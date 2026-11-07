@@ -496,12 +496,41 @@ pub(package) fn write_file_atomic(path: str, body: str) bool {
 
 /// `write_file_atomic` of `head` followed by `body` (`write_file_parts`).
 pub(package) fn write_file_atomic_parts(path: str, head: str, body: str) bool {
+    let tmp = tmp_of(path);
+    return settle(&tmp, path, write_file_parts(&tmp, head, body));
+}
+
+/// `write_file_atomic` of `head` followed by each string of `rest`, which stay apart in memory.
+pub(package) fn write_file_atomic_list(path: str, head: str, rest: &Vector<String>) bool {
+    let tmp = tmp_of(path);
+    let f = stdio::fopen(&tmp, "wb");
+    let mut ok = f != null;
+    if ok {
+        let mut n = unsafe stdio::fwrite(head.ptr(), 1, head.len(), f);
+        let mut want = head.len();
+        for i in 0..rest.len() {
+            let s = rest.at(i).as_str();
+            n += unsafe stdio::fwrite(s.ptr(), 1, s.len(), f);
+            want += s.len();
+        }
+        ok = unsafe stdio::fclose(f) == 0 && n == want;
+    }
+    return settle(&tmp, path, ok);
+}
+
+// The temporary file an atomic write of `path` goes through.
+fn tmp_of(path: str) String {
     let mut tmp = String::from_str(path);
     tmp.push_str(".tmp");
-    if write_file_parts(&tmp, head, body) && fs::rename(&tmp, path).is_ok() {
+    return tmp;
+}
+
+// Move `tmp` onto `path` when it was written (`wrote`), else remove it; whether `path` holds it.
+fn settle(tmp: str, path: str, wrote: bool) bool {
+    if wrote && fs::rename(tmp, path).is_ok() {
         return true;
     }
-    let _ = fs::unlink(&tmp);
+    let _ = fs::unlink(tmp);
     return false;
 }
 

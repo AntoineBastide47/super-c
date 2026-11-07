@@ -254,7 +254,7 @@ pub(package) struct Inliner {
     work: Vector<u32>,
     /// Per caller instruction, whether `run` may inline its call; empty: every call.
     pub(package) only: Vector<bool>,
-    spare: Body, // the body `run` builds into (`build`)
+    pub(package) spare: Body, // the body `run` builds into (`build`)
     args: Vector<Value>, // an edge's arguments, before `Body::edge` copies them
     // The new body's instruction, block and parameter counts (`plan`).
     ni: u32,

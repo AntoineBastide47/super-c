@@ -356,6 +356,9 @@ pub(package) struct Opt {
     // Promotion of private slots (`lir::promote`) and the body it builds.
     prom: pr::Promoter,
     pbody: Body,
+    // The spare a snapshot of the body is copied into (`Run::job`, `slp`): the one a body keeps leaves it
+    // empty.
+    snap: Body,
     pub(package) unr: lu::LoopOpt,
     slp: sl::Slp,
     pairs: pa::Pairs,
@@ -610,6 +613,7 @@ extend Opt {
             blocks: Vector::<Block>::new(),
             prom: pr::Promoter::new(),
             pbody: Body::new(),
+            snap: Body::empty(),
             unr: lu::LoopOpt::new(),
             slp: sl::Slp::new(),
             pairs: pa::Pairs::new(),
@@ -1193,7 +1197,8 @@ extend Opt {
         ) {
             return None;
         }
-        let saved = b.compact();
+        let mut saved = replace(&mut self.snap, Body::empty());
+        b.copy_into(&mut saved);
         let ni = b.insts.len();
         self.kept = K_NONE;
         self.fresh(b);
@@ -1209,7 +1214,7 @@ extend Opt {
         self.rebuild(b);
         let _ = self.run(pk, b, true);
         if self.weigh(pk, b) >= before {
-            *b = saved;
+            self.snap = replace(b, saved);
             self.kept = K_NONE;
             return None;
         }
@@ -12286,6 +12291,22 @@ pub(package) struct Run {
     free: psync::Mutex<Vector<Box<Scratch>>>,
 }
 
+// Keep the buffers of `x`, a body a job is done with, as the spare of a rebuild of `sc` whose own are
+// smaller (by instructions; the spare it takes the place of goes on to the next): the spares grow to the
+// largest body the scratch serves, and the rebuilds stop allocating.
+fn recycle(sc: &mut Box<Scratch>, done: Body) {
+    let mut x = done;
+    if x.insts.capacity() > sc.il.spare.insts.capacity() {
+        x = replace(&mut sc.il.spare, x);
+    }
+    if x.insts.capacity() > sc.o.pbody.insts.capacity() {
+        x = replace(&mut sc.o.pbody, x);
+    }
+    if x.insts.capacity() > sc.o.snap.insts.capacity() {
+        let _ = replace(&mut sc.o.snap, x);
+    }
+}
+
 struct Scratch {
     pub(package) il: il::Inliner,
     pub(package) o: Opt,
@@ -12464,7 +12485,11 @@ extend Run {
         // scratch per job in flight, not per worker.
         prt::preempt_mask_enter();
         let mut sc = r.take();
-        let b = unsafe &mut *(base + j as usize);
+        // The passes work on the body out of the package, which gets it back at the end as one exact-size
+        // copy: the rebuilds swap it with the scratch's spares, whose buffers it then keeps (`recycle`).
+        let pb = unsafe &mut *(base + j as usize);
+        let mut wb = replace(pb, Body::empty());
+        let b = &mut wb;
         r.ready(p, j, &mut sc, true, false);
         // The inliner reads the rare blocks, the loop transforms and the code generators too: marked before
         // the inlining (a copy takes its call's marks) and once the transforms made their blocks.
@@ -12558,7 +12583,9 @@ extend Run {
         // serves.
         let straight = want && sc.o.straight(p, b);
         let mut pre = if want && !straight {
-            Option::<Body>::Some(b.compact())
+            let mut s = replace(&mut sc.o.snap, Body::empty());
+            b.copy_into(&mut s);
+            Option::<Body>::Some(s)
         } else {
             Option::<Body>::None
         };
@@ -12650,25 +12677,35 @@ extend Run {
         // Its callers copy its pool when they inline it, and the code generators read it: the passes'
         // dead records go.
         b.compact_pool(&mut sc.o.cps);
-        b.shrink();
         let mut fits = r.inline && r.shape[j as usize];
-        if snap && (packed(b) || rotated) {
-            if pre.is_some() {
-                let fin = replace(b, pre.unwrap());
-                b.compact_pool(&mut sc.o.cps);
-                b.shrink();
-                unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(fin);
-            } else if packed(b) {
-                assert(!straight, "opt: only the packing makes vectors in a straight body");
-                fits = false;
-            }
+        let keep = snap && (packed(b) || rotated);
+        switch pre {
+            Some(s) => {
+                if keep {
+                    let fin = replace(b, s);
+                    b.compact_pool(&mut sc.o.cps);
+                    unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(fin.compact());
+                    recycle(&mut sc, fin);
+                } else {
+                    recycle(&mut sc, s);
+                }
+            },
+            None => {
+                if keep && packed(b) {
+                    assert(!straight, "opt: only the packing makes vectors in a straight body");
+                    fits = false;
+                }
+            },
         }
         // An `@always_inline` body inlines whatever its size.
-        unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
+        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
             il::facts(b, r.cf.inline)
         } else {
             0u8
         };
+        *pb = b.compact();
+        recycle(&mut sc, wb);
+        unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = facts;
         r.give(sc);
         prt::preempt_mask_exit();
         // Its body, facts and final form are written: the bodies waiting to inline it go on.

@@ -1268,6 +1268,29 @@ extend Body {
         self.cur = 0;
     }
 
+    /// This body's copy into `o`, whose buffers it reuses.
+    pub(package) fn copy_into(self: &Self, o: &mut Body) {
+        assign(&mut o.insts, &self.insts);
+        assign(&mut o.locs, &self.locs);
+        assign(&mut o.blocks, &self.blocks);
+        assign(&mut o.params, &self.params);
+        assign(&mut o.pool, &self.pool);
+        assign(&mut o.words, &self.words);
+        assign(&mut o.slots, &self.slots);
+        assign(&mut o.syms, &self.syms);
+        assign(&mut o.msgs, &self.msgs);
+        assign(&mut o.lines, &self.lines);
+        assign(&mut o.inl, &self.inl);
+        o.sig = self.sig;
+        assign(&mut o.refs, &self.refs);
+        assign(&mut o.owned, &self.owned);
+        o.bools = self.bools;
+        o.fmath = self.fmath;
+        assign(&mut o.scopes, &self.scopes);
+        o.naked = self.naked;
+        o.cur = 0;
+    }
+
     /// An exact-size copy: one allocation per non-empty table and no growth slack.
     pub(package) fn compact(self: &Self) Body {
         return Body {
@@ -1393,25 +1416,6 @@ extend Body {
         for k in 0..self.scopes.len() {
             self.scopes.index_mut(k).site = map[self.scopes[k].site as usize];
         }
-    }
-
-    /// Give back every table's growth slack: a body the optimizer finished keeps its tables until code
-    /// generation, and the passes' buffers it took (`Opt::rebuild`, the inliner) are sized for larger ones.
-    pub(package) fn shrink(self: &mut Self) {
-        self.insts.shrink_to_fit();
-        self.locs.shrink_to_fit();
-        self.blocks.shrink_to_fit();
-        self.params.shrink_to_fit();
-        self.pool.shrink_to_fit();
-        self.words.shrink_to_fit();
-        self.slots.shrink_to_fit();
-        self.syms.shrink_to_fit();
-        self.msgs.shrink_to_fit();
-        self.lines.shrink_to_fit();
-        self.inl.shrink_to_fit();
-        self.refs.shrink_to_fit();
-        self.owned.shrink_to_fit();
-        self.scopes.shrink_to_fit();
     }
 
     // `compact_pool`'s copy of the `n` words at `at` (an empty range: the copy's end).

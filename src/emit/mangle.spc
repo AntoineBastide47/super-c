@@ -496,6 +496,11 @@ pub(package) struct Mangler {
     /// Frontier shard capture of instance-aggregate claims (1:1 with agg_reqs pushes).
     pub(package) sh_on: bool,
     pub(package) sh_agg_k: Vector<u64>,
+    // The emission's master (`new_like` of a prepared one, `prepare_shared`), whose package tables this
+    // mangler reads: `own_idx` and the extend rows, complete before the shards start and written no
+    // more. Null: this mangler builds its own.
+    base: *const Mangler,
+    shared: bool, // `prepare_shared` built this mangler's package tables
     // Per module, fnode -> owning extend/interface, built on first query: symbol resolution asks
     // per CALL SITE, so membership must be a lookup, not a rescan of the module's item list.
     own_built: Vector<bool>,
@@ -732,7 +737,7 @@ extend Mangler {
 
     /// A mangler as `new` makes for `proto`'s package, the package's constants taken from `proto`.
     pub(package) fn new_like(proto: &Mangler) Mangler {
-        return Mangler::make(
+        let mut m = Mangler::make(
             proto.pkg,
             proto.mangle,
             loader::LookupHit { node: proto.ph_global.node, mid: proto.ph_global.mid },
@@ -740,6 +745,31 @@ extend Mangler {
             proto.nd,
             proto.lib_names.clone(),
         );
+        m.base = if proto.shared {
+            proto
+        } else {
+            proto.base
+        };
+        return m;
+    }
+
+    /// Exchange the identifier escape cache (`ident`) with `v`: a pooled one serves the shards in turn, its
+    /// verdicts depending on the package alone.
+    pub(package) fn swap_escapes(self: &mut Self, v: &mut Vector<u64>) {
+        let mine = replace(&mut self.esc_seen, Vector::<u64>::new());
+        self.esc_seen = replace(v, mine);
+    }
+
+    /// Build the package tables (`own_idx`, the extend rows) whole, for the manglers `new_like` makes of
+    /// this one to read (`base`) instead of each building its own: every one depends on the package alone.
+    pub(package) fn prepare_shared(self: &mut Self) {
+        for m in 0..self.p().modules.len() {
+            if self.p().modules.at(m).has_ast {
+                self.own_build(m as ModuleId);
+            }
+        }
+        self.ext_build();
+        self.shared = true;
     }
 
     fn make(
@@ -797,6 +827,8 @@ extend Mangler {
             sh_agg_k: Vector::<u64>::new(),
             agg_reqs: Vector::<AggReq>::new(),
             agg_seen: Map::<u64, u64>::new(),
+            base: null,
+            shared: false,
             own_built: Vector::<bool>::new(),
             own_idx: Map::<u64, u64>::new(),
             pin_built: Vector::<bool>::new(),
@@ -825,6 +857,20 @@ extend Mangler {
     // The packed owner record of `fnode` (module `m`): extend node in the high half, interface
     // node in the low half, zero halves = not a member.
     fn owner_of(self: &mut Self, m: ModuleId, fnode: NodeId) u64 {
+        let t = if self.base != null {
+            self.base
+        } else {
+            self.own_build(m);
+            self as *const Mangler
+        };
+        return switch unsafe (*t).own_idx.get(&skey_mix(0, m as u64 << 32 | fnode as u64)) {
+            Some(v) => *v,
+            None => 0u64,
+        };
+    }
+
+    // `own_idx`'s entries of module `m`, once.
+    fn own_build(self: &mut Self, m: ModuleId) {
         if self.own_built.len() == 0 {
             self.own_built.resize_default(self.p().modules.len());
         }
@@ -850,11 +896,6 @@ extend Mangler {
                 }
             }
         }
-        let rec = switch self.own_idx.get(&skey_mix(0, m as u64 << 32 | fnode as u64)) {
-            Some(v) => *v,
-            None => 0u64,
-        };
-        return rec;
     }
 
     const fn p<'a>(self: &Self) &'a loader::Package {
@@ -2975,10 +3016,11 @@ extend Mangler {
             // Builtin receivers: their extends usually live in the prelude, but any module
             // may extend a builtin (std::parallel's AtomicOps conformances do).
             let bt = DefId { module: self.p().core_module, node: self.p().builtin_decl(unsafe y.as_data.builtin) };
-            let mut r = self.ext_first(bt);
+            let et = unsafe &*self.ext_tabs();
+            let mut r = Mangler::ext_first(et, bt);
             while r != EXT_END {
-                let row = *self.ext_rows.at(r as usize);
-                r = *self.ext_next.at(r as usize);
+                let row = *et.ext_rows.at(r as usize);
+                r = *et.ext_next.at(r as usize);
                 let em2 = (row >> 32) as ModuleId;
                 let mid2 = self.ext_method(em2, row as NodeId, mname);
                 if mid2 != NODE_NONE {
@@ -2994,11 +3036,12 @@ extend Mangler {
         // target this instance does not match is skipped, and then a miss is not memoized.
         let mut skipped = false;
         let d = DefId { module: dm, node: dd };
+        let et = unsafe &*self.ext_tabs();
         for pass in 0..2 {
-            let mut r = self.ext_first(d);
+            let mut r = Mangler::ext_first(et, d);
             while r != EXT_END {
-                let row = *self.ext_rows.at(r as usize);
-                r = *self.ext_next.at(r as usize);
+                let row = *et.ext_rows.at(r as usize);
+                r = *et.ext_next.at(r as usize);
                 let em2 = (row >> 32) as ModuleId;
                 if em2 == dm != (pass == 0) {
                     continue;
@@ -3021,9 +3064,26 @@ extend Mangler {
         return none;
     }
 
-    // The first `ext_rows` row whose extend targets `d` (EXT_END = none); `ext_next` chains the
-    // rest. Builds the rows from the package's extend list on the first call.
-    fn ext_first(self: &mut Self, d: DefId) u32 {
+    // The mangler whose extend rows this one reads (`base`, else itself, its rows built).
+    fn ext_tabs(self: &mut Self) *const Mangler {
+        if self.base != null {
+            return self.base;
+        }
+        self.ext_build();
+        return self;
+    }
+
+    // The first `ext_rows` row of `t` (`ext_tabs`) whose extend targets `d` (EXT_END = none); `ext_next`
+    // chains the rest.
+    fn ext_first(t: &Mangler, d: DefId) u32 {
+        return switch t.ext_head.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
+            Some(v) => *v,
+            None => EXT_END,
+        };
+    }
+
+    // The extend rows from the package's extend list, once.
+    fn ext_build(self: &mut Self) {
         if !self.ext_built {
             self.ext_built = true;
             let idx = self.p().idx();
@@ -3054,10 +3114,6 @@ extend Mangler {
                 self.ext_head.insert(key, x as u32);
             }
         }
-        return switch self.ext_head.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
-            Some(v) => *v,
-            None => EXT_END,
-        };
     }
 
     // The function named `mname` in extend `ext` of module `em`, or NODE_NONE.

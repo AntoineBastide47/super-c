@@ -125,21 +125,6 @@ extend<T, A: Allocator> Vector<T, A> {
         self.grow_to(self.len + additional);
     }
 
-    /// Give the capacity past the length back to the allocator: one `realloc`, which may keep the block in
-    /// place, or the block freed when the vector is empty.
-    pub const fn shrink_to_fit(self: &mut Vector<T, A>) {
-        if sizeof(T) == 0 || self.cap == self.len {
-            return;
-        }
-        if self.len == 0 {
-            unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
-            self.ptr = null;
-            self.cap = 0;
-            return;
-        }
-        self.grow_to(self.len);
-    }
-
     // Reallocate to `new_cap` elements, at least the length (nonzero-sized `T`).
     const fn grow_to(self: &mut Vector<T, A>, new_cap: usize) {
         let p = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), new_cap * sizeof(T), alignof(T))) as *mut T;

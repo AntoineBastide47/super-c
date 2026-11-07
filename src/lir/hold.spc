@@ -362,7 +362,11 @@ pub(package) fn save(pk: &Package, r: &lopt::Run, want: &Vector<bool>, out: &mut
             sv.rec.free.push(hd);
             q += 1;
         }
+        // A sizing pass first: the record is then written into one allocation of its size.
+        let mut sz = Writer::sizing();
+        sv.rec.save(&mut sz);
         let mut w = Writer::new();
+        w.buf.reserve_exact(sz.len());
         sv.rec.save(&mut w);
         out.set(u, replace(&mut w.buf, String::new()));
     }

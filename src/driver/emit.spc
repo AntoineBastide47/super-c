@@ -1828,6 +1828,7 @@ pub(package) struct CemitOut {
     /// Next per-TU cache image + its path ("" = caching off): run_package persists it only after a
     /// fully successful emission, so a failed build never publishes sections it did not finish.
     pub(package) tuc_img: String,
+    pub(package) tuc_parts: Vector<String>, // the image's rest after `tuc_img` (`tuc::Tuc.parts`)
     pub(package) tuc_path: String,
     /// The emission cache's module keys and hits (empty when it is off), for the native objects' reuse.
     pub(package) tuc_keys: Vector<u64>,
@@ -1876,6 +1877,7 @@ extend CemitOut {
             refused: Vector::<cbe::Refusal>::new(),
             edges: Vector::<u64>::new(),
             tuc_img: String::new(),
+            tuc_parts: Vector::<String>::new(),
             tuc_path: String::new(),
             tuc_keys: Vector::<u64>::new(),
             tuc_hit: Vector::<bool>::new(),
@@ -3361,6 +3363,7 @@ extend SeedShard {
         if used {
             sh.cem.collect_demand = true;
             sh.cem.mg.agg_on = true;
+            sh.cem.env_skip.reserve(env_defined.len());
             for ei in 0..env_defined.len() {
                 sh.cem.env_skip.insert(env_defined[ei], 1);
             }
@@ -3428,6 +3431,7 @@ fn cemit_seed_task(t: SeedTask) {
     let mut cl_cache = Map::<u64, u64>::new();
     let mut clws = Vector::<irl::Lowerer>::new();
     o.cem.swap_caches(&mut dow.lc);
+    o.cem.mg.swap_escapes(&mut dow.esc);
     cemit_seed_module(
         p,
         &mut o.cem,
@@ -3445,6 +3449,7 @@ fn cemit_seed_task(t: SeedTask) {
         (unsafe &*t.ctl).release(t.est);
     }
     o.cem.swap_caches(&mut dow.lc);
+    o.cem.mg.swap_escapes(&mut dow.esc);
     dctx_put(dow);
     prt::preempt_mask_exit();
 }
@@ -3865,6 +3870,7 @@ fn cemit_drain_task(t: DrainTask) {
     let clc = unsafe &*t.clc;
     let clws0 = unsafe &*t.clw;
     o.cem.swap_caches(&mut dow.lc);
+    o.cem.mg.swap_escapes(&mut dow.esc);
     for w in t.lo..t.hi {
         let di = (unsafe t.widx[w as usize]) as usize;
         let li = unsafe t.wli[w as usize];
@@ -3872,6 +3878,7 @@ fn cemit_drain_task(t: DrainTask) {
         o.dmarks.push(o.cap_of());
     }
     o.cem.swap_caches(&mut dow.lc);
+    o.cem.mg.swap_escapes(&mut dow.esc);
     dctx_put(dow);
     prt::preempt_mask_exit();
 }
@@ -3992,12 +3999,8 @@ fn cemit_drain_slice_one(
     } else {
         lws.at(li2 as usize)
     };
-    let mut bvs = Vector::<irl::Lowerer>::new();
-    switch bound_variant(&mut o.cem, dow2, base, d_subs) {
-        Some(x) => bvs.push(x),
-        None => {},
-    }
-    let bv_on = bvs.len() != 0;
+    let bv = bound_variant(&mut o.cem, dow2, base, d_subs);
+    let bv_on = bv.is_some();
     let sh = &mut o.cem;
     sh.mg.mark_ctx = mbe::CTX_INST | d_def.module as i64;
     sh.mg.clear_subs();
@@ -4007,8 +4010,8 @@ fn cemit_drain_slice_one(
     sh.mg.clos_sfx.truncate(0);
     sh.mg.clos_sfx.push_str(d_sfx);
     sh.mg.clos_ids.truncate(0);
-    let blw = if bv_on {
-        bvs.at(0)
+    let blw = if let Some(x) = &bv {
+        x
     } else if var_on {
         o.dvars.at(vix as usize)
     } else {
@@ -4952,8 +4955,13 @@ pub(package) fn cemit_package(
         } else {
             p.gen_root.as_str()
         },
-        // A section carries its module's C text, as large as the module's TU buffer.
-        2 * src_total,
+        // A C section carries its module's C text, as large as the module's TU buffer; a native one carries
+        // the module's replay events alone, under a quarter of its source.
+        if p.native {
+            src_total / 4
+        } else {
+            2 * src_total
+        },
     );
     let mut held = Vector::<Option<lhold::Rec>>::new();
     nat_trust(p, &mut tuc, &mut held, &mut o.nat_rec);
@@ -4967,7 +4975,9 @@ pub(package) fn cemit_package(
         // table makes sections pool-position-independent, so parallel intern order is harmless).
         set_stage_locks(p, true);
         let mut kl = psync::Semaphore::new(1);
-        let mut shards = Vector::<SeedShard>::new();
+        // The shards read the master's package tables instead of each building its own.
+        cem.prepare_shared();
+        let mut shards = Vector::<SeedShard>::with_capacity(p.modules.len());
         for m in 0..p.modules.len() {
             let used = module_emits(p, live, m) && !(tuc.on && tuc.hit[m]);
             // A shard renders into the buffer reserved for its module above; a hit module keeps it.
@@ -5026,6 +5036,11 @@ pub(package) fn cemit_package(
         if verbose {
             eprint("cemit-frontier seed: {} tasks\n", launched9);
         }
+        let mut nb9: usize = 0;
+        for m in 0..shards.len() {
+            nb9 += shards.at(m).cem.lir_bodies();
+        }
+        cem.lir_reserve(nb9);
         for m in 0..p.modules.len() {
             let eligible9 = module_emits(p, live, m);
             if !eligible9 {
@@ -5316,10 +5331,12 @@ pub(package) fn cemit_package(
             for i in 0..nsl9 {
                 sbounds.push((widx.len() * (i + 1) / nsl9) as u64);
             }
-            let mut dsh = Vector::<SeedShard>::new();
+            cem.prepare_shared();
+            let mut dsh = Vector::<SeedShard>::with_capacity(nsl9);
             for _i in 0..nsl9 {
                 let mut sh = SeedShard::new(&cem, TuBufs::new(0), true, &em.env_defined, &ext_keys, -1, predp);
                 sh.cem.mg.share_short(&mut em.mg);
+                sh.cem.env_skip.reserve(envh9.len());
                 for ei in 0..envh9.len() {
                     sh.cem.env_skip.insert(envh9[ei], 1);
                 }
@@ -5345,6 +5362,11 @@ pub(package) fn cemit_package(
             );
             // Merge in exact queue order, glue interleaved exactly as the serial loop drains it.
             let mut wcur: usize = 0;
+            let mut nb9: usize = 0;
+            for k9 in 0..dsh.len() {
+                nb9 += dsh.at(k9).cem.lir_bodies();
+            }
+            cem.lir_reserve(nb9);
             let mut scur: usize = 0;
             let mut slo: usize = 0;
             for j in qi..len0 {
@@ -6344,8 +6366,9 @@ pub(package) fn cemit_package(
         cem.lir_put(l);
     }
     if tuc.on {
-        tuc::held_put(&mut tuc, &recs, &nks);
+        tuc::held_put(&mut tuc, &mut recs, &nks);
         o.tuc_img = replace(&mut tuc.out, String::new());
+        o.tuc_parts = replace(&mut tuc.parts, Vector::<String>::new());
         o.tuc_path = replace(&mut tuc.path, String::new());
         o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
         o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
@@ -8264,8 +8287,23 @@ const U_INST: u8 = 2;
 
 static mut G_DPOOL: *mut Vector<DropCtx> = null;
 static mut G_DPOOL_LOCK: i32 = 0;
+// One permit per worker: a task that waits on `kl` or the evaluator's lock holds its context, and the
+// task its worker runs meanwhile waits for a returned one instead of filling a new one's caches. A
+// waiting task holds no context and no lock; each holder runs on to its end and gives its context back.
+static mut G_DSEM: *mut psync::Semaphore = null;
 
 fn dctx_take(p: *const loader::Package) DropCtx {
+    unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
+    if unsafe G_DSEM == null {
+        let mut g9 = Global {};
+        let ps = (unsafe g9.alloc(sizeof(psync::Semaphore), alignof(psync::Semaphore))) as *mut psync::Semaphore;
+        let n9 = (unsafe (*p).jobs.max(1)) as i64;
+        unsafe ps[0] = psync::Semaphore::new(n9);
+        unsafe G_DSEM = ps;
+    }
+    let sem = unsafe G_DSEM;
+    unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+    (unsafe &*sem).acquire_masked();
     unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);
     if unsafe G_DPOOL != null {
         switch (unsafe &mut *G_DPOOL).pop() {
@@ -8289,7 +8327,9 @@ fn dctx_put(d: DropCtx) {
         unsafe G_DPOOL = pv;
     }
     (unsafe &mut *G_DPOOL).push(d);
+    let sem = unsafe G_DSEM;
     unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
+    (unsafe &*sem).release();
 }
 
 // End-of-phase teardown: the pooled contexts and the pool holder itself are released, so a compile
@@ -8309,6 +8349,13 @@ fn dctx_drop(acc: &mut prb::Probe) {
         unsafe (*pv).free();
         let mut g9 = Global {};
         unsafe g9.dealloc(pv, sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>));
+    }
+    if unsafe G_DSEM != null {
+        let ps = unsafe G_DSEM;
+        unsafe G_DSEM = null;
+        unsafe (*ps).free();
+        let mut g9 = Global {};
+        unsafe g9.dealloc(ps, sizeof(psync::Semaphore), alignof(psync::Semaphore));
     }
     unsafe sc_runtime::sc_rt_spin_unlock(&mut G_DPOOL_LOCK);
 }
@@ -8333,6 +8380,8 @@ struct DropCtx {
     /// The lowering caches the task's shard uses while it runs (`cbe::CEmit::swap_caches`), kept for the
     /// next task.
     pub(package) lc: lw::LCaches,
+    /// The same for the shard's identifier escape cache (`mbe::Mangler::swap_escapes`).
+    pub(package) esc: Vector<u64>,
 }
 
 extend DropCtx {
@@ -8352,6 +8401,7 @@ extend DropCtx {
             validate: stdlib::getenv("SC_BC_VALIDATE") != null,
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
             lc: lw::LCaches::new(),
+            esc: Vector::<u64>::new(),
         };
     }
 
@@ -13145,11 +13195,15 @@ unsafe extend BcSlot as Send {}
 
 /// The idle slots and the count of jobs that have not leased a slot yet. When that count is zero,
 /// a returned slot has no next lease and is freed at once, unless `reported`: the borrow probe and
-/// the item measurement read every slot after the stage.
+/// the item measurement read every slot after the stage. At most `cap` slots exist (`live`), one per
+/// worker: a job that waits on the evaluator's lock holds its slot, and the job its worker runs
+/// meanwhile waits for a returned one (`freed`) instead of filling a new one's memos and scratch.
 struct BcPool {
     pub(package) idle: Vector<BcSlot>,
     pub(package) unleased: usize,
     pub(package) reported: bool,
+    pub(package) live: usize,
+    pub(package) cap: usize,
 }
 
 struct BcStage {
@@ -13157,7 +13211,9 @@ struct BcStage {
     pub(package) jobs: *const Vector<BcJob>,
     pub(package) outs: *mut Option<Box<diag::Errors>>, // per item
     pub(package) slots: *const psync::Mutex<BcPool>,
+    pub(package) freed: *const psync::Condvar, // a slot went back to `slots`
     pub(package) master: *mut irl::Keep, // null = discard the lowerings
+    pub(package) nbodies: *const usize, // per module, its function and closure bodies (`module_bodies`)
     pub(package) validate: bool,
 }
 
@@ -13167,10 +13223,14 @@ fn bc_slot_new(p: *const loader::Package) BcSlot {
     return s;
 }
 
-// The guard lives exactly as long as these bodies: a job never holds the pool lock while it runs.
-fn bc_slot_take(pool: &psync::Mutex<BcPool>, p: *const loader::Package) BcSlot {
+// The guard lives exactly as long as these bodies: a job never holds the pool lock while it runs. A
+// waiting job holds no slot and no lock, and every slot's job runs on to its end and gives it back.
+fn bc_slot_take(pool: &psync::Mutex<BcPool>, freed: &psync::Condvar, p: *const loader::Package) BcSlot {
     let mut g = pool.lock();
     assert(g.unleased != 0, "each borrow job leases one slot");
+    while g.idle.len() == 0 && g.live == g.cap {
+        freed.wait_masked(&g);
+    }
     g.unleased -= 1;
     switch g.idle.pop() {
         Some(s) => {
@@ -13178,13 +13238,15 @@ fn bc_slot_take(pool: &psync::Mutex<BcPool>, p: *const loader::Package) BcSlot {
         },
         _ => {},
     }
+    g.live += 1;
     return bc_slot_new(p);
 }
 
-fn bc_slot_give(pool: &psync::Mutex<BcPool>, slot: BcSlot) {
+fn bc_slot_give(pool: &psync::Mutex<BcPool>, freed: &psync::Condvar, slot: BcSlot) {
     let mut g = pool.lock();
     if g.unleased != 0 || g.reported {
         g.idle.push(slot);
+        freed.notify_one();
     }
 }
 
@@ -13194,7 +13256,10 @@ fn bc_job(ctx: *mut void, j: u32) {
     let job = *(unsafe &*st.jobs).at(j as usize);
     let m = job.m as usize;
     let pkg = st.p;
-    let mut slot = bc_slot_take(unsafe &*st.slots, st.p);
+    // One slot per job in flight (`cemit_seed_task`): a job preempted while it holds one would make its
+    // worker's next job lease another, whose memos and scratch fill again.
+    prt::preempt_mask_enter();
+    let mut slot = bc_slot_take(unsafe &*st.slots, unsafe &*st.freed, st.p);
     let ts = slot.ctx.st.pr.start();
     let mm = &mut p.modules[m];
     let src = mm.source.as_str().ptr() as *const char;
@@ -13207,6 +13272,7 @@ fn bc_job(ctx: *mut void, j: u32) {
         slot.ctx.keep = if p.jobs == 1 {
             st.master
         } else {
+            keep.reserve(unsafe st.nbodies[m]);
             &mut keep
         };
     }
@@ -13247,7 +13313,8 @@ fn bc_job(ctx: *mut void, j: u32) {
         }
         slot.ctx.st.pr.stop(bfi::BP_KEEP, tk);
     }
-    bc_slot_give(unsafe &*st.slots, slot);
+    bc_slot_give(unsafe &*st.slots, unsafe &*st.freed, slot);
+    prt::preempt_mask_exit();
     // The module's Core IR is ready. Its body syntax stays until the instance graph has evaluated
     // the per-instance static_asserts (`graph_inst_asserts`).
     p.set_module_states(m, loader::IS_IR_READY);
@@ -13371,14 +13438,19 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
             idle: Vector::<BcSlot>::new(),
             unleased: jobs.len(),
             reported: p.icost_on || stdlib::getenv("SC_BORROW_STATS") != null,
+            live: 0,
+            cap: p.jobs.max(1) as usize,
         },
     );
+    let freed = psync::Condvar::new();
     let mut st = BcStage {
         p: p,
         jobs: &jobs,
         outs: outs.index_mut(0),
         slots: &slots,
+        freed: &freed,
         master: keep,
+        nbodies: bodies.as_ptr(),
         validate: stdlib::getenv("SC_BC_VALIDATE") != null,
     };
     let mut g = sch::Jobs::independent(jobs.len());
@@ -13393,6 +13465,7 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         s0.ctx.st.all = true;
         let mut g0 = slots.lock();
         g0.idle.push(s0);
+        g0.live = 1;
     }
     st0.pr.stop(bfi::BP_SETUP, ts);
     sch::run_jobs(&mut g, p.jobs, bc_job, &mut st, &ctl);
@@ -16242,7 +16315,7 @@ pub(package) fn run_package(
     // Publish the per-TU cache only after a fully successful emission; keep[] shields it from pruning.
     // Atomic: the reader checks only bounds, so a torn image would replay sections of corrupt content.
     if !err && co.skips == 0 && co.tuc_path.len() != 0 {
-        if write_file_atomic(&co.tuc_path, &co.tuc_img) {
+        if write_file_atomic_list(&co.tuc_path, &co.tuc_img, &co.tuc_parts) {
             keep.push(String::from_str(&co.tuc_path));
         }
     }

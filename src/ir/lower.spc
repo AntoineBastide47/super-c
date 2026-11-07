@@ -300,6 +300,12 @@ extend Keep {
         self.kept.reserve(n);
     }
 
+    /// Room for `n` bodies in `kept` and its index: a borrow job's own keep, for its module's bodies.
+    pub(package) fn reserve(self: &mut Self, n: usize) {
+        self.kept.reserve_exact(n);
+        self.ix.reserve(n);
+    }
+
     /// The `kept` slot of the non-generic body `(module, node)`, or -1. Never a generic body: a
     /// caller without a substitution env cannot execute one.
     pub(package) fn view(self: &Self, module: ModuleId, node: NodeId) i64 {

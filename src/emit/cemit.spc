@@ -414,6 +414,10 @@ pub(package) struct CEmit {
     /// `conf_mods` modules.
     conf_ix: Map<u64, Vector<u64>>,
     conf_mods: usize,
+    // The emission's master (`new_like` of a prepared one, `prepare_shared`), whose `conf_ix` this
+    // emitter reads: complete before the shards start and written no more. Null: its own.
+    base: *const CEmit,
+    shared: bool, // `prepare_shared` built this emitter's package tables
     /// The build's features with what they imply (`cf::close`).
     build_fs: cf::CpuFeatureSet,
     sym_pool: String,
@@ -575,7 +579,23 @@ extend CEmit {
     /// An emitter as `new` makes for `proto`'s package (a shard of `proto`'s emission), the package's
     /// constants taken from `proto`.
     pub(package) fn new_like(proto: &CEmit) CEmit {
-        return CEmit::make(proto.pkg, mbe::Mangler::new_like(&proto.mg), proto.backends.clone(), proto.vec_prog);
+        let mut c = CEmit::make(proto.pkg, mbe::Mangler::new_like(&proto.mg), proto.backends.clone(), proto.vec_prog);
+        c.base = if proto.shared {
+            proto
+        } else {
+            proto.base
+        };
+        return c;
+    }
+
+    /// Build the package tables whole (`conf_ix`, the mangler's), for the emitters `new_like` makes of
+    /// this one to read instead of each building its own (`Mangler::prepare_shared`).
+    pub(package) fn prepare_shared(self: &mut Self) {
+        if self.conf_mods != self.p().modules.len() {
+            self.index_confs();
+        }
+        self.mg.prepare_shared();
+        self.shared = true;
     }
 
     fn make(pkg: *const loader::Package, mg0: mbe::Mangler, backends: Vector<u8>, vec_prog: bool) CEmit {
@@ -790,6 +810,8 @@ extend CEmit {
             sym_memo_ctx: -2,
             conf_ix: Map::<u64, Vector<u64>>::new(),
             conf_mods: 0,
+            base: null,
+            shared: false,
             build_fs: cf::close(pk.features),
             sym_pool: String::new(),
             sym_off: Vector::<u32>::new(),
@@ -1128,16 +1150,21 @@ extend CEmit {
         }
         let mut hit = none;
         let mut napply: u32 = 0;
-        if self.conf_mods != self.p().modules.len() {
-            self.index_confs();
-        }
+        let cx = if self.base != null {
+            self.base
+        } else {
+            if self.conf_mods != self.p().modules.len() {
+                self.index_confs();
+            }
+            self as *const CEmit
+        };
         let key = conf_key(iit.module, iit.decl, rit.module, rit.decl);
-        let nx = switch self.conf_ix.get(&key) {
+        let nx = switch unsafe (*cx).conf_ix.get(&key) {
             Some(v) => v.len(),
             None => 0,
         };
         for xi in 0..nx {
-            let e = self.conf_ix.get(&key).unwrap()[xi];
+            let e = unsafe (*cx).conf_ix.get(&key).unwrap()[xi];
             let em = (e >> 32) as ModuleId;
             let iid = e as NodeId;
             let da = self.p().module_ast_const(em);
@@ -1993,6 +2020,22 @@ extend CEmit {
         let mut l = replace(&mut self.lir, Option::<Box<lw::Lower>>::None).unwrap();
         l.deref_mut().swap_caches(cc);
         self.lir = Some(l);
+    }
+
+    /// The bodies of this emitter's LIR (0 without a lowering).
+    pub(package) const fn lir_bodies(self: &Self) usize {
+        if let Some(l) = &self.lir {
+            return l.pkg.bodies.len();
+        }
+        return 0;
+    }
+
+    /// Room in this emitter's LIR for `n` more bodies, the `lir_bodies` of the shards it absorbs: the
+    /// absorbs then grow no table step by step.
+    pub(package) fn lir_reserve(self: &mut Self, n: usize) {
+        if let Some(l) = &mut self.lir {
+            l.pkg.bodies.reserve(n);
+        }
     }
 
     /// Move `other`'s LIR into this emitter's.

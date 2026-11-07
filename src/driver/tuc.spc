@@ -92,6 +92,9 @@ pub(package) struct Tuc {
     pub(package) hlen: Vector<u64>,
     pub(package) hnat: Vector<u64>,
     pub(package) out: String, // next cache image, assembled section by section in module order
+    // The rest of the next image after `out` (`held_put`): per module its held record's header, then the
+    // record. The image file is `out` followed by these.
+    pub(package) parts: Vector<String>,
     pub(package) path: String,
     // Scratch of the live section `sec_rec` writes, reused across sections.
     pub(package) tt: TtRec,
@@ -317,28 +320,35 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
     }
 }
 
-/// Append to the next image (its sections done) every module's held record (`lir::hold`): `recs[m]` when
-/// it is not empty, else module `m`'s record in the previous image when the module replays, else none;
-/// each under the module's key and native key `nat[m]`, from a multiple of 16 bytes on.
-pub(package) fn held_put(t: &mut Tuc, recs: &Vector<String>, nat: &Vector<u64>) {
-    let mut out = replace(&mut t.out, String::new());
+/// Put after the next image's sections (`parts`) every module's held record (`lir::hold`): `recs[m]`,
+/// taken, when it is not empty, else module `m`'s record in the previous image when the module replays,
+/// else none; each under the module's key and native key `nat[m]`, from a multiple of 16 bytes on.
+pub(package) fn held_put(t: &mut Tuc, recs: &mut Vector<String>, nat: &Vector<u64>) {
+    let mut at = t.out.len();
+    t.parts.reserve_exact(2 * t.keys.len());
     for m in 0..t.keys.len() {
-        let mut rec = "";
-        if m < recs.len() && recs.at(m).len() != 0 {
-            rec = recs.at(m).as_str();
+        let rec = if m < recs.len() && recs.at(m).len() != 0 {
+            replace(recs.index_mut(m), String::new())
         } else if t.hit[m] {
-            rec = held_of(t, m, nat[m]);
+            String::from_str(held_of(t, m, nat[m]))
+        } else {
+            String::new()
+        };
+        let mut h = String::with_capacity(HELD_HEAD + 15);
+        w64(&mut h, t.keys[m]);
+        w64(&mut h, nat[m]);
+        w32(&mut h, rec.len() as u32);
+        while (at + h.len()) % 16 != 0 {
+            h.push_byte(0);
         }
-        w64(&mut out, t.keys[m]);
-        w64(&mut out, nat[m]);
-        w32(&mut out, rec.len() as u32);
-        while out.len() % 16 != 0 {
-            out.push_byte(0);
-        }
-        out.push_str(rec);
+        at += h.len() + rec.len();
+        t.parts.push(h);
+        t.parts.push(rec);
     }
-    t.out = out;
 }
+
+// A held record's header: the module's key, its native key and the record's length.
+const HELD_HEAD: usize = 20;
 
 /// Module `m`'s held record in the previous image under native key `nat` (low two bits aside); empty
 /// when there is none.
@@ -373,6 +383,7 @@ pub(package) fn tuc_setup(
         hlen: Vector::<u64>::new(),
         hnat: Vector::<u64>::new(),
         out: String::new(),
+        parts: Vector::<String>::new(),
         path: String::new(),
         tt: tt_new(),
         xs: Vector::<u32>::new(),
