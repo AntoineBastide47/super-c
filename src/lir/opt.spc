@@ -193,6 +193,7 @@ pub(package) struct Opt {
     acls: Vector<u8>,
     aobj: Vector<u32>, // per load or store, the object it accesses (`object`)
     frz: Vector<bool>, // per instruction, a load of a read-only referent (`frozen`)
+    frz_ptr: Vector<bool>, // `frozen`'s per instruction, whether its value points into a read-only referent
     mark: Vector<u32>,
     hdr: Vector<bool>, // per block, whether it heads a loop (`thread`)
     preader: Vector<u32>, // per block parameter, the block outside its own that reads it (`thread`)
@@ -482,6 +483,7 @@ extend Opt {
             acls: Vector::<u8>::new(),
             aobj: Vector::<u32>::new(),
             frz: Vector::<bool>::new(),
+            frz_ptr: Vector::<bool>::new(),
             mark: Vector::<u32>::new(),
             hdr: Vector::<bool>::new(),
             preader: Vector::<u32>::new(),
@@ -3949,7 +3951,7 @@ extend Opt {
         // parameter an inlined body's accesses go through, a scope's, becomes the caller's pointer.
         fill(&mut self.acls, b.insts.len(), CL_MANY);
         fill(&mut self.aobj, b.insts.len(), NONE);
-        frozen(b, &mut self.frz);
+        frozen(b, &mut self.frz, &mut self.frz_ptr);
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
             if op == O_LOAD && self.frz[i] {
@@ -16621,8 +16623,8 @@ const fn entry_param(b: &Body, v: Value) u32 {
 // Per instruction of `b` into `out`: whether it is a load through a read-only parameter's referent
 // (`REF_READONLY`): through the parameter, or a view's (`REF_INNER`) pointer at its offset 0, then
 // offsets of either (`ptradd`, a `select` of two). One pass in order: a pointer defined after its use
-// counts as none.
-fn frozen(b: &Body, out: &mut Vector<bool>) {
+// counts as none. `fp` holds, per instruction, whether its value points into such a referent.
+fn frozen(b: &Body, out: &mut Vector<bool>, fp: &mut Vector<bool>) {
     let ni = b.insts.len();
     out.truncate(0);
     out.resize_default(ni);
@@ -16634,9 +16636,7 @@ fn frozen(b: &Body, out: &mut Vector<bool>) {
     if !any {
         return;
     }
-    // Per instruction, whether its value points into a read-only referent.
-    let mut fp = Vector::<bool>::new();
-    fp.resize_default(ni);
+    fill(fp, ni, false);
     for i in 0..ni {
         let t = b.insts[i];
         let base = if t.op == O_LOAD || t.op == O_PTRADD {

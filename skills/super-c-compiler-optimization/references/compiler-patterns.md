@@ -129,7 +129,9 @@ swaps it in. In the LIR optimizer every rebuild works on scratch bodies: `Run::j
 of the package, the rebuilds swap it with the scratch's spares, and the job writes it back once at its
 exact size (`Body::compact`); `recycle` then keeps the larger buffers as the spares, so they grow to
 the largest body and stop allocating. A per-body output buffer that a later pass trims costs its size
-twice.
+twice. A pass on a scratch body writes its result into the body's own buffers: an exact-size copy
+there (`Body::compact_pool` made one of the pool) puts a small buffer among the spares, and the next
+rebuild grows it again (about 90 MiB per jobs=1 build).
 
 Parallel stages pool their scratch per worker, not per task. A pool item a task holds for its whole
 run needs both guards: the task masks preemption (`preempt_mask_enter`, super-c-concurrency), and the

@@ -1373,7 +1373,9 @@ extend Body {
             }
             self.insts[i] = t;
         }
-        self.pool = exact(out);
+        // Into the body's own buffer: an exact copy here would make a scratch body that later holds it
+        // grow again (`Run::job` stores an exact copy of the body).
+        assign(&mut self.pool, out);
         self.compact_lines(&mut s.lmap);
     }
 
