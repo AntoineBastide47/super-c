@@ -143,14 +143,32 @@ job holds a scratch: the pool is under a spin lock and `marked_done` only tries 
 scratches were 20 to 135 per jobs=18 build before, 18 after). A table that depends on the package alone is built once and read by
 every shard (`CEmit::prepare_shared`, `Mangler::prepare_shared`: a shard's `base`), not rebuilt in each.
 
+A per-worker scratch grows each table by doubling to the largest body its worker serves, so at jobs=18
+the requested bytes are about 36 times one table's final size, against twice at jobs=1. Three ways
+cut that:
+- A part that one pass uses goes to a pool of the run's, not to each scratch: a large body's job
+  (more than `SHARE_MIN` instructions, `src/lir/opt.spc`) takes the promoter, the packing's scratch,
+  the loop transforms' parts (`LoopParts`) and the pool compaction's scratch for that pass only
+  (`pool_take`, `pool_give`, under `free_lock`), and a small body's job uses the scratch's own, which
+  then grow only to small bodies. A pass that swaps its output body with a spare does not pool well:
+  the spare leaves with the body, and the next large body grows a new one.
+- An answer that is a pure function of its key is shared, not memoized per worker: the borrow jobs
+  set the owns, carries and observes memos in one table per module (`SharedMemos`, an atomic or of
+  2 bits per type), and the native objects' tasks take the generators' object-symbol tables
+  (`place::Osyms`) from a pool.
+- A table starts small (`fx::TABLE_MIN`): a large start costs each of a context's tables at once.
+A buffer a pass needs per call comes from its caller's scratch (`pointer_ivs`'s map, `ret_edges`),
+and a vector built once per run is counted before it is filled (`Run::new`'s job edges, `waits`).
+
 ## Fixed-Array Replacement
 
 When the maximum element count is domain-bounded (not user-input-bounded), replace
 `Vector<T>` with `Array<T, N>` or `[T; N]`. Proven instance: the resolver's `::` member
 chain is `let mut chain: [NodeId; 32]` (`src/resolver/resolver.spc`): path nesting is
-grammar-bounded, so the Vector it replaced was pure allocation overhead. The borrow
-checker's `FlowState` save/restore likewise reuses stack locals instead of copied
-containers.
+grammar-bounded, so the Vector it replaced was pure allocation overhead. The opposite
+holds when most instances use a small part of the bound: the type checker's `FlowState`
+holds its moved, late and borrow lists as vectors of their counted prefixes, because
+fixed arrays at the bound cost every saved state the bound.
 
 ## Interning Deduplication
 

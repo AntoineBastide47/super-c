@@ -212,15 +212,12 @@ pub(package) struct LoopEntry {
 }
 
 /// Snapshot of the borrow pass's flow state (moves, split initializations, borrows), saved
-/// and merged around branches; only the counted prefixes are touched. Each array is as large as the
-/// matching TypeChecker table, so a snapshot holds every state the live checker can hold.
+/// and merged around branches: the counted prefixes of the TypeChecker's tables, at most their
+/// capacities.
 pub(package) struct FlowState {
-    pub(package) moved: [NodeId; 1024],
-    pub(package) nmoved: u32,
-    pub(package) late: [NodeId; 256],
-    pub(package) nlate: u32,
-    pub(package) borrows: [Borrow; 256],
-    pub(package) nborrows: u32,
+    pub(package) moved: Vector<NodeId>,
+    pub(package) late: Vector<NodeId>,
+    pub(package) borrows: Vector<Borrow>,
 }
 
 /// One extend in the per-checker target index (`TypeChecker::ext_begin`); `next` links the extends

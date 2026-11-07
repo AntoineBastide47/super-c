@@ -304,9 +304,10 @@ pub(package) struct RefBind {
 pub(package) const SYNTH_PL: u32 = 0x80000000u32;
 
 /// The starting capacity of the per-local, per-block and per-statement tables (`Facts`, `bce::Bce`):
-/// a large body's size (the self-build averages about 100 locals and 110 blocks per checked body, its
-/// largest 2,100), so the bodies that follow grow each table about twice instead of eight times.
-pub(package) const TABLE_MIN: usize = 1024;
+/// about a small body's size (the self-build averages about 100 locals and 110 blocks per checked
+/// body). A context keeps its tables across bodies, so each grows to its largest body's (2,100 at
+/// most) once per worker; a larger start costs each of a context's 70 tables at once.
+pub(package) const TABLE_MIN: usize = 64;
 
 // Fixed bounds: the exposed scalars a heap write kills, the escaped roots, the loop-header scan work, the integer facts a block-entry state keeps, the entry-state pool and
 // the solver's block visits.

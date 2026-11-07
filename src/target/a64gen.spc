@@ -214,7 +214,7 @@ pub(package) struct Gen {
     cclean: Vector<bool>,
     tail_ret: u32,
     rels: Vector<CRel>,
-    osym: Vector<u32>, // per package symbol, its object symbol in this generator's object (NONE until used)
+    osym: place::Osyms, // the object symbols of the package symbols (`place::osym_of`)
     // Calls.
     lay: ab::CallLayout,
     // Per symbol of the body at hand, its intrinsic's instructions (`intrin::of_symbols`); per signature
@@ -337,7 +337,7 @@ extend Gen {
             cclean: Vector::<bool>::new(),
             tail_ret: NONE,
             rels: Vector::<CRel>::new(),
-            osym: Vector::<u32>::new(),
+            osym: place::Osyms::new(),
             lay: ab::CallLayout::new(),
             itpl: Vector::<str<'static>>::new(),
             lays: Vector::<ab::CallLayout>::new(),
@@ -349,6 +349,18 @@ extend Gen {
             local: false,
             cs: ob::CStrs::new(),
         };
+    }
+
+    /// Use `t`, a cleared table, as the object symbols of the package symbols (`place::Osyms`).
+    pub(package) fn use_osyms(self: &mut Self, t: place::Osyms) {
+        self.osym = t;
+    }
+
+    /// The table of object symbols, cleared for the next object's generator.
+    pub(package) fn take_osyms(self: &mut Self) place::Osyms {
+        let mut t = replace(&mut self.osym, place::Osyms::new());
+        t.clear();
+        return t;
     }
 
     // The body being compiled and the object: both outlive the generator's borrows.

@@ -167,7 +167,8 @@ pub(package) struct HData {
 
 extend HData as Persist {}
 
-/// A unit's held record (`record`, `read`).
+/// A unit's held record (`record`, `read`). `Held::save` writes it field by field, as its conformance does:
+/// a field added here is added there.
 pub(package) struct Rec {
     pub(package) names: Vector<String>,
     pub(package) funcs: Vector<HFunc>,
@@ -188,10 +189,12 @@ struct Lent {
     files: Vector<u32>,
 }
 
-// A record under construction: spellings get indices in first-use order.
+// A record under construction: spellings get indices in first-use order. Its names are the package's name
+// ids (`names`), spelled when it is saved (`Held::save`); `rec.names` stays empty.
 struct Saver {
     pub(package) rec: Rec,
-    pub(package) ids: Map<u32, u32>, // package name id -> index into `rec.names`
+    pub(package) names: Vector<u32>,
+    pub(package) ids: Map<u32, u32>, // package name id -> index into `names`
 }
 
 extend Saver {
@@ -200,7 +203,7 @@ extend Saver {
         let sy = pk.syms[s as usize];
         let d = pk.data[sy.def as usize];
         let mut hd = HData {
-            name: self.name(pk, sy.name),
+            name: self.name(sy.name),
             kind: sy.kind,
             size: d.size,
             align_log2: d.align_log2,
@@ -212,17 +215,17 @@ extend Saver {
         for j in d.relocs..d.relocs + d.nrelocs {
             let rl = pk.relocs[j as usize];
             let ry = pk.syms[rl.sym as usize];
-            hd.relocs.push(HReloc { offset: rl.offset, sym: self.name(pk, ry.name), kind: ry.kind, addend: rl.addend });
+            hd.relocs.push(HReloc { offset: rl.offset, sym: self.name(ry.name), kind: ry.kind, addend: rl.addend });
         }
         return hd;
     }
 
-    fn name(self: &mut Self, pk: &Package, id: u32) u32 {
+    fn name(self: &mut Self, id: u32) u32 {
         if let Some(k) = self.ids.get(&id) {
             return *k;
         }
-        let k = self.rec.names.len() as u32;
-        self.rec.names.push(String::from_str(pk.spell(id)));
+        let k = self.names.len() as u32;
+        self.names.push(id);
         self.ids.insert(id, k);
         return k;
     }
@@ -285,6 +288,7 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
             free: Vector::<HData>::new(),
             decls: Vector::<Body>::new(),
         },
+        names: Vector::<u32>::new(),
         ids: Map::<u32, u32>::new(),
     };
     // The free data the inlinable bodies name, then the free data their relocations reach.
@@ -300,7 +304,7 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
         let k = sy.def;
         let ok = r.inlinable(k);
         let mut f = HFunc {
-            name: sv.name(pk, sy.name),
+            name: sv.name(sy.name),
             flags: if r.shape_of(k) {
                 HELD_SHAPE
             } else {
@@ -323,7 +327,12 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
             esc: sy.esc,
             spans: Vector::<u64>::new(),
             calls: Vector::<u32>::new(),
-            body: Body::new(),
+            // An inlinable function's is its body (`take_inlined`).
+            body: if ok {
+                Body::empty()
+            } else {
+                Body::new()
+            },
             refs: Vector::<HRef>::new(),
         };
         if sy.span != NONE {
@@ -331,12 +340,14 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
             f.spans.extend_from_slice(pk.spans[sy.span as usize + 1..sy.span as usize + 1 + n]);
         }
         let cs = r.calls_of(k);
+        f.calls.reserve_exact(cs.len());
         for c in 0..cs.len() {
-            f.calls.push(sv.name(pk, pk.syms[us.bsym[cs[c] as usize] as usize].name));
+            f.calls.push(sv.name(pk.syms[us.bsym[cs[c] as usize] as usize].name));
         }
         if ok {
             let (b, of_pk) = r.take_inlined(pk, k);
             f.body = b;
+            f.refs.reserve_exact(f.body.syms.len());
             for i in 0..f.body.syms.len() {
                 let ry = pk.syms[f.body.syms[i] as usize];
                 if ry.kind != SK_FUNC && ry.def != NONE && ry.unit == NONE && !seen.contains(&f.body.syms[i]) {
@@ -355,7 +366,7 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
                         },
                     });
                 }
-                f.refs.push(HRef { name: sv.name(pk, ry.name), kind: ry.kind, ext: ry.ext, sig: sig });
+                f.refs.push(HRef { name: sv.name(ry.name), kind: ry.kind, ext: ry.ext, sig: sig });
             }
             let syms = replace(&mut f.body.syms, Vector::<u32>::new());
             if of_pk {
@@ -373,10 +384,10 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
                 lent.push(l);
             }
             for i in 0..f.body.msgs.len() {
-                f.body.msgs[i] = sv.name(pk, pk.msgs[f.body.msgs[i] as usize]);
+                f.body.msgs[i] = sv.name(pk.msgs[f.body.msgs[i] as usize]);
             }
             for i in 1..f.body.lines.len() {
-                f.body.lines.index_mut(i).file = sv.name(pk, pk.files[f.body.lines[i].file as usize]);
+                f.body.lines.index_mut(i).file = sv.name(pk.files[f.body.lines[i].file as usize]);
             }
         }
         sv.rec.funcs.push(f);
@@ -406,14 +417,29 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
 
 extend Held {
     /// The bytes `write` gives.
-    pub(package) fn size(self: &Self) usize {
+    pub(package) fn size(self: &Self, pk: &Package) usize {
         let mut sz = Writer::sizing();
-        self.sv.rec.save(&mut sz);
+        self.save(pk, &mut sz);
         return sz.len();
     }
 
-    pub(package) fn write(self: &Self, w: &mut Writer) {
-        self.sv.rec.save(w);
+    pub(package) fn write(self: &Self, pk: &Package, w: &mut Writer) {
+        self.save(pk, w);
+    }
+
+    // The record as `Rec`'s conformance saves it, field by field, its names spelled from `pk`
+    // (`Saver::names`): what `read` loads.
+    fn save(self: &Self, pk: &Package, w: &mut Writer) {
+        w.u64(self.sv.names.len() as u64);
+        for i in 0..self.sv.names.len() {
+            let s = pk.spell(self.sv.names[i]);
+            w.u64(s.len() as u64);
+            w.bytes(s.ptr(), s.len());
+        }
+        self.sv.rec.funcs.save(w);
+        self.sv.rec.data.save(w);
+        self.sv.rec.free.save(w);
+        self.sv.rec.decls.save(w);
     }
 
     /// Give `pk` the bodies the record holds back, as they were.

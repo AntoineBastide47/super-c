@@ -21,8 +21,8 @@ import ir::core as ir;
 import utils::errors as diag;
 import utils::diag_codes as dc;
 
-// Capacities of the TypeChecker's flow tables: `moved`, and `late` and `borrows`.
-// FlowState snapshots have the same sizes, so saving a state never truncates it.
+// Capacities of the TypeChecker's flow tables: `moved`, and `late` and `borrows`. A FlowState
+// snapshot holds at most as many, so saving a state never truncates it.
 const BC_MOVED_CAP: u32 = 1024;
 const BC_TABLE_CAP: u32 = 256;
 
@@ -31,18 +31,27 @@ const fn rep_bm(st: &mut bfi::RepSt) u32 {
     return st.bms.pop().unwrap_or(0);
 }
 
-// Depth-slot flow push: slots are refilled row-wise (no whole-FlowState copies). Out of line so the
-// two FlowState temporaries of the first push at a depth stay out of bc_replay's frame.
-@noinline
+// Depth-slot flow push: a depth's slots keep their buffers and are refilled.
 fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
     let d = st.fdepth;
     if st.pre.len() <= d {
-        // Zero bytes are a valid FlowState: empty tables of plain data.
-        st.pre.push(Box::<FlowState>::new(unsafe zeroed::<FlowState>()));
-        st.acc.push(Box::<FlowState>::new(unsafe zeroed::<FlowState>()));
+        st.pre.push(
+            FlowState {
+                moved: Vector::<NodeId>::new(),
+                late: Vector::<NodeId>::new(),
+                borrows: Vector::<Borrow>::new(),
+            },
+        );
+        st.acc.push(
+            FlowState {
+                moved: Vector::<NodeId>::new(),
+                late: Vector::<NodeId>::new(),
+                borrows: Vector::<Borrow>::new(),
+            },
+        );
     }
-    t.tc_flow_save(st.pre.index_mut(d).deref_mut());
-    t.tc_flow_clear(st.acc.index_mut(d).deref_mut());
+    t.tc_flow_save(st.pre.index_mut(d));
+    t.tc_flow_clear(st.acc.index_mut(d));
     st.fdepth = d + 1;
 }
 
@@ -716,18 +725,18 @@ extend tc::TypeChecker {
     }
 
     /// Copy the move/split-init/borrow flow state into `s` (a branch checkpoint).
-    pub(package) const fn tc_flow_save(self: &Self, s: &mut FlowState) {
-        s.nmoved = self.nmoved;
+    pub(package) fn tc_flow_save(self: &Self, s: &mut FlowState) {
+        s.moved.truncate(0);
         for i in 0..self.nmoved {
-            unsafe s.moved[i as usize] = unsafe self.moved[i as usize];
+            s.moved.push(unsafe self.moved[i as usize]);
         }
-        s.nlate = self.nlate;
+        s.late.truncate(0);
         for i in 0..self.nlate {
-            unsafe s.late[i as usize] = unsafe self.late[i as usize];
+            s.late.push(unsafe self.late[i as usize]);
         }
-        s.nborrows = self.nborrows;
+        s.borrows.truncate(0);
         for i in 0..self.nborrows {
-            unsafe s.borrows[i as usize] = unsafe self.borrows[i as usize];
+            s.borrows.push(unsafe self.borrows[i as usize]);
         }
     }
 
@@ -736,69 +745,63 @@ extend tc::TypeChecker {
         for i in 0..self.nmoved {
             self.ms_bit_clear(unsafe self.moved[i as usize]);
         }
-        self.nmoved = s.nmoved;
-        for i in 0..s.nmoved {
-            unsafe self.moved[i as usize] = unsafe s.moved[i as usize];
-            self.ms_bit_set(unsafe s.moved[i as usize]);
+        self.nmoved = s.moved.len() as u32;
+        for i in 0..s.moved.len() {
+            unsafe self.moved[i] = s.moved[i];
+            self.ms_bit_set(s.moved[i]);
         }
-        self.nlate = s.nlate;
-        for i in 0..s.nlate {
-            unsafe self.late[i as usize] = unsafe s.late[i as usize];
+        self.nlate = s.late.len() as u32;
+        for i in 0..s.late.len() {
+            unsafe self.late[i] = s.late[i];
         }
-        self.nborrows = s.nborrows;
-        for i in 0..s.nborrows {
-            unsafe self.borrows[i as usize] = unsafe s.borrows[i as usize];
+        self.nborrows = s.borrows.len() as u32;
+        for i in 0..s.borrows.len() {
+            unsafe self.borrows[i] = s.borrows[i];
         }
     }
 
     /// Reset `s` to the empty flow state.
-    pub(package) const fn tc_flow_clear(self: &Self, s: &mut FlowState) {
-        s.nmoved = 0;
-        s.nlate = 0;
-        s.nborrows = 0;
+    pub(package) fn tc_flow_clear(self: &Self, s: &mut FlowState) {
+        s.moved.truncate(0);
+        s.late.truncate(0);
+        s.borrows.truncate(0);
     }
 
     /// Union this state's flow facts into `acc` (deduplicated). A union past a table's capacity is
     /// reported: the join would otherwise drop facts.
-    pub(package) fn tc_flow_collect(self: &mut Self, acc: *mut FlowState) {
+    pub(package) fn tc_flow_collect(self: &mut Self, acc: &mut FlowState) {
         'm: for i in 0..self.nmoved {
-            for j in 0..unsafe (*acc).nmoved {
-                if unsafe (*acc).moved[j as usize] == unsafe self.moved[i as usize] {
+            for j in 0..acc.moved.len() {
+                if acc.moved[j] == unsafe self.moved[i as usize] {
                     continue 'm;
                 }
             }
-            if unsafe (*acc).nmoved < BC_MOVED_CAP {
-                let k = unsafe (*acc).nmoved;
-                unsafe (*acc).moved[k as usize] = unsafe self.moved[i as usize];
-                unsafe (*acc).nmoved = k + 1;
+            if acc.moved.len() < BC_MOVED_CAP as usize {
+                acc.moved.push(unsafe self.moved[i as usize]);
             } else {
                 self.bc_flow_limit("moved bindings", BC_MOVED_CAP);
             }
         }
         'l: for i in 0..self.nlate {
-            for j in 0..unsafe (*acc).nlate {
-                if unsafe (*acc).late[j as usize] == unsafe self.late[i as usize] {
+            for j in 0..acc.late.len() {
+                if acc.late[j] == unsafe self.late[i as usize] {
                     continue 'l;
                 }
             }
-            if unsafe (*acc).nlate < BC_TABLE_CAP {
-                let k = unsafe (*acc).nlate;
-                unsafe (*acc).late[k as usize] = unsafe self.late[i as usize];
-                unsafe (*acc).nlate = k + 1;
+            if acc.late.len() < BC_TABLE_CAP as usize {
+                acc.late.push(unsafe self.late[i as usize]);
             } else {
                 self.bc_flow_limit("split-initialized bindings", BC_TABLE_CAP);
             }
         }
         'b: for i in 0..self.nborrows {
-            for j in 0..unsafe (*acc).nborrows {
-                if self.borrow_same(unsafe (*acc).borrows[j as usize], unsafe self.borrows[i as usize]) {
+            for j in 0..acc.borrows.len() {
+                if self.borrow_same(acc.borrows[j], unsafe self.borrows[i as usize]) {
                     continue 'b;
                 }
             }
-            if unsafe (*acc).nborrows < BC_TABLE_CAP {
-                let k = unsafe (*acc).nborrows;
-                unsafe (*acc).borrows[k as usize] = unsafe self.borrows[i as usize];
-                unsafe (*acc).nborrows = k + 1;
+            if acc.borrows.len() < BC_TABLE_CAP as usize {
+                acc.borrows.push(unsafe self.borrows[i as usize]);
             } else {
                 self.bc_flow_limit("live borrows", BC_TABLE_CAP);
             }
@@ -2125,15 +2128,15 @@ extend tc::TypeChecker {
             } else if k == ir::TP_FLOW_ELSE {
                 let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(unsafe (*a).at_const(node).as_data.if_stmt.then_branch) {
-                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
+                    self.tc_flow_collect(st.acc.index_mut(ti));
                 }
-                self.tc_flow_set(st.pre.at(ti).deref());
+                self.tc_flow_set(st.pre.at(ti));
             } else if k == ir::TP_FLOW_JOIN {
                 let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(unsafe (*a).at_const(node).as_data.if_stmt.else_branch) {
-                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
+                    self.tc_flow_collect(st.acc.index_mut(ti));
                 }
-                self.tc_flow_set(st.acc.at(ti).deref());
+                self.tc_flow_set(st.acc.at(ti));
                 st.fdepth = ti;
             } else if k == ir::TP_MATCH_PRE {
                 let bm = rep_bm(st);
@@ -2151,7 +2154,7 @@ extend tc::TypeChecker {
                 st.mbm.push(bm);
             } else if k == ir::TP_ARM {
                 let ti = st.fdepth - 1;
-                self.tc_flow_set(st.pre.at(ti).deref());
+                self.tc_flow_set(st.pre.at(ti));
                 self.bc_pattern_depths(unsafe (*a).at_const(node).as_data.match_arm.pattern);
             } else if k == ir::TP_ARM_END {
                 let body = unsafe (*a).at_const(node).as_data.match_arm.body;
@@ -2159,12 +2162,12 @@ extend tc::TypeChecker {
                 let diverges = self.tc_stmt_returns(body) || bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER;
                 let ti = st.fdepth - 1;
                 if !diverges {
-                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
+                    self.tc_flow_collect(st.acc.index_mut(ti));
                 }
             } else if k == ir::TP_MATCH_POST {
                 let ti = st.fdepth - 1;
                 if unsafe (*a).at_const(node).as_data.match_expr.arms.len != 0 {
-                    self.tc_flow_set(st.acc.at(ti).deref());
+                    self.tc_flow_set(st.acc.at(ti));
                 }
                 st.fdepth = ti;
                 self.borrow_release_to(st.mbm.pop().unwrap_or(0));

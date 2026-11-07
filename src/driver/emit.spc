@@ -45,6 +45,7 @@ import lir::inline as il;
 import lir::loops as lu;
 import lir::hold as lhold;
 import target::native as nat;
+import codegen::place as cpl;
 import bindgen::bindgen as bg;
 import bindgen::ctarget as ct;
 import build_system::manifest as bman;
@@ -6373,8 +6374,8 @@ pub(package) fn cemit_package(
                         continue;
                     }
                     let mut h = lhold::record(pkg, &mut r, &us, m);
-                    tuc::held_head(&tuc, &mut w, m, nks[m], h.size());
-                    h.write(&mut w);
+                    tuc::held_head(&tuc, &mut w, m, nks[m], h.size(pkg));
+                    h.write(pkg, &mut w);
                     h.restore(pkg);
                 }
                 img_ok = w.finish();
@@ -12701,15 +12702,30 @@ struct NatTask {
     pub(package) bytes: *mut Vector<u8>,
     pub(package) why: *mut String,
     pub(package) ok: *mut bool,
+    pub(package) syms: *const NatSyms,
 }
 
 // Tasks read the finished LIR and their part's symbol lists, and write their own slots.
 unsafe extend NatTask as Send {}
 
+// The tasks' tables of object symbols (`nat::object_with`): a task takes one and gives it back, so a table
+// serves one task after another. Under a spin lock: a task that waited on a lock while it holds a table
+// would let its worker start a task that makes another.
+struct NatSyms {
+    pub(package) free: UnsafeCell<Vector<cpl::Osyms>>,
+    pub(package) lock: UnsafeCell<i32>,
+}
+
 fn nat_task(t: NatTask) {
     let fs = unsafe &*t.fs;
     let ds = unsafe &*t.ds;
-    unsafe *t.ok = nat::object(
+    let ns = unsafe &*t.syms;
+    // A task preempted while it holds a table would make its worker's next task take another.
+    prt::preempt_mask_enter();
+    unsafe sc_runtime::sc_rt_spin_lock(ns.lock.get());
+    let mut tab = unsafe (*ns.free.get()).pop().unwrap_or(cpl::Osyms::new());
+    unsafe sc_runtime::sc_rt_spin_unlock(ns.lock.get());
+    unsafe *t.ok = nat::object_with(
         unsafe &*t.pk,
         t.os,
         t.isa,
@@ -12718,7 +12734,12 @@ fn nat_task(t: NatTask) {
         unsafe (*t.text).as_str(),
         unsafe &mut *t.bytes,
         unsafe &mut *t.why,
+        &mut tab,
     );
+    unsafe sc_runtime::sc_rt_spin_lock(ns.lock.get());
+    unsafe (*ns.free.get()).push(tab);
+    unsafe sc_runtime::sc_rt_spin_unlock(ns.lock.get());
+    prt::preempt_mask_exit();
 }
 
 // The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
@@ -13064,6 +13085,10 @@ fn native_plan(
     // Largest first, for the balance of the pool.
     todo.sort();
     let pk = (&l.pkg) as *const lir_ir::Package;
+    let syms = NatSyms {
+        free: UnsafeCell::<Vector<cpl::Osyms>>::new(Vector::<cpl::Osyms>::new()),
+        lock: UnsafeCell::<i32>::new(0),
+    };
     let wg = psync::WaitGroup::new();
     for k in 0..todo.len() {
         let q = (todo[k] & 0xFFFFFFFF) as usize;
@@ -13077,6 +13102,7 @@ fn native_plan(
             bytes: bytes.index_mut(q),
             why: whys.index_mut(q),
             ok: oks.index_mut(q),
+            syms: &syms,
         };
         if p.jobs == 1 || todo.len() == 1 {
             nat_task(t);
@@ -13239,6 +13265,7 @@ struct BcStage {
     pub(package) master: *mut irl::Keep, // null = discard the lowerings
     pub(package) nbodies: *const usize, // per module, its function and closure bodies (`module_bodies`)
     pub(package) validate: bool,
+    pub(package) memos: *const bfx::SharedMemos, // the jobs' shared memos, null on the serial path
 }
 
 fn bc_slot_new(p: *const loader::Package) BcSlot {
@@ -13301,6 +13328,7 @@ fn bc_job(ctx: *mut void, j: u32) {
         };
     }
     slot.ctx.validate = st.validate;
+    slot.ow.shared = st.memos;
     // The lowered bodies of the function under analysis: one vector for the job, emptied after
     // every function (a per-function vector reserves eight Lowerer slots on its first push).
     let mut bodies = Vector::<irl::Lowerer>::new();
@@ -13467,6 +13495,12 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         },
     );
     let freed = psync::Condvar::new();
+    // The memos the jobs share: built once the types the stage starts with are known.
+    let memos = if par {
+        Some(bfx::SharedMemos::new(p))
+    } else {
+        Option::<bfx::SharedMemos>::None
+    };
     let mut st = BcStage {
         p: p,
         jobs: &jobs,
@@ -13476,6 +13510,10 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         master: keep,
         nbodies: bodies.as_ptr(),
         validate: stdlib::getenv("SC_BC_VALIDATE") != null,
+        memos: switch &memos {
+            Some(x) => x,
+            None => null,
+        },
     };
     let mut g = sch::Jobs::independent(jobs.len());
     for j in 0..jobs.len() {

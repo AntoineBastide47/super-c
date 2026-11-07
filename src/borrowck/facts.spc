@@ -9,6 +9,7 @@ import module::loader as loader;
 import ir::core as ir;
 import borrowck::move_paths as mp;
 import utils::bits as bits;
+import atomic;
 
 /// The absent fact index, place, local, or origin.
 pub(package) const BF_NONE: u32 = 0xFFFFFFFF;
@@ -404,23 +405,115 @@ pub(package) struct Owner {
     unsafe_cell: DefId, // the prelude's `UnsafeCell`: what a shared reference may write through
     interior_memo: Map<u64, u64>, // (mod << 32 | decl) -> `interior_mask` (INTERIOR_BUSY while computed)
     cell_memo: Map<u64, bool>, // (mod << 32 | decl) -> `decl_has_cell` (false while computed)
+    /// The memos the parallel borrow jobs share (null: the arrays above alone).
+    pub(package) shared: *const SharedMemos,
 }
 
-// Read/grow a `[mid][ty]` cache byte; -1 means uncomputed. Type ids are dense per module.
+/// The owns, carries and observes memos the parallel borrow jobs share (`Owner::shared`): per module, a row
+/// of each, of the words a memo of the type ids the stage starts with takes (`memo_words`). An answer is a
+/// pure function of (module, type), so jobs that set one at once write the same bits, by an atomic or; a
+/// type id past its row stays in the job's own memo.
+pub(package) struct SharedMemos {
+    words: UnsafeCell<Vector<u64>>,
+    at: Vector<usize>, // per module, its first row's first word
+    n: Vector<usize>, // per module, the words of a row
+}
+
+extend SharedMemos {
+    /// The rows of every module of package `p`.
+    pub(package) fn new(p: &loader::Package) SharedMemos {
+        let nm = p.modules.len();
+        let mut at = Vector::<usize>::with_capacity(nm);
+        let mut n = Vector::<usize>::with_capacity(nm);
+        let mut total: usize = 0;
+        for m in 0..nm {
+            let w = if p.modules.at(m).has_ast {
+                memo_words(unsafe &*p.module_ast_const(m as ModuleId))
+            } else {
+                0usize
+            };
+            at.push(total);
+            n.push(w);
+            total += 3 * w;
+        }
+        let mut words = Vector::<u64>::with_capacity(total);
+        words.resize_default(total);
+        return SharedMemos { words: UnsafeCell::<Vector<u64>>::new(words), at: at, n: n };
+    }
+}
+
+// The words of a memo of a module (`cache_set`) for every type id `ty_dense` gives there: the package's
+// types and the module's own (`a`).
+const fn memo_words(a: &Ast) usize {
+    let mut n = a.pool.len();
+    if a.gt.p != null {
+        n = n.max(unsafe (*a.gt.p).len());
+    }
+    return (2 * n + 31) / 32;
+}
+
+// The shared word of memo `k` (0 owns, 1 carries, 2 observes) that holds dense type index `i` of module
+// `mid`, null when `sh` is or the row ends before it.
 @always_inline
-const fn cache_get(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId) i32 {
+const fn shared_word(sh: *const SharedMemos, k: usize, mid: ModuleId, i: usize) *mut u64 {
+    if sh == null {
+        return null;
+    }
+    let s = unsafe &*sh;
+    let m = mid as usize;
+    if i >> 5 >= s.n[m] {
+        return null;
+    }
+    let off = s.at[m] + k * s.n[m] + (i >> 5);
+    let base = unsafe (*s.words.get()).as_mut_ptr();
+    return unsafe (base + off);
+}
+
+// Read/grow a `[mid][ty]` cache entry of memo `k` (`shared_word`); -1 means uncomputed. Type ids are dense
+// per module.
+@always_inline
+const fn cache_get(arr: &mut Vector<Vector<u64>>, sh: *const SharedMemos, k: usize, mid: ModuleId, ty: TypeId) i32 {
+    let i = ty_dense(ty);
+    let w = shared_word(sh, k, mid, i);
+    if w != null {
+        return (unsafe atomic::load_u64(w, 0) >> (i & 31) as u64 * 2 & 3) as i32 - 1;
+    }
     if arr.len() <= mid as usize {
         return -1;
     }
-    return memo2_get(arr.at(mid as usize), ty_dense(ty));
+    return memo2_get(arr.at(mid as usize), i);
 }
 
+// A module's own memo takes `words` (`memo_words`) at its first entry: most grow to about that.
 @always_inline
-fn cache_set(arr: &mut Vector<Vector<u64>>, mid: ModuleId, ty: TypeId, r: bool) {
+fn cache_set(
+    arr: &mut Vector<Vector<u64>>,
+    sh: *const SharedMemos,
+    k: usize,
+    mid: ModuleId,
+    ty: TypeId,
+    r: bool,
+    words: usize,
+) {
+    let i = ty_dense(ty);
+    let w = shared_word(sh, k, mid, i);
+    if w != null {
+        let val: u64 = if r {
+            2
+        } else {
+            1
+        };
+        let _ = unsafe atomic::or_u64(w, val << (i & 31) as u64 * 2, 0);
+        return;
+    }
     while arr.len() <= mid as usize {
         arr.push(Vector::<u64>::new());
     }
-    memo2_set(arr.index_mut(mid as usize), ty_dense(ty), r);
+    let v = arr.index_mut(mid as usize);
+    if v.capacity() == 0 {
+        v.reserve_exact(words);
+    }
+    memo2_set(v, i, r);
 }
 
 /// Bucket `loans` by their place's base local (counting sort): the loans on local `l` are
@@ -5131,6 +5224,7 @@ extend Owner {
             unsafe_cell: DefId { module: uc.mid, node: uc.node },
             interior_memo: Map::<u64, u64>::new(),
             cell_memo: Map::<u64, bool>::new(),
+            shared: null,
             free_ext: Map::<u64, u64>::new(),
             ext_built: false,
             owns_arr: Vector::<Vector<u64>>::new(),
@@ -5718,7 +5812,7 @@ extend Owner {
             return self.owns_raw(mid, &y, f0, f1, depth);
         }
         // A concrete type reads no frame, so its verdict is a pure function of (mid, ty).
-        let c = cache_get(&mut self.owns_arr, mid, ty);
+        let c = cache_get(&mut self.owns_arr, self.shared, 0, mid, ty);
         if c >= 0 {
             return c != 0;
         }
@@ -5729,7 +5823,7 @@ extend Owner {
         }
         let r = self.owns_raw(mid, &y, 0, 0, depth);
         if self.busy_leave(at, outer) {
-            cache_set(&mut self.owns_arr, mid, ty, r);
+            cache_set(&mut self.owns_arr, self.shared, 0, mid, ty, r, memo_words(self.ast_of(mid)));
         }
         return r;
     }
@@ -5985,14 +6079,14 @@ extend Owner {
         }
         let front = self.ast_of(mid).type_concrete(ty);
         if front {
-            let c = cache_get(&mut self.obs_arr, mid, ty);
+            let c = cache_get(&mut self.obs_arr, self.shared, 2, mid, ty);
             if c >= 0 {
                 return c != 0;
             }
         }
         let r = self.observes_go(mid, ty, depth);
         if front {
-            cache_set(&mut self.obs_arr, mid, ty, r);
+            cache_set(&mut self.obs_arr, self.shared, 2, mid, ty, r, memo_words(self.ast_of(mid)));
         }
         return r;
     }
@@ -6335,7 +6429,7 @@ extend Owner {
         // them), so closure-typed results are stable, unlike the walk-side memo.
         let front = self.ast_of(mid).type_concrete(ty);
         if front {
-            let c = cache_get(&mut self.carry_arr, mid, ty);
+            let c = cache_get(&mut self.carry_arr, self.shared, 1, mid, ty);
             if c >= 0 {
                 return c != 0;
             }
@@ -6347,7 +6441,7 @@ extend Owner {
         }
         let r = self.carries_go(mid, ty, depth);
         if self.busy_leave(at, outer) && front {
-            cache_set(&mut self.carry_arr, mid, ty, r);
+            cache_set(&mut self.carry_arr, self.shared, 1, mid, ty, r, memo_words(self.ast_of(mid)));
         }
         return r;
     }

@@ -97,6 +97,7 @@ pub(package) struct Promoter {
     // The fields: slot `s` has `flds[fat[s] .. fat[s + 1]]`, by offset.
     flds: Vector<Fld>,
     fat: Vector<u32>,
+    fat_spare: Vector<u32>, // the buffer of the `fat` before (`build_fields`)
     tmp: Vector<Fld>,
     gap: Vector<Fld>, // `fill_gaps`'s fields
     reached: Vector<bool>, // per block, whether the entry reaches it
@@ -166,6 +167,7 @@ extend Promoter {
             copies: Vector::<Copy>::new(),
             flds: Vector::<Fld>::new(),
             fat: Vector::<u32>::new(),
+            fat_spare: Vector::<u32>::new(),
             tmp: Vector::<Fld>::new(),
             gap: Vector::<Fld>::new(),
             reached: Vector::<bool>::new(),
@@ -917,7 +919,8 @@ extend Promoter {
             self.mark[ac.slot as usize] += 1;
         }
         self.flds.truncate(0);
-        let mut at = Vector::<u32>::with_capacity(ns + 1);
+        let mut at = replace(&mut self.fat_spare, Vector::<u32>::new());
+        at.truncate(0);
         at.push(0);
         for s in 0..ns {
             let lo = self.fat[s] as usize;
@@ -945,7 +948,7 @@ extend Promoter {
             }
             at.push(self.flds.len() as u32);
         }
-        self.fat = at;
+        self.fat_spare = replace(&mut self.fat, at);
     }
 
     // The fields of the accesses `tmp[lo .. hi]` (one slot's, sorted) but those marked W_SPANS, pushed from
@@ -1824,14 +1827,14 @@ extend Promoter {
         o.clear();
         // Each table at the size the numbering gave (`grown`): the walk that follows adds constants and
         // hoisted copies.
-        o.insts.reserve_exact(grown(n));
-        o.locs.reserve_exact(grown(n));
+        o.insts.reserve(grown(n));
+        o.locs.reserve(grown(n));
         if b.inl.len() != 0 {
-            o.inl.reserve_exact(grown(n));
+            o.inl.reserve(grown(n));
         }
-        o.params.reserve_exact(grown(np));
-        o.blocks.reserve_exact(grown(b.blocks.len() as u32));
-        o.pool.reserve_exact(grown(b.pool.len() as u32));
+        o.params.reserve(grown(np));
+        o.blocks.reserve(grown(b.blocks.len() as u32));
+        o.pool.reserve(grown(b.pool.len() as u32));
         o.pool.extend_copy(&b.pool);
         o.words.extend_copy(&b.words);
         o.words.extend_copy(&self.xwords);

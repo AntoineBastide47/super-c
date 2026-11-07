@@ -47,7 +47,8 @@ makes calls direct, and when a job takes a scratch back after its wait (`Run::re
 moves edges alone, keeps `K_GRAPH` (`cfg` and the predecessors again, the operands of the terminators
 and of its rewrites spliced in, `splice_ops`); `estimate` computes `cfg` alone. `preheaders`
 keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and in `loop_opts`
-`unpreheaders` takes back the tables `save_tables` copied:
+`unpreheaders` takes back the block tables `save_tables` copied and the operand lists the spares of
+`splice_ops` hold, and cuts the block of each instruction and parameter to its saved length:
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
@@ -89,7 +90,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 | Call layout of a signature | `call_layout` (a64gen, x64gen), `cc::classify` | `Gen` (`lays`, `lay_at`) | end of the function |
 | Intrinsic template of each body symbol | `intrin::of_symbols` | `Gen.itpl` | end of the function |
 | Calls that return, clobber, dead ends | `call_tables` | `Gen` (`cret`, `cpre`, `rarec`) | end of the function |
-| Object symbol of a package symbol | `osym_of` (wasm `pkg_osym`) | `Gen.osym` | end of the object |
+| Object symbol of a package symbol | `osym_of` (wasm `pkg_osym`) | `Gen.osym` (`place::Osyms`, from the native objects' pool) | end of the object |
 | Object sections, symbols, relocations | `codegen::obj` `Obj` | `Obj`, then the object bytes | the object write |
 
 ## publish, sync, link

@@ -317,14 +317,36 @@ pub(package) fn row(rows: &mut Vector<u64>, at: u64, loc: u32) {
     rows.push(at << 32 | loc as u64);
 }
 
+/// A generator's object symbols (`osym_of`): per package symbol, its object symbol in the generator's
+/// object (NONE until used), and the package symbols set. An object sets a few hundred of the entries, so
+/// one table serves the objects a worker compiles in turn (`clear`).
+pub(package) struct Osyms {
+    pub(package) at: Vector<u32>,
+    pub(package) set: Vector<u32>,
+}
+
+extend Osyms {
+    pub(package) fn new() Osyms {
+        return Osyms { at: Vector::<u32>::new(), set: Vector::<u32>::new() };
+    }
+
+    /// The table of a new object: every entry NONE.
+    pub(package) fn clear(self: &mut Self) {
+        for i in 0..self.set.len() {
+            self.at[self.set[i] as usize] = NONE;
+        }
+        self.set.truncate(0);
+    }
+}
+
 /// The object symbol of body symbol `s` of `b` (package `p`) in object `o`, through the per package
-/// symbol cache `osym` (NONE until used).
-pub(package) fn osym_of(p: &Package, b: &Body, o: &mut ob::Obj, osym: &mut Vector<u32>, s: u32) u32 {
-    if osym.len() == 0 {
-        fill(osym, p.syms.len(), NONE);
+/// symbol cache `osym`.
+pub(package) fn osym_of(p: &Package, b: &Body, o: &mut ob::Obj, osym: &mut Osyms, s: u32) u32 {
+    if osym.at.len() == 0 {
+        fill(&mut osym.at, p.syms.len(), NONE);
     }
     let g = b.syms[s as usize] as usize;
-    if osym[g] == NONE {
+    if osym.at[g] == NONE {
         let ps = p.syms[g];
         let nm0 = p.spell(ps.name);
         // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header).
@@ -333,9 +355,10 @@ pub(package) fn osym_of(p: &Package, b: &Body, o: &mut ob::Obj, osym: &mut Vecto
         } else {
             nm0
         };
-        osym[g] = o.sym(nm);
+        osym.at[g] = o.sym(nm);
+        osym.set.push(g as u32);
     }
-    return osym[g];
+    return osym.at[g];
 }
 
 /// A generator whose call arguments the stores before a call may relay (`arg_relays`).

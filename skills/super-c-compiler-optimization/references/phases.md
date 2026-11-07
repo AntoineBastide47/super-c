@@ -206,8 +206,8 @@ spatial locality, automatic cleanup.
 
 **Proven patterns in the compiler:**
 - `[NodeId; 32]` fixed arrays for resolver chain lookups
-- `FlowState` out-param: save/clear into uninitialized stack locals instead of `memset`
-  copies
+- `FlowState` save and restore copy only the counted prefixes of its lists (vectors, not
+  arrays at their bounds)
 - Pooled scratch fields on pass contexts (`CEmit`, `CFlow`, `Lowerer`, `DropCtx`),
   cleared per body instead of reallocated
 

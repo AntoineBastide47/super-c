@@ -293,7 +293,9 @@ pub(package) struct Opt {
     log: Vector<(u8, u64, u32)>,
     places: Vector<Place>,
     recent: Vector<u32>, // the `places` entries made last in the walk's block and its dominators (`carry`)
-    end_recent: Vector<u32>, // per block, `recent` at its end: RECENT_MAX entries, NONE past its count
+    // Per depth in the dominator tree, `recent` at the end of the walk's block there: RECENT_MAX entries, NONE
+    // past its count. Only a block's children read it, while the walk is below the block.
+    end_recent: Vector<u32>,
     state: u32, // the current memory state of the visited access (its tag's)
     prior: u32, // the memory state of the visited access's tag before it
     // The private and the untagged memory states before the visited instruction: no write between two
@@ -311,9 +313,9 @@ pub(package) struct Opt {
     wr: Vector<SlotWrite>,
     wat: Vector<u32>,
     wl: Vector<SlotWrite>,
-    end_state: Vector<u32>, // per block and type tag, its state at its end
+    end_state: Vector<u32>, // per depth (as `end_recent`) and type tag, the state at the block's end
     pstate: u32, // the current memory state of the private slots' accesses (`privates`)
-    end_pstate: Vector<u32>, // per block, `pstate` at its end
+    end_pstate: Vector<u32>, // per depth (as `end_recent`), `pstate` at the block's end
     pder: Vector<u32>, // per instruction, the slot its address derives from (NONE: none)
     pwrite: Vector<bool>, // per loop header, whether the loop writes a private slot's memory
     lst: Vector<u32>, // the loops' plain stores of an exclusive parameter's class, each loop's together
@@ -339,7 +341,6 @@ pub(package) struct Opt {
     sread: Vector<bool>, // per slot, whether it is read (`slot_reads`)
     sused: Vector<u32>, // per slot, NONE when no emitted instruction takes its address (`emit`), else its new number
     done_pool: Vector<bool>, // per pool word, whether it is renumbered
-    cps: PoolScratch, // `Body::compact_pool`'s
     pmap: Vector<u32>, // per block parameter, its new number
     params: Vector<u8>,
     live: Vector<bool>,
@@ -351,13 +352,11 @@ pub(package) struct Opt {
     newidx: Vector<u32>,
     into: Vector<u32>,
     done: Vector<bool>, // per block, whether another block's chain continues into it
-    insts: Vector<Inst>,
-    locs: Vector<u32>,
-    inls: Vector<u32>,
-    blocks: Vector<Block>,
-    // Promotion of private slots (`lir::promote`) and the body it builds.
+    // Promotion of private slots (`lir::promote`) and the body it builds; `rebuild` builds its instructions,
+    // locations, inline marks and blocks in that body's tables too.
     prom: pr::Promoter,
     pbody: Body,
+    cps: PoolScratch, // `Body::compact_pool`'s
     // The spare a snapshot of the body is copied into (`Run::job`, `slp`): the one a body keeps leaves it
     // empty.
     snap: Body,
@@ -392,16 +391,24 @@ pub(package) struct Opt {
     pundo: Vector<(u32, Inst)>,
     plen: [u32; 6],
     phd: Vector<u32>, // per block `preheaders` made, the header it enters
-    // The operand lists before `enter_tables`, and the tables before the last `preheaders` that kept them
-    // (`saved`: the vectors `save_tables` names, in its order; `saved_lb`: `lb_at`).
+    // The operand lists before the last `splice_ops` (`splices` of them), and the tables before the last
+    // `preheaders` that kept them (`saved`: the vectors `save_tables` names, in its order; `saved_lb`:
+    // `lb_at`; the lengths of `blk_of` and `pblock`; the splice whose spares hold its operand lists).
     xat: Vector<u32>,
     xarg: Vector<u32>,
     xops: Vector<Value>,
     xdst: Vector<u32>,
+    splices: u32,
     saved: Vector<Vector<u32>>,
     saved_lb: Vector<u64>,
+    saved_ni: u32,
+    saved_np: u32,
+    saved_splice: u32,
     saved_on: bool,
     promote: bool, // SC_LIR_PROMOTE=0 promotes nothing (a debugging aid)
+    // The run whose jobs share the parts a large body's passes use (`Run::proms`, `SHARE_MIN`), null outside
+    // one.
+    shared: *const Run,
 }
 
 /// What `optimize` does: the inline budget, and the loop transforms' budgets.
@@ -587,7 +594,6 @@ extend Opt {
             sread: Vector::<bool>::new(),
             sused: Vector::<u32>::new(),
             done_pool: Vector::<bool>::new(),
-            cps: PoolScratch::new(),
             prepl: Vector::<u32>::new(),
             frepl: Vector::<u32>::new(),
             extra: Vector::<u32>::new(),
@@ -610,12 +616,9 @@ extend Opt {
             newidx: Vector::<u32>::new(),
             into: Vector::<u32>::new(),
             done: Vector::<bool>::new(),
-            insts: Vector::<Inst>::new(),
-            locs: Vector::<u32>::new(),
-            inls: Vector::<u32>::new(),
-            blocks: Vector::<Block>::new(),
             prom: pr::Promoter::new(),
             pbody: Body::new(),
+            cps: PoolScratch::new(),
             snap: Body::empty(),
             unr: lu::LoopOpt::new(),
             slp: sl::Slp::new(),
@@ -645,8 +648,13 @@ extend Opt {
             xdst: Vector::<u32>::new(),
             saved: Vector::<Vector<u32>>::new(),
             saved_lb: Vector::<u64>::new(),
+            splices: 0,
+            saved_ni: 0,
+            saved_np: 0,
+            saved_splice: 0,
             saved_on: false,
             promote: !stdlib::env_is("SC_LIR_PROMOTE", "0"),
+            shared: null,
         };
     }
 
@@ -976,7 +984,7 @@ extend Opt {
     /// addresses its accesses no longer read, a counter whose exit test went) and renumbers the body.
     /// Whether it changed it.
     pub(package) fn pointer_ivs(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if !lu::pointer_ivs(b) {
+        if !lu::pointer_ivs(b, &mut self.mark) {
             return false;
         }
         // The rebuild reads the block map alone (`fresh`).
@@ -1064,6 +1072,12 @@ extend Opt {
         // address among them); it keeps the blocks and their edges' targets, so the graph and the
         // dominators stand for the walk that follows it, and for `thread` when it promotes nothing.
         self.tables(pk, b, K_DOM);
+        let own = if self.shares(b) {
+            let r = unsafe &*self.shared;
+            Some(replace(&mut self.prom, pool_take(&r.free_lock, &r.proms).unwrap_or(pr::Promoter::new())))
+        } else {
+            Option::<pr::Promoter>::None
+        };
         let promoted = self.prom.run(
             b,
             &self.succ_at,
@@ -1081,6 +1095,10 @@ extend Opt {
             pk.ptr_bytes,
             &mut self.pbody,
         );
+        if let Some(x) = own {
+            let r = unsafe &*self.shared;
+            pool_give(&r.free_lock, &r.proms, replace(&mut self.prom, x));
+        }
         if !promoted {
             let r = self.thread_rounds(pk, b) || changed;
             let w = self.rewalk(pk, b);
@@ -1182,6 +1200,12 @@ extend Opt {
             return None;
         }
         let before = self.weigh(pk, b);
+        let own = if self.shares(b) {
+            let r = unsafe &*self.shared;
+            Some(replace(&mut self.slp, pool_take(&r.free_lock, &r.slps).unwrap_or(sl::Slp::new())))
+        } else {
+            Option::<sl::Slp>::None
+        };
         self.slp.late_terms = !pk.apairs;
         self.slp.pairs = pk.apairs;
         self.slp.red_step = pk.vec_reduce;
@@ -1198,6 +1222,7 @@ extend Opt {
             &self.ops_arg,
             &self.ops,
         ) {
+            self.slp_done(own);
             return None;
         }
         let mut saved = replace(&mut self.snap, Body::empty());
@@ -1214,6 +1239,7 @@ extend Opt {
         }
         self.pre.extend_copy(&self.slp.pre);
         self.hoisted.extend_copy(&self.slp.tail);
+        self.slp_done(own);
         self.rebuild(b);
         let _ = self.run(pk, b, true);
         if self.weigh(pk, b) >= before {
@@ -1222,6 +1248,31 @@ extend Opt {
             return None;
         }
         return Some(saved);
+    }
+
+    // The packing's scratch back to the run that lent it (`Run::slps`), the scratch's own (`own`) in its place.
+    fn slp_done(self: &mut Self, own: Option<sl::Slp>) {
+        if let Some(x) = own {
+            let r = unsafe &*self.shared;
+            pool_give(&r.free_lock, &r.slps, replace(&mut self.slp, x));
+        }
+    }
+
+    // The loop window's scratch `x` in place of this one's, which it returns (`Run::loops`).
+    fn swap_loops(self: &mut Self, x: LoopParts) LoopParts {
+        let mut y = x;
+        let u = replace(&mut y.unr, lu::LoopOpt::new());
+        y.unr = replace(&mut self.unr, u);
+        let sv = replace(&mut y.saved, Vector::<Vector<u32>>::new());
+        y.saved = replace(&mut self.saved, sv);
+        let sl = replace(&mut y.saved_lb, Vector::<u64>::new());
+        y.saved_lb = replace(&mut self.saved_lb, sl);
+        return y;
+    }
+
+    // Whether body `b` takes the run's shared parts for a pass (`SHARE_MIN`).
+    const fn shares(self: &Self, b: &Body) bool {
+        return self.shared != null && b.insts.len() > SHARE_MIN;
     }
 
     /// Mark the rare blocks of body `b` past the lowering's marks (`BLOCK_COLD`, `BLOCK_UNLIKELY`): a block
@@ -2602,6 +2653,7 @@ extend Opt {
         self.xarg = oarg;
         self.xops = oops;
         self.xdst = odst;
+        self.splices += 1;
     }
 
     // The tables up to `nest` (`kept` = K_NEST) for the blocks `preheaders` added to a body of `nb0`
@@ -2717,10 +2769,12 @@ extend Opt {
         self.kept = K_NEST;
     }
 
-    // Copy the tables up to `nest` (`unpreheaders` takes them back).
+    // Copy the tables up to `nest` that `enter_tables` rewrites (`unpreheaders` takes them back): the operand
+    // lists stay in the spares of the splice it makes (`splice_ops`), and the instructions' and parameters'
+    // blocks only grow.
     fn save_tables(self: &mut Self) {
         if self.saved.len() == 0 {
-            for _ in 0..21 {
+            for _ in 0..15 {
                 self.saved.push(Vector::<u32>::new());
             }
         }
@@ -2737,37 +2791,28 @@ extend Opt {
         self.saved.index_mut(5).truncate(0);
         self.saved.index_mut(5).extend_copy(&self.preds);
         self.saved.index_mut(6).truncate(0);
-        self.saved.index_mut(6).extend_copy(&self.blk_of);
+        self.saved.index_mut(6).extend_copy(&self.idom);
         self.saved.index_mut(7).truncate(0);
-        self.saved.index_mut(7).extend_copy(&self.pblock);
+        self.saved.index_mut(7).extend_copy(&self.kid_at);
         self.saved.index_mut(8).truncate(0);
-        self.saved.index_mut(8).extend_copy(&self.ops_at);
+        self.saved.index_mut(8).extend_copy(&self.kids);
         self.saved.index_mut(9).truncate(0);
-        self.saved.index_mut(9).extend_copy(&self.ops_arg);
+        self.saved.index_mut(9).extend_copy(&self.dpre);
         self.saved.index_mut(10).truncate(0);
-        self.saved.index_mut(10).extend_copy(&self.ops);
+        self.saved.index_mut(10).extend_copy(&self.dpost);
         self.saved.index_mut(11).truncate(0);
-        self.saved.index_mut(11).extend_copy(&self.ops_dst);
+        self.saved.index_mut(11).extend_copy(&self.inner);
         self.saved.index_mut(12).truncate(0);
-        self.saved.index_mut(12).extend_copy(&self.idom);
+        self.saved.index_mut(12).extend_copy(&self.lparent);
         self.saved.index_mut(13).truncate(0);
-        self.saved.index_mut(13).extend_copy(&self.kid_at);
+        self.saved.index_mut(13).extend_copy(&self.preh);
         self.saved.index_mut(14).truncate(0);
-        self.saved.index_mut(14).extend_copy(&self.kids);
-        self.saved.index_mut(15).truncate(0);
-        self.saved.index_mut(15).extend_copy(&self.dpre);
-        self.saved.index_mut(16).truncate(0);
-        self.saved.index_mut(16).extend_copy(&self.dpost);
-        self.saved.index_mut(17).truncate(0);
-        self.saved.index_mut(17).extend_copy(&self.inner);
-        self.saved.index_mut(18).truncate(0);
-        self.saved.index_mut(18).extend_copy(&self.lparent);
-        self.saved.index_mut(19).truncate(0);
-        self.saved.index_mut(19).extend_copy(&self.preh);
-        self.saved.index_mut(20).truncate(0);
-        self.saved.index_mut(20).extend_copy(&self.lbs);
+        self.saved.index_mut(14).extend_copy(&self.lbs);
         self.saved_lb.truncate(0);
         self.saved_lb.extend_copy(&self.lb_at);
+        self.saved_ni = self.blk_of.len() as u32;
+        self.saved_np = self.pblock.len() as u32;
+        self.saved_splice = self.splices + 1;
         self.saved_on = true;
     }
 
@@ -2785,38 +2830,37 @@ extend Opt {
         self.pred_at = replace(self.saved.index_mut(4), t4);
         let t5 = replace(&mut self.preds, Vector::<u32>::new());
         self.preds = replace(self.saved.index_mut(5), t5);
-        let t6 = replace(&mut self.blk_of, Vector::<u32>::new());
-        self.blk_of = replace(self.saved.index_mut(6), t6);
-        let t7 = replace(&mut self.pblock, Vector::<u32>::new());
-        self.pblock = replace(self.saved.index_mut(7), t7);
-        let t8 = replace(&mut self.ops_at, Vector::<u32>::new());
-        self.ops_at = replace(self.saved.index_mut(8), t8);
-        let t9 = replace(&mut self.ops_arg, Vector::<u32>::new());
-        self.ops_arg = replace(self.saved.index_mut(9), t9);
-        let t10 = replace(&mut self.ops, Vector::<u32>::new());
-        self.ops = replace(self.saved.index_mut(10), t10);
-        let t11 = replace(&mut self.ops_dst, Vector::<u32>::new());
-        self.ops_dst = replace(self.saved.index_mut(11), t11);
-        let t12 = replace(&mut self.idom, Vector::<u32>::new());
-        self.idom = replace(self.saved.index_mut(12), t12);
-        let t13 = replace(&mut self.kid_at, Vector::<u32>::new());
-        self.kid_at = replace(self.saved.index_mut(13), t13);
-        let t14 = replace(&mut self.kids, Vector::<u32>::new());
-        self.kids = replace(self.saved.index_mut(14), t14);
-        let t15 = replace(&mut self.dpre, Vector::<u32>::new());
-        self.dpre = replace(self.saved.index_mut(15), t15);
-        let t16 = replace(&mut self.dpost, Vector::<u32>::new());
-        self.dpost = replace(self.saved.index_mut(16), t16);
-        let t17 = replace(&mut self.inner, Vector::<u32>::new());
-        self.inner = replace(self.saved.index_mut(17), t17);
-        let t18 = replace(&mut self.lparent, Vector::<u32>::new());
-        self.lparent = replace(self.saved.index_mut(18), t18);
-        let t19 = replace(&mut self.preh, Vector::<u32>::new());
-        self.preh = replace(self.saved.index_mut(19), t19);
-        let t20 = replace(&mut self.lbs, Vector::<u32>::new());
-        self.lbs = replace(self.saved.index_mut(20), t20);
+        let t6 = replace(&mut self.idom, Vector::<u32>::new());
+        self.idom = replace(self.saved.index_mut(6), t6);
+        let t7 = replace(&mut self.kid_at, Vector::<u32>::new());
+        self.kid_at = replace(self.saved.index_mut(7), t7);
+        let t8 = replace(&mut self.kids, Vector::<u32>::new());
+        self.kids = replace(self.saved.index_mut(8), t8);
+        let t9 = replace(&mut self.dpre, Vector::<u32>::new());
+        self.dpre = replace(self.saved.index_mut(9), t9);
+        let t10 = replace(&mut self.dpost, Vector::<u32>::new());
+        self.dpost = replace(self.saved.index_mut(10), t10);
+        let t11 = replace(&mut self.inner, Vector::<u32>::new());
+        self.inner = replace(self.saved.index_mut(11), t11);
+        let t12 = replace(&mut self.lparent, Vector::<u32>::new());
+        self.lparent = replace(self.saved.index_mut(12), t12);
+        let t13 = replace(&mut self.preh, Vector::<u32>::new());
+        self.preh = replace(self.saved.index_mut(13), t13);
+        let t14 = replace(&mut self.lbs, Vector::<u32>::new());
+        self.lbs = replace(self.saved.index_mut(14), t14);
         let tl = replace(&mut self.lb_at, Vector::<u64>::new());
         self.lb_at = replace(&mut self.saved_lb, tl);
+        assert(self.splices == self.saved_splice, "opt: the spares hold the operand lists before the preheaders");
+        let ta = replace(&mut self.ops_at, Vector::<u32>::new());
+        self.ops_at = replace(&mut self.xat, ta);
+        let tg = replace(&mut self.ops_arg, Vector::<u32>::new());
+        self.ops_arg = replace(&mut self.xarg, tg);
+        let tv = replace(&mut self.ops, Vector::<Value>::new());
+        self.ops = replace(&mut self.xops, tv);
+        let td = replace(&mut self.ops_dst, Vector::<u32>::new());
+        self.ops_dst = replace(&mut self.xdst, td);
+        self.blk_of.truncate(self.saved_ni as usize);
+        self.pblock.truncate(self.saved_np as usize);
         self.saved_on = false;
         self.kept = K_NEST;
     }
@@ -4649,9 +4693,6 @@ extend Opt {
         self.eqs.clear_keeping(KEEP_SLOTS);
         self.log.truncate(0);
         self.places.truncate(0);
-        fill(&mut self.end_state, nb * TBAA_TAGS, 0);
-        fill(&mut self.end_recent, nb * RECENT_MAX, NONE);
-        fill(&mut self.end_pstate, nb, 0);
         fill(&mut self.bwrites, nb, 0);
         fill(&mut self.rmark, nb, NONE);
         self.aggregs = pk.arg_copy.min(16);
@@ -4677,8 +4718,8 @@ extend Opt {
         let mut states: u32 = 0;
         self.rewrote = false;
         let mut changed = self.param_cycles(b);
-        // Preorder over the dominator tree: block << 1 enters a block, n << 33 | 1 closes its scope at log
-        // length n.
+        // Preorder over the dominator tree: depth << 33 | block << 1 enters a block, n << 33 | 1 closes its
+        // scope at log length n.
         self.stack.truncate(0);
         self.stack.push(0);
         // Each block is entered and left once.
@@ -4688,7 +4729,8 @@ extend Opt {
                 self.unwind((x >> 33) as usize);
                 continue;
             }
-            let k = (x >> 1) as usize;
+            let k = (x >> 1 & 0xFFFFFFFF) as usize;
+            let dep = (x >> 33) as usize;
             self.stack.push(self.log.len() as u64 << 33 | 1);
             // The places its dominator knew last; those of a state no longer current are not found.
             self.recent.truncate(0);
@@ -4696,7 +4738,7 @@ extend Opt {
                 let at = if k == 0 {
                     NONE
                 } else {
-                    self.end_recent[self.idom[k] as usize * RECENT_MAX + r]
+                    self.end_recent[(dep - 1) * RECENT_MAX + r]
                 };
                 if at == NONE {
                     break;
@@ -4704,11 +4746,11 @@ extend Opt {
                 self.recent.push(at);
             }
             if k != 0 && self.pred_at[k + 1] - self.pred_at[k] == 1 && self.preds[self.pred_at[k] as usize] == self.idom[k] {
-                let d = self.idom[k] as usize * TBAA_TAGS;
+                let d = (dep - 1) * TBAA_TAGS;
                 for g in 0..TBAA_TAGS {
                     unsafe self.tstate[g] = self.end_state[d + g];
                 }
-                self.pstate = self.end_pstate[self.idom[k] as usize];
+                self.pstate = self.end_pstate[dep - 1];
                 // Its parameters are its one edge's arguments.
                 changed = self.forward_params(b, k as u32) || changed;
                 // Its one edge decides its dominator's branch condition here and below.
@@ -4729,7 +4771,7 @@ extend Opt {
                 let w = self.between_writes(k as u32);
                 states += 1;
                 self.pstate = states;
-                let d = self.idom[k] as usize * TBAA_TAGS;
+                let d = (dep - 1) * TBAA_TAGS;
                 for g in 0..TBAA_TAGS {
                     let kept = w != WRITES_ALL && (w & 1) == 0 && (g == 0 && w == 0 || g != 0 && (w >> g as u32 & 1) == 0);
                     unsafe self.tstate[g] = if kept {
@@ -4881,15 +4923,24 @@ extend Opt {
                     changed = true;
                 }
             }
+            if self.end_pstate.len() == dep {
+                self.end_state.resize_default((dep + 1) * TBAA_TAGS);
+                self.end_recent.resize_default((dep + 1) * RECENT_MAX);
+                self.end_pstate.push(0);
+            }
             for g in 0..TBAA_TAGS {
-                self.end_state[k * TBAA_TAGS + g] = unsafe self.tstate[g];
+                self.end_state[dep * TBAA_TAGS + g] = unsafe self.tstate[g];
             }
-            for r in 0..self.recent.len() {
-                self.end_recent[k * RECENT_MAX + r] = self.recent[r];
+            for r in 0..RECENT_MAX {
+                self.end_recent[dep * RECENT_MAX + r] = if r < self.recent.len() {
+                    self.recent[r]
+                } else {
+                    NONE
+                };
             }
-            self.end_pstate[k] = self.pstate;
+            self.end_pstate[dep] = self.pstate;
             for c in self.kid_at[k]..self.kid_at[k + 1] {
-                self.stack.push(self.kids[c as usize] as u64 << 1);
+                self.stack.push((dep + 1) as u64 << 33 | self.kids[c as usize] as u64 << 1);
             }
         }
         return changed || self.rewrote;
@@ -11969,10 +12020,10 @@ extend Opt {
                 cur = self.nxt[cur as usize];
             }
         }
-        self.insts.truncate(0);
-        self.locs.truncate(0);
-        self.inls.truncate(0);
-        self.blocks.truncate(0);
+        self.pbody.insts.truncate(0);
+        self.pbody.locs.truncate(0);
+        self.pbody.inl.truncate(0);
+        self.pbody.blocks.truncate(0);
         fill(&mut self.done_pool, b.pool.len(), false);
         let mut np: u32 = 0;
         for k in 0..nb {
@@ -11980,7 +12031,7 @@ extend Opt {
                 continue;
             }
             let bk = b.blocks[k];
-            let start = self.insts.len() as u32;
+            let start = self.pbody.insts.len() as u32;
             let ps = np;
             for q in bk.param_start..bk.param_start + bk.param_len as u32 {
                 if self.live[ni + q as usize] {
@@ -12019,10 +12070,10 @@ extend Opt {
                 }
                 cur = self.nxt[cur as usize];
             }
-            self.blocks.push(
+            self.pbody.blocks.push(
                 Block {
                     start: start,
-                    len: self.insts.len() as u32 - start,
+                    len: self.pbody.insts.len() as u32 - start,
                     param_start: ps,
                     param_len: (np - ps) as u16,
                     // The blocks of a chain run equally often, as often as control enters its head: the head's
@@ -12049,12 +12100,12 @@ extend Opt {
         b.scopes.truncate(ns);
         // Copied into the body's own buffers, which hold the input and so fit the output: a swap would hand
         // the body this scratch's buffers, sized for the largest body yet, and the scratch would grow anew.
-        assign(&mut b.insts, &self.insts);
-        assign(&mut b.locs, &self.locs);
+        assign(&mut b.insts, &self.pbody.insts);
+        assign(&mut b.locs, &self.pbody.locs);
         if b.inl.len() != 0 {
-            assign(&mut b.inl, &self.inls);
+            assign(&mut b.inl, &self.pbody.inl);
         }
-        assign(&mut b.blocks, &self.blocks);
+        assign(&mut b.blocks, &self.pbody.blocks);
         assign(&mut b.params, &self.params);
         self.drop_slots(b);
         // Empty, its buffer kept for the next walk's.
@@ -12233,10 +12284,10 @@ extend Opt {
         if t.op == O_SLOTADDR {
             self.sused[t.a as usize] = 0;
         }
-        self.insts.push(t);
-        self.locs.push(b.locs[i as usize]);
+        self.pbody.insts.push(t);
+        self.pbody.locs.push(b.locs[i as usize]);
         if b.inl.len() != 0 {
-            self.inls.push(b.inl[i as usize]);
+            self.pbody.inl.push(b.inl[i as usize]);
         }
     }
 
@@ -12296,6 +12347,41 @@ pub(package) struct Run {
     // that makes another.
     free: UnsafeCell<Vector<Box<Scratch>>>,
     free_lock: UnsafeCell<i32>,
+    // The parts of a scratch a large body's job (`SHARE_MIN`) takes for one pass and gives back, under
+    // `free_lock`: a pass runs for a part of a job, so fewer of them than scratches grow to a large body's
+    // tables, and a small body's passes use the scratch's own. The promoters, the packings' scratch
+    // (`Opt::slp`), the loop transforms' (from the first round to the vectorizer's report, with the tables
+    // `save_tables` keeps) and the pool compactions' (`Body::compact_pool`).
+    proms: UnsafeCell<Vector<pr::Promoter>>,
+    slps: UnsafeCell<Vector<sl::Slp>>,
+    loops: UnsafeCell<Vector<LoopParts>>,
+    pools: UnsafeCell<Vector<PoolScratch>>,
+}
+
+// A large body's loop window's scratch (`Run::loops`): the transforms' and the tables `save_tables` keeps.
+struct LoopParts {
+    unr: lu::LoopOpt,
+    saved: Vector<Vector<u32>>,
+    saved_lb: Vector<u64>,
+}
+
+// The instructions of a body past which its passes take the run's shared parts (`Run::proms`): the
+// scratches' own parts grow to smaller bodies' tables only, and a smaller body's pass takes no lock.
+const SHARE_MIN: usize = 512;
+
+// The last of pool `v` under spin lock `lock`, None when it is empty.
+fn pool_take<T>(lock: &UnsafeCell<i32>, v: &UnsafeCell<Vector<T>>) Option<T> {
+    unsafe sc_runtime::sc_rt_spin_lock(lock.get());
+    let x = unsafe (*v.get()).pop();
+    unsafe sc_runtime::sc_rt_spin_unlock(lock.get());
+    return x;
+}
+
+// `x` back into pool `v` under spin lock `lock`.
+fn pool_give<T>(lock: &UnsafeCell<i32>, v: &UnsafeCell<Vector<T>>, x: T) {
+    unsafe sc_runtime::sc_rt_spin_lock(lock.get());
+    unsafe (*v.get()).push(x);
+    unsafe sc_runtime::sc_rt_spin_unlock(lock.get());
 }
 
 // Keep the buffers of `x`, a body a job is done with, as the spare of a rebuild of `sc` whose own are
@@ -12430,22 +12516,12 @@ extend Run {
             order[at[level[i] as usize] as usize] = i as u32;
             at[level[i] as usize] += 1;
         }
-        // A caller waits for each distinct direct callee of a lower level (`seen`: the last caller that
-        // listed it).
-        let mut edges = Vector::<u64>::new();
+        // Counted, then listed.
         let mut seen = Vector::<u32>::new();
-        for _ in 0..n {
-            seen.push(NONE);
-        }
-        for k in 0..n {
-            for q in call_at[k]..call_at[k + 1] {
-                let c = calls[q as usize];
-                if level[c as usize] < level[k] && seen[c as usize] != k as u32 {
-                    seen[c as usize] = k as u32;
-                    edges.push(c as u64 << 32 | k as u64);
-                }
-            }
-        }
+        let mut edges = Vector::<u64>::new();
+        let ne = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, false);
+        edges.reserve_exact(ne);
+        let _ = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, true);
         let mut fin = Vector::<bool>::with_capacity(n);
         for k in 0..n {
             fin.push(k as u32 >= held);
@@ -12479,6 +12555,10 @@ extend Run {
             report: stdlib::env_is("SC_VEC_REPORT", "1"),
             free: UnsafeCell::<Vector<Box<Scratch>>>::new(Vector::<Box<Scratch>>::new()),
             free_lock: UnsafeCell::<i32>::new(0),
+            proms: UnsafeCell::<Vector<pr::Promoter>>::new(Vector::<pr::Promoter>::new()),
+            slps: UnsafeCell::<Vector<sl::Slp>>::new(Vector::<sl::Slp>::new()),
+            loops: UnsafeCell::<Vector<LoopParts>>::new(Vector::<LoopParts>::new()),
+            pools: UnsafeCell::<Vector<PoolScratch>>::new(Vector::<PoolScratch>::new()),
         };
     }
 
@@ -12601,6 +12681,18 @@ extend Run {
         } else {
             Option::<Body>::None
         };
+        let own_loops = if sc.o.shares(b) {
+            let x = pool_take(&r.free_lock, &r.loops).unwrap_or(
+                LoopParts {
+                    unr: lu::LoopOpt::new(),
+                    saved: Vector::<Vector<u32>>::new(),
+                    saved_lb: Vector::<u64>::new(),
+                },
+            );
+            Some(sc.o.swap_loops(x))
+        } else {
+            Option::<LoopParts>::None
+        };
         // A loop a round copied is innermost again for the next one.
         sc.o.unr.wide = false;
         let mut round: u32 = 0;
@@ -12646,6 +12738,9 @@ extend Run {
         if r.report && sc.o.unr.rejected.len() != 0 {
             r.vec_report(p, &sc.o.unr.rejected);
         }
+        if let Some(x) = own_loops {
+            pool_give(&r.free_lock, &r.loops, sc.o.swap_loops(x));
+        }
         // Then the packing of straight-line values into vectors, on the loops' final shape.
         if bu.vector != 0 {
             let form = sc.o.slp(p, b);
@@ -12679,8 +12774,9 @@ extend Run {
             sc.o.reassociate(p, b);
         }
         let _ = sc.o.split_exits(p, b);
-        if ret_edges(b) {
-            sc.o.forget();
+        let so = &mut sc.o;
+        if ret_edges(b, &mut so.mark, &mut so.edges) {
+            so.forget();
         }
         sc.o.estimate(p, b);
         if r.print.len() != 0 {
@@ -12688,6 +12784,11 @@ extend Run {
         }
         // Its callers copy its pool when they inline it, and the code generators read it: the passes'
         // dead records go.
+        let own_cps = if sc.o.shares(b) {
+            Some(replace(&mut sc.o.cps, pool_take(&r.free_lock, &r.pools).unwrap_or(PoolScratch::new())))
+        } else {
+            Option::<PoolScratch>::None
+        };
         b.compact_pool(&mut sc.o.cps);
         let mut fits = r.inline && r.shape[j as usize];
         let keep = snap && (packed(b) || rotated);
@@ -12715,6 +12816,9 @@ extend Run {
         } else {
             0u8
         };
+        if let Some(x) = own_cps {
+            pool_give(&r.free_lock, &r.pools, replace(&mut sc.o.cps, x));
+        }
         *pb = b.take_compact();
         recycle(&mut sc, wb);
         unsafe *((*r.ok.get()).as_mut_ptr() + j as usize) = facts;
@@ -12730,6 +12834,7 @@ extend Run {
     // (`pslots`), a quotient kept for the loop vectorizer (`deferred`).
     fn ready(self: &Self, p: &Package, j: u32, sc: &mut Box<Scratch>, pslots: bool, deferred: bool) {
         sc.o.forget();
+        sc.o.shared = self;
         sc.o.pslots = pslots;
         sc.o.unit = self.bunit[j as usize];
         // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
@@ -12811,10 +12916,7 @@ extend Run {
     // A scratch from the free list, or a new one. The lock is held for this call only, never while a
     // body is optimized.
     fn take(self: &Self) Box<Scratch> {
-        unsafe sc_runtime::sc_rt_spin_lock(self.free_lock.get());
-        let x = unsafe (*self.free.get()).pop();
-        unsafe sc_runtime::sc_rt_spin_unlock(self.free_lock.get());
-        switch x {
+        switch pool_take(&self.free_lock, &self.free) {
             Some(sc) => {
                 return sc;
             },
@@ -12824,9 +12926,7 @@ extend Run {
     }
 
     fn give(self: &Self, sc: Box<Scratch>) {
-        unsafe sc_runtime::sc_rt_spin_lock(self.free_lock.get());
-        unsafe (*self.free.get()).push(sc);
-        unsafe sc_runtime::sc_rt_spin_unlock(self.free_lock.get());
+        pool_give(&self.free_lock, &self.free, sc);
     }
 
     /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
@@ -12971,7 +13071,7 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
 // Each switch of the optimized bodies that selects symbol addresses (`sws::symbol_table`) reads them from
 // a read-only table of its own (LLVM's switch to lookup table): a load in place of a branch per case. A
 // body that took one is optimized again, which removes the cases' blocks. Its form before, the one its
-// callers inlined, stays in `pre` (`Run::inlined`) unless an earlier one does.
+// callers inlined, stays in `pre` (`Run::take_inlined`) unless an earlier one does.
 fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
     let held = if pk.held.body == NONE {
         pk.bodies.len()
@@ -13039,7 +13139,7 @@ fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
             o.forget();
             o.unit = pk.syms[owner[j] as usize].unit;
             let _ = o.run(pk, &mut b, true);
-            let _ = ret_edges(&mut b);
+            let _ = ret_edges(&mut b, &mut o.mark, &mut o.edges);
             o.estimate(pk, &mut b);
             pk.bodies[j] = b;
         }
@@ -13059,7 +13159,7 @@ const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
 // constant global). A stored constant may be a symbol's address (`image`): a relocation. A byte no store
 // writes is 0, which a read of it before any store, undefined, may give. The stores and the values only
 // they read become unused constants. A body's form before, the one its callers inlined, stays in `pre`
-// (`Run::inlined`) unless an earlier one does: a unit that inlines it from a record then makes the data its
+// (`Run::take_inlined`) unless an earlier one does: a unit that inlines it from a record then makes the data its
 // own.
 fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
     let held = if pk.held.body == NONE {
@@ -18100,25 +18200,50 @@ fn args_among(b: &Body, e: u32, o: u32) bool {
     return true;
 }
 
+// The edges of the bodies' job graph (`Run::edges`), pushed onto `edges` when `list`; their count. A caller
+// waits for each distinct direct callee of a lower level (`seen`: the last caller that listed it).
+fn waits(
+    n: usize,
+    call_at: &Vector<u32>,
+    calls: &Vector<u32>,
+    level: &Vector<u32>,
+    seen: &mut Vector<u32>,
+    edges: &mut Vector<u64>,
+    list: bool,
+) usize {
+    fill(seen, n, NONE);
+    let mut ne: usize = 0;
+    for k in 0..n {
+        for q in call_at[k]..call_at[k + 1] {
+            let c = calls[q as usize];
+            if level[c as usize] < level[k] && seen[c as usize] != k as u32 {
+                seen[c as usize] = k as u32;
+                ne += 1;
+                if list {
+                    edges.push(c as u64 << 32 | k as u64);
+                }
+            }
+        }
+    }
+    return ne;
+}
+
 // At most RET_EDGES branch edges of a body return through blocks of their own (`ret_edges`).
 const RET_EDGES: u32 = 8;
 
 // Give each edge of a branch of `b` that passes arguments to a block that only returns a block of its own
 // that returns the value (`ret_through`), up to RET_EDGES and but one edge into each such block (which stays
 // reachable): the native code returns at once rather than move the arguments and jump (LLVM's tail
-// duplication of return blocks; the walk makes a jump's own return). Whether any.
-fn ret_edges(b: &mut Body) bool {
+// duplication of return blocks; the walk makes a jump's own return). Whether any. `into` and `es` are
+// scratch.
+fn ret_edges(b: &mut Body, into: &mut Vector<u32>, es: &mut Vector<u32>) bool {
     let nb = b.blocks.len();
     // Per block, the edges into it.
-    let mut into = Vector::<u32>::with_capacity(nb);
-    for _ in 0..nb {
-        into.push(0);
-    }
-    let mut es = Vector::<u32>::new();
+    fill(into, nb, 0);
     for k in 0..nb {
         let bk = b.blocks[k];
         if bk.len != 0 {
-            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut es);
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], es);
             for q in 0..es.len() {
                 into[b.edge_target(es[q]) as usize] += 1;
             }

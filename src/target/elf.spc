@@ -378,12 +378,18 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             },
         );
     }
-    // Symbols: locals, then defined globals and undefined ones, each group in symbol order.
-    let mut strtab = Vector::<u8>::new();
+    // Symbols: locals, then defined globals and undefined ones, each group in symbol order. The tables at
+    // their sizes: a name is its bytes and a 0, an entry 24 bytes (the null one, a section's, an object
+    // symbol's).
+    let mut nstr: usize = 1;
+    for k in 0..o.syms.len() {
+        nstr += o.name_of(k as u32).len() + 1;
+    }
+    let mut strtab = Vector::<u8>::with_capacity(nstr);
     strtab.push(0);
     let mut symix = Vector::<u32>::new();
     symix.resize_default(o.syms.len());
-    let mut syms = Vector::<u8>::new();
+    let mut syms = Vector::<u8>::with_capacity(24 * (1 + parts.len() + o.syms.len()));
     for _ in 0..24 {
         syms.push(0);
     }

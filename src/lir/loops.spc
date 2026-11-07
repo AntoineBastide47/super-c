@@ -323,7 +323,8 @@ pub(package) struct LoopOpt {
     // compares signed, the counter's bits, needs a guard that the bound is at most or at least `cf_limit`);
     // the instruction whose location the new ones take; per header parameter its start and back edge
     // values and facts (`cf_hp`); per instruction its facts (`cf_st`, `cf_fv`) and its linear form for the
-    // parameter at hand (`cf_lst`, `cf_lco`, `cf_lre`); the instructions copied in order (`cf_order`, per
+    // parameter at hand (`cf_lst`, `cf_lco`, `cf_lre`; from the loop's first instruction `cf_base` to its
+    // last, an instruction outside the loop has none); the instructions copied in order (`cf_order`, per
     // instruction its place `cf_idx`), the header parameters they read (`cf_need`), and per iteration the
     // copies' values (`cf_val`) and the parameters' (`cf_pv`); per value the loop leaves with, whether its
     // closed form replaces it (`cf_poly`). `cf_bits` is a bit count's exit (CB_*), CB_NONE for a counter.
@@ -341,6 +342,7 @@ pub(package) struct LoopOpt {
     cf_guard: bool,
     cf_limit: u64,
     cf_at: u32,
+    cf_base: u32,
     cf_init: Vector<Value>,
     cf_next: Vector<Value>,
     cf_hp: Vector<Poly>,
@@ -547,6 +549,7 @@ extend LoopOpt {
             cf_guard: false,
             cf_limit: 0,
             cf_at: 0,
+            cf_base: 0,
             cf_init: Vector::<Value>::new(),
             cf_next: Vector::<Value>::new(),
             cf_hp: Vector::<Poly>::new(),
@@ -1523,14 +1526,23 @@ extend LoopOpt {
         for _ in 0..np {
             self.cf_hp.push(p_of(PS_UNKNOWN));
         }
-        // The facts and linear forms are read only where `cf_st` and `cf_lst` are set: they only grow.
-        fill(&mut self.cf_st, b.insts.len(), 0);
-        grow_poly(&mut self.cf_fv, b.insts.len());
-        fill(&mut self.cf_lst, b.insts.len(), 0);
-        if self.cf_lco.len() < b.insts.len() {
-            self.cf_lco.resize_default(b.insts.len());
+        let mut lo = b.insts.len() as u32;
+        let mut hi: u32 = 0;
+        for j in 0..self.lblocks.len() {
+            let bk = b.blocks[self.lblocks[j] as usize];
+            lo = lo.min(bk.start);
+            hi = hi.max(bk.start + bk.len);
         }
-        grow_poly(&mut self.cf_lre, b.insts.len());
+        self.cf_base = lo;
+        let n = (hi - lo) as usize;
+        // The facts and linear forms are read only where `cf_st` and `cf_lst` are set: they only grow.
+        fill(&mut self.cf_st, n, 0);
+        grow_poly(&mut self.cf_fv, n);
+        fill(&mut self.cf_lst, n, 0);
+        if self.cf_lco.len() < n {
+            self.cf_lco.resize_default(n);
+        }
+        grow_poly(&mut self.cf_lre, n);
         let hs = b.blocks[self.cf_h as usize].param_start;
         // Each round resolves at least one parameter.
         for _ in 0..np + 1 {
@@ -1618,9 +1630,9 @@ extend LoopOpt {
         for j in 0..self.lblocks.len() {
             let bk = b.blocks[self.lblocks[j] as usize];
             for i in bk.start..bk.start + bk.len {
-                self.cf_st[i as usize] = 0;
+                self.cf_st[(i - self.cf_base) as usize] = 0;
                 if lin {
-                    self.cf_lst[i as usize] = 0;
+                    self.cf_lst[(i - self.cf_base) as usize] = 0;
                 }
             }
         }
@@ -1692,8 +1704,9 @@ extend LoopOpt {
         if (v & VFLAG) != 0 {
             return p_of(PS_NO);
         }
-        if self.cf_st[v as usize] != 0 {
-            return self.cf_fv[v as usize];
+        let ix = (v - self.cf_base) as usize;
+        if self.cf_st[ix] != 0 {
+            return self.cf_fv[ix];
         }
         let t = b.insts[v as usize];
         if !cf_pure(b, t) {
@@ -1749,8 +1762,8 @@ extend LoopOpt {
                 r = op_fact(b, ptr, t, fa, fb, w);
             }
         }
-        self.cf_st[v as usize] = 1;
-        self.cf_fv[v as usize] = r;
+        self.cf_st[ix] = 1;
+        self.cf_fv[ix] = r;
         return r;
     }
 
@@ -1798,8 +1811,9 @@ extend LoopOpt {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || !self.defined_in(v) {
             return Lin { coef: 0, rest: self.fact(b, ptr, v) };
         }
-        if self.cf_lst[v as usize] != 0 {
-            return Lin { coef: self.cf_lco[v as usize], rest: self.cf_lre[v as usize] };
+        let ix = (v - self.cf_base) as usize;
+        if self.cf_lst[ix] != 0 {
+            return Lin { coef: self.cf_lco[ix], rest: self.cf_lre[ix] };
         }
         let t = b.insts[v as usize];
         let w = type_bits(t.ty, ptr);
@@ -1878,9 +1892,9 @@ extend LoopOpt {
         } else {
             r = Lin { coef: 0, rest: self.fact(b, ptr, v) };
         }
-        self.cf_lst[v as usize] = 1;
-        self.cf_lco[v as usize] = r.coef;
-        self.cf_lre[v as usize] = r.rest;
+        self.cf_lst[ix] = 1;
+        self.cf_lco[ix] = r.coef;
+        self.cf_lre[ix] = r.rest;
         return r;
     }
 
@@ -9233,8 +9247,8 @@ const PIV_MAX: usize = 8;
 /// steps it in that access: arm64's post-indexed `ldr`, `ldp`, `str`, `stp`), where each iteration added
 /// the scaled counter to the base. A counter that only steps, indexes them and meets its bound gives
 /// its exit test to the first pointer and goes. Whether it changed a loop; the caller's rebuild then
-/// drops what it left unused and renumbers the body (`opt::Opt::pointer_ivs`).
-pub(package) fn pointer_ivs(b: &mut Body) bool {
+/// drops what it left unused and renumbers the body (`opt::Opt::pointer_ivs`). `map` is scratch.
+pub(package) fn pointer_ivs(b: &mut Body, map: &mut Vector<Value>) bool {
     let nb = b.blocks.len();
     // A loop of one block branches to itself: without one, nothing to do.
     let mut self_loop = false;
@@ -9263,7 +9277,7 @@ pub(package) fn pointer_ivs(b: &mut Body) bool {
     }
     let mut any = false;
     for h in 0..nb as u32 {
-        if into[h as usize] == 2 && piv_loop(b, h, from[h as usize]) {
+        if into[h as usize] == 2 && piv_loop(b, h, from[h as usize], map) {
             any = true;
         }
     }
@@ -9282,8 +9296,8 @@ struct Piv {
     n: u32, // its accesses
 }
 
-// `pointer_ivs` of loop `h`, whose one other predecessor is `e`: whether it changed it.
-fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
+// `pointer_ivs` of loop `h`, whose one other predecessor is `e`: whether it changed it. `map` is scratch.
+fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>) bool {
     let th = term(b, h);
     let te = term(b, e);
     if th.op != O_BR || te.op != O_JMP && te.op != O_BR {
@@ -9480,10 +9494,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
     for _ in 0..np {
         b.params.push(T_PTR);
     }
-    let mut map = Vector::<Value>::with_capacity(ni + npar);
-    for _ in 0..ni + npar {
-        map.push(NONE);
-    }
+    fill(map, ni + npar, NONE);
     for q in 0..hb.param_len as u32 {
         map[ni + (hb.param_start + q) as usize] = VPARAM | start + q;
     }
@@ -9510,7 +9521,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
                 c: (off as i32) as u32,
             }
         } else {
-            piv_mapped(b, s, &map, ni, npar, &mut es)
+            piv_mapped(b, s, map, ni, npar, &mut es)
         };
         if (s.op == O_LOAD || s.op == O_STORE) && piv_inst(hb, s.a) {
             let ga = of[(s.a - hb.start) as usize];
@@ -9539,13 +9550,13 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
     }
     args.truncate(0);
     for q in 0..b.edge_nargs(back) {
-        args.push(piv_map(b.edge_arg(back, q), &map, ni, npar));
+        args.push(piv_map(b.edge_arg(back, q), map, ni, npar));
     }
     args.extend_from_slice(&steps);
     let nback = b.edge(h, &args);
     args.truncate(0);
     for q in 0..b.edge_nargs(out) {
-        args.push(piv_map(b.edge_arg(out, q), &map, ni, npar));
+        args.push(piv_map(b.edge_arg(out, q), map, ni, npar));
     }
     let nout = b.edge(b.edge_target(out), &args);
     let mut tt = th;
@@ -9559,7 +9570,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
         };
         piv_put(b, Inst { op: O_ICMP, ty: ct.ty, aux: ct.aux, a: x, b: y, c: VNONE }, test)
     } else {
-        piv_map(th.a, &map, ni, npar)
+        piv_map(th.a, map, ni, npar)
     };
     if back == th.b {
         tt.b = nback;
@@ -9576,7 +9587,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32) bool {
         }
         let bk = b.blocks[k as usize];
         for i in bk.start..bk.start + bk.len {
-            let t = piv_mapped(b, b.insts[i as usize], &map, ni, npar, &mut es);
+            let t = piv_mapped(b, b.insts[i as usize], map, ni, npar, &mut es);
             b.insts[i as usize] = t;
         }
     }

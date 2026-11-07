@@ -197,13 +197,14 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     if o.frames.len() != 0 {
         let cu = o.own_section("__LD,__compact_unwind,regular,debug");
         let _ = o.align(cu, 3);
+        let mut e = Vector::<u8>::with_capacity(32);
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
             if fr.compact == 0 {
                 continue;
             }
             let at = o.secs[cu as usize].bytes.len() as u32;
-            let mut e = Vector::<u8>::with_capacity(32);
+            e.truncate(0);
             ob::w64(&mut e, 0);
             ob::w32(&mut e, fr.size);
             ob::w32(&mut e, fr.compact);
@@ -382,6 +383,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         symix[order[i] as usize] = i as u32;
     }
     let reloc_start = data_start + filesz + 7 & ~7u64;
+    relbytes.reserve_exact(8 * (o.rels.len() + tv_rel.len()));
     for i in 0..kinds.len() {
         let k = kinds[i];
         rel_off.push((reloc_start + relbytes.len() as u64) as u32);
@@ -408,10 +410,15 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         rel_n.push(((relbytes.len() - n0) / 8) as u32);
     }
     let symoff = reloc_start + relbytes.len() as u64;
-    let mut strs = Vector::<u8>::new();
+    // A name is its bytes after `_`, then a 0; the table starts with " \0" and ends padded to 8 bytes.
+    let mut nstr: usize = 2 + 7;
+    for i in 0..order.len() {
+        nstr += o.name_of(order[i]).len() + 2;
+    }
+    let mut strs = Vector::<u8>::with_capacity(nstr);
     strs.push(b' ');
     strs.push(0);
-    let mut nl = Vector::<u8>::new();
+    let mut nl = Vector::<u8>::with_capacity(16 * order.len());
     for i in 0..order.len() {
         let k = order[i];
         let y = o.syms[k as usize];

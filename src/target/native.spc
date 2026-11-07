@@ -18,6 +18,7 @@ import target::wasmobj as wobj;
 import target::assembler as asmr;
 import target::ctxswitch as ctxs;
 import target::win64 as w64;
+import codegen::place as pl;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub(package) const fn supported(os: i32, isa: i32) bool {
@@ -138,6 +139,23 @@ pub(package) fn object(
     out: &mut Vector<u8>,
     err: &mut String,
 ) bool {
+    let mut syms = pl::Osyms::new();
+    return object_with(p, os, isa, funcs, datas, text, out, err, &mut syms);
+}
+
+/// `object`, its generator's object symbols in `syms` (`place::Osyms`): a cleared table, which it leaves
+/// cleared for the next object when the object compiles.
+pub(package) fn object_with(
+    p: &Package,
+    os: i32,
+    isa: i32,
+    funcs: []u32,
+    datas: []u32,
+    text: str,
+    out: &mut Vector<u8>,
+    err: &mut String,
+    syms: &mut pl::Osyms,
+) bool {
     if text.len() != 0 && !asm_native(os, isa) {
         err.push_str("module-level assembly");
         return false;
@@ -158,6 +176,12 @@ pub(package) fn object(
     }
     let mut ga = gen::Gen::new(p, &mut o, apple, !apple);
     let mut gx = xgen::Gen::new(p, &mut o, win);
+    let tab = replace(syms, pl::Osyms::new());
+    if x64 {
+        gx.use_osyms(tab);
+    } else {
+        ga.use_osyms(tab);
+    }
     let mut g = Backend { a: &mut ga, x: &mut gx, x64: x64 };
     let fmt = if apple {
         asmr::FMT_MACHO
@@ -220,6 +244,11 @@ pub(package) fn object(
             return false;
         }
     }
+    *syms = if x64 {
+        gx.take_osyms()
+    } else {
+        ga.take_osyms()
+    };
     if all.len() != 0 {
         let mut asr = asmr::Asm::new(
             if x64 {
