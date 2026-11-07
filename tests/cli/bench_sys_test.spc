@@ -20,7 +20,7 @@ const BURN_ITERS: i64 = 20000000; // multiply-chain iterations each burning thre
 @test
 fn concurrent_allocation_counts_are_exact() {
     if unsafe sys::sc_bs_alloc_supported() == 0 {
-        // Windows: nothing is counted, and the reports say so.
+        // Android and wasm: nothing is counted, and the reports say so.
         return;
     }
     let arrive = sync::Barrier::new(THREADS + 1);

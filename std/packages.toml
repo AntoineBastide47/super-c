@@ -239,7 +239,7 @@ errors = "No errors: a duration saturates at the largest value instead of wrappi
 [package.testing]
 tier = 5
 targets = { macos = "full", ios = "full", linux = "full", android = "reduced", windows = "reduced", wasm = "reduced" }
-limits = "Android: no allocation accounting. Windows: no allocation accounting and no fresh process per benchmark. WebAssembly: no allocation accounting, process CPU time, resident set or fresh process."
+limits = "Android: no allocation accounting. Windows: no fresh process per benchmark. WebAssembly: no allocation accounting, process CPU time, resident set or fresh process."
 capabilities = ["CPU cycle and process CPU time counters", "resident set queries", "`fork` for a fresh process per benchmark"]
 accelerations = []
 allocator = "Samples go into `Vector`s from `Global`; allocation accounting counts the binary's C `malloc`, `calloc` and `realloc` calls."

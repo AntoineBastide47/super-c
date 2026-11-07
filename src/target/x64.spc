@@ -130,6 +130,57 @@ pub(package) struct Code {
     pub(package) dead: Vector<u32>,
     pub(package) in_at: Vector<u32>,
     pub(package) stack_at: u32,
+    rs: Relax,
+}
+
+// `Code::relax`'s vectors, kept across functions (the names are relax's), the buffer the next function's
+// code is relaxed into (`nb`: the previous function's buffer), and `unreached`'s jump targets (`tos`).
+struct Relax {
+    hs: Vector<u32>,
+    al: Vector<bool>,
+    bound: Vector<u32>,
+    op: Vector<u32>,
+    to: Vector<u32>,
+    jcc: Vector<bool>,
+    pre: Vector<bool>,
+    save: Vector<u32>,
+    cut: Vector<u32>,
+    pad_at: Vector<u32>,
+    nb: Vector<u8>,
+    tos: Vector<u32>,
+}
+
+extend Relax {
+    fn new() Relax {
+        return Relax {
+            hs: Vector::<u32>::new(),
+            al: Vector::<bool>::new(),
+            bound: Vector::<u32>::new(),
+            op: Vector::<u32>::new(),
+            to: Vector::<u32>::new(),
+            jcc: Vector::<bool>::new(),
+            pre: Vector::<bool>::new(),
+            save: Vector::<u32>::new(),
+            cut: Vector::<u32>::new(),
+            pad_at: Vector::<u32>::new(),
+            nb: Vector::<u8>::new(),
+            tos: Vector::<u32>::new(),
+        };
+    }
+
+    fn clear(self: &mut Self) {
+        self.hs.truncate(0);
+        self.al.truncate(0);
+        self.bound.truncate(0);
+        self.op.truncate(0);
+        self.to.truncate(0);
+        self.jcc.truncate(0);
+        self.pre.truncate(0);
+        self.save.truncate(0);
+        self.cut.truncate(0);
+        self.pad_at.truncate(0);
+        self.nb.truncate(0);
+    }
 }
 
 extend Code {
@@ -141,6 +192,7 @@ extend Code {
             dead: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
             stack_at: 0xFFFFFFFF,
+            rs: Relax::new(),
         };
     }
 
@@ -186,82 +238,83 @@ extend Code {
     /// them before each such position it spans, and the inserted bytes.
     pub(package) fn relax(self: &mut Self, at: &mut Vector<u32>, heads: &Vector<u32>, lead: u32, ins_at: u32, ins: []u8) {
         let nj = self.jumps.len();
+        let mut r = replace(&mut self.rs, Relax::new());
+        r.clear();
         // The positions with bytes before them: the heads and `ins_at`, ascending; whether each is a head; the
         // most bytes before the ones below each (15 a head, `ins` at `ins_at`).
-        let mut hs = Vector::<u32>::with_capacity(heads.len() + 1);
-        let mut al = Vector::<bool>::with_capacity(heads.len() + 1);
-        let mut bound = Vector::<u32>::with_capacity(heads.len() + 2);
-        bound.push(0);
+        r.hs.reserve(heads.len() + 1);
+        r.al.reserve(heads.len() + 1);
+        r.bound.reserve(heads.len() + 2);
+        r.bound.push(0);
         let mut put_ins = ins_at == NO_INS;
         for h in 0..heads.len() + 1 {
             if !put_ins && (h == heads.len() || heads[h] >= ins_at) {
                 put_ins = true;
-                hs.push(ins_at);
-                al.push(h < heads.len() && heads[h] == ins_at);
-                bound.push(bound[bound.len() - 1] + ins.len() as u32 + 15 * al[al.len() - 1] as u32);
-                if al[al.len() - 1] {
+                r.hs.push(ins_at);
+                r.al.push(h < heads.len() && heads[h] == ins_at);
+                r.bound.push(r.bound[r.bound.len() - 1] + ins.len() as u32 + 15 * r.al[r.al.len() - 1] as u32);
+                if r.al[r.al.len() - 1] {
                     continue;
                 }
             }
             if h < heads.len() {
-                hs.push(heads[h]);
-                al.push(true);
-                bound.push(bound[bound.len() - 1] + 15);
+                r.hs.push(heads[h]);
+                r.al.push(true);
+                r.bound.push(r.bound[r.bound.len() - 1] + 15);
             }
         }
-        if nj == 0 && hs.len() == 0 {
+        if nj == 0 && r.hs.len() == 0 {
+            self.rs = r;
             return;
         }
         // Per jump: its first byte, its target, whether a `jcc`, whether it lands before the inserted bytes, its
         // saving (3 for a short `jmp`, 4 for a short `jcc`, its 5 or 6 bytes dropped).
-        let mut op = Vector::<u32>::with_capacity(nj);
-        let mut to = Vector::<u32>::with_capacity(nj);
-        let mut jcc = Vector::<bool>::with_capacity(nj);
-        let mut pre = Vector::<bool>::with_capacity(nj);
-        let mut save = Vector::<u32>::new();
-        save.resize_default(nj);
+        r.op.reserve(nj);
+        r.to.reserve(nj);
+        r.jcc.reserve(nj);
+        r.pre.reserve(nj);
+        r.save.resize_default(nj);
         let mut l: usize = 0;
         for k in 0..nj {
             let d = self.jumps[k];
             let c = self.b[d as usize - 1] != 0xE9;
-            op.push(d - 1 - c as u32);
-            to.push((d as i64 + 4 + (read32(&self.b, d) as i32) as i64) as u32);
-            jcc.push(c);
-            pre.push(ins_at != NO_INS && to[k] == ins_at && op[k] < ins_at);
+            r.op.push(d - 1 - c as u32);
+            r.to.push((d as i64 + 4 + (read32(&self.b, d) as i32) as i64) as u32);
+            r.jcc.push(c);
+            r.pre.push(ins_at != NO_INS && r.to[k] == ins_at && r.op[k] < ins_at);
             while l < self.dead.len() && self.dead[l] < d {
                 l += 1;
             }
             if l < self.dead.len() && self.dead[l] == d {
-                save[k] = 5 + c as u32;
+                r.save[k] = 5 + c as u32;
             }
         }
         // `cut[k]`: the bytes the jumps before jump k save; `cut[nj]` all of them.
-        let mut cut = Vector::<u32>::new();
-        cut.resize_default(nj + 1);
+        r.cut.resize_default(nj + 1);
         for _ in 0..nj + 1 {
             for k in 0..nj {
-                cut[k + 1] = cut[k] + save[k];
+                r.cut[k + 1] = r.cut[k] + r.save[k];
             }
             let mut changed = false;
             for k in 0..nj {
-                let full = 5 + jcc[k] as u32;
-                if save[k] == full {
+                let full = 5 + r.jcc[k] as u32;
+                if r.save[k] == full {
                     continue;
                 }
-                let d = moved(&op, &cut, to[k]) as i64 - (moved(&op, &cut, op[k]) as i64 + (full - save[k]) as i64);
+                let d = moved(&r.op, &r.cut, r.to[k]) as i64 - (moved(&r.op, &r.cut, r.op[k]) as i64 + (full - r.save[k]) as i64);
                 // The bytes before the positions in (lo, hi] (in (lo, hi) to land before them) move the jump
                 // and its target apart.
-                let (lo, hi) = if to[k] > op[k] {
-                    (op[k], to[k] + 1 - pre[k] as u32)
+                let (lo, hi) = if r.to[k] > r.op[k] {
+                    (r.op[k], r.to[k] + 1 - r.pre[k] as u32)
                 } else {
-                    (to[k], op[k] + 1)
+                    (r.to[k], r.op[k] + 1)
                 };
-                let pad = (bound[upto(&hs, hi) as usize] - bound[upto(&hs, lo + 1) as usize]) as i64;
+                let pad = (r.bound[upto(&r.hs, hi) as usize] - r.bound[upto(&r.hs, lo + 1) as usize]) as i64;
                 if d == 0 && pad == 0 {
-                    save[k] = full;
+                    r.save[k] = full;
                     changed = true;
-                } else if save[k] == 0 && d + (full - 2) as i64 - pad >= -128 && d + (full - 2) as i64 + pad <= 127 {
-                    save[k] = full - 2;
+                } else if r.save[k] == 0 && d + (full - 2) as i64 - pad >= -128 && d + (full - 2) as i64 + pad <= 127 {
+                    r.save[k] = full - 2;
                     changed = true;
                 }
             }
@@ -270,93 +323,95 @@ extend Code {
             }
         }
         for k in 0..nj {
-            cut[k + 1] = cut[k] + save[k];
+            r.cut[k + 1] = r.cut[k] + r.save[k];
         }
         // The bytes before each of `hs`, in order, from its position past the shorter jumps and the bytes before
         // it: the inserted ones, then a head's no-ops; `pad_at[h]`: those before `hs[h]`.
-        let nh = hs.len();
-        let mut pad_at = Vector::<u32>::with_capacity(nh + 1);
-        pad_at.push(0);
+        let nh = r.hs.len();
+        r.pad_at.reserve(nh + 1);
+        r.pad_at.push(0);
         for h in 0..nh {
-            let mut n = if hs[h] == ins_at {
+            let mut n = if r.hs[h] == ins_at {
                 ins.len() as u32
             } else {
                 0
             };
-            if al[h] {
-                let p = lead + moved(&op, &cut, hs[h]) + pad_at[h] + n;
+            if r.al[h] {
+                let p = lead + moved(&r.op, &r.cut, r.hs[h]) + r.pad_at[h] + n;
                 n += (16 - p % 16) % 16;
             }
-            pad_at.push(pad_at[h] + n);
+            r.pad_at.push(r.pad_at[h] + n);
         }
-        let mut nb = Vector::<u8>::with_capacity(self.b.len() - cut[nj] as usize + pad_at[nh] as usize);
+        r.nb.reserve(self.b.len() - r.cut[nj] as usize + r.pad_at[nh] as usize);
         let mut from: u32 = 0;
         let mut h: usize = 0;
         for k in 0..nj + 1 {
             let end = if k < nj {
-                op[k]
+                r.op[k]
             } else {
                 self.b.len() as u32
             };
             for q in from..end + 1 {
-                while h < nh && hs[h] == q {
-                    let mut n = pad_at[h + 1] - pad_at[h];
+                while h < nh && r.hs[h] == q {
+                    let mut n = r.pad_at[h + 1] - r.pad_at[h];
                     if q == ins_at {
-                        nb.extend_from_slice(ins);
+                        r.nb.extend_from_slice(ins);
                         n -= ins.len() as u32;
                     }
-                    nops(&mut nb, n);
+                    nops(&mut r.nb, n);
                     h += 1;
                 }
                 if q < end {
-                    nb.push(self.b[q as usize]);
+                    r.nb.push(self.b[q as usize]);
                 }
             }
             if k == nj {
                 break;
             }
-            let full = 5 + jcc[k] as u32;
-            from = op[k] + full;
-            if save[k] == full {
+            let full = 5 + r.jcc[k] as u32;
+            from = r.op[k] + full;
+            if r.save[k] == full {
                 continue;
             }
-            let cc = if jcc[k] {
-                self.b[op[k] as usize + 1] as u32 & 15
+            let cc = if r.jcc[k] {
+                self.b[r.op[k] as usize + 1] as u32 & 15
             } else {
                 0
             };
-            let here = nb.len() as i64;
-            let tgt = if pre[k] {
-                moved(&op, &cut, to[k]) + pad_at[upto(&hs, to[k]) as usize]
+            let here = r.nb.len() as i64;
+            let tgt = if r.pre[k] {
+                moved(&r.op, &r.cut, r.to[k]) + r.pad_at[upto(&r.hs, r.to[k]) as usize]
             } else {
-                placed(&op, &cut, &hs, &pad_at, to[k])
+                placed(&r.op, &r.cut, &r.hs, &r.pad_at, r.to[k])
             } as i64;
-            if save[k] != 0 {
-                nb.push(
-                    if jcc[k] {
+            if r.save[k] != 0 {
+                r.nb.push(
+                    if r.jcc[k] {
                         (0x70 + cc) as u8
                     } else {
                         0xEB
                     },
                 );
-                nb.push((tgt - (here + 2)) as u8);
+                r.nb.push((tgt - (here + 2)) as u8);
             } else {
-                if jcc[k] {
-                    nb.push(0x0F);
-                    nb.push((0x80 + cc) as u8);
+                if r.jcc[k] {
+                    r.nb.push(0x0F);
+                    r.nb.push((0x80 + cc) as u8);
                 } else {
-                    nb.push(0xE9);
+                    r.nb.push(0xE9);
                 }
-                let d = (tgt - (nb.len() as i64 + 4)) as u32;
+                let d = (tgt - (r.nb.len() as i64 + 4)) as u32;
                 for q in 0..4u32 {
-                    nb.push((d >> 8 * q & 0xFF) as u8);
+                    r.nb.push((d >> 8 * q & 0xFF) as u8);
                 }
             }
         }
         for k in 0..at.len() {
-            at[k] = placed(&op, &cut, &hs, &pad_at, at[k]);
+            at[k] = placed(&r.op, &r.cut, &r.hs, &r.pad_at, at[k]);
         }
-        self.b = nb;
+        let nb = replace(&mut r.nb, Vector::<u8>::new());
+        r.nb = replace(&mut self.b, nb);
+        self.rs = r;
         self.jumps.truncate(0);
         self.dead.truncate(0);
     }
@@ -1097,7 +1152,9 @@ extend Code {
     /// Of the jumps whose fields are `cands`, mark `dead` each `jmp` right after a `jmp` that no jump and no
     /// position of `also` (a table's entry) reaches: no code runs it.
     pub(package) fn unreached(self: &mut Self, cands: &Vector<u32>, also: &Vector<u32>) {
-        let mut tos = Vector::<u32>::with_capacity(self.jumps.len() + also.len());
+        let mut tos = replace(&mut self.rs.tos, Vector::<u32>::new());
+        tos.truncate(0);
+        tos.reserve(self.jumps.len() + also.len());
         for j in 0..self.jumps.len() {
             let d = self.jumps[j];
             tos.push((d as i64 + 4 + (read32(&self.b, d) as i32) as i64) as u32);
@@ -1113,6 +1170,7 @@ extend Code {
             }
         }
         self.dead.sort();
+        self.rs.tos = tos;
     }
 
     /// Point the 32-bit displacement field at `at` to code position `to`.

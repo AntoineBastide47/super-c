@@ -565,9 +565,9 @@ fn memory_counters(pmc: &mut ProcessMemoryCounters) bool {
 // Counted: every `malloc`, `calloc` and `realloc` call made by this binary's own object code (the program,
 // std, the runtime, the ffi shims) while accounting is enabled; `realloc` counts its new size. Not counted:
 // `free`, aligned allocation calls (std's Global makes them only for types aligned above what malloc
-// guarantees), and on Apple the allocations libc makes internally (two-level namespace: libc binds its own
-// malloc); glibc binds ours, so on Linux those count too. Windows (no real allocator to forward to across
-// CRTs), wasm and Android count nothing: `supported` is 0.
+// guarantees), and the allocations the C library makes internally on Apple (two-level namespace: libc binds
+// its own malloc) and on Windows (the C runtime DLL binds its own); glibc binds ours, so on Linux those count
+// too. wasm and Android count nothing: `supported` is 0.
 //
 // Accounting is per thread (a cache line per thread, handed out on the thread's first counted call, never
 // reclaimed, at most ACCT_THREADS; later threads share one atomic line), so counting costs the owning thread
@@ -597,7 +597,7 @@ static mut MINE: *mut Line = null;
 
 // Whether this build defines the malloc family below: the condition of their gates.
 const fn counted() bool {
-    return PLATFORM == Platform::MacOS || PLATFORM == Platform::IOS || PLATFORM == Platform::Linux;
+    return PLATFORM == Platform::MacOS || PLATFORM == Platform::IOS || PLATFORM == Platform::Linux || PLATFORM == Platform::Windows;
 }
 
 /// Whether malloc-family calls are counted on this platform: 1, else 0.
@@ -648,7 +648,7 @@ pub unsafe fn sc_bs_alloc_bytes() i64 {
 }
 
 // Count one call that requests `n` bytes, when accounting is on.
-@platform(macos | ios | linux)
+@platform(macos | ios | linux | windows)
 fn note(n: usize) {
     if unsafe atomic::load_i32(&ACCT_ON, RELAXED) == 0 {
         return;
@@ -808,6 +808,48 @@ unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
 @export("free")
 unsafe fn counted_free(p: *mut void) {
     unsafe __libc_free(p);
+}
+
+// The universal C runtime's allocator under the names its `malloc` family forwards to (ucrtbase.dll exports
+// them; no header declares them). The program's own `malloc` binds before the DLL's: the linker imports
+// only what no object defines.
+@platform(windows)
+extern "C" {
+    fn _malloc_base(n: usize) *mut void;
+    fn _calloc_base(c: usize, n: usize) *mut void;
+    fn _realloc_base(p: *mut void, n: usize) *mut void;
+    fn _free_base(p: *mut void);
+}
+
+/// C `malloc`: counted, then the C runtime's.
+@platform(windows)
+@export("malloc")
+unsafe fn counted_malloc(n: usize) *mut void {
+    note(n);
+    return unsafe _malloc_base(n);
+}
+
+/// C `calloc`: counted with the product of its arguments, then the C runtime's.
+@platform(windows)
+@export("calloc")
+unsafe fn counted_calloc(c: usize, n: usize) *mut void {
+    note(c.wrapping_mul(n));
+    return unsafe _calloc_base(c, n);
+}
+
+/// C `realloc`: counted with the new size, then the C runtime's.
+@platform(windows)
+@export("realloc")
+unsafe fn counted_realloc(p: *mut void, n: usize) *mut void {
+    note(n);
+    return unsafe _realloc_base(p, n);
+}
+
+/// C `free`: the C runtime's.
+@platform(windows)
+@export("free")
+unsafe fn counted_free(p: *mut void) {
+    unsafe _free_base(p);
 }
 
 // ---- resident memory -------------------------------------------------------------------------------------

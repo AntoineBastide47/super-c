@@ -160,11 +160,15 @@ runner, the build hooks, the LIR check, the type and item dumps, a package kept 
 module-level assembly the later stages read is copied out first (`CemitOut.asm_has`,
 `asm_text`). A later node read aborts on bounds, and a later `ensure_index` would rebuild from
 the released syntax and abort too. `Global::trim` then hands the freed pages back: a glibc
-worker thread allocates from its own arena and never takes another thread's free pages.
-The compiler's self-build, release compiler: live heap at the end of optimization 276 to
-151 MiB (one worker); peak RSS on Linux 465-483 to 431 MiB (one worker), 680-714 to 513-549
-MiB (12 workers), whose peak moves from the optimizer to planning; on macOS one worker 525-560
-to 498-523 MiB.
+worker thread allocates from its own arena and never takes another thread's free pages. On
+macOS the trim does nothing: Apple's allocator reuses the freed pages in every thread, and
+handing them back cost 0.8% of the cycles at one job per core.
+
+The compiler's self-build, release compiler: the live heap at the end of optimization falls
+from 276 to 151 MiB (one worker). Linux peak RSS falls from 465-483 to 431 MiB (one worker) and
+from 680-714 to 513-549 MiB (12 workers), where the peak moves from the optimizer to planning,
+and the serial build takes 4% less time. macOS peak RSS does not change: the planning peak
+stands.
 
 Body syntax itself cannot go earlier than planning: the evaluator lowers a callee from syntax
 whenever no kept body holds it (the always-panics probes, the deferred `static_assert` and
