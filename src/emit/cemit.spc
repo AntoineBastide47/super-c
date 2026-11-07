@@ -588,8 +588,22 @@ extend CEmit {
         return c;
     }
 
-    /// Build the package tables whole (`conf_ix`, the mangler's), for the emitters `new_like` makes of
-    /// this one to read instead of each building its own (`Mangler::prepare_shared`).
+    /// Whether the C header of an extern block declares item key `k` (`ext_backed`: the master's, for a
+    /// shard that reads its tables).
+    const fn ext_backs(self: &Self, k: &u64) bool {
+        if self.base != null {
+            return unsafe (*self.base).ext_backed.contains(k);
+        }
+        return self.ext_backed.contains(k);
+    }
+
+    /// Whether this emitter reads its master's package tables (`base`).
+    pub(package) const fn shares(self: &Self) bool {
+        return self.base != null;
+    }
+
+    /// Build the package tables whole (`conf_ix`, `ext_backed` as it stands, the mangler's), for the emitters
+    /// `new_like` makes of this one to read instead of each building its own (`Mangler::prepare_shared`).
     pub(package) fn prepare_shared(self: &mut Self) {
         if self.conf_mods != self.p().modules.len() {
             self.index_confs();
@@ -13500,7 +13514,7 @@ extend CEmit {
     /// header-less block takes a declaration like any static.
     fn header_owned(self: &Self, item: DefId) bool {
         let idn = unsafe (*self.p().module_ast_const(item.module)).at_const(item.node);
-        return idn.kind == NodeKind::NODE_CONST && unsafe idn.as_data.const_def.is_extern && self.ext_backed.contains(
+        return idn.kind == NodeKind::NODE_CONST && unsafe idn.as_data.const_def.is_extern && self.ext_backs(
             &skey_mix(0, item.module as u64 << 32 | item.node as u64),
         );
     }
@@ -16428,7 +16442,7 @@ extend CEmit {
     fn ext_nested_cast(self: &mut Self, d: DefId, pt: TypeId, o: &mut String) bool {
         let a = self.p().module_ast_const(d.module);
         let y = *unsafe (*a).type_at(pt);
-        if y.kind != TypeKind::TYPE_ARRAY || unsafe (*a).type_at(y.as_data.arr.elem).kind != TypeKind::TYPE_ARRAY || self.ext_backed.contains(
+        if y.kind != TypeKind::TYPE_ARRAY || unsafe (*a).type_at(y.as_data.arr.elem).kind != TypeKind::TYPE_ARRAY || self.ext_backs(
             &skey_mix(0, d.module as u64 << 32 | d.node as u64),
         ) {
             return true;
@@ -18795,7 +18809,7 @@ extend CEmit {
         if !unsafe (*ca).ext(callee.node).function.is_extern() {
             return;
         }
-        if self.ext_backed.contains(&skey_mix(0, callee.module as u64 << 32 | callee.node as u64)) {
+        if self.ext_backs(&skey_mix(0, callee.module as u64 << 32 | callee.node as u64)) {
             // The extern block's header ships the real prototype.
             return;
         }

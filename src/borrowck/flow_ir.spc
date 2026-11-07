@@ -254,8 +254,9 @@ pub(package) struct RepSt {
     pub(package) bms: Vector<u32>,
     pub(package) les: Vector<i32>,
     pub(package) mbm: Vector<u32>,
-    pub(package) pre: Vector<tc::FlowState>,
-    pub(package) acc: Vector<tc::FlowState>,
+    // One state per depth, each its own block: a depth costs its state once, and growth moves pointers.
+    pub(package) pre: Vector<Box<tc::FlowState>>,
+    pub(package) acc: Vector<Box<tc::FlowState>>,
     pub(package) seg: Vector<u64>, // start<<32 | nmoved0<<16 | nborrows0
     pub(package) fdepth: usize,
 }
@@ -267,8 +268,8 @@ extend RepSt {
             bms: Vector::<u32>::new(),
             les: Vector::<i32>::new(),
             mbm: Vector::<u32>::new(),
-            pre: Vector::<tc::FlowState>::new(),
-            acc: Vector::<tc::FlowState>::new(),
+            pre: Vector::<Box<tc::FlowState>>::new(),
+            acc: Vector::<Box<tc::FlowState>>::new(),
             seg: Vector::<u64>::new(),
             fdepth: 0,
         };

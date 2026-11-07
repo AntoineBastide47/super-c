@@ -8701,12 +8701,15 @@ struct Poly {
     pub(package) deg: u8,
     pub(package) m: u8,
     pub(package) rng: bool,
+    pub(package) tog: bool,
     pub(package) lo: i64,
     pub(package) hi: i64,
-    pub(package) tog: bool,
 }
 
 extend Poly as Copy {}
+
+// The per-instruction tables hold one each (`LoopOpt::cf_fv`, `cf_lre`): the flags share one word.
+static_assert(sizeof(Poly) == 24, "Poly keeps its flags in one word");
 
 // A value as `coef` times a header parameter plus `rest` (`LoopOpt::lin`).
 struct Lin {

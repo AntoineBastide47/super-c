@@ -52,6 +52,15 @@ ranges and consuming `for` loops tick per iteration. Where the body prints no ti
 instance binding no user type), the chunk end is the loop's end. BCE reads `IN_CHUNK`
 (`lim <= end`), so `i < lim` in the chunk proves `i < end`.
 
+**Masked regions.** `runtime::preempt_mask_enter()` and `preempt_mask_exit()` bracket a region in
+which the safepoints never yield (a re-entrant per-coroutine depth, `Coroutine.pmask`); the task's
+own waits (a lock, a semaphore, a channel) still park it. A task that holds pooled memory for the
+whole region (the compiler's optimizer scratch, borrow slot or emission context) masks it, so a
+worker holds one such task's memory at a time, not one per task preempted mid-region. A task
+that parks while it holds the memory still lets its worker start another: the compiler's pools
+of that kind also cap their items at the worker count (`BcPool.cap`, `G_DSEM`), and a task that
+finds none waits before it takes anything.
+
 Reachability (`Package::reach_solve`, over one scan per module, `Package::co_scan`) starts at
 the entry argument of every spawn API
 (`runtime::submit`, which `launch` lowers to, `TaskGroup::spawn`,

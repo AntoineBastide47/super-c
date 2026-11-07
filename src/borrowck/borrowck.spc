@@ -38,11 +38,11 @@ fn rep_flow_push(t: &mut tc::TypeChecker, st: &mut bfi::RepSt) {
     let d = st.fdepth;
     if st.pre.len() <= d {
         // Zero bytes are a valid FlowState: empty tables of plain data.
-        st.pre.push(unsafe zeroed::<FlowState>());
-        st.acc.push(unsafe zeroed::<FlowState>());
+        st.pre.push(Box::<FlowState>::new(unsafe zeroed::<FlowState>()));
+        st.acc.push(Box::<FlowState>::new(unsafe zeroed::<FlowState>()));
     }
-    t.tc_flow_save(&mut st.pre[d]);
-    t.tc_flow_clear(&mut st.acc[d]);
+    t.tc_flow_save(st.pre.index_mut(d).deref_mut());
+    t.tc_flow_clear(st.acc.index_mut(d).deref_mut());
     st.fdepth = d + 1;
 }
 
@@ -2125,15 +2125,15 @@ extend tc::TypeChecker {
             } else if k == ir::TP_FLOW_ELSE {
                 let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(unsafe (*a).at_const(node).as_data.if_stmt.then_branch) {
-                    self.tc_flow_collect(&mut st.acc[ti]);
+                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
                 }
-                self.tc_flow_set(&st.pre[ti]);
+                self.tc_flow_set(st.pre.at(ti).deref());
             } else if k == ir::TP_FLOW_JOIN {
                 let ti = st.fdepth - 1;
                 if !self.tc_stmt_returns(unsafe (*a).at_const(node).as_data.if_stmt.else_branch) {
-                    self.tc_flow_collect(&mut st.acc[ti]);
+                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
                 }
-                self.tc_flow_set(&st.acc[ti]);
+                self.tc_flow_set(st.acc.at(ti).deref());
                 st.fdepth = ti;
             } else if k == ir::TP_MATCH_PRE {
                 let bm = rep_bm(st);
@@ -2151,7 +2151,7 @@ extend tc::TypeChecker {
                 st.mbm.push(bm);
             } else if k == ir::TP_ARM {
                 let ti = st.fdepth - 1;
-                self.tc_flow_set(&st.pre[ti]);
+                self.tc_flow_set(st.pre.at(ti).deref());
                 self.bc_pattern_depths(unsafe (*a).at_const(node).as_data.match_arm.pattern);
             } else if k == ir::TP_ARM_END {
                 let body = unsafe (*a).at_const(node).as_data.match_arm.body;
@@ -2159,12 +2159,12 @@ extend tc::TypeChecker {
                 let diverges = self.tc_stmt_returns(body) || bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER;
                 let ti = st.fdepth - 1;
                 if !diverges {
-                    self.tc_flow_collect(&mut st.acc[ti]);
+                    self.tc_flow_collect(st.acc.index_mut(ti).deref_mut());
                 }
             } else if k == ir::TP_MATCH_POST {
                 let ti = st.fdepth - 1;
                 if unsafe (*a).at_const(node).as_data.match_expr.arms.len != 0 {
-                    self.tc_flow_set(&st.acc[ti]);
+                    self.tc_flow_set(st.acc.at(ti).deref());
                 }
                 st.fdepth = ti;
                 self.borrow_release_to(st.mbm.pop().unwrap_or(0));

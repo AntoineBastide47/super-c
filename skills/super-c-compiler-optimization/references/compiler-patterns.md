@@ -120,6 +120,23 @@ self.sx_name.clear(); // frees each String, keeps the Vector's capacity across f
 The Vectors grow to their high-water mark and stay there. A `Map` does not: a clear walks the
 whole table, so `Map::clear` releases storage more than 8 times its entries (one large body would
 otherwise make every later clear pay its size), and a map that keeps its size keeps its storage.
+A per-body map that a large body would otherwise free and the next one regrow clears with
+`Map::clear_keeping(slots)`, which keeps up to `slots` slots (`KEEP_SLOTS` in `src/lir/ir.spc`:
+`Lower::reset`, the optimizer's walk, inliner and promote maps).
+
+A pass that rebuilds a whole body (the inliner, promote, a snapshot) builds into a spare body and
+swaps it in. In the LIR optimizer every rebuild works on scratch bodies: `Run::job` takes the body out
+of the package, the rebuilds swap it with the scratch's spares, and the job writes it back once at its
+exact size (`Body::compact`); `recycle` then keeps the larger buffers as the spares, so they grow to
+the largest body and stop allocating. A per-body output buffer that a later pass trims costs its size
+twice.
+
+Parallel stages pool their scratch per worker, not per task. A pool item a task holds for its whole
+run needs both guards: the task masks preemption (`preempt_mask_enter`, super-c-concurrency), and the
+pool caps its items at the worker count, because a task that parks on a lock while it holds one lets
+its worker start another (the borrow slots were 181 for 204 module jobs before the cap: `BcPool.cap`;
+the emission contexts, `G_DSEM`). A table that depends on the package alone is built once and read by
+every shard (`CEmit::prepare_shared`, `Mangler::prepare_shared`: a shard's `base`), not rebuilt in each.
 
 ## Fixed-Array Replacement
 

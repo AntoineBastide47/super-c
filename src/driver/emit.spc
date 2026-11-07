@@ -3367,8 +3367,11 @@ extend SeedShard {
             for ei in 0..env_defined.len() {
                 sh.cem.env_skip.insert(env_defined[ei], 1);
             }
-            for k in 0..ext_keys.len() {
-                sh.cem.ext_backed.insert(ext_keys[k]);
+            // A shard of a prepared master reads its set (`cbe::CEmit::ext_backs`).
+            if !sh.cem.shares() {
+                for k in 0..ext_keys.len() {
+                    sh.cem.ext_backed.insert(ext_keys[k]);
+                }
             }
             sh.cem.sh_on = true;
             sh.cem.mg.sh_on = true;

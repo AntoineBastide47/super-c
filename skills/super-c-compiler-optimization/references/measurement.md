@@ -58,6 +58,16 @@ the frontend, borrowck, plan, publish and build boundaries. `SC_BUILD_MEM=1` add
 allocation tracker's counts, requested and live bytes, and the survivors of each
 phase (slower: only for memory questions).
 
+The bench's per-phase `Kalloc` and `MiB` count every `malloc`, `calloc` and `realloc` call of the
+process at its new size (the interposer in `std/testing/bench_sys.spc`): a vector that doubles to N
+bytes counts about 2N, and a realloc that shrinks counts its new size too. Grow a table once to its
+known size, and reuse buffers, rather than trim them afterwards. Every compiler allocation goes through
+`sc_lk_malloc`, `sc_lk_calloc` or `sc_lk_realloc` (`std/rt/base.spc`), whose caller is the site: a
+temporary counter there, keyed by the caller and the frames above it, attributes the column per
+call stack. The frames come from the frame-pointer chain: an `@unsafe(naked)` function that returns
+`x29` on arm64. Compare a jobs=1 round with a jobs=18 round per stack: what grows with the job
+count is the parallel duplication.
+
 ### Transpile work count (CI)
 
 Hosted runners are VMs without hardware counters (Linux `perf stat` reports `<not supported>`,
