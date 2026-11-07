@@ -151,6 +151,26 @@ release after the instance graph.
 A correct per-instance check costs 35 MiB of peak RSS at fourteen workers and 0.5 MiB at one
 worker.
 
+The rest of the front end goes after the lowering, its last reader (`syntax_done`, between
+`cemit_package` and `lir_stage`): the package's line tables always, then every module's syntax
+and source text (`Package::release_syntax`, `Ast::release_all`: the arenas, side tables and type
+pool), the package index, the item schedule and the build's evaluator (`p.cir`), unless a later
+stage reads them: the located reports of a failed emission, the library exports, the test
+runner, the build hooks, the LIR check, the type and item dumps, a package kept for reuse. The
+module-level assembly the later stages read is copied out first (`CemitOut.asm_has`,
+`asm_text`). A later node read aborts on bounds, and a later `ensure_index` would rebuild from
+the released syntax and abort too. `Global::trim` then hands the freed pages back: a glibc
+worker thread allocates from its own arena and never takes another thread's free pages.
+The compiler's self-build, release compiler: live heap at the end of optimization 276 to
+151 MiB (one worker); peak RSS on Linux 465-483 to 431 MiB (one worker), 680-714 to 513-549
+MiB (12 workers), whose peak moves from the optimizer to planning; on macOS one worker 525-560
+to 498-523 MiB.
+
+Body syntax itself cannot go earlier than planning: the evaluator lowers a callee from syntax
+whenever no kept body holds it (the always-panics probes, the deferred `static_assert` and
+constant flushes, the per-instance asserts, the constant pass before emission), so an earlier
+release needs a kept body for every callee the evaluator may run.
+
 ## Consumer inventory
 
 Every consumer of a lowered body, the record fields it reads, what it reads outside the Core

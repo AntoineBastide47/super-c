@@ -3854,6 +3854,16 @@ extend Ast {
         self.seeds.truncate(w);
     }
 
+    /// Free the whole module (`Package::release_syntax`): its arenas, side tables and type pool. A later read
+    /// of one of its nodes aborts on bounds.
+    pub(package) fn release_all(self: &mut Self) {
+        let m = self.module;
+        let _ = replace(self, Ast::new(0));
+        self.nodes.clear();
+        self.module = m;
+        self.b.released = true;
+    }
+
     /// Free the `call_info` and `mono` entries of body-arena nodes once the body arena is released
     /// (batch builds): no later pass reads a body node. The freed entries' distinct type arguments
     /// stay in `mono_live`, which the emission liveness reads.

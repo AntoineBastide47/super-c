@@ -61,15 +61,21 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          a body emission lowered itself, the inliner, bounds-check
   |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs;
   |                          a module whose backend holds BK_LIR also lowers each body
-  |                          and derived destructor to LIR (see LIR)
+  |                          and derived destructor to LIR (see LIR); it returns at S_LOWERED,
+  |                          its emitters, lowerers, instance graph and inline store going with it
+syntax_done               -- the front end's data after its last reader: the line tables, then
+  |                          (unless a later stage reads them) every module's syntax and source,
+  |                          the index, the item schedule and the build's evaluator, then
+  |                          Global::trim gives the freed pages back (core-ir-publication.md)
+lir_stage                 -- the LIR optimizer (opt-level > 0), each module's held record into the
+  |                          next per-TU cache image, the LIR check (SC_LIR), the render boundary
 serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then
   |                          (--emit-c) the module TU shards (<module>.c, __p<k>), per-owner
   |                          instance shards (<module>__inst.c), __sc_registry.c and
   |                          __sc_manifest (a shard streams out as includes, head, its chunks,
   |                          tail); then prune_orphans drops stale outputs
-native objects + link     -- a linking build: the LIR optimizer (opt-level > 0), the generators
-                             (x64gen, a64gen, wasmgen) in parallel under --jobs, then the own
-                             linker (src/link/)
+native objects + link     -- a linking build: the generators (x64gen, a64gen, wasmgen) in
+                             parallel under --jobs, then the own linker (src/link/)
 ```
 
 Order facts that surprise people:
