@@ -1,8 +1,8 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
-# the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
-# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
-# the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# the file. Current probe: why one cold build of the compiler peaks higher on Linux arm64 than on x86-64:
+# each Linux runner's kernel, C library and transparent huge page setting, and the build's peak resident
+# set with transparent huge pages on and off (prctl PR_SET_THP_DISABLE, which the exec keeps).
 name: Debug
 on:
   workflow_dispatch
@@ -18,12 +18,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
           # No release ships a Linux arm64 compiler: the x86-64 runner cross-builds it against the arm64
           # C library. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
           - { os: ubuntu-26.04, target: linux_arm64, platform: linux }
-          - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -62,63 +60,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The suite with the compiler `compile` built. Leak-gated: a process that leaks or double-frees exits
-  # nonzero. The first shard of each target also checks the builds with LIR (SC_LIR).
-  test:
+  peak:
     needs: compile
-    name: test (${{ matrix.target }} ${{ matrix.shard }})
+    name: peak (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos, shard: "1/2" }
-          - { os: macos-latest, target: macos, shard: "2/2" }
-          - { os: ubuntu-latest, target: linux, shard: "1/2" }
-          - { os: ubuntu-latest, target: linux, shard: "2/2" }
-          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "1/2" }
-          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "2/2" }
-          - { os: windows-latest, target: windows, shard: "1/3" }
-          - { os: windows-latest, target: windows, shard: "2/3" }
-          - { os: windows-latest, target: windows, shard: "3/3" }
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: ${{ matrix.target }}
-          sha: ${{ github.sha }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: compiler-${{ matrix.target }}
-
-      - name: Run the test suite
-        run: |
-          set -eu
-          bin="super-c${BINEXT:-}"
-          chmod +x "./$bin"
-          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
-          case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
-          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
-
-  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
-  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
-  # agree on it within the targets' differences; time and cycles follow each runner's machine.
-  bench:
-    needs: compile
-    name: self-compile bench (${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
+          - { os: ubuntu-26.04, target: linux }
           - { os: ubuntu-26.04-arm, target: linux_arm64 }
-          - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -126,19 +77,25 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: ./.github/actions/toolchain
-        with:
-          target: ${{ matrix.target }}
-          sha: ${{ github.sha }}
-
       - uses: actions/download-artifact@v8
         with:
           name: compiler-${{ matrix.target }}
 
-      - name: Self-compile benchmark
+      - name: Peak with transparent huge pages on and off
         run: |
           set -eu
-          bin="super-c${BINEXT:-}"
-          chmod +x "./$bin"
-          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
-          "./$bin" bench --filter=self_compile
+          chmod +x ./super-c
+          grep PRETTY_NAME /etc/os-release
+          uname -r
+          ldd --version | head -1
+          echo "thp enabled: $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+          echo "thp defrag: $(cat /sys/kernel/mm/transparent_hugepage/defrag)"
+          printf '%s\n' 'import ctypes, os, sys' 'assert ctypes.CDLL(None).prctl(41, 1, 0, 0, 0) == 0' 'os.execv(sys.argv[1], sys.argv[1:])' > nothp.py
+          export SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
+          for round in 1 2; do
+            SC_BUILD_STATS=on.json ./super-c build --profile=release --jobs=1 --out-dir=on -o on/sc
+            SC_BUILD_STATS=off.json python3 nothp.py ./super-c build --profile=release --jobs=1 --out-dir=off -o off/sc
+            echo "round $round, thp on:  $(grep -o '"at":"[a-z]*","rss_mib":[0-9.]*' on.json | tr '\n' ' ')"
+            echo "round $round, thp off: $(grep -o '"at":"[a-z]*","rss_mib":[0-9.]*' off.json | tr '\n' ' ')"
+            rm -rf on off on.json off.json
+          done
