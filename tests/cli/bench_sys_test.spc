@@ -6,8 +6,6 @@ import stdlib;
 import std::parallel::thread as thread;
 import std::parallel::sync as sync;
 import std::parallel::platform as platform;
-import std::platform::process;
-import std::platform::vm;
 import std::testing::bench_sys as sys;
 import std::testing::bench as bench;
 import tests::cli_harness as cli;
@@ -106,61 +104,6 @@ fn resident_memory_is_the_process_s() {
     assert(now == -1 || now >= 1048576, "the resident set is at least 1 MiB");
     let peak = unsafe sys::sc_bs_rss_peak();
     assert(peak == -1 || peak >= 1048576, "the peak resident set is at least 1 MiB");
-}
-
-// 64 MiB of pages committed and written, held while the mapping lives.
-@platform(!wasm)
-fn written(size: usize) vm::Mapping {
-    let page = vm::page_size().unwrap();
-    let mut m = vm::reserve(size).unwrap();
-    m.commit(0, size).unwrap();
-    for i in 0..size / page {
-        unsafe m.as_ptr()[i * page] = 1;
-    }
-    return m;
-}
-
-// The peak resident set is this process's own: it grows by the pages it writes. The test runner that
-// started it peaked higher, and Linux's `getrusage` gave that peak instead.
-@platform(!wasm)
-@test
-fn the_peak_resident_set_is_this_process_s() {
-    let size: usize = 64 << 20;
-    let p0 = unsafe sys::sc_bs_rss_peak();
-    let m = written(size);
-    let p1 = unsafe sys::sc_bs_rss_peak();
-    assert(p1 >= p0 + (size / 2) as i64, "the peak grows by the written pages");
-    assert_eq(m.len(), size);
-}
-
-// A child's peak is its own: this process holds 64 MiB of written pages while it waits for a compiler that
-// prints its usage, which needs far less, and whose exit code comes back. Linux reports none (-1): only
-// the child reads its own.
-@platform(!wasm)
-@test
-fn a_child_s_peak_is_its_own() {
-    let size: usize = 64 << 20;
-    let m = written(size);
-    let args: [str; 2] = [cli::superc_path(), "--help"];
-    let child = process::spawn(
-        process::Command {
-            argv: args,
-            program: None,
-            env: None,
-            cwd: None,
-            command_line: None,
-            stdin: process::Redirect::Null,
-            stdout: process::Redirect::Null,
-            stderr: process::Redirect::Null,
-        },
-    ).unwrap();
-    let mut peak: i64 = 0;
-    assert_eq(unsafe sys::sc_bs_wait_peak(child.id(), &mut peak), 0);
-    assert(
-        peak == -1 || peak >= 1048576 && peak < size as i64,
-        "the child's peak is at least 1 MiB and below this process's",
-    );
-    assert_eq(m.len(), size);
 }
 
 // Four threads each perform BURN_ITERS dependent multiplies while the calling thread only waits in

@@ -25,7 +25,6 @@ import filesystem;
 @platform(wasm)
 import time;
 import std::mem::ptr;
-import std::platform::process;
 
 // The memory-order codes of `atomic` (std/parallel/atomics.spc `MemoryOrder`).
 const RELAXED: i32 = 0;
@@ -118,7 +117,7 @@ pub unsafe fn sc_bs_cycles_scope() i32 {
 @platform(macos | ios)
 fn mac_cycles() i64 {
     let mut ri = unsafe zeroed::<RusageInfoV4>();
-    if !rusage_info(unistd::getpid(), &mut ri) {
+    if !rusage_info(&mut ri) {
         return -1;
     }
     return ri.ri_cycles as i64;
@@ -474,12 +473,12 @@ extern "C" {
     fn sysctlbyname(name: *const char, oldp: *mut void, oldlenp: *mut usize, newp: *mut void, newlen: usize) i32;
 }
 
-// Process `pid`'s `rusage_info_v4` into `ri`; false when the call fails.
+// This process's `rusage_info_v4` into `ri`; false when the call fails.
 @platform(macos | ios)
-fn rusage_info(pid: i32, ri: &mut RusageInfoV4) bool {
+fn rusage_info(ri: &mut RusageInfoV4) bool {
     static_assert(sizeof(RusageInfoV4) == 296, "rusage_info_v4 is 296 bytes");
     // The parameter is `rusage_info_t *` (`void **`) in C, but the call writes the record itself.
-    return unsafe proc_pid_rusage(pid, RUSAGE_INFO_V4, (ri as *mut RusageInfoV4) as *mut *mut void) == 0;
+    return unsafe proc_pid_rusage(unistd::getpid(), RUSAGE_INFO_V4, (ri as *mut RusageInfoV4) as *mut *mut void) == 0;
 }
 
 // ---- Win32 ------------------------------------------------------------------------------------------------
@@ -505,15 +504,6 @@ extern "C" "windows.h" {
         pub high: stdlib::c_ulong,
     }
     fn GetCurrentProcess() *mut void;
-    fn OpenProcess(access: stdlib::c_ulong, inherit: i32, pid: stdlib::c_ulong) *mut void;
-    fn WaitForSingleObject(handle: *mut void, ms: stdlib::c_ulong) stdlib::c_ulong;
-    // `LPDWORD`, as `RegGetValueA`'s below.
-    fn GetExitCodeProcess(process: *mut void, code: *mut void) i32;
-    fn CloseHandle(handle: *mut void) i32;
-    const SYNCHRONIZE: stdlib::c_ulong;
-    const PROCESS_QUERY_LIMITED_INFORMATION: stdlib::c_ulong;
-    const INFINITE: stdlib::c_ulong;
-    const WAIT_OBJECT_0: stdlib::c_ulong;
     fn QueryProcessCycleTime(process: *mut void, cycles: *mut u64) i32;
     fn GetProcessTimes(
         process: *mut void,
@@ -563,11 +553,11 @@ extern "C" "psapi.h" {
     fn K32GetProcessMemoryInfo(process: *mut void, counters: *mut ProcessMemoryCounters, cb: stdlib::c_ulong) i32;
 }
 
-// The memory counters of `process` (a process handle) into `pmc`; false when the call fails.
+// This process's memory counters into `pmc`; false when the call fails.
 @platform(windows)
-fn memory_counters(process: *mut void, pmc: &mut ProcessMemoryCounters) bool {
+fn memory_counters(pmc: &mut ProcessMemoryCounters) bool {
     static_assert(sizeof(ProcessMemoryCounters) == 72, "PROCESS_MEMORY_COUNTERS is 72 bytes");
-    return unsafe K32GetProcessMemoryInfo(process, pmc, sizeof(ProcessMemoryCounters) as stdlib::c_ulong) != 0;
+    return unsafe K32GetProcessMemoryInfo(GetCurrentProcess(), pmc, sizeof(ProcessMemoryCounters) as stdlib::c_ulong) != 0;
 }
 
 // ---- allocation accounting -----------------------------------------------------------------------------
@@ -864,22 +854,30 @@ unsafe fn counted_free(p: *mut void) {
 
 // ---- resident memory -------------------------------------------------------------------------------------
 
-/// Peak resident set, bytes (`process::peak_rss`); -1 when unavailable.
+/// Peak resident set, bytes; -1 when unavailable.
+@platform(windows)
 pub unsafe fn sc_bs_rss_peak() i64 {
-    return switch process::peak_rss() {
-        Ok(bytes) => bytes as i64,
-        Err(_) => -1,
-    };
+    let mut pmc = unsafe zeroed::<ProcessMemoryCounters>();
+    if !memory_counters(&mut pmc) {
+        return -1;
+    }
+    return pmc.peak_working_set_size as i64;
 }
 
 /// Current resident set, bytes; -1 when unavailable.
 @platform(windows)
 pub unsafe fn sc_bs_rss_now() i64 {
     let mut pmc = unsafe zeroed::<ProcessMemoryCounters>();
-    if !memory_counters(unsafe GetCurrentProcess(), &mut pmc) {
+    if !memory_counters(&mut pmc) {
         return -1;
     }
     return pmc.working_set_size as i64;
+}
+
+/// Peak resident set, bytes; -1 when unavailable.
+@platform(wasm)
+pub unsafe fn sc_bs_rss_peak() i64 {
+    return -1;
 }
 
 /// Current resident set, bytes; -1 when unavailable.
@@ -888,14 +886,34 @@ pub unsafe fn sc_bs_rss_now() i64 {
     return -1;
 }
 
+/// Peak resident set, bytes; -1 when unavailable.
+@platform(macos | ios)
+pub unsafe fn sc_bs_rss_peak() i64 {
+    let mut ru = unsafe zeroed::<rusage>();
+    if unsafe getrusage(RUSAGE_SELF, &mut ru) != 0 {
+        return -1;
+    }
+    return ru.ru_opaque[0] as i64; // `ru_maxrss`, in bytes on Apple
+}
+
 /// Current resident set, bytes; -1 when unavailable.
 @platform(macos | ios)
 pub unsafe fn sc_bs_rss_now() i64 {
     let mut ri = unsafe zeroed::<RusageInfoV4>();
-    if !rusage_info(unistd::getpid(), &mut ri) {
+    if !rusage_info(&mut ri) {
         return -1;
     }
     return ri.ri_resident_size as i64;
+}
+
+/// Peak resident set, bytes; -1 when unavailable.
+@platform(linux | android)
+pub unsafe fn sc_bs_rss_peak() i64 {
+    let mut ru = unsafe zeroed::<rusage>();
+    if unsafe getrusage(RUSAGE_SELF, &mut ru) != 0 {
+        return -1;
+    }
+    return ru.ru_maxrss as i64 * 1024; // KiB
 }
 
 @platform(linux | android)
@@ -1109,37 +1127,6 @@ pub unsafe fn sc_bs_wait(_pid: i64) i32 {
     return -1;
 }
 
-/// Wait for child `pid`, which no other wait reaps: its exit code as `sc_bs_wait` gives it, and into
-/// `peak` the most memory the child held, in bytes, -1 when unavailable. Windows: its largest working set.
-@platform(windows)
-pub unsafe fn sc_bs_wait_peak(pid: i64, peak: &mut i64) i32 {
-    *peak = -1;
-    let h = unsafe OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as stdlib::c_ulong);
-    if h == null {
-        return -1;
-    }
-    let mut code: i32 = -1;
-    if unsafe WaitForSingleObject(h, INFINITE) == WAIT_OBJECT_0 {
-        let mut pmc = unsafe zeroed::<ProcessMemoryCounters>();
-        if memory_counters(h, &mut pmc) {
-            *peak = pmc.peak_working_set_size as i64;
-        }
-        let mut ec: stdlib::c_ulong = 0;
-        if unsafe GetExitCodeProcess(h, &mut ec) != 0 {
-            code = ec as i32;
-        }
-    }
-    let _ = unsafe CloseHandle(h);
-    return code;
-}
-
-/// Wait for child `pid`; -1: wasm has no processes.
-@platform(wasm)
-pub unsafe fn sc_bs_wait_peak(_pid: i64, peak: &mut i64) i32 {
-    *peak = -1;
-    return -1;
-}
-
 /// Fork: 0 in the child, the child's pid in the parent, -1 where there is no fork (Windows, wasm). On Linux
 /// the child drops the parent's cycle events, which count the child only once it exits, and opens its own
 /// on its first `sc_bs_cycles` call; the Apple counters are the calling process's own.
@@ -1160,22 +1147,6 @@ extern "C" "sys/wait.h" {
     fn waitpid(pid: i32, status: *mut i32, options: i32) i32;
 }
 
-// `waitid`, which leaves the child waitable (WNOWAIT), so its usage record stays readable.
-@platform(macos | ios)
-extern "C" "sys/wait.h" {
-    @import("idtype_t")
-    enum IdType {
-        P_ALL = 0,
-        P_PID = 1,
-        P_PGID = 2,
-    }
-    @layout(104, 8)
-    type siginfo_t;
-    fn waitid(idtype: IdType, id: u32, info: *mut siginfo_t, options: i32) i32;
-    const WEXITED: i32;
-    const WNOWAIT: i32;
-}
-
 /// Wait for child `pid`: its exit code, 128 plus the signal that killed it, or -1 when the wait itself
 /// failed.
 @platform(macos | ios | linux | android)
@@ -1194,30 +1165,6 @@ pub unsafe fn sc_bs_wait(pid: i64) i32 {
         return 128 + sig;
     }
     return -1;
-}
-
-/// Wait for child `pid`, which no other wait reaps: its exit code as `sc_bs_wait` gives it, and into
-/// `peak` the most memory the child held, in bytes, -1 when unavailable. Apple: its physical footprint's
-/// maximum (`time -l`'s peak memory footprint): its dirty and compressed memory, without the clean file
-/// pages and the pages its allocator gave back, which its resident set still counts.
-@platform(macos | ios)
-pub unsafe fn sc_bs_wait_peak(pid: i64, peak: &mut i64) i32 {
-    *peak = -1;
-    let mut si = unsafe zeroed::<siginfo_t>();
-    let mut ri = unsafe zeroed::<RusageInfoV4>();
-    if unsafe waitid(IdType::P_PID, pid as u32, &mut si, WEXITED | WNOWAIT) == 0 && rusage_info(pid as i32, &mut ri) {
-        *peak = ri.ri_lifetime_max_phys_footprint as i64;
-    }
-    return unsafe sc_bs_wait(pid);
-}
-
-/// Wait for child `pid`: its exit code as `sc_bs_wait` gives it; `peak` is -1. Linux and Android: the
-/// kernel's peak for a spawned child (`wait4`) also holds its parent's, which the child's exec records;
-/// only the child reads its own (`process::peak_rss`).
-@platform(linux | android)
-pub unsafe fn sc_bs_wait_peak(pid: i64, peak: &mut i64) i32 {
-    *peak = -1;
-    return unsafe sc_bs_wait(pid);
 }
 
 /// Flush every stdio stream (before a fork, so the child does not carry the parent's unwritten output).

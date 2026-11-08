@@ -164,13 +164,9 @@ job, then 25 with one job per core: setup, the same front end, then lower (the d
 the LIR), optimize (the LIR optimizer), codegen (the native objects), publish, sync and link
 (the own linker). Each job count gets its own table: per-phase averages (wall ms, CPU ms, Mcyc,
 Kalloc, MiB, throughput of wall time with a dash under 1 ms, share of wall time), the effective
-GHz and cores in use, the min/median/p95/sd of wall ms, CPU ms and Mcyc, heap requested per
-round, and the peak memory of one more cold build in a process of its own (the compiler the rounds
-linked builds the compiler; `fresh_peak_mib`): the physical footprint on Apple (`time -l`'s peak
-memory footprint), the resident set's high-water mark on Linux (from the child's `SC_BUILD_STATS`
-record), the peak working set on Windows. Then the bench process's peak RSS over every round, which
-also holds what the allocator kept from earlier rounds. `SC_BENCH_OUT=<file>` writes the whole record
-as JSON (schema `"v":3`: the lane in `lane`, one entry per job count in `modes`).
+GHz and cores in use, the min/median/p95/sd of wall ms, CPU ms and Mcyc, and heap requested per
+round; then peak RSS. `SC_BENCH_OUT=<file>` writes the whole record as JSON (schema `"v":3`: the
+lane in `lane`, one entry per job count in `modes`).
 
 ### Gates
 

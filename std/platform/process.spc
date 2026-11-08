@@ -96,7 +96,7 @@ extern "C" "errno.h" {
 }
 
 // `struct rusage` as the build's feature level declares it: Darwin then folds the counters into
-// `ru_opaque`, whose first word is `ru_maxrss` (bytes).
+// `ru_opaque`, whose first word is `ru_maxrss` (bytes); glibc keeps the names (KiB).
 @platform(macos | ios)
 extern "C" "sys/resource.h" {
     struct timeval {
@@ -108,8 +108,31 @@ extern "C" "sys/resource.h" {
         pub ru_stime: timeval,
         pub ru_opaque: [isize; 14],
     }
-    fn getrusage(who: i32, usage: *mut rusage) i32;
-    const RUSAGE_SELF: i32;
+}
+@platform(linux | android)
+extern "C" "sys/resource.h" {
+    struct timeval {
+        pub tv_sec: i64,
+        pub tv_usec: isize,
+    }
+    struct rusage {
+        pub ru_utime: timeval,
+        pub ru_stime: timeval,
+        pub ru_maxrss: isize,
+        pub ru_ixrss: isize,
+        pub ru_idrss: isize,
+        pub ru_isrss: isize,
+        pub ru_minflt: isize,
+        pub ru_majflt: isize,
+        pub ru_nswap: isize,
+        pub ru_inblock: isize,
+        pub ru_oublock: isize,
+        pub ru_msgsnd: isize,
+        pub ru_msgrcv: isize,
+        pub ru_nsignals: isize,
+        pub ru_nvcsw: isize,
+        pub ru_nivcsw: isize,
+    }
 }
 @platform(macos | ios | linux | android)
 extern "C" "sys/resource.h" {
@@ -117,8 +140,10 @@ extern "C" "sys/resource.h" {
         pub rlim_cur: u64,
         pub rlim_max: u64,
     }
+    fn getrusage(who: i32, usage: *mut rusage) i32;
     fn getrlimit(resource: i32, rl: *mut rlimit) i32;
     fn setrlimit(resource: i32, rl: *const rlimit) i32;
+    const RUSAGE_SELF: i32;
     const RLIMIT_NOFILE: i32;
     const RLIM_INFINITY: u64;
 }
@@ -1059,36 +1084,14 @@ pub fn peak_rss() Result<u64, IoError> {
     }
     return Ok(ru.ru_opaque[0] as u64); // ru_maxrss, in bytes
 }
-/// The largest resident set this process has had, in bytes. Unsupported on WASI. Linux and Android: the
-/// high-water mark of its own address space (`VmHWM`); `getrusage`'s also holds the address space an exec
-/// replaced, which after `posix_spawn` is the parent's.
+/// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(linux | android)
 pub fn peak_rss() Result<u64, IoError> {
-    // /proc/self/status: a "VmHWM:\t <n> kB" line, within its first 4 KiB.
-    let fd = unsafe fcntl::open("/proc/self/status".ptr() as *const char, fcntl::O_RDONLY);
-    if fd < 0 {
+    let mut ru = unsafe zeroed::<rusage>();
+    if unsafe getrusage(RUSAGE_SELF, &mut ru) != 0 {
         return fail::<u64>(IoOp::ResourceUsage);
     }
-    let mut buf: [char; 4096] = [0 as char; 4096];
-    let got = unsafe unistd::read(fd, (&mut buf[0]) as *mut char, 4095);
-    let _ = unsafe unistd::close(fd);
-    if got <= 0 {
-        return fail::<u64>(IoOp::ResourceUsage);
-    }
-    let text = str::from_cbuf(buf);
-    let at = text.find("\nVmHWM:");
-    if at < 0 {
-        return Err(error::unsupported(IoOp::ResourceUsage));
-    }
-    let rest = text.slice(at as usize + 7, text.len());
-    let end = rest.find(" kB");
-    if end < 0 {
-        return Err(error::unsupported(IoOp::ResourceUsage));
-    }
-    return switch rest.slice(0, end as usize).trim().parse_u64() {
-        Some(kib) => Ok(kib * 1024),
-        None => Err(error::unsupported(IoOp::ResourceUsage)),
-    };
+    return Ok(ru.ru_maxrss as u64 * 1024); // KiB
 }
 /// The largest resident set this process has had, in bytes. Unsupported on WASI.
 @platform(windows)

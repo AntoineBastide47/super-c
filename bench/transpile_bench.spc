@@ -26,7 +26,6 @@ import std::testing::bench as bench;
 import driver_shim as dshim;
 import std::platform::env as penv;
 import std::platform::fs;
-import std::platform::process;
 import std::parallel::platform as platform;
 import stdio;
 import stdlib;
@@ -241,8 +240,7 @@ const fn avg(s: &PhaseSum, rounds: f64) PhaseAvg {
 }
 
 // The rounds of one job count: per phase sums, the lexer-only pass, the heap requested and the per-round
-// wall ms, CPU ms and Mcyc of the build; `fresh`, the peak memory of one more build in a process of its
-// own (`fresh_peak`), in bytes, -1 when none ran or the platform does not report it.
+// wall ms, CPU ms and Mcyc of the build.
 struct Mode {
     pub jobs: u32,
     pub sums: Vector<PhaseSum>,
@@ -251,7 +249,6 @@ struct Mode {
     pub wall: Vector<f64>,
     pub cpu: Vector<f64>,
     pub mcyc: Vector<f64>,
-    pub fresh: i64,
 }
 
 fn mode_new(jobs: u32, phases: usize, rounds: usize) Mode {
@@ -267,7 +264,6 @@ fn mode_new(jobs: u32, phases: usize, rounds: usize) Mode {
         wall: Vector::<f64>::with_capacity(rounds),
         cpu: Vector::<f64>::with_capacity(rounds),
         mcyc: Vector::<f64>::with_capacity(rounds),
-        fresh: -1,
     };
 }
 
@@ -687,17 +683,6 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
             unsafe sys::sc_bs_alloc_bytes() - yl0,
         );
     }
-    // A native lane's peak memory per build: this process's peak also holds what the allocator kept from
-    // earlier rounds.
-    if ok && lane.native {
-        for q in 0..modes.len() {
-            let md = modes.index_mut(q);
-            if !fresh_peak(&bin, &dir, md.jobs, &mut md.fresh) {
-                ok = false;
-                break;
-            }
-        }
-    }
     let _ = fs::remove_all(&dir);
     if !ok {
         return false;
@@ -756,10 +741,7 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
         // included).
         b.report();
     } else {
-        unsafe stdio::printf(
-            "  peak RSS %.1f MiB (this process, every round)\n".ptr() as *const char,
-            rss as f64 / (1024.0 * 1024.0),
-        );
+        unsafe stdio::printf("  peak RSS %.1f MiB\n".ptr() as *const char, rss as f64 / (1024.0 * 1024.0));
     }
 
     // A native lane's parallel rounds are cold builds on every core: no further real build.
@@ -790,85 +772,6 @@ fn run_report(b: &mut bench::Bencher, lane: &Lane) bool {
         unsafe stdio::printf("  record: %.*s\n".ptr() as *const char, path.len() as i32, path.ptr() as *const char);
     }
     return built;
-}
-
-// One more cold build of the compiler with `jobs` jobs, in a process of its own: the compiler the rounds
-// linked (`bin`) builds it under `dir`, with the rounds' environment (every cache off). Its peak memory
-// into `peak`: from this process (`sys::sc_bs_wait_peak`), else the one its build record holds (Linux),
-// else -1. False when it could not start or failed.
-fn fresh_peak(bin: &String, dir: &String, jobs: u32, peak: &mut i64) bool {
-    let out = format("{}/fresh", dir.as_str());
-    let exe = format("{}/super-c", out.as_str());
-    let profile = format("--profile={}", BUILD_PROFILE);
-    let jobs_arg = format("--jobs={}", jobs);
-    let out_arg = format("--out-dir={}", out.as_str());
-    let stats = format("{}/fresh-stats.json", dir.as_str());
-    let std_dir = format("{}/{}", process::current_dir().unwrap_or(String::from_str(".")).as_str(), STD_DIR);
-    set_env("SC_STD_DIR", &std_dir);
-    set_env("SC_BUILD_STATS", &stats);
-    let args: [str; 7] = [
-        bin.as_str(),
-        "build",
-        profile.as_str(),
-        jobs_arg.as_str(),
-        out_arg.as_str(),
-        "-o",
-        exe.as_str(),
-    ];
-    let spawned = process::spawn(
-        process::Command {
-            argv: args,
-            program: None,
-            env: None,
-            cwd: None,
-            command_line: None,
-            stdin: process::Redirect::Null,
-            stdout: process::Redirect::Null,
-            stderr: process::Redirect::Inherit,
-        },
-    );
-    if spawned.is_err() {
-        eprintln("bench: cannot start {}", bin.as_str());
-        return false;
-    }
-    let code = unsafe sys::sc_bs_wait_peak(spawned.unwrap().id(), peak);
-    let _ = unsafe penv::unset("SC_BUILD_STATS");
-    if *peak < 0 {
-        *peak = record_peak(&stats);
-    }
-    let _ = fs::remove_all(&out);
-    let _ = fs::unlink(&stats); // the record appends: the next build starts a new one
-    if code != 0 {
-        eprintln("bench: the build in a process of its own failed (code {})", code);
-        return false;
-    }
-    return true;
-}
-
-// The peak resident set a build record (`SC_BUILD_STATS`, src/driver/stats.spc) holds at the build's end,
-// in bytes: its "build" boundary's `rss_mib`, written with three decimals. -1 when the file has none.
-fn record_peak(path: &String) i64 {
-    let text = loader::read_file(path.as_str());
-    if text.is_none() {
-        return -1;
-    }
-    let t = text.unwrap();
-    let key = "\"at\":\"build\",\"rss_mib\":";
-    let at = t.as_str().find(key);
-    if at < 0 {
-        return -1;
-    }
-    let rest = t.as_str().slice(at as usize + key.len(), t.len());
-    let dot = rest.find(".");
-    if dot < 0 || rest.len() < dot as usize + 4 {
-        return -1;
-    }
-    let whole = rest.slice(0, dot as usize).parse_u64();
-    let milli = rest.slice(dot as usize + 1, dot as usize + 4).parse_u64();
-    if whole.is_none() || milli.is_none() {
-        return -1;
-    }
-    return ((whole.unwrap() * 1000 + milli.unwrap()) * 1048576 / 1000) as i64;
 }
 
 // The table and distributions of mode `md`'s rounds, and its JSON object into `js`.
@@ -953,12 +856,6 @@ fn report_mode(lane: &Lane, md: &mut Mode, srcf: f64, linesf: f64, out_bytes: us
         "  heap: %.1f MiB requested per round\n".ptr() as *const char,
         md.heap as f64 / fi / (1024.0 * 1024.0),
     );
-    if md.fresh >= 0 {
-        unsafe stdio::printf(
-            "  peak memory of one build in a process of its own: %.1f MiB\n".ptr() as *const char,
-            md.fresh as f64 / (1024.0 * 1024.0),
-        );
-    }
 
     js.push_str("{\"jobs\":");
     js.push_u64(md.jobs);
@@ -976,9 +873,5 @@ fn report_mode(lane: &Lane, md: &mut Mode, srcf: f64, linesf: f64, out_bytes: us
     bench::json_dist(js, "mcyc", &sm_cyc, 1.0);
     js.push_str(",\"heap_mib\":");
     js.push_f64_prec(md.heap as f64 / fi / 1048576.0, 3);
-    if md.fresh >= 0 {
-        js.push_str(",\"fresh_peak_mib\":");
-        js.push_f64_prec(md.fresh as f64 / 1048576.0, 3);
-    }
     js.push_byte(b'}');
 }
