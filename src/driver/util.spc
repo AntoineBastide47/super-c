@@ -38,7 +38,7 @@ pub(package) const fn fnv_cont(h: u64, s: str) u64 {
 // the same value.
 static mut G_CID: u64 = 0;
 
-/// The identity of the running compiler: a content hash of its executable (`file_id`), read once per
+/// The identity of the running compiler: a content hash of its executable (`exe_id`), read once per
 /// process. The C a compiler emits is a function of the compiler, so the emit stamp and the per-TU cache
 /// key on this, not on the file's path or mtime: a reinstall, a copy or an extracted archive can keep
 /// both while the content changes. 0 when the executable cannot be read (the caller then keeps no cache).
@@ -51,7 +51,7 @@ pub(package) fn compiler_id() u64 {
     if exe.len() == 0 {
         return 0;
     }
-    let h = file_id(&exe);
+    let h = exe_id(&exe);
     unsafe atomic::store_u64(&mut G_CID, h, 0);
     return h;
 }
@@ -169,6 +169,132 @@ pub(package) fn file_id(path: str) u64 {
         return 0;
     }
     return lanes_end(&l, tot);
+}
+
+/// The bytes `exe_id` reads first of an executable: its headers and the identity they lead to.
+const EXE_HEAD: usize = 8192;
+
+/// The identity of the executable at `path`: the content hash its linker recorded, read from the file's
+/// first EXE_HEAD bytes (`image_id`); else the content hash of the whole file (`file_id`). 0 when it
+/// cannot be read.
+pub(package) fn exe_id(path: str) u64 {
+    let f = stdio::fopen(path, "rb");
+    if f == null {
+        return 0;
+    }
+    let mut buf = Array::<u64, 1024>::new();
+    let bp = (&mut buf[0]) as *mut u64;
+    let n = unsafe stdio::fread(bp, 1, EXE_HEAD, f);
+    unsafe stdio::fclose(f);
+    let h = image_id(unsafe Slice::<u8> { ptr: bp as *const u8, len: n });
+    if h != 0 {
+        return h;
+    }
+    return file_id(path);
+}
+
+// The content hash the linker recorded in the image whose first bytes `b` holds (`image_id_span`), folded
+// to 64 bits and never 0; 0 when `b` holds none.
+const fn image_id(b: []u8) u64 {
+    let mut at: usize = 0;
+    let mut n: usize = 0;
+    if !image_id_span(b, &mut at, &mut n) {
+        return 0;
+    }
+    let mut h: u64 = 0;
+    for k in 0..n {
+        h = h ^ b[at + k] as u64 << (8 * (k % 8)) as u64;
+    }
+    return h | (h == 0) as u64;
+}
+
+/// Where the content hash the linker recorded lies in the 64-bit little-endian image whose first bytes
+/// `b` holds: a Mach-O image's `LC_UUID` (a hash of its pages, from the own linker and ld64) or an ELF
+/// image's GNU build-id note (from the own linker, GNU ld and lld), its offset into `at` and its length
+/// into `n`. False when `b` holds no such image or identity.
+pub(package) const fn image_id_span(b: []u8, at: &mut usize, n: &mut usize) bool {
+    if b.len() >= 32 && le32(b, 0) == 0xFEEDFACF {
+        return macho_uuid(b, at, n);
+    }
+    if b.len() >= 64 && le32(b, 0) == 0x464C457F && b[4] == 2 && b[5] == 1 {
+        return elf_build_id(b, at, n);
+    }
+    return false;
+}
+
+// The `LC_UUID` of the Mach-O image whose head `b` holds (`image_id_span`).
+const fn macho_uuid(b: []u8, out_at: &mut usize, out_n: &mut usize) bool {
+    let ncmds = le32(b, 16) as usize;
+    let mut at: usize = 32;
+    for _ in 0..ncmds {
+        if at + 8 > b.len() {
+            return false;
+        }
+        let size = le32(b, at + 4) as usize;
+        if le32(b, at) == 0x1B && size >= 24 && at + 24 <= b.len() {
+            *out_at = at + 8;
+            *out_n = 16;
+            return true;
+        }
+        if size < 8 {
+            return false;
+        }
+        at += size;
+    }
+    return false;
+}
+
+// The descriptor of the GNU build-id note (type 3, name "GNU") of the ELF image whose head `b` holds,
+// found through its PT_NOTE program headers (`image_id_span`).
+const fn elf_build_id(b: []u8, out_at: &mut usize, out_n: &mut usize) bool {
+    let len = b.len() as u64;
+    let phoff = le64(b, 32);
+    let phentsize = (le32(b, 52) >> 16) as u64;
+    let phnum = (le32(b, 56) & 0xFFFF) as u64;
+    if phoff > len || phentsize < 56 {
+        return false;
+    }
+    for i in 0..phnum {
+        let ph = phoff + i * phentsize;
+        if ph + 56 > len {
+            return false;
+        }
+        if le32(b, ph as usize) != 4 {
+            continue;
+        }
+        let mut at = le64(b, ph as usize + 8);
+        let size = le64(b, ph as usize + 32);
+        if at > len || size > len - at {
+            continue;
+        }
+        let end = at + size;
+        while at + 12 <= end {
+            let p = at as usize;
+            let namesz = le32(b, p) as u64;
+            let descsz = le32(b, p + 4) as u64;
+            let desc = at + 12 + (namesz + 3) / 4 * 4;
+            if desc + descsz > end {
+                break;
+            }
+            if le32(b, p + 8) == 3 && namesz == 4 && le32(b, p + 12) == 0x00554E47 && descsz != 0 {
+                *out_at = desc as usize;
+                *out_n = descsz as usize;
+                return true;
+            }
+            at = desc + (descsz + 3) / 4 * 4;
+        }
+    }
+    return false;
+}
+
+// The little-endian u32 at byte `at` of `b`.
+const fn le32(b: []u8, at: usize) u32 {
+    return b[at] as u32 | b[at + 1] as u32 << 8 | b[at + 2] as u32 << 16 | b[at + 3] as u32 << 24;
+}
+
+// The little-endian u64 at byte `at` of `b`.
+const fn le64(b: []u8, at: usize) u64 {
+    return le32(b, at) as u64 | le32(b, at + 4) as u64 << 32;
 }
 
 /// A content hash of `s` in the scheme of `file_id`, about 1 ms per 10 MB; never 0.

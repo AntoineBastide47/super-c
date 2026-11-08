@@ -44,9 +44,11 @@ super-c clean --full         # remove the out-dir, every <root dir>/build/<profi
 ```
 
 The build system reads `build.toml` in the working directory. An emit stamp skips the
-entire transpile when no input changed (~25 ms no-op); it records the content hash of the compiler
-that emitted the tree (a different compiler at the same path with the same mtime transpiles again,
-as does the per-TU cache, keyed on the same hash; a WASI guest hashes the module file its absolute
+entire transpile when no input changed (~25 ms no-op); it records the identity of the compiler
+that emitted the tree (`exe_id`: the content hash its linker recorded, a Mach-O `LC_UUID` or an ELF
+GNU build-id note, read from the file's head; else the content hash of the whole file. A different
+compiler at the same path with the same mtime transpiles again,
+as does the per-TU cache, keyed on the same identity; a WASI guest hashes the module file its absolute
 argv[0] names, as `wasmtime run --dir=/ --argv0 <abs path>` gives it, and keeps neither stamp nor
 cache when argv[0] is relative), the std directory (a build under another std tree transpiles
 again, `stamp_opt_line`), the profile's `opt-level` and code-generation flags with the command line's

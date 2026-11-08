@@ -372,6 +372,43 @@ fn a_c_shared_library_links_with_the_own_linker() {
     assert_eq(p.run_bin(), 0);
 }
 
+// `atexit` through the own linker (on Linux the runtime's, `__cxa_atexit` keyed on the image's
+// `__dso_handle`): the handlers run at exit, the last registered first. `first` sees whether `later` ran.
+const AT_EXIT_MAIN: str = M"(static mut LATER_RAN: bool = false;
+
+extern "C" {
+    fn atexit(f: fn()) i32;
+    fn _Exit(code: i32);
+}
+
+fn first() {
+    unsafe _Exit(if unsafe LATER_RAN {
+        7
+    } else {
+        9
+    });
+}
+
+fn later() {
+    unsafe LATER_RAN = true;
+}
+
+fn main() i32 {
+    if unsafe atexit(first) != 0 || unsafe atexit(later) != 0 {
+        return 1;
+    }
+    return 0;
+}
+)";
+
+@test
+fn exit_handlers_run_last_registered_first() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", AT_EXIT_MAIN);
+    assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds");
+    assert_eq(p.run_bin(), 7);
+}
+
 // Two modules whose `@noinline` functions return one string literal: each object defines its copy. With
 // variables in sections of their own (the default from -O1), each copy is a weak definition and the link
 // keeps one; without, each object's copy is its own.

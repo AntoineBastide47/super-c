@@ -6,6 +6,7 @@
 import link::util as lku;
 import stdio;
 import stdlib;
+import std::platform::clock;
 import std::platform::fs;
 import std::platform::process;
 import graph::items as gitems;
@@ -13661,14 +13662,161 @@ fn bc_job(ctx: *mut void, j: u32) {
     let _ = replace(&mut p.modules[m].ast.get_mut().last_use, Vector::<NodeId>::new());
 }
 
-/// The borrow jobs: one per module with syntax, its items in source order.
+/// The borrow jobs: one per module with syntax, its items in source order. A lazy module's bodies
+/// lower in `bc_std_closure` instead.
 fn bc_jobs(p: &loader::Package, out: &mut Vector<BcJob>) {
     for m in 0..p.modules.len() {
-        if !p.modules.at(m).has_ast {
+        if !p.modules.at(m).has_ast || p.bc_lazy(m) {
             continue;
         }
         out.push(BcJob { m: m as u32, lo: p.idx().mod_items[m], hi: p.idx().mod_items[m + 1] });
     }
+}
+
+/// The borrow pass over the lazy modules' bodies the build reaches (`Package::bc_lazy`): the functions
+/// and methods `reach_root` names, then every one a kept body calls or names as a value, through the
+/// bodies they lower, to a fixed point. A call through an interface member reaches every conformance
+/// method of that name: the inliner takes such a method once an instance names its receiver
+/// (`InlineStore::build`). Every kept body the inliner, the instance graph and the evaluator read is the
+/// one the full pass keeps. Serial, each round in item order, so the keep and the types its lowerings
+/// intern do not depend on the worker count. An item's errors go to `outs` as a job's do.
+fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
+    let n = p.modules.len();
+    let nitems = p.idx().items.len();
+    let mut queued = Vector::<bool>::new();
+    queued.resize_default(nitems);
+    let mut round = Vector::<u32>::new();
+    // The lazy modules' conformance methods by the hash of their name (`fn_name_key`).
+    let mut conf_ix = Map::<u64, u64>::new();
+    let mut confs = Vector::<Vector<u32>>::new();
+    for m in 0..n {
+        if !p.modules.at(m).has_ast || !p.bc_lazy(m) {
+            continue;
+        }
+        let a = unsafe &*p.module_ast_const(m as ModuleId);
+        for k in p.idx().mod_items[m]..p.idx().mod_items[m + 1] {
+            let it = *p.idx().items.at(k as usize);
+            if !bc_body_item(p, &it) {
+                continue;
+            }
+            if reach_root(p, a, m as ModuleId, it.node, testing, false) {
+                bc_queue(&mut queued, &mut round, k);
+            }
+            if it.owner != loader::ITEM_NONE && a.ext(p.idx().items.at(it.owner as usize).node).extend_def.interface_type != NODE_NONE {
+                let key = fn_name_key(p, m as ModuleId, it.node);
+                if !conf_ix.contains_key(&key) {
+                    conf_ix.insert(key, confs.len() as u64);
+                    confs.push(Vector::<u32>::new());
+                }
+                confs.index_mut((*conf_ix.get(&key).unwrap()) as usize).push(k);
+            }
+        }
+    }
+    let kp = unsafe &mut *st.master;
+    let mut slot = bc_slot_take(unsafe &*st.slots, unsafe &*st.freed, st.p);
+    slot.ctx.keep = st.master;
+    slot.ctx.validate = st.validate;
+    slot.ow.shared = st.memos;
+    let mut bodies = Vector::<irl::Lowerer>::new();
+    let mut scanned: usize = 0;
+    let free_key = fnv_cont(FNV_BASIS, "free");
+    let mut dropped = false;
+    loop {
+        // The calls of the bodies kept since the last scan: a lazy module's function or method, or an
+        // interface's member (no item of its own), which reaches the conformance methods of its name. A
+        // drop reaches every `free` conformance method: the destructions the emitter renders call them.
+        for i in scanned..kp.kept.len() {
+            let b = &kp.kept.at(i).body;
+            for k in 0..b.blocks.len() {
+                let t = &b.blocks.at(k).term;
+                if t.kind == irc::TM_DROP && !dropped {
+                    dropped = true;
+                    if let Some(x) = conf_ix.get(&free_key) {
+                        let v = confs.at((*x) as usize);
+                        for j in 0..v.len() {
+                            bc_queue(&mut queued, &mut round, v[j]);
+                        }
+                    }
+                }
+                if t.kind != irc::TM_CALL || t.callee.node == NODE_NONE || t.callee.module as usize >= n {
+                    continue;
+                }
+                let it = p.item_of(t.callee.module, t.callee.node);
+                if it != loader::ITEM_NONE {
+                    if p.bc_lazy(t.callee.module as usize) && bc_body_item(p, p.idx().items.at(it as usize)) {
+                        bc_queue(&mut queued, &mut round, it);
+                    }
+                } else if (unsafe &*p.module_ast_const(t.callee.module)).at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION {
+                    if let Some(x) = conf_ix.get(&fn_name_key(p, t.callee.module, t.callee.node)) {
+                        let v = confs.at((*x) as usize);
+                        for j in 0..v.len() {
+                            bc_queue(&mut queued, &mut round, v[j]);
+                        }
+                    }
+                }
+            }
+            // A function a body names as a value.
+            for k in 0..b.constants.len() {
+                let c = b.constants.at(k);
+                if c.kind != irc::CK_ITEM || c.item.node == NODE_NONE || c.item.module as usize >= n || !p.bc_lazy(
+                    c.item.module as usize,
+                ) {
+                    continue;
+                }
+                let it = p.item_of(c.item.module, c.item.node);
+                if it != loader::ITEM_NONE && bc_body_item(p, p.idx().items.at(it as usize)) {
+                    bc_queue(&mut queued, &mut round, it);
+                }
+            }
+        }
+        scanned = kp.kept.len();
+        if round.len() == 0 {
+            break;
+        }
+        // A module's items are contiguous in the index: the sort groups them, one checker each.
+        round.sort();
+        let mut i: usize = 0;
+        while i < round.len() {
+            let m = p.idx().items.at(round[i] as usize).module as usize;
+            let mm = &mut p.modules[m];
+            let src = mm.source.as_str().ptr() as *const char;
+            let len = mm.source.len();
+            let mut tck = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), st.p);
+            while i < round.len() && p.idx().items.at(round[i] as usize).module as usize == m {
+                let it = round[i] as usize;
+                tck.bc_item(p.idx().items.at(it).node, &mut slot.ow, &mut slot.ctx, &mut bodies);
+                *unsafe &mut *(st.outs + it) = take_errs(&mut tck.errors);
+                i += 1;
+            }
+        }
+        round.truncate(0);
+    }
+    slot.ctx.keep = null;
+    bc_slot_give(unsafe &*st.slots, unsafe &*st.freed, slot);
+}
+
+// The hash of the name function `node` of module `m` declares.
+fn fn_name_key(p: &loader::Package, m: ModuleId, node: NodeId) u64 {
+    let a = unsafe &*p.module_ast_const(m);
+    let s = a.at_const(a.ext_name(node)).as_data.name.text;
+    return fnv_cont(FNV_BASIS, p.modules.at(m as usize).source.as_str().slice(s.start as usize, s.end as usize));
+}
+
+// Queue item `it` for the next round of `bc_std_closure`, once.
+fn bc_queue(queued: &mut Vector<bool>, round: &mut Vector<u32>, it: u32) {
+    if !queued[it as usize] {
+        queued.set(it as usize, true);
+        round.push(it);
+    }
+}
+
+// Whether item `it` has a body the borrow pass checks: a function or a method of an extend (an
+// interface's members have none of their own).
+const fn bc_body_item(p: &loader::Package, it: &loader::ItemMeta) bool {
+    if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
+        return false;
+    }
+    return it.owner == loader::ITEM_NONE || p.idx().items.at(it.owner as usize).kind == loader::ItemKind::IK_EXTEND as u8;
 }
 
 /// The borrow stage's prologue: per module, its row of the reference table the borrow jobs query
@@ -13698,8 +13846,10 @@ fn bc_pre_job(ctx: *mut void, j: u32) {
 /// Borrow-check every module as a job (`bc_job`): one ownership oracle and one borrow pipeline
 /// per slot in flight (the serial path's single slot serves every body), outputs published in
 /// module and item order, so both paths print and lower identically. `keep` (null = discard)
-/// collects every lowered body for the backend. False when any module reported an error.
-pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool {
+/// collects every lowered body for the backend. Under `Package::lazy_std` a lazy module's bodies lower
+/// where the build reaches them (`bc_std_closure`; `testing`: a test build, whose tests are roots).
+/// False when any module reported an error.
+pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep, testing: bool) bool {
     // The stage's own regions (the slots' probes hold the per-body ones).
     let mut st0 = bc_stats_new();
     let tp = st0.pr.start();
@@ -13778,7 +13928,8 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     let slots = psync::Mutex::<BcPool>::new(
         BcPool {
             idle: Vector::<BcSlot>::new(),
-            unleased: jobs.len(),
+            // The lazy modules' closure leases one more (`bc_std_closure`).
+            unleased: jobs.len() + (p.lazy_std && keep != null) as usize,
             reported: p.icost_on || stdlib::getenv("SC_BORROW_STATS") != null,
             live: 0,
             cap: p.jobs.max(1) as usize,
@@ -13827,10 +13978,17 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     if par {
         set_stage_locks(p, false);
     }
-    // Modules without a job (no syntax) are ready too.
+    if p.lazy_std && keep != null {
+        bc_std_closure(p, &st, testing);
+    }
+    // Modules without a job are ready too: one without syntax, and a lazy one once its closure is
+    // lowered (its last-use table served the type check and that pass, as a job's does).
     for m in 0..n {
         if !p.modules[m].has_ast {
             p.set_module_states(m, loader::IS_IR_READY);
+        } else if p.bc_lazy(m) {
+            p.set_module_states(m, loader::IS_IR_READY);
+            let _ = replace(&mut p.modules[m].ast.get_mut().last_use, Vector::<NodeId>::new());
         }
     }
     let mut ok = true;
@@ -15390,7 +15548,7 @@ pub(package) fn lint_package(
     facts_snapshot(p, &mut wms);
     // Kept so the report-only passes execute the checked bodies instead of lowering their own.
     let mut lkeep = irl::Keep::new();
-    p.ok = borrowck_all(p, &mut lkeep) && p.ok;
+    p.ok = borrowck_all(p, &mut lkeep, false) && p.ok;
     if p.jobs != 1 {
         prt::shutdown();
     }
@@ -15837,12 +15995,13 @@ pub(package) fn prelude_stage(
         // project.
         q.root_dir = q.std_root.clone();
         q.alt_root = String::new();
-        // The std listing the image records, taken before the load lists it.
+        // The std listing and the clock the image records, taken before the load lists and reads.
         let std_id = if cid != 0 {
             pimg::dir_id(std_dir)
         } else {
             0 as u64
         };
+        let taken = clock::wall_ns();
         q.load_prelude_stage(std_dir, q.bootstrap, target);
         if !q.ok {
             p.ok = false;
@@ -15859,7 +16018,7 @@ pub(package) fn prelude_stage(
         }
         img = pimg::save(&q, &qe);
         if cid != 0 && q.lint_warnings == 0 {
-            pimg::write(cache, key, cid, &q, std_dir, std_id, &img);
+            pimg::write(cache, key, cid, &q, std_dir, std_id, taken, &img);
         }
     }
     let mut t = p.settings_copy();
@@ -16012,7 +16171,11 @@ pub(package) fn run_package(
         }
     }
     let mut irkeep = irl::Keep::new();
-    p.ok = borrowck_all(p, &mut irkeep) && p.ok;
+    let testing = topts != null && unsafe (*topts).enabled;
+    // The build reads only the std bodies it reaches: the instance graph seeds those the borrow pass
+    // kept, and lowers any other one it needs.
+    p.lazy_std = true;
+    p.ok = borrowck_all(p, &mut irkeep, testing) && p.ok;
     // Release the pool as soon as the one parallel stage is done: the test runner FORKS after
     // this, and a forked child inherits the pool's state but none of its worker threads. (Also
     // what keeps the leak gate green.)
@@ -16094,7 +16257,6 @@ pub(package) fn run_package(
     bst::mark(bst::B_CHECKS);
     ts_phase("checks");
     stage_ms(tstat, &mut tp0, "phase lint+panics");
-    let testing = topts != null && unsafe (*topts).enabled;
     let mut plan = TestPlan::new(n);
     if testing {
         test_plan_build(p, &mut plan);

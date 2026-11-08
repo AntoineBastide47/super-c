@@ -9,6 +9,8 @@ import driver_shim as shim;
 import build_system::objcache as ocache;
 import time;
 import utils::persist as per;
+import std::platform::clock;
+import std::platform::fs;
 
 // Copy the files and directories under `src` to `dst`.
 fn copy_tree(src: str, dst: str) {
@@ -107,9 +109,10 @@ fn prelude_image_records_the_std_text_it_checked() {
     let root = p.dir();
     let sd = copy_std_ffi(root);
     let cache = format("{}/cache", root);
+    let taken = clock::wall_ns();
     let q = load_prelude(root, &sd);
     let img = String::from_str("image");
-    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), &img);
+    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), taken, &img);
     let mut at: usize = 0;
     assert(pimg::read(&cache, 1, 2, &mut at).is_some(), "an unchanged std tree reads the image");
     let mut f = String::new();
@@ -117,8 +120,48 @@ fn prelude_image_records_the_std_text_it_checked() {
     let mut text = cli::read_text(&f);
     text.push_str("\n");
     p.mkfile("std/option.spc", &text);
-    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), &img);
+    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), taken, &img);
     assert(pimg::read(&cache, 1, 2, &mut at).is_none(), "a std file edited after the load rejects the image");
+}
+
+// A std file whose modification time is the one the image records, and lay two seconds or more before
+// the load, keeps its recorded hash unread: an edit gives the file a new time and rejects the image, and
+// the old time set back vouches for the file again.
+@test
+fn prelude_image_trusts_an_old_unchanged_modification_time() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    let sd = copy_std_ffi(root);
+    let f = format("{}/option.spc", sd.as_str());
+    let old = clock::wall_ns() - 10000000000;
+    assert(fs::set_times(&f, fs::FileTime::Keep, fs::FileTime::At(old)).is_ok(), "the time sets");
+    let taken = clock::wall_ns();
+    let q = load_prelude(root, &sd);
+    let cache = format("{}/cache", root);
+    let img = String::from_str("image");
+    pimg::write(&cache, 1, 2, &q, &sd, pimg::dir_id(&sd), taken, &img);
+    let mut text = cli::read_text(&f);
+    text.push_str("\n");
+    p.mkfile("std/option.spc", &text);
+    let mut at: usize = 0;
+    assert(pimg::read(&cache, 1, 2, &mut at).is_none(), "the edited file's new time rejects the image");
+    assert(fs::set_times(&f, fs::FileTime::Keep, fs::FileTime::At(old)).is_ok(), "the time sets back");
+    assert(pimg::read(&cache, 1, 2, &mut at).is_some(), "the old time vouches for the file unread");
+}
+
+// An executable's identity is the content hash its linker records, read from its head: a Mach-O
+// image's `LC_UUID` or an ELF image's build-id note, not the hash of the whole file. A file that is no
+// such image is known by its content hash.
+@platform(macos | linux)
+@test
+fn an_executable_is_known_by_the_identity_its_linker_records() {
+    let exe = du::exe_path();
+    assert(du::exe_id(&exe) != du::file_id(&exe), "the identity comes from the header");
+    assert_eq(du::compiler_id(), du::exe_id(&exe));
+    let p = cli::proj_new();
+    p.mkfile("a.txt", "no image");
+    let txt = format("{}/a.txt", p.dir());
+    assert_eq(du::exe_id(&txt), du::file_id(&txt));
 }
 
 // The files in directory `dir`.
@@ -141,14 +184,14 @@ fn sweep_deletes_stale_prelude_images() {
     let me = du::compiler_id();
     let img = String::from_str("image");
     let q = load_prelude(root, &sd);
-    pimg::write(&croot, 3, me, &q, &sd, pimg::dir_id(&sd), &img);
+    pimg::write(&croot, 3, me, &q, &sd, pimg::dir_id(&sd), clock::wall_ns(), &img);
     let f = format("{}/option.spc", sd.as_str());
     let mut text = cli::read_text(&f);
     text.push_str("\n");
     p.mkfile("std/option.spc", &text);
     let q2 = load_prelude(root, &sd);
-    pimg::write(&croot, 1, me, &q2, &sd, pimg::dir_id(&sd), &img);
-    pimg::write(&croot, 2, me ^ 1, &q2, &sd, pimg::dir_id(&sd), &img);
+    pimg::write(&croot, 1, me, &q2, &sd, pimg::dir_id(&sd), clock::wall_ns(), &img);
+    pimg::write(&croot, 2, me ^ 1, &q2, &sd, pimg::dir_id(&sd), clock::wall_ns(), &img);
     let mut old = per::Writer::new();
     old.u64(2);
     old.u64(4);
@@ -166,7 +209,7 @@ fn sweep_deletes_stale_prelude_images() {
     let mut at: usize = 0;
     assert(pimg::read(&croot, 1, me, &mut at).is_some(), "the live image stays");
     for k in 10..16u64 {
-        pimg::write(&croot, k, me, &q2, &sd, pimg::dir_id(&sd), &img);
+        pimg::write(&croot, k, me, &q2, &sd, pimg::dir_id(&sd), clock::wall_ns(), &img);
     }
     pimg::sweep(&croot, time::now());
     assert(file_count(&dir) == 7, "the images used within a day stay");

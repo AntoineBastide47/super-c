@@ -230,6 +230,9 @@ pub(package) struct Package {
     pub(package) rt_libm: i32,
     /// The traps of the native backends' vector code (`std::rt::lanes`), loaded with a vector; -1 else.
     pub(package) rt_lanes: i32,
+    /// The borrow pass checks the std prelude's bodies only where the build reaches them (`bc_lazy`):
+    /// set by a build that emits, never by a lint.
+    pub(package) lazy_std: bool,
     /// The module the package was loaded from, whose top-level `main` is the program entry; -1 when
     /// the package has none (a batch lint, whose listed files `lint_set` marks as roots instead).
     pub(package) root: i32,
@@ -2672,6 +2675,15 @@ extend Package {
         return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
     }
 
+    /// Whether the borrow pass lowers module `m`'s bodies only where the build reaches them
+    /// (`driver::emit::bc_std_closure`), and the instance graph seeds only those: a std prelude module
+    /// other than a runtime one, under `lazy_std`. A runtime module's symbols are linked by name, not
+    /// reached by a call. A lazy module's other bodies keep their syntax, and the stage that needs one
+    /// lowers it.
+    pub(package) const fn bc_lazy(self: &Self, m: usize) bool {
+        return self.lazy_std && self.modules.at(m).prelude && !self.is_rt(m as i32) && m as i32 != self.rt_lanes;
+    }
+
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
     /// alone, with `-fno-builtin` (`libc_unit`).
     pub(package) const fn is_libc(self: &Self, m: i32) bool {
@@ -4016,6 +4028,7 @@ extend Package {
             rt_builtins: -1,
             rt_libm: -1,
             rt_lanes: -1,
+            lazy_std: false,
             root: -1,
             tt: Box::<UnsafeCell<TypePool>>::new(UnsafeCell::<TypePool>::new(TypePool::new())),
             ok: true,
@@ -5428,10 +5441,11 @@ extend Package {
 
     /// Free every module's body arena: the checked release point of releasable body syntax, once
     /// the last consumer of it (the instance graph's static_assert check) has run. Every retained record a later stage
-    /// reads (kept Core IR, closure and asm facts) was copied out before.
+    /// reads (kept Core IR, closure and asm facts) was copied out before. A lazy module (`bc_lazy`) keeps
+    /// its arena: emission lowers the bodies of it no earlier stage lowered.
     pub(package) fn release_bodies(self: &mut Self) {
         for i in 0..self.modules.len() {
-            if self.modules[i].has_ast {
+            if self.modules[i].has_ast && !self.bc_lazy(i) {
                 self.modules[i].ast.get_mut().release_bodies();
                 if !self.modules[i].ast.get_ref().call_info_rel.on {
                     self.modules[i].ast.get_mut().release_body_facts();

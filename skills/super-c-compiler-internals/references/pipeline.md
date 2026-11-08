@@ -34,7 +34,14 @@ borrowck_all              -- lowers every body to Core IR (kept in irl::Keep, vi
   |                          facts (the keep holds elaborated bodies); one independent job
   |                          per module on the same runner (a body split contends on the
   |                          module's type-pool lock, item-index.md); body syntax stays
-  |                          until cemit_package releases it (syntax-ownership.md)
+  |                          until cemit_package releases it (syntax-ownership.md). In a
+  |                          build (Package::lazy_std, not a lint) a std prelude module other
+  |                          than a runtime one (Package::bc_lazy) has no job: bc_std_closure
+  |                          then runs the same pass, serially and in item order, over its
+  |                          bodies the build reaches (reach_root's roots, then what a kept
+  |                          body calls or names as a value, the conformance methods of an
+  |                          interface member it calls, every `free` conformance once a body
+  |                          drops), to a fixed point
 [verification gates]      -- SC_FACTS_CHECK / SC_LAYOUT: each pass is a NO-OP unless its env
   |                          var is set
 lint + panics + flush     -- lint_unused_items, check_recursion (ir::recursion: unbounded
@@ -54,9 +61,12 @@ emission planning         -- compute_emit_live (module-arena resolutions + item 
   |                          touches copied into the evaluator, then the keep view closes
   |
 cemit_package             -- InstGraph.collect() over the kept Core IR bodies of every module that
-  |                          emits (dead prelude modules seed nothing), graph_inst_asserts
+  |                          emits (dead prelude modules seed nothing; a lazy module seeds only
+  |                          the bodies the borrow pass kept, and a reference lowers any other
+  |                          one, `body_idx`), graph_inst_asserts
   |                          (the static_asserts of every demanded generic instance), then
-  |                          Package::release_bodies frees the body syntax; then per-module
+  |                          Package::release_bodies frees the body syntax (a lazy module keeps
+  |                          its arena: emission lowers its unlowered bodies); then per-module
   |                          TU emission (emit/tu.spc); per body: drop elaboration only for
   |                          a body emission lowered itself, the inliner, bounds-check
   |                          elimination (DropCtx::apply_drops); parallel frontier under --jobs;

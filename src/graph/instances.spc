@@ -3765,7 +3765,10 @@ extend InstGraph {
                 let nid = unsafe a.list(items)[i as usize];
                 let n = a.at_const(nid);
                 if n.kind == NodeKind::NODE_FUNCTION {
-                    if a.ext(nid).function.generics.len == 0 && !a.ext(nid).function.is_extern() && a.ext(nid).function.body != NODE_NONE {
+                    if a.ext(nid).function.generics.len == 0 && !a.ext(nid).function.is_extern() && a.ext(nid).function.body != NODE_NONE && self.seeds(
+                        m,
+                        nid,
+                    ) {
                         let u0 = self.enter(U_FN | m as u64 << 32 | nid as u64);
                         self.seed_body(m as ModuleId, nid, a, &empty);
                         self.cur_unit = u0;
@@ -3779,7 +3782,10 @@ extend InstGraph {
                     for j in 0..inner.len {
                         let iid = unsafe a.list(inner)[j as usize];
                         let it = a.at_const(iid);
-                        if it.kind == NodeKind::NODE_FUNCTION && a.ext(iid).function.body != NODE_NONE && a.ext(iid).function.generics.len == 0 {
+                        if it.kind == NodeKind::NODE_FUNCTION && a.ext(iid).function.body != NODE_NONE && a.ext(iid).function.generics.len == 0 && self.seeds(
+                            m,
+                            iid,
+                        ) {
                             let u0 = self.enter(U_FN | m as u64 << 32 | iid as u64);
                             self.seed_body(m as ModuleId, iid, a, &empty);
                             self.cur_unit = u0;
@@ -3815,6 +3821,16 @@ extend InstGraph {
             }
         }
         self.run();
+    }
+
+    // Whether the collection seeds function `node` of module `m`: every one but those of a lazy module
+    // (`Package::bc_lazy`) the borrow pass did not keep, which no kept body calls. A reference the walks
+    // record reaches one, and its body lowers then (`body_idx`).
+    const fn seeds(self: &Self, m: usize, node: NodeId) bool {
+        if self.keep == null || !(unsafe &*self.pkg).bc_lazy(m) {
+            return true;
+        }
+        return (unsafe &*self.keep).ix.contains_key(&skey_mix(0, m as u64 << 32 | node as u64));
     }
 
     // True for a prelude module the emitter skips (see `live`).

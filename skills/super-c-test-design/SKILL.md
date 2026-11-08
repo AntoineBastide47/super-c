@@ -84,7 +84,8 @@ Rules for the costly rungs:
   assertion is about the prelude images.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.
 - The checked std prelude is cached in the cache root too (`<root>/prelude/`): a build
-  checks only the program. A test that must see the prelude checked (a std edit, a std tree of its own) sets
+  type-checks only the program, and lowers and borrow-checks only the std bodies it reaches
+  (`Package::bc_lazy`). A test that must see the prelude checked (a std edit, a std tree of its own) sets
   its own `SC_CACHE_DIR`, as `tests/cli/prelude_image_test.spc` does; the first build in a new cache
   root checks the prelude once.
 

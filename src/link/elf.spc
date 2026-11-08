@@ -11,6 +11,7 @@
 import link::util as lu;
 import utils::par as par;
 import link::ar;
+import driver::util as dutil;
 import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
@@ -74,6 +75,7 @@ const STV_DEFAULT: u8 = 0;
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_NOTE: u32 = 4;
 const PT_PHDR: u32 = 6;
 const PT_TLS: u32 = 7;
 const PT_GNU_EH_FRAME: u32 = 0x6474E550;
@@ -324,7 +326,14 @@ const O_PLT: usize = 10;
 const O_DYNAMIC: usize = 11;
 const O_GOT: usize = 12;
 const O_BSS: usize = 13;
-const O_COUNT: usize = 14;
+const O_NOTE: usize = 14;
+const O_COUNT: usize = 15;
+
+// The build-id note: its name ("GNU" and its terminator), its type and its descriptor's size, a content
+// hash of the image.
+const NT_GNU_BUILD_ID: u32 = 3;
+const BUILD_ID_SIZE: u64 = 8;
+const NOTE_SIZE: u64 = 16 + BUILD_ID_SIZE;
 
 /// Link `o`. False with the reason in `err` when it fails.
 pub(package) fn link(o: &Opts, err: &mut String) bool {
@@ -424,11 +433,19 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     write_synthetic(l, b, &mut img);
     finish(l, o, b, &mut img);
+    build_id(l, &mut img);
     if !lu::write(&o.out, &img, 0o755) {
         l.err.format_into("cannot write '{}'", o.out.as_str());
         return false;
     }
     return true;
+}
+
+// The build-id note's descriptor: the content hash (`str_id`) of the complete image, taken while the
+// descriptor is still zero. A reader of the file's head knows the image by it (`driver::util::exe_id`).
+fn build_id(l: &L, img: &mut Vector<u8>) {
+    let h = dutil::str_id(unsafe str::from_raw(img.as_ptr(), img.len()));
+    lu::p64(img, l.osecs[l.o[O_NOTE] as usize].off as usize + 16, h);
 }
 
 extend L as ar::Members {
@@ -1646,6 +1663,9 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
     if !l.shared {
         role(l, O_INTERP, ".interp", SHT_PROGBITS, SHF_ALLOC, 10);
     }
+    // After `.interp`, in the first page, where a reader of the file's head finds it.
+    role(l, O_NOTE, ".note.gnu.build-id", SHT_NOTE, SHF_ALLOC, 10);
+    set(l, O_NOTE, NOTE_SIZE, 4, 0);
     role(l, O_HASH, ".hash", SHT_HASH, SHF_ALLOC, 11);
     role(l, O_DYNSYM, ".dynsym", SHT_DYNSYM, SHF_ALLOC, 12);
     role(l, O_DYNSTR, ".dynstr", SHT_STRTAB, SHF_ALLOC, 13);
@@ -1838,10 +1858,10 @@ const fn seg_used(l: &L, seg: u32) bool {
     return seg == 0;
 }
 
-// The number of program headers: PHDR, INTERP, a LOAD per used segment, DYNAMIC, GNU_STACK, GNU_RELRO, and
-// TLS and GNU_EH_FRAME when the image has thread-locals and frames.
+// The number of program headers: PHDR, INTERP, NOTE, a LOAD per used segment, DYNAMIC, GNU_STACK,
+// GNU_RELRO, and TLS and GNU_EH_FRAME when the image has thread-locals and frames.
 const fn nphdrs(l: &L) u32 {
-    let mut n: u32 = 4 + (!l.shared) as u32 + has_tls(l) as u32 + (l.o[O_EHHDR] != NONE) as u32;
+    let mut n: u32 = 5 + (!l.shared) as u32 + has_tls(l) as u32 + (l.o[O_EHHDR] != NONE) as u32;
     for seg in 0..4u32 {
         n += seg_used(l, seg) as u32;
     }
@@ -2820,6 +2840,12 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             img[oi.off as usize + i] = ip.byte_at(i);
         }
     }
+    // The build-id note's header; `build_id` fills its descriptor once the image is complete.
+    let on = l.osecs[l.o[O_NOTE] as usize].off as usize;
+    lu::p32(img, on, 4);
+    lu::p32(img, on + 4, BUILD_ID_SIZE as u32);
+    lu::p32(img, on + 8, NT_GNU_BUILD_ID);
+    lu::p32(img, on + 12, 0x00554E47); // "GNU\0"
     // .dynstr and .dynsym.
     let mut ds = Vector::<u8>::new();
     ds.push(0);
@@ -3269,6 +3295,8 @@ fn write_headers(l: &L, img: &mut Vector<u8>, shoff: u64, nsh: u32) {
         let oi = l.osecs[l.o[O_INTERP] as usize];
         phdr(&mut h, PT_INTERP, 4, oi.off, oi.addr, oi.size, oi.size, 1);
     }
+    let on = l.osecs[l.o[O_NOTE] as usize];
+    phdr(&mut h, PT_NOTE, 4, on.off, on.addr, on.size, on.size, 4);
     // The four loadable segments: each one's first section to its last.
     for seg in 0..4u32 {
         let mut lo: u64 = 0;

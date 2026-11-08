@@ -7,6 +7,14 @@ producer, or keep it valid through your transform. Update this file in the same 
 when you add, remove, or move an analysis. The source is authoritative for names; this
 file is authoritative for where to look first.
 
+## borrow (`borrowck_all`, before `cemit_package`)
+
+| Fact | Producer | Stored in | Valid until |
+|------|----------|-----------|-------------|
+| The lazy modules' bodies a build reaches: roots, call targets, function values, the conformance methods of a called interface member, every `free` conformance once a body drops | `bc_std_closure` (scans each kept body once, after the jobs) | `irl::Keep` (the bodies), a local queue per item | end of `borrowck_all` |
+| The lazy modules' conformance methods by name hash | `bc_std_closure` (`fn_name_key`) | local map | end of `bc_std_closure` |
+| Whether the instance graph seeds a lazy module's function | `InstGraph::seeds` (reads `Keep.ix`) | not stored | per call |
+
 ## lower (`cemit_package`, `B_PLAN` to `S_LOWERED`)
 
 | Fact | Producer | Stored in | Valid until |

@@ -4,6 +4,8 @@
 import tests::cli_harness as cli;
 import build_system::build as bsys;
 import stdio;
+import driver::util as du;
+import module::loader as loader;
 import std::platform::env as penv;
 import std::platform::fs;
 
@@ -250,16 +252,30 @@ fn emit_stamp_keys_on_the_compiler_content() {
     let same = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");
     assert_eq(same.exit, 3);
     assert(!same.out_has("phase load"), "the same compiler skips the transpile");
-    // Another compiler at the same path and mtime: appended bytes change the content, not the behavior.
-    // The new file is written beside the copy and renamed over it: Linux refuses to open a file for
-    // writing while it counts a process as executing it (ETXTBSY).
+    // Another compiler at the same path and mtime, which behaves the same: another identity in the image
+    // (the content hash its linker records, `driver::util::exe_id`), else an appended byte. A Mach-O
+    // image's signature covers its identity: the copy is signed again. The new file is written beside the
+    // copy and renamed over it: Linux refuses to open a file for writing while it counts a process as
+    // executing it (ETXTBSY).
     let next = format("{}.next", exe.as_str());
     let mut cp = format("cp {} {}", exe.as_str(), next.as_str());
     assert_eq(cli::run_quiet(cp.cstr()), 0);
-    let f = stdio::fopen(&next, "ab");
-    assert(f != null, "the new copy opens for append");
-    let _ = unsafe stdio::fwrite("x".ptr(), 1, 1, f);
+    let mut bytes = loader::read_file(&exe).unwrap();
+    let mut at: usize = 0;
+    let mut n: usize = 0;
+    if du::image_id_span(unsafe Slice::<u8> { ptr: bytes.as_str().ptr(), len: bytes.len() }, &mut at, &mut n) {
+        bytes.set_byte(at, bytes.as_str().byte_at(at) ^ 1);
+    } else {
+        bytes.push_str("x");
+    }
+    let f = stdio::fopen(&next, "wb");
+    assert(f != null, "the new copy opens for writing");
+    assert_eq(unsafe stdio::fwrite(bytes.as_str().ptr(), 1, bytes.len(), f), bytes.len());
     unsafe stdio::fclose(f);
+    if PLATFORM == Platform::MacOS && n != 0 {
+        let mut sign = format("codesign -f -s - {}", next.as_str());
+        assert_eq(cli::run_quiet(sign.cstr()), 0);
+    }
     let mut mv = format("mv {} {} && touch -r {}/tc/ref {}", next.as_str(), exe.as_str(), root, exe.as_str());
     assert_eq(cli::run_quiet(mv.cstr()), 0);
     let other = cli::exe_env_in(&exe, root, "SC_CEMIT_STATS", "1", "run");

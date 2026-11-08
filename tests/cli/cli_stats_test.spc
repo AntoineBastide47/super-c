@@ -67,6 +67,27 @@ fn borrow_probe_reads_the_slots_after_the_stage() {
     assert(probe_calls(t, "tail") > 1, "the tail-call conversion is timed");
 }
 
+// A build lowers only the std bodies it reaches (`Package::bc_lazy`): an empty program lowers a small part
+// of what a lint lowers, which checks every std body.
+@test
+fn a_build_lowers_only_the_std_bodies_it_reaches() {
+    // The wasm guest has no stable cwd: the lint of the working directory runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let b = cli::superc_env_in(root, "SC_BORROW_STATS", "1", "build");
+    assert(b.ok(), "the build succeeds");
+    let l = cli::superc_env_in(root, "SC_BORROW_STATS", "1", "lint");
+    assert(l.ok(), "the lint succeeds");
+    let built = probe_calls(b.text(), "lower");
+    let linted = probe_calls(l.text(), "lower");
+    assert(built != 0 && built * 4 < linted, "the build lowers a small part of the std bodies");
+}
+
 // The calls column of the borrow probe's row `name` in output `t`; 0 when the row is absent.
 const fn probe_calls(t: str, name: str) u64 {
     for ln in t.lines() {

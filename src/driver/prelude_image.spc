@@ -5,9 +5,12 @@
 //
 // A cached image is a file of the build cache root's `prelude` directory, named by the hash of what the
 // prelude stage reads besides the std files (the std directory as given and the build settings) and by
-// the compiler that wrote it. It records the std files it was checked from (content hashes), the
-// directories their imports were looked up in (listings) and the path of the compiler; a reader compares
-// the files and directories and checks the prelude again on any difference. A read touches it, the cache
+// the compiler that wrote it. It records the std files it was checked from (content hashes, and their
+// modification times with the time before the load read them), the directories their imports were looked
+// up in (listings) and the path of the compiler; a reader compares the files and directories and checks
+// the prelude again on any difference. A file whose modification time is unchanged and was more than
+// SAME_SECOND before the load keeps its hash unread, as the emit stamp's inputs do: an edit after the
+// load gives the file a later time. A read touches it, the cache
 // sweep deletes the stale images and the idle ones beyond the most recent (`sweep`), and SC_NO_CACHE
 // turns the cache off.
 import module::loader as loader;
@@ -19,7 +22,12 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 5;
+const IMAGE_VER: u64 = 6;
+
+/// How long before the load a std file's modification time must lie for that time to vouch for its
+/// content: a file system with a coarse clock (two seconds on FAT) gives an edit made just after the load
+/// the time the file had at the load.
+const SAME_SECOND: i64 = 2000000000;
 
 /// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
 /// type-table hash mode.
@@ -94,28 +102,34 @@ const fn listing_id(st: u8, names: &Vector<String>) u64 {
     return h;
 }
 
-/// What a checked prelude was read from: every module file with its content hash, every directory the
-/// loader listed (the std directory and the import lookups) with its listing's identity, and the real
-/// path of the compiler that checked it.
+/// What a checked prelude was read from: every module file with its content hash and its modification
+/// time (0 when it did not stat), every directory the loader listed (the std directory and the import
+/// lookups) with its listing's identity, the real path of the compiler that checked it, and the wall
+/// clock before the load (`taken`, nanoseconds).
 @derive(Persist)
 struct Deps {
     pub(package) exe: String,
     pub(package) files: Vector<String>,
     pub(package) file_ids: Vector<u64>,
+    pub(package) file_mts: Vector<i64>,
+    pub(package) taken: i64,
     pub(package) dirs: Vector<String>,
     pub(package) dir_ids: Vector<u64>,
 }
 
 // What `q` was checked from, as its load read it: a file edited or a directory changed during the check
-// then fails `deps_current`. `std_id` is `dir_id(std_dir)` from before the load.
-fn deps_of(q: &loader::Package, std_dir: str, std_id: u64) Deps {
-    let mut d = Deps { exe: loader::real_path_of(exe_path().as_str()) };
+// then fails `deps_current`. `std_id` is `dir_id(std_dir)` and `taken` the wall clock, both from before
+// the load.
+fn deps_of(q: &loader::Package, std_dir: str, std_id: u64, taken: i64) Deps {
+    let mut d = Deps { exe: loader::real_path_of(exe_path().as_str()), taken: taken };
     for m in 0..q.modules.len() {
         if q.build_module == m as i32 {
             continue; // the build-constant module has no file: its text is the settings
         }
-        d.files.push(q.modules.at(m).file.clone());
+        let f = &q.modules.at(m).file;
+        d.files.push(f.clone());
         d.file_ids.push(q.modules.at(m).src_id);
+        d.file_mts.push(modified_ns(f.as_str()));
     }
     d.dirs.push(String::from_str(std_dir));
     d.dir_ids.push(std_id);
@@ -127,16 +141,36 @@ fn deps_of(q: &loader::Package, std_dir: str, std_id: u64) Deps {
     return d;
 }
 
-/// The identities of files (`file_id`) and directory listings (`dir_id`), each computed once: the
-/// images a sweep checks share their std files and compilers.
+// The modification time of the file at `path` in nanoseconds; 0 when it does not stat.
+fn modified_ns(path: str) i64 {
+    if let Ok(m) = fs::stat(path) {
+        return m.modified_ns;
+    }
+    return 0;
+}
+
+/// The identities of files (`file_id`), executables (`exe_id`) and directory listings (`dir_id`), each
+/// computed once: the images a sweep checks share their std files and compilers.
 struct Ids {
     files: Map<String, u64>,
+    exes: Map<String, u64>,
     dirs: Map<String, u64>,
 }
 
 extend Ids {
     fn new() Ids {
-        return Ids { files: Map::<String, u64>::new(), dirs: Map::<String, u64>::new() };
+        return Ids {
+            files: Map::<String, u64>::new(),
+            exes: Map::<String, u64>::new(),
+            dirs: Map::<String, u64>::new(),
+        };
+    }
+
+    fn exe(self: &mut Ids, path: &String) u64 {
+        if !self.exes.contains_key(path) {
+            self.exes.insert(path.clone(), exe_id(path.as_str()));
+        }
+        return *self.exes.get(path).unwrap();
     }
 
     fn file(self: &mut Ids, path: &String) u64 {
@@ -154,9 +188,14 @@ extend Ids {
     }
 }
 
-// Whether the files and directories `d` records are still as recorded.
+// Whether the files and directories `d` records are still as recorded: a file whose modification time
+// is the recorded one, SAME_SECOND or more before the load, without reading it.
 fn deps_current(d: &Deps, ids: &mut Ids) bool {
     for i in 0..d.files.len() {
+        let mt = d.file_mts[i];
+        if mt != 0 && mt <= d.taken - SAME_SECOND && modified_ns(d.files.at(i).as_str()) == mt {
+            continue;
+        }
         if ids.file(d.files.at(i)) != d.file_ids[i] {
             return false;
         }
@@ -261,10 +300,19 @@ fn header(key: u64, cid: u64, payload: &String) Writer {
 /// Store `img` in cache root `cache` under `key` for compiler `cid` (`compiler_id`) with the dependencies
 /// of `q`, the package that checked it from `std_dir`, whose listing had identity `std_id` (`dir_id`) before the load. A
 /// failed write only makes the next build check the prelude again.
-pub(package) fn write(cache: str, key: u64, cid: u64, q: &loader::Package, std_dir: str, std_id: u64, img: &String) {
+pub(package) fn write(
+    cache: str,
+    key: u64,
+    cid: u64,
+    q: &loader::Package,
+    std_dir: str,
+    std_id: u64,
+    taken: i64,
+    img: &String,
+) {
     let path = image_path(cache, key, cid);
     let mut w = header(key, cid, img);
-    deps_of(q, std_dir, std_id).save(&mut w);
+    deps_of(q, std_dir, std_id, taken).save(&mut w);
     w.align();
     mkdir_p(loader::dirname_of(&path));
     let _ = write_file_atomic_parts(&path, &w.buf, img.as_str());
@@ -406,5 +454,5 @@ fn live(path: str, name: str, ids: &mut Ids, mt: &mut i64) bool {
             return false;
         }
     }
-    return ids.file(&d.exe) == cid && deps_current(&d, ids);
+    return ids.exe(&d.exe) == cid && deps_current(&d, ids);
 }

@@ -220,10 +220,12 @@ fn hunt_timers() i64 {
     let wg = sync::WaitGroup::new();
     wg.add(T2);
     let got = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let live = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(T2));
     for _t in 0..T2 {
         let r = rx.clone();
         let w = wg.clone();
         let g = got.clone();
+        let lv = live.clone();
         launch || {
             for _i in 0..40 {
                 // A deadline short enough that timeout and delivery genuinely contend.
@@ -234,14 +236,19 @@ fn hunt_timers() i64 {
                     None => {},
                 }
             }
+            let _ = lv.get().fetch_sub(1, atomics::MemoryOrder::Relaxed);
             w.done();
         };
     }
     // Bounded on purpose. The consumers make a FIXED number of timed attempts, most of which expire, so
     // they exit having taken far fewer items than this loop has to give. `send` does not report "no
     // receivers" while this frame still holds one, so an unbounded producer waits for room forever:
-    // a stall in the probe, not in the runtime.
+    // a stall in the probe, not in the runtime. Once every consumer is gone, each send only waits out
+    // its timeout, so the loop stops.
     for i in 0..200 {
+        if live.get().load(atomics::MemoryOrder::Relaxed) == 0 {
+            break;
+        }
         let _ = tx.send_timeout(i, time::Duration::from_millis(50));
     }
     tx.close();
@@ -260,6 +267,7 @@ fn hunt_select_contention() i64 {
     let atx = a.sender();
     let btx = b.sender();
     let hits = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let live = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(T2));
     let wg = sync::WaitGroup::new();
     wg.add(T2);
     for _t in 0..T2 {
@@ -267,6 +275,7 @@ fn hunt_select_contention() i64 {
         let rb = brx.clone();
         let w = wg.clone();
         let h = hits.clone();
+        let lv = live.clone();
         launch || {
             for _i in 0..30 {
                 let mut s = sel::Selector::new();
@@ -279,11 +288,16 @@ fn hunt_select_contention() i64 {
                     TimedOut => {},
                 }
             }
+            let _ = lv.get().fetch_sub(1, atomics::MemoryOrder::Relaxed);
             w.done();
         };
     }
-    // Bounded for the same reason as `hunt_timers`: the selectors give up after a fixed number of rounds.
+    // Bounded, and stopped once the selectors are gone, for the same reasons as `hunt_timers`: the
+    // selectors give up after a fixed number of rounds.
     for i in 0..300 {
+        if live.get().load(atomics::MemoryOrder::Relaxed) == 0 {
+            break;
+        }
         let _ = atx.send_timeout(i, time::Duration::from_millis(50));
         let _ = btx.send_timeout(i, time::Duration::from_millis(50));
     }

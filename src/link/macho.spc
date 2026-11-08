@@ -899,8 +899,9 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
     return true;
 }
 
-// The symbols no input defines: `__mh_execute_header` (or `__mh_dylib_header`) is the image's header, a
-// `___sc_zst_<A>` sentinel a fresh `A`-aligned byte. Any other one is an error.
+// The symbols no input defines: `__mh_execute_header` (or `__mh_dylib_header`) and `___dso_handle` (the
+// key `__cxa_atexit` takes) are the image's header, a `___sc_zst_<A>` sentinel a fresh `A`-aligned byte.
+// Any other one is an error.
 fn finish_symbols(l: &mut L) bool {
     let mut miss = lu::Missing::new();
     for g in 0..l.gs.len() {
@@ -909,7 +910,7 @@ fn finish_symbols(l: &mut L) bool {
             continue;
         }
         let s = l.names.spell(gy.name);
-        if s == "__mh_execute_header" || s == "__mh_dylib_header" {
+        if s == "__mh_execute_header" || s == "__mh_dylib_header" || s == "___dso_handle" {
             l.gs.index_mut(g).kind = G_HEADER;
             continue;
         }
@@ -2618,6 +2619,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         }
     }
     // Exported names, sorted for the trie: a stripped executable's header alone, as `strip` leaves it.
+    // `___dso_handle` stays private to the image, as ld64 keeps it.
     let mut enames = Vector::<u32>::new();
     let mut eflags = Vector::<u64>::new();
     let mut eaddrs = Vector::<u64>::new();
@@ -2628,7 +2630,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         let exported = all && (gy.kind == G_COMMON || gy.kind == G_DEF && (l.syms[gy.sym as usize].ty & N_PEXT) == 0 && kept(
             l,
             gy.sym,
-        )) && lu::listed(&o.exports, l.names.spell(gy.name)) || gy.kind == G_HEADER;
+        )) && lu::listed(&o.exports, l.names.spell(gy.name)) || gy.kind == G_HEADER && l.names.spell(gy.name) != "___dso_handle";
         if exported {
             keyed.push(g as u32);
         }

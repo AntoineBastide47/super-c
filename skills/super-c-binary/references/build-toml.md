@@ -130,11 +130,14 @@ checks it up to the prelude gate (`prelude_stage`), with imports looked up under
 so the result does not depend on the project; the user's modules load after it (`load_user`). The
 entry's name hashes the std directory as given, the target, arch, CPU features, vector settings,
 `--test`, profile and profile names, `--bootstrap-tags`, the constant-evaluation
-budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`). The image records the
-real path of the compiler that wrote it, the content hash of every prelude file as the check read it and the listing of every directory the std
+budgets and `SC_TYPE_COLLIDE`, then the compiler identity (`compiler_id`, `exe_id`: the content hash
+the compiler's linker recorded, else the file's). The image records the
+real path of the compiler that wrote it, the content hash and modification time of every prelude file
+as the check read it, the clock before the load, and the listing of every directory the std
 imports were looked up in, as the load listed it (the std directory's from before the load), so an
 edit made during the check makes the next build check again; a build that finds both unchanged loads the image in place of parsing and checking std, and
-checks the prelude again on any difference. A build that checks the prelude writes the image (not
+checks the prelude again on any difference. A file whose modification time is the recorded one and
+lay two seconds or more before the load keeps its hash unread, as the emit stamp's inputs do. A build that checks the prelude writes the image (not
 when the prelude logged a warning) and loads it back, so both paths continue from the same state. The
 read records a use (its mtime), and `SC_NO_CACHE` turns the cache off. Each compiler build writes new
 images (about 7 MB each), so the cache sweep (`prelude_image::sweep`) deletes an image of another
