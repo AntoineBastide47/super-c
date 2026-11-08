@@ -5,6 +5,7 @@
 import link::util as lu;
 import target::native as nat;
 import utils::names as nm;
+import codegen::obj as ob;
 
 /// Archive the objects `objs` (object format `fmt`, `target::native::OBJ_*`) into `out`. False with the reason in `err` when it fails.
 pub(package) fn archive(fmt: u8, out: str, objs: &Vector<String>, err: &mut String) bool {
@@ -373,14 +374,7 @@ fn field(a: &mut Vector<u8>, s: str, n: usize) {
     }
 }
 
-fn put_be32(a: &mut Vector<u8>, v: u32) {
-    a.push((v >> 24) as u8);
-    a.push((v >> 16 & 0xFF) as u8);
-    a.push((v >> 8 & 0xFF) as u8);
-    a.push((v & 0xFF) as u8);
-}
-
-const fn base<'a>(p: str<'a>) str<'a> {
+pub(package) const fn base<'a>(p: str<'a>) str<'a> {
     let mut i = p.len();
     while i > 0 && p.byte_at(i - 1) != b'/' && p.byte_at(i - 1) != b'\\' {
         i -= 1;
@@ -422,12 +416,12 @@ fn sysv(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &Vector<(String,
     }
     a.extend_from_slice([0x21u8, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A]); // "!<arch>\n"
     header(a, "/", idx);
-    put_be32(a, syms.len() as u32);
+    ob::w32be(a, syms.len() as u32);
     for k in 0..syms.len() {
-        put_be32(a, offs[syms[k].1 as usize]);
+        ob::w32be(a, offs[syms[k].1 as usize]);
     }
     for k in 0..syms.len() {
-        let _ = lu::put_str(a, &syms[k].0);
+        let _ = ob::put_str(a, &syms[k].0);
     }
     if a.len() % 2 != 0 {
         a.push(b'\n');
@@ -461,7 +455,7 @@ fn bsd(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &mut Vector<(Stri
     let mut strs = Vector::<u8>::new();
     let mut strx = Vector::<u32>::new();
     for k in 0..syms.len() {
-        strx.push(lu::put_str(&mut strs, &syms[k].0));
+        strx.push(ob::put_str(&mut strs, &syms[k].0));
     }
     while strs.len() % 8 != 0 {
         strs.push(0);
@@ -481,12 +475,12 @@ fn bsd(objs: &Vector<String>, data: &Vector<Vector<u8>>, syms: &mut Vector<(Stri
     a.extend_from_slice([0x21u8, 0x3C, 0x61, 0x72, 0x63, 0x68, 0x3E, 0x0A]); // "!<arch>\n"
     header(a, format("#1/{}", nl0).as_str(), nl0 + sym_body);
     name_field(a, symdef, nl0);
-    lu::w32(a, 8 * syms.len() as u32);
+    ob::w32(a, 8 * syms.len() as u32);
     for k in 0..syms.len() {
-        lu::w32(a, strx[k]);
-        lu::w32(a, offs[syms[k].1 as usize]);
+        ob::w32(a, strx[k]);
+        ob::w32(a, offs[syms[k].1 as usize]);
     }
-    lu::w32(a, strs.len() as u32);
+    ob::w32(a, strs.len() as u32);
     a.extend_from_slice(&strs);
     for i in 0..data.len() {
         let len = lu::align_up(data.at(i).len() as u64, 8);

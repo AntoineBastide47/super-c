@@ -26,7 +26,7 @@ file is authoritative for where to look first.
 | Frozen (no `UnsafeCell`) of a concrete type | `frozen_top` (`frozen`) | `cc.zcache` | whole build |
 | The caches above (`lw::LCaches`) in a parallel emission | each shard task takes the set of its pooled task context and gives it back (`CEmit::swap_caches`) | `DropCtx.lc` | whole build |
 | Package constants of an emitter (backends, `names_vectors`, the mangler's prelude lookups, niche declarations and C library names) | `CEmit::new`, `Mangler::new`; a shard copies the master's (`CEmit::new_like`, `Mangler::new_like`) | each emitter; the C library names one `Arc` | whole build |
-| Uses of each instruction during slot forwarding | `forward_slots` (`inst_uses`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
+| Uses of each instruction during slot forwarding | `forward_slots` (`lir::verify::uses_edges`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
 | Package part of the native cache key | `nat_base` | a local per loop (a module's key: its emission key xor it) | per loop |
 
 ## optimize (`lir::opt` `Run`, `S_LOWERED` to the end of the `lir_opt` block)
@@ -83,7 +83,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 | Rare blocks | `Live::rare_blocks` (none under `Live::in_place`: wasm) | `Live` | end of the function; the optimizer's `BLOCK_RARE` holds the same fact only when `lir_opt` ran |
 | Next use of each folded operand | `Live::ranges`, reverse walk of the existing operand CSR; `Live::advance` consumes it | `Live.next`, `use_next`; native eviction scoring reads `next` | layout change; cursors advance once per instruction |
 | Register home classes and prefix cuts | `Live::plan`; safe cuts reuse `pat`, `preds`, `pos` | `Live.home`, `cut`, sorted `splits`; native `home_at` and `save_splits` consume them | next home plan or layout change |
-| Operand list of one instruction (edge arguments included) | `live::each_use`; folded: `Live::uses_of` | caller's vector; `Live` | per call |
+| Operand list of one instruction (edge arguments included) | `live::each_use` (over `lir::verify::uses_edges`, which the LIR passes call too); folded: `Live::uses_of` | caller's vector; `Live` | per call |
 | Special operations of the body | `lv::op_flags` | `Gen.opf` | end of the function, retries included |
 | Stack canary | `lver::protected` | `Gen.prot` | end of the function, retries included |
 | Wasm structure (idom, loop headers, forward edges) | `codegen::structure` `Shape::run` (reads `Live`'s `rpo`, `pat`, `preds`) | `Shape` | end of the function |

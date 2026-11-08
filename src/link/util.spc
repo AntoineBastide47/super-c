@@ -1,5 +1,6 @@
 // Byte helpers the linkers share: whole-file reads and writes, little-endian fields, LEB128.
 import std::platform::fs;
+import codegen::obj as ob;
 
 /// The bytes of file `path`, None when it cannot be read in full.
 pub(package) fn read(path: str) Option<Vector<u8>> {
@@ -8,6 +9,15 @@ pub(package) fn read(path: str) Option<Vector<u8>> {
         return None;
     }
     return Some(b);
+}
+
+/// `read_append` of input `path`, its failure the reason in `err`.
+pub(package) fn read_input(path: str, out: &mut Vector<u8>, err: &mut String) bool {
+    if read_append(path, out) {
+        return true;
+    }
+    err.format_into("cannot read '{}'", path);
+    return false;
 }
 
 /// Append the bytes of file `path` to `out`; false when it cannot be read.
@@ -117,47 +127,6 @@ pub(package) const fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
     p32(b, at + 4, (v >> 32) as u32);
 }
 
-/// Append the little-endian 16, 32 and 64 bits of `v` to `o`.
-pub(package) fn w16(o: &mut Vector<u8>, v: u32) {
-    o.push((v & 0xFF) as u8);
-    o.push((v >> 8 & 0xFF) as u8);
-}
-
-pub(package) fn w32(o: &mut Vector<u8>, v: u32) {
-    w16(o, v & 0xFFFF);
-    w16(o, v >> 16);
-}
-
-pub(package) fn w64(o: &mut Vector<u8>, v: u64) {
-    w32(o, v as u32);
-    w32(o, (v >> 32) as u32);
-}
-
-/// Append `s` and a terminating zero to string table `t`; its offset.
-pub(package) fn put_str(t: &mut Vector<u8>, s: str) u32 {
-    let at = t.len() as u32;
-    for i in 0..s.len() {
-        t.push(s.byte_at(i));
-    }
-    t.push(0);
-    return at;
-}
-
-/// Append `v` as unsigned LEB128.
-pub(package) fn uleb(o: &mut Vector<u8>, v: u64) {
-    let mut x = v;
-    // At most 10 bytes for 64 bits.
-    loop {
-        let byte = (x & 0x7F) as u8;
-        x = x >> 7;
-        if x == 0 {
-            o.push(byte);
-            return;
-        }
-        o.push(byte | 0x80);
-    }
-}
-
 /// The size of `v` as unsigned LEB128.
 pub(package) const fn uleb_len(v: u64) usize {
     let mut n: usize = 1;
@@ -194,7 +163,6 @@ pub(package) const fn cstr<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
     return unsafe str::from_raw(b.as_ptr() + at, e - at);
 }
 
-/// `v` rounded up to a multiple of `a` (a power of two).
 /// Whether `p` names a regular file.
 pub(package) fn is_file(p: str) bool {
     let m = fs::stat(p);
@@ -215,6 +183,7 @@ pub(package) const fn be32(b: []u8, at: usize) u32 {
     return b[at] as u32 << 24 | b[at + 1] as u32 << 16 | b[at + 2] as u32 << 8 | b[at + 3] as u32;
 }
 
+/// `v` rounded up to a multiple of `a` (a power of two).
 pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }
@@ -228,4 +197,35 @@ pub(package) fn listed(exports: &Option<Set<String>>, name: str) bool {
         },
         None => true,
     };
+}
+
+/// The undefined symbols of a link: their count and the names of the first 20.
+pub(package) struct Missing {
+    n: usize,
+    names: String,
+}
+
+extend Missing {
+    pub(package) fn new() Missing {
+        return Missing { n: 0, names: String::new() };
+    }
+
+    pub(package) fn add(self: &mut Self, s: str) {
+        self.n += 1;
+        if self.n <= 20 {
+            self.names.format_into("\n  {}", s);
+        }
+    }
+
+    /// Whether no symbol is missing; else the report in `err`.
+    pub(package) fn report(self: &Self, err: &mut String) bool {
+        if self.n == 0 {
+            return true;
+        }
+        err.format_into("{} undefined symbol(s):{}", self.n, self.names.as_str());
+        if self.n > 20 {
+            err.push_str("\n  ...");
+        }
+        return false;
+    }
 }

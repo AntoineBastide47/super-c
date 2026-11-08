@@ -30,10 +30,6 @@ pub(package) const T_F32: u8 = 6;
 pub(package) const T_F64: u8 = 7;
 pub(package) const T_PTR: u8 = 8;
 pub(package) const T_VEC: u8 = 0x40;
-pub(package) const ELEM_I8: u8 = 0;
-pub(package) const ELEM_I16: u8 = 1;
-pub(package) const ELEM_I32: u8 = 2;
-pub(package) const ELEM_I64: u8 = 3;
 pub(package) const ELEM_F32: u8 = 4;
 pub(package) const ELEM_F64: u8 = 5;
 
@@ -86,9 +82,7 @@ pub(package) fn splat_words(b: &mut Body, vt: u8, x: u64) (u32, u32) {
     let n = lanes(vt);
     let nw = (n * lb + 63) / 64;
     let w = b.words.len() as u32;
-    for _ in 0..nw {
-        b.words.push(0);
-    }
+    b.words.resize_default(b.words.len() + nw as usize);
     let mut lv = x;
     if lb < 64 {
         lv &= (1u64 << lb as u64) - 1;
@@ -142,15 +136,12 @@ pub(package) fn splat_of(b: &Body, v: Value) Option<u64> {
 /// target).
 pub(package) const fn type_align(t: u8, ptr: u32) u32 {
     let n = type_bytes(t, ptr);
-    if is_vec(t) && n > 16 {
-        return 16;
-    }
-    return n;
+    return ast::pick(is_vec(t) && n > 16, 16, n);
 }
 
 pub(package) const fn type_bytes(t: u8, ptr: u32) u32 {
     if is_vec(t) {
-        // A lane of 2^e bytes (`ELEM_I8` .. `ELEM_I64`: e = 0 .. 3; `ELEM_F32`, `ELEM_F64`: 2, 3), 2^(t & 7)
+        // A lane of 2^e bytes (integers 0 .. 3: e = 0 .. 3; `ELEM_F32`, `ELEM_F64`: 2, 3), 2^(t & 7)
         // lanes.
         let e = (t >> 3 & 7) as u32;
         let lane = if e >= ELEM_F32 as u32 {
@@ -474,6 +465,157 @@ pub(package) const fn vcmp_ok(c: u16, lt: u8) bool {
     };
 }
 
+/// The integer type of `n` bytes (1, 2, 4; any other size is 8).
+pub(package) const fn int_type(n: u32) u8 {
+    return if n == 1 {
+        T_I8
+    } else if n == 2 {
+        T_I16
+    } else if n == 4 {
+        T_I32
+    } else {
+        T_I64
+    };
+}
+
+/// The integer type with a bit for each of `l` lanes (at most 64).
+pub(package) const fn mask_int(l: u32) u8 {
+    return if l <= 8 {
+        T_I8
+    } else if l <= 16 {
+        T_I16
+    } else if l <= 32 {
+        T_I32
+    } else {
+        T_I64
+    };
+}
+
+/// The `w` low bits set.
+pub(package) const fn mask_of(w: u32) u64 {
+    return if w >= 64 {
+        ~0u64
+    } else {
+        (1u64 << w) - 1
+    };
+}
+
+/// The `bits` low bits of `x`.
+pub(package) const fn trunc_bits(x: u64, bits: u32) u64 {
+    return x & mask_of(bits);
+}
+
+/// `bits` read as a signed integer of `w` bits (1 to 64).
+pub(package) const fn sign_extend(bits: u64, w: u32) i64 {
+    if w >= 64 {
+        return bits as i64;
+    }
+    let sh = (64 - w) as u64;
+    return (bits << sh) as i64 >> sh as i64;
+}
+
+/// The constant `v` of type `ty`.
+pub(package) const fn iconst(ty: u8, v: u64) Inst {
+    return Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
+}
+
+/// The bits of `v` of `b` when an `iconst` defines it.
+pub(package) const fn int_bits(b: &Body, v: Value) Option<u64> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    return Some(t.b as u64 << 32 | t.a as u64);
+}
+
+/// The bits of `v` of `b` when an `iconst` or an `fconst` defines it.
+pub(package) const fn const_bits(b: &Body, v: Value) Option<u64> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST && b.insts[v as usize].op != O_FCONST {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    return Some(t.b as u64 << 32 | t.a as u64);
+}
+
+/// The slot whose address `v` of `b` is, through at most 8 pointer sums, or NONE.
+pub(package) const fn slot_of(b: &Body, v: Value) u32 {
+    let mut x = v;
+    // Each step leaves one pointer sum.
+    for _ in 0..8 {
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+            return NONE;
+        }
+        let t = b.insts[x as usize];
+        if t.op == O_SLOTADDR {
+            return t.a;
+        }
+        if t.op != O_PTRADD {
+            return NONE;
+        }
+        x = t.a;
+    }
+    return NONE;
+}
+
+/// Whether `c` may appear in an unquoted name.
+pub(package) const fn name_byte(c: u8) bool {
+    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b'.' || c == b'$';
+}
+
+/// The number of edges of terminator `t` (`edge_of`), 0 for any other instruction.
+pub(package) const fn edge_count(t: Inst) u32 {
+    return if t.op == O_JMP {
+        1
+    } else if t.op == O_BR {
+        2
+    } else if t.op == O_SWITCH {
+        t.aux as u32 + 1
+    } else {
+        0
+    };
+}
+
+/// Edge `k` of terminator `t` of `b`.
+pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
+    if t.op == O_JMP {
+        return t.a;
+    }
+    if t.op == O_BR {
+        return ast::pick(k == 0, t.b, t.c);
+    }
+    return b.switch_edge(t, k);
+}
+
+/// Whether edges `e` and `f` of `b` go to one block with the same arguments.
+pub(package) fn same_edge(b: &Body, e: u32, f: u32) bool {
+    if b.edge_target(e) != b.edge_target(f) || b.edge_nargs(e) != b.edge_nargs(f) {
+        return false;
+    }
+    for q in 0..b.edge_nargs(e) {
+        if b.edge_arg(e, q) != b.edge_arg(f, q) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// The nearest common dominator of blocks `a` and `c` (Cooper, Harvey and Kennedy): `idom` the immediate
+/// dominators found so far, `num` each block's reverse postorder number.
+pub(package) const fn dom_meet(idom: &Vector<u32>, num: &Vector<u32>, a0: u32, c0: u32) u32 {
+    let mut a = a0;
+    let mut c = c0;
+    // Each step climbs one dominator: at most the block count in all.
+    while a != c {
+        while num[a as usize] > num[c as usize] {
+            a = idom[a as usize];
+        }
+        while num[c as usize] > num[a as usize] {
+            c = idom[c as usize];
+        }
+    }
+    return a;
+}
+
 /// `v` as `n` copies of `x`, its buffer reused.
 pub(package) fn fill<T: Clone + Default + Eq>(v: &mut Vector<T>, n: usize, x: T) {
     v.truncate(0);
@@ -682,11 +824,7 @@ pub(package) const fn tbaa_of(ty: u8) u16 {
     } else {
         ty
     };
-    return if t == T_I8 {
-        0u16
-    } else {
-        t
-    };
+    return ast::pick(t == T_I8, 0u16, t);
 }
 
 /// The scale of `O_PTRADD` `t`.
@@ -1019,10 +1157,7 @@ pub(package) const fn alloc_of(name0: str) u8 {
     if name == "free" || name == "_aligned_free" || name == "sc_lk_free" || name == "sc_lk_aligned_free" {
         return ALLOC_FREE;
     }
-    if name == "memcmp" {
-        return ALLOC_MEMCMP;
-    }
-    return ALLOC_NONE;
+    return ast::pick(name == "memcmp", ALLOC_MEMCMP, ALLOC_NONE);
 }
 /// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
 /// arguments address (and no other); a call may not come back (a panic, a trap, a loop, a recursion, a
@@ -1638,6 +1773,17 @@ extend Body {
         return self.pool[(e + 2 + i) as usize];
     }
 
+    /// Instruction `t` appended with instruction `from`'s location and inline site. Its value.
+    pub(package) fn push_at(self: &mut Self, t: Inst, from: u32) Value {
+        let v = self.insts.len() as u32;
+        self.insts.push(t);
+        self.locs.push(self.locs[from as usize]);
+        if self.inl.len() != 0 {
+            self.inl.push(self.inl[from as usize]);
+        }
+        return v;
+    }
+
     /// The successor edges of terminator `t` into `out`.
     pub(package) fn succ_edges(self: &Self, t: Inst, out: &mut Vector<u32>) {
         out.truncate(0);
@@ -1914,6 +2060,24 @@ extend Held {
 }
 
 extend Package {
+    /// The number of bodies the held part of the package leaves out: all of them when none is held.
+    pub(package) const fn held_bodies(self: &Self) usize {
+        return ast::pick(self.held.body == NONE, self.bodies.len(), self.held.body as usize);
+    }
+
+    /// Per body, the symbol of the function it defines, else NONE.
+    pub(package) fn body_owners(self: &Self) Vector<u32> {
+        let mut owner = Vector::<u32>::new();
+        fill(&mut owner, self.bodies.len(), NONE);
+        for s in 0..self.syms.len() {
+            let y = self.syms[s];
+            if y.kind == SK_FUNC && y.def != NONE {
+                owner[y.def as usize] = s as u32;
+            }
+        }
+        return owner;
+    }
+
     /// An empty package for a data model with `ptr_bytes`-byte pointers.
     pub(package) fn new(ptr_bytes: u32) Package {
         return Package {

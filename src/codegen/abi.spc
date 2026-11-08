@@ -2,6 +2,7 @@
 // travel, in registers, on the stack or through memory the caller provides. The code generator moves the
 // bytes.
 import lir::ir as *;
+import ast::ast as ast;
 
 /// Location kinds.
 pub(package) const L_NONE: u8 = 0; // nothing passes (no result)
@@ -175,17 +176,29 @@ pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp:
         out.ret.kind = L_REG;
         out.ret.n = 1;
         out.ret.p0 = out.parts.len() as u32;
-        out.parts.push(
-            Part {
-                reg: if v {
-                    0
-                } else {
-                    ret_gp
-                },
-                v: v,
-                size: type_bytes(t, ptr) as u8,
-                off: 0,
-            },
-        );
+        out.parts.push(Part { reg: ast::pick(v, 0, ret_gp), v: v, size: type_bytes(t, ptr) as u8, off: 0 });
     }
+}
+
+/// `x` rounded up to a multiple of `a` (a power of two).
+pub(package) const fn align_up(x: u32, a: u32) u32 {
+    return x + a - 1 & ~(a - 1);
+}
+
+/// The size and alignment of signature entry `pt` of `b` (`AGG` and a layout, or a scalar type).
+pub(package) fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
+    if (pt & AGG) != 0 {
+        let l = (pt & ~AGG) as usize;
+        return (b.pool[l], 1u32 << b.pool[l + 1]);
+    }
+    return (type_bytes(pt as u8, ptr), type_align(pt as u8, ptr));
+}
+
+/// The number of fixed parameters of a signature whose fixed word is `fixed` and that has `np`.
+pub(package) const fn nfixed(fixed: u32, np: u32) u32 {
+    return if (fixed & SIG_VARIADIC) != 0 {
+        fixed & ~SIG_VARIADIC
+    } else {
+        np
+    };
 }

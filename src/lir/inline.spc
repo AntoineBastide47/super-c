@@ -10,6 +10,7 @@
 import lir::ir as *;
 import lir::eval as le;
 import lir::verify as lv;
+import ast::ast as ast;
 
 /// A caller takes no more callees past CALLER_MAX instructions, but the ones no bigger than their call.
 pub(package) const CALLER_MAX: u32 = 8000;
@@ -119,16 +120,12 @@ fn folds_small(
             let x = known(e, c, t, q.a);
             let y = known(e, c, t, q.b);
             if x.is_some() && y.is_some() {
-                only = if le::icmp(q.aux, e.type_of(q.a), 8, x.unwrap(), y.unwrap()) {
-                    end.b
-                } else {
-                    end.c
-                };
+                only = ast::pick(le::icmp(q.aux, e.type_of(q.a), 8, x.unwrap(), y.unwrap()), end.b, end.c);
             }
         } else if end.op == O_SWITCH {
             let x = known(e, c, t, end.a);
             if x.is_some() {
-                let m = mask(e.type_of(end.a));
+                let m = mask_of(type_bits(e.type_of(end.a), 8));
                 only = e.switch_edge(end, end.aux);
                 for q in 0..end.aux as u32 {
                     if (e.words[(end.b + q) as usize] & m) == (x.unwrap() & m) {
@@ -158,26 +155,12 @@ fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
     } else {
         return None;
     };
-    let b = if w == v {
-        e
-    } else {
-        c
-    };
+    let b = ast::pick(w == v, e, c);
     if w == VNONE || (w & (VPARAM | VFLAG)) != 0 || b.insts[w as usize].op != O_ICONST || b.insts[w as usize].ty == T_I128 {
         return None;
     }
     let k = b.insts[w as usize];
     return Some(k.b as u64 << 32 | k.a as u64);
-}
-
-// The bits of integer type `ty` up to 64.
-const fn mask(ty: u8) u64 {
-    let n = type_bits(ty, 8);
-    return if n >= 64 {
-        ~0u64
-    } else {
-        (1u64 << n as u64) - 1
-    };
 }
 
 /// The facts of an inlinable body that each call of it reads (`Run.ok`, set once the body is final):
@@ -412,11 +395,7 @@ extend Inliner {
                 };
                 nb += e.blocks.len() as u32 + 1;
                 ni += e.insts.len() as u32;
-                np += e.params.len() as u32 + if t.ty == T_NONE {
-                    0u32
-                } else {
-                    1u32
-                };
+                np += e.params.len() as u32 + ast::pick(t.ty == T_NONE, 0u32, 1u32);
                 self.cmap[i as usize] = if s.kparam == NONE {
                     VNONE
                 } else {
@@ -657,16 +636,9 @@ extend Inliner {
     // Whether body `e` uses value `p` only as a load's address.
     fn loads_only(e: &Body, p: Value) bool {
         let mut uses = Vector::<Value>::new();
-        let mut edges = Vector::<u32>::new();
         for x in 0..e.insts.len() {
             let t = e.insts[x];
-            lv::uses(e, t, &mut uses);
-            e.succ_edges(t, &mut edges);
-            for j in 0..edges.len() {
-                for a in 0..e.edge_nargs(edges[j]) {
-                    uses.push(e.edge_arg(edges[j], a));
-                }
-            }
+            lv::uses_edges(e, t, &mut uses);
             for u in 0..uses.len() {
                 if uses[u] == p && !(t.op == O_LOAD && u == 0) {
                     return false;
@@ -694,7 +666,7 @@ extend Inliner {
             o.lines.extend_from_slice(e.lines[1..e.lines.len()]);
         }
         o.params.extend_copy(&e.params);
-        fill_bool_to(&mut self.done, o.pool.len());
+        self.done.resize_default(o.pool.len());
         fill(&mut self.csym, e.syms.len(), 0);
         for q in 0..e.syms.len() {
             self.csym[q] = Inliner::ref_in(&mut self.smap, &mut o.syms, e.syms[q]);
@@ -844,11 +816,7 @@ extend Inliner {
 // The body index of the function direct call `t` of `c` calls (NONE: none defined).
 const fn callee_of(pk: &Package, c: &Body, t: Inst) u32 {
     let sy = pk.syms[c.syms[t.a as usize] as usize];
-    return if sy.kind == SK_FUNC && sy.def != NONE {
-        sy.def
-    } else {
-        NONE
-    };
+    return ast::pick(sy.kind == SK_FUNC && sy.def != NONE, sy.def, NONE);
 }
 
 // The inline site of caller instruction `i` of `c`: the call it came from, 0 for the caller's own; with
@@ -875,9 +843,4 @@ const fn ev(s: Site, v: Value) Value {
         return VPARAM | s.pbase + (v & ~VPARAM);
     }
     return s.vbase + (v & ~VFLAG) | v & VFLAG;
-}
-
-// `v` grown to `n` entries, the new ones false.
-fn fill_bool_to(v: &mut Vector<bool>, n: usize) {
-    v.resize_default(n);
 }

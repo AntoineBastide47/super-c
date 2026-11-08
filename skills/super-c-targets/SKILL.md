@@ -43,7 +43,7 @@ target (`src/target/native.spc`), then the link (`src/link/link.spc`). A target 
    assembler and code generator; a known one needs its calling convention and its object format's
    relocation kinds ([code-generator.md](references/code-generator.md)).
 4. The object writer and the linker ([object-and-linker.md](references/object-and-linker.md)).
-5. Dispatch: `supported`, `own_linker`, `obj_kind`, `asm_native` and `object` in `src/target/native.spc`
+5. Dispatch: `supported`, `own_linker`, `obj_kind` and `object` in `src/target/native.spc`
    name the new pair by its parts (`tgt::callconv_of(os, isa).name`, `tgt::obj_of(os).name`), as the
    existing predicates do.
 6. The tests (Validation), then a CI lane that builds and runs on the target.

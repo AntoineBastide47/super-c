@@ -17,6 +17,9 @@ import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
 import stdlib;
+import ast::ast as ast;
+import codegen::obj as ob;
+import target::coff as *;
 
 const NONE: u32 = 0xFFFFFFFF;
 
@@ -37,26 +40,15 @@ pub(package) struct Opts {
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
-const SCN_CODE: u32 = 0x20;
 const SCN_IDATA: u32 = 0x40;
 const SCN_UDATA: u32 = 0x80;
 const SCN_LNK_INFO: u32 = 0x200;
 const SCN_LNK_REMOVE: u32 = 0x800;
-const SCN_LNK_COMDAT: u32 = 0x1000;
-const SCN_NRELOC_OVFL: u32 = 0x01000000;
-const SCN_DISCARDABLE: u32 = 0x02000000;
-const SCN_EXEC: u32 = 0x20000000;
-const SCN_READ: u32 = 0x40000000;
-const SCN_WRITE: u32 = 0x80000000;
 
 const REL_ABSOLUTE: u32 = 0;
-const REL_ADDR64: u32 = 1;
 const REL_ADDR32: u32 = 2;
-const REL_ADDR32NB: u32 = 3;
-const REL_REL32: u32 = 4;
 const REL_REL32_5: u32 = 9;
 const REL_SECTION: u32 = 10;
-const REL_SECREL: u32 = 11;
 
 const CLASS_EXTERNAL: u8 = 2;
 const CLASS_STATIC: u8 = 3;
@@ -259,11 +251,7 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         xc_hi: 0,
         entry_pdata_at: 0,
         shared: o.shared,
-        base: if o.shared {
-            DLL_BASE
-        } else {
-            EXE_BASE
-        },
+        base: ast::pick(o.shared, DLL_BASE, EXE_BASE),
         onexit_at: 0,
         exports: Vector::<u32>::new(),
         edata_at: 0,
@@ -284,17 +272,12 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
         let at = blob.len();
-        if lu::take_held(o.mem, p, blob) {
-            if !parse_object(l, p, at, blob) {
-                return false;
-            }
-            continue;
-        }
-        if ar::is_archive(p) {
+        let held = lu::take_held(o.mem, p, blob);
+        if !held && ar::is_archive(p) {
             if !ars.add(nat::OBJ_COFF, p, &mut l.err) {
                 return false;
             }
-        } else if !read_object(l, p, blob) {
+        } else if !held && !lu::read_input(p, blob, &mut l.err) || !parse_object(l, p, at, blob) {
             return false;
         }
     }
@@ -362,15 +345,6 @@ const fn short_name<'a>(b: Slice<'a, u8>, at: usize) str<'a> {
         n += 1;
     }
     return unsafe str::from_raw(b.as_ptr() + at, n);
-}
-
-fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
-    let at = blob.len();
-    if !lu::read_append(path, blob) {
-        l.err.format_into("cannot read '{}'", path);
-        return false;
-    }
-    return parse_object(l, path, at, blob);
 }
 
 // Enter the object at `at` of `blob` (named `path` in messages).
@@ -866,10 +840,7 @@ fn prepare_imports(l: &mut L) {
 
 // The C runtime functions the entry calls.
 const fn entry_imports(shared: bool) Slice<'static, str<'static>> {
-    if shared {
-        return DLL_IMPORTS;
-    }
-    return ENTRY_IMPORTS;
+    return ast::pick(shared, DLL_IMPORTS, ENTRY_IMPORTS);
 }
 
 // Whether a global still needs a definition: undefined, and not an alias.
@@ -980,11 +951,7 @@ fn load_dll(l: &mut L, o: &Opts, dll: str, required: bool) bool {
     let pe = lu::r32(b, 0x3C) as usize;
     let nsec = lu::r16(b, pe + 6) as usize;
     let opt = pe + 24;
-    let dd = opt + if lu::r16(b, opt) == 0x20B {
-        112usize
-    } else {
-        96usize
-    };
+    let dd = opt + ast::pick(lu::r16(b, opt) == 0x20B, 112usize, 96usize);
     let erva = lu::r32(b, dd);
     if erva == 0 {
         return true;
@@ -1052,8 +1019,7 @@ fn finish_symbols(l: &mut L, main: u32) bool {
         l.err.push_str("undefined symbol: main");
         return false;
     }
-    let mut missing = String::new();
-    let mut nmiss: usize = 0;
+    let mut miss = lu::Missing::new();
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
         let s = l.names.spell(gy.name);
@@ -1074,19 +1040,9 @@ fn finish_symbols(l: &mut L, main: u32) bool {
         if k != G_UNDEF && !(gy.iat && k != G_IMPORT) {
             continue;
         }
-        nmiss += 1;
-        if nmiss <= 20 {
-            missing.format_into("\n  {}", s);
-        }
+        miss.add(s);
     }
-    if nmiss != 0 {
-        l.err.format_into("{} undefined symbol(s):{}", nmiss, missing.as_str());
-        if nmiss > 20 {
-            l.err.push_str("\n  ...");
-        }
-        return false;
-    }
-    return true;
+    return miss.report(&mut l.err);
 }
 
 // ---- layout ---------------------------------------------------------------------------------------------
@@ -1853,7 +1809,7 @@ fn write_exports(l: &L, o: &Opts, img: &mut Vector<u8>) {
     let enpt = eat + 4 * n;
     let eord = enpt + 4 * n;
     let mut str_at = eord + 2 * n;
-    let leaf = base_name(&o.out);
+    let leaf = ar::base(&o.out);
     let name_rva = str_at;
     for i in 0..leaf.len() {
         img[d + (str_at - dr) as usize + i] = leaf.byte_at(i);
@@ -1877,14 +1833,6 @@ fn write_exports(l: &L, o: &Opts, img: &mut Vector<u8>) {
         }
         str_at += s.len() as u64 + 1;
     }
-}
-
-const fn base_name(p: str) str {
-    let mut i = p.len();
-    while i > 0 && p.byte_at(i - 1) != b'/' && p.byte_at(i - 1) != b'\\' {
-        i -= 1;
-    }
-    return p.slice(i, p.len());
 }
 
 fn write_synthetic(l: &mut L, o: &Opts, main: u32, img: &mut Vector<u8>) {
@@ -2042,14 +1990,14 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     while i < l.relocs.len() {
         let page = l.relocs[i] & ~0xFFFu32;
         let start = rb.len();
-        lu::w32(&mut rb, page);
-        lu::w32(&mut rb, 0);
+        ob::w32(&mut rb, page);
+        ob::w32(&mut rb, 0);
         while i < l.relocs.len() && (l.relocs[i] & ~0xFFFu32) == page {
-            lu::w16(&mut rb, 0xA000 | l.relocs[i] & 0xFFF);
+            ob::w16(&mut rb, 0xA000 | l.relocs[i] & 0xFFF);
             i += 1;
         }
         if (rb.len() - start) % 4 != 0 {
-            lu::w16(&mut rb, 0);
+            ob::w16(&mut rb, 0);
         }
         let sz = (rb.len() - start) as u32;
         lu::p32(&mut rb, start + 4, sz);
@@ -2068,7 +2016,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     // The string table for the long section and symbol names; unless stripped, the COFF symbol table GNU
     // ld keeps: each named symbol of a loaded section, by its output section and offset in it.
     let mut strs = Vector::<u8>::new();
-    lu::w32(&mut strs, 0);
+    ob::w32(&mut strs, 0);
     let mut hdr_names = Vector::<String>::new();
     for k in 0..l.osecs.len() {
         let n = l.sn.spell(l.osecs[k].name);
@@ -2076,7 +2024,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
             hdr_names.push(String::from_str(n));
         } else {
             hdr_names.push(format("/{}", strs.len()));
-            let _ = lu::put_str(&mut strs, n);
+            let _ = ob::put_str(&mut strs, n);
         }
     }
     let mut syms = Vector::<u8>::new();
@@ -2104,20 +2052,13 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
                     );
                 }
             } else {
-                lu::w32(&mut syms, 0);
-                let at = lu::put_str(&mut strs, n);
-                lu::w32(&mut syms, at);
+                ob::w32(&mut syms, 0);
+                let at = ob::put_str(&mut strs, n);
+                ob::w32(&mut syms, at);
             }
-            lu::w32(&mut syms, (sc.at + y.value as u64) as u32);
-            lu::w16(&mut syms, sc.out + 1);
-            lu::w16(
-                &mut syms,
-                if (sc.flags & SCN_CODE) != 0 {
-                    0x20u32
-                } else {
-                    0u32
-                },
-            );
+            ob::w32(&mut syms, (sc.at + y.value as u64) as u32);
+            ob::w16(&mut syms, sc.out + 1);
+            ob::w16(&mut syms, ast::pick((sc.flags & SCN_CODE) != 0, 0x20u32, 0u32));
             syms.push(y.class);
             syms.push(0);
             nsyms += 1;
@@ -2137,27 +2078,20 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     // The headers.
     let nsec = l.osecs.len() + nrel_sec;
     let mut h = Vector::<u8>::new();
-    lu::w16(&mut h, 0x5A4D);
+    ob::w16(&mut h, 0x5A4D);
     for _ in 0..29 {
-        lu::w16(&mut h, 0);
+        ob::w16(&mut h, 0);
     }
-    lu::w32(&mut h, 64);
-    lu::w32(&mut h, 0x00004550);
-    lu::w16(&mut h, 0x8664);
-    lu::w16(&mut h, nsec as u32);
-    lu::w32(&mut h, 0);
-    lu::w32(&mut h, sym_off as u32);
-    lu::w32(&mut h, nsyms);
-    lu::w16(&mut h, 240);
+    ob::w32(&mut h, 64);
+    ob::w32(&mut h, 0x00004550);
+    ob::w16(&mut h, 0x8664);
+    ob::w16(&mut h, nsec as u32);
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, sym_off as u32);
+    ob::w32(&mut h, nsyms);
+    ob::w16(&mut h, 240);
     // An executable image, large-address aware; a DLL.
-    lu::w16(
-        &mut h,
-        if l.shared {
-            0x2022u32
-        } else {
-            0x0022u32
-        },
-    );
+    ob::w16(&mut h, ast::pick(l.shared, 0x2022u32, 0x0022u32));
     // The optional header.
     let mut code: u64 = 0;
     let mut idata: u64 = 0;
@@ -2175,44 +2109,37 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
     idata += rel_raw * nrel_sec as u64;
     let image_end = rel_rva + rel_vsz * nrel_sec as u64;
     let text = &l.osecs[l.o_text as usize];
-    lu::w16(&mut h, 0x20B);
+    ob::w16(&mut h, 0x20B);
     h.push(14);
     h.push(0);
-    lu::w32(&mut h, code as u32);
-    lu::w32(&mut h, idata as u32);
-    lu::w32(&mut h, udata as u32);
-    lu::w32(&mut h, (text.rva + l.entry_at) as u32);
-    lu::w32(&mut h, text.rva as u32);
-    lu::w64(&mut h, l.base);
-    lu::w32(&mut h, SECT_ALIGN as u32);
-    lu::w32(&mut h, FILE_ALIGN as u32);
-    lu::w16(&mut h, 6);
-    lu::w16(&mut h, 0);
-    lu::w16(&mut h, 0);
-    lu::w16(&mut h, 0);
-    lu::w16(&mut h, 6);
-    lu::w16(&mut h, 0);
-    lu::w32(&mut h, 0);
-    lu::w32(&mut h, image_end as u32);
-    lu::w32(&mut h, lu::align_up(headers_size(nsec), FILE_ALIGN) as u32);
-    lu::w32(&mut h, 0);
-    lu::w16(&mut h, 3); // the console subsystem
+    ob::w32(&mut h, code as u32);
+    ob::w32(&mut h, idata as u32);
+    ob::w32(&mut h, udata as u32);
+    ob::w32(&mut h, (text.rva + l.entry_at) as u32);
+    ob::w32(&mut h, text.rva as u32);
+    ob::w64(&mut h, l.base);
+    ob::w32(&mut h, SECT_ALIGN as u32);
+    ob::w32(&mut h, FILE_ALIGN as u32);
+    ob::w16(&mut h, 6);
+    ob::w16(&mut h, 0);
+    ob::w16(&mut h, 0);
+    ob::w16(&mut h, 0);
+    ob::w16(&mut h, 6);
+    ob::w16(&mut h, 0);
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, image_end as u32);
+    ob::w32(&mut h, lu::align_up(headers_size(nsec), FILE_ALIGN) as u32);
+    ob::w32(&mut h, 0);
+    ob::w16(&mut h, 3); // the console subsystem
     // High-entropy addresses, a movable image, no-execute data, terminal-server aware.
-    lu::w16(&mut h, 0x8160);
+    ob::w16(&mut h, 0x8160);
     // The stack (mingw-w64's 2 MiB reserved unless the link names its size) and mingw-w64's heap defaults.
-    lu::w64(
-        &mut h,
-        if o.stack != 0 {
-            o.stack
-        } else {
-            0x200000u64
-        },
-    );
-    lu::w64(&mut h, 0x1000);
-    lu::w64(&mut h, 0x100000);
-    lu::w64(&mut h, 0x1000);
-    lu::w32(&mut h, 0);
-    lu::w32(&mut h, 16);
+    ob::w64(&mut h, ast::pick(o.stack != 0, o.stack, 0x200000u64));
+    ob::w64(&mut h, 0x1000);
+    ob::w64(&mut h, 0x100000);
+    ob::w64(&mut h, 0x1000);
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, 16);
     // The data directories: import, exception, base relocation, TLS, import address table.
     let (_lookup, iat) = import_tables(l);
     let mut nlib: u64 = 0;
@@ -2237,8 +2164,8 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
         } else {
             (0u64, 0u64)
         };
-        lu::w32(&mut h, rva as u32);
-        lu::w32(&mut h, size as u32);
+        ob::w32(&mut h, rva as u32);
+        ob::w32(&mut h, size as u32);
     }
     // The section headers, `.reloc` last.
     for k in 0..l.osecs.len() {
@@ -2264,10 +2191,10 @@ fn section_header(h: &mut Vector<u8>, name: str, vsize: u64, rva: u64, raw: u64,
             },
         );
     }
-    lu::w32(h, vsize as u32);
-    lu::w32(h, rva as u32);
-    lu::w32(h, raw as u32);
-    lu::w32(
+    ob::w32(h, vsize as u32);
+    ob::w32(h, rva as u32);
+    ob::w32(h, raw as u32);
+    ob::w32(
         h,
         if raw == 0 {
             0u32
@@ -2275,8 +2202,8 @@ fn section_header(h: &mut Vector<u8>, name: str, vsize: u64, rva: u64, raw: u64,
             off as u32
         },
     );
-    lu::w32(h, 0);
-    lu::w32(h, 0);
-    lu::w32(h, 0);
-    lu::w32(h, flags);
+    ob::w32(h, 0);
+    ob::w32(h, 0);
+    ob::w32(h, 0);
+    ob::w32(h, flags);
 }

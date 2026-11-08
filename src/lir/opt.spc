@@ -39,6 +39,7 @@ import lir::print as lp;
 import lir::switches as sws;
 import stdlib;
 import std::platform::clock as pclock;
+import ast::ast as ast;
 
 // `Opt.repl` of an instruction without a value that the rebuild drops.
 const DROPPED: u32 = 0xFFFFFFFE;
@@ -669,7 +670,7 @@ extend Opt {
     // pointer or 0 (an iterator's `next`) gives such an integer. Whether any changed.
     fn ptr_params(self: &mut Self, pk: &Package, b: &mut Body) bool {
         let np = b.params.len();
-        let it = int_type_of(pk.ptr_bytes);
+        let it = int_type(pk.ptr_bytes);
         let e0 = b.blocks[0].param_len as usize;
         fill(&mut self.pok, np, false);
         let mut any = false;
@@ -1323,11 +1324,7 @@ extend Opt {
                         f & BLOCK_UNLIKELY
                     };
                 }
-                let add = if all == BLOCK_RARE {
-                    BLOCK_COLD
-                } else {
-                    all
-                };
+                let add = ast::pick(all == BLOCK_RARE, BLOCK_COLD, all);
                 if (b.blocks[k].flags | add) != b.blocks[k].flags {
                     b.blocks.index_mut(k).flags |= add;
                     changed = true;
@@ -1475,13 +1472,7 @@ extend Opt {
                 0u8
             };
             let round = f == core::SIMD_FLOOR || f == core::SIMD_CEIL || f == core::SIMD_TRUNC || f == lu::ROUND_AWAY;
-            self.unr.vfn.push(
-                if round && !pk.vround || f == core::SIMD_FMA && !pk.fma {
-                    0u8
-                } else {
-                    f
-                },
-            );
+            self.unr.vfn.push(ast::pick(round && !pk.vround || f == core::SIMD_FMA && !pk.fma, 0u8, f));
         }
         let none_u8: []u8 = [];
         let none_u32: []u32 = [];
@@ -1606,20 +1597,8 @@ extend Opt {
             if ib == self.in_loop(h, b.edge_target(t.c)) {
                 continue;
             }
-            let e = if ib {
-                t.c
-            } else {
-                t.b
-            };
-            if b.edge_nargs(e) == 0 || args_among(
-                b,
-                e,
-                if ib {
-                    t.b
-                } else {
-                    t.c
-                },
-            ) {
+            let e = ast::pick(ib, t.c, t.b);
+            if b.edge_nargs(e) == 0 || args_among(b, e, ast::pick(ib, t.b, t.c)) {
                 continue;
             }
             let x = b.add_block(none);
@@ -1783,11 +1762,7 @@ extend Opt {
             let bk = b.blocks[k as usize];
             let oi = bk.start + bk.len - 2;
             let mut o = b.insts[oi as usize];
-            let v = if o.a == ci {
-                o.b
-            } else {
-                o.a
-            };
+            let v = ast::pick(o.a == ci, o.b, o.a);
             o.a = accv;
             o.b = v;
             b.insts[oi as usize] = o;
@@ -1825,7 +1800,10 @@ extend Opt {
         if !pk.pairs || b.naked || !pa::has_i128(b) {
             return false;
         }
-        self.tables(pk, b, K_GRAPH);
+        // The rewrite reads the reverse postorder alone (`cfg`), and every table goes after it.
+        if self.kept < K_GRAPH {
+            self.cfg(b);
+        }
         self.pairs.run(b, &self.order, &self.rpo, &mut self.pbody);
         let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
@@ -1839,7 +1817,10 @@ extend Opt {
         if pk.vector == 0 || b.naked || !wd::has_wide(b, pk.vector) {
             return false;
         }
-        self.tables(pk, b, K_GRAPH);
+        // The rewrite reads the reverse postorder alone (`cfg`), and every table goes after it.
+        if self.kept < K_GRAPH {
+            self.cfg(b);
+        }
         self.wide.run(b, pk.vector, &self.order, &self.rpo, &mut self.pbody);
         let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
@@ -1947,11 +1928,7 @@ extend Opt {
                     if stat {
                         // A static: stored back only when the loop changed it, then on along a copy of `e`.
                         let (x, y) = if ty == T_F32 || ty == T_F64 {
-                            let it = if ty == T_F32 {
-                                T_I32
-                            } else {
-                                T_I64
-                            };
+                            let it = ast::pick(ty == T_F32, T_I32, T_I64);
                             (
                                 b.emit(Inst { op: O_BITCAST, ty: it, aux: 0, a: w, b: VNONE, c: VNONE }, l),
                                 b.emit(Inst { op: O_BITCAST, ty: it, aux: 0, a: v, b: VNONE, c: VNONE }, l)
@@ -2029,16 +2006,8 @@ extend Opt {
                 ty: T_NONE,
                 aux: 0,
                 a: cv,
-                b: if self.gstay {
-                    on
-                } else {
-                    xe
-                },
-                c: if self.gstay {
-                    xe
-                } else {
-                    on
-                },
+                b: ast::pick(self.gstay, on, xe),
+                c: ast::pick(self.gstay, xe, on),
             },
             loc,
         );
@@ -2056,16 +2025,8 @@ extend Opt {
                     ty: T_NONE,
                     aux: 0,
                     a: self.gchain[q],
-                    b: if stay {
-                        on
-                    } else {
-                        side
-                    },
-                    c: if stay {
-                        side
-                    } else {
-                        on
-                    },
+                    b: ast::pick(stay, on, side),
+                    c: ast::pick(stay, side, on),
                 },
                 loc,
             );
@@ -2098,11 +2059,7 @@ extend Opt {
                     let v = self.ops[q as usize];
                     if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
                         self.rcount[v as usize] += 1;
-                        self.ruser[v as usize] = if t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH {
-                            NONE
-                        } else {
-                            i
-                        };
+                        self.ruser[v as usize] = ast::pick(t.op == O_JMP || t.op == O_BR || t.op == O_SWITCH, NONE, i);
                     }
                 }
             }
@@ -3131,7 +3088,7 @@ extend Opt {
                     d = if d == NONE {
                         q
                     } else {
-                        self.intersect(d, q)
+                        dom_meet(&self.idom, &self.rpo, d, q)
                     };
                 }
                 if d != self.idom[k] {
@@ -3183,21 +3140,6 @@ extend Opt {
                 self.stack.push(self.kids[c as usize] as u64 << 1);
             }
         }
-    }
-
-    const fn intersect(self: &Self, a0: u32, c0: u32) u32 {
-        let mut a = a0;
-        let mut c = c0;
-        // Each step climbs one dominator: at most the block count in all.
-        while a != c {
-            while self.rpo[a as usize] > self.rpo[c as usize] {
-                a = self.idom[a as usize];
-            }
-            while self.rpo[c as usize] > self.rpo[a as usize] {
-                c = self.idom[c as usize];
-            }
-        }
-        return a;
     }
 
     // The alias class of every address value: CL_NOALIAS + k for one that comes from exclusive reference
@@ -3423,7 +3365,7 @@ extend Opt {
                 let n = if t.b == VNONE {
                     Option::<u64>::Some(0)
                 } else {
-                    const_of(b, t.b)
+                    int_bits(b, t.b)
                 };
                 self.oder[i] = k;
                 self.ooffs[i] = if o == OFF_ANY || n.is_none() {
@@ -3526,10 +3468,11 @@ extend Opt {
     // class outside that scope's copy.
     const fn acc(self: &Self, i: u32, a: Value) u8 {
         let c = self.class(a);
-        if c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.member(i) & class_bit(c)) == 0 {
-            return CL_MANY;
-        }
-        return c;
+        return ast::pick(
+            c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.member(i) & class_bit(c)) == 0,
+            CL_MANY,
+            c,
+        );
     }
 
     // The class of load or store `i`'s access (`acls`) as loop `h` sees it: CL_MANY for a scope's whose
@@ -3757,11 +3700,7 @@ extend Opt {
                 }
                 continue;
             }
-            let freed = if op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE {
-                fresh
-            } else {
-                0u64
-            };
+            let freed = ast::pick(op == O_RET || op == O_CALL && call_alloc(pk, b, t) == ALLOC_FREE, fresh, 0u64);
             // A call's uses are its arguments.
             let kept = if op == O_CALL {
                 ~pk.syms[b.syms[t.a as usize] as usize].esc
@@ -4212,11 +4151,7 @@ extend Opt {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let t = b.insts[i as usize];
-                let a = if t.op == O_STORE || t.op == O_MEMCPY {
-                    t.a
-                } else {
-                    VNONE
-                };
+                let a = ast::pick(t.op == O_STORE || t.op == O_MEMCPY, t.a, VNONE);
                 let k = entry_of(e, &fwd, a);
                 if k != NONE {
                     looped |= 1u64 << k as u64;
@@ -4255,7 +4190,7 @@ extend Opt {
                 if k == NONE {
                     continue;
                 }
-                let ok = t.op == O_LOAD && t.a == v || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && t.a == v != (t.b == v) && const_of(
+                let ok = t.op == O_LOAD && t.a == v || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && t.a == v != (t.b == v) && int_bits(
                     b,
                     t.c,
                 ).is_some();
@@ -4278,11 +4213,7 @@ extend Opt {
             args.push(b.param(ne, q));
         }
         let at = b.locs[e.start as usize];
-        let it = if pk.ptr_bytes == 8 {
-            T_I64
-        } else {
-            T_I32
-        };
+        let it = ast::pick(pk.ptr_bytes == 8, T_I64, T_I32);
         b.begin(ne);
         let mut made: u32 = 0;
         for k in 0..np {
@@ -4433,7 +4364,7 @@ extend Opt {
             if !ok || n < 2 || !int || (mask & leaves) != leaves {
                 continue;
             }
-            let ct = int_type_of(cs);
+            let ct = int_type(cs);
             let mut v = VNONE;
             // The joined store's alignment: the chunk's first byte's store's; no type tag (it writes several).
             let mut al: u16 = 0;
@@ -4453,7 +4384,7 @@ extend Opt {
                             b,
                             blk,
                             i,
-                            Inst { op: O_BITCAST, ty: int_type_of(sz), aux: 0, a: x, b: VNONE, c: VNONE },
+                            Inst { op: O_BITCAST, ty: int_type(sz), aux: 0, a: x, b: VNONE, c: VNONE },
                         );
                     }
                     if sz < cs {
@@ -4501,7 +4432,7 @@ extend Opt {
         ) || u.ty == T_PTR {
             return false;
         }
-        let ct = int_type_of(cs);
+        let ct = int_type(cs);
         let slot = (2 * k + c) as usize;
         if self.aggload[slot] == NONE {
             // The aggregate's alignment, no type tag (the chunk holds several values).
@@ -4520,7 +4451,7 @@ extend Opt {
             let sh = self.constant(b, ct, 8 * o as u64);
             x = self.before(b, blk, i, Inst { op: O_LSHR, ty: ct, aux: 0, a: x, b: sh, c: VNONE });
         }
-        let it = int_type_of(s);
+        let it = int_type(s);
         if s < cs {
             x = self.before(b, blk, i, Inst { op: O_TRUNC, ty: it, aux: 0, a: x, b: VNONE, c: VNONE });
         }
@@ -4569,11 +4500,7 @@ extend Opt {
                     for r in 0..nu {
                         once = once && (r == q || self.ops[(u0 + r) as usize] != v);
                     }
-                    self.rslot[s] = if call && once && self.rslot[s] == NONE {
-                        i
-                    } else {
-                        bad
-                    };
+                    self.rslot[s] = ast::pick(call && once && self.rslot[s] == NONE, i, bad);
                 }
             }
         }
@@ -4615,7 +4542,7 @@ extend Opt {
         if !int {
             return false;
         }
-        let ct = int_type_of(cs);
+        let ct = int_type(cs);
         let at = (2 * s + c) as usize;
         // A load of the whole chunk after the call, with only loads of the slot between (an earlier walk's):
         // the chunk's load, which the later ones read.
@@ -4652,7 +4579,7 @@ extend Opt {
             x = self.before(b, blk, i, Inst { op: O_LSHR, ty: ct, aux: 0, a: x, b: sh, c: VNONE });
         }
         if sz < cs {
-            x = self.before(b, blk, i, Inst { op: O_TRUNC, ty: int_type_of(sz), aux: 0, a: x, b: VNONE, c: VNONE });
+            x = self.before(b, blk, i, Inst { op: O_TRUNC, ty: int_type(sz), aux: 0, a: x, b: VNONE, c: VNONE });
         }
         if is_float(u.ty) {
             x = self.before(b, blk, i, Inst { op: O_BITCAST, ty: u.ty, aux: 0, a: x, b: VNONE, c: VNONE });
@@ -4755,12 +4682,8 @@ extend Opt {
                 changed = self.forward_params(b, k as u32) || changed;
                 // Its one edge decides its dominator's branch condition here and below.
                 let t = term(b, self.idom[k]);
-                if t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) && const_of(b, t.a).is_none() {
-                    let taken: u32 = if b.edge_target(t.b) == k as u32 {
-                        1
-                    } else {
-                        0
-                    };
+                if t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) && int_bits(b, t.a).is_none() {
+                    let taken: u32 = ast::pick(b.edge_target(t.b) == k as u32, 1, 0);
                     self.enter(LOG_COND, t.a, taken);
                     self.order_facts(b, t.a, taken != 0);
                 }
@@ -4863,11 +4786,7 @@ extend Opt {
                     if b.insts[i as usize].op == O_SELECT && self.repl[i as usize] == VNONE {
                         let d = self.cond_at(b, k as u32, u.a, THREAD_DEPTH);
                         if d != 0 {
-                            self.repl[i as usize] = if d == 1 {
-                                u.b
-                            } else {
-                                u.c
-                            };
+                            self.repl[i as usize] = ast::pick(d == 1, u.b, u.c);
                             changed = true;
                         }
                     }
@@ -4875,15 +4794,7 @@ extend Opt {
                     if u.op == O_RET && is_op(b, u.a, O_ICMP) {
                         let d = self.cond_at(b, k as u32, u.a, THREAD_DEPTH);
                         if d != 0 {
-                            let c = self.constant(
-                                b,
-                                b.type_of(u.a),
-                                if d == 1 {
-                                    1u64
-                                } else {
-                                    0u64
-                                },
-                            );
+                            let c = self.constant(b, b.type_of(u.a), ast::pick(d == 1, 1u64, 0u64));
                             b.insts.index_mut(i as usize).a = c;
                             changed = true;
                         }
@@ -4992,7 +4903,7 @@ extend Opt {
             return false;
         }
         let n = if t.op == O_MEMSET && (t.aux & MEM_VOLATILE) == 0 {
-            const_of(b, t.c).unwrap_or(0)
+            int_bits(b, t.c).unwrap_or(0)
         } else {
             0
         };
@@ -5017,7 +4928,7 @@ extend Opt {
             let s = b.insts[j as usize];
             if s.op == O_MEMSET {
                 // The fill's bytes this store writes; all of them: it goes.
-                let fl = const_of(b, s.c).unwrap_or(0) as i64;
+                let fl = int_bits(b, s.c).unwrap_or(0) as i64;
                 if self.repl[j as usize] != VNONE || self.val(s.a) != a {
                     x += 1;
                     continue;
@@ -5103,23 +5014,27 @@ extend Opt {
         return w;
     }
 
+    // The scoped table `LOG_*` `t` names.
+    fn table(self: &mut Self, t: u8) &mut Map<u64, u32> {
+        return if t == LOG_PURE {
+            &mut self.pure
+        } else if t == LOG_MEM {
+            &mut self.mem
+        } else if t == LOG_COND {
+            &mut self.cond
+        } else if t == LOG_REL {
+            &mut self.rel
+        } else if t == LOG_EQ {
+            &mut self.eqs
+        } else {
+            &mut self.ub
+        };
+    }
     fn unwind(self: &mut Self, to: usize) {
         // Each entry undoes one insertion.
         while self.log.len() > to {
             let (table, key, prev) = self.log.pop().unwrap();
-            let m = if table == LOG_PURE {
-                &mut self.pure
-            } else if table == LOG_MEM {
-                &mut self.mem
-            } else if table == LOG_COND {
-                &mut self.cond
-            } else if table == LOG_REL {
-                &mut self.rel
-            } else if table == LOG_EQ {
-                &mut self.eqs
-            } else {
-                &mut self.ub
-            };
+            let m = self.table(table);
             if prev == NONE {
                 let _ = m.remove(&key);
             } else {
@@ -5129,19 +5044,7 @@ extend Opt {
     }
 
     fn enter(self: &mut Self, table: u8, key: u64, v: u32) {
-        let m = if table == LOG_PURE {
-            &mut self.pure
-        } else if table == LOG_MEM {
-            &mut self.mem
-        } else if table == LOG_COND {
-            &mut self.cond
-        } else if table == LOG_REL {
-            &mut self.rel
-        } else if table == LOG_EQ {
-            &mut self.eqs
-        } else {
-            &mut self.ub
-        };
+        let m = self.table(table);
         let prev = switch m.get(&key) {
             Some(p) => *p,
             None => NONE,
@@ -5264,23 +5167,14 @@ extend Opt {
     // block `k` (`hoisted`): its operands are final, so it is simplified now, as no later walk may see it
     // (the rewalk's own). The value it is.
     fn side_select(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, ty: u8, c: Value, x: Value, y: Value) Value {
-        let v = b.insts.len() as u32;
-        b.insts.push(Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y });
-        b.locs.push(b.locs[i as usize]);
-        if b.inl.len() != 0 {
-            b.inl.push(b.inl[i as usize]);
-        }
+        let v = b.push_at(Inst { op: O_SELECT, ty: ty, aux: 0, a: c, b: x, c: y }, i);
         self.repl.push(VNONE);
         self.frepl.push(VNONE);
         self.moved.push(true);
         self.blk_of.push(k);
         self.hoisted.push(k as u64 << 32 | v as u64);
         let r = simplify(pk, b, v);
-        return if r != VNONE {
-            r
-        } else {
-            v
-        };
+        return ast::pick(r != VNONE, r, v);
     }
 
     // Branch `t`, instruction `i` ending block `k`, whose sides each enter a block of no parameters that `k`
@@ -5519,7 +5413,7 @@ extend Opt {
                 self.enter(LOG_EQ, eq_key(t.a, t.b), 1);
             }
             // `x != 0`: `x` is at least 1 (`lbound`).
-            if (t.aux == C_NE && holds || t.aux == C_EQ && !holds) && const_of(b, t.b) == Some(0u64) && (t.a & VFLAG) == 0 {
+            if (t.aux == C_NE && holds || t.aux == C_EQ && !holds) && int_bits(b, t.b) == Some(0u64) && (t.a & VFLAG) == 0 {
                 self.enter(LOG_UB, LB_KEY | t.a as u64, t.b << 1 | 1);
             }
         }
@@ -5534,14 +5428,14 @@ extend Opt {
         }
         // A constant side bounds the other: `x <u k`, or `y <=u k` when `k <u y` fails; from below `k <u y`,
         // or `x >=u k` when `x <u k` fails (`lbound`).
-        if lt && const_of(b, y).is_some() && (x & VFLAG) == 0 {
+        if lt && int_bits(b, y).is_some() && (x & VFLAG) == 0 {
             self.enter(LOG_UB, x, y << 1 | 1);
-        } else if !lt && const_of(b, x).is_some() && (y & VFLAG) == 0 {
+        } else if !lt && int_bits(b, x).is_some() && (y & VFLAG) == 0 {
             self.enter(LOG_UB, y, x << 1);
         }
-        if lt && const_of(b, x).is_some() && (y & VFLAG) == 0 {
+        if lt && int_bits(b, x).is_some() && (y & VFLAG) == 0 {
             self.enter(LOG_UB, LB_KEY | y as u64, x << 1 | 1);
-        } else if !lt && const_of(b, y).is_some() && (x & VFLAG) == 0 {
+        } else if !lt && int_bits(b, y).is_some() && (x & VFLAG) == 0 {
             self.enter(LOG_UB, LB_KEY | x as u64, y << 1);
         }
     }
@@ -5554,13 +5448,13 @@ extend Opt {
             return None;
         }
         let m = width_mask(b.type_of(v), pk.ptr_bytes);
-        let k = const_of(b, v);
+        let k = int_bits(b, v);
         if k.is_some() {
             return Some(k.unwrap() & m);
         }
         let mut best = Option::<u64>::None;
         if let Some(f) = self.ub.get(&(LB_KEY | v as u64)) {
-            let c = const_of(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
+            let c = int_bits(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
             // Above the type's greatest value: the block does not run.
             best = Some(
                 if (*f & 1) == 0 || c == m {
@@ -5574,8 +5468,8 @@ extend Opt {
             return best;
         }
         let t = b.insts[v as usize];
-        if (t.op == O_ADD || t.op == O_SUB) && !is_vec(t.ty) && t.ty != T_I128 && const_of(b, t.b).is_some() {
-            let kb = const_of(b, t.b).unwrap() & m;
+        if (t.op == O_ADD || t.op == O_SUB) && !is_vec(t.ty) && t.ty != T_I128 && int_bits(b, t.b).is_some() {
+            let kb = int_bits(b, t.b).unwrap() & m;
             let d = if t.op == O_SUB {
                 kb
             } else {
@@ -5611,13 +5505,13 @@ extend Opt {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
         }
-        let k = const_of(b, v);
+        let k = int_bits(b, v);
         if k.is_some() {
             return Some(k.unwrap() & width_mask(b.type_of(v), pk.ptr_bytes));
         }
         let mut best = Option::<u64>::None;
         if let Some(f) = self.ub.get(&(v as u64)) {
-            let c = const_of(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
+            let c = int_bits(b, *f >> 1).unwrap() & width_mask(b.type_of(*f >> 1), pk.ptr_bytes);
             best = if (*f & 1) == 0 {
                 Some(c)
             } else if c == 0 {
@@ -5649,7 +5543,7 @@ extend Opt {
             }
         } else if t.op == O_LSHR {
             let x = self.ubound(pk, b, t.a, depth - 1);
-            let s = const_of(b, t.b);
+            let s = int_bits(b, t.b);
             if s.is_some() && (s.unwrap() & m) < type_bits(t.ty, pk.ptr_bytes) as u64 {
                 let hi = if x.is_some() {
                     x.unwrap()
@@ -5659,7 +5553,7 @@ extend Opt {
                 r = Some(hi >> (s.unwrap() & m));
             }
         } else if t.op == O_UREM || t.op == O_UDIV {
-            let d = const_of(b, t.b);
+            let d = int_bits(b, t.b);
             if d.is_some() && (d.unwrap() & m) != 0 {
                 let dv = d.unwrap() & m;
                 if t.op == O_UREM {
@@ -5714,10 +5608,7 @@ extend Opt {
         if r.is_some() && best.is_some() {
             return Some(r.unwrap().min(best.unwrap()));
         }
-        if r.is_some() {
-            return r;
-        }
-        return best;
+        return ast::pick(r.is_some(), r, best);
     }
 
     // Instruction `i`, which the bounds in scope (`ubound`) decide: a remainder or quotient by a constant
@@ -5733,7 +5624,7 @@ extend Opt {
         // A low mask less a value its bound keeps within the mask clears the value's bits: their `xor`, which
         // takes the operands in either order.
         if t.op == O_SUB {
-            let k = const_of(b, t.a);
+            let k = int_bits(b, t.a);
             let m = width_mask(t.ty, pk.ptr_bytes);
             let kv = k.unwrap_or(1) & m;
             if k.is_some() && (kv & kv.wrapping_add(1)) == 0 {
@@ -5745,7 +5636,7 @@ extend Opt {
             return VNONE;
         }
         if t.op == O_UREM || t.op == O_UDIV || t.op == O_LSHR || t.op == O_AND {
-            let k = const_of(b, t.b);
+            let k = int_bits(b, t.b);
             if k.is_none() {
                 return VNONE;
             }
@@ -5767,13 +5658,10 @@ extend Opt {
                 b.insts[i as usize] = iconst(t.ty, 0);
                 return VNONE;
             }
-            if t.op == O_AND && (c & c.wrapping_add(1)) == 0 && hi <= c {
-                return t.a;
-            }
-            return VNONE;
+            return ast::pick(t.op == O_AND && (c & c.wrapping_add(1)) == 0 && hi <= c, t.a, VNONE);
         }
         if t.op == O_ICMP && t.aux <= C_UGE {
-            let k = const_of(b, t.b);
+            let k = int_bits(b, t.b);
             let at = b.type_of(t.a);
             if k.is_none() || is_vec(at) || at == T_I128 {
                 return VNONE;
@@ -5853,7 +5741,7 @@ extend Opt {
         if let Some(r) = self.rel.get(&rel_key(x, y)) {
             return Some((*r != 0 != neg) as u64);
         }
-        if is_op(b, y, O_ADD) && const_of(b, b.insts[y as usize].b) == Some(1u64) {
+        if is_op(b, y, O_ADD) && int_bits(b, b.insts[y as usize].b) == Some(1u64) {
             if let Some(r) = self.rel.get(&rel_key(b.insts[y as usize].a, x)) {
                 if *r != 0 {
                     return Some(neg as u64);
@@ -6207,7 +6095,7 @@ extend Opt {
         if u < jb.start || u >= jb.start + jb.len || t.op != O_ICMP || t.a != (VPARAM | p) || !is_int(ty) || ty == T_I128 {
             return false;
         }
-        let k = const_of(b, t.b);
+        let k = int_bits(b, t.b);
         if k.is_none() {
             return false;
         }
@@ -6231,18 +6119,18 @@ extend Opt {
                         done.push(ed);
                     }
                     let a = b.edge_arg(ed, q);
-                    let c = const_of(b, a);
-                    let sel = c.is_none() && (a & (VPARAM | VFLAG)) == 0 && b.insts[a as usize].op == O_SELECT && self.icount[a as usize] == 1 && const_of(
+                    let c = int_bits(b, a);
+                    let sel = c.is_none() && (a & (VPARAM | VFLAG)) == 0 && b.insts[a as usize].op == O_SELECT && self.icount[a as usize] == 1 && int_bits(
                         b,
                         b.insts[a as usize].b,
-                    ).is_some() && const_of(b, b.insts[a as usize].c).is_some();
+                    ).is_some() && int_bits(b, b.insts[a as usize].c).is_some();
                     if c.is_none() && !sel {
                         return false;
                     }
                     if pass == 1 && sel {
                         let st = b.insts[a as usize];
-                        let r0 = le::icmp(t.aux, ty, pk.ptr_bytes, const_of(b, st.b).unwrap(), k.unwrap()) as u64;
-                        let r1 = le::icmp(t.aux, ty, pk.ptr_bytes, const_of(b, st.c).unwrap(), k.unwrap()) as u64;
+                        let r0 = le::icmp(t.aux, ty, pk.ptr_bytes, int_bits(b, st.b).unwrap(), k.unwrap()) as u64;
+                        let r1 = le::icmp(t.aux, ty, pk.ptr_bytes, int_bits(b, st.c).unwrap(), k.unwrap()) as u64;
                         let x0 = self.tconst(b, t.ty, r0);
                         let x1 = self.tconst(b, t.ty, r1);
                         b.insts[a as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: st.a, b: x0, c: x1 };
@@ -6471,14 +6359,7 @@ extend Opt {
             if pt.op != O_BR || b.edge_target(pt.b) != k && b.edge_target(pt.c) != k {
                 return false;
             }
-            (
-                p,
-                if b.edge_target(pt.b) == k {
-                    pt.b
-                } else {
-                    pt.c
-                }
-            )
+            (p, ast::pick(b.edge_target(pt.b) == k, pt.b, pt.c))
         } else {
             return false;
         };
@@ -6518,7 +6399,7 @@ extend Opt {
             }
             let st = term(b, src);
             for q in 0..edge_count(st) {
-                let ed = edge_at(b, st, q);
+                let ed = edge_of(b, st, q);
                 if b.edge_target(ed) != j {
                     continue;
                 }
@@ -6600,10 +6481,7 @@ extend Opt {
             }
             return v;
         }
-        if (v & VFLAG) == 0 && self.made_in(v, j) {
-            return VNONE;
-        }
-        return v;
+        return ast::pick((v & VFLAG) == 0 && self.made_in(v, j), VNONE, v);
     }
 
     // Whether instruction `i` is one of block `j`'s; a constant `thread` made (`tconst`) is no block's.
@@ -6617,7 +6495,7 @@ extend Opt {
     // `k` starts (`entry_fact`); None when they do not.
     fn implied(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, a: Value, c: u64, depth: u32) Option<bool> {
         let m = width_mask(b.type_of(a), pk.ptr_bytes);
-        let ka = const_of(b, a);
+        let ka = int_bits(b, a);
         if ka.is_some() {
             return Some((ka.unwrap() & m) == (c & m));
         }
@@ -6636,7 +6514,7 @@ extend Opt {
     // Whether it did.
     fn null_test(self: &Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
-        if t.aux != C_EQ && t.aux != C_NE || const_of(b, t.b) != Some(0u64) {
+        if t.aux != C_EQ && t.aux != C_NE || int_bits(b, t.b) != Some(0u64) {
             return false;
         }
         let s = slice_of(b, t.a);
@@ -6686,16 +6564,8 @@ extend Opt {
                     ty: t.ty,
                     aux: 0,
                     a: t.a,
-                    b: if side == 0 {
-                        d
-                    } else {
-                        z
-                    },
-                    c: if side == 0 {
-                        z
-                    } else {
-                        d
-                    },
+                    b: ast::pick(side == 0, d, z),
+                    c: ast::pick(side == 0, z, d),
                 },
             );
             b.insts[i as usize] = Inst { op: o.op, ty: t.ty, aux: 0, a: a, b: s, c: VNONE };
@@ -6767,7 +6637,7 @@ extend Opt {
                     return false;
                 }
                 wt = w;
-            } else if const_of(b, v).is_none() {
+            } else if int_bits(b, v).is_none() {
                 return false;
             }
         }
@@ -6781,7 +6651,7 @@ extend Opt {
             wide[q as usize] = if is_op(b, v, O_TRUNC) {
                 b.insts[v as usize].a
             } else {
-                let c = const_of(b, v).unwrap();
+                let c = int_bits(b, v).unwrap();
                 let s = if bits < 64 && (c >> (bits - 1) as u64 & 1) != 0 {
                     c | u64::MAX << bits as u64
                 } else {
@@ -6881,11 +6751,7 @@ extend Opt {
         let test = is_op(b, t.a, O_ICMP) && !same_edge(b, t.b, t.c);
         let mut any = false;
         for q in 0..2u32 {
-            let mut e = if q == 0 {
-                t.b
-            } else {
-                t.c
-            };
+            let mut e = ast::pick(q == 0, t.b, t.c);
             // Where the edge runs, the condition holds (the true edge) or fails.
             let holds = q == 0;
             let mut own = false;
@@ -6893,15 +6759,7 @@ extend Opt {
                 let v = b.edge_arg(e, k);
                 let mut w = VNONE;
                 if test && v == t.a {
-                    w = self.constant(
-                        b,
-                        b.type_of(v),
-                        if holds {
-                            1u64
-                        } else {
-                            0u64
-                        },
-                    );
+                    w = self.constant(b, b.type_of(v), ast::pick(holds, 1u64, 0u64));
                 } else if is_op(b, v, O_SELECT) {
                     let s = b.insts[v as usize];
                     let same = s.a == t.a;
@@ -6912,11 +6770,7 @@ extend Opt {
                         opp = x.a == y.a && x.b == y.b && x.aux == opposite(y.aux);
                     }
                     if same || opp {
-                        w = if same == holds {
-                            s.b
-                        } else {
-                            s.c
-                        };
+                        w = ast::pick(same == holds, s.b, s.c);
                     }
                 }
                 if w == VNONE {
@@ -6948,11 +6802,7 @@ extend Opt {
         if st.op == O_BR && !same_edge(b, st.b, st.c) && b.edge_target(st.b) == k != (b.edge_target(st.c) == k) {
             let r = same_test(b, st.a, c);
             if r != 0 {
-                return if r == 1 == (b.edge_target(st.b) == k) {
-                    1
-                } else {
-                    2
-                };
+                return ast::pick(r == 1 == (b.edge_target(st.b) == k), 1, 2);
             }
         }
         return self.cond_at(b, src, c, depth - 1);
@@ -6977,7 +6827,7 @@ extend Opt {
             let st = term(b, src);
             let mut here = true;
             for n in 0..edge_count(st) {
-                let ed = edge_at(b, st, n);
+                let ed = edge_of(b, st, n);
                 if b.edge_target(ed) != k {
                     continue;
                 }
@@ -7010,8 +6860,8 @@ extend Opt {
         };
         if c.is_none() && is_op(b, s.a, O_ICMP) {
             let e = b.insts[s.a as usize];
-            let kb = const_of(b, e.b);
-            if (e.aux == C_EQ || e.aux == C_NE) && kb.is_some() && const_of(b, e.a).is_none() {
+            let kb = int_bits(b, e.b);
+            if (e.aux == C_EQ || e.aux == C_NE) && kb.is_some() && int_bits(b, e.a).is_none() {
                 let r = self.entry_fact(pk, b, k, e.a, kb.unwrap(), THREAD_DEPTH);
                 if r.is_some() {
                     c = Some((r.unwrap() == (e.aux == C_EQ)) as u64);
@@ -7049,7 +6899,7 @@ extend Opt {
                 }
                 let st = term(b, src);
                 for n in 0..edge_count(st) {
-                    let ed = edge_at(b, st, n);
+                    let ed = edge_of(b, st, n);
                     if b.edge_target(ed) != k {
                         continue;
                     }
@@ -7069,7 +6919,7 @@ extend Opt {
         let st = term(b, src);
         let mut only = NONE;
         for n in 0..edge_count(st) {
-            let ed = edge_at(b, st, n);
+            let ed = edge_of(b, st, n);
             if b.edge_target(ed) == k {
                 if only != NONE {
                     return None;
@@ -7112,10 +6962,10 @@ extend Opt {
             if a == cond && cond != VNONE {
                 return Some(holds);
             }
-            return const_of(b, a);
+            return int_bits(b, a);
         }
         if (v & VFLAG) != 0 || self.blk_of[v as usize] != j || depth == 0 {
-            return const_of(b, v);
+            return int_bits(b, v);
         }
         // A comparison `param_cmp` moved into the edges is its parameter now.
         for x in 0..self.trepl.len() {
@@ -7129,28 +6979,14 @@ extend Opt {
             return None;
         }
         if t.op == O_ICONST {
-            return const_of(b, v);
+            return int_bits(b, v);
         }
         if t.op == O_SELECT {
             let c = self.decide(pk, b, k, j, e, t.a, cond, holds, depth - 1);
             if c.is_none() {
                 return c;
             }
-            return self.decide(
-                pk,
-                b,
-                k,
-                j,
-                e,
-                if c.unwrap() != 0 {
-                    t.b
-                } else {
-                    t.c
-                },
-                cond,
-                holds,
-                depth - 1,
-            );
+            return self.decide(pk, b, k, j, e, ast::pick(c.unwrap() != 0, t.b, t.c), cond, holds, depth - 1);
         }
         if t.op != O_ICMP && t.op != O_ZEXT && t.op != O_SEXT && t.op != O_TRUNC && (t.op < O_ADD || t.op > O_XOR || t.op == O_MUL || t.op >= O_SDIV && t.op <= O_UREM) {
             return None;
@@ -7248,11 +7084,7 @@ extend Opt {
         }
         if (v & VPARAM) != 0 {
             let r = self.prepl[(v & ~VPARAM) as usize];
-            return if r == VNONE {
-                v
-            } else {
-                r
-            };
+            return ast::pick(r == VNONE, v, r);
         }
         if (v & VFLAG) != 0 && self.frepl[(v & ~VFLAG) as usize] != VNONE {
             return self.frepl[(v & ~VFLAG) as usize];
@@ -7332,8 +7164,8 @@ extend Opt {
         if is_vec(t.ty) || t.ty == T_I128 {
             return false;
         }
-        let ca = const_of(b, t.a);
-        let cb = const_of(b, t.b);
+        let ca = int_bits(b, t.a);
+        let cb = int_bits(b, t.b);
         let signed = (t.aux & OV_SIGNED) != 0;
         let base = if t.op == O_ADDO {
             O_ADD
@@ -7412,7 +7244,7 @@ extend Opt {
             // A branch or a switch on a constant jumps, and so does a branch on a condition the edge into a
             // dominating block decides.
             let mut c = if t.op == O_BR || t.op == O_SWITCH {
-                const_of(b, t.a)
+                int_bits(b, t.a)
             } else {
                 Option::<u64>::None
             };
@@ -7424,13 +7256,7 @@ extend Opt {
                 }
             }
             if t.op == O_BR && c.is_some() {
-                t = jump(
-                    if c.unwrap() != 0 {
-                        t.b
-                    } else {
-                        t.c
-                    },
-                );
+                t = jump(ast::pick(c.unwrap() != 0, t.b, t.c));
             } else if t.op == O_BR {
                 // The if-conversions first, which speculate the sides; then sides that differ in operands
                 // alone.
@@ -7479,11 +7305,11 @@ extend Opt {
             return !same(t, t0);
         }
         // A reference is never null (`nonnull`).
-        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(b, t.b) == Some(0u64) && nonnull(
+        if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (int_bits(b, t.b) == Some(0u64) && nonnull(
             b,
             t.a,
             pk.ptr_bytes,
-        ) || const_of(b, t.a) == Some(0u64) && nonnull(b, t.b, pk.ptr_bytes)) {
+        ) || int_bits(b, t.a) == Some(0u64) && nonnull(b, t.b, pk.ptr_bytes)) {
             t = iconst(t.ty, (t.aux == C_NE) as u64);
         }
         // An unsigned compare with a constant that the largest value of its other side settles (`umax_cmp`): a
@@ -7497,8 +7323,8 @@ extend Opt {
         // An equality of a value from before the block with a constant that the branches into the block
         // settle (`entry_fact`): the `None` test of an `Option` a loop that stops on `Some` returns. So is
         // `x <u 1`, which is `x == 0`, and `x >=u 1` (a bounds check of index 0 after a length test).
-        let below1 = t.op == O_ICMP && (t.aux == C_ULT || t.aux == C_UGE) && const_of(b, t.b) == Some(1u64);
-        if below1 && (t.a & VFLAG) == 0 && !((t.a & VPARAM) == 0 && (t.a as usize >= self.blk_of.len() || self.blk_of[t.a as usize] == k)) && const_of(
+        let below1 = t.op == O_ICMP && (t.aux == C_ULT || t.aux == C_UGE) && int_bits(b, t.b) == Some(1u64);
+        if below1 && (t.a & VFLAG) == 0 && !((t.a & VPARAM) == 0 && (t.a as usize >= self.blk_of.len() || self.blk_of[t.a as usize] == k)) && int_bits(
             b,
             t.a,
         ).is_none() {
@@ -7507,19 +7333,15 @@ extend Opt {
                 t = iconst(t.ty, (r.unwrap() == (t.aux == C_ULT)) as u64);
             }
         } else if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
-            let kb = const_of(b, t.b);
-            let a = if kb.is_some() {
-                t.a
-            } else {
-                t.b
-            };
+            let kb = int_bits(b, t.b);
+            let a = ast::pick(kb.is_some(), t.a, t.b);
             let kc = if kb.is_some() {
                 kb
             } else {
-                const_of(b, t.a)
+                int_bits(b, t.a)
             };
             let local = (a & VFLAG) != 0 || (a & VPARAM) == 0 && (a as usize >= self.blk_of.len() || self.blk_of[a as usize] == k);
-            if kc.is_some() && const_of(b, a).is_none() && !local {
+            if kc.is_some() && int_bits(b, a).is_none() && !local {
                 let r = self.entry_fact(pk, b, k, a, kc.unwrap(), THREAD_DEPTH);
                 if r.is_some() {
                     t = iconst(t.ty, (r.unwrap() == (t.aux == C_EQ)) as u64);
@@ -7554,7 +7376,10 @@ extend Opt {
         // offset, made right before it once, and the offset joins the access's (`ldr x, [x, #off]` on
         // arm64 after one `add`; the accesses of other fields share the address). Not for an address moved
         // or made in this walk: its place in the instructions is not where it runs.
-        if (t.op == O_LOAD || t.op == O_STORE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE && b.insts[t.a as usize].c != 0 && !self.moved[t.a as usize] && !slot_based(
+        // An indexed address from an indexed address with an offset (an element of a row at an offset) the
+        // same: the rows' elements at one index are then one address and constant offsets (`lir::slp` packs
+        // their loads).
+        if (t.op == O_LOAD || t.op == O_STORE || t.op == O_PTRADD && t.b != VNONE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE && b.insts[t.a as usize].c != 0 && !self.moved[t.a as usize] && !slot_based(
             b,
             b.insts[t.a as usize].a,
         ) {
@@ -7576,41 +7401,16 @@ extend Opt {
                 }
                 t.a = q;
                 t.c = off as u32;
-            }
-        }
-        // An indexed address from an indexed address with an offset (an element of a row at an offset):
-        // from that address without the offset, made as above, the offset joining this one's. The rows'
-        // elements at one index are then one address and constant offsets (`lir::slp` packs their loads).
-        if t.op == O_PTRADD && t.b != VNONE && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE && b.insts[t.a as usize].c != 0 && !self.moved[t.a as usize] && !slot_based(
-            b,
-            b.insts[t.a as usize].a,
-        ) {
-            let pa = b.insts[t.a as usize];
-            let off = (t.c as i32) as i64 + (pa.c as i32) as i64;
-            if off >= -0x80000000 && off <= 0x7FFFFFFF {
-                let mut q = switch self.unbiased.get(&t.a) {
-                    Some(x) => *x,
-                    None => NONE,
-                };
-                if q == NONE {
-                    q = self.before(
-                        b,
-                        self.blk_of[t.a as usize],
-                        t.a,
-                        Inst { op: O_PTRADD, ty: pa.ty, aux: pa.aux & PTR_SCALE, a: pa.a, b: pa.b, c: 0 },
-                    );
-                    self.unbiased.insert(t.a, q);
+                if t.op == O_PTRADD {
+                    // `q` may leave the object: no longer in bounds of its base.
+                    t.aux &= ~PTR_INBOUNDS;
                 }
-                // `q` may leave the object: no longer in bounds of its base.
-                t.a = q;
-                t.c = off as u32;
-                t.aux &= ~PTR_INBOUNDS;
             }
         }
         b.insts[i as usize] = t;
         // A copy or a fill of no byte does nothing.
         let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
-            const_of(b, t.c)
+            int_bits(b, t.c)
         } else {
             Option::<u64>::None
         };
@@ -7641,14 +7441,14 @@ extend Opt {
         }
         // A fill of 1, 2, 4 or 8 bytes with a constant byte is a store of the integer of those bytes.
         let fill = if t.op == O_MEMSET && (t.aux & MEM_VOLATILE) == 0 {
-            const_of(b, t.b)
+            int_bits(b, t.b)
         } else {
             Option::<u64>::None
         };
         if size.is_some() && fill.is_some() {
             let n = size.unwrap();
             if n == 1 || n == 2 || n == 4 || n == 8 {
-                let ty = int_type_of(n as u32);
+                let ty = int_type(n as u32);
                 let v = self.constant(b, ty, (fill.unwrap() & 0xFF) * 0x0101010101010101 & width_mask(ty, 8));
                 // At a constant offset from an address: that address and the offset.
                 let (base, off) = if is_op(b, t.a, O_PTRADD) && b.insts[t.a as usize].b == VNONE {
@@ -7674,7 +7474,7 @@ extend Opt {
                 let ca = self.base(b, c.a);
                 let cb = self.base(b, c.b);
                 let apart = (c.aux & MEM_OVERLAP) == 0 || ca != NONE && cb != NONE && ca != cb;
-                if c.op == O_MEMCPY && c.a == t.b && const_of(b, c.c) == size && c.b != t.b && apart {
+                if c.op == O_MEMCPY && c.a == t.b && int_bits(b, c.c) == size && c.b != t.b && apart {
                     t.b = c.b;
                     t.aux |= MEM_OVERLAP;
                     b.insts[i as usize] = t;
@@ -7702,8 +7502,8 @@ extend Opt {
                 let p = b.insts[i as usize - 1];
                 let ty = b.type_of(t.b);
                 let n = type_bytes(ty, pk.ptr_bytes);
-                let kp = const_of(b, p.b);
-                let kt = const_of(b, t.b);
+                let kp = int_bits(b, p.b);
+                let kt = int_bits(b, t.b);
                 let fit = (n == 1 || n == 2 || n == 4) && ty != T_PTR && is_int(ty) && p.aux == t.aux && p.a == t.a && kp.is_some() && kt.is_some() && b.type_of(
                     p.b,
                 ) == ty;
@@ -7753,11 +7553,11 @@ extend Opt {
             }
             // A load of bytes no write touches (a private slot's, a read-only referent's: `frozen`) reads one
             // value in every memory state.
-            let st = if p == PRIV_KEPT || i as usize < self.acls.len() && self.acls[i as usize] == CL_FROZEN {
-                KEPT_STATE
-            } else {
-                self.state
-            };
+            let st = ast::pick(
+                p == PRIV_KEPT || i as usize < self.acls.len() && self.acls[i as usize] == CL_FROZEN,
+                KEPT_STATE,
+                self.state,
+            );
             let seen = self.recall(t.a, t.c, t.ty, st);
             if seen != VNONE {
                 self.repl[i as usize] = seen;
@@ -7768,7 +7568,7 @@ extend Opt {
                 self.repl[i as usize] = part;
                 return true;
             }
-            if fold_data(pk, b, i) || self.fold_ptr(pk, b, i) {
+            if fold_data(pk, b, i) || fold_ptr(pk, b, i, self.unit) {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
@@ -7993,11 +7793,11 @@ extend Opt {
             return;
         }
         let x = b.insts[t.a as usize];
-        let k2 = const_of(b, t.b);
+        let k2 = int_bits(b, t.b);
         if x.op != O_ADD && x.op != O_SUB || x.ty != t.ty || k2.is_none() {
             return;
         }
-        let k1 = const_of(b, x.b);
+        let k1 = int_bits(b, x.b);
         if k1.is_none() {
             return;
         }
@@ -8011,7 +7811,7 @@ extend Opt {
         } else {
             0u64.wrapping_sub(k2.unwrap())
         };
-        let kv = self.constant(b, t.ty, le::trunc_bits(s1.wrapping_add(s2), type_bits(t.ty, pk.ptr_bytes)));
+        let kv = self.constant(b, t.ty, trunc_bits(s1.wrapping_add(s2), type_bits(t.ty, pk.ptr_bytes)));
         b.insts[i as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: x.a, b: kv, c: VNONE };
     }
 
@@ -8038,7 +7838,7 @@ extend Opt {
             } else {
                 (s.b, s.a)
             };
-            if self.outside(x, h) || !self.outside(y, h) || const_of(b, y).is_some() {
+            if self.outside(x, h) || !self.outside(y, h) || int_bits(b, y).is_some() {
                 continue;
             }
             let p = self.preh[h as usize];
@@ -8066,10 +7866,10 @@ extend Opt {
             return;
         }
         let x = b.insts[t.a as usize];
-        let k = const_of(b, t.b);
+        let k = int_bits(b, t.b);
         let bits = type_bits(t.ty, pk.ptr_bytes) as u64;
         let k1 = if x.op == t.op {
-            const_of(b, x.b)
+            int_bits(b, x.b)
         } else {
             Option::<u64>::None
         };
@@ -8083,14 +7883,13 @@ extend Opt {
             b.insts[i as usize] = Inst { op: t.op, ty: t.ty, aux: 0, a: x.a, b: sv, c: VNONE };
             return;
         }
-        if t.op == O_ASHR || x.op != if t.op == O_LSHR {
-            O_SHL
-        } else {
-            O_LSHR
-        } || k.is_none() || k.unwrap() == 0 || k.unwrap() >= bits || const_of(b, x.b) != k {
+        if t.op == O_ASHR || x.op != ast::pick(t.op == O_LSHR, O_SHL, O_LSHR) || k.is_none() || k.unwrap() == 0 || k.unwrap() >= bits || int_bits(
+            b,
+            x.b,
+        ) != k {
             return;
         }
-        let ones = le::trunc_bits(0xFFFFFFFFFFFFFFFF, bits as u32);
+        let ones = trunc_bits(0xFFFFFFFFFFFFFFFF, bits as u32);
         let m = if t.op == O_LSHR {
             ones >> k.unwrap()
         } else {
@@ -8107,7 +7906,7 @@ extend Opt {
         if t.op != O_MUL && t.op != O_UDIV && t.op != O_UREM || !is_int(t.ty) || t.ty == T_I128 {
             return;
         }
-        let c = const_of(b, t.b);
+        let c = int_bits(b, t.b);
         if c.is_none() || c.unwrap() == 0 || (c.unwrap() & c.unwrap() - 1) != 0 {
             return;
         }
@@ -8118,11 +7917,7 @@ extend Opt {
             return;
         }
         let s = self.constant(b, t.ty, y.trailing_zeros() as u64);
-        let op = if t.op == O_MUL {
-            O_SHL
-        } else {
-            O_LSHR
-        };
+        let op = ast::pick(t.op == O_MUL, O_SHL, O_LSHR);
         b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: s, c: VNONE };
     }
 
@@ -8312,7 +8107,7 @@ extend Opt {
             let mut sh: u64 = 0;
             let mut zv = v;
             if x.op == O_SHL && x.ty == t.ty {
-                let c = const_of(b, x.b);
+                let c = int_bits(b, x.b);
                 if c.is_none() {
                     return false;
                 }
@@ -8350,11 +8145,7 @@ extend Opt {
                 first = lv;
             }
         }
-        let off = if fwd {
-            boff
-        } else {
-            roff
-        };
+        let off = ast::pick(fwd, boff, roff);
         if sp != 0 || seen != (1u32 << n) - 1 || off < -0x80000000 || off > 0x7FFFFFFF || n == 1 {
             return false;
         }
@@ -8411,7 +8202,7 @@ extend Opt {
             if u.op != O_ICMP || u.aux != C_EQ || u.ty != t.ty || x != VNONE && u.a != x || vals.len() == SET_MAX {
                 return false;
             }
-            let c = const_of(b, u.b);
+            let c = int_bits(b, u.b);
             if c.is_none() {
                 return false;
             }
@@ -8504,18 +8295,7 @@ extend Opt {
         let lv = self.constant(b, ty, lo);
         let d = self.before(b, k, i, Inst { op: O_SUB, ty: ty, aux: 0, a: x, b: lv, c: VNONE });
         let span = self.constant(b, ty, hi.wrapping_sub(lo) & m);
-        b.insts[i as usize] = Inst {
-            op: O_ICMP,
-            ty: t.ty,
-            aux: if neg {
-                C_UGT
-            } else {
-                C_ULE
-            },
-            a: d,
-            b: span,
-            c: VNONE,
-        };
+        b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: ast::pick(neg, C_UGT, C_ULE), a: d, b: span, c: VNONE };
         return true;
     }
 
@@ -8554,39 +8334,13 @@ extend Opt {
             b,
             k,
             i,
-            Inst {
-                op: O_ICMP,
-                ty: T_I8,
-                aux: if signed {
-                    C_SLT
-                } else {
-                    C_ULT
-                },
-                a: pa,
-                b: qa,
-                c: VNONE,
-            },
+            Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(signed, C_SLT, C_ULT), a: pa, b: qa, c: VNONE },
         );
         let m = self.before(
             b,
             k,
             i,
-            Inst {
-                op: O_SELECT,
-                ty: ty,
-                aux: 0,
-                a: lt,
-                b: if min {
-                    pa
-                } else {
-                    qa
-                },
-                c: if min {
-                    qa
-                } else {
-                    pa
-                },
-            },
+            Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: ast::pick(min, pa, qa), c: ast::pick(min, qa, pa) },
         );
         b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: pc, a: x, b: m, c: VNONE };
         // The minimum or maximum, made before `i`, leaves its loop in one more walk.
@@ -8667,18 +8421,7 @@ extend Opt {
                 b,
                 k,
                 i,
-                Inst {
-                    op: if k_true {
-                        O_OR
-                    } else {
-                        O_AND
-                    },
-                    ty: T_I8,
-                    aux: 0,
-                    a: t.a,
-                    b: c2k,
-                    c: VNONE,
-                },
+                Inst { op: ast::pick(k_true, O_OR, O_AND), ty: T_I8, aux: 0, a: t.a, b: c2k, c: VNONE },
                 false,
             );
             b.insts.index_mut(i as usize).a = both;
@@ -8726,11 +8469,7 @@ extend Opt {
                 b.insts[i as usize] = Inst {
                     op: O_ICMP,
                     ty: t.ty,
-                    aux: if neg {
-                        C_NE
-                    } else {
-                        C_EQ
-                    },
+                    aux: ast::pick(neg, C_NE, C_EQ),
                     a: c,
                     b: one,
                     c: VNONE,
@@ -8743,11 +8482,7 @@ extend Opt {
                 b.insts[i as usize] = Inst {
                     op: O_ICMP,
                     ty: t.ty,
-                    aux: if neg {
-                        C_ULE
-                    } else {
-                        C_UGT
-                    },
+                    aux: ast::pick(neg, C_ULE, C_UGT),
                     a: xd,
                     b: d,
                     c: VNONE,
@@ -8764,11 +8499,7 @@ extend Opt {
     fn narrow_cmp(self: &mut Self, pk: &Package, b: &mut Body, i: u32) bool {
         let t = b.insts[i as usize];
         let (ea, eb) = (extension(b, t.a), extension(b, t.b));
-        let e = if ea.op != O_ICONST {
-            ea
-        } else {
-            eb
-        };
+        let e = ast::pick(ea.op != O_ICONST, ea, eb);
         if e.op == O_ICONST || is_vec(b.type_of(t.a)) {
             return false;
         }
@@ -8783,14 +8514,7 @@ extend Opt {
             b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: t.aux, a: ea.a, b: eb.a, c: VNONE };
             return true;
         }
-        let kv = const_of(
-            b,
-            if ea.op != O_ICONST {
-                t.b
-            } else {
-                t.a
-            },
-        );
+        let kv = int_bits(b, ast::pick(ea.op != O_ICONST, t.b, t.a));
         if kv.is_none() {
             return false;
         }
@@ -8835,17 +8559,17 @@ extend Opt {
         }
         let w = b.insts[t.a as usize];
         // A left shift by less than the narrow width: its low bits are the shifted value's.
-        let shl = w.op == O_SHL && const_of(b, w.b).is_some() && const_of(b, w.b).unwrap() < type_bits(
+        let shl = w.op == O_SHL && int_bits(b, w.b).is_some() && int_bits(b, w.b).unwrap() < type_bits(
             t.ty,
             pk.ptr_bytes,
         ) as u64;
         if (w.op < O_ADD || w.op > O_XOR || w.op >= O_SDIV && w.op <= O_UREM) && !shl || !is_int(w.ty) || w.ty == T_I128 {
             return false;
         }
-        let (e, c) = if const_of(b, w.b).is_some() {
-            (w.a, const_of(b, w.b))
+        let (e, c) = if int_bits(b, w.b).is_some() {
+            (w.a, int_bits(b, w.b))
         } else {
-            (w.b, const_of(b, w.a))
+            (w.b, int_bits(b, w.a))
         };
         if c.is_none() || (e & (VPARAM | VFLAG)) != 0 || e == VNONE {
             return false;
@@ -8865,7 +8589,7 @@ extend Opt {
             self.before(b, k, i, Inst { op: x.op, ty: t.ty, aux: 0, a: x.a, b: VNONE, c: VNONE })
         };
         let kv = self.constant(b, t.ty, c.unwrap() & width_mask(t.ty, pk.ptr_bytes));
-        let sub_first = w.op == O_SUB && const_of(b, w.b).is_none();
+        let sub_first = w.op == O_SUB && int_bits(b, w.b).is_none();
         b.insts[i as usize] = if sub_first {
             Inst { op: w.op, ty: t.ty, aux: 0, a: kv, b: v, c: VNONE }
         } else {
@@ -8893,10 +8617,10 @@ extend Opt {
         if t.op == O_CTZ && x.op == O_OR {
             aux = 0;
             // The bit right above the narrow value, the other operand a zero extension.
-            let (e, c) = if const_of(b, x.b).is_some() {
-                (x.a, const_of(b, x.b))
+            let (e, c) = if int_bits(b, x.b).is_some() {
+                (x.a, int_bits(b, x.b))
             } else {
-                (x.b, const_of(b, x.a))
+                (x.b, int_bits(b, x.a))
             };
             if c.is_none() || (e & (VPARAM | VFLAG)) != 0 || e == VNONE || b.insts[e as usize].op != O_ZEXT {
                 return false;
@@ -8934,7 +8658,7 @@ extend Opt {
         if t.aux != C_EQ && t.aux != C_NE || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
             return false;
         }
-        let c = const_of(b, t.b);
+        let c = int_bits(b, t.b);
         let r = b.insts[t.a as usize];
         let ty = r.ty;
         if c.is_none() || r.op != O_SUB || !is_int(ty) || ty == T_I128 || (r.b & (VPARAM | VFLAG)) != 0 || r.b == VNONE {
@@ -8947,7 +8671,7 @@ extend Opt {
         if low.op != O_AND || (low.a & (VPARAM | VFLAG)) != 0 || low.a == VNONE {
             return false;
         }
-        let m = const_of(b, low.b);
+        let m = int_bits(b, low.b);
         if m.is_none() {
             return false;
         }
@@ -8964,12 +8688,12 @@ extend Opt {
         let sgn_ok = if s == 1 {
             bias.a == n
         } else {
-            (bias.a & (VPARAM | VFLAG)) == 0 && bias.a != VNONE && b.insts[bias.a as usize].op == O_ASHR && b.insts[bias.a as usize].a == n && const_of(
+            (bias.a & (VPARAM | VFLAG)) == 0 && bias.a != VNONE && b.insts[bias.a as usize].op == O_ASHR && b.insts[bias.a as usize].a == n && int_bits(
                 b,
                 b.insts[bias.a as usize].b,
             ) == Some(s - 1)
         };
-        if const_of(b, bias.b) != Some(w - s) || !sgn_ok {
+        if int_bits(b, bias.b) != Some(w - s) || !sgn_ok {
             return false;
         }
         let cv = c.unwrap() & wm;
@@ -9047,7 +8771,7 @@ extend Opt {
         }
         *budget -= 1;
         let v = self.val(v0);
-        if let Some(c) = const_of(b, v) {
+        if let Some(c) = int_bits(b, v) {
             if c == 0 {
                 for j in 0..8 {
                     by[j] = NOBYTE;
@@ -9059,7 +8783,7 @@ extend Opt {
             let x = b.insts[v as usize];
             let bin = x.op == O_OR || x.op == O_SHL || x.op == O_LSHR || x.op == O_AND;
             let s = if bin {
-                const_of(b, x.b)
+                int_bits(b, x.b)
             } else {
                 Option::<u64>::None
             };
@@ -9103,7 +8827,7 @@ extend Opt {
                 let (m, o) = if s.is_some() {
                     (s, x.a)
                 } else {
-                    (const_of(b, x.a), x.b)
+                    (int_bits(b, x.a), x.b)
                 };
                 if m.is_some() && whole_bytes(m.unwrap(), n) {
                     if !self.bytes_of(b, n, o, src, by, budget) {
@@ -9171,7 +8895,7 @@ extend Opt {
                         continue;
                     }
                     let last = i + 2 == bk.start + bk.len && b.insts[i as usize + 1].op == O_RET;
-                    if cp != NONE || t.op != O_MEMCPY || t.a != rp || t.b == rp || (t.aux & MEM_VOLATILE) != 0 || const_of(
+                    if cp != NONE || t.op != O_MEMCPY || t.a != rp || t.b == rp || (t.aux & MEM_VOLATILE) != 0 || int_bits(
                         b,
                         t.c,
                     ) != Option::<u64>::Some(size) || !last || !is_op(b, t.b, O_SLOTADDR) {
@@ -9277,10 +9001,10 @@ extend Opt {
                         if v != self.fresh[f] || !self.fresh_ok[f] {
                             continue;
                         }
-                        let ok = t.op == O_STORE && t.a == v && t.b != v && (t.aux & MEM_VOLATILE) == 0 || t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (const_of(
+                        let ok = t.op == O_STORE && t.a == v && t.b != v && (t.aux & MEM_VOLATILE) == 0 || t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (int_bits(
                             b,
                             t.a,
-                        ) == Some(0u64) || const_of(b, t.b) == Some(0u64));
+                        ) == Some(0u64) || int_bits(b, t.b) == Some(0u64));
                         let free = t.op == O_CALL && t.aux == 1 && named_alloc(pk, b, t) == ALLOC_FREE && self.fresh_free[f] == NONE;
                         if free {
                             self.fresh_free[f] = k as u32;
@@ -9365,23 +9089,8 @@ extend Opt {
             return false;
         }
         let a = b.insts[s as usize];
-        let op = if a.op == O_ADD {
-            O_ADDO
-        } else {
-            O_SUBO
-        };
-        b.insts[s as usize] = Inst {
-            op: op,
-            ty: a.ty,
-            aux: if signed {
-                OV_SIGNED
-            } else {
-                0
-            },
-            a: a.a,
-            b: a.b,
-            c: VNONE,
-        };
+        let op = ast::pick(a.op == O_ADD, O_ADDO, O_SUBO);
+        b.insts[s as usize] = Inst { op: op, ty: a.ty, aux: ast::pick(signed, OV_SIGNED, 0), a: a.a, b: a.b, c: VNONE };
         if negated {
             let z = self.constant(b, T_I8, 0);
             b.insts[i as usize] = Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: VFLAG | s, b: z, c: VNONE };
@@ -9410,11 +9119,7 @@ extend Opt {
             return false;
         }
         let stay_t = b.edge_target(th.b) == k;
-        let se = if stay_t {
-            th.b
-        } else {
-            th.c
-        };
+        let se = ast::pick(stay_t, th.b, th.c);
         if !stay_t && b.edge_target(th.c) != k || b.edge_nargs(se) != 0 {
             return false;
         }
@@ -9460,13 +9165,9 @@ extend Opt {
         }
         let q0 = self.val(b.edge_arg(pe, m));
         // Down by 1 to 0: `q != 0` stays, `q == 0` leaves.
-        let bound = if c.a == qv {
-            c.b
-        } else {
-            c.a
-        };
-        let down = step == 2 && const_of(b, bound) == Some(0u64) && (stay_t && c.aux == C_NE || !stay_t && c.aux == C_EQ);
-        let up = step == 1 && const_of(b, q0) == Some(0u64);
+        let bound = ast::pick(c.a == qv, c.b, c.a);
+        let down = step == 2 && int_bits(b, bound) == Some(0u64) && (stay_t && c.aux == C_NE || !stay_t && c.aux == C_EQ);
+        let up = step == 1 && int_bits(b, q0) == Some(0u64);
         if !down && !up {
             return false;
         }
@@ -9566,6 +9267,39 @@ extend Opt {
     // Select `i` of block `k` on a comparison or a checked operation's flag defined earlier in `k`, which no
     // instruction between reads (up to FLAG_REACH back): that definition moves right before `i`, where
     // every backend tests its flags in place rather than setting a register.
+    // Definition `s` of block `k` moved right before instruction `to`, when an instruction lies between and
+    // none of those reads it: else the definition is in place already.
+    fn move_before(self: &mut Self, b: &Body, k: u32, s: u32, to: u32) {
+        let mut between = false;
+        for j in s + 1..to {
+            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
+                continue;
+            }
+            if self.reads(b, j, s) {
+                return;
+            }
+            between = between || !self.moved[j as usize] && self.repl[j as usize] == VNONE;
+        }
+        // The instructions the walk made before those (`pre`): the newest entries, from the last back.
+        let mut q = self.pre.len();
+        // Each step goes back one entry.
+        while q > 0 {
+            q -= 1;
+            let at = (self.pre[q] >> 32) as u32;
+            if at <= s || at > to || self.blk_of[at as usize] != k {
+                break;
+            }
+            if self.reads(b, self.pre[q] as u32, s) {
+                return;
+            }
+            between = true;
+        }
+        if !between {
+            return;
+        }
+        self.moved[s as usize] = true;
+        self.pre.push(to as u64 << 32 | s as u64);
+    }
     fn flag_next(self: &mut Self, b: &Body, k: u32, i: u32) {
         let c = b.insts[i as usize].a;
         if c == VNONE || (c & VPARAM) != 0 {
@@ -9581,36 +9315,7 @@ extend Opt {
         if !ok || s >= i || self.blk_of[s as usize] != k || self.moved[s as usize] || i - s > FLAG_REACH {
             return;
         }
-        // Whether an instruction lies between: else the definition is in place already.
-        let mut between = false;
-        for j in s + 1..i {
-            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
-                continue;
-            }
-            if self.reads(b, j, s) {
-                return;
-            }
-            between = between || !self.moved[j as usize] && self.repl[j as usize] == VNONE;
-        }
-        // The instructions the walk made before those (`pre`): the newest entries, from the last back.
-        let mut q = self.pre.len();
-        // Each step goes back one entry.
-        while q > 0 {
-            q -= 1;
-            let at = (self.pre[q] >> 32) as u32;
-            if at <= s || at > i || self.blk_of[at as usize] != k {
-                break;
-            }
-            if self.reads(b, self.pre[q] as u32, s) {
-                return;
-            }
-            between = true;
-        }
-        if !between {
-            return;
-        }
-        self.moved[s as usize] = true;
-        self.pre.push(i as u64 << 32 | s as u64);
+        self.move_before(b, k, s, i);
     }
 
     // Branch `t` ending block `k` on a comparison in `k` of an `add` or `sub` of `k` by a constant (a counter's
@@ -9628,9 +9333,9 @@ extend Opt {
             return;
         }
         let eq = ct.aux == C_EQ || ct.aux == C_NE;
-        let s = if eq && const_of(b, ct.b) == Some(0u64) {
+        let s = if eq && int_bits(b, ct.b) == Some(0u64) {
             ct.a
-        } else if eq && const_of(b, ct.a) == Some(0u64) {
+        } else if eq && int_bits(b, ct.a) == Some(0u64) {
             ct.b
         } else if self.counter_step(b, ct.a) {
             ct.a
@@ -9646,35 +9351,7 @@ extend Opt {
         if d != O_ADD && d != O_SUB && d != O_AND {
             return;
         }
-        let mut between = false;
-        for j in s + 1..c {
-            if self.blk_of[j as usize] != k || self.repl[j as usize] == DROPPED {
-                continue;
-            }
-            if self.reads(b, j, s) {
-                return;
-            }
-            between = between || !self.moved[j as usize] && self.repl[j as usize] == VNONE;
-        }
-        // The instructions the walk made before those (`pre`): the newest entries, from the last back.
-        let mut q = self.pre.len();
-        // Each step goes back one entry.
-        while q > 0 {
-            q -= 1;
-            let at = (self.pre[q] >> 32) as u32;
-            if at <= s || at > c || self.blk_of[at as usize] != k {
-                break;
-            }
-            if self.reads(b, self.pre[q] as u32, s) {
-                return;
-            }
-            between = true;
-        }
-        if !between {
-            return;
-        }
-        self.moved[s as usize] = true;
-        self.pre.push(c as u64 << 32 | s as u64);
+        self.move_before(b, k, s, c);
     }
 
     // Select `i` of `n - a` where `a <u n` or `a <=u n` holds and of 0 else (a subtraction floored at 0, as a
@@ -9688,10 +9365,10 @@ extend Opt {
         }
         let tb = self.val(t.b);
         let tc = self.val(t.c);
-        let on_true = const_of(b, tc) == Some(0u64);
+        let on_true = int_bits(b, tc) == Some(0u64);
         let s = if on_true {
             tb
-        } else if const_of(b, tb) == Some(0u64) {
+        } else if int_bits(b, tb) == Some(0u64) {
             tc
         } else {
             VNONE
@@ -9715,16 +9392,13 @@ extend Opt {
         } else {
             aux == C_UGE || aux == C_UGT
         };
-        if !ok || !self.at_most(b, a, n, UB_DEPTH) {
-            return VNONE;
-        }
-        return s;
+        return ast::pick(!ok || !self.at_most(b, a, n, UB_DEPTH), VNONE, s);
     }
 
     // Whether `a <=u n` always holds: `a` is `n`, 0, an `and` with an operand that is at most `n`, a select
     // of two, or a parameter every edge into its block passes such a value for (up to `depth` deep).
     fn at_most(self: &Self, b: &Body, a: Value, n: Value, depth: u32) bool {
-        if a == n || const_of(b, a) == Some(0u64) {
+        if a == n || int_bits(b, a) == Some(0u64) {
             return true;
         }
         if depth == 0 || (a & VFLAG) != 0 {
@@ -9759,7 +9433,7 @@ extend Opt {
         for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
             let st = term(b, self.preds[x as usize]);
             for e in 0..edge_count(st) {
-                let ed = edge_at(b, st, e);
+                let ed = edge_of(b, st, e);
                 if b.edge_target(ed) == k && !self.at_most(b, self.val(b.edge_arg(ed, q)), n, depth - 1) {
                     return false;
                 }
@@ -9774,7 +9448,7 @@ extend Opt {
             return false;
         }
         let x = b.insts[v as usize];
-        return (x.op == O_ADD || x.op == O_SUB) && (const_of(b, x.b).is_some() || x.op == O_ADD && const_of(b, x.a).is_some());
+        return (x.op == O_ADD || x.op == O_SUB) && (int_bits(b, x.b).is_some() || x.op == O_ADD && int_bits(b, x.a).is_some());
     }
 
     // Whether instruction `j` reads value `s` or its flag (operands as the walk replaced them).
@@ -9797,11 +9471,11 @@ extend Opt {
             return false;
         }
         let c = b.insts[t.a as usize];
-        if c.op != O_ICMP || const_of(b, c.b) != Some(0u64) || c.aux != C_SLT && c.aux != C_SGE || b.type_of(c.a) != t.ty {
+        if c.op != O_ICMP || int_bits(b, c.b) != Some(0u64) || c.aux != C_SLT && c.aux != C_SGE || b.type_of(c.a) != t.ty {
             return false;
         }
-        let x = const_of(b, t.b);
-        let y = const_of(b, t.c);
+        let x = int_bits(b, t.b);
+        let y = int_bits(b, t.c);
         let m = width_mask(t.ty, pk.ptr_bytes);
         if x.is_none() || y.is_none() || ((x.unwrap() ^ y.unwrap()) & m) != m {
             return false;
@@ -9829,13 +9503,9 @@ extend Opt {
         if t.aux > C_UGE {
             return false;
         }
-        let left = const_of(b, t.b).is_some();
-        let s = if left {
-            t.a
-        } else {
-            t.b
-        };
-        if !left && const_of(b, t.a).is_none() || (s & (VPARAM | VFLAG)) != 0 || s == VNONE || b.insts[s as usize].op != O_SELECT || !cmp_arm(
+        let left = int_bits(b, t.b).is_some();
+        let s = ast::pick(left, t.a, t.b);
+        if !left && int_bits(b, t.a).is_none() || (s & (VPARAM | VFLAG)) != 0 || s == VNONE || b.insts[s as usize].op != O_SELECT || !cmp_arm(
             pk,
             b,
             t,
@@ -9858,8 +9528,8 @@ extend Opt {
         } else {
             u.b = v;
         }
-        let x = const_of(b, u.a);
-        let y = const_of(b, u.b);
+        let x = int_bits(b, u.a);
+        let y = int_bits(b, u.b);
         if x.is_some() && y.is_some() {
             return self.constant(
                 b,
@@ -9875,10 +9545,6 @@ extend Opt {
         let p = self.cmp_into(pk, b, k, i, t, left, sel.b);
         let q = self.cmp_into(pk, b, k, i, t, left, sel.c);
         return self.made(pk, b, k, i, Inst { op: O_SELECT, ty: t.ty, aux: 0, a: sel.a, b: p, c: q });
-    }
-
-    fn fold_ptr(self: &Self, pk: &Package, b: &mut Body, i: u32) bool {
-        return fold_ptr(pk, b, i, self.unit);
     }
 
     // Call `i` of block `k` of C's `copysign` or `copysignf`: the magnitude's bits and the sign's bit, in
@@ -9939,7 +9605,7 @@ extend Opt {
         self.readers(b);
         if i as usize < self.icount.len() && self.icount[i as usize] == 1 && i + 1 < bk.start + bk.len {
             let u = b.insts[i as usize + 1];
-            eq = u.op == O_ICMP && (u.aux == C_EQ || u.aux == C_NE) && (u.a == i && const_of(b, u.b) == Some(0u64) || u.b == i && const_of(
+            eq = u.op == O_ICMP && (u.aux == C_EQ || u.aux == C_NE) && (u.a == i && int_bits(b, u.b) == Some(0u64) || u.b == i && int_bits(
                 b,
                 u.a,
             ) == Some(0u64));
@@ -9947,7 +9613,7 @@ extend Opt {
         let pa = self.val(b.pool[t.c as usize]);
         let pb = self.val(b.pool[t.c as usize + 1]);
         let nv = self.val(b.pool[t.c as usize + 2]);
-        let mut n = const_of(b, nv);
+        let mut n = int_bits(b, nv);
         if n.is_none() {
             n = self.count_fact(pk, b, k, nv);
         }
@@ -10062,7 +9728,7 @@ extend Opt {
                     1u32
                 };
                 // A narrower pair loads zero-extended to the widest width.
-                let st = int_type_of(s);
+                let st = int_type(s);
                 let mut x = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: st, aux: 0, a: pa, b: VNONE, c: off });
                 let _ = fold_data(pk, b, x);
                 let mut y = self.made(pk, b, k, i, Inst { op: O_LOAD, ty: st, aux: 0, a: pb, b: VNONE, c: off });
@@ -10078,18 +9744,7 @@ extend Opt {
                         d = z;
                         continue;
                     }
-                    let o = Inst {
-                        op: if rel == C_EQ {
-                            O_AND
-                        } else {
-                            O_OR
-                        },
-                        ty: T_I8,
-                        aux: 0,
-                        a: d,
-                        b: z,
-                        c: VNONE,
-                    };
+                    let o = Inst { op: ast::pick(rel == C_EQ, O_AND, O_OR), ty: T_I8, aux: 0, a: d, b: z, c: VNONE };
                     if q + 1 == np {
                         b.insts[ui as usize] = o;
                         b.insts[i as usize] = iconst(T_I32, 0);
@@ -10208,12 +9863,7 @@ extend Opt {
     // Instruction `t`, with instruction `at`'s location, at the end of block `k`, before its terminator
     // (`hoisted`); or at the entry's start (`extra`) when `start`.
     fn placed(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst, start: bool) Value {
-        let v = b.insts.len() as u32;
-        b.insts.push(t);
-        b.locs.push(b.locs[at as usize]);
-        if b.inl.len() != 0 {
-            b.inl.push(b.inl[at as usize]);
-        }
+        let v = b.push_at(t, at);
         self.repl.push(VNONE);
         self.frepl.push(VNONE);
         self.moved.push(true);
@@ -10228,12 +9878,7 @@ extend Opt {
     }
 
     fn before(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst) Value {
-        let v = b.insts.len() as u32;
-        b.insts.push(t);
-        b.locs.push(b.locs[at as usize]);
-        if b.inl.len() != 0 {
-            b.inl.push(b.inl[at as usize]);
-        }
+        let v = b.push_at(t, at);
         self.repl.push(VNONE);
         self.frepl.push(VNONE);
         self.moved.push(true);
@@ -10269,7 +9914,7 @@ extend Opt {
         let c = if vec {
             splat_of(b, t.b)
         } else {
-            const_of(b, t.b)
+            int_bits(b, t.b)
         };
         if c.is_none() {
             return false;
@@ -10285,7 +9930,7 @@ extend Opt {
             return false;
         }
         if signed {
-            return self.divide_signed(pk, b, k, i, le::sign_ext(d, bits));
+            return self.divide_signed(pk, b, k, i, sign_extend(d, bits));
         }
         let (m, sh, add) = magic(d, bits);
         let n = t.a;
@@ -10403,7 +10048,7 @@ extend Opt {
         } else {
             let mv = self.lane_const(b, ty, m);
             let mut h = self.before(b, k, i, Inst { op: O_MULHS, ty: ty, aux: 0, a: n, b: mv, c: VNONE });
-            if le::sign_ext(m, bits) < 0 {
+            if sign_extend(m, bits) < 0 {
                 h = self.before(b, k, i, Inst { op: O_ADD, ty: ty, aux: 0, a: h, b: n, c: VNONE });
             }
             if sh != 0 {
@@ -10461,18 +10106,7 @@ extend Opt {
         if t.op != O_UREM && t.op != O_SREM || !is_int(t.ty) || t.ty == T_I128 || is_vec(t.ty) {
             return false;
         }
-        let d = Inst {
-            op: if t.op == O_UREM {
-                O_UDIV
-            } else {
-                O_SDIV
-            },
-            ty: t.ty,
-            aux: t.aux,
-            a: t.a,
-            b: t.b,
-            c: t.c,
-        };
+        let d = Inst { op: ast::pick(t.op == O_UREM, O_UDIV, O_SDIV), ty: t.ty, aux: t.aux, a: t.a, b: t.b, c: t.c };
         let q = switch self.pure.get(&value_hash(b, d)) {
             Some(v) => *v,
             None => NONE,
@@ -10510,7 +10144,7 @@ extend Opt {
                 continue;
             }
             let c = b.insts[m as usize];
-            let n = const_of(b, c.c);
+            let n = int_bits(b, c.c);
             let ca = self.base(b, c.a);
             let cb = self.base(b, c.b);
             // A slot whose address leaks nowhere holds no bytes of a source not derived from it.
@@ -10541,7 +10175,7 @@ extend Opt {
     // through its result; it comes back (no `FX_STALL`), so no panic unwinds to code that reads the bytes it
     // left half written. Whether it did.
     fn result_into(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) bool {
-        let n = const_of(b, t.c);
+        let n = int_bits(b, t.c);
         let c = self.acc(i, t.a);
         if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 {
             return false;
@@ -10564,7 +10198,7 @@ extend Opt {
             if self.repl[j as usize] != VNONE || pure_op(w.op) {
                 continue;
             }
-            if w.op != O_MEMCPY || w.a != src || w.b == src || (w.aux & MEM_VOLATILE) != 0 || const_of(b, w.c) != n || hops.len() as u32 == RESULT_HOPS {
+            if w.op != O_MEMCPY || w.a != src || w.b == src || (w.aux & MEM_VOLATILE) != 0 || int_bits(b, w.c) != n || hops.len() as u32 == RESULT_HOPS {
                 break;
             }
             hops.push(j);
@@ -10602,13 +10236,7 @@ extend Opt {
             if w.op == O_SLOTADDR && result_slot(b, t, &hops, w.a) && x != t.b && !result_addr(b, t, &hops, x) {
                 return false;
             }
-            lv::uses(b, w, &mut self.uses);
-            b.succ_edges(w, &mut self.edges);
-            for e in 0..self.edges.len() {
-                for a in 0..b.edge_nargs(self.edges[e]) {
-                    self.uses.push(b.edge_arg(self.edges[e], a));
-                }
-            }
+            lv::uses_edges(b, w, &mut self.uses);
             for q in 0..self.uses.len() {
                 if result_addr(b, t, &hops, self.uses[q]) {
                     return false;
@@ -10687,19 +10315,11 @@ extend Opt {
             return; // `fast_math` made it a product already
         }
         let c = float_const(b, t.b);
-        let frac = if t.ty == T_F64 {
-            0xFFFFFFFFFFFFFu64
-        } else {
-            0x7FFFFFu64
-        };
+        let frac = ast::pick(t.ty == T_F64, 0xFFFFFFFFFFFFFu64, 0x7FFFFFu64);
         if c.is_none() || (c.unwrap() & frac) != 0 || !regular(t.ty, c.unwrap()) {
             return;
         }
-        let one = if t.ty == T_F64 {
-            0x3FF0000000000000u64
-        } else {
-            0x3F800000u64
-        };
+        let one = ast::pick(t.ty == T_F64, 0x3FF0000000000000u64, 0x3F800000u64);
         let r = le::float_op(O_FDIV, t.ty, one, c.unwrap());
         if regular(t.ty, r) {
             t.op = O_FMUL;
@@ -10724,11 +10344,7 @@ extend Opt {
             t.b = x;
             b.insts[i as usize] = t;
         }
-        let one = if t.ty == T_F64 {
-            0x3FF0000000000000u64
-        } else {
-            0x3F800000u64
-        };
+        let one = ast::pick(t.ty == T_F64, 0x3FF0000000000000u64, 0x3F800000u64);
         let cb = float_const(b, t.b);
         let finite = (fm & FM_FINITE) != 0;
         let nsz = (fm & FM_NSZ) != 0;
@@ -10843,19 +10459,7 @@ extend Opt {
         if found != NONE && same(b.insts[found as usize], t) {
             return found;
         }
-        let i = b.insts.len() as u32;
-        b.insts.push(t);
-        b.locs.push(0);
-        if b.inl.len() != 0 {
-            b.inl.push(0);
-        }
-        self.repl.push(VNONE);
-        self.frepl.push(VNONE);
-        self.moved.push(false);
-        self.blk_of.push(0);
-        self.extra.push(i);
-        self.made.insert(h, i);
-        return i;
+        return self.add_const(b, t, h);
     }
 
     // ---- Memory ----
@@ -10908,7 +10512,7 @@ extend Opt {
                     }
                     let o = self.base_off(v);
                     let size = if t.op == O_MEMCPY || t.op == O_MEMSET {
-                        const_of(b, t.c)
+                        int_bits(b, t.c)
                     } else {
                         Option::<u64>::None
                     };
@@ -11063,11 +10667,7 @@ extend Opt {
             seen |= lane;
             v = x;
         }
-        return if seen.count_ones() as u32 == lanes(t.ty) {
-            v
-        } else {
-            VNONE
-        };
+        return ast::pick(seen.count_ones() as u32 == lanes(t.ty), v, VNONE);
     }
 
     // The private slots: those whose address and the addresses derived from it (`ptradd`) are only the
@@ -11123,11 +10723,7 @@ extend Opt {
         }
         let s = self.pder[a as usize];
         if s != NONE {
-            return s | if self.pesc[s as usize] {
-                lu::OBJ_SLOT
-            } else {
-                lu::OBJ_PRIVATE
-            };
+            return s | ast::pick(self.pesc[s as usize], lu::OBJ_SLOT, lu::OBJ_PRIVATE);
         }
         let mut v = a;
         for _ in 0..FRAME_DEPTH {
@@ -11135,11 +10731,7 @@ extend Opt {
             if t.op == O_SYMADDR {
                 let s = b.syms[t.a as usize];
                 let y = pk.syms[s as usize];
-                return if y.kind != SK_FUNC && !y.ext {
-                    s
-                } else {
-                    NONE
-                };
+                return ast::pick(y.kind != SK_FUNC && !y.ext, s, NONE);
             }
             if call_alloc(pk, b, t) == ALLOC_FRESH && t.ty == T_PTR && v < lu::OBJ_FRESH {
                 return v | lu::OBJ_FRESH;
@@ -11196,11 +10788,7 @@ extend Opt {
             return VNONE;
         }
         let p = self.places[found as usize];
-        return if p.addr == addr && p.off == off && p.ty == ty && p.state == state {
-            p.val
-        } else {
-            VNONE
-        };
+        return ast::pick(p.addr == addr && p.off == off && p.ty == ty && p.state == state, p.val, VNONE);
     }
 
     // Load `t`, instruction `i` of block `k`, of an integer of at most 4 bytes: the bytes of a wider integer
@@ -11304,11 +10892,11 @@ extend Opt {
     // of both set, keep the length when a store sets the capacity). None when they are not 1, 2, 4 or 8.
     fn constant_rest(self: &mut Self, b: &mut Body, p: Place, lo: i64, hi: i64) {
         let n = hi - lo;
-        let kv = const_of(b, p.val);
+        let kv = int_bits(b, p.val);
         if n != 1 && n != 2 && n != 4 && n != 8 || kv.is_none() || !is_int(p.ty) || p.ty == T_PTR || p.ty == T_I128 {
             return;
         }
-        let ty = int_type_of(n as u32);
+        let ty = int_type(n as u32);
         let sh = 8 * (lo - (p.off as i32) as i64) as u64;
         let v = self.constant(b, ty, kv.unwrap() >> sh & ~0u64 >> 64 - 8 * n as u64);
         let off = (lo as i32) as u32;
@@ -11643,7 +11231,7 @@ extend Opt {
         if s.op != O_ADD || !is_int(s.ty) || s.ty == T_I128 || (s.a & VPARAM) == 0 || s.a == VNONE || (s.a & ~VPARAM) < hb.param_start || (s.a & ~VPARAM) >= hb.param_start + hb.param_len as u32 {
             return false;
         }
-        let off = const_of(b, s.b);
+        let off = int_bits(b, s.b);
         let bits = type_bits(s.ty, 8);
         let top = if bits >= 64 {
             ~0u64
@@ -11667,7 +11255,7 @@ extend Opt {
                 }
                 let x = self.val(b.edge_arg(ed, qi));
                 if pb == p {
-                    let st = const_of(b, x);
+                    let st = int_bits(b, x);
                     if st.is_none() || st.unwrap() > top - kc {
                         return false;
                     }
@@ -11680,9 +11268,9 @@ extend Opt {
                 let k = if u.op != O_ADD || u.ty != s.ty {
                     0u64
                 } else if u.a == s.a {
-                    const_of(b, u.b).unwrap_or(0) & top
+                    int_bits(b, u.b).unwrap_or(0) & top
                 } else if u.b == s.a {
-                    const_of(b, u.a).unwrap_or(0) & top
+                    int_bits(b, u.a).unwrap_or(0) & top
                 } else {
                     0u64
                 };
@@ -12173,13 +11761,7 @@ extend Opt {
         if self.repl[i as usize] != VNONE {
             return;
         }
-        lv::uses(b, t, &mut self.uses);
-        b.succ_edges(t, &mut self.edges);
-        for e in 0..self.edges.len() {
-            for q in 0..b.edge_nargs(self.edges[e]) {
-                self.uses.push(b.edge_arg(self.edges[e], q));
-            }
-        }
+        lv::uses_edges(b, t, &mut self.uses);
         for u in 0..self.uses.len() {
             let v = self.uses[u];
             if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
@@ -12422,11 +12004,7 @@ extend Run {
             bodies = fit;
         }
         let n = bodies.len();
-        let held = if pk.held.body == NONE {
-            n as u32
-        } else {
-            pk.held.body
-        };
+        let held = ast::pick(pk.held.body == NONE, n as u32, pk.held.body);
         let mut cs = Calls {
             at: Vector::<u32>::with_capacity(n + 1),
             callee: Vector::<u32>::new(),
@@ -12850,11 +12428,7 @@ extend Run {
         } else {
             NONE
         };
-        return if c == NONE || self.level[c as usize] >= self.level[j as usize] {
-            NONE
-        } else {
-            c
-        };
+        return ast::pick(c == NONE || self.level[c as usize] >= self.level[j as usize], NONE, c);
     }
 
     // Whether the job of each body `marked_callee` names has finished; false while another job holds the
@@ -13073,21 +12647,8 @@ pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
 // body that took one is optimized again, which removes the cases' blocks. Its form before, the one its
 // callers inlined, stays in `pre` (`Run::take_inlined`) unless an earlier one does.
 fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
-    let held = if pk.held.body == NONE {
-        pk.bodies.len()
-    } else {
-        pk.held.body as usize
-    };
-    let mut owner = Vector::<u32>::with_capacity(pk.bodies.len());
-    for _ in 0..pk.bodies.len() {
-        owner.push(NONE);
-    }
-    for s in 0..pk.syms.len() {
-        let y = pk.syms[s];
-        if y.kind == SK_FUNC && y.def != NONE {
-            owner[y.def as usize] = s as u32;
-        }
-    }
+    let held = pk.held_bodies();
+    let owner = pk.body_owners();
     let ptr = pk.ptr_bytes;
     let mut st = sws::SymTable::new();
     let mut o = Opt::new();
@@ -13148,9 +12709,8 @@ fn symbol_tables(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
 
 // At most CONST_SLOT_BYTES bytes of a slot go to read-only data (`const_slots`).
 const CONST_SLOT_BYTES: u32 = 4096;
-// `const_slot`'s offset of an address the slot gives at a variable place, and of a value it does not give.
+// `const_slots`' offset of an address the slot gives at a variable place.
 const OFF_VAR: u64 = 0xFFFFFFFFFFFFFFFE;
-const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
 
 // Place each slot of the optimized bodies that only constants of disjoint bytes are stored into, and whose
 // address only those stores and loads read (through offsets and indices), or a direct call as an aggregate
@@ -13162,21 +12722,8 @@ const OFF_NONE: u64 = 0xFFFFFFFFFFFFFFFF;
 // (`Run::take_inlined`) unless an earlier one does: a unit that inlines it from a record then makes the data its
 // own.
 fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
-    let held = if pk.held.body == NONE {
-        pk.bodies.len()
-    } else {
-        pk.held.body as usize
-    };
-    let mut owner = Vector::<u32>::with_capacity(pk.bodies.len());
-    for _ in 0..pk.bodies.len() {
-        owner.push(NONE);
-    }
-    for s in 0..pk.syms.len() {
-        let y = pk.syms[s];
-        if y.kind == SK_FUNC && y.def != NONE {
-            owner[y.def as usize] = s as u32;
-        }
-    }
+    let held = pk.held_bodies();
+    let owner = pk.body_owners();
     let mut cs = ConstSlot {
         slot: Vector::<u32>::new(),
         off: Vector::<u64>::new(),
@@ -13529,11 +13076,7 @@ extend ConstSlot {
                 return false;
             }
             *bits = x | y;
-            *sym = if sx != NONE {
-                sx
-            } else {
-                sy
-            };
+            *sym = ast::pick(sx != NONE, sx, sy);
             return true;
         }
         return false;
@@ -13734,11 +13277,7 @@ fn effects(
     sp_at: &mut Vector<u32>,
 ) Vector<u8> {
     let n = bodies.len();
-    let held = if p.held.body == NONE {
-        n
-    } else {
-        p.held.body as usize
-    };
+    let held = ast::pick(p.held.body == NONE, n, p.held.body as usize);
     let mut fx = Vector::<u8>::with_capacity(n);
     wargs.truncate(0);
     esc.truncate(0);
@@ -14029,11 +13568,7 @@ fn stalls(fx: &mut Vector<u8>, cs: &Calls, rc_at: &Vector<u32>, rc: &Vector<u32>
 // The flags (`FX_*`) of body `b`'s own instructions (`effects`), and into `w` the parameters whose memory
 // they may write: a call of a body counts for none here.
 fn own_effects(p: &Package, b: &Body, w: &mut u64, fs: &mut FxScratch) u8 {
-    let mut f: u8 = if has_cycle(b, fs) {
-        FX_STALL
-    } else {
-        0
-    };
+    let mut f: u8 = ast::pick(has_cycle(b, fs), FX_STALL, 0);
     for k in 0..b.blocks.len() {
         let bk = b.blocks[k];
         let end = b.insts[(bk.start + bk.len - 1) as usize].op;
@@ -14168,7 +13703,7 @@ fn own_escapes(
                     let n = if t.b == VNONE {
                         Option::<u64>::Some(0)
                     } else {
-                        const_of(b, t.b)
+                        int_bits(b, t.b)
                     };
                     if o != OFF_ANY && n.is_some() {
                         // A 32-bit index is a 32-bit target's: its address arithmetic wraps at 32 bits.
@@ -14249,7 +13784,7 @@ fn own_escapes(
                 } else if t.op == O_STORE {
                     ((t.c as i32) as i64, type_bytes(b.type_of(t.b), p.ptr_bytes) as i64)
                 } else {
-                    let c = const_of(b, t.c);
+                    let c = int_bits(b, t.c);
                     (
                         0i64,
                         if c.is_some() && c.unwrap() <= SPAN_MAX as u64 {
@@ -14498,11 +14033,7 @@ const fn call_target(p: &Package, b: &Body, t: Inst) u32 {
         return NONE;
     }
     let sy = p.syms[b.syms[t.a as usize] as usize];
-    return if sy.kind == SK_FUNC && sy.def != NONE {
-        sy.def
-    } else {
-        NONE
-    };
+    return ast::pick(sy.kind == SK_FUNC && sy.def != NONE, sy.def, NONE);
 }
 
 // Whether `t` has no effect but its value: dropped when nothing uses it.
@@ -14526,12 +14057,12 @@ const fn umax_cmp(b: &Body, t: Inst, ptr: u32) Option<bool> {
         return Some(false);
     }
     let ty = b.type_of(t.a);
-    let ka = const_of(b, t.a);
-    let kb = const_of(b, t.b);
+    let ka = int_bits(b, t.a);
+    let kb = int_bits(b, t.b);
     if !is_int(ty) || ty == T_I128 || ka.is_some() == kb.is_some() {
         return None;
     }
-    let all = ones_below(type_bits(ty, ptr));
+    let all = mask_of(type_bits(ty, ptr));
     // `x op c`, or `c op x` read as `x op' c` with the operands swapped (`<` becomes `>`).
     let (c, m, op) = if kb.is_some() {
         (kb.unwrap() & all, umax_of(b, t.a, ptr, UMAX_DEPTH), t.aux)
@@ -14569,21 +14100,12 @@ const fn umin_of(b: &Body, v: Value, w: Value) bool {
     return c.op == O_ICMP && (c.aux == C_ULT || c.aux == C_ULE) && c.a == s.b && c.b == s.c && (w == s.b || w == s.c);
 }
 
-// The `n` low bits set (`n` at most 64).
-const fn ones_below(n: u32) u64 {
-    return if n >= 64 {
-        0xFFFFFFFFFFFFFFFF
-    } else {
-        (1u64 << n) - 1
-    };
-}
-
 // The largest unsigned value integer `v` of `b` (pointers `ptr` bytes) can hold, from its form up to `depth`
 // instructions deep: a constant, a mask, a zero extension, a select, a bit count, a quotient or a remainder,
 // a right shift, a view parameter's length; else its type's largest.
 const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
-    let all = ones_below(type_bits(b.type_of(v), ptr));
-    let k = const_of(b, v);
+    let all = mask_of(type_bits(b.type_of(v), ptr));
+    let k = int_bits(b, v);
     if k.is_some() {
         return k.unwrap() & all;
     }
@@ -14594,11 +14116,7 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     if t.op == O_AND {
         let x = umax_of(b, t.a, ptr, depth - 1);
         let y = umax_of(b, t.b, ptr, depth - 1);
-        return if x < y {
-            x
-        } else {
-            y
-        };
+        return ast::pick(x < y, x, y);
     }
     if t.op == O_ZEXT {
         return umax_of(b, t.a, ptr, depth - 1);
@@ -14606,18 +14124,14 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     if t.op == O_SELECT {
         let x = umax_of(b, t.b, ptr, depth - 1);
         let y = umax_of(b, t.c, ptr, depth - 1);
-        return if x > y {
-            x
-        } else {
-            y
-        };
+        return ast::pick(x > y, x, y);
     }
     if t.op == O_CLZ || t.op == O_CTZ || t.op == O_POPCNT {
         return type_bits(b.type_of(t.a), ptr);
     }
     if t.op == O_UDIV || t.op == O_LSHR {
         let x = umax_of(b, t.a, ptr, depth - 1);
-        let s = const_of(b, t.b);
+        let s = int_bits(b, t.b);
         if s.is_none() {
             return x;
         }
@@ -14651,15 +14165,6 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     return all;
 }
 
-// The integer constant value `v` is (up to 64 bits, truncated to its type), if it is one.
-const fn const_of(b: &Body, v: Value) Option<u64> {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST || b.insts[v as usize].ty == T_I128 {
-        return None;
-    }
-    let t = b.insts[v as usize];
-    return Some(t.b as u64 << 32 | t.a as u64);
-}
-
 // Store or fill `j` of `b` (pointers `ptr` bytes) into the result at address `pv` (`Opt::ret_chunks`): the
 // offset, the bytes and the value of a store of a scalar of up to 8 bytes (no pointer, no vector), or of a
 // fill of 1 to 8 bytes with a constant byte at a constant offset, its value VNONE and its bytes' integer
@@ -14680,8 +14185,8 @@ fn ret_part(b: &Body, ptr: u32, j: u32, pv: Value) (u32, u32, Value, u64) {
     if s.op != O_MEMSET {
         return none;
     }
-    let n = const_of(b, s.c);
-    let f = const_of(b, s.b);
+    let n = int_bits(b, s.c);
+    let f = int_bits(b, s.b);
     let (base, off) = if is_op(b, s.a, O_PTRADD) && b.insts[s.a as usize].b == VNONE {
         (b.insts[s.a as usize].a, b.insts[s.a as usize].c)
     } else {
@@ -14716,11 +14221,10 @@ fn zero_test(b: &Body, v: Value, eq: bool) Value {
     } else {
         T_NONE
     };
-    if t.op != O_ICMP || t.aux != if eq {
-        C_EQ
-    } else {
-        C_NE
-    } || !is_int(ty) || ty == T_PTR || ty == T_I128 || const_of(b, t.b) != Some(0u64) {
+    if t.op != O_ICMP || t.aux != ast::pick(eq, C_EQ, C_NE) || !is_int(ty) || ty == T_PTR || ty == T_I128 || int_bits(
+        b,
+        t.b,
+    ) != Some(0u64) {
         return VNONE;
     }
     return t.a;
@@ -14733,11 +14237,7 @@ fn low_clear(b: &Body, ptr: u32, v: Value, ne: bool, x: Value) Value {
         return VNONE;
     }
     let t = b.insts[v as usize];
-    if t.op != O_ICMP || t.aux != if ne {
-        C_NE
-    } else {
-        C_EQ
-    } || const_of(b, t.b) != Some(0u64) || !is_op(b, t.a, O_AND) {
+    if t.op != O_ICMP || t.aux != ast::pick(ne, C_NE, C_EQ) || int_bits(b, t.b) != Some(0u64) || !is_op(b, t.a, O_AND) {
         return VNONE;
     }
     let a = b.insts[t.a as usize];
@@ -14753,10 +14253,11 @@ fn low_clear(b: &Body, ptr: u32, v: Value, ne: bool, x: Value) Value {
     }
     let s = b.insts[d as usize];
     let ones = width_mask(b.type_of(x), ptr);
-    if s.a == x && (s.op == O_ADD && const_of(b, s.b) == Some(ones) || s.op == O_SUB && const_of(b, s.b) == Some(1u64)) {
-        return d;
-    }
-    return VNONE;
+    return ast::pick(
+        s.a == x && (s.op == O_ADD && int_bits(b, s.b) == Some(ones) || s.op == O_SUB && int_bits(b, s.b) == Some(1u64)),
+        d,
+        VNONE,
+    );
 }
 
 // Whether condition `c` of `b` is condition `x` (1), its opposite comparison (2), or neither (0).
@@ -14822,10 +14323,11 @@ fn slice_of(b: &Body, p: Value) Value {
     }
     let s = b.insts[q as usize].a;
     let e = b.blocks[0].param_start;
-    if (s & VPARAM) == 0 || s == VNONE || (s & ~VPARAM) < e || ((s & ~VPARAM) - e) as usize >= b.refs.len() || (b.refs[((s & ~VPARAM) - e) as usize] & REF_INNER) == 0 {
-        return VNONE;
-    }
-    return s;
+    return ast::pick(
+        (s & VPARAM) == 0 || s == VNONE || (s & ~VPARAM) < e || ((s & ~VPARAM) - e) as usize >= b.refs.len() || (b.refs[((s & ~VPARAM) - e) as usize] & REF_INNER) == 0,
+        VNONE,
+        s,
+    );
 }
 
 // Whether comparison `c` of `b` holding (failing, when not `holds`) implies the length of slice parameter
@@ -14841,9 +14343,9 @@ fn len_set(b: &Body, ptr: u32, s: Value, c: Value, holds: bool) bool {
         opposite(k.aux)
     };
     let len = |v: Value| is_op(b, v, O_LOAD) && b.insts[v as usize].a == s && b.insts[v as usize].c == ptr;
-    return cc == C_ULT && len(k.b) || cc == C_UGT && len(k.a) || cc == C_NE && (len(k.a) && const_of(b, k.b) == Some(
+    return cc == C_ULT && len(k.b) || cc == C_UGT && len(k.a) || cc == C_NE && (len(k.a) && int_bits(b, k.b) == Some(
         0u64,
-    ) || len(k.b) && const_of(b, k.a) == Some(0u64));
+    ) || len(k.b) && int_bits(b, k.a) == Some(0u64));
 }
 
 // Whether value `v` of `b` is 0 unless value `x` is 0: a test that `x` is 0 (`x == 0`, `x <u 1`), extended
@@ -14856,10 +14358,10 @@ fn zero_unless_zero(b: &Body, v: Value, x: Value) bool {
         }
         let t = b.insts[u as usize];
         if t.op == O_ICMP {
-            let k = const_of(b, t.b);
+            let k = int_bits(b, t.b);
             return t.a == x && k.is_some() && (k.unwrap() == 0 && (t.aux == C_EQ || t.aux == C_ULE) || k.unwrap() == 1 && t.aux == C_ULT);
         }
-        if t.op == O_SUB && const_of(b, t.a) == Some(0u64) {
+        if t.op == O_SUB && int_bits(b, t.a) == Some(0u64) {
             u = t.b;
             continue;
         }
@@ -14887,13 +14389,13 @@ fn simplify_wide(b: &mut Body, i: u32) Value {
     let t = b.insts[i as usize];
     let mut r: (u64, u64) = (0, 0);
     if t.op == O_ZEXT || t.op == O_SEXT {
-        let x = const_of(b, t.a);
+        let x = int_bits(b, t.a);
         if x.is_none() {
             return VNONE;
         }
         let bits = type_bits(b.type_of(t.a), 8);
         let l = if t.op == O_SEXT {
-            le::sign_ext(x.unwrap(), bits) as u64
+            sign_extend(x.unwrap(), bits) as u64
         } else {
             x.unwrap()
         };
@@ -14915,10 +14417,11 @@ fn simplify_wide(b: &mut Body, i: u32) Value {
         if y.is_some() && x.is_none() {
             let (yl, yh) = y.unwrap();
             let zero = yl == 0 && yh == 0;
-            if zero && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR || t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) || yl == 1 && yh == 0 && t.op == O_MUL {
-                return t.a;
-            }
-            return VNONE;
+            return ast::pick(
+                zero && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR || t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) || yl == 1 && yh == 0 && t.op == O_MUL,
+                t.a,
+                VNONE,
+            );
         }
         if x.is_none() || y.is_none() {
             return cancel(b, t);
@@ -14946,11 +14449,7 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
         return VNONE;
     }
     let t = b.insts[v as usize];
-    return if (t.op == O_ZEXT || t.op == O_SEXT) && b.type_of(t.a) == ty {
-        t.a
-    } else {
-        VNONE
-    };
+    return ast::pick((t.op == O_ZEXT || t.op == O_SEXT) && b.type_of(t.a) == ty, t.a, VNONE);
 }
 
 // Lane access `i` of `b` (`O_VEXTRACT`, `O_VINSERT`) through the lanes it reads: a lane of a splat is its
@@ -15069,15 +14568,11 @@ fn vec_minmax(b: &mut Body, i: u32) bool {
     let signed = m.aux == C_SGT || m.aux == C_SGE || m.aux == C_SLT || m.aux == C_SLE;
     // `x > y ? x : y` is the maximum; with the sides swapped, the minimum.
     let max = gt == same;
-    let code = (core::OP_SIMD + if max {
-        core::SIMD_MAX
-    } else {
-        core::SIMD_MIN
-    } as u32) as u16 | if signed {
-        VOP_SIGNED
-    } else {
-        0
-    };
+    let code = (core::OP_SIMD + ast::pick(max, core::SIMD_MAX, core::SIMD_MIN) as u32) as u16 | ast::pick(
+        signed,
+        VOP_SIGNED,
+        0,
+    );
     let ops = [t.b, t.c];
     let at = b.pool_list(ops[0..2]);
     b.insts[i as usize] = Inst { op: O_VOP, ty: t.ty, aux: code, a: at, b: 2, c: VNONE };
@@ -15094,11 +14589,7 @@ fn simplify_vec(b: &mut Body, i: u32) {
         return;
     }
     if (t.op == O_ADD || t.op == O_SUB) && is_op(b, t.b, O_NEG) {
-        let o = if t.op == O_ADD {
-            O_SUB
-        } else {
-            O_ADD
-        };
+        let o = ast::pick(t.op == O_ADD, O_SUB, O_ADD);
         b.insts[i as usize] = Inst { op: o, ty: t.ty, aux: 0, a: t.a, b: b.insts[t.b as usize].a, c: VNONE };
         return;
     }
@@ -15182,8 +14673,8 @@ fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
     let t = b.insts[v as usize];
     let bits = 8 * type_bytes(lane_type(vt), 8);
     if t.op == O_SPLAT {
-        let c = const_of(b, t.a);
-        return c.is_some() && le::trunc_bits(c.unwrap(), bits) == k;
+        let c = int_bits(b, t.a);
+        return c.is_some() && trunc_bits(c.unwrap(), bits) == k;
     }
     let mut w: [u64; 8] = [0; 8];
     if type_bytes(vt, 8) % 8 != 0 || !vec_words(b, v, vt, &mut w) {
@@ -15218,14 +14709,14 @@ fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
     if t.op != O_SPLAT {
         return false;
     }
-    let c = const_of(b, t.a);
+    let c = int_bits(b, t.a);
     if c.is_none() {
         return false;
     }
     let bits = 8 * type_bytes(lane_type(vt), 8);
     let mut w: u64 = 0;
     for l in 0..64 / bits {
-        w |= le::trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
+        w |= trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
     }
     for q in 0..nw {
         out[q as usize] = w;
@@ -15256,10 +14747,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let ptr = pk.ptr_bytes;
     // A byte or bit reversal or a bit count of a constant.
     if (t.op == O_BSWAP || t.op == O_BITREV || t.op >= O_CLZ && t.op <= O_POPCNT) && is_int(t.ty) && t.ty != T_PTR {
-        let c = const_of(b, t.a);
+        let c = int_bits(b, t.a);
         if c.is_some() {
             let bits = type_bits(t.ty, ptr);
-            let x = le::trunc_bits(c.unwrap(), bits);
+            let x = trunc_bits(c.unwrap(), bits);
             let r = if t.op == O_BSWAP {
                 x.swap_bytes() >> (64 - bits) as u64
             } else if t.op == O_BITREV {
@@ -15281,11 +14772,11 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     // reference) or an element address of a slice parameter, which is not null where `c` (its opposite)
     // implies the slice is not empty: the test is the condition or its opposite (an iterator's `next` as a
     // pointer or null, `slice_of`).
-    if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && const_of(b, t.b) == Some(0u64) && is_op(b, t.a, O_SELECT) {
+    if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && int_bits(b, t.b) == Some(0u64) && is_op(b, t.a, O_SELECT) {
         let s = b.insts[t.a as usize];
-        let (p, when) = if const_of(b, s.b) == Some(0u64) {
+        let (p, when) = if int_bits(b, s.b) == Some(0u64) {
             (s.c, false)
-        } else if const_of(b, s.c) == Some(0u64) {
+        } else if int_bits(b, s.c) == Some(0u64) {
             (s.b, true)
         } else {
             (VNONE, false)
@@ -15321,13 +14812,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         t = b.insts[i as usize];
     }
     if t.op == O_SELECT {
-        let c = const_of(b, t.a);
+        let c = int_bits(b, t.a);
         if c.is_some() {
-            return if c.unwrap() != 0 {
-                t.b
-            } else {
-                t.c
-            };
+            return ast::pick(c.unwrap() != 0, t.b, t.c);
         }
         // A select on a zero extension of an `i8` (a flag) tests that `i8`.
         if (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
@@ -15340,8 +14827,8 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // A select on a flag's equality with 0 or its `xor` with 1 (`!f`) is one on the flag, arms swapped.
         if (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
             let c = b.insts[t.a as usize];
-            let not = c.op == O_XOR && const_of(b, c.b) == Some(1u64) && zero_one(b, c.a, ZO_DEPTH);
-            if not || c.op == O_ICMP && (c.aux == C_EQ || c.aux == C_NE) && const_of(b, c.b) == Some(0u64) && zero_one(
+            let not = c.op == O_XOR && int_bits(b, c.b) == Some(1u64) && zero_one(b, c.a, ZO_DEPTH);
+            if not || c.op == O_ICMP && (c.aux == C_EQ || c.aux == C_NE) && int_bits(b, c.b) == Some(0u64) && zero_one(
                 b,
                 c.a,
                 ZO_DEPTH,
@@ -15367,8 +14854,8 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
         // A flag (`zero_one`) chosen as 1 or 0 is the flag; as 0 or 1, the opposite comparison, or the
         // flag's equality with that 0.
-        let x = const_of(b, t.b);
-        let y = const_of(b, t.c);
+        let x = int_bits(b, t.b);
+        let y = int_bits(b, t.c);
         let zc = zero_one(b, t.a, ZO_DEPTH);
         let ct = b.type_of(t.a);
         let f = zc && ct == t.ty && x.is_some() && y.is_some();
@@ -15380,11 +14867,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         if g && !f && x.unwrap() == 1 && y.unwrap() == 0 {
             let wide = type_bits(t.ty, ptr) > type_bits(ct, ptr);
             b.insts[i as usize] = Inst {
-                op: if wide {
-                    O_ZEXT
-                } else {
-                    O_TRUNC
-                },
+                op: ast::pick(wide, O_ZEXT, O_TRUNC),
                 ty: t.ty,
                 aux: 0,
                 a: t.a,
@@ -15427,16 +14910,8 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // The flag itself on one side, another flag on the other: `c ? f : c` is `c & f`, `c ? c : f` is
         // `c | f` (a `&&` or `||` of flags).
         if fc && (t.c == t.a && flag_b || t.b == t.a && flag_c) {
-            let op = if t.c == t.a {
-                O_AND
-            } else {
-                O_OR
-            };
-            let f = if t.c == t.a {
-                t.b
-            } else {
-                t.c
-            };
+            let op = ast::pick(t.c == t.a, O_AND, O_OR);
+            let f = ast::pick(t.c == t.a, t.b, t.c);
             b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: t.a, b: f, c: VNONE };
             return VNONE;
         }
@@ -15444,25 +14919,17 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_ICMP {
             let ci = b.insts[t.a as usize];
             if (ci.aux == C_EQ || ci.aux == C_NE) && (t.b == ci.a && t.c == ci.b || t.b == ci.b && t.c == ci.a) {
-                return if ci.aux == C_NE {
-                    t.b
-                } else {
-                    t.c
-                };
+                return ast::pick(ci.aux == C_NE, t.b, t.c);
             }
         }
-        return if t.b == t.c {
-            t.b
-        } else {
-            VNONE
-        };
+        return ast::pick(t.b == t.c, t.b, VNONE);
     }
     if t.op == O_PTRADD {
         // A slot's address keeps its index: a constant offset past the slot in a path that never runs
         // would fail the verifier's check of slot accesses.
-        let ix = const_of(b, t.b);
+        let ix = int_bits(b, t.b);
         if ix.is_some() && !slot_based(b, t.a) {
-            let off = (t.c as i32) as i64 + le::sign_ext(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) * scale_of(t) as i64;
+            let off = (t.c as i32) as i64 + sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) * scale_of(t) as i64;
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
                 t.b = VNONE;
                 t.c = off as u32;
@@ -15477,19 +14944,19 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             let x = b.insts[t.b as usize];
             // An `or` of a constant below `2^s` with a value shifted left by `s` adds it.
             let low = if x.op == O_OR && (x.a & (VPARAM | VFLAG)) == 0 && b.insts[x.a as usize].op == O_SHL {
-                const_of(b, b.insts[x.a as usize].b)
+                int_bits(b, b.insts[x.a as usize].b)
             } else {
                 Option::<u64>::None
             };
             let k = if x.op == O_ADD || x.op == O_SUB {
-                const_of(b, x.b)
-            } else if low.is_some() && low.unwrap() < 64 && const_of(b, x.b).is_some() && const_of(b, x.b).unwrap() < 1u64 << low.unwrap() {
-                const_of(b, x.b)
+                int_bits(b, x.b)
+            } else if low.is_some() && low.unwrap() < 64 && int_bits(b, x.b).is_some() && int_bits(b, x.b).unwrap() < 1u64 << low.unwrap() {
+                int_bits(b, x.b)
             } else {
                 Option::<u64>::None
             };
             if k.is_some() {
-                let kv = le::sign_ext(k.unwrap(), ptr * 8);
+                let kv = sign_extend(k.unwrap(), ptr * 8);
                 let d = if x.op == O_SUB {
                     -kv
                 } else {
@@ -15512,12 +14979,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
             };
             let f = if x2.op == O_MUL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST {
-                const_of(b, x2.b)
-            } else if x2.op == O_SHL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST && const_of(
+                int_bits(b, x2.b)
+            } else if x2.op == O_SHL && (x2.b & (VPARAM | VFLAG)) == 0 && b.insts[x2.b as usize].op == O_ICONST && int_bits(
                 b,
                 x2.b,
             ).unwrap() < 16 {
-                Option::<u64>::Some(1u64 << const_of(b, x2.b).unwrap())
+                Option::<u64>::Some(1u64 << int_bits(b, x2.b).unwrap())
             } else {
                 Option::<u64>::None
             };
@@ -15538,15 +15005,11 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             }
         }
         b.insts[i as usize] = t;
-        return if t.b == VNONE && t.c == 0 {
-            t.a
-        } else {
-            VNONE
-        };
+        return ast::pick(t.b == VNONE && t.c == 0, t.a, VNONE);
     }
     if t.op == O_ICMP {
-        let ca = const_of(b, t.a);
-        let cb = const_of(b, t.b);
+        let ca = int_bits(b, t.a);
+        let cb = int_bits(b, t.b);
         if ca.is_some() && cb.is_some() {
             b.insts[i as usize] = iconst(t.ty, le::icmp(t.aux, b.type_of(t.a), ptr, ca.unwrap(), cb.unwrap()) as u64);
         } else if ca.is_some() || cb.is_some() {
@@ -15568,7 +15031,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             }
             // A flag (a comparison, extended or not) against 0 or 1 is the comparison or its opposite; another
             // flag (`zero_one`) of the result's type, the flag itself when the test is its being 1.
-            let kk = const_of(b, c.b).unwrap();
+            let kk = int_bits(b, c.b).unwrap();
             let mut fl = c.a;
             if (fl & (VPARAM | VFLAG)) == 0 && b.insts[fl as usize].op == O_ZEXT && zero_one(
                 b,
@@ -15601,16 +15064,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
                 };
                 return VNONE;
             }
-            if const_of(b, c.b).unwrap() == 0 && (c.aux == C_ULT || c.aux == C_UGE) {
+            if int_bits(b, c.b).unwrap() == 0 && (c.aux == C_ULT || c.aux == C_UGE) {
                 b.insts[i as usize] = iconst(t.ty, (c.aux == C_UGE) as u64);
                 return VNONE;
             }
-            if const_of(b, c.b).unwrap() == 0 && (c.aux == C_UGT || c.aux == C_ULE) {
-                c.aux = if c.aux == C_UGT {
-                    C_NE
-                } else {
-                    C_EQ
-                };
+            if int_bits(b, c.b).unwrap() == 0 && (c.aux == C_UGT || c.aux == C_ULE) {
+                c.aux = ast::pick(c.aux == C_UGT, C_NE, C_EQ);
             }
             b.insts[i as usize] = c;
         } else if t.a == t.b {
@@ -15634,11 +15093,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             return t.a;
         }
         // So is 1.0 * v.
-        let one: u64 = if t.ty == T_F32 {
-            0x3F800000
-        } else {
-            0x3FF0000000000000
-        };
+        let one: u64 = ast::pick(t.ty == T_F32, 0x3F800000, 0x3FF0000000000000);
         if t.op == O_FMUL && x.is_some() && x.unwrap() == one && quiet(b, t.b) && (t.ty == T_F32 || t.ty == T_F64) {
             return t.b;
         }
@@ -15699,11 +15154,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             }
             let wider = type_bits(ft, ptr) > type_bits(t.ty, ptr);
             b.insts[i as usize] = Inst {
-                op: if wider {
-                    O_TRUNC
-                } else {
-                    w.op
-                },
+                op: ast::pick(wider, O_TRUNC, w.op),
                 ty: t.ty,
                 aux: 0,
                 a: w.a,
@@ -15721,7 +15172,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         }
     }
     if t.op == O_SEXT || t.op == O_ZEXT || t.op == O_TRUNC || t.op == O_INTTOPTR || t.op == O_PTRTOINT {
-        let x = const_of(b, t.a);
+        let x = int_bits(b, t.a);
         let mut r: u64 = 0;
         if x.is_some() && le::scalar_convert(t.op, t.aux, b.type_of(t.a), t.ty, ptr, x.unwrap(), &mut r) {
             b.insts[i as usize] = iconst(t.ty, r);
@@ -15733,7 +15184,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     }
     // A commutative operation takes a constant second.
     let op = t.op;
-    if (op == O_ADD || op == O_MUL || op == O_AND || op == O_OR || op == O_XOR) && const_of(b, t.a).is_some() && const_of(
+    if (op == O_ADD || op == O_MUL || op == O_AND || op == O_OR || op == O_XOR) && int_bits(b, t.a).is_some() && int_bits(
         b,
         t.b,
     ).is_none() {
@@ -15742,11 +15193,11 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         t.b = x;
         b.insts[i as usize] = t;
     }
-    let ca = const_of(b, t.a);
+    let ca = int_bits(b, t.a);
     let cb = if op == O_NEG || op == O_NOT {
         Option::<u64>::Some(0)
     } else {
-        const_of(b, t.b)
+        int_bits(b, t.b)
     };
     let mut r: u64 = 0;
     if ca.is_some() && cb.is_some() {
@@ -15758,7 +15209,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     if op == O_NEG || op == O_NOT {
         return VNONE;
     }
-    let ones = le::trunc_bits(0xFFFFFFFFFFFFFFFF, type_bits(t.ty, ptr));
+    let ones = trunc_bits(0xFFFFFFFFFFFFFFFF, type_bits(t.ty, ptr));
     if cb.is_some() {
         let y = cb.unwrap();
         // The negation of a comparison (`!(a < b)`) is the opposite comparison.
@@ -15789,11 +15240,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     // A sum with a negation is a difference, a difference with one a sum.
     if (op == O_ADD || op == O_SUB) && t.ty != T_I128 {
         if is_op(b, t.b, O_NEG) {
-            let o = if op == O_ADD {
-                O_SUB
-            } else {
-                O_ADD
-            };
+            let o = ast::pick(op == O_ADD, O_SUB, O_ADD);
             b.insts[i as usize] = Inst { op: o, ty: t.ty, aux: 0, a: t.a, b: b.insts[t.b as usize].a, c: VNONE };
             return VNONE;
         }
@@ -15836,9 +15283,9 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             VNONE
         };
         if y != VNONE {
-            let k = const_of(b, y);
+            let k = int_bits(b, y);
             b.insts[i as usize] = if k.is_some() {
-                iconst(t.ty, le::trunc_bits(k.unwrap().wrapping_neg(), type_bits(t.ty, ptr)))
+                iconst(t.ty, trunc_bits(k.unwrap().wrapping_neg(), type_bits(t.ty, ptr)))
             } else {
                 Inst { op: O_NEG, ty: t.ty, aux: 0, a: y, b: VNONE, c: VNONE }
             };
@@ -15872,10 +15319,7 @@ fn cancel(b: &Body, t: Inst) Value {
     if t.op == O_ADD && a.op == O_SUB && same_term(b, a.b, t.b) {
         return a.a;
     }
-    if t.op == O_ADD && c.op == O_SUB && same_term(b, c.b, t.a) {
-        return c.a;
-    }
-    return VNONE;
+    return ast::pick(t.op == O_ADD && c.op == O_SUB && same_term(b, c.b, t.a), c.a, VNONE);
 }
 
 // Whether terms `x` and `y` of one sum are one value: the same, or equal constants not yet numbered one.
@@ -15883,8 +15327,8 @@ fn same_term(b: &Body, x: Value, y: Value) bool {
     if x == y {
         return true;
     }
-    let k = const_of(b, x);
-    return k.is_some() && k == const_of(b, y);
+    let k = int_bits(b, x);
+    return k.is_some() && k == int_bits(b, y);
 }
 
 // Whether float bits `r` of type `ty` are a normal number: neither zero, subnormal, infinite nor NaN.
@@ -15894,11 +15338,7 @@ fn regular(ty: u8, r: u64) bool {
     } else {
         r >> 23 & 0xFF
     };
-    let top = if ty == T_F64 {
-        0x7FFu64
-    } else {
-        0xFFu64
-    };
+    let top = ast::pick(ty == T_F64, 0x7FFu64, 0xFFu64);
     return e != 0 && e != top;
 }
 
@@ -15999,11 +15439,7 @@ fn decided_arm(b: &Body, p: Value, v: Value, truth: bool) Value {
         if d == 2 {
             return x;
         }
-        x = if d == 1 {
-            s.b
-        } else {
-            s.c
-        };
+        x = ast::pick(d == 1, s.b, s.c);
     }
     return x;
 }
@@ -16012,7 +15448,7 @@ fn decided_arm(b: &Body, p: Value, v: Value, truth: bool) Value {
 // constants and comparisons (`Opt::icmp_select`): `v` is a constant, a three-way comparison, or a select of
 // such values, `depth` selects deep.
 fn cmp_arm(pk: &Package, b: &Body, t: Inst, left: bool, v: Value, depth: u32) bool {
-    if const_of(b, v).is_some() {
+    if int_bits(b, v).is_some() {
         return true;
     }
     let mut u = t;
@@ -16040,10 +15476,10 @@ fn cmp_arm(pk: &Package, b: &Body, t: Inst, left: bool, v: Value, depth: u32) bo
 
 // Integer condition `c` between constants `x` and `y` of `bits` bits.
 fn holds_const(c: u16, x: u64, y: u64, bits: u32) bool {
-    let xu = le::trunc_bits(x, bits);
-    let yu = le::trunc_bits(y, bits);
-    let xs = le::sign_ext(x, bits);
-    let ys = le::sign_ext(y, bits);
+    let xu = trunc_bits(x, bits);
+    let yu = trunc_bits(y, bits);
+    let xs = sign_extend(x, bits);
+    let ys = sign_extend(y, bits);
     return if c == C_EQ {
         xu == yu
     } else if c == C_NE {
@@ -16101,10 +15537,10 @@ fn three_way(b: &Body, v: Value) (Value, Value, bool) {
 // Comparison `t` of a three-way comparison of `x` and `y` (`three_way`, of -1, 0 or 1) with a constant: the
 // comparison of `x` and `y` that holds for the same outcomes, or a constant flag. None when `t` is not one.
 fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
-    let (v, k, code) = if const_of(b, t.b).is_some() {
-        (t.a, const_of(b, t.b).unwrap(), t.aux)
-    } else if const_of(b, t.a).is_some() {
-        (t.b, const_of(b, t.a).unwrap(), mirror(t.aux))
+    let (v, k, code) = if int_bits(b, t.b).is_some() {
+        (t.a, int_bits(b, t.b).unwrap(), t.aux)
+    } else if int_bits(b, t.a).is_some() {
+        (t.b, int_bits(b, t.a).unwrap(), mirror(t.aux))
     } else {
         return None;
     };
@@ -16114,7 +15550,7 @@ fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
     }
     let bits = type_bits(b.type_of(v), ptr);
     let m = width_mask(b.type_of(v), ptr);
-    let ks = le::sign_ext(k, bits);
+    let ks = sign_extend(k, bits);
     // Per outcome (below, equal, above: -1, 0, 1), whether `code` holds of it against `k`.
     let mut holds: u32 = 0;
     for o in 0..3 {
@@ -16136,11 +15572,7 @@ fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
     if holds == 0 || holds == 7 {
         return Some(iconst(t.ty, (holds == 7) as u64));
     }
-    let base = if signed {
-        C_SLT
-    } else {
-        C_ULT
-    };
+    let base = ast::pick(signed, C_SLT, C_ULT);
     let codes: [u16; 6] = [C_EQ, C_NE, base, base + 1, base + 2, base + 3];
     for q in 0..6 {
         if outcomes(codes[q]) == holds {
@@ -16237,7 +15669,7 @@ fn zero_bits(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     }
     let m = width_mask(t.ty, ptr);
     if t.op == O_ICONST {
-        return ~const_of(b, v).unwrap() & m;
+        return ~int_bits(b, v).unwrap() & m;
     }
     if t.op == O_ICMP || t.op == O_FCMP {
         return ~1u64 & m;
@@ -16278,7 +15710,7 @@ fn zero_bits(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
     } else if t.op == O_SELECT {
         zero_bits(b, t.b, ptr, d) & zero_bits(b, t.c, ptr, d)
     } else if t.op == O_SHL || t.op == O_LSHR {
-        let c = const_of(b, t.b);
+        let c = int_bits(b, t.b);
         if c.is_none() || c.unwrap() >= type_bits(t.ty, ptr) as u64 {
             return 0;
         }
@@ -16307,24 +15739,20 @@ fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
         return (v, m);
     }
     let t = b.insts[v as usize];
-    if t.op == O_AND && const_of(b, t.b).is_some() {
-        return (t.a, const_of(b, t.b).unwrap() & m);
+    if t.op == O_AND && int_bits(b, t.b).is_some() {
+        return (t.a, int_bits(b, t.b).unwrap() & m);
     }
     let c = if t.op == O_SHL || t.op == O_LSHR {
-        const_of(b, t.b)
+        int_bits(b, t.b)
     } else {
         Option::<u64>::None
     };
     if c.is_some() && c.unwrap() < bits && (t.a & (VPARAM | VFLAG)) == 0 {
         let s = c.unwrap();
         let u = b.insts[t.a as usize];
-        let back = if t.op == O_SHL {
-            O_LSHR
-        } else {
-            O_SHL
-        };
+        let back = ast::pick(t.op == O_SHL, O_LSHR, O_SHL);
         // `x >> s << s` and `x << s >> s`.
-        if u.op == back && const_of(b, u.b) == c && u.ty == ty {
+        if u.op == back && int_bits(b, u.b) == c && u.ty == ty {
             return (
                 u.a,
                 if t.op == O_SHL {
@@ -16338,14 +15766,14 @@ fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
         if t.op == O_SHL {
             let (x, lo, n) = piece_of(b, t.a, ptr);
             if x != VNONE && lo == s && b.type_of(x) == ty {
-                return (x, width_mask(int_type_of(n), ptr) << s & m);
+                return (x, width_mask(int_type(n), ptr) << s & m);
             }
         }
         return (VNONE, 0);
     }
     let (x, lo, n) = piece_of(b, v, ptr);
     if x != VNONE && lo == 0 && b.type_of(x) == ty {
-        return (x, width_mask(int_type_of(n), ptr));
+        return (x, width_mask(int_type(n), ptr));
     }
     if t.ty == ty {
         return (v, m);
@@ -16360,19 +15788,6 @@ fn piece_of(b: &Body, v: Value, ptr: u32) (Value, u64, u32) {
     }
     let (x, j, n) = stored_piece(b, b.insts[v as usize].a, ptr);
     return (x, 8 * j as u64, n);
-}
-
-// The integer type of `n` bytes (1, 2, 4 or 8).
-const fn int_type_of(n: u32) u8 {
-    return if n == 1 {
-        T_I8
-    } else if n == 2 {
-        T_I16
-    } else if n == 4 {
-        T_I32
-    } else {
-        T_I64
-    };
 }
 
 // `or` tree `i` of `b` whose leaves (at most REJOIN_MAX) each keep bits of one value `x` in place
@@ -16414,11 +15829,7 @@ fn rejoined(b: &Body, i: u32, ptr: u32) Value {
     if todo.len() != 0 || src == VNONE || leaves < 2 {
         return VNONE;
     }
-    return if mask == width_mask(t.ty, ptr) {
-        src
-    } else {
-        VNONE
-    };
+    return ast::pick(mask == width_mask(t.ty, ptr), src, VNONE);
 }
 
 // Through `or` and `xor` operations: `v` without each operand whose possibly-set bits are outside mask `dm`
@@ -16471,7 +15882,7 @@ fn demanded_fold(b: &mut Body, i: u32, ptr: u32) Value {
         b.insts[i as usize] = iconst(t.ty, 0);
         return VNONE;
     }
-    let c = const_of(b, t.b);
+    let c = int_bits(b, t.b);
     let dm = if t.op == O_TRUNC {
         m
     } else if t.op == O_AND {
@@ -16496,20 +15907,13 @@ fn demanded_fold(b: &mut Body, i: u32, ptr: u32) Value {
     let u = b.insts[i as usize];
     if u.op == O_AND {
         let z = zero_bits(b, u.a, ptr, ZB_DEPTH);
-        if (~z & m & ~dm) == 0 {
-            return u.a;
-        }
-        return VNONE;
+        return ast::pick((~z & m & ~dm) == 0, u.a, VNONE);
     }
     // `x << c >> c` and `x >> c << c`, which the `and` that follows folds when `x`'s other bits are 0.
     if (u.op == O_LSHR || u.op == O_SHL) && (u.a & (VPARAM | VFLAG)) == 0 {
         let w = b.insts[u.a as usize];
-        let inner = if u.op == O_LSHR {
-            O_SHL
-        } else {
-            O_LSHR
-        };
-        if w.op == inner && w.ty == u.ty && const_of(b, w.b) == c {
+        let inner = ast::pick(u.op == O_LSHR, O_SHL, O_LSHR);
+        if w.op == inner && w.ty == u.ty && int_bits(b, w.b) == c {
             let z = zero_bits(b, w.a, ptr, ZB_DEPTH);
             let keep = if u.op == O_LSHR {
                 m >> c.unwrap()
@@ -16552,7 +15956,7 @@ fn zero_one(b: &Body, v: Value, depth: u32) bool {
         return zero_one(b, t.a, depth - 1) || zero_one(b, t.b, depth - 1);
     }
     if t.op == O_OR || t.op == O_XOR {
-        return zero_one(b, t.a, depth - 1) && (zero_one(b, t.b, depth - 1) || t.op == O_XOR && const_of(b, t.b) == Option::<
+        return zero_one(b, t.a, depth - 1) && (zero_one(b, t.b, depth - 1) || t.op == O_XOR && int_bits(b, t.b) == Option::<
             u64
         >::Some(1));
     }
@@ -16695,7 +16099,7 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 // null constant), which frees that block: `dead_allocs` keeps it.
 fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
     let name = pk.spell(pk.syms[b.syms[t.a as usize] as usize].name);
-    return name.ends_with("realloc") && const_of(b, b.pool[t.c as usize]) != Some(0u64);
+    return name.ends_with("realloc") && int_bits(b, b.pool[t.c as usize]) != Some(0u64);
 }
 
 // The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
@@ -16715,11 +16119,7 @@ fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
         return ALLOC_NONE;
     }
     let s = pk.syms[b.syms[t.a as usize] as usize];
-    return if s.def == NONE {
-        s.alloc
-    } else {
-        ALLOC_NONE
-    };
+    return ast::pick(s.def == NONE, s.alloc, ALLOC_NONE);
 }
 
 // The type tag of the memory write `t` writes that the program may read (`TBAA_TAGS` past the tags: none):
@@ -16736,26 +16136,6 @@ fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
     } else {
         0usize
     };
-}
-
-// The slot index whose address value `v` of `b` derives through pointer sums (at most 8), NONE else.
-const fn slot_of(b: &Body, v: Value) u32 {
-    let mut x = v;
-    // Each step leaves one pointer sum.
-    for _ in 0..8 {
-        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
-            return NONE;
-        }
-        let t = b.insts[x as usize];
-        if t.op == O_SLOTADDR {
-            return t.a;
-        }
-        if t.op != O_PTRADD {
-            return NONE;
-        }
-        x = t.a;
-    }
-    return NONE;
 }
 
 // `writes_memory`, but for a call of a function whose body writes no memory outside its frame
@@ -16792,11 +16172,7 @@ fn frozen(b: &Body, out: &mut Vector<bool>, fp: &mut Vector<bool>) {
     fill(fp, ni, false);
     for i in 0..ni {
         let t = b.insts[i];
-        let base = if t.op == O_LOAD || t.op == O_PTRADD {
-            t.a
-        } else {
-            VNONE
-        };
+        let base = ast::pick(t.op == O_LOAD || t.op == O_PTRADD, t.a, VNONE);
         let mut via = false;
         if (base & VPARAM) != 0 && (base & VFLAG) == 0 {
             let p = base & ~VPARAM;
@@ -16950,7 +16326,7 @@ fn speculable(pk: &Package, b: &Body, t: Inst) bool {
         return false;
     }
     if op == O_SHL || op == O_LSHR || op == O_ASHR {
-        let c = const_of(b, t.b);
+        let c = int_bits(b, t.b);
         return c.is_some() && c.unwrap() < type_bits(t.ty, pk.ptr_bytes) as u64;
     }
     return true;
@@ -17082,9 +16458,9 @@ fn flag_of(b: &Body, t: Inst) (Value, bool, bool) {
 // `flag_of` for signed comparison `t`.
 fn signed_flag_of(b: &Body, t: Inst) (Value, bool, bool) {
     let none = (VNONE, false, false);
-    let (m, code) = if const_of(b, t.b) == Some(0u64) {
+    let (m, code) = if int_bits(b, t.b) == Some(0u64) {
         (t.a, t.aux)
-    } else if const_of(b, t.a) == Some(0u64) {
+    } else if int_bits(b, t.a) == Some(0u64) {
         (t.b, mirror(t.aux))
     } else {
         return none;
@@ -17143,7 +16519,7 @@ fn bit_sources(b: &Body, v: Value, bits: u32, depth: u32, src: &mut [u8; 64]) Va
         b.insts[v as usize]
     };
     let c = if t.op == O_AND || t.op == O_SHL || t.op == O_LSHR {
-        const_of(b, t.b)
+        int_bits(b, t.b)
     } else {
         Option::<u64>::None
     };
@@ -17302,18 +16678,14 @@ const SEL_CMP_DEPTH: u32 = 3;
 // at most `depth` selects deep: `(0 or 1, _)` when it is that constant, `(SC_VALUE, c)` when it is the
 // comparison `c` a select tests, else `(SC_NONE, _)`.
 fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
-    let v = if left {
-        t.a
-    } else {
-        t.b
-    };
+    let v = ast::pick(left, t.a, t.b);
     let ty = b.type_of(t.a);
-    let k = const_of(b, v);
+    let k = int_bits(b, v);
     if k.is_some() {
         let o = if left {
-            const_of(b, t.b).unwrap()
+            int_bits(b, t.b).unwrap()
         } else {
-            const_of(b, t.a).unwrap()
+            int_bits(b, t.a).unwrap()
         };
         let r = if left {
             le::icmp(t.aux, ty, ptr, k.unwrap(), o)
@@ -17329,9 +16701,9 @@ fn sel_cmp(b: &Body, t: Inst, ptr: u32, left: bool, depth: u32) (u8, Value) {
     let z = b.insts[v as usize];
     if z.op == O_ZEXT && (z.a & (VPARAM | VFLAG)) == 0 && b.insts[z.a as usize].op == O_ICMP {
         let o = if left {
-            const_of(b, t.b)
+            int_bits(b, t.b)
         } else {
-            const_of(b, t.a)
+            int_bits(b, t.a)
         };
         if o.is_none() {
             return (SC_NONE, VNONE);
@@ -17509,7 +16881,7 @@ fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
     let n = type_bytes(b.insts[v as usize].ty, ptr);
     let x = b.insts[v as usize].a;
     if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && b.insts[x as usize].op == O_LSHR {
-        let s = const_of(b, b.insts[x as usize].b);
+        let s = int_bits(b, b.insts[x as usize].b);
         let xn = type_bytes(b.type_of(x), ptr) as u64;
         if s.is_some() && s.unwrap() % 8 == 0 && s.unwrap() / 8 + n as u64 <= xn {
             return (b.insts[x as usize].a, (s.unwrap() / 8) as u32, n);
@@ -17527,14 +16899,10 @@ fn nonzero_arm(b: &mut Body, i: u32) {
         return;
     }
     let c = b.insts[t.a as usize];
-    if c.aux != C_EQ && c.aux != C_NE || const_of(b, c.b) != Some(0u64) {
+    if c.aux != C_EQ && c.aux != C_NE || int_bits(b, c.b) != Some(0u64) {
         return;
     }
-    let arm = if c.aux == C_EQ {
-        t.c
-    } else {
-        t.b
-    };
+    let arm = ast::pick(c.aux == C_EQ, t.c, t.b);
     if !is_op(b, arm, O_CLZ) && !is_op(b, arm, O_CTZ) || b.insts[arm as usize].a != c.a || b.insts[arm as usize].aux != 0 || !only_use(
         b,
         arm,
@@ -17577,11 +16945,7 @@ fn only_use(b: &Body, v: Value, at: u32) bool {
 // its index.
 fn own_edge(b: &mut Body, i: u32, q: u32) u32 {
     let t = b.insts[i as usize];
-    let e = if q == 0 {
-        t.b
-    } else {
-        t.c
-    };
+    let e = ast::pick(q == 0, t.b, t.c);
     let mut args = Vector::<Value>::with_capacity(b.edge_nargs(e) as usize);
     for k in 0..b.edge_nargs(e) {
         args.push(b.edge_arg(e, k));
@@ -17595,35 +16959,14 @@ fn own_edge(b: &mut Body, i: u32, q: u32) u32 {
     return n;
 }
 
-fn same_edge(b: &Body, x: u32, y: u32) bool {
-    if b.edge_target(x) != b.edge_target(y) {
-        return false;
-    }
-    for q in 0..b.edge_nargs(x) {
-        if b.edge_arg(x, q) != b.edge_arg(y, q) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // The edge branch `t` takes when its condition is `c`.
 const fn side(t: Inst, c: u64) u32 {
-    return if c != 0 {
-        t.b
-    } else {
-        t.c
-    };
+    return ast::pick(c != 0, t.b, t.c);
 }
 
 // The bits of a value of type `ty`.
 const fn width_mask(ty: u8, ptr: u32) u64 {
-    let w = type_bits(ty, ptr);
-    return if w >= 64 {
-        ~0u64
-    } else {
-        (1u64 << w as u64) - 1
-    };
+    return mask_of(type_bits(ty, ptr));
 }
 
 // The edge branch or switch `t` takes for condition value `c`.
@@ -17637,29 +16980,6 @@ fn decided(b: &Body, t: Inst, c: u64) u32 {
         }
     }
     return b.switch_edge(t, t.aux);
-}
-
-// The number of edges terminator `t` holds, and its edge `n`.
-const fn edge_count(t: Inst) u32 {
-    return if t.op == O_JMP {
-        1u32
-    } else if t.op == O_BR {
-        2u32
-    } else if t.op == O_SWITCH {
-        t.aux as u32 + 1
-    } else {
-        0u32
-    };
-}
-
-fn edge_at(b: &Body, t: Inst, n: u32) u32 {
-    return if t.op == O_JMP {
-        t.a
-    } else if t.op == O_BR {
-        side(t, (n == 0) as u64)
-    } else {
-        b.switch_edge(t, n)
-    };
 }
 
 // Whether `c` calls body `j`'s own function.
@@ -17679,11 +16999,7 @@ fn acc_call(pk: &Package, b: &Body, j: u32, start: u32, ri: u32) u32 {
         return NONE;
     }
     for side in 0..2 {
-        let c = if side == 0 {
-            o.a
-        } else {
-            o.b
-        };
+        let c = ast::pick(side == 0, o.a, o.b);
         if (c & (VPARAM | VFLAG)) != 0 || c < start || c >= oi || !self_call(pk, b, j, b.insts[c as usize]) || b.insts[c as usize].ty != o.ty {
             continue;
         }
@@ -17716,14 +17032,14 @@ fn bound_by(pk: &Package, b: &Body, v: Value, neg: bool) (Value, bool, u64, u64)
     if !is_int(ty) || ty == T_I128 {
         return none;
     }
-    let (x, k, cond) = if const_of(b, c.b).is_some() {
-        (c.a, const_of(b, c.b).unwrap(), c.aux)
-    } else if const_of(b, c.a).is_some() {
-        (c.b, const_of(b, c.a).unwrap(), mirror(c.aux))
+    let (x, k, cond) = if int_bits(b, c.b).is_some() {
+        (c.a, int_bits(b, c.b).unwrap(), c.aux)
+    } else if int_bits(b, c.a).is_some() {
+        (c.b, int_bits(b, c.a).unwrap(), mirror(c.aux))
     } else {
         return none;
     };
-    if const_of(b, x).is_some() {
+    if int_bits(b, x).is_some() {
         return none;
     }
     let cond2 = if neg {
@@ -17778,11 +17094,7 @@ const fn whole_bytes(m: u64, n: u32) bool {
 // that edge (the edge's argument for a parameter of the block; VNONE for none).
 // The edge of branch `t` that is not `e`.
 const fn other_edge(t: Inst, e: u32) u32 {
-    return if t.b == e {
-        t.c
-    } else {
-        t.b
-    };
+    return ast::pick(t.b == e, t.c, t.b);
 }
 
 // Make each indirect call of `pk`'s bodies through the address of a function whose signature the call fits
@@ -17826,23 +17138,12 @@ fn direct_calls(pk: &mut Package) {
 // bodies (`Package.held`).
 fn specialize(pk: &mut Package) {
     let n = pk.bodies.len();
-    let held = if pk.held.body == NONE {
-        n
-    } else {
-        pk.held.body as usize
-    };
+    let held = pk.held_bodies();
     let ns = pk.syms.len();
     // Per body below `held`, its function's symbol; per symbol, the parameters every call passes one
     // constant (`mask`, after `seen`), those constants (`vals`, by `symbol << 6 | parameter`), and the
     // calls from other bodies.
-    let mut owner = Vector::<u32>::new();
-    fill(&mut owner, held, NONE);
-    for s in 0..ns {
-        let y = pk.syms[s];
-        if y.kind == SK_FUNC && y.def != NONE && y.def as usize < held {
-            owner[y.def as usize] = s as u32;
-        }
-    }
+    let owner = pk.body_owners();
     let mut mask = Vector::<u64>::new();
     fill(&mut mask, ns, 0);
     let mut seen = Vector::<bool>::new();
@@ -18261,11 +17562,7 @@ fn ret_edges(b: &mut Body, into: &mut Vector<u32>, es: &mut Vector<u32>) bool {
             continue;
         }
         for side in 0..2 {
-            let e = if side == 0 {
-                t.b
-            } else {
-                t.c
-            };
+            let e = ast::pick(side == 0, t.b, t.c);
             let (ok, v) = ret_through(b, e);
             let j = b.edge_target(e);
             if !ok || b.edge_nargs(e) == 0 || n == RET_EDGES || into[j as usize] < 2 {
@@ -18315,7 +17612,7 @@ fn counter_step(b: &Body, v: Value, q: Value) u32 {
         return 0;
     }
     let t = b.insts[v as usize];
-    let c = const_of(b, t.b);
+    let c = int_bits(b, t.b);
     if c.is_none() {
         return 0;
     }
@@ -18339,7 +17636,7 @@ fn ptr_step(b: &Body, v: Value, q: Value) u32 {
     let t = b.insts[v as usize];
     let mut s = (t.c as i32) as i64;
     if t.b != VNONE {
-        let k = const_of(b, t.b);
+        let k = int_bits(b, t.b);
         if k.is_none() || k.unwrap() > 0xFFFF {
             return 0;
         }
@@ -18396,9 +17693,9 @@ fn cond_fact(b: &Body, v: Value, want: bool, a: Value, c: u64, m: u64, depth: u3
     let t = b.insts[v as usize];
     if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) {
         let k2: Option<u64> = if t.a == a {
-            const_of(b, t.b)
+            int_bits(b, t.b)
         } else if t.b == a {
-            const_of(b, t.a)
+            int_bits(b, t.a)
         } else {
             None
         };
@@ -18435,9 +17732,9 @@ fn eq_const(b: &Body, v: Value, want: bool, n: Value, depth: u32) Option<u64> {
     let t = b.insts[v as usize];
     if t.op == O_ICMP && t.aux == C_EQ == want && (t.aux == C_EQ || t.aux == C_NE) {
         return if t.a == n {
-            const_of(b, t.b)
+            int_bits(b, t.b)
         } else if t.b == n {
-            const_of(b, t.a)
+            int_bits(b, t.a)
         } else {
             None
         };
@@ -18464,11 +17761,6 @@ fn in_block(b: &Body, v: Value, k: u32) bool {
 
 const fn jump(e: u32) Inst {
     return Inst { op: O_JMP, ty: T_NONE, aux: 0, a: e, b: 0, c: 0 };
-}
-
-// An integer constant of type `ty` (`v` truncated to it), as the lowering writes one.
-const fn iconst(ty: u8, v: u64) Inst {
-    return Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
 }
 
 const fn is_nan(ty: u8, r: u64) bool {

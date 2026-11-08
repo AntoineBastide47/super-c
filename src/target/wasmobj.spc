@@ -9,6 +9,7 @@ import target::wasm as w;
 import utils::names as nm;
 import codegen::obj as ob;
 import codegen::dwarf as dw;
+import ast::ast as ast;
 
 /// Symbol kinds (the linking conventions' `SYMTAB_*`).
 pub(package) const K_FUNC: u8 = 0;
@@ -207,7 +208,7 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     let mut sec = Vector::<u8>::new();
     let mut nsec: u32 = 0;
     // Types.
-    w::uleb(&mut sec, o.types.len() as u64);
+    ob::uleb(&mut sec, o.types.len() as u64);
     for i in 0..o.types.len() {
         sec.push(0x60);
         sec.extend_copy(o.types.at(i));
@@ -215,19 +216,19 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     let _ = put_section(out, 1, &mut sec, &mut nsec);
     // Imports: the memory, the table, the stack pointer, the undefined functions.
     let nimp = 1 + (sp.table_sym != NONE) as u32 + (sp.sp_sym != NONE) as u32 + sp.nfimports;
-    w::uleb(&mut sec, nimp);
+    ob::uleb(&mut sec, nimp);
     w::name(&mut sec, "env");
     w::name(&mut sec, "__linear_memory");
     sec.push(2);
     sec.push(0);
-    w::uleb(&mut sec, 0);
+    ob::uleb(&mut sec, 0);
     if sp.table_sym != NONE {
         w::name(&mut sec, "env");
         w::name(&mut sec, "__indirect_function_table");
         sec.push(1);
         sec.push(w::FUNCREF);
         sec.push(0);
-        w::uleb(&mut sec, 0);
+        ob::uleb(&mut sec, 0);
     }
     if sp.sp_sym != NONE {
         w::name(&mut sec, "env");
@@ -256,23 +257,23 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
                 },
             );
             sec.push(0);
-            w::uleb(&mut sec, s.ty);
+            ob::uleb(&mut sec, s.ty);
         }
     }
     let _ = put_section(out, 2, &mut sec, &mut nsec);
     // Functions: their types.
-    w::uleb(&mut sec, o.funcs.len() as u64);
+    ob::uleb(&mut sec, o.funcs.len() as u64);
     for i in 0..o.funcs.len() {
-        w::uleb(&mut sec, o.syms[o.funcs.at(i).sym as usize].ty);
+        ob::uleb(&mut sec, o.syms[o.funcs.at(i).sym as usize].ty);
     }
     let _ = put_section(out, 3, &mut sec, &mut nsec);
     // The data count (the bulk memory forms read it; clang writes it).
-    w::uleb(&mut sec, o.segs.len() as u64);
+    ob::uleb(&mut sec, o.segs.len() as u64);
     let _ = put_section(out, 12, &mut sec, &mut nsec);
     // Code: per body its size, its locals in runs of one type, its instructions. A relocation's offset
     // counts from the section's contents.
     let mut code_rels = Vector::<WRel>::new();
-    w::uleb(&mut sec, o.funcs.len() as u64);
+    ob::uleb(&mut sec, o.funcs.len() as u64);
     let mut head = Vector::<u8>::new();
     // Per body, where its entry starts in the section's contents and its instructions start in the entry.
     let mut entry = Vector::<u32>::with_capacity(o.funcs.len());
@@ -292,19 +293,19 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
             runs += 1;
             j = e;
         }
-        w::uleb(&mut head, runs);
+        ob::uleb(&mut head, runs);
         j = 0;
         while j < f.locals.len() {
             let mut e = j + 1;
             while e < f.locals.len() && f.locals[e] == f.locals[j] {
                 e += 1;
             }
-            w::uleb(&mut head, (e - j) as u64);
+            ob::uleb(&mut head, (e - j) as u64);
             head.push(f.locals[j]);
             j = e;
         }
         body_size.push((head.len() + f.code.len()) as u32);
-        w::uleb(&mut sec, (head.len() + f.code.len()) as u64);
+        ob::uleb(&mut sec, (head.len() + f.code.len()) as u64);
         sec.extend_copy(&head);
         let base = sec.len() as u32;
         inst_at.push(base - entry[i]);
@@ -321,7 +322,7 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     let code_index = put_section(out, 10, &mut sec, &mut nsec);
     // Data: one active segment per data symbol at a running address (the linker places them again).
     let mut data_rels = Vector::<WRel>::new();
-    w::uleb(&mut sec, o.segs.len() as u64);
+    ob::uleb(&mut sec, o.segs.len() as u64);
     let mut addr: u32 = 0;
     for i in 0..o.segs.len() {
         let g = o.segs.at(i);
@@ -329,9 +330,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
         addr = addr + al - 1 & ~(al - 1);
         sec.push(0);
         sec.push(w::I32_CONST);
-        w::sleb(&mut sec, addr);
+        ob::sleb(&mut sec, addr);
         sec.push(w::END);
-        w::uleb(&mut sec, g.bytes.len() as u64);
+        ob::uleb(&mut sec, g.bytes.len() as u64);
         let base = sec.len() as u32;
         sec.extend_copy(&g.bytes);
         for q in 0..g.rels.len() {
@@ -371,15 +372,15 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     }
     // linking: the symbol table, then the segment info.
     let mut lk = Vector::<u8>::new();
-    w::uleb(&mut lk, 2);
+    ob::uleb(&mut lk, 2);
     let mut sub = Vector::<u8>::new();
-    w::uleb(&mut sub, (o.syms.len() + dbg_index.len()) as u64);
+    ob::uleb(&mut sub, (o.syms.len() + dbg_index.len()) as u64);
     for k in 0..o.syms.len() {
         let s = o.syms[k];
         sub.push(s.kind);
         // An import of another name than the symbol's names the symbol too.
         let explicit = s.kind == K_FUNC && s.def == NONE && s.iname != NONE;
-        w::uleb(
+        ob::uleb(
             &mut sub,
             if explicit {
                 s.flags | F_EXPLICIT_NAME
@@ -390,9 +391,9 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
         if s.kind == K_DATA {
             w::name(&mut sub, o.name_of(k as u32));
             if s.def != NONE {
-                w::uleb(&mut sub, s.def);
-                w::uleb(&mut sub, 0);
-                w::uleb(&mut sub, s.size);
+                ob::uleb(&mut sub, s.def);
+                ob::uleb(&mut sub, 0);
+                ob::uleb(&mut sub, s.size);
             }
             continue;
         }
@@ -401,31 +402,27 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
         } else {
             0u32
         };
-        w::uleb(&mut sub, idx);
+        ob::uleb(&mut sub, idx);
         if s.def != NONE || explicit {
             w::name(&mut sub, o.name_of(k as u32));
         }
     }
     for k in 0..dbg_index.len() {
         sub.push(K_SECTION);
-        w::uleb(&mut sub, F_LOCAL);
-        w::uleb(&mut sub, dbg_index[k]);
+        ob::uleb(&mut sub, F_LOCAL);
+        ob::uleb(&mut sub, dbg_index[k]);
     }
-    lk.push(8);
-    w::uleb(&mut lk, sub.len() as u64);
-    lk.extend_copy(&sub);
+    w::section(&mut lk, 8, &sub);
     sub.truncate(0);
     if o.segs.len() != 0 {
-        w::uleb(&mut sub, o.segs.len() as u64);
+        ob::uleb(&mut sub, o.segs.len() as u64);
         for i in 0..o.segs.len() {
             let g = o.segs.at(i);
             w::name(&mut sub, &g.name);
-            w::uleb(&mut sub, g.align_log2);
-            w::uleb(&mut sub, ast_pick32(g.retain, SEG_RETAIN, 0));
+            ob::uleb(&mut sub, g.align_log2);
+            ob::uleb(&mut sub, ast::pick(g.retain, SEG_RETAIN, 0));
         }
-        lk.push(5);
-        w::uleb(&mut lk, sub.len() as u64);
-        lk.extend_copy(&sub);
+        w::section(&mut lk, 5, &sub);
     }
     let _ = put_custom(out, "linking", &lk, &mut nsec);
     // The relocations of the code, of the data and of the debug sections.
@@ -458,7 +455,7 @@ pub(package) fn write(o: &WObj, out: &mut Vector<u8>) {
     if o.bulk {
         feats.push("bulk-memory");
     }
-    w::uleb(&mut tf, feats.len() as u64);
+    ob::uleb(&mut tf, feats.len() as u64);
     for i in 0..feats.len() {
         tf.push(b'+');
         w::name(&mut tf, feats[i]);
@@ -502,13 +499,6 @@ fn debug_info(o: &WObj, inst_at: &Vector<u32>, body_size: &Vector<u32>) dw::Dwar
     return dw::Dwarf::build(&funcs, &lines, &names, &globals, &files, &o.comp_dir, 4);
 }
 
-const fn ast_pick32(c: bool, a: u32, b: u32) u32 {
-    if c {
-        return a;
-    }
-    return b;
-}
-
 // The object's own value of relocated field `r` at `at` of `sec`: the index a function, the stack pointer,
 // a type or the table has in this object. A memory address or table index stays for the linker.
 fn fill_reloc(sec: &mut Vector<u8>, at: usize, r: WRel, sp: &Spaces) {
@@ -522,9 +512,7 @@ fn fill_reloc(sec: &mut Vector<u8>, at: usize, r: WRel, sp: &Spaces) {
 // Append section `id` with contents `sec` to `out` and clear `sec`; its index in the module (`n` counts
 // them).
 fn put_section(out: &mut Vector<u8>, id: u8, sec: &mut Vector<u8>, n: &mut u32) u32 {
-    out.push(id);
-    w::uleb(out, sec.len() as u64);
-    out.extend_copy(sec);
+    w::section(out, id, sec);
     sec.truncate(0);
     *n += 1;
     return *n - 1;
@@ -532,12 +520,7 @@ fn put_section(out: &mut Vector<u8>, id: u8, sec: &mut Vector<u8>, n: &mut u32) 
 
 // Append custom section `name` with contents `body` to `out`; its index in the module (`n` counts them).
 fn put_custom(out: &mut Vector<u8>, name: str, body: &Vector<u8>, n: &mut u32) u32 {
-    let mut c = Vector::<u8>::new();
-    w::name(&mut c, name);
-    c.extend_copy(body);
-    out.push(0);
-    w::uleb(out, c.len() as u64);
-    out.extend_copy(&c);
+    w::custom(out, name, body);
     *n += 1;
     return *n - 1;
 }
@@ -545,15 +528,15 @@ fn put_custom(out: &mut Vector<u8>, name: str, body: &Vector<u8>, n: &mut u32) u
 // The contents of a `reloc.*` section for section `index`.
 fn rel_section(index: u32, rels: &Vector<WRel>) Vector<u8> {
     let mut c = Vector::<u8>::new();
-    w::uleb(&mut c, index);
-    w::uleb(&mut c, rels.len() as u64);
+    ob::uleb(&mut c, index);
+    ob::uleb(&mut c, rels.len() as u64);
     for q in 0..rels.len() {
         let r = rels[q];
         c.push(r.kind);
-        w::uleb(&mut c, r.off);
-        w::uleb(&mut c, r.sym);
+        ob::uleb(&mut c, r.off);
+        ob::uleb(&mut c, r.sym);
         if w::has_addend(r.kind) {
-            w::sleb(&mut c, r.addend);
+            ob::sleb(&mut c, r.addend);
         }
     }
     return c;

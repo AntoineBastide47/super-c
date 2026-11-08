@@ -11,6 +11,7 @@ import target::x64asm as xa;
 import target::wasm as w;
 import target::wasmasm as wa;
 import target::wasmobj as wo;
+import ast::ast as ast;
 
 /// Instruction sets.
 pub(package) const ISA_A64: u8 = 0;
@@ -814,11 +815,7 @@ extend Asm {
                     }
                 }
                 let off = o.secs[self.sec as usize].size as u32;
-                let kind = if self.isa == ISA_X64 {
-                    x::R_ABS64
-                } else {
-                    a::R_ABS64
-                };
+                let kind = ast::pick(self.isa == ISA_X64, x::R_ABS64, a::R_ABS64);
                 self.refs.push(
                     Ref {
                         sec: self.sec,
@@ -960,11 +957,7 @@ extend Asm {
     // Advance the open frame's rules to the current offset.
     fn cfi_advance(self: &mut Self, o: &mut ob::Obj) {
         let here = o.secs[self.cfi.sec as usize].size;
-        let factor: u64 = if self.isa == ISA_A64 {
-            4
-        } else {
-            1
-        };
+        let factor: u64 = ast::pick(self.isa == ISA_A64, 4, 1);
         let d = (here - self.cfi.last) / factor;
         if d == 0 {
             return;
@@ -1200,7 +1193,7 @@ extend Asm {
                 n
             };
             o.cfi.push(0x0E);
-            uleb(&mut o.cfi, self.cfi.cfa as u64);
+            ob::uleb(&mut o.cfi, self.cfi.cfa as u64);
             return true;
         }
         if d == ".cfi_remember_state" {
@@ -1226,11 +1219,11 @@ extend Asm {
             let f = -n / 8;
             if r < 64 && f >= 0 {
                 o.cfi.push(0x80 | r as u8);
-                uleb(&mut o.cfi, f as u64);
+                ob::uleb(&mut o.cfi, f as u64);
             } else {
                 o.cfi.push(0x11);
-                uleb(&mut o.cfi, r as u64);
-                sleb(&mut o.cfi, f);
+                ob::uleb(&mut o.cfi, r as u64);
+                ob::sleb(&mut o.cfi, f);
             }
             return true;
         }
@@ -1239,24 +1232,18 @@ extend Asm {
                 o.cfi.push(0xC0 | r as u8);
             } else {
                 o.cfi.push(0x06);
-                uleb(&mut o.cfi, r as u64);
+                ob::uleb(&mut o.cfi, r as u64);
             }
             return true;
         }
         if d == ".cfi_undefined" || d == ".cfi_same_value" {
-            o.cfi.push(
-                if d == ".cfi_undefined" {
-                    0x07u8
-                } else {
-                    0x08u8
-                },
-            );
-            uleb(&mut o.cfi, r as u64);
+            o.cfi.push(ast::pick(d == ".cfi_undefined", 0x07u8, 0x08u8));
+            ob::uleb(&mut o.cfi, r as u64);
             return true;
         }
         if d == ".cfi_def_cfa_register" {
             o.cfi.push(0x0D);
-            uleb(&mut o.cfi, r as u64);
+            ob::uleb(&mut o.cfi, r as u64);
             return true;
         }
         if d == ".cfi_def_cfa" {
@@ -1265,39 +1252,11 @@ extend Asm {
             }
             self.cfi.cfa = n;
             o.cfi.push(0x0C);
-            uleb(&mut o.cfi, r as u64);
-            uleb(&mut o.cfi, n as u64);
+            ob::uleb(&mut o.cfi, r as u64);
+            ob::uleb(&mut o.cfi, n as u64);
             return true;
         }
         return self.fail(format("the directive '{}' is not one this assembler takes", d).as_str());
-    }
-}
-
-/// Append `v` to `o` as unsigned LEB128.
-pub(package) fn uleb(o: &mut Vector<u8>, v0: u64) {
-    let mut v = v0;
-    loop {
-        let b = (v & 0x7F) as u8;
-        v >>= 7;
-        if v == 0 {
-            o.push(b);
-            return;
-        }
-        o.push(b | 0x80);
-    }
-}
-
-/// Append `v` to `o` as signed LEB128.
-pub(package) fn sleb(o: &mut Vector<u8>, v0: i64) {
-    let mut v = v0;
-    loop {
-        let b = (v & 0x7F) as u8;
-        v >>= 7;
-        if v == 0 && (b & 0x40) == 0 || v == -1 && (b & 0x40) != 0 {
-            o.push(b);
-            return;
-        }
-        o.push(b | 0x80);
     }
 }
 
@@ -1322,14 +1281,7 @@ extend Asm {
     ) bool {
         let mut sts = Vector::<Stmt>::new();
         statements(text, false, &mut sts);
-        let mut a0 = Asm::new(
-            ISA_A64,
-            if apple {
-                FMT_MACHO
-            } else {
-                FMT_ELF
-            },
-        );
+        let mut a0 = Asm::new(ISA_A64, ast::pick(apple, FMT_MACHO, FMT_ELF));
         let base = words.len();
         let mut refs = Vector::<InlRef>::new();
         for k in 0..sts.len() {
@@ -1583,26 +1535,8 @@ const NOPS: [u8; 55] = [
 // The encoding number of x86-64 register `r` (a 64-bit general register 0..15, xmm 16..31); -1 for
 // none.
 const fn x64_reg_number(r: str) i64 {
-    let gp: [str<'static>; 16] = [
-        "rax",
-        "rcx",
-        "rdx",
-        "rbx",
-        "rsp",
-        "rbp",
-        "rsi",
-        "rdi",
-        "r8",
-        "r9",
-        "r10",
-        "r11",
-        "r12",
-        "r13",
-        "r14",
-        "r15",
-    ];
     for i in 0..16usize {
-        if unsafe gp[i] == r {
+        if xa::gp_name(i, 8) == r {
             return i as i64;
         }
     }
@@ -1820,18 +1754,7 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
             let modl = body.starts_with(".import_module");
             let mut a = "";
             let mut b2 = "";
-            if !two_names(
-                after(
-                    body,
-                    if modl {
-                        14usize
-                    } else {
-                        12usize
-                    },
-                ),
-                &mut a,
-                &mut b2,
-            ) {
+            if !two_names(after(body, ast::pick(modl, 14usize, 12usize)), &mut a, &mut b2) {
                 err.format_into("line {}: '{}' takes a symbol and a name", line, body);
                 return false;
             }
@@ -1845,14 +1768,7 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
         }
         if body.starts_with(".globl") || body.starts_with(".global") || body.starts_with(".hidden") {
             let n = String::from_str(
-                after(
-                    body,
-                    if body.starts_with(".globl") || body.starts_with(".hidden") {
-                        7usize
-                    } else {
-                        8usize
-                    },
-                ),
+                after(body, ast::pick(body.starts_with(".globl") || body.starts_with(".hidden"), 7usize, 8usize)),
             );
             if body.starts_with(".hidden") {
                 hidden.push(n);
@@ -1875,15 +1791,8 @@ pub(package) fn wasm_module(o: &mut wo::WObj, text: str, err: &mut String) bool 
                         break;
                     },
                 };
-                let ty = switch tn {
-                    "i32" => w::I32,
-                    "i64" => w::I64,
-                    "f32" => w::F32,
-                    "f64" => w::F64,
-                    "v128" => w::V128,
-                    _ => 0u8,
-                };
-                if ty == 0 {
+                let ty = wa::val_type(tn);
+                if ty == 0 || ty == w::FUNCREF {
                     err.format_into("line {}: '{}' is no local type", line, tn);
                     return false;
                 }

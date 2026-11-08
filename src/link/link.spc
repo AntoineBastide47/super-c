@@ -13,14 +13,12 @@ import module::loader as loader;
 import target::table as tgt;
 import target::native as nat;
 import bindgen::ctarget as ct;
+import ast::ast as ast;
 
 /// Archive objects `objs` into static library `out` for target `os`; LINKED, or FAILED with the reason in
 /// `why`.
 pub(package) fn archive(os: i32, out: str, objs: &Vector<String>, why: &mut String) i32 {
-    if !ar::archive(nat::obj_kind(os), out, objs, why) {
-        return FAILED;
-    }
-    return LINKED;
+    return ast::pick(!ar::archive(nat::obj_kind(os), out, objs, why), FAILED, LINKED);
 }
 
 /// Outcomes of `link_args`.
@@ -267,11 +265,7 @@ fn read_exports(path: str, form: u8, c: &mut Cmd, why: &mut String) bool {
 fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
     let mut o = lm::Opts {
         out: replace(&mut c.out, String::new()),
-        kind: if c.shared {
-            lm::K_DYLIB
-        } else {
-            lm::K_EXE
-        },
+        kind: ast::pick(c.shared, lm::K_DYLIB, lm::K_EXE),
         install: replace(&mut c.install, String::new()),
         objs: replace(&mut c.objs, Vector::<String>::new()),
         libs: replace(&mut c.libs, Vector::<String>::new()),
@@ -295,10 +289,7 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
             return FAILED;
         }
     }
-    if !lm::link(&o, why) {
-        return FAILED;
-    }
-    return LINKED;
+    return ast::pick(!lm::link(&o, why), FAILED, LINKED);
 }
 
 fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
@@ -310,20 +301,11 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
     // A shared library's name: the one its command gives it, else its file's.
     let mut soname = replace(&mut c.install, String::new());
     if c.shared && soname.len() == 0 {
-        let p = c.out.as_str();
-        let mut i = p.len();
-        while i > 0 && p.byte_at(i - 1) != b'/' {
-            i -= 1;
-        }
-        soname.push_str(p.slice(i, p.len()));
+        soname.push_str(lu::basename(&c.out));
     }
     let o = le::Opts {
         out: replace(&mut c.out, String::new()),
-        kind: if c.shared {
-            le::K_SHARED
-        } else {
-            le::K_EXE
-        },
+        kind: ast::pick(c.shared, le::K_SHARED, le::K_EXE),
         soname: soname,
         objs: replace(&mut c.objs, Vector::<String>::new()),
         libs: replace(&mut c.libs, Vector::<String>::new()),
@@ -335,10 +317,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
     };
-    if !le::link(&o, why) {
-        return FAILED;
-    }
-    return LINKED;
+    return ast::pick(!le::link(&o, why), FAILED, LINKED);
 }
 
 // The C library's parts on wasm, which `std::rt::libc` is: a link that names them needs nothing more.
@@ -385,10 +364,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         gc: c.gc,
         mem: c.mem,
     };
-    if !lw::link(&o, why) {
-        return FAILED;
-    }
-    return LINKED;
+    return ast::pick(!lw::link(&o, why), FAILED, LINKED);
 }
 
 fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
@@ -411,8 +387,5 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
     if !pe::has_dlls(&o, why) {
         return NOT_SERVED;
     }
-    if !pe::link(&o, why) {
-        return FAILED;
-    }
-    return LINKED;
+    return ast::pick(!pe::link(&o, why), FAILED, LINKED);
 }

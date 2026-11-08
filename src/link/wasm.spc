@@ -10,8 +10,9 @@ import link::util as lu;
 import utils::names as nm;
 import target::native as nat;
 import target::wasm as w;
-
-const NONE: u32 = 0xFFFFFFFF;
+import ast::ast as ast;
+import codegen::obj as ob;
+import target::wasmobj as *;
 
 /// A link: the objects, the output, the stack's size and place, and whether to leave out the names and
 /// the debug sections.
@@ -27,16 +28,6 @@ pub(package) struct Opts {
 }
 
 // Symbol kinds and flags (the linking conventions').
-const K_FUNC: u8 = 0;
-const K_DATA: u8 = 1;
-const K_GLOBAL: u8 = 2;
-const K_SECTION: u8 = 3;
-const K_TABLE: u8 = 5;
-const F_WEAK: u32 = 1;
-const F_LOCAL: u32 = 2;
-const F_UNDEFINED: u32 = 0x10;
-const F_EXPLICIT_NAME: u32 = 0x40;
-const F_NO_STRIP: u32 = 0x80;
 
 // An input file: its bytes in the blob, and where its parts start in the per-file tables.
 struct IFile {
@@ -48,7 +39,6 @@ struct IFile {
     pub(package) imp0: u32, // `fimps`: its function imports
     pub(package) nimp: u32,
     pub(package) fn0: u32, // `funcs`: its bodies
-    pub(package) nfn: u32,
     pub(package) seg0: u32, // `segs`: its data segments
     pub(package) nseg: u32,
     pub(package) sec0: u32, // `secs`: its sections
@@ -122,13 +112,6 @@ struct GSym {
     pub(package) strong: bool, // a strong reference
 }
 
-// An output function import.
-struct OImp {
-    pub(package) module: u32,
-    pub(package) field: u32,
-    pub(package) ty: u32,
-}
-
 extend IFile as Copy {}
 extend ISec as Copy {}
 extend IImp as Copy {}
@@ -136,7 +119,6 @@ extend IFunc as Copy {}
 extend ISeg as Copy {}
 extend ISym as Copy {}
 extend GSym as Copy {}
-extend OImp as Copy {}
 
 struct L {
     pub(package) files: Vector<IFile>,
@@ -153,14 +135,13 @@ struct L {
     pub(package) names: nm::Names,
     pub(package) glob: Vector<u32>,
     pub(package) gs: Vector<GSym>,
-    pub(package) oimps: Vector<OImp>,
+    pub(package) oimps: Vector<IImp>,
     pub(package) table: Vector<u32>, // the table's functions (output indices) from slot 1
     pub(package) slot_of: Map<u32, u32>, // output function index -> its table slot
     pub(package) ctors: Vector<u32>, // output function indices `__wasm_call_ctors` calls
     pub(package) inits: Vector<(u32, u32)>, // the init functions: (priority, input symbol)
     pub(package) ctor_fn: u32, // `__wasm_call_ctors`'s output index
     pub(package) ctor_ty: u32,
-    pub(package) nfuncs: u32, // imports plus bodies plus the ctor function
     pub(package) sp: u32, // the stack pointer's initial value
     pub(package) heap_base: u32,
     pub(package) data_end: u32,
@@ -185,14 +166,13 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         names: nm::Names::with_capacity(1 << 20, 1 << 14),
         glob: Vector::<u32>::new(),
         gs: Vector::<GSym>::new(),
-        oimps: Vector::<OImp>::new(),
+        oimps: Vector::<IImp>::new(),
         table: Vector::<u32>::new(),
         slot_of: Map::<u32, u32>::new(),
         ctors: Vector::<u32>::new(),
         inits: Vector::<(u32, u32)>::new(),
         ctor_fn: NONE,
         ctor_ty: NONE,
-        nfuncs: 0,
         sp: 0,
         heap_base: 0,
         data_end: 0,
@@ -214,17 +194,12 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
         let at = blob.len();
-        if lu::take_held(o.mem, p, blob) {
-            if !parse_object(l, p, at, blob) {
-                return false;
-            }
-            continue;
-        }
-        if ar::is_archive(p) {
+        let held = lu::take_held(o.mem, p, blob);
+        if !held && ar::is_archive(p) {
             if !ars.add(nat::OBJ_WASM, p, &mut l.err) {
                 return false;
             }
-        } else if !read_object(l, p, blob) {
+        } else if !held && !lu::read_input(p, blob, &mut l.err) || !parse_object(l, p, at, blob) {
             return false;
         }
     }
@@ -314,15 +289,6 @@ fn type_index(l: &mut L, enc: []u8) u32 {
     return (l.types.len() - 1) as u32;
 }
 
-fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
-    let at = blob.len();
-    if !lu::read_append(path, blob) {
-        l.err.format_into("cannot read '{}'", path);
-        return false;
-    }
-    return parse_object(l, path, at, blob);
-}
-
 // Enter the object at `at` of `blob` (named `path` in messages).
 fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
@@ -342,7 +308,6 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
         imp0: l.fimps.len() as u32,
         nimp: 0,
         fn0: l.funcs.len() as u32,
-        nfn: 0,
         seg0: l.segs.len() as u32,
         nseg: 0,
         sec0: l.secs.len() as u32,
@@ -425,7 +390,6 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 l.funcs.push(
                     IFunc { ty: l.ftypes[(f.type0 + ty) as usize], at: 0, len: 0, index: NONE, out: 0, live: true },
                 );
-                f.nfn += 1;
             }
         } else if id == 10 {
             let n = lu::read_uleb(b, &mut q);
@@ -608,8 +572,7 @@ fn enter(l: &mut L, from: usize) bool {
 fn resolve(l: &mut L) bool {
     // The linker's own: the start of the heap, the end of the data, the constructors' caller; the stack
     // pointer and the table are the module's.
-    let mut missing = String::new();
-    let mut nmiss: usize = 0;
+    let mut miss = lu::Missing::new();
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
         if gy.kind != G_UNDEF {
@@ -623,19 +586,9 @@ fn resolve(l: &mut L) bool {
         if gy.weak_ref {
             continue;
         }
-        nmiss += 1;
-        if nmiss <= 20 {
-            missing.format_into("\n  {}", s);
-        }
+        miss.add(s);
     }
-    if nmiss != 0 {
-        l.err.format_into("{} undefined symbol(s):{}", nmiss, missing.as_str());
-        if nmiss > 20 {
-            l.err.push_str("\n  ...");
-        }
-        return false;
-    }
-    return true;
+    return miss.report(&mut l.err);
 }
 
 fn add_import(l: &mut L, im: IImp) u32 {
@@ -644,7 +597,7 @@ fn add_import(l: &mut L, im: IImp) u32 {
             return i as u32;
         }
     }
-    l.oimps.push(OImp { module: im.module, field: im.field, ty: im.ty });
+    l.oimps.push(im);
     return (l.oimps.len() - 1) as u32;
 }
 
@@ -659,7 +612,6 @@ fn assign_functions(l: &mut L, b: []u8) bool {
         }
     }
     l.ctor_fn = nx;
-    l.nfuncs = l.ctor_fn + 1;
     let empty: [u8; 2] = [0, 0];
     l.ctor_ty = type_index(l, empty);
     for g in 0..l.gs.len() {
@@ -890,10 +842,7 @@ const fn seg_rank(n: str) u32 {
     if n.starts_with(".rodata") {
         return 0;
     }
-    if n.starts_with(".bss") {
-        return 2;
-    }
-    return 1;
+    return ast::pick(n.starts_with(".bss"), 2, 1);
 }
 
 // Place the stack and the segments: the stack first (`stack_first`) or after the data at wasm-ld's
@@ -942,10 +891,7 @@ const fn data_addr(l: &L, k: u32) u32 {
             if s == "__heap_base" {
                 return l.heap_base;
             }
-            if s == "__data_end" {
-                return l.data_end;
-            }
-            return 0;
+            return ast::pick(s == "__data_end", l.data_end, 0);
         }
         if gy.kind != G_DEF {
             return 0;
@@ -970,22 +916,6 @@ fn slot(l: &mut L, fx: u32) u32 {
 }
 
 // ---- output ---------------------------------------------------------------------------------------------
-
-fn put_uleb5(o: &mut Vector<u8>, at: usize, v: u32) {
-    w::patch_uleb5(o, at, v);
-}
-
-const fn put_sleb5(o: &mut Vector<u8>, at: usize, v: i32) {
-    let mut x = v as i64;
-    for i in 0..5usize {
-        let mut c = (x & 0x7F) as u8;
-        x = x >> 7;
-        if i < 4 {
-            c |= 0x80;
-        }
-        o[at + i] = c;
-    }
-}
 
 // Where relocated blob offset `src` lands in its output: the code section's payload (`P_CODE`), the memory
 // image (`P_DATA`, `usize::MAX` for a constructor table), or a debug section whose input payload at blob
@@ -1029,15 +959,7 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
             // Debug information on a dropped body or segment: wasm-ld's tombstones, -2 where -1 would end
             // a list.
             let dn = l.names.spell(tsec.name);
-            lu::p32(
-                out,
-                p,
-                if dn == ".debug_ranges" || dn == ".debug_loc" {
-                    0xFFFFFFFEu32
-                } else {
-                    0xFFFFFFFFu32
-                },
-            );
+            lu::p32(out, p, ast::pick(dn == ".debug_ranges" || dn == ".debug_loc", 0xFFFFFFFEu32, 0xFFFFFFFFu32));
             continue;
         }
         if ty == w::R_FUNCTION_INDEX_LEB {
@@ -1050,9 +972,9 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
                 );
                 return false;
             }
-            put_uleb5(out, p, fx);
+            w::patch_uleb5(out, p, fx);
         } else if ty == w::R_TYPE_INDEX_LEB {
-            put_uleb5(out, p, l.ftypes[(f.type0 + k) as usize]);
+            w::patch_uleb5(out, p, l.ftypes[(f.type0 + k) as usize]);
         } else if ty == w::R_GLOBAL_INDEX_LEB || ty == w::R_GLOBAL_INDEX_I32 {
             // The module's globals: the stack pointer, then the thread-local block's base (`tls_base`).
             let gn = l.names.spell(l.syms[(f.sym0 + k) as usize].name);
@@ -1060,31 +982,27 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
                 l.err.format_into("'{}': global '{}'", l.paths[f.path as usize].as_str(), gn);
                 return false;
             }
-            let gx: u32 = if gn == "__tls_base" {
-                1
-            } else {
-                0
-            };
+            let gx: u32 = ast::pick(gn == "__tls_base", 1, 0);
             if ty == w::R_GLOBAL_INDEX_LEB {
-                put_uleb5(out, p, gx);
+                w::patch_uleb5(out, p, gx);
             } else {
                 lu::p32(out, p, gx);
             }
         } else if ty == w::R_TABLE_NUMBER_LEB {
-            put_uleb5(out, p, 0);
+            w::patch_uleb5(out, p, 0);
         } else if ty == w::R_TABLE_INDEX_SLEB || ty == w::R_TABLE_INDEX_I32 {
             let s = slot(l, func_index(l, f.sym0 + k));
             if ty == w::R_TABLE_INDEX_SLEB {
-                put_sleb5(out, p, s as i32);
+                w::patch_sleb5(out, p, s as i32);
             } else {
                 lu::p32(out, p, s);
             }
         } else if ty == w::R_MEMORY_ADDR_LEB || ty == w::R_MEMORY_ADDR_SLEB || ty == w::R_MEMORY_ADDR_I32 {
             let a = (data_addr(l, f.sym0 + k) as i64 + addend) as u32;
             if ty == w::R_MEMORY_ADDR_LEB {
-                put_uleb5(out, p, a);
+                w::patch_uleb5(out, p, a);
             } else if ty == w::R_MEMORY_ADDR_SLEB {
-                put_sleb5(out, p, a as i32);
+                w::patch_sleb5(out, p, a as i32);
             } else {
                 lu::p32(out, p, a);
             }
@@ -1105,19 +1023,6 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
         }
     }
     return true;
-}
-
-fn section(m: &mut Vector<u8>, id: u8, body: &Vector<u8>) {
-    m.push(id);
-    w::uleb(m, body.len() as u64);
-    m.extend_from_slice(body.as_slice());
-}
-
-fn custom(m: &mut Vector<u8>, name: str, body: &Vector<u8>) {
-    let mut c = Vector::<u8>::new();
-    w::name(&mut c, name);
-    c.extend_from_slice(body.as_slice());
-    section(m, 0, &c);
 }
 
 // Where blob offset `src` (in some body) lands in the output code section's payload (`usize::MAX`: a
@@ -1177,7 +1082,7 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     // `__wasm_call_ctors`.
     let nlive = (l.ctor_fn - l.oimps.len() as u32) as u64;
     let mut code = Vector::<u8>::new();
-    w::uleb(&mut code, nlive + 1);
+    ob::uleb(&mut code, nlive + 1);
     for i in 0..l.funcs.len() {
         let fx = l.funcs[i];
         if !fx.live {
@@ -1190,10 +1095,10 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     cb.push(0);
     for i in 0..l.ctors.len() {
         cb.push(w::CALL);
-        w::uleb(&mut cb, l.ctors[i]);
+        ob::uleb(&mut cb, l.ctors[i]);
     }
     cb.push(w::END);
-    w::uleb(&mut code, cb.len() as u64);
+    ob::uleb(&mut code, cb.len() as u64);
     code.extend_from_slice(&cb);
     // The memory image of the data.
     let mut mem = Vector::<u8>::new();
@@ -1280,63 +1185,56 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
     // The module.
     m.extend_from_slice([0x00u8, 0x61, 0x73, 0x6D, 0x01, 0x00, 0x00, 0x00]);
     let mut s = Vector::<u8>::new();
-    w::uleb(&mut s, l.types.len() as u64);
+    ob::uleb(&mut s, l.types.len() as u64);
     for i in 0..l.types.len() {
         s.push(0x60);
         s.extend_from_slice(l.types.at(i).as_slice());
     }
-    section(m, 1, &s);
+    w::section(m, 1, &s);
     s.truncate(0);
-    w::uleb(&mut s, l.oimps.len() as u64);
+    ob::uleb(&mut s, l.oimps.len() as u64);
     for i in 0..l.oimps.len() {
         let im = l.oimps[i];
         w::name(&mut s, l.names.spell(im.module));
         w::name(&mut s, l.names.spell(im.field));
         s.push(0);
-        w::uleb(&mut s, im.ty);
+        ob::uleb(&mut s, im.ty);
     }
-    section(m, 2, &s);
+    w::section(m, 2, &s);
     s.truncate(0);
-    w::uleb(&mut s, nlive + 1);
+    ob::uleb(&mut s, nlive + 1);
     for i in 0..l.funcs.len() {
         if l.funcs[i].live {
-            w::uleb(&mut s, l.funcs[i].ty);
+            ob::uleb(&mut s, l.funcs[i].ty);
         }
     }
-    w::uleb(&mut s, l.ctor_ty);
-    section(m, 3, &s);
+    ob::uleb(&mut s, l.ctor_ty);
+    w::section(m, 3, &s);
     // The table: the null slot and every function a pointer names.
     let nslots = l.table.len() as u64 + 1;
     s.truncate(0);
-    w::uleb(&mut s, 1);
+    ob::uleb(&mut s, 1);
     s.push(w::FUNCREF);
     s.push(1);
-    w::uleb(&mut s, nslots);
-    w::uleb(&mut s, nslots);
-    section(m, 4, &s);
+    ob::uleb(&mut s, nslots);
+    ob::uleb(&mut s, nslots);
+    w::section(m, 4, &s);
     // The memory: enough pages for the stack, the data and the heap's start.
     s.truncate(0);
-    w::uleb(&mut s, 1);
+    ob::uleb(&mut s, 1);
     s.push(0);
-    w::uleb(&mut s, (l.heap_base as u64 + 65535) / 65536);
-    section(m, 5, &s);
+    ob::uleb(&mut s, (l.heap_base as u64 + 65535) / 65536);
+    w::section(m, 5, &s);
     // The stack pointer; then, when an object names it, `__tls_base`: the thread-local data's start (the
     // first `.tdata` segment's, as wasm-ld defines it without shared memory), immutable.
     let tb = l.names.find("__tls_base");
     let tls = tb >= 0 && tb as usize < l.glob.len() && l.glob[tb as usize] != 0;
     s.truncate(0);
-    w::uleb(
-        &mut s,
-        if tls {
-            2u64
-        } else {
-            1u64
-        },
-    );
+    ob::uleb(&mut s, ast::pick(tls, 2u64, 1u64));
     s.push(w::I32);
     s.push(1);
     s.push(w::I32_CONST);
-    w::sleb(&mut s, l.sp);
+    ob::sleb(&mut s, l.sp);
     s.push(w::END);
     if tls {
         let mut at: u32 = 0;
@@ -1349,33 +1247,33 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
         s.push(w::I32);
         s.push(0);
         s.push(w::I32_CONST);
-        w::sleb(&mut s, at);
+        ob::sleb(&mut s, at);
         s.push(w::END);
     }
-    section(m, 6, &s);
+    w::section(m, 6, &s);
     s.truncate(0);
-    w::uleb(&mut s, 2);
+    ob::uleb(&mut s, 2);
     w::name(&mut s, "memory");
     s.push(2);
-    w::uleb(&mut s, 0);
+    ob::uleb(&mut s, 0);
     w::name(&mut s, "_start");
     s.push(0);
-    w::uleb(&mut s, l.gs[start as usize].index);
-    section(m, 7, &s);
+    ob::uleb(&mut s, l.gs[start as usize].index);
+    w::section(m, 7, &s);
     if l.table.len() != 0 {
         s.truncate(0);
-        w::uleb(&mut s, 1);
+        ob::uleb(&mut s, 1);
         s.push(0);
         s.push(w::I32_CONST);
-        w::sleb(&mut s, 1);
+        ob::sleb(&mut s, 1);
         s.push(w::END);
-        w::uleb(&mut s, l.table.len() as u64);
+        ob::uleb(&mut s, l.table.len() as u64);
         for i in 0..l.table.len() {
-            w::uleb(&mut s, l.table[i]);
+            ob::uleb(&mut s, l.table[i]);
         }
-        section(m, 9, &s);
+        w::section(m, 9, &s);
     }
-    section(m, 10, &code);
+    w::section(m, 10, &code);
     // The data: the image's runs, split at 32 zero bytes or more, the trailing zeros left out.
     let mut runs = Vector::<(u32, u32)>::new();
     let mut i: usize = 0;
@@ -1401,17 +1299,17 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
         runs.push((st as u32, (i - z) as u32));
     }
     s.truncate(0);
-    w::uleb(&mut s, runs.len() as u64);
+    ob::uleb(&mut s, runs.len() as u64);
     for r in 0..runs.len() {
         let (a, e) = runs[r];
         s.push(0);
         s.push(w::I32_CONST);
-        w::sleb(&mut s, l.data_lo + a);
+        ob::sleb(&mut s, l.data_lo + a);
         s.push(w::END);
-        w::uleb(&mut s, e - a);
+        ob::uleb(&mut s, e - a);
         s.extend_from_slice(mem[a as usize..e as usize]);
     }
-    section(m, 11, &s);
+    w::section(m, 11, &s);
     if !o.strip {
         // The names of the functions.
         let mut fnames = Vector::<(u32, u32)>::new();
@@ -1438,19 +1336,19 @@ fn write_module(l: &mut L, o: &Opts, b: []u8, m: &mut Vector<u8>) bool {
             if q != 0 && fnames[q].0 == fnames[q - 1].0 {
                 continue;
             }
-            w::uleb(&mut body, fnames[q].0);
+            ob::uleb(&mut body, fnames[q].0);
             w::name(&mut body, l.names.spell(fnames[q].1));
             cnt += 1;
         }
-        w::uleb(&mut sub, cnt);
+        ob::uleb(&mut sub, cnt);
         sub.extend_from_slice(&body);
         let mut nsec = Vector::<u8>::new();
         nsec.push(1);
-        w::uleb(&mut nsec, sub.len() as u64);
+        ob::uleb(&mut nsec, sub.len() as u64);
         nsec.extend_from_slice(&sub);
-        custom(m, "name", &nsec);
+        w::custom(m, "name", &nsec);
         for d in 0..dnames.len() {
-            custom(m, l.names.spell(dnames[d]), dbg.at(d));
+            w::custom(m, l.names.spell(dnames[d]), dbg.at(d));
         }
     }
     return true;

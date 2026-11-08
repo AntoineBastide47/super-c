@@ -10,6 +10,7 @@
 // 8..15, and the xmm index for a vector part.
 import lir::ir as *;
 import codegen::abi as *;
+import ast::ast as ast;
 
 // Eightbyte classes.
 const K_NONE: u8 = 0;
@@ -31,20 +32,6 @@ const fn gp_ret(k: u32) u8 {
 // The class of eightbyte `e` of packed classes `cls` (a byte each).
 const fn kof(cls: u64, e: u32) u8 {
     return (cls >> (8 * e) as u64 & 0xFF) as u8;
-}
-
-const fn align_up(x: u32, a: u32) u32 {
-    return x + a - 1 & ~(a - 1);
-}
-
-// The size and alignment of signature type `pt`.
-fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
-    if (pt & AGG) != 0 {
-        let l = (pt & ~AGG) as usize;
-        return (b.pool[l], 1u32 << b.pool[l + 1]);
-    }
-    let t = pt as u8;
-    return (type_bytes(t, ptr), type_align(t, ptr));
 }
 
 // The class of a scalar of type `t` (`vregs`: the package's `vec_regs`) at byte `off`: its eightbytes
@@ -154,11 +141,7 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut Cal
         out.unknown = out.unknown || unknown_class(b, b.pool[(sig + 3 + k) as usize]);
     }
     let fixed = b.pool[sig as usize + 1];
-    let nfixed = if (fixed & SIG_VARIADIC) != 0 {
-        fixed & ~SIG_VARIADIC
-    } else {
-        np
-    };
+    let nfixed = nfixed(fixed, np);
     let mut cls: u64 = 0;
     let mut gp: u32 = 0;
     let mut vr: u32 = 0;
@@ -204,19 +187,11 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, vregs: u32, out: &mut Cal
             put_parts(b, pt, ptr, cls, n, &mut gp, &mut vr, false, &mut loc, &mut out.parts);
             let t = pt as u8;
             if (pt & AGG) == 0 && !is_vec(t) && !is_float(t) && size < 4 {
-                loc.ext = if (pt & SIG_SEXT) != 0 {
-                    2
-                } else {
-                    1
-                };
+                loc.ext = ast::pick((pt & SIG_SEXT) != 0, 2, 1);
             }
         } else {
             // On the stack, at least eightbyte-aligned.
-            let a = if al > 8 {
-                al
-            } else {
-                8
-            };
+            let a = ast::pick(al > 8, al, 8);
             stack = align_up(stack, a);
             loc.kind = L_STACK;
             loc.off = stack;

@@ -118,7 +118,7 @@ fn feature(pk: &loader::Package, name: str) bool {
 pub(package) fn backends_of(pk: &loader::Package) Vector<u8> {
     let n = pk.modules.len();
     let mut out = Vector::<u8>::with_capacity(n);
-    let all = native_on(pk);
+    let all = pk.native;
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
     for i in 0..n {
         let on = all || pk.lir_out != null || ext::reads_ir() || in_list(&sel, &pk.modules.at(i).path);
@@ -159,12 +159,6 @@ pub(package) const fn in_list(sel: str, path: str) bool {
         rest = rest.slice(c as usize + 1, rest.len());
     }
     return false;
-}
-
-/// Whether this build compiles its modules with the native backend (a build that links). Every module
-/// then lowers to LIR.
-pub(package) const fn native_on(pk: &loader::Package) bool {
-    return pk.native;
 }
 
 // The LIR of the dyn table `CEmit::dyn_pair_tabs` builds for unit `unit`: `ok` while its unit lowers to
@@ -734,7 +728,7 @@ extend CEmit {
             snap_took: false,
             simd_on: simd_on,
             vec_prog: vec_prog,
-            no_split: native_on(pk),
+            no_split: pk.native,
             render_all: false,
             disp: Vector::<String>::new(),
             fwd_spelled: 0,

@@ -4,6 +4,7 @@
 // fixup the caller resolves. The disassembler prints the row `x64tab::decode` finds.
 import target::x64 as x;
 import target::x64tab as t;
+import ast::ast as ast;
 
 /// A symbol an instruction names: the relocation kind (`x::R_*`), the name as written, the field's
 /// offset from the instruction's start, and the addend as `x64gen` gives its relocations (relative to
@@ -650,11 +651,7 @@ const fn sized(s: u8, sz: &mut u8) bool {
 // `spec` (empty: none), 0xFF for none.
 fn reloc_kind(rel: bool, spec: str, rex: bool) u8 {
     if rel {
-        return if spec.len() == 0 || spec == "plt" {
-            x::R_PLT32
-        } else {
-            0xFFu8
-        };
+        return ast::pick(spec.len() == 0 || spec == "plt", x::R_PLT32, 0xFFu8);
     }
     return switch spec {
         "" => x::R_PC32,
@@ -908,7 +905,7 @@ pub(package) fn assemble(text: str, tgt: i64, out: &mut Vector<u8>, fx: &mut Fix
 // ---- Printing ----
 
 // The name of general register `i` (16 + n for ah..bh) of `size` bytes, empty past the last.
-const fn gp_name(i: usize, size: u8) str<'static> {
+pub(package) const fn gp_name(i: usize, size: u8) str<'static> {
     let n8: []str<'static> = R8;
     let n16: []str<'static> = R16;
     let n32: []str<'static> = R32;

@@ -13666,7 +13666,7 @@ fn inline_assembly_compiles_natively() {
         );
         assert(r.out_has("main native"), "main compiles natively for x86-64");
     }
-    if !nat::supported(tgt::host_os(), tgt::host_isa()) || !nat::asm_native(tgt::host_os(), tgt::host_isa()) {
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
         return;
     }
     assert(cli::superc_in(p.dir(), "build main.spc -o bin").ok(), "the program builds");

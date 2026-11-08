@@ -6,6 +6,7 @@
 // a row, an operand size, a condition (for `j<cc>`, `set<cc>`, `cmov<cc>`), an EVEX mask and its
 // operands; it encodes to bytes and decodes back.
 import target::x64 as x;
+import ast::ast as ast;
 
 pub(package) struct Row {
     pub(package) mn: str<'static>,
@@ -56,7 +57,6 @@ pub(package) const N4: u16 = 4 << 3;
 pub(package) const N5: u16 = 5 << 3;
 pub(package) const N6: u16 = 6 << 3;
 pub(package) const N7: u16 = 7 << 3;
-pub(package) const N8: u16 = 8 << 3;
 pub(package) const N9: u16 = 9 << 3;
 pub(package) const MK: u16 = 1 << 7; // takes a mask
 pub(package) const MZ: u16 = 1 << 8; // takes zeroing under a mask
@@ -1393,16 +1393,6 @@ const fn hi(g: u8) u32 {
     return g as u32 >> 3 & 1;
 }
 
-// VEX.pp of mandatory prefix `p`.
-const fn pp_of(p: u8) u32 {
-    return switch p {
-        0x66 => 1u32,
-        0xF3 => 2u32,
-        0xF2 => 3u32,
-        _ => 0u32,
-    };
-}
-
 // `n` little-endian bytes of `v` onto `out`.
 fn put(out: &mut Vector<u8>, v: u64, n: u32) {
     for i in 0..n {
@@ -1606,7 +1596,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
     }
     let mut n8: i32 = 1;
     if ve != 0 {
-        let pp = pp_of(r.pfx);
+        let pp = x::pp_of(r.pfx);
         let mp = map_of(r.op);
         let w = r.vx as u32 >> 2 & 1;
         let l = r.vx as u32 >> 10 & 3;
@@ -1702,15 +1692,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
         if !ok {
             return false;
         }
-        put(
-            out,
-            v as u64,
-            if n.sz == 2 {
-                2u32
-            } else {
-                4u32
-            },
-        );
+        put(out, v as u64, ast::pick(n.sz == 2, 2u32, 4u32));
     } else if immk == K::I64 {
         put(out, v as u64, 8);
     }
@@ -1899,7 +1881,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         }
         let mut x66 = c66;
         if vex != 0 {
-            if pp_of(r.pfx) != vpp || (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
+            if x::pp_of(r.pfx) != vpp || (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
                 continue;
             }
             if vk != 0 && (r.vx & MK) == 0 || vk == 0 && (r.vx & MR) != 0 || vz && ((r.vx & MZ) == 0 || vk == 0) {
@@ -2075,11 +2057,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         } else {
             0
         };
-        let i4: usize = if is4 >= 0 {
-            1
-        } else {
-            0
-        };
+        let i4: usize = ast::pick(is4 >= 0, 1, 0);
         if q + isz + i4 + rsz > end {
             continue;
         }

@@ -132,7 +132,7 @@ extend<'a> Parser<'a> {
     const fn word(self: &mut Self) str<'a> {
         self.skip_spaces();
         let s = self.at;
-        while self.at < self.line_end && (name_char(self.text.byte_at(self.at)) || self.text.byte_at(self.at) == b'-') {
+        while self.at < self.line_end && (name_byte(self.text.byte_at(self.at)) || self.text.byte_at(self.at) == b'-') {
             self.at += 1;
         }
         return self.text.slice(s, self.at);
@@ -272,7 +272,7 @@ extend<'a> Parser<'a> {
             return self.quoted(out);
         }
         let s = self.at;
-        while self.at < self.line_end && name_char(self.text.byte_at(self.at)) {
+        while self.at < self.line_end && name_byte(self.text.byte_at(self.at)) {
             self.at += 1;
         }
         if self.at == s {
@@ -1373,22 +1373,8 @@ extend<'a> Parser<'a> {
             }
             t.c = self.body.pool.len() as u32;
             let mut n: u32 = 0;
-            if !self.eat(b')') {
-                loop {
-                    if !self.pool_value() {
-                        return false;
-                    }
-                    n += 1;
-                    if n > verify::MAX_ARGS {
-                        return self.fail("the call passes the argument limit");
-                    }
-                    if self.eat(b')') {
-                        break;
-                    }
-                    if !self.expect(b',', "expected ',' or ')'") {
-                        return false;
-                    }
-                }
+            if !self.value_list(&mut n, verify::MAX_ARGS) {
+                return false;
             }
             t.aux = n as u16;
             return self.expect(b':', "expected ':' and the call's signature") && self.signature(&mut t.b);
@@ -1402,19 +1388,8 @@ extend<'a> Parser<'a> {
             }
             t.a = self.body.pool.len() as u32;
             t.b = 0;
-            if !self.eat(b')') {
-                loop {
-                    if !self.pool_value() {
-                        return false;
-                    }
-                    t.b += 1;
-                    if self.eat(b')') {
-                        break;
-                    }
-                    if !self.expect(b',', "expected ',' or ')'") {
-                        return false;
-                    }
-                }
+            if !self.value_list(&mut t.b, u32::MAX) {
+                return false;
             }
             if self.keyword("lanes") {
                 if !self.expect(b'[', "expected '['") {
@@ -1522,9 +1497,7 @@ extend<'a> Parser<'a> {
         if !self.pool_msg() {
             return false;
         }
-        for _ in 0..3 {
-            self.body.pool.push(0);
-        }
+        self.body.pool.resize_default(self.body.pool.len() + 3);
         // The outputs: their constraints, then their types after them.
         let mut tys = Vector::<u32>::new();
         if !self.expect_word("out", "expected 'out'") || !self.expect(b'[', "expected '['") {
@@ -1576,24 +1549,37 @@ extend<'a> Parser<'a> {
         }
         t.a = self.body.pool.len() as u32;
         t.b = 0;
-        if !self.eat(b')') {
-            loop {
-                if !self.pool_value() {
-                    return false;
-                }
-                t.b += 1;
-                if self.eat(b')') {
-                    break;
-                }
-                if !self.expect(b',', "expected ',' or ')'") {
-                    return false;
-                }
-            }
+        if !self.value_list(&mut t.b, u32::MAX) {
+            return false;
         }
         if t.b != self.body.pool[(r + 1) as usize] + self.body.pool[(r + 2) as usize] {
             return self.fail("an asm takes one value per output and input");
         }
         return true;
+    }
+
+    // The values of a list after its `(` into the pool, through its `)`, counted into `n`; more than `max`
+    // is a call past the argument limit.
+    fn value_list(self: &mut Self, n: &mut u32, max: u32) bool {
+        if self.eat(b')') {
+            return true;
+        }
+        // Each step reads one value.
+        loop {
+            if !self.pool_value() {
+                return false;
+            }
+            *n += 1;
+            if *n > max {
+                return self.fail("the call passes the argument limit");
+            }
+            if self.eat(b')') {
+                return true;
+            }
+            if !self.expect(b',', "expected ',' or ')'") {
+                return false;
+            }
+        }
     }
 
     // Patch the forward value numbers and define the body read so far.
@@ -1661,14 +1647,7 @@ const fn match_field(t: Inst, f: u64) u32 {
     if f == 0 {
         return t.a;
     }
-    if f == 1 {
-        return t.b;
-    }
-    return t.c;
-}
-
-const fn name_char(c: u8) bool {
-    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b'.' || c == b'$';
+    return ast::pick(f == 1, t.b, t.c);
 }
 
 const fn hex_val(c: u8) i64 {

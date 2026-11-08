@@ -16,6 +16,7 @@
 import lir::ir as *;
 import lir::verify as lver;
 import codegen::live as lv;
+import codegen::place as pl;
 import codegen::structure as st;
 import target::wasm as w;
 import target::wasmobj as wo;
@@ -26,6 +27,7 @@ import target::assembler as asmr;
 import target::wasmasm as wasm_asm;
 import target::intrin as intrin;
 import std::float as fl;
+import ast::ast as ast;
 
 // The local and home classes: the four scalar wasm types, then v128.
 const CL_I32: u32 = 0;
@@ -126,7 +128,6 @@ pub(package) struct Gen {
     osp: u32, // the stack pointer at entry, for a frame aligned past 16 bytes (NONE: none)
     frame: u32,
     falign: u32,
-    call_area: u32,
     warm_area: u32, // the call area the blocks but the failure paths (`fails`) need
     /// Per block, whether it is a failure path's: a rare block (`BLOCK_RARE`) that ends in a panic or a
     /// trap, or whose every successor is a failure path's (`failing`).
@@ -183,15 +184,7 @@ const fn class_of(t: u8) u32 {
     if t == w::F64 {
         return CL_F64;
     }
-    if t == w::V128 {
-        return CL_V128;
-    }
-    return CL_I32;
-}
-
-// Whether LIR type `t` lives in frame memory: i128 and vectors.
-const fn in_mem(t: u8) bool {
-    return t == T_I128 || is_vec(t);
+    return ast::pick(t == w::V128, CL_V128, CL_I32);
 }
 
 // The mask of a narrow integer type's bits, 0 for a type of 32 bits or more.
@@ -199,10 +192,7 @@ const fn narrow_mask(t: u8) u32 {
     if t == T_I8 {
         return 0xFF;
     }
-    if t == T_I16 {
-        return 0xFFFF;
-    }
-    return 0;
+    return ast::pick(t == T_I16, 0xFFFF, 0);
 }
 
 extend Gen {
@@ -264,7 +254,6 @@ extend Gen {
             osp: NONE,
             frame: 0,
             falign: 16,
-            call_area: 0,
             warm_area: 0,
             fails: Vector::<bool>::new(),
             cold_entry: Vector::<bool>::new(),
@@ -362,11 +351,7 @@ extend Gen {
         } else {
             nm0
         };
-        let kind = if y.kind == SK_FUNC {
-            wo::K_FUNC
-        } else {
-            wo::K_DATA
-        };
+        let kind = ast::pick(y.kind == SK_FUNC, wo::K_FUNC, wo::K_DATA);
         return self.obj().sym(nm, kind);
     }
 
@@ -380,13 +365,7 @@ extend Gen {
         if self.sp_sym == NONE {
             self.sp_sym = self.obj().sym("__stack_pointer", wo::K_GLOBAL);
         }
-        self.c.op(
-            if set {
-                w::GLOBAL_SET
-            } else {
-                w::GLOBAL_GET
-            },
-        );
+        self.c.op(ast::pick(set, w::GLOBAL_SET, w::GLOBAL_GET));
         self.reloc(w::R_GLOBAL_INDEX_LEB, self.sp_sym, 0);
         self.c.uleb5(0);
     }
@@ -402,9 +381,9 @@ extend Gen {
     // `call` of runtime function `name` whose wasm type has parameters `ps` and results `rs`.
     fn call_rt(self: &mut Self, name: str, ps: []u8, rs: []u8) {
         self.enc.truncate(0);
-        w::uleb(&mut self.enc, ps.len() as u64);
+        ob::uleb(&mut self.enc, ps.len() as u64);
         self.enc.extend_from_slice(ps);
-        w::uleb(&mut self.enc, rs.len() as u64);
+        ob::uleb(&mut self.enc, rs.len() as u64);
         self.enc.extend_from_slice(rs);
         let ty = self.obj().type_index(&self.enc);
         let k = self.obj().sym(name, wo::K_FUNC);
@@ -486,7 +465,7 @@ extend Gen {
         }
         intrin::of_symbols(self.p(), b, "wasm32", &mut self.itpl);
         // A shift's count masked to the width is the shift's own (wasm shifts take the count modulo it).
-        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC | lv::FOLD_WIDEN | lv::FOLD_SINK | pick64(
+        self.lv.fold_ops = lv::FOLD_FREE_ZEXT | lv::FOLD_CMP | lv::FOLD_SHAMT | lv::FOLD_SINC | lv::FOLD_WIDEN | lv::FOLD_SINK | ast::pick(
             self.simd,
             lv::FOLD_VSINK,
             0,
@@ -987,22 +966,21 @@ extend Gen {
                             n += type_bytes(self.vt(a), 4) + 15 & ~15u32;
                         }
                     }
-                    need = ast_max(need, n);
+                    need = need.max(n);
                 }
             }
-            area = ast_max(area, need);
+            area = area.max(need);
             if !cold[k] {
-                self.warm_area = ast_max(self.warm_area, need);
+                self.warm_area = self.warm_area.max(need);
             }
         }
-        self.call_area = area + 15 & ~15u32;
-        let mut at = self.call_area;
+        let mut at = area + 15 & ~15u32;
         self.falign = 16;
         fill(&mut self.slot_off, b.slots.len(), 0);
         for k in 0..b.slots.len() {
             let sl = b.slots[k];
             let al = 1u32 << sl.align_log2 as u32;
-            self.falign = ast_max(self.falign, al);
+            self.falign = self.falign.max(al);
             at = at + al - 1 & ~(al - 1);
             self.slot_off[k] = at;
             at += sl.size;
@@ -1076,50 +1054,65 @@ extend Gen {
     }
 }
 
-const fn pick64(c: bool, a: u64, b: u64) u64 {
-    if c {
-        return a;
-    }
-    return b;
-}
-
 // log2 of power of two `n`.
 const fn log2u(n: u32) u32 {
     return n.trailing_zeros() as u32;
 }
 
 // The i64 comparison of integer lane rule `c` (SIMD_CMP_EQ .. SIMD_CMP_GE), signed `sg`.
+// i32.add .. i32.shr_s in the order of O_ADD .. O_ASHR (`lshr` before `ashr`); each i64 form is
+// `I64_ADD - I32_ADD` past its i32 one.
+const INT_OPS: [u8; 13] = [
+    w::I32_ADD,
+    w::I32_SUB,
+    w::I32_MUL,
+    w::I32_DIV_S,
+    w::I32_DIV_U,
+    w::I32_REM_S,
+    w::I32_REM_U,
+    w::I32_AND,
+    w::I32_OR,
+    w::I32_XOR,
+    w::I32_SHL,
+    w::I32_SHR_U,
+    w::I32_SHR_S,
+];
+
+// i32.eq .. i32.ge_u in the order of C_EQ .. C_UGE; each i64 form is `I64_EQ - I32_EQ` past its i32 one.
+const CMP_OPS: [u8; 10] = [
+    w::I32_EQ,
+    w::I32_NE,
+    w::I32_LT_S,
+    w::I32_LE_S,
+    w::I32_GT_S,
+    w::I32_GE_S,
+    w::I32_LT_U,
+    w::I32_LE_U,
+    w::I32_GT_U,
+    w::I32_GE_U,
+];
+
+// The f32 comparison of float condition `c`: C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, else C_OGE.
+const fn fcmp_op(c: u16) u8 {
+    return if c == C_OEQ {
+        w::F32_EQ
+    } else if c == C_UNE {
+        w::F32_NE
+    } else if c == C_OLT {
+        w::F32_LT
+    } else if c == C_OLE {
+        w::F32_LE
+    } else if c == C_OGT {
+        w::F32_GT
+    } else {
+        w::F32_GE
+    };
+}
+
+// The i64 comparison of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`), signed when `sg`.
 const fn int_cmp64(c: u8, sg: bool) u8 {
-    if c == core::SIMD_CMP_EQ {
-        return w::I64_EQ;
-    }
-    if c == core::SIMD_CMP_NE {
-        return w::I64_NE;
-    }
-    if c == core::SIMD_CMP_LT {
-        return pick8(sg, w::I64_LT_S, w::I64_LT_U);
-    }
-    if c == core::SIMD_CMP_LE {
-        return pick8(sg, w::I64_LE_S, w::I64_LE_U);
-    }
-    if c == core::SIMD_CMP_GT {
-        return pick8(sg, w::I64_GT_S, w::I64_GT_U);
-    }
-    return pick8(sg, w::I64_GE_S, w::I64_GE_U);
-}
-
-const fn pick_v(c: bool, a: Value, b: Value) Value {
-    if c {
-        return a;
-    }
-    return b;
-}
-
-const fn pick8(c: bool, a: u8, b: u8) u8 {
-    if c {
-        return a;
-    }
-    return b;
+    let k = (c - core::SIMD_CMP_EQ) as usize;
+    return CMP_OPS[ast::pick(k >= 2 && !sg, k + 4, k)] + (w::I64_EQ - w::I32_EQ);
 }
 
 // A walk over the cuts of `Gen::stack_values` in code order: the next cut, the bytes the ones before it cut.
@@ -1151,13 +1144,6 @@ const fn uleb_len(x: u32) u32 {
         y >>= 7;
     }
     return n;
-}
-
-const fn ast_max(a: u32, b: u32) u32 {
-    if a > b {
-        return a;
-    }
-    return b;
 }
 
 // ---- Locals and homes ----
@@ -1525,13 +1511,13 @@ extend Gen {
 
     // Whether value index `x` lives in frame memory: an i128, or a vector not in a v128 local.
     const fn mem_x(self: &Self, x: u32) bool {
-        return in_mem(self.xty(x)) && !self.vreg[x as usize];
+        return pl::in_mem(self.xty(x)) && !self.vreg[x as usize];
     }
 
     // Whether value `v` lives in frame memory (`mem_x`).
     const fn mem_v(self: &Self, v: Value) bool {
         let x = self.vx(v);
-        return in_mem(self.vt(v)) && (x == NONE || !self.vreg[x as usize]);
+        return pl::in_mem(self.vt(v)) && (x == NONE || !self.vreg[x as usize]);
     }
 
     // The wasm type of value index `x`'s local.
@@ -1544,15 +1530,7 @@ extend Gen {
 
     // The LIR type of value index `x`.
     const fn xty(self: &Self, x: u32) u8 {
-        let b = self.b();
-        let ni = b.insts.len() as u32;
-        if x < ni {
-            return b.insts[x as usize].ty;
-        }
-        if x < ni + b.params.len() as u32 {
-            return b.params[(x - ni) as usize];
-        }
-        return T_I8;
+        return lv::xty(self.b(), x);
     }
 
     // The entry block's parameters: a scalar passed as one wasm value is its wasm parameter's local; the
@@ -1642,11 +1620,7 @@ extend Gen {
         let ni = b.insts.len() as u32;
         let e0 = b.blocks[0].param_start;
         let np = b.pool[b.sig as usize];
-        let mut wp: u32 = if self.me.sret() {
-            1u32
-        } else {
-            0u32
-        };
+        let mut wp: u32 = ast::pick(self.me.sret(), 1u32, 0u32);
         for k in 0..np {
             let pa = self.me.params[k as usize];
             let x = ni + e0 + k;
@@ -1863,11 +1837,7 @@ extend Gen {
         }
         wa::encode(&self.me, &mut self.enc);
         let ty = o.type_index(&self.enc);
-        let mut fl = if ps.linkage == SL_GLOBAL && !self.local {
-            wo::F_HIDDEN
-        } else {
-            wo::F_LOCAL
-        };
+        let mut fl = ast::pick(ps.linkage == SL_GLOBAL && !self.local, wo::F_HIDDEN, wo::F_LOCAL);
         if ps.used {
             fl |= wo::F_NO_STRIP;
         }
@@ -1944,7 +1914,7 @@ extend Gen {
             } else {
                 self.get(t.a);
                 if t.ty == T_I64 && (t.op == O_ZEXT || t.op == O_SEXT) {
-                    self.c.op(pick8(t.op == O_ZEXT, w::I64_EXTEND_I32_U, w::I64_EXTEND_I32_S));
+                    self.c.op(ast::pick(t.op == O_ZEXT, w::I64_EXTEND_I32_U, w::I64_EXTEND_I32_S));
                 } else if t.op == O_TRUNC && self.vt(t.a) == T_I64 {
                     self.c.op(w::I32_WRAP_I64);
                 }
@@ -2070,7 +2040,7 @@ extend Gen {
     // VW_ONE when one instruction or edge reads it, which no loop keeps).
     fn value_write(self: &mut Self, x: u32) {
         let n = self.c.acc_op.len();
-        self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | pick8(self.lv.reads(x) == 1, VW_ONE, 0);
+        self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | ast::pick(self.lv.reads(x) == 1, VW_ONE, 0);
     }
 
     // The frame offset of memory value `v`.
@@ -2124,14 +2094,7 @@ extend Gen {
             (w::I32_LOAD, 2u32)
         };
         self.c.op(op);
-        self.c.memarg(
-            if al < nat {
-                al
-            } else {
-                nat
-            },
-            off,
-        );
+        self.c.memarg(ast::pick(al < nat, al, nat), off);
     }
 
     // A store of LIR scalar type `t` at offset `off` of the address under the value on the stack.
@@ -2154,14 +2117,7 @@ extend Gen {
             (w::I32_STORE, 2u32)
         };
         self.c.op(op);
-        self.c.memarg(
-            if al < nat {
-                al
-            } else {
-                nat
-            },
-            off,
-        );
+        self.c.memarg(ast::pick(al < nat, al, nat), off);
     }
 
     // Copy `n` bytes from `sl + soff` to `dl + doff` (both locals holding addresses).
@@ -2241,7 +2197,7 @@ extend Gen {
             }
             if self.simd && (t.b == 2 || vfit(t.ty)) {
                 self.vpre(i);
-                self.vconst(b.words[t.a as usize], pick64(t.b == 2, b.words[t.a as usize + t.b as usize - 1], 0));
+                self.vconst(b.words[t.a as usize], ast::pick(t.b == 2, b.words[t.a as usize + t.b as usize - 1], 0));
                 self.vpost(i);
                 return true;
             }
@@ -2280,10 +2236,14 @@ extend Gen {
             if t.ty == T_I128 {
                 return self.int128(i, t);
             }
-            return self.int_op(i, t);
+            self.int_push(t);
+            self.put(i);
+            return true;
         }
         if op == O_CLZ || op == O_CTZ || op == O_POPCNT {
-            return self.bit_count(i, t);
+            self.count_push(t);
+            self.put(i);
+            return true;
         }
         if op == O_BSWAP {
             return self.byte_swap(i, t);
@@ -2390,13 +2350,6 @@ extend Gen {
         return self.refuse("an instruction the wasm generator does not compile");
     }
 
-    // The scalar integer operations O_ADD .. O_NOT.
-    fn int_op(self: &mut Self, i: u32, t: Inst) bool {
-        self.int_push(t);
-        self.put(i);
-        return true;
-    }
-
     // Push the value of integer operation `t`.
     // Scalar float operation `t` (O_FADD .. O_FNEG, O_FSQRT) onto the stack.
     fn float_push(self: &mut Self, t: Inst) {
@@ -2404,15 +2357,15 @@ extend Gen {
         let d = t.ty == T_F64;
         if op == O_FNEG {
             self.get(t.a);
-            self.c.op(pick8(d, w::F64_NEG, w::F32_NEG));
+            self.c.op(ast::pick(d, w::F64_NEG, w::F32_NEG));
         } else if op == O_FSQRT {
             self.get(t.a);
-            self.c.op(pick8(d, w::F64_SQRT, w::F32_SQRT));
+            self.c.op(ast::pick(d, w::F64_SQRT, w::F32_SQRT));
         } else {
             let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
-            self.get(pick_v(swap, t.b, t.a));
-            self.get(pick_v(swap, t.a, t.b));
-            self.c.op(pick8(d, w::F64_ADD, w::F32_ADD) + (op - O_FADD));
+            self.get(ast::pick(swap, t.b, t.a));
+            self.get(ast::pick(swap, t.a, t.b));
+            self.c.op(ast::pick(d, w::F64_ADD, w::F32_ADD) + (op - O_FADD));
         }
     }
 
@@ -2449,13 +2402,7 @@ extend Gen {
                 self.c.i32_const(0);
             }
             self.get(t.a);
-            self.c.op(
-                if wide {
-                    w::I64_SUB
-                } else {
-                    w::I32_SUB
-                },
-            );
+            self.c.op(ast::pick(wide, w::I64_SUB, w::I32_SUB));
         } else if op == O_NOT {
             self.get(t.a);
             if wide {
@@ -2469,30 +2416,14 @@ extend Gen {
             // A commutative operation reads first the operand that keeps more values on the stack.
             let comm = op == O_ADD || op == O_MUL || op >= O_AND && op <= O_XOR;
             let swap = comm && self.swap_reads(t.a, t.b);
-            self.get_ext(pick_v(swap, t.b, t.a), signed);
+            self.get_ext(ast::pick(swap, t.b, t.a), signed);
             if op == O_ASHR {
                 self.get(t.b);
             } else {
-                self.get_ext(pick_v(swap, t.a, t.b), signed);
+                self.get_ext(ast::pick(swap, t.a, t.b), signed);
             }
             let k = op - O_ADD;
-            // O_ADD .. O_ASHR in the order of i32.add .. i32.shr_u, but with `lshr` before `ashr`.
-            let ops: []u8 = [
-                w::I32_ADD,
-                w::I32_SUB,
-                w::I32_MUL,
-                w::I32_DIV_S,
-                w::I32_DIV_U,
-                w::I32_REM_S,
-                w::I32_REM_U,
-                w::I32_AND,
-                w::I32_OR,
-                w::I32_XOR,
-                w::I32_SHL,
-                w::I32_SHR_U,
-                w::I32_SHR_S,
-            ];
-            let o32 = ops[k as usize];
+            let o32 = INT_OPS[k as usize];
             self.c.op(
                 if wide {
                     o32 + (w::I64_ADD - w::I32_ADD)
@@ -2513,24 +2444,14 @@ extend Gen {
         let sgn = t.op == O_MULHS;
         if t.ty != T_I64 {
             let bits = type_bits(t.ty, 4);
-            let ext = if sgn {
-                w::I64_EXTEND_I32_S
-            } else {
-                w::I64_EXTEND_I32_U
-            };
+            let ext = ast::pick(sgn, w::I64_EXTEND_I32_S, w::I64_EXTEND_I32_U);
             self.get_ext(t.a, sgn);
             self.c.op(ext);
             self.get_ext(t.b, sgn);
             self.c.op(ext);
             self.c.op(w::I64_MUL);
             self.c.i64_const(bits);
-            self.c.op(
-                if sgn {
-                    w::I64_SHR_S
-                } else {
-                    w::I64_SHR_U
-                },
-            );
+            self.c.op(ast::pick(sgn, w::I64_SHR_S, w::I64_SHR_U));
             self.c.op(w::I32_WRAP_I64);
             // A signed narrow result back to its bits zero-extended, as every value of its type.
             if sgn {
@@ -2637,13 +2558,7 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, y);
                 self.c.op(w::I64_MUL);
                 self.c.i64_const(lb);
-                self.c.op(
-                    if sgn {
-                        w::I64_SHR_S
-                    } else {
-                        w::I64_SHR_U
-                    },
-                );
+                self.c.op(ast::pick(sgn, w::I64_SHR_S, w::I64_SHR_U));
             }
             self.c.local(w::LOCAL_SET, x);
             self.st_lane(x, d, k, lt, false);
@@ -2718,12 +2633,6 @@ extend Gen {
             self.c.i64_const(32);
             self.c.op(w::I64_ROTL);
         }
-        self.put(i);
-        return true;
-    }
-
-    fn bit_count(self: &mut Self, i: u32, t: Inst) bool {
-        self.count_push(t);
         self.put(i);
         return true;
     }
@@ -2809,40 +2718,19 @@ extend Gen {
         let bits = type_bits(ty, 4);
         // An i32 product is exact in 64 bits.
         let big = op == O_MULO && bits == 32;
-        let wt = if wide || big {
-            w::I64
-        } else {
-            w::I32
-        };
+        let wt = ast::pick(wide || big, w::I64, w::I32);
         let ra = self.tmp(wt);
         let rb = self.tmp(wt);
         let r = self.tmp(wt);
         if bits < 32 || big {
             // In 32 bits (a narrow type) or 64 (an i32 product): exact, then compared with its truncation.
             for q in 0..2 {
-                let v = if q == 0 {
-                    t.a
-                } else {
-                    t.b
-                };
+                let v = ast::pick(q == 0, t.a, t.b);
                 self.get_ext(v, signed);
                 if big {
-                    self.c.op(
-                        if signed {
-                            w::I64_EXTEND_I32_S
-                        } else {
-                            w::I64_EXTEND_I32_U
-                        },
-                    );
+                    self.c.op(ast::pick(signed, w::I64_EXTEND_I32_S, w::I64_EXTEND_I32_U));
                 }
-                self.c.local(
-                    w::LOCAL_SET,
-                    if q == 0 {
-                        ra
-                    } else {
-                        rb
-                    },
-                );
+                self.c.local(w::LOCAL_SET, ast::pick(q == 0, ra, rb));
             }
             let x = r;
             let big_r = big;
@@ -2869,13 +2757,7 @@ extend Gen {
                 if big_r {
                     self.c.local(w::LOCAL_GET, x);
                     self.c.op(w::I32_WRAP_I64);
-                    self.c.op(
-                        if signed {
-                            w::I64_EXTEND_I32_S
-                        } else {
-                            w::I64_EXTEND_I32_U
-                        },
-                    );
+                    self.c.op(ast::pick(signed, w::I64_EXTEND_I32_S, w::I64_EXTEND_I32_U));
                     self.c.op(w::I64_NE);
                 } else {
                     self.c.local(w::LOCAL_GET, x);
@@ -2919,16 +2801,8 @@ extend Gen {
             rb
         };
         let li = self.local_of[i as usize];
-        let x = if li != NONE && li != la && (li != lb || add && !signed) {
-            li
-        } else {
-            r
-        };
-        let o = if add {
-            w::I32_ADD
-        } else {
-            w::I32_SUB
-        };
+        let x = ast::pick(li != NONE && li != la && (li != lb || add && !signed), li, r);
+        let o = ast::pick(add, w::I32_ADD, w::I32_SUB);
         let d = if wide {
             w::I64_ADD - w::I32_ADD
         } else {
@@ -2965,16 +2839,16 @@ extend Gen {
             } else {
                 self.c.i32_const(0);
             }
-            self.c.op(pick8(wide, w::I64_LT_S, w::I32_LT_S));
-            self.c.local(w::LOCAL_GET, pick32(add, x, xa));
-            self.c.local(w::LOCAL_GET, pick32(add, xa, x));
-            self.c.op(pick8(wide, w::I64_LT_S, w::I32_LT_S));
+            self.c.op(ast::pick(wide, w::I64_LT_S, w::I32_LT_S));
+            self.c.local(w::LOCAL_GET, ast::pick(add, x, xa));
+            self.c.local(w::LOCAL_GET, ast::pick(add, xa, x));
+            self.c.op(ast::pick(wide, w::I64_LT_S, w::I32_LT_S));
             self.c.op(w::I32_XOR);
         } else {
             // add: x < a; sub: a < b.
-            self.c.local(w::LOCAL_GET, pick32(add, x, xa));
-            self.c.local(w::LOCAL_GET, pick32(add, xa, xb));
-            self.c.op(pick8(wide, w::I64_LT_U, w::I32_LT_U));
+            self.c.local(w::LOCAL_GET, ast::pick(add, x, xa));
+            self.c.local(w::LOCAL_GET, ast::pick(add, xa, xb));
+            self.c.op(ast::pick(wide, w::I64_LT_U, w::I32_LT_U));
         }
     }
 
@@ -3140,26 +3014,14 @@ extend Gen {
         if x != VNONE && (c == C_EQ || truth && ty != T_I64) {
             self.get(x);
             if c == C_EQ {
-                self.c.op(pick8(ty == T_I64, w::I64_EQZ, w::I32_EQZ));
+                self.c.op(ast::pick(ty == T_I64, w::I64_EQZ, w::I32_EQZ));
             }
             return;
         }
-        let ops: []u8 = [
-            w::I32_EQ,
-            w::I32_NE,
-            w::I32_LT_S,
-            w::I32_LE_S,
-            w::I32_GT_S,
-            w::I32_GE_S,
-            w::I32_LT_U,
-            w::I32_LE_U,
-            w::I32_GT_U,
-            w::I32_GE_U,
-        ];
         let signed = c >= C_SLT && c <= C_SGE;
         self.get_ext(t.a, signed);
         self.get_ext(t.b, signed);
-        let o = ops[c as usize];
+        let o = CMP_OPS[c as usize];
         self.c.op(
             if ty == T_I64 {
                 o + (w::I64_EQ - w::I32_EQ)
@@ -3220,19 +3082,7 @@ extend Gen {
         } else {
             self.get(t.a);
             self.get(t.b);
-            let o = if c == C_OEQ {
-                w::F32_EQ
-            } else if c == C_UNE {
-                w::F32_NE
-            } else if c == C_OLT {
-                w::F32_LT
-            } else if c == C_OLE {
-                w::F32_LE
-            } else if c == C_OGT {
-                w::F32_GT
-            } else {
-                w::F32_GE
-            };
+            let o = fcmp_op(c);
             self.c.op(o + d);
         }
         self.put(i);
@@ -3258,13 +3108,7 @@ extend Gen {
                 self.sx(from);
             }
             if !fw && tw {
-                self.c.op(
-                    if op == O_SEXT {
-                        w::I64_EXTEND_I32_S
-                    } else {
-                        w::I64_EXTEND_I32_U
-                    },
-                );
+                self.c.op(ast::pick(op == O_SEXT, w::I64_EXTEND_I32_S, w::I64_EXTEND_I32_U));
             } else if fw && !tw {
                 self.c.op(w::I32_WRAP_I64);
             }
@@ -3276,26 +3120,16 @@ extend Gen {
         }
         if op == O_FPEXT || op == O_FPTRUNC {
             self.get(t.a);
-            self.c.op(
-                if op == O_FPEXT {
-                    w::F64_PROMOTE_F32
-                } else {
-                    w::F32_DEMOTE_F64
-                },
-            );
+            self.c.op(ast::pick(op == O_FPEXT, w::F64_PROMOTE_F32, w::F32_DEMOTE_F64));
             self.put(i);
             return true;
         }
         if op == O_SITOFP || op == O_UITOFP {
             let s = op == O_SITOFP;
             self.get_ext(t.a, s);
-            let base = if to == T_F32 {
-                w::F32_CONVERT_I32_S
-            } else {
-                w::F64_CONVERT_I32_S
-            };
+            let base = ast::pick(to == T_F32, w::F32_CONVERT_I32_S, w::F64_CONVERT_I32_S);
             // _i32_s, _i32_u, _i64_s, _i64_u in order.
-            let k = pick8(from == T_I64, 2, 0) + pick8(s, 0, 1);
+            let k = ast::pick(from == T_I64, 2u8, 0) + ast::pick(s, 0u8, 1);
             self.c.op(base + k);
             self.put(i);
             return true;
@@ -3311,11 +3145,11 @@ extend Gen {
         if t.aux != CV_UNCHECKED && (tb == 32 || tb == 64) {
             self.get(t.a);
             self.c.op(0xFC);
-            self.c.uleb(pick8(tb == 64, 4, 0) + pick8(fd, 2, 0) + pick8(t.op == O_FPTOSI, 0, 1));
+            self.c.uleb(ast::pick(tb == 64, 4u8, 0) + ast::pick(fd, 2u8, 0) + ast::pick(t.op == O_FPTOSI, 0u8, 1));
             self.put(i);
             return true;
         }
-        let x = self.tmp(pick8(fd, w::F64, w::F32));
+        let x = self.tmp(ast::pick(fd, w::F64, w::F32));
         self.get(t.a);
         self.c.local(w::LOCAL_SET, x);
         self.trunc_sat(x, fd, t.ty, t.op == O_FPTOSI, t.aux == CV_UNCHECKED);
@@ -3330,9 +3164,9 @@ extend Gen {
         let wide = to == T_I64;
         // The truncation: to i32 (signed for a narrow type, which fits either way) or i64.
         let tr = if wide {
-            pick8(fd, w::I64_TRUNC_F64_S, w::I64_TRUNC_F32_S) + pick8(signed, 0, 1)
+            ast::pick(fd, w::I64_TRUNC_F64_S, w::I64_TRUNC_F32_S) + ast::pick(signed, 0u8, 1)
         } else {
-            pick8(fd, w::I32_TRUNC_F64_S, w::I32_TRUNC_F32_S) + pick8(signed || tb < 32, 0, 1)
+            ast::pick(fd, w::I32_TRUNC_F64_S, w::I32_TRUNC_F32_S) + ast::pick(signed || tb < 32, 0u8, 1)
         };
         if unchecked {
             self.c.local(w::LOCAL_GET, x);
@@ -3342,7 +3176,7 @@ extend Gen {
             }
             return;
         }
-        let rt = pick8(wide, w::I64, w::I32);
+        let rt = ast::pick(wide, w::I64, w::I32);
         let lo: f64 = if signed {
             -fpow2(tb - 1)
         } else {
@@ -3366,7 +3200,7 @@ extend Gen {
         // NaN: 0.
         self.c.local(w::LOCAL_GET, x);
         self.c.local(w::LOCAL_GET, x);
-        self.c.op(pick8(fd, w::F64_NE, w::F32_NE));
+        self.c.op(ast::pick(fd, w::F64_NE, w::F32_NE));
         self.open_if();
         self.c.op(rt);
         self.int_const(wide, 0);
@@ -3417,8 +3251,8 @@ extend Gen {
         if self.simd && self.cast_fits(t) {
             // A scalar is lane 0 of the vector; an i128 is in memory.
             let vin = is_vec(from) || from == T_I128;
-            let sc = pick8(vin, to, from);
-            let lt = pick8(is_float(sc), sc, pick8(type_bytes(sc, 4) == 8, T_I64, T_I32));
+            let sc = ast::pick(vin, to, from);
+            let lt = ast::pick(is_float(sc), sc, ast::pick(type_bytes(sc, 4) == 8, T_I64, T_I32));
             self.vpre(i);
             if vin {
                 self.vget(t.a);
@@ -3435,8 +3269,8 @@ extend Gen {
             }
             return true;
         }
-        let mf = in_mem(from);
-        let mt = in_mem(to);
+        let mf = pl::in_mem(from);
+        let mt = pl::in_mem(to);
         if mf && mt {
             if self.home[i as usize] != NONE {
                 let n = type_bytes(to, 4);
@@ -3492,13 +3326,7 @@ extend Gen {
                 if op == O_SEXT {
                     self.sx(from);
                 }
-                self.c.op(
-                    if op == O_SEXT {
-                        w::I64_EXTEND_I32_S
-                    } else {
-                        w::I64_EXTEND_I32_U
-                    },
-                );
+                self.c.op(ast::pick(op == O_SEXT, w::I64_EXTEND_I32_S, w::I64_EXTEND_I32_U));
             }
             self.c.local(w::LOCAL_SET, lo);
             self.c.local(w::LOCAL_GET, self.fp);
@@ -3538,11 +3366,7 @@ extend Gen {
             };
             self.mword(t.a, 0);
             self.mword(t.a, 1);
-            let rt = if d {
-                w::F64
-            } else {
-                w::F32
-            };
+            let rt = ast::pick(d, w::F64, w::F32);
             self.call_rt(name, [w::I64, w::I64], [rt]);
             self.put(i);
             return true;
@@ -3563,11 +3387,7 @@ extend Gen {
             self.c.op(w::I32_ADD);
         }
         self.get(t.a);
-        let ft = if fd {
-            w::F64
-        } else {
-            w::F32
-        };
+        let ft = ast::pick(fd, w::F64, w::F32);
         self.call_rt(name, [w::I32, ft], []);
         return true;
     }
@@ -3623,23 +3443,11 @@ extend Gen {
             let add = op == O_ADD;
             self.c.local(w::LOCAL_GET, al);
             self.c.local(w::LOCAL_GET, bl);
-            self.c.op(
-                if add {
-                    w::I64_ADD
-                } else {
-                    w::I64_SUB
-                },
-            );
+            self.c.op(ast::pick(add, w::I64_ADD, w::I64_SUB));
             self.c.local(w::LOCAL_SET, rl);
             self.c.local(w::LOCAL_GET, ah);
             self.c.local(w::LOCAL_GET, bh);
-            self.c.op(
-                if add {
-                    w::I64_ADD
-                } else {
-                    w::I64_SUB
-                },
-            );
+            self.c.op(ast::pick(add, w::I64_ADD, w::I64_SUB));
             // The carry (rl < al) or the borrow (al < bl).
             if add {
                 self.c.local(w::LOCAL_GET, rl);
@@ -3650,13 +3458,7 @@ extend Gen {
             }
             self.c.op(w::I64_LT_U);
             self.c.op(w::I64_EXTEND_I32_U);
-            self.c.op(
-                if add {
-                    w::I64_ADD
-                } else {
-                    w::I64_SUB
-                },
-            );
+            self.c.op(ast::pick(add, w::I64_ADD, w::I64_SUB));
             self.c.local(w::LOCAL_SET, rh);
         } else if op == O_AND || op == O_OR || op == O_XOR {
             let o = if op == O_AND {
@@ -3713,11 +3515,7 @@ extend Gen {
     // `(x >> 1) >> (63 - n)` is `x >> (64 - n)` that stays 0 at n = 0.
     fn shift128(self: &mut Self, op: u8, al: u32, ah: u32, n: u32, rl: u32, rh: u32) {
         let left = op == O_SHL;
-        let sh_hi = if op == O_ASHR {
-            w::I64_SHR_S
-        } else {
-            w::I64_SHR_U
-        };
+        let sh_hi = ast::pick(op == O_ASHR, w::I64_SHR_S, w::I64_SHR_U);
         if left {
             self.c.local(w::LOCAL_GET, al);
             self.c.local(w::LOCAL_GET, n);
@@ -3797,8 +3595,8 @@ extend Gen {
             self.c.i32_const(off);
             self.c.op(w::I32_ADD);
         }
-        self.sop(pick32(n == 16, w::V128_LOAD, pick32(n == 8, 0x5D, 0x5C)));
-        self.c.memarg(pick32(al < log2u(n), al, log2u(n)), pick32(off < 0, 0, off as u32));
+        self.sop(ast::pick(n == 16, w::V128_LOAD, ast::pick(n == 8, 0x5Du32, 0x5C)));
+        self.c.memarg(ast::pick(al < log2u(n), al, log2u(n)), ast::pick(off < 0, 0, off as u32));
     }
 
     fn load(self: &mut Self, i: u32, t: Inst) bool {
@@ -3808,7 +3606,7 @@ extend Gen {
             self.put(i);
             return true;
         }
-        if in_mem(t.ty) {
+        if pl::in_mem(t.ty) {
             if self.home[i as usize] == NONE {
                 return true;
             }
@@ -3831,7 +3629,7 @@ extend Gen {
             self.c.i32_const(off);
             self.c.op(w::I32_ADD);
         }
-        self.load_al(t.ty, pick32(off < 0, 0, off as u32), al);
+        self.load_al(t.ty, ast::pick(off < 0, 0, off as u32), al);
     }
 
     // Local `a` = the address in `v` plus `off`.
@@ -3871,8 +3669,8 @@ extend Gen {
             // `v128.store`, or `v128.store64_lane` or `v128.store32_lane` of lane 0.
             let n = type_bytes(vt, 4);
             self.get(t.b);
-            self.sop(pick32(n == 16, w::V128_STORE, pick32(n == 8, 0x5B, 0x5A)));
-            self.c.memarg(pick32(al < log2u(n), al, log2u(n)), o);
+            self.sop(ast::pick(n == 16, w::V128_STORE, ast::pick(n == 8, 0x5Bu32, 0x5A)));
+            self.c.memarg(ast::pick(al < log2u(n), al, log2u(n)), o);
             if n != 16 {
                 self.c.op(0);
             }
@@ -3891,11 +3689,7 @@ extend Gen {
             t.ty
         };
         let wide = ty == T_I64;
-        let wt = if wide {
-            w::I64
-        } else {
-            w::I32
-        };
+        let wt = ast::pick(wide, w::I64, w::I32);
         let off = if t.op == O_ARMW {
             t.c as i32
         } else {
@@ -3911,13 +3705,7 @@ extend Gen {
             let hit = self.tmp(w::I32);
             self.c.local(w::LOCAL_GET, old);
             self.get(t.b);
-            self.c.op(
-                if wide {
-                    w::I64_EQ
-                } else {
-                    w::I32_EQ
-                },
-            );
+            self.c.op(ast::pick(wide, w::I64_EQ, w::I32_EQ));
             self.c.local(w::LOCAL_TEE, hit);
             self.open_if();
             self.c.op(w::BLOCK_EMPTY);
@@ -3971,7 +3759,7 @@ extend Gen {
             self.vpost(i);
             return true;
         }
-        if in_mem(t.ty) {
+        if pl::in_mem(t.ty) {
             let d = self.home[i as usize];
             if d == NONE {
                 return true;
@@ -4033,7 +3821,7 @@ extend Gen {
         // false side).
         let s = self.inc_fold(t);
         if s != 0 {
-            self.get(pick_v(s == 1, t.c, t.b));
+            self.get(ast::pick(s == 1, t.c, t.b));
             self.get_cond(t.a, s == 2, false);
             if t.ty == T_I64 {
                 self.c.op(w::I64_EXTEND_I32_U);
@@ -4057,8 +3845,8 @@ extend Gen {
         let swap = (a & (VPARAM | VFLAG)) == 0 && self.lv.pfold[a as usize] && self.b().insts[a as usize].op == O_ICMP && self.is_remat(
             t.b,
         ) && !self.is_remat(t.c);
-        self.get(pick_v(swap, t.c, t.b));
-        self.get(pick_v(swap, t.b, t.c));
+        self.get(ast::pick(swap, t.c, t.b));
+        self.get(ast::pick(swap, t.b, t.c));
         self.get_cond(a, swap, true);
         self.c.op(w::SELECT);
     }
@@ -4067,7 +3855,7 @@ extend Gen {
     // else 0.
     fn inc_fold(self: &Self, t: Inst) u8 {
         let s = lv::inc_side(self.b(), t);
-        return pick8(s != 0 && self.lv.pfold[pick_v(s == 1, t.b, t.c) as usize], s, 0);
+        return ast::pick(s != 0 && self.lv.pfold[ast::pick(s == 1, t.b, t.c) as usize], s, 0);
     }
 
     // Whether `v` rematerializes at each use.
@@ -4080,7 +3868,7 @@ extend Gen {
         let (sz, al) = if ty == T_I128 {
             (16u32, 16u32)
         } else {
-            (ast_max(type_bytes(ty, 4), 4), ast_max(type_align(ty, 4), 4))
+            (type_bytes(ty, 4).max(4), type_align(ty, 4).max(4))
         };
         let la = self.tmp(w::I32);
         let pa = self.tmp(w::I32);
@@ -4094,7 +3882,7 @@ extend Gen {
             self.c.op(w::I32_AND);
         }
         self.c.local(w::LOCAL_SET, pa);
-        if in_mem(ty) {
+        if pl::in_mem(ty) {
             if self.home[i as usize] != NONE {
                 self.copy_mem(self.fp, self.home[i as usize], pa, 0, sz);
             }
@@ -4139,11 +3927,7 @@ extend Gen {
 
     // The `br` depth of the label a branch to block `t` takes (`back`: the loop it heads).
     fn depth(self: &mut Self, t: u32, back: bool) u32 {
-        let kind = if back {
-            LB_LOOP
-        } else {
-            LB_BLOCK
-        };
+        let kind = ast::pick(back, LB_LOOP, LB_BLOCK);
         let n = self.labels.len();
         for q in 0..n {
             let l = self.labels[n - 1 - q];
@@ -4282,7 +4066,7 @@ extend Gen {
             let t = self.b().insts[v as usize];
             let comm = t.op == O_ADD || t.op == O_MUL || t.op >= O_AND && t.op <= O_XOR;
             if is_int(t.ty) && t.op >= O_ADD && t.op <= O_ASHR {
-                return self.wait_pos(pick_v(comm && self.swap_reads(t.a, t.b), t.b, t.a));
+                return self.wait_pos(ast::pick(comm && self.swap_reads(t.a, t.b), t.b, t.a));
             }
             return NONE;
         }
@@ -4495,16 +4279,7 @@ extend Gen {
 
     // A line row at the next code byte for location `loc` (a `lines` index) when it differs from the last.
     fn row(self: &mut Self, loc: u32) {
-        let n = self.rows.len();
-        if loc == 0 || n != 0 && (self.rows[n - 1] & 0xFFFFFFFF) as u32 == loc {
-            return;
-        }
-        let at = self.c.bytes.len() as u64 << 32;
-        if n != 0 && self.rows[n - 1] >> 32 == at >> 32 {
-            self.rows[n - 1] = at | loc as u64;
-            return;
-        }
-        self.rows.push(at | loc as u64);
+        pl::row(&mut self.rows, self.c.bytes.len() as u64, loc);
     }
 
     // Edge `e` of block `s`: the target's parameters, then a `br`, or the target's code inline.
@@ -4623,7 +4398,7 @@ extend Gen {
             }
         }
         if wr == 0 {
-            return pick32(n != 0, 0, NONE);
+            return ast::pick(n != 0, 0, NONE);
         }
         let tg = b.edge_target(o);
         for v in 0..self.local_of.len() {
@@ -4812,13 +4587,7 @@ extend Gen {
             let cv = trunc_to(b.words[(t.b + k) as usize], bits);
             self.get(t.a);
             self.int_const(wide, cv);
-            self.c.op(
-                if wide {
-                    w::I64_EQ
-                } else {
-                    w::I32_EQ
-                },
-            );
+            self.c.op(ast::pick(wide, w::I64_EQ, w::I32_EQ));
             if self.brable(x, tg) && b.edge_nargs(e) == 0 {
                 let d = self.depth(tg, self.sh.back(x, tg));
                 self.c.op(w::BR_IF);
@@ -4975,15 +4744,7 @@ extend Gen {
 
     // Whether `v` is an integer constant: its bits in `out`.
     const fn const_of(self: &Self, v: Value, out: &mut u64) bool {
-        if (v & (VPARAM | VFLAG)) != 0 {
-            return false;
-        }
-        let t = self.b().insts[v as usize];
-        if t.op != O_ICONST {
-            return false;
-        }
-        *out = t.b as u64 << 32 | t.a as u64;
-        return true;
+        return lv::const_of(self.b(), v, out);
     }
 
     // Intrinsic `tpl` in place of call `t`, its arguments on the operand stack: its instructions, with
@@ -5082,23 +4843,15 @@ extend Gen {
             ""
         };
         // An intrinsic takes its vectors as v128 values.
-        wa::classify(
-            b,
-            sig,
-            if tpl.len() != 0 {
-                16u32
-            } else {
-                self.vregs
-            },
-            &mut self.cs,
-        );
+        wa::classify(b, sig, ast::pick(tpl.len() != 0, 16u32, self.vregs), &mut self.cs);
         let np = b.pool[sig as usize];
         let rt = b.pool[sig as usize + 2];
         // The call area: copies of memory values passed by reference, then the variadic buffer.
         let mut at: u32 = 0;
         let mut refs = Vector::<u32>::new();
         fill(&mut refs, np as usize, NONE);
-        for k in 0..self.cs.nfixed {
+        // The variadic arguments' copies too, before the buffer.
+        for k in 0..ast::pick(self.cs.variadic, np, self.cs.nfixed) {
             let pa = self.cs.params[k as usize];
             let pt = b.pool[(sig + 3 + k) as usize];
             if pa.kind == wa::P_REF && (pt & AGG) == 0 {
@@ -5112,19 +4865,6 @@ extend Gen {
         }
         let mut vbuf = NONE;
         if self.cs.variadic {
-            // The variadic arguments' copies of memory values first, then the buffer.
-            for k in self.cs.nfixed..np {
-                let pa = self.cs.params[k as usize];
-                let pt = b.pool[(sig + 3 + k) as usize];
-                if pa.kind == wa::P_REF && (pt & AGG) == 0 {
-                    at = at + 15 & ~15u32;
-                    let v = b.pool[(t.c + k) as usize];
-                    let h = self.mhome(v);
-                    self.copy_mem(self.fp, at, self.fp, h, type_bytes(pa.ty, 4));
-                    refs[k as usize] = at;
-                    at += type_bytes(pa.ty, 4);
-                }
-            }
             at = at + 15 & ~15u32;
             vbuf = at;
             let mut pos: u32 = 0;
@@ -5402,13 +5142,13 @@ extend Gen {
         let eb = type_bytes(lt, 4);
         let al = log2u(eb);
         let op = if is_float(lt) && !raw {
-            pick8(lt == T_F64, w::F64_LOAD, w::F32_LOAD)
+            ast::pick(lt == T_F64, w::F64_LOAD, w::F32_LOAD)
         } else if eb == 1 {
-            pick8(sg, w::I64_LOAD8_S, w::I64_LOAD8_U)
+            ast::pick(sg, w::I64_LOAD8_S, w::I64_LOAD8_U)
         } else if eb == 2 {
-            pick8(sg, w::I64_LOAD16_S, w::I64_LOAD16_U)
+            ast::pick(sg, w::I64_LOAD16_S, w::I64_LOAD16_U)
         } else if eb == 4 {
-            pick8(sg, w::I64_LOAD32_S, w::I64_LOAD32_U)
+            ast::pick(sg, w::I64_LOAD32_S, w::I64_LOAD32_U)
         } else {
             w::I64_LOAD
         };
@@ -5433,7 +5173,7 @@ extend Gen {
     fn lane_store(self: &mut Self, lt: u8, raw: bool, off: u32) {
         let eb = type_bytes(lt, 4);
         let op = if is_float(lt) && !raw {
-            pick8(lt == T_F64, w::F64_STORE, w::F32_STORE)
+            ast::pick(lt == T_F64, w::F64_STORE, w::F32_STORE)
         } else if eb == 1 {
             w::I64_STORE8
         } else if eb == 2 {
@@ -5527,7 +5267,7 @@ extend Gen {
             let d = self.vdef(i);
             let l = if is_float(lt) {
                 self.get(t.a);
-                self.tmp(pick8(lt == T_F64, w::F64, w::F32))
+                self.tmp(ast::pick(lt == T_F64, w::F64, w::F32))
             } else {
                 self.get64(t.a);
                 self.tmp(w::I64)
@@ -5562,7 +5302,7 @@ extend Gen {
             }
             let l = if is_float(lt) {
                 self.get(t.b);
-                self.tmp(pick8(lt == T_F64, w::F64, w::F32))
+                self.tmp(ast::pick(lt == T_F64, w::F64, w::F32))
             } else {
                 self.get64(t.b);
                 x
@@ -5666,32 +5406,8 @@ extend Gen {
         let c = t.aux;
         let d = self.vdef(i);
         let x = self.tmp(w::I64);
-        let iops: []u8 = [
-            w::I64_EQ,
-            w::I64_NE,
-            w::I64_LT_S,
-            w::I64_LE_S,
-            w::I64_GT_S,
-            w::I64_GE_S,
-            w::I64_LT_U,
-            w::I64_LE_U,
-            w::I64_GT_U,
-            w::I64_GE_U,
-        ];
-        let fd = pick8(lt == T_F64, w::F64_EQ - w::F32_EQ, 0);
-        let fo = if c == C_OEQ {
-            w::F32_EQ
-        } else if c == C_UNE {
-            w::F32_NE
-        } else if c == C_OLT {
-            w::F32_LT
-        } else if c == C_OLE {
-            w::F32_LE
-        } else if c == C_OGT {
-            w::F32_GT
-        } else {
-            w::F32_GE
-        };
+        let fd = ast::pick(lt == T_F64, w::F64_EQ - w::F32_EQ, 0);
+        let fo = fcmp_op(c);
         let sg = c >= C_SLT && c <= C_SGE;
         for k in 0..lanes(vt) {
             self.c.i64_const(0);
@@ -5702,7 +5418,7 @@ extend Gen {
             } else {
                 self.ld_lane(t.a, k, lt, sg, false);
                 self.ld_lane(t.b, k, lt, sg, false);
-                self.c.op(iops[c as usize]);
+                self.c.op(CMP_OPS[c as usize] + (w::I64_EQ - w::I32_EQ));
             }
             self.c.op(w::I64_EXTEND_I32_U);
             self.c.op(w::I64_SUB);
@@ -5718,15 +5434,15 @@ extend Gen {
         let n = lanes(t.ty);
         let d = self.vdef(i);
         if is_float(lt) {
-            let ft = pick8(lt == T_F64, w::F64, w::F32);
-            let fd = pick8(lt == T_F64, w::F64_ADD - w::F32_ADD, 0);
+            let ft = ast::pick(lt == T_F64, w::F64, w::F32);
+            let fd = ast::pick(lt == T_F64, w::F64_ADD - w::F32_ADD, 0);
             let fa = self.tmp(ft);
             for k in 0..n {
                 self.ld_lane(t.a, k, lt, false, false);
                 if op == O_FNEG {
-                    self.c.op(pick8(lt == T_F64, w::F64_NEG, w::F32_NEG));
+                    self.c.op(ast::pick(lt == T_F64, w::F64_NEG, w::F32_NEG));
                 } else if op == O_FSQRT {
-                    self.c.op(pick8(lt == T_F64, w::F64_SQRT, w::F32_SQRT));
+                    self.c.op(ast::pick(lt == T_F64, w::F64_SQRT, w::F32_SQRT));
                 } else {
                     self.ld_lane(t.b, k, lt, false, false);
                     self.c.op(w::F32_ADD + (op - O_FADD) + fd);
@@ -5738,21 +5454,6 @@ extend Gen {
         }
         let sg = op == O_ASHR || op == O_SDIV || op == O_SREM;
         let x = self.tmp(w::I64);
-        let ops: []u8 = [
-            w::I64_ADD,
-            w::I64_SUB,
-            w::I64_MUL,
-            w::I64_DIV_S,
-            w::I64_DIV_U,
-            w::I64_REM_S,
-            w::I64_REM_U,
-            w::I64_AND,
-            w::I64_OR,
-            w::I64_XOR,
-            w::I64_SHL,
-            w::I64_SHR_U,
-            w::I64_SHR_S,
-        ];
         for k in 0..n {
             if op == O_NEG {
                 self.c.i64_const(0);
@@ -5765,7 +5466,7 @@ extend Gen {
             } else {
                 self.ld_lane(t.a, k, lt, sg, false);
                 self.ld_lane(t.b, k, lt, sg && op != O_ASHR, false);
-                self.c.op(ops[(op - O_ADD) as usize]);
+                self.c.op(INT_OPS[(op - O_ADD) as usize] + (w::I64_ADD - w::I32_ADD));
             }
             self.c.local(w::LOCAL_SET, x);
             self.st_lane(x, d, k, lt, false);
@@ -5779,12 +5480,12 @@ extend Gen {
         let d = self.vdef(i);
         let x = self.tmp(w::I64);
         let fa = if is_float(fl) {
-            self.tmp(pick8(fl == T_F64, w::F64, w::F32))
+            self.tmp(ast::pick(fl == T_F64, w::F64, w::F32))
         } else {
             NONE
         };
         let fr = if is_float(tl) {
-            self.tmp(pick8(tl == T_F64, w::F64, w::F32))
+            self.tmp(ast::pick(tl == T_F64, w::F64, w::F32))
         } else {
             NONE
         };
@@ -5792,14 +5493,14 @@ extend Gen {
             if is_float(fl) && is_float(tl) {
                 self.ld_lane(v, k, fl, false, false);
                 if fl != tl {
-                    self.c.op(pick8(tl == T_F64, w::F64_PROMOTE_F32, w::F32_DEMOTE_F64));
+                    self.c.op(ast::pick(tl == T_F64, w::F64_PROMOTE_F32, w::F32_DEMOTE_F64));
                 }
                 self.c.local(w::LOCAL_SET, fr);
                 self.st_lane(fr, d, k, tl, false);
             } else if is_float(tl) {
                 self.ld_lane(v, k, fl, fs, false);
-                let base = pick8(tl == T_F64, w::F64_CONVERT_I64_S, w::F32_CONVERT_I64_S);
-                self.c.op(base + pick8(fs, 0, 1));
+                let base = ast::pick(tl == T_F64, w::F64_CONVERT_I64_S, w::F32_CONVERT_I64_S);
+                self.c.op(base + ast::pick(fs, 0u8, 1));
                 self.c.local(w::LOCAL_SET, fr);
                 self.st_lane(fr, d, k, tl, false);
             } else if is_float(fl) {
@@ -5824,11 +5525,7 @@ extend Gen {
         let dsg = (t.aux & VOP_DSIGNED) != 0;
         let mut ops: [Value; 4] = [VNONE, VNONE, VNONE, VNONE];
         let mut tys: [u8; 4] = [T_NONE, T_NONE, T_NONE, T_NONE];
-        let na = if t.b < 4 {
-            t.b
-        } else {
-            4u32
-        };
+        let na = ast::pick(t.b < 4, t.b, 4u32);
         for k in 0..na {
             let v = self.b().pool[(t.a + k) as usize];
             unsafe ops[k as usize] = v;
@@ -5859,7 +5556,7 @@ extend Gen {
             let sop = if code == core::OP_SHL_SCALAR {
                 w::I64_SHL
             } else {
-                pick8(sg, w::I64_SHR_S, w::I64_SHR_U)
+                ast::pick(sg, w::I64_SHR_S, w::I64_SHR_U)
             };
             for k in 0..lanes(tys[0]) {
                 self.ld_lane(ops[0], k, lt, sg, false);
@@ -5898,7 +5595,7 @@ extend Gen {
     // Float vectors `x` % `y` lane by lane through C's `fmod` (`fmodf`).
     fn vec_fmod(self: &mut Self, i: u32, x: Value, y: Value) {
         let lt = lane_type(self.vt(x));
-        let ft = pick8(lt == T_F64, w::F64, w::F32);
+        let ft = ast::pick(lt == T_F64, w::F64, w::F32);
         let d = self.vdef(i);
         let fa = self.tmp(ft);
         for k in 0..lanes(self.vt(x)) {
@@ -5994,7 +5691,7 @@ extend Gen {
         let traps = !fl && sg && c == core::SIMD_ABS || c == core::SIMD_NARROW_CHECKED;
         // Bit operations read the lane's bits.
         let bitop = c >= core::SIMD_CLZ && c <= core::SIMD_BSWAP;
-        let ft = pick8(lt == T_F64, w::F64, w::F32);
+        let ft = ast::pick(lt == T_F64, w::F64, w::F32);
         let (fa, fb, fc) = if fl {
             (self.tmp(ft), self.tmp(ft), self.tmp(ft))
         } else {
@@ -6095,23 +5792,9 @@ extend Gen {
             if sg {
                 // add: (x ^ r) & (y ^ r) < 0; sub: (x ^ y) & (x ^ r) < 0.
                 self.c.local(w::LOCAL_GET, x);
-                self.c.local(
-                    w::LOCAL_GET,
-                    if add {
-                        z
-                    } else {
-                        y
-                    },
-                );
+                self.c.local(w::LOCAL_GET, ast::pick(add, z, y));
                 self.c.op(w::I64_XOR);
-                self.c.local(
-                    w::LOCAL_GET,
-                    if add {
-                        y
-                    } else {
-                        x
-                    },
-                );
+                self.c.local(w::LOCAL_GET, ast::pick(add, y, x));
                 self.c.local(w::LOCAL_GET, z);
                 self.c.op(w::I64_XOR);
                 self.c.op(w::I64_AND);
@@ -6176,7 +5859,7 @@ extend Gen {
     // operation's zero-extended): the result lane (of `rlt`, signed `rsg`) in `x`; a lane that traps sets
     // `fr`.
     fn int_rule(self: &mut Self, c: u8, lb: u32, sg: bool, rlt: u8, rsg: bool, x: u32, y: u32, z: u32, fr: u32) {
-        let lt_op = pick8(sg, w::I64_LT_S, w::I64_LT_U);
+        let lt_op = ast::pick(sg, w::I64_LT_S, w::I64_LT_U);
         if c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_MUL {
             self.c.local(w::LOCAL_GET, x);
             self.c.local(w::LOCAL_GET, y);
@@ -6204,7 +5887,7 @@ extend Gen {
                 if c == core::SIMD_WRAP_SHL {
                     w::I64_SHL
                 } else {
-                    pick8(sg, w::I64_SHR_S, w::I64_SHR_U)
+                    ast::pick(sg, w::I64_SHR_S, w::I64_SHR_U)
                 },
             );
             self.c.local(w::LOCAL_SET, x);
@@ -6225,14 +5908,14 @@ extend Gen {
             self.ovf_lane(c, lb, sg, x, y, z);
             self.c.local(w::LOCAL_SET, ov);
             if sg {
-                self.c.i64_const(pick64(add, min, max) as i64);
-                self.c.i64_const(pick64(add, max, min) as i64);
+                self.c.i64_const(ast::pick(add, min, max) as i64);
+                self.c.i64_const(ast::pick(add, max, min) as i64);
                 self.c.local(w::LOCAL_GET, y);
                 self.c.i64_const(0);
                 self.c.op(w::I64_LT_S);
                 self.c.op(w::SELECT);
             } else {
-                self.c.i64_const(pick64(add, max, min) as i64);
+                self.c.i64_const(ast::pick(add, max, min) as i64);
             }
             self.c.local(w::LOCAL_SET, z);
             self.c.local(w::LOCAL_GET, ov);
@@ -6457,7 +6140,7 @@ extend Gen {
         self.c.local(w::LOCAL_SET, z);
         self.c.local(w::LOCAL_GET, z);
         self.c.local(w::LOCAL_GET, x);
-        self.c.op(pick8(sg, w::I64_LT_S, w::I64_LT_U));
+        self.c.op(ast::pick(sg, w::I64_LT_S, w::I64_LT_U));
         self.sel64(x, z, x);
         if sg && rsg {
             self.c.i64_const(rmin as i64);
@@ -6488,8 +6171,8 @@ extend Gen {
         let dd = lt == T_F64;
         let lb = type_bits(lt, 4);
         let sb = 1u64 << (lb - 1) as u64;
-        let cd = pick8(dd, w::F64_EQ - w::F32_EQ, 0);
-        let ud = pick8(dd, w::F64_ABS - w::F32_ABS, 0);
+        let cd = ast::pick(dd, w::F64_EQ - w::F32_EQ, 0);
+        let ud = ast::pick(dd, w::F64_ABS - w::F32_ABS, 0);
         if c == core::SIMD_COPYSIGN || c == core::SIMD_IS_SIGN_NEG {
             self.ld_lane_to(x, ops[0], k, lt, false, true);
             if c == core::SIMD_IS_SIGN_NEG {
@@ -6543,8 +6226,8 @@ extend Gen {
                 self.mask_bit(mk, k);
                 return;
             }
-            let minn = pick64(dd, 0x0010000000000000, 0x00800000);
-            let maxf = pick64(dd, 0x7FEFFFFFFFFFFFFF, 0x7F7FFFFF);
+            let minn = ast::pick(dd, 0x0010000000000000u64, 0x00800000);
+            let maxf = ast::pick(dd, 0x7FEFFFFFFFFFFFFFu64, 0x7F7FFFFF);
             self.c.local(w::LOCAL_GET, fa);
             self.c.op(w::F32_ABS + ud);
             self.c.local(w::LOCAL_SET, fa);
@@ -6629,7 +6312,7 @@ extend Gen {
     // and two give `a`, its quiet bit set when `quiet` (the lane rule; a reduction keeps `a`). `t` is a
     // scratch local of the type.
     fn fminmax(self: &mut Self, dd: bool, lo: bool, nan: bool, quiet: bool, d: u32, a: u32, b: u32, t: u32) {
-        let cd = pick8(dd, w::F64_EQ - w::F32_EQ, 0);
+        let cd = ast::pick(dd, w::F64_EQ - w::F32_EQ, 0);
         let na = self.tmp(w::I32);
         let nb = self.tmp(w::I32);
         self.c.local(w::LOCAL_GET, a);
@@ -6645,19 +6328,9 @@ extend Gen {
         self.c.i32_const(0);
         self.c.local(w::LOCAL_GET, a);
         self.c.local(w::LOCAL_GET, b);
-        self.c.op(pick8(lo, w::F32_LT, w::F32_GT) + cd);
+        self.c.op(ast::pick(lo, w::F32_LT, w::F32_GT) + cd);
         // Equal: `a` when its sign is the min side's.
-        self.c.local(w::LOCAL_GET, a);
-        if dd {
-            self.c.op(w::I64_REINTERPRET_F64);
-            self.c.i64_const(63);
-            self.c.op(w::I64_SHR_U);
-            self.c.op(w::I32_WRAP_I64);
-        } else {
-            self.c.op(w::I32_REINTERPRET_F32);
-            self.c.i32_const(31);
-            self.c.op(w::I32_SHR_U);
-        }
+        self.float_sign(a, dd);
         if !lo {
             self.c.op(w::I32_EQZ);
         }
@@ -6666,23 +6339,9 @@ extend Gen {
         self.c.op(w::F32_NE + cd);
         self.c.op(w::SELECT);
         // nan: a NaN `a` first, then a NaN `b`; else a NaN `b` keeps `a`, a NaN `a` takes `b`.
-        self.c.local(
-            w::LOCAL_GET,
-            if nan {
-                nb
-            } else {
-                na
-            },
-        );
+        self.c.local(w::LOCAL_GET, ast::pick(nan, nb, na));
         self.c.op(w::SELECT);
-        self.c.local(
-            w::LOCAL_GET,
-            if nan {
-                na
-            } else {
-                nb
-            },
-        );
+        self.c.local(w::LOCAL_GET, ast::pick(nan, na, nb));
         self.c.op(w::SELECT);
         let pa = self.tmp(w::I32);
         self.c.local(w::LOCAL_SET, pa);
@@ -6759,12 +6418,8 @@ extend Gen {
             return;
         }
         // A float and an integer: the integer side's range [lo, hi) as f64 bounds.
-        let ib = pick8(ff, rt, bt);
-        let isg = if ff {
-            rs
-        } else {
-            bs
-        };
+        let ib = ast::pick(ff, rt, bt);
+        let isg = ast::pick(ff, rs, bs);
         let iw = type_bits(ib, 4) - isg as u32;
         let hi = 1023u64 + iw as u64 << 52;
         let lo = if isg {
@@ -6808,7 +6463,7 @@ extend Gen {
             self.c.op(w::BLOCK_EMPTY);
             self.ld_lane_to(x, ops[0], k, bt, bs, false);
             self.c.local(w::LOCAL_GET, va);
-            self.c.op(pick8(bs, w::I64_TRUNC_F64_S, w::I64_TRUNC_F64_U));
+            self.c.op(ast::pick(bs, w::I64_TRUNC_F64_S, w::I64_TRUNC_F64_U));
             self.c.local(w::LOCAL_GET, x);
             self.c.op(w::I64_EQ);
             self.c.local(w::LOCAL_SET, fr);
@@ -7119,11 +6774,7 @@ extend Gen {
         } else {
             self.ld_lane_to(acc, ops[0], 0, lt, sg, false);
         }
-        let from: u32 = if dot {
-            0
-        } else {
-            1
-        };
+        let from: u32 = ast::pick(dot, 0, 1);
         for k in from..n {
             self.ld_lane_to(x, ops[0], k, lt, sg, false);
             if dot {
@@ -7141,13 +6792,13 @@ extend Gen {
             } else if add || mul {
                 self.c.local(w::LOCAL_GET, acc);
                 self.c.local(w::LOCAL_GET, x);
-                self.c.op(pick8(add, w::I64_ADD, w::I64_MUL));
+                self.c.op(ast::pick(add, w::I64_ADD, w::I64_MUL));
                 self.c.local(w::LOCAL_SET, acc);
             } else {
                 // min takes a lane below the accumulator, max one not below: both stay extended.
                 self.c.local(w::LOCAL_GET, x);
                 self.c.local(w::LOCAL_GET, acc);
-                self.c.op(pick8(sg, w::I64_LT_S, w::I64_LT_U));
+                self.c.op(ast::pick(sg, w::I64_LT_S, w::I64_LT_U));
                 if c == core::SIMD_REDUCE_MIN {
                     self.sel64(acc, x, acc);
                 } else {
@@ -7178,8 +6829,8 @@ extend Gen {
         n: u32,
     ) {
         let dd = at == T_F64;
-        let aty = pick8(dd, w::F64, w::F32);
-        let fop = pick8(add, w::F32_ADD, w::F32_MUL) + pick8(dd, w::F64_ADD - w::F32_ADD, 0);
+        let aty = ast::pick(dd, w::F64, w::F32);
+        let fop = ast::pick(add, w::F32_ADD, w::F32_MUL) + ast::pick(dd, w::F64_ADD - w::F32_ADD, 0);
         let acc = self.tmp(aty);
         if c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_MUL_TREE {
             // Halves in a copy in the call area: lane j of the lower half with lane j of the upper, to one
@@ -7209,19 +6860,15 @@ extend Gen {
         let fold = add || mul;
         if fold {
             if add {
-                self.fconst(dd, pick64(dd, 0x8000000000000000, 0x80000000));
+                self.fconst(dd, ast::pick(dd, 0x8000000000000000u64, 0x80000000));
             } else {
-                self.fconst(dd, pick64(dd, fl::f64_bits(1.0), fl::f32_bits(1.0)));
+                self.fconst(dd, ast::pick(dd, fl::f64_bits(1.0), fl::f32_bits(1.0)));
             }
             self.c.local(w::LOCAL_SET, acc);
         } else {
             self.ld_lane_to(acc, ops[0], 0, lt, false, false);
         }
-        let from: u32 = if fold {
-            0
-        } else {
-            1
-        };
+        let from: u32 = ast::pick(fold, 0, 1);
         let fa = self.tmp(aty);
         let fb = self.tmp(aty);
         let lo = c == core::SIMD_REDUCE_MIN_NUM || c == core::SIMD_REDUCE_MINIMUM;
@@ -7236,7 +6883,7 @@ extend Gen {
                 if at != lt {
                     self.c.op(w::F64_PROMOTE_F32);
                 }
-                self.c.op(pick8(dd, w::F64_MUL, w::F32_MUL));
+                self.c.op(ast::pick(dd, w::F64_MUL, w::F32_MUL));
             }
             self.c.local(w::LOCAL_SET, fa);
             if fold {
@@ -7264,7 +6911,7 @@ extend Gen {
         let lo = self.tmp(w::I64);
         let hi = self.tmp(w::I64);
         let r = self.tmp(w::I32);
-        self.c.i64_const(pick64(add, 0, 1) as i64);
+        self.c.i64_const(ast::pick(add, 0u64, 1) as i64);
         self.c.local(w::LOCAL_SET, lo);
         self.c.i64_const(0);
         self.c.local(w::LOCAL_SET, hi);
@@ -7411,9 +7058,9 @@ extend Gen {
             let x = self.tmp(w::I64);
             let y = self.tmp(w::I64);
             let c = if min {
-                pick8(sg, w::I64_LT_S, w::I64_LT_U)
+                ast::pick(sg, w::I64_LT_S, w::I64_LT_U)
             } else {
-                pick8(sg, w::I64_GT_S, w::I64_GT_U)
+                ast::pick(sg, w::I64_GT_S, w::I64_GT_U)
             };
             let take = self.tmp(w::I32);
             self.c.i64_const(0);
@@ -7435,8 +7082,8 @@ extend Gen {
             }
         } else {
             let dd = lt == T_F64;
-            let ft = pick8(dd, w::F64, w::F32);
-            let cd = pick8(dd, w::F64_EQ - w::F32_EQ, 0);
+            let ft = ast::pick(dd, w::F64, w::F32);
+            let cd = ast::pick(dd, w::F64_EQ - w::F32_EQ, 0);
             let fa = self.tmp(ft);
             let fb = self.tmp(ft);
             let take = self.tmp(w::I32);
@@ -7460,7 +7107,7 @@ extend Gen {
                     self.c.op(w::I64_EQ);
                     self.c.local(w::LOCAL_GET, fa);
                     self.c.local(w::LOCAL_GET, fb);
-                    self.c.op(pick8(min, w::F32_LT, w::F32_GT) + cd);
+                    self.c.op(ast::pick(min, w::F32_LT, w::F32_GT) + cd);
                     self.c.op(w::I32_OR);
                     self.c.local(w::LOCAL_GET, fa);
                     self.c.local(w::LOCAL_GET, fb);
@@ -7690,13 +7337,6 @@ const fn size_log(t: u8) u32 {
     return log2u(type_bytes(t, 4));
 }
 
-const fn pick32(c: bool, a: u32, b: u32) u32 {
-    if c {
-        return a;
-    }
-    return b;
-}
-
 extend Gen {
     // `vreg`: per value index, whether it is a vector in a v128 local (`vfit`): with simd128, one no
     // instruction defines or reads in memory. An instruction with a SIMD128 form (`vform`, `vop_form`), a
@@ -7784,16 +7424,7 @@ extend Gen {
         } else {
             ""
         };
-        wa::classify(
-            b,
-            t.b,
-            if tpl.len() != 0 {
-                16u32
-            } else {
-                self.vregs
-            },
-            &mut self.cs,
-        );
+        wa::classify(b, t.b, ast::pick(tpl.len() != 0, 16u32, self.vregs), &mut self.cs);
         if self.cs.ret.kind != wa::P_V128 {
             self.vreg[i as usize] = false;
         }
@@ -7875,7 +7506,7 @@ extend Gen {
     // The lane operation `kind` (VL_*) on lanes of `lt`; an extraction or a replacement takes its lane next.
     fn lane_op(self: &mut Self, kind: u8, lt: u8) {
         let code = if is_float(lt) {
-            let f = pick32(lt == T_F64, 1, 0);
+            let f = ast::pick(lt == T_F64, 1u32, 0);
             if kind == VL_SPLAT {
                 0x13 + f
             } else {
@@ -7992,7 +7623,7 @@ extend Gen {
             let eb = type_bytes(lt, 4);
             let n = lanes(t.ty);
             let nr = 16 / eb;
-            let h = pick32(op == O_VZIPHI, n / 2, 0);
+            let h = ast::pick(op == O_VZIPHI, n / 2, 0);
             for j in 0..16u32 {
                 let ln = j / eb;
                 let s2 = 2 * ln + t.aux as u32;
@@ -8001,7 +7632,7 @@ extend Gen {
                 } else if s2 < n {
                     s2
                 } else {
-                    pick32(s2 < 2 * n, nr + s2 - n, 0)
+                    ast::pick(s2 < 2 * n, nr + s2 - n, 0)
                 };
                 unsafe idx[j as usize] = (src * eb + j % eb) as u8;
             }
@@ -8014,7 +7645,7 @@ extend Gen {
             self.sop(V_ADD[k]);
         } else if op == O_MULHS || op == O_MULHU {
             // The double-width products of the low and high lanes, then each one's high half.
-            let u = pick32(op == O_MULHU, 2, 0);
+            let u = ast::pick(op == O_MULHU, 2u32, 0);
             let eb = 1u32 << k as u32;
             self.vget(t.a);
             self.vget(t.b);
@@ -8029,14 +7660,14 @@ extend Gen {
         } else if op >= O_FADD && op <= O_FNEG || op == O_FSQRT {
             let f = lt == T_F64;
             let swap = (op == O_FADD || op == O_FMUL) && self.swap_reads(t.a, t.b);
-            self.vget(pick_v(swap, t.b, t.a));
+            self.vget(ast::pick(swap, t.b, t.a));
             if op == O_FNEG {
-                self.sop(pick32(f, 0xED, 0xE1));
+                self.sop(ast::pick(f, 0xEDu32, 0xE1));
             } else if op == O_FSQRT {
-                self.sop(pick32(f, 0xEF, 0xE3));
+                self.sop(ast::pick(f, 0xEFu32, 0xE3));
             } else {
-                self.vget(pick_v(swap, t.a, t.b));
-                self.sop(pick32(f, 0xF0, 0xE4) + (op - O_FADD) as u32);
+                self.vget(ast::pick(swap, t.a, t.b));
+                self.sop(ast::pick(f, 0xF0u32, 0xE4) + (op - O_FADD) as u32);
             }
         } else if op == O_NOT {
             self.vget(t.a);
@@ -8047,7 +7678,7 @@ extend Gen {
         } else if op >= O_SHL && op <= O_ASHR {
             self.vget(t.a);
             self.shift_count(t.b, lt);
-            self.sop(V_SHL[k] + pick32(op == O_SHL, 0, pick32(op == O_ASHR, 1, 2)));
+            self.sop(V_SHL[k] + ast::pick(op == O_SHL, 0, ast::pick(op == O_ASHR, 1u32, 2)));
         } else if op == O_MUL && k == 0 {
             // Bytes: the low bytes of the 16-bit products.
             self.vget(t.a);
@@ -8064,8 +7695,8 @@ extend Gen {
             // A commutative operation reads the value the instruction before computed first: it stays on the
             // stack (`stack_values`).
             let swap = op != O_SUB && (t.b & (VPARAM | VFLAG)) == 0 && t.b + 1 == i;
-            self.vget(pick_v(swap, t.b, t.a));
-            self.vget(pick_v(swap, t.a, t.b));
+            self.vget(ast::pick(swap, t.b, t.a));
+            self.vget(ast::pick(swap, t.a, t.b));
             let code = if op == O_ADD {
                 V_ADD[k]
             } else if op == O_SUB {
@@ -8091,20 +7722,8 @@ extend Gen {
         if is_float(lt) {
             self.vget(t.a);
             self.vget(t.b);
-            let off = if c == C_OEQ {
-                0u32
-            } else if c == C_UNE {
-                1u32
-            } else if c == C_OLT {
-                2u32
-            } else if c == C_OGT {
-                3u32
-            } else if c == C_OLE {
-                4u32
-            } else {
-                5u32
-            };
-            self.sop(pick32(lt == T_F64, 0x47, 0x41) + off);
+            let off = (fcmp_op(c) - w::F32_EQ) as u32;
+            self.sop(ast::pick(lt == T_F64, 0x47u32, 0x41) + off);
             return;
         }
         let k = size_log(lt) as usize;
@@ -8166,7 +7785,7 @@ extend Gen {
         if n != type_bytes(from, 4) || !vfit(t.ty) && !vfit(from) {
             return false;
         }
-        let other = pick8(vfit(t.ty), from, t.ty);
+        let other = ast::pick(vfit(t.ty), from, t.ty);
         return is_vec(other) || other == T_I128 || is_float(other) || other == T_I32 || other == T_I64;
     }
 
@@ -8210,12 +7829,12 @@ extend Gen {
             self.vget(v);
         } else {
             self.c.local(w::LOCAL_GET, self.fp);
-            self.sop(1 + 2 * log2u(e) + pick32(sg, 0, 1));
+            self.sop(1 + 2 * log2u(e) + ast::pick(sg, 0u32, 1));
             self.c.memarg(3, self.mhome(v));
             e *= 2;
         }
         while e < te {
-            self.sop(V_EXTEND[log2u(e) as usize] + pick32(sg, 0, 2));
+            self.sop(V_EXTEND[log2u(e) as usize] + ast::pick(sg, 0u32, 2));
             e *= 2;
         }
     }
@@ -8245,7 +7864,7 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, self.fp);
                 self.c.local(w::LOCAL_GET, x);
                 if op == O_SEXT || op == O_ZEXT {
-                    self.sop(V_EXTEND[log2u(fe) as usize] + half + pick32(sg, 0, 2));
+                    self.sop(V_EXTEND[log2u(fe) as usize] + half + ast::pick(sg, 0u32, 2));
                 } else {
                     if half == 1 {
                         self.c.local(w::LOCAL_GET, x);
@@ -8255,7 +7874,7 @@ extend Gen {
                         if op == O_FPEXT {
                             0x5Fu32
                         } else {
-                            pick32(sg, 0xFE, 0xFF)
+                            ast::pick(sg, 0xFEu32, 0xFF)
                         },
                     );
                 }
@@ -8275,14 +7894,14 @@ extend Gen {
                 if op == O_FPTRUNC {
                     self.sop(0x5E);
                 } else if op != O_TRUNC {
-                    self.sop(pick32(sg, 0xFC, 0xFD));
+                    self.sop(ast::pick(sg, 0xFCu32, 0xFD));
                 }
             }
             for j in 0..16u32 {
                 unsafe idx[j as usize] = if op == O_TRUNC {
                     (j / te * fe + j % te) as u8
                 } else {
-                    (j + pick32(j >= 8, 8, 0)) as u8
+                    (j + ast::pick(j >= 8, 8u32, 0)) as u8
                 };
             }
             self.shuffle(&idx);
@@ -8304,14 +7923,14 @@ extend Gen {
         } else if op == O_SITOFP || op == O_UITOFP {
             if te == 8 {
                 self.vget(t.a);
-                self.sop(pick32(sg, 0xFE, 0xFF));
+                self.sop(ast::pick(sg, 0xFEu32, 0xFF));
             } else {
                 self.vext_low(t.a, fl, sg, 4);
-                self.sop(pick32(sg, 0xFA, 0xFB));
+                self.sop(ast::pick(sg, 0xFAu32, 0xFB));
             }
         } else {
             self.vget(t.a);
-            self.sop(pick32(fe == 8, pick32(sg, 0xFC, 0xFD), pick32(sg, 0xF8, 0xF9)));
+            self.sop(ast::pick(fe == 8, ast::pick(sg, 0xFCu32, 0xFD), ast::pick(sg, 0xF8u32, 0xF9)));
         }
         self.vpost(i);
     }
@@ -8345,13 +7964,13 @@ extend Gen {
         let te = type_bytes(tl, 4);
         let sg = (t.aux & VOP_SIGNED) != 0;
         let op = if is_float(fl) && is_float(tl) {
-            pick8(fe < te, O_FPEXT, pick8(fe > te, O_FPTRUNC, 0))
+            ast::pick(fe < te, O_FPEXT, ast::pick(fe > te, O_FPTRUNC, 0))
         } else if is_float(tl) {
-            pick8(sg, O_SITOFP, O_UITOFP)
+            ast::pick(sg, O_SITOFP, O_UITOFP)
         } else if is_float(fl) {
-            pick8((t.aux & VOP_DSIGNED) != 0, O_FPTOSI, O_FPTOUI)
+            ast::pick((t.aux & VOP_DSIGNED) != 0, O_FPTOSI, O_FPTOUI)
         } else {
-            pick8(fe < te, pick8(sg, O_SEXT, O_ZEXT), pick8(fe > te, O_TRUNC, 0))
+            ast::pick(fe < te, ast::pick(sg, O_SEXT, O_ZEXT), ast::pick(fe > te, O_TRUNC, 0))
         };
         return Inst { op: op, ty: t.ty, aux: 0, a: a, b: 0, c: 0 };
     }
@@ -8428,7 +8047,7 @@ extend Gen {
             if self.vt(b.pool[t.a as usize + 1]) == T_I64 {
                 self.c.op(w::I32_WRAP_I64);
             }
-            self.sop(V_SHL[k] + pick32(code == core::OP_SHL_SCALAR, 0, pick32(sg, 1, 2)));
+            self.sop(V_SHL[k] + ast::pick(code == core::OP_SHL_SCALAR, 0, ast::pick(sg, 1u32, 2)));
             self.vpost(i);
             return true;
         }
@@ -8451,7 +8070,7 @@ extend Gen {
                 } else {
                     0
                 };
-                unsafe idx[j as usize] = (pick32(x < n, x, 16 / eb + x - n) * eb + j % eb) as u8;
+                unsafe idx[j as usize] = (ast::pick(x < n, x, 16 / eb + x - n) * eb + j % eb) as u8;
             }
             if t.b == 2 {
                 self.vget(a);
@@ -8478,7 +8097,7 @@ extend Gen {
     // of `lt` (signed `sg`).
     fn vec_rule(self: &mut Self, c: u8, a: Value, y: Value, lt: u8, sg: bool) {
         let k = size_log(lt) as usize;
-        let f = pick32(lt == T_F64, 1, 0);
+        let f = ast::pick(lt == T_F64, 1u32, 0);
         if is_float(lt) && (c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_MINIMUM || c == core::SIMD_MAXIMUM) {
             self.float_minmax(c, a, y, lt == T_F64);
             return;
@@ -8506,13 +8125,13 @@ extend Gen {
             } else if c == core::SIMD_SQRT {
                 0xE3 + 12 * f
             } else if c == core::SIMD_CEIL {
-                pick32(f == 1, 0x74, 0x67)
+                ast::pick(f == 1, 0x74u32, 0x67)
             } else if c == core::SIMD_FLOOR {
-                pick32(f == 1, 0x75, 0x68)
+                ast::pick(f == 1, 0x75u32, 0x68)
             } else if c == core::SIMD_TRUNC {
-                pick32(f == 1, 0x7A, 0x69)
+                ast::pick(f == 1, 0x7Au32, 0x69)
             } else {
-                pick32(f == 1, 0x94, 0x6A)
+                ast::pick(f == 1, 0x94u32, 0x6A)
             }
         } else if c == core::SIMD_WRAP_ADD {
             V_ADD[k]
@@ -8523,7 +8142,7 @@ extend Gen {
         } else if c == core::SIMD_WRAP_NEG {
             V_NEG[k]
         } else if c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB {
-            V_SAT[k] + pick32(c == core::SIMD_SAT_SUB, 3, 0) + pick32(sg, 0, 1)
+            V_SAT[k] + ast::pick(c == core::SIMD_SAT_SUB, 3u32, 0) + ast::pick(sg, 0u32, 1)
         } else if sg {
             // A signed lane's absolute value, the lowest value its own.
             0x60 + 0x20 * k as u32
@@ -8543,12 +8162,12 @@ extend Gen {
         if k < 3 {
             self.c.local(w::LOCAL_GET, x);
             self.c.local(w::LOCAL_GET, z);
-            self.sop(V_MIN[k] + pick32(max, 2, 0) + pick32(sg, 0, 1));
+            self.sop(V_MIN[k] + ast::pick(max, 2u32, 0) + ast::pick(sg, 0u32, 1));
             return;
         }
         // bitselect(x, z, x > z) is the maximum; bitselect(z, x, x > z) the minimum.
-        self.c.local(w::LOCAL_GET, pick32(max, x, z));
-        self.c.local(w::LOCAL_GET, pick32(max, z, x));
+        self.c.local(w::LOCAL_GET, ast::pick(max, x, z));
+        self.c.local(w::LOCAL_GET, ast::pick(max, z, x));
         let ls: [u32; 2] = [x, z];
         for q in 0..2usize {
             self.c.local(w::LOCAL_GET, ls[q]);
@@ -8568,7 +8187,7 @@ extend Gen {
     fn float_minmax(self: &mut Self, c: u8, a: Value, y: Value, dd: bool) {
         let x = self.vlocal(a);
         let z = self.vlocal(y);
-        let ne = pick32(dd, 0x48, 0x42);
+        let ne = ast::pick(dd, 0x48u32, 0x42);
         let num = c == core::SIMD_MIN || c == core::SIMD_MAX;
         let an = self.tmp(w::V128);
         self.c.local(w::LOCAL_GET, x);
@@ -8579,7 +8198,7 @@ extend Gen {
         self.c.local(w::LOCAL_GET, x);
         if num {
             self.c.local(w::LOCAL_GET, an);
-            let qb = pick64(dd, 1u64 << 51, 0x0040000000400000);
+            let qb = ast::pick(dd, 1u64 << 51, 0x0040000000400000);
             self.vconst(qb, qb);
             self.sop(0x4E);
             self.sop(0x50);
@@ -8589,7 +8208,7 @@ extend Gen {
         self.c.local(w::LOCAL_GET, z);
         self.c.local(w::LOCAL_GET, x);
         self.c.local(w::LOCAL_GET, z);
-        self.sop(pick32(dd, 0xF4, 0xE8) + pick32(c == core::SIMD_MIN || c == core::SIMD_MINIMUM, 0, 1));
+        self.sop(ast::pick(dd, 0xF4u32, 0xE8) + ast::pick(c == core::SIMD_MIN || c == core::SIMD_MINIMUM, 0u32, 1));
         for q in 0..2u32 {
             if num == (q == 0) {
                 self.c.local(w::LOCAL_GET, an);
@@ -8626,11 +8245,7 @@ extend Gen {
                         t
                     };
                     let mut k: u64 = 1;
-                    let other = if c.a == x {
-                        c.b
-                    } else {
-                        c.a
-                    };
+                    let other = ast::pick(c.a == x, c.b, c.a);
                     let zero_cmp = c.op == O_ICMP && (c.aux == C_EQ || c.aux == C_NE) && self.const_of(other, &mut k) && k == 0;
                     let cond = at_cond && t.a == x;
                     if !zero_cmp && !cond {
@@ -8640,7 +8255,7 @@ extend Gen {
                     // A second read of `x` in one instruction (an edge's argument) reads it whole.
                     let mut occ: u32 = 0;
                     for q in 0..us.len() {
-                        occ += pick32(us[q] == x, 1, 0);
+                        occ += ast::pick(us[q] == x, 1u32, 0);
                     }
                     if occ != 1 {
                         self.not_truth[x as usize] = true;
@@ -8656,10 +8271,10 @@ extend Gen {
     fn vreduce_reg(self: &mut Self, i: u32, c: u8, a: Value, lt: u8, sg: bool) {
         let eb = type_bytes(lt, 4);
         let k = size_log(lt) as usize;
-        let f = pick32(lt == T_F64, 1, 0);
+        let f = ast::pick(lt == T_F64, 1u32, 0);
         let add = c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_ORD || c == core::SIMD_REDUCE_ADD_TREE;
         let code = if is_float(lt) {
-            pick32(add, 0xE4, 0xE6) + 12 * f
+            ast::pick(add, 0xE4u32, 0xE6) + 12 * f
         } else if add {
             V_ADD[k]
         } else if c == core::SIMD_REDUCE_AND {
@@ -8691,11 +8306,7 @@ extend Gen {
         } else {
             self.plain_local(a)
         };
-        let mut src = if own != NONE {
-            own
-        } else {
-            acc
-        };
+        let mut src = ast::pick(own != NONE, own, acc);
         self.vget(a);
         let mut idx: [u8; 16] = [0; 16];
         let mut h = lanes(self.vt(a)) / 2;
@@ -8704,7 +8315,7 @@ extend Gen {
                 unsafe idx[j as usize] = (j + h * eb & 15) as u8;
             }
             if src == acc {
-                self.c.local(pick8(pair, w::LOCAL_SET, w::LOCAL_TEE), acc);
+                self.c.local(ast::pick(pair, w::LOCAL_SET, w::LOCAL_TEE), acc);
             }
             self.c.local(w::LOCAL_GET, src);
             if pair {
@@ -8716,7 +8327,7 @@ extend Gen {
                 self.c.local(w::LOCAL_GET, src);
                 self.shuffle(&idx);
                 if c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX {
-                    self.sop(V_MIN[k] + pick32(c == core::SIMD_REDUCE_MAX, 2, 0) + pick32(sg, 0, 1));
+                    self.sop(V_MIN[k] + ast::pick(c == core::SIMD_REDUCE_MAX, 2u32, 0) + ast::pick(sg, 0u32, 1));
                 } else {
                     self.sop(code);
                 }

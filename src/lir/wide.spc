@@ -479,11 +479,7 @@ extend Wide {
         ) == lanes(t.ty) && self.splits(b.type_of(b.pool[(t.a + 1) as usize])) && is_int(
             b.type_of(b.pool[(t.a + 2) as usize]),
         ) && b.type_of(b.pool[(t.a + 3) as usize]) == t.ty;
-        let wt = if cmp {
-            t0
-        } else {
-            t.ty
-        };
+        let wt = ast::pick(cmp, t0, t.ty);
         if !(shift || vec || cmp || choose || cast || gather) || !self.splits(wt) {
             return false;
         }
@@ -866,18 +862,4 @@ pub(package) fn has_wide(b: &Body, rb: u32) bool {
         }
     }
     return false;
-}
-
-// The integer of a lane mask of `l` lanes (as the lowering's).
-const fn mask_int(l: u32) u8 {
-    if l <= 8 {
-        return T_I8;
-    }
-    if l <= 16 {
-        return T_I16;
-    }
-    if l <= 32 {
-        return T_I32;
-    }
-    return T_I64;
 }

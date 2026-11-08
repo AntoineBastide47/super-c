@@ -1,5 +1,7 @@
 // SHA-256 (FIPS 180-4), for the page hashes of a Mach-O code signature.
 
+import ast::ast as ast;
+
 const K: [u32; 64] = [
     0x428A2F98,
     0x71374491,
@@ -134,11 +136,7 @@ pub(package) const fn digest(data: []u8, out: &mut [u8; 32]) {
         unsafe tail[i] = data[64 * full + i];
     }
     unsafe tail[rest] = 0x80;
-    let total = if rest < 56 {
-        64usize
-    } else {
-        128usize
-    };
+    let total = ast::pick(rest < 56, 64usize, 128usize);
     let bits = n as u64 * 8;
     for i in 0..8usize {
         unsafe tail[total - 1 - i] = (bits >> (8 * i) as u64 & 0xFF) as u8;

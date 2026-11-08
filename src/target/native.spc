@@ -19,6 +19,7 @@ import target::assembler as asmr;
 import target::ctxswitch as ctxs;
 import target::win64 as w64;
 import codegen::place as pl;
+import ast::ast as ast;
 
 /// Whether a native backend compiles for operating system `os` on instruction set `isa`.
 pub(package) const fn supported(os: i32, isa: i32) bool {
@@ -68,10 +69,7 @@ pub(package) const fn obj_kind(os: i32) u8 {
     if f == "coff" {
         return OBJ_COFF;
     }
-    if f == "wasm" {
-        return OBJ_WASM;
-    }
-    return OBJ_ELF;
+    return ast::pick(f == "wasm", OBJ_WASM, OBJ_ELF);
 }
 
 pub(package) const fn own_linker(os: i32, isa: i32) u8 {
@@ -87,10 +85,7 @@ pub(package) const fn own_linker(os: i32, isa: i32) u8 {
     if windows_x64(os, isa) {
         return LINK_PE;
     }
-    if wasm32(os, isa) {
-        return LINK_WASM;
-    }
-    return LINK_NONE;
+    return ast::pick(wasm32(os, isa), LINK_WASM, LINK_NONE);
 }
 
 const NONE16: u16 = 0xFFFF;
@@ -111,14 +106,6 @@ fn ctx_op(p: &Package, s: u32) u16 {
     return NONE16;
 }
 
-/// Whether the backend for `(os, isa)` assembles module-level assembly.
-pub(package) const fn asm_native(os: i32, isa: i32) bool {
-    return apple_arm64(os, isa) || linux_arm64(os, isa) || linux_x64(os, isa) || windows_x64(os, isa) || wasm32(os, isa);
-}
-
-/// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
-/// `datas` of package `p`, and module-level assembly `text` (`asm_native`). False, with the function and
-/// the reason in `err`, when a body is outside what the backend compiles.
 /// Package `p` made ready for `object` for `(os, isa)`: under Microsoft x64, the C entries of the
 /// functions of Super-C's own convention whose address it takes (`w64::thunks`). False, with the reason
 /// in `err`, when it cannot be.
@@ -129,6 +116,9 @@ pub(package) fn prepare(p: &mut Package, os: i32, isa: i32, err: &mut String) bo
     return true;
 }
 
+/// Write into `out` an object for `(os, isa)` that defines function symbols `funcs` and data symbols
+/// `datas` of package `p`, and module-level assembly `text`. False, with the function and
+/// the reason in `err`, when a body is outside what the backend compiles.
 pub(package) fn object(
     p: &Package,
     os: i32,
@@ -156,7 +146,7 @@ pub(package) fn object_with(
     err: &mut String,
     syms: &mut pl::Osyms,
 ) bool {
-    if text.len() != 0 && !asm_native(os, isa) {
+    if text.len() != 0 && !supported(os, isa) {
         err.push_str("module-level assembly");
         return false;
     }
@@ -250,14 +240,7 @@ pub(package) fn object_with(
         ga.take_osyms()
     };
     if all.len() != 0 {
-        let mut asr = asmr::Asm::new(
-            if x64 {
-                asmr::ISA_X64
-            } else {
-                asmr::ISA_A64
-            },
-            fmt,
-        );
+        let mut asr = asmr::Asm::new(ast::pick(x64, asmr::ISA_X64, asmr::ISA_A64), fmt);
         if !asr.module(&mut o, &all) {
             err.format_into("module-level assembly: {}", asr.err.as_str());
             return false;
@@ -272,7 +255,7 @@ pub(package) fn object_with(
         } else {
             dw::F_ELF
         };
-        dw::attach(&mut o, &d, fmt, ast_pick(x64, x::R_ABS64, a::R_ABS64));
+        dw::attach(&mut o, &d, fmt, ast::pick(x64, x::R_ABS64, a::R_ABS64));
     }
     if win {
         coff::write(&o, p.split, out);
@@ -293,14 +276,6 @@ pub(package) fn object_with(
     }
     mo::write(&mut o, out);
     return true;
-}
-
-const fn ast_pick(c: bool, t: u8, f: u8) u8 {
-    return if c {
-        t
-    } else {
-        f
-    };
 }
 
 // The generator of the target: the arm64 one, or the x86-64 one (`x64`). Both share the object.
@@ -328,9 +303,9 @@ extend Backend {
     // The first refusal's reason.
     const fn why(self: &Self) str {
         if self.x64 {
-            return unsafe (*self.x).err.as_str();
+            return unsafe (*self.x).cr.err.as_str();
         }
-        return unsafe (*self.a).err.as_str();
+        return unsafe (*self.a).cr.err.as_str();
     }
 }
 

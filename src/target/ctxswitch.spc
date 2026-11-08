@@ -22,6 +22,7 @@
 import target::assembler as asmr;
 import target::table as tgt;
 import lir::ir as ir;
+import ast::ast as ast;
 
 const SYSV_SWAP: str<'static> = M"(  .cfi_startproc
   pushq %rbp
@@ -227,24 +228,12 @@ const WIN_ENTRY: str<'static> = M"(  movq %r13, %rcx
 fn lines(op: u16, x64: bool, win: bool) str<'static> {
     let swap = op == ir::SYS_CTXSWAP;
     if win && x64 {
-        return if swap {
-            WIN_SWAP
-        } else {
-            WIN_ENTRY
-        };
+        return ast::pick(swap, WIN_SWAP, WIN_ENTRY);
     }
     if x64 {
-        return if swap {
-            SYSV_SWAP
-        } else {
-            SYSV_ENTRY
-        };
+        return ast::pick(swap, SYSV_SWAP, SYSV_ENTRY);
     }
-    return if swap {
-        A64_SWAP
-    } else {
-        A64_ENTRY
-    };
+    return ast::pick(swap, A64_SWAP, A64_ENTRY);
 }
 
 /// The module-level assembly of naked function `name` whose body is context operation `op`, for

@@ -12,6 +12,7 @@
 import lir::ir as *;
 import lir::verify as lv;
 import ir::core as core;
+import ast::ast as ast;
 
 /// `Live::fold_ops`: an integer comparison whose every use is a `select`'s or a `br`'s condition (each
 /// compares again instead of testing a boolean set from the flags); an `and` whose every use compares it
@@ -176,11 +177,6 @@ pub(package) const MASK_DEPTH: u32 = 8;
 const LDOP_REACH: u32 = 16;
 /// The most calls outside rare blocks a shrink-wrapped body makes (`lives_across` reads every value per call).
 pub(package) const WARM_CALLS: u32 = 4;
-// The terminator of block `k` of `b`.
-const fn term_of(b: &Body, k: u32) Inst {
-    let bk = b.blocks[k as usize];
-    return b.insts[(bk.start + bk.len - 1) as usize];
-}
 
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
@@ -478,15 +474,7 @@ extend Live {
         }
         let pb = b.blocks[self.order[q as usize - 1] as usize];
         let t = b.insts[(pb.start + pb.len - 1) as usize];
-        let ne: u32 = if t.op == O_JMP {
-            1
-        } else if t.op == O_BR {
-            2
-        } else if t.op == O_SWITCH {
-            t.aux as u32 + 1
-        } else {
-            0
-        };
+        let ne = edge_count(t);
         for e in 0..ne {
             if b.edge_target(edge_of(b, t, e)) == k {
                 return true;
@@ -581,14 +569,8 @@ extend Live {
             if self.rare[p as usize] || close[q + 1] == NONE {
                 continue;
             }
-            let t = term_of(b, p);
-            let ne: u32 = if t.op == O_JMP {
-                1
-            } else if t.op == O_BR {
-                2
-            } else {
-                0
-            };
+            let t = term(b, p);
+            let ne = jb_edges(t);
             for e in 0..ne {
                 let ed = edge_of(b, t, e);
                 let j = b.edge_target(ed);
@@ -678,11 +660,7 @@ extend Live {
                 continue;
             }
             let s = inc_side(b, t);
-            let x = if s == 1 {
-                t.b
-            } else {
-                t.c
-            };
+            let x = ast::pick(s == 1, t.b, t.c);
             if s != 0 && self.count[x as usize] == 1 && !self.pfold[x as usize] {
                 self.pfold[x as usize] = true;
             }
@@ -761,16 +739,8 @@ extend Live {
         moved.push(v);
         let t = b.insts[v as usize];
         // A load's and a pointer sum's last field is an offset, not a value.
-        let ob = if t.op == O_LOAD {
-            VNONE
-        } else {
-            t.b
-        };
-        let oc = if t.op == O_SELECT {
-            t.c
-        } else {
-            VNONE
-        };
+        let ob = ast::pick(t.op == O_LOAD, VNONE, t.b);
+        let oc = ast::pick(t.op == O_SELECT, t.c, VNONE);
         for o in [t.a, ob, oc] {
             if o != VNONE && !self.fixed(b, o, lo) {
                 self.mark_sunk(b, o, lo, moved);
@@ -873,11 +843,7 @@ extend Live {
             return v;
         }
         let t = b.insts[v as usize];
-        return if t.op == O_ZEXT || t.op == O_TRUNC {
-            t.a
-        } else {
-            v
-        };
+        return ast::pick(t.op == O_ZEXT || t.op == O_TRUNC, t.a, v);
     }
 
     // Whether value `v` is where a value moved within the block from `lo` reads it: it `stays`, or another
@@ -1138,11 +1104,7 @@ extend Live {
                 t.ty,
             ) {
                 for side in 0..2u32 {
-                    let x = if side == 0 {
-                        t.a
-                    } else {
-                        t.b
-                    };
+                    let x = ast::pick(side == 0, t.a, t.b);
                     if lane0_of(b, x) != VNONE && self.count[x as usize] == 1 && !self.pfold[x as usize] && b.insts[x as usize].ty == t.ty {
                         self.pfold[x as usize] = true;
                     }
@@ -1173,11 +1135,11 @@ extend Live {
                 let m = int_const(b, t.b);
                 self.pfold[i] = bits >= 32 || m != u64::MAX && m >> bits as u64 == 0;
             }
-            let p = if t.op == O_SUB || t.op == O_ADD && int_const(b, t.a) == u64::MAX && int_const(b, t.b) == u64::MAX {
-                t.b
-            } else {
-                VNONE
-            };
+            let p = ast::pick(
+                t.op == O_SUB || t.op == O_ADD && int_const(b, t.a) == u64::MAX && int_const(b, t.b) == u64::MAX,
+                t.b,
+                VNONE,
+            );
             if (self.fold_ops & FOLD_MADD) != 0 && p != VNONE && (p & (VPARAM | VFLAG)) == 0 && b.insts[p as usize].op == O_MUL && self.count[p as usize] == 1 && int_const(
                 b,
                 t.a,
@@ -1200,11 +1162,7 @@ extend Live {
                     // The amount operand of the shift that takes `amt` itself, maybe its extension.
                     let mut own = VNONE;
                     for q in 0..2u32 {
-                        let sh = if q == 0 {
-                            t.a
-                        } else {
-                            t.b
-                        };
+                        let sh = ast::pick(q == 0, t.a, t.b);
                         let s = b.insts[sh as usize].b;
                         let ext = amount_of(b, s) != s;
                         if ext && self.count[s as usize] == 1 {
@@ -1263,17 +1221,9 @@ extend Live {
             }
             if (self.fold_ops & FOLD_LEA) != 0 && (t.op == O_ADD || t.op == O_SUB || is_sum_or(b, t)) {
                 // The shift an index takes, then the inner sum whose operands the address takes.
-                let nq: u32 = if t.op != O_SUB {
-                    2
-                } else {
-                    0
-                };
+                let nq: u32 = ast::pick(t.op != O_SUB, 2, 0);
                 for q in 0..nq {
-                    let v = if q == 0 {
-                        t.b
-                    } else {
-                        t.a
-                    };
+                    let v = ast::pick(q == 0, t.b, t.a);
                     if lea_shift(b, v) == 0 || self.pfold[v as usize] || self.count[v as usize] != 1 {
                         continue;
                     }
@@ -1284,11 +1234,7 @@ extend Live {
                     self.pfold[v as usize] = false;
                 }
                 for q in 0..2u32 {
-                    let v = if q == 0 {
-                        t.a
-                    } else {
-                        t.b
-                    };
+                    let v = ast::pick(q == 0, t.a, t.b);
                     if q == 1 && t.op == O_SUB || !is_inst(v) || self.pfold[v as usize] || self.count[v as usize] != 1 || b.insts[v as usize].op != O_ADD || b.insts[v as usize].ty != t.ty {
                         continue;
                     }
@@ -1411,23 +1357,12 @@ extend Live {
                 let t = b.insts[i];
                 let w = type_bits(t.ty, 8) as u64;
                 let sub = t.op == O_SUB;
-                let c = if sub {
-                    t.b
-                } else {
-                    t.a
-                };
+                let c = ast::pick(sub, t.b, t.a);
                 if !sub && t.op != O_XOR || !is_int(t.ty) || w != 32 && w != 64 || (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
                     continue;
                 }
                 let ci = b.insts[c as usize];
-                let k = int_const(
-                    b,
-                    if sub {
-                        t.a
-                    } else {
-                        t.b
-                    },
-                );
+                let k = int_const(b, ast::pick(sub, t.a, t.b));
                 if ci.op == O_CLZ && ci.ty == t.ty && self.count[c as usize] == 1 && !self.pfold[c as usize] && k == if sub {
                     w
                 } else {
@@ -1839,11 +1774,7 @@ extend Live {
             return false;
         }
         let x = b.insts[u as usize];
-        let o = if x.a == i {
-            x.b
-        } else {
-            x.a
-        };
+        let o = ast::pick(x.a == i, x.b, x.a);
         if is_inst(o) && self.pfold[o as usize] || x.op == O_MUL && (is_const_val(b, o) || o == i) {
             return false;
         }
@@ -1900,11 +1831,7 @@ extend Live {
             // symbol, a load's bound), and a use of `i` there leaves one of the two halves unfound.
             let prod = x.op == O_MUL || x.op == O_MULHU || x.op == O_MULHS;
             if prod && (x.a == i || x.b == i) {
-                let o = if x.a == i {
-                    x.b
-                } else {
-                    x.a
-                };
+                let o = ast::pick(x.a == i, x.b, x.a);
                 if x.ty != T_I64 || o == i || other != VNONE && o != other || is_inst(o) && self.pfold[o as usize] || self.pfold[u as usize] {
                     return false;
                 }
@@ -1982,13 +1909,7 @@ extend Live {
     /// branch's other edge must leave the loop, and no path from it reads the parameter but through the
     /// header, which defines it again (`reads_before`).
     pub(package) fn back_param(self: &Self, b: &Body, t: Inst, v: Value, pos: u32) u32 {
-        let ne: u32 = if t.op == O_JMP {
-            1
-        } else if t.op == O_BR {
-            2
-        } else {
-            0
-        };
+        let ne = jb_edges(t);
         for e in 0..ne {
             let x = edge_of(b, t, e);
             let tk = b.edge_target(x);
@@ -2166,7 +2087,7 @@ extend Live {
         // that needs it.
         let mut live = Vector::<bool>::new();
         for p in lo..hi + 1 {
-            let t = term_of(b, self.order[p as usize]);
+            let t = term(b, self.order[p as usize]);
             let mut other = false;
             for e in 0..edge_count(t) {
                 let ed = edge_of(b, t, e);
@@ -2175,7 +2096,7 @@ extend Live {
                     other = other || b.edge_arg(ed, q) != m;
                     continue;
                 }
-                let jt = term_of(b, j);
+                let jt = term(b, j);
                 if jt.op != O_JMP || b.edge_target(jt.a) != h {
                     continue;
                 }
@@ -2240,7 +2161,7 @@ extend Live {
                     continue;
                 }
                 let mut l = reads[n - 1 - k];
-                let t = term_of(b, blk);
+                let t = term(b, blk);
                 for e in 0..edge_count(t) {
                     let sp = self.pos[b.edge_target(edge_of(b, t, e)) as usize];
                     l = l || sp >= lo && sp <= hi && out[(sp - lo) as usize];
@@ -2298,10 +2219,7 @@ extend Live {
             b.type_of(t.b)
         };
         let n = type_bytes(ty, 8);
-        if is_vec(ty) && n != 8 && n != 16 || ty == T_I128 {
-            return NONE;
-        }
-        return t.a;
+        return ast::pick(is_vec(ty) && n != 8 && n != 16 || ty == T_I128, NONE, t.a);
     }
 
     /// Whether `v` of `b` is a parameter of a block other than the entry that every edge into it passes a
@@ -2320,15 +2238,7 @@ extend Live {
         for j in self.pat[k as usize]..self.pat[k as usize + 1] {
             let pb = b.blocks[self.preds[j as usize] as usize];
             let t = b.insts[(pb.start + pb.len - 1) as usize];
-            let ne: u32 = if t.op == O_JMP {
-                1
-            } else if t.op == O_BR {
-                2
-            } else if t.op == O_SWITCH {
-                t.aux as u32 + 1
-            } else {
-                0
-            };
+            let ne = edge_count(t);
             for e in 0..ne {
                 let ed = edge_of(b, t, e);
                 let mut c: u64 = 0;
@@ -2477,10 +2387,7 @@ extend Live {
         if ok(t.b) && t.b != t.a {
             return t.b;
         }
-        if t.op == O_ADD && ok(t.a) && t.a != t.b {
-            return t.a;
-        }
-        return VNONE;
+        return ast::pick(t.op == O_ADD && ok(t.a) && t.a != t.b, t.a, VNONE);
     }
 
     // The right shift by an immediate `FOLD_VMLA` folds into vector sum `t` when no product does: its second
@@ -2493,10 +2400,7 @@ extend Live {
         if ok(t.b) && t.b != t.a {
             return t.b;
         }
-        if ok(t.a) && t.a != t.b {
-            return t.a;
-        }
-        return VNONE;
+        return ast::pick(ok(t.a) && t.a != t.b, t.a, VNONE);
     }
 
     // The absolute difference `FOLD_VSAD` folds into widening sum `t`: its second operand, an unsigned
@@ -2508,11 +2412,7 @@ extend Live {
         }
         let d = b.insts[v as usize];
         let code = (core::OP_SIMD + core::SIMD_ABS_DIFF as u32) as u16;
-        return if d.op == O_VOP && d.aux == code && d.b == 2 && type_bytes(lane_type(d.ty), 8) == 1 {
-            v
-        } else {
-            VNONE
-        };
+        return ast::pick(d.op == O_VOP && d.aux == code && d.b == 2 && type_bytes(lane_type(d.ty), 8) == 1, v, VNONE);
     }
 
     // The extension `FOLD_VWADD` folds into vector sum `t`: its second operand, else its first. VNONE when
@@ -2525,10 +2425,7 @@ extend Live {
         if self.zero_zip(b, lt, t.b) && t.b != t.a {
             return t.b;
         }
-        if self.zero_zip(b, lt, t.a) && t.a != t.b {
-            return t.a;
-        }
-        return VNONE;
+        return ast::pick(self.zero_zip(b, lt, t.a) && t.a != t.b, t.a, VNONE);
     }
 
     // Whether `v`, with one use, is a `bitcast` to lanes of type `lt` of a 16-byte `vziplo` or `vziphi`,
@@ -2602,11 +2499,7 @@ extend Live {
             return 0;
         }
         let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.pfold[t.a as usize] || t.b != VNONE && (t.b & (VPARAM | VFLAG)) == 0 && self.pfold[t.b as usize];
-        return if folded {
-            0
-        } else {
-            1
-        };
+        return ast::pick(folded, 0, 1);
     }
 
     // `rpo`: the reverse postorder number of each block the entry reaches, by an explicit-stack DFS
@@ -2918,7 +2811,7 @@ extend Live {
         let mut mv = Vector::<u64>::new();
         for j in 0..n {
             let k = self.order[j];
-            if self.inner[k as usize] != NONE || term_of(b, k).op != O_RET || self.pat[k as usize] + 1 != self.pat[k as usize + 1] || !self.enters_with(
+            if self.inner[k as usize] != NONE || term(b, k).op != O_RET || self.pat[k as usize] + 1 != self.pat[k as usize + 1] || !self.enters_with(
                 b,
                 k,
             ) {
@@ -2971,7 +2864,7 @@ extend Live {
     fn enters_with(self: &mut Self, b: &Body, k: u32) bool {
         let p = self.preds[self.pat[k as usize] as usize];
         let mut es = Vector::<u32>::new();
-        b.succ_edges(term_of(b, p), &mut es);
+        b.succ_edges(term(b, p), &mut es);
         let bk = b.blocks[k as usize];
         for e in 0..es.len() {
             let h = b.edge_target(es[e]);
@@ -3037,11 +2930,7 @@ extend Live {
         for k in 0..ni {
             checked = checked || op_info(b.insts[k].op).form == F_OVF;
         }
-        let scan = if checked {
-            ni
-        } else {
-            0
-        };
+        let scan = ast::pick(checked, ni, 0);
         for k in 0..scan {
             let t = b.insts[k];
             each_use(b, t, &mut self.succ);
@@ -3126,11 +3015,7 @@ extend Live {
                         self.last[x as usize] = i;
                     }
                     if x as usize >= ni && x as usize < nv && self.sole[x as usize] != i {
-                        self.sole[x as usize] = if self.sole[x as usize] == NONE {
-                            i
-                        } else {
-                            READERS
-                        };
+                        self.sole[x as usize] = ast::pick(self.sole[x as usize] == NONE, i, READERS);
                     }
                     let mut e = p as u32;
                     // A use in a loop the definition is outside of keeps the value to the loop's end.
@@ -3209,11 +3094,7 @@ extend Live {
         } else {
             x < ni + b.params.len() as u32 && self.uses[x as usize] > self.wn[x as usize] && (self.wpos[x as usize] == NONE || self.wpos[x as usize] < e)
         };
-        return if read && !self.kept[x as usize] && self.pos[self.def_blk[l as usize] as usize] == e {
-            l
-        } else {
-            NONE
-        };
+        return ast::pick(read && !self.kept[x as usize] && self.pos[self.def_blk[l as usize] as usize] == e, l, NONE);
     }
 }
 
@@ -3581,10 +3462,7 @@ extend Live {
         if (w & WANT_UPPER) != 0 && u < caps.vu {
             return HOME_UPPER;
         }
-        if (w & WANT_CALLEE) != 0 && c < cc {
-            return HOME_CALLEE;
-        }
-        return HOME_NONE;
+        return ast::pick((w & WANT_CALLEE) != 0 && c < cc, HOME_CALLEE, HOME_NONE);
     }
 
     // The least cap (`jcap`) of the blocks value `x`'s range covers: where the count at its start holds
@@ -3668,11 +3546,7 @@ extend Live {
                 let lo = zt.a & ~VFLAG;
                 let lt = b.insts[lo as usize];
                 let ht = b.insts[h as usize];
-                if lt.op != if sub {
-                    O_SUBO
-                } else {
-                    O_ADDO
-                } || lt.aux == OV_SIGNED || lt.ty != t.ty || self.cnd[lo as usize] != 1 || self.pfold[lo as usize] || is_inst(
+                if lt.op != ast::pick(sub, O_SUBO, O_ADDO) || lt.aux == OV_SIGNED || lt.ty != t.ty || self.cnd[lo as usize] != 1 || self.pfold[lo as usize] || is_inst(
                     ht.a,
                 ) && self.pfold[ht.a as usize] || is_inst(ht.b) && self.pfold[ht.b as usize] {
                     continue;
@@ -3706,11 +3580,7 @@ extend Live {
         let t = b.insts[s as usize];
         let sub = t.op == O_SUB || t.op == O_SUBO;
         for side in 0..2u32 {
-            let o = if side == 0 {
-                t.b
-            } else {
-                t.a
-            };
+            let o = ast::pick(side == 0, t.b, t.a);
             if side == 1 && sub || !is_inst(o) || o > s || self.count[o as usize] != 1 || self.pfold[o as usize] {
                 continue;
             }
@@ -3779,10 +3649,7 @@ extend Live {
         for u in a..a + self.un[x as usize] {
             n += (self.uv[u as usize] == pv) as u32;
         }
-        if n > 1 || n == 1 && b.insts[x as usize].a != pv || self.reads_after(b, k, x, pv) {
-            return NONE;
-        }
-        return px;
+        return ast::pick(n > 1 || n == 1 && b.insts[x as usize].a != pv || self.reads_after(b, k, x, pv), NONE, px);
     }
 
     // The header parameter of a loop that parameter value `x` of `b`, of a block laid out after the loop,
@@ -3814,14 +3681,8 @@ extend Live {
             if self.pos[pb as usize] == NONE || hh == NONE || self.pos[k as usize] <= self.lend[hh as usize] {
                 continue;
             }
-            let t = term_of(b, pb);
-            let ne: u32 = if t.op == O_JMP {
-                1
-            } else if t.op == O_BR {
-                2
-            } else {
-                0
-            };
+            let t = term(b, pb);
+            let ne = jb_edges(t);
             for e in 0..ne {
                 let ed = edge_of(b, t, e);
                 if b.edge_target(ed) != k {
@@ -3850,15 +3711,11 @@ extend Live {
                 return NONE;
             }
             if inside {
-                let t = term_of(b, pb);
+                let t = term(b, pb);
                 if t.op != O_JMP && t.op != O_BR {
                     return NONE;
                 }
-                let ne: u32 = if t.op == O_JMP {
-                    1
-                } else {
-                    2
-                };
+                let ne = edge_count(t);
                 for e in 0..ne {
                     let ed = edge_of(b, t, e);
                     if b.edge_target(ed) == k && self.exit_value(b, h, t, ed, q) != px {
@@ -3905,7 +3762,7 @@ extend Live {
             if h == k {
                 continue;
             }
-            let t = term_of(b, pb);
+            let t = term(b, pb);
             b.succ_edges(t, &mut self.succ);
             for e in 0..self.succ.len() {
                 let ed = self.succ[e];
@@ -3941,11 +3798,7 @@ extend Live {
             self.reads_from(b, k);
         }
         let yx = self.vix(b, y);
-        return if self.ep_read[yx as usize] == self.ep_gen {
-            NONE
-        } else {
-            yx
-        };
+        return ast::pick(self.ep_read[yx as usize] == self.ep_gen, NONE, yx);
     }
 
     // `ep_read`: the values the blocks loop header `k` of `b` reaches read or pass (`uses_at`: edge
@@ -3970,7 +3823,7 @@ extend Live {
                     }
                 }
             }
-            b.succ_edges(term_of(b, c), &mut self.succ);
+            b.succ_edges(term(b, c), &mut self.succ);
             for e in 0..self.succ.len() {
                 let s = b.edge_target(self.succ[e]);
                 if !self.ep_seen[s as usize] {
@@ -3988,15 +3841,16 @@ extend Live {
         if h != NONE {
             return h;
         }
-        if b.blocks[k as usize].len != 1 || term_of(b, k).op != O_JMP || self.pat[k as usize + 1] - self.pat[k as usize] != 1 {
+        if b.blocks[k as usize].len != 1 || term(b, k).op != O_JMP || self.pat[k as usize + 1] - self.pat[k as usize] != 1 {
             return NONE;
         }
         let p = self.preds[self.pat[k as usize] as usize];
         let hp = self.inner[p as usize];
-        if hp == NONE || self.pos[k as usize] == NONE || self.pos[k as usize] >= self.pos[hp as usize] && self.pos[k as usize] <= self.lend[hp as usize] {
-            return NONE;
-        }
-        return hp;
+        return ast::pick(
+            hp == NONE || self.pos[k as usize] == NONE || self.pos[k as usize] >= self.pos[hp as usize] && self.pos[k as usize] <= self.lend[hp as usize],
+            NONE,
+            hp,
+        );
     }
 
     // The parameter value of loop header `h` that argument `q` of edge `ed` of terminator `t` continues: the
@@ -4005,11 +3859,7 @@ extend Live {
     fn exit_value(self: &Self, b: &Body, h: u32, t: Inst, ed: u32, q: u32) u32 {
         let v = b.edge_arg(ed, q);
         if t.op == O_BR {
-            let o = if ed == t.b {
-                t.c
-            } else {
-                t.b
-            };
+            let o = ast::pick(ed == t.b, t.c, t.b);
             if b.edge_target(o) == h {
                 let hb = b.blocks[h as usize];
                 for j in 0..hb.param_len as u32 {
@@ -4041,14 +3891,8 @@ extend Live {
             if pp == NONE || pp < self.pos[h as usize] || pp > self.lend[h as usize] {
                 continue;
             }
-            let t = term_of(b, pb);
-            let ne: u32 = if t.op == O_JMP {
-                1
-            } else if t.op == O_BR {
-                2
-            } else {
-                0
-            };
+            let t = term(b, pb);
+            let ne = jb_edges(t);
             for e in 0..ne {
                 let ed = edge_of(b, t, e);
                 if b.edge_target(ed) != h {
@@ -4137,13 +3981,7 @@ extend Live {
                 } else {
                     0u32
                 };
-                sp.push(
-                    if a > c {
-                        a
-                    } else {
-                        c
-                    },
-                );
+                sp.push(ast::pick(a > c, a, c));
             }
         }
         let ni = b.insts.len();
@@ -4165,11 +4003,7 @@ extend Live {
                 }
                 let a = sp[j * np + lo];
                 let c = sp[j * np + hi + 1 - (1usize << j)];
-                let e = if a > c {
-                    a
-                } else {
-                    c
-                };
+                let e = ast::pick(a > c, a, c);
                 // 0: no rare block's edge (the entry, at 0, is not rare).
                 if e < self.end[x] || e == 0 {
                     break;
@@ -4236,26 +4070,20 @@ pub(package) const fn op_flags(b: &Body) u8 {
 /// The values instruction `t` of `b` uses into `out`, each use once: its operands, a call's arguments, a
 /// vector operation's operands and each edge's arguments.
 pub(package) fn each_use(b: &Body, t: Inst, out: &mut Vector<Value>) {
-    lv::uses(b, t, out);
+    lv::uses_edges(b, t, out);
     if t.op == O_RET && (b.pool[b.sig as usize + 2] & AGG) != 0 {
         // The return reads the aggregate result's memory, the parameter after the declared ones.
         out.push(VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize]);
     }
-    let ne: u32 = if t.op == O_JMP {
-        1
-    } else if t.op == O_BR {
-        2
-    } else if t.op == O_SWITCH {
-        t.aux as u32 + 1
-    } else {
+}
+
+/// `edge_count` of a jump or a branch `t`, 0 for a switch.
+const fn jb_edges(t: Inst) u32 {
+    return if t.op == O_SWITCH {
         0
+    } else {
+        edge_count(t)
     };
-    for k in 0..ne {
-        let e = edge_of(b, t, k);
-        for x in 0..b.edge_nargs(e) {
-            out.push(b.edge_arg(e, x));
-        }
-    }
 }
 
 /// The value indexes of the parameters terminator `t` of `b` writes, one per edge into them, into `out`.
@@ -4357,33 +4185,6 @@ pub(package) fn has_vectors(b: &Body) bool {
     return false;
 }
 
-/// The number of edges of terminator `t` (`edge_of`).
-pub(package) const fn edge_count(t: Inst) u32 {
-    return if t.op == O_JMP {
-        1
-    } else if t.op == O_BR {
-        2
-    } else if t.op == O_SWITCH {
-        t.aux as u32 + 1
-    } else {
-        0
-    };
-}
-
-pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
-    if t.op == O_JMP {
-        return t.a;
-    }
-    if t.op == O_BR {
-        return if k == 0 {
-            t.b
-        } else {
-            t.c
-        };
-    }
-    return b.switch_edge(t, k);
-}
-
 /// A rotation (`rotate_of`): value `x` by amount `amt` (VNONE for constant `k`, rotating left), to the
 /// right when `right`; `x` VNONE for none. `src` is the shift's own amount operand, `amt` maybe past an
 /// extension of it (`rot_amount`). A funnel shift when `y`, the value shifted right, is not `x`: `x << k |
@@ -4475,11 +4276,7 @@ pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
     if t.op != O_OR || !is_int(t.ty) || bits != 32 && bits != 64 || !is_inst(t.a) || !is_inst(t.b) {
         return none;
     }
-    let all = if bits == 64 {
-        u64::MAX
-    } else {
-        0xFFFFFFFFu64
-    };
+    let all = ast::pick(bits == 64, u64::MAX, 0xFFFFFFFFu64);
     for side in 0..2 {
         let (ka, kb) = if side == 0 {
             (t.a, t.b)
@@ -4538,10 +4335,11 @@ pub(package) fn inversion(b: &Body, v: Value) Value {
     } else {
         (1u64 << type_bits(t.ty, 8) as u64) - 1
     };
-    if t.op == O_XOR && is_int(t.ty) && t.ty != T_I128 && is_const_val(b, t.b) && (const_val(b, t.b) & m) == m {
-        return t.a;
-    }
-    return VNONE;
+    return ast::pick(
+        t.op == O_XOR && is_int(t.ty) && t.ty != T_I128 && is_const_val(b, t.b) && (const_val(b, t.b) & m) == m,
+        t.a,
+        VNONE,
+    );
 }
 
 /// The operand of `and`, `or` or `xor` `t` of `b` that is a folded inversion (`FOLD_NOT`, `folded`); VNONE
@@ -4553,10 +4351,7 @@ pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     if is_inst(t.b) && folded[t.b as usize] && inversion(b, t.b) != VNONE {
         return t.b;
     }
-    if is_inst(t.a) && folded[t.a as usize] && inversion(b, t.a) != VNONE {
-        return t.a;
-    }
-    return VNONE;
+    return ast::pick(is_inst(t.a) && folded[t.a as usize] && inversion(b, t.a) != VNONE, t.a, VNONE);
 }
 
 /// The load store `t` of `b` reads, modifies and writes back (`FOLD_RMW`): its value an integer `add`, `sub`,
@@ -4588,19 +4383,6 @@ pub(package) fn rmw_load(b: &Body, folded: &Vector<bool>, t: Inst) Value {
         }
     }
     return VNONE;
-}
-
-/// Whether edges `e` and `f` of `b` go to one block with the same arguments.
-pub(package) fn same_edge(b: &Body, e: u32, f: u32) bool {
-    if b.edge_target(e) != b.edge_target(f) || b.edge_nargs(e) != b.edge_nargs(f) {
-        return false;
-    }
-    for q in 0..b.edge_nargs(e) {
-        if b.edge_arg(e, q) != b.edge_arg(f, q) {
-            return false;
-        }
-    }
-    return true;
 }
 
 // Whether instruction `t` may write memory: a store, a call, a block copy or fill, an atomic operation,
@@ -4659,10 +4441,7 @@ pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
     if is_inst(t.b) && !folded[t.b as usize] && cs_kind(b, t.b, t.c) == CS_INC {
         return t.b;
     }
-    if is_inst(t.c) && !folded[t.c as usize] && cs_kind(b, t.c, t.b) == CS_INC {
-        return t.c;
-    }
-    return VNONE;
+    return ast::pick(is_inst(t.c) && !folded[t.c as usize] && cs_kind(b, t.c, t.b) == CS_INC, t.c, VNONE);
 }
 
 pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
@@ -4673,11 +4452,7 @@ pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
         return CS_NEG;
     }
     let (k, x) = cs_base(b, v);
-    return if x == other {
-        k
-    } else {
-        CS_NONE
-    };
+    return ast::pick(x == other, k, CS_NONE);
 }
 
 /// Whether `v` is `y - x` and `other` is `x - y`, of one integer type: `v` negates `other`.
@@ -4759,10 +4534,11 @@ pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
     if is_inst(t.b) && pfold[t.b as usize] && b.insts[t.b as usize].op >= O_SHL && b.insts[t.b as usize].op <= O_ASHR {
         return t.b;
     }
-    if is_inst(t.a) && pfold[t.a as usize] && b.insts[t.a as usize].op >= O_SHL && b.insts[t.a as usize].op <= O_ASHR {
-        return t.a;
-    }
-    return VNONE;
+    return ast::pick(
+        is_inst(t.a) && pfold[t.a as usize] && b.insts[t.a as usize].op >= O_SHL && b.insts[t.a as usize].op <= O_ASHR,
+        t.a,
+        VNONE,
+    );
 }
 
 /// The extension (`O_ZEXT`, `O_SEXT`) both operands of 64-bit product `t` are, from 32 bits, two
@@ -4781,16 +4557,13 @@ pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
         } else {
             c as i64 >= -2147483648 && c as i64 < 2147483648
         };
-        return if fits {
-            x.op
-        } else {
-            0u8
-        };
+        return ast::pick(fits, x.op, 0u8);
     }
-    if x.op != y.op || x.op != O_ZEXT && x.op != O_SEXT || b.type_of(x.a) != T_I32 || b.type_of(y.a) != T_I32 {
-        return 0;
-    }
-    return x.op;
+    return ast::pick(
+        x.op != y.op || x.op != O_ZEXT && x.op != O_SEXT || b.type_of(x.a) != T_I32 || b.type_of(y.a) != T_I32,
+        0,
+        x.op,
+    );
 }
 
 /// The value a left shift with operand `v` shifts: the narrow value when `v` is a zero extension folded
@@ -4950,11 +4723,7 @@ pub(package) fn lea_of(b: &Body, folded: &Vector<bool>, i: u32) Lea {
     }
     let bits = type_bits(t.ty, 8);
     for q in 0..2u32 {
-        let v = if q == 0 {
-            t.a
-        } else {
-            t.b
-        };
+        let v = ast::pick(q == 0, t.a, t.b);
         let neg = q == 1 && t.op == O_SUB;
         // A folded inner sum's operands in its place.
         if is_inst(v) && folded[v as usize] && b.insts[v as usize].op == O_ADD {
@@ -5130,11 +4899,7 @@ pub(package) const fn lane0_of(b: &Body, v: Value) Value {
         return VNONE;
     }
     let vb = type_bytes(b.type_of(t.a), 8);
-    return if vb == 8 || vb == 16 {
-        t.a
-    } else {
-        VNONE
-    };
+    return ast::pick(vb == 8 || vb == 16, t.a, VNONE);
 }
 
 // Value `v` is an instruction's (no parameter, no flag, not VNONE).

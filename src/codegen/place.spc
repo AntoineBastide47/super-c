@@ -6,6 +6,9 @@ import lir::ir as *;
 import codegen::live as lv;
 import codegen::abi as ab;
 import codegen::obj as ob;
+import ir::core as core;
+import std::float as fl;
+import ast::ast as ast;
 
 pub(package) const NOREG: u8 = 0xFF;
 
@@ -668,11 +671,7 @@ pub(package) fn parts_passed(b: &Body, lv: &lv::Live, clobbers: fn(&Body, Inst) 
             for k in 0..b.pool[t.b as usize] {
                 arg = arg || b.pool[(t.c + k) as usize] == v;
             }
-            return if arg {
-                i
-            } else {
-                NONE
-            };
+            return ast::pick(arg, i, NONE);
         }
         if clobbers(b, t) {
             return NONE;
@@ -761,11 +760,7 @@ pub(package) fn result_loads(b: &Body, lv: &lv::Live, lay: &ab::CallLayout, ptr:
         }
         n += 1;
     }
-    return if suse[b.insts[rv as usize].a as usize] == n + 1 {
-        n
-    } else {
-        0
-    };
+    return ast::pick(suse[b.insts[rv as usize].a as usize] == n + 1, n, 0);
 }
 
 /// The part (0 ..) of call layout `lay`'s register result that load `u` reads whole (pointers `ptr`
@@ -795,4 +790,643 @@ pub(package) fn arg_part(b: &Body, lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc
         }
     }
     return NONE;
+}
+
+/// The register and slot state both register code generators keep per body, and the methods they share
+/// over it.
+pub(package) struct Core {
+    pub(package) err: String, // the first refusal, empty when every body compiled
+    pub(package) o: *mut ob::Obj,
+    pub(package) ptr: u32,
+    // ---- per body ----
+    pub(package) bp: *const Body,
+    pub(package) lv: lv::Live,
+    pub(package) va: Vector<Va>,
+    pub(package) owner: Vector<u32>, // per register number, the value index it holds, NONE
+    /// Per register number, the parameter of a block after a loop that shares it with the loop's parameter
+    /// (`lv::Live::share`): it holds the register on when the value that holds it now (the loop's
+    /// parameter, or the step `def_step` defines in its register) is released. NONE else.
+    pub(package) heir: Vector<u32>,
+    pub(package) held: u64, // a bit per register whose `owner` is a value
+    pub(package) lock: u64, // registers the current instruction reads or writes
+    pub(package) tmps: u64, // registers the current instruction took as temporaries
+    pub(package) fixed_busy: u64,
+    pub(package) rstore: Vector<u32>, // per instruction, 1 + the result part a store moves into its register (`ret_stores`), else 0
+    pub(package) pos: u32, // the layout position of the block being compiled
+    pub(package) shared: Vector<u32>, // the values that share another's slot, which that one frees (`back_share`, `step_slot`)
+    pub(package) dying: Vector<u32>, // values whose register frees after the current instruction
+    pub(package) pheld: Vector<bool>, // per entry parameter, an aggregate whose memory the frame holds (`frame_escapes`)
+    pub(package) ends: Vector<u32>, // values by the position their range ends at (CSR, `ends_at`)
+    pub(package) ends_at: Vector<u32>,
+    pub(package) spill_base: u32,
+    pub(package) spill_top: u32,
+    pub(package) free_slots: Vector<u64>, // size << 32 | offset of a released spill slot
+    pub(package) tail_ok: bool,
+    // Calls.
+    pub(package) lay: ab::CallLayout,
+    pub(package) self_lay: ab::CallLayout,
+    pub(package) uses: Vector<Value>,
+}
+
+extend Core {
+    /// The state of a generator for package `pkg` writing `o`, with `nregs` register numbers.
+    pub(package) fn new(pkg: &Package, o: &mut ob::Obj, nregs: u32) Core {
+        let mut owner = Vector::<u32>::with_capacity(nregs as usize);
+        for _ in 0..nregs {
+            owner.push(NONE);
+        }
+        return Core {
+            err: String::new(),
+            o: o,
+            ptr: pkg.ptr_bytes,
+            bp: null,
+            lv: lv::Live::new(),
+            va: Vector::<Va>::new(),
+            owner: owner,
+            heir: Vector::<u32>::new(),
+            held: 0,
+            lock: 0,
+            tmps: 0,
+            fixed_busy: 0,
+            rstore: Vector::<u32>::new(),
+            pos: 0,
+            shared: Vector::<u32>::new(),
+            dying: Vector::<u32>::new(),
+            pheld: Vector::<bool>::new(),
+            ends: Vector::<u32>::new(),
+            ends_at: Vector::<u32>::new(),
+            spill_base: 0,
+            spill_top: 0,
+            free_slots: Vector::<u64>::new(),
+            tail_ok: false,
+            lay: ab::CallLayout::new(),
+            self_lay: ab::CallLayout::new(),
+            uses: Vector::<Value>::new(),
+        };
+    }
+
+    // The home register of the parameter jump `t` passes `v` to (once), when the jump is no back edge, so
+    // nothing reads that parameter's earlier value here (`def_step` takes the back edges): `v` defined
+    // there needs no move. NOREG else.
+    pub(package) fn jump_reg(self: &Self, b: &Body, t: Inst, v: Value) u8 {
+        let tg = b.edge_target(t.a);
+        let mut h = self.lv.inner[self.lv.def_blk[v as usize] as usize];
+        // Each step leaves one loop: at most one per block.
+        for _ in 0..b.blocks.len() {
+            if h == NONE {
+                break;
+            }
+            if h == tg {
+                return NOREG;
+            }
+            h = self.lv.parent[h as usize];
+        }
+        let tb = b.blocks[tg as usize];
+        let mut r = NOREG;
+        for k in 0..b.edge_nargs(t.a) {
+            if b.edge_arg(t.a, k) != v {
+                continue;
+            }
+            let pva = self.va[b.insts.len() + (tb.param_start + k) as usize];
+            if r != NOREG || pva.home != H_FIXED {
+                return NOREG;
+            }
+            r = pva.reg;
+        }
+        return ast::pick(r == NOREG || ((self.lock | self.tmps) & bit(r)) != 0, NOREG, r);
+    }
+
+    // Free value index `x`'s register and slot.
+    pub(package) fn release(self: &mut Self, x: u32) {
+        let va = self.va[x as usize];
+        if va.reg != NOREG && self.owner[va.reg as usize] == x {
+            // A later block's parameter that shares the register (`param_home`) holds it on.
+            let to = self.heir[va.reg as usize];
+            if to == x {
+                self.heir[va.reg as usize] = NONE;
+            }
+            if va.home == H_FIXED && to != NONE && to != x && self.va[to as usize].home == H_FIXED && self.va[to as usize].reg == va.reg {
+                self.set_owner(va.reg, to);
+            } else {
+                self.set_owner(va.reg, NONE);
+                if va.home == H_FIXED {
+                    self.fixed_busy &= ~bit(va.reg);
+                }
+            }
+        }
+        if va.home == H_SLOT && !self.is_shared(x) {
+            let n = if in_mem(self.xty(x)) {
+                type_bytes(self.xty(x), self.ptr)
+            } else {
+                8
+            };
+            self.free_slots.push(n as u64 << 32 | (va.off as u32) as u64);
+        }
+        let w = self.va.index_mut(x as usize);
+        w.reg = NOREG;
+        w.home = H_NONE;
+        w.dirty = false;
+    }
+
+    // `same_moves` one way: each move of edge `e` is one of edge `o`'s.
+    pub(package) fn moves_within(self: &Self, e: u32, o: u32) bool {
+        let b = self.b();
+        let ni = b.insts.len() as u32;
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ob = b.blocks[b.edge_target(o) as usize];
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let a = b.edge_arg(e, q);
+            let ax = self.vx(a);
+            let pva = self.va[px as usize];
+            if ax == px || pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
+                continue;
+            }
+            if pva.home != H_FIXED {
+                return false;
+            }
+            let mut found = false;
+            for j in 0..b.edge_nargs(o) {
+                let oy = ni + ob.param_start + j;
+                found = found || b.edge_arg(o, j) == a && self.va[oy as usize].home == H_FIXED && self.va[oy as usize].reg == pva.reg;
+            }
+            let y = self.owner[pva.reg as usize];
+            let mine = y == NONE || y == px || self.lv.share[px as usize] == y || self.lv.end[y as usize] <= self.pos;
+            if !found || !mine {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // A stack slot of `size` bytes aligned to `al` (memory values and spills); its sp offset.
+    pub(package) const fn slot_alloc(self: &mut Self, size0: u32, al0: u32) u32 {
+        let size = ast::pick(size0 < 8, 8u32, size0);
+        let al = if al0 < 8 {
+            8u32
+        } else if al0 > 16 {
+            16u32
+        } else {
+            al0
+        };
+        for k in 0..self.free_slots.len() {
+            let e = self.free_slots[k];
+            if (e >> 32) as u32 == size && e as u32 % al == 0 {
+                let _ = self.free_slots.swap_remove(k);
+                return e as u32;
+            }
+        }
+        let at = self.spill_base + self.spill_top + al - 1 & ~(al - 1);
+        self.spill_top = at + size - self.spill_base;
+        return at;
+    }
+
+    // Whether call `t` (its layout in `lay`) reads vector `u` only as arguments it passes whole in one
+    // register (`whole_vreg`), not in memory.
+    pub(package) fn whole_arg(self: &Self, t: Inst, u: Value) bool {
+        let b = self.b();
+        if !is_vec(self.vt(u)) || t.op == O_CALLIND && t.a == u {
+            return false;
+        }
+        let np = b.pool[t.b as usize];
+        let nops = np + ((b.pool[t.b as usize + 2] & AGG) != 0) as u32;
+        let mut any = false;
+        for k in 0..nops {
+            if b.pool[(t.c + k) as usize] != u {
+                continue;
+            }
+            if k == np || (b.pool[(t.b + 3 + k) as usize] & AGG) != 0 || !self.lay.whole_vreg(
+                self.lay.locs[k as usize],
+                self.vt(u),
+            ) {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // `ends`: the values grouped by the position their range ends at.
+    pub(package) fn bucket_ends(self: &mut Self) {
+        let np = self.lv.order.len();
+        fill(&mut self.ends_at, np + 1, 0);
+        for x in 0..self.lv.end.len() {
+            if self.lv.def_blk[x] != NONE && self.lv.pos[self.lv.def_blk[x] as usize] != NONE {
+                self.ends_at[self.lv.end[x] as usize + 1] += 1;
+            }
+        }
+        for q in 0..np {
+            self.ends_at[q + 1] += self.ends_at[q];
+        }
+        fill(&mut self.ends, self.ends_at[np] as usize, 0);
+        let mut fillp = Vector::<u32>::with_capacity(np + 1);
+        fillp.extend_copy(&self.ends_at);
+        for x in 0..self.lv.end.len() {
+            if self.lv.def_blk[x] != NONE && self.lv.pos[self.lv.def_blk[x] as usize] != NONE {
+                let e = self.lv.end[x] as usize;
+                self.ends[fillp[e] as usize] = x as u32;
+                fillp[e] += 1;
+            }
+        }
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine (no constant size it does inline) right
+    // before the body returns nothing: a sibling call where `mem_tail` holds, which `shrinkable` reads before
+    // `tail_ok` is known (when it fails, the warm code calls, and the body is compiled again unshrunk).
+    pub(package) fn mem_tail_shape(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        if t.op != O_MEMCPY && t.op != O_MEMSET || b.pool[b.sig as usize + 2] != T_NONE as u32 {
+            return false;
+        }
+        let mut n: u64 = 0;
+        let lim: u64 = ast::pick(t.op == O_MEMCPY && t.aux == MEM_OVERLAP, 64, 128);
+        if self.const_of(t.c, &mut n) && n <= lim {
+            return false;
+        }
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        let r = b.insts[i as usize + 1];
+        return i + 2 == bk.start + bk.len && r.op == O_RET && r.a == VNONE;
+    }
+
+    // The register home of edge argument `v` when `v` dies at this terminator, NOREG else.
+    pub(package) fn home_dying(self: &Self, v: Value) u8 {
+        if v == VNONE {
+            return NOREG;
+        }
+        let x = self.vx(v);
+        if x == NONE {
+            return NOREG;
+        }
+        let va = self.va[x as usize];
+        // Not one a later parameter shares (`heir`, unless the parameter is `x`, which took the register
+        // over), nor one that shares another's (`back_share`: the owner keeps it).
+        return ast::pick(
+            va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && (self.heir[va.reg as usize] == NONE || self.heir[va.reg as usize] == x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos,
+            va.reg,
+            NOREG,
+        );
+    }
+
+    // Whether every return of the body takes the result from a run of part stores (`rstore`): then nothing
+    // reads the result's memory, which needs no slot.
+    pub(package) fn ret_moved(self: &Self) bool {
+        let b = self.b();
+        let mut any = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            let end = bk.start + bk.len - 1;
+            if bk.len == 0 || b.insts[end as usize].op != O_RET {
+                continue;
+            }
+            if end == bk.start || self.rstore[end as usize - 1] == 0 {
+                return false;
+            }
+            any = true;
+        }
+        return any;
+    }
+
+    // The register of edge argument `v` when it holds `v` without being its home and `v` dies at this
+    // terminator: the parameter that takes it may keep it, and the edge then moves nothing. NOREG else.
+    pub(package) fn dying_reg(self: &Self, v: Value) u8 {
+        if v == VNONE {
+            return NOREG;
+        }
+        let x = self.vx(v);
+        if x == NONE {
+            return NOREG;
+        }
+        let va = self.va[x as usize];
+        return ast::pick(
+            va.reg != NOREG && va.home != H_FIXED && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos,
+            va.reg,
+            NOREG,
+        );
+    }
+
+    // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
+    pub(package) fn moves_needed(self: &Self, e: u32) bool {
+        let b = self.b();
+        let tb = b.blocks[b.edge_target(e) as usize];
+        let ni = b.insts.len() as u32;
+        for q in 0..b.edge_nargs(e) {
+            let px = ni + tb.param_start + q;
+            let ax = self.vx(b.edge_arg(e, q));
+            let pva = self.va[px as usize];
+            if ax != px && !(pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The return register when block parameter value index `x` is an integer whose one use returns it from
+    // its block: there it needs no move. NOREG else.
+    pub(package) fn ret_reg(self: &Self, b: &Body, x: u32) u8 {
+        let d = self.lv.def_blk[x as usize];
+        let bk = b.blocks[d as usize];
+        let t = b.insts[(bk.start + bk.len - 1) as usize];
+        let rl = self.self_lay.ret;
+        if self.lv.uses[x as usize] != 1 || t.op != O_RET || t.a != (VPARAM | x - b.insts.len() as u32) || rl.kind != ab::L_REG || rl.n != 1 || self.self_lay.parts[rl.p0 as usize].v {
+            return NOREG;
+        }
+        return self.self_lay.parts[rl.p0 as usize].reg;
+    }
+
+    // Edge argument `v`, when register `r` is its home and it dies at this terminator, gives `r` up: the
+    // parameter that takes `r` then holds it, and the edge moves nothing.
+    pub(package) fn free_home(self: &mut Self, v: Value, r: u8) {
+        let x = self.vx(v);
+        if x == NONE {
+            return;
+        }
+        let va = self.va[x as usize];
+        if va.home == H_FIXED && va.reg == r && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+            self.fixed_busy &= ~bit(r);
+        }
+    }
+
+    // Whether the instruction after `i` is a branch or a select on value `v`.
+    pub(package) const fn next_reads(self: &Self, i: u32, v: Value) bool {
+        let b = self.b();
+        let k = self.lv.def_blk[i as usize];
+        let bk = b.blocks[k as usize];
+        if i + 1 >= bk.start + bk.len {
+            return false;
+        }
+        let n = b.insts[i as usize + 1];
+        return (n.op == O_BR || n.op == O_SELECT) && n.a == v;
+    }
+
+    // Whether every late edge's target lies before layout position `q` (`lv::Live::late`).
+    pub(package) fn late_ready(self: &Self, q: u32) bool {
+        let b = self.b();
+        for j in 0..self.lv.late.len() {
+            if self.lv.pos[b.edge_target(self.lv.late[j] as u32) as usize] >= q {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether copy or fill `t`, instruction `i`, calls its C routine as a sibling call (`tail_ok`): of that
+    // shape (`mem_tail_shape`), neither address may point into this frame (`frame_based`). Its return
+    // is not emitted (`tail_ret`).
+    pub(package) fn mem_tail(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        return self.tail_ok && self.mem_tail_shape(i, t) && !frame_based(b, &self.pheld, t.a, FRAME_DEPTH) && (t.op == O_MEMSET || !frame_based(
+            b,
+            &self.pheld,
+            t.b,
+            FRAME_DEPTH,
+        ));
+    }
+
+    // Register `r` holds value `x` from now on (NONE: no value).
+    pub(package) const fn set_owner(self: &mut Self, r: u8, x: u32) {
+        self.owner[r as usize] = x;
+        if x == NONE {
+            self.held &= ~bit(r);
+        } else {
+            self.held |= bit(r);
+        }
+    }
+
+    // Bind register `r` to value index `x` as its newest copy.
+    pub(package) fn bind(self: &mut Self, x: u32, r: u8) {
+        self.set_owner(r, x);
+        self.lock |= bit(r);
+        let va = self.va.index_mut(x as usize);
+        va.reg = r;
+        va.dirty = va.home != H_FIXED;
+        va.clean = false;
+    }
+
+    // Whether value index `x` shares another value's slot, which that one frees (`back_share`,
+    // `step_slot`).
+    pub(package) fn is_shared(self: &Self, x: u32) bool {
+        for k in 0..self.shared.len() {
+            if self.shared[k] == x {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether value index `x` has its last use in the current instruction.
+    pub(package) const fn dies(self: &Self, x: u32) bool {
+        for k in 0..self.dying.len() {
+            if self.dying[k] == x {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether the current instruction reads value `x`.
+    pub(package) const fn read_now(self: &Self, x: u32) bool {
+        for k in 0..self.uses.len() {
+            if self.vx(self.uses[k]) == x {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The value whose low bits value `v` is: the source of a folded truncation (`lv::FOLD_TRUNC`), else `v`.
+    pub(package) const fn narrow_src(self: &Self, v: Value) Value {
+        return if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && self.lv.pfold[v as usize] && self.b().insts[v as usize].op == O_TRUNC {
+            self.b().insts[v as usize].a
+        } else {
+            v
+        };
+    }
+
+    // One use of value index `x` done: it frees after the current instruction when that was its last.
+    pub(package) fn use_once(self: &mut Self, x: u32) {
+        self.lv.uses[x as usize] -= 1;
+        if self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+            self.dying.push(x);
+        }
+    }
+
+    // The memory value instruction `i` defines: a slot; its sp offset.
+    pub(package) fn mdef(self: &mut Self, i: u32) i64 {
+        let x = self.vx(i);
+        let t = self.xty(x);
+        let off = self.slot_alloc(type_bytes(t, self.ptr), 16);
+        self.va.index_mut(x as usize).home = H_SLOT;
+        self.va.index_mut(x as usize).off = off as i32;
+        return off;
+    }
+
+    pub(package) fn refuse(self: &mut Self, why: str) bool {
+        if self.err.len() == 0 {
+            self.err.push_str(why);
+        }
+        return false;
+    }
+
+    // The type of value index `x`.
+    pub(package) const fn xty(self: &Self, x: u32) u8 {
+        return lv::xty(self.b(), x);
+    }
+
+    // The body being compiled and the object: both outlive the generator's borrows.
+    pub(package) const fn b(self: &Self) &'static Body {
+        return bref(self.bp);
+    }
+
+    pub(package) const fn obj(self: &Self) &'static mut ob::Obj {
+        return oref(self.o);
+    }
+
+    // Whether `v` is an integer constant; its bits in `out`.
+    pub(package) const fn const_of(self: &Self, v: Value, out: &mut u64) bool {
+        return lv::const_of(self.b(), v, out);
+    }
+
+    // Whether value `x` is used after the current instruction.
+    pub(package) const fn live_on(self: &Self, x: u32) bool {
+        return self.lv.uses[x as usize] != 0 || self.lv.end[x as usize] > self.pos;
+    }
+
+    // The type of value `v`.
+    pub(package) const fn vt(self: &Self, v: Value) u8 {
+        return self.b().type_of(v);
+    }
+
+    // The value index of `v`.
+    pub(package) const fn vx(self: &Self, v: Value) u32 {
+        return self.lv.vix(self.b(), v);
+    }
+
+    pub(package) fn data(self: &mut Self, p: &Package, s: u32, local: bool, coff: bool, abs64: u8) bool {
+        let ps = p.syms[s as usize];
+        let d = p.data[ps.def as usize];
+        let tls = ps.kind == SK_TLS;
+        let mut zero = d.nrelocs == 0;
+        for j in 0..d.nbytes {
+            zero = zero && p.bytes[(d.bytes + j) as usize] == 0;
+        }
+        // COFF has no zero-filled thread-local section: `.tls$` holds every byte.
+        zero = zero && !(tls && coff);
+        let sec = if ps.sect != NONE {
+            // Its own section: every byte written.
+            self.obj().named(p.spell(ps.sect), false)
+        } else if tls && zero {
+            ob::S_TBSS
+        } else if tls {
+            ob::S_TDATA
+        } else if zero && !d.readonly {
+            ob::S_BSS
+        } else if d.readonly && d.nrelocs == 0 {
+            ob::S_RODATA
+        } else if d.readonly {
+            ob::S_RELRO
+        } else {
+            ob::S_DATA
+        };
+        let o = self.obj();
+        let k = o.sym(p.spell(ps.name));
+        let mut fl = if local {
+            ob::copy_flags(p.split)
+        } else if ps.linkage == SL_GLOBAL {
+            ob::SF_GLOBAL
+        } else {
+            0
+        };
+        if tls {
+            fl |= ob::SF_TLS;
+        }
+        if ps.used {
+            fl |= ob::SF_USED;
+        }
+        if sec == ob::NOSEC {
+            self.err = String::from_str("too many sections");
+            return false;
+        }
+        let at = o.define(k, sec, d.align_log2, d.size, fl);
+        if sec == ob::S_BSS || sec == ob::S_TBSS {
+            return true;
+        }
+        let bs = p.data_bytes(&d);
+        o.put(sec, bs[0..bs.len()]);
+        o.pad_to(sec, at + d.size as u64);
+        for j in 0..d.nrelocs {
+            let r = p.relocs[(d.relocs + j) as usize];
+            let ks = o.sym(p.spell(p.syms[r.sym as usize].name));
+            o.reloc(sec, abs64, (at + r.offset as u64) as u32, ks, r.addend);
+        }
+        return true;
+    }
+}
+
+/// The mask of register `r`.
+pub(package) const fn bit(r: u8) u64 {
+    return 1u64 << r as u64;
+}
+
+const fn bref(p: *const Body) &'static Body {
+    return unsafe &*p;
+}
+
+const fn oref(p: *mut ob::Obj) &'static mut ob::Obj {
+    return unsafe &mut *p;
+}
+
+/// The LIR condition of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`): of floats, else signed or not.
+pub(package) const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
+    let k = (c - core::SIMD_CMP_EQ) as usize;
+    let f: [u16; 6] = [C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, C_OGE];
+    let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
+    let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
+    return if fl {
+        unsafe f[k]
+    } else if sg {
+        unsafe s[k]
+    } else {
+        unsafe u[k]
+    };
+}
+
+/// The chunk of a copy with `left` bytes to go: the largest power of two up to both `left` and `max` (a
+/// power of two), at least 1.
+pub(package) const fn chunk(left: u32, max: u32) u32 {
+    let mut s = max;
+    // Each step halves `s`.
+    while s > left && s > 1 {
+        s /= 2;
+    }
+    return s;
+}
+
+/// The bits of integer `k` converted to a float of lane type `lt` (`T_F32` or `T_F64`).
+pub(package) const fn float_bits(lt: u8, k: u32) u64 {
+    if lt == T_F32 {
+        return fl::f32_bits(k as f32);
+    }
+    return fl::f64_bits(k as f64);
+}
+
+/// The text section of function symbol `ps` of `p`: its own section, `cold` for a cold function, else
+/// `S_TEXT`.
+pub(package) fn text_section(o: &mut ob::Obj, p: &Package, ps: Sym, cold: str) u8 {
+    if ps.sect != NONE {
+        return o.named(p.spell(ps.sect), true);
+    }
+    if ps.cold {
+        return o.named(cold, true);
+    }
+    return ob::S_TEXT;
+}
+
+/// The object flags of function symbol `ps`: global when its linkage is and `global`, used when it is
+/// `@used` and `used`.
+pub(package) const fn func_flags(ps: Sym, global: bool, used: bool) u8 {
+    return ob::SF_FUNC | ast::pick(ps.linkage == SL_GLOBAL && global, ob::SF_GLOBAL, 0) | ast::pick(
+        ps.used && used,
+        ob::SF_USED,
+        0,
+    );
 }

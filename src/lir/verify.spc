@@ -212,10 +212,7 @@ extend Verifier {
         }
         if (v & VFLAG) != 0 {
             let k = v & ~VFLAG;
-            if k as usize >= b.insts.len() || op_info(b.insts[k as usize].op).form != F_OVF {
-                return T_NONE;
-            }
-            return T_I8;
+            return ast::pick(k as usize >= b.insts.len() || op_info(b.insts[k as usize].op).form != F_OVF, T_NONE, T_I8);
         }
         if v as usize >= b.insts.len() {
             return T_NONE;
@@ -234,11 +231,7 @@ extend Verifier {
         if t.a != VNONE != n > 0 || t.b != VNONE != n > 1 || t.c != VNONE != n > 2 {
             return self.fail_at(name, b, i, "a system operation takes its operands and no other");
         }
-        let res = if s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL {
-            T_I64
-        } else {
-            T_NONE
-        };
+        let res = ast::pick(s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL, T_I64, T_NONE);
         let ok = if s == SYS_FPSAVE {
             ta == T_PTR
         } else if s == SYS_GSLOAD {
@@ -936,7 +929,7 @@ extend Verifier {
                     nd = if nd == NONE {
                         pb
                     } else {
-                        self.intersect(pb, nd)
+                        dom_meet(&self.idom, &self.order, pb, nd)
                     };
                 }
                 if nd != self.idom[blk as usize] {
@@ -945,20 +938,6 @@ extend Verifier {
                 }
             }
         }
-    }
-
-    const fn intersect(self: &Self, x: u32, y: u32) u32 {
-        let mut a = x;
-        let mut c = y;
-        while a != c {
-            while self.order[a as usize] > self.order[c as usize] {
-                a = self.idom[a as usize];
-            }
-            while self.order[c as usize] > self.order[a as usize] {
-                c = self.idom[c as usize];
-            }
-        }
-        return a;
     }
 
     // Whether block `d` dominates block `x`.
@@ -1125,6 +1104,17 @@ pub(package) const fn operand_b(f: u8) bool {
 pub(package) fn uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
     out.truncate(0);
     uses_into(b, t, out);
+}
+
+/// `uses`, then the arguments of each edge of terminator `t`.
+pub(package) fn uses_edges(b: &Body, t: Inst, out: &mut Vector<Value>) {
+    uses(b, t, out);
+    for k in 0..edge_count(t) {
+        let e = edge_of(b, t, k);
+        for x in 0..b.edge_nargs(e) {
+            out.push(b.edge_arg(e, x));
+        }
+    }
 }
 
 /// `uses`, appended to `out`. Inline: the passes over a body call it per instruction.

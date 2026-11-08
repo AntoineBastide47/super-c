@@ -41,9 +41,11 @@ information leaves the code bytes unchanged.
 
 Models: `src/link/macho.spc`, `src/link/elf.spc`, `src/link/pe.spc`, `src/link/wasm.spc`;
 `src/link/ar.spc` archives and takes their members for any linker (`take_members`, over `Members`),
-`src/link/tbd.spc` reads Apple's text stubs, `src/link/util.spc` holds the byte and file helpers and
-`Mem`, the objects a build hands its link in memory (`link_args`' `mem`: the ones it just wrote, read
-from there, not from their files). `link::link::link_args` takes the C compiler's link command (`-o`, `-l`, `-L`,
+`src/link/tbd.spc` reads Apple's text stubs, `src/link/util.spc` holds the file helpers (`read_input`),
+the undefined-symbol report every linker gives (`Missing`) and `Mem`, the objects a build hands its link
+in memory (`link_args`' `mem`: the ones it just wrote, read from there, not from their files). The byte
+writers the object writers and the linkers share (`w16`, `w32`, `w64`, `w32be`, `uleb`, `sleb`, `put_str`,
+`put_padded`, `pad`) are in `codegen::obj`. `link::link::link_args` takes the C compiler's link command (`-o`, `-l`, `-L`,
 `-framework`, `-shared`, `--sysroot=`, `-Wl,` flags), so a build has one link command; it returns
 NOT_SERVED for a flag or input it does not handle.
 

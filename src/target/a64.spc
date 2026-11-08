@@ -2,6 +2,8 @@
 // Registers are numbers: x0 to x30 (31 is sp or the zero register, as the form reads it) and v0 to v31.
 // `sf` selects the 64-bit form. Every immediate is the caller's to range-check (`*_fits` helpers).
 
+import ast::ast as ast;
+
 /// Relocation kinds (`codegen::obj::ORel.kind`).
 pub(package) const R_BRANCH26: u8 = 1; // B or BL to a symbol
 pub(package) const R_PAGE21: u8 = 2; // ADRP of a symbol's page
@@ -73,10 +75,7 @@ const fn sfb(sf: bool) u32 {
 
 // `v` when `c`, else 0.
 pub(package) const fn on(c: bool, v: u32) u32 {
-    if c {
-        return v;
-    }
-    return 0;
+    return ast::pick(c, v, 0);
 }
 
 // ---- Data processing, immediate ----
@@ -118,21 +117,13 @@ pub(package) const fn movw(sf: bool, opc: u32, rd: u32, imm16: u32, hw: u32) u32
 
 /// SBFM, BFM, UBFM: `opc` 0, 1, 2.
 pub(package) const fn bitfield(sf: bool, opc: u32, rd: u32, rn: u32, immr: u32, imms: u32) u32 {
-    let n = if sf {
-        0x00400000u32
-    } else {
-        0u32
-    };
+    let n = ast::pick(sf, 0x00400000u32, 0u32);
     return sfb(sf) | opc << 29 | 0x13000000 | n | immr << 16 | imms << 10 | rn << 5 | rd;
 }
 
 /// LSL (immediate) by `s`, below the width.
 pub(package) const fn lsl_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
-    let w: u32 = if sf {
-        64u32
-    } else {
-        32u32
-    };
+    let w: u32 = ast::pick(sf, 64u32, 32u32);
     return bitfield(sf, 2, rd, rn, (w - s) % w, w - 1 - s);
 }
 
@@ -144,34 +135,12 @@ pub(package) const fn extr(sf: bool, rd: u32, rn: u32, rm: u32, lsb: u32) u32 {
 
 /// LSR (immediate).
 pub(package) const fn lsr_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
-    return bitfield(
-        sf,
-        2,
-        rd,
-        rn,
-        s,
-        if sf {
-            63u32
-        } else {
-            31u32
-        },
-    );
+    return bitfield(sf, 2, rd, rn, s, ast::pick(sf, 63u32, 31u32));
 }
 
 /// ASR (immediate).
 pub(package) const fn asr_imm(sf: bool, rd: u32, rn: u32, s: u32) u32 {
-    return bitfield(
-        sf,
-        0,
-        rd,
-        rn,
-        s,
-        if sf {
-            63u32
-        } else {
-            31u32
-        },
-    );
+    return bitfield(sf, 0, rd, rn, s, ast::pick(sf, 63u32, 31u32));
 }
 
 /// Sign-extend the low `bits` (8, 16, 32) of `rn` into `rd`.
@@ -187,11 +156,7 @@ pub(package) const fn uxt(rd: u32, rn: u32, bits: u32) u32 {
 /// ADR (`page` false) or ADRP: the 21-bit signed offset in bytes or pages.
 pub(package) const fn adr(page: bool, rd: u32, imm21: i32) u32 {
     let u = imm21 as u32;
-    let op = if page {
-        0x90000000u32
-    } else {
-        0x10000000u32
-    };
+    let op = ast::pick(page, 0x90000000u32, 0x10000000u32);
     return op | (u & 3) << 29 | (u >> 2 & 0x7FFFF) << 5 | rd;
 }
 
@@ -200,11 +165,7 @@ pub(package) const fn adr(page: bool, rd: u32, imm21: i32) u32 {
 /// Logical (shifted register): `opc` 0 AND, 1 ORR, 2 EOR, 3 ANDS; `n` inverts `rm` (BIC, ORN, EON,
 /// BICS); `shift` 0 LSL, 1 LSR, 2 ASR, 3 ROR.
 pub(package) const fn logic_reg(sf: bool, opc: u32, n: bool, rd: u32, rn: u32, rm: u32, shift: u32, amt: u32) u32 {
-    let nb = if n {
-        0x00200000u32
-    } else {
-        0u32
-    };
+    let nb = ast::pick(n, 0x00200000u32, 0u32);
     return sfb(sf) | opc << 29 | 0x0A000000 | shift << 22 | nb | rm << 16 | amt << 10 | rn << 5 | rd;
 }
 
@@ -269,11 +230,7 @@ pub(package) const DP1_CLZ: u32 = 4;
 
 /// MADD (`sub` false) or MSUB: `rd` = ra +- rn * rm.
 pub(package) const fn madd(sf: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
-    let o = if sub {
-        0x8000u32
-    } else {
-        0u32
-    };
+    let o = ast::pick(sub, 0x8000u32, 0u32);
     return sfb(sf) | 0x1B000000 | rm << 16 | o | ra << 10 | rn << 5 | rd;
 }
 
@@ -283,21 +240,13 @@ pub(package) const fn mul(sf: bool, rd: u32, rn: u32, rm: u32) u32 {
 
 /// SMULL (`signed`) or UMULL: the 64-bit product of two 32-bit registers.
 pub(package) const fn mull(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
-    let b = if signed {
-        0x9B200000u32
-    } else {
-        0x9BA00000u32
-    };
+    let b = ast::pick(signed, 0x9B200000u32, 0x9BA00000u32);
     return b | rm << 16 | ZR << 10 | rn << 5 | rd;
 }
 
 /// SMULH (`signed`) or UMULH: the high 64 bits of the 128-bit product.
 pub(package) const fn mulh(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
-    let b = if signed {
-        0x9B400000u32
-    } else {
-        0x9BC00000u32
-    };
+    let b = ast::pick(signed, 0x9B400000u32, 0x9BC00000u32);
     return b | rm << 16 | ZR << 10 | rn << 5 | rd;
 }
 
@@ -336,11 +285,7 @@ pub(package) const fn msize(m: u32) u32 {
 
 // The opcode bits of access `m` (`load`), with size, V and opc, for the unscaled form.
 const fn mbits(m: u32, load: bool) u32 {
-    let ld = if load {
-        1u32
-    } else {
-        0u32
-    };
+    let ld = ast::pick(load, 1u32, 0u32);
     if m <= M_X {
         return m << 30 | 0x38000000 | ld << 22;
     }
@@ -371,11 +316,7 @@ pub(package) const fn ldst_post(m: u32, load: bool, rt: u32, rn: u32, off: i32) 
 
 /// LDR/STR (register): the address is rn + rm (64-bit), shifted by the size when `scaled`.
 pub(package) const fn ldst_reg(m: u32, load: bool, rt: u32, rn: u32, rm: u32, scaled: bool) u32 {
-    let s = if scaled {
-        0x1000u32
-    } else {
-        0u32
-    };
+    let s = ast::pick(scaled, 0x1000u32, 0u32);
     return mbits(m, load) | 0x00200800 | rm << 16 | 3u32 << 13 | s | rn << 5 | rt;
 }
 
@@ -394,11 +335,7 @@ pub(package) const fn uimm_fits(m: u32, off: i64) bool {
 /// LDP/STP: `m` M_W, M_X, M_VS, M_VD or M_VQ; `mode` 1 post-index, 2 signed offset, 3 pre-index; `off` in
 /// bytes, a multiple of the size within 7 signed bits of it.
 pub(package) const fn ldstp(m: u32, load: bool, mode: u32, rt: u32, rt2: u32, rn: u32, off: i32) u32 {
-    let ld = if load {
-        0x00400000u32
-    } else {
-        0u32
-    };
+    let ld = ast::pick(load, 0x00400000u32, 0u32);
     let base = if m == M_W {
         0x28000000u32
     } else if m == M_X {
@@ -430,21 +367,13 @@ pub(package) const fn bcond(cond: u32, off: i32) u32 {
 
 /// CBZ (`nz` false) or CBNZ.
 pub(package) const fn cbz(sf: bool, nz: bool, rt: u32, off: i32) u32 {
-    let o = if nz {
-        0x35000000u32
-    } else {
-        0x34000000u32
-    };
+    let o = ast::pick(nz, 0x35000000u32, 0x34000000u32);
     return sfb(sf) | o | ((off >> 2) as u32 & 0x7FFFF) << 5 | rt;
 }
 
 /// TBZ (`nz` false) or TBNZ on bit `bit`.
 pub(package) const fn tbz(nz: bool, rt: u32, bit: u32, off: i32) u32 {
-    let o = if nz {
-        0x37000000u32
-    } else {
-        0x36000000u32
-    };
+    let o = ast::pick(nz, 0x37000000u32, 0x36000000u32);
     return bit >> 5 << 31 | o | (bit & 31) << 19 | ((off >> 2) as u32 & 0x3FFF) << 5 | rt;
 }
 
@@ -509,11 +438,7 @@ pub(package) const fn reaches(w: u32, off: i64) bool {
 
 // `d` selects double precision.
 const fn ftype(d: bool) u32 {
-    return if d {
-        0x00400000u32
-    } else {
-        0u32
-    };
+    return ast::pick(d, 0x00400000u32, 0u32);
 }
 
 /// FMOV (register).
@@ -523,16 +448,8 @@ pub(package) const fn fmov(d: bool, rd: u32, rn: u32) u32 {
 
 /// FMOV between an x or w register and a v register: `to_v` moves into the v register.
 pub(package) const fn fmov_gv(d: bool, to_v: bool, rd: u32, rn: u32) u32 {
-    let base = if d {
-        0x9E660000u32
-    } else {
-        0x1E260000u32
-    };
-    let t = if to_v {
-        0x10000u32
-    } else {
-        0u32
-    };
+    let base = ast::pick(d, 0x9E660000u32, 0x1E260000u32);
+    let t = ast::pick(to_v, 0x10000u32, 0u32);
     return base | t | rn << 5 | rd;
 }
 
@@ -570,7 +487,6 @@ pub(package) const FP_RINTP: u32 = 9;
 pub(package) const FP_RINTM: u32 = 10;
 pub(package) const FP_RINTZ: u32 = 11;
 pub(package) const FP_RINTA: u32 = 12;
-pub(package) const FP_RINTX: u32 = 14;
 
 /// FCVT between binary16 and single: half to single (`to_s`), or single to half (rounding to nearest even).
 pub(package) const fn fcvt_h(to_s: bool, rd: u32, rn: u32) u32 {
@@ -607,32 +523,20 @@ pub(package) const fn fcsel(d: bool, rd: u32, rn: u32, rm: u32, cond: u32) u32 {
 
 /// FMADD (`sub` false) or FMSUB: `rd` = ra +- rn * rm.
 pub(package) const fn fmadd(d: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
-    let o = if sub {
-        0x8000u32
-    } else {
-        0u32
-    };
+    let o = ast::pick(sub, 0x8000u32, 0u32);
     return 0x1F000000 | ftype(d) | rm << 16 | o | ra << 10 | rn << 5 | rd;
 }
 
 /// SCVTF (`signed`) or UCVTF: integer register `rn` (64-bit when `sf`) to float `rd`.
 pub(package) const fn cvtf(sf: bool, d: bool, signed: bool, rd: u32, rn: u32) u32 {
-    let o = if signed {
-        0x1E220000u32
-    } else {
-        0x1E230000u32
-    };
+    let o = ast::pick(signed, 0x1E220000u32, 0x1E230000u32);
     return sfb(sf) | o | ftype(d) | rn << 5 | rd;
 }
 
 /// FCVTZS (`signed`) or FCVTZU: float `rn` to integer `rd` (64-bit when `sf`), toward zero, saturating,
 /// NaN to 0.
 pub(package) const fn fcvtz(sf: bool, d: bool, signed: bool, rd: u32, rn: u32) u32 {
-    let o = if signed {
-        0x1E380000u32
-    } else {
-        0x1E390000u32
-    };
+    let o = ast::pick(signed, 0x1E380000u32, 0x1E390000u32);
     return sfb(sf) | o | ftype(d) | rn << 5 | rd;
 }
 
@@ -660,9 +564,6 @@ pub(package) const V3_FMUL: u32 = 0x3B; // size 0|sz
 pub(package) const V3_FDIV: u32 = 0x3F; // size 0|sz
 pub(package) const V3_FMLA: u32 = 0x19; // size 0|sz
 pub(package) const V3_FMAXNM: u32 = 0x18; // size 0|sz
-pub(package) const V3_FMINNM: u32 = 0x18; // size 2|sz
-pub(package) const V3_FMAX: u32 = 0x1E; // size 0|sz
-pub(package) const V3_FMIN: u32 = 0x1E; // size 2|sz
 
 /// A three-same operation `op` (`V3_*`).
 pub(package) const fn v3op(q: bool, op: u32, size: u32, rd: u32, rn: u32, rm: u32) u32 {
@@ -701,11 +602,7 @@ pub(package) const fn addv8b(rd: u32, rn: u32) u32 {
 
 /// LDAR (`load`) or STLR of access size `size` (0 to 3).
 pub(package) const fn ldar(size: u32, load: bool, rt: u32, rn: u32) u32 {
-    let b = if load {
-        0x08DFFC00u32
-    } else {
-        0x089FFC00u32
-    };
+    let b = ast::pick(load, 0x08DFFC00u32, 0x089FFC00u32);
     return size << 30 | b | rn << 5 | rt;
 }
 
@@ -727,16 +624,8 @@ pub(package) const fn ldapr(size: u32, rt: u32, rn: u32) u32 {
 /// The LSE atomic memory operations: `opc` 0 LDADD, 1 LDCLR, 2 LDEOR, 3 LDSET, 8 SWP; `a` acquire,
 /// `r` release.
 pub(package) const fn lse(size: u32, opc: u32, a: bool, r: bool, rs: u32, rt: u32, rn: u32) u32 {
-    let ab = if a {
-        0x00800000u32
-    } else {
-        0u32
-    };
-    let rb = if r {
-        0x00400000u32
-    } else {
-        0u32
-    };
+    let ab = ast::pick(a, 0x00800000u32, 0u32);
+    let rb = ast::pick(r, 0x00400000u32, 0u32);
     return size << 30 | 0x38200000 | ab | rb | rs << 16 | opc >> 3 << 15 | (opc & 7) << 12 | rn << 5 | rt;
 }
 
@@ -748,16 +637,8 @@ pub(package) const LSE_SWP: u32 = 8;
 
 /// CAS: compare `rs` with memory at `rn`, store `rt` when equal; `rs` receives the old value.
 pub(package) const fn cas(size: u32, a: bool, r: bool, rs: u32, rt: u32, rn: u32) u32 {
-    let ab = if a {
-        0x00400000u32
-    } else {
-        0u32
-    };
-    let rb = if r {
-        0x8000u32
-    } else {
-        0u32
-    };
+    let ab = ast::pick(a, 0x00400000u32, 0u32);
+    let rb = ast::pick(r, 0x8000u32, 0u32);
     return size << 30 | 0x08A07C00 | ab | rb | rs << 16 | rn << 5 | rt;
 }
 

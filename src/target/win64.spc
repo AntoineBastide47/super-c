@@ -15,6 +15,7 @@
 // takes.
 import lir::ir as *;
 import codegen::abi as *;
+import ast::ast as ast;
 
 /// Integer argument register of position `k` (0 to 3): rcx, rdx, r8, r9.
 pub(package) const fn gp_arg(k: u32) u8 {
@@ -47,14 +48,6 @@ pub(package) fn pairs_in(b: &Body, sig: u32) bool {
     return false;
 }
 
-// The size of signature type `pt`.
-fn size_of(b: &Body, pt: u32, ptr: u32) u32 {
-    if (pt & AGG) != 0 {
-        return b.pool[(pt & ~AGG) as usize];
-    }
-    return type_bytes(pt as u8, ptr);
-}
-
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers), by Super-C's own convention when `sc`.
 /// C passes every vector as a struct, so the package's `vec_regs` changes nothing.
 pub(package) fn classify(b: &Body, sig: u32, ptr: u32, sc: bool, out: &mut CallLayout) {
@@ -64,18 +57,14 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, sc: bool, out: &mut CallL
     // An aggregate passes by its size alone: its leaves never matter.
     out.unknown = false;
     let fixed = b.pool[sig as usize + 1];
-    let nfixed = if (fixed & SIG_VARIADIC) != 0 {
-        fixed & ~SIG_VARIADIC
-    } else {
-        np
-    };
+    let nfixed = nfixed(fixed, np);
     let two = sc && (fixed & SIG_VARIADIC) == 0;
     // The position of the next argument.
     let mut at: u32 = 0;
     let rt = b.pool[sig as usize + 2];
     let mut r = none();
     if rt != T_NONE as u32 {
-        let n = size_of(b, rt, ptr);
+        let n = size_align(b, rt, ptr).0;
         let t = rt as u8;
         r.p0 = out.parts.len() as u32;
         if (rt & AGG) == 0 && is_float(t) {
@@ -103,7 +92,7 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, sc: bool, out: &mut CallL
         }
         let pt = b.pool[(sig + 3 + k) as usize];
         let t = pt as u8;
-        let n = size_of(b, pt, ptr);
+        let n = size_align(b, pt, ptr).0;
         let agg = (pt & AGG) != 0;
         let mut loc = none();
         loc.p0 = out.parts.len() as u32;
@@ -149,25 +138,13 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, sc: bool, out: &mut CallL
                     out.parts.push(Part { reg: gp_arg(at), v: false, size: n as u8, off: 0 });
                 }
                 if !agg && !is_vec(t) && !flt && n < 4 {
-                    loc.ext = if (pt & SIG_SEXT) != 0 {
-                        2
-                    } else {
-                        1
-                    };
+                    loc.ext = ast::pick((pt & SIG_SEXT) != 0, 2, 1);
                 }
             }
         } else {
-            loc.kind = if byref {
-                L_REF_STACK
-            } else {
-                L_STACK
-            };
+            loc.kind = ast::pick(byref, L_REF_STACK, L_STACK);
             loc.off = 32 + 8 * (at - 4);
-            loc.size = if byref {
-                8
-            } else {
-                n
-            };
+            loc.size = ast::pick(byref, 8, n);
         }
         at += 1;
         out.locs.push(loc);
@@ -215,11 +192,7 @@ fn copy_sig(src: &Body, sig: u32, dst: &mut Body) u32 {
 /// bodies and data are a cached unit's, whose object has its own thunks. False, with the reason in `err`,
 /// when the package records no signature of such a function.
 pub(package) fn thunks(p: &mut Package, err: &mut String) bool {
-    let nb = if p.held.body == NONE {
-        p.bodies.len()
-    } else {
-        p.held.body as usize
-    };
+    let nb = p.held_bodies();
     let nd = if p.held.data == NONE {
         p.data.len()
     } else {
@@ -361,21 +334,7 @@ fn thunk(p: &mut Package, s: u32, o: u32, made: &mut Map<u64, u32>, err: &mut St
         rt as u8
     };
     let v = b.emit(Inst { op: O_CALL, ty: rty, aux: types.len() as u16, a: fs, b: ns, c: al }, 0);
-    let _ = b.emit(
-        Inst {
-            op: O_RET,
-            ty: T_NONE,
-            aux: 0,
-            a: if rty == T_NONE {
-                VNONE
-            } else {
-                v
-            },
-            b: VNONE,
-            c: VNONE,
-        },
-        0,
-    );
+    let _ = b.emit(Inst { op: O_RET, ty: T_NONE, aux: 0, a: ast::pick(rty == T_NONE, VNONE, v), b: VNONE, c: VNONE }, 0);
     b.sig = ns;
     // An object's number tells its thunks apart (a package of no unit has one each).
     let mut name = format("{}.msabi", p.spell(p.syms[s as usize].name));

@@ -4,6 +4,8 @@
 // relocation.
 import target::wasm as w;
 import target::wasmtab as t;
+import ast::ast as ast;
+import codegen::obj as ob;
 
 /// A symbol an instruction names: the relocation kind (`w::R_*`; for `R_TYPE_INDEX_LEB` the name is a
 /// signature, `(i32, i64) -> (f32)`), the name, the addend and the field's offset from the
@@ -110,26 +112,14 @@ pub(package) fn float_bits(s: str, i: &mut usize, f64: bool, out: &mut u64) bool
         neg = s.byte_at(j) == b'-';
         j += 1;
     }
-    let mb: u32 = if f64 {
-        52
-    } else {
-        23
-    };
-    let eb: u32 = if f64 {
-        11
-    } else {
-        8
-    };
+    let mb: u32 = ast::pick(f64, 52, 23);
+    let eb: u32 = ast::pick(f64, 11, 8);
     let sign: u64 = neg as u64 << mb + eb;
     let emax: u64 = (1u64 << eb) - 1;
     let rest = s.slice(j, s.len());
     if rest.starts_with("infinity") || rest.starts_with("inf") {
         *out = sign | emax << mb;
-        *i = j + if rest.starts_with("infinity") {
-            8usize
-        } else {
-            3usize
-        };
+        *i = j + ast::pick(rest.starts_with("infinity"), 8usize, 3usize);
         return true;
     }
     if rest.starts_with("nan") {
@@ -251,11 +241,7 @@ const fn round_bits(m0: u64, e0: i64, sticky0: bool, mb: u32, eb: u32) u64 {
     if keep <= 0 {
         // Below half the smallest subnormal rounds to 0; exactly half to 0 (even); above to it.
         let half = keep == 0 && (m > 1u64 << 63 || sticky0);
-        return if half {
-            1u64
-        } else {
-            0u64
-        };
+        return ast::pick(half, 1u64, 0u64);
     }
     let drop = 64 - keep as u32;
     let mut q = m >> drop;
@@ -282,16 +268,8 @@ const fn round_bits(m0: u64, e0: i64, sticky0: bool, mb: u32, eb: u32) u64 {
 /// The text of float bits `v` (`f64`, else `f32`): `infinity`, `nan`, `nan:0x<payload>`, or exact
 /// hexadecimal `0x1.<digits>p<exp>` (a subnormal normalized), each signed.
 pub(package) fn float_text(o: &mut String, v: u64, f64: bool) {
-    let mb: u32 = if f64 {
-        52
-    } else {
-        23
-    };
-    let eb: u32 = if f64 {
-        11
-    } else {
-        8
-    };
+    let mb: u32 = ast::pick(f64, 52, 23);
+    let eb: u32 = ast::pick(f64, 11, 8);
     let bias: i64 = (1i64 << eb - 1) - 1;
     if (v >> mb + eb & 1) != 0 {
         o.push_byte(b'-');
@@ -353,7 +331,7 @@ pub(package) fn float_text(o: &mut String, v: u64, f64: bool) {
 // ---- Instructions ----
 
 // The value type `w` names, 0 for none.
-const fn val_type(w: str) u8 {
+pub(package) const fn val_type(w: str) u8 {
     return switch w {
         "i32" => w::I32,
         "i64" => w::I64,
@@ -416,7 +394,7 @@ pub(package) fn signature(s: str, i: &mut usize, out: &mut String, enc: &mut Vec
             }
         }
         out.push_byte(b')');
-        w::uleb(enc, tys.len() as u64);
+        ob::uleb(enc, tys.len() as u64);
         enc.extend_copy(&tys);
     }
     return true;
@@ -490,11 +468,7 @@ pub(package) fn assemble(text: str, out: &mut Vector<u8>, fx: &mut Vector<Fix>, 
         t::K::FUNC | t::K::GLOBAL => {
             if !int(text, &mut i, &mut n.a) {
                 ok = sym_ref(text, &mut i, &mut sym, &mut add) && add == 0;
-                k1 = if r.imm == t::K::FUNC {
-                    w::R_FUNCTION_INDEX_LEB
-                } else {
-                    w::R_GLOBAL_INDEX_LEB
-                };
+                k1 = ast::pick(r.imm == t::K::FUNC, w::R_FUNCTION_INDEX_LEB, w::R_GLOBAL_INDEX_LEB);
                 n.wide |= 1;
             }
         },
@@ -736,11 +710,7 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
             o.push_str(" 0, 0");
         },
         t::K::V128 | t::K::SHUF => {
-            let lb: u32 = if r.imm == t::K::SHUF {
-                8
-            } else {
-                32
-            };
+            let lb: u32 = ast::pick(r.imm == t::K::SHUF, 8, 32);
             let cnt = 128 / lb;
             for k in 0..cnt {
                 o.push_str(

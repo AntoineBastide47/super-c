@@ -10,6 +10,7 @@
 import lir::ir as *;
 import lir::opt as lopt;
 import utils::persist as *;
+import ast::ast as ast;
 
 extend Inst as Persist {
     fn plain() bool {
@@ -305,23 +306,11 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
         let ok = r.inlinable(k);
         let mut f = HFunc {
             name: sv.name(sy.name),
-            flags: if r.shape_of(k) {
-                HELD_SHAPE
-            } else {
-                0u8
-            } | if ok {
-                HELD_OK
-            } else {
-                0u8
-            } | if sy.cold {
-                HELD_COLD
-            } else {
-                0u8
-            } | if sy.always {
-                HELD_ALWAYS
-            } else {
-                0u8
-            },
+            flags: ast::pick(r.shape_of(k), HELD_SHAPE, 0u8) | ast::pick(ok, HELD_OK, 0u8) | ast::pick(
+                sy.cold,
+                HELD_COLD,
+                0u8,
+            ) | ast::pick(sy.always, HELD_ALWAYS, 0u8),
             fx: sy.fx,
             wargs: r.wargs_of(k),
             esc: sy.esc,

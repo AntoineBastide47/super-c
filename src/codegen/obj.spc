@@ -3,6 +3,7 @@
 // its encoder); the format writer maps it to its own type. Names are C names: the writer adds the
 // format's prefix.
 import utils::names as nm;
+import ast::ast as ast;
 
 // Section kinds, in the order the writer lays them out.
 pub(package) const S_TEXT: u8 = 0; // code
@@ -146,7 +147,6 @@ pub(package) fn w16(o: &mut Vector<u8>, v: u32) {
     o.push((v >> 8 & 0xFF) as u8);
 }
 
-/// Append `v` to `o`, little-endian.
 /// `o` grown with zero bytes to `n` bytes, when shorter.
 pub(package) fn pad(o: &mut Vector<u8>, n: u64) {
     if o.len() as u64 < n {
@@ -154,6 +154,7 @@ pub(package) fn pad(o: &mut Vector<u8>, n: u64) {
     }
 }
 
+/// Append `v` to `o`, little-endian.
 pub(package) fn w32(o: &mut Vector<u8>, v: u32) {
     w16(o, v & 0xFFFF);
     w16(o, v >> 16);
@@ -260,11 +261,7 @@ extend Obj {
         let a = 1u64 << al as u64;
         let at = sec.size + a - 1 & ~(a - 1);
         if s != S_BSS && s != S_TBSS {
-            let fill = if sec.code || s == S_TEXT {
-                self.code_fill
-            } else {
-                0
-            };
+            let fill = ast::pick(sec.code || s == S_TEXT, self.code_fill, 0);
             while sec.bytes.len() as u64 < at {
                 sec.bytes.push(fill);
             }
@@ -428,3 +425,64 @@ pub(package) const NONE32: u32 = 0xFFFFFFFF;
 /// own.
 pub(package) const SPLIT_FUNCS: u8 = 1;
 pub(package) const SPLIT_DATA: u8 = 2;
+
+/// Append `x0` to `o` as an unsigned LEB128.
+pub(package) fn uleb(o: &mut Vector<u8>, x0: u64) {
+    let mut x = x0;
+    // At most 10 bytes: each takes 7 bits.
+    for _ in 0..10 {
+        let b = (x & 0x7F) as u8;
+        x = x >> 7;
+        if x == 0 {
+            o.push(b);
+            return;
+        }
+        o.push(b | 0x80);
+    }
+}
+
+/// Append `x0` to `o` as a signed LEB128.
+pub(package) fn sleb(o: &mut Vector<u8>, x0: i64) {
+    let mut x = x0;
+    // At most 10 bytes: each takes 7 bits.
+    for _ in 0..10 {
+        let b = (x & 0x7F) as u8;
+        x = x >> 7;
+        if x == 0 && (b & 0x40) == 0 || x == -1 && (b & 0x40) != 0 {
+            o.push(b);
+            return;
+        }
+        o.push(b | 0x80);
+    }
+}
+
+/// Append `s` and a terminating zero to string table `t`; its offset.
+pub(package) fn put_str(t: &mut Vector<u8>, s: str) u32 {
+    let at = t.len() as u32;
+    for i in 0..s.len() {
+        t.push(s.byte_at(i));
+    }
+    t.push(0);
+    return at;
+}
+
+/// `s` in `n` bytes, cut or padded with zeros.
+pub(package) fn put_padded(o: &mut Vector<u8>, s: str, n: usize) {
+    for i in 0..n {
+        o.push(
+            if i < s.len() {
+                s.byte_at(i)
+            } else {
+                0
+            },
+        );
+    }
+}
+
+/// A 32-bit big-endian word.
+pub(package) fn w32be(o: &mut Vector<u8>, v: u32) {
+    o.push((v >> 24) as u8);
+    o.push((v >> 16 & 0xFF) as u8);
+    o.push((v >> 8 & 0xFF) as u8);
+    o.push((v & 0xFF) as u8);
+}

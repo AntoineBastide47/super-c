@@ -2,7 +2,9 @@
 // buffer. Registers are numbers: rax 0, rcx 1, rdx 2, rbx 3, rsp 4, rbp 5, rsi 6, rdi 7, r8..r15 8..15;
 // xmm0..xmm15 are 0..15 in the vector forms. `sz` is an operand size in bytes: 1, 2, 4 or 8. A memory
 // operand is a base register (or RIP), an optional index scaled by 1, 2, 4 or 8, and a 32-bit
-// displacement; a RIP-relative one leaves its displacement for a relocation (`Mem::rip`, `RIP_AT`).
+// displacement; a RIP-relative one leaves its displacement for a relocation (`Mem::rip`, `Code.rip_at`).
+
+import ast::ast as ast;
 
 /// Relocation kinds (`codegen::obj::ORel.kind`): a 32-bit PC-relative field (its addend counts from the
 /// field: -4 and less), a call through the PLT, the address slot of a symbol in the GOT (relaxable), the
@@ -628,31 +630,9 @@ extend Code {
     /// zero-extend unless `sx`.
     pub(package) fn load(self: &mut Self, sz: u32, sx: bool, dst: u8, m: Mem) {
         if sz == 1 {
-            self.rm(
-                0,
-                if sx {
-                    0x0FBE
-                } else {
-                    0x0FB6
-                },
-                sx,
-                dst,
-                m,
-                false,
-            );
+            self.rm(0, ast::pick(sx, 0x0FBEu32, 0x0FB6), sx, dst, m, false);
         } else if sz == 2 {
-            self.rm(
-                0,
-                if sx {
-                    0x0FBF
-                } else {
-                    0x0FB7
-                },
-                sx,
-                dst,
-                m,
-                false,
-            );
+            self.rm(0, ast::pick(sx, 0x0FBFu32, 0x0FB7), sx, dst, m, false);
         } else if sz == 4 && sx {
             self.rm(0, 0x63, true, dst, m, false);
         } else {
@@ -663,35 +643,13 @@ extend Code {
     /// The low `sz` bytes of `src` to `m`.
     pub(package) fn store(self: &mut Self, sz: u32, src: u8, m: Mem) {
         self.osize(sz);
-        self.rm(
-            0,
-            if sz == 1 {
-                0x88u32
-            } else {
-                0x89u32
-            },
-            sz == 8,
-            src,
-            m,
-            sz == 1,
-        );
+        self.rm(0, ast::pick(sz == 1, 0x88u32, 0x89u32), sz == 8, src, m, sz == 1);
     }
 
     /// `sz` bytes of immediate `v` (sign-extended from 32 bits for 8) to `m`.
     pub(package) fn store_i(self: &mut Self, sz: u32, v: i32, m: Mem) {
         self.osize(sz);
-        self.rm(
-            0,
-            if sz == 1 {
-                0xC6u32
-            } else {
-                0xC7u32
-            },
-            sz == 8,
-            0,
-            m,
-            false,
-        );
+        self.rm(0, ast::pick(sz == 1, 0xC6u32, 0xC7u32), sz == 8, 0, m, false);
         if sz == 1 {
             self.byte(v as u32);
         } else if sz == 2 {
@@ -734,16 +692,7 @@ extend Code {
     /// `dst` = `dst` op `src` (`ADD` .. `CMP`).
     pub(package) fn alu_rr(self: &mut Self, op: u32, sz: u32, dst: u8, src: u8) {
         self.osize(sz);
-        self.rr_both(
-            (op << 3) + if sz == 1 {
-                0u32
-            } else {
-                1u32
-            },
-            sz,
-            src,
-            dst,
-        );
+        self.rr_both((op << 3) + ast::pick(sz == 1, 0u32, 1u32), sz, src, dst);
     }
 
     // `op r/m, reg` of `sz` bytes where both registers are operands of that size: a byte register
@@ -757,18 +706,7 @@ extend Code {
     /// `dst` = `dst` op `[m]`.
     pub(package) fn alu_rm(self: &mut Self, op: u32, sz: u32, dst: u8, m: Mem) {
         self.osize(sz);
-        self.rm(
-            0,
-            (op << 3) + if sz == 1 {
-                2u32
-            } else {
-                3u32
-            },
-            sz == 8,
-            dst,
-            m,
-            sz == 1,
-        );
+        self.rm(0, (op << 3) + ast::pick(sz == 1, 2u32, 3u32), sz == 8, dst, m, sz == 1);
     }
 
     /// `dst` = `dst` op `k` (a sign-extended 32-bit immediate; 8 bits when it fits).
@@ -825,18 +763,7 @@ extend Code {
     /// `[m]` op= `src`.
     pub(package) fn alu_mr(self: &mut Self, op: u32, sz: u32, m: Mem, src: u8) {
         self.osize(sz);
-        self.rm(
-            0,
-            (op << 3) + if sz == 1 {
-                0u32
-            } else {
-                1u32
-            },
-            sz == 8,
-            src,
-            m,
-            sz == 1,
-        );
+        self.rm(0, (op << 3) + ast::pick(sz == 1, 0u32, 1u32), sz == 8, src, m, sz == 1);
     }
 
     /// `[m]` op= `k` (`CMP` compares).
@@ -864,16 +791,7 @@ extend Code {
     /// The flags of `a` & `b`.
     pub(package) fn test_rr(self: &mut Self, sz: u32, a: u8, b: u8) {
         self.osize(sz);
-        self.rr_both(
-            if sz == 1 {
-                0x84u32
-            } else {
-                0x85u32
-            },
-            sz,
-            b,
-            a,
-        );
+        self.rr_both(ast::pick(sz == 1, 0x84u32, 0x85u32), sz, b, a);
     }
 
     /// The flags of `a` & `k` (`sz` 1: the low byte against 8 bits).
@@ -902,18 +820,7 @@ extend Code {
     /// An `F7` group operation on `r` (`NOT`, `NEG`, `MUL`, `IMUL1`, `DIV`, `IDIV`).
     pub(package) fn unary(self: &mut Self, op: u32, sz: u32, r: u8) {
         self.osize(sz);
-        self.rr(
-            0,
-            if sz == 1 {
-                0xF6u32
-            } else {
-                0xF7u32
-            },
-            sz == 8,
-            op as u8,
-            r,
-            sz == 1,
-        );
+        self.rr(0, ast::pick(sz == 1, 0xF6u32, 0xF7u32), sz == 8, op as u8, r, sz == 1);
     }
 
     /// `dst` = `dst` * `src` (the low `sz` bytes; sz 4 or 8).
@@ -949,29 +856,14 @@ extend Code {
     /// Shift `r` by cl (`SHL`, `SHR`, `SAR`, `ROL`, `ROR`).
     pub(package) fn shift_cl(self: &mut Self, op: u32, sz: u32, r: u8) {
         self.osize(sz);
-        self.rr(
-            0,
-            if sz == 1 {
-                0xD2u32
-            } else {
-                0xD3u32
-            },
-            sz == 8,
-            op as u8,
-            r,
-            sz == 1,
-        );
+        self.rr(0, ast::pick(sz == 1, 0xD2u32, 0xD3u32), sz == 8, op as u8, r, sz == 1);
     }
 
     /// Shift `r` by `k` (below the width).
     pub(package) fn shift_ri(self: &mut Self, op: u32, sz: u32, r: u8, k: u32) {
         self.osize(sz);
         // A shift by 1 has a form without the immediate.
-        let one: u32 = if k == 1 {
-            0x10
-        } else {
-            0
-        };
+        let one: u32 = ast::pick(k == 1, 0x10, 0);
         self.rr(
             0,
             if sz == 1 {
@@ -991,18 +883,7 @@ extend Code {
 
     /// shld (`left`) or shrd `dst`, `src`, cl: 64 bits.
     pub(package) fn shd_cl(self: &mut Self, left: bool, dst: u8, src: u8) {
-        self.rr(
-            0,
-            if left {
-                0x0FA5u32
-            } else {
-                0x0FADu32
-            },
-            true,
-            src,
-            dst,
-            false,
-        );
+        self.rr(0, ast::pick(left, 0x0FA5u32, 0x0FADu32), true, src, dst, false);
     }
 
     /// rdx:rax = sign extension of rax (`sz` 8: cqo; 4: cdq).
@@ -1025,18 +906,7 @@ extend Code {
 
     /// bsr (`rev`) or bsf `dst`, `src`: the index of the highest (lowest) set bit; ZF when `src` is 0.
     pub(package) fn bsx(self: &mut Self, rev: bool, sz: u32, dst: u8, src: u8) {
-        self.rr(
-            0,
-            if rev {
-                0x0FBDu32
-            } else {
-                0x0FBCu32
-            },
-            sz == 8,
-            dst,
-            src,
-            false,
-        );
+        self.rr(0, ast::pick(rev, 0x0FBDu32, 0x0FBCu32), sz == 8, dst, src, false);
     }
 
     /// CF = bit `k` (below 64) of `r`.
@@ -1055,54 +925,21 @@ extend Code {
     /// xchg `r`, `[m]` (locked).
     pub(package) fn xchg_m(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
-        self.rm(
-            0,
-            if sz == 1 {
-                0x86u32
-            } else {
-                0x87u32
-            },
-            sz == 8,
-            r,
-            m,
-            sz == 1,
-        );
+        self.rm(0, ast::pick(sz == 1, 0x86u32, 0x87u32), sz == 8, r, m, sz == 1);
     }
 
     /// lock xadd `[m]`, `r`.
     pub(package) fn lock_xadd(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
         self.byte(0xF0);
-        self.rm(
-            0,
-            if sz == 1 {
-                0x0FC0u32
-            } else {
-                0x0FC1u32
-            },
-            sz == 8,
-            r,
-            m,
-            sz == 1,
-        );
+        self.rm(0, ast::pick(sz == 1, 0x0FC0u32, 0x0FC1u32), sz == 8, r, m, sz == 1);
     }
 
     /// lock cmpxchg `[m]`, `r` (compares with rax).
     pub(package) fn lock_cmpxchg(self: &mut Self, sz: u32, r: u8, m: Mem) {
         self.osize(sz);
         self.byte(0xF0);
-        self.rm(
-            0,
-            if sz == 1 {
-                0x0FB0u32
-            } else {
-                0x0FB1u32
-            },
-            sz == 8,
-            r,
-            m,
-            sz == 1,
-        );
+        self.rm(0, ast::pick(sz == 1, 0x0FB0u32, 0x0FB1u32), sz == 8, r, m, sz == 1);
     }
 
     pub(package) fn mfence(self: &mut Self) {
@@ -1414,35 +1251,13 @@ extend Code {
 
     /// cvtsi2ss or cvtsi2sd (`d`) xmm `dst` = the signed `sz`-byte (4 or 8) integer in `src`.
     pub(package) fn cvtsi2f(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
-        self.rr(
-            if d {
-                0xF2u32
-            } else {
-                0xF3u32
-            },
-            0x0F2A,
-            sz == 8,
-            dst,
-            src,
-            false,
-        );
+        self.rr(ast::pick(d, 0xF2u32, 0xF3u32), 0x0F2A, sz == 8, dst, src, false);
     }
 
     /// cvttss2si or cvttsd2si (`d`): `dst` = xmm `src` truncated to a signed `sz`-byte integer
     /// (0x80..0 when out of range or NaN).
     pub(package) fn cvtf2si(self: &mut Self, d: bool, sz: u32, dst: u8, src: u8) {
-        self.rr(
-            if d {
-                0xF2u32
-            } else {
-                0xF3u32
-            },
-            0x0F2C,
-            sz == 8,
-            dst,
-            src,
-            false,
-        );
+        self.rr(ast::pick(d, 0xF2u32, 0xF3u32), 0x0F2C, sz == 8, dst, src, false);
     }
 
     /// vfmadd231sd (`d`) or vfmadd231ss: xmm `dst` = xmm `a` * xmm `b` + xmm `dst` (VEX.LIG.66.0F38 B9).
@@ -1453,13 +1268,7 @@ extend Code {
         }
         self.byte(0xC4);
         self.byte((~(dst as u32) >> 3 & 1) << 7 | 1u32 << 6 | (~(b as u32) >> 3 & 1) << 5 | 2);
-        self.byte(
-            if d {
-                0x80u32
-            } else {
-                0u32
-            } | (~(a as u32) & 15) << 3 | 1,
-        );
+        self.byte(ast::pick(d, 0x80u32, 0u32) | (~(a as u32) & 15) << 3 | 1);
         self.byte(0xB9);
         self.modrm_rr(dst, b);
     }
@@ -1470,21 +1279,7 @@ extend Code {
     pub(package) fn ymov(self: &mut Self, load: bool, r: u8, m: Mem) {
         if r >= 16 {
             // vmovdqu32 (EVEX.256.F3.0F.W0).
-            self.evex_m(
-                0xF3,
-                1,
-                if load {
-                    0x6Fu32
-                } else {
-                    0x7Fu32
-                },
-                false,
-                1,
-                r,
-                0,
-                m,
-                32,
-            );
+            self.evex_m(0xF3, 1, ast::pick(load, 0x6Fu32, 0x7Fu32), false, 1, r, 0, m, 32);
             return;
         }
         // Map 0F, prefix F3, L = 1: the two-byte form unless the index or the base needs its REX bit.
@@ -1507,39 +1302,19 @@ extend Code {
             self.byte(rb | xb | bb | 1);
             self.byte(0x78 | 4 | 2);
         }
-        self.byte(
-            if load {
-                0x6Fu32
-            } else {
-                0x7Fu32
-            },
-        );
+        self.byte(ast::pick(load, 0x6Fu32, 0x7Fu32));
         self.modrm_m(r, m);
     }
 
     /// vmovdqu64 of 64 bytes (EVEX.512): zmm `r` from (`load`) or to `m`. Its 8-bit displacement counts
     /// in 64-byte units.
     pub(package) fn zmov(self: &mut Self, load: bool, r: u8, m: Mem) {
-        self.evex_m(
-            0xF3,
-            1,
-            if load {
-                0x6Fu32
-            } else {
-                0x7Fu32
-            },
-            true,
-            2,
-            r,
-            0,
-            m,
-            64,
-        );
+        self.evex_m(0xF3, 1, ast::pick(load, 0x6Fu32, 0x7Fu32), true, 2, r, 0, m, 64);
     }
 }
 
 // The VEX and EVEX `pp` field of legacy prefix `pfx` (0, 0x66, 0xF3 or 0xF2).
-const fn pp_of(pfx: u32) u32 {
+pub(package) const fn pp_of(pfx: u32) u32 {
     return if pfx == 0x66 {
         1
     } else if pfx == 0xF3 {
@@ -1619,11 +1394,7 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
     let n0 = pfx == 0;
     if map == 0x0F {
         // Floats: single (no prefix, F3) W0, double (66, F2) W1; the scalar ones (F3, F2) read 4 or 8 bytes.
-        let fw = if p66 || sd {
-            EV_W1
-        } else {
-            EV_W0
-        };
+        let fw = ast::pick(p66 || sd, EV_W1, EV_W0);
         let fs = if ss {
             EV_N4
         } else if sd {
@@ -1635,21 +1406,13 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
             return if (ss || sd) && mem {
                 fw | fs
             } else if ss || sd {
-                fw | fs | if o == 0x10 {
-                    EV_NDS
-                } else {
-                    EV_NDM
-                }
+                fw | fs | ast::pick(o == 0x10, EV_NDS, EV_NDM)
             } else {
                 fw
             };
         }
         if (o == 0x12 || o == 0x16) && (n0 || p66 && mem) {
-            return fw | EV_NDS | if mem {
-                EV_N8
-            } else {
-                EV_FULL
-            };
+            return fw | EV_NDS | ast::pick(mem, EV_N8, EV_FULL);
         }
         if o == 0x12 && sd {
             return EV_W1 | EV_N8;
@@ -1673,18 +1436,10 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
             return EV_WW | fs;
         }
         if (o == 0x2E || o == 0x2F) && (n0 || p66) {
-            return fw | if p66 {
-                EV_N8
-            } else {
-                EV_N4
-            };
+            return fw | ast::pick(p66, EV_N8, EV_N4);
         }
         if o == 0x51 {
-            return fw | fs | if ss || sd {
-                EV_NDS
-            } else {
-                EV_MOV
-            };
+            return fw | fs | ast::pick(ss || sd, EV_NDS, EV_MOV);
         }
         if o >= 0x58 && o <= 0x5F && o != 0x5A && o != 0x5B {
             return fw | fs | EV_NDS;
@@ -1725,11 +1480,7 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
         }
         // Shifts by an immediate: `psrlq` and `psllq` (73 /2, /6) take W1.
         if o >= 0x71 && o <= 0x73 && !mem {
-            return EV_NDD | if o == 0x73 && (dg == 2 || dg == 6) {
-                EV_W1
-            } else {
-                EV_W0
-            };
+            return EV_NDD | ast::pick(o == 0x73 && (dg == 2 || dg == 6), EV_W1, EV_W0);
         }
         if o == 0xC4 {
             return EV_W0 | EV_NDS | EV_N2;
@@ -1742,15 +1493,7 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
         if lane {
             let q = o == 0xD4 || o == 0xFB || o == 0xF4 || o == 0x6C || o == 0x6D || o == 0xD3 || o == 0xF3;
             let sh = o == 0xD1 || o == 0xD2 || o == 0xD3 || o == 0xE1 || o == 0xE2 || o == 0xF1 || o == 0xF2 || o == 0xF3;
-            return EV_NDS | if q {
-                EV_W1
-            } else {
-                EV_W0
-            } | if sh {
-                EV_N16
-            } else {
-                EV_FULL
-            };
+            return EV_NDS | ast::pick(q, EV_W1, EV_W0) | ast::pick(sh, EV_N16, EV_FULL);
         }
         return EV_NONE;
     }
@@ -1806,11 +1549,7 @@ const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
         // up) read one lane.
         let lo = o & 0xF;
         if o >= 0x96 && o <= 0xBF && lo >= 6 {
-            return EV_WW | EV_NDS | if lo >= 9 && (lo & 1) == 1 {
-                EV_NW
-            } else {
-                EV_FULL
-            };
+            return EV_WW | EV_NDS | ast::pick(lo >= 9 && (lo & 1) == 1, EV_NW, EV_FULL);
         }
         return EV_NONE;
     }

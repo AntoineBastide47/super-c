@@ -13,6 +13,9 @@ import link::ar;
 import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
+import ast::ast as ast;
+import codegen::obj as ob;
+import target::elf as *;
 
 const NONE: u32 = 0xFFFFFFFF;
 
@@ -39,30 +42,16 @@ pub(package) struct Opts {
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
 const SHT_HASH: u32 = 5;
 const SHT_DYNAMIC: u32 = 6;
-const SHT_NOBITS: u32 = 8;
 const SHT_DYNSYM: u32 = 11;
-const SHT_INIT_ARRAY: u32 = 14;
-const SHT_FINI_ARRAY: u32 = 15;
-const SHT_PREINIT_ARRAY: u32 = 16;
 const SHT_GROUP: u32 = 17;
 const SHT_NOTE: u32 = 7;
-const SHT_X86_64_UNWIND: u32 = 0x70000001;
 const SHT_GNU_VERDEF: u32 = 0x6FFFFFFD;
 const SHT_GNU_VERNEED: u32 = 0x6FFFFFFE;
 const SHT_GNU_VERSYM: u32 = 0x6FFFFFFF;
 
-const SHF_WRITE: u64 = 1;
-const SHF_ALLOC: u64 = 2;
-const SHF_EXECINSTR: u64 = 4;
-const SHF_TLS: u64 = 0x400;
 const SHF_LINK_ORDER: u64 = 0x80;
-const SHF_GNU_RETAIN: u64 = 0x200000;
 
 const SHN_UNDEF: u32 = 0;
 const SHN_ABS: u32 = 0xFFF1;
@@ -119,42 +108,19 @@ const DF_1_NOW: u64 = 1;
 const DF_1_PIE: u64 = 0x08000000;
 
 // x86-64 relocation types.
-const X_64: u32 = 1;
-const X_PC32: u32 = 2;
-const X_PLT32: u32 = 4;
 const X_GLOB_DAT: u32 = 6;
 const X_RELATIVE: u32 = 8;
 const X_GOTPCREL: u32 = 9;
-const X_32: u32 = 10;
 const X_32S: u32 = 11;
-const X_TLSGD: u32 = 19;
-const X_GOTTPOFF: u32 = 22;
-const X_TPOFF32: u32 = 23;
 const X_PC64: u32 = 24;
 const X_TPOFF64: u32 = 18;
-const X_GOTPCRELX: u32 = 41;
-const X_REX_GOTPCRELX: u32 = 42;
 
 // arm64 relocation types.
-const A_ABS64: u32 = 257;
-const A_ABS32: u32 = 258;
 const A_PREL64: u32 = 260;
-const A_PREL32: u32 = 261;
 const A_LD_PREL_LO19: u32 = 273;
 const A_ADR_PREL_LO21: u32 = 274;
-const A_ADR_PREL_PG_HI21: u32 = 275;
-const A_ADD_ABS_LO12_NC: u32 = 277;
-const A_LDST8_ABS_LO12_NC: u32 = 278;
 const A_TSTBR14: u32 = 279;
 const A_CONDBR19: u32 = 280;
-const A_JUMP26: u32 = 282;
-const A_CALL26: u32 = 283;
-const A_LDST16_ABS_LO12_NC: u32 = 284;
-const A_LDST32_ABS_LO12_NC: u32 = 285;
-const A_LDST64_ABS_LO12_NC: u32 = 286;
-const A_LDST128_ABS_LO12_NC: u32 = 299;
-const A_ADR_GOT_PAGE: u32 = 311;
-const A_LD64_GOT_LO12_NC: u32 = 312;
 const A_TLSIE_ADR_GOTTPREL_PAGE21: u32 = 541;
 const A_TLSIE_LD64_GOTTPREL_LO12_NC: u32 = 542;
 const A_TLSLE_MOVW_TPREL_G2: u32 = 544;
@@ -166,10 +132,6 @@ const A_TLSLE_LDST8_TPREL_LO12: u32 = 552;
 const A_TLSLE_LDST64_TPREL_LO12_NC: u32 = 559;
 const A_TLSLE_LDST128_TPREL_LO12: u32 = 570;
 const A_TLSLE_LDST128_TPREL_LO12_NC: u32 = 571;
-const A_TLSDESC_ADR_PAGE21: u32 = 562;
-const A_TLSDESC_LD64_LO12: u32 = 563;
-const A_TLSDESC_ADD_LO12: u32 = 564;
-const A_TLSDESC_CALL: u32 = 569;
 const A_GLOB_DAT: u32 = 1025;
 const A_RELATIVE: u32 = 1027;
 const A_TLS_TPREL64: u32 = 1030;
@@ -197,7 +159,6 @@ struct IFile {
     pub(package) path: u32,
     pub(package) at: usize,
     pub(package) sec0: u32,
-    pub(package) nsec: u32,
     pub(package) sym0: u32,
     pub(package) nsym: u32,
 }
@@ -262,7 +223,6 @@ struct GSym {
     pub(package) got: u32,
     pub(package) plt: u32,
     pub(package) dynix: u32, // `.dynsym` index
-    pub(package) weak: bool,
     pub(package) used: bool, // a kept relocation refers to it
     pub(package) strong: bool, // an object references it with a global (not weak) undefined symbol
     pub(package) func: bool,
@@ -362,18 +322,13 @@ const O_PLT: usize = 10;
 const O_DYNAMIC: usize = 11;
 const O_GOT: usize = 12;
 const O_BSS: usize = 13;
-const O_DATA: usize = 14;
-const O_COUNT: usize = 15;
+const O_COUNT: usize = 14;
 
 /// Link `o`. False with the reason in `err` when it fails.
 pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         a64: o.a64,
-        page: if o.a64 {
-            0x10000u64
-        } else {
-            0x1000u64
-        },
+        page: ast::pick(o.a64, 0x10000u64, 0x1000u64),
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),
         secs: Vector::<ISec>::new(),
@@ -419,17 +374,12 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
         let at = blob.len();
-        if lu::take_held(o.mem, p, blob) {
-            if !parse_object(l, p, at, blob) {
-                return false;
-            }
-            continue;
-        }
-        if ar::is_archive(p) {
+        let held = lu::take_held(o.mem, p, blob);
+        if !held && ar::is_archive(p) {
             if !ars.add(nat::OBJ_ELF, p, &mut l.err) {
                 return false;
             }
-        } else if !read_object(l, p, blob) {
+        } else if !held && !lu::read_input(p, blob, &mut l.err) || !parse_object(l, p, at, blob) {
             return false;
         }
     }
@@ -501,23 +451,10 @@ extend L as ar::Members {
 
 // ---- input ----------------------------------------------------------------------------------------------
 
-fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
-    let at = blob.len();
-    if !lu::read_append(path, blob) {
-        l.err.format_into("cannot read '{}'", path);
-        return false;
-    }
-    return parse_object(l, path, at, blob);
-}
-
 // Record the sections and symbols of the object at `at` of the blob, named `path`.
 fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
     let b = blob.as_slice();
-    let mach: u32 = if l.a64 {
-        183
-    } else {
-        62
-    };
+    let mach: u32 = ast::pick(l.a64, 183, 62);
     if b.len() - at < 64 || lu::r32(b, at) != 0x464C457F || b[at + 4] != 2 || lu::r16(b, at + 16) != 1 || lu::r16(
         b,
         at + 18,
@@ -590,9 +527,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
         }
         nsym = n as u32;
     }
-    l.files.push(
-        IFile { path: (l.paths.len() - 1) as u32, at: at, sec0: sec0, nsec: shnum as u32, sym0: sym0, nsym: nsym },
-    );
+    l.files.push(IFile { path: (l.paths.len() - 1) as u32, at: at, sec0: sec0, sym0: sym0, nsym: nsym });
     return true;
 }
 
@@ -614,7 +549,6 @@ fn global(l: &mut L, id: u32) u32 {
                 got: NONE,
                 plt: NONE,
                 dynix: 0,
-                weak: false,
                 used: false,
                 strong: false,
                 func: false,
@@ -764,11 +698,7 @@ struct LibDirs {
 
 // The library directories of link `o`.
 fn lib_dirs(o: &Opts) LibDirs {
-    let sys: []str = if o.a64 {
-        DIRS_A64
-    } else {
-        DIRS_X64
-    };
+    let sys: []str = ast::pick(o.a64, DIRS_A64, DIRS_X64);
     let mut ld = LibDirs { dirs: Vector::<String>::new(), ents: Vector::<Option<Vector<String>>>::new() };
     for i in 0..o.dirs.len() {
         ld.dirs.push(o.dirs[i].clone());
@@ -1015,8 +945,7 @@ fn load_so(l: &mut L, path: str) bool {
 // a `__sc_zst_<A>` sentinel, a weak reference and any other undefined one are errors but for a weak one,
 // which stays zero.
 fn finish_symbols(l: &mut L) bool {
-    let mut missing = String::new();
-    let mut nmiss: usize = 0;
+    let mut miss = lu::Missing::new();
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
         if gy.kind != G_UNDEF {
@@ -1037,19 +966,9 @@ fn finish_symbols(l: &mut L) bool {
             m.lib = NONE;
             continue;
         }
-        nmiss += 1;
-        if nmiss <= 20 {
-            missing.format_into("\n  {}", s);
-        }
+        miss.add(s);
     }
-    if nmiss != 0 {
-        l.err.format_into("{} undefined symbol(s):{}", nmiss, missing.as_str());
-        if nmiss > 20 {
-            l.err.push_str("\n  ...");
-        }
-        return false;
-    }
-    return true;
+    return miss.report(&mut l.err);
 }
 
 // glibc 2.34's `__libc_start_main` runs the executable's initializers itself; an older one leaves them to
@@ -1244,21 +1163,30 @@ fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, lo: u64, hi:
     }
 }
 
-// Mark live the section that defines symbol `k` (a global: its definition).
-fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
+// The input section that symbol `k` (through its global) is defined in, or NONE32 when it is undefined or
+// absolute.
+const fn def_section(l: &L, k: u32) u32 {
     let mut d = k;
     let g = gof(l, k);
     if g != NONE {
         if l.gs[g as usize].kind != G_DEF {
-            return;
+            return NONE32;
         }
         d = l.gs[g as usize].sym;
     }
     let y = l.syms[d as usize];
     if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
+        return NONE32;
+    }
+    return l.files[y.file as usize].sec0 + y.shndx;
+}
+
+// Mark live the section that defines symbol `k` (a global: its definition).
+fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
+    let s = def_section(l, k);
+    if s == NONE32 {
         return;
     }
-    let s = l.files[y.file as usize].sec0 + y.shndx;
     let sc = l.secs[s as usize];
     if alloc(sc) && !sc.live && l.sn.spell(sc.name) != ".eh_frame" {
         l.secs.index_mut(s as usize).live = true;
@@ -1275,19 +1203,7 @@ fn reloc_section(l: &L, b: []u8, s: u32, ix: []u64, off: u64) u32 {
         let rs = l.secs[sc.rela as usize];
         let f = l.files[sc.file as usize];
         let r = rel_at(b, rs, (ix[k] & 0xFFFFFFFF) as usize);
-        let mut d = f.sym0 + r.sym;
-        let g = gof(l, d);
-        if g != NONE {
-            if l.gs[g as usize].kind != G_DEF {
-                return NONE32;
-            }
-            d = l.gs[g as usize].sym;
-        }
-        let y = l.syms[d as usize];
-        if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
-            return NONE32;
-        }
-        return l.files[y.file as usize].sec0 + y.shndx;
+        return def_section(l, f.sym0 + r.sym);
     }
     return NONE32;
 }
@@ -1337,18 +1253,7 @@ fn eh_records(l: &mut L, b: []u8, e: u32, ix: []u64) {
             let fs = reloc_section(l, b, e, ix, (p + 8) as u64);
             keep = fs == NONE32 || l.secs[fs as usize].live;
         }
-        l.eh.push(
-            EhRec {
-                old: p as u32,
-                len: (4 + len) as u32,
-                new: if keep {
-                    0u32
-                } else {
-                    NONE32
-                },
-                cie: cie,
-            },
-        );
+        l.eh.push(EhRec { old: p as u32, len: (4 + len) as u32, new: ast::pick(keep, 0u32, NONE32), cie: cie });
         p += 4 + len;
     }
     let last = l.eh.len() as u32;
@@ -1395,11 +1300,7 @@ fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
         }
     }
     let r = l.eh[lo as usize];
-    return if off < r.old + r.len {
-        lo
-    } else {
-        NONE32
-    };
+    return ast::pick(off < r.old + r.len, lo, NONE32);
 }
 
 // One relocation of a section: offset, type, symbol (file-relative), addend.
@@ -1423,28 +1324,15 @@ const fn rel_at(b: []u8, rs: ISec, i: usize) Rel {
     };
 }
 
-// Mark relocation `i` of input section `s` consumed by a relaxed sequence.
+// Mark the relocation at `off` of input section `s` consumed by a relaxed sequence.
 fn skip_rel(l: &mut L, s: u32, off: u64) {
     l.skip.push(s as u64 << 32 | off);
 }
 
 const fn skipped(l: &L, s: u32, off: u64) bool {
-    let k = s as u64 << 32 | off;
-    let mut lo: usize = 0;
-    let mut hi = l.skip.len();
-    while lo < hi {
-        let mid = (lo + hi) / 2;
-        if l.skip[mid] < k {
-            lo = mid + 1;
-        } else {
-            hi = mid;
-        }
-    }
-    return lo < l.skip.len() && l.skip[lo] == k;
+    return l.skip.binary_search(&(s as u64 << 32 | off)).is_ok();
 }
 
-// What each kept relocation needs: a GOT slot, a stub, a dynamic relocation; relaxed thread-local
-// sequences drop their call of `__tls_get_addr`.
 // The globals the kept relocations refer to; a relaxed thread-local sequence's call of `__tls_get_addr` is
 // no reference.
 fn mark_used(l: &mut L, b: []u8) {
@@ -1457,7 +1345,7 @@ fn mark_used(l: &mut L, b: []u8) {
         let n = (rs.size / 24) as usize;
         for i in 0..n {
             let r = rel_at(b, rs, i);
-            if r.ty == X_TLSGD && !l.a64 {
+            if r.ty == R_X86_64_TLSGD && !l.a64 {
                 // data16 lea x@tlsgd(%rip), %rdi; data16 data16 rex.W call __tls_get_addr@PLT: the call's
                 // relocation is 8 bytes on.
                 skip_rel(l, s as u32, r.off + 8);
@@ -1486,6 +1374,8 @@ fn mark_used(l: &mut L, b: []u8) {
     }
 }
 
+// What each kept relocation needs: a GOT slot, a stub, a dynamic relocation; relaxed thread-local
+// sequences drop their call of `__tls_get_addr`.
 fn scan(l: &mut L, b: []u8, lsm: u32) bool {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
@@ -1518,7 +1408,7 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
                 continue;
             }
             if g == NONE {
-                if alloc(sc) && (sc.flags & SHF_WRITE) != 0 && (r.ty == X_64 && !l.a64 || r.ty == A_ABS64 && l.a64) {
+                if alloc(sc) && (sc.flags & SHF_WRITE) != 0 && (r.ty == R_X86_64_64 && !l.a64 || r.ty == R_AARCH64_ABS64 && l.a64) {
                     l.drels.push(DRel { at: 0, ty: 0, sym: 0, addend: 0 });
                 } else if is_got(l, r.ty) && l.lgot_slot.get(&k).is_none() {
                     let n = l.lgot.len() as u32;
@@ -1533,13 +1423,13 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
                 tls_slot(l, g, k);
             } else if is_got(l, r.ty) {
                 need_got(l, g);
-            } else if (r.ty == X_PLT32 && !l.a64 || (r.ty == A_CALL26 || r.ty == A_JUMP26) && l.a64) && shared {
+            } else if (r.ty == R_X86_64_PLT32 && !l.a64 || (r.ty == R_AARCH64_CALL26 || r.ty == R_AARCH64_JUMP26) && l.a64) && shared {
                 if l.gs[g as usize].plt == NONE {
                     l.gs.index_mut(g as usize).plt = l.plt.len() as u32;
                     l.plt.push(g);
                     need_got(l, g);
                 }
-            } else if (r.ty == X_64 && !l.a64 || r.ty == A_ABS64 && l.a64) && alloc(sc) {
+            } else if (r.ty == R_X86_64_64 && !l.a64 || r.ty == R_AARCH64_ABS64 && l.a64) && alloc(sc) {
                 if (sc.flags & SHF_WRITE) == 0 {
                     l.err.format_into(
                         "'{}': an absolute address in read-only section {}",
@@ -1578,7 +1468,7 @@ fn scan(l: &mut L, b: []u8, lsm: u32) bool {
 
 // Whether relocation `ty` starts a thread-local sequence a shared library relaxes to initial-exec.
 const fn tls_ie(l: &L, ty: u32) bool {
-    return l.shared && (ty == X_TLSGD && !l.a64 || (ty == A_TLSDESC_ADR_PAGE21 || ty == A_TLSIE_ADR_GOTTPREL_PAGE21) && l.a64);
+    return l.shared && (ty == R_X86_64_TLSGD && !l.a64 || (ty == R_AARCH64_TLSDESC_ADR_PAGE21 || ty == A_TLSIE_ADR_GOTTPREL_PAGE21) && l.a64);
 }
 
 // The key of thread-local symbol `k` (global `g`, or NONE for a local one).
@@ -1616,7 +1506,7 @@ fn slot_addr(l: &L, g: u32, k: u32) u64 {
 // `call *x@GOTPCREL(%rip)` (`op` its two opcode bytes), of a function the output defines and no library
 // may replace: it becomes `addr32 call x` (the psABI's relaxation), which needs no slot.
 fn call_relaxes(l: &L, g: u32, r: Rel, op: u16) bool {
-    if l.a64 || r.ty != X_GOTPCRELX || op != 0xFF15 {
+    if l.a64 || r.ty != R_X86_64_GOTPCRELX || op != 0xFF15 {
         return false;
     }
     return g == NONE || l.gs[g as usize].kind == G_DEF && !(l.shared && exported(l, g));
@@ -1624,9 +1514,9 @@ fn call_relaxes(l: &L, g: u32, r: Rel, op: u16) bool {
 
 fn is_got(l: &L, ty: u32) bool {
     if l.a64 {
-        return ty == A_ADR_GOT_PAGE || ty == A_LD64_GOT_LO12_NC;
+        return ty == R_AARCH64_ADR_GOT_PAGE || ty == R_AARCH64_LD64_GOT_LO12_NC;
     }
-    return ty == X_GOTPCREL || ty == X_GOTPCRELX || ty == X_REX_GOTPCRELX;
+    return ty == X_GOTPCREL || ty == R_X86_64_GOTPCRELX || ty == R_X86_64_REX_GOTPCRELX;
 }
 
 fn need_got(l: &mut L, g: u32) {
@@ -1745,10 +1635,7 @@ const fn seg_of(r: u32) u32 {
     if r < 500 {
         return 2;
     }
-    if r < 900 {
-        return 3;
-    }
-    return 4;
+    return ast::pick(r < 900, 3, 4);
 }
 
 fn layout(l: &mut L, o: &Opts, b: []u8) {
@@ -1792,11 +1679,7 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
             prev_o
         } else {
             let name = String::from_str(out_name(l, sc, &mut rank));
-            let ty = if sc.ty == SHT_X86_64_UNWIND {
-                SHT_PROGBITS
-            } else {
-                sc.ty
-            };
+            let ty = ast::pick(sc.ty == SHT_X86_64_UNWIND, SHT_PROGBITS, sc.ty);
             prev_o = out_section(l, &name, ty, sc.flags & (SHF_ALLOC | SHF_WRITE | SHF_EXECINSTR | SHF_TLS), rank);
             has_eh = has_eh || name.as_str() == ".eh_frame";
             prev = name;
@@ -2236,10 +2119,10 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     let sa = sv.wrapping_add(r.addend as u64);
     let path = l.paths[f.path as usize].as_str();
     if !l.a64 {
-        if r.ty == X_64 {
+        if r.ty == R_X86_64_64 {
             if writable {
                 if shared {
-                    dyn_rel(l, pa, X_64, l.gs[g as usize].dynix, r.addend);
+                    dyn_rel(l, pa, R_X86_64_64, l.gs[g as usize].dynix, r.addend);
                 } else {
                     dyn_rel(l, pa, X_RELATIVE, 0, sa as i64);
                 }
@@ -2249,7 +2132,7 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             }
             return true;
         }
-        if r.ty == X_PC32 || r.ty == X_PLT32 {
+        if r.ty == R_X86_64_PC32 || r.ty == R_X86_64_PLT32 {
             let d = sa.wrapping_sub(pa) as i64;
             if !fits(d, 32) {
                 l.err.format_into("'{}': a 32-bit displacement out of range", path);
@@ -2262,7 +2145,7 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             lu::p64(img, p, sa.wrapping_sub(pa));
             return true;
         }
-        if r.ty == X_GOTPCREL || r.ty == X_GOTPCRELX || r.ty == X_REX_GOTPCRELX {
+        if r.ty == X_GOTPCREL || r.ty == R_X86_64_GOTPCRELX || r.ty == R_X86_64_REX_GOTPCRELX {
             if p >= 2 && call_relaxes(l, g, r, img[p - 2] as u16 << 8 | img[p - 1] as u16) {
                 let d = sa.wrapping_sub(pa) as i64;
                 if !fits(d, 32) {
@@ -2278,11 +2161,11 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             lu::p32(img, p, d as u32);
             return true;
         }
-        if r.ty == X_32 || r.ty == X_32S {
+        if r.ty == R_X86_64_32 || r.ty == X_32S {
             lu::p32(img, p, sa as u32);
             return true;
         }
-        if r.ty == X_TLSGD {
+        if r.ty == R_X86_64_TLSGD {
             // Relaxed to local-exec: mov %fs:0, %rax; lea tpoff(%rax), %rax. A shared library's to
             // initial-exec: mov %fs:0, %rax; add slot(%rip), %rax.
             let st = p - 4;
@@ -2303,7 +2186,7 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             let _ = s;
             return true;
         }
-        if r.ty == X_TPOFF32 {
+        if r.ty == R_X86_64_TPOFF32 {
             lu::p32(img, p, tpoff(l, sv).wrapping_add(r.addend) as u32);
             return true;
         }
@@ -2311,10 +2194,10 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         return false;
     }
     let insn = lu::r32(img.as_slice(), p);
-    if r.ty == A_ABS64 {
+    if r.ty == R_AARCH64_ABS64 {
         if writable {
             if shared {
-                dyn_rel(l, pa, A_ABS64, l.gs[g as usize].dynix, r.addend);
+                dyn_rel(l, pa, R_AARCH64_ABS64, l.gs[g as usize].dynix, r.addend);
             } else {
                 dyn_rel(l, pa, A_RELATIVE, 0, sa as i64);
             }
@@ -2324,11 +2207,11 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         }
         return true;
     }
-    if r.ty == A_ABS32 {
+    if r.ty == R_AARCH64_ABS32 {
         lu::p32(img, p, sa as u32);
         return true;
     }
-    if r.ty == A_PREL32 {
+    if r.ty == R_AARCH64_PREL32 {
         lu::p32(img, p, sa.wrapping_sub(pa) as u32);
         return true;
     }
@@ -2336,7 +2219,7 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         lu::p64(img, p, sa.wrapping_sub(pa));
         return true;
     }
-    if r.ty == A_CALL26 || r.ty == A_JUMP26 {
+    if r.ty == R_AARCH64_CALL26 || r.ty == R_AARCH64_JUMP26 {
         let d = sa.wrapping_sub(pa) as i64;
         if !fits(d, 28) {
             l.err.format_into("'{}': a branch beyond 128 MiB", path);
@@ -2360,8 +2243,8 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         lu::p32(img, p, insn & 0x9F00001F | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
         return true;
     }
-    if r.ty == A_ADR_PREL_PG_HI21 || r.ty == A_ADR_GOT_PAGE {
-        let t = if r.ty == A_ADR_GOT_PAGE {
+    if r.ty == R_AARCH64_ADR_PREL_PG_HI21 || r.ty == R_AARCH64_ADR_GOT_PAGE {
+        let t = if r.ty == R_AARCH64_ADR_GOT_PAGE {
             slot_addr(l, g, k)
         } else {
             sa
@@ -2375,19 +2258,19 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         lu::p32(img, p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
         return true;
     }
-    if r.ty == A_ADD_ABS_LO12_NC || r.ty == A_LDST8_ABS_LO12_NC || r.ty == A_LDST16_ABS_LO12_NC || r.ty == A_LDST32_ABS_LO12_NC || r.ty == A_LDST64_ABS_LO12_NC || r.ty == A_LDST128_ABS_LO12_NC || r.ty == A_LD64_GOT_LO12_NC {
-        let t = if r.ty == A_LD64_GOT_LO12_NC {
+    if r.ty == R_AARCH64_ADD_ABS_LO12_NC || r.ty == R_AARCH64_LDST8_ABS_LO12_NC || r.ty == R_AARCH64_LDST16_ABS_LO12_NC || r.ty == R_AARCH64_LDST32_ABS_LO12_NC || r.ty == R_AARCH64_LDST64_ABS_LO12_NC || r.ty == R_AARCH64_LDST128_ABS_LO12_NC || r.ty == R_AARCH64_LD64_GOT_LO12_NC {
+        let t = if r.ty == R_AARCH64_LD64_GOT_LO12_NC {
             slot_addr(l, g, k)
         } else {
             sa
         };
-        let sh: u32 = if r.ty == A_LDST16_ABS_LO12_NC {
+        let sh: u32 = if r.ty == R_AARCH64_LDST16_ABS_LO12_NC {
             1
-        } else if r.ty == A_LDST32_ABS_LO12_NC {
+        } else if r.ty == R_AARCH64_LDST32_ABS_LO12_NC {
             2
-        } else if r.ty == A_LDST64_ABS_LO12_NC || r.ty == A_LD64_GOT_LO12_NC {
+        } else if r.ty == R_AARCH64_LDST64_ABS_LO12_NC || r.ty == R_AARCH64_LD64_GOT_LO12_NC {
             3
-        } else if r.ty == A_LDST128_ABS_LO12_NC {
+        } else if r.ty == R_AARCH64_LDST128_ABS_LO12_NC {
             4
         } else {
             0
@@ -2399,18 +2282,18 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     // A thread-local descriptor sequence relaxed to local-exec: movz x0, #hi16, lsl #16; movk x0, #lo16;
     // nop; nop.
     // A shared library's: adrp x0, slot; ldr x0, [x0, :lo12:slot]; nop; nop (initial-exec).
-    if r.ty == A_TLSDESC_ADR_PAGE21 && l.shared {
+    if r.ty == R_AARCH64_TLSDESC_ADR_PAGE21 && l.shared {
         let slot = tls_got_addr(l, k);
         let d = ((slot & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12) as u32;
         lu::p32(img, p, 0x90000000 | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
         return true;
     }
-    if r.ty == A_TLSDESC_LD64_LO12 && l.shared {
+    if r.ty == R_AARCH64_TLSDESC_LD64_LO12 && l.shared {
         let slot = tls_got_addr(l, k);
         lu::p32(img, p, 0xF9400000 | ((slot & 0xFFF) >> 3) as u32 << 10);
         return true;
     }
-    if r.ty == A_TLSDESC_ADR_PAGE21 {
+    if r.ty == R_AARCH64_TLSDESC_ADR_PAGE21 {
         let t = tpoff(l, sv) as u64;
         if t >= 1u64 << 32 {
             l.err.format_into("'{}': thread-locals beyond 4 GiB", path);
@@ -2419,12 +2302,12 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         lu::p32(img, p, 0xD2A00000 | (t >> 16 & 0xFFFF) as u32 << 5);
         return true;
     }
-    if r.ty == A_TLSDESC_LD64_LO12 {
+    if r.ty == R_AARCH64_TLSDESC_LD64_LO12 {
         let t = tpoff(l, sv) as u64;
         lu::p32(img, p, 0xF2800000 | (t & 0xFFFF) as u32 << 5);
         return true;
     }
-    if r.ty == A_TLSDESC_ADD_LO12 || r.ty == A_TLSDESC_CALL {
+    if r.ty == R_AARCH64_TLSDESC_ADD_LO12 || r.ty == R_AARCH64_TLSDESC_CALL {
         lu::p32(img, p, 0xD503201F);
         return true;
     }
@@ -2530,7 +2413,7 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
                     v = ts.at.wrapping_add(r.addend as u64);
                 }
             }
-            if r.ty == X_64 && !l.a64 || r.ty == A_ABS64 && l.a64 {
+            if r.ty == R_X86_64_64 && !l.a64 || r.ty == R_AARCH64_ABS64 && l.a64 {
                 lu::p64(img, p, v);
             } else {
                 lu::p32(img, p, v as u32);
@@ -2541,19 +2424,11 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
 
 // Whether symbol `k` (a global: its definition) lies in a loaded section garbage collection dropped.
 fn dropped_target(l: &L, k: u32) bool {
-    let mut d = k;
-    let g = gof(l, k);
-    if g != NONE {
-        if l.gs[g as usize].kind != G_DEF {
-            return false;
-        }
-        d = l.gs[g as usize].sym;
-    }
-    let y = l.syms[d as usize];
-    if y.shndx == SHN_UNDEF || y.shndx >= 0xFF00 {
+    let x = def_section(l, k);
+    if x == NONE32 {
         return false;
     }
-    let s = l.secs[(l.files[y.file as usize].sec0 + y.shndx) as usize];
+    let s = l.secs[x as usize];
     return alloc(s) && !s.live;
 }
 
@@ -2580,10 +2455,7 @@ fn copy_eh(l: &L, b: []u8, sc: ISec, img: &mut Vector<u8>, at: usize) {
 // ---- the entry ------------------------------------------------------------------------------------------
 
 const fn start_size(a64: bool) u64 {
-    if a64 {
-        return 56;
-    }
-    return 48;
+    return ast::pick(a64, 56, 48);
 }
 
 // `_start`: the stack's argc and argv, the dynamic linker's finalizer, then
@@ -2698,29 +2570,17 @@ fn write_synthetic(l: &mut L, b: []u8, img: &mut Vector<u8>) {
         let g = l.got[i];
         let a = gos.addr + 8 * i as u64;
         if l.gs[g as usize].kind == G_SHARED {
-            let ty = if l.a64 {
-                A_GLOB_DAT
-            } else {
-                X_GLOB_DAT
-            };
+            let ty = ast::pick(l.a64, A_GLOB_DAT, X_GLOB_DAT);
             dyn_rel(l, a, ty, l.gs[g as usize].dynix, 0);
         } else {
-            let ty = if l.a64 {
-                A_RELATIVE
-            } else {
-                X_RELATIVE
-            };
+            let ty = ast::pick(l.a64, A_RELATIVE, X_RELATIVE);
             dyn_rel(l, a, ty, 0, g_addr(l, g) as i64);
         }
     }
     // The local symbols' slots: their addresses.
     for i in 0..l.lgot.len() {
         let a = gos.addr + 8 * (l.got.len() + i) as u64;
-        let ty = if l.a64 {
-            A_RELATIVE
-        } else {
-            X_RELATIVE
-        };
+        let ty = ast::pick(l.a64, A_RELATIVE, X_RELATIVE);
         dyn_rel(l, a, ty, 0, sym_addr(l, l.lgot[i]) as i64);
     }
     // A shared library's thread-local slots: the offset from the thread pointer the dynamic linker places
@@ -2733,11 +2593,7 @@ fn write_synthetic(l: &mut L, b: []u8, img: &mut Vector<u8>) {
         } else {
             sym_addr(l, key as u32)
         };
-        let ty = if l.a64 {
-            A_TLS_TPREL64
-        } else {
-            X_TPOFF64
-        };
+        let ty = ast::pick(l.a64, A_TLS_TPREL64, X_TPOFF64);
         dyn_rel(l, a, ty, 0, (va - l.tls_start) as i64);
     }
     if l.o[O_EH] != NONE {
@@ -2844,10 +2700,7 @@ const fn ptr_size(e: u8) usize {
     if f == 0x02 || f == 0x0A {
         return 2;
     }
-    if f == 0x03 || f == 0x0B {
-        return 4;
-    }
-    return 8;
+    return ast::pick(f == 0x03 || f == 0x0B, 4, 8);
 }
 
 // ---- the dynamic tables, the headers, the symbol table --------------------------------------------------
@@ -2878,19 +2731,19 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let mut ds = Vector::<u8>::new();
     ds.push(0);
     let soname = if l.shared {
-        lu::put_str(&mut ds, &o.soname)
+        ob::put_str(&mut ds, &o.soname)
     } else {
         0u32
     };
     let mut sym_name = Vector::<u32>::new();
     for i in 0..l.dyns.len() {
-        sym_name.push(lu::put_str(&mut ds, l.names.spell(l.gs[l.dyns[i] as usize].name)));
+        sym_name.push(ob::put_str(&mut ds, l.names.spell(l.gs[l.dyns[i] as usize].name)));
     }
     let mut lib_name = Vector::<u32>::new();
     for i in 0..l.libs.len() {
         lib_name.push(
             if l.libs[i].used {
-                lu::put_str(&mut ds, &l.libs[i].soname)
+                ob::put_str(&mut ds, &l.libs[i].soname)
             } else {
                 0u32
             },
@@ -2900,7 +2753,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     for v in 0..l.vers.len() {
         ver_name.push(
             if l.vers[v].index != 0 {
-                lu::put_str(&mut ds, &l.vers[v].name)
+                ob::put_str(&mut ds, &l.vers[v].name)
             } else {
                 0u32
             },
@@ -2934,15 +2787,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             continue;
         }
         // An import; one no library defines binds weakly (a shared library's).
-        img[e + 4] = if gy.lib == NONE {
-            STB_WEAK
-        } else {
-            STB_GLOBAL
-        } << 4 | if gy.func {
-            STT_FUNC
-        } else {
-            STT_OBJECT
-        };
+        img[e + 4] = ast::pick(gy.lib == NONE, STB_WEAK, STB_GLOBAL) << 4 | ast::pick(gy.func, STT_FUNC, STT_OBJECT);
         lu::p16(
             img,
             ovs.off as usize + 2 * (i + 1),
@@ -3004,15 +2849,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             lu::p16(img, q + 4, 0);
             lu::p16(img, q + 6, l.vers[v].index);
             lu::p32(img, q + 8, ver_name[v]);
-            lu::p32(
-                img,
-                q + 12,
-                if k < cnt {
-                    16u32
-                } else {
-                    0u32
-                },
-            );
+            lu::p32(img, q + 12, ast::pick(k < cnt, 16u32, 0u32));
             q += 16;
         }
     }
@@ -3072,11 +2909,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         nrel,
         DT_VERSYM,
         ovs.addr,
-        if l.shared {
-            DT_SONAME
-        } else {
-            DT_DEBUG
-        },
+        ast::pick(l.shared, DT_SONAME, DT_DEBUG),
         soname,
     ];
     let ps: []u64 = pairs;
@@ -3110,21 +2943,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         }
     }
     dv.push(DT_FLAGS);
-    dv.push(
-        DF_BIND_NOW | if l.tls_keys.len() != 0 {
-            DF_STATIC_TLS
-        } else {
-            0u64
-        },
-    );
+    dv.push(DF_BIND_NOW | ast::pick(l.tls_keys.len() != 0, DF_STATIC_TLS, 0u64));
     dv.push(DT_FLAGS_1);
-    dv.push(
-        DF_1_NOW | if l.shared {
-            0u64
-        } else {
-            DF_1_PIE
-        },
-    );
+    dv.push(DF_1_NOW | ast::pick(l.shared, 0u64, DF_1_PIE));
     dv.push(DT_NULL);
     dv.push(0);
     assert(8 * dv.len() as u64 <= od.size, "elf: the dynamic section's size");
@@ -3137,7 +2958,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     shstr.push(0);
     let mut sh_name = Vector::<u32>::new();
     for i in 0..l.osecs.len() {
-        sh_name.push(lu::put_str(&mut shstr, l.sn.spell(l.osecs[i].name)));
+        sh_name.push(ob::put_str(&mut shstr, l.sn.spell(l.osecs[i].name)));
     }
     let mut dbg_off = Vector::<u64>::new();
     dbg_off.resize_default(l.osecs.len());
@@ -3169,9 +2990,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let mut st = Vector::<u8>::new();
     st.push(0);
     let mut syms = Vector::<u8>::new();
-    for _ in 0..24 {
-        syms.push(0);
-    }
+    syms.resize_default(syms.len() + 24);
     let mut nloc: u32 = 1;
     if !o.strip {
         for k in 0..l.syms.len() {
@@ -3186,7 +3005,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             }
             put_sym(
                 &mut syms,
-                lu::put_str(&mut st, l.names.spell(y.name)),
+                ob::put_str(&mut st, l.names.spell(y.name)),
                 y.info,
                 s.out + 1,
                 sym_addr(l, k as u32),
@@ -3198,7 +3017,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             let ts = l.o[O_TEXT] + 1;
             put_sym(
                 &mut syms,
-                lu::put_str(&mut st, "_start"),
+                ob::put_str(&mut st, "_start"),
                 STB_LOCAL << 4 | STT_FUNC,
                 ts,
                 l.start_at,
@@ -3221,7 +3040,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 };
                 put_sym(
                     &mut syms,
-                    lu::put_str(&mut st, l.names.spell(gy.name)),
+                    ob::put_str(&mut st, l.names.spell(gy.name)),
                     y.info,
                     sh,
                     g_addr(l, g as u32),
@@ -3230,12 +3049,8 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             } else if gy.kind == G_SHARED && gy.used {
                 put_sym(
                     &mut syms,
-                    lu::put_str(&mut st, l.names.spell(gy.name)),
-                    STB_GLOBAL << 4 | if gy.func {
-                        STT_FUNC
-                    } else {
-                        STT_NOTYPE
-                    },
+                    ob::put_str(&mut st, l.names.spell(gy.name)),
+                    STB_GLOBAL << 4 | ast::pick(gy.func, STT_FUNC, STT_NOTYPE),
                     0,
                     0,
                     0,
@@ -3243,9 +3058,9 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             }
         }
     }
-    let shstrtab_name = lu::put_str(&mut shstr, ".shstrtab");
-    let symtab_name = lu::put_str(&mut shstr, ".symtab");
-    let strtab_name = lu::put_str(&mut shstr, ".strtab");
+    let shstrtab_name = ob::put_str(&mut shstr, ".shstrtab");
+    let symtab_name = ob::put_str(&mut shstr, ".symtab");
+    let strtab_name = ob::put_str(&mut shstr, ".strtab");
     while img.len() % 8 != 0 {
         img.push(0);
     }
@@ -3261,9 +3076,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     // The section headers: null, the output sections, .symtab, .strtab, .shstrtab.
     let shoff = img.len() as u64;
     let nsh = l.osecs.len() + 4;
-    for _ in 0..64 {
-        img.push(0);
-    }
+    img.resize_default(img.len() + 64);
     let dynstr_ix = l.o[O_DYNSTR] + 1;
     let dynsym_ix = l.o[O_DYNSYM] + 1;
     for i in 0..l.osecs.len() {
@@ -3284,21 +3097,13 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         } else {
             (0u32, 0u32)
         };
-        let size = if i as u32 == l.o[O_RELA] {
-            rela_size
-        } else {
-            os.size
-        };
+        let size = ast::pick(i as u32 == l.o[O_RELA], rela_size, os.size);
         put_shdr(
             img,
             sh_name[i],
             os.ty,
             os.flags,
-            if loaded {
-                os.addr
-            } else {
-                0u64
-            },
+            ast::pick(loaded, os.addr, 0u64),
             os.off,
             size,
             link,
@@ -3314,12 +3119,12 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
 }
 
 fn put_sym(o: &mut Vector<u8>, name: u32, info: u8, shndx: u32, value: u64, size: u64) {
-    lu::w32(o, name);
+    ob::w32(o, name);
     o.push(info);
     o.push(STV_DEFAULT);
-    lu::w16(o, shndx);
-    lu::w64(o, value);
-    lu::w64(o, size);
+    ob::w16(o, shndx);
+    ob::w64(o, value);
+    ob::w64(o, size);
 }
 
 fn put_shdr(
@@ -3335,43 +3140,36 @@ fn put_shdr(
     align: u64,
     entsize: u64,
 ) {
-    lu::w32(o, name);
-    lu::w32(o, ty);
-    lu::w64(o, flags);
-    lu::w64(o, addr);
-    lu::w64(o, off);
-    lu::w64(o, size);
-    lu::w32(o, link);
-    lu::w32(o, info);
-    lu::w64(o, align);
-    lu::w64(o, entsize);
+    ob::w32(o, name);
+    ob::w32(o, ty);
+    ob::w64(o, flags);
+    ob::w64(o, addr);
+    ob::w64(o, off);
+    ob::w64(o, size);
+    ob::w32(o, link);
+    ob::w32(o, info);
+    ob::w64(o, align);
+    ob::w64(o, entsize);
 }
 
 // The ELF header and the program headers.
 fn write_headers(l: &L, img: &mut Vector<u8>, shoff: u64, nsh: u32) {
     let mut h = Vector::<u8>::new();
-    lu::w64(&mut h, 0x00010102464C457F);
-    lu::w64(&mut h, 0);
-    lu::w16(&mut h, 3); // ET_DYN: position-independent
-    lu::w16(
-        &mut h,
-        if l.a64 {
-            183u32
-        } else {
-            62u32
-        },
-    );
-    lu::w32(&mut h, 1);
-    lu::w64(&mut h, l.start_at);
-    lu::w64(&mut h, 64);
-    lu::w64(&mut h, shoff);
-    lu::w32(&mut h, 0);
-    lu::w16(&mut h, 64);
-    lu::w16(&mut h, 56);
-    lu::w16(&mut h, l.nph);
-    lu::w16(&mut h, 64);
-    lu::w16(&mut h, nsh);
-    lu::w16(&mut h, nsh - 1);
+    ob::w64(&mut h, 0x00010102464C457F);
+    ob::w64(&mut h, 0);
+    ob::w16(&mut h, 3); // ET_DYN: position-independent
+    ob::w16(&mut h, ast::pick(l.a64, 183u32, 62u32));
+    ob::w32(&mut h, 1);
+    ob::w64(&mut h, l.start_at);
+    ob::w64(&mut h, 64);
+    ob::w64(&mut h, shoff);
+    ob::w32(&mut h, 0);
+    ob::w16(&mut h, 64);
+    ob::w16(&mut h, 56);
+    ob::w16(&mut h, l.nph);
+    ob::w16(&mut h, 64);
+    ob::w16(&mut h, nsh);
+    ob::w16(&mut h, nsh - 1);
     let nph = l.nph as u64;
     phdr(&mut h, PT_PHDR, 4, 64, 64, 56 * nph, 56 * nph, 8);
     if !l.shared {
@@ -3464,12 +3262,12 @@ fn write_headers(l: &L, img: &mut Vector<u8>, shoff: u64, nsh: u32) {
 }
 
 fn phdr(h: &mut Vector<u8>, ty: u32, flags: u32, off: u64, addr: u64, filesz: u64, memsz: u64, align: u64) {
-    lu::w32(h, ty);
-    lu::w32(h, flags);
-    lu::w64(h, off);
-    lu::w64(h, addr);
-    lu::w64(h, addr);
-    lu::w64(h, filesz);
-    lu::w64(h, memsz);
-    lu::w64(h, align);
+    ob::w32(h, ty);
+    ob::w32(h, flags);
+    ob::w64(h, off);
+    ob::w64(h, addr);
+    ob::w64(h, addr);
+    ob::w64(h, filesz);
+    ob::w64(h, memsz);
+    ob::w64(h, align);
 }

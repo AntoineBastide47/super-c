@@ -8,6 +8,8 @@
 // registers (`vregs`, the package's `vec_regs`).
 import lir::ir as *;
 import target::wasm as w;
+import ast::ast as ast;
+import codegen::obj as ob;
 
 /// How one value passes.
 pub(package) const P_SKIP: u8 = 0; // nothing: an empty aggregate, or no result
@@ -61,10 +63,7 @@ pub(package) const fn wtype(t: u8) u8 {
     if t == T_F32 {
         return w::F32;
     }
-    if t == T_F64 {
-        return w::F64;
-    }
-    return w::I32;
+    return ast::pick(t == T_F64, w::F64, w::I32);
 }
 
 /// The passing of signature `sig` of body `b` into `out`.
@@ -85,10 +84,6 @@ pub(package) fn classify(b: &Body, sig: u32, vregs: u32, out: &mut WSig) {
     } else {
         pass(b, rt, vregs, &mut out.unknown)
     };
-    // A result that is not one wasm value returns through memory.
-    if out.ret.kind == P_I128 || out.ret.kind == P_DIRECT && out.ret.leaf && out.ret.ty == T_I128 {
-        out.ret.kind = P_I128;
-    }
 }
 
 // The passing of signature type `pt`.
@@ -122,11 +117,7 @@ fn pass(b: &Body, pt: u32, vregs: u32, unknown: &mut bool) Pass {
         let off = b.pool[l + 3];
         let t = b.pool[l + 4] as u8;
         if off == 0 && !is_vec(t) && type_bytes(t, 4) == size && 1u32 << al <= type_align(t, 4) {
-            let k = if t == T_I128 {
-                P_I128
-            } else {
-                P_DIRECT
-            };
+            let k = ast::pick(t == T_I128, P_I128, P_DIRECT);
             return Pass { kind: k, ty: t, leaf: true, sext: false };
         }
     }
@@ -156,7 +147,7 @@ pub(package) fn encode(s: &WSig, out: &mut Vector<u8>) {
     if s.variadic {
         ps.push(w::I32);
     }
-    w::uleb(out, ps.len() as u64);
+    ob::uleb(out, ps.len() as u64);
     out.extend_copy(&ps);
     if s.ret.kind == P_DIRECT {
         out.push(1);
@@ -177,17 +168,10 @@ pub(package) fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
     if p.kind == P_DIRECT || p.kind == P_I128 {
         let n = type_bytes(p.ty, 4);
         let a = type_align(p.ty, 4);
-        return (ast_max(n, 4), ast_max(a, 4));
+        return (n.max(4), a.max(4));
     }
     if p.kind == P_V128 {
         return (16, 16);
     }
     return (4, 4);
-}
-
-const fn ast_max(a: u32, b: u32) u32 {
-    if a > b {
-        return a;
-    }
-    return b;
 }

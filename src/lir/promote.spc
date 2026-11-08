@@ -32,6 +32,7 @@
 // then forwards the parameters and drops the address arithmetic nothing uses.
 import lir::ir as *;
 import lir::verify as lv;
+import ast::ast as ast;
 
 // A slot with more fields than this, or a body whose fields times blocks pass PROMOTE_WORK_MAX, keeps
 // its memory: the placement is linear in the blocks per field.
@@ -1092,7 +1093,7 @@ extend Promoter {
             let fe = fl.off + size_of(fl.ty, self.ptr);
             if fl.off < off + n && off < fe && (fl.off < off || fe > off + n || is_vec(fl.ty) || fl.ty == T_I128 || conv_op(
                 fl.ty,
-                int_of(size_of(fl.ty, self.ptr)),
+                int_type(size_of(fl.ty, self.ptr) as u32),
                 self.ptr,
             ) == NO_CONV) {
                 return false;
@@ -1109,11 +1110,7 @@ extend Promoter {
             if ac.slot != s || (ac.kind & W_LOAD) == 0 {
                 continue;
             }
-            let lo = if ac.off > off {
-                ac.off
-            } else {
-                off
-            };
+            let lo = ast::pick(ac.off > off, ac.off, off);
             let ae = ac.off + size_of(ac.ty, self.ptr);
             let hi = if ae < off + n {
                 ae
@@ -1157,7 +1154,7 @@ extend Promoter {
             let fw = size_of(fl.ty, self.ptr);
             if fl.off <= off && off + n <= fl.off + fw && fw > n && !is_vec(fl.ty) && fl.ty != T_I128 && conv_op(
                 fl.ty,
-                int_of(fw),
+                int_type(fw as u32),
                 self.ptr,
             ) != NO_CONV {
                 return f;
@@ -1513,9 +1510,7 @@ extend Promoter {
         let k = if is_vec(ty) || ty == T_I128 {
             let at = b.words.len() + self.xwords.len();
             let nw = (type_bytes(ty, self.ptr) + 7) / 8;
-            for _ in 0..nw {
-                self.xwords.push(0);
-            }
+            self.xwords.resize_default(self.xwords.len() + nw as usize);
             Inst { op: O_WCONST, ty: ty, aux: 0, a: at as u32, b: nw, c: VNONE }
         } else {
             fill_const(ty, 0, self.ptr)
@@ -1557,12 +1552,12 @@ extend Promoter {
             let k = self.lane[i as usize];
             if self.part[i as usize] != NONE {
                 // Part of a wider field: its integer bits shifted down and truncated (little-endian).
-                let it = int_of(size_of(fty, self.ptr));
+                let it = int_type(size_of(fty, self.ptr) as u32);
                 let fv = self.value(b, f);
                 let mut v = self.convert(b, i, fv, fty, it);
                 let sh = 8 * self.part[i as usize] as u64;
                 if sh != 0 {
-                    let c = self.push(b, i, fill_int(it, sh));
+                    let c = self.push(b, i, iconst(it, sh));
                     v = self.push(b, i, Inst { op: O_LSHR, ty: it, aux: 0, a: v, b: c, c: VNONE });
                 }
                 self.repl[i as usize] = self.push(
@@ -1662,14 +1657,7 @@ extend Promoter {
             let t = b.insts[x as usize];
             if t.op == O_LOAD && t.ty == fl.ty && self.slot_of(t.a) == s && self.doff[t.a as usize] + (t.c as i32) as i64 == fl.off {
                 let fx = t.aux & (MEM_BOOL | MEM_RANGE);
-                return (
-                    fx,
-                    if (fx & MEM_RANGE) != 0 {
-                        t.b
-                    } else {
-                        0
-                    }
-                );
+                return (fx, ast::pick((fx & MEM_RANGE) != 0, t.b, 0));
             }
             if t.op != O_LOAD && t.op != O_ICONST && t.op != O_FCONST && t.op != O_SLOTADDR && t.op != O_PTRADD {
                 break;
@@ -1712,11 +1700,11 @@ extend Promoter {
             if !in_range(fl, off, n, self.ptr) {
                 continue;
             }
-            let it = int_of(size_of(fl.ty, self.ptr));
+            let it = int_type(size_of(fl.ty, self.ptr) as u32);
             let sh = 8 * (fl.off - off) as u64;
             let mut v = t.b;
             if sh != 0 {
-                let c = self.push(b, i, fill_int(ty, sh));
+                let c = self.push(b, i, iconst(ty, sh));
                 v = self.push(b, i, Inst { op: O_LSHR, ty: ty, aux: 0, a: v, b: c, c: VNONE });
             }
             if it != ty {
@@ -1739,7 +1727,7 @@ extend Promoter {
             if !in_range(fl, off, n, self.ptr) {
                 continue;
             }
-            let it = int_of(size_of(fl.ty, self.ptr));
+            let it = int_type(size_of(fl.ty, self.ptr) as u32);
             let sh = 8 * (fl.off - off) as u64;
             let fv = self.value(b, f2);
             let mut v = self.convert(b, i, fv, fl.ty, it);
@@ -1747,7 +1735,7 @@ extend Promoter {
                 v = self.push(b, i, Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: v, b: VNONE, c: VNONE });
             }
             if sh != 0 {
-                let c = self.push(b, i, fill_int(t.ty, sh));
+                let c = self.push(b, i, iconst(t.ty, sh));
                 v = self.push(b, i, Inst { op: O_SHL, ty: t.ty, aux: 0, a: v, b: c, c: VNONE });
             }
             acc = if acc == NONE {
@@ -2034,29 +2022,7 @@ extend Promoter {
 // W_LOAD for a load of type `ty` that may span fields or read part of a wider one, an integer of 1 to 8
 // bytes; else 0.
 const fn wide_kind(ty: u8) u8 {
-    return if is_int(ty) && ty != T_PTR && ty != T_I128 {
-        W_LOAD
-    } else {
-        0
-    };
-}
-
-// The integer type of `n` bytes (1, 2, 4 or 8).
-const fn int_of(n: i64) u8 {
-    return if n == 1 {
-        T_I8
-    } else if n == 2 {
-        T_I16
-    } else if n == 4 {
-        T_I32
-    } else {
-        T_I64
-    };
-}
-
-// The integer constant `v` of type `ty`.
-const fn fill_int(ty: u8, v: u64) Inst {
-    return Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
+    return ast::pick(is_int(ty) && ty != T_PTR && ty != T_I128, W_LOAD, 0);
 }
 
 // `conv_op`'s answer when no conversion exists.
@@ -2077,10 +2043,7 @@ const fn conv_op(from: u8, to: u8, ptr: u32) u8 {
     if is_int(from) && to == T_PTR {
         return O_INTTOPTR;
     }
-    if from == T_PTR || to == T_PTR {
-        return NO_CONV;
-    }
-    return O_BITCAST;
+    return ast::pick(from == T_PTR || to == T_PTR, NO_CONV, O_BITCAST);
 }
 
 // Whether field `f` lies in bytes `off` to `off + n`, pointers of `ptr` bytes.
@@ -2126,23 +2089,10 @@ const fn fill_const(ty: u8, byte: u64, ptr: u32) Inst {
     return Inst { op: NO_CONST, ty: T_NONE, aux: 0, a: 0, b: 0, c: 0 };
 }
 
-// The bits of integer constant `v` of `b`, None when it is no constant.
-const fn int_bits(b: &Body, v: Value) Option<u64> {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
-        return None;
-    }
-    let t = b.insts[v as usize];
-    return Some(t.b as u64 << 32 | t.a as u64);
-}
-
 // A constant of scalar type `ty` (an integer, a pointer or a float) of bits `x`.
 const fn bits_const(ty: u8, x: u64) Inst {
     return Inst {
-        op: if is_float(ty) {
-            O_FCONST
-        } else {
-            O_ICONST
-        },
+        op: ast::pick(is_float(ty), O_FCONST, O_ICONST),
         ty: ty,
         aux: 0,
         a: x as u32,

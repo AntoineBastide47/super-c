@@ -6,25 +6,26 @@
 import codegen::obj as ob;
 import target::x64 as x;
 import target::a64 as a;
+import ast::ast as ast;
 
-const SHT_PROGBITS: u32 = 1;
-const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
-const SHT_RELA: u32 = 4;
-const SHT_NOBITS: u32 = 8;
-const SHT_INIT_ARRAY: u32 = 14;
-const SHT_FINI_ARRAY: u32 = 15;
-const SHT_PREINIT_ARRAY: u32 = 16;
-const SHT_X86_64_UNWIND: u32 = 0x70000001;
+pub(package) const SHT_PROGBITS: u32 = 1;
+pub(package) const SHT_SYMTAB: u32 = 2;
+pub(package) const SHT_STRTAB: u32 = 3;
+pub(package) const SHT_RELA: u32 = 4;
+pub(package) const SHT_NOBITS: u32 = 8;
+pub(package) const SHT_INIT_ARRAY: u32 = 14;
+pub(package) const SHT_FINI_ARRAY: u32 = 15;
+pub(package) const SHT_PREINIT_ARRAY: u32 = 16;
+pub(package) const SHT_X86_64_UNWIND: u32 = 0x70000001;
 
-const SHF_WRITE: u64 = 1;
-const SHF_ALLOC: u64 = 2;
-const SHF_EXECINSTR: u64 = 4;
+pub(package) const SHF_WRITE: u64 = 1;
+pub(package) const SHF_ALLOC: u64 = 2;
+pub(package) const SHF_EXECINSTR: u64 = 4;
 const SHF_MERGE: u64 = 0x10;
 const SHF_STRINGS: u64 = 0x20;
 const SHF_INFO_LINK: u64 = 0x40;
-const SHF_TLS: u64 = 0x400;
-const SHF_GNU_RETAIN: u64 = 0x200000;
+pub(package) const SHF_TLS: u64 = 0x400;
+pub(package) const SHF_GNU_RETAIN: u64 = 0x200000;
 
 const STB_LOCAL: u32 = 0;
 const STB_GLOBAL: u32 = 1;
@@ -36,33 +37,33 @@ const STT_SECTION: u32 = 3;
 const STT_TLS: u32 = 6;
 const STV_HIDDEN: u8 = 2;
 
-const R_X86_64_64: u32 = 1;
-const R_X86_64_32: u32 = 10;
-const R_X86_64_PC32: u32 = 2;
-const R_X86_64_PLT32: u32 = 4;
-const R_X86_64_TLSGD: u32 = 19;
-const R_X86_64_TPOFF32: u32 = 23;
-const R_X86_64_GOTPCRELX: u32 = 41;
-const R_X86_64_REX_GOTPCRELX: u32 = 42;
+pub(package) const R_X86_64_64: u32 = 1;
+pub(package) const R_X86_64_32: u32 = 10;
+pub(package) const R_X86_64_PC32: u32 = 2;
+pub(package) const R_X86_64_PLT32: u32 = 4;
+pub(package) const R_X86_64_TLSGD: u32 = 19;
+pub(package) const R_X86_64_TPOFF32: u32 = 23;
+pub(package) const R_X86_64_GOTPCRELX: u32 = 41;
+pub(package) const R_X86_64_REX_GOTPCRELX: u32 = 42;
 
-const R_AARCH64_ABS64: u32 = 257;
-const R_AARCH64_ABS32: u32 = 258;
-const R_AARCH64_PREL32: u32 = 261;
-const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
-const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
-const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
-const R_AARCH64_JUMP26: u32 = 282;
-const R_AARCH64_CALL26: u32 = 283;
-const R_AARCH64_LDST16_ABS_LO12_NC: u32 = 284;
-const R_AARCH64_LDST32_ABS_LO12_NC: u32 = 285;
-const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
-const R_AARCH64_LDST128_ABS_LO12_NC: u32 = 299;
-const R_AARCH64_ADR_GOT_PAGE: u32 = 311;
-const R_AARCH64_LD64_GOT_LO12_NC: u32 = 312;
-const R_AARCH64_TLSDESC_ADR_PAGE21: u32 = 562;
-const R_AARCH64_TLSDESC_LD64_LO12: u32 = 563;
-const R_AARCH64_TLSDESC_ADD_LO12: u32 = 564;
-const R_AARCH64_TLSDESC_CALL: u32 = 569;
+pub(package) const R_AARCH64_ABS64: u32 = 257;
+pub(package) const R_AARCH64_ABS32: u32 = 258;
+pub(package) const R_AARCH64_PREL32: u32 = 261;
+pub(package) const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+pub(package) const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
+pub(package) const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
+pub(package) const R_AARCH64_JUMP26: u32 = 282;
+pub(package) const R_AARCH64_CALL26: u32 = 283;
+pub(package) const R_AARCH64_LDST16_ABS_LO12_NC: u32 = 284;
+pub(package) const R_AARCH64_LDST32_ABS_LO12_NC: u32 = 285;
+pub(package) const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+pub(package) const R_AARCH64_LDST128_ABS_LO12_NC: u32 = 299;
+pub(package) const R_AARCH64_ADR_GOT_PAGE: u32 = 311;
+pub(package) const R_AARCH64_LD64_GOT_LO12_NC: u32 = 312;
+pub(package) const R_AARCH64_TLSDESC_ADR_PAGE21: u32 = 562;
+pub(package) const R_AARCH64_TLSDESC_LD64_LO12: u32 = 563;
+pub(package) const R_AARCH64_TLSDESC_ADD_LO12: u32 = 564;
+pub(package) const R_AARCH64_TLSDESC_CALL: u32 = 569;
 
 // The `.eh_frame` common entry: version 1, "zR" (0x7A 0x52), code alignment 1, data alignment -8, return address
 // register 16 (rip), FDE pointers PC-relative signed 4 bytes; at a function's first byte the CFA is rsp + 8
@@ -72,14 +73,6 @@ const CIE: [u8; 24] = [20, 0, 0, 0, 0, 0, 0, 0, 1, 0x7A, 0x52, 0, 1, 0x78, 16, 1
 // arm64's: code alignment 4, data alignment -8, return address register 30 (x30); at a function's first
 // instruction the CFA is sp + 0. 24 bytes with its length.
 const CIE_A64: [u8; 24] = [20, 0, 0, 0, 0, 0, 0, 0, 1, 0x7A, 0x52, 0, 4, 0x78, 30, 1, 0x1B, 0x0C, 31, 0, 0, 0, 0, 0];
-
-// Append `s` and a NUL to string table `t`; its offset.
-fn add_str(t: &mut Vector<u8>, s: str) u32 {
-    let at = t.len() as u32;
-    push_bytes(t, s);
-    t.push(0);
-    return at;
-}
 
 // The name, type and flags of object section `k` of `o`.
 const fn sec_info<'a>(o: &'a ob::Obj, k: u8, name: &mut str<'a>, ty: &mut u32) u64 {
@@ -164,11 +157,7 @@ const fn rel_type(k: u8) u32 {
 // offset's from the instruction (ADD, or a load or store of its access size), as Mach-O's linker infers it.
 const fn rel_type_a64(k: u8, insn: u32) u32 {
     if k == a::R_BRANCH26 {
-        return if insn >> 31 != 0 {
-            R_AARCH64_CALL26
-        } else {
-            R_AARCH64_JUMP26
-        };
+        return ast::pick(insn >> 31 != 0, R_AARCH64_CALL26, R_AARCH64_JUMP26);
     }
     if k == a::R_PAGE21 {
         return R_AARCH64_ADR_PREL_PG_HI21;
@@ -238,7 +227,7 @@ struct Shdr {
 extend Shdr as Copy {}
 
 /// Write object `o` as an ELF relocatable object for arm64 (`a64`) or x86-64 into `out`, its sections split
-/// at their symbols as `split` asks (`lir::SPLIT_*`). The layout comes first (each section's offset in the
+/// at their symbols as `split` asks (`ob::SPLIT_*`). The layout comes first (each section's offset in the
 /// data after the 64-byte header, the section names, the symbols), then the bytes, into `out` at its size.
 pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     let mut parts = Vector::<ob::Part>::new();
@@ -311,11 +300,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         let s = &o.secs[pt.k as usize];
         let mut name: str = "";
         let mut ty: u32 = 0;
-        let fl = sec_info(o, pt.k, &mut name, &mut ty) | if retain[q] {
-            SHF_GNU_RETAIN
-        } else {
-            0u64
-        };
+        let fl = sec_info(o, pt.k, &mut name, &mut ty) | ast::pick(retain[q], SHF_GNU_RETAIN, 0u64);
         let al = 1u64 << s.align_log2 as u64;
         let mut off: u64 = 0;
         if ty != SHT_NOBITS {
@@ -346,7 +331,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     }
     hdrs.push(
         Shdr {
-            name: add_str(&mut shstr, ".note.GNU-stack"),
+            name: ob::put_str(&mut shstr, ".note.GNU-stack"),
             ty: SHT_PROGBITS,
             flags: 0,
             off: pos,
@@ -364,11 +349,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     if eh {
         pos = up(pos, 8);
         let start = pos;
-        let cie: []u8 = if a64 {
-            CIE_A64
-        } else {
-            CIE
-        };
+        let cie: []u8 = ast::pick(a64, CIE_A64, CIE);
         pos += cie.len() as u64;
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
@@ -380,12 +361,8 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         eh_sec = hdrs.len() as u32;
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, ".eh_frame"),
-                ty: if a64 {
-                    SHT_PROGBITS
-                } else {
-                    SHT_X86_64_UNWIND
-                },
+                name: ob::put_str(&mut shstr, ".eh_frame"),
+                ty: ast::pick(a64, SHT_PROGBITS, SHT_X86_64_UNWIND),
                 flags: SHF_ALLOC,
                 off: start,
                 size: pos - start,
@@ -408,9 +385,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     let mut symix = Vector::<u32>::new();
     symix.resize_default(o.syms.len());
     let mut syms = Vector::<u8>::with_capacity(24 * (1 + np + o.syms.len()));
-    for _ in 0..24 {
-        syms.push(0);
-    }
+    syms.resize_default(syms.len() + 24);
     let mut nsym: u32 = 1;
     // A section symbol per part with frames or a relocation through it (`ob::ORel.part`): `.eh_frame` and
     // the jump tables refer to a function through it, as a relocation against a global symbol would make
@@ -451,7 +426,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
             }
             symix[k] = nsym;
             nsym += 1;
-            ob::w32(&mut syms, add_str(&mut strtab, o.name_of(k as u32)));
+            ob::w32(&mut syms, ob::put_str(&mut strtab, o.name_of(k as u32)));
             let ty = if (y.flags & ob::SF_TLS) != 0 {
                 STT_TLS
             } else if y.sec == ob::NOSEC {
@@ -469,13 +444,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
                 STB_LOCAL
             };
             syms.push((bind << 4 | ty) as u8);
-            syms.push(
-                if (y.flags & ob::SF_HIDDEN) != 0 {
-                    STV_HIDDEN
-                } else {
-                    0u8
-                },
-            );
+            syms.push(ast::pick((y.flags & ob::SF_HIDDEN) != 0, STV_HIDDEN, 0u8));
             let q = if y.sec == ob::NOSEC {
                 ob::NONE32
             } else {
@@ -523,7 +492,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         pos = up(pos, 8);
         hdrs.push(
             Shdr {
-                name: add_str(&mut shstr, ".rela.eh_frame"),
+                name: ob::put_str(&mut shstr, ".rela.eh_frame"),
                 ty: SHT_RELA,
                 flags: SHF_INFO_LINK,
                 off: pos,
@@ -540,7 +509,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     pos = up(pos, 8);
     hdrs.push(
         Shdr {
-            name: add_str(&mut shstr, ".symtab"),
+            name: ob::put_str(&mut shstr, ".symtab"),
             ty: SHT_SYMTAB,
             flags: 0,
             off: pos,
@@ -554,7 +523,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     pos += syms.len() as u64;
     hdrs.push(
         Shdr {
-            name: add_str(&mut shstr, ".strtab"),
+            name: ob::put_str(&mut shstr, ".strtab"),
             ty: SHT_STRTAB,
             flags: 0,
             off: pos,
@@ -567,7 +536,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     );
     pos += strtab.len() as u64;
     let shstrndx = hdrs.len() as u32;
-    let shname = add_str(&mut shstr, ".shstrtab");
+    let shname = ob::put_str(&mut shstr, ".shstrtab");
     hdrs.push(
         Shdr {
             name: shname,
@@ -595,14 +564,7 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     ob::w64(out, 0x00010102464C457F);
     ob::w64(out, 0);
     ob::w16(out, 1);
-    ob::w16(
-        out,
-        if a64 {
-            183
-        } else {
-            62
-        },
-    );
+    ob::w16(out, ast::pick(a64, 183u32, 62));
     ob::w32(out, 1);
     ob::w64(out, 0);
     ob::w64(out, 0);
@@ -618,18 +580,14 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         let pt = parts[q];
         let h = hdrs[pt.hdr as usize];
         if h.ty != SHT_NOBITS {
-            pad_to(out, h.off);
+            ob::pad(out, 64 + h.off);
             out.extend_from_slice(o.secs[pt.k as usize].bytes[pt.lo as usize..pt.hi as usize]);
         }
     }
     if eh {
-        pad_to(out, hdrs[eh_sec as usize].off);
+        ob::pad(out, 64 + hdrs[eh_sec as usize].off);
         let start = out.len();
-        let cie: []u8 = if a64 {
-            CIE_A64
-        } else {
-            CIE
-        };
+        let cie: []u8 = ast::pick(a64, CIE_A64, CIE);
         out.extend_from_slice(cie);
         for f in 0..o.frames.len() {
             let fr = o.frames[f];
@@ -653,15 +611,11 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         if pfirst[q + 1] == pfirst[q] {
             continue;
         }
-        pad_to(out, hdrs[ri].off);
+        ob::pad(out, 64 + hdrs[ri].off);
         ri += 1;
         for j in pfirst[q]..pfirst[q + 1] {
             let x = o.rels[byp[j as usize] as usize];
-            let abs32 = if a64 {
-                R_AARCH64_ABS32
-            } else {
-                R_X86_64_32
-            };
+            let abs32 = ast::pick(a64, R_AARCH64_ABS32, R_X86_64_32);
             let ty = if x.kind == ob::R_SECOFF32 {
                 abs32
             } else if a64 {
@@ -682,26 +636,22 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
         }
     }
     if eh {
-        pad_to(out, hdrs[ri].off);
+        ob::pad(out, 64 + hdrs[ri].off);
         for r in 0..eh_rels.len() {
             let x = eh_rels[r];
             let y = o.syms[x.sym as usize];
             ob::w64(out, x.off);
-            let pc32 = if a64 {
-                R_AARCH64_PREL32
-            } else {
-                R_X86_64_PC32
-            };
+            let pc32 = ast::pick(a64, R_AARCH64_PREL32, R_X86_64_PC32);
             let q = ob::part_at(&parts, &first, y.sec, y.off) as usize;
             ob::w64(out, secsym[q] as u64 << 32 | pc32 as u64);
             ob::w64(out, y.off - parts[q].lo);
         }
     }
-    pad_to(out, hdrs[symtab as usize].off);
+    ob::pad(out, 64 + hdrs[symtab as usize].off);
     out.extend_from_slice(&syms);
     out.extend_from_slice(&strtab);
     out.extend_from_slice(&shstr);
-    pad_to(out, pos);
+    ob::pad(out, 64 + pos);
     for i in 0..hdrs.len() {
         let h = hdrs[i];
         ob::w32(out, h.name);
@@ -728,13 +678,6 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
 // `p` rounded up to a multiple of `al` (a power of two).
 const fn up(p: u64, al: u64) u64 {
     return p + al - 1 & ~(al - 1);
-}
-
-// Zeros onto `out` up to data offset `off` (after the 64-byte header).
-fn pad_to(out: &mut Vector<u8>, off: u64) {
-    while out.len() as u64 < 64 + off {
-        out.push(0);
-    }
 }
 
 // The bytes after the length field of a frame entry with `cfi` bytes of rules: CIE pointer, pc_begin,

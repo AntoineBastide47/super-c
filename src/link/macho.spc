@@ -13,21 +13,19 @@ import link::sha256 as sha;
 import utils::names as nm;
 import std::platform::fs;
 import std::parallel::data as parallel;
+import ast::ast as ast;
+import codegen::obj as ob;
+import target::macho as *;
 
 const NONE: u32 = 0xFFFFFFFF;
 const PAGE: u64 = 0x4000;
 const EXE_BASE: u64 = 0x100000000;
 
-const MH_MAGIC_64: u32 = 0xFEEDFACF;
 const FAT_MAGIC: u32 = 0xBEBAFECA; // 0xCAFEBABE as read little-endian
 const CPU_ARM64: u32 = 0x0100000C;
-const MH_OBJECT: u32 = 1;
 const MH_EXECUTE: u32 = 2;
 const MH_DYLIB: u32 = 6;
 
-const LC_SEGMENT_64: u32 = 0x19;
-const LC_SYMTAB: u32 = 0x2;
-const LC_DYSYMTAB: u32 = 0xB;
 const LC_LOAD_DYLIB: u32 = 0xC;
 const LC_ID_DYLIB: u32 = 0xD;
 const LC_LOAD_DYLINKER: u32 = 0xE;
@@ -37,7 +35,6 @@ const LC_REEXPORT_DYLIB: u32 = 0x8000001F;
 const LC_DYLD_INFO_ONLY: u32 = 0x80000022;
 const LC_FUNCTION_STARTS: u32 = 0x26;
 const LC_MAIN: u32 = 0x80000028;
-const LC_BUILD_VERSION: u32 = 0x32;
 const LC_DYLD_EXPORTS_TRIE: u32 = 0x80000033;
 const LC_DYLD_CHAINED_FIXUPS: u32 = 0x80000034;
 
@@ -49,25 +46,17 @@ const MH_HAS_TLV_DESCRIPTORS: u32 = 0x800000;
 const MH_NO_REEXPORTED_DYLIBS: u32 = 0x100000;
 
 const S_TYPE: u32 = 0xFF;
-const S_REGULAR: u32 = 0;
-const S_ZEROFILL: u32 = 1;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 6;
 const S_SYMBOL_STUBS: u32 = 8;
 const S_MOD_INIT_FUNC_POINTERS: u32 = 9;
 const S_MOD_TERM_FUNC_POINTERS: u32 = 0xA;
 const S_GB_ZEROFILL: u32 = 0xC;
-const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
-const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
-const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
 const S_ATTR_DEBUG: u32 = 0x02000000;
 const S_ATTR_NO_DEAD_STRIP: u32 = 0x10000000;
 const S_ATTR_LIVE_SUPPORT: u32 = 0x08000000;
-const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
-const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
 const SG_READ_ONLY: u32 = 0x10;
 
 const N_STAB: u8 = 0xE0;
-const N_PEXT: u8 = 0x10;
 const N_TYPE: u8 = 0x0E;
 const N_EXT: u8 = 0x01;
 const N_SECT: u8 = 0x0E;
@@ -75,7 +64,6 @@ const N_ABS: u8 = 0x02;
 const N_WEAK_DEF: u16 = 0x80;
 const N_NO_DEAD_STRIP: u16 = 0x20;
 const N_ALT_ENTRY: u16 = 0x200;
-const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
 const N_SO: u8 = 0x64;
 const N_OSO: u8 = 0x66;
 const N_BNSYM: u8 = 0x2E;
@@ -296,11 +284,7 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
     let mut l = L {
         kind: o.kind,
         install: o.install.clone(),
-        base: if o.kind == K_EXE {
-            EXE_BASE
-        } else {
-            0u64
-        },
+        base: ast::pick(o.kind == K_EXE, EXE_BASE, 0u64),
         files: Vector::<IFile>::new(),
         paths: Vector::<String>::new(),
         secs: Vector::<ISec>::new(),
@@ -339,17 +323,12 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     for i in 0..o.objs.len() {
         let p = o.objs[i].as_str();
         let at = blob.len();
-        if lu::take_held(o.mem, p, blob) {
-            if !parse_object(l, p, at, blob) {
-                return false;
-            }
-            continue;
-        }
-        if ar::is_archive(p) {
+        let held = lu::take_held(o.mem, p, blob);
+        if !held && ar::is_archive(p) {
             if !ars.add(nat::OBJ_MACHO, p, &mut l.err) {
                 return false;
             }
-        } else if !read_object(l, p, blob) {
+        } else if !held && !lu::read_input(p, blob, &mut l.err) || !parse_object(l, p, at, blob) {
             return false;
         }
     }
@@ -425,16 +404,6 @@ extend L as ar::Members {
 }
 
 // ---- input ----------------------------------------------------------------------------------------------
-
-// Append object `path` to the blob and record its sections and symbols.
-fn read_object(l: &mut L, path: str, blob: &mut Vector<u8>) bool {
-    let at = blob.len();
-    if !lu::read_append(path, blob) {
-        l.err.format_into("cannot read '{}'", path);
-        return false;
-    }
-    return parse_object(l, path, at, blob);
-}
 
 // Record the sections and symbols of the object at `at` of the blob, named `path`.
 fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
@@ -688,11 +657,7 @@ pub(package) fn find_lib(o: &Opts, name: str, path: &mut String) u8 {
             if lu::is_file(&c) {
                 path.clear();
                 path.push_string(&c);
-                return if k == 2 {
-                    LIB_ARCHIVE
-                } else {
-                    LIB_SHARED
-                };
+                return ast::pick(k == 2, LIB_ARCHIVE, LIB_SHARED);
             }
         }
     }
@@ -936,8 +901,7 @@ fn load_dylib(l: &mut L, o: &Opts, d: []u8, path: str, ord0: u32) bool {
 // The symbols no input defines: `__mh_execute_header` (or `__mh_dylib_header`) is the image's header, a
 // `___sc_zst_<A>` sentinel a fresh `A`-aligned byte. Any other one is an error.
 fn finish_symbols(l: &mut L) bool {
-    let mut missing = String::new();
-    let mut nmiss: usize = 0;
+    let mut miss = lu::Missing::new();
     for g in 0..l.gs.len() {
         let gy = l.gs[g];
         if gy.kind != G_UNDEF {
@@ -958,19 +922,9 @@ fn finish_symbols(l: &mut L) bool {
                 continue;
             }
         }
-        nmiss += 1;
-        if nmiss <= 20 {
-            missing.format_into("\n  {}", s);
-        }
+        miss.add(s);
     }
-    if nmiss != 0 {
-        l.err.format_into("{} undefined symbol(s):{}", nmiss, missing.as_str());
-        if nmiss > 20 {
-            l.err.push_str("\n  ...");
-        }
-        return false;
-    }
-    return true;
+    return miss.report(&mut l.err);
 }
 
 const fn parse_u64(s: str) u64 {
@@ -1364,16 +1318,10 @@ const fn rank(seg: str, sect: str, flags: u32) u32 {
         if (flags & S_ATTR_SOME_INSTRUCTIONS) != 0 {
             return 2;
         }
-        if sect == "__unwind_info" {
-            return 9;
-        }
-        return 5;
+        return ast::pick(sect == "__unwind_info", 9, 5);
     }
     if seg == "__DATA_CONST" {
-        if sect == "__got" {
-            return 0;
-        }
-        return 5;
+        return ast::pick(sect == "__got", 0, 5);
     }
     if t == S_THREAD_LOCAL_VARIABLES {
         return 6;
@@ -1387,10 +1335,7 @@ const fn rank(seg: str, sect: str, flags: u32) u32 {
     if t == S_ZEROFILL || t == S_GB_ZEROFILL {
         return 9;
     }
-    if sect == "__data" {
-        return 0;
-    }
-    return 5;
+    return ast::pick(sect == "__data", 0, 5);
 }
 
 // Whether section flags `fl` hold no file bytes.
@@ -1422,11 +1367,11 @@ fn layout(l: &mut L, b: []u8) bool {
             continue;
         }
         // Read-only after the fixups: constant data with pointers and the initializers.
-        let seg = if sc.seg == data && (sc.sect == cnst || (sc.flags & S_TYPE) == S_MOD_INIT_FUNC_POINTERS) {
-            dconst
-        } else {
-            sc.seg
-        };
+        let seg = ast::pick(
+            sc.seg == data && (sc.sect == cnst || (sc.flags & S_TYPE) == S_MOD_INIT_FUNC_POINTERS),
+            dconst,
+            sc.seg,
+        );
         let o = out_section_of(l, seg, sc.sect, sc.flags);
         let os = l.osecs.index_mut(o as usize);
         if sc.align > os.align {
@@ -1529,16 +1474,8 @@ fn layout(l: &mut L, b: []u8) bool {
             i += 1;
         }
         let name = String::from_str(l.sn.spell(l.osecs[first].segname));
-        let prot = if name.as_str() == "__TEXT" {
-            5u32
-        } else {
-            3u32
-        };
-        let flags = if name.as_str() == "__DATA_CONST" {
-            SG_READ_ONLY
-        } else {
-            0u32
-        };
+        let prot = ast::pick(name.as_str() == "__TEXT", 5u32, 3u32);
+        let flags = ast::pick(name.as_str() == "__DATA_CONST", SG_READ_ONLY, 0u32);
         l.segs.push(
             OSeg {
                 name: name,
@@ -1579,11 +1516,7 @@ fn layout(l: &mut L, b: []u8) bool {
         let cnt = sg.n as usize;
         let seg_va = va;
         let seg_fo = fo;
-        let mut at: u64 = if k == 0 || l.segs[k - 1].name.as_str() == "__PAGEZERO" {
-            hdr
-        } else {
-            0u64
-        };
+        let mut at: u64 = ast::pick(k == 0 || l.segs[k - 1].name.as_str() == "__PAGEZERO", hdr, 0u64);
         let mut fend: u64 = at;
         for q in first..first + cnt {
             let os = l.osecs.index_mut(q);
@@ -2066,10 +1999,7 @@ const fn compressed(l: &L) bool {
 }
 
 const fn per_page(l: &L) usize {
-    if compressed(l) {
-        return 1021;
-    }
-    return 511;
+    return ast::pick(compressed(l), 1021, 511);
 }
 
 // The size of `__unwind_info`: the header, the common encodings, the first-level index (a sentinel
@@ -2127,23 +2057,23 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
     let mut o = Vector::<u8>::with_capacity(os.size as usize);
     let idx = 28 + 4 * nc;
     let lsda = idx + 12 * (npages + 1);
-    lu::w32(&mut o, 1);
-    lu::w32(&mut o, 28);
-    lu::w32(&mut o, nc as u32);
-    lu::w32(&mut o, idx as u32);
-    lu::w32(&mut o, 0);
-    lu::w32(&mut o, idx as u32);
-    lu::w32(&mut o, npages as u32 + 1);
+    ob::w32(&mut o, 1);
+    ob::w32(&mut o, 28);
+    ob::w32(&mut o, nc as u32);
+    ob::w32(&mut o, idx as u32);
+    ob::w32(&mut o, 0);
+    ob::w32(&mut o, idx as u32);
+    ob::w32(&mut o, npages as u32 + 1);
     for i in 0..nc {
-        lu::w32(&mut o, l.unw_enc[i]);
+        ob::w32(&mut o, l.unw_enc[i]);
     }
     // The first-level index, its page offsets filled as the pages go.
     let mut page_at = lsda;
     for pg in 0..npages {
         let first = keyed[pg * pp] >> 24;
-        lu::w32(&mut o, first as u32);
-        lu::w32(&mut o, page_at as u32);
-        lu::w32(&mut o, lsda as u32);
+        ob::w32(&mut o, first as u32);
+        ob::w32(&mut o, page_at as u32);
+        ob::w32(&mut o, lsda as u32);
         let cnt = (n - pg * pp).min(pp);
         page_at += if comp {
             12 + 4 * cnt
@@ -2151,22 +2081,22 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
             8 + 8 * cnt
         };
     }
-    lu::w32(&mut o, end as u32);
-    lu::w32(&mut o, 0);
-    lu::w32(&mut o, lsda as u32);
+    ob::w32(&mut o, end as u32);
+    ob::w32(&mut o, 0);
+    ob::w32(&mut o, lsda as u32);
     for pg in 0..npages {
         let cnt = (n - pg * pp).min(pp);
         let base = keyed[pg * pp] >> 24;
         if comp {
-            lu::w32(&mut o, 3);
-            lu::w16(&mut o, 12);
-            lu::w16(&mut o, cnt as u32);
-            lu::w16(&mut o, (12 + 4 * cnt) as u32);
-            lu::w16(&mut o, 0);
+            ob::w32(&mut o, 3);
+            ob::w16(&mut o, 12);
+            ob::w16(&mut o, cnt as u32);
+            ob::w16(&mut o, (12 + 4 * cnt) as u32);
+            ob::w16(&mut o, 0);
         } else {
-            lu::w32(&mut o, 2);
-            lu::w16(&mut o, 8);
-            lu::w16(&mut o, cnt as u32);
+            ob::w32(&mut o, 2);
+            ob::w16(&mut o, 8);
+            ob::w16(&mut o, cnt as u32);
         }
         for j in 0..cnt {
             let kv = keyed[pg * pp + j];
@@ -2179,10 +2109,10 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
                     return false;
                 }
                 let ei = *enc_ix.get(&enc).unwrap();
-                lu::w32(&mut o, d as u32 | ei << 24);
+                ob::w32(&mut o, d as u32 | ei << 24);
             } else {
-                lu::w32(&mut o, a as u32);
-                lu::w32(&mut o, enc);
+                ob::w32(&mut o, a as u32);
+                ob::w32(&mut o, enc);
             }
         }
     }
@@ -2191,16 +2121,9 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
     return true;
 }
 
-fn bw32(o: &mut Vector<u8>, v: u32) {
-    o.push((v >> 24) as u8);
-    o.push((v >> 16 & 0xFF) as u8);
-    o.push((v >> 8 & 0xFF) as u8);
-    o.push((v & 0xFF) as u8);
-}
-
 fn bw64(o: &mut Vector<u8>, v: u64) {
-    bw32(o, (v >> 32) as u32);
-    bw32(o, v as u32);
+    ob::w32be(o, (v >> 32) as u32);
+    ob::w32be(o, v as u32);
 }
 
 // ---- chained fixups -------------------------------------------------------------------------------------
@@ -2214,17 +2137,15 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
     }
     keyed.sort();
     let mut o = Vector::<u8>::new();
-    for _ in 0..28 {
-        o.push(0);
-    }
+    o.resize_default(o.len() + 28);
     while o.len() % 8 != 0 {
         o.push(0);
     }
     let starts = o.len();
     let nseg = l.segs.len();
-    lu::w32(&mut o, nseg as u32);
+    ob::w32(&mut o, nseg as u32);
     for _ in 0..nseg {
-        lu::w32(&mut o, 0);
+        ob::w32(&mut o, 0);
     }
     let mut q: usize = 0;
     for k in 0..nseg {
@@ -2254,15 +2175,15 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
         // The pages with file bytes: dyld's page-in linking maps that many from the file, so a count that
         // reached into the zero-filled tail would map the file's next bytes there.
         let npages = ((sg.filesize + PAGE - 1) / PAGE) as usize;
-        lu::w32(&mut o, (22 + 2 * npages) as u32);
-        lu::w16(&mut o, PAGE as u32);
-        lu::w16(&mut o, DYLD_CHAINED_PTR_64_OFFSET);
-        lu::w64(&mut o, so);
-        lu::w32(&mut o, 0);
-        lu::w16(&mut o, npages as u32);
+        ob::w32(&mut o, (22 + 2 * npages) as u32);
+        ob::w16(&mut o, PAGE as u32);
+        ob::w16(&mut o, DYLD_CHAINED_PTR_64_OFFSET);
+        ob::w64(&mut o, so);
+        ob::w32(&mut o, 0);
+        ob::w16(&mut o, npages as u32);
         let ps = o.len();
         for _ in 0..npages {
-            lu::w16(&mut o, 0xFFFF);
+            ob::w16(&mut o, 0xFFFF);
         }
         let mut cur = npages;
         for i in first..last {
@@ -2297,15 +2218,8 @@ fn chained_fixups(l: &mut L, img: &mut Vector<u8>) Vector<u8> {
     for i in 0..l.imps.len() {
         let im = l.imps[i];
         let ord = l.gs[(l.glob[im.name as usize] - 1) as usize].lib;
-        lu::w32(
-            &mut o,
-            ord & 0xFF | if im.weak {
-                1u32
-            } else {
-                0u32
-            } << 8 | syms.len() as u32 << 9,
-        );
-        lu::w32(&mut o, im.addend as u32);
+        ob::w32(&mut o, ord & 0xFF | ast::pick(im.weak, 1u32, 0u32) << 8 | syms.len() as u32 << 9);
+        ob::w32(&mut o, im.addend as u32);
         let s = l.names.spell(im.name);
         for j in 0..s.len() {
             syms.push(s.byte_at(j));
@@ -2428,9 +2342,9 @@ fn exports_trie(l: &L, names: &Vector<u32>, flags: &Vector<u64>, addrs: &Vector<
         let nd = nodes[i];
         if nd.term {
             let ts = lu::uleb_len(nd.flags) + lu::uleb_len(nd.addr);
-            lu::uleb(&mut o, ts as u64);
-            lu::uleb(&mut o, nd.flags);
-            lu::uleb(&mut o, nd.addr);
+            ob::uleb(&mut o, ts as u64);
+            ob::uleb(&mut o, nd.flags);
+            ob::uleb(&mut o, nd.addr);
         } else {
             o.push(0);
         }
@@ -2442,7 +2356,7 @@ fn exports_trie(l: &L, names: &Vector<u32>, flags: &Vector<u64>, addrs: &Vector<
                 o.push(s.byte_at(c as usize));
             }
             o.push(0);
-            lu::uleb(&mut o, nodes[e.to as usize].off);
+            ob::uleb(&mut o, nodes[e.to as usize].off);
         }
     }
     while o.len() % 8 != 0 {
@@ -2626,12 +2540,8 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             }
             locs.push(
                 OSym {
-                    name: lu::put_str(&mut st, s),
-                    ty: N_SECT | if (y.ty & N_EXT) != 0 && private {
-                        N_PEXT
-                    } else {
-                        0
-                    },
+                    name: ob::put_str(&mut st, s),
+                    ty: N_SECT | ast::pick((y.ty & N_EXT) != 0 && private, N_PEXT, 0),
                     sect: out_sect(l, k as u32),
                     desc: 0,
                     value: sym_addr(l, k as u32),
@@ -2675,33 +2585,16 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         } else if gy.kind == G_COMMON {
             ((l.o_common + 1) as u8, 0u16)
         } else {
-            (
-                out_sect(l, gy.sym),
-                if gy.weak {
-                    N_WEAK_DEF
-                } else {
-                    0u16
-                }
-            )
+            (out_sect(l, gy.sym), ast::pick(gy.weak, N_WEAK_DEF, 0u16))
         };
         let ty = if abs {
             N_ABS | N_EXT
         } else {
             N_SECT | N_EXT
         };
-        exts.push(OSym { name: lu::put_str(&mut st, l.names.spell(gy.name)), ty: ty, sect: sect, desc: desc, value: a });
+        exts.push(OSym { name: ob::put_str(&mut st, l.names.spell(gy.name)), ty: ty, sect: sect, desc: desc, value: a });
         enames.push(gy.name);
-        eflags.push(
-            if gy.tlv {
-                1u64
-            } else {
-                0u64
-            } | if gy.weak {
-                4u64
-            } else {
-                0u64
-            },
-        );
+        eflags.push(ast::pick(gy.tlv, 1u64, 0u64) | ast::pick(gy.weak, 4u64, 0u64));
         eaddrs.push(a - l.base);
     }
     let mut undix = Vector::<u32>::new(); // per `gs` index: its symbol table index (imports only)
@@ -2712,7 +2605,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             undix[g] = (locs.len() + exts.len() + unds.len()) as u32;
             unds.push(
                 OSym {
-                    name: lu::put_str(&mut st, l.names.spell(gy.name)),
+                    name: ob::put_str(&mut st, l.names.spell(gy.name)),
                     ty: N_EXT,
                     sect: 0,
                     desc: (gy.lib << 8) as u16,
@@ -2736,17 +2629,13 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     }
     starts.sort();
     let mut fstarts = Vector::<u8>::new();
-    let text0 = l.segs[if l.kind == K_EXE {
-        1usize
-    } else {
-        0usize
-    }].addr;
+    let text0 = l.segs[ast::pick(l.kind == K_EXE, 1usize, 0usize)].addr;
     let mut prev = text0;
     for i in 0..starts.len() {
         if i != 0 && starts[i] == starts[i - 1] {
             continue;
         }
-        lu::uleb(&mut fstarts, starts[i] - prev);
+        ob::uleb(&mut fstarts, starts[i] - prev);
         prev = starts[i];
     }
     fstarts.push(0);
@@ -2756,11 +2645,11 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     // The indirect symbols: one per stub, then one per GOT slot.
     let mut ind = Vector::<u8>::new();
     for i in 0..l.stubs.len() {
-        lu::w32(&mut ind, undix[l.stubs[i] as usize]);
+        ob::w32(&mut ind, undix[l.stubs[i] as usize]);
     }
     for i in 0..l.got.len() {
         let g = l.got[i];
-        lu::w32(
+        ob::w32(
             &mut ind,
             if l.gs[g as usize].kind == G_DYLIB {
                 undix[g as usize]
@@ -2801,11 +2690,11 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         };
         for i in 0..v.len() {
             let e = v[i];
-            lu::w32(&mut tab, e.name);
+            ob::w32(&mut tab, e.name);
             tab.push(e.ty);
             tab.push(e.sect);
-            lu::w16(&mut tab, e.desc);
-            lu::w64(&mut tab, e.value);
+            ob::w16(&mut tab, e.desc);
+            ob::w64(&mut tab, e.value);
         }
     }
     img.extend_from_slice(&tab);
@@ -2823,19 +2712,12 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     // The header and load commands.
     let mut h = Vector::<u8>::new();
     let ncmds_at: usize = 16;
-    lu::w32(&mut h, MH_MAGIC_64);
-    lu::w32(&mut h, CPU_ARM64);
-    lu::w32(&mut h, 0);
-    lu::w32(
-        &mut h,
-        if l.kind == K_EXE {
-            MH_EXECUTE
-        } else {
-            MH_DYLIB
-        },
-    );
-    lu::w32(&mut h, 0);
-    lu::w32(&mut h, 0);
+    ob::w32(&mut h, MH_MAGIC_64);
+    ob::w32(&mut h, CPU_ARM64);
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, ast::pick(l.kind == K_EXE, MH_EXECUTE, MH_DYLIB));
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, 0);
     let mut flags = MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL;
     if l.kind == K_EXE {
         flags |= MH_PIE;
@@ -2845,40 +2727,33 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     if l.tlv {
         flags |= MH_HAS_TLV_DESCRIPTORS;
     }
-    lu::w32(&mut h, flags);
-    lu::w32(&mut h, 0);
+    ob::w32(&mut h, flags);
+    ob::w32(&mut h, 0);
     let mut ncmds: u32 = 0;
     for k in 0..l.segs.len() {
         let sg = &l.segs[k];
-        lu::w32(&mut h, LC_SEGMENT_64);
-        lu::w32(&mut h, 72 + 80 * sg.n);
-        name16(&mut h, &sg.name);
-        lu::w64(&mut h, sg.addr);
-        lu::w64(&mut h, sg.vmsize);
-        lu::w64(&mut h, sg.off);
-        lu::w64(&mut h, sg.filesize);
-        lu::w32(
-            &mut h,
-            if sg.name.as_str() == "__PAGEZERO" {
-                0u32
-            } else {
-                sg.prot
-            },
-        );
-        lu::w32(&mut h, sg.prot);
-        lu::w32(&mut h, sg.n);
-        lu::w32(&mut h, sg.flags);
+        ob::w32(&mut h, LC_SEGMENT_64);
+        ob::w32(&mut h, 72 + 80 * sg.n);
+        ob::put_padded(&mut h, &sg.name, 16);
+        ob::w64(&mut h, sg.addr);
+        ob::w64(&mut h, sg.vmsize);
+        ob::w64(&mut h, sg.off);
+        ob::w64(&mut h, sg.filesize);
+        ob::w32(&mut h, ast::pick(sg.name.as_str() == "__PAGEZERO", 0u32, sg.prot));
+        ob::w32(&mut h, sg.prot);
+        ob::w32(&mut h, sg.n);
+        ob::w32(&mut h, sg.flags);
         for q in sg.first..sg.first + sg.n {
             let os = &l.osecs[q as usize];
-            name16(&mut h, l.sn.spell(os.sect));
-            name16(&mut h, l.sn.spell(os.segname));
-            lu::w64(&mut h, os.addr);
-            lu::w64(&mut h, os.size);
-            lu::w32(&mut h, os.off as u32);
-            lu::w32(&mut h, os.align);
-            lu::w32(&mut h, 0);
-            lu::w32(&mut h, 0);
-            lu::w32(&mut h, os.flags);
+            ob::put_padded(&mut h, l.sn.spell(os.sect), 16);
+            ob::put_padded(&mut h, l.sn.spell(os.segname), 16);
+            ob::w64(&mut h, os.addr);
+            ob::w64(&mut h, os.size);
+            ob::w32(&mut h, os.off as u32);
+            ob::w32(&mut h, os.align);
+            ob::w32(&mut h, 0);
+            ob::w32(&mut h, 0);
+            ob::w32(&mut h, os.flags);
             let (r1, r2) = if q == l.o_stubs {
                 (0u32, 12u32)
             } else if q == l.o_got {
@@ -2886,58 +2761,56 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
             } else {
                 (0u32, 0u32)
             };
-            lu::w32(&mut h, r1);
-            lu::w32(&mut h, r2);
-            lu::w32(&mut h, 0);
+            ob::w32(&mut h, r1);
+            ob::w32(&mut h, r2);
+            ob::w32(&mut h, 0);
         }
         ncmds += 1;
     }
     linkedit_cmd(&mut h, LC_DYLD_CHAINED_FIXUPS, fix_off, fixups.len() as u64);
     linkedit_cmd(&mut h, LC_DYLD_EXPORTS_TRIE, trie_off, trie.len() as u64);
-    lu::w32(&mut h, LC_SYMTAB);
-    lu::w32(&mut h, 24);
-    lu::w32(&mut h, sym_off as u32);
-    lu::w32(&mut h, nsyms as u32);
-    lu::w32(&mut h, str_off as u32);
-    lu::w32(&mut h, st.len() as u32);
-    lu::w32(&mut h, LC_DYSYMTAB);
-    lu::w32(&mut h, 80);
-    lu::w32(&mut h, 0);
-    lu::w32(&mut h, locs.len() as u32);
-    lu::w32(&mut h, locs.len() as u32);
-    lu::w32(&mut h, exts.len() as u32);
-    lu::w32(&mut h, (locs.len() + exts.len()) as u32);
-    lu::w32(&mut h, unds.len() as u32);
+    ob::w32(&mut h, LC_SYMTAB);
+    ob::w32(&mut h, 24);
+    ob::w32(&mut h, sym_off as u32);
+    ob::w32(&mut h, nsyms as u32);
+    ob::w32(&mut h, str_off as u32);
+    ob::w32(&mut h, st.len() as u32);
+    ob::w32(&mut h, LC_DYSYMTAB);
+    ob::w32(&mut h, 80);
+    ob::w32(&mut h, 0);
+    ob::w32(&mut h, locs.len() as u32);
+    ob::w32(&mut h, locs.len() as u32);
+    ob::w32(&mut h, exts.len() as u32);
+    ob::w32(&mut h, (locs.len() + exts.len()) as u32);
+    ob::w32(&mut h, unds.len() as u32);
     for _ in 0..6 {
-        lu::w32(&mut h, 0);
+        ob::w32(&mut h, 0);
     }
-    lu::w32(&mut h, ind_off as u32);
-    lu::w32(&mut h, (ind.len() / 4) as u32);
+    ob::w32(&mut h, ind_off as u32);
+    ob::w32(&mut h, (ind.len() / 4) as u32);
     for _ in 0..4 {
-        lu::w32(&mut h, 0);
+        ob::w32(&mut h, 0);
     }
     ncmds += 4;
     if l.kind == K_EXE {
-        lu::w32(&mut h, LC_LOAD_DYLINKER);
-        lu::w32(&mut h, 32);
-        lu::w32(&mut h, 12);
+        ob::w32(&mut h, LC_LOAD_DYLINKER);
+        ob::w32(&mut h, 32);
+        ob::w32(&mut h, 12);
         put_padded(&mut h, "/usr/lib/dyld", 20);
     } else {
         dylib_cmd(&mut h, LC_ID_DYLIB, &l.install, 0x10000, 0x10000);
     }
     ncmds += 1;
     let uuid_at = h.len() + 8;
-    lu::w32(&mut h, LC_UUID);
-    lu::w32(&mut h, 24);
-    for _ in 0..16 {
-        h.push(0);
-    }
-    lu::w32(&mut h, LC_BUILD_VERSION);
-    lu::w32(&mut h, 24);
-    lu::w32(&mut h, 1);
-    lu::w32(&mut h, 0x000C0000);
-    lu::w32(&mut h, 0x000C0000);
-    lu::w32(&mut h, 0);
+    ob::w32(&mut h, LC_UUID);
+    ob::w32(&mut h, 24);
+    h.resize_default(h.len() + 16);
+    ob::w32(&mut h, LC_BUILD_VERSION);
+    ob::w32(&mut h, 24);
+    ob::w32(&mut h, 1);
+    ob::w32(&mut h, 0x000C0000);
+    ob::w32(&mut h, 0x000C0000);
+    ob::w32(&mut h, 0);
     ncmds += 2;
     if l.kind == K_EXE {
         let main = l.names.find("_main");
@@ -2945,10 +2818,10 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
         if main >= 0 && main as usize < l.glob.len() && l.glob[main as usize] != 0 {
             entry = file_off(l, g_addr(l, l.glob[main as usize] - 1) - l.base);
         }
-        lu::w32(&mut h, LC_MAIN);
-        lu::w32(&mut h, 24);
-        lu::w64(&mut h, entry);
-        lu::w64(&mut h, 0);
+        ob::w32(&mut h, LC_MAIN);
+        ob::w32(&mut h, 24);
+        ob::w64(&mut h, entry);
+        ob::w64(&mut h, 0);
         ncmds += 1;
     }
     for i in 0..l.libs.len() {
@@ -3014,9 +2887,9 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
     if d.len() != 0 && !d.as_str().ends_with("/") {
         d.push_byte(b'/');
     }
-    locs.push(OSym { name: lu::put_str(st, &d), ty: N_SO, sect: 0, desc: 0, value: 0 });
-    locs.push(OSym { name: lu::put_str(st, name), ty: N_SO, sect: 0, desc: 0, value: 0 });
-    locs.push(OSym { name: lu::put_str(st, &l.paths[f.path as usize]), ty: N_OSO, sect: 0, desc: 1, value: 0 });
+    locs.push(OSym { name: ob::put_str(st, &d), ty: N_SO, sect: 0, desc: 0, value: 0 });
+    locs.push(OSym { name: ob::put_str(st, name), ty: N_SO, sect: 0, desc: 0, value: 0 });
+    locs.push(OSym { name: ob::put_str(st, &l.paths[f.path as usize]), ty: N_OSO, sect: 0, desc: 1, value: 0 });
     // The functions sorted by address; each one's size reaches the next one or its section's end.
     let mut fk = Vector::<u64>::new();
     for k in f.sym0..f.sym0 + f.nsym {
@@ -3045,23 +2918,11 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
         }
         let sect = out_sect(l, k);
         locs.push(OSym { name: 1, ty: N_BNSYM, sect: sect, desc: 0, value: a });
-        locs.push(OSym { name: lu::put_str(st, l.names.spell(y.name)), ty: N_FUN, sect: sect, desc: 0, value: a });
+        locs.push(OSym { name: ob::put_str(st, l.names.spell(y.name)), ty: N_FUN, sect: sect, desc: 0, value: a });
         locs.push(OSym { name: 1, ty: N_FUN, sect: 0, desc: 0, value: e - a });
         locs.push(OSym { name: 1, ty: N_ENSYM, sect: sect, desc: 0, value: e - a });
     }
     locs.push(OSym { name: 1, ty: N_SO, sect: 1, desc: 0, value: 0 });
-}
-
-fn name16(h: &mut Vector<u8>, s: str) {
-    for i in 0..16usize {
-        h.push(
-            if i < s.len() {
-                s.byte_at(i)
-            } else {
-                0u8
-            },
-        );
-    }
 }
 
 fn put_padded(h: &mut Vector<u8>, s: str, n: usize) {
@@ -3077,20 +2938,20 @@ fn put_padded(h: &mut Vector<u8>, s: str, n: usize) {
 }
 
 fn linkedit_cmd(h: &mut Vector<u8>, cmd: u32, off: u64, size: u64) {
-    lu::w32(h, cmd);
-    lu::w32(h, 16);
-    lu::w32(h, off as u32);
-    lu::w32(h, size as u32);
+    ob::w32(h, cmd);
+    ob::w32(h, 16);
+    ob::w32(h, off as u32);
+    ob::w32(h, size as u32);
 }
 
 fn dylib_cmd(h: &mut Vector<u8>, cmd: u32, name: str, cur: u32, compat: u32) {
     let size = lu::align_up(24 + name.len() as u64 + 1, 8) as u32;
-    lu::w32(h, cmd);
-    lu::w32(h, size);
-    lu::w32(h, 24);
-    lu::w32(h, 2);
-    lu::w32(h, cur);
-    lu::w32(h, compat);
+    ob::w32(h, cmd);
+    ob::w32(h, size);
+    ob::w32(h, 24);
+    ob::w32(h, 2);
+    ob::w32(h, cur);
+    ob::w32(h, compat);
     put_padded(h, name, (size - 24) as usize);
 }
 
@@ -3103,45 +2964,34 @@ fn sign(l: &L, img: &mut Vector<u8>, ident: str, sig_off: u64, uuid_at: usize, j
     let hash_off = id_off + ident.len() as u32 + 1;
     let cd_len = hash_off + 32 * npages as u32;
     let mut s = Vector::<u8>::new();
-    bw32(&mut s, 0xFADE0CC0);
-    bw32(&mut s, 20 + cd_len);
-    bw32(&mut s, 1);
-    bw32(&mut s, 0);
-    bw32(&mut s, 20);
-    bw32(&mut s, 0xFADE0C02);
-    bw32(&mut s, cd_len);
-    bw32(&mut s, 0x20400);
-    bw32(&mut s, 0x20002); // ad-hoc, linker-signed
-    bw32(&mut s, hash_off);
-    bw32(&mut s, id_off);
-    bw32(&mut s, 0);
-    bw32(&mut s, npages as u32);
-    bw32(&mut s, sig_off as u32);
+    ob::w32be(&mut s, 0xFADE0CC0);
+    ob::w32be(&mut s, 20 + cd_len);
+    ob::w32be(&mut s, 1);
+    ob::w32be(&mut s, 0);
+    ob::w32be(&mut s, 20);
+    ob::w32be(&mut s, 0xFADE0C02);
+    ob::w32be(&mut s, cd_len);
+    ob::w32be(&mut s, 0x20400);
+    ob::w32be(&mut s, 0x20002); // ad-hoc, linker-signed
+    ob::w32be(&mut s, hash_off);
+    ob::w32be(&mut s, id_off);
+    ob::w32be(&mut s, 0);
+    ob::w32be(&mut s, npages as u32);
+    ob::w32be(&mut s, sig_off as u32);
     s.push(32);
     s.push(2); // SHA-256
     s.push(0);
     s.push(12); // 4 KiB pages
-    bw32(&mut s, 0);
-    bw32(&mut s, 0);
-    bw32(&mut s, 0);
-    bw32(&mut s, 0);
+    ob::w32be(&mut s, 0);
+    ob::w32be(&mut s, 0);
+    ob::w32be(&mut s, 0);
+    ob::w32be(&mut s, 0);
     bw64(&mut s, 0);
     // The executable segment: __TEXT.
-    let text = &l.segs[if l.kind == K_EXE {
-        1usize
-    } else {
-        0usize
-    }];
+    let text = &l.segs[ast::pick(l.kind == K_EXE, 1usize, 0usize)];
     bw64(&mut s, text.off);
     bw64(&mut s, text.filesize);
-    bw64(
-        &mut s,
-        if l.kind == K_EXE {
-            1u64
-        } else {
-            0u64
-        },
-    );
+    bw64(&mut s, ast::pick(l.kind == K_EXE, 1u64, 0u64));
     for i in 0..ident.len() {
         s.push(ident.byte_at(i));
     }

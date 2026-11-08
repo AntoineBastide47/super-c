@@ -5,6 +5,7 @@ import lir::ir as *;
 import target::a64intrin as a64i;
 import target::x64intrin as x64i;
 import target::wasmintrin as wasmi;
+import ast::ast as ast;
 
 /// The instructions of intrinsic `name` on instruction set `isa` (`target::table`'s `ISA_*` name: "aarch64",
 /// "x86_64", "wasm32"); empty when the backend has none, or when the intrinsic needs no instruction (`has`).
@@ -315,11 +316,7 @@ pub(package) fn vrename(a64: bool, text: str, from: []u32, to: []u32, out: &mut 
             continue;
         }
         // The spelling's letters, then the new number.
-        let letters = if a64 {
-            1usize
-        } else {
-            4usize
-        };
+        let letters = ast::pick(a64, 1usize, 4usize);
         out.push_str(text.slice(i, i + letters));
         out.push_u64(to[q]);
         i += l;
@@ -399,11 +396,7 @@ pub(package) const fn mem_form(name: str) u8 {
             let rest = name.slice(neon[k].len(), name.len());
             for j in 0..lanes.len() {
                 if rest == lanes[j] {
-                    return if k < 2 {
-                        MF_LOAD
-                    } else {
-                        MF_STORE
-                    };
+                    return ast::pick(k < 2, MF_LOAD, MF_STORE);
                 }
             }
             return MF_NONE;
@@ -425,11 +418,7 @@ pub(package) const fn mem_form(name: str) u8 {
             let r2 = r1.slice(ops[o].len(), r1.len());
             // The integer type names the width: si128 with `_mm`, si256 with `_mm256`, si512 with `_mm512`.
             if r2 == "ps" || r2 == "pd" || r2 == tys[p + 2] {
-                return if o < 3 {
-                    MF_LOAD
-                } else {
-                    MF_STORE
-                };
+                return ast::pick(o < 3, MF_LOAD, MF_STORE);
             }
         }
     }

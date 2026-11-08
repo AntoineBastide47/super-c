@@ -4,32 +4,33 @@
 // variable's own symbol) and its initial value under `<name>$tlv$init`. C names take the `_` prefix.
 import codegen::obj as ob;
 import target::a64 as a;
+import ast::ast as ast;
 
-const MH_MAGIC_64: u32 = 0xFEEDFACF;
+pub(package) const MH_MAGIC_64: u32 = 0xFEEDFACF;
 const CPU_TYPE_ARM64: u32 = 0x0100000C;
-const MH_OBJECT: u32 = 1;
-const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
-const LC_SEGMENT_64: u32 = 0x19;
-const LC_SYMTAB: u32 = 0x2;
-const LC_DYSYMTAB: u32 = 0xB;
-const LC_BUILD_VERSION: u32 = 0x32;
+pub(package) const MH_OBJECT: u32 = 1;
+pub(package) const MH_SUBSECTIONS_VIA_SYMBOLS: u32 = 0x2000;
+pub(package) const LC_SEGMENT_64: u32 = 0x19;
+pub(package) const LC_SYMTAB: u32 = 0x2;
+pub(package) const LC_DYSYMTAB: u32 = 0xB;
+pub(package) const LC_BUILD_VERSION: u32 = 0x32;
 const PLATFORM_MACOS: u32 = 1;
 const MACOS_MIN: u32 = 0x000B0000; // 11.0: the first macOS on arm64
 
-const S_REGULAR: u32 = 0;
-const S_ZEROFILL: u32 = 1;
+pub(package) const S_REGULAR: u32 = 0;
+pub(package) const S_ZEROFILL: u32 = 1;
 const S_CSTRING_LITERALS: u32 = 2;
-const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
-const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
-const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
+pub(package) const S_THREAD_LOCAL_REGULAR: u32 = 0x11;
+pub(package) const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
+pub(package) const S_THREAD_LOCAL_VARIABLES: u32 = 0x13;
 const S_ATTR_CODE: u32 = 0x80000400; // pure and some instructions
-const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
-const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
+pub(package) const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x400;
+pub(package) const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x80000000;
 
 pub(package) const NONE32: u32 = 0xFFFFFFFF;
 const N_EXT: u8 = 1;
 const N_SECT: u8 = 0xE;
-const N_PEXT: u8 = 0x10;
+pub(package) const N_PEXT: u8 = 0x10;
 const N_NO_DEAD_STRIP: u32 = 0x20;
 const N_WEAK_DEF: u32 = 0x80;
 
@@ -71,18 +72,6 @@ const RT_ADDEND: u32 = 10;
 
 // A Mach-O section: its object kind (or TV, the descriptors), names and flags.
 const TV: u8 = 254;
-
-fn wname(o: &mut Vector<u8>, s: str) {
-    for i in 0..16usize {
-        o.push(
-            if i < s.len() {
-                s.byte_at(i)
-            } else {
-                0
-            },
-        );
-    }
-}
 
 /// The section and segment names and the flags of named section `spec` (`segment,section[,type[,attr+
 /// ...]]`), holding `code` when a function is there; NONE32 for a type or attribute this writer does not
@@ -239,9 +228,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         let at = tv.len() as u32;
         tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, part: false, off: at, sym: boot, addend: 0 });
         tv_rel.push(ob::ORel { sec: TV, kind: a::R_ABS64, part: false, off: at + 16, sym: ik, addend: 0 });
-        for _ in 0..24 {
-            tv.push(0);
-        }
+        tv.resize_default(tv.len() + 24);
         let vy = o.syms.index_mut(k);
         vy.sec = TV;
         vy.off = at;
@@ -272,9 +259,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     let nsect = kinds.len() as u32;
     // Section number (1-based) of each kind.
     let mut secno = Vector::<u8>::new();
-    for _ in 0..256 {
-        secno.push(0);
-    }
+    secno.resize_default(secno.len() + 256);
     for i in 0..kinds.len() {
         secno[kinds[i] as usize] = (i + 1) as u8;
     }
@@ -437,28 +422,20 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         } else {
             let si = secno[y.sec as usize];
             nl.push(
-                N_SECT | if (y.flags & ob::SF_GLOBAL) != 0 {
-                    N_EXT
-                } else {
-                    0
-                } | if (y.flags & ob::SF_HIDDEN) != 0 {
-                    N_PEXT
-                } else {
-                    0
-                },
+                N_SECT | ast::pick((y.flags & ob::SF_GLOBAL) != 0, N_EXT, 0) | ast::pick(
+                    (y.flags & ob::SF_HIDDEN) != 0,
+                    N_PEXT,
+                    0,
+                ),
             );
             nl.push(si);
             ob::w16(
                 &mut nl,
-                if (y.flags & ob::SF_USED) != 0 {
-                    N_NO_DEAD_STRIP
-                } else {
-                    0
-                } | if (y.flags & ob::SF_WEAK) != 0 {
-                    N_WEAK_DEF
-                } else {
-                    0
-                },
+                ast::pick((y.flags & ob::SF_USED) != 0, N_NO_DEAD_STRIP, 0) | ast::pick(
+                    (y.flags & ob::SF_WEAK) != 0,
+                    N_WEAK_DEF,
+                    0,
+                ),
             );
             ob::w64(&mut nl, addr[(si - 1) as usize] + y.off);
         }
@@ -480,7 +457,7 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
     ob::w32(out, 0);
     ob::w32(out, LC_SEGMENT_64);
     ob::w32(out, seg_sz);
-    wname(out, "");
+    ob::put_padded(out, "", 16);
     ob::w64(out, 0);
     ob::w64(out, va);
     ob::w64(out, data_start);
@@ -495,8 +472,8 @@ pub(package) fn write(o: &mut ob::Obj, out: &mut Vector<u8>) {
         let mut seg: str = "";
         let fl = sec_names(o, k, &mut sect, &mut seg);
         let (size, al) = sec_size(o, &tv, k);
-        wname(out, sect);
-        wname(out, seg);
+        ob::put_padded(out, sect, 16);
+        ob::put_padded(out, seg, 16);
         ob::w64(out, addr[i]);
         ob::w64(out, size);
         ob::w32(out, foff[i]);

@@ -6,6 +6,8 @@
 // when its masked bits equal the row's and every operand decodes. Aliases (`mov` for `orr` from the
 // zero register) come before their base forms, so the disassembler prints the preferred name.
 
+import ast::ast as ast;
+
 /// A row: `mn`, the fixed bits, the variant kind (`Q::*`) and the variant values it takes (a bit per
 /// value), the operand kinds (one byte each from the low byte, 0 ends), and an alias condition
 /// (`FL_*`).
@@ -66,8 +68,6 @@ extend Q {
 }
 
 // Bit sets of variant values.
-pub(package) const QW: u8 = 1;
-pub(package) const QX: u8 = 2;
 pub(package) const QWX: u8 = 3;
 pub(package) const QSD: u8 = 3; // Q::FT: s and d
 pub(package) const QALL: u8 = 0x0F; // Q::Z: every element
@@ -1083,10 +1083,7 @@ const fn qof(r: Row, w: u32) u32 {
         Q::ZE => (r.qok as u32).trailing_zeros() as u32,
         _ => 0,
     };
-    if qk != Q::NONE && (q >= 8 || (r.qok as u32 >> q & 1) == 0) {
-        return 0xFF;
-    }
-    return q;
+    return ast::pick(qk != Q::NONE && (q >= 8 || (r.qok as u32 >> q & 1) == 0), 0xFF, q);
 }
 
 /// The variant of row `r`: its one value when the mnemonic fixes it (`Q::ZE`), else `q`.
@@ -1262,10 +1259,7 @@ pub(package) const fn mask(r: Row) u32 {
 /// The log2 of the bytes a load or store word `w` moves.
 pub(package) const fn ldst_scale(w: u32) u32 {
     let size = w >> 30;
-    if (w >> 26 & 1) != 0 && size == 0 && (w >> 23 & 1) != 0 {
-        return 4;
-    }
-    return size;
+    return ast::pick((w >> 26 & 1) != 0 && size == 0 && (w >> 23 & 1) != 0, 4, size);
 }
 
 // The log2 of the bytes of one register of pair word `w`.
@@ -1333,11 +1327,7 @@ pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
     if rr != 0 {
         e = (ones >> rr as u64 | ones << (esize - rr) as u64) & emask;
     }
-    let width: u32 = if x {
-        64
-    } else {
-        32
-    };
+    let width: u32 = ast::pick(x, 64, 32);
     let mut v: u64 = 0;
     let mut at: u32 = 0;
     while at < width {
@@ -1349,20 +1339,13 @@ pub(package) const fn bitmask_value(nrs: u32, x: bool) Option<u64> {
 
 /// The bits of a 64-bit (`x`) or 32-bit register.
 pub(package) const fn wmask(x: bool) u64 {
-    if x {
-        return 0xFFFFFFFFFFFFFFFFu64;
-    }
-    return 0xFFFFFFFFu64;
+    return ast::pick(x, 0xFFFFFFFFFFFFFFFFu64, 0xFFFFFFFFu64);
 }
 
 /// The chunk `hw` with `u == imm16 << 16 * hw` in a 64-bit (`x`) or 32-bit register, 4 when there is
 /// none.
 pub(package) const fn wide_chunk(u: u64, x: bool) u32 {
-    let n: u32 = if x {
-        4
-    } else {
-        2
-    };
+    let n: u32 = ast::pick(x, 4, 2);
     for hw in 0..n {
         let sh = (hw * 16) as u64;
         if (u >> sh & 0xFFFF) << sh == u {
@@ -1391,11 +1374,7 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
         return false;
     }
     let x = is64(r.q, q);
-    let wbits: i64 = if x {
-        64
-    } else {
-        32
-    };
+    let wbits: i64 = ast::pick(x, 64, 32);
     let mut w = r.bits | qbits(r.q, q);
     let mut at: usize = 0;
     for i in 0..6u32 {
@@ -1511,11 +1490,7 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
                 for q in 0..8u32 {
                     let y = a as u64 >> (8 * q) as u64 & 0xFF;
                     ok = ok && (y == 0 || y == 0xFF);
-                    m |= if y != 0 {
-                        1u32
-                    } else {
-                        0
-                    } << q;
+                    m |= ast::pick(y != 0, 1u32, 0) << q;
                 }
                 w |= m >> 5 << 16 | (m & 31) << 5;
             },
@@ -1728,11 +1703,7 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
         return false;
     }
     let x = is64(r.q, q);
-    let wbits: i64 = if x {
-        64
-    } else {
-        32
-    };
+    let wbits: i64 = ast::pick(x, 64, 32);
     let immr = (w >> 16 & 0x3F) as i64;
     let imms = (w >> 10 & 0x3F) as i64;
     let mut at: usize = 0;

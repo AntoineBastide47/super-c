@@ -3,7 +3,6 @@
 // own); each names its install name, its re-exported libraries and its exported symbols per target.
 // The parser reads the YAML subset these files use: top-level keys, sequences of mappings whose items
 // start with `- `, flow sequences `[ ... ]` across lines, single-quoted and plain scalars.
-import link::util as lu;
 
 /// How an exported name spells its symbols.
 pub(package) const E_PLAIN: u8 = 0; // the name itself

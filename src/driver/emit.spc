@@ -3783,7 +3783,7 @@ fn cemit_drain_demand(
             cf_ok.push(false);
         }
         // Only the C renderer reads it: a native build renders no body.
-        if !cf_ok[li2 as usize] && !cbe::native_on(p) {
+        if !cf_ok[li2 as usize] && !p.native {
             let cfp = &mut cfs[li2 as usize];
             cfp.build_into(&lws.at(li2 as usize).body);
             cf_ok.set(li2 as usize, true);
@@ -4035,7 +4035,7 @@ fn cemit_drain_slice_one(
         sh.mg.clos_ids.push(blw.closures[c2]);
     }
     if bv_on || var_on {
-        if !cbe::native_on(p) {
+        if !p.native {
             cf_own.build_into(&blw.body);
         }
         cfp = &cf_own;
@@ -4169,7 +4169,7 @@ fn cemit_low_task(t: LowTask) {
                 dow2.apply_drops(&mut lw);
             }
             let mut cf = cfl::CFlow::new_empty();
-            if !cbe::native_on(p) {
+            if !p.native {
                 cf.build_into(&lw.body);
             }
             let rp = unsafe &mut *(res + i as usize);
@@ -5453,7 +5453,7 @@ pub(package) fn cemit_package(
                                 let slot = lws.len() as u64;
                                 let mv9 = replace(o.dvars.index_mut(vix as usize), irl::Lowerer::new(p, 0, NODE_NONE));
                                 let mut cf9 = cfl::CFlow::new_empty();
-                                if !cbe::native_on(p) {
+                                if !p.native {
                                     cf9.build_into(&mv9.body);
                                 }
                                 lws.push(mv9);
@@ -6484,7 +6484,7 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         }
         o.lir = Some(l);
     }
-    if !cbe::native_on(p) {
+    if !p.native {
         o.lir = None;
     }
     if unsafe TS_ON {
@@ -13109,10 +13109,6 @@ fn native_plan(
         // Each statement ends in a newline: the text is empty exactly when the module holds none.
         let text = replace(asm_text.index_mut(m), String::new());
         if text.len() != 0 {
-            if !nat::asm_native(p.build_target, p.arch) {
-                why.push_str("module-level assembly, which the assembler does not take for this target");
-                continue;
-            }
             texts.set(2 * m, text);
         }
         if conly[m] != 0 {
@@ -15930,11 +15926,11 @@ pub(package) fn run_package(
         }
     }
     stage_ms(tstat, &mut tp0, "phase mid");
-    if cbe::native_on(p) {
+    if p.native {
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }
-    if cbe::native_on(p) || cbe::lir_requested(p) {
+    if p.native || cbe::lir_requested(p) {
         lir_lines(p);
     }
     // The installed hooks' stage before the emission (`build_system::ext`): an error leaves the tree as it is.
@@ -16545,6 +16541,18 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
 /// The native registry object's name in the tree: a build that links it links no C registry object.
 pub(package) const NAT_REGISTRY: str = "__sc_registry_n";
 
+// The section of the target's constructor pointers.
+fn ctor_section(p: &loader::Package) str<'static> {
+    let f = tgt::obj_of(p.build_target).name;
+    return if f == "macho" {
+        "__DATA,__mod_init_func,mod_init_funcs"
+    } else if f == "coff" {
+        ".CRT$XCU"
+    } else {
+        ".init_array"
+    };
+}
+
 // The registry of a build whose modules are all native, as an object of the target: the ZST sentinels
 // of alignments `zst`, and with reflection roots `roots` (space-separated, sorted) their table and the
 // constructor that registers it, as the C registry has them.
@@ -16576,14 +16584,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
     }
     if names.len() != 0 {
-        let f = tgt::obj_of(p.build_target).name;
-        let sec = if f == "macho" {
-            "__DATA,__mod_init_func,mod_init_funcs"
-        } else if f == "coff" {
-            ".CRT$XCU"
-        } else {
-            ".init_array"
-        };
+        let sec = ctor_section(p);
         for i in 0..names.len() {
             t.format_into("sym @{} data global ext\n", names[i]);
         }
@@ -16662,14 +16663,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
 // sets it, up to the highest. `int` is the pointer-sized integer type.
 fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     let n = p.simd_levels.len();
-    let f = tgt::obj_of(p.build_target).name;
-    let sec = if f == "macho" {
-        "__DATA,__mod_init_func,mod_init_funcs"
-    } else if f == "coff" {
-        ".CRT$XCU"
-    } else {
-        ".init_array"
-    };
+    let sec = ctor_section(p);
     let ptr = lay::target_for(p.arch).ptr as u32;
     t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\nsym @sc_cpu_words fn global\n");
     t.format_into(

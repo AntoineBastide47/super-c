@@ -596,10 +596,7 @@ extend Lower {
         if bt == BuiltinType::BT_ISIZE || bt == BuiltinType::BT_USIZE {
             return self.ptr_int();
         }
-        if bt == BuiltinType::BT_F32 {
-            return T_F32;
-        }
-        return T_F64;
+        return ast::pick(bt == BuiltinType::BT_F32, T_F32, T_F64);
     }
 
     // The resolved type `(m, t)`.
@@ -1434,6 +1431,17 @@ struct FieldAt {
 
 extend FieldAt as Copy {}
 
+const FIELD_NONE: FieldAt = FieldAt {
+    m: 0,
+    t: TYPE_NONE,
+    off: 0,
+    idx: 0,
+    node: NODE_NONE,
+    variant: NODE_NONE,
+    mty: T_NONE,
+    packed: false,
+};
+
 // An enum value's payload of at most this many bytes is zeroed where its variant leaves it.
 const ENUM_ZERO_MAX: u32 = 32;
 
@@ -1836,16 +1844,12 @@ extend Lower {
             let m = self.b.ref_msg(self.pkg.add_message(&s));
             if k == d.nout {
                 // The output types come after the output constraints: their slots, filled below.
-                for _ in 0..d.nout {
-                    self.b.pool.push(0);
-                }
+                self.b.pool.resize_default(self.b.pool.len() + d.nout as usize);
             }
             self.b.pool.push(m);
         }
         if d.nin + d.nclob == 0 {
-            for _ in 0..d.nout {
-                self.b.pool.push(0);
-            }
+            self.b.pool.resize_default(self.b.pool.len() + d.nout as usize);
         }
         let mut vals = Vector::<Value>::new();
         let mut backs = Vector::<(PlaceRef, Value, u8)>::new();
@@ -2905,16 +2909,7 @@ extend Lower {
                 return 0;
             }
         }
-        let mut f = FieldAt {
-            m: 0,
-            t: TYPE_NONE,
-            off: 0,
-            idx: 0,
-            node: NODE_NONE,
-            variant: NODE_NONE,
-            mty: T_NONE,
-            packed: false,
-        };
+        let mut f = FIELD_NONE;
         if !self.named_field(c, rm, rt, "ptr", &mut f) || f.off != 0 {
             return 0;
         }
@@ -2924,11 +2919,11 @@ extend Lower {
         let mut pt = f.t;
         let py = Lower::resolved(c, f.m, f.t, &mut pm, &mut pt);
         let mut ei = TyI { cls: 0, mty: T_NONE, size: 0, align: 1 };
-        let size = if py.kind == TypeKind::TYPE_POINTER && self.ty(c, pm, py.as_data.elem, &mut ei) && ei.cls != VC_ZST && ei.size <= REF_BYTES {
-            ei.size
-        } else {
-            0u32
-        };
+        let size = ast::pick(
+            py.kind == TypeKind::TYPE_POINTER && self.ty(c, pm, py.as_data.elem, &mut ei) && ei.cls != VC_ZST && ei.size <= REF_BYTES,
+            ei.size,
+            0u32,
+        );
         if excl {
             return REF_INNER | REF_NOALIAS | size;
         }
@@ -3057,9 +3052,7 @@ extend Lower {
             let z = if is_vec(t) {
                 let w = self.b.words.len() as u32;
                 let nw = (type_bytes(t, self.pkg.ptr_bytes) + 7) / 8;
-                for _ in 0..nw {
-                    self.b.words.push(0);
-                }
+                self.b.words.resize_default(self.b.words.len() + nw as usize);
                 self.inst(O_WCONST, t, 0, w, nw, VNONE)
             } else if is_float(t) {
                 self.fconst(t, 0)
@@ -3298,13 +3291,13 @@ extend Lower {
             i -= 1;
             let t = self.b.insts[i as usize];
             if t.op == O_STORE {
-                if self.slot_of(t.a) == s && (t.aux & MEM_VOLATILE) == 0 {
+                if slot_of(&self.b, t.a) == s && (t.aux & MEM_VOLATILE) == 0 {
                     self.b.insts[i as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: VNONE };
                 }
                 continue;
             }
             if t.op == O_LOAD {
-                let ls = self.slot_of(t.a);
+                let ls = slot_of(&self.b, t.a);
                 if ls == s || ls == NONE {
                     return;
                 }
@@ -3314,26 +3307,6 @@ extend Lower {
                 return;
             }
         }
-    }
-
-    // The slot address value `v` derives from through address arithmetic (at most 8 steps), NONE when none.
-    fn slot_of(self: &Self, v: Value) u32 {
-        let mut x = v;
-        // Each step goes back one `ptradd`.
-        for _ in 0..8 {
-            if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
-                return NONE;
-            }
-            let t = self.b.insts[x as usize];
-            if t.op == O_SLOTADDR {
-                return t.a;
-            }
-            if t.op != O_PTRADD {
-                return NONE;
-            }
-            x = t.a;
-        }
-        return NONE;
     }
 
     // A slot for type `ti`, addressed in the entry block.
@@ -3571,16 +3544,7 @@ extend Lower {
                     cur.addr = self.ptradd(cur.addr, VNONE, 0, el.payload_off);
                     // The payload keeps the enum's type until its member is named.
                 } else {
-                    let mut f = FieldAt {
-                        m: 0,
-                        t: TYPE_NONE,
-                        off: 0,
-                        idx: 0,
-                        node: NODE_NONE,
-                        variant: NODE_NONE,
-                        mty: T_NONE,
-                        packed: false,
-                    };
+                    let mut f = FIELD_NONE;
                     if !self.member(c, rm, rt, pj, variant, &mut f) {
                         return false;
                     }
@@ -3640,16 +3604,7 @@ extend Lower {
                 } else {
                     let nm = Lower::agg_name(c, rm, rt);
                     let fname = ast::pick(nm == "Array", "data", "ptr");
-                    let mut f = FieldAt {
-                        m: 0,
-                        t: TYPE_NONE,
-                        off: 0,
-                        idx: 0,
-                        node: NODE_NONE,
-                        variant: NODE_NONE,
-                        mty: T_NONE,
-                        packed: false,
-                    };
+                    let mut f = FIELD_NONE;
                     if !self.named_field(c, rm, rt, fname, &mut f) {
                         return self.fail("index-storage");
                     }
@@ -4025,10 +3980,7 @@ extend Lower {
             return t;
         }
         let t = self.temp(ti);
-        if !self.const_into(c, b, op.data, t, ti) {
-            return VNONE;
-        }
-        return t;
+        return ast::pick(!self.const_into(c, b, op.data, t, ti), VNONE, t);
     }
 
     // Store operand `opid` of type `ti` into memory at `dst`.
@@ -4478,7 +4430,7 @@ extend Lower {
                 if !self.wrap && signed {
                     let m = self.vop(
                         (irc::OP_SIMD + irc::SIMD_OVF_SUB as u32) as u16 | VOP_SIGNED,
-                        self.mask_of(ty),
+                        mask_int(lanes(ty)),
                         [z, x],
                         VNONE,
                     );
@@ -4506,21 +4458,6 @@ extend Lower {
         let _ = tyy;
         let _ = ti;
         return self.fail_v("unary");
-    }
-
-    // The mask type of vector type `vt`: an integer of one bit per lane.
-    const fn mask_of(self: &Self, vt: u8) u8 {
-        let n = lanes(vt);
-        if n <= 8 {
-            return T_I8;
-        }
-        if n <= 16 {
-            return T_I16;
-        }
-        if n <= 32 {
-            return T_I32;
-        }
-        return T_I64;
     }
 
     // Trap with `msg` when lane mask `m` has a bit set.
@@ -4744,18 +4681,7 @@ extend Lower {
                     ast::pick(t == tt::TokenType::Minus, O_SUBO, O_MULO),
                 );
                 let o = self.inst(oo, ct, ast::pick(signed, OV_SIGNED, 0), x, y, VNONE);
-                self.check(
-                    VFLAG | o,
-                    ast::pick(
-                        t == tt::TokenType::Plus,
-                        "attempt to add with overflow",
-                        ast::pick(
-                            t == tt::TokenType::Minus,
-                            "attempt to subtract with overflow",
-                            "attempt to multiply with overflow",
-                        ),
-                    ),
-                );
+                self.check(VFLAG | o, irc::lane_trap_msg(irc::RV_BINARY, t as u8, false));
                 return o;
             }
             return self.arith(op, x, y);
@@ -4767,14 +4693,7 @@ extend Lower {
             if !known && checked {
                 let z = self.zero(ct);
                 let f = self.icmp(C_EQ, y, z);
-                self.check(
-                    f,
-                    ast::pick(
-                        div,
-                        "attempt to divide by zero",
-                        "attempt to calculate the remainder with a divisor of zero",
-                    ),
-                );
+                self.check(f, irc::lane_trap_msg(irc::RV_BINARY, t as u8, false));
                 if signed {
                     let bits = type_bits(ct, self.pkg.ptr_bytes);
                     let mn = self.iconst(ct, 1u64 << (bits - 1) as u64);
@@ -4782,14 +4701,7 @@ extend Lower {
                     let fx = self.icmp(C_EQ, x, mn);
                     let fy = self.icmp(C_EQ, y, m1);
                     let f2 = self.arith(O_AND, fx, fy);
-                    self.check(
-                        f2,
-                        ast::pick(
-                            div,
-                            "attempt to divide with overflow",
-                            "attempt to calculate the remainder with overflow",
-                        ),
-                    );
+                    self.check(f2, irc::lane_trap_msg(irc::RV_BINARY, t as u8, true));
                 }
             }
             let op = if div {
@@ -5085,7 +4997,7 @@ extend Lower {
         let vt = self.vty(x);
         let flt = is_float(lane_type(vt));
         let sg = ast::pick(signed, VOP_SIGNED, 0);
-        let mt = self.mask_of(vt);
+        let mt = mask_int(lanes(vt));
         if t == tt::TokenType::EqualEqual || t == tt::TokenType::BangEqual {
             let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16 | sg, mt, [x, y], VNONE);
             let all = self.iconst(mt, ~0u64 >> (64 - lanes(vt)) as u64);
@@ -5150,18 +5062,7 @@ extend Lower {
                     ast::pick(t == tt::TokenType::Minus, irc::SIMD_OVF_SUB, irc::SIMD_OVF_MUL),
                 );
                 let m = self.vop((irc::OP_SIMD + code as u32) as u16 | sg, mt, [x, y], VNONE);
-                self.lane_check(
-                    m,
-                    ast::pick(
-                        t == tt::TokenType::Plus,
-                        "attempt to add with overflow",
-                        ast::pick(
-                            t == tt::TokenType::Minus,
-                            "attempt to subtract with overflow",
-                            "attempt to multiply with overflow",
-                        ),
-                    ),
-                );
+                self.lane_check(m, irc::lane_trap_msg(irc::RV_BINARY, t as u8, false));
             }
             return self.arith(
                 ast::pick(t == tt::TokenType::Plus, O_ADD, ast::pick(t == tt::TokenType::Minus, O_SUB, O_MUL)),
@@ -5173,11 +5074,7 @@ extend Lower {
             let div = t == tt::TokenType::Slash;
             let z = self.zero(vt);
             let m = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, z], VNONE);
-            let zmsg = ast::pick(
-                div,
-                "attempt to divide by zero",
-                "attempt to calculate the remainder with a divisor of zero",
-            );
+            let zmsg = irc::lane_trap_msg(irc::RV_BINARY, t as u8, false);
             if signed {
                 // A zero divisor and MIN / -1: one trap, at the lowest lane of either.
                 let bits = type_bits(lane_type(vt), 8);
@@ -5186,16 +5083,7 @@ extend Lower {
                 let fx = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [x, mn], VNONE);
                 let fy = self.vop((irc::OP_SIMD + irc::SIMD_CMP_EQ as u32) as u16, mt, [y, m1], VNONE);
                 let f = self.arith(O_AND, fx, fy);
-                self.lane_checks(
-                    m,
-                    zmsg,
-                    f,
-                    ast::pick(
-                        div,
-                        "attempt to divide with overflow",
-                        "attempt to calculate the remainder with overflow",
-                    ),
-                );
+                self.lane_checks(m, zmsg, f, irc::lane_trap_msg(irc::RV_BINARY, t as u8, true));
             } else {
                 self.lane_check(m, zmsg);
             }
@@ -5227,9 +5115,7 @@ extend Lower {
         let n = lanes(vt);
         let nw = (n * lb + 63) / 64;
         let w = self.b.words.len() as u32;
-        for _ in 0..nw {
-            self.b.words.push(0);
-        }
+        self.b.words.resize_default(self.b.words.len() + nw as usize);
         let mut lv = v;
         if lb < 64 {
             lv &= (1u64 << lb as u64) - 1;
@@ -5269,16 +5155,7 @@ extend Lower {
             return self.iconst(ti.mty, n as u64);
         }
         let nm = Lower::agg_name(c, rm, rt);
-        let mut f = FieldAt {
-            m: 0,
-            t: TYPE_NONE,
-            off: 0,
-            idx: 0,
-            node: NODE_NONE,
-            variant: NODE_NONE,
-            mty: T_NONE,
-            packed: false,
-        };
+        let mut f = FIELD_NONE;
         if nm == "Array" {
             if !self.named_field(c, rm, rt, "data", &mut f) {
                 return self.fail_v("len-array-field");
@@ -5717,10 +5594,7 @@ const fn check_args(k: u8) u32 {
     if k == irc::IN_BOUNDS || k == irc::IN_BOUNDS_PROVEN || k == irc::IN_CHUNK {
         return 2;
     }
-    if irc::is_check(k) || k == irc::IN_GROUP_FITS {
-        return 3;
-    }
-    return 0;
+    return ast::pick(irc::is_check(k) || k == irc::IN_GROUP_FITS, 3, 0);
 }
 
 extend Lower {
@@ -6139,16 +6013,7 @@ extend Lower {
         let mut len = VNONE;
         let mut et = TYPE_NONE;
         let mut em = rm;
-        let mut f = FieldAt {
-            m: 0,
-            t: TYPE_NONE,
-            off: 0,
-            idx: 0,
-            node: NODE_NONE,
-            variant: NODE_NONE,
-            mty: T_NONE,
-            packed: false,
-        };
+        let mut f = FIELD_NONE;
         if by.kind == TypeKind::TYPE_ARRAY {
             len = self.iconst(pi, c.mg.arr_len(rm, &by) as u64);
             et = by.as_data.arr.elem;
@@ -6358,16 +6223,7 @@ extend Lower {
                 return false;
             }
             let ba = self.operand_addr(c, b, rv.a, oi);
-            let mut f = FieldAt {
-                m: 0,
-                t: TYPE_NONE,
-                off: 0,
-                idx: 0,
-                node: NODE_NONE,
-                variant: NODE_NONE,
-                mty: T_NONE,
-                packed: false,
-            };
+            let mut f = FIELD_NONE;
             if ba == VNONE || !self.named_field(c, om, ott, "ptr", &mut f) {
                 return self.fail("dyn-box");
             }
@@ -6527,10 +6383,11 @@ extend Lower {
             }
             let mut rm = b.module;
             let mut rt = TYPE_NONE;
-            if aty != TYPE_NONE && Lower::resolved(c, b.module, aty, &mut rm, &mut rt).kind == TypeKind::TYPE_REFERENCE {
-                return AM_DEREF;
-            }
-            return AM_VAL;
+            return ast::pick(
+                aty != TYPE_NONE && Lower::resolved(c, b.module, aty, &mut rm, &mut rt).kind == TypeKind::TYPE_REFERENCE,
+                AM_DEREF,
+                AM_VAL,
+            );
         }
         if py.kind != TypeKind::TYPE_REFERENCE {
             return AM_VAL;
@@ -6578,10 +6435,11 @@ extend Lower {
         if !self.ty(c, b.module, aty, &mut ti) {
             return AM_VAL;
         }
-        if ti.cls == VC_ZST && aty != TYPE_NONE && Lower::builtin(c, b.module, aty) != BuiltinType::BT_VOID && ay.kind != TypeKind::TYPE_NEVER {
-            return AM_ZST_REF;
-        }
-        return AM_REF;
+        return ast::pick(
+            ti.cls == VC_ZST && aty != TYPE_NONE && Lower::builtin(c, b.module, aty) != BuiltinType::BT_VOID && ay.kind != TypeKind::TYPE_NEVER,
+            AM_ZST_REF,
+            AM_REF,
+        );
     }
 
     // The name of declaration `(m, d)`.
@@ -6642,16 +6500,7 @@ extend Lower {
             } else {
                 self.operand_addr(c, b, opid, ti)
             };
-            let mut f = FieldAt {
-                m: 0,
-                t: TYPE_NONE,
-                off: 0,
-                idx: 0,
-                node: NODE_NONE,
-                variant: NODE_NONE,
-                mty: T_NONE,
-                packed: false,
-            };
+            let mut f = FIELD_NONE;
             if ba == VNONE || !self.named_field(c, rm, rt, "ptr", &mut f) {
                 return self.fail("box-arg");
             }
@@ -7072,11 +6921,7 @@ extend Lower {
             };
             for q in 0..self.hints.len() {
                 if (self.hints[q] >> 1) as u32 == v {
-                    let rare = if (self.hints[q] & 1) != 0 {
-                        no
-                    } else {
-                        yes
-                    };
+                    let rare = ast::pick((self.hints[q] & 1) != 0, no, yes);
                     if self.npred[rare as usize + 1] - self.npred[rare as usize] == 1 && self.lblk[rare as usize] != NONE {
                         self.b.blocks.index_mut(self.lblk[rare as usize] as usize).flags |= BLOCK_UNLIKELY;
                     }
@@ -7920,11 +7765,11 @@ extend Lower {
         if code == SYS_COUNT || a.len() != sys_arity(code) as usize {
             return false;
         }
-        let ty = if code == SYS_CYCLES || code == SYS_GSLOAD || code == SYS_XGETBV || code == SYS_SVL {
-            T_I64
-        } else {
-            T_NONE
-        };
+        let ty = ast::pick(
+            code == SYS_CYCLES || code == SYS_GSLOAD || code == SYS_XGETBV || code == SYS_SVL,
+            T_I64,
+            T_NONE,
+        );
         let mut ops: [Value; 3] = [VNONE, VNONE, VNONE];
         for k in 0..a.len() {
             unsafe ops[k] = a[k];
@@ -9296,10 +9141,11 @@ const fn trap_class(o: &le::Outcome) u8 {
     if m.starts_with("attempt to ") && m.ends_with(" with overflow") {
         return iri::IT_TRAP_UB_OVERFLOW;
     }
-    if m.starts_with("index out of bounds") || m == "range out of bounds" {
-        return iri::IT_TRAP_UB_OOB;
-    }
-    return iri::IT_TRAP_PANIC;
+    return ast::pick(
+        m.starts_with("index out of bounds") || m == "range out of bounds",
+        iri::IT_TRAP_UB_OOB,
+        iri::IT_TRAP_PANIC,
+    );
 }
 
 // The 1-based line and column of byte `pos` of `src`.
@@ -10167,7 +10013,7 @@ struct Tidy {
     pub(package) slast: Vector<u32>, // its last use so far, and that use's block
     pub(package) slastb: Vector<u32>,
     pub(package) sesc: Vector<bool>, // its address goes beyond a load, a store, a copy or a fill of it
-    pub(package) uat: Vector<u32>, // per instruction, its uses (`inst_uses`) in `ul`: `ul[uat[i]..uat[i + 1]]`
+    pub(package) uat: Vector<u32>, // per instruction, its uses (`lv::uses_edges`) in `ul`: `ul[uat[i]..uat[i + 1]]`
     pub(package) ul: Vector<Value>,
 }
 
@@ -10232,62 +10078,6 @@ const fn pure_inst(t: Inst) bool {
     return op >= O_ICONST && op <= O_MUL || op >= O_AND && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_RETADDR || op == O_LOAD && (t.aux & MEM_VOLATILE) == 0;
 }
 
-// The values instruction `t` of `b` uses into `out`: its operands, a call's arguments, a vector
-// operation's operands and each edge's arguments.
-fn inst_uses(b: &Body, t: Inst, out: &mut Vector<Value>) {
-    out.truncate(0);
-    let f = op_info(t.op).form;
-    if lv::operand_a(f) && t.a != VNONE {
-        out.push(t.a);
-    }
-    if lv::operand_b(f) && t.b != VNONE {
-        out.push(t.b);
-    }
-    if lv::operand_c(f) && t.c != VNONE {
-        out.push(t.c);
-    }
-    if f == F_CALL || f == F_CALLIND {
-        for k in 0..t.aux as u32 {
-            out.push(b.pool[(t.c + k) as usize]);
-        }
-    } else if f == F_VOP || f == F_ASM {
-        for k in 0..t.b {
-            out.push(b.pool[(t.a + k) as usize]);
-        }
-    }
-    for k in 0..term_edges(t) {
-        let e = term_edge(b, t, k);
-        for x in 0..b.edge_nargs(e) {
-            out.push(b.edge_arg(e, x));
-        }
-    }
-}
-
-// The number of edges terminator `t` takes (0 for any other instruction).
-const fn term_edges(t: Inst) u32 {
-    if t.op == O_JMP {
-        return 1;
-    }
-    if t.op == O_BR {
-        return 2;
-    }
-    if t.op == O_SWITCH {
-        return t.aux as u32 + 1;
-    }
-    return 0;
-}
-
-// Edge `k` of terminator `t` of `b`.
-const fn term_edge(b: &Body, t: Inst, k: u32) u32 {
-    if t.op == O_JMP {
-        return t.a;
-    }
-    if t.op == O_BR {
-        return ast::pick(k == 0, t.b, t.c);
-    }
-    return b.switch_edge(t, k);
-}
-
 extend Lower {
     // Compact the finished body: drop the pure instructions nothing uses, send each edge to a block
     // that only jumps on to that jump's target, drop the blocks the entry no longer reaches, and
@@ -10335,7 +10125,7 @@ extend Lower {
         fill(&mut self.td.puse, self.b.params.len(), 0);
         while self.td.work.len() != 0 {
             let i = self.td.work.pop().unwrap();
-            inst_uses(&self.b, self.b.insts[i as usize], &mut self.td.uses);
+            lv::uses_edges(&self.b, self.b.insts[i as usize], &mut self.td.uses);
             for u in 0..self.td.uses.len() {
                 let v = self.td.uses[u];
                 let d = v & ~VFLAG;
@@ -10513,7 +10303,7 @@ extend Lower {
             let bk = self.b.blocks[k];
             for i in bk.start..bk.start + bk.len {
                 let t = self.b.insts[i as usize];
-                inst_uses(&self.b, t, &mut self.td.uses);
+                lv::uses_edges(&self.b, t, &mut self.td.uses);
                 self.td.uat[i as usize] = self.td.ul.len() as u32;
                 self.td.ul.extend_copy(&self.td.uses);
                 self.td.uat[i as usize + 1] = self.td.ul.len() as u32;
@@ -10693,8 +10483,8 @@ extend Lower {
             }
             let bk = self.b.blocks[k];
             let t = self.b.insts[(bk.start + bk.len - 1) as usize];
-            for q in 0..term_edges(t) {
-                let to = self.b.edge_target(term_edge(&self.b, t, q)) as usize;
+            for q in 0..edge_count(t) {
+                let to = self.b.edge_target(edge_of(&self.b, t, q)) as usize;
                 self.td.fwd[to] += 1;
                 if t.op == O_JMP {
                     self.td.jp[to] = k as u32;
@@ -10820,7 +10610,7 @@ extend Lower {
             }
             let v = x.b as u64 << 32 | x.a as u64;
             let u = if t.op == O_SEXT {
-                lp::sign_extend(v, type_bits(x.ty, ptr)) as u64
+                sign_extend(v, type_bits(x.ty, ptr)) as u64
             } else {
                 v
             };
@@ -10851,8 +10641,8 @@ extend Lower {
             let k = self.td.work.pop().unwrap();
             let bk = self.b.blocks[k as usize];
             let t = self.b.insts[(bk.start + bk.len - 1) as usize];
-            for q in 0..term_edges(t) {
-                let to = self.b.edge_target(term_edge(&self.b, t, q));
+            for q in 0..edge_count(t) {
+                let to = self.b.edge_target(edge_of(&self.b, t, q));
                 if self.td.bmap[to as usize] == NONE {
                     self.td.bmap[to as usize] = 0;
                     self.td.work.push(to);
@@ -10931,8 +10721,8 @@ extend Lower {
                 self.b.pool[at] = self.renum(self.b.pool[at]);
             }
         }
-        for k in 0..term_edges(t) {
-            let e = term_edge(&self.b, t, k);
+        for k in 0..edge_count(t) {
+            let e = edge_of(&self.b, t, k);
             if self.td.done[e as usize] {
                 continue;
             }

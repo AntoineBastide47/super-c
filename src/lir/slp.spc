@@ -19,6 +19,7 @@
 import lir::ir as *;
 import lir::verify as lv;
 import ir::core as core;
+import ast::ast as ast;
 
 // The bytes of the narrowest pack.
 const VBYTES: u32 = 16;
@@ -795,11 +796,7 @@ extend Slp {
             let v = self.tmp[(at + q) as usize];
             let t = b.insts[v as usize];
             // A load's alignment may differ: the vector takes the first lane's.
-            let flags = if t0.op == O_LOAD {
-                0xFFF0u16
-            } else {
-                0xFFFFu16
-            };
+            let flags = ast::pick(t0.op == O_LOAD, 0xFFF0u16, 0xFFFFu16);
             if t.op != t0.op || t.ty != ty || (t.aux & flags) != (t0.aux & flags) || self.iblk[v as usize] != self.iblk[l0 as usize] {
                 return 0;
             }
@@ -832,11 +829,7 @@ extend Slp {
             self.ptr,
         ) < 8;
         let float_op = op >= O_FADD && op <= O_FNEG || op == O_FSQRT;
-        return if is_int(ty) && int_op || is_float(ty) && float_op {
-            PK_OP
-        } else {
-            0u8
-        };
+        return ast::pick(is_int(ty) && int_op || is_float(ty) && float_op, PK_OP, 0u8);
     }
 
     // The lanes of `tmp[at .. at + n]` of type `ty` that are each the operation of itself and 0 (a bit
@@ -948,17 +941,12 @@ extend Slp {
     // Instruction `t` for block `k`, right before instruction `at` (NONE: at the block's end); `fixed`
     // when it reads vectors. Its value.
     fn make(self: &mut Self, b: &mut Body, t: Inst, k: u32, at: u32, fixed: bool) Value {
-        let v = b.insts.len() as u32;
         let src = if at == NONE {
             b.blocks[k as usize].start + b.blocks[k as usize].len - 1
         } else {
             at
         };
-        b.insts.push(t);
-        b.locs.push(b.locs[src as usize]);
-        if b.inl.len() != 0 {
-            b.inl.push(b.inl[src as usize]);
-        }
+        let v = b.push_at(t, src);
         if at == NONE {
             self.tail.push(k as u64 << 32 | v as u64);
         } else {
@@ -1129,9 +1117,7 @@ extend Slp {
         let lb = type_bits(pk.ty, self.ptr);
         let nw = (pk.n * lb + 63) / 64;
         let w = b.words.len() as u32;
-        for _ in 0..nw {
-            b.words.push(0);
-        }
+        b.words.resize_default(b.words.len() + nw as usize);
         for q in 0..pk.n {
             let mut x = lane_bits(b, self.lv[(pk.lane + q) as usize]).unwrap();
             if lb < 64 {
@@ -1208,11 +1194,7 @@ const fn fit(got: u32, n: u32, size: u32) u32 {
     while m > got && m * size > VBYTES {
         m = m / 2;
     }
-    return if m <= got && m * size >= VBYTES {
-        m
-    } else {
-        0u32
-    };
+    return ast::pick(m <= got && m * size >= VBYTES, m, 0u32);
 }
 
 const fn unary(op: u8) bool {
@@ -1236,15 +1218,6 @@ fn lane_bits(b: &Body, v: Value) Option<u64> {
     } else {
         const_bits(b, v)
     };
-}
-
-// The bits of constant `v` (an integer's or a float's), if it is one.
-fn const_bits(b: &Body, v: Value) Option<u64> {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST && b.insts[v as usize].op != O_FCONST {
-        return None;
-    }
-    let t = b.insts[v as usize];
-    return Some(t.b as u64 << 32 | t.a as u64);
 }
 
 // Whether `t` may read or write memory.

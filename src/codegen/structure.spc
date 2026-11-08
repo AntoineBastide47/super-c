@@ -119,7 +119,7 @@ extend Shape {
                     d = if d == NONE {
                         p
                     } else {
-                        self.common(d, p)
+                        dom_meet(&self.idom, &self.rpo, d, p)
                     };
                 }
                 if d != self.idom[k] {
@@ -131,21 +131,5 @@ extend Shape {
                 return;
             }
         }
-    }
-
-    // The nearest common dominator of `x` and `y`, both with dominators set: each step moves the deeper
-    // one up the tree.
-    const fn common(self: &Self, x0: u32, y0: u32) u32 {
-        let mut x = x0;
-        let mut y = y0;
-        while x != y {
-            while self.rpo[x as usize] > self.rpo[y as usize] {
-                x = self.idom[x as usize];
-            }
-            while self.rpo[y as usize] > self.rpo[x as usize] {
-                y = self.idom[y as usize];
-            }
-        }
-        return x;
     }
 }

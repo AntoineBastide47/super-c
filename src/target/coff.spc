@@ -8,21 +8,22 @@
 // built with it place them).
 import codegen::obj as ob;
 import target::x64 as x;
+import ast::ast as ast;
 
-const SCN_CODE: u32 = 0x20;
+pub(package) const SCN_CODE: u32 = 0x20;
 const SCN_DATA: u32 = 0x40;
 const SCN_BSS: u32 = 0x80;
-const SCN_LNK_COMDAT: u32 = 0x1000;
-const SCN_NRELOC_OVFL: u32 = 0x01000000;
-const SCN_DISCARDABLE: u32 = 0x02000000;
-const SCN_EXEC: u32 = 0x20000000;
-const SCN_READ: u32 = 0x40000000;
-const SCN_WRITE: u32 = 0x80000000;
+pub(package) const SCN_LNK_COMDAT: u32 = 0x1000;
+pub(package) const SCN_NRELOC_OVFL: u32 = 0x01000000;
+pub(package) const SCN_DISCARDABLE: u32 = 0x02000000;
+pub(package) const SCN_EXEC: u32 = 0x20000000;
+pub(package) const SCN_READ: u32 = 0x40000000;
+pub(package) const SCN_WRITE: u32 = 0x80000000;
 
-const REL_ADDR64: u32 = 1;
-const REL_ADDR32NB: u32 = 3;
-const REL_REL32: u32 = 4;
-const REL_SECREL: u32 = 11;
+pub(package) const REL_ADDR64: u32 = 1;
+pub(package) const REL_ADDR32NB: u32 = 3;
+pub(package) const REL_REL32: u32 = 4;
+pub(package) const REL_SECREL: u32 = 11;
 
 const CLASS_EXTERNAL: u32 = 2;
 const CLASS_STATIC: u32 = 3;
@@ -224,13 +225,6 @@ fn put_str(out: &mut Vector<u8>, name: str) {
     }
 }
 
-// Zeros onto `out` up to file offset `off`.
-fn pad_to(out: &mut Vector<u8>, off: u32) {
-    while out.len() as u32 < off {
-        out.push(0);
-    }
-}
-
 /// Write object `o` as a COFF x86-64 object into `out`, its sections split at their symbols as `split`
 /// asks (`ob::SPLIT_*`). The file is laid out first, then written once at its size.
 pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
@@ -428,30 +422,16 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         ob::w32(out, s.raw);
         ob::w32(out, s.rat);
         ob::w32(out, 0);
-        ob::w16(
-            out,
-            if ovf {
-                0xFFFF
-            } else {
-                s.nrel
-            },
-        );
+        ob::w16(out, ast::pick(ovf, 0xFFFF, s.nrel));
         ob::w16(out, 0);
-        ob::w32(
-            out,
-            s.flags | if ovf {
-                SCN_NRELOC_OVFL
-            } else {
-                0
-            },
-        );
+        ob::w32(out, s.flags | ast::pick(ovf, SCN_NRELOC_OVFL, 0));
     }
     // Each section's bytes, its relocations' addends in them, then the relocations.
     let mut xat: u32 = 0;
     for k in 0..nsec as usize {
         let s = secs[k];
         if s.raw != 0 {
-            pad_to(out, s.raw);
+            ob::pad(out, s.raw);
         }
         if s.kind == CS_PART {
             let pt = parts[s.q as usize];
@@ -506,14 +486,7 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
                 let fr = o.frames[f];
                 ob::w32(out, fr.off);
                 ob::w32(out, fr.off + fr.size);
-                ob::w32(
-                    out,
-                    if per_fn {
-                        0u32
-                    } else {
-                        xat
-                    },
-                );
+                ob::w32(out, ast::pick(per_fn, 0u32, xat));
                 xat += fr.cfi_len;
             }
             if s.nrel > 0xFFFF {
@@ -534,21 +507,12 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let s = secs[k];
         put_sym(out, &mut soff, csec_name(o, &parts, s), 0, k as u32 + 1, 0, CLASS_STATIC, 1);
         ob::w32(out, s.size as u32);
-        ob::w16(
-            out,
-            if s.nrel > 0xFFFF {
-                0xFFFF
-            } else {
-                s.nrel
-            },
-        );
+        ob::w16(out, ast::pick(s.nrel > 0xFFFF, 0xFFFF, s.nrel));
         ob::w16(out, 0);
         ob::w32(out, 0);
         ob::w16(out, s.assoc);
         out.push(s.sel as u8);
-        for _ in 0..3 {
-            out.push(0);
-        }
+        out.resize_default(out.len() + 3);
     }
     for i in 0..order.len() {
         let k = (order[i] & 0xFFFFFFFF) as usize;
@@ -569,16 +533,8 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             } else {
                 parts[q as usize].hdr
             },
-            if (y.flags & ob::SF_FUNC) != 0 {
-                0x20
-            } else {
-                0
-            },
-            if global {
-                CLASS_EXTERNAL
-            } else {
-                CLASS_STATIC
-            },
+            ast::pick((y.flags & ob::SF_FUNC) != 0, 0x20u32, 0),
+            ast::pick(global, CLASS_EXTERNAL, CLASS_STATIC),
             0,
         );
     }

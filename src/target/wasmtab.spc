@@ -4,6 +4,8 @@
 // one byte), the immediates' kind and a memory access's natural alignment. An instruction is a row and
 // its immediates; it encodes to bytes and decodes back, a relocated field in a padded 5-byte LEB.
 import target::wasm as w;
+import ast::ast as ast;
+import codegen::obj as ob;
 
 pub(package) struct Row {
     pub(package) mn: str<'static>,
@@ -538,7 +540,7 @@ fn u32f(out: &mut Vector<u8>, v: i64, wide: bool) bool {
     if wide {
         w::uleb5(out, v as u32);
     } else {
-        w::uleb(out, v as u64);
+        ob::uleb(out, v as u64);
     }
     return true;
 }
@@ -549,13 +551,10 @@ fn s32f(out: &mut Vector<u8>, v: i64, wide: bool) bool {
         return false;
     }
     if !wide {
-        w::sleb(out, v);
+        ob::sleb(out, v);
         return true;
     }
-    for k in 0..4u32 {
-        out.push((v >> 7 * k & 0x7F) as u8 | 0x80);
-    }
-    out.push((v >> 28 & 0x7F) as u8);
+    w::sleb5(out, v as i32);
     return true;
 }
 
@@ -572,7 +571,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
     let st = out.len();
     if r.pfx != 0 {
         out.push(r.pfx);
-        w::uleb(out, r.code);
+        ob::uleb(out, r.code);
     } else {
         out.push(r.code as u8);
     }
@@ -597,9 +596,9 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
             if n.targets.len() == 0 {
                 return false;
             }
-            w::uleb(out, (n.targets.len() - 1) as u64);
+            ob::uleb(out, (n.targets.len() - 1) as u64);
             for k in 0..n.targets.len() {
-                w::uleb(out, n.targets[k]);
+                ob::uleb(out, n.targets[k]);
             }
         },
         K::CALLI => {
@@ -614,7 +613,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
             if n.a < 0 || n.a > r.al as i64 {
                 return false;
             }
-            w::uleb(out, n.a as u64);
+            ob::uleb(out, n.a as u64);
             f.at = (out.len() - st) as u32;
             f.wide = wb;
             if !u32f(out, n.b, wb) {
@@ -631,7 +630,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, f: &mut Field, f2: &mut Fi
             return s32f(out, n.a, wa);
         },
         K::I64 => {
-            w::sleb(out, n.a);
+            ob::sleb(out, n.a);
         },
         K::F32 => {
             if n.a < 0 || n.a > 0xFFFFFFFF {
@@ -693,10 +692,7 @@ pub(package) const fn lanes(mn: str) u32 {
     if mn.starts_with("i16x8") {
         return 8;
     }
-    if mn.starts_with("i32x4") || mn.starts_with("f32x4") {
-        return 4;
-    }
-    return 2;
+    return ast::pick(mn.starts_with("i32x4") || mn.starts_with("f32x4"), 4, 2);
 }
 
 // An unsigned LEB at `b[*p..end]`: its value, and whether it took 5 bytes where fewer would do;
@@ -714,7 +710,7 @@ fn get_uleb(b: []u8, p: &mut usize, end: usize, v: &mut u64, padded: &mut bool) 
         if (c & 0x80) == 0 {
             *v = x;
             let mut tmp = Vector::<u8>::new();
-            w::uleb(&mut tmp, x);
+            ob::uleb(&mut tmp, x);
             *padded = *p - st != tmp.len();
             return true;
         }
@@ -741,7 +737,7 @@ fn get_sleb(b: []u8, p: &mut usize, end: usize, v: &mut i64, padded: &mut bool) 
             }
             *v = x;
             let mut tmp = Vector::<u8>::new();
-            w::sleb(&mut tmp, x);
+            ob::sleb(&mut tmp, x);
             *padded = *p - st != tmp.len();
             return true;
         }
@@ -769,11 +765,7 @@ pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
     let rows: []Row = ROWS;
     for ri in 0..rows.len() {
         let r = rows[ri];
-        let rp: u8 = if pfx == 0xFC || pfx == 0xFD {
-            pfx
-        } else {
-            0u8
-        };
+        let rp: u8 = ast::pick(pfx == 0xFC || pfx == 0xFD, pfx, 0u8);
         if r.pfx != rp || r.code as u64 != code {
             continue;
         }
@@ -848,11 +840,7 @@ pub(package) fn decode(b: []u8, at: usize, end: usize, n: &mut Ins) u32 {
                 }
             },
             K::F32 | K::F64 => {
-                let nb: usize = if r.imm == K::F32 {
-                    4
-                } else {
-                    8
-                };
+                let nb: usize = ast::pick(r.imm == K::F32, 4, 8);
                 ok = q + nb <= end;
                 if ok {
                     for k in 0..nb {

@@ -7,10 +7,7 @@
 // travels; the code generator moves the bytes.
 import lir::ir as *;
 import codegen::abi as *;
-
-const fn align_up(x: u32, a: u32) u32 {
-    return x + a - 1 & ~(a - 1);
-}
+import ast::ast as ast;
 
 /// The layout of signature `sig` of body `b` (`ptr`-byte pointers) under the Apple variant when `apple`;
 /// `vregs` is the package's `vec_regs`.
@@ -23,7 +20,7 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, 
         out.unknown = out.unknown || unknown_class(b, b.pool[(sig + 3 + k) as usize]);
     }
     let fixed = b.pool[sig as usize + 1];
-    let nfixed = ast_nfixed(fixed, np);
+    let nfixed = nfixed(fixed, np);
     let mut ngrn: u32 = 0;
     let mut nsrn: u32 = 0;
     let mut nsaa: u32 = 0;
@@ -46,14 +43,7 @@ pub(package) fn classify(b: &Body, sig: u32, ptr: u32, apple: bool, vregs: u32, 
                 loc.off = nsaa;
                 nsaa += 8;
             } else {
-                nsaa = align_up(
-                    nsaa,
-                    if al > 8 {
-                        al
-                    } else {
-                        8
-                    },
-                );
+                nsaa = align_up(nsaa, ast::pick(al > 8, al, 8));
                 loc.kind = L_STACK;
                 loc.off = nsaa;
                 loc.size = size;
@@ -105,30 +95,8 @@ pub(package) fn va_place(b: &Body, t: u8, ptr: u32, vregs: u32) (bool, u32, u32,
         return (false, 1, 8, true);
     }
     let p = parts[0];
-    let es: u32 = if p.v {
-        p.size
-    } else {
-        8
-    };
+    let es: u32 = ast::pick(p.v, p.size, 8);
     return (p.v, loc.n, es, false);
-}
-
-// The fixed-parameter count of a signature's second word.
-const fn ast_nfixed(fixed: u32, np: u32) u32 {
-    if (fixed & SIG_VARIADIC) != 0 {
-        return fixed & ~SIG_VARIADIC;
-    }
-    return np;
-}
-
-// The size and alignment of signature type `pt`.
-fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
-    if (pt & AGG) != 0 {
-        let l = (pt & ~AGG) as usize;
-        return (b.pool[l], 1u32 << b.pool[l + 1]);
-    }
-    let t = pt as u8;
-    return (type_bytes(t, ptr), type_align(t, ptr));
 }
 
 // Place one fixed argument (or the result) of signature type `pt`.
@@ -225,21 +193,13 @@ fn place(
         }
         *ngrn += n;
         if !agg && !is_vec(t) && size < 4 {
-            loc.ext = if (pt & SIG_SEXT) != 0 {
-                2
-            } else {
-                1
-            };
+            loc.ext = ast::pick((pt & SIG_SEXT) != 0, 2, 1);
         }
         return;
     }
     *ngrn = 8;
     // A scalar packs at its own size under Apple; an aggregate rounds up to 8 bytes.
-    let a = if (agg || !apple) && al < 8 {
-        8
-    } else {
-        al
-    };
+    let a = ast::pick((agg || !apple) && al < 8, 8, al);
     *nsaa = align_up(*nsaa, a);
     loc.kind = L_STACK;
     loc.off = *nsaa;

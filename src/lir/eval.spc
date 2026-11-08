@@ -652,16 +652,14 @@ extend Eval {
         if op == O_PTRADD {
             let mut p = self.val(&f, b, t.a);
             if t.b != VNONE {
-                let ix = sign_ext(self.val(&f, b, t.b), type_bits(b.type_of(t.b), ptr));
+                let ix = sign_extend(self.val(&f, b, t.b), type_bits(b.type_of(t.b), ptr));
                 p = p.wrapping_add((ix as u64).wrapping_mul(scale_of(t)));
             }
             self.vals[dst as usize] = p.wrapping_add(((t.c as i32) as i64) as u64);
             return true;
         }
         if op == O_LOAD || op == O_ALOAD {
-            let p = self.val(&f, b, t.a).wrapping_add(
-                pick_u64(op == O_LOAD, ((t.c as i32) as i64) as u64, ((t.c as i32) as i64) as u64),
-            );
+            let p = self.val(&f, b, t.a).wrapping_add(((t.c as i32) as i64) as u64);
             return self.load(p, t.ty, dst);
         }
         if op == O_STORE || op == O_ASTORE {
@@ -737,11 +735,7 @@ extend Eval {
             return true;
         }
         if op == O_SELECT {
-            let src = if self.val(&f, b, t.a) != 0 {
-                t.b
-            } else {
-                t.c
-            };
+            let src = ast::pick(self.val(&f, b, t.a) != 0, t.b, t.c);
             let sw = self.word(&f, b, src);
             for k in 0..value_words(t.ty, ptr) {
                 self.vals[(dst + k) as usize] = self.vals[(sw + k) as usize];
@@ -809,7 +803,7 @@ extend Eval {
             return self.take(&f, b, t.a);
         }
         if op == O_BR {
-            return self.take(&f, b, pick_u32(self.val(&f, b, t.a) != 0, t.b, t.c));
+            return self.take(&f, b, ast::pick(self.val(&f, b, t.a) != 0, t.b, t.c));
         }
         if op == O_SWITCH {
             let v = self.val(&f, b, t.a);
@@ -934,12 +928,12 @@ extend Eval {
             // The low word extended to 64 bits, the high word its sign or 0.
             let fb = type_bits(from, ptr);
             let lo = if t.op == O_SEXT {
-                sign_ext(x, fb) as u64
+                sign_extend(x, fb) as u64
             } else {
                 trunc_bits(x, fb)
             };
             self.vals[dst as usize] = lo;
-            self.vals[dst as usize + 1] = pick_u64(t.op == O_SEXT && lo >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
+            self.vals[dst as usize + 1] = ast::pick(t.op == O_SEXT && lo >> 63 != 0, 0xFFFFFFFFFFFFFFFFu64, 0);
             return true;
         }
         if from == T_I128 && t.op == O_TRUNC {
@@ -976,7 +970,7 @@ extend Eval {
         if !ob.live {
             return self.stop(
                 iri::IT_TRAP_UB_USE_AFTER_FREE,
-                pick_str(ob.kind == OB_STACK, "use after return", "use after free"),
+                ast::pick(ob.kind == OB_STACK, "use after return", "use after free"),
             );
         }
         if off + n > ob.size {
@@ -1000,7 +994,7 @@ extend Eval {
         for k in 0..nw {
             let mut w: u64 = 0;
             let lo = k as u64 * 8;
-            let hi = pick_u64(lo + 8 < n, lo + 8, n);
+            let hi = ast::pick(lo + 8 < n, lo + 8, n);
             let mut j = hi;
             while j > lo {
                 j -= 1;
@@ -1220,7 +1214,7 @@ extend Eval {
         // Every modeled routine takes at most four words.
         let n = self.tmp.len();
         let mut args: [u64; 4] = [0, 0, 0, 0];
-        for k in 0..pick_usize(n < 4, n, 4) {
+        for k in 0..ast::pick(n < 4, n, 4) {
             unsafe args[k] = self.tmp[k];
         }
         if ic == IC_MALLOC || ic == IC_ALIGNED {
@@ -1242,7 +1236,7 @@ extend Eval {
             return true;
         }
         if ic == IC_ACCT_ENABLED {
-            self.put(dst, pick_u64(self.acct_on, 1, 0));
+            self.put(dst, ast::pick(self.acct_on, 1u64, 0));
             return true;
         }
         if ic == IC_ACCT_SNAPSHOT {
@@ -1273,7 +1267,7 @@ extend Eval {
                 if !self.objs[o as usize].live {
                     return self.stop(iri::IT_TRAP_UB_USE_AFTER_FREE, "use after free");
                 }
-                let keep = pick_u64(self.objs[o as usize].size < args[1], self.objs[o as usize].size, args[1]);
+                let keep = ast::pick(self.objs[o as usize].size < args[1], self.objs[o as usize].size, args[1]);
                 if !self.copy_bytes(np, old, keep) {
                     return false;
                 }
@@ -1314,7 +1308,7 @@ extend Eval {
                     return false;
                 }
                 if x != y {
-                    r = pick_i32(x < y, -1, 1);
+                    r = ast::pick(x < y, -1i32, 1);
                     break;
                 }
             }
@@ -1598,7 +1592,7 @@ extend Eval {
         let dsg = (t.aux & VOP_DSIGNED) != 0;
         let mut w: [u32; 4] = [0, 0, 0, 0];
         let mut ty: [u8; 4] = [T_NONE, T_NONE, T_NONE, T_NONE];
-        for k in 0..pick_u32(t.b < 4, t.b, 4) {
+        for k in 0..ast::pick(t.b < 4, t.b, 4) {
             let v = b.pool[(t.a + k) as usize];
             unsafe w[k as usize] = self.word(f, b, v);
             unsafe ty[k as usize] = b.type_of(v);
@@ -1630,7 +1624,7 @@ extend Eval {
                 let r = if code == core::OP_SHL_SCALAR {
                     x << k
                 } else if sg {
-                    (sign_ext(x, lb) >> k as i64) as u64
+                    (sign_extend(x, lb) >> k as i64) as u64
                 } else {
                     x >> k
                 };
@@ -1668,11 +1662,11 @@ extend Eval {
         let fb = type_bits(fl, 8);
         let tb = type_bits(tl, 8);
         let op = if is_float(fl) && is_float(tl) {
-            pick_u8(fb < tb, O_FPEXT, pick_u8(fb > tb, O_FPTRUNC, O_ZEXT))
+            ast::pick(fb < tb, O_FPEXT, ast::pick(fb > tb, O_FPTRUNC, O_ZEXT))
         } else if is_float(fl) {
-            pick_u8(ts, O_FPTOSI, O_FPTOUI)
+            ast::pick(ts, O_FPTOSI, O_FPTOUI)
         } else if is_float(tl) {
-            pick_u8(fs, O_SITOFP, O_UITOFP)
+            ast::pick(fs, O_SITOFP, O_UITOFP)
         } else if fb < tb && fs {
             O_SEXT
         } else {
@@ -1682,7 +1676,7 @@ extend Eval {
             let mut r: u64 = 0;
             if !scalar_convert(
                 op,
-                pick_u16(unchecked, CV_UNCHECKED, 0),
+                ast::pick(unchecked, CV_UNCHECKED, 0),
                 fl,
                 tl,
                 8,
@@ -1717,8 +1711,8 @@ pub(package) const FOLD_SHIFT: u8 = 3;
 /// which the optimizer folds with. FOLD_OK, or the trap it raises (and `out` unchanged).
 pub(package) const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &mut u64) u8 {
     let bits = type_bits(ty, ptr);
-    let sx = sign_ext(x, bits);
-    let sy = sign_ext(y, bits);
+    let sx = sign_extend(x, bits);
+    let sy = sign_extend(y, bits);
     let mut r: u64 = 0;
     if op == O_ADD {
         r = x.wrapping_add(y);
@@ -1730,7 +1724,7 @@ pub(package) const fn int_fold(op: u8, ty: u8, ptr: u32, x: u64, y: u64, out: &m
         if sy == 0 {
             return FOLD_DIV_ZERO;
         }
-        if sy == -1 && sx == sign_ext(1u64 << (bits - 1) as u64, bits) {
+        if sy == -1 && sx == sign_extend(1u64 << (bits - 1) as u64, bits) {
             return FOLD_OVERFLOW;
         }
         r = if op == O_SDIV {
@@ -1778,22 +1772,6 @@ const fn value_words(t: u8, ptr: u32) u32 {
         return 0;
     }
     return (type_bytes(t, ptr) + 7) / 8;
-}
-
-const fn pick_u32(c: bool, a: u32, b: u32) u32 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_u64(c: bool, a: u64, b: u64) u64 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_i32(c: bool, a: i32, b: i32) i32 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_str(c: bool, a: str<'static>, b: str<'static>) str<'static> {
-    return ast::pick(c, a, b);
 }
 
 // `x` truncated to its low `bits` bits.
@@ -1866,13 +1844,6 @@ pub(package) const fn f32_bits_to_half(x: u32) u32 {
         return s | 0x7C00;
     }
     return s | ef << 10 | r & 0x3FF;
-}
-
-pub(package) const fn trunc_bits(x: u64, bits: u32) u64 {
-    if bits >= 64 {
-        return x;
-    }
-    return x & (1u64 << bits as u64) - 1;
 }
 
 // The 128-bit product of `x` and `y`: its low and high words.
@@ -1965,7 +1936,7 @@ const fn shift128(op: u8, l: u64, h: u64, n: u32) (u64, u64) {
     if n == 0 {
         return (l, h);
     }
-    let fill = pick_u64(op == O_ASHR && h >> 63 != 0, 0xFFFFFFFFFFFFFFFF, 0);
+    let fill = ast::pick(op == O_ASHR && h >> 63 != 0, 0xFFFFFFFFFFFFFFFFu64, 0);
     if n >= 64 {
         let k = (n - 64) as u64;
         if op == O_SHL {
@@ -2040,10 +2011,6 @@ const fn icmp128(c: u16, xl: u64, xh: u64, yl: u64, yh: u64) bool {
     return !less;
 }
 
-pub(package) const fn sign_ext(x: u64, bits: u32) i64 {
-    return lprint::sign_extend(x, bits);
-}
-
 // Lane `k` of `bits`-bit lanes of the vector whose words start at `w`.
 const fn get_lane(vals: &Vector<u64>, w: u32, k: u32, bits: u32) u64 {
     let bit = k as u64 * bits as u64;
@@ -2054,7 +2021,7 @@ const fn get_lane(vals: &Vector<u64>, w: u32, k: u32, bits: u32) u64 {
 // `signed` (`O_MULHS`, else `O_MULHU`).
 const fn mul_high(signed: bool, x: u64, y: u64, bits: u32) u64 {
     if signed {
-        let p = sign_ext(x, bits) as i128 * sign_ext(y, bits);
+        let p = sign_extend(x, bits) as i128 * sign_extend(y, bits);
         return trunc_bits((p >> bits as usize) as u64, bits);
     }
     return (trunc_bits(x, bits) as u128 * trunc_bits(y, bits) >> bits as usize) as u64;
@@ -2073,8 +2040,8 @@ const fn set_lane(vals: &mut Vector<u64>, w: u32, k: u32, bits: u32, v: u64) {
 pub(package) const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
     if signed {
-        let a = sign_ext(x, bits);
-        let c = sign_ext(y, bits);
+        let a = sign_extend(x, bits);
+        let c = sign_extend(y, bits);
         if bits == 64 {
             return ov64(op, true, x, y);
         }
@@ -2085,7 +2052,7 @@ pub(package) const fn overflows(op: u8, ty: u8, ptr: u32, signed: bool, x: u64, 
         } else {
             a * c
         };
-        return r != sign_ext(r as u64, bits);
+        return r != sign_extend(r as u64, bits);
     }
     if bits == 64 {
         return ov64(op, false, x, y);
@@ -2131,8 +2098,8 @@ const fn ov64(op: u8, signed: bool, x: u64, y: u64) bool {
 
 pub(package) const fn icmp(c: u16, ty: u8, ptr: u32, x: u64, y: u64) bool {
     let bits = type_bits(ty, ptr);
-    let a = sign_ext(x, bits);
-    let d = sign_ext(y, bits);
+    let a = sign_extend(x, bits);
+    let d = sign_extend(y, bits);
     if c == C_EQ {
         return x == y;
     }
@@ -2264,7 +2231,7 @@ pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u3
     let fb = type_bits(from, ptr);
     let tb = type_bits(to, ptr);
     if op == O_SEXT {
-        *out = trunc_bits(sign_ext(x, fb) as u64, tb);
+        *out = trunc_bits(sign_extend(x, fb) as u64, tb);
         return true;
     }
     if op == O_ZEXT || op == O_TRUNC || op == O_PTRTOINT || op == O_INTTOPTR {
@@ -2281,14 +2248,14 @@ pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u3
     }
     if op == O_SITOFP || op == O_UITOFP {
         let v: f64 = if op == O_SITOFP {
-            sign_ext(x, fb) as f64
+            sign_extend(x, fb) as f64
         } else {
             x as f64
         };
         // A 64-bit integer converts with one rounding, straight to f32 when that is the result.
         if to == T_F32 {
             let r: f32 = if op == O_SITOFP {
-                sign_ext(x, fb) as f32
+                sign_extend(x, fb) as f32
             } else {
                 x as f32
             };
@@ -2318,9 +2285,9 @@ pub(package) const fn scalar_convert(op: u8, aux: u16, from: u8, to: u8, ptr: u3
         if v != v {
             *out = 0;
         } else if v < 0.0 {
-            *out = trunc_bits(pick_u64(signed, (1u64 << (tb - 1) as u64).wrapping_neg(), 0), tb);
+            *out = trunc_bits(ast::pick(signed, (1u64 << (tb - 1) as u64).wrapping_neg(), 0), tb);
         } else {
-            *out = trunc_bits(pick_u64(signed, (1u64 << (tb - 1) as u64) - 1, 0xFFFFFFFFFFFFFFFFu64), tb);
+            *out = trunc_bits(ast::pick(signed, (1u64 << (tb - 1) as u64) - 1, 0xFFFFFFFFFFFFFFFFu64), tb);
         }
         return true;
     }
@@ -2486,10 +2453,6 @@ const fn icode_of(name0: str) u8 {
     return IC_NONE;
 }
 
-const fn pick_usize(c: bool, a: usize, b: usize) usize {
-    return ast::pick(c, a, b);
-}
-
 extend Eval {
     // The element-wise operations: comparisons and choices, integer and float lane rules, the lane
     // count changes (halves, concatenation, narrowing) and `bitcast`.
@@ -2570,7 +2533,7 @@ extend Eval {
             } else if c >= core::SIMD_CMP_EQ && c <= core::SIMD_CMP_GE {
                 bit = lane_cmp(c, a, c2, lt, sg);
             } else if c == core::SIMD_CHOOSE {
-                r = pick_u64((self.vals[w[0] as usize] >> i as u64 & 1) != 0, a, c2);
+                r = ast::pick((self.vals[w[0] as usize] >> i as u64 & 1) != 0, a, c2);
             } else if c == core::SIMD_CAST_CHANGED {
                 bit = lane_changed(
                     a,
@@ -2589,7 +2552,7 @@ extend Eval {
                 return false;
             }
             if mask {
-                bits = bits | pick_u64(bit, 1, 0) << i as u64;
+                bits = bits | ast::pick(bit, 1u64, 0) << i as u64;
             } else {
                 set_lane(&mut self.vals, dst, i, rlb, r);
             }
@@ -2637,7 +2600,7 @@ extend Eval {
         if c >= core::SIMD_WRAP_ADD && c <= core::SIMD_WRAP_MUL || c >= core::SIMD_OVF_ADD && c <= core::SIMD_SAT_SUB {
             let add = c == core::SIMD_WRAP_ADD || c == core::SIMD_OVF_ADD || c == core::SIMD_SAT_ADD;
             let sub = c == core::SIMD_WRAP_SUB || c == core::SIMD_OVF_SUB || c == core::SIMD_SAT_SUB;
-            let oc = pick_u8(add, O_ADDO, pick_u8(sub, O_SUBO, O_MULO));
+            let oc = ast::pick(add, O_ADDO, ast::pick(sub, O_SUBO, O_MULO));
             let ua = a as u64;
             let uc = c2 as u64;
             let mut v = if add {
@@ -2648,7 +2611,7 @@ extend Eval {
                 ua.wrapping_mul(uc)
             } as i64;
             let o = ov64(oc, sg, ua, uc) || w < 64 && if sg {
-                sign_ext(trunc_bits(v as u64, w), w) != v
+                sign_extend(trunc_bits(v as u64, w), w) != v
             } else {
                 v as u64 >> w as u64 != 0
             };
@@ -2657,9 +2620,9 @@ extend Eval {
                 return true;
             }
             if c == core::SIMD_SAT_ADD && o {
-                v = pick_i64(sg && c2 < 0, min, max);
+                v = ast::pick(sg && c2 < 0, min, max);
             } else if c == core::SIMD_SAT_SUB && o {
-                v = pick_i64(sg && c2 < 0, max, min);
+                v = ast::pick(sg && c2 < 0, max, min);
             }
             *r = trunc_bits(v as u64, w);
             return true;
@@ -2684,15 +2647,15 @@ extend Eval {
         }
         if c == core::SIMD_NARROW_SAT {
             let rw = type_bits(rlt, 8);
-            let rmax = pick_u64(rsg, (1u64 << (rw - 1) as u64) - 1, trunc_bits(0xFFFFFFFFFFFFFFFFu64, rw)) as i64;
-            let rmin = pick_i64(rsg, (1u64 << (rw - 1) as u64).wrapping_neg() as i64, 0);
-            let v = pick_i64(a < 0 && sg && !rsg, 0, a);
-            let big = pick_bool(sg, v > rmax, v as u64 > rmax as u64);
-            *r = trunc_bits(pick_i64(big, rmax, pick_i64(sg && v < rmin, rmin, v)) as u64, rw);
+            let rmax = ast::pick(rsg, (1u64 << (rw - 1) as u64) - 1, trunc_bits(0xFFFFFFFFFFFFFFFFu64, rw)) as i64;
+            let rmin = ast::pick(rsg, (1u64 << (rw - 1) as u64).wrapping_neg() as i64, 0);
+            let v = ast::pick(a < 0 && sg && !rsg, 0, a);
+            let big = ast::pick(sg, v > rmax, v as u64 > rmax as u64);
+            *r = trunc_bits(ast::pick(big, rmax, ast::pick(sg && v < rmin, rmin, v)) as u64, rw);
             return true;
         }
         if c == core::SIMD_BITREV || c == core::SIMD_BSWAP {
-            let step = pick_u64(c == core::SIMD_BSWAP, 8, 1);
+            let step = ast::pick(c == core::SIMD_BSWAP, 8u64, 1);
             let mut x: u64 = 0;
             let mut j: u64 = 0;
             for _ in 0..64 {
@@ -2710,16 +2673,16 @@ extend Eval {
         } else if c == core::SIMD_WRAP_SHL {
             (u << k) as i64
         } else if c == core::SIMD_WRAP_SHR {
-            pick_i64(sg, a >> k as i64, (u >> k) as i64)
+            ast::pick(sg, a >> k as i64, (u >> k) as i64)
         } else if c == core::SIMD_MIN {
-            pick_i64(lt_, a, c2)
+            ast::pick(lt_, a, c2)
         } else if c == core::SIMD_MAX {
-            pick_i64(lt_, c2, a)
+            ast::pick(lt_, c2, a)
         } else if c == core::SIMD_ABS || c == core::SIMD_WRAP_ABS {
-            pick_i64(sg && a < 0, a.wrapping_neg(), a)
+            ast::pick(sg && a < 0, a.wrapping_neg(), a)
         } else if c == core::SIMD_ABS_DIFF {
-            let d = pick_u64(
-                pick_bool(sg, a > c2, a as u64 > c2 as u64),
+            let d = ast::pick(
+                ast::pick(sg, a > c2, a as u64 > c2 as u64),
                 (a as u64).wrapping_sub(c2 as u64),
                 (c2 as u64).wrapping_sub(a as u64),
             );
@@ -2728,7 +2691,7 @@ extend Eval {
         } else if c == core::SIMD_CLZ {
             (u.leading_zeros() as u64 - (64 - w as u64)) as i64
         } else if c == core::SIMD_CTZ {
-            pick_u64(u == 0, w, u.trailing_zeros() as u64) as i64
+            ast::pick(u == 0, w, u.trailing_zeros() as u64) as i64
         } else if c == core::SIMD_POPCNT {
             u.count_ones() as i64
         } else if c == core::SIMD_ROTL {
@@ -2746,7 +2709,7 @@ extend Eval {
 // Lane bits `x` of `w` bits as a value: sign-extended for a signed lane.
 const fn lane_val(x: u64, w: u32, sg: bool) i64 {
     if sg {
-        return sign_ext(x, w);
+        return sign_extend(x, w);
     }
     return trunc_bits(x, w) as i64;
 }
@@ -2757,7 +2720,7 @@ const fn lane_fits(v: i64, w: u32, sg: bool) bool {
         return sg || v >= 0;
     }
     if sg {
-        return sign_ext(trunc_bits(v as u64, w), w) == v;
+        return sign_extend(trunc_bits(v as u64, w), w) == v;
     }
     return v >= 0 && v as u64 >> w as u64 == 0;
 }
@@ -2784,7 +2747,7 @@ const fn lane_cmp(c: u8, a: u64, b: u64, lt: u8, sg: bool) bool {
     let w = type_bits(lt, 8);
     let x = lane_val(a, w, sg);
     let y = lane_val(b, w, sg);
-    let less = pick_bool(sg, x < y, x as u64 < y as u64);
+    let less = ast::pick(sg, x < y, x as u64 < y as u64);
     return if c == core::SIMD_CMP_EQ {
         x == y
     } else if c == core::SIMD_CMP_NE {
@@ -2810,9 +2773,9 @@ fn lane_changed(a: u64, bt: u8, bs: bool, d: u64, rt: u8, rs: bool) bool {
         return x != x || to_f64(rt, d) != x;
     }
     // The exact float range of the integer side: [lo, hi).
-    let ib = pick_u8(ff, rt, bt);
-    let isg = pick_bool(ff, rs, bs);
-    let iw = type_bits(ib, 8) as i32 - pick_i32(isg, 1, 0);
+    let ib = ast::pick(ff, rt, bt);
+    let isg = ast::pick(ff, rs, bs);
+    let iw = type_bits(ib, 8) as i32 - ast::pick(isg, 1i32, 0);
     let hi = math::ldexp(1.0, iw);
     let lo = if isg {
         0.0 - hi
@@ -2850,7 +2813,7 @@ fn lane_float(c: u8, num: bool, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut b
     let a = to_f64(lt, a0);
     let c2 = to_f64(lt, c20);
     let c3 = to_f64(lt, c30);
-    let sb = pick_u64(f32l, 1u64 << 31, 1u64 << 63);
+    let sb = ast::pick(f32l, 1u64 << 31, 1u64 << 63);
     if c == core::SIMD_ABS {
         return a0 & ~sb;
     }
@@ -2862,12 +2825,12 @@ fn lane_float(c: u8, num: bool, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut b
         let nan = c >= core::SIMD_MINIMUM;
         if !nan && a != a && c2 != c2 {
             // Two NaNs: `a` with its quiet bit set (IEEE 754 minimumNumber).
-            return a0 | pick_u64(f32l, 1u64 << 22, 1u64 << 51);
+            return a0 | ast::pick(f32l, 1u64 << 22, 1u64 << 51);
         }
-        return pick_u64(fminmax(a, c2, lo, nan), a0, c20);
+        return ast::pick(fminmax(a, c2, lo, nan), a0, c20);
     }
-    let minn = pick_f64(f32l, 1.1754943508222875e-38, 2.2250738585072014e-308);
-    let maxf = pick_f64(f32l, 3.4028234663852886e38, 1.7976931348623157e308);
+    let minn = ast::pick(f32l, 1.1754943508222875e-38, 2.2250738585072014e-308);
+    let maxf = ast::pick(f32l, 3.4028234663852886e38, 1.7976931348623157e308);
     let ab = math::fabs(a);
     if c >= core::SIMD_IS_NAN && c <= core::SIMD_IS_SIGN_NEG {
         *bit = if c == core::SIMD_IS_NAN {
@@ -2895,7 +2858,7 @@ fn lane_float(c: u8, num: bool, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut b
         let sbits = fl::f64_bits(s);
         let fin = s == s && math::fabs(s) <= 1.7976931348623157e308;
         let r = if e != 0.0 && fin && (sbits & 1) == 0 {
-            fl::f64_from_bits(pick_u64(e > 0.0 == s > 0.0, sbits + 1, sbits - 1))
+            fl::f64_from_bits(ast::pick(e > 0.0 == s > 0.0, sbits + 1, sbits - 1))
         } else {
             s
         };
@@ -2925,7 +2888,7 @@ fn lane_float(c: u8, num: bool, a0: u64, c20: u64, c30: u64, lt: u8, bit: &mut b
 // (maximum): whether `a` is the kept operand.
 const fn fminmax(a: f64, c: f64, min: bool, nan: bool) bool {
     if a != a || c != c {
-        return pick_bool(nan, a != a, c != c);
+        return ast::pick(nan, a != a, c != c);
     }
     if a != c {
         return a < c == min;
@@ -2939,26 +2902,6 @@ const fn from_f64(lt: u8, x: f64) u64 {
         return fl::f32_bits(x as f32);
     }
     return fl::f64_bits(x);
-}
-
-const fn pick_u8(c: bool, a: u8, b: u8) u8 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_u16(c: bool, a: u16, b: u16) u16 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_i64(c: bool, a: i64, b: i64) i64 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_f64(c: bool, a: f64, b: f64) f64 {
-    return ast::pick(c, a, b);
-}
-
-const fn pick_bool(c: bool, a: bool, b: bool) bool {
-    return ast::pick(c, a, b);
 }
 
 extend Eval {
@@ -3006,12 +2949,12 @@ extend Eval {
         let vt = if load {
             t.ty
         } else {
-            unsafe ty[pick_usize(raw, 1, 2)]
+            unsafe ty[ast::pick(raw, 1usize, 2)]
         };
         let vw = if load {
             dst
         } else {
-            unsafe w[pick_usize(raw, 1, 2)]
+            unsafe w[ast::pick(raw, 1usize, 2)]
         };
         for i in 0..lanes(vt) {
             if !self.lane_mem(p, start + i as u64, lane_type(vt), vw, i, load) {
@@ -3041,15 +2984,7 @@ extend Eval {
             let w0 = self.vals.len() as u32;
             self.vals.push(0);
             self.vals.push(0);
-            let ok = self.load(p, T_PTR, w0) && self.load(
-                p + ptr as u64,
-                if ptr == 8 {
-                    T_I64
-                } else {
-                    T_I32
-                },
-                w0 + 1,
-            );
+            let ok = self.load(p, T_PTR, w0) && self.load(p + ptr as u64, ast::pick(ptr == 8, T_I64, T_I32), w0 + 1);
             p = self.vals[w0 as usize];
             len = self.vals[(w0 + 1) as usize];
             self.vals.truncate(w0 as usize);
@@ -3125,11 +3060,7 @@ extend Eval {
                 self.vals[(dst + k) as usize] = self.vals[(vw0 + k) as usize];
             }
         }
-        let vw = if store {
-            vw0
-        } else {
-            dst
-        };
+        let vw = ast::pick(store, vw0, dst);
         let mut k: u64 = 0;
         for i in 0..n {
             if (act >> i as u64 & 1) == 0 {
@@ -3182,7 +3113,7 @@ extend Eval {
         let n = lanes(vt);
         let fl = is_float(lt);
         if c == core::SIMD_REDUCE_ADD_OVF || c == core::SIMD_REDUCE_MUL_OVF {
-            self.put(dst, pick_u64(exact_fits(c == core::SIMD_REDUCE_ADD_OVF, &self.vals, w[0], n, lb, sg), 0, 1));
+            self.put(dst, ast::pick(exact_fits(c == core::SIMD_REDUCE_ADD_OVF, &self.vals, w[0], n, lb, sg), 0u64, 1));
             return true;
         }
         if c >= core::SIMD_ARG_MIN && c <= core::SIMD_ARG_MAX_NUM {
@@ -3209,7 +3140,7 @@ extend Eval {
                 } else {
                     let x = lane_val(l, lb, sg);
                     let y = lane_val(o, lb, sg);
-                    x != y && pick_bool(sg, x < y, x as u64 < y as u64) == min
+                    x != y && ast::pick(sg, x < y, x as u64 < y as u64) == min
                 };
                 if beats {
                     best = i;
@@ -3241,7 +3172,7 @@ extend Eval {
             }
             self.vals.push(a);
         }
-        let fop = pick_u8(add, O_FADD, O_FMUL);
+        let fop = ast::pick(add, O_FADD, O_FMUL);
         if c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_MUL_TREE {
             // Halves: lane i of the lower half with lane i of the upper, until one lane.
             let mut h = n / 2;
@@ -3259,13 +3190,13 @@ extend Eval {
         }
         let ffold = fl && (add || mul);
         let mut acc = if ffold {
-            from_f64(at, pick_f64(add, -0.0, 1.0))
+            from_f64(at, ast::pick(add, -0.0, 1.0))
         } else if c == core::SIMD_DOT {
             0
         } else {
             self.vals[w0 as usize]
         };
-        let from = pick_u32(ffold || c == core::SIMD_DOT, 0, 1);
+        let from = ast::pick(ffold || c == core::SIMD_DOT, 0u32, 1);
         for i in from..n {
             let a = self.vals[(w0 + i) as usize];
             if ffold {
@@ -3273,7 +3204,7 @@ extend Eval {
             } else if fl {
                 // min_num, max_num, minimum, maximum: the lane rule, the kept operand itself.
                 let lo = c == core::SIMD_REDUCE_MIN_NUM || c == core::SIMD_REDUCE_MINIMUM;
-                acc = pick_u64(fminmax(to_f64(at, acc), to_f64(at, a), lo, c >= core::SIMD_REDUCE_MINIMUM), acc, a);
+                acc = ast::pick(fminmax(to_f64(at, acc), to_f64(at, a), lo, c >= core::SIMD_REDUCE_MINIMUM), acc, a);
             } else if c == core::SIMD_REDUCE_AND {
                 acc = acc & a;
             } else if c == core::SIMD_REDUCE_OR {
@@ -3287,8 +3218,8 @@ extend Eval {
             } else {
                 let x = lane_val(acc, ab, sg);
                 let y = lane_val(a, ab, sg);
-                let less = pick_bool(sg, y < x, y as u64 < x as u64);
-                acc = pick_u64(less == (c == core::SIMD_REDUCE_MIN), a, acc);
+                let less = ast::pick(sg, y < x, y as u64 < x as u64);
+                acc = ast::pick(less == (c == core::SIMD_REDUCE_MIN), a, acc);
             }
         }
         self.vals.truncate(w0 as usize);
@@ -3300,7 +3231,7 @@ extend Eval {
     // `expand`.
     fn vrearrange(self: &mut Self, b: &Body, t: Inst, c: u8, w: &[u32; 4], ty: &[u8; 4], dst: u32) bool {
         let rule = core::simd_op(c).rule;
-        let vt = pick_u8(rule == core::SR_MASKED, ty[1], ty[0]);
+        let vt = ast::pick(rule == core::SR_MASKED, ty[1], ty[0]);
         let lt = lane_type(vt);
         let lb = type_bits(lt, 8);
         let n = lanes(vt);
@@ -3345,7 +3276,7 @@ extend Eval {
                 get_lane(&self.vals, w[1], i, ib)
             };
             if c == core::SIMD_SWIZZLE_OOB {
-                bits = bits | pick_u64(k >= n as u64, 1, 0) << i as u64;
+                bits = bits | ast::pick(k >= n as u64, 1u64, 0) << i as u64;
                 continue;
             }
             let x = if k < n as u64 {
@@ -3368,7 +3299,7 @@ extend Eval {
 // word `w` fits their type. The sum runs in 128 bits (`hi`:`lo`); a product with no zero lane only
 // grows in magnitude, so one past 64 bits never fits.
 const fn exact_fits(add: bool, vals: &Vector<u64>, w: u32, n: u32, lb: u32, sg: bool) bool {
-    let mut lo: u64 = pick_u64(add, 0, 1);
+    let mut lo: u64 = ast::pick(add, 0u64, 1);
     let mut hi: i64 = 0;
     let mut neg = false;
     let mut over = false;
@@ -3376,11 +3307,11 @@ const fn exact_fits(add: bool, vals: &Vector<u64>, w: u32, n: u32, lb: u32, sg: 
         let a = lane_val(get_lane(vals, w, i, lb), lb, sg);
         if add {
             let s = lo.wrapping_add(a as u64);
-            hi = hi + pick_i64(sg && a < 0, -1, 0) + pick_i64(s < lo, 1, 0);
+            hi = hi + ast::pick(sg && a < 0, -1i64, 0) + ast::pick(s < lo, 1i64, 0);
             lo = s;
             continue;
         }
-        let mag = pick_u64(sg && a < 0, (a as u64).wrapping_neg(), a as u64);
+        let mag = ast::pick(sg && a < 0, (a as u64).wrapping_neg(), a as u64);
         if mag == 0 {
             return true;
         }
@@ -3389,7 +3320,7 @@ const fn exact_fits(add: bool, vals: &Vector<u64>, w: u32, n: u32, lb: u32, sg: 
         lo = lo.wrapping_mul(mag);
     }
     if add {
-        return pick_bool(
+        return ast::pick(
             sg,
             hi == lo as i64 >> 63 && lane_fits(lo as i64, lb, true),
             hi == 0 && (lb == 64 || lo >> lb as u64 == 0),

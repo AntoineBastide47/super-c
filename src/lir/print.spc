@@ -723,11 +723,6 @@ fn push_name(s: str, out: &mut String) {
     out.push_str(s);
 }
 
-/// Whether `c` may appear in an unquoted name.
-pub(package) const fn name_byte(c: u8) bool {
-    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_' || c == b'.' || c == b'$';
-}
-
 // A string literal: printable ASCII as itself but `"` and `\`, every other byte as `\xHH`.
 fn push_quoted(s: str, out: &mut String) {
     out.push_byte(b'"');
@@ -750,13 +745,4 @@ fn push_hex2(c: u8, out: &mut String) {
     let d: str = "0123456789abcdef";
     out.push_byte(d.byte_at((c >> 4) as usize));
     out.push_byte(d.byte_at((c & 15) as usize));
-}
-
-/// `bits` read as a signed integer of `w` bits (1 to 64).
-pub(package) const fn sign_extend(bits: u64, w: u32) i64 {
-    if w >= 64 {
-        return bits as i64;
-    }
-    let sh = (64 - w) as u64;
-    return (bits << sh) as i64 >> sh as i64;
 }

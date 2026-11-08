@@ -4,6 +4,7 @@
 // records a fixup the caller resolves. The disassembler prints the first row a word matches.
 import target::a64 as a;
 import target::a64tab as t;
+import ast::ast as ast;
 
 /// A symbol or label an instruction names: the relocation kind (`a::R_*`, or a `FX_*` kind only a
 /// local label resolves), the name as written and the addend.
@@ -260,11 +261,7 @@ const fn reg_name(w: str, l: &mut u8, n: &mut i64, sp: &mut bool) {
     }
     if eq_nocase(w, "fp") || eq_nocase(w, "lr") {
         *l = b'x';
-        *n = if lower(w.byte_at(0)) == b'f' {
-            29i64
-        } else {
-            30i64
-        };
+        *n = ast::pick(lower(w.byte_at(0)) == b'f', 29i64, 30i64);
         return;
     }
     if w.len() < 2 {
@@ -363,11 +360,7 @@ const fn reg(s: str, i: &mut usize, r: &mut Reg) bool {
     if j < s.len() && s.byte_at(j) == b'/' && j + 1 < s.len() {
         let c = lower(s.byte_at(j + 1));
         if c == b'z' || c == b'm' {
-            r.pq = if c == b'z' {
-                1u8
-            } else {
-                2u8
-            };
+            r.pq = ast::pick(c == b'z', 1u8, 2u8);
             j += 2;
         }
     }
@@ -418,11 +411,7 @@ const fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) boo
     }
     *v = r.n;
     let g = r.l == b'x' || r.l == b'w';
-    let gx: i32 = if r.l == b'x' {
-        1
-    } else {
-        0
-    };
+    let gx: i32 = ast::pick(r.l == b'x', 1, 0);
     return switch c {
         t::C::R => g && !r.sp && r.arr < 0 && agree(&mut f.gw, gx),
         t::C::RS => g && (r.sp || r.n != 31) && r.arr < 0 && agree(&mut f.gw, gx),
@@ -853,11 +842,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
                 return false;
             }
             v[at] = r0.n;
-            f.rmx = if r0.l == b'x' {
-                1
-            } else {
-                0
-            };
+            f.rmx = ast::pick(r0.l == b'x', 1, 0);
             return true;
         },
         t::K::COND | t::K::CONDI => {
@@ -913,11 +898,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
                 return false;
             }
             v[at] = r0.n;
-            f.rtb = if r0.l == b'x' {
-                1
-            } else {
-                0
-            };
+            f.rtb = ast::pick(r0.l == b'x', 1, 0);
             return true;
         },
         t::K::MU12 | t::K::MS9 | t::K::MP7 => {
@@ -1124,11 +1105,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
         },
         t::K::PNGZ | t::K::PNG => {
             let mut r0 = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
-            let want: u8 = if k == t::K::PNGZ {
-                1u8
-            } else {
-                0u8
-            };
+            let want: u8 = ast::pick(k == t::K::PNGZ, 1u8, 0u8);
             if !reg(s, i, &mut r0) || r0.l != b'p' || r0.n < 32 || r0.arr >= 0 || r0.pq != want {
                 return false;
             }
@@ -1442,11 +1419,7 @@ const fn za_tile(w: str, tile: &mut i64, el: &mut i32, slice: bool) bool {
         if c != b'h' && c != b'v' {
             return false;
         }
-        vert = if c == b'v' {
-            1i64
-        } else {
-            0i64
-        };
+        vert = ast::pick(c == b'v', 1i64, 0i64);
         j += 1;
     }
     if j + 2 != w.len() || w.byte_at(j) != b'.' {
@@ -1604,11 +1577,7 @@ const fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
         if k == t::K::EXT {
             // `lsl` or nothing: uxtx (uxtw for a 32-bit form), which the register's width must match.
             if v[at] == 10 {
-                v[at] = if x {
-                    3i64
-                } else {
-                    2i64
-                };
+                v[at] = ast::pick(x, 3i64, 2i64);
             }
             let wide = (v[at] & 3) == 3;
             if f.rmx >= 0 && f.rmx == 1 != wide {
@@ -1622,11 +1591,7 @@ const fn fix_kinds(r: t::Row, q: u32, v: &mut t::Vals, f: &Facts) bool {
             if amt >= 0 && amt != sc && amt != 0 {
                 return false;
             }
-            v[at + 3] = if amt == sc {
-                1i64
-            } else {
-                0i64
-            };
+            v[at + 3] = ast::pick(amt == sc, 1i64, 0i64);
         }
         if k == t::K::TBIT && f.rtb >= 0 && f.rtb == 1 != v[at] >= 32 && f.rtb == 0 {
             return false;
@@ -1836,11 +1801,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             }
         },
         t::K::EXT => {
-            let lslopt: i64 = if x {
-                3
-            } else {
-                2
-            };
+            let lslopt: i64 = ast::pick(x, 3, 2);
             if has_sp && a == lslopt {
                 if v[at + 1] != 0 {
                     o.format_into(", lsl #{}", v[at + 1]);
@@ -1894,11 +1855,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             let opt = v[at + 2];
             gpr_text(o, v[at + 1], (opt & 3) == 3, false);
             let sc = t::ldst_scale(r.bits | t::qbits(r.q, q));
-            let amt: u32 = if v[at + 3] != 0 {
-                sc
-            } else {
-                0u32
-            };
+            let amt: u32 = ast::pick(v[at + 3] != 0, sc, 0u32);
             if opt == 3 {
                 if v[at + 3] != 0 {
                     o.format_into(", lsl #{}", amt);

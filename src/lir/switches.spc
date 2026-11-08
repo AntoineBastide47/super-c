@@ -11,6 +11,7 @@
 // at most LEAF values that forms no range nor bit test stays: the backends' compare chain mispredicts less
 // than a search on unpredictable values.
 import lir::ir as *;
+import ast::ast as ast;
 
 // A bit test spans fewer than BT_SPAN values.
 const BT_SPAN: u64 = 64;
@@ -161,13 +162,7 @@ pub(package) fn symbol_table(b: &Body, t: Inst, bits: u32, st: &mut SymTable) bo
     let (dv, dto) = sym_arg(b, b.switch_edge(t, n));
     let mut at = Vector::<Value>::with_capacity(st.span as usize);
     for _ in 0..st.span {
-        at.push(
-            if dto == to {
-                dv
-            } else {
-                VNONE
-            },
-        );
+        at.push(ast::pick(dto == to, dv, VNONE));
     }
     for k in 0..n {
         let (v, kto) = sym_arg(b, b.switch_edge(t, k));
@@ -227,11 +222,7 @@ pub(package) fn use_symbol_table(b: &mut Body, k: u32, st: &SymTable, tab: u32, 
         flags: bk.flags & BLOCK_RARE,
         dflt: b.switch_edge(t, t.aux),
     };
-    let it = if ptr == 8 {
-        T_I64
-    } else {
-        T_I32
-    };
+    let it = ast::pick(ptr == 8, T_I64, T_I32);
     let ck = b.add_block([]);
     let ld = b.add_block([]);
     b.blocks.index_mut(ck as usize).flags = sw.flags;
@@ -368,27 +359,13 @@ extend Lookup {
     }
 }
 
-// The bits of constant `v` of `b` (an integer or a float), in `out`.
-const fn const_bits(b: &Body, v: Value, out: &mut u64) bool {
-    if (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op != O_ICONST && t.op != O_FCONST {
-        return false;
-    }
-    *out = t.b as u64 << 32 | t.a as u64;
-    return true;
-}
-
 // Whether edge `e` of `b` enters block `to` passing a constant to each of its `np` parameters.
 fn consts_to(b: &Body, e: u32, to: u32, np: u32) bool {
     if b.edge_target(e) != to || b.edge_nargs(e) != np {
         return false;
     }
-    let mut k: u64 = 0;
     for q in 0..np {
-        if !const_bits(b, b.edge_arg(e, q), &mut k) {
+        if const_bits(b, b.edge_arg(e, q)).is_none() {
             return false;
         }
     }
@@ -468,9 +445,9 @@ pub(package) fn switch_lookup(b: &Body, t: Inst, bits: u32, ptr: u32, fwd: bool,
             let k = at[x as usize];
             let mut v: u64 = 0;
             if k != NONE {
-                let _ = const_bits(b, b.edge_arg(edge(k), q), &mut v);
+                v = const_bits(b, b.edge_arg(edge(k), q)).unwrap_or(0);
             } else if fill {
-                let _ = const_bits(b, b.edge_arg(d, q), &mut v);
+                v = const_bits(b, b.edge_arg(d, q)).unwrap_or(0);
             }
             for y in 0..e {
                 lk.bytes.push((v >> (8 * y) as u64) as u8);
@@ -590,11 +567,7 @@ fn table(b: &mut Body, sw: &Sw, vals: &Vector<u64>, first: &Map<u64, u32>, ptr: 
 fn forward(b: &Body, e: u32) u32 {
     let bk = b.blocks[b.edge_target(e) as usize];
     let t = b.insts[(bk.start + bk.len - 1) as usize];
-    return if bk.len == 1 && bk.param_len == 0 && b.edge_nargs(e) == 0 && t.op == O_JMP {
-        t.a
-    } else {
-        e
-    };
+    return ast::pick(bk.len == 1 && bk.param_len == 0 && b.edge_nargs(e) == 0 && t.op == O_JMP, t.a, e);
 }
 
 // The bits of integer constant `v` of `b`, if it is one.
@@ -650,11 +623,7 @@ fn top_of(b: &Body, v: Value, all: u64, ptr: u32, depth: u32, trunc: bool) u64 {
         depth - 1,
         trunc,
     );
-    return if inner < all {
-        inner
-    } else {
-        all
-    };
+    return ast::pick(inner < all, inner, all);
 }
 
 // The inline mark of instruction `i` of `b`, 0 when the body has none.
@@ -794,11 +763,7 @@ fn bit_testable(b: &Body, cls: &Vector<Cl>, l: usize, r: usize) bool {
     let mut es = StaticVector::<u32, 4>::new();
     let mut ncmp: u32 = 0;
     for j in l..r {
-        ncmp += if cls[j].lo == cls[j].hi {
-            1u32
-        } else {
-            2u32
-        };
+        ncmp += ast::pick(cls[j].lo == cls[j].hi, 1u32, 2u32);
         let mut seen = false;
         for q in 0..es.len() {
             seen = seen || same_edge(b, es[q], cls[j].e);
@@ -952,17 +917,4 @@ fn emit(b: &mut Body, sw: &Sw, i: Inst) Value {
 // The integer constant `v` of type `ty`.
 fn konst(b: &mut Body, sw: &Sw, ty: u8, v: u64) Value {
     return emit(b, sw, Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE });
-}
-
-// Whether edges `e` and `f` of `b` go to one block with the same arguments.
-fn same_edge(b: &Body, e: u32, f: u32) bool {
-    if b.edge_target(e) != b.edge_target(f) || b.edge_nargs(e) != b.edge_nargs(f) {
-        return false;
-    }
-    for q in 0..b.edge_nargs(e) {
-        if b.edge_arg(e, q) != b.edge_arg(f, q) {
-            return false;
-        }
-    }
-    return true;
 }

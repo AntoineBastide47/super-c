@@ -5,6 +5,7 @@
 // Mach-O object, and the wasm writer takes them as custom sections.
 import codegen::obj as ob;
 import lir::ir as ir;
+import ast::ast as ast;
 
 /// The debug sections.
 pub(package) const D_ABBREV: u8 = 0;
@@ -135,34 +136,6 @@ const LINE_RANGE: u32 = 14;
 const OPCODE_BASE: u32 = 13;
 const STD_LENGTHS: [u8; 12] = [0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1];
 
-pub(package) fn uleb(o: &mut Vector<u8>, v0: u64) {
-    let mut v = v0;
-    // Seven bits a byte: at most 10 bytes.
-    for _ in 0..10 {
-        let b = (v & 0x7F) as u8;
-        v >>= 7;
-        if v == 0 {
-            o.push(b);
-            return;
-        }
-        o.push(b | 0x80);
-    }
-}
-
-fn sleb(o: &mut Vector<u8>, v0: i64) {
-    let mut v = v0;
-    // Seven bits a byte: at most 10 bytes.
-    for _ in 0..10 {
-        let b = (v & 0x7F) as u8;
-        v >>= 7;
-        if v == 0 && (b & 0x40) == 0 || v == -1 && (b & 0x40) != 0 {
-            o.push(b);
-            return;
-        }
-        o.push(b | 0x80);
-    }
-}
-
 fn cstr(o: &mut Vector<u8>, s: str) {
     for i in 0..s.len() {
         o.push(s.byte_at(i));
@@ -234,36 +207,23 @@ extend Dwarf {
         ob::w16(&mut info, 4);
         fix(&mut info, &mut fx, D_INFO, FX_SECOFF, D_ABBREV, 4);
         info.push(ptr as u8);
-        uleb(&mut info, AB_CU);
+        ob::uleb(&mut info, AB_CU);
         cstr(&mut info, "super-c");
         ob::w16(&mut info, DW_LANG_C11);
         cstr(&mut info, name);
         fix(&mut info, &mut fx, D_INFO, FX_SECOFF, D_LINE, 4);
         cstr(&mut info, comp_dir);
-        for _ in 0..ptr {
-            info.push(0);
-        }
+        info.resize_default(info.len() + ptr as usize);
         fix(&mut info, &mut fx, D_INFO, FX_SECOFF, D_RANGES, 4);
         for k in 0..funcs.len() {
             let f = funcs[k];
-            uleb(
-                &mut info,
-                if globals[k] {
-                    AB_SUB_EXT
-                } else {
-                    AB_SUB
-                } + if f.n == 0 {
-                    2u8
-                } else {
-                    0u8
-                },
-            );
+            ob::uleb(&mut info, ast::pick(globals[k], AB_SUB_EXT, AB_SUB) + ast::pick(f.n == 0, 2u8, 0u8));
             fix(&mut info, &mut fx, D_INFO, FX_ADDR, f.sym, ptr);
             ob::w32(&mut info, f.size);
             cstr(&mut info, names[k]);
             if f.n != 0 {
-                uleb(&mut info, fidx[lines[f.start as usize].file as usize]);
-                uleb(&mut info, lines[f.start as usize].line);
+                ob::uleb(&mut info, fidx[lines[f.start as usize].file as usize]);
+                ob::uleb(&mut info, lines[f.start as usize].line);
             }
             fix(&mut ranges, &mut fx, D_RANGES, FX_ADDR, f.sym, ptr);
             fix(&mut ranges, &mut fx, D_RANGES, FX_ADDR, f.sym, ptr);
@@ -289,9 +249,7 @@ extend Dwarf {
 // (FX_ADDR), or the offset of debug section `sym` (FX_SECOFF), plus no addend.
 fn fix(b: &mut Vector<u8>, fx: &mut Vector<DFix>, sec: u8, kind: u8, sym: u32, size: u32) {
     fx.push(DFix { sec: sec, off: b.len() as u32, kind: kind, sym: sym, addend: 0 });
-    for _ in 0..size {
-        b.push(0);
-    }
+    b.resize_default(b.len() + size as usize);
 }
 
 // The line program: a header naming the files `used` (package file ids into `files`, `fidx` their
@@ -336,7 +294,7 @@ fn line_program(
         }
         // DW_LNE_set_address.
         l.push(0);
-        uleb(&mut l, 1 + ptr as u64);
+        ob::uleb(&mut l, 1 + ptr as u64);
         l.push(2);
         fix(&mut l, fx, D_LINE, FX_ADDR, f.sym, ptr);
         let mut at: u32 = 0;
@@ -361,7 +319,7 @@ fn line_program(
         // DW_LNS_advance_pc to the end, DW_LNE_end_sequence.
         if f.size > at {
             l.push(2);
-            uleb(&mut l, f.size - at);
+            ob::uleb(&mut l, f.size - at);
         }
         l.push(0);
         l.push(1);
@@ -386,12 +344,12 @@ fn row_op(
 ) {
     if fno != *file {
         l.push(4);
-        uleb(l, fno);
+        ob::uleb(l, fno);
         *file = fno;
     }
     if r.col != *col {
         l.push(5);
-        uleb(l, r.col);
+        ob::uleb(l, r.col);
         *col = r.col;
     }
     if pend {
@@ -410,11 +368,11 @@ fn row_op(
     }
     if ld != 0 {
         l.push(3);
-        sleb(l, ld);
+        ob::sleb(l, ld);
     }
     if ad != 0 {
         l.push(2);
-        uleb(l, ad);
+        ob::uleb(l, ad);
     }
     l.push(1);
 }
