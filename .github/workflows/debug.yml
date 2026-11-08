@@ -1,7 +1,8 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
-# the file. Current probe: the transparent huge page sizes each Linux runner's kernel enables for
-# anonymous memory (the 2 MiB size and the smaller multi-size ones).
+# the file. Current probe: one cold build's peak resident set on Linux arm64 with glibc's default malloc
+# tunables, where malloc asks for transparent huge pages (glibc.malloc.hugetlb=1 on AArch64), and with
+# glibc.malloc.hugetlb=0.
 name: Debug
 on:
   workflow_dispatch
@@ -11,19 +12,86 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  thp:
-    name: thp (${{ matrix.os }})
+  compile:
+    name: compile (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-26.04, ubuntu-26.04-arm]
+        include:
+          # No release ships a Linux arm64 compiler: the x86-64 runner cross-builds it against the arm64
+          # C library. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
+          - { os: ubuntu-26.04, target: linux_arm64, platform: linux }
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
-      - name: Transparent huge page sizes
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: ${{ matrix.platform || matrix.target }}
+
+      - name: Build the compiler
         run: |
           set -eu
-          uname -m
-          getconf PAGESIZE
-          for f in /sys/kernel/mm/transparent_hugepage/enabled /sys/kernel/mm/transparent_hugepage/hugepages-*/enabled; do
-            echo "$f: $(cat "$f")"
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          test -x "./super-c${BINEXT:-}"
+
+      - name: Cross-build the arm64 compiler
+        if: matrix.target == 'linux_arm64'
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev-arm64-cross
+          SC_LEAK_CHECK=fatal ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+          mv super-c-a64 super-c
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-${{ matrix.target }}
+          path: super-c${{ env.BINEXT }}
+          if-no-files-found: error
+          retention-days: 1
+
+  peak:
+    needs: compile
+    name: peak (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-26.04-arm, target: linux_arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Peak with glibc's default malloc tunables and with hugetlb=0
+        run: |
+          set -eu
+          chmod +x ./super-c
+          grep PRETTY_NAME /etc/os-release
+          uname -r
+          ldd --version | head -1
+          echo "thp enabled: $(cat /sys/kernel/mm/transparent_hugepage/enabled)"
+          echo "thp defrag: $(cat /sys/kernel/mm/transparent_hugepage/defrag)"
+          export SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
+          for round in 1 2; do
+            SC_BUILD_STATS=on.json ./super-c build --profile=release --jobs=1 --out-dir=on -o on/sc
+            SC_BUILD_STATS=off.json GLIBC_TUNABLES=glibc.malloc.hugetlb=0 ./super-c build --profile=release --jobs=1 --out-dir=off -o off/sc
+            echo "round $round, default:   $(grep -o '"at":"[a-z]*","rss_mib":[0-9.]*' on.json | tr '\n' ' ')"
+            echo "round $round, hugetlb=0: $(grep -o '"at":"[a-z]*","rss_mib":[0-9.]*' off.json | tr '\n' ' ')"
+            rm -rf on off on.json off.json
           done
