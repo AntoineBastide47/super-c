@@ -147,6 +147,7 @@ call these releases.
 
 Enforcement is env-gated: under `SC_FACTS_CHECK` the driver snapshots per-module watermarks
 after typecheck and verifies them **twice**: after borrowck (a difference fails the build) and
-after codegen (reported). A released table must match its snapshot up to its release and its
-released length after it. The check also requires each release at its point: the body facts
+after codegen (reported), or where the tables go when the build releases its syntax after the
+lowering (`syntax_done`), the tables' last state; the codegen check then skips them. A released
+table must match its snapshot up to its release and its released length after it. The check also requires each release at its point: the body facts
 exactly when the body arena is released, and `method_refs` and `seeds` by the codegen check.

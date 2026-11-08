@@ -3854,6 +3854,24 @@ extend Ast {
         self.seeds.truncate(w);
     }
 
+    /// Free the whole module's syntax (`Package::release_syntax`): its arenas, side tables and type pool. The
+    /// module's own facts stay (`names_vectors`, ...: the backend reads them). A later read of one of its
+    /// nodes aborts on bounds.
+    pub(package) fn release_all(self: &mut Self) {
+        let old = replace(self, Ast::new(0));
+        self.nodes.clear();
+        self.b.released = true;
+        self.module = old.module;
+        self.root = old.root;
+        self.names_vectors = old.names_vectors;
+        self.sink_body = old.sink_body;
+        self.has_c_value = old.has_c_value;
+        self.has_member_pins = old.has_member_pins;
+        self.sugar_marks = old.sugar_marks;
+        self.hir_base = old.hir_base;
+        self.hir_body = old.hir_body;
+    }
+
     /// Free the `call_info` and `mono` entries of body-arena nodes once the body arena is released
     /// (batch builds): no later pass reads a body node. The freed entries' distinct type arguments
     /// stay in `mono_live`, which the emission liveness reads.

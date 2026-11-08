@@ -1212,7 +1212,7 @@ extern "C" "malloc.h" {
 
 // The tracker's own tables take zeroed pages from the system, never the malloc family: a program that
 // interposes the family to count its calls (std::testing::bench_sys) counts the program's allocations
-// alone. Windows and wasm have no such program and keep calloc.
+// alone. wasm has no such program and keeps calloc.
 @platform(macos | ios | linux | android)
 fn lk_table_new(n: usize) *mut void {
     let p = unsafe mmap(null, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -1222,7 +1222,11 @@ fn lk_table_new(n: usize) *mut void {
         p
     };
 }
-@platform(windows | wasm)
+@platform(windows)
+fn lk_table_new(n: usize) *mut void {
+    return unsafe VirtualAlloc(null, n, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+}
+@platform(wasm)
 fn lk_table_new(n: usize) *mut void {
     return unsafe c_calloc(1, n);
 }
@@ -1232,9 +1236,25 @@ fn lk_table_free(p: *mut void, n: usize) {
         unsafe munmap(p, n);
     }
 }
-@platform(windows | wasm)
+@platform(windows)
+fn lk_table_free(p: *mut void, _n: usize) {
+    if p != null {
+        let _ = unsafe VirtualFree(p, 0, MEM_RELEASE);
+    }
+}
+@platform(wasm)
 fn lk_table_free(p: *mut void, _n: usize) {
     unsafe c_free(p);
+}
+
+@platform(windows)
+extern "C" "windows.h" {
+    fn VirtualAlloc(addr: *mut void, size: usize, kind: u32, protect: u32) *mut void;
+    fn VirtualFree(addr: *mut void, size: usize, kind: u32) i32;
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_RESERVE: u32 = 0x2000;
+    const MEM_RELEASE: u32 = 0x8000;
+    const PAGE_READWRITE: u32 = 4;
 }
 
 fn lk_get() i32 {

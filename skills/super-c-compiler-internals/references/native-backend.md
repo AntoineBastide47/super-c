@@ -101,7 +101,7 @@ native object too (`__sc_registry_n.o`); `__sc_registry.c` is still written, and
 The vector bounds-check helpers live in `std/rt/lanes.spc`, loaded only when a
 program names a vector type.
 
-`check_all` (end of `cemit_package`, under `SC_LIR`) verifies every body the build lowered (the
+`check_all` (in `lir_stage`, under `SC_LIR`) verifies every body the build lowered (the
 per-TU cache keys on `SC_LIR`, so a replayed module passed it before), and under `SC_LIR_EVAL` in a
 test build runs each test without fixture arguments in the evaluator, the tests spread over
 `--jobs` workers with an evaluator each: against the CTFE run (`lw::probe_tests`, before the body

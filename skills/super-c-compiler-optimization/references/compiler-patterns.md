@@ -160,6 +160,14 @@ cut that:
 A buffer a pass needs per call comes from its caller's scratch (`pointer_ivs`'s map, `ret_edges`),
 and a vector built once per run is counted before it is filled (`Run::new`'s job edges, `waits`).
 
+A phase's data goes at its last reader, not with the package: a stage's locals die with its frame,
+so a later stage runs in a function of its own (`cemit_package` returns at the end of the lowering,
+and `lir_stage` optimizes after it), and data a later stage still needs is copied out first
+(`CemitOut.asm_text`). After a large release, `Global::trim` returns the freed pages: a glibc thread
+allocates from its own arena, so pages one thread freed stay resident while the others grow. To
+find what is live and why, run a build with `SC_BUILD_MEM=1`: the record's boundaries give the
+live bytes by the phase that allocated them.
+
 ## Fixed-Array Replacement
 
 When the maximum element count is domain-bounded (not user-input-bounded), replace

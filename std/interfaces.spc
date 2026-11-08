@@ -350,6 +350,30 @@ extend Global as Allocator {
     }
 }
 
+extend Global {
+    /// Give the C heap's free pages back to the system after the process frees much: glibc's `malloc_trim`.
+    /// A glibc thread allocates from its own arena, which never takes another thread's free pages, so they
+    /// stay resident otherwise. Nothing with the other C libraries: Apple's allocator reuses a free page in
+    /// any thread, and giving its pages back (`malloc_zone_pressure_relief`) only costs the faults that
+    /// take them again.
+    pub fn trim() {
+        heap_trim();
+    }
+}
+
+@platform(linux)
+extern "C" "malloc.h" {
+    fn malloc_trim(pad: usize) i32;
+}
+
+@platform(linux)
+fn heap_trim() {
+    let _ = unsafe malloc_trim(0);
+}
+
+@platform(macos | ios | windows | android | wasm)
+fn heap_trim() {}
+
 // `Global` is constructible from nothing, so containers' no-argument constructors (`Vector::new()`, ...)
 // can synthesize one. A stored `Global` is zero bytes.
 extend Global as Default {

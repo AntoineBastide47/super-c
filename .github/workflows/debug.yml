@@ -1,11 +1,8 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
-# content, run on demand from the Actions tab. Edit the job for the next investigation; do not remove
-# the file. Current probe: the code generation benchmarks (bench/codegen), each kernel as Super-C
-# compiles it against the same kernel compiled by clang -O2, on Linux x86-64 (3 runners), Linux arm64
-# and Windows x86-64 (2 runners); then the same benchmarks built by the latest release's compiler (the "before").
-# The test suite runs on Windows x86-64 alone (3 shards), where the code generator's Microsoft x64 paths run.
-# The native tests run under Intel SDE (AVX-512), as built and again with every value that may live in
-# xmm16..xmm31 put there first.
+# content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
+# the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
+# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
+# the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
 name: Debug
 on:
   workflow_dispatch
@@ -15,18 +12,18 @@ concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
-  # Each target on several runners at once: the machines differ, so a ratio holds when it holds on each.
-  codegen:
-    name: codegen (${{ matrix.target }} ${{ matrix.run }})
+  compile:
+    name: compile (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: linux, run: 1 }
-          - { os: ubuntu-latest, target: linux, run: 2 }
-          - { os: ubuntu-latest, target: linux, run: 3 }
-          - { os: windows-latest, target: windows, run: 1 }
-          - { os: windows-latest, target: windows, run: 2 }
+          - { os: macos-latest, target: macos }
+          - { os: ubuntu-latest, target: linux }
+          # No release ships a Linux arm64 compiler: the x86-64 runner cross-builds it against the arm64
+          # C library. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
+          - { os: ubuntu-26.04, target: linux_arm64, platform: linux }
+          - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -38,181 +35,110 @@ jobs:
         with:
           target: ${{ matrix.target }}
           sha: ${{ github.sha }}
-          llvm-mingw: ${{ matrix.target == 'windows' }}
 
       - uses: ./.github/actions/bootstrap
         with:
-          target: ${{ matrix.target }}
+          target: ${{ matrix.platform || matrix.target }}
 
       - name: Build the compiler
         run: |
           set -eu
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
-          [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          test -x "./super-c${BINEXT:-}"
 
-      # clang -O2 for the C side: the runner's on Linux, llvm-mingw's on Windows (the mingw ABI).
-      - name: Build the clang kernels
-        run: |
-          set -eu
-          if [ "${{ matrix.target }}" = windows ]; then
-            export CC="$LLVM_MINGW/clang" AR="$LLVM_MINGW/llvm-ar"
-          else
-            export CC=clang
-          fi
-          $CC --version | head -1
-          sh bench/codegen/lib.sh
-
-      - name: Code generation benchmarks (this tree's compiler)
-        run: |
-          grep -m1 'model name' /proc/cpuinfo || true
-          "./super-c${BINEXT:-}" bench --filter=codegen_
-
-      - name: Code generation benchmarks (the latest release's compiler)
-        continue-on-error: true
-        run: |
-          rm -rf build/bench
-          "./super-c-boot${BINEXT:-}" bench --filter=codegen_
-
-  # The native tests under Intel SDE (an emulated Sapphire Rapids, as the release's AVX-512 lane): this tree's
-  # compiler, then the same with the homes taking xmm16..xmm31 before xmm0..xmm15 (`Live::fits`), so every
-  # value whose instructions all have EVEX forms runs from an upper register.
-  avx512:
-    name: avx512 (linux, sde)
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: linux
-          sha: ${{ github.sha }}
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: linux
-
-      - name: Build the compiler
-        run: |
-          set -eu
-          ./super-c-boot build --bootstrap-tags
-
-      - name: Install Intel SDE
-        run: |
-          set -eu
-          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
-          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
-          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
-          mkdir sde
-          tar -xJf "$f" -C sde --strip-components=1
-
-      - name: Native tests under SDE
-        run: |
-          set -eu
-          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
-
-      - name: Native tests under SDE, xmm16..xmm31 first
-        run: |
-          set -eu
-          python3 - <<'EOF'
-          p = 'src/codegen/live.spc'
-          s = open(p).read()
-          a = "        if (w & WANT_SCRATCH) != 0 && s < sc {\n            return HOME_SCRATCH;\n        }\n"
-          b = "        if (w & WANT_UPPER) != 0 && u < caps.vu {\n            return HOME_UPPER;\n        }\n"
-          assert s.count(a + b) == 1
-          open(p, 'w').write(s.replace(a + b, b + a))
-          EOF
-          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
-
-  # The test suite on Windows x86-64, with this tree's compiler, in 3 shards.
-  test-windows:
-    name: test (windows ${{ matrix.shard }})
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: ["1/3", "2/3", "3/3"]
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: windows
-          sha: ${{ github.sha }}
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: windows
-
-      - name: Build the compiler
-        run: |
-          set -eu
-          "./super-c-boot${BINEXT:-}" build --bootstrap-tags
-          [ -f "./super-c${BINEXT:-}" ] || mv ./super-c "./super-c${BINEXT:-}"
-
-      - name: Run the test suite
-        run: |
-          set -eu
-          SC_LEAK_CHECK=fatal "./super-c${BINEXT:-}" test --quiet --test-shard=${{ matrix.shard }}
-
-  # Linux arm64: no release ships a Linux arm64 compiler, so the x86-64 runner cross-builds this tree's
-  # compiler against the arm64 C library, and the arm64 runner benchmarks with it.
-  arm64-compile:
-    name: linux arm64 compile
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: linux
-          sha: ${{ github.sha }}
-
-      - uses: ./.github/actions/bootstrap
-        with:
-          target: linux
-
-      - name: Cross-build an arm64 compiler
+      - name: Cross-build the arm64 compiler
+        if: matrix.target == 'linux_arm64'
         run: |
           set -eu
           sudo apt-get update
           sudo apt-get install -y libc6-dev-arm64-cross
-          ./super-c-boot build --bootstrap-tags
-          ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+          SC_LEAK_CHECK=fatal ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+          mv super-c-a64 super-c
 
       - uses: actions/upload-artifact@v7
         with:
-          name: compiler-linux-arm64
-          path: super-c-a64
+          name: compiler-${{ matrix.target }}
+          path: super-c${{ env.BINEXT }}
           if-no-files-found: error
           retention-days: 1
 
-  codegen-arm64:
-    needs: arm64-compile
-    name: codegen (linux arm64)
-    runs-on: ubuntu-26.04-arm
+  # The suite with the compiler `compile` built. Leak-gated: a process that leaks or double-frees exits
+  # nonzero. The first shard of each target also checks the builds with LIR (SC_LIR).
+  test:
+    needs: compile
+    name: test (${{ matrix.target }} ${{ matrix.shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: macos, shard: "1/2" }
+          - { os: macos-latest, target: macos, shard: "2/2" }
+          - { os: ubuntu-latest, target: linux, shard: "1/2" }
+          - { os: ubuntu-latest, target: linux, shard: "2/2" }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "1/2" }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "2/2" }
+          - { os: windows-latest, target: windows, shard: "1/3" }
+          - { os: windows-latest, target: windows, shard: "2/3" }
+          - { os: windows-latest, target: windows, shard: "3/3" }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
 
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
       - uses: actions/download-artifact@v8
         with:
-          name: compiler-linux-arm64
+          name: compiler-${{ matrix.target }}
 
-      - name: Build the clang kernels
+      - name: Run the test suite
         run: |
           set -eu
-          command -v clang || { sudo apt-get update; sudo apt-get install -y clang; }
-          clang --version | head -1
-          CC=clang sh bench/codegen/lib.sh
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
 
-      - name: Code generation benchmarks (this tree's compiler)
+  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
+  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
+  # agree on it within the targets' differences; time and cycles follow each runner's machine.
+  bench:
+    needs: compile
+    name: self-compile bench (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: macos }
+          - { os: ubuntu-latest, target: linux }
+          - { os: ubuntu-26.04-arm, target: linux_arm64 }
+          - { os: windows-latest, target: windows }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Self-compile benchmark
         run: |
           set -eu
-          chmod +x super-c-a64
-          mv super-c-a64 super-c
-          ./super-c bench --filter=codegen_
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
+          "./$bin" bench --filter=self_compile

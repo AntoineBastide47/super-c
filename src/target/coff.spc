@@ -31,85 +31,104 @@ const SEL_NODUPLICATES: u32 = 1;
 const SEL_ANY: u32 = 2;
 const SEL_ASSOCIATIVE: u32 = 5;
 
-// A section of the file: its name, flags, bytes (none for `.bss`), size and relocations; a COMDAT one's
-// selection and, associative, the section number it goes with.
+// What a section of the file holds: a part of the object's sections, a frame's UNWIND_INFO (`.xdata`) or
+// function table entry (`.pdata`), or every frame's (`q` NONE32).
+const CS_PART: u8 = 0;
+const CS_XDATA: u8 = 1;
+const CS_PDATA: u8 = 2;
+
+// A section of the file: what it holds (`kind`, the part or frame `q`), its flags, size and relocation count;
+// a COMDAT one's selection and, associative, the section number it goes with; where its bytes and its
+// relocations start (`raw`, `rat`, 0: none).
 struct CSec {
-    pub(package) name: String,
+    pub(package) kind: u8,
+    pub(package) q: u32,
     pub(package) flags: u32,
-    pub(package) bytes: Vector<u8>,
     pub(package) size: u64,
-    pub(package) rels: Vector<u8>, // 10-byte entries
     pub(package) nrel: u32,
     pub(package) sel: u32,
     pub(package) assoc: u32,
+    pub(package) raw: u32,
+    pub(package) rat: u32,
 }
 
-// The name and flags of object section `k` of `o`.
-fn sec_info(o: &ob::Obj, k: u8, name: &mut String) u32 {
+extend CSec as Copy {}
+
+// The name of file section `s` of `o`.
+fn csec_name<'a>(o: &'a ob::Obj, parts: &Vector<ob::Part>, s: CSec) str<'a> {
+    if s.kind == CS_XDATA {
+        return ".xdata";
+    }
+    if s.kind == CS_PDATA {
+        return ".pdata";
+    }
+    let k = parts[s.q as usize].k;
+    if k >= ob::S_COUNT {
+        return o.secs[k as usize].name.as_str();
+    }
+    if k == ob::S_TEXT {
+        return ".text";
+    }
+    if k == ob::S_CSTR || k == ob::S_RODATA || k == ob::S_RELRO {
+        return ".rdata";
+    }
+    if k == ob::S_DATA {
+        return ".data";
+    }
+    if k == ob::S_TDATA {
+        return ".tls$";
+    }
+    assert(k == ob::S_BSS, "coff: a thread-local section without bytes");
+    return ".bss";
+}
+
+// The flags of object section `k` of `o`.
+fn sec_flags(o: &ob::Obj, k: u8) u32 {
     let al = o.secs[k as usize].align_log2 as u32 + 1 << 20;
     if k >= ob::S_COUNT {
-        name.push_str(&o.secs[k as usize].name);
         if o.secs[k as usize].code {
             return SCN_CODE | SCN_EXEC | SCN_READ | al;
         }
-        if name.as_str().starts_with(".debug_") {
+        if o.secs[k as usize].name.as_str().starts_with(".debug_") {
             // Debug information: no part of the image.
             return SCN_DATA | SCN_DISCARDABLE | SCN_READ | al;
         }
         return SCN_DATA | SCN_READ | SCN_WRITE | al;
     }
     if k == ob::S_TEXT {
-        name.push_str(".text");
         return SCN_CODE | SCN_EXEC | SCN_READ | al;
     }
     if k == ob::S_CSTR || k == ob::S_RODATA || k == ob::S_RELRO {
-        name.push_str(".rdata");
         return SCN_DATA | SCN_READ | al;
     }
-    if k == ob::S_DATA {
-        name.push_str(".data");
-        return SCN_DATA | SCN_READ | SCN_WRITE | al;
-    }
-    if k == ob::S_TDATA {
-        name.push_str(".tls$");
+    if k == ob::S_DATA || k == ob::S_TDATA {
         return SCN_DATA | SCN_READ | SCN_WRITE | al;
     }
     assert(k == ob::S_BSS, "coff: a thread-local section without bytes");
-    name.push_str(".bss");
     return SCN_BSS | SCN_READ | SCN_WRITE | al;
 }
 
-// Add an `.xdata` section of bytes `xdata` and an empty `.pdata` one after it, both COMDAT sections
-// associative to section number `assoc` unless it is 0.
-fn unwind_pair(secs: &mut Vector<CSec>, xdata: Vector<u8>, assoc: u32) {
+// An `.xdata` section of `size` bytes and a `.pdata` one of `n` entries after it, for frame `q` (NONE32:
+// every frame), both COMDAT sections associative to section number `assoc` unless it is 0.
+fn unwind_pair(secs: &mut Vector<CSec>, q: u32, size: u64, n: u32, assoc: u32) {
     let (fl, sel) = if assoc != 0 {
         (SCN_LNK_COMDAT, SEL_ASSOCIATIVE)
     } else {
         (0u32, 0u32)
     };
-    let n = xdata.len() as u64;
+    let flags = SCN_DATA | SCN_READ | 3 << 20 | fl;
+    secs.push(CSec { kind: CS_XDATA, q: q, flags: flags, size: size, nrel: 0, sel: sel, assoc: assoc, raw: 0, rat: 0 });
     secs.push(
         CSec {
-            name: String::from_str(".xdata"),
-            flags: SCN_DATA | SCN_READ | 3 << 20 | fl,
-            bytes: xdata,
-            size: n,
-            rels: Vector::<u8>::new(),
-            nrel: 0,
+            kind: CS_PDATA,
+            q: q,
+            flags: flags,
+            size: 12 * n as u64,
+            nrel: 3 * n,
             sel: sel,
             assoc: assoc,
-        },
-    );
-    secs.push(
-        CSec {
-            name: String::from_str(".pdata"),
-            flags: SCN_DATA | SCN_READ | 3 << 20 | fl,
-            bytes: Vector::<u8>::new(),
-            size: 0,
-            rels: Vector::<u8>::new(),
-            nrel: 0,
-            sel: sel,
-            assoc: assoc,
+            raw: 0,
+            rat: 0,
         },
     );
 }
@@ -133,9 +152,18 @@ const fn add_field(b: &mut Vector<u8>, at: u32, n: u32, v: u64) {
     }
 }
 
-// A symbol table entry: the name (inline up to 8 bytes, else a string table offset), value, section
-// number, type, storage class and auxiliary entry count.
-fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, sec: u32, ty: u32, class: u32, aux: u32) {
+// The bytes a name takes in the string table: none inline (up to 8 bytes), else the name and its NUL.
+const fn str_len(name: str) u32 {
+    return if name.len() <= 8 {
+        0u32
+    } else {
+        name.len() as u32 + 1
+    };
+}
+
+// The 8-byte name field of a symbol or section header: the name inline (up to 8 bytes), else what `long`
+// writes for the string table offset `*soff`, which then moves past the name.
+fn put_name(out: &mut Vector<u8>, soff: &mut u32, name: str, slash: bool) {
     if name.len() <= 8 {
         for i in 0..8usize {
             out.push(
@@ -146,14 +174,39 @@ fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, s
                 },
             );
         }
+        return;
+    }
+    if slash {
+        // "/<offset>" in decimal, NUL-padded, its first 8 bytes.
+        let mut d: [u8; 10] = [0; 10];
+        let mut n: usize = 0;
+        let mut v = *soff;
+        for _ in 0..10 {
+            d[n] = b'0' + (v % 10) as u8;
+            n += 1;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        let w = n.min(7);
+        out.push(b'/');
+        for i in 0..w {
+            out.push(d[n - 1 - i]);
+        }
+        for _ in w + 1..8 {
+            out.push(0);
+        }
     } else {
         ob::w32(out, 0);
-        ob::w32(out, strs.len() as u32);
-        for i in 0..name.len() {
-            strs.push(name.byte_at(i));
-        }
-        strs.push(0);
+        ob::w32(out, *soff);
     }
+    *soff += name.len() as u32 + 1;
+}
+
+// A symbol table entry: the name, value, section number, type, storage class and auxiliary entry count.
+fn put_sym(out: &mut Vector<u8>, soff: &mut u32, name: str, value: u32, sec: u32, ty: u32, class: u32, aux: u32) {
+    put_name(out, soff, name, false);
     ob::w32(out, value);
     ob::w16(out, sec);
     ob::w16(out, ty);
@@ -161,8 +214,25 @@ fn put_sym(out: &mut Vector<u8>, strs: &mut Vector<u8>, name: str, value: u32, s
     out.push(aux as u8);
 }
 
+// A long name's bytes and its NUL onto the string table.
+fn put_str(out: &mut Vector<u8>, name: str) {
+    if name.len() > 8 {
+        for i in 0..name.len() {
+            out.push(name.byte_at(i));
+        }
+        out.push(0);
+    }
+}
+
+// Zeros onto `out` up to file offset `off`.
+fn pad_to(out: &mut Vector<u8>, off: u32) {
+    while out.len() as u32 < off {
+        out.push(0);
+    }
+}
+
 /// Write object `o` as a COFF x86-64 object into `out`, its sections split at their symbols as `split`
-/// asks (`ob::SPLIT_*`).
+/// asks (`ob::SPLIT_*`). The file is laid out first, then written once at its size.
 pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     // The file's sections: the object's non-empty ones (or their parts), then `.xdata` and `.pdata` for
     // the frames (a pair per frame when the code splits).
@@ -194,28 +264,27 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             }
         }
     }
-    let mut secs = Vector::<CSec>::new();
+    let per_fn = (split & ob::SPLIT_FUNCS) != 0;
+    let mut secs = Vector::<CSec>::with_capacity(
+        parts.len() + 2 * if per_fn {
+            o.frames.len()
+        } else {
+            1
+        },
+    );
     for q in 0..parts.len() {
         let pt = parts[q];
-        let mut nm = String::new();
-        let mut fl = sec_info(o, pt.k, &mut nm);
-        let mut bytes = Vector::<u8>::new();
-        if (fl & SCN_BSS) == 0 {
-            for j in pt.lo as usize..pt.hi as usize {
-                bytes.push(o.secs[pt.k as usize].bytes[j]);
-            }
-        }
+        let mut fl = sec_flags(o, pt.k);
         let comdat = pt.sym != ob::NONE32 && !kept[q];
         if comdat {
             fl |= SCN_LNK_COMDAT;
         }
         secs.push(
             CSec {
-                name: nm,
+                kind: CS_PART,
+                q: q as u32,
                 flags: fl,
-                bytes: bytes,
                 size: pt.hi - pt.lo,
-                rels: Vector::<u8>::new(),
                 nrel: 0,
                 // A weak definition's section: the link keeps one of the objects' (`ob::SF_WEAK`).
                 sel: if !comdat {
@@ -226,37 +295,32 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
                     SEL_NODUPLICATES
                 },
                 assoc: 0,
+                raw: 0,
+                rat: 0,
             },
         );
         parts.index_mut(q).hdr = secs.len() as u32;
     }
-    let per_fn = (split & ob::SPLIT_FUNCS) != 0;
     // Per frame, its `.xdata` and `.pdata` section numbers.
-    let mut fxs = Vector::<u32>::new();
-    let mut fps = Vector::<u32>::new();
+    let mut fxs = Vector::<u32>::with_capacity(o.frames.len());
+    let mut fps = Vector::<u32>::with_capacity(o.frames.len());
     if o.frames.len() != 0 && !per_fn {
-        let mut xdata = Vector::<u8>::new();
+        let mut size: u64 = 0;
         for f in 0..o.frames.len() {
-            let fr = o.frames[f];
-            xdata.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
+            size += o.frames[f].cfi_len;
         }
-        unwind_pair(&mut secs, xdata, 0);
+        unwind_pair(&mut secs, ob::NONE32, size, o.frames.len() as u32, 0);
     }
     for f in 0..o.frames.len() {
         if per_fn {
             let fr = o.frames[f];
             let q = sp[fr.sym as usize] as usize;
-            let mut xdata = Vector::<u8>::new();
-            xdata.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
-            unwind_pair(
-                &mut secs,
-                xdata,
-                if secs[parts[q].hdr as usize - 1].sel != 0 {
-                    parts[q].hdr
-                } else {
-                    0u32
-                },
-            );
+            let assoc = if secs[parts[q].hdr as usize - 1].sel != 0 {
+                parts[q].hdr
+            } else {
+                0u32
+            };
+            unwind_pair(&mut secs, f as u32, fr.cfi_len, 1, assoc);
         }
         fxs.push(secs.len() as u32 - 1);
         fps.push(secs.len() as u32);
@@ -283,82 +347,69 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     for i in 0..order.len() {
         symix[(order[i] & 0xFFFFFFFF) as usize] = 2 * nsec + i as u32;
     }
-    // Relocations, their addends into the section bytes.
+    // The relocations by file section, each section's in the object's order (`rord` from `rfrom[s]`).
+    let mut rsec = Vector::<u32>::with_capacity(o.rels.len());
     for r in 0..o.rels.len() {
         let rl = o.rels[r];
-        let q = ob::part_at(&parts, &first, rl.sec, rl.off) as usize;
-        let s = parts[q].hdr as usize - 1;
-        let at = (rl.off as u64 - parts[q].lo) as u32;
-        let ty = if rl.kind == x::R_ABS64 {
-            add_field(&mut secs.index_mut(s).bytes, at, 8, rl.addend as u64);
-            REL_ADDR64
-        } else if rl.kind == x::R_SECREL || rl.kind == ob::R_SECOFF32 {
-            add_field(&mut secs.index_mut(s).bytes, at, 4, rl.addend as u64);
-            REL_SECREL
+        let s = parts[ob::part_at(&parts, &first, rl.sec, rl.off) as usize].hdr - 1;
+        rsec.push(s);
+        secs.index_mut(s as usize).nrel += 1;
+    }
+    let mut rfrom = Vector::<u32>::new();
+    rfrom.resize_default(nsec as usize + 1);
+    for s in 0..nsec as usize {
+        rfrom[s + 1] = rfrom[s] + if secs[s].kind == CS_PART {
+            secs[s].nrel
         } else {
-            assert(rl.kind == x::R_PC32 || rl.kind == x::R_PLT32, "coff: a relocation kind ELF alone takes");
-            // REL32 is relative to the field's end: the addend's 4 bytes back.
-            add_field(&mut secs.index_mut(s).bytes, at, 4, (rl.addend + 4) as u64);
-            REL_REL32
+            0
         };
-        put_rel(&mut secs.index_mut(s).rels, at, symix[rl.sym as usize], ty);
-        secs.index_mut(s).nrel += 1;
     }
-    // A function table entry per frame: its start and end, and its UNWIND_INFO in its `.xdata`.
-    let mut xat: u32 = 0;
-    for f in 0..o.frames.len() {
-        let fr = o.frames[f];
-        let xs = fxs[f];
-        let p = secs.index_mut(fps[f] as usize - 1);
-        let at = p.bytes.len() as u32;
-        ob::w32(&mut p.bytes, fr.off);
-        ob::w32(&mut p.bytes, fr.off + fr.size);
-        ob::w32(
-            &mut p.bytes,
-            if per_fn {
-                0u32
-            } else {
-                xat
-            },
-        );
-        put_rel(&mut p.rels, at, symix[fr.sym as usize], REL_ADDR32NB);
-        put_rel(&mut p.rels, at + 4, symix[fr.sym as usize], REL_ADDR32NB);
-        put_rel(&mut p.rels, at + 8, 2 * (xs - 1), REL_ADDR32NB);
-        p.nrel += 3;
-        p.size = p.bytes.len() as u64;
-        xat += fr.cfi_len;
-    }
-    // Layout: the header, the section headers, then per section its bytes and its relocations, then the
-    // symbol table and the string table.
-    let mut strs = Vector::<u8>::new();
-    ob::w32(&mut strs, 0);
-    let mut at = 20 + 40 * nsec;
-    let mut raw = Vector::<u32>::with_capacity(nsec as usize);
-    let mut rat = Vector::<u32>::with_capacity(nsec as usize);
-    for k in 0..nsec as usize {
-        // Bytes 4-aligned; relocations right after them.
-        if secs[k].bytes.len() != 0 {
-            at = at + 3 & ~3u32;
-            raw.push(at);
-        } else {
-            raw.push(0);
+    let mut rord = Vector::<u32>::new();
+    rord.resize_default(o.rels.len());
+    {
+        let mut at = Vector::<u32>::with_capacity(nsec as usize);
+        for s in 0..nsec as usize {
+            at.push(rfrom[s]);
         }
-        at += secs[k].bytes.len() as u32;
+        for r in 0..o.rels.len() {
+            let s = rsec[r] as usize;
+            rord[at[s] as usize] = r as u32;
+            at[s] += 1;
+        }
+    }
+    // Layout: the header, the section headers, then per section its bytes (4-aligned; none for `.bss`) and
+    // its relocations, then the symbol table and the string table.
+    let mut at = 20 + 40 * nsec;
+    let mut nstr: u32 = 4;
+    for k in 0..nsec as usize {
+        // The long name: once for the header, once for the section symbol.
+        nstr += 2 * str_len(csec_name(o, &parts, secs[k]));
+        let s = secs.index_mut(k);
+        let n = if (s.flags & SCN_BSS) != 0 {
+            0u32
+        } else {
+            s.size as u32
+        };
+        if n != 0 {
+            at = at + 3 & ~3u32;
+            s.raw = at;
+        }
+        at += n;
         // Past 65535 relocations the first entry holds their count, itself included.
-        let ovf = secs[k].nrel > 0xFFFF;
-        rat.push(
-            if secs[k].nrel != 0 {
-                at
-            } else {
-                0
-            },
-        );
-        at += 10 * (secs[k].nrel + ovf as u32);
+        if s.nrel != 0 {
+            s.rat = at;
+        }
+        at += 10 * (s.nrel + (s.nrel > 0xFFFF) as u32);
     }
     let symtab = at;
     let nsyms = 2 * nsec + o.syms.len() as u32;
-    // The header, at the start of `out` as ELF's and Mach-O's are.
+    for k in 0..o.syms.len() {
+        nstr += str_len(o.name_of(k as u32));
+    }
+    let size = symtab as usize + 18 * nsyms as usize + nstr as usize;
     out.truncate(0);
+    out.reserve_exact(size);
+    // The header, the section headers.
     ob::w16(out, 0x8664);
     ob::w16(out, nsec);
     ob::w32(out, 0);
@@ -366,39 +417,16 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     ob::w32(out, nsyms);
     ob::w16(out, 0);
     ob::w16(out, 0);
+    let mut soff: u32 = 4;
     for k in 0..nsec as usize {
-        let s = &secs[k];
-        let nm = s.name.as_str();
-        if nm.len() <= 8 {
-            for i in 0..8usize {
-                out.push(
-                    if i < nm.len() {
-                        nm.byte_at(i)
-                    } else {
-                        0
-                    },
-                );
-            }
-        } else {
-            // "/<offset>" into the string table.
-            let mut slash = format("/{}", strs.len());
-            for i in 0..nm.len() {
-                strs.push(nm.byte_at(i));
-            }
-            strs.push(0);
-            while slash.len() < 8 {
-                slash.push_byte(0);
-            }
-            for i in 0..8usize {
-                out.push(slash.as_str().byte_at(i));
-            }
-        }
+        let s = secs[k];
+        put_name(out, &mut soff, csec_name(o, &parts, s), true);
         let ovf = s.nrel > 0xFFFF;
         ob::w32(out, 0);
         ob::w32(out, 0);
         ob::w32(out, s.size as u32);
-        ob::w32(out, raw[k]);
-        ob::w32(out, rat[k]);
+        ob::w32(out, s.raw);
+        ob::w32(out, s.rat);
         ob::w32(out, 0);
         ob::w16(
             out,
@@ -418,21 +446,93 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             },
         );
     }
+    // Each section's bytes, its relocations' addends in them, then the relocations.
+    let mut xat: u32 = 0;
     for k in 0..nsec as usize {
-        while out.len() as u32 < raw[k] {
-            out.push(0);
+        let s = secs[k];
+        if s.raw != 0 {
+            pad_to(out, s.raw);
         }
-        out.extend_from_slice(&secs[k].bytes);
-        if secs[k].nrel > 0xFFFF {
-            put_rel(out, secs[k].nrel + 1, 0, 0);
+        if s.kind == CS_PART {
+            let pt = parts[s.q as usize];
+            if s.raw != 0 {
+                out.extend_from_slice(o.secs[pt.k as usize].bytes[pt.lo as usize..pt.hi as usize]);
+            }
+            for i in rfrom[k]..rfrom[k + 1] {
+                let rl = o.rels[rord[i as usize] as usize];
+                let f = s.raw + (rl.off as u64 - pt.lo) as u32;
+                if rl.kind == x::R_ABS64 {
+                    add_field(out, f, 8, rl.addend as u64);
+                } else if rl.kind == x::R_SECREL || rl.kind == ob::R_SECOFF32 {
+                    add_field(out, f, 4, rl.addend as u64);
+                } else {
+                    assert(rl.kind == x::R_PC32 || rl.kind == x::R_PLT32, "coff: a relocation kind ELF alone takes");
+                    // REL32 is relative to the field's end: the addend's 4 bytes back.
+                    add_field(out, f, 4, (rl.addend + 4) as u64);
+                }
+            }
+            if s.nrel > 0xFFFF {
+                put_rel(out, s.nrel + 1, 0, 0);
+            }
+            for i in rfrom[k]..rfrom[k + 1] {
+                let rl = o.rels[rord[i as usize] as usize];
+                let ty = if rl.kind == x::R_ABS64 {
+                    REL_ADDR64
+                } else if rl.kind == x::R_SECREL || rl.kind == ob::R_SECOFF32 {
+                    REL_SECREL
+                } else {
+                    REL_REL32
+                };
+                put_rel(out, (rl.off as u64 - pt.lo) as u32, symix[rl.sym as usize], ty);
+            }
+        } else if s.kind == CS_XDATA {
+            let (f0, f1) = if s.q == ob::NONE32 {
+                (0usize, o.frames.len())
+            } else {
+                (s.q as usize, s.q as usize + 1)
+            };
+            for f in f0..f1 {
+                let fr = o.frames[f];
+                out.extend_from_slice(o.cfi[fr.cfi_at as usize..(fr.cfi_at + fr.cfi_len) as usize]);
+            }
+        } else {
+            // A function table entry per frame: its start and end, and its UNWIND_INFO in its `.xdata`.
+            let (f0, f1) = if s.q == ob::NONE32 {
+                (0usize, o.frames.len())
+            } else {
+                (s.q as usize, s.q as usize + 1)
+            };
+            for f in f0..f1 {
+                let fr = o.frames[f];
+                ob::w32(out, fr.off);
+                ob::w32(out, fr.off + fr.size);
+                ob::w32(
+                    out,
+                    if per_fn {
+                        0u32
+                    } else {
+                        xat
+                    },
+                );
+                xat += fr.cfi_len;
+            }
+            if s.nrel > 0xFFFF {
+                put_rel(out, s.nrel + 1, 0, 0);
+            }
+            for f in f0..f1 {
+                let fr = o.frames[f];
+                let at = 12 * (f - f0) as u32;
+                put_rel(out, at, symix[fr.sym as usize], REL_ADDR32NB);
+                put_rel(out, at + 4, symix[fr.sym as usize], REL_ADDR32NB);
+                put_rel(out, at + 8, 2 * (fxs[f] - 1), REL_ADDR32NB);
+            }
         }
-        out.extend_from_slice(&secs[k].rels);
     }
     assert(out.len() as u32 == symtab, "coff: the laid out size differs from the written one");
     // Section symbols, each with its auxiliary entry: the length and the relocation count.
     for k in 0..nsec as usize {
-        let s = &secs[k];
-        put_sym(out, &mut strs, &s.name, 0, k as u32 + 1, 0, CLASS_STATIC, 1);
+        let s = secs[k];
+        put_sym(out, &mut soff, csec_name(o, &parts, s), 0, k as u32 + 1, 0, CLASS_STATIC, 1);
         ob::w32(out, s.size as u32);
         ob::w16(
             out,
@@ -457,7 +557,7 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
         let global = y.sec == ob::NOSEC || (y.flags & ob::SF_GLOBAL) != 0;
         put_sym(
             out,
-            &mut strs,
+            &mut soff,
             o.name_of(k as u32),
             if q == ob::NONE32 {
                 y.off as u32
@@ -482,9 +582,17 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
             0,
         );
     }
-    let n = strs.len() as u32;
-    for q in 0..4u32 {
-        strs[q as usize] = (n >> 8 * q & 0xFF) as u8;
+    assert(soff == nstr, "coff: the string table counted differs from the one named");
+    // The string table: its size, then the long names in the order the offsets named them.
+    ob::w32(out, nstr);
+    for k in 0..nsec as usize {
+        put_str(out, csec_name(o, &parts, secs[k]));
     }
-    out.extend_from_slice(&strs);
+    for k in 0..nsec as usize {
+        put_str(out, csec_name(o, &parts, secs[k]));
+    }
+    for i in 0..order.len() {
+        put_str(out, o.name_of((order[i] & 0xFFFFFFFF) as u32));
+    }
+    assert(out.len() == size, "coff: the file's size differs from its layout");
 }
