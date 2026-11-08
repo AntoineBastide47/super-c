@@ -84,3 +84,4 @@ Read only the file the task needs. Section names are kept, so a pointer such as
 - [compile-time.md](references/compile-time.md): const evaluation, build constants, @platform and @when.
 - [attributes.md](references/attributes.md): the attribute table, branch hints, unsafe placement, module-level assembly.
 - [std-and-interop.md](references/std-and-interop.md): short forms of C FFI, tests, concurrency, and the standard library.
+- [migration.md](references/migration.md): the Super-C name of each common contract, by its names in other languages.

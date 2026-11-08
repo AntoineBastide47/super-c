@@ -68,6 +68,20 @@ call stack. The frames come from the frame-pointer chain: an `@unsafe(naked)` fu
 `x29` on arm64. Compare a jobs=1 round with a jobs=18 round per stack: what grows with the job
 count is the parallel duplication.
 
+### Build memory
+
+Judge a build's memory on the lane's "peak memory of one build in a process of its own" line (macOS M5 Pro: 423 MiB at jobs=1, 408 MiB
+at jobs=18, physical footprint). On Linux arm64 the line reads about 35 MiB more than on x86-64 with the
+same heap: glibc 2.43's malloc asks for transparent huge pages there (`glibc.malloc.hugetlb=1` is
+its AArch64 default), so a touched byte makes 2 MiB resident; `GLIBC_TUNABLES=glibc.malloc.hugetlb=0`
+gives the x86-64 figure. The final peak RSS is the bench process's over all rounds: the
+allocator keeps freed memory between rounds (no leak: flat under `SC_LEAK_CHECK=1`), so it reads
+1.2 to 2.1 GiB on macOS, by machine. Inside one long-lived process macOS's footprint undercounts:
+pages the allocator frees and then reuses do not count again. Of a build's peak resident set, about
+250 MiB is memory the allocator kept after frees (live bytes peak near 390 and 450 MiB, in
+borrowck); a trim at each phase boundary cut a jobs=18 build's peak by about 40 MiB but cost 0.5%
+cycles and raised the lane's peak.
+
 ### Transpile work count (CI)
 
 Hosted runners are VMs without hardware counters (Linux `perf stat` reports `<not supported>`,

@@ -48,3 +48,4 @@ Read only the file the task needs. Section names are kept, so a pointer such as
 - [io-and-blocking.md](references/io-and-blocking.md): async I/O and blocking calls.
 - [diagnostics.md](references/diagnostics.md): task diagnostics, hunting races and hangs, measuring the runtime.
 - [cancellation.md](references/cancellation.md): cancellation sources and groups, shutdown.
+- [primitives.md](references/primitives.md): the API of atomics, locks and the other primitives.

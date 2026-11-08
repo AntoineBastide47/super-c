@@ -100,3 +100,13 @@ Read only the file the task needs. Section names are kept, so a pointer such as
 - [lir.md](references/lir.md): the low-level IR and its optimizer.
 - [native-backend.md](references/native-backend.md): instruction selection, registers, encoders, objects.
 - [emission.md](references/emission.md): emission buffers, probes, the build output tree.
+- [stages.md](references/stages.md): each stage as `run_package` runs it, in execution order.
+- [core-ir.md](references/core-ir.md): the Core IR records, pools and invariants (`src/ir/core.spc`).
+- [core-ir-publication.md](references/core-ir-publication.md): the Core IR publication gate, its consumer inventory and the body-syntax release point.
+- [type-identity.md](references/type-identity.md): the package type table and `TypeId` identity.
+- [item-index.md](references/item-index.md): the item schedule index and the item scheduler.
+- [syntax-ownership.md](references/syntax-ownership.md): the module and body syntax arenas and their release.
+- [ownership-analysis.md](references/ownership-analysis.md): the borrow, move and drop analyses from typed Core IR.
+- [instance-specialization.md](references/instance-specialization.md): the re-lowering census, symbolic generic IR, the discovery closure.
+- [simd-backends.md](references/simd-backends.md): vector backends, `@simd_impl` entries and the lowering planner.
+- [output-layout.md](references/output-layout.md): the emitted C tree: headers, shards and ownership.
