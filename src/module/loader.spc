@@ -248,6 +248,8 @@ pub(package) struct Package {
     /// The build emits the manifest's `[lib]` target: the project's exported functions are its API, so
     /// each is emitted whether or not the library calls it (`reach_roots`).
     pub(package) lib_build: bool,
+    /// The modules' syntax and source text are gone (`release_syntax`).
+    pub(package) syntax_released: bool,
     /// The `vendor/<name>` packages in load order: `Module.pkg` is `PKG_VENDOR` plus the index.
     pub(package) vendors: Vector<String>,
     /// Per vendored package, its own `build.toml` sets `std_internals = true`.
@@ -5436,6 +5438,21 @@ extend Package {
                 }
             }
         }
+    }
+
+    /// Free every module's syntax and source text, and the index and item schedule built over them, once no
+    /// stage of the build reads them (`driver::emit::syntax_done`): a later read of a node aborts on bounds,
+    /// and so does a later `ensure_index`, which would build the index again from the syntax.
+    pub(package) fn release_syntax(self: &mut Self) {
+        for i in 0..self.modules.len() {
+            if self.modules[i].has_ast {
+                self.modules[i].ast.get_mut().release_all();
+            }
+            self.modules[i].source = String::new();
+        }
+        self.sched = ItemSched {};
+        let _ = replace(self.index.get_mut(), PkgIndex {});
+        self.syntax_released = true;
     }
 
     /// The enum declaring member `vd` (NODE_NONE when `vd` is no enum member) and `vd`'s position

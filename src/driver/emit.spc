@@ -1509,9 +1509,10 @@ fn facts_snapshot(p: &loader::Package, out: &mut Vector<facts::FactsWatermark>) 
 }
 
 // Compare the snapshot against the live tables; returns the number of changed tables (0 when the
-// snapshot is empty, i.e. the gate is off). One strict set at every stage; see ast::facts.
+// snapshot is empty, i.e. the gate is off, or the tables are gone: `syntax_done` checked them there). One
+// strict set at every stage; see ast::facts.
 fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage: str) u32 {
-    if wms.len() == 0 {
+    if wms.len() == 0 || p.syntax_released {
         return 0;
     }
     let mut d: u32 = 0;
@@ -1839,6 +1840,13 @@ pub(package) struct CemitOut {
     pub(package) pr: prb::Probe,
     /// The LIR of every body of a native build (`cbe::native_on`), for the write stage's objects.
     pub(package) lir: Option<Box<lw::Lower>>,
+    /// From the lowering to `lir_stage`: the per-TU cache state and the held records `nat_trust` read.
+    pub(package) tuc: Option<tuc::Tuc>,
+    pub(package) held: Vector<Option<lhold::Rec>>,
+    /// Per module, whether it holds module-level assembly and the text the platform filter kept
+    /// (`module_has_asm`, `module_asm`), for the stages after the syntax goes (`syntax_done`).
+    pub(package) asm_has: Vector<bool>,
+    pub(package) asm_text: Vector<String>,
 }
 
 extend CemitOut {
@@ -1883,6 +1891,10 @@ extend CemitOut {
             nat_rec: Map::<String, u64>::new(),
             pr: prb::Probe::new(false, false),
             lir: None,
+            tuc: None,
+            held: Vector::<Option<lhold::Rec>>::new(),
+            asm_has: Vector::<bool>::new(),
+            asm_text: Vector::<String>::new(),
         };
         o.protos_h.resize_default(n);
         o.tu_incs.resize_default(n);
@@ -6316,6 +6328,56 @@ pub(package) fn cemit_package(
     o.main_argv = acc.main_argv;
     prd.merge(&dow.pr);
     prd.merge(&cem.pr);
+    bst::mark_sub(bst::S_LOWERED);
+    // The rest of the render reads the LIR, the refusals, the cache state and the held records alone
+    // (`lir_stage`): the emission's state goes with this frame.
+    o.lir = cem.lir_done();
+    o.refused = replace(&mut cem.refused, Vector::<cbe::Refusal>::new());
+    o.tuc = Some(tuc);
+    o.held = held;
+    p.inl_store = null;
+    bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
+    o.pr = prd;
+}
+
+// The front end's data after the lowering, its last reader: the line tables go, and the modules' syntax and
+// source text, the item schedule (`Package::release_syntax`) and the build's evaluator (`p.cir`) go unless a
+// later stage reads them: the located reports of a failed emission, the library exports
+// (`build::write_exports`), the test runner, the build hooks, the LIR check (`cbe::lir_requested`), the
+// type and item dumps, or a package kept for reuse (`carry.keep`). The module-level assembly the later
+// stages read stays in `o` (`asm_has`, `asm_text`).
+fn syntax_done(p: &mut loader::Package, testing: bool, wms: &Vector<facts::FactsWatermark>, o: &mut CemitOut) {
+    // The LIR lowering was the last reader of the line tables (`lir_lines`).
+    p.lines = Vector::<Vector<u32>>::new();
+    for m in 0..p.modules.len() {
+        o.asm_has.push(module_has_asm(p, m));
+        o.asm_text.push(module_asm(p, m));
+    }
+    let cir = p.cir as *const iri::Interp;
+    let folds = cir != null && unsafe (*cir).fold_errs.len() != 0;
+    if testing || !p.ok || folds || o.skips != 0 || o.refused.len() != 0 || p.lib_build || ext::hooks() != null {
+        return;
+    }
+    let dumps = unsafe TS_ON || stdlib::getenv("SC_TYPE_TABLE") != null || stdlib::getenv("SC_ITEM_STATS") != null;
+    if cbe::lir_requested(p) || dumps || p.carry.keep {
+        return;
+    }
+    // The facts gate's last look (SC_FACTS_CHECK): the backend after this reads none of the tables.
+    let _ = facts_verify(p, wms, "codegen");
+    p.release_syntax();
+    // The build's evaluator answered its last constant in the lowering: its bodies, objects and caches go.
+    if p.cir != null {
+        let _ = replace(unsafe &mut *(p.cir as *mut iri::Interp), iri::interp_new(p));
+    }
+    // What this freed goes back to the system: the optimizer's workers would not take it.
+    Global::trim();
+}
+
+/// The render after the lowering (`cemit_package`): the optimization of the finished LIR, each module's
+/// held record into the next per-TU cache image, the LIR check and dumps, then the render boundary.
+fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
+    let mut tuc = replace(&mut o.tuc, Option::<tuc::Tuc>::None).unwrap();
+    let held = replace(&mut o.held, Vector::<Option<lhold::Rec>>::new());
     // Per module, the native key its held record goes under (`lir::hold`). Whether the next image's
     // temporary file holds it in full (`tuc::image_begin`), and whether this build wrote it yet.
     let mut nks = Vector::<u64>::new();
@@ -6327,15 +6389,14 @@ pub(package) fn cemit_package(
             nks.push(tuc.keys[m] ^ base);
         }
     }
-    bst::mark_sub(bst::S_LOWERED);
     // An optimizing build optimizes the finished LIR: every constant's data is defined by now.
-    if p.lir_opt && p.ok && cem.lir.is_some() {
-        let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    if p.lir_opt && p.ok && o.lir.is_some() {
+        let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();
         // A module's own assembly may give its symbols what a reference elsewhere cannot carry (a wasm
         // import module): its bodies stay in its object.
         let mut sealed = Vector::<bool>::with_capacity(p.modules.len());
         for m in 0..p.modules.len() {
-            sealed.push(module_has_asm(p, m));
+            sealed.push(o.asm_has[m]);
         }
         let pkg = &mut l.deref_mut().pkg;
         // A replayed unit's bodies the others may inline, its call graph and its data come from its record.
@@ -6382,7 +6443,7 @@ pub(package) fn cemit_package(
             }
         }
         pkg.drop_held();
-        cem.lir_put(l);
+        o.lir = Some(l);
     }
     if tuc.on && !img_done {
         if let Some(mut w) = tuc::image_begin(&mut tuc) {
@@ -6401,8 +6462,8 @@ pub(package) fn cemit_package(
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
     // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key. A
     // build that asks for the LIR text (`lir_out`) runs without that cache, so every body is rendered.
-    if cem.lir.is_some() && p.ok && cem.refused.len() == 0 && cbe::lir_requested(p) {
-        let mut l = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None).unwrap();
+    if o.lir.is_some() && p.ok && o.refused.len() == 0 && cbe::lir_requested(p) {
+        let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();
         if !l.deref_mut().check_all(p) {
             p.ok = false;
         }
@@ -6421,15 +6482,11 @@ pub(package) fn cemit_package(
         if p.ok && ext::reads_ir() && !ext::run_stage(ext::STAGE_AFTER_IR, p, &mut l.deref_mut().pkg) {
             p.ok = false;
         }
-        cem.lir_put(l);
+        o.lir = Some(l);
     }
-    if cbe::native_on(p) {
-        o.lir = replace(&mut cem.lir, Option::<Box<lw::Lower>>::None);
+    if !cbe::native_on(p) {
+        o.lir = None;
     }
-    o.refused = replace(&mut cem.refused, Vector::<cbe::Refusal>::new());
-    p.inl_store = null;
-    bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
-    o.pr = prd;
     if unsafe TS_ON {
         ty_stats_report(p);
     }
@@ -12953,7 +13010,8 @@ fn nat_base(p: &loader::Package) u64 {
 
 // The objects of a native build: each module of `lm` and `iq` (those with units) compiles, its objects into
 // `objs`; `isnat` marks them. A module the emission cache replayed (`hit`) takes the object its record
-// `rec` holds (`nat_trust`). A module the backend cannot compile (module-level assembly the target's
+// `rec` holds (`nat_trust`); `asm_text` is each module's module-level assembly (`syntax_done`), which it takes.
+// A module the backend cannot compile (module-level assembly the target's
 // assembler does not take, a body the lowering or the backend refuses) is an error, which names the
 // module and why: false then. SC_NATIVE_STATS reports each module.
 fn native_plan(
@@ -12964,6 +13022,7 @@ fn native_plan(
     root: str,
     hit: &Vector<bool>,
     rec: &Map<String, u64>,
+    asm_text: &mut Vector<String>,
     isnat: &mut Vector<bool>,
     objs: &mut Vector<NatObj>,
 ) bool {
@@ -13048,7 +13107,7 @@ fn native_plan(
         }
         let why = whys.index_mut(2 * m);
         // Each statement ends in a newline: the text is empty exactly when the module holds none.
-        let text = module_asm(p, m);
+        let text = replace(asm_text.index_mut(m), String::new());
         if text.len() != 0 {
             if !nat::asm_native(p.build_target, p.arch) {
                 why.push_str("module-level assembly, which the assembler does not take for this target");
@@ -15883,6 +15942,8 @@ pub(package) fn run_package(
         return 1;
     }
     cemit_package(p, testing, &plan, live.as_ptr(), target, &mut co, &mut irkeep);
+    syntax_done(p, testing, &wms, &mut co);
+    lir_stage(p, &mut co);
     // The emission frontier restarted the pool; release it again before any test-runner fork.
     if p.jobs != 1 {
         prt::shutdown();
@@ -15931,7 +15992,7 @@ pub(package) fn run_package(
     let mut keep_mod = live;
     // A module-level `asm` defines symbols that only C names: its unit stays whenever it loads.
     for m9 in 0..n {
-        if module_has_asm(p, m9) {
+        if co.asm_has[m9] {
             keep_mod.set(m9, true);
         }
     }
@@ -16012,7 +16073,7 @@ pub(package) fn run_package(
             }
         }
         if let Some(l) = &co.lir {
-            if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut nat_mod, &mut nat_objs) {
+            if !native_plan(p, l, &lm, &iq, root, &co.tuc_hit, &nat_rec, &mut co.asm_text, &mut nat_mod, &mut nat_objs) {
                 return 1;
             }
         }

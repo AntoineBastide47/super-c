@@ -9505,7 +9505,7 @@ pub fn wasm_loop(b: &mut bench::Bencher) {
 // storage and the leak tracker's tables are not counted, and a fraction of a call keeps its digits.
 @test
 fn bench_alloc_line_counts_the_benchmark_alone() {
-    if PLATFORM != Platform::MacOS && PLATFORM != Platform::Linux {
+    if PLATFORM != Platform::MacOS && PLATFORM != Platform::Linux && PLATFORM != Platform::Windows {
         return; // no allocation accounting elsewhere
     }
     let p = cli::proj_new();

@@ -376,6 +376,16 @@ pub(package) struct Gen {
     // symbol (NONE: the callee in r11); whether the body may make them; the return they replace.
     tails: Vector<u64>,
     tail_ok: bool,
+    // `call`'s scratch, per argument: an intrinsic's constants (`cimm`, `cknown`), a renamed argument
+    // register (`cren`), an aggregate whose stores relay (`crelay`), the moved and clean values.
+    cimm: Vector<i64>,
+    cknown: Vector<bool>,
+    cren: Vector<bool>,
+    crelay: Vector<bool>,
+    cmoved: Vector<bool>,
+    cclean: Vector<bool>,
+    late: Vector<bool>, // `plan_homes`'s values a call reads after its argument moves, kept across bodies
+    pro: x::Code, // `finish`'s prologue, kept across bodies
     tail_ret: u32,
     // The remainder the division before it computed (`int_op`) and the product it reads, NONE for none.
     div_pair: u32,
@@ -564,6 +574,14 @@ extend Gen {
             stop: NONE,
             tails: Vector::<u64>::new(),
             tail_ok: false,
+            cimm: Vector::<i64>::new(),
+            cknown: Vector::<bool>::new(),
+            cren: Vector::<bool>::new(),
+            crelay: Vector::<bool>::new(),
+            cmoved: Vector::<bool>::new(),
+            cclean: Vector::<bool>::new(),
+            late: Vector::<bool>::new(),
+            pro: x::Code::new(),
             tail_ret: NONE,
             div_pair: NONE,
             div_mul: NONE,
@@ -1732,7 +1750,8 @@ extend Gen {
         // The values a call reads after its argument moves (`call`: the callee of an indirect call, an
         // aggregate's address, the result's): the scratch homes are argument registers, which the moves
         // take.
-        let mut late = Vector::<bool>::with_capacity(n);
+        let mut late = replace(&mut self.late, Vector::<bool>::new());
+        late.truncate(0);
         late.resize_default(n);
         for i in 0..ni {
             let t = b.insts[i];
@@ -1957,6 +1976,7 @@ extend Gen {
                 self.va.index_mut(x).home = H_NONE;
             }
         }
+        self.late = late;
     }
 
     // The integer registers instruction `i` holds at once besides the homes: its operands outside a
@@ -8762,14 +8782,14 @@ extend Gen {
         // An intrinsic's instructions, its constant arguments in place.
         let mut text = String::new();
         if tpl.len() != 0 {
-            let mut imm = Vector::<i64>::with_capacity(np as usize);
-            let mut known = Vector::<bool>::with_capacity(np as usize);
+            self.cimm.truncate(0);
+            self.cknown.truncate(0);
             for k in 0..np {
                 let mut u: u64 = 0;
-                known.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
-                imm.push(u as i64);
+                self.cknown.push(self.const_of(b.pool[(t.c + k) as usize], &mut u));
+                self.cimm.push(u as i64);
             }
-            if !intrin::expand(tpl, imm[0..imm.len()], known[0..known.len()], &mut text) {
+            if !intrin::expand(tpl, self.cimm[0..self.cimm.len()], self.cknown[0..self.cknown.len()], &mut text) {
                 return self.refuse("an intrinsic's immediate argument of no constant value");
             }
         }
@@ -8783,7 +8803,7 @@ extend Gen {
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be. A written one is renamed only when it is the result's and the argument
         // dies here: the result is then in the argument's register (`rres`).
-        let mut ren = Vector::<bool>::with_capacity(np as usize);
+        self.cren.truncate(0);
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
@@ -8811,7 +8831,7 @@ extend Gen {
                     rres = vr;
                 }
             }
-            ren.push(ok);
+            self.cren.push(ok);
             if ok {
                 from.push(pr);
                 to.push(vr - V0);
@@ -9025,7 +9045,7 @@ extend Gen {
         // The scalars from registers and homes as one parallel move; a narrow one then extends in place. An
         // aggregate whose stores relay (`arg_relays`) takes their values.
         self.mv.truncate(0);
-        let mut relayed = Vector::<bool>::with_capacity(np as usize);
+        self.crelay.truncate(0);
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
@@ -9050,10 +9070,10 @@ extend Gen {
                         },
                     );
                 }
-                relayed.push(true);
+                self.crelay.push(true);
                 continue;
             }
-            relayed.push(
+            self.crelay.push(
                 loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && relay_parts(
                     self,
                     i,
@@ -9062,7 +9082,7 @@ extend Gen {
                     &mut rvals,
                 ),
             );
-            if tpl.len() == 0 && !relayed[k as usize] && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(
+            if tpl.len() == 0 && !self.crelay[k as usize] && (b.pool[(sig + 3 + k) as usize] & AGG) != 0 && self.parts_moved(
                 v,
                 loc,
                 &late,
@@ -9090,7 +9110,7 @@ extend Gen {
                         },
                     );
                 }
-                relayed[k as usize] = true;
+                self.crelay[k as usize] = true;
                 continue;
             }
             if loc.kind == ab::L_REF_REG && self.by_address(sig, k) {
@@ -9108,14 +9128,14 @@ extend Gen {
                             done: false,
                         },
                     );
-                    relayed[k as usize] = true;
+                    self.crelay[k as usize] = true;
                 }
                 continue;
             }
             if loc.kind != ab::L_REG || (b.pool[(sig + 3 + k) as usize] & AGG) != 0 || in_mem(vty) && !self.lay.whole_vreg(
                 loc,
                 vty,
-            ) || ren[k as usize] {
+            ) || self.cren[k as usize] {
                 continue;
             }
             let src = self.loc_of(self.vx(v));
@@ -9153,8 +9173,8 @@ extend Gen {
             );
         }
         // Per argument: whether the move took it, and whether its register then holds it zero-extended.
-        let mut moved = Vector::<bool>::with_capacity(np as usize);
-        let mut clean = Vector::<bool>::with_capacity(np as usize);
+        self.cmoved.truncate(0);
+        self.cclean.truncate(0);
         for k in 0..np {
             let v = b.pool[(t.c + k) as usize];
             let x = self.vx(v);
@@ -9162,13 +9182,13 @@ extend Gen {
             let vty = self.vt(v);
             let loc = self.lay.locs[k as usize];
             // A renamed argument is read where it is.
-            moved.push(
+            self.cmoved.push(
                 loc.kind == ab::L_REG && (b.pool[(sig + 3 + k) as usize] & AGG) == 0 && (!in_mem(vty) || self.lay.whole_vreg(
                     loc,
                     vty,
-                )) && self.loc_of(x).kind != LC_VAL || ren[k as usize] || relayed[k as usize],
+                )) && self.loc_of(x).kind != LC_VAL || self.cren[k as usize] || self.crelay[k as usize],
             );
-            clean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
+            self.cclean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
         }
         resolve_moves(self);
         // The moved values' registers now hold arguments; the parts passed on are in theirs.
@@ -9181,7 +9201,7 @@ extend Gen {
         }
         for k in 0..np {
             let loc = self.lay.locs[k as usize];
-            if relayed[k as usize] {
+            if self.crelay[k as usize] {
                 continue;
             }
             if loc.kind == ab::L_REF_REG && self.by_address(sig, k) {
@@ -9205,18 +9225,18 @@ extend Gen {
                 // A variadic float (Microsoft x64): its vector register, then its bits in the integer one. (An
                 // aggregate's float and integer halves under System V are two parts too.)
                 let pv = self.lay.parts[loc.p0 as usize];
-                if !moved[k as usize] {
+                if !self.cmoved[k as usize] {
                     self.materialize(v, V0 + pv.reg);
                 }
                 self.c.movd_from_x(8, self.lay.parts[loc.p0 as usize + 1].reg, pv.reg);
                 continue;
             }
-            if moved[k as usize] {
+            if self.cmoved[k as usize] {
                 // Moved: only a narrow integer's extension is left.
                 let pa = self.lay.parts[loc.p0 as usize];
                 if loc.ext == 2 {
                     self.c.ext(type_bits(vty, self.ptr) / 8, 4, true, pa.reg, pa.reg);
-                } else if loc.ext != 0 && !clean[k as usize] {
+                } else if loc.ext != 0 && !self.cclean[k as usize] {
                     self.c.ext(type_bits(vty, self.ptr) / 8, 4, false, pa.reg, pa.reg);
                 }
                 continue;
@@ -10584,7 +10604,16 @@ extend Gen {
         );
     }
 
+    // `finish_in` with the prologue's code (`pro`), kept across bodies.
     fn finish(self: &mut Self, s: u32) bool {
+        let mut pro = replace(&mut self.pro, x::Code::new());
+        pro.clear();
+        let ok = self.finish_in(s, &mut pro);
+        self.pro = pro;
+        return ok;
+    }
+
+    fn finish_in(self: &mut Self, s: u32, pro: &mut x::Code) bool {
         let sw = self.shrink;
         let ra = if sw {
             self.rare_at()
@@ -10680,7 +10709,6 @@ extend Gen {
             // The incoming frame's operands from rsp: rbp would sit 8 below the return address.
             self.c.rebase((8 * npush + local) as i32 - 8);
         }
-        let mut pro = x::Code::new();
         if !omit {
             pro.push(x::RBP);
             pro.mov_rr(8, x::RBP, x::RSP);

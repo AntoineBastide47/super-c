@@ -16212,6 +16212,15 @@ extend CEmit {
         self.lir = Some(l);
     }
 
+    /// The LIR, taken for good (`driver::emit::lir_stage`): nothing the lowering demanded is left to lower.
+    pub(package) fn lir_done(self: &mut Self) Option<Box<lw::Lower>> {
+        assert(
+            self.blk_due.len() == 0 && self.dyn_due.len() == 0,
+            "cemit: the lowering left demands when the LIR leaves",
+        );
+        return replace(&mut self.lir, Option::<Box<lw::Lower>>::None);
+    }
+
     // Give the LIR back after a lowering, then lower the wrappers that lowering spelled (`blk_due`).
     pub(package) fn lir_put(self: &mut Self, l: Box<lw::Lower>) {
         self.lir = Some(l);
