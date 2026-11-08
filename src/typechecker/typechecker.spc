@@ -18551,6 +18551,10 @@ extend<'a> TypeChecker<'a> {
             return;
         }
         let ot = unsafe (*a).type_of(opn);
+        if ot == TYPE_ERROR {
+            // The operand's check failed, and was reported there: the cast proves nothing.
+            return;
+        }
         if ot == expected {
             // Same-type casts belong to the existing unnecessary-cast lint.
             return;

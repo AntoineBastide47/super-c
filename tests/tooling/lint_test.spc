@@ -46,13 +46,13 @@ fn lint_without_a_manifest() {
 
 // The probe-backed lint covers EVERY implicit conversion, not an enumerated subset: reference
 // weakening, literal adaptation, and null-to-pointer all flag; a cast that picks an unannotated
-// binding's type never does.
+// binding's type never does, nor one of an operand whose check failed.
 @test
 fn redundant_cast_lint_covers_all_implicits() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "fn share(r: &i32) i32 {\n    return *r;\n}\n\nfn sink(v: i64) i64 {\n    return v;\n}\n\nfn psink(p: *mut i32) i32 {\n    return 0;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    let mr: &mut i32 = &mut x;\n    let a = share(mr as &i32);\n    let n: u8 = 3;\n    let b = sink(n as i64);\n    let c = sink(300 as i64);\n    let f = psink(null as *mut i32);\n    let keep = (&mut x) as *mut i32;\n    return (a as i64 + b + c) as i32 + f + (keep as usize) as i32 * 0;\n}\n",
+        "fn share(r: &i32) i32 {\n    return *r;\n}\n\nfn sink(v: i64) i64 {\n    return v;\n}\n\nfn psink(p: *mut i32) i32 {\n    return 0;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    let mr: &mut i32 = &mut x;\n    let a = share(mr as &i32);\n    let n: u8 = 3;\n    let b = sink(n as i64);\n    let c = sink(300 as i64);\n    let f = psink(null as *mut i32);\n    let keep = (&mut x) as *mut i32;\n    let g = sink(n.nope() as i64);\n    return (a as i64 + b + c + g) as i32 + f + (keep as usize) as i32 * 0;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint \"");
@@ -65,6 +65,8 @@ fn redundant_cast_lint_covers_all_implicits() {
     assert(r.out_has("'null' converts to '*mut i32' implicitly here"));
     // The unannotated-let cast is load-bearing: quiet.
     assert(!r.out_has("'&mut i32' converts to '*mut i32'"));
+    assert(r.out_has("no field or method 'nope' on 'u8'"));
+    assert(!r.out_has("'_' converts"), "a failed operand's cast is not linted");
 }
 
 // `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
