@@ -13040,3 +13040,389 @@ b0(v0: i64):
     let r = text_of(&a, "relay");
     assert(!r.contains("memcpy") && r.contains("call @bump(v1"), r.as_str());
 }
+
+// Seventy-two owned buffers before the three the loops reach; pushes through `&mut self.work`, whose growth
+// stays a cold call, at several sites before the loops (copies that share one root) and, through an
+// inlined helper, in them; a load of the read vector's first element in the loop.
+const MARKS: str<'static> = M"(struct Q {
+    a: Vector<u32>,
+    b: Vector<u32>,
+    c: Vector<u32>,
+    d: Vector<u32>,
+}
+
+struct S {
+    q0: Q,
+    q1: Q,
+    q2: Q,
+    q3: Q,
+    q4: Q,
+    q5: Q,
+    q6: Q,
+    q7: Q,
+    q8: Q,
+    q9: Q,
+    q10: Q,
+    q11: Q,
+    q12: Q,
+    q13: Q,
+    q14: Q,
+    q15: Q,
+    q16: Q,
+    q17: Q,
+    live: Vector<bool>,
+    work: Vector<u32>,
+    uses: Vector<u32>,
+}
+
+extend S {
+    fn mark(self: &mut Self, x: u32) {
+        if !self.live[x as usize] {
+            self.live[x as usize] = true;
+            self.work.push(x);
+        }
+    }
+
+    @noinline
+    fn mark_all(self: &mut Self, first: u32) {
+        self.work.truncate(0);
+        self.work.reserve(4);
+        self.work.push(first);
+        for u in 0..self.uses.len() {
+            self.mark((self.uses[u] + self.uses[0]) % 31);
+        }
+        self.work.truncate(self.work.len() - 1);
+    }
+
+    @noinline
+    fn mark_rest(self: &mut Self, first: u32) {
+        self.work.push(first);
+        for u in 0..self.uses.len() {
+            self.mark(self.uses[u]);
+        }
+    }
+}
+
+fn main() i32 {
+    let mut s = S {
+        q0: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q1: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q2: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q3: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q4: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q5: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q6: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q7: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q8: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q9: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q10: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q11: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q12: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q13: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q14: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q15: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q16: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        q17: Q { a: Vector::<u32>::new(), b: Vector::<u32>::new(), c: Vector::<u32>::new(), d: Vector::<u32>::new() },
+        live: Vector::<bool>::new(),
+        work: Vector::<u32>::new(),
+        uses: Vector::<u32>::new(),
+    };
+    for k in 0..40u32 {
+        s.live.push(false);
+        s.uses.push(k * 7 % 31);
+    }
+    s.mark_all(3);
+    s.mark_rest(5);
+    println("{} {}", s.work.len(), s.work[s.work.len() - 1]);
+    return 0;
+}
+)";
+
+// The loads of the first loop of printed body `m`: the blocks from the latest one a branch goes back to
+// through that branch's block, in the text's order.
+fn loop_loads(m: str) u32 {
+    let mut labels = Vector::<str>::new();
+    let mut loads = Vector::<u32>::new();
+    for l in m.lines() {
+        if l.starts_with("b") {
+            let mut e: usize = 1;
+            while e < l.len() && l.byte_at(e) >= b'0' && l.byte_at(e) <= b'9' {
+                e += 1;
+            }
+            labels.push(l.slice(0, e));
+            loads.push(0);
+            continue;
+        }
+        if labels.len() == 0 {
+            continue;
+        }
+        let k = loads.len() - 1;
+        if l.contains("= load") {
+            loads[k] += 1;
+        }
+        if l.contains(" br ") || l.contains(" jmp ") {
+            // The header is the latest block before the branch it names: an exit may come earlier.
+            for d in 0..k + 1 {
+                let x = k - d;
+                let (open, comma, gap) = (
+                    format(" {}(", labels[x]),
+                    format(" {},", labels[x]),
+                    format(" {} ", labels[x])
+                );
+                if l.contains(&open) || l.contains(&comma) || l.contains(&gap) {
+                    let mut n: u32 = 0;
+                    for y in x..k + 1 {
+                        n += loads[y];
+                    }
+                    return n;
+                }
+            }
+        }
+    }
+    return 0;
+}
+
+// The loops load the vector the push writes, its length and capacity, and the elements they read; the
+// read vectors' buffers, lengths and first element leave them: whatever the referent's owned buffers
+// before them, past the growth's cold call (its span reaches only that vector's fields), past copies whose
+// shared root a call outside them takes. Both profiles print the same.
+@test
+fn loop_loads_of_other_fields_leave_past_a_push() {
+    h::expect_same_output("marks", MARKS, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", MARKS);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "mark_", "build --profile=release main.spc -o app");
+    let all = loop_loads(printed(r.text(), "S__mark_all"));
+    let rest = loop_loads(printed(r.text(), "S__mark_rest"));
+    let ok = r.ok() && all != 0 && all <= 6 && rest != 0 && rest <= 6;
+    if !ok {
+        r.show();
+        eprint("loop loads: {} {}\n", all, rest);
+    }
+    assert(ok, "only the pushed vector's fields and the read elements load in the loops");
+}
+
+// A load of read-only data reads one value in every memory state: an untagged byte store through a
+// parameter between two loads of one table entry leaves one load.
+@test
+fn a_read_only_table_load_holds_across_stores() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @tab data global
+sym @f fn global
+fn @f
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = symaddr @tab
+  v3 = ptradd v2, v1 * 1
+  v4 = load.i8 v3 align 0
+  v5 = iconst.i8 7
+  store v5, v0 align 0
+  v6 = load.i8 v3 align 0
+  v7 = add.i8 v4, v6
+  v8 = zext.i32 v7
+  ret v8
+data @tab size 8 align 0 ro bytes 0102030405060708
+)",
+    );
+    let before = text_of(&b, "f");
+    let after = text_of(&a, "f");
+    assert(count_of(&before, "= load") == 2, before.as_str());
+    assert(count_of(&after, "= load") == 1, after.as_str());
+}
+
+// A slot that only a copy of a by-value aggregate argument writes reads that argument: its loads read the
+// argument's bytes, across stores to other memory; a call takes the argument in its place when the target
+// copies the aggregate, and the copy and the slot go. Passed by address, the copy stays for the call.
+const PRIVATE_COPY: str = M"(lir ptr 8
+sym @g fn global noinline
+sym @f fn global
+fn @g
+  layout l0 size 16 align 2 [0 i32, 4 i32, 8 i32, 12 i16, 14 i8, 15 i8]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  ret v1
+fn @f
+  layout l0 size 16 align 2 [0 i32, 4 i32, 8 i32, 12 i16, 14 i8, 15 i8]
+  sig (ptr, l0) -> i32
+  slot s0 size 16 align 2
+b0(v0: ptr, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 16
+  memcpy.overlap v2, v1, v3
+  v4 = load.i32 v2+4 align 2
+  store v4, v0 align 2
+  v5 = load.i32 v2+8 align 2
+  store v5, v0+4 align 2
+  v6 = call.i32 @g(v2) : (l0) -> i32
+  v7 = add.i32 v4, v6
+  ret v7
+)";
+
+@test
+fn a_private_copy_of_an_argument_reads_and_passes_the_argument() {
+    let (_, a) = optimized_copy(PRIVATE_COPY, 16, 16);
+    let r = text_of(&a, "f");
+    assert(!r.contains("memcpy") && !r.contains("slot") && r.contains("@g(v1)"), r.as_str());
+    let (_, m) = optimized_copy(PRIVATE_COPY, 0, 16);
+    let q = text_of(&m, "f");
+    assert(q.contains("memcpy") && q.contains("load.i32 v1+4") && q.contains("load.i32 v1+8"), q.as_str());
+}
+
+// A load of a slot whose every store of its bytes stores one value, one of them before it on every path,
+// reads that value, across calls that read the slot and write other memory: the slot the calls read stays,
+// its loads go.
+@test
+fn stores_of_one_value_give_a_load_that_value() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @g fn global noinline
+sym @f fn global
+fn @g
+  sig (ptr, ptr) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = load.i32 v0 align 2
+  store v2, v1 align 2
+  ret v2
+fn @f
+  sig (i32, ptr) -> i32
+  slot s0 size 4 align 2
+b0(v0: i32, v1: ptr):
+  v2 = slotaddr s0
+  store v0, v2 align 2
+  v3 = call.i32 @g(v2, v1) : (ptr, ptr) -> i32
+  v4 = load.i32 v2 align 2
+  store v0, v2 align 2
+  v5 = call.i32 @g(v2, v1) : (ptr, ptr) -> i32
+  v6 = load.i32 v2 align 2
+  v7 = add.i32 v4, v6
+  v8 = add.i32 v7, v3
+  v9 = add.i32 v8, v5
+  ret v9
+)",
+    );
+    let r = text_of(&a, "f");
+    assert(r.contains("call.i32 @g") && !r.contains("= load"), r.as_str());
+}
+
+const TRUNCATE: str<'static> = M"(@noinline
+fn clear_all(v: &mut Vector<u32>) {
+    v.truncate(0);
+}
+
+fn main() i32 {
+    let mut v = Vector::<u32>::new();
+    for k in 0..5u32 {
+        v.push(k);
+    }
+    v.truncate(9);
+    let before = v.len();
+    v.truncate(2);
+    let mid = v.len();
+    clear_all(&mut v);
+    println("{} {} {}", before, mid, v.len());
+    return 0;
+}
+)";
+
+// A truncation to 0 of a vector of elements without a drop is one store of its length: no load, no branch.
+// Both profiles print the same lengths.
+@test
+fn a_truncation_to_zero_is_one_store() {
+    h::expect_same_output("truncate", TRUNCATE, ["--profile=debug"], ["--profile=release"]);
+    let p = cli::proj_new();
+    p.mkfile("main.spc", TRUNCATE);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "clear_all", "build --profile=release main.spc -o app");
+    let m = printed(r.text(), "clear_all");
+    let ok = r.ok() && m.contains("store") && !m.contains("= load") && !m.contains(" br ");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "one store");
+}
+
+// A chain of branches to one block, each block between them one `==` test of one value, is one branch on
+// their `or` (`common_true`), which the bit test of the constants' mask then decides: at most one `br`, a
+// shift, no `icmp.eq`. The value is the same for each input.
+@test
+fn an_or_chain_of_equalities_is_one_bit_test() {
+    let (before, after) = optimized(
+        M"(lir ptr 8
+sym @chain fn global
+fn @chain
+  sig (i8) -> i32
+b0(v0: i8):
+  v1 = iconst.i8 12
+  v2 = icmp.eq v0, v1
+  br v2, b4, b1
+b1:
+  v3 = iconst.i8 13
+  v4 = icmp.eq v0, v3
+  br v4, b4, b2
+b2:
+  v5 = iconst.i8 14
+  v6 = icmp.eq v0, v5
+  br v6, b4, b3
+b3:
+  v7 = iconst.i8 21
+  v8 = icmp.eq v0, v7
+  br v8, b4, b5
+b4:
+  v9 = iconst.i32 7
+  ret v9
+b5:
+  v10 = iconst.i32 0
+  ret v10
+)",
+    );
+    let t = text_of(&after, "chain");
+    assert(count_of(&t, " br ") <= 1 && t.as_str().contains("lshr") && !t.as_str().contains("icmp.eq"), t.as_str());
+    for x in 0..70u64 {
+        let want: u64 = if x == 12 || x == 13 || x == 14 || x == 21 {
+            7
+        } else {
+            0
+        };
+        same_result(&before, &after, "chain", [x], want);
+    }
+}
+
+// A pointer's constant index, an index plus a constant, and an index times a constant whose product with
+// the scale does not fit 64 bits fold without overflow (`simplify`): each address is the same modulo 2^64.
+@test
+fn huge_index_constants_fold_without_overflow() {
+    let (before, after) = optimized(
+        M"(lir ptr 8
+sym @at_const fn global
+sym @at_sum fn global
+sym @at_product fn global
+fn @at_const
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 4611686018427387905
+  v2 = ptradd v0, v1 * 4
+  v3 = ptrtoint.i64 v2
+  ret v3
+fn @at_sum
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 4611686018427387905
+  v3 = add.i64 v1, v2
+  v4 = ptradd v0, v3 * 4
+  v5 = ptrtoint.i64 v4
+  ret v5
+fn @at_product
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 9223372036854775807
+  v3 = mul.i64 v1, v2
+  v4 = ptradd v0, v3 * 4
+  v5 = ptrtoint.i64 v4
+  ret v5
+)",
+    );
+    same_result(&before, &after, "at_const", [1000], 1004);
+    same_result(&before, &after, "at_sum", [1000, 3], 1016);
+    same_result(&before, &after, "at_product", [1000, 3], 988);
+}

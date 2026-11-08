@@ -1048,6 +1048,22 @@ extend Core {
         return i + 2 == bk.start + bk.len && r.op == O_RET && r.a == VNONE;
     }
 
+    // Whether call `t`, instruction `i`, is right before the return of its result (or of nothing, for a call
+    // of no result), not into memory: a sibling call's shape, which `shrinkable` reads before `tail_ok` is
+    // known (when the call is no sibling call, the warm code calls, and the body is compiled again unshrunk).
+    pub(package) fn call_tail_shape(self: &Self, i: u32, t: Inst) bool {
+        let b = self.b();
+        if t.op != O_CALL && t.op != O_CALLIND {
+            return false;
+        }
+        let bk = b.blocks[self.lv.def_blk[i as usize] as usize];
+        if i + 2 != bk.start + bk.len {
+            return false;
+        }
+        let r = b.insts[i as usize + 1];
+        return r.op == O_RET && (r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) && (b.pool[t.b as usize + 2] & AGG) == 0;
+    }
+
     // The register home of edge argument `v` when `v` dies at this terminator, NOREG else.
     pub(package) fn home_dying(self: &Self, v: Value) u8 {
         if v == VNONE {

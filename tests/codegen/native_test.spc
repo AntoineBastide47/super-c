@@ -16814,3 +16814,148 @@ b0(v0: ptr, v1: ptr):
     assert_eq(elf_text_count(&a64, 0xFFE00C10, 0xFA400000), 3);
     assert_eq(elf_text_count(&a64, 0x7FE00C00, 0x1A800400), 1);
 }
+
+// arm64: an unsigned or equality comparison with a constant whose negation of the register's width is
+// below 4096 (`x != 0xFFFFFFFF`, `x <u 2^64 - 2`) is `cmn` with that negation, no constant in a register;
+// the flags give each condition's answer at its edges.
+@test
+fn a_constant_of_small_negation_compares_with_cmn() {
+    let src = M"(lir ptr 8
+sym @ne_all fn global
+sym @below fn global
+fn @ne_all
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 -1
+  v2 = icmp.ne v0, v1
+  v3 = zext.i32 v2
+  ret v3
+fn @below
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 -2
+  v2 = icmp.ult v0, v1
+  v3 = zext.i32 v2
+  ret v3
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // `cmn wN, #1` (ADDS wzr, wN, #1) and `cmn xN, #2` (ADDS xzr, xN, #2).
+    let (mut w1, mut x2) = (false, false);
+    for x in 0..obj.len() / 4 {
+        let w = word_at(&obj, x as u32 * 4, 4);
+        w1 = w1 || (w & 0xFFFFFC1F) == 0x3100041F;
+        x2 = x2 || (w & 0xFFFFFC1F) == 0xB100081F;
+    }
+    assert(w1 && x2, "cmn with the constants' negations");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint32_t ne_all(uint32_t);\nint32_t below(uint64_t);\nint main(void) {\n  if (ne_all(0xFFFFFFFFu) != 0 || ne_all(0) != 1 || ne_all(0xFFFFFFFEu) != 1) return 1;\n  if (below(UINT64_MAX - 2) != 1 || below(UINT64_MAX - 1) != 0 || below(UINT64_MAX) != 0 || below(0) != 1) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(src, drv), 0);
+}
+
+// arm64: a slot's address at offset 0 plus a scaled register index takes sp as its base (`add` of an
+// extended register, or the access's register offset), no copy of sp into a register (`add xN, sp, #0`);
+// the element written is the one read.
+@test
+fn an_indexed_slot_access_bases_on_sp() {
+    let src = M"(lir ptr 8
+sym @pick fn global
+sym @put fn global
+fn @put
+  sig (i64, i32) -> i32
+  slot s0 size 64 align 2
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = iconst.i64 15
+  v4 = and.i64 v0, v3
+  v5 = ptradd v2, v4 * 4
+  store v1, v5 align 2
+  v6 = load.i32 v2 align 2
+  ret v6
+fn @pick
+  sig (i64, i32) -> i32
+  slot s0 size 64 align 2
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = iconst.i64 15
+  v4 = and.i64 v0, v3
+  v5 = ptradd v2, v4 * 4
+  store v1, v5 align 2
+  v6 = load.i32 v5 align 2
+  ret v6
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    let mut copies: u32 = 0;
+    let mut on_sp: u32 = 0;
+    let mut folded: u32 = 0;
+    for x in 0..obj.len() / 4 {
+        let w = word_at(&obj, x as u32 * 4, 4);
+        // Not the frame pointer's own `mov x29, sp`.
+        copies += ((w & 0xFFFFFFE0) == 0x910003E0 && (w & 31) != 29) as u32;
+        // `add xN, sp, xM, uxtx #2`, or a W register's STR or LDR (register) with base sp.
+        on_sp += ((w & 0xFFE0FFE0) == 0x8B206BE0) as u32;
+        folded += ((w & 0xFFA003E0) == 0xB82003E0) as u32;
+    }
+    assert(copies == 0 && on_sp != 0 && folded != 0, "the index addresses through sp");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint32_t pick(int64_t, int32_t);\nint32_t put(int64_t, int32_t);\nint main(void) {\n  if (pick(3, 7) != 7 || pick(19, -2) != -2) return 1;\n  if (put(16, 5) != 5) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(src, drv), 0);
+}
+
+// arm64, with sibling calls: a body whose only call outside its rare blocks is right before the return of
+// its result (a sibling call's shape) sets its frame up on the rare path alone: the warm path ends in the sibling call's
+// `b` with no `stp x29, x30` before it. Both paths run.
+@test
+fn a_tail_call_leaves_the_warm_path_without_a_frame() {
+    let src = M"(lir ptr 8
+sym @g fn global
+sym @slow fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b1, b2
+b1: unlikely
+  call @slow() : () -> void
+  jmp b2
+b2:
+  v3 = call.i64 @g(v0) : (i64) -> i64
+  ret v3
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(src, tgt::axis_index("macos", false), tgt::axis_index("aarch64", true), TAIL, &mut obj),
+        "the arm64 object",
+    );
+    let mut jump = NONE;
+    let mut frame = NONE;
+    for x in 0..obj.len() / 4 {
+        let w = word_at(&obj, x as u32 * 4, 4);
+        if (w & 0xFC000000) == 0x14000000 && jump == NONE {
+            jump = x as u32;
+        }
+        // `stp x29, x30, [sp, #imm]` or `[sp, #imm]!` of any immediate.
+        if (w & 0xFF407FFF) == 0xA9007BFD && frame == NONE {
+            frame = x as u32;
+        }
+    }
+    assert(jump != NONE && (frame == NONE || jump < frame), "the warm path jumps before any frame");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t f(int64_t);\nstatic int slowed;\nvoid slow(void) { slowed = 1; }\nint64_t g(int64_t x) { return x + 3; }\nint main(void) {\n  if (f(4) != 7 || slowed) return 1;\n  if (f(0) != 3 || !slowed) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native_with(src, drv, TAIL), 0);
+}

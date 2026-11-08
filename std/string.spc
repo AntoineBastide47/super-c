@@ -371,8 +371,9 @@ extend<A: Allocator> String<A> {
 
     /// Append one raw byte.
     pub fn push_byte(self: &mut String<A>, b: u8) {
-        self.reserve(1);
+        // The growth keeps the length: read before it.
         let len = self.len();
+        self.reserve(1);
         let p = self.data_ptr();
         unsafe p[len] = b;
         self.set_len(len + 1);

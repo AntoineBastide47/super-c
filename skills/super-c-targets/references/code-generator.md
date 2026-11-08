@@ -54,7 +54,9 @@ out. Every call of a shrink-wrapped body saves the scratch homes live past it (`
 the warm jumps into the first framed block take the prologue `relax` inserts before it (a jump table's
 entry takes a stub); the other entries take stubs. arm64 keeps the frame in rare blocks alone: there a
 warm return between the entry and the framed code writes x0, which would move the parameters off their
-registers. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
+registers. On arm64 a call right before the return of its
+result (a sibling call's shape under `Package.tail`, `place::call_tail_shape`) needs no frame either: it is
+the warm code's `b`; one that stays a call makes the try fail. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
 variadic access; nor when the entry's code uses the frame (a parameter's register parts stored into its
 slot): it runs in the warm entry block (`frame_use` at the entry's layout position). Microsoft x64: no
 edge may leave them for the warm code (its unwinder reads an epilogue only where it ends in `ret` or a

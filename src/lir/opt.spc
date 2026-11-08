@@ -181,11 +181,14 @@ pub(package) struct Opt {
     imem: Vector<u64>,
     sbits: u64,
     fbits: u64, // the classes of allocations' blocks (`fresh_seeds`)
+    obits: u64, // the classes of owned buffers (`owned_seeds`)
     cnext: u32, // the first class index past the parameters' and the scopes'
     fcall: Vector<u32>, // per class index, the allocation whose block it is (`fresh_seeds`)
     oparam: Vector<u32>, // per class index, the parameter whose owned buffer it is (`owned_seeds`)
     ooff: Vector<u32>, // per class index, the owned field's offset in the parameter's referent
     oload: Vector<u32>, // per instruction, the class index of the owned field it loads (NONE: none)
+    okeys: Vector<u64>, // the owned fields the body loads a pointer from, sorted (`owned_seeds`)
+    sroots: Vector<u64>, // the scopes' roots and class indices, `root << 32 | index`, sorted (`scope_seeds`)
     oder: Vector<u32>, // per instruction, the parameter its address arithmetic starts from (`owned_seeds`)
     ooffs: Vector<i64>, // per instruction, that arithmetic's constant offset (OFF_ANY: not constant)
     ipin: Vector<bool>,
@@ -304,6 +307,7 @@ pub(package) struct Opt {
     // instructions when both are the same.
     pprior: u32,
     tprior: u32,
+    tbefore: [u32; TBAA_TAGS], // the type tags' states before the walk's current write (`carry`)
     tstate: [u32; TBAA_TAGS], // per type tag, the current memory state of its accesses
     tags: Vector<u16>, // per loop header, the type tags its blocks write (`block_writes`)
     // Private memory (`slot_writes`): the slots, then the aggregate arguments (each a copy the callee
@@ -423,13 +427,14 @@ pub(package) struct Config {
 extend Config as Copy {}
 
 // A write into private memory whose address does not escape: bytes `off` to `end` of `slot` (`Opt.sbase`),
-// by store `inst` in block `blk` (NONE: a copy or a fill).
+// by store `inst` in block `blk` (NONE: a copy or a fill), or by copy `copy` (NONE: a store or a fill).
 struct SlotWrite {
     pub(package) slot: u32,
     pub(package) off: i64,
     pub(package) end: i64,
     pub(package) inst: u32,
     pub(package) blk: u32,
+    pub(package) copy: u32,
 }
 
 extend SlotWrite as Copy {}
@@ -481,11 +486,14 @@ extend Opt {
             imem: Vector::<u64>::new(),
             sbits: 0,
             fbits: 0,
+            obits: 0,
             cnext: 0,
             fcall: Vector::<u32>::new(),
             oparam: Vector::<u32>::new(),
             ooff: Vector::<u32>::new(),
             oload: Vector::<u32>::new(),
+            okeys: Vector::<u64>::new(),
+            sroots: Vector::<u64>::new(),
             oder: Vector::<u32>::new(),
             ooffs: Vector::<i64>::new(),
             ipin: Vector::<bool>::new(),
@@ -570,6 +578,7 @@ extend Opt {
             prior: 0,
             pprior: 0,
             tprior: 0,
+            tbefore: [0u32; TBAA_TAGS],
             end_state: Vector::<u32>::new(),
             pstate: 0,
             end_pstate: Vector::<u32>::new(),
@@ -2452,6 +2461,16 @@ extend Opt {
         return true;
     }
 
+    // Whether access `i` is of a read-only data definition of the package (`aobj`), which no write touches.
+    fn rodata(self: &Self, pk: &Package, i: u32) bool {
+        let o = self.aobj[i as usize];
+        if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
+            return false;
+        }
+        let y = pk.syms[o as usize];
+        return y.kind == SK_DATA && y.def != NONE && pk.data[y.def as usize].readonly;
+    }
+
     fn static_place(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
         if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
@@ -3169,6 +3188,7 @@ extend Opt {
         fill(&mut self.croot, CL_MANY as usize, NONE);
         self.sbits = 0;
         self.fbits = 0;
+        self.obits = 0;
         self.imem.truncate(0);
         let e = b.blocks[0];
         self.cnext = e.param_len;
@@ -3228,6 +3248,7 @@ extend Opt {
             if kept == seeds {
                 self.sbits = (seeds & cand) << 1;
                 self.fbits = (seeds & fresh) << 1;
+                self.obits = (seeds & owned) << 1;
                 return;
             }
             seeds = kept;
@@ -3278,6 +3299,22 @@ extend Opt {
                 out &= ~(1u64 << idx as u64);
             }
         }
+        // A root of two classes' scopes (two sites' copies that share one value) ends both: a value has one
+        // class, and a copy that passes it on under the other's would let the base escape (`escape_bits`).
+        self.sroots.truncate(0);
+        for x in 0..b.scopes.len() {
+            let r = b.scopes[x].root;
+            if self.sgroup[x] != NONE && r != VNONE {
+                self.sroots.push(r as u64 << 32 | self.sgroup[x] as u64);
+            }
+        }
+        self.sroots.sort();
+        for q in 1..self.sroots.len() {
+            let (lo, hi) = (self.sroots[q - 1], self.sroots[q]);
+            if lo >> 32 == hi >> 32 && lo != hi {
+                out &= ~(1u64 << (lo & 0xFFFFFFFF)) & ~(1u64 << (hi & 0xFFFFFFFF));
+            }
+        }
         if out == 0 || b.inl.len() != ni {
             return 0;
         }
@@ -3326,23 +3363,12 @@ extend Opt {
         if b.owned.len() == 0 {
             return 0;
         }
-        fill(&mut self.oparam, CL_MANY as usize, NONE);
-        fill(&mut self.ooff, CL_MANY as usize, 0);
-        let mut out: u64 = 0;
-        let mut next = start;
+        let mut any = false;
         for x in 0..b.owned.len() {
             let k = (b.owned[x] >> 32) as u32;
-            if next >= (CL_FROZEN - CL_NOALIAS) as u32 {
-                break;
-            }
-            if k < 64 && (params >> k as u64 & 1) != 0 && !inner(b, k) {
-                self.oparam[next as usize] = k;
-                self.ooff[next as usize] = b.owned[x] as u32;
-                out |= 1u64 << next as u64;
-                next += 1;
-            }
+            any = any || k < 64 && (params >> k as u64 & 1) != 0 && !inner(b, k);
         }
-        if out == 0 {
+        if !any || start >= (CL_FROZEN - CL_NOALIAS) as u32 {
             return 0;
         }
         // Per instruction, the parameter its address arithmetic starts from and the constant offset. Each
@@ -3381,6 +3407,41 @@ extend Opt {
                 break;
             }
         }
+        // The fields the body loads a pointer from (`okeys`, `parameter << 32 | offset`): only they take
+        // class indices, so a body that reaches a few fields of a referent with many keeps a class each.
+        self.okeys.truncate(0);
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op == O_LOAD && t.ty == T_PTR {
+                let (k, o) = self.param_at(b, t.a);
+                if k != NONE && o != OFF_ANY {
+                    let at = o + (t.c as i32) as i64;
+                    if at >= 0 && at <= 0xFFFFFFFF {
+                        self.okeys.push(k as u64 << 32 | at as u64);
+                    }
+                }
+            }
+        }
+        self.okeys.sort();
+        fill(&mut self.oparam, CL_MANY as usize, NONE);
+        fill(&mut self.ooff, CL_MANY as usize, 0);
+        let mut out: u64 = 0;
+        let mut next = start;
+        for x in 0..b.owned.len() {
+            let k = (b.owned[x] >> 32) as u32;
+            if next >= (CL_FROZEN - CL_NOALIAS) as u32 {
+                break;
+            }
+            if k < 64 && (params >> k as u64 & 1) != 0 && !inner(b, k) && self.okeys.binary_search(&b.owned[x]).is_ok() {
+                self.oparam[next as usize] = k;
+                self.ooff[next as usize] = b.owned[x] as u32;
+                out |= 1u64 << next as u64;
+                next += 1;
+            }
+        }
+        if out == 0 {
+            return 0;
+        }
         fill(&mut self.oload, ni, NONE);
         // Per parameter, its fields' class indices.
         let mut pmask: [u64; 64] = [0u64; 64];
@@ -3401,8 +3462,13 @@ extend Opt {
                     continue;
                 }
                 let addr = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_PTRADD && t.a == v && t.b != v || t.op == O_ICMP;
-                if !addr {
+                // A direct call's argument reaches the fields its span covers (`owned_args`); a callee that
+                // lets it escape takes the parameter's class, and its fields' with it (`classes`).
+                if !addr && t.op != O_CALL {
                     lost |= 1u64 << k as u64;
+                    continue;
+                }
+                if !addr {
                     continue;
                 }
                 if t.op != O_LOAD && t.op != O_STORE {
@@ -3466,15 +3532,28 @@ extend Opt {
         };
     }
 
-    // The class of instruction `i`'s access through address `a`: its address's, CL_MANY for a scope's
-    // class outside that scope's copy.
+    // The class of instruction `i`'s access through address `a`: its address's, outside a scope's copy that
+    // scope's roots' base's (`base_at`).
     const fn acc(self: &Self, i: u32, a: Value) u8 {
-        let c = self.class(a);
-        return ast::pick(
-            c < CL_MANY && (class_bit(c) & self.sbits) != 0 && (self.member(i) & class_bit(c)) == 0,
-            CL_MANY,
-            c,
-        );
+        return self.base_at(self.class(a), self.member(i), self.sbits);
+    }
+
+    // Class `c` at an instruction of the scope classes `m` (`member`), of the scope classes `scoped`: past
+    // its copy a scope's root is a pointer of its roots' base's class (`cbase`), through nested scopes;
+    // CL_MANY when that base is not one class.
+    const fn base_at(self: &Self, c: u8, m: u64, scoped: u64) u8 {
+        let mut x = c;
+        // Each step goes from a scope class to its roots' base; a cycle of roots ends with CL_MANY.
+        for _ in 0..CL_MANY {
+            if x >= CL_MANY {
+                return CL_MANY;
+            }
+            if (class_bit(x) & scoped) == 0 || (m & class_bit(x)) != 0 {
+                return x;
+            }
+            x = self.cbase[x as usize];
+        }
+        return CL_MANY;
     }
 
     // The class of load or store `i`'s access (`acls`) as loop `h` sees it: CL_MANY for a scope's whose
@@ -3594,10 +3673,11 @@ extend Opt {
                 }
             }
             if !changed {
-                // A value of no reachable definition is no parameter's.
-                for i in 0..self.icls.len() {
-                    if self.icls[i] == CL_UNSET {
-                        self.icls[i] = CL_OTHER;
+                // A value of no reachable definition is no parameter's. Only the work's values start unset.
+                for w in 0..self.cf_work.len() {
+                    let x = self.cf_work[w];
+                    if (x & CF_EDGES) == 0 && self.icls[x as usize] == CL_UNSET {
+                        self.icls[x as usize] = CL_OTHER;
                     }
                 }
                 for q in 0..self.pcls.len() {
@@ -3711,7 +3791,11 @@ extend Opt {
             };
             for u in 0..nu {
                 let c = self.class(self.ops[(u0 + u) as usize]);
-                if c == CL_OTHER || u < 64 && (kept >> u as u64 & 1) != 0 && (class_bit(c) & scoped) == 0 {
+                // Past its copy, a scope's value is one of its roots' base, which an argument the callee
+                // keeps no pointer of lets escape no more than any value of that base's class.
+                if c == CL_OTHER || u < 64 && (kept >> u as u64 & 1) != 0 && (class_bit(
+                    self.base_at(c, self.member(i as u32), scoped),
+                ) & scoped) == 0 {
                     continue;
                 }
                 out |= self.escape_bits(c, foreign) & ~freed;
@@ -3745,8 +3829,9 @@ extend Opt {
     // - `bw`: the alias classes it writes (`write_bits`);
     // - `bt`: the type tags it writes (bit 0: an untagged write, all of them; `write_tag`);
     // - `bpw`: whether it writes a private slot's memory (`privates`);
-    // - `bst`: its plain stores whose class is an exclusive parameter's;
-    // - `bimp`: the classes its other writes touch (`bw`'s, those stores' aside).
+    // - `bst`: its plain stores whose class is an exclusive parameter's, and its direct calls with an
+    //   argument of an exclusive class, which `fields_apart` checks by their spans (`call_apart`);
+    // - `bimp`: the classes its other writes touch (`bw`'s, those stores' and those arguments' aside).
     fn block_writes(self: &mut Self, pk: &Package, b: &Body, k: u32) {
         let bk = b.blocks[k as usize];
         let mut w: u64 = 0;
@@ -3782,8 +3867,22 @@ extend Opt {
                 } else {
                     imp |= class_bit(c) | other;
                 }
+            } else if wr && t.op == O_CALL {
+                imp |= class_bit(CL_OTHER) | other | self.owned_args(pk, b, i, t);
+                let mut precise = false;
+                for q in 0..t.aux as u32 {
+                    let c = self.acc(i, b.pool[(t.c + q) as usize]);
+                    if c >= CL_NOALIAS && c < CL_FROZEN && (class_bit(c) & self.sbits) == 0 {
+                        precise = true;
+                    } else {
+                        imp |= class_bit(c);
+                    }
+                }
+                if precise {
+                    self.bst.push(i);
+                }
             } else if wr {
-                imp |= class_bit(CL_OTHER) | other | self.arg_bits(b, i, t);
+                imp |= class_bit(CL_OTHER) | other | self.arg_bits(pk, b, i, t);
             }
         }
         self.bw.push(w);
@@ -3806,16 +3905,67 @@ extend Opt {
         } else {
             CL_OTHER
         };
-        return class_bit(c) | self.sbits & ~self.member(i) | self.arg_bits(b, i, t);
+        return class_bit(c) | self.sbits & ~self.member(i) | self.arg_bits(pk, b, i, t);
     }
 
     // The classes call `t`, instruction `i` of `b`, may write through its arguments (a class a callee does
-    // not let escape stays, `escaped`); none for any other instruction.
-    fn arg_bits(self: &Self, b: &Body, i: u32, t: Inst) u64 {
+    // not let escape stays, `escaped`), the owned buffers it reaches through them too (`owned_args`); none
+    // for any other instruction.
+    fn arg_bits(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
         let mut out: u64 = 0;
         if t.op == O_CALL || t.op == O_CALLIND {
             for q in 0..t.aux as u32 {
                 out |= class_bit(self.acc(i, b.pool[(t.c + q) as usize]));
+            }
+            out |= self.owned_args(pk, b, i, t);
+        }
+        return out;
+    }
+
+    // The owned buffers' classes (`obits`) call `t`, instruction `i` of `b`, reaches through an argument
+    // into its parameter's referent: each whose field's bytes meet the bytes the callee reaches through that
+    // argument (`Sym.span`, at the argument's constant offset), every one of that parameter when the offset
+    // or the span is unknown. Only a load of the field reaches the buffer while the reference lives.
+    fn owned_args(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
+        if self.obits == 0 || t.op != O_CALL && t.op != O_CALLIND {
+            return 0;
+        }
+        let sy = if t.op == O_CALL {
+            pk.syms[b.syms[t.a as usize] as usize].span
+        } else {
+            NONE
+        };
+        let mut out: u64 = 0;
+        for q in 0..t.aux as u32 {
+            let v = b.pool[(t.c + q) as usize];
+            let c = self.acc(i, v);
+            if c < CL_NOALIAS || c >= CL_FROZEN {
+                continue;
+            }
+            let s = if sy != NONE && q as u64 < pk.spans[sy as usize] {
+                pk.spans[(sy + 1 + q) as usize]
+            } else {
+                SPAN_ANY
+            };
+            if s == SPAN_NONE {
+                continue;
+            }
+            let k = (c - CL_NOALIAS) as u32;
+            let (pa, o) = self.param_at(b, v);
+            let known = s != SPAN_ANY && pa == k && o != OFF_ANY;
+            let mut m = self.obits;
+            // Each step clears one bit: at most 64 steps.
+            while m != 0 {
+                let cb = m.trailing_zeros() as u64;
+                m &= m - 1;
+                let idx = (cb - 1) as usize;
+                if self.oparam[idx] != k {
+                    continue;
+                }
+                let f = self.ooff[idx] as i64;
+                if !known || span_lo(s) + o < f + pk.ptr_bytes as i64 && f < span_hi(s) + o {
+                    out |= 1u64 << cb;
+                }
             }
         }
         return out;
@@ -3823,7 +3973,8 @@ extend Opt {
 
     // Whether load `t` of class bit `cls`, an exclusive parameter's, reads no byte loop
     // `h` writes: every write of that class in the loop is a plain store through the load's address value
-    // at a constant range apart from the load's (another field of the parameter's referent).
+    // at a constant range apart from the load's (another field of the parameter's referent), or a call
+    // whose arguments of that class reach only bytes apart from the load's (`call_apart`).
     fn fields_apart(self: &Self, pk: &Package, b: &Body, h: u32, t: Inst, cls: u64) bool {
         if (cls & cls - 1) != 0 || (cls & class_bit(CL_OTHER)) != 0 || (self.imprecise[h as usize] & cls) != 0 {
             return false;
@@ -3834,10 +3985,16 @@ extend Opt {
         let r = self.lst_at[h as usize];
         for x in (r >> 32) as u32..r as u32 {
             let si = self.lst[x as usize];
+            let st = b.insts[si as usize];
+            if st.op == O_CALL {
+                if !self.call_apart(pk, b, si, st, t.a, lo, hi) {
+                    return false;
+                }
+                continue;
+            }
             if (class_bit(self.loop_acc(si, h)) & cls) == 0 {
                 continue;
             }
-            let st = b.insts[si as usize];
             if st.op != O_STORE || self.val(st.a) != a {
                 return false;
             }
@@ -3940,13 +4097,13 @@ extend Opt {
         frozen(b, &mut self.frz, &mut self.frz_ptr);
         for i in 0..b.insts.len() {
             let op = b.insts[i].op;
-            if op == O_LOAD && self.frz[i] {
+            if op == O_LOAD || op == O_STORE {
+                self.aobj[i] = self.object(pk, b, b.insts[i].a);
+            }
+            if op == O_LOAD && (self.frz[i] || self.rodata(pk, i as u32)) {
                 self.acls[i] = CL_FROZEN;
             } else if op == O_LOAD || op == O_STORE {
                 self.acls[i] = self.acc(i as u32, b.insts[i].a);
-            }
-            if op == O_LOAD || op == O_STORE {
-                self.aobj[i] = self.object(pk, b, b.insts[i].a);
             }
         }
         // Each block in a loop, once.
@@ -4725,27 +4882,28 @@ extend Opt {
                 // write, for all.
                 let t = b.insts[i as usize];
                 let g = write_tag(pk, b, t);
-                let before = self.tstate;
                 let pbefore = self.pstate;
                 // An access of a private slot's memory has states of its own: no other access touches it.
                 let private = self.private(t);
                 self.prior = if private {
                     pbefore
                 } else if g < TBAA_TAGS {
-                    unsafe before[g]
+                    unsafe self.tstate[g]
                 } else {
-                    before[0]
+                    self.tstate[0]
                 };
                 self.pprior = pbefore;
-                self.tprior = before[0];
+                self.tprior = self.tstate[0];
                 let wr = g < TBAA_TAGS && writes(pk, b, t);
                 if wr {
                     states += 1;
                     if private {
                         self.pstate = states;
                     } else if g == 0 || (t.aux & MEM_VOLATILE) != 0 {
+                        self.tbefore = self.tstate;
                         self.tstate = [states; TBAA_TAGS];
                     } else {
+                        self.tbefore = self.tstate;
                         unsafe self.tstate[g] = states;
                         self.tstate[0] = states;
                     }
@@ -4823,11 +4981,13 @@ extend Opt {
                     called = called || u.op == O_CALL || u.op == O_CALLIND;
                     // A store the visit dropped wrote nothing.
                     if t.op == O_STORE && self.repl[i as usize] == DROPPED {
-                        self.tstate = before;
+                        if !private {
+                            self.tstate = self.tbefore;
+                        }
                         self.pstate = pbefore;
                         self.unstored = self.unstored || self.inner[k] != NONE;
                     } else if !private && wr {
-                        self.carry(pk, b, i, before);
+                        self.carry(pk, b, i);
                     }
                     if self.repl[i as usize] == VNONE {
                         changed = self.overwrite(pk, b, i) || changed;
@@ -5103,6 +5263,60 @@ extend Opt {
             args.push(v);
         }
         return b.edge(j, &args);
+    }
+
+    // Branch `t`, instruction `i` ending block `k`, whose false side enters a block `x` of no parameters that
+    // `k` alone enters along an edge of no arguments, whose code but constants is one instruction `speculated`
+    // allows, and which branches to `t`'s true side along an edge of the same arguments: one branch on the `or`
+    // of the two conditions, `x`'s code at the end of `k` (`speculate`), then the same along `x`'s false side
+    // (LLVM's FoldBranchToCommonDest). A chain of `==` tests of one value is then an `or` tree (`bit_set`).
+    // `x`, which no edge enters, jumps to its false side, so the walk's facts and parameters below it hold.
+    // The branch; `t` when none merges.
+    fn common_true(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t0: Inst) Inst {
+        let mut t = t0;
+        let mut from = k;
+        let ty = b.type_of(t.a);
+        // Each step merges one more block of the chain.
+        for _ in 0..b.blocks.len() {
+            let x = b.edge_target(t.c);
+            let xb = b.blocks[x as usize];
+            if x == k || x == b.edge_target(t.b) || b.edge_nargs(t.c) != 0 || xb.param_len != 0 || self.pred_at[x as usize + 1] - self.pred_at[x as usize] != 1 || self.preds[self.pred_at[x as usize] as usize] != from || (xb.flags & ~b.blocks[k as usize].flags & BLOCK_RARE) != 0 {
+                break;
+            }
+            let u = term(b, x);
+            if u.op != O_BR || b.edge_target(u.b) != b.edge_target(t.b) || b.edge_target(u.c) == b.edge_target(t.b) || self.speculated(
+                pk,
+                b,
+                k,
+                x,
+            ) > 1 {
+                break;
+            }
+            let mut same = true;
+            for q in 0..b.edge_nargs(t.b) {
+                same = same && self.val(b.edge_arg(u.b, q)) == b.edge_arg(t.b, q);
+            }
+            let c = self.val(u.a);
+            if !same || is_vec(ty) || b.type_of(c) != ty {
+                break;
+            }
+            self.speculate(b, k, x);
+            for q in 0..b.edge_nargs(u.c) {
+                let at = (u.c + 2 + q) as usize;
+                b.pool[at] = self.val(b.pool[at]);
+            }
+            let mut args = Vector::<Value>::with_capacity(b.edge_nargs(u.c) as usize);
+            for q in 0..b.edge_nargs(u.c) {
+                args.push(b.edge_arg(u.c, q));
+            }
+            let e = b.edge(b.edge_target(u.c), &args);
+            b.insts[(xb.start + xb.len - 1) as usize] = jump(e);
+            let v = self.placed(b, k, i, Inst { op: O_OR, ty: ty, aux: 0, a: t.a, b: c, c: VNONE }, false);
+            let r = simplify(pk, b, v);
+            t = Inst { op: O_BR, ty: t.ty, aux: t.aux, a: ast::pick(r != VNONE, r, v), b: t.b, c: u.c };
+            from = x;
+        }
+        return t;
     }
 
     // Whether edges `e0` and `e1` into one block differ in 1 to MAX_SELECTS arguments, each an integer of up
@@ -7273,6 +7487,8 @@ extend Opt {
                         let e2 = self.twin_sides(pk, b, k, i, t);
                         if e2 != NONE {
                             t = jump(e2);
+                        } else {
+                            t = self.common_true(pk, b, k, i, t);
                         }
                     }
                 }
@@ -7538,7 +7754,17 @@ extend Opt {
             // A load of the place the store wrote, in the state the store starts, reads the stored value.
             self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state);
         } else if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 {
-            let p = self.private_load(pk, b, k, i, t);
+            let mut p = self.private_load(pk, b, k, i, t);
+            // A load of a copy's bytes whose source no write touches reads the source.
+            if p == PRIV_NONE {
+                let (a, c) = self.copy_source(pk, b, k, i, t);
+                if a != VNONE {
+                    t.a = a;
+                    t.c = c;
+                    b.insts[i as usize] = t;
+                    p = self.private_load(pk, b, k, i, t);
+                }
+            }
             if p != PRIV_NONE && p != PRIV_KEPT {
                 self.repl[i as usize] = p;
                 return true;
@@ -10143,6 +10369,18 @@ extend Opt {
             }
             let m = self.recall(v, self.pprior, T_NONE, self.tprior);
             if m == VNONE || (m & (VPARAM | VFLAG)) != 0 || b.insts[m as usize].op != O_MEMCPY {
+                // A private copy no write touched since, of a source no write touches, passes its source.
+                let size = b.pool[(pt & ~AGG) as usize] as i64;
+                let (src, rel, cp) = self.copy_of(b, self.blk_of[i as usize], i, v, 0, size);
+                let n = if cp == NONE {
+                    Option::<u64>::None
+                } else {
+                    int_bits(b, b.insts[cp as usize].c)
+                };
+                if !big && src != VNONE && rel == 0 && b.insts[cp as usize].a == v && n.is_some() && n.unwrap() == size as u64 {
+                    b.pool[(t.c + k) as usize] = src;
+                    self.rewrote = true;
+                }
                 continue;
             }
             let c = b.insts[m as usize];
@@ -10538,10 +10776,12 @@ extend Opt {
                                 end: at + type_bytes(b.type_of(t.b), pk.ptr_bytes) as i64,
                                 inst: i,
                                 blk: k,
+                                copy: NONE,
                             },
                         );
                     } else if t.op == O_MEMCPY && t.a == v && t.b != v || t.op == O_MEMSET && t.a == v {
-                        self.wr.push(SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k });
+                        let copy = ast::pick(t.op == O_MEMCPY, i, NONE);
+                        self.wr.push(SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k, copy: copy });
                     } else {
                         self.sesc[s as usize] = true;
                     }
@@ -10600,9 +10840,9 @@ extend Opt {
 
     // Load `t` (instruction `i` of block `k`) of private memory whose address does not escape: PRIV_NONE
     // when that does not hold or another write touches its bytes; PRIV_KEPT when no write touches them, so
-    // it reads the same value wherever it runs; else the value of the one store that writes exactly its
-    // bytes when that store dominates it (as LLVM's mem2reg promotes an alloca of one store: on any path
-    // to the load the last write of those bytes is that store's).
+    // it reads the same value wherever it runs; else the value the stores that write exactly its bytes all
+    // store when one of them dominates it (as LLVM's mem2reg promotes an alloca of one store: on any path
+    // to the load the last write of those bytes is one of those stores').
     fn private_load(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
         let s = self.base(b, t.a) as usize;
         if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX {
@@ -10610,26 +10850,81 @@ extend Opt {
         }
         let off = self.base_off(t.a) + (t.c as i32) as i64;
         let end = off + type_bytes(t.ty, pk.ptr_bytes) as i64;
-        let mut one = NONE;
-        let mut blk = NONE;
+        let mut v = VNONE;
+        let mut first = false;
         for q in self.wat[s]..self.wat[s + 1] {
             let w = self.wl[q as usize];
             if w.off < end && off < w.end {
-                if one != NONE || w.inst == NONE || w.off != off || w.end != end {
+                if w.inst == NONE || w.off != off || w.end != end {
                     return PRIV_NONE;
                 }
-                one = w.inst;
-                blk = w.blk;
+                let st = b.insts[w.inst as usize];
+                let x = self.val(st.b);
+                if b.type_of(st.b) != t.ty || v != VNONE && x != v {
+                    return PRIV_NONE;
+                }
+                v = x;
+                first = first || w.blk == k && w.inst < i || w.blk != k && self.dominates(w.blk, k);
+            }
+        }
+        if v == VNONE {
+            return PRIV_KEPT;
+        }
+        return ast::pick(first, v, PRIV_NONE);
+    }
+
+    // The address and offset load `t` (instruction `i` of block `k`) of private memory may read instead
+    // (`copy_of`); VNONE for none.
+    fn copy_source(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) (Value, u32) {
+        let (src, rel, _) = self.copy_of(b, k, i, t.a, t.c as i32, type_bytes(t.ty, pk.ptr_bytes));
+        return (src, rel);
+    }
+
+    // The bytes `n` at offset `at` past address `a` of private memory hold at instruction `i` of block `k`:
+    // when the one write of them is a copy that runs before `i` from private memory no write touches, that
+    // copy's source, their offset into it and the copy; VNONE otherwise.
+    fn copy_of(self: &Self, b: &Body, k: u32, i: u32, a: Value, at: i64, n: i64) (Value, u32, u32) {
+        let s = self.base(b, a) as usize;
+        if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX {
+            return (VNONE, 0u32, NONE);
+        }
+        let off = self.base_off(a) + at;
+        let end = off + n;
+        let mut one = NONE;
+        for q in self.wat[s]..self.wat[s + 1] {
+            let w = self.wl[q as usize];
+            if w.off < end && off < w.end {
+                if one != NONE || w.copy == NONE || off < w.off || w.end < end {
+                    return (VNONE, 0u32, NONE);
+                }
+                one = q;
             }
         }
         if one == NONE {
-            return PRIV_KEPT;
+            return (VNONE, 0u32, NONE);
         }
-        let st = b.insts[one as usize];
-        if b.type_of(st.b) != t.ty || blk == k && one >= i || blk != k && !self.dominates(blk, k) {
-            return PRIV_NONE;
+        let w = self.wl[one as usize];
+        if w.blk == k && w.copy >= i || w.blk != k && !self.dominates(w.blk, k) {
+            return (VNONE, 0u32, NONE);
         }
-        return self.val(st.b);
+        let c = b.insts[w.copy as usize];
+        let s2 = self.base(b, c.b) as usize;
+        if s2 == NONE as usize || self.sesc[s2] || (c.aux & MEM_VOLATILE) != 0 {
+            return (VNONE, 0u32, NONE);
+        }
+        let rel = off - w.off;
+        let so = self.base_off(c.b) + rel;
+        let se = so + (end - off);
+        for q in self.wat[s2]..self.wat[s2 + 1] {
+            let x = self.wl[q as usize];
+            if x.off < se && so < x.end {
+                return (VNONE, 0u32, NONE);
+            }
+        }
+        if rel > 0x7FFFFFFF {
+            return (VNONE, 0u32, NONE);
+        }
+        return (c.b, rel as u32, w.copy);
     }
 
     // The value a vector load `t` (instruction `i` of block `k`) of a private slot splats: one store alone
@@ -10771,7 +11066,8 @@ extend Opt {
     }
 
     // Whether instruction `t` accesses only a private slot's memory (`privates`): a load from one, or a
-    // store, copy or fill into one.
+    // store, copy or fill into one. Inline: the walk and the block summaries call it per instruction.
+    @always_inline
     fn private(self: &Self, t: Inst) bool {
         if t.op != O_LOAD && t.op != O_STORE && t.op != O_MEMCPY && t.op != O_MEMSET || (t.a & (VPARAM | VFLAG)) != 0 || t.a as usize >= self.pder.len() {
             return false;
@@ -10843,7 +11139,7 @@ extend Opt {
     // the untagged accesses' and its type's tag's; another tag's state may be its number by chance and then
     // miss the writes of the place's own tag. A store of part of an integer constant's place that no write
     // followed keeps the rest (`constant_rest`).
-    fn carry(self: &mut Self, pk: &Package, b: &mut Body, i: u32, before: [u32; TBAA_TAGS]) {
+    fn carry(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
         let t = b.insts[i as usize];
         let wb = self.write_bits(pk, b, i);
         let n = self.recent.len();
@@ -10853,7 +11149,7 @@ extend Opt {
             let mut to = NONE;
             let tags: [usize; 2] = [0, tbaa_of(p.ty) as usize];
             for g in tags {
-                if unsafe before[g] == p.state && unsafe self.tstate[g] != p.state {
+                if unsafe self.tbefore[g] == p.state && unsafe self.tstate[g] != p.state {
                     to = unsafe self.tstate[g];
                 }
             }
@@ -10880,7 +11176,7 @@ extend Opt {
             ));
             if (other_class || other_bytes || apart) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
                 self.remember(p.addr, p.off, p.ty, p.val, to);
-            } else if t.op == O_STORE && t.a == p.addr && !other_bytes && before[0] == p.state {
+            } else if t.op == O_STORE && t.a == p.addr && !other_bytes && self.tbefore[0] == p.state {
                 let tn = type_bytes(b.type_of(t.b), pk.ptr_bytes) as i64;
                 self.constant_rest(b, p, lo, tlo.max(lo).min(hi));
                 self.constant_rest(b, p, (tlo + tn).max(lo).min(hi), hi);
@@ -11081,7 +11377,9 @@ extend Opt {
 
     fn call_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
         let c = self.class(a);
-        if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 {
+        if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 || (self.owned_args(pk, b, i, t) & class_bit(
+            c,
+        )) != 0 {
             return false;
         }
         let sy = pk.syms[b.syms[t.a as usize] as usize];
@@ -15179,7 +15477,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // would fail the verifier's check of slot accesses.
         let ix = int_bits(b, t.b);
         if ix.is_some() && !slot_based(b, t.a) {
-            let off = (t.c as i32) as i64 + sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) * scale_of(t) as i64;
+            // In 128 bits: a constant index times the scale may not fit 64.
+            let off = (t.c as i32) as i128 + sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) as i128 * scale_of(
+                t,
+            );
             if off >= -0x80000000 && off <= 0x7FFFFFFF {
                 t.b = VNONE;
                 t.c = off as u32;
@@ -15207,12 +15508,13 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             };
             if k.is_some() {
                 let kv = sign_extend(k.unwrap(), ptr * 8);
+                // In 128 bits: the constant times the scale may not fit 64.
                 let d = if x.op == O_SUB {
-                    -kv
+                    0i128 - kv
                 } else {
-                    kv
+                    kv as i128
                 };
-                let off = (t.c as i32) as i64 + d * scale_of(t) as i64;
+                let off = (t.c as i32) as i128 + d * scale_of(t);
                 if kv > -0x80000000 && kv < 0x80000000 && off >= -0x80000000 && off <= 0x7FFFFFFF {
                     // The index alone times the scale may overflow: the same address, not in bounds.
                     t.b = x.a;
@@ -15238,7 +15540,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             } else {
                 Option::<u64>::None
             };
-            if f.is_some() && f.unwrap() != 0 && scale_of(t) as u64 * f.unwrap() <= PTR_SCALE as u64 {
+            if f.is_some() && f.unwrap() != 0 && f.unwrap() <= PTR_SCALE as u64 && scale_of(t) as u64 * f.unwrap() <= PTR_SCALE as u64 {
                 t.aux = (scale_of(t) as u64 * f.unwrap()) as u16 | t.aux & PTR_NONNULL;
                 t.b = x2.a;
             }

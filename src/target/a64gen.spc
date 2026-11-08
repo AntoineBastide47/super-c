@@ -871,16 +871,18 @@ extend Gen {
         // thread-local address's getter) and runs no system operation or variadic access: its homes may
         // take x0..x8; x2..x8 when it calls in rare blocks only, as a call's result arrives in x0 and x1,
         // where a home saved around it (`save_scratch`) would come back, or calls a getter, which keeps
-        // x1..x15 (`sym_addr`).
+        // x1..x15 (`sym_addr`). A call right before the return of its result, a sibling call's shape, comes
+        // back to no code of the body (`call_tail_shape`; one that stays a call makes the shrink try fail).
         let mut leaf = true;
         let mut rare = true;
+        let tail = unsafe (*self.pkg).tail;
         for x in 0..ni {
             let t = b.insts[x];
             let calls = self.cret[x];
             let other = t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG;
             let getter = t.op == O_SYMADDR && !self.remat_inst(x as u32);
             leaf = leaf && !calls && !other && !getter;
-            rare = rare && !(calls && !self.rarec[x]) && !other;
+            rare = rare && !(calls && !self.rarec[x] && !(tail && self.cr.call_tail_shape(x as u32, t))) && !other;
         }
         self.scr = if leaf {
             XSCR_LEAF
@@ -1650,7 +1652,14 @@ extend Gen {
     // (`a::ldst_ext`: 3 not, 2 `uxtw`, 6 `sxtw`, for an extension `lv::FOLD_XIDX` folds).
     fn folded(self: &mut Self, i: u32) (u32, u32, bool, u32) {
         let p = self.cr.b().insts[self.cr.b().insts[i as usize].a as usize];
-        let rn = self.reg(p.a);
+        // A frame address at offset 0 is its frame register: the register-offset form takes sp as its base.
+        let (fr, fb, fo) = self.frame_addr(p.a);
+        let rn = if fr && fo == 0 {
+            self.frame_use(fb);
+            fb
+        } else {
+            self.reg(p.a) as u32
+        };
         if (p.b & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[p.b as usize] {
             let x = self.cr.b().insts[p.b as usize];
             let rm = self.reg(x.a);
@@ -2243,11 +2252,14 @@ extend Gen {
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.cr.lv.def_blk[i];
-            // A vector operation's lane trap and a panic call too: their blocks need the frame. A copy that
-            // may be a sibling call does not (`mem_tail_shape`).
+            // A vector operation's lane trap and a panic call too: their blocks need the frame. A copy or a
+            // call that may be a sibling call does not (`mem_tail_shape`, `call_tail_shape`).
             if d == NONE || self.cr.lv.rpo[d as usize] == NONE || !Gen::clobbers(b, t) && !(t.op == O_VOP && !lv::reduces(
                 t,
-            )) && t.op != O_PANIC || self.cr.mem_tail_shape(i as u32, t) {
+            )) && t.op != O_PANIC || self.cr.mem_tail_shape(i as u32, t) || unsafe (*self.pkg).tail && self.cr.call_tail_shape(
+                i as u32,
+                t,
+            ) {
                 continue;
             }
             if !self.cr.lv.rare[d as usize] {
@@ -3750,6 +3762,14 @@ extend Gen {
                 self.emit_cmp(a::cmn_imm(sf, ra, (-kv) as u32));
                 return icond(c);
             }
+            // An unsigned or equality constant of the register's width whose negation is small: `cmn` adds
+            // that negation, which sets every flag `cmp` with the constant would (`x + n` carries exactly
+            // when `x >= 2^w - n`).
+            let neg = 0u64.wrapping_sub(k) & mask_of(bits);
+            if !signed && !small && neg != 0 && neg < 4096 {
+                self.emit_cmp(a::cmn_imm(sf, ra, neg as u32));
+                return icond(c);
+            }
         }
         let rb = if small {
             self.ext(t.b, signed, bits)
@@ -4702,6 +4722,12 @@ extend Gen {
         if ib < 64 {
             self.emit(a::sxt(true, a::IP0, ri, ib));
             idx = a::IP0;
+        }
+        // A frame base takes the extended-register form, which reads sp and shifts by up to 4.
+        if (base == a::SP || base == a::FP) && scale != 0 && (scale & scale - 1) == 0 && scale <= 16 {
+            self.emit(a::addsub_ext(true, 0, false, rd, base, idx, 3, scale.trailing_zeros() as u32));
+            self.add_imm_any(rd as u8, boff + off);
+            return true;
         }
         let rb = if base == a::SP || base == a::FP && boff != 0 {
             self.add_off(rd as u8, base, boff);

@@ -135,12 +135,13 @@ extend<T, A: Allocator> Vector<T, A> {
     /// Appends `value`, taking ownership of it; amortised O(1).
     pub const fn push(self: &mut Vector<T, A>, value: T) {
         // Only a full vector grows (a zero-sized `T`'s first push sets the capacity to the maximum, so
-        // `reserve` then sees only the length overflow).
-        if unlikely(self.len == self.cap) {
+        // `reserve` then sees only the length overflow). The growth keeps the length: read once.
+        let n = self.len;
+        if unlikely(n == self.cap) {
             self.reserve(1);
         }
-        unsafe self.ptr[self.len] = value;
-        self.len = self.len + 1;
+        unsafe self.ptr[n] = value;
+        self.len = n + 1;
     }
 
     /// Removes and returns the last element, moving ownership to the caller (`None` when empty).
@@ -206,14 +207,16 @@ extend<T, A: Allocator> Vector<T, A> {
 
     /// Shortens to `new_len` elements, freeing the dropped tail (no-op when already shorter).
     pub const fn truncate(self: &mut Vector<T, A>, new_len: usize) {
-        if new_len < self.len {
+        let n = self.len;
+        if new_len < n {
             let mut i = new_len;
-            while i < self.len {
+            while i < n {
                 unsafe self.ptr[i].free();
                 i = i + 1;
             }
-            self.len = new_len;
         }
+        // One store, no branch around it: the length when already shorter.
+        self.len = new_len.min(n);
     }
 
     /// Raw pointer to the buffer; invalidated by any reallocating mutation (push/reserve/insert).
