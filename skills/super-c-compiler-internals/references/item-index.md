@@ -248,11 +248,15 @@ the closure facts the layout reads).
 ## The scheduler
 
 `driver::sched::Jobs` is a job graph: per job the count of dependencies still pending, the
-dependents (CSR) and an estimated byte size; `run_jobs` executes it. One worker runs the
-jobs in the graph's stable order on the calling thread; more run them on the production
-runtime: every job whose count is zero is launched, and the job that takes a dependent's
-count to zero launches it (an acquire-release decrement, so the dependency's writes are
-visible to the dependent). The memory controller (`taskctl::Ctl`, `SC_BUILD_MEM_BUDGET`)
+dependents (CSR), an estimated byte size and an estimated cost; `run_jobs` executes it. One
+worker runs the jobs in the graph's stable order on the calling thread; more run them on the
+production runtime: every job whose count is zero is launched, the one on the costliest chain
+of costs first and the rest in index order, and the job that takes a dependent's count to zero
+launches it (an acquire-release decrement, so the dependency's writes are visible to the
+dependent). The costliest-first order for every ready job was measured: 10 ms off the borrow
+check of a self-build at 18 jobs, but its largest modules then run together and the peak
+footprint rose 7 MiB; a ready heap with at most two jobs per worker launched cost the type
+check 20 ms. The memory controller (`taskctl::Ctl`, `SC_BUILD_MEM_BUDGET`)
 gates the estimate before a launch and releases it when the job ends; `SC_TASK_DELAY`
 staggers every job by its index. There is no cancellation source in the driver: a failed
 item publishes its diagnostics and the stage's result stops the build after the barrier.

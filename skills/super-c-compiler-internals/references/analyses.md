@@ -31,7 +31,9 @@ file is authoritative for where to look first.
 
 ## optimize (`lir::opt` `Run`, `S_LOWERED` to the end of the `lir_opt` block)
 
-Per package, in `Run::new`:
+Per package, in `Run::new`; `calls_of`, the shape test and `effects`' own facts of each body (`own_effects`,
+`own_escapes`) run by chunks of bodies on worker threads (`utils::par::chunks`, `Config.jobs`), each chunk's lists
+then appended in body order, so the facts do not depend on the workers; `effects`' fixed point stays serial:
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
@@ -129,5 +131,6 @@ not copy their pattern into new code.
   target-dependent parts of the register allocation (`edge_moves`, `continues`, `entry_reg`,
   `param_home`, `call_tables`, `plan_homes` and more).
 - publish, sync, link: the linker parses again the objects the build had in memory, and reads the
-  replayed ones from their files; the four linkers repeat `global`, `out_section` and the
-  `copy_sections` loops.
+  replayed ones from their files; the four linkers repeat `global` and `out_section`; the Mach-O, ELF and
+  COFF linkers copy and relocate the input sections by chunks on worker threads (`lu::Img`,
+  `utils::par::chunks`), then add the fixups, dynamic and base relocations they found in section order.

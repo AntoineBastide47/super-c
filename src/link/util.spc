@@ -127,6 +127,92 @@ pub(package) const fn p64(b: &mut Vector<u8>, at: usize, v: u64) {
     p32(b, at + 4, (v >> 32) as u32);
 }
 
+/// An output image by its address and size: the tasks that copy and relocate input sections write
+/// through it, each into its own sections' bytes, and nothing resizes the image meanwhile.
+pub(package) struct Img {
+    ptr: *mut u8,
+    len: usize,
+}
+
+extend Img as Copy {}
+
+// The image outlives the tasks of the stage that writes it; their byte ranges are disjoint.
+unsafe extend Img as Send {}
+
+extend Img {
+    pub(package) fn of(v: &mut Vector<u8>) Img {
+        return Img { ptr: v.as_mut_ptr(), len: v.len() };
+    }
+
+    fn at(self: Img, at: usize, n: usize) *mut u8 {
+        assert(at + n <= self.len, "an access past the image");
+        return unsafe (self.ptr + at);
+    }
+
+    pub(package) fn r8(self: Img, at: usize) u8 {
+        return unsafe self.at(at, 1)[0];
+    }
+
+    pub(package) fn p8(self: Img, at: usize, v: u8) {
+        unsafe self.at(at, 1)[0] = v;
+    }
+
+    pub(package) fn r16(self: Img, at: usize) u32 {
+        let p = self.at(at, 2);
+        return (unsafe p[0]) as u32 | (unsafe p[1]) as u32 << 8;
+    }
+
+    pub(package) fn r32(self: Img, at: usize) u32 {
+        return self.r16(at) | self.r16(at + 2) << 16;
+    }
+
+    pub(package) fn r64(self: Img, at: usize) u64 {
+        return self.r32(at) as u64 | self.r32(at + 4) as u64 << 32;
+    }
+
+    pub(package) fn p16(self: Img, at: usize, v: u32) {
+        let p = self.at(at, 2);
+        unsafe p[0] = (v & 0xFF) as u8;
+        unsafe p[1] = (v >> 8 & 0xFF) as u8;
+    }
+
+    pub(package) fn p32(self: Img, at: usize, v: u32) {
+        self.p16(at, v & 0xFFFF);
+        self.p16(at + 2, v >> 16);
+    }
+
+    pub(package) fn p64(self: Img, at: usize, v: u64) {
+        self.p32(at, v as u32);
+        self.p32(at + 4, (v >> 32) as u32);
+    }
+
+    /// `b` at `at`.
+    pub(package) fn put(self: Img, at: usize, b: []u8) {
+        let p = self.at(at, b.len());
+        unsafe SliceMut::<u8> { ptr: p, len: b.len() }.copy_from_slice(b);
+    }
+}
+
+/// The chunks of a linker's input sections: a fixed count, so a chunk's work does not depend on the workers.
+pub(package) const SEC_CHUNKS: u64 = 64;
+
+/// Into `out`, the end of each chunk of `w.len()` items of about equal total weight `w` (SEC_CHUNKS of them,
+/// fewer when the items are few).
+pub(package) fn chunk_ends(w: &Vector<u64>, out: &mut Vector<u32>) {
+    out.truncate(0);
+    let mut tot: u64 = 0;
+    for i in 0..w.len() {
+        tot += w[i];
+    }
+    let mut acc: u64 = 0;
+    for i in 0..w.len() {
+        acc += w[i];
+        if i + 1 == w.len() || acc * SEC_CHUNKS >= tot * (out.len() as u64 + 1) {
+            out.push(i as u32 + 1);
+        }
+    }
+}
+
 /// The size of `v` as unsigned LEB128.
 pub(package) const fn uleb_len(v: u64) usize {
     let mut n: usize = 1;

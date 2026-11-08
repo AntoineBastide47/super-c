@@ -1,8 +1,9 @@
 // The item job runner: a dependency graph of bounded jobs executed on the production runtime.
 // A job runs once every job it depends on has completed; the job that completes the last
-// dependency launches it. One worker (`jobs == 1`) runs the graph in its stable order on the
-// calling thread, with no runtime, so the serial pipeline and the parallel one execute one
-// code path over one graph.
+// dependency launches it. Of the jobs ready at the start, the one on the costliest remaining
+// chain launches first. One worker (`jobs == 1`) runs the graph in its stable order on the
+// calling thread, with no runtime, so the serial pipeline and the parallel one execute one code
+// path over one graph.
 import stdlib;
 import atomic;
 import std::parallel::runtime as prt;
@@ -12,7 +13,8 @@ import driver::taskctl as tctl;
 /// A job graph: `pending[j]` counts the dependencies job `j` still waits for, `succ` (CSR by
 /// job) lists the jobs that wait for it, `order` is the serial execution order (a topological
 /// order: every job after its dependencies), `est` the estimated bytes each job puts in flight
-/// for the memory gate.
+/// for the memory gate, `cost` its estimated work (any unit; 0 counts as 1), which picks the job
+/// that launches first.
 pub(package) struct Jobs {
     pub(package) n: usize,
     pub(package) pending: Vector<u32>,
@@ -20,6 +22,7 @@ pub(package) struct Jobs {
     pub(package) succ: Vector<u32>,
     pub(package) order: Vector<u32>,
     pub(package) est: Vector<u64>,
+    pub(package) cost: Vector<u64>,
 }
 
 extend Jobs {
@@ -72,10 +75,12 @@ extend Jobs {
             succ: Vector::<u32>::new(),
             order: Vector::<u32>::new(),
             est: Vector::<u64>::new(),
+            cost: Vector::<u64>::new(),
         };
         j.pending.resize_default(n);
         j.succ_off.resize_default(n + 1);
         j.est.resize_default(n);
+        j.cost.resize_default(n);
         j.order.reserve(n);
         for i in 0..n {
             j.order.push(i as u32);
@@ -139,8 +144,9 @@ fn run_task(t: Task, wg: &psync::WaitGroup) {
 
 /// Run every job of `g` through `run(ctx, job)`: in `order` on the calling thread when `workers`
 /// is 1, else on the runtime with `workers` workers, each job started by the completion of its
-/// last dependency. `ctl` (null = off) gates the estimated bytes in flight. Returns once every
-/// job has completed. The parallel path counts `g.pending` down to zero, so a graph runs once.
+/// last dependency, the job ready at the start on the costliest remaining chain first. `ctl`
+/// (null = off) gates the estimated bytes in flight. Returns once every job has completed. The
+/// parallel path counts `g.pending` down to zero, so a graph runs once.
 pub(package) fn run_jobs(
     g: &mut Jobs,
     workers: u32,
@@ -168,17 +174,55 @@ pub(package) fn run_jobs(
             seed = 1;
         }
     }
+    // A job's rank: its cost plus its costliest successor's rank, over the serial order backward
+    // (every successor after its job), saturated at 32 bits.
+    let mut rank = Vector::<u32>::new();
+    rank.resize_default(g.n);
+    let mut k = g.order.len();
+    while k > 0 {
+        k -= 1;
+        let j = g.order[k] as usize;
+        let mut best: u64 = 0;
+        for e in g.succ_off[j] as usize..g.succ_off[j + 1] as usize {
+            let s = rank[g.succ[e] as usize] as u64;
+            if s > best {
+                best = s;
+            }
+        }
+        let sum = best + if g.cost[j] == 0 {
+            1u64
+        } else {
+            g.cost[j]
+        };
+        rank.set(
+            j,
+            if sum > 0xFFFFFFFFu64 {
+                0xFFFFFFFFu32
+            } else {
+                sum as u32
+            },
+        );
+    }
     // The initial ready set is read before any job runs: a completing job decrements live
-    // counters, and a job whose count it takes to zero is its to launch.
+    // counters, and a job whose count it takes to zero is its to launch. Its costliest chain
+    // launches first, the rest in index order: the costliest first throughout put the largest jobs
+    // in flight together, which raised the peak memory.
     let mut ready = Vector::<u32>::new();
+    let mut top: usize = 0;
     for j in 0..g.n {
         if g.pending[j] == 0 {
+            if ready.len() == 0 || rank[j] > rank[ready[top] as usize] {
+                top = ready.len();
+            }
             ready.push(j as u32);
         }
     }
-    let pend = g.pending.index_mut(0) as *mut u32;
+    let pend: *mut u32 = g.pending.index_mut(0);
+    spawn(Task { g: g, pend: pend, run: run, ctx: ctx, j: ready[top], ctl: ctl, seed: seed }, &wg);
     for k in 0..ready.len() {
-        spawn(Task { g: g, pend: pend, run: run, ctx: ctx, j: ready[k], ctl: ctl, seed: seed }, &wg);
+        if k != top {
+            spawn(Task { g: g, pend: pend, run: run, ctx: ctx, j: ready[k], ctl: ctl, seed: seed }, &wg);
+        }
     }
     wg.wait_masked();
 }

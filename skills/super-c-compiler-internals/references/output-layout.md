@@ -318,7 +318,7 @@ content-synced `gen/`, the compiled tree (about 95 ms per emitting build on macO
 49 ms on Linux, 254 to 350 ms on Windows). Now `publish_file` (`std::platform::fs::publish`) compares each
 file with the text first (its size, then its bytes; never the manifest's hash, which would
 hide a hand edit) and writes only a changed file, with one `write` call, so an unchanged
-file keeps its mtime. The sink hears whether each file changed. The headers are
+file keeps its mtime. The sink hears whether each file changed. The headers, and the native objects, are
 published on up to four workers (`publish_batch`; file creation in one directory scales
 about 2x on APFS: at `--jobs=4` the write stage less its sink takes 82 instead of 151 ms on a
 fresh tree), then recorded and reported in manifest order, so the tree, the manifest and the

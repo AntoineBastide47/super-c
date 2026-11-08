@@ -316,6 +316,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         gc: c.gc,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
+        jobs: c.jobs,
     };
     return ast::pick(!le::link(&o, why), FAILED, LINKED);
 }
@@ -382,6 +383,7 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         gc: c.gc,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
+        jobs: c.jobs,
     };
     // The system's DLLs: on a Windows host, or in a directory the command names.
     if !pe::has_dlls(&o, why) {

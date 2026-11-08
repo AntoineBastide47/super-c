@@ -59,8 +59,8 @@ no stamp. The stamp lives in the target's profile directory, so it
 is per profile. A build that transpiles deletes the stamp first; the emission writes its record to
 `.emit_stamp.new`, and the engine moves it into place only after the whole tree is written, so a
 build that stops part way leaves no stamp for a mixed tree. The native backend compiles the modules in
-parallel, largest first, and a module whose key matches the native record (`__sc_native`) keeps its
-object.
+parallel, largest first, a large module as several objects of about 60000 LIR instructions each, and a
+module whose key matches the native record (`__sc_native`) keeps its objects.
 
 ### External transpiler
 

@@ -20,6 +20,8 @@ import ast::ast as *;
 import ast::facts as facts;
 import module::loader as loader;
 import ir::core as ir;
+import std::parallel::data as dpar;
+import std::mem::ptr;
 import ir::layout as lay;
 import ir::interp as iri;
 import pattern::pattern as pat;
@@ -323,18 +325,33 @@ extend Keep {
         }
     }
 
-    /// Rewrite every kept body's types through the package's last publication; returns how many
-    /// bodies had a map to apply.
-    pub(package) const fn remap_types(self: &mut Self, p: &loader::Package) usize {
+    /// Rewrite every kept body's types through the package's last publication, on worker threads unless
+    /// the build has one (each body is its own); returns how many bodies had a map to apply.
+    pub(package) fn remap_types(self: &mut Self, p: &loader::Package) usize {
         let mut n: usize = 0;
         for i in 0..self.kept.len() {
-            let lw = self.kept.index_mut(i);
-            let m = lw.body.module as usize;
+            let m = self.kept.at(i).body.module as usize;
             if m < p.pub_map.len() && p.pub_map.at(m).len() != 0 {
-                lw.body.remap_types(p.pub_map.at(m));
                 n += 1;
             }
         }
+        if p.jobs == 1 || self.kept.len() < 2 {
+            for i in 0..self.kept.len() {
+                remap_kept(p, self.kept.index_mut(i));
+            }
+            return n;
+        }
+        let pa = (p as *const loader::Package) as usize;
+        let ka = self.kept.as_mut_ptr() as usize;
+        dpar::range(
+            0..self.kept.len(),
+            |i: usize| {
+                remap_kept(
+                    unsafe &*ptr::from_addr_mut::<loader::Package>(pa),
+                    unsafe &mut *(ptr::from_addr_mut::<KeptBody>(ka) + i),
+                );
+            },
+        );
         return n;
     }
 
@@ -9945,4 +9962,12 @@ const fn lit_int_value(src: str, sp: tok::Span, out: &mut u64) bool {
 // Whether a type of kind `k` is concrete: no substitution can still change it.
 const fn concrete_kind(k: TypeKind) bool {
     return k != TypeKind::TYPE_GENERIC && k != TypeKind::TYPE_ASSOC && k != TypeKind::TYPE_CONST_EXPR && k != TypeKind::TYPE_FIELD_PROJECTION && k != TypeKind::TYPE_CONST && k != TypeKind::TYPE_ERROR;
+}
+
+// Kept body `lw`'s types through its module's publication map, when it has one (`Keep::remap_types`).
+fn remap_kept(p: &loader::Package, lw: &mut KeptBody) {
+    let m = lw.body.module as usize;
+    if m < p.pub_map.len() && p.pub_map.at(m).len() != 0 {
+        lw.body.remap_types(p.pub_map.at(m));
+    }
 }

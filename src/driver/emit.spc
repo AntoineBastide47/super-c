@@ -888,7 +888,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
         eprint("item-stats typecheck serial order: {} module checkers open at once at the peak\n", peak);
     }
     let mut g = sch::Jobs::from_edges(nc + 1, &edges, order);
-    // The memory gate's estimate: the component's module-arena nodes.
+    // The memory gate's estimate and the work's: the component's module-arena nodes.
     for c in 0..nc {
         let mut nodes: u64 = 0;
         for k in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
@@ -898,6 +898,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
             }
         }
         g.est.set(c, nodes * 96);
+        g.cost.set(c, nodes);
     }
     return g;
 }
@@ -6413,31 +6414,57 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         let mut r = lopt::Run::new(
             pkg,
             &sealed,
-            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p, p.opt, p.cg) },
+            lopt::Config { inline: inline_budget(p.opt, p.cg), loops: loop_budgets(p, p.opt, p.cg), jobs: p.jobs },
         );
         // Each body starts once the callees it may inline are done.
         let mut g = sch::Jobs::from_edges(r.order.len(), &r.edges, replace(&mut r.order, Vector::<u32>::new()));
+        for j in 0..g.n {
+            g.cost.set(j, r.cost(j as u32));
+        }
         sch::run_jobs(&mut g, p.jobs, lopt::job, &mut r, null);
         r.finish(pkg);
-        // Each module this build emitted writes its own record, one at a time: no record waits in memory
-        // for the publication.
+        // Each module this build emitted writes its own record, two per worker at a time (`lhold::records`),
+        // then into the image in module order: no more records wait in memory for the publication.
         if tuc.on {
             img_done = true;
             if let Some(mut w) = tuc::image_begin(&mut tuc) {
-                let mut want = Vector::<bool>::with_capacity(p.modules.len());
-                for m in 0..p.modules.len() {
+                let n = p.modules.len();
+                let mut want = Vector::<bool>::with_capacity(n);
+                for m in 0..n {
                     want.push(!tuc.hit[m]);
                 }
                 let us = lhold::units(pkg, &want);
-                for m in 0..p.modules.len() {
-                    if tuc.hit[m] {
-                        tuc::held_old(&tuc, &mut w, m, nks[m]);
-                        continue;
+                let win = if p.jobs == 1 {
+                    1
+                } else {
+                    2 * prt::worker_count()
+                };
+                let mut batch = Vector::<u32>::with_capacity(win);
+                let mut recs = Vector::<String>::new();
+                let mut m0: usize = 0;
+                while m0 < n {
+                    // The next window: up to `win` modules this build emitted, with the replayed ones among them.
+                    batch.truncate(0);
+                    let mut m1 = m0;
+                    while m1 < n && batch.len() < win {
+                        if !tuc.hit[m1] {
+                            batch.push(m1 as u32);
+                        }
+                        m1 += 1;
                     }
-                    let mut h = lhold::record(pkg, &mut r, &us, m);
-                    tuc::held_head(&tuc, &mut w, m, nks[m], h.size(pkg));
-                    h.write(pkg, &mut w);
-                    h.restore(pkg);
+                    lhold::records(pkg, &mut r, &us, &batch, &mut recs, p.jobs);
+                    let mut b: usize = 0;
+                    for m in m0..m1 {
+                        if tuc.hit[m] {
+                            tuc::held_old(&tuc, &mut w, m, nks[m]);
+                            continue;
+                        }
+                        let rec = recs.at(b).as_str();
+                        b += 1;
+                        tuc::held_head(&tuc, &mut w, m, nks[m], rec.len());
+                        w.bytes(rec.ptr(), rec.len());
+                    }
+                    m0 = m1;
                 }
                 img_ok = w.finish();
             }
@@ -12738,13 +12765,156 @@ const fn hf_word<'a>(line: &mut str<'a>) str<'a> {
     return r.slice(0, sp as usize);
 }
 
-// One object of a native build: its unit's own part (`own`: the module's own items) or the part the
-// build adds (instances, glue, data, wrappers): its bytes, or the object the tree holds (`old`).
+// One object of a native build: piece `piece` of its unit's own part (`own`: the module's own items) or of
+// the part the build adds (instances, glue, data, wrappers): its bytes, or the object the tree holds (`old`).
 struct NatObj {
     pub(package) m: ModuleId,
     pub(package) own: bool,
+    pub(package) piece: u32,
     pub(package) bytes: Vector<u8>,
     pub(package) old: bool,
+}
+
+// The instructions of one object of a part, about (`nat_pieces`): a larger part compiles as several
+// objects, each on its own worker. A fixed count, so the objects do not depend on the workers.
+const NAT_PIECE: u64 = 60000;
+
+// The most objects of one part: the native record holds the count of a module's own in 7 bits.
+const NAT_PIECES_MAX: u64 = 127;
+
+// The tree path of piece `k` of module path `mp`'s own part (`own`) or added part.
+fn nat_obj_path(root: str, mp: str, own: bool, k: u32) String {
+    if k == 0 {
+        return build_out_path(
+            root,
+            mp,
+            if own {
+                ".o"
+            } else {
+                "__inst.o"
+            },
+        );
+    }
+    let ext = if own {
+        format(".{}.o", k)
+    } else {
+        format("__inst.{}.o", k)
+    };
+    return build_out_path(root, mp, &ext);
+}
+
+// Into `pf` and `pd`, the pieces of a part with functions `fs` and data `ds` of package `pk`, each list in
+// the part's order: one piece, or past NAT_PIECE instructions about that many each. A symbol only its own
+// object sees (`SL_LOCAL`) goes into the piece of each symbol that names it, so those share a piece.
+fn nat_pieces(
+    pk: &lir_ir::Package,
+    fs: &Vector<u32>,
+    ds: &Vector<u32>,
+    pf: &mut Vector<Vector<u32>>,
+    pd: &mut Vector<Vector<u32>>,
+) {
+    pf.truncate(0);
+    pd.truncate(0);
+    let mut tot: u64 = 0;
+    for i in 0..fs.len() {
+        tot += pk.bodies[pk.syms[fs[i] as usize].def as usize].insts.len() as u64;
+    }
+    let k = ((tot + NAT_PIECE - 1) / NAT_PIECE).min(NAT_PIECES_MAX).min(fs.len() as u64);
+    if k < 2 {
+        pf.push(fs.clone());
+        pd.push(ds.clone());
+        return;
+    }
+    // The part's symbols: its functions, then its data; their groups by a union of each symbol with every
+    // local symbol of the part it names.
+    let nf = fs.len();
+    let n = nf + ds.len();
+    let mut at = Map::<u32, u32>::new();
+    for i in 0..n {
+        let y = if i < nf {
+            fs[i]
+        } else {
+            ds[i - nf]
+        };
+        at.insert(y, i as u32);
+    }
+    let mut up = Vector::<u32>::with_capacity(n);
+    for i in 0..n {
+        up.push(i as u32);
+    }
+    for i in 0..n {
+        if i < nf {
+            let b = &pk.bodies[pk.syms[fs[i] as usize].def as usize];
+            for x in 0..b.syms.len() {
+                nat_join(pk, &at, &mut up, i as u32, b.syms[x]);
+            }
+        } else {
+            let d = pk.data[pk.syms[ds[i - nf] as usize].def as usize];
+            for r in d.relocs..d.relocs + d.nrelocs {
+                nat_join(pk, &at, &mut up, i as u32, pk.relocs[r as usize].sym);
+            }
+        }
+    }
+    // A group's piece: the one being filled when its first function comes, in the part's order.
+    let mut piece = Vector::<u32>::with_capacity(n);
+    for _ in 0..n {
+        piece.push(lir_ir::NONE);
+    }
+    pf.resize_default(k as usize);
+    pd.resize_default(k as usize);
+    let mut cur: u64 = 0;
+    let mut acc: u64 = 0;
+    for i in 0..nf {
+        let g = nat_root(&mut up, i as u32) as usize;
+        if piece[g] == lir_ir::NONE {
+            piece.set(g, cur as u32);
+        }
+        pf.index_mut(piece[g] as usize).push(fs[i]);
+        acc += pk.bodies[pk.syms[fs[i] as usize].def as usize].insts.len() as u64;
+        if cur + 1 < k && acc * k >= tot * (cur + 1) {
+            cur += 1;
+        }
+    }
+    for i in nf..n {
+        let g = nat_root(&mut up, i as u32) as usize;
+        let at_k = if piece[g] == lir_ir::NONE {
+            0usize
+        } else {
+            piece[g] as usize
+        };
+        pd.index_mut(at_k).push(ds[i - nf]);
+    }
+}
+
+// Join item `i` of a part with the item of symbol `t` when `t` is a local symbol of the part (`nat_pieces`).
+fn nat_join(pk: &lir_ir::Package, at: &Map<u32, u32>, up: &mut Vector<u32>, i: u32, t: u32) {
+    if pk.syms[t as usize].linkage != lir_ir::SL_LOCAL {
+        return;
+    }
+    switch at.get(&t) {
+        Some(j) => {
+            let a = nat_root(up, i);
+            let b = nat_root(up, *j);
+            if a != b {
+                up.set(a.max(b) as usize, a.min(b));
+            }
+        },
+        None => {},
+    }
+}
+
+// The group of item `i` (`nat_pieces`), its path halved on the way.
+fn nat_root(up: &mut Vector<u32>, i: u32) u32 {
+    let mut x = i;
+    for _ in 0..up.len() {
+        if up[x as usize] == x {
+            return x;
+        }
+        let g = up[up[x as usize] as usize];
+        up.set(x as usize, g);
+        x = g;
+    }
+    return x;
 }
 
 // One part of one unit to compile: its functions `fs` and data `ds` of LIR package `pk` for `(os, isa)`
@@ -12800,10 +12970,12 @@ fn nat_task(t: NatTask) {
 }
 
 // The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
-// under (its emission cache key xor `nat_base`), its low bit `NAT_OBJ` when that part has an object
-// (`<key> <path>` lines). A cached emission of a module counts only under its record's key.
+// under (its emission cache key xor `nat_base`) but its low byte (`NAT_FLAGS`), its low bit `NAT_OBJ` when
+// that part has objects and the next 7 their count less one (`nat_pieces`) (`<key> <path>` lines). A cached
+// emission of a module counts only under its record's key.
 const NAT_RECORD: str = "__sc_native";
 const NAT_OBJ: u64 = 1;
+const NAT_FLAGS: u64 = 0xFF;
 
 // The native record at `path`: each module path's key and flags (`NAT_RECORD`); empty without one.
 fn nat_record(path: str) Map<String, u64> {
@@ -12843,7 +13015,7 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lho
             None => 0,
         };
         let nk = t.keys[m] ^ base;
-        if r == 0 || (r & ~3u64) != (nk & ~3u64) {
+        if r == 0 || (r & ~NAT_FLAGS) != (nk & ~NAT_FLAGS) {
             t.hit.set(m, false);
             continue;
         }
@@ -13088,56 +13260,80 @@ fn native_plan(
         }
     }
     let stats = stdlib::getenv("SC_NATIVE_STATS") != null;
-    // Each unit's reason it does not compile, else its parts, compiled in parallel; a replayed unit's own
-    // part is its recorded object.
-    let mut bytes = Vector::<Vector<u8>>::new();
-    let mut olds = Vector::<bool>::new();
+    // Each unit's reason it does not compile, else its parts' pieces (`nat_pieces`), compiled in parallel;
+    // a replayed unit's own part is its recorded objects.
+    let mut olds = Vector::<u32>::new(); // per module, the recorded objects of its own part (0: none)
     olds.resize_default(n);
     let mut whys = Vector::<String>::new();
-    let mut oks = Vector::<bool>::new();
-    bytes.resize_default(2 * n);
     whys.resize_default(2 * n);
-    oks.resize_default(2 * n);
-    let mut todo = Vector::<u64>::new();
     let mut texts = Vector::<String>::new();
     texts.resize_default(2 * n);
+    // Per part, whether it is done without a piece (empty, or replayed); the pieces: their part, number and
+    // symbols.
+    let mut done = Vector::<bool>::new();
+    done.resize_default(2 * n);
+    let mut ppart = Vector::<u32>::new();
+    let mut pnum = Vector::<u32>::new();
+    let mut pfs = Vector::<Vector<u32>>::new();
+    let mut pds = Vector::<Vector<u32>>::new();
+    let mut tf = Vector::<Vector<u32>>::new();
+    let mut td = Vector::<Vector<u32>>::new();
     for m in 0..n {
         if !*unit.at(m) {
             continue;
         }
-        let why = whys.index_mut(2 * m);
         // Each statement ends in a newline: the text is empty exactly when the module holds none.
         let text = replace(asm_text.index_mut(m), String::new());
         if text.len() != 0 {
             texts.set(2 * m, text);
         }
         if conly[m] != 0 {
-            why.push_string(l.conly_why.at(conly[m] as usize - 1));
+            whys.index_mut(2 * m).push_string(l.conly_why.at(conly[m] as usize - 1));
             continue;
         }
-        if hit.len() != 0 && hit[m] {
-            // The record holds the module under its key (`nat_trust`).
-            let r = *rec.get(&p.modules[m].path).unwrap();
-            if (r & NAT_OBJ) != 0 {
-                if fs::stat(build_out_path(root, &p.modules[m].path, ".o").as_str()).is_err() {
-                    why.push_str("its cached emission has no native object");
-                    continue;
+        for part in 2 * m..2 * m + 2 {
+            if part == 2 * m && hit.len() != 0 && hit[m] {
+                // The record holds the module under its key (`nat_trust`), with the count of its objects.
+                let r = *rec.get(&p.modules[m].path).unwrap();
+                if (r & NAT_OBJ) != 0 {
+                    let no = (r >> 1 & NAT_PIECES_MAX) as u32 + 1;
+                    for k in 0..no {
+                        if fs::stat(nat_obj_path(root, &p.modules[m].path, true, k).as_str()).is_err() {
+                            whys.index_mut(part).push_str("its cached emission has no native object");
+                            break;
+                        }
+                    }
+                    olds.set(m, no);
                 }
-                olds.set(m, true);
+                done.set(part, true);
+                continue;
             }
-            oks.set(2 * m, true);
-        } else if funcs.at(2 * m).len() + datas.at(2 * m).len() + texts.at(2 * m).len() != 0 {
-            todo.push(0xFFFFFFFFu64 - funcs.at(2 * m).len() as u64 << 32 | (2 * m) as u64);
-        } else {
-            oks.set(2 * m, true);
-        }
-        if funcs.at(2 * m + 1).len() + datas.at(2 * m + 1).len() != 0 {
-            todo.push(0xFFFFFFFFu64 - funcs.at(2 * m + 1).len() as u64 << 32 | (2 * m + 1) as u64);
-        } else {
-            oks.set(2 * m + 1, true);
+            if funcs.at(part).len() + datas.at(part).len() + texts.at(part).len() == 0 {
+                done.set(part, true);
+                continue;
+            }
+            nat_pieces(&l.pkg, funcs.at(part), datas.at(part), &mut tf, &mut td);
+            for k in 0..tf.len() {
+                ppart.push(part as u32);
+                pnum.push(k as u32);
+                pfs.push(replace(tf.index_mut(k), Vector::<u32>::new()));
+                pds.push(replace(td.index_mut(k), Vector::<u32>::new()));
+            }
         }
     }
+    let np = ppart.len();
+    let mut bytes = Vector::<Vector<u8>>::new();
+    bytes.resize_default(np);
+    let mut pwhys = Vector::<String>::new();
+    pwhys.resize_default(np);
+    let mut oks = Vector::<bool>::new();
+    oks.resize_default(np);
+    let none = String::new();
     // Largest first, for the balance of the pool.
+    let mut todo = Vector::<u64>::with_capacity(np);
+    for q in 0..np {
+        todo.push(0xFFFFFFFFu64 - pfs.at(q).len() as u64 << 32 | q as u64);
+    }
     todo.sort();
     let pk = (&l.pkg) as *const lir_ir::Package;
     let syms = NatSyms {
@@ -13147,15 +13343,21 @@ fn native_plan(
     let wg = psync::WaitGroup::new();
     for k in 0..todo.len() {
         let q = (todo[k] & 0xFFFFFFFF) as usize;
+        // The module-level assembly goes into its part's first object.
+        let text: *const String = if pnum[q] == 0 {
+            texts.at(ppart[q] as usize)
+        } else {
+            &none
+        };
         let t = NatTask {
             pk: pk,
             os: p.build_target,
             isa: p.arch,
-            fs: funcs.at(q),
-            ds: datas.at(q),
-            text: texts.at(q),
+            fs: pfs.at(q),
+            ds: pds.at(q),
+            text: text,
             bytes: bytes.index_mut(q),
-            why: whys.index_mut(q),
+            why: pwhys.index_mut(q),
             ok: oks.index_mut(q),
             syms: &syms,
         };
@@ -13171,6 +13373,21 @@ fn native_plan(
         };
     }
     wg.wait_masked();
+    // Per part, its first piece (the pieces of a part are adjacent); a piece's reason it does not compile is
+    // its part's.
+    let mut first = Vector::<u32>::with_capacity(2 * n);
+    for _ in 0..2 * n {
+        first.push(lir_ir::NONE);
+    }
+    for q in 0..np {
+        let part = ppart[q] as usize;
+        if first[part] == lir_ir::NONE {
+            first.set(part, q as u32);
+        }
+        if !oks[q] && whys.at(part).len() == 0 {
+            whys.set(part, replace(pwhys.index_mut(q), String::new()));
+        }
+    }
     let mut nc: u64 = 0;
     let mut nn: u64 = 0;
     let mut ok = true;
@@ -13178,14 +13395,29 @@ fn native_plan(
         if !*unit.at(m) {
             continue;
         }
-        if whys.at(2 * m).len() == 0 && oks[2 * m] && oks[2 * m + 1] {
+        let mut good = whys.at(2 * m).len() == 0 && whys.at(2 * m + 1).len() == 0;
+        for part in 2 * m..2 * m + 2 {
+            if !done[part] && first[part] == lir_ir::NONE {
+                good = false;
+            }
+        }
+        if good {
             isnat.set(m, true);
             nn += 1;
-            for part in 0..2usize {
-                let old = part == 0 && olds[m];
-                if bytes.at(2 * m + part).len() != 0 || old {
-                    let b = replace(bytes.index_mut(2 * m + part), Vector::<u8>::new());
-                    objs.push(NatObj { m: m as ModuleId, own: part == 0, bytes: b, old: old });
+            for k in 0..olds[m] {
+                objs.push(NatObj { m: m as ModuleId, own: true, piece: k, bytes: Vector::<u8>::new(), old: true });
+            }
+            for part in 2 * m..2 * m + 2 {
+                if first[part] == lir_ir::NONE {
+                    continue;
+                }
+                let mut q = first[part] as usize;
+                while q < np && ppart[q] as usize == part {
+                    if bytes.at(q).len() != 0 {
+                        let b = replace(bytes.index_mut(q), Vector::<u8>::new());
+                        objs.push(NatObj { m: m as ModuleId, own: part == 2 * m, piece: pnum[q], bytes: b, old: false });
+                    }
+                    q += 1;
                 }
             }
             if stats {
@@ -13203,7 +13435,7 @@ fn native_plan(
         eprint("error: module '{}' does not compile: {}\n", p.modules[m].path.as_str(), w);
     }
     if stats {
-        eprint("native: {} modules compiled, {} refused, {} ms\n", nn, nc, ticks_ms() - t0);
+        eprint("native: {} modules compiled, {} refused, {} objects, {} ms\n", nn, nc, np, ticks_ms() - t0);
     }
     return ok;
 }
@@ -13504,6 +13736,9 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
         },
     };
     let mut gp = sch::Jobs::independent(n);
+    for m in 0..n {
+        gp.cost.set(m, p.modules[m].source.len() as u64);
+    }
     sch::run_jobs(&mut gp, p.jobs, bc_pre_job, &mut pre, null);
     p.mod_refs = refs;
     p.mod_refs_w = w;
@@ -13572,8 +13807,10 @@ pub(package) fn borrowck_all(p: &mut loader::Package, keep: *mut irl::Keep) bool
     };
     let mut g = sch::Jobs::independent(jobs.len());
     for j in 0..jobs.len() {
-        // The memory gate's estimate: the module's source bytes, several times over for its IR.
+        // The memory gate's estimate: the module's source bytes, several times over for its IR. The
+        // work's: the source bytes.
         g.est.set(j, p.modules[jobs[j].m as usize].source.len() as u64 * 8);
+        g.cost.set(j, p.modules[jobs[j].m as usize].source.len() as u64);
     }
     let ctl = tctl::Ctl::new(tctl::budget_from_env());
     // The serial path's slot records the measurement (SC_ITEM_STATS).
@@ -15051,6 +15288,9 @@ fn check_always_panics(p: &mut loader::Package, only_mod: i32) {
         marks.push(p.modules[m].ast.get_ref().used_mark());
     }
     let mut g = sch::Jobs::independent(jobs.len());
+    for j in 0..jobs.len() {
+        g.cost.set(j, p.modules[jobs[j].m as usize].source.len() as u64);
+    }
     sch::run_jobs(&mut g, p.jobs, ap_job, &mut st, null);
     if par {
         set_stage_locks(p, false);
@@ -15255,9 +15495,21 @@ fn pub_range(t: PubTask) {
 // Publish `paths[i]` with the `lens[i]` bytes at `texts[i]` on up to PUB_WORKERS workers (one when
 // `jobs` is 1 or the batch is small), each result into `rc[i]` (`publish_file`). The files are
 // independent, so the order of the writes never shows in the tree; the caller reports them in order.
-fn publish_batch(paths: &Vector<String>, texts: &Vector<usize>, lens: &Vector<usize>, rc: &mut Vector<i32>, jobs: u32) {
+// `release`: the pool is released after a parallel batch, before C sources stream into compiler
+// processes.
+fn publish_batch(
+    paths: &Vector<String>,
+    texts: &Vector<usize>,
+    lens: &Vector<usize>,
+    rc: &mut Vector<i32>,
+    jobs: u32,
+    release: bool,
+) {
     let n = paths.len();
     rc.resize_default(n);
+    if n == 0 {
+        return;
+    }
     let nw = if jobs == 1 || n < PUB_PAR_MIN {
         1
     } else {
@@ -15288,8 +15540,10 @@ fn publish_batch(paths: &Vector<String>, texts: &Vector<usize>, lens: &Vector<us
         };
     }
     wg.wait_masked();
-    // The pool is released before the sources stream into compiler processes, as after the emission.
-    prt::shutdown();
+    if release {
+        // The pool is released before the sources stream into compiler processes, as after the emission.
+        prt::shutdown();
+    }
 }
 
 /// Compile a loaded package into the <gen_root> C tree: full per-module pipeline, instance propagation,
@@ -16205,7 +16459,7 @@ pub(package) fn run_package(
             hos.push(m as u32);
         }
         let mut hrc = Vector::<i32>::new();
-        publish_batch(&hps, &hts, &hls, &mut hrc, p.jobs);
+        publish_batch(&hps, &hts, &hls, &mut hrc, p.jobs, true);
         for i in 0..hps.len() {
             // The texts live in `co` until the write stage ends.
             let ht = unsafe str::from_raw(hts[i] as *const u8, hls[i]);
@@ -16349,36 +16603,55 @@ pub(package) fn run_package(
         &mut mem
     };
     if wtree {
+        // The new objects are written on worker threads, then reported in order; the tree's object of a
+        // replayed unit stands as it is.
+        let mut ops = Vector::<String>::with_capacity(nat_objs.len());
+        let mut ots = Vector::<usize>::new();
+        let mut ols = Vector::<usize>::new();
+        for k in 0..nat_objs.len() {
+            let ob = nat_objs.at(k);
+            let op = nat_obj_path(root, &p.modules[ob.m as usize].path, ob.own, ob.piece);
+            if !ob.old {
+                ots.push(ob.bytes.as_ptr() as usize);
+                ols.push(ob.bytes.len());
+            }
+            ops.push(op);
+        }
+        let mut wps = Vector::<String>::with_capacity(ots.len());
+        for k in 0..nat_objs.len() {
+            if !nat_objs.at(k).old {
+                wps.push(ops.at(k).clone());
+            }
+        }
+        let mut orc = Vector::<i32>::new();
+        publish_batch(&wps, &ots, &ols, &mut orc, p.jobs, false);
+        let mut w: usize = 0;
         for k in 0..nat_objs.len() {
             let ob = nat_objs.index_mut(k);
-            let mp = p.modules[ob.m as usize].path.as_str();
-            let mut op = build_out_path(
-                root,
-                mp,
-                if ob.own {
-                    ".o"
-                } else {
-                    "__inst.o"
-                },
-            );
-            // The tree's object of a replayed unit stands as it is.
+            let mut op = replace(ops.index_mut(k), String::new());
             if ob.old {
                 sink_notify(osink, &mut co.pr, &op, "", 3, false);
                 nat_paths.push(op.clone());
                 keep.push(op);
-            } else if publish_out(
-                osink,
-                &mut co.pr,
-                &mut op,
-                unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len()),
-                3,
-            ) {
-                nat_paths.push(op.clone());
-                unsafe (*memp).objs.insert(op.clone(), replace(&mut ob.bytes, Vector::<u8>::new()));
-                keep.push(op);
-            } else {
-                err = true;
+                continue;
             }
+            let body = unsafe str::from_raw(ob.bytes.as_ptr(), ob.bytes.len());
+            // A failure again on this thread: the message gets its own error.
+            let rc = if orc[w] < 0 {
+                publish_file(&op, body)
+            } else {
+                orc[w]
+            };
+            w += 1;
+            if rc < 0 {
+                unsafe stdio::perror(op.cstr());
+                err = true;
+                continue;
+            }
+            sink_notify(osink, &mut co.pr, &op, body, 3, rc == 1);
+            nat_paths.push(op.clone());
+            unsafe (*memp).objs.insert(op.clone(), replace(&mut ob.bytes, Vector::<u8>::new()));
+            keep.push(op);
         }
         if nat_all && !err {
             let mut bytes = Vector::<u8>::new();
@@ -16397,23 +16670,23 @@ pub(package) fn run_package(
                 err = true;
             }
         }
-        // Every module, with whether it has an own object.
+        // Every module, with the count of its own objects.
         if co.tuc_keys.len() != 0 && nat_mod.len() != 0 {
-            let mut has = Vector::<bool>::new();
+            let mut has = Vector::<u64>::new();
             has.resize_default(p.modules.len());
             for k in 0..nat_objs.len() {
                 if nat_objs.at(k).own {
-                    has.set(nat_objs.at(k).m as usize, true);
+                    has.set(nat_objs.at(k).m as usize, has[nat_objs.at(k).m as usize] + 1);
                 }
             }
             let base = nat_base(p);
             for m in 0..p.modules.len() {
-                let fl = if has[m] {
-                    NAT_OBJ
+                let fl = if has[m] != 0 {
+                    has[m] - 1 << 1 | NAT_OBJ
                 } else {
                     0
                 };
-                rec_txt.format_into("{} {}\n", (co.tuc_keys[m] ^ base) & ~3u64 | fl, p.modules[m].path.as_str());
+                rec_txt.format_into("{} {}\n", (co.tuc_keys[m] ^ base) & ~NAT_FLAGS | fl, p.modules[m].path.as_str());
             }
         }
         if !err && rec_txt.len() != 0 {

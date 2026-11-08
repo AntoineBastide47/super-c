@@ -11,6 +11,7 @@ import lir::ir as *;
 import lir::opt as lopt;
 import utils::persist as *;
 import ast::ast as ast;
+import std::parallel::sync as psync;
 
 extend Inst as Persist {
     fn plain() bool {
@@ -405,13 +406,6 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
 }
 
 extend Held {
-    /// The bytes `write` gives.
-    pub(package) fn size(self: &Self, pk: &Package) usize {
-        let mut sz = Writer::sizing();
-        self.save(pk, &mut sz);
-        return sz.len();
-    }
-
     pub(package) fn write(self: &Self, pk: &Package, w: &mut Writer) {
         self.save(pk, w);
     }
@@ -445,6 +439,62 @@ extend Held {
         }
         self.lent.truncate(0);
     }
+}
+
+// One unit's record for `records`: the package and the run of every task, the unit, its bytes' slot.
+struct RecTask {
+    pk: *mut Package,
+    r: *mut lopt::Run,
+    us: *const Units,
+    u: usize,
+    out: *mut String,
+}
+
+// A task lends and gives back its own unit's bodies and the run's slots of them, which no other task
+// of the batch touches; everything else it reads.
+unsafe extend RecTask as Send {}
+
+fn rec_task(t: RecTask) {
+    let pk = unsafe &mut *t.pk;
+    let mut h = record(pk, unsafe &mut *t.r, unsafe &*t.us, t.u);
+    // A record starts at a multiple of 16 bytes in the image, so its own padding is the image's.
+    let mut w = Writer::new();
+    h.write(pk, &mut w);
+    h.restore(pk);
+    unsafe *t.out = replace(&mut w.buf, String::new());
+}
+
+/// Into `outs[i]`, the bytes `Held::write` gives for unit `units[i]` of `us` (`record`), the bodies
+/// given back (`restore`): on worker threads unless `jobs` is 1. The units' own bodies are disjoint, so
+/// the bytes do not depend on the schedule.
+pub(package) fn records(
+    pk: &mut Package,
+    r: &mut lopt::Run,
+    us: &Units,
+    units: &Vector<u32>,
+    outs: &mut Vector<String>,
+    jobs: u32,
+) {
+    outs.truncate(0);
+    outs.resize_default(units.len());
+    let t0 = RecTask { pk: pk, r: r, us: us, u: 0, out: null };
+    let wg = psync::WaitGroup::new();
+    for i in 0..units.len() {
+        let mut t = t0;
+        t.u = units[i] as usize;
+        t.out = outs.index_mut(i);
+        if jobs == 1 || units.len() == 1 {
+            rec_task(t);
+            continue;
+        }
+        wg.add(1);
+        let wgc = wg.clone();
+        launch || {
+            rec_task(t);
+            wgc.done();
+        };
+    }
+    wg.wait_masked();
 }
 
 /// Record `img` (from `Held::write`, 16-byte aligned) for a package of `ptr_bytes`-byte pointers; None when it

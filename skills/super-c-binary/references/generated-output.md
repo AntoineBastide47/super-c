@@ -10,9 +10,10 @@ writes the native objects there and no C; `--emit-c` writes the program's C inst
 ```
 build/
   debug/raw/
-    app.o app__inst.o # a linking build: the module's object and its instances' object
+    app.o app__inst.o # a linking build: the module's object and its instances' object; a part past about
+                      # 60000 LIR instructions also as app.1.o, app.2.o, ... (app__inst.1.o, ...)
     __sc_registry_n.o # a linking build: ZST sentinels and the reflection registry
-    __sc_native       # a linking build: per module, the key its objects were compiled under
+    __sc_native       # a linking build: per module, the key its objects were compiled under and their count
     __sc_hfacts       # the record of the header scan (`native_header_facts`)
     __sc_manifest     # the build's configuration; with --emit-c also output paths, content hashes,
                       # header dependencies, shard counts

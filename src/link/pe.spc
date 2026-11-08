@@ -13,6 +13,7 @@
 // implements, which the Super-C runtime defines as `__sc_ucrt_<name>` (`std::rt::builtins`).
 import link::ar;
 import link::util as lu;
+import utils::par as par;
 import target::native as nat;
 import utils::names as nm;
 import std::platform::fs;
@@ -38,6 +39,7 @@ pub(package) struct Opts {
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
+    pub(package) jobs: u32, // 1: the sections relocate in this thread, else on the task pool
 }
 
 const SCN_IDATA: u32 = 0x40;
@@ -303,8 +305,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     layout(l, o);
     let mut img = Vector::<u8>::new();
     img.resize_default(file_end(l) as usize);
-    copy_sections(l, b, &mut img);
-    if !apply(l, b, &mut img) {
+    if !apply(l, b, &mut img, o.jobs) {
         return false;
     }
     write_synthetic(l, o, main, &mut img);
@@ -1439,8 +1440,8 @@ fn in_section(l: &L, k: u32) bool {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
-    // Code sections: `int3` between the inputs, so that the processor decodes no memory access past a `ret`.
+// Code sections: `int3` between the inputs, so that the processor decodes no memory access past a `ret`.
+const fn fill_code(l: &L, img: &mut Vector<u8>) {
     for k in 0..l.osecs.len() {
         let os = l.osecs[k];
         if (os.flags & SCN_CODE) != 0 && os.raw != 0 {
@@ -1449,81 +1450,145 @@ const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
             }
         }
     }
+}
+
+// Copy each input section into the image and apply its relocations: the sections by chunks on worker
+// threads unless `jobs` is 1 (each writes its own bytes), then the base relocations they add in section
+// order. The first error in section order fails the link.
+fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>, jobs: u32) bool {
+    fill_code(l, img);
+    let mut w = Vector::<u64>::with_capacity(l.secs.len());
     for s in 0..l.secs.len() {
-        let sc = l.secs[s];
-        if sc.out == NONE || sc.off == 0 || (l.osecs[sc.out as usize].flags & SCN_UDATA) != 0 {
-            continue;
+        w.push(l.secs[s].nreloc as u64 + 1);
+    }
+    let mut ends = Vector::<u32>::new();
+    lu::chunk_ends(&w, &mut ends);
+    let mut chunks = Vector::<RelChunk>::with_capacity(ends.len());
+    for c in 0..ends.len() {
+        chunks.push(
+            RelChunk {
+                lo: if c == 0 {
+                    0
+                } else {
+                    ends[c - 1]
+                },
+                hi: ends[c],
+                rels: Vector::<u32>::new(),
+                bad: false,
+                err: String::new(),
+            },
+        );
+    }
+    let mut cx = RelCtx { l: l, b: b.ptr, blen: b.len(), img: lu::Img::of(img), chunks: chunks.as_mut_ptr() };
+    par::chunks(chunks.len(), jobs, rel_chunk, (&mut cx) as *mut RelCtx);
+    for c in 0..chunks.len() {
+        let ch = chunks.index_mut(c);
+        l.relocs.extend_from_slice(&ch.rels);
+        if ch.bad {
+            l.err.push_string(&ch.err);
+            return false;
         }
-        let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
-        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
+    }
+    return true;
+}
+
+// One chunk of `apply`: input sections `lo..hi`, the base relocations they add in order, and whether one
+// failed (`err`: why; the sections after it in the chunk stay as they are).
+struct RelChunk {
+    lo: u32,
+    hi: u32,
+    rels: Vector<u32>,
+    bad: bool,
+    err: String,
+}
+
+// What the chunks read, the image they write, and the chunks, each written by its own task alone.
+struct RelCtx {
+    l: *const L,
+    b: *const u8,
+    blen: usize,
+    img: lu::Img,
+    chunks: *mut RelChunk,
+}
+
+fn rel_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const RelCtx);
+    let ch = unsafe &mut *(x.chunks + c);
+    let b = unsafe Slice::<u8> { ptr: x.b, len: x.blen };
+    for s in ch.lo as usize..ch.hi as usize {
+        if !relocate(unsafe &*x.l, b, x.img, s, &mut ch.rels, &mut ch.err) {
+            ch.bad = true;
+            return;
+        }
     }
 }
 
-fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
-    for s in 0..l.secs.len() {
-        let sc = l.secs[s];
-        if sc.out == NONE || sc.nreloc == 0 {
+// Input section `s` into image `img`, its relocations applied: the base relocations it adds into `rels`, in
+// order. False, with the reason in `err`, when a relocation cannot be applied.
+fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, rels: &mut Vector<u32>, err: &mut String) bool {
+    let sc = l.secs[s];
+    if sc.out == NONE {
+        return true;
+    }
+    if sc.off != 0 && (l.osecs[sc.out as usize].flags & SCN_UDATA) == 0 {
+        img.put((l.osecs[sc.out as usize].off + sc.at) as usize, b[sc.off..sc.off + sc.size as usize]);
+    }
+    if sc.nreloc == 0 {
+        return true;
+    }
+    let f = l.files[sc.file as usize];
+    let os_off = l.osecs[sc.out as usize].off;
+    let os_rva = l.osecs[sc.out as usize].rva;
+    let debug = (l.osecs[sc.out as usize].flags & SCN_DISCARDABLE) != 0;
+    for i in 0..sc.nreloc as usize {
+        let e = sc.reloff + 10 * i;
+        let at = lu::r32(b, e) as u64;
+        let k = f.sym0 + lu::r32(b, e + 4);
+        let ty = lu::r16(b, e + 8);
+        let p = (os_off + sc.at + at) as usize;
+        let pr = os_rva + sc.at + at;
+        if debug && target_osec(l, k) == NONE && in_section(l, k) {
+            // Debug information on a dropped section's code: left unapplied, as lld-link leaves it.
             continue;
         }
-        let f = l.files[sc.file as usize];
-        let os_off = l.osecs[sc.out as usize].off;
-        let os_rva = l.osecs[sc.out as usize].rva;
-        let debug = (l.osecs[sc.out as usize].flags & SCN_DISCARDABLE) != 0;
-        for i in 0..sc.nreloc as usize {
-            let e = sc.reloff + 10 * i;
-            let at = lu::r32(b, e) as u64;
-            let k = f.sym0 + lu::r32(b, e + 4);
-            let ty = lu::r16(b, e + 8);
-            let p = (os_off + sc.at + at) as usize;
-            let pr = os_rva + sc.at + at;
-            if debug && target_osec(l, k) == NONE && in_section(l, k) {
-                // Debug information on a dropped section's code: left unapplied, as lld-link leaves it.
-                continue;
+        let t = target_rva(l, k);
+        if ty == REL_ADDR64 {
+            img.p64(p, img.r64(p).wrapping_add(l.base + t));
+            if !debug {
+                rels.push(pr as u32);
             }
-            let t = target_rva(l, k);
-            if ty == REL_ADDR64 {
-                lu::p64(img, p, lu::r64(img.as_slice(), p).wrapping_add(l.base + t));
-                if !debug {
-                    l.relocs.push(pr as u32);
-                }
-            } else if ty == REL_ADDR32NB {
-                lu::p32(img, p, lu::r32(img.as_slice(), p).wrapping_add(t as u32));
-            } else if ty >= REL_REL32 && ty <= REL_REL32_5 {
-                let d = t.wrapping_sub(pr + 4 + (ty - REL_REL32) as u64) as u32;
-                lu::p32(img, p, lu::r32(img.as_slice(), p).wrapping_add(d));
-            } else if ty == REL_SECREL {
-                let o = target_osec(l, k);
-                let base = if o == NONE {
-                    0u64
+        } else if ty == REL_ADDR32NB {
+            img.p32(p, img.r32(p).wrapping_add(t as u32));
+        } else if ty >= REL_REL32 && ty <= REL_REL32_5 {
+            let d = t.wrapping_sub(pr + 4 + (ty - REL_REL32) as u64) as u32;
+            img.p32(p, img.r32(p).wrapping_add(d));
+        } else if ty == REL_SECREL {
+            let o = target_osec(l, k);
+            let base = if o == NONE {
+                0u64
+            } else {
+                l.osecs[o as usize].rva
+            };
+            img.p32(p, img.r32(p).wrapping_add(t.wrapping_sub(base) as u32));
+        } else if ty == REL_SECTION {
+            let o = target_osec(l, k);
+            img.p16(
+                p,
+                if o == NONE {
+                    0u32
                 } else {
-                    l.osecs[o as usize].rva
-                };
-                lu::p32(img, p, lu::r32(img.as_slice(), p).wrapping_add(t.wrapping_sub(base) as u32));
-            } else if ty == REL_SECTION {
-                let o = target_osec(l, k);
-                lu::p16(
-                    img,
-                    p,
-                    if o == NONE {
-                        0u32
-                    } else {
-                        o + 1
-                    },
-                );
-            } else if ty == REL_ADDR32 {
-                l.err.format_into(
-                    "'{}': a 32-bit absolute address (the image loads above 4 GiB)",
-                    l.paths[f.path as usize].as_str(),
-                );
-                return false;
-            } else if ty != REL_ABSOLUTE {
-                l.err.format_into(
-                    "'{}': COFF relocation type {} is not supported",
-                    l.paths[f.path as usize].as_str(),
-                    ty,
-                );
-                return false;
-            }
+                    o + 1
+                },
+            );
+        } else if ty == REL_ADDR32 {
+            err.format_into(
+                "'{}': a 32-bit absolute address (the image loads above 4 GiB)",
+                l.paths[f.path as usize].as_str(),
+            );
+            return false;
+        } else if ty != REL_ABSOLUTE {
+            err.format_into("'{}': COFF relocation type {} is not supported", l.paths[f.path as usize].as_str(), ty);
+            return false;
         }
     }
     return true;

@@ -36,6 +36,7 @@ import lir::slp as sl;
 import lir::pairs as pa;
 import lir::wide as wd;
 import lir::print as lp;
+import utils::par as par;
 import lir::switches as sws;
 import stdlib;
 import std::platform::clock as pclock;
@@ -416,6 +417,7 @@ pub(package) struct Opt {
 pub(package) struct Config {
     pub(package) inline: il::Budget,
     pub(package) loops: lu::Budgets,
+    pub(package) jobs: u32, // the build's workers: 1 runs every pass on the calling thread
 }
 
 extend Config as Copy {}
@@ -12013,12 +12015,12 @@ extend Run {
             arg: Vector::<u32>::new(),
             bits: Vector::<u64>::new(),
         };
-        calls_of(pk, &bodies, held, &mut cs);
+        calls_of(pk, &bodies, held, &mut cs, cf.jobs);
         let mut wargs = Vector::<u64>::new();
         let mut esc = Vector::<u64>::new();
         let mut sp = Vector::<u64>::new();
         let mut sp_at = Vector::<u32>::new();
-        let fx = effects(pk, &bodies, &cs, &mut wargs, &mut esc, &mut sp, &mut sp_at);
+        let fx = effects(pk, &bodies, &cs, &mut wargs, &mut esc, &mut sp, &mut sp_at, cf.jobs);
         // Per body, its count, then its parameters' ranges.
         pk.spans.truncate(0);
         for s in 0..pk.syms.len() {
@@ -12050,14 +12052,29 @@ extend Run {
             unit.push(NONE);
             bunit.push(NONE);
         }
+        // The inliner's shape test of each body below `held` under its function's symbol (the last one
+        // that names it), by chunks of bodies on worker threads.
+        let mut owner = Vector::<u32>::new();
+        fill(&mut owner, held as usize, NONE);
+        for s in 0..p.syms.len() {
+            let sy = p.syms[s];
+            if sy.kind == SK_FUNC && sy.def != NONE && sy.def < held {
+                owner[sy.def as usize] = s as u32;
+            }
+        }
+        let mut sx = ShapeCtx {
+            p: p,
+            bodies: &bodies,
+            owner: owner.as_ptr(),
+            held: held as usize,
+            shape: shape.as_mut_ptr(),
+        };
+        par::chunks((held as usize + SHAPE_CHUNK - 1) / SHAPE_CHUNK, cf.jobs, shape_chunk, (&mut sx) as *mut ShapeCtx);
         for s in 0..p.syms.len() {
             let sy = p.syms[s];
             if sy.kind == SK_FUNC && sy.def != NONE {
                 bunit[sy.def as usize] = sy.unit;
                 always[sy.def as usize] = sy.always;
-                if sy.def < held {
-                    shape[sy.def as usize] = il::shape_ok(p, s as u32, &bodies[sy.def as usize]);
-                }
                 if sy.unit < sealed.len() as u32 && sealed[sy.unit as usize] {
                     unit[sy.def as usize] = sy.unit;
                 }
@@ -12138,6 +12155,14 @@ extend Run {
             loops: UnsafeCell::<Vector<LoopParts>>::new(Vector::<LoopParts>::new()),
             pools: UnsafeCell::<Vector<PoolScratch>>::new(Vector::<PoolScratch>::new()),
         };
+    }
+
+    /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none).
+    pub(package) fn cost(self: &Self, j: u32) u64 {
+        if j >= self.held {
+            return 0;
+        }
+        return (unsafe (*self.bodies.get())[j as usize].insts.len()) as u64;
     }
 
     /// Optimize body `j`, once every body `edges` makes it wait for is done. Jobs of one `Run` run in
@@ -12518,7 +12543,7 @@ extend Run {
             }
         }
         pk.bodies = replace(bodies, Vector::<Body>::new());
-        const_slots(pk, finals);
+        const_slots(pk, finals, self.cf.jobs);
         symbol_tables(pk, finals);
         // The calls through a method a constant table holds (`fold_ptr`): the jobs, which ran at once, did
         // not read another body's signature.
@@ -12633,9 +12658,12 @@ pub(package) fn job(ctx: *mut void, j: u32) {
     (unsafe &*(ctx as *const Run)).job(j);
 }
 
-/// `Run::new`, every job in `order` on this thread, then `finish`.
+/// `Run::new`, every job in `order` on this thread, then `finish`: every pass on this thread, whatever
+/// `cf.jobs`.
 pub(package) fn optimize(pk: &mut Package, sealed: &Vector<bool>, cf: Config) {
-    let mut r = Run::new(pk, sealed, cf);
+    let mut one = cf;
+    one.jobs = 1;
+    let mut r = Run::new(pk, sealed, one);
     for k in 0..r.order.len() {
         r.job(r.order[k]);
     }
@@ -12721,26 +12749,19 @@ const OFF_VAR: u64 = 0xFFFFFFFFFFFFFFFE;
 // they read become unused constants. A body's form before, the one its callers inlined, stays in `pre`
 // (`Run::take_inlined`) unless an earlier one does: a unit that inlines it from a record then makes the data its
 // own.
-fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
+fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>, jobs: u32) {
     let held = pk.held_bodies();
     let owner = pk.body_owners();
-    let mut cs = ConstSlot {
-        slot: Vector::<u32>::new(),
-        off: Vector::<u64>::new(),
-        bad: Vector::<bool>::new(),
-        has: Vector::<bool>::new(),
-        adds: Vector::<u32>::new(),
-        us: Vector::<Value>::new(),
-        es: Vector::<u32>::new(),
-        stores: Vector::<u32>::new(),
-        bytes: Vector::<u8>::new(),
-        set: Vector::<bool>::new(),
-        relocs: Vector::<Reloc>::new(),
-        cnt: Vector::<u32>::new(),
-        work: Vector::<u32>::new(),
-    };
+    // Which bodies have a slot to place, by chunks on worker threads: the scan reads the package alone. The
+    // few that do are scanned again below, in order, as they change the package.
+    let mut cand = Vector::<bool>::new();
+    fill(&mut cand, held, false);
+    let nc = (held + CS_CHUNK - 1) / CS_CHUNK;
+    let mut cx = CsCtx { pk: pk, owner: owner.as_ptr(), cand: cand.as_mut_ptr(), held: held };
+    par::chunks(nc, jobs, cs_chunk, (&mut cx) as *mut CsCtx);
+    let mut cs = ConstSlot::new();
     for k in 0..held {
-        if owner[k] == NONE || pk.bodies[k].slots.len() == 0 || !cs.scan(pk, &pk.bodies[k]) {
+        if !cand[k] || !cs.scan(pk, &pk.bodies[k]) {
             continue;
         }
         cs.work.truncate(0);
@@ -12783,6 +12804,26 @@ fn const_slots(pk: &mut Package, pre: &mut Vector<Option<Box<Body>>>) {
     }
 }
 
+// The bodies of a `const_slots` scan chunk.
+const CS_CHUNK: usize = 256;
+
+// What the scan chunks read, and per body whether it has a slot to place, each written by its chunk alone.
+struct CsCtx {
+    pk: *const Package,
+    owner: *const u32,
+    cand: *mut bool,
+    held: usize,
+}
+
+fn cs_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const CsCtx);
+    let pk = unsafe &*x.pk;
+    let mut cs = ConstSlot::new();
+    for k in c * CS_CHUNK..(c * CS_CHUNK + CS_CHUNK).min(x.held) {
+        unsafe x.cand[k] = unsafe x.owner[k] != NONE && pk.bodies[k].slots.len() != 0 && cs.scan(pk, &pk.bodies[k]);
+    }
+}
+
 // `const_slots`'s scratch, per body: per instruction the slot an address it gives is into (`slot`, NONE for
 // none; a store's, its address's) and the offset into it (`off`, OFF_VAR for a variable one), per slot
 // whether something but stores of constants and loads reads its address (`bad`) and whether a constant
@@ -12805,6 +12846,24 @@ struct ConstSlot {
 }
 
 extend ConstSlot {
+    fn new() ConstSlot {
+        return ConstSlot {
+            slot: Vector::<u32>::new(),
+            off: Vector::<u64>::new(),
+            bad: Vector::<bool>::new(),
+            has: Vector::<bool>::new(),
+            adds: Vector::<u32>::new(),
+            us: Vector::<Value>::new(),
+            es: Vector::<u32>::new(),
+            stores: Vector::<u32>::new(),
+            bytes: Vector::<u8>::new(),
+            set: Vector::<bool>::new(),
+            relocs: Vector::<Reloc>::new(),
+            cnt: Vector::<u32>::new(),
+            work: Vector::<u32>::new(),
+        };
+    }
+
     // The slots of `b` and the addresses they give, each instruction read a few times: whether a slot is
     // stored into with constants and read by loads alone or as a call's aggregate its callee only reads
     // (`Sym.wargs`, `Sym.esc`; not `bad`).
@@ -13154,38 +13213,39 @@ struct Calls {
     pub(package) bits: Vector<u64>,
 }
 
-// `Calls` of `bodies`: each body's instructions read twice, the first time to size the lists.
-fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
+// `Calls` of `bodies`: the bodies below `held` by chunks on worker threads unless `jobs` is 1, then in
+// body order into lists of their exact sizes.
+fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls, jobs: u32) {
     let hd = &p.held;
-    // The lists at once, at their most: a held body's calls, every `call` instruction with its arguments,
-    // and every relocation of the read-only tables a body names.
-    let (mut nc, mut na) = (bodies.len() + 1, 1usize);
-    for k in 0..bodies.len() {
-        if k as u32 >= held {
-            let h = k - held as usize;
-            nc += (hd.at[h + 1] - hd.at[h]) as usize;
-            continue;
-        }
-        let b = &bodies[k];
-        for i in 0..b.insts.len() {
-            if b.insts[i].op == O_CALL {
-                nc += 1;
-                na += (b.insts[i].aux as usize).min(64);
-            }
-        }
-        for x in 0..b.syms.len() {
-            let sy = p.syms[b.syms[x] as usize];
-            if sy.kind == SK_DATA && sy.def != NONE {
-                nc += p.data[sy.def as usize].nrelocs as usize;
-            }
-        }
+    let mut bounds = Vector::<u32>::new();
+    chunk_bounds(bodies, held as usize, &mut bounds);
+    let mut chunks = Vector::<CallChunk>::with_capacity(bounds.len());
+    for c in 0..bounds.len() {
+        let lo = if c == 0 {
+            0usize
+        } else {
+            bounds[c - 1] as usize
+        };
+        chunks.push(CallChunk::new(lo, bounds[c] as usize));
+    }
+    let mut cx = CallCtx { p: p, bodies: bodies, chunks: chunks.as_mut_ptr() };
+    par::chunks(chunks.len(), jobs, call_chunk, (&mut cx) as *mut CallCtx);
+    // The lists at once, at their sizes: a held body's calls, then the chunks'.
+    let (mut nc, mut na) = (1usize, 1usize);
+    for k in held as usize..bodies.len() {
+        let h = k - held as usize;
+        nc += (hd.at[h + 1] - hd.at[h]) as usize;
+    }
+    for c in 0..chunks.len() {
+        nc += chunks[c].c.callee.len();
+        na += chunks[c].c.arg.len();
     }
     cs.callee.reserve_exact(nc);
     cs.live.reserve_exact(nc);
     cs.arg_at.reserve_exact(nc);
     cs.arg.reserve_exact(na);
     cs.bits.reserve_exact(na);
-    let mut ends = Vector::<bool>::new();
+    let mut c: usize = 0;
     for k in 0..bodies.len() {
         cs.at.push(cs.callee.len() as u32);
         if k as u32 >= held {
@@ -13200,6 +13260,70 @@ fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
             }
             continue;
         }
+        while k >= chunks[c].hi {
+            c += 1;
+        }
+        let ch = &chunks[c];
+        let i = k - ch.lo;
+        let (c0, c1) = (ch.c.at[i] as usize, ch.c.at[i + 1] as usize);
+        let (a0, a1) = (ch.aat[i], ch.aat[i + 1]);
+        let base = cs.arg.len() as u32;
+        cs.callee.extend_from_slice(ch.c.callee[c0..c1]);
+        cs.live.extend_from_slice(ch.c.live[c0..c1]);
+        for x in c0..c1 {
+            cs.arg_at.push(ch.c.arg_at[x] - a0 + base);
+        }
+        cs.arg.extend_from_slice(ch.c.arg[a0 as usize..a1 as usize]);
+        cs.bits.extend_from_slice(ch.c.bits[a0 as usize..a1 as usize]);
+    }
+    cs.at.push(cs.callee.len() as u32);
+    cs.arg_at.push(cs.arg.len() as u32);
+}
+
+// One chunk of `calls_of`: bodies `lo..hi`, their calls as `Calls` gives them (`c.at` per body), each body's
+// first argument (`aat`).
+struct CallChunk {
+    lo: usize,
+    hi: usize,
+    c: Calls,
+    aat: Vector<u32>,
+}
+
+extend CallChunk {
+    fn new(lo: usize, hi: usize) CallChunk {
+        return CallChunk {
+            lo: lo,
+            hi: hi,
+            c: Calls {
+                at: Vector::<u32>::with_capacity(hi - lo + 1),
+                callee: Vector::<u32>::new(),
+                live: Vector::<bool>::new(),
+                arg_at: Vector::<u32>::new(),
+                arg: Vector::<u32>::new(),
+                bits: Vector::<u64>::new(),
+            },
+            aat: Vector::<u32>::with_capacity(hi - lo + 1),
+        };
+    }
+}
+
+// The package and bodies the chunks read, and the chunks, each written by its own task alone.
+struct CallCtx {
+    p: *const Package,
+    bodies: *const Vector<Body>,
+    chunks: *mut CallChunk,
+}
+
+fn call_chunk(ctx: *mut void, ci: usize) {
+    let x = unsafe &*(ctx as *const CallCtx);
+    let p = unsafe &*x.p;
+    let bodies = unsafe &*x.bodies;
+    let ch = unsafe &mut *(x.chunks + ci);
+    let cs = &mut ch.c;
+    let mut ends = Vector::<bool>::new();
+    for k in ch.lo..ch.hi {
+        cs.at.push(cs.callee.len() as u32);
+        ch.aat.push(cs.arg.len() as u32);
         let b = &bodies[k];
         fill(&mut ends, b.insts.len(), false);
         for x in 0..b.blocks.len() {
@@ -13250,7 +13374,7 @@ fn calls_of(p: &Package, bodies: &Vector<Body>, held: u32, cs: &mut Calls) {
         }
     }
     cs.at.push(cs.callee.len() as u32);
-    cs.arg_at.push(cs.arg.len() as u32);
+    ch.aat.push(cs.arg.len() as u32);
 }
 
 // Per body of `bodies`, the memory outside its frame a call of it may read or write (`Sym.fx`): its own
@@ -13275,6 +13399,7 @@ fn effects(
     esc: &mut Vector<u64>,
     sp: &mut Vector<u64>,
     sp_at: &mut Vector<u32>,
+    jobs: u32,
 ) Vector<u8> {
     let n = bodies.len();
     let held = ast::pick(p.held.body == NONE, n, p.held.body as usize);
@@ -13288,7 +13413,22 @@ fn effects(
     let mut pass = Vector::<u64>::new();
     let mut poff = Vector::<i64>::new();
     let mut at = Vector::<u32>::with_capacity(held + 1);
-    let mut fs = FxScratch::new();
+    // The bodies' own facts by chunks of about equal instructions, on worker threads (`par::chunks`), then
+    // in body order: each chunk's lists are what the bodies append in order.
+    let mut bounds = Vector::<u32>::new();
+    chunk_bounds(bodies, held, &mut bounds);
+    let mut chunks = Vector::<FxChunk>::with_capacity(bounds.len());
+    for c in 0..bounds.len() {
+        let lo = if c == 0 {
+            0usize
+        } else {
+            bounds[c - 1] as usize
+        };
+        chunks.push(FxChunk::new(lo, bounds[c] as usize));
+    }
+    let mut cx = FxCtx { p: p, bodies: bodies, chunks: chunks.as_mut_ptr() };
+    par::chunks(chunks.len(), jobs, fx_chunk, (&mut cx) as *mut FxCtx);
+    let mut c: usize = 0;
     for k in 0..n {
         sp_at.push(sp.len() as u32);
         if k >= held {
@@ -13299,18 +13439,18 @@ fn effects(
             sp.extend_from_slice(hd.spans[hd.span_at[k - held] as usize..hd.span_at[k - held + 1] as usize]);
             continue;
         }
-        let mut w: u64 = 0;
-        fx.push(own_effects(p, &bodies[k], &mut w, &mut fs));
-        wargs.push(w);
+        while k >= chunks[c].hi {
+            c += 1;
+        }
+        let ch = &chunks[c];
+        let i = k - ch.lo;
+        fx.push(ch.fx[i]);
+        wargs.push(ch.w[i]);
         at.push(pass.len() as u32);
-        let np = (bodies[k].blocks[0].param_len as u64).min(64);
-        esc.push(
-            own_escapes(p, &bodies[k], &mut pass, &mut poff, sp, &mut fs) | if np < 64 {
-                ~0u64 << np
-            } else {
-                0u64
-            },
-        );
+        pass.extend_from_slice(ch.pass[ch.at[i] as usize..ch.at[i + 1] as usize]);
+        poff.extend_from_slice(ch.poff[ch.at[i] as usize..ch.at[i + 1] as usize]);
+        sp.extend_from_slice(ch.sp[ch.sp_at[i] as usize..ch.sp_at[i + 1] as usize]);
+        esc.push(ch.esc[i]);
     }
     sp_at.push(sp.len() as u32);
     at.push(pass.len() as u32);
@@ -13607,6 +13747,116 @@ fn own_effects(p: &Package, b: &Body, w: &mut u64, fs: &mut FxScratch) u8 {
         }
     }
     return f;
+}
+
+// The chunks the per-body passes of `Run::new` split the bodies into (`chunk_bounds`): a fixed count, so the
+// chunks do not depend on the workers.
+const BODY_CHUNKS: u64 = 64;
+
+// Into `out`, the end of each chunk of bodies `0..held` of about equal instructions (`BODY_CHUNKS`).
+fn chunk_bounds(bodies: &Vector<Body>, held: usize, out: &mut Vector<u32>) {
+    out.truncate(0);
+    let mut tot: u64 = 0;
+    for k in 0..held {
+        tot += bodies[k].insts.len() as u64;
+    }
+    let mut acc: u64 = 0;
+    for k in 0..held {
+        acc += bodies[k].insts.len() as u64;
+        if k + 1 == held || acc * BODY_CHUNKS >= tot * (out.len() as u64 + 1) {
+            out.push(k as u32 + 1);
+        }
+    }
+}
+
+// One chunk of `effects`' own facts: bodies `lo..hi`, per body its flags, written parameters and escaping
+// parameters, and its passes (`pass`, `poff` from `at[i]`) and spans (`sp` from `sp_at[i]`), as `effects`
+// appends them.
+struct FxChunk {
+    lo: usize,
+    hi: usize,
+    fx: Vector<u8>,
+    w: Vector<u64>,
+    esc: Vector<u64>,
+    pass: Vector<u64>,
+    poff: Vector<i64>,
+    at: Vector<u32>,
+    sp: Vector<u64>,
+    sp_at: Vector<u32>,
+}
+
+extend FxChunk {
+    fn new(lo: usize, hi: usize) FxChunk {
+        return FxChunk {
+            lo: lo,
+            hi: hi,
+            fx: Vector::<u8>::with_capacity(hi - lo),
+            w: Vector::<u64>::with_capacity(hi - lo),
+            esc: Vector::<u64>::with_capacity(hi - lo),
+            pass: Vector::<u64>::new(),
+            poff: Vector::<i64>::new(),
+            at: Vector::<u32>::with_capacity(hi - lo + 1),
+            sp: Vector::<u64>::new(),
+            sp_at: Vector::<u32>::with_capacity(hi - lo + 1),
+        };
+    }
+}
+
+// The package and bodies the chunks read, and the chunks, each written by its own task alone.
+struct FxCtx {
+    p: *const Package,
+    bodies: *const Vector<Body>,
+    chunks: *mut FxChunk,
+}
+
+fn fx_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const FxCtx);
+    let p = unsafe &*x.p;
+    let bodies = unsafe &*x.bodies;
+    let ch = unsafe &mut *(x.chunks + c);
+    let mut fs = FxScratch::new();
+    for k in ch.lo..ch.hi {
+        ch.sp_at.push(ch.sp.len() as u32);
+        let mut w: u64 = 0;
+        ch.fx.push(own_effects(p, &bodies[k], &mut w, &mut fs));
+        ch.w.push(w);
+        ch.at.push(ch.pass.len() as u32);
+        let np = (bodies[k].blocks[0].param_len as u64).min(64);
+        ch.esc.push(
+            own_escapes(p, &bodies[k], &mut ch.pass, &mut ch.poff, &mut ch.sp, &mut fs) | if np < 64 {
+                ~0u64 << np
+            } else {
+                0u64
+            },
+        );
+    }
+    ch.sp_at.push(ch.sp.len() as u32);
+    ch.at.push(ch.pass.len() as u32);
+}
+
+// The bodies of a `Run::new` shape test chunk.
+const SHAPE_CHUNK: usize = 256;
+
+// What the shape test chunks read (per body its function's symbol, NONE for none), and per body its
+// result, each written by its chunk alone.
+struct ShapeCtx {
+    p: *const Package,
+    bodies: *const Vector<Body>,
+    owner: *const u32,
+    held: usize,
+    shape: *mut bool,
+}
+
+fn shape_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const ShapeCtx);
+    let p = unsafe &*x.p;
+    let bodies = unsafe &*x.bodies;
+    for k in c * SHAPE_CHUNK..(c * SHAPE_CHUNK + SHAPE_CHUNK).min(x.held) {
+        let s = unsafe x.owner[k];
+        if s != NONE {
+            unsafe x.shape[k] = il::shape_ok(p, s, &bodies[k]);
+        }
+    }
 }
 
 // `effects`'s scratch, reused from body to body.

@@ -6,6 +6,7 @@
 // it), the exports trie, the function starts and an ad-hoc linker signature, which arm64 macOS needs to
 // run the code. Output is a function of the inputs alone: no timestamps.
 import link::util as lu;
+import utils::par as par;
 import link::ar;
 import link::tbd;
 import target::native as nat;
@@ -370,7 +371,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let mut img = Vector::<u8>::new();
     let end = l.segs[l.segs.len() - 1].off;
     img.resize_default(end as usize);
-    if !copy_sections(l, b, &mut img) || !apply_relocations(l, b, &mut img) {
+    if !apply_relocations(l, b, &mut img, o.jobs) {
         return false;
     }
     if !write_synthetic(l, &mut img) {
@@ -1613,18 +1614,6 @@ const fn g_addr(l: &L, g: u32) u64 {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-const fn copy_sections(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
-    for s in 0..l.secs.len() {
-        let sc = l.secs[s];
-        if sc.out == NONE || zerofill(sc.flags) {
-            continue;
-        }
-        let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
-        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
-    }
-    return true;
-}
-
 // The import of library symbol `g` plus `addend`, added when new.
 fn import_of(l: &mut L, g: u32, addend: i64) u32 {
     let gy = l.gs[g as usize];
@@ -1655,175 +1644,254 @@ fn pointer(l: &mut L, at: u64, value: u64, g: u32, addend: i64) {
     }
 }
 
-fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
+// Copy each input section into the image and apply its relocations: the sections by chunks on worker
+// threads unless `jobs` is 1 (each writes its own bytes), then the pointers they store in section order
+// (`pointer`), which is the image's fixup order. The first error in section order fails the link.
+fn apply_relocations(l: &mut L, b: []u8, img: &mut Vector<u8>, jobs: u32) bool {
+    let mut w = Vector::<u64>::with_capacity(l.secs.len());
     for s in 0..l.secs.len() {
-        let sc = l.secs[s];
-        if sc.out == NONE || sc.nreloc == 0 {
+        w.push(l.secs[s].nreloc as u64 + 1);
+    }
+    let mut ends = Vector::<u32>::new();
+    lu::chunk_ends(&w, &mut ends);
+    let mut chunks = Vector::<RelChunk>::with_capacity(ends.len());
+    for c in 0..ends.len() {
+        chunks.push(
+            RelChunk {
+                lo: if c == 0 {
+                    0
+                } else {
+                    ends[c - 1]
+                },
+                hi: ends[c],
+                ptrs: Vector::<Ptr>::new(),
+                bad: false,
+                err: String::new(),
+            },
+        );
+    }
+    let mut cx = RelCtx { l: l, b: b.ptr, blen: b.len(), img: lu::Img::of(img), chunks: chunks.as_mut_ptr() };
+    par::chunks(chunks.len(), jobs, rel_chunk, (&mut cx) as *mut RelCtx);
+    for c in 0..chunks.len() {
+        let ch = chunks.index_mut(c);
+        for i in 0..ch.ptrs.len() {
+            let q = ch.ptrs[i];
+            pointer(l, q.at, q.value, q.g, q.addend);
+        }
+        if ch.bad {
+            l.err.push_string(&ch.err);
+            return false;
+        }
+    }
+    return true;
+}
+
+// A pointer a relocation stores (`pointer`'s arguments).
+struct Ptr {
+    at: u64,
+    value: u64,
+    g: u32,
+    addend: i64,
+}
+
+extend Ptr as Copy {}
+
+// One chunk of `apply_relocations`: input sections `lo..hi`, the pointers they store in order, and whether
+// one failed (`err`: why; the sections after it in the chunk stay as they are).
+struct RelChunk {
+    lo: u32,
+    hi: u32,
+    ptrs: Vector<Ptr>,
+    bad: bool,
+    err: String,
+}
+
+// What the chunks read, the image they write, and the chunks, each written by its own task alone.
+struct RelCtx {
+    l: *const L,
+    b: *const u8,
+    blen: usize,
+    img: lu::Img,
+    chunks: *mut RelChunk,
+}
+
+fn rel_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const RelCtx);
+    let ch = unsafe &mut *(x.chunks + c);
+    let b = unsafe Slice::<u8> { ptr: x.b, len: x.blen };
+    for s in ch.lo as usize..ch.hi as usize {
+        if !relocate(unsafe &*x.l, b, x.img, s, &mut ch.ptrs, &mut ch.err) {
+            ch.bad = true;
+            return;
+        }
+    }
+}
+
+// Input section `s` into image `img`, its relocations applied: the pointers it stores into `ptrs`, in order.
+// False, with the reason in `err`, when a relocation cannot be applied.
+fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, ptrs: &mut Vector<Ptr>, err: &mut String) bool {
+    let sc = l.secs[s];
+    if sc.out == NONE {
+        return true;
+    }
+    if !zerofill(sc.flags) {
+        img.put((l.osecs[sc.out as usize].off + sc.at) as usize, b[sc.off..sc.off + sc.size as usize]);
+    }
+    let os = l.osecs[sc.out as usize];
+    let f = l.files[sc.file as usize];
+    let writable = l.sn.spell(os.segname) != "__TEXT";
+    let tvars = (sc.flags & S_TYPE) == S_THREAD_LOCAL_VARIABLES;
+    let mut addend: i64 = 0;
+    let mut sub: u64 = 0;
+    let mut has_sub = false;
+    for r in 0..sc.nreloc as usize {
+        let w0 = lu::r32(b, sc.reloff + 8 * r);
+        let w1 = lu::r32(b, sc.reloff + 8 * r + 4);
+        let off = w0 as u64;
+        let symnum = w1 & 0xFFFFFF;
+        let pcrel = (w1 >> 24 & 1) != 0;
+        let len = w1 >> 25 & 3;
+        let ext = (w1 >> 27 & 1) != 0;
+        let ty = w1 >> 28;
+        if ty == R_ADDEND {
+            addend = (symnum << 8) as i32 >> 8;
             continue;
         }
-        let os = l.osecs[sc.out as usize];
-        let f = l.files[sc.file as usize];
-        let writable = l.sn.spell(os.segname) != "__TEXT";
-        let tvars = (sc.flags & S_TYPE) == S_THREAD_LOCAL_VARIABLES;
-        let mut addend: i64 = 0;
-        let mut sub: u64 = 0;
-        let mut has_sub = false;
-        for r in 0..sc.nreloc as usize {
-            let w0 = lu::r32(b, sc.reloff + 8 * r);
-            let w1 = lu::r32(b, sc.reloff + 8 * r + 4);
-            let off = w0 as u64;
-            let symnum = w1 & 0xFFFFFF;
-            let pcrel = (w1 >> 24 & 1) != 0;
-            let len = w1 >> 25 & 3;
-            let ext = (w1 >> 27 & 1) != 0;
-            let ty = w1 >> 28;
-            if ty == R_ADDEND {
-                addend = (symnum << 8) as i32 >> 8;
+        let p_addr = os.addr + sc.at + off;
+        let p = (os.off + sc.at + off) as usize;
+        // The target: a symbol (local, global or a library's), or a section of the object.
+        let mut g = NONE;
+        let mut target: u64 = 0;
+        if ext {
+            let k = f.sym0 + symnum;
+            let y = l.syms[k as usize];
+            g = gof(l, y);
+            if g == NONE {
+                target = sym_addr(l, k);
+            } else if l.gs[g as usize].kind != G_DYLIB {
+                target = g_addr(l, g);
+                g = NONE;
+            }
+        } else if ty != R_UNSIGNED && ty != R_SUBTRACTOR {
+            err.format_into("'{}': a section-relative relocation of type {}", l.paths[f.path as usize].as_str(), ty);
+            return false;
+        }
+        if ty == R_SUBTRACTOR {
+            if g != NONE {
+                err.format_into("'{}': a difference with a library's symbol", l.paths[f.path as usize].as_str());
+                return false;
+            }
+            sub = target;
+            has_sub = true;
+            continue;
+        }
+        if ty == R_UNSIGNED {
+            let stored = if len == 3 {
+                img.r64(p)
+            } else {
+                img.r32(p) as u64
+            };
+            if !ext {
+                target = section_relative(l, f, symnum, stored);
+            }
+            let v = if ext {
+                target.wrapping_add(stored)
+            } else {
+                target
+            };
+            if has_sub {
+                has_sub = false;
+                let d = v.wrapping_sub(sub);
+                if len == 3 {
+                    img.p64(p, d);
+                } else {
+                    img.p32(p, d as u32);
+                }
                 continue;
             }
-            let p_addr = os.addr + sc.at + off;
-            let p = (os.off + sc.at + off) as usize;
-            // The target: a symbol (local, global or a library's), or a section of the object.
-            let mut g = NONE;
-            let mut target: u64 = 0;
-            if ext {
-                let k = f.sym0 + symnum;
-                let y = l.syms[k as usize];
-                g = gof(l, y);
-                if g == NONE {
-                    target = sym_addr(l, k);
-                } else if l.gs[g as usize].kind != G_DYLIB {
-                    target = g_addr(l, g);
-                    g = NONE;
-                }
-            } else if ty != R_UNSIGNED && ty != R_SUBTRACTOR {
-                l.err.format_into(
-                    "'{}': a section-relative relocation of type {}",
+            if len != 3 || pcrel {
+                err.format_into("'{}': a 32-bit absolute address", l.paths[f.path as usize].as_str());
+                return false;
+            }
+            if tvars && off % 24 == 16 {
+                // A descriptor's third word: its variable's offset in the thread-local template.
+                img.p64(p, v - l.tlv_start);
+                continue;
+            }
+            if !writable {
+                err.format_into(
+                    "'{}': an absolute address in read-only section {},{}",
                     l.paths[f.path as usize].as_str(),
-                    ty,
+                    l.sn.spell(os.segname),
+                    l.sn.spell(os.sect),
                 );
                 return false;
             }
-            if ty == R_SUBTRACTOR {
-                if g != NONE {
-                    l.err.format_into("'{}': a difference with a library's symbol", l.paths[f.path as usize].as_str());
-                    return false;
-                }
-                sub = target;
-                has_sub = true;
-                continue;
-            }
-            if ty == R_UNSIGNED {
-                let stored = if len == 3 {
-                    lu::r64(img.as_slice(), p)
-                } else {
-                    lu::r32(img.as_slice(), p) as u64
-                };
-                if !ext {
-                    target = section_relative(l, f, symnum, stored);
-                }
-                let v = if ext {
-                    target.wrapping_add(stored)
-                } else {
-                    target
-                };
-                if has_sub {
-                    has_sub = false;
-                    let d = v.wrapping_sub(sub);
-                    if len == 3 {
-                        lu::p64(img, p, d);
-                    } else {
-                        lu::p32(img, p, d as u32);
-                    }
-                    continue;
-                }
-                if len != 3 || pcrel {
-                    l.err.format_into("'{}': a 32-bit absolute address", l.paths[f.path as usize].as_str());
-                    return false;
-                }
-                if tvars && off % 24 == 16 {
-                    // A descriptor's third word: its variable's offset in the thread-local template.
-                    lu::p64(img, p, v - l.tlv_start);
-                    continue;
-                }
-                if !writable {
-                    l.err.format_into(
-                        "'{}': an absolute address in read-only section {},{}",
-                        l.paths[f.path as usize].as_str(),
-                        l.sn.spell(os.segname),
-                        l.sn.spell(os.sect),
-                    );
-                    return false;
-                }
-                if (p_addr & 3) != 0 {
-                    l.err.format_into(
-                        "'{}': a pointer at an address not a multiple of 4",
-                        l.paths[f.path as usize].as_str(),
-                    );
-                    return false;
-                }
-                lu::p64(img, p, 0);
-                pointer(l, p_addr, v, g, stored as i64);
-                continue;
-            }
-            let insn = lu::r32(img.as_slice(), p);
-            if ty == R_BRANCH26 {
-                let t = if g != NONE {
-                    l.osecs[l.o_stubs as usize].addr + 12 * l.gs[g as usize].stub as u64
-                } else {
-                    target
-                }.wrapping_add(addend as u64);
-                let d = t.wrapping_sub(p_addr) as i64;
-                if d < -(1i64 << 27) || d >= 1i64 << 27 {
-                    l.err.format_into("'{}': a branch beyond 128 MiB", l.paths[f.path as usize].as_str());
-                    return false;
-                }
-                lu::p32(img, p, insn & 0xFC000000 | (d >> 2) as u32 & 0x3FFFFFF);
-            } else if ty == R_PAGE21 || ty == R_GOT_LOAD_PAGE21 || ty == R_TLVP_LOAD_PAGE21 {
-                let t = if ty == R_GOT_LOAD_PAGE21 {
-                    got_addr(l, f, symnum)
-                } else {
-                    target.wrapping_add(addend as u64)
-                };
-                let d = (t & ~0xFFFu64).wrapping_sub(p_addr & ~0xFFFu64) as i64 >> 12;
-                if d < -(1i64 << 20) || d >= 1i64 << 20 {
-                    l.err.format_into("'{}': a page reference beyond 4 GiB", l.paths[f.path as usize].as_str());
-                    return false;
-                }
-                let imm = d as u32;
-                lu::p32(img, p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
-            } else if ty == R_PAGEOFF12 || ty == R_GOT_LOAD_PAGEOFF12 {
-                let t = if ty == R_GOT_LOAD_PAGEOFF12 {
-                    got_addr(l, f, symnum)
-                } else {
-                    target.wrapping_add(addend as u64)
-                };
-                let lo = (t & 0xFFF) as u32;
-                let mut sh: u32 = 0;
-                if (insn & 0x3B000000) == 0x39000000 {
-                    sh = insn >> 30;
-                    if (insn & 0x04800000) == 0x04800000 {
-                        sh = 4;
-                    }
-                }
-                if (lo & (1u32 << sh) - 1) != 0 {
-                    l.err.format_into("'{}': a misaligned page offset", l.paths[f.path as usize].as_str());
-                    return false;
-                }
-                lu::p32(img, p, insn & 0xFFC003FF | lo >> sh << 10);
-            } else if ty == R_TLVP_LOAD_PAGEOFF12 {
-                // The descriptor is the image's own: the load of its address becomes an add.
-                let lo = (target.wrapping_add(addend as u64) & 0xFFF) as u32;
-                lu::p32(img, p, 0x91000000 | lo << 10 | (insn >> 5 & 31) << 5 | insn & 31);
-            } else if ty == R_POINTER_TO_GOT && pcrel && len == 2 {
-                let d = got_addr(l, f, symnum).wrapping_sub(p_addr);
-                lu::p32(img, p, d as u32);
-            } else {
-                l.err.format_into("'{}': relocation type {} is not supported", l.paths[f.path as usize].as_str(), ty);
+            if (p_addr & 3) != 0 {
+                err.format_into("'{}': a pointer at an address not a multiple of 4", l.paths[f.path as usize].as_str());
                 return false;
             }
-            addend = 0;
+            img.p64(p, 0);
+            ptrs.push(Ptr { at: p_addr, value: v, g: g, addend: stored as i64 });
+            continue;
         }
+        let insn = img.r32(p);
+        if ty == R_BRANCH26 {
+            let t = if g != NONE {
+                l.osecs[l.o_stubs as usize].addr + 12 * l.gs[g as usize].stub as u64
+            } else {
+                target
+            }.wrapping_add(addend as u64);
+            let d = t.wrapping_sub(p_addr) as i64;
+            if d < -(1i64 << 27) || d >= 1i64 << 27 {
+                err.format_into("'{}': a branch beyond 128 MiB", l.paths[f.path as usize].as_str());
+                return false;
+            }
+            img.p32(p, insn & 0xFC000000 | (d >> 2) as u32 & 0x3FFFFFF);
+        } else if ty == R_PAGE21 || ty == R_GOT_LOAD_PAGE21 || ty == R_TLVP_LOAD_PAGE21 {
+            let t = if ty == R_GOT_LOAD_PAGE21 {
+                got_addr(l, f, symnum)
+            } else {
+                target.wrapping_add(addend as u64)
+            };
+            let d = (t & ~0xFFFu64).wrapping_sub(p_addr & ~0xFFFu64) as i64 >> 12;
+            if d < -(1i64 << 20) || d >= 1i64 << 20 {
+                err.format_into("'{}': a page reference beyond 4 GiB", l.paths[f.path as usize].as_str());
+                return false;
+            }
+            let imm = d as u32;
+            img.p32(p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
+        } else if ty == R_PAGEOFF12 || ty == R_GOT_LOAD_PAGEOFF12 {
+            let t = if ty == R_GOT_LOAD_PAGEOFF12 {
+                got_addr(l, f, symnum)
+            } else {
+                target.wrapping_add(addend as u64)
+            };
+            let lo = (t & 0xFFF) as u32;
+            let mut sh: u32 = 0;
+            if (insn & 0x3B000000) == 0x39000000 {
+                sh = insn >> 30;
+                if (insn & 0x04800000) == 0x04800000 {
+                    sh = 4;
+                }
+            }
+            if (lo & (1u32 << sh) - 1) != 0 {
+                err.format_into("'{}': a misaligned page offset", l.paths[f.path as usize].as_str());
+                return false;
+            }
+            img.p32(p, insn & 0xFFC003FF | lo >> sh << 10);
+        } else if ty == R_TLVP_LOAD_PAGEOFF12 {
+            // The descriptor is the image's own: the load of its address becomes an add.
+            let lo = (target.wrapping_add(addend as u64) & 0xFFF) as u32;
+            img.p32(p, 0x91000000 | lo << 10 | (insn >> 5 & 31) << 5 | insn & 31);
+        } else if ty == R_POINTER_TO_GOT && pcrel && len == 2 {
+            let d = got_addr(l, f, symnum).wrapping_sub(p_addr);
+            img.p32(p, d as u32);
+        } else {
+            err.format_into("'{}': relocation type {} is not supported", l.paths[f.path as usize].as_str(), ty);
+            return false;
+        }
+        addend = 0;
     }
     return true;
 }

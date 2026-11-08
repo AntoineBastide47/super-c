@@ -9,6 +9,7 @@
 // `.eh_frame` with its binary search table, the symbol table, the debug sections with their
 // relocations applied, and the section headers.
 import link::util as lu;
+import utils::par as par;
 import link::ar;
 import target::native as nat;
 import utils::names as nm;
@@ -40,6 +41,7 @@ pub(package) struct Opts {
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
+    pub(package) jobs: u32, // 1: the sections relocate in this thread, else on the task pool
 }
 
 const SHT_HASH: u32 = 5;
@@ -414,8 +416,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     let end = file_end(l);
     let mut img = Vector::<u8>::new();
     img.resize_default(end as usize);
-    copy_sections(l, b, &mut img);
-    if !apply(l, b, &mut img) {
+    if !apply(l, b, &mut img, o.jobs) {
         return false;
     }
     if !l.shared {
@@ -2044,9 +2045,9 @@ const fn tpoff(l: &L, a: u64) i64 {
 
 // ---- section bytes and relocations ----------------------------------------------------------------------
 
-const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
-    // x86-64 code sections: `int3` between the inputs, so that the processor decodes no memory access past
-    // a `ret` (arm64's 0 words are `udf`).
+// x86-64 code sections: `int3` between the inputs, so that the processor decodes no memory access past a
+// `ret` (arm64's 0 words are `udf`).
+const fn fill_code(l: &L, img: &mut Vector<u8>) {
     if !l.a64 {
         for k in 0..l.osecs.len() {
             let os = l.osecs[k];
@@ -2057,50 +2058,127 @@ const fn copy_sections(l: &L, b: []u8, img: &mut Vector<u8>) {
             }
         }
     }
+}
+
+// Copy each input section into the image and apply its relocations: the sections by chunks on worker
+// threads unless `jobs` is 1 (each writes its own bytes), then the dynamic relocations they add in section
+// order. The first error in section order fails the link.
+fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>, jobs: u32) bool {
+    fill_code(l, img);
+    let mut w = Vector::<u64>::with_capacity(l.secs.len());
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
-        if sc.out == NONE || sc.ty == SHT_NOBITS || seg_of(l.osecs[sc.out as usize].rank) == 4 {
-            continue;
+        w.push(
+            1 + if sc.rela == NONE {
+                0u64
+            } else {
+                l.secs[sc.rela as usize].size / 24
+            },
+        );
+    }
+    let mut ends = Vector::<u32>::new();
+    lu::chunk_ends(&w, &mut ends);
+    let mut chunks = Vector::<RelChunk>::with_capacity(ends.len());
+    for c in 0..ends.len() {
+        chunks.push(
+            RelChunk {
+                lo: if c == 0 {
+                    0
+                } else {
+                    ends[c - 1]
+                },
+                hi: ends[c],
+                drels: Vector::<DRel>::new(),
+                bad: false,
+                err: String::new(),
+            },
+        );
+    }
+    let mut cx = RelCtx { l: l, b: b.ptr, blen: b.len(), img: lu::Img::of(img), chunks: chunks.as_mut_ptr() };
+    par::chunks(chunks.len(), jobs, rel_chunk, (&mut cx) as *mut RelCtx);
+    for c in 0..chunks.len() {
+        let ch = chunks.index_mut(c);
+        l.drels.extend_from_slice(&ch.drels);
+        if ch.bad {
+            l.err.push_string(&ch.err);
+            return false;
         }
-        let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
-        if sc.eh != NONE {
-            copy_eh(l, b, sc, img, at);
-            continue;
+    }
+    return true;
+}
+
+// One chunk of `apply`: input sections `lo..hi`, the dynamic relocations they add in order, and whether one
+// failed (`err`: why; the sections after it in the chunk stay as they are).
+struct RelChunk {
+    lo: u32,
+    hi: u32,
+    drels: Vector<DRel>,
+    bad: bool,
+    err: String,
+}
+
+// What the chunks read, the image they write, and the chunks, each written by its own task alone.
+struct RelCtx {
+    l: *const L,
+    b: *const u8,
+    blen: usize,
+    img: lu::Img,
+    chunks: *mut RelChunk,
+}
+
+fn rel_chunk(ctx: *mut void, c: usize) {
+    let x = unsafe &*(ctx as *const RelCtx);
+    let ch = unsafe &mut *(x.chunks + c);
+    let b = unsafe Slice::<u8> { ptr: x.b, len: x.blen };
+    for s in ch.lo as usize..ch.hi as usize {
+        if !relocate(unsafe &*x.l, b, x.img, s, &mut ch.drels, &mut ch.err) {
+            ch.bad = true;
+            return;
         }
-        img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
     }
 }
 
-fn apply(l: &mut L, b: []u8, img: &mut Vector<u8>) bool {
-    for s in 0..l.secs.len() {
-        let sc = l.secs[s];
-        if sc.rela == NONE || sc.out == NONE || seg_of(l.osecs[sc.out as usize].rank) == 4 {
+// Input section `s` into image `img`, its relocations applied: the dynamic relocations it adds into
+// `drels`, in order. False, with the reason in `err`, when a relocation cannot be applied.
+fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, drels: &mut Vector<DRel>, err: &mut String) bool {
+    let sc = l.secs[s];
+    if sc.out == NONE || seg_of(l.osecs[sc.out as usize].rank) == 4 {
+        return true;
+    }
+    if sc.ty != SHT_NOBITS {
+        let at = (l.osecs[sc.out as usize].off + sc.at) as usize;
+        if sc.eh != NONE {
+            copy_eh(l, b, sc, img, at);
+        } else {
+            img.put(at, b[sc.off..sc.off + sc.size as usize]);
+        }
+    }
+    if sc.rela == NONE {
+        return true;
+    }
+    let rs = l.secs[sc.rela as usize];
+    let f = l.files[sc.file as usize];
+    let os = l.osecs[sc.out as usize];
+    let n = (rs.size / 24) as usize;
+    for i in 0..n {
+        let r = rel_at(b, rs, i);
+        if skipped(l, s as u32, r.off) {
             continue;
         }
-        let rs = l.secs[sc.rela as usize];
-        let f = l.files[sc.file as usize];
-        let os = l.osecs[sc.out as usize];
-        let n = (rs.size / 24) as usize;
-        for i in 0..n {
-            let r = rel_at(b, rs, i);
-            if skipped(l, s as u32, r.off) {
+        // In a packed `.eh_frame`, the field's place among the kept records.
+        let mut off = r.off;
+        if sc.eh != NONE {
+            let j = eh_find(l, sc.eh, sc.eh + sc.neh, r.off as u32);
+            if j == NONE32 || l.eh[j as usize].new == NONE32 {
                 continue;
             }
-            // In a packed `.eh_frame`, the field's place among the kept records.
-            let mut off = r.off;
-            if sc.eh != NONE {
-                let j = eh_find(l, sc.eh, sc.eh + sc.neh, r.off as u32);
-                if j == NONE32 || l.eh[j as usize].new == NONE32 {
-                    continue;
-                }
-                off = r.off - l.eh[j as usize].old as u64 + l.eh[j as usize].new as u64;
-            }
-            let k = f.sym0 + r.sym;
-            let p_addr = os.addr + sc.at + off;
-            let p = (os.off + sc.at + off) as usize;
-            if !reloc(l, img, s as u32, f, k, r, p_addr, p, (sc.flags & SHF_WRITE) != 0) {
-                return false;
-            }
+            off = r.off - l.eh[j as usize].old as u64 + l.eh[j as usize].new as u64;
+        }
+        let k = f.sym0 + r.sym;
+        let p_addr = os.addr + sc.at + off;
+        let p = (os.off + sc.at + off) as usize;
+        if !reloc(l, img, drels, err, s as u32, f, k, r, p_addr, p, (sc.flags & SHF_WRITE) != 0) {
+            return false;
         }
     }
     return true;
@@ -2112,7 +2190,19 @@ const fn fits(v: i64, bits: u32) bool {
 
 // Apply relocation `r` (of input section `s`, symbol `k` of file `f`) at image address `pa`, file offset
 // `p`.
-fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: u64, p: usize, writable: bool) bool {
+fn reloc(
+    l: &L,
+    img: lu::Img,
+    drels: &mut Vector<DRel>,
+    err: &mut String,
+    s: u32,
+    f: IFile,
+    k: u32,
+    r: Rel,
+    pa: u64,
+    p: usize,
+    writable: bool,
+) bool {
     let sv = target(l, k);
     let g = gof(l, k);
     let shared = g != NONE && l.gs[g as usize].kind == G_SHARED;
@@ -2122,47 +2212,47 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         if r.ty == R_X86_64_64 {
             if writable {
                 if shared {
-                    dyn_rel(l, pa, R_X86_64_64, l.gs[g as usize].dynix, r.addend);
+                    drel(drels, pa, R_X86_64_64, l.gs[g as usize].dynix, r.addend);
                 } else {
-                    dyn_rel(l, pa, X_RELATIVE, 0, sa as i64);
+                    drel(drels, pa, X_RELATIVE, 0, sa as i64);
                 }
-                lu::p64(img, p, 0);
+                img.p64(p, 0);
             } else {
-                lu::p64(img, p, sa);
+                img.p64(p, sa);
             }
             return true;
         }
         if r.ty == R_X86_64_PC32 || r.ty == R_X86_64_PLT32 {
             let d = sa.wrapping_sub(pa) as i64;
             if !fits(d, 32) {
-                l.err.format_into("'{}': a 32-bit displacement out of range", path);
+                err.format_into("'{}': a 32-bit displacement out of range", path);
                 return false;
             }
-            lu::p32(img, p, d as u32);
+            img.p32(p, d as u32);
             return true;
         }
         if r.ty == X_PC64 {
-            lu::p64(img, p, sa.wrapping_sub(pa));
+            img.p64(p, sa.wrapping_sub(pa));
             return true;
         }
         if r.ty == X_GOTPCREL || r.ty == R_X86_64_GOTPCRELX || r.ty == R_X86_64_REX_GOTPCRELX {
-            if p >= 2 && call_relaxes(l, g, r, img[p - 2] as u16 << 8 | img[p - 1] as u16) {
+            if p >= 2 && call_relaxes(l, g, r, img.r8(p - 2) as u16 << 8 | img.r8(p - 1) as u16) {
                 let d = sa.wrapping_sub(pa) as i64;
                 if !fits(d, 32) {
-                    l.err.format_into("'{}': a 32-bit displacement out of range", path);
+                    err.format_into("'{}': a 32-bit displacement out of range", path);
                     return false;
                 }
-                img[p - 2] = 0x67;
-                img[p - 1] = 0xE8;
-                lu::p32(img, p, d as u32);
+                img.p8(p - 2, 0x67);
+                img.p8(p - 1, 0xE8);
+                img.p32(p, d as u32);
                 return true;
             }
             let d = slot_addr(l, g, k).wrapping_add(r.addend as u64).wrapping_sub(pa) as i64;
-            lu::p32(img, p, d as u32);
+            img.p32(p, d as u32);
             return true;
         }
         if r.ty == R_X86_64_32 || r.ty == X_32S {
-            lu::p32(img, p, sa as u32);
+            img.p32(p, sa as u32);
             return true;
         }
         if r.ty == R_X86_64_TLSGD {
@@ -2175,72 +2265,72 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
                 [0x64, 0x48, 0x8B, 0x04, 0x25, 0, 0, 0, 0, 0x48, 0x8D, 0x80]
             };
             for j in 0..12usize {
-                img[st + j] = unsafe seq[j];
+                img.p8(st + j, unsafe seq[j]);
             }
             let v = if l.shared {
                 tls_got_addr(l, k).wrapping_sub(pa - 4 + 16)
             } else {
                 tpoff(l, sv) as u64
             };
-            lu::p32(img, st + 12, v as u32);
+            img.p32(st + 12, v as u32);
             let _ = s;
             return true;
         }
         if r.ty == R_X86_64_TPOFF32 {
-            lu::p32(img, p, tpoff(l, sv).wrapping_add(r.addend) as u32);
+            img.p32(p, tpoff(l, sv).wrapping_add(r.addend) as u32);
             return true;
         }
-        l.err.format_into("'{}': x86-64 relocation type {} is not supported", path, r.ty);
+        err.format_into("'{}': x86-64 relocation type {} is not supported", path, r.ty);
         return false;
     }
-    let insn = lu::r32(img.as_slice(), p);
+    let insn = img.r32(p);
     if r.ty == R_AARCH64_ABS64 {
         if writable {
             if shared {
-                dyn_rel(l, pa, R_AARCH64_ABS64, l.gs[g as usize].dynix, r.addend);
+                drel(drels, pa, R_AARCH64_ABS64, l.gs[g as usize].dynix, r.addend);
             } else {
-                dyn_rel(l, pa, A_RELATIVE, 0, sa as i64);
+                drel(drels, pa, A_RELATIVE, 0, sa as i64);
             }
-            lu::p64(img, p, 0);
+            img.p64(p, 0);
         } else {
-            lu::p64(img, p, sa);
+            img.p64(p, sa);
         }
         return true;
     }
     if r.ty == R_AARCH64_ABS32 {
-        lu::p32(img, p, sa as u32);
+        img.p32(p, sa as u32);
         return true;
     }
     if r.ty == R_AARCH64_PREL32 {
-        lu::p32(img, p, sa.wrapping_sub(pa) as u32);
+        img.p32(p, sa.wrapping_sub(pa) as u32);
         return true;
     }
     if r.ty == A_PREL64 {
-        lu::p64(img, p, sa.wrapping_sub(pa));
+        img.p64(p, sa.wrapping_sub(pa));
         return true;
     }
     if r.ty == R_AARCH64_CALL26 || r.ty == R_AARCH64_JUMP26 {
         let d = sa.wrapping_sub(pa) as i64;
         if !fits(d, 28) {
-            l.err.format_into("'{}': a branch beyond 128 MiB", path);
+            err.format_into("'{}': a branch beyond 128 MiB", path);
             return false;
         }
-        lu::p32(img, p, insn & 0xFC000000 | (d >> 2) as u32 & 0x3FFFFFF);
+        img.p32(p, insn & 0xFC000000 | (d >> 2) as u32 & 0x3FFFFFF);
         return true;
     }
     if r.ty == A_CONDBR19 || r.ty == A_LD_PREL_LO19 {
         let d = sa.wrapping_sub(pa) as i64;
-        lu::p32(img, p, insn & 0xFF00001F | ((d >> 2) as u32 & 0x7FFFF) << 5);
+        img.p32(p, insn & 0xFF00001F | ((d >> 2) as u32 & 0x7FFFF) << 5);
         return true;
     }
     if r.ty == A_TSTBR14 {
         let d = sa.wrapping_sub(pa) as i64;
-        lu::p32(img, p, insn & 0xFFF8001F | ((d >> 2) as u32 & 0x3FFF) << 5);
+        img.p32(p, insn & 0xFFF8001F | ((d >> 2) as u32 & 0x3FFF) << 5);
         return true;
     }
     if r.ty == A_ADR_PREL_LO21 {
         let d = sa.wrapping_sub(pa) as u32;
-        lu::p32(img, p, insn & 0x9F00001F | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
+        img.p32(p, insn & 0x9F00001F | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
         return true;
     }
     if r.ty == R_AARCH64_ADR_PREL_PG_HI21 || r.ty == R_AARCH64_ADR_GOT_PAGE {
@@ -2251,11 +2341,11 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         };
         let d = (t & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12;
         if !fits(d, 21) {
-            l.err.format_into("'{}': a page reference beyond 4 GiB", path);
+            err.format_into("'{}': a page reference beyond 4 GiB", path);
             return false;
         }
         let imm = d as u32;
-        lu::p32(img, p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
+        img.p32(p, insn & 0x9F00001F | (imm & 3) << 29 | (imm >> 2 & 0x7FFFF) << 5);
         return true;
     }
     if r.ty == R_AARCH64_ADD_ABS_LO12_NC || r.ty == R_AARCH64_LDST8_ABS_LO12_NC || r.ty == R_AARCH64_LDST16_ABS_LO12_NC || r.ty == R_AARCH64_LDST32_ABS_LO12_NC || r.ty == R_AARCH64_LDST64_ABS_LO12_NC || r.ty == R_AARCH64_LDST128_ABS_LO12_NC || r.ty == R_AARCH64_LD64_GOT_LO12_NC {
@@ -2276,7 +2366,7 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
             0
         };
         let lo = (t & 0xFFF) as u32;
-        lu::p32(img, p, insn & 0xFFC003FF | lo >> sh << 10);
+        img.p32(p, insn & 0xFFC003FF | lo >> sh << 10);
         return true;
     }
     // A thread-local descriptor sequence relaxed to local-exec: movz x0, #hi16, lsl #16; movk x0, #lo16;
@@ -2285,30 +2375,30 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     if r.ty == R_AARCH64_TLSDESC_ADR_PAGE21 && l.shared {
         let slot = tls_got_addr(l, k);
         let d = ((slot & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12) as u32;
-        lu::p32(img, p, 0x90000000 | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
+        img.p32(p, 0x90000000 | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
         return true;
     }
     if r.ty == R_AARCH64_TLSDESC_LD64_LO12 && l.shared {
         let slot = tls_got_addr(l, k);
-        lu::p32(img, p, 0xF9400000 | ((slot & 0xFFF) >> 3) as u32 << 10);
+        img.p32(p, 0xF9400000 | ((slot & 0xFFF) >> 3) as u32 << 10);
         return true;
     }
     if r.ty == R_AARCH64_TLSDESC_ADR_PAGE21 {
         let t = tpoff(l, sv) as u64;
         if t >= 1u64 << 32 {
-            l.err.format_into("'{}': thread-locals beyond 4 GiB", path);
+            err.format_into("'{}': thread-locals beyond 4 GiB", path);
             return false;
         }
-        lu::p32(img, p, 0xD2A00000 | (t >> 16 & 0xFFFF) as u32 << 5);
+        img.p32(p, 0xD2A00000 | (t >> 16 & 0xFFFF) as u32 << 5);
         return true;
     }
     if r.ty == R_AARCH64_TLSDESC_LD64_LO12 {
         let t = tpoff(l, sv) as u64;
-        lu::p32(img, p, 0xF2800000 | (t & 0xFFFF) as u32 << 5);
+        img.p32(p, 0xF2800000 | (t & 0xFFFF) as u32 << 5);
         return true;
     }
     if r.ty == R_AARCH64_TLSDESC_ADD_LO12 || r.ty == R_AARCH64_TLSDESC_CALL {
-        lu::p32(img, p, 0xD503201F);
+        img.p32(p, 0xD503201F);
         return true;
     }
     // Initial-exec: the GOT slot of the offset in a shared library; in an executable the offset itself
@@ -2317,33 +2407,33 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
     if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 && l.shared {
         let slot = tls_got_addr(l, k);
         let d = ((slot & ~0xFFFu64).wrapping_sub(pa & ~0xFFFu64) as i64 >> 12) as u32;
-        lu::p32(img, p, 0x90000000 | rd | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
+        img.p32(p, 0x90000000 | rd | (d & 3) << 29 | (d >> 2 & 0x7FFFF) << 5);
         return true;
     }
     if r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC && l.shared {
         let slot = tls_got_addr(l, k);
-        lu::p32(img, p, insn & 0xFFC003FF | ((slot & 0xFFF) >> 3) as u32 << 10);
+        img.p32(p, insn & 0xFFC003FF | ((slot & 0xFFF) >> 3) as u32 << 10);
         return true;
     }
     // Local-exec: the thread pointer offset itself.
     let tp = tpoff(l, sv).wrapping_add(r.addend) as u64;
     let le = r.ty >= A_TLSLE_MOVW_TPREL_G2 && r.ty <= A_TLSLE_LDST64_TPREL_LO12_NC || r.ty == A_TLSLE_LDST128_TPREL_LO12 || r.ty == A_TLSLE_LDST128_TPREL_LO12_NC;
     if (r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 || r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC || le) && l.shared {
-        l.err.format_into("'{}': a local-exec thread-local access in a shared library", path);
+        err.format_into("'{}': a local-exec thread-local access in a shared library", path);
         return false;
     }
     if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 || r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC || r.ty == A_TLSLE_ADD_TPREL_HI12 {
         if tp >= 1u64 << 24 && r.ty == A_TLSLE_ADD_TPREL_HI12 || tp >= 1u64 << 32 {
-            l.err.format_into("'{}': thread-locals beyond the reach of their access", path);
+            err.format_into("'{}': thread-locals beyond the reach of their access", path);
             return false;
         }
     }
     if r.ty == A_TLSIE_ADR_GOTTPREL_PAGE21 {
-        lu::p32(img, p, 0xD2A00000 | rd | (tp >> 16 & 0xFFFF) as u32 << 5);
+        img.p32(p, 0xD2A00000 | rd | (tp >> 16 & 0xFFFF) as u32 << 5);
         return true;
     }
     if r.ty == A_TLSIE_LD64_GOTTPREL_LO12_NC {
-        lu::p32(img, p, 0xF2800000 | rd | (tp & 0xFFFF) as u32 << 5);
+        img.p32(p, 0xF2800000 | rd | (tp & 0xFFFF) as u32 << 5);
         return true;
     }
     if r.ty >= A_TLSLE_MOVW_TPREL_G2 && r.ty <= A_TLSLE_MOVW_TPREL_G0_NC {
@@ -2355,15 +2445,15 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         } else {
             0
         };
-        lu::p32(img, p, insn & 0xFFE0001F | (tp >> sh & 0xFFFF) as u32 << 5);
+        img.p32(p, insn & 0xFFE0001F | (tp >> sh & 0xFFFF) as u32 << 5);
         return true;
     }
     if r.ty == A_TLSLE_ADD_TPREL_HI12 {
-        lu::p32(img, p, insn & 0xFFC003FF | (tp >> 12 & 0xFFF) as u32 << 10);
+        img.p32(p, insn & 0xFFC003FF | (tp >> 12 & 0xFFF) as u32 << 10);
         return true;
     }
     if r.ty == A_TLSLE_ADD_TPREL_LO12 || r.ty == A_TLSLE_ADD_TPREL_LO12_NC {
-        lu::p32(img, p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 << 10);
+        img.p32(p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 << 10);
         return true;
     }
     if le {
@@ -2373,19 +2463,24 @@ fn reloc(l: &mut L, img: &mut Vector<u8>, s: u32, f: IFile, k: u32, r: Rel, pa: 
         } else {
             (r.ty - A_TLSLE_LDST8_TPREL_LO12) / 2
         };
-        lu::p32(img, p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 >> sh << 10);
+        img.p32(p, insn & 0xFFC003FF | (tp & 0xFFF) as u32 >> sh << 10);
         return true;
     }
-    l.err.format_into("'{}': arm64 relocation type {} is not supported", path, r.ty);
+    err.format_into("'{}': arm64 relocation type {} is not supported", path, r.ty);
     return false;
 }
 
 fn dyn_rel(l: &mut L, at: u64, ty: u32, sym: u32, addend: i64) {
-    l.drels.push(DRel { at: at, ty: ty, sym: sym, addend: addend });
+    drel(&mut l.drels, at, ty, sym, addend);
 }
 
 // Apply the relocations of the debug sections: addresses at their link-time values, offsets into other
 // debug sections at the merged section's.
+// Dynamic relocation `(at, ty, sym, addend)` into `d`.
+fn drel(d: &mut Vector<DRel>, at: u64, ty: u32, sym: u32, addend: i64) {
+    d.push(DRel { at: at, ty: ty, sym: sym, addend: addend });
+}
+
 const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>) {
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
@@ -2434,21 +2529,19 @@ fn dropped_target(l: &L, k: u32) bool {
 
 // Copy the kept records of packed `.eh_frame` section `sc` to `img` at `at`, each frame entry's pointer to
 // its common entry recomputed.
-fn copy_eh(l: &L, b: []u8, sc: ISec, img: &mut Vector<u8>, at: usize) {
+fn copy_eh(l: &L, b: []u8, sc: ISec, img: lu::Img, at: usize) {
     for j in sc.eh..sc.eh + sc.neh {
         let r = l.eh[j as usize];
         if r.new == NONE32 {
             continue;
         }
         let dst = at + r.new as usize;
-        for i in 0..r.len as usize {
-            img[dst + i] = b[sc.off + r.old as usize + i];
-        }
+        img.put(dst, b[sc.off + r.old as usize..sc.off + r.old as usize + r.len as usize]);
         if r.cie || r.len == 4 {
             continue;
         }
         let c = eh_find(l, sc.eh, sc.eh + sc.neh, r.old + 4 - lu::r32(b, sc.off + r.old as usize + 4));
-        lu::p32(img, dst + 4, r.new + 4 - l.eh[c as usize].new);
+        img.p32(dst + 4, r.new + 4 - l.eh[c as usize].new);
     }
 }
 
