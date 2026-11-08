@@ -48,12 +48,15 @@ Before any optimization work, understand these non-negotiable constraints:
    round, and a wide spread means the box was not quiet. First run after a rebuild is
    a cold outlier. Ignore it. Run 3x interleaved A/B on a quiet machine. A run that
    reports a compile or link failure exits nonzero and measures nothing.
-   Run the benchmark binary directly (`build/bench-bin`). The lane's peak RSS is the process peak over all rounds, the
-   jobs=18 rounds included: the macOS allocator keeps freed memory between rounds (no leak: flat under
-   `SC_LEAK_CHECK=1`), so it reads about 1.1 to 1.2 GiB while one cold build of the compiler peaks near
-   570 MiB at jobs=1 and 700 MiB at jobs=18. Of a build's peak, about 250 MiB is memory the allocator
-   kept after frees (live bytes peak near 390 and 450 MiB, in borrowck); a trim at each phase boundary
-   cut a jobs=18 build's peak by about 40 MiB but cost 0.5% cycles and raised the lane's peak.
+   Run the benchmark binary directly (`build/bench-bin`). Judge a build's memory on the lane's
+   "peak memory of one build in a process of its own" line (macOS M5 Pro: 423 MiB at jobs=1, 408 MiB
+   at jobs=18, physical footprint). The final peak RSS is the bench process's over all rounds: the
+   allocator keeps freed memory between rounds (no leak: flat under `SC_LEAK_CHECK=1`), so it reads
+   1.2 to 2.1 GiB on macOS, by machine. Inside one long-lived process macOS's footprint undercounts:
+   pages the allocator frees and then reuses do not count again. Of a build's peak resident set, about
+   250 MiB is memory the allocator kept after frees (live bytes peak near 390 and 450 MiB, in
+   borrowck); a trim at each phase boundary cut a jobs=18 build's peak by about 40 MiB but cost 0.5%
+   cycles and raised the lane's peak.
 
 ## Rationalizations to Reject
 
