@@ -358,6 +358,8 @@ b0(v0: f32, v1: f64):
   v42 = bitcast.v2i64 v40
   v43 = bitcast.v16i8 v40
   v44 = vsumw.v2i64 v42, v43
+  v45 = vmulw.s.hi.v8i16 v43, v43
+  v46 = vmulw.v8i16 v43, v43
   ret v41
 fn @memory
   sig (ptr, i64) -> void
@@ -393,6 +395,7 @@ b0(v0: ptr, v1: i64):
   sys.cpuid v2, v15, v15
   v16 = sys.xgetbv.i64 v15
   v17 = sys.svl.i64
+  v18 = load.v16i8 v0 align 4 block
   ret
 fn @bare
   naked

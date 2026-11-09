@@ -6696,35 +6696,59 @@ extend f32 {
     }
     /// The larger of the two by IEEE 754-2019 `maximum`: NaN when either is NaN, and +0.0 above -0.0.
     pub const fn maximum(self: f32, other: f32) f32 {
-        if self > other {
-            return self;
-        }
-        if other > self {
-            return other;
-        }
-        if self == other {
-            if self.is_sign_positive() && other.is_sign_negative() {
-                return self;
-            }
-            return other;
-        }
-        return self + other; // a NaN operand: the sum is a quiet NaN
+        // Selects, no branches: a loop of them vectorizes. Of equal values the `and` of their bits
+        // (+0.0 above -0.0).
+        let e = f32::from_bits(self.to_bits() & other.to_bits());
+        let m = if self > other {
+            self
+        } else {
+            other
+        };
+        let k = if self == other {
+            e
+        } else {
+            m
+        };
+        // A NaN operand: the sum is a quiet NaN.
+        let q = self + other;
+        let r = if self != self {
+            q
+        } else {
+            k
+        };
+        return if other != other {
+            q
+        } else {
+            r
+        };
     }
     /// The smaller of the two by IEEE 754-2019 `minimum`: NaN when either is NaN, and -0.0 below +0.0.
     pub const fn minimum(self: f32, other: f32) f32 {
-        if self < other {
-            return self;
-        }
-        if other < self {
-            return other;
-        }
-        if self == other {
-            if self.is_sign_negative() && other.is_sign_positive() {
-                return self;
-            }
-            return other;
-        }
-        return self + other; // a NaN operand: the sum is a quiet NaN
+        // Selects, no branches: a loop of them vectorizes. Of equal values the `or` of their bits
+        // (-0.0 below +0.0).
+        let e = f32::from_bits(self.to_bits() | other.to_bits());
+        let m = if self < other {
+            self
+        } else {
+            other
+        };
+        let k = if self == other {
+            e
+        } else {
+            m
+        };
+        // A NaN operand: the sum is a quiet NaN.
+        let q = self + other;
+        let r = if self != self {
+            q
+        } else {
+            k
+        };
+        return if other != other {
+            q
+        } else {
+            r
+        };
     }
 }
 
@@ -7098,35 +7122,59 @@ extend f64 {
     }
     /// The larger of the two by IEEE 754-2019 `maximum`: NaN when either is NaN, and +0.0 above -0.0.
     pub const fn maximum(self: f64, other: f64) f64 {
-        if self > other {
-            return self;
-        }
-        if other > self {
-            return other;
-        }
-        if self == other {
-            if self.is_sign_positive() && other.is_sign_negative() {
-                return self;
-            }
-            return other;
-        }
-        return self + other; // a NaN operand: the sum is a quiet NaN
+        // Selects, no branches: a loop of them vectorizes. Of equal values the `and` of their bits
+        // (+0.0 above -0.0).
+        let e = f64::from_bits(self.to_bits() & other.to_bits());
+        let m = if self > other {
+            self
+        } else {
+            other
+        };
+        let k = if self == other {
+            e
+        } else {
+            m
+        };
+        // A NaN operand: the sum is a quiet NaN.
+        let q = self + other;
+        let r = if self != self {
+            q
+        } else {
+            k
+        };
+        return if other != other {
+            q
+        } else {
+            r
+        };
     }
     /// The smaller of the two by IEEE 754-2019 `minimum`: NaN when either is NaN, and -0.0 below +0.0.
     pub const fn minimum(self: f64, other: f64) f64 {
-        if self < other {
-            return self;
-        }
-        if other < self {
-            return other;
-        }
-        if self == other {
-            if self.is_sign_negative() && other.is_sign_positive() {
-                return self;
-            }
-            return other;
-        }
-        return self + other; // a NaN operand: the sum is a quiet NaN
+        // Selects, no branches: a loop of them vectorizes. Of equal values the `or` of their bits
+        // (-0.0 below +0.0).
+        let e = f64::from_bits(self.to_bits() | other.to_bits());
+        let m = if self < other {
+            self
+        } else {
+            other
+        };
+        let k = if self == other {
+            e
+        } else {
+            m
+        };
+        // A NaN operand: the sum is a quiet NaN.
+        let q = self + other;
+        let r = if self != self {
+            q
+        } else {
+            k
+        };
+        return if other != other {
+            q
+        } else {
+            r
+        };
     }
 }
 

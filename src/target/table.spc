@@ -95,10 +95,28 @@ pub(package) struct Isa {
     /// The lane sizes whose absolute differences the native backend computes in registers:
     /// `lir::ir::Package::vec_absd`.
     pub(package) vector_absd: u8,
+    /// Per bit operation the lane sizes whose results the native backend computes in registers, a bit per
+    /// size in bytes: `clz` in bits 0 to 7, `popcnt` in 8 to 15, `bswap` in 16 to 23:
+    /// `lir::ir::Package::vec_bits`. arm64 counts in CLZ, CNT and UADDLP, and swaps in REV16, REV32, REV64;
+    /// wasm32 counts the set bits of lanes up to 4 bytes in `i8x16.popcnt` and pairwise sums, and swaps in
+    /// `i8x16.shuffle`; x86-64 swaps in SSE2 (PSHUFLW, PSHUFHW and word shifts).
+    pub(package) vector_bits: u32,
+    /// The native backend makes the bits of a 16-byte lane mask of bytes (bit `k` for byte `k`) in one
+    /// instruction: `lir::ir::Package::mask_bits`. x86-64 PMOVMSKB.
+    pub(package) mask_bits: bool,
+    /// The instructions a permutation of the lanes of up to three vectors takes in registers, 0 for none:
+    /// `lir::ir::Package::vec_perm3`. arm64 9 (per vector an index table's ADRP and LDR, and TBL or TBX),
+    /// wasm32 2 (two `i8x16.shuffle`); x86-64 0, 9 with SSSE3 (`emit::cemit`, PSHUFB).
+    pub(package) vector_perm3: u8,
     /// The widening sums of lanes into wider lanes the native backend computes in registers, a bit per pair
     /// of sizes (`lir::loops::sumw_bit`): `lir::ir::Package::vec_sumw`. arm64 widens any lanes (UADDLP,
     /// UADALP); x86-64 bytes into 8-byte lanes (PSADBW).
     pub(package) vector_sumw: u16,
+    /// The widening products of lanes the native backend computes in registers, a bit per operand lane size
+    /// in bytes, unsigned in bits 0 to 7 and signed in 8 to 15: `lir::ir::Package::vec_mulw`. arm64 and
+    /// wasm32 multiply any lanes up to 4 bytes (SMULL, UMULL; `extmul`); x86-64 4-byte ones unsigned
+    /// (PMULUDQ), signed with SSE4.1 (PMULDQ, `lir::ir::Package::vec_mulw` from the build's features).
+    pub(package) vector_mulw: u16,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -272,7 +290,11 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_accs: 8,
         vector_sat: 3,
         vector_absd: 3,
+        vector_bits: 0x0E0000,
+        mask_bits: true,
+        vector_perm3: 0,
         vector_sumw: 0x8,
+        vector_mulw: 0x4,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 0,
@@ -314,7 +336,11 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_accs: 16,
         vector_sat: 7,
         vector_absd: 7,
+        vector_bits: 0x0E0F07,
+        mask_bits: false,
+        vector_perm3: 9,
         vector_sumw: 0x8CE,
+        vector_mulw: 0x707,
         access_pairs: true,
         sum_trees: true,
         vector_reduce: 0,
@@ -356,7 +382,11 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_accs: 8,
         vector_sat: 3,
         vector_absd: 7,
+        vector_bits: 0x0E0700,
+        mask_bits: false,
+        vector_perm3: 2,
         vector_sumw: 0x8CE,
+        vector_mulw: 0x707,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 4,
@@ -705,7 +735,11 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_accs: 0,
     vector_sat: 0,
     vector_absd: 0,
+    vector_bits: 0,
+    mask_bits: false,
+    vector_perm3: 0,
     vector_sumw: 0,
+    vector_mulw: 0,
     access_pairs: false,
     sum_trees: false,
     vector_reduce: 0,

@@ -975,7 +975,7 @@ extend Gen {
                 t.op,
                 lane_type(t.ty),
                 &mut un,
-            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT || t.op == O_VSUMW) && in_vreg(
+            ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) && in_vreg(
                 t.ty,
             ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.cr.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
                 t,
@@ -1018,8 +1018,11 @@ extend Gen {
     // its vector operands and result need no memory.
     fn vop_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
-        if lv::lane_perm(self.cr.b(), t) != 0 {
+        if lv::lane_perm(self.cr.b(), t) != 0 || lv::lane_slide(self.cr.b(), t) != 0 {
             return in_vreg(t.ty);
+        }
+        if self.tbl_shuffle(t) {
+            return true;
         }
         if t.b == 0 || t.c != VNONE {
             return false;
@@ -1047,6 +1050,9 @@ extend Gen {
         }
         if c == core::SIMD_ABS_DIFF {
             return in_vreg(t.ty) && in_vreg(t0) && type_bytes(lane_type(t0), 8) < 8;
+        }
+        if c == core::SIMD_POPCNT || c == core::SIMD_CLZ || c == core::SIMD_BSWAP {
+            return in_vreg(t.ty) && t0 == t.ty && bits_in_reg(c, type_bytes(lane_type(t0), 8));
         }
         if rule == core::SR_CHOOSE {
             return in_vreg(t.ty) && lanes(t.ty) >= 2;
@@ -1403,12 +1409,13 @@ extend Gen {
                     return e as u8;
                 }
             }
-            let r = self.tmp(is_v(t));
+            let r = self.tmp(is_v(t) || in_vreg(t));
             self.materialize(v, r);
             self.remat.push(x as u64 << 8 | r as u64);
             return r;
         }
-        let r = self.alloc(is_v(t));
+        // A vector of a v register's size reloads into a v register.
+        let r = self.alloc(is_v(t) || in_vreg(t));
         if va.home == H_SLOT {
             self.mem(mkind(t, true), true, r, a::SP, va.off);
         } else if va.home == H_ARG {
@@ -1543,13 +1550,11 @@ extend Gen {
         // memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW) || t.op == O_VEXTRACT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) || t.op == O_VEXTRACT || self.conv_reg(
             t,
-        ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a)) || self.lane_pair(t) || lv::lane0_op(
-            self.cr.b(),
-            &self.cr.lv.pfold,
+        ) || t.op == O_BITCAST && in_vreg(self.cr.vt(t.a)) && (in_vreg(t.ty) || is_int(t.ty) && type_bytes(t.ty, 8) == 8) || self.lane_pair(
             t,
-        );
+        ) || lv::lane0_op(self.cr.b(), &self.cr.lv.pfold, t);
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.cr.uses.len() {
                 self.sync(self.cr.uses[k]);
@@ -3227,6 +3232,13 @@ extend Gen {
             self.vsumw(i, t);
             return true;
         }
+        if op == O_VMULW {
+            // Unless a sum or difference accumulates it (`lv::FOLD_VMLA`).
+            if !self.cr.lv.pfold[i as usize] {
+                self.vmulw(i, t);
+            }
+            return true;
+        }
         if op == O_VZIPLO || op == O_VZIPHI {
             // Unless a sum widens it (`lv::FOLD_VWADD`).
             if !self.cr.lv.pfold[i as usize] {
@@ -4538,6 +4550,13 @@ extend Gen {
                 self.copy_mem(a::SP, d, base, off, type_bytes(to, self.cr.ptr));
                 return true;
             }
+            if op == O_BITCAST && in_vreg(from) && is_int(to) && type_bytes(to, 8) == type_bytes(from, 8) {
+                // An 8-byte vector in a v register as an integer: FMOV of its D register.
+                let ra = self.reg(t.a);
+                let rd = self.def(i);
+                self.emit(a::fmov_gv(true, false, rd, ra - V0));
+                return true;
+            }
             if op == O_BITCAST {
                 // A vector and a scalar of one size: through memory.
                 if in_mem(from) {
@@ -4706,6 +4725,11 @@ extend Gen {
             }
         }
         let (base, boff) = self.addr(t.a, 0);
+        if t.b == VNONE && off + boff == 0 && base != a::SP && base != a::FP {
+            // The pointer itself (a reference's copy of it, `PTR_NONNULL`): its register when it dies here.
+            let _ = self.def_from(i, t.a, base as u8);
+            return true;
+        }
         if t.b == VNONE {
             // A pointer's step takes the register of the loop parameter it passes to (`def_step`).
             let rd = self.def_step(i);
@@ -7183,9 +7207,10 @@ extend Gen {
 
     // Whether edge `e`'s moves may run before a branch on `test` whose other edge is `o`: they leave the
     // flags as they are and write no register the test reads (`keeps_test`), every parameter of `e`'s
-    // target (a loop header, its back edge) ends its range in this block, and no argument of `o` is in a
-    // register they write, so the other path reads none of the homes they write. One branch then takes the
-    // edge.
+    // target (a loop header, its back edge) ends its range in this block or its register holds no value
+    // the path of `o` reads (`home_dead_on`: a loop's back edge whose exit enters a block that jumps back
+    // into it), and no argument of `o` is in a register they write, so the other path reads none of the
+    // homes they write. One branch then takes the edge.
     fn early_moves(self: &Self, test: Test, e: u32, o: u32) bool {
         if !self.keeps_test(test, e) {
             return false;
@@ -7194,11 +7219,50 @@ extend Gen {
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
         for q in 0..tb.param_len as u32 {
-            if self.cr.lv.end[(ni + tb.param_start + q) as usize] > self.cr.pos {
+            let px = ni + tb.param_start + q;
+            if self.cr.lv.end[px as usize] > self.cr.pos && !self.home_dead_on(o, px) {
                 return false;
             }
         }
         return self.args_apart(e, o);
+    }
+
+    // Whether the fixed register home of parameter value index `px` holds no value the path of edge `o`
+    // reads: neither `px`, nor another value of that home, nor the value the register holds now is live into
+    // `o`'s target (`lv::Live::live_in`) or an argument of `o`. Such a value's range holds this block and
+    // `o`'s target.
+    fn home_dead_on(self: &Self, o: u32, px: u32) bool {
+        let b = self.cr.b();
+        let k = b.edge_target(o);
+        let pk = self.cr.lv.pos[k as usize];
+        if self.cr.va[px as usize].home != H_FIXED {
+            return false;
+        }
+        let r = self.cr.va[px as usize].reg;
+        let y = if (self.cr.held & bit(r)) != 0 {
+            self.cr.owner[r as usize]
+        } else {
+            NONE
+        };
+        for z in 0..self.cr.va.len() as u32 {
+            let vz = self.cr.va[z as usize];
+            if z != px && z != y && !(vz.home == H_FIXED && vz.reg == r) {
+                continue;
+            }
+            let d = self.cr.lv.def_blk[z as usize];
+            if d == NONE || self.cr.lv.pos[d as usize] == NONE || self.cr.lv.pos[d as usize] > self.cr.pos || self.cr.lv.end[z as usize] < self.cr.pos {
+                continue;
+            }
+            for j in 0..b.edge_nargs(o) {
+                if self.cr.vx(b.edge_arg(o, j)) == z {
+                    return false;
+                }
+            }
+            if pk != NONE && self.cr.lv.end[z as usize] >= pk && self.cr.lv.live_in(b, z, k) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Whether no argument of edge `o` is in a register home edge `e`'s moves write.
@@ -8282,6 +8346,15 @@ const fn lane_st(lt: u8, raw: bool) u32 {
 }
 
 // The NEON size field of integer lanes of `eb` bytes.
+// The long form `opc` (bits 12 to 15: SMULL 0xC000, SMLAL 0x8000, SMLSL 0xA000) of widening product `t`
+// (`O_VMULW`): its operands' lane size, U for unsigned, Q (the `2` form) for their high lanes.
+const fn mull_word(t: Inst, opc: u32) u32 {
+    return 0x0E200000u32 | opc | a::on((t.aux & MULW_SIGNED) == 0, 1u32 << 29) | a::on(
+        (t.aux & MULW_HIGH) != 0,
+        1u32 << 30,
+    ) | vsize(type_bytes(lane_type(t.ty), 8) / 2) << 22;
+}
+
 const fn vsize(eb: u32) u32 {
     return eb.trailing_zeros() as u32;
 }
@@ -8471,6 +8544,13 @@ const fn neon_of_simd(c: u8, lt: u8, sg: bool, num: bool, un: &mut bool, fma: &m
         return a::v2op(false, a::V2_CNT, 0, 0, 0);
     }
     return NONE;
+}
+
+// Whether the lanes of `eb` bytes of bit operation `c` (`SIMD_POPCNT`, `SIMD_CLZ`, `SIMD_BSWAP`) compute
+// in v registers (`target::table::Isa.vector_bits`): CNT and UADDLP, CLZ below 8 bytes, REV16, REV32 and
+// REV64.
+const fn bits_in_reg(c: u8, eb: u32) bool {
+    return c == core::SIMD_POPCNT || c == core::SIMD_CLZ && eb < 8 || c == core::SIMD_BSWAP && eb > 1;
 }
 
 extend Gen {
@@ -8671,6 +8751,70 @@ extend Gen {
         self.emit(a::fmov_gv(true, true, rd, a::IP0 as u8));
     }
 
+    // Whether `vop` `t` is a `shuffle` of two or three vectors of its own type of 8 or 16 bytes by a constant
+    // index list (`tbl_lanes`).
+    fn tbl_shuffle(self: &Self, t: Inst) bool {
+        if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b < 2 || t.b > 3 || t.c == VNONE || !in_vreg(
+            t.ty,
+        ) {
+            return false;
+        }
+        let b = self.cr.b();
+        let nb = type_bytes(t.ty, 8);
+        if nb != 8 && nb != 16 || b.pool[t.c as usize] != lanes(t.ty) {
+            return false;
+        }
+        for o in 0..t.b {
+            if self.cr.vt(b.pool[(t.a + o) as usize]) != t.ty {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Shuffle `t` of vectors `ops` into vector `i` (`tbl_shuffle`): per operand a table of the bytes it gives,
+    // 0xFF where another gives them, into v30; TBL of the first, TBX of each other into a temporary (no
+    // operand's register), which then moves into the result.
+    fn tbl_lanes(self: &mut Self, i: u32, t: Inst, ops: &[Value; 4]) {
+        let nb = type_bytes(t.ty, 8);
+        let q = nb == 16;
+        let n = lanes(t.ty);
+        let eb = nb / n;
+        let acc = self.tmp(true) - V0;
+        for o in 0..t.b {
+            let mut w: [u64; 2] = [0, 0];
+            for m in 0..n {
+                let j = self.cr.b().pool[(t.c + 1 + m) as usize];
+                for y in 0..eb {
+                    let byte = if j / n == o {
+                        (j % n * eb + y) as u64
+                    } else {
+                        0xFF
+                    };
+                    let at = m * eb + y;
+                    w[(at / 8) as usize] = w[(at / 8) as usize] | byte << (at % 8 * 8) as u64;
+                }
+            }
+            let ro = self.vec_use(ops[o as usize], V0 + 31) - V0;
+            if q {
+                let k = self.const_sym(w[0], w[1]);
+                self.reloc(a::R_PAGE21, k, 0);
+                self.emit(a::adr(true, a::IP1, 0));
+                self.reloc(a::R_PAGEOFF12, k, 0);
+                self.emit(a::ldst_uimm(a::M_VQ, true, 30, a::IP1, 0));
+            } else {
+                self.mov_imm(a::IP0 as u8, w[0], true);
+                self.emit(a::fmov_gv(true, true, 30, a::IP0 as u8));
+            }
+            // TBL (TBX past the first) of a one-register table: an index past it gives 0 (keeps the lane).
+            self.emit(
+                0x0E000000 | a::on(q, 1u32 << 30) | 30u32 << 16 | a::on(o != 0, 1u32 << 12) | ro as u32 << 5 | acc as u32,
+            );
+        }
+        let rd = (self.def_step(i) - V0) as u32;
+        self.emit(0x0EA01C00 | a::on(q, 1u32 << 30) | acc as u32 << 16 | acc as u32 << 5 | rd);
+    }
+
     // The local read-only symbol of the object holding words `w0` and `w1` (little-endian), 16-byte aligned:
     // one per contents in a body (`kcon`).
     fn const_sym(self: &mut Self, w0: u64, w1: u64) u32 {
@@ -8720,6 +8864,16 @@ extend Gen {
         }
     }
 
+    // Widening product `t` (`O_VMULW`, a register's) into `i`: SMULL or UMULL of the operands' low lanes, the
+    // `2` form of their high ones (`MULW_HIGH`).
+    fn vmulw(self: &mut Self, i: u32, t: Inst) {
+        assert(in_vreg(t.ty), "a64gen: a widening product wider than a register (lir::wide splits it)");
+        let rn = self.vec_use(t.a, V0 + 30);
+        let rm = self.vec_use(t.b, V0 + 31);
+        let rd = self.vec_def(i);
+        self.emit(mull_word(t, 0xC000) | (rm - V0) as u32 << 16 | (rn - V0) as u32 << 5 | (rd - V0) as u32);
+    }
+
     // Widening sum `t` (`O_VSUMW`) into vector `i`: UADDLP of the narrow lanes until twice as wide as the
     // accumulator's halves, then UADALP over the accumulator; a vector outside a v register sums each lane.
     fn vsumw(self: &mut Self, i: u32, t: Inst) {
@@ -8737,7 +8891,7 @@ extend Gen {
                 rn = V0 + 31;
                 eb *= 2;
             }
-            self.accumulate(0x2E206800u32 | vsize(eb) << 22, i, t.a, rn, NOREG);
+            self.accumulate(0x2E206800u32 | q | vsize(eb) << 22, i, t.a, rn, NOREG);
             return;
         }
         self.sync(t.a);
@@ -9114,14 +9268,15 @@ extend Gen {
         self.call_rt("__sc_lane_panic");
     }
 
-    // Accumulating vector instruction `w` (MLA, MLS, USRA, SSRA: Vd plus a function of Vn and Vm, or of Vn
-    // alone when `rm` is NOREG) of result `i` over accumulator `acc`, its other operands in `rn` and `rm`:
+    // Accumulating vector instruction `w0` (MLA, MLS, USRA, SSRA, UADALP, SMLAL, UMLAL, SMLSL, UMLSL: Vd plus a
+    // function of Vn and Vm, or of Vn alone when `rm` is NOREG; its Q bit set) of result `i` over accumulator
+    // `acc`, its other operands in `rn` and `rm`:
     // in `acc`'s register when `acc`, an instruction's value in no other operand's register, dies here
     // (`def_from`); else `acc` copied into the result's register (`def_step`), or into a temporary moved
     // there after when that register holds `rn` or `rm`.
     fn accumulate(self: &mut Self, w0: u32, i: u32, acc: Value, rn: u8, rm: u8) {
         let nb = type_bytes(self.cr.vt(acc), 8);
-        let w = w0 | a::on(nb == 16, 1u32 << 30) | (rn - V0) as u32 << 5 | if rm == NOREG {
+        let w = w0 | (rn - V0) as u32 << 5 | if rm == NOREG {
             0
         } else {
             (rm - V0) as u32 << 16
@@ -9196,10 +9351,18 @@ extend Gen {
         if (op == O_ADD || op == O_SUB) && is_vec(t.ty) {
             let p = self.cr.lv.vmla_mul(self.cr.b(), t);
             if p != VNONE && self.cr.lv.pfold[p as usize] {
-                // MLA or MLS Vd, Vn, Vm over the accumulator, the other operand.
+                // MLA or MLS Vd, Vn, Vm over the accumulator, the other operand; of a widening product SMLAL,
+                // UMLAL, SMLSL or UMLSL.
                 let m = self.cr.b().insts[p as usize];
                 let acc = ast::pick(t.b == p, t.a, t.b);
-                let w = ast::pick(op == O_SUB, 0x2E209400u32, 0x0E209400u32) | vsize(type_bytes(lane_type(t.ty), 8)) << 22;
+                let w = if m.op == O_VMULW {
+                    mull_word(m, ast::pick(op == O_SUB, 0xA000u32, 0x8000u32))
+                } else {
+                    ast::pick(op == O_SUB, 0x2E209400u32, 0x0E209400u32) | vsize(type_bytes(lane_type(t.ty), 8)) << 22 | a::on(
+                        type_bytes(t.ty, 8) == 16,
+                        1u32 << 30,
+                    )
+                };
                 let rn = self.vec_use(m.a, V0 + 30);
                 let rm = self.vec_use(m.b, V0 + 31);
                 self.accumulate(w, i, acc, rn, rm);
@@ -9216,7 +9379,10 @@ extend Gen {
                 let k = self.cr.lv.vshimm(self.cr.b(), sh);
                 let acc = ast::pick(t.b == s, t.a, t.b);
                 let bits = 8 * type_bytes(lane_type(t.ty), 8);
-                let w = ast::pick(sh.op == O_ASHR, 0x0F001400u32, 0x2F001400u32) | 2 * bits - k << 16;
+                let w = ast::pick(sh.op == O_ASHR, 0x0F001400u32, 0x2F001400u32) | 2 * bits - k << 16 | a::on(
+                    type_bytes(t.ty, 8) == 16,
+                    1u32 << 30,
+                );
                 let rn = self.vec_use(sh.a, V0 + 31);
                 self.accumulate(w, i, acc, rn, NOREG);
                 return true;
@@ -9499,6 +9665,22 @@ extend Gen {
             self.masked_in_reg(i, sc == core::SIMD_STORE_MASKED_PTR, &ops, &tys);
             return true;
         }
+        let slide = lv::lane_slide(self.cr.b(), t);
+        if slide != 0 && self.vop_reg(t) {
+            // The lanes of the two in a row from byte `slide` of the first (`lv::lane_slide`): EXT.
+            let nb = type_bytes(t.ty, 8);
+            let rx = self.vec_use(ops[0], V0 + 30);
+            let ry = self.vec_use(ops[1], V0 + 31);
+            let rd = self.def_step(i);
+            self.emit(
+                0x2E000000 | a::on(nb == 16, 1u32 << 30) | (ry - V0) as u32 << 16 | slide << 11 | (rx - V0) as u32 << 5 | (rd - V0) as u32,
+            );
+            return true;
+        }
+        if self.tbl_shuffle(t) {
+            self.tbl_lanes(i, t, &ops);
+            return true;
+        }
         let perm = lv::lane_perm(self.cr.b(), t);
         if self.vop_reg(t) && perm != 0 {
             // The lanes moved (`lv::lane_perm`): REV64 reverses them within each 8 bytes, then EXT #8 swaps the
@@ -9670,6 +9852,33 @@ extend Gen {
         if c == core::SIMD_ABS_DIFF && in_vreg(t.ty) && in_vreg(vt) && eb < 8 {
             // UABD or SABD.
             self.neon_reg(a::on(!sg, 0x20000000) | 0x0E207400 | vsize(eb) << 22, i, ops[0], ops[1], VNONE, nb);
+            return;
+        }
+        if (c == core::SIMD_POPCNT || c == core::SIMD_CLZ || c == core::SIMD_BSWAP) && in_vreg(t.ty) && vt == t.ty && bits_in_reg(
+            c,
+            eb,
+        ) {
+            let q = nb == 16;
+            let rx = self.vec_use(ops[0], V0 + 30);
+            let rd = self.def_step(i);
+            let (d, x) = ((rd - V0) as u32, (rx - V0) as u32);
+            if c == core::SIMD_CLZ {
+                self.emit(a::v2op(q, a::V2_CLZ, vsize(eb), d, x));
+            } else if c == core::SIMD_BSWAP {
+                // REV16, REV32 or REV64 of the bytes.
+                self.emit(
+                    a::v2op(q, ast::pick(eb == 2, a::V2_REV16, ast::pick(eb == 4, a::V2_REV32, a::V2_REV64)), 0, d, x),
+                );
+            } else {
+                // The bytes' counts, summed in pairs (UADDLP) up to the lane's width.
+                self.emit(a::v2op(q, a::V2_CNT, 0, d, x));
+                let mut s: u32 = 0;
+                // Each step doubles the width: at most 3 steps.
+                while 1u32 << s < eb {
+                    self.emit(a::v2op(q, a::V2_UADDLP, s, d, d));
+                    s += 1;
+                }
+            }
             return;
         }
         if rule == core::SR_BITCAST && in_vreg(t.ty) && in_vreg(vt) && type_bytes(t.ty, 8) == nb {
@@ -11137,7 +11346,8 @@ extend Gen {
                 if j < n {
                     self.ld_lane(x, ops[0], j, lt, false, true);
                 } else if c == core::SIMD_SHUFFLE {
-                    self.ld_lane(x, ops[1], j - n, lt, false, true);
+                    // Of the operand `j / n` (a shuffle of two or three vectors).
+                    self.ld_lane(x, ops[(j / n) as usize], j % n, lt, false, true);
                 } else {
                     self.emit(a::mov_reg(true, x, a::ZR));
                 }

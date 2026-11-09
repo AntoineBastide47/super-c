@@ -17,12 +17,18 @@ fn optimized(text: str, bu: lu::Budgets) (Package, Package) {
 
 // `optimized` for a processor with a fused multiply-add when `fma` (`Package.fma`).
 fn optimized_fma(text: str, bu: lu::Budgets, fma: bool) (Package, Package) {
+    return optimized_fm(text, bu, fma, 0);
+}
+
+// `optimized_fma` with the float rewrites `fm` (`FM_*`, `Package.fmath`) allowed.
+fn optimized_fm(text: str, bu: lu::Budgets, fma: bool, fm: u8) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.fma = fma;
+    after.fmath = fm;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let mut v = verify::Verifier::new();
@@ -4216,9 +4222,9 @@ b3:
     let _ = b;
 }
 
-// A body with a 64-bit product, which no vector unit of the targets multiplies, runs `vector` scalar
-// copies of itself, each instruction's copies together; a load of one place its stores keep apart from
-// (the exclusive view's elements) is loaded once before them.
+// A body with a 64-bit product of two values, which no vector unit of the targets multiplies, runs `vector`
+// scalar copies of itself, each instruction's copies together; a load of one place its stores keep apart
+// from (the exclusive view's elements) is loaded once before them.
 @test
 fn a_loop_without_vector_lanes_interleaves_scalar_copies() {
     let src = M"(lir ptr 8
@@ -4229,7 +4235,7 @@ fn @f
   ref p0 0 inner noalias
 b0(v0: ptr, v1: ptr):
   v2 = iconst.i64 0
-  v3 = iconst.i64 3
+  v3 = iconst.i64 11
   v4 = iconst.i64 1
   v5 = load.i64 v0+8 align 3 tbaa 4
   v6 = load.ptr v0 align 3 tbaa 8
@@ -4240,7 +4246,7 @@ b1(v7: i64, v8: i64):
 b2:
   v10 = ptradd v6, v7 * 8
   v11 = load.i64 v10 align 3 tbaa 4
-  v12 = mul.i64 v11, v3
+  v12 = mul.i64 v11, v11
   store v12, v10 align 3 tbaa 4
   v13 = load.i64 v1 align 3 tbaa 4
   v14 = add.i64 v8, v13
@@ -5581,6 +5587,722 @@ b3:
     }
 }
 
+// The slot and symbol addresses an inlined check passes to its failure call leave the loop as constants
+// do, so the loop of the check `i & 63 <u len` vectorizes; each count fails or ends as before.
+@test
+fn a_checks_failure_arguments_leave_its_loop() {
+    let src = M"(lir ptr 8
+sym @mix fn global noinline
+sym @fail fn global noinline
+sym @drive fn global
+sym @MSG data global
+fn @fail
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  panic "index out of bounds"
+fn @mix
+  sig (ptr, ptr) -> void
+  ref p0 4 inner noalias
+  ref p1 4 inner readonly
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v1 align 3
+  v5 = load.i64 v1+8 align 3
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 63
+  jmp b1(v6)
+b1(v9: i64):
+  v10 = icmp.ult v9, v3
+  br v10, b2, b5
+b2:
+  v11 = and.i64 v9, v8
+  v12 = slotaddr s0
+  v13 = symaddr @MSG
+  v14 = slotaddr s1
+  v15 = icmp.uge v11, v5
+  br v15, b4, b3
+b3:
+  v16 = ptradd v4, v11 * 4
+  v17 = load.i32 v16 align 2
+  v18 = ptradd v2, v9 * 4
+  v19 = load.i32 v18 align 2
+  v20 = add.i32 v19, v17
+  store v20, v18 align 2
+  v21 = add.i64 v9, v7
+  jmp b1(v21)
+b4: cold
+  store v13, v12 align 3
+  store v5, v12+8 align 3
+  store v13, v14 align 3
+  store v11, v14+8 align 3
+  call @fail(v12, v14) : (ptr, ptr) -> void
+  unreachable
+b5:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = slotaddr s3
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 128
+  jmp b1(v6)
+b1(v9: i64):
+  v10 = icmp.ult v9, v8
+  br v10, b2, b3
+b2:
+  v11 = trunc.i32 v9
+  v12 = ptradd v3, v9 * 4
+  store v11, v12 align 2
+  v13 = ptradd v2, v9 * 4
+  v14 = mul.i32 v11, v11
+  store v14, v13 align 2
+  v15 = add.i64 v9, v7
+  jmp b1(v15)
+b3:
+  store v2, v4 align 3
+  store v1, v4+8 align 3
+  store v3, v5 align 3
+  store v0, v5+8 align 3
+  call @mix(v5, v4) : (ptr, ptr) -> void
+  jmp b4(v6, v6)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v8
+  br v18, b5, b6
+b5:
+  v19 = ptradd v3, v16 * 4
+  v20 = load.i32 v19 align 2
+  v21 = sext.i64 v20
+  v22 = mul.i64 v17, v8
+  v23 = add.i64 v22, v21
+  v24 = add.i64 v16, v7
+  jmp b4(v24, v23)
+b6:
+  ret v17
+data @MSG size 16 align 3
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let m = text_of(&a, "mix");
+    assert(m.contains("vcmp.uge.v2i64") && m.contains("add.v2i32"), m.as_str());
+    let ns: [u64; 6] = [0, 3, 37, 64, 100, 128];
+    let lens: [u64; 3] = [40, 64, 128];
+    for k in 0..6usize {
+        for j in 0..3usize {
+            let args: []u64 = [unsafe ns[k], unsafe lens[j]];
+            let fails = unsafe ns[k] > unsafe lens[j] && unsafe lens[j] < 64;
+            if fails {
+                same_outcome(&b, &a, "drive", args, 0, true);
+            } else {
+                same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+            }
+        }
+    }
+}
+
+// A gather's bounds check is an early exit whose lanes past it load their index too: from a slice that a
+// branch before the loop keeps at least as long as the bound (`counted_slice`, `guard_le`), so the loop
+// vectorizes. Each count fails at the guard, at the gather or not at all as before.
+@test
+fn a_gather_loads_its_index_past_its_check_under_a_guard() {
+    let src = M"(lir ptr 8
+sym @vag fn global noinline
+sym @drive fn global
+fn @vag
+  sig (ptr, ptr, ptr) -> void
+  ref p0 4 inner noalias
+  ref p1 4 inner readonly
+  ref p2 4 inner readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.ptr v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.ptr v1 align 3
+  v6 = load.i64 v1+8 align 3
+  v7 = load.ptr v2 align 3
+  v8 = load.i64 v2+8 align 3
+  v9 = iconst.i64 0
+  v10 = iconst.i64 1
+  v11 = icmp.ule v4, v8
+  br v11, b1, b6
+b1:
+  jmp b2(v9)
+b2(v12: i64):
+  v13 = icmp.ult v12, v4
+  br v13, b3, b7
+b3:
+  v14 = ptradd v7, v12 * 4
+  v15 = load.i32 v14 align 2
+  v16 = zext.i64 v15
+  v17 = icmp.uge v16, v6
+  br v17, b5, b4
+b4:
+  v18 = ptradd v5, v16 * 4
+  v19 = load.i32 v18 align 2
+  v20 = ptradd v3, v12 * 4
+  store v19, v20 align 2
+  v21 = add.i64 v12, v10
+  jmp b2(v21)
+b5: cold
+  panic "index out of bounds"
+b6: cold
+  panic "assertion failed"
+b7:
+  ret
+fn @drive
+  sig (i64, i64, i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 256 align 3
+  slot s2 size 512 align 3
+  slot s3 size 16 align 3
+  slot s4 size 16 align 3
+  slot s5 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = slotaddr s0
+  v4 = slotaddr s1
+  v5 = slotaddr s2
+  v6 = slotaddr s3
+  v7 = slotaddr s4
+  v8 = slotaddr s5
+  v9 = iconst.i64 0
+  v10 = iconst.i64 1
+  v11 = iconst.i64 128
+  v12 = iconst.i64 64
+  v13 = iconst.i64 7
+  v14 = iconst.i64 63
+  jmp b1(v9)
+b1(v15: i64):
+  v16 = icmp.ult v15, v11
+  br v16, b2, b3
+b2:
+  v17 = mul.i64 v15, v13
+  v18 = and.i64 v17, v14
+  v19 = trunc.i32 v18
+  v20 = ptradd v5, v15 * 4
+  store v19, v20 align 2
+  v21 = and.i64 v15, v14
+  v22 = mul.i64 v21, v21
+  v23 = trunc.i32 v22
+  v24 = ptradd v4, v21 * 4
+  store v23, v24 align 2
+  v25 = ptradd v3, v15 * 4
+  store v19, v25 align 2
+  v26 = add.i64 v15, v10
+  jmp b1(v26)
+b3:
+  store v3, v6 align 3
+  store v0, v6+8 align 3
+  store v4, v7 align 3
+  store v1, v7+8 align 3
+  store v5, v8 align 3
+  store v2, v8+8 align 3
+  call @vag(v6, v7, v8) : (ptr, ptr, ptr) -> void
+  jmp b4(v9, v9)
+b4(v27: i64, v28: i64):
+  v29 = icmp.ult v27, v11
+  br v29, b5, b6
+b5:
+  v30 = ptradd v3, v27 * 4
+  v31 = load.i32 v30 align 2
+  v32 = sext.i64 v31
+  v33 = mul.i64 v28, v11
+  v34 = add.i64 v33, v32
+  v35 = add.i64 v27, v10
+  jmp b4(v35, v34)
+b6:
+  ret v28
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let g = text_of(&a, "vag");
+    assert(g.contains("vcmp.uge.v2i64") && g.contains("vextract"), g.as_str());
+    let ns: [u64; 6] = [0, 4, 5, 40, 100, 128];
+    let slens: [u64; 3] = [30, 50, 64];
+    let ilens: [u64; 2] = [90, 128];
+    for k in 0..6usize {
+        for j in 0..3usize {
+            for q in 0..2usize {
+                let n = unsafe ns[k];
+                let args: []u64 = [n, unsafe slens[j], unsafe ilens[q]];
+                let mut fails = n > unsafe ilens[q];
+                for i in 0..n {
+                    fails = fails || (i * 7 & 63) >= unsafe slens[j];
+                }
+                if fails {
+                    same_outcome(&b, &a, "drive", args, 0, true);
+                } else {
+                    same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+                }
+            }
+        }
+    }
+}
+
+// A side of a branch may load an element of the slice whose length the header's test counts to
+// (`side_counted`): every iteration may read it, so the body runs as selects. Each count runs as before.
+@test
+fn a_side_loads_an_element_of_the_counted_slice() {
+    let src = M"(lir ptr 8
+sym @pick fn global noinline
+sym @drive fn global
+fn @pick
+  sig (ptr, ptr, ptr) -> void
+  ref p2 4 inner readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.ptr v2 align 3
+  v4 = load.i64 v2+8 align 3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i32 0
+  v8 = iconst.i32 3
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v4
+  br v10, b2, b5
+b2:
+  v11 = ptradd v1, v9 * 4
+  v12 = load.i32 v11 align 2
+  v13 = icmp.sgt v12, v7
+  br v13, b3, b4(v7)
+b3:
+  v14 = ptradd v3, v9 * 4
+  v15 = load.i32 v14 align 2
+  v16 = mul.i32 v15, v8
+  jmp b4(v16)
+b4(v17: i32):
+  v18 = ptradd v0, v9 * 4
+  store v17, v18 align 2
+  v19 = add.i64 v9, v6
+  jmp b1(v19)
+b5:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+  slot s3 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 128
+  v8 = iconst.i64 7
+  v9 = iconst.i64 3
+  jmp b1(v5)
+b1(v10: i64):
+  v11 = icmp.ult v10, v7
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v9
+  v13 = urem.i64 v12, v8
+  v14 = sub.i64 v13, v9
+  v15 = trunc.i32 v14
+  v16 = ptradd v2, v10 * 4
+  store v15, v16 align 2
+  v17 = trunc.i32 v10
+  v18 = ptradd v3, v10 * 4
+  store v17, v18 align 2
+  v19 = ptradd v1, v10 * 4
+  store v17, v19 align 2
+  v20 = add.i64 v10, v6
+  jmp b1(v20)
+b3:
+  store v3, v4 align 3
+  store v0, v4+8 align 3
+  call @pick(v1, v2, v4) : (ptr, ptr, ptr) -> void
+  jmp b4(v5, v5)
+b4(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v7
+  br v23, b5, b6
+b5:
+  v24 = ptradd v1, v21 * 4
+  v25 = load.i32 v24 align 2
+  v26 = sext.i64 v25
+  v27 = mul.i64 v22, v7
+  v28 = add.i64 v27, v26
+  v29 = add.i64 v21, v6
+  jmp b4(v29, v28)
+b6:
+  ret v22
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let p = text_of(&a, "pick");
+    assert(p.contains("mul.v4i32") && p.contains("vsel.v4i32"), p.as_str());
+    let ns: [u64; 6] = [0, 3, 4, 37, 100, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A load of `a[0]` before stores of `a[i]` from `i = 1` (TSVC s113) reads no byte they write
+// (`inv_below`): it is loaded once and the loop vectorizes, also when a product of it is the lane value's
+// operand (`lane_operands`: on its splat). From `i = 0` the first store writes it, and that loop
+// vectorizes only under an overlap check. Each count runs as before.
+@test
+fn an_invariant_load_below_the_stores_vectorizes() {
+    let src = M"(lir ptr 8
+sym @from1 fn global noinline
+sym @from0 fn global noinline
+sym @times fn global noinline
+sym @drive fn global
+fn @times
+  sig (ptr, ptr) -> void
+  ref p0 4 inner noalias
+  ref p1 4 inner readonly
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v1 align 3
+  v5 = iconst.i64 1
+  v6 = iconst.i32 3
+  jmp b1(v5)
+b1(v7: i64):
+  v8 = icmp.ult v7, v3
+  br v8, b2, b3
+b2:
+  v9 = load.i32 v2 align 2
+  v10 = mul.i32 v9, v6
+  v11 = ptradd v4, v7 * 4
+  v12 = load.i32 v11 align 2
+  v13 = add.i32 v10, v12
+  v14 = ptradd v2, v7 * 4
+  store v13, v14 align 2
+  v15 = add.i64 v7, v5
+  jmp b1(v15)
+b3:
+  ret
+fn @from1
+  sig (ptr, ptr) -> void
+  ref p0 4 inner noalias
+  ref p1 4 inner readonly
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v1 align 3
+  v5 = iconst.i64 1
+  jmp b1(v5)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = load.i32 v2 align 2
+  v9 = ptradd v4, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = add.i32 v8, v10
+  v12 = ptradd v2, v6 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v6, v5
+  jmp b1(v13)
+b3:
+  ret
+fn @from0
+  sig (ptr, ptr) -> void
+  ref p0 4 inner noalias
+  ref p1 4 inner readonly
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = load.ptr v1 align 3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  jmp b1(v5)
+b1(v7: i64):
+  v8 = icmp.ult v7, v3
+  br v8, b2, b3
+b2:
+  v9 = load.i32 v2 align 2
+  v10 = ptradd v4, v7 * 4
+  v11 = load.i32 v10 align 2
+  v12 = add.i32 v9, v11
+  v13 = ptradd v2, v7 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v7, v6
+  jmp b1(v14)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 128
+  v8 = iconst.i64 3
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v7
+  br v10, b2, b3
+b2:
+  v11 = add.i64 v9, v6
+  v12 = trunc.i32 v11
+  v13 = ptradd v1, v9 * 4
+  store v12, v13 align 2
+  v14 = mul.i64 v9, v8
+  v15 = trunc.i32 v14
+  v16 = ptradd v2, v9 * 4
+  store v15, v16 align 2
+  jmp b1(v11)
+b3:
+  store v1, v3 align 3
+  store v0, v3+8 align 3
+  store v2, v4 align 3
+  store v7, v4+8 align 3
+  call @from1(v3, v4) : (ptr, ptr) -> void
+  call @times(v3, v4) : (ptr, ptr) -> void
+  call @from0(v3, v4) : (ptr, ptr) -> void
+  jmp b4(v5, v5)
+b4(v17: i64, v18: i64):
+  v19 = icmp.ult v17, v7
+  br v19, b5, b6
+b5:
+  v20 = ptradd v1, v17 * 4
+  v21 = load.i32 v20 align 2
+  v22 = sext.i64 v21
+  v23 = mul.i64 v18, v7
+  v24 = add.i64 v23, v22
+  v25 = add.i64 v17, v6
+  jmp b4(v25, v24)
+b6:
+  ret v18
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let f1 = text_of(&a, "from1");
+    let f0 = text_of(&a, "from0");
+    let tm = text_of(&a, "times");
+    assert(f1.contains("add.v4i32"), f1.as_str());
+    assert(tm.contains("mul.v4i32"), tm.as_str());
+    // From 0, only under a check before the loop that the first store misses the load's place (an `or`
+    // of two address comparisons); from 1 none.
+    assert(f0.contains("v4i32") && f0.contains(" = or.i8") && !f1.contains(" = or.i8"), f0.as_str());
+    let ns: [u64; 7] = [0, 1, 2, 5, 37, 100, 128];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A sum into `x[i]` over a row, `x[i] += a[i * m + j]` (a matrix-vector product), whose first pass checks
+// the row's index before `x[i]`'s: the guard before the loop makes that check on the entry values
+// (`Opt::entry_cmp`), so `x[i]` stays in a register; the checks version away (`cold` reads the block
+// storing it back on the way to a failure call) and the sum vectorizes. Each count fails or ends as before.
+@test
+fn a_row_sum_into_memory_stays_in_a_register_and_vectorizes() {
+    let src = M"(lir ptr 8
+sym @row fn global noinline
+sym @fail fn global noinline cold
+sym @drive fn global
+fn @fail
+  sig (i64) -> void
+b0(v0: i64):
+  panic "index out of bounds"
+fn @row
+  sig (ptr, ptr, i64, i64) -> void
+  ref p0 8 inner noalias
+  ref p1 8 inner readonly
+b0(v0: ptr, v1: ptr, v2: i64, v3: i64):
+  v4 = load.ptr v0 align 3
+  v5 = load.i64 v0+8 align 3
+  v6 = load.ptr v1 align 3
+  v7 = load.i64 v1+8 align 3
+  v8 = iconst.i64 0
+  v9 = iconst.i64 1
+  v10 = mul.i64 v2, v3
+  v11 = icmp.uge v2, v5
+  v12 = ptradd v4, v2 * 8
+  jmp b1(v8)
+b1(v13: i64):
+  v14 = icmp.ult v13, v3
+  br v14, b2, b5
+b2:
+  v15 = add.i64 v10, v13
+  v16 = icmp.uge v15, v7
+  br v16, b6, b3
+b3:
+  br v11, b7, b4
+b4:
+  v17 = ptradd v6, v15 * 8
+  v18 = load.i64 v17 align 3
+  v19 = load.i64 v12 align 3
+  v20 = add.i64 v19, v18
+  store v20, v12 align 3
+  v21 = add.i64 v13, v9
+  jmp b1(v21)
+b5:
+  ret
+b6:
+  call @fail(v3) : (i64) -> void
+  unreachable
+b7:
+  call @fail(v2) : (i64) -> void
+  unreachable
+fn @drive
+  sig (i64, i64, i64) -> i64
+  slot s0 size 64 align 3
+  slot s1 size 1024 align 3
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = slotaddr s0
+  v4 = slotaddr s1
+  v5 = slotaddr s2
+  v6 = slotaddr s3
+  v7 = iconst.i64 0
+  v8 = iconst.i64 1
+  v9 = iconst.i64 128
+  v10 = iconst.i64 8
+  jmp b1(v7)
+b1(v11: i64):
+  v12 = icmp.ult v11, v9
+  br v12, b2, b3
+b2:
+  v13 = mul.i64 v11, v11
+  v14 = ptradd v4, v11 * 8
+  store v13, v14 align 3
+  v15 = add.i64 v11, v8
+  jmp b1(v15)
+b3:
+  store v7, v3 align 3
+  store v8, v3+8 align 3
+  store v10, v3+16 align 3
+  store v3, v5 align 3
+  store v10, v5+8 align 3
+  store v4, v6 align 3
+  store v2, v6+8 align 3
+  call @row(v5, v6, v0, v1) : (ptr, ptr, i64, i64) -> void
+  v16 = ptradd v3, v0 * 8
+  v17 = load.i64 v16 align 3
+  ret v17
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 200,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let r = text_of(&a, "row");
+    assert(r.contains("add.v2i64"), r.as_str());
+    // Row `i`, `m` columns, `alen` elements of `a`: the access past `a` or row 8 fails.
+    let cases: [u64; 21] = [0, 7, 128, 1, 7, 128, 2, 9, 128, 3, 30, 128, 7, 16, 128, 2, 40, 100, 8, 3, 128];
+    for k in 0..7usize {
+        let i = unsafe cases[3 * k];
+        let m = unsafe cases[3 * k + 1];
+        let alen = unsafe cases[3 * k + 2];
+        let args: []u64 = [i, m, alen];
+        let fails = m != 0 && (i * m + m > alen || i >= 8);
+        if fails {
+            same_outcome(&b, &a, "drive", args, 0, true);
+        } else {
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A u32 counter tested through its extension against a 64-bit bound, `while (i as usize) < n`: where `n`
+// fits the counter (`n <=u 4294967295`) a copy tests `i <u trunc(n)` (`narrow_head`), which vectorizes;
+// the loop as it was runs where it does not. Each count runs as before.
+@test
+fn a_narrow_counter_against_a_wide_bound_vectorizes_in_a_copy() {
+    let src = M"(lir ptr 8
+sym @twice fn global noinline
+sym @drive fn global
+fn @twice
+  sig (ptr, i64) -> void
+  ref p0 512 noalias
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  jmp b1(v2)
+b1(v4: i32):
+  v5 = zext.i64 v4
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  v7 = add.i32 v4, v4
+  v8 = ptradd v0, v5 * 4
+  store v7, v8 align 2
+  v9 = add.i32 v4, v3
+  jmp b1(v9)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 128
+  call @twice(v1, v0) : (ptr, i64) -> void
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = sext.i64 v9
+  v11 = mul.i64 v6, v4
+  v12 = add.i64 v11, v10
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 200,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "twice");
+    assert(t.contains("4294967295") && t.contains("add.v4i32"), t.as_str());
+    let ns: [u64; 6] = [0, 1, 3, 4, 37, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
 // A store on one side of a branch stores the lanes its condition picks (`store_masked_ptr`; the other side
 // the complement), so no element the loop leaves is written; the loop runs the rest with its branch. Each
 // count runs as before.
@@ -6079,8 +6801,9 @@ b3:
 
 // Lanes of 4 times another's width: with conversions in registers (`vops`) the vectors hold 8 lanes, the
 // bytes in 8, the 16-bit lanes in 16, the 32-bit ones in two registers, which `lir::wide` splits: a byte
-// widens through 16 bits (interleaved with its sign or zeros), a 32-bit lane narrows through 16 (even
-// lanes), and a byte to a float extends, then converts. Each count runs as before.
+// (times a constant past a byte's range: no widening product) widens through 16 bits (interleaved with its
+// sign or zeros), a 32-bit lane narrows through 16 (even lanes), and a byte to a float extends, then
+// converts. Each count runs as before.
 @test
 fn lanes_of_4_times_the_width_vectorize() {
     let src = M"(lir ptr 8
@@ -7681,7 +8404,17 @@ b6:
 
 @test
 fn byte_idioms_vectorize_at_their_lanes() {
-    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 2, interleave: 2, fin: 0 };
+    let four = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
     // (saturating sizes, difference sizes, widening sums, the text each loop's vectors take)
     let (b, a) = optimized_idioms(IDIOMS, four, 7, 7, lu::sumw_bit(1, 4) | lu::sumw_bit(1, 8));
     let wants: [(str, str); 5] = [
@@ -7716,6 +8449,627 @@ fn byte_idioms_vectorize_at_their_lanes() {
             same_outcome(&b8, &a8, "drive", args, want, false);
             same_outcome(&b0, &a0, "drive", args, want, false);
         }
+    }
+}
+
+// Bit counts and byte swaps the target computes in registers (`Package.vec_bits`) vectorize as lane
+// operations: a sum of 32-bit population counts, 16-bit leading zeros stored, 64-bit swapped bytes stored.
+// Without the target's forms the loops stay scalar, but a count by bit-parallel sums or, where the target
+// looks up bytes by indices (`Package.vtbl`), by a table of nibbles, and narrow leading zeros by a count of
+// the bits below the top one where the target counts bits. Each count runs as before.
+const BITS: str = M"(lir ptr 8
+sym @pop fn global noinline
+sym @lz fn global noinline
+sym @swap fn global noinline
+sym @drive fn global
+fn @pop
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = iconst.i64 1
+  jmp b1(v2, v3)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = popcnt.i32 v9
+  v11 = add.i32 v6, v10
+  v12 = add.i64 v5, v4
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @lz
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 2
+  v8 = load.i16 v7 align 1
+  v9 = clz.i16 v8
+  v10 = ptradd v0, v5 * 2
+  store v9, v10 align 1
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @swap
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2)
+b1(v4: i64):
+  v5 = icmp.ult v4, v1
+  br v5, b2, b3
+b2:
+  v6 = ptradd v0, v4 * 8
+  v7 = load.i64 v6 align 3
+  v8 = bswap.i64 v7
+  store v8, v6 align 3
+  v9 = add.i64 v4, v3
+  jmp b1(v9)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 8
+  slot s1 size 256 align 8
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  v6 = iconst.i64 -7046029254386353131
+  v7 = iconst.i64 31
+  jmp b1(v3, v0)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v5
+  br v10, b2, b3
+b2:
+  v11 = mul.i64 v9, v6
+  v12 = lshr.i64 v11, v7
+  v13 = ptradd v1, v8 * 8
+  store v12, v13 align 3
+  v14 = add.i64 v8, v4
+  jmp b1(v14, v11)
+b3:
+  v15 = call.i32 @pop(v1, v0) : (ptr, i64) -> i32
+  call @lz(v2, v1, v0) : (ptr, ptr, i64) -> void
+  call @swap(v1, v0) : (ptr, i64) -> void
+  jmp b4(v3, v3)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v0
+  br v18, b5, b6
+b5:
+  v19 = ptradd v1, v16 * 8
+  v20 = load.i64 v19 align 3
+  v21 = ptradd v2, v16 * 2
+  v22 = load.i16 v21 align 1
+  v23 = zext.i64 v22
+  v24 = mul.i64 v17, v7
+  v25 = xor.i64 v24, v20
+  v26 = add.i64 v25, v23
+  v27 = add.i64 v16, v4
+  jmp b4(v27, v26)
+b6:
+  v28 = zext.i64 v15
+  v29 = xor.i64 v28, v17
+  ret v29
+)";
+
+@test
+fn bit_counts_and_byte_swaps_vectorize_where_the_target_has_them() {
+    let four = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
+    let mut err = String::new();
+    let b = lparse::parse(BITS, &mut err).unwrap();
+    let mut a = lparse::parse(BITS, &mut err).unwrap();
+    a.vector = 16;
+    a.vops = VOPS_ALL;
+    a.vec_bits = 0x0E0F07;
+    let mut a0 = lparse::parse(BITS, &mut err).unwrap();
+    a0.vector = 16;
+    a0.vops = VOPS_ALL;
+    a0.vec_bits = 0;
+    // A target with a scalar count in one instruction (x86-64-v2's `popcnt`, wasm32's): a 4-byte count stays.
+    let mut a1 = lparse::parse(BITS, &mut err).unwrap();
+    a1.vector = 16;
+    a1.vops = VOPS_ALL;
+    a1.vec_bits = 0;
+    a1.popcnt = true;
+    // One that looks up bytes by indices (x86-64's SSSE3 `pshufb`): the counts by a table of nibbles,
+    // also of 4-byte lanes beside the scalar count, where the cost model finds them cheaper.
+    let mut a2 = lparse::parse(BITS, &mut err).unwrap();
+    a2.vector = 16;
+    a2.vops = VOPS_ALL;
+    a2.vec_bits = 0;
+    a2.popcnt = true;
+    a2.vtbl = true;
+    // One that counts set bits but no leading zeros in registers (wasm32): 16-bit leading zeros by the bits
+    // below the top one set, then their count.
+    let mut a3 = lparse::parse(BITS, &mut err).unwrap();
+    a3.vector = 16;
+    a3.vops = VOPS_ALL;
+    a3.vec_bits = 0x000700;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: four });
+    lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: four });
+    lopt::optimize(&mut a1, &none, lopt::Config { inline: il::SPEED, loops: four });
+    lopt::optimize(&mut a2, &none, lopt::Config { inline: il::SPEED, loops: four });
+    lopt::optimize(&mut a3, &none, lopt::Config { inline: il::SPEED, loops: four });
+    let tl3 = text_of(&a3, "lz");
+    assert(
+        tl3.contains("vop.count_ones.v8i16") && tl3.contains("or.v8i16") && !tl3.contains("leading_zeros"),
+        tl3.as_str(),
+    );
+    let tp2 = text_of(&a2, "pop");
+    assert(tp2.contains("vop.swizzle_or_zero.v16i8") && !tp2.contains("lshr.v2i64"), tp2.as_str());
+    // Without one, the count of 4-byte lanes by shifts, masks and adds (`swar_count`).
+    let tp = text_of(&a0, "pop");
+    assert(tp.contains("lshr.v2i64") && tp.contains("lshr.v4i32") && !tp.contains("popcnt.v"), tp.as_str());
+    let tp1 = text_of(&a1, "pop");
+    assert(!tp1.contains("vop.") && tp1.contains("popcnt"), tp1.as_str());
+    let wants: [(str, str); 3] = [
+        ("pop", "vop.count_ones.v4i32"),
+        ("lz", "vop.leading_zeros.v8i16"),
+        ("swap", "vop.swap_bytes.v2i64"),
+    ];
+    for k in 0..3usize {
+        let (f, want) = unsafe wants[k];
+        let t = text_of(&a, f);
+        assert(t.contains(want), t.as_str());
+        let t0 = text_of(&a0, f);
+        assert(k == 0 || !t0.contains("vop."), t0.as_str());
+    }
+    for n in 0..65u64 {
+        let args: []u64 = [n];
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
+        same_outcome(&b, &a0, "drive", args, want, false);
+        same_outcome(&b, &a1, "drive", args, want, false);
+        same_outcome(&b, &a2, "drive", args, want, false);
+        same_outcome(&b, &a3, "drive", args, want, false);
+    }
+}
+
+// Products of two sign-extended or two zero-extended values (or of one and a constant its narrow type
+// holds) vectorize as the narrow lanes' widening products (`O_VMULW`, `Package.vec_mulw`): a 64-bit sum of
+// 32-bit products, a square of a 32-bit unsigned value, a 64-bit product of 16-bit values (a 32-bit
+// widening product extended), and a product beside a byte extension, whose vectors split (`lir::wide`: the
+// high halves' products). A sign extension times a zero extension stays scalar; without the target's forms
+// the products stay as they were. Each runs as before.
+const WIDENED: str = M"(lir ptr 8
+sym @dot fn global noinline
+sym @sq fn global noinline
+sym @mixed fn global noinline
+sym @mix8 fn global noinline
+sym @wide4 fn global noinline
+sym @fold fn global noinline
+sym @drive fn global
+fn @dot
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = sext.i64 v9
+  v11 = ptradd v1, v5 * 4
+  v12 = load.i32 v11 align 2
+  v13 = sext.i64 v12
+  v14 = mul.i64 v10, v13
+  v15 = add.i64 v6, v14
+  v16 = add.i64 v5, v4
+  jmp b1(v16, v15)
+b3:
+  ret v6
+fn @sq
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.i32 v7 align 2
+  v9 = zext.i64 v8
+  v10 = mul.i64 v9, v9
+  v11 = ptradd v0, v5 * 8
+  store v10, v11 align 3
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @mixed
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 4
+  v8 = load.i32 v7 align 2
+  v9 = zext.i64 v8
+  v10 = sext.i64 v8
+  v11 = mul.i64 v9, v10
+  v12 = ptradd v0, v5 * 8
+  store v11, v12 align 3
+  v13 = add.i64 v5, v4
+  jmp b1(v13)
+b3:
+  ret
+fn @mix8
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 -5
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v3
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v7 * 4
+  v10 = load.i32 v9 align 2
+  v11 = sext.i64 v10
+  v12 = mul.i64 v11, v6
+  v13 = ptradd v2, v7 * 1
+  v14 = load.i8 v13 align 0
+  v15 = zext.i64 v14
+  v16 = add.i64 v12, v15
+  v17 = ptradd v0, v7 * 8
+  store v16, v17 align 3
+  v18 = add.i64 v7, v5
+  jmp b1(v18)
+b3:
+  ret
+fn @wide4
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 2
+  v8 = load.i16 v7 align 1
+  v9 = sext.i64 v8
+  v10 = ptradd v1, v5 * 2
+  v11 = load.i16 v10+128 align 1
+  v12 = sext.i64 v11
+  v13 = mul.i64 v9, v12
+  v14 = ptradd v0, v5 * 8
+  store v13, v14 align 3
+  v15 = add.i64 v5, v4
+  jmp b1(v15)
+b3:
+  ret
+fn @fold
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 31
+  jmp b1(v3, v2)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 8
+  v10 = load.i64 v9 align 3
+  v11 = mul.i64 v7, v5
+  v12 = xor.i64 v11, v10
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b3:
+  ret v7
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 8
+  slot s1 size 512 align 8
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  v6 = iconst.i64 -7046029254386353131
+  v7 = iconst.i64 23
+  jmp b1(v3, v0)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v5
+  br v10, b2, b3
+b2:
+  v11 = mul.i64 v9, v6
+  v12 = add.i64 v11, v8
+  v13 = lshr.i64 v12, v7
+  v14 = xor.i64 v12, v13
+  v15 = ptradd v1, v8 * 8
+  store v14, v15 align 3
+  v16 = add.i64 v8, v4
+  jmp b1(v16, v12)
+b3:
+  v17 = ptradd v1+256
+  v18 = call.i64 @dot(v1, v17, v0) : (ptr, ptr, i64) -> i64
+  call @sq(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v19 = call.i64 @fold(v2, v0, v18) : (ptr, i64, i64) -> i64
+  call @mixed(v2, v17, v0) : (ptr, ptr, i64) -> void
+  v20 = call.i64 @fold(v2, v0, v19) : (ptr, i64, i64) -> i64
+  call @mix8(v2, v1, v17, v0) : (ptr, ptr, ptr, i64) -> void
+  v21 = call.i64 @fold(v2, v0, v20) : (ptr, i64, i64) -> i64
+  call @wide4(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v22 = call.i64 @fold(v2, v0, v21) : (ptr, i64, i64) -> i64
+  ret v22
+)";
+
+@test
+fn widening_products_vectorize_as_the_narrow_lanes_products() {
+    let two = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
+    let mut err = String::new();
+    let b = lparse::parse(WIDENED, &mut err).unwrap();
+    let mut a = lparse::parse(WIDENED, &mut err).unwrap();
+    a.vector = 16;
+    a.vops = VOPS_ALL;
+    a.vec_mulw = 0x707;
+    let mut a0 = lparse::parse(WIDENED, &mut err).unwrap();
+    a0.vector = 16;
+    a0.vops = VOPS_ALL;
+    a0.vec_mulw = 0;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: two });
+    lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: two });
+    let wants: [(str, str); 4] = [
+        ("dot", "vmulw.s.v2i64"),
+        ("sq", "vmulw.v2i64"),
+        ("mix8", "vmulw.s.hi.v2i64"),
+        ("wide4", "vmulw.s.v4i32"),
+    ];
+    for k in 0..4usize {
+        let (f, want) = unsafe wants[k];
+        let t = text_of(&a, f);
+        assert(t.contains(want), t.as_str());
+        let t0 = text_of(&a0, f);
+        assert(!t0.contains("vmulw"), t0.as_str());
+    }
+    let tm = text_of(&a, "mixed");
+    assert(!tm.contains("vmulw") && !tm.contains("mul.v"), tm.as_str());
+    for n in 0..65u64 {
+        let args: []u64 = [n];
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
+        same_outcome(&b, &a0, "drive", args, want, false);
+    }
+}
+
+// Scans: a last-index search counting down from a slice's length with an early exit reads every element
+// below the counter (`counted_down`), not one from another slice's length; a scan with no bound (a NUL-terminated string through an index, a
+// 32-bit one through a stepping pointer) enters a vector loop of aligned block loads (`aligned_scan`,
+// MEM_BLOCK) once its address is aligned. The strings end at every position, and at the last byte of a
+// 100-byte slot, whose last aligned block reaches past it. Each runs as before.
+const SCANS: str = M"(lir ptr 8
+sym @slen fn global noinline
+sym @slen32 fn global noinline
+sym @rfind fn global noinline
+sym @rfrom fn global noinline
+sym @drive fn global
+fn @slen
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i8 0
+  v3 = iconst.i64 1
+  jmp b1(v1)
+b1(v4: i64):
+  v5 = ptradd v0, v4 * 1
+  v6 = load.i8 v5 align 0
+  v7 = icmp.ne v6, v2
+  br v7, b2, b3
+b2:
+  v8 = add.i64 v4, v3
+  jmp b1(v8)
+b3:
+  ret v4
+fn @slen32
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i32 0
+  jmp b1(v0)
+b1(v2: ptr):
+  v3 = load.i32 v2 align 2
+  v4 = icmp.ne v3, v1
+  br v4, b2, b3
+b2:
+  v5 = ptradd v2+4
+  jmp b1(v5)
+b3:
+  v6 = ptrtoint.i64 v2
+  v7 = ptrtoint.i64 v0
+  v8 = sub.i64 v6, v7
+  ret v8
+fn @rfind
+  sig (ptr, i8) -> i64
+b0(v0: ptr, v1: i8):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 -1
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ne v7, v4
+  br v8, b2, b3
+b2:
+  v9 = sub.i64 v7, v5
+  v10 = ptradd v2, v7 * 1
+  v11 = load.i8 v10-1 align 0
+  v12 = icmp.eq v11, v1
+  br v12, b4, b1(v9)
+b3:
+  ret v6
+b4:
+  ret v9
+fn @rfrom
+  sig (ptr, ptr, i8) -> i64
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = load.ptr v0 align 3
+  v4 = load.i64 v1+8 align 3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 -1
+  jmp b1(v4)
+b1(v8: i64):
+  v9 = icmp.ne v8, v5
+  br v9, b2, b3
+b2:
+  v10 = sub.i64 v8, v6
+  v11 = ptradd v3, v8 * 1
+  v12 = load.i8 v11-1 align 0
+  v13 = icmp.eq v12, v2
+  br v13, b4, b1(v10)
+b3:
+  ret v7
+b4:
+  ret v10
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 100 align 4
+  slot s1 size 100 align 4
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 100
+  v7 = iconst.i64 -7046029254386353131
+  v8 = iconst.i64 29
+  v9 = iconst.i8 1
+  jmp b1(v4, v0)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v6
+  br v12, b2, b3
+b2:
+  v13 = mul.i64 v11, v7
+  v14 = add.i64 v13, v5
+  v15 = lshr.i64 v14, v8
+  v16 = trunc.i8 v15
+  v17 = or.i8 v16, v9
+  v18 = ptradd v1, v10 * 1
+  store v17, v18 align 0
+  v19 = ptradd v2, v10 * 1
+  store v17, v19 align 0
+  v20 = add.i64 v10, v5
+  jmp b1(v20, v14)
+b3:
+  v21 = iconst.i8 0
+  v22 = ptradd v1, v0 * 1
+  store v21, v22 align 0
+  store v21, v1+99 align 0
+  v23 = iconst.i64 25
+  v24 = urem.i64 v0, v23
+  v25 = iconst.i32 0
+  v26 = ptradd v2, v24 * 4
+  store v25, v26 align 2
+  store v25, v2+96 align 2
+  store v1, v3 align 3
+  store v6, v3+8 align 3
+  v27 = call.i64 @slen(v1) : (ptr) -> i64
+  v28 = call.i64 @slen32(v2) : (ptr) -> i64
+  v29 = iconst.i64 37
+  v30 = mul.i64 v0, v29
+  v31 = iconst.i64 97
+  v32 = urem.i64 v30, v31
+  v33 = ptradd v1, v32 * 1
+  v34 = load.i8 v33 align 0
+  v35 = call.i64 @rfind(v3, v34) : (ptr, i8) -> i64
+  v36 = iconst.i64 1000
+  v37 = mul.i64 v28, v36
+  v38 = mul.i64 v35, v36
+  v39 = mul.i64 v38, v36
+  v40 = add.i64 v27, v37
+  v41 = add.i64 v40, v39
+  v42 = slotaddr s3
+  store v1, v42 align 3
+  store v6, v42+8 align 3
+  v43 = call.i64 @rfrom(v42, v3, v34) : (ptr, ptr, i8) -> i64
+  v44 = xor.i64 v41, v43
+  ret v44
+)";
+
+@test
+fn scans_vectorize_counting_down_and_without_a_bound() {
+    let (b, a) = optimized_for(
+        SCANS,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let ts = text_of(&a, "slen");
+    assert(ts.contains("load.v16i8") && ts.contains(" block"), ts.as_str());
+    let tw = text_of(&a, "slen32");
+    assert(tw.contains("load.v4i32") && tw.contains(" block"), tw.as_str());
+    let tr = text_of(&a, "rfind");
+    assert(tr.contains("vcmp.eq.v16i8") && !tr.contains(" block"), tr.as_str());
+    // From another slice's length: the lanes below the exit may lie before the slice.
+    let tf = text_of(&a, "rfrom");
+    assert(!tf.contains("vcmp"), tf.as_str());
+    for k in 0..100u64 {
+        let args: []u64 = [k];
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
     }
 }
 
@@ -7770,4 +9124,4626 @@ b3:
         f.as_str(),
     );
     let _ = b;
+}
+
+// Reductions of a select or a C call: a `fmaxf` call's lanes start at the start value (each lane may take
+// it again), not at 0, which would be the maximum of negative elements; a float min whose select keeps the
+// accumulator when the comparison holds (`s < x ? s : x`) widens where the build has no NaN (`FM_FINITE`,
+// with `FM_NSZ`), and stays scalar with NaNs; an update a select takes or skips (`s = c ? s op x : s`)
+// takes the operand where the condition holds and the operation's identity elsewhere (`cond_red`): an
+// integer sum, an `and` on the other side, a product, and a float sum where the build reassociates.
+const SELECTED: str = M"(lir ptr 8
+sym @fmaxf fn global
+sym @mx fn global noinline
+sym @smin fn global noinline
+sym @csum fn global noinline
+sym @cand fn global noinline
+sym @cmul fn global noinline
+sym @cfadd fn global noinline
+sym @drive fn global
+fn @mx
+  sig (ptr, i64) -> f32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = fconst.f32 0xff800000
+  jmp b1(v2, v4)
+b1(v5: i64, v6: f32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.f32 v8 align 2
+  v10 = call.f32 @fmaxf(v6, v9) : (f32, f32) -> f32
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+fn @smin
+  sig (ptr, i64) -> f32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = fconst.f32 0x7f800000
+  jmp b1(v2, v4)
+b1(v5: i64, v6: f32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.f32 v8 align 2
+  v10 = fcmp.olt v6, v9
+  v11 = select.f32 v10, v6, v9
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @csum
+  sig (ptr, i64, i32) -> i32
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.sgt v10, v2
+  v12 = add.i32 v7, v10
+  v13 = select.i32 v11, v12, v7
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @cand
+  sig (ptr, i64) -> i8
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 -1
+  v5 = iconst.i8 16
+  jmp b1(v2, v4)
+b1(v6: i64, v7: i8):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = icmp.slt v10, v5
+  v12 = and.i8 v10, v7
+  v13 = select.i8 v11, v7, v12
+  v14 = add.i64 v6, v3
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @cmul
+  sig (ptr, i64) -> i16
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 1
+  v5 = iconst.i16 3
+  jmp b1(v2, v4)
+b1(v6: i64, v7: i16):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 2
+  v10 = load.i16 v9 align 1
+  v11 = and.i16 v10, v5
+  v12 = icmp.eq v11, v4
+  v13 = mul.i16 v7, v10
+  v14 = select.i16 v12, v13, v7
+  v15 = add.i64 v6, v3
+  jmp b1(v15, v14)
+b3:
+  ret v7
+fn @cfadd
+  sig (ptr, i64) -> f32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = fconst.f32 0x0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: f32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.f32 v8 align 2
+  v10 = fcmp.ogt v9, v4
+  v11 = fadd.f32 v6, v9
+  v12 = select.f32 v10, v11, v6
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+fn @drive
+  sig (i64, i32) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 64
+  v7 = iconst.i32 37
+  v8 = iconst.i32 85
+  v9 = iconst.i32 101
+  v10 = iconst.i32 50
+  jmp b1(v4)
+b1(v11: i64):
+  v12 = icmp.ult v11, v6
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v11
+  v14 = mul.i32 v13, v7
+  v15 = xor.i32 v14, v8
+  v16 = srem.i32 v15, v9
+  v17 = sub.i32 v16, v10
+  v18 = ptradd v2, v11 * 4
+  store v17, v18 align 2
+  v19 = sitofp.f32 v17
+  v20 = ptradd v3, v11 * 4
+  store v19, v20 align 2
+  v21 = add.i64 v11, v5
+  jmp b1(v21)
+b3:
+  v22 = call.i32 @csum(v2, v0, v1) : (ptr, i64, i32) -> i32
+  v23 = call.i8 @cand(v2, v0) : (ptr, i64) -> i8
+  v24 = call.i16 @cmul(v2, v0) : (ptr, i64) -> i16
+  v25 = call.f32 @smin(v3, v0) : (ptr, i64) -> f32
+  v26 = call.f32 @cfadd(v3, v0) : (ptr, i64) -> f32
+  v27 = sext.i64 v22
+  v28 = zext.i64 v23
+  v29 = iconst.i64 32
+  v30 = shl.i64 v28, v29
+  v31 = xor.i64 v27, v30
+  v32 = zext.i64 v24
+  v33 = iconst.i64 40
+  v34 = shl.i64 v32, v33
+  v35 = xor.i64 v31, v34
+  v36 = bitcast.i32 v25
+  v37 = zext.i64 v36
+  v38 = iconst.i64 7
+  v39 = shl.i64 v37, v38
+  v40 = xor.i64 v35, v39
+  v41 = bitcast.i32 v26
+  v42 = zext.i64 v41
+  v43 = iconst.i64 13
+  v44 = shl.i64 v42, v43
+  v45 = xor.i64 v40, v44
+  ret v45
+)";
+
+@test
+fn selected_and_called_reductions_vectorize() {
+    let (b, a) = optimized_fm(SELECTED, VECTOR, false, FM_FINITE | FM_NSZ | FM_ASSOC);
+    let m = text_of(&a, "mx");
+    assert(m.contains("max.num.v4f32") && !m.contains("wconst.v4f32 0x0, 0x0"), m.as_str());
+    let s = text_of(&a, "smin");
+    assert(s.contains("vsel.v4f32") && s.contains("reduce_min"), s.as_str());
+    let c = text_of(&a, "csum");
+    assert(c.contains("vsel.v4i32") && c.contains("add.v4i32") && c.contains("reduce_add"), c.as_str());
+    let d = text_of(&a, "cand");
+    assert(d.contains("vsel.v16i8") && d.contains("and.v16i8") && d.contains("reduce_and"), d.as_str());
+    let p = text_of(&a, "cmul");
+    assert(p.contains("vsel.v8i16") && p.contains("mul.v8i16") && p.contains("reduce_mul"), p.as_str());
+    let f = text_of(&a, "cfadd");
+    assert(f.contains("vsel.v4f32") && f.contains("fadd.v4f32") && f.contains("reduce_add"), f.as_str());
+    // Counts below, at and past the vector loops' iterations; bounds below, inside and above the data.
+    let lens: [u64; 9] = [0, 1, 3, 4, 15, 16, 17, 33, 64];
+    let bounds: [u64; 3] = [0xFFFFFF9C, 7, 60];
+    for k in 0..9usize {
+        for q in 0..3usize {
+            let args: []u64 = [unsafe lens[k], unsafe bounds[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+    // With NaNs the select's negation keeps them: the float min stays scalar.
+    let (_, e) = optimized_fm(SELECTED, VECTOR, false, FM_NSZ);
+    let s2 = text_of(&e, "smin");
+    assert(!s2.contains("v4f32"), s2.as_str());
+}
+
+// A group of fields a loop loads and stores in place (`p[i] = (3 * p[i].y, p[i].x ^ 85)`) vectorizes: its
+// loads unzip before the group's interleaved store, and an access at another field of each step touches no
+// byte the other field's store writes (`distance_ok`). A load of the previous group's field (`p[i - 1].y`)
+// reads what the last iteration stored: that loop stays scalar.
+const GROUPS: str = M"(lir ptr 8
+sym @swap fn global noinline
+sym @prevy fn global noinline
+sym @drive fn global
+fn @swap
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 3
+  v5 = iconst.i32 85
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 8
+  v9 = load.i32 v8 align 2
+  v10 = load.i32 v8+4 align 2
+  v11 = mul.i32 v10, v4
+  store v11, v8 align 2
+  v12 = xor.i32 v9, v5
+  store v12, v8+4 align 2
+  v13 = add.i64 v6, v3
+  jmp b1(v13)
+b3:
+  ret
+fn @prevy
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 1
+  jmp b1(v2)
+b1(v3: i64):
+  v4 = icmp.ult v3, v1
+  br v4, b2, b3
+b2:
+  v5 = ptradd v0, v3 * 8
+  v6 = load.i32 v5-4 align 2
+  v7 = load.i32 v5 align 2
+  v8 = add.i32 v7, v6
+  store v8, v5+4 align 2
+  store v6, v5 align 2
+  v9 = add.i64 v3, v2
+  jmp b1(v9)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 128
+  v5 = iconst.i32 -1640531535
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v4
+  br v7, b2, b6
+b2:
+  v8 = trunc.i32 v6
+  v9 = mul.i32 v8, v5
+  v10 = ptradd v1, v6 * 4
+  store v9, v10 align 2
+  v11 = add.i64 v6, v3
+  jmp b1(v11)
+b3(v12: i64, v13: i64):
+  v14 = icmp.ult v12, v4
+  br v14, b4, b5
+b4:
+  v15 = ptradd v1, v12 * 4
+  v16 = load.i32 v15 align 2
+  v17 = zext.i64 v16
+  v18 = iconst.i64 1000003
+  v19 = mul.i64 v13, v18
+  v20 = xor.i64 v19, v17
+  v21 = add.i64 v12, v3
+  jmp b3(v21, v20)
+b5:
+  ret v13
+b6:
+  call @swap(v1, v0) : (ptr, i64) -> void
+  call @prevy(v1, v0) : (ptr, i64) -> void
+  jmp b3(v2, v2)
+)";
+
+@test
+fn a_group_loaded_and_stored_in_place_vectorizes() {
+    let (b, a) = optimized(GROUPS, VECTOR);
+    let s = text_of(&a, "swap");
+    assert(s.contains("vunzip.v4i32") && s.contains("vziplo.v4i32") && s.contains("mul.v4i32"), s.as_str());
+    let p = text_of(&a, "prevy");
+    assert(!p.contains("v4i32"), p.as_str());
+    let lens: [u64; 8] = [0, 1, 2, 7, 8, 9, 17, 64];
+    for k in 0..8usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A counter stepping by a power of 2 is a lane value too (`vector_ctr`: its lanes `i + k * step`): sums of
+// every 2nd element combined with the counter's truncation, and with the counter itself from 1.
+const STEPPED: str = M"(lir ptr 8
+sym @two fn global noinline
+sym @four fn global noinline
+sym @drive fn global
+fn @two
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = trunc.i32 v5
+  v11 = xor.i32 v9, v10
+  v12 = add.i32 v6, v11
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+fn @four
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 8
+  v9 = load.i64 v8 align 3
+  v10 = xor.i64 v9, v5
+  v11 = add.i64 v6, v10
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 128
+  v5 = iconst.i64 -7046029254386353131
+  jmp b1(v2)
+b1(v6: i64):
+  v7 = icmp.ult v6, v4
+  br v7, b2, b3
+b2:
+  v8 = mul.i64 v6, v5
+  v9 = ptradd v1, v6 * 8
+  store v8, v9 align 3
+  v10 = add.i64 v6, v3
+  jmp b1(v10)
+b3:
+  v11 = call.i32 @two(v1, v0) : (ptr, i64) -> i32
+  v12 = call.i64 @four(v1, v0) : (ptr, i64) -> i64
+  v13 = sext.i64 v11
+  v14 = iconst.i64 17
+  v15 = shl.i64 v12, v14
+  v16 = xor.i64 v13, v15
+  ret v16
+)";
+
+@test
+fn a_counter_stepping_by_a_power_of_two_is_a_lane_value() {
+    let (b, a) = optimized(STEPPED, VECTOR);
+    let t = text_of(&a, "two");
+    assert(t.contains("vunzip.v4i32") && t.contains("xor.v4i32"), t.as_str());
+    let f = text_of(&a, "four");
+    assert(f.contains("xor.v2i64") && f.contains("reduce_add"), f.as_str());
+    let lens: [u64; 10] = [0, 1, 2, 3, 8, 9, 16, 17, 33, 128];
+    for k in 0..10usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A value stepping by a constant beside the counter (an induction, `j += k`) is a lane value: its value
+// at the counter's iteration plus each lane's iterations times the step (`ind_at`, `vector_ramp`), and
+// the loop that runs the rest starts from its value where the vectors stop: before and after its update,
+// stepping down, wrapping, and with the counter stepping by 2.
+const INDUCTIONS: str = M"(lir ptr 8
+sym @up fn global noinline
+sym @down fn global noinline
+sym @every2 fn global noinline
+sym @drive fn global
+fn @up
+  sig (ptr, ptr, i64, i32) -> i32
+b0(v0: ptr, v1: ptr, v2: i64, v3: i32):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 3
+  jmp b1(v4, v3)
+b1(v7: i64, v8: i32):
+  v9 = icmp.ult v7, v2
+  br v9, b2, b3
+b2:
+  v10 = ptradd v1, v7 * 4
+  v11 = load.i32 v10 align 2
+  v12 = xor.i32 v11, v8
+  v13 = ptradd v0, v7 * 4
+  store v12, v13 align 2
+  v14 = add.i32 v8, v6
+  v15 = add.i64 v7, v5
+  jmp b1(v15, v14)
+b3:
+  ret v8
+fn @down
+  sig (ptr, i64) -> i16
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 7
+  v5 = iconst.i16 -32760
+  jmp b1(v2, v5)
+b1(v6: i64, v7: i16):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = sub.i16 v7, v4
+  v10 = ptradd v0, v6 * 2
+  store v9, v10 align 1
+  v11 = add.i64 v6, v3
+  jmp b1(v11, v9)
+b3:
+  ret v7
+fn @every2
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 0
+  v5 = iconst.i32 5
+  v6 = iconst.i32 1000
+  jmp b1(v2, v4, v6)
+b1(v7: i64, v8: i32, v9: i32):
+  v10 = icmp.ult v7, v1
+  br v10, b2, b3
+b2:
+  v11 = ptradd v0, v7 * 4
+  v12 = load.i32 v11 align 2
+  v13 = xor.i32 v12, v9
+  v14 = add.i32 v8, v13
+  v15 = add.i32 v9, v5
+  v16 = add.i64 v7, v3
+  jmp b1(v16, v14, v15)
+b3:
+  v17 = xor.i32 v8, v9
+  ret v17
+fn @drive
+  sig (i64, i32) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 256 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 128
+  v8 = iconst.i32 -1640531535
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v7
+  br v10, b2, b3
+b2:
+  v11 = trunc.i32 v9
+  v12 = mul.i32 v11, v8
+  v13 = ptradd v2, v9 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v9, v6
+  jmp b1(v14)
+b3:
+  v15 = call.i32 @up(v3, v2, v0, v1) : (ptr, ptr, i64, i32) -> i32
+  v16 = call.i16 @down(v4, v0) : (ptr, i64) -> i16
+  v17 = call.i32 @every2(v2, v0) : (ptr, i64) -> i32
+  v18 = sext.i64 v15
+  v19 = zext.i64 v16
+  v20 = iconst.i64 32
+  v21 = shl.i64 v19, v20
+  v22 = xor.i64 v18, v21
+  v23 = sext.i64 v17
+  v24 = iconst.i64 11
+  v25 = shl.i64 v23, v24
+  v26 = xor.i64 v22, v25
+  jmp b4(v5, v26)
+b4(v27: i64, v28: i64):
+  v29 = icmp.ult v27, v7
+  br v29, b5, b6
+b5:
+  v30 = ptradd v3, v27 * 4
+  v31 = load.i32 v30 align 2
+  v32 = ptradd v4, v27 * 2
+  v33 = load.i16 v32 align 1
+  v34 = sext.i64 v31
+  v35 = zext.i64 v33
+  v36 = iconst.i64 1000003
+  v37 = mul.i64 v28, v36
+  v38 = xor.i64 v37, v34
+  v39 = xor.i64 v38, v35
+  v40 = add.i64 v27, v6
+  jmp b4(v40, v39)
+b6:
+  ret v28
+)";
+
+@test
+fn inductions_beside_the_counter_vectorize() {
+    let (b, a) = optimized(INDUCTIONS, VECTOR);
+    let u = text_of(&a, "up");
+    assert(u.contains("xor.v4i32") && u.contains("splat.v4i32"), u.as_str());
+    let d = text_of(&a, "down");
+    assert(d.contains("v8i16"), d.as_str());
+    let e = text_of(&a, "every2");
+    assert(e.contains("vunzip.v4i32") && e.contains("reduce_add"), e.as_str());
+    let lens: [u64; 10] = [0, 1, 2, 3, 8, 9, 16, 17, 33, 128];
+    let starts: [u64; 3] = [0, 0x7FFFFFFF, 0xFFFFFFF0];
+    for k in 0..10usize {
+        for q in 0..3usize {
+            let args: []u64 = [unsafe lens[k], unsafe starts[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A branch on the counter (`if i < m { c[i] = a[i] + 2 }`, the element loaded before it) linearizes: the
+// counter's lanes compared (`vector_ctr`) into the mask of the store, on both of the test's forms.
+const COUNTER_BRANCH: str = M"(lir ptr 8
+sym @below fn global noinline
+sym @from fn global noinline
+sym @drive fn global
+fn @below
+  sig (ptr, ptr, i64, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 2
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v3
+  br v8, b2, b5
+b2:
+  v9 = ptradd v1, v7 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.ult v7, v2
+  br v11, b3, b4
+b3:
+  v12 = add.i32 v10, v6
+  v13 = ptradd v0, v7 * 4
+  store v12, v13 align 2
+  jmp b4
+b4:
+  v14 = add.i64 v7, v5
+  jmp b1(v14)
+b5:
+  ret
+fn @from
+  sig (ptr, ptr, i64, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b5
+b2:
+  v8 = ptradd v1, v6 * 4
+  v9 = load.i32 v8 align 2
+  v10 = icmp.ugt v2, v6
+  br v10, b4, b3
+b3:
+  v11 = ptradd v0, v6 * 4
+  store v9, v11 align 2
+  jmp b4
+b4:
+  v12 = add.i64 v6, v5
+  jmp b1(v12)
+b5:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 128
+  v7 = iconst.i32 -1640531535
+  v8 = iconst.i32 9
+  jmp b1(v4)
+b1(v9: i64):
+  v10 = icmp.ult v9, v6
+  br v10, b2, b3
+b2:
+  v11 = trunc.i32 v9
+  v12 = mul.i32 v11, v7
+  v13 = ptradd v2, v9 * 4
+  store v12, v13 align 2
+  v14 = ptradd v3, v9 * 4
+  store v8, v14 align 2
+  v15 = add.i64 v9, v5
+  jmp b1(v15)
+b3:
+  call @below(v3, v2, v1, v0) : (ptr, ptr, i64, i64) -> void
+  v16 = ptradd v3+256
+  call @from(v16, v2, v1, v0) : (ptr, ptr, i64, i64) -> void
+  jmp b4(v4, v4)
+b4(v17: i64, v18: i64):
+  v19 = icmp.ult v17, v6
+  br v19, b5, b6
+b5:
+  v20 = ptradd v3, v17 * 4
+  v21 = load.i32 v20 align 2
+  v22 = zext.i64 v21
+  v23 = iconst.i64 1000003
+  v24 = mul.i64 v18, v23
+  v25 = xor.i64 v24, v22
+  v26 = add.i64 v17, v5
+  jmp b4(v26, v25)
+b6:
+  ret v18
+)";
+
+@test
+fn a_branch_on_the_counter_linearizes() {
+    let (b, a) = optimized_for(COUNTER_BRANCH, VECTOR, 16, VOPS_ALL);
+    let w = text_of(&a, "below");
+    assert(w.contains("store_masked_ptr") && w.contains("add.v2i64"), w.as_str());
+    let f = text_of(&a, "from");
+    assert(f.contains("store_masked_ptr"), f.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 4, 9, 17, 64];
+    let bounds: [u64; 5] = [0, 1, 6, 63, 1000];
+    for k in 0..7usize {
+        for q in 0..5usize {
+            let args: []u64 = [unsafe lens[k], unsafe bounds[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A count beside a masked store (`if c[i] > k { c[i] = k; n += 1 }`): the count's step is a select of 1
+// and the body's constant 0 (`cond_step`), which is no load a store may write (`vchecks`).
+const COUNTED_STORE: str = M"(lir ptr 8
+sym @clamp fn global noinline
+sym @drive fn global
+fn @clamp
+  sig (ptr, i64, i32) -> i64
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b5
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = icmp.sgt v9, v2
+  br v10, b3, b4(v6)
+b3:
+  store v2, v8 align 2
+  v11 = add.i64 v6, v4
+  jmp b4(v11)
+b4(v12: i64):
+  v13 = add.i64 v5, v4
+  jmp b1(v13, v12)
+b5:
+  ret v6
+fn @drive
+  sig (i64, i32) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i32 37
+  v7 = iconst.i32 101
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v5
+  br v9, b2, b3
+b2:
+  v10 = trunc.i32 v8
+  v11 = mul.i32 v10, v6
+  v12 = srem.i32 v11, v7
+  v13 = ptradd v2, v8 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v8, v4
+  jmp b1(v14)
+b3:
+  v15 = call.i64 @clamp(v2, v0, v1) : (ptr, i64, i32) -> i64
+  jmp b4(v3, v15)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v5
+  br v18, b5, b6
+b5:
+  v19 = ptradd v2, v16 * 4
+  v20 = load.i32 v19 align 2
+  v21 = sext.i64 v20
+  v22 = iconst.i64 1000003
+  v23 = mul.i64 v17, v22
+  v24 = xor.i64 v23, v21
+  v25 = add.i64 v16, v4
+  jmp b4(v25, v24)
+b6:
+  ret v17
+)";
+
+@test
+fn a_count_beside_a_masked_store_vectorizes() {
+    let (b, a) = optimized_for(COUNTED_STORE, VECTOR, 16, VOPS_ALL);
+    let c = text_of(&a, "clamp");
+    assert(c.contains("store_masked_ptr") && c.contains("reduce_add"), c.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 4, 9, 17, 128];
+    let bounds: [u64; 4] = [0, 50, 100, 0xFFFFFFFF];
+    for k in 0..7usize {
+        for q in 0..4usize {
+            let args: []u64 = [unsafe lens[k], unsafe bounds[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A reduction by std's `f32::maximum`, its selects (NaN when either is NaN, of equal values the `and` of
+// the bits): lanes of `maximum` (`ieee_red`), from the start value in every lane. Each count and NaN
+// position gives the bits it gave.
+@test
+fn a_maximum_reduction_keeps_maximum_lanes() {
+    let src = M"(lir ptr 8
+sym @maxr fn global noinline
+sym @drive fn global
+fn @maxr
+  sig (ptr, i64, f32) -> f32
+  ref p0 256 readonly
+b0(v0: ptr, v1: i64, v2: f32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v2)
+b1(v5: i64, v6: f32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.f32 v8 align 2
+  v10 = bitcast.i32 v6
+  v11 = bitcast.i32 v9
+  v12 = and.i32 v10, v11
+  v13 = bitcast.f32 v12
+  v14 = fcmp.ogt v6, v9
+  v15 = select.f32 v14, v6, v9
+  v16 = fcmp.oeq v6, v9
+  v17 = select.f32 v16, v13, v15
+  v18 = fadd.f32 v6, v9
+  v19 = fcmp.une v6, v6
+  v20 = select.f32 v19, v18, v17
+  v21 = fcmp.une v9, v9
+  v22 = select.f32 v21, v18, v20
+  v23 = add.i64 v5, v4
+  jmp b1(v23, v22)
+b3:
+  ret v6
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 13
+  v6 = iconst.i64 6
+  v7 = fconst.f32 0x7fc00000
+  v8 = fconst.f32 0x80000000
+  jmp b1(v3)
+b1(v9: i64):
+  v10 = icmp.ult v9, v0
+  br v10, b2, b3
+b2:
+  v11 = urem.i64 v9, v5
+  v12 = sub.i64 v11, v6
+  v13 = sitofp.f32 v12
+  v14 = ptradd v2, v9 * 4
+  v15 = icmp.eq v9, v1
+  v16 = select.f32 v15, v7, v13
+  store v16, v14 align 2
+  v17 = add.i64 v9, v4
+  jmp b1(v17)
+b3:
+  v18 = call.f32 @maxr(v2, v0, v8) : (ptr, i64, f32) -> f32
+  v19 = bitcast.i32 v18
+  v20 = zext.i64 v19
+  ret v20
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "maxr");
+    assert(t.contains("vop.maximum.v4f32"), t.as_str());
+    let ns: [u64; 5] = [0, 1, 7, 8, 37];
+    for k in 0..5usize {
+        for at in 0u64..9 {
+            let args: []u64 = [unsafe ns[k], at * 5];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// An else-if chain (TSVC s441) whose inner sides the optimizer merged into a load through a select of two
+// slices' pointers: if-conversion loads from both slices, each at least as long as the loop's bound, and
+// selects (`split_all`), so the loop vectorizes. Each count gives the elements it gave.
+@test
+fn a_load_through_a_select_of_two_slices_vectorizes() {
+    let src = M"(lir ptr 8
+sym @f fn global noinline
+sym @drive fn global
+fn @f
+  sig (ptr, ptr, ptr) -> void
+  ref p0 16 noalias
+  ref p1 16 readonly
+  ref p2 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = fconst.f32 0x0
+  v6 = fconst.f32 0x3f800000
+  v7 = load.i64 v0+8 align 3
+  v8 = load.ptr v0 align 3
+  v9 = load.i64 v1+8 align 3
+  v10 = load.ptr v1 align 3
+  v11 = load.i64 v2+8 align 3
+  v12 = load.ptr v2 align 3
+  v13 = icmp.ule v7, v9
+  v14 = icmp.ule v7, v11
+  v15 = and.i8 v13, v14
+  br v15, b1(v3), b6
+b1(v16: i64):
+  v17 = icmp.ult v16, v7
+  br v17, b2, b6
+b2:
+  v18 = ptradd v8, v16 * 4
+  v19 = load.f32 v18 align 2
+  v20 = fcmp.olt v19, v5
+  br v20, b3, b4
+b3:
+  v21 = ptradd v10, v16 * 4
+  v22 = load.f32 v21 align 2
+  store v22, v18 align 2
+  jmp b5
+b4:
+  v23 = fcmp.ogt v19, v6
+  v24 = select.ptr v23, v10, v12
+  v25 = ptradd v24, v16 * 4
+  v26 = load.f32 v25 align 2
+  v27 = fadd.f32 v26, v19
+  store v27, v18 align 2
+  jmp b5
+b5:
+  v28 = add.i64 v16, v4
+  jmp b1(v28)
+b6:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+  slot s2 size 256 align 3
+  slot s3 size 48 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 5
+  v8 = iconst.i64 2
+  v9 = iconst.i64 64
+  v10 = iconst.i64 3
+  v11 = iconst.i64 131
+  store v1, v4 align 3
+  store v0, v4+8 align 3
+  store v2, v4+16 align 3
+  store v9, v4+24 align 3
+  store v3, v4+32 align 3
+  store v9, v4+40 align 3
+  jmp b1(v5)
+b1(v12: i64):
+  v13 = icmp.ult v12, v9
+  br v13, b2, b3
+b2:
+  v14 = urem.i64 v12, v7
+  v15 = sub.i64 v14, v8
+  v16 = sitofp.f32 v15
+  v17 = ptradd v1, v12 * 4
+  store v16, v17 align 2
+  v18 = mul.i64 v12, v10
+  v19 = sitofp.f32 v18
+  v20 = ptradd v2, v12 * 4
+  store v19, v20 align 2
+  v21 = sub.i64 v5, v12
+  v22 = sitofp.f32 v21
+  v23 = ptradd v3, v12 * 4
+  store v22, v23 align 2
+  v24 = add.i64 v12, v6
+  jmp b1(v24)
+b3:
+  v25 = ptradd v4+16
+  v26 = ptradd v4+32
+  call @f(v4, v25, v26) : (ptr, ptr, ptr) -> void
+  jmp b4(v5, v5)
+b4(v27: i64, v28: i64):
+  v29 = icmp.ult v27, v9
+  br v29, b5, b6
+b5:
+  v30 = ptradd v1, v27 * 4
+  v31 = load.f32 v30 align 2
+  v32 = fptosi.i64 v31
+  v33 = mul.i64 v28, v11
+  v34 = add.i64 v33, v32
+  v35 = add.i64 v27, v6
+  jmp b4(v35, v34)
+b6:
+  ret v28
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "f");
+    assert(t.contains("fadd.v4f32"), t.as_str());
+    let ns: [u64; 6] = [0, 1, 3, 4, 9, 37];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A loop counting down over pairs, `while i != 0 { i -= 1; (p[i].x, p[i].y) = (p[i].y + 1, p[i].x) }`:
+// each vector holds its pairs in order, the group loaded from each pair's first field (`group_start`)
+// and stored back, the copies' groups from the highest down. Each count gives the elements it gave.
+@test
+fn a_group_of_fields_counting_down_vectorizes() {
+    let src = M"(lir ptr 8
+sym @swap fn global noinline
+sym @drive fn global
+fn @swap
+  sig (ptr, i64) -> void
+  ref p0 512 noalias
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 1
+  jmp b1(v1)
+b1(v5: i64):
+  v6 = icmp.ne v5, v2
+  br v6, b2, b3
+b2:
+  v7 = sub.i64 v5, v3
+  v8 = ptradd v0, v7 * 8
+  v9 = load.i32 v8 align 2
+  v10 = load.i32 v8+4 align 2
+  v11 = add.i32 v10, v4
+  store v11, v8 align 2
+  store v9, v8+4 align 2
+  jmp b1(v7)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 131
+  v5 = iconst.i32 7
+  v6 = add.i64 v0, v0
+  jmp b1(v2)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v7 * 4
+  v10 = trunc.i32 v7
+  v11 = mul.i32 v10, v5
+  store v11, v9 align 2
+  v12 = add.i64 v7, v3
+  jmp b1(v12)
+b3:
+  call @swap(v1, v0) : (ptr, i64) -> void
+  jmp b4(v2, v2)
+b4(v13: i64, v14: i64):
+  v15 = icmp.ult v13, v6
+  br v15, b5, b6
+b5:
+  v16 = ptradd v1, v13 * 4
+  v17 = load.i32 v16 align 2
+  v18 = sext.i64 v17
+  v19 = mul.i64 v14, v4
+  v20 = add.i64 v19, v18
+  v21 = add.i64 v13, v3
+  jmp b4(v21, v20)
+b6:
+  ret v14
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "swap");
+    assert(t.contains("add.v4i32") && t.contains("vziplo"), t.as_str());
+    let ns: [u64; 8] = [0, 1, 3, 4, 7, 8, 9, 37];
+    for k in 0..8usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// An early exit that returns the running sum, `for i in 0..a.len() { if a[i] == 0 { return s } s += b[i] }`
+// with `b[i]` checked: in the copy without the check (`clip`) the exit passes the sum, which the vector loop
+// hands, as the iteration a lane leaves in found it, to the loop, which takes the exit itself
+// (`exit_reads`). Each count, zero position and length of `b` gives the sum or the failure it gave.
+@test
+fn an_early_exit_that_returns_the_running_sum_vectorizes() {
+    let src = M"(lir ptr 8
+sym @upto fn global noinline
+sym @fail fn global noinline cold
+sym @drive fn global
+fn @fail
+  sig (i64) -> void
+b0(v0: i64):
+  panic "index out of bounds"
+fn @upto
+  sig (ptr, ptr) -> i32
+  ref p0 16 readonly
+  ref p1 16 readonly
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 0
+  v5 = load.i64 v0+8 align 3
+  v6 = load.ptr v0 align 3
+  v7 = load.i64 v1+8 align 3
+  v8 = load.ptr v1 align 3
+  jmp b1(v2, v4)
+b1(v9: i64, v10: i32):
+  v11 = icmp.ult v9, v5
+  br v11, b2, b6
+b2:
+  v12 = ptradd v6, v9 * 4
+  v13 = load.i32 v12 align 2
+  v14 = icmp.eq v13, v4
+  br v14, b5, b3
+b3:
+  v15 = icmp.uge v9, v7
+  br v15, b7, b4
+b4:
+  v16 = ptradd v8, v9 * 4
+  v17 = load.i32 v16 align 2
+  v18 = add.i32 v10, v17
+  v19 = add.i64 v9, v3
+  jmp b1(v19, v18)
+b5:
+  ret v10
+b6:
+  v20 = sub.i32 v4, v10
+  ret v20
+b7:
+  call @fail(v9) : (i64) -> void
+  unreachable
+fn @drive
+  sig (i64, i64, i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 32 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = slotaddr s0
+  v4 = slotaddr s1
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 7
+  v8 = iconst.i32 0
+  store v3, v4 align 3
+  store v0, v4+8 align 3
+  store v3, v4+16 align 3
+  store v2, v4+24 align 3
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v0
+  br v10, b2, b3
+b2:
+  v11 = mul.i64 v9, v7
+  v12 = add.i64 v11, v6
+  v13 = trunc.i32 v12
+  v14 = icmp.eq v9, v1
+  v15 = select.i32 v14, v8, v13
+  v16 = ptradd v3, v9 * 4
+  store v15, v16 align 2
+  v17 = add.i64 v9, v6
+  jmp b1(v17)
+b3:
+  v18 = ptradd v4+16
+  v19 = call.i32 @upto(v4, v18) : (ptr, ptr) -> i32
+  v20 = sext.i64 v19
+  ret v20
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 200,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "upto");
+    assert(t.contains("add.v4i32"), t.as_str());
+    let ns: [u64; 6] = [0, 1, 4, 8, 13, 37];
+    for k in 0..6usize {
+        for at in 0u64..9 {
+            // `b` as long as `a`, or shorter: the check fails before or after the zero.
+            for cut in 0u64..2 {
+                let n = unsafe ns[k];
+                let z = at * 4 + at % 3;
+                let bl = n - n / 3 * cut;
+                let args: []u64 = [n, z, bl];
+                let fails = bl < n && z > bl;
+                if fails {
+                    same_outcome(&b, &a, "drive", args, 0, true);
+                } else {
+                    same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+                }
+            }
+        }
+    }
+}
+
+// An induction that steps by a parameter, `a[i] = j; j -= k`: its lanes from the counter's iterations
+// times `k`, the lane offsets built from `k` per bit of the lane index (`vector_ramp_by`). Each count and
+// step gives the elements it gave.
+@test
+fn an_induction_by_a_value_from_before_the_loop_vectorizes() {
+    let src = M"(lir ptr 8
+sym @ramp fn global noinline
+sym @drive fn global
+fn @ramp
+  sig (ptr, i64, i32) -> void
+  ref p0 512 noalias
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 11
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 4
+  store v7, v9 align 2
+  v10 = sub.i32 v7, v2
+  v11 = add.i64 v6, v4
+  jmp b1(v11, v10)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 512 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 131
+  v6 = trunc.i32 v1
+  call @ramp(v2, v0, v6) : (ptr, i64, i32) -> void
+  jmp b1(v3, v3)
+b1(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v0
+  br v9, b2, b3
+b2:
+  v10 = ptradd v2, v7 * 4
+  v11 = load.i32 v10 align 2
+  v12 = sext.i64 v11
+  v13 = mul.i64 v8, v5
+  v14 = add.i64 v13, v12
+  v15 = add.i64 v7, v4
+  jmp b1(v15, v14)
+b3:
+  ret v8
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "ramp");
+    assert(t.contains("splat.v4i32"), t.as_str());
+    let ns: [u64; 6] = [0, 1, 4, 7, 8, 37];
+    let ks: [u64; 4] = [0, 3, 0xFFFFFFFB, 0x7FFFFFFF];
+    for k in 0..6usize {
+        for q in 0..4usize {
+            let args: []u64 = [unsafe ns[k], unsafe ks[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A flag that a comparison sets for good (`f = f || x > k`, from 0) or clears for good (`f = f && x < k`,
+// from 1) is a reduction (`bool_red`): the comparisons' masks or'ed or and'ed into its lanes, reduced and
+// and'ed with 1 after the loop. An i64 comparison's mask narrows to the flag's i8 lanes, an i8 load extends
+// to i64 and an i64 one truncates to i8 (8 times the width, `vconv_ok`), each in steps of twice or half the
+// width (`vconv`, `vmask`), which split by parts in registers (`lir::wide`): no slot in any loop.
+const FLAGS_AND_WIDTHS: str = M"(lir ptr 8
+sym @any64 fn global noinline
+sym @allf fn global noinline
+sym @widen fn global noinline
+sym @narrow fn global noinline
+sym @drive fn global
+fn @any64
+  sig (ptr, i64, i64) -> i8
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i8 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i8):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 8
+  v10 = load.i64 v9 align 3
+  v11 = icmp.sgt v10, v2
+  v12 = select.i8 v7, v7, v11
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b3:
+  ret v7
+fn @allf
+  sig (ptr, i64, f32) -> i8
+b0(v0: ptr, v1: i64, v2: f32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i8 1
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i8):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 4
+  v10 = load.f32 v9 align 2
+  v11 = fcmp.olt v10, v2
+  v12 = select.i8 v7, v11, v7
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b3:
+  ret v7
+fn @widen
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 1
+  v8 = load.i8 v7 align 0
+  v9 = sext.i64 v8
+  v10 = ptradd v0, v5 * 8
+  store v9, v10 align 3
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @narrow
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 8
+  v8 = load.i64 v7 align 3
+  v9 = trunc.i8 v8
+  v10 = ptradd v0, v5 * 1
+  store v9, v10 align 0
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 512 align 3
+  slot s2 size 1024 align 3
+  slot s3 size 128 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = slotaddr s3
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 128
+  v9 = iconst.i64 2654435761
+  v10 = iconst.i64 101
+  jmp b1(v6)
+b1(v11: i64):
+  v12 = icmp.ult v11, v8
+  br v12, b2, b3
+b2:
+  v13 = mul.i64 v11, v9
+  v14 = ptradd v2, v11 * 8
+  store v13, v14 align 3
+  v15 = srem.i64 v13, v10
+  v16 = sitofp.f32 v15
+  v17 = ptradd v3, v11 * 4
+  store v16, v17 align 2
+  v18 = add.i64 v11, v7
+  jmp b1(v18)
+b3:
+  v19 = call.i8 @any64(v2, v0, v1) : (ptr, i64, i64) -> i8
+  v20 = sitofp.f32 v1
+  v21 = call.i8 @allf(v3, v0, v20) : (ptr, i64, f32) -> i8
+  call @widen(v4, v2, v0) : (ptr, ptr, i64) -> void
+  call @narrow(v5, v2, v0) : (ptr, ptr, i64) -> void
+  v22 = zext.i64 v19
+  v23 = zext.i64 v21
+  v24 = iconst.i64 1000003
+  v25 = mul.i64 v22, v24
+  v26 = add.i64 v25, v23
+  jmp b4(v6, v26)
+b4(v27: i64, v28: i64):
+  v29 = icmp.ult v27, v0
+  br v29, b5, b6
+b5:
+  v30 = ptradd v4, v27 * 8
+  v31 = load.i64 v30 align 3
+  v32 = ptradd v5, v27 * 1
+  v33 = load.i8 v32 align 0
+  v34 = sext.i64 v33
+  v35 = mul.i64 v28, v24
+  v36 = xor.i64 v35, v31
+  v37 = mul.i64 v36, v24
+  v38 = xor.i64 v37, v34
+  v39 = add.i64 v27, v7
+  jmp b4(v39, v38)
+b6:
+  ret v28
+)";
+
+@test
+fn flags_and_eightfold_conversions_vectorize_in_registers() {
+    let (b, a) = optimized_for(FLAGS_AND_WIDTHS, VECTOR, 16, VOPS_ALL);
+    let any = text_of(&a, "any64");
+    assert(any.contains("vcmp.sgt.v2i64") && any.contains("or.v") && !any.contains("slotaddr"), any.as_str());
+    let all = text_of(&a, "allf");
+    assert(all.contains("vcmp.olt.v4i32") && all.contains("and.v") && !all.contains("slotaddr"), all.as_str());
+    let w = text_of(&a, "widen");
+    assert(w.contains(".v2i64") && !w.contains("slotaddr"), w.as_str());
+    let n = text_of(&a, "narrow");
+    assert(n.contains("load.v2i64") && n.contains("vunzip") && !n.contains("slotaddr"), n.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 9, 17, 64, 128];
+    let ks: [u64; 4] = [0, 50, 200, 1099511627776];
+    for q in 0..7usize {
+        for j in 0..4usize {
+            let args: []u64 = [unsafe lens[q], unsafe ks[j]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A count of byte matches in 2- and 4-byte counters (`n += (x == k) as u16`, `as u32`): the flag extended
+// is the mask at the counter's width, negated (`vclass`), not a lane conversion of a flag, which would
+// leave the loop scalar.
+@test
+fn counts_of_matches_in_wider_counters_vectorize() {
+    let src = M"(lir ptr 8
+sym @c16 fn global
+sym @c32 fn global
+sym @w data local
+fn @c16
+  sig (i64, i8) -> i16
+b0(v0: i64, v1: i8):
+  v2 = symaddr @w
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i16 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i16):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = icmp.eq v10, v1
+  v12 = zext.i16 v11
+  v13 = add.i16 v7, v12
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v13)
+b3:
+  ret v7
+fn @c32
+  sig (i64, i8) -> i32
+b0(v0: i64, v1: i8):
+  v2 = symaddr @w
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = icmp.slt v10, v1
+  v12 = zext.i32 v11
+  v13 = add.i32 v7, v12
+  v14 = add.i64 v6, v4
+  jmp b1(v14, v13)
+b3:
+  ret v7
+data @w size 128 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd160395cc98081cc614069dc99a0f18c71a019dce940e1cc0180495cb960518c11e0f95c090041cca1c029dcd920b18cb120d9dc29c0a1cc4100095cf9e0118c5160b95c498001cce140e9dc19a0718cf1a099dc694061cc8180c95c3960d18c91e0795c8900c1cc
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let c16 = text_of(&a, "c16");
+    assert(c16.contains("vcmp.eq.v8i8") && c16.contains("sub.v8i16"), c16.as_str());
+    let c32 = text_of(&a, "c32");
+    assert(c32.contains("vcmp.slt.v8i8") && c32.contains("sub.v4i32"), c32.as_str());
+    let ks: [u64; 3] = [0x21, 0, 0xC0];
+    for n in 0..129u64 {
+        for q in 0..3usize {
+            let args: []u64 = [n, unsafe ks[q]];
+            same_outcome(&b, &a, "c16", args, run_value(&b, "c16", args), false);
+            same_outcome(&b, &a, "c32", args, run_value(&b, "c32", args), false);
+        }
+    }
+}
+
+// A first-order recurrence (`prev = x` for the next iteration, `c[i] = x - prev`) vectorizes
+// (`first_order`): each copy's lanes of the value one iteration back are the lanes in a row from the last
+// of the copy before (the loop's carried vector for the first), a `shuffle` the backends make in
+// registers (`lv::lane_slide`); the loop after takes the last lane. Of an i32 load, and of a byte load
+// widened to i32 (vectors two registers wide, which `lir::wide` slides by parts, no slot). Each count and
+// start runs as before.
+const RECURRENCES: str = M"(lir ptr 8
+sym @diff fn global noinline
+sym @wdiff fn global noinline
+sym @drive fn global
+fn @diff
+  sig (ptr, ptr, i64, i32) -> i32
+b0(v0: ptr, v1: ptr, v2: i64, v3: i32):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4, v3)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = sub.i32 v10, v7
+  v12 = ptradd v0, v6 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v6, v5
+  jmp b1(v13, v10)
+b3:
+  ret v7
+fn @wdiff
+  sig (ptr, ptr, i64, i32) -> i32
+b0(v0: ptr, v1: ptr, v2: i64, v3: i32):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4, v3)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = zext.i32 v10
+  v12 = mul.i32 v11, v7
+  v13 = sub.i32 v12, v7
+  v14 = ptradd v0, v6 * 4
+  store v13, v14 align 2
+  v15 = add.i64 v6, v5
+  jmp b1(v15, v11)
+b3:
+  ret v7
+fn @drive
+  sig (i64, i32) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 128
+  v7 = iconst.i32 -1640531535
+  jmp b1(v4)
+b1(v8: i64):
+  v9 = icmp.ult v8, v6
+  br v9, b2, b3
+b2:
+  v10 = trunc.i32 v8
+  v11 = mul.i32 v10, v7
+  v12 = ptradd v2, v8 * 4
+  store v11, v12 align 2
+  v13 = add.i64 v8, v5
+  jmp b1(v13)
+b3:
+  v14 = call.i32 @diff(v3, v2, v0, v1) : (ptr, ptr, i64, i32) -> i32
+  v15 = iconst.i64 1000003
+  v16 = sext.i64 v14
+  jmp b4(v4, v16)
+b4(v17: i64, v18: i64):
+  v19 = icmp.ult v17, v0
+  br v19, b5, b6
+b5:
+  v20 = ptradd v3, v17 * 4
+  v21 = load.i32 v20 align 2
+  v22 = sext.i64 v21
+  v23 = mul.i64 v18, v15
+  v24 = xor.i64 v23, v22
+  v25 = add.i64 v17, v5
+  jmp b4(v25, v24)
+b6:
+  v26 = call.i32 @wdiff(v3, v2, v0, v1) : (ptr, ptr, i64, i32) -> i32
+  v27 = sext.i64 v26
+  v28 = mul.i64 v18, v15
+  v29 = xor.i64 v28, v27
+  jmp b7(v4, v29)
+b7(v30: i64, v31: i64):
+  v32 = icmp.ult v30, v0
+  br v32, b8, b9
+b8:
+  v33 = ptradd v3, v30 * 4
+  v34 = load.i32 v33 align 2
+  v35 = sext.i64 v34
+  v36 = mul.i64 v31, v15
+  v37 = xor.i64 v36, v35
+  v38 = add.i64 v30, v5
+  jmp b7(v38, v37)
+b9:
+  ret v31
+)";
+
+@test
+fn first_order_recurrences_vectorize() {
+    let (b, a) = optimized_for(RECURRENCES, VECTOR, 16, VOPS_ALL);
+    let d = text_of(&a, "diff");
+    assert(d.contains("vop.shuffle.v4i32") && d.contains("sub.v4i32") && d.contains("vextract"), d.as_str());
+    let w = text_of(&a, "wdiff");
+    assert(w.contains("vop.shuffle.v4i32") && w.contains("mul.v4i32") && !w.contains("slotaddr"), w.as_str());
+    let lens: [u64; 9] = [0, 1, 3, 4, 7, 16, 17, 33, 128];
+    let starts: [u64; 3] = [0, 5, 0xFFFFFFF0];
+    for k in 0..9usize {
+        for q in 0..3usize {
+            let args: []u64 = [unsafe lens[k], unsafe starts[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A load ahead of a store through its base that the body runs after the store (TSVC s212, `a[i] *= c[i];
+// b[i] += a[i + 1]`): iteration `i` reads `a[i + 1]` before iteration `i + 1` writes it, so the vector loop
+// loads before it stores (`ahead_load`, `vlord`). Each count gives the elements it gave.
+@test
+fn a_load_ahead_of_an_earlier_store_moves_before_it() {
+    let src = M"(lir ptr 8
+sym @fwd fn global noinline
+sym @drive fn global
+fn @fwd
+  sig (ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 noalias
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 3
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 4
+  v9 = load.i32 v8 align 2
+  v10 = mul.i32 v9, v5
+  store v10, v8 align 2
+  v11 = load.i32 v8+4 align 2
+  v12 = ptradd v1, v6 * 4
+  v13 = load.i32 v12 align 2
+  v14 = add.i32 v13, v11
+  store v14, v12 align 2
+  v15 = add.i64 v6, v4
+  jmp b1(v15)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 131
+  v6 = iconst.i32 7
+  v7 = add.i64 v0, v4
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v7
+  br v9, b2, b3
+b2:
+  v10 = trunc.i32 v8
+  v11 = mul.i32 v10, v6
+  v12 = ptradd v1, v8 * 4
+  store v11, v12 align 2
+  v13 = ptradd v2, v8 * 4
+  store v10, v13 align 2
+  v14 = add.i64 v8, v4
+  jmp b1(v14)
+b3:
+  call @fwd(v1, v2, v0) : (ptr, ptr, i64) -> void
+  jmp b4(v3, v3)
+b4(v15: i64, v16: i64):
+  v17 = icmp.ult v15, v7
+  br v17, b5, b6
+b5:
+  v18 = ptradd v1, v15 * 4
+  v19 = load.i32 v18 align 2
+  v20 = ptradd v2, v15 * 4
+  v21 = load.i32 v20 align 2
+  v22 = add.i32 v19, v21
+  v23 = sext.i64 v22
+  v24 = mul.i64 v16, v5
+  v25 = add.i64 v24, v23
+  v26 = add.i64 v15, v4
+  jmp b4(v26, v25)
+b6:
+  ret v16
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "fwd");
+    assert(t.contains("mul.v4i32"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// TSVC s124: `j += 1; a[j] = ..` on both sides of a branch, `j` from -1 beside the counter from 0. The
+// sum both sides compute moves before the branch (`opt::hoist_common`), so `j` steps by 1 on every edge
+// and is the counter minus 1 (`opt::offset_params`); the sides' stores of one address are one store of a
+// select (`linearize`), and the loop vectorizes. Each count gives the elements it gave.
+@test
+fn an_index_stepped_on_both_sides_vectorizes_as_one_store() {
+    let src = M"(lir ptr 8
+sym @s124 fn global noinline
+sym @drive fn global
+fn @s124
+  sig (ptr, ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 readonly
+  ref p2 512 readonly
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 -1
+  v7 = iconst.i32 0
+  jmp b1(v4, v6)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v3
+  br v10, b2, b6
+b2:
+  v11 = ptradd v1, v8 * 4
+  v12 = load.i32 v11 align 2
+  v13 = icmp.sgt v12, v7
+  v14 = ptradd v2, v8 * 4
+  v15 = load.i32 v14 align 2
+  br v13, b3, b4
+b3:
+  v16 = add.i64 v9, v5
+  v17 = ptradd v0, v16 * 4
+  store v12, v17 align 2
+  jmp b5(v16)
+b4:
+  v18 = add.i64 v9, v5
+  v19 = ptradd v0, v18 * 4
+  v20 = mul.i32 v15, v15
+  store v20, v19 align 2
+  jmp b5(v18)
+b5(v21: i64):
+  v22 = add.i64 v8, v5
+  jmp b1(v22, v21)
+b6:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 131
+  v7 = iconst.i32 7
+  v8 = iconst.i32 3
+  v9 = iconst.i64 64
+  jmp b1(v4)
+b1(v10: i64):
+  v11 = icmp.ult v10, v9
+  br v11, b2, b3
+b2:
+  v12 = trunc.i32 v10
+  v13 = mul.i32 v12, v7
+  v14 = and.i32 v13, v8
+  v15 = sub.i32 v14, v8
+  v16 = ptradd v2, v10 * 4
+  store v15, v16 align 2
+  v17 = mul.i32 v12, v8
+  v18 = ptradd v3, v10 * 4
+  store v17, v18 align 2
+  v19 = ptradd v1, v10 * 4
+  store v12, v19 align 2
+  v20 = add.i64 v10, v5
+  jmp b1(v20)
+b3:
+  call @s124(v1, v2, v3, v0) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v9
+  br v23, b5, b6
+b5:
+  v24 = ptradd v1, v21 * 4
+  v25 = load.i32 v24 align 2
+  v26 = sext.i64 v25
+  v27 = mul.i64 v22, v6
+  v28 = add.i64 v27, v26
+  v29 = add.i64 v21, v5
+  jmp b4(v29, v28)
+b6:
+  ret v22
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "s124");
+    assert(t.contains("vsel.v4i32") && !t.contains("store_masked"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// An integer difference from the accumulator (`s = s - a[i]`) is a reduction: its lanes take away from 0,
+// their sums add to the start value (`red_op`). Each count and start runs as before.
+@test
+fn a_difference_from_the_accumulator_is_a_reduction() {
+    let src = M"(lir ptr 8
+sym @subs fn global noinline
+sym @drive fn global
+fn @subs
+  sig (ptr, i64, i32) -> i32
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v2)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = sub.i32 v6, v9
+  v11 = add.i64 v5, v4
+  jmp b1(v11, v10)
+b3:
+  ret v6
+fn @drive
+  sig (i64, i32) -> i32
+  slot s0 size 512 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i32 -1640531535
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v7
+  v10 = mul.i32 v9, v6
+  v11 = ptradd v2, v7 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v7, v4
+  jmp b1(v12)
+b3:
+  v13 = call.i32 @subs(v2, v0, v1) : (ptr, i64, i32) -> i32
+  ret v13
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let s = text_of(&a, "subs");
+    assert(s.contains("sub.v4i32") && s.contains("reduce_add"), s.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 4, 9, 33, 128];
+    let starts: [u64; 3] = [0, 7, 0x80000000];
+    for k in 0..7usize {
+        for q in 0..3usize {
+            let args: []u64 = [unsafe lens[k], unsafe starts[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// 8-byte lanes multiply by a constant of one or two powers of 2 as shifts and an add or a subtraction
+// (`mul_split`: 3 = 2 + 1, 2^62 - 8, 8): the targets have no 64-bit lane product. Each count runs as before.
+@test
+fn eight_byte_products_by_two_powers_vectorize() {
+    let src = M"(lir ptr 8
+sym @mk fn global noinline
+sym @drive fn global
+fn @mk
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 3
+  v6 = iconst.i64 4611686018427387896
+  v7 = iconst.i64 8
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v2
+  br v9, b2, b3
+b2:
+  v10 = ptradd v1, v8 * 8
+  v11 = load.i64 v10 align 3
+  v12 = mul.i64 v11, v5
+  v13 = mul.i64 v11, v6
+  v14 = mul.i64 v11, v7
+  v15 = xor.i64 v12, v13
+  v16 = add.i64 v15, v14
+  v17 = ptradd v0, v8 * 8
+  store v16, v17 align 3
+  v18 = add.i64 v8, v4
+  jmp b1(v18)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i64 -7046029254386353131
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = mul.i64 v7, v6
+  v10 = ptradd v1, v7 * 8
+  store v9, v10 align 3
+  v11 = add.i64 v7, v4
+  jmp b1(v11)
+b3:
+  call @mk(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v12 = iconst.i64 1000003
+  jmp b4(v3, v3)
+b4(v13: i64, v14: i64):
+  v15 = icmp.ult v13, v0
+  br v15, b5, b6
+b5:
+  v16 = ptradd v2, v13 * 8
+  v17 = load.i64 v16 align 3
+  v18 = mul.i64 v14, v12
+  v19 = xor.i64 v18, v17
+  v20 = add.i64 v13, v4
+  jmp b4(v20, v19)
+b6:
+  ret v14
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let m = text_of(&a, "mk");
+    assert(m.contains("shl.v2i64") && m.contains("sub.v2i64") && !m.contains("mul.v2i64"), m.as_str());
+    let lens: [u64; 6] = [0, 1, 2, 5, 17, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A comparison's flag stored (`c[i] = a[i] > k` into bools) vectorizes: the mask's lanes narrowed to bytes
+// (`vmask`), negated to 0 or 1. Of i64 and of i32 lanes; each count and bound runs as before.
+@test
+fn stored_comparison_flags_vectorize() {
+    let src = M"(lir ptr 8
+sym @flags fn global noinline
+sym @drive fn global
+fn @flags
+  sig (ptr, ptr, ptr, i64, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64):
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = trunc.i32 v4
+  jmp b1(v5)
+b1(v8: i64):
+  v9 = icmp.ult v8, v3
+  br v9, b2, b3
+b2:
+  v10 = ptradd v2, v8 * 8
+  v11 = load.i64 v10 align 3
+  v12 = icmp.sgt v11, v4
+  v13 = ptradd v0, v8 * 1
+  store v12, v13 align 0
+  v14 = trunc.i32 v11
+  v15 = icmp.ult v14, v7
+  v16 = ptradd v1, v8 * 1
+  store v15, v16 align 0
+  v17 = add.i64 v8, v6
+  jmp b1(v17)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 128 align 3
+  slot s2 size 128 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 128
+  v8 = iconst.i64 -7046029254386353131
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v7
+  br v10, b2, b3
+b2:
+  v11 = mul.i64 v9, v8
+  v12 = ptradd v2, v9 * 8
+  store v11, v12 align 3
+  v13 = add.i64 v9, v6
+  jmp b1(v13)
+b3:
+  call @flags(v3, v4, v2, v0, v1) : (ptr, ptr, ptr, i64, i64) -> void
+  v14 = iconst.i64 3
+  jmp b4(v5, v5)
+b4(v15: i64, v16: i64):
+  v17 = icmp.ult v15, v0
+  br v17, b5, b6
+b5:
+  v18 = ptradd v3, v15 * 1
+  v19 = load.i8 v18 align 0
+  v20 = ptradd v4, v15 * 1
+  v21 = load.i8 v20 align 0
+  v22 = zext.i64 v19
+  v23 = zext.i64 v21
+  v24 = mul.i64 v16, v14
+  v25 = add.i64 v24, v22
+  v26 = mul.i64 v25, v14
+  v27 = add.i64 v26, v23
+  v28 = add.i64 v15, v6
+  jmp b4(v28, v27)
+b6:
+  ret v16
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let f = text_of(&a, "flags");
+    assert(f.contains("vcmp.sgt.v2i64") && f.contains("neg.v") && !f.contains("slotaddr"), f.as_str());
+    let lens: [u64; 6] = [0, 1, 7, 16, 33, 128];
+    let ks: [u64; 3] = [0, 0x7FFFFFFF00000000, 0xFFFFFFFFFFFFFF00];
+    for k in 0..6usize {
+        for q in 0..3usize {
+            let args: []u64 = [unsafe lens[k], unsafe ks[q]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// A float to a narrower integer converts to the integer of its width (saturating, NaN 0), clamps to the
+// narrow range by lane maximum and minimum, then cuts (`vconv`); f32 to i64 goes through f64. Out-of-range
+// values, infinities and NaN saturate as the scalar loop's.
+@test
+fn floats_to_narrow_and_wide_integers_vectorize() {
+    let src = M"(lir ptr 8
+sym @cv fn global noinline
+sym @drive fn global
+fn @cv
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v2, v6 * 4
+  v9 = load.f32 v8 align 2
+  v10 = fptosi.i8 v9
+  v11 = ptradd v0, v6 * 1
+  store v10, v11 align 0
+  v12 = fptosi.i64 v9
+  v13 = ptradd v1, v6 * 8
+  store v12, v13 align 3
+  v14 = add.i64 v6, v5
+  jmp b1(v14)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 128 align 3
+  slot s2 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 128
+  v7 = iconst.i64 -7046029254386353131
+  v8 = iconst.i64 40
+  jmp b1(v4)
+b1(v9: i64):
+  v10 = icmp.ult v9, v6
+  br v10, b2, b3
+b2:
+  v11 = mul.i64 v9, v7
+  v12 = ashr.i64 v11, v8
+  v13 = sitofp.f32 v12
+  v14 = ptradd v1, v9 * 4
+  store v13, v14 align 2
+  v15 = add.i64 v9, v5
+  jmp b1(v15)
+b3:
+  v16 = fconst.f32 0x7fc00000
+  store v16, v1+8 align 2
+  v17 = fconst.f32 0x7f800000
+  store v17, v1+12 align 2
+  v18 = fconst.f32 0xff800000
+  store v18, v1+20 align 2
+  call @cv(v2, v3, v1, v0) : (ptr, ptr, ptr, i64) -> void
+  v19 = iconst.i64 1000003
+  jmp b4(v4, v4)
+b4(v20: i64, v21: i64):
+  v22 = icmp.ult v20, v0
+  br v22, b5, b6
+b5:
+  v23 = ptradd v2, v20 * 1
+  v24 = load.i8 v23 align 0
+  v25 = sext.i64 v24
+  v26 = ptradd v3, v20 * 8
+  v27 = load.i64 v26 align 3
+  v28 = mul.i64 v21, v19
+  v29 = xor.i64 v28, v25
+  v30 = mul.i64 v29, v19
+  v31 = xor.i64 v30, v27
+  v32 = add.i64 v20, v5
+  jmp b4(v32, v31)
+b6:
+  ret v21
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let c = text_of(&a, "cv");
+    assert(
+        c.contains("fptosi.v4i32") && c.contains("vop.max.s.v4i32") && c.contains("vop.min.s.v4i32") && c.contains(
+            "fpext.v2f64",
+        ) && !c.contains("slotaddr"),
+        c.as_str(),
+    );
+    let lens: [u64; 6] = [0, 1, 6, 16, 33, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A checked sum or difference saturated on its overflow flag (`select(ovf, bound, r)` of `addo`, `subo`)
+// is a saturating lane operation (`sat_ovf`): unsigned, the bound all ones or 0; signed, MAX or MIN by the
+// second operand's sign (`(b >>s 15) ^ MAX`). Each count runs as before.
+@test
+fn checked_operations_saturated_on_overflow_vectorize() {
+    let src = M"(lir ptr 8
+sym @sat fn global noinline
+sym @drive fn global
+fn @sat
+  sig (ptr, ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr, v4: i64):
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i16 15
+  v8 = iconst.i16 32767
+  v9 = iconst.i16 0
+  jmp b1(v5)
+b1(v10: i64):
+  v11 = icmp.ult v10, v4
+  br v11, b2, b3
+b2:
+  v12 = ptradd v2, v10 * 2
+  v13 = load.i16 v12 align 1
+  v14 = ptradd v3, v10 * 2
+  v15 = load.i16 v14 align 1
+  v16 = ashr.i16 v15, v7
+  v17 = xor.i16 v16, v8
+  v18, v19 = addo.s.i16 v13, v15
+  v20 = select.i16 v19, v17, v18
+  v21 = ptradd v0, v10 * 2
+  store v20, v21 align 1
+  v22, v23 = subo.u.i16 v13, v15
+  v24 = select.i16 v23, v9, v22
+  v25 = ptradd v1, v10 * 2
+  store v24, v25 align 1
+  v26 = add.i64 v10, v6
+  jmp b1(v26)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 256 align 3
+  slot s2 size 256 align 3
+  slot s3 size 256 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 128
+  v8 = iconst.i64 -7046029254386353131
+  v9 = iconst.i64 48
+  jmp b1(v5)
+b1(v10: i64):
+  v11 = icmp.ult v10, v7
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v8
+  v13 = trunc.i16 v12
+  v14 = lshr.i64 v12, v9
+  v15 = trunc.i16 v14
+  v16 = ptradd v3, v10 * 2
+  store v13, v16 align 1
+  v17 = ptradd v4, v10 * 2
+  store v15, v17 align 1
+  v18 = add.i64 v10, v6
+  jmp b1(v18)
+b3:
+  call @sat(v1, v2, v3, v4, v0) : (ptr, ptr, ptr, ptr, i64) -> void
+  v19 = iconst.i64 1000003
+  jmp b4(v5, v5)
+b4(v20: i64, v21: i64):
+  v22 = icmp.ult v20, v0
+  br v22, b5, b6
+b5:
+  v23 = ptradd v1, v20 * 2
+  v24 = load.i16 v23 align 1
+  v25 = sext.i64 v24
+  v26 = ptradd v2, v20 * 2
+  v27 = load.i16 v26 align 1
+  v28 = zext.i64 v27
+  v29 = mul.i64 v21, v19
+  v30 = xor.i64 v29, v25
+  v31 = mul.i64 v30, v19
+  v32 = xor.i64 v31, v28
+  v33 = add.i64 v20, v6
+  jmp b4(v33, v32)
+b6:
+  ret v21
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let s = text_of(&a, "sat");
+    assert(s.contains("vop.saturating_add.s.v8i16") && s.contains("vop.saturating_sub.v8i16"), s.as_str());
+    let lens: [u64; 6] = [0, 1, 7, 16, 33, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// Loads of every 8th element vectorize (three `vunzip` levels of 8 vectors): the loop runs the last
+// iteration, so no vector reads past the last element read, which ends the slot here. Each count runs as
+// before.
+@test
+fn loads_of_every_eighth_element_vectorize() {
+    let src = M"(lir ptr 8
+sym @s8 fn global noinline
+sym @drive fn global
+fn @s8
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 1
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 32
+  v9 = load.i32 v8 align 2
+  v10 = add.i32 v9, v5
+  v11 = ptradd v0, v6 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v6, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 4068 align 3
+  slot s1 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 1017
+  v6 = iconst.i32 -1640531535
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v7
+  v10 = mul.i32 v9, v6
+  v11 = ptradd v1, v7 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v7, v4
+  jmp b1(v12)
+b3:
+  call @s8(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v13 = iconst.i64 1000003
+  jmp b4(v3, v3)
+b4(v14: i64, v15: i64):
+  v16 = icmp.ult v14, v0
+  br v16, b5, b6
+b5:
+  v17 = ptradd v2, v14 * 4
+  v18 = load.i32 v17 align 2
+  v19 = sext.i64 v18
+  v20 = mul.i64 v15, v13
+  v21 = xor.i64 v20, v19
+  v22 = add.i64 v14, v4
+  jmp b4(v22, v21)
+b6:
+  ret v15
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let s = text_of(&a, "s8");
+    assert(count(&s, "vunzip.v4i32") >= 7, s.as_str());
+    let lens: [u64; 7] = [0, 1, 5, 9, 33, 100, 128];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// The cost model counts a strided group's vectors once for the loads through its address (`cheaper`): two
+// fields of every 4th i64 and four lane operations cost 17 per vector iteration against 18 for its two
+// scalar ones, so the loop vectorizes; each count runs as before.
+@test
+fn a_strided_groups_vectors_count_once() {
+    let src = M"(lir ptr 8
+sym @g4 fn global noinline
+sym @drive fn global
+fn @g4
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 7
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 32
+  v9 = load.i64 v8 align 3
+  v10 = load.i64 v8+8 align 3
+  v11 = xor.i64 v9, v10
+  v12 = add.i64 v11, v5
+  v13 = shl.i64 v9, v4
+  v14 = xor.i64 v12, v13
+  v15 = ptradd v0, v6 * 8
+  store v14, v15 align 3
+  v16 = add.i64 v6, v4
+  jmp b1(v16)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 4096 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 512
+  v6 = iconst.i64 -7046029254386353131
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = mul.i64 v7, v6
+  v10 = ptradd v1, v7 * 8
+  store v9, v10 align 3
+  v11 = add.i64 v7, v4
+  jmp b1(v11)
+b3:
+  call @g4(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v12 = iconst.i64 1000003
+  jmp b4(v3, v3)
+b4(v13: i64, v14: i64):
+  v15 = icmp.ult v13, v0
+  br v15, b5, b6
+b5:
+  v16 = ptradd v2, v13 * 8
+  v17 = load.i64 v16 align 3
+  v18 = mul.i64 v14, v12
+  v19 = xor.i64 v18, v17
+  v20 = add.i64 v13, v4
+  jmp b4(v20, v19)
+b6:
+  ret v14
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let g = text_of(&a, "g4");
+    assert(g.contains("vunzip.v2i64") && g.contains("xor.v2i64"), g.as_str());
+    let lens: [u64; 6] = [0, 1, 2, 5, 33, 128];
+    for k in 0..6usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// An inner loop of a convolution (TSVC s176), `a[i] += b[i + m - j - 1] * c[j]`: the index's invariant
+// part regroups (`opt::invariant_sum`: `i + (m - j - 1)`), and the check of the outer index `j`, which the
+// loop does not compute, joins the guard (`checks`, `ginv`), so the copy has no check and vectorizes.
+// Each count, offset and length gives the sum or the failure it gave.
+@test
+fn an_inner_loop_with_an_invariant_offset_and_an_outer_check_vectorizes() {
+    let src = M"(lir ptr 8
+sym @conv fn global noinline
+sym @fail fn global noinline cold
+sym @drive fn global
+fn @fail
+  sig (i64) -> void
+b0(v0: i64):
+  panic "index out of bounds"
+fn @conv
+  sig (ptr, ptr, ptr, i64, i64, i64) -> void
+  ref p0 512 noalias
+  ref p1 16 readonly
+  ref p2 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64, v5: i64):
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = load.i64 v1+8 align 3
+  v9 = load.ptr v1 align 3
+  v10 = load.i64 v2+8 align 3
+  v11 = load.ptr v2 align 3
+  v12 = icmp.uge v5, v10
+  jmp b1(v6)
+b1(v13: i64):
+  v14 = icmp.ult v13, v3
+  br v14, b2, b5
+b2:
+  v15 = add.i64 v13, v4
+  v16 = sub.i64 v15, v5
+  v17 = icmp.uge v16, v8
+  br v17, b6, b3
+b3:
+  br v12, b7, b4
+b4:
+  v18 = ptradd v9, v16 * 4
+  v19 = load.i32 v18 align 2
+  v20 = ptradd v11, v5 * 4
+  v21 = load.i32 v20 align 2
+  v22 = mul.i32 v19, v21
+  v23 = ptradd v0, v13 * 4
+  v24 = load.i32 v23 align 2
+  v25 = add.i32 v24, v22
+  store v25, v23 align 2
+  v26 = add.i64 v13, v7
+  jmp b1(v26)
+b5:
+  ret
+b6:
+  call @fail(v16) : (i64) -> void
+  unreachable
+b7:
+  call @fail(v5) : (i64) -> void
+  unreachable
+fn @drive
+  sig (i64, i64, i64, i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 32 align 3
+b0(v0: i64, v1: i64, v2: i64, v3: i64):
+  v4 = slotaddr s0
+  v5 = slotaddr s1
+  v6 = slotaddr s2
+  v7 = iconst.i64 0
+  v8 = iconst.i64 1
+  v9 = iconst.i64 131
+  v10 = iconst.i32 7
+  v11 = iconst.i64 100
+  v12 = iconst.i64 8
+  store v5, v6 align 3
+  store v11, v6+8 align 3
+  store v5, v6+16 align 3
+  store v12, v6+24 align 3
+  jmp b1(v7)
+b1(v13: i64):
+  v14 = icmp.ult v13, v11
+  br v14, b2, b3
+b2:
+  v15 = trunc.i32 v13
+  v16 = mul.i32 v15, v10
+  v17 = ptradd v5, v13 * 4
+  store v16, v17 align 2
+  v18 = ptradd v4, v13 * 4
+  store v15, v18 align 2
+  v19 = add.i64 v13, v8
+  jmp b1(v19)
+b3:
+  v20 = ptradd v6+16
+  call @conv(v4, v6, v20, v0, v1, v2) : (ptr, ptr, ptr, i64, i64, i64) -> void
+  jmp b4(v7, v7)
+b4(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v0
+  br v23, b5, b6
+b5:
+  v24 = ptradd v4, v21 * 4
+  v25 = load.i32 v24 align 2
+  v26 = sext.i64 v25
+  v27 = mul.i64 v22, v9
+  v28 = add.i64 v27, v26
+  v29 = add.i64 v21, v8
+  jmp b4(v29, v28)
+b6:
+  ret v22
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 200,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "conv");
+    assert(t.contains("mul.v4i32"), t.as_str());
+    // (count, m, j): within both slices; past `b` (100 elements) at an iteration; `j` past `c` (8).
+    let cases: [[u64; 3]; 8] = [
+        [0, 5, 1],
+        [1, 5, 1],
+        [7, 20, 3],
+        [37, 40, 7],
+        [64, 30, 0],
+        [90, 20, 5],
+        [37, 40, 8],
+        [5, 0, 1],
+    ];
+    for k in 0..8usize {
+        let cs = unsafe cases[k];
+        let (n, m, j) = (cs[0], cs[1], cs[2]);
+        let args: []u64 = [n, m, j];
+        let mut fails = false;
+        for i in 0..n {
+            let x = (i + m).wrapping_sub(j);
+            fails = fails || x >= 100 || j >= 8;
+        }
+        let args4: []u64 = [n, m, j, 0];
+        if fails {
+            same_outcome(&b, &a, "drive", args4, 0, true);
+        } else {
+            same_outcome(&b, &a, "drive", args4, run_value(&b, "drive", args4), false);
+        }
+        let _ = args;
+    }
+}
+
+// A triangular solve's row, `for j in 0..i { x[i] -= l[j] * x[j] }`: the loads `x[j]` share the place's
+// base, and the header keeps `j` below `i`, so they read other elements (`opt::below_place`); `x[i]` stays
+// in a register and the loop vectorizes; with `j` up to `i` (`row2`) the last load reads the place, which
+// stays in memory. Each row and length gives the elements it gave.
+@test
+fn a_row_of_a_triangular_solve_keeps_its_element_in_a_register() {
+    let src = M"(lir ptr 8
+sym @row fn global noinline
+sym @row2 fn global noinline
+sym @drive fn global
+fn @row
+  sig (ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = ptradd v0, v2 * 4 inbounds
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 4 inbounds
+  v9 = load.i32 v8 align 2
+  v10 = ptradd v0, v6 * 4 inbounds
+  v11 = load.i32 v10 align 2
+  v12 = mul.i32 v9, v11
+  v13 = load.i32 v5 align 2
+  v14 = sub.i32 v13, v12
+  store v14, v5 align 2
+  v15 = add.i64 v6, v4
+  jmp b1(v15)
+b3:
+  ret
+fn @row2
+  sig (ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = ptradd v0, v2 * 4 inbounds
+  v6 = add.i64 v2, v4
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v7 * 4 inbounds
+  v10 = load.i32 v9 align 2
+  v11 = ptradd v0, v7 * 4 inbounds
+  v12 = load.i32 v11 align 2
+  v13 = mul.i32 v10, v12
+  v14 = load.i32 v5 align 2
+  v15 = sub.i32 v14, v13
+  store v15, v5 align 2
+  v16 = add.i64 v7, v4
+  jmp b1(v16)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 131
+  v6 = iconst.i32 7
+  v7 = iconst.i64 64
+  v8 = iconst.i32 3
+  v9 = iconst.i64 128
+  v10 = ptradd v1+256
+  jmp b1(v3)
+b1(v11: i64):
+  v12 = icmp.ult v11, v9
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v11
+  v14 = mul.i32 v13, v6
+  v15 = ptradd v1, v11 * 4
+  store v14, v15 align 2
+  v16 = sub.i32 v13, v8
+  v17 = ptradd v2, v11 * 4
+  store v16, v17 align 2
+  v18 = add.i64 v11, v4
+  jmp b1(v18)
+b3:
+  call @row(v1, v2, v0) : (ptr, ptr, i64) -> void
+  call @row2(v10, v2, v0) : (ptr, ptr, i64) -> void
+  jmp b4(v3, v3)
+b4(v19: i64, v20: i64):
+  v21 = icmp.ult v19, v9
+  br v21, b5, b6
+b5:
+  v22 = ptradd v1, v19 * 4
+  v23 = load.i32 v22 align 2
+  v24 = sext.i64 v23
+  v25 = mul.i64 v20, v5
+  v26 = add.i64 v25, v24
+  v27 = add.i64 v19, v4
+  jmp b4(v27, v26)
+b6:
+  ret v20
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "row");
+    assert(t.contains("mul.v4i32"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A branch inside a side (TSVC s279, `if a[i] > 0 { b[i] *= 2; if b[i] > a[i] { c[i] += a[i] } } else {
+// c[i] = 7 }`): the inner block's store takes the lanes both conditions pick (`lin_nest`, `lcc2`), the
+// other stores their side's lanes, and the loop vectorizes. Each count gives the elements it gave.
+@test
+fn a_branch_inside_a_side_if_converts() {
+    let src = M"(lir ptr 8
+sym @nest fn global noinline
+sym @drive fn global
+fn @nest
+  sig (ptr, ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 noalias
+  ref p2 512 noalias
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 0
+  v7 = iconst.i32 7
+  jmp b1(v4)
+b1(v8: i64):
+  v9 = icmp.ult v8, v3
+  br v9, b2, b7
+b2:
+  v10 = ptradd v0, v8 * 4
+  v11 = load.i32 v10 align 2
+  v12 = ptradd v1, v8 * 4
+  v13 = load.i32 v12 align 2
+  v14 = ptradd v2, v8 * 4
+  v15 = load.i32 v14 align 2
+  v16 = icmp.sgt v11, v6
+  br v16, b3, b5
+b3:
+  v17 = add.i32 v13, v13
+  store v17, v12 align 2
+  v18 = icmp.sgt v17, v11
+  br v18, b4, b6
+b4:
+  v19 = add.i32 v15, v11
+  store v19, v14 align 2
+  jmp b6
+b5:
+  store v7, v14 align 2
+  jmp b6
+b6:
+  v20 = add.i64 v8, v5
+  jmp b1(v20)
+b7:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 131
+  v7 = iconst.i32 7
+  v8 = iconst.i32 5
+  v9 = iconst.i64 128
+  v10 = iconst.i32 2
+  jmp b1(v4)
+b1(v11: i64):
+  v12 = icmp.ult v11, v9
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v11
+  v14 = mul.i32 v13, v7
+  v15 = and.i32 v14, v8
+  v16 = sub.i32 v15, v10
+  v17 = ptradd v1, v11 * 4
+  store v16, v17 align 2
+  v18 = and.i32 v13, v8
+  v19 = sub.i32 v18, v10
+  v20 = ptradd v2, v11 * 4
+  store v19, v20 align 2
+  v21 = ptradd v3, v11 * 4
+  store v13, v21 align 2
+  v22 = add.i64 v11, v5
+  jmp b1(v22)
+b3:
+  call @nest(v1, v2, v3, v0) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v23: i64, v24: i64):
+  v25 = icmp.ult v23, v9
+  br v25, b5, b6
+b5:
+  v26 = ptradd v2, v23 * 4
+  v27 = load.i32 v26 align 2
+  v28 = ptradd v3, v23 * 4
+  v29 = load.i32 v28 align 2
+  v30 = add.i32 v27, v29
+  v31 = sext.i64 v30
+  v32 = mul.i64 v24, v6
+  v33 = add.i64 v32, v31
+  v34 = add.i64 v23, v5
+  jmp b4(v34, v33)
+b6:
+  ret v24
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "nest");
+    assert(t.contains("store_masked") && t.contains("v4i32"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A side's load of a slice whose length is one of three a loop counts to the least of (`a.len().min(b.len())
+// .min(n)`): the least of the least reads no element past the slice's end (`counted_at`, `min_of_len`), so
+// the side may load in every lane and the loop vectorizes. Each count gives the elements it gave.
+@test
+fn a_side_load_under_the_least_of_three_lengths_vectorizes() {
+    let src = M"(lir ptr 8
+sym @side fn global noinline
+sym @drive fn global
+fn @side
+  sig (ptr, ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 16 readonly
+  ref p2 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 0
+  v7 = load.ptr v1 align 3
+  v8 = load.i64 v1+8 align 3
+  v9 = load.ptr v2 align 3
+  v10 = load.i64 v2+8 align 3
+  v11 = icmp.ult v8, v10
+  v12 = select.i64 v11, v8, v10
+  v13 = icmp.ult v12, v3
+  v14 = select.i64 v13, v12, v3
+  jmp b1(v4)
+b1(v15: i64):
+  v16 = icmp.ult v15, v14
+  br v16, b2, b4
+b2:
+  v17 = ptradd v7, v15 * 4
+  v18 = load.i32 v17 align 2
+  v19 = icmp.sgt v18, v6
+  br v19, b3, b5
+b3:
+  v20 = ptradd v9, v15 * 4
+  v21 = load.i32 v20 align 2
+  v22 = add.i32 v21, v18
+  v23 = ptradd v0, v15 * 4
+  store v22, v23 align 2
+  jmp b5
+b4:
+  ret
+b5:
+  v24 = add.i64 v15, v5
+  jmp b1(v24)
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+  slot s3 size 32 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = slotaddr s3
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 131
+  v9 = iconst.i32 7
+  v10 = iconst.i32 3
+  v11 = iconst.i64 128
+  store v3, v5 align 3
+  store v0, v5+8 align 3
+  store v4, v5+16 align 3
+  store v1, v5+24 align 3
+  jmp b1(v6)
+b1(v12: i64):
+  v13 = icmp.ult v12, v11
+  br v13, b2, b3
+b2:
+  v14 = trunc.i32 v12
+  v15 = mul.i32 v14, v9
+  v16 = and.i32 v15, v10
+  v17 = sub.i32 v10, v16
+  v18 = ptradd v3, v12 * 4
+  store v17, v18 align 2
+  v19 = ptradd v4, v12 * 4
+  store v15, v19 align 2
+  v20 = ptradd v2, v12 * 4
+  store v14, v20 align 2
+  v21 = add.i64 v12, v7
+  jmp b1(v21)
+b3:
+  v22 = ptradd v5+16
+  call @side(v2, v5, v22, v11) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v6, v6)
+b4(v23: i64, v24: i64):
+  v25 = icmp.ult v23, v11
+  br v25, b5, b6
+b5:
+  v26 = ptradd v2, v23 * 4
+  v27 = load.i32 v26 align 2
+  v28 = sext.i64 v27
+  v29 = mul.i64 v24, v8
+  v30 = add.i64 v29, v28
+  v31 = add.i64 v23, v7
+  jmp b4(v31, v30)
+b6:
+  ret v24
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "side");
+    assert(t.contains("store_masked") && t.contains("v4i32"), t.as_str());
+    // (a.len, b.len): either the least, at and past a vector's width.
+    let cs: [[u64; 2]; 6] = [[0, 9], [9, 0], [3, 17], [17, 3], [37, 40], [128, 64]];
+    for k in 0..6usize {
+        let c = unsafe cs[k];
+        let args: []u64 = [c[0], c[1]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A body of one block that stores through a select of two pointers (TSVC s278 once `opt` merged its two
+// sides): the copy stores each pointer's element under the lanes the select picks it in (`linearize`,
+// `split_store`); the accesses keep the alias classes of the pointers' other accesses
+// (`base_access`), so no overlap check is needed. Each count gives the elements it gave.
+@test
+fn a_store_through_a_select_of_two_pointers_vectorizes_as_two_masked_stores() {
+    let src = M"(lir ptr 8
+sym @pick fn global noinline
+sym @drive fn global
+fn @pick
+  sig (ptr, ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 noalias
+  ref p2 512 noalias
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 0
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v3
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v7 * 4
+  v10 = load.i32 v9 align 2
+  v11 = icmp.sgt v10, v6
+  v12 = select.ptr v11, v1, v2
+  v13 = ptradd v12, v7 * 4
+  v14 = add.i32 v10, v10
+  v15 = sub.i32 v14, v6
+  store v15, v13 align 2
+  v16 = ptradd v1, v7 * 4
+  v17 = load.i32 v16 align 2
+  v18 = ptradd v2, v7 * 4
+  v19 = load.i32 v18 align 2
+  v20 = add.i32 v17, v19
+  store v20, v9 align 2
+  v21 = add.i64 v7, v5
+  jmp b1(v21)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 131
+  v7 = iconst.i32 7
+  v8 = iconst.i32 5
+  v9 = iconst.i64 128
+  v10 = iconst.i32 2
+  jmp b1(v4)
+b1(v11: i64):
+  v12 = icmp.ult v11, v9
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v11
+  v14 = mul.i32 v13, v7
+  v15 = and.i32 v14, v8
+  v16 = sub.i32 v15, v10
+  v17 = ptradd v1, v11 * 4
+  store v16, v17 align 2
+  v18 = ptradd v2, v11 * 4
+  store v14, v18 align 2
+  v19 = ptradd v3, v11 * 4
+  store v13, v19 align 2
+  v20 = add.i64 v11, v5
+  jmp b1(v20)
+b3:
+  call @pick(v1, v2, v3, v0) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v21: i64, v22: i64):
+  v23 = icmp.ult v21, v9
+  br v23, b5, b6
+b5:
+  v24 = ptradd v1, v21 * 4
+  v25 = load.i32 v24 align 2
+  v26 = ptradd v2, v21 * 4
+  v27 = load.i32 v26 align 2
+  v28 = ptradd v3, v21 * 4
+  v29 = load.i32 v28 align 2
+  v30 = mul.i32 v27, v7
+  v31 = xor.i32 v30, v29
+  v32 = add.i32 v31, v25
+  v33 = sext.i64 v32
+  v34 = mul.i64 v22, v6
+  v35 = add.i64 v34, v33
+  v36 = add.i64 v21, v5
+  jmp b4(v36, v35)
+b6:
+  ret v22
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "pick");
+    // No overlap check (an `or` of two address comparisons): the noalias classes hold.
+    assert(t.contains("store_masked") && t.contains("v4i32") && !t.contains(" = or.i8"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A switch on a lane value whose every case stores one place (TSVC s442): one block whose stored value
+// and latch argument are chains of selects on the cases' comparisons, the first case outermost
+// (`linearize_switch`), so the loop vectorizes. Each count gives the elements it gave, and a value two
+// cases name takes the first's.
+@test
+fn a_switch_whose_cases_store_one_place_vectorizes_as_selects() {
+    let src = M"(lir ptr 8
+sym @sw fn global noinline
+sym @drive fn global
+fn @sw
+  sig (ptr, ptr, ptr, i64) -> void
+  ref p0 512 noalias
+  ref p1 512 noalias
+  ref p2 512 readonly
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i32 3
+  v7 = iconst.i32 5
+  v8 = iconst.i32 7
+  jmp b1(v4)
+b1(v9: i64):
+  v10 = icmp.ult v9, v3
+  br v10, b2, b7
+b2:
+  v11 = ptradd v2, v9 * 4
+  v12 = load.i32 v11 align 2
+  v13 = and.i32 v12, v6
+  v14 = ptradd v0, v9 * 4
+  switch v13 [1 -> b3, 2 -> b4, 1 -> b5] else b6
+b3:
+  v15 = mul.i32 v12, v6
+  store v15, v14 align 2
+  jmp b8(v12)
+b4:
+  v16 = sub.i32 v12, v7
+  store v16, v14 align 2
+  jmp b8(v16)
+b5:
+  store v7, v14 align 2
+  jmp b8(v8)
+b6:
+  v17 = xor.i32 v12, v8
+  store v17, v14 align 2
+  jmp b8(v6)
+b7:
+  ret
+b8(v18: i32):
+  v19 = ptradd v1, v9 * 4
+  store v18, v19 align 2
+  v20 = add.i64 v9, v5
+  jmp b1(v20)
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 3
+  slot s1 size 512 align 3
+  slot s2 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 131
+  v7 = iconst.i32 7
+  v8 = iconst.i64 128
+  v9 = iconst.i32 11
+  jmp b1(v4)
+b1(v10: i64):
+  v11 = icmp.ult v10, v8
+  br v11, b2, b3
+b2:
+  v12 = trunc.i32 v10
+  v13 = mul.i32 v12, v7
+  v14 = xor.i32 v13, v9
+  v15 = ptradd v3, v10 * 4
+  store v14, v15 align 2
+  v16 = ptradd v1, v10 * 4
+  store v12, v16 align 2
+  v17 = ptradd v2, v10 * 4
+  store v13, v17 align 2
+  v18 = add.i64 v10, v5
+  jmp b1(v18)
+b3:
+  call @sw(v1, v2, v3, v0) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v19: i64, v20: i64):
+  v21 = icmp.ult v19, v8
+  br v21, b5, b6
+b5:
+  v22 = ptradd v1, v19 * 4
+  v23 = load.i32 v22 align 2
+  v24 = ptradd v2, v19 * 4
+  v25 = load.i32 v24 align 2
+  v26 = mul.i32 v25, v7
+  v27 = xor.i32 v26, v23
+  v28 = sext.i64 v27
+  v29 = mul.i64 v20, v6
+  v30 = add.i64 v29, v28
+  v31 = add.i64 v19, v5
+  jmp b4(v31, v30)
+b6:
+  ret v20
+)";
+    let (b, a) = optimized_for(
+        src,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+        16,
+        VOPS_ALL,
+    );
+    let t = text_of(&a, "sw");
+    assert(t.contains("vsel.v4i32"), t.as_str());
+    let ns: [u64; 7] = [0, 1, 3, 4, 8, 9, 37];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe ns[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A counter that counts down and whose next value the body reads (`i -= 1; c[i] = 3 * i`) vectorizes: the
+// lanes, in the elements' order, the counter's from copy c's lowest up (`vector_ctr`), stepped. A truncated
+// next value counts in its own lanes (`vector_ind`), a 64-bit one in the counter's (`vstepv`). Each count
+// runs as before.
+@test
+fn a_counter_counting_down_is_a_lane_value() {
+    let src = M"(lir ptr 8
+sym @down fn global noinline
+sym @down64 fn global noinline
+sym @drive fn global
+fn @down
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 3
+  jmp b1(v1)
+b1(v5: i64):
+  v6 = icmp.ne v5, v2
+  br v6, b2, b3
+b2:
+  v7 = sub.i64 v5, v3
+  v8 = trunc.i32 v7
+  v9 = mul.i32 v8, v4
+  v10 = ptradd v0, v7 * 4
+  store v9, v10 align 2
+  jmp b1(v7)
+b3:
+  ret
+fn @down64
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 5
+  jmp b1(v1)
+b1(v5: i64):
+  v6 = icmp.ne v5, v2
+  br v6, b2, b3
+b2:
+  v7 = sub.i64 v5, v3
+  v8 = xor.i64 v7, v4
+  v9 = ptradd v0, v7 * 8
+  store v8, v9 align 3
+  jmp b1(v7)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  call @down64(v1, v0) : (ptr, i64) -> void
+  call @down(v1, v0) : (ptr, i64) -> void
+  v4 = iconst.i64 1000003
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = sext.i64 v9
+  v11 = mul.i64 v6, v4
+  v12 = xor.i64 v11, v10
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v12)
+b3:
+  ret v6
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let d = text_of(&a, "down");
+    assert(d.contains("mul.v4i32") && d.contains("sub.v4i32"), d.as_str());
+    let e = text_of(&a, "down64");
+    assert(e.contains("xor.v2i64") && e.contains("sub.v2i64"), e.as_str());
+    let lens: [u64; 7] = [0, 1, 2, 5, 8, 17, 128];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+    let args: []u64 = [127];
+    same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+}
+
+// A 64-bit product by a constant of more than two powers of 2 vectorizes in 32-byte vectors of its 32-bit
+// lanes' products (`mul_by_halves`): by 11 (a low word alone), by 11 << 32 (a high word alone) and by
+// 0x9E3779B97F4A7C15 (both). Each count runs as before; in 16-byte vectors such a product alone costs more
+// than its scalar iterations.
+@test
+fn eight_byte_products_by_any_constant_vectorize() {
+    let src = M"(lir ptr 8
+sym @mk fn global noinline
+sym @drive fn global
+fn @mk
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 11
+  v6 = iconst.i64 47244640256
+  v7 = iconst.i64 -7046029254386353131
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v2
+  br v9, b2, b3
+b2:
+  v10 = ptradd v1, v8 * 8
+  v11 = load.i64 v10 align 3
+  v12 = mul.i64 v11, v5
+  v13 = mul.i64 v11, v6
+  v14 = mul.i64 v11, v7
+  v15 = xor.i64 v12, v13
+  v16 = add.i64 v15, v14
+  v17 = ptradd v0, v8 * 8
+  store v16, v17 align 3
+  v18 = add.i64 v8, v4
+  jmp b1(v18)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 128
+  v6 = iconst.i64 -4658895280553007687
+  jmp b1(v3, v3)
+b1(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v5
+  br v9, b2, b3
+b2:
+  v10 = add.i64 v8, v6
+  v11 = ptradd v1, v7 * 8
+  store v10, v11 align 3
+  v12 = add.i64 v7, v4
+  v13 = mul.i64 v10, v6
+  jmp b1(v12, v13)
+b3:
+  call @mk(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v14 = iconst.i64 1000003
+  jmp b4(v3, v3)
+b4(v15: i64, v16: i64):
+  v17 = icmp.ult v15, v0
+  br v17, b5, b6
+b5:
+  v18 = ptradd v2, v15 * 8
+  v19 = load.i64 v18 align 3
+  v20 = mul.i64 v16, v14
+  v21 = xor.i64 v20, v19
+  v22 = add.i64 v15, v4
+  jmp b4(v22, v21)
+b6:
+  ret v16
+)";
+    let (b, a) = optimized_for(src, VECTOR, 32, VOPS_ALL);
+    let m = text_of(&a, "mk");
+    assert(m.contains("mulhu.v8i32") && m.contains("mul.v8i32") && m.contains("shl.v4i64"), m.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 4, 9, 64, 127];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+    let (_, n) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let s = text_of(&n, "mk");
+    assert(!s.contains("mulhu.v4i32"), s.as_str());
+}
+
+// A load the loop does not change through an address from before it, which its stores may write, versions
+// the loop on it (`vchecks`, `vrange`): the vector loop reads it once when its bytes lie apart from the
+// stores' range, the scalar loop runs when they do not. Each count runs as before with the place outside
+// the stores, in their range, at their first and last element, and just past them.
+@test
+fn an_invariant_load_a_store_may_write_versions_the_loop() {
+    let src = M"(lir ptr 8
+sym @addk fn global noinline
+sym @drive fn global
+fn @addk
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 3
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 4
+  v9 = load.i32 v8 align 2
+  v10 = mul.i32 v9, v5
+  v11 = load.i32 v1 align 2
+  v12 = add.i32 v10, v11
+  store v12, v8 align 2
+  v13 = add.i64 v6, v4
+  jmp b1(v13)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 1024 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 256
+  v6 = iconst.i32 7
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v7
+  v10 = xor.i32 v9, v6
+  v11 = ptradd v2, v7 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v7, v4
+  jmp b1(v12)
+b3:
+  v13 = ptradd v2+64
+  v14 = ptradd v2, v1 * 4
+  call @addk(v13, v14, v0) : (ptr, ptr, i64) -> void
+  v15 = iconst.i64 1000003
+  jmp b4(v3, v3)
+b4(v16: i64, v17: i64):
+  v18 = icmp.ult v16, v5
+  br v18, b5, b6
+b5:
+  v19 = ptradd v2, v16 * 4
+  v20 = load.i32 v19 align 2
+  v21 = sext.i64 v20
+  v22 = mul.i64 v17, v15
+  v23 = xor.i64 v22, v21
+  v24 = add.i64 v16, v4
+  jmp b4(v24, v23)
+b6:
+  ret v17
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let f = text_of(&a, "addk");
+    assert(f.contains("mul.v4i32") && f.contains("icmp.ule"), f.as_str());
+    // The stores write elements 16 up to 16 + n of the slot; the place is element `at`.
+    let lens: [u64; 4] = [3, 8, 37, 100];
+    let ats: [u64; 6] = [0, 15, 16, 30, 52, 116];
+    for k in 0..4usize {
+        for j in 0..6usize {
+            let args: []u64 = [unsafe lens[k], unsafe ats[j]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// An extreme with its first index vectorizes (`arg_pair`): each lane keeps its value and the counter where
+// `x REL value` holds, the exit takes of all lanes the preferred value, of equal ones the lowest index
+// (`arg_exit`). Integers with ties (the least value first at 5, in a lane the exit reads after the lane of
+// the next one, at 32), floats with NaNs (never taken) and both zeros, from a start value and from a NaN
+// (nothing taken); each count runs as before.
+@test
+fn an_extreme_and_its_first_index_vectorize() {
+    let src = M"(lir ptr 8
+sym @am fn global noinline
+sym @fm fn global noinline
+sym @drive fn global
+fn @am
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 3
+  v5 = iconst.i64 77
+  jmp b1(v2, v4, v5)
+b1(v6: i64, v7: i32, v8: i64):
+  v9 = icmp.ult v6, v1
+  br v9, b2, b3
+b2:
+  v10 = ptradd v0, v6 * 4
+  v11 = load.i32 v10 align 2
+  v12 = icmp.slt v11, v7
+  v13 = select.i32 v12, v11, v7
+  v14 = select.i64 v12, v6, v8
+  v15 = add.i64 v6, v3
+  jmp b1(v15, v13, v14)
+b3:
+  v16 = sext.i64 v7
+  v17 = iconst.i64 1000003
+  v18 = mul.i64 v16, v17
+  v19 = add.i64 v18, v8
+  ret v19
+fn @fm
+  sig (ptr, i64, f32) -> i64
+b0(v0: ptr, v1: i64, v2: f32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 5
+  jmp b1(v3, v2, v5)
+b1(v6: i64, v7: f32, v8: i64):
+  v9 = icmp.ult v6, v1
+  br v9, b2, b3
+b2:
+  v10 = ptradd v0, v6 * 4
+  v11 = load.f32 v10 align 2
+  v12 = fcmp.ogt v7, v11
+  v13 = select.f32 v12, v11, v7
+  v14 = select.i64 v12, v6, v8
+  v15 = add.i64 v6, v4
+  jmp b1(v15, v13, v14)
+b3:
+  v16 = bitcast.i32 v7
+  v17 = zext.i64 v16
+  v18 = iconst.i64 1000003
+  v19 = mul.i64 v17, v18
+  v20 = add.i64 v19, v8
+  ret v20
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 256
+  v6 = iconst.i64 9
+  v7 = iconst.i64 4
+  v8 = iconst.i64 11
+  v9 = iconst.i64 13
+  v10 = iconst.i32 2143289344
+  v11 = iconst.i32 -2147483648
+  v12 = iconst.i64 7
+  jmp b1(v3)
+b1(v13: i64):
+  v14 = icmp.ult v13, v5
+  br v14, b2, b3
+b2:
+  v15 = add.i64 v13, v7
+  v16 = mul.i64 v15, v12
+  v17 = urem.i64 v16, v6
+  v18 = sub.i64 v17, v7
+  v19 = trunc.i32 v18
+  v20 = ptradd v1, v13 * 4
+  store v19, v20 align 2
+  v21 = sitofp.f32 v19
+  v22 = bitcast.i32 v21
+  v23 = urem.i64 v13, v8
+  v24 = icmp.eq v23, v7
+  v25 = select.i32 v24, v10, v22
+  v26 = urem.i64 v13, v9
+  v27 = icmp.eq v26, v7
+  v28 = select.i32 v27, v11, v25
+  v29 = ptradd v2, v13 * 4
+  store v28, v29 align 2
+  v30 = add.i64 v13, v4
+  jmp b1(v30)
+b3:
+  v31 = call.i64 @am(v1, v0) : (ptr, i64) -> i64
+  v32 = fconst.f32 0x40400000
+  v33 = call.i64 @fm(v2, v0, v32) : (ptr, i64, f32) -> i64
+  v34 = fconst.f32 0x7fc00000
+  v35 = call.i64 @fm(v2, v0, v34) : (ptr, i64, f32) -> i64
+  v36 = xor.i64 v31, v33
+  v37 = mul.i64 v36, v12
+  v38 = xor.i64 v37, v35
+  ret v38
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let m = text_of(&a, "am");
+    assert(m.contains("vcmp.slt.v2i32") && m.contains("vsel.v2i64"), m.as_str());
+    let f = text_of(&a, "fm");
+    assert(f.contains("vcmp.olt.v2i32") && f.contains("vsel.v2i64"), f.as_str());
+    for n in 0..90u64 {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// `while p < end`, `while end > p` and `while p != end`: loops that step pointers and no counter take one
+// and vectorize: an end the pointer reaches by whole elements (`p + n`), an end some bytes past the start
+// that are no whole number of elements, a start past the end, which runs no iteration (also an end
+// `p + m` with `m` negative), and a search that leaves with the pointer at the match.
+@test
+fn loops_that_step_pointers_take_a_counter_and_vectorize() {
+    let src = M"(lir ptr 8
+sym @psum fn global noinline
+sym @pxor fn global noinline
+sym @pbytes fn global noinline
+sym @pnear fn global noinline
+sym @pfind fn global noinline
+sym @drive fn global
+fn @psum
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = ptradd v0, v1 * 4 inbounds
+  jmp b1(v0, v2)
+b1(v4: ptr, v5: i32):
+  v6 = icmp.ult v4, v3
+  br v6, b2, b3
+b2:
+  v7 = load.i32 v4 align 2
+  v8 = add.i32 v5, v7
+  v9 = ptradd v4+4 inbounds
+  jmp b1(v9, v8)
+b3:
+  ret v5
+fn @pxor
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = ptradd v0, v2 * 4 inbounds
+  v4 = iconst.i32 1365
+  jmp b1(v0, v1)
+b1(v5: ptr, v6: ptr):
+  v7 = icmp.ne v5, v3
+  br v7, b2, b3
+b2:
+  v8 = load.i32 v6 align 2
+  v9 = xor.i32 v8, v4
+  store v9, v5 align 2
+  v10 = ptradd v5+4 inbounds
+  v11 = ptradd v6+4 inbounds
+  jmp b1(v10, v11)
+b3:
+  ret
+fn @pbytes
+  sig (ptr, i64, i64) -> i32
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i32 0
+  v4 = ptradd v0, v1 * 4 inbounds
+  v5 = ptradd v0, v2 * 1 inbounds
+  jmp b1(v4, v3)
+b1(v6: ptr, v7: i32):
+  v8 = icmp.ugt v5, v6
+  br v8, b2, b3
+b2:
+  v9 = load.i32 v6 align 2
+  v10 = add.i32 v7, v9
+  v11 = ptradd v6+4 inbounds
+  jmp b1(v11, v10)
+b3:
+  ret v7
+fn @pnear
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = ptradd v0, v1 * 2+2 inbounds
+  jmp b1(v0, v2)
+b1(v4: ptr, v5: i32):
+  v6 = icmp.ult v4, v3
+  br v6, b2, b3
+b2:
+  v7 = load.i32 v4 align 2
+  v8 = xor.i32 v5, v7
+  v9 = ptradd v4+4 inbounds
+  jmp b1(v9, v8)
+b3:
+  ret v5
+fn @pfind
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i32) -> i64
+b0(v0: ptr, v1: i32):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = ptradd v2, v3 * 4 inbounds
+  v5 = iconst.i64 2
+  v6 = iconst.i64 -1
+  jmp b1(v2)
+b1(v7: ptr):
+  v8 = icmp.ult v7, v4
+  br v8, b2, b5
+b2:
+  v9 = load.i32 v7 align 2
+  v10 = icmp.eq v9, v1
+  br v10, b4, b3
+b3:
+  v11 = ptradd v7+4 inbounds
+  jmp b1(v11)
+b4:
+  v12 = ptrtoint.i64 v7
+  v13 = ptrtoint.i64 v2
+  v14 = sub.i64 v12, v13
+  v15 = lshr.i64 v14, v5
+  ret v15
+b5:
+  ret v6
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+  slot s2 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 256
+  v6 = iconst.i64 9
+  v7 = iconst.i64 4
+  v8 = iconst.i64 7
+  v9 = iconst.i64 3
+  jmp b1(v3)
+b1(v10: i64):
+  v11 = icmp.ult v10, v5
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v8
+  v13 = urem.i64 v12, v6
+  v14 = sub.i64 v13, v7
+  v15 = trunc.i32 v14
+  v16 = ptradd v1, v10 * 4
+  store v15, v16 align 2
+  v17 = add.i64 v10, v4
+  jmp b1(v17)
+b3:
+  v18 = call.i32 @psum(v1, v0) : (ptr, i64) -> i32
+  call @pxor(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v19 = call.i32 @psum(v2, v0) : (ptr, i64) -> i32
+  v20 = urem.i64 v0, v8
+  v21 = mul.i64 v0, v7
+  v22 = urem.i64 v0, v9
+  v23 = sub.i64 v21, v22
+  v24 = call.i32 @pbytes(v1, v20, v23) : (ptr, i64, i64) -> i32
+  v25 = zext.i64 v18
+  v26 = zext.i64 v19
+  v27 = zext.i64 v24
+  v28 = mul.i64 v25, v8
+  v29 = xor.i64 v28, v26
+  v30 = mul.i64 v29, v8
+  v31 = xor.i64 v30, v27
+  v32 = trunc.i32 v20
+  v33 = slotaddr s2
+  store v1, v33 align 3
+  store v0, v33+8 align 3
+  v34 = call.i64 @pfind(v33, v32) : (ptr, i32) -> i64
+  v35 = mul.i64 v31, v8
+  v36 = xor.i64 v35, v34
+  v37 = ptradd v1+16
+  v38 = iconst.i64 -2
+  v39 = call.i32 @psum(v37, v38) : (ptr, i64) -> i32
+  v40 = zext.i64 v39
+  v41 = mul.i64 v36, v8
+  v42 = xor.i64 v41, v40
+  v43 = iconst.i64 2
+  v44 = mul.i64 v0, v43
+  v45 = sub.i64 v44, v22
+  v46 = call.i32 @pnear(v1, v45) : (ptr, i64) -> i32
+  v47 = zext.i64 v46
+  v48 = mul.i64 v42, v8
+  v49 = xor.i64 v48, v47
+  ret v49
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    for f in ["psum", "pxor", "pbytes", "pfind", "pnear"] {
+        let t = text_of(&a, f);
+        assert(t.contains("load.v4i32"), t.as_str());
+    }
+    for n in 0..90u64 {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// `while p > begin { p -= 1; .. }` and `while p != begin`: loops that step pointers down take a counter
+// down to 0 and vectorize: a sum from `begin + n`, a copy through two pointers stepping down, and a start
+// some bytes from an unrelated base, which may lie below `begin` (no iteration) or not a whole number of
+// elements above it.
+@test
+fn loops_that_step_pointers_down_take_a_counter_and_vectorize() {
+    let src = M"(lir ptr 8
+sym @dsum fn global noinline
+sym @dcopy fn global noinline
+sym @dgen fn global noinline
+sym @drive fn global
+fn @dsum
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i32 0
+  v3 = ptradd v0, v1 * 4 inbounds
+  jmp b1(v3, v2)
+b1(v4: ptr, v5: i32):
+  v6 = icmp.ugt v4, v0
+  br v6, b2, b3
+b2:
+  v7 = ptradd v4-4 inbounds
+  v8 = load.i32 v7 align 2
+  v9 = add.i32 v5, v8
+  jmp b1(v7, v9)
+b3:
+  ret v5
+fn @dcopy
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = ptradd v0, v2 * 4 inbounds
+  v4 = ptradd v1, v2 * 4 inbounds
+  v5 = iconst.i32 1365
+  jmp b1(v3, v4)
+b1(v6: ptr, v7: ptr):
+  v8 = icmp.ne v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v6-4 inbounds
+  v10 = ptradd v7-4 inbounds
+  v11 = load.i32 v10 align 2
+  v12 = xor.i32 v11, v5
+  store v12, v9 align 2
+  jmp b1(v9, v10)
+b3:
+  ret
+fn @dgen
+  sig (ptr, i64, i64) -> i32
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i32 0
+  v4 = ptradd v0, v1 * 1 inbounds
+  v5 = ptradd v0, v2 * 4+8 inbounds
+  jmp b1(v4, v3)
+b1(v6: ptr, v7: i32):
+  v8 = icmp.ult v5, v6
+  br v8, b2, b3
+b2:
+  v9 = ptradd v6-4 inbounds
+  v10 = load.i32 v9 align 2
+  v11 = xor.i32 v7, v10
+  jmp b1(v9, v11)
+b3:
+  ret v7
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 256
+  v6 = iconst.i64 9
+  v7 = iconst.i64 4
+  v8 = iconst.i64 7
+  v9 = iconst.i64 3
+  jmp b1(v3)
+b1(v10: i64):
+  v11 = icmp.ult v10, v5
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v8
+  v13 = urem.i64 v12, v6
+  v14 = sub.i64 v13, v7
+  v15 = trunc.i32 v14
+  v16 = ptradd v1, v10 * 4
+  store v15, v16 align 2
+  v17 = add.i64 v10, v4
+  jmp b1(v17)
+b3:
+  v18 = call.i32 @dsum(v1, v0) : (ptr, i64) -> i32
+  call @dcopy(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v19 = call.i32 @dsum(v2, v0) : (ptr, i64) -> i32
+  v20 = mul.i64 v0, v7
+  v21 = urem.i64 v0, v9
+  v22 = add.i64 v20, v21
+  v23 = urem.i64 v0, v6
+  v24 = call.i32 @dgen(v1, v22, v23) : (ptr, i64, i64) -> i32
+  v25 = zext.i64 v18
+  v26 = zext.i64 v19
+  v27 = zext.i64 v24
+  v28 = mul.i64 v25, v8
+  v29 = xor.i64 v28, v26
+  v30 = mul.i64 v29, v8
+  v31 = xor.i64 v30, v27
+  ret v31
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    for f in ["dsum", "dcopy", "dgen"] {
+        let t = text_of(&a, f);
+        assert(t.contains("load.v4i32"), t.as_str());
+    }
+    for n in 0..90u64 {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A search that carries nothing but its counter and has no effect leaves its vector loop at the first
+// lane that matches, the least lane index over the copies, and the loop runs that iteration alone: a byte
+// search (64 lanes a vector iteration) and the end of a run (it leaves where a lane stops holding).
+@test
+fn an_early_exit_goes_on_at_the_first_lane_that_leaves() {
+    let src = M"(lir ptr 8
+sym @find fn global noinline
+sym @span fn global noinline
+sym @drive fn global
+fn @find
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i8) -> i64
+b0(v0: ptr, v1: i8):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b4
+b2:
+  v8 = ptradd v2, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v1
+  br v10, b5, b3
+b3:
+  v11 = add.i64 v6, v5
+  jmp b1(v11)
+b4:
+  ret v3
+b5:
+  ret v6
+fn @span
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i32) -> i64
+b0(v0: ptr, v1: i32):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b4
+b2:
+  v8 = ptradd v2, v6 * 4
+  v9 = load.i32 v8 align 2
+  v10 = icmp.eq v9, v1
+  br v10, b3, b4
+b3:
+  v11 = add.i64 v6, v5
+  jmp b1(v11)
+b4:
+  ret v6
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 1024 align 3
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = slotaddr s2
+  v5 = slotaddr s3
+  v6 = iconst.i64 0
+  v7 = iconst.i64 1
+  v8 = iconst.i64 127
+  v9 = iconst.i32 5
+  jmp b1(v6)
+b1(v10: i64):
+  v11 = iconst.i64 256
+  v12 = icmp.ult v10, v11
+  br v12, b2, b3
+b2:
+  v13 = and.i64 v10, v8
+  v14 = trunc.i8 v13
+  v15 = ptradd v2, v10 * 1
+  store v14, v15 align 0
+  v16 = ptradd v3, v10 * 4
+  store v9, v16 align 2
+  v17 = add.i64 v10, v7
+  jmp b1(v17)
+b3:
+  v18 = iconst.i8 -1
+  v19 = ptradd v2, v1 * 1
+  store v18, v19 align 0
+  v20 = iconst.i32 6
+  v21 = ptradd v3, v1 * 4
+  store v20, v21 align 2
+  store v2, v4 align 3
+  store v0, v4+8 align 3
+  store v3, v5 align 3
+  store v0, v5+8 align 3
+  v22 = call.i64 @find(v4, v18) : (ptr, i8) -> i64
+  v23 = call.i64 @span(v5, v9) : (ptr, i32) -> i64
+  v24 = iconst.i64 20
+  v25 = shl.i64 v22, v24
+  v26 = add.i64 v25, v23
+  ret v26
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let f = text_of(&a, "find");
+    assert(f.contains("vcmp.eq.v16i8") && f.contains("reduce_min.i8"), f.as_str());
+    let s = text_of(&a, "span");
+    assert(s.contains("vcmp.eq.v4i32") && s.contains("reduce_min.i32"), s.as_str());
+    let lens: [u64; 6] = [0, 15, 64, 100, 200, 256];
+    let at: [u64; 9] = [0, 15, 16, 47, 63, 64, 100, 199, 255];
+    for k in 0..6usize {
+        for j in 0..9usize {
+            let args: []u64 = [unsafe lens[k], unsafe at[j]];
+            same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+        }
+    }
+}
+
+// An array of structs of two `i32` copied element by element through a slot that changes a field
+// (`let mut t = a[i]; t.y += t.x; b[i] = t`): the copies move the fields, so the loop loads every second
+// element and stores the pairs back interleaved, in vectors.
+@test
+fn a_struct_copied_through_a_slot_vectorizes_by_its_fields() {
+    let src = M"(lir ptr 8
+sym @upd fn global noinline
+sym @drive fn global
+fn @upd
+  sig (ptr, ptr, i64) -> void
+  slot s0 size 8 align 2
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = slotaddr s0
+  v4 = iconst.i64 8
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  jmp b1(v5)
+b1(v7: i64):
+  v8 = icmp.ult v7, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v7 * 8
+  memcpy v3, v9, v4
+  v10 = load.i32 v3 align 2
+  v11 = load.i32 v3+4 align 2
+  v12 = add.i32 v10, v11
+  store v12, v3+4 align 2
+  v13 = ptradd v0, v7 * 8
+  memcpy v13, v3, v4
+  v14 = add.i64 v7, v6
+  jmp b1(v14)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 256
+  v6 = iconst.i64 7
+  v7 = iconst.i64 31
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v5
+  br v9, b2, b3
+b2:
+  v10 = mul.i64 v8, v6
+  v11 = trunc.i32 v10
+  v12 = ptradd v1, v8 * 4
+  store v11, v12 align 2
+  v13 = ptradd v2, v8 * 4
+  store v11, v13 align 2
+  v14 = add.i64 v8, v4
+  jmp b1(v14)
+b3:
+  call @upd(v2, v1, v0) : (ptr, ptr, i64) -> void
+  jmp b4(v3, v3)
+b4(v15: i64, v16: i64):
+  v17 = icmp.ult v15, v5
+  br v17, b5, b6
+b5:
+  v18 = ptradd v2, v15 * 4
+  v19 = load.i32 v18 align 2
+  v20 = zext.i64 v19
+  v21 = mul.i64 v16, v7
+  v22 = add.i64 v21, v20
+  v23 = add.i64 v15, v4
+  jmp b4(v23, v22)
+b6:
+  ret v16
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let u = text_of(&a, "upd");
+    assert(u.contains("vunzip.v4i32") && u.contains("vziplo.v4i32") && !u.contains("lshr"), u.as_str());
+    let lens: [u64; 7] = [0, 1, 3, 4, 9, 64, 127];
+    for k in 0..7usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// Triples of bytes (RGB pixels): the loads of each third byte take every third lane of three vectors and
+// the stores of a whole triple interleave three vectors, both as shuffles of three vectors (`vperm3`): a
+// gray value of each pixel and the pixels with two channels swapped and one changed.
+@test
+fn groups_of_every_third_element_vectorize() {
+    let src = M"(lir ptr 8
+sym @gray fn global noinline
+sym @swap fn global noinline
+sym @drive fn global
+fn @gray
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i8 1
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 3
+  v9 = load.i8 v8 align 0
+  v10 = load.i8 v8+1 align 0
+  v11 = load.i8 v8+2 align 0
+  v12 = lshr.i8 v9, v5
+  v13 = lshr.i8 v10, v5
+  v14 = add.i8 v12, v13
+  v15 = xor.i8 v14, v11
+  v16 = ptradd v0, v6 * 1
+  store v15, v16 align 0
+  v17 = add.i64 v6, v4
+  jmp b1(v17)
+b3:
+  ret
+fn @swap
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i8 7
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 3
+  v9 = load.i8 v8 align 0
+  v10 = load.i8 v8+1 align 0
+  v11 = load.i8 v8+2 align 0
+  v12 = add.i8 v10, v5
+  v13 = ptradd v0, v6 * 3
+  store v11, v13 align 0
+  store v12, v13+1 align 0
+  store v9, v13+2 align 0
+  v14 = add.i64 v6, v4
+  jmp b1(v14)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+  slot s2 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 1024
+  v7 = iconst.i64 37
+  v8 = iconst.i64 31
+  v9 = iconst.i64 3
+  jmp b1(v4)
+b1(v10: i64):
+  v11 = icmp.ult v10, v6
+  br v11, b2, b3
+b2:
+  v12 = mul.i64 v10, v7
+  v13 = xor.i64 v12, v10
+  v14 = trunc.i8 v13
+  v15 = ptradd v1, v10 * 1
+  store v14, v15 align 0
+  v16 = add.i64 v10, v5
+  jmp b1(v16)
+b3:
+  call @gray(v3, v1, v0) : (ptr, ptr, i64) -> void
+  call @swap(v2, v1, v0) : (ptr, ptr, i64) -> void
+  jmp b4(v4, v4)
+b4(v17: i64, v18: i64):
+  v19 = icmp.ult v17, v0
+  br v19, b5, b6
+b5:
+  v20 = ptradd v3, v17 * 1
+  v21 = load.i8 v20 align 0
+  v22 = zext.i64 v21
+  v23 = ptradd v2, v17 * 3
+  v24 = load.i8 v23 align 0
+  v25 = load.i8 v23+1 align 0
+  v26 = load.i8 v23+2 align 0
+  v27 = zext.i64 v24
+  v28 = zext.i64 v25
+  v29 = zext.i64 v26
+  v30 = mul.i64 v18, v8
+  v31 = add.i64 v30, v22
+  v32 = mul.i64 v31, v8
+  v33 = add.i64 v32, v27
+  v34 = mul.i64 v33, v8
+  v35 = add.i64 v34, v28
+  v36 = mul.i64 v35, v8
+  v37 = add.i64 v36, v29
+  v38 = add.i64 v17, v5
+  jmp b4(v38, v37)
+b6:
+  ret v18
+)";
+    let (b, a) = optimized_for(src, VECTOR, 16, VOPS_ALL);
+    let g = text_of(&a, "gray");
+    assert(g.contains("vop.shuffle.v16i8 (") && g.contains("lanes [0, 3, 6, 9"), g.as_str());
+    let s = text_of(&a, "swap");
+    assert(s.contains("vop.shuffle.v16i8 (") && s.contains("lanes [0, 16, 32, 1, 17"), s.as_str());
+    let lens: [u64; 9] = [0, 1, 15, 16, 17, 32, 63, 100, 170];
+    for k in 0..9usize {
+        let args: []u64 = [unsafe lens[k]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// Pairs of elements whose even one is one operation of two inputs' even elements and whose odd one another
+// of their odd ones (`o[2i] = a[2i] - b[2i]`, `o[2i + 1] = a[2i + 1] + b[2i + 1]`) vectorize as both
+// operations of the inputs' vectors, the lanes chosen by a constant mask (`vsel`), not as the even and
+// odd lanes split and zipped again; a pair of one operation is that operation alone; a pair whose odd
+// element reads other inputs keeps the split. Each runs as before, of 0 to 64 pairs.
+const ALTERNATE: str = M"(lir ptr 8
+sym @as fn global noinline
+sym @asf fn global noinline
+sym @same fn global noinline
+sym @cross fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+fn @as
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 8
+  v9 = load.i32 v8 align 2
+  v10 = load.i32 v8+4 align 2
+  v11 = ptradd v2, v6 * 8
+  v12 = load.i32 v11 align 2
+  v13 = load.i32 v11+4 align 2
+  v14 = sub.i32 v9, v12
+  v15 = add.i32 v10, v13
+  v16 = ptradd v0, v6 * 8
+  store v14, v16 align 2
+  store v15, v16+4 align 2
+  v17 = add.i64 v6, v5
+  jmp b1(v17)
+b3:
+  ret
+fn @asf
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 16
+  v9 = load.f64 v8 align 3
+  v10 = load.f64 v8+8 align 3
+  v11 = ptradd v2, v6 * 16
+  v12 = load.f64 v11 align 3
+  v13 = load.f64 v11+8 align 3
+  v14 = fsub.f64 v9, v12
+  v15 = fadd.f64 v10, v13
+  v16 = ptradd v0, v6 * 16
+  store v14, v16 align 3
+  store v15, v16+8 align 3
+  v17 = add.i64 v6, v5
+  jmp b1(v17)
+b3:
+  ret
+fn @same
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 8
+  v9 = load.i32 v8 align 2
+  v10 = load.i32 v8+4 align 2
+  v11 = ptradd v2, v6 * 8
+  v12 = load.i32 v11 align 2
+  v13 = load.i32 v11+4 align 2
+  v14 = xor.i32 v9, v12
+  v15 = xor.i32 v10, v13
+  v16 = ptradd v0, v6 * 8
+  store v14, v16 align 2
+  store v15, v16+4 align 2
+  v17 = add.i64 v6, v5
+  jmp b1(v17)
+b3:
+  ret
+fn @cross
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v3
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v6 * 8
+  v9 = load.i32 v8 align 2
+  v10 = load.i32 v8+4 align 2
+  v11 = ptradd v2, v6 * 8
+  v12 = load.i32 v11 align 2
+  v13 = load.i32 v11+4 align 2
+  v14 = sub.i32 v9, v12
+  v15 = add.i32 v10, v9
+  v16 = ptradd v0, v6 * 8
+  store v14, v16 align 2
+  store v15, v16+4 align 2
+  v17 = add.i64 v6, v5
+  jmp b1(v17)
+b3:
+  ret
+fn @fill
+  sig (ptr, i64, i32) -> void
+b0(v0: ptr, v1: i64, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 -7
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v1
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = mul.i32 v8, v2
+  v10 = xor.i32 v9, v5
+  v11 = ptradd v0, v6 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v6, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1024 align 3
+  slot s1 size 1024 align 3
+  slot s2 size 1024 align 3
+  slot s3 size 1024 align 3
+  slot s4 size 2048 align 3
+  slot s5 size 2048 align 3
+  slot s6 size 2048 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = slotaddr s4
+  v6 = slotaddr s5
+  v7 = slotaddr s6
+  v8 = iconst.i64 256
+  v9 = iconst.i32 1000003
+  v10 = iconst.i32 -77777
+  call @fill(v1, v8, v9) : (ptr, i64, i32) -> void
+  call @fill(v2, v8, v10) : (ptr, i64, i32) -> void
+  v11 = iconst.i64 0
+  v12 = iconst.i64 1
+  jmp b1(v11)
+b1(v13: i64):
+  v14 = icmp.ult v13, v8
+  br v14, b2, b3
+b2:
+  v15 = ptradd v1, v13 * 4
+  v16 = load.i32 v15 align 2
+  v17 = sitofp.f64 v16
+  v18 = ptradd v5, v13 * 8
+  store v17, v18 align 3
+  v19 = ptradd v2, v13 * 4
+  v20 = load.i32 v19 align 2
+  v21 = sitofp.f64 v20
+  v22 = ptradd v6, v13 * 8
+  store v21, v22 align 3
+  v23 = add.i64 v13, v12
+  jmp b1(v23)
+b3:
+  call @as(v3, v1, v2, v0) : (ptr, ptr, ptr, i64) -> void
+  call @same(v4, v1, v2, v0) : (ptr, ptr, ptr, i64) -> void
+  call @asf(v5, v5, v6, v0) : (ptr, ptr, ptr, i64) -> void
+  call @cross(v7, v1, v2, v0) : (ptr, ptr, ptr, i64) -> void
+  jmp b4(v11, v11)
+b4(v24: i64, v25: i64):
+  v26 = icmp.ult v24, v8
+  br v26, b5, b6
+b5:
+  v27 = ptradd v3, v24 * 4
+  v28 = load.i32 v27 align 2
+  v29 = ptradd v4, v24 * 4
+  v30 = load.i32 v29 align 2
+  v31 = ptradd v5, v24 * 8
+  v32 = load.i64 v31 align 3
+  v33 = ptradd v7, v24 * 4
+  v34 = load.i32 v33 align 2
+  v35 = sext.i64 v28
+  v36 = mul.i64 v25, v8
+  v37 = add.i64 v36, v35
+  v38 = sext.i64 v30
+  v39 = xor.i64 v37, v38
+  v40 = add.i64 v39, v32
+  v41 = sext.i64 v34
+  v42 = sub.i64 v40, v41
+  v43 = add.i64 v24, v12
+  jmp b4(v43, v42)
+b6:
+  ret v25
+)";
+
+@test
+fn alternating_pairs_vectorize_as_both_operations_and_a_select() {
+    let (b, a) = optimized(ALTERNATE, VECTOR);
+    let ta = text_of(&a, "as");
+    assert(
+        ta.contains("vsel.v4i32") && ta.contains("sub.v4i32") && ta.contains("add.v4i32") && !ta.contains("vunzip") && !ta.contains(
+            "vzip",
+        ),
+        ta.as_str(),
+    );
+    let tf = text_of(&a, "asf");
+    assert(
+        tf.contains("vsel.v2f64") && tf.contains("fsub.v2f64") && !tf.contains("vunzip") && !tf.contains("vzip"),
+        tf.as_str(),
+    );
+    let ts = text_of(&a, "same");
+    assert(ts.contains("xor.v4i32") && !ts.contains("vsel") && !ts.contains("vunzip"), ts.as_str());
+    let tc = text_of(&a, "cross");
+    assert(!tc.contains("vsel"), tc.as_str());
+    for n in 0..65u64 {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
+// A count of 2-byte lanes stored as 4-byte ones: vectors of 8 bytes, whose byte lookups hold 8 of the 16
+// nibbles' counts, count by bit-parallel sums, not by the table (`by_table`); each count as before.
+const NARROW_POP: str = M"(lir ptr 8
+sym @pop fn global noinline
+sym @fill fn global noinline
+sym @drive fn global
+fn @pop
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 2
+  v8 = load.i16 v7 align 1
+  v9 = popcnt.i16 v8
+  v10 = zext.i32 v9
+  v11 = ptradd v1, v5 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 -24575
+  jmp b1(v2)
+b1(v5: i64):
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  v7 = trunc.i16 v5
+  v8 = mul.i16 v7, v4
+  v9 = ptradd v0, v5 * 2
+  store v8, v9 align 1
+  v10 = add.i64 v5, v3
+  jmp b1(v10)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 256 align 3
+  slot s1 size 512 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 128
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  call @fill(v1, v3) : (ptr, i64) -> void
+  call @pop(v1, v2, v0) : (ptr, ptr, i64) -> void
+  jmp b1(v4, v4)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v6 * 4
+  v10 = load.i32 v9 align 2
+  v11 = zext.i64 v10
+  v12 = mul.i64 v7, v3
+  v13 = add.i64 v12, v11
+  v14 = add.i64 v6, v5
+  jmp b1(v14, v13)
+b3:
+  ret v7
+)";
+
+@test
+fn narrow_counts_of_8_byte_vectors_take_no_byte_lookups() {
+    let mut err = String::new();
+    let b = lparse::parse(NARROW_POP, &mut err).unwrap();
+    let mut a = lparse::parse(NARROW_POP, &mut err).unwrap();
+    a.vector = 16;
+    a.vops = VOPS_ALL;
+    a.vec_bits = 0;
+    a.vtbl = true;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
+    for n in 0..100u64 {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+    let t = text_of(&a, "pop");
+    assert(t.contains(".v4i16") && !t.contains("swizzle_or_zero.v8i8"), t.as_str());
 }

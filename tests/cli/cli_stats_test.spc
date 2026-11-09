@@ -147,3 +147,24 @@ fn computed_width_signature_does_not_chain() {
     assert(r.out_has("cemit-stage collect:"), "the collect line is printed");
     assert(!r.out_has("budget exhausted"), "the instance graph closes within its budget");
 }
+
+// SC_VEC_REPORT prints why each loop the vectorizer leaves stays scalar, once, with the reason of the round
+// that refused it: the 64-bit products of two values (no lane multiply) are reported though a later round
+// interleaves scalar copies of the loop; the sum, which vectorizes, is not.
+@test
+fn vector_report_names_each_scalar_loop_once() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        "@noinline\nfn m11(c: []mut u64, a: []u64) {\n    for i in 0..c.len() {\n        c[i] = a[i].wrapping_mul(c[i]);\n    }\n}\n@noinline\nfn sum(a: []i32) i32 {\n    let mut s: i32 = 0;\n    for x in a {\n        s = s.wrapping_add(x);\n    }\n    return s;\n}\nfn main() i32 {\n    let mut a = Vector::<u64>::new();\n    let mut c = Vector::<u64>::new();\n    let mut b = Vector::<i32>::new();\n    for i in 0..64 {\n        a.push(i as u64);\n        c.push(0);\n        b.push(i);\n    }\n    m11(c.index_range_mut(0..64), a[0..64]);\n    return sum(b[0..64]) - 2016 + (c[3] as i32);\n}\n",
+    );
+    let root = p.dir();
+    let r = cli::superc_env_in(root, "SC_VEC_REPORT", "1", "build -O3");
+    assert(r.ok(), "the build succeeds");
+    assert(
+        r.out_has(":3:5: not vectorized: an instruction it does not widen (`mul`)"),
+        "the products' loop is reported",
+    );
+    assert(!r.out_has(":10:5: not vectorized"), "the sum's loop is not");
+}

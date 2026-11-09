@@ -4277,23 +4277,51 @@ extend Lower {
 extend Lower {
     // ---- Scalar rvalues ----
 
+    // Pointer `a` as a reference's address, never null (`PTR_NONNULL`): itself when an address the body makes
+    // (a slot's, a symbol's, a reference's), else a copy that says so (`lir::opt` keeps it while `a` does not).
+    fn nonnull_copy(self: &mut Self, a: Value) Value {
+        if (a & VPARAM) == 0 {
+            let t = self.b.insts[a as usize];
+            if t.op == O_SLOTADDR || t.op == O_SYMADDR || t.op == O_PTRADD && (t.aux & PTR_NONNULL) != 0 {
+                return a;
+            }
+        }
+        return self.inst(O_PTRADD, T_PTR, PTR_NONNULL, a, VNONE, 0);
+    }
+
     // The value of rvalue `rid`, of scalar type `ti`.
     fn rvalue(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rid: u32, ti: TyI) Value {
         let rv = b.rvalues[rid as usize];
         if rv.kind == irc::RV_USE {
-            return self.operand(c, b, rv.a);
+            let v = self.operand(c, b, rv.a);
+            // A raw pointer retyped as a reference (`&*(p + i)`, which the Core IR makes a use): never null.
+            if v != VNONE && (v & VFLAG) == 0 && rv.target != TYPE_NONE && self.vty(v) == T_PTR {
+                let (mut rm, mut rt) = (b.module, TYPE_NONE);
+                let (mut om, mut ot) = (b.module, TYPE_NONE);
+                let ry = Lower::resolved(c, b.module, rv.target, &mut rm, &mut rt);
+                let oy = Lower::resolved(c, b.module, Lower::op_ty(b, rv.a), &mut om, &mut ot);
+                if ry.kind == TypeKind::TYPE_REFERENCE && oy.kind == TypeKind::TYPE_POINTER {
+                    return self.nonnull_copy(v);
+                }
+            }
+            return v;
         }
         if rv.kind == irc::RV_ADDR {
             return self.place_addr(c, b, rv.a);
         }
         if rv.kind == irc::RV_REF {
-            // A reference is never null: the address made for it here says so (`PTR_NONNULL`).
+            // A reference is never null: the address made for it here says so (`PTR_NONNULL`); the
+            // address of another value (`&*p`) is a copy of it that says so.
             let n = self.b.insts.len() as u32;
             let a = self.place_addr(c, b, rv.a);
             if (a & (VPARAM | VFLAG)) == 0 && a != VNONE && a >= n && self.b.insts[a as usize].op == O_PTRADD {
                 self.b.insts.index_mut(a as usize).aux |= PTR_NONNULL;
+                return a;
             }
-            return a;
+            if a == VNONE || (a & VFLAG) != 0 || self.vty(a) != T_PTR {
+                return a;
+            }
+            return self.nonnull_copy(a);
         }
         if rv.kind == irc::RV_CAST {
             return self.cast(c, b, rv, ti);

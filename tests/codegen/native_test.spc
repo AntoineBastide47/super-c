@@ -19,8 +19,8 @@ import module::loader;
 // on macOS arm64, whose every processor has FEAT_FP16, else conversions), 64-byte vectors (x86-64's zmm
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
 // acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
-// optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); and a fused
-// multiply-add (`Package.fma`: x86-64's FMA3).
+// optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
+// multiply-add (`Package.fma`: x86-64's FMA3); and x86-64's `lzcnt` (`Package.lzcnt`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -32,6 +32,7 @@ const RCPC: u32 = 128;
 const SHARE: u32 = 256;
 const OMIT_FP: u32 = 512;
 const FMA: u32 = 1024;
+const LZCNT: u32 = 2048;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -171,7 +172,17 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.tail = (opts & TAIL) != 0;
     p.omit_fp = (opts & OMIT_FP) != 0;
     p.popcnt = (opts & POPCNT) != 0;
+    p.lzcnt = (opts & LZCNT) != 0;
+    // The lanes the target counts and swaps in registers, as a build sets them (`CEmit`): with AVX-512 also
+    // the leading zeros of 4- and 8-byte lanes (CD and VL).
+    p.vec_bits = tgt::isa(isa).vector_bits;
+    if (opts & Z512) != 0 && isa == tgt::axis_index("x86_64", true) {
+        p.vec_bits |= 0x0C;
+    }
     p.sse41 = (opts & SSE41) != 0;
+    // SSE4.1 implies SSSE3's byte lookups and SSE3's alternating sums.
+    p.vtbl = p.sse41 && isa == tgt::axis_index("x86_64", true);
+    p.addsub = p.vtbl;
     p.lse = (opts & LSE) != 0;
     p.rcpc = (opts & RCPC) != 0;
     p.fma = (opts & FMA) != 0;
@@ -5488,6 +5499,46 @@ int main(void) {
     }
 }
 
+// A shift by a masked field of the value (`x >> ((x >> 50) & 63)`): the field is one `ubfx`, which the
+// shift reads; the mask does not fold into the shift past it (the shift took `x` itself as its count).
+// arm64; it gives the C results.
+@test
+fn a_shift_by_an_extracted_field_reads_the_field() {
+    let lir = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 50
+  v2 = iconst.i64 63
+  v3 = lshr.i64 v0, v1
+  v4 = and.i64 v3, v2
+  v5 = lshr.i64 v0, v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // lsr x0, x0, x0 (9AC02400): the count would be x itself.
+    let bad: [u8; 4] = [0x00, 0x24, 0xC0, 0x9A];
+    assert(!holds(&obj, bad[0..4]), "f");
+    let drv = M"(#include <stdint.h>
+uint64_t f(uint64_t);
+int main(void) {
+  static const uint64_t v[4] = {4025353432212273003u, 0, 0xFFFFFFFFFFFFFFFFu, 0x8000000000000001u};
+  for (int i = 0; i < 4; i++) {
+    if (f(v[i]) != v[i] >> (v[i] >> 50 & 63)) return 1 + i;
+  }
+  return 0;
+}
+)";
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // A value whose truncation the block returns next is made in the return's register (`@lz`'s count:
 // `clz x0, x0`), and 0 - x reads the zero register (`@lowbit`: `neg`, no 0 made). arm64; they give the C
 // results.
@@ -8427,6 +8478,660 @@ fn a_switch_on_an_optional_reference_tests_the_length() {
         r.show();
     }
     assert(ok, "no select");
+}
+
+// x86-64 swaps the bytes of 2-, 4- and 8-byte lanes in an xmm register, in SSE2 (`swap_lane_bytes`): the
+// words of a lane reversed by PSHUFLW and PSHUFHW (F2/F3 0F 70), then each word's bytes by PSLLW and PSRLW
+// by 8 (66 0F 71) and POR; no lane by lane through memory (no `bswap`, 0F C8+r).
+@test
+fn x86_swaps_lane_bytes_in_registers() {
+    let lir = M"(lir ptr 8
+sym @sw fn global
+fn @sw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v0 align 0
+  v3 = vop.swap_bytes.v4i32 (v2)
+  store v3, v1 align 0
+  v4 = load.v8i16 v0 align 0
+  v5 = vop.swap_bytes.v8i16 (v4)
+  store v5, v1+16 align 0
+  v6 = load.v2i64 v0 align 0
+  v7 = vop.swap_bytes.v2i64 (v6)
+  store v7, v1+32 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    let mut shuf: u32 = 0;
+    let mut shift: u32 = 0;
+    let mut scalar = false;
+    for k in 2..obj.len() - 1 {
+        // The prefix, then a REX for the high registers.
+        let p = if (obj[k - 1] & 0xF0) == 0x40 {
+            obj[k - 2]
+        } else {
+            obj[k - 1]
+        };
+        shuf += (obj[k] == 0x0F && obj[k + 1] == 0x70 && (p == 0xF2 || p == 0xF3)) as u32;
+        shift += (obj[k] == 0x0F && obj[k + 1] == 0x71) as u32;
+        scalar = scalar || obj[k] == 0x0F && obj[k + 1] >= 0xC8 && obj[k + 1] <= 0xCF && (obj[k - 1] & 0xF0) == 0x40;
+    }
+    assert(
+        shuf == 4 && shift == 6 && !scalar,
+        format("PSHUFLW, PSHUFHW, word shifts: {} {} {}", shuf, shift, scalar).as_str(),
+    );
+}
+
+// The set bits of 1-, 2- and 4-byte lanes and the swapped bytes of 2-, 4- and 8-byte lanes in wasm32's
+// registers (`vector_bits`): `i8x16.popcnt` and pairwise sums, `i8x16.shuffle`; each lane as the scalar's.
+@test
+fn wasm_counts_bits_and_swaps_bytes_in_registers() {
+    let lir = M"(lir ptr 8
+sym @bits fn global
+fn @bits
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = vop.count_ones.v16i8 (v2)
+  store v3, v1 align 0
+  v4 = load.v8i16 v0 align 0
+  v5 = vop.count_ones.v8i16 (v4)
+  store v5, v1+16 align 0
+  v6 = load.v4i32 v0 align 0
+  v7 = vop.count_ones.v4i32 (v6)
+  store v7, v1+32 align 0
+  v8 = vop.swap_bytes.v4i32 (v6)
+  store v8, v1+48 align 0
+  v9 = vop.swap_bytes.v8i16 (v4)
+  store v9, v1+64 align 0
+  v10 = load.v2i64 v0 align 0
+  v11 = vop.swap_bytes.v2i64 (v10)
+  store v11, v1+80 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void bits(const void *, void *);
+int main(void) {
+  unsigned char in[16], o[96];
+  for (int k = 0; k < 16; k++) in[k] = (unsigned char)(k * 37 + 11);
+  bits(in, o);
+  uint8_t b[16]; uint16_t h[8], hs[8]; uint32_t w[4], c[4], s[4]; uint64_t d[2], ds[2];
+  memcpy(b, in, 16); memcpy(h, in, 16); memcpy(w, in, 16); memcpy(d, in, 16);
+  for (int k = 0; k < 16; k++) if (o[k] != __builtin_popcount(b[k])) return 1;
+  memcpy(hs, o + 16, 16);
+  for (int k = 0; k < 8; k++) if (hs[k] != __builtin_popcount(h[k])) return 2;
+  memcpy(c, o + 32, 16); memcpy(s, o + 48, 16);
+  for (int k = 0; k < 4; k++) if (c[k] != (uint32_t)__builtin_popcount(w[k]) || s[k] != __builtin_bswap32(w[k])) return 3;
+  memcpy(hs, o + 64, 16);
+  for (int k = 0; k < 8; k++) if (hs[k] != __builtin_bswap16(h[k])) return 4;
+  memcpy(ds, o + 80, 16);
+  for (int k = 0; k < 2; k++) if (ds[k] != __builtin_bswap64(d[k])) return 5;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let wt = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&wt, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // `i8x16.popcnt`: the SIMD prefix and 0x62.
+    let mut pop = false;
+    for k in 0..obj.len() - 1 {
+        pop = pop || obj[k] == 0xFD && obj[k + 1] == 0x62;
+    }
+    assert(pop, "i8x16.popcnt");
+    if !cli::has_cc() {
+        return;
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
+// Widening products (`O_VMULW`) in registers: of the low and the high lanes, signed and unsigned, of 4-, 2-
+// and 1-byte lanes, of an 8-byte vector, and a sum and a difference that accumulate them (arm64 SMULL,
+// UMULL, the `2` forms, SMLAL2 and UMLSL; x86-64 PSHUFD and PMULDQ (SSE4.1) or PMULUDQ for 4-byte lanes,
+// the others lane by lane; wasm `extmul`). A sum of a lane product and a zero-extended half (`FOLD_VMLA`
+// and `FOLD_VWADD` both apply) accumulates the product into the extension (the sum of a folded product
+// read as its accumulator stopped the compiler). With AVX2 and AVX-512 a product of 32 and 64 bytes: the
+// low or high half of the operand extended (VEXTRACTI128 and VPMOVZXDQ).
+@test
+fn widening_products_run_in_registers() {
+    let lir = M"(lir ptr 8
+sym @mw fn global
+fn @mw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v0 align 0
+  v3 = load.v4i32 v0+16 align 0
+  v4 = vmulw.s.v2i64 v2, v3
+  store v4, v1 align 0
+  v5 = vmulw.s.hi.v2i64 v2, v3
+  store v5, v1+16 align 0
+  v6 = vmulw.v2i64 v2, v3
+  store v6, v1+32 align 0
+  v7 = vmulw.hi.v2i64 v2, v3
+  store v7, v1+48 align 0
+  v8 = load.v8i16 v0 align 0
+  v9 = load.v8i16 v0+16 align 0
+  v10 = vmulw.s.hi.v4i32 v8, v9
+  store v10, v1+64 align 0
+  v11 = vmulw.v4i32 v8, v9
+  store v11, v1+80 align 0
+  v12 = load.v16i8 v0 align 0
+  v13 = load.v16i8 v0+16 align 0
+  v14 = vmulw.s.v8i16 v12, v13
+  store v14, v1+96 align 0
+  v15 = vmulw.hi.v8i16 v12, v13
+  store v15, v1+112 align 0
+  v16 = load.v2i32 v0+8 align 0
+  v17 = load.v2i32 v0+24 align 0
+  v18 = vmulw.s.v2i64 v16, v17
+  store v18, v1+128 align 0
+  v19 = load.v2i64 v0+32 align 0
+  v20 = vmulw.s.hi.v2i64 v2, v3
+  v21 = add.v2i64 v19, v20
+  store v21, v1+144 align 0
+  v22 = vmulw.v2i64 v2, v3
+  v23 = sub.v2i64 v19, v22
+  store v23, v1+160 align 0
+  v24 = mul.v4i32 v2, v3
+  v25 = wconst.v8i16 0x0, 0x0
+  v26 = vziplo.v8i16 v8, v25
+  v27 = bitcast.v4i32 v26
+  v28 = add.v4i32 v24, v27
+  store v28, v1+176 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void mw(const void *, void *);
+int main(void) {
+  unsigned char in[48], o[192];
+  for (int k = 0; k < 48; k++) in[k] = (unsigned char)(k * 73 + 5);
+  int32_t e[8] = {INT32_MIN, INT32_MAX, -1, 3, INT32_MIN, -7, -1, 0x7FFF0001};
+  memcpy(in, e, 32);
+  mw(in, o);
+  int32_t a[4], b[4]; uint32_t ua[4], ub[4]; int64_t s[4], w[2], acc[2], m[2], q[2]; uint64_t u[4];
+  memcpy(a, in, 16); memcpy(b, in + 16, 16); memcpy(ua, in, 16); memcpy(ub, in + 16, 16);
+  memcpy(s, o, 32); memcpy(u, o + 32, 32);
+  for (int k = 0; k < 4; k++) if (s[k] != (int64_t)a[k] * b[k] || u[k] != (uint64_t)ua[k] * ub[k]) return 1 + k;
+  int16_t h[8], g[8]; uint16_t uh[8], ug[8]; int32_t r[4]; uint32_t ur[4];
+  memcpy(h, in, 16); memcpy(g, in + 16, 16); memcpy(uh, in, 16); memcpy(ug, in + 16, 16);
+  memcpy(r, o + 64, 16); memcpy(ur, o + 80, 16);
+  for (int k = 0; k < 4; k++) if (r[k] != (int32_t)h[4 + k] * g[4 + k] || ur[k] != (uint32_t)uh[k] * ug[k]) return 5 + k;
+  int8_t c[16], d[16]; uint8_t uc[16], ud[16]; int16_t p[8]; uint16_t up[8];
+  memcpy(c, in, 16); memcpy(d, in + 16, 16); memcpy(uc, in, 16); memcpy(ud, in + 16, 16);
+  memcpy(p, o + 96, 16); memcpy(up, o + 112, 16);
+  for (int k = 0; k < 8; k++) if (p[k] != (int16_t)(c[k] * d[k]) || up[k] != (uint16_t)(uc[8 + k] * ud[8 + k])) return 9 + k;
+  memcpy(w, o + 128, 16); memcpy(acc, in + 32, 16); memcpy(m, o + 144, 16); memcpy(q, o + 160, 16);
+  for (int k = 0; k < 2; k++) {
+    if (w[k] != (int64_t)a[2 + k] * b[2 + k]) return 17 + k;
+    if ((uint64_t)m[k] != (uint64_t)acc[k] + (uint64_t)((int64_t)a[2 + k] * b[2 + k])) return 19 + k;
+    if ((uint64_t)q[k] != (uint64_t)acc[k] - (uint64_t)ua[k] * ub[k]) return 21 + k;
+  }
+  uint32_t z[4];
+  memcpy(z, o + 176, 16);
+  for (int k = 0; k < 4; k++) if (z[k] != (uint32_t)a[k] * (uint32_t)b[k] + uh[k]) return 23 + k;
+  return 0;
+}
+)";
+    // 32- and 64-byte products with AVX2 and AVX-512: of a register's lanes whole, of a wider one's high half.
+    let ymm = M"(lir ptr 8
+sym @mw fn global
+fn @mw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v0 align 0
+  v3 = load.v4i32 v0+16 align 0
+  v4 = vmulw.s.v4i64 v2, v3
+  store v4, v1 align 0
+  v5 = load.v8i32 v0 align 0
+  v6 = load.v8i32 v0+32 align 0
+  v7 = vmulw.hi.v4i64 v5, v6
+  store v7, v1+32 align 0
+  ret
+)";
+    let ydrv = M"(#include <stdint.h>
+#include <string.h>
+void mw(const void *, void *);
+int main(void) {
+  int32_t a[16]; uint32_t ua[16]; int64_t s[4]; uint64_t u[4]; unsigned char o[64];
+  for (int k = 0; k < 16; k++) a[k] = (int32_t)(0x9E3779B9u * (uint32_t)(k + 1));
+  a[0] = INT32_MIN; a[4] = INT32_MIN; a[12] = -1;
+  memcpy(ua, a, 64);
+  mw(a, o);
+  memcpy(s, o, 32); memcpy(u, o + 32, 32);
+  for (int k = 0; k < 4; k++) if (s[k] != (int64_t)a[k] * a[4 + k] || u[k] != (uint64_t)ua[4 + k] * ua[12 + k]) return 1 + k;
+  return 0;
+}
+)";
+    let zmm = M"(lir ptr 8
+sym @mw fn global
+fn @mw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i32 v0 align 0
+  v3 = load.v8i32 v0+32 align 0
+  v4 = vmulw.v8i64 v2, v3
+  store v4, v1 align 0
+  v5 = load.v16i32 v0 align 0
+  v6 = load.v16i32 v0+64 align 0
+  v7 = vmulw.hi.v8i64 v5, v6
+  store v7, v1+64 align 0
+  ret
+)";
+    let zdrv = M"(#include <stdint.h>
+#include <string.h>
+void mw(const void *, void *);
+int main(void) {
+  uint32_t a[32]; uint64_t u[16]; unsigned char o[128];
+  for (int k = 0; k < 32; k++) a[k] = 0x9E3779B9u * (uint32_t)(k + 1);
+  a[0] = UINT32_MAX; a[24] = UINT32_MAX;
+  mw(a, o);
+  memcpy(u, o, 128);
+  for (int k = 0; k < 8; k++) if (u[k] != (uint64_t)a[k] * a[8 + k] || u[8 + k] != (uint64_t)a[8 + k] * a[24 + k]) return 1 + k;
+  return 0;
+}
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    let linux = tgt::axis_index("linux", false);
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, linux, x64, SSE41, &mut obj), "the x86-64 object");
+    // PMULDQ (66 0F 38 28) and PMULUDQ (66 0F F4), one per 4-byte product: four signed, three unsigned.
+    let mut smul: u32 = 0;
+    let mut umul: u32 = 0;
+    for k in 3..obj.len() {
+        smul += (obj[k - 3] == 0x0F && obj[k - 2] == 0x38 && obj[k - 1] == 0x28 && (obj[k] & 0xC0) == 0xC0) as u32;
+        umul += (obj[k - 2] == 0x0F && obj[k - 1] == 0xF4 && (obj[k] & 0xC0) == 0xC0) as u32;
+    }
+    assert(smul == 4 && umul == 3, format("PMULDQ, PMULUDQ: {} {}", smul, umul).as_str());
+    assert(object_of(ymm, linux, x64, WIDE | SSE41, &mut obj), "the AVX2 object");
+    assert(object_of(zmm, linux, x64, Z512, &mut obj), "the AVX-512 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    // x86-64 multiplies signed 4-byte lanes with SSE4.1 only (`Package.vec_mulw`).
+    if tgt::host_isa() != x64 {
+        assert_eq(run_native(lir, drv), 0);
+    }
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    assert_eq(run_fma(ymm, ydrv), 0);
+    assert_eq(run_zmm(zmm, zdrv), 0);
+}
+
+// A scan with no bound vectorizes as aligned block loads (`lir::loops::aligned_scan`): through strings that
+// end at the last byte of a readable page, or 1 or 2 bytes before it, the next page reserved without
+// access, no load faults and each length (0 to 40) comes out.
+@test
+fn an_unbounded_scan_reads_no_page_past_its_string() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::platform::vm;
+
+@noinline
+fn len8(p: *const u8) usize {
+    let mut i: usize = 0;
+    unsafe {
+        while *(p + i) != 0 {
+            i += 1;
+        }
+    }
+    return i;
+}
+
+fn main() i32 {
+    let page = vm::page_size().unwrap();
+    let mut m = vm::reserve(2 * page).unwrap();
+    m.commit(0, page).unwrap();
+    let mut bad: i32 = 0;
+    for gap in 0..3usize {
+        for len in 0..41usize {
+            unsafe {
+                let end = m.as_ptr() + page - 1 - gap;
+                for k in 0..len {
+                    *(end - len + k) = 65;
+                }
+                *end = 0;
+                if len8(end - len) != len {
+                    bad += 1;
+                }
+            }
+        }
+    }
+    return bad;
+}
+)",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "len8", "build -O2 main.spc -o bin");
+    let ok = r.ok() && r.out_has(" block");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "an aligned block load");
+    assert_eq(p.run_bin(), 0);
+}
+
+// x86-64 looks up bytes by a vector of indices in registers with SSSE3 (`Package.vtbl`): PSHUFB (66 0F 38
+// 00), indices that may be 16 or more first saturated past bit 7 (PADDUSB, 66 0F DC), those an `and`
+// keeps below 16 as they are; 32 bytes with AVX2 for a table of one repeated 16-byte pattern; 8 bytes lane
+// by lane, as PSHUFB would read the register's 8 bytes past the table. Each lane is the table's byte, 0
+// past the table.
+@test
+fn x86_looks_up_bytes_in_registers() {
+    let lir = M"(lir ptr 8
+sym @tb fn global
+fn @tb
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = load.v16i8 v0+16 align 0
+  v4 = vop.swizzle_or_zero.v16i8 (v2, v3)
+  store v4, v1 align 0
+  v5 = wconst.v16i8 0x0f0f0f0f0f0f0f0f, 0x0f0f0f0f0f0f0f0f
+  v6 = and.v16i8 v3, v5
+  v7 = vop.swizzle_or_zero.v16i8 (v2, v6)
+  store v7, v1+16 align 0
+  v8 = wconst.v8i8 0x0807060504030201
+  v9 = load.v8i8 v0+16 align 0
+  v10 = wconst.v8i8 0x0f0f0f0f0f0f0f0f
+  v11 = and.v8i8 v9, v10
+  v12 = vop.swizzle_or_zero.v8i8 (v8, v11)
+  store v12, v1+32 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void tb(const void *, void *);
+int main(void) {
+  uint8_t in[32], o[40];
+  for (int k = 0; k < 16; k++) in[k] = (uint8_t)(k * 17 + 3);
+  for (int k = 0; k < 16; k++) in[16 + k] = (uint8_t)(k * 29 + 250);
+  tb(in, o);
+  for (int k = 0; k < 16; k++) {
+    uint8_t ix = in[16 + k];
+    if (o[k] != (ix < 16 ? in[ix] : 0)) return 1 + k;
+    if (o[16 + k] != in[ix & 15]) return 17 + k;
+    if (k < 8 && o[32 + k] != ((ix & 15) < 8 ? (ix & 15) + 1 : 0)) return 33 + k;
+  }
+  return 0;
+}
+)";
+    let wide = M"(lir ptr 8
+sym @tb fn global
+fn @tb
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v32i8 0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x0706050403020100, 0x0f0e0d0c0b0a0908
+  v3 = load.v32i8 v0 align 0
+  v4 = wconst.v32i8 0x0f0f0f0f0f0f0f0f, 0x0f0f0f0f0f0f0f0f, 0x0f0f0f0f0f0f0f0f, 0x0f0f0f0f0f0f0f0f
+  v5 = and.v32i8 v3, v4
+  v6 = vop.swizzle_or_zero.v32i8 (v2, v5)
+  store v6, v1 align 0
+  ret
+)";
+    let wdrv = M"(#include <stdint.h>
+void tb(const void *, void *);
+int main(void) {
+  uint8_t in[32], o[32];
+  for (int k = 0; k < 32; k++) in[k] = (uint8_t)(k * 37 + 5);
+  tb(in, o);
+  for (int k = 0; k < 32; k++) if (o[k] != (in[k] & 15)) return 1 + k;
+  return 0;
+}
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    let linux = tgt::axis_index("linux", false);
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, linux, x64, SSE41, &mut obj), "the x86-64 object");
+    let mut shuf: u32 = 0;
+    let mut sat: u32 = 0;
+    for k in 3..obj.len() {
+        shuf += (obj[k - 3] == 0x0F && obj[k - 2] == 0x38 && obj[k - 1] == 0x00 && (obj[k] & 0xC0) == 0xC0) as u32;
+        sat += (obj[k - 2] == 0x0F && obj[k - 1] == 0xDC && (obj[k] & 0xC0) == 0xC0) as u32;
+    }
+    // The two 16-byte lookups by PSHUFB, the 8-byte one lane by lane.
+    assert(shuf == 2 && sat == 1, format("PSHUFB, PADDUSB: {} {}", shuf, sat).as_str());
+    assert(object_of(wide, linux, x64, WIDE | SSE41, &mut obj), "the AVX2 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_fma(wide, wdrv), 0);
+}
+
+// x86-64 counts the leading zeros of 4- and 8-byte lanes in registers with AVX-512 CD and VL (VPLZCNTD,
+// VPLZCNTQ: EVEX 0F38 44, its W bit for 8-byte lanes) at each vector length, else lane by lane; and the
+// scalar count with LZCNT (F3 0F BD) where the processor has it, else BSR (0F BD). Each lane as the scalar.
+@test
+fn x86_counts_leading_zeros_of_lanes_with_avx512() {
+    let lir = M"(lir ptr 8
+sym @lz fn global
+fn @lz
+  sig (ptr, ptr) -> i32
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4i32 v0 align 0
+  v3 = vop.leading_zeros.v4i32 (v2)
+  store v3, v1 align 0
+  v4 = load.v2i64 v0 align 0
+  v5 = vop.leading_zeros.v2i64 (v4)
+  store v5, v1+16 align 0
+  v6 = load.v16i32 v0 align 0
+  v7 = vop.leading_zeros.v16i32 (v6)
+  store v7, v1+32 align 0
+  v8 = load.i32 v0+4 align 2
+  v9 = clz.i32 v8
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+int lz(const void *, void *);
+static int c32(uint32_t x) { return x ? __builtin_clz(x) : 32; }
+static int c64(uint64_t x) { return x ? __builtin_clzll(x) : 64; }
+int main(void) {
+  uint32_t in[16], o[24]; uint64_t w[2], q[2];
+  for (int k = 0; k < 16; k++) in[k] = k == 1 ? 0 : 0x80000000u >> (k * 3 % 31);
+  int r = lz(in, o);
+  if (r != 32) return 1;
+  for (int k = 0; k < 4; k++) if (o[k] != (uint32_t)c32(in[k])) return 2 + k;
+  memcpy(w, in, 16); memcpy(q, o + 4, 16);
+  for (int k = 0; k < 2; k++) if (q[k] != (uint64_t)c64(w[k])) return 6 + k;
+  for (int k = 0; k < 16; k++) if (o[8 + k] != (uint32_t)c32(in[k])) return 8 + k;
+  return 0;
+}
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    let linux = tgt::axis_index("linux", false);
+    let mut obj = Vector::<u8>::new();
+    for z in 0..2u32 {
+        let opts = if z == 1 {
+            Z512 | LZCNT
+        } else {
+            0u32
+        };
+        assert(object_of(lir, linux, x64, opts, &mut obj), "the x86-64 object");
+        let mut ev: u32 = 0;
+        let mut lzc: u32 = 0;
+        let mut bsr: u32 = 0;
+        for k in 5..obj.len() {
+            // EVEX P0 with map 2, then the opcode 44 and a register-direct ModRM.
+            ev += (obj[k - 5] == 0x62 && (obj[k - 4] & 3) == 2 && obj[k - 1] == 0x44 && (obj[k] & 0xC0) == 0xC0) as u32;
+            let p = if (obj[k - 3] & 0xF0) == 0x40 {
+                obj[k - 4]
+            } else {
+                obj[k - 3]
+            };
+            lzc += (obj[k - 2] == 0x0F && obj[k - 1] == 0xBD && p == 0xF3) as u32;
+            bsr += (obj[k - 2] == 0x0F && obj[k - 1] == 0xBD && p != 0xF3) as u32;
+        }
+        let want = if z == 1 {
+            ev == 3 && lzc == 1 && bsr == 0
+        } else {
+            ev == 0 && lzc == 0 && bsr >= 1
+        };
+        assert(want, format("AVX-512 {}: VPLZCNT, LZCNT, BSR: {} {} {}", z, ev, lzc, bsr).as_str());
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_zmm(lir, drv), 0);
+}
+
+// x86-64 with SSE3 subtracts the even lanes and adds the odd ones of float vectors in one instruction: a
+// select by a constant of the even lanes of a difference and a sum of the same operands (`lv::FOLD_ADDSUB`)
+// is ADDSUBPS (F2 0F D0) or ADDSUBPD (66 0F D0), with AVX of 32 bytes too (VEX); without SSE3, the select
+// of both (`pand`). Each lane as the scalar operation.
+@test
+fn x86_alternates_subtraction_and_addition_in_one_instruction() {
+    let lir = M"(lir ptr 8
+sym @as fn global
+fn @as
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = load.v4f32 v0+16 align 0
+  v4 = fsub.v4f32 v2, v3
+  v5 = fadd.v4f32 v2, v3
+  v6 = wconst.v4i32 0xffffffff, 0xffffffff
+  v7 = vsel.v4f32 v6, v4, v5
+  store v7, v1 align 0
+  v8 = load.v2f64 v0+32 align 0
+  v9 = load.v2f64 v0+48 align 0
+  v10 = fsub.v2f64 v8, v9
+  v11 = fadd.v2f64 v8, v9
+  v12 = wconst.v2i64 0xffffffffffffffff, 0x0
+  v13 = vsel.v2f64 v12, v10, v11
+  store v13, v1+16 align 0
+  ret
+)";
+    let drv = M"(#include <string.h>
+void as(const void *, void *);
+int main(void) {
+  float f[8], o[4]; double d[4], q[2]; unsigned char in[64], out[32];
+  for (int k = 0; k < 8; k++) f[k] = (float)(k * 3 - 7) * 0.375f;
+  for (int k = 0; k < 4; k++) d[k] = (double)(k * 5 - 9) * 1.125;
+  memcpy(in, f, 32); memcpy(in + 32, d, 32);
+  as(in, out);
+  memcpy(o, out, 16); memcpy(q, out + 16, 16);
+  for (int k = 0; k < 4; k++) if (o[k] != (k % 2 == 0 ? f[k] - f[4 + k] : f[k] + f[4 + k])) return 1 + k;
+  if (q[0] != d[0] - d[2] || q[1] != d[1] + d[3]) return 5;
+  return 0;
+}
+)";
+    let wide = M"(lir ptr 8
+sym @as fn global
+fn @as
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 0
+  v3 = load.v8f32 v0+32 align 0
+  v4 = fsub.v8f32 v2, v3
+  v5 = fadd.v8f32 v2, v3
+  v6 = wconst.v8i32 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff
+  v7 = vsel.v8f32 v6, v4, v5
+  store v7, v1 align 0
+  ret
+)";
+    let wdrv = M"(#include <string.h>
+void as(const void *, void *);
+int main(void) {
+  float f[16], o[8];
+  for (int k = 0; k < 16; k++) f[k] = (float)(k * 7 - 40) * 0.25f;
+  as(f, o);
+  for (int k = 0; k < 8; k++) if (o[k] != (k % 2 == 0 ? f[k] - f[8 + k] : f[k] + f[8 + k])) return 1 + k;
+  return 0;
+}
+)";
+    let x64 = tgt::axis_index("x86_64", true);
+    let linux = tgt::axis_index("linux", false);
+    let mut obj = Vector::<u8>::new();
+    for z in 0..2u32 {
+        let opts = if z == 1 {
+            SSE41
+        } else {
+            0u32
+        };
+        assert(object_of(lir, linux, x64, opts, &mut obj), "the x86-64 object");
+        let mut ps: u32 = 0;
+        let mut pd: u32 = 0;
+        let mut pand: u32 = 0;
+        for k in 4..obj.len() {
+            // The prefix, a REX between or not, then 0F D0.
+            let p = if (obj[k - 2] & 0xF0) == 0x40 {
+                obj[k - 3]
+            } else {
+                obj[k - 2]
+            };
+            let op = obj[k - 1] == 0x0F && obj[k] == 0xD0;
+            ps += (op && p == 0xF2) as u32;
+            pd += (op && p == 0x66) as u32;
+            pand += (obj[k - 1] == 0x0F && obj[k] == 0xDB) as u32;
+        }
+        let want = if z == 1 {
+            ps == 1 && pd == 1 && pand == 0
+        } else {
+            ps == 0 && pd == 0 && pand == 2
+        };
+        assert(want, format("SSE3 {}: ADDSUBPS, ADDSUBPD, PAND: {} {} {}", z, ps, pd, pand).as_str());
+    }
+    assert(object_of(wide, linux, x64, WIDE | SSE41, &mut obj), "the AVX2 object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_sse41(lir, drv), 0);
+    assert_eq(run_fma(wide, wdrv), 0);
+}
+
+// A body past CALLER_MAX instructions still takes its checked slice indexes, whose warm path is a few
+// instructions and a rare failure path (`il::cheap`): its loops vectorize.
+@test
+fn a_long_bodys_slice_indexes_inline() {
+    let p = cli::proj_new();
+    let mut src = String::from_str(
+        "@noinline\nfn many(d: []mut i32, a0: []i32) i32 {\n    let n = d.len().min(a0.len());\n    let a = &a0[0..n];\n    let mut s: i32 = 0;\n",
+    );
+    for k in 0..300 {
+        src.format_into(
+            "    for i in 0..n {{\n        d[i] = a[i] + {};\n    }}\n    for i in 0..n {{\n        s = s.wrapping_add(a[i] ^ {});\n    }}\n",
+            k,
+            k,
+        );
+    }
+    src.push_str(
+        "    return s;\n}\n\nfn main() i32 {\n    let mut d = Vector::<i32>::new();\n    d.push(1);\n    let a = d.clone();\n    return many(&mut d, &a);\n}\n",
+    );
+    p.mkfile("main.spc", &src);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "many", "build -O2 main.spc -o app");
+    let ok = r.ok() && r.out_has("fn @") && !r.out_has("call.ptr @Slice") && !r.out_has("call.ptr @SliceMut") && r.out_has(
+        "v4i32",
+    );
+    if !ok {
+        r.show();
+    }
+    assert(ok, "no index call, vector loops");
+}
+
+// A reference made of a pointer (`&*(data + i)`, the iterator's `next`) is never null: a sum over a
+// `Vector`'s `iter()` tests no `Option` of it, and vectorizes.
+@test
+fn a_sum_over_a_vectors_iterator_vectorizes() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "@noinline\nfn total(v: &Vector<u32>) u32 {\n    let mut s: u32 = 0;\n    for x in v.iter() {\n        s = s.wrapping_add(*x);\n    }\n    return s;\n}\n\nfn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(3);\n    return total(&v) as i32;\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "total", "build -O2 main.spc -o app");
+    let ok = r.ok() && r.out_has("fn @") && r.out_has("add.v4i32") && !r.out_has("ptrtoint");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "a vector sum, no null test");
 }
 
 // A loop that reads `s[n - 1 - k]` with its check hoisted vectorizes: each vector loads the elements below
@@ -16958,4 +17663,326 @@ b2:
     }
     let drv = "#include <stdint.h>\nint64_t f(int64_t);\nstatic int slowed;\nvoid slow(void) { slowed = 1; }\nint64_t g(int64_t x) { return x + 3; }\nint main(void) {\n  if (f(4) != 7 || slowed) return 1;\n  if (f(0) != 3 || !slowed) return 2;\n  return 0;\n}\n";
     assert_eq(run_native_with(src, drv, TAIL), 0);
+}
+
+// More 16-byte vectors live at once than v registers (34 loads, each read by a bitcast after all of them):
+// a spilled one reloads into a v register for its bitcast (`Gen::reg`), not into a general register.
+@test
+fn a_spilled_vector_reloads_into_a_vector_register() {
+    let lir = "lir ptr 8\nsym @spilled fn global\nfn @spilled\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n  v2 = load.v4i32 v0+0 align 2\n  v3 = load.v4i32 v0+16 align 2\n  v4 = load.v4i32 v0+32 align 2\n  v5 = load.v4i32 v0+48 align 2\n  v6 = load.v4i32 v0+64 align 2\n  v7 = load.v4i32 v0+80 align 2\n  v8 = load.v4i32 v0+96 align 2\n  v9 = load.v4i32 v0+112 align 2\n  v10 = load.v4i32 v0+128 align 2\n  v11 = load.v4i32 v0+144 align 2\n  v12 = load.v4i32 v0+160 align 2\n  v13 = load.v4i32 v0+176 align 2\n  v14 = load.v4i32 v0+192 align 2\n  v15 = load.v4i32 v0+208 align 2\n  v16 = load.v4i32 v0+224 align 2\n  v17 = load.v4i32 v0+240 align 2\n  v18 = load.v4i32 v0+256 align 2\n  v19 = load.v4i32 v0+272 align 2\n  v20 = load.v4i32 v0+288 align 2\n  v21 = load.v4i32 v0+304 align 2\n  v22 = load.v4i32 v0+320 align 2\n  v23 = load.v4i32 v0+336 align 2\n  v24 = load.v4i32 v0+352 align 2\n  v25 = load.v4i32 v0+368 align 2\n  v26 = load.v4i32 v0+384 align 2\n  v27 = load.v4i32 v0+400 align 2\n  v28 = load.v4i32 v0+416 align 2\n  v29 = load.v4i32 v0+432 align 2\n  v30 = load.v4i32 v0+448 align 2\n  v31 = load.v4i32 v0+464 align 2\n  v32 = load.v4i32 v0+480 align 2\n  v33 = load.v4i32 v0+496 align 2\n  v34 = load.v4i32 v0+512 align 2\n  v35 = load.v4i32 v0+528 align 2\n  v36 = bitcast.v8i16 v2\n  v37 = bitcast.v8i16 v3\n  v38 = bitcast.v8i16 v4\n  v39 = bitcast.v8i16 v5\n  v40 = bitcast.v8i16 v6\n  v41 = bitcast.v8i16 v7\n  v42 = bitcast.v8i16 v8\n  v43 = bitcast.v8i16 v9\n  v44 = bitcast.v8i16 v10\n  v45 = bitcast.v8i16 v11\n  v46 = bitcast.v8i16 v12\n  v47 = bitcast.v8i16 v13\n  v48 = bitcast.v8i16 v14\n  v49 = bitcast.v8i16 v15\n  v50 = bitcast.v8i16 v16\n  v51 = bitcast.v8i16 v17\n  v52 = bitcast.v8i16 v18\n  v53 = bitcast.v8i16 v19\n  v54 = bitcast.v8i16 v20\n  v55 = bitcast.v8i16 v21\n  v56 = bitcast.v8i16 v22\n  v57 = bitcast.v8i16 v23\n  v58 = bitcast.v8i16 v24\n  v59 = bitcast.v8i16 v25\n  v60 = bitcast.v8i16 v26\n  v61 = bitcast.v8i16 v27\n  v62 = bitcast.v8i16 v28\n  v63 = bitcast.v8i16 v29\n  v64 = bitcast.v8i16 v30\n  v65 = bitcast.v8i16 v31\n  v66 = bitcast.v8i16 v32\n  v67 = bitcast.v8i16 v33\n  v68 = bitcast.v8i16 v34\n  v69 = bitcast.v8i16 v35\n  v70 = add.v8i16 v36, v37\n  v71 = add.v8i16 v70, v38\n  v72 = add.v8i16 v71, v39\n  v73 = add.v8i16 v72, v40\n  v74 = add.v8i16 v73, v41\n  v75 = add.v8i16 v74, v42\n  v76 = add.v8i16 v75, v43\n  v77 = add.v8i16 v76, v44\n  v78 = add.v8i16 v77, v45\n  v79 = add.v8i16 v78, v46\n  v80 = add.v8i16 v79, v47\n  v81 = add.v8i16 v80, v48\n  v82 = add.v8i16 v81, v49\n  v83 = add.v8i16 v82, v50\n  v84 = add.v8i16 v83, v51\n  v85 = add.v8i16 v84, v52\n  v86 = add.v8i16 v85, v53\n  v87 = add.v8i16 v86, v54\n  v88 = add.v8i16 v87, v55\n  v89 = add.v8i16 v88, v56\n  v90 = add.v8i16 v89, v57\n  v91 = add.v8i16 v90, v58\n  v92 = add.v8i16 v91, v59\n  v93 = add.v8i16 v92, v60\n  v94 = add.v8i16 v93, v61\n  v95 = add.v8i16 v94, v62\n  v96 = add.v8i16 v95, v63\n  v97 = add.v8i16 v96, v64\n  v98 = add.v8i16 v97, v65\n  v99 = add.v8i16 v98, v66\n  v100 = add.v8i16 v99, v67\n  v101 = add.v8i16 v100, v68\n  v102 = add.v8i16 v101, v69\n  store v102, v1 align 1\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid spilled(const int32_t *, int16_t *);\nint main(void) {\n  int32_t a[136];\n  int16_t got[8], want[8] = {0};\n  for (int k = 0; k < 136; k++) a[k] = k * 2654435761u;\n  for (int k = 0; k < 34; k++) for (int j = 0; j < 8; j++) want[j] = (int16_t)(want[j] + ((const int16_t *)&a[4 * k])[j]);\n  spilled(a, got);\n  for (int j = 0; j < 8; j++) if (got[j] != want[j]) return 1 + j;\n  return 0;\n}\n";
+    // The other generators compile it too (the object alone).
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    obj.clear();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// x86-64 with AVX: a bit cast of a 32-byte vector whose operand stays live copies all 32 bytes
+// (`vmovaps ymm`, VEX.256 0F 28), not the low 16 of the legacy `movaps` (0F 28, a register ModRM), which
+// left the upper lanes of `x | y` stale in `x == y ? x | y : y` (std's `f32::minimum`).
+@test
+fn a_bit_cast_of_a_32_byte_vector_copies_every_lane() {
+    let lir = M"(lir ptr 8
+sym @eqor fn global
+fn @eqor
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 2
+  v3 = load.v8f32 v1 align 2
+  v4 = bitcast.v8i32 v2
+  v5 = bitcast.v8i32 v3
+  v6 = or.v8i32 v4, v5
+  v7 = bitcast.v8f32 v6
+  v8 = vcmp.oeq.v8i32 v2, v3
+  v9 = vsel.v8f32 v8, v7, v3
+  store v9, v0 align 2
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the object",
+    );
+    let mut legacy = false;
+    for at in 0..obj.len() - 3 {
+        legacy = legacy || obj[at] == 0x0F && obj[at + 1] == 0x28 && obj[at + 2] >= 0xC0;
+    }
+    assert(!legacy, "no 16-byte register copy");
+}
+
+// Whether `obj` holds a 4-byte little-endian word `w` with `w & mask == want`.
+fn holds_word(obj: &Vector<u8>, mask: u32, want: u32) bool {
+    let mut k: usize = 0;
+    while k + 4 <= obj.len() {
+        let w = obj[k] as u32 | obj[k + 1] as u32 << 8 | obj[k + 2] as u32 << 16 | obj[k + 3] as u32 << 24;
+        if (w & mask) == want {
+            return true;
+        }
+        k += 4;
+    }
+    return false;
+}
+
+// The lanes of two vectors in a row from a lane of the first (`lv::lane_slide`, a recurrence's vectors): in
+// registers, arm64's EXT (of 16 and of 8 bytes, no lane load or store), x86-64's PSLLDQ, PSRLDQ and POR
+// (PALIGNR with SSE4.1); each lane as the driver computes it.
+@test
+fn vectors_in_a_row_from_a_lane_slide_in_registers() {
+    let lir = M"(lir ptr 8
+sym @slide fn global
+fn @slide
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v4i32 v1 align 2
+  v4 = load.v4i32 v2 align 2
+  v5 = vop.shuffle.v4i32 (v3, v4) lanes [3, 4, 5, 6]
+  store v5, v0 align 2
+  v6 = load.v8i16 v1 align 1
+  v7 = load.v8i16 v2 align 1
+  v8 = vop.shuffle.v8i16 (v6, v7) lanes [1, 2, 3, 4, 5, 6, 7, 8]
+  store v8, v0+16 align 1
+  v9 = load.v2i32 v1 align 2
+  v10 = load.v2i32 v2 align 2
+  v11 = vop.shuffle.v2i32 (v9, v10) lanes [1, 2]
+  store v11, v0+32 align 2
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid slide(uint8_t *, const uint8_t *, const uint8_t *);\nint main(void) {\n  uint8_t a[16], b[16], out[40], want[40];\n  for (int k = 0; k < 16; k++) { a[k] = (uint8_t)(k + 1); b[k] = (uint8_t)(101 + k); }\n  uint8_t ab[32];\n  memcpy(ab, a, 16); memcpy(ab + 16, b, 16);\n  memcpy(want, ab + 12, 16);\n  memcpy(want + 16, ab + 2, 16);\n  uint8_t c[16];\n  memcpy(c, a, 8); memcpy(c + 8, b, 8);\n  memcpy(want + 32, c + 4, 8);\n  slide(out, a, b);\n  for (int k = 0; k < 40; k++) if (out[k] != want[k]) return 1 + k;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // EXT Vd.16B, Vn.16B, Vm.16B, #12 and Vd.8B, .., #4.
+    assert(holds_word(&obj, 0xFFE0FC00, 0x6E006000) && holds_word(&obj, 0xFFE0FC00, 0x2E002000), "EXT");
+    obj.clear();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    // The byte shifts (0F 73) and POR (0F EB).
+    let shift: [u8; 2] = [0x0F, 0x73];
+    let por: [u8; 2] = [0x0F, 0xEB];
+    assert(holds(&obj, shift[0..2]) && holds(&obj, por[0..2]), "PSRLDQ, PSLLDQ, POR");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Shuffles of three vectors by constant lanes (`lir::loops`' groups of every third element) and of two
+// beyond a slide or a reversal: in registers, arm64's TBL and TBX of index tables, x86-64's PSHUFB and POR,
+// wasm32's two `i8x16.shuffle`; each lane as the driver computes it.
+@test
+fn shuffles_of_three_vectors_in_registers() {
+    let lir = M"(lir ptr 8
+sym @perm fn global
+fn @perm
+  sig (ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.v16i8 v1 align 0
+  v5 = load.v16i8 v2 align 0
+  v6 = load.v16i8 v3 align 0
+  v7 = vop.shuffle.v16i8 (v4, v5, v6) lanes [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45]
+  store v7, v0 align 0
+  v8 = vop.shuffle.v16i8 (v4, v5, v6) lanes [21, 37, 6, 22, 38, 7, 23, 39, 8, 24, 40, 9, 25, 41, 10, 26]
+  store v8, v0+16 align 0
+  v9 = load.v4i32 v1 align 0
+  v10 = load.v4i32 v2 align 0
+  v11 = load.v4i32 v3 align 0
+  v12 = vop.shuffle.v4i32 (v9, v10, v11) lanes [1, 4, 7, 10]
+  store v12, v0+32 align 0
+  v13 = load.v8i8 v1 align 0
+  v14 = load.v8i8 v2 align 0
+  v15 = load.v8i8 v3 align 0
+  v16 = vop.shuffle.v8i8 (v13, v14, v15) lanes [2, 5, 8, 11, 14, 17, 20, 23]
+  store v16, v0+48 align 0
+  v17 = load.v8i16 v1 align 0
+  v18 = load.v8i16 v2 align 0
+  v19 = vop.shuffle.v8i16 (v17, v18) lanes [0, 8, 1, 9, 2, 10, 3, 11]
+  store v19, v0+56 align 0
+  ret
+)";
+    let drv = M"(#include <stdint.h>
+void perm(uint8_t *, const uint8_t *, const uint8_t *, const uint8_t *);
+/* Lane k of `want + at` is lane idx[k] of the vectors of `nb` bytes at a, b and c in a row. */
+static void model(uint8_t *want, int at, const uint8_t *const v[3], int nb, int eb, const int *idx, int cnt) {
+  int n = nb / eb;
+  for (int k = 0; k < cnt; k++) for (int y = 0; y < eb; y++) want[at + k * eb + y] = v[idx[k] / n][idx[k] % n * eb + y];
+}
+int main(void) {
+  uint8_t a[16], b[16], c[16], out[72], want[72];
+  for (int k = 0; k < 16; k++) { a[k] = (uint8_t)(k + 1); b[k] = (uint8_t)(101 + k); c[k] = (uint8_t)(201 + k); }
+  const uint8_t *const v[3] = {a, b, c};
+  static const int e3[16] = {0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45};
+  static const int z1[16] = {21, 37, 6, 22, 38, 7, 23, 39, 8, 24, 40, 9, 25, 41, 10, 26};
+  static const int w4[4] = {1, 4, 7, 10};
+  static const int b8[8] = {2, 5, 8, 11, 14, 17, 20, 23};
+  static const int t2[8] = {0, 8, 1, 9, 2, 10, 3, 11};
+  model(want, 0, v, 16, 1, e3, 16);
+  model(want, 16, v, 16, 1, z1, 16);
+  model(want, 32, v, 16, 4, w4, 4);
+  model(want, 48, v, 8, 1, b8, 8);
+  model(want, 56, v, 16, 2, t2, 8);
+  perm(out, a, b, c);
+  for (int k = 0; k < 72; k++) if (out[k] != want[k]) return 1 + k;
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the arm64 object",
+    );
+    // TBL Vd.16B, {Vn.16B}, Vm.16B and TBX of 16 and of 8 bytes.
+    assert(holds_word(&obj, 0xFFE0FC00, 0x4E000000) && holds_word(&obj, 0xFFE0FC00, 0x4E001000), "TBL, TBX");
+    assert(holds_word(&obj, 0xFFE0FC00, 0x0E001000), "TBX of 8 bytes");
+    obj.clear();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    // PSHUFB (66 0F 38 00) and POR (0F EB).
+    let pshufb: [u8; 3] = [0x0F, 0x38, 0x00];
+    let por: [u8; 2] = [0x0F, 0xEB];
+    assert(holds(&obj, pshufb[0..3]) && holds(&obj, por[0..2]), "PSHUFB, POR");
+    obj.clear();
+    let w = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&w, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // `i8x16.shuffle` (FD 0D), no lane loads: `i8x16.extract_lane_u` (FD 16) absent.
+    let shuf: [u8; 2] = [0xFD, 0x0D];
+    let ext: [u8; 2] = [0xFD, 0x16];
+    assert(holds(&obj, shuf[0..2]) && !holds(&obj, ext[0..2]), "i8x16.shuffle");
+    assert_eq(run_wasm(lir, drv), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A loop's sum (`h = (h ^ a[k]) * K`, the parameter's register shared by its chain, `step_chain`) read past
+// the loop, beside more values kept across calls than registers: the chain's last value has its own register
+// or slot there, not the parameter's caller-saved one that a call's arguments write (x86-64).
+@test
+fn a_step_chain_read_past_its_loop_keeps_its_value() {
+    let lir = "lir ptr 8\nsym @chain fn global\nsym @g fn global noinline\nfn @g\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 3\n  v3 = mul.i64 v0, v2\n  v4 = add.i64 v3, v1\n  ret v4\nfn @chain\n  sig (ptr, i64, i64) -> i64\nb0(v0: ptr, v1: i64, v2: i64):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  v5 = iconst.i64 1099511628211\n  v6 = iconst.i64 50\n  v7 = iconst.i64 3\n  v8 = mul.i64 v2, v7\n  v9 = iconst.i64 5\n  v10 = mul.i64 v2, v9\n  v11 = iconst.i64 7\n  v12 = mul.i64 v2, v11\n  v13 = iconst.i64 9\n  v14 = mul.i64 v2, v13\n  v15 = iconst.i64 11\n  v16 = mul.i64 v2, v15\n  v17 = iconst.i64 13\n  v18 = mul.i64 v2, v17\n  v19 = iconst.i64 15\n  v20 = mul.i64 v2, v19\n  v21 = iconst.i64 17\n  v22 = mul.i64 v2, v21\n  v23 = iconst.i64 19\n  v24 = mul.i64 v2, v23\n  v25 = iconst.i64 21\n  v26 = mul.i64 v2, v25\n  v27 = iconst.i64 23\n  v28 = mul.i64 v2, v27\n  v29 = iconst.i64 25\n  v30 = mul.i64 v2, v29\n  jmp b1(v2, v3, v3, v3, v3, v3, v3, v3, v3, v3, v3)\nb1(v31: i64, v32: i64, v33: i64, v34: i64, v35: i64, v36: i64, v37: i64, v38: i64, v39: i64, v40: i64, v41: i64):\n  v42 = icmp.uge v32, v1\n  br v42, b4, b2\nb2:\n  v43 = ptradd v0, v32 * 8\n  v44 = load.i64 v43 align 3\n  v45 = xor.i64 v31, v44\n  v46 = mul.i64 v45, v5\n  v47 = add.i64 v34, v8\n  v48 = add.i64 v35, v10\n  v49 = add.i64 v36, v12\n  v50 = add.i64 v37, v14\n  v51 = add.i64 v38, v16\n  v52 = add.i64 v39, v18\n  v53 = add.i64 v40, v20\n  v54 = add.i64 v41, v22\n  v55 = add.i64 v32, v4\n  v56 = icmp.ult v55, v6\n  br v56, b1(v46, v55, v33, v47, v48, v49, v50, v51, v52, v53, v54), b3\nb3:\n  v57 = call.i64 @g(v1, v2) : (i64, i64) -> i64\n  v58 = xor.i64 v57, v8\n  v59 = xor.i64 v58, v10\n  v60 = xor.i64 v59, v12\n  v61 = xor.i64 v60, v14\n  v62 = xor.i64 v61, v16\n  v63 = xor.i64 v62, v18\n  v64 = xor.i64 v63, v20\n  v65 = xor.i64 v64, v22\n  v66 = xor.i64 v65, v24\n  v67 = xor.i64 v66, v26\n  v68 = xor.i64 v67, v28\n  v69 = xor.i64 v68, v30\n  v70 = call.i64 @g(v69, v46) : (i64, i64) -> i64\n  v71 = add.i64 v70, v8\n  v72 = add.i64 v71, v10\n  v73 = add.i64 v72, v12\n  v74 = add.i64 v73, v14\n  v75 = add.i64 v74, v16\n  v76 = add.i64 v75, v18\n  v77 = add.i64 v76, v20\n  v78 = add.i64 v77, v22\n  v79 = add.i64 v78, v24\n  v80 = add.i64 v79, v26\n  v81 = add.i64 v80, v28\n  v82 = add.i64 v81, v30\n  v83 = xor.i64 v82, v46\n  v84 = add.i64 v83, v55\n  v85 = xor.i64 v84, v47\n  v86 = xor.i64 v85, v48\n  v87 = xor.i64 v86, v49\n  v88 = xor.i64 v87, v50\n  v89 = xor.i64 v88, v51\n  v90 = xor.i64 v89, v52\n  v91 = xor.i64 v90, v53\n  v92 = xor.i64 v91, v54\n  ret v92\nb4:\n  v93 = iconst.i64 -1\n  ret v93\n";
+    let drv = "#include <stdint.h>\nint64_t chain(const uint64_t *, int64_t, int64_t);\nstatic uint64_t model(const uint64_t *a, uint64_t len, uint64_t s) {\n  uint64_t p[12]; p[0] = s * 3ULL; p[1] = s * 5ULL; p[2] = s * 7ULL; p[3] = s * 9ULL; p[4] = s * 11ULL; p[5] = s * 13ULL; p[6] = s * 15ULL; p[7] = s * 17ULL; p[8] = s * 19ULL; p[9] = s * 21ULL; p[10] = s * 23ULL; p[11] = s * 25ULL;\n  uint64_t h = s, q = 0, sa[8] = {0};\n  for (uint64_t k = 0; k < 50; k++) { if (k >= len) return (uint64_t)-1; h = (h ^ a[k]) * 1099511628211ULL; for (int j = 0; j < 8; j++) sa[j] += p[j % 12]; }\n  q = 50;\n  uint64_t x = len * 3 + s;\n  for (int k = 0; k < 12; k++) x ^= p[k];\n  uint64_t y = x * 3 + h;\n  for (int k = 0; k < 12; k++) y += p[k];\n  uint64_t r = (y ^ h) + q;\n  for (int j = 0; j < 8; j++) r ^= sa[j];\n  return r;\n}\nint main(void) {\n  uint64_t a[64];\n  for (int k = 0; k < 64; k++) a[k] = (uint64_t)k * 2654435761u;\n  for (int64_t s = 0; s < 4; s++) if ((uint64_t)chain(a, 64, s) != model(a, 64, s)) return 1 + (int)s;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Whether `obj` holds a 256-bit VEX instruction of map 0F3A with prefix 66 (C4, map 3, L 1, pp 01), opcode
+// `op`, of registers (ModRM mod 3) and immediate `imm`.
+fn holds_vex3(obj: &Vector<u8>, op: u8, imm: u8) bool {
+    for i in 0..obj.len() - 5 {
+        if obj[i] == 0xC4 && (obj[i + 1] & 0x1F) == 3 && (obj[i + 2] & 0x07) == 0x05 && obj[i + 3] == op && obj[i + 4] >= 0xC0 && obj[i + 5] == imm {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The lanes of two 32-byte vectors in a row (`lv::lane_slide`) stay in ymm registers under AVX2: VPERM2I128
+// puts the first's high half below the second's low half, VPALIGNR takes each half's bytes from those and
+// the first's (from byte 6 or 16) or the second's (from byte 28).
+@test
+fn vectors_in_a_row_from_a_32_byte_lane_slide_in_registers() {
+    let lir = M"(lir ptr 8
+sym @slide fn global
+fn @slide
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8i32 v1 align 2
+  v4 = load.v8i32 v2 align 2
+  v5 = vop.shuffle.v8i32 (v3, v4) lanes [7, 8, 9, 10, 11, 12, 13, 14]
+  store v5, v0 align 2
+  v6 = vop.shuffle.v8i32 (v3, v4) lanes [4, 5, 6, 7, 8, 9, 10, 11]
+  store v6, v0+32 align 2
+  v7 = load.v16i16 v1 align 1
+  v8 = load.v16i16 v2 align 1
+  v9 = vop.shuffle.v16i16 (v7, v8) lanes [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+  store v9, v0+64 align 1
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\nvoid slide(uint8_t *, const uint8_t *, const uint8_t *);\nint main(void) {\n  uint8_t a[32], b[32], ab[64], out[96], want[96];\n  for (int k = 0; k < 32; k++) { a[k] = (uint8_t)(k + 1); b[k] = (uint8_t)(101 + k); }\n  memcpy(ab, a, 32); memcpy(ab + 32, b, 32);\n  memcpy(want, ab + 28, 32);\n  memcpy(want + 32, ab + 16, 32);\n  memcpy(want + 64, ab + 6, 32);\n  slide(out, a, b);\n  for (int k = 0; k < 96; k++) if (out[k] != want[k]) return 1 + k;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the x86-64 object",
+    );
+    assert(holds_vex3(&obj, 0x46, 0x21), "VPERM2I128");
+    assert(holds_vex3(&obj, 0x0F, 12) && holds_vex3(&obj, 0x0F, 16) && holds_vex3(&obj, 0x0F, 6), "VPALIGNR");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_wide(lir, drv), 0);
+}
+
+// A branch to a block whose parameters share registers with a loop's (`b4` passes them back to `b1`, `b2`
+// passes it `v8`) moves before the branch only when the other path reads none of those registers: the
+// other path of `b3` (`b5`, laid out after `b4`) reads the loop's `v8`, so the move of 1 into `v15` waits
+// for the branch (`early_moves`).
+@test
+fn moves_into_a_merge_keep_the_other_paths_values() {
+    let lir = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 5
+  v4 = iconst.i64 7
+  v5 = iconst.i64 3
+  jmp b1(v1, v1, v4)
+b1(v6: i64, v7: i64, v8: i64):
+  v9 = icmp.ult v6, v0
+  br v9, b2, b6
+b2:
+  v10 = and.i64 v6, v5
+  v11 = icmp.ne v10, v5
+  br v11, b3, b4(v7, v8)
+b3:
+  v12 = and.i64 v6, v2
+  v13 = icmp.eq v12, v1
+  br v13, b5, b4(v7, v2)
+b4(v14: i64, v15: i64):
+  v16 = add.i64 v6, v2
+  jmp b1(v16, v14, v15)
+b5:
+  v17 = mul.i64 v7, v3
+  v18 = add.i64 v17, v8
+  v19 = add.i64 v6, v2
+  jmp b1(v19, v18, v8)
+b6:
+  v20 = mul.i64 v7, v3
+  v21 = add.i64 v20, v8
+  ret v21
+)";
+    let drv = "#include <stdint.h>\nint64_t f(int64_t);\nstatic int64_t g(int64_t n) {\n  int64_t x = 0, y = 7;\n  for (int64_t i = 0; i < n; i++) {\n    if ((i & 3) == 3) { } else if (i & 1) { y = 1; } else { x = x * 5 + y; }\n  }\n  return x * 5 + y;\n}\nint main(void) {\n  for (int64_t n = 0; n < 40; n++) if (f(n) != g(n)) return 1 + (int)n;\n  return 0;\n}\n";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
 }

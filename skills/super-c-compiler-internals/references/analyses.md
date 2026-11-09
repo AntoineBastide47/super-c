@@ -68,7 +68,7 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Per instruction, its readers up to 2, and whether an `or` reads it | `thread`'s walk over `ops`, or `Opt::readers` (from `ops`) where the walk first reads them | `Opt` (`icount`, `in_or`; `counted`) | the next `operands` or `splice_ops` |
 | Dominator tree and its pre/post numbers | `Opt::dominators` | `Opt` (`dpre`, `dpost`) | `K_DOM`: any change |
 | Loop nesting, preheaders, loop blocks in block order | `Opt::nest` | `Opt` (`inner`, `lparent`, `preh`, `lb_at`, `lbs`) | `K_NEST`: any change |
-| Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them) | `K_MEM`: any change |
+| Private slots and the slot each address derives, alias classes and their scope roots' bases, slot escapes, frozen memory, per-block and per-loop writes and tags | `Opt::memory` (`privates`, `classes`, `slot_escapes`, `root_bases`, `frozen`, `bw`, `bt`, `bpw`, `bst`) | `Opt` (`pder`, which `slot_escapes` and `slot_apart` read through `der_slot`; `cbase` among them; per scope class its roots' base value `sroot` and `smulti`) | `K_MEM`: any change |
 | The parameter offsets of pointer loads, the owned fields' classes, the scopes' roots | `Opt::owned_seeds`, `scope_seeds` (in `Opt::memory`) | `Opt` (`okeys`, `obits`, `sroots`) | `K_MEM`: any change |
 | Slot base, offset, escape; per write the copy it is (`SlotWrite.copy`) | `Opt::slot_writes` | `Opt` | `K_SLOTS`: any change |
 | Slots an instruction still addresses | `Opt::rebuild`, `emit` | `Opt.sused` | the next rebuild |
@@ -83,6 +83,7 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Loop counter, trip count, exit test | `LoopOpt::counted_by`, `trip`, `cf_test` (`lir::loops`) | `LoopOpt`, per loop | the loop's transform |
 | The bounds checks a versioned loop drops and their count (a check against the lesser of two lengths counts two) | `LoopOpt::checks` | `LoopOpt` (`gchecks`, `cap_len`, `cap_v`) | the loop's transform |
 | Header counts and shape test of a loop | `LoopOpt::header_counts` | caller | the loop's transform |
+| Per candidate loop, the blocks that read its values | `LoopOpt::close_index` (one walk of the body), `close_scan` | `LoopOpt` (`xs_at`, `xs`, `xdone`, `xof`) | the loop's transform |
 | Closed form's leaving values and their targets | `LoopOpt::close_plan` (no change), then `close_apply` | `LoopOpt` (`lout`, `tgt_of`, `tused`, `cf_leave`) | `close_apply` |
 | Promotion candidates, the slots addresses derive (`collect`, for `merges` too) | `Promoter::collect`, `Promoter::merges` (`lir::promote`; graph and operand lists from `Opt`) | `Promoter` | the promotion |
 | SLP predecessor tables | `Slp::plan` (`lir::slp`; block map and use counts from `Opt`'s `blk_of`, `pblock`, `ops`) | `Slp` | the packing |
@@ -99,6 +100,7 @@ above. Recompute a fact only after a change that the "Valid until" column names.
 | Block layout, live ranges, last uses, folded use lists (CSR) | `Live::relayout` (`layout`, `ranges`; `uses_of`) | `Live` (`pos`, `end`, `ua`, `un`, `uv`) | a change of the layout (`after`) |
 | Rare blocks | `Live::rare_blocks` (none under `Live::in_place`: wasm) | `Live` | end of the function; the optimizer's `BLOCK_RARE` holds the same fact only when `lir_opt` ran |
 | Next use of each folded operand | `Live::ranges`, reverse walk of the existing operand CSR; `Live::advance` consumes it | `Live.next`, `use_next`; native eviction scoring reads `next` | layout change; cursors advance once per instruction |
+| Per block, the first layout position of a block it reaches | `Live::reach_min` (for `entry_partner`) | `Live.ep_min` (`ep_min_ok`) | a change of the layout |
 | Register home classes and prefix cuts | `Live::plan`; safe cuts reuse `pat`, `preds`, `pos` | `Live.home`, `cut`, sorted `splits`; native `home_at` and `save_splits` consume them | next home plan or layout change |
 | Operand list of one instruction (edge arguments included) | `live::each_use` (over `lir::verify::uses_edges`, which the LIR passes call too); folded: `Live::uses_of` | caller's vector; `Live` | per call |
 | Special operations of the body | `lv::op_flags` | `Gen.opf` | end of the function, retries included |

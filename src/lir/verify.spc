@@ -354,6 +354,20 @@ extend Verifier {
                 "an integer vector of the result's type and one of its bytes in narrower lanes",
             );
         }
+        if op == O_VMULW {
+            let h = (t.aux & MULW_HIGH) != 0;
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && is_int(lane_type(t.ty)) && type_bytes(lane_type(t.ty), 8) >= 2 && is_vec(ta) && is_int(
+                    lane_type(ta),
+                ) && tb == ta && 2 * type_bytes(lane_type(ta), 8) == type_bytes(lane_type(t.ty), 8) && (lanes(ta) == 2 * lanes(
+                    t.ty,
+                ) || lanes(ta) == lanes(t.ty) && !h),
+                "two integer vectors of one type, of lanes half the result's width, as many as its lanes or twice as many (with `.hi`, twice)",
+            );
+        }
         if op == O_VEXTRACT {
             return self.need(
                 name,
@@ -496,8 +510,14 @@ extend Verifier {
         }
         if op == O_LOAD || op == O_STORE {
             let vt = ast::pick(op == O_LOAD, t.ty, tb);
-            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | MEM_BOOL | MEM_RANGE | 15)) != 0 {
+            if ta != T_PTR || vt == T_NONE || op == O_STORE && t.ty != T_NONE || (t.aux & ~(MEM_VOLATILE | MEM_TBAA | MEM_BOOL | MEM_RANGE | MEM_BLOCK | 15)) != 0 {
                 return self.fail_at(name, b, i, "a pointer address and a typed value");
+            }
+            if (t.aux & MEM_BLOCK) != 0 && (op != O_LOAD || !is_vec(vt) || 1u32 << (t.aux & 15) as u32 != type_bytes(
+                vt,
+                8,
+            )) {
+                return self.fail_at(name, b, i, "a block load of a vector aligned to its bytes");
             }
             if (t.aux & MEM_BOOL) != 0 && (op != O_LOAD || vt != T_I8) {
                 return self.fail_at(name, b, i, "a bool load of an i8");

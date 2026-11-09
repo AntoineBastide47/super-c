@@ -271,11 +271,13 @@ extend Wide {
     }
 
     // Conversion `t` by parts: of a vector and a result of one width part by part; an integer of a
-    // register (or half of one, extended in its register first) to a power of 2 times its width, by levels
-    // that double the lanes' width: each vector's low and high lanes interleaved (`vziplo`, `vziphi`) with
-    // zeros or with their signs (a lane comparison with 0; a lane mask with itself), which as the wider lanes are the extended
-    // values, the last level's vectors the parts; an integer of two parts to half its width in a register, the even
-    // narrower lanes of the parts (`vunzip`), which are the wider lanes' low halves. Whether it applied.
+    // register (or half of one, extended in its register first) or of parts to a power of 2 times its
+    // width, by levels that double the lanes' width: each vector's low and high lanes interleaved
+    // (`vziplo`, `vziphi`) with zeros or with their signs (a lane comparison with 0; a lane mask with
+    // itself), which as the wider lanes are the extended values, the last level's vectors the parts; an
+    // integer of parts to half its width, in a register or in parts, each pair of parts the even narrower
+    // lanes of the two (`vunzip`), which are the wider lanes' low halves; f32 lanes of a register or of parts
+    // to f64 by halves. Whether it applied.
     fn conv_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
         let ft = b.type_of(t.a);
@@ -296,19 +298,24 @@ extend Wide {
             self.at[i as usize] = first;
             return true;
         }
-        if (op == O_SEXT || op == O_ZEXT) && !ws && wd && (fb == self.rb || 2 * fb == self.rb) && tb > fb && (tb / fb).is_power_of_two() {
+        if (op == O_SEXT || op == O_ZEXT) && (ws || fb == self.rb || 2 * fb == self.rb) && wd && tb > fb && (tb / fb).is_power_of_two() {
             // A vector of half a register first extends in its register to lanes twice as wide; then each
             // vector of a level gives the next its low and high lanes extended (zipped with zeros or signs).
-            let mut s = self.whole(b, out, i, t.a);
+            let mut cur = Vector::<Value>::new();
             let mut st = ft;
-            if fb < self.rb {
-                st = vec_type(T_I8 + (2 * type_bytes(lane_type(ft), 8)).trailing_zeros() as u8, lanes(ft));
-                s = self.put(b, out, i, Inst { op: op, ty: st, aux: 0, a: s, b: VNONE, c: VNONE });
+            if ws {
+                self.parts_of(b, out, i, t.a);
+                cur.extend_copy(&self.tmp);
+            } else {
+                let mut s = self.whole(b, out, i, t.a);
+                if fb < self.rb {
+                    st = vec_type(T_I8 + (2 * type_bytes(lane_type(ft), 8)).trailing_zeros() as u8, lanes(ft));
+                    s = self.put(b, out, i, Inst { op: op, ty: st, aux: 0, a: s, b: VNONE, c: VNONE });
+                }
+                cur.push(s);
             }
             // A lane mask's lanes beside themselves are its sign extension.
             let mask = op == O_SEXT && lane_mask(b, t.a, 4);
-            let mut cur = Vector::<Value>::new();
-            cur.push(s);
             let mut lb = type_bytes(lane_type(st), 8);
             while lb < type_bytes(lane_type(t.ty), 8) {
                 let lt = vec_type(T_I8 + lb.trailing_zeros() as u8, self.rb / lb);
@@ -341,11 +348,55 @@ extend Wide {
             self.at[i as usize] = first;
             return true;
         }
-        if op == O_TRUNC && ws && !wd && tb == self.rb && fb == 2 * tb {
+        if op == O_FPEXT && wd && lane_type(ft) == T_F32 && (ws || fb == self.rb) {
+            // f32 lanes to f64 ones: each register of them, its low and high halves (`low_half`,
+            // `high_half`) extended, two parts.
+            let mut src = Vector::<Value>::new();
+            if ws {
+                self.parts_of(b, out, i, t.a);
+                src.extend_copy(&self.tmp);
+            } else {
+                src.push(self.whole(b, out, i, t.a));
+            }
+            let ht = vec_type(T_F32, self.rb / 8);
+            let pt = vec_type(T_F64, self.rb / 8);
+            for k in 0..src.len() {
+                for c in [core::SIMD_LOW_HALF, core::SIMD_HIGH_HALF] {
+                    let one = out.pool_list([src[k]]);
+                    let code = (core::OP_SIMD + c as u32) as u16;
+                    let h = self.put(b, out, i, Inst { op: O_VOP, ty: ht, aux: code, a: one, b: 1, c: VNONE });
+                    self.parts.push(self.put(b, out, i, Inst { op: O_FPEXT, ty: pt, aux: 0, a: h, b: VNONE, c: VNONE }));
+                }
+            }
+            self.at[i as usize] = first;
+            return true;
+        }
+        if op == O_TRUNC && ws && (wd || tb == self.rb) && fb == 2 * tb {
             self.parts_of(b, out, i, t.a);
-            let p0 = self.put(b, out, i, Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: self.tmp[0], b: VNONE, c: VNONE });
-            let p1 = self.put(b, out, i, Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: self.tmp[1], b: VNONE, c: VNONE });
-            self.val[i as usize] = self.put(b, out, i, Inst { op: O_VUNZIP, ty: t.ty, aux: 0, a: p0, b: p1, c: VNONE });
+            let pt = ast::pick(wd, self.part_type(t.ty), t.ty);
+            for k in 0..self.tmp.len() / 2 {
+                let p0 = self.put(
+                    b,
+                    out,
+                    i,
+                    Inst { op: O_BITCAST, ty: pt, aux: 0, a: self.tmp[2 * k], b: VNONE, c: VNONE },
+                );
+                let p1 = self.put(
+                    b,
+                    out,
+                    i,
+                    Inst { op: O_BITCAST, ty: pt, aux: 0, a: self.tmp[2 * k + 1], b: VNONE, c: VNONE },
+                );
+                let p = self.put(b, out, i, Inst { op: O_VUNZIP, ty: pt, aux: 0, a: p0, b: p1, c: VNONE });
+                if wd {
+                    self.parts.push(p);
+                } else {
+                    self.val[i as usize] = p;
+                }
+            }
+            if wd {
+                self.at[i as usize] = first;
+            }
             return true;
         }
         return false;
@@ -385,6 +436,30 @@ extend Wide {
             u.c = out.pool_list(&es);
         }
         self.val[i as usize] = self.put(b, out, i, u);
+    }
+
+    // Widening product `t` by parts: part `p` the products of the low (`p` even) or high half of the lanes of
+    // the operands' part `p / 2`, an operand of one register its one part. Whether it applied.
+    fn mulw_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
+        let ot = b.type_of(t.a);
+        if (t.aux & MULW_HIGH) != 0 || !self.splits(ot) && type_bytes(ot, 8) != self.rb {
+            return false;
+        }
+        let n = self.count(t.ty);
+        let pt = self.part_type(t.ty);
+        let mut xs = Vector::<Value>::with_capacity(n as usize);
+        let mut ys = Vector::<Value>::with_capacity(n as usize);
+        self.operand_parts(b, out, i, t.a, 1, &mut xs);
+        self.operand_parts(b, out, i, t.b, 1, &mut ys);
+        let first = self.parts.len() as u32;
+        for p in 0..n {
+            let q = (p / 2) as usize;
+            let aux = t.aux | ast::pick(p % 2 == 1, MULW_HIGH, 0u16);
+            let v = self.put(b, out, i, Inst { op: O_VMULW, ty: pt, aux: aux, a: xs[q], b: ys[q], c: VNONE });
+            self.parts.push(v);
+        }
+        self.at[i as usize] = first;
+        return true;
     }
 
     // Operand `v` of an operation by `n` parts into `ops`: its parts when wide, else itself `n` times.
@@ -433,6 +508,59 @@ extend Wide {
             }
             ops.push(pv);
         }
+    }
+
+    // A `shuffle` (instruction `i`) of two split vectors of its type that takes their lanes in a row from lane
+    // `s` (a recurrence's, `lir::loops`): part `j` the lanes in a row of the parts `j + s / p` and the next
+    // of the two's parts, `s % p` lanes in (`p` lanes a part), or that part itself. Whether it did.
+    fn slide_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
+        if (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b != 2 || t.c == VNONE || !self.splits(
+            t.ty,
+        ) {
+            return false;
+        }
+        let x = b.pool[t.a as usize];
+        let y = b.pool[(t.a + 1) as usize];
+        let n = lanes(t.ty);
+        if b.type_of(x) != t.ty || b.type_of(y) != t.ty || b.pool[t.c as usize] != n {
+            return false;
+        }
+        let s = b.pool[(t.c + 1) as usize];
+        if s > n {
+            return false;
+        }
+        for k in 0..n {
+            if b.pool[(t.c + 1 + k) as usize] != s + k {
+                return false;
+            }
+        }
+        let m = self.count(t.ty);
+        let pl = n / m;
+        let pt = self.part_type(t.ty);
+        let mut xs = Vector::<Value>::with_capacity(2 * m as usize);
+        self.parts_of(b, out, i, x);
+        xs.extend_copy(&self.tmp);
+        self.parts_of(b, out, i, y);
+        xs.extend_copy(&self.tmp);
+        let q = s / pl;
+        let r = s % pl;
+        let first = self.parts.len() as u32;
+        for j in 0..m {
+            let part = if r == 0 {
+                xs[(j + q) as usize]
+            } else {
+                let ix = out.pool.len() as u32;
+                out.pool.push(pl);
+                for k in 0..pl {
+                    out.pool.push(r + k);
+                }
+                let ops = out.pool_list([xs[(j + q) as usize], xs[(j + q + 1) as usize]]);
+                self.put(b, out, i, Inst { op: O_VOP, ty: pt, aux: t.aux, a: ops, b: 2, c: ix })
+            };
+            self.parts.push(part);
+        }
+        self.at[i as usize] = first;
+        return true;
     }
 
     // `vop` `t` (instruction `i`) by parts, when its lanes split and no lane traps: a lane rule, a shift by
@@ -684,7 +812,12 @@ extend Wide {
     fn by_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
         if op == O_VOP {
-            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(b, out, i, t);
+            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(b, out, i, t) || self.slide_parts(
+                b,
+                out,
+                i,
+                t,
+            );
         }
         if (op == O_AND || op == O_OR || op == O_XOR) && is_int(t.ty) {
             return self.mask_op(b, out, i, t);
@@ -754,6 +887,9 @@ extend Wide {
         }
         if op >= O_SEXT && op <= O_UITOFP && is_vec(t.ty) && (t.a & VFLAG) == 0 {
             return self.conv_parts(b, out, i, t);
+        }
+        if op == O_VMULW && self.splits(t.ty) {
+            return self.mulw_parts(b, out, i, t);
         }
         if !self.splits(t.ty) {
             return false;

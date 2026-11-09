@@ -88,9 +88,10 @@ pub(package) const FOLD_LDOP: u64 = 1048576;
 /// of a 32-byte one too (AVX2's `vpmovmskb`).
 pub(package) const FOLD_ANY: u64 = 2097152;
 pub(package) const FOLD_ANY_WIDE: u64 = 4194304;
-/// `FOLD_VMLA`: a product of integer vectors of 8 or 16 bytes, lanes below 8 bytes, with one use, the second
-/// operand of a sum or a difference or the first of a sum, folds into it (arm64's MLA and MLS); else a right
-/// shift by an immediate (`vshimm`) with one use, an operand of a sum, folds into it (USRA and SSRA).
+/// `FOLD_VMLA`: a product of integer vectors of 8 or 16 bytes, lanes below 8 bytes, or a widening product
+/// (`O_VMULW`) of 16 bytes, with one use, the second operand of a sum or a difference or the first of a sum,
+/// folds into it (arm64's MLA and MLS; SMLAL, UMLAL, SMLSL and UMLSL); else a right shift by an immediate
+/// (`vshimm`) with one use, an operand of a sum, folds into it (USRA and SSRA).
 pub(package) const FOLD_VMLA: u64 = 8388608;
 /// `FOLD_VSHIMM`: a vector shift by one constant below its integer lanes' width (`vec_shift_amount`) shifts
 /// by an immediate, and a splat or wide constant such shifts alone read as their amount folds into them:
@@ -109,7 +110,8 @@ pub(package) const FOLD_XADDR: u64 = 134217728;
 pub(package) const FOLD_BRCONJ: u64 = 268435456;
 /// `FOLD_VWADD`: a 16-byte integer vector `bitcast` of a `vziplo` or `vziphi` of a vector with zeros (its
 /// low or high half zero-extended to lanes twice as wide), each with one use, that a vector sum of the
-/// wide lanes adds: the sum widens and adds (arm64 `uaddw`, `uaddw2`).
+/// wide lanes adds: the sum widens and adds (arm64 `uaddw`, `uaddw2`). Not into a sum that accumulates a
+/// product or a shift (`FOLD_VMLA`), whose other operand is its accumulator.
 pub(package) const FOLD_VWADD: u64 = 536870912;
 /// `FOLD_TRUNC`: a truncation of an integer to 8 or 16 bits that only integer comparisons read folds into
 /// each: they extend or test its low bits in the source's register (arm64 `tst`, `uxtb`, `sxth`).
@@ -165,6 +167,12 @@ pub(package) const FOLD_VCMEM: u64 = 281474976710656;
 /// `FOLD_VMUL`: with `FOLD_VLDOP` and `FOLD_VCMEM`, a product of 32-bit lanes is such a lane operation
 /// (x86-64's SSE4.1 `pmulld x, [m]`).
 pub(package) const FOLD_VMUL: u64 = 562949953421312;
+/// `FOLD_ADDSUB`: a lane select of 16-byte float vectors by a constant of all ones in the even lanes alone
+/// (`addsub_parts`), of a difference `x - y` and a sum `x + y`, each with that one use: the two fold into
+/// it, which subtracts in the even lanes and adds in the odd ones (x86-64's SSE3 `addsubps`, `addsubpd`),
+/// and the mask when such selects alone read it. `FOLD_ADDSUB_WIDE`: of 32-byte ones too (AVX).
+pub(package) const FOLD_ADDSUB: u64 = 1125899906842624;
+pub(package) const FOLD_ADDSUB_WIDE: u64 = 2251799813685248;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -270,6 +278,10 @@ pub(package) struct Live {
     ep_gen: u32,
     ep_head: u32,
     ep_seen: Vector<bool>,
+    // Per block, the first layout position a block it reaches has (`reach_min`; NONE: none laid out), once
+    // `ep_min_ok`.
+    ep_min: Vector<u32>,
+    ep_min_ok: bool,
     wpos: Vector<u32>, // per block parameter, the last layout position of a block whose edge writes it, NONE: none
     wn: Vector<u32>, // per block parameter, how many edges write it
     pub(package) flag_of: Vector<u32>, // per instruction, the value index of its flag, NONE when none is used
@@ -418,6 +430,8 @@ extend Live {
             ep_gen: 0,
             ep_head: NONE,
             ep_seen: Vector::<bool>::new(),
+            ep_min: Vector::<u32>::new(),
+            ep_min_ok: false,
             jcap: Vector::<u32>::new(),
             jmin: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
@@ -1008,6 +1022,17 @@ extend Live {
             if (m & (VPARAM | VFLAG)) != 0 || m == VNONE || b.insts[m as usize].op != O_AND || self.count[m as usize] != 1 || self.pfold[m as usize] {
                 continue;
             }
+            // A mask that takes in an operand other than an extension or truncation (`shift_amount` reads past
+            // those; `FOLD_UBFX`: `(x >> 50) & 63` one field extract) computes it.
+            let z = b.insts[m as usize].a;
+            let zop = if is_inst(z) {
+                b.insts[z as usize].op
+            } else {
+                O_ZEXT
+            };
+            if is_inst(z) && self.pfold[z as usize] && zop != O_ZEXT && zop != O_SEXT && zop != O_TRUNC {
+                continue;
+            }
             let k = int_const(b, b.insts[m as usize].b);
             if k != u64::MAX && (k & (bits - 1) as u64) == (bits - 1) as u64 {
                 self.pfold[m as usize] = true;
@@ -1065,10 +1090,15 @@ extend Live {
                 self.cnd[t.a as usize] += 1;
             }
         }
-        self.scan_ops([O_ADD, O_SUB, O_AND, O_OR, O_XOR, O_VOP, O_SPLAT, O_FMUL, O_FADD, O_FSUB, O_FDIV, O_VSUMW]);
+        self.scan_ops(
+            [O_ADD, O_SUB, O_AND, O_OR, O_XOR, O_VOP, O_SPLAT, O_FMUL, O_FADD, O_FSUB, O_FDIV, O_VSUMW, O_VSEL],
+        );
+        // The masks of the selects `FOLD_ADDSUB` folds into, one entry a select.
+        let mut masks = Vector::<Value>::new();
         for q in 0..self.scan.len() {
             let i = self.scan[q] as usize;
             let t = b.insts[i];
+            let mut accumulates = false;
             if (self.fold_ops & FOLD_VMLA) != 0 && (t.op == O_ADD || t.op == O_SUB) && is_vec(t.ty) {
                 let mut p = self.vmla_mul(b, t);
                 if p == VNONE && t.op == O_ADD {
@@ -1076,6 +1106,7 @@ extend Live {
                 }
                 if p != VNONE {
                     self.pfold[p as usize] = true;
+                    accumulates = true;
                 }
             }
             if (self.fold_ops & FOLD_LANE) != 0 && t.op == O_SPLAT && is_inst(t.a) && b.insts[t.a as usize].op == O_VEXTRACT && self.count[t.a as usize] == 1 {
@@ -1110,13 +1141,21 @@ extend Live {
                     }
                 }
             }
+            if (self.fold_ops & FOLD_ADDSUB) != 0 && t.op == O_VSEL {
+                let (d, s) = self.addsub_parts(b, t);
+                if d != VNONE {
+                    self.pfold[d as usize] = true;
+                    self.pfold[s as usize] = true;
+                    masks.push(t.a);
+                }
+            }
             if (self.fold_ops & FOLD_VSAD) != 0 && t.op == O_VSUMW {
                 let p = self.vsad_diff(b, t);
                 if p != VNONE {
                     self.pfold[p as usize] = true;
                 }
             }
-            if (self.fold_ops & FOLD_VWADD) != 0 && t.op == O_ADD && is_vec(t.ty) {
+            if (self.fold_ops & FOLD_VWADD) != 0 && t.op == O_ADD && is_vec(t.ty) && !accumulates {
                 let p = self.vwadd_ext(b, t);
                 if p != VNONE {
                     self.pfold[p as usize] = true;
@@ -1259,6 +1298,19 @@ extend Live {
                     self.pfold[t.a as usize] = self.pfold[t.a as usize] || k + w <= bits as u64;
                 }
             }
+        }
+        // A mask those selects alone read folds too.
+        masks.sort();
+        let mut k: usize = 0;
+        while k < masks.len() {
+            let mut e = k + 1;
+            while e < masks.len() && masks[e] == masks[k] {
+                e += 1;
+            }
+            if (e - k) as u32 == self.count[masks[k] as usize] {
+                self.pfold[masks[k] as usize] = true;
+            }
+            k = e;
         }
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
@@ -2130,6 +2182,30 @@ extend Live {
         return true;
     }
 
+    /// Whether value index `x` of `b` is live into block `k`: read on a path from `k`'s entry that does not
+    /// pass its definition (`live_into` over its range, outside which it is dead).
+    pub(package) fn live_in(self: &Self, b: &Body, x: u32, k: u32) bool {
+        let d = self.def_blk[x as usize];
+        if d == NONE || d == k || self.pos[d as usize] == NONE || self.pos[k as usize] == NONE {
+            return false;
+        }
+        let lo = self.pos[d as usize];
+        let hi = self.end[x as usize];
+        let p = self.pos[k as usize];
+        if p < lo || p > hi {
+            return false;
+        }
+        let ni = b.insts.len() as u32;
+        let v = if x < ni {
+            x
+        } else {
+            VPARAM | x - ni
+        };
+        let mut out = Vector::<bool>::new();
+        self.live_into(b, v, d, lo, hi, &mut out);
+        return out[(p - lo) as usize];
+    }
+
     // Per layout position `lo..=hi` (the range of instruction `m` of block `d`) into `out`: whether `m` is
     // live into the block there, a backward fixpoint over the range's reads of `m` (it is dead outside the
     // range, and into `d`, which defines it).
@@ -2375,15 +2451,45 @@ extend Live {
         return is_int(ty) && ty != T_I128 || ty == T_PTR;
     }
 
+    // The difference and the sum `FOLD_ADDSUB` folds into lane select `t`: (VNONE, VNONE) when none.
+    pub(package) fn addsub_parts(self: &Self, b: &Body, t: Inst) (Value, Value) {
+        let nb = type_bytes(t.ty, 8);
+        if t.op != O_VSEL || !is_float(lane_type(t.ty)) || nb != 16 && (nb != 32 || (self.fold_ops & FOLD_ADDSUB_WIDE) == 0) || !is_inst(
+            t.a,
+        ) || !is_inst(t.b) || !is_inst(t.c) || self.count[t.b as usize] != 1 || self.count[t.c as usize] != 1 {
+            return (VNONE, VNONE);
+        }
+        let d = b.insts[t.b as usize];
+        let s = b.insts[t.c as usize];
+        let m = b.insts[t.a as usize];
+        if d.op != O_FSUB || s.op != O_FADD || d.a != s.a || d.b != s.b || d.ty != t.ty || s.ty != t.ty || m.op != O_WCONST || m.b != nb / 8 {
+            return (VNONE, VNONE);
+        }
+        // The mask's words: each pair of lanes the even one's bits, of 8-byte lanes every other word.
+        let eight = type_bytes(lane_type(t.ty), 8) == 8;
+        for q in 0..m.b {
+            let want = if eight {
+                ast::pick(q % 2 == 0, ~0u64, 0u64)
+            } else {
+                0x00000000FFFFFFFF
+            };
+            if b.words[(m.a + q) as usize] != want {
+                return (VNONE, VNONE);
+            }
+        }
+        return (t.b, t.c);
+    }
+
     // The product `FOLD_VMLA` folds into vector sum or difference `t`: its second operand, else (a sum) its
     // first. VNONE when none.
     pub(package) fn vmla_mul(self: &Self, b: &Body, t: Inst) Value {
         let lt = lane_type(t.ty);
         let nb = type_bytes(t.ty, 8);
-        if !is_int(lt) || type_bytes(lt, 8) >= 8 || nb != 8 && nb != 16 {
+        if !is_int(lt) || nb != 8 && nb != 16 {
             return VNONE;
         }
-        let ok = |v: Value| (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_MUL && b.insts[v as usize].ty == t.ty && self.count[v as usize] == 1;
+        let narrow = type_bytes(lt, 8) < 8;
+        let ok = |v: Value| (v & (VPARAM | VFLAG)) == 0 && v != VNONE && (b.insts[v as usize].op == O_MUL && narrow || b.insts[v as usize].op == O_VMULW && nb == 16) && b.insts[v as usize].ty == t.ty && self.count[v as usize] == 1;
         if ok(t.b) && t.b != t.a {
             return t.b;
         }
@@ -2952,6 +3058,7 @@ extend Live {
         fill(&mut self.ep_read, nv, 0);
         self.ep_gen = 0;
         self.ep_head = NONE;
+        self.ep_min_ok = false;
         fill(&mut self.wpos, n, NONE);
         fill(&mut self.wn, n, 0);
         for f in 0..nf as usize {
@@ -3793,12 +3900,45 @@ extend Live {
         if ty != b.params[(x - ni) as usize] || self.end[self.vix(b, y) as usize] >= self.pos[k as usize] {
             return NONE;
         }
-        // No block the header reaches reads `y` or passes it (`reads_from`, once per header).
+        // No block the header reaches reads `y` or passes it: none when every block it reaches lies past
+        // `y`'s last use (`ep_min`), else `reads_from`, once per header.
+        let yx = self.vix(b, y);
+        if !self.ep_min_ok {
+            self.reach_min(b);
+        }
+        if self.ep_min[k as usize] > self.end[yx as usize] {
+            return yx;
+        }
         if self.ep_head != k {
             self.reads_from(b, k);
         }
-        let yx = self.vix(b, y);
         return ast::pick(self.ep_read[yx as usize] == self.ep_gen, NONE, yx);
+    }
+
+    // `ep_min` for `b`: from each laid-out block in layout order, the blocks that reach it and no earlier
+    // one take its position, through the predecessors. Each block enters the walk once.
+    fn reach_min(self: &mut Self, b: &Body) {
+        self.ep_min_ok = true;
+        fill(&mut self.ep_min, b.blocks.len(), NONE);
+        for p in 0..self.order.len() {
+            let d = self.order[p];
+            if self.ep_min[d as usize] != NONE {
+                continue;
+            }
+            self.ep_min[d as usize] = p as u32;
+            self.stack.truncate(0);
+            self.stack.push(d);
+            while self.stack.len() != 0 {
+                let c = self.stack.pop().unwrap();
+                for j in self.pat[c as usize]..self.pat[c as usize + 1] {
+                    let a = self.preds[j as usize];
+                    if self.ep_min[a as usize] == NONE {
+                        self.ep_min[a as usize] = p as u32;
+                        self.stack.push(a);
+                    }
+                }
+            }
+        }
     }
 
     // `ep_read`: the values the blocks loop header `k` of `b` reaches read or pass (`uses_at`: edge
@@ -4862,6 +5002,33 @@ pub(package) fn lane_perm(b: &Body, t: Inst) u8 {
 pub(package) const PERM_REV8: u8 = 1;
 /// `lane_perm`: the two 8-byte halves swapped.
 pub(package) const PERM_SWAP8: u8 = 2;
+
+/// The bytes `t` of `b` slides by: a `shuffle` of constant indexes `s`, `s + 1`, .. of two operands of its
+/// type, a vector of 8, 16 or 32 bytes, which takes the lanes of the two in a row from lane `s` of the first
+/// (arm64's EXT, x86-64's PALIGNR); 0 for another shuffle or another instruction.
+pub(package) fn lane_slide(b: &Body, t: Inst) u32 {
+    if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b != 2 || t.c == VNONE {
+        return 0;
+    }
+    let n = lanes(t.ty);
+    let nb = type_bytes(t.ty, 8);
+    if n < 2 || nb != 8 && nb != 16 && nb != 32 || b.pool[t.c as usize] != n {
+        return 0;
+    }
+    if b.type_of(b.pool[t.a as usize]) != t.ty || b.type_of(b.pool[(t.a + 1) as usize]) != t.ty {
+        return 0;
+    }
+    let s = b.pool[(t.c + 1) as usize];
+    if s == 0 || s >= n {
+        return 0;
+    }
+    for k in 0..n {
+        if b.pool[(t.c + 1 + k) as usize] != s + k {
+            return 0;
+        }
+    }
+    return s * (nb / n);
+}
 
 /// Whether `t` of `b` is a scalar float `fadd` of lanes 0 and 1 (in either order) of one float vector of two
 /// lanes (`FOLD_LANE_PAIR`).

@@ -165,18 +165,19 @@ fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
 
 /// The facts of an inlinable body that each call of it reads (`Run.ok`, set once the body is final):
 /// callers may inline it, it is `small` within SHRINK, `small` within the run's budget, a `forwarder`, it
-/// computes with floats (`floats`).
+/// computes with floats (`floats`), its warm path within SHRINK but for constants (`cheap`).
 pub(package) const IL_OK: u8 = 1;
 pub(package) const IL_SHRINK: u8 = 2;
 pub(package) const IL_SMALL: u8 = 4;
 pub(package) const IL_FWD: u8 = 8;
 pub(package) const IL_FLOAT: u8 = 16;
+pub(package) const IL_CHEAP: u8 = 32;
 
 /// The `IL_*` facts of inlinable body `b` under budget `bu`.
 pub(package) const fn facts(b: &Body, bu: Budget) u8 {
     return IL_OK | small(b, SHRINK) as u8 * IL_SHRINK | small(b, bu) as u8 * IL_SMALL | forwarder(b) as u8 * IL_FWD | floats(
         b,
-    ) as u8 * IL_FLOAT;
+    ) as u8 * IL_FLOAT | cheap(b) as u8 * IL_CHEAP;
 }
 
 /// Whether body `b` has an instruction a float rewrite (`Body.fmath`) may change: a float result, scalar or
@@ -205,6 +206,23 @@ pub(package) const fn small(b: &Body, bu: Budget) bool {
         }
     }
     return warm <= bu.warm && b.insts.len() as u32 <= bu.all;
+}
+
+/// Whether body `b`'s warm path is within SHRINK's but for its constants and addresses (a rare path's
+/// message): a copy adds the caller no more than its call does there (`IL_CHEAP`).
+pub(package) const fn cheap(b: &Body) bool {
+    let mut warm: u32 = 0;
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        if (bk.flags & BLOCK_RARE) != 0 {
+            continue;
+        }
+        for i in bk.start..bk.start + bk.len {
+            let op = b.insts[i as usize].op;
+            warm += (op != O_ICONST && op != O_FCONST && op != O_SYMADDR && op != O_SLOTADDR) as u32;
+        }
+    }
+    return warm <= SHRINK.warm && b.insts.len() as u32 <= SHRINK.all;
 }
 
 // A call to inline: its instruction, the callee's body and the bases of the copy's blocks, values and
@@ -346,9 +364,10 @@ extend Inliner {
                 }
                 let e = unsafe &*(bodies + callee as usize);
                 let f = ok[callee as usize];
-                // A callee of one block and at most 3 instructions (a field read) is no bigger than its
-                // call: CALLER_MAX does not stop it. A failure path takes forwarders alone.
-                let tiny = e.blocks.len() == 1 && e.insts.len() <= 3;
+                // A callee no bigger than its call (a field read, a checked index whose failure path is
+                // rare: `IL_CHEAP`) adds at most SHRINK's instructions per call the caller holds: CALLER_MAX
+                // does not stop it. A failure path takes forwarders alone.
+                let tiny = e.blocks.len() == 1 && e.insts.len() <= 3 || (f & IL_CHEAP) != 0;
                 // An `@always_inline` callee passes the size, cold and rare-path gates (the Core IR's
                 // inliner, which a native build skips, did as much: `ir::inline::always_native`).
                 let always = pk.syms[c.syms[t.a as usize] as usize].always;

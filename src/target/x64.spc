@@ -1172,9 +1172,9 @@ extend Code {
         self.byte(ll << 5 | (~(v as u32) >> 4 & 1) << 3);
     }
 
-    // An EVEX instruction on registers: `reg` (ModRM.reg), `v` (V'vvvv), `rm` (ModRM.rm, an xmm or a general
-    // register: EVEX.X holds its fifth bit).
-    fn evex_r(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, ll: u32, reg: u8, v: u8, rm: u8) {
+    /// An EVEX instruction on registers: `reg` (ModRM.reg), `v` (V'vvvv), `rm` (ModRM.rm, an xmm or a general
+    /// register: EVEX.X holds its fifth bit), vector length `ll` (0: 128 bits, 1: 256, 2: 512).
+    pub(package) fn evex_r(self: &mut Self, pfx: u32, mm: u32, op: u32, w: bool, ll: u32, reg: u8, v: u8, rm: u8) {
         self.evex_p(pfx, mm, w, ll, reg, v, ~(rm as u32) >> 4 & 1, ~(rm as u32) >> 3 & 1);
         self.byte(op);
         self.modrm_rr(reg, rm);

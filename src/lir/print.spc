@@ -386,6 +386,13 @@ extend Printer {
             out.format_into(".{}", t.aux);
         } else if t.op == O_VUNZIP && t.aux != 0 {
             out.push_str(".odd");
+        } else if t.op == O_VMULW {
+            if (t.aux & MULW_SIGNED) != 0 {
+                out.push_str(".s");
+            }
+            if (t.aux & MULW_HIGH) != 0 {
+                out.push_str(".hi");
+            }
         } else if t.op == O_SYS {
             out.push_byte(b'.');
             out.push_str(sys_name(t.aux));
@@ -675,6 +682,9 @@ extend Printer {
         }
         if t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
             out.push_str(" bool");
+        }
+        if t.op == O_LOAD && (t.aux & MEM_BLOCK) != 0 {
+            out.push_str(" block");
         }
         if t.op == O_LOAD && (t.aux & MEM_RANGE) != 0 {
             out.format_into(" range {}", t.b);

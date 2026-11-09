@@ -674,7 +674,20 @@ extend CEmit {
             l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;
             l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
+            // AVX-512 CD with VL counts the leading zeros of 4- and 8-byte lanes (VPLZCNTD, VPLZCNTQ).
+            l.pkg.vec_bits = tgt::isa(pk.arch).vector_bits | pick(
+                feature(pk, "avx512cd") && feature(pk, "avx512vl"),
+                0x0Cu32,
+                0u32,
+            );
+            // x86-64 permutes bytes with SSSE3's PSHUFB: per vector a copy, PSHUFB of a mask in memory and POR.
+            l.pkg.vec_perm3 = if tgt::isa(pk.arch).vector_perm3 == 0 && feature(pk, "ssse3") {
+                9
+            } else {
+                tgt::isa(pk.arch).vector_perm3
+            };
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
+            l.pkg.vec_mulw = tgt::isa(pk.arch).vector_mulw | pick(feature(pk, "sse4.1"), 0x400u16, 0u16);
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             l.pkg.vround = l.pkg.vfloat && (tgt::isa(pk.arch).vector_round || feature(pk, "sse4.1"));
             l.pkg.vround_away = l.pkg.vfloat && tgt::isa(pk.arch).vector_round_away;
@@ -693,6 +706,10 @@ extend CEmit {
             l.pkg.align_loops = pk.opt > 0 && pk.opt != bman::OPT_S && pk.opt != bman::OPT_Z;
             l.pkg.popcnt = tgt::isa(pk.arch).popcount || feature(pk, "popcnt");
             l.pkg.sse41 = feature(pk, "sse4.1");
+            l.pkg.vtbl = feature(pk, "ssse3");
+            l.pkg.mask_bits = tgt::isa(pk.arch).mask_bits;
+            l.pkg.addsub = feature(pk, "sse3");
+            l.pkg.lzcnt = feature(pk, "lzcnt");
             l.pkg.lse = feature(pk, "lse");
             l.pkg.rcpc = feature(pk, "rcpc");
             l.pkg.switch_tree = tgt::isa(pk.arch).switch_tree;

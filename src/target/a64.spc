@@ -587,6 +587,11 @@ pub(package) const V2_FRINTM: u32 = 0x19; // size 0|sz
 pub(package) const V2_FRINTP: u32 = 0x18; // size 2|sz
 pub(package) const V2_FRINTZ: u32 = 0x19; // size 2|sz
 pub(package) const V2_CNT: u32 = 0x05; // size 0
+pub(package) const V2_CLZ: u32 = 0x24;
+pub(package) const V2_REV16: u32 = 0x01; // size 0
+pub(package) const V2_REV32: u32 = 0x20; // size 0
+pub(package) const V2_REV64: u32 = 0x00; // size 0
+pub(package) const V2_UADDLP: u32 = 0x22; // size: the source lanes'
 
 /// CNT (8 bytes): the population count of each byte.
 pub(package) const fn cnt8b(rd: u32, rn: u32) u32 {

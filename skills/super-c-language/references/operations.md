@@ -135,7 +135,7 @@ enum (or an aggregate holding one) needs `unsafe`.
 | float rewrites | none: the optimizer keeps every float operation as written, unless the build allows a rewrite (`-fassociative-math`, `-freciprocal-math`, `-ffinite-math-only`, `-fno-signed-zeros`, all of them under `-ffast-math`; super-c-binary, "Optimization levels and code-generation flags"), which may change the result's bits. `@associative_math` on a function with a body allows reassociation inside it alone (its closures too): its float sums and products may vectorize; the native build keeps it from inlining a function without it into one with it, and the C output keeps its operations as written |
 | libm calls | run as written: no build folds, merges (`sincos`) or rewrites (`pow(2, x)` to `exp2(x)`) a call of a transcendental function, so every profile gives the same bits, and constant evaluation gives them where the compiler and the program use one libm. `--emit-c` writes `-fno-builtin-<f>` for the `f64` and `f32` names of the transcendental functions (`sin` .. `hypot`, `LIBM_AS_WRITTEN` in `src/build_system/build.spc`) and `-ffp-contract=off` into `__cflags`, so a C compiler keeps them too |
 | `%` | the C `fmod` remainder: the sign of the dividend (`-7.5 % 2.0` is -1.5) |
-| NaN payload of an arithmetic result | not specified |
+| NaN sign and payload of an arithmetic result | not specified: a NaN made from operands that hold no NaN (`inf - inf`, `0.0 / 0.0`) is negative on x86-64 and positive on arm64 |
 | `==`, `<` operators | IEEE: NaN is unordered, `-0.0 == 0.0` |
 | `Eq`, `Ord`, `Hash` | the IEEE 754 total order (`total_cmp`): NaN equals itself, `-0.0` differs from `0.0` |
 

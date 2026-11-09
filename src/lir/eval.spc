@@ -536,6 +536,24 @@ extend Eval {
             }
             return true;
         }
+        if op == O_VMULW {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let nb = lb / 2;
+            let h = ast::pick((t.aux & MULW_HIGH) != 0, lanes(t.ty), 0u32);
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            for k in 0..lanes(t.ty) {
+                let x = get_lane(&self.vals, wa, h + k, nb);
+                let y = get_lane(&self.vals, wb, h + k, nb);
+                let p = if (t.aux & MULW_SIGNED) != 0 {
+                    (sign_extend(x, nb) * sign_extend(y, nb)) as u64
+                } else {
+                    x * y
+                };
+                set_lane(&mut self.vals, dst, k, lb, p);
+            }
+            return true;
+        }
         if op == O_HTOF {
             self.vals[dst as usize] = half_to_f32_bits(self.val(&f, b, t.a) as u32 & 0xFFFF);
             return true;
@@ -660,6 +678,9 @@ extend Eval {
         }
         if op == O_LOAD || op == O_ALOAD {
             let p = self.val(&f, b, t.a).wrapping_add(((t.c as i32) as i64) as u64);
+            if op == O_LOAD && (t.aux & MEM_BLOCK) != 0 {
+                return self.load_block(p, t.ty, dst);
+            }
             return self.load(p, t.ty, dst);
         }
         if op == O_STORE || op == O_ASTORE {
@@ -983,11 +1004,30 @@ extend Eval {
 
     // Read a value of type `ty` at `p` into the words from `dst`.
     fn load(self: &mut Self, p: u64, ty: u8, dst: u32) bool {
+        let n = type_bytes(ty, (unsafe &*self.pkg).ptr_bytes) as u64;
+        return self.load_bytes(p, ty, dst, n);
+    }
+
+    // `load` of a MEM_BLOCK vector: the bytes of the object of its first byte, 0 for those past its end.
+    fn load_block(self: &mut Self, p: u64, ty: u8, dst: u32) bool {
+        let n = type_bytes(ty, (unsafe &*self.pkg).ptr_bytes) as u64;
+        let o = (p >> 32) as usize;
+        let off = p & 0xFFFFFFFF;
+        let have = if o != 0 && o < self.objs.len() && off < self.objs[o].size {
+            n.min(self.objs[o].size - off)
+        } else {
+            n
+        };
+        return self.load_bytes(p, ty, dst, have);
+    }
+
+    // `load` of the first `have` bytes of the value, the rest 0.
+    fn load_bytes(self: &mut Self, p: u64, ty: u8, dst: u32, have: u64) bool {
         let ptr = (unsafe &*self.pkg).ptr_bytes;
         let n = type_bytes(ty, ptr) as u64;
         let mut base: u64 = 0;
         let mut heap = false;
-        if !self.locate(p, n, &mut base, &mut heap) {
+        if !self.locate(p, have, &mut base, &mut heap) {
             return false;
         }
         let nw = value_words(ty, ptr);
@@ -998,7 +1038,9 @@ extend Eval {
             let mut j = hi;
             while j > lo {
                 j -= 1;
-                let byte = if heap {
+                let byte = if j >= have {
+                    0u8
+                } else if heap {
                     self.heap[(base + j) as usize]
                 } else {
                     self.stack[(base + j) as usize]
@@ -3281,8 +3323,11 @@ extend Eval {
             }
             let x = if k < n as u64 {
                 get_lane(&self.vals, w[0], k as u32, lb)
-            } else if c == core::SIMD_SHUFFLE {
+            } else if c == core::SIMD_SHUFFLE && k < 2 * n as u64 {
                 get_lane(&self.vals, w[1], (k - n as u64) as u32, lb)
+            } else if c == core::SIMD_SHUFFLE {
+                // Of three vectors (`lir::loops`' groups of every third element).
+                get_lane(&self.vals, w[2], (k - 2 * n as u64) as u32, lb)
             } else {
                 0
             };

@@ -100,6 +100,19 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   with 0 of the `or` of a vector's lanes tests the register (`lv::FOLD_ANY`: `pmovmskb` of a lane mask;
   with SSE4.1 `ptest` of any integer vector, `lv::FOLD_ANY_BITS`). With SSE4.1 a product of 32-bit lanes
   reads such a constant or a folded load as its memory operand (`lv::FOLD_VMUL`, `pmulld x, [m]`).
+- Further vector register forms: slides of two vectors' lanes in a row (`lv::lane_slide`: arm64 EXT;
+  x86-64 PALIGNR with SSSE3, else PSLLDQ, PSRLDQ and POR, 32 bytes VPERM2I128 and VPALIGNR); widening
+  products (`O_VMULW`: arm64 SMULL, UMULL and their `2` forms; x86-64 PMULUDQ, PMULDQ with SSE4.1, of
+  4-byte lanes); byte lookups and shuffles of up to three vectors (arm64 TBL and TBX; x86-64 PSHUFB with
+  SSSE3, `pshufb_shuffle`, each 16 bytes looked up in their own on 32 and 64 bytes); bit operations per
+  `Isa.vector_bits` (arm64 CNT and UADDLP, CLZ, REV16, REV32, REV64; x86-64 a parallel bit count,
+  PSHUFLW, PSHUFHW and word shifts for byte swaps, VPLZCNTD and VPLZCNTQ with AVX-512 CD and VL); the bits
+  of a byte lane mask (x86-64 PMOVMSKB, `Isa.mask_bits`). Folds: `lv::FOLD_VMLA`, a product or widening
+  product with one use that a sum or difference reads accumulates into it (arm64 MLA, MLS, SMLAL, UMLAL,
+  SMLSL, UMLSL), and a right shift by an immediate into a sum (USRA, SSRA); `lv::FOLD_ADDSUB`, a lane
+  select by an even-lanes mask of a float difference and sum is x86-64's `addsubps` or `addsubpd` (SSE3;
+  `FOLD_ADDSUB_WIDE` of 32 bytes with AVX). An 8-byte vector moves to an integer register by FMOV (arm64)
+  or MOVQ (x86-64).
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is

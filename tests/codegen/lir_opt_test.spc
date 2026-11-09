@@ -530,6 +530,104 @@ data @pad size 32 align 3 bytes 000000000000000000000000000000000000000000000000
     same_result(&b, &a, "run", five, 0xAAAAAA0403020100u64);
 }
 
+// A loop that copies each 12-byte element as an 8-byte and a 4-byte pair goes, one `memcpy` of 12 bytes an
+// element in its place (`mem_pairs`); one whose pairs leave 4 bytes of each element (a 16-byte step) stays.
+@test
+fn a_copy_loop_of_pairs_covering_its_element_goes() {
+    let (b, a) = optimized_loops(
+        M"(lir ptr 8
+sym @pairs fn global noinline
+sym @holes fn global noinline
+sym @run fn global
+fn @pairs
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 12
+  v8 = load.i64 v7 align 0
+  v9 = load.i32 v7+8 align 0
+  v10 = ptradd v0, v5 * 12
+  store v8, v10 align 0
+  store v9, v10+8 align 0
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @holes
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 16
+  v8 = load.i64 v7 align 0
+  v9 = load.i32 v7+8 align 0
+  v10 = ptradd v0, v5 * 16
+  store v8, v10 align 0
+  store v9, v10+8 align 0
+  v11 = add.i64 v5, v4
+  jmp b1(v11)
+b3:
+  ret
+fn @run
+  sig (i64) -> i64
+  slot s0 size 64 align 3
+  slot s1 size 64 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 72623859790382856
+  v4 = iconst.i64 -1
+  store v3, v1 align 3
+  store v4, v1+8 align 3
+  store v3, v1+16 align 3
+  store v4, v1+24 align 3
+  store v3, v1+32 align 3
+  store v4, v1+40 align 3
+  call @pairs(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v5 = load.i64 v2 align 3
+  v6 = load.i64 v2+16 align 3
+  v7 = xor.i64 v5, v6
+  ret v7
+)",
+        0,
+        false,
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 512,
+        },
+    );
+    let p = text_of(&a, "pairs");
+    assert(p.contains("memcpy") && !p.contains("load.i32"), p.as_str());
+    let h = text_of(&a, "holes");
+    assert(!h.contains("memcpy") && h.contains("load.i32"), h.as_str());
+    for n in 0..4u64 {
+        let args: []u64 = [n];
+        same_result(&b, &a, "run", args, run_of(&b, "run", args));
+    }
+}
+
 // A view's length is at most `isize::MAX` over its element's bytes (`ref p0 4 inner`), so it never passes
 // `usize::MAX - 8`; a length of an element size unknown (`ref p1 0 inner`) may. The minimum of two values is
 // at most each, and a select is at most the larger of its sides: `min(len0, len2) <= usize::MAX - 8`.
@@ -9823,6 +9921,517 @@ b0(v0: i32):
     same_result(&b, &a, "top", x, 41);
 }
 
+// The field-wise sum `o.x = a.x + b.x; o.y = a.y + b.y; ..` loads each lane between the stores: an
+// exclusive referent's stores and read-only referents' loads touch different bytes (`Slp::apart`), so
+// they pack as one vector store of a sum of two vector loads. Without the references' classes `o` may be
+// `a` moved by a lane, and the stores and loads keep their order: `top2` passes such pointers.
+@test
+fn field_wise_sums_pack_across_the_loads_between_their_stores() {
+    let body = M"(b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i32 v1 align 2
+  v4 = load.i32 v2 align 2
+  v5 = add.i32 v3, v4
+  store v5, v0 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = load.i32 v2+4 align 2
+  v8 = add.i32 v6, v7
+  store v8, v0+4 align 2
+  v9 = load.i32 v1+8 align 2
+  v10 = load.i32 v2+8 align 2
+  v11 = add.i32 v9, v10
+  store v11, v0+8 align 2
+  v12 = load.i32 v1+12 align 2
+  v13 = load.i32 v2+12 align 2
+  v14 = add.i32 v12, v13
+  store v14, v0+12 align 2
+  ret
+)";
+    let tops = M"(fn @top
+  sig (i32) -> i32
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+  slot s2 size 16 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i32 3
+  v5 = add.i32 v0, v4
+  store v0, v2 align 2
+  store v5, v2+4 align 2
+  store v0, v2+8 align 2
+  store v5, v2+12 align 2
+  store v5, v3 align 2
+  store v5, v3+4 align 2
+  store v0, v3+8 align 2
+  store v0, v3+12 align 2
+  call @f(v1, v2, v3) : (ptr, ptr, ptr) -> void
+  v6 = load.i32 v1+4 align 2
+  v7 = load.i32 v1+8 align 2
+  v8 = add.i32 v6, v7
+  ret v8
+fn @top2
+  sig (i32) -> i32
+  slot s0 size 32 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = ptradd v1+4
+  store v0, v1 align 2
+  store v0, v1+4 align 2
+  store v0, v1+8 align 2
+  store v0, v1+12 align 2
+  store v0, v1+16 align 2
+  call @f(v2, v1, v1) : (ptr, ptr, ptr) -> void
+  v3 = load.i32 v1+16 align 2
+  ret v3
+)";
+    let head = "lir ptr 8\nsym @f fn global noinline\nsym @top fn global\nsym @top2 fn global\nfn @f\n  sig (ptr, ptr, ptr) -> void\n";
+    let refs = format("{}  ref p0 16 noalias\n  ref p1 16 readonly\n  ref p2 16 readonly\n{}{}", head, body, tops);
+    let (b, a) = optimized_with(&refs, 0, false, 4);
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "add.v4i32") == 1 && count_of(&t, "load.v4i32") == 2 && count_of(&t, "store ") == 1, t.as_str());
+    let x: []u64 = [20];
+    same_result(&b, &a, "top", x, 86);
+    // Each lane doubles the lane before it, which the store before wrote: 20 << 4.
+    let plain = format("{}{}{}", head, body, tops);
+    let (b2, a2) = optimized_with(&plain, 0, false, 4);
+    let t2 = text_of(&a2, "f");
+    assert(!t2.contains("v4i32"), t2.as_str());
+    same_result(&b2, &a2, "top2", x, 320);
+}
+
+// Stores written from the highest address down pack as one group (`Slp::store_seeds` takes a group's
+// stores in any order), and lanes that are a vector's in reverse order take that vector with its lanes
+// moved (`PK_PERM`, a `swizzle` the backends do in registers): one vector store of a sum of a reversed
+// vector load and a vector load.
+@test
+fn stores_in_any_order_and_reversed_lanes_pack() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr, ptr) -> void
+  ref p0 16 noalias
+  ref p1 16 readonly
+  ref p2 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.i32 v1 align 2
+  v4 = load.i32 v2+12 align 2
+  v5 = add.i32 v3, v4
+  store v5, v0+12 align 2
+  v6 = load.i32 v1+4 align 2
+  v7 = load.i32 v2+8 align 2
+  v8 = add.i32 v6, v7
+  store v8, v0+8 align 2
+  v9 = load.i32 v1+8 align 2
+  v10 = load.i32 v2+4 align 2
+  v11 = add.i32 v9, v10
+  store v11, v0+4 align 2
+  v12 = load.i32 v1+12 align 2
+  v13 = load.i32 v2 align 2
+  v14 = add.i32 v12, v13
+  store v14, v0 align 2
+  ret
+fn @top
+  sig (i32) -> i32
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+  slot s2 size 16 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i32 1
+  v5 = iconst.i32 10
+  v6 = iconst.i32 0
+  v7 = iconst.i32 20
+  v8 = iconst.i32 30
+  v9 = add.i32 v0, v4
+  v10 = add.i32 v9, v4
+  v11 = add.i32 v10, v4
+  store v0, v2 align 2
+  store v9, v2+4 align 2
+  store v10, v2+8 align 2
+  store v11, v2+12 align 2
+  store v6, v3 align 2
+  store v5, v3+4 align 2
+  store v7, v3+8 align 2
+  store v8, v3+12 align 2
+  call @f(v1, v2, v3) : (ptr, ptr, ptr) -> void
+  v12 = load.i32 v1+4 align 2
+  v13 = load.i32 v1+12 align 2
+  v14 = load.i32 v1 align 2
+  v15 = mul.i32 v14, v5
+  v16 = add.i32 v12, v13
+  v17 = add.i32 v16, v15
+  ret v17
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "add.v4i32") == 1 && count_of(&t, "swizzle") == 1 && count_of(&t, "store ") == 1, t.as_str());
+    // o = [x + 3, x + 12, x + 21, x + 30]: (x + 12) + (x + 30) + 10 * (x + 3).
+    let x: []u64 = [5];
+    same_result(&b, &a, "top", x, 132);
+}
+
+// A load of a stored lane's bytes between a group's stores reads that lane's new value and the next
+// lane's old one: the stores do not move past it to the group's last (`Slp::group_last`), and stay
+// scalar.
+@test
+fn a_load_between_a_groups_stores_keeps_them_in_place() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @g fn global noinline
+sym @top fn global
+fn @g
+  sig (ptr, ptr) -> i64
+  ref p0 16 noalias
+  ref p1 16 readonly
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i32 1
+  v3 = iconst.i32 2
+  v4 = iconst.i32 3
+  v5 = iconst.i32 4
+  v6 = load.i32 v1+12 align 2
+  v7 = add.i32 v6, v5
+  store v7, v0+12 align 2
+  v8 = load.i32 v1 align 2
+  v9 = add.i32 v8, v2
+  store v9, v0 align 2
+  v10 = load.i64 v0 align 2
+  v11 = load.i32 v1+8 align 2
+  v12 = add.i32 v11, v4
+  store v12, v0+8 align 2
+  v13 = load.i32 v1+4 align 2
+  v14 = add.i32 v13, v3
+  store v14, v0+4 align 2
+  ret v10
+fn @top
+  sig (i32) -> i64
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i32 0
+  store v3, v1 align 2
+  store v3, v1+4 align 2
+  store v0, v2 align 2
+  store v0, v2+4 align 2
+  store v0, v2+8 align 2
+  store v0, v2+12 align 2
+  v4 = call.i64 @g(v1, v2) : (ptr, ptr) -> i64
+  ret v4
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "g");
+    assert(count_of(&t, "store ") == 4 && !t.contains("v4i32"), t.as_str());
+    // The load reads lane 0 as x + 1 and lane 1 as 0.
+    let x: []u64 = [6];
+    same_result(&b, &a, "top", x, 7);
+}
+
+// A sum of terms past a multiple of the lanes packs the multiple: six loads, a vector of four reduced, the
+// two others added to it (`Slp::red_seeds`, `rrest`); the same sum.
+@test
+fn a_sum_past_a_multiple_of_the_lanes_packs_the_multiple() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr) -> i32
+  ref p0 24 readonly
+b0(v0: ptr):
+  v1 = load.i32 v0 align 2
+  v2 = load.i32 v0+4 align 2
+  v3 = load.i32 v0+8 align 2
+  v4 = load.i32 v0+12 align 2
+  v5 = load.i32 v0+16 align 2
+  v6 = load.i32 v0+20 align 2
+  v7 = add.i32 v1, v2
+  v8 = add.i32 v7, v3
+  v9 = add.i32 v8, v4
+  v10 = add.i32 v9, v5
+  v11 = add.i32 v10, v6
+  ret v11
+fn @top
+  sig (i32) -> i32
+  slot s0 size 24 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = iconst.i32 10
+  v3 = iconst.i32 200
+  store v0, v1 align 2
+  store v2, v1+4 align 2
+  store v3, v1+8 align 2
+  store v0, v1+12 align 2
+  store v2, v1+16 align 2
+  store v3, v1+20 align 2
+  v4 = call.i32 @f(v1) : (ptr) -> i32
+  ret v4
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(
+        count_of(&t, "load.v4i32") == 1 && count_of(&t, "reduce_add") == 1 && count_of(&t, "= add.i32") == 2,
+        t.as_str(),
+    );
+    // x = 3: 2 * (3 + 10 + 200).
+    let x: []u64 = [3];
+    same_result(&b, &a, "top", x, 426);
+}
+
+// Lanes another pack holds rotated, or its low half's lanes twice each, are that pack's vector moved in
+// registers (`perm_lane`): a `shuffle` of the vector with itself from lane 1 (arm64 EXT, x86-64 PALIGNR:
+// `lv::lane_slide`), an interleave of the vector with itself.
+@test
+fn rotated_and_doubled_lanes_move_in_registers() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr, ptr, ptr) -> void
+  ref p0 16 noalias
+  ref p1 16 noalias
+  ref p2 16 readonly
+  ref p3 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.i32 v2 align 2
+  v5 = load.i32 v2+4 align 2
+  v6 = load.i32 v2+8 align 2
+  v7 = load.i32 v2+12 align 2
+  v8 = load.i32 v3 align 2
+  v9 = load.i32 v3+4 align 2
+  v10 = load.i32 v3+8 align 2
+  v11 = load.i32 v3+12 align 2
+  v12 = add.i32 v4, v8
+  v13 = add.i32 v5, v9
+  v14 = add.i32 v6, v10
+  v15 = add.i32 v7, v11
+  store v12, v1 align 2
+  store v13, v1+4 align 2
+  store v14, v1+8 align 2
+  store v15, v1+12 align 2
+  v16 = xor.i32 v5, v12
+  v17 = xor.i32 v6, v12
+  v18 = xor.i32 v7, v13
+  v19 = xor.i32 v4, v13
+  store v16, v0 align 2
+  store v17, v0+4 align 2
+  store v18, v0+8 align 2
+  store v19, v0+12 align 2
+  ret
+fn @top
+  sig (i32) -> i32
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+  slot s2 size 16 align 4
+  slot s3 size 16 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i32 1
+  v6 = iconst.i32 6
+  v7 = iconst.i32 40
+  store v0, v3 align 2
+  store v5, v3+4 align 2
+  store v6, v3+8 align 2
+  store v7, v3+12 align 2
+  store v7, v4 align 2
+  store v6, v4+4 align 2
+  store v5, v4+8 align 2
+  store v0, v4+12 align 2
+  call @f(v1, v2, v3, v4) : (ptr, ptr, ptr, ptr) -> void
+  v8 = load.i32 v1 align 2
+  v9 = load.i32 v1+4 align 2
+  v10 = load.i32 v1+8 align 2
+  v11 = load.i32 v1+12 align 2
+  v12 = add.i32 v8, v9
+  v13 = add.i32 v12, v10
+  v14 = add.i32 v13, v11
+  ret v14
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(
+        count_of(&t, "shuffle.v4i32") == 1 && count_of(&t, "vziplo") == 1 && count_of(&t, "xor.v4i32") == 1 && count_of(
+            &t,
+            "xor.i32",
+        ) == 0,
+        t.as_str(),
+    );
+    // x = 2: t = [42, 7, 7, 42]; o = [1 ^ 42, 6 ^ 42, 40 ^ 7, 2 ^ 7] = [43, 44, 47, 5].
+    let x: []u64 = [2];
+    same_result(&b, &a, "top", x, 139);
+}
+
+// Four values stored and summed with weights: the sum's packs hold them, and the store group, which the
+// sum's reads alone kept scalar before it, then stores their vector (`Slp::plan` tries the stores again
+// after the sums): one vector `xor`, one vector store, no scalar `xor`.
+@test
+fn values_a_sum_packs_are_stored_from_its_vector() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr, ptr) -> i32
+  ref p0 16 noalias
+  ref p1 16 readonly
+  ref p2 16 readonly
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = iconst.i32 3
+  v4 = iconst.i32 5
+  v5 = iconst.i32 7
+  v6 = iconst.i32 11
+  v7 = load.i32 v1 align 2
+  v8 = load.i32 v2 align 2
+  v9 = xor.i32 v7, v8
+  v10 = load.i32 v1+4 align 2
+  v11 = load.i32 v2+4 align 2
+  v12 = xor.i32 v10, v11
+  v13 = load.i32 v1+8 align 2
+  v14 = load.i32 v2+8 align 2
+  v15 = xor.i32 v13, v14
+  v16 = load.i32 v1+12 align 2
+  v17 = load.i32 v2+12 align 2
+  v18 = xor.i32 v16, v17
+  store v9, v0 align 2
+  store v12, v0+4 align 2
+  store v15, v0+8 align 2
+  store v18, v0+12 align 2
+  v19 = mul.i32 v9, v3
+  v20 = mul.i32 v12, v4
+  v21 = add.i32 v19, v20
+  v22 = mul.i32 v15, v5
+  v23 = add.i32 v21, v22
+  v24 = mul.i32 v18, v6
+  v25 = add.i32 v23, v24
+  ret v25
+fn @top
+  sig (i32) -> i32
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+  slot s2 size 16 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = iconst.i32 1
+  v5 = iconst.i32 6
+  store v0, v2 align 2
+  store v4, v2+4 align 2
+  store v0, v2+8 align 2
+  store v4, v2+12 align 2
+  store v5, v3 align 2
+  store v5, v3+4 align 2
+  store v4, v3+8 align 2
+  store v0, v3+12 align 2
+  v6 = call.i32 @f(v1, v2, v3) : (ptr, ptr, ptr) -> i32
+  v7 = load.i32 v1+12 align 2
+  v8 = add.i32 v6, v7
+  ret v8
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "xor.v4i32") == 1 && count_of(&t, "xor.i32") == 0 && count_of(&t, "store ") == 1, t.as_str());
+    // x = 2: lanes [4, 7, 3, 3]; 12 + 35 + 21 + 33 = 101, then lane 3.
+    let x: []u64 = [2];
+    same_result(&b, &a, "top", x, 104);
+}
+
+// Each seed's packs count by themselves (`Slp::pays`): four stores of products of parameters gather all
+// their lanes, which costs more than they save, and stay scalar; the four stores of sums of loads beside
+// them still pack. A lane another instruction reads too keeps its scalar and saves nothing.
+@test
+fn a_seed_that_gathers_does_not_keep_another_from_packing() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr, i32, i32, i32, i32, i32, i32, i32, i32) -> i32
+  ref p0 32 noalias
+  ref p1 32 readonly
+b0(v0: ptr, v1: ptr, v2: i32, v3: i32, v4: i32, v5: i32, v6: i32, v7: i32, v8: i32, v9: i32):
+  v10 = load.i32 v1 align 2
+  v11 = load.i32 v1+4 align 2
+  v12 = load.i32 v1+8 align 2
+  v13 = load.i32 v1+12 align 2
+  v14 = load.i32 v1+16 align 2
+  v15 = load.i32 v1+20 align 2
+  v16 = load.i32 v1+24 align 2
+  v17 = load.i32 v1+28 align 2
+  v18 = add.i32 v10, v14
+  v19 = add.i32 v11, v15
+  v20 = add.i32 v12, v16
+  v21 = add.i32 v13, v17
+  store v18, v0 align 2
+  store v19, v0+4 align 2
+  store v20, v0+8 align 2
+  store v21, v0+12 align 2
+  v22 = mul.i32 v2, v6
+  v23 = mul.i32 v3, v7
+  v24 = mul.i32 v4, v8
+  v25 = mul.i32 v5, v9
+  store v22, v0+16 align 2
+  store v23, v0+20 align 2
+  store v24, v0+24 align 2
+  store v25, v0+28 align 2
+  ret v22
+fn @top
+  sig (i32) -> i32
+  slot s0 size 32 align 4
+  slot s1 size 32 align 4
+b0(v0: i32):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i32 2
+  store v0, v2 align 2
+  store v0, v2+4 align 2
+  store v0, v2+8 align 2
+  store v0, v2+12 align 2
+  store v3, v2+16 align 2
+  store v3, v2+20 align 2
+  store v3, v2+24 align 2
+  store v3, v2+28 align 2
+  v4 = call.i32 @f(v1, v2, v0, v0, v0, v0, v3, v3, v3, v3) : (ptr, ptr, i32, i32, i32, i32, i32, i32, i32, i32) -> i32
+  v5 = load.i32 v1+4 align 2
+  v6 = load.i32 v1+28 align 2
+  v7 = add.i32 v5, v6
+  v8 = add.i32 v7, v4
+  ret v8
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "add.v4i32") == 1 && count_of(&t, "mul.i32") == 4 && count_of(&t, "store ") == 5, t.as_str());
+    let x: []u64 = [10];
+    same_result(&b, &a, "top", x, 52);
+}
+
 // A callee whose packing makes vectors inlines as it was before the packing: the caller's slots become
 // values, which the callee's vector accesses of them would prevent; the callee's own body keeps its vectors.
 @test
@@ -10364,6 +10973,28 @@ b0(v0: i64):
     assert(at >= 0 && loop_at >= 0 && at < loop_at, t.as_str());
     let x: []u64 = [7];
     same_result(&b, &a, "top", x, 35);
+}
+
+// A call of the C library's `fabsf` reads and writes no memory and comes back (`ir::pure_libm`): two calls
+// of one value, a store between them, are one call.
+@test
+fn calls_of_exact_c_math_number_as_values() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @fabsf fn global
+sym @f fn global noinline
+fn @f
+  sig (ptr, f32) -> f32
+b0(v0: ptr, v1: f32):
+  v2 = call.f32 @fabsf(v1) : (f32) -> f32
+  store v2, v0 align 2
+  v3 = call.f32 @fabsf(v1) : (f32) -> f32
+  v4 = fadd.f32 v2, v3
+  ret v4
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "call.f32 @fabsf") == 1, t.as_str());
 }
 
 // A branch a constant decides leaves one edge into the join: its argument, defined in a block that does
@@ -17064,4 +17695,351 @@ b0(v0: ptr, v1: i64):
     same_result(&before, &after, "at_const", [1000], 1004);
     same_result(&before, &after, "at_sum", [1000, 3], 1016);
     same_result(&before, &after, "at_product", [1000, 3], 988);
+}
+
+// A copy of 8 bytes into a slot whose fields are two `i32`, and out of it, waits for the promotion, which
+// makes it loads and stores of the fields in their type: no `i64` that packs both, no shift that unpacks
+// them.
+@test
+fn a_copy_through_a_slot_moves_its_fields() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @update fn global noinline
+sym @drive fn global
+fn @update
+  sig (ptr, ptr) -> void
+  slot s0 size 8 align 2
+b0(v0: ptr, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 8
+  memcpy v2, v1, v3
+  v4 = load.i32 v2 align 2
+  v5 = load.i32 v2+4 align 2
+  v6 = add.i32 v4, v5
+  store v6, v2+4 align 2
+  memcpy v0, v2, v3
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+  slot s1 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  store v0, v1 align 3
+  call @update(v2, v1) : (ptr, ptr) -> void
+  v3 = load.i64 v2 align 3
+  ret v3
+)",
+    );
+    let u = text_of(&a, "update");
+    assert(!u.contains("i64") && !u.contains("lshr") && !u.contains("slot") && u.contains("load.i32 v1+4"), u.as_str());
+    let xs: [u64; 3] = [0x0000000500000007, 0xFFFFFFFF00000001, 0x7FFFFFFF7FFFFFFF];
+    for k in 0..3usize {
+        let x = unsafe xs[k];
+        let lo = x as u32;
+        let hi = lo.wrapping_add((x >> 32) as u32);
+        let args: []u64 = [x];
+        same_result(&b, &a, "drive", args, lo as u64 | hi as u64 << 32);
+    }
+}
+
+// A copy into the bytes an inlined call's exclusive parameter points to (a root of the call's scope, an
+// offset into the caller's parameter) changes them for a read after the call through the caller's
+// parameter, of another call's scope, as for one in the copy that the optimizer folded onto that address:
+// the read loads again (`Opt::write_bits`, the roots' base class).
+@test
+fn a_write_through_an_inlined_calls_parameter_reaches_the_reads_after_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+file f0 "t.spc"
+sym @fill fn global noinline
+sym @f fn global noinline
+sym @top fn global
+fn @fill
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = iconst.i64 7
+  store v1, v0+8 align 3
+  ret
+fn @f
+  file f0
+  sig (ptr) -> i64
+  ref p0 40 noalias
+  owned p0 16
+  scope @20:3 g0 v4
+  scope @40:3 g0 v0
+  slot s0 size 24 align 3
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 24
+  v3 = iconst.i64 0
+  store v3, v1 align 3
+  store v3, v1+8 align 3
+  store v3, v1+16 align 3
+  call @fill(v1) : (ptr) -> void
+  v4 = ptradd v0+16 inbounds nonnull !20:9
+  v5 = load.i64 v0+24 align 0 !10:5@20:3
+  memcpy.overlap v4, v1, v2 !11:5@20:3
+  v6 = load.i64 v0+24 align 3 tbaa 4 !30:5@40:3
+  v7 = icmp.eq v6, v3
+  br v7, b1, b2
+b1:
+  ret v5
+b2:
+  v8 = add.i64 v6, v5
+  ret v8
+fn @top
+  sig (i64) -> i64
+  slot s0 size 40 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  store v0, v1+24 align 3
+  v2 = call.i64 @f(v1) : (ptr) -> i64
+  ret v2
+)",
+    );
+    let t = text_of(&a, "f");
+    assert(count_of(&t, "load.i64 v0+24") == 2, t.as_str());
+    // x = 3: the copy writes 7 over it; 7 + 3.
+    let x: []u64 = [3];
+    same_result(&b, &a, "top", x, 10);
+}
+
+// In a loop, an inlined call's read of its exclusive parameter's bytes that the optimizer folded onto the
+// caller's parameter (root `v0+16`, read `v0+24`) is a read through the root: the copy's store through
+// the root changes it, and the loop does not read it once before (`Opt::acc`, `sroot`).
+@test
+fn a_folded_read_of_an_inlined_calls_parameter_sees_its_stores() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+file f0 "t.spc"
+sym @g fn global noinline
+sym @top fn global
+fn @g
+  file f0
+  sig (ptr, i64) -> i64
+  ref p0 40 noalias
+  scope @20:3 g0 v4
+  slot s0 size 8 align 3
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = ptradd v0+16 inbounds nonnull !20:9
+  jmp b1(v2)
+b1(v5: i64):
+  v6 = icmp.ult v5, v1
+  br v6, b2, b3
+b2:
+  v7 = load.i64 v0+24 align 3 tbaa 4 !10:5@20:3
+  v8 = add.i64 v7, v3 !10:5@20:3
+  store v8, v4+8 align 3 tbaa 4 !11:5@20:3
+  v9 = add.i64 v5, v3
+  jmp b1(v9)
+b3:
+  v10 = load.i64 v0+24 align 3 tbaa 4
+  ret v10
+fn @top
+  sig (i64) -> i64
+  slot s0 size 40 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 5
+  store v2, v1+24 align 3
+  v3 = call.i64 @g(v1, v0) : (ptr, i64) -> i64
+  ret v3
+)",
+    );
+    let _ = text_of(&a, "g");
+    // n = 4: 5 + 4.
+    let x: []u64 = [4];
+    same_result(&b, &a, "top", x, 9);
+}
+
+// In a loop, a call in an inlined call's copy whose argument is at an offset from the base its scope's root
+// is at (`v0+24`, root `v0+16`) writes the scope's class, as the copy's folded read of those bytes is of it:
+// the read stays in the loop (`Opt::block_writes` takes the argument's class as `Opt::acc` does).
+@test
+fn a_call_on_an_inlined_calls_folded_bytes_keeps_their_read_in_the_loop() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+file f0 "t.spc"
+sym @bump fn global noinline
+sym @g fn global noinline
+sym @top fn global
+fn @bump
+  sig (ptr) -> void
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  ret
+fn @g
+  file f0
+  sig (ptr, i64) -> i64
+  ref p0 40 noalias
+  scope @20:3 g0 v4
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = ptradd v0+16 inbounds nonnull !20:9
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b3
+b2:
+  v8 = load.i64 v0+24 align 3 tbaa 4 !10:5@20:3
+  v9 = add.i64 v6, v8 !10:5@20:3
+  v10 = ptradd v0+24 inbounds nonnull !11:5@20:3
+  call @bump(v10) : (ptr) -> void !11:5@20:3
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v9)
+b3:
+  ret v6
+fn @top
+  sig (i64) -> i64
+  slot s0 size 40 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 5
+  store v2, v1+24 align 3
+  v3 = call.i64 @g(v1, v0) : (ptr, i64) -> i64
+  ret v3
+)",
+    );
+    let _ = text_of(&a, "g");
+    // n = 3: 5 + 6 + 7.
+    let x: []u64 = [3];
+    same_result(&b, &a, "top", x, 18);
+}
+
+// A chain `c == a || c == b || c == d` whose edges pass the tests' values into a join merges into one branch
+// on their `or` (`common_true`); the merged branch's false edge enters the join from a block the walk's
+// predecessor list does not hold, so the join's parameter is not taken as the one value the listed edges
+// pass (`same_args`): codes outside both chains stay false.
+@test
+fn a_merged_chain_leaves_its_join_its_false_edge() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @f fn global
+sym @core__SIMD_REDUCE_AND data global
+sym @core__SIMD_REDUCE_OR data global
+sym @core__SIMD_REDUCE_XOR data global
+sym @core__SIMD_REDUCE_ADD data global
+sym @core__SIMD_REDUCE_MIN data global
+sym @core__SIMD_REDUCE_MAX data global
+data @core__SIMD_REDUCE_AND size 1 align 0 ro bytes 4d
+data @core__SIMD_REDUCE_OR size 1 align 0 ro bytes 4e
+data @core__SIMD_REDUCE_XOR size 1 align 0 ro bytes 4f
+data @core__SIMD_REDUCE_ADD size 1 align 0 ro bytes 3f
+data @core__SIMD_REDUCE_MIN size 1 align 0 ro bytes 47
+data @core__SIMD_REDUCE_MAX size 1 align 0 ro bytes 48
+fn @f
+  sig (i8, i8, i8, i8, i8, i32, i8, i32, i32) -> i8
+b0(v0: i8, v1: i8, v2: i8, v3: i8, v4: i8, v5: i32, v6: i8, v7: i32, v8: i32):
+  v9 = iconst.i32 0
+  v10 = iconst.i32 8
+  v11 = iconst.i32 16
+  v12 = iconst.i8 1
+  v13 = symaddr @core__SIMD_REDUCE_OR
+  v14 = symaddr @core__SIMD_REDUCE_XOR
+  v15 = symaddr @core__SIMD_REDUCE_ADD
+  v16 = symaddr @core__SIMD_REDUCE_MIN
+  v17 = symaddr @core__SIMD_REDUCE_MAX
+  v18 = iconst.i32 2
+  v19 = iconst.i8 0
+  v20 = symaddr @core__SIMD_REDUCE_AND
+  v21 = or.i8 v3, v3
+  v22 = or.i8 v4, v4
+  br v22, b1, b3(v22)
+b1:
+  v23 = or.i32 v5, v5
+  v24 = icmp.eq v23, v10
+  br v24, b3(v24), b2
+b2:
+  v25 = or.i32 v5, v5
+  v26 = icmp.eq v25, v11
+  jmp b3(v26)
+b3(v27: i8):
+  v28 = xor.i8 v27, v12
+  br v28, b5(v28), b4
+b4:
+  v29 = or.i8 v6, v6
+  jmp b5(v29)
+b5(v30: i8):
+  br v30, b7(v30), b6
+b6:
+  v31 = or.i32 v7, v7
+  v32 = or.i32 v8, v8
+  v33 = icmp.ne v31, v32
+  jmp b7(v33)
+b7(v34: i8):
+  br v34, b23, b8
+b8:
+  v35 = or.i32 v8, v8
+  v36 = or.i32 v5, v5
+  v37 = icmp.eq v35, v9
+  br v37, b24, b25
+b9:
+  v38 = load.i8 v13 align 0
+  v39 = icmp.eq v0, v38
+  jmp b10(v39)
+b10(v40: i8):
+  br v40, b12(v40), b11
+b11:
+  v41 = load.i8 v14 align 0
+  v42 = icmp.eq v0, v41
+  jmp b12(v42)
+b12(v43: i8):
+  br v43, b22(v43), b13
+b13:
+  v44 = load.i8 v15 align 0
+  v45 = icmp.eq v0, v44
+  br v45, b15(v45), b14
+b14:
+  v46 = load.i8 v16 align 0
+  v47 = icmp.eq v0, v46
+  jmp b15(v47)
+b15(v48: i8):
+  br v48, b17(v48), b16
+b16:
+  v49 = load.i8 v17 align 0
+  v50 = icmp.eq v0, v49
+  jmp b17(v50)
+b17(v51: i8):
+  br v51, b18, b22(v51)
+b18:
+  v52 = icmp.eq v35, v10
+  br v52, b19, b21(v52)
+b19:
+  v53 = load.i8 v15 align 0
+  v54 = icmp.ne v0, v53
+  br v54, b21(v54), b20
+b20:
+  v55 = icmp.ne v59, v18
+  jmp b21(v55)
+b21(v56: i8):
+  v57 = xor.i8 v56, v12
+  jmp b22(v57)
+b22(v58: i8):
+  ret v58
+b23:
+  ret v19
+b24: cold
+  panic "attempt to divide by zero"
+b25:
+  v59 = udiv.i32 v36, v35
+  v60 = load.i8 v20 align 0
+  v61 = icmp.eq v0, v60
+  br v61, b10(v61), b9)",
+    );
+    for c in [0u64, 62, 63, 64, 70, 71, 72, 73, 76, 77, 78, 79, 80] {
+        let want: u64 = if c == 63 || c == 71 || c == 72 || c == 77 || c == 78 || c == 79 {
+            1
+        } else {
+            0
+        };
+        same_result(&b, &a, "f", [c, 17, 1, 1, 1, 16, 0, 2, 2], want);
+    }
 }

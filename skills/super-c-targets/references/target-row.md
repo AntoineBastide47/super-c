@@ -5,7 +5,7 @@
 
 | Part | Table | Holds |
 |---|---|---|
-| `Isa` | `ISAS` | `@arch` name, pointer size, feature model (`fn_features`, `levels`, `ext_flags`), `vector_bytes` (0: the LIR vectorizer stays off), `vector_ops` (how vectors convert and shift by vector amounts: 0 lane by lane, 1 in registers but some, 2 each; `lir::ir::Package.vops`), `mul_high`, `simd_backend`, the C intrinsic headers |
+| `Isa` | `ISAS` | `@arch` name, pointer size, feature model (`fn_features`, `levels`, `ext_flags`), `vector_bytes` (0: the LIR vectorizer stays off), `vector_ops` (how vectors convert and shift by vector amounts: 0 lane by lane, 1 in registers but some, 2 each; `lir::ir::Package.vops`), `mul_high`, the vector register facts the loop vectorizer reads (`vector_sat`, `vector_absd`, `vector_bits`: the lane sizes of `clz`, `popcnt` and `bswap` in registers; `mask_bits`: a byte lane mask to bits in one instruction; `vector_perm3`: the instructions of a permutation of up to three vectors, 0 for none; each copied to a `lir::ir::Package` field), `simd_backend`, the C intrinsic headers |
 | `CallConv` | `CALLCONVS` | the convention's name and C `va_list` size |
 | `ObjFormat` | `OBJFORMATS` | section-name rule (`SEC_*`), symbol visibility, `-fPIC`, the soname flag |
 | `Os` | `OSES` | `@platform` name, default instruction set, SDK kind (`SDK_*`), sysroot layout (`SYSROOT_*`), whether std provides its C library (`own_libc`), file name affixes, link flags |

@@ -196,6 +196,9 @@ pub(package) const V128_LOAD: u32 = 0x00;
 pub(package) const V128_STORE: u32 = 0x0B;
 pub(package) const V128_CONST: u32 = 0x0C;
 pub(package) const I8X16_SHUFFLE: u32 = 0x0D;
+pub(package) const I8X16_POPCNT: u32 = 0x62;
+pub(package) const I16X8_EXTADD_PAIRWISE_I8X16_U: u32 = 0x7D;
+pub(package) const I32X4_EXTADD_PAIRWISE_I16X8_U: u32 = 0x7F;
 
 /// The bytes of one function body or data segment, and the relocations it holds.
 pub(package) struct Code {

@@ -5332,6 +5332,24 @@ extend Gen {
             }
             return true;
         }
+        if op == O_VMULW {
+            // Lane k the product of lanes `h + k` of `a` and `b` extended.
+            let lt = lane_type(t.ty);
+            let nl = lane_type(self.vt(t.a));
+            let sg = (t.aux & MULW_SIGNED) != 0;
+            let n = lanes(t.ty);
+            let h = ast::pick((t.aux & MULW_HIGH) != 0, n, 0u32);
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n {
+                self.ld_lane(t.a, h + k, nl, sg, false);
+                self.ld_lane(t.b, h + k, nl, sg, false);
+                self.c.op(w::I64_MUL);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, false);
+            }
+            return true;
+        }
         if op == O_VSUMW {
             // Lane k of `a` plus lanes `k * g` to `k * g + g - 1` of `b` zero-extended.
             let lt = lane_type(t.ty);
@@ -7248,7 +7266,8 @@ extend Gen {
                 if j < n {
                     self.ld_lane_to(x, ops[0], j, lt, false, true);
                 } else if c == core::SIMD_SHUFFLE {
-                    self.ld_lane_to(x, ops[1], j - n, lt, false, true);
+                    // Of the operand `j / n` (a shuffle of two or three vectors).
+                    self.ld_lane_to(x, ops[(j / n) as usize], j % n, lt, false, true);
                 } else {
                     self.c.i64_const(0);
                     self.c.local(w::LOCAL_SET, x);
@@ -7541,6 +7560,9 @@ extend Gen {
         if op == O_ADD || op == O_SUB || op == O_MUL || op >= O_AND && op <= O_XOR || op == O_NEG || op == O_NOT || op == O_VSUMW {
             return true;
         }
+        if op == O_VMULW {
+            return vfit(self.vt(t.a));
+        }
         if op == O_SHL || op == O_LSHR || op == O_ASHR {
             return self.uniform(t.b);
         }
@@ -7643,6 +7665,17 @@ extend Gen {
             self.vget(t.a);
             self.vsum_pairs(t.b, lane_type(self.vt(t.b)), lt);
             self.sop(V_ADD[k]);
+        } else if op == O_VMULW {
+            // `extmul` of the operands' low or high lanes, unsigned 2 past the signed form.
+            self.vget(t.a);
+            self.vget(t.b);
+            self.sop(
+                V_EXTMUL[k - 1] + ast::pick((t.aux & MULW_SIGNED) == 0, 2u32, 0) + ast::pick(
+                    (t.aux & MULW_HIGH) != 0,
+                    1u32,
+                    0,
+                ),
+            );
         } else if op == O_MULHS || op == O_MULHU {
             // The double-width products of the low and high lanes, then each one's high half.
             let u = ast::pick(op == O_MULHU, 2u32, 0);
@@ -7997,7 +8030,10 @@ extend Gen {
         let c = (code - core::OP_SIMD) as u8;
         let rule = core::simd_op(c).rule;
         if rule == core::SR_INDEX {
-            let two = c == core::SIMD_SHUFFLE && t.b == 2 && self.vt(b.pool[t.a as usize + 1]) == t0;
+            // A shuffle of two or three vectors of one type (the third through a second `i8x16.shuffle`).
+            let two = c == core::SIMD_SHUFFLE && (t.b == 2 || t.b == 3) && self.vt(b.pool[t.a as usize + 1]) == t0 && (t.b == 2 || self.vt(
+                b.pool[t.a as usize + 2],
+            ) == t0);
             return (c == core::SIMD_SWIZZLE && t.b == 1 || two) && t.c != VNONE && vfit(t0) && vfit(t.ty) && lane_type(
                 t0,
             ) == lane_type(t.ty);
@@ -8025,6 +8061,11 @@ extend Gen {
             return c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_MINIMUM || c == core::SIMD_MAXIMUM || c == core::SIMD_ABS || c >= core::SIMD_SQRT && c <= core::SIMD_ROUND_EVEN;
         }
         let eb = type_bytes(lt, 4);
+        // The set bits of lanes up to 4 bytes (`i8x16.popcnt`, then pairwise sums), the bytes of lanes past one
+        // swapped (`i8x16.shuffle`): `vector_bits`.
+        if t.b == 1 && (c == core::SIMD_POPCNT && eb <= 4 || c == core::SIMD_BSWAP && eb > 1) {
+            return true;
+        }
         return c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_NEG || c == core::SIMD_WRAP_MUL && eb > 1 || c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_WRAP_ABS || c == core::SIMD_ABS && (t.aux & VOP_SIGNED) == 0 || (c == core::SIMD_SAT_ADD || c == core::SIMD_SAT_SUB) && eb <= 2 || c == core::SIMD_ABS_DIFF && eb <= 4;
     }
 
@@ -8059,28 +8100,61 @@ extend Gen {
         }
         self.vpre(i);
         if rule == core::SR_INDEX {
-            // Lane j is lane idx[j] of `a` (`a ++ b` for a shuffle, `b`'s lanes from byte 16).
+            // Lane j is lane idx[j] of `a` (`a ++ b` for a shuffle, `b`'s lanes from byte 16). Of three
+            // vectors, a second shuffle takes the third's lanes (from byte 16) beside the first's others.
             let eb = type_bytes(lt, 4);
             let n = lanes(self.vt(a));
             let cnt = b.pool[t.c as usize];
             let mut idx: [u8; 16] = [0; 16];
+            let mut idx3: [u8; 16] = [0; 16];
             for j in 0..16u32 {
                 let x = if j / eb < cnt {
                     b.pool[(t.c + 1 + j / eb) as usize]
                 } else {
                     0
                 };
-                unsafe idx[j as usize] = (ast::pick(x < n, x, 16 / eb + x - n) * eb + j % eb) as u8;
+                let y = ast::pick(x < 2 * n, x, 0);
+                unsafe idx[j as usize] = (ast::pick(y < n, y, 16 / eb + y - n) * eb + j % eb) as u8;
+                unsafe idx3[j as usize] = if x < 2 * n {
+                    j as u8
+                } else {
+                    (16 + (x - 2 * n) * eb + j % eb) as u8
+                };
             }
-            if t.b == 2 {
+            if t.b >= 2 {
                 self.vget(a);
                 self.vget(b.pool[t.a as usize + 1]);
             } else {
                 self.vget_one(a);
             }
             self.shuffle(&idx);
+            if t.b == 3 {
+                self.vget(b.pool[t.a as usize + 2]);
+                self.shuffle(&idx3);
+            }
         } else if rule == core::SR_BITCAST {
             self.vget(a);
+        } else if c == core::SIMD_BSWAP {
+            // Byte j of a lane from byte eb - 1 - j.
+            let eb = type_bytes(lt, 4);
+            let mut idx: [u8; 16] = [0; 16];
+            for j in 0..16u32 {
+                unsafe idx[j as usize] = (j / eb * eb + eb - 1 - j % eb) as u8;
+            }
+            self.vget_one(a);
+            self.shuffle(&idx);
+        } else if c == core::SIMD_POPCNT {
+            // Per byte, then sums of pairs up to the lane: `i16x8.extadd_pairwise_i8x16_u`,
+            // `i32x4.extadd_pairwise_i16x8_u`.
+            let eb = type_bytes(lt, 4);
+            self.vget(a);
+            self.sop(w::I8X16_POPCNT);
+            if eb >= 2 {
+                self.sop(w::I16X8_EXTADD_PAIRWISE_I8X16_U);
+            }
+            if eb >= 4 {
+                self.sop(w::I32X4_EXTADD_PAIRWISE_I16X8_U);
+            }
         } else {
             let y = if t.b == 2 {
                 b.pool[t.a as usize + 1]

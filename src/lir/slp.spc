@@ -2,22 +2,26 @@
 // vectorizer: a pack of N isomorphic scalar values, one per lane of a vector of the target's register
 // width (`Package.vector`, at least 16 bytes; a seed short of that many lanes packs the widest power of
 // two of 16 bytes or more it fills), becomes one vector value. The seeds: N stores to consecutive
-// addresses with nothing that touches memory between them, N parameters of a block whose arguments on
-// one edge are loads from consecutive addresses (a loop's carried values: the vector stays in a register
-// across the back edge), and the N terms of a sum (a tree of integer adds, or float adds the build
-// reassociates, each but the root with one use: one vector reduction), or a multiple of N of them up to
-// SUM_PACKS packs (their vectors added, then one reduction). The lanes of a pack's operand
-// form a pack in turn: N instructions of one operation in one block (an `add`, `or` or `xor`, also with
-// other values among them, each the operation of itself and 0: LLVM's copyable elements), N loads from
-// consecutive addresses
-// with no write between them (one vector load), N parameters of one block other than the entry (one
-// vector parameter; each edge into the block passes the pack of its arguments), one value (a splat) or
-// any values (a gather through memory). A value a pack holds in another arrangement is gathered. The
+// addresses, in any order within SPAN_MAX instructions, each apart from every access between it and the
+// group's last (`apart`: one base at offsets apart, a read-only referent's load, or the optimizer's alias
+// classes and objects), N parameters of a block whose arguments on one edge are loads from consecutive
+// addresses (a loop's carried values: the vector stays in a register across the back edge), and the N
+// terms of a sum (a tree of integer adds, or float adds the build reassociates, each but the root with one
+// use: one vector reduction), or more (a pack of each N, their vectors added, then one reduction, which
+// the terms past the last pack join). The lanes of a pack's operand form a pack in turn: N instructions of one operation in
+// one block (an `add`, `or` or `xor`, also with other values among them, each the operation of itself and
+// 0: LLVM's copyable elements), N loads from consecutive addresses each apart from the writes between the
+// first and it (one vector load), N parameters of one block other than the entry (one vector parameter;
+// each edge into the block passes the pack of its arguments), one value (a splat), a pack's lanes or
+// consecutive loads reversed, their halves or their pairs swapped (a `swizzle` the backends do in
+// registers), or any values (a gather through memory). Each seed's packs must save more than they add
+// (`pays`): a lane a use outside the packs reads keeps its scalar instruction and its operands'. The
 // scalar instructions stay for the uses outside the packs, and go where none is left; a vector
 // parameter's lanes come out through memory at its block's start for the scalar uses. `lir::opt` keeps
 // the result when it lowers the instruction count weighted by loop depth.
 import lir::ir as *;
 import lir::verify as lv;
+import lir::loops as lu;
 import ir::core as core;
 import ast::ast as ast;
 
@@ -30,8 +34,6 @@ const DEPTH_MAX: u32 = 32;
 // group's last; loads more than SPAN_MAX apart are no pack (each search is linear in them).
 const ARGS_MAX: u32 = 64;
 const SPAN_MAX: u32 = 64;
-// A sum seed takes at most SUM_PACKS packs of its terms.
-const SUM_PACKS: u32 = 16;
 // A vector load of what scalar stores just wrote waits for them (no store forwarding): its cost in
 // instructions.
 const GATHER_COST: u64 = 8;
@@ -41,15 +43,16 @@ const PK_LOAD: u8 = 2; // loads from consecutive addresses
 const PK_PARAM: u8 = 3; // parameters of one block
 const PK_SPLAT: u8 = 4; // one value in every lane
 const PK_GATHER: u8 = 5; // any values
+const PK_PERM: u8 = 6; // another pack's lanes in another order: lane `perm_lane(n, s, k)` (`perm_ok`)
 
 struct Pack {
     pub(package) kind: u8,
     pub(package) ty: u8, // the lanes' type
     pub(package) n: u32, // the lane count
     pub(package) lane: u32, // its lanes: `lv[lane .. lane + n]`
-    pub(package) a: u32, // PK_OP: the operand packs (`b` NONE for a unary operation)
+    pub(package) a: u32, // PK_OP: the operand packs (`b` NONE for a unary operation); PK_PERM: its source, `s`
     pub(package) b: u32,
-    pub(package) blk: u32, // PK_GATHER: the block it runs in, right before instruction `at` (NONE: at its end)
+    pub(package) blk: u32, // PK_GATHER, PK_PERM: the block it runs in, right before instruction `at` (NONE: at its end)
     pub(package) at: u32,
     pub(package) vec: Value, // its vector once made (VNONE: not yet)
     pub(package) tpl: Value, // PK_OP: its first lane of the operation (`identity`); else its first lane
@@ -80,6 +83,13 @@ pub(package) struct Slp {
     pown: Vector<u32>, // per block parameter, its PK_PARAM pack (NONE: none)
     iblk: Vector<u32>, // per instruction, its block
     pblk: Vector<u32>, // per block parameter, its block
+    acls: Vector<u8>, // per instruction, its access's alias class (`lir::opt`'s `acls`)
+    aobj: Vector<u32>, // per instruction, the object it accesses (`lir::opt`'s `aobj`)
+    scoped: u64, // the scope classes (`lir::opt`'s `sbits`)
+    /// `plan` took no classes and an access through another base might have been apart with them.
+    pub(package) wants: bool,
+    /// What the seeds `pays` kept save, weighted: `lir::opt` packs a body only for 2 or more.
+    pub(package) paid: i64,
     // The edges into block `k`: `ins[in_at[k] .. in_at[k + 1]]`, from blocks `insrc[..]`.
     in_at: Vector<u32>,
     ins: Vector<u32>,
@@ -90,7 +100,12 @@ pub(package) struct Slp {
     groups: Vector<(u32, u32)>, // per store seed: its first `stores` index, the pack of its values
     reds: Vector<(u32, u32, u32)>, // per sum seed: its root add, its first pack in `rpk`, their count
     rpk: Vector<u32>, // the packs of the sum seeds' terms, `n` terms each
-    uses: Vector<u32>, // per instruction, its uses (`red_seeds`)
+    rrest: Vector<(u32, u32)>, // per sum seed: its first term in `rterm` past its packs, their count
+    rterm: Vector<Value>,
+    uses: Vector<u32>, // per instruction, its uses, edge arguments too
+    inuse: Vector<u32>, // per instruction, its uses by the packs' lanes, the seeds' stores and sums
+    kept: Vector<bool>, // `pays`: per instruction, whether its scalar stays for a use outside the packs
+    wgt: Vector<u64>, // per block, the weight of an instruction there
     assoc: bool, // float adds reassociate
     hfa: bool, // a homogeneous float aggregate parameter or result passes in registers (`Package.hfa_regs`)
     sclaim: Vector<bool>, // per instruction, whether a store seed holds it
@@ -122,6 +137,11 @@ extend Slp {
             pown: Vector::<u32>::new(),
             iblk: Vector::<u32>::new(),
             pblk: Vector::<u32>::new(),
+            acls: Vector::<u8>::new(),
+            aobj: Vector::<u32>::new(),
+            scoped: 0,
+            wants: false,
+            paid: 0,
             in_at: Vector::<u32>::new(),
             ins: Vector::<u32>::new(),
             insrc: Vector::<u32>::new(),
@@ -131,7 +151,12 @@ extend Slp {
             groups: Vector::<(u32, u32)>::new(),
             reds: Vector::<(u32, u32, u32)>::new(),
             rpk: Vector::<u32>::new(),
+            rrest: Vector::<(u32, u32)>::new(),
+            rterm: Vector::<Value>::new(),
             uses: Vector::<u32>::new(),
+            inuse: Vector::<u32>::new(),
+            kept: Vector::<bool>::new(),
+            wgt: Vector::<u64>::new(),
             assoc: false,
             hfa: false,
             sclaim: Vector::<bool>::new(),
@@ -145,8 +170,9 @@ extend Slp {
     }
 
     /// The packs of body `b` (`ptr` its pointer size, `vb` the bytes of the widest vector, `w` per block the
-    /// weight of an instruction there; per instruction its block `iblk` and its operands
-    /// `ops[ops_at[i]..ops_arg[i]]`, per parameter its block `pblk`): whether the instructions they save
+    /// weight of an instruction there; per instruction its block `iblk` and its operands and edges'
+    /// arguments `ops[ops_at[i]..ops_at[i + 1]]`, per parameter its block `pblk`; per instruction its access's alias
+    /// class `acls` and object `aobj`, and the scope classes `scoped`): whether the instructions they save
     /// outweigh the splats and gathers they add. `b` stays as it is.
     pub(package) fn plan(
         self: &mut Self,
@@ -159,14 +185,18 @@ extend Slp {
         iblk: []u32,
         pblk: []u32,
         ops_at: []u32,
-        ops_arg: []u32,
         ops: []Value,
+        acls: []u8,
+        aobj: []u32,
+        scoped: u64,
     ) bool {
         self.ptr = ptr;
         self.vb = vb;
         self.assoc = assoc;
         self.hfa = hfa;
         self.reds.truncate(0);
+        self.rrest.truncate(0);
+        self.rterm.truncate(0);
         self.rpk.truncate(0);
         let ni = b.insts.len();
         let np = b.params.len();
@@ -183,6 +213,13 @@ extend Slp {
         self.iblk.extend_from_slice(iblk);
         self.pblk.truncate(0);
         self.pblk.extend_from_slice(pblk);
+        self.acls.truncate(0);
+        self.acls.extend_from_slice(acls);
+        self.aobj.truncate(0);
+        self.aobj.extend_from_slice(aobj);
+        self.scoped = scoped;
+        self.wants = false;
+        self.paid = 0;
         fill(&mut self.sclaim, ni, false);
         fill(&mut self.in_at, nb + 1, 0);
         for k in 0..nb {
@@ -207,24 +244,37 @@ extend Slp {
                 self.cur[s] += 1;
             }
         }
-        for k in 1..nb {
-            self.edge_seeds(b, k as u32);
-        }
-        for k in 0..nb {
-            self.store_seeds(b, k as u32);
-        }
-        // Each instruction's uses, for the sums.
+        self.wgt.truncate(0);
+        self.wgt.extend_from_slice(w);
+        // Each instruction's uses: by operands and by edges' arguments.
         fill(&mut self.uses, ni, 0);
+        fill(&mut self.inuse, ni, 0);
+        fill(&mut self.kept, ni, false);
         for i in 0..ni {
-            for q in ops_at[i]..ops_arg[i] {
+            for q in ops_at[i]..ops_at[i + 1] {
                 let v = ops[q as usize];
                 if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
                     self.uses[v as usize] += 1;
                 }
             }
         }
+        for k in 1..nb {
+            self.edge_seeds(b, k as u32);
+        }
+        let edge_packs = self.packs.len();
+        for k in 0..nb {
+            self.store_seeds(b, k as u32);
+        }
         for k in 0..nb {
             self.red_seeds(b, k as u32);
+        }
+        // What the loops' carried vectors save counts too (`paid`), with every seed's reads known; they stay
+        // whatever it is.
+        let _ = self.pays_of(b, 0, edge_packs, 0);
+        // The stores again: a group whose values a sum's packs now hold reads their vector, where before
+        // the sum's reads of them kept their scalars (`pays`).
+        for k in 0..nb * (self.reds.len() != 0) as usize {
+            self.store_seeds(b, k as u32);
         }
         // The estimate: what the packs and the seeds' stores save, less what the splats and gathers add.
         let mut gain: u64 = 0;
@@ -254,6 +304,8 @@ extend Slp {
                 } else {
                     pk.n as u64 + 1 + GATHER_COST
                 } * w[k as usize];
+            } else if pk.kind == PK_PERM {
+                cost += perm_cost(pk) * w[pk.blk as usize];
             }
         }
         for g in 0..self.groups.len() {
@@ -322,7 +374,18 @@ extend Slp {
             let one = [v];
             let at = b.pool_list(one[0..1]);
             let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
-            let red = self.make(b, Inst { op: O_VOP, ty: t.ty, aux: code, a: at, b: 1, c: VNONE }, k, r, true);
+            let mut red = self.make(b, Inst { op: O_VOP, ty: t.ty, aux: code, a: at, b: 1, c: VNONE }, k, r, true);
+            // The terms past the packs, added to the reduction in order.
+            let (r0, nr) = self.rrest[x];
+            for q in r0..r0 + nr {
+                red = self.make(
+                    b,
+                    Inst { op: t.op, ty: t.ty, aux: 0, a: red, b: self.rterm[q as usize], c: VNONE },
+                    k,
+                    r,
+                    true,
+                );
+            }
             let c = self.make(b, Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 1, b: 0, c: VNONE }, k, r, false);
             b.insts[r as usize] = Inst { op: O_SELECT, ty: t.ty, aux: 0, a: c, b: red, c: red };
         }
@@ -330,7 +393,10 @@ extend Slp {
             let (s0, vp) = self.groups[g];
             let n = self.packs[vp as usize].n;
             let first = self.stores[s0 as usize];
-            let last = self.stores[(s0 + n - 1) as usize];
+            let mut last: u32 = 0;
+            for q in 0..n {
+                last = last.max(self.stores[(s0 + q) as usize]);
+            }
             let t = b.insts[first as usize];
             let (root, off) = address(b, t);
             let v = self.vector(b, vp);
@@ -390,10 +456,9 @@ extend Slp {
             let at = self.tmp.len();
             self.open.truncate(0);
             self.open.push(i);
-            let mut ok = true;
-            // Each step opens one add or takes one term: at most 2 * n * SUM_PACKS + 1 steps.
+            // Each step opens one add of the block or takes one term: at most 2 * len + 1 steps.
             let mut steps: u32 = 0;
-            while self.open.len() != 0 && ok && steps <= 2 * n * SUM_PACKS + 1 {
+            while self.open.len() != 0 && steps <= 2 * bk.len + 1 {
                 steps += 1;
                 let v = self.open.pop().unwrap();
                 if v == i || self.inner(b, v, k, t) {
@@ -401,31 +466,34 @@ extend Slp {
                     let x = b.insts[v as usize];
                     self.open.push(x.b);
                     self.open.push(x.a);
-                } else if (self.tmp.len() - at) as u32 == n * SUM_PACKS {
-                    ok = false;
                 } else {
                     self.tmp.push(v);
                 }
             }
             let got = (self.tmp.len() - at) as u32;
             let size = type_bytes(t.ty, self.ptr);
-            // One pack of the terms, or a pack of each `n` of them.
-            let np = if got <= n && fit(got, n, size) == got {
+            // One pack of the terms, or a pack of each `n` of them, the rest (`rest`) added to the reduction.
+            let one = got <= n && fit(got, n, size) == got;
+            let np = if one {
                 1u32
-            } else if got > n && got % n == 0 {
-                got / n
             } else {
-                0u32
+                got / n
             };
-            if ok && self.open.len() == 0 && got >= 2 && np != 0 {
+            let rest = if one {
+                0u32
+            } else {
+                got % n
+            };
+            if self.open.len() == 0 && got >= 2 && np != 0 {
                 // Kept when no pack it makes gathers; else its packs go.
                 let np0 = self.packs.len();
                 let nl0 = self.lv.len();
                 let ne0 = self.eargs.len();
                 let r0 = self.rpk.len() as u32;
                 let mut keep = true;
+                let per = (got - rest) / np;
                 for q in 0..np {
-                    let vp = self.build(b, at as u32 + q * (got / np), got / np, t.ty, k, i, 0);
+                    let vp = self.build(b, at as u32 + q * per, per, t.ty, k, i, 0);
                     keep = keep && vp != NONE && self.packs[vp as usize].kind != PK_SPLAT && self.packs[vp as usize].kind != PK_GATHER;
                     if !keep {
                         break;
@@ -433,13 +501,27 @@ extend Slp {
                     self.rpk.push(vp);
                 }
                 for p in np0..self.packs.len() {
-                    keep = keep && self.packs[p].kind != PK_GATHER;
+                    keep = keep && (self.packs[p].kind != PK_GATHER || self.consts(b, self.packs[p]));
                 }
+                // The adds that the vector adds and the reduction replace.
+                let w = self.wgt[k as usize] as i64;
+                let saved = (got - np - rest) as i64 * w - self.red_step as i64 * per.trailing_zeros() as i64 * w;
+                for x in at..at + (got - rest) as usize {
+                    self.use_lane(self.tmp[x], 1);
+                }
+                keep = keep && self.pays(b, np0, saved);
                 if keep {
                     self.reds.push((i, r0, np));
+                    self.rrest.push((self.rterm.len() as u32, rest));
+                    for x in at + (got - rest) as usize..at + got as usize {
+                        self.rterm.push(self.tmp[x]);
+                    }
                 } else {
+                    for x in at..at + (got - rest) as usize {
+                        self.use_lane(self.tmp[x], -1);
+                    }
                     self.rpk.truncate(r0 as usize);
-                    self.drop_packs(np0, nl0, ne0);
+                    self.drop_packs(b, np0, nl0, ne0);
                 }
             }
             self.tmp.truncate(at);
@@ -448,9 +530,15 @@ extend Slp {
 
     // Drop the packs from `np0` on (their lanes from `nl0`, the edge packs from `ne0`): their values belong
     // to no pack again.
-    fn drop_packs(self: &mut Self, np0: usize, nl0: usize, ne0: usize) {
+    fn drop_packs(self: &mut Self, b: &Body, np0: usize, nl0: usize, ne0: usize) {
+        for x in ne0..self.eargs.len() {
+            self.use_edge(b, x, -1);
+        }
         for p in np0..self.packs.len() {
             let pk = self.packs[p];
+            if pk.kind == PK_OP {
+                self.use_operands(b, p as u32, -1);
+            }
             if pk.kind != PK_OP && pk.kind != PK_LOAD && pk.kind != PK_PARAM {
                 continue;
             }
@@ -536,8 +624,9 @@ extend Slp {
         }
     }
 
-    // The stores of block `k` to consecutive addresses, nothing between them touching memory, whose
-    // values pack into instructions, loads or parameters.
+    // The stores of block `k` to consecutive addresses, each apart from every access between it and the
+    // group's last (`apart`: the vector store goes there), whose values pack into instructions, loads or
+    // parameters.
     fn store_seeds(self: &mut Self, b: &Body, k: u32) {
         let bk = b.blocks[k as usize];
         let end = bk.start + bk.len - 1;
@@ -556,37 +645,71 @@ extend Slp {
                 continue;
             }
             let size = type_bytes(ty, self.ptr) as i64;
-            // The values on the lane stack, the stores past the seeds' (`stores`) until it is one.
+            // The values on the lane stack, the stores past the seeds' (`stores`) until it is one: lane `q`
+            // the store to `off + q * size` within SPAN_MAX instructions of `i`, before it or after it.
             let at = self.tmp.len();
             let sat = self.stores.len();
             self.tmp.push(t.b);
             self.stores.push(i);
+            let lo = bk.start.max(i.max(SPAN_MAX) - SPAN_MAX);
+            let hi = end.min(i + SPAN_MAX + 1);
             let mut got: u32 = 1;
-            let mut j = i + 1;
-            while j < end && j - i <= SPAN_MAX && got < n {
-                let u = b.insts[j as usize];
-                let mut lane = false;
-                if u.op == O_STORE && (u.aux & MEM_VOLATILE) == 0 && !self.sclaim[j as usize] && b.type_of(u.b) == ty {
-                    let (r2, o2) = address(b, u);
-                    lane = r2 == root && o2 == off + got as i64 * size;
+            while got < n {
+                let mut found = NONE;
+                for j in lo..hi {
+                    let u = b.insts[j as usize];
+                    if j != i && u.op == O_STORE && (u.aux & MEM_VOLATILE) == 0 && !self.sclaim[j as usize] && b.type_of(
+                        u.b,
+                    ) == ty {
+                        let (r2, o2) = address(b, u);
+                        if r2 == root && o2 == off + got as i64 * size {
+                            found = j;
+                            break;
+                        }
+                    }
                 }
-                if lane {
-                    self.tmp.push(u.b);
-                    self.stores.push(j);
-                    got += 1;
-                } else if touches(u) {
+                if found == NONE {
                     break;
                 }
-                j += 1;
+                self.tmp.push(b.insts[found as usize].b);
+                self.stores.push(found);
+                got += 1;
             }
-            let m = fit(got, n, size as u32);
+            // The widest group whose stores move to its last one past the accesses between (`group_last`).
+            let mut m = fit(got, n, size as u32);
+            let mut last = NONE;
+            while m != 0 {
+                last = self.group_last(b, sat, m);
+                if last != NONE {
+                    break;
+                }
+                m = fit(m - 1, n, size as u32);
+            }
+            let np0 = self.packs.len();
+            let nl0 = self.lv.len();
+            let ne0 = self.eargs.len();
             let vp = if m != 0 {
-                self.build(b, at as u32, m, ty, k, self.stores[sat + m as usize - 1], 0)
+                self.build(b, at as u32, m, ty, k, last, 0)
             } else {
                 NONE
             };
+            let mut keep = vp != NONE && self.packs[vp as usize].kind != PK_SPLAT && self.packs[vp as usize].kind != PK_GATHER;
+            if keep {
+                // The stores the vector store replaces.
+                let saved = (m - 1) as i64 * self.wgt[k as usize] as i64 / ast::pick(self.pairs, 2i64, 1);
+                for q in 0..m {
+                    self.use_lane(self.tmp[at + q as usize], 1);
+                }
+                keep = self.pays(b, np0, saved);
+                if !keep {
+                    for q in 0..m {
+                        self.use_lane(self.tmp[at + q as usize], -1);
+                    }
+                }
+            }
             self.tmp.truncate(at);
-            if vp == NONE || self.packs[vp as usize].kind == PK_SPLAT || self.packs[vp as usize].kind == PK_GATHER {
+            if !keep {
+                self.drop_packs(b, np0, nl0, ne0);
                 self.stores.truncate(sat);
                 continue;
             }
@@ -597,6 +720,31 @@ extend Slp {
                 self.sclaim[self.stores[q] as usize] = true;
             }
         }
+    }
+
+    // The last of the stores `stores[sat .. sat + m]` of one block, when each is apart from every access
+    // between it and that last one but the group's (`apart`): the vector store goes there. NONE when not.
+    fn group_last(self: &mut Self, b: &Body, sat: usize, m: u32) u32 {
+        let mut last: u32 = 0;
+        for q in 0..m {
+            last = last.max(self.stores[sat + q as usize]);
+        }
+        for q in 0..m {
+            let s = self.stores[sat + q as usize];
+            for u in s + 1..last {
+                if !touches(b.insts[u as usize]) || self.apart(b, s, u) {
+                    continue;
+                }
+                let mut lane = false;
+                for r in 0..m {
+                    lane = lane || self.stores[sat + r as usize] == u;
+                }
+                if !lane {
+                    return NONE;
+                }
+            }
+        }
+        return last;
     }
 
     // ---- Packs ----
@@ -617,8 +765,12 @@ extend Slp {
         }
         let o = self.owner(l0);
         if o != NONE {
-            return if self.same_lanes(o, at, n) {
-                o
+            if self.same_lanes(o, at, n) {
+                return o;
+            }
+            let s = self.perm_of(o, at, n, ty);
+            return if s != 0 {
+                self.add_perm(o, s, ty, at, n, ublk, uat)
             } else {
                 self.add(PK_GATHER, ty, at, n, ublk, uat)
             };
@@ -639,10 +791,34 @@ extend Slp {
                 let ap = self.build(b, top as u32, n, ty, self.insrc[j as usize], NONE, depth + 1);
                 self.tmp.truncate(top);
                 self.eargs.push((p, e, ap));
+                self.use_edge(b, self.eargs.len() - 1, 1);
             }
             return p;
         }
         let mut kind = self.isomorphic(b, at, n, ty);
+        // Loads from consecutive addresses in another order: their vector, its lanes moved.
+        if kind == 0 && plain_load(b, l0, ty) {
+            for s in 1..2 * n {
+                if !perm_ok(n, type_bytes(ty, self.ptr), s) {
+                    continue;
+                }
+                // Lane perm_lane(s, k) of the loads in address order is lane k: lane j of them is lane
+                // perm_lane's inverse of j.
+                for q in 0..n {
+                    self.tmp.push(self.tmp[(at + perm_back(n, s, q)) as usize]);
+                }
+                let ok = self.isomorphic(b, top as u32, n, ty) == PK_LOAD;
+                let lp = if ok {
+                    self.build(b, top as u32, n, ty, ublk, uat, depth + 1)
+                } else {
+                    NONE
+                };
+                self.tmp.truncate(top);
+                if lp != NONE {
+                    return self.add_perm(lp, s, ty, at, n, ublk, uat);
+                }
+            }
+        }
         // The lanes that are no instruction of the operation (`ids`, a bit each), when they are its identity.
         let mut ids: u64 = 0;
         if kind == 0 {
@@ -668,6 +844,7 @@ extend Slp {
         if kind == PK_LOAD {
             return p;
         }
+        self.use_operands(b, p, 1);
         // The operands' packs, for the vector instruction right before the last lane: an identity lane's
         // operands are its value and 0 (VNONE, `lane_bits`).
         for q in 0..n {
@@ -749,6 +926,34 @@ extend Slp {
         return true;
     }
 
+    // The `s` of a lane order `perm_ok` takes in which pack `p` holds lanes `tmp[at .. at + n]` of type `ty`
+    // (lane k from lane `perm_lane(n, s, k)`), 0 for none.
+    const fn perm_of(self: &Self, p: u32, at: u32, n: u32, ty: u8) u32 {
+        let pk = self.packs[p as usize];
+        if pk.n != n {
+            return 0;
+        }
+        for s in 1..2 * n + 2 {
+            let mut all = perm_ok(n, type_bytes(ty, self.ptr), s);
+            for q in 0..n {
+                all = all && self.lv[(pk.lane + perm_lane(n, s, q)) as usize] == self.tmp[(at + q) as usize];
+            }
+            if all {
+                return s;
+            }
+        }
+        return 0;
+    }
+
+    // PK_PERM pack of lanes `tmp[at .. at + n]` of type `ty`: pack `src`'s, lane k from lane
+    // `perm_lane(n, s, k)`, for a user in block `ublk` right before instruction `uat`.
+    fn add_perm(self: &mut Self, src: u32, s: u32, ty: u8, at: u32, n: u32, ublk: u32, uat: u32) u32 {
+        let p = self.add(PK_PERM, ty, at, n, ublk, uat);
+        self.packs.index_mut(p as usize).a = src;
+        self.packs.index_mut(p as usize).b = s;
+        return p;
+    }
+
     // Whether lanes `tmp[at .. at + n]` are distinct parameters of type `ty` of one block other than the
     // entry, no pack holding any.
     const fn params_of_one_block(self: &Self, b: &Body, at: u32, n: u32, ty: u8) bool {
@@ -771,10 +976,10 @@ extend Slp {
         return true;
     }
 
-    // PK_LOAD when lanes `tmp[at .. at + n]` are loads of type `ty` from consecutive addresses in one block with
-    // no write between them; PK_OP when they are distinct instructions of one operation a vector has,
+    // PK_LOAD when lanes `tmp[at .. at + n]` are loads of type `ty` from consecutive addresses in one block,
+    // each apart from every write between the first lane and it (the vector load goes at the first); PK_OP when they are distinct instructions of one operation a vector has,
     // flags and type in one block; else 0. No pack holds any.
-    fn isomorphic(self: &Self, b: &Body, at: u32, n: u32, ty: u8) u8 {
+    fn isomorphic(self: &mut Self, b: &Body, at: u32, n: u32, ty: u8) u8 {
         let l0 = self.tmp[at as usize];
         let mut lo = NONE;
         let mut hi: u32 = 0;
@@ -816,9 +1021,12 @@ extend Slp {
                     return 0;
                 }
             }
-            for i in lo + 1..hi {
-                if writes_memory(b.insts[i as usize]) {
-                    return 0;
+            for q in 0..n {
+                let v = self.tmp[(at + q) as usize];
+                for i in lo + 1..v {
+                    if writes_memory(b.insts[i as usize]) && !self.apart(b, i, v) {
+                        return 0;
+                    }
                 }
             }
             return PK_LOAD;
@@ -892,6 +1100,152 @@ extend Slp {
             }
         }
         return ids;
+    }
+
+    // Count `d` (1 or -1) more uses of value `v` by the packs (`inuse`): none for a parameter or a flag.
+    fn use_lane(self: &mut Self, v: Value, d: i32) {
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
+            self.inuse[v as usize] = (self.inuse[v as usize] as i32 + d) as u32;
+        }
+    }
+
+    // Count `d` more uses (`use_lane`) of the arguments edge pack `eargs[x]` passes to a vector parameter.
+    fn use_edge(self: &mut Self, b: &Body, x: usize, d: i32) {
+        let (pp, e, _) = self.eargs[x];
+        let pk = self.packs[pp as usize];
+        for q in 0..pk.n {
+            let p = self.lv[(pk.lane + q) as usize] & ~VPARAM;
+            self.use_lane(b.edge_arg(e, p - b.blocks[self.pblk[p as usize] as usize].param_start), d);
+        }
+    }
+
+    // Count `d` more uses (`use_lane`) of the operands of PK_OP pack `p`'s lanes: an operation's
+    // operands, an identity lane's value.
+    fn use_operands(self: &mut Self, b: &Body, p: u32, d: i32) {
+        let pk = self.packs[p as usize];
+        for q in 0..pk.n {
+            let v = self.lv[(pk.lane + q) as usize];
+            if (v & VPARAM) != 0 || self.iown[v as usize] != p {
+                self.use_lane(v, d);
+            } else {
+                let t = b.insts[v as usize];
+                self.use_lane(t.a, d);
+                if !unary(t.op) {
+                    self.use_lane(t.b, d);
+                }
+            }
+        }
+    }
+
+    // Whether the packs from `np0` on, one seed's, save more than they add, with `saved` more saved: a
+    // lane whose value a use outside the packs reads keeps its scalar instruction, and so its operands',
+    // and saves none; a gather of other values than constants adds its own. A splat or a constant, which
+    // several seeds may share, counts in `plan`'s estimate of all seeds.
+    fn pays(self: &mut Self, b: &Body, np0: usize, saved: i64) bool {
+        return self.pays_of(b, np0, self.packs.len(), saved);
+    }
+
+    // `pays` of the packs from `np0` to `np1`.
+    fn pays_of(self: &mut Self, b: &Body, np0: usize, np1: usize, saved: i64) bool {
+        let mut gain = saved;
+        for p in np0..np1 {
+            let pk = self.packs[p];
+            if pk.kind == PK_OP || pk.kind == PK_LOAD {
+                let mut real: i64 = 0;
+                for q in 0..pk.n {
+                    let v = self.lv[(pk.lane + q) as usize];
+                    if (v & VPARAM) != 0 || self.iown[v as usize] != p as u32 {
+                        continue;
+                    }
+                    if self.uses[v as usize] > self.inuse[v as usize] {
+                        self.kept[v as usize] = true;
+                    }
+                    if !self.kept[v as usize] {
+                        real += 1;
+                    } else if pk.kind == PK_OP {
+                        let t = b.insts[v as usize];
+                        self.keep(t.a);
+                        self.keep(t.b);
+                    }
+                }
+                gain += (real - 1) * self.wgt[self.iblk[pk.tpl as usize] as usize] as i64;
+            } else if pk.kind == PK_GATHER && !self.consts(b, pk) {
+                gain -= (pk.n as i64 + 1 + GATHER_COST as i64) * self.wgt[pk.blk as usize] as i64;
+            } else if pk.kind == PK_PERM {
+                gain -= perm_cost(pk) as i64 * self.wgt[pk.blk as usize] as i64;
+            }
+        }
+        // `kept` back to false: the lanes and their operands.
+        for p in np0..np1 {
+            let pk = self.packs[p];
+            if pk.kind != PK_OP && pk.kind != PK_LOAD {
+                continue;
+            }
+            for q in 0..pk.n {
+                let v = self.lv[(pk.lane + q) as usize];
+                if (v & VPARAM) != 0 || self.iown[v as usize] != p as u32 {
+                    continue;
+                }
+                self.kept[v as usize] = false;
+                if pk.kind == PK_OP {
+                    let t = b.insts[v as usize];
+                    self.unkeep(t.a);
+                    self.unkeep(t.b);
+                }
+            }
+        }
+        if gain > 0 {
+            self.paid += gain;
+        }
+        return gain > 0;
+    }
+
+    // `pays`: instruction value `v`'s scalar stays (`kept`).
+    fn keep(self: &mut Self, v: Value) {
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
+            self.kept[v as usize] = true;
+        }
+    }
+
+    fn unkeep(self: &mut Self, v: Value) {
+        if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
+            self.kept[v as usize] = false;
+        }
+    }
+
+    // Whether loads or stores `x` and `y` touch different bytes, so they run in either order: through one base
+    // at offsets apart, a load of a read-only referent (CL_FROZEN, which no write touches), or objects or
+    // alias classes the optimizer keeps apart (`aobj`, `acls`; a scope's class holds only for the loops its
+    // roots are outside of, so none here). A volatile access keeps its place. Without the classes (`plan`
+    // takes none at first) two accesses through different bases are not apart, and `wants` says so.
+    fn apart(self: &mut Self, b: &Body, x: u32, y: u32) bool {
+        let tx = b.insts[x as usize];
+        let ty = b.insts[y as usize];
+        if tx.op != O_LOAD && tx.op != O_STORE || ty.op != O_LOAD && ty.op != O_STORE || ((tx.aux | ty.aux) & MEM_VOLATILE) != 0 {
+            return false;
+        }
+        let (rx, ox) = address(b, tx);
+        let (ry, oy) = address(b, ty);
+        if rx == ry && (ox + access_bytes(b, tx, self.ptr) <= oy || oy + access_bytes(b, ty, self.ptr) <= ox) {
+            return true;
+        }
+        if self.acls.len() == 0 {
+            self.wants = self.wants || rx != ry;
+            return false;
+        }
+        let jx = self.aobj[x as usize];
+        let jy = self.aobj[y as usize];
+        if jx != jy && (jx != NONE && jy != NONE || jx != NONE && (jx & lu::OBJ_PRIVATE) != 0 || jy != NONE && (jy & lu::OBJ_PRIVATE) != 0) {
+            return true;
+        }
+        let cx = self.acls[x as usize];
+        let cy = self.acls[y as usize];
+        return cx == CL_FROZEN || cy == CL_FROZEN || cx != cy && self.settled(cx) && self.settled(cy);
+    }
+
+    // Whether alias class `c` keeps its accesses apart from another class's: no CL_MANY, no scope's.
+    const fn settled(self: &Self, c: u8) bool {
+        return c < CL_MANY && (self.scoped >> c as u64 & 1) == 0;
     }
 
     // Whether `v` is the address of an aggregate parameter or result whose elements pass in registers, one
@@ -1064,6 +1418,39 @@ extend Slp {
                 t.b = vb;
             }
             v = self.make(b, t, self.iblk[last as usize], last, true);
+        } else if pk.kind == PK_PERM {
+            // At the user, of the source's vector: a `swizzle` of lane k from lane k ^ s; a rotation, a
+            // `shuffle` of the vector with itself from lane r on (`lv::lane_slide`); its low or high half's
+            // lanes twice each, the vector interleaved with itself.
+            let va = self.vector(b, pk.a);
+            if pk.b >= 2 * pk.n {
+                let op = ast::pick(pk.b == 2 * pk.n, O_VZIPLO, O_VZIPHI);
+                v = self.make(b, Inst { op: op, ty: vt, aux: 0, a: va, b: va, c: 0 }, pk.blk, pk.at, true);
+                self.packs.index_mut(p as usize).vec = v;
+                return v;
+            }
+            let ix = b.pool.len() as u32;
+            b.pool.push(pk.n);
+            let rot = pk.b >= pk.n;
+            for q in 0..pk.n {
+                b.pool.push(
+                    if rot {
+                        pk.b - pk.n + q
+                    } else {
+                        q ^ pk.b
+                    },
+                );
+            }
+            let two = [va, va];
+            let ap = b.pool_list(two[0..1 + rot as usize]);
+            let code = (core::OP_SIMD + ast::pick(rot, core::SIMD_SHUFFLE, core::SIMD_SWIZZLE) as u32) as u16;
+            v = self.make(
+                b,
+                Inst { op: O_VOP, ty: vt, aux: code, a: ap, b: 1 + rot as u32, c: ix },
+                pk.blk,
+                pk.at,
+                true,
+            );
         } else if pk.kind == PK_LOAD {
             let mut first = l0;
             for q in 1..pk.n {
@@ -1197,6 +1584,56 @@ const fn fit(got: u32, n: u32, size: u32) u32 {
     return ast::pick(m <= got && m * size >= VBYTES, m, 0u32);
 }
 
+// The lane of the source PK_PERM lane `k` of `n` takes: `k ^ s` for `s` below `n`; `k` rotated by `s - n`
+// below `2 * n`; lane `k / 2` of the low half (`2 * n`) or of the high half (`2 * n + 1`).
+const fn perm_lane(n: u32, s: u32, k: u32) u32 {
+    return if s < n {
+        k ^ s
+    } else if s < 2 * n {
+        (k + s - n) % n
+    } else {
+        (s - 2 * n) * n / 2 + k / 2
+    };
+}
+
+// The lane `perm_lane(n, s, ..)` maps to `j`: the inverse.
+const fn perm_back(n: u32, s: u32, j: u32) u32 {
+    return if s < n {
+        j ^ s
+    } else {
+        (j + 2 * n - s) % n
+    };
+}
+
+// Whether a vector of `n` lanes of `eb` bytes moves its lanes in registers as lane k from lane
+// `perm_lane(n, s, k)` does: of 16 bytes, the lanes reversed within each 8 bytes, the 8-byte halves
+// swapped, or both (`lv::lane_perm`), or a half's lanes twice each (`O_VZIPLO`, `O_VZIPHI`); of 8, 16 or
+// 32 bytes, rotated (`lv::lane_slide`).
+const fn perm_ok(n: u32, eb: u32, s: u32) bool {
+    if s >= n && s < 2 * n {
+        return s != n && (n * eb == 8 || n * eb == 16 || n * eb == 32);
+    }
+    if s == 2 * n || s == 2 * n + 1 {
+        return n * eb == 16;
+    }
+    if n * eb != 16 || s == 0 || s >= n {
+        return false;
+    }
+    let m = 8 / eb;
+    let rev = m > 1 && (s & m - 1) == m - 1;
+    let swap = (s & ~(m - 1)) == n - m;
+    return (rev || swap) && s == (rev as u32 * (m - 1) | swap as u32 * (n - m));
+}
+
+// The instructions PK_PERM pack `pk` moves its lanes with: one per step (`perm_ok`).
+const fn perm_cost(pk: Pack) u64 {
+    if pk.b >= pk.n {
+        return 1;
+    }
+    let m = 8 / (16 / pk.n);
+    return ((pk.b & m - 1) != 0) as u64 + ((pk.b & ~(m - 1)) != 0) as u64;
+}
+
 const fn unary(op: u8) bool {
     return op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT;
 }
@@ -1218,6 +1655,18 @@ fn lane_bits(b: &Body, v: Value) Option<u64> {
     } else {
         const_bits(b, v)
     };
+}
+
+// The bytes load or store `t` accesses.
+const fn access_bytes(b: &Body, t: Inst, ptr: u32) i64 {
+    return type_bytes(
+        if t.op == O_LOAD {
+            t.ty
+        } else {
+            b.type_of(t.b)
+        },
+        ptr,
+    );
 }
 
 // Whether `t` may read or write memory.

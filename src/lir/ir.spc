@@ -318,7 +318,13 @@ pub(package) const O_BITREV: u8 = 87;
 /// of `b`, `g` the ratio of their lane counts (a loop's widening sum, `lir::loops`; arm64's UADALP, x86-64's
 /// PSADBW).
 pub(package) const O_VSUMW: u8 = 88;
-pub(package) const OP_COUNT: u8 = 89;
+/// The exact products of the lanes of integer vectors `a` and `b` (of one type, lanes half the result's
+/// width, as many as its `n` or twice as many), each lane extended first (`MULW_SIGNED`: sign-extended, else
+/// zero-extended): lane k is the product of lanes `k` of `a` and `b`, with `MULW_HIGH` of lanes `n + k` of
+/// operands of `2n` lanes (a split part's, `lir::wide`). A loop's widening product (`lir::loops`; arm64's
+/// SMULL and UMULL, x86-64's PMULDQ and PMULUDQ, wasm's `extmul`).
+pub(package) const O_VMULW: u8 = 89;
+pub(package) const OP_COUNT: u8 = 90;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -326,7 +332,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 89] = [
+pub(package) const OPS: [OpInfo; 90] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -416,6 +422,7 @@ pub(package) const OPS: [OpInfo; 89] = [
     OpInfo { name: "bswap", form: F_UN },
     OpInfo { name: "bitrev", form: F_UN },
     OpInfo { name: "vsumw", form: F_BIN },
+    OpInfo { name: "vmulw", form: F_BIN },
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
@@ -846,6 +853,11 @@ pub(package) const MEM_BOOL: u16 = 32;
 /// `O_LOAD` of an integer: the value read is at most `b`, unsigned (an enum's tag: its greatest
 /// discriminant; the text's `range b`). A copy that keeps the flags and gives `b` VNONE keeps no bound.
 pub(package) const MEM_RANGE: u16 = 64;
+/// `O_LOAD` of a vector at an address aligned to its bytes (the text's `block`; `lir::loops`' scans of a
+/// terminated sequence): it may read past the end of the object of its first byte, within its aligned
+/// block, which never crosses a page (every target's pages hold a multiple of 64 bytes); those bytes read as
+/// any values (the LIR evaluator's: 0).
+pub(package) const MEM_BLOCK: u16 = 128;
 /// The greatest value load `t` (of type mask `m`) reads by its flags: 1 for a `bool`, `b` for a bounded
 /// one (MEM_RANGE); None for another instruction.
 pub(package) const fn load_bound(t: Inst, m: u64) Option<u64> {
@@ -879,6 +891,10 @@ pub(package) const SH_EXACT: u16 = 1;
 /// for 0 is any value, so a target whose bit scan leaves 0 undefined takes no fix-up (x86-64's `bsr`,
 /// `bsf`). A rewrite that reads the count where the operand may be 0 drops the flag.
 pub(package) const CNT_NONZERO: u16 = 1;
+/// `O_VMULW`: the lanes are signed (the text's `.s`).
+pub(package) const MULW_SIGNED: u16 = 1;
+/// `O_VMULW`: the products of the operands' high half of lanes (the text's `.hi`).
+pub(package) const MULW_HIGH: u16 = 2;
 
 /// Atomic memory orders (`aux` bits 0 to 2 of the atomic opcodes; `O_ACAS`: the failure order in bits
 /// 3 to 5, then ACAS_WEAK; `O_ARMW`: the operation in bits 4 to 7).
@@ -1164,6 +1180,24 @@ pub(package) const fn alloc_of(name0: str) u8 {
     }
     return ast::pick(name == "memcmp", ALLOC_MEMCMP, ALLOC_NONE);
 }
+/// Whether the C library function named `name0` (`__sc_x_<c name>` is an alias) reads and writes no memory
+/// and comes back: `fabs`, `floor`, `ceil`, `trunc`, `round`, `fmin`, `fmax` and `copysign`, and their
+/// `f` forms, whose results are exact and which set no `errno` (C17 7.12.7.2, 7.12.9, 7.12.11.1, 7.12.12).
+/// A package that defines the function treats it as any other (`lir::opt`'s `effects`).
+pub(package) const fn pure_libm(name0: str) bool {
+    let name = if name0.starts_with("__sc_x_") {
+        name0.slice(7, name0.len())
+    } else {
+        name0
+    };
+    let n = if name.ends_with("f") && name != "f" {
+        name.slice(0, name.len() - 1)
+    } else {
+        name
+    };
+    return n == "fabs" || n == "floor" || n == "ceil" || n == "trunc" || n == "round" || n == "fmin" || n == "fmax" || n == "copysign";
+}
+
 /// `Sym.fx`: a call may read memory; a call may write memory; a call may write the memory its pointer
 /// arguments address (and no other); a call may not come back (a panic, a trap, a loop, a recursion, a
 /// call that may not).
@@ -1893,10 +1927,22 @@ pub(package) struct Package {
     /// (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop vectorizer computes the idiom at
     /// the narrow lanes.
     pub(package) vec_absd: u8,
+    /// The lane sizes whose `clz`, `popcnt` and `bswap` the native backend computes in registers
+    /// (`target::table::Isa`), a bit per size in bytes in bits 0 to 7, 8 to 15 and 16 to 23: the loop
+    /// vectorizer widens them (`SIMD_CLZ`, `SIMD_POPCNT`, `SIMD_BSWAP`).
+    pub(package) vec_bits: u32,
+    /// The instructions the native backend takes to permute the lanes of up to three vectors in registers
+    /// (`target::table::Isa`, a `shuffle` of three operands), 0 for none: the loop vectorizer loads and
+    /// stores groups of every third element through them, at that cost.
+    pub(package) vec_perm3: u8,
     /// The widening sums (`O_VSUMW`) the native backend computes in registers (`target::table::Isa`), a bit
     /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
     /// into accumulators of such lanes.
     pub(package) vec_sumw: u16,
+    /// The widening products (`O_VMULW`) the native backend computes in registers (`target::table::Isa`), a
+    /// bit per operand lane size in bytes (1, 2, 4), unsigned in bits 0 to 7 and signed in bits 8 to 15: the
+    /// loop vectorizer multiplies two extended values' narrow lanes.
+    pub(package) vec_mulw: u16,
     /// Whether the native backend computes the absolute value, C's `fmin` and `fmax`, and the fused
     /// multiply-add (with `fma`) of float vectors in registers (`target::table::Isa`): the loop vectorizer
     /// then widens the calls of C's `fabs`, `fmin`, `fmax` and `fma` (`lir::loops::lane_fn`).
@@ -1958,6 +2004,21 @@ pub(package) struct Package {
     /// The processor has SSE4.1 (x86-64 `roundsd`, from x86-64-v2 or `-msse4.1`): the C library's exact
     /// roundings are instructions (`target::x64intrin::SSE41_ROWS`).
     pub(package) sse41: bool,
+    /// The native backend looks up the bytes of a 16-byte table by a vector of byte indices in one
+    /// instruction (`SIMD_SWIZZLE_ZERO` of bytes; x86-64's SSSE3 `pshufb`, also on 32 and 64 bytes for a
+    /// table of one 16-byte pattern and indices below 16): the loop vectorizer counts set bits by a table
+    /// of the nibbles' counts (`lir::loops::nibble_count`).
+    pub(package) vtbl: bool,
+    /// The native backend makes the bits of a 16-byte lane mask of bytes in one instruction
+    /// (`target::table::Isa`, x86-64's PMOVMSKB): an unbounded scan finds the lane that leaves by them
+    /// (`lir::loops::scan_bits`), else by a nibble a byte (`lir::loops::nibbles`).
+    pub(package) mask_bits: bool,
+    /// The processor subtracts the even lanes and adds the odd ones of float vectors in one instruction
+    /// (x86-64's SSE3 `addsubps`, `addsubpd`; from x86-64-v2 or `-msse3`): `codegen::live::FOLD_ADDSUB`.
+    pub(package) addsub: bool,
+    /// The processor counts leading zeros in one instruction, the width for 0 (x86-64's `lzcnt`, from
+    /// x86-64-v3 or `-mlzcnt`).
+    pub(package) lzcnt: bool,
     /// The processor has the Large System Extensions (arm64 `ldadd`, `cas`; Armv8.1-A): else an atomic
     /// read-modify-write or compare-and-swap is a loop of exclusive loads and stores.
     pub(package) lse: bool,
@@ -2094,7 +2155,10 @@ extend Package {
             vec_accs: 0,
             vec_sat: 7,
             vec_absd: 7,
+            vec_bits: 0x0E0F07,
+            vec_perm3: 9,
             vec_sumw: 0x8CE,
+            vec_mulw: 0x0707,
             vfloat: true,
             vround: true,
             vround_away: false,
@@ -2114,6 +2178,10 @@ extend Package {
             align_loops: false,
             popcnt: false,
             sse41: false,
+            vtbl: false,
+            mask_bits: false,
+            addsub: false,
+            lzcnt: false,
             lse: false,
             rcpc: false,
             switch_tree: false,
@@ -2200,7 +2268,7 @@ extend Package {
                 noinline: false,
                 always: false,
                 cold: false,
-                fx: FX_READ | FX_WRITE | FX_STALL,
+                fx: ast::pick(kind == SK_FUNC && pure_libm(name), 0u8, FX_READ | FX_WRITE | FX_STALL),
                 esc: ~0u64,
                 wargs: ~0u64,
                 span: NONE,
