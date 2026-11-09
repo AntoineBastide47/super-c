@@ -190,6 +190,8 @@ pub(package) struct LoopOpt {
     xstamp: u32,
     xcur: u32,
     xscan: Vector<u32>,
+    xdom: Vector<bool>, // per block, whether `close_index` reads its uses
+    xord: Vector<u32>, // per preorder number of the dominator tree, its block (`close_index`)
     // Per block, the block of the body before the first transform whose dominators it has: itself, a
     // copy's original, a landing block's target, a guard block's preheader.
     proxy: Vector<u32>,
@@ -590,6 +592,8 @@ extend LoopOpt {
             xseen: Vector::<u32>::new(),
             xstamp: 0,
             xcur: 0,
+            xdom: Vector::<bool>::new(),
+            xord: Vector::<u32>::new(),
             xscan: Vector::<u32>::new(),
             proxy: Vector::<u32>::new(),
             latch: NONE,
@@ -812,7 +816,7 @@ extend LoopOpt {
         dpost: []u32,
         cl: Classes,
     ) bool {
-        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk);
+        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk, dpre, dpost);
         // The transforms so far, and as of the last loop's.
         let mut nt: u32 = 0;
         let mut seen: u32 = 0;
@@ -1043,7 +1047,7 @@ extend LoopOpt {
         dpre: []u32,
         dpost: []u32,
     ) bool {
-        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk);
+        let cand = self.candidates(b, inner, lparent, preh, iblk, pblk, dpre, dpost);
         let mut nt: u32 = 0;
         let mut seen: u32 = 0;
         for c in 0..cand.len() {
@@ -1067,9 +1071,17 @@ extend LoopOpt {
 
     // The tables `run` and `rotate` share set for `b` (`owner`, `powner`: `iblk`'s and `pblk`'s, which the
     // transforms extend); the headers of its innermost loops with a preheader.
-    fn candidates(self: &mut Self, b: &Body, inner: []u32, lparent: []u32, preh: []u32, iblk: []u32, pblk: []u32) Vector<
-        u32
-    > {
+    fn candidates(
+        self: &mut Self,
+        b: &Body,
+        inner: []u32,
+        lparent: []u32,
+        preh: []u32,
+        iblk: []u32,
+        pblk: []u32,
+        dpre: []u32,
+        dpost: []u32,
+    ) Vector<u32> {
         let nb = b.blocks.len();
         self.proxy.truncate(0);
         for k in 0..nb {
@@ -1092,7 +1104,7 @@ extend LoopOpt {
                 cand.push(h as u32);
             }
         }
-        self.close_index(b, inner, &cand);
+        self.close_index(b, inner, &cand, dpre, dpost);
         // No block marked: `shape` clears only what it and the transforms mark.
         fill(&mut self.inl, nb, false);
         self.inl_at.truncate(0);
@@ -1102,7 +1114,7 @@ extend LoopOpt {
 
     // `xs_at` and `xs` for the candidate loops `cand` of `b` (`inner`: per block its innermost loop's
     // header): one walk of the body, so `close_plan` reads only the blocks that read a loop's values.
-    fn close_index(self: &mut Self, b: &Body, inner: []u32, cand: []u32) {
+    fn close_index(self: &mut Self, b: &Body, inner: []u32, cand: []u32, dpre: []u32, dpost: []u32) {
         let nb = b.blocks.len();
         self.xnb = nb as u32;
         self.xdone.truncate(0);
@@ -1126,11 +1138,40 @@ extend LoopOpt {
         fill(&mut self.tgt_of, nb, NONE);
         fill(&mut self.tused, nb, false);
         self.tblk.truncate(0);
+        // A loop's values have their uses in the blocks its header dominates (`close_reads`): the uses of
+        // those of the candidates, and of the blocks without dominator numbers (none reaches them, or a
+        // preheader made since), in one pass over the dominator tree's preorder; `xs` holds the headers
+        // whose subtree holds the block at hand.
+        fill(&mut self.xdom, nb, false);
+        fill(&mut self.xord, nb, NONE);
+        for k in 0..nb {
+            if k < dpre.len() && (k == 0 || dpre[k] != 0 || dpost[k] != 0) {
+                self.xord[dpre[k] as usize] = k as u32;
+            } else {
+                self.xdom[k] = true;
+            }
+        }
+        // Each block enters `xs` at most once and leaves it once.
+        for n in 0..nb {
+            let x = self.xord[n];
+            if x == NONE {
+                continue;
+            }
+            while self.xs.len() != 0 && dpost[x as usize] > dpost[self.xs[self.xs.len() - 1] as usize] {
+                let _ = self.xs.pop();
+            }
+            if self.inl[x as usize] {
+                self.xs.push(x);
+            }
+            self.xdom[x as usize] = self.xs.len() != 0;
+        }
+        self.xs.truncate(0);
         let mut pairs = Vector::<(u32, u32)>::new();
         let mut preds = Vector::<(u32, u32)>::new();
         for k in 0..nb {
             let bk = b.blocks[k];
-            for i in bk.start..bk.start + bk.len {
+            let start = ast::pick(self.xdom[k], bk.start, bk.start + bk.len);
+            for i in start..bk.start + bk.len {
                 lv::uses_edges(b, b.insts[i as usize], &mut self.uses);
                 for q in 0..self.uses.len() {
                     let v = self.uses[q];

@@ -334,6 +334,7 @@ pub(package) struct Opt {
     rel: Map<u64, u32>, // `y << 32 | x` -> whether `x <u y` holds (`rel_key`)
     eqs: Map<u64, u32>, // the pairs of values the branches in scope make equal (`rel_key` of the lower first)
     ub: Map<u64, u32>, // value -> constant `k` << 1 | 1 when `value <u k` holds, `k` << 1 when `value <=u k`
+    nsigned: u32, // the signed bounds `ub` holds (`SLO_KEY`, `SHI_KEY`): not 0 while it holds one
     log: Vector<(u8, u64, u32)>,
     places: Vector<Place>,
     recent: Vector<u32>, // the `places` entries made last in the walk's block and its dominators (`carry`)
@@ -631,6 +632,7 @@ extend Opt {
             rel: Map::<u64, u32>::new(),
             eqs: Map::<u64, u32>::new(),
             ub: Map::<u64, u32>::new(),
+            nsigned: 0,
             log: Vector::<(u8, u64, u32)>::new(),
             places: Vector::<Place>::new(),
             recent: Vector::<u32>::new(),
@@ -3775,11 +3777,20 @@ extend Opt {
         if m == 0 {
             return c;
         }
+        return self.acc_root(b, a, c, m);
+    }
+
+    // `acc` of address `a` of class `c` (no scope's) in the copies of scopes `m`.
+    fn acc_root(self: &Self, b: &Body, a: Value, c: u8, m: u64) u8 {
         let (base, _) = address_of(b, a);
-        for s in CL_NOALIAS..CL_MANY {
-            if (m & class_bit(s)) != 0 && (self.smulti[s as usize] || self.sroot[s as usize] == base) {
-                return s;
+        // The classes from CL_NOALIAS up, the lowest first: each step takes one bit of `m`.
+        let mut left = m & ~class_bit(CL_OTHER);
+        while left != 0 {
+            let s = left.trailing_zeros();
+            if self.smulti[s] || self.sroot[s] == base {
+                return s as u8;
             }
+            left &= left - 1;
         }
         return c;
     }
@@ -5067,6 +5078,7 @@ extend Opt {
         self.cond.clear_keeping(KEEP_SLOTS);
         self.rel.clear_keeping(KEEP_SLOTS);
         self.ub.clear_keeping(KEEP_SLOTS);
+        self.nsigned = 0;
         self.eqs.clear_keeping(KEEP_SLOTS);
         self.log.truncate(0);
         self.places.truncate(0);
@@ -5506,6 +5518,9 @@ extend Opt {
             let m = self.table(table);
             if prev == NONE {
                 let _ = m.remove(&key);
+                if table == LOG_UB && (key & (SLO_KEY | SHI_KEY)) != 0 {
+                    self.nsigned -= 1;
+                }
             } else {
                 m.insert(key, prev);
             }
@@ -5520,6 +5535,9 @@ extend Opt {
         };
         m.insert(key, v);
         self.log.push((table, key, prev));
+        if prev == NONE && table == LOG_UB && (key & (SLO_KEY | SHI_KEY)) != 0 {
+            self.nsigned += 1;
+        }
     }
 
     // ---- If-conversion and order facts ----
@@ -6260,19 +6278,37 @@ extend Opt {
         }
     }
 
+    // Whether `srange(v, depth)` is None by `v`'s form alone: no signed bound is in `ub`, and `v` is a
+    // parameter or an instruction other than a constant, a load and, with depth left, a select, a sum, a
+    // difference, a product or an extension.
+    const fn no_srange(self: &Self, b: &Body, v: Value, depth: u32) bool {
+        if self.nsigned != 0 {
+            return false;
+        }
+        if (v & VPARAM) != 0 {
+            return true;
+        }
+        let op = b.insts[v as usize].op;
+        return op != O_ICONST && op != O_LOAD && (depth == 0 || op != O_SELECT && op != O_ADD && op != O_SUB && op != O_MUL && op != O_SEXT && op != O_ZEXT);
+    }
+
     // The signed range `(lo, hi)` of integer `v` (of at most 64 bits) here, `depth` operations deep: a
     // constant's; the signed bounds the branches in scope and the loop counters set (`SLO_KEY`, `SHI_KEY`:
     // `order_facts`, `signed_counter`); a sum or difference with a constant, a product by a constant of at
     // least 0, an extension, when neither end leaves the type. None when nothing bounds it.
     fn srange(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<(i64, i64)> {
-        if v == VNONE || (v & VFLAG) != 0 || is_vec(b.type_of(v)) {
+        if v == VNONE || (v & VFLAG) != 0 {
             return None;
         }
-        let w = type_bits(b.type_of(v), pk.ptr_bytes);
+        let ty = b.type_of(v);
+        if is_vec(ty) {
+            return None;
+        }
+        let w = type_bits(ty, pk.ptr_bytes);
         if w == 0 || w > 64 {
             return None;
         }
-        let tmax = (width_mask(b.type_of(v), pk.ptr_bytes) >> 1) as i64;
+        let tmax = (mask_of(w) >> 1) as i64;
         let tmin = -tmax - 1;
         let k = int_bits(b, v);
         if k.is_some() {
@@ -6282,18 +6318,20 @@ extend Opt {
         let mut lo = tmin;
         let mut hi = tmax;
         let mut known = false;
-        if let Some(f) = self.ub.get(&(SLO_KEY | v as u64)) {
-            lo = lo.max(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
-            known = true;
-        }
-        if let Some(f) = self.ub.get(&(SHI_KEY | v as u64)) {
-            hi = hi.min(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
-            known = true;
+        if self.nsigned != 0 {
+            if let Some(f) = self.ub.get(&(SLO_KEY | v as u64)) {
+                lo = lo.max(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
+                known = true;
+            }
+            if let Some(f) = self.ub.get(&(SHI_KEY | v as u64)) {
+                hi = hi.min(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
+                known = true;
+            }
         }
         // A bounded load's or view length's bound below the sign bit (`load_bound`, `view_len_max`).
-        if (v & VPARAM) == 0 {
+        if (v & VPARAM) == 0 && b.insts[v as usize].op == O_LOAD {
             let t = b.insts[v as usize];
-            let m = width_mask(t.ty, pk.ptr_bytes);
+            let m = mask_of(w);
             let mut r = load_bound(t, m);
             if r.is_none() {
                 r = view_len_max(b, t, pk.ptr_bytes);
@@ -6307,7 +6345,7 @@ extend Opt {
         // At least 0: the unsigned least value the branches set is a signed one too (`len != 0`: `len - 1 >= 0`).
         if known && lo >= 0 {
             if let Some(f) = self.ub.get(&(LB_KEY | v as u64)) {
-                let c = int_bits(b, *f >> 1).unwrap() & width_mask(b.type_of(v), pk.ptr_bytes);
+                let c = int_bits(b, *f >> 1).unwrap() & mask_of(w);
                 let c1 = c + (*f & 1) as u64;
                 if c1 <= tmax as u64 && c1 as i64 > lo {
                     lo = c1 as i64;
@@ -6425,9 +6463,11 @@ extend Opt {
             best = Some(1);
         }
         // A signed range at or above 0 bounds the unsigned value from below too.
-        if let Some(sr) = self.srange(pk, b, v, depth) {
-            if sr.0 >= 0 && (best.is_none() || sr.0 as u64 > best.unwrap()) {
-                best = Some(sr.0 as u64);
+        if !self.no_srange(b, v, depth) {
+            if let Some(sr) = self.srange(pk, b, v, depth) {
+                if sr.0 >= 0 && (best.is_none() || sr.0 as u64 > best.unwrap()) {
+                    best = Some(sr.0 as u64);
+                }
             }
         }
         if (v & VPARAM) != 0 || depth == 0 {
@@ -6518,9 +6558,11 @@ extend Opt {
             }
         }
         // A signed range at or above 0 is an unsigned one.
-        if let Some(sr) = self.srange(pk, b, v, depth) {
-            if sr.0 >= 0 && (best.is_none() || sr.1 as u64 < best.unwrap()) {
-                best = Some(sr.1 as u64);
+        if !self.no_srange(b, v, depth) {
+            if let Some(sr) = self.srange(pk, b, v, depth) {
+                if sr.0 >= 0 && (best.is_none() || sr.1 as u64 < best.unwrap()) {
+                    best = Some(sr.1 as u64);
+                }
             }
         }
         if (v & VPARAM) != 0 {
@@ -6528,9 +6570,12 @@ extend Opt {
         }
         let t = b.insts[v as usize];
         let m = width_mask(t.ty, pk.ptr_bytes);
-        let mut r = load_bound(t, m);
-        if r.is_none() {
-            r = view_len_max(b, t, pk.ptr_bytes);
+        let mut r = Option::<u64>::None;
+        if t.op == O_LOAD {
+            r = load_bound(t, m);
+            if r.is_none() {
+                r = view_len_max(b, t, pk.ptr_bytes);
+            }
         }
         if depth == 0 && r.is_none() {
             return best;
