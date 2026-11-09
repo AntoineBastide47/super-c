@@ -3101,7 +3101,7 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
                 continue;
             }
             let at = (dbg_off[sc.out as usize] + sc.at) as usize;
-            img.index_range_mut(at..at + sc.size as usize).copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
+            img[at..at + sc.size as usize].copy_from_slice(b[sc.off..sc.off + sc.size as usize]);
         }
         apply_debug(l, b, img, &dbg_off);
     }

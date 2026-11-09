@@ -2186,7 +2186,7 @@ fn write_unwind(l: &mut L, img: &mut Vector<u8>) bool {
         }
     }
     assert(o.len() as u64 == os.size, "macho: the unwind table's size");
-    img.index_range_mut(at..at + o.len()).copy_from_slice(&o);
+    img[at..at + o.len()].copy_from_slice(&o);
     return true;
 }
 
@@ -2929,7 +2929,7 @@ fn page_hashes(img: &Vector<u8>, end: usize, jobs: u32, out: &mut Vector<u8>) {
     let base = out.as_ptr() as usize;
     // 64 pages (256 KiB of input) per task.
     parallel::chunks_mut(
-        out.index_range_mut(0..out.len()),
+        out[0..out.len()],
         32 * 64,
         |c: []mut u8| {
             let pg0 = (c.as_ptr() as usize - base) / 32;
