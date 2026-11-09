@@ -312,6 +312,9 @@ pub(package) struct Package {
     /// The emission's inline-candidate store (`ir::inline::InlineStore`), set for the emission's
     /// lifetime by `cemit_package`; null outside it.
     pub(package) inl_store: *const void,
+    /// The emission's capture summary (`ir::capture::CaptureStore`): which `&mut` parameters a call may let
+    /// outlive it, set for the emission's lifetime by `cemit_package`; null outside it.
+    pub(package) cap_store: *const void,
     /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
     /// (`scope_extern_items`); empty outside an emission.
     pub(package) xscoped: Set<u64>,

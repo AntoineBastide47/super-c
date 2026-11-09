@@ -31,6 +31,7 @@ import ir::verify as irv;
 import ir::drops as ird;
 import ir::tailcall as irt;
 import ir::bce as bce;
+import ir::capture as cap;
 import ir::inline as inl;
 import ir::interp as iri;
 import ir::recursion as recur;
@@ -4748,10 +4749,14 @@ pub(package) fn cemit_package(
     // The inline candidates come from the kept lowerings, before the graph takes them.
     let mut inls = inl::InlineStore::new();
     let ti9 = ticks_ms();
+    // The parameters a call may let outlive it come from the same lowerings (`ir::facts` reads them).
+    let mut caps = cap::CaptureStore::new();
     if irkeep != null {
         inls.build(p, unsafe &*irkeep);
+        caps.build(p, unsafe &*irkeep);
     }
     p.inl_store = &inls;
+    p.cap_store = &caps;
     if verbose {
         eprint(
             "cemit-stage publish: {} ms, sigs: {} ms, inline-store build: {} ms\n",
@@ -6338,6 +6343,7 @@ pub(package) fn cemit_package(
     o.tuc = Some(tuc);
     o.held = held;
     p.inl_store = null;
+    p.cap_store = null;
     bst::relower(prd.c[prb::C_RELOWER_REFLECT], prd.c[prb::C_RELOWER_ZST]);
     o.pr = prd;
 }

@@ -135,6 +135,22 @@ fn safety_element_checks(b: &mut h::ExitBatch) {
         "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 2] = [1, 2];\n    let s: []i32 = a[0..0];\n    let i = argv.len() - 1; // == 0\n    return s[i];\n}\n",
         "index out of bounds",
     );
+    // A signed index below a constant bound may be negative: a lane and an array element check it.
+    b.add_trap(
+        "a negative lane index below the lane count panics",
+        "fn main(argv: Vector<str>) i32 {\n    let v = Simd::<i32, 8>::splat(3);\n    let i = 0 - argv.len() as i32; // == -1\n    if i < 8 {\n        return v[i];\n    }\n    return 0;\n}\n",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "a negative array index below the length panics",
+        "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let i = 0 - argv.len() as i64; // == -1\n    if i < 8 {\n        return a[i];\n    }\n    return 0;\n}\n",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "a negative index below a value equal to the length panics",
+        "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 8] = [1, 2, 3, 4, 5, 6, 7, 8];\n    let i = 0 - argv.len() as i64; // == -1\n    let n = argv.len() as i64 + 7; // == 8\n    if n == 8 && i < n {\n        return a[i];\n    }\n    return 0;\n}\n",
+        "index out of bounds",
+    );
     // A valid dynamic access still works.
     b.add(
         "valid dynamic access",
@@ -199,6 +215,83 @@ fn safety_mutation_and_zst(b: &mut h::ExitBatch) {
         "zst logical length out of range panics",
         "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<Z>::new();\n    v.push(Z {});\n    let i = argv.len() + 1; // == 2\n    let _ = v[i];\n    return 0;\n}\n",
         "index out of bounds",
+    );
+    // A view of zero-sized elements may be usize::MAX long: after `s[i]` passed, `i + 2` overflows and
+    // traps before the next guard; a widened guard must not panic with the index message first.
+    b.add_trap(
+        "an overflow past a zero-sized element traps first",
+        "struct Z {}\nfn main(argv: Vector<str>) i32 {\n    let zs = Z {};\n    let s = unsafe Slice::<Z> { ptr: &zs, len: usize::MAX };\n    let i = usize::MAX - argv.len(); // == usize::MAX - 1\n    let a = &s[i];\n    let b = &s[i + 2];\n    let _ = a;\n    let _ = b;\n    return 0;\n}\n",
+        "attempt to add with overflow",
+    );
+}
+
+// Fixed-array checks from the facts of `&&` conditions, at another offset, through one value, and
+// a range check from the facts of its bounds; the length of `[T; N]` is the constant N.
+@test
+fn removal_array_constant_bounds() {
+    let SRC: str = "fn two(m: &[[i32; 8]; 4], i: usize, j: usize) i32 {\n    if i < 4 && j < 8 {\n        return m[i][j];\n    }\n    return 0;\n}\nfn prev(a: &[i32; 16], i: usize) i32 {\n    if i >= 1 && i <= 16 {\n        return a[i - 1];\n    }\n    return 0;\n}\nfn via(a: &[i32; 16], i: usize, n: usize) i32 {\n    if n == 16 && i < n {\n        return a[i];\n    }\n    return 0;\n}\nfn part(a: &[i32; 16], lo: usize, hi: usize) usize {\n    if lo <= hi && hi <= 16 {\n        return a[lo..hi].len();\n    }\n    return 0;\n}\nfn upto(a: &[i32; 16], lo: usize, hi: usize) usize {\n    if lo <= hi && hi < 16 {\n        return a[lo..=hi].len();\n    }\n    return 0;\n}\n";
+    expect_in_fn("an `&&` of constant bounds", SRC, "int32_t two(", "__sc_bounds(", false);
+    expect_in_fn("a bound at another offset", SRC, "int32_t prev(", "__sc_bounds(", false);
+    expect_in_fn("a bound through one value", SRC, "int32_t via(", "__sc_bounds(", false);
+    expect_in_fn("a range from its bounds' facts", SRC, "size_t part(", "__sc_range(", false);
+    expect_in_fn("an inclusive range from its bounds' facts", SRC, "size_t upto(", "__sc_range(", false);
+    expect_in_fn("an inclusive range end check", SRC, "size_t upto(", "__sc_bounds(", false);
+    // A counter of stride 2 from 0 below 16 is at most 14: `i + 1` is in bounds; from 1 it is not.
+    let STEP: str = "fn even(a: &[i32; 16]) i32 {\n    let mut s = 0;\n    let mut i: usize = 0;\n    while i < 16 {\n        s += a[i] + a[i + 1];\n        i += 2;\n    }\n    return s;\n}\nfn odd(a: &[i32; 16], i0: usize) i32 {\n    let mut s = 0;\n    let mut i = i0;\n    while i < 16 {\n        s += a[i] + a[i + 1];\n        i += 2;\n    }\n    return s;\n}\n";
+    expect_in_fn("a stride rounds the bound down", STEP, "int32_t even(", "__sc_bounds(", false);
+    expect_in_fn("an unknown phase keeps the check", STEP, "int32_t odd(", "__sc_bounds(", true);
+    // A signed index clamped on two branches: each literal lands at the index's width.
+    let CLAMP: str = "fn bce_clamp(a: &[i32; 16], i: i64) i32 {\n    let mut k = i;\n    if k < 0 {\n        k = 0;\n    }\n    if k > 15 {\n        k = 15;\n    }\n    return a[k];\n}\n";
+    expect_in_fn("a signed clamp", CLAMP, "int32_t bce_clamp(", "__sc_bounds(", false);
+}
+
+// Std guards a debug build proves: where overflow traps a computed `i + 1` is exact (`i + 1 < len`
+// bounds `i`), `n - 1 - k` is at most `n - 1` below `len`, `1 <= len - 1` after `4 <= len`, and the
+// minimum with `len - 1` after a non-empty test.
+@test
+fn removal_slice_offsets() {
+    let SRC: str = "fn bce_pairs(a: []i32) i32 {\n    let mut s = 0;\n    let mut i: usize = 0;\n    while i + 1 < a.len() {\n        s += a[i] * a[i + 1];\n        i += 2;\n    }\n    return s;\n}\nfn bce_rev(a: []i32) i32 {\n    let n = a.len();\n    let mut s = 0;\n    for k in 0..n {\n        s += a[n - 1 - k];\n    }\n    return s;\n}\nfn bce_inner(a: []i32) usize {\n    if a.len() < 4 {\n        return 0;\n    }\n    return a[1..a.len() - 1].len();\n}\nfn bce_lastmin(a: []i32, i: usize) i32 {\n    if a.len() == 0 {\n        return 0;\n    }\n    return a[i.min(a.len() - 1)];\n}\n";
+    expect_in_fn("a step-2 pair loop", SRC, "int32_t bce_pairs(", "__sc_bounds(", false);
+    expect_in_fn("a step-2 pair loop needs no widened guard", SRC, "int32_t bce_pairs(", "__sc_bounds_group(", false);
+    expect_in_fn("a reverse index", SRC, "int32_t bce_rev(", "__sc_bounds(", false);
+    expect_in_fn("an inner range", SRC, "size_t bce_inner(", "__sc_range(", false);
+    expect_in_fn("a minimum with the last index", SRC, "int32_t bce_lastmin(", "__sc_bounds(", false);
+    // A minimum written out: the false side's `len - 1` is the comparison's own value (an offset copy
+    // of one length read); with `len` instead it is not below the length.
+    let MIN: str = "fn bce_minif(a: []i32, i: usize) i32 {\n    if a.len() == 0 {\n        return 0;\n    }\n    let j = if i < a.len() - 1 {\n        i\n    } else {\n        a.len() - 1\n    };\n    return a[j];\n}\nfn bce_minlen(a: []i32, i: usize) i32 {\n    if a.len() == 0 {\n        return 0;\n    }\n    let j = if i < a.len() - 1 {\n        i\n    } else {\n        a.len()\n    };\n    return a[j];\n}\n";
+    expect_in_fn("a minimum with two length reads", MIN, "int32_t bce_minif(", "__sc_bounds(", false);
+    expect_in_fn("a length on the false side keeps the check", MIN, "int32_t bce_minlen(", "__sc_bounds(", true);
+    // A row's length read through another copy of an unchanged index is the row's length; a write of
+    // the index between them ends that.
+    let ROWS: str = "fn bce_rows(m: &Vector<Vector<i32>>) i32 {\n    let mut s: i32 = 0;\n    for i in 0..m.len() {\n        for j in 0..m[i].len() {\n            s += m[i][j];\n        }\n    }\n    return s;\n}\nfn bce_moved(m: &Vector<Vector<i32>>, d: usize) i32 {\n    let mut s: i32 = 0;\n    for i0 in 0..m.len() {\n        let mut i = i0;\n        let n = m[i].len();\n        i = (i + d) % m.len();\n        for j in 0..n {\n            s += m[i][j];\n        }\n    }\n    return s;\n}\n";
+    expect_in_fn("the rows of a vector of vectors", ROWS, "int32_t bce_rows(", "__sc_bounds(", false);
+    expect_in_fn("a row index written between keeps the check", ROWS, "int32_t bce_moved(", "__sc_bounds(", true);
+    // A window's last element: `i + k <= len` for `i < len - k + 1` (`len - k` exact past `k <= len`);
+    // without the `- 1`, or with `k` written after the difference, the check stays.
+    let WIN: str = "fn bce_win(a: []i32, k: usize) i32 {\n    let mut s: i32 = 0;\n    if k > a.len() {\n        return 0;\n    }\n    for i in 0..(a.len() - k + 1) {\n        s += a[i + k - 1];\n    }\n    return s;\n}\nfn bce_winend(a: []i32, k: usize) i32 {\n    let mut s: i32 = 0;\n    if k > a.len() {\n        return 0;\n    }\n    for i in 0..(a.len() - k + 1) {\n        s += a[i + k];\n    }\n    return s;\n}\nfn bce_winmoved(a: []i32, k0: usize, d: usize) i32 {\n    let mut k = k0;\n    if k > a.len() {\n        return 0;\n    }\n    let n = a.len() - k + 1;\n    k = k + d;\n    let mut s: i32 = 0;\n    for i in 0..n {\n        s += a[i + k - 1];\n    }\n    return s;\n}\n";
+    expect_in_fn("a window's last element", WIN, "int32_t bce_win(", "__sc_bounds(", false);
+    expect_in_fn("one past a window keeps the check", WIN, "int32_t bce_winend(", "__sc_bounds(", true);
+    expect_in_fn(
+        "a width written after the difference keeps the check",
+        WIN,
+        "int32_t bce_winmoved(",
+        "__sc_bounds(",
+        true,
+    );
+    // A midpoint is below `hi` where `lo < hi`, and `hi = mid` keeps `hi` at most its entry value; a
+    // write of `lo` before the midpoint, or an inclusive test, keeps the check.
+    let BS: str = "fn bce_bs(a: []i32, x: i32) usize {\n    let mut lo: usize = 0;\n    let mut hi: usize = a.len();\n    while lo < hi {\n        let mid = lo + (hi - lo) / 2;\n        if a[mid] < x {\n            lo = mid + 1;\n        } else {\n            hi = mid;\n        }\n    }\n    return lo;\n}\nfn bce_bsa(a: &[i32; 16], x: i32) usize {\n    let mut lo: usize = 0;\n    let mut hi: usize = 16;\n    while lo < hi {\n        let mid = lo + ((hi - lo) >> 1);\n        if a[mid] < x {\n            lo = mid + 1;\n        } else {\n            hi = mid;\n        }\n    }\n    return lo;\n}\nfn bce_bslo(a: []i32, x: i32, d: usize) usize {\n    let mut lo: usize = 0;\n    let mut hi: usize = a.len();\n    while lo < hi {\n        lo = lo + d;\n        let mid = (lo + hi) / 2;\n        if a[mid] < x {\n            lo = mid + 1;\n        } else {\n            hi = mid;\n        }\n    }\n    return lo;\n}\nfn bce_bsle(a: []i32, x: i32) usize {\n    let mut lo: usize = 0;\n    let mut hi: usize = a.len();\n    while lo <= hi {\n        let mid = lo + (hi - lo) / 2;\n        if a[mid] < x {\n            lo = mid + 1;\n        } else {\n            hi = mid;\n        }\n    }\n    return lo;\n}\n";
+    expect_in_fn("a binary search", BS, "size_t bce_bs(", "__sc_bounds(", false);
+    expect_in_fn("a binary search of an array", BS, "size_t bce_bsa(", "__sc_bounds(", false);
+    expect_in_fn("a write of `lo` before the midpoint keeps the check", BS, "size_t bce_bslo(", "__sc_bounds(", true);
+    expect_in_fn("an inclusive search keeps the check", BS, "size_t bce_bsle(", "__sc_bounds(", true);
+    let GAP: str = "fn bce_bsgap(a: []i32, lo0: usize) i32 {\n    let mut lo = lo0;\n    let hi: usize = a.len();\n    if lo + 1 < hi {\n        let d = hi - lo;\n        lo = lo + 1;\n        let mid = lo + d / 2;\n        return a[mid];\n    }\n    return 0;\n}\n";
+    expect_in_fn(
+        "a write of `lo` between the midpoint's parts keeps the check",
+        GAP,
+        "int32_t bce_bsgap(",
+        "__sc_bounds(",
+        true,
     );
 }
 
@@ -370,10 +463,14 @@ fn affine_guard_removes_check(b: &mut h::ExitBatch) {
 
 fn coalescing_groups_adjacent_checks(b: &mut h::ExitBatch) {
     // Three adjacent accesses collapse to ONE group check at the first site.
-    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s - 126;\n}\n";
+    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 40;\n    let x = v[j];\n    let y = v[j + 1];\n    let z = v[j + 2];\n    return x + y + z - 126;\n}\n";
     expect_c_user_present("group check emitted", SRC, "__sc_bounds_group(");
     expect_c_user_absent("no per-element checks in the group", SRC, "__sc_bounds(");
     b.add("group behavior", SRC, 0);
+    // Where overflow traps (opt-level 0 and 1), a sum between two members panics first when it
+    // overflows: the group stops before it, and the program traps on the overflow.
+    let SUM: str = "fn main(argv: Vector<str>) i32 {\n    let a: [i32; 4] = [1, 2, 3, 2147483647];\n    let j = argv.len() + 2; // == 3: a[j + 1] is out of bounds\n    let x = a[j];\n    let t = x + 1;\n    return t + a[j + 1];\n}\n";
+    b.add_trap("an overflow between two members traps first", SUM, "attempt to add with overflow");
 }
 
 @test
@@ -408,12 +505,18 @@ extend Buf as Index<i32, []i32> {
 fn guard_widening_groups_any_container() {
     // Three guards over one root and one length, with pure code between: one group test at the first,
     // and the member guards fold, for std's Vector and for the program's own container alike.
-    let tri_user = format("{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\n", BUF);
+    let tri_user = format(
+        "{}fn tri(b: &Buf, j: usize) i32 {{\n    let x = b[j];\n    let y = b[j + 1];\n    let z = b[j + 2];\n    return x + y + z;\n}}\n",
+        BUF,
+    );
     expect_in_fn("a user container's guards widen", &tri_user, "int32_t tri(", "__sc_bounds_group(", true);
     expect_in_fn("no member guard of a user container", &tri_user, "int32_t tri(", "__sc_bounds(", false);
-    let tri_vec = "fn tri(v: &Vector<i32>, j: usize) i32 {\n    return v[j] + v[j + 1] + v[j + 2];\n}\n";
+    let tri_vec = "fn tri(v: &Vector<i32>, j: usize) i32 {\n    let x = v[j];\n    let y = v[j + 1];\n    let z = v[j + 2];\n    return x + y + z;\n}\n";
     expect_c_user_present("a Vector's guards widen", tri_vec, "__sc_bounds_group(");
     expect_c_user_absent("no member guard of a Vector", tri_vec, "__sc_bounds(");
+    // Where overflow traps, the sum `v[j] + v[j + 1]` can panic before the third guard: it keeps its own.
+    let tri_sum = "fn tri(v: &Vector<i32>, j: usize) i32 {\n    return v[j] + v[j + 1] + v[j + 2];\n}\n";
+    expect_c_user_present("a trapping sum stops the widening", tri_sum, "__sc_bounds(");
     // A loop bounded by the container's own length field proves its guard.
     let sum_user = format(
         "{}fn sum(b: &Buf) i32 {{\n    let mut s = 0;\n    for i in 0..b.n {{\n        s += b[i];\n    }}\n    return s;\n}}\n",
@@ -702,6 +805,32 @@ fn sig_escaped_ref_kills() {
 }
 
 @test
+fn sig_held_target_kills() {
+    // A `&mut` parameter held by a guard whose drop glue clears the vector: the drop writes the
+    // parameter's target.
+    let drop = "struct G<'a> {\n    v: &'a mut Vector<i32>,\n}\nextend<'a> G<'a> as Free {\n    fn free(self: &mut Self) {\n        self.v.clear();\n    }\n}\nfn f(v: &mut Vector<i32>, i: usize) i32 {\n    if i < v.len() {\n        {\n            let _g = G { v: v };\n        }\n        return v[i];\n    }\n    return 0;\n}\n";
+    expect_in_fn("a guard's drop kills its target's length", drop, "int32_t f(", "__sc_bounds(", true);
+    // A raw pointer parameter held by a struct a callee reads through a shared reference: the
+    // callee writes through the pointer.
+    let ptr = "struct H {\n    p: *mut Vector<i32>,\n}\n@noinline\nfn clear(h: &H) {\n    unsafe {\n        (*h.p).clear();\n    }\n}\nfn f(p: *mut Vector<i32>, i: usize) i32 {\n    let h = H { p: p };\n    if i < unsafe (*p).len() {\n        clear(&h);\n        return unsafe (*p)[i];\n    }\n    return 0;\n}\n";
+    expect_in_fn("a held pointer's callee kills its target's length", ptr, "int32_t f(", "__sc_bounds(", true);
+    // A callee with a result that keeps nothing of its `&mut` argument (its capture summary): the
+    // vector stays in the call, so a later call of no argument keeps its length; a callee whose
+    // result holds the pointer hands it on, and the later call may write through it.
+    let kept = "struct P {\n    a: i32,\n    b: i32,\n}\nstruct W {\n    p: *mut Vector<i32>,\n}\n@noinline\nfn peek(v: &mut Vector<i32>) P {\n    return P { a: v[0], b: 1 };\n}\n@noinline\nfn wrap(v: &mut Vector<i32>) W {\n    return W { p: v as *mut Vector<i32> };\n}\n@noinline\nfn other() {\n}\nfn bce_peek(v: &mut Vector<i32>, i: usize) i32 {\n    let p = peek(v);\n    if i < v.len() {\n        other();\n        return v[i] + p.a;\n    }\n    return 0;\n}\nfn bce_wrap(v: &mut Vector<i32>, i: usize) i32 {\n    let w = wrap(v);\n    if i < v.len() {\n        other();\n        return v[i] + unsafe (*w.p).len() as i32;\n    }\n    return 0;\n}\n";
+    expect_in_fn("a callee that keeps nothing keeps the facts", kept, "int32_t bce_peek(", "__sc_bounds(", false);
+    expect_in_fn("a callee whose result holds the pointer kills them", kept, "int32_t bce_wrap(", "__sc_bounds(", true);
+    // A raw pointer compared, or a cast or offset of it compared, hands its target on to no one: a later
+    // call of no argument keeps the facts behind it. A raw address held in a struct escapes only the
+    // place it names: another vector keeps its facts.
+    let stay = "struct H {\n    p: *mut Vector<i32>,\n}\n@noinline\nfn other() {\n}\nfn bce_cmp(p: *mut Vector<i32>, i: usize) i32 {\n    if p != null && i < unsafe (*p).len() {\n        other();\n        return unsafe (*p)[i];\n    }\n    return 0;\n}\nfn bce_cast(p: *mut Vector<i32>, i: usize) i32 {\n    let q = p as *mut u8;\n    if q != null && i < unsafe (*p).len() {\n        other();\n        return unsafe (*p)[i];\n    }\n    return 0;\n}\nfn bce_off(p: *mut Vector<i32>, i: usize) i32 {\n    let q = unsafe (p + 0);\n    if q != null && i < unsafe (*p).len() {\n        other();\n        return unsafe (*p)[i];\n    }\n    return 0;\n}\nfn bce_addr(w: &mut Vector<i32>, i: usize) i32 {\n    let mut v = Vector::<i32>::new();\n    let p = &mut v as *mut Vector<i32>;\n    let h = H { p: p };\n    if i < w.len() {\n        other();\n        return w[i] + unsafe (*h.p).len() as i32;\n    }\n    return 0;\n}\n";
+    expect_in_fn("a compared pointer stays", stay, "int32_t bce_cmp(", "__sc_bounds(", false);
+    expect_in_fn("a compared cast stays", stay, "int32_t bce_cast(", "__sc_bounds(", false);
+    expect_in_fn("a compared offset stays", stay, "int32_t bce_off(", "__sc_bounds(", false);
+    expect_in_fn("a held raw address escapes its place only", stay, "int32_t bce_addr(", "__sc_bounds(", false);
+}
+
+@test
 fn sig_disable_and_inline_parity() {
     // Identical behavior with transparency off and with the inliner off; the OOB path panics the
     // same way in every mode.
@@ -785,6 +914,18 @@ fn interval_join_keeps_the_hull(b: &mut h::ExitBatch) {
     let SRC: str = "fn hull(s: []i32, c: bool) i32 {\n    if s.len() < 8 {\n        return 0;\n    }\n    let k: usize = if c {\n        2\n    } else {\n        5\n    };\n    return s[k];\n}\nfn masked(s: []i32, k: usize) i32 {\n    if s.len() >= 8 {\n        return s[k & 7] + s[k % 8];\n    }\n    return 0;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..8 {\n        v.push(k);\n    }\n    let s: []i32 = v[0..8];\n    return hull(s, argv.len() == 1) + masked(s, argv.len() + 8) - 4;\n}\n";
     expect_c_user_absent("hull and mask bounds prove the accesses", SRC, "__sc_bounds(");
     b.add("hull behavior", SRC, 0);
+}
+
+// `for i in iter::rev(s..e)` counts down from `e` while `i > s`: the values, empty and reversed ranges,
+// a signed range, `break` and `continue`, and the evaluation of each bound once, start first.
+fn reverse_range_loops(b: &mut h::ExitBatch) {
+    let SRC: str = "import std::iter;\n@noinline\nfn bce_revsum(a: []i32) i32 {\n    let mut s: i32 = 0;\n    for i in iter::rev(0..a.len()) {\n        s = s * 3 + a[i];\n    }\n    return s;\n}\nfn bound(g: &mut i64, v: i64, w: i64) i64 {\n    *g = *g * 10 + w;\n    return v;\n}\nfn main(argv: Vector<str>) i32 {\n    let z = argv.len() - 1;\n    let v: [i32; 4] = [1, 2, 3, 4];\n    if bce_revsum(v[0..4]) != 142 {\n        return 1;\n    }\n    let mut t: i64 = 0;\n    for i in iter::rev((3 + z)..(3 + z)) {\n        t += i as i64 + 1;\n    }\n    for i in iter::rev((5 + z)..(2 + z)) {\n        t += i as i64 + 1;\n    }\n    if t != 0 {\n        return 2;\n    }\n    for i in iter::rev((-3 + z as i64)..(2 + z as i64)) {\n        if i == 0 {\n            continue;\n        }\n        if i == -3 {\n            break;\n        }\n        t = t * 10 + i + 5;\n    }\n    if t != 643 {\n        return 3;\n    }\n    let mut g: i64 = 0;\n    t = 0;\n    for i in iter::rev(bound(&mut g, 1, 1)..bound(&mut g, 4, 2)) {\n        t = t * 10 + i;\n    }\n    if t != 321 || g != 12 {\n        return 4;\n    }\n    return 0;\n}\n";
+    // the in-process C emission sees no std module: a project build emits the C
+    let cb = h::diff_build(SRC, ["--emit-c"]);
+    assert(cb.built, "a reverse range loop builds");
+    let c = cli::read_text(format("{}/build/debug/raw/main.c", cb.proj.dir()).as_str());
+    assert(check_count(h::c_fn(&c, "(noinline)) int32_t bce_revsum("), "__sc_bounds(") == 0, "a reverse range loop");
+    b.add("reverse range loop behavior", SRC, 0);
 }
 
 fn interval_widening_terminates_on_nested_loops(b: &mut h::ExitBatch) {
@@ -947,6 +1088,49 @@ fn vector_access_group_checks() {
     vp.check();
 }
 
+// Where sums wrap (opt-level 2), a counter stepping by `k` under `i + d < n` (`d >= k - 1`) stays at
+// most `n` when `n` is a constant or the length of nonzero-sized elements (at most isize::MAX), so
+// `i + d` is exact. Any other bound, or a zero-sized view as long as usize::MAX, keeps the checks.
+@test
+fn removal_step_counters_where_sums_wrap() {
+    let SRC: str = "struct Z {}\n@noinline\nfn bce_pair(a: []i32) i32 {\n    let mut s: i32 = 0;\n    let mut i: usize = 0;\n    while i + 1 < a.len() {\n        s += a[i] * a[i + 1];\n        i += 2;\n    }\n    return s;\n}\n@noinline\nfn bce_three(a: []i32) i32 {\n    let mut s: i32 = 0;\n    let mut i: usize = 0;\n    while i + 3 <= a.len() {\n        s += a[i] + a[i + 1] + a[i + 2];\n        i += 3;\n    }\n    return s;\n}\n@noinline\nfn bce_big(a: []i32, i0: usize, n: usize) i32 {\n    let mut s: i32 = 0;\n    let mut i = i0;\n    while i + 1 < n {\n        s += a[i];\n        i += 2;\n    }\n    return s;\n}\n@noinline\nfn bce_zst(s: []Z, i0: usize) i32 {\n    let mut c: i32 = 0;\n    if i0 > s.len() {\n        return -1;\n    }\n    let mut i = i0;\n    while i + 1 < s.len() {\n        let _ = &s[i];\n        c += 1;\n        i += 2;\n    }\n    return c;\n}\nfn main(argv: Vector<str>) i32 {\n    let v: [i32; 6] = [1, 2, 3, 4, 5, 6];\n    let zs = Z {};\n    let big = unsafe Slice::<Z> { ptr: &zs, len: argv.len() };\n    return bce_pair(v[0..6]) + bce_three(v[0..6]) + bce_big(v[0..6], 0, 6) + bce_zst(big, 0) - 65;\n}\n";
+    let cb = h::diff_build(SRC, ["--emit-c", "-O2"]);
+    assert(cb.built, "step counters build at -O2");
+    let c = cli::read_text(format("{}/build/debug/raw/main.c", cb.proj.dir()).as_str());
+    let pair = h::c_fn(&c, "(noinline)) int32_t bce_pair(");
+    assert(check_count(pair, "__sc_bounds(") + check_count(pair, "__sc_bounds_group(") == 0, "a pair loop");
+    let three = h::c_fn(&c, "(noinline)) int32_t bce_three(");
+    assert(check_count(three, "__sc_bounds(") + check_count(three, "__sc_bounds_group(") == 0, "a loop of three");
+    assert(
+        check_count(h::c_fn(&c, "(noinline)) int32_t bce_big("), "__sc_bounds(") != 0,
+        "an unknown bound keeps the check",
+    );
+    assert(
+        check_count(h::c_fn(&c, "(noinline)) int32_t bce_zst("), "__sc_bounds(") != 0,
+        "a zero-sized view keeps the check",
+    );
+}
+
+// A guard `start + 3 < len` bounds a 4-lane access only where `start + 3` cannot wrap. Opt-level 2
+// wraps: with start = usize::MAX - 1 the sum is 1, the guard passes, and the load must still trap.
+@test
+fn vector_group_needs_an_unwrapped_last_lane() {
+    let SRC: str = "import std::simd;\n@noinline\nfn get(a: []i32, i: usize) i32 {\n    let j = i + 3;\n    if j >= a.len() {\n        return -1;\n    }\n    return simd::load::<i32, 4>(a, i)[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 15 {\n        v.push(k as i32);\n    }\n    return get(v[0..v.len()], usize::MAX - argv.len());\n}\n";
+    let b = h::diff_build(SRC, ["-O2"]);
+    assert(b.built, "builds at -O2");
+    let r = h::diff_run(&b, "");
+    // `usize::MAX - 1` of the target: wasm32's usize is 32 bits.
+    let want = if h::target_lane() {
+        "4 lanes from 4294967294"
+    } else {
+        "4 lanes from 18446744073709551614"
+    };
+    if r.exit == 0 || !r.err.contains(want) {
+        eprintln("exit {}: {}", r.exit, r.err.as_str());
+    }
+    assert(r.exit != 0 && r.err.contains(want), "the wrapped guard keeps the load's check");
+}
+
 // A whole reassignment of a view kills the length facts of its old value: the next access checks
 // the new length, in straight-line code, in a loop, and after an index operand that reassigns the
 // indexed view.
@@ -1012,6 +1196,372 @@ fn main(argv: Vector<str>) i32 {
     );
 }
 
+// A callee handed `&mut v` that returns nothing may still keep a raw pointer to `v` (the borrow ends at
+// the cast, the pointer stays valid): a later call that shrinks `v` through it, with no reference to `v`
+// live, invalidates a length fact from before that call, for a vector and for an index read from an
+// array.
+fn safety_escaped_through_callee(b: &mut h::ExitBatch) {
+    // A raw address held in a struct a callee reads through a shared reference: the callee writes the
+    // vector through the held address, which kills the vector's length fact.
+    b.add_trap(
+        "a held raw address written through by a callee",
+        M"(struct H {
+    p: *mut Vector<i32>,
+}
+@noinline
+fn shrink(h: &H) {
+    unsafe {
+        (*h.p).truncate(1);
+    }
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    let p = &mut v as *mut Vector<i32>;
+    let h = H { p: p };
+    let i = argv.len() + 4;
+    if i < v.len() {
+        shrink(&h);
+        return v[i];
+    }
+    return 0;
+}
+)",
+        "index out of bounds",
+    );
+    // A raw pointer a callee returning nothing keeps (itself, a cast of it, `p + 0`, each written on two
+    // paths): the later call that shrinks the vector through the kept copy kills the length fact.
+    b.add_trap(
+        "a raw pointer kept by a callee",
+        M"(static mut G: *mut Vector<i32> = null;
+@noinline
+fn keep(p: *mut Vector<i32>) {
+    unsafe {
+        G = p;
+    }
+}
+@noinline
+fn keep_bytes(p: *mut u8) {
+    unsafe {
+        G = p as *mut Vector<i32>;
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*G).truncate(1);
+    }
+}
+@noinline
+fn f(p: *mut Vector<i32>, i: usize) i32 {
+    keep(p);
+    if i < unsafe (*p).len() {
+        poke();
+        return unsafe (*p)[i];
+    }
+    return 0;
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    return f(&mut v as *mut Vector<i32>, argv.len() + 4);
+}
+)",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "a cast of a raw pointer kept by a callee",
+        M"(static mut G: *mut Vector<i32> = null;
+@noinline
+fn keep(p: *mut Vector<i32>) {
+    unsafe {
+        G = p;
+    }
+}
+@noinline
+fn keep_bytes(p: *mut u8) {
+    unsafe {
+        G = p as *mut Vector<i32>;
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*G).truncate(1);
+    }
+}
+@noinline
+fn f(p: *mut Vector<i32>, i: usize) i32 {
+    let mut q = p as *mut u8;
+    if i == 99 {
+        q = p as *mut u8;
+    }
+    keep_bytes(q);
+    if i < unsafe (*p).len() {
+        poke();
+        return unsafe (*p)[i];
+    }
+    return 0;
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    return f(&mut v as *mut Vector<i32>, argv.len() + 4);
+}
+)",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "an offset raw pointer kept by a callee",
+        M"(static mut G: *mut Vector<i32> = null;
+@noinline
+fn keep(p: *mut Vector<i32>) {
+    unsafe {
+        G = p;
+    }
+}
+@noinline
+fn keep_bytes(p: *mut u8) {
+    unsafe {
+        G = p as *mut Vector<i32>;
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*G).truncate(1);
+    }
+}
+@noinline
+fn f(p: *mut Vector<i32>, i: usize) i32 {
+    let mut q = unsafe (p + 0);
+    if i == 99 {
+        q = unsafe (p + 1);
+    }
+    keep(q);
+    if i < unsafe (*p).len() {
+        poke();
+        return unsafe (*p)[i];
+    }
+    return 0;
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    return f(&mut v as *mut Vector<i32>, argv.len() + 4);
+}
+)",
+        "index out of bounds",
+    );
+    // A callee whose result holds the pointer hands it back: the holder's later call shrinks `v`.
+    b.add_trap(
+        "vector handed back in a callee's result, shrunk through it",
+        M"(struct W {
+    p: *mut Vector<i32>,
+}
+@noinline
+fn wrap(v: &mut Vector<i32>) W {
+    return W { p: v as *mut Vector<i32> };
+}
+@noinline
+fn shrink(w: &W) {
+    unsafe {
+        (*w.p).truncate(1);
+    }
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    let w = wrap(&mut v);
+    let i = argv.len() + 4;
+    if i < v.len() {
+        shrink(&w);
+        return v[i];
+    }
+    return 0;
+}
+)",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "vector kept by a callee, shrunk by a later call",
+        M"(static mut G: *mut Vector<i32> = null;
+@noinline
+fn keep(v: &mut Vector<i32>) {
+    unsafe {
+        G = v as *mut Vector<i32>;
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*G).truncate(1);
+    }
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..10 {
+        v.push(k);
+    }
+    keep(&mut v);
+    let i = argv.len() + 4;
+    if i < v.len() {
+        poke();
+        return v[i];
+    }
+    return 0;
+}
+)",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "array element kept by a callee, rewritten by a later call",
+        M"(static mut A: *mut [usize; 2] = null;
+@noinline
+fn keep(a: &mut [usize; 2]) {
+    unsafe {
+        A = a as *mut [usize; 2];
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*A)[0] = 9;
+    }
+}
+fn main(argv: Vector<str>) i32 {
+    let mut t = Vector::<i32>::new();
+    for k in 0..4 {
+        t.push(k);
+    }
+    let mut a: [usize; 2] = [argv.len(), 0];
+    keep(&mut a);
+    let k = a[0];
+    if k < t.len() {
+        poke();
+        return t[a[0]];
+    }
+    return 0;
+}
+)",
+        "index out of bounds",
+    );
+    b.add_trap(
+        "integer index kept by a callee, rewritten by a later call",
+        M"(static mut N: *mut usize = null;
+@noinline
+fn keep(n: &mut usize) {
+    unsafe {
+        N = n as *mut usize;
+    }
+}
+@noinline
+fn poke() {
+    unsafe {
+        *N = 99;
+    }
+}
+fn main(argv: Vector<str>) i32 {
+    let mut t = Vector::<i32>::new();
+    for k in 0..4 {
+        t.push(k);
+    }
+    let mut n = argv.len();
+    keep(&mut n);
+    if n < t.len() {
+        poke();
+        return t[n];
+    }
+    return 0;
+}
+)",
+        "index out of bounds",
+    );
+    // The callee summaries (`ir::capture`): a store by index through a raw pointer is a store to memory,
+    // a pointer a callee returns is the caller's to keep, and an interface method runs any conformance.
+    let labels: [str; 3] = [
+        "vector kept through an index of a raw pointer",
+        "vector kept through a callee's result",
+        "vector kept by one conformance of an interface method",
+    ];
+    let keeps: [str; 3] = [
+        "keep_at(&mut v, unsafe &mut G as *mut *mut Vector<i32>)",
+        "keep_ret(&mut v)",
+        "through(&Stash { n: 1 }, &mut v)",
+    ];
+    for c in 0..3usize {
+        let src = format("{}{}{}{}", KEEPERS, KEEP_HEAD, keeps[c], KEEP_TAIL);
+        b.add_trap(labels[c], &src, "index out of bounds");
+    }
+}
+
+// The main of a callee summary case (`safety_escaped_through_callee`): its call between `KEEP_HEAD` and
+// `KEEP_TAIL` hands the vector to a keeper; a later call shrinks it through the static.
+const KEEP_HEAD: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..10 {\n        v.push(k);\n    }\n    ";
+const KEEP_TAIL: str = ";\n    let i = argv.len() + 4;\n    if i < v.len() {\n        poke();\n        return v[i];\n    }\n    return 0;\n}\n";
+
+// The keepers of the callee summary cases: one through an index of a raw pointer, one through a
+// callee's result, one through an interface method (of two conformances, one keeps it).
+const KEEPERS: str = M"(static mut G: *mut Vector<i32> = null;
+@noinline
+fn keep_at(v: &mut Vector<i32>, slot: *mut *mut Vector<i32>) {
+    unsafe {
+        slot[0] = v as *mut Vector<i32>;
+    }
+}
+@noinline
+fn as_raw(v: &mut Vector<i32>) *mut Vector<i32> {
+    return v as *mut Vector<i32>;
+}
+@noinline
+fn keep_ret(v: &mut Vector<i32>) {
+    unsafe {
+        G = as_raw(v);
+    }
+}
+interface Keeper {
+    fn put(self: &Self, v: &mut Vector<i32>);
+}
+struct Pass {
+    n: i32,
+}
+struct Stash {
+    n: i32,
+}
+extend Pass as Keeper {
+    fn put(self: &Pass, v: &mut Vector<i32>) {
+        v.push(self.n);
+    }
+}
+extend Stash as Keeper {
+    fn put(self: &Stash, v: &mut Vector<i32>) {
+        unsafe {
+            G = v as *mut Vector<i32>;
+        }
+    }
+}
+@noinline
+fn through<K: Keeper>(k: &K, v: &mut Vector<i32>) {
+    k.put(v);
+}
+@noinline
+fn poke() {
+    unsafe {
+        (*G).truncate(1);
+    }
+}
+)";
+
 // The exit-code and trap cases of the provider functions above, one program per group
 // (`h::ExitBatch`): a group builds once where each case built alone.
 @test
@@ -1033,7 +1583,9 @@ fn exit_cases_01() {
     interval_facts_remove_strided_checks(&mut b);
     interval_join_keeps_the_hull(&mut b);
     interval_widening_terminates_on_nested_loops(&mut b);
+    reverse_range_loops(&mut b);
     safety_reassigned_view(&mut b);
+    safety_escaped_through_callee(&mut b);
     b.run();
 }
 

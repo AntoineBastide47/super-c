@@ -3425,6 +3425,13 @@ extend Lowerer {
                 return;
             }
         }
+        let rr = self.rev_range(id);
+        if rr != NODE_NONE {
+            self.for_open(id);
+            self.lower_for_rev(id, rr);
+            self.for_close(id);
+            return;
+        }
         if self.f.node(d.iterable).kind != NodeKind::NODE_RANGE {
             // iterator protocol: the checker recorded the selected `next` and its Option return
             switch self.f.call_info(id) {
@@ -3566,6 +3573,87 @@ extend Lowerer {
             self.chunk_close(pre, inner, step, ipl, eop4, head, exit, sp);
         }
         self.for_close(id);
+    }
+
+    // The range `s..e` of a loop `for x in iter::rev(s..e)` over a builtin integer whose binding the
+    // body cannot assign, else NODE_NONE: such a loop counts down (`lower_for_rev`).
+    fn rev_range(self: &mut Self, id: NodeId) NodeId {
+        let d = unsafe self.f.ext(id).for_stmt;
+        if self.f.node(id).kind == NodeKind::NODE_INLINE_FOR || self.f.node(d.iterable).kind != NodeKind::NODE_CALL {
+            return NODE_NONE;
+        }
+        let cd = self.f.node(d.iterable).as_data.call;
+        if cd.args.len != 1 || !self.counted_ty(self.nty(id)) || self.binding_mut(d.binding) {
+            return NODE_NONE;
+        }
+        let r = unsafe self.f.list(cd.args)[0];
+        if self.f.node(r).kind != NodeKind::NODE_RANGE {
+            return NODE_NONE;
+        }
+        let rd = unsafe self.f.node(r).as_data.pattern_range;
+        if rd.inclusive || rd.start == NODE_NONE || rd.end == NODE_NONE {
+            return NODE_NONE;
+        }
+        let t = switch self.f.call_info(d.iterable) {
+            Some(ci) => DefId { module: ci_module(ci), node: ci_decl(ci) },
+            None => DefId { module: 0, node: NODE_NONE },
+        };
+        let p = unsafe &*self.pkg;
+        if t.node == NODE_NONE || !p.modules.at(t.module as usize).prelude {
+            return NODE_NONE;
+        }
+        let a = unsafe &*p.module_ast_const(t.module);
+        if a.at_const(t.node).kind != NodeKind::NODE_FUNCTION {
+            return NODE_NONE;
+        }
+        let sp2 = a.at_const(a.ext_name(t.node)).as_data.name.text;
+        if p.modules.at(t.module as usize).source.as_str().slice(sp2.start as usize, sp2.end as usize) != "rev" {
+            return NODE_NONE;
+        }
+        return r;
+    }
+
+    // `for x in iter::rev(s..e)` (`rev_range`): x from e while x > s, stepping down by one before
+    // the body, the values `e - 1` down to `s` the iterator yields.
+    fn lower_for_rev(self: &mut Self, id: NodeId, range: NodeId) {
+        let d = unsafe self.f.ext(id).for_stmt;
+        let sp = self.f.node(id).span;
+        let rd = unsafe self.f.node(range).as_data.pattern_range;
+        let ity = self.nty(id);
+        let sop = self.lower_expr(rd.start);
+        if sop == ir::IR_NONE {
+            return;
+        }
+        let mut spl = ir::IR_NONE;
+        let mut scst = ir::IR_NONE;
+        let so = *self.body.operands.at(sop as usize);
+        if so.kind == ir::OP_CONST {
+            scst = so.data;
+        } else {
+            spl = self.spill(sop, sp);
+        }
+        let eop = self.lower_expr(rd.end);
+        if eop == ir::IR_NONE {
+            return;
+        }
+        let l = self.for_binding(id, d.binding, ity, true, sp);
+        let ipl = self.place_of_local(l);
+        let rv0 = self.rv_use(eop, ity);
+        self.assign(ipl, rv0, sp);
+        let head = self.open_block();
+        let body_b = self.open_block();
+        let step = self.open_block();
+        let exit = self.open_block();
+        self.seal(ir::goto_term(head, sp), head);
+        let s1 = self.range_end(scst, spl);
+        let more = self.cmp_test(ipl, s1, tt::TokenType::GreaterThan, sp);
+        self.branch_bool(more, body_b, exit, sp);
+        let iop = self.copy_op(ipl);
+        let one = self.kop(ir::CK_INT, ity, 1, sp);
+        self.assign(ipl, ir::rv(ir::RV_BINARY, iop, one, tt::TokenType::Minus as u8, ity), sp);
+        self.loop_body(d.label, exit, step, 0, d.body, id, sp, self.scope_locals.len(), self.defers.len(), true);
+        self.seal(ir::goto_term(step, sp), step);
+        self.seal(ir::goto_term(head, sp), exit);
     }
 
     // A fresh operand for a range loop's end: the constant `ecst`, else a copy of `epl`.

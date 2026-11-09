@@ -17,6 +17,7 @@ import lexer::token as tok;
 import lexer::token_type as tt;
 import ir::core as ir;
 import ir::facts as fx;
+import ir::layout as lay;
 import module::loader as loader;
 import stdlib;
 
@@ -74,6 +75,7 @@ pub(package) struct Fact {
     pub(package) lp_bg: u32,
     pub(package) lp_pg: u32,
     pub(package) lp_fg: u32,
+    pub(package) lp_xv: u32,
     pub(package) kind: u8,
     pub(package) iconst: bool,
     pub(package) ln_ok: bool,
@@ -101,6 +103,9 @@ pub(package) struct LenBind {
     pub(package) bg: u32,
     pub(package) pg: u32,
     pub(package) fg: u32, // the buffer generation; compared only for a place that heap memory may hold
+    // The version of the place's one dynamic index local at capture (IR_NONE: no such index, or
+    // more): two reads of `m[i].len` through different operands of an unchanged `i` match.
+    pub(package) xv: u32,
     pub(package) my_v: u32,
     pub(package) ok: bool,
 }
@@ -132,6 +137,14 @@ pub(package) struct EqBind {
     pub(package) my_v: u32,
     pub(package) ne: bool,
     pub(package) uns: bool,
+    pub(package) ok: bool,
+}
+// `l = a - b` over unsigned values at version `my_v`, `b` not a constant: a later `x + b` with `x <= l`
+// is at most `a` (`window_fact`).
+pub(package) struct DiffBind {
+    pub(package) a: fx::VKey,
+    pub(package) b: fx::VKey,
+    pub(package) my_v: u32,
     pub(package) ok: bool,
 }
 // A loop counter at a header (`iv_scan`): `l` steps by `step` (1 or -1) once per iteration, and an
@@ -194,6 +207,7 @@ pub(package) struct Bce {
     pub(package) reads: Vector<u32>, // per local of the body: the operands that read it whole (`local_reads`; empty until asked)
     pub(package) cmpof: Vector<CmpBind>,
     pub(package) remof: Vector<RemBind>,
+    pub(package) diffof: Vector<DiffBind>,
     pub(package) eqof: Vector<EqBind>,
     pub(package) alof: Vector<AlBind>,
     pub(package) chunks: Vector<ChunkBind>, // the body's chunk ends, few per body
@@ -236,6 +250,7 @@ pub(package) struct Bce {
     pub(package) no_iv: bool,
     pub(package) no_bnd: bool,
     pub(package) no_phi: bool,
+    pub(package) traps: bool, // the build traps on integer overflow: a window's `+` or `-` can panic
     // per local, the source keys of its last two copies and their blocks (`phi_facts`)
     pub(package) cp1: Vector<fx::VKey>,
     pub(package) cp2: Vector<fx::VKey>,
@@ -272,6 +287,11 @@ pub(package) struct Bce {
     // Widening-lookahead scratch: the window's references (`rf_dest[i] = &rf_pl[i]`).
     pub(package) rf_dest: Vector<u32>,
     pub(package) rf_pl: Vector<u32>,
+    // The window's members index elements of a nonzero size (`elem_step`): the first member's
+    // access lies in an object, so a root step up to 7 past it cannot wrap. Else only `+1` can't.
+    pub(package) wsized: bool,
+    pub(package) lay: lay::Svc, // element sizes, per body (`lay_used`: reset at the next body)
+    pub(package) lay_used: bool,
 }
 
 // The successor a two-way branch on a bool takes when the bool is `v`, or IR_NONE for another shape
@@ -346,6 +366,7 @@ const fn key_fact(kind: u8, ik: &fx::VKey, lk: &fx::VKey) Fact {
         lp_bg: 0,
         lp_pg: 0,
         lp_fg: 0,
+        lp_xv: ir::IR_NONE,
         lconst: lk.is_const && lk.c >= CMIN && lk.c <= CMAX,
         ip: ir::IR_NONE,
     };
@@ -369,11 +390,11 @@ const fn bool_target(b: &ir::CoreBody, t: &ir::Terminator, v: bool) u32 {
 
 // The length-place identity a fact captured.
 const fn fact_lp(f: &Fact) LenBind {
-    return LenBind { pl: f.lp, hg: f.lp_hg, bg: f.lp_bg, pg: f.lp_pg, fg: f.lp_fg, my_v: 0, ok: f.lp_ok };
+    return LenBind { pl: f.lp, hg: f.lp_hg, bg: f.lp_bg, pg: f.lp_pg, fg: f.lp_fg, xv: f.lp_xv, my_v: 0, ok: f.lp_ok };
 }
 
 const fn lenbind_none() LenBind {
-    return LenBind { pl: 0, hg: 0, bg: 0, pg: 0, fg: 0, my_v: 0, ok: false };
+    return LenBind { pl: 0, hg: 0, bg: 0, pg: 0, fg: 0, xv: ir::IR_NONE, my_v: 0, ok: false };
 }
 
 // `lb` bound to local version `my_v`.
@@ -396,6 +417,7 @@ extend Bce {
             reads: Vector::<u32>::new(),
             cmpof: Vector::<CmpBind>::with_capacity(fx::TABLE_MIN),
             remof: Vector::<RemBind>::with_capacity(fx::TABLE_MIN),
+            diffof: Vector::<DiffBind>::with_capacity(fx::TABLE_MIN),
             eqof: Vector::<EqBind>::with_capacity(fx::TABLE_MIN),
             alof: Vector::<AlBind>::with_capacity(fx::TABLE_MIN),
             chunks: Vector::<ChunkBind>::new(),
@@ -430,6 +452,7 @@ extend Bce {
             no_iv: d.contains("iv"),
             no_bnd: d.contains("bnd"),
             no_phi: d.contains("phi"),
+            traps: false,
             cp1: Vector::<fx::VKey>::with_capacity(fx::TABLE_MIN),
             cp2: Vector::<fx::VKey>::with_capacity(fx::TABLE_MIN),
             cp1b: Vector::<u32>::with_capacity(fx::TABLE_MIN),
@@ -456,6 +479,9 @@ extend Bce {
             ll_pl: Vector::<u32>::new(),
             rf_dest: Vector::<u32>::new(),
             rf_pl: Vector::<u32>::new(),
+            wsized: false,
+            lay: lay::Svc::new(null),
+            lay_used: false,
         };
     }
 
@@ -464,12 +490,11 @@ extend Bce {
     /// Do two length-place identities name one length: the same place, heap and base generations,
     /// and no write into the place between their path generations?
     fn lp_same(self: &Self, b: &ir::CoreBody, x: &LenBind, y: &LenBind) bool {
-        return (x.hg == y.hg || !self.fx.reachable(b, x.pl)) && x.bg == y.bg && self.fx.places_eq(b, x.pl, y.pl) && self.fx.path_alive(
+        return (x.hg == y.hg || !self.fx.reachable(b, x.pl)) && x.bg == y.bg && (self.fx.places_eq(b, x.pl, y.pl) || x.xv != ir::IR_NONE && x.xv == y.xv && self.fx.places_eq_index(
             b,
             x.pl,
-            x.pg,
-            y.pg,
-        ) && (x.fg == y.fg || !self.fx.resident(b, x.pl));
+            y.pl,
+        )) && self.fx.path_alive(b, x.pl, x.pg, y.pg) && (x.fg == y.fg || !self.fx.resident(b, x.pl));
     }
 
     const fn vkey(self: &Self, b: &ir::CoreBody, opid: u32) fx::VKey {
@@ -501,6 +526,18 @@ extend Bce {
         return 0 - 1;
     }
 
+    /// Length key `lk` as a constant when it reads the length of a fixed array (`const_len_of`), else
+    /// `lk` itself.
+    const fn array_extent(self: &Self, b: &ir::CoreBody, lk: &fx::VKey) fx::VKey {
+        if lk.is_local && lk.off == 0 {
+            let cl = self.const_len_of(b, lk.l);
+            if cl > 0 && cl <= CMAX {
+                return fx::VKey { is_const: true, c: cl, is_local: false, l: 0, v: 0, off: 0 };
+            }
+        }
+        return *lk;
+    }
+
     /// The len-place identity carried by a resolved local, when its binding is still current.
     const fn len_place_of(self: &Self, l: u32) LenBind {
         let lb = *self.lenof.at(l as usize);
@@ -519,6 +556,7 @@ extend Bce {
             bg: self.fx.bgen(b.places.at(pl as usize).base),
             pg: self.fx.pgen[b.places.at(pl as usize).base as usize],
             fg: self.fx.bufgen,
+            xv: self.fx.index_ver(b, pl),
             my_v: my_v,
             ok: true,
         };
@@ -576,6 +614,7 @@ extend Bce {
             bg: self.fx.ver(rl),
             pg: 0,
             fg: self.fx.bufgen,
+            xv: ir::IR_NONE,
             my_v: 0,
             ok: true,
         };
@@ -595,6 +634,13 @@ extend Bce {
                 if y.kind == TypeKind::TYPE_BUILTIN && bt_is_unsigned(unsafe y.as_data.builtin) {
                     return true;
                 }
+            }
+        }
+        // A constant below a value's least bound (`1 <= len - 1` after `4 <= len`).
+        if ik.is_const && ik.c >= 0 && ik.c <= CMAX && lk.is_local && self.sum_ok(b, lk.l, lk.v, lk.off) {
+            let lo = self.lower_of(b, lk.l, lk.v);
+            if lo > CMIN && lo + lk.off >= ik.c + pick(need_le, 0i64, 1i64) {
+                return true;
             }
         }
         // A value is at most itself: the same value, or a read of the same length place.
@@ -629,27 +675,66 @@ extend Bce {
         return !self.no_off && self.offset_lt(b, ik, lk, l_lp, need_le);
     }
 
-    /// `ik < lk` (`<=` with `le`) through constants: a constant bound on `ik` against a constant
-    /// `lk`, or below a constant bound on `lk` (`i < 10`, `20 < len`).
+    /// The least constant the facts keep `(l, v) + off` at or below (CMAX + 1: none): a constant bound,
+    /// or with `hops` left a bound on a value the facts keep it below (`i < n` and `n == 16`). A bound on
+    /// the same value at another offset counts where neither sum wraps (`i <= 16` bounds `i - 1` for
+    /// `1 <= i`), and an unsigned value of a known stride lies at or below the greatest value of its
+    /// phase under the bound (`i < 16` with `i` even: `i + 1 <= 15`).
+    fn const_hi(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64, hops: u32) i64 {
+        let mut hi = CMAX + 1;
+        let mut hx = CMAX + 1; // the bound on `(l, v)` itself, from the facts whose sums do not wrap
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.iconst || f.il != l || f.iv != v {
+                continue;
+            }
+            let strict: i64 = if f.kind == 0 {
+                1
+            } else {
+                0
+            };
+            let mut c = CMAX + 1;
+            if f.lconst {
+                c = f.lc - strict;
+            } else if hops != 0 && f.ln_ok && f.ln_l != l {
+                let y = self.const_hi(b, f.ln_l, f.ln_v, f.ln_off, hops - 1);
+                if y <= CMAX {
+                    c = y - strict;
+                }
+            }
+            if c > CMAX {
+                continue;
+            }
+            if f.ioff == off {
+                hi = hi.min(c);
+            }
+            if f.ioff == 0 || self.sum_ok(b, l, v, f.ioff) {
+                hx = hx.min(c - f.ioff);
+            }
+        }
+        if hx > CMAX || off != 0 && !self.sum_ok(b, l, v, off) {
+            return hi;
+        }
+        if self.uns_ty(b, b.locals.at(l as usize).ty) {
+            let mut st: u64 = 1;
+            let mut ph: u64 = 0;
+            self.stride_of(l, v, &mut st, &mut ph);
+            if st > 1 && st <= CMAX as u64 && ph < st && hx >= ph as i64 {
+                hx = hx - (hx - ph as i64) % st as i64;
+            }
+        }
+        return hi.min(hx + off);
+    }
+
+    /// `ik < lk` (`<=` with `le`) through constants: a constant bound on `ik` (`const_hi`) against a
+    /// constant `lk`, or below a constant bound on `lk` (`i < 10`, `20 < len`).
     fn const_lt(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, le: bool) bool {
         if !ik.is_local {
             return false;
         }
-        // the least constant the facts keep `ik` at or below
-        let mut hi = CMAX + 1;
-        for i in 0..self.facts.len() {
-            let f = *self.facts.at(i);
-            if f.lconst && !f.iconst && f.il == ik.l && f.iv == ik.v && f.ioff == ik.off {
-                hi = hi.min(
-                    f.lc - if f.kind == 0 {
-                        1
-                    } else {
-                        0
-                    },
-                );
-            }
-        }
-        if hi > CMAX {
+        let hi = self.const_hi(b, ik.l, ik.v, ik.off, 1);
+        // a signed value below a constant may be negative: an index check reads it as a huge one
+        if hi > CMAX || !self.uns_ty(b, b.locals.at(ik.l as usize).ty) && self.lower_of(b, ik.l, ik.v) + ik.off < 0 {
             return false;
         }
         let need: i64 = if le {
@@ -698,9 +783,9 @@ extend Bce {
             1
         }; // ik + need <= lk
         if lk.is_local && lk.l == ik.l && lk.v == ik.v {
-            return ik.off + need <= lk.off && self.nowrap(b, ik.l, ik.v, ik.off) && self.nowrap(b, lk.l, lk.v, lk.off);
+            return ik.off + need <= lk.off && self.sum_ok(b, ik.l, ik.v, ik.off) && self.sum_ok(b, lk.l, lk.v, lk.off);
         }
-        if !self.nowrap(b, ik.l, ik.v, ik.off) || lk.is_local && !self.nowrap(b, lk.l, lk.v, lk.off) {
+        if !self.sum_ok(b, ik.l, ik.v, ik.off) || lk.is_local && !self.sum_ok(b, lk.l, lk.v, lk.off) {
             return false;
         }
         if lk.off == 0 && l_lp.ok && ik.off + need <= 0 {
@@ -729,7 +814,7 @@ extend Bce {
             } else {
                 0
             };
-            if ik.off - f.ioff + need - fneed <= gap && self.nowrap(b, f.il, f.iv, f.ioff) && (!f.ln_ok || self.nowrap(
+            if ik.off - f.ioff + need - fneed <= gap && self.sum_ok(b, f.il, f.iv, f.ioff) && (!f.ln_ok || self.sum_ok(
                 b,
                 f.ln_l,
                 f.ln_v,
@@ -741,8 +826,15 @@ extend Bce {
         return false;
     }
 
-    /// Is `(l, v) + off` computed without wrapping: a lower bound of at least `-off` below 0, a strict
-    /// bound above for `+1`?
+    /// `nowrap` for the key of a value the body computed (an operand's, a fact's): where overflow
+    /// traps, every `+` and `-` on the way stayed in range, so its sum is the exact one.
+    fn sum_ok(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64) bool {
+        return self.traps || self.nowrap(b, l, v, off);
+    }
+
+    /// Is `(l, v) + off` computed without wrapping: a lower bound of at least `-off` below 0; above, an
+    /// interval whose top leaves room for `off`, or strict bounds `x + k < y` for every `k < off` (each
+    /// sum lies below the largest value, so the next one does not wrap: `x < y` for `+1`)?
     fn nowrap(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64) bool {
         if off == 0 {
             return true;
@@ -750,16 +842,102 @@ extend Bce {
         if off < 0 {
             return off >= 0 - CMAX && self.lower_of(b, l, v) >= 0 - off;
         }
-        if off != 1 {
+        if off > 64 {
             return false;
         }
-        for i in 0..self.facts.len() {
-            let f = *self.facts.at(i);
-            if f.kind == 0 && !f.iconst && f.il == l && f.iv == v && f.ioff == 0 {
-                return true; // x < y: x is below the largest value
+        // an unsigned key's offset adds in usize (`fx` binds affine steps of usize values only)
+        if self.fx.ion && self.fx.ver(l) == v && self.uns_ty(b, b.locals.at(l as usize).ty) {
+            let it = self.fx.ilocal(l);
+            if !it.ln && !it.hn && it.hi <= ~0u64 - off as u64 {
+                return true;
             }
         }
-        return false;
+        // at most a length of elements of a nonzero size (at most isize::MAX): an offset to 64 stays
+        if self.uns_ty(b, b.locals.at(l as usize).ty) {
+            for i in 0..self.facts.len() {
+                let f = *self.facts.at(i);
+                if f.kind > 1 || f.iconst || f.il != l || f.iv != v || f.ioff != 0 {
+                    continue;
+                }
+                if f.lp_ok && f.ln_off <= 0 && self.sized_view(b, f.lp) {
+                    return true;
+                }
+                if f.ln_ok && f.ln_off <= 0 && self.fx.ver(f.ln_l) == f.ln_v {
+                    let lb = self.len_place_of(f.ln_l);
+                    if lb.ok && self.sized_view(b, lb.pl) {
+                        return true;
+                    }
+                }
+            }
+        }
+        if off > 63 {
+            return false;
+        }
+        let mut seen: u64 = 0;
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.kind == 0 && !f.iconst && f.il == l && f.iv == v && f.ioff >= 0 && f.ioff < off {
+                seen = seen | 1u64 << f.ioff as u64;
+            }
+        }
+        let all = (1u64 << off as u64) - 1;
+        return (seen & all) == all;
+    }
+
+    /// Does length place `pl` measure a prelude view (`Slice`, `SliceMut`, `Vector`, a slice, `str` or
+    /// `String`, or a reference to one) of elements of a nonzero size (a scalar or a pointer)? Its
+    /// length then bounds a byte range: at most `isize::MAX`.
+    fn sized_view(self: &Self, b: &ir::CoreBody, pl: u32) bool {
+        let mut t = if (pl & fx::SYNTH_PL) != 0 {
+            b.locals.at((pl & ~fx::SYNTH_PL) as usize).ty
+        } else {
+            b.places.at(pl as usize).ty
+        };
+        if t == TYPE_NONE {
+            return false;
+        }
+        let pk = unsafe &*self.fx.pkg;
+        let da = unsafe &*pk.module_ast_const(b.module);
+        let mut y = *da.type_at(t);
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
+            t = y.as_data.elem;
+            y = *da.type_at(t);
+        }
+        let mut et = TYPE_NONE;
+        if y.kind == TypeKind::TYPE_SLICE {
+            et = y.as_data.elem;
+        } else {
+            let mut m9: ModuleId = 0;
+            let mut dn = NODE_NONE;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *da.instance(y.as_data.inst);
+                m9 = it.module;
+                dn = it.decl;
+                if it.n >= 1 {
+                    et = it.args[0];
+                }
+            } else if y.kind == TypeKind::TYPE_STRUCT {
+                m9 = y.module;
+                dn = y.as_data.decl;
+            }
+            if dn == NODE_NONE || m9 as usize >= pk.modules.len() || !pk.modules.at(m9 as usize).prelude {
+                return false;
+            }
+            let fa = unsafe &*pk.module_ast_const(m9);
+            let sp = fa.at_const(fa.ext_name(dn)).as_data.name.text;
+            let nm = pk.modules.at(m9 as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
+            if et == TYPE_NONE {
+                return nm == "str" || nm == "String";
+            }
+            if nm != "Slice" && nm != "SliceMut" && nm != "Vector" {
+                return false;
+            }
+        }
+        if et == TYPE_NONE {
+            return false;
+        }
+        let ey = *da.type_at(et);
+        return ey.kind == TypeKind::TYPE_BUILTIN && unsafe ey.as_data.builtin != BuiltinType::BT_VOID && unsafe ey.as_data.builtin != BuiltinType::BT_VALIST || ey.kind == TypeKind::TYPE_POINTER || ey.kind == TypeKind::TYPE_REFERENCE;
     }
 
     /// The least value `(l, v)` holds here: 0 for an unsigned type, raised by the facts `c <= x`,
@@ -954,6 +1132,7 @@ extend Bce {
             f.lp_bg = rlp.bg;
             f.lp_pg = rlp.pg;
             f.lp_fg = rlp.fg;
+            f.lp_xv = rlp.xv;
         }
         self.in_facts.push(f);
     }
@@ -961,7 +1140,7 @@ extend Bce {
     /// Two place identities with the same place and generations (no body needed: `places_eq` is
     /// left to the read that matches, `place_read`).
     const fn lp_same_at(self: &Self, x: &LenBind, y: &LenBind) bool {
-        return x.pl == y.pl && x.hg == y.hg && x.bg == y.bg && x.pg == y.pg && x.fg == y.fg;
+        return x.pl == y.pl && x.hg == y.hg && x.bg == y.bg && x.pg == y.pg && x.fg == y.fg && x.xv == y.xv;
     }
 
     /// `d = copy p` read place `p` (identity `rp`): the facts over `p` read in place hold for `d`.
@@ -1030,6 +1209,7 @@ extend Bce {
             f.lp_bg = lp.bg;
             f.lp_pg = lp.pg;
             f.lp_fg = lp.fg;
+            f.lp_xv = lp.xv;
         }
         self.push_fact(f);
     }
@@ -1075,6 +1255,7 @@ extend Bce {
                 lp_bg: lp.bg,
                 lp_pg: lp.pg,
                 lp_fg: lp.fg,
+                lp_xv: lp.xv,
                 lconst: lk.is_const && lk.c >= CMIN && lk.c <= CMAX,
                 ip: ir::IR_NONE,
             },
@@ -1221,14 +1402,27 @@ extend Bce {
             }
         }
         if !self.no_off {
-            // the length's place: the read its local holds
-            let llp = if lk.is_local && lk.off == 0 {
-                self.len_place_of(lk.l)
-            } else {
-                lenbind_none()
-            };
+            // the length's place: the read its local holds, or a guard's in-place read
+            let llp = self.lop_place(b, lop);
             if self.offset_lt(b, &ik, &lk, &llp, false) {
                 return true;
+            }
+            // a chain through one value at an offset: `j <= n - 1` and `n - 1 < len` (at most four
+            // middle values, each one offset proof)
+            let mut tries = 0;
+            for i in 0..self.facts.len() {
+                let f = *self.facts.at(i);
+                if tries >= 4 {
+                    break;
+                }
+                if f.iconst || !f.ln_ok || !self.idx_matches(&f, &ik, false) {
+                    continue;
+                }
+                tries += 1;
+                let mid = fx::VKey { is_const: false, c: 0, is_local: true, l: f.ln_l, v: f.ln_v, off: f.ln_off };
+                if self.offset_lt(b, &mid, &lk, &llp, f.kind == 0) {
+                    return true;
+                }
             }
         }
         if !self.no_off {
@@ -1238,6 +1432,11 @@ extend Bce {
                 lenbind_none()
             };
             if self.const_lt(b, &ik, &lk, &llp, false) {
+                return true;
+            }
+            // a fixed array's length read is its constant extent
+            let ck = self.array_extent(b, &lk);
+            if ck.is_const && (self.narrow_below(b, &ik, ck.c) || self.const_lt(b, &ik, &ck, &llp, false)) {
                 return true;
             }
         }
@@ -1253,6 +1452,13 @@ extend Bce {
             return true;
         } else if self.prove_aligned(b, &ik, lop) {
             return true;
+        } else if !self.no_off {
+            // a constant bound rounded down to the index's stride, known now
+            let ck = self.array_extent(b, &lk);
+            let llp = lenbind_none();
+            if ck.is_const && self.const_lt(b, &ik, &ck, &llp, false) {
+                return true;
+            }
         }
         if self.limited || self.fx.ilimited {
             *reason = BR_RESOURCE_LIMIT;
@@ -1320,14 +1526,12 @@ extend Bce {
         if !ik.is_local {
             return false;
         }
+        // The facts and the strides bound the last lane `start + w - 1`. That bounds `start + w` for a
+        // start that is the true sum of its key, and from a fact over the last lane's key only when
+        // the last lane does not wrap either.
+        let sum = ik.off >= 0 || self.sum_ok(b, ik.l, ik.v, ik.off);
         ik.off += w - 1;
-        for i in 0..self.facts.len() {
-            let f = *self.facts.at(i);
-            if f.kind == 0 && self.idx_matches(&f, &ik, true) && self.len_matches(b, &f, lop) {
-                return true;
-            }
-        }
-        if self.prove_aligned(b, &ik, lop) {
+        if sum && self.lane_fact(b, &ik, lop) || sum && self.prove_aligned(b, &ik, lop) {
             return true;
         }
         if self.ints_for(b, lop) {
@@ -1340,11 +1544,25 @@ extend Bce {
             if xw != 0 && yw != 0 && !xs && !ys && !x.hn && !y.ln && y.lo >= w as u64 && x.hi <= y.lo - w as u64 {
                 return true;
             }
-            if self.prove_aligned(b, &ik, lop) {
+            if sum && (self.lane_fact(b, &ik, lop) || self.prove_aligned(b, &ik, lop)) {
                 return true;
             }
         }
         *reason = pick(self.limited || self.fx.ilimited, BR_RESOURCE_LIMIT, BR_JOIN_LOST_FACT);
+        return false;
+    }
+
+    /// A fact `last < len` over last lane key `ik` (length operand `lop`) whose sum does not wrap.
+    fn lane_fact(self: &mut Self, b: &ir::CoreBody, ik: &fx::VKey, lop: u32) bool {
+        if !self.nowrap(b, ik.l, ik.v, ik.off) {
+            return false;
+        }
+        for i in 0..self.facts.len() {
+            let f = *self.facts.at(i);
+            if f.kind == 0 && self.idx_matches(&f, ik, true) && self.len_matches(b, &f, lop) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -1383,7 +1601,16 @@ extend Bce {
                 }
             }
         }
-        if !e_le_l {}
+        if !e_le_l {
+            // the facts over the end: below the length, or below a fixed array's extent
+            let llp = if lk.is_local && lk.off == 0 {
+                self.len_place_of(lk.l)
+            } else {
+                lenbind_none()
+            };
+            let ck = self.array_extent(b, &lk);
+            e_le_l = self.fold_proved(b, &ek, &lk, &llp, true) || ck.is_const && self.const_lt(b, &ek, &ck, &llp, true);
+        }
         if !e_le_l && !(self.ints_for(b, lop) && (self.int_le(b, eop, lop, false) || self.int_len_bound(
             b,
             eop,
@@ -1400,6 +1627,14 @@ extend Bce {
             s_le_e = true;
         } else if sk.is_local && ek.is_local && sk.l == ek.l && sk.v == ek.v && sk.off == ek.off {
             s_le_e = true;
+        } else {
+            // the facts over the start against the end
+            let elp = if ek.is_local && ek.off == 0 {
+                self.len_place_of(ek.l)
+            } else {
+                lenbind_none()
+            };
+            s_le_e = self.fold_proved(b, &sk, &ek, &elp, true);
         }
         if !s_le_e && !(self.ints_for(b, lop) && self.int_le(b, sop, eop, false)) {
             *reason = BR_UNKNOWN_INDEX;
@@ -1560,6 +1795,49 @@ extend Bce {
         return false;
     }
 
+    /// Can a window's `+` or `-` not panic? Where overflow wraps, always. Where it traps, only a step of
+    /// the root (`aff`) to an offset `off` among the members' (`root` to `root + 7`): the first check
+    /// passed, so `root + root_off` lies below the length and such a sum cannot overflow.
+    const fn quiet_step(self: &Self, aff: bool, off: i64, root_off: i64) bool {
+        return !self.traps || aff && off >= root_off && self.reach_ok(off - root_off);
+    }
+
+    /// May a window reach a member `d` past the first? `+1` always: the first member is below its length.
+    /// Further only where the members index elements of a nonzero size (`wsized`): a zero-sized element's
+    /// length bounds no byte range, and `root + d` could wrap (a widened guard would then panic where
+    /// the member's index wrapped, or before its overflow trap).
+    const fn reach_ok(self: &Self, d: i64) bool {
+        return d <= 1 || self.wsized && d < 8;
+    }
+
+    /// Does place `pl` index elements of a nonzero size by root `ik` at its own offset (the first
+    /// member's access)?
+    fn elem_step(self: &mut Self, b: &ir::CoreBody, pl: u32, ik: &fx::VKey) bool {
+        let p = *b.places.at(pl as usize);
+        for i in 0..p.proj_len {
+            let pj = *b.projections.at((p.proj_start + i) as usize);
+            if pj.kind != ir::PJ_INDEX_OP {
+                continue;
+            }
+            let o = *b.operands.at(pj.data as usize);
+            let x = if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+                self.fx.whole_local(b, o.data)
+            } else {
+                ir::IR_NONE
+            };
+            let mut off: i64 = 0;
+            if self.root_off(b, x, pj.data, ik, &mut off) && off == ik.off && pj.ty != TYPE_NONE {
+                if !self.lay_used {
+                    self.lay.reset();
+                    self.lay_used = true;
+                }
+                let l = self.lay.layout(b.module, pj.ty);
+                return l.ok && l.size > 0;
+            }
+        }
+        return false;
+    }
+
     /// Lookahead from the unproven element check at `si` for later checks over the same affine
     /// root and the same length value, separated only by statements that cannot write memory or
     /// panic. On a hit the CURRENT check is rewritten in place to IN_BOUNDS_GROUP covering the
@@ -1588,6 +1866,9 @@ extend Bce {
         let mut maxoff = ik.off;
         let mut members: u32 = 0;
         let mut sj = si + 1;
+        // a length known below CMAX bounds the root: no member step wraps
+        let ck0 = self.array_extent(b, &lk);
+        self.wsized = ck0.is_const && ck0.c >= 0 && ck0.c <= CMAX;
         let scan_end = if bb.stmt_len > si + 48 {
             si + 48
         } else {
@@ -1652,7 +1933,7 @@ extend Bce {
                         }
                     }
                 }
-                if !have2 || !same_len || off2 < ik.off || off2 - ik.off >= 8 {
+                if !have2 || !same_len || off2 < ik.off || !self.reach_ok(off2 - ik.off) {
                     break; // an unrelated check is another possible panic: never move past it
                 }
                 if off2 > maxoff {
@@ -1709,6 +1990,9 @@ extend Bce {
                         bind_off = baseoff + ck;
                     }
                 }
+                if !self.quiet_step(bind_aff, bind_off, ik.off) {
+                    break; // an overflow trap would come before the group's panic
+                }
             } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::LessThan as u8 || rv2.c == tt::TokenType::LessThanEqual as u8) {
                 // pure comparison
             } else if k2 == ir::RV_INTRINSIC && rv2.c == ir::IN_BOUNDS_PROVEN {
@@ -1720,6 +2004,9 @@ extend Bce {
                 }
             } else if k2 == ir::RV_REF || k2 == ir::RV_ADDR || k2 == ir::RV_DISCRIMINANT {
                 // pure reads
+                if !self.wsized && k2 != ir::RV_DISCRIMINANT && self.elem_step(b, rv2.a, &ik) {
+                    self.wsized = true;
+                }
             } else {
                 break; // anything else may write memory, allocate, or panic
             }
@@ -2034,10 +2321,16 @@ extend Bce {
                     bind_rf = self.window_copy(&self.rf_dest, &self.rf_pl, x);
                 } else {
                     bind_pl = o2.data;
+                    if !self.wsized && self.elem_step(b, o2.data, ik) {
+                        self.wsized = true;
+                    }
                 }
             }
         } else if k2 == ir::RV_REF {
             bind_rf = rv2.a;
+            if !self.wsized && self.elem_step(b, rv2.a, ik) {
+                self.wsized = true;
+            }
         } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::Plus as u8 || rv2.c == tt::TokenType::Minus as u8) {
             let ka = self.vkey_c(b, rv2.a);
             let kb = self.vkey_c(b, rv2.b);
@@ -2058,6 +2351,9 @@ extend Bce {
             if basex != ir::IR_NONE && self.root_off(b, basex, side, ik, &mut baseoff) {
                 bind_aff = true;
                 bind_off = baseoff + ck;
+            }
+            if !self.quiet_step(bind_aff, bind_off, ik.off) {
+                return false; // an overflow trap would come before the widened guard's panic
             }
         } else if k2 == ir::RV_BINARY && (rv2.c == tt::TokenType::LessThan as u8 || rv2.c == tt::TokenType::LessThanEqual as u8 || rv2.c == tt::TokenType::GreaterThan as u8 || rv2.c == tt::TokenType::GreaterThanEqual as u8) {
             // a pure comparison
@@ -2333,6 +2629,7 @@ extend Bce {
         let mut maxoff = ik.off;
         let mut members: u32 = 0;
         let mut cur = surv;
+        self.wsized = false;
         let mut nst: u32 = 0;
         for _h in 0..16 {
             if cur == blk || self.fx.npred[cur as usize] != 1 {
@@ -2393,7 +2690,7 @@ extend Bce {
             if o3.kind == ir::OP_COPY || o3.kind == ir::OP_MOVE {
                 x = self.fx.whole_local(b, o3.data);
             }
-            if !self.root_off(b, x, iop2, &ik, &mut off2) || off2 < ik.off || off2 - ik.off >= 8 {
+            if !self.root_off(b, x, iop2, &ik, &mut off2) || off2 < ik.off || !self.reach_ok(off2 - ik.off) {
                 break;
             }
             // its length: the same value, or the same place read again (the window wrote no memory
@@ -2532,6 +2829,247 @@ extend Bce {
             self.stmt_fact(1, &cb.a, &lj, &nlp);
             self.stmt_fact(1, &cb.b, &lj, &nlp);
         }
+    }
+
+    /// `x + y` (operands `xo`, `yo`, either order) where a fact `x <= d` (or `x < d + 1`) names a
+    /// difference `d = a - y` (`diffof`) that is exact (overflow traps, or `y <= a`): the sum is at
+    /// most `a`, and exact. Returns `a`'s key, or none.
+    fn window_fact(self: &Self, b: &ir::CoreBody, xo: u32, yo: u32) fx::VKey {
+        for side in 0..2u32 {
+            let xk = self.vkey(
+                b,
+                if side == 0 {
+                    xo
+                } else {
+                    yo
+                },
+            );
+            let yk = self.vkey(
+                b,
+                if side == 0 {
+                    yo
+                } else {
+                    xo
+                },
+            );
+            if !xk.is_local || !yk.is_local || xk.off != 0 {
+                continue;
+            }
+            for i in 0..self.facts.len() {
+                let f = *self.facts.at(i);
+                if f.iconst || f.il != xk.l || f.iv != xk.v || f.ioff != 0 || !f.ln_ok || !(f.kind == 1 && f.ln_off == 0 || f.kind == 0 && f.ln_off == 1) {
+                    continue;
+                }
+                let db = *self.diffof.at(f.ln_l as usize);
+                if !db.ok || db.my_v != f.ln_v || !same_key(&db.b, &yk) {
+                    continue;
+                }
+                let alp = if db.a.off == 0 && self.fx.ver(db.a.l) == db.a.v {
+                    self.len_place_of(db.a.l)
+                } else {
+                    lenbind_none()
+                };
+                if self.traps || self.fold_proved(b, &db.b, &db.a, &alp, true) {
+                    return db.a;
+                }
+            }
+        }
+        return fx::vkey_none();
+    }
+
+    /// Is `rv` (a binary operation) the midpoint `m = lo + (x - lo) / c` (`c >= 2`, or `>> c` with
+    /// `c >= 1`) or `m = (lo + x) / c` (or `>> c`; `sym`: `lo` and `x` may swap) of unsigned `lo`
+    /// and `x`, its parts defined once in statements `s0 ..` of its block before its own `sid`, with
+    /// no write of `lo` or `x` from the first part on? Where `lo <= x` holds, `m <= x`, and where
+    /// `lo < x`, `m < x` (a wrapped sum is below `x` too).
+    fn mid_shape(
+        self: &Self,
+        b: &ir::CoreBody,
+        s0: u32,
+        sid: u32,
+        rv: &ir::Rvalue,
+        lo: &mut u32,
+        x: &mut u32,
+        sym: &mut bool,
+    ) bool {
+        if rv.kind != ir::RV_BINARY || !self.uns_ty(b, rv.target) {
+            return false;
+        }
+        let mut first = ir::IR_NONE;
+        if fx::norm_op(rv.c) == tt::TokenType::Plus as u8 {
+            for side in 0..2u32 {
+                let a = self.op_local(
+                    b,
+                    if side == 0 {
+                        rv.a
+                    } else {
+                        rv.b
+                    },
+                );
+                let qs = self.part_def(
+                    b,
+                    self.op_local(
+                        b,
+                        if side == 0 {
+                            rv.b
+                        } else {
+                            rv.a
+                        },
+                    ),
+                    s0,
+                    sid,
+                );
+                if a == ir::IR_NONE || qs == ir::IR_NONE {
+                    continue;
+                }
+                let qrv = *b.rvalues.at(b.statements.at(qs as usize).rvalue as usize);
+                let ds = if self.halves(b, &qrv) {
+                    self.part_def(b, self.op_local(b, qrv.a), s0, qs)
+                } else {
+                    ir::IR_NONE
+                };
+                if ds == ir::IR_NONE {
+                    continue;
+                }
+                let drv = *b.rvalues.at(b.statements.at(ds as usize).rvalue as usize);
+                if drv.kind == ir::RV_BINARY && fx::norm_op(drv.c) == tt::TokenType::Minus as u8 && self.op_local(
+                    b,
+                    drv.b,
+                ) == a {
+                    *lo = a;
+                    *x = self.op_local(b, drv.a);
+                    *sym = false;
+                    first = ds;
+                    break;
+                }
+            }
+        } else if self.halves(b, rv) {
+            let ss = self.part_def(b, self.op_local(b, rv.a), s0, sid);
+            if ss != ir::IR_NONE {
+                let srv = *b.rvalues.at(b.statements.at(ss as usize).rvalue as usize);
+                if srv.kind == ir::RV_BINARY && fx::norm_op(srv.c) == tt::TokenType::Plus as u8 {
+                    *lo = self.op_local(b, srv.a);
+                    *x = self.op_local(b, srv.b);
+                    *sym = true;
+                    first = ss;
+                }
+            }
+        }
+        if first == ir::IR_NONE || *lo == ir::IR_NONE || *x == ir::IR_NONE || *lo == *x || self.fx.exposed[(*lo) as usize] || self.fx.exposed[(*x) as usize] || !self.uns_ty(
+            b,
+            b.locals.at((*lo) as usize).ty,
+        ) || !self.uns_ty(b, b.locals.at((*x) as usize).ty) {
+            return false;
+        }
+        for k in first..sid {
+            let s9 = *b.statements.at(k as usize);
+            let w = if s9.kind == ir::ST_ASSIGN {
+                b.places.at(s9.place as usize).base
+            } else {
+                s9.a
+            };
+            if w == *lo || w == *x {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// Does binary `rv` divide by a constant of 2 or more, or shift right by 1 or more?
+    const fn halves(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) bool {
+        if rv.kind != ir::RV_BINARY {
+            return false;
+        }
+        let op = fx::norm_op(rv.c);
+        let c = *b.operands.at(rv.b as usize);
+        if c.kind != ir::OP_CONST || b.constants.at(c.data as usize).kind != ir::CK_INT {
+            return false;
+        }
+        let v = b.constants.at(c.data as usize).val;
+        return op == tt::TokenType::Slash as u8 && v >= 2 || op == tt::TokenType::RightShift as u8 && v >= 1 && v < 64;
+    }
+
+    /// The one definition of local `l` when it is a statement in `s0 .. before`, else IR_NONE.
+    const fn part_def(self: &Self, b: &ir::CoreBody, l: u32, s0: u32, before: u32) u32 {
+        if l == ir::IR_NONE || l as usize >= self.fx.def1.len() {
+            return ir::IR_NONE;
+        }
+        let d = self.fx.def1[l as usize];
+        if d == ir::IR_NONE || d < s0 || d >= before || b.statements.at(d as usize).kind != ir::ST_ASSIGN {
+            return ir::IR_NONE;
+        }
+        return d;
+    }
+
+    /// A local `x` the loop writes once, `x = m`, with `m` a midpoint of `x` and `lo` (`mid_shape`) in
+    /// a block `M` outside nested loops that the staying edge `stay` of exit test `e` (`x rel lo`, `rel`
+    /// `>` or `>=`, compared in `e`) dominates, and whose write of `x` and every write of `lo` come
+    /// after it (in blocks `M` strictly dominates): each iteration's `M` reads the `x` and `lo` its test
+    /// read, so `m <= x`, and `x` stays at most its entry value (a counter stepping down).
+    fn mid_try(self: &mut Self, b: &ir::CoreBody, e: u32, stay: u32, rel: u8, cs: u32, io: u32, yo: u32) {
+        let x = self.op_local(b, io);
+        let lo = self.op_local(b, yo);
+        let st = self.iv_stamp;
+        if x == ir::IR_NONE || lo == ir::IR_NONE || self.ivs.len() >= IV_MAX || self.ivw_s[x as usize] != st || self.ivw_n[x as usize] != 1 || rel != tt::TokenType::GreaterThan as u8 && rel != tt::TokenType::GreaterThanEqual as u8 {
+            return;
+        }
+        let eb = *b.blocks.at(e as usize);
+        if cs < eb.stmt_start || cs >= eb.stmt_start + eb.stmt_len {
+            return;
+        }
+        let ws = self.ivw_i[x as usize];
+        let wb = self.ivw_b[x as usize];
+        let wrv = *b.rvalues.at(b.statements.at(ws as usize).rvalue as usize);
+        let m = if wrv.kind == ir::RV_USE {
+            self.op_local(b, wrv.a)
+        } else {
+            ir::IR_NONE
+        };
+        if m == ir::IR_NONE || m as usize >= self.fx.def1.len() || self.fx.def1[m as usize] == ir::IR_NONE {
+            return;
+        }
+        let ms = self.fx.def1[m as usize];
+        let mut mb = ir::IR_NONE;
+        for q in 0..self.fx.lblocks.len() {
+            let y = self.fx.lblocks[q];
+            let yb = b.blocks.at(y as usize);
+            if ms >= yb.stmt_start && ms < yb.stmt_start + yb.stmt_len {
+                mb = y;
+                break;
+            }
+        }
+        if mb == ir::IR_NONE || self.ivin[mb as usize] == st || self.ivin[wb as usize] == st || !self.fx.dominates(
+            stay,
+            mb,
+        ) || !(mb != wb && self.fx.dominates(mb, wb) || mb == wb && ms < ws) {
+            return;
+        }
+        if self.ivw_s[lo as usize] == st && (self.ivw_n[lo as usize] != 1 || self.ivw_b[lo as usize] == mb || !self.fx.dominates(
+            mb,
+            self.ivw_b[lo as usize],
+        )) {
+            return;
+        }
+        let mut l2 = ir::IR_NONE;
+        let mut x2 = ir::IR_NONE;
+        let mut sym = false;
+        let mrv = *b.rvalues.at(b.statements.at(ms as usize).rvalue as usize);
+        if !self.mid_shape(b, b.blocks.at(mb as usize).stmt_start, ms, &mrv, &mut l2, &mut x2, &mut sym) || !(l2 == lo && x2 == x || sym && l2 == x && x2 == lo) {
+            return;
+        }
+        let ek = self.vkey(b, io); // the value on entry (not yet bumped)
+        self.ivs.push(
+            IvCand {
+                yk: fx::vkey_none(),
+                ek: ek,
+                ylp: lenbind_none(),
+                yop: ir::IR_NONE,
+                l: x,
+                step: -1,
+                after: false,
+                up: false,
+            },
+        );
     }
 
     /// Is block `p` side target `s` or reached from it through blocks of one predecessor (at most
@@ -2681,6 +3219,7 @@ extend Bce {
                     rv.a
                 };
                 self.iv_try(b, h, e, stay, stay_rel(rv.c, side, in_t), io, yo);
+                self.mid_try(b, e, stay, stay_rel(rv.c, side, in_t), self.fx.def1[c as usize], io, yo);
             }
         }
     }
@@ -2741,8 +3280,35 @@ extend Bce {
 
     /// A counter read by operand `io` of exit test `e` (staying edge `stay`, which keeps `io rel yo`).
     fn iv_try(self: &mut Self, b: &mut ir::CoreBody, h: u32, e: u32, stay: u32, rel: u8, io: u32, yo: u32) {
-        let l = self.op_local(b, io);
+        let mut l = self.op_local(b, io);
         let st = self.iv_stamp;
+        // `t = l + d` in the test's block, `t < y`: the test reads the counter at offset `d`
+        let mut dd: i64 = 0;
+        if l != ir::IR_NONE && l as usize < self.fx.def1.len() && self.fx.def1[l as usize] != ir::IR_NONE {
+            // its block in the loop, outside nested loops, dominates the test: each iteration reads
+            // the counter there before its one write, which the staying edge dominates
+            let ts = self.fx.def1[l as usize];
+            let mut tb = ir::IR_NONE;
+            for q in 0..self.fx.lblocks.len() {
+                let y = self.fx.lblocks[q];
+                let yb = b.blocks.at(y as usize);
+                if ts >= yb.stmt_start && ts < yb.stmt_start + yb.stmt_len {
+                    tb = y;
+                    break;
+                }
+            }
+            let trv = *b.rvalues.at(b.statements.at(ts as usize).rvalue as usize);
+            if tb != ir::IR_NONE && self.ivin[tb as usize] != st && self.fx.dominates(tb, e) && trv.kind == ir::RV_BINARY && fx::norm_op(
+                trv.c,
+            ) == tt::TokenType::Plus as u8 {
+                let x = self.op_local(b, trv.a);
+                let dk = self.vkey(b, trv.b);
+                if x != ir::IR_NONE && x != l && dk.is_const && dk.c >= 1 && dk.c <= 64 && self.ivw_s[x as usize] == st {
+                    l = x;
+                    dd = dk.c;
+                }
+            }
+        }
         if l == ir::IR_NONE || self.ivs.len() >= IV_MAX || self.ivw_s[l as usize] != st || self.ivw_n[l as usize] != 1 || self.fx.exposed[l as usize] || !self.uns_ty(
             b,
             b.locals.at(l as usize).ty,
@@ -2762,9 +3328,17 @@ extend Bce {
             return;
         }
         let one = *b.operands.at(srv.b as usize);
-        if one.kind != ir::OP_CONST || b.constants.at(one.data as usize).kind != ir::CK_INT || b.constants.at(
-            one.data as usize,
-        ).val != 1 {
+        if one.kind != ir::OP_CONST || b.constants.at(one.data as usize).kind != ir::CK_INT {
+            return;
+        }
+        // a step of `k` (up, the test before it): `l + d < y` with `d >= k - 1`, or `l + d <= y` with
+        // `d >= k`, leaves `l + k <= y`
+        let k = b.constants.at(one.data as usize).val;
+        let wide = k != 1 || dd != 0;
+        if wide && (k < 1 || k > 64 || srv.c != tt::TokenType::Plus as u8 && srv.c != tt::TokenType::PlusEqual as u8 || !(rel == tt::TokenType::LessThan as u8 && dd >= k - 1 || rel == tt::TokenType::LessThanEqual as u8 && dd >= k)) {
+            return;
+        }
+        if !wide && k != 1 {
             return;
         }
         let step: i64 = if srv.c == tt::TokenType::Plus as u8 || srv.c == tt::TokenType::PlusEqual as u8 {
@@ -2813,7 +3387,7 @@ extend Bce {
         let after = step == 1 && self.fx.dominates(ib, e) && self.dominates_latches(stay, h);
         let ne = rel == tt::TokenType::BangEqual as u8;
         let ok = if step == 1 {
-            (before || after) && (rel == tt::TokenType::LessThan as u8 || ne && before)
+            (before || after) && (rel == tt::TokenType::LessThan as u8 || ne && before || wide && before && rel == tt::TokenType::LessThanEqual as u8)
         } else if step == -1 {
             before && (rel == tt::TokenType::GreaterThan as u8 || ne && yk.is_const && yk.c == 0)
         } else {
@@ -2822,7 +3396,7 @@ extend Bce {
         if !ok {
             return;
         }
-        let ek = self.vkey(b, io); // the counter's value on entry (not yet bumped)
+        let ek = self.fx.local_key(l); // the counter's value on entry (not yet bumped)
         let mut up = false;
         if step == 1 {
             let nlp = lenbind_none();
@@ -2837,6 +3411,23 @@ extend Bce {
                 },
                 !after,
             );
+        }
+        if wide {
+            // `l <= y` holds on entry and `l + d` does not wrap: overflow traps, or `y` is a constant,
+            // or a length of elements of a nonzero size (at most isize::MAX, which `l` stays below)
+            let ylp2 = if ylp.ok {
+                ylp
+            } else if yk.is_local && yk.off == 0 {
+                self.len_place_of(yk.l)
+            } else {
+                lenbind_none()
+            };
+            if !before || !up || !(self.traps || yk.is_const && yk.c >= 0 && yk.c <= CMAX || ylp2.ok && self.sized_view(
+                b,
+                ylp2.pl,
+            )) {
+                return;
+            }
         }
         self.ivs.push(
             IvCand { yk: yk, ek: ek, ylp: ylp, yop: yopid, l: l, step: step, after: after && !before, up: up },
@@ -2898,6 +3489,7 @@ extend Bce {
                         f.lp_bg = now.bg;
                         f.lp_pg = now.pg;
                         f.lp_fg = now.fg;
+                        f.lp_xv = now.xv;
                         self.push_fact(f);
                     }
                 }
@@ -2916,8 +3508,11 @@ extend Bce {
                     f.lp_bg = lp.bg;
                     f.lp_pg = lp.pg;
                     f.lp_fg = lp.fg;
+                    f.lp_xv = lp.xv;
                 }
                 self.push_fact(f);
+            } else if c.ek.is_const && c.ek.c >= 0 && c.ek.c <= CMAX {
+                self.push_fact(key_fact(1, &lh, &c.ek));
             }
         }
     }
@@ -3026,6 +3621,7 @@ extend Bce {
                 lp_bg: lp.bg,
                 lp_pg: lp.pg,
                 lp_fg: lp.fg,
+                lp_xv: lp.xv,
                 lconst: rk.is_const && rk.c >= CMIN && rk.c <= CMAX,
                 ip: ir::IR_NONE,
             },
@@ -3171,6 +3767,7 @@ extend Bce {
                 },
             );
             self.remof.push(RemBind { x: fx::vkey_none(), x_lp: lenbind_none(), c: 0, my_v: 0, ok: false });
+            self.diffof.push(DiffBind { a: fx::vkey_none(), b: fx::vkey_none(), my_v: 0, ok: false });
             self.eqof.push(
                 EqBind {
                     a: fx::vkey_none(),
@@ -3487,14 +4084,73 @@ extend Bce {
         let mut flp = lenbind_none();
         // `d = a % n`, `a / c`, `a >> c`, `a & m` over unsigned values: bounded by a side
         let rop = fx::norm_op(rv.c);
-        let is_bnd = !self.no_bnd && dest != ir::IR_NONE && rv.kind == ir::RV_BINARY && (rop == op9 || rop == tt::TokenType::Slash as u8 || rop == tt::TokenType::RightShift as u8 || rop == tt::TokenType::Ampersand as u8) && self.uns_ty(
-            b,
-            rv.target,
-        );
+        let is_bnd = !self.no_bnd && dest != ir::IR_NONE && rv.kind == ir::RV_BINARY && (rop == op9 || rop == tt::TokenType::Slash as u8 || rop == tt::TokenType::RightShift as u8 || rop == tt::TokenType::Ampersand as u8 || rop == tt::TokenType::Minus as u8 && b.operands.at(
+            rv.b as usize,
+        ).kind != ir::OP_CONST) && self.uns_ty(b, rv.target);
         let mut bk1 = fx::vkey_none();
         let mut bk2 = fx::vkey_none();
         let mut blp1 = lenbind_none();
         let mut blp2 = lenbind_none();
+        // a midpoint of `lo` and `x` is below `x` where `lo < x` (at most `x` where `lo <= x`)
+        let mut mid_k: u8 = 2;
+        let mut mid_x = fx::vkey_none();
+        let mut mlo = ir::IR_NONE;
+        let mut mx = ir::IR_NONE;
+        let mut msym = false;
+        if !self.no_bnd && dest != ir::IR_NONE && self.mid_shape(
+            b,
+            bb.stmt_start,
+            sid as u32,
+            &rv,
+            &mut mlo,
+            &mut mx,
+            &mut msym,
+        ) {
+            for side in 0..2u32 {
+                let lk9 = self.fx.local_key(
+                    if side == 0 {
+                        mlo
+                    } else {
+                        mx
+                    },
+                );
+                let xk9 = self.fx.local_key(
+                    if side == 0 {
+                        mx
+                    } else {
+                        mlo
+                    },
+                );
+                let xlp9 = if xk9.is_local && xk9.off == 0 {
+                    self.len_place_of(xk9.l)
+                } else {
+                    lenbind_none()
+                };
+                if lk9.is_const || lk9.is_local {
+                    if self.fold_proved(b, &lk9, &xk9, &xlp9, false) {
+                        mid_k = 0;
+                    } else if self.fold_proved(b, &lk9, &xk9, &xlp9, true) {
+                        mid_k = 1;
+                    }
+                }
+                if mid_k != 2 {
+                    mid_x = xk9;
+                    break;
+                }
+                if !msym {
+                    break;
+                }
+            }
+        }
+        // `x + b` with `x <= a - b` (a window's end, `i + k` for `i < len - k + 1`) is at most `a`
+        let win_a = if !self.no_bnd && dest != ir::IR_NONE && rv.kind == ir::RV_BINARY && rop == tt::TokenType::Plus as u8 && self.uns_ty(
+            b,
+            rv.target,
+        ) {
+            self.window_fact(b, rv.a, rv.b)
+        } else {
+            fx::vkey_none()
+        };
         if is_bnd {
             bk1 = self.vkey(b, rv.a);
             bk2 = self.vkey(b, rv.b);
@@ -3576,14 +4232,48 @@ extend Bce {
         if flp.ok {
             self.place_read(b, &flp, dest, dv);
         }
-        self.note_copy(dest, &cpk); // another write records no source
+        let mut cpk2 = cpk;
+        if !cpk2.is_local && !cpk2.is_const && rv.kind == ir::RV_BINARY {
+            // an affine step (`j = n - 1`) is a copy of its source at an offset
+            let rk = self.fx.local_key(dest);
+            if rk.is_local && rk.l != dest {
+                cpk2 = rk;
+            }
+        }
+        self.note_copy(dest, &cpk2); // another write records no source
         if self.fx.cast_prev != ir::IR_NONE {
             self.rename_facts(self.fx.cast_prev, self.fx.cast_prev_v, dest, dv);
+        }
+        if win_a.is_local {
+            let dk = fx::VKey { is_const: false, c: 0, is_local: true, l: dest, v: dv, off: 0 };
+            let alp = if win_a.off == 0 {
+                self.len_place_of(win_a.l)
+            } else {
+                lenbind_none()
+            };
+            self.stmt_fact(1, &dk, &win_a, &alp);
+        }
+        if mid_k != 2 && (mid_x.is_local || mid_x.is_const) {
+            let dk = fx::VKey { is_const: false, c: 0, is_local: true, l: dest, v: dv, off: 0 };
+            let xlp = if mid_x.is_local && mid_x.off == 0 {
+                self.len_place_of(mid_x.l)
+            } else {
+                lenbind_none()
+            };
+            self.stmt_fact(mid_k, &dk, &mid_x, &xlp);
         }
         if is_bnd {
             let dk = fx::VKey { is_const: false, c: 0, is_local: true, l: dest, v: dv, off: 0 };
             if rop == op9 {
                 self.stmt_fact(0, &dk, &bk2, &blp2); // a remainder by zero traps
+            } else if rop == tt::TokenType::Minus as u8 {
+                // `a - b` is at most `a` where it does not wrap: an overflow traps, or `b <= a`
+                if self.traps || self.fold_proved(b, &bk2, &bk1, &blp1, true) {
+                    self.stmt_fact(1, &dk, &bk1, &blp1);
+                }
+                if bk1.is_local && bk2.is_local {
+                    self.diffof.set(dest as usize, DiffBind { a: bk1, b: bk2, my_v: dv, ok: true });
+                }
             } else {
                 // `a / c` (`c >= 2`) and `a >> c` (`c >= 1`) lie below a positive `a`
                 let shrink = (rop == tt::TokenType::Slash as u8 && bk2.is_const && bk2.c >= 2 || rop == tt::TokenType::RightShift as u8 && bk2.is_const && bk2.c >= 1) && (bk1.is_const && bk1.c >= 1 || bk1.is_local && bk1.off == 0 && self.lower_of(
@@ -3661,6 +4351,7 @@ extend Bce {
                             lp_bg: lp.bg,
                             lp_pg: lp.pg,
                             lp_fg: lp.fg,
+                            lp_xv: lp.xv,
                             lconst: false,
                             ip: ir::IR_NONE,
                         },
@@ -3726,6 +4417,9 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
         return "";
     }
     z.fx.pkg = pkg;
+    z.lay.pkg = pkg;
+    z.lay_used = false;
+    z.traps = unsafe (&*pkg).bc_value(BC_OVERFLOW_CHECKS) != 0;
     // most bodies carry no checks at all: skip every allocation for them
     let mut checks = false;
     for i in 0..b.rvalues.len() {

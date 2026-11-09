@@ -21,6 +21,7 @@ import ast::ast as *;
 import lexer::token_type as tt;
 import ir::core as ir;
 import ir::layout as lay;
+import ir::capture as cap;
 import module::loader as loader;
 
 // ---- memory effects --------------------------------------------------------------------------------
@@ -1341,8 +1342,23 @@ extend Facts {
                     if !deref && d != ir::IR_NONE {
                         self.holds.set(d as usize, true);
                     }
+                } else if rv.kind == ir::RV_CAST && self.ptr_derive(b, da, d, rv.a, &rv) {
+                    // a raw pointer cast to a pointer: the same address, a copy for the escape walk
+                    self.stack.push(d as u64 << 32 | self.op_local(b, rv.a) as u64);
                 } else if rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_DYN {
                     self.esc_op(b, rv.a);
+                } else if rv.kind == ir::RV_BINARY && norm_op(rv.c) >= tt::TokenType::EqualEqual as u8 && norm_op(rv.c) <= tt::TokenType::GreaterThanEqual as u8 {
+                    // a comparison hands neither side on
+                } else if rv.kind == ir::RV_BINARY && (norm_op(rv.c) == tt::TokenType::Plus as u8 || norm_op(rv.c) == tt::TokenType::Minus as u8) && self.ptr_derive(
+                    b,
+                    da,
+                    d,
+                    rv.a,
+                    &rv,
+                ) {
+                    // `p + k`, `p - k`: an address derived from `p`, a copy for the escape walk
+                    self.stack.push(d as u64 << 32 | self.op_local(b, rv.a) as u64);
+                    self.esc_op(b, rv.b);
                 } else if rv.kind == ir::RV_BINARY || rv.kind == ir::RV_REPEAT {
                     self.esc_op(b, rv.a);
                     self.esc_op(b, rv.b);
@@ -1373,9 +1389,22 @@ extend Facts {
             }
             let t = bb.term;
             if t.kind == ir::TM_CALL {
-                if !self.scalar_dests(b, &t) {
-                    for i in 0..t.args_len {
-                        self.esc_op(b, b.oper_pool[(t.args_start + i) as usize]);
+                // A call that returns no reference hands no borrow back, but its body may keep a raw
+                // pointer made from a mutable one (the borrow ends at the cast, the pointer stays valid):
+                // the storage a mutable reference argument borrows escapes unless the callee's summary
+                // keeps that parameter in the call (`ir::capture`); so does a raw pointer argument's target
+                // (its copies and derivations reach it through the escape walk). A call with other results
+                // escapes every argument but such a pointer its summary keeps in the call and returns
+                // nothing of.
+                let sd = self.scalar_dests(b, &t);
+                for i in 0..t.args_len {
+                    let opid = b.oper_pool[(t.args_start + i) as usize];
+                    let mr = self.mut_ref_op(b, opid) || self.raw_ptr_op(b, opid);
+                    if !sd && !(mr && self.callee_keeps(&t, i) && self.callee_returns_none(&t, i)) || sd && mr && !self.callee_keeps(
+                        &t,
+                        i,
+                    ) {
+                        self.esc_op(b, opid);
                     }
                 }
                 for i in 0..t.dests_len {
@@ -1432,28 +1461,41 @@ extend Facts {
                     }
                 } else if rv.kind == ir::RV_CAST && self.is_ref_to_ptr_cast(b, &rv) {
                     // the BORROWED storage escapes, not the reference
-                    let cl = self.whole_local(b, b.operands.at(rv.a as usize).data);
-                    let r = if cl == ir::IR_NONE {
-                        ir::IR_NONE
-                    } else {
-                        self.def_src(b, cl)
-                    };
-                    if r == ir::IR_NONE {
-                        self.escall = true;
-                    } else if self.def1[r as usize] != ir::IR_NONE && b.rvalues.at(
-                        b.statements.at(self.def1[r as usize] as usize).rvalue as usize,
-                    ).kind == ir::RV_REF {
-                        self.escape_place(
-                            b,
-                            b.rvalues.at(b.statements.at(self.def1[r as usize] as usize).rvalue as usize).a,
-                        );
-                    } else if self.holds[r as usize] {
-                        self.escall = true;
-                    } else {
-                        self.mark_escaped(r);
-                    }
+                    self.escape_target(b, self.whole_local(b, b.operands.at(rv.a as usize).data));
                 }
             }
+        }
+        // A `&mut` or a raw pointer whose value is stored or handed on (an aggregate's field, a call
+        // that returns more than scalars): the holder's drop glue or callee can write its target.
+        for i in 0..nl {
+            if !self.esc_use[i] || b.locals.at(i).storage == ir::LS_STATIC_REF {
+                continue;
+            }
+            let y = *da.type_at(b.locals.at(i).ty);
+            if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                self.escape_target(b, i as u32);
+            }
+        }
+    }
+
+    // The storage reference or pointer local `cl` (IR_NONE: unknown) points at escapes: a borrow's or
+    // a raw address's place, else the root its single definitions copy, else every local.
+    fn escape_target(self: &mut Self, b: &ir::CoreBody, cl: u32) {
+        let r = if cl == ir::IR_NONE {
+            ir::IR_NONE
+        } else {
+            self.def_src(b, cl)
+        };
+        if r == ir::IR_NONE {
+            self.escall = true;
+        } else if self.def1[r as usize] != ir::IR_NONE && (b.rvalues.at(
+            b.statements.at(self.def1[r as usize] as usize).rvalue as usize,
+        ).kind == ir::RV_REF || b.rvalues.at(b.statements.at(self.def1[r as usize] as usize).rvalue as usize).kind == ir::RV_ADDR) {
+            self.escape_place(b, b.rvalues.at(b.statements.at(self.def1[r as usize] as usize).rvalue as usize).a);
+        } else if self.holds[r as usize] {
+            self.escall = true;
+        } else {
+            self.mark_escaped(r);
         }
     }
 
@@ -1577,6 +1619,68 @@ extend Facts {
             }
         }
         return true;
+    }
+
+    /// `places_eq`, with a dynamic index taken by its local: two operands that copy one whole local
+    /// match. The caller knows that local kept its version between the two reads (`index_ver`).
+    pub(package) const fn places_eq_index(self: &Self, b: &ir::CoreBody, p1: u32, p2: u32) bool {
+        if (p1 & SYNTH_PL) != 0 || (p2 & SYNTH_PL) != 0 {
+            return false;
+        }
+        let a = *b.places.at(p1 as usize);
+        let c = *b.places.at(p2 as usize);
+        if a.base != c.base || a.proj_len != c.proj_len {
+            return false;
+        }
+        for i in 0..a.proj_len {
+            let x = *b.projections.at((a.proj_start + i) as usize);
+            let y = *b.projections.at((c.proj_start + i) as usize);
+            if x.kind != y.kind || x.sub != y.sub {
+                return false;
+            }
+            if x.data != y.data && (x.kind != ir::PJ_INDEX_OP || self.index_local(b, x.data) == ir::IR_NONE || self.index_local(
+                b,
+                x.data,
+            ) != self.index_local(b, y.data)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The whole local index operand `opid` copies, or IR_NONE.
+    const fn index_local(self: &Self, b: &ir::CoreBody, opid: u32) u32 {
+        let o = *b.operands.at(opid as usize);
+        if o.kind != ir::OP_COPY && o.kind != ir::OP_MOVE {
+            return ir::IR_NONE;
+        }
+        return self.whole_local(b, o.data);
+    }
+
+    /// The current version of the one dynamic index local of place `pl`, or IR_NONE when it has no
+    /// dynamic index, several, or one that no whole local holds.
+    pub(package) const fn index_ver(self: &Self, b: &ir::CoreBody, pl: u32) u32 {
+        if (pl & SYNTH_PL) != 0 {
+            return ir::IR_NONE;
+        }
+        let p = *b.places.at(pl as usize);
+        let mut x = ir::IR_NONE;
+        for i in 0..p.proj_len {
+            let pj = *b.projections.at((p.proj_start + i) as usize);
+            if pj.kind == ir::PJ_INDEX_OP {
+                if x != ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+                x = self.index_local(b, pj.data);
+                if x == ir::IR_NONE {
+                    return ir::IR_NONE;
+                }
+            }
+        }
+        if x == ir::IR_NONE || self.opaque(x) {
+            return ir::IR_NONE;
+        }
+        return self.ver(x);
     }
 
     /// A whole-local place (no projections), or IR_NONE.
@@ -2617,6 +2721,55 @@ extend Facts {
         }
     }
 
+    // Does call `t` keep no pointer from its argument `i` past the call (`ir::capture`)? False when the
+    // emission built no summary.
+    const fn callee_keeps(self: &Self, t: &ir::Terminator, i: u32) bool {
+        let cs = unsafe (&*self.pkg).cap_store;
+        return cs != null && unsafe (*(cs as *const cap::CaptureStore)).keeps_none(self.pkg, t, i);
+    }
+
+    // Does no result of call `t` point into what its argument `i` points into (`ir::capture`)? False
+    // when the emission built no summary.
+    const fn callee_returns_none(self: &Self, t: &ir::Terminator, i: u32) bool {
+        let cs = unsafe (&*self.pkg).cap_store;
+        return cs != null && unsafe (*(cs as *const cap::CaptureStore)).returns_none(self.pkg, t, i);
+    }
+
+    // Is operand `opid` a raw pointer local?
+    const fn raw_ptr_op(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+        if opid == ir::IR_NONE {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST || self.whole_local(b, op.data) == ir::IR_NONE {
+            return false;
+        }
+        let y = unsafe &*(&*self.pkg).module_ast_const(b.module);
+        return y.type_at(op.ty).kind == TypeKind::TYPE_POINTER;
+    }
+
+    // Is `d = rv` (operand `src` first) an address derived from raw pointer local `src` into a pointer
+    // local `d` that is not the result: a cast, `src + k` or `src - k`?
+    const fn ptr_derive(self: &Self, b: &ir::CoreBody, da: &Ast, d: u32, src: u32, rv: &ir::Rvalue) bool {
+        return d != ir::IR_NONE && b.locals.at(d as usize).storage != ir::LS_RET && self.raw_ptr_op(b, src) && da.type_at(
+            rv.target,
+        ).kind == TypeKind::TYPE_POINTER && da.type_at(b.locals.at(d as usize).ty).kind == TypeKind::TYPE_POINTER;
+    }
+
+    // Is operand `opid` a mutable reference?
+    const fn mut_ref_op(self: &Self, b: &ir::CoreBody, opid: u32) bool {
+        if opid == ir::IR_NONE {
+            return false;
+        }
+        let op = *b.operands.at(opid as usize);
+        if op.kind == ir::OP_CONST {
+            return false;
+        }
+        let y = unsafe &*(&*self.pkg).module_ast_const(b.module);
+        let ty = y.type_at(op.ty);
+        return ty.kind == TypeKind::TYPE_REFERENCE && ty.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+    }
+
     /// True when the callee is a local Super-C function body (not extern, not a fn value).
     pub(package) const fn callee_defined(self: &Self, d: DefId) bool {
         let pk = unsafe &*self.pkg;
@@ -2956,6 +3109,35 @@ extend Facts {
                     }
                 }
             }
+            if rv.kind == ir::RV_INTRINSIC && ir::is_check(rv.c) {
+                // a check returns its index (a range check: its end) unchanged: a copy of an index of
+                // its own type (a signed one converts)
+                let at = pick(rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN, 1u32, 0u32);
+                let op = *b.operands.at(b.oper_pool[(rv.a + at) as usize] as usize);
+                let srcl = if (op.kind == ir::OP_COPY || op.kind == ir::OP_MOVE) && op.ty == rv.target {
+                    self.whole_local(b, op.data)
+                } else {
+                    ir::IR_NONE
+                };
+                let sv = if srcl == ir::IR_NONE {
+                    0
+                } else {
+                    self.ver(srcl)
+                };
+                self.write_place(b, s.place);
+                if srcl != ir::IR_NONE {
+                    self.copyof.set(dest as usize, CopyBind { src: srcl, src_v: sv, my_v: self.ver(dest), ok: true });
+                } else if op.kind == ir::OP_CONST && b.constants.at(op.data as usize).kind == ir::CK_INT {
+                    let c = b.constants.at(op.data as usize).val;
+                    if c >= 0 && c < 1099511627776 {
+                        self.constof.set(
+                            dest as usize,
+                            AffBind { src: 0, src_v: 0, c: c, my_v: self.ver(dest), ok: true },
+                        );
+                    }
+                }
+                return;
+            }
             if rv.kind == ir::RV_REF {
                 self.write_place(b, s.place);
                 self.refof.set(dest as usize, RefBind { pl: rv.a, my_v: self.ver(dest), ok: true });
@@ -3120,8 +3302,11 @@ extend Facts {
 
     /// The fact of local `l` at the evaluation point.
     pub(package) const fn ilocal(self: &Self, l: u32) IFact {
-        if !self.ion || self.iw[l as usize] == 0 || self.cst[l as usize] != self.stamp {
+        if !self.ion || self.iw[l as usize] == 0 {
             return itop(64, false); // unknown at any width: no bound, no stride, no known bits
+        }
+        if self.cst[l as usize] != self.stamp {
+            return itop(self.iw[l as usize], self.isg[l as usize]); // its type's range, below 0 when signed
         }
         return self.cur[l as usize];
     }
@@ -3589,6 +3774,10 @@ extend Facts {
             let f = self.ival(b, rv.a, &mut aw, &mut asg);
             if aw == w && asg == sg {
                 return f;
+            }
+            // a literal keeps its own type (`k = 15` into an `i64`): its value is what lands
+            if aw != 0 && b.operands.at(rv.a as usize).kind == ir::OP_CONST && iexact(&f) {
+                return icast(&f, aw, w, sg);
             }
             return top;
         }

@@ -332,6 +332,13 @@ panic-guard folding and widening).
   a length bound (`const_lt`: `i < 10`, `20 < len`), and `c <= len` proves a constant index below `c`. The solved intervals prove `x < y` (`int_le`) over
   unsigned values and over signed ones whose interval is not negative (an `i32` counter from 0 indexes as
   its unsigned value).
+- **Wrapping sums.** Where overflow traps (opt-level 0 and 1), every `+` and `-` the body computed
+  stayed in range, so its sum is exact (`sum_ok`). Where it wraps, a sum is exact only when a bound
+  keeps it in range: the length of a prelude view of elements of a nonzero size is at most
+  `isize::MAX` (`sized_view`), so `i + d < len` cannot wrap; a view of zero-sized elements may be
+  `usize::MAX` long and proves nothing. A fact `x <= a - y` with an exact difference (`diffof`) bounds
+  `x + y` by `a` (`window_fact`). A midpoint `lo + (x - lo) / c` or `(lo + x) >> c` of a loop's `x`
+  stays at most `x` where `lo <= x` holds (`mid_shape`, `mid_try`: a binary search's `hi`).
 - **Loop counters** (`iv_scan`, `iv_facts`). At a loop header, before its writes are bumped, an
   unsigned local whose one write in the loop is `l = l + 1` (or `l - 1`, directly or through a
   temporary) outside every nested loop, with an exit test outside them that compares it with a
@@ -351,7 +358,11 @@ panic-guard folding and widening).
   `IN_GROUP_FITS(index, len, width)`, a bool the emitter spells `__sc_fits`: the guard keeps its panic,
   its true edge proves every member offset, and the members fold. A member that would fail panics with
   the same panic, before the pure statements between. The guard's comparison must have one reader, counted once
-  per body (`local_reads`: the run adds no operand that reads a local).
+  per body (`local_reads`: the run adds no operand that reads a local). A member past `root + 1` joins only
+  where the members index elements of a nonzero size (`reach_ok`, `elem_step`): otherwise `root + d`
+  could wrap. Where overflow traps, a member's `+` or `-` joins only when it cannot panic before the
+  first check (`quiet_step`), so the overflow panic keeps its order. A vector access of `w` lanes
+  proves its last lane only where `last < len` holds without a wrap (`lane_fact`).
 
 - **Memory effects.** `stmt_effect` and `term_effect` are pure functions of the body:
   `EF_WRITE` (a place, through a deref or not), `EF_PTR` (a write through a pointer operand: a
@@ -378,6 +389,16 @@ panic-guard folding and widening).
   and calls, references cast to raw pointers, a closure's captures) comes from one scan of the body
   before the walk; a call or drop through a raw pointer is never transparent (`raw_target`). It is
   resolved through single definitions; an unresolved one disables call transparency for the body.
+  A raw pointer cast from another, or `p + k` and `p - k`, is a copy of it for the escape walk
+  (`ptr_derive`). A `&mut` or a raw pointer stored in an aggregate or handed to a call that returns
+  more than scalars escapes its target (`escape_target`). A call that returns no reference escapes
+  the storage of a `&mut` argument, and the target of a raw pointer argument, unless the callee's
+  capture summary keeps that parameter in the call (`callee_keeps`; a call with other results also
+  needs `callee_returns_none`). The summary (`ir/capture.spc`, `CaptureStore`, built once per
+  emission from the borrow checker's kept lowerings into `Package.cap_store`) marks a parameter that
+  a body stores outside its locals and result, turns into an integer, captures in a closure, or
+  hands to a call that may keep it; a call of an interface member reaches every kept body of its
+  name. Without a summary every such argument escapes.
   BCE walks each body once, in reverse postorder up to the last block with a check or a
   fold candidate: no fact flows backward, so the blocks after it change no result.
 - **Integer facts.** Per tracked integer local: an interval in exact sign-magnitude arithmetic
