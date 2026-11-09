@@ -480,8 +480,9 @@ pub interface Index<T, S> {
 /// The writable counterpart. `obj[i] = v` stores through the `&mut T` that `index_mut` returns (a
 /// compound `obj[i] += v` reads and writes through it; a plain `=` over a `Free` element frees the
 /// replaced value first, like a binding reassignment). `S` is the writable sub-view (`[]mut T`):
-/// `&mut obj[lo..hi]` takes `index_range_mut`'s view (a `&mut S`), every other `obj[lo..hi]` the
-/// read-only `index_range`.
+/// `&mut obj[lo..hi]`, and `obj[lo..hi]` where a `[]mut T` is expected or as the receiver of a method
+/// only `[]mut T` has, take `index_range_mut`'s view (an `S`); every other `obj[lo..hi]` and
+/// `&obj[lo..hi]` the read-only `index_range`.
 pub interface IndexMut<T, S> {
     fn index_mut(self: &mut Self, i: usize) &mut T;
     fn index_range_mut(self: &mut Self, r: Range<usize>) S;

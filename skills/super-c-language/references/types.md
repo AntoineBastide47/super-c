@@ -334,7 +334,9 @@ view's element and sub-view borrow what the view borrows (`Slice::index<'a>(self
 packed into a `Range<usize>` (`r.inclusive` set by `..=`); a missing start is 0 and a missing end
 is the value's `len()`, which must return `usize` ("an open-ended range index needs a 'len' method
 returning 'usize' on 'V<4>' to supply the end"). `&mut obj[lo..hi]` calls `index_range_mut`
-instead and has type `&mut S` for its result `S`.
+instead. `&obj[lo..hi]` and `&mut obj[lo..hi]` have the type `S` of the call's result (a view), not
+`&S`. A plain `obj[lo..hi]` calls `index_range_mut` where its context expects a `[]mut T`
+(`slices-and-arrays.md`).
 
 An operator whose left operand has a builtin type and whose right operand has a struct, enum or
 vector type calls the conformance of the builtin type that accepts the right operand

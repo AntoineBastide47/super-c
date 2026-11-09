@@ -8984,10 +8984,117 @@ fn core_value_regressions() {
         "a dyn of its own interface in a dyn-compatible method",
         "pub interface Link {\n    fn next(self: &Self) Option<&dyn Link>;\n}\nfn main() i32 {\n    return 0;\n}\n",
     );
+    // Where a `[]mut T` is expected, `x[a..b]` of a read-only object stays its read-only view.
+    expect_one_err(
+        "a mutable sub-view of a read-only view",
+        "fn m(a: []mut i32) {\n    a[0] = 1;\n}\nfn ro(a: []i32) {\n    m(a[0..]);\n}\nfn main() i32 {\n    return 0;\n}\n",
+        "mismatched types: expected 'SliceMut<i32>', found 'Slice<i32>'",
+    );
+    expect_one_err(
+        "a mutable sub-view of an immutable binding",
+        "fn m(a: []mut i32) {\n    a[0] = 1;\n}\nfn main() i32 {\n    let v = Vector::<i32>::new();\n    m(v[0..]);\n    return 0;\n}\n",
+        "mismatched types: expected 'SliceMut<i32>', found 'Slice<i32>'",
+    );
     let mut b = h::ExitBatch::new();
     b.add(
         "a mutated sub-view of a vector, an array and a view",
         "fn main() i32 {\n    let mut a: [i32; 2] = [5, 6];\n    let w = &mut a[0..1];\n    w[0] = 7;\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let sm = &mut v[0..2];\n    let u = &mut sm[1..2];\n    u[0] = 9;\n    return a[0] + v[1] - 16;\n}\n",
+        0,
+    );
+    // `else if let` ends a statement `if` chain and a value `if`: its names resolve and its type checks.
+    b.add(
+        "else if let in statement and value chains",
+        M"(fn pick(up: bool, m: &Vector<u32>, e: usize) u32 {
+    let mut r: u32 = 0;
+    if up {
+        r = 1;
+    } else if let Some(f) = m.get(e) {
+        r = *f;
+    }
+    return r;
+}
+fn chain(a: u32, o: Option<u32>, p: Option<u32>) u32 {
+    let mut r: u32 = 0;
+    if a == 0 {
+        r = 1;
+    } else if a == 1 {
+        r = 2;
+    } else if let Some(x) = o {
+        r = x;
+    } else if let Some(y) = p {
+        r = y + 100;
+    } else {
+        r = 3;
+    }
+    return r;
+}
+fn value(a: u32, o: Option<u32>) u32 {
+    return if a == 0 {
+        5
+    } else if let Some(x) = o {
+        x
+    } else {
+        6
+    };
+}
+fn main() i32 {
+    let mut v = Vector::<u32>::new();
+    v.push(7);
+    let s = pick(false, &v, 0) + pick(true, &v, 0) + pick(false, &v, 5);
+    let c = chain(0, None, None) + chain(1, None, None) + chain(2, Some(10), None) + chain(2, None, Some(20)) + chain(2, None, None);
+    let w = value(0, None) + value(1, Some(30)) + value(1, None);
+    return (s + c + w) as i32 - 185;
+})",
+        0,
+    );
+    // `&x[a..b]` is a `[]T` and `&mut x[a..b]` a `[]mut T`, and `x[a..b]` is the mutable sub-view
+    // where a `[]mut T` is expected (an argument, an annotated `let`, a method only `[]mut T` has),
+    // on an array, a vector, a mutable view and a string.
+    b.add(
+        "sub-views passed to view parameters",
+        M"(fn s(a: []i32) i32 {
+    let mut t = 0;
+    for x in a {
+        t += x;
+    }
+    return t;
+}
+fn m(a: []mut i32, k: i32) {
+    for i in 0..a.len() {
+        a[i] += k;
+    }
+}
+fn sub(a: []mut i32) {
+    m(&mut a[1..], 100);
+    m(a[2..], 1000);
+}
+fn bytes(t: str) usize {
+    return t.len();
+}
+fn main() i32 {
+    let mut arr: [i32; 4] = [1, 2, 3, 4];
+    m(&mut arr[1..3], 10);
+    m(arr[0..1], 20);
+    let mut v = Vector::<i32>::new();
+    v.push(5);
+    v.push(6);
+    v.push(7);
+    m(&mut v[0..2], 1);
+    let w: []mut i32 = v[2..];
+    w[0] = 70;
+    sub(&mut v[0..]);
+    let mut b = Vector::<u8>::new();
+    b.push(0);
+    b.push(0);
+    b.push(0);
+    let o: [u8; 2] = [50, 60];
+    b[1..].copy_from_slice(o[0..]);
+    let st = String::from("hello");
+    if s(&arr[0..2]) != 33 || arr[2] != 13 || s(&v[1..]) != 1277 || v[0] != 6 || bytes(&st[1..4]) != 3 || b[2] != 60 {
+        return 1;
+    }
+    return 0;
+})",
         0,
     );
     b.add(

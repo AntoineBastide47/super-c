@@ -19012,6 +19012,22 @@ extend<'a> TypeChecker<'a> {
                 }
                 return true;
             }
+            // `x[a..b]` where a `[]mut T` is expected is `index_range_mut`'s sub-view, as an array is a
+            // `[]mut T` there: `is_assignable` switches the node's method and type.
+            let pn = unsafe (*self.cur_ast()).peel(node, false);
+            let pd = unsafe (*self.cur_ast()).at_const(pn);
+            let mut se: TypeId = TYPE_NONE;
+            let mut me: TypeId = TYPE_NONE;
+            if pd.kind == NodeKind::NODE_INDEX && unsafe (*self.cur_ast()).at_const(pd.as_data.index.index).kind == NodeKind::NODE_RANGE && self.slice_kind(
+                actual,
+                &mut se,
+            ) == 1 && self.slice_kind(expected, &mut me) == 2 && se == me {
+                if probe || self.is_assignable(pn) {
+                    return true;
+                }
+                // A read-only object keeps its read-only view: the mismatch names it.
+                unsafe (*self.cur_ast()).set_type(pn, actual);
+            }
         }
         if ac.kind == TypeKind::TYPE_ARRAY {
             let mut selem: TypeId = TYPE_NONE;
@@ -21761,7 +21777,6 @@ extend TypeChecker {
                     self.tc_lint_pair_fix(usp.start, unsafe (*a).at_const(inner).span.start);
                 }
             }
-            let mut pointee = opnd;
             let opw = unsafe (*a).peel(operand, false);
             let onk = unsafe (*a).at_const(opw).kind;
             if mut2 && self.is_place(operand) && !self.is_assignable(operand) {
@@ -21775,11 +21790,12 @@ extend TypeChecker {
             if self.tc_packed_misaligned(operand, 0) {
                 self.err_packed_ref(unsafe (*a).at_const(operand).span);
             }
-            // `&mut v[a..b]` takes `index_range_mut`'s sub-view (`is_assignable` switched the type).
-            if mut2 && onk == NodeKind::NODE_INDEX && unsafe (*a).at_const(
+            // `&v[a..b]` is the sub-view itself, `&mut v[a..b]` `index_range_mut`'s (`is_assignable`
+            // switched the type): a view, as `&a` of an array is where one is expected.
+            if onk == NodeKind::NODE_INDEX && !untyped(opnd) && unsafe (*a).at_const(
                 unsafe (*a).at_const(opw).as_data.index.index,
             ).kind == NodeKind::NODE_RANGE {
-                pointee = unsafe (*a).type_of(opw);
+                return unsafe (*a).type_of(opw);
             }
             if !self.is_place(opw) && !untyped(opnd) && self.type_at(opnd).kind != TypeKind::TYPE_BUILTIN && (onk == NodeKind::NODE_CALL || onk == NodeKind::NODE_IF || onk == NodeKind::NODE_MATCH || onk == NodeKind::NODE_BLOCK || onk == NodeKind::NODE_BINARY || onk == NodeKind::NODE_ASSIGNMENT || onk == NodeKind::NODE_CAST) {
                 let osp = unsafe (*a).at_const(opw).span;
@@ -21790,7 +21806,7 @@ extend TypeChecker {
                 );
             }
             return unsafe (*self.cur_ast()).intern_type(
-                Ty { kind: TYPE_REFERENCE, qualifier: qual as u8, as_data: TyAs { elem: pointee } },
+                Ty { kind: TYPE_REFERENCE, qualifier: qual as u8, as_data: TyAs { elem: opnd } },
             );
         }
         if op == TokenType::Question {
@@ -27922,8 +27938,9 @@ extend TypeChecker {
         let mok = replace(&mut self.icx.mret_ok, obj_node);
         let mobj = replace(&mut self.icx.member_obj, pick(prefer_method, NODE_NONE, obj_node));
         self.icx.union_cross = false;
-        let obj = self.check_expr(obj_node);
+        let mut obj = self.check_expr(obj_node);
         self.icx.member_obj = mobj;
+        obj = self.tc_mut_view_receiver(id, obj_node, obj);
         let crossed = replace(&mut self.icx.union_cross, false);
         let hi = self.tc_dfr_index(obj);
         if hi >= 0 && self.dfr_holes[hi as usize].bind == TYPE_NONE {
@@ -27977,6 +27994,38 @@ extend TypeChecker {
         self.errors.fixes.truncate(f0);
         self.tc_raw_member(id, obj_node, t == TYPE_NONE);
         return TYPE_ERROR;
+    }
+
+    // The receiver type of member `id` on `obj_node` of type `obj`: a method only `[]mut T` has, on
+    // `x[a..b]`, takes `index_range_mut`'s sub-view, as an argument where a `[]mut T` is expected does
+    // (`is_assignable` switches the node's method and type).
+    fn tc_mut_view_receiver(self: &mut Self, id: NodeId, obj_node: NodeId, obj: TypeId) TypeId {
+        let a = self.cur_ast();
+        let pn = unsafe (*a).peel(obj_node, false);
+        let pd = unsafe (*a).at_const(pn);
+        let mut se: TypeId = TYPE_NONE;
+        if pd.kind != NodeKind::NODE_INDEX || unsafe (*a).at_const(pd.as_data.index.index).kind != NodeKind::NODE_RANGE || self.slice_kind(
+            obj,
+            &mut se,
+        ) != 1 {
+            return obj;
+        }
+        let name = self.name_span(unsafe (*a).at_const(id).as_data.member.member);
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if !self.aggregate_decl(self.strip(obj), &mut om, &mut od) || self.find_method(om, od, name).node != NODE_NONE {
+            return obj;
+        }
+        let mt = self.prelude_slice_type(se, true);
+        if !self.aggregate_decl(mt, &mut om, &mut od) || self.find_method(om, od, name).node == NODE_NONE {
+            return obj;
+        }
+        if !self.is_assignable(pn) {
+            // A read-only object keeps its read-only view: the missing method names it.
+            unsafe (*self.cur_ast()).set_type(pn, obj);
+            return obj;
+        }
+        return unsafe (*self.cur_ast()).type_of(pn);
     }
 
     // Whether member `id` resolved to a method whose `self` is the raw pointer type `obj` itself (no

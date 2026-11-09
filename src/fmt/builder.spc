@@ -1685,7 +1685,8 @@ extend Builder {
         return self.cat(v);
     }
 
-    // An else branch: `else if`, `else if let`, or a block.
+    // An else branch: `else if`, `else if let` (in a statement `if` chain, the expression statement
+    // the parser wraps it in), or a block.
     fn b_else(self: &mut Self, id: NodeId) d::DocId {
         let k = self.nd(id).kind;
         if k == NodeKind::NODE_IF {
@@ -1693,6 +1694,9 @@ extend Builder {
         }
         if k == NodeKind::NODE_MATCH {
             return self.b_if_let(id);
+        }
+        if k == NodeKind::NODE_EXPRESSION_STATEMENT {
+            return self.b_if_let(self.nd(id).as_data.single.value);
         }
         return self.b_block(id);
     }

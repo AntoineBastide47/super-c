@@ -3540,7 +3540,8 @@ extend Parser {
             },
             If => {
                 let f = self.parse_if();
-                // if-let desugars to a match EXPRESSION; wrap it so it statement-positions
+                // if-let desugars to a match EXPRESSION; wrap it so it statement-positions, also as
+                // the last `else` of an `if` chain (`} else if let ..`), which is a statement there too
                 if f != NODE_NONE && self.ast.at_const(f).kind == NodeKind::NODE_MATCH {
                     result = self.mk(
                         NodeKind::NODE_EXPRESSION_STATEMENT,
@@ -3549,6 +3550,19 @@ extend Parser {
                     );
                 } else {
                     result = f;
+                    let mut c = f;
+                    while c != NODE_NONE && self.ast.at_const(c).kind == NodeKind::NODE_IF {
+                        let e = self.ast.at_const(c).as_data.if_stmt.else_branch;
+                        if e != NODE_NONE && self.ast.at_const(e).kind == NodeKind::NODE_MATCH {
+                            let w = self.mk(
+                                NodeKind::NODE_EXPRESSION_STATEMENT,
+                                self.node_span(e),
+                                NodeAs { single: SingleData { value: e } },
+                            );
+                            self.ast.at(c).as_data.if_stmt.else_branch = w;
+                        }
+                        c = e;
+                    }
                 }
             },
             Label => {

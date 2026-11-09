@@ -1503,7 +1503,12 @@ extend Resolver {
         let ifd = self.ast.at_const(id).as_data.if_stmt;
         self.resolve_expr(ifd.condition);
         self.resolve_stmt(ifd.then_branch);
-        self.resolve_stmt(ifd.else_branch);
+        // A value `if`'s `else if let` is the match the parser makes of it, an expression.
+        if ifd.else_branch != NODE_NONE && self.ast.at_const(ifd.else_branch).kind == NodeKind::NODE_MATCH {
+            self.resolve_expr(ifd.else_branch);
+        } else {
+            self.resolve_stmt(ifd.else_branch);
+        }
     }
 
     fn resolve_block(self: &mut Self, id: NodeId) {

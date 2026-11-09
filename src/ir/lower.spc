@@ -4711,6 +4711,11 @@ extend Lowerer {
         }
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
+        // `&v[a..b]` and `&mut v[a..b]` are the sub-view the index gives: the checker typed the
+        // borrow as its operand, a type no reference has.
+        if d.op == tt::TokenType::Ampersand && ty != TYPE_NONE && ty == self.nty(d.operand) {
+            return self.lower_expr_d(d.operand, dest);
+        }
         if d.op == tt::TokenType::Ampersand && ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_REFERENCE && self.f.derefs(
             id,
         ) == null {

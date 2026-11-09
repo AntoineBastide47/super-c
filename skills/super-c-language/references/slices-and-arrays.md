@@ -23,7 +23,10 @@ array like `&a` (`&mut a` for `[]mut`) and never moves it: the array must outliv
 cannot be written, moved or viewed mutably while the view is live. A `[]mut T` coerces to `[]T` (a
 generic `[]T` parameter infers `T` from it); the `[]T` borrows the `[]mut T` shared, and a `[]mut T`
 passed to a call is a mutable use of it, as a `&mut` argument is. `&mut x[a..b]` on an array, a
-`[]mut T` or a container with `index_range_mut` is a `[]mut T`, and `&x[a..b]` a `[]T`. A literal coerced to a slice
+`[]mut T` or a container with `index_range_mut` is a `[]mut T`, and `&x[a..b]` a `[]T`. A plain
+`x[a..b]` is a `[]mut T` too where the context expects one (an argument, an annotated `let`) and as
+the receiver of a method only `[]mut T` has; on an object that cannot be written it stays a `[]T`,
+and the mismatch or the missing method names it. A literal coerced to a slice
 (`let s: []u8 = [x, y];`, `f([x, y])`) builds its array in a temporary that lives to the end of
 its block, so its view cannot leave the block or be returned. An `if` or `switch` arm whose value
 borrows a temporary of the arm (an array viewed as a slice, `&S { .. }`) keeps the temporary to
