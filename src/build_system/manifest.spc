@@ -237,7 +237,7 @@ pub(package) fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 /// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
 /// ABI allows), calls inline, and functions and variables take sections of their own, which the link
 /// drops when nothing reaches them (`link_gc`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
-/// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch and version on their bounds checks at 3;
+/// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch at 3 and version on their bounds checks at 2 and 3;
 /// aliasing is strict and calls whose result is returned at once become jumps from 2 on, "s" and "z"
 /// included (as GCC's).
 pub(package) const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
@@ -254,8 +254,11 @@ pub(package) const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     if opt >= 2 && opt != OPT_Z {
         f |= CG_VECTORIZE;
     }
+    if opt == 2 || opt == 3 {
+        f |= CG_VERSION_LOOPS;
+    }
     if opt == 3 {
-        f |= CG_UNSWITCH | CG_VERSION_LOOPS;
+        f |= CG_UNSWITCH;
     }
     if opt >= 2 {
         f |= CG_STRICT_ALIASING | CG_SIBLING_CALLS;

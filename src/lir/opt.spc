@@ -64,12 +64,33 @@ const LOG_UB: u8 = 4;
 const LOG_EQ: u8 = 5;
 // A lower bound's key in the bounds' table (`ub`, LOG_UB): the value's with this bit.
 const LB_KEY: u64 = 1u64 << 40;
+// The keys of the two values a value is known to be at most (`Opt::note_le`), in the bounds' table.
+const UP_KEY: u64 = 1u64 << 41;
+const UP2_KEY: u64 = 1u64 << 42;
+// The key of a value known to be at least 0 as a signed value (`Opt::param_bounds`), in the bounds' table.
+const NN_KEY: u64 = 1u64 << 43;
+// `Opt::edge_value` follows at most THROUGH_MAX edges.
+const THROUGH_MAX: u32 = 4;
+// `ub` key of a value that is nonzero (`param_bounds`: a header parameter every edge in proves nonzero).
+const NZ_KEY: u64 = 1u64 << 44;
+// The keys of a value's signed bounds from below and from above (`Opt::srange`), in the bounds' table: a
+// constant's value shifted left by 2, plus 1 + the offset (-1, 0 or 1) the bound adds to it (`signed_bound`).
+const SLO_KEY: u64 = 1u64 << 45;
+const SHI_KEY: u64 = 1u64 << 46;
+// The key of a value from before a loop that a counter down from it stays at most as a signed value
+// (`Opt::signed_counter`), in the bounds' table.
+const SHV_KEY: u64 = 1u64 << 47;
+// The key of a value the branches in scope keep other than the value (`Opt::order_facts`), in the bounds' table.
+const NE_KEY: u64 = 1u64 << 48;
 // `Opt::overwrite` keeps at most PEND_MAX stores, and a fill of at most FILL_MAX bytes.
 const PEND_MAX: u32 = 8;
 const FILL_MAX: u32 = 512;
 // `Opt::ubound` follows at most UB_DEPTH instructions.
 const UB_DEPTH: u32 = 4;
-// An if-conversion makes at most MAX_SELECTS selects; a minimum's operands are followed MIN_DEPTH deep.
+// `Opt::room` follows at most ROOM_DEPTH facts and differences.
+const ROOM_DEPTH: u32 = 2;
+// An if-conversion makes at most MAX_SELECTS selects; the values an order fact's bound is at most are
+// followed MIN_DEPTH deep (`Opt::upper_parts`).
 const MAX_SELECTS: u32 = 2;
 // The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
 const SPEC_MAX: u32 = 4;
@@ -104,6 +125,12 @@ const LOOP_ROUNDS: u32 = 3;
 // `Opt::between_writes` visits at most BETWEEN_MAX blocks; WRITES_ALL is its answer past them.
 const BETWEEN_MAX: u32 = 16;
 const WRITES_ALL: u32 = 0x10000;
+// `Opt::join_out` keeps the facts of a join block's first JOIN_MAX parameters, of blocks with at most
+// JOIN_PREDS edges in.
+const JOIN_MAX: u32 = 8;
+const JOIN_PREDS: u32 = 8;
+// `Opt.jat` of a join block whose edges a rewrite changed during the walk: no facts.
+const JOIN_BAD: u32 = 0xFFFFFFFE;
 // `in_frame` follows at most FRAME_DEPTH values.
 const FRAME_DEPTH: u32 = 8;
 // `Opt::result_into` follows at most RESULT_HOPS copies of a call's result.
@@ -333,6 +360,9 @@ pub(package) struct Opt {
     pleak: Vector<bool>,
     bwrites: Vector<u16>, // per block, the type tags its writes write (bit 0: an untagged write, all of them)
     rmark: Vector<u32>, // per block, the last block whose `between_writes` reached it
+    jat: Vector<u32>, // per block, its parameters' first `JoinFact` in `jfacts` (NONE: none yet)
+    jcnt: Vector<u32>, // per block, the edges into it whose facts `jfacts` holds
+    jfacts: Vector<JoinFact>,
     rstack: Vector<u32>,
     stack: Vector<u64>,
     pend: Vector<u32>, // the walk's block's stores no instruction since may read (`overwrite`)
@@ -446,9 +476,30 @@ struct Place {
     pub(package) ty: u8,
     pub(package) state: u32,
     pub(package) val: u32,
+    pub(package) mem: u64, // the scopes' classes whose copy holds the access that made it (`Opt::member`)
 }
 
 extend Place as Copy {}
+
+// What the edges into a join block recorded so far give one of its integer parameters (`Opt::join_out`): its
+// unsigned range `[lo, hi]`, its signed range `[slo, shi]` where `sk`, and up to two values `w` from before the
+// join it is at most (below where `ws`), `nw` of them (NONE: no edge but constants 0 yet, which any `w` is at
+// least); `sw`, a value from before the join it is at most as a signed one (NONE: none yet; VNONE: none);
+// `dead`: an edge gave nothing.
+struct JoinFact {
+    pub(package) lo: u64,
+    pub(package) hi: u64,
+    pub(package) slo: i64,
+    pub(package) shi: i64,
+    pub(package) sk: bool,
+    pub(package) w: [Value; 2],
+    pub(package) ws: [bool; 2],
+    pub(package) nw: u32,
+    pub(package) sw: Value,
+    pub(package) dead: bool,
+}
+
+extend JoinFact as Copy {}
 
 extend Opt {
     pub(package) fn new() Opt {
@@ -591,6 +642,9 @@ extend Opt {
             pleak: Vector::<bool>::new(),
             bwrites: Vector::<u16>::new(),
             rmark: Vector::<u32>::new(),
+            jat: Vector::<u32>::new(),
+            jcnt: Vector::<u32>::new(),
+            jfacts: Vector::<JoinFact>::new(),
             rstack: Vector::<u32>::new(),
             tstate: [0u32; TBAA_TAGS],
             tags: Vector::<u16>::new(),
@@ -4781,6 +4835,9 @@ extend Opt {
         self.places.truncate(0);
         fill(&mut self.bwrites, nb, 0);
         fill(&mut self.rmark, nb, NONE);
+        fill(&mut self.jat, nb, NONE);
+        fill(&mut self.jcnt, nb, 0);
+        self.jfacts.truncate(0);
         self.aggregs = pk.arg_copy.min(16);
         self.aggp = self.agg_params(b);
         self.aggload = [NONE; 64];
@@ -4844,12 +4901,13 @@ extend Opt {
                 if t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) && int_bits(b, t.a).is_none() {
                     let taken: u32 = ast::pick(b.edge_target(t.b) == k as u32, 1, 0);
                     self.enter(LOG_COND, t.a, taken);
-                    self.order_facts(b, t.a, taken != 0);
+                    self.cond_parts(pk, b, t.a, taken != 0, MIN_DEPTH);
                 }
             } else if k != 0 {
                 // Several edges enter: the tags no block between its dominator and it writes keep the
                 // dominator's state; the others, and the untagged accesses when any is written, a new one.
                 changed = self.same_args(b, k as u32) || changed;
+                self.join_in(pk, b, k as u32);
                 let w = self.between_writes(k as u32);
                 states += 1;
                 self.pstate = states;
@@ -4874,6 +4932,7 @@ extend Opt {
             if self.inner[k] == k as u32 {
                 changed = self.same_params(b, k as u32) || changed;
                 changed = self.offset_test(pk, b, k as u32) || changed;
+                self.param_bounds(pk, b, k as u32);
             }
             self.pend.truncate(0);
             let mut called = false;
@@ -5012,8 +5071,18 @@ extend Opt {
                 };
             }
             self.end_pstate[dep] = self.pstate;
-            for c in self.kid_at[k]..self.kid_at[k + 1] {
-                self.stack.push((dep + 1) as u64 << 33 | self.kids[c as usize] as u64 << 1);
+            // The children that join edges into parameters pop last, in reverse postorder: such a join comes after
+            // the blocks before it (`join_in`).
+            let (k0, k1) = (self.kid_at[k], self.kid_at[k + 1]);
+            for late in 0..2u32 {
+                for c in 0..k1 - k0 {
+                    let x = self.kids[ast::pick(late == 0, k1 - 1 - c, k0 + c) as usize];
+                    let np = self.pred_at[x as usize + 1] - self.pred_at[x as usize];
+                    let join = b.blocks[x as usize].param_len != 0 && np >= 2 && np <= JOIN_PREDS && self.inner[x as usize] != x;
+                    if join == (late == 0) {
+                        self.stack.push((dep + 1) as u64 << 33 | x as u64 << 1);
+                    }
+                }
             }
         }
         return changed || self.rewrote;
@@ -5619,28 +5688,181 @@ extend Opt {
         return (VNONE, VNONE, false);
     }
 
-    // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u m` for each
-    // minimum `m` that `y` is made of (`min_parts`).
-    fn order_facts(self: &mut Self, b: &Body, c: Value, holds: bool) {
-        // An equality that holds here: its sides are one value below.
+    // Comparison `c` as `x <s y` and whether `c` is its negation; `(VNONE, VNONE, _)` when `c` is no signed
+    // order comparison of scalars (`as_ult`'s signed twin).
+    const fn as_slt(b: &Body, c: Value) (Value, Value, bool) {
+        if (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
+            return (VNONE, VNONE, false);
+        }
+        let t = b.insts[c as usize];
+        if t.op != O_ICMP || is_vec(t.ty) || t.aux < C_SLT || t.aux > C_SGE {
+            return (VNONE, VNONE, false);
+        }
+        return if t.aux == C_SLT {
+            (t.a, t.b, false)
+        } else if t.aux == C_SGE {
+            (t.a, t.b, true)
+        } else if t.aux == C_SGT {
+            (t.b, t.a, false)
+        } else {
+            (t.b, t.a, true)
+        };
+    }
+
+    // Whether integer `v` is at least 0 as a signed value here: its unsigned bound clears the sign bit.
+    fn nonneg(self: &Self, pk: &Package, b: &Body, v: Value) bool {
+        let ty = b.type_of(v);
+        if !is_int(ty) || ty == T_I128 {
+            return false;
+        }
+        let hi = self.ubound(pk, b, v, UB_DEPTH);
+        return hi.is_some() && hi.unwrap() <= width_mask(ty, pk.ptr_bytes) >> 1;
+    }
+
+    // Condition `c`, `holds` on the edge into the scope (`order_facts`): each comparison of an `and` that holds
+    // and of an `or` that fails holds or fails with it, `depth` deep.
+    fn cond_parts(self: &mut Self, pk: &Package, b: &Body, c: Value, holds: bool, depth: u32) {
+        if depth != 0 && (c & (VPARAM | VFLAG)) == 0 && c != VNONE && b.insts[c as usize].ty == T_I8 {
+            let t = b.insts[c as usize];
+            if t.op == O_AND && holds || t.op == O_OR && !holds {
+                // Each part is decided as the whole (an overflow flag `o` of `o || p > n` fails).
+                self.enter(LOG_COND, t.a, holds as u32);
+                self.enter(LOG_COND, t.b, holds as u32);
+                self.cond_parts(pk, b, t.a, holds, depth - 1);
+                self.cond_parts(pk, b, t.b, holds, depth - 1);
+                return;
+            }
+        }
+        self.order_facts(pk, b, c, holds);
+    }
+
+    // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u u` for each value
+    // `u` that `y` is at most (`upper_parts`).
+    fn order_facts(self: &mut Self, pk: &Package, b: &Body, c: Value, holds: bool) {
+        // An equality that holds here: its sides are one value below, each at most the other, and one
+        // with a constant bounds the other from both sides.
         if (c & (VPARAM | VFLAG)) == 0 && b.insts[c as usize].op == O_ICMP && !is_vec(b.insts[c as usize].ty) {
             let t = b.insts[c as usize];
             if t.aux == C_EQ && holds || t.aux == C_NE && !holds {
                 self.enter(LOG_EQ, eq_key(t.a, t.b), 1);
+                if (t.a & VFLAG) == 0 && (t.b & VFLAG) == 0 && b.type_of(t.a) != T_I128 {
+                    if int_bits(b, t.b).is_some() && int_bits(b, t.a).is_none() {
+                        self.enter(LOG_UB, t.a, t.b << 1);
+                        self.enter(LOG_UB, LB_KEY | t.a as u64, t.b << 1);
+                        self.equal_const(pk, b, t.a, t.b);
+                    } else if int_bits(b, t.a).is_none() {
+                        self.note_le(t.a, t.b);
+                        self.note_le(t.b, t.a);
+                    }
+                }
             }
-            // `x != 0`: `x` is at least 1 (`lbound`).
+            // An inequality that holds: a constant side moves the other's bound that equals it by one; two values
+            // note each other (`NE_KEY`) for a later equality with a constant (`equal_const`).
+            if (t.aux == C_NE && holds || t.aux == C_EQ && !holds) && (t.a & VFLAG) == 0 && (t.b & VFLAG) == 0 && is_int(
+                b.type_of(t.a),
+            ) && b.type_of(t.a) != T_I128 && int_bits(b, t.a).is_none() {
+                if int_bits(b, t.b).is_some() {
+                    self.not_bound(pk, b, t.a, int_bits(b, t.b).unwrap());
+                } else {
+                    self.enter(LOG_UB, NE_KEY | t.a as u64, t.b);
+                    self.enter(LOG_UB, NE_KEY | t.b as u64, t.a);
+                }
+            }
+            // `x != 0`: `x` is at least 1 (`lbound`), and so is `a` where `x` is `a >> k` (`i / 2 != 0`).
             if (t.aux == C_NE && holds || t.aux == C_EQ && !holds) && int_bits(b, t.b) == Some(0u64) && (t.a & VFLAG) == 0 {
                 self.enter(LOG_UB, LB_KEY | t.a as u64, t.b << 1 | 1);
+                if is_op(b, t.a, O_LSHR) && (b.insts[t.a as usize].a & VFLAG) == 0 {
+                    self.enter(LOG_UB, LB_KEY | b.insts[t.a as usize].a as u64, t.b << 1 | 1);
+                }
             }
         }
-        let (x, y, neg) = Opt::as_ult(b, c);
+        let (mut x, mut y, mut neg) = Opt::as_ult(b, c);
         if x == VNONE {
-            return;
+            // `x <s y` with `x` at least 0 is `x <u y`; `x >=s y` with `y` at least 0 is `x >=u y`.
+            let (sx, sy, sneg) = Opt::as_slt(b, c);
+            // A constant side bounds the other as a signed value (`srange`), and both values of a maximum
+            // bounded from above or of a minimum from below (`while i >= 0 && j >= 0` as `min(i, j) >= 0`).
+            if sx != VNONE && (sx & VFLAG) == 0 && (sy & VFLAG) == 0 {
+                let slt = holds != sneg;
+                let ax = extreme_arms(b, sx, slt);
+                let ay = extreme_arms(b, sy, !slt);
+                let vs: [Value; 6] = [sx, ax.0, ax.1, sy, ay.0, ay.1];
+                for j in 0..6usize {
+                    let v = vs[j];
+                    if v != VNONE && j < 3 && int_bits(b, sy).is_some() {
+                        self.note_signed(pk, b, v, !slt, sy, ast::pick(slt, -1i32, 0i32));
+                    }
+                    if v != VNONE && j >= 3 && int_bits(b, sx).is_some() {
+                        self.note_signed(pk, b, v, slt, sx, ast::pick(slt, 1i32, 0i32));
+                    }
+                }
+                // A counter down from a value before its loop at least 0 here (`shv_le`).
+                for j in 0..6usize {
+                    if vs[j] != VNONE {
+                        self.shv_le(pk, b, vs[j]);
+                    }
+                }
+                // Two values: the smaller's bound from below bounds the larger, the larger's from above the
+                // smaller, one more apart where strict (`i <s len - 2` with `i >= 0`: `len - 2 >= 1`).
+                if int_bits(b, sx).is_none() && int_bits(b, sy).is_none() && type_bits(b.type_of(sx), pk.ptr_bytes) <= 64 {
+                    let (lo, hi) = ast::pick(slt, (sx, sy), (sy, sx));
+                    let d: i32 = ast::pick(slt, 1i32, 0i32);
+                    let fl = switch self.ub.get(&(SLO_KEY | lo as u64)) {
+                        Some(f) => *f,
+                        None => NONE,
+                    };
+                    let fh = switch self.ub.get(&(SHI_KEY | hi as u64)) {
+                        Some(f) => *f,
+                        None => NONE,
+                    };
+                    if fl != NONE {
+                        let (fc, fa) = (fl >> 2, (fl & 3) as i32 - 1);
+                        if fa + d <= 2 {
+                            self.note_signed(pk, b, hi, true, fc, fa + d);
+                        }
+                    }
+                    if fh != NONE {
+                        let (fc, fa) = (fh >> 2, (fh & 3) as i32 - 1);
+                        if fa - d >= -1 {
+                            self.note_signed(pk, b, lo, false, fc, fa - d);
+                        }
+                    }
+                }
+            }
+            if sx == VNONE || (sx & VFLAG) != 0 || (sy & VFLAG) != 0 || !self.nonneg(
+                pk,
+                b,
+                ast::pick(holds != sneg, sx, sy),
+            ) {
+                return;
+            }
+            x = sx;
+            y = sy;
+            neg = sneg;
         }
         let lt = holds != neg;
         self.enter(LOG_REL, rel_key(x, y), lt as u32);
         if lt {
-            self.min_parts(b, x, y, MIN_DEPTH);
+            self.upper_parts(pk, b, x, y, MIN_DEPTH);
+            // Both values of a maximum `select(u <u w, w, u)` are below what it is below (two tests
+            // `i <u n && j <u n` merged into one).
+            if (x & (VPARAM | VFLAG)) == 0 && is_op(b, x, O_SELECT) && !is_vec(b.type_of(x)) {
+                let t = b.insts[x as usize];
+                let (u, w, neg) = Opt::as_ult(b, t.a);
+                if u != VNONE && (u == t.c && w == t.b && !neg || u == t.b && w == t.c && neg) {
+                    self.enter(LOG_REL, rel_key(t.b, y), 1);
+                    self.enter(LOG_REL, rel_key(t.c, y), 1);
+                }
+            }
+        }
+        if (x & VFLAG) == 0 && (y & VFLAG) == 0 && int_bits(b, x).is_none() && int_bits(b, y).is_none() {
+            if lt {
+                // Above a value, `y` is nonzero (`lbound`).
+                self.enter(LOG_UB, NZ_KEY | y as u64, 1);
+                self.note_le(x, y);
+            } else {
+                self.note_le(y, x);
+            }
         }
         // A constant side bounds the other: `x <u k`, or `y <=u k` when `k <u y` fails; from below `k <u y`,
         // or `x >=u k` when `x <u k` fails (`lbound`).
@@ -5654,6 +5876,201 @@ extend Opt {
         } else if !lt && int_bits(b, y).is_some() && (x & VFLAG) == 0 {
             self.enter(LOG_UB, LB_KEY | x as u64, y << 1);
         }
+    }
+
+    // `x == c` (`c` a constant value) holds: each value the facts keep `x` at most (`note_le`) is at least `c`,
+    // and equal to it where it is at most `x` too (`i == j`, then `i == 5`); a value the facts keep other than `x`
+    // (`NE_KEY`) has its bound at `c` moved by one (`not_bound`).
+    fn equal_const(self: &mut Self, pk: &Package, b: &Body, x: Value, c: Value) {
+        let m = width_mask(b.type_of(x), pk.ptr_bytes);
+        let cv = int_bits(b, c).unwrap() & m;
+        for key in [UP_KEY, UP2_KEY] {
+            let f = switch self.ub.get(&(key | x as u64)) {
+                Some(f) => *f,
+                None => VNONE,
+            };
+            if f == VNONE || f == x || (f & VFLAG) != 0 || int_bits(b, f).is_some() || b.type_of(f) != b.type_of(x) {
+                continue;
+            }
+            if self.lbound(pk, b, f, 0).unwrap_or(0) < cv {
+                self.enter(LOG_UB, LB_KEY | f as u64, c << 1);
+            }
+            let back = self.known_le(f, x);
+            if back && self.ub.get(&(f as u64)).is_none() {
+                self.enter(LOG_UB, f, c << 1);
+            }
+        }
+        // As a signed value too: a counter down from a value before its loop then stays at most it unsigned
+        // (`shv_le`: `a[i]` after a loop down to `i == 0` from `len - 1`).
+        if type_bits(b.type_of(x), pk.ptr_bytes) <= 64 {
+            self.note_signed(pk, b, x, true, c, 0);
+            self.note_signed(pk, b, x, false, c, 0);
+            self.shv_le(pk, b, x);
+        }
+        let y = switch self.ub.get(&(NE_KEY | x as u64)) {
+            Some(f) => *f,
+            None => VNONE,
+        };
+        if y != VNONE && b.type_of(y) == b.type_of(x) {
+            self.not_bound(pk, b, y, cv);
+        }
+    }
+
+    // `x != k` holds: a least value `k` of `x` becomes `k + 1`, a greatest `k - 1` (where the body holds that
+    // constant: `known_const`).
+    fn not_bound(self: &mut Self, pk: &Package, b: &Body, x: Value, k: u64) {
+        let ty = b.type_of(x);
+        let m = width_mask(ty, pk.ptr_bytes);
+        let kv = k & m;
+        if self.lbound(pk, b, x, UB_DEPTH) == Some(kv) && kv < m {
+            let c = self.known_const(b, ty, kv + 1);
+            if c != NONE {
+                self.enter(LOG_UB, LB_KEY | x as u64, c << 1);
+            }
+        }
+        if self.ubound(pk, b, x, UB_DEPTH) == Some(kv) && kv > 0 {
+            let c = self.known_const(b, ty, kv - 1);
+            if c != NONE {
+                self.enter(LOG_UB, x, c << 1);
+            }
+        }
+    }
+
+    // The signed range `(lo, hi)` of integer `v` (of at most 64 bits) here, `depth` operations deep: a
+    // constant's; the signed bounds the branches in scope and the loop counters set (`SLO_KEY`, `SHI_KEY`:
+    // `order_facts`, `signed_counter`); a sum or difference with a constant, a product by a constant of at
+    // least 0, an extension, when neither end leaves the type. None when nothing bounds it.
+    fn srange(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<(i64, i64)> {
+        if v == VNONE || (v & VFLAG) != 0 || is_vec(b.type_of(v)) {
+            return None;
+        }
+        let w = type_bits(b.type_of(v), pk.ptr_bytes);
+        if w == 0 || w > 64 {
+            return None;
+        }
+        let tmax = (width_mask(b.type_of(v), pk.ptr_bytes) >> 1) as i64;
+        let tmin = -tmax - 1;
+        let k = int_bits(b, v);
+        if k.is_some() {
+            let c = sign_extend(k.unwrap(), w);
+            return Some((c, c));
+        }
+        let mut lo = tmin;
+        let mut hi = tmax;
+        let mut known = false;
+        if let Some(f) = self.ub.get(&(SLO_KEY | v as u64)) {
+            lo = lo.max(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
+            known = true;
+        }
+        if let Some(f) = self.ub.get(&(SHI_KEY | v as u64)) {
+            hi = hi.min(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
+            known = true;
+        }
+        // A bounded load's or view length's bound below the sign bit (`load_bound`, `view_len_max`).
+        if (v & VPARAM) == 0 {
+            let t = b.insts[v as usize];
+            let m = width_mask(t.ty, pk.ptr_bytes);
+            let mut r = load_bound(t, m);
+            if r.is_none() {
+                r = view_len_max(b, t, pk.ptr_bytes);
+            }
+            if r.is_some() && r.unwrap() <= tmax as u64 {
+                lo = lo.max(0);
+                hi = hi.min(r.unwrap() as i64);
+                known = true;
+            }
+        }
+        // At least 0: the unsigned least value the branches set is a signed one too (`len != 0`: `len - 1 >= 0`).
+        if known && lo >= 0 {
+            if let Some(f) = self.ub.get(&(LB_KEY | v as u64)) {
+                let c = int_bits(b, *f >> 1).unwrap() & width_mask(b.type_of(v), pk.ptr_bytes);
+                let c1 = c + (*f & 1) as u64;
+                if c1 <= tmax as u64 && c1 as i64 > lo {
+                    lo = c1 as i64;
+                }
+            }
+        }
+        // A select: the larger of each end of a maximum's values, the smaller of a minimum's, else the union.
+        if depth != 0 && (v & VPARAM) == 0 && is_op(b, v, O_SELECT) {
+            let t = b.insts[v as usize];
+            let (xa, _) = extreme_arms(b, v, true);
+            let (na, _) = extreme_arms(b, v, false);
+            let ra = self.srange(pk, b, t.b, depth - 1);
+            let rb = self.srange(pk, b, t.c, depth - 1);
+            let (al, ah) = switch ra {
+                Some(r) => r,
+                None => (tmin, tmax),
+            };
+            let (bl, bh) = switch rb {
+                Some(r) => r,
+                None => (tmin, tmax),
+            };
+            let (sl, sh) = if xa != VNONE {
+                (al.max(bl), ah.max(bh))
+            } else if na != VNONE {
+                (al.min(bl), ah.min(bh))
+            } else {
+                (al.min(bl), ah.max(bh))
+            };
+            if sl > tmin || sh < tmax {
+                lo = lo.max(sl);
+                hi = hi.min(sh);
+                known = true;
+            }
+        }
+        if depth != 0 && (v & VPARAM) == 0 {
+            let t = b.insts[v as usize];
+            let arith = t.op == O_ADD || t.op == O_SUB || t.op == O_MUL;
+            let kb = if arith {
+                int_bits(b, t.b)
+            } else {
+                Option::<u64>::None
+            };
+            let mut r = Option::<(i128, i128)>::None;
+            if arith && kb.is_some() {
+                let c = sign_extend(kb.unwrap(), w) as i128;
+                if let Some(a) = self.srange(pk, b, t.a, depth - 1) {
+                    let (l, h) = (a.0 as i128, a.1 as i128);
+                    if t.op == O_ADD {
+                        r = Some((l + c, h + c));
+                    } else if t.op == O_SUB {
+                        r = Some((l - c, h - c));
+                    } else if c >= 0 {
+                        r = Some((l * c, h * c));
+                    }
+                }
+            } else if t.op == O_SEXT || t.op == O_ZEXT {
+                if let Some(a) = self.srange(pk, b, t.a, depth - 1) {
+                    if t.op == O_SEXT || a.0 >= 0 {
+                        r = Some((a.0 as i128, a.1 as i128));
+                    }
+                }
+            }
+            if r.is_some() && r.unwrap().0 >= tmin && r.unwrap().1 <= tmax {
+                lo = lo.max(r.unwrap().0 as i64);
+                hi = hi.min(r.unwrap().1 as i64);
+                known = true;
+            }
+        }
+        return ast::pick(known, Some((lo, hi)), Option::<(i64, i64)>::None);
+    }
+
+    // Record signed bound `c + adj` (`c` a constant value, `adj` -1, 0 or 1) of `x` from below (`low`) or
+    // above, where it is tighter than the one in scope.
+    fn note_signed(self: &mut Self, pk: &Package, b: &Body, x: Value, low: bool, c: Value, adj: i32) {
+        if (x & VFLAG) != 0 || int_bits(b, x).is_some() || is_vec(b.type_of(x)) || type_bits(b.type_of(x), pk.ptr_bytes) > 64 {
+            return;
+        }
+        let w = type_bits(b.type_of(x), pk.ptr_bytes);
+        let key = ast::pick(low, SLO_KEY, SHI_KEY) | x as u64;
+        let f = c << 2 | (adj + 1) as u32;
+        if let Some(o) = self.ub.get(&key) {
+            let (ov, nv) = (signed_bound(b, *o, w), signed_bound(b, f, w));
+            if low && ov >= nv || !low && ov <= nv {
+                return;
+            }
+        }
+        self.enter(LOG_UB, key, f);
     }
 
     // The least unsigned value `v` takes here: a constant's, a bound the branches in scope set
@@ -5680,6 +6097,15 @@ extend Opt {
                 },
             );
         }
+        if (best.is_none() || best.unwrap() == 0) && self.ub.get(&(NZ_KEY | v as u64)).is_some() {
+            best = Some(1);
+        }
+        // A signed range at or above 0 bounds the unsigned value from below too.
+        if let Some(sr) = self.srange(pk, b, v, depth) {
+            if sr.0 >= 0 && (best.is_none() || sr.0 as u64 > best.unwrap()) {
+                best = Some(sr.0 as u64);
+            }
+        }
         if (v & VPARAM) != 0 || depth == 0 {
             return best;
         }
@@ -5689,7 +6115,7 @@ extend Opt {
             let d = if t.op == O_SUB {
                 kb
             } else {
-                m - kb + 1 & m
+                (m - kb).wrapping_add(1) & m
             };
             let x = self.lbound(pk, b, t.a, depth - 1);
             if x.is_some() && x.unwrap() >= d {
@@ -5703,20 +6129,29 @@ extend Opt {
                 );
             }
         }
-        // A zero extension keeps its operand's bound.
+        // A zero extension keeps its operand's bound; an `or` is at least either operand.
         if t.op == O_ZEXT && !is_vec(t.ty) {
             let x = self.lbound(pk, b, t.a, depth - 1);
             if x.is_some() && (best.is_none() || x.unwrap() > best.unwrap()) {
                 return x;
             }
         }
+        if t.op == O_OR && !is_vec(t.ty) && t.ty != T_I128 {
+            for v2 in [t.a, t.b] {
+                let x = self.lbound(pk, b, v2, depth - 1);
+                if x.is_some() && (best.is_none() || x.unwrap() > best.unwrap()) {
+                    best = x;
+                }
+            }
+        }
         return best;
     }
 
     // The greatest unsigned value `v` takes here: a constant's, a bound the branches in scope set
-    // (`order_facts`), a `bool` or bounded load's (`load_bound`), or one an `and` with a constant, a right
-    // shift, a remainder or quotient by a constant or a zero extension keeps, `depth` instructions deep;
-    // None when unknown.
+    // (`order_facts`) or that of a value they keep `v` at most (`note_le`), a `bool`, bounded load's
+    // (`load_bound`) or view length's (`view_len_max`), or one an `and` with a constant, a right shift, a
+    // remainder or quotient by a constant, a zero extension, or a shift, product by a constant or sum that
+    // cannot wrap keeps, `depth` instructions deep; None when unknown.
     fn ubound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -5737,12 +6172,42 @@ extend Opt {
                 Some(c - 1)
             };
         }
+        // A value at least 0 as a signed one (`param_bounds`) clears its sign bit.
+        if self.ub.get(&(NN_KEY | v as u64)).is_some() {
+            let h = width_mask(b.type_of(v), pk.ptr_bytes) >> 1;
+            if best.is_none() || h < best.unwrap() {
+                best = Some(h);
+            }
+        }
+        // At most the bound of a value the branches keep it at most (`note_le`), below it where `v <u f` holds.
+        if depth != 0 {
+            for key in [UP_KEY, UP2_KEY] {
+                if let Some(f) = self.ub.get(&(key | v as u64)) {
+                    let mut u = self.ubound(pk, b, *f, depth - 1);
+                    if u.is_some() && self.below(v, *f) {
+                        u = Some(u.unwrap().max(1) - 1);
+                    }
+                    if u.is_some() && (best.is_none() || u.unwrap() < best.unwrap()) {
+                        best = u;
+                    }
+                }
+            }
+        }
+        // A signed range at or above 0 is an unsigned one.
+        if let Some(sr) = self.srange(pk, b, v, depth) {
+            if sr.0 >= 0 && (best.is_none() || sr.1 as u64 < best.unwrap()) {
+                best = Some(sr.1 as u64);
+            }
+        }
         if (v & VPARAM) != 0 {
             return best;
         }
         let t = b.insts[v as usize];
         let m = width_mask(t.ty, pk.ptr_bytes);
         let mut r = load_bound(t, m);
+        if r.is_none() {
+            r = view_len_max(b, t, pk.ptr_bytes);
+        }
         if depth == 0 && r.is_none() {
             return best;
         }
@@ -5785,6 +6250,35 @@ extend Opt {
                     );
                 }
             }
+        } else if (t.op == O_SHL || t.op == O_MUL || t.op == O_ADD) && !is_vec(t.ty) && t.ty != T_I128 {
+            // A shift by a constant, a product or a sum whose bounds' result fits the type does not wrap.
+            let x = self.ubound(pk, b, t.a, depth - 1);
+            let y = if t.op != O_SHL {
+                self.ubound(pk, b, t.b, depth - 1)
+            } else {
+                int_bits(b, t.b)
+            };
+            if x.is_some() && y.is_some() {
+                let (xv, yv) = (x.unwrap(), y.unwrap() & m);
+                if t.op == O_SHL && yv < type_bits(t.ty, pk.ptr_bytes) as u64 && xv <= m >> yv {
+                    r = Some(xv << yv);
+                } else if t.op == O_MUL && (yv == 0 || xv <= m / yv) {
+                    r = Some(xv * yv);
+                } else if t.op == O_ADD && xv <= m - yv {
+                    r = Some(xv + yv);
+                }
+            }
+        } else if t.op == O_SUB && !is_vec(t.ty) && t.ty != T_I128 && int_bits(b, t.b).is_some() {
+            // A difference with a constant at most its operand's least value does not wrap.
+            let k = int_bits(b, t.b).unwrap() & m;
+            let lo = self.lbound(pk, b, t.a, depth - 1);
+            let hi = self.ubound(pk, b, t.a, depth - 1);
+            if lo.is_some() && lo.unwrap() >= k && hi.is_some() && hi.unwrap() >= k {
+                r = Some(hi.unwrap() - k);
+            }
+        } else if t.op == O_ICMP && !is_vec(t.ty) {
+            // A comparison is 0 or 1.
+            r = Some(1);
         } else if t.op == O_ZEXT {
             let x = self.ubound(pk, b, t.a, depth - 1);
             r = if x.is_some() {
@@ -5926,36 +6420,1455 @@ extend Opt {
         return VNONE;
     }
 
-    // `x <u y` holds: so does `x <u` each operand of minimum `y` (a select of the lesser of two values),
-    // and of the minimums they are, `depth` deep.
-    fn min_parts(self: &mut Self, b: &Body, x: Value, y: Value, depth: u32) {
-        if depth == 0 || (y & (VPARAM | VFLAG)) != 0 {
+    // The value `p` that `v` is at most by its form, and whether below it: `p - w` where `w <=u p` holds (a
+    // constant within `p`'s lower bound, strictly below `p` from 1 on), `p >> c` and `p / c` by a nonzero
+    // constant, `p & m`; `(VNONE, false)` else.
+    fn at_most_of(self: &Self, pk: &Package, b: &Body, v: Value) (Value, bool) {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+            return (VNONE, false);
+        }
+        let t = b.insts[v as usize];
+        if is_vec(t.ty) || t.ty == T_I128 || (t.a & VFLAG) != 0 {
+            return (VNONE, false);
+        }
+        let m = width_mask(t.ty, pk.ptr_bytes);
+        if t.op == O_SUB {
+            let k = int_bits(b, t.b);
+            if k.is_some() {
+                let kv = k.unwrap() & m;
+                let lo = self.lbound(pk, b, t.a, UB_DEPTH);
+                return ast::pick(lo.is_some() && lo.unwrap() >= kv, (t.a, kv != 0), (VNONE, false));
+            }
+            let ge = switch self.rel.get(&rel_key(t.a, t.b)) {
+                Some(r) => *r == 0,
+                None => false,
+            };
+            return ast::pick(ge, (t.a, false), (VNONE, false));
+        }
+        if t.op == O_LSHR || t.op == O_UDIV {
+            let k = int_bits(b, t.b);
+            return ast::pick(k.is_some() && (k.unwrap() & m) != 0, (t.a, false), (VNONE, false));
+        }
+        return ast::pick(t.op == O_AND, (t.a, false), (VNONE, false));
+    }
+
+    // `(k, s)` when `v` is `(k << s) + c` (`k * 2^s`, the value of a checked sum too) with `c` a constant
+    // from 1 to `2^s` and `s` the constant shift's value; `(VNONE, VNONE)` else.
+    fn chunk_end(self: &Self, pk: &Package, b: &Body, v: Value) (Value, Value) {
+        let none = (VNONE, VNONE);
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+            return none;
+        }
+        let t = b.insts[v as usize];
+        if t.op != O_ADD && !(t.op == O_ADDO && (t.aux & OV_SIGNED) == 0) || is_vec(t.ty) || (t.a & (VPARAM | VFLAG)) != 0 {
+            return none;
+        }
+        let c = int_bits(b, t.b);
+        let sh = b.insts[t.a as usize];
+        if c.is_none() || c.unwrap() == 0 || sh.op != O_SHL {
+            return none;
+        }
+        let sv = int_bits(b, sh.b);
+        let w = type_bits(t.ty, pk.ptr_bytes) as u64;
+        if sv.is_none() || sv.unwrap() == 0 || sv.unwrap() >= w || c.unwrap() > 1u64 << sv.unwrap() {
+            return none;
+        }
+        return (sh.a, sh.b);
+    }
+
+    // Whether `x <u y` holds in the scope (`rel`).
+    fn below(self: &Self, x: Value, y: Value) bool {
+        return switch self.rel.get(&rel_key(x, y)) {
+            Some(r) => *r != 0,
+            None => false,
+        };
+    }
+
+    // Whether the product of `w` and `h`, computed in scope, wraps nowhere and is at most `y`: a product
+    // whose operands' bounds (`ubound`) multiply within the type, or an unsigned checked one whose flag
+    // the branches in scope clear.
+    fn product_le(self: &Self, pk: &Package, b: &Body, w: Value, h: Value, y: Value) bool {
+        let ty = b.type_of(w);
+        let m = width_mask(ty, pk.ptr_bytes);
+        for side in 0..2u32 {
+            let t = Inst {
+                op: O_MUL,
+                ty: ty,
+                aux: 0,
+                a: ast::pick(side == 0, w, h),
+                b: ast::pick(side == 0, h, w),
+                c: VNONE,
+            };
+            let z = switch self.pure.get(&value_hash(b, t)) {
+                Some(v) => *v,
+                None => NONE,
+            };
+            if z == NONE || !same_value(b, as_plain(b.insts[z as usize]), t) || !self.known_le(z, y) {
+                continue;
+            }
+            let u = b.insts[z as usize];
+            if u.op == O_MULO {
+                let clear = switch self.cond.get(&((VFLAG | z) as u64)) {
+                    Some(f) => *f == 0,
+                    None => false,
+                };
+                if (u.aux & OV_SIGNED) == 0 && clear {
+                    return true;
+                }
+                continue;
+            }
+            let x = self.ubound(pk, b, w, UB_DEPTH);
+            let v = self.ubound(pk, b, h, UB_DEPTH);
+            if x.is_some() && v.is_some() && (x.unwrap() == 0 || v.unwrap() <= m / x.unwrap()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Whether `u <=u y` holds in the scope: `u` is `y`, the order facts give it, or `y` is a value `u` is at
+    // most (`note_le`).
+    fn known_le(self: &Self, u: Value, y: Value) bool {
+        if u == y {
+            return true;
+        }
+        if let Some(r) = self.rel.get(&rel_key(u, y)) {
+            if *r != 0 {
+                return true;
+            }
+        }
+        if let Some(r) = self.rel.get(&rel_key(y, u)) {
+            if *r == 0 {
+                return true;
+            }
+        }
+        for key in [UP_KEY, UP2_KEY] {
+            if let Some(f) = self.ub.get(&(key | u as u64)) {
+                if *f == y {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // `x <=u w` holds in the scope: `w` is one of the two values `x` is known to be at most (`UP_KEY`,
+    // `UP2_KEY`), the newer first, for `upper_parts`.
+    fn note_le(self: &mut Self, x: Value, w: Value) {
+        let prev = switch self.ub.get(&(UP_KEY | x as u64)) {
+            Some(f) => *f,
+            None => VNONE,
+        };
+        if prev == w {
             return;
         }
-        let t = b.insts[y as usize];
-        if t.op != O_SELECT {
+        if prev != VNONE {
+            self.enter(LOG_UB, UP2_KEY | x as u64, prev);
+        }
+        self.enter(LOG_UB, UP_KEY | x as u64, w);
+    }
+
+    // `x <u y` holds: so does `x <u u` for each value `u` that `y` is at most, `depth` steps deep: an operand
+    // of minimum `y` (a select of the lesser of two values); `n` of `n - k` where `k <=u n` (a saturating
+    // difference, a select of `n - k` where the condition gives `k <=u n` and of 0 where not; a difference
+    // of a constant at most `n`'s lower bound, or of a value the branches keep at most `n`); `n` of `n >> c`,
+    // `n / c` by a constant below the width, above 0; both operands of `n & m`; `n` and `w` of `w % n` where
+    // `n` is at least 1; the values the branches in scope keep `y` at most (`note_le`).
+    fn upper_parts(self: &mut Self, pk: &Package, b: &Body, x: Value, y: Value, depth: u32) {
+        if depth == 0 || (y & VFLAG) != 0 || y == VNONE {
             return;
         }
-        let (u, w, neg) = Opt::as_ult(b, t.a);
-        if !(u == t.b && w == t.c && !neg || u == t.c && w == t.b && neg) {
+        let mut ups: [Value; 4] = [VNONE; 4];
+        let mut nu: usize = 0;
+        for key in [UP_KEY, UP2_KEY] {
+            if let Some(f) = self.ub.get(&(key | y as u64)) {
+                ups[nu] = *f;
+                nu += 1;
+            }
+        }
+        if (y & VPARAM) == 0 {
+            let t = b.insts[y as usize];
+            let m = width_mask(t.ty, pk.ptr_bytes);
+            if t.op == O_SELECT && !is_vec(t.ty) {
+                let (u, w, neg) = Opt::as_ult(b, t.a);
+                if u == t.b && w == t.c && !neg || u == t.c && w == t.b && neg {
+                    ups[nu] = t.b;
+                    ups[nu + 1] = t.c;
+                    nu += 2;
+                } else if u != VNONE {
+                    // The condition holds on the true side; `k <=u n` where it gives `!(n <u k)` or `k <u n`.
+                    for side in 0..2u32 {
+                        let (d, z) = ast::pick(side == 0, (t.b, t.c), (t.c, t.b));
+                        if !is_op(b, d, O_SUB) || int_bits(b, z) != Some(0u64) {
+                            continue;
+                        }
+                        let s = b.insts[d as usize];
+                        let on_true = side == 0;
+                        if u == s.a && w == s.b && neg == on_true || u == s.b && w == s.a && neg != on_true {
+                            ups[nu] = s.a;
+                            nu += 1;
+                            break;
+                        }
+                    }
+                }
+            } else if t.op == O_SUB && !is_vec(t.ty) && t.ty != T_I128 {
+                let k = int_bits(b, t.b);
+                let lo = self.lbound(pk, b, t.a, UB_DEPTH);
+                let below = if k.is_some() {
+                    lo.is_some() && lo.unwrap() >= (k.unwrap() & m)
+                } else {
+                    switch self.rel.get(&rel_key(t.a, t.b)) {
+                        Some(r) => *r == 0,
+                        None => false,
+                    }
+                };
+                if below {
+                    ups[nu] = t.a;
+                    nu += 1;
+                }
+            } else if (t.op == O_LSHR || t.op == O_UDIV) && !is_vec(t.ty) && t.ty != T_I128 {
+                let c = int_bits(b, t.b);
+                if c.is_some() && (c.unwrap() & m) != 0 && (t.op == O_UDIV || (c.unwrap() & m) < type_bits(
+                    t.ty,
+                    pk.ptr_bytes,
+                ) as u64) {
+                    ups[nu] = t.a;
+                    nu += 1;
+                }
+            } else if t.op == O_AND && !is_vec(t.ty) {
+                ups[nu] = t.a;
+                ups[nu + 1] = t.b;
+                nu += 2;
+            } else if t.op == O_UREM && !is_vec(t.ty) && t.ty != T_I128 {
+                let lo = self.lbound(pk, b, t.b, UB_DEPTH);
+                if lo.is_some() && lo.unwrap() != 0 {
+                    ups[nu] = t.b;
+                    ups[nu + 1] = t.a;
+                    nu += 2;
+                }
+            }
+        }
+        for q in 0..nu {
+            let u = ups[q];
+            if u == x {
+                continue;
+            }
+            self.enter(LOG_REL, rel_key(x, u), 1);
+            if int_bits(b, u).is_none() {
+                self.upper_parts(pk, b, x, u, depth - 1);
+            }
+        }
+    }
+
+    // Loop header `h`'s parameters that stay at most the one value from outside the loop every entry passes
+    // (`note_le`): each back edge passes the parameter itself, a select of such values, or a midpoint
+    // `lo + ((p - lo) >> c)` (a quotient by at least 2 too) below the parameter `p` where the header's test
+    // `lo <u p` holds into the loop (by induction over the iterations; a binary search's `hi`). And a counter
+    // `p` from a constant of at least 0 by steps of 1 under the test `p <s n` stays at least 0 (its bound
+    // clears the sign bit, `ubound`): the step never passes `n`; under `p <u n`, at least its start (`lbound`,
+    // or `p >=u s` for a start `s` that is no constant).
+    fn param_bounds(self: &mut Self, pk: &Package, b: &Body, h: u32) {
+        let hb = b.blocks[h as usize];
+        let th = term(b, h);
+        if hb.param_len == 0 || th.op != O_BR || b.edge_target(th.b) == b.edge_target(th.c) {
             return;
         }
-        self.enter(LOG_REL, rel_key(x, t.b), 1);
-        self.enter(LOG_REL, rel_key(x, t.c), 1);
-        self.min_parts(b, x, t.b, depth - 1);
-        self.min_parts(b, x, t.c, depth - 1);
+        let tin = self.in_loop(h, b.edge_target(th.b));
+        let one_in = tin != self.in_loop(h, b.edge_target(th.c));
+        let (x, y, neg) = Opt::as_ult(b, th.a);
+        let lt = x != VNONE && one_in && tin != neg;
+        let (sx, _, sneg) = Opt::as_slt(b, th.a);
+        let slt = sx != VNONE && one_in && tin != sneg;
+        for q in 0..hb.param_len as u32 {
+            let p = VPARAM | hb.param_start + q;
+            let mut e = VNONE;
+            let mut ok = true;
+            // A back edge passes `(lo + p) >> 1` (`half_sum`) below `p` where `lo <u p`: then the start's bound
+            // keeps the sum from wrapping.
+            let mut halves = false;
+            // Every edge in passes a value it proves nonzero (`nonzero_on`): `p` is at least 1.
+            let mut nz = true;
+            // The header's test keeps `p` nonzero into the loop: `p - 1` on a back edge wraps nowhere.
+            let hz = one_in && self.nonzero_on(pk, b, th, tin, p, false);
+            let mut up = slt && sx == p;
+            // Counting up by `k` where the header's test or each back edge's leaves `p` room for `k` (`p <u y`,
+            // `p <=u y` with `y`'s bound low enough: `step_room`): no step wraps, so `p` stays at least its start.
+            let mut rise = true;
+            let hroom = ast::pick(one_in, self.step_room(pk, b, th.a, tin, p), 0u64);
+            // The least value each edge in passes (`edge_floor`): a step down by at most it wraps nowhere.
+            let (lbp, lbf) = self.edge_floor(pk, b, h, q, p);
+            let mut eo = true;
+            for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+                let pb = self.preds[j as usize];
+                b.succ_edges(term(b, pb), &mut self.edges);
+                for d in 0..self.edges.len() {
+                    let ed = self.edges[d];
+                    if b.edge_target(ed) != h {
+                        continue;
+                    }
+                    let a = b.edge_arg(ed, q);
+                    let tp = term(b, pb);
+                    nz = nz && (a == p || tp.op == O_BR && b.edge_target(tp.b) != b.edge_target(tp.c) && self.nonzero_on(
+                        pk,
+                        b,
+                        tp,
+                        ed == tp.b,
+                        a,
+                        !self.in_loop(h, pb),
+                    ) || tp.op != O_BR && !self.in_loop(h, pb) && self.nonzero_on(pk, b, tp, true, a, true));
+                    if !self.in_loop(h, pb) {
+                        eo = eo && (e == VNONE || e == a) && self.outside(a, h);
+                        ok = ok && (e == VNONE || e == a) && self.outside(a, h);
+                        up = up && (e == VNONE || e == a) && int_bits(b, a).is_some() && self.nonneg(pk, b, a);
+                        e = a;
+                    } else {
+                        let lo = ast::pick(lt && y == p, x, VNONE);
+                        let (h0, h1) = half_sum(b, a);
+                        let half = lo != VNONE && (h0 == lo && h1 == p || h0 == p && h1 == lo);
+                        halves = halves || half;
+                        ok = ok && (self.below_param(b, a, p, lo, MIN_DEPTH) || minus_one(b, a, p) || half || lbp != 0 && step_of(
+                            b,
+                            a,
+                            p,
+                        ) < 0 && (-step_of(b, a, p)) as u64 <= lbp);
+                        let k = step_of(b, a, p);
+                        up = up && k == 1;
+                        let (c, holds) = self.edge_cond(b, pb, ed);
+                        let eroom = if c != VNONE {
+                            self.step_room(pk, b, c, holds, p)
+                        } else {
+                            0u64
+                        };
+                        rise = rise && k > 0 && hroom.max(eroom) >= k as u64;
+                    }
+                }
+            }
+            // A step down by 1 counts only where `p` is nonzero.
+            let down = !(hz || nz || lbp != 0) && self.steps_down_from(b, h, q, p);
+            let eu = self.ubound(pk, b, e, UB_DEPTH);
+            let wraps = halves && (eu.is_none() || eu.unwrap() > width_mask(b.type_of(p), pk.ptr_bytes) >> 1);
+            if ok && !down && !wraps && e != VNONE && int_bits(b, e).is_none() {
+                self.note_le(p, e);
+            }
+            // A constant start bounds the parameter itself (`j` of `while i < j { j -= 1 }` from `200`).
+            if ok && !down && !wraps && e != VNONE && (e & VFLAG) == 0 && int_bits(b, e).is_some() && self.ub.get(
+                &(p as u64),
+            ).is_none() {
+                self.enter(LOG_UB, p, e << 1);
+            }
+            if nz && e != VNONE {
+                self.enter(LOG_UB, NZ_KEY | p as u64, 1);
+            }
+            if lbp != 0 && self.lbound(pk, b, p, 0).unwrap_or(0) < lbp {
+                self.enter(LOG_UB, LB_KEY | p as u64, lbf);
+            }
+
+            if up && e != VNONE {
+                self.enter(LOG_UB, NN_KEY | p as u64, 1);
+            }
+            if rise && eo && e != VNONE && (e & VFLAG) == 0 {
+                if int_bits(b, e).is_some() {
+                    self.enter(LOG_UB, LB_KEY | p as u64, e << 1);
+                } else {
+                    self.enter(LOG_REL, rel_key(p, e), 0);
+                }
+            }
+        }
+        // Below a value from before the loop that every edge in proves its argument below; a second round
+        // takes an argument that is a parameter the first round bounded (`j` of `i = j` after `j <u n`).
+        let mut done = 0u64;
+        for _ in 0..2u32 {
+            for q in 0..(hb.param_len as u32).min(64) {
+                let p = VPARAM | hb.param_start + q;
+                if (done >> q & 1) != 0 {
+                    continue;
+                }
+                let yb = self.edge_bound(pk, b, h, q, p, ast::pick(one_in, th.a, VNONE), tin);
+                if yb == VNONE {
+                    continue;
+                }
+                done |= 1u64 << q;
+                self.enter(LOG_REL, rel_key(p, yb), 1);
+                if int_bits(b, yb).is_some() {
+                    self.enter(LOG_UB, p, yb << 1 | 1);
+                } else {
+                    self.note_le(p, yb);
+                }
+            }
+        }
+        // At most such a value where the edges' tests are inclusive (`edge_le`).
+        for q in 0..(hb.param_len as u32).min(64) {
+            let p = VPARAM | hb.param_start + q;
+            if (done >> q & 1) != 0 {
+                continue;
+            }
+            let w = self.edge_le(b, h, q, p);
+            if w == VNONE {
+                continue;
+            }
+            if int_bits(b, w).is_none() {
+                self.note_le(p, w);
+            } else if self.ub.get(&(p as u64)).is_none() {
+                self.enter(LOG_UB, p, w << 1);
+            }
+        }
+        // A constant bound one step past a test (`edge_ub`: the count `i + 1` a loop `i < 128` exits with).
+        for q in 0..(hb.param_len as u32).min(64) {
+            let p = VPARAM | hb.param_start + q;
+            if self.ub.get(&(p as u64)).is_some() || !is_int(b.type_of(p)) || b.type_of(p) == T_I128 || is_vec(
+                b.type_of(p),
+            ) {
+                continue;
+            }
+            let u = self.edge_ub(pk, b, h, q, p, ast::pick(one_in, th.a, VNONE), tin);
+            let c = ast::pick(u.is_some(), self.known_const(b, b.type_of(p), u.unwrap_or(0)), NONE);
+            if u.is_some() && c != NONE && u.unwrap() < width_mask(b.type_of(p), pk.ptr_bytes) {
+                self.enter(LOG_UB, p, c << 1);
+            }
+        }
+        for q in 0..hb.param_len as u32 {
+            self.signed_counter(pk, b, h, q, VPARAM | hb.param_start + q, ast::pick(one_in, th.a, VNONE), tin);
+        }
+    }
+
+    // The greatest value each edge into loop `h` passes for its header parameter `q` (`p`): on an edge from
+    // outside the argument's bound (`ubound`); on a back edge `p + k` (`k` above 0) where the edge's test or the
+    // header's `hc` (holding into the loop where `tin`) keeps `p` below a constant `c` (`c - 1 + k`) or at most
+    // it (`c + k`), else the argument's bound in the header's scope. None when some edge has none, or a sum
+    // passes the type.
+    fn edge_ub(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value, hc: Value, tin: bool) Option<u64> {
+        let m = width_mask(b.type_of(p), pk.ptr_bytes);
+        let mut best: u64 = 0;
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            let inl = self.in_loop(h, pb);
+            b.succ_edges(term(b, pb), &mut self.edges);
+            for d in 0..self.edges.len() {
+                let ed = self.edges[d];
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                let a0 = self.val(b.edge_arg(ed, q));
+                let a = self.edge_value(b, a0);
+                if a == p {
+                    continue;
+                }
+                let k = ast::pick(step_of(b, a, p) != 0, step_of(b, a, p), step_of(b, a0, p));
+                let mut u = Option::<u64>::None;
+                if inl && k > 0 {
+                    let (c, holds) = self.edge_cond(b, pb, ed);
+                    for side in 0..2u32 {
+                        let (cc, hh) = ast::pick(side == 0, (c, holds), (hc, tin));
+                        let (x, y, neg) = Opt::as_ult(b, cc);
+                        let lt = x != VNONE && hh != neg;
+                        let lim = if lt && x == p && int_bits(b, y).is_some() && (int_bits(b, y).unwrap() & m) != 0 {
+                            Some((int_bits(b, y).unwrap() & m) - 1)
+                        } else if x != VNONE && !lt && y == p && int_bits(b, x).is_some() {
+                            Some(int_bits(b, x).unwrap() & m)
+                        } else {
+                            Option::<u64>::None
+                        };
+                        if lim.is_some() && lim.unwrap() <= m - k as u64 && (u.is_none() || lim.unwrap() + k as u64 < u.unwrap()) {
+                            u = Some(lim.unwrap() + k as u64);
+                        }
+                    }
+                }
+                if u.is_none() {
+                    u = self.ubound(pk, b, a, UB_DEPTH);
+                }
+                if u.is_none() {
+                    return None;
+                }
+                best = best.max(u.unwrap());
+            }
+        }
+        return Some(best);
+    }
+
+    // Signed bounds of loop header `h`'s parameter `p` (index `q`): a counter from one start `e` that each back
+    // edge steps by one constant `k` (`step_of`), up or down, within a bound `B` (`limit_of`: a constant plus
+    // -1, 0 or 1, or a value `n` from before the loop, whose signed range gives `B`: `bound_num`). With the
+    // header's test `hc` holding into the loop (`tin`), `p` is within `B` before each step, which then does not
+    // wrap (`B + k` stays in the type), and the exit sees up to `k` past it: up, `[e, max(e, B + k)]`. With every
+    // back edge's own test, by induction from `e` within `B`: up, `[e, B]`. Down is the mirror. A start `e` from
+    // before the loop (no constant): under the header's test, down at most `e` as a signed value (`SHV_KEY`), up
+    // at least the start's signed bound from below; under every edge's test against a constant (the entry's
+    // too), also within that constant. Up from a constant `e` of at least 0 under every edge's `a <s n`: `p` is
+    // below `n` as an unsigned value too, and `n` above `e`.
+    fn signed_counter(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value, hc: Value, tin: bool) {
+        if is_vec(b.type_of(p)) || type_bits(b.type_of(p), pk.ptr_bytes) > 64 {
+            return;
+        }
+        let mut e = VNONE;
+        let mut k: i64 = 0;
+        let mut ek = VNONE;
+        let mut ea: i32 = 0;
+        let mut edges_ok = true;
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            let tp = term(b, pb);
+            b.succ_edges(tp, &mut self.edges);
+            for d in 0..self.edges.len() {
+                let ed = self.edges[d];
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                let a = b.edge_arg(ed, q);
+                if !self.in_loop(h, pb) {
+                    if (a & VFLAG) != 0 || !self.outside(a, h) || e != VNONE && e != a {
+                        return;
+                    }
+                    e = a;
+                    continue;
+                }
+                let st = step_of(b, a, p);
+                if st == 0 || k != 0 && k != st {
+                    return;
+                }
+                k = st;
+                let (ec, eh) = self.edge_cond(b, pb, ed);
+                let (bk, adj) = if ec != VNONE {
+                    Opt::limit_of(b, ec, eh, a, st > 0)
+                } else {
+                    (VNONE, 0)
+                };
+                if bk == VNONE || ek != VNONE && (ek != bk || ea != adj) || int_bits(b, bk).is_none() && !self.outside(
+                    bk,
+                    h,
+                ) {
+                    edges_ok = false;
+                } else {
+                    ek = bk;
+                    ea = adj;
+                }
+            }
+        }
+        if e == VNONE || k == 0 {
+            return;
+        }
+        let up = k > 0;
+        let w = type_bits(b.type_of(p), pk.ptr_bytes);
+        let tmax64 = (width_mask(b.type_of(p), pk.ptr_bytes) >> 1) as i64;
+        let (tmax, tmin) = (tmax64 as i128, (-tmax64 - 1) as i128);
+        // Whether one more step from `v` stays in the type.
+        let fits = |v: i128| v + k <= tmax && v + k >= tmin;
+        let (hk, ha) = if hc != VNONE {
+            Opt::limit_of(b, hc, tin, p, up)
+        } else {
+            (VNONE, 0)
+        };
+        let hn = self.bound_num(pk, b, h, hk, ha, up);
+        if int_bits(b, e).is_none() {
+            // A start from before the loop.
+            let lo = switch self.ub.get(&(SLO_KEY | e as u64)) {
+                Some(f) => *f,
+                None => VNONE,
+            };
+            if hn.is_some() && fits(hn.unwrap()) {
+                if !up {
+                    self.enter(LOG_UB, SHV_KEY | p as u64, e);
+                } else if lo != VNONE {
+                    self.enter(LOG_UB, SLO_KEY | p as u64, lo);
+                }
+                return;
+            }
+            if !edges_ok || ek == VNONE || int_bits(b, ek).is_none() || self.entry_limit(b, h, e, up) != (ek, ea) {
+                return;
+            }
+            let bv = sign_extend(int_bits(b, ek).unwrap(), w) as i128 + ea;
+            if !fits(bv) {
+                return;
+            }
+            self.note_signed(pk, b, p, !up, ek, ea);
+            if !up {
+                self.enter(LOG_UB, SHV_KEY | p as u64, e);
+                self.shv_le(pk, b, p);
+            } else if lo != VNONE {
+                self.enter(LOG_UB, SLO_KEY | p as u64, lo);
+            }
+            return;
+        }
+        let ev = sign_extend(int_bits(b, e).unwrap(), w) as i128;
+        if hn.is_some() {
+            let hv = hn.unwrap();
+            if !fits(hv) {
+                return;
+            }
+            self.note_signed(pk, b, p, up, e, 0);
+            // Up to one step past a constant bound; a bound the encoding cannot hold stays unnoted.
+            let far = ha as i64 + k;
+            if int_bits(b, hk).is_some() {
+                if ast::pick(up, ev > hv + k, ev < hv + k) {
+                    self.note_signed(pk, b, p, !up, e, 0);
+                } else if far >= -1 && far <= 2 {
+                    self.note_signed(pk, b, p, !up, hk, far as i32);
+                }
+            }
+            return;
+        }
+        if !edges_ok || ek == VNONE {
+            return;
+        }
+        let bn = self.bound_num(pk, b, h, ek, ea, up);
+        if bn.is_none() {
+            return;
+        }
+        let bv = bn.unwrap();
+        if int_bits(b, ek).is_some() {
+            if fits(bv) && ast::pick(up, ev <= bv, ev >= bv) {
+                self.note_signed(pk, b, p, up, e, 0);
+                self.note_signed(pk, b, p, !up, ek, ea);
+            }
+            return;
+        }
+        if !fits(ast::pick(up == ev > bv, ev, bv)) {
+            return;
+        }
+        self.note_signed(pk, b, p, up, e, 0);
+        let nlo = switch self.srange(pk, b, ek, UB_DEPTH) {
+            Some(r) => r.0 as i128,
+            None => tmin,
+        };
+        if up && ev >= 0 && ea == -1 && (nlo > ev || self.entry_limit(b, h, e, true) == (ek, -1)) {
+            self.enter(LOG_REL, rel_key(p, ek), 1);
+            self.note_le(p, ek);
+            self.note_signed(pk, b, ek, true, e, 1);
+        }
+    }
+
+    // The signed bound `k + adj` (`limit_of`) as a number for loop header `h`: a constant's; for a value `k` from
+    // before the loop, the greatest (`up`) or least value of its signed range (`srange`). None else.
+    fn bound_num(self: &Self, pk: &Package, b: &Body, h: u32, k: Value, adj: i32, up: bool) Option<i128> {
+        if k == VNONE {
+            return None;
+        }
+        let w = type_bits(b.type_of(k), pk.ptr_bytes);
+        if int_bits(b, k).is_some() {
+            return Some(sign_extend(int_bits(b, k).unwrap(), w) as i128 + adj);
+        }
+        if !self.outside(k, h) {
+            return None;
+        }
+        return switch self.srange(pk, b, k, UB_DEPTH) {
+            Some(r) => Some(ast::pick(up, r.1, r.0) + adj),
+            None => None,
+        };
+    }
+
+    // The bound (`limit_of`) every edge into loop `h` from outside it gives start `e`; `(VNONE, 0)` when they
+    // differ or one gives none.
+    fn entry_limit(self: &mut Self, b: &Body, h: u32, e: Value, up: bool) (Value, i32) {
+        let mut r = (VNONE, 0i32);
+        let mut first = true;
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            if self.in_loop(h, pb) {
+                continue;
+            }
+            let tp = term(b, pb);
+            b.succ_edges(tp, &mut self.edges);
+            for d in 0..self.edges.len() {
+                let ed = self.edges[d];
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                let (ec, eh) = self.edge_cond(b, pb, ed);
+                let l = if ec != VNONE {
+                    Opt::limit_of(b, ec, eh, e, up)
+                } else {
+                    (VNONE, 0)
+                };
+                if l.0 == VNONE || !first && l != r {
+                    return (VNONE, 0);
+                }
+                r = l;
+                first = false;
+            }
+        }
+        return r;
+    }
+
+    // A counter down from a value before its loop (`SHV_KEY`) that `v` is, at least 0 here, is at most that value
+    // as an unsigned one too, and below `n` where that value is `n - 1`.
+    fn shv_le(self: &mut Self, pk: &Package, b: &Body, v: Value) {
+        let e = switch self.ub.get(&(SHV_KEY | v as u64)) {
+            Some(f) => *f,
+            None => VNONE,
+        };
+        let nn = e != VNONE && (switch self.srange(pk, b, v, 0) {
+            Some(r) => r.0 >= 0,
+            None => false,
+        });
+        if nn {
+            self.note_le(v, e);
+            if is_op(b, e, O_SUB) && int_bits(b, b.insts[e as usize].b) == Some(1u64) {
+                self.enter(LOG_REL, rel_key(v, b.insts[e as usize].a), 1);
+            }
+        }
+    }
+
+    // At terminator `t` of block `k`, in its scope: for each edge into a join block (no loop header, from 2 to
+    // JOIN_PREDS edges in) with parameters, the facts the edge's condition and the scope give each argument,
+    // joined with those of the edges into it recorded before (`JoinFact`, `join_arg`). The walk visits a join
+    // after its predecessors; it enters what every edge gave (`join_in`: the count a scan loop exits with). An
+    // edge of the block's terminator `t0` before the visit that `t` no longer has (a branch it decided) passes
+    // nothing, and counts.
+    fn join_out(self: &mut Self, pk: &Package, b: &mut Body, k: u32, t0: Inst, t: Inst) {
+        let mut eds: [u32; 2] = [NONE; 2];
+        let mut ne: usize = 1;
+        if t0.op == O_JMP {
+            eds[0] = t0.a;
+        } else if t0.op == O_BR {
+            eds[0] = t0.b;
+            eds[1] = t0.c;
+            ne = 2;
+        } else {
+            return;
+        }
+        let split = t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) && int_bits(b, t.a).is_none();
+        // An edge `t` has that `t0` had not (a side's edge an if-conversion took over) enters its block from
+        // a block its predecessors at the walk's start do not list: that block keeps no facts.
+        let mut tes: [u32; 2] = [NONE; 2];
+        if t.op == O_JMP {
+            tes[0] = t.a;
+        } else if t.op == O_BR {
+            tes[0] = t.b;
+            tes[1] = t.c;
+        }
+        for d in 0..2usize {
+            if tes[d] != NONE && tes[d] != eds[0] && tes[d] != eds[1] {
+                self.jat[b.edge_target(tes[d]) as usize] = JOIN_BAD;
+            }
+        }
+        for d in 0..ne {
+            let ed = eds[d];
+            let j = b.edge_target(ed);
+            let np = self.pred_at[j as usize + 1] - self.pred_at[j as usize];
+            let jb = b.blocks[j as usize];
+            if jb.param_len == 0 || np < 2 || np > JOIN_PREDS || self.inner[j as usize] == j || j == k || self.jat[j as usize] == JOIN_BAD {
+                continue;
+            }
+            // An edge from a block the walk's start did not list (one a rewrite moved here) spoils the count.
+            let mut listed = false;
+            for x in self.pred_at[j as usize]..self.pred_at[j as usize + 1] {
+                listed = listed || self.preds[x as usize] == k;
+            }
+            if !listed {
+                self.jat[j as usize] = JOIN_BAD;
+                continue;
+            }
+            let nq = (jb.param_len as u32).min(JOIN_MAX);
+            let live = t.op == O_JMP && t.a == ed || t.op == O_BR && (t.b == ed || t.c == ed);
+            if self.jat[j as usize] == NONE {
+                self.jat[j as usize] = self.jfacts.len() as u32;
+                for _ in 0..nq {
+                    self.jfacts.push(
+                        JoinFact {
+                            lo: u64::MAX,
+                            hi: 0,
+                            slo: i64::MAX,
+                            shi: i64::MIN,
+                            sk: true,
+                            w: [VNONE; 2],
+                            ws: [false; 2],
+                            nw: NONE,
+                            sw: NONE,
+                            dead: false,
+                        },
+                    );
+                }
+            }
+            if !live {
+                self.jcnt[j as usize] += 1;
+                continue;
+            }
+            let mark = self.log.len();
+            if split {
+                let holds = ed == t.b;
+                self.enter(LOG_COND, t.a, holds as u32);
+                self.cond_parts(pk, b, t.a, holds, MIN_DEPTH);
+            }
+            let base = self.jat[j as usize];
+            for q in 0..nq {
+                let mut f = self.jfacts[(base + q) as usize];
+                if !f.dead {
+                    let a = self.val(b.edge_arg(ed, q));
+                    self.join_arg(pk, b, j, a, &mut f);
+                    self.jfacts[(base + q) as usize] = f;
+                }
+            }
+            self.unwind(mark);
+            self.jcnt[j as usize] += 1;
+        }
+    }
+
+    // Fact `f` of a parameter of join block `j` joined with argument `a` of one more edge into it, in that edge's
+    // scope: the ranges' union; of the values `f` is at most, those `a` is at most too (`le_of`); the first edge
+    // that is no constant 0 gives them: the values from before the join that `a` is at most (`uppers`).
+    fn join_arg(self: &Self, pk: &Package, b: &Body, j: u32, a: Value, f: &mut JoinFact) {
+        let ty = b.type_of(a);
+        if a == VNONE || (a & VFLAG) != 0 || !is_int(ty) || ty == T_I128 || is_vec(ty) {
+            f.dead = true;
+            return;
+        }
+        let m = width_mask(ty, pk.ptr_bytes);
+        f.hi = f.hi.max(self.ubound(pk, b, a, UB_DEPTH).unwrap_or(m));
+        f.lo = f.lo.min(self.lbound(pk, b, a, UB_DEPTH).unwrap_or(0));
+        switch self.srange(pk, b, a, UB_DEPTH) {
+            Some(r) => {
+                f.slo = f.slo.min(r.0);
+                f.shi = f.shi.max(r.1);
+            },
+            None => {
+                f.sk = false;
+            },
+        }
+        // At most a value as a signed one: the first edge's `a` or the start a counter down stays at most
+        // (`SHV_KEY`), which every later edge's keeps (`sle_of`).
+        if f.sw == NONE {
+            f.sw = self.sle_first(b, j, a);
+        } else if f.sw != VNONE && !self.sle_of(pk, b, a, f.sw) {
+            f.sw = VNONE;
+        }
+        let c = int_bits(b, a);
+        if c.is_some() && (c.unwrap() & m) == 0 {
+            return;
+        }
+        if f.nw == NONE {
+            f.nw = 0;
+            if c.is_some() {
+                return;
+            }
+            let mut us: [(Value, i64); 3] = [(VNONE, 0); 3];
+            let n = self.uppers(pk, b, a, &mut us);
+            for q in 0..n {
+                let (u, d) = us[q];
+                let du = self.def_blk(u);
+                if d <= 0 && f.nw < 2 && u != VNONE && (u & VFLAG) == 0 && int_bits(b, u).is_none() && du != NONE && du != j && self.dominates(
+                    du,
+                    j,
+                ) {
+                    f.w[f.nw as usize] = u;
+                    f.ws[f.nw as usize] = d < 0;
+                    f.nw += 1;
+                }
+            }
+            return;
+        }
+        let mut kept: u32 = 0;
+        for q in 0..f.nw as usize {
+            let w = f.w[q];
+            let s = if c.is_some() {
+                let lw = self.lbound(pk, b, w, UB_DEPTH);
+                if lw.is_none() || lw.unwrap() < (c.unwrap() & m) {
+                    0u32
+                } else {
+                    ast::pick(lw.unwrap() > (c.unwrap() & m), 2u32, 1u32)
+                }
+            } else {
+                self.le_of(pk, b, a, w)
+            };
+            if s != 0 {
+                f.w[kept as usize] = w;
+                f.ws[kept as usize] = f.ws[q] && s == 2;
+                kept += 1;
+            }
+        }
+        f.nw = kept;
+    }
+
+    // A value from before join block `j` that `a` is at most as a signed one: `a` itself, else the value a counter
+    // down `a` is stays at most (`SHV_KEY`); VNONE for none.
+    fn sle_first(self: &Self, b: &Body, j: u32, a: Value) Value {
+        if a == VNONE || (a & VFLAG) != 0 || int_bits(b, a).is_some() {
+            return VNONE;
+        }
+        let da = self.def_blk(a);
+        if da != NONE && da != j && self.dominates(da, j) {
+            return a;
+        }
+        return switch self.ub.get(&(SHV_KEY | a as u64)) {
+            Some(f) => *f,
+            None => VNONE,
+        };
+    }
+
+    // Whether `a <=s w` holds here: `a` is `w`, a counter down from `w` (`SHV_KEY`), or `p - k` (`k` a constant
+    // of at least 0) that does not wrap (`p` at least the type's least value plus `k`) of such a `p`.
+    fn sle_of(self: &Self, pk: &Package, b: &Body, a: Value, w: Value) bool {
+        if a == w {
+            return true;
+        }
+        let mut p = a;
+        if is_op(b, a, O_SUB) && int_bits(b, b.insts[a as usize].b).is_some() && (b.insts[a as usize].a & VFLAG) == 0 {
+            let t = b.insts[a as usize];
+            let bits = type_bits(t.ty, pk.ptr_bytes);
+            let k = sign_extend(int_bits(b, t.b).unwrap(), bits) as i128;
+            let tmin = (-((width_mask(t.ty, pk.ptr_bytes) >> 1) as i64) - 1) as i128;
+            let lo = switch self.srange(pk, b, t.a, UB_DEPTH) {
+                Some(r) => r.0 as i128,
+                None => tmin,
+            };
+            if k >= 0 && lo >= tmin + k {
+                p = t.a;
+            }
+        }
+        if p == w {
+            return true;
+        }
+        return switch self.ub.get(&(SHV_KEY | p as u64)) {
+            Some(f) => *f == w,
+            None => false,
+        };
+    }
+
+    // Whether `a <=u w` holds here: 2 when `a <u w`, 1 when only `a <=u w` is known, 0 when neither.
+    fn le_of(self: &Self, pk: &Package, b: &Body, a: Value, w: Value) u32 {
+        if a == w {
+            return 1;
+        }
+        if self.below(a, w) || self.offset_order(pk, b, a, w) == Some(true) {
+            return 2;
+        }
+        return ast::pick(self.known_le(a, w) || self.offset_order(pk, b, w, a) == Some(false), 1u32, 0u32);
+    }
+
+    // Block `j`, which several edges enter, with every edge's facts recorded (`join_out`): its parameters take
+    // them (a bound needs a constant the body holds: `known_const`).
+    fn join_in(self: &mut Self, pk: &Package, b: &Body, j: u32) {
+        let base = self.jat[j as usize];
+        if base == NONE || base == JOIN_BAD || self.jcnt[j as usize] != self.pred_at[j as usize + 1] - self.pred_at[j as usize] {
+            return;
+        }
+        let jb = b.blocks[j as usize];
+        for q in 0..(jb.param_len as u32).min(JOIN_MAX) {
+            let f = self.jfacts[(base + q) as usize];
+            let p = VPARAM | jb.param_start + q;
+            if f.dead || self.val(p) != p {
+                continue;
+            }
+            let ty = b.type_of(p);
+            let m = width_mask(ty, pk.ptr_bytes);
+            let tmax = (m >> 1) as i64;
+            let hc = ast::pick(f.hi < m, self.known_const(b, ty, f.hi), NONE);
+            let lc = ast::pick(f.lo > 0, self.known_const(b, ty, f.lo), NONE);
+            let sl = ast::pick(f.sk && f.slo > -tmax - 1, self.known_const(b, ty, f.slo as u64 & m), NONE);
+            let sh = ast::pick(f.sk && f.shi < tmax, self.known_const(b, ty, f.shi as u64 & m), NONE);
+            if hc != NONE && self.ub.get(&(p as u64)).is_none() {
+                self.enter(LOG_UB, p, hc << 1);
+            }
+            if lc != NONE && self.ub.get(&(LB_KEY | p as u64)).is_none() {
+                self.enter(LOG_UB, LB_KEY | p as u64, lc << 1);
+            }
+            if sl != NONE {
+                self.note_signed(pk, b, p, true, sl, 0);
+            }
+            if sh != NONE {
+                self.note_signed(pk, b, p, false, sh, 0);
+            }
+            if f.sw != NONE && f.sw != VNONE {
+                self.enter(LOG_UB, SHV_KEY | p as u64, f.sw);
+            }
+            if f.nw != NONE {
+                for i in 0..f.nw as usize {
+                    self.note_le(p, f.w[i]);
+                    if f.ws[i] {
+                        self.enter(LOG_REL, rel_key(p, f.w[i]), 1);
+                    }
+                }
+            }
+        }
+    }
+
+    // The bound `(k, adj)` (`v` is at most `k + adj` when `up`, at least it else; `k` a constant, or a value
+    // the caller checks) that signed condition `c` gives `v` where it is `holds`; `(VNONE, 0)` when none. Of
+    // the two sides of an `and`, a constant bound first.
+    const fn limit_of(b: &Body, c: Value, holds: bool, v: Value, up: bool) (Value, i32) {
+        // Both sides of an `and` that holds hold (`ia >= 0 && ib >= 0`).
+        if holds && (c & (VPARAM | VFLAG)) == 0 && c != VNONE && is_op(b, c, O_AND) && !is_vec(b.insts[c as usize].ty) {
+            let l = Opt::limit_of(b, b.insts[c as usize].a, true, v, up);
+            let r = Opt::limit_of(b, b.insts[c as usize].b, true, v, up);
+            return if l.0 != VNONE && (int_bits(b, l.0).is_some() || r.0 == VNONE) {
+                l
+            } else {
+                r
+            };
+        }
+        let (x, y, neg) = Opt::as_slt(b, c);
+        if x == VNONE || (x & VFLAG) != 0 || (y & VFLAG) != 0 {
+            return (VNONE, 0);
+        }
+        let lt = holds != neg;
+        if up && lt && x == v {
+            return (y, -1);
+        }
+        if up && !lt && y == v {
+            return (x, 0);
+        }
+        if !up && lt && y == v {
+            return (x, 1);
+        }
+        if !up && !lt && x == v {
+            return (y, 0);
+        }
+        return (VNONE, 0);
+    }
+
+    // Whether condition `t.a` of branch `t`, holding where `holds` (or terminator `t` none: `out`), keeps `a`
+    // nonzero: `a != 0`, `a == 0` failing, `0 <u a`, `a <u 1` failing; with `out` (an edge from outside the
+    // loop, whose facts are in scope) also a constant other than 0, or `a`'s lower bound of 1.
+    fn nonzero_on(self: &Self, pk: &Package, b: &Body, t: Inst, holds: bool, a: Value, out: bool) bool {
+        if a == VNONE || (a & VFLAG) != 0 {
+            return false;
+        }
+        let k = int_bits(b, a);
+        if k.is_some() {
+            return (k.unwrap() & width_mask(b.type_of(a), pk.ptr_bytes)) != 0;
+        }
+        if out {
+            let lo = self.lbound(pk, b, a, UB_DEPTH);
+            if lo.is_some() && lo.unwrap() != 0 {
+                return true;
+            }
+        }
+        if t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE || b.insts[t.a as usize].op != O_ICMP {
+            return false;
+        }
+        let c = b.insts[t.a as usize];
+        let zero = |v: Value| int_bits(b, v) == Option::<u64>::Some(0);
+        if (c.aux == C_NE && holds || c.aux == C_EQ && !holds) && (c.a == a && zero(c.b) || c.b == a && zero(c.a)) {
+            return true;
+        }
+        let (x, y, neg) = Opt::as_ult(b, t.a);
+        let lt = holds != neg;
+        // `x <u a` holding makes `a` at least 1 for any `x` (a counter down to a lower one: `while i < j`).
+        return x != VNONE && (lt && y == a || !lt && x == a && int_bits(b, y) == Option::<u64>::Some(1));
+    }
+
+    // The value `y` from before loop `h` that each edge into it proves its argument for header parameter `q`
+    // (`p`) below (`edge_below`, or on a back edge the header's test `hc`), `y` from such a test; VNONE where
+    // there is none (a rotated loop's counter, or one that trails it: `i = j` after `j <u n`).
+    fn edge_bound(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value, hc: Value, tin: bool) Value {
+        // The header's test `hc` (VNONE: none that leaves the loop) as `x <u w` on the side into the loop
+        // (`tin`): every back edge is below that side.
+        let (hx, hw, hn) = Opt::as_ult(b, hc);
+        let hlt = hc != VNONE && hx != VNONE && tin != hn;
+        let mut y = VNONE;
+        for pass in 0..2u32 {
+            for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+                let pb = self.preds[j as usize];
+                let tp = term(b, pb);
+                b.succ_edges(tp, &mut self.edges);
+                for d in 0..self.edges.len() {
+                    let ed = self.edges[d];
+                    if b.edge_target(ed) != h {
+                        continue;
+                    }
+                    let a = self.edge_value(b, self.val(b.edge_arg(ed, q)));
+                    let split = tp.op == O_BR && b.edge_target(tp.b) != b.edge_target(tp.c);
+                    if pass == 0 {
+                        if y == VNONE && split && self.in_loop(h, pb) {
+                            let (x, w, neg) = Opt::as_ult(b, tp.a);
+                            if x == a && x != VNONE && ed == tp.b != neg && self.outside(w, h) {
+                                y = w;
+                            }
+                        }
+                        if y == VNONE && hlt && hx == a && self.in_loop(h, pb) && self.outside(hw, h) {
+                            y = hw;
+                        }
+                        // A parameter the facts keep below a value it is at most (`note_le`).
+                        for key in [UP_KEY, UP2_KEY] {
+                            if let Some(f) = self.ub.get(&(key | a as u64)) {
+                                if y == VNONE && self.in_loop(h, pb) && self.below(a, *f) && self.outside(*f, h) {
+                                    y = *f;
+                                }
+                            }
+                        }
+                    } else if !self.edge_below(pk, b, tp, split && ed == tp.b, split, a, y, !self.in_loop(h, pb)) && a != p && !(hlt && hx == a && hw == y && self.in_loop(
+                        h,
+                        pb,
+                    )) {
+                        return VNONE;
+                    }
+                }
+            }
+            if y == VNONE {
+                return VNONE;
+            }
+        }
+        return y;
+    }
+
+    // Value `v`, or for a parameter of a block with one edge in, the argument that edge passes (a block
+    // the walk has not reached yet forwards it later: `forward_params`), at most THROUGH_MAX steps.
+    fn edge_value(self: &Self, b: &Body, v: Value) Value {
+        let mut a = v;
+        // Each step crosses one edge.
+        for _ in 0..THROUGH_MAX {
+            if a == VNONE || (a & VPARAM) == 0 || (a & ~VPARAM) as usize >= self.pblock.len() {
+                return a;
+            }
+            let k = self.pblock[(a & ~VPARAM) as usize];
+            if k == NONE || k == 0 || self.pred_at[k as usize + 1] - self.pred_at[k as usize] != 1 {
+                return a;
+            }
+            let t = term(b, self.preds[self.pred_at[k as usize] as usize]);
+            let e = if t.op == O_JMP {
+                t.a
+            } else if t.op == O_BR && b.edge_target(t.b) != b.edge_target(t.c) {
+                ast::pick(b.edge_target(t.b) == k, t.b, t.c)
+            } else {
+                return a;
+            };
+            if b.edge_target(e) != k {
+                return a;
+            }
+            a = self.val(b.edge_arg(e, (a & ~VPARAM) - b.blocks[k as usize].param_start));
+        }
+        return a;
+    }
+
+    // Whether the edge of terminator `t` (a branch with distinct targets where `split`, its condition holding
+    // where `holds`) keeps `a <u y`: the condition is `a <u y`, or `x <u y` with `a` 0; or the facts in scope
+    // (the header's, which hold on its back edges too) give it.
+    fn edge_below(self: &Self, pk: &Package, b: &Body, t: Inst, holds: bool, split: bool, a: Value, y: Value, out: bool) bool {
+        if a == VNONE || (a & VFLAG) != 0 {
+            return false;
+        }
+        let k = int_bits(b, a);
+        if self.below(a, y) {
+            return true;
+        }
+        if out {
+            let ly = self.lbound(pk, b, y, UB_DEPTH);
+            if k.is_some() && ly.is_some() && (k.unwrap() & width_mask(b.type_of(a), pk.ptr_bytes)) < ly.unwrap() {
+                return true;
+            }
+        }
+        if !split {
+            return false;
+        }
+        let (x, w, neg) = Opt::as_ult(b, t.a);
+        if x == VNONE || w != y || holds == neg {
+            return false;
+        }
+        if x == a {
+            return true;
+        }
+        return k.is_some() && (k.unwrap() & width_mask(b.type_of(a), pk.ptr_bytes)) == 0;
+    }
+
+    // The value `w` from before loop `h` that each edge into it keeps its argument for header parameter `q`
+    // (`p`) at most: on a back edge its test `a <=u w` (or `a <u w`), or the argument is `p`; on an edge from
+    // outside the argument is 0, `w`, or a value the facts in scope keep at most `w`. VNONE when none (a
+    // rotated loop's `while i <= len - 128`).
+    fn edge_le(self: &mut Self, b: &Body, h: u32, q: u32, p: Value) Value {
+        let mut w = VNONE;
+        for pass in 0..2u32 {
+            for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+                let pb = self.preds[j as usize];
+                let tp = term(b, pb);
+                let inl = self.in_loop(h, pb);
+                b.succ_edges(tp, &mut self.edges);
+                for d in 0..self.edges.len() {
+                    let ed = self.edges[d];
+                    if b.edge_target(ed) != h {
+                        continue;
+                    }
+                    let a0 = self.val(b.edge_arg(ed, q));
+                    let a = self.edge_value(b, a0);
+                    let (c, holds) = self.edge_cond(b, pb, ed);
+                    let (x, y, neg) = Opt::as_ult(b, c);
+                    let lt = x != VNONE && holds != neg;
+                    // The value the edge's test keeps `a` (or the argument it forwards) at most: `a <u y` holding, `x <u a`
+                    // failing.
+                    let tw = if lt && (x == a || x == a0) {
+                        y
+                    } else if x != VNONE && !lt && (y == a || y == a0) {
+                        x
+                    } else {
+                        VNONE
+                    };
+                    if pass == 0 {
+                        if w == VNONE && inl && tw != VNONE && self.outside(tw, h) {
+                            w = tw;
+                        }
+                    } else if !(a == p || inl && tw == w || !inl && (int_bits(b, a) == Some(0u64) || a == w || tw == w || self.known_le(
+                        a,
+                        w,
+                    ))) {
+                        return VNONE;
+                    }
+                }
+            }
+            if w == VNONE {
+                return VNONE;
+            }
+        }
+        return w;
+    }
+
+    // The least unsigned value each edge into loop `h` passes for its header parameter `q` (`p`), with its
+    // `LB_KEY` entry: the edge's test `a >=u c` (or `c <u a`), or on an edge from outside a constant or the
+    // bound the facts in scope give it (`lbound`'s entry); `(0, 0)` when some edge gives none (a counter down
+    // by 2 while `i >= 2`).
+    fn edge_floor(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value) (u64, u32) {
+        let mut best: (u64, u32) = (u64::MAX, 0);
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            let tp = term(b, pb);
+            let inl = self.in_loop(h, pb);
+            b.succ_edges(tp, &mut self.edges);
+            for d in 0..self.edges.len() {
+                let ed = self.edges[d];
+                if b.edge_target(ed) != h {
+                    continue;
+                }
+                let a0 = self.val(b.edge_arg(ed, q));
+                let a = self.edge_value(b, a0);
+                if a == p {
+                    continue;
+                }
+                if a == VNONE || (a & VFLAG) != 0 || !is_int(b.type_of(a)) || b.type_of(a) == T_I128 {
+                    return (0, 0);
+                }
+                let m = width_mask(b.type_of(a), pk.ptr_bytes);
+                let (c, holds) = self.edge_cond(b, pb, ed);
+                let (x, y, neg) = Opt::as_ult(b, c);
+                let lt = x != VNONE && holds != neg;
+                let mut f: (u64, u32) = (0, 0);
+                if lt && (y == a || y == a0) && int_bits(b, x).is_some() && (int_bits(b, x).unwrap() & m) < m {
+                    f = ((int_bits(b, x).unwrap() & m) + 1, x << 1 | 1);
+                } else if x != VNONE && !lt && (x == a || x == a0) && int_bits(b, y).is_some() {
+                    f = (int_bits(b, y).unwrap() & m, y << 1);
+                } else if !inl && int_bits(b, a).is_some() {
+                    f = (int_bits(b, a).unwrap() & m, a << 1);
+                } else if !inl {
+                    if let Some(e) = self.ub.get(&(LB_KEY | a as u64)) {
+                        let c = int_bits(b, *e >> 1).unwrap() & m;
+                        if (*e & 1) == 0 || c < m {
+                            f = (c + (*e & 1) as u64, *e);
+                        }
+                    }
+                }
+                if f.0 == 0 {
+                    return (0, 0);
+                }
+                if f.0 < best.0 {
+                    best = f;
+                }
+            }
+        }
+        return ast::pick(best.0 == u64::MAX, (0u64, 0u32), best);
+    }
+
+    // The condition that decides edge `ed` out of block `pb`, and whether it holds there: `pb`'s branch, or for
+    // a `pb` that only jumps, the branch of its one predecessor into it (a latch after the test). `(VNONE,
+    // false)` for none.
+    fn edge_cond(self: &Self, b: &Body, pb: u32, ed: u32) (Value, bool) {
+        let tp = term(b, pb);
+        if tp.op == O_BR && b.edge_target(tp.b) != b.edge_target(tp.c) {
+            return (tp.a, ed == tp.b);
+        }
+        if tp.op != O_JMP || self.pred_at[pb as usize + 1] - self.pred_at[pb as usize] != 1 {
+            return (VNONE, false);
+        }
+        let tq = term(b, self.preds[self.pred_at[pb as usize] as usize]);
+        if tq.op != O_BR || b.edge_target(tq.b) == b.edge_target(tq.c) {
+            return (VNONE, false);
+        }
+        return (tq.a, b.edge_target(tq.b) == pb);
+    }
+
+    // The room above `p` (`room`) that condition `c`, where it `holds`, leaves: `p <u y` one more than `y`'s,
+    // `p <=u y` `y`'s; 0 for none.
+    fn step_room(self: &Self, pk: &Package, b: &Body, c: Value, holds: bool, p: Value) u64 {
+        let (x, y, neg) = Opt::as_ult(b, c);
+        if x == VNONE || !is_int(b.type_of(p)) || b.type_of(p) == T_I128 {
+            return 0;
+        }
+        let lt = holds != neg;
+        let m = width_mask(b.type_of(p), pk.ptr_bytes);
+        if lt && x == p {
+            return self.room(pk, b, y, ROOM_DEPTH).min(m - 1) + 1;
+        }
+        return ast::pick(!lt && y == p, self.room(pk, b, x, ROOM_DEPTH), 0u64);
+    }
+
+    // Whether a back edge of loop `h` passes `p - 1` as header parameter `q`.
+    fn steps_down_from(self: &mut Self, b: &Body, h: u32, q: u32, p: Value) bool {
+        for j in self.pred_at[h as usize]..self.pred_at[h as usize + 1] {
+            let pb = self.preds[j as usize];
+            if !self.in_loop(h, pb) {
+                continue;
+            }
+            b.succ_edges(term(b, pb), &mut self.edges);
+            for d in 0..self.edges.len() {
+                if b.edge_target(self.edges[d]) == h && minus_one(b, b.edge_arg(self.edges[d], q), p) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // Whether back edge value `a` is at most header parameter `p` (`param_bounds`): `p`, a select of such
+    // values, or a midpoint of `lo` (VNONE: none) and `p`, `depth` selects deep.
+    fn below_param(self: &Self, b: &Body, a: Value, p: Value, lo: Value, depth: u32) bool {
+        if a == p {
+            return true;
+        }
+        if depth == 0 || (a & (VPARAM | VFLAG)) != 0 || a == VNONE {
+            return false;
+        }
+        let t = b.insts[a as usize];
+        if t.op == O_SELECT && !is_vec(t.ty) {
+            return self.below_param(b, t.b, p, lo, depth - 1) && self.below_param(b, t.c, p, lo, depth - 1);
+        }
+        return lo != VNONE && midpoint(b, a, lo, p);
+    }
+
+    // `val(v)` for a value the maps know; a value the walk added is its own.
+    const fn val_known(self: &Self, v: Value) Value {
+        if v == VNONE || (v & VPARAM) != 0 && (v & ~VPARAM) as usize >= self.prepl.len() || (v & VPARAM) == 0 && (v & ~VFLAG) as usize >= self.repl.len() {
+            return v;
+        }
+        if (v & VFLAG) != 0 && (v & ~VFLAG) as usize >= self.frepl.len() {
+            return v;
+        }
+        return self.val(v);
+    }
+
+    // The low bits of `v` known to be 0 (at most the width), `depth` operations deep: a constant's, a sum's or
+    // difference's fewest, a product's or shift's sum, an `and`'s most. Parameter `p` counts `assume`; any
+    // other parameter counts its own (`param_zeros`) while `depth` lasts.
+    fn low_zeros(self: &Self, b: &Body, v: Value, p: Value, assume: u32, depth: u32) u32 {
+        if v == p {
+            return assume;
+        }
+        if v == VNONE || (v & VFLAG) != 0 || is_vec(b.type_of(v)) {
+            return 0;
+        }
+        let w = type_bits(b.type_of(v), 8);
+        let k = int_bits(b, v);
+        if k.is_some() {
+            return ast::pick(k.unwrap() == 0, w, (k.unwrap().trailing_zeros() as u32).min(w));
+        }
+        if depth == 0 {
+            return 0;
+        }
+        if (v & VPARAM) != 0 {
+            return if p == VNONE {
+                self.param_zeros(b, v, depth - 1)
+            } else {
+                0
+            };
+        }
+        let t = b.insts[v as usize];
+        if t.op != O_ADD && t.op != O_SUB && t.op != O_AND && t.op != O_MUL && t.op != O_SHL {
+            return 0;
+        }
+        let (x, y) = (self.val_known(t.a), self.val_known(t.b));
+        if t.op == O_ADD || t.op == O_SUB {
+            return self.low_zeros(b, x, p, assume, depth - 1).min(self.low_zeros(b, y, p, assume, depth - 1));
+        }
+        if t.op == O_AND {
+            return self.low_zeros(b, x, p, assume, depth - 1).max(self.low_zeros(b, y, p, assume, depth - 1));
+        }
+        if t.op == O_MUL {
+            return (self.low_zeros(b, x, p, assume, depth - 1) + self.low_zeros(b, y, p, assume, depth - 1)).min(w);
+        }
+        if t.op == O_SHL && int_bits(b, y).is_some() && int_bits(b, y).unwrap() < w as u64 {
+            return (self.low_zeros(b, x, p, assume, depth - 1) + int_bits(b, y).unwrap() as u32).min(w);
+        }
+        return 0;
+    }
+
+    // The low bits of block parameter `a` known to be 0: the fewest of the values the edges into its block
+    // pass, by induction over the iterations (the values that pass `a` itself, its own count assumed, keep
+    // at least that count).
+    fn param_zeros(self: &Self, b: &Body, a: Value, depth: u32) u32 {
+        let k = if (a & ~VPARAM) as usize < self.pblock.len() {
+            self.def_blk(a)
+        } else {
+            NONE
+        };
+        if k == NONE || k == 0 || k as usize >= self.rpo.len() || k as usize + 1 >= self.pred_at.len() || self.rpo[k as usize] == NONE {
+            return 0;
+        }
+        let np = self.pred_at[k as usize + 1] - self.pred_at[k as usize];
+        if np == 0 || np > IMPLY_FAN {
+            return 0;
+        }
+        let q = (a & ~VPARAM) - b.blocks[k as usize].param_start;
+        let mut s: u32 = 64;
+        for pass in 0..2u32 {
+            let assume = s;
+            let mut m: u32 = 64;
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                let st = term(b, self.preds[x as usize]);
+                for e in 0..edge_count(st) {
+                    let ed = edge_of(b, st, e);
+                    if b.edge_target(ed) == k {
+                        m = m.min(self.low_zeros(b, self.val_known(b.edge_arg(ed, q)), a, assume, depth));
+                    }
+                }
+            }
+            if pass == 1 && m < s {
+                return 0;
+            }
+            s = m;
+            if s == 0 {
+                return 0;
+            }
+        }
+        return s.min(type_bits(b.type_of(a), 8));
     }
 
     // The value of condition `c` the order facts in scope decide (`order_facts`), if any: `x <u y` itself,
     // or `x <u a + 1` false where `a <u x` holds (`a + 1` does not wrap: an inclusive range's second test,
     // `i + 1 <=u last` after `i <u last`).
-    fn order_decided(self: &Self, b: &Body, c: Value) Option<u64> {
+    fn order_decided(self: &Self, pk: &Package, b: &Body, c: Value) Option<u64> {
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
+            // `v == 0` fails, `v != 0` holds, for a `v` of at least 1 (`lbound`: `y | 1`, a divisor).
+            if (c & (VPARAM | VFLAG)) == 0 && c != VNONE && is_op(b, c, O_ICMP) && !is_vec(b.insts[c as usize].ty) {
+                let t = b.insts[c as usize];
+                let v = ast::pick(
+                    int_bits(b, t.b) == Option::<u64>::Some(0),
+                    t.a,
+                    ast::pick(int_bits(b, t.a) == Option::<u64>::Some(0), t.b, VNONE),
+                );
+                if (t.aux == C_EQ || t.aux == C_NE) && v != VNONE && (v & VFLAG) == 0 && b.type_of(v) != T_I128 {
+                    let lo = self.lbound(pk, b, v, UB_DEPTH);
+                    if lo.is_some() && lo.unwrap() != 0 {
+                        return Some((t.aux == C_NE) as u64);
+                    }
+                    // `a - q == 0` fails where `q <u a` holds (`a[i..].len()` below `i <u len`).
+                    if is_op(b, v, O_SUB) && self.below(b.insts[v as usize].b, b.insts[v as usize].a) {
+                        return Some((t.aux == C_NE) as u64);
+                    }
+                    // `a + 1 == 0` fails where `a` is below some value (`a[..i + 1]` below `i <u len`).
+                    if is_op(b, v, O_ADD) && int_bits(b, b.insts[v as usize].b) == Some(1u64) {
+                        let a = b.insts[v as usize].a;
+                        for key in [UP_KEY, UP2_KEY] {
+                            if let Some(f) = self.ub.get(&(key | a as u64)) {
+                                if self.below(a, *f) {
+                                    return Some((t.aux == C_NE) as u64);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             return None;
         }
         if let Some(r) = self.rel.get(&rel_key(x, y)) {
             return Some((*r != 0 != neg) as u64);
+        }
+        // `y <u x` holding makes `x <u y` fail.
+        if self.below(y, x) {
+            return Some(neg as u64);
         }
         if is_op(b, y, O_ADD) && int_bits(b, b.insts[y as usize].b) == Some(1u64) {
             if let Some(r) = self.rel.get(&rel_key(b.insts[y as usize].a, x)) {
@@ -5964,7 +7877,491 @@ extend Opt {
                 }
             }
         }
+        if b.type_of(x) == T_I128 {
+            return None;
+        }
+        // `n <u (k << s) + c` fails where `k <u n >> s` holds and `c <= 2^s`: `k << s` is at most `n - 2^s`, so
+        // the sum does not wrap and is at most `n` (a chunk `a[k * w..k * w + w]` of `a.len() / w` chunks).
+        let ch = self.chunk_end(pk, b, y);
+        if ch.0 != VNONE {
+            let w = Inst { op: O_LSHR, ty: b.type_of(x), aux: 0, a: x, b: ch.1, c: VNONE };
+            if let Some(z) = self.pure.get(&value_hash(b, w)) {
+                if same_value(b, b.insts[(*z) as usize], w) {
+                    if let Some(r) = self.rel.get(&rel_key(ch.0, *z)) {
+                        if *r != 0 {
+                            return Some(neg as u64);
+                        }
+                    }
+                }
+            }
+        }
+        // A value at most `p` (`p - w` that does not wrap, `p >> c`, `p / c`, `p & m`) is below a `y` that `p` is
+        // below; `p - w` for a constant `w` of at least 1, below `p`, below a `y` that `p` is at most (`y` itself
+        // for `(y >> 1) - 1`).
+        let (p, strict) = self.at_most_of(pk, b, x);
+        if p != VNONE {
+            let lt = switch self.rel.get(&rel_key(p, y)) {
+                Some(r) => *r != 0,
+                None => false,
+            };
+            if lt || strict && (self.known_le(p, y) || self.at_most_of(pk, b, p).0 == y) {
+                return Some((!neg) as u64);
+            }
+        }
+        // A value at most `y - k` (itself, or an `and` with it; `k` a constant of at least 1) with `y` at least
+        // `k` is below `y` (`h & (len - 1)` where `len != 0`).
+        let mut sides: [Value; 3] = [x, VNONE, VNONE];
+        if is_op(b, x, O_AND) {
+            sides[1] = b.insts[x as usize].a;
+            sides[2] = b.insts[x as usize].b;
+        }
+        for q in 0..3usize {
+            let s = sides[q];
+            if s != VNONE && is_op(b, s, O_SUB) && b.insts[s as usize].a == y && int_bits(b, b.insts[s as usize].b).is_some() {
+                let k = int_bits(b, b.insts[s as usize].b).unwrap() & width_mask(b.type_of(y), pk.ptr_bytes);
+                let lo = self.lbound(pk, b, y, UB_DEPTH);
+                if k != 0 && lo.is_some() && lo.unwrap() >= k {
+                    return Some((!neg) as u64);
+                }
+            }
+        }
+        // `x <u (x + 1) >> 1` fails where `x + 1` does not wrap: half of `x + 1` rounded down is at most `x`.
+        if is_op(b, y, O_LSHR) && int_bits(b, b.insts[y as usize].b) == Some(1u64) && is_op(
+            b,
+            b.insts[y as usize].a,
+            O_ADD,
+        ) {
+            let s = b.insts[b.insts[y as usize].a as usize];
+            let hx = self.ubound(pk, b, x, UB_DEPTH);
+            if s.a == x && int_bits(b, s.b) == Some(1u64) && hx.is_some() && hx.unwrap() < width_mask(
+                b.type_of(x),
+                pk.ptr_bytes,
+            ) {
+                return Some(neg as u64);
+            }
+        }
+        // `zext(a - 1) <u y` where `a` is at least 1 and `zext(a) <u y` holds (`x[j - 1]` after `x[j]`).
+        if is_op(b, x, O_ZEXT) && is_op(b, b.insts[x as usize].a, O_SUB) {
+            let d = b.insts[b.insts[x as usize].a as usize];
+            let lo = self.lbound(pk, b, d.a, UB_DEPTH);
+            if int_bits(b, d.b) == Some(1u64) && lo.is_some() && lo.unwrap() >= 1 {
+                let z = Inst { op: O_ZEXT, ty: b.type_of(x), aux: 0, a: d.a, b: VNONE, c: VNONE };
+                if let Some(zv) = self.pure.get(&value_hash(b, z)) {
+                    if same_value(b, b.insts[(*zv) as usize], z) && self.below(*zv, y) {
+                        return Some((!neg) as u64);
+                    }
+                }
+            }
+        }
+        // `zext(a) <u y` where `a <u trunc(y)` holds: a truncation is at most its operand (`i < len as u32`).
+        if is_op(b, x, O_ZEXT) && (b.insts[x as usize].a & VFLAG) == 0 {
+            let a = b.insts[x as usize].a;
+            let tr = Inst { op: O_TRUNC, ty: b.type_of(a), aux: 0, a: y, b: VNONE, c: VNONE };
+            if let Some(tv) = self.pure.get(&value_hash(b, tr)) {
+                if same_value(b, b.insts[(*tv) as usize], tr) && self.below(a, *tv) {
+                    return Some((!neg) as u64);
+                }
+            }
+        }
+        // `x <u x - w` fails where `w <=u x` (`!(x <u w)`): the difference does not wrap (`s[s.len() - n..]`).
+        if is_op(b, y, O_SUB) && b.insts[y as usize].a == x {
+            let w = b.insts[y as usize].b;
+            let le = switch self.rel.get(&rel_key(x, w)) {
+                Some(r) => *r == 0,
+                None => false,
+            };
+            if le || self.below(w, x) {
+                return Some(neg as u64);
+            }
+        }
+        // `(y - 1) - p <u y` where `p <u y` holds: `p` is at most `y - 1`, so neither difference wraps (the
+        // mirror `a[n - 1 - i]` of a counter below `n / 2`, which the facts carry to `n`: `upper_parts`).
+        if is_op(b, x, O_SUB) && !is_vec(b.type_of(x)) {
+            let d = b.insts[x as usize];
+            if is_op(b, d.a, O_SUB) && b.insts[d.a as usize].a == y && int_bits(b, b.insts[d.a as usize].b) == Some(
+                1u64,
+            ) {
+                if let Some(r) = self.rel.get(&rel_key(d.b, y)) {
+                    if *r != 0 {
+                        return Some((!neg) as u64);
+                    }
+                }
+            }
+        }
+        // `a - (a >> c)` (`c` at least 1) or `a - a / k` (`k` at least 2) is at least `a >> c` or `a / k`: a
+        // value below that part is below the rest (`split_at(len / 2)`: the right half is no shorter).
+        if is_op(b, y, O_SUB) && !is_vec(b.type_of(y)) {
+            let d = b.insts[y as usize];
+            if half_of(b, d.b, d.a) {
+                if let Some(r) = self.rel.get(&rel_key(x, d.b)) {
+                    if *r != 0 {
+                        return Some((!neg) as u64);
+                    }
+                }
+            }
+        }
+        // `p + k <u y` where `p <u m`, `p` and `m` are multiples of `2^s` above `k`, and `m <=u y` (`y` itself,
+        // `y & mask`): `p` is at most `m - 2^s`, so the sum does not wrap and stays below `m` (a stride
+        // `a[i + 3]` of a loop `i += 4` while `i < len & -4`).
+        if is_op(b, x, O_ADD) && !is_vec(b.type_of(x)) {
+            let ad = b.insts[x as usize];
+            let k = int_bits(b, ad.b);
+            let w = type_bits(ad.ty, 8);
+            if k.is_some() && k.unwrap() != 0 && 64 - k.unwrap().leading_zeros() as u32 < w {
+                let s = 64 - k.unwrap().leading_zeros() as u32;
+                let p = self.val_known(ad.a);
+                if self.low_zeros(b, p, VNONE, 0, UB_DEPTH) >= s {
+                    let mut ms: [Value; 3] = [y, VNONE, VNONE];
+                    for q in 0..2usize {
+                        if let Some(f) = self.ub.get(&(ast::pick(q == 0, UP_KEY, UP2_KEY) | p as u64)) {
+                            ms[q + 1] = *f;
+                        }
+                    }
+                    for q in 0..3usize {
+                        let m = ms[q];
+                        if m == VNONE {
+                            continue;
+                        }
+                        let lt = switch self.rel.get(&rel_key(p, m)) {
+                            Some(r) => *r != 0,
+                            None => false,
+                        };
+                        let le = m == y || is_op(b, m, O_AND) && (b.insts[m as usize].a == y || b.insts[m as usize].b == y) || self.known_le(
+                            m,
+                            y,
+                        );
+                        if lt && le && self.low_zeros(b, m, VNONE, 0, UB_DEPTH) >= s {
+                            return Some((!neg) as u64);
+                        }
+                    }
+                }
+            }
+        }
+        // A value at most the largest of its parts (`max_parts`: `abs_diff`, `saturating_sub`, `midpoint`) is
+        // below a `y` every part is below.
+        let mut parts: [Value; 2] = [VNONE, VNONE];
+        let np = max_parts(b, x, &mut parts);
+        if np != 0 {
+            let mut all = true;
+            for q in 0..np as usize {
+                all = all && (switch self.rel.get(&rel_key(unsafe parts[q], y)) {
+                    Some(r) => *r != 0,
+                    None => false,
+                });
+            }
+            if all {
+                return Some((!neg) as u64);
+            }
+        }
+        // A value `w` that `x` is at most (`note_le`) below `y`: `x` is too.
+        for key in [UP_KEY, UP2_KEY] {
+            if let Some(f) = self.ub.get(&(key | x as u64)) {
+                let (pw, sw) = self.at_most_of(pk, b, *f);
+                if self.below(*f, y) || pw != VNONE && (self.below(pw, y) || sw && self.known_le(pw, y)) {
+                    return Some((!neg) as u64);
+                }
+            }
+        }
+        // An extension of `a` where `a <u n` holds is below the same extension of `n`, so below a `y` that one
+        // is at most: both extensions keep the unsigned order.
+        if is_op(b, x, O_ZEXT) || is_op(b, x, O_SEXT) {
+            let e = b.insts[x as usize];
+            for key in [UP_KEY, UP2_KEY] {
+                if let Some(f) = self.ub.get(&(key | e.a as u64)) {
+                    let n = *f;
+                    let lt = switch self.rel.get(&rel_key(e.a, n)) {
+                        Some(r) => *r != 0,
+                        None => false,
+                    };
+                    let w = Inst { op: e.op, ty: e.ty, aux: 0, a: n, b: VNONE, c: VNONE };
+                    if lt {
+                        if let Some(z) = self.pure.get(&value_hash(b, w)) {
+                            if same_value(b, b.insts[(*z) as usize], w) && self.known_le(*z, y) {
+                                return Some((!neg) as u64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // A midpoint `lo + ((hi - lo) >> c)` where `lo <u hi` holds is below `hi`, so below a `y` that `hi` is
+        // at most.
+        if is_op(b, x, O_ADD) {
+            let ad = b.insts[x as usize];
+            for side in 0..2u32 {
+                let l = ast::pick(side == 0, ad.a, ad.b);
+                let hi = mid_top(b, x, l);
+                let holds = hi != VNONE && (switch self.rel.get(&rel_key(l, hi)) {
+                    Some(r) => *r != 0,
+                    None => false,
+                });
+                if holds && self.known_le(hi, y) {
+                    return Some((!neg) as u64);
+                }
+            }
+        }
+        // `(l + h) >> k` where `l <u h` holds and the bounds keep `l + h` from wrapping is below `h`, so below a
+        // `y` that `h` is at most (a binary search's `(lo + hi) / 2`).
+        let (l0, l1) = half_sum(b, x);
+        if l0 != VNONE && b.type_of(x) != T_I128 {
+            let m = width_mask(b.type_of(x), pk.ptr_bytes);
+            let u0 = self.ubound(pk, b, l0, UB_DEPTH);
+            let u1 = self.ubound(pk, b, l1, UB_DEPTH);
+            let fits = u0.is_some() && u1.is_some() && u0.unwrap() <= m - u1.unwrap();
+            if fits && (self.below(l0, l1) && self.known_le(l1, y) || self.below(l1, l0) && self.known_le(l0, y)) {
+                return Some((!neg) as u64);
+            }
+        }
+        // A row's element `q * w + z <u y` where `z <u w`, `q <u h` and `w * h` wraps nowhere and is at most
+        // `y`: `q * w + z` is at most `(h - 1) * w + w - 1 = w * h - 1`, so neither wraps (`a[r * w + x]`).
+        if (x & (VPARAM | VFLAG)) == 0 && as_plain(b.insts[x as usize]).op == O_ADD && (b.insts[x as usize].aux & OV_SIGNED) == 0 && !is_vec(
+            b.insts[x as usize].ty,
+        ) {
+            let ad = as_plain(b.insts[x as usize]);
+            for side in 0..2u32 {
+                let (mv, z) = ast::pick(side == 0, (ad.a, ad.b), (ad.b, ad.a));
+                if (mv & (VPARAM | VFLAG)) != 0 || as_plain(b.insts[mv as usize]).op != O_MUL || (b.insts[mv as usize].aux & OV_SIGNED) != 0 {
+                    continue;
+                }
+                let mt = b.insts[mv as usize];
+                for fs in 0..2u32 {
+                    let (q, w) = ast::pick(fs == 0, (mt.a, mt.b), (mt.b, mt.a));
+                    if !self.below(z, w) {
+                        continue;
+                    }
+                    for key in [UP_KEY, UP2_KEY] {
+                        if let Some(f) = self.ub.get(&(key | q as u64)) {
+                            if self.below(q, *f) && self.product_le(pk, b, w, *f, y) {
+                                return Some((!neg) as u64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let lo = self.lbound(pk, b, y, UB_DEPTH);
+        // `p + k <u y` where `p <u w - k` holds, `w - k` does not wrap (`k <=u w`) and `w <=u y`: nor does
+        // `p + k`. `w` is `y`, or a value `y` is at most that is at most `y` (an equal one, `note_le`).
+        if is_op(b, x, O_ADD) {
+            let ad = b.insts[x as usize];
+            let k = int_bits(b, ad.b);
+            let m = width_mask(ad.ty, pk.ptr_bytes);
+            let mut ws: [Value; 3] = [y, VNONE, VNONE];
+            for q in 0..2usize {
+                if let Some(f) = self.ub.get(&(ast::pick(q == 0, UP_KEY, UP2_KEY) | y as u64)) {
+                    if self.known_le(*f, y) {
+                        ws[q + 1] = *f;
+                    }
+                }
+            }
+            for q in 0..3usize {
+                let w = ws[q];
+                if w == VNONE || k.is_none() || (k.unwrap() & m) == 0 {
+                    continue;
+                }
+                let lw = ast::pick(q == 0, lo, self.lbound(pk, b, w, UB_DEPTH));
+                if lw.is_none() || lw.unwrap() < (k.unwrap() & m) {
+                    continue;
+                }
+                let s = Inst { op: O_SUB, ty: ad.ty, aux: 0, a: w, b: ad.b, c: VNONE };
+                if let Some(z) = self.pure.get(&value_hash(b, s)) {
+                    if same_value(b, as_plain(b.insts[(*z) as usize]), s) {
+                        if let Some(r) = self.rel.get(&rel_key(ad.a, *z)) {
+                            if *r != 0 {
+                                return Some((!neg) as u64);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Bounds that keep every value of `x` below every value of `y`, or none below; `w % y` is below a `y`
+        // of at least 1.
+        if lo.is_some() && lo.unwrap() != 0 {
+            let hi = self.ubound(pk, b, x, UB_DEPTH);
+            if hi.is_some() && hi.unwrap() < lo.unwrap() || is_op(b, x, O_UREM) && b.insts[x as usize].b == y {
+                return Some((!neg) as u64);
+            }
+        }
+        let hy = self.ubound(pk, b, y, UB_DEPTH);
+        if hy.is_some() {
+            let lx = self.lbound(pk, b, x, UB_DEPTH);
+            if lx.is_some() && lx.unwrap() >= hy.unwrap() {
+                return Some(neg as u64);
+            }
+        }
+        // A signed minimum of two values at least 0 is at most each as an unsigned one: below a `y` one of them is
+        // below (`min(max(i, 0), len - 1)`).
+        let (ma, mb) = extreme_arms(b, x, false);
+        if ma != VNONE && self.srange(pk, b, ma, UB_DEPTH).unwrap_or((-1, 0)).0 >= 0 && self.srange(pk, b, mb, UB_DEPTH).unwrap_or(
+            (-1, 0),
+        ).0 >= 0 {
+            for v in [ma, mb] {
+                if self.below(v, y) || self.offset_order(pk, b, v, y) == Some(true) {
+                    return Some((!neg) as u64);
+                }
+            }
+        }
+        // A select whose every value is below `y` (`v[if c { a } else if d { b } else { e }]` after three checks).
+        if self.arms_below(pk, b, x, y, MIN_DEPTH) {
+            return Some((!neg) as u64);
+        }
+        return switch self.offset_order(pk, b, x, y) {
+            Some(lt) => Some((lt != neg) as u64),
+            None => None,
+        };
+    }
+
+    // Whether select `x` (selects of selects, `depth` deep) takes only values the order facts keep below `y`, or
+    // constants below `y`'s least value.
+    fn arms_below(self: &Self, pk: &Package, b: &Body, x: Value, y: Value, depth: u32) bool {
+        if depth == 0 || x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !is_op(b, x, O_SELECT) || is_vec(b.type_of(x)) {
+            return false;
+        }
+        let t = b.insts[x as usize];
+        let lo = self.lbound(pk, b, y, UB_DEPTH);
+        for side in 0..2u32 {
+            let a = ast::pick(side == 0, t.b, t.c);
+            let k = int_bits(b, a);
+            let ok = self.below(a, y) || k.is_some() && lo.is_some() && (k.unwrap() & width_mask(
+                b.type_of(a),
+                pk.ptr_bytes,
+            )) < lo.unwrap() || self.arms_below(pk, b, a, y, depth - 1);
+            if !ok {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether `x <u y` holds (true) or fails (false) by offsets that do not wrap (`offset_form`): `x` as
+    // `xa + dx` and `y` as `ya + dy`, each base at most a value of its own at an offset (`uppers`). `x <u y`
+    // holds where an upper value `u + d` of `xa` has `u` equal to `ya` (`d + dx < dy`), below it (`d + dx <= dy`)
+    // or at most it (`d + dx < dy`); it fails where an upper value of `ya` meets `xa` the same way (`y <= x`).
+    // None when neither (`s[i - 32..i]` under `i <= len`, `a[i + 32]` under `i <= len - 128`).
+    fn offset_order(self: &Self, pk: &Package, b: &Body, x: Value, y: Value) Option<bool> {
+        let ty = b.type_of(x);
+        if !is_int(ty) || ty == T_I128 || is_vec(ty) || (x & VFLAG) != 0 || (y & VFLAG) != 0 {
+            return None;
+        }
+        let (xa, dx) = self.offset_form(pk, b, x);
+        let (ya, dy) = self.offset_form(pk, b, y);
+        let mut ux: [(Value, i64); 3] = [(VNONE, 0); 3];
+        let mut uy: [(Value, i64); 3] = [(VNONE, 0); 3];
+        let nx = self.uppers(pk, b, xa, &mut ux);
+        let ny = self.uppers(pk, b, ya, &mut uy);
+        for side in 0..2u32 {
+            // Side 0: `x <= u + d + dx` against `ya + dy`; side 1: `y <= u + d + dy` against `xa + dx`.
+            let (us, n, lo, dl, dh) = ast::pick(side == 0, (ux, nx, ya, dy, dx), (uy, ny, xa, dx, dy));
+            for q in 0..n {
+                let (u, d) = us[q];
+                let s: i128 = d + dh;
+                let (eq, lt, le) = (u == lo, u != lo && self.below(u, lo), u != lo && self.known_le(u, lo));
+                // `x <u y` needs `x <= y - 1`; `y <= x` needs `y <= x`.
+                let gap = ast::pick(side == 0, 1i128, 0i128);
+                if (eq || le) && s + gap <= dl || lt && s + gap <= dl + 1 {
+                    return Some(side == 0);
+                }
+            }
+        }
         return None;
+    }
+
+    // Integer `v` as `a + d` (`d` a constant within 2^62 either way) where the sum or difference does not wrap:
+    // `a - k` where `a` is at least `k` or the result at most the greatest value less `k`; `a + k` where `a`'s
+    // room (`room`) is at least `k` or the result at least `k`. `(v, 0)` else.
+    fn offset_form(self: &Self, pk: &Package, b: &Body, v: Value) (Value, i64) {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || is_vec(b.type_of(v)) || b.type_of(v) == T_I128 {
+            return (v, 0);
+        }
+        let t = b.insts[v as usize];
+        let unsigned = (t.aux & OV_SIGNED) == 0;
+        let sub = t.op == O_SUB || t.op == O_SUBO && unsigned;
+        if !sub && t.op != O_ADD && !(t.op == O_ADDO && unsigned) || (t.a & VFLAG) != 0 || int_bits(b, t.a).is_some() {
+            return (v, 0);
+        }
+        let kb = int_bits(b, t.b);
+        if kb.is_none() {
+            return (v, 0);
+        }
+        let m = width_mask(t.ty, pk.ptr_bytes);
+        let mut k = kb.unwrap() & m;
+        let mut down = sub;
+        // `a + k` for a `k` past half the type is `a - (2^w - k)`.
+        if k > m >> 1 {
+            k = m - k + 1;
+            down = !down;
+        }
+        if k == 0 || k > 1u64 << 62 {
+            return (v, 0);
+        }
+        let exact = if down {
+            let lo = self.lbound(pk, b, t.a, UB_DEPTH);
+            let hi = self.ubound(pk, b, v, UB_DEPTH);
+            lo.is_some() && lo.unwrap() >= k || hi.is_some() && hi.unwrap() <= m - k
+        } else {
+            let lo = self.lbound(pk, b, v, UB_DEPTH);
+            self.room(pk, b, t.a, ROOM_DEPTH) >= k || lo.is_some() && lo.unwrap() >= k
+        };
+        return ast::pick(exact, (t.a, ast::pick(down, -(k as i64), k as i64)), (v, 0i64));
+    }
+
+    // The values `(u, d)` with `a <=u u + d` here, `u + d` not wrapping, into `out`: `(a, 0)`, and for each value
+    // `f` the facts keep `a` at most (`note_le`) its offset form (`offset_form`), less 1 where `a <u f`. Their
+    // count.
+    fn uppers(self: &Self, pk: &Package, b: &Body, a: Value, out: &mut [(Value, i64); 3]) usize {
+        out[0] = (a, 0);
+        let mut n: usize = 1;
+        if a == VNONE || (a & VFLAG) != 0 {
+            return n;
+        }
+        for key in [UP_KEY, UP2_KEY] {
+            if let Some(f) = self.ub.get(&(key | a as u64)) {
+                if *f == a || (*f & VFLAG) != 0 || b.type_of(*f) != b.type_of(a) {
+                    continue;
+                }
+                let (u, d) = self.offset_form(pk, b, *f);
+                out[n] = (u, d - self.below(a, *f) as i64);
+                n += 1;
+            }
+        }
+        return n;
+    }
+
+    // The least distance from integer `v` up to its type's greatest value here, `depth` steps deep (0 when none
+    // is known): its bound's (`ubound`); that of a value the facts keep `v` at most (`note_le`), one more where
+    // `v` is below it; `k` more than `a`'s for `v` a difference `a - k` that does not wrap.
+    fn room(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) u64 {
+        if v == VNONE || (v & VFLAG) != 0 || !is_int(b.type_of(v)) || is_vec(b.type_of(v)) || b.type_of(v) == T_I128 {
+            return 0;
+        }
+        let m = width_mask(b.type_of(v), pk.ptr_bytes);
+        let mut best: u64 = 0;
+        if let Some(u) = self.ubound(pk, b, v, UB_DEPTH) {
+            best = m - u.min(m);
+        }
+        if depth == 0 {
+            return best;
+        }
+        for key in [UP_KEY, UP2_KEY] {
+            if let Some(f) = self.ub.get(&(key | v as u64)) {
+                if *f != v && (*f & VFLAG) == 0 && b.type_of(*f) == b.type_of(v) {
+                    let r = self.room(pk, b, *f, depth - 1).saturating_add(self.below(v, *f) as u64).min(m);
+                    best = best.max(r);
+                }
+            }
+        }
+        if (v & VPARAM) == 0 && is_op(b, v, O_SUB) {
+            let t = b.insts[v as usize];
+            let k = int_bits(b, t.b);
+            if k.is_some() && (k.unwrap() & m) <= m >> 1 && (t.a & VFLAG) == 0 {
+                let lo = self.lbound(pk, b, t.a, UB_DEPTH);
+                if lo.is_some() && lo.unwrap() >= (k.unwrap() & m) {
+                    best = best.max(self.room(pk, b, t.a, depth - 1).saturating_add(k.unwrap() & m).min(m));
+                }
+            }
+        }
+        return best;
     }
 
     // The parameters of block `k`, whose one predecessor (its dominator, which the walk visited) has
@@ -6085,7 +8482,13 @@ extend Opt {
         return any;
     }
 
+    // Each parameter of block `k` that every edge in passes one value (`prepl`), the edges of its
+    // predecessors at the walk's start. A block a rewrite of this walk gave an edge from another block
+    // (`common_true`'s merged branch, JOIN_BAD) has an edge that list misses: none.
     fn same_args(self: &mut Self, b: &Body, k: u32) bool {
+        if self.jat[k as usize] == JOIN_BAD {
+            return false;
+        }
         let bk = b.blocks[k as usize];
         let mut any = false;
         for q in 0..bk.param_len as u32 {
@@ -7072,7 +9475,7 @@ extend Opt {
         let s = b.insts[v as usize];
         let mut c = switch self.cond.get(&(s.a as u64)) {
             Some(x) => Option::<u64>::Some(*x),
-            None => self.order_decided(b, s.a),
+            None => self.order_decided(pk, b, s.a),
         };
         if c.is_none() && is_op(b, s.a, O_ICMP) {
             let e = b.insts[s.a as usize];
@@ -7312,6 +9715,23 @@ extend Opt {
         return r | v & VFLAG;
     }
 
+    // The integer constant of type `ty` and bits `v` (truncated to it) the dominating blocks hold or the walk
+    // made (`constant`); NONE when none: a fact needs no new instruction, which only a changed body places.
+    fn known_const(self: &Self, b: &Body, ty: u8, v: u64) Value {
+        let t = iconst(ty, v);
+        let h = hash(t);
+        for m in 0..2u32 {
+            let found = switch ast::pick(m == 0, &self.pure, &self.made).get(&h) {
+                Some(x) => *x,
+                None => NONE,
+            };
+            if found != NONE && same(b.insts[found as usize], t) {
+                return found;
+            }
+        }
+        return NONE;
+    }
+
     // An integer constant of type `ty` and bits `v` (truncated to it): one the dominating blocks hold, else
     // a new one at the start of the entry block.
     fn constant(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
@@ -7371,6 +9791,41 @@ extend Opt {
         }
         self.enter(LOG_PURE, h, i);
         return false;
+    }
+
+    // Unsigned checked sum or product `i` of block `k` that the bounds in scope keep below the type's
+    // greatest value (`ubound`, or a sum with a constant the other operand's `room` holds): a plain one, its
+    // flag 0, numbered as one. Whether it is.
+    fn checked_range(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        if (t.aux & OV_SIGNED) != 0 || is_vec(t.ty) || t.ty == T_I128 || int_bits(b, t.a).is_some() && int_bits(b, t.b).is_some() {
+            return false;
+        }
+        let m = width_mask(t.ty, pk.ptr_bytes);
+        let x = self.ubound(pk, b, t.a, UB_DEPTH);
+        let y = self.ubound(pk, b, t.b, UB_DEPTH);
+        if x.is_none() || y.is_none() || if t.op == O_ADDO {
+            x.unwrap() > m - y.unwrap()
+        } else {
+            y.unwrap() != 0 && x.unwrap() > m / y.unwrap()
+        } {
+            // A constant added within the other operand's room (`room`: `i + 32` where `i <= len - 128`).
+            let (v, k) = ast::pick(int_bits(b, t.b).is_some(), (t.a, int_bits(b, t.b)), (t.b, int_bits(b, t.a)));
+            if t.op != O_ADDO || k.is_none() || self.room(pk, b, v, ROOM_DEPTH) < (k.unwrap() & m) {
+                return false;
+            }
+        }
+        b.insts[i as usize] = Inst {
+            op: ast::pick(t.op == O_ADDO, O_ADD, O_MUL),
+            ty: t.ty,
+            aux: 0,
+            a: t.a,
+            b: t.b,
+            c: VNONE,
+        };
+        self.frepl[i as usize] = self.constant(b, T_I8, 0);
+        let _ = self.number(pk, b, k, i);
+        return true;
     }
 
     // Checked operation `i` of constants, or of an identity (`x + 0`, `x - 0`, `x * 1`, `x * 0`): its value
@@ -7468,7 +9923,7 @@ extend Opt {
                 if let Some(x) = self.cond.get(&(t.a as u64)) {
                     c = Some(*x);
                 } else {
-                    c = self.order_decided(b, t.a);
+                    c = self.order_decided(pk, b, t.a);
                 }
             }
             if t.op == O_BR && c.is_some() {
@@ -7519,6 +9974,7 @@ extend Opt {
             if t.op == O_BR {
                 self.step_next(b, k, t);
             }
+            self.join_out(pk, b, k, t0, t);
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
@@ -7701,7 +10157,7 @@ extend Opt {
             // Keyed by the destination and both states after the copy; not in `recent`, whose places
             // `carry` keeps across writes that do not touch them, as a source's write would.
             self.enter(LOG_MEM, place_hash(t.a, self.pstate, T_NONE, self.tstate[0]), self.places.len() as u32);
-            self.places.push(Place { addr: t.a, off: self.pstate, ty: T_NONE, state: self.tstate[0], val: i });
+            self.places.push(Place { addr: t.a, off: self.pstate, ty: T_NONE, state: self.tstate[0], val: i, mem: 0 });
         }
         if t.op == O_CALL || t.op == O_CALLIND {
             t = self.copied_args(pk, b, i);
@@ -7752,7 +10208,7 @@ extend Opt {
                 return true;
             }
             // A load of the place the store wrote, in the state the store starts, reads the stored value.
-            self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state);
+            self.remember(t.a, t.c, b.type_of(t.b), t.b, self.state, self.member(i));
         } else if t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 {
             let mut p = self.private_load(pk, b, k, i, t);
             // A load of a copy's bytes whose source no write touches reads the source.
@@ -7779,10 +10235,11 @@ extend Opt {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
-            // A load of bytes no write touches (a private slot's, a read-only referent's: `frozen`) reads one
-            // value in every memory state.
+            // A load of bytes no write touches (a private slot's, a read-only referent's: `frozen`, a view
+            // parameter's own words: `view_word`) reads one value in every memory state.
+            let word = view_word(b, t);
             let st = ast::pick(
-                p == PRIV_KEPT || i as usize < self.acls.len() && self.acls[i as usize] == CL_FROZEN,
+                p == PRIV_KEPT || word || i as usize < self.acls.len() && self.acls[i as usize] == CL_FROZEN,
                 KEPT_STATE,
                 self.state,
             );
@@ -7800,10 +10257,10 @@ extend Opt {
                 let _ = self.number(pk, b, k, i);
                 return true;
             }
-            self.remember(t.a, t.c, t.ty, i, st);
+            self.remember(t.a, t.c, t.ty, i, st, self.member(i));
             // A load that may fault leaves only the loop whose every entry runs it.
             let safe = self.safe_load(pk, b, t);
-            if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT, !safe) {
+            if (safe || self.runs_first(b, k, i)) && self.hoist(pk, b, k, i, true, p == PRIV_KEPT || word, !safe) {
                 // Out of a header into its preheader, which always enters it, the load keeps its guard.
                 if self.inner[k as usize] != k || self.preh[k as usize] != self.blk_of[i as usize] {
                     b.insts[i as usize] = unguarded(b.insts[i as usize]);
@@ -7813,6 +10270,8 @@ extend Opt {
             if safe && self.sink_load(pk, b, k, i, t) {
                 return true;
             }
+        } else if (t.op == O_ADDO || t.op == O_MULO) && self.checked_range(pk, b, k, i) {
+            return true;
         } else if (t.op == O_ADDO || t.op == O_SUBO || t.op == O_MULO) && (self.fold_checked(pk, b, i) || self.checked_plain(
             b,
             i,
@@ -8043,8 +10502,8 @@ extend Opt {
         b.insts[i as usize] = Inst { op: O_ADD, ty: t.ty, aux: 0, a: x.a, b: kv, c: VNONE };
     }
 
-    // Address `i` of block `k`, `ptradd p, (x + y) * s + c` in a loop that defines `x` but neither `p` nor
-    // `y`: in place `ptradd q, x * s + c`, `q = ptradd p, y * s` made in the loop's preheader. The same
+    // Address `i` of block `k`, `ptradd p, (x + y) * s + c` (or `x - y`) in a loop that defines `x` but
+    // neither `p` nor `y`: in place `ptradd q, x * s + c`, `q = ptradd p, y * s` made in the loop's preheader. The same
     // address (both wrap alike); the loop's access steps through `x` alone, the shape the loop vectorizer
     // reads (a row's elements `m[r * w + x]`).
     fn split_base(self: &mut Self, b: &mut Body, k: u32, i: u32) {
@@ -8057,6 +10516,22 @@ extend Opt {
             return;
         }
         let s = b.insts[t.b as usize];
+        if s.op == O_SUB && !self.outside(s.a, h) && self.outside(s.b, h) && int_bits(b, s.b).is_none() {
+            // `x - y`: `q = ptradd p, (0 - y) * s`, the same address modulo the pointer's width.
+            let p = self.preh[h as usize];
+            let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
+            let zero = self.constant(b, s.ty, 0);
+            let ny = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: zero, b: s.b, c: VNONE }, false);
+            let q = self.placed(
+                b,
+                p,
+                at,
+                Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux & PTR_SCALE, a: t.a, b: ny, c: 0 },
+                false,
+            );
+            b.insts[i as usize] = Inst { op: O_PTRADD, ty: T_PTR, aux: t.aux & ~PTR_INBOUNDS, a: q, b: s.a, c: t.c };
+            return;
+        }
         if s.op != O_ADD {
             return;
         }
@@ -8558,21 +11033,34 @@ extend Opt {
         let min = below == (t.op == O_AND);
         let signed = pc >= C_SLT && pc <= C_SGE;
         let ty = b.type_of(pa);
-        let lt = self.before(
-            b,
-            k,
-            i,
-            Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(signed, C_SLT, C_ULT), a: pa, b: qa, c: VNONE },
-        );
-        let m = self.before(
-            b,
-            k,
-            i,
-            Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: ast::pick(min, pa, qa), c: ast::pick(min, qa, pa) },
-        );
+        let c = Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(signed, C_SLT, C_ULT), a: pa, b: qa, c: VNONE };
+        let h = self.inner[k as usize];
+        // Of two bounds from before the loop: in its preheader, where versioning reads a bound from before
+        // the loop (`lir::loops`' `checks`).
+        let m = if h != NONE && self.preh[h as usize] != NONE && self.outside(pa, h) && self.outside(qa, h) {
+            let pb = self.preh[h as usize];
+            let at = b.blocks[pb as usize].start + b.blocks[pb as usize].len - 1;
+            let lt = self.placed(b, pb, at, c, false);
+            self.placed(
+                b,
+                pb,
+                at,
+                Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: ast::pick(min, pa, qa), c: ast::pick(min, qa, pa) },
+                false,
+            )
+        } else {
+            let lt = self.before(b, k, i, c);
+            let m = self.before(
+                b,
+                k,
+                i,
+                Inst { op: O_SELECT, ty: ty, aux: 0, a: lt, b: ast::pick(min, pa, qa), c: ast::pick(min, qa, pa) },
+            );
+            // The minimum or maximum, made before `i`, leaves its loop in one more walk.
+            self.refold = true;
+            m
+        };
         b.insts[i as usize] = Inst { op: O_ICMP, ty: t.ty, aux: pc, a: x, b: m, c: VNONE };
-        // The minimum or maximum, made before `i`, leaves its loop in one more walk.
-        self.refold = true;
         return true;
     }
 
@@ -11122,26 +13610,28 @@ extend Opt {
         return VNONE;
     }
 
-    fn remember(self: &mut Self, addr: u32, off: u32, ty: u8, v: Value, state: u32) {
+    fn remember(self: &mut Self, addr: u32, off: u32, ty: u8, v: Value, state: u32, mem: u64) {
         if self.recent.len() == RECENT_MAX {
             let _ = self.recent.remove(0);
         }
         self.recent.push(self.places.len() as u32);
         self.enter(LOG_MEM, place_hash(addr, off, ty, state), self.places.len() as u32);
-        self.places.push(Place { addr: addr, off: off, ty: ty, state: state, val: v });
+        self.places.push(Place { addr: addr, off: off, ty: ty, state: state, val: v, mem: mem });
     }
 
     // Write `i`, which started memory state `states` for the type tags whose state `before` held
     // otherwise: each place of `recent` known in such a state that the write cannot touch holds its value
     // in the new state too. A write cannot touch a place of an alias class it writes none of (`write_bits`,
-    // a scope's class aside), nor a store bytes of its own address apart from its own, nor a call bytes
-    // its arguments reach none of (`call_apart`). A place moves only along the states a load of it reads:
-    // the untagged accesses' and its type's tag's; another tag's state may be its number by chance and then
-    // miss the writes of the place's own tag. A store of part of an integer constant's place that no write
-    // followed keeps the rest (`constant_rest`).
+    // a scope's class aside; a write of a scope's class within its copy, only a place an access of that
+    // copy made: outside the copy the root may reach any byte), nor a store bytes of its own address apart
+    // from its own, nor a call bytes its arguments reach none of (`call_apart`). A place moves only along
+    // the states a load of it reads: the untagged accesses' and its type's tag's; another tag's state may be
+    // its number by chance and then miss the writes of the place's own tag. A store of part of an integer
+    // constant's place that no write followed keeps the rest (`constant_rest`).
     fn carry(self: &mut Self, pk: &Package, b: &mut Body, i: u32) {
         let t = b.insts[i as usize];
         let wb = self.write_bits(pk, b, i);
+        let inside = wb & self.sbits & self.member(i);
         let n = self.recent.len();
         // Each entry is checked once; the carried ones join `recent` after the old ones.
         for r in 0..n {
@@ -11157,7 +13647,7 @@ extend Opt {
                 continue;
             }
             let c = self.class(p.addr);
-            let other_class = c < CL_MANY && (class_bit(c) & self.sbits) == 0 && (wb & class_bit(c)) == 0;
+            let other_class = c < CL_MANY && (class_bit(c) & self.sbits) == 0 && (wb & class_bit(c)) == 0 && (inside & ~p.mem) == 0;
             let lo = (p.off as i32) as i64;
             let tlo = (t.c as i32) as i64;
             let other_bytes = t.op == O_STORE && t.a == p.addr && (tlo >= lo + type_bytes(p.ty, pk.ptr_bytes) as i64 || lo >= tlo + type_bytes(
@@ -11175,7 +13665,7 @@ extend Opt {
                 hi,
             ));
             if (other_class || other_bytes || apart) && self.recall(p.addr, p.off, p.ty, to) == VNONE {
-                self.remember(p.addr, p.off, p.ty, p.val, to);
+                self.remember(p.addr, p.off, p.ty, p.val, to, p.mem);
             } else if t.op == O_STORE && t.a == p.addr && !other_bytes && self.tbefore[0] == p.state {
                 let tn = type_bytes(b.type_of(t.b), pk.ptr_bytes) as i64;
                 self.constant_rest(b, p, lo, tlo.max(lo).min(hi));
@@ -11202,7 +13692,7 @@ extend Opt {
         for g in tags {
             let st = unsafe self.tstate[g];
             if self.recall(p.addr, off, ty, st) == VNONE {
-                self.remember(p.addr, off, ty, v, st);
+                self.remember(p.addr, off, ty, v, st, p.mem);
             }
         }
     }
@@ -11508,12 +13998,14 @@ extend Opt {
         return false;
     }
 
-    // Header `h`'s exit test `q + c <u n`, before a body of other blocks, of a counter `q` that starts at a
-    // constant and steps by a constant `d`, `c` a nonzero constant whose sum with the start does not wrap, `n`
-    // from outside the loop, at most `max - d + 1` (any `n` for a step by 1; else a bound the branches in
-    // scope set, `ubound`): `q <u n - min(n, c)`, the difference made in the preheader. Each sum the test
-    // reads is below `n + d`, so none wraps and both tests agree; the header then only tests its counter, a
-    // counted loop (LLVM's IndVarSimplify). Whether it did.
+    // Header `h`'s exit test `q + c <u n`, true on the edge into a body of other blocks, of a counter `q` that
+    // starts at a constant and steps by a constant `d`, `c` a nonzero constant whose sum with the start does
+    // not wrap, `n` from outside the loop, at most `max - d + 1` (any `n` for a step by 1; else a bound the
+    // branches in scope set, `ubound`): `q <u n - min(n, c)`, the difference made in the preheader. Each sum
+    // the test reads is below `n + d`, so none wraps and both tests agree; the header then only tests its
+    // counter, a counted loop (LLVM's IndVarSimplify). A test `q + c <=u n` likewise, `n` at most `max - d`:
+    // `q <u (n >=u c ? n - (c - 1) : 0)`. The sum may be a checked one's (`addo`, unsigned): it wraps
+    // nowhere, so its flag is 0 and it is a plain sum. Whether it did.
     fn offset_test(self: &mut Self, pk: &Package, b: &mut Body, h: u32) bool {
         let p = self.preh[h as usize];
         let th = term(b, h);
@@ -11522,13 +14014,23 @@ extend Opt {
         ) == h {
             return false;
         }
+        // The test holds on the edge into the body: where it fails the loop leaves, so each counter value
+        // passed the test before its step.
+        if !self.in_loop(h, b.edge_target(th.b)) || self.in_loop(h, b.edge_target(th.c)) {
+            return false;
+        }
         let c = b.insts[th.a as usize];
-        if c.op != O_ICMP || c.aux != C_ULT || (c.a & (VPARAM | VFLAG)) != 0 || c.a == VNONE || !self.outside(c.b, h) {
+        let ule = c.aux == C_ULE;
+        if c.op != O_ICMP || c.aux != C_ULT && !ule || (c.a & (VPARAM | VFLAG)) != 0 || c.a == VNONE || !self.outside(
+            c.b,
+            h,
+        ) {
             return false;
         }
         let s = b.insts[c.a as usize];
         let hb = b.blocks[h as usize];
-        if s.op != O_ADD || !is_int(s.ty) || s.ty == T_I128 || (s.a & VPARAM) == 0 || s.a == VNONE || (s.a & ~VPARAM) < hb.param_start || (s.a & ~VPARAM) >= hb.param_start + hb.param_len as u32 {
+        let checked = s.op == O_ADDO && (s.aux & OV_SIGNED) == 0;
+        if s.op != O_ADD && !checked || !is_int(s.ty) || s.ty == T_I128 || (s.a & VPARAM) == 0 || s.a == VNONE || (s.a & ~VPARAM) < hb.param_start || (s.a & ~VPARAM) >= hb.param_start + hb.param_len as u32 {
             return false;
         }
         let off = int_bits(b, s.b);
@@ -11581,16 +14083,26 @@ extend Opt {
             }
         }
         let n = self.val(c.b);
-        if d != 1 && (d == 0 || self.ubound(pk, b, n, UB_DEPTH).unwrap_or(top) > top - d + 1) {
+        let slack = ast::pick(ule, 0u64, 1u64);
+        if d == 0 || (d != 1 || ule) && self.ubound(pk, b, n, UB_DEPTH).unwrap_or(top) > top - d + slack {
             return false;
         }
-        let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
-        let kv = self.constant(b, s.ty, kc);
-        let zv = self.constant(b, s.ty, 0);
-        let ge = self.placed(b, p, at, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: n, b: kv, c: VNONE }, false);
-        let dv = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: n, b: kv, c: VNONE }, false);
-        let n2 = self.placed(b, p, at, Inst { op: O_SELECT, ty: s.ty, aux: 0, a: ge, b: dv, c: zv }, false);
+        let n2 = if ule && kc == 1 {
+            n
+        } else {
+            let at = b.blocks[p as usize].start + b.blocks[p as usize].len - 1;
+            let kv = self.constant(b, s.ty, kc);
+            let zv = self.constant(b, s.ty, 0);
+            let ge = self.placed(b, p, at, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: n, b: kv, c: VNONE }, false);
+            let kd = ast::pick(ule, self.constant(b, s.ty, kc - 1), kv);
+            let dv = self.placed(b, p, at, Inst { op: O_SUB, ty: s.ty, aux: 0, a: n, b: kd, c: VNONE }, false);
+            self.placed(b, p, at, Inst { op: O_SELECT, ty: s.ty, aux: 0, a: ge, b: dv, c: zv }, false)
+        };
         b.insts[th.a as usize] = Inst { op: O_ICMP, ty: c.ty, aux: C_ULT, a: s.a, b: n2, c: VNONE };
+        if checked {
+            b.insts[c.a as usize] = Inst { op: O_ADD, ty: s.ty, aux: 0, a: s.a, b: s.b, c: VNONE };
+            self.frepl[c.a as usize] = self.constant(b, T_I8, 0);
+        }
         return true;
     }
 
@@ -12620,6 +15132,7 @@ extend Run {
                     peel: 0,
                     partial: 0,
                     version: 0,
+                    version_checks: u32::MAX,
                     unswitch: 0,
                     rotate: 0,
                     vector: 0,
@@ -14648,6 +17161,19 @@ const fn umin_of(b: &Body, v: Value, w: Value) bool {
     return c.op == O_ICMP && (c.aux == C_ULT || c.aux == C_ULE) && c.a == s.b && c.b == s.c && (w == s.b || w == s.c);
 }
 
+// The largest length load `t` of `b` (pointers `ptr` bytes) reads when it reads a view parameter's length
+// (`REF_INNER`, its element's bytes in REF_BYTES): no object is larger than `isize::MAX` bytes. None else.
+const fn view_len_max(b: &Body, t: Inst, ptr: u32) Option<u64> {
+    if t.op != O_LOAD || t.c != ptr || !is_int(t.ty) || type_bytes(t.ty, ptr) != ptr || (t.aux & MEM_VOLATILE) != 0 {
+        return None;
+    }
+    let q = entry_param(b, t.a);
+    if q == NONE || q as usize >= b.refs.len() || (b.refs[q as usize] & REF_INNER) == 0 || (b.refs[q as usize] & REF_BYTES) == 0 {
+        return None;
+    }
+    return Some((mask_of(type_bits(t.ty, ptr)) >> 1) / (b.refs[q as usize] & REF_BYTES) as u64);
+}
+
 // The largest unsigned value integer `v` of `b` (pointers `ptr` bytes) can hold, from its form up to `depth`
 // instructions deep: a constant, a mask, a zero extension, a select, a bit count, a quotient or a remainder,
 // a right shift, a view parameter's length; else its type's largest.
@@ -14692,13 +17218,8 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
             x
         };
     }
-    if t.op == O_LOAD && t.c == ptr && is_int(t.ty) && type_bytes(t.ty, ptr) == ptr && (t.aux & MEM_VOLATILE) == 0 {
-        // A view parameter's length (`REF_INNER`, its element's bytes in REF_BYTES): no object is larger than
-        // `isize::MAX` bytes.
-        let q = entry_param(b, t.a);
-        if q != NONE && q as usize < b.refs.len() && (b.refs[q as usize] & REF_INNER) != 0 && (b.refs[q as usize] & REF_BYTES) != 0 {
-            return (all >> 1) / (b.refs[q as usize] & REF_BYTES) as u64;
-        }
+    if let Some(n) = view_len_max(b, t, ptr) {
+        return n;
     }
     if t.op == O_UREM {
         // Below the divisor, which is not 0 when the remainder is computed.
@@ -15351,6 +17872,11 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[i as usize] = g.unwrap();
             return VNONE;
         }
+        let h = self_bound(b, t);
+        if h.is_some() {
+            b.insts[i as usize] = h.unwrap();
+            return VNONE;
+        }
     }
     if is_int(t.ty) && t.ty != T_PTR && (t.op == O_TRUNC || t.op == O_LSHR || t.op == O_SHL || t.op == O_AND || t.op == O_OR) {
         let r = demanded_fold(b, i, ptr);
@@ -15848,7 +18374,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
 }
 
 // The operand a sum or difference `t` leaves when one of its terms cancels: `(x + y) - x` is `y`,
-// `(x - y) + y` is `x`; VNONE when none does.
+// `(x - y) + y` is `x`, also of the wrapped value of a checked sum or difference; VNONE when none does.
 fn cancel(b: &Body, t: Inst) Value {
     let a = if (t.a & (VPARAM | VFLAG)) == 0 {
         b.insts[t.a as usize]
@@ -15860,7 +18386,8 @@ fn cancel(b: &Body, t: Inst) Value {
     } else {
         Inst { op: 0, ty: 0, aux: 0, a: VNONE, b: VNONE, c: VNONE }
     };
-    if t.op == O_SUB && a.op == O_ADD {
+    let (aa, as_) = (a.op == O_ADD || a.op == O_ADDO, a.op == O_SUB || a.op == O_SUBO);
+    if t.op == O_SUB && aa {
         if same_term(b, a.a, t.b) {
             return a.b;
         }
@@ -15868,10 +18395,133 @@ fn cancel(b: &Body, t: Inst) Value {
             return a.a;
         }
     }
-    if t.op == O_ADD && a.op == O_SUB && same_term(b, a.b, t.b) {
+    if t.op == O_ADD && as_ && same_term(b, a.b, t.b) {
         return a.a;
     }
-    return ast::pick(t.op == O_ADD && c.op == O_SUB && same_term(b, c.b, t.a), c.a, VNONE);
+    return ast::pick(t.op == O_ADD && (c.op == O_SUB || c.op == O_SUBO) && same_term(b, c.b, t.a), c.a, VNONE);
+}
+
+// Whether `h` is at most half of `a`: `a >> c` for a constant `c` from 1 below the width, or `a / k` for
+// a constant `k` of at least 2. Then `a - h` does not wrap and is at least `h`.
+fn half_of(b: &Body, h: Value, a: Value) bool {
+    if !is_op(b, h, O_LSHR) && !is_op(b, h, O_UDIV) {
+        return false;
+    }
+    let t = b.insts[h as usize];
+    let k = int_bits(b, t.b);
+    let w = type_bits(t.ty, 8) as u64;
+    return t.a == a && k.is_some() && !is_vec(t.ty) && (t.op == O_LSHR && k.unwrap() != 0 && k.unwrap() < w || t.op == O_UDIV && k.unwrap() >= 2);
+}
+
+// The values `x` is at most the largest of, by its form, in `out` (their count; 0: none known): a select
+// whose arms are each 0, a value, or a difference `p - q` the arm's condition keeps from wrapping (`q <=u
+// p`, so at most `p`: `abs_diff`, `saturating_sub`); a midpoint `(a & b) + ((a ^ b) >> 1)`, at most the
+// larger of `a` and `b` (`midpoint`).
+fn max_parts(b: &Body, x: Value, out: &mut [Value; 2]) u32 {
+    if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || is_vec(b.type_of(x)) {
+        return 0;
+    }
+    let t = b.insts[x as usize];
+    if t.op == O_ADD && is_op(b, t.a, O_AND) && is_op(b, t.b, O_LSHR) && int_bits(b, b.insts[t.b as usize].b) == Some(
+        1u64,
+    ) {
+        let n = b.insts[t.a as usize];
+        let s = b.insts[t.b as usize].a;
+        if !is_op(b, s, O_XOR) {
+            return 0;
+        }
+        let xo = b.insts[s as usize];
+        if xo.a == n.a && xo.b == n.b || xo.a == n.b && xo.b == n.a {
+            out[0] = n.a;
+            out[1] = n.b;
+            return 2;
+        }
+        return 0;
+    }
+    if t.op != O_SELECT {
+        return 0;
+    }
+    let mut k: u32 = 0;
+    for side in 0..2u32 {
+        let v = ast::pick(side == 0, t.b, t.c);
+        if int_bits(b, v) == Some(0u64) {
+            continue; // 0 is at most any part
+        }
+        unsafe out[k as usize] = arm_top(b, t.a, v, side == 0);
+        k += 1;
+    }
+    return k;
+}
+
+// The value select arm `v` is at most where condition `c` is `holds`: a difference `p - q` the condition
+// keeps from wrapping (`q <=u p`): `p`; any other value: itself.
+fn arm_top(b: &Body, c: Value, v: Value, holds: bool) Value {
+    if !is_op(b, v, O_SUB) {
+        return v;
+    }
+    let d = b.insts[v as usize];
+    let (lo, hi, neg) = Opt::as_ult(b, c);
+    if lo == VNONE {
+        return v;
+    }
+    // `lo <u hi` holds on this arm, or `hi <=u lo` does.
+    let lt = holds != neg;
+    if lt && d.a == hi && d.b == lo || !lt && d.a == lo && d.b == hi {
+        return d.a;
+    }
+    return v;
+}
+
+// `hi` when `a` is a midpoint `lo + ((hi - lo) >> c)` (`c` a constant from 1 below the width, or a quotient
+// by a constant of at least 2), which is below `hi` wherever `lo <u hi` holds: `hi - lo` does not wrap and
+// its part less than itself added to `lo` stays below `hi`; VNONE else.
+fn mid_top(b: &Body, a: Value, lo: Value) Value {
+    if !is_op(b, a, O_ADD) || is_vec(b.insts[a as usize].ty) {
+        return VNONE;
+    }
+    let t = b.insts[a as usize];
+    let s = ast::pick(t.a == lo, t.b, ast::pick(t.b == lo, t.a, VNONE));
+    if s == VNONE || !is_op(b, s, O_LSHR) && !is_op(b, s, O_UDIV) {
+        return VNONE;
+    }
+    let st = b.insts[s as usize];
+    let k = int_bits(b, st.b);
+    let w = type_bits(st.ty, 8) as u64;
+    if k.is_none() || st.op == O_LSHR && (k.unwrap() == 0 || k.unwrap() >= w) || st.op == O_UDIV && k.unwrap() < 2 || !is_op(
+        b,
+        st.a,
+        O_SUB,
+    ) {
+        return VNONE;
+    }
+    let d = b.insts[st.a as usize];
+    return ast::pick(d.b == lo, d.a, VNONE);
+}
+
+// `(x, y)` when `a` is `(x + y) >> k` (`k` from 1) or `(x + y) / k` (`k` from 2), a midpoint where the
+// sum does not wrap; `(VNONE, VNONE)` else.
+fn half_sum(b: &Body, a: Value) (Value, Value) {
+    let none = (VNONE, VNONE);
+    if !is_op(b, a, O_LSHR) && !is_op(b, a, O_UDIV) || is_vec(b.insts[a as usize].ty) {
+        return none;
+    }
+    let st = b.insts[a as usize];
+    let k = int_bits(b, st.b);
+    let w = type_bits(st.ty, 8) as u64;
+    if k.is_none() || st.op == O_LSHR && (k.unwrap() == 0 || k.unwrap() >= w) || st.op == O_UDIV && k.unwrap() < 2 || !is_op(
+        b,
+        st.a,
+        O_ADD,
+    ) {
+        return none;
+    }
+    let d = b.insts[st.a as usize];
+    return (d.a, d.b);
+}
+
+// Whether `a` is a midpoint of `lo` and `hi` (`mid_top`).
+fn midpoint(b: &Body, a: Value, lo: Value, hi: Value) bool {
+    return hi != VNONE && mid_top(b, a, lo) == hi;
 }
 
 // Whether terms `x` and `y` of one sum are one value: the same, or equal constants not yet numbered one.
@@ -16130,6 +18780,51 @@ fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
         if outcomes(codes[q]) == holds {
             return Some(Inst { op: O_ICMP, ty: t.ty, aux: codes[q], a: x, b: y, c: VNONE });
         }
+    }
+    return None;
+}
+
+// `at_most` follows at most AM_DEPTH operations.
+const AM_DEPTH: u32 = 4;
+
+// Whether integer value `v` of `b` is at most `x` (unsigned) by its form alone: `x` itself, or a right
+// shift, a quotient, a remainder of such a value, an `and` with one, a minimum with one operand such a
+// value (a select of the lesser of two values), a select of two such values, `depth` operations deep.
+fn at_most(b: &Body, v: Value, x: Value, depth: u32) bool {
+    if v == x {
+        return true;
+    }
+    if depth == 0 || v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_LSHR || t.op == O_UDIV || t.op == O_UREM {
+        return at_most(b, t.a, x, depth - 1);
+    }
+    if t.op == O_AND {
+        return at_most(b, t.a, x, depth - 1) || at_most(b, t.b, x, depth - 1);
+    }
+    if t.op != O_SELECT {
+        return false;
+    }
+    let (u, w, neg) = Opt::as_ult(b, t.a);
+    if u == t.b && w == t.c && !neg || u == t.c && w == t.b && neg {
+        return at_most(b, t.b, x, depth - 1) || at_most(b, t.c, x, depth - 1);
+    }
+    return at_most(b, t.b, x, depth - 1) && at_most(b, t.c, x, depth - 1);
+}
+
+// Unsigned comparison `t` of a value with one its form keeps at most it (`at_most`): `x >> 1 >u x` and
+// `x <u x / d` are false, `x & m <=u x` and `x >=u x % m` hold. None when the forms do not decide it.
+fn self_bound(b: &Body, t: Inst) Option<Inst> {
+    if t.aux < C_ULT || t.aux > C_UGE || is_vec(b.type_of(t.a)) {
+        return None;
+    }
+    if at_most(b, t.a, t.b, AM_DEPTH) && (t.aux == C_ULE || t.aux == C_UGT) {
+        return Some(iconst(t.ty, (t.aux == C_ULE) as u64));
+    }
+    if at_most(b, t.b, t.a, AM_DEPTH) && (t.aux == C_UGE || t.aux == C_ULT) {
+        return Some(iconst(t.ty, (t.aux == C_UGE) as u64));
     }
     return None;
 }
@@ -16772,6 +19467,15 @@ const fn inner(b: &Body, k: u32) bool {
     return k < b.refs.len() as u32 && (b.refs[k as usize] & REF_INNER) != 0;
 }
 
+// Whether load `t` reads a view parameter's own words (its element pointer or length) through the
+// parameter: the body does not rebind the view (`REF_INNER`, `Lower::view_ref`), and no other pointer
+// reaches the parameter's bytes, so they hold one value for the whole call. Checked at the load's
+// visit, where its address is current: an inlined copy's accesses reach the parameter only once the
+// walk forwarded the copy's entry parameters, after `frozen` ran.
+const fn view_word(b: &Body, t: Inst) bool {
+    return t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && inner(b, entry_param(b, t.a));
+}
+
 // Whether value `v` of `b` is never null: a reference parameter (`ref_param`), the address a reference
 // takes (`PTR_NONNULL`) or a slot's, as a pointer or an integer as wide (`ptrtoint`, `inttoptr`), through at
 // most NONNULL_STEPS conversions.
@@ -16958,6 +19662,69 @@ fn result_addr(b: &Body, t: Inst, hops: &Vector<u32>, v: Value) bool {
 // Whether `t` and `u` are the same instruction.
 const fn same(t: Inst, u: Inst) bool {
     return t.op == u.op && t.ty == u.ty && t.aux == u.aux && t.a == u.a && t.b == u.b && t.c == u.c;
+}
+
+// `v` within `[lo, hi]`.
+fn clamp_i64(v: i128, lo: i64, hi: i64) i64 {
+    if v < lo {
+        return lo;
+    }
+    return ast::pick(v > hi, hi, v as i64);
+}
+
+// The signed bound a `SLO_KEY` or `SHI_KEY` entry `f` gives for a value of `w` bits: its constant plus its offset.
+fn signed_bound(b: &Body, f: u32, w: u32) i128 {
+    return sign_extend(int_bits(b, f >> 2).unwrap(), w) as i128 + (f & 3) - 1;
+}
+
+// The two values `s` is the signed maximum (`max`) or minimum of, as a select (a bound on `s` from above, or
+// below, bounds both); `(VNONE, VNONE)` else.
+fn extreme_arms(b: &Body, s: Value, max: bool) (Value, Value) {
+    if (s & (VPARAM | VFLAG)) != 0 || s == VNONE || !is_op(b, s, O_SELECT) || is_vec(b.insts[s as usize].ty) {
+        return (VNONE, VNONE);
+    }
+    let t = b.insts[s as usize];
+    let (x, y, neg) = Opt::as_slt(b, t.a);
+    // The select takes `x` when `x <s y` (`neg`: when it fails), so its true arm is the smaller.
+    let small_first = t.b == x && t.c == y && !neg || t.b == y && t.c == x && neg;
+    let large_first = t.b == y && t.c == x && !neg || t.b == x && t.c == y && neg;
+    return if x != VNONE && ast::pick(max, large_first, small_first) {
+        (x, y)
+    } else {
+        (VNONE, VNONE)
+    };
+}
+
+// The constant step `k` (within 2^32 either way) of `a` as `p + k` or `p - (-k)`, as a signed value of the
+// type; 0 for none.
+fn step_of(b: &Body, a: Value, p: Value) i64 {
+    if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || is_vec(b.insts[a as usize].ty) || b.insts[a as usize].ty == T_I128 {
+        return 0;
+    }
+    let t = b.insts[a as usize];
+    if t.a != p || t.op != O_ADD && t.op != O_SUB {
+        return 0;
+    }
+    let k = int_bits(b, t.b);
+    if k.is_none() {
+        return 0;
+    }
+    let s = sign_extend(k.unwrap(), type_bits(t.ty, 8));
+    if s > 1i64 << 32 || s < -(1i64 << 32) {
+        return 0;
+    }
+    return ast::pick(t.op == O_ADD, s, -s);
+}
+
+// Whether `a` is `p - 1` (or `p + ~0`).
+fn minus_one(b: &Body, a: Value, p: Value) bool {
+    if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].a != p || is_vec(b.insts[a as usize].ty) || b.insts[a as usize].ty == T_I128 {
+        return false;
+    }
+    let t = b.insts[a as usize];
+    let k = int_bits(b, t.b);
+    let m = mask_of(type_bits(t.ty, 8));
+    return k.is_some() && (t.op == O_SUB && (k.unwrap() & m) == 1 || t.op == O_ADD && (k.unwrap() & m) == m);
 }
 
 // The hash of pure instruction `t` of `b`, a wide constant's by its words.
@@ -17163,11 +19930,6 @@ fn bit_reverse(pk: &Package, b: &mut Body, i: u32) bool {
     }
     b.insts[i as usize] = Inst { op: O_BITREV, ty: t.ty, aux: 0, a: x, b: VNONE, c: VNONE };
     return true;
-}
-
-// Whether value `v` of `b` is an instruction of operation `op`.
-fn is_op(b: &Body, v: Value, op: u8) bool {
-    return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == op;
 }
 
 // The plain operation whose value checked operation `t` (`addo`, `subo`, `mulo`) gives; else `t`.
@@ -18349,8 +21111,11 @@ fn same_call(b: &Body, x: Inst, y: Inst) bool {
     return true;
 }
 
+// The operation's word is mixed before the first operand joins it: else two instructions whose words and
+// first operands differ in the same bits (`shl` and `lshr` of two parameters one apart, by one constant)
+// hash alike, and in the value numbering the newer shadows the older.
 const fn hash(t: Inst) u64 {
-    return mix(mix(mix(t.op as u64 | t.ty as u64 << 8 | t.aux as u64 << 16, t.a), t.b), t.c);
+    return mix(mix(mix(mix(t.op as u64 | t.ty as u64 << 8 | t.aux as u64 << 16, 0), t.a), t.b), t.c);
 }
 
 const fn place_hash(addr: u32, off: u32, ty: u8, state: u32) u64 {

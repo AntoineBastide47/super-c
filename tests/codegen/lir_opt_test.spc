@@ -34,6 +34,7 @@ fn optimized_with(text: str, fm: u8, fma: bool, vector: u32) (Package, Package) 
             peel: 0,
             partial: 0,
             version: 0,
+            version_checks: u32::MAX,
             unswitch: 0,
             rotate: 0,
             vector: vector,
@@ -105,6 +106,7 @@ fn optimized_copy(text: str, copy: u32, ret: u32) (Package, Package) {
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -249,6 +251,158 @@ fn a_constant_every_call_passes_makes_a_copy_without_it() {
     assert(s.ok() && c.contains("sig (i32) -> i32"), "the recursion's copy takes the count alone");
 }
 
+// A `mut` by-value `[]mut T` parameter the body writes only through its elements (a store, a `&mut` of
+// one) keeps its header as it came in (`inner noalias`), so the stores leave its length known; one the
+// body assigns, or a closure of the body captures, does not.
+const MUT_VIEW: str = M"(@noinline
+fn hdr_elems(mut a: []mut i64) i64 {
+    a[6] = 1;
+    let r = &mut a[2];
+    *r = 4;
+    a[5] = 1;
+    return 13;
+}
+@noinline
+fn hdr_rebound(mut a: []mut i64, n: usize) i64 {
+    a = a.index_range_mut(0..n);
+    a[0] = 1;
+    return 1;
+}
+@noinline
+fn hdr_captured<'a>(mut a: []'a mut i64, short: []'a mut i64) i64 {
+    a[3] = 1;
+    let mut f = || {
+        a = short;
+    };
+    f();
+    a[0] = 1;
+    return 1;
+}
+fn main(argv: Vector<str>) i32 {
+    let mut v = Vector::<i64>::new();
+    let mut w = Vector::<i64>::new();
+    for k in 0..8 {
+        v.push(k as i64);
+        w.push(k as i64);
+    }
+    let n = hdr_elems(v.as_mut_slice()) + hdr_rebound(v.as_mut_slice(), argv.len());
+    return (n + hdr_captured(v.as_mut_slice(), w.as_mut_slice())) as i32 - 15;
+}
+)";
+
+@test
+fn a_mut_view_parameter_the_body_does_not_rebind_keeps_its_header() {
+    let p = cli::proj_new();
+    p.mkfile("main.spc", MUT_VIEW);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "hdr_", "build -O2 main.spc -o app");
+    let t = r.text();
+    let ok = r.ok() && printed(t, "hdr_elems").contains("ref p0 8 inner noalias") && !printed(t, "hdr_rebound").contains(
+        "ref p0 8 inner",
+    ) && !printed(t, "hdr_captured").contains("ref p0 8 inner");
+    if !ok {
+        r.show();
+    }
+    assert(ok, "the element-only `mut` view keeps its header; the reassigned and the captured ones do not");
+}
+
+const VERSION_LEVELS: str = M"(@noinline
+fn ver_one(a: []i32, n: usize) i32 {
+    let mut s: i32 = 0;
+    for i in 0..n {
+        s = s.wrapping_mul(31).wrapping_add(a[i]);
+    }
+    return s;
+}
+
+@noinline
+fn ver_sum(a: []i32, n: usize) i32 {
+    let mut s: i32 = 0;
+    for i in 0..n {
+        s = s.wrapping_add(a[i]);
+    }
+    return s;
+}
+
+@noinline
+fn ver_two(a: []i32, b: []i32, n: usize) i32 {
+    let mut s: i32 = 0;
+    for i in 0..n {
+        s = s.wrapping_mul(31).wrapping_add(a[i]).wrapping_add(b[i]);
+    }
+    return s;
+}
+
+fn main() i32 {
+    let mut v = Vector::<i32>::new();
+    for k in 0..40usize {
+        v.push(k as i32);
+    }
+    println("{} {} {}", ver_one(&v, 40), ver_sum(&v, 40), ver_two(&v, &v, 30));
+    return 0;
+}
+)";
+
+// Whether body text `t` has a bounds check (`icmp.uge`) in a block that is neither cold nor unlikely: one
+// each iteration runs, not one only a versioned loop's checked copy or its last step runs.
+fn hot_check(t: str) bool {
+    let mut rest = t;
+    let mut cold = false;
+    // Each step reads one line.
+    while rest.len() != 0 {
+        let n = rest.find("\n");
+        let end = if n < 0 {
+            rest.len()
+        } else {
+            n as usize
+        };
+        let line = rest.slice(0, end);
+        if line.starts_with("b") {
+            cold = line.contains("unlikely") || line.contains("cold");
+        } else if !cold && line.contains("icmp.uge") {
+            return true;
+        }
+        rest = rest.slice(
+            if n < 0 {
+                end
+            } else {
+                end + 1
+            },
+            rest.len(),
+        );
+    }
+    return false;
+}
+
+// `-O2` versions a loop with one bounds check and keeps the checks of a loop with two (`version_checks`
+// 1); `-O3` versions both: no check runs each iteration. The sums are recurrences, which no vectoriser
+// takes with their checks before versioning does. A plain sum versions before it vectorizes: its vector
+// loop compares no lane's index with the length.
+@test
+fn o2_versions_loops_with_one_check() {
+    let levels: [str; 2] = ["-O2", "-O3"];
+    for k in 0..2usize {
+        // A fresh project each time: the first build's cache would replay the unit, whose bodies then
+        // print nothing.
+        let p = cli::proj_new();
+        p.mkfile("main.spc", VERSION_LEVELS);
+        let r = cli::superc_env_in(
+            p.dir(),
+            "SC_LIR_PRINT",
+            "ver_",
+            format("build {} main.spc -o app", levels[k]).as_str(),
+        );
+        let one = hot_check(printed(r.text(), "ver_one"));
+        let two = hot_check(printed(r.text(), "ver_two"));
+        let sum = printed(r.text(), "ver_sum");
+        let clean = !hot_check(sum) && sum.contains("load.v") && !sum.contains("vcmp.uge");
+        let ok = r.ok() && !one && two == (k == 0) && clean;
+        if !ok {
+            r.show();
+        }
+        assert(ok, levels[k]);
+    }
+}
+
 // A copy loop goes, a `memcpy` in its place, whatever the numbers of its instructions: `mem_run` reads the
 // other instructions' operands and the edges' arguments, not their other fields (with 4, 6 or 8 stores before
 // it, an edge's or a constant's field equals the load's number). `@run` copies 5 bytes after `@c4`'s stores.
@@ -356,7 +510,17 @@ data @pad size 32 align 3 bytes 000000000000000000000000000000000000000000000000
 )",
         0,
         false,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 512,
+        },
     );
     for name in ["c4", "c6", "c8"] {
         let c = text_of(&a, name);
@@ -1046,7 +1210,17 @@ b1(v35: i128, v36: i64):
         0,
         false,
         il::SPEED,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
         true,
         false,
     );
@@ -1212,6 +1386,7 @@ data @kept_ptr size 8 align 3
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -1368,6 +1543,7 @@ b4:
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -2754,6 +2930,7 @@ b0(v0: i32):
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -2977,7 +3154,17 @@ b4(v9: i64):
 )",
         0,
         false,
-        lu::Budgets { peel: 0, partial: 16, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 16,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
     );
     let cases: [[u64; 3]; 5] = [[100, 49, 7], [100, 50, 100], [10, 81, 9], [5, 81, 5], [0, 0, 0]];
     for k in 0..5 {
@@ -3043,6 +3230,7 @@ b0(v0: i64):
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -5295,6 +5483,1369 @@ b3(v5: i64):
     same_result(&b, &a, "arm", lesser, 0);
 }
 
+// Function `name` of `before` and of `after` on arguments `args` both panic.
+fn same_panic(before: &Package, after: &Package, name: str, args: []u64) {
+    let mut e = leval::Eval::new(before);
+    let o = e.run(before.find_symbol(name), args);
+    let mut e2 = leval::Eval::new(after);
+    let o2 = e2.run(after.find_symbol(name), args);
+    assert(o.kind != leval::EV_OK, name);
+    assert_eq(o2.kind, o.kind);
+    assert(o.msg.as_str() == o2.msg.as_str(), o2.msg.as_str());
+}
+
+// An order fact `x <u y` holds for each value `y` is at most: `n` of a saturating `n - 1` (`sat`), the
+// length a dominating branch keeps `n` at most (`guarded`), a length equal to the bound (`eqlen`); `w % n`
+// is below an `n` of at least 1 (`rem`), and a value below another's lower bound is below it (`low`, and
+// `eqk`, a length equal to a constant bounded from both sides). Not
+// `n` of an `n - 2` below `n`'s lower bound (`wraps`), nor of a select of `n - 2` on `n >=u 1` (`unsat`),
+// nor a shift whose bound reaches the lower bound (`high`): each of those checks fails and panics.
+@test
+fn order_facts_follow_the_values_a_bound_is_at_most() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sat fn global
+sym @unsat fn global
+sym @wraps fn global
+sym @guarded fn global
+sym @eqlen fn global
+sym @rem fn global
+sym @low fn global
+sym @high fn global
+sym @eqk fn global
+fn @eqk
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 256
+  v4 = iconst.i64 255
+  v5 = icmp.ne v0, v3
+  br v5, b3, b1
+b1:
+  v6 = and.i64 v1, v4
+  v7 = icmp.ult v6, v0
+  br v7, b2, b4
+b2:
+  ret v6
+b3:
+  ret v2
+b4: cold
+  panic "index out of bounds"
+fn @sat
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = icmp.uge v0, v2
+  v4 = sub.i64 v0, v2
+  v5 = select.i64 v3, v4, v1
+  jmp b1(v1, v1)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b2, b4
+b2:
+  v9 = icmp.ult v6, v0
+  br v9, b3, b5
+b3:
+  v10 = add.i64 v7, v6
+  v11 = add.i64 v6, v2
+  jmp b1(v11, v10)
+b4:
+  ret v7
+b5: cold
+  panic "index out of bounds"
+fn @unsat
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = icmp.uge v0, v2
+  v5 = sub.i64 v0, v3
+  v6 = select.i64 v4, v5, v1
+  jmp b1(v1, v1)
+b1(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v6
+  br v9, b2, b4
+b2:
+  v10 = icmp.ult v7, v0
+  br v10, b3, b5
+b3:
+  v11 = add.i64 v8, v7
+  v12 = add.i64 v7, v2
+  jmp b1(v12, v11)
+b4:
+  ret v8
+b5: cold
+  panic "index out of bounds"
+fn @wraps
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = icmp.eq v0, v1
+  br v4, b5, b1
+b1:
+  v5 = sub.i64 v0, v3
+  jmp b2(v1, v1)
+b2(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b3, b7
+b3:
+  v9 = icmp.ult v6, v0
+  br v9, b4, b6
+b4:
+  v10 = add.i64 v7, v6
+  v11 = add.i64 v6, v2
+  jmp b2(v11, v10)
+b5:
+  ret v1
+b6: cold
+  panic "index out of bounds"
+b7:
+  ret v7
+fn @guarded
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ugt v0, v1
+  br v4, b6, b1
+b1:
+  jmp b2(v2, v2)
+b2(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b3, b5
+b3:
+  v8 = icmp.ult v5, v1
+  br v8, b4, b7
+b4:
+  v9 = add.i64 v6, v5
+  v10 = add.i64 v5, v3
+  jmp b2(v10, v9)
+b5:
+  ret v6
+b6:
+  ret v2
+b7: cold
+  panic "index out of bounds"
+fn @eqlen
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ne v0, v1
+  br v4, b6, b1
+b1:
+  jmp b2(v2, v2)
+b2(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b3, b5
+b3:
+  v8 = icmp.uge v5, v1
+  br v8, b7, b4
+b4:
+  v9 = add.i64 v6, v5
+  v10 = add.i64 v5, v3
+  jmp b2(v10, v9)
+b5:
+  ret v6
+b6:
+  ret v2
+b7: cold
+  panic "index out of bounds"
+fn @rem
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v1, v2
+  br v3, b3, b1
+b1:
+  v4 = urem.i64 v0, v1
+  v5 = icmp.ult v4, v1
+  br v5, b2, b4
+b2:
+  ret v4
+b3:
+  ret v2
+b4: cold
+  panic "index out of bounds"
+fn @low
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 200
+  v4 = iconst.i64 57
+  v5 = icmp.ult v0, v3
+  br v5, b3, b1
+b1:
+  v6 = lshr.i64 v1, v4
+  v7 = icmp.ult v6, v0
+  br v7, b2, b4
+b2:
+  ret v6
+b3:
+  ret v2
+b4: cold
+  panic "index out of bounds"
+fn @high
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 200
+  v4 = iconst.i64 56
+  v5 = icmp.ult v0, v3
+  br v5, b3, b1
+b1:
+  v6 = lshr.i64 v1, v4
+  v7 = icmp.ult v6, v0
+  br v7, b2, b4
+b2:
+  ret v6
+b3:
+  ret v2
+b4: cold
+  panic "index out of bounds"
+)",
+    );
+    for name in ["sat", "guarded", "eqlen", "rem", "low", "eqk"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("panic"), t.as_str());
+    }
+    for name in ["unsat", "wraps", "high"] {
+        let t = text_of(&a, name);
+        assert(t.contains("panic"), t.as_str());
+    }
+    let five: []u64 = [5];
+    same_result(&b, &a, "sat", five, 6);
+    let zero: []u64 = [0];
+    same_result(&b, &a, "sat", zero, 0);
+    same_result(&b, &a, "unsat", five, 3);
+    let one: []u64 = [1];
+    same_panic(&b, &a, "unsat", one);
+    same_result(&b, &a, "wraps", five, 3);
+    same_panic(&b, &a, "wraps", one);
+    let fits: []u64 = [4, 10];
+    same_result(&b, &a, "guarded", fits, 6);
+    let over: []u64 = [10, 4];
+    same_result(&b, &a, "guarded", over, 0);
+    let equal: []u64 = [4, 4];
+    same_result(&b, &a, "eqlen", equal, 6);
+    let unequal: []u64 = [4, 5];
+    same_result(&b, &a, "eqlen", unequal, 0);
+    let r: []u64 = [17, 5];
+    same_result(&b, &a, "rem", r, 2);
+    let big: []u64 = [200, 0xFFFFFFFFFFFFFFFF];
+    same_result(&b, &a, "low", big, 127);
+    same_panic(&b, &a, "high", big);
+    let small: []u64 = [199, 0xFFFFFFFFFFFFFFFF];
+    same_result(&b, &a, "high", small, 0);
+    let k: []u64 = [256, 0x1234];
+    same_result(&b, &a, "eqk", k, 0x34);
+}
+
+// A binary search's midpoint `lo + ((hi - lo) >> 1)` is below `hi` where `lo <u hi` holds, and `hi`,
+// whose back edges pass itself or the midpoint, stays at most its start, the length: the check of the
+// midpoint goes (`param_bounds`, `mid_top`). Under `lo <=u hi` the midpoint may be `hi`: the check stays
+// and fails for a key past every element.
+@test
+fn a_binary_search_midpoint_stays_below_the_length() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @bs fn global
+sym @incl fn global
+fn @bs
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2, v0)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v5
+  br v6, b2, b4
+b2:
+  v7 = sub.i64 v5, v4
+  v8 = lshr.i64 v7, v3
+  v9 = add.i64 v4, v8
+  v10 = icmp.ult v9, v0
+  br v10, b3, b5
+b3:
+  v11 = icmp.ult v9, v1
+  v12 = add.i64 v9, v3
+  v13 = select.i64 v11, v12, v4
+  v14 = select.i64 v11, v5, v9
+  jmp b1(v13, v14)
+b4:
+  ret v4
+b5: cold
+  panic "index out of bounds"
+fn @incl
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2, v0)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ule v4, v5
+  br v6, b2, b4
+b2:
+  v7 = sub.i64 v5, v4
+  v8 = lshr.i64 v7, v3
+  v9 = add.i64 v4, v8
+  v10 = icmp.ult v9, v0
+  br v10, b3, b5
+b3:
+  v11 = icmp.ult v9, v1
+  v12 = add.i64 v9, v3
+  v13 = select.i64 v11, v12, v4
+  v14 = select.i64 v11, v5, v9
+  jmp b1(v13, v14)
+b4:
+  ret v4
+b5: cold
+  panic "index out of bounds"
+)",
+    );
+    let t = text_of(&a, "bs");
+    assert(!t.contains("panic"), t.as_str());
+    let i = text_of(&a, "incl");
+    assert(i.contains("panic"), i.as_str());
+    for n in [0u64, 1, 2, 7, 100] {
+        for key in [0u64, 3, 1000] {
+            let x: [u64; 2] = [n, key];
+            same_result(&b, &a, "bs", x[0..2], key.min(n));
+        }
+    }
+    let past: []u64 = [7, 1000];
+    same_panic(&b, &a, "incl", past);
+}
+
+// A signed counter from 0 by steps of 1 under `i <s n` stays at least 0 (`param_bounds`), so `i <s n` is
+// `i <u n`, and its sign extension stays below the extension of `n`, which a branch keeps at most the
+// length: the check of `sext(i) <u len` goes. From -1 the extension of the first `i` is huge: it stays.
+@test
+fn a_signed_counter_from_zero_indexes_below_the_length() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @up fn global
+sym @neg fn global
+fn @up
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = iconst.i64 0
+  v5 = icmp.slt v0, v2
+  br v5, b6, b1
+b1:
+  v6 = sext.i64 v0
+  v7 = icmp.ugt v6, v1
+  br v7, b6, b2(v2, v4)
+b2(v8: i32, v9: i64):
+  v10 = icmp.slt v8, v0
+  br v10, b3, b5
+b3:
+  v11 = sext.i64 v8
+  v12 = icmp.ult v11, v1
+  br v12, b4, b7
+b4:
+  v13 = add.i64 v9, v11
+  v14 = add.i32 v8, v3
+  jmp b2(v14, v13)
+b5:
+  ret v9
+b6:
+  ret v4
+b7: cold
+  panic "index out of bounds"
+fn @neg
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i32 -1
+  v3 = iconst.i32 1
+  v4 = iconst.i64 0
+  v5 = icmp.slt v0, v2
+  br v5, b6, b1
+b1:
+  v6 = sext.i64 v0
+  v7 = icmp.ugt v6, v1
+  br v7, b6, b2(v2, v4)
+b2(v8: i32, v9: i64):
+  v10 = icmp.slt v8, v0
+  br v10, b3, b5
+b3:
+  v11 = sext.i64 v8
+  v12 = icmp.ult v11, v1
+  br v12, b4, b7
+b4:
+  v13 = add.i64 v9, v11
+  v14 = add.i32 v8, v3
+  jmp b2(v14, v13)
+b5:
+  ret v9
+b6:
+  ret v4
+b7: cold
+  panic "index out of bounds"
+)",
+    );
+    let t = text_of(&a, "up");
+    assert(!t.contains("panic"), t.as_str());
+    let n = text_of(&a, "neg");
+    assert(n.contains("panic"), n.as_str());
+    let five: []u64 = [5, 10];
+    same_result(&b, &a, "up", five, 10);
+    let all: []u64 = [10, 10];
+    same_result(&b, &a, "up", all, 45);
+    let over: []u64 = [11, 10];
+    same_result(&b, &a, "up", over, 0);
+    let negative: []u64 = [0xFFFFFFFF, 10];
+    same_result(&b, &a, "up", negative, 0);
+    same_panic(&b, &a, "neg", five);
+}
+
+// A binary search's `(lo + hi) >> 1` under `lo <u hi` with `hi` from a length at most half the type's range
+// stays at most `hi` (`param_bounds`) and below it (`half_sum`): its check goes. From a length of any
+// value the sum may wrap and the check stays.
+@test
+fn a_midpoint_of_a_sum_that_cannot_wrap_stays_below_the_length() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @half fn global
+sym @any fn global
+fn @half
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = lshr.i64 v0, v2
+  v4 = iconst.i64 0
+  jmp b1(v4, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v6
+  br v7, b2, b6
+b2:
+  v8 = add.i64 v5, v6
+  v9 = lshr.i64 v8, v2
+  v10 = icmp.ult v9, v3
+  br v10, b3, b5
+b3:
+  v11 = icmp.ult v9, v1
+  br v11, b4, b1(v5, v9)
+b4:
+  v12 = add.i64 v9, v2
+  jmp b1(v12, v6)
+b5: cold
+  panic "index out of bounds"
+b6:
+  ret v5
+fn @any
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = sub.i64 v0, v2
+  v4 = iconst.i64 0
+  jmp b1(v4, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v6
+  br v7, b2, b6
+b2:
+  v8 = add.i64 v5, v6
+  v9 = lshr.i64 v8, v2
+  v10 = icmp.ult v9, v3
+  br v10, b3, b5
+b3:
+  v11 = icmp.ult v9, v1
+  br v11, b4, b1(v5, v9)
+b4:
+  v12 = add.i64 v9, v2
+  jmp b1(v12, v6)
+b5: cold
+  panic "index out of bounds"
+b6:
+  ret v5
+)",
+    );
+    let t = text_of(&a, "half");
+    assert(!t.contains("panic"), t.as_str());
+    let n = text_of(&a, "any");
+    assert(n.contains("panic"), n.as_str());
+    // (2 * len, key): the first index from 0 whose value is not below the key, each index its value.
+    let mid: []u64 = [20, 7];
+    same_result(&b, &a, "half", mid, 7);
+    let past: []u64 = [20, 30];
+    same_result(&b, &a, "half", past, 10);
+    let wide: []u64 = [0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFF0];
+    same_result(&b, &a, "half", wide, 0x7FFF_FFFF_FFFF_FFFF);
+    let some: []u64 = [21, 7];
+    same_result(&b, &a, "any", some, 7);
+}
+
+// `y | 1` is at least 1 (`lbound`), so its test against 0 before a division folds; `y & 1` may be 0 and
+// keeps its test.
+@test
+fn a_value_or_a_nonzero_constant_is_no_zero_divisor() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @set fn global
+sym @mask fn global
+fn @set
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = or.i64 v1, v2
+  v5 = icmp.eq v4, v3
+  br v5, b1, b2
+b1: cold
+  panic "attempt to divide by zero"
+b2:
+  v6 = udiv.i64 v0, v4
+  ret v6
+fn @mask
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = and.i64 v1, v2
+  v5 = icmp.eq v4, v3
+  br v5, b1, b2
+b1: cold
+  panic "attempt to divide by zero"
+b2:
+  v6 = udiv.i64 v0, v4
+  ret v6
+)",
+    );
+    let t = text_of(&a, "set");
+    assert(!t.contains("panic"), t.as_str());
+    let m = text_of(&a, "mask");
+    assert(m.contains("panic"), m.as_str());
+    let even: []u64 = [12, 4];
+    same_result(&b, &a, "set", even, 2);
+    same_panic(&b, &a, "mask", even);
+    let odd: []u64 = [12, 3];
+    same_result(&b, &a, "mask", odd, 12);
+}
+
+// A header parameter whose every edge in passes a value the edge's test, or on a back edge the header's
+// test, keeps below `len`, or a parameter the first is below (`i = j` after `j <u len`), stays below `len`
+// (`edge_bound`), also through parameters of blocks with one edge in the walk has not forwarded yet (a
+// rotated loop's first test and latch, `edge_value`): its check goes. The
+// check of a sum the test does not bound (`j + k`, the test on `j`) stays, and so does one of a start of 5
+// that a test of another value (`k <u len`) does not bound, and one that a second back edge passes past
+// `len`.
+@test
+fn a_parameter_every_edge_keeps_below_a_bound_stays_below_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @trail fn global
+sym @header fn global
+sym @lead fn global
+sym @five fn global
+sym @jump fn global
+sym @peeled fn global
+fn @trail
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ult v1, v0
+  br v3, b1(v2, v1, v2), b4(v2)
+b1(v4: i64, v5: i64, v6: i64):
+  v7 = icmp.uge v4, v0
+  br v7, b3, b2
+b2:
+  v8 = add.i64 v6, v4
+  v9 = add.i64 v5, v1
+  v10 = icmp.ult v9, v0
+  br v10, b1(v5, v9, v8), b4(v8)
+b3: cold
+  panic "index out of bounds"
+b4(v11: i64):
+  ret v11
+fn @header
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ult v1, v0
+  br v3, b1(v2, v1, v2), b4(v2)
+b1(v4: i64, v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b4(v6)
+b2:
+  v8 = icmp.uge v4, v0
+  br v8, b3, b5
+b3: cold
+  panic "index out of bounds"
+b4(v9: i64):
+  ret v9
+b5:
+  v10 = add.i64 v6, v4
+  v11 = add.i64 v5, v1
+  jmp b1(v5, v11, v10)
+fn @lead
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ult v1, v0
+  br v3, b1(v2, v1, v2), b4(v2)
+b1(v4: i64, v5: i64, v6: i64):
+  v7 = add.i64 v5, v1
+  v8 = icmp.uge v7, v0
+  br v8, b3, b2
+b2:
+  v9 = add.i64 v6, v4
+  v10 = icmp.ult v5, v0
+  br v10, b1(v5, v7, v9), b4(v9)
+b3: cold
+  panic "index out of bounds"
+b4(v11: i64):
+  ret v11
+fn @five
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 5
+  v3 = icmp.ult v1, v0
+  br v3, b1(v2, v2), b4(v2)
+b1(v4: i64, v5: i64):
+  v6 = icmp.uge v4, v0
+  br v6, b3, b2
+b2:
+  v7 = add.i64 v5, v4
+  v8 = add.i64 v4, v1
+  v9 = icmp.ult v8, v0
+  br v9, b1(v8, v7), b4(v7)
+b3: cold
+  panic "index out of bounds"
+b4(v10: i64):
+  ret v10
+fn @jump
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 4
+  v4 = iconst.i64 100
+  v5 = icmp.ult v1, v0
+  br v5, b1(v2, v1, v2), b5(v2)
+b1(v6: i64, v7: i64, v8: i64):
+  v9 = icmp.ult v7, v0
+  br v9, b2, b5(v8)
+b2:
+  v10 = icmp.uge v6, v0
+  br v10, b3, b4
+b3: cold
+  panic "index out of bounds"
+b4:
+  v11 = add.i64 v8, v6
+  v12 = add.i64 v7, v1
+  v13 = icmp.ult v11, v3
+  br v13, b1(v7, v12, v11), b6
+b5(v14: i64):
+  ret v14
+b6:
+  v15 = add.i64 v7, v4
+  jmp b1(v15, v12, v11)
+fn @peeled
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  jmp b1(v2, v2)
+b1(v3: i64, v4: i64):
+  v5 = add.i64 v3, v1
+  v6 = icmp.ult v5, v0
+  br v6, b2(v3, v5, v4), b6(v4)
+b2(v7: i64, v8: i64, v9: i64):
+  v10 = icmp.uge v7, v0
+  br v10, b5, b3
+b3:
+  v11 = add.i64 v9, v7
+  jmp b4(v8, v11)
+b4(v12: i64, v13: i64):
+  v14 = add.i64 v12, v1
+  v15 = icmp.ult v14, v0
+  br v15, b2(v12, v14, v13), b6(v13)
+b5: cold
+  panic "index out of bounds"
+b6(v16: i64):
+  ret v16
+)",
+    );
+    for f in ["trail", "header", "peeled"] {
+        let t = text_of(&a, f);
+        assert(!t.contains("panic"), t.as_str());
+    }
+    for f in ["lead", "five", "jump"] {
+        let t = text_of(&a, f);
+        assert(t.contains("panic"), t.as_str());
+    }
+    // (len, step): the indexes 0, 3, 6.
+    let three: []u64 = [9, 3];
+    same_result(&b, &a, "trail", three, 3);
+    let none: []u64 = [3, 3];
+    same_result(&b, &a, "trail", none, 0);
+    same_result(&b, &a, "header", three, 3);
+    same_result(&b, &a, "header", none, 0);
+    same_result(&b, &a, "peeled", three, 3);
+    same_result(&b, &a, "peeled", none, 0);
+    same_panic(&b, &a, "lead", three);
+    let one: []u64 = [9, 1];
+    same_result(&b, &a, "five", one, 31);
+    let short: []u64 = [3, 1];
+    same_panic(&b, &a, "five", short);
+    same_result(&b, &a, "jump", three, 3);
+    let far: []u64 = [20, 5];
+    same_panic(&b, &a, "jump", far);
+}
+
+// A counter down by 1 under `0 <u i`, or whose every value in is nonzero (`i != 0` on each edge in), stays
+// at most its start and at least 1 (`param_bounds`): `i - 1` is below a start `len`. From a value no edge
+// proves nonzero (a start of 0 steps to the type's greatest value), or a start that is no length, the
+// check stays. Under `i <u j` and `j <u 11`, `i` is at most 9 (`ubound`).
+@test
+fn a_counter_down_from_a_nonzero_start_stays_below_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @test fn global
+sym @rotated fn global
+sym @count fn global
+sym @zero fn global
+sym @wraps fn global
+sym @strict fn global
+sym @loose fn global
+fn @test
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  jmp b1(v0, v1)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ugt v3, v1
+  br v5, b2, b5
+b2:
+  v6 = sub.i64 v3, v2
+  v7 = icmp.ult v6, v0
+  br v7, b3, b4
+b3:
+  v8 = add.i64 v4, v6
+  jmp b1(v6, v8)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v4
+fn @rotated
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = icmp.ne v0, v1
+  br v3, b1(v0, v1), b4(v1)
+b1(v4: i64, v5: i64):
+  v6 = sub.i64 v4, v2
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = add.i64 v5, v6
+  v9 = icmp.ne v6, v1
+  br v9, b1(v6, v8), b4(v8)
+b3: cold
+  panic "index out of bounds"
+b4(v10: i64):
+  ret v10
+fn @count
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v1, v2)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ugt v4, v2
+  br v6, b2, b5
+b2:
+  v7 = sub.i64 v4, v3
+  v8 = icmp.ult v7, v0
+  br v8, b3, b4
+b3:
+  v9 = add.i64 v5, v7
+  jmp b1(v7, v9)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v5
+fn @zero
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v1, v2)
+b1(v4: i64, v5: i64):
+  v6 = sub.i64 v4, v3
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = add.i64 v5, v6
+  v9 = icmp.ne v6, v2
+  br v9, b1(v6, v8), b4(v8)
+b3: cold
+  panic "index out of bounds"
+b4(v10: i64):
+  ret v10
+fn @wraps
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.eq v0, v2
+  br v4, b6, b1
+b1:
+  v5 = sub.i64 v0, v3
+  jmp b2(v5, v2)
+b2(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b3, b4
+b3:
+  v9 = add.i64 v7, v6
+  v10 = sub.i64 v6, v3
+  v11 = icmp.ult v9, v1
+  br v11, b2(v10, v9), b5(v9)
+b4: cold
+  panic "index out of bounds"
+b5(v12: i64):
+  ret v12
+b6:
+  ret v2
+fn @strict
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 11
+  v3 = iconst.i64 10
+  v4 = icmp.ult v1, v2
+  v5 = icmp.ult v0, v1
+  v6 = and.i8 v4, v5
+  br v6, b1, b3
+b1:
+  v7 = icmp.ult v0, v3
+  br v7, b2, b4
+b2:
+  ret v0
+b3:
+  ret v3
+b4: cold
+  panic "index out of bounds"
+fn @loose
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 12
+  v3 = iconst.i64 10
+  v4 = icmp.ult v1, v2
+  v5 = icmp.ult v0, v1
+  v6 = and.i8 v4, v5
+  br v6, b1, b3
+b1:
+  v7 = icmp.ult v0, v3
+  br v7, b2, b4
+b2:
+  ret v0
+b3:
+  ret v3
+b4: cold
+  panic "index out of bounds"
+)",
+    );
+    for f in ["test", "rotated", "strict"] {
+        let t = text_of(&a, f);
+        assert(!t.contains("panic"), t.as_str());
+    }
+    for f in ["count", "zero", "wraps", "loose"] {
+        let t = text_of(&a, f);
+        assert(t.contains("panic"), t.as_str());
+    }
+    let five: []u64 = [5];
+    same_result(&b, &a, "test", five, 10);
+    same_result(&b, &a, "rotated", five, 10);
+    let none: []u64 = [0];
+    same_result(&b, &a, "test", none, 0);
+    same_result(&b, &a, "rotated", none, 0);
+    let within: []u64 = [5, 4];
+    same_result(&b, &a, "count", within, 6);
+    let past: []u64 = [5, 6];
+    same_panic(&b, &a, "count", past);
+    same_result(&b, &a, "zero", within, 6);
+    let start: []u64 = [5, 0];
+    same_panic(&b, &a, "zero", start);
+    let three: []u64 = [3, 2];
+    same_result(&b, &a, "wraps", three, 2);
+    let below: []u64 = [3, 100];
+    same_panic(&b, &a, "wraps", below);
+    let top: []u64 = [9, 10];
+    same_result(&b, &a, "strict", top, 9);
+    let over: []u64 = [10, 11];
+    same_panic(&b, &a, "loose", over);
+    same_result(&b, &a, "loose", top, 9);
+}
+
+// A row's element `y * w + x` of rows `y <u h` and columns `x <u w` is below a `len` of at least `w * h`
+// where that product wraps nowhere: of two 32-bit counts (`ubound`), or a checked product whose flag the
+// entry tests (`product_le`). A product that may wrap keeps the check.
+@test
+fn a_row_element_stays_below_a_product_that_does_not_wrap() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @narrow fn global
+sym @checked fn global
+sym @wraps fn global
+fn @narrow
+  sig (i64, i32, i32) -> i64
+b0(v0: i64, v1: i32, v2: i32):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = zext.i64 v1
+  v6 = zext.i64 v2
+  v7 = mul.i64 v5, v6
+  v8 = icmp.ugt v7, v0
+  br v8, b9, b1
+b1:
+  jmp b2(v3, v3)
+b2(v9: i64, v10: i64):
+  v11 = icmp.ult v9, v6
+  br v11, b3, b8
+b3:
+  v12 = mul.i64 v9, v5
+  jmp b4(v3, v10)
+b4(v13: i64, v14: i64):
+  v15 = icmp.ult v13, v5
+  br v15, b5, b7
+b5:
+  v16 = add.i64 v12, v13
+  v17 = icmp.ult v16, v0
+  br v17, b6, b10
+b6:
+  v18 = add.i64 v14, v16
+  v19 = add.i64 v13, v4
+  jmp b4(v19, v18)
+b7:
+  v20 = add.i64 v9, v4
+  jmp b2(v20, v14)
+b8:
+  ret v10
+b9:
+  ret v3
+b10: cold
+  panic "index out of bounds"
+fn @checked
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5, v6 = mulo.u.i64 v1, v2
+  v7 = icmp.ugt v5, v0
+  v8 = or.i8 v6, v7
+  br v8, b9, b1
+b1:
+  jmp b2(v3, v3)
+b2(v9: i64, v10: i64):
+  v11 = icmp.ult v9, v2
+  br v11, b3, b8
+b3:
+  v12 = mul.i64 v1, v9
+  jmp b4(v3, v10)
+b4(v13: i64, v14: i64):
+  v15 = icmp.ult v13, v1
+  br v15, b5, b7
+b5:
+  v16 = add.i64 v13, v12
+  v17 = icmp.ult v16, v0
+  br v17, b6, b10
+b6:
+  v18 = add.i64 v14, v16
+  v19 = add.i64 v13, v4
+  jmp b4(v19, v18)
+b7:
+  v20 = add.i64 v9, v4
+  jmp b2(v20, v14)
+b8:
+  ret v10
+b9:
+  ret v3
+b10: cold
+  panic "index out of bounds"
+fn @wraps
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = mul.i64 v1, v2
+  v6 = icmp.ugt v5, v0
+  br v6, b9, b1
+b1:
+  jmp b2(v3, v3)
+b2(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v2
+  br v9, b3, b8
+b3:
+  v10 = mul.i64 v7, v1
+  jmp b4(v3, v8)
+b4(v11: i64, v12: i64):
+  v13 = icmp.ult v11, v1
+  br v13, b5, b7
+b5:
+  v14 = add.i64 v10, v11
+  v15 = icmp.ult v14, v0
+  br v15, b6, b10
+b6:
+  v16 = add.i64 v12, v14
+  v17 = add.i64 v11, v4
+  jmp b4(v17, v16)
+b7:
+  v18 = add.i64 v7, v4
+  jmp b2(v18, v12)
+b8:
+  ret v8
+b9:
+  ret v3
+b10: cold
+  panic "index out of bounds"
+)",
+    );
+    for f in ["narrow", "checked"] {
+        let t = text_of(&a, f);
+        assert(!t.contains("panic"), t.as_str());
+    }
+    let w = text_of(&a, "wraps");
+    assert(w.contains("panic"), w.as_str());
+    // (len, w, h): sum of the indexes 0 to w * h - 1.
+    let fits: []u64 = [12, 4, 3];
+    same_result(&b, &a, "narrow", fits, 66);
+    same_result(&b, &a, "checked", fits, 66);
+    same_result(&b, &a, "wraps", fits, 66);
+    let over: []u64 = [11, 4, 3];
+    same_result(&b, &a, "narrow", over, 0);
+    same_result(&b, &a, "checked", over, 0);
+    let wide: []u64 = [5, 0x8000000000000000, 2];
+    same_result(&b, &a, "checked", wide, 0);
+    same_panic(&b, &a, "wraps", wide);
+}
+
+// A counter from 1 by 1 under `i <u n` stays at least 1 (`param_bounds`), so `i - 1` is below `i`, below `n`
+// (`at_most_of`); from a value `c`, `i - c` does not wrap. From 0 the first `i - 1` wraps: its check stays.
+// Both comparisons of an `or` that fails fail (`cond_parts`).
+@test
+fn a_counter_less_its_start_stays_below_the_bound() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @prev fn global
+sym @from fn global
+sym @zero fn global
+sym @orv fn global
+fn @prev
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 0
+  jmp b1(v1, v2)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ult v3, v0
+  br v5, b2, b4
+b2:
+  v6 = sub.i64 v3, v1
+  v7 = icmp.ult v6, v0
+  br v7, b3, b5
+b3:
+  v8 = add.i64 v4, v6
+  v9 = add.i64 v3, v1
+  jmp b1(v9, v8)
+b4:
+  ret v4
+b5: cold
+  panic "index out of bounds"
+fn @from
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  jmp b1(v1, v3)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b4
+b2:
+  v7 = sub.i64 v4, v1
+  v8 = icmp.ult v7, v0
+  br v8, b3, b5
+b3:
+  v9 = add.i64 v5, v7
+  v10 = add.i64 v4, v2
+  jmp b1(v10, v9)
+b4:
+  ret v5
+b5: cold
+  panic "index out of bounds"
+fn @zero
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 0
+  jmp b1(v2, v2)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ult v3, v0
+  br v5, b2, b4
+b2:
+  v6 = sub.i64 v3, v1
+  v7 = icmp.ult v6, v0
+  br v7, b3, b5
+b3:
+  v8 = add.i64 v4, v3
+  v9 = add.i64 v3, v1
+  jmp b1(v9, v8)
+b4:
+  ret v4
+b5: cold
+  panic "index out of bounds"
+fn @orv
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = icmp.ne v1, v0
+  v6 = icmp.ugt v0, v2
+  v7 = or.i8 v5, v6
+  br v7, b6, b1(v3, v3)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v0
+  br v10, b2, b5
+b2:
+  v11 = icmp.ult v8, v1
+  br v11, b3, b7
+b3:
+  v12 = icmp.ult v8, v2
+  br v12, b4, b7
+b4:
+  v13 = add.i64 v9, v8
+  v14 = add.i64 v8, v4
+  jmp b1(v14, v13)
+b5:
+  ret v9
+b6:
+  ret v3
+b7: cold
+  panic "index out of bounds"
+)",
+    );
+    for name in ["prev", "from", "orv"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("panic"), t.as_str());
+    }
+    let z = text_of(&a, "zero");
+    assert(z.contains("panic"), z.as_str());
+    let five: []u64 = [5];
+    same_result(&b, &a, "prev", five, 6);
+    let fr: []u64 = [6, 2];
+    same_result(&b, &a, "from", fr, 6);
+    same_panic(&b, &a, "zero", five);
+    let fits: []u64 = [4, 4, 9];
+    same_result(&b, &a, "orv", fits, 6);
+    let unequal: []u64 = [5, 4, 9];
+    same_result(&b, &a, "orv", unequal, 0);
+    let over: []u64 = [5, 5, 4];
+    same_result(&b, &a, "orv", over, 0);
+}
+
+// Windows and chunks: a test `i + 3 <=u n` of a counter from 0 by 1, `n` at most `max - 1`, is `i <u n - 2`
+// (`offset_test`), and its checked sum wraps nowhere (its flag 0); the window's length `(i + 3) - i` is 3
+// (`cancel`, also from a start that is no constant, whose checked sum stays). A chunk `(k << 2) + 4` stays
+// at most `n` where `k <u n >> 2` holds; `+ 5` does not. A checked sum of bounded operands is a plain one
+// (`checked_range`). A sum
+// `i + 1` stays below `n` where `i <u n - 1` and `n >=u 1` hold.
+@test
+fn window_and_chunk_ends_stay_within_the_length() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @win fn global
+sym @ck fn global
+sym @from fn global
+fn @ck
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 255
+  v2 = iconst.i64 1000
+  v3 = and.i64 v0, v1
+  v4, v5 = addo.u.i64 v3, v2
+  br v5, b1, b2
+b1:
+  panic "attempt to add with overflow"
+b2:
+  ret v4
+sym @chunk fn global
+sym @over fn global
+sym @next fn global
+fn @from
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 3
+  v4 = iconst.i64 1
+  jmp b1(v1, v2)
+b1(v5: i64, v6: i64):
+  v7, v8 = addo.u.i64 v5, v3
+  v9 = icmp.ule v7, v0
+  br v9, b2, b4
+b2:
+  br v8, b5, b3
+b3:
+  v10 = sub.i64 v7, v5
+  v11 = icmp.ule v10, v4
+  br v11, b5, b6
+b4:
+  ret v6
+b5: cold
+  panic "index out of bounds"
+b6:
+  v12 = add.i64 v6, v5
+  v13 = add.i64 v5, v4
+  jmp b1(v13, v12)
+fn @win
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 3
+  v3 = iconst.i64 1
+  v4 = iconst.i64 1000
+  v5 = icmp.ugt v0, v4
+  br v5, b5, b1
+b1:
+  jmp b2(v1, v1)
+b2(v6: i64, v7: i64):
+  v8, v9 = addo.u.i64 v6, v2
+  v10 = icmp.ule v8, v0
+  br v10, b3, b6
+b3:
+  br v9, b7, b4
+b4:
+  v11 = sub.i64 v8, v6
+  v12 = icmp.ule v11, v3
+  br v12, b7, b8
+b5:
+  ret v1
+b6:
+  ret v7
+b7: cold
+  panic "index out of bounds"
+b8:
+  v13 = add.i64 v7, v6
+  v14 = add.i64 v6, v3
+  jmp b2(v14, v13)
+fn @chunk
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 2
+  v3 = iconst.i64 4
+  v4 = iconst.i64 1
+  v5 = lshr.i64 v0, v2
+  jmp b1(v1, v1)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b2, b4
+b2:
+  v9 = shl.i64 v6, v2
+  v10 = add.i64 v9, v3
+  v11 = icmp.ugt v10, v0
+  br v11, b5, b3
+b3:
+  v12 = add.i64 v7, v10
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b4:
+  ret v7
+b5: cold
+  panic "index out of bounds"
+fn @over
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 2
+  v3 = iconst.i64 5
+  v4 = iconst.i64 1
+  v5 = lshr.i64 v0, v2
+  jmp b1(v1, v1)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v5
+  br v8, b2, b4
+b2:
+  v9 = shl.i64 v6, v2
+  v10 = add.i64 v9, v3
+  v11 = icmp.ugt v10, v0
+  br v11, b5, b3
+b3:
+  v12 = add.i64 v7, v10
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b4:
+  ret v7
+b5: cold
+  panic "index out of bounds"
+fn @next
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = icmp.eq v0, v1
+  br v3, b5, b1
+b1:
+  v4 = sub.i64 v0, v2
+  jmp b2(v1, v1)
+b2(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v4
+  br v7, b3, b6
+b3:
+  v8 = add.i64 v5, v2
+  v9 = icmp.ult v8, v0
+  br v9, b4, b7
+b4:
+  v10 = add.i64 v6, v8
+  jmp b2(v8, v10)
+b5:
+  ret v1
+b6:
+  ret v6
+b7: cold
+  panic "index out of bounds"
+)",
+    );
+    for name in ["win", "chunk", "next", "ck"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("panic") && !t.contains("addo"), t.as_str());
+    }
+    let o = text_of(&a, "over");
+    assert(o.contains("panic"), o.as_str());
+    let f = text_of(&a, "from");
+    assert(f.contains("addo") && !f.contains("sub.i64"), f.as_str());
+    let big: []u64 = [0xFFFFFFFFFFFFFFFF];
+    same_result(&b, &a, "ck", big, 1255);
+    let fr: []u64 = [10, 4];
+    same_result(&b, &a, "from", fr, 4 + 5 + 6 + 7);
+    for n in [0u64, 1, 2, 3, 4, 9, 17] {
+        let x: [u64; 1] = [n];
+        let w = if n < 3 {
+            0u64
+        } else {
+            (n - 3) * (n - 2) / 2
+        };
+        same_result(&b, &a, "win", x[0..1], w);
+        let mut c: u64 = 0;
+        for k in 0..n / 4 {
+            c += 4 * k + 4;
+        }
+        same_result(&b, &a, "chunk", x[0..1], c);
+        let nx = if n == 0 {
+            0u64
+        } else {
+            n * (n - 1) / 2
+        };
+        same_result(&b, &a, "next", x[0..1], nx);
+    }
+    let eight: []u64 = [8];
+    same_panic(&b, &a, "over", eight);
+}
+
 // Jump threading: a `&&` of comparisons stays a diamond, which becomes an `and` and a select (threading its
 // sides apart would leave branches); an `Option` tag a side fixes skips its test (a small join of pure
 // instructions its switch alone reads), while the side whose target reads the join's values keeps it.
@@ -5726,7 +7277,17 @@ b0(v0: i32, v1: i64):
     let mut p = lparse::parse(src, &mut err).unwrap();
     p.mul_high = false;
     let none = Vector::<bool>::new();
-    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    let bu = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 0,
+        interleave: 0,
+        fin: 0,
+    };
     lopt::optimize(&mut p, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let tq = text_of(&p, "q");
     assert(tq.contains("sdiv.i32") && tq.contains("urem.i64") && !tq.contains("mulh"), tq.as_str());
@@ -5954,6 +7515,1974 @@ b0(v0: i64):
     // Element 0: 3 x 5 from `same`, then 5 from `moving`; elements 1 and 2: 5 each.
     let x: []u64 = [5];
     same_result(&b, &a, "top", x, 20 + 5 + 5);
+}
+
+// A by-value view parameter the body does not rebind (`ref inner`) keeps its own words, the element
+// pointer and the length, for the whole call: an inlined length getter (an exclusive `self`, whose copy
+// reads the view through its entry parameter) after a store of an element of the length's type reads
+// the length the first copy read, for an exclusive view and for a read-only one. The referent of a plain
+// reference parameter has no such promise: its second load stays.
+@test
+fn a_view_parameter_keeps_its_length_across_element_stores() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+file f0 "view.spc"
+sym @len fn global
+sym @put fn global
+sym @get fn global
+sym @plain fn global
+fn @len
+  sig (ptr) -> i64
+  ref p0 16 noalias
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3 tbaa 4
+  ret v1
+fn @put
+  file f0
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i64) -> i64
+  ref p0 8 inner noalias
+b0(v0: ptr, v1: i64):
+  v2 = call.i64 @len(v0) : (ptr) -> i64 !3:5
+  v3 = load.ptr v0 align 3 tbaa 8
+  store v1, v3 align 3 tbaa 4
+  v4 = call.i64 @len(v0) : (ptr) -> i64 !4:5
+  v5 = load.ptr v0 align 3 tbaa 8
+  store v1, v5+8 align 3 tbaa 4
+  v6 = add.i64 v2, v4
+  ret v6
+fn @get
+  file f0
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, ptr) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr, v1: ptr):
+  v2 = call.i64 @len(v0) : (ptr) -> i64 !7:5
+  v3 = iconst.i64 7
+  store v3, v1 align 3 tbaa 4
+  v4 = call.i64 @len(v0) : (ptr) -> i64 !8:5
+  v5 = add.i64 v2, v4
+  ret v5
+fn @plain
+  file f0
+  sig (ptr, ptr) -> i64
+  ref p0 16
+b0(v0: ptr, v1: ptr):
+  v2 = call.i64 @len(v0) : (ptr) -> i64 !11:5
+  v3 = iconst.i64 7
+  store v3, v1 align 3 tbaa 4
+  v4 = call.i64 @len(v0) : (ptr) -> i64 !12:5
+  v5 = add.i64 v2, v4
+  ret v5
+)",
+    );
+    let names: []str = ["put", "get"];
+    for k in 0..names.len() {
+        let t = text_of(&a, names[k]);
+        assert(!t.contains("call") && count_of(&t, "load.i64 v0+8") == 1, t.as_str());
+    }
+    let p = text_of(&a, "plain");
+    assert(!p.contains("call") && count_of(&p, "load.i64 v0+8") == 2, p.as_str());
+}
+
+// An unsigned comparison of a value with one its form keeps at most it is decided: a slice's half
+// (`len >> 1`, `len / 2`), its length rounded down (`len & -16`), a remainder, and a minimum with it are
+// at most the length, so the range check `hi >u len` of `s[..hi]` folds. A strict order (`x >> 1 <u x`,
+// false at 0) and a sum (`x + 1`, which wraps) stay.
+@test
+fn a_value_at_most_another_by_its_form_decides_their_order() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @forms fn global
+sym @kept fn global
+fn @forms
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 -16
+  v5 = lshr.i64 v0, v2
+  v6 = icmp.ugt v5, v0
+  v7 = udiv.i64 v0, v3
+  v8 = icmp.ult v0, v7
+  v9 = and.i64 v0, v4
+  v10 = icmp.ule v9, v0
+  v11 = urem.i64 v1, v3
+  v12 = and.i64 v11, v0
+  v13 = lshr.i64 v12, v2
+  v14 = icmp.uge v0, v13
+  v15 = icmp.ult v0, v1
+  v16 = select.i64 v15, v0, v1
+  v17 = icmp.ugt v16, v1
+  v18 = zext.i64 v6
+  v19 = zext.i64 v8
+  v20 = zext.i64 v10
+  v21 = zext.i64 v14
+  v22 = zext.i64 v17
+  v23 = add.i64 v18, v19
+  v24 = shl.i64 v20, v2
+  v25 = shl.i64 v21, v3
+  v26 = add.i64 v23, v24
+  v27 = add.i64 v26, v25
+  v28 = add.i64 v27, v22
+  ret v28
+fn @kept
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = lshr.i64 v0, v1
+  v3 = icmp.ult v2, v0
+  v4 = add.i64 v0, v1
+  v5 = icmp.ule v4, v0
+  v6 = zext.i64 v3
+  v7 = zext.i64 v5
+  v8 = shl.i64 v7, v1
+  v9 = add.i64 v6, v8
+  ret v9
+)",
+    );
+    let f = text_of(&a, "forms");
+    assert(!f.contains("icmp"), f.as_str());
+    let k = text_of(&a, "kept");
+    assert(count_of(&k, "icmp") == 2, k.as_str());
+    let xs: []u64 = [0, 1, 7, 0xFFFFFFFFFFFFFFFF];
+    for q in 0..xs.len() {
+        let x: []u64 = [xs[q], 5];
+        same_result(&b, &a, "forms", x, 2 + 4);
+    }
+    let z: []u64 = [7];
+    same_result(&b, &a, "kept", z, 1);
+    let m: []u64 = [0xFFFFFFFFFFFFFFFF];
+    same_result(&b, &a, "kept", m, 1 + 2);
+}
+
+// Where `i <u n` and `j <u n` hold, `abs_diff` (a select of the two differences its condition keeps
+// from wrapping), `midpoint` (`(i & j) + ((i ^ j) >> 1)`) and `saturating_sub(1)` of them are below `n`:
+// their tests fold (`max_parts`). The differences the wrong way round wrap, and their test stays.
+@test
+fn a_difference_or_midpoint_of_indices_below_a_length_is_below_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @parts fn global
+sym @wrong fn global
+sym @merged fn global
+fn @parts
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = icmp.ult v0, v2
+  br v6, b1, b6
+b1:
+  v7 = icmp.ult v1, v2
+  br v7, b2, b6
+b2:
+  v8 = icmp.ult v0, v1
+  v9 = sub.i64 v1, v0
+  v10 = sub.i64 v0, v1
+  v11 = select.i64 v8, v9, v10
+  v12 = icmp.uge v11, v2
+  br v12, b7, b3
+b3:
+  v13 = and.i64 v0, v1
+  v14 = xor.i64 v0, v1
+  v15 = lshr.i64 v14, v4
+  v16 = add.i64 v13, v15
+  v17 = icmp.uge v16, v2
+  br v17, b7, b4
+b4:
+  v18 = icmp.ult v0, v4
+  v19 = sub.i64 v0, v4
+  v20 = select.i64 v18, v3, v19
+  v21 = icmp.uge v20, v2
+  br v21, b7, b5
+b5:
+  v22 = add.i64 v11, v16
+  v23 = add.i64 v22, v20
+  ret v23
+b6:
+  ret v3
+b7: cold
+  ret v5
+fn @wrong
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 99
+  v5 = icmp.ult v0, v2
+  br v5, b1, b3
+b1:
+  v6 = icmp.ult v1, v2
+  br v6, b2, b3
+b2:
+  v7 = icmp.ult v0, v1
+  v8 = sub.i64 v0, v1
+  v9 = sub.i64 v1, v0
+  v10 = select.i64 v7, v8, v9
+  v11 = icmp.uge v10, v2
+  br v11, b4, b5
+b3:
+  ret v3
+b4: cold
+  ret v4
+b5:
+  ret v10
+fn @merged
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 99
+  v5 = icmp.ult v0, v1
+  v6 = select.i64 v5, v1, v0
+  v7 = icmp.ugt v2, v6
+  br v7, b1, b2
+b1:
+  v8 = sub.i64 v1, v0
+  v9 = sub.i64 v0, v1
+  v10 = select.i64 v5, v8, v9
+  v11 = icmp.uge v10, v2
+  br v11, b3, b4
+b2:
+  ret v3
+b3: cold
+  ret v4
+b4:
+  ret v10
+)",
+    );
+    // The three tests into `b7` go: no path returns 99. A maximum below `n` keeps both its values below
+    // `n` (`i <u n && j <u n` merged into one test).
+    let p = text_of(&a, "parts");
+    assert(!p.contains("99"), p.as_str());
+    let m = text_of(&a, "merged");
+    assert(!m.contains("99"), m.as_str());
+    let mx: []u64 = [7, 2, 8];
+    same_result(&b, &a, "merged", mx, 5);
+    let w = text_of(&a, "wrong");
+    assert(w.contains("99"), w.as_str());
+    let x: []u64 = [1, 3, 10];
+    same_result(&b, &a, "parts", x, 2 + 2 + 0);
+    let y: []u64 = [0, 0, 1];
+    same_result(&b, &a, "parts", y, 0);
+    let z: []u64 = [9, 2, 10];
+    same_result(&b, &a, "parts", z, 7 + 5 + 8);
+    same_result(&b, &a, "wrong", x, 99);
+    let e: []u64 = [2, 2, 3];
+    same_result(&b, &a, "wrong", e, 0);
+}
+
+// A value below `n >> 1` (or `n / 2`) is below `n - (n >> 1)`: the right half of `split_at(n / 2)` is no
+// shorter than the left, so its test folds (`half_of`). The half rounded up, `(n + 1) >> 1`, can pass
+// the rest, and its test stays.
+@test
+fn a_value_below_a_half_is_below_the_rest() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @halves fn global
+sym @rounded fn global
+fn @halves
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 99
+  v5 = iconst.i64 0
+  v6 = lshr.i64 v0, v2
+  v7 = sub.i64 v0, v6
+  v8 = udiv.i64 v0, v3
+  v9 = sub.i64 v0, v8
+  v10 = icmp.ult v1, v6
+  br v10, b1, b4
+b1:
+  v11 = icmp.uge v1, v7
+  br v11, b3, b2
+b2:
+  v12 = icmp.ult v1, v9
+  br v12, b5, b3
+b3: cold
+  ret v4
+b4:
+  ret v5
+b5:
+  ret v1
+fn @rounded
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = add.i64 v0, v2
+  v6 = lshr.i64 v5, v2
+  v7 = sub.i64 v0, v6
+  v8 = icmp.ult v1, v6
+  br v8, b1, b3
+b1:
+  v9 = icmp.uge v1, v7
+  br v9, b2, b4
+b2: cold
+  ret v3
+b3:
+  ret v4
+b4:
+  ret v1
+)",
+    );
+    let h = text_of(&a, "halves");
+    assert(!h.contains("99"), h.as_str());
+    let r = text_of(&a, "rounded");
+    assert(r.contains("99"), r.as_str());
+    let x: []u64 = [9, 3];
+    same_result(&b, &a, "halves", x, 3);
+    let y: []u64 = [9, 4];
+    same_result(&b, &a, "halves", y, 0);
+    same_result(&b, &a, "rounded", y, 99);
+    same_result(&b, &a, "rounded", x, 3);
+}
+
+// `(n - 1) - i <u n` where `i <u n >> 1` holds: `i` is at most `n - 1`, so neither difference wraps (the
+// mirror of a swap loop's counter, `below_within`). `(n - 2) - i` wraps at `i = n - 1`, and its test
+// stays.
+@test
+fn the_mirror_of_an_index_below_a_length_is_below_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @mirror fn global
+sym @skewed fn global
+fn @mirror
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = lshr.i64 v0, v2
+  v6 = icmp.ult v1, v5
+  br v6, b1, b3
+b1:
+  v7 = sub.i64 v0, v2
+  v8 = sub.i64 v7, v1
+  v9 = icmp.uge v8, v0
+  br v9, b2, b4
+b2: cold
+  ret v3
+b3:
+  ret v4
+b4:
+  ret v8
+fn @skewed
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 2
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.ult v1, v0
+  br v5, b1, b3
+b1:
+  v6 = sub.i64 v0, v2
+  v7 = sub.i64 v6, v1
+  v8 = icmp.uge v7, v0
+  br v8, b2, b4
+b2: cold
+  ret v3
+b3:
+  ret v4
+b4:
+  ret v7
+)",
+    );
+    let m = text_of(&a, "mirror");
+    assert(!m.contains("99"), m.as_str());
+    let s = text_of(&a, "skewed");
+    assert(s.contains("99"), s.as_str());
+    let x: []u64 = [9, 3];
+    same_result(&b, &a, "mirror", x, 5);
+    same_result(&b, &a, "skewed", x, 4);
+    let e: []u64 = [9, 8];
+    same_result(&b, &a, "skewed", e, 99);
+}
+
+// Two counters `while i < j { .. i += 1; j -= 1 }`: every edge into the loop passes a `j` above an `i`, so
+// `j` is nonzero, its step does not wrap, and it stays at most its start (`nonzero_on`): below the length
+// the start is below, or the constant start's bound (`param_bounds`). Under `i <=u j` the step wraps at 0,
+// and the test stays.
+@test
+fn a_counter_down_above_another_stays_at_most_its_start() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @rev fn global
+sym @rev200 fn global
+sym @rev_le fn global
+fn @rev
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 99
+  v5 = icmp.ult v2, v0
+  br v5, b1, b5(v3)
+b1:
+  v6 = icmp.ult v1, v2
+  br v6, b2(v1, v2), b5(v3)
+b2(v7: i64, v8: i64):
+  v9 = icmp.uge v8, v0
+  br v9, b4, b3
+b3:
+  v10 = add.i64 v7, v3
+  v11 = sub.i64 v8, v3
+  v12 = icmp.ult v10, v11
+  br v12, b2(v10, v11), b5(v11)
+b4: cold
+  ret v4
+b5(v13: i64):
+  ret v13
+fn @rev200
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = iconst.i64 200
+  v5 = icmp.ugt v0, v4
+  br v5, b1, b5(v2)
+b1:
+  v6 = icmp.ult v1, v4
+  br v6, b2(v1, v4), b5(v2)
+b2(v7: i64, v8: i64):
+  v9 = icmp.uge v8, v0
+  br v9, b4, b3
+b3:
+  v10 = add.i64 v7, v2
+  v11 = sub.i64 v8, v2
+  v12 = icmp.ult v10, v11
+  br v12, b2(v10, v11), b5(v11)
+b4: cold
+  ret v3
+b5(v13: i64):
+  ret v13
+fn @rev_le
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 99
+  v5 = icmp.ult v2, v0
+  br v5, b1, b5(v3)
+b1:
+  v6 = icmp.ule v1, v2
+  br v6, b2(v1, v2), b5(v3)
+b2(v7: i64, v8: i64):
+  v9 = icmp.uge v8, v0
+  br v9, b4, b3
+b3:
+  v10 = add.i64 v7, v3
+  v11 = sub.i64 v8, v3
+  v12 = icmp.ule v10, v11
+  br v12, b2(v10, v11), b5(v11)
+b4: cold
+  ret v4
+b5(v13: i64):
+  ret v13
+)",
+    );
+    let r = text_of(&a, "rev");
+    assert(!r.contains("99"), r.as_str());
+    let c = text_of(&a, "rev200");
+    assert(!c.contains("99"), c.as_str());
+    let l = text_of(&a, "rev_le");
+    assert(l.contains("99"), l.as_str());
+    let x: []u64 = [9, 2, 7];
+    same_result(&b, &a, "rev", x, 4);
+    let y: []u64 = [300, 190];
+    same_result(&b, &a, "rev200", y, 195);
+    let z: []u64 = [9, 0, 0];
+    same_result(&b, &a, "rev_le", z, 99);
+}
+
+// Signed ranges (`srange`): a counter down from 89 while `i >s -11` keeps `i + 10` in [0, 99]; a counter
+// up by 1 from `MIN + 1` while its next value is `<s MIN + 51` keeps `i - (MIN + 1)` in [0, 49]; the tests
+// `x >=s 0` and `x <=s 10` keep `3 * x` at most 30. Their tests against 100, 100 and 31 fold; `i + 9`
+// (down to -1) and `3 * x <u 30` stay.
+@test
+fn signed_ranges_of_counters_and_tests_bound_their_indexes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @down fn global
+sym @rot fn global
+sym @tri fn global
+sym @flag fn global
+sym @both fn global
+sym @either fn global
+sym @upn fn global
+sym @upn_any fn global
+fn @down
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 89
+  v2 = iconst.i64 -11
+  v3 = iconst.i64 10
+  v4 = iconst.i64 9
+  v5 = iconst.i64 100
+  v6 = iconst.i64 1
+  v7 = iconst.i64 99
+  jmp b1(v1, v0)
+b1(v8: i64, v9: i64):
+  v10 = icmp.sgt v8, v2
+  br v10, b2, b6
+b2:
+  v11 = add.i64 v8, v3
+  v12 = icmp.uge v11, v5
+  br v12, b5, b3
+b3:
+  v13 = add.i64 v8, v4
+  v14 = icmp.uge v13, v5
+  br v14, b5, b4
+b4:
+  v15 = add.i64 v9, v11
+  v16 = sub.i64 v8, v6
+  jmp b1(v16, v15)
+b5: cold
+  ret v7
+b6:
+  ret v9
+fn @rot
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -9223372036854775807
+  v2 = iconst.i64 -9223372036854775757
+  v3 = iconst.i64 100
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  jmp b1(v1, v0)
+b1(v6: i64, v7: i64):
+  v8 = sub.i64 v6, v1
+  v9 = icmp.uge v8, v3
+  br v9, b3, b2
+b2:
+  v10 = add.i64 v7, v8
+  v11 = add.i64 v6, v4
+  v12 = icmp.slt v11, v2
+  br v12, b1(v11, v10), b4
+b3: cold
+  ret v5
+b4:
+  ret v10
+fn @tri
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 10
+  v3 = iconst.i64 3
+  v4 = iconst.i64 31
+  v5 = iconst.i64 30
+  v6 = iconst.i64 99
+  v7 = iconst.i64 77
+  v8 = icmp.sge v0, v1
+  br v8, b1, b5
+b1:
+  v9 = icmp.sle v0, v2
+  br v9, b2, b5
+b2:
+  v10 = mul.i64 v0, v3
+  v11 = icmp.uge v10, v4
+  br v11, b4, b3
+b3:
+  v12 = icmp.uge v10, v5
+  br v12, b6, b5
+b4: cold
+  ret v6
+b5:
+  ret v1
+b6:
+  ret v7
+fn @flag
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 2
+  v3 = iconst.i64 4
+  v4 = iconst.i64 99
+  v5 = icmp.eq v0, v1
+  v6 = zext.i64 v5
+  v7 = add.i64 v6, v2
+  v8 = icmp.uge v7, v3
+  br v8, b1, b2
+b1: cold
+  ret v4
+b2:
+  v9 = select.i64 v5, v2, v6
+  v10 = icmp.uge v9, v3
+  br v10, b1, b3
+b3:
+  v11 = add.i64 v7, v9
+  ret v11
+fn @both
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v3
+  v7 = sub.i64 v2, v3
+  jmp b1(v6, v7)
+b1(v8: i64, v9: i64):
+  v10 = icmp.sge v8, v4
+  v11 = icmp.sge v9, v4
+  v12 = and.i8 v10, v11
+  br v12, b2, b6
+b2:
+  v13 = icmp.uge v8, v1
+  br v13, b5, b3
+b3:
+  store v8, v0 align 3
+  v14 = icmp.uge v9, v2
+  br v14, b5, b4
+b4:
+  store v9, v0 align 3
+  v15 = sub.i64 v8, v3
+  v16 = sub.i64 v9, v3
+  jmp b1(v15, v16)
+b5: cold
+  ret v5
+b6:
+  ret v4
+fn @either
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v3
+  v7 = sub.i64 v2, v3
+  jmp b1(v6, v7)
+b1(v8: i64, v9: i64):
+  v10 = icmp.sge v8, v4
+  v11 = icmp.sge v9, v4
+  v12 = or.i8 v10, v11
+  br v12, b2, b6
+b2:
+  v13 = icmp.uge v8, v1
+  br v13, b5, b3
+b3:
+  store v8, v0 align 3
+  v14 = icmp.uge v9, v2
+  br v14, b5, b4
+b4:
+  store v9, v0 align 3
+  v15 = sub.i64 v8, v3
+  v16 = sub.i64 v9, v3
+  jmp b1(v15, v16)
+b5: cold
+  ret v5
+b6:
+  ret v4
+fn @upn
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 25
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = icmp.slt v0, v2
+  br v6, b5, b1
+b1:
+  v7 = icmp.ule v1, v3
+  br v7, b5, b2(v0, v2)
+b2(v8: i64, v9: i64):
+  v10 = icmp.sle v8, v3
+  br v10, b3, b6(v9)
+b3:
+  v11 = icmp.uge v8, v1
+  br v11, b4, b7
+b4: cold
+  ret v5
+b5:
+  ret v2
+b6(v12: i64):
+  ret v12
+b7:
+  v13 = add.i64 v9, v8
+  v14 = add.i64 v8, v4
+  jmp b2(v14, v13)
+fn @upn_any
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 25
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = icmp.ule v1, v3
+  br v6, b4, b1(v0, v2)
+b1(v7: i64, v8: i64):
+  v9 = icmp.sle v7, v3
+  br v9, b2, b5(v8)
+b2:
+  v10 = icmp.uge v7, v1
+  br v10, b3, b6
+b3: cold
+  ret v5
+b4:
+  ret v2
+b5(v11: i64):
+  ret v11
+b6:
+  v12 = add.i64 v8, v7
+  v13 = add.i64 v7, v4
+  jmp b1(v13, v12)
+)",
+    );
+    // A counter up from `n >=s 0` while `i <=s 25` keeps its signed bound from below: below a length of at
+    // least 26 (`upn`). From any `n` (`upn_any`) the test stays.
+    let up = text_of(&a, "upn");
+    assert(!up.contains("99"), up.as_str());
+    let ua = text_of(&a, "upn_any");
+    assert(ua.contains("99"), ua.as_str());
+    let n24: []u64 = [24, 30];
+    same_result(&b, &a, "upn", n24, 49);
+    // Two counters down from `n - 1` and `m - 1` while both are at least 0 (`and`, or their minimum once
+    // the optimizer selects it): both stay below their lengths. While either is (`either`), both tests stay.
+    let bo = text_of(&a, "both");
+    assert(!bo.contains("99"), bo.as_str());
+    let ei = text_of(&a, "either");
+    assert(count_of(&ei, "icmp.uge") == 2, ei.as_str());
+    // A comparison is at most 1 (`ubound`): `flag + 2 <u 4` holds, and so does `select(c, 2, flag) <u 4`.
+    let f = text_of(&a, "flag");
+    assert(!f.contains("99"), f.as_str());
+    let d = text_of(&a, "down");
+    assert(count_of(&d, "icmp.uge") == 1, d.as_str());
+    let r = text_of(&a, "rot");
+    assert(!r.contains("99"), r.as_str());
+    let t = text_of(&a, "tri");
+    assert(!t.contains("99") && t.contains("77"), t.as_str());
+    let z: []u64 = [0];
+    same_result(&b, &a, "down", z, 99);
+    same_result(&b, &a, "rot", z, 1225);
+    let ten: []u64 = [10];
+    same_result(&b, &a, "tri", ten, 77);
+    let nine: []u64 = [9];
+    same_result(&b, &a, "tri", nine, 0);
+}
+
+// Offsets that do not wrap (`offset_order`, `room`), inclusive and floor edge bounds (`edge_le`, `edge_floor`),
+// counters by 2 (`signed_counter`, `param_bounds`), the count a scan leaves with (`join_out`, `join_in`) and a
+// select of checked indexes (`arms_below`) fold their tests (the cold `ret 99`). Near misses keep theirs:
+// `i + 1 >u len` under `i <=u len`, a sum of 129 within a room of 128, a step down by 3 past a floor of 2,
+// `i + 2` of a counter by 2 below `len - 1`, a count compared with 127, a select with an unchecked index.
+@test
+fn offsets_steps_and_joins_bound_their_indexes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @subs fn global
+sym @room fn global
+sym @room1 fn global
+sym @rotle fn global
+sym @down2 fn global
+sym @down3 fn global
+sym @sstep fn global
+sym @sstep2 fn global
+sym @scan fn global
+sym @scan_n fn global
+sym @pick3 fn global
+sym @pick3_n fn global
+sym @scan_h fn global
+sym @diamond_join fn global
+fn @subs
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 128
+  v3 = iconst.i64 96
+  v4 = iconst.i64 32
+  v5 = iconst.i64 99
+  v6 = iconst.i64 1
+  v7 = iconst.i64 0
+  v8 = icmp.uge v1, v2
+  br v8, b1, b9
+b1:
+  v9 = icmp.ule v1, v0
+  br v9, b2, b9
+b2:
+  v10 = sub.i64 v1, v3
+  v11 = icmp.ugt v10, v0
+  br v11, b8, b3
+b3:
+  v12 = sub.i64 v1, v2
+  v13 = icmp.ugt v12, v10
+  br v13, b8, b4
+b4:
+  v14 = sub.i64 v1, v4
+  v15 = icmp.ugt v14, v1
+  br v15, b8, b5
+b5:
+  v16 = add.i64 v1, v6
+  v17 = icmp.ugt v16, v0
+  br v17, b7, b6
+b6:
+  ret v12
+b7:
+  ret v6
+b8: cold
+  ret v5
+b9:
+  ret v7
+fn @room
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 128
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.uge v0, v2
+  br v5, b1, b5
+b1:
+  v6 = sub.i64 v0, v2
+  v7 = icmp.ule v1, v6
+  br v7, b2, b5
+b2:
+  v8, v9 = addo.u.i64 v1, v2
+  br v9, b4, b3
+b3:
+  ret v8
+b4: cold
+  ret v3
+b5:
+  ret v4
+fn @room1
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 128
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = iconst.i64 129
+  v6 = icmp.uge v0, v2
+  br v6, b1, b5
+b1:
+  v7 = sub.i64 v0, v2
+  v8 = icmp.ule v1, v7
+  br v8, b2, b5
+b2:
+  v9, v10 = addo.u.i64 v1, v5
+  br v10, b4, b3
+b3:
+  ret v9
+b4: cold
+  ret v3
+b5:
+  ret v4
+fn @rotle
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 128
+  v2 = iconst.i64 32
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.uge v0, v1
+  br v5, b1, b5(v4)
+b1:
+  v6 = sub.i64 v0, v1
+  jmp b2(v4, v4)
+b2(v7: i64, v8: i64):
+  v9, v10 = addo.u.i64 v7, v2
+  br v10, b6, b3
+b3:
+  v11 = icmp.ugt v9, v0
+  br v11, b6, b4
+b4:
+  v12 = add.i64 v8, v9
+  v13 = add.i64 v7, v1
+  v14 = icmp.ule v13, v6
+  br v14, b2(v13, v12), b5(v12)
+b5(v15: i64):
+  ret v15
+b6: cold
+  ret v3
+fn @down2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 2
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.uge v0, v1
+  br v5, b1(v0, v4), b4(v4)
+b1(v6: i64, v7: i64):
+  v8 = sub.i64 v6, v2
+  v9 = icmp.uge v8, v0
+  br v9, b5, b2
+b2:
+  v10 = sub.i64 v6, v1
+  v11 = icmp.uge v10, v0
+  br v11, b5, b3
+b3:
+  v12 = add.i64 v7, v10
+  v13 = icmp.uge v10, v1
+  br v13, b1(v10, v12), b4(v12)
+b4(v14: i64):
+  ret v14
+b5: cold
+  ret v3
+fn @down3
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 2
+  v2 = iconst.i64 3
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.uge v0, v1
+  br v5, b1(v0, v4), b3(v4)
+b1(v6: i64, v7: i64):
+  v8 = sub.i64 v6, v2
+  v9 = icmp.uge v8, v0
+  br v9, b4, b2
+b2:
+  v10 = add.i64 v7, v6
+  v11 = icmp.uge v8, v1
+  br v11, b1(v8, v10), b3(v10)
+b3(v12: i64):
+  ret v12
+b4: cold
+  ret v3
+fn @sstep
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v2
+  v7 = icmp.sgt v6, v3
+  br v7, b1(v3, v3), b4(v3)
+b1(v8: i64, v9: i64):
+  v10 = icmp.uge v8, v1
+  br v10, b5, b2
+b2:
+  v11 = add.i64 v8, v2
+  v12 = icmp.uge v11, v1
+  br v12, b5, b3
+b3:
+  v13 = add.i64 v9, v11
+  v14 = add.i64 v8, v4
+  v15 = icmp.slt v14, v6
+  br v15, b1(v14, v13), b4(v13)
+b4(v16: i64):
+  ret v16
+b5: cold
+  ret v5
+fn @sstep2
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v2
+  v7 = icmp.sgt v6, v3
+  br v7, b1(v3, v3), b3(v3)
+b1(v8: i64, v9: i64):
+  v10 = add.i64 v8, v4
+  v11 = icmp.uge v10, v1
+  br v11, b4, b2
+b2:
+  v12 = add.i64 v9, v8
+  v13 = icmp.slt v10, v6
+  br v13, b1(v10, v12), b3(v12)
+b3(v14: i64):
+  ret v14
+b4: cold
+  ret v5
+fn @scan
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 128
+  v3 = iconst.i8 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  jmp b1(v1)
+b1(v6: i64):
+  v7 = ptradd v0, v6 * 1
+  v8 = load.i8 v7 align 0
+  v9 = icmp.eq v8, v3
+  br v9, b3(v6), b2
+b2:
+  v10 = add.i64 v6, v4
+  v11 = icmp.ult v10, v2
+  br v11, b1(v10), b3(v10)
+b3(v12: i64):
+  v13 = icmp.ugt v12, v2
+  br v13, b4, b5
+b4: cold
+  ret v5
+b5:
+  ret v12
+fn @scan_n
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 128
+  v3 = iconst.i8 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = iconst.i64 127
+  jmp b1(v1)
+b1(v7: i64):
+  v8 = ptradd v0, v7 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v3
+  br v10, b3(v7), b2
+b2:
+  v11 = add.i64 v7, v4
+  v12 = icmp.ult v11, v2
+  br v12, b1(v11), b3(v11)
+b3(v13: i64):
+  v14 = icmp.ugt v13, v6
+  br v14, b4, b5
+b4: cold
+  ret v5
+b5:
+  ret v13
+fn @pick3
+  sig (i64, i64, i64, i64, i8, i8) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i8, v5: i8):
+  v6 = iconst.i64 99
+  v7 = iconst.i64 0
+  v8 = icmp.ult v1, v0
+  br v8, b1, b6
+b1:
+  v9 = icmp.ult v2, v0
+  br v9, b2, b6
+b2:
+  v10 = icmp.ult v3, v0
+  br v10, b3, b6
+b3:
+  v11 = select.i64 v5, v2, v3
+  v12 = select.i64 v4, v1, v11
+  v13 = icmp.uge v12, v0
+  br v13, b4, b5
+b4: cold
+  ret v6
+b5:
+  ret v12
+b6:
+  ret v7
+fn @pick3_n
+  sig (i64, i64, i64, i64, i8, i8) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i8, v5: i8):
+  v6 = iconst.i64 99
+  v7 = iconst.i64 0
+  v8 = icmp.ult v1, v0
+  br v8, b1, b5
+b1:
+  v9 = icmp.ult v2, v0
+  br v9, b2, b5
+b2:
+  v10 = select.i64 v5, v2, v3
+  v11 = select.i64 v4, v1, v10
+  v12 = icmp.uge v11, v0
+  br v12, b3, b4
+b3: cold
+  ret v6
+b4:
+  ret v11
+b5:
+  ret v7
+fn @scan_h
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 128
+  v3 = iconst.i8 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  jmp b1(v1)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b4(v6)
+b2:
+  v8 = ptradd v0, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = icmp.eq v9, v3
+  br v10, b4(v6), b3
+b3:
+  v11 = add.i64 v6, v4
+  jmp b1(v11)
+b4(v12: i64):
+  v13 = icmp.ugt v12, v2
+  br v13, b5, b6
+b5: cold
+  ret v5
+b6:
+  ret v12
+fn @diamond_join
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 10
+  v4 = iconst.i64 5
+  v5 = iconst.i64 7
+  v6 = iconst.i64 20
+  v7 = iconst.i64 99
+  v8 = iconst.i64 0
+  v9 = icmp.ult v0, v3
+  br v9, b1, b3(v8)
+b1:
+  v10 = icmp.ult v1, v4
+  br v10, b3(v2), b2
+b2:
+  v11 = and.i64 v1, v5
+  jmp b3(v11)
+b3(v12: i64):
+  v13 = icmp.uge v12, v6
+  br v13, b4, b5
+b4: cold
+  ret v7
+b5:
+  ret v12
+)",
+    );
+    for name in ["subs", "room", "rotle", "down2", "sstep", "scan", "scan_h", "pick3"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("99"), t.as_str());
+    }
+    // An if-conversion of a side that is the branch's own edge into the join (`diamond`) takes the join's
+    // facts away: `v2` may be 100.
+    for name in ["room1", "down3", "sstep2", "scan_n", "pick3_n", "diamond_join"] {
+        let t = text_of(&a, name);
+        assert(t.contains("99"), t.as_str());
+    }
+    let s: []u64 = [300, 200];
+    same_result(&b, &a, "subs", s, 72);
+    let dj: []u64 = [3, 2, 100];
+    same_result(&b, &a, "diamond_join", dj, 99);
+    let e: []u64 = [200, 200];
+    same_result(&b, &a, "subs", e, 1);
+    let r: []u64 = [200, 72];
+    same_result(&b, &a, "room", r, 200);
+    let l: []u64 = [300];
+    same_result(&b, &a, "rotle", l, 32 + 160);
+    let d: []u64 = [7];
+    same_result(&b, &a, "down2", d, 5 + 3 + 1);
+    let p: []u64 = [10, 1, 2, 3, 0, 0];
+    same_result(&b, &a, "pick3", p, 3);
+}
+
+// An equality with a constant bounds the values the facts keep equal to its other side (`equal_const`):
+// `i == j && i == 5` keeps `j - 5` below 1; an inequality moves a bound it meets by one (`not_bound`):
+// `i != j`, `5 <= j <= 6` and `i == 5` keep `j - 6` below 1. With `j <= 7` (`neq_n`) the test stays.
+@test
+fn equalities_carry_constant_bounds_to_their_partners() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @eqp fn global
+sym @neq fn global
+sym @neq_n fn global
+sym @notk fn global
+fn @eqp
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 5
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = icmp.eq v0, v1
+  br v6, b1, b4
+b1:
+  v7 = icmp.eq v0, v2
+  br v7, b2, b4
+b2:
+  v8 = sub.i64 v1, v2
+  v9 = icmp.uge v8, v3
+  br v9, b3, b5
+b3: cold
+  ret v5
+b4:
+  ret v4
+b5:
+  ret v8
+fn @neq
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 5
+  v3 = iconst.i64 6
+  v4 = iconst.i64 1
+  v5 = iconst.i64 0
+  v6 = iconst.i64 99
+  v7 = icmp.ne v0, v1
+  br v7, b1, b6
+b1:
+  v8 = icmp.uge v1, v2
+  br v8, b2, b6
+b2:
+  v9 = icmp.ule v1, v3
+  br v9, b3, b6
+b3:
+  v10 = icmp.eq v0, v2
+  br v10, b4, b6
+b4:
+  v11 = sub.i64 v1, v3
+  v12 = icmp.uge v11, v4
+  br v12, b5, b7
+b5: cold
+  ret v6
+b6:
+  ret v5
+b7:
+  ret v11
+fn @neq_n
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 5
+  v3 = iconst.i64 6
+  v4 = iconst.i64 1
+  v5 = iconst.i64 0
+  v6 = iconst.i64 99
+  v7 = iconst.i64 7
+  v8 = icmp.ne v0, v1
+  br v8, b1, b6
+b1:
+  v9 = icmp.uge v1, v2
+  br v9, b2, b6
+b2:
+  v10 = icmp.ule v1, v7
+  br v10, b3, b6
+b3:
+  v11 = icmp.eq v0, v2
+  br v11, b4, b6
+b4:
+  v12 = sub.i64 v1, v3
+  v13 = icmp.uge v12, v4
+  br v13, b5, b7
+b5: cold
+  ret v6
+b6:
+  ret v5
+b7:
+  ret v12
+fn @notk
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 5
+  v2 = iconst.i64 6
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = icmp.uge v0, v1
+  br v6, b1, b5
+b1:
+  v7 = icmp.ule v0, v2
+  br v7, b2, b5
+b2:
+  v8 = icmp.ne v0, v1
+  br v8, b3, b5
+b3:
+  v9 = sub.i64 v0, v2
+  v10 = icmp.uge v9, v3
+  br v10, b4, b6
+b4: cold
+  ret v5
+b5:
+  ret v4
+b6:
+  ret v9
+)",
+    );
+    let e = text_of(&a, "eqp");
+    assert(!e.contains("99"), e.as_str());
+    let n = text_of(&a, "neq");
+    assert(!n.contains("99"), n.as_str());
+    let k = text_of(&a, "notk");
+    assert(!k.contains("99"), k.as_str());
+    let m = text_of(&a, "neq_n");
+    assert(m.contains("99"), m.as_str());
+    let x: []u64 = [5, 5];
+    same_result(&b, &a, "eqp", x, 0);
+    let y: []u64 = [5, 6];
+    same_result(&b, &a, "neq", y, 0);
+    let z: []u64 = [5, 7];
+    same_result(&b, &a, "neq_n", z, 99);
+}
+
+// Signed bounds across two values (`order_facts`): `i <s len - 2` with `i >= 0` keeps `len - 2` at least 1, so
+// it does not wrap and `i + 2 <u len` folds (`dots`); `i + 3` (`dots_n`) stays. The value a counter down by 2
+// from `len - 1` leaves with stays at most `len - 1` as a signed one (`join_arg`, `SHV_KEY`): at `i == 0` the
+// tail's `a[i]` folds (`downtail`); from `len` (`downtail_n`) it stays.
+@test
+fn signed_bounds_cross_values_and_joins() {
+    let (_b, a) = optimized(
+        M"(lir ptr 8
+sym @dots fn global
+sym @dots_n fn global
+sym @downtail fn global
+sym @downtail_n fn global
+sym @clamp fn global
+sym @clamp_n fn global
+fn @dots
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 1 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v3
+  jmp b1(v2, v2)
+b1(v7: i64, v8: i64):
+  v9 = icmp.slt v7, v6
+  br v9, b2, b4
+b2:
+  v10 = add.i64 v7, v3
+  v11 = icmp.uge v10, v1
+  br v11, b5, b3
+b3:
+  v12 = add.i64 v8, v10
+  v13 = add.i64 v7, v4
+  jmp b1(v13, v12)
+b4:
+  ret v8
+b5: cold
+  ret v5
+fn @dots_n
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 1 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = iconst.i64 3
+  v7 = sub.i64 v1, v3
+  jmp b1(v2, v2)
+b1(v8: i64, v9: i64):
+  v10 = icmp.slt v8, v7
+  br v10, b2, b4
+b2:
+  v11 = add.i64 v8, v6
+  v12 = icmp.uge v11, v1
+  br v12, b5, b3
+b3:
+  v13 = add.i64 v9, v11
+  v14 = add.i64 v8, v4
+  jmp b1(v14, v13)
+b4:
+  ret v9
+b5: cold
+  ret v5
+fn @downtail
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 2
+  v5 = iconst.i64 99
+  v6 = sub.i64 v1, v3
+  v7 = icmp.sgt v6, v2
+  br v7, b1(v6, v2), b3(v6, v2)
+b1(v8: i64, v9: i64):
+  v10 = icmp.uge v8, v1
+  br v10, b6, b2
+b2:
+  v11 = add.i64 v9, v8
+  v12 = sub.i64 v8, v4
+  v13 = icmp.sgt v12, v2
+  br v13, b1(v12, v11), b3(v12, v11)
+b3(v14: i64, v15: i64):
+  v16 = icmp.sge v14, v2
+  br v16, b4, b5
+b4:
+  v17 = icmp.uge v14, v1
+  br v17, b6, b7
+b5:
+  ret v15
+b6: cold
+  ret v5
+b7:
+  v18 = add.i64 v15, v15
+  ret v18
+fn @downtail_n
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr):
+  v1 = load.i64 v0+8 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 2
+  v5 = iconst.i64 99
+  v6 = icmp.sgt v1, v2
+  br v6, b1(v1, v2), b3(v1, v2)
+b1(v7: i64, v8: i64):
+  v9 = sub.i64 v7, v3
+  v10 = icmp.uge v9, v1
+  br v10, b6, b2
+b2:
+  v11 = add.i64 v8, v7
+  v12 = sub.i64 v7, v4
+  v13 = icmp.sgt v12, v2
+  br v13, b1(v12, v11), b3(v12, v11)
+b3(v14: i64, v15: i64):
+  v16 = icmp.sge v14, v2
+  br v16, b4, b5
+b4:
+  v17 = icmp.uge v14, v1
+  br v17, b6, b7
+b5:
+  ret v15
+b6: cold
+  ret v5
+b7:
+  v18 = add.i64 v15, v15
+  ret v18
+fn @clamp
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i64) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = icmp.eq v2, v3
+  br v6, b3, b1
+b1:
+  v7 = icmp.sgt v1, v3
+  v8 = select.i64 v7, v1, v3
+  v9 = sub.i64 v2, v4
+  v10 = icmp.slt v8, v9
+  v11 = select.i64 v10, v8, v9
+  v12 = icmp.uge v11, v2
+  br v12, b2, b4
+b2: cold
+  ret v5
+b3:
+  ret v3
+b4:
+  ret v11
+fn @clamp_n
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i64) -> i64
+  ref p0 8 inner readonly
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0+8 align 3
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 99
+  v6 = icmp.sgt v1, v3
+  v7 = select.i64 v6, v1, v3
+  v8 = sub.i64 v2, v4
+  v9 = icmp.slt v7, v8
+  v10 = select.i64 v9, v7, v8
+  v11 = icmp.uge v10, v2
+  br v11, b1, b2
+b1: cold
+  ret v5
+b2:
+  ret v10
+)",
+    );
+    for name in ["dots", "downtail", "clamp"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("99"), t.as_str());
+    }
+    // `min(max(i, 0), len - 1)` is below a nonzero `len` (`srange` of the selects, `order_decided`); with `len`
+    // possibly 0 (`clamp_n`) its test stays.
+    for name in ["dots_n", "downtail_n", "clamp_n"] {
+        let t = text_of(&a, name);
+        assert(t.contains("99"), t.as_str());
+    }
+}
+
+// Order facts that decide the checks of suffixes, prefixes, halves and masks (`order_decided`): `n - q == 0`
+// and `q >u n` fail where `q <u n` (`suffix`); `i + 1 == 0` fails for a counter below `n` (`prefix`);
+// `h & (n - 1) <u n` where `n != 0` (`mask`); `(n + 1) >> 1 <=u n` where `n + 1` does not wrap (`half`);
+// `zext(a - 1) <u y` after `zext(a) <u y` and `a != 0` (`zext`); `n - w <=u n` where `w <=u n` (`tail`).
+// Their near misses keep their tests: `q <=u n` (`suffix_le`), `h & n` (`mask_n`), `(n + 2) >> 1`
+// (`half_2`), no `a != 0` (`zext_any`), no `w <=u n` (`tail_any`).
+@test
+fn order_facts_decide_suffix_prefix_half_and_mask_checks() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @suffix fn global
+sym @prefix fn global
+sym @mask fn global
+sym @half fn global
+sym @zext fn global
+sym @tail fn global
+sym @suffix_le fn global
+sym @mask_n fn global
+sym @half_2 fn global
+sym @zext_any fn global
+sym @tail_any fn global
+sym @halfnz fn global
+sym @halfnz_any fn global
+sym @trunc fn global
+sym @trunc_other fn global
+fn @suffix
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = icmp.ult v1, v0
+  br v4, b1, b4
+b1:
+  v5 = sub.i64 v0, v1
+  v6 = icmp.eq v5, v2
+  br v6, b3, b2
+b2:
+  v7 = icmp.ugt v1, v0
+  br v7, b3, b4
+b3: cold
+  ret v3
+b4:
+  ret v2
+fn @prefix
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = icmp.ne v0, v1
+  br v4, b1(v1), b4(v1)
+b1(v5: i64):
+  v6 = add.i64 v5, v2
+  v7 = icmp.eq v6, v1
+  br v7, b3, b2
+b2:
+  v8 = icmp.ult v6, v0
+  br v8, b1(v6), b4(v6)
+b3: cold
+  ret v3
+b4(v9: i64):
+  ret v9
+fn @mask
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 99
+  v5 = icmp.eq v0, v2
+  br v5, b3, b1
+b1:
+  v6 = sub.i64 v0, v3
+  v7 = and.i64 v1, v6
+  v8 = icmp.uge v7, v0
+  br v8, b2, b4(v7)
+b2: cold
+  ret v4
+b3:
+  ret v2
+b4(v9: i64):
+  ret v9
+fn @half
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1000
+  v2 = iconst.i64 1
+  v3 = iconst.i64 99
+  v4 = iconst.i64 0
+  v5 = icmp.ult v0, v1
+  br v5, b1, b3
+b1:
+  v6 = add.i64 v0, v2
+  v7 = lshr.i64 v6, v2
+  v8 = icmp.ugt v7, v0
+  br v8, b2, b4(v7)
+b2: cold
+  ret v3
+b3:
+  ret v4
+b4(v9: i64):
+  ret v9
+fn @zext
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i32 0
+  v3 = iconst.i32 1
+  v4 = iconst.i64 98
+  v5 = iconst.i64 99
+  v6 = iconst.i64 0
+  v7 = zext.i64 v0
+  v8 = icmp.uge v7, v1
+  br v8, b4, b1
+b1:
+  v9 = icmp.ne v0, v2
+  br v9, b2, b6
+b2:
+  v10 = sub.i32 v0, v3
+  v11 = zext.i64 v10
+  v12 = icmp.uge v11, v1
+  br v12, b5, b3
+b3:
+  ret v11
+b4: cold
+  ret v4
+b5: cold
+  ret v5
+b6:
+  ret v6
+fn @tail
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = icmp.ule v1, v0
+  br v4, b1, b3
+b1:
+  v5 = sub.i64 v0, v1
+  v6 = icmp.ugt v5, v0
+  br v6, b2, b4(v5)
+b2: cold
+  ret v3
+b3:
+  ret v2
+b4(v7: i64):
+  ret v7
+fn @suffix_le
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = icmp.ule v1, v0
+  br v4, b1, b3
+b1:
+  v5 = sub.i64 v0, v1
+  v6 = icmp.eq v5, v2
+  br v6, b2, b3
+b2: cold
+  ret v3
+b3:
+  ret v2
+fn @mask_n
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = icmp.eq v0, v2
+  br v4, b3, b1
+b1:
+  v5 = and.i64 v1, v0
+  v6 = icmp.uge v5, v0
+  br v6, b2, b4(v5)
+b2: cold
+  ret v3
+b3:
+  ret v2
+b4(v7: i64):
+  ret v7
+fn @half_2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1000
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 99
+  v5 = iconst.i64 0
+  v6 = icmp.ult v0, v1
+  br v6, b1, b3
+b1:
+  v7 = add.i64 v0, v3
+  v8 = lshr.i64 v7, v2
+  v9 = icmp.ugt v8, v0
+  br v9, b2, b4(v8)
+b2: cold
+  ret v4
+b3:
+  ret v5
+b4(v10: i64):
+  ret v10
+fn @zext_any
+  sig (i32, i64) -> i64
+b0(v0: i32, v1: i64):
+  v2 = iconst.i32 1
+  v3 = iconst.i64 98
+  v4 = iconst.i64 99
+  v5 = zext.i64 v0
+  v6 = icmp.uge v5, v1
+  br v6, b3, b1
+b1:
+  v7 = sub.i32 v0, v2
+  v8 = zext.i64 v7
+  v9 = icmp.uge v8, v1
+  br v9, b4, b2
+b2:
+  ret v8
+b3: cold
+  ret v3
+b4: cold
+  ret v4
+fn @tail_any
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 99
+  v3 = sub.i64 v0, v1
+  v4 = icmp.ugt v3, v0
+  br v4, b1, b2(v3)
+b1: cold
+  ret v2
+b2(v5: i64):
+  ret v5
+fn @halfnz
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = lshr.i64 v0, v1
+  v5 = icmp.eq v4, v2
+  br v5, b3, b1
+b1:
+  v6 = sub.i64 v0, v1
+  v7 = icmp.uge v6, v0
+  br v7, b2, b4
+b2: cold
+  ret v3
+b3:
+  ret v2
+b4:
+  v8 = sub.i64 v4, v1
+  v9 = icmp.uge v8, v0
+  br v9, b2, b5
+b5:
+  v10 = add.i64 v6, v8
+  ret v10
+fn @halfnz_any
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = iconst.i64 99
+  v3 = sub.i64 v0, v1
+  v4 = icmp.uge v3, v0
+  br v4, b1, b2
+b1: cold
+  ret v2
+b2:
+  ret v3
+fn @trunc
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 99
+  v4 = trunc.i32 v0
+  v5 = icmp.ult v1, v4
+  br v5, b1, b3
+b1:
+  v6 = zext.i64 v1
+  v7 = icmp.uge v6, v0
+  br v7, b2, b4
+b2: cold
+  ret v3
+b3:
+  ret v2
+b4:
+  ret v6
+fn @trunc_other
+  sig (i64, i32, i64) -> i64
+b0(v0: i64, v1: i32, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 99
+  v5 = trunc.i32 v0
+  v6 = icmp.ult v1, v5
+  br v6, b1, b3
+b1:
+  v7 = zext.i64 v1
+  v8 = icmp.uge v7, v2
+  br v8, b2, b4
+b2: cold
+  ret v4
+b3:
+  ret v3
+b4:
+  ret v7
+)",
+    );
+    // `i / 2 != 0` makes `i` at least 1, and `(i >> 1) - 1` is below `i` (`halfnz`); `zext(i) <u len` where
+    // `i <u trunc(len)` (`trunc`). Near misses: no `i / 2 != 0` (`halfnz_any`), another bound (`trunc_other`).
+    for name in ["suffix", "prefix", "mask", "half", "zext", "tail", "halfnz", "trunc"] {
+        let t = text_of(&a, name);
+        assert(!t.contains("99"), t.as_str());
+    }
+    for name in ["suffix_le", "mask_n", "half_2", "zext_any", "tail_any", "halfnz_any", "trunc_other"] {
+        let t = text_of(&a, name);
+        assert(t.contains("99"), t.as_str());
+    }
+    let s: []u64 = [5, 2];
+    same_result(&b, &a, "suffix", s, 0);
+    let s63: []u64 = [6, 3];
+    same_result(&b, &a, "mask", s63, 1);
+    same_result(&b, &a, "tail", s, 3);
+    let s5: []u64 = [5, 5];
+    same_result(&b, &a, "suffix_le", s5, 99);
+    same_result(&b, &a, "mask_n", s63, 2);
+    let n: []u64 = [7];
+    same_result(&b, &a, "prefix", n, 7);
+    same_result(&b, &a, "half", n, 4);
+    let z: []u64 = [0];
+    same_result(&b, &a, "half_2", z, 99);
+    let a39: []u64 = [3, 9];
+    same_result(&b, &a, "zext", a39, 2);
+    let a09: []u64 = [0, 9];
+    same_result(&b, &a, "zext_any", a09, 99);
+    let a25: []u64 = [2, 5];
+    same_result(&b, &a, "tail_any", a25, 99);
+    let h6: []u64 = [6];
+    same_result(&b, &a, "halfnz", h6, 7);
+    let t53: []u64 = [5, 3];
+    same_result(&b, &a, "trunc", t53, 3);
+}
+
+// `i + 3 <u n` where `i <u n & -4` and `i` counts from 0 by 4: both are multiples of 4, so `i` is at most
+// `(n & -4) - 4` and the test folds (`low_zeros`). A counter by 2, or a bound rounded to a multiple of 2,
+// can pass `n`, and the test stays.
+@test
+fn a_stride_below_a_bound_of_its_multiple_stays_below_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @by4 fn global
+sym @by2 fn global
+sym @mask2 fn global
+fn @by4
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -4
+  v2 = iconst.i64 4
+  v3 = iconst.i64 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = and.i64 v0, v1
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b4
+b2:
+  v9 = add.i64 v7, v3
+  v10 = icmp.uge v9, v0
+  br v10, b3, b5
+b3: cold
+  ret v5
+b4:
+  ret v7
+b5:
+  v11 = add.i64 v7, v2
+  jmp b1(v11)
+fn @by2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -4
+  v2 = iconst.i64 2
+  v3 = iconst.i64 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = and.i64 v0, v1
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b4
+b2:
+  v9 = add.i64 v7, v3
+  v10 = icmp.uge v9, v0
+  br v10, b3, b5
+b3: cold
+  ret v5
+b4:
+  ret v7
+b5:
+  v11 = add.i64 v7, v2
+  jmp b1(v11)
+fn @mask2
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -2
+  v2 = iconst.i64 4
+  v3 = iconst.i64 3
+  v4 = iconst.i64 0
+  v5 = iconst.i64 99
+  v6 = and.i64 v0, v1
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v6
+  br v8, b2, b4
+b2:
+  v9 = add.i64 v7, v3
+  v10 = icmp.uge v9, v0
+  br v10, b3, b5
+b3: cold
+  ret v5
+b4:
+  ret v7
+b5:
+  v11 = add.i64 v7, v2
+  jmp b1(v11)
+)",
+    );
+    let f = text_of(&a, "by4");
+    assert(!f.contains("99"), f.as_str());
+    let t = text_of(&a, "by2");
+    assert(t.contains("99"), t.as_str());
+    let m = text_of(&a, "mask2");
+    assert(m.contains("99"), m.as_str());
+    let n9: []u64 = [9];
+    same_result(&b, &a, "by4", n9, 8);
+    same_result(&b, &a, "by2", n9, 99);
+    let n10: []u64 = [10];
+    same_result(&b, &a, "mask2", n10, 99);
+    same_result(&b, &a, "by4", n10, 8);
+}
+
+// A store of an inlined call's copy (`Body.scopes`) through its exclusive parameter writes no byte another
+// pointer of the copy reaches, but a pointer of the caller outside the copy may reach any: a row's length
+// loaded before the copy of `rows[k].clear()` is loaded again after it (`carry`), as row `i` may be row `k`.
+@test
+fn a_store_through_a_scope_root_kills_what_the_caller_loaded() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+file f0 "rows.spc"
+sym @row fn global noinline
+sym @top fn global
+fn @row
+  file f0
+  sig (ptr, i64, i64) -> i64
+  ref p0 24 noalias
+  owned p0 0
+  scope @7:5 g0 v8
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = load.ptr v0 align 3 tbaa 8
+  v5 = ptradd v4, v1 * 24 inbounds nonnull
+  v6 = load.i64 v5+8 align 3 tbaa 4
+  v7 = icmp.ult v3, v6
+  br v7, b1, b2
+b1:
+  v8 = ptradd v4, v2 * 24 inbounds nonnull
+  store v3, v8+8 align 3 tbaa 4 !7:5@7:5
+  v9 = load.i64 v5+8 align 3 tbaa 4
+  ret v9
+b2:
+  ret v3
+fn @top
+  sig (i64, i64) -> i64
+  slot s0 size 24 align 3
+  slot s1 size 48 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 5
+  store v3, v2 align 3
+  store v4, v3+8 align 3
+  store v4, v3+32 align 3
+  v5 = call.i64 @row(v2, v0, v1) : (ptr, i64, i64) -> i64
+  ret v5
+)",
+    );
+    let t = text_of(&a, "row");
+    assert(count_of(&t, "load.i64") == 2, t.as_str());
+    let same: []u64 = [1, 1];
+    same_result(&b, &a, "top", same, 0);
+    let other: []u64 = [0, 1];
+    same_result(&b, &a, "top", other, 5);
 }
 
 // Past its copy, an inlined call's root is a pointer of the class it comes from: `&mut self.c` passed to
@@ -6709,7 +10238,17 @@ b0(v0: i64):
         0,
         false,
         il::FAST,
-        lu::Budgets { peel: 300, partial: 0, version: 200, unswitch: 50, rotate: 8, vector: 4, interleave: 4, fin: 0 },
+        lu::Budgets {
+            peel: 300,
+            partial: 0,
+            version: 200,
+            version_checks: u32::MAX,
+            unswitch: 50,
+            rotate: 8,
+            vector: 4,
+            interleave: 4,
+            fin: 0,
+        },
     );
     let x: []u64 = [0x2020202041202020];
     same_result(&b, &a, "top", x, 3);
@@ -8098,7 +11637,17 @@ b3:
   v19 = load.i32 v5 align 2
   ret v19
 )";
-    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    let bu = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 4,
+        interleave: 4,
+        fin: 0,
+    };
     let (b, a) = optimized_loops(src, 0, false, bu);
     // (the length of `a`, the length of `d`): an empty `a` with an empty `d`, one with a non-empty `d`, a
     // non-empty `a` with an empty `d` (the panic), sums of 1, 4, 5, 13 and 16 squares.
@@ -8208,7 +11757,17 @@ b2:
   v7 = mul.i32 v0, v6
   ret v7
 )";
-    let none = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    let none = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 0,
+        interleave: 0,
+        fin: 0,
+    };
     let (b, a) = optimized_split(src, 0, false, il::SPEED, none, false, true);
     let tc = text_of(&a, "class");
     assert(tc.contains("switch"), tc.as_str());
@@ -8666,7 +12225,17 @@ data @TAG size 1 align 0
         0,
         false,
         il::SPEED,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
         false,
         true,
     );
@@ -10146,7 +13715,17 @@ fn optimized_copying(text: str, arg_copy: u32) (Package, Package) {
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.arg_copy = arg_copy;
     let none = Vector::<bool>::new();
-    let bu = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 };
+    let bu = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 0,
+        interleave: 0,
+        fin: 0,
+    };
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
     let mut v = verify::Verifier::new();
     for i in 0..after.syms.len() {
@@ -10920,6 +14499,7 @@ b7:
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 0,
@@ -11061,7 +14641,17 @@ data @x size 4 align 2 bytes 07000000
 )",
         0,
         false,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 512,
+        },
     );
     let t = text_of(&a, "acc");
     assert(count_of(&t, "load.") == 2 && count_of(&t, "store ") == 1 && t.contains("mul.i32"), t.as_str());
@@ -11656,7 +15246,17 @@ data @src size 64 align 3 bytes 000102030405060708090a0b0c0d0e0f1011121314151617
 )",
         0,
         false,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 512 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 512,
+        },
     );
     let f = text_of(&a, "fill");
     assert(f.contains("memset") && !f.contains("store"), f.as_str());
@@ -11928,6 +15528,41 @@ b3:
     }
     let w: [u64; 2] = [5, 0xFFFFFFFFFFFFFFFF];
     same_result(&b, &a, "from", w[0..2], 5);
+}
+
+// A loop that leaves where `i + 3 <u n` holds runs while it fails: its counter steps past the wrap of
+// `i + 3`, where `i <u n - min(n, 3)` would answer otherwise, so the test stays (`offset_test`).
+@test
+fn a_test_that_leaves_where_it_holds_stays() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @inv fn global
+fn @inv
+  sig (i16) -> i64
+b0(v0: i16):
+  v1 = iconst.i16 -5536
+  v2 = iconst.i16 3
+  v3 = iconst.i16 1
+  v4 = iconst.i64 0
+  jmp b1(v1, v4)
+b1(v5: i16, v6: i64):
+  v7 = add.i16 v5, v2
+  v8 = icmp.ult v7, v0
+  br v8, b3, b2
+b2:
+  v9 = zext.i64 v5
+  v10 = add.i64 v6, v9
+  v11 = add.i16 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+)",
+    );
+    let p = text_of(&a, "inv");
+    assert(!p.contains("select"), p.as_str());
+    // The sum of 60000 to 65532: at 65533 `v7` wraps to 0, below 7.
+    let x: [u64; 1] = [7];
+    same_result(&b, &a, "inv", x[0..1], 347284278);
 }
 
 // A test `i + 3 <u n` of a counter from 0 by 2 becomes `i <u n - min(n, 3)` (`offset_test`) where a branch
@@ -12440,6 +16075,7 @@ data @arr size 16 align 2 bytes 07000000fdffffffa0860100ffffff7f
                     peel: 0,
                     partial: 0,
                     version: 0,
+                    version_checks: u32::MAX,
                     unswitch: 0,
                     rotate: 0,
                     vector: 4,
@@ -12526,6 +16162,7 @@ b0(v0: i32):
                     peel: 0,
                     partial: 0,
                     version: 0,
+                    version_checks: u32::MAX,
                     unswitch: 0,
                     rotate: 0,
                     vector: 4,
@@ -12753,6 +16390,7 @@ fn optimized_target(text: str, vector: u32, ccmp: bool) (Package, Package) {
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: nv,
@@ -12970,6 +16608,7 @@ b0(v0: i64, v1: ptr):
                 peel: 0,
                 partial: 0,
                 version: 0,
+                version_checks: u32::MAX,
                 unswitch: 0,
                 rotate: 0,
                 vector: 2,

@@ -96,7 +96,7 @@ native object's key.
 | `inline-functions` | 2, 3, s | Calls inline past the ones that shrink the code (budgets per level: `inline_budget` in `src/driver/emit.spc`) |
 | `unroll-loops` | 2, 3 | Loops whose trip count is known unroll fully (copies of up to 300 instructions at 3, 150 at 2) |
 | `unswitch-loops` | 3 | A loop copies itself for each side of a branch on a value it does not change (up to 50 instructions) |
-| `version-loops-for-bounds` | 3 | A loop copies itself without its bounds checks, entered when one test before it proves them all |
+| `version-loops-for-bounds` | 2, 3 | A loop of up to 200 instructions copies itself without its bounds checks, entered when one test before it proves them all: any number of checks at 3, one at 2 (a check against the lesser of two lengths counts as two; `version_checks` in `src/driver/emit.spc`) |
 | `vectorize` | 2, 3, s | Counted loops over slices, and loops that step pointers beside a counter, run 16-byte vectors, 4 interleaved (1 at s); what an interleaved loop leaves runs one vector at a time (an epilogue); isomorphic straight-line values, a loop's carried ones too, pack into vectors (`src/lir/slp.spc`); arm64 and x86-64 only |
 | `strict-aliasing` | 2, 3, s, z | A typed access touches no object of another scalar type (language skill, `operations.md`) |
 | `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too |

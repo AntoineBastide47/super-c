@@ -75,9 +75,13 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | The pool records and `lines` entries a body names (dead ones dropped; `compact_lines` keeps equal entries apart) | `Body::compact_pool`, at the end of `Run::job`; `lines` also in `Lower::body` before `Package::define` | `Body.pool`, `Body.lines` | the next pass that adds records |
 | Rare blocks | `Opt::estimate` | `BLOCK_RARE` flags on the body | any block change; codegen reads them too |
 | Loop weights | `Opt::weigh` | `Opt` | any edge or block change |
-| Unsigned upper bound of a value | `Opt::ubound` | not stored | per call |
+| Unsigned upper bound, lower bound and signed range of a value | `Opt::ubound`, `lbound`, `srange` | not stored | per call |
+| Order facts of the branches in scope: `x <u y`, the values `y` is at most, signed bounds | `Opt::order_facts` (`upper_parts`), `note_signed`; read by `order_decided` | the walk's scoped tables `rel`, `ub` (signed bounds under `SLO_KEY`, `SHI_KEY`) | the scope's end |
+| Bounds of a loop header's parameters: at most an outside value, a signed counter's range | `Opt::param_bounds` (`edge_bound`, `note_le`), `signed_counter` | the walk's scoped tables | the loop's scope |
+| What the edges into a join block give its integer parameters: unsigned and signed ranges, values from before the join they are at most | `Opt::join_out` per edge, `join_in` at the join | `Opt` (`jat`, `jcnt`, `jfacts`: `JoinFact`) | the walk (cleared at its start) |
 | A loop's blocks and the block of each instruction for the loop transforms | `LoopOpt::shape` (from `Opt`'s `lb_at`, `lbs`), `LoopOpt::candidates` (a copy of `blk_of`, `pblock`, which the transforms extend) | `LoopOpt` (`inl`, `lblocks`, `owner`, `powner`) | the loop's transform |
 | Loop counter, trip count, exit test | `LoopOpt::counted_by`, `trip`, `cf_test` (`lir::loops`) | `LoopOpt`, per loop | the loop's transform |
+| The bounds checks a versioned loop drops and their count (a check against the lesser of two lengths counts two) | `LoopOpt::checks` | `LoopOpt` (`gchecks`, `cap_len`, `cap_v`) | the loop's transform |
 | Header counts and shape test of a loop | `LoopOpt::header_counts` | caller | the loop's transform |
 | Closed form's leaving values and their targets | `LoopOpt::close_plan` (no change), then `close_apply` | `LoopOpt` (`lout`, `tgt_of`, `tused`, `cf_leave`) | `close_apply` |
 | Promotion candidates, the slots addresses derive (`collect`, for `merges` too) | `Promoter::collect`, `Promoter::merges` (`lir::promote`; graph and operand lists from `Opt`) | `Promoter` | the promotion |

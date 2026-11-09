@@ -1656,6 +1656,52 @@ struct EnumL {
 
 extend EnumL as Copy {}
 
+// Whether body `b` may change the header of view parameter `l`: it assigns the binding or a field of it
+// (a call result included), borrows either mutably or as a raw address (`&mut a`, a `&mut self` method
+// of the view), or a closure captures the binding (a capture by reference names the place itself). An
+// element store goes through the header's pointer, not into the header.
+const fn header_written(b: &irc::CoreBody, l: u32) bool {
+    for k in 0..b.blocks.len() {
+        let bb = b.blocks.at(k);
+        for si in bb.stmt_start..bb.stmt_start + bb.stmt_len {
+            let s = b.statements.at(si as usize);
+            if s.kind != irc::ST_ASSIGN {
+                continue;
+            }
+            if header_place(b, l, s.place) {
+                return true;
+            }
+            let rv = b.rvalues.at(s.rvalue as usize);
+            if (rv.kind == irc::RV_REF && rv.b == 1 || rv.kind == irc::RV_ADDR) && header_place(b, l, rv.a) {
+                return true;
+            }
+            if rv.kind == irc::RV_CLOSURE {
+                for q in 0..rv.b {
+                    let op = b.operands.at(b.oper_pool[(rv.a + q) as usize] as usize);
+                    if op.kind != irc::OP_CONST && header_place(b, l, op.data) {
+                        return true;
+                    }
+                }
+            }
+        }
+        let t = &bb.term;
+        if t.kind == irc::TM_CALL {
+            for i in 0..t.dests_len {
+                if header_place(b, l, b.dest_pool[(t.dests_start + i) as usize]) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+// Whether place `pl` of `b` is local `l` or a field of it: its header, not an element.
+const fn header_place(b: &irc::CoreBody, l: u32, pl: u32) bool {
+    let p = b.places.at(pl as usize);
+    return p.base == l && (p.proj_len == 0 || b.projections.at(p.proj_start as usize).kind == irc::PJ_FIELD);
+}
+
 /// `v` rounded up to a multiple of `a`.
 pub(package) const fn round_up(v: u32, a: u32) u32 {
     if a <= 1 {
@@ -2888,7 +2934,7 @@ extend Lower {
     // the language keeps its elements unchanged during the call (`str::from_raw`'s promise for a `str`).
     // 0 for any other.
     fn view_ref(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, l: u32) u32 {
-        if b.locals[l as usize].is_mutable {
+        if b.locals[l as usize].is_mutable && header_written(b, l) {
             return 0;
         }
         let mut rm = b.module;

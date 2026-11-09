@@ -84,6 +84,8 @@ const MAX_OUT: usize = 32;
 // A loop versions on at most MAX_CHECKS bounds checks; a vectorized loop checks at most MAX_CHECKS pairs
 // of ranges.
 const MAX_CHECKS: usize = 8;
+// `LoopOpt::inv_expr` reads sums of invariants at most INV_DEPTH deep.
+const INV_DEPTH: u32 = 3;
 // The fewest bytes of a vector the vectorizer makes; it makes the target's widest (`LoopOpt.vbytes`).
 const VBYTES: u32 = 16;
 // The blocks of a chain unroll and jam takes before or after the inner loop (`jam_chain`).
@@ -154,7 +156,10 @@ pub(package) struct LoopOpt {
     fixed: Vector<bool>, // per instruction, whether a copy computes it from constants (`residual`)
     // Bounds-check versioning (`checks`): the blocks whose branches the fast copy drops, the side each one
     // keeps (0: its taken edge, 1: the other), and the guard's comparisons (`n <= len` each; for a check of
-    // `q << gsh + goff`, or `q << gsh + gbase` with `gbase` not VNONE, `n <= bound(len)`: `checks`).
+    // `q << gsh + goff`, or `q << gsh + gbase` with `gbase` not VNONE, `n <= bound(len)`; of `q - gsub`,
+    // `n <= len + gsub`; of `q - gsubv` with `gsubv` not VNONE, `n <= len + gsubv` after the start test
+    // `gsubv <= q0`; of `q * gmul + c` with `gmul` not VNONE (`c` `gbase`, or `goff` where that is VNONE),
+    // `(n - 1) * gmul + c <u len` without a wrap: `checks`).
     fixes: Vector<u32>,
     fside: Vector<u8>,
     gx: Vector<Value>,
@@ -162,7 +167,23 @@ pub(package) struct LoopOpt {
     gsh: Vector<u8>,
     goff: Vector<u64>,
     gbase: Vector<Value>,
+    gsub: Vector<u64>,
+    gsubv: Vector<Value>,
+    gmul: Vector<Value>,
     gcond: u16,
+    // `checks` of a rotated loop (`rotated_test`): the counter's header parameter index the guard tests
+    // below `gn` at the start, NONE for another loop.
+    grot: u32,
+    // `checks`: the bounds checks the fixes drop, one against the least of two lengths (`bound_min`'s
+    // select) counting as two.
+    gchecks: u32,
+    // `checks` of an index its form bounds (`capped`): per length `cap_len` the bound, a value from before
+    // the loop (`cap_v`; VNONE: the constant `cap_k`) the index is at most, or below where `cap_x`. The
+    // guard tests `cap <u len` (`cap <=u len` for `cap_x`).
+    cap_len: Vector<Value>,
+    cap_v: Vector<Value>,
+    cap_k: Vector<u64>,
+    cap_x: Vector<bool>,
     // `checks`: the exit test's bound and comparison, whether its in-loop side is the taken edge, whether
     // every check is of the counter plus a constant or a value from before the loop (`q + c <u len`);
     // `clip_ok` of that loop and its latch.
@@ -356,6 +377,7 @@ pub(package) struct LoopOpt {
     cf_need: Vector<bool>,
     cf_poly: Vector<bool>,
     cf_leave: Vector<Value>, // the values the loop leaves with: the exit edge's arguments, then `lout`
+    cf_read: Vector<bool>, // per value of `cf_leave`, whether the exit's target reads it
     cf_val: Vector<Value>,
     cf_pv: Vector<Value>,
     // Unroll and jam (`jam_factor`): the outer header, its preheader, the inner header and body; the inner
@@ -403,6 +425,9 @@ pub(package) struct Budgets {
     pub(package) peel: u32,
     pub(package) partial: u32,
     pub(package) version: u32,
+    // The most bounds checks a loop drops when it versions (u32::MAX: no limit); one against the least of
+    // two lengths counts as two (`gchecks`).
+    pub(package) version_checks: u32,
     pub(package) unswitch: u32,
     pub(package) rotate: u32,
     pub(package) vector: u32,
@@ -440,6 +465,15 @@ extend LoopOpt {
             gsh: Vector::<u8>::new(),
             goff: Vector::<u64>::new(),
             gbase: Vector::<Value>::new(),
+            gsub: Vector::<u64>::new(),
+            gsubv: Vector::<Value>::new(),
+            gmul: Vector::<Value>::new(),
+            grot: NONE,
+            gchecks: 0,
+            cap_len: Vector::<Value>::new(),
+            cap_v: Vector::<Value>::new(),
+            cap_k: Vector::<u64>::new(),
+            cap_x: Vector::<bool>::new(),
             gy: Vector::<Value>::new(),
             gcond: 0,
             gn: VNONE,
@@ -563,6 +597,7 @@ extend LoopOpt {
             cf_need: Vector::<bool>::new(),
             cf_poly: Vector::<bool>::new(),
             cf_leave: Vector::<Value>::new(),
+            cf_read: Vector::<bool>::new(),
             cf_val: Vector::<Value>::new(),
             cf_pv: Vector::<Value>::new(),
             jb: [0, 0, 0, 0],
@@ -675,6 +710,17 @@ extend LoopOpt {
                 }
                 continue;
             }
+            // Bounds checks versioning takes: first, so that a later round vectorizes the copy without
+            // them rather than a vector loop that tests them each step.
+            if size <= bu.version && self.checks(b, ptr, h, p, u) && self.gchecks <= bu.version_checks {
+                if self.close(b, h, dpre, dpost) {
+                    self.gclip = self.clip_ok(b, h, u, dpre, dpost);
+                    self.gu = u;
+                    self.version(b, h, p, VNONE);
+                    any = true;
+                }
+                continue;
+            }
             if bu.vector != 0 && vec >= VBYTES && self.vplan(b, ptr, fmath, h, p, u, cl, false) {
                 self.vectorize(b, h, p, u, self.vcopies(b, bu.vector));
                 any = true;
@@ -761,15 +807,6 @@ extend LoopOpt {
                     any = true;
                     continue;
                 }
-            }
-            if size <= bu.version && self.checks(b, ptr, h, p, u) {
-                if self.close(b, h, dpre, dpost) {
-                    self.gclip = self.clip_ok(b, h, u, dpre, dpost);
-                    self.gu = u;
-                    self.version(b, h, p, VNONE);
-                    any = true;
-                }
-                continue;
             }
             if size <= bu.unswitch {
                 let g = self.invariant_branch(b);
@@ -943,6 +980,32 @@ extend LoopOpt {
                 self.cf_leave.push(self.lout[q]);
             }
         }
+        // `lout` holds the values every exit lands, a failure path's too: a loop that stays gains by those its
+        // exit's target reads alone.
+        let nout = b.edge_nargs(out0) as usize;
+        fill(&mut self.cf_read, self.cf_leave.len(), pure);
+        for q in 0..nout {
+            self.cf_read[q] = true;
+        }
+        if !pure && self.cf_leave.len() > nout {
+            let tg = b.edge_target(out0);
+            for k in 0..self.tgt_of.len() {
+                if self.tgt_of[k] != tg {
+                    continue;
+                }
+                let bk = b.blocks[k];
+                for i in bk.start..bk.start + bk.len {
+                    self.outside_uses(b, b.insts[i as usize]);
+                    for u in 0..self.uses.len() {
+                        for q in nout..self.cf_leave.len() {
+                            if self.cf_leave[q] == self.uses[u] {
+                                self.cf_read[q] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
         self.cf_resolve(b, ptr);
         // The values that leave as polynomials in their types' bits, of degrees up to CF_DEG (`cf_poly`):
         // all of them when the loop goes, at least one when it stays.
@@ -957,7 +1020,7 @@ extend LoopOpt {
         let known = is_const(b, self.cf_init[qi]) && (self.cf_bound == VNONE || is_const(b, self.cf_bound));
         for q in 0..na {
             let v = self.cf_leave[q as usize];
-            if !pure && !known && (v == self.cf_q || v == self.cf_x || v == qn) {
+            if !pure && !known && (v == self.cf_q || v == self.cf_x || v == qn) || !self.cf_read[q as usize] {
                 continue;
             }
             if self.defined_in(v) {
@@ -1641,11 +1704,14 @@ extend LoopOpt {
         };
         let mut far = ast::pick(self.cf_up, tmax, tmin);
         if is_const(b, self.cf_bound) {
+            // The counted test keeps the step past the last value from wrapping (`cf_limit`), so the exit
+            // value fits; adding the bound last keeps the sum in range at the type's extremes.
             let bv = int_value(raw_const(b, self.cf_bound), w, self.cf_signed);
+            let d = c - 1 + ns;
             far = if self.cf_up {
-                bv + ns + c - 1
+                bv + d
             } else {
-                bv - ns - c + 1
+                bv - d
             };
         }
         f.rng = true;
@@ -2453,7 +2519,8 @@ extend LoopOpt {
         if self.vaccs == 0 || regs == 0 {
             return n;
         }
-        return n.min(self.vaccs / regs).max(1);
+        let c = n.min(self.vaccs / regs).max(1);
+        return 1u32 << 31 - c.leading_zeros() as u32;
     }
 
     // The lanes of the plan's vectors: a register of the widest lane, or past a width ratio of 2 those of
@@ -6627,7 +6694,9 @@ extend LoopOpt {
     // `i << s + c` wherever `n <= bound(len)`, with `bound(len)` `((len - c - 1) >> s) + 1` when `len > c`,
     // else 0: then `(n - 1) << s + c` stays below `len` and wraps nowhere. The exit test may also keep
     // `i + k` below or at most `n`, or `i` below two bounds (`offset_head`), and a check may be a range's
-    // (`range_check`, `group_check`). Sets `fixes`, `fside` and the guard's `gx` (the `n`s), `gy` (the
+    // (`range_check`, `group_check`). A check of `i - c` from a start of at least `c` holds wherever `n <=
+    // len + c` (`counted_from`, `counted_from_value`), one of `i * w + c` wherever `(n - 1) * w + c <u len`
+    // without a wrap (`scaled`). Sets `fixes`, `fside` and the guard's `gx` (the `n`s), `gy` (the
     // `len`s, VNONE for `offset_head`'s wrap test), `gsh`, `goff` and `gbase`, one comparison per `n`,
     // `len`, shift and base. The loop with the checks a guard keeps (`BLOCK_NOVEC`) has none.
     fn checks(self: &mut Self, b: &Body, ptr: u32, h: u32, p: u32, u: u32) bool {
@@ -6638,6 +6707,14 @@ extend LoopOpt {
         self.gsh.truncate(0);
         self.goff.truncate(0);
         self.gbase.truncate(0);
+        self.gsub.truncate(0);
+        self.gsubv.truncate(0);
+        self.gmul.truncate(0);
+        self.gchecks = 0;
+        self.cap_len.truncate(0);
+        self.cap_v.truncate(0);
+        self.cap_k.truncate(0);
+        self.cap_x.truncate(0);
         if (b.blocks[h as usize].flags & BLOCK_NOVEC) != 0 {
             return false;
         }
@@ -6651,8 +6728,24 @@ extend LoopOpt {
         if in_taken == self.inl[b.edge_target(t.c) as usize] {
             return false;
         }
-        let (oq, step) = self.offset_head(b, ptr, h, p, u, t.a, in_taken);
-        if ci.op != O_ICMP && oq == VNONE {
+        // Rotated: the header's branch enters a cold block (a check), the latch's test `q + 1 <u n` the
+        // header (`rotated_test`).
+        let (rq, rn) = if u != h && (cold(b, b.edge_target(t.b)) || cold(b, b.edge_target(t.c))) {
+            self.rotated_test(b, h, u)
+        } else {
+            (VNONE, VNONE)
+        };
+        let rot = rq != VNONE;
+        self.grot = ast::pick(rot, (rq & ~VPARAM) - b.blocks[h as usize].param_start, NONE);
+        if rot {
+            self.hn.truncate(0);
+        }
+        let (oq, step) = if rot {
+            (VNONE, 0u64)
+        } else {
+            self.offset_head(b, ptr, h, p, u, t.a, in_taken)
+        };
+        if ci.op != O_ICMP && oq == VNONE && !rot {
             return false;
         }
         if step != 0 {
@@ -6662,10 +6755,13 @@ extend LoopOpt {
             self.gsh.push(0);
             self.goff.push(step);
             self.gbase.push(VNONE);
+            self.gsub.push(0);
+            self.gsubv.push(VNONE);
+            self.gmul.push(VNONE);
         }
         // The comparison read as `q < n` on the in-loop side; `q != n` too, by steps of 1 from at most `n`
         // (`gq`: the guard checks the start).
-        let ne = oq == VNONE && (in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ);
+        let ne = !rot && oq == VNONE && (in_taken && ci.aux == C_NE || !in_taken && ci.aux == C_EQ);
         let hb0 = b.blocks[h as usize];
         let pa = (ci.a & VPARAM) != 0 && (ci.a & ~VPARAM) >= hb0.param_start && (ci.a & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
         let pb = (ci.b & VPARAM) != 0 && (ci.b & ~VPARAM) >= hb0.param_start && (ci.b & ~VPARAM) < hb0.param_start + hb0.param_len as u32;
@@ -6680,11 +6776,13 @@ extend LoopOpt {
         } else {
             VNONE
         };
-        self.grev = oq == VNONE && qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
+        self.grev = !rot && oq == VNONE && qd != VNONE && self.steps_down(b, h, u, qd, (qd & ~VPARAM) - hb0.param_start);
         if self.grev {
             self.gq = (qd & ~VPARAM) - hb0.param_start;
         }
-        let (q, n, cond) = if oq != VNONE {
+        let (q, n, cond) = if rot {
+            (rq, rn, C_ULT)
+        } else if oq != VNONE {
             (oq, self.hn[0], C_ULT)
         } else if self.grev {
             (qd, VNONE, C_ULT)
@@ -6713,7 +6811,7 @@ extend LoopOpt {
         self.gn = n;
         self.gcmp = cond;
         self.gin = in_taken;
-        self.gplain = true;
+        self.gplain = !rot;
         if ne && !self.grev {
             let qi = (q & ~VPARAM) - hb.param_start;
             if !self.steps_by_one(b, h, u, q, qi) {
@@ -6737,7 +6835,7 @@ extend LoopOpt {
         // The checks: a branch whose one edge enters a cold block, on `q <u len`.
         for j in 0..self.lblocks.len() {
             let k = self.lblocks[j];
-            if k == h {
+            if k == h && !rot {
                 continue;
             }
             let bt = term(b, k);
@@ -6762,8 +6860,68 @@ extend LoopOpt {
                 continue;
             }
             // `x <u len` holds on the edge that does not fail, `x` of `q` (counting down, `x` is `q - 1`).
-            let (mut sa, oa, ba) = self.affine(b, ptr, bc.a, q);
-            let (mut sb, ob, bb) = self.affine(b, ptr, bc.b, q);
+            let (mut sa, mut oa, mut ba) = self.affine(b, ptr, bc.a, q);
+            let (mut sb, mut ob, mut bb) = self.affine(b, ptr, bc.b, q);
+            // `q - k` of a counter from at least `k` by steps of 1 (`counted_from`): below `len` wherever
+            // `n <= len + k`.
+            let up_from = rsh == 0xFF && !self.grev && cond == C_ULT && self.hn.len() == 0;
+            let mut ka = ast::pick(up_from && sa == 0xFF, self.counted_from(b, h, p, u, bc.a, q), 0u64);
+            let mut kb = ast::pick(up_from && sb == 0xFF, self.counted_from(b, h, p, u, bc.b, q), 0u64);
+            if ka != 0 {
+                sa = 0;
+            }
+            if kb != 0 {
+                sb = 0;
+            }
+            // `q - c` with `c` from before the loop: below `len` wherever `c <= start` and `n <= len + c`.
+            let va = ast::pick(up_from && sa == 0xFF, self.counted_from_value(b, h, u, bc.a, q), VNONE);
+            let vb = ast::pick(up_from && sb == 0xFF, self.counted_from_value(b, h, u, bc.b, q), VNONE);
+            if va != VNONE {
+                sa = 0;
+            }
+            if vb != VNONE {
+                sb = 0;
+            }
+            // `(q << s + c) - k` with `c` from before the loop is `q << s + (c - k)`, wrapping or not.
+            if rsh == 0xFF && sa == 0xFF {
+                let (s2, k2, b2) = self.base_less(b, ptr, bc.a, q);
+                if s2 != 0xFF {
+                    sa = s2;
+                    ka = k2;
+                    ba = b2;
+                }
+            }
+            if rsh == 0xFF && sb == 0xFF {
+                let (s2, k2, b2) = self.base_less(b, ptr, bc.b, q);
+                if s2 != 0xFF {
+                    sb = s2;
+                    kb = k2;
+                    bb = b2;
+                }
+            }
+            // `q * w + c` with `w` and `c` from before the loop (`scaled`): below `len` wherever `(n - 1) * w + c`
+            // is and wraps nowhere, as every smaller `q`'s.
+            let plain_up = rsh == 0xFF && !self.grev && self.hn.len() == 0;
+            let (ma, ca, ka2) = if plain_up && sa == 0xFF {
+                self.scaled(b, ptr, bc.a, q)
+            } else {
+                (VNONE, VNONE, 0u64)
+            };
+            let (mb, cb, kb2) = if plain_up && sb == 0xFF {
+                self.scaled(b, ptr, bc.b, q)
+            } else {
+                (VNONE, VNONE, 0u64)
+            };
+            if ma != VNONE {
+                sa = 0;
+                oa = ka2;
+                ba = ca;
+            }
+            if mb != VNONE {
+                sb = 0;
+                ob = kb2;
+                bb = cb;
+            }
             let (fa, fb) = (sa, sb);
             if self.grev {
                 sa = ast::pick(self.down_of(b, bc.a, q), 0u8, 0xFFu8);
@@ -6779,6 +6937,34 @@ extend LoopOpt {
             }
             let ok = rsh != 0xFF || sa != 0xFF && (bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b) || sb != 0xFF && (bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b);
             if !ok {
+                // An index its form keeps at most a bound from before the loop (`capped`): the check holds
+                // wherever that bound is below `len`.
+                let xa = bc.aux == C_ULT && cold_c || bc.aux == C_UGE && cold_b;
+                let xb = bc.aux == C_UGT && cold_c || bc.aux == C_ULE && cold_b;
+                if rsh == 0xFF && !self.grev && (xa || xb) {
+                    let (x, len) = ast::pick(xa, (bc.a, bc.b), (bc.b, bc.a));
+                    let (cv, ck, cx) = self.capped(b, ptr, x);
+                    if (cv != VNONE || ck != u64::MAX) && len != VNONE && !self.defined_in(len) && self.gx.len() + self.cap_len.len() < MAX_CHECKS {
+                        self.fixes.push(k);
+                        self.fside.push(ast::pick(cold_c, 0u8, 1u8));
+                        self.gchecks += 1;
+                        self.gplain = false;
+                        let mut at = self.cap_len.len();
+                        for g in 0..self.cap_len.len() {
+                            if self.cap_len[g] == len && self.cap_v[g] == cv && self.cap_x[g] == cx {
+                                at = g;
+                            }
+                        }
+                        if at == self.cap_len.len() {
+                            self.cap_len.push(len);
+                            self.cap_v.push(cv);
+                            self.cap_k.push(ck);
+                            self.cap_x.push(cx);
+                        } else if cv == VNONE && ck > self.cap_k[at] {
+                            self.cap_k[at] = ck;
+                        }
+                    }
+                }
                 continue;
             }
             let on_a = sa != 0xFF && (bc.aux == C_ULT || bc.aux == C_UGE);
@@ -6796,6 +6982,9 @@ extend LoopOpt {
             } else {
                 (sb, ob, bb)
             };
+            let ksub = ast::pick(rsh != 0xFF, 0u64, ast::pick(on_a, ka, kb));
+            let vsub = ast::pick(rsh != 0xFF, VNONE, ast::pick(on_a, va, vb));
+            let wmul = ast::pick(rsh != 0xFF, VNONE, ast::pick(on_a, ma, mb));
             // The length of the index's width: `q`'s, or an extension's of it (`affine`).
             let it = if rsh != 0xFF || self.grev {
                 b.type_of(ast::pick(self.grev, q, n))
@@ -6827,28 +7016,74 @@ extend LoopOpt {
                 };
             }
             // One comparison per bound, length and shift: the largest offset's, which implies the others.
+            // The least subtraction's, which implies the others of its length.
             let mut at = self.gx.len();
             for g in 0..self.gx.len() {
-                if self.gx[g] == gn && self.gy[g] == len && self.gsh[g] == sh && self.gbase[g] == base {
+                if self.gx[g] == gn && self.gy[g] == len && self.gsh[g] == sh && self.gbase[g] == base && ast::pick(
+                    base == VNONE,
+                    self.gsub[g] != 0 == (ksub != 0),
+                    self.gsub[g] == ksub,
+                ) && self.gsubv[g] == vsub && self.gmul[g] == wmul {
                     at = g;
                 }
             }
-            if at == self.gx.len() && at == MAX_CHECKS {
+            if at == self.gx.len() && at + ast::pick(vsub != VNONE, 1usize, 0) >= MAX_CHECKS {
                 continue;
             }
-            if rsh != 0xFF || sh != 0 || ast::pick(on_a, fa, fb) == 0xFF || base != VNONE && off != 0 {
+            if rsh != 0xFF || sh != 0 || ast::pick(on_a, fa, fb) == 0xFF || base != VNONE && off != 0 || ksub != 0 || vsub != VNONE || wmul != VNONE {
                 self.gplain = false;
+            }
+            // `clip` enters the loop with the checks at the counter's start where that is past its bound:
+            // `q + c` fails there only where the sum does not wrap (with `c` past `len`, it may be below
+            // `len` again). It does not from 0 or, for a constant `c`, from a constant `s` with `s + c`
+            // in the index's width, or under the header's test `q <u n` of a constant `n` with
+            // `(n - 1) + c` in it.
+            if base != VNONE || off != 0 {
+                let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - b.blocks[h as usize].param_start);
+                let top = mask_of(type_bits(it, ptr));
+                let s0 = if is_const(b, init) {
+                    raw_const(b, init)
+                } else {
+                    u64::MAX
+                };
+                let nk = if is_const(b, self.gn) {
+                    raw_const(b, self.gn) & top
+                } else {
+                    0u64
+                };
+                if s0 != 0 && (base != VNONE || s0 > top - off && (nk == 0 || nk - 1 > top - off)) {
+                    self.gplain = false;
+                }
+            }
+            if vsub != VNONE && at == self.gx.len() {
+                // The start test `c <= q0`, a comparison as it is.
+                let qi = (q & ~VPARAM) - b.blocks[h as usize].param_start;
+                self.gx.push(vsub);
+                self.gy.push(b.edge_arg(term(b, p).a, qi));
+                self.gsh.push(0);
+                self.goff.push(0);
+                self.gbase.push(VNONE);
+                self.gsub.push(0);
+                self.gsubv.push(VNONE);
+                self.gmul.push(VNONE);
+                at = self.gx.len();
             }
             self.fixes.push(k);
             self.fside.push(ast::pick(cold_c, 0u8, 1u8));
+            self.gchecks += ast::pick(least_of_two(b, len), 2u32, 1u32);
             if at == self.gx.len() {
                 self.gx.push(gn);
                 self.gy.push(len);
                 self.gsh.push(sh);
                 self.goff.push(goff);
                 self.gbase.push(base);
+                self.gsub.push(ksub);
+                self.gsubv.push(vsub);
+                self.gmul.push(wmul);
             } else if goff > self.goff[at] {
                 self.goff[at] = goff;
+            } else if ksub != 0 && ksub < self.gsub[at] && base == VNONE {
+                self.gsub[at] = ksub;
             }
         }
         self.gcond = C_ULE;
@@ -7135,7 +7370,7 @@ extend LoopOpt {
             // Plus a value from outside the loop, either side.
             for side in 0..2u32 {
                 let (y, c) = ast::pick(side == 0, (t.a, t.b), (t.b, t.a));
-                if c == VNONE || self.defined_in(c) || is_const(b, c) {
+                if c == VNONE || !self.inv_expr(b, c, INV_DEPTH) || is_const(b, c) {
                     continue;
                 }
                 let (s, k0, b0) = self.affine(b, ptr, y, q);
@@ -7163,15 +7398,244 @@ extend LoopOpt {
     }
 
     // Whether a branch on the guard `version` would make (`gx`, `gy`, `gcond`) already enters preheader
-    // `p`: the loop is the copy that keeps its checks.
+    // `p` where the guard fails: the loop is the copy that keeps its checks. Where it holds, the checks
+    // hold too.
     fn guarded(self: &Self, b: &Body, p: u32) bool {
         for k in 0..b.blocks.len() {
             let t = term(b, k as u32);
-            if t.op == O_BR && (b.edge_target(t.b) == p || b.edge_target(t.c) == p) && self.is_guard(b, t.a) {
+            if t.op == O_BR && b.edge_target(t.c) == p && b.edge_target(t.b) != p && self.is_guard(b, t.a) {
                 return true;
             }
         }
         return false;
+    }
+
+    // `(s, k, c)` when `x` is `(q << s + c) - k` (`affine`, `c` from before the loop, `k` a constant from 1):
+    // the counter's `q << s` plus `c - k`, the same value modulo the type's range. `(0xFF, 0, VNONE)` else.
+    fn base_less(self: &Self, b: &Body, ptr: u32, x: Value, q: Value) (u8, u64, Value) {
+        let none = (0xFFu8, 0u64, VNONE);
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) || b.insts[x as usize].op != O_SUB || !is_const(
+            b,
+            b.insts[x as usize].b,
+        ) {
+            return none;
+        }
+        let k = raw_const(b, b.insts[x as usize].b) & mask_of(type_bits(b.type_of(x), ptr));
+        let (s, c, base) = self.affine(b, ptr, b.insts[x as usize].a, q);
+        if s == 0xFF || c != 0 || base == VNONE || k == 0 {
+            return none;
+        }
+        return (s, k, base);
+    }
+
+    // The bound of index `x` of the loop by its form, whatever the values it reads: `(c, k, below)` with
+    // `x <=u c` (`x <u c` where `below`) for `c` from before the loop (`x & c`, `x % c`), or `c` VNONE and
+    // `x <=u k` for a constant `k` below the type's greatest value (`cap_const`: a mask, a remainder, a
+    // shift, a narrow value extended). `(VNONE, u64::MAX, false)` else.
+    fn capped(self: &Self, b: &Body, ptr: u32, x: Value) (Value, u64, bool) {
+        let none = (VNONE, u64::MAX, false);
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) || is_vec(b.insts[x as usize].ty) || !is_int(
+            b.insts[x as usize].ty,
+        ) || b.insts[x as usize].ty == T_I128 {
+            return none;
+        }
+        let t = b.insts[x as usize];
+        // A bound of 2^31 or more (a 32-bit value, a 64-bit one shifted by less than 33) leaves a guard that
+        // only a slice of 2^31 elements or more passes: no copy for it.
+        let k = cap_const(b, ptr, x, 4);
+        if k < mask_of(type_bits(t.ty, ptr)) && k < 1u64 << 31 {
+            return (VNONE, k, false);
+        }
+        if t.op == O_AND || t.op == O_UREM {
+            for side in 0..2u32 {
+                let c = ast::pick(side == 0, t.b, t.a);
+                if t.op == O_UREM && side == 1 {
+                    break;
+                }
+                if c != VNONE && (c & VFLAG) == 0 && !self.defined_in(c) && !is_const(b, c) {
+                    return (c, 0u64, t.op == O_UREM);
+                }
+            }
+        }
+        return none;
+    }
+
+    // `(q, n)` when latch `u` of loop `h` branches on `q + 1 <u n` (or its negation) into the header,
+    // its other edge leaving, `q` a header parameter that the back edge steps by 1 and `n` from before the
+    // loop: below `n` in every iteration after the first. `(VNONE, VNONE)` else.
+    fn rotated_test(self: &mut Self, b: &Body, h: u32, u: u32) (Value, Value) {
+        let none = (VNONE, VNONE);
+        let t = term(b, u);
+        if t.op != O_BR || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE || b.edge_target(t.b) == b.edge_target(t.c) {
+            return none;
+        }
+        let to_b = b.edge_target(t.b) == h;
+        if !to_b && b.edge_target(t.c) != h || self.inl[b.edge_target(ast::pick(to_b, t.c, t.b)) as usize] {
+            return none;
+        }
+        let c = b.insts[t.a as usize];
+        if c.op != O_ICMP || is_vec(b.type_of(c.a)) {
+            return none;
+        }
+        // `x <u n` on the edge into the header.
+        let (x, n) = if c.aux == C_ULT && to_b || c.aux == C_UGE && !to_b {
+            (c.a, c.b)
+        } else if c.aux == C_UGT && to_b || c.aux == C_ULE && !to_b {
+            (c.b, c.a)
+        } else {
+            return none;
+        };
+        if n == VNONE || self.defined_in(n) {
+            return none;
+        }
+        let back = ast::pick(to_b, t.b, t.c);
+        let hb = b.blocks[h as usize];
+        for qi in 0..hb.param_len as u32 {
+            let q = VPARAM | hb.param_start + qi;
+            if b.edge_arg(back, qi) == x && self.steps_by_one(b, h, u, q, qi) {
+                return (q, n);
+            }
+        }
+        return none;
+    }
+
+    // Whether `v` is the same in every iteration: defined outside the loop, or a sum or difference of such
+    // values the loop computes (a sum of invariants reassociated in the loop, until a walk moves it out),
+    // at most `d` deep.
+    fn inv_expr(self: &Self, b: &Body, v: Value, d: u32) bool {
+        if v == VNONE || (v & VFLAG) != 0 {
+            return false;
+        }
+        if !self.defined_in(v) {
+            return true;
+        }
+        if d == 0 || (v & VPARAM) != 0 {
+            return false;
+        }
+        let t = b.insts[v as usize];
+        return (t.op == O_ADD || t.op == O_SUB) && is_int(t.ty) && !is_vec(t.ty) && self.inv_expr(b, t.a, d - 1) && self.inv_expr(
+            b,
+            t.b,
+            d - 1,
+        );
+    }
+
+    // Value `v` (`inv_expr`, or VNONE) where a guard before the loop reads it: itself when defined outside
+    // the loop, else its sum or difference made again at the end of the instructions (location `l`).
+    fn inv_copy(self: &Self, b: &mut Body, v: Value, l: u32) Value {
+        if v == VNONE || !self.defined_in(v) {
+            return v;
+        }
+        let t = b.insts[v as usize];
+        let x = self.inv_copy(b, t.a, l);
+        let y = self.inv_copy(b, t.b, l);
+        return vpush(b, bin(t.op, t.ty, x, y), l);
+    }
+
+    // `(w, c, k)` when `x` is `q * w + c` (either order), `w` from before the loop, `c` a value from before
+    // it (`k` 0) or a constant `k` (`c` VNONE), or `q * w` (both none). `(VNONE, VNONE, 0)` else.
+    fn scaled(self: &Self, b: &Body, ptr: u32, x: Value, q: Value) (Value, Value, u64) {
+        let none = (VNONE, VNONE, 0u64);
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) {
+            return none;
+        }
+        let t = b.insts[x as usize];
+        let is_mul = |v: Value| (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_MUL;
+        let (m, c) = if t.op == O_MUL {
+            (x, VNONE)
+        } else if t.op == O_ADD && is_mul(t.a) {
+            (t.a, t.b)
+        } else if t.op == O_ADD && is_mul(t.b) {
+            (t.b, t.a)
+        } else {
+            return none;
+        };
+        if c != VNONE && ((c & VFLAG) != 0 || self.defined_in(c)) || !is_mul(m) {
+            return none;
+        }
+        let mt = b.insts[m as usize];
+        let w = if mt.a == q {
+            mt.b
+        } else if mt.b == q {
+            mt.a
+        } else {
+            return none;
+        };
+        if w == VNONE || (w & VFLAG) != 0 || self.defined_in(w) {
+            return none;
+        }
+        if c != VNONE && is_const(b, c) {
+            return (w, VNONE, raw_const(b, c) & mask_of(type_bits(t.ty, ptr)));
+        }
+        return (w, c, 0u64);
+    }
+
+    // The guard's comparison `k` of a check of `q * w + c` (`gmul`): `(n - 1) * w + c <u len`, the
+    // product and the sum checked; where either wraps, the type's greatest value, which no length
+    // exceeds. Below `n` the loop runs; with `n` 0 it does not.
+    fn scaled_guard(self: &mut Self, b: &mut Body, k: usize, l0: u32) Value {
+        let n = self.gx[k];
+        let ty = b.type_of(n);
+        let one = vpush(b, iconst_of(ty, 1), l0);
+        let nm = vpush(b, bin(O_SUB, ty, n, one), l0);
+        let pr = vpush(b, Inst { op: O_MULO, ty: ty, aux: 0, a: nm, b: self.gmul[k], c: VNONE }, l0);
+        let mut bad = VFLAG | pr;
+        let mut sum = pr;
+        let c = if self.gbase[k] != VNONE {
+            self.gbase[k]
+        } else if self.goff[k] != 0 {
+            vpush(b, iconst_of(ty, self.goff[k]), l0)
+        } else {
+            VNONE
+        };
+        if c != VNONE {
+            sum = vpush(b, Inst { op: O_ADDO, ty: ty, aux: 0, a: pr, b: c, c: VNONE }, l0);
+            bad = vpush(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: bad, b: VFLAG | sum, c: 0 }, l0);
+        }
+        let top = vpush(b, iconst_of(ty, mask_of(type_bits(ty, 8))), l0);
+        let last = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: bad, b: top, c: sum }, l0);
+        return vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: last, b: self.gy[k], c: 0 }, l0);
+    }
+
+    // `c` when `x` is `q - c`, `c` a value from before loop `h` (latch `u`) that is no constant, `q` a header
+    // parameter that steps by 1: under the loop's test `q <u n` no step wraps, so every `q` is at least `c`
+    // where the start is (the guard tests it). VNONE else.
+    fn counted_from_value(self: &mut Self, b: &Body, h: u32, u: u32, x: Value, q: Value) Value {
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) || b.insts[x as usize].op != O_SUB || b.insts[x as usize].a != q {
+            return VNONE;
+        }
+        let c = b.insts[x as usize].b;
+        let qi = (q & ~VPARAM) - b.blocks[h as usize].param_start;
+        if c == VNONE || (c & VFLAG) != 0 || self.defined_in(c) || is_const(b, c) || !self.steps_by_one(b, h, u, q, qi) {
+            return VNONE;
+        }
+        return c;
+    }
+
+    // `k` when `x` is `q - k` (a constant from 1), `q` header parameter `qi` of loop `h` (preheader `p`,
+    // latch `u`) that starts at a constant of at least `k` and steps by 1: under the loop's test `q <u n`
+    // no step wraps, so every `q` is at least `k`. 0 else.
+    fn counted_from(self: &mut Self, b: &Body, h: u32, p: u32, u: u32, x: Value, q: Value) u64 {
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) || b.insts[x as usize].op != O_SUB || b.insts[x as usize].a != q || !is_const(
+            b,
+            b.insts[x as usize].b,
+        ) {
+            return 0;
+        }
+        let k = raw_const(b, b.insts[x as usize].b) & mask_of(type_bits(b.type_of(q), 8));
+        let hb = b.blocks[h as usize];
+        let qi = (q & ~VPARAM) - hb.param_start;
+        let init = b.edge_arg(term(b, p).a, qi);
+        if k == 0 || k >= 1u64 << 31 || !is_const(b, init) || (raw_const(b, init) & mask_of(type_bits(b.type_of(q), 8))) < k || !self.steps_by_one(
+            b,
+            h,
+            u,
+            q,
+            qi,
+        ) {
+            return 0;
+        }
+        return k;
     }
 
     // Whether `v` is the guard `version` makes: the comparisons in order, joined by `and`.
@@ -7302,6 +7766,7 @@ extend LoopOpt {
         for k in 0..self.gy.len() {
             let mut y = self.gy[k];
             if self.goff[k] != 0 || self.gbase[k] != VNONE {
+                self.gbase[k] = self.inv_copy(b, self.gbase[k], l0);
                 let c0 = if self.gbase[k] != VNONE {
                     self.gbase[k]
                 } else {
@@ -7657,6 +8122,17 @@ extend LoopOpt {
         let mut hmin = VNONE;
         if g == VNONE {
             for k in 0..self.gx.len() {
+                // A base the loop computes from values before it (`inv_expr`), made again here.
+                self.gbase[k] = self.inv_copy(b, self.gbase[k], l0);
+                if self.gmul[k] != VNONE {
+                    let c = self.scaled_guard(b, k, l0);
+                    gv = if gv != VNONE {
+                        vpush(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: gv, b: c, c: 0 }, l0)
+                    } else {
+                        c
+                    };
+                    continue;
+                }
                 if self.gx[k] == VNONE && hmin == VNONE && !self.grev {
                     let lt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: self.hn[0], b: self.hn[1], c: 0 }, l0);
                     let ty = b.type_of(self.hn[0]);
@@ -7666,10 +8142,26 @@ extend LoopOpt {
                 if y == VNONE {
                     // A sum of the counter wraps nowhere (`offset_head`): `n <= max - step`.
                     y = vpush(b, iconst_of(b.type_of(self.hn[0]), ~self.goff[k]), l0);
+                } else if self.gsub[k] != 0 && self.gbase[k] == VNONE || self.gsubv[k] != VNONE {
+                    // bound(len) = len + k, the type's greatest value where that wraps (`checks`).
+                    let ty = b.type_of(y);
+                    let top = mask_of(type_bits(ty, 8));
+                    let all = vpush(b, iconst_of(ty, top), l0);
+                    let (kv, lim) = if self.gsubv[k] != VNONE {
+                        (self.gsubv[k], vpush(b, bin(O_SUB, ty, all, self.gsubv[k]), l0))
+                    } else {
+                        (vpush(b, iconst_of(ty, self.gsub[k]), l0), vpush(b, iconst_of(ty, top - self.gsub[k]), l0))
+                    };
+                    let ov = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: y, b: lim, c: 0 }, l0);
+                    let s1 = vpush(b, bin(O_ADD, ty, y, kv), l0);
+                    y = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: ov, b: all, c: s1 }, l0);
                 } else if self.gsh[k] != 0 || self.goff[k] != 0 || self.gbase[k] != VNONE {
                     // bound(len) = len > c ? ((len - c - 1) >> s) + 1 : 0 (`checks`).
                     let ty = b.type_of(y);
-                    let c0 = if self.gbase[k] != VNONE {
+                    let c0 = if self.gbase[k] != VNONE && self.gsub[k] != 0 {
+                        let kv = vpush(b, iconst_of(ty, self.gsub[k]), l0);
+                        vpush(b, bin(O_SUB, ty, self.gbase[k], kv), l0)
+                    } else if self.gbase[k] != VNONE {
                         self.gbase[k]
                     } else {
                         vpush(b, iconst_of(ty, self.goff[k]), l0)
@@ -7710,11 +8202,39 @@ extend LoopOpt {
                     gv = c;
                 }
             }
+            // An index its form bounds (`capped`): `cap <u len`, or `cap <=u len` for a bound it is below.
+            for k in 0..self.cap_len.len() {
+                let len = self.cap_len[k];
+                let cv = if self.cap_v[k] != VNONE {
+                    self.cap_v[k]
+                } else {
+                    vpush(b, iconst_of(b.type_of(len), self.cap_k[k]), l0)
+                };
+                let c = vpush(
+                    b,
+                    Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.cap_x[k], C_ULE, C_ULT), a: cv, b: len, c: 0 },
+                    l0,
+                );
+                gv = if gv != VNONE {
+                    vpush(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: gv, b: c, c: 0 }, l0)
+                } else {
+                    c
+                };
+            }
+            if self.grot != NONE && gv != VNONE {
+                // A rotated loop's first iteration runs before any test: its counter `q0 <u n`.
+                let c = vpush(
+                    b,
+                    Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: VPARAM | ps + self.grot, b: self.gn, c: 0 },
+                    l0,
+                );
+                gv = vpush(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: gv, b: c, c: 0 }, l0);
+            }
             if self.gq != NONE && !self.grev && gv != VNONE {
                 // `i != n` from at most `n`: every value below `n`.
                 let c = vpush(
                     b,
-                    Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: VPARAM | ps + self.gq, b: self.gx[0], c: 0 },
+                    Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: VPARAM | ps + self.gq, b: self.gn, c: 0 },
                     l0,
                 );
                 gv = vpush(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: gv, b: c, c: 0 }, l0);
@@ -8361,6 +8881,141 @@ fn vpush(b: &mut Body, t: Inst, l: u32) Value {
 }
 
 // The type of value `v`: an instruction's, a block parameter's, or a checked operation's flag (`i8`).
+
+// Whether `v` is the least or greatest of two values, `select (x < y), x, y` or its mirror (`bound_min`).
+fn least_of_two(b: &Body, v: Value) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.a == VNONE || (t.a & (VPARAM | VFLAG)) != 0 || b.insts[t.a as usize].op != O_ICMP {
+        return false;
+    }
+    let c = b.insts[t.a as usize];
+    return c.a == t.b && c.b == t.c || c.a == t.c && c.b == t.b;
+}
+
+// The greatest value integer `v` takes by its form, `depth` instructions deep: a constant; the least of
+// an `and`'s operands' bounds; the bits up to an `or`'s operands' top bit; below its divisor's bound for
+// a remainder; a right shift of its operand's; an extension of a narrower value's; the type's greatest
+// value else.
+fn cap_const(b: &Body, ptr: u32, v: Value, depth: u32) u64 {
+    let m = mask_of(type_bits(b.type_of(v), ptr));
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || depth == 0 {
+        return m;
+    }
+    let t = b.insts[v as usize];
+    if is_vec(t.ty) || t.ty == T_I128 {
+        return m;
+    }
+    if is_const(b, v) {
+        return raw_const(b, v) & m;
+    }
+    if t.op == O_AND {
+        return cap_const(b, ptr, t.a, depth - 1).min(cap_const(b, ptr, t.b, depth - 1));
+    }
+    if t.op == O_OR {
+        // No bit above the higher operand's top bit.
+        let u = cap_const(b, ptr, t.a, depth - 1).max(cap_const(b, ptr, t.b, depth - 1));
+        return mask_of(64 - u.leading_zeros() as u32) & m;
+    }
+    if t.op == O_UREM {
+        // Below the divisor's bound (a zero divisor traps first).
+        return cap_const(b, ptr, t.b, depth - 1).max(1) - 1;
+    }
+    if t.op == O_LSHR && is_const(b, t.b) && (raw_const(b, t.b) & m) < type_bits(t.ty, ptr) as u64 {
+        return cap_const(b, ptr, t.a, depth - 1) >> (raw_const(b, t.b) & m);
+    }
+    if t.op == O_ZEXT {
+        return cap_const(b, ptr, t.a, depth - 1);
+    }
+    // `n - (mulhu(n, k) >> s) * d`, the remainder by `d` the division by a constant gives (`divide`).
+    if t.op == O_SUB && is_op(b, t.b, O_MUL) {
+        let mt = b.insts[t.b as usize];
+        for side in 0..2u32 {
+            let (q, d) = ast::pick(side == 0, (mt.a, mt.b), (mt.b, mt.a));
+            if is_const(b, d) && exact_quotient(b, ptr, q, t.a, raw_const(b, d) & m) {
+                return (raw_const(b, d) & m) - 1;
+            }
+        }
+    }
+    return m;
+}
+
+// Whether `q` is the quotient of `n` by `d` (from 2) for every `n` of its width `w`, the forms `divide`
+// makes: `mulhu(n, k) >> s`; `((n - h) >> 1 + h) >> (s - 1)` with `h = mulhu(n, k)`, which is `n * (2^w + k)`
+// over `2^(w + s)`; or for 32 bits `trunc((zext(n) * k) >> (32 + s))`. The multiplier `m` (`k`, or
+// `2^w + k`) is `2^(w + s) / d` rounded up and errs by at most `2^s` (Granlund and Montgomery 1994).
+fn exact_quotient(b: &Body, ptr: u32, q: Value, n: Value, d: u64) bool {
+    if d < 2 || q == VNONE || (q & (VPARAM | VFLAG)) != 0 || is_vec(b.insts[q as usize].ty) {
+        return false;
+    }
+    let w = type_bits(b.insts[q as usize].ty, ptr);
+    if w > 64 {
+        return false;
+    }
+    let one: u128 = 1;
+    // `(m, s)` of the forms above, `s` 128 when `q` is none of them.
+    let mut m: u128 = 0;
+    let mut s: u64 = 128;
+    let (mut x, mut sh) = (q, 0u64);
+    if is_op(b, q, O_LSHR) && is_const(b, b.insts[q as usize].b) {
+        x = b.insts[q as usize].a;
+        sh = raw_const(b, b.insts[q as usize].b) & mask_of(w);
+    }
+    let k0 = high_of(b, ptr, x, n);
+    if k0.is_some() {
+        m = k0.unwrap();
+        s = sh;
+    } else if is_op(b, x, O_ADD) {
+        let t = b.insts[x as usize];
+        for side in 0..2u32 {
+            let (half, h) = ast::pick(side == 0, (t.a, t.b), (t.b, t.a));
+            let k = high_of(b, ptr, h, n);
+            if k.is_some() && is_op(b, half, O_LSHR) && is_const(b, b.insts[half as usize].b) && (raw_const(
+                b,
+                b.insts[half as usize].b,
+            ) & mask_of(w)) == 1 && is_op(b, b.insts[half as usize].a, O_SUB) && b.insts[b.insts[half as usize].a as usize].a == n && b.insts[b.insts[half as usize].a as usize].b == h {
+                m = (one << w as usize) + k.unwrap();
+                s = sh + 1;
+            }
+        }
+    } else if w == 32 && is_op(b, q, O_TRUNC) && is_op(b, b.insts[q as usize].a, O_LSHR) {
+        let r = b.insts[b.insts[q as usize].a as usize];
+        let p = r.a;
+        if is_const(b, r.b) && is_op(b, p, O_MUL) && b.type_of(p) == T_I64 {
+            let pt = b.insts[p as usize];
+            for side in 0..2u32 {
+                let (e, k) = ast::pick(side == 0, (pt.a, pt.b), (pt.b, pt.a));
+                if is_op(b, e, O_ZEXT) && b.insts[e as usize].a == n && is_const(b, k) && raw_const(b, k) < 1u64 << 32 && raw_const(
+                    b,
+                    r.b,
+                ) >= 32 && raw_const(b, r.b) < 64 {
+                    m = raw_const(b, k);
+                    s = raw_const(b, r.b) - 32;
+                }
+            }
+        }
+    }
+    if s >= 64 || w as u64 + s >= 127 {
+        return false;
+    }
+    let p = one << (w as u64 + s) as usize;
+    // Below 2^63 by a multiplier below 2^65 the product fits.
+    if d >= 1u64 << 63 || m >= one << 65 {
+        return false;
+    }
+    let md = m * d;
+    return md >= p && md - p <= one << s as usize;
+}
+
+// `k` when `h` is `mulhu(n, k)` for a constant `k`.
+fn high_of(b: &Body, ptr: u32, h: Value, n: Value) Option<u64> {
+    if !is_op(b, h, O_MULHU) || b.insts[h as usize].a != n || !is_const(b, b.insts[h as usize].b) {
+        return None;
+    }
+    return Some(raw_const(b, b.insts[h as usize].b) & mask_of(type_bits(b.insts[h as usize].ty, ptr)));
+}
 
 // Whether `v` is an instruction's value that is an integer constant.
 // The access class of instruction `i` (`Classes.acc`); CL_MANY for one made since.
@@ -9060,12 +9715,29 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>) bool {
             }
         }
     }
+    // The entry edge. A constant address of a slot lies in it (`lir::verify`): where the first pointer's
+    // first value or its value past the last iteration would not (`piv_in_slot`; with its bias, the end of
+    // a loop over a slot's elements lies past it), the counter keeps its exit test.
+    let ee = if te.op == O_JMP {
+        te.a
+    } else if b.edge_target(te.b) == h {
+        te.b
+    } else {
+        te.c
+    };
+    if test != VNONE {
+        let f = ps[first as usize];
+        if !piv_in_slot(b, f, bound) || !piv_in_slot(b, f, b.edge_arg(ee, f.q)) {
+            test = VNONE;
+            tq = NONE;
+        }
+    }
     // Per pointer, its parameter after the loop's own (NONE: no pointer): one of two or more accesses, or
-    // of the counter whose exit test the first takes over.
+    // of the counter whose exit test the first takes over, whose first value lies in its slot.
     let mut used = StaticVector::<u32, PIV_MAX>::new();
     let mut np: u32 = 0;
     for x in 0..ps.len() {
-        if ps[x].n >= 2 || ps[x].q == tq {
+        if (ps[x].n >= 2 || ps[x].q == tq) && piv_in_slot(b, ps[x], b.edge_arg(ee, ps[x].q)) {
             used.push(np);
             np += 1;
         } else {
@@ -9078,13 +9750,6 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>) bool {
     let ni = b.insts.len();
     let npar = b.params.len();
     let last = hb.start + hb.len - 1;
-    let ee = if te.op == O_JMP {
-        te.a
-    } else if b.edge_target(te.b) == h {
-        te.b
-    } else {
-        te.c
-    };
     // The new preheader: each pointer's initial value from the entry edge's counter, then the loop with
     // the entry edge's arguments and those.
     let none: []u8 = [];
@@ -9234,6 +9899,33 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>) bool {
 // At the end of the block begun last, with instruction `from`'s location: pointer `p`'s base plus index
 // `x` times its scale plus its bias, the index folded into the offset when a constant the offset holds
 // (the base itself for 0).
+// Whether `piv_at(b, p, x, _)` lies in the slot `p.base` points into, where that gives a constant address
+// of a slot (`x` a constant, `p.base` a slot's address plus constants): its offset from 0 to the slot's
+// size. True for any other.
+fn piv_in_slot(b: &Body, p: Piv, x: Value) bool {
+    if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || b.insts[x as usize].op != O_ICONST {
+        return true;
+    }
+    let k = raw_const(b, x) as i64;
+    if k <= -0x80000000 || k >= 0x80000000 {
+        return true;
+    }
+    let mut off = k * p.scale as i64 + p.bias;
+    let mut v = p.base;
+    // Each step reads one constant offset: at most one per instruction.
+    for _ in 0..b.insts.len() {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_PTRADD || b.insts[v as usize].b != VNONE {
+            break;
+        }
+        off += b.insts[v as usize].c as i32;
+        v = b.insts[v as usize].a;
+    }
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR {
+        return true;
+    }
+    return off >= 0 && off <= b.slots[b.insts[v as usize].a as usize].size as i64;
+}
+
 fn piv_at(b: &mut Body, p: Piv, x: Value, from: u32) Value {
     if x != VNONE && (x & (VPARAM | VFLAG)) == 0 && b.insts[x as usize].op == O_ICONST {
         let k = raw_const(b, x) as i64;

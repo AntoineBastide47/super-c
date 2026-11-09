@@ -13055,6 +13055,8 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
 // 2), counted once the counter is a constant (`lir::loops::LoopOpt::residual`, as LLVM counts the copies
 // after simplification); a partially unrolled loop's copies of its body up to 64 instructions at 3, 32 at
 // 2 (4 copies of a body of up to 16 or 8, else 2), with the same flag; a loop versions on its bounds checks up to 200 (GCC's complete peeling limit),
+// at 3 for any number of checks, else for one (at 2: 1.3% of the compiler's build time and 1.15% of its
+// size for 22 more vectorized loops, against 1.9% and 1.8% for 26 with any number),
 // and unswitches up to GCC's and LLVM's 50; a header of up to 8 instructions rotates, but at "s" and "z" (the copy grows the
 // code: 1.6% on the compiler, for 1.1% of its build's processor time); a vectorized loop interleaves 4
 // vectors (LLVM's AArch64 maximum; 2 left a sum's accumulator latency exposed: 0.20 against 0.15 s), 1 at
@@ -13080,6 +13082,11 @@ fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
             200u32
         } else {
             0u32
+        },
+        version_checks: if opt == 3 {
+            u32::MAX
+        } else {
+            1u32
         },
         unswitch: if (cg & bman::CG_UNSWITCH) != 0 {
             50u32

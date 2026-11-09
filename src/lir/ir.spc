@@ -500,6 +500,11 @@ pub(package) const fn mask_of(w: u32) u64 {
     };
 }
 
+/// Whether value `v` of `b` is an instruction of operation `op`.
+pub(package) fn is_op(b: &Body, v: Value, op: u8) bool {
+    return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == op;
+}
+
 /// The `bits` low bits of `x`.
 pub(package) const fn trunc_bits(x: u64, bits: u32) u64 {
     return x & mask_of(bits);

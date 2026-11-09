@@ -91,6 +91,7 @@ const NO_LOOPS: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 0,
@@ -101,6 +102,7 @@ const PEEL: lu::Budgets = lu::Budgets {
     peel: 200,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 0,
@@ -111,6 +113,7 @@ const VERSION: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 200,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 0,
@@ -121,6 +124,7 @@ const UNSWITCH: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 50,
     rotate: 0,
     vector: 0,
@@ -131,6 +135,7 @@ const ROTATE: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 8,
     vector: 0,
@@ -141,6 +146,7 @@ const VECTOR: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 2,
@@ -151,6 +157,7 @@ const PARTIAL: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 32,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 0,
@@ -235,7 +242,17 @@ b5:
 )";
     let (b, a) = optimized(
         src,
-        lu::Budgets { peel: 40, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 40,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
     );
     let t = text_of(&a, "bytes");
     assert(!t.contains("icmp") && !t.contains("panic"), t.as_str());
@@ -337,6 +354,1087 @@ b5:
     same_outcome(&b, &a, "sum", past, 0, true);
     let none: []u64 = [0, 0];
     same_outcome(&b, &a, "sum", none, 0, false);
+}
+
+// A value of the loop that only the failure path reads (a panic message's slot) leaves through the
+// normal exit too once the loop is closed, but no final value replaces it there: no round spins on that
+// change the walk takes back, and the checks clip the loop. A loop entered where a guard `n <=u
+// len` holds is no versioned copy with checks: its signed counter's checks version too.
+@test
+fn values_only_a_failure_path_reads_leave_the_checks_to_versioning() {
+    let src = M"(lir ptr 8
+sym @report fn global noinline
+sym @sum fn global
+sym @signed fn global
+fn @report
+  sig (ptr) -> void
+b0(v0: ptr):
+  panic "index out of bounds"
+fn @sum
+  sig (i64, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 7
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b5
+b2:
+  v8 = slotaddr s0
+  v9 = icmp.ult v5, v1
+  br v9, b3, b4
+b3:
+  v10 = xor.i64 v6, v5
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b4: cold
+  store v4, v8 align 3
+  call @report(v8) : (ptr) -> void
+  unreachable
+b5:
+  ret v6
+fn @signed
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ule v0, v1
+  br v4, b1, b6
+b1:
+  jmp b2(v2, v2)
+b2(v5: i64, v6: i64):
+  v7 = icmp.slt v5, v0
+  br v7, b3, b5
+b3:
+  v8 = icmp.ult v5, v1
+  br v8, b4, b7
+b4:
+  v9 = add.i64 v6, v5
+  v10 = add.i64 v5, v3
+  jmp b2(v10, v9)
+b5:
+  ret v6
+b6:
+  ret v2
+b7: cold
+  panic "index out of bounds"
+)";
+    let bu = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 200,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 0,
+        interleave: 0,
+        fin: 200,
+    };
+    let (b, a) = optimized(src, bu);
+    let t = text_of(&a, "sum");
+    assert(t.contains("select.i64") && count(&t, "call @report") == 1, t.as_str());
+    let fits: []u64 = [5, 10];
+    same_outcome(&b, &a, "sum", fits, 4, false);
+    let past: []u64 = [5, 3];
+    same_outcome(&b, &a, "sum", past, 0, true);
+    let none: []u64 = [0, 0];
+    same_outcome(&b, &a, "sum", none, 0, false);
+    let s = text_of(&a, "signed");
+    assert(!s.contains("panic"), s.as_str());
+    let inside: []u64 = [5, 10];
+    same_outcome(&b, &a, "signed", inside, 10, false);
+    let outside: []u64 = [10, 5];
+    same_outcome(&b, &a, "signed", outside, 0, false);
+}
+
+// A check of `i - 1 <u len` of a counter from 1 by 1 versions under `n <=u len + 1` (every `i` is at least
+// 1); one of a counter from 0 does not (its first `i - 1` wraps); one of `(i + c) - 1`, `c` from before
+// the loop, versions as `i + (c - 1)`, wrapping or not: with the checked copy, or (where the walk first
+// makes the sum `i + (c - 1)` in the loop) clipped to the iteration that fails, both with a block the
+// guard makes unlikely. Each panics or sums as before.
+@test
+fn checks_of_a_counter_less_a_constant_version() {
+    let src = M"(lir ptr 8
+sym @neg fn global
+sym @zero fn global
+sym @base fn global
+fn @neg
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  jmp b1(v2, v3)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b5
+b2:
+  v7 = sub.i64 v4, v2
+  v8 = icmp.ult v7, v1
+  br v8, b3, b4
+b3:
+  v9 = add.i64 v5, v7
+  v10 = add.i64 v4, v2
+  jmp b1(v10, v9)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v5
+fn @zero
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 0
+  jmp b1(v3, v3)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b5
+b2:
+  v7 = sub.i64 v4, v2
+  v8 = icmp.ult v7, v1
+  br v8, b3, b4
+b3:
+  v9 = add.i64 v5, v4
+  v10 = add.i64 v4, v2
+  jmp b1(v10, v9)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v5
+fn @base
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  jmp b1(v4, v4)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b5
+b2:
+  v8 = add.i64 v2, v5
+  v9 = sub.i64 v8, v3
+  v10 = icmp.ult v9, v1
+  br v10, b3, b4
+b3:
+  v11 = add.i64 v6, v5
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v6
+)";
+    let (b, a) = optimized(src, VERSION);
+    assert(text_of(&a, "neg").contains("novec"), text_of(&a, "neg").as_str());
+    assert(!text_of(&a, "zero").contains("novec"), text_of(&a, "zero").as_str());
+    assert(text_of(&a, "base").contains("unlikely"), text_of(&a, "base").as_str());
+    let fits: []u64 = [6, 5];
+    same_outcome(&b, &a, "neg", fits, 10, false);
+    let past: []u64 = [7, 5];
+    same_outcome(&b, &a, "neg", past, 0, true);
+    let none: []u64 = [0, 0];
+    same_outcome(&b, &a, "neg", none, 0, false);
+    let first: []u64 = [3, 10];
+    same_outcome(&b, &a, "zero", first, 0, true);
+    let inside: []u64 = [4, 10, 3];
+    same_outcome(&b, &a, "base", inside, 6, false);
+    let over: []u64 = [5, 6, 3];
+    same_outcome(&b, &a, "base", over, 0, true);
+    let wraps: []u64 = [4, 10, 0];
+    same_outcome(&b, &a, "base", wraps, 0, true);
+    let low: []u64 = [4, 10, 1];
+    same_outcome(&b, &a, "base", low, 6, false);
+}
+
+// A check of `i + c`, `c` from before the loop, of a counter from 3 versions, and from 0 it versions as
+// the loop clipped to the iteration that fails. From 3, with `c` past `len` (`c` wraps: -3), `i + c` is
+// below `len` again: the loop runs to its end as before, the clip would have taken its first iteration
+// for one that fails. So would it for `i + 5` from -2, which wraps to 3. Under a constant exit bound
+// (16) no `i + 1` wraps: from any start, the loop is clipped.
+@test
+fn checks_of_a_counter_plus_a_value_clip_only_where_no_sum_wraps() {
+    let src = M"(lir ptr 8
+sym @three fn global
+sym @zero fn global
+sym @far fn global
+sym @bound fn global
+fn @three
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 3
+  v5 = iconst.i64 0
+  jmp b1(v4, v5)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b5
+b2:
+  v9 = add.i64 v6, v2
+  v10 = icmp.ult v9, v1
+  br v10, b3, b4
+b3:
+  v11 = add.i64 v7, v9
+  v12 = add.i64 v6, v3
+  jmp b1(v12, v11)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v7
+fn @zero
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 1
+  v4 = iconst.i64 0
+  jmp b1(v4, v4)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b5
+b2:
+  v8 = add.i64 v5, v2
+  v9 = icmp.ult v8, v1
+  br v9, b3, b4
+b3:
+  v10 = add.i64 v6, v8
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v6
+fn @far
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 -2
+  v4 = iconst.i64 5
+  v5 = iconst.i64 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b5
+b2:
+  v9 = add.i64 v6, v4
+  v10 = icmp.ult v9, v1
+  br v10, b3, b4
+b3:
+  v11 = add.i64 v7, v9
+  v12 = add.i64 v6, v2
+  jmp b1(v12, v11)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v7
+fn @bound
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 1
+  v3 = iconst.i64 16
+  v4 = iconst.i64 0
+  jmp b1(v0, v4)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v3
+  br v7, b2, b5
+b2:
+  v8 = add.i64 v5, v2
+  v9 = icmp.ult v8, v1
+  br v9, b3, b4
+b3:
+  v10 = add.i64 v6, v8
+  jmp b1(v8, v10)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v6
+)";
+    let (b, a) = optimized(src, VERSION);
+    assert(text_of(&a, "bound").contains("unreachable"), text_of(&a, "bound").as_str());
+    let room: []u64 = [3, 17];
+    same_outcome(&b, &a, "bound", room, 130, false);
+    let short: []u64 = [3, 16];
+    same_outcome(&b, &a, "bound", short, 0, true);
+    let none: []u64 = [20, 5];
+    same_outcome(&b, &a, "bound", none, 0, false);
+    let early: []u64 = [0, 10];
+    same_outcome(&b, &a, "bound", early, 0, true);
+    let far: []u64 = [18446744073709551615, 10];
+    same_outcome(&b, &a, "far", far, 3, false);
+    assert(text_of(&a, "three").contains("novec"), text_of(&a, "three").as_str());
+    assert(text_of(&a, "zero").contains("unreachable"), text_of(&a, "zero").as_str());
+    let wraps: []u64 = [60, 64, 18446744073709551613];
+    same_outcome(&b, &a, "three", wraps, 1596, false);
+    let past: []u64 = [70, 64, 18446744073709551613];
+    same_outcome(&b, &a, "three", past, 0, true);
+    let fits: []u64 = [50, 64, 10];
+    same_outcome(&b, &a, "three", fits, 1692, false);
+    let over: []u64 = [60, 64, 10];
+    same_outcome(&b, &a, "three", over, 0, true);
+    let first: []u64 = [5, 3, 18446744073709551615];
+    same_outcome(&b, &a, "zero", first, 0, true);
+    let inside: []u64 = [3, 10, 2];
+    same_outcome(&b, &a, "zero", inside, 9, false);
+    let ends: []u64 = [4, 5, 2];
+    same_outcome(&b, &a, "zero", ends, 0, true);
+}
+
+// A check of an index its form bounds, whatever the counter (`capped`), versions on that bound below
+// `len`: `(i * x) & 15` on `15 <u len`, `i & m` on `m <u len`, `i % m` on `m <=u len`, `i % 10` divided by
+// its multiplier on `9 <u len`, also under a `!=` exit test with no check of the counter. A multiplier
+// that is not the quotient's keeps its checks. Where the guard fails the loop with the checks runs: it
+// panics at an index past `len` only.
+@test
+fn checks_of_an_index_its_form_bounds_version() {
+    let src = M"(lir ptr 8
+sym @mask fn global
+sym @inv fn global
+sym @rem fn global
+sym @div fn global
+sym @wrong fn global
+sym @ne fn global
+fn @mask
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v5
+  v15 = add.i64 v14, v3
+  v16 = add.i64 v15, v3
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @inv
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = add.i64 v10, v3
+  v14 = add.i64 v13, v3
+  v15 = add.i64 v14, v3
+  v16 = and.i64 v15, v2
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @rem
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = add.i64 v10, v3
+  v14 = add.i64 v13, v3
+  v15 = add.i64 v14, v3
+  v16 = urem.i64 v15, v2
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @div
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mulhu.i64 v10, v7
+  v14 = lshr.i64 v13, v8
+  v15 = mul.i64 v14, v6
+  v16 = sub.i64 v10, v15
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @wrong
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mulhu.i64 v10, v9
+  v14 = lshr.i64 v13, v8
+  v15 = mul.i64 v14, v6
+  v16 = sub.i64 v10, v15
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @ne
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 10
+  v7 = iconst.i64 -3689348814741910323
+  v8 = iconst.i64 3
+  v9 = iconst.i64 -3689348814741910528
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ne v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v5
+  v15 = add.i64 v14, v3
+  v16 = add.i64 v15, v3
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+)";
+    let (b, a) = optimized(src, VERSION);
+    for f in ["mask", "inv", "rem", "div", "ne"] {
+        let t = text_of(&a, f);
+        assert(t.contains("novec"), t.as_str());
+    }
+    let w = text_of(&a, "wrong");
+    assert(!w.contains("novec"), w.as_str());
+    // (len, n, x).
+    let fits: []u64 = [16, 40, 7];
+    same_outcome(&b, &a, "mask", fits, run_value(&b, "mask", fits), false);
+    let short: []u64 = [15, 40, 7];
+    same_outcome(&b, &a, "mask", short, 0, true);
+    let zero: []u64 = [15, 40, 0];
+    same_outcome(&b, &a, "mask", zero, 0, false);
+    let below: []u64 = [8, 20, 7];
+    same_outcome(&b, &a, "inv", below, run_value(&b, "inv", below), false);
+    let at: []u64 = [8, 20, 8];
+    same_outcome(&b, &a, "inv", at, 0, true);
+    let top: []u64 = [5, 3, 0xFFFF_FFFF_FFFF_FFFF];
+    same_outcome(&b, &a, "inv", top, 3, false);
+    let whole: []u64 = [5, 20, 5];
+    same_outcome(&b, &a, "rem", whole, 40, false);
+    let past: []u64 = [5, 20, 6];
+    same_outcome(&b, &a, "rem", past, 0, true);
+    let few: []u64 = [5, 4, 6];
+    same_outcome(&b, &a, "rem", few, 6, false);
+    let ten: []u64 = [10, 25, 0];
+    same_outcome(&b, &a, "div", ten, 100, false);
+    let nine: []u64 = [9, 25, 0];
+    same_outcome(&b, &a, "div", nine, 0, true);
+    // Its remainder of 10 is 10.
+    same_outcome(&b, &a, "wrong", ten, 0, true);
+    same_outcome(&b, &a, "ne", fits, run_value(&b, "ne", fits), false);
+    same_outcome(&b, &a, "ne", short, 0, true);
+}
+
+// With `version_checks` 1 (`-O2`) a loop with one bounds check versions and a loop with two keeps both,
+// also two into one failure block (one test against the least of the lengths); with no limit (`-O3`) all
+// version. Each sums or panics as before.
+@test
+fn versioning_takes_loops_of_at_most_its_number_of_checks() {
+    let src = M"(lir ptr 8
+sym @one fn global
+sym @two fn global
+sym @merged fn global
+fn @one
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  jmp b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v1
+  br v6, b2, b4
+b2:
+  v7 = icmp.ult v4, v0
+  br v7, b3, b5
+b3:
+  v8 = add.i64 v5, v4
+  v9 = add.i64 v4, v3
+  jmp b1(v9, v8)
+b4:
+  ret v5
+b5: cold
+  panic "index out of bounds"
+fn @two
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b5
+b2:
+  v8 = icmp.ult v5, v0
+  br v8, b3, b6
+b3:
+  v9 = icmp.ult v5, v2
+  br v9, b4, b7
+b4:
+  v10 = add.i64 v6, v5
+  v11 = add.i64 v5, v4
+  jmp b1(v11, v10)
+b5:
+  ret v6
+b6: cold
+  panic "index out of bounds"
+b7: cold
+  panic "second index out of bounds"
+fn @merged
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v1
+  br v7, b2, b5
+b2:
+  v8 = icmp.ult v5, v0
+  br v8, b3, b6
+b3:
+  v9 = icmp.ult v5, v2
+  br v9, b4, b6
+b4:
+  v10 = add.i64 v6, v5
+  v11 = add.i64 v5, v4
+  jmp b1(v11, v10)
+b5:
+  ret v6
+b6: cold
+  panic "index out of bounds"
+)";
+    // A loop that versions (or clips) differs from the one no versioning budget leaves.
+    let mut bu = VERSION;
+    bu.version_checks = 1;
+    let (b, a) = optimized(src, bu);
+    let mut off = VERSION;
+    off.version = 0;
+    let (_, none) = optimized(src, off);
+    let (_, all) = optimized(src, VERSION);
+    let o = text_of(&a, "one");
+    assert(o.as_str() != text_of(&none, "one").as_str(), o.as_str());
+    let t = text_of(&a, "two");
+    assert(t.as_str() == text_of(&none, "two").as_str(), t.as_str());
+    let t2 = text_of(&all, "two");
+    assert(t2.as_str() != text_of(&none, "two").as_str(), t2.as_str());
+    // Two checks into one failure block, one test against the least of the lengths (`bound_min`, made
+    // before the loop): two checks.
+    let m = text_of(&a, "merged");
+    assert(m.as_str() == text_of(&none, "merged").as_str(), m.as_str());
+    let m2 = text_of(&all, "merged");
+    assert(m2.as_str() != text_of(&none, "merged").as_str(), m2.as_str());
+    let fits: []u64 = [5, 5];
+    same_outcome(&b, &a, "one", fits, 10, false);
+    let past: []u64 = [4, 5];
+    same_outcome(&b, &a, "one", past, 0, true);
+    let both: []u64 = [5, 5, 6];
+    same_outcome(&b, &a, "two", both, 10, false);
+    let second: []u64 = [6, 5, 4];
+    same_outcome(&b, &a, "two", second, 0, true);
+    same_outcome(&b, &all, "merged", both, 10, false);
+    same_outcome(&b, &all, "merged", second, 0, true);
+}
+
+// The remainder by 7 divided with the multiplier one bit wider (`(n - h) >> 1 + h`), the remainder by 10
+// of a 32-bit value through its 64-bit product, and `i % m` with `m` from the loop at most 15 (`(y & 15) |
+// 1`) bound the index: their checks version. A 64-bit value shifted by 1 bounds it only past 2^32: its
+// checks stay; one of 16 bits shifted by 7 bounds it at 511, `(y & 2) | 1` at 3, `14 % m` below `m`. Each
+// sums or panics as before.
+@test
+fn checks_of_a_remainder_or_shift_its_form_bounds_version() {
+    let src = M"(lir ptr 8
+sym @seven fn global
+sym @narrow fn global
+sym @inner fn global
+sym @wide fn global
+sym @low fn global
+sym @orr fn global
+sym @top fn global
+fn @seven
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mulhu.i64 v10, v7
+  v14 = sub.i64 v10, v13
+  v15 = lshr.i64 v14, v4
+  v16 = add.i64 v15, v13
+  v17 = lshr.i64 v16, v8
+  v18 = mul.i64 v17, v6
+  v19 = sub.i64 v10, v18
+  v20 = icmp.ult v19, v0
+  br v20, b3, b4
+b3:
+  v21 = add.i64 v11, v19
+  v22 = add.i64 v10, v4
+  jmp b1(v22, v21)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @narrow
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 3435973837
+  v6 = iconst.i64 35
+  v7 = iconst.i32 10
+  jmp b1(v3, v3)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v1
+  br v10, b2, b5
+b2:
+  v11 = trunc.i32 v8
+  v12 = zext.i64 v11
+  v13 = mul.i64 v12, v5
+  v14 = lshr.i64 v13, v6
+  v15 = trunc.i32 v14
+  v16 = mul.i32 v15, v7
+  v17 = sub.i32 v11, v16
+  v18 = zext.i64 v17
+  v19 = icmp.ult v18, v0
+  br v19, b3, b4
+b3:
+  v20 = add.i64 v9, v18
+  v21 = add.i64 v8, v4
+  jmp b1(v21, v20)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v9
+fn @inner
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v5
+  v15 = or.i64 v14, v4
+  v16 = urem.i64 v10, v15
+  v17 = icmp.ult v16, v0
+  br v17, b3, b4
+b3:
+  v18 = add.i64 v11, v16
+  v19 = add.i64 v10, v4
+  jmp b1(v19, v18)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @wide
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = lshr.i64 v13, v4
+  v15 = icmp.ult v14, v0
+  br v15, b3, b4
+b3:
+  v16 = add.i64 v11, v14
+  v17 = add.i64 v10, v4
+  jmp b1(v17, v16)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @low
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v9
+  v15 = lshr.i64 v14, v6
+  v16 = icmp.ult v15, v0
+  br v16, b3, b4
+b3:
+  v17 = add.i64 v11, v15
+  v18 = add.i64 v10, v4
+  jmp b1(v18, v17)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @orr
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v8
+  v15 = or.i64 v14, v4
+  v16 = icmp.ult v15, v0
+  br v16, b3, b4
+b3:
+  v17 = add.i64 v11, v15
+  v18 = add.i64 v10, v4
+  jmp b1(v18, v17)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+fn @top
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 15
+  v6 = iconst.i64 7
+  v7 = iconst.i64 2635249153387078803
+  v8 = iconst.i64 2
+  v9 = iconst.i64 65535
+  jmp b1(v3, v3)
+b1(v10: i64, v11: i64):
+  v12 = icmp.ult v10, v1
+  br v12, b2, b5
+b2:
+  v13 = mul.i64 v10, v2
+  v14 = and.i64 v13, v5
+  v15 = or.i64 v14, v4
+  v16 = add.i64 v6, v6
+  v17 = urem.i64 v16, v15
+  v18 = icmp.ult v17, v0
+  br v18, b3, b4
+b3:
+  v19 = add.i64 v11, v17
+  v20 = add.i64 v10, v4
+  jmp b1(v20, v19)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v11
+)";
+    let (b, a) = optimized(src, VERSION);
+    for f in ["seven", "narrow", "inner", "low", "orr", "top"] {
+        let t = text_of(&a, f);
+        assert(t.contains("novec"), t.as_str());
+    }
+    let w = text_of(&a, "wide");
+    assert(!w.contains("novec"), w.as_str());
+    // (len, n, x).
+    let seven: []u64 = [7, 30, 0];
+    same_outcome(&b, &a, "seven", seven, run_value(&b, "seven", seven), false);
+    let six: []u64 = [6, 30, 0];
+    same_outcome(&b, &a, "seven", six, 0, true);
+    let ten: []u64 = [10, 25, 0];
+    same_outcome(&b, &a, "narrow", ten, 100, false);
+    let nine: []u64 = [9, 25, 0];
+    same_outcome(&b, &a, "narrow", nine, 0, true);
+    let fifteen: []u64 = [15, 40, 3];
+    same_outcome(&b, &a, "inner", fifteen, run_value(&b, "inner", fifteen), false);
+    let few: []u64 = [3, 40, 3];
+    same_outcome(&b, &a, "inner", few, 0, true);
+    let small: []u64 = [512, 40, 1700];
+    same_outcome(&b, &a, "low", small, run_value(&b, "low", small), false);
+    let short: []u64 = [400, 40, 1700];
+    same_outcome(&b, &a, "low", short, 0, true);
+    let two: []u64 = [512, 2, 1000];
+    same_outcome(&b, &a, "wide", two, 500, false);
+    same_outcome(&b, &a, "wide", small, 0, true);
+    // `(i * x & 2) | 1` reaches 3, past both operands' bounds.
+    let four: []u64 = [4, 10, 1];
+    same_outcome(&b, &a, "orr", four, run_value(&b, "orr", four), false);
+    let three: []u64 = [3, 10, 1];
+    same_outcome(&b, &a, "orr", three, 0, true);
+    // `14 % m` is 14 where `m` is 15.
+    let whole: []u64 = [15, 40, 3];
+    same_outcome(&b, &a, "top", whole, run_value(&b, "top", whole), false);
+    let fourteen: []u64 = [14, 40, 3];
+    same_outcome(&b, &a, "top", fourteen, 0, true);
+}
+
+// A rotated loop (the zero-trip test before it, the exit test `i + 1 <u n` at the latch) whose header's
+// branch is the check `i <u len` versions on `n <= len` and a start below `n` (the first iteration runs
+// before any test): the header's branch is no exit test. It panics or sums as before.
+@test
+fn a_rotated_loop_whose_header_is_a_check_versions() {
+    let src = M"(lir ptr 8
+sym @rot fn global
+sym @start fn global
+fn @rot
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = icmp.ne v1, v2
+  br v4, b1(v2, v2), b4(v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.uge v5, v0
+  br v7, b3, b2
+b2:
+  v8 = add.i64 v6, v5
+  v9 = add.i64 v5, v3
+  v10 = icmp.ult v9, v1
+  br v10, b1(v9, v8), b4(v8)
+b3: cold
+  panic "index out of bounds"
+b4(v11: i64):
+  ret v11
+fn @start
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v2, v3)
+b1(v5: i64, v6: i64):
+  v7 = icmp.uge v5, v0
+  br v7, b3, b2
+b2:
+  v8 = add.i64 v6, v5
+  v9 = add.i64 v5, v4
+  v10 = icmp.ult v9, v1
+  br v10, b1(v9, v8), b4(v8)
+b3: cold
+  panic "index out of bounds"
+b4(v11: i64):
+  ret v11
+)";
+    let (b, a) = optimized(src, VERSION);
+    let t = text_of(&a, "rot");
+    assert(t.contains("novec") && count(&t, "panic") == 1, t.as_str());
+    // (len, n).
+    let fits: []u64 = [5, 5];
+    same_outcome(&b, &a, "rot", fits, 10, false);
+    let short: []u64 = [9, 4];
+    same_outcome(&b, &a, "rot", short, 6, false);
+    let past: []u64 = [4, 6];
+    same_outcome(&b, &a, "rot", past, 0, true);
+    let none: []u64 = [0, 0];
+    same_outcome(&b, &a, "rot", none, 0, false);
+    let st = text_of(&a, "start");
+    assert(st.contains("novec"), st.as_str());
+    // (len, n, start): a start at or past `n` runs one iteration.
+    let from: []u64 = [6, 5, 2];
+    same_outcome(&b, &a, "start", from, 9, false);
+    let late: []u64 = [6, 5, 7];
+    same_outcome(&b, &a, "start", late, 0, true);
+    let once: []u64 = [8, 5, 7];
+    same_outcome(&b, &a, "start", once, 7, false);
+}
+
+// A check of `i - c <u len`, `c` from before the loop, of a counter from `s` by 1 versions under `c <=u s`
+// and `n <=u len + c` (the type's greatest value where the sum wraps). Each panics or sums as before.
+@test
+fn checks_of_a_counter_less_a_value_version() {
+    let src = M"(lir ptr 8
+sym @val fn global
+fn @val
+  sig (i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64):
+  v4 = iconst.i64 1
+  v5 = iconst.i64 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b5
+b2:
+  v9 = sub.i64 v6, v2
+  v10 = icmp.ult v9, v1
+  br v10, b3, b4
+b3:
+  v11 = add.i64 v7, v9
+  v12 = add.i64 v6, v4
+  jmp b1(v12, v11)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v7
+)";
+    let (b, a) = optimized(src, VERSION);
+    let t = text_of(&a, "val");
+    assert(t.contains("novec") && count(&t, "panic") == 1, t.as_str());
+    let fits: []u64 = [7, 5, 2, 2];
+    same_outcome(&b, &a, "val", fits, 10, false);
+    let late: []u64 = [7, 5, 2, 4];
+    same_outcome(&b, &a, "val", late, 9, false);
+    let early: []u64 = [7, 5, 2, 1];
+    same_outcome(&b, &a, "val", early, 0, true);
+    let past: []u64 = [8, 5, 2, 2];
+    same_outcome(&b, &a, "val", past, 0, true);
+    let top: []u64 = [0xFFFF_FFFF_FFFF_FFFF, 5, 0xFFFF_FFFF_FFFF_FFFD, 0xFFFF_FFFF_FFFF_FFFD];
+    same_outcome(&b, &a, "val", top, 1, false);
+    let short: []u64 = [0xFFFF_FFFF_FFFF_FFFF, 1, 0xFFFF_FFFF_FFFF_FFFD, 0xFFFF_FFFF_FFFF_FFFD];
+    same_outcome(&b, &a, "val", short, 0, true);
+    let none: []u64 = [0, 0, 3, 0];
+    same_outcome(&b, &a, "val", none, 0, false);
+}
+
+// A check of `i * w + c <u len`, `w` and `c` from before the loop, versions under `(n - 1) * w + c <u len`
+// with the product and the sum checked. A last index at the length, a product or a sum that wraps
+// panic as before.
+@test
+fn checks_of_a_counter_times_a_value_version() {
+    let src = M"(lir ptr 8
+sym @col fn global
+fn @col
+  sig (i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64):
+  v4 = iconst.i64 1
+  v5 = iconst.i64 0
+  jmp b1(v5, v5)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v3
+  br v8, b2, b5
+b2:
+  v9 = mul.i64 v6, v1
+  v10 = add.i64 v9, v2
+  v11 = icmp.ult v10, v0
+  br v11, b3, b4
+b3:
+  v12 = add.i64 v7, v10
+  v13 = add.i64 v6, v4
+  jmp b1(v13, v12)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret v7
+)";
+    let (b, a) = optimized(src, VERSION);
+    let t = text_of(&a, "col");
+    assert(t.contains("novec") && t.contains("mulo") && count(&t, "panic") == 1, t.as_str());
+    // (len, w, c, n).
+    let top: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    let fits: []u64 = [20, 3, 2, 6];
+    same_outcome(&b, &a, "col", fits, 57, false);
+    let zero: []u64 = [3, 0, 2, 1000];
+    same_outcome(&b, &a, "col", zero, 2000, false);
+    let none: []u64 = [0, 3, 2, 0];
+    same_outcome(&b, &a, "col", none, 0, false);
+    let last: []u64 = [17, 3, 2, 6];
+    same_outcome(&b, &a, "col", last, 0, true);
+    let product: []u64 = [10, 0x8000_0000_0000_0000, 0, 3];
+    same_outcome(&b, &a, "col", product, 0, true);
+    let sum: []u64 = [10, 1, top - 1, 3];
+    same_outcome(&b, &a, "col", sum, 0, true);
 }
 
 // The checks of `i + c <u len`, `c` from before the loop, clip a loop that sums at `len > c ? len - c :
@@ -799,7 +1897,17 @@ b3:
     same_outcome(&b, &a, "squares", four, 14, false);
     let (b2, a2) = optimized(
         src,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 1, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 1,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
     );
     let q2 = text_of(&a2, "squares");
     assert(count(&q2, "icmp.ult") == 1 && q2.contains("jmp"), q2.as_str());
@@ -870,7 +1978,17 @@ b3:
     }
     let (_, small) = optimized(
         text,
-        lu::Budgets { peel: 0, partial: 5, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 5,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
     );
     let s = text_of(&small, "mix");
     assert_eq(count(&s, "mul.i32"), 1);
@@ -1849,7 +2967,17 @@ b5:
 b6:
   ret v21
 )";
-    let jam = lu::Budgets { peel: 0, partial: 32, version: 0, unswitch: 0, rotate: 0, vector: 2, interleave: 2, fin: 0 };
+    let jam = lu::Budgets {
+        peel: 0,
+        partial: 32,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
     for excl in 0..2usize {
         let src = format(
             "lir ptr 8\nsym @mv fn global noinline\nsym @drive fn global\nfn @mv\n  sig (ptr, ptr, ptr, i64, i64) -> void\n{}b0(v0: ptr, v1: ptr, v2: ptr, v3: i64, v4: i64):\n{}{}",
@@ -2394,6 +3522,7 @@ const FIN: lu::Budgets = lu::Budgets {
     peel: 0,
     partial: 0,
     version: 0,
+    version_checks: u32::MAX,
     unswitch: 0,
     rotate: 0,
     vector: 0,
@@ -2978,7 +4107,17 @@ b3:
     // Each loop keeps its blocks too: the tests that fail leave no block behind (`close_plan`).
     let (_, z) = optimized(
         src,
-        lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 0, interleave: 0, fin: 0 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
     );
     let names: []str = ["xor", "geo", "mem"];
     for f in 0..names.len() {
@@ -2990,6 +4129,60 @@ b3:
     let x: []u64 = [10];
     same_outcome(&b, &a, "xor", x, 1, false);
     same_outcome(&b, &a, "geo", x, 59049, false);
+}
+
+// A counter whose constant bound is the type's greatest (or least) value: its last step reaches the
+// bound exactly, and its interval is computed without passing it.
+@test
+fn a_counter_up_to_the_type_extremes_takes_its_closed_form() {
+    let src = M"(lir ptr 8
+sym @top fn global
+sym @bottom fn global
+fn @top
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 9223372036854775757
+  v2 = iconst.i64 9223372036854775807
+  v3 = iconst.i64 1
+  jmp b1(v1, v0)
+b1(v4: i64, v5: i64):
+  v6 = icmp.slt v4, v2
+  br v6, b2, b3
+b2:
+  v7 = add.i64 v5, v4
+  v8 = add.i64 v4, v3
+  jmp b1(v8, v7)
+b3:
+  ret v5
+fn @bottom
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -9223372036854775758
+  v2 = iconst.i64 -9223372036854775808
+  v3 = iconst.i64 1
+  jmp b1(v1, v0)
+b1(v4: i64, v5: i64):
+  v6 = icmp.sgt v4, v2
+  br v6, b2, b3
+b2:
+  v7 = add.i64 v5, v4
+  v8 = sub.i64 v4, v3
+  jmp b1(v8, v7)
+b3:
+  ret v5
+)";
+    let (b, a) = closed(src, "top");
+    let (bb, ba) = closed(src, "bottom");
+    let xs: []u64 = [0, 7, 0xFFFFFFFFFFFFFFFF];
+    for k in 0..xs.len() {
+        let x: []u64 = [xs[k]];
+        let mut e = leval::Eval::new(&b);
+        let want = e.run(b.find_symbol("top"), x).value;
+        same_outcome(&b, &a, "top", x, want, false);
+        let mut e2 = leval::Eval::new(&bb);
+        let want2 = e2.run(bb.find_symbol("bottom"), x).value;
+        same_outcome(&bb, &ba, "bottom", x, want2, false);
+    }
 }
 
 // A loop that stores stays, but the sum it leaves with goes: the block its exit enters computes it from
@@ -3149,6 +4342,51 @@ fn optimized_stepping(text: str, bu: lu::Budgets) (Package, Package) {
         }
     }
     return (before, after);
+}
+
+// A loop over a slot's 4 elements of 16 bytes, its accesses at 0 and 8 of each apart (no pair): its pointer
+// to the access at 8 steps, but its value past the last iteration, 72, would lie past the slot's 64 bytes
+// (a constant address of a slot lies in it): the counter keeps its exit test. Each body verifies.
+@test
+fn a_stepped_pointer_leaves_no_slot() {
+    let (b, a) = optimized_stepping(
+        M"(lir ptr 8
+sym @slotpair fn global
+fn @slotpair
+  sig (i64) -> i64
+  slot s0 size 64 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 4
+  store v0, v1 align 3
+  store v0, v1+8 align 3
+  store v0, v1+16 align 3
+  store v0, v1+24 align 3
+  store v0, v1+32 align 3
+  store v0, v1+40 align 3
+  store v0, v1+48 align 3
+  store v0, v1+56 align 3
+  jmp b1(v2, v2)
+b1(v5: i64, v6: i64):
+  v7 = ptradd v1, v5 * 16
+  v8 = load.i64 v7 align 3
+  v9 = add.i64 v6, v8
+  v10 = load.i64 v7+8 align 3
+  v11 = add.i64 v9, v10
+  v12 = add.i64 v5, v3
+  v13 = icmp.ult v12, v4
+  br v13, b1(v12, v11), b2
+b2:
+  ret v11
+)",
+        NO_LOOPS,
+    );
+    let t = text_of(&a, "slotpair");
+    assert(t.contains("+16") && t.contains("icmp.ult"), t.as_str());
+    let five: []u64 = [5];
+    same_outcome(&b, &a, "slotpair", five, 40, false);
 }
 
 // A loop of one block whose counter indexes a base with one scale for two or more accesses carries a
@@ -3569,6 +4807,7 @@ b3:
         peel: 0,
         partial: 0,
         version: 200,
+        version_checks: u32::MAX,
         unswitch: 0,
         rotate: 0,
         vector: 2,
@@ -3661,6 +4900,7 @@ b3:
         peel: 0,
         partial: 0,
         version: 200,
+        version_checks: u32::MAX,
         unswitch: 0,
         rotate: 0,
         vector: 2,
@@ -3680,6 +4920,96 @@ b3:
     let past: [[u64; 3]; 4] = [[64, 13, 5], [59, 30, 2], [64, 0x8000000000000000, 2], [64, 65, 1]];
     for k in 0..4usize {
         let args: []u64 = [unsafe past[k][0], unsafe past[k][1], unsafe past[k][2]];
+        same_outcome(&b, &a, "drive", args, 0, true);
+    }
+}
+
+// A bounds check of `a[i - c]`, `c` from before the loop, versions on `c <=u start` and `n <=u len + c`;
+// the copy without it steps through `a - c` (`split_base`) and vectorizes. A start below `c`, a count past
+// the length and a length short of a sum that wraps panic as before.
+@test
+fn checks_less_a_value_version_and_vectorize() {
+    let src = M"(lir ptr 8
+sym @from fn global noinline
+sym @drive fn global
+fn @from
+  sig (ptr, i64, i64, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5 = iconst.i64 1
+  v6 = iconst.i32 0
+  jmp b1(v3, v6)
+b1(v7: i64, v8: i32):
+  v9 = icmp.ult v7, v4
+  br v9, b2, b5
+b2:
+  v10 = sub.i64 v7, v2
+  v11 = icmp.uge v10, v1
+  br v11, b4, b3
+b3:
+  v12 = ptradd v0, v10 * 4
+  v13 = load.i32 v12 align 2
+  v14 = add.i32 v8, v13
+  v15 = add.i64 v7, v5
+  jmp b1(v15, v14)
+b4: cold
+  panic "index out of bounds"
+b5:
+  v16 = sext.i64 v8
+  ret v16
+fn @drive
+  sig (i64, i64, i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64, v2: i64, v3: i64):
+  v4 = slotaddr s0
+  v5 = iconst.i64 0
+  v6 = iconst.i64 1
+  v7 = iconst.i64 64
+  v8 = iconst.i32 7
+  jmp b1(v5)
+b1(v9: i64):
+  v10 = icmp.ult v9, v7
+  br v10, b2, b3
+b2:
+  v11 = trunc.i32 v9
+  v12 = mul.i32 v11, v8
+  v13 = ptradd v4, v9 * 4
+  store v12, v13 align 2
+  v14 = add.i64 v9, v6
+  jmp b1(v14)
+b3:
+  v15 = call.i64 @from(v4, v0, v1, v2, v3) : (ptr, i64, i64, i64, i64) -> i64
+  ret v15
+)";
+    let both = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 200,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
+    let (b, a) = optimized(src, both);
+    let t = text_of(&a, "from");
+    assert(t.contains("load.v4i32") && count(&t, "panic") == 1, t.as_str());
+    // (len, c, start, n).
+    let top: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    let fits: [[u64; 4]; 5] = [
+        [64, 3, 3, 67],
+        [64, 0, 0, 64],
+        [64, 5, 9, 40],
+        [64, 5, 5, 5],
+        [2, top - 2, top - 2, top],
+    ];
+    for k in 0..5usize {
+        let args: []u64 = [unsafe fits[k][0], unsafe fits[k][1], unsafe fits[k][2], unsafe fits[k][3]];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+    let past: [[u64; 4]; 3] = [[64, 3, 3, 68], [64, 5, 4, 40], [1, top - 2, top - 2, top]];
+    for k in 0..3usize {
+        let args: []u64 = [unsafe past[k][0], unsafe past[k][1], unsafe past[k][2], unsafe past[k][3]];
         same_outcome(&b, &a, "drive", args, 0, true);
     }
 }
@@ -4763,7 +6093,7 @@ fn @widen
 b0(v0: ptr, v1: ptr, v2: i64):
   v3 = iconst.i64 0
   v4 = iconst.i64 1
-  v5 = iconst.i32 3
+  v5 = iconst.i32 300
   jmp b1(v3)
 b1(v6: i64):
   v7 = icmp.ult v6, v2
@@ -5725,7 +7055,17 @@ b3:
   ret v6
 data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
 )";
-    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    let four = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 4,
+        interleave: 4,
+        fin: 0,
+    };
     let (b, a) = optimized(src, four);
     let s = text_of(&a, "sum");
     assert(count(&s, "load.v4i32") == 5 && !s.contains(" epi"), s.as_str());
@@ -5826,8 +7166,9 @@ data @w size 200 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd
 }
 
 // A count whose 8-byte lanes take 4 registers per vector of byte lanes interleaves as many copies as hold
-// its accumulators in the target's registers for them (`Package.vec_accs`): 2 of 4 within 8 registers, 1
-// within 4, all 4 without a bound; each length runs as before.
+// its accumulators in the target's registers for them (`Package.vec_accs`), a power of 2 (the vector
+// iterations' count masks the length): 2 of 4 within 8 registers, 2 within 12, 1 within 4, all 4 without
+// a bound; each length runs as before.
 @test
 fn wide_reductions_interleave_within_their_registers() {
     let src = M"(lir ptr 8
@@ -5855,10 +7196,20 @@ b3:
   ret v6
 data @w size 64 align 3 bytes 21c0a9dc5920318c312059dca9c021ccc100895c79e0918cd160395cc98081cc614069dc99a0f18c71a019dce940e1cc0180495cb960518c11e0f95c090041cc
 )";
-    let four = lu::Budgets { peel: 0, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 4, interleave: 4, fin: 0 };
+    let four = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 4,
+        interleave: 4,
+        fin: 0,
+    };
     // (registers, vector loads of the first vector loop)
-    let cases: [(u32, u32); 3] = [(8, 2), (4, 1), (0, 4)];
-    for k in 0..3usize {
+    let cases: [(u32, u32); 4] = [(8, 2), (12, 2), (4, 1), (0, 4)];
+    for k in 0..4usize {
         let (accs, loads) = unsafe cases[k];
         let (b, a) = optimized_with(src, four, 16, VOPS_SOME, accs);
         // The block of the first vector load, to its branch.
@@ -6399,7 +7750,17 @@ b3:
   v10 = add.i32 v5, v4
   jmp b1(v10)
 )",
-        lu::Budgets { peel: 300, partial: 0, version: 0, unswitch: 0, rotate: 0, vector: 1, interleave: 1, fin: 0 },
+        lu::Budgets {
+            peel: 300,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 1,
+            interleave: 1,
+            fin: 0,
+        },
         16,
         0,
     );

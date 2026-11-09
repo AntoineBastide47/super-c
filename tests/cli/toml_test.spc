@@ -297,7 +297,7 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     let sec = manifest::CG_FUNCTION_SECTIONS | manifest::CG_DATA_SECTIONS;
     assert_eq(manifest::cg_effective(0, 0, 0), 0u64);
     assert_eq(manifest::cg_effective(1, 0, 0), fp | inl | sec);
-    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | sec | fun | unr | vec | sa);
+    assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | sec | fun | unr | manifest::CG_VERSION_LOOPS | vec | sa);
     assert_eq(manifest::cg_effective(3, 0, 0), fp | inl | sec | fun | unr | vers | vec | sa);
     assert_eq(manifest::cg_effective(manifest::OPT_S, 0, 0), fp | inl | sec | fun | vec | sa);
     assert_eq(manifest::cg_effective(manifest::OPT_Z, 0, 0), fp | inl | sec | sa);
