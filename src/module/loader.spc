@@ -2346,6 +2346,38 @@ fn package_base(root_dir: str, alt_dir: str, std_dir: str, overlay_files: Vector
     return p;
 }
 
+/// `file` spelled from `std_root` when it is a file of the std tree in use (`std/` or `ffi/` under
+/// `std_root`, whose real path is `std_real`, "" for none), as the package's imports name it; else "".
+pub(package) fn std_tree_file(file: str, std_root: str, std_real: str) String {
+    if std_real.len() == 0 {
+        return String::new();
+    }
+    let rf = real_path_of(file);
+    if rf.len() <= std_real.len() + 5 || !rf.as_str().starts_with(std_real) || rf.as_str().byte_at(std_real.len()) != b'/' {
+        return String::new();
+    }
+    let rel = rf.as_str().slice(std_real.len() + 1, rf.len());
+    if !rel.starts_with("std/") && !rel.starts_with("ffi/") {
+        return String::new();
+    }
+    return join2(std_root, rel);
+}
+
+/// Batch-listed `file`'s module path (`batch_mod_path`) and the file to load it from. A file of the std
+/// tree in use (`std_tree_file`) is the module its imports name there (`std::vec`), at the file they
+/// name it by, wherever the package roots: a workspace that holds the std it builds with checks those
+/// files as std. A file the roots already name so (the std at the package root) keeps its spelling.
+pub(package) fn batch_module(file: str, root: str, alt: str, std_root: str, std_real: str) (String, String) {
+    let mp = batch_mod_path(file, root, alt);
+    if !mp.as_str().starts_with("std::") && !mp.as_str().starts_with("ffi::") {
+        let f = std_tree_file(file, std_root, std_real);
+        if f.len() != 0 {
+            return (batch_mod_path(&f, std_root, ""), f);
+        }
+    }
+    return (mp, String::from_str(file));
+}
+
 /// A batch-listed file's canonical module path: relative to the alt root when under it (the spelling
 /// manifest imports must use: the alt root has no index form), else to the package root, `/` -> `::`.
 /// A root-level index file (<root>/x/x.spc with no <root>/x.spc beside it) collapses to `x`, mirroring

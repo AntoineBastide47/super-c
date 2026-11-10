@@ -425,6 +425,7 @@ pub(package) fn compile_batch(
     lsp_load_target(&bs);
     let mut p = loader::package_load_prelude(root_dir, alt_dir, std_dir, target, ov_files, ov_texts);
     let mut mids = Vector::<i32>::new();
+    let std_real = loader::real_path_of(&p.std_root);
     for k in 0..files.len() {
         let fc = files.at(k).as_str();
         let mut mid: i32 = -1;
@@ -435,8 +436,8 @@ pub(package) fn compile_batch(
             }
         }
         if mid < 0 {
-            let mp = loader::batch_mod_path(files.at(k).as_str(), root_dir, alt_dir);
-            mid = p.load_module(&mp, files.at(k).as_str(), false, target);
+            let (mp, mf) = loader::batch_module(fc, root_dir, alt_dir, &p.std_root, &std_real);
+            mid = p.load_module(&mp, &mf, false, target);
         }
         mids.push(mid);
     }

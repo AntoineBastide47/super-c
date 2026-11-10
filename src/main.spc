@@ -266,7 +266,12 @@ fn lint_project(
         // The project's analyzer and hook modules (`[tools]`): the tool compiler calls their `pub` entries, so
         // they lint as a batch of their own without the binary-project pub lint.
         let mut tool_files = Vector::<String>::new();
-        let mo = bman::load("build.toml", false);
+        // A `src/` alone (no build.toml) has no manifest to read.
+        let mo = if has_manifest(".") {
+            bman::load("build.toml", false)
+        } else {
+            Option::<bman::Manifest>::None
+        };
         if whole && !mo.is_none() {
             let man = mo.unwrap();
             lpub = man.lib_name.len() == 0;
@@ -586,7 +591,8 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
     }
     // A std/ffi file must keep its prelude identity (module path, builtin seeding, load order):
     // loading it as a root would invent errors. Load an empty root (the prelude comes along as
-    // always) and if the requested file IS one of those modules, lint it in place.
+    // always) and if the requested file IS one of those modules, lint it in place; another file of
+    // the std tree in use loads beside them as the std module it is (`loader::std_tree_file`).
     // `--fix`: quiet fixpoint loop (re-lint after each write, capped) that REJECTS (writes nothing)
     // if the package has any error a machine fix cannot repair (when EVERY error carries a fix, e.g.
     // the generated-Free leak fix, applying is the way out); a final plain pass prints what remains
@@ -601,6 +607,18 @@ fn lint_one(path: str, root: str, std_dir: str, ce_steps: u32, ce_mem: u64, targ
                 lint_mod = m;
                 found = true;
                 break;
+            }
+        }
+        if !found {
+            let sr = loader::real_path_of(&p.std_root);
+            let mf = loader::std_tree_file(path, &p.std_root, &sr);
+            if mf.len() != 0 {
+                let mp = loader::batch_mod_path(&mf, &p.std_root, "");
+                let mid = p.load_module(&mp, &mf, false, target);
+                if mid >= 0 {
+                    lint_mod = mid as usize;
+                    found = true;
+                }
             }
         }
         if !found {
@@ -712,6 +730,7 @@ fn lint_load_over(
 ) loader::Package {
     let mut p = loader::package_load_prelude_as(root, alt, std_dir, target, test_build, overlay_files, overlay_texts);
     let mut mids = Vector::<i32>::new();
+    let std_real = loader::real_path_of(&p.std_root);
     for k in 0..files.len() {
         let fc = files.at(k).as_str();
         let base = loader::basename_of(fc);
@@ -728,8 +747,8 @@ fn lint_load_over(
             }
         }
         if mid < 0 {
-            let mp = loader::batch_mod_path(files.at(k).as_str(), root, alt);
-            mid = p.load_module(&mp, files.at(k).as_str(), false, target);
+            let (mp, mf) = loader::batch_module(fc, root, alt, &p.std_root, &std_real);
+            mid = p.load_module(&mp, &mf, false, target);
         }
         mids.push(mid);
     }

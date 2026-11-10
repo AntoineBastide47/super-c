@@ -22,7 +22,7 @@ extern "C" {
         let b = value as u8;
         for i in 0..n {
             if unsafe p[i] == b {
-                return (unsafe (p + i)) as *const void;
+                return unsafe (p + i);
             }
         }
         return null;

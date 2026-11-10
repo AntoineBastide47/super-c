@@ -437,6 +437,12 @@ fn main() i32 {
     assert(r.out_shows("unused function 'zz_own_unused'"), "and its unused item");
     assert(!r.out_has("probe.spc"), "the std and ffi modules report nothing");
     assert(!r.out_has("zz_std_") && !r.out_has("zz_ffi_"), "nothing names their functions");
+    // A listed file of the std tree in use lints as the std module it is (`loader::batch_module`), not as a
+    // project module `sc::std::collections::heap` that cannot see the std's `pub(package)` items.
+    // An absolute path: the wasm lane's guest has no working directory.
+    let heap = format("lint {}/sc/std/collections/heap.spc", root);
+    let l = cli::superc_env_in(root, "SC_CACHE_DIR", &env, &heap);
+    assert(l.exit == 0 && !l.out_has("cannot find"), "a std file lints as std");
 }
 
 // Unbounded recursion is an ERROR on every build (ir/recursion.spc): a function or method no path of

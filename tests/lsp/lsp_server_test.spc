@@ -707,6 +707,8 @@ fn lsp_rename_workspace_relative() {
     assert(out2.as_str().contains(&want));
     assert(out2.as_str().contains("\"newText\":\"shove\""));
     assert(!out2.as_str().contains("cannot rename"));
+    // The std the workspace holds checks as the std (`loader::batch_module`): no error in it.
+    assert(!out2.as_str().contains("\"severity\":1"), "the workspace's std checks as std");
 }
 
 // The compiler regression the server depends on: embedding loader::Package by value from another
