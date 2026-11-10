@@ -6,56 +6,6 @@ import std::math::vec as *;
 import std::math::mat as *;
 import std::math::query as *;
 
-@test
-fn collinear_splats() {
-    assert(are_collinear(vec2::splat(-1.0), vec2::splat(1.0), 0.00001f32));
-    assert(are_collinear(vec3::splat(-1.0), vec3::splat(1.0), 0.00001f32));
-    assert(are_collinear(vec4::splat(-1.0), vec4::splat(1.0), 0.00001f32));
-}
-
-@test
-fn orthogonal_axes() {
-    assert(are_orthogonal(vec2::new(1.0, 0.0), vec2::new(0.0, 1.0), 0.00001f32));
-}
-
-@test
-fn normalized_axis() {
-    assert(is_normalized(vec4::new(1.0, 0.0, 0.0, 0.0), 0.00001f32));
-}
-
-@test
-fn null_vector() {
-    assert(is_null(vec4::splat(0.0), 0.00001f32));
-}
-
-@test
-fn orthonormal_axes() {
-    assert(are_orthonormal(vec2::new(1.0, 0.0), vec2::new(0.0, 1.0), 0.00001f32));
-}
-
-@test
-fn matrix_is_null() {
-    assert(is_null(mat4::zero(), 0.00001f32));
-}
-
-@test
-fn identity_matrices() {
-    assert(is_identity(mat2::identity(), 0.00001f32));
-    assert(is_identity(mat3::identity(), 0.00001f32));
-    assert(is_identity(mat4::identity(), 0.00001f32));
-}
-
-@test
-fn matrix_is_normalized() {
-    assert(is_normalized(mat4::identity(), 0.00001f32));
-}
-
-@test
-fn orthogonal_identity() {
-    assert(is_orthogonal(mat4::identity(), 0.00001f32));
-    assert(!is_orthogonal(mat4::zero(), 0.00001f32));
-}
-
 // The collinearity test crosses vec3s: a vec2 gets z = 0 and a vec4 loses w, so w never matters.
 @test
 fn are_collinear_shapes() {

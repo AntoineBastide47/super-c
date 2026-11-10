@@ -41,16 +41,6 @@ fn eps_near<T: Float, const N: usize>(a: Vec<T, N>, b: Vec<T, N>, eps: T) bool {
     return true;
 }
 
-// Every column of `a` has an element farther than `eps` from `b`'s.
-fn all_cols_differ<T: Float, const C: usize, const R: usize>(a: Mat<T, C, R>, b: Mat<T, C, R>, eps: T) bool {
-    for i in 0..C {
-        if near(a[i], b[i], eps) {
-            return false;
-        }
-    }
-    return true;
-}
-
 const TRANSLATED: mat4 = translate(mat4::identity(), vec3::new(1.0, 2.0, 3.0));
 const SCALED: dmat4 = scale(dmat4::identity(), dvec3::new(2.0, 3.0, 4.0));
 const ROW1: vec3 = row(mat3::new(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0), 1);
@@ -94,12 +84,6 @@ fn rotate_quarter_turn() {
     let r = rotate(mat4::identity(), radians(90.0f32), vec3::new(0.0, 0.0, 1.0));
     let b = r * a;
     assert(near(b, vec4::new(0.0, 1.0, 0.0, 1.0), 0.0001));
-}
-
-@test
-fn translate_zero_matrix() {
-    let t = translate(mat4::zero(), vec3::splat(1.0));
-    assert(all_cols_differ(t, mat4::identity(), 0.001));
 }
 
 @test
@@ -360,24 +344,6 @@ fn mat4x4_col_set() {
 }
 
 @test
-fn mat4x4_row_get() {
-    let m = mat4::identity();
-    assert(near(row(m, 0), vec4::new(1.0, 0.0, 0.0, 0.0), epsilon::<f32>()));
-    assert(near(row(m, 1), vec4::new(0.0, 1.0, 0.0, 0.0), epsilon::<f32>()));
-    assert(near(row(m, 2), vec4::new(0.0, 0.0, 1.0, 0.0), epsilon::<f32>()));
-    assert(near(row(m, 3), vec4::new(0.0, 0.0, 0.0, 1.0), epsilon::<f32>()));
-}
-
-@test
-fn mat4x4_col_get() {
-    let m = mat4::identity();
-    assert(near(column(m, 0), vec4::new(1.0, 0.0, 0.0, 0.0), epsilon::<f32>()));
-    assert(near(column(m, 1), vec4::new(0.0, 1.0, 0.0, 0.0), epsilon::<f32>()));
-    assert(near(column(m, 2), vec4::new(0.0, 0.0, 1.0, 0.0), epsilon::<f32>()));
-    assert(near(column(m, 3), vec4::new(0.0, 0.0, 0.0, 1.0), epsilon::<f32>()));
-}
-
-@test
 fn affine() {
     {
         let m = mat3::new(2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 1.0);
@@ -472,26 +438,6 @@ fn const_initializers() {
     assert(TRANSLATED[3] == vec4::new(1.0, 2.0, 3.0, 1.0));
     assert(SCALED == dmat4::new(2.0, 0.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 0.0, 4.0, 0.0, 0.0, 0.0, 0.0, 1.0));
     assert(ROW1 == vec3::new(2.0, 5.0, 8.0));
-}
-
-@test
-fn decompose_identity() {
-    let m = mat4::identity();
-    let (ok, scale, orientation, translation, skew, perspective) = decompose(m);
-    assert(ok);
-    let out = recompose(scale, orientation, translation, skew, perspective);
-    assert(near_mat(m, out, epsilon::<f32>()));
-}
-
-@test
-fn decompose_scale_translate() {
-    let t = vec3::splat(2.0);
-    let s = vec3::splat(2.0);
-    let m = translate(scale(mat4::identity(), s), t);
-    let (ok, scale, orientation, translation, skew, perspective) = decompose(m);
-    assert(ok);
-    let out = recompose(scale, orientation, translation, skew, perspective);
-    assert(near_mat(m, out, epsilon::<f32>()));
 }
 
 // The axis, the angle and the yaw of the rotation between two rotations about y. The matrices are
@@ -624,13 +570,6 @@ fn rotate_vector() {
     assert(near(b, vec3::new(0.0, 1.0, 0.0), epsilon::<f32>()));
     let c = rotate(vec4::new(1.0, 0.0, 0.0, 1.0), half_pi, vec3::new(0.0, 0.0, 1.0));
     assert(near(c, vec4::new(0.0, 1.0, 0.0, 1.0), epsilon::<f32>()));
-}
-
-@test
-fn rotate_x_vector() {
-    let half_pi = pi::<f32>() * 0.5;
-    assert(near(rotate_x(vec3::new(1.0, 0.0, 0.0), half_pi), vec3::new(1.0, 0.0, 0.0), epsilon::<f32>()));
-    assert(near(rotate_x(vec4::new(1.0, 0.0, 0.0, 1.0), half_pi), vec4::new(1.0, 0.0, 0.0, 1.0), epsilon::<f32>()));
 }
 
 @test

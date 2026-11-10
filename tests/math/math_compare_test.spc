@@ -29,6 +29,28 @@ fn vector_relational_less() {
     assert(all(less_than_equal(ivec3::new(1, 2, 3), ivec3::new(1, 3, 4))));
     assert(all(less_than(ivec4::new(1, 2, 3, 4), ivec4::new(2, 3, 4, 5))));
     assert(all(less_than_equal(ivec4::new(1, 2, 3, 4), ivec4::new(1, 3, 4, 5))));
+    // An equal lane and a greater lane: false for `<`, and only the equal one true for `<=`.
+    let a = vec4::new(1.0, 2.0, 3.0, 4.0);
+    let b = vec4::new(1.0, 3.0, 2.0, 5.0);
+    assert(less_than(a, b) == bvec4::new(false, true, false, true), "less_than");
+    assert(less_than_equal(a, b) == bvec4::new(true, true, false, true), "less_than_equal");
+    let i = ivec3::new(1, 2, 3);
+    let j = ivec3::new(1, 3, 2);
+    assert(less_than(i, j) == bvec3::new(false, true, false), "integer less_than");
+    assert(less_than_equal(i, j) == bvec3::new(true, true, false), "integer less_than_equal");
+}
+
+@test
+fn vector_relational_greater_lanes() {
+    // An equal lane and a smaller lane: false for `>`, and only the equal one true for `>=`.
+    let a = vec4::new(1.0, 3.0, 2.0, 5.0);
+    let b = vec4::new(1.0, 2.0, 3.0, 4.0);
+    assert(greater_than(a, b) == bvec4::new(false, true, false, true), "greater_than");
+    assert(greater_than_equal(a, b) == bvec4::new(true, true, false, true), "greater_than_equal");
+    let i = ivec3::new(1, 3, 2);
+    let j = ivec3::new(1, 2, 3);
+    assert(greater_than(i, j) == bvec3::new(false, true, false), "integer greater_than");
+    assert(greater_than_equal(i, j) == bvec3::new(true, true, false), "integer greater_than_equal");
 }
 
 @test

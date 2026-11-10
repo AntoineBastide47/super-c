@@ -88,7 +88,7 @@ fn a_member_gated_out_is_absent() {
     h::expect_err_msg(
         "a member gated out is absent",
         "struct S {}\nextend S {\n    @arch(wasm32)\n    @platform(wasm)\n    fn only_wasm() i32 {\n        return 1;\n    }\n}\nfn main() i32 {\n    return S::only_wasm();\n}\n",
-        "only_wasm",
+        "no associated method or constant 'only_wasm' on this type",
     );
 }
 
@@ -158,7 +158,7 @@ fn a_failing_build_condition_removes_the_item() {
     h::expect_err_msg(
         "an item whose condition never holds is absent",
         "@when(TEST && !TEST)\nfn never() i32 {\n    return 1;\n}\nfn main() i32 {\n    return never();\n}\n",
-        "never",
+        "cannot find value 'never'",
     );
     let msg = "'@when' takes a condition over TEST, LOCKDEP and OVERFLOW_CHECKS";
     h::expect_err_msg("an unknown name", "@when(FAST)\nfn f() {}\nfn main() i32 { return 0; }\n", msg);

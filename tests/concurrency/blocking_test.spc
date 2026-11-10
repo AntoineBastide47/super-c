@@ -20,9 +20,12 @@ import std::testing::bench_sys as sys;
 
 @platform(macos | linux)
 extern "C" "unistd.h" {
-    // `sleep`, not `usleep`: POSIX 2008 (`_POSIX_C_SOURCE=200809L`) no longer declares `usleep`.
+    // A read of an empty pipe: foreign code that blocks until the test writes to the pipe.
     @blocking
-    fn sleep(seconds: u32) u32;
+    fn read(fd: i32, buf: *mut void, n: usize) isize;
+    fn pipe(fds: *mut i32) i32;
+    fn write(fd: i32, buf: *const void, n: usize) isize;
+    fn close(fd: i32) i32;
 }
 
 // Exact-destruction counter: every `free` of a Payload bumps it, so a test can prove one destruction.
@@ -388,6 +391,8 @@ fn an_idle_thread_exits_and_is_reaped() {
         },
     );
     assert(wait_threads_gone(), "the idle thread exits");
+    // The second thread stays: its idle wait is longer than any preemption before `stats`.
+    blocking::set_idle_ns(60000000000);
     let _ = blocking::call(
         fn() i64 {
             return 0i64;
@@ -714,6 +719,9 @@ fn shutdown_with_an_abandoned_call_is_bounded() {
 @test
 fn shutdown_with_an_unreturned_foreign_call_is_bounded() {
     rt::set_worker_count(2);
+    let mut fds: [i32; 2] = [0, 0];
+    assert(unsafe pipe(&mut fds[0]) == 0, "a pipe");
+    let rfd = fds[0];
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
@@ -721,9 +729,11 @@ fn shutdown_with_an_unreturned_foreign_call_is_bounded() {
     let r0 = rc.clone();
     launch || {
         defer w.done();
-        // Foreign code the runtime cannot stop, and cannot signal either: long enough that the shutdown
-        // below, asked for once the call is running, cannot outlast it on a loaded runner.
-        r0.get().store(unsafe sleep(1), atomics::MemoryOrder::Release);
+        // Foreign code the runtime cannot stop, and cannot signal either: it returns only once the test
+        // writes to the pipe, after the shutdown below.
+        let mut b: u8 = 0;
+        let n = unsafe read(rfd, (&mut b) as *mut u8, 1);
+        r0.get().store(n as i64, atomics::MemoryOrder::Release);
     };
     // Wait until the pool reports the call running: a fixed sleep loses to a slow start under load.
     let deadline = platform::now_ns() + 5000000000;
@@ -733,8 +743,12 @@ fn shutdown_with_an_unreturned_foreign_call_is_bounded() {
     let r = blocking::try_shutdown(50000000);
     assert(!r.released, "the foreign call is still running");
     assert_eq(r.running, 1usize);
+    let one: u8 = 1;
+    assert(unsafe write(fds[1], (&one) as *const u8, 1) == 1, "the pipe takes a byte");
     assert(wg.wait_timeout(time::Duration::from_secs(10)), "the foreign call returns");
-    assert_eq(count(&rc), 0i64);
+    assert_eq(count(&rc), 1i64);
+    let _ = unsafe close(fds[0]);
+    let _ = unsafe close(fds[1]);
     let r2 = blocking::try_shutdown(5000000000);
     assert(r2.released, "released once the foreign call returned");
     rt::shutdown();

@@ -1724,7 +1724,9 @@ fn completion_during_cancel(_fx: &mut Base) {
 }
 
 // A block reused by a new task after its member completed: the source's cancel must not reach the new
-// occupant. One worker, so the second task takes the first task's recycled block and slot.
+// occupant. One worker: the member's block goes back to that worker's stash, and a launch from a task on
+// the worker takes it again (a launch from this thread takes from the shared pool). The test checks that
+// the new occupant has the member's slot.
 @test
 fn slot_reuse_is_not_a_member(fx: &mut Base) {
     rt::set_worker_count(1);
@@ -1732,20 +1734,38 @@ fn slot_reuse_is_not_a_member(fx: &mut Base) {
     let first = sync::WaitGroup::new();
     first.add(1);
     let w1 = first.clone();
+    let slot1 = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(-1));
+    let s1 = slot1.clone();
     launch || {
         defer finish(&w1);
+        s1.get().store(rt::current_key().slot, atomics::MemoryOrder::Release);
         tok.bind_current();
     };
     assert(first.wait_timeout(time::Duration::from_secs(5)), "the member completes");
+    assert(ph::wait_quiescent(), "the member retires");
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w2 = wg.clone();
+    let slot2 = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(-1));
+    let s2 = slot2.clone();
+    let spawner = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(-1));
+    let sp = spawner.clone();
     launch || {
-        defer finish(&w2);
-        time::sleep(forever()); // never bound: no source may touch it
-        after_mark();
+        let k = rt::current_key();
+        sp.get().store(k.slot as i64 << 32 | k.gen as i64, atomics::MemoryOrder::Release);
+        let (w3, s3) = (w2.clone(), s2.clone());
+        launch || {
+            defer finish(&w3);
+            s3.get().store(rt::current_key().slot, atomics::MemoryOrder::Release);
+            time::sleep(forever()); // never bound: no source may touch it
+            after_mark();
+        };
     };
     assert(wait_parked_sleeping(1), "the new occupant is parked");
+    let key = spawner.get().load(atomics::MemoryOrder::Acquire);
+    assert(ph::wait_gone(rt::TaskKey { slot: (key >> 32) as u32, gen: key as u32 }), "the spawner completes");
+    let reused = slot2.get().load(atomics::MemoryOrder::Acquire);
+    assert(reused >= 0 && reused == slot1.get().load(atomics::MemoryOrder::Acquire), "the slot is reused");
     src.cancel(rt::CR_USER);
     time::sleep(short());
     assert_eq(rt::live_tasks(), 1);
@@ -1869,9 +1889,16 @@ extend MaskNoisy as Free {
 struct MaskSleeper {
     pub k: i64,
 }
+// Sleeps until its task has a cancel request, at most five seconds: a cancel that lands here lands in a
+// destructor, which runs masked.
 extend MaskSleeper as Free {
     fn free(self: &mut Self) {
-        time::sleep(time::Duration::from_millis(100));
+        for _ in 0..5000 {
+            if rt::cancel_requested() {
+                return;
+            }
+            time::sleep(time::Duration::from_millis(1));
+        }
     }
 }
 
@@ -1906,7 +1933,8 @@ fn a_destructor_runs_masked(fx: &mut Base) {
             let _ = mask_make(false);
         }
     };
-    time::sleep(short());
+    // The cancel lands while the destructor sleeps: masked, it finishes, and the next call still runs.
+    assert(wait_parked_sleeping(1), "the destructor sleeps");
     src.cancel(rt::CR_USER);
     wg.wait();
     let made = unsafe atomic::load_i64(&mut unsafe G_MASK_MADE, 0);

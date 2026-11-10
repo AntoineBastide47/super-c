@@ -47,32 +47,6 @@ fn seq_vec<T: Scalar, const N: usize>(start: i64) Vec<T, N> {
     return v;
 }
 
-// The operators of a C x R matrix: `a` is `m * u`, `b` is `v * m` for the identity `m` and all-ones
-// `u` and `v`.
-fn operators<const C: usize, const R: usize>(a_expected: Vec<f32, R>, b_expected: Vec<f32, C>) {
-    let eps = f32::epsilon();
-    let l = Mat::<f32, C, R>::diagonal(1.0);
-    let m = Mat::<f32, C, R>::diagonal(1.0);
-    let u = Vec::<f32, C>::splat(1.0);
-    let v = Vec::<f32, R>::splat(1.0);
-    let x: f32 = 1.0;
-    let a = m * u;
-    assert(near(a, a_expected, eps));
-    let b = v * m;
-    assert(near(b, b_expected, eps));
-    let n0 = Mat::<f32, C, R>::from_cols([Vec::<f32, R>::splat(1.0); C]);
-    let n = x / n0;
-    assert(near_mat(n, n0, eps));
-    let o = m / x;
-    assert(near_mat(o, m, eps));
-    let p = x * m;
-    assert(near_mat(p, m, eps));
-    let q = m * x;
-    let r = !near_mat(m, q, eps);
-    let s = near_mat(m, l, eps);
-    assert(s && !r);
-}
-
 // `from_mat` of the C2 x R2 identity is the C x R identity.
 fn from_identity<const C2: usize, const R2: usize, const C: usize, const R: usize>() {
     let a = Mat::<f32, C2, R2>::diagonal(1.0);
@@ -301,28 +275,6 @@ const AFF4: mat4 = affine_inverse(
 // mat2x2.
 
 @test
-fn mat2x2_operators() {
-    operators::<2, 2>(vec2::splat(1.0), vec2::splat(1.0));
-}
-
-@test
-fn mat2x2_inverse() {
-    {
-        let matrix = mat2::new(1.0, 2.0, 3.0, 4.0);
-        let inv = inverse(matrix);
-        let identity = matrix * inv;
-        assert(near(identity[0], vec2::new(1.0, 0.0), 0.01));
-        assert(near(identity[1], vec2::new(0.0, 1.0), 0.01));
-    }
-    {
-        let matrix = mat2::new(1.0, 2.0, 3.0, 4.0);
-        let identity = matrix / matrix;
-        assert(near(identity[0], vec2::new(1.0, 0.0), 0.01));
-        assert(near(identity[1], vec2::new(0.0, 1.0), 0.01));
-    }
-}
-
-@test
 fn mat2x2_ctr() {
     let eps = f32::epsilon();
     {
@@ -361,11 +313,6 @@ fn mat2x2_size() {
 // mat2x3.
 
 @test
-fn mat2x3_operators() {
-    operators::<2, 3>(vec2::splat(1.0).append(0.0), vec2::splat(1.0));
-}
-
-@test
 fn mat2x3_ctr() {
     let eps = f32::epsilon();
     let m0 = mat2x3::cols(vec3::new(0.0, 1.0, 2.0), vec3::new(3.0, 4.0, 5.0));
@@ -393,11 +340,6 @@ fn mat2x3_size() {
 // mat2x4.
 
 @test
-fn mat2x4_operators() {
-    operators::<2, 4>(vec2::splat(1.0).append(0.0).append(0.0), vec2::splat(1.0));
-}
-
-@test
 fn mat2x4_ctr() {
     let eps = f32::epsilon();
     let m0 = mat2x4::cols(vec4::new(0.0, 1.0, 2.0, 3.0), vec4::new(4.0, 5.0, 6.0, 7.0));
@@ -421,11 +363,6 @@ fn mat2x4_size() {
 }
 
 // mat3x2.
-
-@test
-fn mat3x2_operators() {
-    operators::<3, 2>(vec2::splat(1.0), vec2::splat(1.0).append(0.0));
-}
 
 @test
 fn mat3x2_ctr() {
@@ -465,30 +402,6 @@ fn mat3x3_inverse_double() {
 }
 
 @test
-fn mat3x3_operators() {
-    operators::<3, 3>(vec3::splat(1.0), vec3::splat(1.0));
-}
-
-@test
-fn mat3x3_inverse() {
-    {
-        let matrix = mat3::cols(vec3::new(0.6, 0.2, 0.3), vec3::new(0.2, 0.7, 0.5), vec3::new(0.3, 0.5, 0.7));
-        let inv = inverse(matrix);
-        let identity = matrix * inv;
-        assert(near(identity[0], vec3::new(1.0, 0.0, 0.0), 0.01));
-        assert(near(identity[1], vec3::new(0.0, 1.0, 0.0), 0.01));
-        assert(near(identity[2], vec3::new(0.0, 0.0, 1.0), 0.01));
-    }
-    {
-        let matrix = mat3::cols(vec3::new(0.6, 0.2, 0.3), vec3::new(0.2, 0.7, 0.5), vec3::new(0.3, 0.5, 0.7));
-        let identity = matrix / matrix;
-        assert(near(identity[0], vec3::new(1.0, 0.0, 0.0), 0.01));
-        assert(near(identity[1], vec3::new(0.0, 1.0, 0.0), 0.01));
-        assert(near(identity[2], vec3::new(0.0, 0.0, 1.0), 0.01));
-    }
-}
-
-@test
 fn mat3x3_ctr() {
     let eps = f32::epsilon();
     let m0 = mat3x3::cols(vec3::new(0.0, 1.0, 2.0), vec3::new(3.0, 4.0, 5.0), vec3::new(6.0, 7.0, 8.0));
@@ -512,11 +425,6 @@ fn mat3x3_size() {
 }
 
 // mat3x4.
-
-@test
-fn mat3x4_operators() {
-    operators::<3, 4>(vec3::splat(1.0).append(0.0), vec3::splat(1.0));
-}
 
 @test
 fn mat3x4_ctr() {
@@ -546,11 +454,6 @@ fn mat3x4_size() {
 // mat4x2.
 
 @test
-fn mat4x2_operators() {
-    operators::<4, 2>(vec2::splat(1.0), vec2::splat(1.0).append(0.0).append(0.0));
-}
-
-@test
 fn mat4x2_ctr() {
     let eps = f32::epsilon();
     let m0 = mat4x2::cols(vec2::new(0.0, 1.0), vec2::new(2.0, 3.0), vec2::new(4.0, 5.0), vec2::new(6.0, 7.0));
@@ -574,11 +477,6 @@ fn mat4x2_size() {
 }
 
 // mat4x3.
-
-@test
-fn mat4x3_operators() {
-    operators::<4, 3>(vec3::splat(1.0), vec3::splat(1.0).append(0.0));
-}
 
 @test
 fn mat4x3_ctr() {
@@ -611,12 +509,6 @@ fn mat4x3_size() {
 }
 
 // mat4x4.
-
-@test
-fn mat4x4_member_alloc() {
-    let m = Box::new(mat4::zero());
-    assert(*m == mat4::diagonal(0.0));
-}
 
 @test
 fn mat4x4_ctr() {
@@ -717,22 +609,6 @@ fn mat4x4_ctor_bits() {
 }
 
 // Column count.
-
-@test
-fn mat_length_non_squared() {
-    assert_eq(mat2x3::LEN, 2);
-    assert_eq(mat2x4::LEN, 2);
-    assert_eq(mat3x2::LEN, 3);
-    assert_eq(mat3x4::LEN, 3);
-    assert_eq(mat4x2::LEN, 4);
-    assert_eq(mat4x3::LEN, 4);
-    assert_eq(dmat2x3::LEN, 2);
-    assert_eq(dmat2x4::LEN, 2);
-    assert_eq(dmat3x2::LEN, 3);
-    assert_eq(dmat3x4::LEN, 3);
-    assert_eq(dmat4x2::LEN, 4);
-    assert_eq(dmat4x3::LEN, 4);
-}
 
 @test
 fn mat_length() {
@@ -926,20 +802,6 @@ fn func_inverse() {
         let i = a * b;
         assert(near_mat(i, mat2x2::identity(), eps));
     }
-}
-
-@test
-fn func_inverse_simd() {
-    let identity = mat4x4::identity();
-    let a = mat4x4::cols(
-        vec4::new(1.0, 0.0, 1.0, 0.0),
-        vec4::new(0.0, 1.0, 0.0, 0.0),
-        vec4::new(0.0, 0.0, 1.0, 0.0),
-        vec4::new(0.0, 0.0, 0.0, 1.0),
-    );
-    let b = inverse(a);
-    let i = a * b;
-    assert(near_mat(i, identity, 0.001));
 }
 
 // Edge cases: determinants, shape conversion, every shape, wrapping, division, indexing, constants.

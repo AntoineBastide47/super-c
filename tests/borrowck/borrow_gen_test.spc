@@ -935,39 +935,14 @@ fn reborrow_through_a_mut_reference_argument() {
     );
 }
 
+const ARGUMENT_READS_TAKE_THEIR_POSITION_DEF: str = "struct U { pub a: String, pub n: u64 }\nfn take(a: String, n: u64, b: String) u64 { return a.len() as u64 + n + b.len() as u64; }\n";
+
 // Arguments evaluate left to right: a scalar read out of a place is taken at its own position when a
 // later argument may write the place (`ir::lower` `pin_read`). So a field read through a `Box`'s
 // `Deref` ends that borrow before a later argument's `&mut` (the plain-reference shape always
 // compiled), and the call sees the value before a later argument changes it.
 @test
 fn argument_reads_take_their_position() {
-    let def = "struct U { pub a: String, pub n: u64 }\nfn take(a: String, n: u64, b: String) u64 { return a.len() as u64 + n + b.len() as u64; }\n";
-    h::expect_exit(
-        "a field read through Box before a later &mut argument",
-        format(
-            "{}fn main() i32 {{ let mut v = Vector::<Box<U>>::new(); v.push(Box::<U>::new(U {{ a: String::new(), n: 3 }})); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
-            def,
-        ).as_str(),
-        3,
-    );
-    h::expect_exit(
-        "a field read through a reference before a later &mut argument",
-        format(
-            "{}fn main() i32 {{ let mut v = Vector::<U>::new(); v.push(U {{ a: String::new(), n: 3 }}); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
-            def,
-        ).as_str(),
-        3,
-    );
-    h::expect_exit(
-        "a field read before a later argument writes it",
-        "struct U { pub n: u64 }\nfn set(u: &mut U) u64 { u.n = 5; return 0; }\nfn take2(a: u64, b: u64) u64 { return a * 10 + b; }\nfn main() i32 { let mut x = U { n: 3 }; let mut bx = Box::<U>::new(U { n: 3 }); let r = take2(x.n, set(&mut x)); let r2 = take2(bx.n, set(&mut *bx)); return (r + r2) as i32; }\n",
-        60,
-    );
-    h::expect_exit(
-        "a struct value read before a later argument writes it",
-        "struct P { pub a: i64, pub b: i64 }\nfn set(p: &mut P) i64 { p.a = 5; return 0; }\nfn take(p: P, z: i64) i64 { return p.a * 10 + z; }\nfn main() i32 { let mut p = P { a: 3, b: 0 }; return take(p, set(&mut p)) as i32; }\n",
-        30,
-    );
     // An owned argument moves at its own position, so a later argument may no longer borrow it (the
     // call used to see the value that argument changed).
     h::expect_err_msg(
@@ -975,13 +950,41 @@ fn argument_reads_take_their_position() {
         "fn grow(s: &mut String) u64 { s.push_str(\"cd\"); return 0; }\nfn take(a: String, b: u64) u64 { return a.len() as u64 + b; }\nfn main() i32 { let mut s = String::from_str(\"ab\"); return take(s, grow(&mut s)) as i32; }\n",
         "use of moved value",
     );
-    // The moved-out value is a scope temporary: an exit inside a later argument releases it.
-    let r = h::compile_and_run_env(
-        "fn take(a: String, b: u64) u64 { return a.len() as u64 * 10 + b; }\nfn f(c: bool) u64 { let s = String::from_str(\"abc\"); return take(s, switch c { true => { return 7; }, false => 2u64, }); }\nfn main() i32 { return (f(true) + f(false)) as i32; }\n",
-        "SC_LEAK_CHECK=fatal",
+}
+
+fn argument_reads_take_their_position_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a field read through Box before a later &mut argument",
+        format(
+            "{}fn main() i32 {{ let mut v = Vector::<Box<U>>::new(); v.push(Box::<U>::new(U {{ a: String::new(), n: 3 }})); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
+            ARGUMENT_READS_TAKE_THEIR_POSITION_DEF,
+        ).as_str(),
+        3,
     );
-    assert(r.built, "an exit in a later argument builds");
-    assert_eq(r.exit, 39);
+    b.add(
+        "a field read through a reference before a later &mut argument",
+        format(
+            "{}fn main() i32 {{ let mut v = Vector::<U>::new(); v.push(U {{ a: String::new(), n: 3 }}); let u = v.index_mut(0); let r = take(replace(&mut u.a, String::new()), u.n, replace(&mut u.a, String::new())); return r as i32; }}\n",
+            ARGUMENT_READS_TAKE_THEIR_POSITION_DEF,
+        ).as_str(),
+        3,
+    );
+    b.add(
+        "a field read before a later argument writes it",
+        "struct U { pub n: u64 }\nfn set(u: &mut U) u64 { u.n = 5; return 0; }\nfn take2(a: u64, b: u64) u64 { return a * 10 + b; }\nfn main() i32 { let mut x = U { n: 3 }; let mut bx = Box::<U>::new(U { n: 3 }); let r = take2(x.n, set(&mut x)); let r2 = take2(bx.n, set(&mut *bx)); return (r + r2) as i32; }\n",
+        60,
+    );
+    b.add(
+        "a struct value read before a later argument writes it",
+        "struct P { pub a: i64, pub b: i64 }\nfn set(p: &mut P) i64 { p.a = 5; return 0; }\nfn take(p: P, z: i64) i64 { return p.a * 10 + z; }\nfn main() i32 { let mut p = P { a: 3, b: 0 }; return take(p, set(&mut p)) as i32; }\n",
+        30,
+    );
+    // The moved-out value is a scope temporary: an exit inside a later argument releases it.
+    b.add(
+        "an exit in a later argument builds",
+        "fn take(a: String, b: u64) u64 { return a.len() as u64 * 10 + b; }\nfn f(c: bool) u64 { let s = String::from_str(\"abc\"); return take(s, switch c { true => { return 7; }, false => 2u64, }); }\nfn main() i32 { return (f(true) + f(false)) as i32; }\n",
+        39,
+    );
 }
 
 // A by-value argument tied to a result only through tokens behind its references passes on what
@@ -1534,4 +1537,11 @@ fn closure_arguments_store_through_results_and_writable_parameters() {
         "fn fill<T, F: fn() T>(s: []mut T, f: F) {\n    s[0] = f();\n}\npub fn f(s: []mut &i64) {\n    let local: i64 = 1;\n    let r = &local;\n    fill(s, fn() &i64 {\n        return r;\n    });\n}\nfn main() i32 {\n    return 0;\n}\n",
         msg,
     );
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    argument_reads_take_their_position_cases(&mut b);
+    b.run();
 }

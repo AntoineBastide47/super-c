@@ -10,6 +10,9 @@ Choosing an oracle, batching cases and keeping a test's CPU and energy cost low:
   Shared state must go through the global fixture mechanism.
 - **Test the contract, not the implementation.** Assert on observable behavior (return
   values, side effects, error messages), not on internal data structure shapes.
+- **Every assertion can fail.** Name one wrong implementation each assertion rejects; a
+  needle the input already holds, a bare `!ok()`, a "differs from" check, or a round trip
+  compared with itself rejects none (`super-c-test-design`, Oracles that can fail).
 - **Fixture values, not fixture effects.** `@test_init` returns a value. Side effects
   that need cleanup go in `@test_free`.
 - **A cancelled task reports through `defer`.** Code after a cancelled wait never runs,

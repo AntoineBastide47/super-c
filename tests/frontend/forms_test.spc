@@ -8,13 +8,6 @@ import tests::harness as h;
 // the prelude's `Some`, `None`, `Ok` and `Err` also without one.
 @test
 fn bare_and_qualified_variants() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "bare variants through every expected type",
-        "enum Shape { Circle(i32), Rect { w: i32, h: i32 }, Unit }\nstruct H { pub s: Shape }\nfn mk(n: i32) Option<i32> { if n > 3 { return None; } return Some(n); }\nfn take(s: Shape) i32 { return switch s { Circle(r) => r, Shape::Rect { w, h } => w * h, Shape::Unit => 7, }; }\nfn main() i32 {\n    let a = Some(1);\n    let e: Result<i32, i32> = Err(4);\n    let h = H { s: Circle(2) };\n    let arr: [Shape; 2] = [Unit, Circle(3)];\n    let mut s: Shape = Unit;\n    s = Circle(4);\n    let eq = mk(1) == Some(1);\n    let q = switch a { Option::Some(x) => x, Option::None => 0, };\n    let r = switch e { Ok(x) => x, Result::Err(x) => x * 10, };\n    let t = take(s) + take(h.s) + take(Unit);\n    let u: Option<i32> = switch mk(9) { Some(x) => Some(x), None => None, };\n    let z = switch mk(1) { Some(x) => x, None => { return 1; }, };\n    return q + r + t + (eq as i32) + u.unwrap_or(0) + z - 56;\n}\n",
-        0,
-    );
-    b.run();
     h::expect_err_msg(
         "a local that a bare variant also names",
         "enum Shape { Circle(i32), Unit }\nfn f() Shape { let Unit = 3; let z: Shape = Unit; return z; }\n",
@@ -37,6 +30,16 @@ fn bare_and_qualified_variants() {
     );
 }
 
+fn bare_and_qualified_variants_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "bare variants through every expected type",
+        "enum Shape { Circle(i32), Rect { w: i32, h: i32 }, Unit }\nstruct H { pub s: Shape }\nfn mk(n: i32) Option<i32> { if n > 3 { return None; } return Some(n); }\nfn take(s: Shape) i32 { return switch s { Circle(r) => r, Shape::Rect { w, h } => w * h, Shape::Unit => 7, }; }\nfn main() i32 {\n    let a = Some(1);\n    let e: Result<i32, i32> = Err(4);\n    let h = H { s: Circle(2) };\n    let arr: [Shape; 2] = [Unit, Circle(3)];\n    let mut s: Shape = Unit;\n    s = Circle(4);\n    let eq = mk(1) == Some(1);\n    let q = switch a { Option::Some(x) => x, Option::None => 0, };\n    let r = switch e { Ok(x) => x, Result::Err(x) => x * 10, };\n    let t = take(s) + take(h.s) + take(Unit);\n    let u: Option<i32> = switch mk(9) { Some(x) => Some(x), None => None, };\n    let z = switch mk(1) { Some(x) => x, None => { return 1; }, };\n    return q + r + t + (eq as i32) + u.unwrap_or(0) + z - 56;\n}\n",
+        0,
+    );
+}
+
+const VALUE_BLOCKS_AND_STATEMENT_SWITCHES_SEMI: str = "this block ends in ';', so it has no value: remove the ';'";
+
 // A block is a value when its last expression has no `;`; with one, it is a statement block, and where
 // a value is expected the `;` is an error. A statement `switch` ends at its `}` (a `;` after it is an
 // error), and its arms are statements, so arms of different types do not join. A value block's last
@@ -44,13 +47,6 @@ fn bare_and_qualified_variants() {
 // with `return`.
 @test
 fn value_blocks_and_statement_switches() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "value blocks and statement switches",
-        "enum E { A, B }\nfn g(e: E) i32 {\n    switch e {\n        A => { return 1; },\n        B => { return 2; },\n    }\n}\nfn main() i32 {\n    let e = E::A;\n    let o: Option<usize> = None;\n    let mut n: usize = 0;\n    switch o {\n        Some(x) => { n + x; },\n        None => { n = 1; },\n    }\n    switch e { A => { n = n + 2; }, B => {}, }\n    let a = { 5 };\n    let c = unsafe { 6 };\n    let s = { let x = 2; let t = String::from_str(\"abc\"); x + t.len() as i32 };\n    let v = if true { let k = 5; if false { k } else { 2 } } else { 3 };\n    let w = { n = n + 1; switch e { A => 10, B => 20, } };\n    return a + c + s + v + w + g(e) + n as i32 - 33;\n}\n",
-        0,
-    );
-    b.run();
     h::expect_err_msg(
         "a function body's last expression is no result",
         "fn k(x: i32) i32 { x + 1 }\n",
@@ -61,14 +57,25 @@ fn value_blocks_and_statement_switches() {
         "fn main() i32 { let c = |x: i32| { x + 1 }; return c(1); }\n",
         "a closure body gives its result with 'return': write 'return x + 1;'",
     );
-    let semi = "this block ends in ';', so it has no value: remove the ';'";
-    h::expect_err_msg("a value block whose last expression ends in ';'", "fn f() i32 { return { 1; }; }\n", semi);
-    h::expect_err_msg("a let of such a block", "fn g() i32 { return 1; }\nfn f() { let x = { g(); }; }\n", semi);
-    h::expect_err_msg("one branch of a value if", "fn f(c: bool) { let x = if c { 1; } else { 2 }; }\n", semi);
+    h::expect_err_msg(
+        "a value block whose last expression ends in ';'",
+        "fn f() i32 { return { 1; }; }\n",
+        VALUE_BLOCKS_AND_STATEMENT_SWITCHES_SEMI,
+    );
+    h::expect_err_msg(
+        "a let of such a block",
+        "fn g() i32 { return 1; }\nfn f() { let x = { g(); }; }\n",
+        VALUE_BLOCKS_AND_STATEMENT_SWITCHES_SEMI,
+    );
+    h::expect_err_msg(
+        "one branch of a value if",
+        "fn f(c: bool) { let x = if c { 1; } else { 2 }; }\n",
+        VALUE_BLOCKS_AND_STATEMENT_SWITCHES_SEMI,
+    );
     h::expect_err_msg(
         "one arm of a value switch",
         "fn f(n: i32) { let x = switch n { 1 => { 2; }, _ => 3, }; }\n",
-        semi,
+        VALUE_BLOCKS_AND_STATEMENT_SWITCHES_SEMI,
     );
     h::expect_err_msg(
         "a ';' after a statement switch",
@@ -77,18 +84,19 @@ fn value_blocks_and_statement_switches() {
     );
 }
 
+fn value_blocks_and_statement_switches_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "value blocks and statement switches",
+        "enum E { A, B }\nfn g(e: E) i32 {\n    switch e {\n        A => { return 1; },\n        B => { return 2; },\n    }\n}\nfn main() i32 {\n    let e = E::A;\n    let o: Option<usize> = None;\n    let mut n: usize = 0;\n    switch o {\n        Some(x) => { n + x; },\n        None => { n = 1; },\n    }\n    switch e { A => { n = n + 2; }, B => {}, }\n    let a = { 5 };\n    let c = unsafe { 6 };\n    let s = { let x = 2; let t = String::from_str(\"abc\"); x + t.len() as i32 };\n    let v = if true { let k = 5; if false { k } else { 2 } } else { 3 };\n    let w = { n = n + 1; switch e { A => 10, B => 20, } };\n    return a + c + s + v + w + g(e) + n as i32 - 33;\n}\n",
+        0,
+    );
+}
+
 // `&x` and `&mut x` call arguments pass as the view the prelude view interface of `x`'s type gives:
 // `str` (`AsStr`), `[]T` (`AsSlice<T>`, which also infers `T`), `[]mut T` (`AsSliceMut<T>`). The view
 // borrows `x` as `x.as_str()` does; without `&` the argument stays an error naming the borrow.
 @test
 fn call_site_view_coercion() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "views of String, Vector and Array arguments",
-        "fn count(s: str) usize { return s.len(); }\nfn total(xs: []i32) i32 { let mut t = 0; for x in xs { t += x; } return t; }\nfn bump(xs: []mut i32) { for i in 0..xs.len() { xs[i] += 1; } }\nfn first<T: Copy>(xs: []T) T { return xs[0]; }\nstruct W { pub s: String }\nextend W { fn take(self: &Self, s: str) usize { return s.len() + self.s.len(); } }\nfn main() i32 {\n    let s = String::from_str(\"hello\");\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    bump(&mut v);\n    let a = Array::<i32, 3>::new();\n    let w = W { s: String::from_str(\"ab\") };\n    return (count(&s) + w.take(&s)) as i32 + total(&v) + total(&a) + first(&v) - 19;\n}\n",
-        0,
-    );
-    b.run();
     h::expect_err_msg(
         "a view keeps its owner borrowed",
         "fn first(s: str) str { return s; }\nfn main() i32 { let mut s = String::from_str(\"x\"); let v = first(&s); s.push_str(\"y\"); return v.len() as i32; }\n",
@@ -101,26 +109,20 @@ fn call_site_view_coercion() {
     );
 }
 
+fn call_site_view_coercion_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "views of String, Vector and Array arguments",
+        "fn count(s: str) usize { return s.len(); }\nfn total(xs: []i32) i32 { let mut t = 0; for x in xs { t += x; } return t; }\nfn bump(xs: []mut i32) { for i in 0..xs.len() { xs[i] += 1; } }\nfn first<T: Copy>(xs: []T) T { return xs[0]; }\nstruct W { pub s: String }\nextend W { fn take(self: &Self, s: str) usize { return s.len() + self.s.len(); } }\nfn main() i32 {\n    let s = String::from_str(\"hello\");\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    bump(&mut v);\n    let a = Array::<i32, 3>::new();\n    let w = W { s: String::from_str(\"ab\") };\n    return (count(&s) + w.take(&s)) as i32 + total(&v) + total(&a) + first(&v) - 19;\n}\n",
+        0,
+    );
+}
+
 // A local whose initializer leaves generic arguments open keeps them open: its later uses in the body
 // fill them in, an unsuffixed literal only when no typed use does. A closure a let binds takes its
 // parameter types from its first call. `_` leaves a type to inference in a local's annotation and a
 // call's type arguments only.
 @test
 fn deferred_inference() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "locals typed by their later uses",
-        "fn pair<A, B>(a: A, b: B) B { return b; }\nfn main() i32 {\n    let mut v = Vector::new();\n    let x: u8 = 3;\n    v.push(1);\n    v.push(x);\n    let c = |a| a + 1;\n    let n = c(2);\n    let mut w = Vector::new();\n    w.push(String::from_str(\"ab\"));\n    let mut o = None;\n    if o.is_none() { o = Some(3u8); }\n    let mut r = Ok(1);\n    r = Err(String::from_str(\"e\"));\n    let mut z: Vector<_> = Vector::new();\n    z.push(7u16);\n    let m = pair::<_, u8>(1, 2);\n    return v.len() as i32 + v[1] as i32 + n + w[0].len() as i32 + o.unwrap() as i32 + r.is_err() as i32 + z[0] as i32 + m as i32 - 23;\n}\n",
-        0,
-    );
-    // The first check's records of a body with a hole (an instance, a conversion) give way to the second
-    // check's: a const generic argument and a struct element both come out whole.
-    b.add(
-        "records of the second check",
-        "struct F {\n    pub owner: u32,\n    pub next: usize,\n    pub paths: Vector<String>,\n}\nfn walk() u32 {\n    let mut stack = Vector::new();\n    let mut ps = Vector::<String>::new();\n    ps.push(String::from_str(\"ab\"));\n    stack.push(F { owner: 1, next: 0, paths: ps });\n    let mut sum: u32 = 0;\n    loop {\n        if stack.len() == 0 {\n            break;\n        }\n        let top = stack.len() - 1;\n        let k = stack.at(top).next;\n        if k == stack.at(top).paths.len() {\n            let _ = stack.pop();\n            continue;\n        }\n        stack.index_mut(top).next = k + 1;\n        let cp = replace(stack.index_mut(top).paths.index_mut(k), String::new());\n        sum += stack.at(top).owner + cp.len() as u32;\n    }\n    return sum;\n}\nfn wide(a: Int<256>) Int<256> {\n    let mut t0 = Int::zero();\n    t0 = t0 + Int::<256>::one() + a;\n    return t0;\n}\nfn main() i32 {\n    let two = Int::<256>::one() + Int::<256>::one();\n    return walk() as i32 - 3 + (wide(Int::<256>::one()) != two) as i32;\n}\n",
-        0,
-    );
-    b.run();
     h::expect_err_msg(
         "two typed uses that disagree",
         "fn main() i32 { let mut v = Vector::new(); let a: u8 = 1; let b: i64 = 2; v.push(a); v.push(b); return 0; }\n",
@@ -138,15 +140,38 @@ fn deferred_inference() {
     );
 }
 
+fn deferred_inference_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "locals typed by their later uses",
+        "fn pair<A, B>(a: A, b: B) B { return b; }\nfn main() i32 {\n    let mut v = Vector::new();\n    let x: u8 = 3;\n    v.push(1);\n    v.push(x);\n    let c = |a| a + 1;\n    let n = c(2);\n    let mut w = Vector::new();\n    w.push(String::from_str(\"ab\"));\n    let mut o = None;\n    if o.is_none() { o = Some(3u8); }\n    let mut r = Ok(1);\n    r = Err(String::from_str(\"e\"));\n    let mut z: Vector<_> = Vector::new();\n    z.push(7u16);\n    let m = pair::<_, u8>(1, 2);\n    return v.len() as i32 + v[1] as i32 + n + w[0].len() as i32 + o.unwrap() as i32 + r.is_err() as i32 + z[0] as i32 + m as i32 - 23;\n}\n",
+        0,
+    );
+    // The first check's records of a body with a hole (an instance, a conversion) give way to the second
+    // check's: a const generic argument and a struct element both come out whole.
+    b.add(
+        "records of the second check",
+        "struct F {\n    pub owner: u32,\n    pub next: usize,\n    pub paths: Vector<String>,\n}\nfn walk() u32 {\n    let mut stack = Vector::new();\n    let mut ps = Vector::<String>::new();\n    ps.push(String::from_str(\"ab\"));\n    stack.push(F { owner: 1, next: 0, paths: ps });\n    let mut sum: u32 = 0;\n    loop {\n        if stack.len() == 0 {\n            break;\n        }\n        let top = stack.len() - 1;\n        let k = stack.at(top).next;\n        if k == stack.at(top).paths.len() {\n            let _ = stack.pop();\n            continue;\n        }\n        stack.index_mut(top).next = k + 1;\n        let cp = replace(stack.index_mut(top).paths.index_mut(k), String::new());\n        sum += stack.at(top).owner + cp.len() as u32;\n    }\n    return sum;\n}\nfn wide(a: Int<256>) Int<256> {\n    let mut t0 = Int::zero();\n    t0 = t0 + Int::<256>::one() + a;\n    return t0;\n}\nfn main() i32 {\n    let two = Int::<256>::one() + Int::<256>::one();\n    return walk() as i32 - 3 + (wide(Int::<256>::one()) != two) as i32;\n}\n",
+        0,
+    );
+}
+
 // A tuple of up to 8 elements is `Eq`, `Ord`, `Hash`, `Clone`, `Default` and `Format` when every
 // element is: a result list names one, and `return a, b;` returns the tuple `(a, b)`.
-@test
-fn tuple_conformances_at_every_arity() {
-    let mut b = h::ExitBatch::new();
+fn tuple_conformances_at_every_arity(b: &mut h::ExitBatch) {
     b.add(
         "an 8-tuple's conformances",
         "fn eight() (i32, u8, i64, u16, i32, i32, i32, i32) { return 1, 2, 3, 4, 5, 6, 7, 8; }\nfn main() i32 {\n    let t = eight();\n    let u = t.clone();\n    let s = t.fmt();\n    let mut m = Map::<(i32, i32, i32, i32, i32), i32>::new();\n    m.insert((1, 2, 3, 4, 5), 9);\n    let d: (i32, i32, i32, i32, i32, i32) = Default::default();\n    let less = (1, 2, 3, 4, 5) < (1, 2, 3, 4, 6);\n    if t != u || !s.eq_str(\"(1, 2, 3, 4, 5, 6, 7, 8)\") || !less {\n        return 1;\n    }\n    return t.7 + *m.get(&(1, 2, 3, 4, 5)).unwrap() + d.5 - 17;\n}\n",
         0,
     );
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    bare_and_qualified_variants_cases(&mut b);
+    value_blocks_and_statement_switches_cases(&mut b);
+    call_site_view_coercion_cases(&mut b);
+    deferred_inference_cases(&mut b);
+    tuple_conformances_at_every_arity(&mut b);
     b.run();
 }

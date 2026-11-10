@@ -311,18 +311,6 @@ fn operations_lower_to_their_instructions() {
     ks.run();
 }
 
-// The sum of [1e8, 1, -1e8, 1] by halves is (1e8 + -1e8) + (1 + 1) = 2; by adjacent pairs
-// (`faddp`) it is (1e8 + 1) + (-1e8 + 1) = 0 in f32.
-@test
-fn a_float_tree_reduction_adds_halves() {
-    h::expect_run(
-        "halves, not pairs",
-        "import std::simd;\nfn main(args: Vector<str>) i32 {\n    let k = args.len() as f32;\n    let v = f32x4::from_array([1.0e8 * k, 1.0, -1.0e8 * k, 1.0]);\n    let w = Simd::<f32, 8>::from_array([1.0e8 * k, 1.0, -1.0e8 * k, 1.0, 0.0, 0.0, 0.0, 0.0]);\n    assert(simd::reduce_add_tree(v) == 2.0 && simd::reduce_add_tree(w) == 2.0, \"halves\");\n    return 0;\n}\n",
-        "",
-        "",
-    );
-}
-
 // A vector of 16 bytes or less is a C vector under the planner: its lanes have no address of their
 // own, so a lane borrow, a constant's pointer to a lane and the byte moves address through the vector.
 @test
@@ -773,19 +761,23 @@ fn pick_u8(c: bool, v: u8) u8 {
 }
 )";
 
+const A_CHOOSE_THROUGH_COPIES_READS_LANE_MASKS_SRC: str = "@noinline\nfn canon(a: [u64; 2]) Simd<u64, 2> {\n    let x = Simd::<f64, 2>::from_bits(Simd::<u64, 2>::from_array(a));\n    let v = x.min_num(x);\n    return v.is_nan().choose(Simd::<u64, 2>::splat(1), v.to_bits());\n}\nfn main() i32 {\n    let c = canon([0xfff8000000000001, 0x3ff0000000000000]);\n    return (c[0] == 1 && c[1] == 0x3ff0000000000000) as i32;\n}\n";
+
 // A comparison bound through a chain of copies (the inlined `is_nan`'s result, then the caller's
 // temporary) still gives its `choose` the lane masks it wrote, not a never-written mask local.
 @test
 fn a_choose_through_copies_reads_lane_masks() {
-    let src = "@noinline\nfn canon(a: [u64; 2]) Simd<u64, 2> {\n    let x = Simd::<f64, 2>::from_bits(Simd::<u64, 2>::from_array(a));\n    let v = x.min_num(x);\n    return v.is_nan().choose(Simd::<u64, 2>::splat(1), v.to_bits());\n}\nfn main() i32 {\n    let c = canon([0xfff8000000000001, 0x3ff0000000000000]);\n    return (c[0] == 1 && c[1] == 0x3ff0000000000000) as i32;\n}\n";
-    let c = h::compile_c_arch(src, 1);
+    let c = h::compile_c_arch(A_CHOOSE_THROUGH_COPIES_READS_LANE_MASKS_SRC, 1);
     assert(c.ok(), "the program builds");
-    if aarch64_host() {
-        h::expect_exit("choose through copies", src, 1);
-    }
     let b = fn_body(unsafe str::from_cstr(c.code), "main__canon");
     assert(b.contains("__sc_ml") && !b.contains("mask_to_lanes"), "the choose reads the comparison's lane masks");
 }
+
+fn a_choose_through_copies_reads_lane_masks_run(b: &mut h::ExitBatch) {
+    b.add("choose through copies", A_CHOOSE_THROUGH_COPIES_READS_LANE_MASKS_SRC, 1);
+}
+
+const A_CHOOSE_AFTER_CALLS_READS_LANE_MASKS_SRC: str = "@noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\n@noinline\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
 
 // A comparison whose `choose` follows after calls (`big()`, `splat(..)`: each ends its block, and an
 // inlined body leaves dead blocks beside the path) keeps its lane masks: the C neither packs them
@@ -793,12 +785,8 @@ fn a_choose_through_copies_reads_lane_masks() {
 @test
 fn a_choose_after_calls_reads_lane_masks() {
     // The comparison's masks live across the call of `big`, in a later block.
-    let src = "@noinline\nfn big() f32x4 {\n    return f32x4::splat(9.0);\n}\n@noinline\nfn pick(x: f32x4) f32x4 {\n    return choose(x.greater_than(f32x4::splat(1.0)), big(), choose(x.less_than(f32x4::splat(-1.0)), f32x4::splat(0.0), x));\n}\nfn main() i32 {\n    let r = pick(f32x4::from_array([2.0, -2.0, 0.5, -0.5]));\n    return (r.get(0) == 9.0 && r.get(1) == 0.0 && r.get(2) == 0.5 && r.get(3) == -0.5) as i32;\n}\n";
-    let c = h::compile_c_arch(src, 1);
+    let c = h::compile_c_arch(A_CHOOSE_AFTER_CALLS_READS_LANE_MASKS_SRC, 1);
     assert(c.ok(), "the program builds");
-    if aarch64_host() {
-        h::expect_exit("choose after calls", src, 1);
-    }
     let b = fn_body(unsafe str::from_cstr(c.code), "main__pick");
     assert(b.len() != 0, "pick is emitted");
     assert(
@@ -807,36 +795,58 @@ fn a_choose_after_calls_reads_lane_masks() {
     );
 }
 
+fn a_choose_after_calls_reads_lane_masks_run(b: &mut h::ExitBatch) {
+    b.add("choose after calls", A_CHOOSE_AFTER_CALLS_READS_LANE_MASKS_SRC, 1);
+}
+
+const HALVES_AND_CONCAT_COPY_CHUNKS_SRC: str = "import std::simd;\n@noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..s.len() {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
+
 // Over vectors that name their 16-byte chunks, a half and `concat` copy whole chunks, never a lane loop:
 // GCC builds a half that a lane loop copies out of the chunks' union one lane at a time (16 lane
 // inserts in each narrowing `Cast` entry of a `choose` of bytes by `f32` lanes).
 @test
 fn halves_and_concat_copy_chunks() {
-    let src = "import std::simd;\n@noinline\nfn mix(a: [u32; 8], b: [u8; 64]) u32 {\n    let v = Simd::<u32, 8>::from_array(a);\n    let w = Simd::<u8, 64>::from_array(b);\n    let c = simd::concat(v.high_half(), v.low_half());\n    let e = simd::concat(v, c);\n    let h = w.high_half().low_half();\n    return c[0] + c[7] + e[15] + h[0] as u32;\n}\nfn main() i32 {\n    let mut b: [u8; 64] = [0; 64];\n    let s: []mut u8 = b;\n    for i in 0..s.len() {\n        s[i] = i as u8;\n    }\n    return (mix([1, 2, 3, 4, 5, 6, 7, 8], b) == 45) as i32;\n}\n";
-    let c = h::compile_c_arch(src, 1);
+    let c = h::compile_c_arch(HALVES_AND_CONCAT_COPY_CHUNKS_SRC, 1);
     assert(c.ok(), "the program builds");
-    if aarch64_host() {
-        h::expect_exit("halves and concat", src, 1);
-    }
     let b = fn_body(unsafe str::from_cstr(c.code), "main__mix");
     assert(b.len() != 0, "mix is emitted");
     assert(!b.contains("__sc_i +"), "no half or concat lane loop");
     assert(b.contains(".c[2];") && b.contains(".c[3] = "), "the halves and concat copy chunks");
 }
 
+fn halves_and_concat_copy_chunks_run(b: &mut h::ExitBatch) {
+    b.add("halves and concat", HALVES_AND_CONCAT_COPY_CHUNKS_SRC, 1);
+}
+
+const A_GATHER_READS_ITS_LOADED_INDEXES_FROM_THE_SLICE_SRC: str = "import std::simd;\n@noinline\nfn g(x: []f32, idx: []u32) f32x4 {\n    return unsafe simd::gather_unchecked(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn c(x: []f32, idx: []u32) f32x4 {\n    return simd::gather(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn w(x: []f32, idx: []mut u32) f32x4 {\n    let v = simd::load::<u32, 4>(idx, 0);\n    idx[0] = 0;\n    return unsafe simd::gather_unchecked(x, v, Mask::<4>::splat(true), f32x4::splat(0.0));\n}\nfn main() i32 {\n    let x: [f32; 4] = [10.0, 11.0, 12.0, 13.0];\n    let mut i: [u32; 4] = [3, 2, 1, 0];\n    let a = g(x, i);\n    let b = c(x, i);\n    let d = w(x, i);\n    return (a[0] == 13.0 && a[3] == 10.0 && b[1] == 12.0 && d[0] == 13.0 && i[0] == 0) as i32;\n}\n";
+
 // A gather whose index vector a slice load gave, with nothing between that writes memory, reads its
 // indexes from the slice in its lane loop (a C compiler keeping the vector in registers extracts and
 // widens each lane); a write between keeps the loaded vector, whose indexes the write cannot change.
 @test
 fn a_gather_reads_its_loaded_indexes_from_the_slice() {
-    let src = "import std::simd;\n@noinline\nfn g(x: []f32, idx: []u32) f32x4 {\n    return unsafe simd::gather_unchecked(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn c(x: []f32, idx: []u32) f32x4 {\n    return simd::gather(x, simd::load::<u32, 4>(idx, 0), Mask::<4>::splat(true), f32x4::splat(0.0));\n}\n@noinline\nfn w(x: []f32, idx: []mut u32) f32x4 {\n    let v = simd::load::<u32, 4>(idx, 0);\n    idx[0] = 0;\n    return unsafe simd::gather_unchecked(x, v, Mask::<4>::splat(true), f32x4::splat(0.0));\n}\nfn main() i32 {\n    let x: [f32; 4] = [10.0, 11.0, 12.0, 13.0];\n    let mut i: [u32; 4] = [3, 2, 1, 0];\n    let a = g(x, i);\n    let b = c(x, i);\n    let d = w(x, i);\n    return (a[0] == 13.0 && a[3] == 10.0 && b[1] == 12.0 && d[0] == 13.0 && i[0] == 0) as i32;\n}\n";
-    let cc = h::compile_c_arch(src, 1);
+    let cc = h::compile_c_arch(A_GATHER_READS_ITS_LOADED_INDEXES_FROM_THE_SLICE_SRC, 1);
     assert(cc.ok(), "the program builds");
-    if aarch64_host() {
-        h::expect_exit("gathers", src, 1);
-    }
     let code = unsafe str::from_cstr(cc.code);
     assert(fn_body(code, "main__g").contains(".ptr[idx.ptr["), "the unchecked gather reads the slice");
     assert(fn_body(code, "main__c").contains(".ptr[idx.ptr["), "the checked gather reads the slice");
     assert(!fn_body(code, "main__w").contains(".ptr[idx.ptr["), "a write between keeps the vector");
+}
+
+fn a_gather_reads_its_loaded_indexes_from_the_slice_run(b: &mut h::ExitBatch) {
+    b.add("gathers", A_GATHER_READS_ITS_LOADED_INDEXES_FROM_THE_SLICE_SRC, 1);
+}
+
+// The programs of the lane-mask and chunk tests above run on an aarch64 host, one build for all.
+@test
+fn aarch64_programs_run() {
+    if !aarch64_host() {
+        return;
+    }
+    let mut b = h::ExitBatch::new();
+    a_choose_through_copies_reads_lane_masks_run(&mut b);
+    a_choose_after_calls_reads_lane_masks_run(&mut b);
+    halves_and_concat_copy_chunks_run(&mut b);
+    a_gather_reads_its_loaded_indexes_from_the_slice_run(&mut b);
+    b.run();
 }

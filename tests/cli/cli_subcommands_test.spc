@@ -9,19 +9,17 @@ import module::loader as loader;
 import std::platform::env as penv;
 import std::platform::fs;
 
-const E: str = "SC_NO_EMIT_CACHE";
-
 @test
 fn new_scaffolds_and_runs() {
     let p = cli::proj_new();
     let root = p.dir();
     // `new myapp` creates myapp/ with build.toml + src/main.spc.
-    let n = cli::superc_env_in(root, E, "1", "new myapp");
+    let n = cli::superc_in(root, "new myapp");
     assert(n.ok(), "new succeeds");
     let mut app = String::from_str(root);
     app.push_str("/myapp");
     // The scaffolded project builds and runs, printing its greeting.
-    let r = cli::superc_env_in(&app, E, "1", "run");
+    let r = cli::superc_in(&app, "run");
     assert(r.ok(), "the scaffolded project runs");
     assert(r.out_has("Hello from myapp!"), "the scaffold's main runs");
 }
@@ -30,9 +28,9 @@ fn new_scaffolds_and_runs() {
 fn new_rejects_an_existing_directory() {
     let p = cli::proj_new();
     let root = p.dir();
-    assert(cli::superc_env_in(root, E, "1", "new dup").ok(), "first new succeeds");
+    assert(cli::superc_in(root, "new dup").ok(), "first new succeeds");
     // A second `new` with the same name refuses rather than overwrite.
-    let r = cli::superc_env_in(root, E, "1", "new dup");
+    let r = cli::superc_in(root, "new dup");
     assert_eq(r.exit, 1);
     assert(r.out_has("already exists"), "the collision is reported");
 }
@@ -43,10 +41,10 @@ fn init_scaffolds_in_place() {
     // A directory of a fixed name: the project takes it, and with it its cache root.
     p.mkfile("initapp/.keep", "");
     let root = format("{}/initapp", p.dir());
-    let r = cli::superc_env_in(&root, E, "1", "init");
+    let r = cli::superc_in(&root, "init");
     assert(r.ok(), "init scaffolds the current directory");
     // The scaffolded project runs from its own root.
-    let run = cli::superc_env_in(&root, E, "1", "run");
+    let run = cli::superc_in(&root, "run");
     assert(run.ok(), "the initialized project runs");
     assert(run.out_has("Hello from"), "greeting printed");
 }
@@ -58,7 +56,7 @@ fn run_reports_the_program_exit_code() {
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 7;\n}\n");
     let root = p.dir();
     // `run` returns the program's own exit code.
-    let r = cli::superc_env_in(root, E, "1", "run");
+    let r = cli::superc_in(root, "run");
     assert_eq(r.exit, 7);
 }
 
@@ -77,7 +75,7 @@ fn command_runs_a_manifest_command() {
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "command greet");
+    let r = cli::superc_in(root, "command greet");
     assert(r.ok(), "the command runs");
     assert(r.out_has("manifest-command-ran"), "the command's shell line executed");
 }
@@ -94,15 +92,15 @@ fn clean_full_removes_build_outputs() {
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
     // A cache of the test's own: `--full` removes the cache root.
-    let env = format("1 SC_CACHE_DIR={}/ocache", root);
-    assert(cli::superc_env_in(root, E, &env, "build").ok(), "build first");
+    let cache = format("{}/ocache", root);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "build").ok(), "build first");
     let mut bdir = String::from_str(root);
     bdir.push_str("/build");
     assert(cli::dir_count_suffix(&bdir, "") > 0, "the build wrote its out-dir");
     // clean --full removes the out-dir; a rebuild afterwards still works.
-    assert(cli::superc_env_in(root, E, &env, "clean --full").ok(), "clean succeeds");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "clean --full").ok(), "clean succeeds");
     assert_eq(cli::dir_count_suffix(&bdir, ""), 0);
-    assert(cli::superc_env_in(root, E, &env, "build").ok(), "rebuild after clean works");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "build").ok(), "rebuild after clean works");
     assert(cli::dir_count_suffix(&bdir, "") > 0, "the rebuild wrote its out-dir again");
 }
 
@@ -121,9 +119,9 @@ fn clean_keeps_a_user_build_directory() {
     p.mkfile("src/build/release/raw/main.o", "stale\n");
     p.mkfile("src/build/release/raw/__sc_manifest", "stale\n");
     let root = p.dir();
-    let env = format("1 SC_CACHE_DIR={}/ocache", root);
-    assert(cli::superc_env_in(root, E, &env, "build").ok(), "build first");
-    assert(cli::superc_env_in(root, E, &env, "clean --full").ok(), "clean succeeds");
+    let cache = format("{}/ocache", root);
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "build").ok(), "build first");
+    assert(cli::superc_env_in(root, "SC_CACHE_DIR", &cache, "clean --full").ok(), "clean succeeds");
     let mut keep = String::from_str(root);
     keep.push_str("/build");
     assert_eq(cli::dir_count_suffix(&keep, "keep.txt"), 1);
@@ -162,7 +160,7 @@ fn rm_rf_does_not_follow_symlinks() {
 fn new_names_the_project_after_the_last_path_component() {
     let p = cli::proj_new();
     let root = p.dir();
-    assert(cli::superc_env_in(root, E, "1", "new apps/demo").ok(), "new succeeds");
+    assert(cli::superc_in(root, "new apps/demo").ok(), "new succeeds");
     let mut man = String::from_str(root);
     man.push_str("/apps/demo/build.toml");
     let text = cli::read_text(&man);
@@ -176,7 +174,7 @@ fn vendor_rejects_a_path_as_name() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("dep/lib.spc", "pub fn one() i32 {\n    return 1;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "vendor dep .. --force");
+    let r = cli::superc_in(root, "vendor dep .. --force");
     assert_eq(r.exit, 1);
     assert(r.out_has("is not a directory name"), "the name is refused");
     assert_eq(cli::dir_count_suffix(root, "build.toml"), 1);
@@ -195,7 +193,7 @@ fn command_env_keeps_quotes() {
     );
     p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "command show");
+    let r = cli::superc_in(root, "command show");
     assert(r.ok(), "the command runs");
     assert(r.out_has("[it's]"), "the value arrives unchanged");
 }
@@ -324,11 +322,11 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(first.ok(), "the build through the transpiler succeeds");
     assert(first.out_has("phase load"), "the first build transpiles");
     let app = format("{}/app{}", root, unsafe str::from_cstr(cli::binext()));
-    assert_eq(cli::exe_env_in(&app, root, E, "1", "").exit, 3);
+    assert_eq(cli::exe_env_in(&app, root, "SC_NONE", "", "").exit, 3);
     let same = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", &ext);
     assert(same.ok() && !same.out_has("phase load"), "the same transpiler skips the transpile");
     // The engine's own frontend emits the same tree, and it is another emitter for the stamp.
-    assert(cli::superc_env_in(root, E, "1", "build --out-dir=int -o app").ok(), "the frontend build");
+    assert(cli::superc_in(root, "build --out-dir=int -o app").ok(), "the frontend build");
     let own = cli::read_text(format("{}/int/debug/raw/lib.o", root).as_str());
     assert(own.len() != 0, "the frontend wrote the tree");
     assert(own.as_str() == cli::read_text(format("{}/ext/debug/raw/lib.o", root).as_str()).as_str(), "same tree");
@@ -338,7 +336,7 @@ fn external_transpiler_builds_and_keys_the_emit_stamp() {
     assert(again.ok() && again.out_has("phase load"), "the transpiler does not reuse the frontend's tree");
     // A transpiler error fails the build and shows the transpiler's diagnostics.
     p.mkfile("src/lib.spc", "pub fn v() i32 {\n    return missing;\n}\n");
-    let bad = cli::superc_env_in(root, E, "1", &ext);
+    let bad = cli::superc_in(root, &ext);
     assert(!bad.ok(), "a failing transpiler fails the build");
     assert(bad.out_has("cannot find value 'missing'"), "the transpiler's diagnostic reaches the output");
     assert(bad.out_has("build: transpiler failed"), "the engine names the failed step");
@@ -394,10 +392,10 @@ fn manifest_profile_is_a_build_constant() {
         "fn main() i32 {\n    if PROFILE == \"fast\" {\n        return 0;\n    }\n    return 1;\n}\n",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, E, "1", "run --profile=fast");
+    let r = cli::superc_in(root, "run --profile=fast");
     assert(r.ok(), "the fast profile takes the fast branch");
     let mut raw = String::from_str(root);
     raw.push_str("/out/fast/raw");
     assert_eq(cli::dir_count_suffix(&raw, "main.o"), 1);
-    assert_eq(cli::superc_env_in(root, E, "1", "run").exit, 1);
+    assert_eq(cli::superc_in(root, "run").exit, 1);
 }

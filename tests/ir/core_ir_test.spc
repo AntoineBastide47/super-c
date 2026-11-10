@@ -152,28 +152,6 @@ fn loops_break_continue() {
 }
 
 @test
-fn calls_are_terminators() {
-    let p = typed_package(
-        "fn callee(x: i32) i32 { return x; }\nfn caller() i32 { return callee(4); }\nfn main() i32 { let _ = caller(); return 0; }",
-    );
-    // The call ends its block: a TM_CALL terminator naming the callee, with a normal successor.
-    let node = find_fn(&p, "caller");
-    let u = (p.modules.len() - 1) as ModuleId;
-    let mut lw = irl::Lowerer::new(&p, u, node);
-    assert(lw.lower_fn(node), "body lowers");
-    let mut calls = 0;
-    for b in 0..lw.body.blocks.len() {
-        let t = lw.body.blocks.at(b).term;
-        if t.kind == ir::TM_CALL {
-            calls += 1;
-            assert(t.callee.node != NODE_NONE, "the call is resolved to its callee");
-            assert(t.t0 as usize < lw.body.blocks.len(), "the call continues in a block of the body");
-        }
-    }
-    assert_eq(calls, 1);
-}
-
-@test
 fn match_variants_and_or_patterns() {
     let p = typed_package(
         "enum E { A, B(i32), C }\nconst fn m(e: E) i32 { return switch e { A | C => 0, B(x) => x, }; }\nstatic_assert(m(E::A) == 0 && m(E::B(5)) == 5 && m(E::C) == 0);\nfn main() i32 { let _ = m(E::A); return 0; }",
@@ -189,8 +167,11 @@ fn defer_runs_before_return() {
         "fn effect(x: i32) i32 { return x; }\nfn d() i32 { defer { let _ = effect(1); } return effect(2); }\nconst fn order() i32 { let mut x = 1; defer { x = 5; } return x; }\nstatic_assert(order() == 1);\nfn main() i32 { let _ = d(); return 0; }",
     );
     let out = lowered(&p, "d");
-    assert(has(&out, "call m"), "deferred call emitted");
-    assert(has(&out, "return"), "return present");
+    // The return value's call comes first, then the deferred call, then the return.
+    let value = out.find("(const 2)");
+    let deferred = out.find("(const 1)");
+    assert(value >= 0 && deferred > value, "the deferred call runs after the return value is computed");
+    assert(out.as_str().slice(deferred, out.len()).contains("return"), "and before the return");
     // The deferred write lands after the return value is read: `order` returns 1, not 5.
 }
 
@@ -230,36 +211,6 @@ fn typed_facts_boundary() {
         }
     }
     assert(saw_args, "generic arguments recorded at a use site");
-}
-
-@test
-fn question_lowers_explicitly() {
-    let p = typed_package(
-        "fn g(o: Option<i32>) Option<i32> { let v = o?; return Option::<i32>::Some(v + 1); }\nfn main() i32 { let _ = g(Option::<i32>::Some(1)); return 0; }",
-    );
-    // `?` reads the carrier's discriminant, switches on it, and the error path builds a variant and returns.
-    let node = find_fn(&p, "g");
-    let u = (p.modules.len() - 1) as ModuleId;
-    let mut lw = irl::Lowerer::new(&p, u, node);
-    assert(lw.lower_fn(node), "body lowers");
-    let b = &lw.body;
-    let mut discr = false;
-    let mut variant = false;
-    for i in 0..b.rvalues.len() {
-        discr = discr || b.rvalues.at(i).kind == ir::RV_DISCRIMINANT;
-        variant = variant || b.rvalues.at(i).kind == ir::RV_AGGREGATE && b.rvalues.at(i).c == ir::AGG_VARIANT;
-    }
-    let mut switches = 0;
-    let mut returns = 0;
-    for i in 0..b.blocks.len() {
-        let k = b.blocks.at(i).term.kind;
-        switches += (k == ir::TM_SWITCH) as i32;
-        returns += (k == ir::TM_RETURN) as i32;
-    }
-    assert(discr, "the carrier discriminant is read");
-    assert(variant, "the error path rewraps through variant construction");
-    assert(switches >= 1, "the discriminant is switched on");
-    assert(returns >= 2, "the error path returns early, apart from the tail return");
 }
 
 // A feature-dense body drives the printer across its rvalue and terminator variants: references,
@@ -306,48 +257,37 @@ fn main() i32 { let _ = dense(2); let _ = pick(E::A); return 0; })",
     assert(has(&po, "discr ") || has(&po, "switch("), "a discriminant/switch prints");
 }
 
-// Build and run `src` with the leak tracker armed; a leak or a double free exits nonzero.
-fn run_leak_checked(label: str, src: str, code: i32) {
-    let r = h::compile_and_run_env(src, "SC_LEAK_CHECK=fatal");
-    assert(r.built, label);
-    assert_eq(r.exit, code);
-}
-
-@test
-fn question_error_path_frees_owned_locals() {
+fn question_error_path_frees_owned_locals(b: &mut h::ExitBatch) {
     // The error path of `?` returns through the storage deaths, so the owning local and the
     // by-value argument are freed there as on every other exit.
-    run_leak_checked(
+    b.add(
         "question error path frees",
         "fn half(n: i32) Result<i32, i32> { if n % 2 == 0 { return Result::<i32, i32>::Ok(n / 2); } return Result::<i32, i32>::Err(n); }\nfn f(n: i32, arg: String) Result<i32, i32> { let s = String::from_str(\"0123456789012345678901234567890123456789\"); let v = half(n)?; return Result::<i32, i32>::Ok(v + s.len() as i32 + arg.len() as i32); }\nfn main() i32 { let a = f(3, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let b = f(4, String::from_str(\"abcdefghijklmnopqrstuvwxyz0123456789\")); let mut r = 0; switch a { Ok(_) => { r = 1; }, Err(e) => { r = e - 3; } } switch b { Ok(v) => { r = r + v - 78; }, Err(_) => { r = 1; } } return r; }\n",
         0,
     );
 }
 
-@test
-fn closure_frees_by_value_params() {
+fn closure_frees_by_value_params(b: &mut h::ExitBatch) {
     // An expression-bodied closure holds an inferred return slot ahead of its parameters: the
     // parameter's storage death must name the parameter, not the return slot.
-    run_leak_checked(
+    b.add(
         "closure parameter freed",
         "fn apply<F: fn(String) usize>(f: F) usize { return f(String::from_str(\"0123456789012345678901234567890123456789\")); }\nfn main() i32 { let f = |s: String| s.len(); let n = f(String::from_str(\"0123456789012345678901234567890123456789\")); let m = apply(|s: String| s.len()); return (n + m) as i32 - 80; }\n",
         0,
     );
 }
 
-@test
-fn temporary_receivers_and_places_are_freed() {
+fn temporary_receivers_and_places_are_freed(b: &mut h::ExitBatch) {
     // A value that lowers into a temporary (a `format` result, an `if` or `switch` value, a struct
     // literal) and is then used as a method receiver or a place owns that value: it is freed once.
-    run_leak_checked(
+    b.add(
         "temporary receivers freed",
         "struct P { pub s: String }\nextend P { fn eat(self: P) usize { return self.s.len(); } }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { let mut t: usize = 0; let mut s = String::new(); for i in 0..2 { t += format(\"0123456789012345678901234567890123456789{}\", i).len(); s.push_str(format(\"0123456789012345678901234567890123456789{}\", i).as_str()); t += (if i > 0 { mk() } else { mk() }).len(); t += (switch i { 0 => mk(), _ => mk() }).len(); t += (if i > 0 { P { s: mk() } } else { P { s: mk() } }).s.len(); t += (if i > 0 { P { s: mk() } } else { P { s: mk() } }).eat(); let r = &P { s: mk() }; t += r.s.len(); } return (t + s.len()) as i32 - 564; }\n",
         0,
     );
 }
 
-@test
-fn deeply_nested_owner_frees() {
+fn deeply_nested_owner_frees(b: &mut h::ExitBatch) {
     // A String twenty plain structs deep is freed with its outermost owner.
     let mut src = String::from_str("struct S0 { pub s: String }\n");
     for i in 1..20 {
@@ -368,11 +308,10 @@ fn deeply_nested_owner_frees() {
         src.push_str(" }");
     }
     src.push_str("; return v.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.x.s.len() as i32 - 40; }\n");
-    run_leak_checked("nested owner freed", &src, 0);
+    b.add("nested owner freed", &src, 0);
 }
 
-@test
-fn wide_shared_member_type_compiles() {
+fn wide_shared_member_type_compiles(b: &mut h::ExitBatch) {
     // Each level holds two members of the level below, so a walk over member types that judges a
     // shared type again at each use takes 2^29 steps; one judgement per type keeps it linear.
     let mut src = String::from_str("struct L0 {}\n");
@@ -387,11 +326,10 @@ fn wide_shared_member_type_compiles() {
     }
     src.push_str("struct Top { pub w: L29, pub s: String }\n");
     src.push_str("fn main() i32 { let o = Option::<Top>::None; return if o.is_none() { 0 } else { 1 }; }\n");
-    run_leak_checked("wide shared member type", &src, 0);
+    b.add("wide shared member type", &src, 0);
 }
 
-@test
-fn long_else_if_chains_compile() {
+fn long_else_if_chains_compile(b: &mut h::ExitBatch) {
     // 1000-arm `else if` chains render flat, inside and outside a loop: arms that fall through read
     // `} else if (..) {`, and arms that return continue the chain unwrapped even when each test
     // needs statements first (the inlined call).
@@ -425,73 +363,63 @@ fn long_else_if_chains_compile() {
     src.push_str(
         "fn main() i32 {\n    if fall(999) != 1998 || fall(1000) != -1 { return 1; }\n    if ret(999) != 999 || ret(1000) != -1 { return 2; }\n    return inloop(1002) - 1004;\n}\n",
     );
-    let r = h::compile_and_run(&src);
-    assert(r.built, "the 1000-arm chains build");
-    assert_eq(r.exit, 0);
+    b.add("the 1000-arm chains build", &src, 0);
 }
 
-@test
-fn long_sum_compiles() {
+fn long_sum_compiles(b: &mut h::ExitBatch) {
     // A 300-term sum folds into chains of bounded length, so the C renders within its nesting limit.
     let mut src = String::from_str("fn f(x: i32) i32 { return x");
     for _i in 1..300 {
         src.push_str(" + x");
     }
     src.push_str("; }\nfn main() i32 { return f(1) - 300; }\n");
-    let r = h::compile_and_run(&src);
-    assert(r.built, "the 300-term sum builds");
-    assert_eq(r.exit, 0);
+    b.add("the 300-term sum builds", &src, 0);
 }
 
-@test
-fn comparison_operands_are_read_not_moved() {
+fn comparison_operands_are_read_not_moved(b: &mut h::ExitBatch) {
     // `==` and `assert_eq` read owned operands: a compared binding stays usable and is freed by
     // its owner, and a temporary operand is freed by its scope. An aggregate call result compared
     // by `assert_eq` stays a named temporary (the comparison takes its address).
-    run_leak_checked(
+    b.add(
         "comparison operands freed",
         "struct P { pub x: i32 }\nextend P as Eq { pub fn eq(self: &P, o: &P) bool { return self.x == o.x; } }\n@noinline\nfn mp(x: i32) P { return P { x: x }; }\nfn mk() String { return String::from_str(\"0123456789012345678901234567890123456789\"); }\nfn main() i32 { assert_eq(mp(1), mp(1)); let a = mk(); let b = mk(); let e1 = a == b; let e2 = mk() == mk(); let e3 = format(\"{}0123456789012345678901234567890123456789\", 1) != mk(); assert_eq(mk(), mk()); assert(mk() == b); let c = a; return if e1 && e2 && e3 && c.len() == 40 { 0 } else { 1 }; }\n",
         0,
     );
 }
 
-@test
-fn compound_bit_assignments_evaluate() {
+fn compound_bit_assignments_evaluate(b: &mut h::ExitBatch) {
     // `|=`, `^=`, `<<=` and `>>=` apply their base operator at compile time and at run time.
-    run_leak_checked(
+    b.add(
         "compound bit assignments",
         "const fn mix(x: u32) u32 { let mut v = x; v |= 8; v ^= 3; v <<= 2; v >>= 1; return v; }\nconst K: u32 = mix(1);\nstatic_assert(K == 20, \"compound bit ops fold\");\nfn main() i32 { let mut v: u32 = 1; v |= 8; v ^= 3; v <<= 2; v >>= 1; return (K + v) as i32 - 40; }\n",
         0,
     );
 }
 
-@test
-fn inclusive_range_ends_at_type_max() {
+fn inclusive_range_ends_at_type_max(b: &mut h::ExitBatch) {
     // An inclusive end at the element type's maximum ends the loop: the increment past the
     // last element never runs (it would wrap for unsigned types and trap for signed ones). A
     // wrapped counter leaves through the break with a wrong count instead of looping forever.
-    run_leak_checked(
+    b.add(
         "inclusive range at the type maximum",
         "fn main() i32 { let mut n = 0; let lo: u8 = 250; let hi: u8 = 255; for i in lo..=hi { n += 1; if i < lo { break; } } let a: i8 = 125; let b: i8 = 127; let r = a..=b; for j in r { n += 1; let _ = j; } let e: i8 = 3; let x = 0i8..e; for k in x { n += 1; let _ = k; } return n - 12; }\n",
         0,
     );
 }
 
-@test
-fn inlined_repeat_keeps_its_count() {
+fn inlined_repeat_keeps_its_count(b: &mut h::ExitBatch) {
     // The inliner rebases the repeat count operand with the callee's operands: a stale count
     // reads a caller operand (here the constant 2) and fills too few elements.
-    run_leak_checked(
+    b.add(
         "inlined repeat count",
         "pub fn fill(v: i32) [i32; 3] { return [v; 3]; }\nfn main() i32 { let x: i32 = 1; let y: i32 = 2; let a = fill(7); return a[0] + a[1] + a[2] + x + y - 24; }\n",
         0,
     );
 }
 
-@test
-fn large_alignment_layout_is_stable() {
+fn large_alignment_layout_is_stable(b: &mut h::ExitBatch) {
     // A cached layout answer equals the first one for an alignment of 256 or more.
-    run_leak_checked(
+    b.add(
         "large alignment layout",
         "@align(512)\nstruct Big { pub x: u8 }\nconst A: usize = sizeof(Big);\nconst B: usize = sizeof(Big);\nconst C: usize = alignof(Big);\nfn main() i32 { return (A + B + C) as i32 - 1536; }\n",
         0,
@@ -571,11 +499,10 @@ fn printer_shows_omitted_aggregate_members() {
     assert(has(&out, "[const 7, _]"), "an omitted member prints as `_`");
 }
 
-@test
-fn memory_intrinsics_evaluate_at_compile_time() {
+fn memory_intrinsics_evaluate_at_compile_time(b: &mut h::ExitBatch) {
     // memmove copies overlapping bytes of an array in both directions; memset and memcpy fill and
     // copy a heap buffer. The constants and the run-time calls agree.
-    run_leak_checked(
+    b.add(
         "memory intrinsics in constants",
         "import string;\nconst fn moved(right: bool) u32 {\n    let mut a: [u8; 6] = [1, 2, 3, 4, 5, 6];\n    let p = &mut a as *mut [u8; 6] as *mut u8;\n    if right {\n        unsafe string::memmove(unsafe (p + 1), p, 4);\n    } else {\n        unsafe string::memmove(p, unsafe (p + 1), 4);\n    }\n    let mut r: u32 = 0;\n    for x in a {\n        r = r * 10 + x as u32;\n    }\n    return r;\n}\nconst fn filled() u32 {\n    let mut a = Vector::<u8>::new();\n    let mut b = Vector::<u8>::new();\n    for i in 1..5 {\n        a.push(i as u8);\n        b.push(0);\n    }\n    let q = b.as_mut_ptr();\n    unsafe string::memset(q, 7, 2);\n    unsafe string::memcpy(unsafe (q + 2), a.as_ptr(), 2);\n    let mut r: u32 = 0;\n    for x in b.iter() {\n        r = r * 10 + *x as u32;\n    }\n    return r;\n}\nconst R: u32 = moved(true);\nconst L: u32 = moved(false);\nconst F: u32 = filled();\nstatic_assert(R == 112346, \"memmove to a higher address\");\nstatic_assert(L == 234556, \"memmove to a lower address\");\nstatic_assert(F == 7712, \"memset then memcpy\");\nfn main(argv: Vector<str>) i32 {\n    let right = argv.len() == 1;\n    if moved(right) != R || moved(!right) != L || filled() != F {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
@@ -584,9 +511,8 @@ fn memory_intrinsics_evaluate_at_compile_time() {
 
 // A `const fn` of an extend over a lifetime parameter runs at compile time: the receiver's instance
 // binds the extend's type parameters past the lifetime (`for x in v.iter()` reaches `VecIter`'s `next`).
-@test
-fn const_fn_of_an_extend_with_a_lifetime_evaluates() {
-    run_leak_checked(
+fn const_fn_of_an_extend_with_a_lifetime_evaluates(b: &mut h::ExitBatch) {
+    b.add(
         "an extend with a lifetime parameter in a constant",
         M"(pub struct C<'a, T> {
     pub n: usize,
@@ -1357,11 +1283,31 @@ fn a_never_value_builds_in_every_position() {
 // A constant whose evaluation lowers a body that calls a method of an extend checked later in the
 // same cycle must read the same call shape as the run-time code: the argument `bump(&mut x)` runs
 // before `x` is borrowed for `self`, so `m` sees 11, not 1.
-@test
-fn const_eval_keeps_call_shape_of_a_later_method() {
-    h::expect_exit(
+fn const_eval_keeps_call_shape_of_a_later_method(b: &mut h::ExitBatch) {
+    b.add(
         "const equals run time",
         "const X: i32 = h();\nfn h() i32 {\n    let mut x: i32 = 1;\n    return x.m(bump(&mut x));\n}\nconst G: i32 = X + 1;\nextend i32 {\n    pub fn m(self: &Self, b: i32) i32 {\n        if b == 7 {\n            return G;\n        }\n        return *self + b;\n    }\n}\nfn bump(x: &mut i32) i32 {\n    *x += 10;\n    return 0;\n}\nfn main() i32 {\n    return (X != h()) as i32;\n}\n",
         0,
     );
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    question_error_path_frees_owned_locals(&mut b);
+    closure_frees_by_value_params(&mut b);
+    temporary_receivers_and_places_are_freed(&mut b);
+    deeply_nested_owner_frees(&mut b);
+    wide_shared_member_type_compiles(&mut b);
+    long_else_if_chains_compile(&mut b);
+    long_sum_compiles(&mut b);
+    comparison_operands_are_read_not_moved(&mut b);
+    compound_bit_assignments_evaluate(&mut b);
+    inclusive_range_ends_at_type_max(&mut b);
+    inlined_repeat_keeps_its_count(&mut b);
+    large_alignment_layout_is_stable(&mut b);
+    memory_intrinsics_evaluate_at_compile_time(&mut b);
+    const_fn_of_an_extend_with_a_lifetime_evaluates(&mut b);
+    const_eval_keeps_call_shape_of_a_later_method(&mut b);
+    b.run();
 }

@@ -279,8 +279,11 @@ fn scalar_instances_bind_their_interface_calls() {
     h::expect_c_absent("`G::len()` is a constant of the instance", SCALAR_BOUND, "__len()");
     h::expect_c("`at` stays a call", SCALAR_BOUND, "__at(");
     h::expect_c_absent("through a generic interface too", SCALAR_BOUND, "__glen()");
-    h::expect_exit("bound calls in scalar instances", SCALAR_BOUND, 0);
     h::expect_same_output("inlined and called", SCALAR_BOUND, ["SC_INLINE=0"], []);
+}
+
+fn scalar_instances_bind_their_interface_calls_cases(b: &mut h::ExitBatch) {
+    b.add("bound calls in scalar instances", SCALAR_BOUND, 0);
 }
 
 // Scalar code keeps the narrower reach: a callee reading a module constant stays a call there.
@@ -300,7 +303,10 @@ fn main() i32 {
 @test
 fn scalar_code_keeps_a_constant_reader_a_call() {
     h::expect_c("the call stays", SCALAR, "second()");
-    h::expect_exit("scalar reach", SCALAR, 0);
+}
+
+fn scalar_code_keeps_a_constant_reader_a_call_cases(b: &mut h::ExitBatch) {
+    b.add("scalar reach", SCALAR, 0);
 }
 
 // A caller that holds a vector takes a larger splice budget: 16 calls of a callee of about 90
@@ -366,7 +372,10 @@ fn main(args: Vector<str>) i32 {
 @test
 fn a_vector_caller_takes_a_larger_budget() {
     h::expect_c_absent("no call of `step` remains", BUDGET, "step(y)");
-    h::expect_exit("a vector budget", BUDGET, 0);
+}
+
+fn a_vector_caller_takes_a_larger_budget_cases(b: &mut h::ExitBatch) {
+    b.add("a vector budget", BUDGET, 0);
 }
 
 // A parameter the callee never writes reads its argument in place: an autoref receiver reads the
@@ -624,5 +633,14 @@ fn exit_cases_00() {
     a_slice_offset_names_the_element_definition(&mut b);
     a_call_beside_what_it_writes_keeps_its_result(&mut b);
     the_first_panic_in_source_order_reports(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    scalar_instances_bind_their_interface_calls_cases(&mut b);
+    scalar_code_keeps_a_constant_reader_a_call_cases(&mut b);
+    a_vector_caller_takes_a_larger_budget_cases(&mut b);
     b.run();
 }

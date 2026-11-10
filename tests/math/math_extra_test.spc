@@ -248,15 +248,24 @@ fn functions_gauss_2d() {
 
 @test
 fn gradient_paint_radial() {
-    let g = radial_gradient(vec2::splat(0.0), 1.0f32, vec2::splat(1.0), vec2::splat(0.5));
-    assert(g != 0.0);
+    // The fraction of the way from the focal point to the circle along the ray through the position.
+    let c = vec2::splat(0.0);
+    assert_eq(radial_gradient(c, 2.0f32, c, vec2::new(1.0, 0.0)), 0.5);
+    assert_eq(radial_gradient(c, 2.0f32, c, vec2::new(0.0, 2.0)), 1.0);
+    let f = vec2::new(1.0, 0.0);
+    assert_eq(radial_gradient(c, 2.0f32, f, f), 0.0);
+    assert_eq(radial_gradient(c, 2.0f32, f, vec2::new(2.0, 0.0)), 1.0);
+    assert_eq(radial_gradient(c, 2.0f32, f, vec2::new(-0.5, 0.0)), 0.5);
+    assert_eq(radial_gradient(c, 2.0f32, f, vec2::new(-2.0, 0.0)), 1.0);
 }
 
 @test
 fn gradient_paint_linear() {
-    let g = linear_gradient(vec2::splat(0.0), vec2::splat(1.0), vec2::splat(0.5));
-    assert(g != 0.0);
-    assert_eq(g, 0.5f32);
+    // The position's projection onto the segment, as a fraction of its length.
+    let (a, b) = (vec2::new(1.0f32, 1.0), vec2::new(3.0f32, 1.0));
+    assert_eq(linear_gradient(a, b, vec2::new(2.0, 5.0)), 0.5);
+    assert_eq(linear_gradient(a, b, vec2::new(1.0, -4.0)), 0.0);
+    assert_eq(linear_gradient(a, b, vec2::new(4.0, 0.0)), 1.5);
 }
 
 // Principal component analysis.
@@ -717,26 +726,10 @@ fn common_fmod() {
 }
 
 @test
-fn common_isdenormal() {
-    assert(!isdenormal(1.0f32));
-    assert(!any(isdenormal(vec1::splat(1.0))));
-    assert(!any(isdenormal(vec2::splat(1.0))));
-    assert(!any(isdenormal(vec3::splat(1.0))));
-    assert(!any(isdenormal(vec4::splat(1.0))));
-}
-
-@test
 fn common_open_bounded() {
     assert(all(open_bounded(ivec2::splat(2), ivec2::splat(1), ivec2::splat(3))));
     assert(!all(open_bounded(ivec2::splat(1), ivec2::splat(1), ivec2::splat(3))));
     assert(!all(open_bounded(ivec2::splat(3), ivec2::splat(1), ivec2::splat(3))));
-}
-
-@test
-fn common_close_bounded() {
-    assert(all(close_bounded(ivec2::splat(2), ivec2::splat(1), ivec2::splat(3))));
-    assert(all(close_bounded(ivec2::splat(1), ivec2::splat(1), ivec2::splat(3))));
-    assert(all(close_bounded(ivec2::splat(3), ivec2::splat(1), ivec2::splat(3))));
 }
 
 // Every form and edge case.

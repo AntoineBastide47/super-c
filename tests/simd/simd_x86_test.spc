@@ -53,12 +53,8 @@ const fn line_of<'a>(c: str<'a>, needle: str) str<'a> {
 
 // A `setr` intrinsic of more arguments than the templates' registers puts its first argument in the
 // lowest lane, of variable lanes and of constant ones.
-@test
-fn setr_lanes_run_in_order() {
-    if !x86_host() {
-        return;
-    }
-    h::expect_exit(
+fn setr_lanes_run_in_order(b: &mut h::ExitBatch) {
+    b.add(
         "setr lanes",
         "import immintrin;\n\n@arch(x86_64)\nfn lanes(v: immintrin::__m128i) [u8; 16] {\n    let mut b: [u8; 16] = [0; 16];\n    unsafe immintrin::_mm_storeu_si128((&mut b) as *mut [u8; 16] as *mut immintrin::__m128i_u, v);\n    return b;\n}\n\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as i8;\n    let vb = lanes(immintrin::_mm_setr_epi8(n, n + 1, n + 2, n + 3, n + 4, n + 5, n + 6, n + 7, n + 8, n + 9, n + 10, n + 11, n + 12, n + 13, n + 14, n + 15));\n    let cb = lanes(immintrin::_mm_setr_epi8(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));\n    let v: []u8 = vb[0..16];\n    let c: []u8 = cb[0..16];\n    for k in 0..16usize {\n        if v[k] != k as u8 + 1 || c[k] != k as u8 {\n            return k as i32 + 1;\n        }\n    }\n    return 0;\n}\n",
         0,
@@ -417,11 +413,7 @@ fn operations_lower_to_their_instructions() {
 }
 
 // `std::simd::x86` against scalar models, each where this machine has its features.
-@test
-fn x86_operations_match_models() {
-    if !x86_host() {
-        return;
-    }
+fn x86_operations_match_models(b: &mut h::ExitBatch) {
     let src = M"(import std::cpu;
 import std::cpu::detect;
 import std::simd::x86;
@@ -508,7 +500,7 @@ fn main(args: Vector<str>) i32 {
     return 0;
 }
 )";
-    h::expect_exit("std::simd::x86", src, 0);
+    b.add("std::simd::x86", src, 0);
 }
 
 // On AVX-512 hardware, `x86-64-v4` builds that prefer 256-bit and 512-bit entries give the same
@@ -583,4 +575,16 @@ fn pick(c: bool, a: i32, b: i32) i32 {
         eprintln("{}", b.diag.as_str());
     }
     assert(b.built, "std::simd::x86 compiles");
+}
+
+// The run cases above, on an x86-64 host, one build for both.
+@test
+fn x86_programs_run() {
+    if !x86_host() {
+        return;
+    }
+    let mut b = h::ExitBatch::new();
+    setr_lanes_run_in_order(&mut b);
+    x86_operations_match_models(&mut b);
+    b.run();
 }

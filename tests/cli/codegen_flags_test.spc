@@ -3,8 +3,6 @@
 import tests::cli_harness as cli;
 import tests::platform::platform_harness as ph;
 
-const E: str = "SC_NO_EMIT_CACHE";
-
 // A program each flag changes: a counted loop (unrolling), a loop with bounds checks (versioning), a loop
 // with a branch on a parameter (unswitching), a reduction over a slice (vectorization), a loop that
 // writes floats through a struct's pointer and reads its integer length through a raw pointer, which
@@ -100,10 +98,10 @@ fn main() i32 {
 fn built(p: &cli::Proj, flags: str, dir: str) (String, String) {
     let root = p.dir();
     p.mkfile(format("{}/.keep", dir).as_str(), "");
-    let b = cli::superc_env_in(root, E, "1", format("build {} main.spc -o {}/prog", flags, dir).as_str());
+    let b = cli::superc_in(root, format("build {} main.spc -o {}/prog", flags, dir).as_str());
     assert(b.ok(), flags);
     let exe = format("{}/{}/prog{}", root, dir, unsafe str::from_cstr(cli::binext()));
-    let r = cli::exe_env_in(&exe, root, E, "1", "");
+    let r = cli::exe_env_in(&exe, root, "SC_NONE", "", "");
     assert(r.ok(), flags);
     return (ph::read_text(&exe), String::from_str(unsafe str::from_cstr(r.out)));
 }
@@ -197,13 +195,18 @@ fn main() i32 {
 )",
     );
     let root = p.dir();
-    let b = cli::superc_env_in(root, E, "1", "build -O2 -fstack-protector-strong main.spc -o guarded");
+    let b = cli::superc_in(root, "build -O2 -fstack-protector-strong main.spc -o guarded");
     assert(b.ok(), "build");
     let exe = format("{}/guarded{}", root, unsafe str::from_cstr(cli::binext()));
     let fine = cli::exe_env_in(&exe, root, "N", "8", "");
     assert(fine.ok() && fine.out_has("65"), "no overflow");
+    // The canary's check aborts; without it the overwritten frame record or return address ends the run
+    // with a fault instead.
     let smashed = cli::exe_env_in(&exe, root, "N", "64", "");
-    assert(smashed.exit != 0, "the overflow stops");
+    if !cli::aborted(smashed.exit) {
+        eprintln("the overflow ended with exit {}", smashed.exit);
+    }
+    assert(cli::aborted(smashed.exit), "the overflow stops at the canary check");
 }
 
 // `-march` names the CPU as `--target-cpu` does: an unknown one is refused by the same check.
@@ -211,6 +214,6 @@ fn main() i32 {
 fn march_is_target_cpu() {
     let p = cli::proj_new();
     p.mkfile("main.spc", "fn main() i32 {\n    return 0;\n}\n");
-    let r = cli::superc_env_in(p.dir(), E, "1", "build -march=no-such-cpu main.spc -o b");
+    let r = cli::superc_in(p.dir(), "build -march=no-such-cpu main.spc -o b");
     assert(!r.ok() && r.out_has("unknown target CPU 'no-such-cpu'"), "-march");
 }

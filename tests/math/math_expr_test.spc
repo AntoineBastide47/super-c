@@ -46,20 +46,21 @@ fn sum_adds_left_to_right() {
     assert(sum(ex(e)) == 0);
 }
 
-@test
-fn a_length_mismatch_panics() {
-    h::expect_run(
-        "an expression of different lengths",
-        "import std::math::expr as *;\nfn main() i32 {\n    let a: []i32 = [1, 2, 3];\n    let b: []i32 = [1, 2];\n    return sum(ex(a) + ex(b));\n}\n",
-        "",
-        "expr: the lengths differ",
-    );
-    h::expect_run(
-        "an assignment of different lengths",
-        "import std::math::expr as *;\nfn main() i32 {\n    let a: []i32 = [1, 2, 3];\n    let mut v = Vector::<i32>::new();\n    v.push(0);\n    assign(v.index_range_mut(0..1), ex(a));\n    return v[0];\n}\n",
-        "",
-        "expr::assign: the lengths differ",
-    );
+// An expression of different lengths panics ("expr: the lengths differ"); nothing else in the body can.
+@test(should_panic)
+fn an_expression_of_different_lengths_panics() {
+    let a: []i32 = [1, 2, 3];
+    let b: []i32 = [1, 2];
+    let _ = sum(ex(a) + ex(b));
+}
+
+// An assignment of different lengths panics ("expr::assign: the lengths differ").
+@test(should_panic)
+fn an_assignment_of_different_lengths_panics() {
+    let a: []i32 = [1, 2, 3];
+    let mut v = Vector::<i32>::new();
+    v.push(0);
+    assign(v.index_range_mut(0..1), ex(a));
 }
 
 // The assignment's loop reads the views through no bounds check and needs no overlap test: the

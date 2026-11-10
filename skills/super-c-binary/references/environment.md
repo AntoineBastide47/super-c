@@ -26,8 +26,8 @@
 
 | Variable | Effect |
 |----------|--------|
-| `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations |
-| `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations |
+| `SC_FACTS_CHECK` | Snapshot semantic tables after typecheck; report mutations. A clean build prints `facts-check: N modules, no table changed` |
+| `SC_CORE_IR` | Re-verify inlined bodies and re-prove bounds-check eliminations. The build ends with `core-ir check: N bodies re-verified` |
 | `SC_LAYOUT` | Validate pool types against C layout invariants |
 | `SC_BORROW_STATS` | Borrow-check probe table (`src/borrowck/flow_ir.spc`): ms, calls and (with `SC_BUILD_STATS` + `SC_BUILD_MEM`) allocations per region (lower, replay, forest, facts, cfg, liveness, moves, solver, rules, emit, setup, decl, reach, drops, publish, keep, tail: their total is the build record's `borrowck` phase less a few ms of loop overhead; `reach` is the stage's per-module prologue, the module reference rows, body counts and reachability scans, and the solve), skip and elaboration tallies, sizes, the lowered product (Core IR KiB, type slots, replay-tape entries per event kind), the slowest bodies and the retained scratch. Needs `SC_BUILD_STATS`; parallel allocation columns are global counters and mean nothing |
 | `SC_BC_VALIDATE` | Validation build: every borrow-check stage the feature predicate skipped runs anyway and must find nothing (zero loans, zero move events, no diagnostic); every loan issues at a borrow operation, every move path has a valid parent, the init rows match the path count, the liveness queue stays within its tight bound; every elaborated body passes the structural verifier and the ownership verifier (`ir::drops::verify_drops`: each value released once per path, guarded where paths disagree, nothing held at a return). A failure prints the body and its events, then aborts. Output is unchanged. The gate runs its fixpoint and worker-identity builds under it |

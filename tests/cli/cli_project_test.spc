@@ -33,7 +33,7 @@ fn whole_project_fmt_check_flags_an_unformatted_file() {
     }
     let p = project(false);
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "fmt --check");
+    let r = cli::superc_in(root, "fmt --check");
     assert_eq(r.exit, 1);
     assert(r.out_has("a.spc"), "the unformatted file in the sweep is named");
 }
@@ -47,11 +47,11 @@ fn whole_project_lint_is_clean() {
     }
     let p = project(true);
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let r = cli::superc_in(root, "lint");
     assert(r.ok() && !r.out_has("warning"), "a clean project lints without warnings");
     // The sweep reaches a file nothing imports.
     p.mkfile("lib/b.spc", "pub fn g() i32 {\n    let unused = 1;\n    return 0;\n}\n");
-    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let w = cli::superc_in(root, "lint");
     assert(w.exit != 0 && w.out_shows("unused variable 'unused'") && w.out_shows("b.spc"), "the sweep lints every file");
 }
 
@@ -69,7 +69,7 @@ fn lint_recurses_a_directory() {
     let root = p.dir();
     // Run from the project root so imports resolve against it; `lint src` recurses the directory and
     // reaches the nested file's warning.
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint src");
+    let r = cli::superc_in(root, "lint src");
     assert(
         r.exit != 0 && r.out_shows("unused variable 'unused'") && r.out_shows("util.spc"),
         "the nested file is linted",
@@ -93,9 +93,9 @@ fn a_listed_file_keeps_its_pub_items_live() {
         "fn half() i32 {\n    return 0;\n}\n\npub fn u() i32 {\n    return half();\n}\n\npub fn dead() i32 {\n    return 1;\n}\n",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint src/extra/util.spc");
+    let r = cli::superc_in(root, "lint src/extra/util.spc");
     assert(r.ok() && !r.out_has("warning"), "the listed file's pub items and their callees are live");
-    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let w = cli::superc_in(root, "lint");
     assert(w.exit != 0 && w.out_shows("unused public function 'dead'"), "the whole project reports the dead pub item");
     assert(!w.out_has("'u'") && !w.out_has("'half'"), "and only it");
 }
@@ -113,15 +113,15 @@ fn whole_project_lint_roots_a_nested_project_at_its_manifest() {
     p.mkfile("tools/t/main.spc", "import util;\n\nfn main() i32 {\n    return util::u();\n}\n");
     p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let r = cli::superc_in(root, "lint");
     assert(r.ok() && !r.out_has("cannot open module"), "the nested project resolves its own imports");
     p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
-    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let w = cli::superc_in(root, "lint");
     assert(w.exit != 0 && w.out_shows("unused variable 'unused'"), "the nested project is linted");
     // `lint-exclude` skips a directory, the nested projects in it included.
     let toml = cli::read_text(format("{}/build.toml", root).as_str());
     p.mkfile("build.toml", format("lint-exclude = [\"tools\"]\n{}", toml.as_str()).as_str());
-    let x = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let x = cli::superc_in(root, "lint");
     assert(x.ok() && !x.out_has("unused variable"), "the excluded directory is not linted");
 }
 
@@ -141,14 +141,14 @@ fn lint_without_src_roots_a_nested_project_at_its_manifest() {
     p.mkfile("tools/t/main.spc", "import util;\n\nfn main() i32 {\n    return util::u();\n}\n");
     p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    return 0;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let r = cli::superc_in(root, "lint");
     if !r.ok() {
         r.show();
     }
     assert(r.ok(), "the lint passes");
     assert(!r.out_has("cannot open module"), "the nested project resolves its own imports");
     p.mkfile("tools/t/util.spc", "pub fn u() i32 {\n    let unused = 1;\n    return 0;\n}\n");
-    let w = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let w = cli::superc_in(root, "lint");
     assert(w.exit != 0, "the lint fails on the nested project's warning");
     assert(w.out_shows("unused variable 'unused'"), "the nested project is linted");
 }
@@ -165,13 +165,13 @@ fn build_of_a_directory_builds_its_project() {
     p.mkfile("app/main.spc", "fn main() i32 {\n    return 0;\n}\n");
     let root = p.dir();
     // `build <dir>` reads that directory's build.toml; a relative -o stays the caller's.
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "build app -o out-app");
+    let r = cli::superc_in(root, "build app -o out-app");
     assert(r.ok(), "the project of the directory builds");
     // Windows names an executable `<o>.exe` (`exe_name`).
     let out = format("{}/out-app{}", root, unsafe str::from_cstr(cli::binext()));
     assert(cli::read_text(&out).len() > 0, "-o names a path from the caller");
     // A directory given as a file to test is no source file (Linux opens one: it must not be read).
-    let s = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "test app");
+    let s = cli::superc_in(root, "test app");
     assert(s.exit != 0 && s.out_has("cannot open module"), "a directory script is reported, not read");
 }
 
@@ -187,12 +187,12 @@ fn bin_with_output_links_the_named_target() {
     p.mkfile("main.spc", "fn main() i32 {\n    return 3;\n}\n");
     p.mkfile("tool.spc", "fn main() i32 {\n    return 7;\n}\n");
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "build --bin=tool -o out-tool");
+    let r = cli::superc_in(root, "build --bin=tool -o out-tool");
     assert(r.ok(), "the target builds");
     let mut run = String::new();
     run.format_into("\"{}/out-tool\"", root);
     assert(cli::run_quiet(run.cstr()) == 7, "the binary at -o is the named target's");
-    let l = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "build --lib -o out-lib");
+    let l = cli::superc_in(root, "build --lib -o out-lib");
     assert(!l.ok() && l.out_has("-o names one binary; --lib builds the library targets"), "--lib with -o");
 }
 

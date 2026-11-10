@@ -1634,7 +1634,11 @@ b6:
 )";
     let (b, a) = optimized(src, UNSWITCH);
     let t = text_of(&a, "mix");
-    assert(count(&t, "br v1,") == 1 && t.contains("udiv.i64") && t.contains("add.i64"), t.as_str());
+    // The input tests v1 once inside its one loop; unswitched, it tests v1 once before two copies of the
+    // loop, each with its own exit test and only its own side.
+    let test = t.find("br v1,");
+    assert(count(&t, "br v1,") == 1 && test >= 0 && test < t.find("icmp.ult"), t.as_str());
+    assert(count(&t, "icmp.ult") == 2 && count(&t, "udiv.i64") == 1, t.as_str());
     let plus: []u64 = [4, 1];
     same_outcome(&b, &a, "mix", plus, 6, false);
     let minus: []u64 = [4, 0];

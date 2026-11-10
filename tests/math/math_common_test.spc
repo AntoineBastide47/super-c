@@ -111,19 +111,6 @@ fn float_bits_round_trip() {
 }
 
 @test
-fn min_max_of_vectors_and_scalars() {
-    let eps = epsilon::<f32>();
-    assert(near_v(min(vec1::splat(1.0), vec1::splat(1.0)), vec1::splat(1.0), eps));
-    assert(near_v(min(vec2::splat(1.0), vec2::splat(1.0)), min(vec2::splat(1.0), 1.0f32), eps));
-    assert(near_v(min(vec3::splat(1.0), vec3::splat(1.0)), min(vec3::splat(1.0), 1.0f32), eps));
-    assert(near_v(min(vec4::splat(1.0), vec4::splat(1.0)), min(vec4::splat(1.0), 1.0f32), eps));
-    assert(near_v(max(vec1::splat(1.0), vec1::splat(1.0)), vec1::splat(1.0), eps));
-    assert(near_v(max(vec2::splat(1.0), vec2::splat(1.0)), max(vec2::splat(1.0), 1.0f32), eps));
-    assert(near_v(max(vec3::splat(1.0), vec3::splat(1.0)), max(vec3::splat(1.0), 1.0f32), eps));
-    assert(near_v(max(vec4::splat(1.0), vec4::splat(1.0)), max(vec4::splat(1.0), 1.0f32), eps));
-}
-
-@test
 fn mix_with_bool_and_float_interpolants() {
     let eps = epsilon::<f32>();
     let xs: [f32; 4] = [0.0, 0.0, -1.0, -1.0];

@@ -746,11 +746,41 @@ fn type_info_intrinsic() {
     );
 }
 
+const BRACED_ENUM_CONST_ARGUMENTS_ENUMS: str = "enum E { A, B }\nenum D { X = 3, Y = 7, Z }\nconst KE: E = E::B;\nfn g<const N: D>() i32 { return N as i32; }\nfn u<const N: u64>() u64 { return N; }\nfn main() i32 {\n";
+
 // A braced enum variant or named constant is the same argument in a type and in an expression
 // turbofish: the variant's discriminant (an explicit one included), for a parameter of that enum.
 @test
 fn braced_enum_const_arguments() {
-    h::expect_exit(
+    h::expect_err_msg(
+        "a variant of another enum",
+        format("{}    return g::<{{E::A}}>();\n}}\n", BRACED_ENUM_CONST_ARGUMENTS_ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:17",
+    );
+    h::expect_err_msg(
+        "a constant of another enum",
+        format("{}    return g::<KE>();\n}}\n", BRACED_ENUM_CONST_ARGUMENTS_ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:16",
+    );
+    h::expect_err_msg(
+        "an integer for an enum parameter",
+        format("{}    return g::<5>();\n}}\n", BRACED_ENUM_CONST_ARGUMENTS_ENUMS).as_str(),
+        "error: mismatched types: expected 'D', found 'i32'\n--> <harness>:7:16",
+    );
+    h::expect_err_msg(
+        "a variant for an integer parameter",
+        format("{}    return u::<{{E::B}}>() as i32;\n}}\n", BRACED_ENUM_CONST_ARGUMENTS_ENUMS).as_str(),
+        "error: mismatched types: expected 'u64', found 'E'\n--> <harness>:7:17",
+    );
+    h::expect_err_msg(
+        "a variant the enum does not have",
+        format("{}    return g::<{{D::W}}>();\n}}\n", BRACED_ENUM_CONST_ARGUMENTS_ENUMS).as_str(),
+        "error: no variant 'W' on 'D'\n--> <harness>:7:20",
+    );
+}
+
+fn braced_enum_const_arguments_cases(b: &mut h::ExitBatch) {
+    b.add(
         "braced enum arguments in both positions",
         M"(enum E { A, B }
 enum D { X = 3, Y = 7, Z }
@@ -769,32 +799,6 @@ fn main() i32 {
 }
 )",
         0,
-    );
-    const ENUMS: str = "enum E { A, B }\nenum D { X = 3, Y = 7, Z }\nconst KE: E = E::B;\nfn g<const N: D>() i32 { return N as i32; }\nfn u<const N: u64>() u64 { return N; }\nfn main() i32 {\n";
-    h::expect_err_msg(
-        "a variant of another enum",
-        format("{}    return g::<{{E::A}}>();\n}}\n", ENUMS).as_str(),
-        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:17",
-    );
-    h::expect_err_msg(
-        "a constant of another enum",
-        format("{}    return g::<KE>();\n}}\n", ENUMS).as_str(),
-        "error: mismatched types: expected 'D', found 'E'\n--> <harness>:7:16",
-    );
-    h::expect_err_msg(
-        "an integer for an enum parameter",
-        format("{}    return g::<5>();\n}}\n", ENUMS).as_str(),
-        "error: mismatched types: expected 'D', found 'i32'\n--> <harness>:7:16",
-    );
-    h::expect_err_msg(
-        "a variant for an integer parameter",
-        format("{}    return u::<{{E::B}}>() as i32;\n}}\n", ENUMS).as_str(),
-        "error: mismatched types: expected 'u64', found 'E'\n--> <harness>:7:17",
-    );
-    h::expect_err_msg(
-        "a variant the enum does not have",
-        format("{}    return g::<{{D::W}}>();\n}}\n", ENUMS).as_str(),
-        "error: no variant 'W' on 'D'\n--> <harness>:7:20",
     );
 }
 
@@ -1583,15 +1587,18 @@ fn raw_array_index_gate() {
 // field of symbolic length, a return and a binding alike.
 @test
 fn repeat_literals_take_the_expected_element_type() {
-    h::expect_exit(
-        "a repeat literal for a symbolic-length field",
-        "struct S<const N: usize> { pub a: [u8; N] }\nstruct U<const N: usize> { pub a: [u16; N], pub b: u8 }\nfn mk<const N: usize>() S<N> { return S::<N> { a: [250; N] }; }\nfn mk2<const N: usize>() U<N> { return U::<N> { a: [60000; N], b: 1 }; }\nfn ret<const N: usize>() [u8; N] { return [4; N]; }\nfn main() i32 {\n    let s = mk::<3>();\n    let u = mk2::<2>();\n    let r = ret::<2>();\n    static_assert(sizeof(s) == 3);\n    static_assert(sizeof(u) == 6);\n    if s.a[2] != 250 || u.a[1] != 60000 || r[1] != 4 { return 1; }\n    return 0;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a repeat literal whose value the expected element type does not hold",
         "struct S<const N: usize> { pub a: [u8; N] }\nfn mk<const N: usize>() S<N> { return S::<N> { a: [300; N] }; }\n",
         "mismatched types: expected '[u8; N]', found '[i32; N]'",
+    );
+}
+
+fn repeat_literals_take_the_expected_element_type_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a repeat literal for a symbolic-length field",
+        "struct S<const N: usize> { pub a: [u8; N] }\nstruct U<const N: usize> { pub a: [u16; N], pub b: u8 }\nfn mk<const N: usize>() S<N> { return S::<N> { a: [250; N] }; }\nfn mk2<const N: usize>() U<N> { return U::<N> { a: [60000; N], b: 1 }; }\nfn ret<const N: usize>() [u8; N] { return [4; N]; }\nfn main() i32 {\n    let s = mk::<3>();\n    let u = mk2::<2>();\n    let r = ret::<2>();\n    static_assert(sizeof(s) == 3);\n    static_assert(sizeof(u) == 6);\n    if s.a[2] != 250 || u.a[1] != 60000 || r[1] != 4 { return 1; }\n    return 0;\n}\n",
+        0,
     );
 }
 
@@ -1731,11 +1738,6 @@ fn closures() {
         "fn eat(s: String) i32 { return s.len() as i32; }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  let f = |x: i32| x + eat(s);\n  return f(1);\n}\n",
         "cannot move a captured value out of a closure",
     );
-    h::expect_exit(
-        "a closure reading an owning capture borrows it through a plain fn bound",
-        "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
-        3,
-    );
     h::expect_ok(
         "owning closure through a fn move bound",
         "fn apply<F: fn move(i32) i32>(x: i32, f: F) i32 { return f(x) + f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
@@ -1748,6 +1750,14 @@ fn closures() {
     h::expect_ok(
         "capturing a fixed-size array by copy",
         "fn main() i32 { let a: [i32; 2] = [1, 2]; let f = |x: i32| x + a[0]; return f(1); }\n",
+    );
+}
+
+fn closures_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a closure reading an owning capture borrows it through a plain fn bound",
+        "fn apply<F: fn(i32) i32>(x: i32, f: F) i32 { return f(x); }\nfn main() i32 {\n  let s: String = String::from_str(\"hi\");\n  return apply(1, |x: i32| x + s.len() as i32);\n}\n",
+        3,
     );
 }
 
@@ -2791,13 +2801,6 @@ fn return_region_escapes() {
         "returning a borrow of a parameter stays legal",
         "fn pass(x: &i32) &i32 {\n    return x;\n}\nstruct W { pub v: i32 }\nfn field(w: &W) &i32 {\n    return &w.v;\n}\nfn main() i32 {\n    let a = 7;\n    let w = W { v: 1 };\n    return *pass(&a) + *field(&w) - 8;\n}\n",
     );
-    // A pattern that destructures a reference payload binds by reference (a Copy payload too) and
-    // borrows from the reference's origin: `self` here, a local there.
-    h::expect_exit(
-        "returning a binding under Option<&T> borrows from self",
-        "enum J { S(String), Num(f64) }\nstruct H { pub j: J }\nextend H {\n    fn get(self: &H) Option<&J> {\n        return Option::<&J>::Some(&self.j);\n    }\n    fn name(self: &H) str {\n        if let Some(S(s)) = self.get() {\n            return s.as_str();\n        }\n        return \"none\";\n    }\n    fn num(self: &H) f64 {\n        if let Some(Num(n)) = self.get() {\n            return *n;\n        }\n        return 0.0;\n    }\n}\nfn main() i32 {\n    let h = H { j: J::S(String::from_str(\"abc\")) };\n    let g = H { j: J::Num(2.0) };\n    if h.name().len() != 3 || g.num() != 2.0 || g.name().len() != 4 {\n        return 1;\n    }\n    return 0;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "returning a binding under Option<&T> to a local is rejected",
         "enum J { S(String), Num(f64) }\nfn bad(p: &J) str {\n    let _ = p;\n    let j = J::S(String::from_str(\"x\"));\n    let o = Option::<&J>::Some(&j);\n    if let Some(S(s)) = o {\n        return s.as_str();\n    }\n    return \"\";\n}\nfn main() i32 { let q = J::Num(1.0); return bad(&q).len() as i32; }\n",
@@ -2817,6 +2820,16 @@ fn return_region_escapes() {
     h::expect_ok(
         "a declared outlives bound legalizes the same flow",
         "fn f<'a, 'b: 'a>(x: &'a i32, y: &'b i32) &'a i32 {\n    let _ = x;\n    return y;\n}\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    return *f(&a, &b);\n}\n",
+    );
+}
+
+fn return_region_escapes_cases(b: &mut h::ExitBatch) {
+    // A pattern that destructures a reference payload binds by reference (a Copy payload too) and
+    // borrows from the reference's origin: `self` here, a local there.
+    b.add(
+        "returning a binding under Option<&T> borrows from self",
+        "enum J { S(String), Num(f64) }\nstruct H { pub j: J }\nextend H {\n    fn get(self: &H) Option<&J> {\n        return Option::<&J>::Some(&self.j);\n    }\n    fn name(self: &H) str {\n        if let Some(S(s)) = self.get() {\n            return s.as_str();\n        }\n        return \"none\";\n    }\n    fn num(self: &H) f64 {\n        if let Some(Num(n)) = self.get() {\n            return *n;\n        }\n        return 0.0;\n    }\n}\nfn main() i32 {\n    let h = H { j: J::S(String::from_str(\"abc\")) };\n    let g = H { j: J::Num(2.0) };\n    if h.name().len() != 3 || g.num() != 2.0 || g.name().len() != 4 {\n        return 1;\n    }\n    return 0;\n}\n",
+        0,
     );
 }
 
@@ -3909,10 +3922,9 @@ fn dyn_conformance_needs_the_dyn_arguments() {
 }
 
 // Several results are not a tuple: a member of the call is an error where it is written.
-@test
-fn results_are_tuples() {
+fn results_are_tuples(b: &mut h::ExitBatch) {
     // A parenthesized result list is one result, a tuple: a call is a value with members.
-    h::expect_exit(
+    b.add(
         "members of a call's tuple",
         "fn two() (i32, i32) { return (1, 2); }\nfn dup<T: Copy>(a: T) (T, T) { return (a, a); }\nfn main() i32 { return two().1 + dup(3).0 - 5; }\n",
         0,
@@ -3929,28 +3941,29 @@ fn unsupported_const_fn_operation_is_named() {
     );
 }
 
+const RESULTS_ARE_VALUES_PRE: str = "fn two() (usize, usize) { return (1, 2); }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
+
 // Several results are no value: a call with them is an error in an argument, an operand, a
 // single binding and an `assert_eq`, and binds, forwards and stands as a statement.
-@test
-fn results_are_values() {
-    const PRE: str = "fn two() (usize, usize) { return (1, 2); }\nfn one(t: (usize, usize)) usize { return t.0; }\n";
-    let mut src = String::from_str(PRE);
+fn results_are_values(b: &mut h::ExitBatch) {
+    let mut src = String::from_str(RESULTS_ARE_VALUES_PRE);
     src.push_str(
         "fn fwd() (usize, usize) { return two(); }\nfn main() i32 {\n    assert_eq(two(), (1usize, 2usize));\n    let x = two();\n    let y: (usize, usize) = if true { two() } else { (0, 0) };\n    two();\n    unsafe two();\n    let (a, b) = fwd();\n    return (a + b + one(two()) + x.1 + y.0 + (two() == (1usize, 2usize)) as usize) as i32 - 8;\n}\n",
     );
-    h::expect_exit("results bound, passed, compared, forwarded and discarded", &src, 0);
+    b.add("results bound, passed, compared, forwarded and discarded", &src, 0);
 }
+
+const CONFORMANCE_METHODS_ARE_INTERFACE_MEMBERS_IF: str = "interface Base { fn base(self: &Self) i32; }\ninterface Top: Base { fn top(self: &Self) i32; fn twice(self: &Self) i32 { return self.top() * 2; } }\nstruct S { pub a: i32 }\n";
 
 // Every method of a conformance block is a member of its interface (a superinterface's methods are its
 // own conformance's); a helper belongs in a plain `extend`.
 @test
 fn conformance_methods_are_interface_members() {
-    const IF: str = "interface Base { fn base(self: &Self) i32; }\ninterface Top: Base { fn top(self: &Self) i32; fn twice(self: &Self) i32 { return self.top() * 2; } }\nstruct S { pub a: i32 }\n";
     h::expect_err_msg(
         "a helper in a conformance block",
         format(
             "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n    fn helper(self: &S) i32 {{ return 1; }}\n}}\nfn main() i32 {{ return 0; }}\n",
-            IF,
+            CONFORMANCE_METHODS_ARE_INTERFACE_MEMBERS_IF,
         ).as_str(),
         "'helper' is not a member of interface 'Base': define it in a plain 'extend' of the type",
     );
@@ -3958,15 +3971,18 @@ fn conformance_methods_are_interface_members() {
         "a superinterface's method in the sub-interface's block",
         format(
             "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n}}\nextend S as Top {{\n    fn top(self: &S) i32 {{ return 1; }}\n    fn base(self: &S) i32 {{ return 2; }}\n}}\nfn main() i32 {{ return 0; }}\n",
-            IF,
+            CONFORMANCE_METHODS_ARE_INTERFACE_MEMBERS_IF,
         ).as_str(),
         "'base' is not a member of interface 'Top': define it in a plain 'extend' of the type",
     );
-    h::expect_exit(
+}
+
+fn conformance_methods_are_interface_members_cases(b: &mut h::ExitBatch) {
+    b.add(
         "members and an overridden default, with the superinterface's own block",
         format(
             "{}extend S as Base {{\n    fn base(self: &S) i32 {{ return self.a; }}\n}}\nextend S as Top {{\n    fn top(self: &S) i32 {{ return self.a + 1; }}\n    fn twice(self: &S) i32 {{ return 7; }}\n}}\nextend S {{\n    fn helper(self: &S) i32 {{ return 1; }}\n}}\nfn main() i32 {{\n    let s = S {{ a: 2 }};\n    return s.base() + s.top() + s.twice() + s.helper() - 13;\n}}\n",
-            IF,
+            CONFORMANCE_METHODS_ARE_INTERFACE_MEMBERS_IF,
         ).as_str(),
         0,
     );
@@ -3986,7 +4002,10 @@ fn reference_casts_keep_the_referent_type() {
         "fn main() i32 { let a: [u8; 4] = [1, 2, 3, 4]; let p = (&a) as *const u8; return unsafe *p as i32; }\n",
         "a reference to '[u8; 4]' casts only to a pointer to '[u8; 4]': cast to '*const [u8; 4]' first, then to '*const u8'",
     );
-    h::expect_exit(
+}
+
+fn reference_casts_keep_the_referent_type_cases(b: &mut h::ExitBatch) {
+    b.add(
         "the referent's pointer, then a pointer cast",
         "fn main() i32 {\n    let mut x: u32 = 0;\n    let p = ((&mut x) as *mut u32) as *mut u8;\n    unsafe *p = 7;\n    let a: [u8; 4] = [1, 2, 3, 4];\n    let q = (&a[1]) as *const u8;\n    let r = (&a) as *const [u8; 4];\n    return (x as i32 - 7) + (unsafe *q as i32 - 2) + (unsafe (*r)[3] as i32 - 4);\n}\n",
         0,
@@ -3997,15 +4016,18 @@ fn reference_casts_keep_the_referent_type() {
 // parameter; a shared reference still does not convert to `*mut T`.
 @test
 fn reference_arguments_bind_pointer_parameters() {
-    h::expect_exit(
-        "a reference binds *const T",
-        "fn rd<T: Copy>(p: *const T) T { return unsafe *p; }\nfn wr<T: Copy>(p: *mut T, v: T) { unsafe *p = v; }\nfn main() i32 {\n    let x: u64 = 5;\n    let mut y: u16 = 0;\n    wr(&mut y, 7);\n    return (rd(&x) - 5) as i32 + (y - 7) as i32;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a shared reference is no *mut T",
         "fn rd<T: Copy>(p: *mut T) T { return unsafe *p; }\nfn main() i32 { let x: u64 = 5; return rd(&x) as i32; }\n",
         "mismatched types: expected '*mut u64', found '&u64'",
+    );
+}
+
+fn reference_arguments_bind_pointer_parameters_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a reference binds *const T",
+        "fn rd<T: Copy>(p: *const T) T { return unsafe *p; }\nfn wr<T: Copy>(p: *mut T, v: T) { unsafe *p = v; }\nfn main() i32 {\n    let x: u64 = 5;\n    let mut y: u16 = 0;\n    wr(&mut y, 7);\n    return (rd(&x) - 5) as i32 + (y - 7) as i32;\n}\n",
+        0,
     );
 }
 
@@ -4284,7 +4306,10 @@ fn field_lifetime_positions() {
         "struct A { pub s: Slice<'b, u8> }\nfn main() i32 {\n    return 0;\n}\n",
         "error: use of undeclared lifetime name `'b`\n--> <harness>:1:25",
     );
-    h::expect_exit(
+}
+
+fn field_lifetime_positions_cases(b: &mut h::ExitBatch) {
+    b.add(
         "declared and 'static lifetimes in slice, tuple and aggregate fields are accepted",
         "const G: [u8; 2] = [1u8, 2u8];\nstruct A<'a> { pub s: []'a u8, pub t: (i32, &'a u8), pub u: Slice<'static, u8> }\nfn main() i32 {\n    let x: [u8; 1] = [7u8];\n    let a = A { s: x[0..1], t: (1, &x[0]), u: G[0..2] };\n    return (a.s[0] + *a.t.1) as i32 - 14 + a.u.len() as i32 - 2;\n}\n",
         0,
@@ -4340,12 +4365,14 @@ fn undeclared_lifetime_rejected() {
 // `Self` names the lifetimes its extend declares, so it is never an elided position.
 @test
 fn tuple_lifetime_elision() {
-    let mut b = h::ExitBatch::new();
     h::expect_err_msg(
         "a reference inside a returned tuple elides like a bare one",
         "fn f(a: &i32, b: &i32) Option<(i32, &i32)> { let _ = a; let _ = b; return Option::None; }\nfn main() i32 {\n    return 0;\n}\n",
         "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:1:24",
     );
+}
+
+fn tuple_lifetime_elision_cases(b: &mut h::ExitBatch) {
     b.add(
         "a named tuple output and a tuple input's single position are accepted",
         "fn f<'a>(a: &'a i32, b: &i32) Option<(i32, &'a i32)> { let _ = b; return Option::Some((1, a)); }\nfn second(p: (i32, &i32)) &i32 { return p.1; }\nfn main() i32 {\n    let x = 3;\n    let y = 4;\n    let t = f(&x, &y).unwrap();\n    return *second(t) - 3;\n}\n",
@@ -4356,23 +4383,23 @@ fn tuple_lifetime_elision() {
         "struct V<'a> { pub r: &'a i32 }\nextend<'a> V<'a> { pub fn pick(a: &'a i32, b: &i32) Self { let _ = b; return V { r: a }; } }\nfn main() i32 {\n    let x = 1;\n    let y = 2;\n    return *V::pick(&x, &y).r - 1;\n}\n",
         0,
     );
-    b.run();
 }
+
+const ANONYMOUS_LIFETIME_IS_ELIDED_MISSING: str = "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:";
 
 // `'_` is an elided lifetime at every occurrence: a fresh region in an input, the elided output in the
 // result (the elision rules decide it), and nothing ties two `'_` positions together.
 @test
 fn anonymous_lifetime_is_elided() {
-    let missing = "error: missing lifetime specifier: this return type borrows, but which input it borrows from cannot be inferred\n--> <harness>:";
     h::expect_err_msg(
         "two '_ inputs cannot determine a '_ output",
         "fn pick(a: &'_ u8, b: &'_ u8) &'_ u8 { let _ = b; return a; }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}1:31", missing).as_str(),
+        format("{}1:31", ANONYMOUS_LIFETIME_IS_ELIDED_MISSING).as_str(),
     );
     h::expect_err_msg(
         "two elided inputs cannot determine an aggregate's '_ argument",
         "struct R<'a> { pub r: &'a i32 }\nfn mk(x: &i32, y: &i32) R<'_> { let _ = y; return R { r: x }; }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}2:25", missing).as_str(),
+        format("{}2:25", ANONYMOUS_LIFETIME_IS_ELIDED_MISSING).as_str(),
     );
     h::expect_err_msg(
         "a '_ output of a self method is the receiver's region, not another '_ input's",
@@ -4384,67 +4411,77 @@ fn anonymous_lifetime_is_elided() {
         "fn one(a: &'_ mut u8) &'_ u8 { return a; }\nfn main() i32 {\n    let mut x = 1u8;\n    let r = one(&mut x);\n    x = 2;\n    return *r as i32;\n}\n",
         "error: cannot assign to this value while it is borrowed\n--> <harness>:5:5",
     );
-    h::expect_exit(
+}
+
+fn anonymous_lifetime_is_elided_cases(b: &mut h::ExitBatch) {
+    b.add(
         "'_ in single-input signatures and in an extend header is accepted",
         "struct R<'a> { pub r: &'a i32 }\nextend R<'_> { pub fn peek(self: &Self) &'_ i32 { return self.r; } }\nfn one(a: &'_ i32) &'_ i32 { return a; }\nfn mk(x: &'_ i32) R<'_> { return R { r: x }; }\nfn main() i32 {\n    let x = 7;\n    let r = mk(&x);\n    return *one(&x) + *r.peek() - 14;\n}\n",
         0,
     );
 }
 
+const RETURN_LIFETIME_ELIDED_INPUTS_MSG: str = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
+
 // An elided input lifetime is its own anonymous region: only `'static` outlives it, and it outlives no
 // named lifetime and no other input's region. An elided output is the elision source's region.
 @test
 fn return_lifetime_elided_inputs() {
-    let msg = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
     h::expect_err_msg(
         "an elided reference input is not the named output lifetime",
         "fn bad<'a>(a: &'a u8, b: &u8) &'a u8 { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}1:58", msg).as_str(),
+        format("{}1:58", RETURN_LIFETIME_ELIDED_INPUTS_MSG).as_str(),
     );
     h::expect_err_msg(
         "an elided slice input is not the named output lifetime",
         "fn bad<'a>(a: []'a u8, b: []u8) []'a u8 { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}1:61", msg).as_str(),
+        format("{}1:61", RETURN_LIFETIME_ELIDED_INPUTS_MSG).as_str(),
     );
     h::expect_err_msg(
         "an elided lifetime argument is not the named output lifetime",
         "fn bad<'a>(a: str<'a>, b: str) str<'a> { let _ = a; return b; }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}1:60", msg).as_str(),
+        format("{}1:60", RETURN_LIFETIME_ELIDED_INPUTS_MSG).as_str(),
     );
     h::expect_err_msg(
         "an elided output takes the receiver's lifetime, not another input's",
         "struct S { pub v: u8 }\nextend S { pub fn get(self: &Self, b: &u8) &u8 { return b; } }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}2:57", msg).as_str(),
+        format("{}2:57", RETURN_LIFETIME_ELIDED_INPUTS_MSG).as_str(),
     );
-    h::expect_exit(
+}
+
+fn return_lifetime_elided_inputs_cases(b: &mut h::ExitBatch) {
+    b.add(
         "'static outlives a named and an elided output",
         "const G: u8 = 1;\nfn st<'a>(a: &'a u8, b: &'static u8) &'a u8 { let _ = a; return b; }\nstruct S { pub v: u8 }\nextend S { pub fn get(self: &Self, b: &'static u8) &u8 { return b; } }\nfn main() i32 {\n    let x = 1u8;\n    let s = S { v: 0u8 };\n    return (*st(&x, &G) + *s.get(&G)) as i32 - 2;\n}\n",
         0,
     );
 }
 
+const CALL_UNIVERSAL_REGIONS_MSG: str = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
+
 // A call relates the caller's own parameter lifetimes (universal regions) through the callee's
 // signature: a lifetime the callee's `&mut` storage pointee names is exactly the caller's lifetime at
 // that position, and every argument stored under it must outlive that lifetime.
 @test
 fn call_universal_regions() {
-    let mut b = h::ExitBatch::new();
-    let msg = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
     h::expect_err_msg(
         "an elided argument lifetime does not outlive the storage's",
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x>(w: &mut Vector<&'x i32>, a: &i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}2:56", msg).as_str(),
+        format("{}2:56", CALL_UNIVERSAL_REGIONS_MSG).as_str(),
     );
     h::expect_err_msg(
         "an unrelated named argument lifetime does not outlive the storage's",
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, a: &'z i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}2:63", msg).as_str(),
+        format("{}2:63", CALL_UNIVERSAL_REGIONS_MSG).as_str(),
     );
     h::expect_err_msg(
         "the stored lifetime is matched by position, not by the argument's outer reference",
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &&'y i32) { v.push(*e); }\nfn fill<'x>(w: &mut Vector<&'x i32>, a: &&i32) { put(w, a); }\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}2:57", msg).as_str(),
+        format("{}2:57", CALL_UNIVERSAL_REGIONS_MSG).as_str(),
     );
+}
+
+fn call_universal_regions_cases(b: &mut h::ExitBatch) {
     b.add(
         "the same, a declared outlives edge and 'static are accepted",
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn f1<'x>(w: &mut Vector<&'x i32>, a: &'x i32) { put(w, a); }\nfn f2<'x, 'z: 'x>(w: &mut Vector<&'x i32>, a: &'z i32) { put(w, a); }\nfn f3<'x>(w: &mut Vector<&'x i32>, a: &'static i32) { put(w, a); }\nfn main() i32 {\n    let x = 1;\n    let mut v = Vector::<&i32>::new();\n    f1(&mut v, &x);\n    return *v[0] - 1;\n}\n",
@@ -4455,8 +4492,10 @@ fn call_universal_regions() {
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &&'y i32) { v.push(*e); }\nfn fill<'x, 'q>(w: &mut Vector<&'x i32>, a: &'q &'x i32) { put(w, a); }\nfn main() i32 {\n    let x = 1;\n    let r = &x;\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, &r);\n    return *v[0] - 1;\n}\n",
         0,
     );
-    b.run();
 }
+
+const UNIVERSAL_REGION_FLOW_STORE: str = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
+const UNIVERSAL_REGION_FLOW_RET: str = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
 
 // A parameter's regions flow through the body like NLL's outlives constraints (through local copies,
 // field reads, reborrows and reassignments) into the return slots and the storage the parameters
@@ -4465,49 +4504,50 @@ fn call_universal_regions() {
 // type names, so a two-lifetime aggregate keeps its lifetimes apart.
 @test
 fn universal_region_flow() {
-    let store = "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:";
-    let ret = "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:";
     h::expect_err_msg(
         "a parameter's field stored under an unrelated lifetime",
         "struct H<'z> { pub r: &'z i32 }\nfn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, s: &H<'z>) {\n    put(w, s.r);\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", store).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_STORE).as_str(),
     );
     h::expect_err_msg(
         "a local copy of a parameter stored under an unrelated lifetime",
         "fn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn fill<'x, 'z>(w: &mut Vector<&'x i32>, a: &'z i32) {\n    let b = a;\n    put(w, b);\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", store).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_STORE).as_str(),
     );
     h::expect_err_msg(
         "a local copy of a parameter returned under an unrelated lifetime",
         "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let _ = a;\n    let c = b;\n    return c;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", ret).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_RET).as_str(),
     );
     h::expect_err_msg(
         "a parameter's field returned under an unrelated lifetime",
         "struct H<'z> { pub r: &'z i32 }\nfn f<'a, 'z>(a: &'a i32, s: &H<'z>) &'a i32 {\n    let _ = a;\n    return s.r;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", ret).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_RET).as_str(),
     );
     h::expect_err_msg(
         "a reassigned local holds both values' regions",
         "fn f<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let mut r = a;\n    r = b;\n    return r;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", ret).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_RET).as_str(),
     );
     h::expect_err_msg(
         "an assignment through a reborrow of a parameter",
         "struct Slot<'c> { pub r: &'c i32 }\nfn put<'a, 'c>(s: &mut Slot<'c>, x: &'a i32) {\n    let t = &mut *s;\n    t.r = x;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}4:5", store).as_str(),
+        format("{}4:5", UNIVERSAL_REGION_FLOW_STORE).as_str(),
     );
     h::expect_err_msg(
         "the other field of a two-lifetime parameter",
         "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn second<'a, 'b>(p: P<'a, 'b>) &'a i32 {\n    return p.y;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}3:5", ret).as_str(),
+        format("{}3:5", UNIVERSAL_REGION_FLOW_RET).as_str(),
     );
     h::expect_err_msg(
         "an assignment into the other field of a two-lifetime parameter",
         "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn put<'a, 'b>(p: &mut P<'a, 'b>, v: &'b i32) {\n    p.x = v;\n}\nfn main() i32 {\n    return 0;\n}\n",
-        format("{}3:5", store).as_str(),
+        format("{}3:5", UNIVERSAL_REGION_FLOW_STORE).as_str(),
     );
-    h::expect_exit(
+}
+
+fn universal_region_flow_cases(b: &mut h::ExitBatch) {
+    b.add(
         "fields, copies, reborrows, implied and declared bounds and 'static that honour the signature",
         "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nstruct Q<'a, 'b> { pub p: P<'a, 'b>, pub z: &'b i32 }\nstruct H<'z> { pub r: &'z i32 }\nstruct Slot<'c> { pub r: &'c i32 }\nconst G: i32 = 3;\nfn put<'y>(v: &mut Vector<&'y i32>, e: &'y i32) { v.push(e); }\nfn first<'a, 'b>(p: P<'a, 'b>) &'a i32 { return p.x; }\nfn nested<'a, 'b>(q: &Q<'a, 'b>) &'a i32 {\n    let r = q.p.x;\n    return r;\n}\nfn inner<'a, 'b>(x: &'a &'b i32) &'b i32 { return *x; }\nfn outl<'a, 'b: 'a>(a: &'a i32, b: &'b i32) &'a i32 {\n    let _ = a;\n    let c = b;\n    return c;\n}\nfn field<'z>(s: &H<'z>) &'z i32 { return s.r; }\nfn fill<'x>(w: &mut Vector<&'x i32>, s: &H<'x>) {\n    let b = s.r;\n    put(w, b);\n    w.push(b);\n}\nfn set<'c>(s: &mut Slot<'c>, x: &'c i32) {\n    let y = x;\n    let t = &mut *s;\n    t.r = y;\n    s.r = &G;\n}\nextend<'a, 'b> P<'a, 'b> {\n    pub fn gy(self: &Self) &'b i32 { return self.y; }\n    pub fn sx(self: &mut Self, v: &'a i32) { self.x = v; }\n}\nfn main() i32 {\n    let a = 1;\n    let b = 2;\n    let mut p = P { x: &a, y: &b };\n    p.sx(&b);\n    let q = Q { p: P { x: &a, y: &b }, z: &b };\n    let h = H { r: &a };\n    let mut v = Vector::<&i32>::new();\n    fill(&mut v, &h);\n    let mut s = Slot { r: &a };\n    set(&mut s, &b);\n    let rb = &b;\n    return *first(p) + *nested(&q) + *inner(&rb) + *outl(&a, &b) + *field(&h) + *v[1] + *s.r + *p.gy() - 14;\n}\n",
         0,
@@ -4534,7 +4574,10 @@ fn static_parameter_borrows() {
         "fn keep(v: &Vector<&'static u8>) { let _ = v; }\nfn main() i32 {\n    let a = 1u8;\n    let mut v = Vector::<&u8>::new();\n    v.push(&a);\n    keep(&v);\n    return 0;\n}\n",
         "error: borrowed value does not live long enough: this value must satisfy 'static\n--> <harness>:5:12",
     );
-    h::expect_exit(
+}
+
+fn static_parameter_borrows_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a constant's and a static's borrows are 'static",
         "fn keep(r: &'static u8) { let _ = r; }\nconst G: u8 = 1;\nstatic mut S: u8 = 2;\nfn pass(r: &'static u8) {\n    let c = r;\n    keep(c);\n}\nfn main() i32 {\n    keep(&G);\n    unsafe keep(&S);\n    pass(&G);\n    return 0;\n}\n",
         0,
@@ -4546,12 +4589,19 @@ fn static_parameter_borrows() {
 // the reference first, and a loan the entry block issues later is not in scope before its issue.
 @test
 fn loan_scope_at_block_entry() {
-    let mut b = h::ExitBatch::new();
     h::expect_err_msg(
         "a write at the loop body's first point under the previous iteration's loan",
         "fn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    let mut r = &mut y;\n    let mut i = 0;\n    while i < 3 {\n        x += 1;\n        *r += 1;\n        r = &mut x;\n        i += 1;\n    }\n    return x;\n}\n",
         "error: cannot assign to this value while it is borrowed\n--> <harness>:7:9",
     );
+    h::expect_err_msg(
+        "a write after the entry block's loan",
+        "fn f(p: &mut i32) i32 {\n    let r = &*p;\n    *p = 1;\n    return *r;\n}\nfn main() i32 {\n    let mut x = 0;\n    return f(&mut x) - 1;\n}\n",
+        "error: cannot assign to this value while it is borrowed\n--> <harness>:3:5",
+    );
+}
+
+fn loan_scope_at_block_entry_cases(b: &mut h::ExitBatch) {
     b.add(
         "the body re-points the reference before the write",
         "fn main() i32 {\n    let mut x = 1;\n    let mut y = 2;\n    let mut r = &mut y;\n    let mut i = 0;\n    while i < 3 {\n        r = &mut y;\n        x += 1;\n        *r += 1;\n        r = &mut x;\n        *r += 1;\n        i += 1;\n    }\n    return x + y - 12;\n}\n",
@@ -4562,12 +4612,6 @@ fn loan_scope_at_block_entry() {
         "fn f(p: &mut i32) i32 {\n    *p = 1;\n    let r = &*p;\n    return *r;\n}\nfn main() i32 {\n    let mut x = 0;\n    return f(&mut x) - 1;\n}\n",
         0,
     );
-    h::expect_err_msg(
-        "a write after the entry block's loan",
-        "fn f(p: &mut i32) i32 {\n    let r = &*p;\n    *p = 1;\n    return *r;\n}\nfn main() i32 {\n    let mut x = 0;\n    return f(&mut x) - 1;\n}\n",
-        "error: cannot assign to this value while it is borrowed\n--> <harness>:3:5",
-    );
-    b.run();
 }
 
 // An array coerced to a slice view is borrowed by the view like `&a` (`&mut a` for `[]mut`): the array
@@ -4575,7 +4619,6 @@ fn loan_scope_at_block_entry() {
 // literal's array lives to the end of its block. A view never moves the array.
 @test
 fn array_slice_view_borrows() {
-    let mut b = h::ExitBatch::new();
     h::expect_err_msg(
         "a view of an array that dies before the view",
         "fn main() i32 {\n    let s: []u8;\n    {\n        let x = [7u8, 9];\n        s = x;\n    }\n    return s[0] as i32;\n}\n",
@@ -4611,6 +4654,9 @@ fn array_slice_view_borrows() {
         "struct W<'a> { pub d: []'a u8 }\nfn main() i32 {\n    let w: W;\n    {\n        let a = [4u8];\n        w = W { d: a };\n    }\n    return w.d[0] as i32;\n}\n",
         "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:6:20",
     );
+}
+
+fn array_slice_view_borrows_cases(b: &mut h::ExitBatch) {
     b.add(
         "views as arguments, literal views and nested literals",
         "fn take(s: []u8) u8 { return s[0]; }\nfn main() i32 {\n    let a = [1u8, 2];\n    let s: []u8 = [a[1], 3u8];\n    return (take(a) + take([a[0]]) + s[0]) as i32 - 4;\n}\n",
@@ -4621,7 +4667,6 @@ fn array_slice_view_borrows() {
         "fn main() i32 {\n    let mut a = [1u8, 2];\n    {\n        let m: []mut u8 = a;\n        m[0] = 7;\n    }\n    let s: []u8 = a;\n    let x = s[1];\n    a[1] = 5;\n    let v = [String::from(\"ab\")];\n    let t: []String = v;\n    return (a[0] + x + a[1]) as i32 + (t[0].len() + v[0].len()) as i32 - 18;\n}\n",
         0,
     );
-    b.run();
 }
 
 // Arm values that borrow arm temporaries: literal views of block arms (the argument of a call, a
@@ -4809,7 +4854,10 @@ fn static_receiver_autoref() {
         "struct S { pub v: i32 }\nextend S {\n    pub fn k(self: &'static Self) i32 { return self.v; }\n}\nfn main() i32 {\n    let s = S { v: 3 };\n    return s.k();\n}\n",
         "error: borrowed value does not live long enough: this value must satisfy 'static\n--> <harness>:7:12",
     );
-    h::expect_exit(
+}
+
+fn static_receiver_autoref_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a constant receiver and a `&'static` reference",
         "struct S { pub v: i32 }\nextend S {\n    pub fn k(self: &'static Self) i32 { return self.v; }\n}\nconst G: S = S { v: 3 };\nfn h(r: &'static S) i32 {\n    return r.k();\n}\nfn main() i32 {\n    return G.k() + h(&G) - 6;\n}\n",
         0,
@@ -4851,7 +4899,10 @@ fn local_member_regions() {
         "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f<'a, 'b>(a: &'a i32, b: &'b i32) &'b i32 {\n    let p = P { x: a, y: b };\n    let q = p;\n    return q.x;\n}\nfn main() i32 {\n    return 0;\n}\n",
         "error: lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime\n--> <harness>:5:5",
     );
-    h::expect_exit(
+}
+
+fn local_member_regions_cases(b: &mut h::ExitBatch) {
+    b.add(
         "members, copies, destructuring and member-wise stores that honour the signature",
         "struct P<'a, 'b> { pub x: &'a i32, pub y: &'b i32 }\nfn f1<'a, 'b>(a: &'a i32, b: &'b i32) &'a i32 {\n    let t = (a, b);\n    return t.0;\n}\nfn f2<'a, 'b>(a: &'a i32, b: &'b i32) P<'a, 'b> {\n    let p = P { x: a, y: b };\n    return p;\n}\nfn f3<'a, 'b>(p: &mut P<'a, 'b>, a: &'a i32, b: &'b i32) {\n    *p = P { x: a, y: b };\n}\nfn f4<'a, 'b>(a: &'a i32, b: &'b i32) &'b i32 {\n    let p = P { x: a, y: b };\n    let q = p;\n    let (_x, y) = (q.x, q.y);\n    return y;\n}\nfn main() i32 {\n    let x = 1;\n    let y = 2;\n    let mut p = f2(&x, &y);\n    f3(&mut p, &y, &x);\n    return *f1(&x, &y) + *p.x + *f4(&x, &y) - 5;\n}\n",
         0,
@@ -4863,7 +4914,6 @@ fn local_member_regions() {
 // element read from a slice parameter has the element type's lifetimes.
 @test
 fn self_in_callee_signature() {
-    let mut b = h::ExitBatch::new();
     h::expect_err_msg(
         "a `Self` result borrowing a dead local",
         "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let w: W;\n    {\n        let x = 5;\n        w = W::new(&x);\n    }\n    return *w.r;\n}\n",
@@ -4879,22 +4929,24 @@ fn self_in_callee_signature() {
         "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let w = W::new(&y);\n    let v: W;\n    {\n        let x = 5;\n        v = w.same(W::new(&x));\n    }\n    return *v.r;\n}\n",
         "error: borrowed value does not live long enough: it is destroyed at the end of this block while a reference to it is still stored\n--> <harness>:14:27",
     );
-    b.add(
-        "the same calls with borrows that outlive their uses",
-        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let x = 5;\n    let mut w = W::new(&y);\n    let r: &i32;\n    {\n        let u = W::new(&x);\n        w.put(&x);\n        r = u.get();\n    }\n    let v = w.same(W::new(&y));\n    return *w.r + *r + *v.r - 11;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a slice element whose lifetime is elided stored through `&mut Self`",
         "struct Pool<'a> { pub v: Vector<str<'a>> }\nextend<'a> Pool<'a> {\n    pub fn txt(self: &mut Self, s: str<'a>) { self.v.push(s); }\n}\nfn f<'a>(p: &mut Pool<'a>, args: []str) {\n    p.txt(args[0]);\n}\nfn main() i32 {\n    return 0;\n}\n",
         "error: borrowed value does not live long enough: it is stored into caller-visible data whose lifetime it is not declared to outlive\n--> <harness>:6:5",
+    );
+}
+
+fn self_in_callee_signature_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "the same calls with borrows that outlive their uses",
+        "struct W<'a> { pub r: &'a i32 }\nextend<'a> W<'a> {\n    pub fn new(r: &'a i32) Self { return W { r: r }; }\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) &'a i32 { return self.r; }\n    pub fn same(self: &Self, o: Self) Self { let _ = self; return o; }\n}\nfn main() i32 {\n    let y = 1;\n    let x = 5;\n    let mut w = W::new(&y);\n    let r: &i32;\n    {\n        let u = W::new(&x);\n        w.put(&x);\n        r = u.get();\n    }\n    let v = w.same(W::new(&y));\n    return *w.r + *r + *v.r - 11;\n}\n",
+        0,
     );
     b.add(
         "a slice element takes the element type's lifetime",
         "struct Pool<'a> { pub v: Vector<str<'a>> }\nextend<'a> Pool<'a> {\n    pub fn txt(self: &mut Self, s: str<'a>) { self.v.push(s); }\n}\nfn f<'a>(p: &mut Pool<'a>, args: []str<'a>) {\n    p.txt(args[0]);\n}\nfn main() i32 {\n    let mut p = Pool { v: Vector::<str>::new() };\n    f(&mut p, [\"x\"]);\n    return p.v.len() as i32 - 1;\n}\n",
         0,
     );
-    b.run();
 }
 
 // The region solver's outlives closure. Declared outlives edges (`<'a: 'b>` bounds and `where 'a: 'b`)
@@ -5314,11 +5366,6 @@ fn function_type_lifetimes() {
         "fn take<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h, 'i>(f: fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'i i32), pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, pi: &'i i32) {\n    let l = 1;\n    f(pa, pb, pc, pd, pe, pf, pg, &l, pi);\n}\nfn main() i32 { return 0; }\n",
         "borrowed value does not live long enough",
     );
-    h::expect_exit(
-        "a function type with sixteen positions and eight lifetimes chosen at each call",
-        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, qa: &'a i32, qb: &'b i32, qc: &'c i32, qd: &'d i32, qe: &'e i32, qf: &'f i32, qg: &'g i32, qh: &'h i32) &'h i32 { return qh; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32) &'h i32 = pick;\n    let x = 7;\n    let r: &i32;\n    {\n        let y = 1;\n        r = f(&y, &y, &y, &y, &y, &y, &y, &x, &y, &y, &y, &y, &y, &y, &y, &x);\n    }\n    return *r - 7;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a function type with sixteen positions keeps each result's lifetime",
         "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, qa: &'a i32, qb: &'b i32, qc: &'c i32, qd: &'d i32, qe: &'e i32, qf: &'f i32, qg: &'g i32, qh: &'h i32) &'h i32 { return qh; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32) &'h i32 = pick;\n    let x = 7;\n    let r: &i32;\n    {\n        let y = 1;\n        r = f(&y, &y, &y, &y, &y, &y, &y, &x, &y, &y, &y, &y, &y, &y, &y, &y);\n    }\n    return *r - 7;\n}\n",
@@ -5536,6 +5583,14 @@ fn function_type_lifetimes() {
         "a local's function type naming a lifetime no parameter's own reference names",
         "fn sink(x: &i32) { let _ = *x; }\nfn put<'h>(out: &mut Vector<&'h i32>) {\n    let g: fn(&'h i32) = sink;\n    let y = 1;\n    g(&y);\n}\nfn main() i32 { return 0; }\n",
         "borrowed value does not live long enough",
+    );
+}
+
+fn function_type_lifetimes_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a function type with sixteen positions and eight lifetimes chosen at each call",
+        "fn pick<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h>(pa: &'a i32, pb: &'b i32, pc: &'c i32, pd: &'d i32, pe: &'e i32, pf: &'f i32, pg: &'g i32, ph: &'h i32, qa: &'a i32, qb: &'b i32, qc: &'c i32, qd: &'d i32, qe: &'e i32, qf: &'f i32, qg: &'g i32, qh: &'h i32) &'h i32 { return qh; }\nfn main() i32 {\n    let f: for<'a, 'b, 'c, 'd, 'e, 'f, 'g, 'h> fn(&'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32, &'a i32, &'b i32, &'c i32, &'d i32, &'e i32, &'f i32, &'g i32, &'h i32) &'h i32 = pick;\n    let x = 7;\n    let r: &i32;\n    {\n        let y = 1;\n        r = f(&y, &y, &y, &y, &y, &y, &y, &x, &y, &y, &y, &y, &y, &y, &y, &x);\n    }\n    return *r - 7;\n}\n",
+        0,
     );
 }
 
@@ -5840,7 +5895,6 @@ fn zero_length_arrays() {
 // assert whose condition still does not fold once every module is typed is an error, not a pass.
 @test
 fn const_generic_array_layout() {
-    let mut b = h::ExitBatch::new();
     h::expect_err_msg(
         "a false sizeof assert over an Array instance fails",
         "static_assert(sizeof(Array<u64, 4>) == 7, \"no\");\nfn main() i32 { return 0; }\n",
@@ -5851,6 +5905,14 @@ fn const_generic_array_layout() {
         "struct H { pub a: Array<u64, 4>, pub b: u8 }\nstatic_assert(sizeof(H) == 33, \"no\");\nfn main() i32 { return 0; }\n",
         "static assertion failed",
     );
+    h::expect_err_msg(
+        "a false sizeof assert over an arithmetic length fails",
+        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2] }\nstatic_assert(sizeof(T<3>) == 48, \"no\");\nfn main() i32 { return 0; }\n",
+        "static assertion failed",
+    );
+}
+
+fn const_generic_array_layout_cases(b: &mut h::ExitBatch) {
     b.add(
         "true sizeof asserts over Array instances pass",
         "struct H { pub a: Array<u64, 4>, pub b: u8 }\nstruct W<const N: usize> { pub d: [u32; N] }\nstatic_assert(sizeof(Array<u64, 4>) == 32);\nstatic_assert(sizeof(H) == 40);\nstatic_assert(sizeof(W<3>) == 12);\nfn main() i32 { return (sizeof(H) + sizeof(W<3>)) as i32 - 52; }\n",
@@ -5862,27 +5924,24 @@ fn const_generic_array_layout() {
         "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2], pub g: [[u8; N]; 2] }\nstatic_assert(sizeof(T<3>) == 56);\nfn main() i32 { return 0; }\n",
         0,
     );
-    h::expect_err_msg(
-        "a false sizeof assert over an arithmetic length fails",
-        "struct T<const N: usize> { pub x: u8, pub d: [u64; N * 2] }\nstatic_assert(sizeof(T<3>) == 48, \"no\");\nfn main() i32 { return 0; }\n",
-        "static assertion failed",
-    );
-    b.run();
 }
 
 // `tc_type_is_free` peels to the referent, so the split-init rule has to gate on the type kind first:
 // a `&String` binding BORROWS an owner, it does not become one.
 @test
 fn split_init_reference_to_free() {
-    h::expect_exit(
-        "a reference to a Free type may be declared then assigned",
-        "fn main() i32 {\n    let s = String::from_str(\"hi\");\n    let r: &String;\n    r = &s;\n    return (r.len() - 2) as i32;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "the owner itself still must be initialized when declared",
         "fn main() i32 {\n    let s: String;\n    s = String::from_str(\"hi\");\n    return 0;\n}\n",
         "must be initialized when declared",
+    );
+}
+
+fn split_init_reference_to_free_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a reference to a Free type may be declared then assigned",
+        "fn main() i32 {\n    let s = String::from_str(\"hi\");\n    let r: &String;\n    r = &s;\n    return (r.len() - 2) as i32;\n}\n",
+        0,
     );
 }
 
@@ -6022,15 +6081,18 @@ fn arch_gate(b: &mut h::ExitBatch) {
 // name needs no release first.
 @test
 fn arch_gate_rejects() {
-    h::expect_exit(
-        "an unknown architecture gates its item away",
-        "@arch(sparc)\nfn f() i32 { return no_such_name; }\nfn main() i32 { return 0; }\n",
-        0,
-    );
     h::expect_err_msg(
         "the list is required",
         "@arch\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
         "requires an architecture list",
+    );
+}
+
+fn arch_gate_rejects_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "an unknown architecture gates its item away",
+        "@arch(sparc)\nfn f() i32 { return no_such_name; }\nfn main() i32 { return 0; }\n",
+        0,
     );
 }
 
@@ -6058,15 +6120,18 @@ fn platform_gate_values(b: &mut h::ExitBatch) {
 // admits every platform.
 @test
 fn platform_gate_rejects() {
-    h::expect_exit(
-        "an unknown platform gates its item away",
-        "@platform(solaris)\nfn f() i32 { return no_such_name; }\n@platform(!solaris)\nfn g() i32 { return 0; }\nfn main() i32 { return g(); }\n",
-        0,
-    );
     h::expect_err_msg(
         "a malformed list names the whole set",
         "@platform(5)\nfn f() i32 { return 0; }\nfn main() i32 { return 0; }\n",
         "expected a platform name: windows, macos, linux, wasm, ios, or android",
+    );
+}
+
+fn platform_gate_rejects_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "an unknown platform gates its item away",
+        "@platform(solaris)\nfn f() i32 { return no_such_name; }\n@platform(!solaris)\nfn g() i32 { return 0; }\nfn main() i32 { return g(); }\n",
+        0,
     );
 }
 
@@ -6075,7 +6140,14 @@ fn platform_gate_rejects() {
 // attribute list before one; throwing it away fires the assert on every target regardless.
 @test
 fn gated_static_assert() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "an assert the gate keeps still fires",
+        "@platform(!wasm)\nstatic_assert(sizeof(usize) == 2, \"kept and false\");\nfn main() i32 { return 0; }\n",
+        "static assertion failed: kept and false",
+    );
+}
+
+fn gated_static_assert_cases(b: &mut h::ExitBatch) {
     // `wasm` on both axes: no host the suite runs on is ever wasm, so these two stay gated away wherever
     // the test itself is built; the target lane's programs are wasm32, where Windows and x86_64 do.
     let (os, isa) = if h::target_lane() {
@@ -6093,12 +6165,6 @@ fn gated_static_assert() {
         format("@arch({})\nstatic_assert(sizeof(usize) == 2, \"gated away\");\nfn main() i32 {{ return 0; }}\n", isa).as_str(),
         0,
     );
-    h::expect_err_msg(
-        "an assert the gate keeps still fires",
-        "@platform(!wasm)\nstatic_assert(sizeof(usize) == 2, \"kept and false\");\nfn main() i32 { return 0; }\n",
-        "kept and false",
-    );
-    b.run();
 }
 
 // A struct/union/enum declared inside an `extern "C" "hdr.h"` block is the HEADER's type: the members
@@ -6204,7 +6270,7 @@ fn const_generic_expressions() {
     h::expect_err_msg(
         "a divided width that differs is rejected, divisor named",
         "struct A<const N: usize> { pub v: [u64; N] }\nfn bytes<const W: usize>(a: &A<W>) A<{(W + 7) / 8}> { return A::<{W / 8}> {}; }\nfn main() i32 { let a = A::<20> {}; let b = bytes(&a); return (unsafe b.v[0]) as i32; }\n",
-        "/ 8}",
+        "mismatched types: expected 'A<{(W + 7) / 8}>', found 'A<{W / 8}>'",
     );
     b.run();
 }
@@ -6214,17 +6280,6 @@ fn const_generic_expressions() {
 // does for a scalar. A value that genuinely does not convert is still a mismatch.
 @test
 fn array_literals_adopt_the_element_type() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "mixed suffixed and bare literals adopt the annotated element",
-        "fn main() i32 {\n    let vs: [u64; 4] = [0u64, 1, 2, 0x8000000000000000];\n    return ((unsafe vs[3]) >> 63) as i32 + (unsafe vs[1]) as i32 - 2;\n}\n",
-        0,
-    );
-    b.add(
-        "without a context the first element's type leads",
-        "fn main() i32 {\n    let vs = [0u64, 1, 2];\n    return (unsafe vs[2]) as i32 - 2;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "narrowing between suffixed elements is still a mismatch",
         "fn main() i32 {\n    let vs = [1i32, 0u64];\n    return (unsafe vs[1]) as i32;\n}\n",
@@ -6241,7 +6296,19 @@ fn array_literals_adopt_the_element_type() {
         "fn main() i32 {\n    let vs: [u32; 1] = [1 << 32];\n    return vs[0] as i32;\n}\n",
         "shift out of range",
     );
-    b.run();
+}
+
+fn array_literals_adopt_the_element_type_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "mixed suffixed and bare literals adopt the annotated element",
+        "fn main() i32 {\n    let vs: [u64; 4] = [0u64, 1, 2, 0x8000000000000000];\n    return ((unsafe vs[3]) >> 63) as i32 + (unsafe vs[1]) as i32 - 2;\n}\n",
+        0,
+    );
+    b.add(
+        "without a context the first element's type leads",
+        "fn main() i32 {\n    let vs = [0u64, 1, 2];\n    return (unsafe vs[2]) as i32 - 2;\n}\n",
+        0,
+    );
 }
 
 // Typechecker rejection diagnostics by message: self-contained snippets that reach a specific
@@ -6602,7 +6669,14 @@ fn self_resolves_in_its_own_extend(b: &mut h::ExitBatch) {
 
 @test
 fn branch_types_unify_literals_and_divergence() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "a literal that does not fit the typed arm is still rejected",
+        "fn f(k: i32, n: u8) u8 { return switch k { 0 => 300, _ => n, }; }\nfn main() i32 { return f(1, 1) as i32; }\n",
+        "out of range for 'u8'",
+    );
+}
+
+fn branch_types_unify_literals_and_divergence_cases(b: &mut h::ExitBatch) {
     b.add(
         "switch literal arms adopt the typed arm",
         "fn f(k: i32, n: usize) usize { let a = switch k { 0 => 0, 1 => n, 2 => { 7 }, _ => { return 9; }, }; let b = switch k { 1 => n, _ => 0, }; static_assert(sizeof(a) == sizeof(usize), \"usize\"); return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3) + f(2, 3) + f(5, 3)) as i32 - 22; }\n",
@@ -6618,12 +6692,6 @@ fn branch_types_unify_literals_and_divergence() {
         "fn f(k: i32, n: usize) usize { let a: usize = switch k { 1 => n, _ => { return 9; }, }; let b = if k == 1 { n } else { return 3; }; return a + b; }\nfn main() i32 { return (f(1, 3) + f(0, 3)) as i32 - 15; }\n",
         0,
     );
-    h::expect_err_msg(
-        "a literal that does not fit the typed arm is still rejected",
-        "fn f(k: i32, n: u8) u8 { return switch k { 0 => 300, _ => n, }; }\nfn main() i32 { return f(1, 1) as i32; }\n",
-        "out of range for 'u8'",
-    );
-    b.run();
 }
 
 // Moves the batch's ownership rules reject: a `?` payload or a `for` element taken from storage the
@@ -6807,17 +6875,6 @@ fn store_through_reference_chain() {
 // the instances that solve, for methods, conformances, dyn values and defaults alike.
 @test
 fn extend_targets_solve_their_parameters() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "form targets bind their parameter to the inverse",
-        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> {\n    fn get(self: &Self) u64 { return N; }\n    fn twice(self: &Self) u64 { return self.get() * 2; }\n    fn make() Self { return F::<{N + 3}> { x: N }; }\n    pub const K: u64 = N * 10;\n}\nstruct H<const M: u64> { pub x: u64 }\nextend<const N: u64> H<{2 * N}> { fn half(self: &Self) u64 { return N; } }\nstruct G<const M: i64> { pub x: i64 }\nextend<const N: i64> G<{10 - N}> { fn neg(self: &Self) i64 { return N; } }\ninterface I { fn v(self: &Self) u64; fn dv(self: &Self) u64 { return self.v() + 100; } }\nextend<const N: u64> F<{N + 3}> as I { fn v(self: &Self) u64 { return N; } }\nfn use_i<T: I>(t: &T) u64 { return t.v() + t.dv(); }\nfn g<const M: u64>(f: F<{M + 3}>) u64 { return f.get(); }\nconst C: u64 = F::<10> { x: 0 }.get();\nstatic_assert(C == 7);\nfn main() i32 {\n    let f = F::<10> { x: 1 };\n    let h = H::<8> { x: 1 };\n    let q = G::<3> { x: 0 };\n    let d: &dyn I = &f;\n    let m = F::<10>::make();\n    let mut r: u64 = 0;\n    if f.get() == 7 { r += 1; }\n    if f.twice() == 14 { r += 2; }\n    if h.half() == 4 { r += 4; }\n    if q.neg() == 7 { r += 8; }\n    if use_i(&f) == 114 { r += 16; }\n    if d.v() == 7 { r += 32; }\n    if g::<5>(F::<8> { x: 0 }) == 5 { r += 64; }\n    if m.x == 7 && F::<10>::K == 70 { r += 128; }\n    return (r - 200) as i32;\n}\n",
-        55,
-    );
-    b.add(
-        "disjoint specializations each serve their own instances",
-        "struct F<const M: u64> { pub x: u64 }\ninterface I { fn v(self: &Self) u64; }\nextend<const N: u64> F<{2 * N}> as I { fn v(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> as I { fn v(self: &Self) u64 { return N + 1000; } }\nextend<const N: u64> F<{2 * N}> { fn w(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> { fn w(self: &Self) u64 { return N + 1000; } }\nfn use_i<T: I>(t: &T) u64 { return t.v(); }\nstruct P<A> { pub a: A }\nextend P<u8> { fn get(self: &Self) i32 { return 1; } }\nextend P<i32> { fn get(self: &Self) i32 { return 2; } }\nfn main() i32 {\n    let a = F::<8> { x: 0 };\n    let b = F::<9> { x: 0 };\n    let da: &dyn I = &a;\n    let db: &dyn I = &b;\n    let pu = P::<u8> { a: 1 };\n    let pi = P::<i32> { a: 1 };\n    let mut r = 0;\n    if use_i(&a) == 4 && use_i(&b) == 1004 { r += 1; }\n    if da.v() == 4 && db.v() == 1004 { r += 2; }\n    if a.w() == 4 && b.w() == 1004 { r += 4; }\n    if pu.get() == 1 && pi.get() == 2 { r += 8; }\n    return r;\n}\n",
-        15,
-    );
     h::expect_err_msg(
         "a form whose inverse leaves the parameter's type does not apply",
         "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> { fn get(self: &Self) u64 { return N; } }\nfn main() i32 { let f = F::<2> { x: 1 }; return f.get() as i32; }\n",
@@ -6878,7 +6935,19 @@ fn extend_targets_solve_their_parameters() {
         "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 1}> as Free { fn free(self: &mut Self) {} }\n",
         "'Free' is implemented for every instance of a type: write the target with the extend's parameters in order",
     );
-    b.run();
+}
+
+fn extend_targets_solve_their_parameters_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "form targets bind their parameter to the inverse",
+        "struct F<const M: u64> { pub x: u64 }\nextend<const N: u64> F<{N + 3}> {\n    fn get(self: &Self) u64 { return N; }\n    fn twice(self: &Self) u64 { return self.get() * 2; }\n    fn make() Self { return F::<{N + 3}> { x: N }; }\n    pub const K: u64 = N * 10;\n}\nstruct H<const M: u64> { pub x: u64 }\nextend<const N: u64> H<{2 * N}> { fn half(self: &Self) u64 { return N; } }\nstruct G<const M: i64> { pub x: i64 }\nextend<const N: i64> G<{10 - N}> { fn neg(self: &Self) i64 { return N; } }\ninterface I { fn v(self: &Self) u64; fn dv(self: &Self) u64 { return self.v() + 100; } }\nextend<const N: u64> F<{N + 3}> as I { fn v(self: &Self) u64 { return N; } }\nfn use_i<T: I>(t: &T) u64 { return t.v() + t.dv(); }\nfn g<const M: u64>(f: F<{M + 3}>) u64 { return f.get(); }\nconst C: u64 = F::<10> { x: 0 }.get();\nstatic_assert(C == 7);\nfn main() i32 {\n    let f = F::<10> { x: 1 };\n    let h = H::<8> { x: 1 };\n    let q = G::<3> { x: 0 };\n    let d: &dyn I = &f;\n    let m = F::<10>::make();\n    let mut r: u64 = 0;\n    if f.get() == 7 { r += 1; }\n    if f.twice() == 14 { r += 2; }\n    if h.half() == 4 { r += 4; }\n    if q.neg() == 7 { r += 8; }\n    if use_i(&f) == 114 { r += 16; }\n    if d.v() == 7 { r += 32; }\n    if g::<5>(F::<8> { x: 0 }) == 5 { r += 64; }\n    if m.x == 7 && F::<10>::K == 70 { r += 128; }\n    return (r - 200) as i32;\n}\n",
+        55,
+    );
+    b.add(
+        "disjoint specializations each serve their own instances",
+        "struct F<const M: u64> { pub x: u64 }\ninterface I { fn v(self: &Self) u64; }\nextend<const N: u64> F<{2 * N}> as I { fn v(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> as I { fn v(self: &Self) u64 { return N + 1000; } }\nextend<const N: u64> F<{2 * N}> { fn w(self: &Self) u64 { return N; } }\nextend<const N: u64> F<{2 * N + 1}> { fn w(self: &Self) u64 { return N + 1000; } }\nfn use_i<T: I>(t: &T) u64 { return t.v(); }\nstruct P<A> { pub a: A }\nextend P<u8> { fn get(self: &Self) i32 { return 1; } }\nextend P<i32> { fn get(self: &Self) i32 { return 2; } }\nfn main() i32 {\n    let a = F::<8> { x: 0 };\n    let b = F::<9> { x: 0 };\n    let da: &dyn I = &a;\n    let db: &dyn I = &b;\n    let pu = P::<u8> { a: 1 };\n    let pi = P::<i32> { a: 1 };\n    let mut r = 0;\n    if use_i(&a) == 4 && use_i(&b) == 1004 { r += 1; }\n    if da.v() == 4 && db.v() == 1004 { r += 2; }\n    if a.w() == 4 && b.w() == 1004 { r += 4; }\n    if pu.get() == 1 && pi.get() == 2 { r += 8; }\n    return r;\n}\n",
+        15,
+    );
 }
 
 // An interface default body binds the interface's parameters to the arguments of the conformance
@@ -7079,22 +7148,31 @@ fn associated_types_through_bounds() {
     );
 }
 
+const INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I: str = "interface I<A> { fn get(self: &Self) A; }\nstruct P { pub v: i32 }\nextend P as I<i32> { pub fn get(self: &Self) i32 { return self.v; } }\nextend P as I<bool> { pub fn get(self: &Self) bool { return self.v > 0; } }\nstruct Q { pub v: i32 }\nextend Q as I<u8> { pub fn get(self: &Self) u8 { return self.v as u8; } }\nfn f<A, T: I<A>>(t: T) A { return t.get(); }\n";
+
 // A bound gives evidence for a generic argument only through the one conformance that fits it.
 @test
 fn inference_from_bounds_needs_one_conformance() {
-    let mut b = h::ExitBatch::new();
-    const I: str = "interface I<A> { fn get(self: &Self) A; }\nstruct P { pub v: i32 }\nextend P as I<i32> { pub fn get(self: &Self) i32 { return self.v; } }\nextend P as I<bool> { pub fn get(self: &Self) bool { return self.v > 0; } }\nstruct Q { pub v: i32 }\nextend Q as I<u8> { pub fn get(self: &Self) u8 { return self.v as u8; } }\nfn f<A, T: I<A>>(t: T) A { return t.get(); }\n";
     h::expect_ok(
         "one conformance infers the argument",
-        format("{}fn main() i32 {{ let q: u8 = f(Q {{ v: 3 }}); return 0; }}\n", I).as_str(),
+        format(
+            "{}fn main() i32 {{ let q: u8 = f(Q {{ v: 3 }}); return 0; }}\n",
+            INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I,
+        ).as_str(),
     );
     h::expect_ok(
         "the expected result picks among several",
-        format("{}fn main() i32 {{ let x: bool = f(P {{ v: 3 }}); return 0; }}\n", I).as_str(),
+        format(
+            "{}fn main() i32 {{ let x: bool = f(P {{ v: 3 }}); return 0; }}\n",
+            INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I,
+        ).as_str(),
     );
     h::expect_ok(
         "a bound of a type parameter is its conformance",
-        format("{}fn g<U: I<bool>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
+        format(
+            "{}fn g<U: I<bool>>(u: U) i32 {{ let r = f(u); return 0; }}\n",
+            INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I,
+        ).as_str(),
     );
     h::expect_ok(
         "a generic conformance infers the argument for a builtin and an aggregate",
@@ -7104,6 +7182,30 @@ fn inference_from_bounds_needs_one_conformance() {
         "a generic conformance infers the argument for a type parameter its bounds admit",
         "interface K: Copy {}\nextend f32 as K {}\ninterface G<A>: Copy { fn get(self: &Self) A; }\nextend<T: K> T as G<T> { pub fn get(self: &T) T { return *self; } }\nfn first<A: K, T: G<A>>(t: T) T { return t; }\nfn twice<U: K>(u: U) U { let v = first(u); return v; }\nfn main() i32 { let a: f32 = twice(1.0f32); return 0; }\n",
     );
+    h::expect_err_msg(
+        "several conformances and no other evidence",
+        format(
+            "{}fn main() i32 {{ let z = f(P {{ v: 3 }}); return 0; }}\n",
+            INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I,
+        ).as_str(),
+        "cannot infer 'A': 'P' conforms to 'I' with several arguments",
+    );
+    h::expect_err_msg(
+        "an inherited default under several fitting conformances",
+        "interface Mk<A> {\n    fn make(self: &Self, a: A) i32;\n    fn make2(self: &Self, a: A, b: A) i32 { return self.make(a) + self.make(b); }\n}\nstruct K { pub base: i32 }\nextend K as Mk<i64> { pub fn make(self: &Self, a: i64) i32 { return self.base; } }\nextend K as Mk<u64> { pub fn make(self: &Self, a: u64) i32 { return 1; } }\nfn main() i32 { let k = K { base: 10 }; return k.make2(1, 2); }\n",
+        "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that fit",
+    );
+    h::expect_err_msg(
+        "several bounds of a type parameter",
+        format(
+            "{}fn g<U: I<bool> + I<u8>>(u: U) i32 {{ let r = f(u); return 0; }}\n",
+            INFERENCE_FROM_BOUNDS_NEEDS_ONE_CONFORMANCE_I,
+        ).as_str(),
+        "cannot infer 'A': 'U' conforms to 'I' with several arguments",
+    );
+}
+
+fn inference_from_bounds_needs_one_conformance_cases(b: &mut h::ExitBatch) {
     // A conformance whose interface arguments are its own parameters (`T as Re<U, U>`) solves them from
     // the arguments the call fixes: `G: Re<i32, R>` gives `R = i32`.
     b.add(
@@ -7129,22 +7231,6 @@ fn inference_from_bounds_needs_one_conformance() {
         "interface K: Copy {}\nextend f32 as K {}\ninterface S<E>: Copy { type B; fn small(self: Self, e: E) Self::B; }\nextend<T: K> T as S<T> { type B = bool; pub fn small(self: T, e: T) bool { return true; } }\nfn small<E, G: S<E>>(x: G, e: E) G::B { return x.small(e); }\nfn is_small<U: K>(x: U, e: U) bool { let b: bool = small(x, e); return b; }\nfn main() i32 { return is_small(1.0f32, 2.0f32) as i32 + 6; }\n",
         7,
     );
-    h::expect_err_msg(
-        "several conformances and no other evidence",
-        format("{}fn main() i32 {{ let z = f(P {{ v: 3 }}); return 0; }}\n", I).as_str(),
-        "cannot infer 'A': 'P' conforms to 'I' with several arguments",
-    );
-    h::expect_err_msg(
-        "an inherited default under several fitting conformances",
-        "interface Mk<A> {\n    fn make(self: &Self, a: A) i32;\n    fn make2(self: &Self, a: A, b: A) i32 { return self.make(a) + self.make(b); }\n}\nstruct K { pub base: i32 }\nextend K as Mk<i64> { pub fn make(self: &Self, a: i64) i32 { return self.base; } }\nextend K as Mk<u64> { pub fn make(self: &Self, a: u64) i32 { return 1; } }\nfn main() i32 { let k = K { base: 10 }; return k.make2(1, 2); }\n",
-        "ambiguous call to 'make2': 'K' conforms to 'Mk' with several arguments that fit",
-    );
-    h::expect_err_msg(
-        "several bounds of a type parameter",
-        format("{}fn g<U: I<bool> + I<u8>>(u: U) i32 {{ let r = f(u); return 0; }}\n", I).as_str(),
-        "cannot infer 'A': 'U' conforms to 'I' with several arguments",
-    );
-    b.run();
 }
 
 // A method of the type itself wins over an equal conformance method of the same name, as an inherent
@@ -7876,7 +7962,7 @@ fn ambiguity_notes_name_locations() {
     h::expect_err_msg(
         "two methods of one name",
         "interface A { fn m(self: &Self) i32; }\ninterface B { fn m(self: &Self) i32; }\nstruct V { pub a: i32 }\nextend V as A { fn m(self: &V) i32 { return 1; } }\nextend V as B { fn m(self: &V) i32 { return 2; } }\nfn main() i32 { let v = V { a: 1 }; return v.m(); }\n",
-        "  = note: the first candidate is declared here\n--> <harness>:4:17\n  |\n4 | extend V as A { fn m(self: &V) i32 { return 1; } }\n  |                 ^^^^^^^^^^^^^^^^^^\n  = note: the second candidate is declared here\n--> <harness>:5:17",
+        "  = note: the first candidate is declared here\n--> <harness>:4:17\n  |\n  |                 ^^^^^^^^^^^^^^^^^^\n  = note: the second candidate is declared here\n--> <harness>:5:17",
     );
     h::expect_err_msg(
         "one default under two conformances",
@@ -7908,7 +7994,7 @@ fn const_argument_from_disjoint_extends() {
     h::expect_err_msg(
         "no type chooses",
         format("{}fn main() i32 {{ let a = F::<W::K> {{ x: 1 }}; return a.x; }}\n", HEAD).as_str(),
-        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:32\n  |\n5 | fn main() i32 { let a = F::<W::K> { x: 1 }; return a.x; }\n  |                                ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
+        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:32\n  |\n  |                                ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
     );
     h::expect_err_msg(
         "no extend applies to the instance",
@@ -7918,7 +8004,7 @@ fn const_argument_from_disjoint_extends() {
     h::expect_err_msg(
         "an expression names the candidates",
         format("{}fn main() i32 {{ let c: u64 = W::K; return 0; }}\n", HEAD).as_str(),
-        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:33\n  |\n5 | fn main() i32 { let c: u64 = W::K; return 0; }\n  |                                 ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
+        "error: cannot infer the generic arguments of associated constant 'K'; give explicit type arguments\n--> <harness>:5:33\n  |\n  |                                 ^\n  = note: a candidate is declared here\n--> <harness>:2:20",
     );
 }
 
@@ -8010,15 +8096,18 @@ fn qualified_generic_calls_bind_the_qualifier(b: &mut h::ExitBatch) {
 // time; a member of another width is no compile-time value.
 @test
 fn scalar_union_members_reinterpret_at_compile_time() {
-    h::expect_exit(
-        "same-width scalar members reinterpret",
-        "static_assert(f64_bits(1.5) == 0x3FF8000000000000 && f64_from_bits(0x4008000000000000) == 3.0);\nstatic_assert(f32_bits(-2.0f32) == 0xC0000000 && f32_from_bits(0x40000000) == 2.0f32);\nfn main() i32 {\n    return (f64_bits(1.5) >> 48) as i32 - 0x3FF8;\n}\n",
-        0,
-    );
     h::expect_build_err(
         "a member of another width does not fold",
         "union Mixed {\n    pub f: f64,\n    pub u: u32,\n}\nfn low() u32 {\n    let m = Mixed { f: 1.5 };\n    return m.u;\n}\nconst L: u32 = low();\nfn main() i32 {\n    return L as i32;\n}\n",
         "does not fold",
+    );
+}
+
+fn scalar_union_members_reinterpret_at_compile_time_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "same-width scalar members reinterpret",
+        "static_assert(f64_bits(1.5) == 0x3FF8000000000000 && f64_from_bits(0x4008000000000000) == 3.0);\nstatic_assert(f32_bits(-2.0f32) == 0xC0000000 && f32_from_bits(0x40000000) == 2.0f32);\nfn main() i32 {\n    return (f64_bits(1.5) >> 48) as i32 - 0x3FF8;\n}\n",
+        0,
     );
 }
 
@@ -8160,39 +8249,46 @@ fn deep_reference_stores() {
         "fn put<'a, 'b, 'c>(x: &'c mut &'b mut &'a i32, y: &'a i32) { **x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let mut out: &i32 = &K;\n    let mut m = &mut out;\n    {\n        let b = Box::<i32>::new(52);\n        put(&mut m, &*b);\n    }\n    return *out;\n}\n",
         "destroyed at the end of this block while a reference to it is still stored",
     );
-    h::expect_exit(
+}
+
+fn deep_reference_stores_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a deep store of a long enough borrow",
         "fn put<'a, 'b, 'c>(x: &'c mut &'b mut &'a i32, y: &'a i32) { **x = y; }\nconst K: i32 = 0;\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut out: &i32 = &K;\n    let mut m = &mut out;\n    put(&mut m, &*b);\n    let mm = &mut m;\n    **mm = &*b;\n    return *out - 52;\n}\n",
         0,
     );
 }
 
+const INTERFACE_CALL_STORES_DECLS: str = "interface Put<'a> { fn put(self: &mut Self, x: &'a i32); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\n";
+
 // A conformance may store an interface's lifetime and type parameters in `Self`: a call through
 // `dyn` or a generic bound stores the arguments those parameters type into the receiver, as the
 // direct call does. A generic body storing through its bound stays legal.
 @test
 fn interface_call_stores() {
-    let decls = "interface Put<'a> { fn put(self: &mut Self, x: &'a i32); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\n";
-    let mut s1 = String::from_str(decls);
+    let mut s1 = String::from_str(INTERFACE_CALL_STORES_DECLS);
     s1.push_str(
         "fn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
     );
     h::expect_err_msg("a store through `&mut dyn`", &s1, "destroyed at the end of this block");
-    let mut s2 = String::from_str(decls);
+    let mut s2 = String::from_str(INTERFACE_CALL_STORES_DECLS);
     s2.push_str(
         "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let b = Box::<i32>::new(52);\n        call(&mut h, &*b);\n    }\n    return h.get();\n}\n",
     );
     h::expect_err_msg("a store through a generic bound", &s2, "destroyed at the end of this block");
-    let mut s3 = String::from_str(decls);
-    s3.push_str(
-        "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut h = H { r: &K };\n    call(&mut h, &*b);\n    let d: &mut dyn Put = &mut h;\n    d.put(&*b);\n    return h.get() - 52;\n}\n",
-    );
-    h::expect_exit("stores of long enough borrows", &s3, 0);
     h::expect_err_msg(
         "a store through `&mut dyn Put<&i32>`",
         "interface Put<X> { fn put(self: &mut Self, x: X); fn get(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Put<&'a i32> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.r = x; }\n    pub fn get(self: &Self) i32 { return *self.r; }\n}\nconst K: i32 = 0;\nfn main() i32 {\n    let mut h = H { r: &K };\n    {\n        let d: &mut dyn Put<&i32> = &mut h;\n        let b = Box::<i32>::new(52);\n        d.put(&*b);\n    }\n    return h.get();\n}\n",
         "destroyed at the end of this block",
     );
+}
+
+fn interface_call_stores_cases(b: &mut h::ExitBatch) {
+    let mut s3 = String::from_str(INTERFACE_CALL_STORES_DECLS);
+    s3.push_str(
+        "fn call<'a, T: Put<'a>>(t: &mut T, x: &'a i32) { t.put(x); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let mut h = H { r: &K };\n    call(&mut h, &*b);\n    let d: &mut dyn Put = &mut h;\n    d.put(&*b);\n    return h.get() - 52;\n}\n",
+    );
+    b.add("stores of long enough borrows", &s3, 0);
 }
 
 // An owned `dyn I` in a signature is `dyn I + 'static`: a `Box<dyn ..>` returned or passed on holds
@@ -8215,7 +8311,10 @@ fn owned_dyn_is_static_at_boundaries() {
         "interface Show { fn show(self: &Self) i32; }\nstruct H<'a> { pub r: &'a i32 }\nextend<'a> H<'a> as Show { fn show(self: &Self) i32 { return *self.r; } }\nfn keep<F: fn() i32 + 'static>(f: F) i32 { return f(); }\nfn main() i32 {\n    let b = Box::<i32>::new(52);\n    let d: Box<dyn Show> = Box::<H>::new(H { r: &*b });\n    return keep(move || d.show()) - 52;\n}\n",
         "this value must satisfy 'static",
     );
-    h::expect_exit(
+}
+
+fn owned_dyn_is_static_at_boundaries_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a local boxed closure borrowing a local",
         "fn main() i32 {\n    let a = 10;\n    let ra = &a;\n    let g: Box<dyn fn() i32> = Box::new(|| *ra);\n    return g() - 10;\n}\n",
         0,
@@ -8241,11 +8340,6 @@ fn closure_argument_and_lifetime_regions() {
         "fn f(h: &i32) i32 {\n    let mut v: Vector<&i32> = Vector::new();\n    let mut k = fn(w: &i32) i32 {\n        v.push(w);\n        return *v[0];\n    };\n    {\n        let y = 5;\n        let _ = k(&y);\n    }\n    return k(h);\n}\nfn main() i32 { let h = 1; return f(&h); }\n",
         "a closure argument is stored where it must outlive the closure",
     );
-    h::expect_exit(
-        "a closure's borrow of a capture it does not own ends at its last call",
-        "fn put<'h>(h: &'h i32) i32 {\n    let mut v: Vector<&'h i32> = Vector::new();\n    let mut n = 0;\n    let mut k = |w: &'h i32| {\n        v.push(w);\n        n += 1;\n    };\n    k(h);\n    return n;\n}\nfn main() i32 {\n    let mut v: Vector<i32> = Vector::new();\n    let mut n = 0;\n    let mut k = || {\n        v.push(1);\n        n += 1;\n    };\n    k();\n    let x = 1;\n    return n - put(&x);\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a closure's destruction keeps what its owned captures hold, after a move too",
         "fn main() i32 {\n    let mut y = 1;\n    let mut v: Vector<&i32> = Vector::new();\n    v.push(&y);\n    let mut n = 0;\n    let k = || { n += v.len() as i32; };\n    let mut k2 = k;\n    k2();\n    y = 2;\n    return 0;\n}\n",
@@ -8255,6 +8349,14 @@ fn closure_argument_and_lifetime_regions() {
         "a closure storing a reference to its own copy of a capture into another capture",
         "fn main() i32 {\n    let mut b: Vector<Box<dyn fn() i32>> = Vector::new();\n    let m = 5;\n    let mut v: Vector<&i32> = Vector::new();\n    let mut k = fn() i32 {\n        v.push(&m);\n        return *v[0];\n    };\n    let _ = k();\n    b.push(Box::new(k));\n    return b.at(0)();\n}\n",
         "borrowed value does not live long enough",
+    );
+}
+
+fn closure_argument_and_lifetime_regions_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a closure's borrow of a capture it does not own ends at its last call",
+        "fn put<'h>(h: &'h i32) i32 {\n    let mut v: Vector<&'h i32> = Vector::new();\n    let mut n = 0;\n    let mut k = |w: &'h i32| {\n        v.push(w);\n        n += 1;\n    };\n    k(h);\n    return n;\n}\nfn main() i32 {\n    let mut v: Vector<i32> = Vector::new();\n    let mut n = 0;\n    let mut k = || {\n        v.push(1);\n        n += 1;\n    };\n    k();\n    let x = 1;\n    return n - put(&x);\n}\n",
+        0,
     );
 }
 
@@ -8318,7 +8420,10 @@ fn mut_view_sub_slices_reborrow() {
         "fn f(x: []mut i32, y: []i32) i32 {\n    x[0] = 9;\n    return y[0];\n}\nfn main() i32 {\n    let mut arr: [i32; 2] = [1, 2];\n    let x: []mut i32 = arr;\n    let y = x[0..2];\n    return f(x, y);\n}\n",
         "already borrowed as immutable",
     );
-    h::expect_exit(
+}
+
+fn mut_view_sub_slices_reborrow_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a sub-view used before the outer view",
         "fn main() i32 {\n    let mut a: [i32; 4] = [1, 2, 3, 4];\n    let x: []mut i32 = a;\n    let y = x[1..3];\n    let s = y[0] + y[1];\n    x[0] = s;\n    return x[0] - 5;\n}\n",
         0,
@@ -8393,15 +8498,18 @@ fn box_deref_mut_rules() {
 // A store into a container field of a parameter follows that field's declared element lifetime.
 @test
 fn store_into_parameter_field_container() {
-    h::expect_exit(
-        "a 'a borrow pushed into a Vector<&'a i32> field",
-        "struct H<'a> { pub v: Vector<&'a i32> }\nextend<'a> H<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.v.push(x); }\n}\nfn put2<'a>(h: &mut H<'a>, x: &'a i32) { h.v.push(x); }\nfn main() i32 {\n    let a = 5;\n    let mut h = H { v: Vector::<&i32>::new() };\n    h.put(&a);\n    put2(&mut h, &a);\n    return **h.v.at(0) + **h.v.at(1) - 10;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "a 'b borrow pushed into a Vector<&'a i32> field",
         "struct H<'a> { pub v: Vector<&'a i32> }\nfn put<'a, 'b>(h: &mut H<'a>, x: &'b i32) { h.v.push(x); }\nfn main() i32 { return 0; }\n",
         "stored into caller-visible data",
+    );
+}
+
+fn store_into_parameter_field_container_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a 'a borrow pushed into a Vector<&'a i32> field",
+        "struct H<'a> { pub v: Vector<&'a i32> }\nextend<'a> H<'a> {\n    pub fn put(self: &mut Self, x: &'a i32) { self.v.push(x); }\n}\nfn put2<'a>(h: &mut H<'a>, x: &'a i32) { h.v.push(x); }\nfn main() i32 {\n    let a = 5;\n    let mut h = H { v: Vector::<&i32>::new() };\n    h.put(&a);\n    put2(&mut h, &a);\n    return **h.v.at(0) + **h.v.at(1) - 10;\n}\n",
+        0,
     );
 }
 
@@ -8428,7 +8536,10 @@ fn packed_struct_fields() {
         "@packed\nstruct P { pub tag: u8, pub s: String }\nfn main() i32 { return 0; }\n",
         "a field of a '@packed' struct cannot need a 'free'",
     );
-    h::expect_exit(
+}
+
+fn packed_struct_fields_cases(b: &mut h::ExitBatch) {
+    b.add(
         "packed fields read by value and byte fields by reference",
         "@packed\nstruct P { pub tag: u8, pub v: i64 }\nfn main() i32 {\n    let p = P { tag: 1, v: 42 };\n    let t = &p.tag;\n    let v = p.v;\n    return (v - 41) as i32 - *t as i32;\n}\n",
         0,
@@ -8995,7 +9106,9 @@ fn core_value_regressions() {
         "fn m(a: []mut i32) {\n    a[0] = 1;\n}\nfn main() i32 {\n    let v = Vector::<i32>::new();\n    m(v[0..]);\n    return 0;\n}\n",
         "mismatched types: expected 'SliceMut<i32>', found 'Slice<i32>'",
     );
-    let mut b = h::ExitBatch::new();
+}
+
+fn core_value_regressions_cases(b: &mut h::ExitBatch) {
     b.add(
         "a mutated sub-view of a vector, an array and a view",
         "fn main() i32 {\n    let mut a: [i32; 2] = [5, 6];\n    let w = &mut a[0..1];\n    w[0] = 7;\n    let mut v = Vector::<i32>::new();\n    v.push(1);\n    v.push(2);\n    let sm = &mut v[0..2];\n    let u = &mut sm[1..2];\n    u[0] = 9;\n    return a[0] + v[1] - 16;\n}\n",
@@ -9132,7 +9245,6 @@ fn main() i32 {
         "pub interface Link {\n    fn next(self: &Self) Option<&dyn Link>;\n    fn val(self: &Self) i32;\n}\nstruct N { pub v: i32, pub nx: *const N }\nextend N as Link {\n    fn next(self: &N) Option<&dyn Link> {\n        if self.nx == null {\n            return Option::<&dyn Link>::None;\n        }\n        let r: &dyn Link = unsafe &*self.nx;\n        return Option::<&dyn Link>::Some(r);\n    }\n    fn val(self: &N) i32 { return self.v; }\n}\nfn sum(l: &dyn Link) i32 {\n    let mut s = l.val();\n    let mut cur = l.next();\n    for _ in 0..16 {\n        if cur.is_none() {\n            break;\n        }\n        let c = cur.unwrap();\n        s += c.val();\n        cur = c.next();\n    }\n    return s;\n}\nfn main() i32 {\n    let b = N { v: 2, nx: null };\n    let a = N { v: 1, nx: &b };\n    return sum(&a) - 3;\n}\n",
         0,
     );
-    b.run();
 }
 
 // A borrow made through `&'a dyn I` is the referent's, as through `&'a T`; a closure tying its
@@ -9176,4 +9288,68 @@ fn foreign_self_with_a_defaulted_parameter() {
     p.mkfile("main.spc", "import wmod as *;\n\nfn main() i32 {\n    let a: W<E> = W::<E>::make();\n    return 0;\n}\n");
     let r = p.compile("main.spc");
     assert(r.ok(), "W::<E>::make() is a W<E>");
+}
+
+@test
+fn exit_cases_02() {
+    let mut b = h::ExitBatch::new();
+    braced_enum_const_arguments_cases(&mut b);
+    repeat_literals_take_the_expected_element_type_cases(&mut b);
+    closures_cases(&mut b);
+    return_region_escapes_cases(&mut b);
+    results_are_tuples(&mut b);
+    conformance_methods_are_interface_members_cases(&mut b);
+    reference_casts_keep_the_referent_type_cases(&mut b);
+    reference_arguments_bind_pointer_parameters_cases(&mut b);
+    field_lifetime_positions_cases(&mut b);
+    tuple_lifetime_elision_cases(&mut b);
+    anonymous_lifetime_is_elided_cases(&mut b);
+    return_lifetime_elided_inputs_cases(&mut b);
+    call_universal_regions_cases(&mut b);
+    universal_region_flow_cases(&mut b);
+    static_parameter_borrows_cases(&mut b);
+    loan_scope_at_block_entry_cases(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_03() {
+    let mut b = h::ExitBatch::new();
+    array_slice_view_borrows_cases(&mut b);
+    static_receiver_autoref_cases(&mut b);
+    local_member_regions_cases(&mut b);
+    self_in_callee_signature_cases(&mut b);
+    function_type_lifetimes_cases(&mut b);
+    const_generic_array_layout_cases(&mut b);
+    split_init_reference_to_free_cases(&mut b);
+    arch_gate_rejects_cases(&mut b);
+    platform_gate_rejects_cases(&mut b);
+    gated_static_assert_cases(&mut b);
+    array_literals_adopt_the_element_type_cases(&mut b);
+    branch_types_unify_literals_and_divergence_cases(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_04() {
+    let mut b = h::ExitBatch::new();
+    extend_targets_solve_their_parameters_cases(&mut b);
+    inference_from_bounds_needs_one_conformance_cases(&mut b);
+    scalar_union_members_reinterpret_at_compile_time_cases(&mut b);
+    deep_reference_stores_cases(&mut b);
+    owned_dyn_is_static_at_boundaries_cases(&mut b);
+    closure_argument_and_lifetime_regions_cases(&mut b);
+    mut_view_sub_slices_reborrow_cases(&mut b);
+    store_into_parameter_field_container_cases(&mut b);
+    packed_struct_fields_cases(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_05() {
+    let mut b = h::ExitBatch::new();
+    core_value_regressions_cases(&mut b);
+    results_are_values(&mut b);
+    interface_call_stores_cases(&mut b);
+    b.run();
 }

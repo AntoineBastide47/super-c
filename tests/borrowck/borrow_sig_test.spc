@@ -27,10 +27,18 @@ fn a_returned_owned_dyn_cannot_capture_a_borrow() {
         "fn mk(x: &i32) Box<dyn fn() i32> {\n    return Box::new(|| *x);\n}\n\nfn main() i32 {\n    let v = 3;\n    let f = mk(&v);\n    return f() - 3;\n}\n",
         h::STAGE_TYPECHECK,
     );
-    assert(!c.ok(), "the callee rejects the borrowing closure");
+    assert(
+        c.msg_has(
+            "lifetime mismatch: the returned value's lifetime is not declared to outlive the return type's lifetime",
+        ),
+        "the callee rejects the borrowing closure",
+    );
     let s = h::compile(
         "struct S {\n    pub b: Box<dyn fn() i32>,\n}\n\nfn mk(x: &i32) S {\n    return S { b: Box::new(|| *x) };\n}\n\nfn main() i32 {\n    let v = 3;\n    let s = mk(&v);\n    return (s.b)() - 3;\n}\n",
         h::STAGE_TYPECHECK,
     );
-    assert(!s.ok(), "a field of an owned dyn takes only 'static borrows");
+    assert(
+        s.msg_has("lifetime mismatch: this argument's lifetime is not declared to outlive 'static"),
+        "a field of an owned dyn takes only 'static borrows",
+    );
 }

@@ -50,14 +50,17 @@ fn wide_integer_vectors() {
     assert(find_msb(u128::one() << 100) == 100 && bit_count(u128::max()) == 128 && is_power_of_two(u128::one() << 90));
 }
 
-@test
+// One, from a call the constant evaluator does not see through.
+@noinline
+fn one_i128() i128 {
+    return i128::from_i64(1);
+}
+
+// A lane addition past the maximum traps ("attempt to add with overflow"); nothing else in the body can.
+@test(should_panic)
 fn wide_integer_overflow_traps() {
-    h::expect_run(
-        "Int<128> vector overflow",
-        "import std::math::all as *;\nfn main(args: Vector<str>) i32 {\n    let a = Vec::<i128, 2>::splat(i128::max());\n    let b = a + Vec::<i128, 2>::splat(i128::from_i64(args.len() as i64 - 1));\n    return b.e[0].to_i64() as i32;\n}\n",
-        "x",
-        "attempt to add with overflow",
-    );
+    let a = Vec::<i128, 2>::splat(i128::max());
+    let _ = a + Vec::<i128, 2>::splat(one_i128());
 }
 
 @test

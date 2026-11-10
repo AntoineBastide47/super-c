@@ -1,7 +1,8 @@
 // The compiler's own verification gates, driven through a real build: SC_FACTS_CHECK (semantic
 // tables frozen after typecheck), SC_LAYOUT (pool types satisfy the C layout invariants), and
 // SC_CORE_IR (inlined bodies re-verify, proven bounds checks re-prove). A gate reports what it finds
-// and does not fail the build: on a valid program each must report nothing and leave a working binary.
+// and does not fail the build: on a valid program each reports that it ran, finds nothing, and leaves a
+// working binary.
 import tests::cli_harness as cli;
 
 const PROG: str = "struct Pt { pub x: i32, pub y: i32 }\nenum Shape { Dot, Seg(i32), Box { w: i32, h: i32 } }\nextend Pt { fn sum(self: &Pt) i32 { return self.x + self.y; } }\nfn area(s: &Shape) i32 {\n    return switch s {\n        Dot => 0,\n        Seg(n) => *n,\n        Box { w, h } => *w * *h,\n    };\n}\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..8 { v.push(i * i); }\n    let mut t = 0;\n    for i in 0..v.len() { t += v[i]; }\n    let p = Pt { x: 3, y: 4 };\n    let s = Shape::Box { w: 2, h: 5 };\n    return t + p.sum() + area(&s) - 157;\n}\n";
@@ -23,7 +24,8 @@ fn build_with(key: str, finding: str) cli::CliResult {
 
 @test
 fn facts_check_gate_accepts_a_valid_build() {
-    let _ = build_with("SC_FACTS_CHECK", "facts-check:");
+    let r = build_with("SC_FACTS_CHECK", "changed semantic type-check tables");
+    assert(r.out_shows("modules, no table changed"), "the gate ran and found nothing");
 }
 
 @test
@@ -34,5 +36,6 @@ fn layout_gate_accepts_a_valid_build() {
 
 @test
 fn core_ir_gate_accepts_a_valid_build() {
-    let _ = build_with("SC_CORE_IR", "SC_CORE_IR:");
+    let r = build_with("SC_CORE_IR", "SC_CORE_IR:");
+    assert(r.out_shows("core-ir check: ") && !r.out_has("core-ir check: 0 bodies"), "the gate re-verified bodies");
 }

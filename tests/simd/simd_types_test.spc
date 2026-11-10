@@ -395,9 +395,8 @@ fn lanes_round_trips_and_masks_agree_as_constants_and_at_run_time() {
 }
 
 // Run-time bits: a lane keeps a NaN payload, either sign of NaN, -0.0 and a subnormal.
-@test
-fn lanes_keep_float_bits_through_a_round_trip() {
-    h::expect_exit(
+fn lanes_keep_float_bits_through_a_round_trip(b: &mut h::ExitBatch) {
+    b.add(
         "bit-exact lanes",
         M"(@noinline
 fn trip32(b: u32) u32 {
@@ -576,9 +575,8 @@ fn main() i32 {
 }
 
 // A mask satisfies the bounds a generic body needs of it: `Option<Mask<N>>` compares through `Mask<N>: Eq`.
-@test
-fn a_mask_meets_interface_bounds() {
-    h::expect_exit(
+fn a_mask_meets_interface_bounds(b: &mut h::ExitBatch) {
+    b.add(
         "Mask<N>: Eq under a generic N",
         M"(fn none<const N: usize>(m: Mask<N>) bool {
     return Option::<Mask<N>>::Some(m) == Option::<Mask<N>>::None;
@@ -592,4 +590,12 @@ fn main() i32 {
 )",
         0,
     );
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    lanes_keep_float_bits_through_a_round_trip(&mut b);
+    a_mask_meets_interface_bounds(&mut b);
+    b.run();
 }

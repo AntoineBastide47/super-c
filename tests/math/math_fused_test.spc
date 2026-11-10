@@ -265,20 +265,21 @@ fn mul_fused_is_the_fused_chain() {
     }
 }
 
-@test
-fn large_length_mismatch_panics() {
-    h::expect_run(
-        "dot of different lengths",
-        "import std::math::fused as *;\nfn main() i32 {\n    let a = LargeVec::<f32>::zeros(3);\n    let b = LargeVec::<f32>::zeros(4);\n    return a.dot(&b) as i32;\n}\n",
-        "",
-        "LargeVec::dot: the lengths differ",
-    );
-    h::expect_run(
-        "product of mismatched shapes",
-        "import std::math::fused as *;\nfn main() i32 {\n    let a = LargeMat::<f64>::zeros(2, 3);\n    let b = LargeMat::<f64>::zeros(2, 3);\n    let c = &a * &b;\n    return c.rows() as i32;\n}\n",
-        "",
-        "LargeMat * LargeMat: the left column count is not the right row count",
-    );
+// A dot product of different lengths panics ("LargeVec::dot: the lengths differ"); nothing else in the
+// body can.
+@test(should_panic)
+fn large_dot_of_different_lengths_panics() {
+    let a = LargeVec::<f32>::zeros(3);
+    let b = LargeVec::<f32>::zeros(4);
+    let _ = a.dot(&b);
+}
+
+// A product whose left column count is not the right row count panics.
+@test(should_panic)
+fn large_product_of_mismatched_shapes_panics() {
+    let a = LargeMat::<f64>::zeros(2, 3);
+    let b = LargeMat::<f64>::zeros(2, 3);
+    let _ = &a * &b;
 }
 
 // Matrix products and dot products of the large types, checked against the fused chain and hashed.

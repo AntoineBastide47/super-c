@@ -57,33 +57,17 @@ fn generator_reproduces_coefficients() {
     }
 }
 
-// The reduced check, a third of the functions per test. The tools run one worker thread: a test of the
-// parallel suite takes one CPU, so it does not slow the tests that run beside it.
-fn reduced_accuracy(part: str) {
+// The reduced check over every function, from one build of the tool: three worker threads, the CPUs the
+// three parts of one thread each took before, without their two other builds.
+@test(timeout = 300)
+fn reduced_accuracy() {
     let root = repo_root();
     let p = cli::proj_new();
     let exe = tool(&p, &root, "simd-math-check");
     // 10^6 inputs per function: half in each lane type, every special value.
-    let mut args = String::from_str("--jobs=1 --n=500000 --sample32=500000 --part=");
-    args.push_str(part);
-    let r = cli::exe_env_in(&exe, p.dir(), "SC_LEAK_CHECK", "0", &args);
+    let r = cli::exe_env_in(&exe, p.dir(), "SC_LEAK_CHECK", "0", "--jobs=3 --n=500000 --sample32=500000");
     if !r.ok() {
         r.show();
     }
     assert(r.ok(), "a result is over its class bound or a special value is wrong");
-}
-
-@test(timeout = 300)
-fn reduced_accuracy_0() {
-    reduced_accuracy("0/3");
-}
-
-@test(timeout = 300)
-fn reduced_accuracy_1() {
-    reduced_accuracy("1/3");
-}
-
-@test(timeout = 300)
-fn reduced_accuracy_2() {
-    reduced_accuracy("2/3");
 }

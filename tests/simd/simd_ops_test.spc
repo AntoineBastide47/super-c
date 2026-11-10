@@ -108,16 +108,211 @@ fn masked_loads_and_stores_match() {
     sweep([118, 119, 120, 123]);
 }
 
+const OPERATIONS: str = M"(import std::simd;
 // A store of a vector loaded from the same slice one element before writes the loaded lanes, as if
 // every lane were read before the first write.
+fn main_0(args: Vector<str>) i32 {
+    let mut a = [0.0f32; 17];
+    let s: []mut f32 = a;
+    for k in 0..17usize {
+        s[k] = (k + args.len() - 1) as f32;
+    }
+    let v = simd::load::<f32, 16>(s, 0) + Simd::<f32, 16>::splat(100.0);
+    simd::store(s, 1, v);
+    for k in 1..17usize {
+        if s[k] != (k + 99) as f32 {
+            return 1;
+        }
+    }
+    return 0;
+}
+// A lane scalar beside an operator is the scalar in every lane: a variable, a literal and literal-only
+// arithmetic, on either side, in concrete code and in code generic over the lanes.
+fn axpy<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
+    return x * a + y;
+}
+fn axpy_left<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
+    return a * x + y;
+}
+fn twice<T: SimdInt, const N: usize>(x: Simd<T, N>) Simd<T, N> {
+    return x + x;
+}
+fn main_1(args: Vector<str>) i32 {
+    let k = args.len() as f32;
+    let v = Simd::<f32, 8>::splat(k + 1.0);
+    let a = v * 3.0 + k - 0.5;
+    let q = v / (1.0 + 3.0);
+    let w = Simd::<u8, 16>::splat(args.len() as u8 * 200);
+    let b = w ^ (3 | 4) * 2;
+    let c = (w % 7 & 6 | 1) - 1u8;
+    let r = axpy::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
+    let t = twice::<i16, 8>(Simd::<i16, 8>::splat(3));
+    if a[7] != 6.5 || q[0] != 0.5 || b[15] != 198 || c[3] != 4 || r[2] != 3.0 || t[7] != 6 {
+        return 1;
+    }
+    let l = 3.0 * v + k;
+    let m = 10.0 - v;
+    let s = 1u8 << Simd::<u8, 16>::splat(args.len() as u8 * 3);
+    let e = 200 - w ^ 1;
+    let rl = axpy_left::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
+    if l[0] != 7.0 || m[1] != 8.0 || s[2] != 8 || e[3] != 1 || rl[0] != 3.0 {
+        return 2;
+    }
+    return 0;
+}
+// Vector operators through generic code over a bound (`Add`, `SimdSigned`), a free generic function as
+// a value, an unqualified prelude function with a turbofish, compound assignments with a lane shift
+// count, and both forms of `choose`.
+fn sum3<V: Add<Output = V> + Copy>(a: V, b: V, c: V) V {
+    return a + b + c;
+}
+fn neg<T: SimdSigned, const N: usize>(v: Simd<T, N>) Simd<T, N> {
+    return -v;
+}
+fn main_2() i32 {
+    let a = Simd::<f32, 4>::from_array([1.0, -2.0, 3.0, 0.5]);
+    let s = sum3(a, a, a);
+    let f = simd::concat::<f32, 4>;
+    let r = f(s * s, s).sqrt().low_half();
+    let m = r.greater_than(a);
+    let c = simd::choose(m, r, a) + m.choose(a, r);
+    let n = neg(Simd::<i8, 4>::splat(5));
+    let mut k = iota::<u16, 8>();
+    k <<= 2;
+    k >>= 1u16;
+    k += Simd::<u16, 8>::splat(1);
+    if s[1] != -6.0 || r[1] != 6.0 || c[3] != 2.0 || n[2] != -5 || k[7] != 15 {
+        return 1;
+    }
+    return 0;
+}
+// The free forms are the methods: `simd::f(a, ..)` is `a.f(..)`, generic code over the lanes' unsigned
+// type included.
+
+fn ud<T: SimdInt, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T::Unsigned, N> {
+    return simd::abs_diff(a, b);
+}
+
+fn main_3() i32 {
+    let a = Simd::<i32, 4>::from_array([5, -3, 7, 0]);
+    let b = Simd::<i32, 4>::splat(2);
+    let (w, o) = simd::checked_add(a, b);
+    let f = Simd::<f32, 4>::from_array([1.5, -2.0, 4.0, 9.0]);
+    let g = simd::fma(f, f, f);
+    let bits = simd::to_bits(f);
+    let back = simd::from_bits::<f32, 4>(bits);
+    let d = ud(a, b);
+    let m = simd::less_than(a, b);
+    let c = simd::clamp(a, Simd::<i32, 4>::splat(-1), b);
+    if w[0] != 7 || o.any() || g[0] != 3.75 || back[3] != 9.0 || d[1] != 5 || !m.get(1) || c[0] != 2 || c[1] != -1 {
+        return 1;
+    }
+    if simd::min(a, b)[2] != 2 || simd::abs(a)[1] != 3 || simd::sqrt(f)[3] != 3.0 || simd::count_ones(b)[0] != 1 {
+        return 2;
+    }
+    return 0;
+}
+// IEEE 754-2019 minimumNumber/maximumNumber and minimum/maximum on every pair of NaN, -0.0, +0.0 and
+// 1.0, and an fma whose one rounding differs from a multiply then an add.
+const fn bits(v: Simd<f64, 8>) Simd<u64, 8> {
+    return v.is_nan().choose(Simd::<u64, 8>::splat(1), v.to_bits());
+}
+const fn mix(h: u64, v: Simd<u64, 8>) u64 {
+    let mut r = h;
+    for l in v.to_array() {
+        r = r.wrapping_mul(31).wrapping_add(l);
+    }
+    return r;
+}
+const fn table() u64 {
+    let vals: [f64; 4] = [0.0 / 0.0, -0.0, 0.0, 1.0];
+    let mut h: u64 = 0;
+    for half in 0..2usize {
+        let mut a: [f64; 8] = [0.0; 8];
+        let mut b: [f64; 8] = [0.0; 8];
+        for i in 0..8usize {
+            unsafe {
+                a[i] = vals[(half * 8 + i) / 4];
+                b[i] = vals[i % 4];
+            }
+        }
+        let x = Simd::<f64, 8>::from_array(a);
+        let y = Simd::<f64, 8>::from_array(b);
+        h = mix(mix(mix(mix(h, bits(x.min_num(y))), bits(x.max_num(y))), bits(x.minimum(y))), bits(x.maximum(y)));
+    }
+    return h;
+}
+const T: u64 = table();
+fn main_4() i32 {
+    let n: u64 = 1;
+    let mz: u64 = 0x8000000000000000;
+    let pz: u64 = 0;
+    let one: u64 = 0x3FF0000000000000;
+    let min_num = [n, mz, pz, one, mz, mz, mz, mz, pz, mz, pz, pz, one, mz, pz, one];
+    let max_num = [n, mz, pz, one, mz, mz, pz, one, pz, pz, pz, one, one, one, one, one];
+    let minimum = [n, n, n, n, n, mz, mz, mz, n, mz, pz, pz, n, mz, pz, one];
+    let maximum = [n, n, n, n, n, mz, pz, one, n, pz, pz, one, n, one, one, one];
+    let mut h: u64 = 0;
+    for half in 0..2usize {
+        for t in [min_num, max_num, minimum, maximum] {
+            for i in 0..8usize {
+                h = h.wrapping_mul(31).wrapping_add(unsafe t[half * 8 + i]);
+            }
+        }
+    }
+    if h != T || h != table() {
+        return 1;
+    }
+    let e: f64 = 1.0 + 0.0000000074505805969238281;
+    let v = Simd::<f64, 2>::splat(e);
+    let c = Simd::<f64, 2>::splat(-1.0 - 0.000000014901161193847656f64);
+    let fused = v.fma(v, c);
+    let split = v * v + c;
+    if fused[0] != 0.0000000000000000555111512312578270 || split[0] != 0.0 {
+        return 2;
+    }
+    return 0;
+}
+// A store needs its slice mutably borrowed, a load shared: a live borrow of the other kind conflicts.
+// A `[]mut` view written through (a store, a call) conflicts with a live shared borrow of it; as a
+// `[]T` it is borrowed shared.
+fn main_5() i32 {
+    let mut a = [1, 2, 3, 4, 5, 6, 7, 8];
+    let y: []mut i32 = a;
+    let v = simd::load::<i32, 4>(y, 0);
+    simd::store(y, 4, v + simd::load::<i32, 4>(y, 4));
+    return a[7] - 12;
+}
+// The case is the last argument; the case's own arguments come before it.
+fn main(args: Vector<str>) i32 {
+    let mut a = args;
+    let k = a.pop().unwrap().parse_i64().unwrap();
+    if k == 0 {
+        return main_0(a);
+    }
+    if k == 1 {
+        return main_1(a);
+    }
+    if k == 2 {
+        return main_2();
+    }
+    if k == 3 {
+        return main_3();
+    }
+    if k == 4 {
+        return main_4();
+    }
+    if k == 5 {
+        return main_5();
+    }
+    return 255;
+}
+)";
+
+// The programs above, each a case of one build: its last argument selects it.
 @test
-fn a_store_reads_its_vector_first() {
-    h::expect_run(
-        "overlapping load and store",
-        "import std::simd;\nfn main(args: Vector<str>) i32 {\n    let mut a = [0.0f32; 17];\n    let s: []mut f32 = a;\n    for k in 0..17usize {\n        s[k] = (k + args.len() - 1) as f32;\n    }\n    let v = simd::load::<f32, 16>(s, 0) + Simd::<f32, 16>::splat(100.0);\n    simd::store(s, 1, v);\n    for k in 1..17usize {\n        if s[k] != (k + 99) as f32 {\n            return 1;\n        }\n    }\n    return 0;\n}\n",
-        "",
-        "",
-    );
+fn run_cases() {
+    h::expect_runs("operations", OPERATIONS, ["0", "1", "2", "3", "4", "5"], ["", "", "", "", "", ""]);
 }
 
 @test
@@ -241,113 +436,6 @@ fn unknown_intrinsic_under_bootstrap_tags() {
     assert(h::compile_std_bootstrap(&src, h::STAGE_BORROWCK).ok(), "accepted under --bootstrap-tags");
 }
 
-// A lane scalar beside an operator is the scalar in every lane: a variable, a literal and literal-only
-// arithmetic, on either side, in concrete code and in code generic over the lanes.
-@test
-fn a_lane_scalar_operand_is_splat() {
-    let src = M"(import std::simd;
-fn axpy<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
-    return x * a + y;
-}
-fn axpy_left<T: SimdFloat, const N: usize>(a: T, x: Simd<T, N>, y: Simd<T, N>) Simd<T, N> {
-    return a * x + y;
-}
-fn twice<T: SimdInt, const N: usize>(x: Simd<T, N>) Simd<T, N> {
-    return x + x;
-}
-fn main(args: Vector<str>) i32 {
-    let k = args.len() as f32;
-    let v = Simd::<f32, 8>::splat(k + 1.0);
-    let a = v * 3.0 + k - 0.5;
-    let q = v / (1.0 + 3.0);
-    let w = Simd::<u8, 16>::splat(args.len() as u8 * 200);
-    let b = w ^ (3 | 4) * 2;
-    let c = (w % 7 & 6 | 1) - 1u8;
-    let r = axpy::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
-    let t = twice::<i16, 8>(Simd::<i16, 8>::splat(3));
-    if a[7] != 6.5 || q[0] != 0.5 || b[15] != 198 || c[3] != 4 || r[2] != 3.0 || t[7] != 6 {
-        return 1;
-    }
-    let l = 3.0 * v + k;
-    let m = 10.0 - v;
-    let s = 1u8 << Simd::<u8, 16>::splat(args.len() as u8 * 3);
-    let e = 200 - w ^ 1;
-    let rl = axpy_left::<f32, 4>(2.0, Simd::<f32, 4>::splat(k), Simd::<f32, 4>::splat(1.0));
-    if l[0] != 7.0 || m[1] != 8.0 || s[2] != 8 || e[3] != 1 || rl[0] != 3.0 {
-        return 2;
-    }
-    return 0;
-}
-)";
-    h::expect_run("a lane scalar operand", src, "", "");
-}
-
-// Vector operators through generic code over a bound (`Add`, `SimdSigned`), a free generic function as
-// a value, an unqualified prelude function with a turbofish, compound assignments with a lane shift
-// count, and both forms of `choose`.
-@test
-fn operators_dispatch_through_bounds_and_values() {
-    let src = M"(import std::simd;
-fn sum3<V: Add<Output = V> + Copy>(a: V, b: V, c: V) V {
-    return a + b + c;
-}
-fn neg<T: SimdSigned, const N: usize>(v: Simd<T, N>) Simd<T, N> {
-    return -v;
-}
-fn main() i32 {
-    let a = Simd::<f32, 4>::from_array([1.0, -2.0, 3.0, 0.5]);
-    let s = sum3(a, a, a);
-    let f = simd::concat::<f32, 4>;
-    let r = f(s * s, s).sqrt().low_half();
-    let m = r.greater_than(a);
-    let c = simd::choose(m, r, a) + m.choose(a, r);
-    let n = neg(Simd::<i8, 4>::splat(5));
-    let mut k = iota::<u16, 8>();
-    k <<= 2;
-    k >>= 1u16;
-    k += Simd::<u16, 8>::splat(1);
-    if s[1] != -6.0 || r[1] != 6.0 || c[3] != 2.0 || n[2] != -5 || k[7] != 15 {
-        return 1;
-    }
-    return 0;
-}
-)";
-    h::expect_run("bound dispatch, a function value, an unqualified turbofish and choose", src, "", "");
-}
-
-// The free forms are the methods: `simd::f(a, ..)` is `a.f(..)`, generic code over the lanes' unsigned
-// type included.
-@test
-fn free_forms_are_the_methods() {
-    let src = M"(import std::simd;
-
-fn ud<T: SimdInt, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) Simd<T::Unsigned, N> {
-    return simd::abs_diff(a, b);
-}
-
-fn main() i32 {
-    let a = Simd::<i32, 4>::from_array([5, -3, 7, 0]);
-    let b = Simd::<i32, 4>::splat(2);
-    let (w, o) = simd::checked_add(a, b);
-    let f = Simd::<f32, 4>::from_array([1.5, -2.0, 4.0, 9.0]);
-    let g = simd::fma(f, f, f);
-    let bits = simd::to_bits(f);
-    let back = simd::from_bits::<f32, 4>(bits);
-    let d = ud(a, b);
-    let m = simd::less_than(a, b);
-    let c = simd::clamp(a, Simd::<i32, 4>::splat(-1), b);
-    if w[0] != 7 || o.any() || g[0] != 3.75 || back[3] != 9.0 || d[1] != 5 || !m.get(1) || c[0] != 2 || c[1] != -1 {
-        return 1;
-    }
-    if simd::min(a, b)[2] != 2 || simd::abs(a)[1] != 3 || simd::sqrt(f)[3] != 3.0 || simd::count_ones(b)[0] != 1 {
-        return 2;
-    }
-    return 0;
-}
-)";
-    h::expect_run("the free forms", src, "", "");
-}
-
 // A slice access checks its lanes once: `start <= len && N <= len - start`, overflow-free, and the trap
 // names the lanes, the start and the length, as a constant and at run time.
 // A target without vector registers (wasm32 without simd128) copies a vector load's lanes one by one,
@@ -429,75 +517,6 @@ const fn ld(start: usize) i32 {
     assert(d.len() == 0, "vector loads and stores as constants");
 }
 
-// IEEE 754-2019 minimumNumber/maximumNumber and minimum/maximum on every pair of NaN, -0.0, +0.0 and
-// 1.0, and an fma whose one rounding differs from a multiply then an add.
-@test
-fn float_min_max_table_and_fma_rounding() {
-    let src = M"(const fn bits(v: Simd<f64, 8>) Simd<u64, 8> {
-    return v.is_nan().choose(Simd::<u64, 8>::splat(1), v.to_bits());
-}
-const fn mix(h: u64, v: Simd<u64, 8>) u64 {
-    let mut r = h;
-    for l in v.to_array() {
-        r = r.wrapping_mul(31).wrapping_add(l);
-    }
-    return r;
-}
-const fn table() u64 {
-    let vals: [f64; 4] = [0.0 / 0.0, -0.0, 0.0, 1.0];
-    let mut h: u64 = 0;
-    for half in 0..2usize {
-        let mut a: [f64; 8] = [0.0; 8];
-        let mut b: [f64; 8] = [0.0; 8];
-        for i in 0..8usize {
-            unsafe {
-                a[i] = vals[(half * 8 + i) / 4];
-                b[i] = vals[i % 4];
-            }
-        }
-        let x = Simd::<f64, 8>::from_array(a);
-        let y = Simd::<f64, 8>::from_array(b);
-        h = mix(mix(mix(mix(h, bits(x.min_num(y))), bits(x.max_num(y))), bits(x.minimum(y))), bits(x.maximum(y)));
-    }
-    return h;
-}
-const T: u64 = table();
-fn main() i32 {
-    // NaN, -0, +0, 1 by row (x) and column (y); 1 stands for NaN.
-    let n: u64 = 1;
-    let mz: u64 = 0x8000000000000000;
-    let pz: u64 = 0;
-    let one: u64 = 0x3FF0000000000000;
-    let min_num = [n, mz, pz, one, mz, mz, mz, mz, pz, mz, pz, pz, one, mz, pz, one];
-    let max_num = [n, mz, pz, one, mz, mz, pz, one, pz, pz, pz, one, one, one, one, one];
-    let minimum = [n, n, n, n, n, mz, mz, mz, n, mz, pz, pz, n, mz, pz, one];
-    let maximum = [n, n, n, n, n, mz, pz, one, n, pz, pz, one, n, one, one, one];
-    let mut h: u64 = 0;
-    for half in 0..2usize {
-        for t in [min_num, max_num, minimum, maximum] {
-            for i in 0..8usize {
-                h = h.wrapping_mul(31).wrapping_add(unsafe t[half * 8 + i]);
-            }
-        }
-    }
-    if h != T || h != table() {
-        return 1;
-    }
-    // 1 + 2^-27 squared needs one rounding: the product's 2^-54 term survives only in a fused add.
-    let e: f64 = 1.0 + 0.0000000074505805969238281;
-    let v = Simd::<f64, 2>::splat(e);
-    let c = Simd::<f64, 2>::splat(-1.0 - 0.000000014901161193847656f64);
-    let fused = v.fma(v, c);
-    let split = v * v + c;
-    if fused[0] != 0.0000000000000000555111512312578270 || split[0] != 0.0 {
-        return 2;
-    }
-    return 0;
-}
-)";
-    h::expect_run("the min/max table and fma", src, "", "");
-}
-
 // A store needs its slice mutably borrowed, a load shared: a live borrow of the other kind conflicts.
 // A `[]mut` view written through (a store, a call) conflicts with a live shared borrow of it; as a
 // `[]T` it is borrowed shared.
@@ -527,13 +546,6 @@ fn vector_access_borrows_its_slice() {
         "a write through a `[]mut` view while its `[]T` view is live",
         "fn main() i32 {\n    let mut a = [3, 4];\n    let y: []mut i32 = a;\n    let r: []i32 = y;\n    y[0] = 5;\n    return r[0];\n}\n",
         "borrow",
-    );
-    // A `[]mut` view is a `[]T` for a load: an update in place needs no second view.
-    h::expect_run(
-        "an update in place through one view",
-        "import std::simd;\nfn main() i32 {\n    let mut a = [1, 2, 3, 4, 5, 6, 7, 8];\n    let y: []mut i32 = a;\n    let v = simd::load::<i32, 4>(y, 0);\n    simd::store(y, 4, v + simd::load::<i32, 4>(y, 4));\n    return a[7] - 12;\n}\n",
-        "",
-        "",
     );
 }
 

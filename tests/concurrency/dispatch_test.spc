@@ -143,6 +143,7 @@ fn thousand_tasks_exact() {
 // really consumes stack, at every optimisation level.
 static mut G_FRAME: usize = 0;
 
+@noinline
 fn deep(n: u64, acc: u64) u64 {
     let mut pad = Array::<u64, 8>::new();
     pad[7] = n;
@@ -153,22 +154,37 @@ fn deep(n: u64, acc: u64) u64 {
     return deep(n - 1, acc + pad[7]);
 }
 
+// The bytes one frame of `deep` takes in this build: the distance between a call of `deep` and the one it
+// makes.
+fn deep_frame_bytes() usize {
+    let _ = deep(0, 0);
+    let outer = unsafe atomic::load_usize(&mut unsafe G_FRAME, 0);
+    let _ = deep(1, 0);
+    let inner = unsafe atomic::load_usize(&mut unsafe G_FRAME, 0);
+    return outer - inner;
+}
+
 // A task recurses well past the pages a shallow task touches; the stack is reserved, not trimmed short.
+// The depth fills half of the task's stack, whatever the frame size of the ABI and profile.
 @test
 fn deep_recursion_fits_the_default_stack() {
     let wg = sync::WaitGroup::new();
     wg.add(1);
     let w = wg.clone();
+    let want = arc::Arc::<atomics::Atomic<i64>>::new(atomics::Atomic::<i64>::new(0));
+    let wv = want.clone();
     launch || {
-        // About 1500 frames of at least 80 bytes: past 100 KiB of a 256 KiB stack (1 MiB under ASan,
-        // whose frames are larger).
-        let v = deep(1500, 0);
+        let frame = deep_frame_bytes();
+        assert(frame > 0, "the stack grows down");
+        let depth = (rt::stack_size() / 2 / frame) as u64;
+        wv.get().store((depth * (depth + 1) / 2) as i64, atomics::MemoryOrder::Release);
+        let v = deep(depth, 0);
         ran(v as i64);
         w.done();
     };
     wg.wait();
     rt::shutdown();
-    assert_eq(runs(), 1500 * 1501 / 2);
+    assert_eq(runs(), want.get().load(atomics::MemoryOrder::Acquire));
 }
 
 // The return no run reaches keeps the recursion legal: one that cannot return is a compile error.

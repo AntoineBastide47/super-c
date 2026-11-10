@@ -3,16 +3,18 @@
 // lanes, and `dot` in its accumulation type; each at run time and as a constant.
 import tests::harness as h;
 
+const REDUCTIONS: str = M"(import std::simd;
 // [1e8, 1, -1e8, 1] in f32: left to right gives 1, by halves 2, and by adjacent pairs 0, so each result
 // shows its order. A vector of -0.0 sums to -0.0; NaN lanes follow the lane rule of each reduction.
-@test
-fn float_reductions_keep_their_order() {
-    let src = M"(import std::simd;
-fn main(args: Vector<str>) i32 {
+fn main_0(args: Vector<str>) i32 {
     let k = args.len() as f32;
     let f = Simd::<f32, 4>::from_array([1.0e8 * k, 1.0, -1.0e8, 1.0]);
     let pairs = (f[0] + f[1]) + (f[2] + f[3]);
     if simd::reduce_add_ordered(f) != 1.0 || simd::reduce_add_tree(f) != 2.0 || pairs != 0.0 {
+        return 1;
+    }
+    let w = Simd::<f32, 8>::from_array([1.0e8 * k, 1.0, -1.0e8, 1.0, 0.0, 0.0, 0.0, 0.0]);
+    if simd::reduce_add_tree(w) != 2.0 {
         return 1;
     }
     let z = Simd::<f64, 8>::splat(-0.0 * k as f64);
@@ -35,7 +37,6 @@ fn main(args: Vector<str>) i32 {
     if !simd::reduce_min_num(all).is_nan() || simd::arg_min_num(all).is_some() || simd::arg_max_num(all).is_some() {
         return 6;
     }
-    // The lowest lane of the extreme non-NaN value; -0.0 is below +0.0.
     let a = Simd::<f32, 8>::from_array([nan, 0.0, 5.0, -0.0, 5.0, -0.0, 1.0, nan]);
     if simd::arg_min_num(a).unwrap() != 3 || simd::arg_max_num(a).unwrap() != 2 {
         return 7;
@@ -46,17 +47,10 @@ fn main(args: Vector<str>) i32 {
     }
     return 0;
 }
-)";
-    h::expect_run("float orders", src, "", "");
-}
-
 // Wrapping integer reductions, the exact-result tests on each side of their boundary (an exact sum
 // that fits after an intermediate overflow, a zero lane in a product), the extremes, the bitwise
 // reductions, and `dot` wrapping in its accumulation type.
-@test
-fn integer_reductions_wrap_and_check_exactly() {
-    let src = M"(import std::simd;
-fn main(args: Vector<str>) i32 {
+fn main_1(args: Vector<str>) i32 {
     let k = args.len() as i8;
     let a = Simd::<i8, 4>::from_array([127, k, -1, 0]);
     if simd::reduce_add(a) != 127 || simd::reduce_add_checked(a).unwrap() != 127 {
@@ -110,16 +104,9 @@ fn main(args: Vector<str>) i32 {
     }
     return 0;
 }
-)";
-    h::expect_run("integer reductions", src, "", "");
-}
-
 // `dot` over floats: each product rounded to the accumulation type, then summed left to right from
 // -0.0; and an accumulation type that is narrower or of another kind is refused.
-@test
-fn dot_rounds_in_its_accumulation_type() {
-    let src = M"(import std::simd;
-fn main(args: Vector<str>) i32 {
+fn main_2(args: Vector<str>) i32 {
     let e = 1.0f32 + 0.000000119209290 * args.len() as f32;
     let a = Simd::<f32, 4>::from_array([e, e, -1.0, -1.0]);
     let exact = 2.0 * (e as f64 * e as f64) + 2.0;
@@ -132,8 +119,33 @@ fn main(args: Vector<str>) i32 {
     }
     return 0;
 }
+// The case is the last argument; the case's own arguments come before it.
+fn main(args: Vector<str>) i32 {
+    let mut a = args;
+    let k = a.pop().unwrap().parse_i64().unwrap();
+    if k == 0 {
+        return main_0(a);
+    }
+    if k == 1 {
+        return main_1(a);
+    }
+    if k == 2 {
+        return main_2(a);
+    }
+    return 255;
+}
 )";
-    h::expect_run("float dot", src, "", "");
+
+// The programs above, each a case of one build: its last argument selects it.
+@test
+fn run_cases() {
+    h::expect_runs("reductions", REDUCTIONS, ["0", "1", "2"], ["", "", ""]);
+}
+
+// `dot` over floats: each product rounded to the accumulation type, then summed left to right from
+// -0.0; and an accumulation type that is narrower or of another kind is refused.
+@test
+fn dot_rounds_in_its_accumulation_type() {
     let bad: [[str; 2]; 3] = [["i16", "i32"], ["f32", "f64"], ["f64", "i64"]];
     for c in bad {
         let mut s = String::new();

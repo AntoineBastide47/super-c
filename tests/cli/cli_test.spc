@@ -3004,11 +3004,9 @@ int main(void) { Pair__CT p = { .a = { 5 }, .b = { 9 } };
 
 // Per-extend bound filtering: a bounded extension block instantiated over a type that does NOT satisfy the
 // bound must not be specialized (its body would call an unprovided method); only the unbounded block emits.
-@test
-fn per_extend_bound_filtering() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "pibf.spc",
+fn per_extend_bound_filtering(b: &mut h::ExitBatch) {
+    b.add(
+        "per extend bound filtering",
         M"(extern "C" { fn exit(code: i32) void; }
 pub interface Marker { fn mark(self: &Self) i32; }
 pub struct Wrap<T> { pub v: T }
@@ -3017,19 +3015,15 @@ extend<T: Marker> Wrap<T> { pub fn marked(self: &Wrap<T>) i32 { return self.v.ma
 struct Plain { pub n: i32 }
 fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()); return 0; }
 )",
+        7,
     );
-    let r = p.native_build("", "pibf.spc");
-    assert(r.ok(), "the program compiles");
-    assert_eq(p.run_bin(), 7);
 }
 
 // A non-Default allocator must still get all String<A> methods/conformances that only need an explicit or
 // stored allocator (a multi-file regression: warning-clean without a sentinel `RawAlloc: Default`).
-@test
-fn string_non_default_allocator() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn string_non_default_allocator(b: &mut h::ExitBatch) {
+    b.add(
+        "string non default allocator",
         M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
@@ -3048,10 +3042,8 @@ fn main() i32 {
   return 1;
 }
 )",
+        42,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 42);
 }
 
 // Eager emission must stay warning-clean under -Wunused-function: generic methods, inherited defaults and
@@ -4494,9 +4486,9 @@ fn main() i32 {
 // legacy library, a slow syscall: must move off the pool. `blocking::call` runs the closure on a separate
 // pool of plain threads and PARKS the calling coroutine until it returns. Proven by ORDER rather than by the
 // clock, which is what makes it reliable under a loaded machine: with ONE worker, four tasks each make a
-// 50ms blocking call and a fifth does no blocking at all. If the calls held the worker, that fifth task
-// could only run after all of them; because they park, it goes first. Leak-checked, so both pools tear down
-// clean.
+// blocking call that holds until a gate opens, and a fifth task, which does no blocking at all, opens it.
+// Because the calls park, the fifth task runs while they wait; if they held the worker, it could only run
+// after each call gave up waiting (ten seconds). Leak-checked, so both pools tear down clean.
 @test
 fn blocking_call_frees_the_worker() {
     let p = cli::proj_new();
@@ -4514,15 +4506,23 @@ fn main() i32 {
     let order = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let plain_at = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(-1));
     let sum = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let gate = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
     let wg = sync::WaitGroup::new();
     wg.add(5);
     for _i in 0..4 {
         let w = wg.clone();
         let o = order.clone();
         let s = sum.clone();
+        let g = gate.clone();
         launch fn() {
+            let gc = g.clone();
             let got = blocking::call(fn() i64 {
-                time::sleep(time::Duration::from_millis(50)); // off a coroutine: blocks this thread
+                // Off a coroutine: blocks this thread until the gate opens, ten seconds at most.
+                let mut k = 0;
+                while gc.get().load(atom::MemoryOrder::Acquire) == 0 && k < 10000 {
+                    time::sleep(time::Duration::from_millis(1));
+                    k += 1;
+                }
                 return 7;
             });
             let _ = s.get().fetch_add(got, atom::MemoryOrder::Relaxed);
@@ -4533,9 +4533,11 @@ fn main() i32 {
     let w2 = wg.clone();
     let o2 = order.clone();
     let p2 = plain_at.clone();
+    let g2 = gate.clone();
     launch fn() {
         // Whatever this reads is how many blocking calls had already finished when it ran.
         p2.get().store(o2.get().load(atom::MemoryOrder::SeqCst), atom::MemoryOrder::SeqCst);
+        g2.get().store(1, atom::MemoryOrder::Release);
         w2.done();
     };
     let ok = wg.wait_timeout(time::Duration::from_secs(60));
@@ -5694,9 +5696,10 @@ fn main() i32 {
 }
 
 // `sleep` and the scheduler's timer list: a sleeping coroutine parks on its deadline instead of holding its
-// worker. Proven structurally, not by timing: with exactly ONE worker, a task that sleeps 50ms and a task
-// that sleeps not at all race to claim an atomic; only a parking sleep lets the second one win. The elapsed
-// time then confirms the sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
+// worker. Proven structurally, not by timing: with exactly ONE worker, a task sleeps in 20ms steps until a
+// second task, which sleeps not at all, has claimed an atomic (ten seconds at most), and then tries to claim
+// it too; only a parking sleep lets the second one run, and so win. The elapsed time then confirms the
+// sleep really slept, and the plain-thread path (no coroutine) sleeps outright.
 @test
 fn coroutine_sleep_and_timers() {
     let p = cli::proj_new();
@@ -5723,8 +5726,13 @@ fn main() i32 {
     wg.add(2);
     let oa = order.clone();
     let wa = wg.clone();
+    let t1 = platform::now_ns();
     launch fn() {
-        time::sleep(time::Duration::from_millis(50));
+        let mut k = 0;
+        while oa.get().load(atom::MemoryOrder::SeqCst) == 0 && k < 500 {
+            time::sleep(time::Duration::from_millis(20));
+            k += 1;
+        }
         let _ = oa.get().compare_exchange(0, 1, atom::MemoryOrder::SeqCst, atom::MemoryOrder::Relaxed);
         wa.done();
     };
@@ -5734,7 +5742,6 @@ fn main() i32 {
         let _ = ob.get().compare_exchange(0, 2, atom::MemoryOrder::SeqCst, atom::MemoryOrder::Relaxed);
         wb.done();
     };
-    let t1 = platform::now_ns();
     wg.wait();
     let waited = platform::now_ns() - t1;
     let first = order.get().load(atom::MemoryOrder::SeqCst);
@@ -5742,7 +5749,7 @@ fn main() i32 {
     if first != 2 {
         return 2; // the sleeper kept the only worker: sleep did not park
     }
-    if waited < 40000000 {
+    if waited < 20000000 {
         return 3; // the sleep did not actually wait
     }
     return 0;
@@ -5757,8 +5764,9 @@ fn main() i32 {
 
 // Task-aware `Mutex` / `RwLock` acquisition. On ONE worker: task A takes the mutex and then blocks on a
 // semaphore (parking while HOLDING the lock), task B tries to take that mutex (it must park, not sit on the
-// worker), and task C sleeps, releases the semaphore and lets both finish. Under an OS-blocking acquire, B
-// would occupy the only worker and C could never run: the run deadlocks instead of returning. Also covers
+// worker), and task C waits until a task is parked on the mutex, releases the semaphore and lets both
+// finish. Under an OS-blocking acquire, B would occupy the only worker and C could never run: the run
+// deadlocks instead of returning. Also covers
 // read/write guards taken from coroutines and a timed acquire that expires and then succeeds. Leak-checked.
 @test
 fn task_aware_locks() {
@@ -5801,6 +5809,8 @@ fn main() i32 {
         *n = *n + 5;
         wb.done();
     };
+    let contended = arc::Arc::<atom::Atomic<i64>>::new(atom::Atomic::<i64>::new(0));
+    let cs = contended.clone();
     let sc = sem.clone();
     let rc = rw.clone();
     let wc = wg.clone();
@@ -5809,7 +5819,13 @@ fn main() i32 {
             let g = rc.get().read();
             let _ = *g.get();
         }
-        time::sleep(time::Duration::from_millis(10));
+        // B has contended: it waits on the mutex A holds (ten seconds at most).
+        let mut k = 0;
+        while rt::tasks_waiting(rt::WK_MUTEX) < 1 && k < 10000 {
+            time::sleep(time::Duration::from_millis(1));
+            k += 1;
+        }
+        cs.get().store((k < 10000) as i64, atom::MemoryOrder::SeqCst);
         sc.release();
         wc.done();
     };
@@ -5851,6 +5867,9 @@ fn main() i32 {
     }
     if f != 11 {
         return 3;
+    }
+    if contended.get().load(atom::MemoryOrder::SeqCst) != 1 {
+        return 4; // B never waited on the mutex
     }
     return 0;
 }
@@ -6204,6 +6223,8 @@ fn main() i32 {
     let _ = atx.send(1); // full: the send arm cannot proceed
     let wg = sync::WaitGroup::new();
     wg.add(1);
+    // Before the launch: the drain comes at least 60ms after this.
+    let t0 = platform::now_ns();
     {
         let rx = arx.clone();
         let w = wg.clone();
@@ -6215,7 +6236,6 @@ fn main() i32 {
     }
     let mut s = selector::Selector::new();
     let si = s.arm_send(&atx);
-    let t0 = platform::now_ns();
     switch s.wait_timeout(time::Duration::from_secs(60)) {
         Ready(i) => {
             if i != si {
@@ -6413,7 +6433,7 @@ fn main() i32 {
         return 5;
     }
 
-    // A select that PARKS: nothing arrives for 60ms.
+    // A select that PARKS: nothing arrives until the task waits in it.
     let out = arc::Arc::<sync::Mutex<i64>>::new(sync::Mutex::<i64>::new(-1));
     let wg = sync::WaitGroup::new();
     wg.add(1);
@@ -6443,7 +6463,14 @@ fn main() i32 {
             w.done();
         };
     }
-    time::sleep(time::Duration::from_millis(60));
+    let mut k = 0;
+    while rt::tasks_waiting(rt::WK_SELECT) < 1 && k < 10000 {
+        time::sleep(time::Duration::from_millis(1));
+        k += 1;
+    }
+    if k == 10000 {
+        return 8; // the select never parked
+    }
     let _ = pair.tx.send(77);
     if !wg.wait_timeout(time::Duration::from_secs(120)) {
         return 6;
@@ -6653,11 +6680,12 @@ fn main() i32 {
 // A closure stored in an aggregate (`chunks_mut` keeps its body in `ChunksShared`) has its env defined by
 // the declaration pass; a capture the body borrows (a Vector it indexes) is a pointer there too, as in
 // the body, so the env, its initializer and the body agree.
-@test
-fn data_parallel_borrowed_capture_in_stored_closure() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn data_parallel_borrowed_capture_in_stored_closure(b: &mut h::ExitBatch) {
+    if h::target_lane() {
+        return; // WASI has no threads for the runtime
+    }
+    b.add(
+        "data parallel borrowed capture in stored closure",
         M"(import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 
@@ -6680,19 +6708,18 @@ fn main() i32 {
     return out[0].v + out[1].v;
 }
 )",
+        16,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 16);
 }
 
 // A closure stored in a generic struct is its env by value: captures of 16 bytes (a struct, a vector
 // whose C type is a vector register) size and align it as C does.
-@test
-fn data_parallel_closure_with_wide_captures() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn data_parallel_closure_with_wide_captures(b: &mut h::ExitBatch) {
+    if h::target_lane() {
+        return; // WASI has no threads for the runtime
+    }
+    b.add(
+        "data parallel closure with wide captures",
         M"(import std::parallel::runtime as rt;
 import std::parallel::data as parallel;
 
@@ -6714,10 +6741,8 @@ fn main() i32 {
     return (out[0] + out[1]) as i32;
 }
 )",
+        20,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 20);
 }
 
 // Two chunks (grain 1) that each wait (bounded, spinning: a job cannot park) until both run: a batch
@@ -6830,25 +6855,21 @@ fn main() i32 {
 // shared-borrow guarantee), so mutation through a shared reference must go through `UnsafeCell`, whose
 // contents are stored non-`const` and mutated soundly: exercised here by an `UnsafeCell<i32>` in an
 // IMMUTABLE binding whose value is still changed through `get()`.
-@test
-fn interior_mutability_via_unsafe_cell() {
-    let bad = cli::proj_new();
-    bad.mkfile(
-        "main.spc",
-        "fn main() i32 {\n    let x: i32 = 5;\n    let q = (&x) as *mut i32;\n    return unsafe {\n        q[0]\n    };\n}\n",
-    );
-    let rb = bad.compile("main.spc");
-    assert(rb.exit != 0, "casting an immutable &T to *mut T is rejected");
-    assert(rb.out_has("immutable reference"), "the diagnostic names the laundering");
-
-    let ok = cli::proj_new();
-    ok.mkfile(
-        "main.spc",
+fn interior_mutability_via_unsafe_cell(b: &mut h::ExitBatch) {
+    b.add(
+        "interior mutability through UnsafeCell",
         "fn main() i32 {\n    let cell = UnsafeCell::<i32>::new(7);\n    unsafe {\n        cell.get()[0] = 42;\n    }\n    return unsafe {\n        cell.get()[0]\n    } - 42;\n}\n",
+        0,
     );
-    let ro = ok.native_build("", "main.spc");
-    assert(ro.ok());
-    assert_eq(ok.run_bin(), 0);
+}
+
+@test
+fn casting_an_immutable_reference_to_mut_is_rejected() {
+    h::expect_err_msg(
+        "casting an immutable &T to *mut T is rejected",
+        "fn main() i32 {\n    let x: i32 = 5;\n    let q = (&x) as *mut i32;\n    return unsafe {\n        q[0]\n    };\n}\n",
+        "cannot cast an immutable reference to a '*mut' pointer",
+    );
 }
 
 // A trivial app should not dump the whole std prelude tree (Vector/Map/String not written).
@@ -6964,11 +6985,9 @@ fn main() i32 {
 
 // The bundled ffi/ bindings, imported by a C header's bare name (import math; -> ffi/math.spc): a raw pub
 // extern binding with its real unmangled C symbol, and a thin wrapper: compiled -Werror + linked -lm.
-@test
-fn ffi_bindings() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn ffi_bindings(b: &mut h::ExitBatch) {
+    b.add(
+        "ffi bindings",
         M"(import math;
 import ctype;
 extern "C" { fn exit(code: i32) void; }
@@ -6980,10 +6999,8 @@ fn main() i32 {
   unsafe exit(s + acc); return 0;
 }
 )",
+        13,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok(), "the program builds");
-    assert_eq(p.run_bin(), 13);
 }
 
 // A constant argument past a variadic callee's parameters is read as its promoted C type, so it is
@@ -7577,11 +7594,9 @@ fn main() i32 {
 
 // Format conformances across the prelude, built multi-file: String/Vector/Option/Result render to a String.
 // A value type conforming to a prelude interface must NOT pull the interface module's header (no cycle).
-@test
-fn format_conformances() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "fmt.spc",
+fn format_conformances(b: &mut h::ExitBatch) {
+    b.add(
+        "format conformances",
         M"(fn main() i32 {
   let mut v = Vector::<String>::new();
   v.push(String::from_str("a")); v.push(String::from_str("b"));
@@ -7593,10 +7608,8 @@ fn format_conformances() {
   return vs.len() as i32 + os.len() as i32 + rs.len() as i32;
 }
 )",
+        18,
     );
-    let r = p.native_build("", "fmt.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 18);
 }
 
 // Mutually-recursive modules: import cycles are legal; mutual fn calls and mutual POINTER-linked types work;
@@ -7879,31 +7892,24 @@ fn error_exit_code() {
 // emitted expression fails the build with call-stack detail, a short-circuited RHS never
 // false-positives, an unfoldable array length is a hard error, and a provable panic in a plain
 // function keeps its defined runtime behavior.
-@test
-fn ctfe_reinterpret_is_not_folded() {
+fn ctfe_reinterpret_is_not_folded(b: &mut h::ExitBatch) {
     // A pointer-cast type pun (`*((&x) as *const f64 as *const u64)`) has no compile-time byte
     // representation to read through: the evaluator must LEAVE it to runtime, not substitute the
     // unconverted value. The literal also carries its context's type, so the fold that does happen
     // (none here) would be at the right precision.
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+    b.add(
+        "ctfe reinterpret is not folded",
         M"(import stdio;
 fn bits(v: f64) u64 {
     let x = v;
     return unsafe *((&x) as *const f64 as *const u64);
 }
 fn main() i32 {
-    // 0.1 at f64 precision has bit pattern 0x3FB999999999999A; an f32-precision or value-substituted
-    // fold produces something else.
     return (bits(0.1) != 0x3FB999999999999A) as i32;
 }
 )",
+        0,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    let run = p.run_bin_env("");
-    assert(run.ok());
 }
 
 @test
@@ -7996,18 +8002,14 @@ fn call_free_constant_failures() {
 
 // A chain of aggregate constants evaluates each once: a reference thaws the memoized value
 // instead of evaluating the chain behind it again.
-@test
-fn deep_aggregate_constant_chain() {
+fn deep_aggregate_constant_chain(b: &mut h::ExitBatch) {
     let mut src = String::from_str("struct S { pub x: i64 }\nconst S0: S = S { x: 0 };\n");
     for i in 1..3000 {
         src.push_str(format("const S{}: S = S {{ x: S{}.x + 1 }};\n", i, i - 1).as_str());
     }
-    src.push_str("fn main() i32 { return (S2999.x % 256) as i32; }\n");
-    let p = cli::proj_new();
-    p.mkfile("agg.spc", &src);
-    let r = p.native_build("", "agg.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 2999 % 256);
+    // Mod 100: an exit code below 126, which WASI takes.
+    src.push_str("fn main() i32 { return (S2999.x % 100) as i32; }\n");
+    b.add("deep aggregate constant chain", &src, 2999 % 100);
 }
 
 // A discriminant naming a variant of an enum in another module folds to its value there.
@@ -8491,11 +8493,9 @@ fn main() i32 {
 
 // Differential: a const fn produces the same value at compile time (const initializer) and at
 // runtime (plain call), for arithmetic- and branch-heavy bodies.
-@test
-fn ctfe_differential() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "diff.spc",
+fn ctfe_differential(b: &mut h::ExitBatch) {
+    b.add(
+        "ctfe differential",
         M"(const fn mix(n: u32) u64 {
     let mut h: u64 = 1469598103934665603u64;
     let mut i: u32 = 0;
@@ -8513,10 +8513,8 @@ fn main(argv: Vector<str>) i32 {
     return 1;
 }
 )",
+        0,
     );
-    let r = p.native_build("", "diff.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 0);
 }
 
 // `import std::core;` loads the very file the prelude auto-loads, so the loader flags it in place instead
@@ -8524,16 +8522,12 @@ fn main(argv: Vector<str>) i32 {
 // so an explicit import left `i8`/`i32`/... without their synthetic nominal decls and every
 // `extend i8 as Ord` in that same file then failed its `Eq` superinterface. Any std module may be named
 // explicitly; core is the one whose own body depends on the seeding.
-@test
-fn explicit_std_module_import() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn explicit_std_module_import(b: &mut h::ExitBatch) {
+    b.add(
+        "explicit std module import",
         "import std::core as core;\nimport std::vector as vec;\n\nfn main() i32 {\n    let mut v = Vector::<i32>::new();\n    v.push(3);\n    let ok = v.at(0) == 3;\n    v.free();\n    if ok { return 0; }\n    return 1;\n}\n",
+        0,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    assert_eq(p.run_bin(), 0);
 }
 
 // A generic body is emitted in whichever TU instantiates it, so everything it names has to be reachable
@@ -9661,11 +9655,9 @@ fn main() i32 {
 // `TypeInfo.methods` enumerates the `extend` functions declared for a type: across modules, for
 // builtins and generic instances too, and carries `@reflect` entries on methods. Enumeration
 // only: a descriptor cannot invoke.
-@test
-fn method_reflection() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn method_reflection(b: &mut h::ExitBatch) {
+    b.add(
+        "method reflection",
         M"(pub struct Robot { pub id: i32, }
 extend Robot {
   @reflect(doc = "primary accessor")
@@ -9690,22 +9682,16 @@ fn main() i32 {
   return 0;
 }
 )",
+        0,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    let rr = p.run_bin_env("");
-    assert(rr.ok());
-    assert(rr.out_shows("ok"), "method names, arities, visibility, return tags, and metadata agree");
 }
 
 // `zeroed::<T>()` folds recursively (so a derived `Default` folds through it), and `static_assert`
 // runs INSIDE fn bodies: per instantiation for a generic fn, where a violated guard is a
 // compile error naming the offending type argument.
-@test
-fn ctfe_zeroed_and_body_asserts() {
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
+fn ctfe_zeroed_and_body_asserts(b: &mut h::ExitBatch) {
+    b.add(
+        "zeroed, derived default, and body asserts all fold",
         M"(struct Inner { pub p: *const u8, pub n: i64, }
 struct P { pub x: i32, pub f: f64, pub inner: Inner, pub ok: bool, }
 const fn cz() bool {
@@ -9739,12 +9725,14 @@ fn main() i32 {
   return 0;
 }
 )",
+        0,
     );
-    let r = p.native_build("", "main.spc");
-    assert(r.ok());
-    let rr = p.run_bin_env("");
-    assert(rr.ok());
-    assert(rr.out_shows("ok"), "zeroed, derived default, and body asserts all fold");
+}
+
+// A per-instantiation guard a call violates rejects the build, naming the type argument.
+@test
+fn a_violated_instance_guard_rejects_the_build() {
+    let p = cli::proj_new();
     p.mkfile(
         "main.spc",
         M"(enum E { A, B, }
@@ -11836,13 +11824,16 @@ fn instances_check_indexes_and_default_bodies() {
 // A variant the build constants do not have is an error even in a removed branch, and so is a
 // profile name no profile has; the build-constant names are reserved. An unknown platform or
 // instruction set is no error: it names no target of the compiler, so it equals no setting.
-@test
-fn build_constant_mistakes_are_errors() {
-    h::expect_exit(
+fn build_constants_of_no_platform(b: &mut h::ExitBatch) {
+    b.add(
         "an unknown Platform variant equals no platform",
         "fn main() i32 {\n    if PLATFORM == Platform::Haiku {\n        return 1;\n    }\n    if ARCH != Arch::Sparc64 {\n        return 0;\n    }\n    return 2;\n}\n",
         0,
     );
+}
+
+@test
+fn build_constant_mistakes_are_errors() {
     h::expect_err_msg(
         "an unknown Endian variant in a switch arm",
         "fn main() i32 {\n    return switch ENDIAN {\n        Little => 0,\n        Large => 1,\n    };\n}\n",
@@ -12035,5 +12026,25 @@ fn exit_cases_00() {
     ctfe_hardening_runs(&mut b);
     const_fn_semantics_runs(&mut b);
     local_consts_run(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    per_extend_bound_filtering(&mut b);
+    string_non_default_allocator(&mut b);
+    data_parallel_borrowed_capture_in_stored_closure(&mut b);
+    data_parallel_closure_with_wide_captures(&mut b);
+    ffi_bindings(&mut b);
+    format_conformances(&mut b);
+    ctfe_reinterpret_is_not_folded(&mut b);
+    deep_aggregate_constant_chain(&mut b);
+    ctfe_differential(&mut b);
+    explicit_std_module_import(&mut b);
+    method_reflection(&mut b);
+    ctfe_zeroed_and_body_asserts(&mut b);
+    interior_mutability_via_unsafe_cell(&mut b);
+    build_constants_of_no_platform(&mut b);
     b.run();
 }

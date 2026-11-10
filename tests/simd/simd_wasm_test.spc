@@ -61,107 +61,160 @@ fn arch_operations_need_their_feature() {
 
 const RELEASE: [str; 3] = ["--profile=release", "--target=wasm", "--target-feature=+simd128"];
 
+const RELEASE_PROGRAM: str = M"(import std::simd;
+@noinline
+fn vadd(a: f32x4, b: f32x4) f32x4 {
+    return a + b;
+}
+fn main_0(args: Vector<str>) i32 {
+    let v = f32x4::splat(args.len() as f32);
+    return vadd(v, v).get(0) as i32 - 2;
+}
+@noinline
+fn vsel(a: i8x16, b: i8x16) i8x16 {
+    let m = a.less_than(b);
+    return m.choose(a, b);
+}
+fn main_1(args: Vector<str>) i32 {
+    let v = i8x16::splat(args.len() as i8);
+    return vsel(v, v).get(0) as i32 - 1;
+}
+@noinline
+fn veq(a: u8x16, b: u8x16) u32 {
+    return a.equal(b).count() as u32;
+}
+fn main_2(args: Vector<str>) i32 {
+    let v = u8x16::splat(args.len() as u8);
+    return veq(v, v) as i32 - 16;
+}
+@noinline
+fn vany(a: i32x4, b: i32x4) bool {
+    return a.less_than(b).any();
+}
+fn main_3(args: Vector<str>) i32 {
+    let v = i32x4::splat(args.len() as i32);
+    return vany(v, v) as i32;
+}
+@noinline
+fn vall(a: u8x16, b: u8x16) bool {
+    let m = a.equal(b);
+    return m.all();
+}
+fn main_4(args: Vector<str>) i32 {
+    let v = u8x16::splat(args.len() as u8);
+    return vall(v, v) as i32 - 1;
+}
+@noinline
+fn vlm(s: []f32, m: mask4) f32x4 {
+    return simd::load_masked(s, 0, m, f32x4::splat(0.0));
+}
+fn main_5(args: Vector<str>) i32 {
+    let a: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+    return vlm(a, Mask::<4>::from_bits_truncate(args.len() as u64)).get(0) as i32 - 1;
+}
+@noinline
+fn vsh(a: f32x4, b: f32x4) f32x4 {
+    return simd::shuffle(a, b, [0, 5, 2, 7]);
+}
+fn main_6(args: Vector<str>) i32 {
+    let v = f32x4::splat(args.len() as f32);
+    return vsh(v, v).get(0) as i32 - 1;
+}
+@noinline
+fn vzip(a: u8x32, b: u8x32) u8x32 {
+    return simd::shuffle(a, b, [0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39, 8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47]);
+}
+fn main_7(args: Vector<str>) i32 {
+    let v = u8x32::splat(args.len() as u8);
+    return vzip(v, v).get(0) as i32 - 1;
+}
+@noinline
+fn vsum(a: Simd<f32, 16>) f32 {
+    return reduce_add_tree(a);
+}
+fn main_8(args: Vector<str>) i32 {
+    return vsum(Simd::<f32, 16>::splat(args.len() as f32)) as i32 - 16;
+}
+fn main() i32 {
+    return main_0(Vector::<str>::new()) + main_1(Vector::<str>::new()) + main_2(Vector::<str>::new()) + main_3(Vector::<str>::new()) + main_4(Vector::<str>::new()) + main_5(Vector::<str>::new()) + main_6(Vector::<str>::new()) + main_7(Vector::<str>::new()) + main_8(Vector::<str>::new());
+}
+)";
+
+const CHECKED_PROGRAM: str = M"(@noinline
+fn vadd(a: i32x4, b: i32x4) i32x4 {
+    return a + b;
+}
+fn main_0(args: Vector<str>) i32 {
+    let v = i32x4::splat(args.len() as i32);
+    return vadd(v, v).get(0) - 2;
+}
+@noinline
+fn vshl(a: i32x4, n: i32) i32x4 {
+    return a << n;
+}
+fn main_1(args: Vector<str>) i32 {
+    let v = i32x4::splat(args.len() as i32);
+    return vshl(v, 1).get(0) - 2;
+}
+fn main() i32 {
+    return main_0(Vector::<str>::new()) + main_1(Vector::<str>::new());
+}
+)";
+
+// The assembly of the unit of `src`, built once with `opts` (`--emit-c` added), that defines `function`:
+// one unit holds every function of a small program, so its text serves each check.
+fn asm_of(src: str, opts: []str, function: str) String {
+    let mut all = Vector::<str>::new();
+    for o in opts {
+        all.push(o);
+    }
+    all.push("--emit-c");
+    let b = h::diff_build(src, all[0..all.len()]);
+    if !b.built {
+        eprintln("the program does not build:\n{}", b.diag.as_str());
+    }
+    assert(b.built, function);
+    let mut code = String::new();
+    let r = h::asm_text(&b, opts, function, &mut code);
+    assert(r.len() == 0, r.as_str());
+    return code;
+}
+
+// The instruction checks of `h::expect_asm` on `function` in assembly `code`.
+fn check(code: &String, label: str, function: str, contains: []str, absent: []str) {
+    let d = h::asm_match(code.as_str(), function, contains, absent);
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
+}
+
 @test
 fn operations_lower_to_their_instructions() {
     if !have_sdk() || !cli::has_cc() {
         return; // the C compiler assembles the emitted C
     }
     let ops: []str = RELEASE;
-    h::expect_asm(
-        "lane-wise add",
-        "@noinline\nfn vadd(a: f32x4, b: f32x4) f32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vadd(v, v).get(0) as i32 - 2;\n}\n",
-        ops,
-        "main__vadd",
-        ["f32x4.add"],
-        ["call", "f32.add"],
-    );
-    // A comparison whose one use is a choice stays in lanes: no bit mask in between.
-    h::expect_asm(
-        "compare and choose",
-        "@noinline\nfn vsel(a: i8x16, b: i8x16) i8x16 {\n    let m = a.less_than(b);\n    return m.choose(a, b);\n}\nfn main(args: Vector<str>) i32 {\n    let v = i8x16::splat(args.len() as i8);\n    return vsel(v, v).get(0) as i32 - 1;\n}\n",
-        ops,
-        "main__vsel",
-        ["i8x16.lt_s", "v128.bitselect"],
-        ["call", "bitmask"],
-    );
-    // A mask kept as a value packs the lanes with one bitmask instruction.
-    h::expect_asm(
-        "compare to a mask",
-        "@noinline\nfn veq(a: u8x16, b: u8x16) u32 {\n    return a.equal(b).count() as u32;\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return veq(v, v) as i32 - 16;\n}\n",
-        ops,
-        "main__veq",
-        ["i8x16.eq", "i8x16.bitmask"],
-        ["call"],
-    );
-    // A comparison tested once by `any` or `all` reduces its lane masks: no bit mask either.
-    h::expect_asm(
-        "any of a comparison",
-        "@noinline\nfn vany(a: i32x4, b: i32x4) bool {\n    return a.less_than(b).any();\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vany(v, v) as i32;\n}\n",
-        ops,
-        "main__vany",
-        ["i32x4.lt_s", "v128.any_true"],
-        ["call", "bitmask"],
-    );
-    h::expect_asm(
-        "all of a comparison",
-        "@noinline\nfn vall(a: u8x16, b: u8x16) bool {\n    let m = a.equal(b);\n    return m.all();\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x16::splat(args.len() as u8);\n    return vall(v, v) as i32 - 1;\n}\n",
-        ops,
-        "main__vall",
-        ["i8x16.eq", "i8x16.all_true"],
-        ["call", "bitmask"],
-    );
     // A trapping operator checks its lanes with the overflow entry, a shift its count once: no lane
     // loop (`test`: optimized, overflow checked).
     let chk: [str; 3] = ["--profile=test", "--target=wasm", "--target-feature=+simd128"];
-    h::expect_asm(
-        "a checked add",
-        "@noinline\nfn vadd(a: i32x4, b: i32x4) i32x4 {\n    return a + b;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vadd(v, v).get(0) - 2;\n}\n",
-        chk,
-        "main__vadd",
-        ["i32x4.add", "i32x4.bitmask"],
-        ["extract_lane"],
-    );
-    h::expect_asm(
-        "a checked shift",
-        "@noinline\nfn vshl(a: i32x4, n: i32) i32x4 {\n    return a << n;\n}\nfn main(args: Vector<str>) i32 {\n    let v = i32x4::splat(args.len() as i32);\n    return vshl(v, 1).get(0) - 2;\n}\n",
-        chk,
-        "main__vshl",
-        ["i32x4.shl"],
-        ["extract_lane"],
-    );
-    h::expect_asm(
-        "a masked load",
-        "import std::simd;\n@noinline\nfn vlm(s: []f32, m: mask4) f32x4 {\n    return simd::load_masked(s, 0, m, f32x4::splat(0.0));\n}\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 4] = [1.0, 2.0, 3.0, 4.0];\n    return vlm(a, Mask::<4>::from_bits_truncate(args.len() as u64)).get(0) as i32 - 1;\n}\n",
-        ops,
-        "main__vlm",
-        ["v128.load32_lane"],
-        [],
-    );
+    let ops_code = asm_of(RELEASE_PROGRAM, ops, "main__vadd");
+    check(&ops_code, "lane-wise add", "main__vadd", ["f32x4.add"], ["call", "f32.add"]);
+    // A comparison whose one use is a choice stays in lanes: no bit mask in between.
+    check(&ops_code, "compare and choose", "main__vsel", ["i8x16.lt_s", "v128.bitselect"], ["call", "bitmask"]);
+    // A mask kept as a value packs the lanes with one bitmask instruction.
+    check(&ops_code, "compare to a mask", "main__veq", ["i8x16.eq", "i8x16.bitmask"], ["call"]);
+    // A comparison tested once by `any` or `all` reduces its lane masks: no bit mask either.
+    check(&ops_code, "any of a comparison", "main__vany", ["i32x4.lt_s", "v128.any_true"], ["call", "bitmask"]);
+    check(&ops_code, "all of a comparison", "main__vall", ["i8x16.eq", "i8x16.all_true"], ["call", "bitmask"]);
+    check(&ops_code, "a masked load", "main__vlm", ["v128.load32_lane"], []);
     // A constant index list is one shuffle instruction per 16 result bytes, across chunks too.
-    h::expect_asm(
-        "constant shuffles",
-        "import std::simd;\n@noinline\nfn vsh(a: f32x4, b: f32x4) f32x4 {\n    return simd::shuffle(a, b, [0, 5, 2, 7]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = f32x4::splat(args.len() as f32);\n    return vsh(v, v).get(0) as i32 - 1;\n}\n",
-        ops,
-        "main__vsh",
-        ["i8x16.shuffle"],
-        ["call", "swizzle", "v128.or"],
-    );
-    h::expect_asm(
-        "a zip across chunks",
-        "import std::simd;\n@noinline\nfn vzip(a: u8x32, b: u8x32) u8x32 {\n    return simd::shuffle(a, b, [0, 32, 1, 33, 2, 34, 3, 35, 4, 36, 5, 37, 6, 38, 7, 39, 8, 40, 9, 41, 10, 42, 11, 43, 12, 44, 13, 45, 14, 46, 15, 47]);\n}\nfn main(args: Vector<str>) i32 {\n    let v = u8x32::splat(args.len() as u8);\n    return vzip(v, v).get(0) as i32 - 1;\n}\n",
-        ops,
-        "main__vzip",
-        ["i8x16.shuffle"],
-        ["call", "extract_lane", "load8_lane"],
-    );
-    h::expect_asm(
-        "a tree reduction",
-        "@noinline\nfn vsum(a: Simd<f32, 16>) f32 {\n    return reduce_add_tree(a);\n}\nfn main(args: Vector<str>) i32 {\n    return vsum(Simd::<f32, 16>::splat(args.len() as f32)) as i32 - 16;\n}\n",
-        ops,
-        "main__vsum",
-        ["f32x4.add", "f32x4.extract_lane"],
-        ["call"],
-    );
+    check(&ops_code, "constant shuffles", "main__vsh", ["i8x16.shuffle"], ["call", "swizzle", "v128.or"]);
+    check(&ops_code, "a zip across chunks", "main__vzip", ["i8x16.shuffle"], ["call", "extract_lane", "load8_lane"]);
+    check(&ops_code, "a tree reduction", "main__vsum", ["f32x4.add", "f32x4.extract_lane"], ["call"]);
+    let chk_code = asm_of(CHECKED_PROGRAM, chk, "main__vadd");
+    check(&chk_code, "a checked add", "main__vadd", ["i32x4.add", "i32x4.bitmask"], ["extract_lane"]);
+    check(&chk_code, "a checked shift", "main__vshl", ["i32x4.shl"], ["extract_lane"]);
 }
 
 // Every operation of `std::simd::wasm` against its scalar model, on lanes chosen at run time; a

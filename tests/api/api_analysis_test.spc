@@ -24,9 +24,10 @@ pub fn two() i32 {
 }
 )";
 
-// Flags every comment that holds "TODO", with a fix that removes it.
+// Flags every comment that holds "TODO", with a fix that removes it, and counts its runs in `*runs` when
+// `runs` is not null.
 struct NoTodo {
-    pub runs: u32,
+    pub runs: *mut u32,
 }
 
 extend NoTodo as Analyzer {
@@ -39,7 +40,9 @@ extend NoTodo as Analyzer {
     }
 
     pub fn run(self: &mut Self, pass: &mut Pass) Result<Unit, ApiError> {
-        self.runs += 1;
+        if self.runs != null {
+            unsafe *self.runs += 1;
+        }
         let t = pass.tree();
         let mut hits = Vector::<syn::TextRange>::new();
         for k in t.tokens() {
@@ -206,7 +209,7 @@ fn runs_prerequisites_and_reads_their_facts(fx: &mut Fx) {
     let mut list = Vector::<Box<dyn Analyzer>>::new();
     list.push(Box::new(ImportsCount {}));
     list.push(Box::new(PubCount {}));
-    list.push(Box::new(NoTodo { runs: 0 }));
+    list.push(Box::new(NoTodo { runs: null }));
     list.push(Box::new(Broken {}));
     let mut r = Runner::new(list).unwrap();
     let opts = ses::RequestOptions::none();
@@ -233,16 +236,22 @@ fn runs_prerequisites_and_reads_their_facts(fx: &mut Fx) {
 
 @test
 fn reuses_results_until_an_input_changes(fx: &mut Fx) {
+    let mut runs: u32 = 0;
     let mut list = Vector::<Box<dyn Analyzer>>::new();
-    list.push(Box::new(NoTodo { runs: 0 }));
+    list.push(Box::new(NoTodo { runs: &mut runs }));
     let mut r = Runner::new(list).unwrap();
     let opts = ses::RequestOptions::none();
     let a = r.run(&fx.s, &opts).unwrap();
+    let first = runs;
+    assert(first >= 1, "the first run analyzes every module");
     let b = r.run(&fx.s, &opts).unwrap();
+    assert_eq(runs, first);
     assert_eq(a.findings.len(), b.findings.len());
     let _ = fx.s.set_text(&fx.main, "fn main() i32 {\n    return 0;\n}\n");
     assert(fx.s.check().is_ok(), "checks");
     let c = r.run(&fx.s, &opts).unwrap();
+    // Only the changed module is analyzed again.
+    assert_eq(runs, first + 1);
     assert_eq(c.findings.len(), 0);
 }
 
@@ -260,7 +269,7 @@ fn applies_its_budget(fx: &mut Fx) {
 @test
 fn serves_as_a_command(fx: &mut Fx) {
     let mut list = Vector::<Box<dyn Analyzer>>::new();
-    list.push(Box::new(NoTodo { runs: 0 }));
+    list.push(Box::new(NoTodo { runs: null }));
     let mut args = Vector::<str>::new();
     args.push("tool");
     args.push("--fix");
@@ -310,6 +319,6 @@ fn lints_a_project_with_its_tools() {
     proj.mkfile("src/main.spc", MAIN);
     proj.mkfile("src/util.spc", UTIL);
     let mut list = Vector::<Box<dyn Analyzer>>::new();
-    list.push(Box::new(NoTodo { runs: 0 }));
+    list.push(Box::new(NoTodo { runs: null }));
     assert_eq(lint_tools("std", proj.dir(), list), 1);
 }

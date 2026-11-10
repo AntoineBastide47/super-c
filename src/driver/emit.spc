@@ -4,6 +4,7 @@
 // the emit set and codegens each live module into <gen_root> in dependency order. Entry points:
 // run_package (build/run/test) and lint_package (report-only lints + `--fix` fix collection).
 import link::util as lku;
+import atomic;
 import stdio;
 import stdlib;
 import std::platform::clock;
@@ -1526,8 +1527,20 @@ fn facts_verify(p: &loader::Package, wms: &Vector<facts::FactsWatermark>, stage:
     }
     if d != 0 {
         eprint("facts-check: stage '{}' changed semantic type-check tables\n", stage);
+    } else if stage == "codegen" {
+        eprint("facts-check: {} modules, no table changed\n", wms.len());
     }
     return d;
+}
+
+// Bodies the Core IR gate (SC_CORE_IR) re-verified, over every emission worker of the build.
+static mut CORE_IR_BODIES: u64 = 0;
+
+// The Core IR gate's count of re-verified bodies, so a clean run shows that the gate ran.
+fn core_ir_report() {
+    if stdlib::getenv("SC_CORE_IR") != null {
+        eprint("core-ir check: {} bodies re-verified\n", unsafe atomic::load_u64(&CORE_IR_BODIES, 0));
+    }
 }
 
 // Validation mode (SC_LAYOUT=1): every concrete pool type must satisfy the C layout invariants:
@@ -8589,6 +8602,7 @@ extend DropCtx {
             if be.len() != 0 {
                 eprintln("SC_CORE_IR: {}", be);
             }
+            let _ = unsafe atomic::add_u64(&mut CORE_IR_BODIES, 1, 0);
         }
         if self.bce_stats && (bst.total != 0 || bst.ranges_total != 0 || bst.folded != 0) {
             let mut line = String::new();
@@ -16950,6 +16964,7 @@ pub(package) fn run_package(
     // Report-only: emission must have read the semantic tables frozen (intern-pool growth is the one
     // sanctioned mutation; see ast::facts).
     let _ = facts_verify(p, &wms, "codegen");
+    core_ir_report();
     return rc;
 }
 

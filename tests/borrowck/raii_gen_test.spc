@@ -12,8 +12,8 @@
 // multiset check (not ASan) is what catches leaks / double-frees here.)
 //
 // FULL depth, matching tests/raii_gen_test.c (MAX_SWITCH_DEPTH=6, MAX_GENERAL_DEPTH=5): OR switch chains
-// through depth 6 and ORB general chains through depth 5 (depth 3 for reassignment, Vector drop and pop,
-// see `run_general`): hundreds of scenarios per op. Scenarios batch
+// through depth 6 and ORB general chains through depth 5 (depth 3 for the moves, reassignment, Vector drop
+// and pop, see `run_general`): hundreds of scenarios per op. Scenarios batch
 // into programs (ID_CAP ids each, so one program per op) and the ops fork-parallelize across @tests. (The C suite additionally runs under ASan; here the free-multiset check catches the bugs.)
 import tests::harness as h;
 import stdio;
@@ -468,9 +468,9 @@ fn run_switch(op: i32) {
 }
 
 // Run every ORB general shape through `depth` per op: depth 5 (tests/raii_gen_test.c's MAX_GENERAL_DEPTH)
-// where the operation itself depends on the shape. Reassignment, a Vector's element drop and a pop reach
-// the shape only through its drop glue, which `general_free` checks at depth 5: depth 3 keeps every
-// three-level nesting for them.
+// for the scope-exit free, whose drop glue is the code that depends on the shape. A move into a call, a
+// conditional move, reassignment, a Vector's element drop and a pop reach the shape only through that
+// glue: depth 3 keeps every three-level nesting for them.
 fn run_general(op: i32, depth: i32) {
     let mut g = new_gen();
     let mut sh = Buf16 {};
@@ -496,15 +496,15 @@ fn general_free() {
 }
 @test
 fn general_call() {
-    run_general(OP_CALL, 5);
+    run_general(OP_CALL, 3);
 }
 @test
 fn general_cond_true() {
-    run_general(OP_COND_T, 5);
+    run_general(OP_COND_T, 3);
 }
 @test
 fn general_cond_false() {
-    run_general(OP_COND_F, 5);
+    run_general(OP_COND_F, 3);
 }
 @test
 fn general_reassign() {

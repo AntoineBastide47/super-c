@@ -93,6 +93,11 @@ fn superc_path() str<'static> {
 // Run `super-c lsp` over the session written to <root>/session.bin, capturing stdout and stderr into
 // <root>/out.txt and <root>/err.txt. No shell: the runner binds the three files itself.
 fn lsp_run(root: str) i32 {
+    return lsp_run_env(root, "");
+}
+
+// `lsp_run` with `env` ("NAME=VALUE" pairs) applied to the server.
+fn lsp_run_env(root: str, env: str) i32 {
     let mut cmd = String::new();
     cmd.push_str("\"");
     cmd.push_str(superc_path());
@@ -103,7 +108,7 @@ fn lsp_run(root: str) i32 {
     outp.push_str("/out.txt");
     let mut errp = String::from_str(root);
     errp.push_str("/err.txt");
-    return cli::run_io(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr());
+    return cli::run_with(cmd.cstr(), inp.cstr(), outp.cstr(), errp.cstr(), env);
 }
 
 // Count non-overlapping occurrences of `needle` in `hay`.
@@ -659,9 +664,7 @@ fn run_lsp_session(root: str, ses: &String) String {
     return loader::read_file(&op).unwrap();
 }
 
-// The inside case indexes this whole repository with the compiler under test: past 90 s on a loaded
-// 4-vCPU CI runner when that compiler ran under ASan and UBSan.
-@test(timeout = 300)
+@test
 fn lsp_rename_workspace_relative() {
     // Outside: a temp workspace does not contain the installed std -> refused.
     let p = cli::proj_new();
@@ -673,34 +676,42 @@ fn lsp_rename_workspace_relative() {
     let out = run_lsp_session(root, &ses);
     assert(out.as_str().contains("cannot rename: the definition is outside the workspace"));
 
-    // inside: this repo's workspace contains std/; renaming Vector::push answers with edits that
-    // reach std/vector.spc (nothing is written: rename only RETURNS a WorkspaceEdit).
-    let real = fs::realpath(".");
-    assert(real.is_ok());
-    let rs = real.unwrap();
-    let repo = rs.as_str();
-    let p2 = cli::proj_new(); // scratch dir for the session/out files only
+    // Inside: a workspace that holds the std it uses (`SC_STD_DIR` names its copy); renaming
+    // Vector::push answers with edits that reach its std/vector.spc (nothing is written: rename only
+    // RETURNS a WorkspaceEdit).
+    let p2 = cli::proj_new();
+    p2.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p2.mkfile("src/main.spc", MAIN_VEC);
     let root2 = p2.dir();
+    cli::copy_std(root2);
     let mut ses2 = String::new();
-    rename_session(repo, repo, &mut ses2);
+    rename_session(root2, root2, &mut ses2);
     let mut sp = String::from_str(root2);
     sp.push_str("/session.bin");
     let f = stdio::fopen(&sp, "wb");
     unsafe stdio::fwrite(ses2.as_str().ptr(), 1, ses2.len(), f);
     unsafe stdio::fclose(f);
-    let rc = lsp_run(root2);
+    let rc = lsp_run_env(root2, format("SC_STD_DIR={}/sc/std", root2).as_str());
     assert_eq(rc, 0);
     let mut op = String::from_str(root2);
     op.push_str("/out.txt");
     let out2 = loader::read_file(&op).unwrap();
-    assert(out2.as_str().contains("std/vector.spc"));
+    // The edits are keyed by the URI of the resolved path (`/private/var` on macOS; a drive's colon is
+    // `%3A` there on Windows).
+    let real = fs::realpath(root2).unwrap();
+    let vec_path = format("{}/sc/std/vector.spc", real.as_str());
+    let want = text::path_to_uri(&vec_path);
+    if !out2.as_str().contains(&want) {
+        eprintln("{}", out2.as_str());
+    }
+    assert(out2.as_str().contains(&want));
     assert(out2.as_str().contains("\"newText\":\"shove\""));
     assert(!out2.as_str().contains("cannot rename"));
 }
 
 // The compiler regression the server depends on: embedding loader::Package by value from another
 // module demands its `[NodeId; BT_COUNT_N]` field's length (an enum-cast const) before the loader
-// module is typechecked. Compile a two-module project with the same shape end-to-end.
+// module is typechecked. A two-module project of the same shape compiles.
 @test
 fn cross_module_enum_cast_array_len() {
     let p = cli::proj_new();
@@ -734,9 +745,11 @@ fn main() i32 {
 }
 )",
     );
-    let r = p.native_build("", "main.spc");
-    assert_eq(r.exit, 0);
-    assert_eq(p.run_bin(), 0);
+    let r = p.compile("main.spc");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the project compiles");
 }
 
 // build.toml is served by the SAME server as .spc: the manifest's own validator supplies the

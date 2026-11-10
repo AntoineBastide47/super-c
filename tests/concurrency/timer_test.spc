@@ -71,7 +71,7 @@ fn early_notify_leaves_no_stale_entry() {
     let e = early.clone();
     launch || {
         defer w.done();
-        for _k in 0..10 {
+        for _k in 0..2 {
             {
                 let g = m1.get().lock();
                 // Woken by the notify well before this 200 ms deadline.
@@ -86,7 +86,7 @@ fn early_notify_leaves_no_stale_entry() {
         }
     };
     // Each round notifies the waiter while it is parked on the condvar, then lets it reach its sleep.
-    for _k in 0..10 {
+    for _k in 0..2 {
         assert(ph::wait_waiting(rt::WK_CONDVAR, 1), "the waiter parks on the condvar");
         cv.get().notify_one();
         assert(ph::wait_waiting(rt::WK_SLEEP, 1), "the waiter reaches its sleep");

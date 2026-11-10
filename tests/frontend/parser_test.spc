@@ -1425,15 +1425,18 @@ fn diagnostics_by_message() {
 
 @test
 fn tuple_let_mut_elements() {
-    h::expect_exit(
-        "tuple let takes mut per element",
-        "fn f() (i32, i32) { return (1, 2); }\nfn main() i32 { let (_, mut x) = f(); x += 10; let (mut a, b) = f(); a += b; return x + a - 15; }\n",
-        0,
-    );
     h::expect_err_msg(
         "tuple let element without mut stays immutable",
         "fn f() (i32, i32) { return (1, 2); }\nfn main() i32 { let (a, mut b) = f(); a += 1; b += 1; return a + b; }\n",
         "cannot assign",
+    );
+}
+
+fn tuple_let_mut_elements_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "tuple let takes mut per element",
+        "fn f() (i32, i32) { return (1, 2); }\nfn main() i32 { let (_, mut x) = f(); x += 10; let (mut a, b) = f(); a += b; return x + a - 15; }\n",
+        0,
     );
 }
 
@@ -1452,4 +1455,11 @@ fn method_turbofish_shape() {
     let s1 = c.ast.at_const(c.ast.at_const(c1).as_data.call.callee);
     assert(s1.kind == NodeKind::NODE_GENERIC_SPECIALIZATION, "a path's turbofish wraps the path");
     assert(s1.as_data.specialization.types.len == 1, "the specialization holds the path's turbofish");
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    tuple_let_mut_elements_cases(&mut b);
+    b.run();
 }

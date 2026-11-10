@@ -88,7 +88,10 @@ fn broad() {
     h::expect_c("function", BROAD, "int32_t add(");
     h::expect_c("struct decl", BROAD, "struct Point");
     h::expect_c("struct field", BROAD, "int32_t x;");
-    h::expect_exit(
+}
+
+fn broad_cases(b: &mut h::ExitBatch) {
+    b.add(
         "a method call, an associated constructor and a struct literal behave",
         "struct Point { pub x: i32, }\nextend Point { fn get(self: &Point) i32 { return self.x; } fn new(x: i32) Point { return Point { x: x }; } }\nfn add(a: i32, b: i32) i32 { return a + b; }\nfn main() i32 {\n  let p = Point { x: 1 };\n  let q = Point::new(5);\n  return p.get() + q.get() + add(1, 2) - 9;\n}\n",
         0,
@@ -100,9 +103,12 @@ fn control() {
     h::expect_c("a for over an array lowers to a counted C for", CONTROL, "for (size_t ");
     h::expect_c("switch lowered to if", CONTROL, "if (");
     h::expect_c("switch literal test", CONTROL, " == ");
+}
+
+fn control_cases(b: &mut h::ExitBatch) {
     let mut run = String::from_str(CONTROL);
     run.push_str("fn main() i32 { return classify(0) * 100 + classify(7) * 10 + sum([1, 2, 3]) - 126; }\n");
-    h::expect_exit("the switch picks its arm and the for sums every element", &run, 0);
+    b.add("the switch picks its arm and the for sums every element", &run, 0);
 }
 
 @test
@@ -113,7 +119,10 @@ fn ranges() {
     h::expect_c("open-start counts from zero", RANGES, "< 4LL");
     h::expect_c("bare if lowers", RANGES, ">= 103LL");
     h::expect_c("bare while lowers", RANGES, "< 0LL");
-    h::expect_exit("every range form iterates its extent", RANGES, 0);
+}
+
+fn ranges_cases(b: &mut h::ExitBatch) {
+    b.add("every range form iterates its extent", RANGES, 0);
 }
 
 fn switch_ranges(b: &mut h::ExitBatch) {
@@ -280,32 +289,39 @@ fn enums(b: &mut h::ExitBatch) {
     );
 }
 
+const IF_EXPRESSION_SRC: str = "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1 } else { 2 }; return x; }\n";
+
 @test
 fn if_expression() {
-    let SRC: str = "fn f(n: i32) i32 { let x: i32 = if n > 0 { 1 } else { 2 }; return x; }\n";
-    h::expect_c("then arm assigns the result temp", SRC, "= 1LL;");
-    h::expect_c("else arm assigns the result temp", SRC, "= 2LL;");
-    h::expect_c("the chain branches structurally", SRC, "if (");
-    let mut run = String::from_str(SRC);
+    h::expect_c("then arm assigns the result temp", IF_EXPRESSION_SRC, "= 1LL;");
+    h::expect_c("else arm assigns the result temp", IF_EXPRESSION_SRC, "= 2LL;");
+    h::expect_c("the chain branches structurally", IF_EXPRESSION_SRC, "if (");
+}
+
+fn if_expression_cases(b: &mut h::ExitBatch) {
+    let mut run = String::from_str(IF_EXPRESSION_SRC);
     run.push_str("fn main() i32 { return f(5) * 10 + f(-5) - 12; }\n");
-    h::expect_exit("each arm gives its own value", &run, 0);
+    b.add("each arm gives its own value", &run, 0);
 }
 
 @test
 fn array_literals() {
-    // Every element of a literal; a designated literal re-made in a loop zero-fills its tail each time
-    // (the 50 written into the tail must not survive into the next iteration); a repeat evaluates its
-    // element once, a call included; a literal argument reaches the callee by value.
-    h::expect_exit(
-        "array literals",
-        "static mut G: i32 = 0;\nfn tick() u8 {\n  unsafe G += 1;\n  return 3;\n}\nfn probe(n: i32) u32 {\n  let mut s: u32 = 0;\n  for i in 0..n {\n    if i == 0 {\n      continue;\n    }\n    let mut fp: [u32; 4] = [[0] = 1];\n    s += fp[3] + fp[2];\n    fp[3] = 50;\n  }\n  return s;\n}\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn rep(k: u8) u8 { let a = [k * 3; 4]; return a[0] + a[3]; }\nfn main() i32 {\n  let a: [i32; 3] = [1, 2, 3];\n  let t = [tick(); 4];\n  let ok = a[0] + a[1] + a[2] == 6 && probe(4) == 0 && rep(2) == 12 && t[0] + t[3] == 6 && unsafe G == 1 && g([1, 2, 3]) == 4;\n  return if ok { 0 } else { 1 };\n}\n",
-        0,
-    );
     // An emission property, not behavior: a repeat computes a pure element once and copies it.
     h::expect_c_absent(
         "a repeat computes its element once",
         "fn f(k: u8) u8 { let a = [k * 3; 4]; return a[3]; }\n",
         "a[1] = __sc_mul_u8",
+    );
+}
+
+fn array_literals_cases(b: &mut h::ExitBatch) {
+    // Every element of a literal; a designated literal re-made in a loop zero-fills its tail each time
+    // (the 50 written into the tail must not survive into the next iteration); a repeat evaluates its
+    // element once, a call included; a literal argument reaches the callee by value.
+    b.add(
+        "array literals",
+        "static mut G: i32 = 0;\nfn tick() u8 {\n  unsafe G += 1;\n  return 3;\n}\nfn probe(n: i32) u32 {\n  let mut s: u32 = 0;\n  for i in 0..n {\n    if i == 0 {\n      continue;\n    }\n    let mut fp: [u32; 4] = [[0] = 1];\n    s += fp[3] + fp[2];\n    fp[3] = 50;\n  }\n  return s;\n}\nfn g(a: [i32; 3]) i32 { return a[0] + a[2]; }\nfn rep(k: u8) u8 { let a = [k * 3; 4]; return a[0] + a[3]; }\nfn main() i32 {\n  let a: [i32; 3] = [1, 2, 3];\n  let t = [tick(); 4];\n  let ok = a[0] + a[1] + a[2] == 6 && probe(4) == 0 && rep(2) == 12 && t[0] + t[3] == 6 && unsafe G == 1 && g([1, 2, 3]) == 4;\n  return if ok { 0 } else { 1 };\n}\n",
+        0,
     );
 }
 
@@ -388,13 +404,7 @@ fn align_constant_expression_matches_literal() {
     assert(unsafe str::from_cstr(lit.code) == unsafe str::from_cstr(ex.code), "the expression form emits the same C");
 }
 
-// `@align(N)` on a `static mut` aligns its C object: the definition and the `extern` declaration
-// spell `_Alignas(N)` in every definition path (an array literal, a repeat and a struct through the
-// static graph, a scalar, an empty struct); a value at most the type's own alignment spells nothing,
-// as C rejects a weaker specifier.
-@test
-fn aligned_statics() {
-    let src = M"(struct P { pub a: i32, pub b: f32 }
+const ALIGNED_STATICS_SRC: str = M"(struct P { pub a: i32, pub b: f32 }
 const W: u32 = 128;
 @align(64)
 static mut A: [f32; 16] = [0.0; 16];
@@ -419,7 +429,14 @@ fn main() i32 {
     }
 }
 )";
-    let c = h::compile_c(src);
+
+// `@align(N)` on a `static mut` aligns its C object: the definition and the `extern` declaration
+// spell `_Alignas(N)` in every definition path (an array literal, a repeat and a struct through the
+// static graph, a scalar, an empty struct); a value at most the type's own alignment spells nothing,
+// as C rejects a weaker specifier.
+@test
+fn aligned_statics() {
+    let c = h::compile_c(ALIGNED_STATICS_SRC);
     assert(c.ok(), "the program compiles");
     assert(c.code_has("_Alignas(64) float A[16] = {"), "a repeat");
     assert(c.code_has("extern _Alignas(64) float A[16];"), "the declaration");
@@ -428,7 +445,10 @@ fn main() i32 {
     assert(c.code_has("_Alignas(256) uint8_t X = 7;"), "a scalar");
     assert(c.code_has("_Alignas(64) P Z = {0};"), "an empty struct");
     assert(!c.code_has("_Alignas(2)"), "a weaker alignment spells nothing");
-    h::expect_exit("aligned statics", src, 0);
+}
+
+fn aligned_statics_cases(b: &mut h::ExitBatch) {
+    b.add("aligned statics", ALIGNED_STATICS_SRC, 0);
 }
 
 // An all-zero member or element of a static is left out of its initializer, which C zero-fills: a nested
@@ -748,7 +768,10 @@ fn read_only_constants() {
     h::expect_c("a str constant is const", RO_CONSTS, "const str S");
     h::expect_c_absent("a struct constant stays writable", RO_CONSTS, "const P Q");
     h::expect_c_absent("a static mut stays writable", RO_CONSTS, "const int32_t M");
-    h::expect_exit("read-only constants read their values", RO_CONSTS, 0);
+}
+
+fn read_only_constants_cases(b: &mut h::ExitBatch) {
+    b.add("read-only constants read their values", RO_CONSTS, 0);
 }
 
 // A bounds check the compiler proves leaves no store of its condition: the folded jump keeps the
@@ -770,7 +793,10 @@ fn main() i32 {
 @test
 fn a_proven_bounds_check_stores_no_condition() {
     h::expect_c_absent("no dead condition store", PROVEN_INDEX, "(i >= s.len)");
-    h::expect_exit("the loop reads every byte", PROVEN_INDEX, 0);
+}
+
+fn a_proven_bounds_check_stores_no_condition_cases(b: &mut h::ExitBatch) {
+    b.add("the loop reads every byte", PROVEN_INDEX, 0);
 }
 
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
@@ -804,4 +830,18 @@ fn borrowed_local_declares_at_its_initializer() {
         "fn f(n: u64) u64 {\n    let mut pad = Array::<u64, 8>::new();\n    pad[7] = n;\n    return pad[7] + n;\n}\nfn main() i32 { return f(1) as i32 - 2; }\n",
         "Array__u64__8 pad = ",
     );
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    broad_cases(&mut b);
+    control_cases(&mut b);
+    ranges_cases(&mut b);
+    if_expression_cases(&mut b);
+    array_literals_cases(&mut b);
+    aligned_statics_cases(&mut b);
+    read_only_constants_cases(&mut b);
+    a_proven_bounds_check_stores_no_condition_cases(&mut b);
+    b.run();
 }

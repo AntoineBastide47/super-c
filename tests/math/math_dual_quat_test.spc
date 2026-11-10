@@ -41,10 +41,6 @@ fn eps_dq(a: dualquat, b: dualquat, eps: f32) bool {
     return eps_quat(a.real, b.real, eps) && eps_quat(a.dual, b.dual, eps);
 }
 
-const fn copies<T: Copy>(x: T) (T, T) {
-    return (x, x);
-}
-
 const DQ_ID: dualquat = DualQuat::<f32>::identity();
 const DQ_T: ddualquat = DualQuat::<f64>::from_orientation_translation(
     Quat::<f64>::identity(),
@@ -55,15 +51,6 @@ const DQ_P: vec3 = DualQuat::<f32>::from_orientation_translation(Quat::<f32>::id
 );
 
 // Construction, scalar products, inverse, composition and size
-
-// A `DualQuat` is `Copy`: both copies compare equal.
-@test
-fn dual_quat_ctr() {
-    let (a, b) = copies(dual_quat_identity::<f32>());
-    assert(a == b);
-    let (c, d) = copies(dual_quat_identity::<f64>());
-    assert(c == d);
-}
 
 @test
 fn dquat_type() {

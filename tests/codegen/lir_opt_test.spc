@@ -209,6 +209,35 @@ fn main() i32 {
 }
 )";
 
+// Assert that `src` gives the same output built for debug and for release, and return the release
+// build's `SC_LIR_PRINT=name` output: one release build serves both. The vector lane builds every
+// differential program for wasm32, so there the text comes from a host build of its own.
+fn same_and_printed(label: str, src: str, name: str) String {
+    let print = format("SC_LIR_PRINT={}", name);
+    let a = h::diff_build(src, ["--profile=debug"]);
+    let b = h::diff_build(src, ["--profile=release", print.as_str()]);
+    if !a.built || !b.built {
+        eprintln("{}: {}{}", label, a.diag.as_str(), b.diag.as_str());
+    }
+    assert(a.built && b.built, label);
+    let d = h::same_runs(&a, &b, [""]);
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
+    if !h::simd_lane() {
+        return String::from_str(&b.diag);
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", src);
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", name, "build --profile=release main.spc -o app");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), label);
+    return String::from_str(r.text());
+}
+
 // The text of function `name` in `SC_LIR_PRINT` output `out`: to the next function.
 fn printed<'a>(out: str<'a>, name: str) str<'a> {
     let head = format("fn @{}\n", name);
@@ -799,18 +828,13 @@ fn main() i32 {
 // `x + 1`. A push onto a vector of unknown capacity calls the growth. Both profiles print the same.
 @test
 fn a_new_vectors_first_growth_inlines_and_its_buffer_goes() {
-    h::expect_same_output("two pushes", TWO_PUSHES, ["--profile=debug"], ["--profile=release"]);
-    let p = cli::proj_new();
-    p.mkfile("main.spc", TWO_PUSHES);
-    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "two", "build --profile=release main.spc -o app");
-    let m = printed(r.text(), "two");
-    let ok = r.ok() && m.len() != 0 && !m.contains("call") && !m.contains("load") && !m.contains("store") && !m.contains(
-        "slot",
-    );
-    let g = printed(r.text(), "two_more");
+    let text = same_and_printed("two pushes", TWO_PUSHES, "two");
+    let m = printed(&text, "two");
+    let ok = m.len() != 0 && !m.contains("call") && !m.contains("load") && !m.contains("store") && !m.contains("slot");
+    let g = printed(&text, "two_more");
     let out = g.contains("grow_for") && !g.contains("realloc");
     if !ok || !out {
-        r.show();
+        eprintln("{}", text.as_str());
     }
     assert(ok, "no allocation, growth, free or memory access");
     assert(out, "a push onto a vector of unknown capacity calls the growth");
@@ -821,14 +845,11 @@ fn a_new_vectors_first_growth_inlines_and_its_buffer_goes() {
 // stays its own until the loop transforms run. Both profiles print the same sum.
 @test
 fn sides_that_add_and_subtract_one_merge() {
-    h::expect_same_output("merged sides", BUMP, ["--profile=debug"], ["--profile=release"]);
-    let p = cli::proj_new();
-    p.mkfile("main.spc", BUMP);
-    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "bump", "build --profile=release main.spc -o app");
-    let m = printed(r.text(), "bump");
-    let ok = r.ok() && m.contains("select.i32") && m.contains("add.v4i32") && !m.contains("sub.v4i32");
+    let text = same_and_printed("merged sides", BUMP, "bump");
+    let m = printed(&text, "bump");
+    let ok = m.contains("select.i32") && m.contains("add.v4i32") && !m.contains("sub.v4i32");
     if !ok {
-        r.show();
+        eprintln("{}", text.as_str());
     }
     assert(ok, "one loop adds the select");
 }
@@ -995,20 +1016,14 @@ fn vector_loops_interleave_the_targets_copies() {
 // sysroot; the optimizer prints before it.
 @test
 fn wasm_splits_wide_products_lowers_ranges_and_keeps_quotients() {
-    let names: [str; 3] = ["mh", "cls", "q4"];
-    // A project per function: a second build of one project is cached and prints nothing.
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "@noinline\nfn wz_mh(a: u64, b: u64) u64 {\n    return ((a as u128 * b as u128) >> 64) as u64;\n}\n\n@noinline\nfn wz_cls(c: u8) u8 {\n    return switch c {\n        97..=122 => 1,\n        65..=90 => 1,\n        48..=57 => 2,\n        32 | 9 | 10 => 3,\n        _ => 0,\n    };\n}\n\n@noinline\nfn wz_q4(x: i32) i32 {\n    return x / 4;\n}\n\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as u64;\n    return (wz_mh(n, n) + wz_cls(n as u8) as u64) as i32 + wz_q4(n as i32);\n}\n",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "wz_", "build --profile=release --target=wasm main.spc -o app");
+    let names: [str; 3] = ["wz_mh", "wz_cls", "wz_q4"];
     for k in 0..3usize {
-        let p = cli::proj_new();
-        p.mkfile(
-            "main.spc",
-            "@noinline\nfn mh(a: u64, b: u64) u64 {\n    return ((a as u128 * b as u128) >> 64) as u64;\n}\n\n@noinline\nfn cls(c: u8) u8 {\n    return switch c {\n        97..=122 => 1,\n        65..=90 => 1,\n        48..=57 => 2,\n        32 | 9 | 10 => 3,\n        _ => 0,\n    };\n}\n\n@noinline\nfn q4(x: i32) i32 {\n    return x / 4;\n}\n\nfn main(args: Vector<str>) i32 {\n    let n = args.len() as u64;\n    return (mh(n, n) + cls(n as u8) as u64) as i32 + q4(n as i32);\n}\n",
-        );
-        let r = cli::superc_env_in(
-            p.dir(),
-            "SC_LIR_PRINT",
-            unsafe names[k],
-            "build --profile=release --target=wasm main.spc -o app",
-        );
         let f0 = printed(r.text(), unsafe names[k]);
         let f = if f0.len() != 0 {
             f0
@@ -1099,7 +1114,9 @@ fn main() i32 {
 
 @test
 fn float_function_loops_vectorize_with_the_calls_results() {
-    h::expect_same_output("float function loops", FLOAT_CALLS, ["--profile=debug"], ["--profile=release"]);
+    let base = h::diff_build(FLOAT_CALLS, ["--profile=debug"]);
+    assert(base.built, base.diag.as_str());
+    agrees("float function loops", &base, ["--profile=release"]);
     if cli::on_wasm() {
         return;
     }
@@ -1107,20 +1124,10 @@ fn float_function_loops_vectorize_with_the_calls_results() {
     // and FMA3's. Not on the vector lane, which builds every program for wasm32.
     let x86 = tgt::isa(tgt::host_isa()).name == "x86_64" && !h::simd_lane();
     if x86 && detect::has_level(cpu::Level::V2) {
-        h::expect_same_output(
-            "float function loops, x86-64-v2",
-            FLOAT_CALLS,
-            ["--profile=debug"],
-            ["--profile=release", "--target-cpu=x86-64-v2"],
-        );
+        agrees("float function loops, x86-64-v2", &base, ["--profile=release", "--target-cpu=x86-64-v2"]);
     }
     if x86 && detect::has_level(cpu::Level::V3) {
-        h::expect_same_output(
-            "float function loops, x86-64-v3",
-            FLOAT_CALLS,
-            ["--profile=debug"],
-            ["--profile=release", "--target-cpu=x86-64-v3"],
-        );
+        agrees("float function loops, x86-64-v3", &base, ["--profile=release", "--target-cpu=x86-64-v3"]);
     }
     // The lanes of arm64 and of each x86-64 level (a cross build prints its bodies before its link).
     let a = float_calls_printed("--target=macos --arch=aarch64");
@@ -1149,6 +1156,20 @@ fn float_function_loops_vectorize_with_the_calls_results() {
     }
     assert(ok, "arm64: the reductions keep lanes; the fused multiply-adds, floors and absolute values are lanes");
     assert(ox, "x86-64: the same, the floors with SSE4.1 and the fused multiply-adds with FMA3 alone");
+}
+
+// Assert that FLOAT_CALLS built with `opts` gives the output of its build `base`.
+fn agrees(label: str, base: &h::DiffBuild, opts: []str) {
+    let b = h::diff_build(FLOAT_CALLS, opts);
+    let d = if b.built {
+        h::same_runs(base, &b, [""])
+    } else {
+        format("the program does not build:\n{}", b.diag.as_str())
+    };
+    if d.len() != 0 {
+        eprintln("{}: {}", label, d.as_str());
+    }
+    assert(d.len() == 0, label);
 }
 
 // What the release build of FLOAT_CALLS in a fresh project prints of its bodies `fl_*` (`SC_LIR_PRINT`),
@@ -17495,15 +17516,12 @@ fn loop_loads(m: str) u32 {
 // shared root a call outside them takes. Both profiles print the same.
 @test
 fn loop_loads_of_other_fields_leave_past_a_push() {
-    h::expect_same_output("marks", MARKS, ["--profile=debug"], ["--profile=release"]);
-    let p = cli::proj_new();
-    p.mkfile("main.spc", MARKS);
-    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "mark_", "build --profile=release main.spc -o app");
-    let all = loop_loads(printed(r.text(), "S__mark_all"));
-    let rest = loop_loads(printed(r.text(), "S__mark_rest"));
-    let ok = r.ok() && all != 0 && all <= 6 && rest != 0 && rest <= 6;
+    let text = same_and_printed("marks", MARKS, "mark_");
+    let all = loop_loads(printed(&text, "S__mark_all"));
+    let rest = loop_loads(printed(&text, "S__mark_rest"));
+    let ok = all != 0 && all <= 6 && rest != 0 && rest <= 6;
     if !ok {
-        r.show();
+        eprintln("{}", text.as_str());
         eprint("loop loads: {} {}\n", all, rest);
     }
     assert(ok, "only the pushed vector's fields and the read elements load in the loops");
@@ -17637,14 +17655,11 @@ fn main() i32 {
 // Both profiles print the same lengths.
 @test
 fn a_truncation_to_zero_is_one_store() {
-    h::expect_same_output("truncate", TRUNCATE, ["--profile=debug"], ["--profile=release"]);
-    let p = cli::proj_new();
-    p.mkfile("main.spc", TRUNCATE);
-    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "clear_all", "build --profile=release main.spc -o app");
-    let m = printed(r.text(), "clear_all");
-    let ok = r.ok() && m.contains("store") && !m.contains("= load") && !m.contains(" br ");
+    let text = same_and_printed("truncate", TRUNCATE, "clear_all");
+    let m = printed(&text, "clear_all");
+    let ok = m.contains("store") && !m.contains("= load") && !m.contains(" br ");
     if !ok {
-        r.show();
+        eprintln("{}", text.as_str());
     }
     assert(ok, "one store");
 }

@@ -110,46 +110,21 @@ fn the_optimized_lir_agrees_with_ctfe_on_the_math_tests() {
     read_back(&p, true);
 }
 
-// A closure a generic function takes is called directly: its type names its body, so the call needs no
+const LIR_HEADS: str = M"(// A closure a generic function takes is called directly: its type names its body, so the call needs no
 // function pointer, and the optimizer may inline it; a capturing closure takes its environment first.
-@test(timeout = 300)
-fn a_closure_a_generic_function_takes_is_called_directly() {
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(fn apply<F: fn(i64) i64>(f: F, x: i64) i64 {
+fn apply<F: fn(i64) i64>(f: F, x: i64) i64 {
     return f(x);
 }
 
-fn main() i32 {
+fn main_0() i32 {
     let k: i64 = 3;
     let r = apply(|x: i64| x + k, 4) + apply(|x: i64| x * 2, 5);
     return (r - 17) as i32;
 }
-)",
-    );
-    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
-    let r = p.compile_flags_env("", "main.spc", &env);
-    assert(r.ok(), "the program builds and returns 0");
-    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
-    assert(!text.contains("callind") && text.contains("closure_b"), text.as_str());
-}
-
 // The lowering marks a parameter's referent read-only (`readonly`) for a `&T` of a struct whose members
 // hold no `UnsafeCell` and for a `str` (`inner readonly`, its bytes); not for a `&T` whose `T` holds a
 // cell, which changes through the shared reference.
-@test(timeout = 300)
-fn shared_references_to_frozen_structs_and_strs_are_read_only() {
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::mem::cell;
+import std::mem::cell;
 
 struct Pair {
     pub a: u64,
@@ -176,45 +151,14 @@ fn counted(c: &Counter) u32 {
     return c.n.get();
 }
 
-fn main() i32 {
+fn main_1() i32 {
     let p = Pair { a: 2, b: [0, 3, 0, 0] };
     let c = Counter { n: cell::Cell::<u32>::new(4) };
     return (pair_sum(&p) as u32 + text_len("ab") as u32 + counted(&c) - 12) as i32;
 }
-)",
-    );
-    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
-    let r = p.compile_flags_env("", "main.spc", &env);
-    assert(r.ok(), "the program builds and returns 0");
-    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
-    assert(head_of(&text, "main__pair_sum").contains("ref p0 24 readonly"), text.as_str());
-    assert(head_of(&text, "main__text_len").contains("ref p0 1 inner readonly"), text.as_str());
-    assert(!head_of(&text, "main__counted").contains("readonly"), text.as_str());
-}
-
-// The lines of function `name` in LIR text `text` before its entry block.
-fn head_of(text: &String, name: str) String {
-    let t = text.as_str();
-    let h = format("fn @{}\n", name);
-    let at = t.find(&h);
-    assert(at >= 0, h.as_str());
-    let rest = t.slice(at as usize, t.len());
-    let end = rest.find("\nb0(");
-    assert(end >= 0, rest);
-    return String::from_str(rest.slice(0, end as usize));
-}
-
 // The lowering lists a reference parameter's `@owned` pointer fields (`owned p<k> <offset>`), those of
 // the structs its referent holds by value too; for a `&T`, only those whose buffer holds no cell.
-@test(timeout = 300)
-fn owned_fields_of_reference_parameters_are_listed() {
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        M"(import std::mem::cell;
+import std::mem::cell;
 
 struct Inner {
     @owned pub p: *mut u64,
@@ -246,7 +190,7 @@ fn cells(c: &Cells) u32 {
     return unsafe (*c.c).get();
 }
 
-fn main() i32 {
+fn main_2() i32 {
     let mut x: u64 = 1;
     let y: u32 = 2;
     let mut o = Outer { tag: 3, i: Inner { p: &mut x, n: 0 }, q: &y };
@@ -254,17 +198,44 @@ fn main() i32 {
     let c = Cells { c: &mut z };
     return (take(&mut o) + look(&o) + cells(&c) as u64 - 10) as i32;
 }
-)",
-    );
-    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_NO_TU_CACHE=1 SC_NO_EMIT_CACHE=1 SC_LIR_TEXT={}/pkg.lir", p.dir());
+fn main() i32 {
+    return main_0() + main_1() + main_2();
+}
+)";
+
+// The program above, built once with its LIR text written (`SC_LIR_TEXT`), unoptimized.
+@test(timeout = 300)
+fn lir_heads_name_their_facts() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", LIR_HEADS);
+    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_LIR_TEXT={}/pkg.lir", p.dir());
     let r = p.compile_flags_env("", "main.spc", &env);
-    assert(r.ok(), "the program builds and returns 0");
+    assert(r.ok(), "the program builds");
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
+    assert(!text.contains("callind") && text.contains("closure_b"), text.as_str());
+    assert(head_of(&text, "main__pair_sum").contains("ref p0 24 readonly"), text.as_str());
+    assert(head_of(&text, "main__text_len").contains("ref p0 1 inner readonly"), text.as_str());
+    assert(!head_of(&text, "main__counted").contains("readonly"), text.as_str());
     let take = head_of(&text, "main__take");
     let look = head_of(&text, "main__look");
     assert(lines_with(&take, "owned p0 ") == 2 && take.contains("noalias"), text.as_str());
     assert(lines_with(&look, "owned p0 ") == 2 && look.contains("readonly"), text.as_str());
     assert(!head_of(&text, "main__cells").contains("owned"), text.as_str());
+}
+
+// The lines of function `name` in LIR text `text` before its entry block.
+fn head_of(text: &String, name: str) String {
+    let t = text.as_str();
+    let h = format("fn @{}\n", name);
+    let at = t.find(&h);
+    assert(at >= 0, h.as_str());
+    let rest = t.slice(at as usize, t.len());
+    let end = rest.find("\nb0(");
+    assert(end >= 0, rest);
+    return String::from_str(rest.slice(0, end as usize));
 }
 
 // The lines of `text` that hold `pat`.

@@ -485,8 +485,9 @@ fn a_cancel_stops_the_check() {
         let r = s.check_with(&RequestOptions { cancel: Some(tok), deadline_ns: 0, result_limit: 0 });
         canceller.join();
         if r.is_ok() {
+            // The check ended before this delay: it ends before every longer one too.
             assert(delay_ms != 0, "a cancel before the check stops it");
-            continue;
+            break;
         }
         assert(r.unwrap_err().code == Code::Cancelled, "the check stops");
         assert(!s.checked(), "a stopped check leaves the session unchecked");

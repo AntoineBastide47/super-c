@@ -88,6 +88,23 @@ pub fn read_text(path: str) String {
     return text;
 }
 
+/// Whether diagnostic text `text` contains `needle` outside the quoted source lines of its location
+/// blocks (`<line> | <source>`): a needle taken from the source would match any error that quotes it.
+pub fn diag_has(text: str, needle: str) bool {
+    let mut kept = String::new();
+    for line in text.lines() {
+        let mut i: usize = 0;
+        while i < line.len() && line.byte_at(i) >= b'0' && line.byte_at(i) <= b'9' {
+            i += 1;
+        }
+        if i == 0 || !line.slice(i, line.len()).starts_with(" | ") {
+            kept.push_str(line);
+            kept.push_byte(b'\n');
+        }
+    }
+    return kept.contains(needle);
+}
+
 // Copy `needle` to provide the NUL terminator required by strstr.
 pub fn contains_str(hay: *const char, needle: str) bool {
     if hay == null {
@@ -352,10 +369,21 @@ pub fn run_with(cmd: *const char, in_path: *const char, out_path: *const char, e
         eprint("cannot wait for {}: OS error {}\n", line, w.unwrap_err().code);
         return -1;
     }
+    // A signal ends the run as the shell reports it, 128 plus its number, whether or not `sh` ran the
+    // program in its own process.
     return switch w.unwrap() {
         Code(code) => code,
-        _ => -1,
+        Signal(s) => 128 + s,
     };
+}
+
+/// Whether a run that ended with `exit` (`run_with`) ended in `abort`: SIGABRT on POSIX, exit code 3 or
+/// 0xC0000409 (the fast-fail form) on Windows.
+pub const fn aborted(exit: i32) bool {
+    if on_windows() {
+        return exit == 3 || exit == 0xC0000409u32 as i32;
+    }
+    return exit == 134;
 }
 
 // The redirect of a child stream to the file `path` names, or `none` for a null `path`.
@@ -853,8 +881,11 @@ extend Proj {
     /// Assert that compiling `mainrel` fails with output containing `want`.
     pub fn expect_fail(self: &Proj, mainrel: str, want: str) {
         let r = self.compile(mainrel);
-        assert(r.exit != 0, "expected nonzero exit on a bad program");
-        assert(r.out_has(want), "diagnostic missing expected text");
+        let ok = r.exit != 0 && diag_has(r.text(), want);
+        if !ok {
+            eprintln("{}: exit {}, expected a failure with '{}':\n{}", mainrel, r.exit, want, r.text());
+        }
+        assert(ok, mainrel);
     }
 
     /// Check every case of `b` (see `Batch`) through `compile_flags` with `b.flags`.
@@ -1236,7 +1267,7 @@ extend Batch {
                 if d.error {
                     errors += 1;
                 }
-                let held = out.slice(d.start, d.end).contains(self.wants.at(j).as_str());
+                let held = diag_has(out.slice(d.start, d.end), self.wants.at(j).as_str());
                 found = found || held && (at.len() == 0 || d.loc.eq_str(at));
             }
             if !stray && found && errors >= 1 && (!self.one || errors == 1) {
@@ -1257,11 +1288,12 @@ extend Batch {
             ok = ok && !out.contains(f.as_str());
         }
         if at.len() == 0 {
-            ok = ok && out.contains(want);
+            ok = ok && diag_has(out, want);
         } else {
             let mut found = false;
             for d in diags_of(out).iter() {
-                found = found || d.file.equals(&self.file) && d.loc.eq_str(at) && out.slice(d.start, d.end).contains(
+                found = found || d.file.equals(&self.file) && d.loc.eq_str(at) && diag_has(
+                    out.slice(d.start, d.end),
                     want,
                 );
             }

@@ -2051,6 +2051,13 @@ extend Mangler {
                 out.push_str("arr");
                 out.push_u64(n as u64);
                 out.push_str("_");
+            } else if self.pat_params && y.arr_sym() {
+                // A conformance pattern's length spells its parameter (`iface_suffix`).
+                out.push_str("arr");
+                if !self.type_m(pm, y.as_data.arr.len, out) {
+                    return false;
+                }
+                out.push_str("_");
             } else if self.macro_on {
                 out.push_str("arr_");
             } else {
@@ -2066,11 +2073,15 @@ extend Mangler {
             // `__sc_v<N>_<lane>` and `__sc_mask<N>`: the runtime's reserved prefix, which no user type
             // spells.
             let n = self.arr_len(pm, &y);
-            if n < 0 {
+            if n < 0 && !(self.pat_params && y.arr_sym()) {
                 return false;
             }
             out.push_str(if_s(y.kind == TypeKind::TYPE_SIMD, "__sc_v", "__sc_mask"));
-            out.push_u64(n as u64);
+            if n >= 0 {
+                out.push_u64(n as u64);
+            } else if !self.type_m(pm, y.as_data.arr.len, out) {
+                return false;
+            }
             if y.kind == TypeKind::TYPE_MASK {
                 return true;
             }

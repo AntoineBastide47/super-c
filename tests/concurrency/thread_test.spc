@@ -161,36 +161,41 @@ fn zero_sized_result() {
 
 // --- failures are fatal, after release ------------------------------------------------------------------
 
-// A program whose first `fail` operation fails spawns a thread over an owning capture: the spawn releases
-// the capture, then the process ends with its panic. A child process, so the panic's text is checked.
-fn spawn_failure(fail: str) {
-    if h::target_lane() {
+// A program whose first armed operation fails spawns a thread over an owning capture: the spawn releases
+// the capture, then the process ends with its panic. A child process, so the panic's text is checked. Its
+// argument count picks the failure: none for the thread's creation, one for its handle's allocation.
+const SPAWN_FAILURE: str = M"(import sc_runtime;
+import std::parallel::thread as thread;
+struct T { pub n: i32 }
+extend T as Free {
+    pub fn free(self: &mut T) { eprintln("released"); }
+}
+fn main(args: Vector<str>) i32 {
+    let t = T { n: 4 };
+    let fail = if args.len() == 1 { sc_runtime::FAIL_THREAD_CREATE } else { sc_runtime::FAIL_ALLOC };
+    unsafe sc_runtime::sc_rt_fail_arm(fail, 1);
+    let _h = thread::spawn(|| t.n);
+    return 0;
+}
+)";
+
+@test
+fn spawn_fails_when_the_os_refuses_a_thread_or_the_handle_cannot_be_allocated() {
+    if h::simd_lane() {
         return; // WASI has no threads: a spawn there ends the process at once
     }
-    let r = h::compile_and_run(
-        format(
-            "import sc_runtime;\nimport std::parallel::thread as thread;\nstruct T {{ pub n: i32 }}\nextend T as Free {{\n    pub fn free(self: &mut T) {{ eprintln(\"released\"); }}\n}}\nfn main() i32 {{\n    let t = T {{ n: 4 }};\n    unsafe sc_runtime::sc_rt_fail_arm(sc_runtime::{}, 1);\n    let _h = thread::spawn(|| t.n);\n    return 0;\n}}\n",
-            fail,
-        ).as_str(),
-    );
-    assert(r.built, fail);
-    let out = unsafe str::from_cstr(r.out);
-    let rel = out.find("released");
-    let pan = out.find("panic: thread::spawn: the OS cannot create a thread");
-    if r.exit == 0 || rel < 0 || pan < rel {
-        eprintln("{}: exit {}: {}", fail, r.exit, out);
+    let b = h::diff_build(SPAWN_FAILURE, []);
+    assert(b.built, b.diag.as_str());
+    for args in ["", "alloc"] {
+        let r = h::diff_run(&b, args);
+        let out = r.err.as_str();
+        let rel = out.find("released");
+        let pan = out.find("panic: thread::spawn: the OS cannot create a thread");
+        if r.exit == 0 || rel < 0 || pan < rel {
+            eprintln("'{}': exit {}: {}{}", args, r.exit, r.out.as_str(), out);
+        }
+        assert(r.exit != 0 && rel >= 0 && pan > rel, "the capture is released, then the spawn panics");
     }
-    assert(r.exit != 0 && rel >= 0 && pan > rel, "the capture is released, then the spawn panics");
-}
-
-@test
-fn spawn_fails_when_the_os_refuses_a_thread() {
-    spawn_failure("FAIL_THREAD_CREATE");
-}
-
-@test
-fn spawn_fails_when_the_handle_cannot_be_allocated() {
-    spawn_failure("FAIL_ALLOC");
 }
 
 @test(should_panic)

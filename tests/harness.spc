@@ -55,10 +55,9 @@ extend Compiled {
     pub(package) const fn ok(self: &Self) bool {
         return self.errors == 0;
     }
-    // Whether the first error message contains `needle` (matched as a substring).
-    /// True when the first diagnostic contains `needle`.
+    /// True when the first diagnostic contains `needle` outside its quoted source lines (`cli::diag_has`).
     pub(package) fn msg_has(self: &Self, needle: str) bool {
-        return cli::contains_str(&self.first[0], needle);
+        return cli::diag_has(str::from_cbuf(self.first), needle);
     }
 }
 
@@ -684,9 +683,9 @@ pub(package) fn expect_trap(label: str, src: str, msg: str) {
 /// of a scratch program, with its `fn main()` or `fn main(NAME: Vector<str>)` renamed `case_main` and
 /// made public, builds the program once, and runs it once per case with the argument `k`; a case
 /// whose `main` takes the arguments gets them without `k`, as a run of its own program does. A case
-/// with another `main`, and every case of a program that does not build (two cases whose C
-/// declarations clash, a case that does not compile), builds alone through `expect_exit` or
-/// `expect_trap`, so a failure still names its case.
+/// with another `main` builds alone through `expect_exit` or `expect_trap`. When the program does not
+/// build, every case builds alone, so a failure still names its case; when each then passes, the cases
+/// clash as one program (two cases whose C declarations clash) and the run fails.
 pub(package) struct ExitBatch {
     labels: Vector<String>,
     srcs: Vector<String>,
@@ -828,7 +827,14 @@ extend ExitBatch {
             for i in 0..batched.len() {
                 self.alone(batched[i]);
             }
-            return;
+            // Every case passed alone: they clash as one program (two cases declare one C name), and each
+            // case now costs a build of its own. Move the clashing case to its own test or rename.
+            let mut labels = String::new();
+            for i in 0..batched.len() {
+                labels.format_into("\n  {}", self.labels[batched[i]].as_str());
+            }
+            eprintln("harness: these cases build alone but not as one program:{}", labels.as_str());
+            assert(false, "harness: the batch builds as one program");
         }
         let mut outp = format("{}/out", d);
         let mut exits = Vector::<i32>::new();
@@ -1038,7 +1044,9 @@ pub(package) fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
 /// Assert that the build of `src` fails with a diagnostic containing `needle`, before its C compile.
 pub(package) fn expect_build_err(label: str, src: str, needle: str) {
     let b = diff_build(src, []);
-    let ok = !b.built && b.diag.contains(needle) && !b.diag.contains("C compile failed") && !b.diag.contains("internal");
+    let ok = !b.built && cli::diag_has(&b.diag, needle) && !b.diag.contains("C compile failed") && !b.diag.contains(
+        "internal",
+    );
     if !ok {
         eprintln("{}: {}", label, b.diag.as_str());
     }

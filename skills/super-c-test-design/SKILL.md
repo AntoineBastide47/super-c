@@ -20,6 +20,7 @@ fixtures, helpers, runner flags).
 - Leave the caches on. Use `cli::superc_in`; use `SC_NO_CACHE=1` only in a test that
   checks the prelude images.
 - Measure a new or changed test file before handoff (Measuring) and report its CPU time.
+- For each assertion, name one wrong implementation it rejects (Oracles that can fail).
 
 ## Correct tests
 
@@ -34,6 +35,40 @@ fixtures, helpers, runner flags).
   suite's global fixture belongs to `tests/harness.spc` (the prelude snapshot).
 - A failing case must name itself: `ExitBatch`, `cli::Batch` and the differential oracles report
   the label.
+- Before you add a test, search `tests/` for the function or feature name: a case another test
+  already asserts on the same code path is not added again.
+
+## Oracles that can fail
+
+A test must fail for the defect it names. Before handoff, take each assertion and name one wrong
+implementation it rejects; when you cannot name one, the assertion is not an oracle.
+
+- A needle the input already holds proves nothing. A transform test asserts a fact the input does
+  not have: a count that changes, an instruction that disappears, an order that is new. Check the
+  needle against the input LIR, the source, and the unoptimized output.
+- A needle is unique to the fact. `"call m"` matches every call; `"mismatched types"` matches every
+  pair of types. Name the callee, the types, the value.
+- A rejection test names its message, never only `!c.ok()` or a nonzero exit: an unrelated error, or
+  a crash that the feature should have prevented, passes too.
+- A check that a pass ran shows that it ran. A gate or an analysis that prints nothing on success
+  needs a positive mark (a count, `0 violations`) or a run counter the test reads.
+- Inputs separate the right result from the wrong ones. A `<` case has an equal lane that must be
+  false; a predicate has a true case and a false case; `min` and `max` get different arguments;
+  `normalize` gets a non-unit input; `row` and `column` get a non-symmetric matrix; a cast changes
+  the type; a rotation moves its input; vector lanes differ (no `splat`).
+- A round trip compares the result with the original input, not with a second round trip of it:
+  `unpack(pack(unpack(pack(x))))` equal to `unpack(pack(x))` holds for a packer that writes 0.
+- "Differs from X", "is not zero" and "is later than t0" are not oracles. Assert the value, or the
+  bound the claim states.
+- A `should_panic` body holds no assertion that fails on the result of the unchecked code: that
+  panic passes the test. Call the function and discard its result.
+- A scenario program (rungs 4 and 5) obeys the concurrency rules of `super-c-testing` (Test Design
+  Rules) too: it waits for a state (`rt::tasks_waiting(rt::WK_MUTEX)`, a counter), never for a sleep
+  to let another task arrive, and takes a start time before it starts what it measures. A test of
+  file times sets the time it needs (`touch -t`), never two builds within one second.
+- A fixed size that must fit a host limit (recursion depth in a stack, a buffer in a page) depends
+  on the frame size of each ABI and profile. Derive it from the limit, or keep a margin of several
+  times the largest frame the lanes show.
 
 ## The oracle ladder
 
@@ -59,7 +94,14 @@ Rules for the costly rungs:
   `fn name(b: &mut h::ExitBatch)` and run them from `exit_cases_NN` tests of about 20 cases.
   One build serves every case; `add_trap` adds a case that must fail with a message. A case whose
   `main` is neither `fn main()` nor `fn main(NAME: Vector<str>)`, a case that needs a build flag,
-  and a case about a root module's bare C names stay alone.
+  and a case about a root module's bare C names stay alone. A CLI scenario whose only check is the
+  exit code of one file is a rung 4 case: it goes into a provider, not a project of its own. Every
+  run already sets `SC_LEAK_CHECK=fatal` (`cli::run_with`), so a case does not pass it again. A
+  panic that a std function raises before any build-dependent code runs is a rung 2 `should_panic`
+  test in process, not a build.
+- `h::expect_run` builds twice on aarch64 and in the wasm lane (the vector and the scalar entries).
+  Put a file's run cases into one program that selects its case by argument and run it with one
+  `h::expect_runs`.
 - Rung 5: one project per test, reused across its steps. A test that runs its program builds it
   natively (`p.native_build(flags, "main.spc")`: from the root, its outputs under `native/`, so the
   C tree of an earlier `p.compile` stays for `gen_has`), and so runs on every lane. A strict
@@ -81,7 +123,10 @@ Rules for the costly rungs:
   `--emit-c` one by one sets `SC_UNITY_MAX=0` (`cli::set_env`), and a test of packs
   `SC_UNITY_MAX=1`.
 - `SC_NO_CACHE=1` makes every build of that test check the std prelude again. Use it only where the
-  assertion is about the prelude images.
+  assertion is about the prelude images. The same holds for `SC_NO_EMIT_CACHE`, `SC_NO_TU_CACHE`
+  and every other cache switch: a test turns a cache off only when its assertion is about that
+  cache, and then names the reason. A cache left on also tests the cache key: a flag missing from
+  the key gives a stale result.
 - A test that checks cache behavior sets its own `SC_CACHE_DIR` under its scratch directory.
 - The checked std prelude is cached in the cache root too (`<root>/prelude/`): a build
   type-checks only the program, and lowers and borrow-checks only the std bodies it reaches

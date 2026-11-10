@@ -33787,7 +33787,16 @@ extend TypeChecker {
         self.ev_err = false;
         let v = self.ev(self.cur_module(), left);
         if v.kind == iri::IV_BOOL && v.i == 0 {
-            self.errors.emit_span(dc::STATIC_ASSERTION_FAILED, sp, format("static assertion failed"));
+            // The message names the assertion's own text, as the build's flush of a deferred assertion does.
+            let mut msg = String::from_str("static assertion failed");
+            let right = unsafe (*a).at_const(id).as_data.binary.right;
+            if right != NODE_NONE {
+                let raw = unsafe (*a).at_const(right).as_data.literal.raw;
+                if raw.end > raw.start + 2 {
+                    msg.format_into(": {}", diag::span_str(self.source, raw.start + 1, raw.end - 1));
+                }
+            }
+            self.errors.emit_span(dc::STATIC_ASSERTION_FAILED, sp, msg);
         } else if v.kind == iri::IV_NONE && !self.ev_err {
             let trap = unsafe (*ceptr).trap_get();
             if trap.len() != 0 {

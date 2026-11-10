@@ -120,12 +120,7 @@ fn zst_nested_generic_agrees_with_concrete(b: &mut h::ExitBatch) {
     );
 }
 
-// A constant that addresses a zero-sized object (a constant, a field, an element, an array a slice
-// views, a temporary) holds the aligned sentinel, like a reference at run time: the object has no C
-// storage. Every such address is equal.
-@test
-fn zst_constant_references() {
-    const SRC: str = M"(struct Z {}
+const ZST_CONSTANT_REFERENCES_SRC: str = M"(struct Z {}
 @align(8)
 struct Z8 {}
 struct H<'a> { pub z: &'a Z, pub n: i32, pub zs: [Z; 2] }
@@ -155,10 +150,27 @@ fn main() i32 {
     return bad;
 }
 )";
-    h::expect_exit("constants addressing zero-sized objects", SRC, 0);
-    h::expect_c("a field addressing a zero-sized constant", SRC, "H HH = { .z = (void *)&__sc_zst_1, .n = 3 };");
-    h::expect_c("a slice of a zero-sized array", SRC, "Slice__Z ZS = { .ptr = (void *)&__sc_zst_1, .len = 3 };");
-    h::expect_c("an aligned zero-sized constant", SRC, "const Z8 *R8 = (void *)&__sc_zst_8;");
+
+// A constant that addresses a zero-sized object (a constant, a field, an element, an array a slice
+// views, a temporary) holds the aligned sentinel, like a reference at run time: the object has no C
+// storage. Every such address is equal.
+@test
+fn zst_constant_references() {
+    h::expect_c(
+        "a field addressing a zero-sized constant",
+        ZST_CONSTANT_REFERENCES_SRC,
+        "H HH = { .z = (void *)&__sc_zst_1, .n = 3 };",
+    );
+    h::expect_c(
+        "a slice of a zero-sized array",
+        ZST_CONSTANT_REFERENCES_SRC,
+        "Slice__Z ZS = { .ptr = (void *)&__sc_zst_1, .len = 3 };",
+    );
+    h::expect_c("an aligned zero-sized constant", ZST_CONSTANT_REFERENCES_SRC, "const Z8 *R8 = (void *)&__sc_zst_8;");
+}
+
+fn zst_constant_references_cases(b: &mut h::ExitBatch) {
+    b.add("constants addressing zero-sized objects", ZST_CONSTANT_REFERENCES_SRC, 0);
 }
 
 // A zero-length array is zero-sized like any ZST: no local, member or parameter of it is declared
@@ -203,10 +215,13 @@ fn main() i32 {
 
 @test
 fn zero_length_arrays_are_zero_sized() {
-    h::expect_exit("zero-length arrays", ZERO_LEN, 0);
     h::expect_c_absent("no zero-length local", ZERO_LEN, "int32_t e[0]");
     h::expect_c_absent("no zero-length member", ZERO_LEN, "uint32_t a[0]");
     h::expect_c("a pointer to a zero-length array is a data pointer", ZERO_LEN, "const void *ps = ");
+}
+
+fn zero_length_arrays_are_zero_sized_cases(b: &mut h::ExitBatch) {
+    b.add("zero-length arrays", ZERO_LEN, 0);
 }
 
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
@@ -226,5 +241,13 @@ fn exit_cases_00() {
     over_aligned_zst_field_pads_the_layout(&mut b);
     zst_element_array_elides(&mut b);
     zst_nested_generic_agrees_with_concrete(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    zst_constant_references_cases(&mut b);
+    zero_length_arrays_are_zero_sized_cases(&mut b);
     b.run();
 }

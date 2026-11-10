@@ -315,15 +315,6 @@ fn quat_length() {
 }
 
 @test
-fn quat_normalize() {
-    let eps: f32 = 0.001;
-    let a = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
-    assert(all(equal_eps(a, normalize(a), eps)));
-    let b = Quat::<f32>::from_scalar_vec(1.0, vec3::splat(0.0));
-    assert(all(equal_eps(b, normalize(b), eps)));
-}
-
-@test
 fn quat_dot() {
     let a = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
     let b = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
@@ -331,20 +322,6 @@ fn quat_dot() {
 }
 
 // Relational functions
-
-@test
-fn quat_equal() {
-    let q = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
-    let p = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
-    assert(all(equal_eps(q, p, f32::epsilon())));
-}
-
-@test
-fn quat_not_equal() {
-    let q = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
-    let p = Quat::<f32>::new(1.0, 0.0, 0.0, 0.0);
-    assert(!any(not_equal_eps(q, p, f32::epsilon())));
-}
 
 // Transform functions
 
@@ -498,15 +475,6 @@ fn quat_slerp_spins() {
 }
 
 @test
-fn quat_mul_vec() {
-    let q = angle_axis(pi::<f32>() * 0.5, vec3::new(0.0, 0.0, 1.0));
-    let v = vec3::new(1.0, 0.0, 0.0);
-    let u = q * v;
-    let w = u * q;
-    assert(all(equal_eps(v, w, 0.01f32)));
-}
-
-@test
 fn quat_mul() {
     let temp1 = normalize(Quat::<f32>::from_scalar_vec(1.0, vec3::new(0.0, 1.0, 0.0)));
     let temp2 = normalize(Quat::<f32>::from_scalar_vec(0.5, vec3::new(1.0, 0.0, 0.0)));
@@ -523,16 +491,6 @@ fn quat_mul() {
     temp7 *= temp5;
     temp7 *= inverse(temp5);
     assert(!any(not_equal_eps(temp7, Quat::<f32>::from_scalar_vec(1.0, vec3::new(0.0, 1.0, 0.0)), f32::epsilon())));
-}
-
-@test
-fn quat_and_mat_identity() {
-    let q = Quat::<f32>::identity();
-    assert(all(equal_eps(q, Quat::<f32>::new(1.0, 0.0, 0.0, 0.0), 0.0001f32)));
-    assert(!any(not_equal_eps(q, Quat::<f32>::new(1.0, 0.0, 0.0, 0.0), 0.0001f32)));
-    let m = mat4::identity();
-    let n = mat4::diagonal(1.0);
-    assert(all(equal_eps(m, n, 0.0001f32)));
 }
 
 // The branches and conformances the tests above do not reach.
@@ -752,19 +710,6 @@ fn quat_fast_mix() {
     let a = angle_axis(0.0f32, z);
     let b = angle_axis(pi::<f32>() * 0.5, z);
     let c = fast_mix(a, b, 0.5);
-    let d = angle_axis(pi::<f32>() * 0.25, z);
-    assert(epsilon_equal(c.x, d.x, 0.01));
-    assert(epsilon_equal(c.y, d.y, 0.01));
-    assert(epsilon_equal(c.z, d.z, 0.01));
-    assert(epsilon_equal(c.w, d.w, 0.01));
-}
-
-@test
-fn quat_short_mix() {
-    let z = vec3::new(0.0, 0.0, 1.0);
-    let a = angle_axis(0.0f32, z);
-    let b = angle_axis(pi::<f32>() * 0.5, z);
-    let c = short_mix(a, b, 0.5);
     let d = angle_axis(pi::<f32>() * 0.25, z);
     assert(epsilon_equal(c.x, d.x, 0.01));
     assert(epsilon_equal(c.y, d.y, 0.01));

@@ -18,16 +18,6 @@ fn near<T: Float, const N: usize>(a: Vec<T, N>, b: Vec<T, N>, eps: T) bool {
     return true;
 }
 
-// Every column of `a` has an element farther than `eps` from `b`'s.
-fn all_cols_differ<T: Float, const C: usize, const R: usize>(a: Mat<T, C, R>, b: Mat<T, C, R>, eps: T) bool {
-    for i in 0..C {
-        if near(a[i], b[i], eps) {
-            return false;
-        }
-    }
-    return true;
-}
-
 const fn differs(x: f32, y: f32, eps: f32) bool {
     return (x - y).abs().greater(eps);
 }
@@ -36,6 +26,12 @@ const fn differs(x: f32, y: f32, eps: f32) bool {
 const fn depth(p: mat4, z: f32) f32 {
     let v = p * vec4::new(0.0, 0.0, z, 1.0);
     return (v / v.w()).z();
+}
+
+// The depth after `p` of the view-space direction (0, 0, -1): the point at infinity in front.
+const fn depth_at_infinity(p: mat4) f32 {
+    let v = p * vec4::new(0.0, 0.0, -1.0, 0.0);
+    return v.z() / v.w();
 }
 
 const ORTHO: mat4 = ortho(-2.0, 2.0, -1.0, 1.0, 0.5, 10.0);
@@ -87,18 +83,31 @@ fn infinite_perspective_depths() {
     assert(!differs(depth(rh_no, -inf), 1.0, eps));
 }
 
+// The pick matrix maps the region's center to the middle of the clip square and the region's corner to
+// its corner (1, 1): window point (x, y) of viewport (0, 0, 320, 240) is (2x / 320 - 1, 2y / 240 - 1) in
+// normalized device coordinates.
 @test
 fn pick() {
     let p = pick_matrix(vec2::new(1.0, 2.0), vec2::new(3.0, 4.0), ivec4::new(0, 0, 320, 240));
-    assert(all_cols_differ(p, mat4::diagonal(2.0), 0.001));
+    let center = p * vec4::new(2.0 / 320.0 - 1.0, 4.0 / 240.0 - 1.0, 0.5, 1.0);
+    assert(near(center, vec4::new(0.0, 0.0, 0.5, 1.0), 1e-4), "the center maps to the middle");
+    let corner = p * vec4::new(5.0 / 320.0 - 1.0, 8.0 / 240.0 - 1.0, 0.5, 1.0);
+    assert(near(corner, vec4::new(1.0, 1.0, 0.5, 1.0), 1e-4), "the corner maps to the corner");
 }
 
+// The tweaked forms keep the x and y scales of the plain infinite perspective and map the near plane to
+// -1 and infinity to 1 - ep: the far plane clips nothing.
 @test
 fn tweaked_infinite_perspectives() {
-    let a = tweaked_infinite_perspective(45.0f32, 640.0 / 480.0, 1.0);
-    let b = tweaked_infinite_perspective_ep(45.0f32, 640.0 / 480.0, 1.0, 0.001);
-    assert(all_cols_differ(a, mat4::identity(), 0.001));
-    assert(all_cols_differ(b, mat4::identity(), 0.001));
+    let (fovy, aspect, n) = (45.0f32, 640.0f32 / 480.0, 1.0f32);
+    let plain = infinite_perspective_rh_no(fovy, aspect, n);
+    let b = tweaked_infinite_perspective_ep(fovy, aspect, n, 0.001);
+    assert(b[0] == plain[0] && b[1] == plain[1], "the scales of the plain form");
+    assert(!differs(depth(b, -n), -1.0, 1e-5), "the near plane maps to -1");
+    assert(!differs(depth_at_infinity(b), 0.999, 1e-6), "infinity maps to 1 - ep");
+    let a = tweaked_infinite_perspective(fovy, aspect, n);
+    assert(a == tweaked_infinite_perspective_ep(fovy, aspect, n, f32::epsilon()), "ep is the epsilon");
+    assert(depth_at_infinity(plain) == 1.0 && depth_at_infinity(a) < 1.0, "only the plain form reaches 1");
 }
 
 @test

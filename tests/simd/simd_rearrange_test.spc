@@ -5,19 +5,16 @@
 // instance.
 import tests::harness as h;
 
+const REARRANGEMENTS: str = M"(import std::simd;
 // Constant lists: identity, reverse, broadcast, the last lane of each operand, results narrower and
 // wider than the operands (a list past 16 lanes is a table loop), and every composition against the
 // lane rule it is defined by.
-@test
-fn constant_index_lists_pick_their_lanes() {
-    let src = M"(import std::simd;
 fn ck<T: SimdElement, const N: usize>(got: Simd<T, N>, want: [T; N]) bool {
     return got.equal(Simd::<T, N>::from_array(want)).all();
 }
 fn same<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) bool {
     return a.equal(b).all();
 }
-// Lane `i` of `a ++ b`.
 fn ab<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>, i: usize) T {
     if i < N {
         return a[i];
@@ -54,7 +51,7 @@ fn comp<T: SimdElement, const N: usize>(a: Simd<T, N>, b: Simd<T, N>) i32 {
     }
     return 0;
 }
-fn main(args: Vector<str>) i32 {
+fn main_0(args: Vector<str>) i32 {
     let k = args.len() as i32;
     let v = simd::iota::<i32, 4>() + Simd::<i32, 4>::splat(k * 10);
     let w = simd::iota::<i32, 4>() + Simd::<i32, 4>::splat(k * 100);
@@ -82,8 +79,92 @@ fn main(args: Vector<str>) i32 {
     let r = comp(v, w) + comp(simd::iota::<f64, 8>(), Simd::<f64, 8>::splat(-0.5)) + comp(b, b + b);
     return r + comp(simd::iota::<i64, 2>(), Simd::<i64, 2>::splat(9));
 }
+// The run-time index vector: every index from 0 to N + 1 and the index type's maximum, for each
+// unsigned index type; `swizzle_checked` reports exactly the lanes past `N`.
+fn run<U: SimdInt, const M: usize>(idx: Simd<U, M>, top: u64) i32 {
+    let v = simd::iota::<i16, 8>() + Simd::<i16, 8>::splat(7);
+    let (r, oob) = simd::swizzle_checked(v, idx);
+    if !simd::swizzle_or_zero(v, idx).equal(r).all() {
+        return 1;
+    }
+    for i in 0..M {
+        let k = idx[i] as u64;
+        let want = if k < 8 {
+            v[k as usize]
+        } else {
+            0
+        };
+        if r[i] != want || oob.get(i) != (k >= 8) || k > top {
+            return 2;
+        }
+    }
+    return 0;
+}
+fn main_1() i32 {
+    let a = Simd::<u8, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 0, 7, 8, 9, 1]);
+    let b = Simd::<u16, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 65535, 0, 7, 8, 9, 1]);
+    let c = Simd::<u32, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 4294967295, 0, 7, 8, 9, 1]);
+    let d = Simd::<u64, 8>::from_array([0, 1, 7, 8, 9, 18446744073709551615, 3, 6]);
+    return run(a, 255) + run(b, 65535) + run(c, 4294967295) + run(d, 18446744073709551615);
+}
+// Every mask of 2, 4 and 8 lanes: `compress` and `expand` against the lane rules, and `expand` of the
+// compressed lanes gives back the active lanes.
+fn all<const N: usize>(v: Simd<i32, N>, f: Simd<i32, N>) i32 {
+    for bits in 0..(1u64 << N as u64) {
+        let m = Mask::<N>::from_bits_truncate(bits);
+        let c = simd::compress(m, v, f);
+        let e = simd::expand(m, v, f);
+        let mut k: usize = 0;
+        for i in 0..N {
+            if m.get(i) {
+                if c[k] != v[i] || e[i] != v[k] {
+                    return 1;
+                }
+                k += 1;
+            } else if e[i] != f[i] {
+                return 2;
+            }
+        }
+        for i in k..N {
+            if c[i] != f[i] {
+                return 3;
+            }
+        }
+        if !simd::expand(m, c, f).equal(m.choose(v, f)).all() {
+            return 4;
+        }
+    }
+    return 0;
+}
+fn main_2(args: Vector<str>) i32 {
+    let k = args.len() as i32;
+    let r = all(simd::iota::<i32, 2>() + Simd::<i32, 2>::splat(k), Simd::<i32, 2>::splat(-k));
+    return r + all(simd::iota::<i32, 4>() + Simd::<i32, 4>::splat(k), Simd::<i32, 4>::splat(-k)) + all(
+        simd::iota::<i32, 8>() + Simd::<i32, 8>::splat(k),
+        Simd::<i32, 8>::splat(-k),
+    );
+}
+// The case is the last argument; the case's own arguments come before it.
+fn main(args: Vector<str>) i32 {
+    let mut a = args;
+    let k = a.pop().unwrap().parse_i64().unwrap();
+    if k == 0 {
+        return main_0(a);
+    }
+    if k == 1 {
+        return main_1();
+    }
+    if k == 2 {
+        return main_2(a);
+    }
+    return 255;
+}
 )";
-    h::expect_run("constant index lists", src, "", "");
+
+// The programs above, each a case of one build: its last argument selects it.
+@test
+fn run_cases() {
+    h::expect_runs("rearrangements", REARRANGEMENTS, ["0", "1", "2"], ["", "", ""]);
 }
 
 // A list must be a constant, its indexes below the operands' lanes, and its length a valid lane
@@ -146,82 +227,9 @@ fn main() i32 {
 // unsigned index type; `swizzle_checked` reports exactly the lanes past `N`.
 @test
 fn runtime_indexes_zero_and_report_the_lanes_past() {
-    let src = M"(import std::simd;
-fn run<U: SimdInt, const M: usize>(idx: Simd<U, M>, top: u64) i32 {
-    let v = simd::iota::<i16, 8>() + Simd::<i16, 8>::splat(7);
-    let (r, oob) = simd::swizzle_checked(v, idx);
-    if !simd::swizzle_or_zero(v, idx).equal(r).all() {
-        return 1;
-    }
-    for i in 0..M {
-        let k = idx[i] as u64;
-        let want = if k < 8 {
-            v[k as usize]
-        } else {
-            0
-        };
-        if r[i] != want || oob.get(i) != (k >= 8) || k > top {
-            return 2;
-        }
-    }
-    return 0;
-}
-fn main() i32 {
-    let a = Simd::<u8, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 255, 0, 7, 8, 9, 1]);
-    let b = Simd::<u16, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 65535, 0, 7, 8, 9, 1]);
-    let c = Simd::<u32, 16>::from_array([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 4294967295, 0, 7, 8, 9, 1]);
-    let d = Simd::<u64, 8>::from_array([0, 1, 7, 8, 9, 18446744073709551615, 3, 6]);
-    return run(a, 255) + run(b, 65535) + run(c, 4294967295) + run(d, 18446744073709551615);
-}
-)";
-    h::expect_run("run-time indexes", src, "", "");
     h::expect_build_err(
         "signed indexes",
         "import std::simd;\nfn main() i32 {\n    return simd::swizzle_or_zero(Simd::<i32, 4>::splat(1), Simd::<i32, 4>::splat(0))[0];\n}\n",
         "swizzle_or_zero: the indexes must be unsigned",
     );
-}
-
-// Every mask of 2, 4 and 8 lanes: `compress` and `expand` against the lane rules, and `expand` of the
-// compressed lanes gives back the active lanes.
-@test
-fn compress_and_expand_over_every_mask() {
-    let src = M"(import std::simd;
-fn all<const N: usize>(v: Simd<i32, N>, f: Simd<i32, N>) i32 {
-    for bits in 0..(1u64 << N as u64) {
-        let m = Mask::<N>::from_bits_truncate(bits);
-        let c = simd::compress(m, v, f);
-        let e = simd::expand(m, v, f);
-        let mut k: usize = 0;
-        for i in 0..N {
-            if m.get(i) {
-                if c[k] != v[i] || e[i] != v[k] {
-                    return 1;
-                }
-                k += 1;
-            } else if e[i] != f[i] {
-                return 2;
-            }
-        }
-        for i in k..N {
-            if c[i] != f[i] {
-                return 3;
-            }
-        }
-        if !simd::expand(m, c, f).equal(m.choose(v, f)).all() {
-            return 4;
-        }
-    }
-    return 0;
-}
-fn main(args: Vector<str>) i32 {
-    let k = args.len() as i32;
-    let r = all(simd::iota::<i32, 2>() + Simd::<i32, 2>::splat(k), Simd::<i32, 2>::splat(-k));
-    return r + all(simd::iota::<i32, 4>() + Simd::<i32, 4>::splat(k), Simd::<i32, 4>::splat(-k)) + all(
-        simd::iota::<i32, 8>() + Simd::<i32, 8>::splat(k),
-        Simd::<i32, 8>::splat(-k),
-    );
-}
-)";
-    h::expect_run("every mask", src, "", "");
 }

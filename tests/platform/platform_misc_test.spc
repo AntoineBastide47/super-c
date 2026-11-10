@@ -141,9 +141,16 @@ fn thread_local_keys_hold_one_value_per_thread() {
 fn park_returns_when_the_word_differs_or_the_time_passes() {
     let mut word: i32 = 1;
     unsafe thread::park(&mut word, 0, -1); // not the expected value: returns at once
-    let t0 = clock::monotonic_ns();
-    unsafe thread::park(&mut word, 1, 1000000);
-    assert(clock::monotonic_ns() > t0);
+    // A timed park waits its timeout out. A wakeup may be spurious, so one of three parks must wait the
+    // whole millisecond; a park that ignores its timeout returns early from each.
+    let mut waited = false;
+    for _ in 0..3 {
+        let t0 = clock::monotonic_ns();
+        unsafe thread::park(&mut word, 1, 1000000);
+        waited = waited || clock::monotonic_ns() - t0 >= 1000000;
+    }
+    assert(waited, "a timed park waits its timeout out");
+    // An unpark with no thread parked on the word wakes nothing and returns.
     unsafe thread::unpark_one(&mut word);
     unsafe thread::unpark_all(&mut word);
 }

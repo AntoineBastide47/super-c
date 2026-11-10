@@ -680,7 +680,7 @@ fn round_multiple_is_a_floor() {
 
 @test(should_panic)
 fn ceil_multiple_signed_needs_positive_multiple() {
-    assert_eq(ceil_multiple(5, -1), 0);
+    let _ = ceil_multiple(5, -1);
 }
 
 const C_BIT_COUNT: i32 = bit_count(0xF0F0u32);

@@ -473,14 +473,18 @@ fn coalescing_groups_adjacent_checks(b: &mut h::ExitBatch) {
     b.add_trap("an overflow between two members traps first", SUM, "attempt to add with overflow");
 }
 
+const COALESCING_PANIC_PARITY_SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 61; // == 62: j + 2 is out of bounds\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s;\n}\n";
+
 @test
 fn coalescing_panic_parity() {
-    // A failing group panics (earlier site, same panic class); disabled BCE panics too.
-    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {\n        v.push(i);\n    }\n    let j = argv.len() + 61; // == 62: j + 2 is out of bounds\n    let mut s = 0;\n    s += v[j] + v[j + 1] + v[j + 2];\n    return s;\n}\n";
-    h::expect_trap("group check panics", SRC, "index out of bounds");
     // The guard restores the variable when the test ends; the spawned build inherits it.
     let _env2 = cli::set_env("SC_BCE", "0");
-    h::expect_trap("disabled pass panics identically", SRC, "index out of bounds");
+    h::expect_trap("disabled pass panics identically", COALESCING_PANIC_PARITY_SRC, "index out of bounds");
+}
+
+fn coalescing_panic_parity_cases(b: &mut h::ExitBatch) {
+    // A failing group panics (earlier site, same panic class); disabled BCE panics too.
+    b.add_trap("group check panics", COALESCING_PANIC_PARITY_SRC, "index out of bounds");
 }
 
 // A program's own container: its `index` checks its own length field, as std's do.
@@ -525,16 +529,15 @@ fn guard_widening_groups_any_container() {
     expect_in_fn("a user container's loop guard folds", &sum_user, "int32_t sum(", "__sc_bounds(", false);
 }
 
-@test
-fn guard_widening_keeps_its_panic() {
+fn guard_widening_keeps_its_panic(b: &mut h::ExitBatch) {
     // The widened test fails with the guards' own panic, and only where a member would.
     let SRC = format(
         "{}fn tri(b: &Buf, j: usize) i32 {{\n    return b[j] + b[j + 1] + b[j + 2];\n}}\nfn main(argv: Vector<str>) i32 {{\n    let mut v = Vector::<i32>::new();\n    for i in 0..64 {{\n        v.push(i);\n    }}\n    let b = Buf {{ ptr: v.as_ptr(), n: v.len() }};\n    return tri(&b, argv.len() + 60) - 186;\n}}\n",
         BUF,
     );
-    h::expect_exit("the last member in range", &SRC, 0);
+    b.add("the last member in range", &SRC, 0);
     let BAD = SRC.replace("argv.len() + 60", "argv.len() + 61");
-    h::expect_trap("the last member out of range", &BAD, "panic: Buf[i]: index out of bounds");
+    b.add_trap("the last member out of range", &BAD, "panic: Buf[i]: index out of bounds");
 }
 
 @test
@@ -872,12 +875,12 @@ fn asm_write_kills_bounds_facts() {
     );
 }
 
+const JOIN_VERSIONS_ARE_PATH_SOUND_SRC: str = "fn get(v: []i32, s0: usize, c: bool) i32 {\n    let big = s0 + 100;\n    let mut x = s0;\n    if c {\n        x = s0;\n    } else {\n        x = big;\n    }\n    if x < v.len() {\n        return v[big];\n    }\n    return 7;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = Vector::<i32>::new();\n    w.push(1);\n    w.push(2);\n    return get(w[0..2], argv.len() - 1, true);\n}\n";
+
 @test
 fn join_versions_are_path_sound() {
     // After a join, the guard on `x` says nothing about `big`, whatever branch the walk saw last.
-    let SRC: str = "fn get(v: []i32, s0: usize, c: bool) i32 {\n    let big = s0 + 100;\n    let mut x = s0;\n    if c {\n        x = s0;\n    } else {\n        x = big;\n    }\n    if x < v.len() {\n        return v[big];\n    }\n    return 7;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = Vector::<i32>::new();\n    w.push(1);\n    w.push(2);\n    return get(w[0..2], argv.len() - 1, true);\n}\n";
-    expect_c_user_present("the unrelated access keeps its check", SRC, "__sc_bounds(");
-    h::expect_trap("the unrelated access panics", SRC, "index out of bounds");
+    expect_c_user_present("the unrelated access keeps its check", JOIN_VERSIONS_ARE_PATH_SOUND_SRC, "__sc_bounds(");
     // `c || i < len` does not bound `i` on its true edge.
     expect_c_user_present(
         "an or-condition keeps the check",
@@ -892,12 +895,24 @@ fn join_versions_are_path_sound() {
     );
 }
 
+fn join_versions_are_path_sound_cases(b: &mut h::ExitBatch) {
+    b.add_trap("the unrelated access panics", JOIN_VERSIONS_ARE_PATH_SOUND_SRC, "index out of bounds");
+}
+
+const LOOP_HEADER_KILLS_LENGTHS_THE_LOOP_WRITES_SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 2 {\n        v.push(k as i32);\n    }\n    let n = v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += v[i];\n        let _ = v.pop();\n        i += 1;\n    }\n    return x;\n}\n";
+
 @test
 fn loop_header_kills_lengths_the_loop_writes() {
     // The bound read before the loop is stale on the second iteration once the body pops.
-    let SRC: str = "fn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 2 {\n        v.push(k as i32);\n    }\n    let n = v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += v[i];\n        let _ = v.pop();\n        i += 1;\n    }\n    return x;\n}\n";
-    expect_c_user_present("the popped vector keeps its check", SRC, "__sc_bounds(");
-    h::expect_trap("the stale bound panics", SRC, "index out of bounds");
+    expect_c_user_present(
+        "the popped vector keeps its check",
+        LOOP_HEADER_KILLS_LENGTHS_THE_LOOP_WRITES_SRC,
+        "__sc_bounds(",
+    );
+}
+
+fn loop_header_kills_lengths_the_loop_writes_cases(b: &mut h::ExitBatch) {
+    b.add_trap("the stale bound panics", LOOP_HEADER_KILLS_LENGTHS_THE_LOOP_WRITES_SRC, "index out of bounds");
 }
 
 fn interval_facts_remove_strided_checks(b: &mut h::ExitBatch) {
@@ -1964,5 +1979,15 @@ fn rule_programs(b: &mut h::ExitBatch) {
 fn exit_cases_02() {
     let mut b = h::ExitBatch::new();
     rule_programs(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_03() {
+    let mut b = h::ExitBatch::new();
+    coalescing_panic_parity_cases(&mut b);
+    guard_widening_keeps_its_panic(&mut b);
+    join_versions_are_path_sound_cases(&mut b);
+    loop_header_kills_lengths_the_loop_writes_cases(&mut b);
     b.run();
 }

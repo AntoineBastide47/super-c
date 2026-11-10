@@ -98,17 +98,6 @@ fn ycocg_round_trip() {
     assert(all(equal_eps(rgb, vec3::new(1.0, 0.5, 0.0), f32::epsilon())));
 }
 
-@test
-fn color_encoding_srgb() {
-    let rgb = vec3::new(1.0, 0.5, 0.0);
-    let srgb = convert_linear_to_srgb_gamma(rgb, 2.8f32);
-    assert(all(epsilon_equal(rgb, convert_srgb_to_linear_gamma(srgb, 2.8f32), 0.00001f32)));
-    let rgba = vec4::new(1.0, 0.5, 0.0, 1.0);
-    assert(all(epsilon_equal(rgba, convert_srgb_to_linear(convert_linear_to_srgb(rgba)), 0.00001f32)));
-    let srgba = convert_linear_to_srgb_gamma(rgba, 2.8f32);
-    assert(all(epsilon_equal(rgba, convert_srgb_to_linear_gamma(srgba, 2.8f32), 0.00001f32)));
-}
-
 const fn bits3(v: vec3) [u32; 3] {
     return [f32_bits(v.x()), f32_bits(v.y()), f32_bits(v.z())];
 }

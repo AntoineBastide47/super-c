@@ -58,6 +58,28 @@ fn scale<U: Mul<V<f32, 3>, Output = V<f32, 3>>>(u: U, v: V<f32, 3>) V<f32, 3> { 
 fn twice_of<T: Lane>(t: T) i64 { return t.twice(); }
 const C: i64 = 1.5f32.twice() + via_bound(2.5f32);
 const E: f32 = outv(2.5f32);
+// A parameter only an array length of the interface's arguments names: through a direct call, a bound,
+// an associated type and a constant. Beside `f32 as Mul<W<N>>`, the called method's symbol spells its
+// pattern `[f32; N]`.
+extend<const N: usize> f32 as Mul<[f32; N]> {
+    type Output = [f32; N];
+    fn mul(self: &Self, o: &[f32; N]) [f32; N] {
+        let mut r = *o;
+        for i in 0..N {
+            unsafe r[i] = *self * unsafe o[i];
+        }
+        return r;
+    }
+}
+fn g<U: Mul<[f32; 4], Output = [f32; 4]>>(u: U, a: [f32; 4]) [f32; 4] { return u * a; }
+fn h<U: Mul<[f32; 4]>>(u: U, a: [f32; 4]) U::Output { return u * a; }
+const CA: [f32; 4] = g(2.0f32, [1.0, 2.0, 3.0, 4.0]);
+fn array_lengths_bind() bool {
+    let r = g(3.0f32, [1.0; 4]);
+    let s = h(2.0f32, [1.0; 4]);
+    let d = 2.0f32 * [1.0f32, 2.0];
+    return r[3] == 3.0 && s[0] == 2.0 && CA[3] == 8.0 && d[1] == 4.0;
+}
 fn main(args: Vector<str>) i32 {
     let k = args.len() as f32;
     let p = P { x: 1 };
@@ -73,6 +95,9 @@ fn main(args: Vector<str>) i32 {
     let q = k.pair(7u8) as i64 + 3i64.pair(2i64);
     if a != 22 || b != 6 || w.x[2] != 4.0 || s.x[1] != 2.0 || n != 6.0 || o != 3.5 || q != 9 {
         return 1;
+    }
+    if !array_lengths_bind() {
+        return 2;
     }
     return 0;
 }
@@ -149,33 +174,6 @@ fn declarations_are_checked() {
     );
 }
 
-// A parameter only an array length of the interface's arguments names: through a direct call, a
-// bound, an associated type and a constant.
-@test
-fn an_array_length_parameter_binds() {
-    let src = M"(extend<const N: usize> f32 as Mul<[f32; N]> {
-    type Output = [f32; N];
-    fn mul(self: &Self, o: &[f32; N]) [f32; N] {
-        let mut r = *o;
-        for i in 0..N {
-            unsafe r[i] = *self * unsafe o[i];
-        }
-        return r;
-    }
-}
-fn g<U: Mul<[f32; 4], Output = [f32; 4]>>(u: U, a: [f32; 4]) [f32; 4] { return u * a; }
-fn h<U: Mul<[f32; 4]>>(u: U, a: [f32; 4]) U::Output { return u * a; }
-const C: [f32; 4] = g(2.0f32, [1.0, 2.0, 3.0, 4.0]);
-fn main() i32 {
-    let r = g(3.0f32, [1.0; 4]);
-    let s = h(2.0f32, [1.0; 4]);
-    let d = 2.0f32 * [1.0f32, 2.0];
-    return (r[3] != 3.0 || s[0] != 2.0 || C[3] != 8.0 || d[1] != 4.0) as i32;
-}
-)";
-    expect_exit_zero_inlined_and_called("an array length parameter", src);
-}
-
 // An instance a generic conformance gives only through a bound or a `dyn` value is checked like any
 // other: its array length out of range is a compile error located at the interface call, and no C
 // is compiled.
@@ -228,12 +226,7 @@ fn main() i32 {
     b.add("generic conformance methods", src, 0);
 }
 
-// An interface-qualified call takes its implementer from the receiver argument: a conformance's own
-// method, an inherited default, a type parameter's bound, and the conformance the expected result
-// chooses among several.
-@test
-fn an_interface_qualified_call_finds_its_implementer() {
-    let src = M"(interface Lane {}
+const AN_INTERFACE_QUALIFIED_CALL_FINDS_ITS_IMPLEMENTER_SRC: str = M"(interface Lane {}
 extend f32 as Lane {}
 interface Twice {
     fn twice(self: &Self) i64;
@@ -262,12 +255,21 @@ fn main() i32 {
     return (a != 30 || c != 40 || d != 7) as i32;
 }
 )";
-    h::expect_exit("interface-qualified calls", src, 0);
+
+// An interface-qualified call takes its implementer from the receiver argument: a conformance's own
+// method, an inherited default, a type parameter's bound, and the conformance the expected result
+// chooses among several.
+@test
+fn an_interface_qualified_call_finds_its_implementer() {
     h::expect_build_err(
         "several conformances, no expected type",
         "interface Conv<R> { fn conv(self: &Self) R; }\nstruct P { pub x: i64 }\nextend P as Conv<i64> { fn conv(self: &Self) i64 { return 40; } }\nextend P as Conv<u8> { fn conv(self: &Self) u8 { return 7; } }\nfn main() i32 {\n    let p = P { x: 1 };\n    let _ = Conv::conv(&p);\n    return 0;\n}\n",
         "ambiguous call to 'conv': 'P' conforms to 'Conv' with several arguments that fit",
     );
+}
+
+fn an_interface_qualified_call_finds_its_implementer_cases(b: &mut h::ExitBatch) {
+    b.add("interface-qualified calls", AN_INTERFACE_QUALIFIED_CALL_FINDS_ITS_IMPLEMENTER_SRC, 0);
 }
 
 // Extends of std types from a user module: a vector extend over every lane count (std's generic code
@@ -467,5 +469,12 @@ fn exit_cases_00() {
     user_extends_of_std_types(&mut b);
     lane_interfaces_and_aliases(&mut b);
     wider_conformance_results(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    an_interface_qualified_call_finds_its_implementer_cases(&mut b);
     b.run();
 }

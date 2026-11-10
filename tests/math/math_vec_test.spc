@@ -48,20 +48,6 @@ const L2: usize = vec2::LEN;
 // vec1.
 
 @test
-fn vec1_operators() {
-    let mut a = ivec1::new(1);
-    let mut b = ivec1::new(1);
-    assert(a == b);
-    assert(!(a != b));
-    a = a * 1;
-    b = b * 1;
-    a = a + 1;
-    b = b + 1;
-    assert(a == b);
-    assert(!(a != b));
-}
-
-@test
 fn vec1_ctor() {
     let eps = f32::epsilon();
     let a: vec1 = vec2::splat(2.0).truncate::<1>();
@@ -83,27 +69,6 @@ fn vec1_size() {
     assert_eq(sizeof(dvec1), 8);
     assert_eq(vec1::LEN, 1);
     assert_eq(dvec1::LEN, 1);
-}
-
-@test
-fn vec1_operator_increment() {
-    let v0 = ivec1::new(1);
-    let mut v1 = v0;
-    let mut v2 = v0;
-    v1 = v1 + 1;
-    let v3 = v1;
-    let v4 = v2;
-    v2 = v2 + 1;
-    assert(v0 == v4);
-    assert(v1 == v2);
-    assert(v1 == v3);
-}
-
-@test
-fn vec1_swizzle() {
-    let a = vec1::new(1.0);
-    let c = vec1::new(a.x());
-    assert(near(a, c, f32::epsilon()));
 }
 
 // vec2.
@@ -315,20 +280,6 @@ fn vec2_size() {
 }
 
 @test
-fn vec2_operator_increment() {
-    let v0 = ivec2::splat(1);
-    let mut v1 = v0;
-    let mut v2 = v0;
-    v1 = v1 + 1;
-    let v3 = v1;
-    let v4 = v2;
-    v2 = v2 + 1;
-    assert(v0 == v4);
-    assert(v1 == v2);
-    assert(v1 == v3);
-}
-
-@test
 fn vec2_swizzle() {
     let a = vec2::new(1.0, 2.0);
     let b = a.swizzle2::<0, 1>();
@@ -522,20 +473,6 @@ fn vec3_size() {
     assert_eq(dvec3::LEN, 3);
     const L: usize = vec3::LEN;
     assert_eq(L, 3);
-}
-
-@test
-fn vec3_operator_increment() {
-    let v0 = ivec3::splat(1);
-    let mut v1 = v0;
-    let mut v2 = v0;
-    v1 = v1 + 1;
-    let v3 = v1;
-    let v4 = v2;
-    v2 = v2 + 1;
-    assert(v0 == v4);
-    assert(v1 == v2);
-    assert(v1 == v3);
 }
 
 @test
@@ -920,22 +857,6 @@ fn vec4_operators() {
 }
 
 @test
-fn vec4_equal() {
-    {
-        let a = uvec4::new(1, 2, 3, 4);
-        let b = uvec4::new(1, 2, 3, 4);
-        assert(a == b);
-        assert(!(a != b));
-    }
-    {
-        let a = ivec4::new(1, 2, 3, 4);
-        let b = ivec4::new(1, 2, 3, 4);
-        assert(a == b);
-        assert(!(a != b));
-    }
-}
-
-@test
 fn vec4_size() {
     assert_eq(sizeof(vec4), 16);
     assert_eq(sizeof(dvec4), 32);
@@ -997,31 +918,6 @@ fn vec4_swizzle() {
     }
 }
 
-@test
-fn vec4_simd() {
-    let a = vec4::new(3.0, 1.0, 4.0, 1.0);
-    let b = vec4::new(5.0, 9.0, 2.0, 6.0);
-    let c = b * a;
-    let d = a + c;
-    for i in 0..vec4::LEN {
-        assert(d[i].greater_equal(0.0));
-    }
-}
-
-@test
-fn vec4_operator_increment() {
-    let v0 = ivec4::splat(1);
-    let mut v1 = v0;
-    let mut v2 = v0;
-    v1 = v1 + 1;
-    let v3 = v1;
-    let v4 = v2;
-    v2 = v2 + 1;
-    assert(v0 == v4);
-    assert(v1 == v2);
-    assert(v1 == v3);
-}
-
 // Bits of the constructed vectors.
 
 @test
@@ -1045,34 +941,6 @@ fn vec4_ctor_bits() {
 }
 
 // Casts.
-
-@test
-fn vec2_cast() {
-    let eps = f32::epsilon();
-    let a = vec2::new(1.0, 2.0);
-    let e: vec2 = a;
-    assert(near(a, e, eps));
-    assert(near(a.cast::<f32>(), a, eps));
-    let k = vec2::splat(7.8);
-    let l = vec2::new(7.8, 7.8);
-    assert(near(k, l, eps));
-}
-
-@test
-fn vec3_cast() {
-    let a = vec3::new(1.0, 2.0, 3.0);
-    let e: vec3 = a;
-    assert(near(a, e, f32::epsilon()));
-    assert(near(a.cast::<f32>(), a, f32::epsilon()));
-}
-
-@test
-fn vec4_cast() {
-    let a = vec4::new(1.0, 2.0, 3.0, 4.0);
-    let e: vec4 = a;
-    assert(near(a, e, f32::epsilon()));
-    assert(near(a.cast::<f32>(), a, f32::epsilon()));
-}
 
 @test
 fn vec_std_copy() {

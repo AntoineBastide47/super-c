@@ -324,9 +324,9 @@ fn constant_pattern_errors() {
 // A tuple pattern `(p0, p1, ..)` destructures a tuple in switch arms, `if let` and `while let`:
 // nested patterns, `_`, `mut` bindings, literals, variant payloads and reference scrutinees (the
 // bindings then borrow). A `String` element moves out once and is freed once (the fatal leak gate).
-@test
-fn tuple_patterns_destructure_tuples() {
-    let r = h::compile_and_run_env(
+fn tuple_patterns_destructure_tuples(b: &mut h::ExitBatch) {
+    b.add(
+        "tuple patterns build",
         M"(enum E { A(i32), B }
 fn heap(tag: str) String {
     let mut s = String::from_str("a heap string longer than twenty-three bytes: ");
@@ -379,10 +379,8 @@ fn main() i32 {
     return 0;
 }
 )",
-        "SC_LEAK_CHECK=fatal",
+        0,
     );
-    assert(r.built, "tuple patterns build");
-    assert_eq(r.exit, 0);
 }
 
 // A `for` binding is an irrefutable pattern: a tuple (nested), `_`, `mut name` or a struct
@@ -390,9 +388,9 @@ fn main() i32 {
 // pattern leaves out) is freed with the element, at the end of its iteration or at `break` (the
 // fatal leak gate). Elements behind a reference bind by reference. `mut i` over a range is the
 // induction variable itself: a write to it moves the loop.
-@test
-fn for_patterns_destructure_elements() {
-    let r = h::compile_and_run_env(
+fn for_patterns_destructure_elements(b: &mut h::ExitBatch) {
+    b.add(
+        "for patterns build",
         M"(struct Q {
     pub a: String,
     pub b: String,
@@ -445,10 +443,8 @@ fn main() i32 {
     return 0;
 }
 )",
-        "SC_LEAK_CHECK=fatal",
+        0,
     );
-    assert(r.built, "for patterns build");
-    assert_eq(r.exit, 0);
 }
 
 // A `for` pattern must match every element, and a name it binds without `mut` is not assignable.
@@ -507,5 +503,13 @@ fn exit_cases_00() {
     constant_path_patterns(&mut b);
     overlapping_constructors_match_in_arm_order(&mut b);
     tuple_patterns_evaluate_at_compile_time(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    tuple_patterns_destructure_tuples(&mut b);
+    for_patterns_destructure_elements(&mut b);
     b.run();
 }

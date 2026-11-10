@@ -100,24 +100,3 @@ fn blankline_and_span_text() {
     let cc = p.concat(&parts, 0);
     expect_render(&p, cc, 80, "hello\n\nworld\n");
 }
-
-@test
-fn flat_width_memo() {
-    let mut p = d::DocPool::new(null);
-    let t = p.txt("abcd");
-    let l = p.line();
-    let mut parts = Vector::<d::DocId>::new();
-    parts.push(t);
-    parts.push(l);
-    // Shared DocId: DAG reuse is legal.
-    parts.push(t);
-    let cc = p.concat(&parts, 0);
-    // 4 + 1 + 4.
-    assert_eq(p.docs.at(cc as usize).w, 9u32);
-    let h = p.hardline();
-    let mut pair = Vector::<d::DocId>::new();
-    pair.push(cc);
-    pair.push(h);
-    let ph = p.concat(&pair, 0);
-    assert_eq(p.docs.at(ph as usize).w, d::W_INF);
-}

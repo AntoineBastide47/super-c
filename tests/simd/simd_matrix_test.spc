@@ -3,6 +3,7 @@
 // product the i32 sum modulo 2^32, over edge shapes and special values; the run with the detected features masked (`SC_CPU_OFF`, the portable kernel) prints what the
 // run with them prints (on an SME machine, the SME kernels'); and a slice whose length is not its
 // matrix's element count panics.
+import std::simd::matrix;
 import tests::harness as h;
 import tests::cli_harness as cli;
 
@@ -51,12 +52,12 @@ fn the_16_bit_products_are_the_f32_products_of_their_values() {
     kernels_agree(HALVES);
 }
 
-@test
+// A slice whose length is not its matrix's element count panics ("matrix::mul_f32: a slice's length is
+// not its matrix's element count") before any vector code runs; nothing else in the body can.
+@test(should_panic)
 fn a_slice_of_another_length_panics() {
-    h::expect_run(
-        "a of another length",
-        "import std::simd::matrix;\nfn main() i32 {\n    let a: [f32; 5] = [1.0; 5];\n    let b: [f32; 6] = [1.0; 6];\n    let mut c: [f32; 4] = [0.0; 4];\n    matrix::mul_f32(c, a, b, 2, 3, 2);\n    return 0;\n}\n",
-        "",
-        "matrix::mul_f32: a slice's length is not its matrix's element count",
-    );
+    let a: [f32; 5] = [1.0; 5];
+    let b: [f32; 6] = [1.0; 6];
+    let mut c: [f32; 4] = [0.0; 4];
+    matrix::mul_f32(c, a, b, 2, 3, 2);
 }

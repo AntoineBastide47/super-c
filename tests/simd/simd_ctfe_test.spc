@@ -16,9 +16,7 @@ fn a_constant_trap_names_the_lowest_failing_lane() {
     assert(run.exit != 0 && run.err.contains("lane 1: attempt to add with overflow"), "the same lane at run time");
 }
 
-@test
-fn static_assert_folds_vector_code() {
-    let src = M"(const fn dot(a: Simd<i32, 4>, b: Simd<i32, 4>) i32 {
+const STATIC_ASSERT_FOLDS_VECTOR_CODE_SRC: str = M"(const fn dot(a: Simd<i32, 4>, b: Simd<i32, 4>) i32 {
     let p = (a * b).to_array();
     return p[0] + p[1] + p[2] + p[3];
 }
@@ -29,14 +27,12 @@ fn main() i32 {
     return 0;
 }
 )";
-    h::expect_exit("vector static_asserts", src, 0);
+
+fn static_assert_folds_vector_code(b: &mut h::ExitBatch) {
+    b.add("vector static_asserts", STATIC_ASSERT_FOLDS_VECTOR_CODE_SRC, 0);
 }
 
-// The mask operators of 2- and 4-lane masks keep the bits above their lanes 0, at compile time and at
-// run time.
-@test
-fn narrow_mask_operators_keep_their_lanes() {
-    let src = M"(const fn mask_ops(x: u64) u64 {
+const NARROW_MASK_OPERATORS_KEEP_THEIR_LANES_SRC: str = M"(const fn mask_ops(x: u64) u64 {
     let a = Mask::<4>::from_bits_truncate(x);
     let b = Mask::<4>::from_bits_truncate(x >> 4);
     let c = Mask::<2>::from_bits_truncate(x);
@@ -51,12 +47,14 @@ fn main() i32 {
     return (mask_ops(opr(0x5C)) != 0x39D43) as i32;
 }
 )";
-    h::expect_exit("mask operators at compile time and at run time", src, 0);
+
+// The mask operators of 2- and 4-lane masks keep the bits above their lanes 0, at compile time and at
+// run time.
+fn narrow_mask_operators_keep_their_lanes(b: &mut h::ExitBatch) {
+    b.add("mask operators at compile time and at run time", NARROW_MASK_OPERATORS_KEEP_THEIR_LANES_SRC, 0);
 }
 
-@test
-fn signaling_nan_lanes_keep_their_bits() {
-    let decls = M"(const fn nan_ops(b: u32) u32 {
+const SIGNALING_NAN_LANES_KEEP_THEIR_BITS_DECLS: str = M"(const fn nan_ops(b: u32) u32 {
     let v = Simd::<f32, 2>::from_bits(Simd::<u32, 2>::splat(b));
     let w = (-v.abs()).copysign(v).to_bits();
     return w[0] ^ w[1] ^ v.to_bits()[1];
@@ -74,6 +72,9 @@ const fn wide(x: f64) i64 {
     return Simd::<f64, 2>::splat(x).cast::<i64>()[1] ^ (x as i64);
 }
 )";
+
+@test
+fn signaling_nan_lanes_keep_their_bits() {
     let exprs: [str; 5] = [
         "nan_ops(opq::<u32>(0x7fa00001))",
         "nan_ops(opq::<u32>(0xffc00003))",
@@ -82,12 +83,15 @@ const fn wide(x: f64) i64 {
         "wide(opq::<f64>(-1e19))",
     ];
     let tys: [str; 5] = ["u32", "u32", "u32", "i64", "i64"];
-    let d = h::const_runtime_parity(decls, exprs, tys, []);
+    let d = h::const_runtime_parity(SIGNALING_NAN_LANES_KEEP_THEIR_BITS_DECLS, exprs, tys, []);
     if d.len() != 0 {
         eprintln("{}", d.as_str());
     }
     assert(d.len() == 0, "bit-preserving lanes, the NaN min and max pick, and saturating casts as constants");
-    h::expect_exit(
+}
+
+fn signaling_nan_lanes_keep_their_bits_cases(b: &mut h::ExitBatch) {
+    b.add(
         "the values",
         "const A: u32 = 0x7fa00001;\nconst fn f() u32 {\n    let v = Simd::<f32, 2>::from_bits(Simd::<u32, 2>::splat(A));\n    return (-v).to_bits()[0];\n}\nconst X: i64 = 1e19 as i64;\nstatic_assert(f() == 0xffa00001, \"the sign flips, the payload stays\");\nstatic_assert(X == 9223372036854775807, \"saturated\");\nfn main() i32 {\n    return 0;\n}\n",
         0,
@@ -96,11 +100,20 @@ const fn wide(x: f64) i64 {
 
 // A constant computed as a vector's lanes (`to_array` in a generic body) has the array type of the
 // instance, `[u64; 2]`, not the template's `[T; N]`.
-@test
-fn a_constant_from_vector_lanes_has_the_instance_array_type() {
-    h::expect_exit(
+fn a_constant_from_vector_lanes_has_the_instance_array_type(b: &mut h::ExitBatch) {
+    b.add(
         "the lanes",
         "const fn lanes() [u64; 2] {\n    return Simd::<u64, 2>::splat(6).to_array();\n}\nconst C: [u64; 2] = lanes();\nconst D: [u64; 2] = Simd::<u64, 2>::splat(1).to_array();\nfn main() i32 {\n    return (C[0] + C[1] + D[1]) as i32;\n}\n",
         13,
     );
+}
+
+@test
+fn exit_cases_00() {
+    let mut b = h::ExitBatch::new();
+    static_assert_folds_vector_code(&mut b);
+    narrow_mask_operators_keep_their_lanes(&mut b);
+    signaling_nan_lanes_keep_their_bits_cases(&mut b);
+    a_constant_from_vector_lanes_has_the_instance_array_type(&mut b);
+    b.run();
 }

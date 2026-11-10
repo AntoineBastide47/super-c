@@ -61,26 +61,6 @@ fn same_output_with_bounds_checks_forced() {
     assert(r.err.contains("panic: Vector<") && r.err.contains("[i]: index out of bounds"), "the strided loop traps");
 }
 
-// An add, a wrapping add, a signed shift, a float division, a saturating cast and a const fn call: one
-// program, one build.
-@test
-fn parity_values() {
-    let d = h::const_runtime_parity(
-        "const fn sq(x: i64) i64 {\n    return x * x;\n}\n",
-        [
-            "opq::<i32>(40) + opq::<i32>(2)",
-            "opq::<u8>(200).wrapping_add(opq::<u8>(100))",
-            "opq::<i64>(-1) << opq::<i64>(63)",
-            "opq::<f64>(1.0) / opq::<f64>(3.0)",
-            "opq::<f64>(-1e300) as i32",
-            "sq(opq::<i64>(-7))",
-        ],
-        ["i32", "u8", "i64", "f64", "i32", "i64"],
-        [],
-    );
-    assert(d.len() == 0, d.as_str());
-}
-
 // Float literals round once, at their context's type: f32 arguments and operands, f64 arguments,
 // subnormal and tie-breaking hex forms, `_` separators, suffixes; an integer converts to f32 directly.
 @test
@@ -198,41 +178,34 @@ fn f64_literal_contexts_keep_double_precision() {
     );
 }
 
+// Values and traps in one program, one build: an add, a wrapping add, a signed shift, a float division,
+// a saturating cast and a const fn call keep their values; overflows, a division by zero and an
+// oversized shift trap, and the trapping constants leave the program while the rest keep their values.
 @test
-fn parity_traps() {
+fn parity_values_and_traps() {
     let d = h::const_runtime_parity(
-        "",
+        "const fn sq(x: i64) i64 {\n    return x * x;\n}\n",
         [
+            "opq::<i32>(40) + opq::<i32>(2)",
+            "opq::<u8>(200).wrapping_add(opq::<u8>(100))",
+            "opq::<i64>(-1) << opq::<i64>(63)",
+            "opq::<f64>(1.0) / opq::<f64>(3.0)",
+            "opq::<f64>(-1e300) as i32",
+            "sq(opq::<i64>(-7))",
             "opq::<i32>(i32::MAX) + opq::<i32>(1)",
             "-opq::<i8>(i8::MIN)",
             "opq::<u16>(7) / opq::<u16>(0)",
             "opq::<i64>(i64::MIN) % opq::<i64>(-1)",
             "opq::<u32>(1) << opq::<u32>(32)",
-        ],
-        ["i32", "i8", "u16", "i64", "u32"],
-        [],
-    );
-    assert(d.len() == 0, d.as_str());
-}
-
-// Several cases in one program: the trapping constants leave the program, the rest keep their values.
-@test
-fn parity_mixed_cases() {
-    let d = h::const_runtime_parity(
-        "",
-        [
             "opq::<i16>(i16::MIN) - opq::<i16>(1)",
             "opq::<u64>(u64::MAX) / opq::<u64>(3)",
             "opq::<i32>(-9) >> opq::<i32>(-1)",
             "opq::<f32>(0.1) * opq::<f32>(3.0)",
         ],
-        ["i16", "u64", "i32", "f32"],
+        ["i32", "u8", "i64", "f64", "i32", "i64", "i32", "i8", "u16", "i64", "u32", "i16", "u64", "i32", "f32"],
         [],
     );
-    if d.len() != 0 {
-        eprintln("{}", d.as_str());
-    }
-    assert(d.len() == 0, "four cases agree");
+    assert(d.len() == 0, d.as_str());
 }
 
 // A run time without overflow checks is the difference the oracle exists to find: the constant traps,
@@ -327,10 +300,11 @@ fn asm_wasm32() {
     h::expect_asm("wasm32 multiply", MULW, ["--profile=release", "--target=wasm"], "mulw", ["i64.mul"], ["call"]);
 }
 
+const PROFILE_PROGRAMS: str = M"(import std::simd;
 // Loops of `abs`, `floor`, `ceil`, `trunc` and `mul_add`, which the loop vectorizer widens to vector
 // operations where the target computes them in registers: each lane as the C function gives it, on values
 // that round both ways, halves, both zeros, the infinities and a NaN, past a vector and with a remainder.
-const FLOAT_LOOPS: str = M"(@noinline fn fl(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].floor(); } }
+@noinline fn fl(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].floor(); } }
 @noinline fn ce(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].ceil(); } }
 @noinline fn tr(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].trunc(); } }
 @noinline fn ab(d: []mut f32, s: []f32) { for i in 0..s.len() { d[i] = s[i].abs(); } }
@@ -338,7 +312,7 @@ const FLOAT_LOOPS: str = M"(@noinline fn fl(d: []mut f32, s: []f32) { for i in 0
 @noinline fn fl64(d: []mut f64, s: []f64) { for i in 0..s.len() { d[i] = s[i].floor(); } }
 @noinline fn ma64(d: []mut f64, s: []f64, k: f64) { for i in 0..s.len() { d[i] = s[i].mul_add(k, s[i]); } }
 fn show(name: str, d: []f32) { for i in 0..d.len() { println("{} {} {}", name, i, d[i].to_bits()); } }
-fn main() i32 {
+fn main_0() i32 {
     let base: [f32; 12] = [0.0, -0.0, 0.5, -0.5, 1.5, -1.5, 2.75, -2.75, 1.0e30, -3.0e-30, 1.0 / 0.0, -1.0 / 0.0];
     let mut s = Vector::<f32>::new();
     let mut s64 = Vector::<f64>::new();
@@ -367,21 +341,14 @@ fn main() i32 {
     for i in 0..37usize { println("mul_add64 {} {}", i, d64[i].to_bits()); }
     return 0;
 }
-)";
-
-@test
-fn float_function_loops_match_their_scalar_calls() {
-    h::expect_same_output("float function loops", FLOAT_LOOPS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Conditional sums and counts, which the loop vectorizer widens as reductions of a select (`cond_step`):
 // wrapping sums of signed and unsigned elements, a sum of the other side, and a count, past a vector and
 // with a remainder.
-const COND_SUMS: str = M"(@noinline fn pos(s: []i32) i32 { let mut t: i32 = 0; for i in 0..s.len() { if s[i] > 0 { t = t.wrapping_add(s[i]); } } return t; }
+@noinline fn pos(s: []i32) i32 { let mut t: i32 = 0; for i in 0..s.len() { if s[i] > 0 { t = t.wrapping_add(s[i]); } } return t; }
 @noinline fn neg(s: []i32) i32 { let mut t: i32 = 0; for i in 0..s.len() { if s[i] > 0 { } else { t = t.wrapping_sub(s[i]); } } return t; }
 @noinline fn big(s: []u32, k: u32) u32 { let mut t: u32 = 0; for i in 0..s.len() { if s[i] >= k { t = t.wrapping_add(s[i]); } } return t; }
 @noinline fn odd(s: []u32) u32 { let mut t: u32 = 0; for i in 0..s.len() { if (s[i] & 1) != 0 { t ^= s[i]; } } return t; }
-fn main() i32 {
+fn main_1() i32 {
     let mut s = Vector::<i32>::new();
     let mut u = Vector::<u32>::new();
     let mut x: u32 = 12345;
@@ -395,22 +362,15 @@ fn main() i32 {
     }
     return 0;
 }
-)";
-
-@test
-fn conditional_sums_match_across_profiles() {
-    h::expect_same_output("conditional sums", COND_SUMS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Loops whose test is `i + c < n` (`opt::offset_test` makes it `i < n - min(n, c)`, then a counted loop the
 // vectorizer widens after a guard proves its slice checks): sums of neighbours from 0 and from 2, a wider
 // window, and a byte loop, on every length from 0 past a vector with remainders; then a bound past the
 // slice, whose check fails in the last iteration.
-const OFFSET_LOOPS: str = M"(@noinline fn pair(s: []u32) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < s.len() { t = t.wrapping_add(s[i].wrapping_mul(s[i + 1])); i += 1; } return t; }
+@noinline fn pair(s: []u32) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < s.len() { t = t.wrapping_add(s[i].wrapping_mul(s[i + 1])); i += 1; } return t; }
 @noinline fn quad(s: []u32) u32 { let mut t: u32 = 0; let mut i: usize = 2; while i + 3 < s.len() { t = t.wrapping_add(s[i] ^ s[i + 3]); i += 1; } return t; }
 @noinline fn bytes(s: []u8) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < s.len() { t += (s[i] as u32) * (s[i + 1] as u32); i += 1; } return t; }
-@noinline fn over(s: []u32, n: usize) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < n { t = t.wrapping_add(s[i] ^ s[i + 1]); i += 1; } return t; }
-fn main() i32 {
+@noinline fn over_2(s: []u32, n: usize) u32 { let mut t: u32 = 0; let mut i: usize = 0; while i + 1 < n { t = t.wrapping_add(s[i] ^ s[i + 1]); i += 1; } return t; }
+fn main_2() i32 {
     let mut s = Vector::<u32>::new();
     let mut u = Vector::<u8>::new();
     let mut x: u32 = 7;
@@ -423,24 +383,17 @@ fn main() i32 {
         println("{} {} {} {}", n, pair(s[0..n]), quad(s[0..n]), bytes(u[0..n]));
     }
     // A bound past the slice: the last pair's check fails.
-    println("{}", over(s[0..33], 34));
+    println("{}", over_2(s[0..33], 34));
     return 0;
 }
-)";
-
-@test
-fn offset_loop_tests_match_across_profiles() {
-    h::expect_same_output("offset loop tests", OFFSET_LOOPS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // A loop that reads from the end (`d[k] = s[n - 1 - k]` while `k < n`), and one indexed by a `u32` counter,
 // check once, before them (`mirrored`, `affine`'s extension): every length, a source of exactly `n`; then a
 // source one short, a read from the end of a longer count, and a `u32` count past the source, whose checks
 // fail.
-const MIRRORED: str = M"(@noinline fn rev(d: []mut u32, s: []u32) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
+@noinline fn rev(d: []mut u32, s: []u32) { let n = d.len(); for k in 0..n { d[k] = s[n - 1 - k]; } }
 @noinline fn far(d: []mut u32, s: []u32, m: usize) { let n = d.len(); for k in 0..n { d[k] = s[m - 1 - k]; } }
 @noinline fn narrow(s: []u32, n: u32) u32 { let mut t: u32 = 0; let mut i: u32 = 0; while i < n { t = t.wrapping_add(s[i as usize]); i += 1; } return t; }
-fn main(args: Vector<str>) i32 {
+fn main_3(args: Vector<str>) i32 {
     let mut s = Vector::<u32>::new();
     let mut d = Vector::<u32>::new();
     for i in 0..40u32 {
@@ -464,24 +417,16 @@ fn main(args: Vector<str>) i32 {
     }
     return 0;
 }
-)";
-
-@test
-fn mirrored_indexes_match_across_profiles() {
-    let d = h::same_output(MIRRORED, ["--profile=debug"], ["--profile=release"], ["", "far", "far narrow"]);
-    assert(d.len() == 0, d.as_str());
-}
-
 // Quotients and remainders by constants that the loop vectorizer computes by lane high products, and a count
 // of matching bytes whose 8-byte lanes take several registers per vector: in place over slices past a vector
 // and with a remainder, the lanes' extremes included.
-const LANE_DIVISIONS: str = M"(@noinline fn sdiv7(s: []mut i32) { for i in 0..s.len() { s[i] = s[i] / 7; } }
+@noinline fn sdiv7(s: []mut i32) { for i in 0..s.len() { s[i] = s[i] / 7; } }
 @noinline fn sdivm3(s: []mut i16) { for i in 0..s.len() { s[i] = s[i] / -3; } }
 @noinline fn udiv7(s: []mut u32) { for i in 0..s.len() { s[i] = s[i] / 7; } }
 @noinline fn urem10(s: []mut u32) { for i in 0..s.len() { s[i] = s[i] % 10; } }
 @noinline fn udiv3(s: []mut u16) { for i in 0..s.len() { s[i] = s[i] / 3; } }
 @noinline fn count(s: []u8, c: u8) usize { let mut n: usize = 0; for k in 0..s.len() { if s[k] == c { n += 1; } } return n; }
-fn main() i32 {
+fn main_4() i32 {
     let edges: [u32; 6] = [0, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF, 7, 0xFFFFFFF9];
     let mut x: u32 = 2463534242;
     for n in [0usize, 5, 37, 100] {
@@ -518,18 +463,11 @@ fn main() i32 {
     }
     return 0;
 }
-)";
-
-@test
-fn lane_divisions_by_constants_match_across_profiles() {
-    h::expect_same_output("lane divisions by constants", LANE_DIVISIONS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Loops that update every field of a struct array alike, which run as one loop over the fields
 // (`lir::loops` `reroll`), then vectorize: three `f32` fields plus an operand, four `u32` fields by a
 // product and a shift, every count from 0 past a vector; and loops that do not qualify: one field left
 // out (inside the element, or at its end), two fields updated differently.
-const FIELD_LOOPS: str = M"(struct V { x: f32, y: f32, z: f32 }
+struct V { x: f32, y: f32, z: f32 }
 struct Q { a: u32, b: u32, c: u32, d: u32 }
 struct W { x: f32, y: f32, z: f32, w: f32 }
 @noinline fn three(v: []mut W, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].y += d; v[k].z += d; } }
@@ -537,7 +475,7 @@ struct W { x: f32, y: f32, z: f32, w: f32 }
 @noinline fn scale(v: []mut Q, m: u32) { for k in 0..v.len() { v[k].a = v[k].a.wrapping_mul(m) >> 1; v[k].b = v[k].b.wrapping_mul(m) >> 1; v[k].c = v[k].c.wrapping_mul(m) >> 1; v[k].d = v[k].d.wrapping_mul(m) >> 1; } }
 @noinline fn part(v: []mut V, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].z += d; } }
 @noinline fn mixed(v: []mut V, d: f32) { for k in 0..v.len() { v[k].x += d; v[k].y -= d; v[k].z += d; } }
-fn main() i32 {
+fn main_5() i32 {
     for n in 0..20usize {
         let mut v = Vector::<V>::new();
         let mut q = Vector::<Q>::new();
@@ -563,18 +501,11 @@ fn main() i32 {
     }
     return 0;
 }
-)";
-
-@test
-fn field_loops_match_across_profiles() {
-    h::expect_same_output("field loops", FIELD_LOOPS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Calls whose arguments and results go without a copy under release: a slice parameter passed on in its
 // registers (also after another argument), a read-only reference's referent passed by value, a result
 // made in an exclusive reference's referent, an immutable local lent to a call that only reads it, a store
 // into an exclusive referent that a later store overwrites across a call, and stack arguments.
-const IN_PLACE: str = M"(struct Big { a: u64, b: u64, c: u64, d: u64, e: u64 }
+struct Big { a: u64, b: u64, c: u64, d: u64, e: u64 }
 static mut G: u64 = 0;
 @noinline fn tick() { unsafe { G += 1; } }
 @noinline fn sum(s: []u32, k: u32) u32 { let mut t = k; for i in 0..s.len() { t = t.wrapping_mul(31).wrapping_add(s[i]); } return t; }
@@ -586,37 +517,24 @@ static mut G: u64 = 0;
 @noinline fn into(out: &mut Big, a: u64) { *out = mk(a); }
 @noinline fn look(x: &u64) u64 { return *x + 1; }
 @noinline fn lent(a: u64) u64 { let x = a * 3; let y = look(&x); tick(); return x + y; }
-@noinline fn over(p: &mut u64) u64 { *p = 1; tick(); *p += 1; return *p; }
+@noinline fn over_6(p: &mut u64) u64 { *p = 1; tick(); *p += 1; return *p; }
 @noinline fn many(a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64, i: u64, j: u64) u64 { return a + b * 2 + c + d + e + f + g + h + i * 3 + j; }
 @noinline fn sibling(x: u64, y: u64) u64 { return many(y, x, 0, 0, 0, 0, 0, 0, 1, 2); }
-fn main() i32 {
+fn main_6() i32 {
     let v: [u32; 5] = [3, 1, 4, 1, 5];
     println("{} {}", fwd(v[0..5], 9), fwd_swap(9, v[1..4]));
     let mut b = Big { a: 0, b: 0, c: 0, d: 0, e: 0 };
     into(&mut b, 7);
     println("{} {} {}", b.a, b.e, by_ref(&b));
     let mut p: u64 = 5;
-    println("{} {} {}", lent(4), over(&mut p), p);
+    println("{} {} {}", lent(4), over_6(&mut p), p);
     println("{} {}", sibling(10, 20), unsafe G);
     return 0;
 }
-)";
-
-@test
-fn in_place_calls_match_across_profiles() {
-    h::expect_same_output(
-        "calls passing arguments and results in place",
-        IN_PLACE,
-        ["--profile=debug"],
-        ["--profile=release"],
-    );
-}
-
 // Vector loads of two slices in a loop while `i + 16 <= x.len() && i + 16 <= y.len()`, by steps of 16
 // (`lir::loops` versions it on the least bound, which a guard also keeps 16 below the maximum, and the
 // copy without the range checks runs); every pair of lengths around a step; then a bound past the slice,
 // whose last load's check fails.
-const OFFSET_VECTORS: str = M"(import std::simd;
 @noinline fn dot(x: []f32, y: []f32) f32 {
     let z = f32x4::splat(0.0);
     let mut a0 = z; let mut a1 = z; let mut a2 = z; let mut a3 = z;
@@ -639,7 +557,7 @@ const OFFSET_VECTORS: str = M"(import std::simd;
     }
     return t;
 }
-fn main() i32 {
+fn main_7() i32 {
     let mut x = Vector::<f32>::new();
     let mut u = Vector::<u32>::new();
     let mut r: u32 = 11;
@@ -660,17 +578,10 @@ fn main() i32 {
     println("{}", v[0]);
     return 0;
 }
-)";
-
-@test
-fn offset_vector_loops_match_across_profiles() {
-    h::expect_same_output("offset vector loops", OFFSET_VECTORS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Loops that count down to 0 and read the element below the counter, checked (`lir::loops` versions
 // them on `i0 <= len`): from the length, from a shorter start, and from past the end, which traps in both
 // profiles.
-const DOWN_LOOPS: str = M"(@noinline fn down(s: []u32, from: usize) u32 {
+@noinline fn down(s: []u32, from: usize) u32 {
     let mut t: u32 = 0;
     let mut i = from;
     while i != 0 { i -= 1; t = t.wrapping_mul(31).wrapping_add(s[i]); }
@@ -682,7 +593,7 @@ const DOWN_LOOPS: str = M"(@noinline fn down(s: []u32, from: usize) u32 {
     while i > 0 { i -= 1; t ^= s[i] << (i & 7) as u64; }
     return t;
 }
-fn main() i32 {
+fn main_8() i32 {
     let mut v = Vector::<u32>::new();
     let mut w = Vector::<u64>::new();
     for n in 0..20usize {
@@ -693,20 +604,13 @@ fn main() i32 {
     println("{}", down(&v, v.len() + 1));
     return 0;
 }
-)";
-
-@test
-fn loops_counting_down_match_across_profiles() {
-    h::expect_same_output("loops counting down", DOWN_LOOPS, ["--profile=debug"], ["--profile=release"]);
-}
-
 // Byte idioms the loop vectorizer computes at the narrow lanes, and a row's elements whose bounds check one
 // test before the row's loop proves: saturating sums of bytes (by a value, a constant, of two slices, the
 // test either way) and of 16-bit lanes, absolute differences of zero- and sign-extended bytes summed into
 // 32 bits or stored as bytes, and widening sums of bytes and 16-bit lanes, every length from 0 past two
 // vectors; rows of every shape within the matrix. Then rows past the matrix and a sum's second slice one
 // short, whose checks fail.
-const BYTE_IDIOMS: str = M"(@noinline fn sat_by(s: []mut u8, k: u8) { for i in 0..s.len() { let v = s[i] as u16 + k as u16; s[i] = if v > 255 { 255 } else { v as u8 }; } }
+@noinline fn sat_by(s: []mut u8, k: u8) { for i in 0..s.len() { let v = s[i] as u16 + k as u16; s[i] = if v > 255 { 255 } else { v as u8 }; } }
 @noinline fn sat_const(s: []mut u8) { for i in 0..s.len() { let v = s[i] as u32 + 200; s[i] = if v < 256 { v as u8 } else { 255 }; } }
 @noinline fn sat_two(d: []mut u8, a: []u8, b: []u8) { for i in 0..d.len() { let v = a[i] as u16 + b[i] as u16; d[i] = if v >= 256 { 255 } else { v as u8 }; } }
 @noinline fn sat16(s: []mut u16, k: u16) { for i in 0..s.len() { let v = s[i] as u32 + k as u32; s[i] = if v > 65535 { 65535 } else { v as u16 }; } }
@@ -717,7 +621,7 @@ const BYTE_IDIOMS: str = M"(@noinline fn sat_by(s: []mut u8, k: u8) { for i in 0
 @noinline fn wsum(s: []u16) u64 { let mut t: u64 = 0; for i in 0..s.len() { t += s[i] as u64; } return t; }
 @noinline fn rows(m: []u32, w: usize, h: usize) u32 { let mut t: u32 = 0; for y in 0..h { for x in 0..w { t = t.wrapping_add(m[y * w + x]); } } return t; }
 fn hash(s: []u8) u32 { let mut h: u32 = 0; for i in 0..s.len() { h = h.wrapping_mul(31).wrapping_add(s[i] as u32); } return h; }
-fn main(args: Vector<str>) i32 {
+fn main_9(args: Vector<str>) i32 {
     let edges: [u32; 6] = [0, 255, 128, 127, 1, 254];
     let mut x: u32 = 2463534242;
     let mut m = Vector::<u32>::new();
@@ -778,10 +682,53 @@ fn main(args: Vector<str>) i32 {
     }
     return 0;
 }
+// The case is the last argument; the case's own arguments come before it.
+fn main(args: Vector<str>) i32 {
+    let mut a = args;
+    let k = a.pop().unwrap().parse_i64().unwrap();
+    if k == 0 {
+        return main_0();
+    }
+    if k == 1 {
+        return main_1();
+    }
+    if k == 2 {
+        return main_2();
+    }
+    if k == 3 {
+        return main_3(a);
+    }
+    if k == 4 {
+        return main_4();
+    }
+    if k == 5 {
+        return main_5();
+    }
+    if k == 6 {
+        return main_6();
+    }
+    if k == 7 {
+        return main_7();
+    }
+    if k == 8 {
+        return main_8();
+    }
+    if k == 9 {
+        return main_9(a);
+    }
+    return 255;
+}
 )";
 
+// Each program above agrees between the debug and the release profile. They are one program, a case per
+// argument, so each profile builds once.
 @test
-fn byte_idioms_and_rows_match_across_profiles() {
-    let d = h::same_output(BYTE_IDIOMS, ["--profile=debug"], ["--profile=release"], ["", "rows", "rows short"]);
+fn programs_match_across_profiles() {
+    let d = h::same_output(
+        PROFILE_PROGRAMS,
+        ["--profile=debug"],
+        ["--profile=release"],
+        ["0", "1", "2", "3", "far 3", "far narrow 3", "4", "5", "6", "7", "8", "9", "rows 9", "rows short 9"],
+    );
     assert(d.len() == 0, d.as_str());
 }

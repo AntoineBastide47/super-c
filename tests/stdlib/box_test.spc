@@ -6,12 +6,12 @@ import tests::harness as h;
 
 @test
 fn zeroed_cannot_build_a_box() {
-    h::expect_build_err(
+    h::expect_err_msg(
         "a concrete zeroed Box",
         "fn main() i32 { let z = unsafe zeroed::<Box<i32>>(); return 0; }\n",
         "'zeroed' cannot build a value that holds a Box",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a struct that holds a Box",
         "struct S { pub n: i32, pub b: Option<Box<i32>> }\nfn main() i32 { let z = unsafe zeroed::<S>(); return z.n; }\n",
         "'zeroed' cannot build a value that holds a Box",
@@ -21,7 +21,7 @@ fn zeroed_cannot_build_a_box() {
         "fn seed<T>() T { return unsafe zeroed::<T>(); }\nfn main() i32 { let b = seed::<Box<i32>>(); return *b.get(); }\n",
         "zeroed: a value that holds a Box has no all-zero form",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "an omitted Box field",
         "struct S { pub n: i32, pub b: Box<i32> }\nfn main() i32 { let s = S { n: 1 }; return s.n; }\n",
         "missing field 'b'",
@@ -30,12 +30,12 @@ fn zeroed_cannot_build_a_box() {
 
 @test
 fn free_through_a_reference_is_an_error() {
-    h::expect_build_err(
+    h::expect_err_msg(
         "a parameter",
         "fn f(b: &mut Box<i32>) { b.free(); }\nfn main() i32 { let mut b = Box::<i32>::new(1); f(&mut b); return 0; }\n",
         "cannot free a value that holds a Box through a reference",
     );
-    h::expect_build_err(
+    h::expect_err_msg(
         "a field through self",
         "struct S { pub b: Box<i32> }\nextend S { fn drop_b(self: &mut S) { self.b.free(); } }\nfn main() i32 { let mut s = S { b: Box::<i32>::new(1) }; s.drop_b(); return 0; }\n",
         "cannot free a value that holds a Box through a reference",

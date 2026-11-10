@@ -82,23 +82,29 @@ struct Fx {
     pub std_dir: String,
 }
 
-// A project with the step tool built, entered as the working directory.
+// A project whose manifest runs the step tool, entered as the working directory. The tests of steps
+// build the tool (`build_tool`); the hook tests replace the manifest and need none.
 @test_init
 fn fx() Fx {
     let cwd = process::current_dir().unwrap();
     let proj = cli::proj_new();
     proj.mkfile("tools/gen.spc", GEN);
-    let r = cli::superc_in(proj.dir(), format("build tools/gen.spc -o {}", gen_exe()).as_str());
-    if !r.ok() {
-        r.show();
-    }
-    assert(r.ok(), "the step tool builds");
+    let _ = cli::superc_path(); // resolved, and kept, before the chdir below: `build_tool` runs it
     proj.mkfile("src/main.spc", MAIN);
     proj.mkfile("src/util.spc", UTIL);
     proj.mkfile("data.txt", "hello");
     proj.mkfile("build.toml", step_manifest("", "").as_str());
     assert(process::set_current_dir(proj.dir()).is_ok(), "the project is the working directory");
     return Fx { proj: proj, std_dir: format("{}/std", cwd.as_str()) };
+}
+
+// Build the step tool of the fixture's project.
+fn build_tool(fx: &Fx) {
+    let r = cli::superc_in(fx.proj.dir(), format("build tools/gen.spc -o {}", gen_exe()).as_str());
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the step tool builds");
 }
 
 fn build(fx: &Fx) Result<bld::Report, ApiError> {
@@ -125,6 +131,7 @@ fn exists(path: str) bool {
 // A plan reads the manifest, the profile, the target, the steps and the package graph, and starts no step.
 @test(timeout = 300)
 fn a_plan_writes_and_runs_nothing(fx: &mut Fx) {
+    build_tool(fx);
     fx.proj.mkfile("src/gen.spc", "pub fn n() i32 {\n    return 5;\n}\n");
     let p = plan(fx).unwrap();
     assert_eq(p.profile.name.as_str(), "debug");
@@ -158,6 +165,7 @@ fn a_plan_writes_and_runs_nothing(fx: &mut Fx) {
 // no process and links nothing.
 @test(timeout = 300)
 fn steps_run_when_their_inputs_change(fx: &mut Fx) {
+    build_tool(fx);
     let r1 = build(fx).unwrap();
     assert(r1.ok, "the first build succeeds");
     assert_eq(r1.targets.len(), 1usize);
@@ -193,6 +201,7 @@ fn steps_run_when_their_inputs_change(fx: &mut Fx) {
 // A step must declare the project files it reads, its inputs must exist, and it must write its outputs.
 @test(timeout = 300)
 fn steps_declare_what_they_read_and_write(fx: &mut Fx) {
+    build_tool(fx);
     fx.proj.mkfile("other.txt", "x");
     fx.proj.mkfile(
         "build.toml",

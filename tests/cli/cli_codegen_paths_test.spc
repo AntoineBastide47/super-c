@@ -1,21 +1,7 @@
-// Lowering and emission paths reached only by specific program shapes: a range bound to a value then
-// iterated, a loop inside a cancellable launched task (the compiled cancellation safepoint), and a
-// --test build with a global fixture (the test global-env emitter). Each builds through the compiler.
+// Lowering and emission paths reached only by specific program shapes: a loop inside a cancellable
+// launched task (the compiled cancellation safepoint) and a --test build with a global fixture (the test
+// global-env emitter). Each builds through the compiler.
 import tests::cli_harness as cli;
-
-@test
-fn for_over_a_range_value() {
-    let p = cli::proj_new();
-    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    // The iterable is a range stored in a binding, not a literal `a..b` in the loop header: this takes
-    // the range-value lowering rather than the fast literal-range path.
-    p.mkfile(
-        "src/main.spc",
-        "fn main() i32 {\n    let r = 0..10;\n    let mut s = 0;\n    for i in r {\n        s += i;\n    }\n    return s - 45;\n}\n",
-    );
-    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
-    assert_eq(r.exit, 0);
-}
 
 @test
 fn loop_in_a_cancellable_task_gets_a_safepoint() {
@@ -23,10 +9,11 @@ fn loop_in_a_cancellable_task_gets_a_safepoint() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/main.spc",
-        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::channel as chan;\nimport std::time as time;\nstatic mut FINISHED: bool = false;\nfn main() i32 {\n    rt::set_worker_count(2);\n    let kch = chan::Channel::<rt::TaskKey>::bounded(1);\n    let ktx = kch.sender();\n    let krx = kch.receiver();\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        defer w.done();\n        let _ = ktx.send(rt::current_key());\n        let mut s: i64 = 0;\n        for i in 0..1000000000 {\n            s += i;\n        }\n        let _ = s;\n        unsafe FINISHED = true;\n    };\n    let key = krx.recv().unwrap();\n    time::sleep(time::Duration::from_millis(5));\n    let _ = rt::request_cancel(key, rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    if unsafe FINISHED {\n        return 1;\n    }\n    return 0;\n}\n",
+        "import std::parallel::runtime as rt;\nimport std::parallel::sync as sync;\nimport std::parallel::channel as chan;\nstatic mut FINISHED: bool = false;\nstatic mut SINK: u64 = 0;\nfn main() i32 {\n    rt::set_worker_count(2);\n    let kch = chan::Channel::<rt::TaskKey>::bounded(1);\n    let ktx = kch.sender();\n    let krx = kch.receiver();\n    let wg = sync::WaitGroup::new();\n    wg.add(1);\n    let w = wg.clone();\n    launch || {\n        defer w.done();\n        let _ = ktx.send(rt::current_key());\n        let mut s: u64 = 1;\n        for i in 0u64..1000000000000000u64 {\n            s = s.wrapping_mul(6364136223846793005).wrapping_add(i);\n        }\n        unsafe SINK = s;\n        unsafe FINISHED = true;\n    };\n    let key = krx.recv().unwrap();\n    let _ = rt::request_cancel(key, rt::CR_USER);\n    wg.wait();\n    rt::shutdown();\n    if unsafe FINISHED {\n        return 1;\n    }\n    return 0;\n}\n",
     );
-    // The loop's safepoint sees the cancel: the task ends before the loop does.
-    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
+    // The loop's safepoint sees the cancel: the task ends before the loop does. The loop would take days
+    // (a recurrence no optimizer closes), so only the safepoint ends the run in time.
+    let r = cli::superc_in(p.dir(), "run");
     assert_eq(r.exit, 0);
 }
 
@@ -77,7 +64,7 @@ fn struct_array_const_header_includes_its_element_type() {
         "struct S {\n    pub x: i32,\n}\nconst T: [S; 2] = [S { x: 1 }, S { x: 2 }];\n@noinline\npub fn get(i: usize) i32 {\n    return unsafe T[i].x;\n}\n",
     );
     p.mkfile("src/main.spc", "import a;\nfn main(args: Vector<str>) i32 {\n    return a::get(args.len()) - 2;\n}\n");
-    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
+    let r = cli::superc_in(p.dir(), "run");
     assert_eq(r.exit, 0);
 }
 
@@ -95,6 +82,6 @@ fn default_bodies_of_same_named_types_in_two_modules_stay_apart() {
     p.mkfile("src/a.spc", m);
     p.mkfile("src/b.spc", m);
     p.mkfile("src/main.spc", "import a;\nimport b;\nfn main() i32 {\n    return a::run(3) + b::run(4) - 14;\n}\n");
-    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "run");
+    let r = cli::superc_in(p.dir(), "run");
     assert_eq(r.exit, 0);
 }

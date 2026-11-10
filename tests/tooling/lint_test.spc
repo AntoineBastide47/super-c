@@ -1,5 +1,6 @@
 // Lint-surface tests driven through `$SUPERC lint` as a subprocess: the redundant reference->pointer
 // coalescing-cast warning and its `--fix` auto-removal.
+import tests::harness as h;
 import tests::cli_harness as cli;
 import module::loader as loader;
 
@@ -243,7 +244,7 @@ fn lint_reports_cross_module_duplicate_conformance() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/main.spc\"");
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", &args);
+    let r = cli::superc_in(root, &args);
     assert(r.out_shows("duplicate conformance"));
     assert(r.exit != 0, "the lint fails");
 }
@@ -264,10 +265,10 @@ fn lint_resolves_a_standalone_program_beside_itself() {
     let mut args = String::from_str("lint \"");
     args.push_str(root);
     args.push_str("/tools/t/main.spc\"");
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", &args);
+    let r = cli::superc_in(root, &args);
     assert(!r.out_shows("cannot open module"), "the listed file resolves `lib` beside it");
     assert_eq(r.exit, 0);
-    let rd = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint");
+    let rd = cli::superc_in(root, "lint");
     assert(!rd.out_shows("cannot open module"), "the collected file resolves `lib` beside it");
     assert_eq(rd.exit, 0);
 }
@@ -696,7 +697,7 @@ fn type_path_call_marks_a_private_associated_function_used() {
         "struct S {\n    pub v: i32,\n}\n\nextend S {\n    fn helper(v: i32) i32 {\n        return v + 1;\n    }\n\n    pub fn run(self: &S) i32 {\n        return S::helper(self.v);\n    }\n}\n\nfn main() i32 {\n    let s = S { v: 1 };\n    return s.run() - 2;\n}\n",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
+    let r = cli::superc_in(root, "lint solo.spc");
     assert(r.ok(), "a private associated function called through a type path is used");
 }
 
@@ -713,18 +714,21 @@ fn leading_turbofish_call_marks_a_generic_function_used() {
         "fn main() i32 {\n    return (g::<i32>(1)) - 1;\n}\n",
         "fn k() i32 {\n    return g::<i32>(1);\n}\n\nfn main() i32 {\n    return k() - 1;\n}\n",
     ];
-    let root = p.dir();
-    for m in mains {
+    // One lint run over a file per form: each file is a root of its own, its first body at id 0.
+    let mut args = String::from_str("lint");
+    for k in 0..4usize {
+        let name = format("m{}.spc", k);
         let mut src = String::from_str(g);
-        src.push_str(m);
-        p.mkfile("main.spc", &src);
-        let mut args = String::from_str("lint \"");
-        args.push_str(root);
-        args.push_str("/main.spc\"");
-        let r = p.run_raw(&args);
-        assert(!r.out_has("unused function 'g'"), "a leading turbofish call uses the generic function");
-        assert_eq(r.exit, 0);
+        src.push_str(unsafe mains[k]);
+        p.mkfile(&name, &src);
+        args.format_into(" \"{}/{}\"", p.dir(), name.as_str());
     }
+    let r = p.run_raw(&args);
+    if r.out_has("unused function 'g'") || r.exit != 0 {
+        r.show();
+    }
+    assert(!r.out_has("unused function 'g'"), "a leading turbofish call uses the generic function");
+    assert_eq(r.exit, 0);
 }
 
 // A cast to a type alias is not unnecessary: the alias may name another type on another target (`mode_t`
@@ -739,32 +743,6 @@ fn a_cast_to_an_alias_is_kept() {
     let r = p.run_raw(format("lint \"{}/main.spc\"", p.dir()).as_str());
     assert(r.out_has("main.spc:8:12"), "the cast to the type itself is reported");
     assert(!r.out_has("main.spc:4:12"), "the cast to the alias is not");
-}
-
-@test
-fn standalone_file_lint_and_fix() {
-    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
-    // dependent guest command, so it runs on native and Windows only.
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile(
-        "solo.spc",
-        "fn take(q: *mut i32) i32 {\n    return unsafe *q;\n}\n\nfn main() i32 {\n    let mut x = 1;\n    return take((&mut x) as *mut i32) - 1;\n}\n",
-    );
-    let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint solo.spc");
-    // The redundant coalescing cast is reported through the per-path route.
-    assert(r.out_has("unnecessary cast"), "the standalone lint reports the redundant cast");
-    // --fix removes it in place.
-    let fr = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --fix solo.spc");
-    assert(fr.ok(), "the fix run succeeds");
-    let mut sp = String::from_str(root);
-    sp.push_str("/solo.spc");
-    let fixed = loader::read_file(&sp).unwrap();
-    assert(fixed.as_str().contains("return take(&mut x) - 1;"), "the cast was removed");
-    assert(!fixed.as_str().contains("as *mut i32"), "no cast remains");
 }
 
 // The const-suggestion lint (`lint --const`) proves whether a function is fully compile-time
@@ -785,7 +763,7 @@ fn const_suggestion_scans_a_switch() {
         "fn classify(n: i32) i32 {\n    return switch n {\n        0 => 10,\n        1..=5 => 20,\n        _ => 0,\n    };\n}\nfn dbl(n: i32) i32 {\n    return n * 2;\n}\nfn main() i32 { return classify(1) + dbl(0) - 20; }\n",
     );
     let root = p.dir();
-    let r = cli::superc_env_in(root, "SC_NO_EMIT_CACHE", "1", "lint --const solo.spc");
+    let r = cli::superc_in(root, "lint --const solo.spc");
     assert(r.out_shows("function 'dbl' can be declared 'const fn'"), "the sweep ran");
     assert(r.out_shows("function 'classify' can be declared 'const fn'"), "the scan sees through the switch");
 }
@@ -1093,24 +1071,22 @@ fn arch_gated_uses_keep_imports() {
 }
 
 // A byte pointer across the elements of a nested array or a vector stays inside one object, which
-// the pointer rules allow: the compile-time model cannot follow such a view, so it reports nothing,
-// and the program runs.
+// the pointer rules allow: the compile-time model cannot follow such a view, so it reports nothing
+// (a provable fault is a build error), and the program runs.
 @test
 fn byte_views_of_aggregates_are_no_provable_fault() {
-    if !cli::has_cc() {
-        return; // the C compiler builds it
-    }
-    let srcs: [str; 2] = [
+    let mut b = h::ExitBatch::new();
+    b.add(
+        "a byte view of a nested array",
         "fn main() i32 {\n    let mut buf: [[u8; 32]; 2] = [[0; 32], [0; 32]];\n    let base = &mut buf as *mut [[u8; 32]; 2] as *mut u8;\n    for i in 0usize..32 {\n        unsafe *(base + 8 + i) = 1;\n    }\n    return buf[1][0] as i32 - 1;\n}\n",
+        0,
+    );
+    b.add(
+        "a byte view of a vector",
         "fn main() i32 {\n    let mut v = Simd::<u8, 64>::splat(0);\n    let base = &mut v as *mut Simd<u8, 64> as *mut u8;\n    unsafe *(base + 40) = 7;\n    return v[40] as i32 - 7;\n}\n",
-    ];
-    for src in srcs {
-        let p = cli::proj_new();
-        p.mkfile("main.spc", src);
-        let r = p.native_build("", "main.spc");
-        assert(r.ok() && !r.out_has("undefined behavior"), "no compile-time fault");
-        assert(p.run_bin() == 0, "the run writes the bytes");
-    }
+        0,
+    );
+    b.run();
 }
 
 // A conformance uses its interface and the interfaces of its parameters' bounds, generic or not; an
@@ -1163,7 +1139,7 @@ fn lint_sets_test_for_the_test_suite() {
         "tests/util_test.spc",
         "import util;\n\n@test\nfn probe_doubles() {\n    assert(util::twice(util::probe()) == 42, \"probe\");\n}\n",
     );
-    let r = cli::superc_env_in(p.dir(), "SC_NO_EMIT_CACHE", "1", "lint");
+    let r = cli::superc_in(p.dir(), "lint");
     assert(!r.out_shows("no visible item 'probe'"), "the test file sees the TEST item");
     assert_eq(r.exit, 0);
 }

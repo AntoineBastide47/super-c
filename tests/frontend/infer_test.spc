@@ -97,7 +97,23 @@ fn literal_arithmetic_types() {
 // minimum, suffixed or not, and the C form of the i64 minimum is a valid C expression.
 @test
 fn literal_contexts_and_signed_minimum() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "past the minimum",
+        "fn main() i32 { let a = -129i8; return 0; }\n",
+        "integer literal does not fit in its suffixed type",
+    );
+    h::expect_err_msg(
+        "a float operand in an integer context",
+        "fn main() i32 { let a: i32 = 2.5 + 1; return a; }\n",
+        "mismatched types",
+    );
+    h::expect_ok(
+        "an array of tuples holding a function pointer",
+        "fn p(x: []u8) usize { return x.len(); }\nfn main() i32 { let u: [(i32, fn([]u8) usize); 1] = [(1, p)]; return u[0].0 - 1; }\n",
+    );
+}
+
+fn literal_contexts_and_signed_minimum_cases(b: &mut h::ExitBatch) {
     b.add(
         "every context types literal arithmetic",
         "struct P { pub a: i64, pub b: u64 }\nfn take(x: i64) i64 { return x; }\nfn ret() i64 { return 2147483647 + 1; }\nfn main() i32 {\n    let a: i64 = 2147483647 + 1;\n    let p = P { a: 2147483647 + 1, b: 1 << 40 };\n    let x: i64 = 5;\n    let mut f: i64 = 0;\n    f += 2147483647 + 1;\n    let g: [u64; 2] = [1 << 40, 1 << 33];\n    if a != 2147483648 || take(2147483647 + 1) != a || ret() != a || p.a != a || p.b != 1099511627776 { return 1; }\n    if x + (2147483647 + 1) != a + 5 || (2147483647 + 1) + x != a + 5 || f != a || g[1] != 8589934592 { return 2; }\n    return 0;\n}\n",
@@ -118,26 +134,10 @@ fn literal_contexts_and_signed_minimum() {
         "fn main() i32 {\n    let a = -128i8;\n    let b = -32768i16;\n    let c = -2147483648i32;\n    let d = -9223372036854775808i64;\n    let e = -2147483648;\n    let f = -9223372036854775808;\n    static_assert(sizeof(e) == 4 && sizeof(f) == 8, \"i32, i64\");\n    let g: i8 = -128;\n    if a != i8::MIN || g != a || b != i16::MIN || c != i32::MIN || e != c || d != i64::MIN || f != d { return 1; }\n    return 0;\n}\n",
         0,
     );
-    h::expect_err_msg(
-        "past the minimum",
-        "fn main() i32 { let a = -129i8; return 0; }\n",
-        "integer literal does not fit in its suffixed type",
-    );
-    h::expect_err_msg(
-        "a float operand in an integer context",
-        "fn main() i32 { let a: i32 = 2.5 + 1; return a; }\n",
-        "mismatched types",
-    );
-    h::expect_ok(
-        "an array of tuples holding a function pointer",
-        "fn p(x: []u8) usize { return x.len(); }\nfn main() i32 { let u: [(i32, fn([]u8) usize); 1] = [(1, p)]; return u[0].0 - 1; }\n",
-    );
-    b.run();
 }
 
 @test
 fn repeated_generic_params() {
-    let mut b = h::ExitBatch::new();
     h::expect_ok(
         "equal argument types bind once",
         "fn pick<T>(a: T, b: T) T { return a; }\nfn main() i32 { return pick(1, 2) - 1; }\n",
@@ -147,6 +147,9 @@ fn repeated_generic_params() {
         "fn pick<T>(a: T, b: T) T { return a; }\nfn main() i32 { let x: i32 = 1; let y: f64 = 2.0; let z = pick(x, y); return 0; }\n",
         "mismatched types",
     );
+}
+
+fn repeated_generic_params_cases(b: &mut h::ExitBatch) {
     // Directional evidence joins under the safe-conversion oracle, so acceptance does not depend
     // on argument order. Both orders bind
     // T = &i32 and the `&mut` argument coerces.
@@ -165,12 +168,18 @@ fn repeated_generic_params() {
         "fn pick<T>(a: T, b: T) T { return a; }\nfn main() i32 { let y: u8 = 7; let x: u8 = pick(6, y); return (x - 6) as i32; }\n",
         0,
     );
-    b.run();
 }
 
 @test
 fn literal_adopts_generic_sibling() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "adopted literal is range-checked",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i32 = 5; let a = pick(true, x as u8, 300); return a as i32; }\n",
+        "out of range for 'u8'",
+    );
+}
+
+fn literal_adopts_generic_sibling_cases(b: &mut h::ExitBatch) {
     // An unpinned literal argument (decimal, based, or negated) takes the type the other arguments
     // or the expected result give the parameter; only a suffix pins it.
     b.add(
@@ -194,17 +203,18 @@ fn literal_adopts_generic_sibling() {
         "struct W<T> { pub v: T }\nfn pick<T: Copy>(a: T, b: T) W<T> { let _ = b; return W::<T> { v: a }; }\nfn main() i32 {\n    let y: W<f64> = pick(640.0 / 480.0, 0.8);\n    let z = pick(2 * 3, 7i64);\n    let ok = f64_bits(y.v) == 0x3FF5555555555555;\n    return ok as i32 + z.v as i32;\n}\n",
         7,
     );
-    h::expect_err_msg(
-        "adopted literal is range-checked",
-        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i32 = 5; let a = pick(true, x as u8, 300); return a as i32; }\n",
-        "out of range for 'u8'",
-    );
-    b.run();
 }
 
 @test
 fn array_literal_adopts_slice_element() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "slice element range-checks literals",
+        "fn main() i32 { let s: []u8 = [1, 256]; return s.len() as i32; }\n",
+        "mismatched types",
+    );
+}
+
+fn array_literal_adopts_slice_element_cases(b: &mut h::ExitBatch) {
     b.add(
         "array literal fills a usize slice",
         "fn sum(s: []usize) usize { let mut t: usize = 0; for x in s { t += x; } return t; }\nfn main() i32 { let s: []usize = [1, 2]; let r: []usize = [4; 2]; return (sum(s) + sum([3, 4]) + sum(r) + sum([1; 3])) as i32 - 21; }\n",
@@ -215,17 +225,10 @@ fn array_literal_adopts_slice_element() {
         "fn s2(a: [i64; 2]) i64 { return a[0] + a[1]; }\nfn main() i32 { return s2([3, 4]) as i32 - 7; }\n",
         0,
     );
-    h::expect_err_msg(
-        "slice element range-checks literals",
-        "fn main() i32 { let s: []u8 = [1, 256]; return s.len() as i32; }\n",
-        "mismatched types",
-    );
-    b.run();
 }
 
 @test
 fn const_generic_inference() {
-    let mut b = h::ExitBatch::new();
     h::expect_ok(
         "array length from argument",
         "fn len_of<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { let a: [i32; 3] = [1, 2, 3]; return len_of(a) as i32 - 3; }\n",
@@ -234,6 +237,21 @@ fn const_generic_inference() {
         "array literal argument counts its elements",
         "fn len_of<const N: usize>(a: [i32; N]) usize { return N; }\nfn main() i32 { return len_of([1, 2]) as i32 - 2; }\n",
     );
+    h::expect_err_msg(
+        "division with a remainder is rejected",
+        "fn half<const N: usize>(a: [i32; N * 2]) usize { return N; }\nfn main() i32 { let a: [i32; 5] = [1, 2, 3, 4, 5]; return half(a) as i32; }\n",
+        "cannot infer the generic argument",
+    );
+    // A later use whose exact const value
+    // disagrees with the existing binding is a conflict, not a silent first-binding win.
+    h::expect_err_msg(
+        "conflicting const lengths are a conflict",
+        "fn same<const N: usize>(a: [i32; N], b: [i32; N]) usize { return N; }\nfn main() i32 { let a: [i32; 2] = [1, 2]; let b: [i32; 3] = [1, 2, 3]; return same(a, b) as i32; }\n",
+        "conflicting const generic arguments",
+    );
+}
+
+fn const_generic_inference_cases(b: &mut h::ExitBatch) {
     // Bounded exact linear solving: a single-unknown undivided linear form
     // solves against an exact value; a remainder leaves the parameter unresolved with a clean
     // call-site error.
@@ -252,19 +270,6 @@ fn const_generic_inference() {
         "fn wid<const N: usize>(v: &UInt<{N * 2}>) usize { return N; }\nfn main() i32 { let x: UInt<128> = 1; return wid(&x) as i32 - 64; }\n",
         0,
     );
-    h::expect_err_msg(
-        "division with a remainder is rejected",
-        "fn half<const N: usize>(a: [i32; N * 2]) usize { return N; }\nfn main() i32 { let a: [i32; 5] = [1, 2, 3, 4, 5]; return half(a) as i32; }\n",
-        "cannot infer the generic argument",
-    );
-    // A later use whose exact const value
-    // disagrees with the existing binding is a conflict, not a silent first-binding win.
-    h::expect_err_msg(
-        "conflicting const lengths are a conflict",
-        "fn same<const N: usize>(a: [i32; N], b: [i32; N]) usize { return N; }\nfn main() i32 { let a: [i32; 2] = [1, 2]; let b: [i32; 3] = [1, 2, 3]; return same(a, b) as i32; }\n",
-        "conflicting const generic arguments",
-    );
-    b.run();
 }
 
 fn bound_dependency_chains(b: &mut h::ExitBatch) {
@@ -285,7 +290,6 @@ fn bound_dependency_chains(b: &mut h::ExitBatch) {
 
 @test
 fn expected_result_flow() {
-    let mut b = h::ExitBatch::new();
     h::expect_ok(
         "branches coerce to the expected type independently",
         "fn main() i32 { let c = true; let x: i64 = if c { 1i32 } else { 2i64 }; return x as i32 - 1; }\n",
@@ -298,23 +302,6 @@ fn expected_result_flow() {
     h::expect_ok(
         "interface assoc call takes the destination type",
         "fn main() i32 { let v: Vector<i32> = Default::default(); return v.len() as i32; }\n",
-    );
-    // Expected-result inference: a parameter the arguments left
-    // unresolved binds from the destination type, before declared and literal defaults.
-    b.add(
-        "generic result inferred from destination",
-        "fn make<T: Default>() T { return T::default(); }\nfn main() i32 { let x: i32 = make(); return x; }\n",
-        0,
-    );
-    b.add(
-        "constructor generics inferred from destination",
-        "fn main() i32 { let v: Vector<i32> = Vector::new(); return v.len() as i32; }\n",
-        0,
-    );
-    b.add(
-        "inferred constructor instance is usable",
-        "fn main() i32 { let mut v: Vector<i64> = Vector::new(); v.push(7); return (*v.at(0) - 7) as i32; }\n",
-        0,
     );
     h::expect_err_msg(
         "constructor with no context still needs the turbofish",
@@ -339,6 +326,26 @@ fn expected_result_flow() {
         h::STAGE_TYPECHECK,
     );
     assert(c2.errors == 1 && c2.msg_has("cannot infer the generic argument 'R'"), "one error beside operators");
+}
+
+fn expected_result_flow_cases(b: &mut h::ExitBatch) {
+    // Expected-result inference: a parameter the arguments left
+    // unresolved binds from the destination type, before declared and literal defaults.
+    b.add(
+        "generic result inferred from destination",
+        "fn make<T: Default>() T { return T::default(); }\nfn main() i32 { let x: i32 = make(); return x; }\n",
+        0,
+    );
+    b.add(
+        "constructor generics inferred from destination",
+        "fn main() i32 { let v: Vector<i32> = Vector::new(); return v.len() as i32; }\n",
+        0,
+    );
+    b.add(
+        "inferred constructor instance is usable",
+        "fn main() i32 { let mut v: Vector<i64> = Vector::new(); v.push(7); return (*v.at(0) - 7) as i32; }\n",
+        0,
+    );
     // Argument, expected-result, and bound evidence together infer one call's parameters
     // at once.
     b.add(
@@ -346,7 +353,6 @@ fn expected_result_flow() {
         "struct Pair<A, B> { pub a: A, pub b: B }\nfn wrap<A, B: Default>(a: A) Pair<A, B> { return Pair::<A, B> { a: a, b: B::default() }; }\nfn main() i32 { let p: Pair<i32, i64> = wrap(1); return (p.a as i64 + p.b) as i32 - 1; }\n",
         0,
     );
-    b.run();
 }
 
 @test
@@ -442,7 +448,6 @@ fn generic_argument_limits() {
 
 @test
 fn candidate_selection() {
-    let mut b = h::ExitBatch::new();
     // Bounded candidate solving: a fully informed tie between distinct
     // candidates is an ambiguity error; a unique fit wins in any declaration order; an adversarial
     // overload set stops at the documented candidate limit.
@@ -451,6 +456,25 @@ fn candidate_selection() {
         "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: i32) i32; }\nstruct V {}\nextend V as A { pub fn m(self: &V, x: i32) i32 { return x + 1; } }\nextend V as B { pub fn m(self: &V, x: i32) i32 { return x + 2; } }\nfn main() i32 { let v = V {}; let k: i32 = 5; return v.m(k); }\n",
         "ambiguous call",
     );
+    // Full lexicographic score: a literal argument scores by its adaptability class,
+    // so an inseparable tie errors even though the literal's exact type is not yet known, and the
+    // literal's default type is the preferred exact match.
+    h::expect_err_msg(
+        "identical candidates tie on a literal argument",
+        "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: i32) i32; }\nstruct V {}\nextend V as A { pub fn m(self: &V, x: i32) i32 { return x + 1; } }\nextend V as B { pub fn m(self: &V, x: i32) i32 { return x + 2; } }\nfn main() i32 { let v = V {}; return v.m(5); }\n",
+        "ambiguous call",
+    );
+    // Past the candidate limit (TC_MAX_CANDIDATES, 32): 33 conformances defining one `m`.
+    let mut adv = String::from_str("struct V {}\n");
+    for i in 0..33 {
+        adv.format_into("struct A{} {{}}\ninterface C{} {{ fn m(self: &Self, x: A{}) i32; }}\n", i, i, i);
+        adv.format_into("extend V as C{} {{ pub fn m(self: &V, x: A{}) i32 {{ return {}; }} }}\n", i, i, i);
+    }
+    adv.push_str("fn main() i32 { let v = V {}; return v.m(A3 {}) - 3; }\n");
+    h::expect_err_msg("candidate budget stops adversarial overload sets", &adv, "candidate limit");
+}
+
+fn candidate_selection_cases(b: &mut h::ExitBatch) {
     b.add(
         "unique fit wins in declaration order",
         "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: str) i32; }\nstruct V {}\nextend V as A { pub fn m(self: &V, x: i32) i32 { return 1; } }\nextend V as B { pub fn m(self: &V, x: str) i32 { return 2; } }\nfn main() i32 { let v = V {}; let s: str = \"hi\"; return v.m(s) - 2; }\n",
@@ -460,14 +484,6 @@ fn candidate_selection() {
         "unique fit wins in reversed declaration order",
         "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: str) i32; }\nstruct V {}\nextend V as B { pub fn m(self: &V, x: str) i32 { return 2; } }\nextend V as A { pub fn m(self: &V, x: i32) i32 { return 1; } }\nfn main() i32 { let v = V {}; let s: str = \"hi\"; return v.m(s) - 2; }\n",
         0,
-    );
-    // Full lexicographic score: a literal argument scores by its adaptability class,
-    // so an inseparable tie errors even though the literal's exact type is not yet known, and the
-    // literal's default type is the preferred exact match.
-    h::expect_err_msg(
-        "identical candidates tie on a literal argument",
-        "interface A { fn m(self: &Self, x: i32) i32; }\ninterface B { fn m(self: &Self, x: i32) i32; }\nstruct V {}\nextend V as A { pub fn m(self: &V, x: i32) i32 { return x + 1; } }\nextend V as B { pub fn m(self: &V, x: i32) i32 { return x + 2; } }\nfn main() i32 { let v = V {}; return v.m(5); }\n",
-        "ambiguous call",
     );
     b.add(
         "a literal argument prefers its default type",
@@ -479,15 +495,6 @@ fn candidate_selection() {
         "struct V {}\ninterface C0 { fn m(self: &Self, x: i32) i32; }\ninterface C1 { fn m(self: &Self, x: i64) i32; }\ninterface C2 { fn m(self: &Self, x: u8) i32; }\ninterface C3 { fn m(self: &Self, x: u16) i32; }\ninterface C4 { fn m(self: &Self, x: u32) i32; }\ninterface C5 { fn m(self: &Self, x: u64) i32; }\ninterface C6 { fn m(self: &Self, x: i8) i32; }\ninterface C7 { fn m(self: &Self, x: i16) i32; }\nextend V as C0 { pub fn m(self: &V, x: i32) i32 { return 0; } }\nextend V as C1 { pub fn m(self: &V, x: i64) i32 { return 1; } }\nextend V as C2 { pub fn m(self: &V, x: u8) i32 { return 2; } }\nextend V as C3 { pub fn m(self: &V, x: u16) i32 { return 3; } }\nextend V as C4 { pub fn m(self: &V, x: u32) i32 { return 4; } }\nextend V as C5 { pub fn m(self: &V, x: u64) i32 { return 5; } }\nextend V as C6 { pub fn m(self: &V, x: i8) i32 { return 6; } }\nextend V as C7 { pub fn m(self: &V, x: i16) i32 { return 7; } }\nfn main() i32 { let v = V {}; let k: u16 = 3; return v.m(k) - 3; }\n",
         0,
     );
-    // Past the candidate limit (TC_MAX_CANDIDATES, 32): 33 conformances defining one `m`.
-    let mut adv = String::from_str("struct V {}\n");
-    for i in 0..33 {
-        adv.format_into("struct A{} {{}}\ninterface C{} {{ fn m(self: &Self, x: A{}) i32; }}\n", i, i, i);
-        adv.format_into("extend V as C{} {{ pub fn m(self: &V, x: A{}) i32 {{ return {}; }} }}\n", i, i, i);
-    }
-    adv.push_str("fn main() i32 { let v = V {}; return v.m(A3 {}) - 3; }\n");
-    h::expect_err_msg("candidate budget stops adversarial overload sets", &adv, "candidate limit");
-    b.run();
 }
 
 @test
@@ -504,15 +511,18 @@ fn overload_and_receiver() {
         "turbofish binds explicitly",
         "fn id<T>(x: T) T { return x; }\nfn main() i32 { return id::<i32>(3) - 3; }\n",
     );
-    h::expect_exit(
-        "a bound interface's five generic arguments all substitute",
-        "interface I<A, B, C, D, E> { fn get(self: &Self, a: A, b: B, c: C, d: D) E; }\nstruct S {}\nextend S as I<i32, i32, i32, i32, i64> { pub fn get(self: &S, a: i32, b: i32, c: i32, d: i32) i64 { let r: i64 = a + b + c + d; return r; } }\nfn f<T: I<i32, i32, i32, i32, i64>>(t: &T) i64 { return t.get(1, 2, 3, 4); }\nfn main() i32 { let s = S {}; return (f(&s) - 10) as i32; }\n",
-        0,
-    );
     h::expect_err_msg(
         "turbofish conflict with argument",
         "fn id<T>(x: T) T { return x; }\nfn main() i32 { let s: str = \"hi\"; return id::<i32>(s); }\n",
         "mismatched types",
+    );
+}
+
+fn overload_and_receiver_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "a bound interface's five generic arguments all substitute",
+        "interface I<A, B, C, D, E> { fn get(self: &Self, a: A, b: B, c: C, d: D) E; }\nstruct S {}\nextend S as I<i32, i32, i32, i32, i64> { pub fn get(self: &S, a: i32, b: i32, c: i32, d: i32) i64 { let r: i64 = a + b + c + d; return r; } }\nfn f<T: I<i32, i32, i32, i32, i64>>(t: &T) i64 { return t.get(1, 2, 3, 4); }\nfn main() i32 { let s = S {}; return (f(&s) - 10) as i32; }\n",
+        0,
     );
 }
 
@@ -572,11 +582,6 @@ fn generic_variant_constructors() {
 // element), else the field values, then the defaults. Arguments after the variant are rejected.
 @test
 fn generic_struct_variant_literals() {
-    h::expect_exit(
-        "every source of the instance",
-        "enum Sh<T> { Pt { x: T, y: T }, No }\nenum D<T = u8> { P { x: T }, E }\nextend<T: Copy> Sh<T> {\n    fn mk(a: T) Self { return Sh::Pt { x: a, y: a }; }\n}\nfn sum(s: Sh<i64>) i64 { return switch s { Pt { x, y } => x + y, No => 0 }; }\nfn back() Sh<u16> { return Sh::Pt { x: 300, y: 1 }; }\nfn main() i32 {\n    let a: Sh<i16> = Sh::Pt { x: 2, y: 5 };\n    let b = Sh::Pt { x: 2u8, y: 5 };\n    static_assert(sizeof(b) == 3, \"u8 payload\");\n    let c = Sh::<i16>::Pt { x: 1, y: 2 };\n    let d = D::P { x: 300u16 };\n    let e = D::P { x: 3 };\n    static_assert(sizeof(e) == 2, \"u8 default\");\n    let f = Sh::mk(4i8);\n    let g: [Sh<u32>; 2] = [Sh::Pt { x: 1, y: 2 }, Sh::No];\n    let mut t: i32 = switch a { Pt { x, y } => x + y, No => 0 };\n    t += switch b { Pt { x, y } => x + y, No => 0 };\n    t += switch c { Pt { x, y } => x + y, No => 0 };\n    t += switch d { P { x } => x, E => 0 };\n    t += switch e { P { x } => x, E => 0 };\n    t += switch f { Pt { x, y } => x + y, No => 0 };\n    t += sum(Sh::Pt { x: 1, y: 2 }) as i32;\n    t += switch back() { Pt { x, y } => x + y, No => 0 };\n    t += switch g[0] { Pt { x, y } => (x + y) as i32, No => 0 };\n    return t - 635;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "type arguments after a struct-payload variant",
         "enum Q<T> { V { a: T }, W(T) }\nfn main() i32 { let q = Q::V::<i16> { a: 2 }; return 0; }\n",
@@ -606,6 +611,14 @@ fn generic_struct_variant_literals() {
         "an unknown field",
         "enum Sh<T> { Pt { x: T, y: T }, No }\nfn main() i32 { let s = Sh::Pt { x: 1, z: 2 }; return 0; }\n",
         "no field 'z' on 'Sh'",
+    );
+}
+
+fn generic_struct_variant_literals_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "every source of the instance",
+        "enum Sh<T> { Pt { x: T, y: T }, No }\nenum D<T = u8> { P { x: T }, E }\nextend<T: Copy> Sh<T> {\n    fn mk(a: T) Self { return Sh::Pt { x: a, y: a }; }\n}\nfn sum(s: Sh<i64>) i64 { return switch s { Pt { x, y } => x + y, No => 0 }; }\nfn back() Sh<u16> { return Sh::Pt { x: 300, y: 1 }; }\nfn main() i32 {\n    let a: Sh<i16> = Sh::Pt { x: 2, y: 5 };\n    let b = Sh::Pt { x: 2u8, y: 5 };\n    static_assert(sizeof(b) == 3, \"u8 payload\");\n    let c = Sh::<i16>::Pt { x: 1, y: 2 };\n    let d = D::P { x: 300u16 };\n    let e = D::P { x: 3 };\n    static_assert(sizeof(e) == 2, \"u8 default\");\n    let f = Sh::mk(4i8);\n    let g: [Sh<u32>; 2] = [Sh::Pt { x: 1, y: 2 }, Sh::No];\n    let mut t: i32 = switch a { Pt { x, y } => x + y, No => 0 };\n    t += switch b { Pt { x, y } => x + y, No => 0 };\n    t += switch c { Pt { x, y } => x + y, No => 0 };\n    t += switch d { P { x } => x, E => 0 };\n    t += switch e { P { x } => x, E => 0 };\n    t += switch f { Pt { x, y } => x + y, No => 0 };\n    t += sum(Sh::Pt { x: 1, y: 2 }) as i32;\n    t += switch back() { Pt { x, y } => x + y, No => 0 };\n    t += switch g[0] { Pt { x, y } => (x + y) as i32, No => 0 };\n    return t - 635;\n}\n",
+        0,
     );
 }
 
@@ -672,7 +685,24 @@ fn generic_struct_literals() {
 // for the generic parameter its reference reaches.
 @test
 fn literals_under_references() {
-    let mut b = h::ExitBatch::new();
+    h::expect_err_msg(
+        "a literal under a reference is range checked",
+        "fn p(x: &u8) u8 { return *x; }\nfn main() i32 { return p(&300) as i32; }\n",
+        "integer literal is out of range for 'u8'",
+    );
+    h::expect_err_msg(
+        "a typed value under a reference does not widen",
+        "fn g(x: &u64) u64 { return *x; }\nfn main() i32 { let x: u8 = 1; return g(&x) as i32; }\n",
+        "mismatched types: expected '&u64', found '&u8'",
+    );
+    h::expect_err_msg(
+        "a shared reference to a literal is not mutable",
+        "fn mm(x: &mut u64) u64 { return *x; }\nfn main() i32 { return mm(&6) as i32; }\n",
+        "mismatched types: expected '&mut u64', found '&i32'",
+    );
+}
+
+fn literals_under_references_cases(b: &mut h::ExitBatch) {
     b.add(
         "reference to a literal adopts the pointee",
         "fn g(x: &u64) u64 { return *x; }\nfn neg(x: &i64) i64 { return *x; }\nfn main() i32 {\n    let r: &u64 = &5000000000;\n    let rr: &&u8 = &&250;\n    let m: &mut u64 = &mut 6;\n    return (g(&1) + (*r - 5000000000) + (**rr - 240) as u64 + *m) as i32 + neg(&-3) as i32;\n}\n",
@@ -693,39 +723,12 @@ fn literals_under_references() {
         "fn h<T>(x: &T, y: T) T { return y; }\nfn main() i32 {\n    let k = h(&4, 5u16);\n    static_assert(sizeof(k) == 2, \"u16\");\n    let d = h(&4, 3);\n    static_assert(sizeof(d) == 4, \"i32\");\n    return (k as i32) + d;\n}\n",
         8,
     );
-    h::expect_err_msg(
-        "a literal under a reference is range checked",
-        "fn p(x: &u8) u8 { return *x; }\nfn main() i32 { return p(&300) as i32; }\n",
-        "integer literal is out of range for 'u8'",
-    );
-    h::expect_err_msg(
-        "a typed value under a reference does not widen",
-        "fn g(x: &u64) u64 { return *x; }\nfn main() i32 { let x: u8 = 1; return g(&x) as i32; }\n",
-        "mismatched types: expected '&u64', found '&u8'",
-    );
-    h::expect_err_msg(
-        "a shared reference to a literal is not mutable",
-        "fn mm(x: &mut u64) u64 { return *x; }\nfn main() i32 { return mm(&6) as i32; }\n",
-        "mismatched types: expected '&mut u64', found '&i32'",
-    );
-    b.run();
 }
 
 // A const parameter used as an array length binds from the argument's length, through references
 // and at every nesting level; an array literal argument takes the element type from the parameter.
 @test
 fn const_lengths_from_arguments() {
-    let mut b = h::ExitBatch::new();
-    b.add(
-        "literal, reference, nested and mutable arguments",
-        "fn third<const N: usize>(a: [i32; N]) i32 { return unsafe a[2]; }\nfn len<const N: usize>(a: &[i32; N]) usize { return N; }\nfn dims<const R: usize, const C: usize>(a: &[[u8; C]; R]) usize { return R * 10 + C; }\nfn sum<const N: usize>(a: &mut [i64; N]) i64 { let mut s: i64 = 0; for i in 0..N { s += unsafe a[i]; } return s; }\nfn main() i32 {\n    let x: [i32; 3] = [1, 2, 3];\n    let m: [[u8; 2]; 3] = [[1, 2], [3, 4], [5, 6]];\n    let mut w = [10i64, 20, 30, 40];\n    if third([7, 8, 9]) != 9 { return 1; }\n    if len(&x) != 3 || len(&[1, 2, 3, 4, 5]) != 5 { return 2; }\n    if dims(&m) != 32 { return 3; }\n    if sum(&mut w) != 100 { return 4; }\n    return 0;\n}\n",
-        0,
-    );
-    b.add(
-        "an array literal argument adopts the element type",
-        "fn f<const N: usize>(a: [u8; N]) u8 { return unsafe a[1]; }\nfn main() i32 { let x: [u8; 3] = [1, 2, 3]; return f(x) as i32 + f([1, 2, 3]) as i32 - 4; }\n",
-        0,
-    );
     h::expect_err_msg(
         "two lengths for one parameter conflict",
         "fn f<const N: usize>(a: [i32; N], b: [i32; N]) i32 { return 0; }\nfn main() i32 { let x: [i32; 2] = [1, 2]; let y: [i32; 3] = [1, 2, 3]; return f(x, y); }\n",
@@ -736,18 +739,25 @@ fn const_lengths_from_arguments() {
         "fn f<const N: usize>(a: &[i32; N]) usize { return N; }\nfn main() i32 { let x: [i64; 3] = [1, 2, 3]; return f(&x) as i32; }\n",
         "mismatched types: expected '&[i32; 3]', found '&[i64; 3]'",
     );
-    b.run();
+}
+
+fn const_lengths_from_arguments_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "literal, reference, nested and mutable arguments",
+        "fn third<const N: usize>(a: [i32; N]) i32 { return unsafe a[2]; }\nfn len<const N: usize>(a: &[i32; N]) usize { return N; }\nfn dims<const R: usize, const C: usize>(a: &[[u8; C]; R]) usize { return R * 10 + C; }\nfn sum<const N: usize>(a: &mut [i64; N]) i64 { let mut s: i64 = 0; for i in 0..N { s += unsafe a[i]; } return s; }\nfn main() i32 {\n    let x: [i32; 3] = [1, 2, 3];\n    let m: [[u8; 2]; 3] = [[1, 2], [3, 4], [5, 6]];\n    let mut w = [10i64, 20, 30, 40];\n    if third([7, 8, 9]) != 9 { return 1; }\n    if len(&x) != 3 || len(&[1, 2, 3, 4, 5]) != 5 { return 2; }\n    if dims(&m) != 32 { return 3; }\n    if sum(&mut w) != 100 { return 4; }\n    return 0;\n}\n",
+        0,
+    );
+    b.add(
+        "an array literal argument adopts the element type",
+        "fn f<const N: usize>(a: [u8; N]) u8 { return unsafe a[1]; }\nfn main() i32 { let x: [u8; 3] = [1, 2, 3]; return f(x) as i32 + f([1, 2, 3]) as i32 - 4; }\n",
+        0,
+    );
 }
 
 // A generic alias named without type arguments in a struct literal infers its arguments like a
 // generic struct: from the expected type, else from the field values.
 @test
 fn generic_alias_literals() {
-    h::expect_exit(
-        "expected type and field values",
-        "struct Pair<A, B> { pub a: A, pub b: B }\ntype Q1<T> = Pair<T, T>;\ntype Q2<T> = Q1<Q1<T>>;\nfn main() i32 {\n    let q: Q1<i64> = Q1 { a: 5000000000, b: 2 };\n    let r = Q1 { a: 1u8, b: 2u8 };\n    static_assert(sizeof(r) == 2, \"u8\");\n    let z: Q2<u8> = Q2 { a: Q1 { a: 1, b: 2 }, b: Q1 { a: 3, b: 4 } };\n    return (q.a - 4999999990) as i32 + r.b as i32 + z.b.b as i32;\n}\n",
-        16,
-    );
     h::expect_err_msg(
         "an argument no value gives",
         "struct W<T> { pub n: i32 }\ntype K<T> = W<T>;\nfn main() i32 { let w = K { n: 1 }; return w.n; }\n",
@@ -760,18 +770,29 @@ fn generic_alias_literals() {
     );
 }
 
+fn generic_alias_literals_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "expected type and field values",
+        "struct Pair<A, B> { pub a: A, pub b: B }\ntype Q1<T> = Pair<T, T>;\ntype Q2<T> = Q1<Q1<T>>;\nfn main() i32 {\n    let q: Q1<i64> = Q1 { a: 5000000000, b: 2 };\n    let r = Q1 { a: 1u8, b: 2u8 };\n    static_assert(sizeof(r) == 2, \"u8\");\n    let z: Q2<u8> = Q2 { a: Q1 { a: 1, b: 2 }, b: Q1 { a: 3, b: 4 } };\n    return (q.a - 4999999990) as i32 + r.b as i32 + z.b.b as i32;\n}\n",
+        16,
+    );
+}
+
 // A `null` branch or arm takes the pointer type of the others, wherever it stands.
 @test
 fn null_branches_take_the_pointer_type() {
-    h::expect_exit(
-        "null first and last",
-        "fn f(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        null\n    } else {\n        p\n    };\n    return q;\n}\nfn g(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        p\n    } else {\n        null\n    };\n    return q;\n}\nfn h(c: u8, p: *mut i32) *mut i32 {\n    let q = switch c {\n        0 => null,\n        1 => null,\n        _ => p,\n    };\n    return q;\n}\nfn main() i32 {\n    let mut x = 1;\n    return (f(true, &mut x) != null || g(false, &mut x) != null || h(0, &mut x) != null || h(2, &mut x) == null) as i32;\n}\n",
-        0,
-    );
     h::expect_err_msg(
         "null against a number",
         "fn main() i32 {\n    let q = if true {\n        null\n    } else {\n        1\n    };\n    return q;\n}\n",
         "mismatched types",
+    );
+}
+
+fn null_branches_take_the_pointer_type_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "null first and last",
+        "fn f(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        null\n    } else {\n        p\n    };\n    return q;\n}\nfn g(c: bool, p: *mut i32) *mut i32 {\n    let q = if c {\n        p\n    } else {\n        null\n    };\n    return q;\n}\nfn h(c: u8, p: *mut i32) *mut i32 {\n    let q = switch c {\n        0 => null,\n        1 => null,\n        _ => p,\n    };\n    return q;\n}\nfn main() i32 {\n    let mut x = 1;\n    return (f(true, &mut x) != null || g(false, &mut x) != null || h(0, &mut x) != null || h(2, &mut x) == null) as i32;\n}\n",
+        0,
     );
 }
 
@@ -913,17 +934,6 @@ fn main() i32 {
 // as an f32 (by its suffix or its context) it is an error, as an overflowing one is.
 @test
 fn float_literal_below_f32_range() {
-    h::expect_exit(
-        "tiny literal default",
-        M"(fn main() i32 {
-    let a = 1e-50;
-    let b = 0x1p-1030;
-    let c = 0.5 * 1e-30 * 1e-30;
-    return (a > 0.0) as i32 + 2 * (b > 0.0) as i32 + 4 * (c > 0.0) as i32;
-}
-)",
-        7,
-    );
     h::expect_err_msg(
         "tiny literal in an f32",
         "fn main() i32 {\n    let x: f32 = 1e-50;\n    return x as i32;\n}\n",
@@ -933,6 +943,20 @@ fn float_literal_below_f32_range() {
         "tiny suffixed f32",
         "fn main() i32 {\n    let x = 1e-50f32;\n    return x as i32;\n}\n",
         "does not fit in its suffixed type",
+    );
+}
+
+fn float_literal_below_f32_range_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "tiny literal default",
+        M"(fn main() i32 {
+    let a = 1e-50;
+    let b = 0x1p-1030;
+    let c = 0.5 * 1e-30 * 1e-30;
+    return (a > 0.0) as i32 + 2 * (b > 0.0) as i32 + 4 * (c > 0.0) as i32;
+}
+)",
+        7,
     );
 }
 
@@ -947,5 +971,31 @@ fn exit_cases_00() {
     if_operand_literals_take_other_operand_type(&mut b);
     deep_generic_call_chain_takes_the_expected_type(&mut b);
     interface_method_param_takes_the_bound_arguments(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    literal_contexts_and_signed_minimum_cases(&mut b);
+    repeated_generic_params_cases(&mut b);
+    literal_adopts_generic_sibling_cases(&mut b);
+    array_literal_adopts_slice_element_cases(&mut b);
+    const_generic_inference_cases(&mut b);
+    expected_result_flow_cases(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_02() {
+    let mut b = h::ExitBatch::new();
+    candidate_selection_cases(&mut b);
+    overload_and_receiver_cases(&mut b);
+    generic_struct_variant_literals_cases(&mut b);
+    literals_under_references_cases(&mut b);
+    const_lengths_from_arguments_cases(&mut b);
+    generic_alias_literals_cases(&mut b);
+    null_branches_take_the_pointer_type_cases(&mut b);
+    float_literal_below_f32_range_cases(&mut b);
     b.run();
 }

@@ -79,36 +79,17 @@ fn double2x32_roundtrip() {
 
 // The other formats.
 
-@test
-fn half1x16_roundtrip() {
-    let tests: [f32; 6] = [0.0, 1.0, -1.0, 2.0, -2.0, 1.9];
-    for t in tests {
-        let v0 = unpack_half1x16(pack_half1x16(t));
-        let v1 = unpack_half1x16(pack_half1x16(v0));
-        assert(near1(v0, v1, f32::epsilon()));
-    }
-}
-
+// Values a half holds exactly come back unchanged, each lane in its own field; others round to the nearest
+// half.
 @test
 fn half4x16_roundtrip() {
-    let tests: [f32; 6] = [1.0, 0.0, 2.0, 0.1, 0.5, -0.9];
-    for t in tests {
-        let v0 = unpack_half4x16(pack_half4x16(vec4::splat(t)));
-        let v1 = unpack_half4x16(pack_half4x16(v0));
-        let v2 = unpack_half(pack_half(v0));
-        assert(near(v0, v1, f32::epsilon()));
-        assert(near(v0, v2, f32::epsilon()));
-    }
-}
-
-@test
-fn i3x10_1x2_roundtrip() {
-    let tests: [i32; 6] = [0, 1, -1, 2, -2, 3];
-    for t in tests {
-        let v0 = unpack_i3x10_1x2(pack_i3x10_1x2(ivec4::splat(t)));
-        let v1 = unpack_i3x10_1x2(pack_i3x10_1x2(v0));
-        assert(v0 == v1);
-    }
+    let v = vec4::new(1.0, 0.0, -2.0, 0.5);
+    assert_eq(pack_half4x16(v), 0x3800C00000003C00u64);
+    assert(unpack_half4x16(pack_half4x16(v)) == v, "exact lanes");
+    let w = vec4::new(0.25, -0.75, 1024.0, 65504.0);
+    assert(unpack_half4x16(pack_half4x16(w)) == w, "exact lanes, up to the largest half");
+    assert(unpack_half(pack_half(w)) == w, "the per-lane form");
+    assert(unpack_half4x16(pack_half4x16(vec4::splat(0.1))) == vec4::splat(0.0999755859375), "0.1 rounds");
 }
 
 @test
@@ -122,30 +103,18 @@ fn u3x10_1x2_roundtrip() {
     assert_eq(pack_u3x10_1x2(uvec4::new(0xff, 0x77, 0x0, 0x33)), 0xc001dcff);
 }
 
+// Each lane comes back within half a step of its field (1 / 511 or 1 / 1023 for x, y, z; w has 2 bits),
+// in its own place, and a value out of range clamps.
 @test
 fn snorm_unorm3x10_1x2_roundtrip() {
-    let tests: [f32; 6] = [1.0, 0.0, 2.0, 0.1, 0.5, 0.9];
-    for t in tests {
-        let s0 = unpack_snorm3x10_1x2(pack_snorm3x10_1x2(vec4::splat(t)));
-        let s1 = unpack_snorm3x10_1x2(pack_snorm3x10_1x2(s0));
-        assert(near(s0, s1, 0.01));
-        let u0 = unpack_unorm3x10_1x2(pack_unorm3x10_1x2(vec4::splat(t)));
-        let u1 = unpack_unorm3x10_1x2(pack_unorm3x10_1x2(u0));
-        assert(near(u0, u1, 0.001));
-    }
-}
-
-@test
-fn f2x11_1x10_f3x9_e1x5_roundtrip() {
-    let tests: [f32; 6] = [1.0, 0.0, 2.0, 0.1, 0.5, 0.9];
-    for t in tests {
-        let f0 = unpack_f2x11_1x10(pack_f2x11_1x10(vec3::splat(t)));
-        let f1 = unpack_f2x11_1x10(pack_f2x11_1x10(f0));
-        assert(near(f0, f1, f32::epsilon()));
-        let e0 = unpack_f3x9_e1x5(pack_f3x9_e1x5(vec3::splat(t)));
-        let e1 = unpack_f3x9_e1x5(pack_f3x9_e1x5(e0));
-        assert(near(e0, e1, f32::epsilon()));
-    }
+    let s = vec4::new(0.5, -0.25, 1.0, -1.0);
+    assert(near(unpack_snorm3x10_1x2(pack_snorm3x10_1x2(s)), s, 0.5 / 511.0 + 1e-6), "snorm lanes");
+    let sc = vec4::new(2.0, -3.0, 0.0, 1.0);
+    assert(unpack_snorm3x10_1x2(pack_snorm3x10_1x2(sc)) == vec4::new(1.0, -1.0, 0.0, 1.0), "snorm clamps");
+    let u = vec4::new(0.25, 0.5, 1.0, 2.0 / 3.0);
+    assert(near(unpack_unorm3x10_1x2(pack_unorm3x10_1x2(u)), u, 0.5 / 1023.0 + 1e-6), "unorm lanes");
+    let uc = vec4::new(2.0, -1.0, 0.0, 5.0);
+    assert(unpack_unorm3x10_1x2(pack_unorm3x10_1x2(uc)) == vec4::new(1.0, 0.0, 0.0, 1.0), "unorm clamps");
 }
 
 @test

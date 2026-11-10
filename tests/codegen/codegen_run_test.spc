@@ -212,30 +212,28 @@ fn prelude_names_stay_distinct() {
     );
 }
 
-@test
-fn matchertext() {
+fn matchertext(b: &mut h::ExitBatch) {
     // Plain literals decode verbatim (embedded quotes, no escape processing); interpolation
     // desugars through the sugar_fmt_* path; format() accepts a matchertext template with `{}`
     // placeholders; interp segments keep doubled braces (they are matchers, not escapes).
-    run_exit(
+    exit_case(
+        b,
         "matchertext literals and interpolation",
         "fn main() i32 {\n    let a = M\"(ab\"cd)\";\n    let b = M[]\"(v=[10 + 4] q=[a.len() as i32])\";\n    let mut r = 0;\n    if a.len() == 5 { r += 1; }\n    if a[2] == 34u8 { r += 2; }\n    if b.as_str() == \"v=14 q=5\" { r += 4; }\n    if M\"[mix {a} (b)]\" == \"mix {a} (b)\" { r += 8; }\n    let f = format(M\"(x={} {{lit}})\", 9);\n    if f.as_str() == \"x=9 {lit}\" { r += 16; }\n    const K: str = M\"(k)\";\n    if K == \"k\" { r += 32; }\n    let g = M[]\"(brace {{x}} [1])\";\n    if g.as_str() == \"brace {{x}} 1\" { r += 64; }\n    return r - 127;\n}\n",
         0,
     );
     // The runtime hole guard: a spliced value must itself be matchertext; compliant values
     // (matched matchers) pass, a breakout value panics; format() args stay unchecked.
-    run_exit(
+    exit_case(
+        b,
         "matchertext hole guard accepts compliant values",
         "fn main() i32 { let ok = \"(a) [b] {c}\"; let s = M{}\"(v={ok})\"; let f = format(\"{}\", \"loose (\"); let mut r = s.len() as i32; if f.len() == 7 { r += 1; } return r - 14; }\n",
         0,
     );
-    let bad = h::compile_and_run(
+    b.add_trap(
+        "a non-matchertext hole value panics, not splices",
         "fn main() i32 { let evil = \"Eve(\"; let s = M{}\"(Hi {evil})\"; return s.len() as i32; }\n",
-    );
-    assert(bad.built, "matchertext guard snippet builds");
-    assert(
-        bad.exit != 0 && cli::contains_str(bad.out, "panic: matchertext interpolation: value is not matchertext"),
-        "a non-matchertext hole value must panic, not splice",
+        "panic: matchertext interpolation: value is not matchertext",
     );
 }
 
@@ -454,12 +452,7 @@ fn constant_references_emit_addresses() {
     assert(c.code_has(".e = (void *)&PP.y[2]"), "a field reference addresses the field");
 }
 
-// A constant of a generic enum instance is static data like any other aggregate: the standard
-// and user enums, nested instances, one inside an array, a struct and a
-// `static mut`, one a `const fn` builds, and a zero-sized payload (it has no C member).
-@test
-fn generic_enum_constants() {
-    const SRC: str = M"(struct Z {}
+const GENERIC_ENUM_CONSTANTS_SRC: str = M"(struct Z {}
 enum E<T> { A(T), B }
 struct S { pub o: Option<i32>, pub r: &'static Option<i32> }
 const OK: Option<i32> = Option::Some(3);
@@ -493,9 +486,26 @@ fn main() i32 {
     return s - (3 + 1 + 4 + 7 + 9 + 3 + 1 + 3 + 6 + 3 + 1 + 11 + 5);
 }
 )";
-    h::expect_exit("generic enum constants", SRC, 0);
-    h::expect_c("a generic enum constant", SRC, "Option__i32 OK = { .tag = Option_Some, .payload.Some = { ._0 = 3 } };");
-    h::expect_c("a zero-sized payload takes no initializer", SRC, "Option__Z OZ = { .tag = Option_Some };");
+
+// A constant of a generic enum instance is static data like any other aggregate: the standard
+// and user enums, nested instances, one inside an array, a struct and a
+// `static mut`, one a `const fn` builds, and a zero-sized payload (it has no C member).
+@test
+fn generic_enum_constants() {
+    h::expect_c(
+        "a generic enum constant",
+        GENERIC_ENUM_CONSTANTS_SRC,
+        "Option__i32 OK = { .tag = Option_Some, .payload.Some = { ._0 = 3 } };",
+    );
+    h::expect_c(
+        "a zero-sized payload takes no initializer",
+        GENERIC_ENUM_CONSTANTS_SRC,
+        "Option__Z OZ = { .tag = Option_Some };",
+    );
+}
+
+fn generic_enum_constants_cases(b: &mut h::ExitBatch) {
+    b.add("generic enum constants", GENERIC_ENUM_CONSTANTS_SRC, 0);
 }
 
 // A two-variant enum whose one payload is a reference or a `Box` of a value that is not `dyn` keeps
@@ -666,12 +676,7 @@ fn local_constants_of_one_name(b: &mut h::ExitBatch) {
     );
 }
 
-// C spells a result that is a pointer to an array or to a function around the declarator
-// (`T (*f(void))[N]`): function and closure definitions and prototypes, dyn vtable slots and their
-// thunks. A dyn call whose result is a reference has no symbol to reserve.
-@test
-fn results_spelled_around_the_declarator() {
-    const SRC: str = M"(const A: [i32; 2] = [1, 2];
+const RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC: str = M"(const A: [i32; 2] = [1, 2];
 const M: [[i32; 2]; 2] = [[3, 4], [5, 6]];
 struct S { pub a: [i32; 2] }
 interface Get { fn get(self: &Self) &[i32; 2]; }
@@ -696,21 +701,46 @@ fn main() i32 {
     return sum - (8 + 6 + 8 + 2 + 1 + 2 + 5 + 1 + 2);
 }
 )";
-    h::expect_exit("results spelled around the declarator", SRC, 0);
+
+// C spells a result that is a pointer to an array or to a function around the declarator
+// (`T (*f(void))[N]`): function and closure definitions and prototypes, dyn vtable slots and their
+// thunks. A dyn call whose result is a reference has no symbol to reserve.
+@test
+fn results_spelled_around_the_declarator() {
     // A pointer to an array spells its element with no qualifier: C11 converts no `int32_t (*)[2]`
     // into a `const int32_t (*)[2]`.
-    h::expect_c("a function returning a pointer to an array", SRC, "int32_t (*mat(void))[2][2] {");
-    h::expect_c_absent("the element takes no qualifier", SRC, "const int32_t (*mat(void))");
-    h::expect_c("a function returning a function pointer", SRC, "int32_t (*pick(void))(int32_t) {");
-    h::expect_c("a dyn slot returning a pointer to an array", SRC, "int32_t (*(*get)(void *self))[2];");
+    h::expect_c(
+        "a function returning a pointer to an array",
+        RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC,
+        "int32_t (*mat(void))[2][2] {",
+    );
+    h::expect_c_absent(
+        "the element takes no qualifier",
+        RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC,
+        "const int32_t (*mat(void))",
+    );
+    h::expect_c(
+        "a function returning a function pointer",
+        RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC,
+        "int32_t (*pick(void))(int32_t) {",
+    );
+    h::expect_c(
+        "a dyn slot returning a pointer to an array",
+        RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC,
+        "int32_t (*(*get)(void *self))[2];",
+    );
+}
+
+fn results_spelled_around_the_declarator_cases(b: &mut h::ExitBatch) {
+    b.add("results spelled around the declarator", RESULTS_SPELLED_AROUND_THE_DECLARATOR_SRC, 0);
 }
 
 // A payload enum honors explicit discriminants: the stored tag, every match, `if let`, the derived
 // Eq/Hash/Format/Ord (Ord compares discriminants first), constant evaluation, statics and
 // reflection all take the discriminant, negative ones included. Owning payloads free on every path.
-@test
-fn payload_enum_discriminants() {
-    run_exit(
+fn payload_enum_discriminants(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "payload enum with explicit discriminants",
         M"(const BASE: i32 = 40;
 enum Other { X = 7, Y }
@@ -765,7 +795,8 @@ fn main(argv: Vector<str>) i32 { return check(argv.len() - 1); }
         0,
     );
     // a negative discriminant of a bare enum is a signed switch case
-    run_exit(
+    exit_case(
+        b,
         "negative bare enum discriminants in a switch",
         M"(enum N { A = -3, B, C = 7 }
 fn f(n: N) i32 { return switch n { A => 1, B => 2, C => 3 }; }
@@ -777,33 +808,34 @@ fn main() i32 { return f(N::A) + f(N::B) * 4 + f(N::C) * 16 + N::B as i32 + 2; }
 
 // A char literal has one value in every pass: the UTF-8 spelling, the `\u{..}` escape and the `\x..`
 // escape of U+00E9 are all the byte 233, at run time and in constant evaluation.
-@test
-fn non_ascii_char_literals() {
-    run_exit(
+fn non_ascii_char_literals(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "non-ASCII char literals",
         "const K: u8 = '\\u{e9}' as u8;\nfn main() i32 { let c: char = 'é'; let d: char = '\\u{e9}'; let e: char = '\\xe9'; unsafe exit(if c as u8 == K && d as u8 == K && e as u8 == K { K as i32 - 200 } else { 1 }); }\n",
         33,
     );
 }
 
-@test
-fn structs_and_methods() {
-    run_exit(
+fn structs_and_methods(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "method dispatch (&self / &mut self)",
         "struct Point { pub x: i32, pub y: i32, }\nextend Point {\n  fn sum(self: &Point) i32 { return unsafe self.x + self.y; }\n  fn shift(self: &mut Point, d: i32) { unsafe self.x = unsafe self.x + d; self.y = self.y + d; }\n}\nfn main() i32 { let mut p: Point = Point { x: 3, y: 4, }; p.shift(10); unsafe exit(p.sum()); }\n",
         27,
     );
-    run_exit(
+    exit_case(
+        b,
         "nested struct field access",
         "struct Inner { pub v: i32, }\nstruct Outer { pub inner: Inner, }\nfn main() i32 { let o: Outer = Outer { inner: Inner { v: 7, }, }; unsafe exit(o.inner.v); }\n",
         7,
     );
 }
 
-@test
-fn const_generics() {
+fn const_generics(b: &mut h::ExitBatch) {
     // 1 + 4 + 9 + a.cap()=4 + c.cap()=8.
-    run_exit(
+    exit_case(
+        b,
         "distinct const-generic instances + value use",
         "struct Buff<T, const N: usize> { pub b: [T; N] }\nextend<T, const N: usize> Buff<T, N> { fn cap(self: &Self) usize { return N; } }\nfn main() i32 {\n  let a = Buff::<i32, 4> { b: [1, 2, 3, 4] };\n  let c = Buff::<i32, 8> { b: [0, 0, 0, 0, 0, 0, 0, 9] };\n  unsafe exit(a.b[0] + a.b[3] + c.b[7] + a.cap() as i32 + c.cap() as i32);\n}\n",
         26,
@@ -813,14 +845,16 @@ fn const_generics() {
     // it: in a field type and in a turbofish alike, which are separate paths. The `[i64]` elements also
     // pin the contextual typing of an array literal: written as bare integers, they are i32 on their own.
     // 3 + 7 + cap()=4.
-    run_exit(
+    exit_case(
+        b,
         "a named const as a const-generic argument",
         "const N: usize = 4;\nstruct Holder { pub cells: Buff<i64, N> }\nstruct Buff<T, const M: usize> { pub b: [T; M] }\nextend<T, const M: usize> Buff<T, M> { fn cap(self: &Self) usize { return M; } }\nfn main() i32 {\n  let h = Holder { cells: Buff::<i64, N> { b: [3, 0, 0, 7] } };\n  unsafe exit(h.cells.b[0] as i32 + h.cells.b[3] as i32 + h.cells.cap() as i32);\n}\n",
         14,
     );
     // Radix-prefixed literals in a symbolic field length fold at their own base: 5 + 2 elements.
     // b[4]=5 + c[1]=7 + sizeof=7.
-    run_exit(
+    exit_case(
+        b,
         "binary and octal literals in a const-generic array length",
         "struct R<const N: usize> { pub b: [u8; N + 0b100], pub c: [u8; N * 0o2] }\nfn main() i32 {\n  let r = R::<1> { b: [1, 2, 3, 4, 5], c: [6, 7] };\n  return unsafe (r.b[4] + r.c[1]) as i32 + sizeof(R<1>) as i32;\n}\n",
         19,
@@ -829,10 +863,10 @@ fn const_generics() {
 
 // A generic alias expands with its parameters bound to the arguments, and an alias named in its
 // body expands first, at any depth: `Q2<i32>` is `Pair<Pair<i32, i32>, Pair<i32, i32>>`.
-@test
-fn generic_type_aliases() {
+fn generic_type_aliases(b: &mut h::ExitBatch) {
     // q.a.a=1 + q.b.b=4 + 3*3 + 7 + 6 + 8 + 11 + 2 + 3.
-    run_exit(
+    exit_case(
+        b,
         "nested generic aliases substitute at every depth",
         M"(struct Pair<A, B> { pub a: A, pub b: B }
 extend<A, B> Pair<A, B> { pub fn mk(a: A, b: B) Pair<A, B> { return Pair::<A, B> { a: a, b: b }; } }
@@ -869,9 +903,9 @@ fn main() i32 {
     );
 }
 
-@test
-fn mut_match_binding() {
-    run_exit(
+fn mut_match_binding(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "mut binding: &mut self method + reassign",
         "struct C { pub n: i32 }\nextend C { fn bump(self: &mut C) { self.n = self.n + 1; } fn get(self: &C) i32 { return self.n; } }\nenum Opt { None, Some(C), }\nfn main() i32 {\n  let o = Opt::Some(C { n: 5 });\n  unsafe exit(switch o { Some(mut c) => { c.bump(); c.bump(); c = C { n: c.get() + 1 }; c.get() }, None => { 0 }, });\n}\n",
         8,
@@ -881,9 +915,9 @@ fn mut_match_binding() {
 // `[v; N]`: N copies of one value. The count is part of the type, so it must be constant, and a value
 // that owns resources cannot be copied into more than one slot; both are rejected rather than emitted. A
 // zero fill emits `{0}` so the C does not grow with N.
-@test
-fn array_repeat_literal() {
-    run_exit(
+fn array_repeat_literal(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "repeat literal as a binding, a field and a slice argument",
         "struct Buf { pub b: [u8; 8] }\nfn sum(s: []u8) i32 { let mut t = 0; for i in 0..s.len() { t = t + *s.get(i) as i32; } return t; }\nconst N: usize = 4;\nfn main() i32 {\n  let zeros: [u8; 8] = [0u8; 8];\n  let ones: [i32; 3] = [1; 3];\n  let sized: [u8; 4] = [2u8; N];\n  let b = Buf { b: [9u8; 8] };\n  unsafe exit(sum(zeros) + ones[0] + ones[2] + sum(sized) + sum(b.b) - 40);\n}\n",
         42,
@@ -893,9 +927,9 @@ fn array_repeat_literal() {
 // `[v; N]` with a const-generic count is the symbolic array `[T; N]`: each instance folds the count and
 // fills its own length. A repeat of an array copies the element array into every slot (C cannot assign
 // arrays), at every nesting and past the unrolled small counts.
-@test
-fn array_repeat_symbolic_count() {
-    run_exit(
+fn array_repeat_symbolic_count(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "generic fn, generic struct method, Copy value and nested repeats at several counts",
         "struct B<const N: usize> { pub d: [u8; N] }\nextend<const N: usize> B<N> { fn fill(v: u8) B<N> { return B::<N> { d: [v; N] }; } }\nstruct P { pub a: i32, pub b: i32 }\nfn zeros<const N: usize>() [u8; N] { return [0u8; N]; }\nfn rep<T: Copy, const N: usize>(v: T) [T; N] { return [v; N]; }\nfn grid<const N: usize>() [[i32; N]; 2] { return [[1; N]; 2]; }\nfn big<const N: usize>() [[u8; N]; 20] { return [[3u8; N]; 20]; }\nfn main() i32 {\n  let z = zeros::<4>();\n  let r3 = rep::<i32, 3>(7);\n  let r5 = rep::<i32, 5>(2);\n  let p = rep::<P, 2>(P { a: 4, b: 5 });\n  let g = grid::<3>();\n  let w = big::<17>();\n  let x = B::<6>::fill(9);\n  let y = B::<2>::fill(1);\n  let mut s: i32 = 0;\n  for i in 0..4 { s = s + unsafe z[i] as i32; }\n  for i in 0..3 { s = s + unsafe r3[i]; }\n  for i in 0..5 { s = s + unsafe r5[i]; }\n  for i in 0..2 { s = s + unsafe p[i].a + unsafe p[i].b; }\n  for i in 0..2 { for j in 0..3 { s = s + unsafe g[i][j]; } }\n  for i in 0..20 { for j in 0..17 { s = s + unsafe w[i][j] as i32; } }\n  for i in 0..6 { s = s + unsafe x.d[i] as i32; }\n  for i in 0..2 { s = s + unsafe y.d[i] as i32; }\n  unsafe exit(s - 21 - 10 - 18 - 6 - 1020 - 54 - 2 + 42);\n}\n",
         42,
@@ -906,9 +940,9 @@ fn array_repeat_symbolic_count() {
 // `unsigned`, so `x - 1` wraps at 32 bits (a `long long` spelling lifted it to 64). A float literal next
 // to an `f32` operand is a `float`, so `x * 0.1` rounds like `x * 0.1f32` (a `double` spelling computed
 // it at double precision).
-@test
-fn literals_compute_at_their_declared_width() {
-    run_exit(
+fn literals_compute_at_their_declared_width(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "u32 wrap and f32 product",
         "static mut X: f32 = 2.433180571;\nfn id32(x: u32) u32 { return x; }\nfn main() i32 {\n  let q = id32(0).wrapping_sub(1) / 2;\n  let a = unsafe X * 0.1;\n  let b = unsafe X * 0.1f32;\n  let mut r = 2;\n  if q == 2147483647 { r += 20; }\n  if a == b { r += 20; }\n  unsafe exit(r);\n}\n",
         42,
@@ -918,9 +952,9 @@ fn literals_compute_at_their_declared_width() {
 // An unsuffixed integer literal past i32 takes the first type that holds it (i64, then u64), and of two
 // literal operands the narrower takes the wider's type: typed i32, `3000000000` truncated at run time and
 // `4000000000 * 2` overflowed. A negated negative constant spells `-(-5.0)`, not the decrement `--5.0`.
-@test
-fn wide_literals_and_negated_constants() {
-    run_exit(
+fn wide_literals_and_negated_constants(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "literal defaults past i32 and double negation",
         "fn m() i64 { return 4000000000 * 2; }\nfn main() i32 {\n  let x = 3000000000;\n  let y = 1 + 3000000000;\n  let z = 18446744073709551615;\n  let f: f64 = -5.0;\n  let g = -f;\n  let i: i64 = -5;\n  let j = -i;\n  let mut r = 0;\n  if x == 3000000000 && y - x == 1 { r += 10; }\n  if m() == 8000000000 && z == 18446744073709551615 { r += 12; }\n  if g == 5.0 && j == 5 { r += 20; }\n  unsafe exit(r);\n}\n",
         42,
@@ -932,9 +966,9 @@ fn wide_literals_and_negated_constants() {
 // by the source: sized by the field, it read past the temp. And the constant evaluator's value for
 // the literal kept the short length through field-init and return positions, so a constant index into
 // the zero tail was reported as out of bounds.
-@test
-fn designated_array_literal_short_tail() {
-    run_exit(
+fn designated_array_literal_short_tail(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "short designated literals in field, binding and return positions; constant reads of the zero tail",
         "struct Env { pub args: [u32; 8], pub n: u8 }\nfn mk() [u32; 8] { return [[0] = 7]; }\nfn main() i32 {\n  let e = Env { args: [[1] = 5], n: 1 };\n  let local: [u32; 8] = [[2] = 3];\n  let r = mk();\n  unsafe exit((e.args[1] + e.args[7] + local[2] + local[7] + r[0] + r[7]) as i32 + 27);\n}\n",
         42,
@@ -948,9 +982,9 @@ fn designated_array_literal_short_tail() {
 // appending `[N]` to the element's spelling, producing `T (*)(..)[N]`: a function returning an array,
 // which is not a type. And an immutable binding took its `const` as a prefix, which for these element types
 // binds to the POINTEE (or the return type), not to the binding: writing through such a pointer then fails.
-@test
-fn array_of_pointers_and_functions() {
-    run_exit(
+fn array_of_pointers_and_functions(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "inferred array bindings, an array of fn pointers, and writing through an array of pointers",
         "fn one() i32 { return 1; }\nfn two() i32 { return 2; }\nfn main() i32 {\n  let inferred = [10, 20];\n  let fs = [one, two];\n  let mut a = 3;\n  let mut b = 4;\n  let ps = [&mut a, &mut b];\n  unsafe { *ps[0] = 5; }\n  unsafe { *ps[1] = 6; }\n  let mut t = 0;\n  for i in 0..2 { let f = unsafe fs[i]; t = t + f(); }\n  unsafe exit(unsafe inferred[0] + unsafe inferred[1] + t + a + b);\n}\n",
         44,
@@ -963,9 +997,9 @@ fn array_of_pointers_and_functions() {
 // every signature check against such a closure (a `F: fn() T` bound, above all) compared against nothing
 // and rejected it. Covered here through a generic method on a generic struct AND a free generic function,
 // which are the two shapes that check the bound.
-@test
-fn closure_declared_return_type_resolves() {
-    run_exit(
+fn closure_declared_return_type_resolves(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "closure returning a struct satisfies a fn-typed bound",
         "struct Pt { pub x: i32 }\nstruct Holder<T> { pub n: usize }\nextend<T> Holder<T> {\n  pub fn fill<F: fn move() T>(self: &mut Holder<T>, make: F) T { return make(); }\n}\nfn free_mk<T, F: fn move() T>(make: F) T { return make(); }\nfn main() i32 {\n  let mut h = Holder::<Pt> { n: 0 };\n  let a = h.fill(fn() Pt { return Pt { x: 20 }; });\n  let b = free_mk(fn() Pt { return Pt { x: 22 }; });\n  unsafe exit(a.x + b.x);\n}\n",
         42,
@@ -976,9 +1010,9 @@ fn closure_declared_return_type_resolves() {
 // count, which is read from the declaration the expression names, and that lookup only understood a plain
 // identifier, so `f(x.buf)` type-checked and then emitted a raw C array where a slice was expected. Covers
 // both directions and a write THROUGH the mutable slice, so the view really is the field's storage.
-@test
-fn array_field_coerces_to_slice() {
-    run_exit(
+fn array_field_coerces_to_slice(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "array-typed struct field passed as []T and []mut T",
         "struct B { pub b: [u8; 4], pub n: [i32; 3] }\nfn ro(s: []u8) usize { return s.len(); }\nfn rw(s: []mut u8) usize { s.set(0, 9u8); return s.len(); }\nfn sum(s: []i32) i32 { let mut t = 0; for i in 0..s.len() { t = t + *s.get(i); } return t; }\nfn main() i32 {\n  let mut x = B {};\n  x.n[0] = 40;\n  x.n[1] = 2;\n  let a: [u8; 4] = [1u8, 2u8, 3u8, 4u8];\n  let total = ro(a) + ro(x.b) + rw(x.b) + sum(x.n) as usize;\n  if x.b[0] != 9u8 { unsafe exit(1); }\n  unsafe exit(total as i32 - 12);\n}\n",
         42,
@@ -989,19 +1023,21 @@ fn array_field_coerces_to_slice() {
 // `let`: an aggregate member (struct, tuple struct, tuple, variant payload, array element and repeat,
 // generic instance) was stored as a raw array copy into the view struct, so its `len` read 0. The
 // view is now explicit in Core IR at every coerced expression; places keep their array type.
-@test
-fn array_coerces_to_slice_everywhere() {
-    run_exit(
+fn array_coerces_to_slice_everywhere(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "array into slice-typed aggregate members, field assignment and projections",
         "struct A<'a> { pub s: []'a u8 }\nstruct P<'a> { pub k: i32, pub a: A<'a> }\nstruct T<'a>([]'a u8, i32);\nstruct W { pub arr: [u8; 2] }\nstruct G<T> { pub v: T }\nenum E<'a> { V([]'a u8), N }\nfn chk(s: []u8, a: u8, b: u8) i32 { if s.len() == 2 && s[0] == a && s[1] == b { return 0; } return 1; }\nfn main() i32 {\n  let x: [u8; 2] = [7, 9];\n  let w = W { arr: [5, 6] };\n  let r = &w;\n  let aa: [[u8; 2]; 2] = [[1u8, 2u8], [3u8, 4u8]];\n  let mut bad = chk(A { s: x }.s, 7, 9);\n  bad += chk(P { k: 1, a: A { s: x } }.a.s, 7, 9);\n  let t = T(x, 3);\n  bad += chk(t.0, 7, 9);\n  let tu: ([]u8, i32) = (x, 4);\n  bad += chk(tu.0, 7, 9);\n  let e = E::V(x);\n  switch e { V(s) => { bad += chk(s, 7, 9); }, N => { bad += 100; } }\n  let o: Option<[]u8> = Option::<[]u8>::Some(x);\n  bad += chk(o.unwrap(), 7, 9);\n  let l: [[]u8; 2] = [x, w.arr];\n  bad += chk(l[0], 7, 9) + chk(l[1], 5, 6);\n  let rp: [[]u8; 2] = [x; 2];\n  bad += chk(rp[1], 7, 9);\n  let mut m = A { s: w.arr };\n  bad += chk(m.s, 5, 6);\n  m.s = x;\n  bad += chk(m.s, 7, 9);\n  bad += chk(A { s: r.arr }.s, 5, 6) + chk(A { s: aa[1] }.s, 3, 4);\n  let g = G::<[]u8> { v: w.arr };\n  bad += chk(g.v, 5, 6);\n  unsafe exit(42 + bad);\n}\n",
         42,
     );
-    run_exit(
+    exit_case(
+        b,
         "array into slice returns, method and closure arguments and generic arguments",
         "struct H { pub k: u8 }\nextend H { fn first(self: &Self, s: []u8) u8 { return s[0] + self.k; } }\nconst K: [u8; 2] = [3, 4];\nfn chk(s: []u8, a: u8, b: u8) i32 { if s.len() == 2 && s[0] == a && s[1] == b { return 0; } return 1; }\nfn view<'a>(x: &'a [u8; 2]) []'a u8 { return *x; }\nfn konst() []'static u8 { return K; }\nfn id<T>(v: T) T { return v; }\nfn main() i32 {\n  let mut y: [u8; 2] = [7, 9];\n  let mut bad = chk(view(&y), 7, 9) + chk(konst(), 3, 4) + chk(id::<[]u8>(y), 7, 9);\n  let h = H { k: 1 };\n  if h.first(y) != 8 { bad += 1; }\n  let f = |s: []u8| s.len();\n  if f(y) != 2 { bad += 1; }\n  {\n    let t: (i32, []mut u8) = (1, y);\n    t.1[1] = 50;\n  }\n  bad += chk(y, 7, 50);\n  unsafe exit(42 + bad);\n}\n",
         42,
     );
-    run_exit(
+    exit_case(
+        b,
         "array into slice members of constants and statics",
         "struct A<'a> { pub s: []'a u8 }\nconst K: [u8; 2] = [3, 4];\nconst CA: A<'static> = A { s: K };\nstatic mut SA: A<'static> = A { s: K };\nconst CS: []'static u8 = K;\nconst CL: A<'static> = A { s: [5, 6] };\nconst CV: A<'static> = A { s: K[0..2] };\nconst LN: usize = A { s: K }.s.len();\nconst E1: u8 = A { s: K }.s[1];\nfn chk(s: []u8, a: u8, b: u8) i32 { if s.len() == 2 && s[0] == a && s[1] == b { return 0; } return 1; }\nfn main() i32 {\n  let mut bad = chk(CA.s, 3, 4) + chk(unsafe SA.s, 3, 4) + chk(CS, 3, 4) + chk(CL.s, 5, 6) + chk(CV.s, 3, 4);\n  bad += LN as i32 - 2 + E1 as i32 - 4;\n  unsafe exit(42 + bad);\n}\n",
         42,
@@ -1012,9 +1048,9 @@ fn array_coerces_to_slice_everywhere() {
 // compiled to an out-of-bounds node lookup: the instance graph demanded closures two levels down and
 // no further, so the innermost never entered its keep and the emitter lowered it from scratch after the
 // body arena was released. The graph now expands closures to any depth.
-@test
-fn closures_nest_to_any_depth() {
-    run_exit(
+fn closures_nest_to_any_depth(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
         "a closure three levels deep runs and captures through every level",
         "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nfn main() i32 {\n  let want: i64 = 3;\n  let got = apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return apply(fn() i64 { return want + 39; }); }); }); });\n  unsafe exit(got as i32);\n}\n",
         42,
@@ -1027,9 +1063,9 @@ fn closures_nest_to_any_depth() {
 // captures (its thunk calls the function, no env), a closure that owns a `String` (the boxed env
 // frees it once), a `move` closure, and a `dyn fn` whose parameter is another `dyn fn` (its
 // vtable block must follow the parameter's).
-@test
-fn dyn_fn_types_in_bodies() {
-    let r = h::compile_and_run_env(
+fn dyn_fn_types_in_bodies(b: &mut h::ExitBatch) {
+    b.add(
+        "dyn fn types in a body build",
         M"(fn run(f: &dyn fn(i32) i32, x: i32) i32 {
     return f(x);
 }
@@ -1046,19 +1082,17 @@ fn main() i32 {
     return total - (7 + 8 + 6 + 5 + 88 + 4);
 }
 )",
-        "SC_LEAK_CHECK=fatal",
+        0,
     );
-    assert(r.built, "dyn fn types in a body build");
-    assert_eq(r.exit, 0);
 }
 
-@test
-fn closure_captures_every_binding_kind() {
+fn closure_captures_every_binding_kind(b: &mut h::ExitBatch) {
     // A closure environment must name EVERY kind of binding it can capture, not only `let`s and parameters:
     // a `for` induction variable, an iterator-`for` binding, an `if let` / switch-arm payload and a
     // struct-pattern shorthand must each emit a NAMED env field (`struct { int32_t; }` does not
     // compile). All five kinds are captured here, so the emitted C proves each field is named.
-    run_exit(
+    exit_case(
+        b,
         "closure captures for / iterator / if-let / switch-arm / struct-shorthand bindings",
         "fn apply<F: fn() i64>(f: F) i64 { return f(); }\nstruct P { pub a: i64, pub b: i64 }\nenum E { N, V(i64), }\nfn main() i32 {\n  let mut t: i64 = 0;\n  for i in 0..3 { t = t + apply(fn() i64 { return i; }); }\n  let mut v = Vector::<i64>::new();\n  v.push(4);\n  v.push(5);\n  for x in v.iter() { t = t + apply(fn() i64 { return *x; }); }\n  v.free();\n  let e = E::V(10);\n  if let V(n) = e { t = t + apply(fn() i64 { return n; }); }\n  switch e { V(n2) => { t = t + apply(fn() i64 { return n2; }); }, N => {}, }\n  let p = P { a: 6, b: 7 };\n  switch p { P { a, b } => { t = t + apply(fn() i64 { return a + b; }); }, }\n  unsafe exit(t as i32);\n}\n",
         45,
@@ -1277,55 +1311,56 @@ fn main() i32 {
     );
 }
 
+const REF_MUTABILITY_MANGLES_APART_SRC: str = "fn peek<T>(v: &T) Option<&T> { return Option::<&T>::Some(v); }\nfn peek_mut<T>(v: &mut T) Option<&mut T> { return Option::<&mut T>::Some(v); }\nfn main() i32 {\n    let mut x = 41;\n    let m = peek_mut(&mut x).unwrap();\n    *m = *m + 1;\n    return *peek(&x).unwrap() - 42;\n}\n";
+
 // `&T` and `&mut T` are DIFFERENT C types (`const T*` vs `T*`), so instances named by them must get
 // different symbols: one name for both redefines the struct and conflicts on every method.
 @test
 fn ref_mutability_mangles_apart() {
-    let SRC: str = "fn peek<T>(v: &T) Option<&T> { return Option::<&T>::Some(v); }\nfn peek_mut<T>(v: &mut T) Option<&mut T> { return Option::<&mut T>::Some(v); }\nfn main() i32 {\n    let mut x = 41;\n    let m = peek_mut(&mut x).unwrap();\n    *m = *m + 1;\n    return *peek(&x).unwrap() - 42;\n}\n";
-    h::expect_exit("Option<&T> and Option<&mut T> coexist in one program", SRC, 0);
-    h::expect_c("the mutable instance takes its own symbol", SRC, "Option__ptrm_i32");
-    h::expect_c("the read-only instance keeps the plain one", SRC, "Option__ptr_i32");
+    h::expect_c("the mutable instance takes its own symbol", REF_MUTABILITY_MANGLES_APART_SRC, "Option__ptrm_i32");
+    h::expect_c("the read-only instance keeps the plain one", REF_MUTABILITY_MANGLES_APART_SRC, "Option__ptr_i32");
+}
+
+fn ref_mutability_mangles_apart_cases(b: &mut h::ExitBatch) {
+    b.add("Option<&T> and Option<&mut T> coexist in one program", REF_MUTABILITY_MANGLES_APART_SRC, 0);
 }
 
 // `Deref` reaches past method dispatch: the `*` operator, field access, and a `&W` argument arriving
 // at a `&Target` parameter all take the same hop `w.method()` already took.
-@test
-fn deref_beyond_methods() {
-    h::expect_exit(
+fn deref_beyond_methods(b: &mut h::ExitBatch) {
+    b.add(
         "the '*' operator uses Deref",
         "struct W { pub v: i32 }\nextend W as Deref<i32> { fn deref(self: &W) &i32 { return &self.v; } }\nfn main() i32 { let w = W { v: 6 }; return *w - 6; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a '&W' argument reaches a '&Target' parameter",
         "struct W { pub v: i32 }\nextend W as Deref<i32> { fn deref(self: &W) &i32 { return &self.v; } }\nfn take(x: &i32) i32 { return *x; }\nfn main() i32 { let w = W { v: 6 }; return take(&w) - 6; }\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "'*' and fields work through Box",
         "struct P { pub v: i32 }\nfn main() i32 {\n    let b = Box::<i32>::new(5);\n    let p = Box::<P>::new(P { v: 4 });\n    return *b + p.v - 9;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "mutation reaches through deref_mut: field assign, '&mut' borrow, '&mut W' coercion",
         "struct P { pub v: i32 }\nfn bump(t: &mut P) { t.v += 1; }\nfn main() i32 {\n    let mut b = Box::<P>::new(P { v: 1 });\n    b.v = 5;\n    let r = &mut b.v;\n    *r += 1;\n    bump(&mut b);\n    return b.v - 7;\n}\n",
         0,
     );
-    h::expect_exit(
+    b.add(
         "a method through Deref still resolves",
         "struct P { pub v: i32 }\nextend P { pub fn peek(self: &P) i32 { return self.v; } }\nfn main() i32 {\n    let b = Box::<P>::new(P { v: 5 });\n    return b.peek() - 5;\n}\n",
         0,
     );
 }
 
-@test
-fn box_set_frees_the_previous_value() {
-    let r = h::compile_and_run_env(
+fn box_set_frees_the_previous_value(b: &mut h::ExitBatch) {
+    b.add(
+        "Box::set builds",
         "fn main() i32 {\n    let mut b = Box::<String>::new(String::from_str(\"a string long enough to live on the heap\"));\n    b.set(String::from_str(\"another string long enough for the heap\"));\n    return b.len() as i32;\n}\n",
-        "SC_LEAK_CHECK=fatal",
+        39,
     );
-    assert(r.built, "Box::set builds");
-    assert_eq(r.exit, 39);
 }
 
 // A value of an unbounded type parameter owns: a generic body drops what it leaves behind (a
@@ -1333,37 +1368,32 @@ fn box_set_frees_the_previous_value() {
 // overwrites), and so do the std bodies built on the rule (`Option::filter` rejecting its payload,
 // `Option::unwrap_or`'s unused default, `Map::insert`'s duplicate key). The strings are longer than
 // 23 bytes, so each one is a heap block the fatal gate would report.
-@test
-fn generic_values_left_behind_are_dropped() {
-    let r = h::compile_and_run_env(
+fn generic_values_left_behind_are_dropped(b: &mut h::ExitBatch) {
+    b.add(
+        "generic bodies that leave values behind build",
         "fn heap(tag: str) String {\n    let mut s = String::from_str(\"a heap string longer than twenty-three bytes: \");\n    s.push_str(tag);\n    return s;\n}\nfn drop_it<T>(x: T) {}\nfn local<T>(x: T) i32 {\n    let y = x;\n    return 1;\n}\nfn early<T>(a: T, b: T, first: bool) T {\n    if first {\n        return a;\n    }\n    return b;\n}\nfn set<T>(r: &mut T, v: T) {\n    *r = v;\n}\nfn tried<T>(x: T, o: Option<i32>) Option<i32> {\n    let v = o?;\n    drop_it(x);\n    return Option::<i32>::Some(v);\n}\nfn main() i32 {\n    drop_it(heap(\"param\"));\n    let n = local(heap(\"local\"));\n    let e = early(heap(\"kept\"), heap(\"skipped\"), true);\n    let mut s = heap(\"old\");\n    set(&mut s, heap(\"new\"));\n    let t = tried(heap(\"question\"), Option::<i32>::None);\n    let f = Option::<String>::Some(heap(\"filtered\")).filter(|x: &String| x.len() < 5);\n    let d = Option::<String>::Some(heap(\"some\")).unwrap_or(heap(\"default\"));\n    let mut m = Map::<String, i32>::new();\n    m.insert(heap(\"key\"), 1);\n    m.insert(heap(\"key\"), 2);\n    if n != 1 || !e.ends_with(\"kept\") || !s.ends_with(\"new\") || t.is_some() || f.is_some() || !d.ends_with(\"some\") || m.len() != 1 {\n        return 1;\n    }\n    return 0;\n}\n",
-        "SC_LEAK_CHECK=fatal",
+        0,
     );
-    assert(r.built, "generic bodies that leave values behind build");
-    assert_eq(r.exit, 0);
 }
 
 // A method's `where T: Copy` on its extend's parameter holds in that method only: a sibling method
 // still owns and drops its `T`.
-@test
-fn scoped_where_copy_keeps_sibling_drops() {
-    let r = h::compile_and_run_env(
+fn scoped_where_copy_keeps_sibling_drops(b: &mut h::ExitBatch) {
+    b.add(
+        "a scoped where bound builds",
         "struct P<T> { pub n: i32 }\nextend<T> P<T> {\n    fn pad(self: &mut Self, v: T) where T: Copy { let a = v; let b = v; self.n = self.n + 2; }\n    fn keep(self: &mut Self, v: T) { let w = v; self.n = self.n + 1; }\n}\nfn main() i32 {\n    let mut p = P::<i32> { n: 0 };\n    p.pad(3);\n    let mut q = P::<String> { n: 0 };\n    q.keep(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return p.n + q.n - 3;\n}\n",
-        "SC_LEAK_CHECK=fatal",
+        0,
     );
-    assert(r.built, "a scoped where bound builds");
-    assert_eq(r.exit, 0);
 }
+
+const SCALAR_INSTANCE_DROPS_NOTHING_SRC: str = "@noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
 
 // A generic body is elaborated once, so a drop is scheduled for every instance: the instance whose
 // type owns nothing emits no code for it.
 @test
 fn scalar_instance_drops_nothing() {
-    let src = "@noinline\nfn drop_it<T>(x: T) {}\nfn main() i32 {\n    drop_it(5i64);\n    drop_it(String::from_str(\"a heap string longer than twenty-three bytes\"));\n    return 0;\n}\n";
-    // The owning instance frees its parameter: the run passes the harness's fatal leak gate.
-    h::expect_exit("both instances run", src, 0);
     // The scalar instance's body is a bare return, whitespace aside.
-    let c = h::compile_c(src);
+    let c = h::compile_c(SCALAR_INSTANCE_DROPS_NOTHING_SRC);
     assert(c.ok());
     let t = unsafe str::from_cstr(c.code);
     let k = t.find("drop_it__i64(int64_t x) {");
@@ -1373,16 +1403,19 @@ fn scalar_instance_drops_nothing() {
     assert(body == "return;", "the scalar instance is empty");
 }
 
-@test
-fn leak_tracker_reports_over_aligned_blocks() {
+fn scalar_instance_drops_nothing_cases(b: &mut h::ExitBatch) {
+    // The owning instance frees its parameter: the run passes the harness's fatal leak gate.
+    b.add("both instances run", SCALAR_INSTANCE_DROPS_NOTHING_SRC, 0);
+}
+
+fn leak_tracker_reports_over_aligned_blocks(b: &mut h::ExitBatch) {
     // Over-aligned blocks take the platform's aligned allocation, not malloc: the tracker still
     // records them, so a leaked Box and Vector of a 64-aligned type fail the fatal gate.
-    let r = h::compile_and_run_env(
+    b.add(
+        "leaked over-aligned blocks build",
         "@align(64)\nstruct Big { pub v: i64 }\nfn main() i32 {\n    let b = Box::<Big>::new(Big { v: 3 });\n    let mut v = Vector::<Big>::new();\n    v.push(Big { v: 4 });\n    forget(b);\n    forget(v);\n    return 0;\n}\n",
-        "SC_LEAK_CHECK=fatal",
+        23,
     );
-    assert(r.built, "leaked over-aligned blocks build");
-    assert_eq(r.exit, 23);
 }
 
 // A program a harness helper runs has SC_LEAK_CHECK=fatal unless the test sets SC_LEAK_CHECK, so a leak
@@ -1425,15 +1458,18 @@ fn qualified_name_of_self_in_a_called_method() {
 // `panic_parts(head, tail)` panics with `head` then `tail`, at run time and at compile time.
 @test
 fn panic_parts_joins_its_message() {
-    h::expect_trap(
-        "a run-time panic_parts",
-        "fn main(argv: Vector<str>) i32 {\n    if argv.len() > 0 {\n        panic_parts(type_info::<Vector<u8>>().qualified_name, \"[i]: tail\");\n    }\n    return 0;\n}\n",
-        "panic: Vector<u8>[i]: tail",
-    );
     h::expect_build_err(
         "a compile-time panic_parts",
         "const fn f() i32 {\n    panic_parts(\"head \", \"tail\");\n    return 0;\n}\nconst X: i32 = f();\nfn main() i32 {\n    return X;\n}\n",
         "head tail",
+    );
+}
+
+fn panic_parts_joins_its_message_cases(b: &mut h::ExitBatch) {
+    b.add_trap(
+        "a run-time panic_parts",
+        "fn main(argv: Vector<str>) i32 {\n    if argv.len() > 0 {\n        panic_parts(type_info::<Vector<u8>>().qualified_name, \"[i]: tail\");\n    }\n    return 0;\n}\n",
+        "panic: Vector<u8>[i]: tail",
     );
 }
 
@@ -1469,36 +1505,32 @@ fn zeroable_asserts_private_fields() {
 
 // The markers are the prelude's declarations, not their names: a program's own `Free` interface is an
 // ordinary interface, so its `free` runs only where called.
-@test
-fn a_program_interface_named_free_is_not_the_marker() {
-    let r = h::compile_and_run(
+fn a_program_interface_named_free_is_not_the_marker(b: &mut h::ExitBatch) {
+    b.add(
+        "a program's Free interface builds",
         "static mut FREED: i32 = 0;\ninterface Free {\n    fn free(self: &mut Self);\n}\nstruct S {\n    pub n: i32,\n}\nextend S as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED += 1;\n    }\n}\nfn main() i32 {\n    {\n        let s = S { n: 1 };\n        let _ = s.n;\n    }\n    return unsafe FREED;\n}\n",
+        0,
     );
-    assert(r.built, "a program's Free interface builds");
-    assert_eq(r.exit, 0);
 }
 
-@test
-fn box_reaches_a_generic_reference_param_unchanged() {
+fn box_reaches_a_generic_reference_param_unchanged(b: &mut h::ExitBatch) {
     // A `&Box<String>` argument binds a generic `&T` param to the Box itself: a derived Clone's
     // per-field helper and a plain generic fn both receive the Box, never its pointee.
-    let r = h::compile_and_run_env(
+    b.add(
+        "derived Clone over a Box field builds",
         "@derive(Clone)\nstruct S {\n    pub b: Box<String>,\n    pub n: i32,\n}\nfn same<T: Eq>(a: &T, b: &T) bool { return a.eq(b); }\nfn main() i32 {\n    let a = S { b: Box::<String>::new(String::from_str(\"a string long enough to live on the heap\")), n: 3 };\n    let c = a.clone();\n    if !same(&a.b, &c.b) { return 1; }\n    return c.b.len() as i32 + c.n - a.n;\n}\n",
-        "SC_LEAK_CHECK=fatal",
+        40,
     );
-    assert(r.built, "derived Clone over a Box field builds");
-    assert_eq(r.exit, 40);
 }
 
 // `@derive` on a type with lifetime parameters conforms every instance: the extend takes the type's
 // lifetimes (`extend<'a, T> Tag<'a, T> as Eq {}`), so the derived `eq` compares a borrowed `str` field.
-@test
-fn derive_takes_lifetime_parameters() {
-    let r = h::compile_and_run(
+fn derive_takes_lifetime_parameters(b: &mut h::ExitBatch) {
+    b.add(
+        "a derived conformance of a lifetime-parameterized type builds",
         "@derive(Eq, Copy)\nstruct Tag<'a, T: Copy> {\n    pub name: str<'a>,\n    pub v: T,\n}\nfn twice<C: Copy>(c: C) (C, C) {\n    return (c, c);\n}\nfn main() i32 {\n    let s = String::from_str(\"ab\");\n    let a = Tag::<i32> { name: s.as_str(), v: 1 };\n    let (b, c) = twice(Tag::<i32> { name: \"ab\", v: 1 });\n    return (a == b) as i32 + (b == c) as i32 + (a != Tag::<i32> { name: \"ab\", v: 2 }) as i32 - 3;\n}\n",
+        0,
     );
-    assert(r.built, "a derived conformance of a lifetime-parameterized type builds");
-    assert_eq(r.exit, 0);
 }
 
 fn compile_time_layout_and_zero_sized_maps(b: &mut h::ExitBatch) {
@@ -1693,9 +1725,8 @@ fn const_generic_array_length_inferred(b: &mut h::ExitBatch) {
 
 // A narrower number in a wider tuple slot keeps its own type and converts at the store, as in an array
 // or a field: an element, a field, a dereference and a call result.
-@test
-fn tuple_slots_widen_their_numbers() {
-    h::expect_exit(
+fn tuple_slots_widen_their_numbers(b: &mut h::ExitBatch) {
+    b.add(
         "tuple slots widen",
         "struct P {\n    pub x: i16,\n}\n\nfn g(k: i16) i16 {\n    return -5 * k;\n}\n\nfn main(args: Vector<str>) i32 {\n    let k = args.len() as i16;\n    let ia: [i16; 4] = [300, -32768, 32767, -5 * k];\n    let i = args.len() + 2;\n    let v = ia[0..4];\n    let p = P { x: -7 * k };\n    let r = &p.x as *const i16;\n    let a: (i32, i64) = unsafe (ia[i], ia[i - 1]);\n    let b: (i32, i64) = (v[i], v[1]);\n    let c: (i32, i64) = (p.x, unsafe *r);\n    let d: (i32, i64) = (g(k), g(k + 1));\n    if a.0 != -5 || a.1 != 32767 || b.0 != -5 || b.1 != -32768 || c.0 != -7 || c.1 != -7 || d.0 != -5 || d.1 != -10 {\n        return 1;\n    }\n    return 0;\n}\n",
         0,
@@ -1833,13 +1864,6 @@ fn static_slice_result(b: &mut h::ExitBatch) {
         "const NAMES: [str<'static>; 3] = [\"x\", \"yy\", \"zzz\"];\nfn names() []'static str<'static> { return NAMES; }\nfn main() i32 {\n    let n = names();\n    return (n.len() + n[1].len()) as i32 - 5;\n}\n",
         0,
     );
-}
-
-// Runs `src` under the fatal leak gate: it must build and exit with `code`.
-fn run_leak_free(label: str, src: str, code: i32) {
-    let r = h::compile_and_run_env(src, "SC_LEAK_CHECK=fatal");
-    assert(r.built, label);
-    assert_eq(r.exit, code);
 }
 
 // `?` consumes its carrier: the payload moves out (a Free payload too), the error or None path
@@ -2388,7 +2412,15 @@ fn main() i32 {
 // context: a struct field, a return, an argument, an assignment or an annotation.
 @test
 fn null_array_elements_take_the_expected_type() {
-    run_leak_free(
+    h::expect_err_msg(
+        "null elements with no expected type",
+        "fn main() i32 {\n    let y = [null, null];\n    return 0;\n}\n",
+        "cannot infer the element type of an array literal of 'null'; annotate the pointer type",
+    );
+}
+
+fn null_array_elements_take_the_expected_type_cases(b: &mut h::ExitBatch) {
+    b.add(
         "null elements of pointer arrays",
         M"(struct H { pub hs: [*mut i32; 2], pub w: i32 }
 fn mk() [*mut i32; 2] { return [null, null]; }
@@ -2409,11 +2441,6 @@ fn main() i32 {
 )",
         0,
     );
-    h::expect_err_msg(
-        "null elements with no expected type",
-        "fn main() i32 {\n    let y = [null, null];\n    return 0;\n}\n",
-        "cannot infer the element type of an array literal of 'null'; annotate the pointer type",
-    );
 }
 
 // `[]` takes its element type from an expected array or slice. A zero-length array (a constant, a
@@ -2421,25 +2448,6 @@ fn main() i32 {
 // points at the aligned zero-size sentinel with length 0: C has no zero-length object to point at.
 @test
 fn zero_length_array_views() {
-    run_leak_free(
-        "zero-length arrays as slices",
-        M"(const NONE: [i32; 0] = [];
-const EMPTY: []i32 = [];
-fn view() Slice<'static, i32> { return NONE; }
-fn take(a: [i32; 0]) usize { let s: []i32 = a; return s.len(); }
-fn main() i32 {
-    let e: [i32; 0] = [];
-    let t: []i32 = e;
-    let u: []i32 = [];
-    let r = &NONE;
-    let w: []i32 = *r;
-    let g: []i32 = e[0..0];
-    for x in view() { return x; }
-    return (view().len() + t.len() + u.len() + take(NONE) + w.len() + EMPTY.len() + g.len()) as i32;
-}
-)",
-        0,
-    );
     h::expect_c(
         "the view of a zero-length constant",
         M"(const NONE: [i32; 0] = [];
@@ -2457,6 +2465,28 @@ fn main() i32 { return view().len() as i32; }
 }
 )",
         "{ .ptr = ((int32_t *)((void *)&__sc_zst_",
+    );
+}
+
+fn zero_length_array_views_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "zero-length arrays as slices",
+        M"(const NONE: [i32; 0] = [];
+const EMPTY: []i32 = [];
+fn view() Slice<'static, i32> { return NONE; }
+fn take(a: [i32; 0]) usize { let s: []i32 = a; return s.len(); }
+fn main() i32 {
+    let e: [i32; 0] = [];
+    let t: []i32 = e;
+    let u: []i32 = [];
+    let r = &NONE;
+    let w: []i32 = *r;
+    let g: []i32 = e[0..0];
+    for x in view() { return x; }
+    return (view().len() + t.len() + u.len() + take(NONE) + w.len() + EMPTY.len() + g.len()) as i32;
+}
+)",
+        0,
     );
 }
 
@@ -2752,11 +2782,7 @@ fn main() i32 {
     );
 }
 
-// Negative const-generic arguments mangle to identifiers (`n` for the minus sign), distinct from the
-// positive ones, and i64::MIN is spelled as a C expression.
-@test
-fn negative_const_generic_arguments() {
-    const SRC: str = M"(struct S<const N: i64> { pub x: i32 }
+const NEGATIVE_CONST_GENERIC_ARGUMENTS_SRC: str = M"(struct S<const N: i64> { pub x: i32 }
 extend<const N: i64> S<N> { fn n(self: &Self) i64 { return N; } }
 fn g<const N: i64>() i64 { return N; }
 fn u<const N: u64>() u64 { return N; }
@@ -2769,15 +2795,19 @@ fn main() i32 {
     return s.x + t.x + m.x - 6;
 }
 )";
-    h::expect_exit("negative const arguments", SRC, 0);
-    h::expect_c("a negative argument mangles with n", SRC, "S__n3");
+
+// Negative const-generic arguments mangle to identifiers (`n` for the minus sign), distinct from the
+// positive ones, and i64::MIN is spelled as a C expression.
+@test
+fn negative_const_generic_arguments() {
+    h::expect_c("a negative argument mangles with n", NEGATIVE_CONST_GENERIC_ARGUMENTS_SRC, "S__n3");
 }
 
-// A generic extend's associated constant has a value per instance: its initializer may depend on the
-// extend's parameters, it folds in constant contexts, and each instance is its own static datum.
-@test
-fn generic_extend_associated_constants() {
-    const SRC: str = M"(struct W<T> { pub x: T }
+fn negative_const_generic_arguments_cases(b: &mut h::ExitBatch) {
+    b.add("negative const arguments", NEGATIVE_CONST_GENERIC_ARGUMENTS_SRC, 0);
+}
+
+const GENERIC_EXTEND_ASSOCIATED_CONSTANTS_SRC: str = M"(struct W<T> { pub x: T }
 struct P { pub a: i32, pub b: i32 }
 extend<T> W<T> {
     pub const K: i32 = 5;
@@ -2799,8 +2829,12 @@ fn main() i32 {
     return 0;
 }
 )";
-    h::expect_exit("generic extend constants", SRC, 0);
-    h::expect_c("one datum per instance", SRC, "int32_t W__u8__K = 5;");
+
+// A generic extend's associated constant has a value per instance: its initializer may depend on the
+// extend's parameters, it folds in constant contexts, and each instance is its own static datum.
+@test
+fn generic_extend_associated_constants() {
+    h::expect_c("one datum per instance", GENERIC_EXTEND_ASSOCIATED_CONSTANTS_SRC, "int32_t W__u8__K = 5;");
     h::expect_err_msg(
         "an instance is required",
         "struct W<T> { pub x: T }\nextend<T> W<T> { pub const K: i32 = 5; }\nfn main() i32 { return W::K; }\n",
@@ -2813,12 +2847,11 @@ fn main() i32 {
     );
 }
 
-// A u64 const-generic argument above i64::MAX keeps its value: the same instance whatever spells
-// it, u64 arithmetic in a closed form, its own symbol, and an argument outside the parameter's
-// type is an error.
-@test
-fn u64_const_generic_arguments() {
-    const SRC: str = M"(struct U<const N: u64> { pub x: i32 }
+fn generic_extend_associated_constants_cases(b: &mut h::ExitBatch) {
+    b.add("generic extend constants", GENERIC_EXTEND_ASSOCIATED_CONSTANTS_SRC, 0);
+}
+
+const U64_CONST_GENERIC_ARGUMENTS_SRC: str = M"(struct U<const N: u64> { pub x: i32 }
 extend<const N: u64> U<N> {
     pub fn n(self: &Self) u64 { return N; }
     pub fn big(self: &Self) bool { return N > 5; }
@@ -2836,10 +2869,15 @@ fn main() i32 {
     return u.x + h.x + t.x + i.x;
 }
 )";
-    h::expect_exit("u64 const arguments", SRC, 0);
-    h::expect_c("u64::MAX spells its value", SRC, "U__18446744073709551615");
-    h::expect_c("2^63 as u64", SRC, "U__9223372036854775808");
-    h::expect_c("-2^63 as i64", SRC, "I___n9223372036854775808");
+
+// A u64 const-generic argument above i64::MAX keeps its value: the same instance whatever spells
+// it, u64 arithmetic in a closed form, its own symbol, and an argument outside the parameter's
+// type is an error.
+@test
+fn u64_const_generic_arguments() {
+    h::expect_c("u64::MAX spells its value", U64_CONST_GENERIC_ARGUMENTS_SRC, "U__18446744073709551615");
+    h::expect_c("2^63 as u64", U64_CONST_GENERIC_ARGUMENTS_SRC, "U__9223372036854775808");
+    h::expect_c("-2^63 as i64", U64_CONST_GENERIC_ARGUMENTS_SRC, "I___n9223372036854775808");
     h::expect_err_msg(
         "a negative u64 argument",
         "struct U<const N: u64> { pub x: i32 }\nfn main() i32 { let u = U::<{0 - 1}> { x: 0 }; return u.x; }\n",
@@ -2855,6 +2893,10 @@ fn main() i32 {
         "struct B<const N: u8> { pub x: i32 }\nfn main() i32 { let b = B::<300> { x: 0 }; return b.x; }\n",
         "const generic argument 300 is out of range for 'u8'",
     );
+}
+
+fn u64_const_generic_arguments_cases(b: &mut h::ExitBatch) {
+    b.add("u64 const arguments", U64_CONST_GENERIC_ARGUMENTS_SRC, 0);
 }
 
 // An operand the checker widens computes at the result's width: `i32 * i64` does not truncate the
@@ -2878,13 +2920,7 @@ fn main() i32 {
     );
 }
 
-// Const-generic values and forms carry their parameter's integer type: a form computes in its
-// parameters' type (a u64 form holds u64 constants and values, an i8 one reaches -128), a narrower
-// parameter widens into a wider one's position with one instance whatever spells it, and a large
-// scale factor is an ordinary coefficient.
-@test
-fn typed_const_generic_expressions() {
-    const SRC: str = M"(struct U<const N: u64> { pub x: i32 }
+const TYPED_CONST_GENERIC_EXPRESSIONS_SRC: str = M"(struct U<const N: u64> { pub x: i32 }
 extend<const N: u64> U<N> { pub fn n(self: &Self) u64 { return N; } }
 struct I<const N: i64> { pub x: i32 }
 extend<const N: i64> I<N> { pub fn n(self: &Self) i64 { return N; } }
@@ -2907,10 +2943,16 @@ fn main() i32 {
     return w.x - 3;
 }
 )";
-    h::expect_exit("typed const forms", SRC, 0);
-    h::expect_c("a u64 form value past i64::MAX", SRC, "U__18446744073709551614");
-    h::expect_c("2^63 from a u64 form", SRC, "U__9223372036854775808");
-    h::expect_c("an i8 form at its minimum", SRC, "S__n128");
+
+// Const-generic values and forms carry their parameter's integer type: a form computes in its
+// parameters' type (a u64 form holds u64 constants and values, an i8 one reaches -128), a narrower
+// parameter widens into a wider one's position with one instance whatever spells it, and a large
+// scale factor is an ordinary coefficient.
+@test
+fn typed_const_generic_expressions() {
+    h::expect_c("a u64 form value past i64::MAX", TYPED_CONST_GENERIC_EXPRESSIONS_SRC, "U__18446744073709551614");
+    h::expect_c("2^63 from a u64 form", TYPED_CONST_GENERIC_EXPRESSIONS_SRC, "U__9223372036854775808");
+    h::expect_c("an i8 form at its minimum", TYPED_CONST_GENERIC_EXPRESSIONS_SRC, "S__n128");
     h::expect_err_msg(
         "a wider parameter in a narrower one's position",
         "struct B<const N: u8> { pub x: i32 }\nfn f<const N: u64>() i32 { let b = B::<N> { x: 0 }; return b.x; }\nfn main() i32 { return f::<1>(); }\n",
@@ -2933,13 +2975,35 @@ fn main() i32 {
     );
 }
 
+fn typed_const_generic_expressions_cases(b: &mut h::ExitBatch) {
+    b.add("typed const forms", TYPED_CONST_GENERIC_EXPRESSIONS_SRC, 0);
+}
+
 // A const-generic expression is one type however it is spelled (`{N * 2 - N}` is `N`), and every
 // step of it computes in its type: between constants the checker decides the step, and a floored
 // division that no instantiation makes negative, an exact division and an alias whose steps fit
 // are accepted.
 @test
 fn const_generic_steps_at_compile_time() {
-    h::expect_exit(
+    h::expect_err_msg(
+        "a step between constants",
+        "struct F<const N: u64> { pub v: i32 }\nconst K: u64 = 18446744073709551615;\nfn main() i32 {\n    let a = F::<{K * 2 - K}> { v: 1 };\n    return a.v;\n}\n",
+        "error: const expression {K * 2} overflows u64\n--> <harness>:4:18",
+    );
+    h::expect_err_msg(
+        "an alias step under constant arguments",
+        "struct F<const N: u64> { pub v: i32 }\ntype A<const M: u64> = F<{M * 2 - M}>;\nfn main() i32 {\n    let c: A<18446744073709551615> = F::<18446744073709551615> { v: 1 };\n    return c.v;\n}\n",
+        "error: const expression {M * 2} overflows u64\n--> <harness>:4:12",
+    );
+    h::expect_err_msg(
+        "an alias scaling a divided argument",
+        "struct F<const N: u64> { pub v: i32 }\ntype A<const M: u64> = F<{M * 2 + 1}>;\nfn f<const N: u64>() i32 {\n    let x = A::<{(N + 7) / 8}> { v: 1 };\n    return x.v;\n}\nfn main() i32 {\n    return f::<17>();\n}\n",
+        "error: const expression {M * 2} of alias 'A' has no linear form for these arguments\n--> <harness>:4:13",
+    );
+}
+
+fn const_generic_steps_at_compile_time_cases(b: &mut h::ExitBatch) {
+    b.add(
         "steps that fit",
         M"(struct F<const N: u64> { pub v: i32 }
 extend<const N: u64> F<N> { pub fn n(self: &Self) u64 { return N; } }
@@ -2961,28 +3025,9 @@ fn main() i32 {
 )",
         0,
     );
-    h::expect_err_msg(
-        "a step between constants",
-        "struct F<const N: u64> { pub v: i32 }\nconst K: u64 = 18446744073709551615;\nfn main() i32 {\n    let a = F::<{K * 2 - K}> { v: 1 };\n    return a.v;\n}\n",
-        "error: const expression {K * 2} overflows u64\n--> <harness>:4:18",
-    );
-    h::expect_err_msg(
-        "an alias step under constant arguments",
-        "struct F<const N: u64> { pub v: i32 }\ntype A<const M: u64> = F<{M * 2 - M}>;\nfn main() i32 {\n    let c: A<18446744073709551615> = F::<18446744073709551615> { v: 1 };\n    return c.v;\n}\n",
-        "error: const expression {M * 2} overflows u64\n--> <harness>:4:12",
-    );
-    h::expect_err_msg(
-        "an alias scaling a divided argument",
-        "struct F<const N: u64> { pub v: i32 }\ntype A<const M: u64> = F<{M * 2 + 1}>;\nfn f<const N: u64>() i32 {\n    let x = A::<{(N + 7) / 8}> { v: 1 };\n    return x.v;\n}\nfn main() i32 {\n    return f::<17>();\n}\n",
-        "error: const expression {M * 2} of alias 'A' has no linear form for these arguments\n--> <harness>:4:13",
-    );
 }
 
-// A local constant of a generic function may use the function's (and its extend's) parameters:
-// each instance has its own value, a static datum of its own, in constant contexts too.
-@test
-fn local_constants_use_generic_parameters() {
-    const SRC: str = M"(struct W<T> { pub x: T }
+const LOCAL_CONSTANTS_USE_GENERIC_PARAMETERS_SRC: str = M"(struct W<T> { pub x: T }
 extend<T> W<T> {
     pub fn s(self: &Self) usize { const Z: usize = sizeof(T) * 2; return Z; }
 }
@@ -2996,16 +3041,19 @@ fn main() i32 {
     return 0;
 }
 )";
-    h::expect_exit("local constants per instance", SRC, 0);
-    h::expect_c("one datum per instance", SRC, "__u64 = 8;");
+
+// A local constant of a generic function may use the function's (and its extend's) parameters:
+// each instance has its own value, a static datum of its own, in constant contexts too.
+@test
+fn local_constants_use_generic_parameters() {
+    h::expect_c("one datum per instance", LOCAL_CONSTANTS_USE_GENERIC_PARAMETERS_SRC, "__u64 = 8;");
 }
 
-// A builtin limit or an associated constant is a const-generic argument wherever a named constant
-// is, unbraced as braced: in a turbofish, in a type, as a default; it spells the instance by its
-// value, so every spelling of one value is one type and one symbol, and compile time reads it too.
-@test
-fn qualified_const_generic_arguments() {
-    const SRC: str = M"(struct Foo { pub a: i32 }
+fn local_constants_use_generic_parameters_cases(b: &mut h::ExitBatch) {
+    b.add("local constants per instance", LOCAL_CONSTANTS_USE_GENERIC_PARAMETERS_SRC, 0);
+}
+
+const QUALIFIED_CONST_GENERIC_ARGUMENTS_SRC: str = M"(struct Foo { pub a: i32 }
 extend Foo { pub const K: i64 = 7; }
 enum D { X, Y }
 extend D { pub const Z: D = D::Y; }
@@ -3038,10 +3086,19 @@ fn main() i32 {
     return d.x + i.x + k.x + k2.x + f.x + g.x - 21;
 }
 )";
-    h::expect_exit("qualified const arguments", SRC, 0);
-    h::expect_c("u64::MAX spells its value", SRC, "U__18446744073709551615");
-    h::expect_c("i64::MIN spells its value", SRC, "I___n9223372036854775808");
-    h::expect_c("an associated constant spells its value", SRC, "I___7");
+
+// A builtin limit or an associated constant is a const-generic argument wherever a named constant
+// is, unbraced as braced: in a turbofish, in a type, as a default; it spells the instance by its
+// value, so every spelling of one value is one type and one symbol, and compile time reads it too.
+@test
+fn qualified_const_generic_arguments() {
+    h::expect_c("u64::MAX spells its value", QUALIFIED_CONST_GENERIC_ARGUMENTS_SRC, "U__18446744073709551615");
+    h::expect_c("i64::MIN spells its value", QUALIFIED_CONST_GENERIC_ARGUMENTS_SRC, "I___n9223372036854775808");
+    h::expect_c("an associated constant spells its value", QUALIFIED_CONST_GENERIC_ARGUMENTS_SRC, "I___7");
+}
+
+fn qualified_const_generic_arguments_cases(b: &mut h::ExitBatch) {
+    b.add("qualified const arguments", QUALIFIED_CONST_GENERIC_ARGUMENTS_SRC, 0);
 }
 
 // Compile-time evaluation reads a const-generic parameter in its declared type: signed comparisons,
@@ -3252,21 +3309,31 @@ fn body_static_assert_must_fold() {
     );
 }
 
+const INSTANCE_STATIC_ASSERT_OF_A_METHOD_WITH_ITS_OWN_PARAMETERS_SRC: str = "struct W<T: Copy, const N: usize> { pub e: [T; N] }\nextend<T: Copy, const N: usize> W<T, N> { pub fn pick<const I: usize, const J: usize, const K: usize>(self: W<T, N>) T { static_assert(I < N && J < N && K < N, \"index past the end\"); return unsafe self.e[I]; } }\n";
+
 // A method of a generic extend with const parameters of its own binds the extend's parameters from its
 // receiver and its own from the call's: `pick::<2, 1, 2>()` on `W<i32, 3>` is I = 2, J = 1, K = 2
 // under N = 3, never the call's arguments read as the extend's (T = 2, N = 1, I = 2).
 @test
 fn instance_static_assert_of_a_method_with_its_own_parameters() {
-    const SRC: str = "struct W<T: Copy, const N: usize> { pub e: [T; N] }\nextend<T: Copy, const N: usize> W<T, N> { pub fn pick<const I: usize, const J: usize, const K: usize>(self: W<T, N>) T { static_assert(I < N && J < N && K < N, \"index past the end\"); return unsafe self.e[I]; } }\n";
-    h::expect_exit(
-        "indexes inside the instance",
-        format("{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<2, 1, 2>() - 3; }}\n", SRC).as_str(),
-        0,
-    );
     h::expect_build_err(
         "an index past the end",
-        format("{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<0, 3, 1>(); }}\n", SRC).as_str(),
+        format(
+            "{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<0, 3, 1>(); }}\n",
+            INSTANCE_STATIC_ASSERT_OF_A_METHOD_WITH_ITS_OWN_PARAMETERS_SRC,
+        ).as_str(),
         "static assertion failed: index past the end",
+    );
+}
+
+fn instance_static_assert_of_a_method_with_its_own_parameters_cases(b: &mut h::ExitBatch) {
+    b.add(
+        "indexes inside the instance",
+        format(
+            "{}fn main() i32 {{ let w = W::<i32, 3> {{ e: [1, 2, 3] }}; return w.pick::<2, 1, 2>() - 3; }}\n",
+            INSTANCE_STATIC_ASSERT_OF_A_METHOD_WITH_ITS_OWN_PARAMETERS_SRC,
+        ).as_str(),
+        0,
     );
 }
 
@@ -3616,7 +3683,25 @@ fn main() i32 {
 // `unsafe`, and in a constant NaN or a value that does not fit is an error.
 @test
 fn float_to_int_unchecked() {
-    h::expect_exit(
+    h::expect_build_err(
+        "a call outside unsafe",
+        "fn main() i32 { let x: f32 = 3.5; return x.to_int_unchecked::<i32>(); }\n",
+        "calling an unsafe function requires an 'unsafe' block",
+    );
+    h::expect_build_err(
+        "a constant out of range",
+        "const E: u8 = unsafe 256.0f32.to_int_unchecked::<u8>();\nfn main() i32 { return E as i32; }\n",
+        "`to_int_unchecked` of NaN or of a value outside the integer type",
+    );
+    h::expect_build_err(
+        "a NaN constant",
+        "const F: i32 = unsafe (0.0f64 / 0.0).to_int_unchecked::<i32>();\nfn main() i32 { return F; }\n",
+        "`to_int_unchecked` of NaN or of a value outside the integer type",
+    );
+}
+
+fn float_to_int_unchecked_cases(b: &mut h::ExitBatch) {
+    b.add(
         "in-range values at run time and in constants",
         M"(@noinline
 fn id(x: f32) f32 { return x; }
@@ -3634,21 +3719,6 @@ fn main() i32 {
 }
 )",
         0,
-    );
-    h::expect_build_err(
-        "a call outside unsafe",
-        "fn main() i32 { let x: f32 = 3.5; return x.to_int_unchecked::<i32>(); }\n",
-        "calling an unsafe function requires an 'unsafe' block",
-    );
-    h::expect_build_err(
-        "a constant out of range",
-        "const E: u8 = unsafe 256.0f32.to_int_unchecked::<u8>();\nfn main() i32 { return E as i32; }\n",
-        "`to_int_unchecked` of NaN or of a value outside the integer type",
-    );
-    h::expect_build_err(
-        "a NaN constant",
-        "const F: i32 = unsafe (0.0f64 / 0.0).to_int_unchecked::<i32>();\nfn main() i32 { return F; }\n",
-        "`to_int_unchecked` of NaN or of a value outside the integer type",
     );
 }
 
@@ -3734,7 +3804,20 @@ fn main(args: Vector<str>) i32 {
 // stays an error.
 @test
 fn box_deref_place_writes() {
-    h::expect_exit(
+    h::expect_build_err(
+        "an immutable binding",
+        "fn main() i32 { let b = Box::new([1, 2]); *b = [3, 4]; return (*b)[0]; }\n",
+        "cannot assign to this expression",
+    );
+    h::expect_build_err(
+        "&mut of an immutable binding",
+        "fn main() i32 { let b = Box::new([1, 2]); let r = &mut *b; r[0] = 5; return (*b)[0]; }\n",
+        "cannot take '&mut' of an immutable binding",
+    );
+}
+
+fn box_deref_place_writes_cases(b: &mut h::ExitBatch) {
+    b.add(
         "writes through *b",
         M"(import std::math::scalar as *;
 import std::math::vec as *;
@@ -3756,16 +3839,6 @@ fn main() i32 {
 }
 )",
         0,
-    );
-    h::expect_build_err(
-        "an immutable binding",
-        "fn main() i32 { let b = Box::new([1, 2]); *b = [3, 4]; return (*b)[0]; }\n",
-        "cannot assign to this expression",
-    );
-    h::expect_build_err(
-        "&mut of an immutable binding",
-        "fn main() i32 { let b = Box::new([1, 2]); let r = &mut *b; r[0] = 5; return (*b)[0]; }\n",
-        "cannot take '&mut' of an immutable binding",
     );
 }
 
@@ -6144,11 +6217,85 @@ fn f(t: (i64, u8)) i64 { return t.0 + t.1 as i64; }
 
 // A boxed zero-sized value erased to `Box<dyn I>` holds the sentinel, which was never allocated: dropping
 // the box runs the value's `free` and frees nothing.
-@test
-fn boxed_zero_sized_dyn_values_drop_without_freeing() {
-    h::expect_exit(
+fn boxed_zero_sized_dyn_values_drop_without_freeing(b: &mut h::ExitBatch) {
+    b.add(
         "a boxed zero-sized dyn value",
         "interface I {\n    fn f(self: &Self) i32;\n}\n\nstruct Z {}\n\nextend Z as I {\n    pub fn f(self: &Self) i32 {\n        return 1;\n    }\n}\n\nstruct W {}\n\nstatic mut FREED: i32 = 0;\n\nextend W as I {\n    pub fn f(self: &Self) i32 {\n        return 2;\n    }\n}\n\nextend W as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED = unsafe FREED + 1;\n    }\n}\n\nfn main() i32 {\n    let mut v = Vector::<Box<dyn I>>::new();\n    v.push(Box::new(Z {}));\n    v.push(Box::new(W {}));\n    let s = v[0].f() + v[1].f();\n    v.clear();\n    return s - 3 + unsafe FREED - 1;\n}\n",
         0,
     );
+}
+
+@test
+fn exit_cases_10() {
+    let mut b = h::ExitBatch::new();
+    matchertext(&mut b);
+    generic_enum_constants_cases(&mut b);
+    results_spelled_around_the_declarator_cases(&mut b);
+    payload_enum_discriminants(&mut b);
+    non_ascii_char_literals(&mut b);
+    structs_and_methods(&mut b);
+    const_generics(&mut b);
+    generic_type_aliases(&mut b);
+    mut_match_binding(&mut b);
+    array_repeat_literal(&mut b);
+    array_repeat_symbolic_count(&mut b);
+    literals_compute_at_their_declared_width(&mut b);
+    wide_literals_and_negated_constants(&mut b);
+    designated_array_literal_short_tail(&mut b);
+    array_of_pointers_and_functions(&mut b);
+    b.run();
+}
+
+@test
+fn exit_cases_11() {
+    let mut b = h::ExitBatch::new();
+    closure_declared_return_type_resolves(&mut b);
+    array_field_coerces_to_slice(&mut b);
+    array_coerces_to_slice_everywhere(&mut b);
+    closures_nest_to_any_depth(&mut b);
+    dyn_fn_types_in_bodies(&mut b);
+    closure_captures_every_binding_kind(&mut b);
+    ref_mutability_mangles_apart_cases(&mut b);
+    deref_beyond_methods(&mut b);
+    box_set_frees_the_previous_value(&mut b);
+    generic_values_left_behind_are_dropped(&mut b);
+    scoped_where_copy_keeps_sibling_drops(&mut b);
+    scalar_instance_drops_nothing_cases(&mut b);
+    leak_tracker_reports_over_aligned_blocks(&mut b);
+    panic_parts_joins_its_message_cases(&mut b);
+    b.run();
+}
+
+// The iterable is a range stored in a binding, not a literal `a..b` in the loop header: this takes the
+// range-value lowering rather than the fast literal-range path.
+fn for_over_a_range_value(b: &mut h::ExitBatch) {
+    b.add(
+        "a for over a range value",
+        "fn main() i32 {\n    let r = 0..10;\n    let mut s = 0;\n    for i in r {\n        s += i;\n    }\n    return s - 45;\n}\n",
+        0,
+    );
+}
+
+@test
+fn exit_cases_12() {
+    let mut b = h::ExitBatch::new();
+    a_program_interface_named_free_is_not_the_marker(&mut b);
+    box_reaches_a_generic_reference_param_unchanged(&mut b);
+    derive_takes_lifetime_parameters(&mut b);
+    tuple_slots_widen_their_numbers(&mut b);
+    null_array_elements_take_the_expected_type_cases(&mut b);
+    zero_length_array_views_cases(&mut b);
+    negative_const_generic_arguments_cases(&mut b);
+    generic_extend_associated_constants_cases(&mut b);
+    u64_const_generic_arguments_cases(&mut b);
+    typed_const_generic_expressions_cases(&mut b);
+    const_generic_steps_at_compile_time_cases(&mut b);
+    local_constants_use_generic_parameters_cases(&mut b);
+    qualified_const_generic_arguments_cases(&mut b);
+    instance_static_assert_of_a_method_with_its_own_parameters_cases(&mut b);
+    float_to_int_unchecked_cases(&mut b);
+    box_deref_place_writes_cases(&mut b);
+    boxed_zero_sized_dyn_values_drop_without_freeing(&mut b);
+    for_over_a_range_value(&mut b);
+    b.run();
 }
