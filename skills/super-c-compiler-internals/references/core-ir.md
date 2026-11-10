@@ -52,8 +52,11 @@ is reused across bodies.
 Each clause (`Ast.contracts`) lowers to a chain of its own blocks: `pred` jumps to `chain`, the
 chain computes the condition, `check` ends in a `TM_ASSERT` of it whose span is the whole clause,
 and `cont` continues. `ContractSite { pred, chain, check, cont, clause, kind, value }`: `clause`
-indexes `Ast.contracts`, `kind` is `CT_REQUIRES`, `CT_ENSURES`, `CT_DECREASES` or `CT_INVARIANT`,
-and a `decreases` site asserts `true` and records its measure in `value`. `requires` and the
+indexes `Ast.contracts`, `kind` is `CT_REQUIRES`, `CT_ENSURES`, `CT_DECREASES`, `CT_INVARIANT`,
+`CT_ASSERT` or `CT_GHOST`, and a `decreases` site asserts `true` and records its measure in `value`.
+Ghost code in a normal body is a site too (`lower_ghost_site`): an `assert P by { B };` is
+`CT_ASSERT` (B, then the check of P), a lemma call statement `CT_GHOST` (the call, then `true`,
+`clause` = `u32::MAX`). `requires` and the
 function's `decreases` follow the entry; `ensures` precede each return, after the defers and
 before the storage deaths; a loop's clauses follow its header. `RangeLoop { head, ind, end_pl,
 end_k }`: a range `for` with an immutable binding, or an indexed collection loop, whose induction
@@ -61,10 +64,13 @@ local `ind` runs from its start up to the end place or constant.
 
 The prover (`src/prove/prove.spc`) reads the sites of the kept bodies. Then `skip_contracts`
 (`skip_site` per site) empties each chain to `TM_UNREACHABLE` and makes `pred` jump to `cont`,
-unless `-fcontract-checks` keeps them; `skip_tail_ensures` drops a proved `ensures` that follows a
+unless `-fcontract-checks` keeps them (a ghost site is skipped in every build, `is_ghost_site`; the
+evaluator jumps past one, `past_ghost`); `skip_tail_ensures` drops a proved `ensures` that follows a
 self tail call. With the chains empty and the size counters subtracted, a body with contracts
 emits the same code as without them. The lowering of an interface's method without a body
-(`lower_fn`) gives the parameters and the sites only; the prover alone reads it.
+(`lower_fn`) gives the parameters and the sites only; the prover alone reads it. A spec function's
+and a lemma's bodies are kept for the prover and never emitted (`reach_root`, `seed_emits`, the
+instance seeds skip them).
 
 ## Locals
 

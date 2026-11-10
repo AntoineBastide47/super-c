@@ -2873,6 +2873,10 @@ fn reach_roots(p: &loader::Package, g: &ig::InstGraph, live: *const bool, testin
 // Whether function or constant `nid` of module `m` (tree `a`) is a reachability root (`reach_roots`);
 // `api`: it is a library build's exported function.
 fn reach_root(p: &loader::Package, a: &Ast, m: ModuleId, nid: NodeId, testing: bool, api: bool) bool {
+    // Ghost code (a spec function, a lemma) is never emitted.
+    if a.at_const(nid).kind == NodeKind::NODE_FUNCTION && a.ext(nid).function.is_ghost() {
+        return false;
+    }
     if api || p.is_rt(m) || a.at_const(nid).kind == NodeKind::NODE_FUNCTION && p.is_entry(m, nid) || testing && is_test_item(
         a,
         nid,
@@ -3016,7 +3020,9 @@ fn cemit_seed_module(
 fn seed_emits(p: &loader::Package, cem: &mut cbe::CEmit, m: ModuleId, nid: NodeId, testing: bool) bool {
     let a = unsafe &*p.module_ast_const(m);
     let n = a.at_const(nid);
-    if n.kind != NodeKind::NODE_FUNCTION || a.ext(nid).function.is_extern() || a.ext(nid).function.body == NODE_NONE {
+    if n.kind != NodeKind::NODE_FUNCTION || a.ext(nid).function.is_extern() || a.ext(nid).function.body == NODE_NONE || a.ext(
+        nid,
+    ).function.is_ghost() {
         return false;
     }
     if a.ext(nid).function.needs_features() && (a.attr_of(nid, AttrKind::ATTR_SIMD_IMPL) != null || !tgt::isa(p.arch).fn_features && !cf::contains(
@@ -14896,7 +14902,7 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     // A build-constant site this build decided removed code another build runs, which may call what a
     // constant cannot (an extern under LOCKDEP): such a function gets no suggestion. Nor does a gated
     // function: another build compiles another variant of it.
-    if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).build_gated(fnode) || unsafe (*a).bc_cut_at(
+    if f.is_const() || f.is_extern() || f.is_ghost() || f.body == NODE_NONE || unsafe (*a).build_gated(fnode) || unsafe (*a).bc_cut_at(
         fnode,
         unsafe (*a).at_const(fnode).span,
     ) {

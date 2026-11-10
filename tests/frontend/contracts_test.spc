@@ -1,6 +1,7 @@
 // Contracts: `requires`, `ensures`, `decreases` and loop `invariant` clauses, their checks, the
-// prover that runs in every build, `@prove_exhaustive` (a proof by evaluation of every input), and the
-// flags that keep the checks at run time (`-fcontract-checks`) or skip the proofs (`-fno-prove`).
+// prover that runs in every build, `@prove_exhaustive` (a proof by evaluation of every input), ghost
+// code (`spec fn`, `lemma`, `assert .. by`, `int` and `nat`), and the flags that keep the checks at run
+// time (`-fcontract-checks`) or skip the proofs (`-fno-prove`).
 import tests::harness as h;
 import tests::cli_harness as cli;
 
@@ -54,6 +55,42 @@ fn clauses_are_checked_like_conditions() {
     assert(
         !h::parse_has_error("interface I {\n    fn g(self: &Self, x: u32) u32 requires x > 0 ensures |r| r < x;\n}\n"),
         "a contract on an interface's method",
+    );
+}
+
+// Ghost code: only it names `int` and `nat` or calls a spec function, a lemma call is a statement, and
+// an `assert .. by` block cannot leave.
+@test
+fn ghost_code_is_checked() {
+    assert(h::parse_has_error("lemma l(x: u32) u32 {}\n"), "a lemma with a return type");
+    assert(
+        !h::parse_has_error("spec fn s(x: nat) int { return x; }\nlemma l(x: nat) ensures s(x) >= 0 {}\n"),
+        "a spec function and a lemma",
+    );
+    h::expect_err_msg(
+        "an int parameter of a function",
+        "fn f(x: int) {}\nfn main() i32 { return 0; }\n",
+        "'int' is a specification type: only ghost code can name it",
+    );
+    h::expect_err_msg(
+        "a nat local of a function",
+        "fn main() i32 {\n    let x: nat = 1;\n    return 0;\n}\n",
+        "'nat' is a specification type: only ghost code can name it",
+    );
+    h::expect_err_msg(
+        "a spec function called by a function",
+        "spec fn s(x: u32) u32 { return x; }\nfn main() i32 { return s(1) as i32; }\n",
+        "a spec function can only be called from ghost code",
+    );
+    h::expect_err_msg(
+        "a lemma call as a value",
+        "lemma l() {}\nfn main() i32 {\n    let x = l();\n    return 0;\n}\n",
+        "a lemma call is a statement of its own: it has no value",
+    );
+    h::expect_err_msg(
+        "a return in an assert-by block",
+        "fn main() i32 {\n    assert true by { return 1; };\n    return 0;\n}\n",
+        "an 'assert .. by' block cannot return: ghost code never runs",
     );
 }
 
@@ -214,6 +251,61 @@ fn unproved_contracts_are_errors() {
     b.add(
         "a rotation the other rotation does not undo",
         "fn f(x: u32, n: u32) u32 ensures |r| r == x { return x.rotate_left(n).rotate_left(n); }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    h::expect_build_errs(b);
+}
+
+// Ghost code never runs: each of its checks is an obligation, it must end, and it assumes only the
+// `ensures` of a callee that ends.
+@test
+fn unproved_ghost_code_is_an_error() {
+    let mut b = cli::Batch::new("", "fn main() i32 {\n    return 0;\n}\n");
+    b.add("a false lemma", "lemma l(x: u32) ensures x > 5 {}\n", "cannot prove this 'ensures' clause");
+    b.add(
+        "a lemma that calls itself without a measure",
+        "lemma l(x: u32) ensures false { l(x); }\n",
+        "this call recurses: a spec function or a lemma that does needs a 'decreases' measure",
+    );
+    b.add(
+        "a lemma with a loop without a measure",
+        "lemma l(x: u32) {\n    let mut k: u32 = 0;\n    while k < x { k += 1; }\n}\n",
+        "this loop needs a 'decreases' measure: ghost code must end",
+    );
+    b.add(
+        "a spec function with a loop",
+        "spec fn s(x: u32) u32 {\n    let mut k: u32 = 0;\n    while k < x decreases x - k { k += 1; }\n    return k;\n}\n",
+        "a spec function cannot loop: state it by recursion",
+    );
+    b.add(
+        "ghost code that writes a variable",
+        "fn f(x: u32) u32 {\n    let mut y = x;\n    assert true by { y = 0; };\n    return y;\n}\n",
+        "ghost code must only compute its condition",
+    );
+    b.add(
+        "an index of ghost code that may be out of bounds",
+        "lemma l(a: [u32; 2], i: usize) {\n    let x = a[i];\n}\n",
+        "cannot prove that this check of ghost code holds",
+    );
+    b.add(
+        "a false assert-by",
+        "fn f(x: u32) u32 {\n    assert x > 5 by {};\n    return x;\n}\n",
+        "cannot prove this 'assert'",
+    );
+    b.add("a panic in ghost code", "lemma l() { panic(\"no\"); }\n", "cannot prove that ghost code does not panic here");
+    b.add(
+        "a nat below 0",
+        "spec fn d(n: nat) nat { return n - 1; }\n",
+        "cannot prove that this operation does not overflow",
+    );
+    b.add(
+        "a value below 0 as a nat",
+        "lemma l(x: i32) ensures x as nat >= 0 {}\n",
+        "cannot prove that this value is at least 0",
+    );
+    b.add(
+        "the ensures of a callee that may not end",
+        "const fn lie() bool ensures |r| false {\n    while true {}\n    return true;\n}\nlemma l() ensures false { let _ = lie(); }\n",
         "cannot prove this 'ensures' clause",
     );
     h::expect_build_errs(b);
@@ -938,7 +1030,109 @@ fn exit_cases_00() {
     exhaustive_proofs(&mut b);
     theory_proofs(&mut b);
     bit_proofs(&mut b);
+    ghost_proofs(&mut b);
     b.run();
+}
+
+// Ghost code no build runs: spec functions and their definitions, lemmas by induction, `assert .. by`,
+// `int` and `nat`, and std::spec.
+fn ghost_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "a spec function, a lemma by induction and a loop invariant over int",
+        M"(spec fn sum_spec(xs: []u32, n: usize) int
+    requires n <= xs.len()
+    decreases n
+{
+    return if n == 0 {
+        0
+    } else {
+        sum_spec(xs, n - 1) + xs[n - 1] as int
+    };
+}
+lemma sum_bound(xs: []u32, n: usize)
+    requires n <= xs.len()
+    ensures sum_spec(xs, n) <= n as int * 4294967295
+    decreases n
+{
+    if n > 0 {
+        sum_bound(xs, n - 1);
+    }
+}
+fn sum(xs: []u32) u64
+    requires xs.len() <= 1000
+    ensures |r| r as int == sum_spec(xs, xs.len())
+{
+    let mut acc: u64 = 0;
+    for i in 0..xs.len()
+        invariant acc as int == sum_spec(xs, i)
+    {
+        sum_bound(xs, i + 1);
+        acc += xs[i];
+    }
+    return acc;
+}
+fn main() i32 {
+    let v: [u32; 3] = [4, 5, 6];
+    return sum(v) as i32;
+}
+)",
+        15,
+    );
+    b.add(
+        "assert by, calls over constants and nat",
+        M"(spec fn pow2(n: nat) nat
+    decreases n
+{
+    return if n == 0 {
+        1
+    } else {
+        2 * pow2(n - 1)
+    };
+}
+spec fn pred(n: nat) nat
+    requires n > 0
+{
+    return n - 1;
+}
+lemma pred_less(n: nat)
+    requires n > 0
+    ensures pred(n) < n
+{
+}
+fn halve(x: u32) u32
+    ensures |r| r as int * 2 <= x as int
+{
+    assert pow2(5) == 32 by {};
+    pred_less(x as nat + 1);
+    return x / 2;
+}
+fn main() i32 {
+    return halve(9) as i32;
+}
+)",
+        4,
+    );
+    b.add(
+        "std::spec from a function",
+        M"(import std::spec::arith as *;
+fn mulmod(a: u32, b: u32, m: u32) u32
+    requires m > 0
+    ensures |r| r as int == a as int * (b as int) % (m as int)
+{
+    mod_mul(a as int, b as int, m as int);
+    return (a as u64 * b as u64 % m as u64) as u32;
+}
+fn shifted(x: u32) u64
+    ensures |r| r as int == x as int * pow2(8)
+{
+    return x as u64 << 8;
+}
+fn main() i32 {
+    return mulmod(3, 5, 7) as i32 + (shifted(1) >> 4) as i32;
+}
+)",
+        17,
+    );
 }
 
 // `@prove_exhaustive`: the first input whose run fails, reported where it fails, and the functions
@@ -1075,6 +1269,13 @@ fn contract_checks_run_on_request() {
     assert(checked.built, "a build with checks accepts it too");
     let r = h::diff_run(&checked, "");
     assert(r.exit != 0 && r.err.contains("assertion failed: `ensures |r| r > x`"), "the ensures check traps");
+    // A clause that names a spec function or converts into `int` has no run-time check.
+    let spec = h::diff_build(
+        "spec fn s(x: u32) u32 { return x; }\nfn f(x: u32) u32 requires x as int < 10, s(x) < 10 { return x; }\nfn main() i32 { return f(3) as i32; }\n",
+        ["-fcontract-checks"],
+    );
+    assert(!spec.built && spec.diag.contains("this contract converts into 'int' or 'nat'"), "a conversion into int");
+    assert(spec.diag.contains("this contract calls a spec function"), "a spec function's call");
 }
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,

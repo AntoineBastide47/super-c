@@ -214,6 +214,11 @@ extend<const B: usize> Blaster<B> {
                 return true;
             }
             let d = self.work[self.work.len() - 1];
+            // No bits hold an exact integer of a specification.
+            if (d & 0xFFFF) as u32 != KB && exact_w(tm.at((d >> 16) as u32).w) {
+                self.ok = false;
+                return false;
+            }
             if self.done(tm, d) {
                 let _ = self.work.pop();
                 continue;

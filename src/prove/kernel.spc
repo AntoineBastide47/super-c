@@ -644,7 +644,7 @@ extend<const B: usize> Kernel<B> {
         if f.kind == F_CONG {
             let x = tm.at(f.a);
             let y = tm.at(f.b);
-            if x.op != y.op || x.w != y.w || x.sg != y.sg || x.k != y.k || pooled(x.op) && x.b != y.b {
+            if !same_op(&x, &y) || pooled(x.op) && x.b != y.b {
                 return false;
             }
             tm.operands(f.a, &mut self.ops_a);
@@ -656,16 +656,26 @@ extend<const B: usize> Kernel<B> {
             if f.p as usize + f.q as usize > pf.cargs.len() {
                 return false;
             }
-            for j in 0..self.ops_a.len() {
-                let oa = self.ops_a[j];
-                let ob = self.ops_b[j];
-                let g = pf.cargs[f.p as usize + j];
-                if g == NONE {
-                    if oa != ob {
-                        return false;
-                    }
-                } else if g >= i || !same_pair(pair(pf.facts[g as usize].a, pf.facts[g as usize].b), oa, ob) {
+            // Each operand joins the other's at its place, or for two operands of an operation that
+            // commutes, at the other place.
+            let n = self.ops_a.len();
+            for swap in 0..2u32 {
+                if swap == 1 && (n != 2 || !commutes(x.op)) {
                     return false;
+                }
+                let mut ok = true;
+                for j in 0..n {
+                    let oa = self.ops_a[j];
+                    let ob = self.ops_b[pick(swap == 1, n - 1 - j, j)];
+                    let g = pf.cargs[f.p as usize + j];
+                    if g == NONE {
+                        ok = ok && oa == ob;
+                    } else {
+                        ok = ok && g < i && same_pair(pair(pf.facts[g as usize].a, pf.facts[g as usize].b), oa, ob);
+                    }
+                }
+                if ok {
+                    break;
                 }
             }
             return true;
@@ -794,14 +804,19 @@ extend<const B: usize> Kernel<B> {
             if r.i as usize >= tm.ts.len() || !tm.is_int(r.i) {
                 return false;
             }
-            switch tm.bounds(r.i) {
-                Some((lo, hi)) => {
+            let b = if r.kind == RW_LO {
+                tm.low(r.i)
+            } else {
+                tm.high(r.i)
+            };
+            switch b {
+                Some(v) => {
                     if r.kind == RW_LO {
                         self.row.push(LinTerm::<B> { c: wide::<B>(-1), atom: r.i });
-                        *k = lo;
+                        *k = v;
                     } else {
                         self.row.push(LinTerm::<B> { c: Num::<B>::one(), atom: r.i });
-                        *k = Num::<B>::zero() - hi;
+                        *k = Num::<B>::zero() - v;
                     }
                     return true;
                 },
@@ -919,14 +934,13 @@ extend<const B: usize> Kernel<B> {
         let mut hi = Num::<B>::zero();
         let mut hl = false;
         let mut hh = false;
-        switch tm.bounds(y) {
-            Some((l, h)) => {
-                lo = l;
-                hi = h;
-                hl = true;
-                hh = true;
-            },
-            None => {},
+        if let Some(l) = tm.low(y) {
+            lo = l;
+            hl = true;
+        }
+        if let Some(h) = tm.high(y) {
+            hi = h;
+            hh = true;
         }
         for j in 0..depth {
             let m = self.path[j];

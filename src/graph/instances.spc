@@ -3765,10 +3765,9 @@ extend InstGraph {
                 let nid = unsafe a.list(items)[i as usize];
                 let n = a.at_const(nid);
                 if n.kind == NodeKind::NODE_FUNCTION {
-                    if a.ext(nid).function.generics.len == 0 && !a.ext(nid).function.is_extern() && a.ext(nid).function.body != NODE_NONE && self.seeds(
-                        m,
+                    if a.ext(nid).function.generics.len == 0 && !a.ext(nid).function.is_extern() && !a.ext(nid).function.is_ghost() && a.ext(
                         nid,
-                    ) {
+                    ).function.body != NODE_NONE && self.seeds(m, nid) {
                         let u0 = self.enter(U_FN | m as u64 << 32 | nid as u64);
                         self.seed_body(m as ModuleId, nid, a, &empty);
                         self.cur_unit = u0;
@@ -3782,10 +3781,9 @@ extend InstGraph {
                     for j in 0..inner.len {
                         let iid = unsafe a.list(inner)[j as usize];
                         let it = a.at_const(iid);
-                        if it.kind == NodeKind::NODE_FUNCTION && a.ext(iid).function.body != NODE_NONE && a.ext(iid).function.generics.len == 0 && self.seeds(
-                            m,
+                        if it.kind == NodeKind::NODE_FUNCTION && a.ext(iid).function.body != NODE_NONE && a.ext(iid).function.generics.len == 0 && !a.ext(
                             iid,
-                        ) {
+                        ).function.is_ghost() && self.seeds(m, iid) {
                             let u0 = self.enter(U_FN | m as u64 << 32 | iid as u64);
                             self.seed_body(m as ModuleId, iid, a, &empty);
                             self.cur_unit = u0;

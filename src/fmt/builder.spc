@@ -1693,7 +1693,18 @@ extend Builder {
                 }
             },
             NODE_BLOCK => {
-                self.st.push(self.b_block(id));
+                // `assert P by { .. };`: the block owns the clause.
+                let (cs, ce) = unsafe (*self.ast).contracts_of(id);
+                if ce > cs {
+                    let c = *unsafe (*self.ast).contracts.at(cs as usize);
+                    self.st.push(self.p.txt("assert "));
+                    self.st.push(self.b_cond(c.expr));
+                    self.st.push(self.p.txt(" by "));
+                    self.st.push(self.b_block(id));
+                    self.st.push(self.p.txt(";"));
+                } else {
+                    self.st.push(self.b_block(id));
+                }
             },
             NODE_CONST | NODE_STATIC_ASSERT => {
                 self.st.push(self.b_item(id));
@@ -1945,7 +1956,10 @@ extend Builder {
                 if f.is_const() {
                     self.st.push(self.p.txt("const "));
                 }
-                self.st.push(self.p.txt("fn "));
+                if f.is_spec() {
+                    self.st.push(self.p.txt("spec "));
+                }
+                self.st.push(self.p.txt(pick(f.is_lemma(), "lemma ", "fn ")));
                 self.st.push(self.node_text(f.name));
                 self.b_generics_lt(unsafe (*self.ast).lifetimes_of(id), f.generics);
                 let ps = self.st.len();

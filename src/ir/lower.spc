@@ -185,6 +185,7 @@ pub(package) struct Lowerer {
     in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
     free_mask: bool, // a `Free::free` body that can accept a cancellation: it runs masked
     contract_fn: NodeId, // the function whose `ensures` clauses each return checks, NODE_NONE: none
+    ghost_fn: bool, // the body is a spec function's or a lemma's: its lemma calls are plain calls
     // The clean nodes of the open root (`chk_nodes[chk_base..]`, see `chk_open`): the calls among
     // them may carry a cancellation check. Any other call is evaluated with pending sibling
     // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
@@ -433,6 +434,7 @@ extend Lowerer {
             in_defer: 0,
             free_mask: false,
             contract_fn: NODE_NONE,
+            ghost_fn: false,
             chk_nodes: Vector::<NodeId>::new(),
             chk_base: 0,
             chk_lbase: 0,
@@ -551,6 +553,7 @@ extend Lowerer {
         self.in_defer = 0;
         self.free_mask = false;
         self.contract_fn = NODE_NONE;
+        self.ghost_fn = false;
         self.chk_nodes.truncate(0);
         self.chk_base = 0;
         self.chk_lbase = 0;
@@ -1269,6 +1272,7 @@ extend Lowerer {
         self.begin_body(fnode);
         let fd = self.f.ext(fnode).function;
         self.body.is_generic = fd.generics.len != 0;
+        self.ghost_fn = fd.is_ghost();
         let sp = self.f.node(fnode).span;
         // Return slots first (locals [0, returns)), then arguments -- a fixed layout the verifier
         // and printer rely on.
@@ -1509,20 +1513,18 @@ extend Lowerer {
         }
         let k = self.f.node(id).kind;
         if k == NodeKind::NODE_BLOCK {
-            self.tp(ir::TP_SCOPE_PUSH, 0, id);
-            self.scope_enter();
-            let stmts = self.f.node(id).as_data.block.statements;
-            for i in 0..stmts.len {
-                self.lower_stmt(unsafe self.f.list(stmts)[i as usize]);
-                if self.err.len() != 0 {
-                    return;
-                }
-                self.tp(ir::TP_NLL, i, id);
+            let (cs, ce) = unsafe (&*self.f.ast).contracts_of(id);
+            if ce > cs {
+                self.lower_ghost_site(id, CT_ASSERT, cs);
+            } else {
+                self.lower_block(id);
             }
-            self.tp(ir::TP_SCOPE_POP, 0, id);
-            self.scope_exit();
         } else if k == NodeKind::NODE_LET {
             self.lower_let(id);
+        } else if k == NodeKind::NODE_EXPRESSION_STATEMENT && !self.ghost_fn && self.lemma_call(
+            self.f.node(id).as_data.single.value,
+        ) {
+            self.lower_ghost_site(id, CT_GHOST, u32::MAX);
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
             self.tp(ir::TP_MARK_PUSH, 0, id);
@@ -1718,6 +1720,94 @@ extend Lowerer {
             }
         }
         self.tp(ir::TP_LET, 0, id);
+    }
+
+    fn lower_block(self: &mut Self, id: NodeId) {
+        self.tp(ir::TP_SCOPE_PUSH, 0, id);
+        self.scope_enter();
+        let stmts = self.f.node(id).as_data.block.statements;
+        for i in 0..stmts.len {
+            self.lower_stmt(unsafe self.f.list(stmts)[i as usize]);
+            if self.err.len() != 0 {
+                return;
+            }
+            self.tp(ir::TP_NLL, i, id);
+        }
+        self.tp(ir::TP_SCOPE_POP, 0, id);
+        self.scope_exit();
+    }
+
+    // Whether expression `v` calls a lemma.
+    fn lemma_call(self: &Self, v: NodeId) bool {
+        if self.f.node(v).kind != NodeKind::NODE_CALL {
+            return false;
+        }
+        let d = switch self.f.call_info(v) {
+            Some(x) => DefId { module: ci_module(x), node: ci_decl(x) },
+            None => DefId { module: 0, node: NODE_NONE },
+        };
+        if d.node == NODE_NONE || Ast::in_body(d.node) || self.decl_kind(d) != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        return unsafe (&*(&*self.pkg).module_ast_const(d.module)).ext(d.node).function.is_lemma();
+    }
+
+    // Ghost code in place: `assert P by { B }` (`kind` CT_ASSERT, statement `id` the block B, `clause`
+    // its record), B then the check of P; or a lemma call statement `id` of a normal body (CT_GHOST, no
+    // record), the call then `true`. A contract site of its own, which every build skips.
+    fn lower_ghost_site(self: &mut Self, id: NodeId, kind: u32, clause: u32) {
+        let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
+        let sp = self.f.node(id).span;
+        let pred = self.cur;
+        let chain = self.open_block();
+        self.seal(ir::goto_term(chain, sp), chain);
+        let mut tm = ir::term0(ir::TM_ASSERT, sp);
+        if kind == CT_ASSERT {
+            self.lower_block(id);
+            if self.err.len() != 0 {
+                return;
+            }
+            let c = *unsafe (&*self.f.ast).contracts.at(clause as usize);
+            let csp = self.f.node(c.expr).span;
+            tm.span = tok::Span { start: c.at, end: csp.end };
+            self.tp(ir::TP_MARK_PUSH, 0, c.expr);
+            let cb = self.chk_open(c.expr, false);
+            tm.a = self.lower_loop_cond(c.expr, csp);
+            self.chk_close(cb);
+            self.tp(ir::TP_MARK_POP, 0, c.expr);
+        } else {
+            let v = self.f.node(id).as_data.single.value;
+            self.tp(ir::TP_MARK_PUSH, 0, id);
+            let cb = self.chk_open(v, true);
+            let op = self.lower_expr(v);
+            self.chk_close(cb);
+            self.tp(ir::TP_MARK_POP, 0, id);
+            if op != ir::IR_NONE {
+                let _ = self.own_temp(op, id);
+            }
+            tm.a = self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), 1, sp);
+        }
+        if self.err.len() != 0 || tm.a == ir::IR_NONE {
+            return;
+        }
+        let check = self.cur;
+        let cont = self.open_block();
+        tm.t0 = cont;
+        self.seal(tm, cont);
+        self.body.contract_blocks += (self.body.blocks.len() - b0) as u32;
+        self.body.contract_stmts += (self.body.statements.len() - s0) as u32;
+        self.body.contract_locals += (self.body.locals.len() - l0) as u32;
+        self.body.contracts.push(
+            ir::ContractSite {
+                pred: pred,
+                chain: chain,
+                check: check,
+                cont: cont,
+                clause: clause,
+                kind: kind,
+                value: ir::IR_NONE,
+            },
+        );
     }
 
     // The `kind` clauses of `owner` (a function or a loop), each as a contract check

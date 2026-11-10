@@ -22,6 +22,8 @@ pub(package) const NONE: u32 = 0xFFFFFFFF;
 // The steps of one term walk (linear forms) and the gcd loop (a Euclid over NUM_WIDE bits ends in under
 // 830).
 pub(package) const LIN_MAX: u32 = 4096;
+// The most products of atoms a product of sums expands into (`Terms::product`).
+const MUL_TERMS_MAX: usize = 16;
 const GCD_MAX: u32 = 900;
 
 // Term operations. Integers are exact (mathematical) values of their type; booleans are formulas.
@@ -62,6 +64,26 @@ pub(package) const T_VIEW: u8 = 30; // a view of array `a` of length k
 pub(package) const T_DOWN: u8 = 31; // `a` as its variant k
 pub(package) const T_ORD: u8 = 32; // the order of integers `a` and `b`: -1, 0 or 1 (a wide integer's `cmp`)
 
+// Whether an operand of operation `op` takes a product apart (`Terms::product`): a sum, a difference,
+// a negation or a product.
+const fn compound(op: u8) bool {
+    return op == T_ADD || op == T_SUB || op == T_NEG || op == T_MUL;
+}
+
+// Whether terms `x` and `y` are one operation (their operands aside): the same operation of the same
+// type, or the same sum, difference, product or negation, whose exact value no type changes.
+pub(package) const fn same_op<const B: usize>(x: &Term<B>, y: &Term<B>) bool {
+    let ring = x.op >= T_ADD && x.op <= T_NEG;
+    return x.op == y.op && x.k == y.k && (ring || x.w == y.w && x.sg == y.sg);
+}
+
+// Whether binary operation `op` gives the same value with its operands swapped: congruence then
+// pairs them either way (the index order of the operands of `x * y` and `y * x` is the order of
+// their own terms, which an equality between operands does not keep).
+pub(package) const fn commutes(op: u8) bool {
+    return op == T_ADD || op == T_MUL || op == T_BAND || op == T_BOR || op == T_BXOR || op == T_EQ || op == T_NE || op == T_AND || op == T_OR;
+}
+
 // Whether operation `op` keeps its operands in `Terms.args`.
 pub(package) const fn pooled(op: u8) bool {
     return op == T_CALL || op == T_AGG || op == T_UPD;
@@ -70,6 +92,15 @@ pub(package) const fn pooled(op: u8) bool {
 // `Term.w`: an integer's bit width; W_BOOL for a boolean; W_OTHER for any other value.
 pub(package) const W_OTHER: u16 = 0;
 pub(package) const W_BOOL: u16 = 1;
+// The widths of the exact integers of specifications: `nat` (at least 0) and `int`, without bounds.
+// No bits hold them (`Blaster::run`).
+pub(package) const W_NAT: u16 = 0xFFFE;
+pub(package) const W_INT: u16 = 0xFFFF;
+
+// Whether width `w` is `nat`'s or `int`'s.
+pub(package) const fn exact_w(w: u16) bool {
+    return w >= W_NAT;
+}
 
 pub(package) struct Term<const B: usize> {
     pub(package) k: Num<B>,
@@ -248,11 +279,136 @@ extend<const B: usize> Terms<B> {
         if op == T_ADD && x.op == T_INT && x.k.is_zero() {
             return b;
         }
+        if op == T_MUL && x.op != T_INT && y.op != T_INT && (compound(x.op) || compound(y.op)) {
+            let r = self.product(a, b, w, sg);
+            if r != NONE {
+                return r;
+            }
+        }
         // A commutative operation keeps its operands in index order, so `x + y` and `y + x` are one term.
         if a > b && (op == T_ADD || op == T_MUL || op == T_BAND || op == T_BOR || op == T_BXOR) {
             return self.make(Term::<B> { k: Num::<B>::zero(), a: b, b: a, op: op, w: w, sg: sg });
         }
         return self.make(Term::<B> { k: Num::<B>::zero(), a: a, b: b, op: op, w: w, sg: sg });
+    }
+
+    // `a * b` as a sum of products of atoms with constant coefficients, each product's factors in
+    // index order: `(x - 1) * y` is `x * y - y`, `x * (y * z)` is `(x * y) * z`. NONE past
+    // MUL_TERMS_MAX products or B-bit coefficients: the caller keeps the plain product.
+    fn product(self: &mut Self, a: u32, b: u32, w: u16, sg: bool) u32 {
+        let mut la = Vector::<LinTerm<B>>::new();
+        let mut lb = Vector::<LinTerm<B>>::new();
+        let mut st = Vector::<LinTerm<B>>::new();
+        let mut ka = Num::<B>::zero();
+        let mut kb = Num::<B>::zero();
+        if !lin_form(self, a, Num::<B>::one(), &mut ka, &mut la, &mut st) || !lin_form(
+            self,
+            b,
+            Num::<B>::one(),
+            &mut kb,
+            &mut lb,
+            &mut st,
+        ) {
+            return NONE;
+        }
+        let na = merge_terms(&mut la, 0, la.len());
+        la.truncate(na);
+        let nb = merge_terms(&mut lb, 0, lb.len());
+        lb.truncate(nb);
+        let ca = na + (!ka.is_zero()) as usize;
+        let cb = nb + (!kb.is_zero()) as usize;
+        if ca * cb > MUL_TERMS_MAX {
+            return NONE;
+        }
+        let mut out = Vector::<LinTerm<B>>::with_capacity(ca * cb);
+        for i in 0..na {
+            for j in 0..nb {
+                let m = self.monomial(la[i].atom, lb[j].atom, w, sg);
+                switch la[i].c.checked_mul(&lb[j].c) {
+                    Some(c) => out.push(LinTerm::<B> { c: c, atom: m }),
+                    None => {
+                        return NONE;
+                    },
+                }
+            }
+            if !kb.is_zero() {
+                switch la[i].c.checked_mul(&kb) {
+                    Some(c) => out.push(LinTerm::<B> { c: c, atom: la[i].atom }),
+                    None => {
+                        return NONE;
+                    },
+                }
+            }
+        }
+        if !ka.is_zero() {
+            for j in 0..nb {
+                switch lb[j].c.checked_mul(&ka) {
+                    Some(c) => out.push(LinTerm::<B> { c: c, atom: lb[j].atom }),
+                    None => {
+                        return NONE;
+                    },
+                }
+            }
+        }
+        let k = switch ka.checked_mul(&kb) {
+            Some(v) => v,
+            None => {
+                return NONE;
+            },
+        };
+        let n = merge_terms(&mut out, 0, out.len());
+        let mut r = self.int(k, w, sg);
+        for j in 0..n {
+            let e = out[j];
+            let neg = e.c.is_negative();
+            let m = switch mag(e.c) {
+                Some(v) => v,
+                None => {
+                    return NONE;
+                },
+            };
+            let t = if m == Num::<B>::one() {
+                e.atom
+            } else {
+                let c = self.int(m, w, sg);
+                self.arith(T_MUL, c, e.atom, w, sg)
+            };
+            r = self.arith(pick(neg, T_SUB, T_ADD), r, t, w, sg);
+        }
+        return r;
+    }
+
+    // The product of atoms `x` and `y` (each an atom or such a product): their factors in index order,
+    // nested from the left.
+    fn monomial(self: &mut Self, x: u32, y: u32, w: u16, sg: bool) u32 {
+        let mut fs = Vector::<u32>::new();
+        let mut st = Vector::<u32>::new();
+        st.push(x);
+        st.push(y);
+        for _s in 0..LIN_MAX {
+            if st.len() == 0 {
+                break;
+            }
+            let t = st.pop().unwrap();
+            let v = self.ts[t as usize];
+            if v.op == T_MUL && self.ts[v.a as usize].op != T_INT && self.ts[v.b as usize].op != T_INT {
+                st.push(v.a);
+                st.push(v.b);
+            } else {
+                fs.push(t);
+            }
+        }
+        fs.sort_stable_in_place();
+        let mut p = fs[0];
+        for j in 1..fs.len() {
+            let (l, r) = if p < fs[j] {
+                (p, fs[j])
+            } else {
+                (fs[j], p)
+            };
+            p = self.make(Term::<B> { k: Num::<B>::zero(), a: l, b: r, op: T_MUL, w: w, sg: sg });
+        }
+        return p;
     }
 
     pub(package) fn neg(self: &mut Self, a: u32, w: u16, sg: bool) u32 {
@@ -490,6 +646,13 @@ extend<const B: usize> Terms<B> {
     // Whether integer `t` is in its type's range, as a formula.
     pub(package) fn in_range(self: &mut Self, t: u32) u32 {
         let x = self.ts[t as usize];
+        if exact_w(x.w) {
+            if x.w == W_INT {
+                return self.boolean(true);
+            }
+            let z = self.int(Num::<B>::zero(), x.w, x.sg);
+            return self.cmp(T_LE, z, t);
+        }
         let (lo, hi) = Terms::<B>::range(x.w, x.sg);
         let l = self.int(lo, x.w, x.sg);
         let h = self.int(hi, x.w, x.sg);
@@ -504,7 +667,7 @@ extend<const B: usize> Terms<B> {
     // products of its operands' ranges, None when one leaves B bits or an operand is such a product.
     pub(package) fn bounds(self: &Self, t: u32) Option<(Num<B>, Num<B>)> {
         let x = self.ts[t as usize];
-        if x.w <= W_BOOL {
+        if x.w <= W_BOOL || exact_w(x.w) {
             return None;
         }
         if x.op == T_ORD {
@@ -513,7 +676,7 @@ extend<const B: usize> Terms<B> {
         if x.op == T_MUL {
             let p = self.ts[x.a as usize];
             let q = self.ts[x.b as usize];
-            if p.w <= W_BOOL || q.w <= W_BOOL || p.op == T_MUL || q.op == T_MUL {
+            if p.w <= W_BOOL || q.w <= W_BOOL || exact_w(p.w) || exact_w(q.w) || p.op == T_MUL || q.op == T_MUL {
                 return None;
             }
             let (pl, ph) = Terms::<B>::range(p.w, p.sg);
@@ -551,6 +714,25 @@ extend<const B: usize> Terms<B> {
             }
         }
         return Some((lo, hi));
+    }
+
+    // The least value of atom `t`: its bounds' (`bounds`), 0 for a `nat`, None where it has none.
+    pub(package) fn low(self: &Self, t: u32) Option<Num<B>> {
+        if self.ts[t as usize].w == W_NAT {
+            return Some(Num::<B>::zero());
+        }
+        return switch self.bounds(t) {
+            Some((l, _h)) => Some(l),
+            None => None,
+        };
+    }
+
+    // The greatest value of atom `t` (`bounds`), None where it has none.
+    pub(package) fn high(self: &Self, t: u32) Option<Num<B>> {
+        return switch self.bounds(t) {
+            Some((_l, h)) => Some(h),
+            None => None,
+        };
     }
 
     // The operands of term `t` that are terms, in order, into `out` (cleared first).

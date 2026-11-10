@@ -263,7 +263,17 @@ modular return-lifetime check) run alongside.
   have no model (`covered`): the case split is checked. Over domains of at most 65536 values the obligation is decided
   by enumeration with an exact evaluator (`Eval`), which also confirms a counterexample; the
   simplex's integer model or the bits' model seeds its candidates. A conformance's method walks again
-  from its interface's `requires` (`refine`). Every walk, search and elimination has a fixed budget;
+  from its interface's `requires` (`refine`). Ghost code (language skill, basics.md, Ghost Code):
+  in a spec function, a lemma and a ghost site every check is an obligation (`check_fact`), a ghost
+  site is walked as code, recursion and loops there need measures (`loops_end`), and a callee's
+  `ensures` holds there only for a callee that ends (`total`). `int` and `nat` terms have the exact
+  widths `W_INT` and `W_NAT` (no upper bound; never bit-blasted). Each spec call term gets its
+  definition once (`define`: the spec body walked without obligations, one disjunction over its
+  paths to a return, guarded by its `requires`), anchored on the call and added to an obligation
+  whose terms reach it (`add_defs`). A product is distributed over sums with its factors ordered
+  (`Terms::product`); a hypothesis's split and the goal's integer disequality wait until the
+  branch's other formulas are done, and the theories first try the literals so far. Every walk,
+  search and elimination has a fixed budget;
   over one is not proved. The prover is generic over its numbers' width (`Prover<B>`,
   `terms::Num<B>`): a body proves with 256-bit numbers, or with 576-bit ones when a local's integer
   type is wider than 192 bits (`needs_wide`; `int_limit(B)` is the widest type a width reads, 512

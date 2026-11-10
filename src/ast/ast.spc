@@ -157,6 +157,10 @@ pub(package) const CT_REQUIRES: u32 = 0;
 pub(package) const CT_ENSURES: u32 = 1;
 pub(package) const CT_DECREASES: u32 = 2;
 pub(package) const CT_INVARIANT: u32 = 3;
+// `assert P by { B }`: the record's owner is block B, its expression P.
+pub(package) const CT_ASSERT: u32 = 4;
+// A lemma call statement in a normal body: a Core site only (no record), the call then `true`.
+pub(package) const CT_GHOST: u32 = 5;
 
 /// The keyword of a contract clause of kind `k` (`CT_*`).
 pub(package) const fn contract_word(k: u32) str<'static> {
@@ -168,6 +172,8 @@ pub(package) const fn contract_word(k: u32) str<'static> {
     }
     return if k == CT_DECREASES {
         "decreases"
+    } else if k == CT_ASSERT {
+        "assert"
     } else {
         "invariant"
     };
@@ -617,12 +623,14 @@ pub(package) const fn vis_text(vis: u8) str<'static> {
 }
 
 static_assert(sizeof(Node) == 32, "Node must stay 32 bytes");
+pub(package) const FN_SPEC: u8 = 1; // `spec fn`: a function of specifications, never emitted
 pub(package) const FN_EXTERN: u8 = 2;
 pub(package) const FN_VARIADIC: u8 = 4;
 pub(package) const FN_CONST: u8 = 8; // `const fn`: must evaluate at compile time when its arguments are known
 pub(package) const FN_UNSAFE: u8 = 16; // `unsafe fn`: calls require an unsafe context (like extern "C" fns)
 pub(package) const FN_INTRINSIC: u8 = 32; // `@intrinsic("name")`: a call lowers to the operation it names; the body is an empty block in its place
 pub(package) const FN_FEATURES: u8 = 64; // `@target_feature` or `@simd_impl`: a call needs the build to have the features
+pub(package) const FN_LEMMA: u8 = 128; // `lemma`: a proof, never emitted; a call applies its contract
 
 extend FunctionData {
     pub(package) const fn is_extern(self: &Self) bool {
@@ -647,6 +655,19 @@ extend FunctionData {
 
     pub(package) const fn is_intrinsic(self: &Self) bool {
         return (self.flags & FN_INTRINSIC) != 0;
+    }
+
+    pub(package) const fn is_spec(self: &Self) bool {
+        return (self.flags & FN_SPEC) != 0;
+    }
+
+    pub(package) const fn is_lemma(self: &Self) bool {
+        return (self.flags & FN_LEMMA) != 0;
+    }
+
+    /// A spec function or a lemma: ghost code, which no build emits.
+    pub(package) const fn is_ghost(self: &Self) bool {
+        return (self.flags & (FN_SPEC | FN_LEMMA)) != 0;
     }
 
     /// Set or clear the FN_* bit `bit`.
@@ -794,6 +815,8 @@ pub(package) const fn bt_name(b: BuiltinType) str<'static> {
         BT_F64 => "f64",
         BT_C32 => "c32",
         BT_C64 => "c64",
+        BT_INT => "int",
+        BT_NAT => "nat",
         BT_VALIST => "va_list",
         _ => "void",
     };
@@ -1149,7 +1172,7 @@ pub(package) const TYPE_NONE: TypeId = 0;
 /// equal to TYPE_NONE ("no type yet", "no expectation"). Compatibility and inference accept it
 /// silently, and a type built over it is itself TYPE_ERROR, so one diagnostic stands for one
 /// root error. It exists only in a module whose check reported an error.
-pub(package) const TYPE_ERROR: TypeId = 19;
+pub(package) const TYPE_ERROR: TypeId = BuiltinType::BT_COUNT as TypeId + 1;
 
 /// Whether instance-table record `it` holds TYPE_ERROR (an instance, dyn or signature over a
 /// rejected type is itself rejected).
@@ -1179,6 +1202,9 @@ pub(package) enum BuiltinType {
     BT_F64,
     BT_C32,
     BT_C64,
+    // The exact integers of specifications (`int`, and `nat` at least 0): only ghost code names them.
+    BT_INT,
+    BT_NAT,
     BT_VALIST,
     BT_VOID,
     BT_COUNT,
@@ -1496,6 +1522,9 @@ pub(package) fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String 
 /// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
 /// other type.
 pub(package) const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
+    if bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT {
+        return bt == BuiltinType::BT_INT || !v.is_negative();
+    }
     let w = bt_int_width(bt, ptr32);
     if w == 0 {
         return false;
@@ -1513,8 +1542,18 @@ pub(package) const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
     return lo << sh >> sh == lo;
 }
 
-/// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`).
+/// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`);
+/// for `int` and `nat`, which have no bounds, those of `i128` (`nat` from 0).
 pub(package) const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
+    if bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT {
+        *hi = i128::max();
+        *lo = if bt == BuiltinType::BT_INT {
+            i128::min()
+        } else {
+            i128::zero()
+        };
+        return;
+    }
     let w = bt_int_width(bt, ptr32) as u64;
     if bt_is_unsigned(bt) {
         let mut m = i128::zero();

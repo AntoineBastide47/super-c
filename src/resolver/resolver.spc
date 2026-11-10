@@ -49,6 +49,9 @@ pub(package) struct Resolver<'a> {
     pub(package) symbol_index: Map<u64, u32>, // (namespace, name hash) -> newest matching symbol index + 1
     pub(package) current_self: DefId, // decl 'Self' refers to inside the current interface/extension
     pub(package) cur_fn: NodeId, // the function whose body is being resolved (NODE_NONE: none)
+    // The depth of ghost code around the name under resolution: a spec function or a lemma, a contract
+    // clause, an `assert .. by` block. Only ghost code names `int` and `nat`.
+    ghost: u32,
     // The type aliases of the open interface/extend blocks, innermost from `self_aliases_start`, for the
     // `Self::Assoc` projection.
     pub(package) self_aliases: Vector<NodeId>,
@@ -181,6 +184,7 @@ extend Resolver {
             symbol_index: Map::<u64, u32>::new(),
             current_self: DefId { module: 0, node: NODE_NONE },
             cur_fn: NODE_NONE,
+            ghost: 0,
             self_aliases: Vector::<NodeId>::new(),
             self_aliases_start: 0,
             closures: Vector::<ClosureScope>::new(),
@@ -808,9 +812,38 @@ extend Resolver {
         self.ast.set_resolution(refn, decl);
     }
 
+    // Whether resolved callee `c` names a lemma.
+    fn is_lemma(self: &Self, c: NodeId) bool {
+        let d = self.ast.resolution_def(c);
+        if d.node == NODE_NONE {
+            let n = self.ast.resolution(c);
+            return n != NODE_NONE && self.ast.at_const(n).kind == NodeKind::NODE_FUNCTION && self.ast.ext(n).function.is_lemma();
+        }
+        if self.package == null || Ast::in_body(d.node) || d.module as usize >= unsafe (&*self.package).modules.len() || !unsafe (&*self.package).modules.at(
+            d.module as usize,
+        ).has_ast {
+            return false;
+        }
+        let a = unsafe &*(&*self.package).module_ast_const(d.module);
+        return a.at_const(d.node).kind == NodeKind::NODE_FUNCTION && a.ext(d.node).function.is_lemma();
+    }
+
     // A name that missed the scope stack: builtin types, then the prelude/glob fallback, else an error.
     fn resolve_ref_miss(self: &mut Self, refn: NodeId, name: tok::Span, ns: Namespace, kind: str) {
         if ns == Namespace::NS_TYPE && is_builtin_type(self.source, name) {
+            if self.ghost == 0 && (span_is(self.source, name, "int") || span_is(self.source, name, "nat")) {
+                self.errors.emit_span(
+                    dc::SPEC_TYPE_OUTSIDE_GHOST,
+                    name,
+                    format(
+                        "'{}' is a specification type: only ghost code can name it",
+                        diag::span_str(self.source, name.start, name.end),
+                    ),
+                );
+                self.errors.note(
+                    format("ghost code: a 'spec fn', a 'lemma', a contract clause, an 'assert .. by' block"),
+                );
+            }
             return;
         }
         // Unqualified fallback: this module's glob imports, then the std prelude (an imported name
@@ -1264,6 +1297,8 @@ extend Resolver {
 
     fn resolve_function(self: &mut Self, id: NodeId) {
         let fd = self.ast.ext(id).function;
+        let g = fd.is_ghost() as u32;
+        self.ghost += g;
         self.scope_enter();
         let lt_mark = self.declare_lifetimes(id);
         self.declare_generics(fd.generics);
@@ -1298,6 +1333,7 @@ extend Resolver {
         self.cur_fn = outer;
         self.lt_owners.truncate(lt_mark as usize);
         self.scope_exit();
+        self.ghost -= g;
     }
 
     fn resolve_type_alias(self: &mut Self, id: NodeId) {
@@ -1525,6 +1561,7 @@ extend Resolver {
     // binder is in scope in its own clause only.
     fn resolve_contracts(self: &mut Self, owner: NodeId) {
         let (cs, ce) = self.ast.contracts_of(owner);
+        self.ghost += 1;
         for i in cs..ce {
             let c = *self.ast.contracts.at(i as usize);
             if c.binder != NODE_NONE {
@@ -1536,6 +1573,7 @@ extend Resolver {
                 self.resolve_expr(c.expr);
             }
         }
+        self.ghost -= 1;
     }
 
     fn resolve_block_stmts(self: &mut Self, id: NodeId) {
@@ -1553,7 +1591,13 @@ extend Resolver {
         let kind = self.ast.at_const(id).kind;
         switch kind {
             NODE_BLOCK => {
+                // `assert P by { .. }`: a ghost block, then P in its enclosing scope.
+                let (cs, ce) = self.ast.contracts_of(id);
+                let g = (ce > cs) as u32;
+                self.ghost += g;
                 self.resolve_block(id);
+                self.ghost -= g;
+                self.resolve_contracts(id);
             },
             NODE_LET => {
                 let ld = unsafe self.ast.at_const(id).as_data.let_stmt;
@@ -1746,10 +1790,14 @@ extend Resolver {
                 } else {
                     self.resolve_expr(cd.callee);
                 }
+                // A lemma's arguments are ghost code.
+                let g = self.is_lemma(cd.callee) as u32;
+                self.ghost += g;
                 for i in 0..cd.args.len {
                     let a = self.child(cd.args, i);
                     self.resolve_expr(a);
                 }
+                self.ghost -= g;
             },
             NODE_INDEX => {
                 let ix = self.ast.at_const(id).as_data.index;

@@ -276,30 +276,23 @@ extend<const B: usize> Lp<B> {
         self.tab.clear();
         for j in 0..self.na {
             let t = self.atom[j];
-            switch tm.bounds(t) {
-                Some((l, h)) => {
-                    self.lo.push(l);
-                    self.hi.push(h);
-                    self.has_lo.push(true);
-                    self.has_hi.push(true);
-                    // A start inside the bounds, as near 0 as they allow.
-                    let v = if Num::<B>::zero() < l {
-                        l
-                    } else if h.is_negative() {
-                        h
-                    } else {
-                        Num::<B>::zero()
-                    };
-                    self.val.push(q_int(v));
-                },
-                None => {
-                    self.lo.push(Num::<B>::zero());
-                    self.hi.push(Num::<B>::zero());
-                    self.has_lo.push(false);
-                    self.has_hi.push(false);
-                    self.val.push(q_int(Num::<B>::zero()));
-                },
-            }
+            let lo = tm.low(t);
+            let hi = tm.high(t);
+            let l = lo.unwrap_or(Num::<B>::zero());
+            let h = hi.unwrap_or(Num::<B>::zero());
+            self.lo.push(l);
+            self.hi.push(h);
+            self.has_lo.push(lo.is_some());
+            self.has_hi.push(hi.is_some());
+            // A start inside the bounds, as near 0 as they allow.
+            let v = if lo.is_some() && Num::<B>::zero() < l {
+                l
+            } else if hi.is_some() && h.is_negative() {
+                h
+            } else {
+                Num::<B>::zero()
+            };
+            self.val.push(q_int(v));
             self.lo_r.push(RowRef { i: t, kind: RW_LO });
             self.hi_r.push(RowRef { i: t, kind: RW_HI });
             self.row_of.push(NONE);
@@ -634,11 +627,15 @@ struct Edge {
 struct Branch {
     todo: Vector<u64>,
     lits: Vector<u64>,
+    // The formulas that split the branch, put off until the theories fail without them (`close`), and
+    // the literal count of the last such attempt.
+    split: Vector<u64>,
+    tried: usize,
 }
 
 extend Branch {
     fn copy(self: &Self) Branch {
-        return Branch { todo: self.todo.clone(), lits: self.lits.clone() };
+        return Branch { todo: self.todo.clone(), lits: self.lits.clone(), split: self.split.clone(), tried: self.tried };
     }
 }
 
@@ -781,11 +778,17 @@ extend<const B: usize> Solver<B> {
             }
         }
         self.kn.begin();
-        let mut b0 = Branch { todo: Vector::<u64>::new(), lits: Vector::<u64>::new() };
+        let mut b0 = Branch {
+            todo: Vector::<u64>::new(),
+            lits: Vector::<u64>::new(),
+            split: Vector::<u64>::new(),
+            tried: 0,
+        };
+        // Each formula to do: its term, whether the goal's (2), its polarity (1).
         for j in 0..hyps.len() {
-            b0.todo.push(hyps[j] as u64 << 1 | 1);
+            b0.todo.push(hyps[j] as u64 << 2 | 1);
         }
-        b0.todo.push(goal as u64 << 1);
+        b0.todo.push(goal as u64 << 2 | 2);
         let mut open = Vector::<Branch>::new();
         open.push(b0);
         let mut splits: u32 = 0;
@@ -794,7 +797,7 @@ extend<const B: usize> Solver<B> {
                 return self.kn.seal(tm, hyps, goal) && self.covered();
             }
             let mut br = open.pop().unwrap();
-            switch self.close(tm, &mut br, &mut open, &mut splits) {
+            switch self.close(tm, &mut br, &mut open, &mut splits, bits) {
                 Some(closed) => {
                     if !closed && !self.lemma(tm, &br.lits, bits) {
                         return false;
@@ -812,6 +815,11 @@ extend<const B: usize> Solver<B> {
     // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
     // when they hold a bit operation; then the theory solvers.
     fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, bits: bool) bool {
+        return self.lemma_with(tm, lits, bits, true);
+    }
+
+    // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
+    fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, bits: bool, guess: bool) bool {
         let mut sub = Vector::<u64>::new();
         if bits && Solver::<B>::has_bits(tm, lits) {
             self.cone(tm, lits, &mut sub);
@@ -834,7 +842,7 @@ extend<const B: usize> Solver<B> {
                 return false;
             },
         };
-        return self.refute(tm, built.get()) && self.kn.lemma(tm, built, &self.pf);
+        return self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf);
     }
 
     // Whether the skeleton and the lemmas have no model, by a proof the kernel accepts.
@@ -974,33 +982,63 @@ extend<const B: usize> Solver<B> {
     // Split the formulas of `br` until none is left: Some(true) when a contradiction of its boolean
     // literals closed it, Some(false) when its theory literals remain to refute, None past the split
     // bound.
-    fn close(self: &mut Self, tm: &Terms<B>, br: &mut Branch, open: &mut Vector<Branch>, splits: &mut u32) Option<bool> {
+    fn close(self: &mut Self, tm: &Terms<B>, br: &mut Branch, open: &mut Vector<Branch>, splits: &mut u32, bits: bool) Option<
+        bool
+    > {
         for _s in 0..LIN_MAX {
+            let mut deferred = false;
             if br.todo.len() == 0 {
-                return Some(false);
+                if br.split.len() == 0 {
+                    return Some(false);
+                }
+                // The literals so far may conflict already: then no split is needed. Only a hypothesis's
+                // split makes the attempt: without one the literals are the hypotheses', which have a
+                // model. The model's guesses wait for the leaves.
+                let mut hyp = false;
+                for j in 0..br.split.len() {
+                    hyp = hyp || (br.split[j] & 2) == 0;
+                }
+                if hyp && br.lits.len() > br.tried {
+                    br.tried = br.lits.len();
+                    if self.lemma_with(tm, &br.lits, bits, false) {
+                        return Some(true);
+                    }
+                }
+                br.todo.push(br.split.pop().unwrap());
+                deferred = true;
             }
             let e = br.todo.pop().unwrap();
-            let t = (e >> 1) as u32;
+            let t = (e >> 2) as u32;
+            let g = e & 2;
             let pos = (e & 1) != 0;
             let x = tm.at(t);
+            let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
+                x.a,
+            ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
+            // The goal's own cases split at once: its literals are what the hypotheses' cases close
+            // against.
+            if splitting && !deferred && !(g != 0 && (x.op == T_AND || x.op == T_OR)) {
+                br.split.push(e);
+                continue;
+            }
             if x.op == T_BOOL {
                 if x.k == wide::<B>(1) != pos {
                     return Some(true);
                 }
             } else if x.op == T_NOT {
-                br.todo.push(x.a as u64 << 1 | (!pos) as u64);
+                br.todo.push(x.a as u64 << 2 | g | (!pos) as u64);
             } else if x.op == T_AND && pos || x.op == T_OR && !pos {
-                br.todo.push(x.a as u64 << 1 | pos as u64);
-                br.todo.push(x.b as u64 << 1 | pos as u64);
+                br.todo.push(x.a as u64 << 2 | g | pos as u64);
+                br.todo.push(x.b as u64 << 2 | g | pos as u64);
             } else if x.op == T_AND || x.op == T_OR {
                 *splits += 1;
                 if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
                     return None;
                 }
                 let mut other = br.copy();
-                other.todo.push(x.b as u64 << 1 | pos as u64);
+                other.todo.push(x.b as u64 << 2 | g | pos as u64);
                 open.push(other);
-                br.todo.push(x.a as u64 << 1 | pos as u64);
+                br.todo.push(x.a as u64 << 2 | g | pos as u64);
             } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) && x.op == T_EQ != pos {
                 // A disequality of integers: one of its orders.
                 *splits += 1;
@@ -1019,11 +1057,11 @@ extend<const B: usize> Solver<B> {
                 }
                 let same = x.op == T_EQ == pos;
                 let mut other = br.copy();
-                other.todo.push(x.a as u64 << 1);
-                other.todo.push(x.b as u64 << 1 | (!same) as u64);
+                other.todo.push(x.a as u64 << 2 | g);
+                other.todo.push(x.b as u64 << 2 | g | (!same) as u64);
                 open.push(other);
-                br.todo.push(x.a as u64 << 1 | 1);
-                br.todo.push(x.b as u64 << 1 | same as u64);
+                br.todo.push(x.a as u64 << 2 | g | 1);
+                br.todo.push(x.b as u64 << 2 | g | same as u64);
             } else {
                 // An atom: closes against its own negation.
                 let want = tlit(t, SEL_ATOM, !pos);
@@ -1040,7 +1078,7 @@ extend<const B: usize> Solver<B> {
 
     // Whether the theory solvers refute what branch `st` states; the proof is in `pf`, for the kernel.
     // When they do not, an integer model they found is kept (`model`).
-    fn refute(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) bool {
+    fn refute(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, guess: bool) bool {
         if st.rows.len() == 0 && st.eqs.len() == 0 {
             return false;
         }
@@ -1050,6 +1088,23 @@ extend<const B: usize> Solver<B> {
         self.ratoms.clear();
         for j in 0..st.pool.len() {
             self.ratoms.insert(st.pool[j].atom, true);
+        }
+        // The atoms of a product's operands too: an equality that fixes one (`a == 0`) reaches the
+        // simplex, which then fixes the product (`fix`).
+        for j in 0..st.pool.len() {
+            let x = tm.at(st.pool[j].atom);
+            if x.op != T_MUL || tm.at(x.a).op == T_INT || tm.at(x.b).op == T_INT {
+                continue;
+            }
+            for side in 0..2 {
+                self.lin.clear();
+                let mut k = Num::<B>::zero();
+                if lin_form(tm, pick(side == 0, x.a, x.b), Num::<B>::one(), &mut k, &mut self.lin, &mut self.stack) {
+                    for q in 0..self.lin.len() {
+                        self.ratoms.insert(self.lin[q].atom, true);
+                    }
+                }
+            }
         }
         self.eqf.clear();
         self.eqk.clear();
@@ -1097,33 +1152,45 @@ extend<const B: usize> Solver<B> {
             if !self.cc_on && !self.cc_build(tm, st) {
                 return false;
             }
-            let mut merged = false;
+            // The congruences the build found merge too.
+            let mut merged = self.pend.len() != 0;
             let mut cands = Vector::<u64>::new();
-            if !self.suggest(tm, &mut cands) {
+            let mut sure = Vector::<bool>::new();
+            if !self.suggest(tm, &mut cands, &mut sure) {
                 return false;
             }
-            for c in 0..cands.len() {
-                if tests >= TESTS_MAX {
+            // The pairs of one linear form first: the model's guesses only when those merge nothing.
+            for pass in 0..2u32 {
+                if pass == 1 && (merged || !guess) {
                     break;
                 }
-                tests += 1;
-                let u = (cands[c] >> 32) as u32;
-                let v = cands[c] as u32;
-                if self.rep[u as usize] == self.rep[v as usize] {
-                    continue;
+                for k in 0..cands.len() {
+                    if sure[k] != (pass == 0) || self.tested.contains_key(&cands[k]) {
+                        continue;
+                    }
+                    if tests >= TESTS_MAX {
+                        break;
+                    }
+                    tests += 1;
+                    self.tested.insert(cands[k], true);
+                    let u = (cands[k] >> 32) as u32;
+                    let v = cands[k] as u32;
+                    if self.rep[u as usize] == self.rep[v as usize] {
+                        continue;
+                    }
+                    let a = self.cc_term[u as usize];
+                    let b = self.cc_term[v as usize];
+                    let t1 = self.implied(tm, st, a, b);
+                    if t1 == NONE {
+                        continue;
+                    }
+                    let t2 = self.implied(tm, st, b, a);
+                    if t2 == NONE {
+                        continue;
+                    }
+                    self.pend.push(Edge { u: u, v: v, p: t1, q: t2, kind: E_ARITH });
+                    merged = true;
                 }
-                let a = self.cc_term[u as usize];
-                let b = self.cc_term[v as usize];
-                let t1 = self.implied(tm, st, a, b);
-                if t1 == NONE {
-                    continue;
-                }
-                let t2 = self.implied(tm, st, b, a);
-                if t2 == NONE {
-                    continue;
-                }
-                self.pend.push(Edge { u: u, v: v, p: t1, q: t2, kind: E_ARITH });
-                merged = true;
             }
             if !merged {
                 return false;
@@ -1616,29 +1683,30 @@ extend<const B: usize> Solver<B> {
             if x.op != T_MUL || tm.at(x.a).op == T_INT || tm.at(x.b).op == T_INT {
                 continue;
             }
-            let va = switch self.lp_value(tm, x.a) {
-                Some(v) => v,
-                None => {
-                    continue;
-                },
+            // An operand at 0 makes the product 0, whatever the other's value.
+            let oa = self.lp_value(tm, x.a);
+            let ob = self.lp_value(tm, x.b);
+            let za = oa.is_some() && oa.unwrap().is_zero();
+            let zb = ob.is_some() && ob.unwrap().is_zero();
+            if (oa.is_none() || ob.is_none()) && !za && !zb {
+                continue;
+            }
+            let vb = ob.unwrap_or(Num::<B>::zero());
+            let m = if za || zb {
+                Some(Num::<B>::zero())
+            } else {
+                oa.unwrap().checked_mul(&vb)
             };
-            let vb = switch self.lp_value(tm, x.b) {
-                Some(v) => v,
-                None => {
-                    continue;
-                },
-            };
-            switch va.checked_mul(&vb) {
-                Some(m) => {
-                    if m == self.lp.val[a].n {
-                        continue;
-                    }
-                },
-                None => {},
+            if m.is_some() && m.unwrap() == self.lp.val[a].n {
+                continue;
             }
             for side in 0..2u32 {
                 let o = 1 - side;
                 let y = pick(o == 1, x.b, x.a);
+                // With an operand at 0, that one is fixed.
+                if (za || zb) && !pick(o == 1, zb, za) {
+                    continue;
+                }
                 let yj = switch self.lp.ix.get(&y) {
                     Some(v) => *v,
                     None => {
@@ -2185,7 +2253,16 @@ extend<const B: usize> Solver<B> {
         for i in 0..n {
             if self.ostart[i] != self.ostart[i + 1] {
                 let h = self.sig_of(tm, i as u32);
-                self.sig.insert(h, i as u32);
+                // Two terms of one value at two types (`same_op`) are congruent from the start.
+                let hit = switch self.sig.get(&h) {
+                    Some(v) => *v,
+                    None => NONE,
+                };
+                if hit != NONE && self.congruent(tm, i as u32, hit) {
+                    self.pend.push(Edge { u: i as u32, v: hit, p: NONE, q: NONE, kind: E_CONG });
+                } else {
+                    self.sig.insert(h, i as u32);
+                }
             }
         }
         return true;
@@ -2194,13 +2271,26 @@ extend<const B: usize> Solver<B> {
     // The signature of application `u`: its operation and its operands' classes.
     const fn sig_of(self: &Self, tm: &Terms<B>, u: u32) u64 {
         let x = tm.at(self.cc_term[u as usize]);
-        let mut h = hmix(0x9E3779B97F4A7C15u64, x.op as u64 << 24 | x.w as u64 << 1 | x.sg as u64);
+        // A sum, difference, product or negation of any type is one operation (`same_op`).
+        let ty = if x.op >= T_ADD && x.op <= T_NEG {
+            0u64
+        } else {
+            x.w as u64 << 1 | x.sg as u64
+        };
+        let mut h = hmix(0x9E3779B97F4A7C15u64, x.op as u64 << 24 | ty);
         h = hmix(h, x.k.limb(0));
         h = hmix(h, x.k.limb(1));
         h = hmix(h, x.k.limb(2));
         h = hmix(h, x.k.limb(3));
-        h = hmix(h, self.ostart[u as usize + 1] - self.ostart[u as usize]);
-        for j in self.ostart[u as usize]..self.ostart[u as usize + 1] {
+        let s = self.ostart[u as usize];
+        let n = self.ostart[u as usize + 1] - s;
+        h = hmix(h, n);
+        if n == 2 && commutes(x.op) {
+            let p = self.rep[self.olist[s as usize] as usize];
+            let q = self.rep[self.olist[s as usize + 1] as usize];
+            return hmix(hmix(h, p.min(q)), p.max(q));
+        }
+        for j in s..s + n {
             h = hmix(h, self.rep[self.olist[j as usize] as usize]);
         }
         return h;
@@ -2212,12 +2302,19 @@ extend<const B: usize> Solver<B> {
         let y = tm.at(self.cc_term[v as usize]);
         let nu = self.ostart[u as usize + 1] - self.ostart[u as usize];
         let nv = self.ostart[v as usize + 1] - self.ostart[v as usize];
-        if x.op != y.op || x.w != y.w || x.sg != y.sg || x.k != y.k || nu != nv || nu == 0 {
+        if !same_op(&x, &y) || nu != nv || nu == 0 {
             return false;
         }
+        return self.paired(u, v, false) || nu == 2 && commutes(x.op) && self.paired(u, v, true);
+    }
+
+    // Whether each operand of application `u` is in the class of `v`'s at its place, or with `swap` at
+    // the other place of two.
+    const fn paired(self: &Self, u: u32, v: u32, swap: bool) bool {
+        let nu = self.ostart[u as usize + 1] - self.ostart[u as usize];
         for j in 0..nu {
             let a = self.olist[(self.ostart[u as usize] + j) as usize];
-            let b = self.olist[(self.ostart[v as usize] + j) as usize];
+            let b = self.olist[(self.ostart[v as usize] + pick(swap, nu - 1 - j, j)) as usize];
             if self.rep[a as usize] != self.rep[b as usize] {
                 return false;
             }
@@ -2479,10 +2576,11 @@ extend<const B: usize> Solver<B> {
             return self.add_fact(Fact { a: a, b: b, p: ed.p, q: ed.q, kind: F_ARITH });
         }
         let n = self.ostart[ed.u as usize + 1] - self.ostart[ed.u as usize];
+        let swap = !self.paired(ed.u, ed.v, false);
         let mut args = Vector::<u32>::with_capacity(n as usize);
         for j in 0..n {
             let x = self.olist[(self.ostart[ed.u as usize] + j) as usize];
-            let y = self.olist[(self.ostart[ed.v as usize] + j) as usize];
+            let y = self.olist[(self.ostart[ed.v as usize] + pick(swap, n - 1 - j, j)) as usize];
             if x == y {
                 args.push(NONE);
                 continue;
@@ -2539,10 +2637,67 @@ extend<const B: usize> Solver<B> {
         return true;
     }
 
-    // The equalities the model suggests: for two applications of one operation in different classes,
-    // each pair of operands in different classes, integers of one value in the model. Only pairs of
-    // applications where every differing operand is such a pair. False past a bound.
-    fn suggest(self: &mut Self, tm: &Terms<B>, out: &mut Vector<u64>) bool {
+    // The operand pairs of applications `u` and `v` (with `swap`, the second's two operands swapped) in
+    // different classes, into `cand` (cleared first), and into `sure` whether each pair has one linear
+    // form: true when each pair has one linear form or is of integers of one value in the model.
+    fn pairs_equal(
+        self: &mut Self,
+        tm: &Terms<B>,
+        u: u32,
+        v: u32,
+        swap: bool,
+        cand: &mut Vector<u64>,
+        sure: &mut Vector<bool>,
+    ) bool {
+        cand.clear();
+        sure.clear();
+        let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
+        for j in 0..n {
+            let a = self.olist[(self.ostart[u as usize] + j) as usize];
+            let b = self.olist[(self.ostart[v as usize] + pick(swap, n - 1 - j, j)) as usize];
+            if self.rep[a as usize] == self.rep[b as usize] {
+                continue;
+            }
+            let ta = self.cc_term[a as usize];
+            let tb = self.cc_term[b as usize];
+            if !tm.is_int(ta) || !tm.is_int(tb) {
+                return false;
+            }
+            let va = self.model_value(tm, ta);
+            let vb = self.model_value(tm, tb);
+            let same = self.same_form(tm, ta, tb);
+            if !same && (va.is_none() || vb.is_none() || va.unwrap() != vb.unwrap()) {
+                return false;
+            }
+            cand.push(pair(pick(a < b, a, b), pick(a < b, b, a)));
+            sure.push(same);
+        }
+        return true;
+    }
+
+    // Whether integers `a` and `b` have one linear form (`(x + y) - 1` and `x + (y - 1)`), whatever
+    // their atoms' values.
+    fn same_form(self: &mut Self, tm: &Terms<B>, a: u32, b: u32) bool {
+        self.lin.clear();
+        let mut k = Num::<B>::zero();
+        if !lin_form(tm, a, Num::<B>::one(), &mut k, &mut self.lin, &mut self.stack) || !lin_form(
+            tm,
+            b,
+            wide::<B>(-1),
+            &mut k,
+            &mut self.lin,
+            &mut self.stack,
+        ) {
+            return false;
+        }
+        return k.is_zero() && merge_terms(&mut self.lin, 0, self.lin.len()) == 0;
+    }
+
+    // The equalities to test: for two applications of one operation in different classes, each pair
+    // of operands in different classes (`pairs_equal`), not tested before, into `out`, and into
+    // `outsure` whether the pair has one linear form. Only pairs of applications where every
+    // differing operand is such a pair. False past a bound.
+    fn suggest(self: &mut Self, tm: &Terms<B>, out: &mut Vector<u64>, outsure: &mut Vector<bool>) bool {
         let mut apps = Vector::<u32>::new();
         for i in 0..self.cc_term.len() {
             if self.ostart[i] != self.ostart[i + 1] {
@@ -2553,6 +2708,7 @@ extend<const B: usize> Solver<B> {
             return true;
         }
         let mut cand = Vector::<u64>::new();
+        let mut sure = Vector::<bool>::new();
         for x in 0..apps.len() {
             let u = apps[x];
             let tu = tm.at(self.cc_term[u as usize]);
@@ -2563,41 +2719,26 @@ extend<const B: usize> Solver<B> {
                 }
                 let tv = tm.at(self.cc_term[v as usize]);
                 let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
-                if tu.op != tv.op || tu.w != tv.w || tu.sg != tv.sg || tu.k != tv.k || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
+                if !same_op(&tu, &tv) || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
                     continue;
                 }
                 if !self.spend(1) {
                     return false;
                 }
-                cand.clear();
-                let mut ok = true;
-                for j in 0..n {
-                    let a = self.olist[(self.ostart[u as usize] + j) as usize];
-                    let b = self.olist[(self.ostart[v as usize] + j) as usize];
-                    if self.rep[a as usize] == self.rep[b as usize] {
-                        continue;
-                    }
-                    let ta = self.cc_term[a as usize];
-                    let tb = self.cc_term[b as usize];
-                    if !tm.is_int(ta) || !tm.is_int(tb) {
-                        ok = false;
-                        break;
-                    }
-                    let va = self.model_value(tm, ta);
-                    let vb = self.model_value(tm, tb);
-                    if va.is_none() || vb.is_none() || va.unwrap() != vb.unwrap() {
-                        ok = false;
-                        break;
-                    }
-                    cand.push(pair(pick(a < b, a, b), pick(a < b, b, a)));
-                }
-                if !ok {
+                if !self.pairs_equal(tm, u, v, false, &mut cand, &mut sure) && !(n == 2 && commutes(tu.op) && self.pairs_equal(
+                    tm,
+                    u,
+                    v,
+                    true,
+                    &mut cand,
+                    &mut sure,
+                )) {
                     continue;
                 }
                 for j in 0..cand.len() {
                     if !self.tested.contains_key(&cand[j]) {
-                        self.tested.insert(cand[j], true);
                         out.push(cand[j]);
+                        outsure.push(sure[j]);
                     }
                 }
             }

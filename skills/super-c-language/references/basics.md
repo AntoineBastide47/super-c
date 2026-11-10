@@ -127,8 +127,8 @@ each loop `invariant`, each callee's `requires`, each `assert`, that no operatio
 own `requires` fails is skipped. The first failing input is reported at the clause, the call or the
 statement (`for example: c = Color::Blue, b = true`). Another parameter type, more inputs, or a
 generic function is error 540; a `decreases` on the function or on a loop in it is error 541 (each
-run ended), and a cycle of calls needs no measure on such a function. A lemma is a function with an
-empty body: `@prove_exhaustive fn inv(x: u8) ensures g(f(x)) == x {}`. The evaluator nests at most
+run ended), and a cycle of calls needs no measure on such a function. A lemma with an empty body
+proves a table: `@prove_exhaustive lemma inv(x: u8) ensures g(f(x)) == x {}`. The evaluator nests at most
 48 calls: a deeper recursion fails with "const-eval call depth exceeded"; narrow the inputs with
 `requires`.
 
@@ -155,6 +155,62 @@ operands give equal results: `requires i == j` proves `a[i] == a[j]`, `half(x) =
 proof that goes over its fixed budget is not proved. `-fno-prove` skips the proofs;
 `-fcontract-checks` also checks the clauses at run time (binary skill, build-toml.md). Without it a
 build emits no check: the output is the same as without the clauses.
+
+### Ghost Code
+
+```superc
+spec fn pow2(n: nat) nat
+    decreases n
+{
+    return if n == 0 { 1 } else { 2 * pow2(n - 1) };
+}
+
+lemma pow2_pos(n: nat)
+    ensures pow2(n) > 0
+    decreases n
+{
+    if n > 0 {
+        pow2_pos(n - 1); // the induction hypothesis
+    }
+}
+
+fn shifted(x: u32) u64
+    ensures |r| r as int == x as int * pow2(8)
+{
+    assert pow2(8) == 256 by {};
+    return x as u64 << 8;
+}
+```
+
+Ghost code is proved and never runs: no build emits it, `-fcontract-checks` neither. It is the body
+of a `spec fn` or a `lemma`, every clause, an `assert P by { B };` block, and a lemma call
+statement with its arguments. `spec` and `lemma` are contextual words at item scope (top level and
+in an `extend`). A lemma has no return type; its `requires` and `ensures` are the theorem, its body
+the proof: a recursive call with `decreases` is induction, an `if` or `switch` a case split, a lemma
+call applies that lemma. A spec function is a mathematical function: the proofs read its body as
+its definition, one unfolding per call (a call over constants unfolds further); it cannot loop.
+
+- `int` and `nat` are exact integers (`nat` at least 0) that only ghost code names (error 542).
+  Literals take them, `nat` converts to `int` implicitly, `x as int` and `x as nat` from every
+  integer (`as nat` must be proved at least 0). They have `+ - * / %` and comparisons, no bit
+  operations; a `nat` below 0 is an overflow to prove absent.
+- Only ghost code calls a spec function (error 543). A lemma call is a statement of its own (error
+  544). An `assert .. by` block cannot return or use `?` (error 546), and a `break` or
+  `continue` in it names only a loop inside it. It writes only its own
+  locals and calls only `const fn`s, spec functions and lemmas (error 537).
+- In ghost code every check is an obligation: an `assert`, an index, a division, a shift count, a
+  panic. A spec function and a lemma must end: recursion needs `decreases`, each loop in a lemma
+  needs a measure. Ghost code assumes a callee's `ensures` only when the callee ends (a spec
+  function, a lemma, a `@prove_exhaustive` function).
+- `assert P by { B };` proves P after B (a lemma call, a case split) and then assumes it.
+- Under `-fcontract-checks` a clause that calls a spec function or converts into `int` or `nat` is
+  error 545: it has no run-time form.
+
+`std::spec::arith` holds proved lemmas: products (`mul_eq`, `mul_nonneg`, `mul_pos`, `mul_le`,
+`mul_lt`), powers of two (`pow2`, `pow2_pos`, `pow2_add`, `pow2_le`), division and remainders
+(`div_mod`, `mod_unique`, `mod_mod`, `mod_add_multiple`, `mod_add`, `mod_mul`). A call
+`mod_mul(a as int, b as int, m as int);` proves `a * b % m == (a % m) * (b % m) % m` at that
+point.
 
 ## Structs and Methods
 

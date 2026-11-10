@@ -23,6 +23,7 @@ import ir::cpu_features as cf;
 import ast::parser as par;
 import typechecker::render as *;
 import utils::diag_codes as dc;
+import build_system::manifest as bman;
 
 /// Alias-chain hops before a cycle is reported.
 pub(package) const TYPE_ALIAS_MAX_DEPTH: u32 = 64;
@@ -436,6 +437,17 @@ pub(package) struct TypeChecker<'a> {
     pub(package) nborrows: u32,
     pub(package) scope_depth: u32,
     pub(package) loop_depth: u32,
+    // The depth of ghost code around the check (a spec function or a lemma, a contract clause, an
+    // `assert .. by` block): only ghost code calls a spec function.
+    ghost: u32,
+    // The call an expression statement holds, under check: only such a call may call a lemma.
+    stmt_call: NodeId,
+    // The depth of `assert .. by` blocks around the check (closures start at 0): such a block cannot
+    // leave by `return` or `?` (nor by `break` or `continue`: its loops are a floor, `loop_floor`).
+    ghost_blk: u32,
+    // The depth of clauses that `-fcontract-checks` runs (`requires`, `ensures`, `invariant` of normal
+    // code) around the check: they cannot call a spec function nor convert into `int` or `nat`.
+    run_clause: u32,
     pub(package) fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
     guard_top: u32, // the innermost `if` around the check inside such a body (`Ast.ob_guards` + 1)
     // A closure block body without written results under check (`clos_ret_on`): the result its
@@ -1202,10 +1214,10 @@ const fn ptr_qual(q: TypeQualifier) TypeQualifier {
 }
 
 const fn bt_is_int(b: BuiltinType) bool {
-    return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
+    return b as u8 >= BuiltinType::BT_I8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8 || b == BuiltinType::BT_INT || b == BuiltinType::BT_NAT;
 }
 const fn bt_is_uint(b: BuiltinType) bool {
-    return b as u8 >= BuiltinType::BT_U8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8;
+    return b as u8 >= BuiltinType::BT_U8 as u8 && b as u8 <= BuiltinType::BT_USIZE as u8 || b == BuiltinType::BT_NAT;
 }
 // The content span of a matchertext literal: past `Md"(` and before `)"` (the delimiter chain
 // `d` ends at the quote).
@@ -1262,7 +1274,7 @@ const fn bt_int_max(b: BuiltinType, ptr32: bool) u64 {
 const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool, ptr32: bool) bool {
     let mx = bt_int_max(b, ptr32);
     if neg {
-        let sgn = b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE;
+        let sgn = b == BuiltinType::BT_I8 || b == BuiltinType::BT_I16 || b == BuiltinType::BT_I32 || b == BuiltinType::BT_I64 || b == BuiltinType::BT_ISIZE || b == BuiltinType::BT_INT;
         return sgn && (mx == 0 || mag <= mx + 1);
     }
     return mx == 0 || mag <= mx;
@@ -1270,7 +1282,7 @@ const fn tc_lit_in_range(b: BuiltinType, mag: u64, neg: bool, ptr32: bool) bool 
 
 // Implicit lossless numeric widening.
 const fn bt_widens(from: BuiltinType, to: BuiltinType) bool {
-    if from == BuiltinType::BT_F32 && to == BuiltinType::BT_F64 {
+    if from == BuiltinType::BT_F32 && to == BuiltinType::BT_F64 || from == BuiltinType::BT_NAT && to == BuiltinType::BT_INT {
         return true;
     }
     let fs = from as u8 >= BuiltinType::BT_I8 as u8 && from as u8 <= BuiltinType::BT_I64 as u8;
@@ -1520,6 +1532,10 @@ extend<'a> TypeChecker<'a> {
             nborrows: 0,
             scope_depth: 0,
             loop_depth: 0,
+            ghost: 0,
+            stmt_call: NODE_NONE,
+            ghost_blk: 0,
+            run_clause: 0,
             fields_depth: 0,
             guard_top: 0,
             clos_ret: TYPE_NONE,
@@ -21813,6 +21829,13 @@ extend TypeChecker {
             );
         }
         if op == TokenType::Question {
+            if self.ghost_blk != 0 {
+                self.errors.emit_span(
+                    dc::GHOST_BLOCK_LEAVES,
+                    sp,
+                    format("an 'assert .. by' block cannot return: ghost code never runs"),
+                );
+            }
             if untyped(opnd) {
                 return TYPE_NONE;
             }
@@ -24894,7 +24917,48 @@ extend TypeChecker {
         let fm = self.lt_env.len();
         let r = self.check_call_i(id, want);
         self.lt_env.truncate(fm);
+        self.tc_ghost_call(id);
         return r;
+    }
+
+    // A clause `-fcontract-checks` runs, which does `what` at `sp`: it has no run-time form.
+    fn tc_not_checkable(self: &mut Self, sp: tok::Span, what: str) {
+        self.errors.emit_span(
+            dc::GHOST_NOT_CHECKABLE,
+            sp,
+            format("this contract {}: '-fcontract-checks' cannot check it at run time", what),
+        );
+        self.errors.note(format("state it as a 'const fn' over the fixed integer types, or build without the flag"));
+    }
+
+    // Call `id` of a spec function only in ghost code, of a lemma only as an expression statement.
+    fn tc_ghost_call(self: &mut Self, id: NodeId) {
+        let d = self.tc_call_callee(id);
+        if d.node == NODE_NONE || Ast::in_body(d.node) {
+            return;
+        }
+        let ca = self.mod_ast(d.module);
+        if unsafe (*ca).at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return;
+        }
+        let f = unsafe (*ca).ext(d.node).function;
+        let sp = unsafe (*self.cur_ast()).at_const(id).span;
+        if f.is_spec() && self.run_clause != 0 {
+            self.tc_not_checkable(sp, "calls a spec function");
+        } else if f.is_spec() && self.ghost == 0 {
+            self.errors.emit_span(
+                dc::SPEC_CALL_OUTSIDE_GHOST,
+                sp,
+                format("a spec function can only be called from ghost code"),
+            );
+            self.errors.note(format("ghost code: a 'spec fn', a 'lemma', a contract clause, an 'assert .. by' block"));
+        } else if f.is_lemma() && self.stmt_call != id {
+            self.errors.emit_span(
+                dc::LEMMA_CALL_NOT_STATEMENT,
+                sp,
+                format("a lemma call is a statement of its own: it has no value"),
+            );
+        }
     }
 
     fn check_call_i(self: &mut Self, id: NodeId, want: TypeId) TypeId {
@@ -30068,6 +30132,7 @@ extend TypeChecker {
         self.icx.nclos = cn + 1;
         let saved_lf = self.loop_floor;
         self.loop_floor = self.nloops;
+        let saved_gb = replace(&mut self.ghost_blk, 0);
         if unsafe (*a).ext(id).closure.expr_body {
             let body = unsafe (*a).ext(id).closure.body;
             self.check_expr(body);
@@ -30129,6 +30194,7 @@ extend TypeChecker {
             }
         }
         self.loop_floor = saved_lf;
+        self.ghost_blk = saved_gb;
         self.icx.nclos = self.icx.nclos - 1;
         // Capture validation, and the closure's emission facts (the mutable-capture mask is
         // finalized by the borrow checker).
@@ -30912,6 +30978,9 @@ extend TypeChecker {
                 let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
                 let tyn = unsafe (*a).at_const(id).as_data.cast.ty;
                 let dst = self.resolve_type(tyn);
+                if self.run_clause != 0 && (self.bt_of(dst) == BuiltinType::BT_INT || self.bt_of(dst) == BuiltinType::BT_NAT) {
+                    self.tc_not_checkable(unsafe (*a).at_const(id).span, "converts into 'int' or 'nat'");
+                }
                 // A cast to a type alias may be needed on another target (`x as mode_t`: `u16` on macOS,
                 // `u32` on Linux): it is not unnecessary.
                 let mut alias = false;
@@ -32642,6 +32711,13 @@ extend TypeChecker {
 
     fn check_return(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
+        if self.ghost_blk != 0 {
+            self.errors.emit_span(
+                dc::GHOST_BLOCK_LEAVES,
+                unsafe (*a).at_const(id).span,
+                format("an 'assert .. by' block cannot return: ghost code never runs"),
+            );
+        }
         let values = unsafe (*a).at_const(id).as_data.return_stmt.values;
         let rets = self.icx.current_returns;
         if self.clos_ret_on && rets.len == 0 && (values.len != 0 || self.clos_ret != TYPE_NONE) {
@@ -33918,6 +33994,7 @@ extend TypeChecker {
         let bodyless = unsafe (*self.cur_ast()).at_const(owner).kind == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).ext(
             owner,
         ).function.body == NODE_NONE;
+        self.ghost += 1;
         for i in cs..ce {
             let c = *unsafe (*self.cur_ast()).contracts.at(i as usize);
             if c.binder != NODE_NONE {
@@ -33933,7 +34010,10 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_type(c.binder, result);
             }
             if c.kind != CT_DECREASES {
+                let run = (c.kind != CT_ASSERT && self.ghost == 1 && (unsafe (&*self.package).cg & bman::CG_CONTRACT_CHECKS) != 0) as u32;
+                self.run_clause += run;
                 let _ = self.check_cond(c.expr, contract_word(c.kind));
+                self.run_clause -= run;
                 continue;
             }
             if bodyless {
@@ -33955,6 +34035,7 @@ extend TypeChecker {
                 );
             }
         }
+        self.ghost -= 1;
     }
 
     fn tc_check_while(self: &mut Self, id: NodeId) {
@@ -34241,6 +34322,15 @@ extend TypeChecker {
             },
             NODE_BLOCK => {
                 let stmts = unsafe (*a).at_const(id).as_data.block.statements;
+                // `assert P by { .. }`: a ghost block, then P.
+                let (cs, ce) = unsafe (*a).contracts_of(id);
+                let g = (ce > cs) as u32;
+                self.ghost += g;
+                self.ghost_blk += g;
+                let saved_lf = self.loop_floor;
+                if g != 0 {
+                    self.loop_floor = self.nloops;
+                }
                 // Re-read the list base every iteration: the `format` rewrite APPENDS children
                 // mid-check, so a pointer cached across the recursion can dangle on regrowth.
                 let mut diverged = false;
@@ -34260,6 +34350,12 @@ extend TypeChecker {
                     if self.lint && !diverged && !unsafe (*a).bc_cut_at(sid, unsafe (*a).at_const(sid).span) {
                         diverged = self.stmt_diverges(sid, 0);
                     }
+                }
+                self.loop_floor = saved_lf;
+                self.ghost_blk -= g;
+                self.ghost -= g;
+                if g != 0 {
+                    self.tc_contracts(id, TYPE_NONE);
                 }
             },
             NODE_LET => {
@@ -34376,7 +34472,9 @@ extend TypeChecker {
                 let v = unsafe (*a).at_const(id).as_data.single.value;
                 let mok = replace(&mut self.icx.mret_ok, self.unsafe_core(v));
                 let osm = replace(&mut self.icx.stmt_match, v);
+                let osc = replace(&mut self.stmt_call, pick(nk == NodeKind::NODE_EXPRESSION_STATEMENT, v, NODE_NONE));
                 let _es = self.check_expr(v);
+                self.stmt_call = osc;
                 self.icx.stmt_match = osm;
                 self.icx.mret_ok = mok;
             },
@@ -35190,6 +35288,8 @@ extend TypeChecker {
                 let saved_tn = replace(&mut self.lt_tnames, Vector::<u64>::new());
                 self.icx.current_returns = fnd.returns;
                 self.icx.current_fn = id;
+                let g = fnd.is_ghost() as u32;
+                self.ghost += g;
                 let saved_cr = self.clos_ret_on;
                 self.clos_ret_on = false;
                 self.err_wm = self.errors.errors.len();
@@ -35312,6 +35412,7 @@ extend TypeChecker {
                     }
                 }
                 self.loop_depth = 0;
+                self.ghost -= g;
                 self.clos_ret_on = saved_cr;
                 self.icx.current_returns = saved;
                 self.icx.current_fn = savedfn;

@@ -545,9 +545,14 @@ pub(package) const CANNOT_PROVE_CONTRACT: u16 = 538;
 pub(package) const DECREASES_NEEDS_BODY: u16 = 539;
 pub(package) const PROVE_EXHAUSTIVE_DOMAIN: u16 = 540;
 pub(package) const PROVE_EXHAUSTIVE_DECREASES: u16 = 541;
+pub(package) const SPEC_TYPE_OUTSIDE_GHOST: u16 = 542;
+pub(package) const SPEC_CALL_OUTSIDE_GHOST: u16 = 543;
+pub(package) const LEMMA_CALL_NOT_STATEMENT: u16 = 544;
+pub(package) const GHOST_NOT_CHECKABLE: u16 = 545;
+pub(package) const GHOST_BLOCK_LEAVES: u16 = 546;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 542;
+pub(package) const COUNT: u16 = 547;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1092,6 +1097,11 @@ pub(package) const fn name(code: u16) str<'static> {
         539 => "decreases_needs_body",
         540 => "prove_exhaustive_domain",
         541 => "prove_exhaustive_takes_no_decreases",
+        542 => "spec_type_outside_ghost_code",
+        543 => "spec_function_called_outside_ghost_code",
+        544 => "lemma_call_not_statement",
+        545 => "ghost_code_has_no_run_time_check",
+        546 => "ghost_block_cannot_leave",
         _ => "",
     };
 }

@@ -3083,6 +3083,9 @@ extend Interp {
             }
             if t.kind == ir::TM_GOTO || t.kind == ir::TM_DROP {
                 blk = t.t0;
+                if b.contracts.len() != 0 {
+                    blk = ir::past_ghost(b, blk);
+                }
             } else if t.kind == ir::TM_SWITCH {
                 let d = self.operand(b, env, t.a);
                 if d.kind != IV_INT && d.kind != IV_BOOL {

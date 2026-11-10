@@ -59,6 +59,11 @@ fn golden_contracts() {
         "@prove_exhaustive\nfn inv(x: u8) requires x < 4 ensures T[x as usize] < 4 {}\n",
         "@prove_exhaustive\nfn inv(x: u8)\n    requires x < 4\n    ensures T[x as usize] < 4\n{}\n",
     );
+    // Ghost code: a spec function, a lemma and an `assert .. by`.
+    expect_fmt(
+        "pub spec fn s(n: nat) int decreases n { return n; }\nlemma l(n: nat) ensures s(n) >= 0 { assert s(n) == n by { }; }\n",
+        "pub spec fn s(n: nat) int\n    decreases n\n{\n    return n;\n}\nlemma l(n: nat)\n    ensures s(n) >= 0\n{\n    assert s(n) == n by {};\n}\n",
+    );
 }
 
 @test

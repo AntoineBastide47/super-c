@@ -1157,14 +1157,32 @@ pub(package) struct RangeLoop {
 }
 
 /// Skip each contract check of `b` the build does not run: every one, or with `keep_checks` only the
-/// `decreases` measures, which have no run-time check. A skipped chain's blocks become empty
-/// `unreachable` ones, so no later pass reads the check (the inliner's vet rejects an assertion).
+/// `decreases` measures and the ghost code (`assert .. by`, lemma calls), which have no run-time
+/// check. A skipped chain's blocks become empty `unreachable` ones, so no later pass reads the check
+/// (the inliner's vet rejects an assertion).
 pub(package) const fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
     for i in 0..b.contracts.len() {
-        if !keep_checks || b.contracts[i].kind == CT_DECREASES {
+        if !keep_checks || b.contracts[i].kind == CT_DECREASES || is_ghost_site(b.contracts[i].kind) {
             skip_site(b, i);
         }
     }
+}
+
+/// Whether a contract site of kind `k` is ghost code in a body: no build runs it.
+pub(package) const fn is_ghost_site(k: u32) bool {
+    return k == CT_ASSERT || k == CT_GHOST;
+}
+
+/// The block a jump of `b` to `blk` reaches: past a ghost site that starts there, which the evaluator
+/// does not run (a body it runs before the proofs still holds the site).
+pub(package) const fn past_ghost(b: &CoreBody, blk: BlockId) BlockId {
+    for i in 0..b.contracts.len() {
+        let s = b.contracts[i];
+        if s.chain == blk && is_ghost_site(s.kind) {
+            return s.cont;
+        }
+    }
+    return blk;
 }
 
 /// Skip contract check `i` of `b` (`skip_contracts`).

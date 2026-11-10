@@ -77,6 +77,8 @@ pub(package) struct Parser<'a> {
     pub(package) bind_buf: Vector<NodeId>,
     // The attributes just parsed hold `@intrinsic`: the next function takes no body.
     pub(package) intrinsic_next: bool,
+    // `lemma` was just read: the next function has no `fn`.
+    pub(package) lemma_next: bool,
     // Parsing the items of an `extern` block.
     pub(package) in_extern: bool,
     // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
@@ -909,6 +911,73 @@ extend Parser {
         return self.check(TokenType::Identifier) && self.text_is(self.raw_peek(), w);
     }
 
+    // Whether the next tokens start a spec function (`spec fn`) or a lemma (`lemma` and its name): the
+    // words are keywords only there.
+    const fn at_ghost_fn(self: &Self) bool {
+        let i = self.current;
+        if !self.check(TokenType::Identifier) || i + 1 >= self.tokens.len() {
+            return false;
+        }
+        let nk = self.tokens[i + 1].kind();
+        return self.text_is(self.raw_peek(), "spec") && nk == TokenType::Fn || self.text_is(self.raw_peek(), "lemma") && nk == TokenType::Identifier;
+    }
+
+    // A spec function or a lemma (`at_ghost_fn`).
+    fn parse_ghost_fn(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        let lemma = self.text_is(self.raw_peek(), "lemma");
+        self.advance();
+        self.lemma_next = lemma;
+        let f = self.parse_function(true, false);
+        self.ast.ext_mut(f).function.set(pick(lemma, FN_LEMMA, FN_SPEC), true);
+        self.ast.at(f).span.start = start;
+        return f;
+    }
+
+    // Whether the next tokens start `assert P by { .. };`: the word `by` after `assert` at bracket
+    // depth 0, before the statement's end, and followed by a block.
+    const fn at_assert_by(self: &Self) bool {
+        if !self.at_word("assert") {
+            return false;
+        }
+        let mut depth: i32 = 0;
+        for i in self.current + 1..self.tokens.len() {
+            let t = self.tokens[i];
+            let k = t.kind();
+            if k == TokenType::LeftParen || k == TokenType::LeftBracket || k == TokenType::LeftBrace {
+                depth += 1;
+            } else if k == TokenType::RightParen || k == TokenType::RightBracket || k == TokenType::RightBrace {
+                depth -= 1;
+                if depth < 0 {
+                    return false;
+                }
+            } else if depth == 0 && (k == TokenType::Semicolon || k == TokenType::Eof) {
+                return false;
+            } else if depth == 0 && k == TokenType::Identifier && self.text_is(t, "by") {
+                return i + 1 < self.tokens.len() && self.tokens[i + 1].kind() == TokenType::LeftBrace;
+            }
+        }
+        return false;
+    }
+
+    // `assert P by { B };`: block B, the owner of a CT_ASSERT clause of condition P.
+    fn parse_assert_by(self: &mut Self) NodeId {
+        let at = self.raw_peek().start();
+        self.advance();
+        let expr = self.parse_condition_expression();
+        if !self.at_word("by") {
+            self.error_here("expected 'by' after the condition of 'assert'");
+        } else {
+            self.advance();
+        }
+        let blk = self.parse_block();
+        self.expect(TokenType::Semicolon, "';'");
+        let mut cs = Vector::<Contract>::new();
+        cs.push(Contract { owner: NODE_NONE, binder: NODE_NONE, expr: expr, kind: CT_ASSERT, at: at });
+        self.ast.set_contracts(blk, &cs);
+        return blk;
+    }
+
     // Whether the next token starts a function's contract clause.
     const fn at_fn_contract(self: &Self) bool {
         return self.at_word("requires") || self.at_word("ensures") || self.at_word("decreases");
@@ -1134,7 +1203,10 @@ extend Parser {
     /// interface member and a generic extend's member are pinned here as well.
     pub(package) fn parse_function(self: &mut Self, require_body: bool, pinned: bool) NodeId {
         let start = self.raw_peek().start();
-        self.expect(TokenType::Fn, "'fn'");
+        let lemma = replace(&mut self.lemma_next, false);
+        if !lemma {
+            self.expect(TokenType::Fn, "'fn'");
+        }
         let name = self.callable_name();
         let mut lifetimes = NodeList { start: 0, len: 0 };
         let generics = self.parse_generics_split(&mut lifetimes);
@@ -1142,6 +1214,9 @@ extend Parser {
         let params = self.parse_parameters(&mut is_variadic);
         let mut named = NodeList { start: 0, len: 0 };
         let returns = self.parse_function_returns(&mut named);
+        if lemma && returns.len != 0 {
+            self.error_here("a lemma has no return type");
+        }
         let where_clause = self.parse_where_clause();
         // Go-style named returns: `(ret: bool)` binds `ret` in the body as an implicitly declared
         // `let mut ret: bool;` (definite assignment enforced by the usual uninitialized tracking),
@@ -1641,6 +1716,11 @@ extend Parser {
                     self.add_attrs_to(&mut attrs, f);
                     self.ast.push(f);
                 }
+            } else if self.at_ghost_fn() {
+                let f = self.parse_ghost_fn();
+                self.ast.ext_mut(f).function.vis = vis;
+                self.add_attrs_to(&mut attrs, f);
+                self.ast.push(f);
             } else if self.check(TokenType::Type) && vis == VIS_PRIVATE {
                 let ta = self.parse_type_alias(false);
                 self.ast.push(ta);
@@ -1923,7 +2003,7 @@ extend Parser {
             TokenType::Union,
         ) && !self.check(TokenType::Enum) && !self.check(TokenType::Const) && !self.check(TokenType::Type) && !self.check(
             TokenType::Interface,
-        ) && !self.check(TokenType::Unsafe) {
+        ) && !self.check(TokenType::Unsafe) && !self.at_ghost_fn() {
             self.error_here(
                 "'pub' may only be applied to a struct, union, enum, function, const, static, interface, or type",
             );
@@ -1981,12 +2061,16 @@ extend Parser {
                 id = self.parse_import();
             },
             _ => {
-                self.error_here("expected top-level item");
-                while !self.at_end() && !self.check(TokenType::Semicolon) {
-                    self.advance();
+                if !self.at_ghost_fn() {
+                    self.error_here("expected top-level item");
+                    while !self.at_end() && !self.check(TokenType::Semicolon) {
+                        self.advance();
+                    }
+                    self.match(TokenType::Semicolon);
+                    return NODE_NONE;
                 }
-                self.match(TokenType::Semicolon);
-                return NODE_NONE;
+                id = self.parse_ghost_fn();
+                self.ast.ext_mut(id).function.vis = vis;
             },
         }
         self.pending_metas = saved_metas;
@@ -3490,6 +3574,9 @@ extend Parser {
         let start = self.raw_peek().start();
         if self.check(TokenType::StaticAssert) {
             return self.parse_static_assert();
+        }
+        if self.at_assert_by() {
+            return self.parse_assert_by();
         }
         let mut result = NODE_NONE;
         switch self.peek_type() {
