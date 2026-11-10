@@ -4787,10 +4787,12 @@ extend<'a> TypeChecker<'a> {
     // with a parameter its result names that no argument typed by itself names (`sp(0.0)` for `fn
     // sp<T, const N: usize>(v: f64) Simd<T, N>`; `choose(m, sp(0.0), sp(1.0))`).
     fn tc_bare_generic_path_call(self: &mut Self, node: NodeId) bool {
-        return self.tc_needs_want(node);
+        return self.tc_needs_want(node, false);
     }
 
-    fn tc_needs_want(self: &mut Self, node: NodeId) bool {
+    // `lits`: an unsuffixed literal argument leaves its parameter open too, as it does in a `let` with
+    // a type (`take(pick(c, 1, 0))` for `fn take(x: u32)` binds `T = u32`, not the literal's `i32`).
+    fn tc_needs_want(self: &mut Self, node: NodeId, lits: bool) bool {
         let a = self.cur_ast();
         if unsafe (*a).at_const(node).kind != NodeKind::NODE_CALL {
             return false;
@@ -4844,10 +4846,11 @@ extend<'a> TypeChecker<'a> {
                 }
                 let m = base + i as usize;
                 if self.want_memo[m] == 0 {
+                    let ai = unsafe (*self.cur_ast()).list(args)[i as usize];
                     self.want_memo[m] = pick(
-                        self.tc_needs_want(unsafe (*self.cur_ast()).list(args)[i as usize]),
-                        1u8,
-                        2u8,
+                        lits && self.tc_peek_lit_class(ai) != 0 || self.tc_needs_want(ai, lits),
+                        1,
+                        2,
                     );
                 }
                 if self.want_memo[m] == 2 {
@@ -22610,6 +22613,8 @@ extend TypeChecker {
             top -= 1;
         }
         let mut l = TYPE_NONE;
+        let mut r0 = TYPE_NONE;
+        let mut rdone = false;
         if top < self.bin_spine.len() {
             let unit = *self.bin_spine.at(top);
             while self.bin_spine.len() > top {
@@ -22619,6 +22624,12 @@ extend TypeChecker {
                 return self.tc_lit_arith(id, k, expected);
             }
             l = self.tc_lit_arith(unit, k, TYPE_NONE);
+        } else if self.tc_bin_adopts(*self.bin_spine.at(top - 1), n) {
+            // A generic call whose literals alone fix its type (`pick(c, 1, 0) + w`) takes the right
+            // operand's numeric type, as a bare literal does: the right operand is checked first.
+            r0 = self.check_expr(unsafe (*a).at_const(*self.bin_spine.at(top - 1)).as_data.binary.right);
+            rdone = true;
+            l = self.check_expr_w(n, pick(self.tc_num_builtin(r0), r0, TYPE_NONE));
         } else {
             l = self.check_expr(n);
         }
@@ -22626,16 +22637,33 @@ extend TypeChecker {
         let mut lk = k;
         while self.bin_spine.len() > base {
             let b = self.bin_spine.pop().unwrap();
-            l = self.check_binary_ops(b, l, lk);
+            l = self.check_binary_ops(b, l, lk, r0, rdone);
+            rdone = false;
             lk = 0;
             unsafe (*a).set_type(b, l);
         }
         return l;
     }
 
+    // Whether the left operand `ln` of binary node `b` is a generic call whose unsuffixed literals
+    // alone fix its type (`tc_needs_want`), so it takes the type of a right operand that is not
+    // literal-only. Not for a logical operator, whose operands are `bool`.
+    fn tc_bin_adopts(self: &mut Self, b: NodeId, ln: NodeId) bool {
+        let bd = unsafe (*self.cur_ast()).at_const(b).as_data.binary;
+        if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe {
+            return false;
+        }
+        return bd.left == ln && self.tc_lit_kind(bd.right) == 0 && self.tc_needs_want(ln, true);
+    }
+
+    // Whether `t` is a builtin numeric type.
+    fn tc_num_builtin(self: &mut Self, t: TypeId) bool {
+        return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_BUILTIN && self.is_numeric(t);
+    }
+
     // The checks of binary node `id` whose left operand has type `l` and literal-only kind `lk`
-    // (tc_lit_kind).
-    fn check_binary_ops(self: &mut Self, id: NodeId, l0: TypeId, lk: u8) TypeId {
+    // (tc_lit_kind); with `rdone`, the right operand is checked already and has type `r0`.
+    fn check_binary_ops(self: &mut Self, id: NodeId, l0: TypeId, lk: u8, r0: TypeId, rdone: bool) TypeId {
         let mut l = l0;
         let a = self.cur_ast();
         let bd = unsafe (*a).at_const(id).as_data.binary;
@@ -22669,21 +22697,24 @@ extend TypeChecker {
         let mut lv = false;
         let skip = logic && self.tc_fold_bool(ln, &mut lv) && lv == (op == TokenType::PipePipe);
         self.ct_dead += skip as u32;
-        // A value `if`, `switch` or block on the right: its literals mean the left operand's numeric
-        // type, as a bare literal does (`x < if c { 0.5; } else { 2.0; }`); not when the left operand
-        // is itself literal-only (a default, which a typed operand overrides), nor for a shift count.
-        let shift = op == TokenType::LeftShift || op == TokenType::RightShift;
-        if rwant == TYPE_NONE && lk == 0 && !logic && !shift && l != TYPE_NONE && (rk == NodeKind::NODE_IF || rk == NodeKind::NODE_MATCH || rk == NodeKind::NODE_BLOCK) && self.type_at(
-            l,
-        ).kind == TypeKind::TYPE_BUILTIN && self.is_numeric(l) {
+        // A value `if`, `switch` or block on the right, or a generic call whose literals alone fix its
+        // type (`w + pick(c, 1, 0)`): its literals mean the left operand's numeric type, as a bare
+        // literal does (`x < if c { 0.5; } else { 2.0; }`, a shift count too); not when the left
+        // operand is itself literal-only (a default, which a typed operand overrides).
+        if rwant == TYPE_NONE && lk == 0 && !logic && self.tc_num_builtin(l) && (rk == NodeKind::NODE_IF || rk == NodeKind::NODE_MATCH || rk == NodeKind::NODE_BLOCK || self.tc_needs_want(
+            rn,
+            true,
+        )) {
             rwant = l;
         }
-        let r = self.check_expr_w(rn, rwant);
+        let r = if rdone {
+            r0
+        } else {
+            self.check_expr_w(rn, rwant)
+        };
         // The mirror: a value `if`, `switch` or block on the left whose values are unpinned literals
         // takes the right operand's numeric type.
-        if !logic && !shift && r != TYPE_NONE && l != TYPE_NONE && r != l && self.type_at(r).kind == TypeKind::TYPE_BUILTIN && self.is_numeric(
-            r,
-        ) && self.tc_value_adopt(ln, r) {
+        if !logic && l != TYPE_NONE && r != l && self.tc_num_builtin(r) && self.tc_value_adopt(ln, r) {
             l = r;
         }
         self.ct_dead -= skip as u32;
@@ -25266,6 +25297,10 @@ extend TypeChecker {
             ).kind == NodeKind::NODE_RANGE || self.tc_wants_param_type(aid) {
                 awant = self.tc_param_expected(callee, callee_id, i);
             }
+            let lw = self.tc_needs_want(aid, true);
+            if awant == TYPE_NONE && lw {
+                awant = self.tc_param_expected(callee, callee_id, i);
+            }
             if awant == TYPE_NONE {
                 awant = self.tc_tuple_ctor_elem(callee, i);
             }
@@ -25277,9 +25312,9 @@ extend TypeChecker {
             ) && self.tc_closure_unannotated(aid) {
                 continue;
             }
-            // `S::f(..)` against a parameter over the callee's own parameters (`choose(m, x,
-            // Simd::splat(0.0))`): checked once the call's inference has bound them.
-            if self.tc_bare_generic_path_call(aid) && self.tc_callee_param_open(callee_id, i, args.len) {
+            // `S::f(..)` or `pick(c, 1, 0)` against a parameter over the callee's own parameters
+            // (`choose(m, x, Simd::splat(0.0))`): checked once the call's inference has bound them.
+            if lw && self.tc_callee_param_open(callee_id, i, args.len) {
                 self.post_paths.push(aid);
                 continue;
             }

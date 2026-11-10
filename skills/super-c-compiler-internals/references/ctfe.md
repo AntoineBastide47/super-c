@@ -54,7 +54,13 @@ gives the bindings), so an instance reached only through another generic body is
 too, while the body syntax is still live. Emission runs `cemit_inst_asserts` again for every
 instance it demands, once per instance; after a failure in the graph's check
 (`Interp.inst_asserts_failed`) it reports nothing more, so each failure is reported once.
-`SC_CEMIT_STATS` prints `cemit-stage inst-asserts: <ms> ms, <n> instances`. During the type check the engine answers as the item under
+`SC_CEMIT_STATS` prints `cemit-stage inst-asserts: <ms> ms, <n> instances`. The prover runs a
+`@prove_exhaustive` function's kept body through `Interp::prove_run` (stages.md, `prove_cached`):
+one run per input within a step count it gives, a shared-reference argument boxed in a new object;
+the outcome is `PR_OK`, `PR_ASSERT` (a failed contract or `assert`, recorded by `assert_failed` in
+`pa_*`: the first one, not one of a constant's evaluation), `PR_TRAP` or `PR_REFUSED` (an operation
+the evaluator does not model, `refused_text`). `trap_frames` gives the calls a trap happened in,
+outermost first, without the innermost `inner` (the `panic` frame of a panic). During the type check the engine answers as the item under
 check (`Interp::set_reader`): a body or a checked type of an item that item cannot see
 (`graph::items::visible`) is a refusal, whatever a worker has done with it.
 

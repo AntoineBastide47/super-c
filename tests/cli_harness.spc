@@ -972,6 +972,21 @@ pub fn copy_tree(src: str, dst: str) {
     }
 }
 
+/// `src` and a comment that takes a program past the size from which a build analyzes on several
+/// workers (`Package::analysis_jobs`: 256 KiB of the program's sources): a test of a parallel stage
+/// pads its program with it, and builds with `--jobs=N` outside the suite's jobserver (`NO_JOBSERVER`).
+pub fn par_sized(src: str) String {
+    let mut s = String::from_str(src);
+    for _i in 0..3500 {
+        s.push_str("// This comment makes the program large enough for the build to analyze it in parallel.\n");
+    }
+    return s;
+}
+
+/// The environment of a build that must get the workers its `--jobs` asks for: outside the suite's
+/// jobserver, which gives a build only the slots the other tests leave free.
+pub const NO_JOBSERVER: str<'static> = "SC_JOBSERVER=none";
+
 /// Run the compiler under test FROM `dir` with one environment variable set: the shape the global
 /// object-cache tests need: the engine resolves build.toml from its working directory and the cache
 /// from its environment. No shell syntax: Windows' sc_run hands the line to CreateProcess verbatim,

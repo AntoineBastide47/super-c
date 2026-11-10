@@ -23,7 +23,9 @@ file is authoritative for where to look first.
 | Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
 | The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is not frozen, a slice view, a closure or a call's implicit borrow may reach (`is_mem`) | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, per body | the next body |
 | The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
-| The contract site of each chain's first block and of each block that enters one | `Prover::prove_body` | `site_of_chain`, `site_of_pred`, per body | the next body |
+| The contract site of each chain's first block and of each block that enters one | `Prover::begin_sites` | `site_of_chain`, `site_of_pred`, per body | the next body |
+| A `@prove_exhaustive` function's inputs: each parameter's domain (kind, range narrowed by its `requires`, count) | `exhaustive_job`, `pdim` | `PJob.dims`, per function | end of the function's proof |
+| The failed assertion of an evaluated run: contract kind, clause, owner, frame depth, span | `Interp::assert_failed` (on a failed `TM_ASSERT` while `pa_on`) | `Interp.pa_*`, per run | the next `prove_run` |
 | The hash-consed terms of a body's values and formulas | `Terms::make` | `Prover.tm`, per body | the next body |
 | The parameters a callee may change | `Prover::param_writes` | `Prover.pwrites`, per callee | end of `check_kept` |
 | The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Prover.shells`, `shell_ix` | end of `check_kept` |

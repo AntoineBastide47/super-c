@@ -86,7 +86,7 @@ fn main() i32 {
 
 // Outside its scope each level is rejected, directly, through a transitive import (`a::m1` reached
 // through `b::m4`) and through a glob import, with the level in the note; the diagnostics are the same
-// at one worker and at every core.
+// at one worker and at eight (the program's comment makes it large enough to resolve in parallel).
 @test
 fn levels_reject_outside_their_scope() {
     let p = levels_project();
@@ -96,7 +96,8 @@ fn levels_reject_outside_their_scope() {
     );
     p.mkfile(
         "main.spc",
-        M"(import b::m4;
+        cli::par_sized(
+            M"(import b::m4;
 import b::m5;
 import a::m1 as *;
 import vendor::v::lib;
@@ -104,6 +105,7 @@ fn main() i32 {
     return m4::ok_b() + m5::bad_b() + a::m1::modf() + modf() + a::m1::filef() + lib::vp();
 }
 )",
+        ).as_str(),
     );
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"main.spc\"\n");
     let r = cli::superc_in(p.dir(), "build --jobs=1");
@@ -117,7 +119,7 @@ fn main() i32 {
     assert(r.out_has("it is 'pub(package)': visible to the files of its package only"));
     assert(r_has(&r, "error: no visible type 'MS' in the imported module", "b/m5.spc:2:33"));
     assert(r_has(&r, "error: no visible item 'modf' in module 'm1'", "b/m5.spc:2:66"));
-    let all = cli::superc_in(p.dir(), "build --jobs=8");
+    let all = cli::superc_env_in(p.dir(), "SC_JOBSERVER", "none", "build --jobs=8");
     assert(all.text() == r.text(), "the diagnostics do not depend on the worker count");
 }
 

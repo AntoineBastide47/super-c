@@ -116,6 +116,9 @@ pub(package) enum AttrKind {
     // `@associative_math` on a function with a body: its float sums and products may reassociate
     // (`lir::ir::Body.fmath`), as the build's `associative-math` allows for every function.
     ATTR_ASSOCIATIVE_MATH,
+    // `@prove_exhaustive` on a function with a body: its obligations are proved by evaluating it on
+    // every value of its parameters (`prove::exhaustive`), not by the symbolic walk.
+    ATTR_PROVE_EXHAUSTIVE,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;

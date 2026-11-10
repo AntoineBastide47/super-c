@@ -543,9 +543,11 @@ pub(package) const INVARIANT_LOOP_NOT_SUPPORTED: u16 = 536;
 pub(package) const CONTRACT_NOT_PURE: u16 = 537;
 pub(package) const CANNOT_PROVE_CONTRACT: u16 = 538;
 pub(package) const DECREASES_NEEDS_BODY: u16 = 539;
+pub(package) const PROVE_EXHAUSTIVE_DOMAIN: u16 = 540;
+pub(package) const PROVE_EXHAUSTIVE_DECREASES: u16 = 541;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 540;
+pub(package) const COUNT: u16 = 542;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1088,6 +1090,8 @@ pub(package) const fn name(code: u16) str<'static> {
         537 => "contract_not_pure",
         538 => "cannot_prove_contract",
         539 => "decreases_needs_body",
+        540 => "prove_exhaustive_domain",
+        541 => "prove_exhaustive_takes_no_decreases",
         _ => "",
     };
 }

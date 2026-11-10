@@ -4402,6 +4402,8 @@ extend Parser {
             AttrKind::ATTR_OWNED as i32
         } else if self.text_is(ns, "associative_math") {
             AttrKind::ATTR_ASSOCIATIVE_MATH as i32
+        } else if self.text_is(ns, "prove_exhaustive") {
+            AttrKind::ATTR_PROVE_EXHAUSTIVE as i32
         } else {
             -1
         };
@@ -4954,7 +4956,7 @@ extend Parser {
             }
             let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
                 pick(fnk, "", "may only be applied to a function")
-            } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 || attr.kind == AttrKind::ATTR_ASSOCIATIVE_MATH as u8 {
+            } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 || attr.kind == AttrKind::ATTR_ASSOCIATIVE_MATH as u8 || attr.kind == AttrKind::ATTR_PROVE_EXHAUSTIVE as u8 {
                 pick(
                     fnk && self.ast.ext(owner).function.body != NODE_NONE,
                     "",
@@ -5358,6 +5360,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("associative_math");
         return;
     }
+    if kind == AttrKind::ATTR_PROVE_EXHAUSTIVE as u8 {
+        out.push_str("prove_exhaustive");
+        return;
+    }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
         out.push_str("layout");
         return;
@@ -5371,7 +5377,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes that are not C-facing, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 27] = [
+const ATTR_NAMES: [str<'static>; 28] = [
     "emit_macro",
     "bench",
     "test",
@@ -5399,6 +5405,7 @@ const ATTR_NAMES: [str<'static>; 27] = [
     "ordered",
     "owned",
     "associative_math",
+    "prove_exhaustive",
 ];
 
 // The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,

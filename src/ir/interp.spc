@@ -66,6 +66,15 @@ pub(package) const IT_TRAP_UB_USE_AFTER_FREE: u8 = 12;
 pub(package) const IT_TRAP_UB_DOUBLE_FREE: u8 = 13;
 pub(package) const IT_TRAP_UB_OOB: u8 = 14;
 
+// `prove_run`'s outcomes: the body returned; an assertion failed (`pa_*`); a trap (`trap_kind`, at
+// `trap_span`); an operation the evaluator does not model, or a refusal the trap names.
+pub(package) const PR_OK: u8 = 0;
+pub(package) const PR_ASSERT: u8 = 1;
+pub(package) const PR_TRAP: u8 = 2;
+pub(package) const PR_REFUSED: u8 = 3;
+// `Interp.pa_kind` of an assertion that is no contract check.
+pub(package) const PA_PLAIN: u32 = 0xFFFFFFFF;
+
 pub(package) const I64_MIN: i64 = 0x8000000000000000u64 as i64;
 pub(package) const I64_MAX: i64 = 0x7FFFFFFFFFFFFFFFu64 as i64;
 pub(package) const F64_MAX: f64 = 1.7976931348623157e308;
@@ -1108,6 +1117,18 @@ pub(package) struct Interp {
     // Each module's line ends (`diag::line_starts_of`), built once: a const-fn failure names its
     // line, and the always-panics probes fail many times over.
     pub(package) line_tabs: Map<ModuleId, Vector<u32>>,
+    // The first failed assertion of a `prove_run` (`pa_set`), outside a constant's evaluation: the
+    // contract kind of its check (`CT_*`, or PA_PLAIN for another assertion) and clause, the
+    // function whose body holds it, its frame depth (1: the body run), its span, and the top
+    // frame's statement then.
+    pub(package) pa_on: bool,
+    pub(package) pa_set: bool,
+    pub(package) pa_kind: u32,
+    pub(package) pa_clause: u32,
+    pub(package) pa_owner: DefId,
+    pub(package) pa_depth: u32,
+    pub(package) pa_span: tok::Span,
+    pub(package) pa_top: tok::Span,
 }
 
 pub(package) fn interp_new(pkg: *const loader::Package) Interp {
@@ -1244,6 +1265,14 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         unsup_m: 0,
         unsup_span: tok::Span { start: 0, end: 0 },
         line_tabs: Map::<ModuleId, Vector<u32>>::new(),
+        pa_on: false,
+        pa_set: false,
+        pa_kind: PA_PLAIN,
+        pa_clause: 0,
+        pa_owner: DefId { module: 0, node: NODE_NONE },
+        pa_depth: 0,
+        pa_span: tok::Span { start: 0, end: 0 },
+        pa_top: tok::Span { start: 0, end: 0 },
     };
 }
 
@@ -3072,6 +3101,9 @@ extend Interp {
             } else if t.kind == ir::TM_ASSERT {
                 let c = self.operand(b, env, t.a);
                 if c.kind != IV_BOOL || c.i == 0 {
+                    if self.pa_on && !self.failed && c.kind == IV_BOOL {
+                        self.assert_failed(b, blk, t.span);
+                    }
                     let _ = self.bail();
                     break;
                 }
@@ -10130,6 +10162,87 @@ extend Interp {
         return zero;
     }
 
+    // Record the assertion of block `blk` of `b` that failed, for `prove_run`: the first one, and not
+    // one of a constant's evaluation, whose body does not outlive it.
+    @cold
+    fn assert_failed(self: &mut Self, b: &ir::CoreBody, blk: u32, sp: tok::Span) {
+        if self.pa_set || self.trap.len() != 0 || self.item_active.len() != 0 {
+            return;
+        }
+        self.pa_set = true;
+        self.pa_kind = PA_PLAIN;
+        for i in 0..b.contracts.len() {
+            if b.contracts[i].check == blk {
+                self.pa_kind = b.contracts[i].kind;
+                self.pa_clause = b.contracts[i].clause;
+            }
+        }
+        self.pa_owner = b.owner;
+        self.pa_depth = self.in_run;
+        self.pa_span = sp;
+        self.pa_top = self.top_span;
+    }
+
+    /// `@prove_exhaustive`: run kept body `b` on `args` within `steps` steps; each argument `i` whose
+    /// bit `refs` sets is passed as a shared reference to a new object that holds it. The outcome
+    /// (`PR_*`); the `pa_*`, `trap*` or `unsup_*` fields describe a failure.
+    pub(package) fn prove_run(self: &mut Self, b: &ir::CoreBody, args: &Vector<IVal>, refs: u64, steps: u32) u8 {
+        self.eng_enter();
+        self.eval_reset();
+        self.subst.truncate(0);
+        self.sub_base = 0;
+        let zero = tok::Span { start: 0, end: 0 };
+        self.top_span = zero;
+        self.trap_span = zero;
+        self.ffi = false;
+        self.pa_set = false;
+        self.pa_on = true;
+        self.max_steps = steps;
+        let mut av = Vector::<IVal>::with_capacity(args.len());
+        for i in 0..args.len() {
+            let v = *args.at(i);
+            if i < 64 && (refs >> i as u64 & 1) != 0 {
+                let id = self.obj_new(1);
+                if id == 0 {
+                    break;
+                }
+                self.store(id, 0, v);
+                av.push(iv_ptr(b.module, b.locals.at(b.returns as usize + i).ty, id, 0));
+            } else {
+                av.push(v);
+            }
+        }
+        let mut k = PR_TRAP;
+        if av.len() == args.len() {
+            self.lint_on = true;
+            let _ = self.run(b, &av);
+            self.lint_on = false;
+            k = if !self.failed {
+                PR_OK
+            } else if self.pa_set {
+                PR_ASSERT
+            } else if self.trap_kind != IT_TRAP_NONE && self.trap_kind != IT_TRAP_UNSUPPORTED {
+                PR_TRAP
+            } else {
+                PR_REFUSED
+            };
+        }
+        self.pa_on = false;
+        self.failed = false;
+        self.eng_leave();
+        return k;
+    }
+
+    /// What a `prove_run` that ended PR_REFUSED could not evaluate, and where; nothing when no
+    /// operation was recorded.
+    pub(package) fn refused_text(self: &mut Self, out: &mut String) {
+        if self.trap_kind == IT_TRAP_UNSUPPORTED && self.trap.len() != 0 {
+            out.push_str(self.trap);
+        } else if self.unsup_ticks == self.ticks && (self.unsup_rv != ir::IR_NONE as u8 || self.unsup_term != ir::IR_NONE as u8) {
+            self.unsup_text(out);
+        }
+    }
+
     /// Run fn `fn_id` of module `m`, which takes no parameter and no generic argument, as a test: its
     /// trap kind (IT_TRAP_NONE when it returns) with `trap`, and in `trap_span` the top-frame statement
     /// that trapped. A call the interpreter cannot run ends it with no trap and `failed` set.
@@ -10828,29 +10941,10 @@ extend Interp {
         self.dbuf.push_str(self.trap);
         let nf = self.trap_nframes as u32;
         if nf != 0 {
+            let mut st = String::new();
+            self.trap_frames(0, &mut st);
             self.dbuf.push_str(" (call stack: ");
-            let mut show = nf;
-            if show > 8 {
-                show = 8;
-                self.dbuf.push_str("... -> ");
-            }
-            let mut i = nf - show;
-            while i < nf {
-                if i != nf - show {
-                    self.dbuf.push_str(" -> ");
-                }
-                let fv = unsafe self.trap_stack[i as usize];
-                let a = unsafe &*self.p().module_ast_const(fv.module);
-                // A body-arena frame is a closure, whose syntax may already be released.
-                if !Ast::in_body(fv.node) && a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
-                    let nm = a.at_const(a.ext_name(fv.node)).as_data.name.text;
-                    let src = self.src_of(fv.module);
-                    self.dbuf.push_str(src.slice(nm.start as usize, nm.end as usize));
-                } else {
-                    self.dbuf.push_str("<closure>");
-                }
-                i += 1;
-            }
+            self.dbuf.push_str(&st);
             self.dbuf.push_str("; steps: ");
             self.dbuf.push_u64(self.trap_steps);
             self.dbuf.push_str("/");
@@ -10864,6 +10958,33 @@ extend Interp {
             self.dbuf.push_str("; see --const-eval-steps/--const-eval-memory)");
         }
         return self.dbuf.as_str();
+    }
+
+    /// The calls the last trap happened in, outermost first (the last 8), but the `inner` innermost:
+    /// `f -> g`; nothing for a trap in the body the evaluation ran.
+    pub(package) fn trap_frames(self: &Self, inner: u32, out: &mut String) {
+        let nf = pick(self.trap_nframes as u32 > inner, self.trap_nframes as u32 - inner, 0);
+        let mut show = nf;
+        if show > 8 {
+            show = 8;
+            out.push_str("... -> ");
+        }
+        let mut i = nf - show;
+        while i < nf {
+            if i != nf - show {
+                out.push_str(" -> ");
+            }
+            let fv = unsafe self.trap_stack[i as usize];
+            let a = unsafe &*self.p().module_ast_const(fv.module);
+            // A body-arena frame is a closure, whose syntax may already be released.
+            if !Ast::in_body(fv.node) && a.at_const(fv.node).kind == NodeKind::NODE_FUNCTION {
+                let nm = a.at_const(a.ext_name(fv.node)).as_data.name.text;
+                out.push_str(self.src_of(fv.module).slice(nm.start as usize, nm.end as usize));
+            } else {
+                out.push_str("<closure>");
+            }
+            i += 1;
+        }
     }
 
     fn record_fold_err(self: &mut Self, m: ModuleId, id: NodeId) {

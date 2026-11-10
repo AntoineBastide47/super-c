@@ -177,6 +177,11 @@ fn literal_adopts_generic_sibling() {
         "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn main() i32 { let x: i32 = 5; let a = pick(true, x as u8, 300); return a as i32; }\n",
         "out of range for 'u8'",
     );
+    h::expect_err_msg(
+        "literal of a generic call is range-checked against the parameter",
+        "fn pick<T>(c: bool, a: T, b: T) T { if c { return a; } return b; }\nfn low(x: u8) u8 { return x; }\nfn main() i32 { return low(pick(true, 300, 0)) as i32; }\n",
+        "out of range for 'u8'",
+    );
 }
 
 fn literal_adopts_generic_sibling_cases(b: &mut h::ExitBatch) {
@@ -960,6 +965,75 @@ fn float_literal_below_f32_range_cases(b: &mut h::ExitBatch) {
     );
 }
 
+// A generic call whose unsuffixed literals alone fix its type parameter takes the type its context
+// gives, as in a `let` with a type: the parameter of an argument, the other operand of a binary
+// operator. The literals' `i32` default would reject `u32`, `u8`, `[i64; 2]` and a `u64` shift count.
+// A value `if` as a shift count takes the shifted operand's type, as a bare literal count does.
+fn literal_generic_calls_take_the_context_type(b: &mut h::ExitBatch) {
+    b.add(
+        "literal generic call arguments",
+        M"(fn pick<T>(c: bool, a: T, b: T) T {
+    if c {
+        return a;
+    }
+    return b;
+}
+fn two<T: Copy>(a: T) [T; 2] {
+    return [a, a];
+}
+fn take(x: u32) u32 {
+    return x;
+}
+fn low(x: u8) u8 {
+    return x;
+}
+fn sum(x: [i64; 2]) i64 {
+    return x[0] + x[1];
+}
+fn main() i32 {
+    let c = true;
+    let y: u8 = 9;
+    let mut v: Vector<u32> = Vector::new();
+    v.push(pick(c, 5, 0));
+    let a = take(pick(c, 1, 0)) + take(pick(c, pick(c, 2, 3), 0));
+    let d = low(pick(c, 200, 0)) - low(pick(c, pick(c, 101, 2), y));
+    return (a + v[0]) as i32 + d as i32 + (sum(two(2000000000)) / 1000000000) as i32;
+}
+)",
+        // 1 + 2 + 5 + 99 + 4: an exit code below 126, which WASI takes.
+        111,
+    );
+    b.add(
+        "literal generic call operands",
+        M"(fn pick<T>(c: bool, a: T, b: T) T {
+    if c {
+        return a;
+    }
+    return b;
+}
+fn main() i32 {
+    let c = true;
+    let w: u32 = 2;
+    let s: u64 = 1;
+    let mut m: u32 = 3;
+    m += pick(c, 1, 0);
+    let a = pick(c, 7, 0) + w;
+    let b = w * pick(c, 7, 0) - pick(c, 1, 0);
+    let k = s << pick(c, 40, 0) >> pick(c, 38, 0);
+    let j = s << if c {
+        5
+    } else {
+        0
+    };
+    let lt = pick(c, 1, 0) < w && w == pick(c, 2, 0);
+    return (a + b + m) as i32 + (k + j) as i32 + lt as i32;
+}
+)",
+        // 9 + 13 + 4 + 4 + 32 + 1
+        63,
+    );
+}
+
 // The exit-code cases of the provider functions above, one program per group (`h::ExitBatch`):
 // a group builds once where each case built alone.
 @test
@@ -971,6 +1045,7 @@ fn exit_cases_00() {
     if_operand_literals_take_other_operand_type(&mut b);
     deep_generic_call_chain_takes_the_expected_type(&mut b);
     interface_method_param_takes_the_bound_arguments(&mut b);
+    literal_generic_calls_take_the_context_type(&mut b);
     b.run();
 }
 

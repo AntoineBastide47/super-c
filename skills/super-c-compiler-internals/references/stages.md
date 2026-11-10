@@ -240,9 +240,17 @@ modular return-lifetime check) run alongside.
   independent replay (`verify`), and over domains of at most 65536 values by enumeration with an
   exact evaluator (`Eval`), which also confirms a counterexample. A conformance's method walks again
   from its interface's `requires` (`refine`). Every walk, search and elimination has a fixed budget;
-  over one is not proved. With more than one job, chunks of bodies run on workers (one `Prover`
-  each, the shells and components read from the main one), their reports merged by body and
-  position, so the output equals the serial one. Modules whose key the build tree's proof record
+  over one is not proved. With more than one job, the bodies run on workers one at a time (`dpar`
+  Dynamic schedule, grain 1; one `Prover` each, the shells and components read from the main one),
+  their reports merged by body and position, so the output equals the serial one. A
+  `@prove_exhaustive` function skips its walk: `prove_exhaustive` sets up its inputs
+  (`exhaustive_job`: a domain per parameter, `pdim`, narrowed by solver queries on its `requires`)
+  and runs each through `Interp::prove_run` on the kept body, contract chains in place, within an
+  equal share of `PE_STEPS`. The inputs run on the workers one at a time, one evaluator each; a
+  worker skips an input after the least failed one found so far (`PJob.first`), and `report_part`
+  reports the least, so the output equals the serial one. With several workers the stage locks are
+  on while the proofs run (the runs lower callee bodies); the `used` records the runs mark are
+  rolled back after `check_kept`. Modules whose key the build tree's proof record
   holds are skipped (binary skill, build-toml.md). Then `skip_kept_contracts` empties the chains
   the build does not check (core-ir.md, Contract sites).
 - `check_always_panics`: an **error**, run on every build of user modules: one job per

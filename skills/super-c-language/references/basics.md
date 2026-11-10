@@ -117,6 +117,21 @@ The compiler proves every clause in every build; one it cannot prove fails the b
   counts over a range with an end or over a collection. A loop's measure is at least 0 and below
   its value at the iteration's start, at each iteration's end.
 
+`@prove_exhaustive` on a function with a body proves it by evaluation instead: the compiler runs the
+body at compile time once for each value of its parameters, at most 65536 inputs, in order with the
+first parameter most significant. A parameter is a `bool`, an integer, an enum without payloads, or
+a shared reference to one of them; an integer ranges over the bounds its `requires` implies
+(`requires i < 300` on a `usize` gives 300 values). Each run checks each `ensures` at its return,
+each loop `invariant`, each callee's `requires`, each `assert`, that no operation traps or panics
+(also without clauses), and that the run ends within its equal share of 2^26 steps; an input whose
+own `requires` fails is skipped. The first failing input is reported at the clause, the call or the
+statement (`for example: c = Color::Blue, b = true`). Another parameter type, more inputs, or a
+generic function is error 540; a `decreases` on the function or on a loop in it is error 541 (each
+run ended), and a cycle of calls needs no measure on such a function. A lemma is a function with an
+empty body: `@prove_exhaustive fn inv(x: u8) ensures g(f(x)) == x {}`. The evaluator nests at most
+48 calls: a deeper recursion fails with "const-eval call depth exceeded"; narrow the inputs with
+`requires`.
+
 A call assumes the callee's `ensures`, never its body. An interface's method may state `requires`
 and `ensures` without a body (a `decreases` needs a body, error 539): a call through a bound or a
 `dyn` proves the interface's `requires` and assumes its `ensures`; each conformance's method proves

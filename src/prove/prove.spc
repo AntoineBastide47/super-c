@@ -15,6 +15,10 @@
 // formula instead (`chain`), in the body's state or, for a callee, in a frame of the callee's
 // locals bound to the call's arguments.
 //
+// A `@prove_exhaustive` function is not walked: its body runs through the evaluator (`ir::interp`)
+// once for each value of its parameters (`exhaustive_job`, `run_inputs`), and each run checks every
+// assertion and trap of that input exactly.
+//
 // Soundness: a value the walk does not model is a fresh unknown of its type (a read through a
 // pointer or of a field, a local whose address is taken, a call's result); a loop header gives each
 // local the loop writes a fresh value; the solver says "proved" only when its refutation closes every
@@ -24,6 +28,8 @@ import lexer::token as tok;
 import lexer::token_type as tt;
 import ir::core as ir;
 import ir::lower as irl;
+import ir::interp as iri;
+import atomic;
 import std::parallel::data as dpar;
 import std::mem::ptr;
 import ir::facts as fx;
@@ -1544,6 +1550,70 @@ struct Sub {
 const OVF_PROVE: u8 = 0;
 const OVF_KEEP: u8 = 1;
 
+// `@prove_exhaustive`: the inputs of one function, and the evaluator steps of all its runs: each run
+// may take an equal share (`share`), so no split of the inputs changes a report, and the runs of every
+// split together take at most PE_STEPS.
+const PE_INPUTS_MAX: u64 = 65536;
+const PE_STEPS: u64 = 67108864; // 1 << 26
+const NO_INPUT: u64 = 0xFFFFFFFFFFFFFFFFu64;
+// The workers' share of one function's inputs: at most this many parts per worker.
+const PE_PARTS: u64 = 4;
+
+// The kinds of a parameter's values (`PDim.kind`).
+const PD_INT: u8 = 0;
+const PD_BOOL: u8 = 1;
+const PD_ENUM: u8 = 2;
+
+// A parameter of a `@prove_exhaustive` function (local `l`) and its values in order: the `n` integers
+// from `lo`, `false` then `true`, or the variants `vars` of enum `decl` of module `em` (discriminants
+// `tags`). Its value has type `ty` of module `tm`; `by_ref`: the function takes it by a shared
+// reference.
+struct PDim {
+    l: u32,
+    kind: u8,
+    by_ref: bool,
+    lo: i128,
+    n: u64,
+    count: i128, // `n`, exact: `n` stops at NO_INPUT
+    w: u8,
+    sg: bool,
+    tm: ModuleId,
+    ty: TypeId,
+    em: ModuleId,
+    decl: NodeId,
+    tags: Vector<i64>,
+    vars: Vector<NodeId>,
+}
+
+// The inputs of kept body `k`, a `@prove_exhaustive` function's: one value of each parameter, `inputs`
+// in all. Input `x` takes value `x / (n of the later parameters) % n` of each. `first`: the least
+// input whose run failed so far, which the parts of the inputs after it read to stop.
+struct PJob {
+    k: usize,
+    dims: Vector<PDim>,
+    inputs: u64,
+    first: u64,
+}
+
+// What the runs of inputs [`from`, `to`) of job `job` found: the first input whose run failed (`at`,
+// NO_INPUT: none) and its report; `cut`: the run took more than its share of the steps.
+struct PRes {
+    job: u32,
+    from: u64,
+    to: u64,
+    at: u64,
+    cut: bool,
+    sp: tok::Span,
+    msg: String,
+    note: String,
+    note2: String,
+}
+
+// The steps each run of `job` may take.
+const fn share(job: &PJob) u64 {
+    return PE_STEPS / job.inputs;
+}
+
 // The body under proof (`b`, its module `m`) and what its walk reads.
 struct Prover {
     p: *const loader::Package,
@@ -1598,6 +1668,7 @@ const OB_DECREASES: u64 = 5;
 const OB_OVERFLOW: u64 = 6;
 const OB_BUDGET: u64 = 7;
 const OB_REFINE: u64 = 8; // a conformance's method against its interface's contracts
+const OB_EVAL: u64 = 9; // a `@prove_exhaustive` function: its setup and its runs
 
 extend Prover {
     fn new(p: &loader::Package, keep: &irl::Keep, slice: loader::LookupHit) Prover {
@@ -3087,7 +3158,10 @@ extend Prover {
     fn prove_kept(self: &mut Self, k: usize) {
         let kb = unsafe (&*self.keep).kept.at(k);
         self.me = k as u32;
-        self.prove_body(&kb.body, false);
+        // A `@prove_exhaustive` function's own obligations are its runs' (`exhaustive_job`).
+        if !self.exhaustive(kb.body.owner) {
+            self.prove_body(&kb.body, false);
+        }
         // A conformance's method runs where a call through the interface proved only the
         // interface's contracts.
         let im = self.iface_member(kb.body.owner);
@@ -3099,6 +3173,269 @@ extend Prover {
             self.prove_body(&kb.body, true);
             self.refine = null;
         }
+    }
+
+    // Whether function `d` is marked `@prove_exhaustive`.
+    fn exhaustive(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || d.module as usize >= self.pkg().modules.len() || !self.pkg().modules.at(
+            d.module as usize,
+        ).has_ast {
+            return false;
+        }
+        return self.ast_of(d.module).attr_of(d.node, AttrKind::ATTR_PROVE_EXHAUSTIVE) != null;
+    }
+
+    // The inputs of kept body `k`, a `@prove_exhaustive` function's (`PJob`); None after the report of
+    // why they cannot run: a generic function, a `decreases` clause, a parameter without a small set of
+    // values, or too many inputs. Each integer parameter takes the values its type and the bounds
+    // that the `requires` clauses imply allow.
+    fn exhaustive_job(self: &mut Self, k: usize) Option<PJob> {
+        let bp = (&unsafe (&*self.keep).kept.at(k).body) as *const ir::CoreBody;
+        let b = unsafe &*bp;
+        self.m = b.module;
+        self.b = bp;
+        self.me = k as u32;
+        self.refining = false;
+        self.tm.clear();
+        self.sv.steps = 0;
+        self.steps = 0;
+        self.over = false;
+        self.failed.clear();
+        let _ = self.needs_proof(b);
+        self.begin_sites(b, false);
+        let a = self.ast_of(b.module);
+        let f = b.owner.node;
+        let name_sp = a.at_const(a.ext_name(f)).span;
+        let mut ok = true;
+        if a.ext(f).function.generics.len != 0 || a.extend_arity(f) > 0 {
+            self.report(
+                OB_EVAL << 56 | k as u64 << 8,
+                dc::PROVE_EXHAUSTIVE_DOMAIN,
+                name_sp,
+                format("'@prove_exhaustive' cannot evaluate a generic function"),
+                String::from_str("its values depend on the types it is instantiated with"),
+            );
+            return None;
+        }
+        for j in 0..b.contracts.len() {
+            if b.contracts[j].kind == CT_DECREASES {
+                ok = false;
+                self.report(
+                    OB_EVAL << 56 | k as u64 << 8 | 1 | j as u64 << 40,
+                    dc::PROVE_EXHAUSTIVE_DECREASES,
+                    self.site_span(b.module, b.contracts[j]),
+                    format("a '@prove_exhaustive' function takes no 'decreases' measure"),
+                    String::from_str("each evaluation of the function ends, which proves that it ends"),
+                );
+            }
+        }
+        // The `requires` clauses at the entry, over the parameters' unknowns.
+        let mut st = Vector::<u32>::new();
+        fill(&mut st, b.locals.len() + 1);
+        st.set(b.locals.len(), self.tm.var(W_OTHER, false));
+        for l in b.returns..b.returns + b.args {
+            self.forget(b, b.module, &mut st, l);
+        }
+        let mut pc = Vector::<u32>::new();
+        let none = tok::Span { start: 0, end: 0 };
+        for j in 0..b.contracts.len() {
+            if b.contracts[j].kind == CT_REQUIRES {
+                let (c, _v) = self.chain(b, b.module, b.contracts[j], &st, &pc, false, none);
+                pc.push(c);
+            }
+        }
+        let mut dims = Vector::<PDim>::with_capacity(b.args as usize);
+        for l in b.returns..b.returns + b.args {
+            switch self.pdim(b, l, &st, &pc) {
+                Some(d) => dims.push(d),
+                None => {
+                    ok = false;
+                    self.report(
+                        OB_EVAL << 56 | k as u64 << 8 | 2 | l as u64 << 40,
+                        dc::PROVE_EXHAUSTIVE_DOMAIN,
+                        b.locals.at(l as usize).name(),
+                        format(
+                            "'@prove_exhaustive' cannot enumerate the values of parameter '{}'",
+                            self.text(b.module, b.locals.at(l as usize).name()),
+                        ),
+                        String::from_str(
+                            "a parameter must be a 'bool', an integer, an enum without payloads, or a shared reference to one of them",
+                        ),
+                    );
+                },
+            }
+        }
+        if !ok {
+            return None;
+        }
+        let mut inputs: u64 = 1;
+        let mut sizes = String::new();
+        for j in 0..dims.len() {
+            inputs = inputs.saturating_mul(dims[j].n);
+            if j != 0 {
+                sizes.push_str(", ");
+            }
+            sizes.format_into(
+                "'{}' takes {} values",
+                self.text(b.module, b.locals.at(dims[j].l as usize).name()),
+                dims[j].count.to_string().as_str(),
+            );
+        }
+        if inputs > PE_INPUTS_MAX {
+            self.report2(
+                OB_EVAL << 56 | k as u64 << 8 | 3,
+                dc::PROVE_EXHAUSTIVE_DOMAIN,
+                name_sp,
+                format("'@prove_exhaustive': the parameters take more than {} combinations of values", PE_INPUTS_MAX),
+                sizes,
+                String::from_str("narrow an integer parameter with 'requires', as 'requires x < 256'"),
+            );
+            return None;
+        }
+        return Some(PJob { k: k, dims: dims, inputs: inputs, first: NO_INPUT });
+    }
+
+    // Parameter `l` of body `b` as an input dimension (`PDim`), None when it has no small set of
+    // values; an integer's range is narrowed to the bounds the conditions `pc` imply of its unknown in
+    // `st`.
+    fn pdim(self: &mut Self, b: &ir::CoreBody, l: u32, st: &Vector<u32>, pc: &Vector<u32>) Option<PDim> {
+        let a = self.ast_of(b.module);
+        let mut ty = b.locals.at(l as usize).ty;
+        if ty == TYPE_NONE {
+            return None;
+        }
+        let mut by_ref = false;
+        let y0 = *a.type_at(ty);
+        if y0.kind == TypeKind::TYPE_REFERENCE && y0.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
+            by_ref = true;
+            ty = y0.as_data.elem;
+        }
+        let mut d = PDim {
+            l: l,
+            kind: PD_INT,
+            by_ref: by_ref,
+            lo: i128::zero(),
+            n: 0,
+            count: i128::zero(),
+            w: 0,
+            sg: false,
+            tm: b.module,
+            ty: ty,
+            em: 0,
+            decl: NODE_NONE,
+            tags: Vector::<i64>::new(),
+            vars: Vector::<NodeId>::new(),
+        };
+        let y = *a.type_at(ty);
+        if y.kind == TypeKind::TYPE_ENUM {
+            let ea = self.ast_of(y.module);
+            let decl = y.as_data.decl;
+            if ea.enum_has_payload(decl) {
+                return None;
+            }
+            d.kind = PD_ENUM;
+            d.em = y.module;
+            d.decl = decl;
+            let mut e = iri::interp_new(self.p);
+            let ms = ea.ext(decl).aggregate.members;
+            let mut cur: i64 = 0 - 1;
+            for j in 0..ms.len {
+                let vid = unsafe ea.list(ms)[j as usize];
+                if !e.discr(y.module, vid, cur, &mut cur) {
+                    return None;
+                }
+                d.tags.push(cur);
+                d.vars.push(vid);
+            }
+            d.n = d.tags.len() as u64;
+            d.count = u64_val(d.n);
+            return Some(d);
+        }
+        let (w, sg) = self.ty_of(b.module, ty);
+        if w == W_BOOL {
+            d.kind = PD_BOOL;
+            d.n = 2;
+            d.count = u64_val(2);
+            return Some(d);
+        }
+        if w < 8 {
+            return None;
+        }
+        d.w = w;
+        d.sg = sg;
+        let (lo0, hi0) = Terms::range(w, sg);
+        let mut lo = lo0;
+        let mut hi = hi0;
+        let x = st[l as usize];
+        if !by_ref && x != NONE && pc.len() != 0 {
+            // The least `hi` with `x <= hi`, then the greatest `lo` with `lo <= x`: each query halves the
+            // range left (at most 128 of each).
+            let mut a = lo0;
+            for _q in 0..130 {
+                if a >= hi {
+                    break;
+                }
+                let mid = a + (hi - a).shr(1);
+                let c = self.tm.int(mid, w, sg);
+                let goal = self.tm.cmp(T_LE, x, c);
+                self.sv.steps = 0;
+                if self.sv.implies(&self.tm, pc, goal) {
+                    hi = mid;
+                } else {
+                    a = mid + i128::one();
+                }
+            }
+            let mut z = hi;
+            for _q in 0..130 {
+                if lo >= z {
+                    break;
+                }
+                let mid = z - (z - lo).shr(1);
+                let c = self.tm.int(mid, w, sg);
+                let goal = self.tm.cmp(T_LE, c, x);
+                self.sv.steps = 0;
+                if self.sv.implies(&self.tm, pc, goal) {
+                    lo = mid;
+                } else {
+                    z = mid - i128::one();
+                }
+            }
+        }
+        d.lo = lo;
+        d.count = if hi < lo {
+            i128::zero()
+        } else {
+            hi - lo + i128::one()
+        };
+        d.n = if wide(iri::I64_MAX) < d.count {
+            NO_INPUT
+        } else {
+            d.count.to_i64() as u64
+        };
+        return Some(d);
+    }
+
+    // Report the first failed run of `job`, from part `r`, which holds the least failed input.
+    fn report_part(self: &mut Self, job: &PJob, r: &PRes) {
+        let b = unsafe &(&*self.keep).kept.at(job.k).body;
+        self.m = b.module;
+        let key = OB_EVAL << 56 | job.k as u64 << 8 | 4;
+        if !r.cut {
+            self.report2(key, dc::CANNOT_PROVE_CONTRACT, r.sp, r.msg.clone(), r.note.clone(), r.note2.clone());
+            return;
+        }
+        self.report2(
+            key,
+            dc::CANNOT_PROVE_CONTRACT,
+            r.sp,
+            format("cannot prove that this function ends: its evaluation takes more than {} steps", share(job)),
+            r.note.clone(),
+            format(
+                "each of its {} inputs may take an equal share of {} steps: narrow them with 'requires', or split the function",
+                job.inputs,
+                PE_STEPS,
+            ),
+        );
     }
 
     // The body whose contract sites hold function `d`'s contracts: its kept body, or for an
@@ -3218,26 +3555,7 @@ extend Prover {
         self.steps = 0;
         self.over = false;
         self.failed.clear();
-        self.fx.begin(b, self.p);
-        self.scan_tracked(b);
-        let nb = b.blocks.len();
-        fill(&mut self.site_of_chain, nb);
-        fill(&mut self.site_of_pred, nb);
-        for j in 0..b.contracts.len() {
-            let s = b.contracts[j];
-            self.site_of_chain.set(s.chain as usize, j as u32);
-            self.site_of_pred.set(s.pred as usize, j as u32);
-            let sp = self.site_span(b.module, s);
-            if !refining && !self.pure_chain(b, s, sp) {
-                self.report(
-                    0xFE00000000000000u64 | j as u64,
-                    dc::CONTRACT_NOT_PURE,
-                    sp,
-                    format("a contract must only compute its condition"),
-                    String::from_str("it calls a function that is not a 'const fn', drops a value or writes a variable"),
-                );
-            }
-        }
+        self.begin_sites(b, refining);
         self.ovf = if b.contracts.len() != 0 {
             OVF_PROVE
         } else {
@@ -3295,6 +3613,32 @@ extend Prover {
             self.run_block(b, path);
         }
         self.budget_spent();
+    }
+
+    // Start the walk of body `b`: its facts, the locals it models, and where each contract chain starts
+    // and is entered. A chain that does more than compute its condition is reported (not by the
+    // refinement walk, the body's second).
+    fn begin_sites(self: &mut Self, b: &ir::CoreBody, refining: bool) {
+        self.fx.begin(b, self.p);
+        self.scan_tracked(b);
+        let nb = b.blocks.len();
+        fill(&mut self.site_of_chain, nb);
+        fill(&mut self.site_of_pred, nb);
+        for j in 0..b.contracts.len() {
+            let s = b.contracts[j];
+            self.site_of_chain.set(s.chain as usize, j as u32);
+            self.site_of_pred.set(s.pred as usize, j as u32);
+            let sp = self.site_span(b.module, s);
+            if !refining && !self.pure_chain(b, s, sp) {
+                self.report(
+                    0xFE00000000000000u64 | j as u64,
+                    dc::CONTRACT_NOT_PURE,
+                    sp,
+                    format("a contract must only compute its condition"),
+                    String::from_str("it calls a function that is not a 'const fn', drops a value or writes a variable"),
+                );
+            }
+        }
     }
 
     fn push_path(self: &mut Self, path: Path) {
@@ -3662,7 +4006,10 @@ extend Prover {
         // A call back into the function's own component must decrease the measure too.
         let ci = self.kept_index(d);
         let scc = &self.shared().scc;
-        if self.fn_dec && !own && ci != NONE && self.me != NONE && scc[ci as usize] != NONE && scc[ci as usize] == scc[self.me as usize] {
+        // A `@prove_exhaustive` callee ends for each argument its `requires` admits: each run ended.
+        if self.fn_dec && !own && ci != NONE && self.me != NONE && scc[ci as usize] != NONE && scc[ci as usize] == scc[self.me as usize] && !self.exhaustive(
+            d,
+        ) {
             self.mutual(b, path, t, ci);
         }
         let has_req = self.has_clause(d, CT_REQUIRES);
@@ -3808,14 +4155,329 @@ const fn param_bit(cb: &ir::CoreBody, l: u32) u64 {
     return 1u64 << (l - cb.returns) as u64;
 }
 
-/// Whether a module of `p` states a contract: else there is nothing to prove.
+/// Whether a module of `p` states a contract or marks a function `@prove_exhaustive`: else there is
+/// nothing to prove.
 pub(package) fn any_contracts(p: &loader::Package) bool {
     for m in 0..p.modules.len() {
-        if p.modules.at(m).has_ast && unsafe (&*p.module_ast_const(m as ModuleId)).contracts.len() != 0 {
+        if p.modules.at(m).has_ast && (unsafe (&*p.module_ast_const(m as ModuleId)).contracts.len() != 0 || any_exhaustive_in(
+            p,
+            m,
+        )) {
             return true;
         }
     }
     return false;
+}
+
+/// Whether a module of `p` marks a function `@prove_exhaustive`: its proofs run the evaluator.
+pub(package) fn any_exhaustive(p: &loader::Package) bool {
+    for m in 0..p.modules.len() {
+        if p.modules.at(m).has_ast && any_exhaustive_in(p, m) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn any_exhaustive_in(p: &loader::Package, m: usize) bool {
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    for j in 0..a.attrs.len() {
+        if a.attrs.at(j).kind == AttrKind::ATTR_PROVE_EXHAUSTIVE as u8 {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The position of input `x`'s value of parameter `j` of `job` among the parameter's values.
+fn input_index(job: &PJob, x: u64, j: usize) u64 {
+    let mut q = x;
+    let mut i = job.dims.len();
+    for _k in 0..job.dims.len() {
+        i -= 1;
+        if i == j {
+            break;
+        }
+        q /= job.dims[i].n;
+    }
+    return q % job.dims[j].n;
+}
+
+// The arguments of input `x` of `job`, as evaluator values.
+fn input_args(job: &PJob, x: u64, out: &mut Vector<iri::IVal>) {
+    out.clear();
+    for j in 0..job.dims.len() {
+        let d = &job.dims[j];
+        let i = input_index(job, x, j);
+        let v = if d.kind == PD_BOOL {
+            iri::IVal { kind: iri::IV_BOOL, tm: d.tm, ty: d.ty, i: i as i64, f: 0.0 }
+        } else if d.kind == PD_ENUM {
+            iri::IVal { kind: iri::IV_INT, tm: d.tm, ty: d.ty, i: d.tags[i as usize], f: 0.0 }
+        } else {
+            let bits = bits_of(d.lo + u64_val(i), d.w);
+            let sh = 64 - d.w as u64;
+            let iv = if d.sg {
+                (bits << sh) as i64 >> sh as i64
+            } else {
+                bits as i64
+            };
+            iri::IVal { kind: iri::IV_INT, tm: d.tm, ty: d.ty, i: iv, f: 0.0 }
+        };
+        out.push(v);
+    }
+}
+
+// Input `x` of `job` by the parameters of body `b`: `for example: x = 3, c = Color::Red`.
+fn describe_input(p: &loader::Package, b: &ir::CoreBody, job: &PJob, x: u64, out: &mut String) {
+    let src = p.modules.at(b.module as usize).source.as_str();
+    out.push_str("for example: ");
+    for j in 0..job.dims.len() {
+        let d = &job.dims[j];
+        let i = input_index(job, x, j);
+        if j != 0 {
+            out.push_str(", ");
+        }
+        let nm = b.locals.at(d.l as usize).name();
+        out.push_str(src.slice(nm.start as usize, nm.end as usize));
+        out.push_str(" = ");
+        if d.kind == PD_BOOL {
+            out.push_str(pick(i == 0, "false", "true"));
+        } else if d.kind == PD_ENUM {
+            let ea = unsafe &*p.module_ast_const(d.em);
+            let es = p.modules.at(d.em as usize).source.as_str();
+            let en = ea.at_const(ea.ext_name(d.decl)).span;
+            out.push_str(es.slice(en.start as usize, en.end as usize));
+            out.push_str("::");
+            let vn = ea.at_const(ea.at_const(d.vars[i as usize]).as_data.variant.name).span;
+            out.push_str(es.slice(vn.start as usize, vn.end as usize));
+        } else {
+            out.push_str((d.lo + u64_val(i)).to_string().as_str());
+        }
+    }
+}
+
+// An evaluator for `@prove_exhaustive` runs, its budgets fixed: the build's `--const-eval-*` do not
+// change a proof.
+fn engine(p: &loader::Package) iri::Interp {
+    let mut e = iri::interp_new(p);
+    e.all_typed = true;
+    return e;
+}
+
+// The name of function `d`, as its source spells it.
+fn fn_name(p: &loader::Package, d: DefId) str {
+    let a = unsafe &*p.module_ast_const(d.module);
+    if (d.node & NODE_BODY) != 0 || a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+        return "<closure>";
+    }
+    let sp = a.at_const(a.ext_name(d.node)).span;
+    return p.modules.at(d.module as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
+}
+
+// Run inputs [`r.from`, `r.to`) of `job` in order, to the first that fails (`PRes`), or to one after a
+// failed input another part found: an input whose own `requires` fails is skipped.
+fn run_inputs(p: &loader::Package, keep: &irl::Keep, job: &PJob, r: &mut PRes) {
+    let b = &keep.kept.at(job.k).body;
+    // The parts of the job share `first` through atomic operations only.
+    let first = ptr::cast_mut(&job.first);
+    let mut e = engine(p);
+    let mut args = Vector::<iri::IVal>::with_capacity(job.dims.len());
+    let mut refs: u64 = 0;
+    for j in 0..job.dims.len() {
+        if job.dims[j].by_ref && j < 64 {
+            refs |= 1u64 << j as u64;
+        }
+    }
+    for x in r.from..r.to {
+        if unsafe atomic::load_u64(first, 0) < x {
+            return;
+        }
+        input_args(job, x, &mut args);
+        let k = e.prove_run(b, &args, refs, share(job) as u32);
+        if k == iri::PR_OK || k == iri::PR_ASSERT && e.pa_depth == 1 && e.pa_kind == CT_REQUIRES {
+            continue;
+        }
+        r.at = x;
+        r.cut = k == iri::PR_TRAP && e.trap_kind_get() == iri::IT_TRAP_BUDGET_STEPS;
+        if job.dims.len() != 0 {
+            describe_input(p, b, job, x, &mut r.note);
+        }
+        if !r.cut {
+            fail_report(p, b, &mut e, k, r);
+        } else {
+            let a = unsafe &*p.module_ast_const(b.module);
+            r.sp = a.at_const(a.ext_name(b.owner.node)).span;
+        }
+        for _q in 0..64 {
+            let f = unsafe atomic::load_u64(first, 0);
+            if f <= x || unsafe atomic::cas_u64(first, f, x, false, 0, 0) {
+                break;
+            }
+        }
+        return;
+    }
+}
+
+// The report of the run of body `b` that ended `k` (`iri::PR_*`) in `e`.
+fn fail_report(p: &loader::Package, b: &ir::CoreBody, e: &mut iri::Interp, k: u8, r: &mut PRes) {
+    let a = unsafe &*p.module_ast_const(b.module);
+    r.sp = a.at_const(a.ext_name(b.owner.node)).span;
+    if k == iri::PR_ASSERT {
+        let owner = String::from_str(fn_name(p, e.pa_owner));
+        let ca = unsafe &*p.module_ast_const(e.pa_owner.module);
+        let clause = if e.pa_kind != iri::PA_PLAIN {
+            let sp = ca.at_const(ca.contracts.at(e.pa_clause as usize).expr).span;
+            String::from_str(
+                p.modules.at(e.pa_owner.module as usize).source.as_str().slice(sp.start as usize, sp.end as usize),
+            )
+        } else {
+            String::new()
+        };
+        if e.pa_depth == 1 {
+            r.sp = if e.pa_kind != iri::PA_PLAIN {
+                ca.at_const(ca.contracts.at(e.pa_clause as usize).expr).span
+            } else {
+                e.pa_span
+            };
+            r.msg = if e.pa_kind == CT_ENSURES {
+                String::from_str("this 'ensures' clause does not hold")
+            } else if e.pa_kind == CT_INVARIANT {
+                String::from_str("this 'invariant' does not hold")
+            } else {
+                String::from_str("this assertion fails")
+            };
+        } else {
+            r.sp = e.pa_top;
+            r.msg = if e.pa_kind == CT_REQUIRES && e.pa_depth == 2 {
+                format("the 'requires' of '{}' does not hold at this call", owner.as_str())
+            } else if e.pa_kind == CT_REQUIRES {
+                format("the 'requires' of '{}' does not hold in this call", owner.as_str())
+            } else if e.pa_kind == CT_ENSURES {
+                format("the 'ensures' of '{}' does not hold in this call", owner.as_str())
+            } else if e.pa_kind == CT_INVARIANT {
+                format("an 'invariant' of '{}' does not hold in this call", owner.as_str())
+            } else {
+                format("an assertion of '{}' fails in this call", owner.as_str())
+            };
+            if clause.len() != 0 {
+                r.note2 = format("the clause: {}", clause.as_str());
+            }
+        }
+    } else if k == iri::PR_TRAP {
+        let tk = e.trap_kind_get();
+        let mut detail = String::from_str(e.trap);
+        let mut calls = String::new();
+        // A panic's innermost frame is the panic itself.
+        e.trap_frames(pick(tk == iri::IT_TRAP_PANIC, 1u32, 0), &mut calls);
+        if calls.len() != 0 {
+            detail.format_into(" (in {})", calls.as_str());
+        }
+        let top = e.trap_span.end > e.trap_span.start;
+        if top {
+            r.sp = e.trap_span;
+        }
+        r.msg = if iri::it_trap_is_ub(tk) && top {
+            format("this statement is undefined behavior for some arguments: {}", detail.as_str())
+        } else if tk == iri::IT_TRAP_PANIC && top {
+            format("this statement panics for some arguments: {}", detail.as_str())
+        } else {
+            format("the evaluation of this function fails for some arguments: {}", detail.as_str())
+        };
+    } else {
+        if e.top_span.end > e.top_span.start {
+            r.sp = e.top_span;
+        }
+        r.msg = String::from_str("'@prove_exhaustive' cannot evaluate this at compile time");
+        let mut why = String::new();
+        e.refused_text(&mut why);
+        if why.len() != 0 {
+            r.note2 = format("it reaches {}", why.as_str());
+        } else if e.ffi {
+            r.note2 = String::from_str("it reaches a call of an external function");
+        }
+    }
+}
+
+// The `@prove_exhaustive` functions of `keep` outside the modules `skip` marks: their inputs split into
+// parts that run in parallel, and each function reports the run of its least failed input, whatever
+// the split.
+fn prove_exhaustive(pv: &mut Prover, p: &loader::Package, keep: &irl::Keep, skip: &Vector<bool>) {
+    let mut jobs = Vector::<PJob>::new();
+    for k in 0..keep.kept.len() {
+        let kb = keep.kept.at(k);
+        if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] && pv.exhaustive(kb.body.owner) {
+            switch pv.exhaustive_job(k) {
+                Some(j) => {
+                    if j.inputs != 0 {
+                        jobs.push(j);
+                    }
+                },
+                None => {},
+            }
+        }
+    }
+    let mut parts = Vector::<PRes>::new();
+    let workers: u64 = pick(p.jobs == 0, 1, p.jobs);
+    for j in 0..jobs.len() {
+        let n = jobs[j].inputs;
+        let np = if workers == 1 || n < 2 {
+            1
+        } else {
+            n.min(workers * PE_PARTS)
+        };
+        for c in 0..np {
+            parts.push(
+                PRes {
+                    job: j as u32,
+                    from: c * n / np,
+                    to: (c + 1) * n / np,
+                    at: NO_INPUT,
+                    cut: false,
+                    sp: tok::Span { start: 0, end: 0 },
+                    msg: String::new(),
+                    note: String::new(),
+                    note2: String::new(),
+                },
+            );
+        }
+    }
+    if parts.len() == 0 {
+        return;
+    }
+    if workers == 1 || parts.len() < 2 {
+        for c in 0..parts.len() {
+            run_inputs(p, keep, &jobs[parts[c].job as usize], parts.index_mut(c));
+        }
+    } else {
+        let pa = (p as *const loader::Package) as usize;
+        let ka = (keep as *const irl::Keep) as usize;
+        let ja = jobs.as_ptr() as usize;
+        let ra = parts.as_mut_ptr() as usize;
+        // A part's cost is its function's: each worker claims one part at a time.
+        dpar::range_with(
+            0..parts.len(),
+            dpar::Options { schedule: dpar::Schedule::Dynamic, grain_size: 1 },
+            |c: usize| {
+                let pk = unsafe &*ptr::from_addr_mut::<loader::Package>(pa);
+                let kp = unsafe &*ptr::from_addr_mut::<irl::Keep>(ka);
+                let r = unsafe &mut *(ptr::from_addr_mut::<PRes>(ra) + c);
+                let job = unsafe &*(ptr::from_addr_mut::<PJob>(ja) + r.job as usize);
+                run_inputs(pk, kp, job, r);
+            },
+        );
+    }
+    // The parts of a job lie in input order: its first part with a failed run holds the least one.
+    let mut c: usize = 0;
+    for j in 0..jobs.len() {
+        let mut done = false;
+        while c < parts.len() && parts[c].job as usize == j {
+            if !done && parts[c].at != NO_INPUT {
+                done = true;
+                pv.report_part(&jobs[j], &parts[c]);
+            }
+            c += 1;
+        }
+    }
 }
 
 /// Prove the contracts of every kept body of `keep` outside the modules `skip` marks, and print the
@@ -3857,8 +4519,10 @@ pub(package) fn check_kept(
         let ma = ((&pv) as *const Prover) as usize;
         let sa = (skip as *const Vector<bool>) as usize;
         let oa = outs.as_mut_ptr() as usize;
-        dpar::range(
+        // A chunk's cost is its bodies': each worker claims one chunk at a time.
+        dpar::range_with(
             0..chunks,
+            dpar::Options { schedule: dpar::Schedule::Dynamic, grain_size: 1 },
             |c: usize| {
                 let pk = unsafe &*ptr::from_addr_mut::<loader::Package>(pa);
                 let kp = unsafe &*ptr::from_addr_mut::<irl::Keep>(ka);
@@ -3902,6 +4566,7 @@ pub(package) fn check_kept(
             }
         }
     }
+    prove_exhaustive(&mut pv, p, keep, skip);
     let mut ok = true;
     for m in 0..p.modules.len() {
         held.set(m, pv.errs.at(m).errors.len() == 0);

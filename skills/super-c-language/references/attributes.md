@@ -30,6 +30,7 @@
 | `@test` / `@test_init` / `@test_free` | Test harness; `@test(should_panic, timeout = N)` takes either argument or both |
 | `@blocking` | Run extern on blocking pool |
 | `@tail_recurse` | Every call of the function to itself must become a jump (see Functions); a function with a body only |
+| `@prove_exhaustive` | Prove the function by running it at compile time on every value of its parameters, in place of the symbolic proof (basics.md, Contracts); a function with a body only |
 | `@no_const` | Struct, union or enum whose values never exist at compile time; a function that is never a `const fn` (an error on one; `lint --const` skips it) |
 | `@intrinsic("<name>")` | `std` only: a function without a body whose call is the operation the name gives: a vector operation `simd.<name>` (references/simd.md), `float.to_int_unchecked` (references/operations.md), the branch hints `hint.likely` and `hint.unlikely` (Branch Hints below), `frame.return_address` (the running function's return address, null on wasm; the leak tracker's allocation sites), or `mem.volatile_load` / `mem.volatile_store` (one access the C compiler keeps, orders and never merges: `std::mem::volatile` wraps them as `read_volatile`, `write_volatile` and `zeroize`) |
 | `@unsafe(safe, const)` | Unverified claims on an extern function, any order, at least one: `safe` = callable without `unsafe`, `const` = its body models it at compile time (see `super-c-ffi`) |

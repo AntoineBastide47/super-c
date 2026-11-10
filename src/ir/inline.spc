@@ -1166,7 +1166,7 @@ fn vet_decl(pkg: *const loader::Package, d: DefId, ext: &mut NodeId, demand: &mu
         }
         // The build filter and the feature checks have read the gates and features: no code of theirs.
         let kd = a.attrs.at(k).kind;
-        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_WHEN as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8 || kd == AttrKind::ATTR_TAIL_RECURSE as u8;
+        let benign = kd == AttrKind::ATTR_INLINE as u8 || kd == AttrKind::ATTR_ALWAYS_INLINE as u8 || kd == AttrKind::ATTR_USED as u8 || kd == AttrKind::ATTR_UNUSED as u8 || kd == AttrKind::ATTR_FMT_SKIP as u8 || kd == AttrKind::ATTR_NO_CONST as u8 || kd == AttrKind::ATTR_PLATFORM as u8 || kd == AttrKind::ATTR_ARCH as u8 || kd == AttrKind::ATTR_WHEN as u8 || kd == AttrKind::ATTR_TARGET_FEATURE as u8 || kd == AttrKind::ATTR_TAIL_RECURSE as u8 || kd == AttrKind::ATTR_PROVE_EXHAUSTIVE as u8;
         if !benign {
             return REJ_BASE | IJ_NOT_FN as u64;
         }

@@ -352,7 +352,7 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 39] = [
+const ATTR_DOCS: [AttrDoc; 40] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -430,6 +430,11 @@ const ATTR_DOCS: [AttrDoc; 39] = [
         name: "tail_recurse",
         sig: "@tail_recurse",
         doc: "Every call of the function to itself must be a tail call that becomes a jump; one that cannot is an error.",
+    },
+    AttrDoc {
+        name: "prove_exhaustive",
+        sig: "@prove_exhaustive",
+        doc: "The build proves the function's contracts and that it cannot panic by evaluating it on every value of its parameters (at most 65536), not symbolically.",
     },
     AttrDoc {
         name: "associative_math",

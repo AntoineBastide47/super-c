@@ -1,6 +1,6 @@
 // Contracts: `requires`, `ensures`, `decreases` and loop `invariant` clauses, their checks, the
-// prover that runs in every build, and the flags that keep the checks at run time
-// (`-fcontract-checks`) or skip the proofs (`-fno-prove`).
+// prover that runs in every build, `@prove_exhaustive` (a proof by evaluation of every input), and the
+// flags that keep the checks at run time (`-fcontract-checks`) or skip the proofs (`-fno-prove`).
 import tests::harness as h;
 import tests::cli_harness as cli;
 
@@ -40,6 +40,11 @@ fn clauses_are_checked_like_conditions() {
         "an unknown name in a requires condition",
         "fn f(x: u32) requires y > 0 {}\nfn main() i32 { f(1); return 0; }\n",
         "cannot find value 'y'",
+    );
+    h::expect_err_msg(
+        "a proof by evaluation of a struct",
+        "@prove_exhaustive\nstruct S {\n    x: u8,\n}\nfn main() i32 { return 0; }\n",
+        "'@prove_exhaustive' may only be applied to a function with a body",
     );
     assert(h::parse_has_error("fn f(x: u32) requires x > 0;\n"), "a contract without a body");
     assert(
@@ -408,11 +413,305 @@ fn main() i32 {
     );
 }
 
+// `@prove_exhaustive`: each function's runs over all its inputs hold, so the build proves it and runs.
+fn exhaustive_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "a table and its inverse, proved as a lemma with an empty body",
+        M"(const S: [u8; 4] = [2, 0, 3, 1];
+const INV: [u8; 4] = [1, 3, 0, 2];
+@prove_exhaustive
+fn inverse(x: u8)
+    requires x < 4
+    ensures INV[S[x as usize] as usize] == x
+{}
+fn main() i32 {
+    return S[INV[2] as usize];
+}
+)",
+        2,
+    );
+    b.add(
+        "an enum's variants, a bool, and a method that takes its enum by reference",
+        M"(enum Color {
+    Red,
+    Green = 5,
+    Blue,
+}
+extend Color {
+    @prove_exhaustive
+    fn code(self: &Self) u8
+        ensures |r| r < 3
+    {
+        return switch *self {
+            Color::Red => 0,
+            Color::Green => 1,
+            Color::Blue => 2,
+        };
+    }
+}
+@prove_exhaustive
+fn choose(c: Color, b: bool) u8
+    ensures |r| r != 7
+{
+    if b && c == Color::Blue {
+        return 6;
+    }
+    return c.code();
+}
+fn main() i32 {
+    return choose(Color::Blue, false) + Color::Green.code();
+}
+)",
+        3,
+    );
+    b.add(
+        "a usize narrowed by its requires, and inputs its requires excludes",
+        M"(const T: [u8; 300] = [3; 300];
+@prove_exhaustive
+fn look(i: usize) u8
+    requires i < 300
+    ensures |r| r < 7
+{
+    return T[i];
+}
+@prove_exhaustive
+fn share(x: u8) u8
+    requires x != 0
+    ensures |r| r <= 100
+{
+    return 100 / x;
+}
+fn main() i32 {
+    return look(299) + share(7);
+}
+)",
+        17,
+    );
+    b.add(
+        "a loop invariant, a callee's requires and a function without contracts",
+        M"(fn half(x: u8) u8
+    requires x % 2 == 0
+{
+    return x / 2;
+}
+@prove_exhaustive
+fn twice_half(x: u8) u8
+    requires x < 100
+{
+    return half(x * 2);
+}
+@prove_exhaustive
+fn tri(n: u8) u32
+    ensures |r| r <= 32385
+{
+    let mut s: u32 = 0;
+    let mut i: u8 = 0;
+    while i < n
+        invariant s <= 32385
+    {
+        s += i;
+        i += 1;
+    }
+    return s;
+}
+@prove_exhaustive
+fn mix(a: u8, b: bool) u8 {
+    return if b { a / 2 } else { a ^ 0x5A };
+}
+@prove_exhaustive
+fn three() u8
+    ensures |r| r == 3
+{
+    return 3;
+}
+fn main() i32 {
+    return (twice_half(3) as u32 + tri(4) + mix(10, true) as u32 + three() as u32) as i32;
+}
+)",
+        17,
+    );
+    b.add(
+        "a cycle with a measure through a function each of whose runs ended",
+        M"(fn even(n: u8) bool
+    requires n < 40
+    decreases n
+{
+    if n == 0 {
+        return true;
+    }
+    return odd(n - 1);
+}
+@prove_exhaustive
+fn odd(n: u8) bool
+    requires n < 40
+{
+    if n == 0 {
+        return false;
+    }
+    return even(n - 1);
+}
+fn main() i32 {
+    return even(4) as i32 + odd(3) as i32 * 2;
+}
+)",
+        3,
+    );
+    b.add(
+        "an enum's conformance that refines its interface",
+        M"(interface Area {
+    fn area(self: &Self, k: u8) u8
+        requires k < 10
+        ensures |r| r < 100;
+}
+enum Kind {
+    A,
+    B,
+}
+extend Kind as Area {
+    @prove_exhaustive
+    fn area(self: &Self, k: u8) u8
+        requires k < 12
+        ensures |r| r < 133
+    {
+        return k * 11;
+    }
+}
+fn main() i32 {
+    return Kind::B.area(2);
+}
+)",
+        22,
+    );
+}
+
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
     proved_contracts(&mut b);
+    exhaustive_proofs(&mut b);
     b.run();
+}
+
+// `@prove_exhaustive`: the first input whose run fails, reported where it fails, and the functions
+// whose inputs cannot run.
+@test
+fn exhaustive_failures_are_reported() {
+    let mut b = cli::Batch::new("", "fn main() i32 {\n    return 0;\n}\n");
+    b.add_at(
+        "an ensures over a table",
+        "const S: [u8; 4] = [2, 0, 3, 1];\n@prove_exhaustive\nfn inv(x: u8) requires x < 4 ensures S[S[x as usize] as usize] == x {}\n",
+        "this 'ensures' clause does not hold",
+        "3:38",
+    );
+    b.add_at(
+        "a loop invariant",
+        "@prove_exhaustive\nfn sum(n: u8) u32 {\n    let mut s: u32 = 0;\n    let mut i: u8 = 0;\n    while i < n invariant s <= 1000 {\n        s += i;\n        i += 1;\n    }\n    return s;\n}\n",
+        "this 'invariant' does not hold",
+        "5:27",
+    );
+    b.add_at(
+        "a callee's requires",
+        "fn half(x: u8) u8 requires x % 2 == 0 { return x / 2; }\n@prove_exhaustive\nfn calls(x: u8) u8 { return half(x); }\n",
+        "the 'requires' of 'half' does not hold at this call",
+        "3:29",
+    );
+    b.add_at(
+        "an overflow",
+        "@prove_exhaustive\nfn add1(x: u8) u8 { return x + 1; }\n",
+        "undefined behavior for some arguments: arithmetic overflow",
+        "2:28",
+    );
+    b.add_at(
+        "an overflow in a callee",
+        "fn inner(x: u8) u8 { return x * 2; }\n@prove_exhaustive\nfn outer(x: u8) u8 { return inner(x); }\n",
+        "undefined behavior for some arguments: arithmetic overflow (in inner)",
+        "3:29",
+    );
+    b.add_at(
+        "an index past the end",
+        "@prove_exhaustive\nfn idx(i: u8) u8 {\n    let t: [u8; 10] = [0; 10];\n    return t[i as usize];\n}\n",
+        "undefined behavior for some arguments: index out of bounds",
+        "4:12",
+    );
+    b.add_at(
+        "a division by zero",
+        "@prove_exhaustive\nfn dv(x: u8, y: u8) u8 requires x < 4 { return x / y; }\n",
+        "undefined behavior for some arguments: division by zero",
+        "2:48",
+    );
+    b.add_at(
+        "a panic",
+        "@prove_exhaustive\nfn pan(x: u8) u8 {\n    if x == 77 {\n        panic(\"no\");\n    }\n    return x;\n}\n",
+        "this statement panics for some arguments: no\n",
+        "4:9",
+    );
+    b.add_at(
+        "an assertion",
+        "@prove_exhaustive\nfn asrt(x: i8) i8 {\n    assert(x != -3, \"x\");\n    return x;\n}\n",
+        "this assertion fails",
+        "3:12",
+    );
+    b.add_at(
+        "a callee's ensures",
+        "fn g(x: u8) u8 ensures |r| r < 200 { return x; }\n@prove_exhaustive\nfn h(x: u8) u8 { return g(x); }\n",
+        "the 'ensures' of 'g' does not hold in this call",
+        "3:25",
+    );
+    b.add_at(
+        "a run that does not end",
+        "@prove_exhaustive\nfn spin(x: u8) u8 {\n    let mut y = x;\n    while y != 3 {\n        y = y;\n    }\n    return y;\n}\n",
+        "cannot prove that this function ends: its evaluation takes more than 262144 steps",
+        "2:4",
+    );
+    b.add_at(
+        "a generic function",
+        "@prove_exhaustive\nfn gen<T>(x: T) T { return x; }\n",
+        "'@prove_exhaustive' cannot evaluate a generic function",
+        "2:4",
+    );
+    b.add_at(
+        "a measure",
+        "@prove_exhaustive\nfn dec(x: u8) u8 decreases x { return x; }\n",
+        "a '@prove_exhaustive' function takes no 'decreases' measure",
+        "2:28",
+    );
+    b.add_at(
+        "a parameter without a small set of values",
+        "@prove_exhaustive\nfn strp(s: str) usize { return s.len(); }\n",
+        "'@prove_exhaustive' cannot enumerate the values of parameter 's'",
+        "2:9",
+    );
+    b.add_at(
+        "too many inputs",
+        "@prove_exhaustive\nfn two(x: u16, y: u8) u16 { return x + y; }\n",
+        "'x' takes 65536 values, 'y' takes 256 values",
+        "2:4",
+    );
+    b.add_at(
+        "a call the evaluator cannot run",
+        "import stdlib;\n@prove_exhaustive\nfn env(x: u8) u8 {\n    let p = stdlib::getenv(\"HOME\");\n    return x + (p == null) as u8;\n}\n",
+        "'@prove_exhaustive' cannot evaluate this at compile time",
+        "4:13",
+    );
+    b.add_at(
+        "a contract that calls a function that is not a const fn",
+        "fn big(x: u8) bool { return x > 3; }\n@prove_exhaustive\nfn f(x: u8) u8 requires big(x) { return x; }\n",
+        "a contract must only compute its condition",
+        "3:25",
+    );
+    b.add_at(
+        "a function with a requires used as a value",
+        "fn half(x: u8) u8 requires x % 2 == 0 { return x / 2; }\n@prove_exhaustive\nfn v(x: u8) u8 {\n    let f = half;\n    return x;\n}\n",
+        "a function with a 'requires' clause cannot be used as a value",
+        "4:13",
+    );
+    b.add_at(
+        "an enum's conformance weaker than its interface",
+        "interface Area {\n    fn area(self: &Self, k: u8) u8 requires k < 10 ensures |r| r < 100;\n}\nenum Kind {\n    A,\n}\nextend Kind as Area {\n    @prove_exhaustive\n    fn area(self: &Self, k: u8) u8 requires k < 12 ensures |r| r < 133 { return k * 12; }\n}\n",
+        "cannot prove the interface's 'ensures' at this return",
+        "9:74",
+    );
+    h::expect_build_errs(b);
 }
 
 // A build checks no contract at run time unless `-fcontract-checks` asks: with the proofs skipped,
@@ -462,6 +761,18 @@ fn proofs_are_recorded_per_module() {
     assert(still.out_has("cannot prove this 'ensures' clause"), "a failed proof is not recorded");
 }
 
+// The diagnostics of a build's output: its error, location and note lines.
+fn diags(out: str) String {
+    let mut s = String::new();
+    for line in out.lines() {
+        if line.starts_with("error") || line.starts_with("-->") || line.trim_start().starts_with("= note") {
+            s.push_str(line);
+            s.push_str("\n");
+        }
+    }
+    return s;
+}
+
 // The proofs run on several workers and report as one: the same diagnostics, in the same order.
 @test
 fn parallel_proofs_report_like_one() {
@@ -469,11 +780,87 @@ fn parallel_proofs_report_like_one() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/main.spc",
-        "fn a(x: u32) u32 ensures |r| r > x { return x; }\nfn b(x: u32) u32 requires x < 9 { return x; }\nfn c(x: u8) bool ensures |r| r { return x != 4; }\nfn main() i32 { return (a(1) + b(20) + c(2) as u32) as i32; }\n",
+        cli::par_sized(
+            "fn a(x: u32) u32 ensures |r| r > x { return x; }\nfn b(x: u32) u32 requires x < 9 { return x; }\nfn c(x: u8) bool ensures |r| r { return x != 4; }\nfn main() i32 { return (a(1) + b(20) + c(2) as u32) as i32; }\n",
+        ).as_str(),
     );
     let root = p.dir();
-    let one = cli::superc_in(root, "build --jobs=1");
-    let many = cli::superc_in(root, "build --jobs=4");
+    let one = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --jobs=1");
+    let many = cli::superc_env_in(root, "SC_CEMIT_STATS", format("1 {}", cli::NO_JOBSERVER).as_str(), "build --jobs=4");
     assert(one.exit != 0 && one.out_has("for example: x = 4"), "the serial build reports the failed proofs");
-    assert(many.exit != 0 && one.text() == many.text(), "the parallel build reports the same text");
+    assert(one.out_has(", 1 workers\n") && many.out_has(", 4 workers\n"), "the builds prove on one worker and on four");
+    assert(many.exit != 0 && diags(one.text()) == diags(many.text()), "the parallel build reports the same text");
+}
+
+// `@prove_exhaustive` names the first failed input by its arguments, in parameter order, and reports
+// the same on one worker as on four, whose parts of the inputs run in parallel.
+@test
+fn exhaustive_proofs_report_like_one() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        cli::par_sized(
+            M"(enum Color {
+    Red,
+    Blue,
+}
+extend Color {
+    @prove_exhaustive
+    fn code(self: &Self) u8
+        ensures |r| r < 1
+    {
+        return *self as u8;
+    }
+}
+@prove_exhaustive
+fn choose(c: Color, b: bool) u8
+    ensures |r| r != 7
+{
+    return if b && c == Color::Blue { 7 } else { 1 };
+}
+@prove_exhaustive
+fn sum2(a: u8, b: u8) bool
+    ensures |r| r
+{
+    return a as u32 + 2 * b as u32 <= 300;
+}
+const T: [u8; 299] = [1; 299];
+@prove_exhaustive
+fn look(i: usize) u8
+    requires i < 300
+{
+    return T[i];
+}
+@prove_exhaustive
+fn neg(x: i8) i8 {
+    assert(x != -3, "x");
+    return x;
+}
+@prove_exhaustive
+fn spin(x: u8) u8 {
+    let mut y = x;
+    while y != 200 {
+        y = y;
+    }
+    return y;
+}
+fn main() i32 {
+    return 0;
+}
+)",
+        ).as_str(),
+    );
+    let root = p.dir();
+    let one = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build --jobs=1");
+    let many = cli::superc_env_in(root, "SC_CEMIT_STATS", format("1 {}", cli::NO_JOBSERVER).as_str(), "build --jobs=4");
+    assert(one.out_has("= note: for example: self = Color::Blue\n"), "an enum by reference names its variant");
+    assert(one.out_has("= note: for example: c = Color::Blue, b = true\n"), "an enum and a bool");
+    assert(one.out_has("= note: for example: a = 0, b = 151\n"), "the first parameter varies slowest");
+    assert(one.out_has("= note: for example: i = 299\n"), "a usize runs over the range its requires gives");
+    assert(one.out_has("= note: for example: x = -3\n"), "a signed value");
+    assert(one.out_has("= note: for example: x = 0\n"), "the first run that does not end");
+    assert(!one.out_has("unused function"), "a function proved by evaluation is used");
+    assert(one.out_has(", 1 workers\n") && many.out_has(", 4 workers\n"), "the builds prove on one worker and on four");
+    assert(many.exit != 0 && diags(one.text()) == diags(many.text()), "the parallel build reports the same text");
 }

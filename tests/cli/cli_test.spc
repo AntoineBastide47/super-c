@@ -10290,20 +10290,26 @@ fn tt_class(t: &String, cls: str) String {
     return out;
 }
 
-// The package type table is one deterministic identity per structural type: a fully colliding hash
-// publishes the same table; no two records read the same; and a body-only edit at the end of a module
-// keeps every signature-class id and record (only body-class and instance-graph ids move). One worker
-// against every worker under skewed schedules is the gate's worker-identity step (ci/gate.sh).
+// The package type table is one deterministic identity per structural type: a fully colliding hash on
+// four workers publishes the table of one worker; no two records read the same; and a body-only edit
+// at the end of a module keeps every signature-class id and record (only body-class and instance-graph
+// ids move). One worker against every worker under skewed schedules is the gate's worker-identity step
+// (ci/gate.sh).
 @test
 fn type_table_is_deterministic() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/shapes.spc", TT_SHAPES);
-    p.mkfile("src/main.spc", TT_MAIN);
+    p.mkfile("src/main.spc", cli::par_sized(TT_MAIN).as_str());
     let root = p.dir();
     let t1 = tt_build(root, "1", "SC_TYPE_VALIDATE=1", "--jobs=1");
-    let t3 = tt_build(root, "3", "SC_TYPE_VALIDATE=1 SC_TYPE_COLLIDE=1", "--jobs=4");
-    assert(t1.equals(&t3), "a colliding hash publishes the same table");
+    let t3 = tt_build(
+        root,
+        "3",
+        format("SC_TYPE_VALIDATE=1 SC_TYPE_COLLIDE=1 {}", cli::NO_JOBSERVER).as_str(),
+        "--jobs=4",
+    );
+    assert(t1.equals(&t3), "a colliding hash on four workers publishes the same table");
     let mut seen = Set::<String>::new();
     let mut n: usize = 0;
     for line in t1.as_str().lines() {
@@ -10335,7 +10341,10 @@ fn type_table_is_deterministic() {
 fn item_jobs_publish_diagnostics_in_declaration_order() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
-    p.mkfile("src/main.spc", "import lib;\n\nfn main() i32 {\n    return lib::one() + lib::two() + lib::three();\n}\n");
+    p.mkfile(
+        "src/main.spc",
+        cli::par_sized("import lib;\n\nfn main() i32 {\n    return lib::one() + lib::two() + lib::three();\n}\n").as_str(),
+    );
     p.mkfile(
         "src/lib.spc",
         "pub fn one() i32 {\n    let s: str = 1;\n    return 1;\n}\n\nstatic_assert(1 + 1 == 3, \"arithmetic\");\n\npub fn two() i32 {\n    let b: bool = \"no\";\n    return 2;\n}\n\npub fn three() i32 {\n    return \"three\";\n}\n",
@@ -10344,7 +10353,7 @@ fn item_jobs_publish_diagnostics_in_declaration_order() {
     let r1 = cli::superc_in(root, "build --jobs=1");
     assert(!r1.ok(), "the build fails");
     let t1 = String::from_str(unsafe str::from_cstr(r1.out));
-    let r4 = cli::superc_env_in(root, "SC_TASK_DELAY", "1", "build --jobs=4");
+    let r4 = cli::superc_env_in(root, "SC_TASK_DELAY", format("1 {}", cli::NO_JOBSERVER).as_str(), "build --jobs=4");
     assert(!r4.ok(), "the build fails");
     let t4 = String::from_str(unsafe str::from_cstr(r4.out));
     assert(t1.equals(&t4), "one worker and four delayed workers print the same diagnostics");
@@ -10363,7 +10372,9 @@ fn item_jobs_fold_across_an_import_cycle() {
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile(
         "src/main.spc",
-        "import a;\nimport b;\n\nfn main() i32 {\n    return a::buf_len() as i32 + b::back() as i32 - 16;\n}\n",
+        cli::par_sized(
+            "import a;\nimport b;\n\nfn main() i32 {\n    return a::buf_len() as i32 + b::back() as i32 - 16;\n}\n",
+        ).as_str(),
     );
     p.mkfile(
         "src/a.spc",
@@ -10374,7 +10385,12 @@ fn item_jobs_fold_across_an_import_cycle() {
         "import a;\n\npub const fn size() usize {\n    return 8;\n}\n\npub fn back() usize {\n    return a::N;\n}\n",
     );
     let root = p.dir();
-    let r4 = cli::superc_env_in(root, "SC_TASK_DELAY", "1", "build --jobs=4 --out-dir=o4 -o o4/app");
+    let r4 = cli::superc_env_in(
+        root,
+        "SC_TASK_DELAY",
+        format("1 {}", cli::NO_JOBSERVER).as_str(),
+        "build --jobs=4 --out-dir=o4 -o o4/app",
+    );
     assert(r4.ok(), "the fold across the cycle succeeds under four delayed workers");
     let r = cli::superc_in(root, "build --jobs=1 -o bin");
     assert(r.ok(), "and under one worker");

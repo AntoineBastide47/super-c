@@ -14496,7 +14496,9 @@ fn lint_item_candidate(a: *const Ast, iid: NodeId, in_iface_extend: bool, pub_to
             iid,
             keep | attr_bit(AttrKind::ATTR_TEST) | attr_bit(AttrKind::ATTR_TEST_INIT) | attr_bit(
                 AttrKind::ATTR_TEST_FREE,
-            ) | attr_bit(AttrKind::ATTR_BENCH) | attr_bit(AttrKind::ATTR_SIMD_IMPL),
+            ) | attr_bit(AttrKind::ATTR_BENCH) | attr_bit(AttrKind::ATTR_SIMD_IMPL) | attr_bit(
+                AttrKind::ATTR_PROVE_EXHAUSTIVE,
+            ),
         );
     }
     if it.kind == NodeKind::NODE_STRUCT || it.kind == NodeKind::NODE_ENUM {
@@ -15527,7 +15529,7 @@ const fn splitmix(x: u64) u64 {
 // The prover over the kept bodies (`prv::check_kept`), skipping each module whose key the build
 // tree's proof record holds; the record then holds the keys of the modules whose proofs held. No
 // record without a build tree; a failed obligation is never recorded.
-fn prove_cached(p: &loader::Package, keep: &irl::Keep, comp: &Vector<u32>, target: i32, tstat: bool) bool {
+fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, target: i32, tstat: bool) bool {
     if !prv::any_contracts(p) {
         return true;
     }
@@ -15566,13 +15568,30 @@ fn prove_cached(p: &loader::Package, keep: &irl::Keep, comp: &Vector<u32>, targe
     }
     let mut held = Vector::<bool>::with_capacity(n);
     held.resize_default(n);
+    // The proofs lower the contracts of interfaces' methods and, for `@prove_exhaustive` functions, the
+    // evaluator lowers their callees: the types they touch are no use by the program (as the
+    // always-panics probes' are), and several workers lower under the stage locks.
+    let locks = p.jobs != 1 && prv::any_exhaustive(p);
+    let mut marks = Vector::<u64>::with_capacity(n);
+    for m in 0..n {
+        marks.push(p.modules[m].ast.get_ref().used_mark());
+    }
+    if locks {
+        set_stage_locks(p, true);
+    }
     let ok = prv::check_kept(p, keep, comp, &skip, &mut held);
+    if locks {
+        set_stage_locks(p, false);
+    }
+    for m in 0..n {
+        p.modules[m].ast.get_mut().used_rollback(marks[m]);
+    }
     if tstat {
         let mut nh: u32 = 0;
         for m in 0..n {
             nh += skip[m] as u32;
         }
-        eprint("prove: {} to prove, {} from the proof record\n", n - nh as usize, nh);
+        eprint("prove: {} to prove, {} from the proof record, {} workers\n", n - nh as usize, nh, p.jobs);
     }
     if cache {
         let mut out = String::new();

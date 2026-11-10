@@ -143,6 +143,10 @@ Rules for the costly rungs:
   inliner make a release build slower than a debug one.
 - A test that starts one worker per CPU passes `--jobs=1`: the suite already runs one test
   per core.
+- A test that compares one worker with several runs the parallel path only on a program of at
+  least 256 KiB of sources (`Package::analysis_jobs`), with the workers it asks for: pad the
+  program with `cli::par_sized`, build with `--jobs=N` and `cli::NO_JOBSERVER` (the suite's
+  jobserver may give fewer), and assert the worker count where the build prints it.
 
 ## Measuring
 

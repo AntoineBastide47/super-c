@@ -49,9 +49,15 @@ Never inferred (the signature barrier):
 - A typed context adapts an unsuffixed literal before the default applies: typed
   operands win over defaults, and the default applies only after all other
   information is exhausted. A value `if`, `switch` or block beside a typed numeric operand of a
-  binary operator (not a shift count) is such a context for its literal branches, on either side
+  binary operator (a shift count too) is such a context for its literal branches, on either side
   (`x < if c { 0.5 } else { 2.0 }` and its mirror compare in `x`'s type). A nested array literal
   is checked against its slot type, in the repeat form too (`[[0.0; 2]; 3]` for `[[f64; 2]; 3]`).
+- A generic call whose unsuffixed literals alone fix its type parameter takes the type of each
+  context a bare literal takes, not the literals' default: an argument's parameter type
+  (`take(pick(c, 1, 0))` for `fn take(x: u32)` binds `T = u32`, as `let a: u32 = pick(c, 1, 0)`
+  does), a generic callee's parameter once its inference binds it (`pick(c, pick(c, 1, 2), y)`
+  with `y: u8`), and a typed numeric operand of a binary operator, on either side
+  (`pick(c, 7, 0) + w`, `w << pick(c, 3, 0)`). A literal that does not fit that type is an error.
 - A literal under `&` or `&mut` (at any depth: `&1`, `&&1`) adapts to the expected
   pointee type: `map.get(&1)` with `Map<u64, V>` passes a `&u64`. A typed value under
   a reference never converts: `&x` with `x: u8` does not become `&u64`.
