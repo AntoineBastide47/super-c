@@ -37,1141 +37,17 @@ import ir::layout as lay;
 import module::loader as loader;
 import utils::errors as diag;
 import utils::diag_codes as dc;
+import prove::terms as *;
+import prove::solver as *;
 
-const NONE: u32 = 0xFFFFFFFF;
-// The blocks, chain blocks and solver rounds one body may spend.
-const STEP_BUDGET: u32 = 200000;
 // The paths waiting in one body's walk.
 const PATHS_MAX: usize = 4096;
-// The rows of one elimination round, and the branches of one refutation.
-const ROWS_MAX: usize = 2048;
-const SPLITS_MAX: u32 = 256;
-// The steps of one term walk (linear forms) and the gcd loop (a 128-bit Euclid ends in under 190).
-const LIN_MAX: u32 = 4096;
-const GCD_MAX: u32 = 200;
-
-// Term operations. Integers are exact (mathematical) values of their type; booleans are formulas.
-const T_INT: u8 = 0; // k = the value
-const T_BOOL: u8 = 1; // k = 0 or 1
-const T_VAR: u8 = 2; // a = the variable's number: an unknown value of its type
-const T_ADD: u8 = 3;
-const T_SUB: u8 = 4;
-const T_MUL: u8 = 5;
-const T_NEG: u8 = 6;
-// Atoms to the solver: their value is exact, the solver knows only their type's range (`bounds`).
-const T_DIV: u8 = 7;
-const T_REM: u8 = 8;
-const T_BAND: u8 = 9;
-const T_BOR: u8 = 10;
-const T_BXOR: u8 = 11;
-const T_SHL: u8 = 12;
-const T_SHR: u8 = 13;
-const T_BNOT: u8 = 14;
-const T_CAST: u8 = 15; // a narrowing or sign-changing cast of `a`
-const T_CALL: u8 = 16; // a `const fn` call: k = the callee's key, arguments [a, a + b) in `Terms.args`
-const T_REF: u8 = 17; // a shared reference to the value `a`
-// Formulas.
-const T_LT: u8 = 18;
-const T_LE: u8 = 19;
-const T_EQ: u8 = 20;
-const T_NE: u8 = 21;
-const T_NOT: u8 = 22;
-const T_AND: u8 = 23;
-const T_OR: u8 = 24;
-// Values of memory and aggregates.
-const T_AGG: u8 = 25; // a struct, tuple or array: its members [a, a + b) in `Terms.args`
-const T_UPD: u8 = 26; // `args[a]` with member `args[a + 1]` (a key) replaced by `args[a + 2]`
-const T_SEL: u8 = 27; // member `b` (a key) of `a`
-const T_LOAD: u8 = 28; // the value pointer `a` points to in memory epoch `b`
-const T_MREF: u8 = 29; // a mutable reference to local `a` of the body (or the caller of a frame)
-const T_VIEW: u8 = 30; // a view of array `a` of length k
-const T_DOWN: u8 = 31; // `a` as its variant k
-
-// Whether operation `op` keeps its operands in `Terms.args`.
-const fn pooled(op: u8) bool {
-    return op == T_CALL || op == T_AGG || op == T_UPD;
-}
-
-// `Term.w`: an integer's bit width; W_BOOL for a boolean; W_OTHER for any other value.
-const W_OTHER: u8 = 0;
-const W_BOOL: u8 = 1;
-
-struct Term {
-    k: i128,
-    a: u32,
-    b: u32,
-    op: u8,
-    w: u8,
-    sg: bool,
-}
-
-// The hash-consed term table: a term built twice is one term, so equal values compare by index.
-struct Terms {
-    ts: Vector<Term>,
-    ix: Map<u64, u32>,
-    args: Vector<u32>,
-    nvars: u32,
-}
-
-const fn hmix(h: u64, v: u64) u64 {
-    return (h ^ v).wrapping_mul(0x100000001B3u64) ^ h >> 29;
-}
-
-// The value of an unsigned 64-bit pattern.
-const fn u64_val(v: u64) i128 {
-    let mut x = i128::zero();
-    x.set_limb(0, v);
-    return x;
-}
-
-const fn wide(v: i64) i128 {
-    return i128::from_i64(v);
-}
-
-extend Terms {
-    fn new() Terms {
-        return Terms { ts: Vector::<Term>::new(), ix: Map::<u64, u32>::new(), args: Vector::<u32>::new(), nvars: 0 };
-    }
-
-    fn clear(self: &mut Self) {
-        self.ts.clear();
-        self.ix.clear();
-        self.args.clear();
-        self.nvars = 0;
-    }
-
-    const fn at(self: &Self, t: u32) Term {
-        return self.ts[t as usize];
-    }
-
-    const fn key(self: &Self, t: &Term) u64 {
-        let mut h = hmix(0xCBF29CE484222325u64, t.op as u64 << 16 | t.w as u64 << 8 | t.sg as u64);
-        // A call's argument list is hashed by content: `a` is only where it lies.
-        let pos: u64 = if pooled(t.op) {
-            0
-        } else {
-            t.a
-        };
-        h = hmix(h, pos << 32 | t.b as u64);
-        h = hmix(h, t.k.limb(0));
-        h = hmix(h, t.k.limb(1));
-        if pooled(t.op) {
-            for j in t.a..t.a + t.b {
-                h = hmix(h, self.args[j as usize]);
-            }
-        }
-        return h;
-    }
-
-    const fn same(self: &Self, x: &Term, y: &Term) bool {
-        if x.op != y.op || x.w != y.w || x.sg != y.sg || x.k != y.k || x.b != y.b {
-            return false;
-        }
-        if !pooled(x.op) {
-            return x.a == y.a;
-        }
-        for j in 0..x.b {
-            if self.args[(x.a + j) as usize] != self.args[(y.a + j) as usize] {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    // The index of term `t`: the earlier one when it was built before.
-    fn make(self: &mut Self, t: Term) u32 {
-        let h = self.key(&t);
-        let hit = switch self.ix.get(&h) {
-            Some(x) => *x,
-            None => NONE,
-        };
-        if hit != NONE && self.same(&self.ts[hit as usize], &t) {
-            if pooled(t.op) {
-                self.args.truncate(t.a as usize);
-            }
-            return hit;
-        }
-        let n = self.ts.len() as u32;
-        self.ts.push(t);
-        if hit == NONE {
-            self.ix.insert(h, n);
-        }
-        return n;
-    }
-
-    fn int(self: &mut Self, k: i128, w: u8, sg: bool) u32 {
-        return self.make(Term { k: k, a: 0, b: 0, op: T_INT, w: w, sg: sg });
-    }
-
-    fn boolean(self: &mut Self, v: bool) u32 {
-        return self.make(Term { k: wide(v as i64), a: 0, b: 0, op: T_BOOL, w: W_BOOL, sg: false });
-    }
-
-    fn var(self: &mut Self, w: u8, sg: bool) u32 {
-        let n = self.nvars;
-        self.nvars += 1;
-        return self.make(Term { k: i128::zero(), a: n, b: 0, op: T_VAR, w: w, sg: sg });
-    }
-
-    const fn is_true(self: &Self, t: u32) bool {
-        let x = self.ts[t as usize];
-        return x.op == T_BOOL && x.k == wide(1);
-    }
-
-    const fn is_false(self: &Self, t: u32) bool {
-        let x = self.ts[t as usize];
-        return x.op == T_BOOL && x.k.is_zero();
-    }
-
-    const fn is_int(self: &Self, t: u32) bool {
-        return self.ts[t as usize].w > W_BOOL;
-    }
-
-    const fn is_bool(self: &Self, t: u32) bool {
-        return self.ts[t as usize].w == W_BOOL;
-    }
-
-    // An arithmetic or bit operation of type (`w`, `sg`); two constants fold when the exact result fits
-    // 128 bits (an arithmetic one only: the atoms keep their node).
-    fn arith(self: &mut Self, op: u8, a: u32, b: u32, w: u8, sg: bool) u32 {
-        let x = self.ts[a as usize];
-        let y = self.ts[b as usize];
-        if x.op == T_INT && y.op == T_INT {
-            let r = if op == T_ADD {
-                x.k.checked_add(&y.k)
-            } else if op == T_SUB {
-                x.k.checked_sub(&y.k)
-            } else if op == T_MUL {
-                x.k.checked_mul(&y.k)
-            } else {
-                Option::<i128>::None
-            };
-            if let Some(v) = r {
-                return self.int(v, w, sg);
-            }
-        }
-        if (op == T_ADD || op == T_SUB) && y.op == T_INT && y.k.is_zero() {
-            return a;
-        }
-        if op == T_ADD && x.op == T_INT && x.k.is_zero() {
-            return b;
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: b, op: op, w: w, sg: sg });
-    }
-
-    fn neg(self: &mut Self, a: u32, w: u8, sg: bool) u32 {
-        let x = self.ts[a as usize];
-        if x.op == T_INT {
-            if let Some(v) = i128::zero().checked_sub(&x.k) {
-                return self.int(v, w, sg);
-            }
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: 0, op: T_NEG, w: w, sg: sg });
-    }
-
-    fn unary(self: &mut Self, op: u8, a: u32, w: u8, sg: bool) u32 {
-        return self.make(Term { k: i128::zero(), a: a, b: 0, op: op, w: w, sg: sg });
-    }
-
-    // A comparison of two integers, or (`T_EQ`, `T_NE`) of two booleans or two other values.
-    fn cmp(self: &mut Self, op: u8, a: u32, b: u32) u32 {
-        let x = self.ts[a as usize];
-        let y = self.ts[b as usize];
-        if x.op == T_INT && y.op == T_INT || x.op == T_BOOL && y.op == T_BOOL {
-            let r = if op == T_LT {
-                x.k < y.k
-            } else if op == T_LE {
-                x.k <= y.k
-            } else if op == T_EQ {
-                x.k == y.k
-            } else {
-                x.k != y.k
-            };
-            return self.boolean(r);
-        }
-        if a == b {
-            return self.boolean(op == T_LE || op == T_EQ);
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: b, op: op, w: W_BOOL, sg: false });
-    }
-
-    fn not(self: &mut Self, a: u32) u32 {
-        let x = self.ts[a as usize];
-        if x.op == T_BOOL {
-            return self.boolean(x.k.is_zero());
-        }
-        if x.op == T_NOT {
-            return x.a;
-        }
-        if x.op == T_LT {
-            return self.cmp(T_LE, x.b, x.a);
-        }
-        if x.op == T_LE {
-            return self.cmp(T_LT, x.b, x.a);
-        }
-        if x.op == T_EQ {
-            return self.cmp(T_NE, x.a, x.b);
-        }
-        if x.op == T_NE {
-            return self.cmp(T_EQ, x.a, x.b);
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: 0, op: T_NOT, w: W_BOOL, sg: false });
-    }
-
-    fn and(self: &mut Self, a: u32, b: u32) u32 {
-        if self.is_true(a) || a == b {
-            return b;
-        }
-        if self.is_true(b) {
-            return a;
-        }
-        if self.is_false(a) || self.is_false(b) {
-            return self.boolean(false);
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: b, op: T_AND, w: W_BOOL, sg: false });
-    }
-
-    fn or(self: &mut Self, a: u32, b: u32) u32 {
-        if self.is_false(a) || a == b {
-            return b;
-        }
-        if self.is_false(b) {
-            return a;
-        }
-        if self.is_true(a) || self.is_true(b) {
-            return self.boolean(true);
-        }
-        return self.make(Term { k: i128::zero(), a: a, b: b, op: T_OR, w: W_BOOL, sg: false });
-    }
-
-    // A `const fn` call of the callee keyed `key` over the arguments `xs`, of type (`w`, `sg`).
-    fn call(self: &mut Self, key: u64, xs: &Vector<u32>, w: u8, sg: bool) u32 {
-        let a = self.args.len() as u32;
-        for j in 0..xs.len() {
-            self.args.push(xs[j]);
-        }
-        return self.make(Term { k: u64_val(key), a: a, b: xs.len() as u32, op: T_CALL, w: w, sg: sg });
-    }
-
-    fn pool(self: &mut Self, op: u8, xs: &Vector<u32>, k: i128) u32 {
-        let a = self.args.len() as u32;
-        for j in 0..xs.len() {
-            self.args.push(xs[j]);
-        }
-        return self.make(Term { k: k, a: a, b: xs.len() as u32, op: op, w: W_OTHER, sg: false });
-    }
-
-    // `v` with member `key` replaced by `x`.
-    fn upd(self: &mut Self, v: u32, key: u32, x: u32) u32 {
-        let a = self.args.len() as u32;
-        self.args.push(v);
-        self.args.push(key);
-        self.args.push(x);
-        return self.make(Term { k: i128::zero(), a: a, b: 3, op: T_UPD, w: W_OTHER, sg: false });
-    }
-
-    // Member `key` of `v`, of type (`w`, `sg`): an aggregate's member, through its updates where the
-    // keys are the same term or two different constants.
-    fn sel(self: &mut Self, v0: u32, key: u32, w: u8, sg: bool) u32 {
-        let mut v = v0;
-        let kx = self.ts[key as usize];
-        for _s in 0..LIN_MAX {
-            let x = self.ts[v as usize];
-            if x.op == T_AGG && kx.op == T_INT && !kx.k.is_negative() && kx.k < wide(x.b) {
-                return self.args[(x.a + kx.k.to_i64() as u32) as usize];
-            }
-            if x.op != T_UPD {
-                break;
-            }
-            let k2 = self.args[(x.a + 1) as usize];
-            if k2 == key {
-                return self.args[(x.a + 2) as usize];
-            }
-            if kx.op != T_INT || self.ts[k2 as usize].op != T_INT {
-                break;
-            }
-            v = self.args[x.a as usize];
-        }
-        return self.make(Term { k: i128::zero(), a: v, b: key, op: T_SEL, w: w, sg: sg });
-    }
-
-    // The range of type (`w`, `sg`) as (lo, hi).
-    const fn range(w: u8, sg: bool) (i128, i128) {
-        if sg {
-            let h = i128::one().shl((w - 1) as usize);
-            return i128::zero() - h, h - i128::one();
-        }
-        return i128::zero(), i128::one().shl(w as usize) - i128::one();
-    }
-
-    // Whether integer `t` is in its type's range, as a formula.
-    fn in_range(self: &mut Self, t: u32) u32 {
-        let x = self.ts[t as usize];
-        let (lo, hi) = Terms::range(x.w, x.sg);
-        let l = self.int(lo, x.w, x.sg);
-        let h = self.int(hi, x.w, x.sg);
-        let c1 = self.cmp(T_LE, l, t);
-        let c2 = self.cmp(T_LE, t, h);
-        return self.and(c1, c2);
-    }
-
-    // The bounds the solver knows of atom `t`: its type's range, narrowed for a remainder by a positive
-    // constant and a mask of an unsigned value. A product of two unknowns is an exact value, which may
-    // lie outside its type (an overflow obligation asks whether it does): it has no bounds.
-    const fn bounds(self: &Self, t: u32) (i128, i128) {
-        let x = self.ts[t as usize];
-        if x.w <= W_BOOL || x.op == T_MUL {
-            let h = i128::one().shl(100);
-            return i128::zero() - h, h;
-        }
-        let (lo, hi) = Terms::range(x.w, x.sg);
-        if !x.sg && (x.op == T_REM || x.op == T_BAND) {
-            let y = self.ts[x.b as usize];
-            if y.op == T_INT && !y.k.is_negative() && !y.k.is_zero() {
-                return lo, if x.op == T_REM {
-                    y.k - i128::one()
-                } else {
-                    y.k
-                };
-            }
-        }
-        return lo, hi;
-    }
-}
-
-// ---- solver --------------------------------------------------------------------------------------
-
-struct LinTerm {
-    c: i128,
-    atom: u32,
-}
-
-// `sum(c * atom) + k <= 0`, its terms [start, start + len) of a pool, sorted by atom.
-struct Row {
-    k: i128,
-    start: u32,
-    len: u32,
-    id: u32, // its record in `Solver.cert`; NONE for a branch's row
-}
-
-// How one row of an elimination was derived: a branch's row, an atom's bound, or a combination
-// `m1 * p1 + m2 * p2` (p2 NONE: `m1 * p1`) with nonnegative factors, each then divided by the gcd of
-// its coefficients with its constant rounded up. `terms` and `k` are the result.
-const C_INPUT: u8 = 0; // p1 = the branch's row
-const C_LO: u8 = 1; // `lo - atom <= 0`
-const C_HI: u8 = 2; // `atom - hi <= 0`
-const C_COMB: u8 = 3;
-
-struct Why {
-    m1: i128,
-    m2: i128,
-    p1: u32,
-    p2: u32,
-    atom: u32,
-    kind: u8,
-}
-
-struct Cert {
-    why: Why,
-    k: i128,
-    start: u32, // terms in `Solver.cpool`
-    len: u32,
-}
-
-// One branch of a refutation: the formulas still to split (`term << 1 | polarity`), the linear rows,
-// and the boolean atoms with their polarity.
-struct Branch {
-    todo: Vector<u64>,
-    rows: Vector<Row>,
-    pool: Vector<LinTerm>,
-    lits: Vector<u64>,
-}
-
-extend Branch {
-    fn copy(self: &Self) Branch {
-        return Branch {
-            todo: self.todo.clone(),
-            rows: copy_of(&self.rows),
-            pool: copy_of(&self.pool),
-            lits: self.lits.clone(),
-        };
-    }
-}
-
-struct Solver {
-    rows: Vector<Row>,
-    pool: Vector<LinTerm>,
-    nrows: Vector<Row>,
-    npool: Vector<LinTerm>,
-    lin: Vector<LinTerm>,
-    stack: Vector<LinTerm>,
-    atoms: Vector<u32>,
-    steps: u32, // the rounds spent, against `STEP_BUDGET` with the walk's
-    cert: Vector<Cert>, // the current refutation's derivation, checked by `verify`
-    cpool: Vector<LinTerm>,
-    bad: u32, // the record of the row without an integer solution
-}
-
-fn copy_of<T: Copy>(v: &Vector<T>) Vector<T> {
-    let mut out = Vector::<T>::with_capacity(v.len());
-    out.extend_copy(v);
-    return out;
-}
 
 // `v` as `n` entries of NONE.
 fn fill(v: &mut Vector<u32>, n: usize) {
     v.clear();
     for _j in 0..n {
         v.push(NONE);
-    }
-}
-
-const fn why(kind: u8, p1: u32, p2: u32) Why {
-    return Why { m1: i128::zero(), m2: i128::zero(), p1: p1, p2: p2, atom: NONE, kind: kind };
-}
-
-// The greatest common divisor of two non-negative values.
-fn gcd(a0: i128, b0: i128) i128 {
-    let mut a = a0;
-    let mut b = b0;
-    for _s in 0..GCD_MAX {
-        if b.is_zero() {
-            return a;
-        }
-        let r = a.rem_euclid(&b);
-        a = b;
-        b = r;
-    }
-    return i128::one();
-}
-
-// The certificate check's own arithmetic, apart from the solver's: `acc += m * row p` (`k` its
-// constant); false when a value leaves 128 bits.
-fn cert_scale(cert: &Vector<Cert>, pool: &Vector<LinTerm>, p: u32, m: i128, acc: &mut Vector<LinTerm>, k: &mut i128) bool {
-    let c = *cert.at(p as usize);
-    for j in c.start..c.start + c.len {
-        let t = pool[j as usize];
-        switch t.c.checked_mul(&m) {
-            Some(v) => acc.push(LinTerm { c: v, atom: t.atom }),
-            None => {
-                return false;
-            },
-        }
-    }
-    switch c.k.checked_mul(&m) {
-        Some(v) => {
-            switch k.checked_add(&v) {
-                Some(s) => *k = s,
-                None => {
-                    return false;
-                },
-            }
-        },
-        None => {
-            return false;
-        },
-    }
-    return true;
-}
-
-// Order `acc` by atom, add equal atoms, drop zeros, then divide by the gcd with the constant rounded
-// up; false when a value leaves 128 bits.
-fn cert_tighten(acc: &mut Vector<LinTerm>, k: &mut i128) bool {
-    let n = acc.len();
-    for j in 1..n {
-        let x = acc[j];
-        let mut q = j;
-        while q > 0 && acc[q - 1].atom > x.atom {
-            acc.set(q, acc[q - 1]);
-            q -= 1;
-        }
-        acc.set(q, x);
-    }
-    let mut out = Vector::<LinTerm>::with_capacity(n);
-    for j in 0..n {
-        let x = acc[j];
-        let last = out.len();
-        if last != 0 && out[last - 1].atom == x.atom {
-            switch out[last - 1].c.checked_add(&x.c) {
-                Some(v) => out.set(last - 1, LinTerm { c: v, atom: x.atom }),
-                None => {
-                    return false;
-                },
-            }
-        } else {
-            out.push(x);
-        }
-    }
-    acc.clear();
-    let mut g = i128::zero();
-    for j in 0..out.len() {
-        if !out[j].c.is_zero() {
-            acc.push(out[j]);
-            let a = out[j].c.abs();
-            g = if g.is_zero() {
-                a
-            } else {
-                gcd(g, a)
-            };
-        }
-    }
-    if g.is_zero() {
-        return true;
-    }
-    for j in 0..acc.len() {
-        let x = acc[j];
-        acc.set(j, LinTerm { c: x.c.div_euclid(&g), atom: x.atom });
-    }
-    *k = i128::zero() - (i128::zero() - *k).div_euclid(&g);
-    return true;
-}
-
-// Sort the terms [s, e) of `v` by atom and merge equal atoms, dropping zero coefficients; the new end.
-fn merge_terms(v: &mut Vector<LinTerm>, s: usize, e: usize) usize {
-    for j in s + 1..e {
-        let x = v[j];
-        let mut q = j;
-        while q > s && v[q - 1].atom > x.atom {
-            v.set(q, v[q - 1]);
-            q -= 1;
-        }
-        v.set(q, x);
-    }
-    let mut o = s;
-    let mut j = s;
-    while j < e {
-        let mut x = v[j];
-        j += 1;
-        while j < e && v[j].atom == x.atom {
-            x.c = x.c + v[j].c;
-            j += 1;
-        }
-        if !x.c.is_zero() {
-            v.set(o, x);
-            o += 1;
-        }
-    }
-    return o;
-}
-
-extend Solver {
-    fn new() Solver {
-        return Solver {
-            rows: Vector::<Row>::new(),
-            pool: Vector::<LinTerm>::new(),
-            nrows: Vector::<Row>::new(),
-            npool: Vector::<LinTerm>::new(),
-            lin: Vector::<LinTerm>::new(),
-            stack: Vector::<LinTerm>::new(),
-            atoms: Vector::<u32>::new(),
-            steps: 0,
-            cert: Vector::<Cert>::new(),
-            cpool: Vector::<LinTerm>::new(),
-            bad: NONE,
-        };
-    }
-
-    // Add `c * t` to the linear form in `lin` (its constant in `k`). False when a coefficient leaves
-    // 128 bits or the walk is too long.
-    fn linearize(self: &mut Self, tm: &Terms, t: u32, c: i128, k: &mut i128) bool {
-        self.stack.clear();
-        self.stack.push(LinTerm { c: c, atom: t });
-        for _s in 0..LIN_MAX {
-            if self.stack.len() == 0 {
-                return true;
-            }
-            let e = self.stack.pop().unwrap();
-            let x = tm.at(e.atom);
-            if x.op == T_INT {
-                let mut ok = false;
-                if let Some(v) = e.c.checked_mul(&x.k) {
-                    if let Some(sum) = k.checked_add(&v) {
-                        *k = sum;
-                        ok = true;
-                    }
-                }
-                if !ok {
-                    return false;
-                }
-            } else if x.op == T_ADD || x.op == T_SUB {
-                self.stack.push(LinTerm { c: e.c, atom: x.a });
-                let cb = if x.op == T_ADD {
-                    Some(e.c)
-                } else {
-                    i128::zero().checked_sub(&e.c)
-                };
-                switch cb {
-                    Some(v) => self.stack.push(LinTerm { c: v, atom: x.b }),
-                    None => {
-                        return false;
-                    },
-                }
-            } else if x.op == T_NEG {
-                switch i128::zero().checked_sub(&e.c) {
-                    Some(v) => self.stack.push(LinTerm { c: v, atom: x.a }),
-                    None => {
-                        return false;
-                    },
-                }
-            } else if x.op == T_MUL && (tm.at(x.a).op == T_INT || tm.at(x.b).op == T_INT) {
-                let (kc, other) = if tm.at(x.a).op == T_INT {
-                    (tm.at(x.a).k, x.b)
-                } else {
-                    (tm.at(x.b).k, x.a)
-                };
-                switch e.c.checked_mul(&kc) {
-                    Some(v) => self.stack.push(LinTerm { c: v, atom: other }),
-                    None => {
-                        return false;
-                    },
-                }
-            } else {
-                self.lin.push(e);
-            }
-        }
-        return false;
-    }
-
-    // The row `a - b + off <= 0` into branch `br`. False when the form does not fit.
-    fn add_le(self: &mut Self, tm: &Terms, br: &mut Branch, a: u32, b: u32, off: i64) bool {
-        self.lin.clear();
-        let mut k = wide(off);
-        if !self.linearize(tm, a, i128::one(), &mut k) || !self.linearize(tm, b, wide(-1), &mut k) {
-            return false;
-        }
-        let n = self.lin.len();
-        let e = merge_terms(&mut self.lin, 0, n);
-        let start = br.pool.len() as u32;
-        for j in 0..e {
-            br.pool.push(self.lin[j]);
-        }
-        br.rows.push(Row { k: k, start: start, len: e as u32, id: NONE });
-        return true;
-    }
-
-    // Append the row `terms + k <= 0` (terms of `src` [s, s + n)) to the next round, divided by the
-    // gcd of its coefficients with its constant rounded up: an integer row holds exactly when the
-    // tightened one does. False when the row has no integer solution (a constant above 0).
-    fn push_row(self: &mut Self, src: &Vector<LinTerm>, s: usize, n: usize, k: i128, why: Why) bool {
-        if n == 0 {
-            if k <= i128::zero() {
-                return true;
-            }
-            self.bad = self.cert.len() as u32;
-            self.cert.push(Cert { why: why, k: k, start: self.cpool.len() as u32, len: 0 });
-            return false;
-        }
-        let mut g = src[s].c.abs();
-        for j in s + 1..s + n {
-            g = gcd(g, src[j].c.abs());
-        }
-        let start = self.npool.len() as u32;
-        for j in s..s + n {
-            let x = src[j];
-            self.npool.push(LinTerm { c: x.c.div_euclid(&g), atom: x.atom });
-        }
-        // k' = ceil(k / g) = -floor(-k / g)
-        let kk = i128::zero() - (i128::zero() - k).div_euclid(&g);
-        let id = self.cert.len() as u32;
-        let cs = self.cpool.len() as u32;
-        for j in start as usize..self.npool.len() {
-            self.cpool.push(self.npool[j]);
-        }
-        self.cert.push(Cert { why: why, k: kk, start: cs, len: n as u32 });
-        self.nrows.push(Row { k: kk, start: start, len: n as u32, id: id });
-        return true;
-    }
-
-    // Whether the rows of `br` have no integer solution, with each atom inside its bounds:
-    // Fourier-Motzkin elimination over the tightened rows. False when a solution may exist or a
-    // bound was hit.
-    fn unsat(self: &mut Self, tm: &Terms, br: &Branch) bool {
-        self.nrows.clear();
-        self.npool.clear();
-        self.cert.clear();
-        self.cpool.clear();
-        self.bad = NONE;
-        for r in 0..br.rows.len() {
-            let x = br.rows[r];
-            if !self.push_row(&br.pool, x.start as usize, x.len as usize, x.k, why(C_INPUT, r as u32, NONE)) {
-                return self.verify(tm, br);
-            }
-        }
-        // Each atom's bounds: `lo - x <= 0` and `x - hi <= 0`.
-        self.atoms.clear();
-        for j in 0..self.npool.len() {
-            self.atoms.push(self.npool[j].atom);
-        }
-        let na = self.atoms.len();
-        for j in 1..na {
-            let x = self.atoms[j];
-            let mut q = j;
-            while q > 0 && self.atoms[q - 1] > x {
-                self.atoms.set(q, self.atoms[q - 1]);
-                q -= 1;
-            }
-            self.atoms.set(q, x);
-        }
-        let mut prev = NONE;
-        for j in 0..na {
-            let x = self.atoms[j];
-            if x == prev {
-                continue;
-            }
-            prev = x;
-            let (lo, hi) = tm.bounds(x);
-            self.lin.clear();
-            self.lin.push(LinTerm { c: wide(-1), atom: x });
-            let src = replace(&mut self.lin, Vector::<LinTerm>::new());
-            let mut wl = why(C_LO, NONE, NONE);
-            wl.atom = x;
-            let _ = self.push_row(&src, 0, 1, lo, wl);
-            self.lin = src;
-            self.lin.clear();
-            self.lin.push(LinTerm { c: i128::one(), atom: x });
-            let src2 = replace(&mut self.lin, Vector::<LinTerm>::new());
-            let mut wh = why(C_HI, NONE, NONE);
-            wh.atom = x;
-            let _ = self.push_row(&src2, 0, 1, i128::zero() - hi, wh);
-            self.lin = src2;
-        }
-        for _round in 0..na + 1 {
-            self.steps += 1;
-            if self.steps > STEP_BUDGET {
-                return false;
-            }
-            self.rows = replace(&mut self.nrows, Vector::<Row>::new());
-            self.pool = replace(&mut self.npool, Vector::<LinTerm>::new());
-            // The atom whose elimination makes the fewest rows.
-            let mut best = NONE;
-            let mut cost: u64 = 0xFFFFFFFFFFFFFFFFu64;
-            for r in 0..self.rows.len() {
-                let x = self.rows[r];
-                for j in x.start..x.start + x.len {
-                    let at = self.pool[j as usize].atom;
-                    let (np, nn) = self.signs(at);
-                    let c = np * nn;
-                    if c < cost || c == cost && at < best {
-                        cost = c;
-                        best = at;
-                    }
-                }
-            }
-            if best == NONE {
-                return false; // every row is a constant at most 0: a solution exists
-            }
-            for r in 0..self.rows.len() {
-                let x = self.rows[r];
-                let c = self.coef(&x, best);
-                if c.is_zero() && !self.push_row_own(x) {
-                    return self.verify(tm, br);
-                }
-            }
-            for r in 0..self.rows.len() {
-                let p = self.rows[r];
-                let cp = self.coef(&p, best);
-                if !(i128::zero() < cp) {
-                    continue;
-                }
-                for q in 0..self.rows.len() {
-                    let n = self.rows[q];
-                    let cn = self.coef(&n, best);
-                    if !cn.is_negative() {
-                        continue;
-                    }
-                    switch self.combine(&p, cp, &n, cn) {
-                        Some(ok) => {
-                            if !ok {
-                                return self.verify(tm, br);
-                            }
-                        },
-                        None => {
-                            return false;
-                        },
-                    }
-                    if self.nrows.len() > ROWS_MAX {
-                        return false;
-                    }
-                }
-            }
-        }
-        return false;
-    }
-
-    // The certificate check: replay the recorded derivation (`cert`) from the branch's rows and the
-    // atoms' bounds with code of its own (a sum of rows by nonnegative factors, the gcd tightening),
-    // compare each row with the record, and accept when the last one is a constant above 0. A solver
-    // defect can make a refutation fail here, never make a false one pass.
-    fn verify(self: &mut Self, tm: &Terms, br: &Branch) bool {
-        if self.bad == NONE {
-            return false;
-        }
-        let mut acc = Vector::<LinTerm>::new();
-        for i in 0..self.bad as usize + 1 {
-            let c = *self.cert.at(i);
-            acc.clear();
-            let mut k = i128::zero();
-            let w = c.why;
-            if w.kind == C_INPUT {
-                if w.p1 as usize >= br.rows.len() {
-                    return false;
-                }
-                let r = br.rows[w.p1 as usize];
-                for j in r.start..r.start + r.len {
-                    acc.push(br.pool[j as usize]);
-                }
-                k = r.k;
-            } else if w.kind == C_LO || w.kind == C_HI {
-                let (lo, hi) = tm.bounds(w.atom);
-                acc.push(
-                    LinTerm {
-                        c: if w.kind == C_LO {
-                            wide(-1)
-                        } else {
-                            i128::one()
-                        },
-                        atom: w.atom,
-                    },
-                );
-                k = if w.kind == C_LO {
-                    lo
-                } else {
-                    i128::zero() - hi
-                };
-            } else {
-                // Both factors positive (the second absent): a sum of valid rows stays valid.
-                if w.p1 as usize >= i || !(i128::zero() < w.m1) || w.p2 != NONE && (w.p2 as usize >= i || !(i128::zero() < w.m2)) {
-                    return false;
-                }
-                if !cert_scale(&self.cert, &self.cpool, w.p1, w.m1, &mut acc, &mut k) {
-                    return false;
-                }
-                if w.p2 != NONE && !cert_scale(&self.cert, &self.cpool, w.p2, w.m2, &mut acc, &mut k) {
-                    return false;
-                }
-            }
-            if !cert_tighten(&mut acc, &mut k) {
-                return false;
-            }
-            if acc.len() != c.len as usize || k != c.k {
-                return false;
-            }
-            for j in 0..acc.len() {
-                let x = self.cpool[c.start as usize + j];
-                if x.atom != acc[j].atom || x.c != acc[j].c {
-                    return false;
-                }
-            }
-        }
-        let last = *self.cert.at(self.bad as usize);
-        return last.len == 0 && i128::zero() < last.k;
-    }
-
-    // The rows with a positive and with a negative coefficient on `at`.
-    const fn signs(self: &Self, at: u32) (u64, u64) {
-        let mut np: u64 = 0;
-        let mut nn: u64 = 0;
-        for r in 0..self.rows.len() {
-            let c = self.coef(&self.rows[r], at);
-            if c.is_negative() {
-                nn += 1;
-            } else if !c.is_zero() {
-                np += 1;
-            }
-        }
-        return np, nn;
-    }
-
-    const fn coef(self: &Self, x: &Row, at: u32) i128 {
-        for j in x.start..x.start + x.len {
-            let t = self.pool[j as usize];
-            if t.atom == at {
-                return t.c;
-            }
-        }
-        return i128::zero();
-    }
-
-    // Row `x` of this round into the next one.
-    fn push_row_own(self: &mut Self, x: Row) bool {
-        let src = replace(&mut self.pool, Vector::<LinTerm>::new());
-        let mut wy = why(C_COMB, x.id, NONE);
-        wy.m1 = i128::one();
-        let ok = self.push_row(&src, x.start as usize, x.len as usize, x.k, wy);
-        self.pool = src;
-        return ok;
-    }
-
-    // `-cn * p + cp * n`, which eliminates the atom, into the next round: whether it has a solution
-    // (`Some(false)`: none), None when a coefficient leaves 128 bits.
-    fn combine(self: &mut Self, p: &Row, cp: i128, n: &Row, cn: i128) Option<bool> {
-        let mp = i128::zero() - cn;
-        self.lin.clear();
-        for j in p.start..p.start + p.len {
-            let t = self.pool[j as usize];
-            switch t.c.checked_mul(&mp) {
-                Some(v) => self.lin.push(LinTerm { c: v, atom: t.atom }),
-                None => {
-                    return None;
-                },
-            }
-        }
-        for j in n.start..n.start + n.len {
-            let t = self.pool[j as usize];
-            switch t.c.checked_mul(&cp) {
-                Some(v) => self.lin.push(LinTerm { c: v, atom: t.atom }),
-                None => {
-                    return None;
-                },
-            }
-        }
-        let mut k = Option::<i128>::None;
-        if let Some(a) = p.k.checked_mul(&mp) {
-            if let Some(b) = n.k.checked_mul(&cp) {
-                k = a.checked_add(&b);
-            }
-        }
-        let kk = switch k {
-            Some(v) => v,
-            None => {
-                return None;
-            },
-        };
-        let total = self.lin.len();
-        let e = merge_terms(&mut self.lin, 0, total);
-        let src = replace(&mut self.lin, Vector::<LinTerm>::new());
-        let mut wy = why(C_COMB, p.id, n.id);
-        wy.m1 = mp;
-        wy.m2 = cp;
-        let ok = self.push_row(&src, 0, e, kk, wy);
-        self.lin = src;
-        return Some(ok);
-    }
-
-    // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
-    // model. Each formula splits into branches; each branch closes on a contradiction of its boolean
-    // atoms or of its rows (`unsat`).
-    fn implies(self: &mut Self, tm: &Terms, hyps: &Vector<u32>, goal: u32) bool {
-        if tm.is_true(goal) {
-            return true;
-        }
-        for j in 0..hyps.len() {
-            if hyps[j] == goal || tm.is_false(hyps[j]) {
-                return true;
-            }
-        }
-        let mut b0 = Branch {
-            todo: Vector::<u64>::new(),
-            rows: Vector::<Row>::new(),
-            pool: Vector::<LinTerm>::new(),
-            lits: Vector::<u64>::new(),
-        };
-        for j in 0..hyps.len() {
-            b0.todo.push(hyps[j] as u64 << 1 | 1);
-        }
-        b0.todo.push(goal as u64 << 1);
-        let mut open = Vector::<Branch>::new();
-        open.push(b0);
-        let mut splits: u32 = 0;
-        for _b in 0..SPLITS_MAX + 1 {
-            if open.len() == 0 {
-                return true;
-            }
-            let mut br = open.pop().unwrap();
-            switch self.close(tm, &mut br, &mut open, &mut splits) {
-                Some(closed) => {
-                    if !closed && !self.unsat(tm, &br) {
-                        return false;
-                    }
-                },
-                None => {
-                    return false;
-                },
-            }
-        }
-        return false;
-    }
-
-    // Split the formulas of `br` until none is left: Some(true) when a contradiction closed it,
-    // Some(false) when only its rows remain to refute, None past the split bound.
-    fn close(self: &mut Self, tm: &Terms, br: &mut Branch, open: &mut Vector<Branch>, splits: &mut u32) Option<bool> {
-        for _s in 0..LIN_MAX {
-            if br.todo.len() == 0 {
-                return Some(false);
-            }
-            let e = br.todo.pop().unwrap();
-            let t = (e >> 1) as u32;
-            let pos = (e & 1) != 0;
-            let x = tm.at(t);
-            if x.op == T_BOOL {
-                if x.k == wide(1) != pos {
-                    return Some(true);
-                }
-            } else if x.op == T_NOT {
-                br.todo.push(x.a as u64 << 1 | (!pos) as u64);
-            } else if x.op == T_AND && pos || x.op == T_OR && !pos {
-                br.todo.push(x.a as u64 << 1 | pos as u64);
-                br.todo.push(x.b as u64 << 1 | pos as u64);
-            } else if x.op == T_AND || x.op == T_OR {
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let mut other = br.copy();
-                other.todo.push(x.b as u64 << 1 | pos as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 1 | pos as u64);
-            } else if (x.op == T_LT || x.op == T_LE) && tm.is_int(x.a) && tm.is_int(x.b) {
-                // pos: a - b + (1 or 0) <= 0; else b - a + (0 or 1) <= 0
-                let ok = if pos {
-                    self.add_le(tm, br, x.a, x.b, pick(x.op == T_LT, 1i64, 0))
-                } else {
-                    self.add_le(tm, br, x.b, x.a, pick(x.op == T_LT, 0i64, 1))
-                };
-                if !ok {
-                    return None;
-                }
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) {
-                if x.op == T_EQ == pos {
-                    if !self.add_le(tm, br, x.a, x.b, 0) || !self.add_le(tm, br, x.b, x.a, 0) {
-                        return None;
-                    }
-                } else {
-                    *splits += 1;
-                    if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                        return None;
-                    }
-                    let mut other = br.copy();
-                    if !self.add_le(tm, &mut other, x.b, x.a, 1) || !self.add_le(tm, br, x.a, x.b, 1) {
-                        return None;
-                    }
-                    open.push(other);
-                }
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
-                // Equal booleans: both hold or neither does.
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let same = x.op == T_EQ == pos;
-                let mut other = br.copy();
-                other.todo.push(x.a as u64 << 1);
-                other.todo.push(x.b as u64 << 1 | (!same) as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 1 | 1);
-                br.todo.push(x.b as u64 << 1 | same as u64);
-            } else {
-                // A boolean atom: closes against its own negation.
-                let want = t as u64 << 1 | (!pos) as u64;
-                for j in 0..br.lits.len() {
-                    if br.lits[j] == want {
-                        return Some(true);
-                    }
-                }
-                br.lits.push(t as u64 << 1 | pos as u64);
-            }
-        }
-        return None;
     }
 }
 
@@ -1185,7 +61,7 @@ const SEARCH_MAX: u64 = 4096;
 const CANDIDATES_MAX: usize = 8;
 
 // `x`'s low `w` bits as an unsigned pattern.
-const fn bits_of(x: i128, w: u8) u64 {
+const fn bits_of<const B: usize>(x: Num<B>, w: u16) u64 {
     let b = x.limb(0);
     return if w >= 64 {
         b
@@ -1195,39 +71,39 @@ const fn bits_of(x: i128, w: u8) u64 {
 }
 
 // The value of the `w`-bit pattern `b` in a type of signedness `sg`.
-const fn val_of(b: u64, w: u8, sg: bool) i128 {
-    let v = u64_val(b);
+const fn val_of<const B: usize>(b: u64, w: u16, sg: bool) Num<B> {
+    let v = u64_val::<B>(b);
     if sg && w > 0 && (b >> (w - 1) as u64 & 1) != 0 {
-        return v - i128::one().shl(w as usize);
+        return v - Num::<B>::one().shl(w as usize);
     }
     return v;
 }
 
 // The values of terms under one assignment of the unknowns (the leaves): `val` for each term whose
 // `stamp` is the current one, `ok` false where the value is not defined (an operation that traps).
-struct Eval {
-    val: Vector<i128>,
+struct Eval<const B: usize> {
+    val: Vector<Num<B>>,
     stamp: Vector<u32>,
     ok: Vector<bool>,
     now: u32,
     stack: Vector<u32>,
     leaves: Vector<u32>,
-    lo: Vector<i128>,
-    hi: Vector<i128>,
+    lo: Vector<Num<B>>,
+    hi: Vector<Num<B>>,
     seen: Vector<u32>,
 }
 
-extend Eval {
-    fn new() Eval {
-        return Eval {
-            val: Vector::<i128>::new(),
+extend<const B: usize> Eval<B> {
+    fn new() Eval<B> {
+        return Eval::<B> {
+            val: Vector::<Num<B>>::new(),
             stamp: Vector::<u32>::new(),
             ok: Vector::<bool>::new(),
             now: 0,
             stack: Vector::<u32>::new(),
             leaves: Vector::<u32>::new(),
-            lo: Vector::<i128>::new(),
-            hi: Vector::<i128>::new(),
+            lo: Vector::<Num<B>>::new(),
+            hi: Vector::<Num<B>>::new(),
             seen: Vector::<u32>::new(),
         };
     }
@@ -1235,7 +111,7 @@ extend Eval {
     // Size the tables for `n` terms and start a new assignment.
     fn begin(self: &mut Self, n: usize) {
         while self.val.len() < n {
-            self.val.push(i128::zero());
+            self.val.push(Num::<B>::zero());
             self.stamp.push(0);
             self.ok.push(false);
             self.seen.push(0);
@@ -1243,14 +119,14 @@ extend Eval {
         self.now += 1;
     }
 
-    fn set(self: &mut Self, t: u32, v: i128) {
+    fn set(self: &mut Self, t: u32, v: Num<B>) {
         self.val.set(t as usize, v);
         self.ok.set(t as usize, true);
         self.stamp.set(t as usize, self.now);
     }
 
     // Whether term `t` is a leaf of evaluation: an unknown, or a value the walk does not take apart.
-    const fn leaf(tm: &Terms, t: u32) bool {
+    const fn leaf(tm: &Terms<B>, t: u32) bool {
         let x = tm.at(t);
         if x.op == T_INT || x.op == T_BOOL {
             return false;
@@ -1258,11 +134,11 @@ extend Eval {
         if x.op >= T_LT && x.op <= T_NE {
             return !(tm.is_int(x.a) && tm.is_int(x.b) || tm.is_bool(x.a) && tm.is_bool(x.b));
         }
-        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG || x.op == T_REF;
+        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG && x.op != T_ORD || x.op == T_REF;
     }
 
     // The leaves under `roots`, in first-seen order, with their domains.
-    fn collect(self: &mut Self, tm: &Terms, roots: &Vector<u32>) bool {
+    fn collect(self: &mut Self, tm: &Terms<B>, roots: &Vector<u32>) bool {
         self.leaves.clear();
         self.lo.clear();
         self.hi.clear();
@@ -1281,18 +157,24 @@ extend Eval {
             }
             self.seen.set(t as usize, self.now);
             let x = tm.at(t);
-            if Eval::leaf(tm, t) {
+            if Eval::<B>::leaf(tm, t) {
                 if x.w == W_OTHER {
                     return false;
                 }
                 self.leaves.push(t);
                 if x.w == W_BOOL {
-                    self.lo.push(i128::zero());
-                    self.hi.push(i128::one());
+                    self.lo.push(Num::<B>::zero());
+                    self.hi.push(Num::<B>::one());
                 } else {
-                    let (l, h) = tm.bounds(t);
-                    self.lo.push(l);
-                    self.hi.push(h);
+                    switch tm.bounds(t) {
+                        Some((l, h)) => {
+                            self.lo.push(l);
+                            self.hi.push(h);
+                        },
+                        None => {
+                            return false;
+                        },
+                    }
                 }
                 continue;
             }
@@ -1308,8 +190,8 @@ extend Eval {
     }
 
     // The value of `t` under the current assignment of the leaves; None where an operation is not
-    // defined (it traps) or leaves 128 bits.
-    fn value(self: &mut Self, tm: &Terms, t: u32) Option<i128> {
+    // defined (it traps) or leaves B bits.
+    fn value(self: &mut Self, tm: &Terms<B>, t: u32) Option<Num<B>> {
         self.stack.clear();
         self.stack.push(t);
         for _s in 0..LIN_MAX * 16 {
@@ -1344,7 +226,7 @@ extend Eval {
             let r = if okv {
                 self.apply(&x)
             } else {
-                Option::<i128>::None
+                Option::<Num<B>>::None
             };
             switch r {
                 Some(v) => self.set(u, v),
@@ -1360,11 +242,11 @@ extend Eval {
         return Some(self.val[t as usize]);
     }
 
-    fn apply(self: &Self, x: &Term) Option<i128> {
+    fn apply(self: &Self, x: &Term<B>) Option<Num<B>> {
         let a = self.val[x.a as usize];
         let b = self.val[x.b as usize];
-        let one = i128::one();
-        let z = i128::zero();
+        let one = Num::<B>::one();
+        let z = Num::<B>::zero();
         if x.op == T_ADD {
             return a.checked_add(&b);
         }
@@ -1389,7 +271,7 @@ extend Eval {
             } else {
                 q0
             };
-            let (lo, hi) = Terms::range(x.w, x.sg);
+            let (lo, hi) = Terms::<B>::range(x.w, x.sg);
             if q < lo || hi < q {
                 return None;
             }
@@ -1398,9 +280,12 @@ extend Eval {
             } else {
                 switch b.checked_mul(&q) {
                     Some(bq) => a.checked_sub(&bq),
-                    None => Option::<i128>::None,
+                    None => Option::<Num<B>>::None,
                 }
             };
+        }
+        if x.w > 64 && (x.op == T_BAND || x.op == T_BOR || x.op == T_BXOR || x.op == T_BNOT || x.op == T_SHL || x.op == T_SHR) {
+            return self.apply_wide(x, a, b);
         }
         if x.op == T_BAND || x.op == T_BOR || x.op == T_BXOR {
             let p = bits_of(a, x.w);
@@ -1412,57 +297,102 @@ extend Eval {
             } else {
                 p ^ q
             };
-            return Some(val_of(r, x.w, x.sg));
+            return Some(val_of::<B>(r, x.w, x.sg));
         }
         if x.op == T_BNOT {
-            return Some(val_of(bits_of(a, x.w) ^ bits_of(i128::zero() - one, x.w), x.w, x.sg));
+            return Some(val_of::<B>(bits_of(a, x.w) ^ bits_of(Num::<B>::zero() - one, x.w), x.w, x.sg));
         }
         if x.op == T_SHL || x.op == T_SHR {
-            if b.is_negative() || wide(x.w) <= b {
+            if !x.k.is_zero() && !b.is_negative() && wide::<B>(x.w) <= b {
+                // A wide shift past the width: 0, or -1 for a negative value shifted right.
+                return Some(pick(x.op == T_SHR && x.sg && a.is_negative(), wide::<B>(-1), Num::<B>::zero()));
+            }
+            if b.is_negative() || wide::<B>(x.w) <= b {
                 return None;
             }
             let c = b.to_i64() as u64;
             let p = bits_of(a, x.w);
             if x.op == T_SHL {
-                return Some(val_of(bits_of(u64_val(p << c), x.w), x.w, x.sg));
+                return Some(val_of::<B>(bits_of(u64_val::<B>(p << c), x.w), x.w, x.sg));
             }
             if x.sg && a.is_negative() {
                 // An arithmetic shift: floor division by 2^c.
                 let d = one.shl(c as usize);
                 return Some(a.div_euclid(&d));
             }
-            return Some(val_of(p >> c, x.w, x.sg));
+            return Some(val_of::<B>(p >> c, x.w, x.sg));
         }
         if x.op == T_CAST {
-            return Some(val_of(bits_of(a, x.w), x.w, x.sg));
+            return Some(val_of::<B>(bits_of(a, x.w), x.w, x.sg));
+        }
+        if x.op == T_ORD {
+            return Some(wide::<B>(pick(a < b, -1i64, pick(a == b, 0i64, 1))));
         }
         if x.op == T_LT {
-            return Some(wide((a < b) as i64));
+            return Some(wide::<B>((a < b) as i64));
         }
         if x.op == T_LE {
-            return Some(wide((a <= b) as i64));
+            return Some(wide::<B>((a <= b) as i64));
         }
         if x.op == T_EQ {
-            return Some(wide((a == b) as i64));
+            return Some(wide::<B>((a == b) as i64));
         }
         if x.op == T_NE {
-            return Some(wide((a != b) as i64));
+            return Some(wide::<B>((a != b) as i64));
         }
         if x.op == T_NOT {
-            return Some(wide(a.is_zero() as i64));
+            return Some(wide::<B>(a.is_zero() as i64));
         }
         if x.op == T_AND {
-            return Some(wide((!a.is_zero() && !b.is_zero()) as i64));
+            return Some(wide::<B>((!a.is_zero() && !b.is_zero()) as i64));
         }
         if x.op == T_OR {
-            return Some(wide((!a.is_zero() || !b.is_zero()) as i64));
+            return Some(wide::<B>((!a.is_zero() || !b.is_zero()) as i64));
         }
         return None;
     }
 
+    // A bit operation or shift of `x`, wider than 64 bits, on the values `a` and `b`: on the
+    // two's-complement patterns of `x.w` bits.
+    fn apply_wide(self: &Self, x: &Term<B>, a: Num<B>, b: Num<B>) Option<Num<B>> {
+        let m = Num::<B>::one().shl(x.w as usize);
+        let p = a.rem_euclid(&m);
+        let q = b.rem_euclid(&m);
+        let r = if x.op == T_BAND {
+            p & q
+        } else if x.op == T_BOR {
+            p | q
+        } else if x.op == T_BXOR {
+            p ^ q
+        } else if x.op == T_BNOT {
+            m - Num::<B>::one() - p
+        } else {
+            if b.is_negative() {
+                return None;
+            }
+            if wide::<B>(x.w) <= b {
+                if x.k.is_zero() {
+                    return None;
+                }
+                return Some(pick(x.op == T_SHR && x.sg && a.is_negative(), wide::<B>(-1), Num::<B>::zero()));
+            }
+            let c = b.to_i64() as usize;
+            if x.op == T_SHL {
+                p.shl(c).rem_euclid(&m)
+            } else if x.sg && a.is_negative() {
+                // An arithmetic shift: floor division by 2^c.
+                let d = Num::<B>::one().shl(c);
+                return Some(a.div_euclid(&d));
+            } else {
+                p.shr(c)
+            }
+        };
+        return Some(Terms::<B>::wrap(r, x.w, x.sg));
+    }
+
     // Under the current assignment: 1 when every hypothesis holds and the goal does not (a
     // counterexample), 0 when the assignment satisfies the implication, 2 when a value is undefined.
-    fn check(self: &mut Self, tm: &Terms, hyps: &Vector<u32>, goal: u32) u8 {
+    fn check(self: &mut Self, tm: &Terms<B>, hyps: &Vector<u32>, goal: u32) u8 {
         for j in 0..hyps.len() {
             switch self.value(tm, hyps[j]) {
                 Some(v) => {
@@ -1489,13 +419,13 @@ extend Eval {
 
     // Assign the leaves the `k`-th combination of their candidate values (`cands`, `cstart` per
     // leaf; or with `cands` empty every value of their domains). False when `k` is past the end.
-    fn assign(self: &mut Self, k0: u64, cands: &Vector<i128>, cstart: &Vector<u32>) bool {
+    fn assign(self: &mut Self, k0: u64, cands: &Vector<Num<B>>, cstart: &Vector<u32>) bool {
         self.now += 1;
         let mut k = k0;
         for j in 0..self.leaves.len() {
             if cands.len() == 0 {
                 let span = (self.hi[j] - self.lo[j]).to_i64() as u64 + 1;
-                let v = self.lo[j] + u64_val(k % span);
+                let v = self.lo[j] + u64_val::<B>(k % span);
                 k = k / span;
                 self.set(self.leaves[j], v);
             } else {
@@ -1550,6 +480,22 @@ struct Sub {
 const OVF_PROVE: u8 = 0;
 const OVF_KEEP: u8 = 1;
 
+// The wide integers' operations the walk reads as integer arithmetic (`wide_kind`).
+const WK_FROM: u8 = 1;
+const WK_EQ: u8 = 2;
+const WK_CMP: u8 = 3;
+const WK_ADD: u8 = 4;
+const WK_SUB: u8 = 5;
+const WK_MUL: u8 = 6;
+const WK_DIV: u8 = 7;
+const WK_REM: u8 = 8;
+const WK_AND: u8 = 9;
+const WK_OR: u8 = 10;
+const WK_XOR: u8 = 11;
+const WK_NOT: u8 = 12;
+const WK_SHL: u8 = 13;
+const WK_SHR: u8 = 14;
+
 // `@prove_exhaustive`: the inputs of one function, and the evaluator steps of all its runs: each run
 // may take an equal share (`share`), so no split of the inputs changes a report, and the runs of every
 // split together take at most PE_STEPS.
@@ -1568,14 +514,14 @@ const PD_ENUM: u8 = 2;
 // from `lo`, `false` then `true`, or the variants `vars` of enum `decl` of module `em` (discriminants
 // `tags`). Its value has type `ty` of module `tm`; `by_ref`: the function takes it by a shared
 // reference.
-struct PDim {
+struct PDim<const B: usize> {
     l: u32,
     kind: u8,
     by_ref: bool,
-    lo: i128,
+    lo: Num<B>,
     n: u64,
-    count: i128, // `n`, exact: `n` stops at NO_INPUT
-    w: u8,
+    count: Num<B>, // `n`, exact: `n` stops at NO_INPUT
+    w: u16,
     sg: bool,
     tm: ModuleId,
     ty: TypeId,
@@ -1588,9 +534,9 @@ struct PDim {
 // The inputs of kept body `k`, a `@prove_exhaustive` function's: one value of each parameter, `inputs`
 // in all. Input `x` takes value `x / (n of the later parameters) % n` of each. `first`: the least
 // input whose run failed so far, which the parts of the inputs after it read to stop.
-struct PJob {
+struct PJob<const B: usize> {
     k: usize,
-    dims: Vector<PDim>,
+    dims: Vector<PDim<B>>,
     inputs: u64,
     first: u64,
 }
@@ -1610,17 +556,24 @@ struct PRes {
 }
 
 // The steps each run of `job` may take.
-const fn share(job: &PJob) u64 {
+const fn share<const B: usize>(job: &PJob<B>) u64 {
     return PE_STEPS / job.inputs;
 }
 
 // The body under proof (`b`, its module `m`) and what its walk reads.
-struct Prover {
+struct Prover<const B: usize> {
     p: *const loader::Package,
     keep: *const irl::Keep,
     slice: loader::LookupHit, // the prelude's `Slice`
-    tm: Terms,
-    sv: Solver,
+    wuint: loader::LookupHit, // the prelude's `UInt` and `Int` (`ty_of`, `wide_kind`)
+    wint: loader::LookupHit,
+    line_mod: u32, // the module whose line starts `line_starts` holds (`source_line`), NONE before one
+    line_starts: Vector<u32>,
+    tm: Terms<B>,
+    sv: Solver<B>,
+    // The facts the walk derives for a division or a shift by a constant (`quotient`, `shifted`),
+    // which `holds` adds to a goal's facts only when it fails without them.
+    derived: Map<u32, bool>,
     fx: fx::Facts,
     pw: u32,
     errs: Vector<diag::Errors>, // per module
@@ -1632,7 +585,6 @@ struct Prover {
     is_mem: Vector<bool>, // the modeled locals a reference or pointer may change (`scan_tracked`)
     mem_list: Vector<u32>,
     esc: Vector<u32>, // the walked path's `Path.esc`, while `run_block` walks it
-    scc: Vector<u32>, // per kept body: its component of the direct-call graph (`ir::recursion`), NONE: none
     me: u32, // the kept index of the body under proof
     fn_dec: bool, // the body's function has a `decreases` measure
     ptr_cast: bool, // the body casts a value to a pointer
@@ -1644,19 +596,22 @@ struct Prover {
     steps: u32,
     over: bool, // the body spent its budget
     work: Vector<Path>,
-    ev: Eval,
+    ev: Eval<B>,
     vname: Map<u32, u32>, // a parameter's unknown -> the parameter's local, for counterexamples
-    // The contracts of the interfaces' methods without a body (`ir::Lowerer::lower_fn` lowers their
-    // clauses only), keyed like `irl::Keep`.
-    shells: Vector<ir::CoreBody>,
-    shell_ix: Map<u64, u32>,
     // The refinement walk of a conformance's method: only its `OB_REFINE` obligations count, and
     // `refine` holds the interface's contracts (null: the interface's method has none).
     refining: bool,
     refine: *const ir::CoreBody,
-    // A worker of the parallel walk reads the main prover's `shells`, `shell_ix` and `scc`; null for
-    // the main prover.
-    main: *const Prover,
+    sh: *const Shared, // the package's, which `check_kept` holds
+}
+
+// What every prover of a package reads: the contracts of the interfaces' methods without a body
+// (`ir::Lowerer::lower_fn` lowers their clauses only), keyed like `irl::Keep`, and per kept body its
+// component of the direct-call graph (`ir::recursion`), NONE: none.
+struct Shared {
+    shells: Vector<ir::CoreBody>,
+    shell_ix: Map<u64, u32>,
+    scc: Vector<u32>,
 }
 
 // The obligation kinds of `Prover::oblige`, in the report key.
@@ -1670,18 +625,23 @@ const OB_BUDGET: u64 = 7;
 const OB_REFINE: u64 = 8; // a conformance's method against its interface's contracts
 const OB_EVAL: u64 = 9; // a `@prove_exhaustive` function: its setup and its runs
 
-extend Prover {
-    fn new(p: &loader::Package, keep: &irl::Keep, slice: loader::LookupHit) Prover {
+extend<const B: usize> Prover<B> {
+    fn new(p: &loader::Package, keep: &irl::Keep, slice: loader::LookupHit) Prover<B> {
         let mut errs = Vector::<diag::Errors>::with_capacity(p.modules.len());
         for _m in 0..p.modules.len() {
             errs.push(diag::Errors::new());
         }
-        return Prover {
+        return Prover::<B> {
             p: p,
             keep: keep,
             slice: slice,
-            tm: Terms::new(),
-            sv: Solver::new(),
+            wuint: p.prelude_lookup("UInt", true),
+            wint: p.prelude_lookup("Int", true),
+            line_mod: NONE,
+            line_starts: Vector::<u32>::new(),
+            tm: Terms::<B>::new(),
+            sv: Solver::<B>::new(),
+            derived: Map::<u32, bool>::new(),
             fx: fx::Facts::new(false),
             pw: lay::target_for(p.arch).ptr as u32 * 8,
             errs: errs,
@@ -1693,7 +653,6 @@ extend Prover {
             is_mem: Vector::<bool>::new(),
             mem_list: Vector::<u32>::new(),
             esc: Vector::<u32>::new(),
-            scc: Vector::<u32>::new(),
             me: NONE,
             fn_dec: false,
             ptr_cast: false,
@@ -1704,13 +663,11 @@ extend Prover {
             steps: 0,
             over: false,
             work: Vector::<Path>::new(),
-            ev: Eval::new(),
+            ev: Eval::<B>::new(),
             vname: Map::<u32, u32>::new(),
-            shells: Vector::<ir::CoreBody>::new(),
-            shell_ix: Map::<u64, u32>::new(),
             refining: false,
             refine: null,
-            main: null,
+            sh: null,
         };
     }
 
@@ -1758,11 +715,52 @@ extend Prover {
     }
 
     // The (width, signed) of type `ty` in module `m`: W_BOOL, an integer's width, or W_OTHER.
-    fn ty_of(self: &Self, m: ModuleId, ty: TypeId) (u8, bool) {
+    // The width of `UInt<N>` or `Int<N>` type `ty` and whether it is signed; 0 for another type.
+    fn wide_bits(self: &Self, m: ModuleId, ty: TypeId) (i64, bool) {
+        let a = self.ast_of(m);
+        let y = a.type_at(ty);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return 0, false;
+        }
+        let inst = a.instance(y.as_data.inst);
+        let wu = inst.module == self.wuint.mid && inst.decl == self.wuint.node;
+        if inst.n != 1 || inst.decl == NODE_NONE || !wu && (inst.module != self.wint.mid || inst.decl != self.wint.node) {
+            return 0, false;
+        }
+        let n = a.type_at(inst.args[0]);
+        if n.kind != TypeKind::TYPE_CONST || n.as_data.value <= 0 {
+            return 0, false;
+        }
+        return n.as_data.value, !wu;
+    }
+
+    // Whether kept body `k` has a local of an integer type wider than `int_limit(B)` bits.
+    fn needs_wide(self: &Self, k: usize) bool {
+        let b = unsafe &(&*self.keep).kept.at(k).body;
+        for l in 0..b.locals.len() {
+            let (n, _sg) = self.wide_bits(b.module, b.locals.at(l).ty);
+            if n > int_limit(B) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn ty_of(self: &Self, m: ModuleId, ty: TypeId) (u16, bool) {
         if ty == TYPE_NONE {
             return W_OTHER, false;
         }
-        let y = self.ast_of(m).type_at(ty);
+        let a = self.ast_of(m);
+        let y = a.type_at(ty);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            // `UInt<N>` and `Int<N>` up to `int_limit` bits (`u128`, `i128`, `UInt<256>`) are integers of
+            // N bits.
+            let (n, sg) = self.wide_bits(m, ty);
+            if n > 0 && n <= int_limit(B) {
+                return n as u16, sg;
+            }
+            return W_OTHER, false;
+        }
         if y.kind != TypeKind::TYPE_BUILTIN {
             return W_OTHER, false;
         }
@@ -1779,7 +777,7 @@ extend Prover {
             BT_ISIZE | BT_USIZE => self.pw,
             _ => 0,
         };
-        return w as u8, sg;
+        return w as u16, sg;
     }
 
     // Whether a value of type `ty` is frozen: a scalar or a shared view (`[]T`), which no shared
@@ -1793,7 +791,15 @@ extend Prover {
         if y.kind == TypeKind::TYPE_BUILTIN {
             return true;
         }
-        if y.kind != TypeKind::TYPE_INSTANCE || self.slice.node == NODE_NONE {
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        // A wide integer is a value of limbs, as a built-in integer is.
+        let (w, _sg) = self.ty_of(m, ty);
+        if w > W_BOOL {
+            return true;
+        }
+        if self.slice.node == NODE_NONE {
             return false;
         }
         let inst = a.instance(y.as_data.inst);
@@ -1824,16 +830,12 @@ extend Prover {
 
     // ---- reports ----------------------------------------------------------------------------------
 
-    const fn source_line(self: &Self, m: ModuleId, at: u32) u32 {
-        let src = self.pkg().modules.at(m as usize).source.as_str();
-        let mut line: u32 = 1;
-        let end = pick(at as usize < src.len(), at as usize, src.len());
-        for j in 0..end {
-            if src.byte_at(j) == b'\n' {
-                line += 1;
-            }
+    fn source_line(self: &mut Self, m: ModuleId, at: u32) u32 {
+        if self.line_mod != m as u32 {
+            self.line_mod = m;
+            self.line_starts = diag::line_starts_of(&self.pkg().modules.at(m as usize).source);
         }
-        return line;
+        return diag::line_in(&self.line_starts, at);
     }
 
     const fn text(self: &Self, m: ModuleId, sp: tok::Span) str {
@@ -1874,7 +876,7 @@ extend Prover {
         let mut domain: u64 = 1;
         for j in 0..n {
             let span = self.ev.hi[j] - self.ev.lo[j];
-            if span.is_negative() || wide(ENUM_MAX as i64) <= span {
+            if span.is_negative() || wide::<B>(ENUM_MAX as i64) <= span {
                 domain = ENUM_MAX + 1;
                 break;
             }
@@ -1883,7 +885,7 @@ extend Prover {
                 break;
             }
         }
-        let no_cands = Vector::<i128>::new();
+        let no_cands = Vector::<Num<B>>::new();
         let no_starts = Vector::<u32>::new();
         if domain <= ENUM_MAX {
             let mut complete = true;
@@ -1902,25 +904,33 @@ extend Prover {
             }
             return complete;
         }
-        // A few values of each unknown: its ends, zero and its neighbors.
-        let mut cands = Vector::<i128>::new();
+        // A few values of each unknown: its value in the solver's model, its ends, zero and its
+        // neighbors.
+        let mut cands = Vector::<Num<B>>::new();
         let mut starts = Vector::<u32>::new();
         let mut combos: u64 = 1;
         for j in 0..n {
             starts.push(cands.len() as u32);
             let lo = self.ev.lo[j];
             let hi = self.ev.hi[j];
-            let picks: [i128; 7] = [
+            let mut mv = lo;
+            for q in 0..self.sv.model.len() {
+                if self.sv.model[q] == self.ev.leaves[j] {
+                    mv = self.sv.mval[q];
+                }
+            }
+            let picks: [Num<B>; 8] = [
+                mv,
                 lo,
                 hi,
-                i128::zero(),
-                i128::one(),
-                i128::zero() - i128::one(),
-                lo + i128::one(),
-                hi - i128::one(),
+                Num::<B>::zero(),
+                Num::<B>::one(),
+                Num::<B>::zero() - Num::<B>::one(),
+                lo + Num::<B>::one(),
+                hi - Num::<B>::one(),
             ];
             let c0 = cands.len();
-            for q in 0..7 {
+            for q in 0..8 {
                 let v = picks[q];
                 if v < lo || hi < v || cands.len() - c0 >= CANDIDATES_MAX {
                     continue;
@@ -2009,11 +1019,31 @@ extend Prover {
     }
 
     // Prove that the conditions `pc` imply `goal`; report obligation `key` when they do not.
+    // Whether the facts `pc` imply `goal`: first without the facts derived for a division or a shift
+    // by a constant, which most goals do not need and which make each simplex larger (on code with
+    // many divisions, about 40% more instructions to prove all goals with them), then with them.
+    fn holds(self: &mut Self, pc: &Vector<u32>, goal: u32) bool {
+        let mut n: usize = 0;
+        for j in 0..pc.len() {
+            n += self.derived.contains_key(&pc[j]) as usize;
+        }
+        if n == 0 {
+            return self.sv.implies(&self.tm, pc, goal);
+        }
+        let mut base = Vector::<u32>::with_capacity(pc.len() - n);
+        for j in 0..pc.len() {
+            if !self.derived.contains_key(&pc[j]) {
+                base.push(pc[j]);
+            }
+        }
+        return self.sv.implies(&self.tm, &base, goal) || self.sv.implies(&self.tm, pc, goal);
+    }
+
     fn oblige(self: &mut Self, pc: &Vector<u32>, goal: u32, key: u64, sp: tok::Span, msg: String, note: String) {
         if self.over || self.failed.contains_key(&key) || self.refining && key >> 56 != OB_REFINE {
             return;
         }
-        if self.sv.implies(&self.tm, pc, goal) {
+        if self.holds(pc, goal) {
             return;
         }
         if self.steps + self.sv.steps > STEP_BUDGET {
@@ -2086,7 +1116,7 @@ extend Prover {
             if pj.kind == ir::PJ_DEREF {
                 v = self.deref(state, v, cm, pj.ty);
             } else if pj.kind == ir::PJ_DOWNCAST {
-                v = self.tm.make(Term { k: wide(pj.data), a: v, b: 0, op: T_DOWN, w: W_OTHER, sg: false });
+                v = self.tm.make(Term::<B> { k: wide::<B>(pj.data), a: v, b: 0, op: T_DOWN, w: W_OTHER, sg: false });
             } else {
                 let key = self.proj_key(cb, cm, state, &pj, ty, all);
                 let (w, sg) = self.ty_of(cm, pj.ty);
@@ -2115,11 +1145,11 @@ extend Prover {
         if pj.kind == ir::PJ_FIELD && pj.data == ir::IR_NONE {
             let ix = self.field_index(cm, base, pj.sub);
             if ix >= 0 {
-                return self.tm.int(wide(ix), 64, false);
+                return self.tm.int(wide::<B>(ix), 64, false);
             }
-            return self.tm.int(wide(pj.sub) + i128::one().shl(40), 64, false);
+            return self.tm.int(wide::<B>(pj.sub) + Num::<B>::one().shl(40), 64, false);
         }
-        return self.tm.int(wide(pj.data), 64, false);
+        return self.tm.int(wide::<B>(pj.data), 64, false);
     }
 
     // The place of field declaration `sub` among the members of struct type `ty`, -1 when it is not one.
@@ -2177,7 +1207,7 @@ extend Prover {
         }
         let (w, sg) = self.ty_of(cm, ty);
         let ep = state[state.len() - 1];
-        return self.tm.make(Term { k: i128::zero(), a: r, b: ep, op: T_LOAD, w: w, sg: sg });
+        return self.tm.make(Term::<B> { k: Num::<B>::zero(), a: r, b: ep, op: T_LOAD, w: w, sg: sg });
     }
 
     // A memory event (a call, a drop, a write through a pointer): every local a reference or pointer
@@ -2227,10 +1257,28 @@ extend Prover {
             let mut v: i64 = 0;
             if c.int_value(&self.pkg().modules.at(sm as usize).source, &mut v) {
                 let k = if !sg && v < 0 {
-                    u64_val(v as u64)
+                    u64_val::<B>(v as u64)
                 } else {
-                    wide(v)
+                    wide::<B>(v)
                 };
+                return self.tm.int(k, w, sg);
+            }
+        }
+        // A literal wider than 64 bits of a wide integer: its stored limbs, two's complement in `w` bits.
+        if c.kind == ir::CK_WIDE && w > 64 {
+            let sm = if c.item.node != NODE_NONE {
+                c.item.module
+            } else {
+                cb.module
+            };
+            let lits = &self.ast_of(sm).wide_lits;
+            if c.val >= 0 && c.val as usize < lits.len() {
+                let wl = *lits.at(c.val as usize);
+                let mut k = Num::<B>::zero();
+                for j in 0..(w as usize + 63) / 64 {
+                    k.set_limb(j, wl.limbs[j]);
+                }
+                k = Terms::<B>::wrap(k, w, sg);
                 return self.tm.int(k, w, sg);
             }
         }
@@ -2390,7 +1438,7 @@ extend Prover {
             // An array's view (`b` 1 or 2) has the array's length.
             let n = self.array_len(cm, cb.operands.at(rv.a as usize).ty);
             if rv.b != 0 && n >= 0 {
-                return self.tm.make(Term { k: wide(n), a: x, b: 0, op: T_VIEW, w: W_OTHER, sg: false });
+                return self.tm.make(Term::<B> { k: wide::<B>(n), a: x, b: 0, op: T_VIEW, w: W_OTHER, sg: false });
             }
             return x;
         }
@@ -2410,7 +1458,9 @@ extend Prover {
             if p.proj_len == 0 && (all || self.tracked[p.base as usize]) {
                 let v = self.local_val(cb, cm, state, p.base);
                 if rv.b != 0 {
-                    return self.tm.make(Term { k: i128::zero(), a: p.base, b: 0, op: T_MREF, w: W_OTHER, sg: false });
+                    return self.tm.make(
+                        Term::<B> { k: Num::<B>::zero(), a: p.base, b: 0, op: T_MREF, w: W_OTHER, sg: false },
+                    );
                 }
                 if !self.ptr_cast && self.frozen(cm, cb.locals.at(p.base as usize).ty) {
                     return self.tm.unary(T_REF, v, W_OTHER, false);
@@ -2430,12 +1480,12 @@ extend Prover {
                     },
                 );
             }
-            return self.tm.pool(T_AGG, &xs, i128::zero());
+            return self.tm.pool(T_AGG, &xs, Num::<B>::zero());
         }
         if rv.kind == ir::RV_LEN {
             let n = self.array_len(cm, cb.places.at(rv.a as usize).ty);
             if n >= 0 && w > W_BOOL {
-                return self.tm.int(wide(n), w, sg);
+                return self.tm.int(wide::<B>(n), w, sg);
             }
         }
         if rv.kind == ir::RV_UNARY {
@@ -2473,19 +1523,9 @@ extend Prover {
                 }
                 if op == tt::TokenType::Slash as u8 || op == tt::TokenType::Percent as u8 {
                     // A zero divisor traps in every profile: past the operation it is not zero.
-                    let z = self.tm.int(i128::zero(), self.tm.at(y).w, self.tm.at(y).sg);
+                    let z = self.tm.int(Num::<B>::zero(), self.tm.at(y).w, self.tm.at(y).sg);
                     pc.push(self.tm.cmp(T_NE, y, z));
-                    return self.tm.arith(
-                        if op == tt::TokenType::Slash as u8 {
-                            T_DIV
-                        } else {
-                            T_REM
-                        },
-                        x,
-                        y,
-                        w,
-                        sg,
-                    );
+                    return self.divided(pc, op == tt::TokenType::Slash as u8, x, y, w, sg);
                 }
                 let bo = if op == tt::TokenType::Ampersand as u8 {
                     T_BAND
@@ -2503,13 +1543,17 @@ extend Prover {
                 if bo == T_SHL || bo == T_SHR {
                     // A count below 0 or of the width or more traps in every profile.
                     let yx = self.tm.at(y);
-                    let z = self.tm.int(i128::zero(), yx.w, yx.sg);
-                    let wv = self.tm.int(wide(w), yx.w, yx.sg);
+                    let z = self.tm.int(Num::<B>::zero(), yx.w, yx.sg);
+                    let wv = self.tm.int(wide::<B>(w), yx.w, yx.sg);
                     pc.push(self.tm.cmp(T_LE, z, y));
                     pc.push(self.tm.cmp(T_LT, y, wv));
                 }
                 if bo != 0 {
-                    return self.tm.arith(bo, x, y, w, sg);
+                    let r = self.tm.arith(bo, x, y, w, sg);
+                    if bo == T_SHL || bo == T_SHR {
+                        self.shifted(pc, r);
+                    }
+                    return r;
                 }
             }
             if ints || bools && (op == tt::TokenType::EqualEqual as u8 || op == tt::TokenType::BangEqual as u8) {
@@ -2545,13 +1589,23 @@ extend Prover {
             }
             return self.tm.var(w, sg);
         }
+        // The implicit `from` of a wide integer (`let x: u128 = 5`, `a < 1000`): the value it converts.
+        if rv.kind == ir::RV_CAST && rv.b == ir::CAST_COERCE_FROM as u32 && self.wide_kind(rv.item) == WK_FROM {
+            let x = self.operand(cb, cm, state, rv.a, all);
+            if self.tm.is_int(x) {
+                let v = self.widened(x, w, sg);
+                if v != NONE {
+                    return v;
+                }
+            }
+        }
         if rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC as u32 {
             let x = self.operand(cb, cm, state, rv.a, all);
             let xs = self.tm.at(x);
             if xs.w > W_BOOL && w > W_BOOL {
                 // A cast that keeps every value of the source keeps the value.
-                let (lo0, hi0) = Terms::range(xs.w, xs.sg);
-                let (lo1, hi1) = Terms::range(w, sg);
+                let (lo0, hi0) = Terms::<B>::range(xs.w, xs.sg);
+                let (lo1, hi1) = Terms::<B>::range(w, sg);
                 if lo1 <= lo0 && hi0 <= hi1 {
                     return x;
                 }
@@ -2565,6 +1619,37 @@ extend Prover {
                 let out = self.tm.or(below, above);
                 pc.push(self.tm.or(out, eq));
                 return c;
+            }
+        }
+        // A bounds check gives back the value it checks (the index, or a range's end), and the path goes
+        // on only where the check holds (the panic edge leaves it).
+        if rv.kind == ir::RV_INTRINSIC && ir::is_check(rv.c) && rv.b >= 2 {
+            let x = self.operand(cb, cm, state, cb.oper_pool[rv.a as usize], all);
+            let y = self.operand(cb, cm, state, cb.oper_pool[(rv.a + 1) as usize], all);
+            let z = if rv.b >= 3 {
+                self.operand(cb, cm, state, cb.oper_pool[(rv.a + 2) as usize], all)
+            } else {
+                NONE
+            };
+            let ints = self.tm.is_int(x) && self.tm.is_int(y) && (z == NONE || self.tm.is_int(z));
+            if ints && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN) {
+                pc.push(self.tm.cmp(T_LT, x, y));
+                return x;
+            }
+            if ints && z != NONE && (rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN) {
+                let c1 = self.tm.cmp(T_LE, x, y);
+                let c2 = self.tm.cmp(T_LE, y, z);
+                pc.push(self.tm.and(c1, c2));
+                return y;
+            }
+            if ints && z != NONE && (rv.c == ir::IN_BOUNDS_GROUP || rv.c == ir::IN_BOUNDS_GROUP_PROVEN) {
+                // `index <= len && width <= len - index`, exact: `index + width <= len`.
+                let (xw, xsg) = (self.tm.at(x).w, self.tm.at(x).sg);
+                let c1 = self.tm.cmp(T_LE, x, y);
+                let end = self.tm.arith(T_ADD, x, z, xw, xsg);
+                let c2 = self.tm.cmp(T_LE, end, y);
+                pc.push(self.tm.and(c1, c2));
+                return x;
             }
         }
         return self.tm.var(w, sg);
@@ -2619,9 +1704,9 @@ extend Prover {
                 }
             } else if dx.w > W_BOOL {
                 let k = if dx.sg {
-                    wide(val as i32)
+                    wide::<B>(val as i32)
                 } else {
-                    wide(val)
+                    wide::<B>(val)
                 };
                 let kv = self.tm.int(k, dx.w, dx.sg);
                 self.tm.cmp(T_EQ, d, kv)
@@ -2725,7 +1810,17 @@ extend Prover {
                     subs.push(Sub { state: sb.state.clone(), conds: cs, blk: (edges[j] >> 32) as u32 });
                 }
             } else if t.kind == ir::TM_CALL {
-                self.chain_call(cb, cm, &mut sb.state, &t, all);
+                let sp = if wsp.end > wsp.start {
+                    wsp
+                } else {
+                    t.span
+                };
+                let key = OB_OVERFLOW << 56 | (cm as u64 & 0xFFFF) << 40 | 1 << 39 | t.span.start as u64;
+                let n1 = full.len();
+                self.chain_call(cb, cm, &mut sb.state, &mut full, &t, all, key, sp);
+                for j in n1..full.len() {
+                    sb.conds.push(full[j]);
+                }
                 sb.blk = t.t0;
                 subs.push(sb);
             }
@@ -2734,17 +1829,24 @@ extend Prover {
         return f, value;
     }
 
-    // A call inside a contract chain: a `const fn` call is a value of its arguments; another call (an
-    // impure contract, reported apart) is a fresh unknown.
+    // A call inside a contract chain: a wide integer's operation is its integer value (its overflow
+    // proved under `pc`, obligation `key` at `sp`), a `const fn` call is a value of its arguments;
+    // another call (an impure contract, reported apart) is a fresh unknown.
     fn chain_call(
         self: &mut Self,
         cb: &ir::CoreBody,
         cm: ModuleId,
         state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
         t: &ir::Terminator,
         all: bool,
+        key: u64,
+        sp: tok::Span,
     ) {
-        let r = self.call_value(cb, cm, state, t, all);
+        let mut r = self.wide_op(cb, cm, state, pc, t, all, OVF_PROVE, key, sp);
+        if r == NONE {
+            r = self.call_value(cb, cm, state, t, all);
+        }
         if t.dests_len == 1 {
             self.write_place(cb, cm, state, cb.dest_pool[t.dests_start as usize], r, all);
         } else {
@@ -2752,6 +1854,249 @@ extend Prover {
                 self.write_place(cb, cm, state, cb.dest_pool[j as usize], NONE, all);
             }
         }
+    }
+
+    // Callee `d` as an operation of a wide integer (`UInt<N>`, `Int<N>`; std's conformances in its
+    // `int` module, which keep these meanings): WK_FROM `from` (`u64` or `i64` to the type), WK_EQ `eq`,
+    // WK_CMP `cmp` (-1, 0 or 1), WK_ADD, WK_SUB and WK_MUL `add`, `sub` and `mul` (trap or wrap on
+    // overflow as the built-in integers do), WK_DIV and WK_REM `div` and `rem` (a zero divisor and
+    // `MIN / -1` trap), WK_AND, WK_OR, WK_XOR and WK_NOT the bit operations, WK_SHL and WK_SHR `shl`
+    // and `shr` (a count of at least the width gives 0, or -1 for a negative `Int` shifted right: no
+    // trap); 0 for any other callee.
+    fn wide_kind(self: &Self, d: DefId) u8 {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.wuint.node == NODE_NONE || d.module != self.wuint.mid && d.module != self.wint.mid || !self.pkg().modules.at(
+            d.module as usize,
+        ).has_ast {
+            return 0;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return 0;
+        }
+        let c = a.container_of(d.node);
+        if c == NODE_NONE || a.at_const(c).kind != NodeKind::NODE_EXTEND {
+            return 0;
+        }
+        let name = self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+        return if name == "from" {
+            WK_FROM
+        } else if name == "eq" {
+            WK_EQ
+        } else if name == "cmp" {
+            WK_CMP
+        } else if name == "add" {
+            WK_ADD
+        } else if name == "sub" {
+            WK_SUB
+        } else if name == "mul" {
+            WK_MUL
+        } else if name == "div" {
+            WK_DIV
+        } else if name == "rem" {
+            WK_REM
+        } else if name == "bit_and" {
+            WK_AND
+        } else if name == "bit_or" {
+            WK_OR
+        } else if name == "bit_xor" {
+            WK_XOR
+        } else if name == "bit_not" {
+            WK_NOT
+        } else if name == "shl" {
+            WK_SHL
+        } else if name == "shr" {
+            WK_SHR
+        } else {
+            0
+        };
+    }
+
+    // The value of call `t` when it is a wide integer's operation over integer values: `from` of a
+    // value the type holds keeps it, `eq` compares, `cmp` is the order (`T_ORD`, which a comparison
+    // with a constant turns into one of the operands), `add`, `sub` and `mul` are the exact result,
+    // its overflow checked by `ovf` under `pc` (obligation `key` at `sp`). NONE otherwise: the caller
+    // models the call as any other.
+    fn wide_op(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+        t: &ir::Terminator,
+        all: bool,
+        ovf: u8,
+        key: u64,
+        sp: tok::Span,
+    ) u32 {
+        let k = self.wide_kind(t.callee);
+        let n = pick(k == WK_FROM || k == WK_NOT, 1u32, 2);
+        if k == 0 || t.args_len != n || t.dests_len != 1 {
+            return NONE;
+        }
+        let rty = cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty;
+        let (w, sg) = self.ty_of(cm, rty);
+        let mut xs: [u32; 2] = [NONE, NONE];
+        for j in 0..n {
+            let oid = cb.oper_pool[(t.args_start + j) as usize];
+            let mut x = self.operand(cb, cm, state, oid, all);
+            // `self` and `other` are shared references: their values.
+            let oy = *self.ast_of(cm).type_at(cb.operands.at(oid as usize).ty);
+            if !self.autoref(cb, cm, t, j) && oy.kind == TypeKind::TYPE_REFERENCE {
+                x = self.deref(state, x, cm, oy.as_data.elem);
+            }
+            if !self.tm.is_int(x) {
+                return NONE;
+            }
+            xs[j as usize] = x;
+        }
+        let a = xs[0];
+        let b = xs[1];
+        if k == WK_FROM {
+            return self.widened(a, w, sg);
+        }
+        if k == WK_EQ {
+            return self.tm.cmp(T_EQ, a, b);
+        }
+        if k == WK_CMP {
+            return pick(w > W_BOOL, self.tm.ord(a, b, w, sg), NONE);
+        }
+        if w <= W_BOOL {
+            return NONE;
+        }
+        if k == WK_ADD || k == WK_SUB || k == WK_MUL {
+            let op = if k == WK_ADD {
+                T_ADD
+            } else if k == WK_SUB {
+                T_SUB
+            } else {
+                T_MUL
+            };
+            let e = self.tm.arith(op, a, b, w, sg);
+            return self.checked(e, pc, ovf, key, sp);
+        }
+        if k == WK_DIV || k == WK_REM {
+            // A zero divisor traps: past the operation it is not zero.
+            let z = self.tm.int(Num::<B>::zero(), self.tm.at(b).w, self.tm.at(b).sg);
+            pc.push(self.tm.cmp(T_NE, b, z));
+            return self.divided(pc, k == WK_DIV, a, b, w, sg);
+        }
+        if k == WK_NOT {
+            return self.tm.unary(T_BNOT, a, w, sg);
+        }
+        if k == WK_SHL || k == WK_SHR {
+            // `k` 1: the wide shift, which gives 0 (or -1) for a count past the width.
+            let r = self.tm.make(
+                Term::<B> { k: Num::<B>::one(), a: a, b: b, op: pick(k == WK_SHL, T_SHL, T_SHR), w: w, sg: sg },
+            );
+            self.shifted(pc, r);
+            return r;
+        }
+        let op = if k == WK_AND {
+            T_BAND
+        } else if k == WK_OR {
+            T_BOR
+        } else {
+            T_BXOR
+        };
+        return self.tm.arith(op, a, b, w, sg);
+    }
+
+    // `x / y` (`div`) or `x % y` of type (`w`, `sg`), truncated toward zero, `y` not zero on the path.
+    // By a positive constant `c` the quotient `q` gets its definition as facts on `pc`: `x - c * q`
+    // lies in [0, c - 1] when `x >= 0` and in [-(c - 1), 0] when `x < 0`, and the remainder is
+    // `x - c * q`.
+    fn divided(self: &mut Self, pc: &mut Vector<u32>, div: bool, x: u32, y: u32, w: u16, sg: bool) u32 {
+        let r = self.tm.arith(pick(div, T_DIV, T_REM), x, y, w, sg);
+        let yt = self.tm.at(y);
+        if yt.op != T_INT || !(Num::<B>::zero() < yt.k) || !self.tm.is_int(x) {
+            return r;
+        }
+        let q = if div {
+            r
+        } else {
+            self.tm.arith(T_DIV, x, y, w, sg)
+        };
+        self.quotient(pc, x, q, yt.k, w, sg, false);
+        if !div {
+            let cq = self.tm.arith(T_MUL, q, y, w, sg);
+            let d = self.tm.arith(T_SUB, x, cq, w, sg);
+            let f = self.tm.cmp(T_EQ, r, d);
+            self.derive(pc, f);
+        }
+        return r;
+    }
+
+    // The facts of quotient `q` of `x` by the positive constant `c`: `x - c * q` in [0, c - 1] (`floor`,
+    // or an `x` of an unsigned type), else in [0, c - 1] for `x >= 0` and [-(c - 1), 0] for `x < 0`
+    // (truncation toward zero).
+    fn quotient(self: &mut Self, pc: &mut Vector<u32>, x: u32, q: u32, c: Num<B>, w: u16, sg: bool, floor: bool) {
+        let cv = self.tm.int(c, w, sg);
+        let cq = self.tm.arith(T_MUL, q, cv, w, sg);
+        let d = self.tm.arith(T_SUB, x, cq, w, sg);
+        let zero = self.tm.int(Num::<B>::zero(), w, sg);
+        let top = self.tm.int(c - Num::<B>::one(), w, sg);
+        let bot = self.tm.int(Num::<B>::one() - c, w, sg);
+        let d0 = self.tm.cmp(T_LE, zero, d);
+        let dt = self.tm.cmp(T_LE, d, top);
+        let pos = self.tm.and(d0, dt);
+        if floor || !self.tm.at(x).sg {
+            self.derive(pc, pos);
+            return;
+        }
+        let db = self.tm.cmp(T_LE, bot, d);
+        let d1 = self.tm.cmp(T_LE, d, zero);
+        let neg = self.tm.and(db, d1);
+        let xneg = self.tm.cmp(T_LT, x, zero);
+        let xpos = self.tm.not(xneg);
+        let f1 = self.tm.or(xneg, pos);
+        let f2 = self.tm.or(xpos, neg);
+        let f = self.tm.and(f1, f2);
+        self.derive(pc, f);
+    }
+
+    // Fact `f` on the path, marked as derived (`holds` tries a goal without it first).
+    fn derive(self: &mut Self, pc: &mut Vector<u32>, f: u32) {
+        pc.push(f);
+        self.derived.insert(f, true);
+    }
+
+    // The facts of shift `r` by a constant count `c` below its width: `x >> c` is `x` divided by `2^c`
+    // rounded down (an arithmetic shift too); `x << c` of an unsigned `x` below `2^(w - c)` is
+    // `x * 2^c`.
+    fn shifted(self: &mut Self, pc: &mut Vector<u32>, r: u32) {
+        let t = self.tm.at(r);
+        let ct = self.tm.at(t.b);
+        if ct.op != T_INT || ct.k.is_negative() || !(ct.k < wide::<B>(t.w)) || !self.tm.is_int(t.a) {
+            return;
+        }
+        let c = ct.k.to_i64() as usize;
+        let p = Num::<B>::one().shl(c);
+        if t.op == T_SHR {
+            self.quotient(pc, t.a, r, p, t.w, t.sg, true);
+            return;
+        }
+        if t.op != T_SHL || self.tm.at(t.a).sg {
+            return;
+        }
+        let lim = self.tm.int(Num::<B>::one().shl(t.w as usize - c), t.w, false);
+        let big = self.tm.cmp(T_LE, lim, t.a);
+        let pv = self.tm.int(p, t.w, false);
+        let m = self.tm.arith(T_MUL, t.a, pv, t.w, false);
+        let eq = self.tm.cmp(T_EQ, r, m);
+        let f = self.tm.or(big, eq);
+        self.derive(pc, f);
+    }
+
+    // Integer `x` as a value of type (`w`, `sg`) through `from`: itself when the type holds every value
+    // of `x`'s, NONE otherwise.
+    const fn widened(self: &mut Self, x: u32, w: u16, sg: bool) u32 {
+        let xt = self.tm.at(x);
+        if w <= W_BOOL || xt.w <= W_BOOL {
+            return NONE;
+        }
+        let (lo0, hi0) = Terms::<B>::range(xt.w, xt.sg);
+        let (lo1, hi1) = Terms::<B>::range(w, sg);
+        return pick(lo1 <= lo0 && hi0 <= hi1, x, NONE);
     }
 
     // The result of call `t`: the same value for the same `const fn` over the same arguments (scalars
@@ -2843,7 +2188,9 @@ extend Prover {
                 continue;
             }
             let t = bb.term;
-            if t.kind == ir::TM_DROP || t.kind == ir::TM_CALL && !self.is_const_fn(t.callee) && !self.panics(t.callee) {
+            if t.kind == ir::TM_DROP || t.kind == ir::TM_CALL && !self.is_const_fn(t.callee) && !self.panics(t.callee) && self.wide_kind(
+                t.callee,
+            ) == 0 {
                 return false;
             }
             if t.kind == ir::TM_GOTO || t.kind == ir::TM_ASSERT || t.kind == ir::TM_CALL {
@@ -3098,7 +2445,7 @@ extend Prover {
     }
 
     // Lower the contracts of every interface method that has contracts and no body.
-    fn lower_shells(self: &mut Self) {
+    fn lower_shells(self: &mut Self, sh: &mut Shared) {
         let p = unsafe &*self.p;
         for m in 0..p.modules.len() {
             if !p.modules.at(m).has_ast {
@@ -3111,7 +2458,7 @@ extend Prover {
                     continue;
                 }
                 let key = skey_mix(0, m as u64 << 32 | o as u64);
-                if self.shell_ix.contains_key(&key) {
+                if sh.shell_ix.contains_key(&key) {
                     continue;
                 }
                 let mut lw = irl::Lowerer::new(self.p, m as ModuleId, o);
@@ -3137,20 +2484,15 @@ extend Prover {
                         );
                     }
                 }
-                self.shell_ix.insert(key, self.shells.len() as u32);
-                self.shells.push(b);
+                sh.shell_ix.insert(key, sh.shells.len() as u32);
+                sh.shells.push(b);
             }
         }
         self.failed.clear();
     }
 
-    // The prover that holds the shells and the components: this one, or a worker's main prover.
-    const fn shared(self: &Self) &Prover {
-        return if self.main == null {
-            self
-        } else {
-            unsafe &*self.main
-        };
+    const fn shared(self: &Self) &Shared {
+        return unsafe &*self.sh;
     }
 
     // Both walks of kept body `k`: its own obligations, then for a conformance's method the
@@ -3189,7 +2531,7 @@ extend Prover {
     // why they cannot run: a generic function, a `decreases` clause, a parameter without a small set of
     // values, or too many inputs. Each integer parameter takes the values its type and the bounds
     // that the `requires` clauses imply allow.
-    fn exhaustive_job(self: &mut Self, k: usize) Option<PJob> {
+    fn exhaustive_job(self: &mut Self, k: usize) Option<PJob<B>> {
         let bp = (&unsafe (&*self.keep).kept.at(k).body) as *const ir::CoreBody;
         let b = unsafe &*bp;
         self.m = b.module;
@@ -3244,7 +2586,7 @@ extend Prover {
                 pc.push(c);
             }
         }
-        let mut dims = Vector::<PDim>::with_capacity(b.args as usize);
+        let mut dims = Vector::<PDim<B>>::with_capacity(b.args as usize);
         for l in b.returns..b.returns + b.args {
             switch self.pdim(b, l, &st, &pc) {
                 Some(d) => dims.push(d),
@@ -3292,13 +2634,13 @@ extend Prover {
             );
             return None;
         }
-        return Some(PJob { k: k, dims: dims, inputs: inputs, first: NO_INPUT });
+        return Some(PJob::<B> { k: k, dims: dims, inputs: inputs, first: NO_INPUT });
     }
 
     // Parameter `l` of body `b` as an input dimension (`PDim`), None when it has no small set of
     // values; an integer's range is narrowed to the bounds the conditions `pc` imply of its unknown in
     // `st`.
-    fn pdim(self: &mut Self, b: &ir::CoreBody, l: u32, st: &Vector<u32>, pc: &Vector<u32>) Option<PDim> {
+    fn pdim(self: &mut Self, b: &ir::CoreBody, l: u32, st: &Vector<u32>, pc: &Vector<u32>) Option<PDim<B>> {
         let a = self.ast_of(b.module);
         let mut ty = b.locals.at(l as usize).ty;
         if ty == TYPE_NONE {
@@ -3310,13 +2652,13 @@ extend Prover {
             by_ref = true;
             ty = y0.as_data.elem;
         }
-        let mut d = PDim {
+        let mut d = PDim::<B> {
             l: l,
             kind: PD_INT,
             by_ref: by_ref,
-            lo: i128::zero(),
+            lo: Num::<B>::zero(),
             n: 0,
-            count: i128::zero(),
+            count: Num::<B>::zero(),
             w: 0,
             sg: false,
             tm: b.module,
@@ -3348,22 +2690,26 @@ extend Prover {
                 d.vars.push(vid);
             }
             d.n = d.tags.len() as u64;
-            d.count = u64_val(d.n);
+            d.count = u64_val::<B>(d.n);
             return Some(d);
         }
         let (w, sg) = self.ty_of(b.module, ty);
         if w == W_BOOL {
             d.kind = PD_BOOL;
             d.n = 2;
-            d.count = u64_val(2);
+            d.count = u64_val::<B>(2);
             return Some(d);
+        }
+        // A wide integer (`UInt<N>`, `Int<N>`) is a struct to the evaluator: no domain.
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return None;
         }
         if w < 8 {
             return None;
         }
         d.w = w;
         d.sg = sg;
-        let (lo0, hi0) = Terms::range(w, sg);
+        let (lo0, hi0) = Terms::<B>::range(w, sg);
         let mut lo = lo0;
         let mut hi = hi0;
         let x = st[l as usize];
@@ -3379,10 +2725,10 @@ extend Prover {
                 let c = self.tm.int(mid, w, sg);
                 let goal = self.tm.cmp(T_LE, x, c);
                 self.sv.steps = 0;
-                if self.sv.implies(&self.tm, pc, goal) {
+                if self.holds(pc, goal) {
                     hi = mid;
                 } else {
-                    a = mid + i128::one();
+                    a = mid + Num::<B>::one();
                 }
             }
             let mut z = hi;
@@ -3394,20 +2740,20 @@ extend Prover {
                 let c = self.tm.int(mid, w, sg);
                 let goal = self.tm.cmp(T_LE, c, x);
                 self.sv.steps = 0;
-                if self.sv.implies(&self.tm, pc, goal) {
+                if self.holds(pc, goal) {
                     lo = mid;
                 } else {
-                    z = mid - i128::one();
+                    z = mid - Num::<B>::one();
                 }
             }
         }
         d.lo = lo;
         d.count = if hi < lo {
-            i128::zero()
+            Num::<B>::zero()
         } else {
-            hi - lo + i128::one()
+            hi - lo + Num::<B>::one()
         };
-        d.n = if wide(iri::I64_MAX) < d.count {
+        d.n = if wide::<B>(iri::I64_MAX) < d.count {
             NO_INPUT
         } else {
             d.count.to_i64() as u64
@@ -3416,7 +2762,7 @@ extend Prover {
     }
 
     // Report the first failed run of `job`, from part `r`, which holds the least failed input.
-    fn report_part(self: &mut Self, job: &PJob, r: &PRes) {
+    fn report_part(self: &mut Self, job: &PJob<B>, r: &PRes) {
         let b = unsafe &(&*self.keep).kept.at(job.k).body;
         self.m = b.module;
         let key = OB_EVAL << 56 | job.k as u64 << 8 | 4;
@@ -3732,7 +3078,7 @@ extend Prover {
             return self.tm.boolean(false);
         }
         let vx = self.tm.at(v);
-        let z = self.tm.int(i128::zero(), vx.w, vx.sg);
+        let z = self.tm.int(Num::<B>::zero(), vx.w, vx.sg);
         let c1 = self.tm.cmp(T_LE, z, v);
         let c2 = self.tm.cmp(T_LT, v, m);
         return self.tm.and(c1, c2);
@@ -3987,6 +3333,16 @@ extend Prover {
     // Call `t` on `path`: the callee's `requires` hold, its `decreases` measure decreases at a call of
     // the body's own function, and its `ensures` hold after it.
     fn call(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) {
+        // A wide integer's operation borrows its operands only to read them: no escape, no memory event.
+        if self.wide_kind(t.callee) != 0 {
+            let key = OB_OVERFLOW << 56 | 1 << 39 | t.span.start as u64;
+            let ovf = self.ovf;
+            let r = self.wide_op(b, b.module, &mut path.state, &mut path.pc, t, false, ovf, key, t.span);
+            if r != NONE {
+                self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
+                return;
+            }
+        }
         for j in 0..t.args_len {
             if self.autoref(b, b.module, t, j) {
                 let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
@@ -4037,7 +3393,9 @@ extend Prover {
                         let pl = *b.places.at(b.operands.at(oid as usize).data as usize);
                         if pl.proj_len == 0 && self.tracked[pl.base as usize] {
                             let _ = self.local_val(b, b.module, &mut path.state, pl.base);
-                            self.tm.make(Term { k: i128::zero(), a: pl.base, b: 0, op: T_MREF, w: W_OTHER, sg: false })
+                            self.tm.make(
+                                Term::<B> { k: Num::<B>::zero(), a: pl.base, b: 0, op: T_MREF, w: W_OTHER, sg: false },
+                            )
                         } else {
                             self.tm.var(W_OTHER, false)
                         }
@@ -4190,7 +3548,7 @@ fn any_exhaustive_in(p: &loader::Package, m: usize) bool {
 }
 
 // The position of input `x`'s value of parameter `j` of `job` among the parameter's values.
-const fn input_index(job: &PJob, x: u64, j: usize) u64 {
+const fn input_index<const B: usize>(job: &PJob<B>, x: u64, j: usize) u64 {
     let mut q = x;
     let mut i = job.dims.len();
     for _k in 0..job.dims.len() {
@@ -4204,7 +3562,7 @@ const fn input_index(job: &PJob, x: u64, j: usize) u64 {
 }
 
 // The arguments of input `x` of `job`, as evaluator values.
-fn input_args(job: &PJob, x: u64, out: &mut Vector<iri::IVal>) {
+fn input_args<const B: usize>(job: &PJob<B>, x: u64, out: &mut Vector<iri::IVal>) {
     out.clear();
     for j in 0..job.dims.len() {
         let d = &job.dims[j];
@@ -4214,7 +3572,7 @@ fn input_args(job: &PJob, x: u64, out: &mut Vector<iri::IVal>) {
         } else if d.kind == PD_ENUM {
             iri::IVal { kind: iri::IV_INT, tm: d.tm, ty: d.ty, i: d.tags[i as usize], f: 0.0 }
         } else {
-            let bits = bits_of(d.lo + u64_val(i), d.w);
+            let bits = bits_of(d.lo + u64_val::<B>(i), d.w);
             let sh = 64 - d.w as u64;
             let iv = if d.sg {
                 (bits << sh) as i64 >> sh as i64
@@ -4228,7 +3586,7 @@ fn input_args(job: &PJob, x: u64, out: &mut Vector<iri::IVal>) {
 }
 
 // Input `x` of `job` by the parameters of body `b`: `for example: x = 3, c = Color::Red`.
-fn describe_input(p: &loader::Package, b: &ir::CoreBody, job: &PJob, x: u64, out: &mut String) {
+fn describe_input<const B: usize>(p: &loader::Package, b: &ir::CoreBody, job: &PJob<B>, x: u64, out: &mut String) {
     let src = p.modules.at(b.module as usize).source.as_str();
     out.push_str("for example: ");
     for j in 0..job.dims.len() {
@@ -4251,7 +3609,7 @@ fn describe_input(p: &loader::Package, b: &ir::CoreBody, job: &PJob, x: u64, out
             let vn = ea.at_const(ea.at_const(d.vars[i as usize]).as_data.variant.name).span;
             out.push_str(es.slice(vn.start as usize, vn.end as usize));
         } else {
-            out.push_str((d.lo + u64_val(i)).to_string().as_str());
+            out.push_str((d.lo + u64_val::<B>(i)).to_string().as_str());
         }
     }
 }
@@ -4276,7 +3634,7 @@ fn fn_name(p: &loader::Package, d: DefId) str {
 
 // Run inputs [`r.from`, `r.to`) of `job` in order, to the first that fails (`PRes`), or to one after a
 // failed input another part found: an input whose own `requires` fails is skipped.
-fn run_inputs(p: &loader::Package, keep: &irl::Keep, job: &PJob, r: &mut PRes) {
+fn run_inputs<const B: usize>(p: &loader::Package, keep: &irl::Keep, job: &PJob<B>, r: &mut PRes) {
     let b = &keep.kept.at(job.k).body;
     // The parts of the job share `first` through atomic operations only.
     let first = ptr::cast_mut(&job.first);
@@ -4401,8 +3759,9 @@ fn fail_report(p: &loader::Package, b: &ir::CoreBody, e: &mut iri::Interp, k: u8
 // The `@prove_exhaustive` functions of `keep` outside the modules `skip` marks: their inputs split into
 // parts that run in parallel, and each function reports the run of its least failed input, whatever
 // the split.
-fn prove_exhaustive(pv: &mut Prover, p: &loader::Package, keep: &irl::Keep, skip: &Vector<bool>) {
-    let mut jobs = Vector::<PJob>::new();
+// The exhaustive proofs take built-in integers only: narrow numbers.
+fn prove_exhaustive(pv: &mut Prover<NUM_NARROW>, p: &loader::Package, keep: &irl::Keep, skip: &Vector<bool>) {
+    let mut jobs = Vector::<PJob<NUM_NARROW>>::new();
     for k in 0..keep.kept.len() {
         let kb = keep.kept.at(k);
         if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] && pv.exhaustive(kb.body.owner) {
@@ -4461,7 +3820,7 @@ fn prove_exhaustive(pv: &mut Prover, p: &loader::Package, keep: &irl::Keep, skip
                 let pk = unsafe &*ptr::from_addr_mut::<loader::Package>(pa);
                 let kp = unsafe &*ptr::from_addr_mut::<irl::Keep>(ka);
                 let r = unsafe &mut *(ptr::from_addr_mut::<PRes>(ra) + c);
-                let job = unsafe &*(ptr::from_addr_mut::<PJob>(ja) + r.job as usize);
+                let job = unsafe &*(ptr::from_addr_mut::<PJob<NUM_NARROW>>(ja) + r.job as usize);
                 run_inputs(pk, kp, job, r);
             },
         );
@@ -4490,20 +3849,36 @@ pub(package) fn check_kept(
     skip: &Vector<bool>,
     held: &mut Vector<bool>,
 ) bool {
-    let mut pv = Prover::new(p, keep, p.prelude_lookup("Slice", true));
-    pv.lower_shells();
-    pv.scc = comp.clone();
+    let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
+    let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
+    pv.lower_shells(&mut sh);
+    pv.sh = &sh;
     let n = keep.kept.len();
+    // A body with an integer wider than the narrow numbers hold proves with the wide ones.
+    let mut wide = Vector::<bool>::with_capacity(n);
+    for k in 0..n {
+        let kb = keep.kept.at(k);
+        wide.push(kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] && pv.needs_wide(k));
+    }
     if p.jobs == 1 || n < 2 {
+        let mut pw = Prover::<NUM_WIDE>::new(p, keep, pv.slice);
+        pw.sh = &sh;
         for k in 0..n {
             let kb = keep.kept.at(k);
-            if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] {
-                pv.prove_kept(k);
+            if kb.body.blocks.len() == 0 || skip[kb.body.module as usize] {
+                continue;
             }
+            if !wide[k] {
+                pv.prove_kept(k);
+                continue;
+            }
+            pw.prove_kept(k);
+            let m = kb.body.module as usize;
+            pv.errs.index_mut(m).append(pw.errs.index_mut(m));
         }
     } else {
         // One prover per chunk of bodies, each body's reports in a container of its own; a walk
-        // reads only the package, the keep and the main prover. The reports merge in body order and
+        // reads only the package, the keep and the shared state. The reports merge in body order and
         // then by position, as one prover orders them (`Errors::emit_ordered`).
         let mut outs = Vector::<diag::Errors>::with_capacity(n);
         for _k in 0..n {
@@ -4516,9 +3891,11 @@ pub(package) fn check_kept(
         };
         let pa = (p as *const loader::Package) as usize;
         let ka = (keep as *const irl::Keep) as usize;
-        let ma = ((&pv) as *const Prover) as usize;
+        let ha = ((&sh) as *const Shared) as usize;
         let sa = (skip as *const Vector<bool>) as usize;
+        let wa = ((&wide) as *const Vector<bool>) as usize;
         let oa = outs.as_mut_ptr() as usize;
+        let slice = pv.slice;
         // A chunk's cost is its bodies': each worker claims one chunk at a time.
         dpar::range_with(
             0..chunks,
@@ -4526,21 +3903,26 @@ pub(package) fn check_kept(
             |c: usize| {
                 let pk = unsafe &*ptr::from_addr_mut::<loader::Package>(pa);
                 let kp = unsafe &*ptr::from_addr_mut::<irl::Keep>(ka);
-                let main = unsafe &*ptr::from_addr_mut::<Prover>(ma);
                 let sk = unsafe &*ptr::from_addr_mut::<Vector<bool>>(sa);
-                let mut w = Prover::new(pk, kp, main.slice);
-                w.main = main;
+                let wd = unsafe &*ptr::from_addr_mut::<Vector<bool>>(wa);
+                let mut w = Prover::<NUM_NARROW>::new(pk, kp, slice);
+                w.sh = ptr::from_addr_mut::<Shared>(ha);
+                let mut w2 = Prover::<NUM_WIDE>::new(pk, kp, slice);
+                w2.sh = ptr::from_addr_mut::<Shared>(ha);
                 for k in c * n / chunks..(c + 1) * n / chunks {
                     let kb = kp.kept.at(k);
                     if kb.body.blocks.len() == 0 || sk[kb.body.module as usize] {
                         continue;
                     }
-                    w.prove_kept(k);
                     let m = kb.body.module as usize;
-                    unsafe *(ptr::from_addr_mut::<diag::Errors>(oa) + k) = replace(
-                        w.errs.index_mut(m),
-                        diag::Errors::new(),
-                    );
+                    let e = if wd[k] {
+                        w2.prove_kept(k);
+                        replace(w2.errs.index_mut(m), diag::Errors::new())
+                    } else {
+                        w.prove_kept(k);
+                        replace(w.errs.index_mut(m), diag::Errors::new())
+                    };
+                    unsafe *(ptr::from_addr_mut::<diag::Errors>(oa) + k) = e;
                 }
             },
         );

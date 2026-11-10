@@ -892,6 +892,53 @@ fn main() i32 {
     );
 }
 
+// A branch whose values are unsuffixed literals behind an `else if`, in a `switch` arm or in a binary
+// operand takes the other branch's type, as one literal does: `4000000000` fits `u32`, not `i32`.
+fn nested_literal_branches_join(b: &mut h::ExitBatch) {
+    b.add(
+        "nested literal branches",
+        M"(fn chain(a: bool, b: bool) u32 {
+    let k = if a {
+        0u32
+    } else if b {
+        4000000000
+    } else {
+        2
+    };
+    static_assert(sizeof(k) == 4, "u32");
+    return k;
+}
+fn arm(t: i32, a: bool) u8 {
+    let k = switch t {
+        0 => 1u8,
+        1 => if a {
+            2
+        } else {
+            3
+        },
+        _ => 4,
+    };
+    static_assert(sizeof(k) == 1, "u8");
+    return k;
+}
+fn operand(a: bool, b: bool) bool {
+    let w: u64 = 5000000000;
+    return w > if a {
+        1
+    } else if b {
+        4294967296
+    } else {
+        3
+    };
+}
+fn main() i32 {
+    return (chain(false, true) / 1000000000) as i32 + arm(1, false) as i32 + operand(false, false) as i32;
+}
+)",
+        8,
+    );
+}
+
 fn deep_generic_call_chain_takes_the_expected_type(b: &mut h::ExitBatch) {
     // Each `id` call's result names T, fixed only by the innermost call's expected type.
     b.add(
@@ -1046,6 +1093,7 @@ fn exit_cases_00() {
     deep_generic_call_chain_takes_the_expected_type(&mut b);
     interface_method_param_takes_the_bound_arguments(&mut b);
     literal_generic_calls_take_the_context_type(&mut b);
+    nested_literal_branches_join(&mut b);
     b.run();
 }
 

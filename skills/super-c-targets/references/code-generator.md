@@ -127,8 +127,9 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   values the call reads go to their homes (`spill_around_call`, `back`): no code of the body runs after
   it. arm64: a parameter a call of the entry block takes before any instruction ran is read in the
   register it arrived in (`arrived_in`), not in its home; not where a branch enters the entry block. arm64 joins up to 8 integer
-  comparisons into one conditional-comparison chain (`lv::FOLD_CCMP`); each leaf's extension frees after
-  its `ccmp`.
+  comparisons into one conditional-comparison chain (`lv::FOLD_CCMP`); each comparison's extensions and
+  operand locks end after its `ccmp` (`conj_flags`), so a chain of spilled values needs no more than the
+  16 registers `alloc` has.
 - A saturating float-to-integer conversion reads the float's sign with `movq`/`movd`, which EVEX
   encodes on xmm16..xmm31 (`movmskpd` has no EVEX form).
 - arm64 pairs loads or stores at adjacent offsets in either order across up to seven pure

@@ -3633,8 +3633,12 @@ extend Gen {
 
     // The flags of `and` or `or` `v` of flags folded into conditional comparisons (`lv::FOLD_CCMP`): its
     // chain operand's flags (or its first comparison's), then its comparison when they let it run (`ccmp`),
-    // else flags that decide it (false for an `and`, true for an `or`). The condition on them.
+    // else flags that decide it (false for an `and`, true for an `or`). The condition on them. Each
+    // comparison's operands stay locked until it is emitted only: a chain of CCMP_MAX comparisons of
+    // spilled values would lock two registers each, past the ones `alloc` has. A later load or spill
+    // between two comparisons leaves the flags as they are.
     fn conj_flags(self: &mut Self, v: Value) u32 {
+        let l0 = self.cr.lock;
         let t = self.cr.b().insts[v as usize];
         let b_leaf = self.cr.lv.conj[t.b as usize] == 0;
         // A `tst` (a comparison of a folded `and`) compares first: no conditional comparison tests bits.
@@ -3692,6 +3696,7 @@ extend Gen {
                 };
                 self.emit(a::ccmp(sf, kv < 0, true, ra, m as u32, nzcv, run));
                 self.cr.tmps = t0;
+                self.cr.lock = l0;
                 return lc;
             }
         }
@@ -3702,6 +3707,7 @@ extend Gen {
         } as u32;
         self.emit(a::ccmp(sf, false, false, ra, rb, nzcv, run));
         self.cr.tmps = t0;
+        self.cr.lock = l0;
         return lc;
     }
 

@@ -102,8 +102,8 @@ keywords. A clause only computes its condition: it calls only `const fn`s, drops
 nothing (error 537). An extern or intrinsic function has no clause.
 
 The compiler proves every clause in every build; one it cannot prove fails the build (error 538,
-"cannot prove ..."), and over small domains the note gives the parameters of a counterexample
-(`for example: x = 0, y = 3`). It proves:
+"cannot prove ..."), and the note gives the parameters of a counterexample the evaluator confirms
+when it finds one (`for example: x = 0, y = 3`). It proves:
 
 - a callee's `requires` at each call, from the facts on the path to it;
 - each `ensures` at each return;
@@ -138,9 +138,16 @@ and `ensures` without a body (a `decreases` needs a body, error 539): a call thr
 its own `requires` from the interface's and the interface's `ensures` at its returns. A function
 with a `requires` clause cannot be a value: a call through the value would prove nothing.
 
-The proofs model integers exactly (linear arithmetic over 128 bits; a product of two unknowns has
-no bound), struct fields, arrays of a constant length and their views, and references; a call that
-may write memory, a drop and a write through a pointer forget the values a reference reaches. A
+The proofs model integers exactly, `u128`, `i128` and `UInt<N>` or `Int<N>` of up to 512 bits too
+(their comparisons, `+ - * / %`, bit operations, shifts, conversions and literals): a product of two
+unknowns lies within the products of its operands' ranges and is linear where the facts fix one
+operand (`requires k == 3` makes `a * k` the value `3 * a`), and a division or shift by a constant
+bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A wider integer and a float are
+values the proofs do not take apart. They also model struct fields, arrays of a constant length and
+their views (an element read by an index the path proves in bounds), and references; a call that
+may write memory, a drop and a write through a pointer forget the values a reference reaches. Equal
+operands give equal results: `requires i == j` proves `a[i] == a[j]`, `half(x) == half(y)` for a
+`const fn`, `x / 3 == y / 3`, also where the rows imply the equality (`x <= y, y <= x`). A
 proof that goes over its fixed budget is not proved. `-fno-prove` skips the proofs;
 `-fcontract-checks` also checks the clauses at run time (binary skill, build-toml.md). Without it a
 build emits no check: the output is the same as without the clauses.

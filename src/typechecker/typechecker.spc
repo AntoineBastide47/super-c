@@ -30611,13 +30611,15 @@ extend TypeChecker {
                 if first || result != TYPE_NONE && self.type_at(result).kind == TypeKind::TYPE_NEVER {
                     result = body;
                     first = false;
-                    lits = blit != NODE_NONE;
+                    lits = self.tc_lits_adopt(arm.body, TYPE_NONE, true);
                 } else if result == TYPE_NONE && !untyped(body) && !body_never && self.tc_arms_take(arms, i, body) {
                     // The earlier arms are untyped `null`s: they take this arm's pointer type.
                     result = body;
                 } else if !body_never && result != body && !untyped(body) && !untyped(result) {
                     if blit != NODE_NONE && self.tc_branch_adopt(arm.body, blit, result, false) {
                         // this literal arm took the earlier arms' type
+                    } else if blit == NODE_NONE && self.tc_value_adopt(arm.body, result) {
+                        // so did this arm of literals
                     } else if lits && self.tc_arms_adopt(arms, i, body) {
                         result = body;
                     } else {
@@ -30637,7 +30639,7 @@ extend TypeChecker {
                         result = TYPE_NONE;
                     }
                 }
-                if !body_never && blit == NODE_NONE {
+                if !body_never && !self.tc_lits_adopt(arm.body, TYPE_NONE, true) {
                     lits = false;
                 }
             }
@@ -30707,53 +30709,70 @@ extend TypeChecker {
     }
 
     // Value `if`, `switch` or block `n` whose every value is an unpinned literal (a `switch` arm may
-    // diverge): give them all the numeric type `ty`, or change nothing when one cannot take it.
+    // diverge; a value may be such an `if`, `switch` or block again): give them all the numeric type
+    // `ty`, or change nothing when one cannot take it.
     fn tc_value_adopt(self: &mut Self, n: NodeId, ty: TypeId) bool {
+        let k = unsafe (*self.cur_ast()).at_const(n).kind;
+        if k != NodeKind::NODE_IF && k != NodeKind::NODE_MATCH && k != NodeKind::NODE_BLOCK || !self.tc_lits_adopt(
+            n,
+            ty,
+            true,
+        ) {
+            return false;
+        }
+        return self.tc_lits_adopt(n, ty, false);
+    }
+
+    // Whether every value branch `br` yields is an unpinned literal: the literal itself, or a value
+    // `if`, `switch` (an arm may diverge) or block of such. With a type `ty` (not TYPE_NONE), whether
+    // each one takes it, and unless `probe` give it to them.
+    fn tc_lits_adopt(self: &mut Self, br: NodeId, ty: TypeId, probe: bool) bool {
+        let lit = self.tc_branch_lit(br);
+        if lit != NODE_NONE {
+            return ty == TYPE_NONE || self.tc_branch_adopt(br, lit, ty, probe);
+        }
         let a = self.cur_ast();
-        let nd = unsafe (*a).at_const(n);
-        if nd.kind == NodeKind::NODE_MATCH {
+        let v = self.tc_branch_tail(br);
+        if v == NODE_NONE {
+            return false;
+        }
+        let nd = *unsafe (*a).at_const(v);
+        let mut ok = false;
+        if nd.kind == NodeKind::NODE_IF {
+            let e = nd.as_data.if_stmt.else_branch;
+            ok = e != NODE_NONE && self.tc_lits_adopt(nd.as_data.if_stmt.then_branch, ty, probe) && self.tc_lits_adopt(
+                e,
+                ty,
+                probe,
+            );
+        } else if nd.kind == NodeKind::NODE_MATCH {
             let arms = nd.as_data.match_expr.arms;
             for j in 0..arms.len {
                 let body = unsafe (*a).at_const(unsafe (*a).list(arms)[j as usize]).as_data.match_arm.body;
                 let bt = unsafe (*a).type_of(body);
-                if self.tc_branch_lit(body) == NODE_NONE && (bt == TYPE_NONE || self.type_at(bt).kind != TypeKind::TYPE_NEVER) {
+                if bt != TYPE_NONE && self.type_at(bt).kind == TypeKind::TYPE_NEVER {
+                    continue;
+                }
+                if !self.tc_lits_adopt(body, ty, probe) {
                     return false;
                 }
+                ok = true;
             }
-            if !self.tc_arms_adopt(arms, arms.len, ty) {
-                return false;
-            }
-        } else {
-            let (b0, b1) = if nd.kind == NodeKind::NODE_IF {
-                (nd.as_data.if_stmt.then_branch, nd.as_data.if_stmt.else_branch)
-            } else if nd.kind == NodeKind::NODE_BLOCK {
-                (n, n)
-            } else {
-                return false;
-            };
-            let l0 = self.tc_branch_lit(b0);
-            let l1 = self.tc_branch_lit(b1);
-            if l0 == NODE_NONE || l1 == NODE_NONE || !self.tc_branch_adopt(b0, l0, ty, true) || !self.tc_branch_adopt(
-                b1,
-                l1,
-                ty,
-                true,
-            ) {
-                return false;
-            }
-            let _ = self.tc_branch_adopt(b0, l0, ty, false);
-            let _ = self.tc_branch_adopt(b1, l1, ty, false);
+        } else if nd.kind == NodeKind::NODE_BLOCK && v != br {
+            ok = self.tc_lits_adopt(v, ty, probe);
         }
-        unsafe (*a).set_type(n, ty);
-        return true;
+        if ok && !probe && ty != TYPE_NONE {
+            unsafe (*a).set_type(v, ty);
+            unsafe (*a).set_type(br, ty);
+        }
+        return ok;
     }
 
     fn tc_arms_adopt(self: &mut Self, arms: NodeList, n: u32, ty: TypeId) bool {
         for pass in 0..2 {
             for j in 0..n {
                 let body = unsafe (*self.cur_ast()).at_const(unsafe (*self.cur_ast()).list(arms)[j as usize]).as_data.match_arm.body;
-                let lit = self.tc_branch_lit(body);
-                if lit != NODE_NONE && !self.tc_branch_adopt(body, lit, ty, pass == 0) {
+                if self.tc_lits_adopt(body, TYPE_NONE, true) && !self.tc_lits_adopt(body, ty, pass == 0) {
                     return false;
                 }
             }
@@ -32380,6 +32399,13 @@ extend TypeChecker {
             }
             let tlit = self.tc_branch_lit(ifd.then_branch);
             if tlit != NODE_NONE && self.tc_branch_adopt(ifd.then_branch, tlit, else_ty, false) {
+                return else_ty;
+            }
+            // So does a branch whose values are such literals (`if a { 0u32 } else if b { 1 } else { 2 }`).
+            if elit == NODE_NONE && self.tc_value_adopt(ifd.else_branch, then_ty) {
+                return then_ty;
+            }
+            if tlit == NODE_NONE && self.tc_value_adopt(ifd.then_branch, else_ty) {
                 return else_ty;
             }
             // Function values of one signature join, as an assignment of one to the other would:

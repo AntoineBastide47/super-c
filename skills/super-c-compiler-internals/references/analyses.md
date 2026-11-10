@@ -19,16 +19,26 @@ file is authoritative for where to look first.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Prover.scc` | end of `check_kept` |
+| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
 | Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
 | The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is not frozen, a slice view, a closure or a call's implicit borrow may reach (`is_mem`) | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, per body | the next body |
 | The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
 | The contract site of each chain's first block and of each block that enters one | `Prover::begin_sites` | `site_of_chain`, `site_of_pred`, per body | the next body |
 | A `@prove_exhaustive` function's inputs: each parameter's domain (kind, range narrowed by its `requires`, count) | `exhaustive_job`, `pdim` | `PJob.dims`, per function | end of the function's proof |
 | The failed assertion of an evaluated run: contract kind, clause, owner, frame depth, span | `Interp::assert_failed` (on a failed `TM_ASSERT` while `pa_on`) | `Interp.pa_*`, per run | the next `prove_run` |
-| The hash-consed terms of a body's values and formulas | `Terms::make` | `Prover.tm`, per body | the next body |
+| The hash-consed terms of a body's values and formulas (commutative operands in index order) | `Terms::make` (`src/prove/terms.spc`) | `Prover.tm`, per body | the next body |
+| A branch's statement: its rows, equalities, disequalities and literals | `Solver::close` | `kernel::Stated`, per branch | the branch's refutation |
+| A branch's congruence classes, their signatures and the forest of merges | `Solver::cc_build`, `cc_run` | `Solver.rep`, `sig`, `edges`, per branch | the next branch |
+| A branch's simplex: tableau, bounds and their rows, assignment | `Lp::load`, `check`, `Solver::bb` | `Solver.lp`, per query | the next query |
+| The product operands branch and bound set to a value, and their rows | `Solver::fix`, `fix_rows` (`Lp::add_row`) | `Solver.fixes`, the tableau's added rows | the next `bb` |
+| The cuts of a branch's integer equalities | `Solver::eliminate` | `Solver.crows`, per set of equality facts | a new equality fact |
+| The Gomory cuts of the root's fractional points | `Solver::gomory`, `gomory_row` (`Lp::add_row`) | the tableau's added rows, `lrows` (`keep_row`), `pf.cuts` | the next `bb` |
+| A branch's proof: facts, trees, cuts, multipliers | the solvers | `Solver.pf` (`kernel::Proof`), checked by `Kernel::check` | the next branch |
+| The last unrefuted branch's integer model | `Solver::keep_model` | `Solver.model`, `mval` | the next `implies` |
 | The parameters a callee may change | `Prover::param_writes` | `Prover.pwrites`, per callee | end of `check_kept` |
-| The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Prover.shells`, `shell_ix` | end of `check_kept` |
+| The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept` |
+| Whether a kept body has an integer type wider than the narrow numbers read | `Prover::needs_wide` (`wide_bits`) | `wide` per kept slot, in `check_kept` | end of `check_kept` |
+| The facts derived for a division or shift by a constant (quotient bounds, remainder, product) | `Prover::derive` (`divided`, `quotient`, `shifted`) | `Prover.derived` | end of `check_kept` |
 | Each module's proof key: its source, its import and reference closure (`import_closure`, `mod_refs`), the prelude, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
 
 ## lower (`cemit_package`, `B_PLAN` to `S_LOWERED`)

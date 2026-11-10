@@ -105,7 +105,9 @@ generic argument convert.
 - With an expected type, each branch of `if`/`switch` coerces to it independently.
 - Without one, all branch result types must be equal after `Never` absorption
   (a diverging branch adopts the other branch's type) and literal adoption (an
-  unsuffixed literal branch takes the other branches' numeric type); a `null` branch or arm,
+  unsuffixed literal branch takes the other branches' numeric type, and so does a branch whose
+  values are such literals behind another `if`, `switch` or block:
+  `if a { 0u32 } else if b { 1 } else { 2 }` is a `u32`); a `null` branch or arm,
   in any position, takes the other branches' pointer type.
 - A block that ends in `return`, `break`, `continue` or a diverging call has type `Never`.
 - There is no implicit least-upper-bound: `if c { 1i32 } else { 2i64 }` without an

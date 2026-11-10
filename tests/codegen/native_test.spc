@@ -475,6 +475,20 @@ fn chains_of_compared_flags_run() {
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A chain of 8 comparisons of values loaded before a branch, 20 of them live across it, in a body that
+// calls only in rare blocks, compiles: each comparison of the chain locks its operands' registers only
+// until it is emitted (arm64 has 16 registers for values loaded at their use).
+@test
+fn long_chains_of_held_comparisons_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = "lir ptr 8\nsym @boom fn global\nsym @ne9 fn global\nfn @ne9\n  sig (ptr, i64, i32, i32) -> i8\nb0(v0: ptr, v1: i64, v2: i32, v3: i32):\n  v4 = iconst.i8 1\n  v5 = iconst.i8 0\n  v6 = zext.i64 v2\n  v7 = icmp.uge v6, v1\n  br v7, b2, b1\nb1:\n  v8 = ptradd v0, v6 * 88 inbounds nonnull\n  v9 = load.i64 v8 align 0\n  v10 = load.i64 v8+8 align 0\n  v11 = load.i64 v8+16 align 0\n  v12 = load.i64 v8+24 align 0\n  v13 = load.i64 v8+32 align 0\n  v14 = load.i64 v8+40 align 0\n  v15 = load.i64 v8+48 align 0\n  v16 = load.i64 v8+56 align 0\n  v17 = load.i64 v8+64 align 0\n  v18 = load.i8 v8+82 align 0\n  v19 = zext.i64 v3\n  v20 = icmp.uge v19, v1\n  br v20, b4, b3\nb2: unlikely\n  call @boom() : () -> void\n  unreachable\nb3:\n  v21 = ptradd v0, v19 * 88 inbounds nonnull\n  v22 = load.i64 v21 align 0\n  v23 = load.i64 v21+8 align 0\n  v24 = load.i64 v21+16 align 0\n  v25 = load.i64 v21+24 align 0\n  v26 = load.i64 v21+32 align 0\n  v27 = load.i64 v21+40 align 0\n  v28 = load.i64 v21+48 align 0\n  v29 = load.i64 v21+56 align 0\n  v30 = load.i64 v21+64 align 0\n  v31 = load.i8 v21+82 align 0\n  v32 = icmp.ne v18, v31\n  v33 = icmp.ne v9, v22\n  v34 = or.i8 v32, v33\n  v35 = icmp.ne v10, v23\n  v36 = or.i8 v34, v35\n  v37 = icmp.ne v11, v24\n  v38 = or.i8 v36, v37\n  v39 = icmp.ne v12, v25\n  v40 = or.i8 v38, v39\n  v41 = icmp.ne v13, v26\n  v42 = or.i8 v40, v41\n  v43 = icmp.ne v14, v27\n  v44 = or.i8 v42, v43\n  v45 = icmp.ne v15, v28\n  v46 = or.i8 v44, v45\n  br v46, b6, b5\nb4: unlikely\n  call @boom() : () -> void\n  unreachable\nb5:\n  v47 = icmp.ne v16, v29\n  v48 = icmp.eq v17, v30\n  v49 = icmp.ule v48, v47\n  br v49, b6, b7\nb6:\n  ret v5\nb7:\n  ret v4\n";
+    let drv = "#include <stdint.h>\n#include <stdlib.h>\n#include <string.h>\nstruct k { uint64_t l[9]; uint8_t pad[10]; uint8_t tag; uint8_t rest[5]; };\nvoid boom(void) { abort(); }\nint8_t ne9(const struct k *, uint64_t, int32_t, int32_t);\nint main(void) {\n  struct k v[2];\n  memset(v, 0, sizeof v);\n  for (int i = 0; i < 9; i++) v[0].l[i] = 0x0101010101010101ull * (i + 1);\n  v[0].tag = 3;\n  v[1] = v[0];\n  if (ne9(v, 2, 0, 1) != 1) return 1;\n  for (int i = 0; i < 9; i++) {\n    v[1] = v[0];\n    v[1].l[i] ^= 1ull << (i * 7);\n    if (ne9(v, 2, 0, 1) != 0) return 2 + i;\n  }\n  v[1] = v[0];\n  v[1].tag = 4;\n  return ne9(v, 2, 1, 0) != 0 ? 20 : 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // A bit count of a 32-bit value truncated from a 64-bit one counts the 32 bits only: the register's bits
 // above them are not the value's.
 @test

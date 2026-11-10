@@ -235,13 +235,30 @@ modular return-lifetime check) run alongside.
   `decreases` (`components`), then walks each kept body: the paths of its CFG with hash-consed terms
   (`Terms`), the facts of each branch, assignment and callee `ensures` on the path, each obligation
   (a `requires` at a call, an `ensures` at a return, a loop's invariant and measure at its header, a
-  checked operation) refuted by case splits and Fourier-Motzkin elimination over the integers with
-  gcd tightening (`Solver`, 128-bit checked arithmetic), each refutation's derivation checked by an
-  independent replay (`verify`), and over domains of at most 65536 values by enumeration with an
-  exact evaluator (`Eval`), which also confirms a counterexample. A conformance's method walks again
+  checked operation) refuted by `Solver::implies` (`src/prove/solver.spc`, over the terms of
+  `src/prove/terms.spc`), first without the facts the walk derives for a division or shift by a
+  constant (`holds`), then with them: a case split into branches, then per branch a congruence closure over every
+  term operation and a simplex over exact rationals with branch and bound over the integers, which
+  exchange equalities (the closure's integer classes become rows; equalities the rows imply between
+  operands of one operation merge in the closure); integer equality elimination adds
+  Chvatal-Gomory cuts, and the root of branch and bound adds Gomory cuts of a fractional point
+  from its tableau rows (`gomory`: a slab of rational points with no integer one, which splits of
+  one atom never end); at an integer model that breaks a product, branch and bound splits an
+  operand at its value and, below splits that fix it, adds the product's linear rows (`fix`). Each
+  refuted branch writes a proof (equality facts, branch-and-bound trees
+  with Farkas leaves, cuts, product rows the path's splits justify) that the kernel (`src/prove/kernel.spc`, its own checked arithmetic)
+  accepts before the branch counts. Over domains of at most 65536 values the obligation is decided
+  by enumeration with an exact evaluator (`Eval`), which also confirms a counterexample; the
+  simplex's integer model seeds its candidates. A conformance's method walks again
   from its interface's `requires` (`refine`). Every walk, search and elimination has a fixed budget;
-  over one is not proved. With more than one job, the bodies run on workers one at a time (`dpar`
-  Dynamic schedule, grain 1; one `Prover` each, the shells and components read from the main one),
+  over one is not proved. The prover is generic over its numbers' width (`Prover<B>`,
+  `terms::Num<B>`): a body proves with 256-bit numbers, or with 576-bit ones when a local's integer
+  type is wider than 192 bits (`needs_wide`; `int_limit(B)` is the widest type a width reads, 512
+  bits for 576), so wide numbers cost only the bodies that need them. `UInt<N>` and `Int<N>` are
+  integers through their std conformances, read as the integer operations (`wide_kind`, `wide_op`).
+  With more than one job, the bodies run on workers one at a time (`dpar`
+  Dynamic schedule, grain 1; a narrow and a wide `Prover` each, the shells and components read from
+  `Shared`),
   their reports merged by body and position, so the output equals the serial one. A
   `@prove_exhaustive` function skips its walk: `prove_exhaustive` sets up its inputs
   (`exhaustive_job`: a domain per parameter, `pdim`, narrowed by solver queries on its `requires`)

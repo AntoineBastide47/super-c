@@ -1612,7 +1612,9 @@ extend<const BITS: usize> UInt<BITS> {
 }
 
 // Operators. `+`, `-` and `*` trap or wrap on overflow with the build profile, and `/` and `%` panic on a
-// zero divisor, which is what the built-in unsigned types do.
+// zero divisor, which is what the built-in unsigned types do. The contract prover reads `from`, `eq`,
+// `cmp`, the arithmetic, bit and shift operators of `UInt` and `Int` as these integer operations
+// (`wide_kind` in src/prove/prove.spc): a change of their meaning changes what it proves.
 extend<const BITS: usize> UInt<BITS> as Add {
     type Output = UInt<BITS>;
 
@@ -1653,7 +1655,7 @@ extend<const BITS: usize> UInt<BITS> as Mul {
 /// `u64` value converts implicitly at an assignment, an argument or an operand, exactly as a narrower
 /// built-in widens to a wider one.
 extend<const BITS: usize> UInt<BITS> as From<u64> {
-    pub fn from(v: u64) UInt<BITS> {
+    pub const fn from(v: u64) UInt<BITS> {
         return UInt::<BITS>::from_u64(v);
     }
 }
@@ -1730,13 +1732,13 @@ extend<const BITS: usize> UInt<BITS> as Rem {
 }
 
 extend<const BITS: usize> UInt<BITS> as Eq {
-    pub fn eq(self: &UInt<BITS>, other: &UInt<BITS>) bool {
+    pub const fn eq(self: &UInt<BITS>, other: &UInt<BITS>) bool {
         return self.bits.eq_bits(&other.bits);
     }
 }
 
 extend<const BITS: usize> UInt<BITS> as Ord {
-    pub fn cmp(self: &UInt<BITS>, other: &UInt<BITS>) i32 {
+    pub const fn cmp(self: &UInt<BITS>, other: &UInt<BITS>) i32 {
         return self.bits.cmp_unsigned(&other.bits);
     }
 }
@@ -2523,7 +2525,7 @@ extend<const BITS: usize> Int<BITS> as Mul {
 
 /// The signed counterpart: an integer literal or an `i64` value converts implicitly.
 extend<const BITS: usize> Int<BITS> as From<i64> {
-    pub fn from(v: i64) Int<BITS> {
+    pub const fn from(v: i64) Int<BITS> {
         return Int::<BITS>::from_i64(v);
     }
 }
@@ -2599,7 +2601,7 @@ extend<const BITS: usize> Int<BITS> as Rem {
 }
 
 extend<const BITS: usize> Int<BITS> as Eq {
-    pub fn eq(self: &Int<BITS>, other: &Int<BITS>) bool {
+    pub const fn eq(self: &Int<BITS>, other: &Int<BITS>) bool {
         return self.bits.eq_bits(&other.bits);
     }
 }
@@ -2607,7 +2609,7 @@ extend<const BITS: usize> Int<BITS> as Eq {
 extend<const BITS: usize> Int<BITS> as Ord {
     /// Signed order: a negative value is below every non-negative one, and two of the same sign compare
     /// by their bits.
-    pub fn cmp(self: &Int<BITS>, other: &Int<BITS>) i32 {
+    pub const fn cmp(self: &Int<BITS>, other: &Int<BITS>) i32 {
         let sa = self.is_negative();
         let sb = other.is_negative();
         if sa != sb {

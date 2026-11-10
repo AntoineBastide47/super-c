@@ -144,7 +144,47 @@ fn unproved_contracts_are_errors() {
     b.add(
         "a counterexample of an overflow",
         "fn f(a: u32, b: u32) u32 ensures |r| r >= a { return a + b; }\nfn main() i32 { return f(1, 2) as i32; }\n",
-        "for example: a = 4294967295, b = 4294967295",
+        "for example: a = 4294967295, b = 1",
+    );
+    // The arithmetic's model is a candidate: no end of `x`'s range, 0 or 1 breaks the clause.
+    b.add(
+        "a counterexample from the arithmetic's model",
+        "fn f(x: u64) u64 requires x > 1000 ensures |r| r != 5000 { return x; }\nfn main() i32 { return (f(2000) - 2000) as i32; }\n",
+        "for example: x = 5000",
+    );
+    // `x <= y` gives no model where the remainders must agree: the combination merges nothing.
+    b.add(
+        "operands the rows do not make equal",
+        "fn f(x: u64, y: u64) bool requires x <= y ensures |r| r { return x % 7 == y % 7; }\nfn main() i32 { return f(9, 9) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    // `u128::MAX + 1` overflows: the counterexample is a 128-bit value.
+    b.add(
+        "a wide integer's overflow",
+        "fn f(a: u128, b: u128) u128 ensures |r| r >= a { return a + b; }\nfn main() i32 { return f(1, 2) as i32 - 3; }\n",
+        "for example: a = 340282366920938463463374607431768211455, b = 1",
+    );
+    // `k < 4` leaves `k` free: no product rows, and `999 * 3` breaks the clause.
+    b.add(
+        "a product of an operand the requires leave free",
+        "fn f(a: u64, k: u64) u64 requires a < 1000, k < 4 ensures |r| r < 2000 { return a * k; }\nfn main() i32 { return f(1, 1) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    // A truncated remainder takes the dividend's sign: `-5 % 13` is -5, `21 % 13` is 8.
+    b.add(
+        "remainders across zero",
+        "fn f(x: i64, y: i64) bool requires x > -1000, x < 1000, y == x + 26 ensures |r| r { return x % 13 == y % 13; }\nfn main() i32 { return f(1, 27) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a wide remainder's counterexample",
+        "fn f(a: u128) u128 ensures |r| r < 8 { return a % 16; }\nfn main() i32 { return f(3) as i32 - 3; }\n",
+        "for example: a = 8",
+    );
+    b.add(
+        "a call over different arguments",
+        "const fn h(x: u32) u32 { return x / 2; }\nfn f(a: u32, b: u32) bool requires b < 100, a == b + 1 ensures |r| r { return h(a) == h(b); }\nfn main() i32 { return f(3, 2) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
     );
     b.add(
         "a conformance's requires stronger than its interface's",
@@ -584,11 +624,225 @@ fn main() i32 {
     );
 }
 
+// Proofs the theory solvers make together: congruence over equal operands (a `const fn` call, a
+// division, an array read), equalities the arithmetic implies (`x <= y, y <= x`), a product bounded by
+// its operands' ranges, and an integer equality with no solution (`x == 2 * y` against an odd value).
+fn theory_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "congruence and implied equalities",
+        M"(const fn half(x: u32) u32 {
+    return x / 2 + 1;
+}
+fn calls(a: u32, b: u32) bool
+    requires a == b
+    ensures |r| r
+{
+    return half(a) == half(b);
+}
+fn thirds(x: u64, y: u64) u64
+    requires x == y
+    ensures |r| r == y / 3
+{
+    return x / 3;
+}
+fn read(a: [u32; 4], i: usize, j: usize) u32
+    requires i == j, i < 4
+    ensures |r| r == a[j]
+{
+    return a[i];
+}
+fn sevens(x: u64, y: u64) bool
+    requires x <= y, y <= x
+    ensures |r| r
+{
+    return x % 7 == y % 7;
+}
+// The remainders' facts leave rational points with no integer one (`r_x - r_y` a multiple of 7 that is
+// not 0, between -6 and 6): Gomory cuts end them, where splits of one atom do not.
+fn shift7(x: u64, y: u64) bool
+    requires x < 1000, y == x + 7
+    ensures |r| r
+{
+    return x % 7 == y % 7;
+}
+fn shift13(x: i64, y: i64) bool
+    requires x > -1000, x < -100, y == x + 26
+    ensures |r| r
+{
+    return x % 13 == y % 13;
+}
+fn main() i32 {
+    let r = read([1, 2, 3, 4], 2, 2);
+    return calls(3, 3) as i32 + (thirds(9, 9) == 3) as i32 + r as i32 + sevens(8, 8) as i32 + shift7(3, 10) as i32 + shift13(-500, -474) as i32;
+}
+)",
+        8,
+    );
+    b.add(
+        "products and integer equalities",
+        M"(fn area(w: u16, h: u16) u64
+    ensures |r| r <= 4294836225
+{
+    return (w as u64) * (h as u64);
+}
+fn odd_off(x: u32, y: u32, z: u32) bool
+    requires y < 1000, z < 1000, x == 2 * y
+    ensures |r| r
+{
+    return x != 2 * z + 1;
+}
+fn main() i32 {
+    return (area(3, 4) - 12) as i32 + odd_off(4, 2, 7) as i32;
+}
+)",
+        1,
+    );
+    // `u128` and `i128` (`UInt<128>`, `Int<128>`) are integers to the prover: their comparisons,
+    // `+`, `-`, `*`, implicit conversions and literals past 64 bits.
+    b.add(
+        "wide integers",
+        M"(fn sum(a: u128, b: u128) u128
+    requires a < 1000, b < 1000
+    ensures |r| r < 2000
+    ensures |r| r >= a
+{
+    return a + b;
+}
+fn above(a: u128) u128
+    requires a > 18446744073709551615, a < 100000000000000000000
+    ensures |r| r > 18446744073709551616
+{
+    return a + 1;
+}
+fn neg(a: i128, b: i128) i128
+    requires a < 0, b < 0, a > -100, b > -100
+    ensures |r| r > -200
+    ensures |r| r < a
+{
+    return a + b;
+}
+fn scale(a: u128) bool
+    requires a < 1000
+    ensures |r| r
+{
+    return a * 3 - a == a * 2 && a != a + 1;
+}
+fn main() i32 {
+    let x: u128 = 18446744073709551616;
+    return (sum(1, 2) - 3) as i32 + (above(x) > x) as i32 + (neg(-1, -2) + 3) as i32 + scale(7) as i32;
+}
+)",
+        2,
+    );
+    // Division and remainder (by a constant: the quotient's bounds), bit operations and shifts of
+    // wide integers.
+    b.add(
+        "wide division, bit operations and shifts",
+        M"(fn half(a: u128) u128
+    requires a < 1000
+    ensures |r| r < 500
+{
+    return a / 2;
+}
+fn low(a: u128) u128
+    ensures |r| r < 16
+{
+    return a % 16;
+}
+fn mask(a: u128) u128
+    ensures |r| r <= 255
+{
+    return a & 255;
+}
+fn same(a: u128, b: u128) bool
+    requires a == b
+    ensures |r| r
+{
+    return (a ^ 5) == (b ^ 5) && (a << 3) == (b << 3) && (a >> 2) == (b >> 2) && ~a == ~b;
+}
+fn sdiv(a: i128) i128
+    requires a > -1000, a < 1000
+    ensures |r| r > -500
+    ensures |r| r < 500
+{
+    return a / 2;
+}
+fn main() i32 {
+    return (half(10) + low(17) + mask(300) - 50) as i32 + same(9, 9) as i32 + sdiv(-7) as i32 + 4;
+}
+)",
+        2,
+    );
+    // `k == 3` makes `a * k` the linear `3 * a`, on built-in and wide integers.
+    b.add(
+        "a product by an operand the requires fix",
+        M"(fn scale(a: u128, k: u128) bool
+    requires a < 1000, k == 3
+    ensures |r| r
+{
+    return a * k - a == a * 2;
+}
+fn sc64(a: u64, k: u64) u64
+    requires a < 1000, k == 3
+    ensures |r| r < 3000
+{
+    return a * k;
+}
+fn neg(a: i32, k: i32) i32
+    requires a > -100, a < 100, k == -2
+    ensures |r| r > -200
+{
+    return k * a;
+}
+fn main() i32 {
+    return scale(7, 3) as i32 + (sc64(5, 3) - 15) as i32 + neg(3, -2) + 6;
+}
+)",
+        1,
+    );
+    b.add(
+        "integers wider than 128 bits",
+        M"(type U256 = UInt<256>;
+type I512 = Int<512>;
+fn add256(a: U256, b: U256) U256
+    requires a < 1000, b < 1000
+    ensures |r| r < 2000
+{
+    return a + b;
+}
+fn big(a: U256) U256
+    requires a > 340282366920938463463374607431768211455, a < 340282366920938463463374607431768211457000
+    ensures |r| r > 340282366920938463463374607431768211456
+{
+    return a + 1;
+}
+fn neg512(a: I512) I512
+    requires a < 0, a > -1000
+    ensures |r| r < 1
+{
+    return a * 2 + 1;
+}
+fn shr256(a: U256) U256
+    requires a < 1024
+    ensures |r| r < 64
+{
+    return a >> 4;
+}
+fn main() i32 {
+    let x: U256 = 340282366920938463463374607431768211456;
+    return (add256(1, 2) - 3) as i32 + (big(x) > x) as i32 + (neg512(-1) + 1) as i32 + shr256(100) as i32 - 3;
+}
+)",
+        4,
+    );
+}
+
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
     proved_contracts(&mut b);
     exhaustive_proofs(&mut b);
+    theory_proofs(&mut b);
     b.run();
 }
 
