@@ -103,9 +103,18 @@ native object's key.
 | `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them). The native build counts a slot only when a block that may return reads its address: a slot only failure paths use (a panic's message) adds no canary (`lir::verify::protected`) |
 | `function-sections`, `data-sections` | 1, 2, 3, s, z | A section per function or variable, and the link drops what nothing reaches from the entry, the exports and the kept symbols (the build adds `-Wl,-dead_strip` on Mach-O, `-Wl,--gc-sections` elsewhere) |
 | `plt` | 0 to z | `-fno-plt`, ELF: a call of an extern declaration's function loads its address from its GOT slot; the x86-64 link turns one whose target the output defines into a direct call |
+| `prove` | 0 to z | The prover checks every contract (`requires`, `ensures`, `decreases`, loop `invariant`) and fails the build on one it cannot prove (error 538); `-fno-prove` skips the proofs |
+| `contract-checks` | | The contract checks also run in the program: a false clause traps with "assertion failed: `<clause>`". Off, a build emits no check and its output is byte-identical to the same program without contracts |
 
 At 1, 2 and 3 a loop whose header test has at most 8 instructions also rotates (the test copied to its
 end); `loop_budgets` in `src/driver/emit.spc` holds the budgets. `-march=C` is `--target-cpu=C`.
+
+A build tree records the proofs that held (`__sc_prove`, `prove_cached` in `src/driver/emit.spc`): one
+key per module whose obligations all held, over the module's source, the sources of every module it
+imports or names (transitively) and of the prelude, the compiler identity, the target, the
+architecture, the level and the flags. A later build skips the proofs of each module whose key the
+record holds; a failed obligation is never recorded. `SC_CEMIT_STATS=1` prints
+`prove: <n> to prove, <k> from the proof record`.
 
 ### Build cache
 

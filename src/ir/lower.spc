@@ -184,6 +184,7 @@ pub(package) struct Lowerer {
     tape_mute: u32,
     in_defer: u32, // lowering a defer body (an exit path): cancellation checks are masked there
     free_mask: bool, // a `Free::free` body that can accept a cancellation: it runs masked
+    contract_fn: NodeId, // the function whose `ensures` clauses each return checks, NODE_NONE: none
     // The clean nodes of the open root (`chk_nodes[chk_base..]`, see `chk_open`): the calls among
     // them may carry a cancellation check. Any other call is evaluated with pending sibling
     // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
@@ -431,6 +432,7 @@ extend Lowerer {
             tape_mute: 0,
             in_defer: 0,
             free_mask: false,
+            contract_fn: NODE_NONE,
             chk_nodes: Vector::<NodeId>::new(),
             chk_base: 0,
             chk_lbase: 0,
@@ -548,6 +550,7 @@ extend Lowerer {
         self.tape_mute = 0;
         self.in_defer = 0;
         self.free_mask = false;
+        self.contract_fn = NODE_NONE;
         self.chk_nodes.truncate(0);
         self.chk_base = 0;
         self.chk_lbase = 0;
@@ -1316,9 +1319,29 @@ extend Lowerer {
                 self.assign(pl, self.rv_use(r, rt), sp);
             }
         } else {
-            self.lower_stmt(fd.body);
+            let (cs, ce) = unsafe (&*self.f.ast).contracts_of(fnode);
+            if ce != cs {
+                // An `ensures` binder names the result slot.
+                self.contract_fn = fnode;
+                for i in cs..ce {
+                    let bd = unsafe (&*self.f.ast).contracts.at(i as usize).binder;
+                    if bd != NODE_NONE {
+                        self.bind(bd, 0);
+                    }
+                }
+                self.lower_contracts(fnode, CT_REQUIRES, sp);
+                self.lower_contracts(fnode, CT_DECREASES, sp);
+            }
+            // A method of an interface without a body lowers its contracts only, for the prover: its
+            // `ensures` read an unset result, and no other stage takes the body.
+            if fd.body != NODE_NONE {
+                self.lower_stmt(fd.body);
+            }
         }
         self.scope_exit();
+        if rets.len == 0 || fd.body == NODE_NONE && !fd.is_intrinsic() {
+            self.lower_ensures(sp);
+        }
         self.emit_deads_down_to(0);
         // Fall-off return (void functions; a returning tail already sealed the block).
         return self.finish_body(sp);
@@ -1697,6 +1720,68 @@ extend Lowerer {
         self.tp(ir::TP_LET, 0, id);
     }
 
+    // The `kind` clauses of `owner` (a function or a loop), each as a contract check
+    // (`ir::ContractSite`): the condition evaluates in a scope of its own, and the assertion's span
+    // is the condition's, so a failure names its text.
+    fn lower_contracts(self: &mut Self, owner: NodeId, kind: u32, sp: tok::Span) {
+        let (cs, ce) = unsafe (&*self.f.ast).contracts_of(owner);
+        for i in cs..ce {
+            let c = *unsafe (&*self.f.ast).contracts.at(i as usize);
+            if c.kind != kind {
+                continue;
+            }
+            let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
+            let pred = self.cur;
+            let chain = self.open_block();
+            self.seal(ir::goto_term(chain, sp), chain);
+            let csp = self.f.node(c.expr).span;
+            // The check's span is the whole clause, so a failure at run time names its kind.
+            let clause_sp = tok::Span { start: c.at, end: csp.end };
+            self.tp(ir::TP_MARK_PUSH, 0, c.expr);
+            let cb = self.chk_open(c.expr, false);
+            let cop = self.lower_loop_cond(c.expr, csp);
+            self.chk_close(cb);
+            self.tp(ir::TP_MARK_POP, 0, c.expr);
+            if cop == ir::IR_NONE {
+                return;
+            }
+            // A `decreases` measure is a value, not a condition: its check asserts `true` and records
+            // the measure for the prover.
+            let mut value = ir::IR_NONE;
+            let mut tm = ir::term0(ir::TM_ASSERT, clause_sp);
+            tm.a = cop;
+            if kind == CT_DECREASES {
+                value = cop;
+                tm.a = self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), 1, csp);
+            }
+            let check = self.cur;
+            let cont = self.open_block();
+            tm.t0 = cont;
+            self.seal(tm, cont);
+            self.body.contract_blocks += (self.body.blocks.len() - b0) as u32;
+            self.body.contract_stmts += (self.body.statements.len() - s0) as u32;
+            self.body.contract_locals += (self.body.locals.len() - l0) as u32;
+            self.body.contracts.push(
+                ir::ContractSite {
+                    pred: pred,
+                    chain: chain,
+                    check: check,
+                    cont: cont,
+                    clause: i,
+                    kind: kind,
+                    value: value,
+                },
+            );
+        }
+    }
+
+    // The `ensures` checks of a return of the function under lowering, after its result is written.
+    fn lower_ensures(self: &mut Self, sp: tok::Span) {
+        if self.contract_fn != NODE_NONE {
+            self.lower_contracts(self.contract_fn, CT_ENSURES, sp);
+        }
+    }
+
     fn lower_return(self: &mut Self, id: NodeId) {
         let rd = self.f.node(id).as_data.return_stmt;
         let sp = self.f.node(id).span;
@@ -1723,6 +1808,7 @@ extend Lowerer {
             }
             self.tp(ir::TP_RET_POST, 0, id);
             self.emit_defers_down_to(0);
+            self.lower_ensures(sp);
             self.emit_deads_down_to(0);
             let t = ir::term0(ir::TM_RETURN, sp);
             let next = self.open_block();
@@ -1747,6 +1833,7 @@ extend Lowerer {
         }
         self.tp(ir::TP_RET_POST, 0, id);
         self.emit_defers_down_to(0);
+        self.lower_ensures(sp);
         self.emit_deads_down_to(0);
         if self.free_mask {
             self.mask_call(loader::SugarItem::SI_CANCEL_MEXIT, sp);
@@ -1978,6 +2065,8 @@ extend Lowerer {
             self.seal(ir::goto_term(body_b, sp), body_b);
         } else {
             self.seal(ir::goto_term(head, sp), head);
+            self.lower_contracts(id, CT_INVARIANT, sp);
+            self.lower_contracts(id, CT_DECREASES, sp);
         }
         if !d.is_do {
             // head: evaluate the condition (an infinite `loop` has no condition node)
@@ -3532,6 +3621,16 @@ extend Lowerer {
         let step = self.open_block();
         let exit = self.open_block();
         self.seal(ir::goto_term(head, sp), head);
+        self.lower_contracts(id, CT_INVARIANT, sp);
+        self.lower_contracts(id, CT_DECREASES, sp);
+        if !self.binding_mut(d.binding) {
+            let end_k = if rd.end != NODE_NONE && epl == ir::IR_NONE {
+                ecst
+            } else {
+                ir::IR_NONE
+            };
+            self.body.ranges.push(ir::RangeLoop { head: head, ind: l, end_pl: epl, end_k: end_k });
+        }
         // An exclusive range over a builtin integer whose binding the body cannot assign is a
         // counted loop: its tick moves to the chunk top (`chunk_open`, `chunk_close`).
         let counted = rd.end != NODE_NONE && !rd.inclusive && self.counted_ty(ity) && !self.binding_mut(d.binding) && self.loop_ticks();
@@ -3986,6 +4085,8 @@ extend Lowerer {
         let step = self.open_block();
         let exit = self.open_block();
         self.seal(ir::goto_term(head, sp), head);
+        // The index counts from zero to the length the loop read once: the loop ends.
+        self.body.ranges.push(ir::RangeLoop { head: head, ind: il, end_pl: lpl, end_k: ir::IR_NONE });
         let iop = self.copy_op(idx_pl);
         let lop = self.copy_op(lpl);
         let cop = self.bool_bin(iop, lop, tt::TokenType::LessThan, sp);
@@ -5019,6 +5120,7 @@ extend Lowerer {
             );
         }
         self.emit_defers_down_to(0);
+        self.lower_ensures(sp);
         self.emit_deads_down_to(0);
         self.seal(ir::term0(ir::TM_RETURN, sp), ok_b);
         let ppl = self.place_project(
@@ -7240,6 +7342,8 @@ extend Lowerer {
         let head = self.open_block();
         let exit = self.open_block();
         self.seal(ir::goto_term(head, sp), head);
+        self.lower_contracts(id, CT_INVARIANT, sp);
+        self.lower_contracts(id, CT_DECREASES, sp);
         self.push_loop(d.label, exit, head, result, self.scope_locals.len(), self.defers.len());
         // A value loop preempts like a statement loop: every backedge enters `head`.
         self.loop_safepoint(sp);

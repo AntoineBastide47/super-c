@@ -537,9 +537,15 @@ pub(package) const VIEW_METHOD_ARGUMENT: u16 = 530;
 pub(package) const BLOCK_ENDS_IN_SEMICOLON: u16 = 531;
 pub(package) const CANNOT_CAST_CONST_POINTER_MUT_POINTER: u16 = 532;
 pub(package) const CANNOT_CAST_NUMBER_MUT_POINTER: u16 = 533;
+pub(package) const ENSURES_BINDER_NEEDS_RESULT: u16 = 534;
+pub(package) const DECREASES_MUST_INTEGER: u16 = 535;
+pub(package) const INVARIANT_LOOP_NOT_SUPPORTED: u16 = 536;
+pub(package) const CONTRACT_NOT_PURE: u16 = 537;
+pub(package) const CANNOT_PROVE_CONTRACT: u16 = 538;
+pub(package) const DECREASES_NEEDS_BODY: u16 = 539;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 534;
+pub(package) const COUNT: u16 = 540;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1076,6 +1082,12 @@ pub(package) const fn name(code: u16) str<'static> {
         531 => "block_ends_in_semicolon",
         532 => "cannot_cast_const_pointer_mut_pointer",
         533 => "cannot_cast_number_mut_pointer",
+        534 => "ensures_binder_needs_result",
+        535 => "decreases_must_integer",
+        536 => "invariant_loop_not_supported",
+        537 => "contract_not_pure",
+        538 => "cannot_prove_contract",
+        539 => "decreases_needs_body",
         _ => "",
     };
 }

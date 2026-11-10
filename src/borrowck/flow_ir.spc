@@ -1249,6 +1249,25 @@ extend tc::TypeChecker {
             }
             return seen;
         }
+        // The prover reads the calls of a body with contract checks as calls; emission converts them
+        // once it skips the checks.
+        if body.contracts.len() != 0 {
+            // Under `@tail_recurse` the calls convert as they will once emission skips the checks:
+            // a copy without them answers.
+            if tagged {
+                let mut conv = ir::CoreBody::compact_from(body);
+                ir::skip_contracts(&mut conv, false);
+                let mut cm = Vector::<irt::TailMiss>::new();
+                let done = irt::convert(&mut conv, ow, &mut cm);
+                for i in 0..cm.len() {
+                    let ms = *cm.at(i);
+                    let why = self.bc_tail_reason(&conv, &ms);
+                    self.bc_tail_err(ms.span, why);
+                }
+                return done + cm.len() as u32;
+            }
+            return 0;
+        }
         let mut misses = Vector::<irt::TailMiss>::new();
         let done = irt::convert(body, ow, &mut misses);
         if done != 0 && ctx.validate {

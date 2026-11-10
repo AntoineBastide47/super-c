@@ -140,6 +140,36 @@ pub(package) struct LifetimeDecl {
     pub(package) list: NodeList,
 }
 
+// A contract clause: `requires`, `ensures` and `decreases` after a function's signature, `invariant`
+// after a loop's header. Held in an Ast SIDE TABLE (`Ast::contracts`), as `LifetimeDecl` is: contracts
+// are rare, and `FunctionData` keeps its size.
+pub(package) struct Contract {
+    pub(package) owner: NodeId, // the function or the loop
+    pub(package) binder: NodeId, // the `ensures |r|` binder, NODE_NONE without one
+    pub(package) expr: NodeId,
+    pub(package) kind: u32, // CT_*; four bytes leave no padding in the persisted record
+    pub(package) at: u32, // the source offset of the clause's keyword
+}
+pub(package) const CT_REQUIRES: u32 = 0;
+pub(package) const CT_ENSURES: u32 = 1;
+pub(package) const CT_DECREASES: u32 = 2;
+pub(package) const CT_INVARIANT: u32 = 3;
+
+/// The keyword of a contract clause of kind `k` (`CT_*`).
+pub(package) const fn contract_word(k: u32) str<'static> {
+    if k == CT_REQUIRES {
+        return "requires";
+    }
+    if k == CT_ENSURES {
+        return "ensures";
+    }
+    return if k == CT_DECREASES {
+        "decreases"
+    } else {
+        "invariant"
+    };
+}
+
 /// How a `where` predicate bounds a type parameter for a code point: `Ast::where_scope` answers.
 pub(package) const WHERE_NONE: u8 = 0;
 pub(package) const WHERE_OWN: u8 = 1;
@@ -3456,6 +3486,9 @@ pub(package) struct Ast {
     pub(package) lifetime_at: Map<u32, u32>, // owner -> its first `lifetime_decls` index
     pub(package) member_of: Map<NodeId, NodeId>, // extend or interface member -> its top-level container
     pub(package) where_bounds: Vector<WhereBound>,
+    /// The contract clauses, each owner's contiguous in source order (`contracts_of`).
+    pub(package) contracts: Vector<Contract>,
+    contract_at: Map<NodeId, u32>, // owner -> its first `contracts` index
     /// The functions with type parameters (their own or their extend's) whose bodies hold a
     /// static_assert (the resolver records them): each is evaluated per instance, for a concrete
     /// call (`Interp::defer_inst_assert`) and for every instance the instance graph finds.
@@ -3607,6 +3640,8 @@ extend Ast as Free {
         self.attr_vals.free();
         self.member_of.free();
         self.where_bounds.free();
+        self.contracts.free();
+        self.contract_at.free();
         self.assert_fns.free();
         self.feature_calls.free();
         self.unsafe_lints.free();
@@ -4856,6 +4891,35 @@ extend Ast {
             self.lifetime_at.insert(owner, self.lifetime_decls.len() as u32);
         }
         self.lifetime_decls.push(LifetimeDecl { owner: owner, list: list });
+    }
+
+    /// Record `owner`'s contract clauses, in source order.
+    pub(package) fn set_contracts(self: &mut Self, owner: NodeId, cs: &Vector<Contract>) {
+        if cs.len() == 0 {
+            return;
+        }
+        self.contract_at.insert(owner, self.contracts.len() as u32);
+        for i in 0..cs.len() {
+            let mut c = *cs.at(i);
+            c.owner = owner;
+            self.contracts.push(c);
+        }
+    }
+
+    /// The `[start, end)` range of `owner`'s clauses in `contracts`; empty without any.
+    pub(package) fn contracts_of(self: &Self, owner: NodeId) (u32, u32) {
+        let start = switch self.contract_at.get(&owner) {
+            Some(i) => *i,
+            None => u32::MAX,
+        };
+        if start == u32::MAX {
+            return 0, 0;
+        }
+        let mut end = start;
+        while end as usize < self.contracts.len() && self.contracts.at(end as usize).owner == owner {
+            end += 1;
+        }
+        return start, end;
     }
 
     pub(package) fn lifetimes_of(self: &Self, owner: NodeId) NodeList {
@@ -6381,6 +6445,20 @@ extend LifetimeDecl as Persist {
     }
 
     fn load(self: &mut LifetimeDecl, r: &mut Reader) {
+        load_bytes(self, r);
+    }
+}
+
+extend Contract as Persist {
+    fn plain() bool {
+        return true;
+    }
+
+    fn save(self: &Contract, w: &mut Writer) {
+        save_bytes(self, w);
+    }
+
+    fn load(self: &mut Contract, r: &mut Reader) {
         load_bytes(self, r);
     }
 }

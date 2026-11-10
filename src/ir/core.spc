@@ -1131,6 +1131,88 @@ pub(package) struct BasicBlock {
 }
 static_assert(sizeof(BasicBlock) == 80, "BasicBlock stays 80 bytes");
 
+/// A contract check the lowering placed: block `pred` jumps to `chain`, whose blocks evaluate one
+/// clause and end in the `TM_ASSERT` of block `check`, which continues at `cont`. The chain's blocks
+/// are [`chain`, `cont`), and nothing else enters them, so skipping the check is one jump: `pred` to
+/// `cont` (`skip_contracts`).
+pub(package) struct ContractSite {
+    pub(package) pred: BlockId,
+    pub(package) chain: BlockId,
+    pub(package) check: BlockId,
+    pub(package) cont: BlockId,
+    pub(package) clause: u32, // the index in the owner module's `Ast::contracts`
+    pub(package) kind: u32, // the clause's `CT_*`
+    pub(package) value: OperandId, // a `decreases` measure's operand; IR_NONE for a condition
+}
+
+/// A `for` loop over a range written in place whose binding the body cannot assign: at `head`, the
+/// binding `ind` holds the start (on entry) or a value at most the end, place `end_pl` or constant
+/// `end_k` (IR_NONE both: an open range), since each step runs only below the end. The prover reads it
+/// as the loop's own invariant; nothing else does.
+pub(package) struct RangeLoop {
+    pub(package) head: BlockId,
+    pub(package) ind: LocalId,
+    pub(package) end_pl: PlaceId,
+    pub(package) end_k: ConstId,
+}
+
+/// Skip each contract check of `b` the build does not run: every one, or with `keep_checks` only the
+/// `decreases` measures, which have no run-time check. A skipped chain's blocks become empty
+/// `unreachable` ones, so no later pass reads the check (the inliner's vet rejects an assertion).
+pub(package) fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
+    for i in 0..b.contracts.len() {
+        if !keep_checks || b.contracts[i].kind == CT_DECREASES {
+            skip_site(b, i);
+        }
+    }
+}
+
+/// Skip contract check `i` of `b` (`skip_contracts`).
+pub(package) fn skip_site(b: &mut CoreBody, i: usize) {
+    let s = b.contracts[i];
+    let t = b.blocks[s.pred as usize].term;
+    if t.kind == TM_GOTO && t.t0 == s.chain {
+        b.blocks[s.pred as usize].term.t0 = s.cont;
+    }
+    for blk in s.chain..s.cont {
+        let sp = b.blocks[blk as usize].term.span;
+        b.blocks[blk as usize].stmt_len = 0;
+        b.blocks[blk as usize].term = term0(TM_UNREACHABLE, sp);
+    }
+}
+
+/// Skip the `ensures` checks on the path from each call of `b`'s function to itself that the
+/// tail-call pass converted in `conv` (a copy of `b` whose `ensures` checks were skipped, then
+/// converted): the jump replaces those checks, which the proof covers.
+pub(package) fn skip_tail_ensures(b: &mut CoreBody, conv: &CoreBody) {
+    for j in 0..conv.tail_jumps.len() {
+        let call = conv.tail_jumps[j];
+        if call as usize >= b.blocks.len() || b.blocks[call as usize].term.kind != TM_CALL {
+            continue;
+        }
+        let mut x = b.blocks[call as usize].term.t0;
+        for _k in 0..b.blocks.len() {
+            let mut site = b.contracts.len();
+            for i in 0..b.contracts.len() {
+                if b.contracts[i].pred == x && b.contracts[i].kind == CT_ENSURES && b.blocks[x as usize].term.t0 == b.contracts[i].chain {
+                    site = i;
+                }
+            }
+            if site < b.contracts.len() {
+                let cont = b.contracts[site].cont;
+                skip_site(b, site);
+                x = cont;
+                continue;
+            }
+            let t = b.blocks[x as usize].term;
+            if t.kind != TM_GOTO {
+                break;
+            }
+            x = t.t0;
+        }
+    }
+}
+
 /// One lowered body. All ranges index the body-local pools below; nothing points at another body.
 pub(package) struct CoreBody {
     pub(package) owner: DefId, // the function/const decl this body lowers
@@ -1167,6 +1249,11 @@ pub(package) struct CoreBody {
     /// inliner's size gate leaves them out.
     pub(package) count_blocks: u32,
     pub(package) chunks: u32,
+    /// The blocks, statements and locals the contract checks added (`contracts`): the inliner's size
+    /// gate leaves them out, so a build that skips the checks inlines as it would without them.
+    pub(package) contract_blocks: u32,
+    pub(package) contract_stmts: u32,
+    pub(package) contract_locals: u32,
     pub(package) locals: Vector<LocalDecl>,
     pub(package) blocks: Vector<BasicBlock>,
     pub(package) statements: Vector<Statement>,
@@ -1195,6 +1282,10 @@ pub(package) struct CoreBody {
     /// The blocks whose `TM_GOTO` replaced a call of the body's function to itself (`ir::tailcall`):
     /// the unbounded-recursion check reads each one as that call (`ir::recursion`).
     pub(package) tail_jumps: Vector<BlockId>,
+    /// The contract checks, in lowering order.
+    pub(package) contracts: Vector<ContractSite>,
+    /// The counted range loops, in lowering order.
+    pub(package) ranges: Vector<RangeLoop>,
     pub(package) entry: BlockId,
 }
 
@@ -1282,6 +1373,9 @@ extend CoreBody {
             inst_ticks: false,
             count_blocks: 0,
             chunks: 0,
+            contract_blocks: 0,
+            contract_stmts: 0,
+            contract_locals: 0,
             has_uninit_decl: false,
             elaborated: false,
             inline_size_ok: false,
@@ -1304,6 +1398,8 @@ extend CoreBody {
             simd_aux: Vector::<u32>::new(),
             demands: Vector::<Terminator>::new(),
             tail_jumps: Vector::<BlockId>::new(),
+            contracts: Vector::<ContractSite>::new(),
+            ranges: Vector::<RangeLoop>::new(),
             entry: 0,
         };
     }
@@ -1322,6 +1418,9 @@ extend CoreBody {
         self.inst_ticks = false;
         self.count_blocks = 0;
         self.chunks = 0;
+        self.contract_blocks = 0;
+        self.contract_stmts = 0;
+        self.contract_locals = 0;
         self.has_uninit_decl = false;
         self.elaborated = false;
         self.inline_size_ok = false;
@@ -1344,6 +1443,8 @@ extend CoreBody {
         self.simd_aux.truncate(0);
         self.demands.truncate(0);
         self.tail_jumps.truncate(0);
+        self.contracts.truncate(0);
+        self.ranges.truncate(0);
         self.entry = 0;
     }
 
@@ -1353,7 +1454,7 @@ extend CoreBody {
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
         n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
-        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4;
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4 + self.contracts.capacity() * sizeof(ContractSite) + self.ranges.capacity() * sizeof(RangeLoop);
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
         n += self.demands.capacity() * sizeof(Terminator) + self.bytes.capacity();
@@ -1374,6 +1475,9 @@ extend CoreBody {
         out.inst_ticks = src.inst_ticks;
         out.count_blocks = src.count_blocks;
         out.chunks = src.chunks;
+        out.contract_blocks = src.contract_blocks;
+        out.contract_stmts = src.contract_stmts;
+        out.contract_locals = src.contract_locals;
         out.elaborated = src.elaborated;
         out.inline_size_ok = src.inline_size_ok;
         out.entry = src.entry;
@@ -1395,6 +1499,8 @@ extend CoreBody {
         out.simd_aux = exact(&src.simd_aux);
         out.demands = exact(&src.demands);
         out.tail_jumps = exact(&src.tail_jumps);
+        out.contracts = exact(&src.contracts);
+        out.ranges = exact(&src.ranges);
         return out;
     }
 

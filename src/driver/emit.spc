@@ -31,6 +31,7 @@ import ir::print as irp;
 import ir::verify as irv;
 import ir::drops as ird;
 import ir::tailcall as irt;
+import prove::prove as prv;
 import ir::bce as bce;
 import ir::capture as cap;
 import ir::inline as inl;
@@ -8504,6 +8505,8 @@ struct DropCtx {
     pub(package) core_ir: bool, // SC_CORE_IR development re-verification
     pub(package) bce_stats: bool, // SC_BCE_STATS per-owner report lines
     pub(package) validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
+    pub(package) contract_checks: bool, // `-fcontract-checks`: contract checks run at run time
+    pub(package) proved: bool, // the build proves the contracts (no `-fno-prove`)
     /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
     pub(package) pr: prb::Probe,
     /// The lowering caches the task's shard uses while it runs (`cbe::CEmit::swap_caches`), kept for the
@@ -8528,6 +8531,8 @@ extend DropCtx {
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
             validate: stdlib::getenv("SC_BC_VALIDATE") != null,
+            contract_checks: (unsafe (&*p).cg & bman::CG_CONTRACT_CHECKS) != 0,
+            proved: (unsafe (&*p).cg & bman::CG_NO_PROVE) == 0,
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
             lc: lw::LCaches::new(),
             esc: Vector::<u64>::new(),
@@ -8573,6 +8578,28 @@ extend DropCtx {
             if self.validate {
                 bfi::bc_validate_elaborated(&mut self.ow, &lw.body);
             }
+        }
+        // The contract checks the build does not run are skipped (a kept body's already, `skip_kept_contracts`);
+        // a call of the function to itself that an `ensures` check kept from the tail becomes a jump then
+        // (the borrow pass left such a body as it is).
+        if lw.body.contracts.len() != 0 {
+            if self.contract_checks && self.proved {
+                // A proved `ensures` check after a tail call of the function to itself leaves with
+                // the jump, so the checked build recurses in constant stack too.
+                let mut conv = irc::CoreBody::compact_from(&lw.body);
+                for i in 0..conv.contracts.len() {
+                    if conv.contracts[i].kind == CT_ENSURES {
+                        irc::skip_site(&mut conv, i);
+                    }
+                }
+                let mut cm = Vector::<irt::TailMiss>::new();
+                if irt::convert(&mut conv, &mut self.ow, &mut cm) != 0 {
+                    irc::skip_tail_ensures(&mut lw.body, &conv);
+                }
+            }
+            irc::skip_contracts(&mut lw.body, self.contract_checks);
+            let mut misses = Vector::<irt::TailMiss>::new();
+            let _ = irt::convert(&mut lw.body, &mut self.ow, &mut misses);
         }
         let mut ist = inl::InlineStats::new();
         if allow_inline && !self.inl.off && !self.lir_inlines {
@@ -15406,13 +15433,202 @@ fn ap_job(ctx: *mut void, j: u32) {
     }
 }
 
+// The proof record of a build tree: the key (`prove_keys`) of each module whose proofs all held, one
+// per line as two hex words.
+const PROVE_RECORD: str<'static> = "__sc_prove";
+
+// The proof key of each module: what its proofs read, the module's own source, the sources of every
+// module it imports or names (`mod_refs`), transitively, and of the prelude, the compiler, the target
+// and the code-generation settings. Two independent 64-bit lanes per module (`2 * m`, `2 * m + 1`);
+// the set of sources is summed, so the module numbering of a build does not matter.
+fn prove_keys(p: &loader::Package, target: i32) Vector<u64> {
+    let n = p.modules.len();
+    let mut cfg = compiler_id() ^ 0x9E3779B97F4A7C15u64;
+    let parts: [u64; 5] = [p.arch as u64, target as u64, p.opt as u64, p.cg, p.bootstrap as u64];
+    for j in 0..5 {
+        cfg = (cfg ^ parts[j]).wrapping_mul(0x100000001b3u64);
+    }
+    // Each module's source, in both lanes, by its file and content.
+    let mut h1 = Vector::<u64>::with_capacity(n);
+    let mut h2 = Vector::<u64>::with_capacity(n);
+    for m in 0..n {
+        let md = p.modules.at(m);
+        let f = fnv_cont(FNV_BASIS, &md.file);
+        h1.push(splitmix(f ^ md.src_id));
+        h2.push(splitmix(f.wrapping_add(md.src_id).rotate_left(29) ^ 0xD6E8FEB86659FD93u64));
+    }
+    let mut pre1 = cfg;
+    let mut pre2 = splitmix(cfg);
+    for m in 0..n {
+        if p.modules.at(m).prelude {
+            pre1 = pre1.wrapping_add(h1[m]);
+            pre2 = pre2.wrapping_add(h2[m]);
+        }
+    }
+    let mut clo = Vector::<Vector<ModuleId>>::with_capacity(n);
+    for m in 0..n {
+        clo.push(p.import_closure(m as ModuleId));
+    }
+    let mut keys = Vector::<u64>::with_capacity(2 * n);
+    let mut seen = Vector::<u32>::new();
+    for _m in 0..n {
+        seen.push(0);
+    }
+    let mut work = Vector::<u32>::with_capacity(n);
+    for m in 0..n {
+        let tag = m as u32 + 1;
+        let mut k1 = pre1 ^ splitmix(h1[m]);
+        let mut k2 = pre2 ^ splitmix(h2[m] ^ 1);
+        work.clear();
+        seen.set(m, tag);
+        work.push(m as u32);
+        for _s in 0..n {
+            if work.len() == 0 {
+                break;
+            }
+            let x = work.pop().unwrap() as usize;
+            for j in 0..clo[x].len() {
+                let y = clo[x][j] as usize;
+                if y < n && seen[y] != tag {
+                    seen.set(y, tag);
+                    work.push(y as u32);
+                }
+            }
+            if p.mod_refs_ready {
+                for y in 0..n {
+                    let w = p.mod_refs[x * p.mod_refs_w + y / 64];
+                    if (w >> (y % 64) as u64 & 1) != 0 && seen[y] != tag {
+                        seen.set(y, tag);
+                        work.push(y as u32);
+                    }
+                }
+            }
+        }
+        for y in 0..n {
+            if seen[y] == tag && y != m {
+                k1 = k1.wrapping_add(h1[y]);
+                k2 = k2.wrapping_add(h2[y]);
+            }
+        }
+        keys.push(k1);
+        keys.push(k2);
+    }
+    return keys;
+}
+
+// A 64-bit finalizer (SplitMix64's).
+const fn splitmix(x: u64) u64 {
+    let mut z = x.wrapping_add(0x9E3779B97F4A7C15u64);
+    z = (z ^ z >> 30).wrapping_mul(0xBF58476D1CE4E5B9u64);
+    z = (z ^ z >> 27).wrapping_mul(0x94D049BB133111EBu64);
+    return z ^ z >> 31;
+}
+
+// The prover over the kept bodies (`prv::check_kept`), skipping each module whose key the build
+// tree's proof record holds; the record then holds the keys of the modules whose proofs held. No
+// record without a build tree; a failed obligation is never recorded.
+fn prove_cached(p: &loader::Package, keep: &irl::Keep, comp: &Vector<u32>, target: i32, tstat: bool) bool {
+    if !prv::any_contracts(p) {
+        return true;
+    }
+    let n = p.modules.len();
+    let mut skip = Vector::<bool>::with_capacity(n);
+    skip.resize_default(n);
+    let cache = p.gen_root.len() != 0 && compiler_id() != 0;
+    let keys = if cache {
+        prove_keys(p, target)
+    } else {
+        Vector::<u64>::new()
+    };
+    let path = build_out_path(&p.gen_root, PROVE_RECORD, "");
+    if cache {
+        let old = loader::read_file(&path).unwrap_or(String::new());
+        let mut have = Map::<u64, u64>::new();
+        for line in old.as_str().split("\n") {
+            let f = line.find(" ");
+            if f < 0 {
+                continue;
+            }
+            let at = f as usize;
+            switch (parse_hex64(line.slice(0, at)), parse_hex64(line.slice(at + 1, line.len()))) {
+                (Some(a), Some(b)) => {
+                    have.insert(a, b);
+                },
+                _ => {},
+            }
+        }
+        for m in 0..n {
+            switch have.get(&keys[2 * m]) {
+                Some(b) => skip.set(m, *b == keys[2 * m + 1]),
+                None => {},
+            }
+        }
+    }
+    let mut held = Vector::<bool>::with_capacity(n);
+    held.resize_default(n);
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held);
+    if tstat {
+        let mut nh: u32 = 0;
+        for m in 0..n {
+            nh += skip[m] as u32;
+        }
+        eprint("prove: {} to prove, {} from the proof record\n", n - nh as usize, nh);
+    }
+    if cache {
+        let mut out = String::new();
+        for m in 0..n {
+            if held[m] {
+                out.push_str(format("{:x} {:x}\n", keys[2 * m], keys[2 * m + 1]).as_str());
+            }
+        }
+        mkdir_p(&p.gen_root);
+        let _ = write_file_atomic(&path, &out);
+    }
+    return ok;
+}
+
+// The value of hex digits `s`, None for another text or more than 16 digits.
+fn parse_hex64(s: str) Option<u64> {
+    if s.len() == 0 || s.len() > 16 {
+        return None;
+    }
+    let mut v: u64 = 0;
+    for j in 0..s.len() {
+        let c = s.byte_at(j);
+        let d = if c >= b'0' && c <= b'9' {
+            c - b'0'
+        } else if c >= b'a' && c <= b'f' {
+            c - b'a' + 10
+        } else {
+            return None;
+        };
+        v = v << 4 | d as u64;
+    }
+    return Some(v);
+}
+
+// Skip the contract checks of every kept body the build does not run (`irc::skip_contracts`), before
+// the inliner copies a callee or the evaluator runs one.
+fn skip_kept_contracts(keep: &mut irl::Keep, keep_checks: bool) {
+    for k in 0..keep.kept.len() {
+        if keep.kept.at(k).body.contracts.len() != 0 {
+            irc::skip_contracts(&mut keep.kept.index_mut(k).body, keep_checks);
+        }
+    }
+}
+
 // Unbounded recursion (`ir::recursion`) in the modules `lint_reported` selects; false when reported.
-fn check_recursion(p: &loader::Package, keep: &irl::Keep, only_mod: i32) bool {
+fn check_recursion(p: &loader::Package, keep: &irl::Keep, only_mod: i32, comp: &mut Vector<u32>) bool {
     let mut reported = Vector::<bool>::with_capacity(p.modules.len());
+    let mut graph = Vector::<bool>::with_capacity(p.modules.len());
     for m in 0..p.modules.len() {
         reported.push(lint_reported(p, m, only_mod));
+        // The prover's `decreases` reads the components of the modules that state a contract too.
+        graph.push(
+            reported[m] || only_mod < 0 && p.modules.at(m).has_ast && unsafe (&*p.module_ast_const(m as ModuleId)).contracts.len() != 0,
+        );
     }
-    return recur::check_kept(p, keep, &reported);
+    return recur::check_kept(p, keep, &reported, &graph, comp);
 }
 
 /// Always-panics check (the `unconditional_panic` analog, an ERROR like the raw-array
@@ -15598,7 +15814,8 @@ pub(package) fn lint_package(
             unsafe (*cirp0).all_typed = true;
         }
         check_always_panics(p, lint_mod as i32);
-        p.ok = check_recursion(p, &lkeep, lint_mod as i32) && p.ok;
+        let mut comp = Vector::<u32>::new();
+        p.ok = check_recursion(p, &lkeep, lint_mod as i32, &mut comp) && p.ok;
         lint_discarded_results(p, lint_mod as i32);
         lint_unused_members(p, lint_mod as i32);
     }
@@ -16247,8 +16464,19 @@ pub(package) fn run_package(
         }
     }
     // An ERROR on every build, over the user modules, like the always-panics check.
-    p.ok = check_recursion(p, &irkeep, -1) && p.ok;
+    let mut comp = Vector::<u32>::new();
+    p.ok = check_recursion(p, &irkeep, -1, &mut comp) && p.ok;
     stage_ms(tstat, &mut tp0, "phase recursion");
+    // An ERROR on every build, over every module: a contract the prover cannot prove (`-fno-prove` skips it).
+    if (p.cg & bman::CG_NO_PROVE) == 0 {
+        p.ok = prove_cached(p, &irkeep, &comp, target, tstat) && p.ok;
+        // The proofs restart the pool; release it again before any test-runner fork.
+        if p.jobs != 1 {
+            prt::shutdown();
+        }
+        stage_ms(tstat, &mut tp0, "phase prove");
+    }
+    skip_kept_contracts(&mut irkeep, (p.cg & bman::CG_CONTRACT_CHECKS) != 0);
     // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let cirf = p.cir as *mut iri::Interp;
     if cirf != null {

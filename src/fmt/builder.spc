@@ -123,6 +123,35 @@ extend Builder {
         return r;
     }
 
+    // The contract clauses of `owner` (a function or a loop), one condition per line, indented by
+    // one level after the signature or the header, then a break before the `{` when a `body`
+    // follows. Whether it has any.
+    fn b_contracts(self: &mut Self, owner: NodeId, body: bool) bool {
+        let (cs, ce) = unsafe (*self.ast).contracts_of(owner);
+        let m = self.st.len();
+        for i in cs..ce {
+            let c = *unsafe (*self.ast).contracts.at(i as usize);
+            self.st.push(self.p.hardline());
+            self.st.push(self.p.txt(contract_word(c.kind)));
+            self.st.push(self.p.txt(" "));
+            if c.binder != NODE_NONE {
+                self.st.push(self.p.txt("|"));
+                self.st.push(self.node_text(self.nd(c.binder).as_data.parameter.name));
+                self.st.push(self.p.txt("| "));
+            }
+            self.st.push(self.b_cond(c.expr));
+        }
+        if ce == cs {
+            return false;
+        }
+        let ic = self.cat(m);
+        self.st.push(self.p.indent(ic));
+        if body {
+            self.st.push(self.p.hardline());
+        }
+        return true;
+    }
+
     fn span_doc(self: &mut Self, s: tok::Span) d::DocId {
         return self.p.span(s.start, s.end);
     }
@@ -1615,12 +1644,17 @@ extend Builder {
                     let ms = self.list_at(self.nd(w.body).as_data.block.statements, 0);
                     self.st.push(self.b_let_head("while let ", self.nd(ms).as_data.single.value));
                 } else if w.condition == NODE_NONE {
-                    self.st.push(self.p.txt("loop "));
+                    self.st.push(self.p.txt("loop"));
+                    if !self.b_contracts(id, true) {
+                        self.st.push(self.p.txt(" "));
+                    }
                     self.st.push(self.b_block(w.body));
                 } else {
                     self.st.push(self.p.txt("while "));
                     self.st.push(self.b_cond(w.condition));
-                    self.st.push(self.p.txt(" "));
+                    if !self.b_contracts(id, true) {
+                        self.st.push(self.p.txt(" "));
+                    }
                     self.st.push(self.b_block(w.body));
                 }
             },
@@ -1637,7 +1671,9 @@ extend Builder {
                 self.st.push(self.node_text(f.binding));
                 self.st.push(self.p.txt(" in "));
                 self.st.push(self.b_cond(f.iterable));
-                self.st.push(self.p.txt(" "));
+                if !self.b_contracts(id, true) {
+                    self.st.push(self.p.txt(" "));
+                }
                 self.st.push(self.b_block(f.body));
             },
             NODE_PARALLEL_FOR => {
@@ -1961,9 +1997,13 @@ extend Builder {
                     }
                 }
                 if f.body != NODE_NONE && !f.is_intrinsic() {
-                    self.st.push(self.p.txt(" "));
+                    if !self.b_contracts(id, true) {
+                        self.st.push(self.p.txt(" "));
+                    }
                     self.st.push(self.b_block(f.body));
                 } else {
+                    // An interface's method without a body: its clauses, then the `;`.
+                    let _ = self.b_contracts(id, false);
                     self.st.push(self.p.txt(";"));
                 }
             },

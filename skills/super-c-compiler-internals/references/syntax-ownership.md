@@ -60,6 +60,13 @@ arena because a later reader needs them after the release: a local `const` (its 
 enter a type) and the target of `dyn` (a `dyn fn` signature node is the identity of its type,
 which emission spells, see `Parser::parse_dyn_target`).
 
+Contract clauses are body syntax: a function's `requires`, `ensures` and `decreases` parse after
+the sink turns on for its body, a loop's `invariant` and `decreases` with the loop. An interface's
+method without a body has no body arena, so its clauses parse into the module arena. The clause
+records are a parse-time side table, `Ast.contracts` (`Contract { owner, binder, expr, kind, at }`,
+an owner's range through `contracts_of`), which the prelude image persists. The checker, the
+lowering and the prover read the clauses before the release; nothing reads them after it.
+
 Rules for every scan and every table indexed by node id:
 
 - Enumerate both arenas: `nnodes()` and `nth_id(k)` (module arena first). A scan that

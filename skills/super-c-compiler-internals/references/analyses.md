@@ -15,6 +15,20 @@ file is authoritative for where to look first.
 | The lazy modules' conformance methods by name hash | `bc_std_closure` (`fn_name_key`) | local map | end of `bc_std_closure` |
 | Whether the instance graph seeds a lazy module's function | `InstGraph::seeds` (reads `Keep.ix`) | not stored | per call |
 
+## prove (`prove::check_kept`, after the recursion check)
+
+| Fact | Producer | Stored in | Valid until |
+|------|----------|-----------|-------------|
+| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Prover.scc` | end of `check_kept` |
+| Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
+| The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is not frozen, a slice view, a closure or a call's implicit borrow may reach (`is_mem`) | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, per body | the next body |
+| The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
+| The contract site of each chain's first block and of each block that enters one | `Prover::prove_body` | `site_of_chain`, `site_of_pred`, per body | the next body |
+| The hash-consed terms of a body's values and formulas | `Terms::make` | `Prover.tm`, per body | the next body |
+| The parameters a callee may change | `Prover::param_writes` | `Prover.pwrites`, per callee | end of `check_kept` |
+| The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Prover.shells`, `shell_ix` | end of `check_kept` |
+| Each module's proof key: its source, its import and reference closure (`import_closure`, `mod_refs`), the prelude, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
+
 ## lower (`cemit_package`, `B_PLAN` to `S_LOWERED`)
 
 | Fact | Producer | Stored in | Valid until |

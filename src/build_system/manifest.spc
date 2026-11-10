@@ -89,14 +89,20 @@ pub(package) const CG_NO_PLT: u64 = 262144;
 /// call of itself (`lir::opt`), to the callee after the caller's epilogue for another
 /// (`-foptimize-sibling-calls`).
 pub(package) const CG_SIBLING_CALLS: u64 = 524288;
+/// Contract checks run at run time (`-fcontract-checks`): each `requires`, `ensures` and `invariant` is
+/// also an assertion, besides its proof.
+pub(package) const CG_CONTRACT_CHECKS: u64 = 1048576;
+/// No proof of the contracts (`-fno-prove`, its bit set by the `no` form): a build for fast iteration,
+/// whose contracts are neither proved nor, without `-fcontract-checks`, checked.
+pub(package) const CG_NO_PROVE: u64 = 2097152;
 // Whether flag `b` (`CG_NAMES`) is set by its `no` form.
 const fn negated(b: u64) bool {
-    return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT;
+    return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT || b == CG_NO_PROVE;
 }
 
 // The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
 // `signed-zeros` and `plt` (`negated`).
-const CG_NAMES: [(str<'static>, u64); 21] = [
+const CG_NAMES: [(str<'static>, u64); 23] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -118,6 +124,8 @@ const CG_NAMES: [(str<'static>, u64); 21] = [
     ("strict-aliasing", CG_STRICT_ALIASING),
     ("plt", CG_NO_PLT),
     ("optimize-sibling-calls", CG_SIBLING_CALLS),
+    ("contract-checks", CG_CONTRACT_CHECKS),
+    ("prove", CG_NO_PROVE),
 ];
 
 // The bits flag `name` names: 0 for none.

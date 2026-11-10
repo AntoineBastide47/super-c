@@ -99,11 +99,12 @@ const VEC_SCALE: usize = 4;
 /// `pkg`). The borrow pass records the answer for the pre-elaboration shape in
 /// `CoreBody.inline_size_ok` (the shape the limits were tuned for), and the vet reads that bit.
 /// The blocks, statements and locals the counted-loop lowering added (`count_blocks`, `chunks`)
-/// do not count.
+/// and the contract checks added (`contract_blocks`, `contract_stmts`, `contract_locals`) do not
+/// count.
 pub(package) fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
-    let ns = b.statements.len() - 2 * b.chunks as usize;
-    let nb = b.blocks.len() - b.count_blocks as usize;
-    let nl = b.locals.len() - 2 * b.chunks as usize;
+    let ns = b.statements.len() - 2 * b.chunks as usize - b.contract_stmts as usize;
+    let nb = b.blocks.len() - b.count_blocks as usize - b.contract_blocks as usize;
+    let nl = b.locals.len() - 2 * b.chunks as usize - b.contract_locals as usize;
     let k = size_scale(b, pkg);
     return ns <= MAX_CALLEE_STMTS * k && nb <= MAX_CALLEE_BLOCKS * k && nl <= MAX_CALLEE_LOCALS * k;
 }

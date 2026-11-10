@@ -17,6 +17,8 @@ import ir::cpu_features as cf;
 import utils::diag_codes as dc;
 
 pub(package) const PARSE_MAX_DEPTH: u32 = 256;
+// The contract clauses of one function or loop.
+pub(package) const PARSE_MAX_CONTRACTS: usize = 256;
 
 pub(package) enum RangeContext {
     RANGE_FOR,
@@ -901,6 +903,69 @@ extend Parser {
         return self.ast.commit(mark);
     }
 
+    // Whether the next token is the identifier `w`: a contract keyword (`requires`, `ensures`,
+    // `decreases`, `invariant`) is a keyword only in its position.
+    fn at_word(self: &Self, w: str) bool {
+        return self.check(TokenType::Identifier) && self.text_is(self.raw_peek(), w);
+    }
+
+    // Whether the next token starts a function's contract clause.
+    fn at_fn_contract(self: &Self) bool {
+        return self.at_word("requires") || self.at_word("ensures") || self.at_word("decreases");
+    }
+
+    // One clause's conditions after its keyword: `E, E` (a comma continues only `requires` and
+    // `invariant`), each pushed as a `Contract` of `kind`; `ensures` may bind the result first (`|r| E`).
+    fn parse_contract_clause(self: &mut Self, kind: u32, out: &mut Vector<Contract>) {
+        let at = self.raw_peek().start();
+        self.advance();
+        loop {
+            let mut binder = NODE_NONE;
+            if kind == CT_ENSURES && self.match(TokenType::Pipe) {
+                let name = self.identifier();
+                binder = self.mk(
+                    NodeKind::NODE_PARAMETER,
+                    self.node_span(name),
+                    NodeAs { parameter: ParameterData { name: name } },
+                );
+                self.expect(TokenType::Pipe, "'|'");
+            }
+            let expr = self.parse_condition_expression();
+            out.push(Contract { owner: NODE_NONE, binder: binder, expr: expr, kind: kind, at: at });
+            if kind == CT_ENSURES || kind == CT_DECREASES || out.len() >= PARSE_MAX_CONTRACTS || !self.match(
+                TokenType::Comma,
+            ) {
+                return;
+            }
+        }
+    }
+
+    // A function's contract clauses, after its `where` clause, in any order.
+    fn parse_fn_contracts(self: &mut Self, out: &mut Vector<Contract>) {
+        while self.at_fn_contract() && out.len() < PARSE_MAX_CONTRACTS {
+            let kind = if self.at_word("requires") {
+                CT_REQUIRES
+            } else if self.at_word("ensures") {
+                CT_ENSURES
+            } else {
+                CT_DECREASES
+            };
+            self.parse_contract_clause(kind, out);
+        }
+    }
+
+    // A loop's `invariant` and `decreases` clauses, after its header.
+    fn parse_loop_invariants(self: &mut Self, out: &mut Vector<Contract>) {
+        while (self.at_word("invariant") || self.at_word("decreases")) && out.len() < PARSE_MAX_CONTRACTS {
+            let kind = if self.at_word("invariant") {
+                CT_INVARIANT
+            } else {
+                CT_DECREASES
+            };
+            self.parse_contract_clause(kind, out);
+        }
+    }
+
     pub(package) fn parse_where_clause(self: &mut Self) NodeList {
         if !self.match(TokenType::Where) {
             return NodeList { start: 0, len: 0 };
@@ -999,7 +1064,7 @@ extend Parser {
     // two or more is one result, their tuple (`(A, B)` is the tuple type `(A, B)`). Named results
     // (`(a: A, b: B)`, all or none) also go to `named`, and the result is their types' (tuple) type.
     pub(package) fn parse_function_returns(self: &mut Self, named: &mut NodeList) NodeList {
-        if !self.check(TokenType::LeftParen) && !Parser::is_type_start(self.peek_type()) {
+        if !self.check(TokenType::LeftParen) && !Parser::is_type_start(self.peek_type()) || self.at_fn_contract() {
             return NodeList { start: 0, len: 0 };
         }
         let mark = self.ast.mark();
@@ -1088,6 +1153,9 @@ extend Parser {
         let mut body = NODE_NONE;
         let outer_sink = self.ast.sink_body;
         self.ast.sink_body = !(pinned || self.pin_scope || generics.len != 0);
+        // The clauses are body syntax: checked and lowered with the body, in its parameter scope.
+        let mut contracts = Vector::<Contract>::new();
+        self.parse_fn_contracts(&mut contracts);
         let intrinsic = replace(&mut self.intrinsic_next, false) && require_body;
         if intrinsic {
             // No written body: an empty block the lowering fills with the operation, so a bound call
@@ -1103,6 +1171,10 @@ extend Parser {
             body = self.parse_block();
         } else if require_body {
             self.error_here("expected function body");
+        }
+        // An interface's method may state contracts without a body; an extern function cannot.
+        if contracts.len() != 0 && (intrinsic || body == NODE_NONE && self.in_extern) {
+            self.error_here("an extern or intrinsic function cannot have a contract");
         }
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);
@@ -1133,6 +1205,7 @@ extend Parser {
             },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
+        self.ast.set_contracts(__decl, &contracts);
         for w in 0..where_clause.len {
             self.ast.where_bounds.push(
                 WhereBound { func: __decl, pred: unsafe self.ast.list(where_clause)[w as usize] },
@@ -3278,6 +3351,7 @@ extend Parser {
 
     pub(package) fn parse_loop_stmt(self: &mut Self, start: u32, label: Span) NodeId {
         let mut result = NODE_NONE;
+        let mut invariants = Vector::<Contract>::new();
         switch self.peek_type() {
             While => {
                 self.advance();
@@ -3317,6 +3391,7 @@ extend Parser {
                     );
                 } else {
                     let condition = self.parse_condition_expression();
+                    self.parse_loop_invariants(&mut invariants);
                     let body = self.parse_block();
                     result = self.mk(
                         NodeKind::NODE_WHILE,
@@ -3358,6 +3433,9 @@ extend Parser {
                 };
                 self.expect(TokenType::In, "'in'");
                 let iterable = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
+                if kind == NodeKind::NODE_FOR {
+                    self.parse_loop_invariants(&mut invariants);
+                }
                 let mut body = self.parse_block();
                 if kind == NodeKind::NODE_PARALLEL_FOR {
                     // The body IS a closure over the binding: built here so resolve treats it as one
@@ -3385,6 +3463,7 @@ extend Parser {
             },
             _ => {
                 self.advance();
+                self.parse_loop_invariants(&mut invariants);
                 let body = self.parse_block();
                 result = self.mk(
                     NodeKind::NODE_WHILE,
@@ -3393,6 +3472,7 @@ extend Parser {
                 );
             },
         }
+        self.ast.set_contracts(result, &invariants);
         return result;
     }
 

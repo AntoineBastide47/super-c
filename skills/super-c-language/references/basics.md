@@ -69,6 +69,8 @@ function takes a raw address of a local. `@tail_recurse` on the function makes e
 an error that names the reason; a call to the function from one of its closures and a function
 that never calls itself are errors too. A function returning a tuple converts when it returns the
 call's tuple, also rebuilt from its elements in order (`let (a, b) = f(..); return (a, b);`).
+Contract checks kept at run time (`-fcontract-checks`) make an `ensures` check follow the call, so
+it stays a call, unless the build proved the clause: a proved check after the call is dropped.
 
 A function or closure with results cannot reach the end of its body ("function 'f' can reach the
 end of its body without returning a value"): every path ends in a `return`, a call of a `!` or
@@ -78,6 +80,55 @@ a path.
 
 `return pair();` returns the call's tuple: its type must be the function's result type exactly (no
 widening: "mismatched types: expected '(i32, i32)', found '(i32, i64)'").
+
+### Contracts
+
+```superc
+fn add_mod(a: u32, b: u32, m: u32) u32
+    requires m > 0, m <= 1000, a < m, b < m
+    ensures |r| r < m
+{
+    let s = a + b;
+    return if s >= m { s - m } else { s };
+}
+```
+
+Clauses follow the signature, before the body: `requires C` (each caller proves it), `ensures C` or
+`ensures |r| C` (`r` names the single result; a function with none or several has no binder, error
+534) and `decreases E` (an integer measure, error 535). A comma list is several clauses. A `while`,
+a `loop` and a `for` over a range written in place (`for i in a..n`) take `invariant C` and
+`decreases E` after the header; another `for` takes none (error 536). The words are contextual
+keywords. A clause only computes its condition: it calls only `const fn`s, drops nothing and writes
+nothing (error 537). An extern or intrinsic function has no clause.
+
+The compiler proves every clause in every build; one it cannot prove fails the build (error 538,
+"cannot prove ..."), and over small domains the note gives the parameters of a counterexample
+(`for example: x = 0, y = 3`). It proves:
+
+- a callee's `requires` at each call, from the facts on the path to it;
+- each `ensures` at each return;
+- an `invariant` when the loop starts and after each iteration (a counted range loop knows its
+  binding lies from the start up to the end);
+- each operation that can trap (overflow, a division by zero, a shift count, a narrowing) does not,
+  in a function with clauses;
+- `decreases`: at each call of the function to itself, and at each call to a function of the same
+  cycle of calls, the measure is at least 0 and below its value at the caller's start; every
+  function of a cycle needs a measure; in a function with one, each loop needs its own unless it
+  counts over a range with an end or over a collection. A loop's measure is at least 0 and below
+  its value at the iteration's start, at each iteration's end.
+
+A call assumes the callee's `ensures`, never its body. An interface's method may state `requires`
+and `ensures` without a body (a `decreases` needs a body, error 539): a call through a bound or a
+`dyn` proves the interface's `requires` and assumes its `ensures`; each conformance's method proves
+its own `requires` from the interface's and the interface's `ensures` at its returns. A function
+with a `requires` clause cannot be a value: a call through the value would prove nothing.
+
+The proofs model integers exactly (linear arithmetic over 128 bits; a product of two unknowns has
+no bound), struct fields, arrays of a constant length and their views, and references; a call that
+may write memory, a drop and a write through a pointer forget the values a reference reaches. A
+proof that goes over its fixed budget is not proved. `-fno-prove` skips the proofs;
+`-fcontract-checks` also checks the clauses at run time (binary skill, build-toml.md). Without it a
+build emits no check: the output is the same as without the clauses.
 
 ## Structs and Methods
 

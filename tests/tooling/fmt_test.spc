@@ -41,6 +41,21 @@ fn golden_for_modifiers() {
     );
 }
 
+// Contract clauses print one condition per line after the signature or the loop header, and the
+// body's brace on a line of its own.
+@test
+fn golden_contracts() {
+    expect_fmt(
+        "fn f(a: u32, m: u32) u32 requires m > 0, a < m ensures |r| r < m decreases a {\nwhile a < m invariant a <= m {}\nreturn a;\n}\n",
+        "fn f(a: u32, m: u32) u32\n    requires m > 0\n    requires a < m\n    ensures |r| r < m\n    decreases a\n{\n    while a < m\n        invariant a <= m\n    {}\n    return a;\n}\n",
+    ); // A loop's measure follows its invariants; an interface's method without a body ends its clauses
+    // with the `;`.
+    expect_fmt(
+        "fn g(n: u32) {\nlet mut k = n;\nwhile k > 0 invariant k <= n decreases k { k -= 1; }\n}\ninterface I { fn h(self: &Self, x: u32) u32 requires x > 0 ensures |r| r < x; }\n",
+        "fn g(n: u32) {\n    let mut k = n;\n    while k > 0\n        invariant k <= n\n        decreases k\n    {\n        k -= 1;\n    }\n}\ninterface I {\n    fn h(self: &Self, x: u32) u32\n        requires x > 0\n        ensures |r| r < x;\n}\n",
+    );
+}
+
 @test
 fn golden_visibility_levels() {
     expect_fmt(

@@ -31208,6 +31208,7 @@ extend TypeChecker {
             NODE_WHILE => {
                 self.loop_depth = self.loop_depth + 1;
                 let le = self.tc_loop_push(tok::Span { start: 0, end: 0 }, id, true);
+                self.tc_contracts(id, TYPE_NONE);
                 self.check_stmt(unsafe (*a).at_const(id).as_data.while_stmt.body);
                 if le >= 0 {
                     result = unsafe self.loop_stack[le as usize].break_ty;
@@ -33833,12 +33834,75 @@ extend TypeChecker {
     // The loop statement kinds live in their own frames so check_stmt, which recurses once per
     // nested statement, keeps a small frame. @noinline keeps LTO from folding them back.
     @noinline
+    // The contract clauses of `owner` (a function or a loop): each condition is a `bool`, a
+    // `decreases` measure an integer, and an `ensures` binder has the type `result` (TYPE_NONE: the
+    // function has no result).
+    // The type of function `id`'s single result, TYPE_NONE for none or several: an `ensures` binder
+    // names one result slot.
+    fn tc_single_result(self: &mut Self, id: NodeId) TypeId {
+        let rets = unsafe (*self.cur_ast()).ext(id).function.returns;
+        if rets.len != 1 {
+            return TYPE_NONE;
+        }
+        let r0 = unsafe (*self.cur_ast()).list(rets)[0];
+        if unsafe (*self.cur_ast()).at_const(r0).kind == NodeKind::NODE_TUPLE_TYPE {
+            return TYPE_NONE;
+        }
+        return self.resolve_type(r0);
+    }
+
+    fn tc_contracts(self: &mut Self, owner: NodeId, result: TypeId) {
+        let (cs, ce) = unsafe (*self.cur_ast()).contracts_of(owner);
+        // A measure bounds the recursion of a body: a method without one has none to bound.
+        let bodyless = unsafe (*self.cur_ast()).at_const(owner).kind == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).ext(
+            owner,
+        ).function.body == NODE_NONE;
+        for i in cs..ce {
+            let c = *unsafe (*self.cur_ast()).contracts.at(i as usize);
+            if c.binder != NODE_NONE {
+                if result == TYPE_NONE {
+                    let sp = unsafe (*self.cur_ast()).at_const(c.binder).span;
+                    self.errors.emit_span(
+                        dc::ENSURES_BINDER_NEEDS_RESULT,
+                        sp,
+                        format("an 'ensures' binder names the result, and this function has no single result"),
+                    );
+                    continue;
+                }
+                unsafe (*self.cur_ast()).set_type(c.binder, result);
+            }
+            if c.kind != CT_DECREASES {
+                let _ = self.check_cond(c.expr, contract_word(c.kind));
+                continue;
+            }
+            if bodyless {
+                self.errors.emit_span(
+                    dc::DECREASES_NEEDS_BODY,
+                    tok::Span { start: c.at, end: c.at },
+                    format("a 'decreases' measure needs a body: this method has none"),
+                );
+                continue;
+            }
+            let t = self.check_expr(c.expr);
+            if !untyped(t) && !self.is_int(self.strip(t)) {
+                let ty = self.type_str(t);
+                let sp = unsafe (*self.cur_ast()).at_const(c.expr).span;
+                self.errors.emit_span(
+                    dc::DECREASES_MUST_INTEGER,
+                    sp,
+                    format("a 'decreases' measure must be an integer, found '{}'", ty.as_str()),
+                );
+            }
+        }
+    }
+
     fn tc_check_while(self: &mut Self, id: NodeId) {
         let a = self.cur_ast();
         self.loop_depth = self.loop_depth + 1;
         let le = self.tc_loop_push(unsafe (*a).at_const(id).as_data.while_stmt.label, id, false);
         self.check_cond(unsafe (*a).at_const(id).as_data.while_stmt.condition, "while");
         self.lint_const_cond(id, unsafe (*a).at_const(id).as_data.while_stmt.condition, true, true);
+        self.tc_contracts(id, TYPE_NONE);
         let body = unsafe (*a).at_const(id).as_data.while_stmt.body;
         self.check_stmt(body);
         if le >= 0 {
@@ -34085,6 +34149,18 @@ extend TypeChecker {
         }
         unsafe (*self.cur_ast()).set_type(id, elem);
         self.tc_for_pattern(id, elem);
+        let (ics, ice) = unsafe (*self.cur_ast()).contracts_of(id);
+        if ice != ics && unsafe (*self.cur_ast()).at_const(iter).kind != NodeKind::NODE_RANGE {
+            let sp = unsafe (*self.cur_ast()).at_const(iter).span;
+            self.errors.emit_span(
+                dc::INVARIANT_LOOP_NOT_SUPPORTED,
+                sp,
+                format(
+                    "a loop's 'invariant' or 'decreases' needs a 'while', a 'loop' or a 'for' over a range written in place",
+                ),
+            );
+        }
+        self.tc_contracts(id, TYPE_NONE);
         self.check_stmt(unsafe (*self.cur_ast()).ext(id).for_stmt.body);
         if le >= 0 {
             self.tc_loop_pop(le, unsafe (*self.cur_ast()).at_const(id).span);
@@ -35057,6 +35133,12 @@ extend TypeChecker {
                 self.clos_ret_on = false;
                 self.err_wm = self.errors.errors.len();
                 self.loop_depth = 0;
+                if fnd.body == NODE_NONE {
+                    // An interface's method states its contracts without a body.
+                    unsafe (*self.cur_ast()).sink_body = false;
+                    let rt = self.tc_single_result(id);
+                    self.tc_contracts(id, rt);
+                }
                 if fnd.body != NODE_NONE && !fnd.is_intrinsic() {
                     // An `unsafe fn` body is one big unsafe context: raw-pointer work inside needs
                     // no per-statement markers; the safety obligation sits at the call sites. A naked
@@ -35077,6 +35159,8 @@ extend TypeChecker {
                     let bsp = unsafe (*self.cur_ast()).at_const(fnd.body).span;
                     let simp = unsafe SIMPLIFY && self.tc_simp_at(bsp.start) != self.tc_simp_at(bsp.end);
                     unsafe (*self.cur_ast()).tlog_on = simp;
+                    let rt = self.tc_single_result(id);
+                    self.tc_contracts(id, rt);
                     self.check_stmt(fnd.body);
                     if self.dfr_holes.len() != 0 || self.dfr_errs.len() != 0 {
                         self.tc_dfr_recheck(fnd.body, e0, w0, f0);

@@ -35,12 +35,36 @@ pub struct CoreBody {
     pub bytes: Vector<u8>,             // CK_BYTES contents
     pub simd_aux: Vector<u32>,         // RV_SIMD index lists: the length, then u8 lanes four to a word
     pub demands: Vector<Terminator>,   // inlined calls whose instance the emitter still demands
+    pub contracts: Vector<ContractSite>, // one per contract clause the body checks
+    pub ranges: Vector<RangeLoop>,     // the counted loops the prover knows the bounds of
+    pub contract_blocks: u32,          // what the contract sites add: the inliner's size gate
+    pub contract_stmts: u32,           // subtracts it
+    pub contract_locals: u32,
     pub entry: BlockId,
 }
 ```
 
 `CoreBody::clear` re-seeds for a fresh body keeping every pool's capacity: one Lowerer
 is reused across bodies.
+
+### Contract sites
+
+Each clause (`Ast.contracts`) lowers to a chain of its own blocks: `pred` jumps to `chain`, the
+chain computes the condition, `check` ends in a `TM_ASSERT` of it whose span is the whole clause,
+and `cont` continues. `ContractSite { pred, chain, check, cont, clause, kind, value }`: `clause`
+indexes `Ast.contracts`, `kind` is `CT_REQUIRES`, `CT_ENSURES`, `CT_DECREASES` or `CT_INVARIANT`,
+and a `decreases` site asserts `true` and records its measure in `value`. `requires` and the
+function's `decreases` follow the entry; `ensures` precede each return, after the defers and
+before the storage deaths; a loop's clauses follow its header. `RangeLoop { head, ind, end_pl,
+end_k }`: a range `for` with an immutable binding, or an indexed collection loop, whose induction
+local `ind` runs from its start up to the end place or constant.
+
+The prover (`src/prove/prove.spc`) reads the sites of the kept bodies. Then `skip_contracts`
+(`skip_site` per site) empties each chain to `TM_UNREACHABLE` and makes `pred` jump to `cont`,
+unless `-fcontract-checks` keeps them; `skip_tail_ensures` drops a proved `ensures` that follows a
+self tail call. With the chains empty and the size counters subtracted, a body with contracts
+emits the same code as without them. The lowering of an interface's method without a body
+(`lower_fn`) gives the parameters and the sites only; the prover alone reads it.
 
 ## Locals
 
@@ -279,6 +303,11 @@ stored parameter becomes `is_mutable`, so a `&mut` parameter loses `restrict` (e
 parameter gets an entry copy, stored or not). Path blocks left unreachable are emptied
 (`TM_UNREACHABLE`) and the operands of their moves become a unit constant, so no read of the
 dead result temp keeps it declared; the statement pool is rebuilt in block order.
+
+A body with contract sites does not convert in the borrow pass: emission (`apply_drops_i`) skips
+its chains first (`skip_contracts`), then converts. `@tail_recurse` checks a copy with the chains
+skipped. Under `-fcontract-checks` a kept `ensures` after the call makes it `TR_AFTER`, unless the
+build proved the clause (`skip_tail_ensures`).
 
 ## Effects and Facts (`src/ir/facts.spc`)
 

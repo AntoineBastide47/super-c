@@ -1289,12 +1289,13 @@ extend Resolver {
             i = i + 1;
         }
         self.resolve_where(fd.where_clause);
+        let outer = self.cur_fn;
+        self.cur_fn = id;
+        self.resolve_contracts(id);
         if fd.body != NODE_NONE {
-            let outer = self.cur_fn;
-            self.cur_fn = id;
             self.resolve_block_stmts(fd.body);
-            self.cur_fn = outer;
         }
+        self.cur_fn = outer;
         self.lt_owners.truncate(lt_mark as usize);
         self.scope_exit();
     }
@@ -1520,6 +1521,23 @@ extend Resolver {
     // A function/closure BODY shares its parameters' scope (C semantics): a top-level `let` that
     // reuses a parameter name is a duplicate definition, not a shadow: the emitted C would be a
     // same-scope redefinition otherwise.
+    // The contract clauses of `owner` (a function or a loop), in the current scope; an `ensures`
+    // binder is in scope in its own clause only.
+    fn resolve_contracts(self: &mut Self, owner: NodeId) {
+        let (cs, ce) = self.ast.contracts_of(owner);
+        for i in cs..ce {
+            let c = *self.ast.contracts.at(i as usize);
+            if c.binder != NODE_NONE {
+                self.scope_enter();
+                self.declare(self.ast.at_const(c.binder).as_data.parameter.name, c.binder, Namespace::NS_VALUE);
+                self.resolve_expr(c.expr);
+                self.scope_exit();
+            } else {
+                self.resolve_expr(c.expr);
+            }
+        }
+    }
+
     fn resolve_block_stmts(self: &mut Self, id: NodeId) {
         let stmts = self.ast.at_const(id).as_data.block.statements;
         for i in 0..stmts.len {
@@ -1615,6 +1633,7 @@ extend Resolver {
             NODE_WHILE => {
                 let wd = unsafe self.ast.at_const(id).as_data.while_stmt;
                 self.resolve_expr(wd.condition);
+                self.resolve_contracts(id);
                 self.resolve_block(wd.body);
             },
             NODE_FOR | NODE_INLINE_FOR => {
@@ -1627,6 +1646,7 @@ extend Resolver {
                 } else {
                     self.resolve_pattern(fr.binding);
                 }
+                self.resolve_contracts(id);
                 self.resolve_block(fr.body);
                 self.scope_exit();
             },
@@ -1794,6 +1814,7 @@ extend Resolver {
             NODE_WHILE => {
                 // `loop { .. }` as an expression.
                 let body = self.ast.at_const(id).as_data.while_stmt.body;
+                self.resolve_contracts(id);
                 self.resolve_block(body);
             },
             NODE_ARRAY_LITERAL | NODE_TUPLE => {

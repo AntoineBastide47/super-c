@@ -228,6 +228,23 @@ modular return-lifetime check) run alongside.
   cancellations (the ladder after a cancellation check, cut at its `cancel_ladder_begin`
   call) are not ends, as in rustc's `unconditional_recursion`. About 4 ms on the compiler's
   own build with a release compiler (`SC_CEMIT_STATS`, `phase recursion`).
+- `prove_cached` (`src/driver/emit.spc`) over `prv::check_kept` (`src/prove/prove.spc`): an
+  **error**, after `check_recursion`, on every build whose modules state a contract
+  (`any_contracts`) unless `-fno-prove`. It lowers the contracts of each interface method without a
+  body (`lower_shells`), finds the components of the direct calls among the kept bodies that have a
+  `decreases` (`components`), then walks each kept body: the paths of its CFG with hash-consed terms
+  (`Terms`), the facts of each branch, assignment and callee `ensures` on the path, each obligation
+  (a `requires` at a call, an `ensures` at a return, a loop's invariant and measure at its header, a
+  checked operation) refuted by case splits and Fourier-Motzkin elimination over the integers with
+  gcd tightening (`Solver`, 128-bit checked arithmetic), each refutation's derivation checked by an
+  independent replay (`verify`), and over domains of at most 65536 values by enumeration with an
+  exact evaluator (`Eval`), which also confirms a counterexample. A conformance's method walks again
+  from its interface's `requires` (`refine`). Every walk, search and elimination has a fixed budget;
+  over one is not proved. With more than one job, chunks of bodies run on workers (one `Prover`
+  each, the shells and components read from the main one), their reports merged by body and
+  position, so the output equals the serial one. Modules whose key the build tree's proof record
+  holds are skipped (binary skill, build-toml.md). Then `skip_kept_contracts` empties the chains
+  the build does not check (core-ir.md, Contract sites).
 - `check_always_panics`: an **error**, run on every build of user modules: one job per
   linted module on the item job runner, a private engine leased per worker (the serial
   path scans with the master engine; a private one starts with the master's `ran0`),

@@ -344,11 +344,19 @@ pub(package) fn check(p: &loader::Package, sums: &Vector<Sums>, reported: &Vecto
 /// Only the members of a cyclic component of the direct-call graph get a summary: the graph comes from
 /// the call terminators and the converted self calls of every kept body, a superset of the calls the
 /// summaries keep, so every function `check` finds in a cycle is summarized, and a call of one that is
-/// not passes there as a call of a member of another component does.
-pub(package) fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vector<bool>) bool {
+/// not passes there as a call of a member of another component does. The graph also holds the
+/// functions of the modules `graph` marks besides; `comp` gets each kept body's component (NONE for a
+/// body outside the graph), what the prover's `decreases` reads.
+pub(package) fn check_kept(
+    p: &loader::Package,
+    keep: &irl::Keep,
+    reported: &Vector<bool>,
+    graph: &Vector<bool>,
+    comp: &mut Vector<u32>,
+) bool {
     let mut g = Recur::new();
     for m in 0..p.modules.len() {
-        if !reported[m] || !p.modules.at(m).has_ast {
+        if !graph[m] || !p.modules.at(m).has_ast {
             continue;
         }
         for k in p.idx().mod_items[m]..p.idx().mod_items[m + 1] {
@@ -364,14 +372,21 @@ pub(package) fn check_kept(p: &loader::Package, keep: &irl::Keep, reported: &Vec
             }
         }
     }
-    g.link_kept(keep, reported);
+    g.link_kept(keep, graph);
     g.components();
+    comp.clear();
+    for _k in 0..keep.kept.len() {
+        comp.push(NONE);
+    }
+    for f in 0..g.members.len() {
+        comp.set(g.members[f].fi as usize, g.members[f].comp);
+    }
     let mut s = Summarizer::new(reported);
     let mut sums = Vector::<Sums>::with_capacity(p.modules.len());
     let mut f: usize = 0;
     for m in 0..p.modules.len() {
         while f < g.members.len() && g.members[f].module == m as u32 {
-            if g.members[f].cyclic {
+            if g.members[f].cyclic && reported[m] {
                 s.add(p, &keep.kept.at(g.members[f].fi as usize).body);
             }
             f += 1;
@@ -484,7 +499,7 @@ extend Recur {
     // The direct-call graph between members whose `fi` is a kept body: every call of a member and,
     // when the pass made one a jump, a call of the member itself; a self call makes the component
     // cyclic.
-    fn link_kept(self: &mut Recur, keep: &irl::Keep, reported: &Vector<bool>) {
+    fn link_kept(self: &mut Recur, keep: &irl::Keep, graph: &Vector<bool>) {
         for f in 0..self.members.len() {
             self.members[f].edge_start = self.edges.len() as u32;
             let b = &keep.kept.at(self.members[f].fi as usize).body;
@@ -494,7 +509,7 @@ extend Recur {
             }
             for k in 0..b.blocks.len() {
                 let t = &b.blocks.at(k).term;
-                if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || !reported[t.callee.module as usize] {
+                if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || !graph[t.callee.module as usize] {
                     continue;
                 }
                 let g = self.member_of(t.callee);
