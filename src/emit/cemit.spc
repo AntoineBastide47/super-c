@@ -107,7 +107,7 @@ pub(package) const BK_C: u8 = 1;
 pub(package) const BK_LIR: u8 = 2;
 
 // Whether `pk`'s target has CPU feature `name`.
-fn feature(pk: &loader::Package, name: str) bool {
+const fn feature(pk: &loader::Package, name: str) bool {
     let k = cf::find(name, pk.arch);
     return k >= 0 && cf::has(pk.features, k as usize);
 }

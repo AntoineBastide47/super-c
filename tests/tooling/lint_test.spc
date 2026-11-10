@@ -72,15 +72,16 @@ fn redundant_cast_lint_covers_all_implicits() {
 
 // `--const`: the deep (all-paths) CTFE scan flags functions provably evaluable at compile
 // time: through branches, matches, loops and statically-resolved method calls, and stays silent
-// on extern calls (also in a loop body), recursion, `@no_const` functions, declared `const fn`s
-// and functions holding a build-constant branch (another build runs the removed code). Off by
-// default (no warning without the flag).
+// on extern calls (also in a loop body), recursion, `@no_const` functions, declared `const fn`s,
+// functions holding a build-constant branch (another build runs the removed code) and gated
+// functions and their callers (another build compiles another variant). Off by default (no warning
+// without the flag).
 @test
 fn const_suggestion_lint() {
     let p = cli::proj_new();
     p.mkfile(
         "main.spc",
-        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    while s > 100 {\n        s = s - 1;\n        if s == 50 {\n            break;\n        }\n    }\n    return s;\n}\n\nfn loop_prints(n: i32) i32 {\n    for i in 0..n {\n        println(\"{}\", i);\n    }\n    return n;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\n@no_const\nfn tagged(a: i32) i32 {\n    return a + 1;\n}\n\nfn gated() i32 {\n    if LOCKDEP {\n        return 1;\n    }\n    return 0;\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + loop_prints(0) + prints(0) + rec(2) + tagged(0) + gated() - 22;\n}\n",
+        "struct P {\n    pub x: i32,\n}\n\nextend P {\n    fn norm(self: Self) i32 {\n        if self.x < 0 {\n            return -self.x;\n        }\n        return self.x;\n    }\n}\n\nfn branchy(a: i32) i32 {\n    if a > 10 {\n        return a - 10;\n    }\n    return 10 - a;\n}\n\nfn use_method(p: P) i32 {\n    return p.norm();\n}\n\nconst fn already(a: i32) i32 {\n    return a + 1;\n}\n\nfn looping(n: i32) i32 {\n    let mut s = 0;\n    for i in 0..n {\n        s = s + i;\n    }\n    while s > 100 {\n        s = s - 1;\n        if s == 50 {\n            break;\n        }\n    }\n    return s;\n}\n\nfn loop_prints(n: i32) i32 {\n    for i in 0..n {\n        println(\"{}\", i);\n    }\n    return n;\n}\n\nfn prints(a: i32) i32 {\n    println(\"{}\", a);\n    return a;\n}\n\nfn rec(n: i32) i32 {\n    if n <= 1 {\n        return 1;\n    }\n    return n * rec(n - 1);\n}\n\n@no_const\nfn tagged(a: i32) i32 {\n    return a + 1;\n}\n\nfn gated() i32 {\n    if LOCKDEP {\n        return 1;\n    }\n    return 0;\n}\n\n@platform(linux)\nfn stub() i32 {\n    return 1;\n}\n\n@platform(macos | ios | windows | android | wasm)\nfn stub() i32 {\n    return 1;\n}\n\nfn calls_stub() i32 {\n    return stub();\n}\n\nfn main() i32 {\n    let p = P { x: 3 };\n    return branchy(4) + use_method(p) + already(1) + looping(2) + loop_prints(0) + prints(0) + rec(2) + tagged(0) + gated() + calls_stub() - 23;\n}\n",
     );
     let root = p.dir();
     let mut args = String::from_str("lint --const \"");
@@ -99,6 +100,7 @@ fn const_suggestion_lint() {
     assert(!r.out_has("'rec'"));
     assert(!r.out_has("'tagged'"), "a '@no_const' function is never suggested");
     assert(!r.out_has("'gated'"), "code another build runs may not be constant");
+    assert(!r.out_has("'stub'") && !r.out_has("'calls_stub'"), "another build compiles another variant");
     assert(!r.out_has("'main'"));
 
     // Off by default: the same file lints clean.

@@ -229,7 +229,7 @@ extend Session {
     }
 
     // The buffer of `path`, or -1.
-    fn buffer(self: &Self, path: str) i64 {
+    const fn buffer(self: &Self, path: str) i64 {
         for i in 0..self.bufs.len() {
             if self.bufs[i].path.as_str() == path {
                 return i as i64;
@@ -239,13 +239,13 @@ extend Session {
     }
 
     /// The root file's canonical path.
-    pub fn root_file(self: &Self) str {
+    pub const fn root_file(self: &Self) str {
         return self.root_file.as_str();
     }
 
     /// The number of input changes so far: every `set_text`, `apply`, `open` and `close` that changed an
     /// input adds one.
-    pub fn revision(self: &Self) u64 {
+    pub const fn revision(self: &Self) u64 {
         return self.revision;
     }
 
@@ -377,7 +377,7 @@ extend Session {
         return Ok(self.revision);
     }
 
-    fn changed(self: &mut Self) {
+    const fn changed(self: &mut Self) {
         self.revision += 1;
         if self.state == S_CHECKED {
             self.state = S_STALE;
@@ -385,7 +385,7 @@ extend Session {
     }
 
     /// Whether the analysis is of the current inputs.
-    pub fn checked(self: &Self) bool {
+    pub const fn checked(self: &Self) bool {
         return self.state == S_CHECKED;
     }
 
@@ -456,7 +456,7 @@ extend Session {
     }
 
     // Whether the analysis holds the root file's module.
-    fn root_loaded(self: &Self) bool {
+    const fn root_loaded(self: &Self) bool {
         for i in 0..self.pkg.modules.len() {
             if self.pkg.modules[i].file.as_str() == self.root_file.as_str() {
                 return true;
@@ -570,7 +570,7 @@ extend Session {
     }
 
     /// The bytes the analysis retains.
-    pub fn retained_bytes(self: &Self) usize {
+    pub const fn retained_bytes(self: &Self) usize {
         return self.pkg.retained_bytes();
     }
 
@@ -588,7 +588,7 @@ extend Session {
     }
 
     // Diagnostic order: file path, start, end, severity, then message bytes.
-    fn diag_cmp(self: &Self, a: u32, b: u32) i32 {
+    const fn diag_cmp(self: &Self, a: u32, b: u32) i32 {
         let x = &self.diags[a as usize];
         let y = &self.diags[b as usize];
         let c = self.pkg.modules[x.module as usize].file.cmp(&self.pkg.modules[y.module as usize].file);
@@ -638,12 +638,12 @@ extend Session {
     }
 
     /// The analysis, for the facade modules that read it. Not part of the API.
-    pub(package) fn package(self: &Self) &loader::Package {
+    pub(package) const fn package(self: &Self) &loader::Package {
         return &self.pkg;
     }
 
     /// The analysis, for the facade modules that parse bodies back into it. Not part of the API.
-    pub(package) fn package_mut(self: &mut Self) &mut loader::Package {
+    pub(package) const fn package_mut(self: &mut Self) &mut loader::Package {
         return &mut self.pkg;
     }
 }
@@ -659,41 +659,41 @@ pub struct Diag<'s> {
 }
 
 extend<'s> Diag<'s> {
-    fn rec(self: &Self) &'s an::DiagRec {
+    const fn rec(self: &Self) &'s an::DiagRec {
         return &self.s.diags[self.i as usize];
     }
 
     /// The file it concerns.
-    pub fn file(self: &Self) str<'s> {
+    pub const fn file(self: &Self) str<'s> {
         return self.s.pkg.modules[self.rec().module as usize].file.as_str();
     }
 
     /// Its byte range in the file's analyzed text.
-    pub fn start(self: &Self) u32 {
+    pub const fn start(self: &Self) u32 {
         return self.rec().start;
     }
 
-    pub fn end(self: &Self) u32 {
+    pub const fn end(self: &Self) u32 {
         return self.rec().start + self.rec().len;
     }
 
     /// `SEV_ERROR` or `SEV_WARNING`.
-    pub fn severity(self: &Self) u8 {
+    pub const fn severity(self: &Self) u8 {
         return self.rec().severity;
     }
 
     /// Its stable code (`utils::diag_codes`), what a client branches on; message text is not identity.
-    pub fn code(self: &Self) u16 {
+    pub const fn code(self: &Self) u16 {
         return self.rec().code;
     }
 
     /// The stable name of its code (`use_of_moved`).
-    pub fn code_name(self: &Self) str<'static> {
+    pub const fn code_name(self: &Self) str<'static> {
         return dc::name(self.rec().code);
     }
 
     /// The message: its first line, then one `= note: ` line per note.
-    pub fn message(self: &Self) str<'s> {
+    pub const fn message(self: &Self) str<'s> {
         return self.rec().msg.as_str();
     }
 
@@ -748,27 +748,27 @@ pub struct Module<'s> {
 
 extend<'s> Module<'s> {
     /// Its module path (`std::vector`, `api::session`).
-    pub fn path(self: &Self) str<'s> {
+    pub const fn path(self: &Self) str<'s> {
         return self.s.pkg.modules[self.i as usize].path.as_str();
     }
 
     /// Its file.
-    pub fn file(self: &Self) str<'s> {
+    pub const fn file(self: &Self) str<'s> {
         return self.s.pkg.modules[self.i as usize].file.as_str();
     }
 
     /// Its analyzed text.
-    pub fn text(self: &Self) str<'s> {
+    pub const fn text(self: &Self) str<'s> {
         return self.s.pkg.modules[self.i as usize].source.as_str();
     }
 
     /// Whether std's prelude loads it into every program.
-    pub fn prelude(self: &Self) bool {
+    pub const fn prelude(self: &Self) bool {
         return self.s.pkg.modules[self.i as usize].prelude;
     }
 
     /// Its index in load order. Not part of the API.
-    pub fn index(self: &Self) u32 {
+    pub const fn index(self: &Self) u32 {
         return self.i;
     }
 }

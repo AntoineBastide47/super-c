@@ -140,7 +140,7 @@ fn text_of(p: &Package, name: str) String {
 }
 
 // The block of body text `t` that byte `at` is in: from its label to the next label.
-fn block_at(t: str, at: usize) str {
+const fn block_at(t: str, at: usize) str {
     let mut from = at;
     // Each step goes back one byte.
     while from > 0 && !(t.byte_at(from - 1) == b'\n' && t.byte_at(from) == b'b') {
@@ -373,7 +373,7 @@ fn main() i32 {
 
 // Whether body text `t` has a bounds check (`icmp.uge`) in a block that is neither cold nor unlikely: one
 // each iteration runs, not one only a versioned loop's checked copy or its last step runs.
-fn hot_check(t: str) bool {
+const fn hot_check(t: str) bool {
     let mut rest = t;
     let mut cold = false;
     // Each step reads one line.
@@ -3813,7 +3813,7 @@ b0(v0: f64, v1: f64):
 }
 
 // The times `text` holds `pat`.
-fn count_of(text: &String, pat: str) u32 {
+const fn count_of(text: &String, pat: str) u32 {
     let mut n: u32 = 0;
     let mut rest = text.as_str();
     let mut at = rest.find(pat);
@@ -7422,7 +7422,7 @@ b0(v0: i32, v1: i64):
 
 // Operation `op` of `quotients_by_constants_give_the_division` (`sdiv`, `srem`, `udiv`, `urem`) of `x` by
 // `d`, both sign-extended; unsigned, their bits under `mask`.
-fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
+const fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
     if op == 0 {
         return (x / d) as u64;
     }
@@ -7439,12 +7439,12 @@ fn divided(op: u32, x: i64, d: i64, mask: u64) u64 {
 }
 
 // The least value of `w` signed bits.
-fn wmin(w: u32) i64 {
+const fn wmin(w: u32) i64 {
     return i64::MIN >> (64 - w) as i64;
 }
 
 // The greatest value of `w` signed bits.
-fn wmax(w: u32) i64 {
+const fn wmax(w: u32) i64 {
     return i64::MAX >> (64 - w) as i64;
 }
 

@@ -4,7 +4,7 @@ import ast::ast as *;
 import module::loader as loader;
 
 // Whether module `m` is the prelude tuple module: its instances are tuples.
-fn rt_tuple(pkg: *const loader::Package, m: ModuleId) bool {
+const fn rt_tuple(pkg: *const loader::Package, m: ModuleId) bool {
     return pkg != null && unsafe (*pkg).modules[m as usize].path.as_str() == "__std::tuple";
 }
 

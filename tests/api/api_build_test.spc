@@ -392,7 +392,7 @@ fn hooks_run_at_every_stage(fx: &mut Fx) {
     drop_installed(inst);
 }
 
-fn drop_installed(_i: bld::Installed) {}
+const fn drop_installed(_i: bld::Installed) {}
 
 // A hook's error fails the build, and its diagnostics reach the report.
 @test(timeout = 300)

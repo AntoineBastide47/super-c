@@ -326,7 +326,7 @@ extend<'a> Parser<'a> {
     }
 
     // An inline site's place among the sites at its location: `#<n>`, or 0 (`ord`).
-    fn site_ord(self: &mut Self) bool {
+    const fn site_ord(self: &mut Self) bool {
         self.ord = 0;
         if self.peek() != b'#' {
             return true;

@@ -27,7 +27,7 @@ pub struct HirNode {
 }
 
 // Whether node `i` of `a` was appended after parsing: by the sugar lowering, or by a checker rewrite.
-fn synthesized(a: &Ast, i: NodeId) bool {
+const fn synthesized(a: &Ast, i: NodeId) bool {
     if Ast::in_body(i) {
         return a.hir_body != 0 && (i & NODE_BODY_MASK) >= a.hir_body;
     }

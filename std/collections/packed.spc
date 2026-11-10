@@ -20,7 +20,7 @@ extern "C" {
 const MIN_BYTES: usize = 64; // the first block
 
 // Take ownership of `v`; it is freed on return.
-fn release<T>(_: T) {}
+const fn release<T>(_: T) {}
 
 /// Values of enum `E` stored back to back at the size of their own variant. Read in order; no indexing.
 pub struct PackedEnums<E, A = Global> {

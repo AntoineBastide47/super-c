@@ -366,7 +366,7 @@ const HELD_HEAD: usize = 20;
 
 /// Module `m`'s held record in the previous image under native key `nat` (low two bits aside); empty
 /// when there is none.
-pub(package) fn held_of(t: &Tuc, m: usize, nat: u64) str {
+pub(package) const fn held_of(t: &Tuc, m: usize, nat: u64) str {
     if t.hlen.len() <= m || t.hlen[m] == 0 || (t.hnat[m] & ~3u64) != (nat & ~3u64) {
         return "";
     }

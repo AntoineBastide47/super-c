@@ -590,7 +590,7 @@ fn no_dtors(l: &mut L) bool {
 }
 
 // The COMDAT selection of the section that defines symbol `k` (0: none).
-fn def_sel(l: &L, k: u32) u8 {
+const fn def_sel(l: &L, k: u32) u8 {
     let y = l.syms[k as usize];
     if y.sec <= 0 {
         return 0;

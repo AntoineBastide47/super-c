@@ -140,7 +140,7 @@ extend Img as Copy {}
 unsafe extend Img as Send {}
 
 extend Img {
-    pub(package) fn of(v: &mut Vector<u8>) Img {
+    pub(package) const fn of(v: &mut Vector<u8>) Img {
         return Img { ptr: v.as_mut_ptr(), len: v.len() };
     }
 

@@ -46,7 +46,7 @@ const fn fits(len: usize, off: usize, n: usize) bool {
 }
 
 /// The little-endian `T` at byte offset `off` of `b`. Panics: fewer than `sizeof(T)` bytes from `off`.
-pub fn read_le<T: EndianScalar>(b: []u8, off: usize) T {
+pub const fn read_le<T: EndianScalar>(b: []u8, off: usize) T {
     if !fits(b.len(), off, sizeof(T)) {
         panic("endian: read past the end of the slice");
     }
@@ -63,7 +63,7 @@ pub fn read_be<T: EndianScalar>(b: []u8, off: usize) T {
 
 /// The little-endian `T` at byte offset `off` of `b`, or `None` when fewer than `sizeof(T)` bytes follow
 /// `off`.
-pub fn try_read_le<T: EndianScalar>(b: []u8, off: usize) Option<T> {
+pub const fn try_read_le<T: EndianScalar>(b: []u8, off: usize) Option<T> {
     if !fits(b.len(), off, sizeof(T)) {
         return None;
     }

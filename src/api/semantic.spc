@@ -73,7 +73,7 @@ fn module_index(s: &ses::Session, file: str) Result<usize, ApiError> {
     };
 }
 
-fn ast_of(p: &loader::Package, m: u32) &Ast {
+const fn ast_of(p: &loader::Package, m: u32) &Ast {
     return p.modules[m as usize].ast.get_ref();
 }
 
@@ -96,7 +96,7 @@ fn locs_of(p: &loader::Package, ls: &Vector<feat::Loc>) Vector<Location> {
 }
 
 extend<'s> Symbol<'s> {
-    fn p(self: &Self) &'s loader::Package {
+    const fn p(self: &Self) &'s loader::Package {
         return self.s.package();
     }
 
@@ -155,7 +155,7 @@ extend<'s> Symbol<'s> {
     }
 
     /// The path of the module that declares it.
-    pub fn module_path(self: &Self) str<'s> {
+    pub const fn module_path(self: &Self) str<'s> {
         return self.p().modules[self.d.module as usize].path.as_str();
     }
 
@@ -467,7 +467,7 @@ fn refs_of(s: &mut ses::Session, d: DefId, include_decl: bool, opts: &ses::Reque
     return Ok(out);
 }
 
-fn loc_cmp(x: &Location, y: &Location) i32 {
+const fn loc_cmp(x: &Location, y: &Location) i32 {
     let c = x.file.cmp(&y.file);
     if c != 0 {
         return c;
@@ -490,7 +490,7 @@ pub struct OutlineEntry {
 }
 
 // The symbol kind of an LSP SymbolKind number.
-fn lsp_kind(k: i32) SymbolKind {
+const fn lsp_kind(k: i32) SymbolKind {
     return switch k {
         2 => Module,
         3 => Extend,

@@ -34,7 +34,7 @@ const fn pair_size(n: u32) bool {
 
 /// Whether signature `sig` of body `b` passes or returns an aggregate in two registers under Super-C's own
 /// convention, where Microsoft x64 passes a pointer to a copy.
-pub(package) fn pairs_in(b: &Body, sig: u32) bool {
+pub(package) const fn pairs_in(b: &Body, sig: u32) bool {
     if (b.pool[sig as usize + 1] & SIG_VARIADIC) != 0 {
         return false;
     }
@@ -259,7 +259,7 @@ pub(package) fn thunks(p: &mut Package, err: &mut String) bool {
 }
 
 // Whether package symbol `s` is a function of Super-C's own convention whose signature C passes otherwise.
-fn needs_thunk(p: &Package, s: u32) bool {
+const fn needs_thunk(p: &Package, s: u32) bool {
     let y = p.syms[s as usize];
     if y.kind != SK_FUNC || y.ext || y.used {
         return false;
@@ -269,7 +269,7 @@ fn needs_thunk(p: &Package, s: u32) bool {
 }
 
 // Body `k` of `p`'s bodies, then of its `decls`.
-fn body_at<'a>(p: &'a Package, k: u32) &'a Body {
+const fn body_at<'a>(p: &'a Package, k: u32) &'a Body {
     if k >= p.bodies.len() as u32 {
         return &p.decls[(k - p.bodies.len() as u32) as usize];
     }
@@ -278,7 +278,7 @@ fn body_at<'a>(p: &'a Package, k: u32) &'a Body {
 
 // The body that holds the signature of function symbol `s` of `p` (its definition, else `decls[sig]` as
 // `bodies.len() + sig`) and that signature; NONE when neither.
-fn sig_of(p: &Package, s: u32) (u32, u32) {
+const fn sig_of(p: &Package, s: u32) (u32, u32) {
     let y = p.syms[s as usize];
     if y.def != NONE {
         return (y.def, p.bodies[y.def as usize].sig);

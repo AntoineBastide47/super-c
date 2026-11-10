@@ -897,7 +897,7 @@ extend Gen {
     }
 
     // Whether a control instruction (`Code.ctl`) lies between code bytes `a` and `b`: a binary search.
-    fn ctl_within(self: &Self, a: u32, b: u32) bool {
+    const fn ctl_within(self: &Self, a: u32, b: u32) bool {
         let mut lo: usize = 0;
         let mut hi = self.c.ctl.len();
         while lo < hi {
@@ -913,7 +913,7 @@ extend Gen {
 
     // Code byte `o` past the cuts (`stack_values`), `o` at least the last one `at` saw: less the bytes cut
     // before it; one inside a cut, at the cut's start.
-    fn moved(self: &Self, at: &mut Cursor, o: u32) u32 {
+    const fn moved(self: &Self, at: &mut Cursor, o: u32) u32 {
         // Each step passes one cut.
         while at.q < self.cuts.len() && self.cuts[at.q] as u32 <= o {
             at.d += self.cuts[at.q] as u32 - (self.cuts[at.q] >> 32) as u32;
@@ -1016,7 +1016,7 @@ extend Gen {
 
     // The call area bytes call `t` needs: copies of its memory values passed by reference, and its
     // variadic buffer.
-    fn call_bytes(self: &Self, t: Inst) u32 {
+    const fn call_bytes(self: &Self, t: Inst) u32 {
         let b = self.b();
         let np = b.pool[t.b as usize];
         let mut n: u32 = 0;
@@ -2038,7 +2038,7 @@ extend Gen {
 
     // The last local access, a `local.set` of value index `x`: marked for `stack_values` (VW_VALUE, and
     // VW_ONE when one instruction or edge reads it, which no loop keeps).
-    fn value_write(self: &mut Self, x: u32) {
+    const fn value_write(self: &mut Self, x: u32) {
         let n = self.c.acc_op.len();
         self.c.acc_op[n - 1] = w::LOCAL_SET | VW_VALUE | ast::pick(self.lv.reads(x) == 1, VW_ONE, 0);
     }
@@ -2688,7 +2688,7 @@ extend Gen {
     }
 
     // The local `get` reads value `v` from, NONE when it makes it otherwise (a constant, a fold) or has none.
-    fn plain_local(self: &Self, v: Value) u32 {
+    const fn plain_local(self: &Self, v: Value) u32 {
         if v == VNONE || (v & VFLAG) != 0 || (v & VPARAM) == 0 && (self.remat[v as usize] || self.lv.pfold[v as usize]) {
             return NONE;
         }
@@ -3787,7 +3787,7 @@ extend Gen {
 
     // Whether 32-bit select `t` is `c ? -1 : x` for strict comparisons `c` and `x` (`x` zero-extended or
     // not) of the same two values that never both hold: `a < b` and `a > b` (or `b < a`), signed or unsigned.
-    fn minus_or_bit(self: &Self, t: Inst) bool {
+    const fn minus_or_bit(self: &Self, t: Inst) bool {
         let b = self.b();
         let mut z: u64 = 0;
         if t.ty != T_I32 || !self.const_of(t.b, &mut z) || z as u32 != 0xFFFFFFFF || (t.a & (VPARAM | VFLAG)) != 0 || (t.c & (VPARAM | VFLAG)) != 0 {
@@ -3853,7 +3853,7 @@ extend Gen {
 
     // The side (1 or 2) of select `t` that is the other side plus 1, that sum folded into it (`lv::FOLD_SINC`);
     // else 0.
-    fn inc_fold(self: &Self, t: Inst) u8 {
+    const fn inc_fold(self: &Self, t: Inst) u8 {
         let s = lv::inc_side(self.b(), t);
         return ast::pick(s != 0 && self.lv.pfold[ast::pick(s == 1, t.b, t.c) as usize], s, 0);
     }
@@ -4421,7 +4421,7 @@ extend Gen {
 
     // Whether block `d` dominates block `k` (`k`'s dominators come before it in reverse postorder); true past
     // the walk budget (`dead_from` then answers).
-    fn dominates(self: &mut Self, d: u32, k: u32) bool {
+    const fn dominates(self: &mut Self, d: u32, k: u32) bool {
         let mut x = k;
         // Each step goes one level up the dominator tree and takes one of the budget.
         while x != d && self.sh.rpo[x as usize] > self.sh.rpo[d as usize] {
@@ -4436,7 +4436,7 @@ extend Gen {
 
     // Whether argument `a` is in parameter `x`'s local already (`arg_local`).
     // Whether edge `e` moves no value: each argument already in its parameter's local.
-    fn no_moves(self: &Self, e: u32) bool {
+    const fn no_moves(self: &Self, e: u32) bool {
         let b = self.b();
         let ps = b.insts.len() as u32 + b.blocks[b.edge_target(e) as usize].param_start;
         for k in 0..b.edge_nargs(e) {
@@ -4605,7 +4605,7 @@ extend Gen {
 
     // The lowest case value of switch `t` and the span to its highest, when a table over them is dense: 4
     // cases or more, the span at most 4 times their count. A span of 0 otherwise.
-    fn table_span(self: &Self, t: Inst) (u64, u32) {
+    const fn table_span(self: &Self, t: Inst) (u64, u32) {
         let b = self.b();
         let n = t.aux as u32;
         if n < 4 {
@@ -7546,7 +7546,7 @@ extend Gen {
 
     // Whether instruction `t` (not an O_VOP) has a SIMD128 form: its 16-byte vector operands and result may
     // live in v128 locals or in memory.
-    fn vform(self: &Self, t: Inst) bool {
+    const fn vform(self: &Self, t: Inst) bool {
         let op = t.op;
         if op >= O_SEXT && op <= O_UITOFP {
             return self.conv_form(t);
@@ -7824,7 +7824,7 @@ extend Gen {
 
     // Whether conversion `t` has a SIMD128 form (`vconv`): between vectors that fit a v128 (`vfit`, or of
     // 2 bytes), or between a 16-byte vector and a 32-byte one.
-    fn conv_form(self: &Self, t: Inst) bool {
+    const fn conv_form(self: &Self, t: Inst) bool {
         let op = t.op;
         let st = self.vt(t.a);
         if !is_vec(st) || !is_vec(t.ty) {
@@ -8010,7 +8010,7 @@ extend Gen {
 
     // Whether `vop` `t` has a SIMD128 form (`vop_reg`): its 16-byte vector operands and result may live in
     // v128 locals or in memory.
-    fn vop_form(self: &Self, t: Inst) bool {
+    const fn vop_form(self: &Self, t: Inst) bool {
         let b = self.b();
         let code = (t.aux & VOP_CODE) as u32;
         if t.b == 0 {

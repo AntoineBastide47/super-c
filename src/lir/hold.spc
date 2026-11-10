@@ -509,7 +509,7 @@ pub(package) fn read(img: str, ptr_bytes: u32) Option<Rec> {
 }
 
 // Whether every index of `rec` is in its table and every data definition holds its bytes and relocations.
-fn valid(rec: &Rec, ptr_bytes: u32) bool {
+const fn valid(rec: &Rec, ptr_bytes: u32) bool {
     let nn = rec.names.len() as u32;
     for q in 0..rec.funcs.len() {
         let f = rec.funcs.at(q);
@@ -535,7 +535,7 @@ fn valid(rec: &Rec, ptr_bytes: u32) bool {
 }
 
 // Whether every data definition of `ds` holds its bytes and relocations, with its spellings below `nn`.
-fn valid_data(ds: &Vector<HData>, nn: u32, ptr_bytes: u32) bool {
+const fn valid_data(ds: &Vector<HData>, nn: u32, ptr_bytes: u32) bool {
     for q in 0..ds.len() {
         let d = ds.at(q);
         let mut ok = d.name < nn && d.kind != SK_FUNC && d.bytes.len() <= d.size as usize;

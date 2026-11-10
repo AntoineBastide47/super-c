@@ -216,7 +216,7 @@ extend Code {
 
     /// Add `d` to the displacement of every operand based on `IN`: the distance from rsp to the incoming
     /// frame, once the frame's size is known.
-    pub(package) fn rebase(self: &mut Self, d: i32) {
+    pub(package) const fn rebase(self: &mut Self, d: i32) {
         for k in 0..self.in_at.len() {
             let at = self.in_at[k] as usize;
             let mut v: u32 = 0;

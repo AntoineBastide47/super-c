@@ -688,7 +688,7 @@ const fn fde_len(cfi: u32) u32 {
 }
 
 // The bytes of part `pt`'s section name: its section's name, then `.` and its symbol's when it has one.
-fn part_name_len(o: &ob::Obj, pt: ob::Part) usize {
+const fn part_name_len(o: &ob::Obj, pt: ob::Part) usize {
     let mut name: str = "";
     let mut ty: u32 = 0;
     let _ = sec_info(o, pt.k, &mut name, &mut ty);

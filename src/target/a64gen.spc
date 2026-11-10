@@ -292,7 +292,7 @@ extend Gen {
     }
 
     /// Use `t`, a cleared table, as the object symbols of the package symbols (`place::Osyms`).
-    pub(package) fn use_osyms(self: &mut Self, t: place::Osyms) {
+    pub(package) const fn use_osyms(self: &mut Self, t: place::Osyms) {
         self.osym = t;
     }
 
@@ -377,7 +377,7 @@ extend Gen {
     }
 
     // Prefer no store, then the value whose next use is farthest away.
-    fn cheapest(self: &Self, set: u64) u8 {
+    const fn cheapest(self: &Self, set: u64) u8 {
         let mut best = NOREG;
         let mut score: u64 = 0;
         let mut left = set;
@@ -474,7 +474,7 @@ extend Gen {
 
     // The register of the result part that the run of result stores before the `ret` of value `v`'s block
     // moves `v` into (`rstore`), when that store is `v`'s only use: `v` is there for it. NOREG else.
-    fn ret_part(self: &Self, v: Value) u8 {
+    const fn ret_part(self: &Self, v: Value) u8 {
         if (v & (VPARAM | VFLAG)) != 0 || self.cr.rstore.len() == 0 || self.cr.lv.uses[v as usize] != 1 {
             return NOREG;
         }
@@ -630,7 +630,7 @@ extend Gen {
     // Whether register aggregate argument `v` (layout `loc`), at an address in a register that no value read
     // after the call's parallel move is (`late`), loads its parts in that move: each of 1, 2, 4 or 8 bytes
     // (a vector one of 4, 8 or 16). The register stays live until the move reads it.
-    fn parts_moved(self: &Self, v: Value, loc: ab::ALoc, late: &Vector<u32>) bool {
+    const fn parts_moved(self: &Self, v: Value, loc: ab::ALoc, late: &Vector<u32>) bool {
         let x = self.cr.vx(v);
         if loc.kind != ab::L_REG || self.cr.va[x as usize].reg == NOREG || self.cr.va[x as usize].reg >= V0 || self.frame_addr(
             v,
@@ -1018,7 +1018,7 @@ extend Gen {
 
     // Whether `vop` `t` computes in v registers (`vlanes`' register forms, a bitcast, a shift by a scalar):
     // its vector operands and result need no memory.
-    fn vop_reg(self: &Self, t: Inst) bool {
+    const fn vop_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if lv::lane_perm(self.cr.b(), t) != 0 || lv::lane_slide(self.cr.b(), t) != 0 {
             return in_vreg(t.ty);
@@ -1274,7 +1274,7 @@ extend Gen {
     // Whether entry parameter value index `x`, arriving in argument register `r`, may keep it as its home:
     // no instruction that may write an argument register (`hpre`) runs from the entry to the end of its
     // range (`Live::last_read`), and nothing else holds `r`.
-    fn quiet_arg(self: &Self, x: u32, r: u8) bool {
+    const fn quiet_arg(self: &Self, x: u32, r: u8) bool {
         let b = self.cr.b();
         let ni = b.insts.len() as u32;
         let arg = r < 8 || r >= V0 && r < V0 + 8;
@@ -2290,7 +2290,7 @@ extend Gen {
 
     // Whether the warm code (the words before the first rare block) branches with a link (`BL`, `BLR`):
     // it would lose the return address its frame does not save.
-    fn warm_calls(self: &Self) bool {
+    const fn warm_calls(self: &Self) bool {
         return self.calls_before(self.rare_at());
     }
 
@@ -2518,7 +2518,7 @@ extend Gen {
 
     // Whether an instruction of a loop reads value `v` zero-extended: compares it unsigned or for equality,
     // extends it, shifts it right logically or divides it unsigned.
-    fn loop_zext(self: &Self, v: Value) bool {
+    const fn loop_zext(self: &Self, v: Value) bool {
         let b = self.cr.b();
         for k in 0..b.blocks.len() {
             if self.cr.lv.inner[k] == NONE {
@@ -3494,7 +3494,7 @@ extend Gen {
 
     // Whether address `v` is a slot or frame address no register holds (`addr`'s folds), with the frame's
     // register and the offset; else false, x17 and 0 (the caller puts `v` there).
-    fn frame_addr(self: &Self, v: Value) (bool, u32, i64) {
+    const fn frame_addr(self: &Self, v: Value) (bool, u32, i64) {
         let x = self.cr.vx(v);
         let va = self.cr.va[x as usize];
         if va.home == H_SPADDR {
@@ -3818,7 +3818,7 @@ extend Gen {
     // (`adds`, `subs`, `ands`, `bics`), and the condition on them is returned; NONE when it does not apply.
     // An addition or subtraction may set V, so only `==`, `!=`, `< 0` (MI) and `>= 0` (PL) read its
     // flags; a logical one clears V, so every signed condition does.
-    fn set_flags(self: &mut Self, r: u32, sf: bool, c: u16) u32 {
+    const fn set_flags(self: &mut Self, r: u32, sf: bool, c: u16) u32 {
         let k = self.cr.lv.order[self.cr.pos as usize];
         let n = self.code.len();
         if n == 0 || self.blk_at[k as usize] >= n as u32 {
@@ -4776,7 +4776,7 @@ extend Gen {
     // `ptr` pair), the bytes after or before through the same address value. Crossing memory or control
     // flow is forbidden; a store's source must already exist where the pair executes. A load passes the
     // loads it does not pair with (but a volatile one) and never takes one an earlier pair took (`stepped`).
-    fn pair_next(self: &Self, i: u32) u32 {
+    const fn pair_next(self: &Self, i: u32) u32 {
         let b = self.cr.b();
         let bk = b.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let t = b.insts[i as usize];
@@ -4991,7 +4991,7 @@ extend Gen {
 
     // How many runs of four stores from store `i` on in its block (at most ZERO_QUADS) each write 0 to 8
     // bytes, at consecutive offsets of one address, none volatile or through a folded index.
-    fn zero_quads(self: &Self, i: u32) u32 {
+    const fn zero_quads(self: &Self, i: u32) u32 {
         let b = self.cr.b();
         let bk = b.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let t = b.insts[i as usize];
@@ -5199,7 +5199,7 @@ extend Gen {
     }
 
     // The result part store `t` writes whole through the result's address `pv`, else NONE.
-    fn part_store(self: &Self, t: Inst, pv: Value) u32 {
+    const fn part_store(self: &Self, t: Inst, pv: Value) u32 {
         if t.op != O_STORE || t.a != pv || t.b == pv || (t.aux & MEM_VOLATILE) != 0 {
             return NONE;
         }
@@ -5467,7 +5467,7 @@ extend Gen {
     // The `y` of 32- or 64-bit select `t` that is `max(y, 0)` on a folded signed comparison of a value `x`
     // with 0 (`x < 0 ? 0 : y`, `x <= 0 ? 0 : y`, `x > 0 ? y : 0`, `x >= 0 ? y : 0`), `y` either `x` or of
     // its sign (`same_sign`); VNONE when not.
-    fn max_zero(self: &Self, t: Inst) Value {
+    const fn max_zero(self: &Self, t: Inst) Value {
         let bits = type_bits(t.ty, self.cr.ptr);
         if !is_int(t.ty) || bits != 32 && bits != 64 || (t.a & (VPARAM | VFLAG)) != 0 || !self.cr.lv.pfold[t.a as usize] || self.cr.lv.conj[t.a as usize] != 0 {
             return VNONE;
@@ -5493,7 +5493,7 @@ extend Gen {
     // Whether value `y` is negative exactly when `x` is, `x` where so: `y` a select of `x` and a constant
     // at least 0 that it takes only where `x > k` (`k` at least -1) or `x >= k` (`k` at least 0), as a
     // clamp's upper bound.
-    fn same_sign(self: &Self, y: Value, x: Value) bool {
+    const fn same_sign(self: &Self, y: Value, x: Value) bool {
         if (y & (VPARAM | VFLAG)) != 0 {
             return false;
         }
@@ -7268,7 +7268,7 @@ extend Gen {
     }
 
     // Whether no argument of edge `o` is in a register home edge `e`'s moves write.
-    fn args_apart(self: &Self, e: u32, o: u32) bool {
+    const fn args_apart(self: &Self, e: u32, o: u32) bool {
         let b = self.cr.b();
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
@@ -7291,7 +7291,7 @@ extend Gen {
 
     // Whether edge `e`'s moves leave `test` as it is: they leave the flags, and a register test's register
     // is no home they write.
-    fn keeps_test(self: &Self, test: Test, e: u32) bool {
+    const fn keeps_test(self: &Self, test: Test, e: u32) bool {
         if test.kind == T_CC {
             return true;
         }
@@ -7325,7 +7325,7 @@ extend Gen {
     // `e`'s parameter of a later block (`edge_homes`), a value that dies in this block, or a copy (its home
     // elsewhere) that `o`'s target does not keep; and, unless `o`'s moves are among `e`'s (`within`: those
     // moves then serve `o` too), no argument of `o` is in one.
-    fn homes_free(self: &Self, e: u32, o: u32, within: bool) bool {
+    const fn homes_free(self: &Self, e: u32, o: u32, within: bool) bool {
         let b = self.cr.b();
         let sp = self.cr.lv.pos[b.edge_target(o) as usize];
         let kept = sp == self.cr.pos + 1 && self.continues(sp);
@@ -7364,7 +7364,7 @@ extend Gen {
     // the other edge fills with the same value (a loop's parameter and the one after the loop that shares
     // its register, `lv::Live::share`); and each such register holds no other value that lives on. The
     // moves then run once, before the branch.
-    fn same_moves(self: &Self, e: u32, o: u32) bool {
+    const fn same_moves(self: &Self, e: u32, o: u32) bool {
         return self.cr.moves_within(e, o) && self.cr.moves_within(o, e);
     }
 
@@ -8189,7 +8189,7 @@ const fn qpair_fits(off: i64) bool {
 
 // Pair `j` of the callee-saved pairs whose lower registers are `xs` then `vs`: its access size and lower
 // register.
-fn pair_at(xs: &Vector<u32>, vs: &Vector<u32>, j: u32) (u32, u32) {
+const fn pair_at(xs: &Vector<u32>, vs: &Vector<u32>, j: u32) (u32, u32) {
     let nx = xs.len() as u32;
     return if j < nx {
         (a::M_X, xs[j as usize])
@@ -8755,7 +8755,7 @@ extend Gen {
 
     // Whether `vop` `t` is a `shuffle` of two or three vectors of its own type of 8 or 16 bytes by a constant
     // index list (`tbl_lanes`).
-    fn tbl_shuffle(self: &Self, t: Inst) bool {
+    const fn tbl_shuffle(self: &Self, t: Inst) bool {
         if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b < 2 || t.b > 3 || t.c == VNONE || !in_vreg(
             t.ty,
         ) {
@@ -9605,7 +9605,7 @@ extend Gen {
     }
 
     // Whether vector conversion `t` has one NEON form (`neon_conv`) and both its vectors are in v registers.
-    fn conv_reg(self: &Self, t: Inst) bool {
+    const fn conv_reg(self: &Self, t: Inst) bool {
         return is_vec(t.ty) && t.op >= O_SEXT && t.op <= O_UITOFP && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a)) && neon_conv(
             t.op,
             lane_type(self.cr.vt(t.a)),

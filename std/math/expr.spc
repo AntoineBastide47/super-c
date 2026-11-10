@@ -99,7 +99,7 @@ extend<T: Scalar, A: Elems<T>> Scaled<T, A> as Elems<T> {
 }
 
 /// The expression of view `s`'s elements.
-pub fn ex<'a, T: Scalar>(s: Slice<'a, T>) Ex<T, Leaf<'a, T>> {
+pub const fn ex<'a, T: Scalar>(s: Slice<'a, T>) Ex<T, Leaf<'a, T>> {
     return Ex::<T, Leaf<'a, T>> { e: Leaf::<'a, T> { s: s } };
 }
 

@@ -513,7 +513,7 @@ extend Gen {
     }
 
     /// Use `t`, a cleared table, as the object symbols of the package symbols (`place::Osyms`).
-    pub(package) fn use_osyms(self: &mut Self, t: place::Osyms) {
+    pub(package) const fn use_osyms(self: &mut Self, t: place::Osyms) {
         self.osym = t;
     }
 
@@ -696,7 +696,7 @@ extend Gen {
     }
 
     // Whether evicting register `r`'s value stores it (`evict`).
-    fn stores(self: &Self, r: u8) bool {
+    const fn stores(self: &Self, r: u8) bool {
         let x = self.cr.owner[r as usize];
         return x != NONE && self.cr.va[x as usize].home != H_FIXED && self.cr.va[x as usize].dirty && (self.cr.live_on(
             x,
@@ -704,7 +704,7 @@ extend Gen {
     }
 
     // Prefer no store, then the value whose next use is farthest away.
-    fn cheapest(self: &Self, set: u64) u8 {
+    const fn cheapest(self: &Self, set: u64) u8 {
         let mut best = NOREG;
         let mut score: u64 = 0;
         let mut left = set;
@@ -722,7 +722,7 @@ extend Gen {
     }
 
     // Whether instruction `i` reads value `v`, through the operands that fold into it too (`lv::uses_of`).
-    fn reads(self: &Self, i: u32, v: Value) bool {
+    const fn reads(self: &Self, i: u32, v: Value) bool {
         let us = self.cr.lv.uses_of(i);
         for k in 0..us.len() {
             if us[k] == v {
@@ -850,7 +850,7 @@ extend Gen {
 
     // The register of the result part that the run of result stores before the `ret` of value `v`'s block
     // moves `v` into (`rstore`), when that store is `v`'s only use: `v` is there for it. NOREG else.
-    fn ret_part(self: &Self, v: Value) u8 {
+    const fn ret_part(self: &Self, v: Value) u8 {
         if (v & (VPARAM | VFLAG)) != 0 || self.cr.rstore.len() == 0 || self.cr.lv.uses[v as usize] != 1 {
             return NOREG;
         }
@@ -1502,7 +1502,7 @@ extend Gen {
     // fused multiply-adds, scalar float comparisons (`ucomis`), integer and lane-wise integer arithmetic,
     // scalar conversions, bit casts, returns and the edges' moves. Not comparisons of vectors, selects, lane
     // inserts and extracts, the other lane-wise operations, calls.
-    fn upper_op(self: &Self, i: u32) bool {
+    const fn upper_op(self: &Self, i: u32) bool {
         let t = self.cr.b().insts[i as usize];
         let op = t.op;
         if op >= O_SEXT && op <= O_INTTOPTR {
@@ -2336,7 +2336,7 @@ extend Gen {
     // a sibling call or one before a trap), a thread-local address, a 128-bit value, a lane-wise operation
     // but one in xmm registers (`reduce_reg`, `ext_reg`, `idiom_reg`, `float_reg`, `FOLD_ANY`), a vector shift by no immediate
     // (`Live::vshimm`) take all three, as does an aggregate or second register return.
-    fn homes_free(self: &Self, b: &Body) u64 {
+    const fn homes_free(self: &Self, b: &Body) u64 {
         let all = bit(x::RAX) | bit(x::RCX) | bit(x::RDX);
         let rl = self.cr.self_lay.ret;
         if (b.pool[b.sig as usize + 2] & AGG) != 0 || rl.kind == ab::L_SRET || rl.kind == ab::L_REG && rl.n > 1 {
@@ -2886,7 +2886,7 @@ extend Gen {
     // that does enters it, and no 32-byte vector's range (from its block's position to its last one)
     // covers it, so the upper halves hold nothing: the code of the legacy SSE encoding after a vector
     // loop runs without their state.
-    fn upper_entry(self: &mut Self, q: u32, k: u32) bool {
+    const fn upper_entry(self: &mut Self, q: u32, k: u32) bool {
         if !self.ymm || self.yblk[k as usize] {
             return false;
         }
@@ -4882,7 +4882,7 @@ extend Gen {
     }
 
     // Whether an edge of branch `t` passes value `v`.
-    fn edge_reads(self: &Self, t: Inst, v: u32) bool {
+    const fn edge_reads(self: &Self, t: Inst, v: u32) bool {
         let b = self.cr.b();
         for e in [t.b, t.c] {
             for q in 0..b.edge_nargs(e) {
@@ -5790,7 +5790,7 @@ extend Gen {
     // The other half of 64-bit product `i` (`t`) later in its block, within DIV_REACH instructions: its high
     // half (`O_MULHU` or `O_MULHS`) when `high`, else its low half (`O_MUL`), of the same operands, computed
     // on its own (no fold) and read. NONE for none.
-    fn twin_product(self: &Self, i: u32, t: Inst, high: bool) u32 {
+    const fn twin_product(self: &Self, i: u32, t: Inst, high: bool) u32 {
         let b = self.cr.b();
         let bk = b.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let end = (bk.start + bk.len - 1).min(i + 1 + DIV_REACH);
@@ -6614,7 +6614,7 @@ extend Gen {
 
     // The result part store `t` writes whole through the result's address `pv` (two for a 16-byte vector
     // of two 8-byte vector parts: `place::span_part`), else NONE.
-    fn part_store(self: &Self, t: Inst, pv: Value) u32 {
+    const fn part_store(self: &Self, t: Inst, pv: Value) u32 {
         if t.op != O_STORE || t.a != pv || t.b == pv || (t.aux & MEM_VOLATILE) != 0 {
             return NONE;
         }
@@ -7237,7 +7237,7 @@ extend Gen {
     }
 
     // The register a return right after value `v` takes it in; NOREG when no such return follows.
-    fn ret_want(self: &Self, v: Value) u8 {
+    const fn ret_want(self: &Self, v: Value) u8 {
         let b = self.cr.b();
         let bk = b.blocks[self.cr.lv.def_blk[v as usize] as usize];
         let rl = self.cr.self_lay.ret;
@@ -7249,7 +7249,7 @@ extend Gen {
 
     // Whether value `v`, in a register it owns, dies at this instruction (`def_over` may take that
     // register).
-    fn dies_here(self: &Self, v: Value) bool {
+    const fn dies_here(self: &Self, v: Value) bool {
         let x = self.cr.vx(v);
         let r = self.cr.va[x as usize].reg;
         return r != NOREG && self.cr.owner[r as usize] == x && ((self.xalloc | self.valloc) & bit(r)) != 0 && self.cr.lv.uses[x as usize] == 0 && self.cr.lv.end[x as usize] == self.cr.pos;
@@ -8828,7 +8828,7 @@ extend Gen {
     // target (a loop header, its back edge) ends its range in this block and no argument of `o` is in a
     // register they write, so the other path reads none of the homes they write. The moves keep the flags
     // (`keep_flags`). One branch then takes the edge.
-    fn early_moves(self: &Self, e: u32, o: u32) bool {
+    const fn early_moves(self: &Self, e: u32, o: u32) bool {
         let b = self.cr.b();
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
@@ -8859,7 +8859,7 @@ extend Gen {
     // writes a register home that no argument of `o` is in and that holds its parameter of a later block
     // (`edge_homes`), a value that dies in this block, or a copy (its home elsewhere) that `o`'s target
     // does not keep.
-    fn early_ok(self: &Self, e: u32, o: u32) bool {
+    const fn early_ok(self: &Self, e: u32, o: u32) bool {
         return self.early_moves(e, o) || self.moves_free(e, o, false);
     }
 
@@ -8867,7 +8867,7 @@ extend Gen {
     // `e`'s parameter of a later block (`edge_homes`), a value that dies in this block, or a copy (its home
     // elsewhere) that `o`'s target does not keep; and, unless `o`'s moves are among `e`'s (`within`: those
     // moves then serve `o` too), no argument of `o` is in one.
-    fn moves_free(self: &Self, e: u32, o: u32, within: bool) bool {
+    const fn moves_free(self: &Self, e: u32, o: u32, within: bool) bool {
         let b = self.cr.b();
         let sp = self.cr.lv.pos[b.edge_target(o) as usize];
         let kept = sp == self.cr.pos + 1 && self.continues(sp);
@@ -8906,14 +8906,14 @@ extend Gen {
     // the other edge fills with the same value (a loop's parameter and the one after the loop that shares
     // its register, `lv::Live::share`); and each such register holds no other value that lives on. The
     // moves then run once, before the branch.
-    fn same_moves(self: &Self, e: u32, o: u32) bool {
+    const fn same_moves(self: &Self, e: u32, o: u32) bool {
         return self.cr.moves_within(e, o) && self.cr.moves_within(o, e);
     }
 
     // Whether register aggregate argument `v` (layout `loc`), at an address in a register that no value read
     // after the call's parallel move is (`late`), loads its parts in that move: each of 1, 2, 4 or 8 bytes
     // (a vector one of 4, 8 or 16). The register stays live until the move reads it.
-    fn parts_moved(self: &Self, v: Value, loc: ab::ALoc, late: &Vector<u32>) bool {
+    const fn parts_moved(self: &Self, v: Value, loc: ab::ALoc, late: &Vector<u32>) bool {
         let x = self.cr.vx(v);
         if loc.kind != ab::L_REG || self.cr.va[x as usize].reg == NOREG || self.cr.va[x as usize].reg >= V0 || self.frame_addr(
             v,
@@ -9426,7 +9426,7 @@ extend Gen {
 
     // Branch `q` of the body: `fix[q]`, then the jump table entries (`jt`): its position (a table entry's: its
     // dispatch's) and target block, NONE for an entry to a position in the code.
-    fn branch_of(self: &Self, q: usize) (u32, u32) {
+    const fn branch_of(self: &Self, q: usize) (u32, u32) {
         if q < self.fix.len() {
             return ((self.fix[q] >> 32) as u32, self.fix[q] as u32);
         }
@@ -10166,7 +10166,7 @@ const fn sse_of_op(op: u8, lt: u8, un: &mut bool) u32 {
 
 // Whether call layout `lay` passes an argument or the result in a ymm or zmm register: a 32- or 64-byte
 // vector part.
-fn ymm_parts(lay: &ab::CallLayout) bool {
+const fn ymm_parts(lay: &ab::CallLayout) bool {
     for k in 0..lay.parts.len() {
         if lay.parts[k].v && lay.parts[k].size >= 32 {
             return true;
@@ -11092,7 +11092,7 @@ extend Gen {
 
     // Whether lane access `t` (`O_VEXTRACT`, `O_VINSERT`) has an SSE2 register form (`vlane`): a lane out
     // of an xmm register but a byte; an f32 into lane 0, an f64 into either lane, a 16-bit lane.
-    fn lane_reg(self: &Self, t: Inst) bool {
+    const fn lane_reg(self: &Self, t: Inst) bool {
         if t.op == O_VEXTRACT {
             return in_vreg(self.cr.vt(t.a)) && type_bytes(t.ty, 8) >= 2;
         }
@@ -11980,7 +11980,7 @@ extend Gen {
 
     // Whether vector shift `t` has an AVX2 form in registers (`vec_arith`): lanes of 4 or 8 bytes, but an
     // arithmetic shift of 8-byte lanes.
-    fn shift_reg(self: &Self, t: Inst) bool {
+    const fn shift_reg(self: &Self, t: Inst) bool {
         let eb = type_bytes(lane_type(t.ty), 8);
         return self.avx && is_vec(t.ty) && (t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR && eb == 4) && (eb == 4 || eb == 8) && type_bytes(
             t.ty,
@@ -11991,7 +11991,7 @@ extend Gen {
     // Whether vector conversion `t` has a form in vector registers (`vconv_reg`): an integer to twice or
     // half its width, i32 to f32 and back, f32 to f64 and back; SSE2 for vectors of 8 or 16 bytes, AVX2
     // when one is of 32.
-    fn conv_reg(self: &Self, t: Inst) bool {
+    const fn conv_reg(self: &Self, t: Inst) bool {
         let op = t.op;
         if !is_vec(t.ty) || op < O_SEXT || op > O_UITOFP {
             return false;
@@ -13447,7 +13447,7 @@ extend Gen {
 
     // Whether `O_VOP` `t` is an integer reduction `reduce_halves` computes in xmm registers: a sum, `and`,
     // `or`, `xor`, minimum or maximum of a 16-byte vector in a register, at its lanes' width.
-    fn reduce_reg(self: &Self, t: Inst) bool {
+    const fn reduce_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
             return false;
@@ -13465,7 +13465,7 @@ extend Gen {
 
     // Whether `O_VOP` `t` is the lanes' minimum or maximum of two vectors of integer lanes of at most 4
     // bytes in registers: 16 bytes in xmm registers, or 32 in ymm registers under AVX2 (`lane_ext`).
-    fn ext_reg(self: &Self, t: Inst) bool {
+    const fn ext_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code != core::OP_SIMD + core::SIMD_MIN as u32 && code != core::OP_SIMD + core::SIMD_MAX as u32 || t.b != 2 {
             return false;
@@ -13483,7 +13483,7 @@ extend Gen {
     // (`lv::lane_perm`, `reverse_lanes`); or the lanes of two vectors in xmm registers, or ymm registers
     // under AVX2, in a row (`lv::lane_slide`, `slide_lanes`); or the bytes of 2- to 8-byte lanes of an xmm
     // register swapped (`swap_lane_bytes`).
-    fn idiom_reg(self: &Self, t: Inst) bool {
+    const fn idiom_reg(self: &Self, t: Inst) bool {
         if swaps_bytes(t) {
             return in_vreg(t.ty) && type_bytes(t.ty, 8) == 16 && type_bytes(lane_type(t.ty), 8) >= 2;
         }
@@ -13523,7 +13523,7 @@ extend Gen {
     // AVX2 and AVX-512) that `float_lanes` computes there: the absolute value, floor, ceil and trunc
     // (SSE4.1, which AVX has), the fused multiply-add (the processor's `fma`), C's `fmin` and `fmax`
     // (VOP_NUM).
-    fn float_reg(self: &Self, t: Inst) bool {
+    const fn float_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || !is_vec(t.ty) || !is_float(lane_type(t.ty)) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
             return false;
@@ -13674,7 +13674,7 @@ extend Gen {
     }
 
     // Whether value `v` is a constant vector (`wconst`) of zero bits.
-    fn zero_vec(self: &Self, v: Value) bool {
+    const fn zero_vec(self: &Self, v: Value) bool {
         if (v & (VPARAM | VFLAG)) != 0 || self.cr.b().insts[v as usize].op != O_WCONST {
             return false;
         }
@@ -13688,7 +13688,7 @@ extend Gen {
     }
 
     // Whether value `v` is a constant float vector (`wconst`) whose lanes are neither NaN nor zero.
-    fn ordinary_lanes(self: &Self, v: Value) bool {
+    const fn ordinary_lanes(self: &Self, v: Value) bool {
         if (v & (VPARAM | VFLAG)) != 0 || self.cr.b().insts[v as usize].op != O_WCONST {
             return false;
         }
@@ -13830,7 +13830,7 @@ extend Gen {
 
     // Whether `vop` `t` is a `shuffle` of two or three vectors of its own type of 8 or 16 bytes by a constant
     // index list that SSSE3's PSHUFB computes (`pshufb_lanes`; `Package.vec_perm3`, set with SSSE3 alone).
-    fn pshufb_shuffle(self: &Self, t: Inst) bool {
+    const fn pshufb_shuffle(self: &Self, t: Inst) bool {
         if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b < 2 || t.b > 3 || t.c == VNONE || unsafe (*self.pkg).vec_perm3 == 0 || !in_vreg(
             t.ty,
         ) {
@@ -13995,7 +13995,7 @@ extend Gen {
 
     // Whether `O_VSUMW` `t` sums bytes into 8-byte lanes of a vector in registers (16 bytes; 32 and 64 with
     // AVX2 and AVX-512), which `vsumw` computes there.
-    fn sumw_reg(self: &Self, t: Inst) bool {
+    const fn sumw_reg(self: &Self, t: Inst) bool {
         if t.op != O_VSUMW {
             return false;
         }
@@ -14008,7 +14008,7 @@ extend Gen {
     // Whether byte lookup `t` (`looks_up_bytes`) runs in registers (`Package.vtbl`, SSSE3): of 16 bytes;
     // of 32 or 64 (AVX2, AVX-512 BW), whose PSHUFB looks up each 16 bytes' indices in their own 16 bytes of
     // the table, when the table repeats one 16-byte constant and each index is below 16 (`small_bytes`).
-    fn tbl_reg(self: &Self, t: Inst) bool {
+    const fn tbl_reg(self: &Self, t: Inst) bool {
         let b = self.cr.b();
         let nb = type_bytes(t.ty, 8);
         let tb = b.pool[t.a as usize];
@@ -14068,7 +14068,7 @@ extend Gen {
 
     // Whether `O_VMULW` `t` multiplies 4-byte lanes into 8-byte ones of a vector in registers (16 bytes; 32
     // and 64 with AVX2 and AVX-512), its operands in registers too, which `vmulw` computes there.
-    fn mulw_reg(self: &Self, t: Inst) bool {
+    const fn mulw_reg(self: &Self, t: Inst) bool {
         if t.op != O_VMULW {
             return false;
         }
@@ -15285,7 +15285,7 @@ fn x64_operand_text(o: &mut String, c: u8, rg: u8, ty: u8, kv: i64, md: u8, out:
 
 // The register a clobber names (`rax`, `eax`, `ax`, `al`, `r12`, `r12d`, `xmm6`), NOREG for none
 // (`memory`, `cc`, `dirflag`, `fpsr`, `flags`).
-fn x64_clobber(s0: str) u8 {
+const fn x64_clobber(s0: str) u8 {
     let s = if s0.starts_with("%") {
         s0.slice(1, s0.len())
     } else {
@@ -15323,14 +15323,14 @@ const fn swaps_bytes(t: Inst) bool {
 
 // Whether `t` looks up the bytes of a vector by a vector of byte indices, 0 past the 16 bytes
 // (`SIMD_SWIZZLE_ZERO` of two operands of bytes).
-fn looks_up_bytes(t: Inst) bool {
+const fn looks_up_bytes(t: Inst) bool {
     return t.op == O_VOP && t.b == 2 && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_SWIZZLE_ZERO as u32 && is_vec(
         t.ty,
     ) && lane_type(t.ty) == T_I8;
 }
 
 // Whether every byte of vector `v` of `b` is below 16: an `and` with a constant whose bytes are.
-fn small_bytes(b: &Body, v: Value) bool {
+const fn small_bytes(b: &Body, v: Value) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_AND {
         return false;
     }
@@ -15340,7 +15340,7 @@ fn small_bytes(b: &Body, v: Value) bool {
 }
 
 // Whether `t` counts the leading zeros of the integer lanes of one vector (`SIMD_CLZ`).
-fn counts_zeros(t: Inst) bool {
+const fn counts_zeros(t: Inst) bool {
     return t.op == O_VOP && t.b == 1 && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_CLZ as u32 && is_vec(
         t.ty,
     ) && is_int(lane_type(t.ty));

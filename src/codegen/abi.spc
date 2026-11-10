@@ -186,7 +186,7 @@ pub(package) const fn align_up(x: u32, a: u32) u32 {
 }
 
 /// The size and alignment of signature entry `pt` of `b` (`AGG` and a layout, or a scalar type).
-pub(package) fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
+pub(package) const fn size_align(b: &Body, pt: u32, ptr: u32) (u32, u32) {
     if (pt & AGG) != 0 {
         let l = (pt & ~AGG) as usize;
         return (b.pool[l], 1u32 << b.pool[l + 1]);

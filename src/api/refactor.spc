@@ -93,12 +93,12 @@ fn module_of(s: &ses::Session, file: str) Result<usize, ApiError> {
     };
 }
 
-fn src_of(s: &ses::Session, m: usize) str {
+const fn src_of(s: &ses::Session, m: usize) str {
     return s.package().modules[m].source.as_str();
 }
 
 // The start of the line holding byte `at`.
-fn line_start(src: str, at: u32) u32 {
+const fn line_start(src: str, at: u32) u32 {
     let mut i = at as usize;
     while i > 0 && src.byte_at(i - 1) != b'\n' {
         i -= 1;
@@ -107,7 +107,7 @@ fn line_start(src: str, at: u32) u32 {
 }
 
 // One past the end of the line holding byte `at`, its line feed included.
-fn line_end(src: str, at: u32) u32 {
+const fn line_end(src: str, at: u32) u32 {
     let mut i = at as usize;
     while i < src.len() && src.byte_at(i) != b'\n' {
         i += 1;
@@ -198,7 +198,7 @@ extend OrganizeImports as Refactoring {
 pub struct AddImport {}
 
 // The identifier text at `off` of module `m`, empty when none.
-fn word_at(src: str, off: u32) str {
+const fn word_at(src: str, off: u32) str {
     let mut a = off as usize;
     let mut b = off as usize;
     while a > 0 && ident_byte(src.byte_at(a - 1)) {
@@ -734,7 +734,7 @@ fn imports_path(p: &loader::Package, m: usize, path: str) bool {
 }
 
 // The last segment of module path `path`: the qualifier its import gives.
-fn last_segment(path: str) str {
+const fn last_segment(path: str) str {
     let mut i = path.len();
     while i > 0 && path.byte_at(i - 1) != b':' {
         i -= 1;
@@ -743,7 +743,7 @@ fn last_segment(path: str) str {
 }
 
 // The start of the qualifier (`a::b::`) right before byte `at` of `src`, or `at` when none.
-fn qualifier_start(src: str, at: u32) u32 {
+const fn qualifier_start(src: str, at: u32) u32 {
     let mut i = at as usize;
     // Each step takes one `ident::` segment.
     for _ in 0..64 {
@@ -936,7 +936,7 @@ extend Match {
     }
 
     /// The node of tree `t` bound to `name`; the matched node itself is bound to "".
-    pub fn get<'t>(self: &Self, t: &'t syn::SyntaxTree, name: str) Option<syn::Node<'t>> {
+    pub const fn get<'t>(self: &Self, t: &'t syn::SyntaxTree, name: str) Option<syn::Node<'t>> {
         for i in 0..self.names.len() {
             if self.names[i].as_str() == name {
                 return t.node(self.ids[i]);

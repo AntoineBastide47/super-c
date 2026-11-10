@@ -138,7 +138,7 @@ pub(package) interface Mover {
 }
 
 /// The registers the pending moves of `mv` read or write, a bit each (a memory location's base too).
-pub(package) fn move_regs(mv: &Vector<Mv>) u64 {
+pub(package) const fn move_regs(mv: &Vector<Mv>) u64 {
     let mut r: u64 = 0;
     for i in 0..mv.len() {
         let m = mv[i];
@@ -270,7 +270,7 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
 /// Whether `b` has a call, copy or fill right before a return: the only place a sibling call may be (the
 /// generators' `sib_shape`, `mem_tail_shape`), which `tail_ok`'s frame test (`lir::verify::frame_escapes`)
 /// serves.
-pub(package) fn tail_candidate(b: &Body) bool {
+pub(package) const fn tail_candidate(b: &Body) bool {
     for i in 1..b.insts.len() {
         let op = b.insts[i - 1].op;
         if (op == O_CALL || op == O_CALLIND || op == O_MEMCPY || op == O_MEMSET) && b.insts[i].op == O_RET {
@@ -507,7 +507,7 @@ pub(package) fn arg_relays<G: Relays>(g: &mut G) {
 
 // Whether call `t` of `b` passes an aggregate as a slot's address (`arg_relays`' arguments, before their
 // layout).
-fn slot_agg_arg(b: &Body, t: Inst) bool {
+const fn slot_agg_arg(b: &Body, t: Inst) bool {
     for q in 0..b.pool[t.b as usize] {
         let v = b.pool[(t.c + q) as usize];
         if (b.pool[(t.b + 3 + q) as usize] & AGG) != 0 && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_SLOTADDR {
@@ -560,7 +560,7 @@ pub(package) const SPAN: u32 = 0x80000000;
 /// The 16-byte vector access `t` (pointers `ptr` bytes) spans, whole, vector register parts `q` and `q + 1` of
 /// 8 bytes each of location `loc` of call layout `lay` (System V's two eightbytes of floats): `q | SPAN`, else
 /// NONE.
-pub(package) fn span_part(lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, ty: u8, off: u32) u32 {
+pub(package) const fn span_part(lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, ty: u8, off: u32) u32 {
     if !is_vec(ty) || type_bytes(ty, ptr) != 16 {
         return NONE;
     }
@@ -742,7 +742,7 @@ pub(package) fn slot_uses(b: &Body, lv: &lv::Live, out: &mut Vector<u32>) {
 /// result's address, a slot's whose addresses nothing uses but the call and those loads (`suse`, from
 /// `slot_uses`), and none folds into its user (`lv.pfold`: a memory operand reads the slot); then the
 /// call stores nothing. 0 when not.
-pub(package) fn result_loads(b: &Body, lv: &lv::Live, lay: &ab::CallLayout, ptr: u32, suse: &Vector<u32>, i: u32) u32 {
+pub(package) const fn result_loads(b: &Body, lv: &lv::Live, lay: &ab::CallLayout, ptr: u32, suse: &Vector<u32>, i: u32) u32 {
     let t = b.insts[i as usize];
     let rl = lay.ret;
     let rv = b.pool[(t.c + b.pool[t.b as usize]) as usize];
@@ -765,7 +765,7 @@ pub(package) fn result_loads(b: &Body, lv: &lv::Live, lay: &ab::CallLayout, ptr:
 
 /// The part (0 ..) of call layout `lay`'s register result that load `u` reads whole (pointers `ptr`
 /// bytes), else NONE.
-pub(package) fn result_part(lay: &ab::CallLayout, ptr: u32, u: Inst) u32 {
+pub(package) const fn result_part(lay: &ab::CallLayout, ptr: u32, u: Inst) u32 {
     let rl = lay.ret;
     for q in 0..rl.n as u32 {
         let pa = lay.parts[(rl.p0 + q) as usize];
@@ -778,7 +778,7 @@ pub(package) fn result_part(lay: &ab::CallLayout, ptr: u32, u: Inst) u32 {
 
 /// The part (0 ..) of register-passed argument `loc` (of call layout `lay`, pointers `ptr` bytes) that
 /// store `u` of `b` writes whole, else NONE.
-pub(package) fn arg_part(b: &Body, lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, u: Inst) u32 {
+pub(package) const fn arg_part(b: &Body, lay: &ab::CallLayout, ptr: u32, loc: ab::ALoc, u: Inst) u32 {
     if (u.aux & MEM_VOLATILE) != 0 || (u.b & VFLAG) != 0 {
         return NONE;
     }
@@ -868,7 +868,7 @@ extend Core {
     // The home register of the parameter jump `t` passes `v` to (once), when the jump is no back edge, so
     // nothing reads that parameter's earlier value here (`def_step` takes the back edges): `v` defined
     // there needs no move. NOREG else.
-    pub(package) fn jump_reg(self: &Self, b: &Body, t: Inst, v: Value) u8 {
+    pub(package) const fn jump_reg(self: &Self, b: &Body, t: Inst, v: Value) u8 {
         let tg = b.edge_target(t.a);
         let mut h = self.lv.inner[self.lv.def_blk[v as usize] as usize];
         // Each step leaves one loop: at most one per block.
@@ -929,7 +929,7 @@ extend Core {
     }
 
     // `same_moves` one way: each move of edge `e` is one of edge `o`'s.
-    pub(package) fn moves_within(self: &Self, e: u32, o: u32) bool {
+    pub(package) const fn moves_within(self: &Self, e: u32, o: u32) bool {
         let b = self.b();
         let ni = b.insts.len() as u32;
         let tb = b.blocks[b.edge_target(e) as usize];
@@ -983,7 +983,7 @@ extend Core {
 
     // Whether call `t` (its layout in `lay`) reads vector `u` only as arguments it passes whole in one
     // register (`whole_vreg`), not in memory.
-    pub(package) fn whole_arg(self: &Self, t: Inst, u: Value) bool {
+    pub(package) const fn whole_arg(self: &Self, t: Inst, u: Value) bool {
         let b = self.b();
         if !is_vec(self.vt(u)) || t.op == O_CALLIND && t.a == u {
             return false;
@@ -1033,7 +1033,7 @@ extend Core {
     // Whether copy or fill `t`, instruction `i`, calls its C routine (no constant size it does inline) right
     // before the body returns nothing: a sibling call where `mem_tail` holds, which `shrinkable` reads before
     // `tail_ok` is known (when it fails, the warm code calls, and the body is compiled again unshrunk).
-    pub(package) fn mem_tail_shape(self: &Self, i: u32, t: Inst) bool {
+    pub(package) const fn mem_tail_shape(self: &Self, i: u32, t: Inst) bool {
         let b = self.b();
         if t.op != O_MEMCPY && t.op != O_MEMSET || b.pool[b.sig as usize + 2] != T_NONE as u32 {
             return false;
@@ -1051,7 +1051,7 @@ extend Core {
     // Whether call `t`, instruction `i`, is right before the return of its result (or of nothing, for a call
     // of no result), not into memory: a sibling call's shape, which `shrinkable` reads before `tail_ok` is
     // known (when the call is no sibling call, the warm code calls, and the body is compiled again unshrunk).
-    pub(package) fn call_tail_shape(self: &Self, i: u32, t: Inst) bool {
+    pub(package) const fn call_tail_shape(self: &Self, i: u32, t: Inst) bool {
         let b = self.b();
         if t.op != O_CALL && t.op != O_CALLIND {
             return false;
@@ -1065,7 +1065,7 @@ extend Core {
     }
 
     // The register home of edge argument `v` when `v` dies at this terminator, NOREG else.
-    pub(package) fn home_dying(self: &Self, v: Value) u8 {
+    pub(package) const fn home_dying(self: &Self, v: Value) u8 {
         if v == VNONE {
             return NOREG;
         }
@@ -1085,7 +1085,7 @@ extend Core {
 
     // Whether every return of the body takes the result from a run of part stores (`rstore`): then nothing
     // reads the result's memory, which needs no slot.
-    pub(package) fn ret_moved(self: &Self) bool {
+    pub(package) const fn ret_moved(self: &Self) bool {
         let b = self.b();
         let mut any = false;
         for k in 0..b.blocks.len() {
@@ -1104,7 +1104,7 @@ extend Core {
 
     // The register of edge argument `v` when it holds `v` without being its home and `v` dies at this
     // terminator: the parameter that takes it may keep it, and the edge then moves nothing. NOREG else.
-    pub(package) fn dying_reg(self: &Self, v: Value) u8 {
+    pub(package) const fn dying_reg(self: &Self, v: Value) u8 {
         if v == VNONE {
             return NOREG;
         }
@@ -1121,7 +1121,7 @@ extend Core {
     }
 
     // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
-    pub(package) fn moves_needed(self: &Self, e: u32) bool {
+    pub(package) const fn moves_needed(self: &Self, e: u32) bool {
         let b = self.b();
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
@@ -1138,7 +1138,7 @@ extend Core {
 
     // The return register when block parameter value index `x` is an integer whose one use returns it from
     // its block: there it needs no move. NOREG else.
-    pub(package) fn ret_reg(self: &Self, b: &Body, x: u32) u8 {
+    pub(package) const fn ret_reg(self: &Self, b: &Body, x: u32) u8 {
         let d = self.lv.def_blk[x as usize];
         let bk = b.blocks[d as usize];
         let t = b.insts[(bk.start + bk.len - 1) as usize];
@@ -1151,7 +1151,7 @@ extend Core {
 
     // Edge argument `v`, when register `r` is its home and it dies at this terminator, gives `r` up: the
     // parameter that takes `r` then holds it, and the edge moves nothing.
-    pub(package) fn free_home(self: &mut Self, v: Value, r: u8) {
+    pub(package) const fn free_home(self: &mut Self, v: Value, r: u8) {
         let x = self.vx(v);
         if x == NONE {
             return;
@@ -1175,7 +1175,7 @@ extend Core {
     }
 
     // Whether every late edge's target lies before layout position `q` (`lv::Live::late`).
-    pub(package) fn late_ready(self: &Self, q: u32) bool {
+    pub(package) const fn late_ready(self: &Self, q: u32) bool {
         let b = self.b();
         for j in 0..self.lv.late.len() {
             if self.lv.pos[b.edge_target(self.lv.late[j] as u32) as usize] >= q {
@@ -1220,7 +1220,7 @@ extend Core {
 
     // Whether value index `x` shares another value's slot, which that one frees (`back_share`,
     // `step_slot`).
-    pub(package) fn is_shared(self: &Self, x: u32) bool {
+    pub(package) const fn is_shared(self: &Self, x: u32) bool {
         for k in 0..self.shared.len() {
             if self.shared[k] == x {
                 return true;

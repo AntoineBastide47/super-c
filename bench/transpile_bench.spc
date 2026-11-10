@@ -453,7 +453,7 @@ pub fn self_compile(b: &mut bench::Bencher) {
 }
 
 // The name of phase `k` of `lane`.
-fn phase_name(lane: &Lane, k: usize) str<'static> {
+const fn phase_name(lane: &Lane, k: usize) str<'static> {
     return if lane.native {
         unsafe C_NAMES[k]
     } else {

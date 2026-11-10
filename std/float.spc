@@ -259,7 +259,7 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
     }
 
     // Whether this format is IEEE binary16 and the processor converts it (`sc_has_f16`).
-    fn half() bool {
+    const fn half() bool {
         return E == 5 && F == 10 && FAMILY == FloatFamily::FF_IEEE && unsafe sc_has_f16() != 0;
     }
 

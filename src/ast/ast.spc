@@ -5670,6 +5670,20 @@ extend Ast {
         };
     }
 
+    /// True when `item`, or the extend that holds it, is `@platform`-, `@arch`- or `@when`-gated: another
+    /// build compiles another variant of it, or none.
+    pub(package) const fn build_gated(self: &Self, item: NodeId) bool {
+        let c = self.container_of(item);
+        return self.gate_on(item) || c != NODE_NONE && self.gate_on(c);
+    }
+
+    const fn gate_on(self: &Self, id: NodeId) bool {
+        return self.attr_of(id, AttrKind::ATTR_PLATFORM) != null || self.attr_of(id, AttrKind::ATTR_ARCH) != null || self.attr_of(
+            id,
+            AttrKind::ATTR_WHEN,
+        ) != null;
+    }
+
     /// The `@unsafe(...)` claims of `owner` (`UNSAFE_*` bits), 0 without one.
     pub(package) const fn unsafe_claims(self: &Self, owner: NodeId) u32 {
         let at = self.attr_of(owner, AttrKind::ATTR_UNSAFE);

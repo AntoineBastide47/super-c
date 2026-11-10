@@ -1159,7 +1159,7 @@ pub(package) struct RangeLoop {
 /// Skip each contract check of `b` the build does not run: every one, or with `keep_checks` only the
 /// `decreases` measures, which have no run-time check. A skipped chain's blocks become empty
 /// `unreachable` ones, so no later pass reads the check (the inliner's vet rejects an assertion).
-pub(package) fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
+pub(package) const fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
     for i in 0..b.contracts.len() {
         if !keep_checks || b.contracts[i].kind == CT_DECREASES {
             skip_site(b, i);
@@ -1168,7 +1168,7 @@ pub(package) fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
 }
 
 /// Skip contract check `i` of `b` (`skip_contracts`).
-pub(package) fn skip_site(b: &mut CoreBody, i: usize) {
+pub(package) const fn skip_site(b: &mut CoreBody, i: usize) {
     let s = b.contracts[i];
     let t = b.blocks[s.pred as usize].term;
     if t.kind == TM_GOTO && t.t0 == s.chain {
@@ -1184,7 +1184,7 @@ pub(package) fn skip_site(b: &mut CoreBody, i: usize) {
 /// Skip the `ensures` checks on the path from each call of `b`'s function to itself that the
 /// tail-call pass converted in `conv` (a copy of `b` whose `ensures` checks were skipped, then
 /// converted): the jump replaces those checks, which the proof covers.
-pub(package) fn skip_tail_ensures(b: &mut CoreBody, conv: &CoreBody) {
+pub(package) const fn skip_tail_ensures(b: &mut CoreBody, conv: &CoreBody) {
     for j in 0..conv.tail_jumps.len() {
         let call = conv.tail_jumps[j];
         if call as usize >= b.blocks.len() || b.blocks[call as usize].term.kind != TM_CALL {

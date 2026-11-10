@@ -118,7 +118,7 @@ const fn hmix(h: u64, v: u64) u64 {
 }
 
 // The value of an unsigned 64-bit pattern.
-fn u64_val(v: u64) i128 {
+const fn u64_val(v: u64) i128 {
     let mut x = i128::zero();
     x.set_limb(0, v);
     return x;
@@ -140,11 +140,11 @@ extend Terms {
         self.nvars = 0;
     }
 
-    fn at(self: &Self, t: u32) Term {
+    const fn at(self: &Self, t: u32) Term {
         return self.ts[t as usize];
     }
 
-    fn key(self: &Self, t: &Term) u64 {
+    const fn key(self: &Self, t: &Term) u64 {
         let mut h = hmix(0xCBF29CE484222325u64, t.op as u64 << 16 | t.w as u64 << 8 | t.sg as u64);
         // A call's argument list is hashed by content: `a` is only where it lies.
         let pos: u64 = if pooled(t.op) {
@@ -163,7 +163,7 @@ extend Terms {
         return h;
     }
 
-    fn same(self: &Self, x: &Term, y: &Term) bool {
+    const fn same(self: &Self, x: &Term, y: &Term) bool {
         if x.op != y.op || x.w != y.w || x.sg != y.sg || x.k != y.k || x.b != y.b {
             return false;
         }
@@ -213,21 +213,21 @@ extend Terms {
         return self.make(Term { k: i128::zero(), a: n, b: 0, op: T_VAR, w: w, sg: sg });
     }
 
-    fn is_true(self: &Self, t: u32) bool {
+    const fn is_true(self: &Self, t: u32) bool {
         let x = self.ts[t as usize];
         return x.op == T_BOOL && x.k == wide(1);
     }
 
-    fn is_false(self: &Self, t: u32) bool {
+    const fn is_false(self: &Self, t: u32) bool {
         let x = self.ts[t as usize];
         return x.op == T_BOOL && x.k.is_zero();
     }
 
-    fn is_int(self: &Self, t: u32) bool {
+    const fn is_int(self: &Self, t: u32) bool {
         return self.ts[t as usize].w > W_BOOL;
     }
 
-    fn is_bool(self: &Self, t: u32) bool {
+    const fn is_bool(self: &Self, t: u32) bool {
         return self.ts[t as usize].w == W_BOOL;
     }
 
@@ -396,7 +396,7 @@ extend Terms {
     }
 
     // The range of type (`w`, `sg`) as (lo, hi).
-    fn range(w: u8, sg: bool) (i128, i128) {
+    const fn range(w: u8, sg: bool) (i128, i128) {
         if sg {
             let h = i128::one().shl((w - 1) as usize);
             return i128::zero() - h, h - i128::one();
@@ -418,7 +418,7 @@ extend Terms {
     // The bounds the solver knows of atom `t`: its type's range, narrowed for a remainder by a positive
     // constant and a mask of an unsigned value. A product of two unknowns is an exact value, which may
     // lie outside its type (an overflow obligation asks whether it does): it has no bounds.
-    fn bounds(self: &Self, t: u32) (i128, i128) {
+    const fn bounds(self: &Self, t: u32) (i128, i128) {
         let x = self.ts[t as usize];
         if x.w <= W_BOOL || x.op == T_MUL {
             let h = i128::one().shl(100);
@@ -526,7 +526,7 @@ fn fill(v: &mut Vector<u32>, n: usize) {
     }
 }
 
-fn why(kind: u8, p1: u32, p2: u32) Why {
+const fn why(kind: u8, p1: u32, p2: u32) Why {
     return Why { m1: i128::zero(), m2: i128::zero(), p1: p1, p2: p2, atom: NONE, kind: kind };
 }
 
@@ -968,7 +968,7 @@ extend Solver {
     }
 
     // The rows with a positive and with a negative coefficient on `at`.
-    fn signs(self: &Self, at: u32) (u64, u64) {
+    const fn signs(self: &Self, at: u32) (u64, u64) {
         let mut np: u64 = 0;
         let mut nn: u64 = 0;
         for r in 0..self.rows.len() {
@@ -982,7 +982,7 @@ extend Solver {
         return np, nn;
     }
 
-    fn coef(self: &Self, x: &Row, at: u32) i128 {
+    const fn coef(self: &Self, x: &Row, at: u32) i128 {
         for j in x.start..x.start + x.len {
             let t = self.pool[j as usize];
             if t.atom == at {
@@ -1195,7 +1195,7 @@ const fn bits_of(x: i128, w: u8) u64 {
 }
 
 // The value of the `w`-bit pattern `b` in a type of signedness `sg`.
-fn val_of(b: u64, w: u8, sg: bool) i128 {
+const fn val_of(b: u64, w: u8, sg: bool) i128 {
     let v = u64_val(b);
     if sg && w > 0 && (b >> (w - 1) as u64 & 1) != 0 {
         return v - i128::one().shl(w as usize);
@@ -1250,7 +1250,7 @@ extend Eval {
     }
 
     // Whether term `t` is a leaf of evaluation: an unknown, or a value the walk does not take apart.
-    fn leaf(tm: &Terms, t: u32) bool {
+    const fn leaf(tm: &Terms, t: u32) bool {
         let x = tm.at(t);
         if x.op == T_INT || x.op == T_BOOL {
             return false;
@@ -1714,7 +1714,7 @@ extend Prover {
         };
     }
 
-    fn pkg(self: &Self) &loader::Package {
+    const fn pkg(self: &Self) &loader::Package {
         return unsafe &*self.p;
     }
 
@@ -1817,14 +1817,14 @@ extend Prover {
         return self.tm.var(w, sg);
     }
 
-    fn spend(self: &mut Self) bool {
+    const fn spend(self: &mut Self) bool {
         self.steps += 1;
         return self.steps + self.sv.steps <= STEP_BUDGET;
     }
 
     // ---- reports ----------------------------------------------------------------------------------
 
-    fn source_line(self: &Self, m: ModuleId, at: u32) u32 {
+    const fn source_line(self: &Self, m: ModuleId, at: u32) u32 {
         let src = self.pkg().modules.at(m as usize).source.as_str();
         let mut line: u32 = 1;
         let end = pick(at as usize < src.len(), at as usize, src.len());
@@ -1836,7 +1836,7 @@ extend Prover {
         return line;
     }
 
-    fn text(self: &Self, m: ModuleId, sp: tok::Span) str {
+    const fn text(self: &Self, m: ModuleId, sp: tok::Span) str {
         return self.pkg().modules.at(m as usize).source.as_str().slice(sp.start as usize, sp.end as usize);
     }
 
@@ -2298,7 +2298,7 @@ extend Prover {
         }
     }
 
-    fn has_deref(self: &Self, cb: &ir::CoreBody, p: &ir::Place, from: u32) bool {
+    const fn has_deref(self: &Self, cb: &ir::CoreBody, p: &ir::Place, from: u32) bool {
         for j in from..p.proj_len {
             if cb.projections.at((p.proj_start + j) as usize).kind == ir::PJ_DEREF {
                 return true;
@@ -3028,7 +3028,7 @@ extend Prover {
     }
 
     // The return a path from block `blk` reaches through jumps, for a report's note.
-    fn return_span(self: &Self, b: &ir::CoreBody, blk: u32) tok::Span {
+    const fn return_span(self: &Self, b: &ir::CoreBody, blk: u32) tok::Span {
         let mut x = blk;
         for _k in 0..64 {
             let t = b.blocks.at(x as usize).term;
@@ -3145,7 +3145,7 @@ extend Prover {
     }
 
     // The prover that holds the shells and the components: this one, or a worker's main prover.
-    fn shared(self: &Self) &Prover {
+    const fn shared(self: &Self) &Prover {
         return if self.main == null {
             self
         } else {
@@ -4190,7 +4190,7 @@ fn any_exhaustive_in(p: &loader::Package, m: usize) bool {
 }
 
 // The position of input `x`'s value of parameter `j` of `job` among the parameter's values.
-fn input_index(job: &PJob, x: u64, j: usize) u64 {
+const fn input_index(job: &PJob, x: u64, j: usize) u64 {
     let mut q = x;
     let mut i = job.dims.len();
     for _k in 0..job.dims.len() {

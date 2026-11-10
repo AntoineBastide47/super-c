@@ -65,7 +65,7 @@ pub const CAP_ALL: u32 = 31;
 const CAP_NAMES: [str<'static>; 5] = ["session", "syntax", "navigation", "refactoring", "ir_views"];
 
 /// The bit of capability `name`; 0 for a name this server does not serve.
-pub fn cap_bit(name: str) u32 {
+pub const fn cap_bit(name: str) u32 {
     let names: []str = CAP_NAMES;
     for i in 0..names.len() {
         if names[i] == name {
@@ -76,7 +76,7 @@ pub fn cap_bit(name: str) u32 {
 }
 
 /// The stable protocol name of `code`.
-pub fn code_name(code: Code) str<'static> {
+pub const fn code_name(code: Code) str<'static> {
     return switch code {
         InvalidArgument => "invalid_argument",
         StaleHandle => "stale_handle",
@@ -787,7 +787,7 @@ fn locations(ls: &Vector<sem::Location>, pg: &mut Page) {
 
 // Store `v` at byte `at` of `w`, little-endian.
 @always_inline
-fn put_u32(w: &mut [u8; 12], at: usize, v: u32) {
+const fn put_u32(w: &mut [u8; 12], at: usize, v: u32) {
     let p = (&mut w[0]) as *mut u8;
     unsafe p[at] = v as u8;
     unsafe p[at + 1] = (v >> 8) as u8;

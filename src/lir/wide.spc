@@ -986,7 +986,7 @@ const fn wide_type(t: u8, rb: u32) bool {
 }
 
 // Whether `b` holds a vector wider than `rb` bytes that splits (`wide_type`).
-pub(package) fn has_wide(b: &Body, rb: u32) bool {
+pub(package) const fn has_wide(b: &Body, rb: u32) bool {
     for q in 0..b.params.len() {
         if wide_type(b.params[q], rb) {
             return true;

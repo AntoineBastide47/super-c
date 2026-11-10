@@ -52,7 +52,7 @@ fn wide_integer_vectors() {
 
 // One, from a call the constant evaluator does not see through.
 @noinline
-fn one_i128() i128 {
+const fn one_i128() i128 {
     return i128::from_i64(1);
 }
 

@@ -1308,7 +1308,7 @@ pub(package) fn frame_escapes(b: &Body, held: []bool) bool {
 
 // Whether value `v`, a use of call `t`, is an entry parameter `held` marks that `t` reads only as
 // aggregate arguments: copies of its bytes, not its address.
-fn by_value(b: &Body, held: []bool, t: Inst, v: Value) bool {
+const fn by_value(b: &Body, held: []bool, t: Inst, v: Value) bool {
     let e0 = b.blocks[0].param_start;
     if (v & VPARAM) == 0 || (v & ~VPARAM) < e0 || ((v & ~VPARAM) - e0) as usize >= held.len() || !held[((v & ~VPARAM) - e0) as usize] {
         return false;
@@ -1332,7 +1332,7 @@ fn by_value(b: &Body, held: []bool, t: Inst, v: Value) bool {
 }
 
 // Whether value `v` is marked in `d` (instructions, then block parameters past `ni`).
-fn derived(d: &Vector<bool>, ni: usize, v: Value) bool {
+const fn derived(d: &Vector<bool>, ni: usize, v: Value) bool {
     if v == VNONE || (v & VFLAG) != 0 {
         return false;
     }
@@ -1486,7 +1486,7 @@ const fn conv_ok(op: u8, from: u8, to: u8, ptr: u32) bool {
 // aggregate layouts of one size, alignment and leaves.
 /// Whether a call of `b` with signature `ks` (a pool index) fits callee body `cb`'s signature: the same
 /// result and parameter types, the variadic arguments past the fixed ones.
-pub(package) fn call_fits(cb: &Body, b: &Body, ks: u32) bool {
+pub(package) const fn call_fits(cb: &Body, b: &Body, ks: u32) bool {
     let cs = cb.sig as usize;
     let k = ks as usize;
     let cn = cb.pool[cs];

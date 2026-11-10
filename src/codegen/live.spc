@@ -612,7 +612,7 @@ extend Live {
     }
 
     /// The target of block `k`'s late edge (`late`), NONE when it has none.
-    pub(package) fn late_target(self: &Self, b: &Body, k: u32) u32 {
+    pub(package) const fn late_target(self: &Self, b: &Body, k: u32) u32 {
         for q in 0..self.late.len() {
             if (self.late[q] >> 32) as u32 == k {
                 return b.edge_target(self.late[q] as u32);
@@ -623,7 +623,7 @@ extend Live {
 
     /// The index in `late` of edge `e` of block `k`'s terminator (blocks may share an edge's record), NONE
     /// when it is not late.
-    pub(package) fn late_index(self: &Self, k: u32, e: u32) u32 {
+    pub(package) const fn late_index(self: &Self, k: u32, e: u32) u32 {
         let key = k as u64 << 32 | e as u64;
         for q in 0..self.late.len() {
             if self.late[q] == key {
@@ -639,7 +639,7 @@ extend Live {
     //
     // The other instructions fold as `fold_ops` lets them (`FOLD_*`).
     // Whether index `v` of `b` is the 64-bit extension `FOLD_XIDX` folds into its one access.
-    fn ext_index(self: &Self, b: &Body, v: Value) bool {
+    const fn ext_index(self: &Self, b: &Body, v: Value) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return false;
         }
@@ -852,7 +852,7 @@ extend Live {
 
     // The value a read of `v` reads: past a folded extension or truncation of one read (each read of it reads
     // its operand: `FOLD_FREE_ZEXT`, `FOLD_WIDEN`).
-    fn read_of(self: &Self, b: &Body, v: Value) Value {
+    const fn read_of(self: &Self, b: &Body, v: Value) Value {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !self.pfold[v as usize] || self.count[v as usize] != 1 {
             return v;
         }
@@ -862,13 +862,13 @@ extend Live {
 
     // Whether value `v` is where a value moved within the block from `lo` reads it: it `stays`, or another
     // block defines it (in its local).
-    fn fixed(self: &Self, b: &Body, v: Value, lo: u32) bool {
+    const fn fixed(self: &Self, b: &Body, v: Value, lo: u32) bool {
         return self.stays(b, v) || (v & (VPARAM | VFLAG)) == 0 && v != VNONE && v < lo;
     }
 
     // Whether value `v` is read where it is (`sinkable`): a parameter, a constant or an address, a value of
     // more uses, or a folded one.
-    fn stays(self: &Self, b: &Body, v: Value) bool {
+    const fn stays(self: &Self, b: &Body, v: Value) bool {
         if (v & VPARAM) != 0 {
             return (v & VFLAG) == 0;
         }
@@ -1767,7 +1767,7 @@ extend Live {
     }
 
     /// The immediate amount vector shift `t` of `b` takes (`FOLD_VSHIMM`), else NONE.
-    pub(package) fn vshimm(self: &Self, b: &Body, t: Inst) u32 {
+    pub(package) const fn vshimm(self: &Self, b: &Body, t: Inst) u32 {
         if t.op != O_SHL && t.op != O_LSHR && t.op != O_ASHR || !is_vec(t.ty) {
             return NONE;
         }
@@ -1795,7 +1795,7 @@ extend Live {
     /// `place::parts_taken`), of the aggregate result (which registers may hold) or of the one of a call right
     /// before (`result_load`), nor one
     /// whose operation's result is stored back in place (the generator's read-modify-write).
-    fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
+    const fn ldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
         if (self.fold_ops & FOLD_VLDOP) != 0 && t.op == O_LOAD && is_vec(t.ty) {
             return self.vldop_user(b, i, end);
@@ -1866,7 +1866,7 @@ extend Live {
     // Whether 64-bit load `i` of `b` (its block ending before `end`), read twice, is an operand of a 64-bit
     // product and its high half alone (x86-64's one `mul` of the memory gives both), within LDOP_REACH
     // instructions with no write of memory from it to them.
-    fn wide_load(self: &Self, b: &Body, i: u32, end: u32) bool {
+    const fn wide_load(self: &Self, b: &Body, i: u32, end: u32) bool {
         if b.insts[i as usize].ty != T_I64 {
             return false;
         }
@@ -1903,7 +1903,7 @@ extend Live {
 
     // Whether instruction `x` is a lane operation of `FOLD_VLDOP` on 16- or 32-byte vectors of type `ty`
     // (a product of 32-bit lanes under `FOLD_VMUL`).
-    fn vop_mem(self: &Self, x: Inst, ty: u8) bool {
+    const fn vop_mem(self: &Self, x: Inst, ty: u8) bool {
         let fl = x.op >= O_FADD && x.op <= O_FDIV && is_float(lane_type(ty));
         let int = (x.op == O_ADD || x.op == O_SUB || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
             lane_type(ty),
@@ -1917,7 +1917,7 @@ extend Live {
 
     /// `FOLD_VLDOP`: whether vector load `i` of `b` (its block ending before `end`) folds into its one use,
     /// as `ldop_user`.
-    fn vldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
+    const fn vldop_user(self: &Self, b: &Body, i: u32, end: u32) bool {
         let t = b.insts[i as usize];
         let n = type_bytes(t.ty, 8);
         if (t.aux & MEM_VOLATILE) != 0 || n != 16 && n != 32 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.reg_param(
@@ -1942,13 +1942,13 @@ extend Live {
     }
 
     /// The uses of instruction `i` of a laid-out block, as `uses_at` gives them (`ranges` found them).
-    pub(package) fn uses_of(self: &Self, i: u32) Slice<Value> {
+    pub(package) const fn uses_of(self: &Self, i: u32) Slice<Value> {
         let a = self.ua[i as usize] as usize;
         return self.uv[a..a + self.un[i as usize] as usize];
     }
 
     /// Advance the next-use cursors past instruction `i`, once in layout order.
-    pub(package) fn advance(self: &mut Self, b: &Body, i: u32) {
+    pub(package) const fn advance(self: &mut Self, b: &Body, i: u32) {
         let a = self.ua[i as usize];
         for u in a..a + self.un[i as usize] {
             let x = self.vix(b, self.uv[u as usize]);
@@ -2252,7 +2252,7 @@ extend Live {
 
     // `FOLD_XADDR` over `b`: each address `ptradd` that the loads and stores of its block alone read, as
     // their address, folds into them all.
-    fn fold_addrs(self: &mut Self, b: &Body) {
+    const fn fold_addrs(self: &mut Self, b: &Body) {
         for k in 0..b.blocks.len() {
             let bk = b.blocks[k];
             for i in bk.start..bk.start + bk.len {
@@ -2302,7 +2302,7 @@ extend Live {
     /// constant: verified LIR holds a narrow constant zero-extended (`verify::fits`), which the backends
     /// write as it is, by an edge's move or from a switch's table (a narrow load), so the parameter's
     /// register holds it so.
-    pub(package) fn zero_param(self: &Self, b: &Body, v: Value) bool {
+    pub(package) const fn zero_param(self: &Self, b: &Body, v: Value) bool {
         if (v & VPARAM) == 0 {
             return false;
         }
@@ -2328,7 +2328,7 @@ extend Live {
 
     /// Whether the stores into slot `s` of `b` relay (`relay`): every use of its addresses is such a store
     /// or a call's argument, so no instruction reads or writes its memory.
-    pub(package) fn relays_slot(self: &Self, b: &Body, s: u32) bool {
+    pub(package) const fn relays_slot(self: &Self, b: &Body, s: u32) bool {
         for q in 0..self.relayed.len() {
             if b.insts[b.insts[(self.relayed[q] & 0xFFFFFFFF) as usize].a as usize].a == s {
                 return true;
@@ -2443,7 +2443,7 @@ extend Live {
 
     // Whether `v` is an integer comparison of up to 64 bits with one use that folds into nothing
     // (`FOLD_BRCONJ`).
-    fn cmp_leaf(self: &Self, b: &Body, v: Value) bool {
+    const fn cmp_leaf(self: &Self, b: &Body, v: Value) bool {
         if !is_inst(v) || b.insts[v as usize].op != O_ICMP || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return false;
         }
@@ -2452,7 +2452,7 @@ extend Live {
     }
 
     // The difference and the sum `FOLD_ADDSUB` folds into lane select `t`: (VNONE, VNONE) when none.
-    pub(package) fn addsub_parts(self: &Self, b: &Body, t: Inst) (Value, Value) {
+    pub(package) const fn addsub_parts(self: &Self, b: &Body, t: Inst) (Value, Value) {
         let nb = type_bytes(t.ty, 8);
         if t.op != O_VSEL || !is_float(lane_type(t.ty)) || nb != 16 && (nb != 32 || (self.fold_ops & FOLD_ADDSUB_WIDE) == 0) || !is_inst(
             t.a,
@@ -2511,7 +2511,7 @@ extend Live {
 
     // The absolute difference `FOLD_VSAD` folds into widening sum `t`: its second operand, an unsigned
     // `SIMD_ABS_DIFF` of two byte vectors of one use, when `t` sums into 8-byte lanes. VNONE when none.
-    pub(package) fn vsad_diff(self: &Self, b: &Body, t: Inst) Value {
+    pub(package) const fn vsad_diff(self: &Self, b: &Body, t: Inst) Value {
         let v = t.b;
         if type_bytes(lane_type(t.ty), 8) != 8 || (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 {
             return VNONE;
@@ -2523,7 +2523,7 @@ extend Live {
 
     // The extension `FOLD_VWADD` folds into vector sum `t`: its second operand, else its first. VNONE when
     // none.
-    pub(package) fn vwadd_ext(self: &Self, b: &Body, t: Inst) Value {
+    pub(package) const fn vwadd_ext(self: &Self, b: &Body, t: Inst) Value {
         let lt = lane_type(t.ty);
         if !is_int(lt) || type_bytes(lt, 8) < 2 || type_bytes(t.ty, 8) != 16 {
             return VNONE;
@@ -2536,7 +2536,7 @@ extend Live {
 
     // Whether `v`, with one use, is a `bitcast` to lanes of type `lt` of a 16-byte `vziplo` or `vziphi`,
     // with one use, of a vector of half-width lanes with zeros (`FOLD_VWADD`).
-    fn zero_zip(self: &Self, b: &Body, lt: u8, v: Value) bool {
+    const fn zero_zip(self: &Self, b: &Body, lt: u8, v: Value) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || b.insts[v as usize].op != O_BITCAST {
             return false;
         }
@@ -2573,7 +2573,7 @@ extend Live {
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
     // first comparison (`conj_folds`).
-    fn tst_leaf(self: &Self, b: &Body, v: Value) bool {
+    const fn tst_leaf(self: &Self, b: &Body, v: Value) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return false;
         }
@@ -2583,7 +2583,7 @@ extend Live {
 
     // Whether `s` is a shift of `bits` bits by a constant below them, read once and not folded yet: an
     // operand `FOLD_SHOP` folds.
-    fn shop_ok(self: &Self, b: &Body, s: Value, bits: u32) bool {
+    const fn shop_ok(self: &Self, b: &Body, s: Value, bits: u32) bool {
         if !is_inst(s) || self.pfold[s as usize] || self.count[s as usize] != 1 {
             return false;
         }
@@ -2593,7 +2593,7 @@ extend Live {
 
     // The comparisons operand `v` of an `and` or `or` brings to a `FOLD_CCMP` chain: 1 for a comparison it
     // alone uses, the chain's count for a chain it alone uses, else 0.
-    fn conj_part(self: &Self, b: &Body, v: Value) u8 {
+    const fn conj_part(self: &Self, b: &Body, v: Value) u8 {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.count[v as usize] != 1 || self.pfold[v as usize] {
             return 0;
         }
@@ -3520,7 +3520,7 @@ extend Live {
 
     /// Whether `plan` gave no register to a used value that `want` asked one for, in a block the layout
     /// does not put last (`after`).
-    pub(package) fn homeless(self: &Self, want: &Vector<u8>) bool {
+    pub(package) const fn homeless(self: &Self, want: &Vector<u8>) bool {
         for x in 0..self.home.len() {
             let d = self.def_blk[x];
             if (want[x] & (WANT_CALLEE | WANT_SCRATCH)) != 0 && self.home[x] == HOME_NONE && self.au[x] != 0 && d != NONE && self.pos[d as usize] != NONE && !self.after[d as usize] {
@@ -3683,7 +3683,7 @@ extend Live {
     // `FOLD_LDOP` for the `add` and `adc` of a sum with a carry (`carries`): an operand of sum or difference
     // `s` (a difference's second) that a load alone gives, of its width, with no write of memory from the load
     // to `at`, where the operation reads it, folds into it.
-    fn carry_load(self: &mut Self, b: &Body, s: u32, at: u32) {
+    const fn carry_load(self: &mut Self, b: &Body, s: u32, at: u32) {
         let t = b.insts[s as usize];
         let sub = t.op == O_SUB || t.op == O_SUBO;
         for side in 0..2u32 {
@@ -3712,7 +3712,7 @@ extend Live {
 
     // Whether value `v` of `b` is an aggregate parameter that does not arrive in memory (`mem_params`), or
     // the pointer to an aggregate result: its loads may be no memory reads.
-    fn reg_param(self: &Self, b: &Body, v: Value) bool {
+    const fn reg_param(self: &Self, b: &Body, v: Value) bool {
         if !agg_param(b, v) {
             return false;
         }
@@ -3722,7 +3722,7 @@ extend Live {
 
     // Whether instruction `i` of `b` is a sum (`sub`: difference) of two integers of 32 or 64 bits that
     // wraps: `add`, or `addo` whose flag nothing reads (`cnd`).
-    fn wrapping(self: &Self, b: &Body, i: u32, sub: bool) bool {
+    const fn wrapping(self: &Self, b: &Body, i: u32, sub: bool) bool {
         let t = b.insts[i as usize];
         let bits = type_bits(t.ty, 8);
         let (plain, ovf) = if sub {
@@ -3765,7 +3765,7 @@ extend Live {
     // the loop; the parameter is dead past the loop and of `x`'s type. Its register may then hold `x` too:
     // on the loop's exits it holds the value already, and an edge that skips the loop finds it unused.
     // NONE else.
-    fn exit_partner(self: &Self, b: &Body, x: u32) u32 {
+    const fn exit_partner(self: &Self, b: &Body, x: u32) u32 {
         let ni = b.insts.len() as u32;
         if x < ni || x >= ni + b.params.len() as u32 {
             return NONE;
@@ -3976,7 +3976,7 @@ extend Live {
 
     // The loop block `k` of `b` leaves: its innermost one, or for a lone jump whose one predecessor is in a
     // loop the block is outside of (a split exit edge), that loop. NONE else.
-    fn left(self: &Self, b: &Body, k: u32) u32 {
+    const fn left(self: &Self, b: &Body, k: u32) u32 {
         let h = self.inner[k as usize];
         if h != NONE {
             return h;
@@ -3996,7 +3996,7 @@ extend Live {
     // The parameter value of loop header `h` that argument `q` of edge `ed` of terminator `t` continues: the
     // one the other edge of `t`, a back edge to `h`, passes it to (that edge's moves before the branch then
     // serve `ed` too), else `header_of_value`.
-    fn exit_value(self: &Self, b: &Body, h: u32, t: Inst, ed: u32, q: u32) u32 {
+    const fn exit_value(self: &Self, b: &Body, h: u32, t: Inst, ed: u32, q: u32) u32 {
         let v = b.edge_arg(ed, q);
         if t.op == O_BR {
             let o = ast::pick(ed == t.b, t.c, t.b);
@@ -4014,7 +4014,7 @@ extend Live {
 
     // The parameter value of loop header `h` that `v` of `b` is: the parameter itself, or the value a back
     // edge of the loop passes it. NONE else.
-    fn header_of_value(self: &Self, b: &Body, h: u32, v: Value) u32 {
+    const fn header_of_value(self: &Self, b: &Body, h: u32, v: Value) u32 {
         let ni = b.insts.len() as u32;
         let hb = b.blocks[h as usize];
         if v != VNONE && (v & VFLAG) == 0 && (v & VPARAM) != 0 {
@@ -4290,7 +4290,7 @@ fn reads_before(b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, las
 }
 
 // The root of `k0`'s set in union-find forest `root`, its path halved.
-fn find_root(root: &mut Vector<u32>, k0: u32) u32 {
+const fn find_root(root: &mut Vector<u32>, k0: u32) u32 {
     let mut k = k0;
     // Each step moves `k` closer to the root: at most `root.len()` steps.
     while root[k as usize] != k {
@@ -4311,7 +4311,7 @@ const fn contains_u32(xs: &Vector<u32>, x: u32) bool {
 
 /// Edge `k` of terminator `t` (`jmp`: 0; `br`: 0 taken, 1 not; `switch`: its cases, then the default).
 /// Whether a value of `b` (an instruction or a block parameter) is a vector.
-pub(package) fn has_vectors(b: &Body) bool {
+pub(package) const fn has_vectors(b: &Body) bool {
     for i in 0..b.insts.len() {
         if is_vec(b.insts[i].ty) {
             return true;
@@ -4348,7 +4348,7 @@ extend Rotation as Copy {}
 /// shifts' bits are disjoint, so their sum and their `xor` are their `or`; a masked `s` of 0 shifts both
 /// by 0, which only the `or` of the value with itself rotates. The amount rotates right when it is the
 /// shift right's. Of two values of 32 or 64 bits by constants, a funnel shift.
-pub(package) fn rotate_of(b: &Body, i: u32) Rotation {
+pub(package) const fn rotate_of(b: &Body, i: u32) Rotation {
     let none = Rotation { x: VNONE, y: VNONE, amt: VNONE, src: VNONE, k: 0, right: false };
     let t = b.insts[i as usize];
     if t.op != O_OR && t.op != O_XOR && t.op != O_ADD || !is_int(t.ty) || t.ty == T_I128 || !is_inst(t.a) || !is_inst(
@@ -4410,7 +4410,7 @@ pub(package) struct Bfi {
 /// bits of `x & ~(m << s)` (or the extension of `x` truncated to the bits below the field when it reaches
 /// the top) and `(v & m) << s` (or `v` extended from `w` bits, shifted), `m` the `w` low bits, the field
 /// within the width; `x` VNONE when it is not one.
-pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
+pub(package) const fn bfi_of(b: &Body, t: Inst) Bfi {
     let none = Bfi { x: VNONE, v: VNONE, keep: VNONE, field: VNONE, trunc: VNONE, s: 0, w: 0 };
     let bits = type_bits(t.ty, 8);
     if t.op != O_OR || !is_int(t.ty) || bits != 32 && bits != 64 || !is_inst(t.a) || !is_inst(t.b) {
@@ -4462,7 +4462,7 @@ pub(package) fn bfi_of(b: &Body, t: Inst) Bfi {
 
 /// The value instruction `v` of `b` inverts (`not v`, or `xor v` with all ones of its width); VNONE when it
 /// is no inversion.
-pub(package) fn inversion(b: &Body, v: Value) Value {
+pub(package) const fn inversion(b: &Body, v: Value) Value {
     if !is_inst(v) {
         return VNONE;
     }
@@ -4484,7 +4484,7 @@ pub(package) fn inversion(b: &Body, v: Value) Value {
 
 /// The operand of `and`, `or` or `xor` `t` of `b` that is a folded inversion (`FOLD_NOT`, `folded`); VNONE
 /// when none.
-pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
+pub(package) const fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     if t.op != O_AND && t.op != O_OR && t.op != O_XOR {
         return VNONE;
     }
@@ -4498,7 +4498,7 @@ pub(package) fn not_side(b: &Body, folded: &Vector<bool>, t: Inst) Value {
 /// `and`, `or` or `xor`, not folded, of a load (its first operand for a `sub`) of the store's address and
 /// offset, of the operation's type, neither volatile nor bounded, nor folded; the other operand no folded
 /// value. VNONE when not.
-pub(package) fn rmw_load(b: &Body, folded: &Vector<bool>, t: Inst) Value {
+pub(package) const fn rmw_load(b: &Body, folded: &Vector<bool>, t: Inst) Value {
     let v = t.b;
     if !is_inst(v) {
         return VNONE;
@@ -4537,7 +4537,7 @@ const fn writes_mem(t: Inst) bool {
 // Whether load `i` of `b` reads the aggregate result of the call right before it, past loads of that result
 // alone, of at most `regs` bytes (`Live::ret_regs`): the generator may take the value from the result's
 // register (`place::result_loads`). At most LDOP_REACH steps back.
-fn result_load(b: &Body, i: u32, regs: u32) bool {
+const fn result_load(b: &Body, i: u32, regs: u32) bool {
     let a = b.insts[i as usize].a;
     let mut k = i;
     while k > 0 && k + LDOP_REACH > i {
@@ -4554,7 +4554,7 @@ fn result_load(b: &Body, i: u32, regs: u32) bool {
     return false;
 }
 
-fn agg_param(b: &Body, v: Value) bool {
+const fn agg_param(b: &Body, v: Value) bool {
     if (v & VPARAM) == 0 || v == VNONE || b.sig == NONE {
         return false;
     }
@@ -4569,7 +4569,7 @@ fn agg_param(b: &Body, v: Value) bool {
 
 /// The side of select `i` of `b` that `FOLD_CARRY` folds (the other side plus 1), when `i` is of 32 or 64
 /// bits on a folded (`folded`) integer comparison of at most 64 bits; VNONE else.
-pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
+pub(package) const fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
     let t = b.insts[i as usize];
     if t.op != O_SELECT || !is_int(t.ty) || type_bits(t.ty, 8) < 32 || t.ty == T_I128 || !is_inst(t.a) || !folded[t.a as usize] {
         return VNONE;
@@ -4584,7 +4584,7 @@ pub(package) fn carry_inc(b: &Body, folded: &Vector<bool>, i: u32) Value {
     return ast::pick(is_inst(t.c) && !folded[t.c as usize] && cs_kind(b, t.c, t.b) == CS_INC, t.c, VNONE);
 }
 
-pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
+pub(package) const fn cs_kind(b: &Body, v: Value, other: Value) u8 {
     if other == VNONE {
         return CS_NONE;
     }
@@ -4596,7 +4596,7 @@ pub(package) fn cs_kind(b: &Body, v: Value, other: Value) u8 {
 }
 
 /// Whether `v` is `y - x` and `other` is `x - y`, of one integer type: `v` negates `other`.
-pub(package) fn neg_sub(b: &Body, v: Value, other: Value) bool {
+pub(package) const fn neg_sub(b: &Body, v: Value, other: Value) bool {
     if !is_inst(v) || !is_inst(other) {
         return false;
     }
@@ -4607,7 +4607,7 @@ pub(package) fn neg_sub(b: &Body, v: Value, other: Value) bool {
 
 /// `cs_kind` of `v` with the value it adds 1 to, negates or inverts: that kind and value, else
 /// (CS_NONE, VNONE).
-pub(package) fn cs_base(b: &Body, v: Value) (u8, Value) {
+pub(package) const fn cs_base(b: &Body, v: Value) (u8, Value) {
     if !is_inst(v) {
         return (CS_NONE, VNONE);
     }
@@ -4652,11 +4652,11 @@ pub(package) fn cs_base(b: &Body, v: Value) (u8, Value) {
 }
 
 // Whether `v` is an integer constant, and its bits.
-fn is_const_val(b: &Body, v: Value) bool {
+const fn is_const_val(b: &Body, v: Value) bool {
     return is_inst(v) && b.insts[v as usize].op == O_ICONST;
 }
 
-fn const_val(b: &Body, v: Value) u64 {
+const fn const_val(b: &Body, v: Value) u64 {
     if !is_const_val(b, v) {
         return 0;
     }
@@ -4666,7 +4666,7 @@ fn const_val(b: &Body, v: Value) u64 {
 
 /// The operand of 32- or 64-bit sum, difference or bitwise operation `t` that is a folded shift by a
 /// constant (`FOLD_SHOP`): `t.b`, else `t.a`; VNONE when neither is.
-pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
+pub(package) const fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
     let ops = t.op == O_ADD || t.op == O_SUB || t.op == O_AND || t.op == O_OR || t.op == O_XOR;
     if !ops || !is_int(t.ty) || t.ty == T_I128 {
         return VNONE;
@@ -4684,7 +4684,7 @@ pub(package) fn shop_side(b: &Body, pfold: &Vector<bool>, t: Inst) Value {
 /// The extension (`O_ZEXT`, `O_SEXT`) both operands of 64-bit product `t` are, from 32 bits, two
 /// instructions, or its first operand is with the second a constant the extension of its low 32 bits; 0
 /// when not.
-pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
+pub(package) const fn mull_ext(b: &Body, t: Inst) u8 {
     if !is_inst(t.a) || !is_inst(t.b) || t.a == t.b {
         return 0;
     }
@@ -4708,7 +4708,7 @@ pub(package) fn mull_ext(b: &Body, t: Inst) u8 {
 
 /// The value a left shift with operand `v` shifts: the narrow value when `v` is a zero extension folded
 /// into it (`FOLD_ZSHL`), else `v`.
-pub(package) fn shl_source(b: &Body, pfold: &Vector<bool>, v: Value) Value {
+pub(package) const fn shl_source(b: &Body, pfold: &Vector<bool>, v: Value) Value {
     if !is_inst(v) || !pfold[v as usize] || b.insts[v as usize].op != O_ZEXT {
         return v;
     }
@@ -4727,7 +4727,7 @@ pub(package) const fn step_op(t: Inst) bool {
 /// For select `t` whose condition is a comparison or a flag (0 or 1, which a sum may add), the side that is
 /// the other plus 1 (an `add` of it and constant 1): 1 for its true side, 2 for its false side, 0 when
 /// neither is.
-pub(package) fn inc_side(b: &Body, t: Inst) u8 {
+pub(package) const fn inc_side(b: &Body, t: Inst) u8 {
     let c = t.a;
     if (c & VPARAM) != 0 || (c & VFLAG) == 0 && b.insts[c as usize].op != O_ICMP {
         return 0;
@@ -4750,7 +4750,7 @@ pub(package) fn inc_side(b: &Body, t: Inst) u8 {
 
 /// The amount a shift with amount operand `v` takes: the operand of `v` when `v` is a mask folded into the
 /// shift (`FOLD_SHAMT`), past a folded extension or truncation (`FOLD_SHAMT_EXT`); else `v`.
-pub(package) fn shift_amount(b: &Body, pfold: &Vector<bool>, v: Value) Value {
+pub(package) const fn shift_amount(b: &Body, pfold: &Vector<bool>, v: Value) Value {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || !pfold[v as usize] || b.insts[v as usize].op != O_AND {
         return v;
     }
@@ -4765,7 +4765,7 @@ pub(package) fn shift_amount(b: &Body, pfold: &Vector<bool>, v: Value) Value {
 /// own amount operand, past a folded extension or truncation and a folded mask to the width (the
 /// rotation takes the amount modulo the width), whose operands live to the rotation; an unfolded one
 /// lives itself.
-pub(package) fn rot_amount(b: &Body, folded: &Vector<bool>, r: Rotation) Value {
+pub(package) const fn rot_amount(b: &Body, folded: &Vector<bool>, r: Rotation) Value {
     let mut n = r.src;
     for _ in 0..2 {
         if !is_inst(n) || !folded[n as usize] {
@@ -4778,7 +4778,7 @@ pub(package) fn rot_amount(b: &Body, folded: &Vector<bool>, r: Rotation) Value {
 
 /// Shift amount `v` past one zero extension or truncation: the amount computed in another type, which
 /// is below the width wherever the shift is defined.
-pub(package) fn amount_of(b: &Body, v: Value) Value {
+pub(package) const fn amount_of(b: &Body, v: Value) Value {
     if is_inst(v) && (b.insts[v as usize].op == O_ZEXT || b.insts[v as usize].op == O_TRUNC) {
         return b.insts[v as usize].a;
     }
@@ -4787,7 +4787,7 @@ pub(package) fn amount_of(b: &Body, v: Value) Value {
 
 // Whether shift amount `v` is `w - s` or, when `masks`, `(c - s) & (w - 1)` (c a multiple of width `w`) or
 // `-s & (w - 1)`, for the amount `s` (`rotate_of`).
-fn negated(b: &Body, v: Value, s: Value, w: u64, masks: bool) bool {
+const fn negated(b: &Body, v: Value, s: Value, w: u64, masks: bool) bool {
     if !is_inst(v) {
         return false;
     }
@@ -4821,7 +4821,7 @@ fn negated(b: &Body, v: Value, s: Value, w: u64, masks: bool) bool {
 
 /// The shift a scaled index of an address takes (`lea_of`): 1 to 3 for a shift left by that constant, else
 /// 0.
-pub(package) fn lea_shift(b: &Body, v: Value) u32 {
+pub(package) const fn lea_shift(b: &Body, v: Value) u32 {
     if !is_inst(v) || b.insts[v as usize].op != O_SHL {
         return 0;
     }
@@ -4882,7 +4882,7 @@ pub(package) fn lea_of(b: &Body, folded: &Vector<bool>, i: u32) Lea {
 // Operand `v` (`bits` wide, negated when `neg`) into address `f` (`lea_of`): a constant into the
 // displacement, a folded shift as the index, a register as the base, then as the index; `ok` false when
 // it takes none (a folded operand has no register).
-fn lea_term(b: &Body, folded: &Vector<bool>, v: Value, neg: bool, bits: u32, f: &mut Lea) {
+const fn lea_term(b: &Body, folded: &Vector<bool>, v: Value, neg: bool, bits: u32, f: &mut Lea) {
     let k = int_const(b, v);
     if k != u64::MAX {
         let s = sext_bits(k, bits);
@@ -4971,7 +4971,7 @@ const ONES_DEPTH: u32 = 4;
 /// indexes of one operand of its type: PERM_REV8 reverses the lanes within each 8 bytes, PERM_SWAP8 swaps
 /// the two 8-byte halves, both reverse them all; 0 for another swizzle or another
 /// instruction.
-pub(package) fn lane_perm(b: &Body, t: Inst) u8 {
+pub(package) const fn lane_perm(b: &Body, t: Inst) u8 {
     if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SWIZZLE as u32 || t.b != 1 || t.c == VNONE {
         return 0;
     }
@@ -5006,7 +5006,7 @@ pub(package) const PERM_SWAP8: u8 = 2;
 /// The bytes `t` of `b` slides by: a `shuffle` of constant indexes `s`, `s + 1`, .. of two operands of its
 /// type, a vector of 8, 16 or 32 bytes, which takes the lanes of the two in a row from lane `s` of the first
 /// (arm64's EXT, x86-64's PALIGNR); 0 for another shuffle or another instruction.
-pub(package) fn lane_slide(b: &Body, t: Inst) u32 {
+pub(package) const fn lane_slide(b: &Body, t: Inst) u32 {
     if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b != 2 || t.c == VNONE {
         return 0;
     }
@@ -5161,7 +5161,7 @@ fn fits_low(b: &Body, v: Value, m: u64, depth: u32) bool {
 // Whether `side`, a truncation of a 16- or 32-bit integer to 8 or 16 bits, is the side of a select on
 // condition `c` that the select takes only where `c` bounds the truncated value within the narrow type
 // (true side `on_true`): the side is that value, whatever the truncation clears.
-fn bounded_side(b: &Body, c: Value, side: Value, on_true: bool) bool {
+const fn bounded_side(b: &Body, c: Value, side: Value, on_true: bool) bool {
     if ((c | side) & (VPARAM | VFLAG)) != 0 || b.insts[side as usize].op != O_TRUNC || b.insts[c as usize].op != O_ICMP {
         return false;
     }
@@ -5196,7 +5196,7 @@ pub(package) const fn const_of(b: &Body, v: Value, out: &mut u64) bool {
 
 /// The amount every lane of vector shift `t` of `b` (integer lanes) shifts by, when one constant below the
 /// lanes' width: a splat of an integer constant, or a wide constant of equal lanes. NONE when not.
-pub(package) fn vec_shift_amount(b: &Body, t: Inst) u32 {
+pub(package) const fn vec_shift_amount(b: &Body, t: Inst) u32 {
     let lt = lane_type(t.ty);
     if !is_vec(t.ty) || !is_int(lt) || (t.b & (VPARAM | VFLAG)) != 0 || t.b == VNONE {
         return NONE;
@@ -5251,7 +5251,7 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
 }
 
 // Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
-fn zero_vec(b: &Body, v: Value) bool {
+const fn zero_vec(b: &Body, v: Value) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -5270,7 +5270,7 @@ fn zero_vec(b: &Body, v: Value) bool {
     return true;
 }
 
-fn int_const(b: &Body, v: Value) u64 {
+const fn int_const(b: &Body, v: Value) u64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST {
         return u64::MAX;
     }

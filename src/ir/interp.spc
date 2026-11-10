@@ -10165,7 +10165,7 @@ extend Interp {
     // Record the assertion of block `blk` of `b` that failed, for `prove_run`: the first one, and not
     // one of a constant's evaluation, whose body does not outlive it.
     @cold
-    fn assert_failed(self: &mut Self, b: &ir::CoreBody, blk: u32, sp: tok::Span) {
+    const fn assert_failed(self: &mut Self, b: &ir::CoreBody, blk: u32, sp: tok::Span) {
         if self.pa_set || self.trap.len() != 0 || self.item_active.len() != 0 {
             return;
         }
@@ -10906,6 +10906,9 @@ extend Interp {
             let mut cont2 = NODE_NONE;
             if self.container_of(fd.module, fd.node, &mut cont2) == 2 {
                 return fx_meet(acc, FX_MAYBE); // interface default body: dispatch may substitute
+            }
+            if fa.build_gated(fd.node) {
+                return fx_meet(acc, FX_MAYBE); // another build calls another variant, or none
             }
         }
         let cv = self.fx_get_in(fd.module, fd.node, deep);

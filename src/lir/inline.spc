@@ -147,7 +147,7 @@ fn folds_small(
 
 // The constant value `v` of callee `e` has at call `t` of `c`: an integer constant, or an entry parameter
 // whose argument is one.
-fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
+const fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
     let w = if (v & VPARAM) != 0 && (v & ~VPARAM) < e.blocks[0].param_len as u32 {
         c.pool[(t.c + (v & ~VPARAM)) as usize]
     } else if (v & (VPARAM | VFLAG)) == 0 {

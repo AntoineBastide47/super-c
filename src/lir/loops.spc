@@ -1295,7 +1295,7 @@ extend LoopOpt {
 
     // Whether `xdone` entry `e`'s loop lies where the header with dominator numbers `hpre`, `hpost`
     // dominates, or might (no numbers).
-    fn close_under(self: &Self, e: u32, hpre: u32, hpost: u32, dpre: []u32, dpost: []u32) bool {
+    const fn close_under(self: &Self, e: u32, hpre: u32, hpost: u32, dpre: []u32, dpost: []u32) bool {
         let x = self.xdone[e as usize].0 as usize;
         return x >= dpre.len() || x != 0 && dpre[x] == 0 && dpost[x] == 0 || hpre <= dpre[x] && dpost[x] <= hpost;
     }
@@ -1852,7 +1852,7 @@ extend LoopOpt {
     // Address `a` plus offset `c` of an access of `n` bytes in loop `h` as `base + r * n + off`: `base` from
     // before the loop, `r` header parameter `idx` (its index among the header's) stepping by 1 (`cf_next`).
     // (VNONE, 0, 0) when not.
-    fn run_addr(self: &Self, b: &Body, h: u32, a: Value, c: u32, n: u32) (Value, u32, u32) {
+    const fn run_addr(self: &Self, b: &Body, h: u32, a: Value, c: u32, n: u32) (Value, u32, u32) {
         let no = (VNONE, 0u32, 0u32);
         if (a & (VPARAM | VFLAG)) != 0 || a == VNONE || !self.defined_in(a) {
             return no;
@@ -2054,7 +2054,7 @@ extend LoopOpt {
     // Whether the loop runs while `x` is not 0, `x` a header parameter `q` (or its next value) that steps by
     // `q & (q - 1)` (it runs popcount(x) more times: CB_POP) or `q >> 1` (bit length: CB_LEN), LLVM's loop
     // idiom recognition of bit counts. Sets the test's `cf_*` fields.
-    fn bit_count(self: &mut Self, b: &Body, ptr: u32, x: Value) bool {
+    const fn bit_count(self: &mut Self, b: &Body, ptr: u32, x: Value) bool {
         let hb = b.blocks[self.cf_h as usize];
         let mut q = VNONE;
         for j in 0..hb.param_len as u32 {
@@ -2108,7 +2108,7 @@ extend LoopOpt {
     }
 
     // Whether `v` is a parameter of the loop's header.
-    fn header_param(self: &Self, v: Value) bool {
+    const fn header_param(self: &Self, v: Value) bool {
         return v != VNONE && (v & VPARAM) != 0 && self.powner[(v & ~VPARAM) as usize] == self.cf_h;
     }
 
@@ -2212,7 +2212,7 @@ extend LoopOpt {
     }
 
     // The other operand `k` when `v` is `q ^ k` (an instruction of the loop), else VNONE.
-    fn toggle_by(self: &Self, b: &Body, q: Value, v: Value) Value {
+    const fn toggle_by(self: &Self, b: &Body, q: Value, v: Value) Value {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || !self.defined_in(v) || b.insts[v as usize].op != O_XOR {
             return VNONE;
         }
@@ -2227,7 +2227,7 @@ extend LoopOpt {
     }
 
     // Forget the facts of the loop's instructions (`lin`'s too when `lin` holds).
-    fn cf_clear(self: &mut Self, b: &Body, lin: bool) {
+    const fn cf_clear(self: &mut Self, b: &Body, lin: bool) {
         for j in 0..self.lblocks.len() {
             let bk = b.blocks[self.lblocks[j] as usize];
             for i in bk.start..bk.start + bk.len {
@@ -2241,7 +2241,7 @@ extend LoopOpt {
 
     // The interval of the counter's values (`f`, `w` bits) while the loop runs: from its start to the
     // last value the test lets through plus a step, the bounds its type's where they are not constants.
-    fn counter_range(self: &Self, b: &Body, f: &mut Poly, w: u32) {
+    const fn counter_range(self: &Self, b: &Body, f: &mut Poly, w: u32) {
         let x0 = self.cf_init[((self.cf_q & ~VPARAM) - b.blocks[self.cf_h as usize].param_start) as usize];
         if self.cf_ne || !self.cf_signed && w >= 64 {
             return;
@@ -2533,7 +2533,7 @@ extend LoopOpt {
     }
 
     // Value `v` at iteration `k` in the block that computes the values.
-    fn cf_of(self: &Self, b: &Body, v: Value, k: u32) Value {
+    const fn cf_of(self: &Self, b: &Body, v: Value, k: u32) Value {
         if v == VNONE || !self.defined_in(v) {
             return v;
         }
@@ -2694,7 +2694,7 @@ extend LoopOpt {
     // is a first-order recurrence the vectors carry (`vfop`): lanes of its type, `a` of that type and made
     // before every read of `pv`, which no instruction reads but through its operands (no call, no `vop`)
     // and no edge passes on.
-    fn first_order(self: &mut Self, b: &Body, ptr: u32, u: u32, pv: Value, a: u32, ty: u8) bool {
+    const fn first_order(self: &mut Self, b: &Body, ptr: u32, u: u32, pv: Value, a: u32, ty: u8) bool {
         if !(is_int(ty) && ty != T_I128 && ty != T_PTR || is_float(ty)) || !self.lane_size(ty, ptr) || b.insts[a as usize].ty != ty {
             return false;
         }
@@ -2751,7 +2751,7 @@ extend LoopOpt {
     }
 
     // Drop the refusal of the loop whose header is at `l` (`report`), which a later round vectorized.
-    fn unreject(self: &mut Self, l: Loc) {
+    const fn unreject(self: &mut Self, l: Loc) {
         let k = self.refusal(l);
         if k != NONE {
             let _ = self.rejected.remove(k as usize);
@@ -2760,7 +2760,7 @@ extend LoopOpt {
     }
 
     // Keep the refusal of loop `h` (`rkept`), which a transform copies.
-    fn keep_refusal(self: &mut Self, b: &Body, h: u32) {
+    const fn keep_refusal(self: &mut Self, b: &Body, h: u32) {
         let k = self.refusal(b.lines[b.locs[b.blocks[h as usize].start as usize] as usize]);
         if k != NONE {
             self.rkept[k as usize] = true;
@@ -2774,7 +2774,7 @@ extend LoopOpt {
     }
 
     // The index of the refusal of the loop whose header is at `l` in `rejected`, NONE when none.
-    fn refusal(self: &Self, l: Loc) u32 {
+    const fn refusal(self: &Self, l: Loc) u32 {
         for k in 0..self.rejected.len() {
             let r = self.rejected[k].0;
             if r.file == l.file && r.line == l.line && r.col == l.col {
@@ -2785,7 +2785,7 @@ extend LoopOpt {
     }
 
     // The plan fails for reason `why` (`report`), about an instruction of opcode `op` (0: none).
-    fn no(self: &mut Self, why: str<'static>, op: u8) bool {
+    const fn no(self: &mut Self, why: str<'static>, op: u8) bool {
         self.why = why;
         self.why_op = op;
         return false;
@@ -3342,7 +3342,7 @@ extend LoopOpt {
     // The vector copies of the plan to interleave, at most `n`: as many as hold the reductions' lanes in
     // `vaccs` registers of `vmax` bytes (an ordered one keeps a scalar), at least one, a power of 2 (the
     // vector iterations' count masks the trip count by the copies' lanes, `vectorize`).
-    fn vcopies(self: &Self, b: &Body, n: u32) u32 {
+    const fn vcopies(self: &Self, b: &Body, n: u32) u32 {
         let mut regs: u32 = 0;
         for r in 0..self.vred.len() {
             if !self.vord[r] {
@@ -3369,7 +3369,7 @@ extend LoopOpt {
     // through every s-th element 2s - 1 (the stores and the zips); a masked store 1 + 1 per lane; a conversion or shift the target does
     // lane by lane (`Package.vops`) 3 per lane; an ordered reduction's update 2 per lane (an extract and
     // the operation); an idiom's part (`idioms`) nothing; each loop 2 for its latch.
-    fn cheaper(self: &Self, b: &Body, ub: Block, ptr: u32) bool {
+    const fn cheaper(self: &Self, b: &Body, ub: Block, ptr: u32) bool {
         let lanes = self.plan_lanes();
         let mut s: u32 = 2;
         let mut v: u32 = 2;
@@ -3453,7 +3453,7 @@ extend LoopOpt {
     // Whether strided load `t` (elements `step` bytes apart) reads from the first byte of a group: the
     // lowest offset of the loads of its type through its address, less than a step below its own (where
     // `vectorize` loads the group from), is a multiple of the step from the address's base.
-    fn group_start(self: &Self, b: &Body, t: Inst, step: u32) bool {
+    const fn group_start(self: &Self, b: &Body, t: Inst, step: u32) bool {
         let eb = type_bytes(t.ty, 8);
         let mut lo = (t.c as i32) as i64;
         for y in 0..self.vacc.len() {
@@ -3472,7 +3472,7 @@ extend LoopOpt {
     // each element of the step (offsets `c`, `c + size`, ...). The group's vectors store at its last store
     // (`store_group`): a load through the address reads no bytes a store before it writes, or comes after
     // the last store.
-    fn store_groups(self: &Self, b: &Body) bool {
+    const fn store_groups(self: &Self, b: &Body) bool {
         for x in 0..self.vacc.len() {
             let s = b.insts[self.vacc[x] as usize];
             if !self.strided_store(b, s) {
@@ -3530,7 +3530,7 @@ extend LoopOpt {
     }
 
     // Whether `s` is a store of the plan through `base + i * step` with `step` past its element's size.
-    fn strided_store(self: &Self, b: &Body, s: Inst) bool {
+    const fn strided_store(self: &Self, b: &Body, s: Inst) bool {
         return s.op == O_STORE && !self.vone && b.insts[s.a as usize].op == O_PTRADD && self.stride(b, s.a) != type_bytes(
             b.type_of(s.b),
             8,
@@ -3541,12 +3541,12 @@ extend LoopOpt {
     // `q < n` alone (`q` its parameter, `n` defined outside the loop, the test's sides either way) that
     // enters body `u`, which jumps back to it; sets the counter, the bound and the test's signedness
     // (`viv`, `vn`, `vsigned`). The vectorizer and partial unrolling read this shape.
-    fn counted(self: &mut Self, b: &Body, h: u32, u: u32) bool {
+    const fn counted(self: &mut Self, b: &Body, h: u32, u: u32) bool {
         return self.lblocks.len() == 2 && u != h && self.counted_by(b, h, u, u);
     }
 
     // The tests of `counted_by` that read header `h` alone: not `novec`, a comparison and a branch on it.
-    fn header_counts(self: &mut Self, b: &Body, h: u32) bool {
+    const fn header_counts(self: &mut Self, b: &Body, h: u32) bool {
         let hb = b.blocks[h as usize];
         let t = term(b, h);
         if (hb.flags & BLOCK_NOVEC) != 0 {
@@ -3560,7 +3560,7 @@ extend LoopOpt {
 
     // `counted` for loop `h` (its blocks `lblocks`) whose header enters block `e`, and whose block `u`
     // jumps back.
-    fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
+    const fn counted_by(self: &mut Self, b: &Body, h: u32, e: u32, u: u32) bool {
         let hb = b.blocks[h as usize];
         let t = term(b, h);
         if !self.header_counts(b, h) {
@@ -3668,7 +3668,7 @@ extend LoopOpt {
 
     // The kind (VK_*) instruction `t` of body `u` takes, 0 when it does not vectorize; sets the lane size
     // from a lane value's type.
-    fn vclass(self: &mut Self, b: &Body, ptr: u32, u: u32, t: Inst) u8 {
+    const fn vclass(self: &mut Self, b: &Body, ptr: u32, u: u32, t: Inst) u8 {
         let op = t.op;
         // The counter extended to a pointer's width: lanes `ext(i) + k` while it does not wrap, which a test
         // `i <u n` excludes for a zero extension, and `i <s n` from a start at 0 or above (`vplan`) for both.
@@ -3901,7 +3901,7 @@ extend LoopOpt {
     // The kind of lane operation `t` of body `u` (`unary`: one operand): a mask for a comparison, else a lane
     // value, when an operand is a lane value or an invariant load and each is one of those or from outside
     // the loop (an operation of invariant loads computes on their splats); else 0.
-    fn lane_operands(self: &Self, b: &Body, u: u32, t: Inst, unary: bool) u8 {
+    const fn lane_operands(self: &Self, b: &Body, u: u32, t: Inst, unary: bool) u8 {
         let ka = self.ctr_kind(b, u, t, t.a);
         let kb = if unary {
             0u8
@@ -3924,7 +3924,7 @@ extend LoopOpt {
     // The kind of operand `v` of lane operation `t` of body `u` (`kind`): a lane value for the counter, of
     // `t`'s type or compared (`vector_ctr` makes its lanes), in vectors; a pointer-wide one not in a sum or
     // difference, which computes an index (it addresses and bounds elements as consecutive ones).
-    fn ctr_kind(self: &Self, b: &Body, u: u32, t: Inst, v: Value) u8 {
+    const fn ctr_kind(self: &Self, b: &Body, u: u32, t: Inst, v: Value) u8 {
         let ty = ast::pick(t.op == O_ICMP, b.type_of(v), t.ty);
         if !self.vone && v == self.viv && v != VNONE && b.type_of(v) == ty && (type_bytes(ty, 8) < self.vptr || t.op != O_ADD && t.op != O_SUB) {
             return VK_LANE;
@@ -3935,7 +3935,7 @@ extend LoopOpt {
     // Whether scalar type `ty` has the plan's lane size, setting it when unset. Scalar copies mix lane
     // sizes; vectors do when the target converts them in registers (`vops`), the widest lane at most twice
     // the narrowest, or 8 times with registers of at most 32 bytes (`plan_lanes`).
-    fn lane_size(self: &mut Self, ty: u8, ptr: u32) bool {
+    const fn lane_size(self: &mut Self, ty: u8, ptr: u32) bool {
         let n = type_bytes(ty, ptr);
         if n == 0 || n > 8 {
             return false;
@@ -4094,7 +4094,7 @@ extend LoopOpt {
 
     // Whether `v` may be an idiom's lane operand: a value of the body or one from before the loop (a
     // splat), not a constant (`vidiom` splats only a missing operand's `vidk`).
-    fn lane_operand(self: &Self, b: &Body, u: u32, v: Value) bool {
+    const fn lane_operand(self: &Self, b: &Body, u: u32, v: Value) bool {
         return v != VNONE && (v & VFLAG) == 0 && (self.in_body(b, u, v) || !self.defined_in(v)) && !is_const(b, v);
     }
 
@@ -4332,7 +4332,7 @@ extend LoopOpt {
     }
 
     // Each of `vs` that body `u` defines: VK_IDI (an idiom's part).
-    fn idiom_parts(self: &mut Self, b: &Body, u: u32, vs: []Value) {
+    const fn idiom_parts(self: &mut Self, b: &Body, u: u32, vs: []Value) {
         self.vtried = true;
         for k in 0..vs.len() {
             if self.in_body(b, u, vs[k]) {
@@ -4343,7 +4343,7 @@ extend LoopOpt {
 
     // The kind of idiom root `x` of body `u` (`idioms`): a lane value of its narrow lanes when an operand is
     // one and each is one, an invariant load, a constant or from outside the loop; else 0.
-    fn idiom_class(self: &mut Self, b: &Body, ptr: u32, u: u32, x: u32) u8 {
+    const fn idiom_class(self: &mut Self, b: &Body, ptr: u32, u: u32, x: u32) u8 {
         let ops = [self.vida[x as usize], self.vidb[x as usize]];
         let mut lane = false;
         for k in 0..2usize {
@@ -4417,7 +4417,7 @@ extend LoopOpt {
 
     // The type of reduction `r`'s accumulators: its lanes' vector (a scalar when ordered), or for a widening
     // sum the narrow vector's bytes in lanes of `vwa` bytes.
-    fn acc_ty(self: &Self, b: &Body, r: u32) u8 {
+    const fn acc_ty(self: &Self, b: &Body, r: u32) u8 {
         let rt = b.params[(self.vred[r as usize] & ~VPARAM) as usize];
         let wa = self.vwa[r as usize];
         if wa != 0 {
@@ -4482,7 +4482,7 @@ extend LoopOpt {
 
     // The plan's kind of value `v` defined in body `u` (0: none or outside it); a truncation of an absolute
     // difference (VK_TLANE) a lane value.
-    fn kind(self: &Self, b: &Body, u: u32, v: Value) u8 {
+    const fn kind(self: &Self, b: &Body, u: u32, v: Value) u8 {
         if self.vone && v == self.viv || self.vivp.contains(&v) || self.vfop.contains(&v) || v == self.vstep && v != VNONE {
             return VK_LANE;
         }
@@ -4494,7 +4494,7 @@ extend LoopOpt {
     }
 
     // Whether `v` is an instruction's value of block `u`.
-    fn in_body(self: &Self, b: &Body, u: u32, v: Value) bool {
+    const fn in_body(self: &Self, b: &Body, u: u32, v: Value) bool {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
             return false;
         }
@@ -4536,7 +4536,7 @@ extend LoopOpt {
     }
 
     // With an early exit (`vexit`), the arguments `v` is of the edge of body `u`'s branch that leaves.
-    fn exit_reads(self: &Self, b: &Body, u: u32, v: Value) u32 {
+    const fn exit_reads(self: &Self, b: &Body, u: u32, v: Value) u32 {
         let t = term(b, u);
         if !self.vexit || t.op != O_BR {
             return 0;
@@ -4661,7 +4661,7 @@ extend LoopOpt {
     // pointer, the load at a constant offset, the store at `base + i * size + offset` with the counter `i`
     // counting up from a constant `i0` (below `n`, so the address only grows), and the store's first bytes,
     // at `i0`, past the load's last (TSVC s113: `a[i] = a[0] + b[i]` from `i = 1`).
-    fn inv_below(self: &Self, b: &Body, x: u32, y: u32) bool {
+    const fn inv_below(self: &Self, b: &Body, x: u32, y: u32) bool {
         let l = b.insts[x as usize];
         let s = b.insts[y as usize];
         if self.vrev || self.vpre == NONE || (s.a & (VPARAM | VFLAG)) != 0 || (l.a & VFLAG) != 0 || self.vsigned {
@@ -4732,13 +4732,13 @@ extend LoopOpt {
 
     // The bytes access address `a` (`base + i * scale`) steps by per iteration: its scale times the counter's
     // step.
-    fn stride(self: &Self, b: &Body, a: Value) u32 {
+    const fn stride(self: &Self, b: &Body, a: Value) u32 {
         return scale_of(b.insts[a as usize]) * self.vqk;
     }
 
     // Whether the target converts or shifts as instruction `t` does lane by lane (`Package.vops`
     // VOPS_SOME).
-    fn by_lane(self: &Self, b: &Body, t: Inst, ptr: u32) bool {
+    const fn by_lane(self: &Self, b: &Body, t: Inst, ptr: u32) bool {
         if self.vops != VOPS_SOME {
             return false;
         }
@@ -5350,7 +5350,7 @@ extend LoopOpt {
     // Whether load `t` of a loop counting down from `start` (VNONE: unknown) reads the element below the
     // counter of a slice `start` long: through `ptr + (i - 1) * size`, or `ptr + i * size` less the size,
     // `ptr` and `start` the loads of one slice's two words. Every element below `start` may then be read.
-    fn counted_down(self: &Self, b: &Body, t: Inst, start: Value, ptr: u32) bool {
+    const fn counted_down(self: &Self, b: &Body, t: Inst, start: Value, ptr: u32) bool {
         let a = b.insts[t.a as usize];
         if start == VNONE || (start & (VPARAM | VFLAG)) != 0 || a.op != O_PTRADD || scale_of(a) != type_bytes(t.ty, ptr) || (a.a & (VPARAM | VFLAG)) != 0 || a.b == VNONE {
             return false;
@@ -5368,7 +5368,7 @@ extend LoopOpt {
     // and before it in the body, it reads each element before any iteration writes it; behind it by at least
     // a vector loop's iterations, it reads what an earlier vector iteration wrote (the dependence distance);
     // at another element of each step (a group's other field), it reads no byte any iteration writes.
-    fn distance_ok(self: &Self, b: &Body, s: u32, o: u32, d: i64) bool {
+    const fn distance_ok(self: &Self, b: &Body, s: u32, o: u32, d: i64) bool {
         let st = b.insts[s as usize];
         let ot = b.insts[o as usize];
         let step = self.stride(b, st.a) as i64;
@@ -5394,7 +5394,7 @@ extend LoopOpt {
     // before it when the load reads an element ahead of each such store (it reads each element before any
     // iteration writes it) and its address comes before that store, so the vector loop loads it before
     // the store (`vlord`); `o` when no such store comes before it; NONE otherwise.
-    fn ahead_load(self: &Self, b: &Body, o: u32) u32 {
+    const fn ahead_load(self: &Self, b: &Body, o: u32) u32 {
         let ot = b.insts[o as usize];
         let oa = b.insts[ot.a as usize];
         let mut first = o;
@@ -5417,7 +5417,7 @@ extend LoopOpt {
     // Whether accesses `x` and `y` touch different bytes in every iteration of the loop at hand
     // (`cl`): different classes, neither CL_MANY nor a scope's whose roots the loop holds, each in the
     // other's scope.
-    fn apart(self: &Self, cl: Classes, x: u32, y: u32) bool {
+    const fn apart(self: &Self, cl: Classes, x: u32, y: u32) bool {
         let ox = obj_at(cl, self.orig(x));
         let oy = obj_at(cl, self.orig(y));
         if ox != oy && (ox != NONE && oy != NONE || private_obj(ox) || private_obj(oy)) {
@@ -5430,7 +5430,7 @@ extend LoopOpt {
 
     // Whether class `c` keeps apart, for the loop at hand, an access in it from instruction `i`'s: no
     // CL_MANY, and a scope's when its roots are outside the loop and `i` is in its copy.
-    fn scope_ok(self: &Self, cl: Classes, c: u8, i: u32) bool {
+    const fn scope_ok(self: &Self, cl: Classes, c: u8, i: u32) bool {
         if c >= CL_MANY {
             return false;
         }
@@ -7003,7 +7003,7 @@ extend LoopOpt {
 
     // The maps for copy `j` of the `k` of `jam`: the inner header's parameters (`fps`, `ni` per copy; the
     // counter `ivx` copy 0's) and the first chain's values (`jcopy`, as `jam_blocks` kept them).
-    fn jam_copy(self: &mut Self, b: &Body, j: u32, k: u32, h: u32, fps: u32, ni: u32, ivx: u32) {
+    const fn jam_copy(self: &mut Self, b: &Body, j: u32, k: u32, h: u32, fps: u32, ni: u32, ivx: u32) {
         self.jam_params(b, h, fps, ni, ivx, j);
         let mut s = j as usize * self.jcopy.len() / k as usize;
         for x in 0..self.jna as usize {
@@ -7020,7 +7020,7 @@ extend LoopOpt {
     }
 
     // `pmap` of inner header `h`'s parameters for copy `j` of `jam`.
-    fn jam_params(self: &mut Self, b: &Body, h: u32, fps: u32, ni: u32, ivx: u32, j: u32) {
+    const fn jam_params(self: &mut Self, b: &Body, h: u32, fps: u32, ni: u32, ivx: u32, j: u32) {
         let ps = b.blocks[h as usize].param_start;
         for x in 0..ni {
             self.pmap[(ps + x) as usize] = VPARAM | fps + if x == ivx {
@@ -7034,7 +7034,7 @@ extend LoopOpt {
     // Value `v` of loop `h` in the copy at hand (`unroll`, `linearize`): a header parameter's value
     // (`vmap`), another parameter's (`pmap`, NONE: itself), a body instruction's copy (`imap`), any other
     // as it is.
-    fn um(self: &Self, b: &Body, h: u32, v: Value) Value {
+    const fn um(self: &Self, b: &Body, h: u32, v: Value) Value {
         if v == VNONE {
             return v;
         }
@@ -7659,7 +7659,7 @@ extend LoopOpt {
     // Branch edge `s` out of block `e` toward `u` (`linearize`) into a block `a` of no parameters that ends in
     // a branch on `c` whose one edge enters `u` and whose other enters a block `w` of no parameters that
     // jumps to `u` (no edge passes arguments): `(a, w, c, whether w runs when c holds)`, `a` NONE when not.
-    fn lin_nest(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32, Value, bool) {
+    const fn lin_nest(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32, Value, bool) {
         let a = b.edge_target(s);
         let none = (NONE, NONE, VNONE, false);
         if a == u || a == e || !self.inl[a as usize] || b.blocks[a as usize].param_len != 0 || b.edge_nargs(s) != 0 {
@@ -7690,7 +7690,7 @@ extend LoopOpt {
     // Branch edge `s` out of block `e` toward `u` (`linearize`): the edge into `u` and the block between
     // (NONE: none), or (NONE, NONE) when neither the edge enters `u` nor a block of the loop without
     // parameters that only jumps to `u`.
-    fn lin_side(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32) {
+    const fn lin_side(self: &Self, b: &Body, s: u32, e: u32, u: u32) (u32, u32) {
         let a = b.edge_target(s);
         if a == u {
             return (s, NONE);
@@ -7750,7 +7750,7 @@ extend LoopOpt {
     }
 
     // The `split_base` select of address `a`, `select c, x, y` + i * size, VNONE when none.
-    fn split_addr(self: &Self, b: &Body, a: Value) Value {
+    const fn split_addr(self: &Self, b: &Body, a: Value) Value {
         if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_PTRADD {
             return VNONE;
         }
@@ -7779,7 +7779,7 @@ extend LoopOpt {
 
     // `v` when it is a select of the loop, `select c, x, y`, of two pointers from before the loop, else
     // VNONE: a load through `v + i * size` reads `x + i * size` or `y + i * size`.
-    fn split_base(self: &Self, b: &Body, v: Value) Value {
+    const fn split_base(self: &Self, b: &Body, v: Value) Value {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || !self.defined_in(v) {
             return VNONE;
         }
@@ -7815,7 +7815,7 @@ extend LoopOpt {
 
     // Whether the loop (body blocks `e` then `u`) reads or writes in every iteration the element load `t`
     // reads: an access in `e` or `u` through the same address and offset, of the same size.
-    fn every_iteration(self: &Self, b: &Body, e: u32, u: u32, t: Inst) bool {
+    const fn every_iteration(self: &Self, b: &Body, e: u32, u: u32, t: Inst) bool {
         let n = type_bytes(t.ty, 8);
         let blks: [u32; 2] = [e, u];
         for blk in blks {
@@ -7893,7 +7893,7 @@ extend LoopOpt {
 
     // Value `v` of the old body as `linearize` copied it into the new block (`imap`, `pmap`); any other
     // value as it is.
-    fn lin_map(self: &Self, v: Value) Value {
+    const fn lin_map(self: &Self, v: Value) Value {
         if v == VNONE {
             return v;
         }
@@ -7944,7 +7944,7 @@ extend LoopOpt {
     // An access of the loop's blocks before `linearize` (`lold`) through pointer `x` (its address `x`, or `x`
     // plus an offset or index) inlined from where instruction `o` was (`Body.inl`, so in the scopes `o` is
     // in): its alias class and object an access through `x` from `o` has. NONE when none.
-    fn base_access(self: &Self, b: &Body, x: Value, o: u32) u32 {
+    const fn base_access(self: &Self, b: &Body, x: Value, o: u32) u32 {
         let site = if b.inl.len() == 0 {
             0u32
         } else {
@@ -7966,7 +7966,7 @@ extend LoopOpt {
     }
 
     // An instruction's original for the alias classes: itself, or for one `linearize` made its source.
-    fn orig(self: &Self, i: u32) u32 {
+    const fn orig(self: &Self, i: u32) u32 {
         let base = self.lsave[0];
         return if base != 0 && i >= base && (i - base) as usize < self.lorig.len() && self.lorig[(i - base) as usize] != NONE {
             self.lorig[(i - base) as usize]
@@ -8372,7 +8372,7 @@ extend LoopOpt {
     }
 
     // Whether an instruction of body `ub` (but its terminator) may write memory.
-    fn body_writes(self: &Self, b: &Body, ub: Block) bool {
+    const fn body_writes(self: &Self, b: &Body, ub: Block) bool {
         let _ = self;
         for i in ub.start..ub.start + ub.len - 1 {
             if writes_memory(b.insts[i as usize]) {
@@ -8989,7 +8989,7 @@ extend LoopOpt {
     }
 
     // The identity of reduction operation `op` on lanes of type `ty`: its bits.
-    fn identity(self: &Self, b: &Body, op: u8, ty: u8) u64 {
+    const fn identity(self: &Self, b: &Body, op: u8, ty: u8) u64 {
         let _ = b;
         if op == O_AND {
             return 0xFFFFFFFFFFFFFFFF;
@@ -9048,7 +9048,7 @@ extend LoopOpt {
 
     // Whether the plan's scalar copies of body `u` have reductions, each an integer product by a value from
     // before the loop (`vpowers`).
-    fn all_powers(self: &Self, b: &Body, u: u32) bool {
+    const fn all_powers(self: &Self, b: &Body, u: u32) bool {
         if !self.vone || self.vred.len() == 0 {
             return false;
         }
@@ -9105,7 +9105,7 @@ extend LoopOpt {
         return self.vi(b, Inst { op: O_XOR, ty: mt, aux: 0, a: m, b: full, c: 0 }, l);
     }
 
-    fn cond_store(self: &Self, i: u32) u32 {
+    const fn cond_store(self: &Self, i: u32) u32 {
         for x in 0..self.lcs.len() {
             if self.lcs[x] == i {
                 return x as u32;
@@ -9293,7 +9293,7 @@ extend LoopOpt {
 
     // The argument of call reduction update `i` (`call_red`, or the operand of the sum of `ieee_red`'s)
     // that is not its accumulator.
-    fn call_other(self: &Self, b: &Body, i: u32) Value {
+    const fn call_other(self: &Self, b: &Body, i: u32) Value {
         let t = b.insts[i as usize];
         if t.op == O_SELECT {
             let q = b.insts[t.b as usize];
@@ -9356,7 +9356,7 @@ extend LoopOpt {
     }
 
     // The comparison flag reduction update `i` (`bool_red`) takes.
-    fn bool_other(self: &Self, b: &Body, i: u32) Value {
+    const fn bool_other(self: &Self, b: &Body, i: u32) Value {
         let t = b.insts[i as usize];
         return ast::pick(t.b == t.a, t.c, t.b);
     }
@@ -9369,7 +9369,7 @@ extend LoopOpt {
 
     // The operation of reduction `r`: its update's, or for a conditional one (`cond_red`) the update's the
     // select takes; an integer difference's lanes, which hold the sums taken away less, add.
-    fn red_op(self: &Self, b: &Body, r: u32) u8 {
+    const fn red_op(self: &Self, b: &Body, r: u32) u8 {
         if self.vbo[r as usize] != 0 {
             return self.vbo[r as usize];
         }
@@ -9682,7 +9682,7 @@ extend LoopOpt {
     }
 
     // Whether `v` is a parameter, instruction or flag of header `h`.
-    fn of_header(self: &Self, b: &Body, h: u32, v: Value) bool {
+    const fn of_header(self: &Self, b: &Body, h: u32, v: Value) bool {
         let hb = b.blocks[h as usize];
         if v == VNONE {
             return false;
@@ -9696,7 +9696,7 @@ extend LoopOpt {
     }
 
     // The index of header `h`'s value `v` in `hvals` (NONE: none).
-    fn hix(self: &Self, b: &Body, h: u32, v: Value) u32 {
+    const fn hix(self: &Self, b: &Body, h: u32, v: Value) u32 {
         let hb = b.blocks[h as usize];
         if (v & VPARAM) != 0 {
             return self.hp[((v & ~VPARAM) - hb.param_start) as usize];
@@ -9707,7 +9707,7 @@ extend LoopOpt {
         return self.hi[(v - hb.start) as usize];
     }
 
-    fn set_hix(self: &mut Self, b: &Body, h: u32, v: Value, x: u32) {
+    const fn set_hix(self: &mut Self, b: &Body, h: u32, v: Value, x: u32) {
         let hb = b.blocks[h as usize];
         if (v & VPARAM) != 0 {
             self.hp[((v & ~VPARAM) - hb.param_start) as usize] = x;
@@ -9720,7 +9720,7 @@ extend LoopOpt {
 
     // `v` as the loop's blocks past header `h` read it after rotation: a body parameter's new number, a
     // header value's body parameter.
-    fn rn(self: &Self, b: &Body, h: u32, v: Value) Value {
+    const fn rn(self: &Self, b: &Body, h: u32, v: Value) Value {
         if v == VNONE {
             return v;
         }
@@ -9737,7 +9737,7 @@ extend LoopOpt {
     }
 
     // `v` of header `h` in the header's copy (`cps`, `cis`); any other as it is.
-    fn hc(self: &Self, b: &Body, h: u32, v: Value) Value {
+    const fn hc(self: &Self, b: &Body, h: u32, v: Value) Value {
         if !self.of_header(b, h, v) {
             return v;
         }
@@ -10668,7 +10668,7 @@ extend LoopOpt {
 
     // Whether `x` is `(n - 1) - q`, the index from the end of a loop that keeps `q` below `n` (`checks`): it
     // wraps nowhere and stays at most `n - 1`.
-    fn mirrored(self: &Self, b: &Body, x: Value, q: Value, n: Value) bool {
+    const fn mirrored(self: &Self, b: &Body, x: Value, q: Value, n: Value) bool {
         if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || !self.defined_in(x) {
             return false;
         }
@@ -10930,7 +10930,7 @@ extend LoopOpt {
     // Whether a branch on the guard `version` would make (`gx`, `gy`, `gcond`) already enters preheader
     // `p` where the guard fails: the loop is the copy that keeps its checks. Where it holds, the checks
     // hold too.
-    fn guarded(self: &Self, b: &Body, p: u32) bool {
+    const fn guarded(self: &Self, b: &Body, p: u32) bool {
         for k in 0..b.blocks.len() {
             let t = term(b, k as u32);
             if t.op == O_BR && b.edge_target(t.c) == p && b.edge_target(t.b) != p && self.is_guard(b, t.a) {
@@ -11169,7 +11169,7 @@ extend LoopOpt {
     }
 
     // Whether `v` is the guard `version` makes: the comparisons in order, joined by `and`.
-    fn is_guard(self: &Self, b: &Body, v: Value) bool {
+    const fn is_guard(self: &Self, b: &Body, v: Value) bool {
         let mut c = v;
         let mut k = self.gx.len();
         // Each step reads one comparison.
@@ -11270,7 +11270,7 @@ extend LoopOpt {
     }
 
     // Whether `x` is `q - 1` (`down_by_one`), defined in the loop.
-    fn down_of(self: &Self, b: &Body, x: Value, q: Value) bool {
+    const fn down_of(self: &Self, b: &Body, x: Value, q: Value) bool {
         return x != VNONE && (x & (VPARAM | VFLAG)) == 0 && self.defined_in(x) && down_by_one(b, b.insts[x as usize], q);
     }
 
@@ -11300,7 +11300,7 @@ extend LoopOpt {
     // recurrence, which pays for the lengths that stay live through the copy), an exit test `q <u n`, no
     // wrap test, every check of `q + c` with a length of `n`'s type, each in a block every iteration that
     // reaches the latch runs (one that dominates it).
-    fn clip_ok(self: &Self, b: &Body, h: u32, u: u32, dpre: []u32, dpost: []u32) bool {
+    const fn clip_ok(self: &Self, b: &Body, h: u32, u: u32, dpre: []u32, dpost: []u32) bool {
         if b.blocks[h as usize].param_len < 2 || !self.gplain || self.gcmp != C_ULT || self.grev || self.hn.len() != 0 || self.gq != NONE || self.gn == VNONE {
             return false;
         }
@@ -11463,7 +11463,7 @@ extend LoopOpt {
     // Whether value `x` of a block that starts at `sa` and holds `n` instructions is `y` of one that starts
     // at `sb`: the same value defined before both (or two loads of one block that read the same memory,
     // nothing between them writing any), or the same instruction of each.
-    fn same_val(self: &Self, b: &Body, x: Value, y: Value, sa: u32, sb: u32, n: u32) bool {
+    const fn same_val(self: &Self, b: &Body, x: Value, y: Value, sa: u32, sb: u32, n: u32) bool {
         let xi = x & ~VFLAG;
         let yi = y & ~VFLAG;
         let ina = x != VNONE && (x & VPARAM) == 0 && xi >= sa && xi < sa + n;
@@ -11987,7 +11987,7 @@ extend LoopOpt {
     }
 
     // `v`, or the landing block's parameter for it (from `base`) when it leaves the loop.
-    fn landed(self: &Self, v: Value, base: u32) Value {
+    const fn landed(self: &Self, v: Value, base: u32) Value {
         for q in 0..self.lout.len() {
             if self.lout[q] == v {
                 return VPARAM | base + q as u32;
@@ -12030,7 +12030,7 @@ extend LoopOpt {
     }
 
     // Whether value `v` is defined in the loop at hand.
-    fn defined_in(self: &Self, v: Value) bool {
+    const fn defined_in(self: &Self, v: Value) bool {
         if v == VNONE {
             return false;
         }
@@ -12311,7 +12311,7 @@ extend LoopOpt {
     }
 
     // The copy's value for `v`: a loop value's copy, any other as it is.
-    fn cv(self: &Self, v: Value) Value {
+    const fn cv(self: &Self, v: Value) Value {
         if !self.defined_in(v) {
             return v;
         }
@@ -12394,7 +12394,7 @@ const fn mem_op(op: u8) bool {
 
 // The terminator of block `k`.
 // Whether `t` is `q - 1` (or `q + -1`).
-fn down_by_one(b: &Body, t: Inst, q: Value) bool {
+const fn down_by_one(b: &Body, t: Inst, q: Value) bool {
     if t.op == O_SUB {
         return t.a == q && is_const(b, t.b) && raw_const(b, t.b) == 1;
     }
@@ -12410,7 +12410,7 @@ fn down_by_one(b: &Body, t: Inst, q: Value) bool {
 
 // The `vop` lane comparison (a `SIMD_CMP_*` code and VOP_SIGNED) of comparison `t` (`icmp`, `fcmp`),
 // NONE16 when none matches it: an equality, an order of integers, an ordered order of floats, `une`.
-fn cmp_code(t: Inst) u16 {
+const fn cmp_code(t: Inst) u16 {
     if t.op != O_ICMP && t.op != O_FCMP {
         return NONE16;
     }
@@ -12434,7 +12434,7 @@ fn cmp_code(t: Inst) u16 {
 }
 
 // Branch terminator of block `k` as a jump to its taken edge (`side` 0) or its other one.
-fn fix_branch(b: &mut Body, k: u32, side: u8) {
+const fn fix_branch(b: &mut Body, k: u32, side: u8) {
     let bk = b.blocks[k as usize];
     let i = (bk.start + bk.len - 1) as usize;
     let t = b.insts[i];
@@ -12445,7 +12445,7 @@ fn fix_branch(b: &mut Body, k: u32, side: u8) {
 // Whether block `k` is a failure path: cold, or ending in a panic or a trap, or a block of loads and stores
 // that jumps to one (a place `opt::promote_places` keeps in a register, stored back on the way out), at
 // most COLD_HOPS of those.
-fn cold(b: &Body, k: u32) bool {
+const fn cold(b: &Body, k: u32) bool {
     let mut x = k;
     for _ in 0..COLD_HOPS {
         let t = term(b, x);
@@ -12504,7 +12504,7 @@ const fn vconv_ok(op: u8, from: u8, to: u8, ptr: u32) bool {
 }
 
 // Whether `v` is the length of the slice whose pointer load `pl` reads: a load of the word after it.
-fn slice_len(b: &Body, pl: Inst, v: Value, ptr: u32) bool {
+const fn slice_len(b: &Body, pl: Inst, v: Value, ptr: u32) bool {
     if (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -12539,7 +12539,7 @@ fn min_of_len(b: &Body, v: Value, pl: Inst, ptr: u32, depth: u32) bool {
 
 // Whether `v` is narrow operand `x` of a sum (`LoopOpt::narrow_of`), or for a constant one (`x` VNONE) the
 // constant `k` in the low bits `top` covers.
-fn same_lane(b: &Body, v: Value, x: Value, k: u64, top: u64) bool {
+const fn same_lane(b: &Body, v: Value, x: Value, k: u64, top: u64) bool {
     return if x != VNONE {
         v == x
     } else {
@@ -12564,7 +12564,7 @@ fn vpush(b: &mut Body, t: Inst, l: u32) Value {
 // The type of value `v`: an instruction's, a block parameter's, or a checked operation's flag (`i8`).
 
 // Whether `v` is the least or greatest of two values, `select (x < y), x, y` or its mirror (`bound_min`).
-fn least_of_two(b: &Body, v: Value) bool {
+const fn least_of_two(b: &Body, v: Value) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
         return false;
     }
@@ -12627,7 +12627,7 @@ fn cap_const(b: &Body, ptr: u32, v: Value, depth: u32) u64 {
 // makes: `mulhu(n, k) >> s`; `((n - h) >> 1 + h) >> (s - 1)` with `h = mulhu(n, k)`, which is `n * (2^w + k)`
 // over `2^(w + s)`; or for 32 bits `trunc((zext(n) * k) >> (32 + s))`. The multiplier `m` (`k`, or
 // `2^w + k`) is `2^(w + s) / d` rounded up and errs by at most `2^s` (Granlund and Montgomery 1994).
-fn exact_quotient(b: &Body, ptr: u32, q: Value, n: Value, d: u64) bool {
+const fn exact_quotient(b: &Body, ptr: u32, q: Value, n: Value, d: u64) bool {
     if d < 2 || q == VNONE || (q & (VPARAM | VFLAG)) != 0 || is_vec(b.insts[q as usize].ty) {
         return false;
     }
@@ -12691,7 +12691,7 @@ fn exact_quotient(b: &Body, ptr: u32, q: Value, n: Value, d: u64) bool {
 }
 
 // `k` when `h` is `mulhu(n, k)` for a constant `k`.
-fn high_of(b: &Body, ptr: u32, h: Value, n: Value) Option<u64> {
+const fn high_of(b: &Body, ptr: u32, h: Value, n: Value) Option<u64> {
     if !is_op(b, h, O_MULHU) || b.insts[h as usize].a != n || !is_const(b, b.insts[h as usize].b) {
         return None;
     }
@@ -12720,7 +12720,7 @@ const fn private_obj(o: u32) bool {
     return o != NONE && (o & OBJ_PRIVATE) != 0;
 }
 
-fn is_const(b: &Body, v: Value) bool {
+const fn is_const(b: &Body, v: Value) bool {
     return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_ICONST;
 }
 
@@ -12825,7 +12825,7 @@ const fn p_zero(w: u32) Poly {
 }
 
 // The facts of value `v` the loop does not define.
-fn const_fact(b: &Body, ptr: u32, v: Value) Poly {
+const fn const_fact(b: &Body, ptr: u32, v: Value) Poly {
     let w = type_bits(b.type_of(v), ptr);
     if is_const(b, v) {
         return p_const(w, sign_extend(raw_const(b, v), w));
@@ -12867,7 +12867,7 @@ const fn scaled(f: Poly, w: u32) Poly {
 }
 
 // The facts of `x op y` in `w` bits, `op` an addition, a subtraction or a multiplication.
-fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
+const fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
     let st = p_st(x.st, y.st);
     if st != PS_YES {
         return p_of(st);
@@ -12921,7 +12921,7 @@ fn arith_fact(op: u8, x: Poly, y: Poly, w: u32) Poly {
 }
 
 // The value of `x`; clears `ok` when there is none.
-fn ck(x: Option<i64>, ok: &mut bool) i64 {
+const fn ck(x: Option<i64>, ok: &mut bool) i64 {
     if let Some(v) = x {
         return v;
     }
@@ -12930,7 +12930,7 @@ fn ck(x: Option<i64>, ok: &mut bool) i64 {
 }
 
 // The interval of the products of intervals `x` and `y`; clears `ok` when one overflows.
-fn products(x: Poly, y: Poly, ok: &mut bool) (i64, i64) {
+const fn products(x: Poly, y: Poly, ok: &mut bool) (i64, i64) {
     let a = ck(x.lo.checked_mul(y.lo), ok);
     let b = ck(x.lo.checked_mul(y.hi), ok);
     let c = ck(x.hi.checked_mul(y.lo), ok);
@@ -12941,7 +12941,7 @@ fn products(x: Poly, y: Poly, ok: &mut bool) (i64, i64) {
 // The facts of instruction `t` (`w` bits) from its operands' (`fa`, `fb`, each PS_YES, not all of
 // degree 0): ring operations keep a polynomial, a conversion keeps it in the bits it keeps, an exact right
 // shift by a constant divides it.
-fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
+const fn op_fact(b: &Body, ptr: u32, t: Inst, fa: Poly, fb: Poly, w: u32) Poly {
     let op = t.op;
     if op == O_ADD || op == O_SUB || op == O_MUL {
         return arith_fact(op, fa, fb, w);
@@ -13021,7 +13021,7 @@ extend MemRun as Copy {}
 /// Whether instruction `t` of a loop computes its value without an effect and without a trap, so the loop
 /// may not run: the arithmetic, comparisons, conversions and selects of scalars, a division by a constant
 /// it may take (not 0, a signed one not -1).
-pub(package) fn cf_pure(b: &Body, t: Inst) bool {
+pub(package) const fn cf_pure(b: &Body, t: Inst) bool {
     let op = t.op;
     if is_vec(t.ty) || op == O_ADDO || op == O_SUBO || op == O_MULO {
         return false;
@@ -13033,7 +13033,7 @@ pub(package) fn cf_pure(b: &Body, t: Inst) bool {
 }
 
 // Whether quotient or remainder `t` (a scalar) is by a constant it may take: not 0, a signed one not -1.
-fn by_constant(b: &Body, t: Inst) bool {
+const fn by_constant(b: &Body, t: Inst) bool {
     if !is_const(b, t.b) || t.ty == T_I128 {
         return false;
     }
@@ -13042,7 +13042,7 @@ fn by_constant(b: &Body, t: Inst) bool {
 }
 
 // Whether addresses `x` and `y` are one: the same value, or the same `ptradd` of the same operands.
-fn same_address(b: &Body, x: Value, y: Value) bool {
+const fn same_address(b: &Body, x: Value, y: Value) bool {
     if x == y {
         return true;
     }
@@ -13084,7 +13084,7 @@ const fn iconst_of(ty: u8, v: u64) Inst {
 }
 
 // The amount constant `v` shifts by (a wide constant's when its high word is 0); ~0 when it is none.
-fn shift_amount(b: &Body, v: Value) u64 {
+const fn shift_amount(b: &Body, v: Value) u64 {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return ~0u64;
     }
@@ -13099,7 +13099,7 @@ fn shift_amount(b: &Body, v: Value) u64 {
 }
 
 // The 64 bits of integer constant `v`, as stored.
-fn raw_const(b: &Body, v: Value) u64 {
+const fn raw_const(b: &Body, v: Value) u64 {
     let t = b.insts[v as usize];
     return t.a as u64 | t.b as u64 << 32;
 }
@@ -13628,7 +13628,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, np
 // Whether `piv_at(b, p, x, _)` lies in the slot `p.base` points into, where that gives a constant address
 // of a slot (`x` a constant, `p.base` a slot's address plus constants): its offset from 0 to the slot's
 // size. True for any other.
-fn piv_in_slot(b: &Body, p: Piv, x: Value) bool {
+const fn piv_in_slot(b: &Body, p: Piv, x: Value) bool {
     if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || b.insts[x as usize].op != O_ICONST {
         return true;
     }
@@ -13735,7 +13735,7 @@ const fn pc_last(pa: []u32, ps: []u32, k: u32) u32 {
 // The body and the latch of loop header `h` through its successor `s` (`pointer_counts`), `(NONE, NONE)`
 // for none: `s` when it is a predecessor of `h` that only `h` enters; else `s`, only `h` entering it,
 // and the block it branches to that only it enters and that jumps to `h` alone.
-fn pc_body(b: &Body, h: u32, s: u32, pa: []u32, ps: []u32) (u32, u32) {
+const fn pc_body(b: &Body, h: u32, s: u32, pa: []u32, ps: []u32) (u32, u32) {
     if s == h || pc_in(pa, s) != 1 {
         return (NONE, NONE);
     }
@@ -14059,7 +14059,7 @@ fn pc_loop(b: &mut Body, h: u32, ptr: u32, pa: []u32, ps: []u32, map: &mut Vecto
 
 // The edge of terminator `t` (a jump or a branch) into block `h`; NONE when none, or when the other edge of a
 // branch enters `h` or `u` too.
-fn pc_edge(b: &Body, t: Inst, h: u32, u: u32) u32 {
+const fn pc_edge(b: &Body, t: Inst, h: u32, u: u32) u32 {
     if t.op == O_JMP {
         return ast::pick(b.edge_target(t.a) == h, t.a, NONE);
     }
@@ -14078,7 +14078,7 @@ fn pc_edge(b: &Body, t: Inst, h: u32, u: u32) u32 {
 
 // Whether `v` is a pointer parameter of header `hb` (body `ub`, latch `lb`, back edge `back`) that steps by a
 // constant (`pc_step`).
-fn pc_ptr(b: &Body, hb: Block, ub: Block, lb: Block, back: u32, v: Value) bool {
+const fn pc_ptr(b: &Body, hb: Block, ub: Block, lb: Block, back: u32, v: Value) bool {
     return piv_param(hb, v) && b.params[(v & ~VPARAM) as usize] == T_PTR && pc_step(
         b,
         ub,
@@ -14090,7 +14090,7 @@ fn pc_ptr(b: &Body, hb: Block, ub: Block, lb: Block, back: u32, v: Value) bool {
 
 // The step of pointer parameter `r` when `v`, its value on the back edge, is an in-bounds `ptradd r + k` of
 // block `ub` or `lb` with `k` not 0 and a scale's size at most; else 0.
-fn pc_step(b: &Body, ub: Block, lb: Block, r: Value, v: Value) i64 {
+const fn pc_step(b: &Body, ub: Block, lb: Block, r: Value, v: Value) i64 {
     if !piv_inst(ub, v) && !piv_inst(lb, v) {
         return 0;
     }
@@ -14128,12 +14128,12 @@ fn counter_step(b: &Body, h: u32, back: u32, q: u32) i64 {
 
 // How many times the instructions and edges of the body read `x`, `y` and `z`, values before the first
 // change (`cnt`, `piv_count`).
-fn piv_uses(cnt: &Vector<u32>, ni: usize, npar: usize, x: Value, y: Value, z: Value) (u32, u32, u32) {
+const fn piv_uses(cnt: &Vector<u32>, ni: usize, npar: usize, x: Value, y: Value, z: Value) (u32, u32, u32) {
     return (piv_reads(cnt, ni, npar, x), piv_reads(cnt, ni, npar, y), piv_reads(cnt, ni, npar, z));
 }
 
 // `piv_uses` of one value: 0 for a flag or a value made since.
-fn piv_reads(cnt: &Vector<u32>, ni: usize, npar: usize, v: Value) u32 {
+const fn piv_reads(cnt: &Vector<u32>, ni: usize, npar: usize, v: Value) u32 {
     if v == VNONE || (v & VFLAG) != 0 {
         return 0;
     }
@@ -14208,7 +14208,7 @@ fn piv_mapped(b: &mut Body, t0: Inst, map: &Vector<Value>, ni: usize, npar: usiz
 }
 
 // The last instruction of block `k` that reads or writes memory or calls when it is a store, else NONE.
-fn last_store(b: &Body, k: u32) u32 {
+const fn last_store(b: &Body, k: u32) u32 {
     let bk = b.blocks[k as usize];
     let mut i = bk.start + bk.len - 1;
     while i > bk.start {
@@ -14225,7 +14225,7 @@ fn last_store(b: &Body, k: u32) u32 {
 }
 
 // Whether the operands of `t` are `x` and `y`, in either order (`t.a`, `t.b`; a select's `t.b`, `t.c`).
-fn of_pair(t: Inst, x: Value, y: Value) bool {
+const fn of_pair(t: Inst, x: Value, y: Value) bool {
     let (p, q) = if t.op == O_SELECT {
         (t.b, t.c)
     } else {
@@ -14286,7 +14286,7 @@ pub(package) const fn lane_fn(name: str) u8 {
 
 // The two vectors whose even (`odd` 0) or odd (1) lanes `v` of `b` is (`vunzip`): (VNONE, VNONE) for
 // another value.
-fn unzipped(b: &Body, v: Value, odd: u16) (Value, Value) {
+const fn unzipped(b: &Body, v: Value, odd: u16) (Value, Value) {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_VUNZIP || b.insts[v as usize].aux != odd {
         return (VNONE, VNONE);
     }
@@ -14300,7 +14300,7 @@ const fn lane_wise(o: u8) bool {
 }
 
 // Whether `x` and `y` of `b` are one value or two loads of one type, address, offset and flags.
-fn same_access(b: &Body, x: Value, y: Value) bool {
+const fn same_access(b: &Body, x: Value, y: Value) bool {
     if x == y {
         return true;
     }
@@ -14339,7 +14339,7 @@ struct ScanLane {
 }
 
 // The instruction that ends block `k` of `b`.
-fn tp_at(b: &Body, k: u32) u32 {
+const fn tp_at(b: &Body, k: u32) u32 {
     let bk = b.blocks[k as usize];
     return bk.start + bk.len - 1;
 }

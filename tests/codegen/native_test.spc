@@ -1772,7 +1772,7 @@ int main(void) {
 }
 
 // How many 32-bit words of the `.text` section of ELF object `o` have bits `mask` equal to `want`.
-fn elf_text_count(o: &Vector<u8>, mask: u32, want: u32) u32 {
+const fn elf_text_count(o: &Vector<u8>, mask: u32, want: u32) u32 {
     let shoff = le_at(o, 0x28, 8) as usize;
     let shsize = le_at(o, 0x3A, 2) as usize;
     let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
@@ -1792,7 +1792,7 @@ fn elf_text_count(o: &Vector<u8>, mask: u32, want: u32) u32 {
 }
 
 // The file offset and size of the `.text` section of ELF object `o`.
-fn elf_text(o: &Vector<u8>) (usize, usize) {
+const fn elf_text(o: &Vector<u8>) (usize, usize) {
     let shoff = le_at(o, 0x28, 8) as usize;
     let shsize = le_at(o, 0x3A, 2) as usize;
     let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
@@ -1808,7 +1808,7 @@ fn elf_text(o: &Vector<u8>) (usize, usize) {
 
 // The relocations of the read-only data of ELF object `o` (`.rela.rodata`): how many, and how many of them
 // name a section symbol.
-fn elf_rodata_rels(o: &Vector<u8>) (u32, u32) {
+const fn elf_rodata_rels(o: &Vector<u8>) (u32, u32) {
     let shoff = le_at(o, 0x28, 8) as usize;
     let shsize = le_at(o, 0x3A, 2) as usize;
     let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
@@ -1838,7 +1838,7 @@ fn elf_rodata_rels(o: &Vector<u8>) (u32, u32) {
 }
 
 // The `n`-byte little-endian integer at `o[at..]`.
-fn le_at(o: &Vector<u8>, at: usize, n: usize) u64 {
+const fn le_at(o: &Vector<u8>, at: usize, n: usize) u64 {
     let mut v: u64 = 0;
     for k in 0..n {
         v |= o[at + k] as u64 << (8 * k) as u64;
@@ -4580,7 +4580,7 @@ int main(void) {
 }
 
 // Whether `bytes` holds `seq` at some offset.
-fn holds(bytes: &Vector<u8>, seq: []u8) bool {
+const fn holds(bytes: &Vector<u8>, seq: []u8) bool {
     let n = seq.len();
     if bytes.len() < n {
         return false;
@@ -6193,7 +6193,7 @@ int main(void) {
 }
 
 // Whether `bytes` holds an x86-64 `movaps` between two registers (0F 28, a register ModRM byte).
-fn movaps_rr(bytes: &Vector<u8>) bool {
+const fn movaps_rr(bytes: &Vector<u8>) bool {
     for at in 0..bytes.len() - 2 {
         if bytes[at] == 0x0F && bytes[at + 1] == 0x28 && bytes[at + 2] >= 0xC0 {
             return true;
@@ -6322,7 +6322,7 @@ int main(void) {
 
 // Whether `bytes` holds an x86-64 64-bit copy into rax (`mov rax, r`: REX.W 89, a register ModRM byte
 // whose destination is rax).
-fn copies_into_rax(bytes: &Vector<u8>) bool {
+const fn copies_into_rax(bytes: &Vector<u8>) bool {
     for at in 0..bytes.len() - 2 {
         let m = bytes[at + 2];
         if (bytes[at] == 0x48 || bytes[at] == 0x4C) && bytes[at + 1] == 0x89 && m >= 0xC0 && (m & 7) == 0 && m != 0xC0 {
@@ -6494,7 +6494,7 @@ int main(void) {
 
 // Whether `bytes` holds an x86-64 64-bit `mov` between a register and `[rsp + d]` (REX.W 89 or 8B, a
 // ModRM byte with a SIB byte of rsp alone).
-fn rsp_moves(bytes: &Vector<u8>) bool {
+const fn rsp_moves(bytes: &Vector<u8>) bool {
     for at in 0..bytes.len() - 3 {
         let r = bytes[at];
         let m = bytes[at + 2];
@@ -6620,7 +6620,7 @@ b2:
 
 // Whether `bytes` holds an x86-64 64-bit copy between two registers (REX.W 89 or 8B, a register ModRM
 // byte) but the frame's `mov rbp, rsp`.
-fn reg_copies(bytes: &Vector<u8>) bool {
+const fn reg_copies(bytes: &Vector<u8>) bool {
     for at in 0..bytes.len() - 2 {
         let m = bytes[at + 2];
         if (bytes[at] & 0xFA) == 0x48 && (bytes[at + 1] == 0x89 || bytes[at + 1] == 0x8B) && m >= 0xC0 && !(bytes[at] == 0x48 && bytes[at + 1] == 0x89 && m == 0xE5) {
@@ -15029,7 +15029,7 @@ fn vector_conversions_and_lane_shifts_run() {
 }
 
 // The little-endian `n`-byte word at byte `at` of `b`.
-fn word_at(b: &Vector<u8>, at: u32, n: u32) u32 {
+const fn word_at(b: &Vector<u8>, at: u32, n: u32) u32 {
     let mut w: u32 = 0;
     for k in 0..n {
         w |= b[(at + k) as usize] as u32 << 8 * k;
@@ -15039,7 +15039,7 @@ fn word_at(b: &Vector<u8>, at: u32, n: u32) u32 {
 
 // The file offset of the raw data of the COFF section named `name` of object `b`, its size in the high
 // half; 0 when there is none.
-fn coff_section(b: &Vector<u8>, name: str) u64 {
+const fn coff_section(b: &Vector<u8>, name: str) u64 {
     let ns = word_at(b, 2, 2);
     let at = 20 + word_at(b, 16, 2);
     for s in 0..ns {
@@ -17782,7 +17782,7 @@ b0(v0: ptr, v1: ptr):
 }
 
 // Whether `obj` holds a 4-byte little-endian word `w` with `w & mask == want`.
-fn holds_word(obj: &Vector<u8>, mask: u32, want: u32) bool {
+const fn holds_word(obj: &Vector<u8>, mask: u32, want: u32) bool {
     let mut k: usize = 0;
     while k + 4 <= obj.len() {
         let w = obj[k] as u32 | obj[k + 1] as u32 << 8 | obj[k + 2] as u32 << 16 | obj[k + 3] as u32 << 24;
@@ -17954,7 +17954,7 @@ fn a_step_chain_read_past_its_loop_keeps_its_value() {
 
 // Whether `obj` holds a 256-bit VEX instruction of map 0F3A with prefix 66 (C4, map 3, L 1, pp 01), opcode
 // `op`, of registers (ModRM mod 3) and immediate `imm`.
-fn holds_vex3(obj: &Vector<u8>, op: u8, imm: u8) bool {
+const fn holds_vex3(obj: &Vector<u8>, op: u8, imm: u8) bool {
     for i in 0..obj.len() - 5 {
         if obj[i] == 0xC4 && (obj[i + 1] & 0x1F) == 3 && (obj[i + 2] & 0x07) == 0x05 && obj[i + 3] == op && obj[i + 4] >= 0xC0 && obj[i + 5] == imm {
             return true;

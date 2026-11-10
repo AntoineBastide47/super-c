@@ -81,7 +81,7 @@ pub fn api_cancel(b: &mut bench::Bencher) {
 const APP: str = "/virtual/app/main.spc";
 
 // The little-endian u32 at byte `o` of `p`.
-fn get_u32(p: &Vector<u8>, o: usize) u32 {
+const fn get_u32(p: &Vector<u8>, o: usize) u32 {
     let b = p.as_ptr();
     return (unsafe b[o]) as u32 | (unsafe b[o + 1]) as u32 << 8 | (unsafe b[o + 2]) as u32 << 16 | (unsafe b[o + 3]) as u32 << 24;
 }

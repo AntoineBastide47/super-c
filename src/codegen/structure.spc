@@ -99,7 +99,7 @@ extend Shape {
 
     // Immediate dominators by Cooper, Harvey and Kennedy's iteration over reverse postorder, over `l`'s
     // predecessor lists. A reducible graph settles in two passes; each pass is bounded by the edges.
-    fn dominators(self: &mut Self, b: &Body, l: &lv::Live) {
+    const fn dominators(self: &mut Self, b: &Body, l: &lv::Live) {
         let nb = b.blocks.len();
         if self.order.len() == 0 {
             return;

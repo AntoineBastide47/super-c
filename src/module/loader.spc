@@ -7305,7 +7305,7 @@ extend Package {
     }
 
     /// The package declaration index, to change.
-    pub(package) fn idx_mut(self: &mut Self) &mut PkgIndex {
+    pub(package) const fn idx_mut(self: &mut Self) &mut PkgIndex {
         return unsafe &mut *self.index.get();
     }
 

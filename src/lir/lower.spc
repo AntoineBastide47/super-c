@@ -3292,7 +3292,7 @@ extend Lower {
 
     // Each set of the candidates (`share_plan`'s `ci`) live in core block `k` of `b`, from `live` at its
     // entry, recorded in `conf`.
-    fn share_walk(b: &irc::CoreBody, k: usize, live: u64, ci: &Vector<u32>, conf: &mut Vector<u64>) {
+    const fn share_walk(b: &irc::CoreBody, k: usize, live: u64, ci: &Vector<u32>, conf: &mut Vector<u64>) {
         let bb = b.blocks[k];
         let mut cur = live;
         Lower::share_meet(cur, conf);
@@ -3312,7 +3312,7 @@ extend Lower {
     }
 
     // Each candidate of live set `cur` meets the others.
-    fn share_meet(cur: u64, conf: &mut Vector<u64>) {
+    const fn share_meet(cur: u64, conf: &mut Vector<u64>) {
         for j in 0..conf.len() {
             if (cur >> j as u64 & 1) != 0 {
                 conf[j] |= cur;
@@ -3325,7 +3325,7 @@ extend Lower {
     // instruction that may read the slot (a load through it or through an address that is no other
     // slot's), copy from it or stop the program on a path that could read it while unwinding (a call, a
     // panic, any other access of memory). Each becomes a constant nothing uses, which `tidy` drops.
-    fn dead_stores(self: &mut Self, a: Value) {
+    const fn dead_stores(self: &mut Self, a: Value) {
         if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || self.b.insts[a as usize].op != O_SLOTADDR {
             return;
         }
@@ -11779,7 +11779,7 @@ extend Lower {
 
 // Member `pj` (a PJ_FIELD) of members `fl`, after a downcast to `variant` (NODE_NONE: none), into `out`;
 // whether there is one.
-fn member_in(fl: []FieldAt, pj: irc::Projection, variant: NodeId, out: &mut FieldAt) bool {
+const fn member_in(fl: []FieldAt, pj: irc::Projection, variant: NodeId, out: &mut FieldAt) bool {
     for k in 0..fl.len() {
         let f = fl[k];
         if f.idx == 0xFFFFFFFF {

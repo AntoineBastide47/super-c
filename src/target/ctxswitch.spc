@@ -225,7 +225,7 @@ const WIN_ENTRY: str<'static> = M"(  movq %r13, %rcx
 
 // The instructions of context operation `op` for x86-64 (`x64`; `win`: the Microsoft x64 convention) or
 // arm64, with their unwind directives, after the label.
-fn lines(op: u16, x64: bool, win: bool) str<'static> {
+const fn lines(op: u16, x64: bool, win: bool) str<'static> {
     let swap = op == ir::SYS_CTXSWAP;
     if win && x64 {
         return ast::pick(swap, WIN_SWAP, WIN_ENTRY);

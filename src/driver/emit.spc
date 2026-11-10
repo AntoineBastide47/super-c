@@ -10759,7 +10759,7 @@ extend Segs {
         self.drop_text();
     }
 
-    fn drop_text(self: &mut Self) {
+    const fn drop_text(self: &mut Self) {
         if !self.keep {
             self.base += self.txt.len() as u32;
             self.txt.truncate(0);
@@ -13075,7 +13075,7 @@ fn nat_trust(p: &loader::Package, t: &mut tuc::Tuc, held: &mut Vector<Option<lho
 }
 
 // The inline budget of `opt-level` `opt` and code-generation flags `cg`.
-fn inline_budget(opt: i32, cg: u64) il::Budget {
+const fn inline_budget(opt: i32, cg: u64) il::Budget {
     if (cg & bman::CG_INLINE) == 0 {
         return il::NONE_INLINES;
     }
@@ -13103,7 +13103,7 @@ fn inline_budget(opt: i32, cg: u64) il::Budget {
 // vectors (LLVM's AArch64 maximum; 2 left a sum's accumulator latency exposed: 0.20 against 0.15 s), 1 at
 // "s"; a loop's final values take up to 512 instructions of copied iterations at every level (LLVM's
 // IndVarSimplify runs from 1).
-fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
+const fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
     return lu::Budgets {
         peel: if (cg & bman::CG_UNROLL) == 0 {
             0u32
@@ -14894,8 +14894,9 @@ fn cs_check_fn(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: u
     }
     let f = unsafe (*a).ext(fnode).function;
     // A build-constant site this build decided removed code another build runs, which may call what a
-    // constant cannot (an extern under LOCKDEP): such a function gets no suggestion.
-    if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).bc_cut_at(
+    // constant cannot (an extern under LOCKDEP): such a function gets no suggestion. Nor does a gated
+    // function: another build compiles another variant of it.
+    if f.is_const() || f.is_extern() || f.body == NODE_NONE || unsafe (*a).build_gated(fnode) || unsafe (*a).bc_cut_at(
         fnode,
         unsafe (*a).at_const(fnode).span,
     ) {
@@ -15607,7 +15608,7 @@ fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, t
 }
 
 // The value of hex digits `s`, None for another text or more than 16 digits.
-fn parse_hex64(s: str) Option<u64> {
+const fn parse_hex64(s: str) Option<u64> {
     if s.len() == 0 || s.len() > 16 {
         return None;
     }
@@ -17252,7 +17253,7 @@ fn native_test_main(p: &loader::Package, plan: &TestPlan, out: &mut Vector<u8>) 
 pub(package) const NAT_REGISTRY: str = "__sc_registry_n";
 
 // The section of the target's constructor pointers.
-fn ctor_section(p: &loader::Package) str<'static> {
+const fn ctor_section(p: &loader::Package) str<'static> {
     let f = tgt::obj_of(p.build_target).name;
     return if f == "macho" {
         "__DATA,__mod_init_func,mod_init_funcs"

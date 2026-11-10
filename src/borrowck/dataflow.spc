@@ -337,11 +337,11 @@ const fn bit_clear(v: &mut Vector<u64>, i: u32) {
 
 // Copy the `w` words at `src` to `dst`. Unsafe: the caller promises `w` valid words at each, in rows
 // that do not overlap. As views, a `[]mut` and a `[]` are apart, so the copy needs no overlap check.
-unsafe fn copy_row(dst: *mut u64, src: *const u64, w: usize) {
+unsafe const fn copy_row(dst: *mut u64, src: *const u64, w: usize) {
     copy_words(unsafe SliceMut::<u64> { ptr: dst, len: w }, unsafe Slice::<u64> { ptr: src, len: w });
 }
 
-fn copy_words(dst: []mut u64, src: []u64) {
+const fn copy_words(dst: []mut u64, src: []u64) {
     for k in 0..dst.len() {
         dst[k] = src[k];
     }

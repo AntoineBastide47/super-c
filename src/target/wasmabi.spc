@@ -87,7 +87,7 @@ pub(package) fn classify(b: &Body, sig: u32, vregs: u32, out: &mut WSig) {
 }
 
 // The passing of signature type `pt`.
-fn pass(b: &Body, pt: u32, vregs: u32, unknown: &mut bool) Pass {
+const fn pass(b: &Body, pt: u32, vregs: u32, unknown: &mut bool) Pass {
     if (pt & AGG) == 0 {
         let t = pt as u8;
         if t == T_I128 {
@@ -162,7 +162,7 @@ pub(package) fn encode(s: &WSig, out: &mut Vector<u8>) {
 
 /// The bytes and alignment variadic argument of LIR type `pt` takes in the buffer: a scalar its own (at
 /// least 4), an aggregate passed through a pointer the pointer's.
-pub(package) fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
+pub(package) const fn va_slot(b: &Body, pt: u32, vregs: u32) (u32, u32) {
     let mut unk = false;
     let p = pass(b, pt, vregs, &mut unk);
     if p.kind == P_DIRECT || p.kind == P_I128 {

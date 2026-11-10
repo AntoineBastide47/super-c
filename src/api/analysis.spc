@@ -64,28 +64,28 @@ struct Fact {
 
 extend<'p> Pass<'p> {
     /// The checked session.
-    pub fn session(self: &Self) &'p ses::Session {
+    pub const fn session(self: &Self) &'p ses::Session {
         return self.s;
     }
 
     /// The module's file.
-    pub fn file(self: &Self) str<'p> {
+    pub const fn file(self: &Self) str<'p> {
         return self.s.package().modules[self.module as usize].file.as_str();
     }
 
     /// The module's path (`app::util`).
-    pub fn module_path(self: &Self) str<'p> {
+    pub const fn module_path(self: &Self) str<'p> {
         return self.s.package().modules[self.module as usize].path.as_str();
     }
 
     /// The module's syntax tree.
-    pub fn tree(self: &Self) &'p syn::SyntaxTree {
+    pub const fn tree(self: &Self) &'p syn::SyntaxTree {
         return self.tree;
     }
 
     /// The analyzer's configuration text (`[tools.<id>]` of the project's build.toml, or what the runner
     /// was given); empty when none.
-    pub fn config(self: &Self) str<'p> {
+    pub const fn config(self: &Self) str<'p> {
         return self.config;
     }
 
@@ -131,7 +131,7 @@ extend<'p> Pass<'p> {
 
     /// Fact `key` that analyzer `analyzer` (this one, or one it requires) recorded for module `module`, which
     /// this module imports, directly or through others; None when there is none or the module is no import.
-    pub fn fact(self: &Self, analyzer: str, module: str, key: str) Option<Slice<u8>> {
+    pub const fn fact(self: &Self, analyzer: str, module: str, key: str) Option<Slice<u8>> {
         let mut ai = NONE;
         for i in 0..self.reads.len() {
             if self.run.ids[self.reads[i] as usize].as_str() == analyzer {
@@ -183,7 +183,7 @@ struct Run {
 
 extend Run {
     // Whether module `m` imports the module of path `path`.
-    fn reaches(self: &Self, m: u32, path: str) bool {
+    const fn reaches(self: &Self, m: u32, path: str) bool {
         for k in 0..self.paths.len() {
             if self.paths[k].as_str() == path {
                 return self.closure[m as usize][k];
@@ -298,7 +298,7 @@ extend Runner {
     }
 
     /// Limit each analyzer's time and fact bytes per module.
-    pub fn set_budget(self: &mut Self, b: Budget) {
+    pub const fn set_budget(self: &mut Self, b: Budget) {
         self.budget = b;
     }
 
@@ -431,7 +431,7 @@ extend Runner {
         return h;
     }
 
-    fn cached(self: &Self, a: u32, module: str, key: u64) i64 {
+    const fn cached(self: &Self, a: u32, module: str, key: u64) i64 {
         for i in 0..self.cache.len() {
             let c = &self.cache[i];
             if c.analyzer == a && c.key == key && c.module.as_str() == module {
@@ -553,7 +553,7 @@ fn closures(p: &loader::Package) Vector<Vector<bool>> {
     return out;
 }
 
-fn finding_cmp(x: &Finding, y: &Finding) i32 {
+const fn finding_cmp(x: &Finding, y: &Finding) i32 {
     let c = x.file.cmp(&y.file);
     if c != 0 {
         return c;
@@ -575,7 +575,7 @@ fn finding_cmp(x: &Finding, y: &Finding) i32 {
     return x.message.cmp(&y.message);
 }
 
-fn fnv_u64(h: u64, v: u64) u64 {
+const fn fnv_u64(h: u64, v: u64) u64 {
     let mut x = h;
     for i in 0..8 {
         x = (x ^ v >> (i * 8) as u64 & 0xFF).wrapping_mul(0x100000001b3);
@@ -583,7 +583,7 @@ fn fnv_u64(h: u64, v: u64) u64 {
     return x;
 }
 
-fn fnv_bytes(h: u64, b: Slice<u8>) u64 {
+const fn fnv_bytes(h: u64, b: Slice<u8>) u64 {
     let mut x = fnv_u64(h, b.len() as u64);
     for i in 0..b.len() {
         x = (x ^ b[i] as u64).wrapping_mul(0x100000001b3);
@@ -591,7 +591,7 @@ fn fnv_bytes(h: u64, b: Slice<u8>) u64 {
     return x;
 }
 
-fn fnv_str(h: u64, s: str) u64 {
+const fn fnv_str(h: u64, s: str) u64 {
     let mut x = fnv_u64(h, s.len() as u64);
     for i in 0..s.len() {
         x = (x ^ s.byte_at(i) as u64).wrapping_mul(0x100000001b3);
@@ -740,7 +740,7 @@ fn stdlib_env(name: str, default: str) String {
 }
 
 // The 1-based line and byte column of offset `off` in `text`.
-fn line_col(text: str, off: u32) (u32, u32) {
+const fn line_col(text: str, off: u32) (u32, u32) {
     let mut line: u32 = 1;
     let mut ls: usize = 0;
     let end = (off as usize).min(text.len());

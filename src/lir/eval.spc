@@ -1584,7 +1584,7 @@ extend Eval {
         return true;
     }
 
-    fn vec_float(self: &mut Self, f: &Frame, b: &Body, t: Inst, dst: u32) bool {
+    const fn vec_float(self: &mut Self, f: &Frame, b: &Body, t: Inst, dst: u32) bool {
         let lt = lane_type(t.ty);
         let n = lanes(t.ty);
         let lb = type_bits(lt, 8);
@@ -3271,7 +3271,7 @@ extend Eval {
 
     // The index forms (`swizzle`, `shuffle`, `swizzle_or_zero`, `swizzle_oob`) and `compress`,
     // `expand`.
-    fn vrearrange(self: &mut Self, b: &Body, t: Inst, c: u8, w: &[u32; 4], ty: &[u8; 4], dst: u32) bool {
+    const fn vrearrange(self: &mut Self, b: &Body, t: Inst, c: u8, w: &[u32; 4], ty: &[u8; 4], dst: u32) bool {
         let rule = core::simd_op(c).rule;
         let vt = ast::pick(rule == core::SR_MASKED, ty[1], ty[0]);
         let lt = lane_type(vt);

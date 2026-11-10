@@ -985,7 +985,7 @@ extend Promoter {
     // Mark W_SPANS each load of `tmp[lo .. hi]` (one slot's, sorted) that may span fields (`Acc.kind`)
     // and overlaps another access that is not the same field (the same offset in a type that converts, or a
     // lane of it), and each constant store that holds such an access whole. Whether any.
-    fn spans(self: &mut Self, lo: usize, hi: usize) bool {
+    const fn spans(self: &mut Self, lo: usize, hi: usize) bool {
         let mut any = false;
         for j in lo..hi {
             let a = self.tmp[j];
@@ -1104,7 +1104,7 @@ extend Promoter {
 
     // Whether an integer load of slot `s` (which may span fields, reading 0 where none is) covers one of
     // bytes `off` to `off + n` that no field holds.
-    fn gaps_read(self: &Self, s: u32, off: i64, n: i64) bool {
+    const fn gaps_read(self: &Self, s: u32, off: i64, n: i64) bool {
         for a in 0..self.accs.len() {
             let ac = self.accs[a];
             if ac.slot != s || (ac.kind & W_LOAD) == 0 {
@@ -1648,7 +1648,7 @@ extend Promoter {
     // copy `i`, past constants, addresses and other loads only (at most AFTER_MAX): a read each run of the
     // copy reaches holds its type's values in the source's bytes too, which a read under a test of another
     // field does not (an `Ok` payload's, where the bytes may be an `Err`'s). (0, 0): none.
-    fn bound_after(self: &Self, b: &Body, i: u32, s: u32, fl: Fld) (u16, u32) {
+    const fn bound_after(self: &Self, b: &Body, i: u32, s: u32, fl: Fld) (u16, u32) {
         let mut end = i + 1 + AFTER_MAX;
         if end > b.insts.len() as u32 {
             end = b.insts.len() as u32;

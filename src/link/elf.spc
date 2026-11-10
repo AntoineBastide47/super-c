@@ -1032,7 +1032,7 @@ const fn alloc(s: ISec) bool {
 
 // Whether input section `s` is kept at all: loaded (and reached, under garbage collection), or debug
 // information.
-fn kept(l: &L, s: ISec) bool {
+const fn kept(l: &L, s: ISec) bool {
     if s.ty == SHT_RELA || s.ty == SHT_SYMTAB || s.ty == SHT_STRTAB || s.ty == SHT_GROUP || s.ty == 0 {
         return false;
     }
@@ -1214,7 +1214,7 @@ fn reach_sym(l: &mut L, k: u32, work: &mut Vector<u32>) {
 
 // The section the first relocation at offset `off` of section `s` (index `ix`) refers to (NONE32: none,
 // or no relocation there).
-fn reloc_section(l: &L, b: []u8, s: u32, ix: []u64, off: u64) u32 {
+const fn reloc_section(l: &L, b: []u8, s: u32, ix: []u64, off: u64) u32 {
     let k = first_at(ix, off);
     if k < ix.len() && ix[k] >> 32 == off {
         let sc = l.secs[s as usize];
@@ -1303,7 +1303,7 @@ fn eh_records(l: &mut L, b: []u8, e: u32, ix: []u64) {
 }
 
 // The record of `L.eh[first .. last]` that holds offset `off` of its section (NONE32: none).
-fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
+const fn eh_find(l: &L, first: u32, last: u32, off: u32) u32 {
     if first == last || off < l.eh[first as usize].old {
         return NONE32;
     }
@@ -1523,14 +1523,14 @@ fn slot_addr(l: &L, g: u32, k: u32) u64 {
 // Whether x86-64 relocation `r` against global `g` (NONE: a local symbol) is a call through a GOT slot,
 // `call *x@GOTPCREL(%rip)` (`op` its two opcode bytes), of a function the output defines and no library
 // may replace: it becomes `addr32 call x` (the psABI's relaxation), which needs no slot.
-fn call_relaxes(l: &L, g: u32, r: Rel, op: u16) bool {
+const fn call_relaxes(l: &L, g: u32, r: Rel, op: u16) bool {
     if l.a64 || r.ty != R_X86_64_GOTPCRELX || op != 0xFF15 {
         return false;
     }
     return g == NONE || l.gs[g as usize].kind == G_DEF && !(l.shared && exported(l, g));
 }
 
-fn is_got(l: &L, ty: u32) bool {
+const fn is_got(l: &L, ty: u32) bool {
     if l.a64 {
         return ty == R_AARCH64_ADR_GOT_PAGE || ty == R_AARCH64_LD64_GOT_LO12_NC;
     }
@@ -2538,7 +2538,7 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
 }
 
 // Whether symbol `k` (a global: its definition) lies in a loaded section garbage collection dropped.
-fn dropped_target(l: &L, k: u32) bool {
+const fn dropped_target(l: &L, k: u32) bool {
     let x = def_section(l, k);
     if x == NONE32 {
         return false;

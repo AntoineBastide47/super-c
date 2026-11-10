@@ -5387,12 +5387,12 @@ union MutPtr<T> {
     m: *mut T,
 }
 
-fn cast_mut<T>(p: *const T) *mut T {
+const fn cast_mut<T>(p: *const T) *mut T {
     let u = MutPtr::<T> { c: p };
     return u.m;
 }
 
-fn addr_mut<T>(a: usize) *mut T {
+const fn addr_mut<T>(a: usize) *mut T {
     let u = MutPtr::<T> { a: a };
     return u.m;
 }

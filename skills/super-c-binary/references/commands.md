@@ -260,7 +260,9 @@ modules (`lint_pub_applies` in `src/driver/emit.spc`). A `[lib]` build lints its
 once: in the static pass when `type` holds `static`, else in the shared pass. `--const` never suggests a
 `@no_const` function: a `const fn` whose call always panics turns the call into an error in every
 program that makes it, so a function such as std's `panic` takes the tag (`cs_check_fn` in
-`src/driver/emit.spc`). It lints std modules only when a listed file names one. A listed file of
+`src/driver/emit.spc`). Nor does it suggest a `@platform`-, `@arch`- or `@when`-gated function, or a
+function that calls one: another build compiles another variant (`Ast::build_gated`), so every target
+gets the same suggestions. It lints std modules only when a listed file names one. A listed file of
 the std tree in use (`std/` or `ffi/` beside the `SC_STD_DIR` directory, such as a copy inside the
 workspace) loads as the std module its imports name, wherever the project roots, and so does a
 swept file in the language server (`loader::batch_module`).

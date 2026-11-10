@@ -233,22 +233,22 @@ extend SyntaxTree {
     }
 
     /// The file name the tree was parsed under.
-    pub fn path(self: &Self) str {
+    pub const fn path(self: &Self) str {
         return self.path.as_str();
     }
 
     /// The parsed text.
-    pub fn text(self: &Self) str {
+    pub const fn text(self: &Self) str {
         return self.text.as_str();
     }
 
     /// The root: the whole file.
-    pub fn root(self: &Self) Node {
+    pub const fn root(self: &Self) Node {
         return Node { t: self, i: 0 };
     }
 
     /// The node of identity `id` (`Node::id`), or None.
-    pub fn node(self: &Self, id: u32) Option<Node> {
+    pub const fn node(self: &Self, id: u32) Option<Node> {
         if id as usize >= self.nodes.len() {
             return None;
         }
@@ -256,22 +256,22 @@ extend SyntaxTree {
     }
 
     /// The lexer and parser errors, in the order they were found.
-    pub fn errors(self: &Self) Slice<SyntaxError> {
+    pub const fn errors(self: &Self) Slice<SyntaxError> {
         return self.errors.as_slice();
     }
 
     /// Whether the text lexes and parses without an error.
-    pub fn is_valid(self: &Self) bool {
+    pub const fn is_valid(self: &Self) bool {
         return self.errors.len() == 0;
     }
 
     /// Every token, comments included, in text order.
-    pub fn tokens(self: &Self) Tokens {
+    pub const fn tokens(self: &Self) Tokens {
         return Tokens { t: self, at: 0, end: self.tokens.len() as u32 };
     }
 
     /// The token that holds byte `off`, or None in whitespace.
-    pub fn token_at(self: &Self, off: u32) Option<Token> {
+    pub const fn token_at(self: &Self, off: u32) Option<Token> {
         let k = self.first_token_from(off);
         if k < self.tokens.len() && self.tokens[k].start() <= off && off < self.tokens[k].end() {
             return Some(Token { t: self, i: k as u32 });
@@ -280,7 +280,7 @@ extend SyntaxTree {
     }
 
     // The first token that ends after `off`.
-    fn first_token_from(self: &Self, off: u32) usize {
+    const fn first_token_from(self: &Self, off: u32) usize {
         let mut lo: usize = 0;
         let mut hi = self.tokens.len();
         while lo < hi {
@@ -412,7 +412,7 @@ extend<'t> Node<'t> {
     }
 
     /// The node it is part of; None for the root.
-    pub fn parent(self: &Self) Option<Node<'t>> {
+    pub const fn parent(self: &Self) Option<Node<'t>> {
         let p = self.t.parents[self.i as usize];
         if p == NONE {
             return None;
@@ -421,12 +421,12 @@ extend<'t> Node<'t> {
     }
 
     /// Its direct children, in text order.
-    pub fn children(self: &Self) Children<'t> {
+    pub const fn children(self: &Self) Children<'t> {
         return Children { t: self.t, at: self.i + 1, end: self.t.ends[self.i as usize] };
     }
 
     /// Every node inside it, in preorder (text order, an outer node before the nodes it holds).
-    pub fn descendants(self: &Self) Descendants<'t> {
+    pub const fn descendants(self: &Self) Descendants<'t> {
         return Descendants { t: self.t, at: self.i + 1, end: self.t.ends[self.i as usize] };
     }
 
@@ -463,7 +463,7 @@ extend<'t> Node<'t> {
     }
 
     /// Its identity in its tree (`SyntaxTree::node`): a number, valid while the tree lives.
-    pub fn id(self: &Self) u32 {
+    pub const fn id(self: &Self) u32 {
         return self.i;
     }
 
@@ -508,7 +508,7 @@ extend<'t> Node<'t> {
         return Some(LetSyntax { n: *self });
     }
 
-    fn list(self: &Self, l: NodeList) NodeIter<'t> {
+    const fn list(self: &Self, l: NodeList) NodeIter<'t> {
         return NodeIter { t: self.t, ids: self.t.ast.list(l), at: 0, len: l.len };
     }
 }
@@ -519,7 +519,7 @@ pub struct FnSyntax<'t> {
 }
 
 extend<'t> FnSyntax<'t> {
-    pub fn node(self: &Self) Node<'t> {
+    pub const fn node(self: &Self) Node<'t> {
         return self.n;
     }
 
@@ -568,7 +568,7 @@ pub struct AggregateSyntax<'t> {
 }
 
 extend<'t> AggregateSyntax<'t> {
-    pub fn node(self: &Self) Node<'t> {
+    pub const fn node(self: &Self) Node<'t> {
         return self.n;
     }
 
@@ -592,7 +592,7 @@ pub struct ImportSyntax<'t> {
 }
 
 extend<'t> ImportSyntax<'t> {
-    pub fn node(self: &Self) Node<'t> {
+    pub const fn node(self: &Self) Node<'t> {
         return self.n;
     }
 
@@ -617,7 +617,7 @@ pub struct CallSyntax<'t> {
 }
 
 extend<'t> CallSyntax<'t> {
-    pub fn node(self: &Self) Node<'t> {
+    pub const fn node(self: &Self) Node<'t> {
         return self.n;
     }
 
@@ -636,7 +636,7 @@ pub struct LetSyntax<'t> {
 }
 
 extend<'t> LetSyntax<'t> {
-    pub fn node(self: &Self) Node<'t> {
+    pub const fn node(self: &Self) Node<'t> {
         return self.n;
     }
 
@@ -733,16 +733,16 @@ pub struct Token<'t> {
 extend<'t> Token<'t> as Copy {}
 
 extend<'t> Token<'t> {
-    pub fn kind(self: &Self) TokenKind {
+    pub const fn kind(self: &Self) TokenKind {
         return token_kind(self.t.tokens[self.i as usize].kind());
     }
 
-    pub fn range(self: &Self) TextRange {
+    pub const fn range(self: &Self) TextRange {
         let k = self.t.tokens[self.i as usize];
         return TextRange { start: k.start(), end: k.end() };
     }
 
-    pub fn text(self: &Self) str<'t> {
+    pub const fn text(self: &Self) str<'t> {
         let k = self.t.tokens[self.i as usize];
         return self.t.text.as_str().slice(k.start() as usize, k.end() as usize);
     }
@@ -776,7 +776,7 @@ extend<'t> Tokens<'t> as Iterator<Token<'t>> {
 }
 
 /// The syntax kind of AST node kind `k`. Not part of the API.
-pub(package) fn kind_of(k: NodeKind) SyntaxKind {
+pub(package) const fn kind_of(k: NodeKind) SyntaxKind {
     return switch k {
         NODE_NONE_KIND => Error,
         NODE_PROGRAM => Program,
@@ -853,7 +853,7 @@ pub(package) fn kind_of(k: NodeKind) SyntaxKind {
     };
 }
 
-fn token_kind(k: tt::TokenType) TokenKind {
+const fn token_kind(k: tt::TokenType) TokenKind {
     return switch k {
         Identifier => Ident,
         Label => TokenKind::Label,
@@ -1063,7 +1063,7 @@ extend Builder {
     }
 
     /// The text so far, unchecked.
-    pub fn text(self: &Self) str {
+    pub const fn text(self: &Self) str {
         return self.out.as_str();
     }
 

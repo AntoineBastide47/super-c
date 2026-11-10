@@ -1710,7 +1710,7 @@ fn release_closed(p: &mut loader::Package, ovk: &Vector<i64>) {
 // Whether module `m` keeps its body syntax between rounds without a document: the constant engine demanded
 // one of its bodies (`Package.body_hold`), or the package keeps every module's outside std and `ffi/`
 // (`Package.keep_bodies`).
-fn kept(p: &loader::Package, m: usize) bool {
+const fn kept(p: &loader::Package, m: usize) bool {
     return m < p.body_hold.len() && p.body_hold[m] || p.keep_bodies && p.modules[m].pkg != loader::PKG_STD && p.modules[m].pkg != loader::PKG_FFI;
 }
 

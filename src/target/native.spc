@@ -92,7 +92,7 @@ const NONE16: u16 = 0xFFFF;
 
 // The context operation (`SYS_CTXSWAP`, `SYS_CTXENTRY`) whose naked function package function `s` is, or
 // NONE16.
-fn ctx_op(p: &Package, s: u32) u16 {
+const fn ctx_op(p: &Package, s: u32) u16 {
     let b = &p.bodies[p.syms[s as usize].def as usize];
     if !b.naked {
         return NONE16;

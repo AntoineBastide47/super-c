@@ -159,7 +159,7 @@ extend Parser {
     }
 
     // A visibility modifier: none, `pub`, `pub(module)` or `pub(package)`.
-    pub(package) fn parse_vis(self: &mut Self) u8 {
+    pub(package) const fn parse_vis(self: &mut Self) u8 {
         if !self.match(TokenType::Pub) {
             return VIS_PRIVATE;
         }
@@ -905,12 +905,12 @@ extend Parser {
 
     // Whether the next token is the identifier `w`: a contract keyword (`requires`, `ensures`,
     // `decreases`, `invariant`) is a keyword only in its position.
-    fn at_word(self: &Self, w: str) bool {
+    const fn at_word(self: &Self, w: str) bool {
         return self.check(TokenType::Identifier) && self.text_is(self.raw_peek(), w);
     }
 
     // Whether the next token starts a function's contract clause.
-    fn at_fn_contract(self: &Self) bool {
+    const fn at_fn_contract(self: &Self) bool {
         return self.at_word("requires") || self.at_word("ensures") || self.at_word("decreases");
     }
 

@@ -129,7 +129,7 @@ const CG_NAMES: [(str<'static>, u64); 23] = [
 ];
 
 // The bits flag `name` names: 0 for none.
-fn cg_bit(name: str) u64 {
+const fn cg_bit(name: str) u64 {
     let names: [](str, u64) = CG_NAMES;
     for k in 0..names.len() {
         if names[k].0 == name {
@@ -141,7 +141,7 @@ fn cg_bit(name: str) u64 {
 
 // Bit `b` into `on` (`set`) or `off`, out of the other; a stack protector's bit sets the others of its
 // group off, and clearing one clears the group.
-fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
+const fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
     let g = if (b & CG_PROTECTS) != 0 {
         CG_PROTECTS
     } else {
@@ -158,7 +158,7 @@ fn cg_put(b: u64, set: bool, on: &mut u64, off: &mut u64) {
 
 /// Command-line flag `arg` (`-f<name>`, `-fno-<name>`, `-ffp-contract=off`) into `on` or `off`: false when
 /// it names no flag.
-pub(package) fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
+pub(package) const fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
     if arg == "-ffp-contract=off" {
         cg_put(CG_FP_CONTRACT, false, on, off);
         return true;
@@ -184,7 +184,7 @@ pub(package) fn cg_flag(arg: str, on: &mut u64, off: &mut u64) bool {
 }
 
 /// Profile key `key` with value `v` into `on` or `off`: false when it names no flag.
-pub(package) fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
+pub(package) const fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
     let b = cg_bit(key);
     if b != 0 {
         cg_put(b, v != negated(b), on, off);
@@ -193,7 +193,7 @@ pub(package) fn cg_key(key: str, v: bool, on: &mut u64, off: &mut u64) bool {
 }
 
 /// Command-line flag `arg` (`-O0` to `-O3`, `-Os`, `-Oz`) as an `opt-level`: OPT_NONE when it is none.
-pub(package) fn opt_flag(arg: str) i32 {
+pub(package) const fn opt_flag(arg: str) i32 {
     if arg.len() != 3 || !arg.starts_with("-O") {
         return OPT_NONE;
     }
@@ -276,7 +276,7 @@ pub(package) const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
 
 /// The link flag that drops what nothing reaches (Mach-O's spelling when `macho`), when the effective
 /// flags `cg` put functions or variables in sections of their own; empty otherwise.
-pub(package) fn link_gc(cg: u64, macho: bool) str<'static> {
+pub(package) const fn link_gc(cg: u64, macho: bool) str<'static> {
     if (cg & (CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS)) == 0 {
         return "";
     }
@@ -450,7 +450,7 @@ pub(package) fn builtins_only<'a>() Manifest<'a> {
 }
 
 /// Whether `path` names a file inside the project: relative, without a `..` segment, not empty.
-pub(package) fn project_path(path: str) bool {
+pub(package) const fn project_path(path: str) bool {
     if path.len() == 0 || path.byte_at(0) == b'/' || path.byte_at(0) == b'\\' || path.find(":") >= 0 {
         return false;
     }
@@ -1159,7 +1159,7 @@ extend Manifest {
 
     /// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over every
     /// profile: whichever the build selects runs with them.
-    pub(package) fn override_profiles(self: &mut Self, opt: i32, on: u64, off: u64) {
+    pub(package) const fn override_profiles(self: &mut Self, opt: i32, on: u64, off: u64) {
         for i in 0..self.profiles.len() {
             let p = &mut self.profiles[i];
             if opt != OPT_NONE {

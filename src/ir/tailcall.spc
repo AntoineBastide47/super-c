@@ -274,7 +274,7 @@ fn result_fields(p: &loader::Package, b: &ir::CoreBody, ty: TypeId) Vector<NodeI
 // The member of the call's result that projection `pj` of a holder of the whole result reads: the
 // index of its field declaration (`pj.sub`) in `fields` (a single tuple result), else slot `pj.data`
 // (several results).
-fn member_of(b: &ir::CoreBody, fields: &Vector<NodeId>, pj: ir::Projection) u32 {
+const fn member_of(b: &ir::CoreBody, fields: &Vector<NodeId>, pj: ir::Projection) u32 {
     if pj.kind != ir::PJ_FIELD {
         return ir::IR_NONE;
     }
@@ -291,7 +291,7 @@ fn member_of(b: &ir::CoreBody, fields: &Vector<NodeId>, pj: ir::Projection) u32 
 
 // Whether `rv` builds a tuple of the members of the call's result in order: member `i` read from a
 // holder of the whole result (`whole`) or from a holder of member `i` (`mem_l`, `mem_k`).
-fn rebuilds(
+const fn rebuilds(
     b: &ir::CoreBody,
     rv: &ir::Rvalue,
     fields: &Vector<NodeId>,

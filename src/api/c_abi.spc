@@ -53,12 +53,12 @@ pub struct CItem {
 }
 
 // The status of `code`: its position in `Code`, plus one (0 is success).
-fn status(code: Code) i32 {
+const fn status(code: Code) i32 {
     return code as i32 + 1;
 }
 
 // A string view of C bytes `p[0..n]`; empty for a null pointer.
-fn view<'a>(p: *const u8, n: usize) str<'a> {
+const fn view<'a>(p: *const u8, n: usize) str<'a> {
     if p == null || n == 0 {
         return "";
     }
@@ -106,7 +106,7 @@ fn current(h: *mut Handle, gen: u64) i32 {
 
 /// `superc_api_version`.
 @export("superc_api_version")
-pub fn api_version() u32 {
+pub const fn api_version() u32 {
     return API_VERSION;
 }
 
@@ -150,7 +150,7 @@ pub fn session_free(h: *mut Handle) {
 
 /// `superc_session_generation`: the generation every read names; a change makes a new one.
 @export("superc_session_generation")
-pub fn session_generation(h: *const Handle) u64 {
+pub const fn session_generation(h: *const Handle) u64 {
     if h == null {
         return 0;
     }
@@ -229,7 +229,7 @@ pub fn session_diagnostics(h: *mut Handle, gen: u64, out: *mut *mut Res) i32 {
 }
 
 // A failed precondition's status, or the invalid-argument status for a missing out-parameter.
-fn pick_status(st: i32) i32 {
+const fn pick_status(st: i32) i32 {
     if st != 0 {
         return st;
     }
@@ -300,7 +300,7 @@ pub fn format_text(text: *const u8, text_len: usize, out: *mut *mut Res) i32 {
 
 /// `superc_result_count`.
 @export("superc_result_count")
-pub fn result_count(r: *const Res) usize {
+pub const fn result_count(r: *const Res) usize {
     if r == null {
         return 0;
     }
@@ -309,7 +309,7 @@ pub fn result_count(r: *const Res) usize {
 
 /// `superc_result_text`: the result's text; valid until the result is freed.
 @export("superc_result_text")
-pub fn result_text(r: *const Res, ptr: *mut *const u8, len: *mut usize) {
+pub const fn result_text(r: *const Res, ptr: *mut *const u8, len: *mut usize) {
     if r == null || ptr == null || len == null {
         return;
     }
@@ -320,7 +320,7 @@ pub fn result_text(r: *const Res, ptr: *mut *const u8, len: *mut usize) {
 /// `superc_result_item`: item `i` into `*item`, whose `size` the caller set; strings valid until the result is
 /// freed.
 @export("superc_result_item")
-pub fn result_item(r: *const Res, i: usize, item: *mut CItem) i32 {
+pub const fn result_item(r: *const Res, i: usize, item: *mut CItem) i32 {
     if r == null || item == null || i >= unsafe (*r).items.len() || (unsafe (*item).size) as usize < sizeof(CItem) {
         return status(Code::InvalidArgument);
     }
@@ -350,7 +350,7 @@ pub fn result_free(r: *mut Res) {
 
 /// `superc_code_name`: the stable name of diagnostic code `code` (empty for an unknown one); static storage.
 @export("superc_code_name")
-pub fn code_name(code: u32, ptr: *mut *const u8, len: *mut usize) {
+pub const fn code_name(code: u32, ptr: *mut *const u8, len: *mut usize) {
     if ptr == null || len == null {
         return;
     }
@@ -390,7 +390,7 @@ pub struct TableV1 {
 /// size): `SUPERC_VERSION_MISMATCH` for a version this library does not fill. A table of a newer minor version
 /// only appends functions, so a client compiled against an older header reads the prefix it knows.
 @export("superc_api_table")
-pub fn api_table(version: u32, table: *mut TableV1, size: usize) i32 {
+pub const fn api_table(version: u32, table: *mut TableV1, size: usize) i32 {
     if version != TABLE_V1 {
         return status(Code::VersionMismatch);
     }

@@ -194,7 +194,7 @@ extend Installed as Free {
 }
 
 // Whether `id` is a hook id: letters, digits, `.`, `-` and `_`, not empty and not `.` or `..`.
-fn valid_id(id: str) bool {
+const fn valid_id(id: str) bool {
     if id.len() == 0 || id == "." || id == ".." {
         return false;
     }
@@ -442,7 +442,7 @@ fn manifest<'a>() Result<mf::Manifest<'a>, ApiError> {
 }
 
 // The engine context of request `req` over manifest `m`.
-fn context<'a>(m: &mf::Manifest, req: &'a Request) bsys::BuildCtx<'a> {
+const fn context<'a>(m: &mf::Manifest, req: &'a Request) bsys::BuildCtx<'a> {
     return bsys::BuildCtx {
         jobs: req.jobs,
         std_dir: req.std_dir.as_str(),

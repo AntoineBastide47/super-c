@@ -1030,7 +1030,7 @@ const fn dropped(l: &L, s: ISec) bool {
 
 // The input section that holds object address `v` of input section `s`: `s`, or the part of it that
 // holds `v` when dead stripping split it (the last part starting at or before `v`).
-fn part(l: &L, s: u32, v: u64) u32 {
+const fn part(l: &L, s: u32, v: u64) u32 {
     let c = l.secs[s as usize];
     if c.pn == 0 {
         return s;
@@ -1051,7 +1051,7 @@ fn part(l: &L, s: u32, v: u64) u32 {
 // Whether dead stripping splits input section `sc` at its symbols: code and data of the image, not the
 // literals (whole strings and constants), the thread-local sections (one template), the initializer
 // lists, the sections that keep themselves alive and what stays out of the image.
-fn splittable(l: &L, sc: ISec) bool {
+const fn splittable(l: &L, sc: ISec) bool {
     let t = sc.flags & S_TYPE;
     return (t == S_REGULAR || t == S_ZEROFILL) && (sc.flags & (S_ATTR_NO_DEAD_STRIP | S_ATTR_LIVE_SUPPORT)) == 0 && !dropped(
         l,
@@ -1905,7 +1905,7 @@ const fn got_addr(l: &L, f: IFile, symnum: u32) u64 {
 }
 
 // The image address of object address `v` in section `sect` (1-based) of file `f`.
-fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
+const fn section_relative(l: &L, f: IFile, sect: u32, v: u64) u64 {
     let s = l.secs[part(l, f.sec0 + sect - 1, v) as usize];
     return (l.osecs[s.out as usize].addr + s.at).wrapping_add(v.wrapping_sub(s.addr));
 }

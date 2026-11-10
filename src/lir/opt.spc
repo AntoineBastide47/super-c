@@ -743,7 +743,7 @@ extend Opt {
     }
 
     /// Drop the analyses of the body at hand (`tables`): the next body's passes compute their own.
-    pub(package) fn forget(self: &mut Self) {
+    pub(package) const fn forget(self: &mut Self) {
         self.kept = K_NONE;
     }
 
@@ -1667,7 +1667,7 @@ extend Opt {
     }
 
     // Whether a block of a loop of `b` stores. The tables of K_NEST.
-    fn loop_stores(self: &Self, b: &Body) bool {
+    const fn loop_stores(self: &Self, b: &Body) bool {
         for k in 0..b.blocks.len() {
             if self.inner[k] == NONE {
                 continue;
@@ -1687,7 +1687,7 @@ extend Opt {
     // stores as loads, up to `lu::MR_PAIRS`, every other instruction
     // without an effect (`lu::cf_pure`), its blocks ending in jumps, branches or switches, its header no
     // vectorizer's rest. The tables of K_NEST.
-    fn run_loops(self: &Self, b: &Body) bool {
+    const fn run_loops(self: &Self, b: &Body) bool {
         let nb = b.blocks.len();
         for h in 0..nb {
             if self.inner[h] != h as u32 || self.preh[h] == NONE || (b.blocks[h].flags & (BLOCK_NOVEC | BLOCK_EPI)) != 0 {
@@ -2437,7 +2437,7 @@ extend Opt {
     // `base + j * size` and `base + i * size` at one offset, with `j` the header parameter the header's
     // exit test keeps below `i` (`for j in 0..i`, a triangular solve's `x[i] -= l[i][j] * x[j]`), both in
     // bounds: other elements in every iteration.
-    fn below_place(self: &Self, b: &Body, h: u32, s: Inst, t: Inst) bool {
+    const fn below_place(self: &Self, b: &Body, h: u32, s: Inst, t: Inst) bool {
         if (s.a & (VPARAM | VFLAG)) != 0 || (t.a & (VPARAM | VFLAG)) != 0 || s.a == VNONE || t.a == VNONE || s.c != t.c {
             return false;
         }
@@ -2475,7 +2475,7 @@ extend Opt {
     // loop with a preheader whose blocks end in jumps and branches and hold no call nor other write but
     // loads and stores, a non-volatile store through an address from outside the loop, and a load of the
     // same address and offset. The tables of K_NEST.
-    fn placeable(self: &Self, b: &Body) bool {
+    const fn placeable(self: &Self, b: &Body) bool {
         for h in 0..b.blocks.len() as u32 {
             if self.inner[h as usize] != h || self.preh[h as usize] == NONE {
                 continue;
@@ -2654,7 +2654,7 @@ extend Opt {
 
     // Whether `v` is a parameter of loop header `h` or a value from outside the loop: on the entry edge, the
     // edge's argument or itself (`entry_of`).
-    fn entry_val(self: &Self, b: &Body, h: u32, v: Value) bool {
+    const fn entry_val(self: &Self, b: &Body, h: u32, v: Value) bool {
         let hb = b.blocks[h as usize];
         return (v & VPARAM) != 0 && (v & ~VPARAM) >= hb.param_start && (v & ~VPARAM) < hb.param_start + hb.param_len as u32 || self.outside(
             v,
@@ -2663,7 +2663,7 @@ extend Opt {
     }
 
     // `v` on the edge into header `h` whose arguments `args` are: a parameter's argument, else `v`.
-    fn entry_of(b: &Body, h: u32, args: []Value, v: Value) Value {
+    const fn entry_of(b: &Body, h: u32, args: []Value, v: Value) Value {
         let hb = b.blocks[h as usize];
         if (v & VPARAM) != 0 && (v & ~VPARAM) >= hb.param_start && (v & ~VPARAM) < hb.param_start + hb.param_len as u32 {
             return args[((v & ~VPARAM) - hb.param_start) as usize];
@@ -2695,7 +2695,7 @@ extend Opt {
     }
 
     // Whether access `i` is of a read-only data definition of the package (`aobj`), which no write touches.
-    fn rodata(self: &Self, pk: &Package, i: u32) bool {
+    const fn rodata(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
         if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
             return false;
@@ -2704,7 +2704,7 @@ extend Opt {
         return y.kind == SK_DATA && y.def != NONE && pk.data[y.def as usize].readonly;
     }
 
-    fn static_place(self: &Self, pk: &Package, i: u32) bool {
+    const fn static_place(self: &Self, pk: &Package, i: u32) bool {
         let o = self.aobj[i as usize];
         if o == NONE || (o & (lu::OBJ_SLOT | lu::OBJ_PRIVATE | lu::OBJ_FRESH)) != 0 {
             return false;
@@ -3745,7 +3745,7 @@ extend Opt {
 
     // The entry parameter value `v` of `b` is or is address arithmetic on (`oder`), with the constant offset
     // (`ooffs`, OFF_ANY when not constant); NONE for none.
-    fn param_at(self: &Self, b: &Body, v: Value) (u32, i64) {
+    const fn param_at(self: &Self, b: &Body, v: Value) (u32, i64) {
         let k = entry_param(b, v);
         if k != NONE {
             return (k, 0i64);
@@ -3781,7 +3781,7 @@ extend Opt {
     }
 
     // `acc` of address `a` of class `c` (no scope's) in the copies of scopes `m`.
-    fn acc_root(self: &Self, b: &Body, a: Value, c: u8, m: u64) u8 {
+    const fn acc_root(self: &Self, b: &Body, a: Value, c: u8, m: u64) u8 {
         let (base, _) = address_of(b, a);
         // The classes from CL_NOALIAS up, the lowest first: each step takes one bit of `m`.
         let mut left = m & ~class_bit(CL_OTHER);
@@ -4018,7 +4018,7 @@ extend Opt {
     // copy's accesses folded onto the parameter's address are of the parameter's class, which the call's
     // write would not reach; a use outside its copy is one of its roots' base (`escape_bits`). An
     // allocation's class (bits `fresh`) escapes not through a return or a free (`ALLOC_FREE`).
-    fn escaped(self: &mut Self, pk: &Package, b: &Body, scoped: u64, fresh: u64) u64 {
+    const fn escaped(self: &mut Self, pk: &Package, b: &Body, scoped: u64, fresh: u64) u64 {
         let views = any_inner(b);
         let mut out: u64 = 0;
         for i in 0..b.insts.len() {
@@ -4160,7 +4160,7 @@ extend Opt {
     // The alias classes write `i` of `b` touches (`class_bit`): a store's, a copy's or a fill's access
     // class (`acc`); CL_OTHER for any other write, which reaches no exclusive parameter's referent; and,
     // outside a scope's copy, the scope's class too. A free writes none.
-    fn write_bits(self: &Self, pk: &Package, b: &Body, i: u32) u64 {
+    const fn write_bits(self: &Self, pk: &Package, b: &Body, i: u32) u64 {
         let t = b.insts[i as usize];
         if call_alloc(pk, b, t) == ALLOC_FREE {
             return 0;
@@ -4177,7 +4177,7 @@ extend Opt {
     // writes through: `write_bits`, and for each scope class it writes, its roots' base's (`under_bits`).
     // A read outside a copy reaches the root's bytes through that class, and the copy's own accesses folded
     // onto the base's address are of it too.
-    fn read_bits(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
+    const fn read_bits(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
         let mut out = self.write_bits(pk, b, i);
         if self.sbits == 0 || out == 0 {
             return out;
@@ -4213,7 +4213,7 @@ extend Opt {
     // The classes call `t`, instruction `i` of `b`, may write through its arguments (a class a callee does
     // not let escape stays, `escaped`), the owned buffers it reaches through them too (`owned_args`); none
     // for any other instruction.
-    fn arg_bits(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
+    const fn arg_bits(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
         let mut out: u64 = 0;
         if t.op == O_CALL || t.op == O_CALLIND {
             for q in 0..t.aux as u32 {
@@ -4228,7 +4228,7 @@ extend Opt {
     // into its parameter's referent: each whose field's bytes meet the bytes the callee reaches through that
     // argument (`Sym.span`, at the argument's constant offset), every one of that parameter when the offset
     // or the span is unknown. Only a load of the field reaches the buffer while the reference lives.
-    fn owned_args(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
+    const fn owned_args(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst) u64 {
         if self.obits == 0 || t.op != O_CALL && t.op != O_CALLIND {
             return 0;
         }
@@ -4277,7 +4277,7 @@ extend Opt {
     // `h` writes: every write of that class in the loop is a plain store through the load's address value
     // at a constant range apart from the load's (another field of the parameter's referent), or a call
     // whose arguments of that class reach only bytes apart from the load's (`call_apart`).
-    fn fields_apart(self: &Self, pk: &Package, b: &Body, h: u32, t: Inst, cls: u64) bool {
+    const fn fields_apart(self: &Self, pk: &Package, b: &Body, h: u32, t: Inst, cls: u64) bool {
         if (cls & cls - 1) != 0 || (cls & class_bit(CL_OTHER)) != 0 || (self.imprecise[h as usize] & cls) != 0 {
             return false;
         }
@@ -4707,7 +4707,7 @@ extend Opt {
     // pass in registers (but `aggregs`), that only loads outside cold blocks read: their loads may move to the entry's
     // start, where the code generator takes each part's register for its load and the aggregate needs no
     // memory.
-    fn agg_params(self: &mut Self, b: &Body) u64 {
+    const fn agg_params(self: &mut Self, b: &Body) u64 {
         if b.sig == NONE {
             return 0;
         }
@@ -5496,7 +5496,7 @@ extend Opt {
     }
 
     // The scoped table `LOG_*` `t` names.
-    fn table(self: &mut Self, t: u8) &mut Map<u64, u32> {
+    const fn table(self: &mut Self, t: u8) &mut Map<u64, u32> {
         return if t == LOG_PURE {
             &mut self.pure
         } else if t == LOG_MEM {
@@ -5647,7 +5647,7 @@ extend Opt {
     // Whether edges `e0` and `e1` into one block differ in 1 to MAX_SELECTS arguments, each an integer of up
     // to 64 bits, a pointer or a scalar float: the selects of an if-conversion (`diamond`). The walk's
     // replacements apply when `walk`.
-    fn selectable(self: &Self, b: &Body, e0: u32, e1: u32, walk: bool) bool {
+    const fn selectable(self: &Self, b: &Body, e0: u32, e1: u32, walk: bool) bool {
         let jb = b.blocks[b.edge_target(e0) as usize];
         let mut nsel: u32 = 0;
         for q in 0..jb.param_len as u32 {
@@ -5815,7 +5815,7 @@ extend Opt {
     // The value the block edge `e` enters returns as a side `ret_diamond` takes (one predecessor, at most
     // SPEC_MAX instructions before a return of a value or a jump to a block that only returns, parameters
     // only before a return alone: the edge's arguments); VNONE when it is not one.
-    fn ret_arm(self: &Self, b: &Body, e: u32) Value {
+    const fn ret_arm(self: &Self, b: &Body, e: u32) Value {
         let a = b.edge_target(e);
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
@@ -5846,7 +5846,7 @@ extend Opt {
     // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
     // parameters it alone enters that holds at most SPEC_MAX instructions besides its jump, and that block;
     // else `e` and `k`.
-    fn arm(self: &Self, b: &Body, k: u32, e: u32) (u32, u32) {
+    const fn arm(self: &Self, b: &Body, k: u32, e: u32) (u32, u32) {
         let a = b.edge_target(e);
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
@@ -5859,7 +5859,7 @@ extend Opt {
     // The weighted cost, excluding constants, of side `a` of block `k`'s branch (`arm`) that `speculate`
     // would move into `k`: each must be pure and speculable, or a load that cannot fault (`safe_load`);
     // SPEC_MAX + 1 when one is not.
-    fn speculated(self: &Self, pk: &Package, b: &Body, k: u32, a: u32) u32 {
+    const fn speculated(self: &Self, pk: &Package, b: &Body, k: u32, a: u32) u32 {
         if a == k {
             return 0;
         }
@@ -5972,7 +5972,7 @@ extend Opt {
     }
 
     // Whether value `v` (VNONE: none) is defined in block `k` or one dominating it.
-    fn avail(self: &Self, v: Value, k: u32) bool {
+    const fn avail(self: &Self, v: Value, k: u32) bool {
         if v == VNONE {
             return true;
         }
@@ -6823,7 +6823,7 @@ extend Opt {
 
     // `(k, s)` when `v` is `(k << s) + c` (`k * 2^s`, the value of a checked sum too) with `c` a constant
     // from 1 to `2^s` and `s` the constant shift's value; `(VNONE, VNONE)` else.
-    fn chunk_end(self: &Self, pk: &Package, b: &Body, v: Value) (Value, Value) {
+    const fn chunk_end(self: &Self, pk: &Package, b: &Body, v: Value) (Value, Value) {
         let none = (VNONE, VNONE);
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
             return none;
@@ -7870,7 +7870,7 @@ extend Opt {
 
     // Value `v`, or for a parameter of a block with one edge in, the argument that edge passes (a block
     // the walk has not reached yet forwards it later: `forward_params`), at most THROUGH_MAX steps.
-    fn edge_value(self: &Self, b: &Body, v: Value) Value {
+    const fn edge_value(self: &Self, b: &Body, v: Value) Value {
         let mut a = v;
         // Each step crosses one edge.
         for _ in 0..THROUGH_MAX {
@@ -8034,7 +8034,7 @@ extend Opt {
     // The condition that decides edge `ed` out of block `pb`, and whether it holds there: `pb`'s branch, or for
     // a `pb` that only jumps, the branch of its one predecessor into it (a latch after the test). `(VNONE,
     // false)` for none.
-    fn edge_cond(self: &Self, b: &Body, pb: u32, ed: u32) (Value, bool) {
+    const fn edge_cond(self: &Self, b: &Body, pb: u32, ed: u32) (Value, bool) {
         let tp = term(b, pb);
         if tp.op == O_BR && b.edge_target(tp.b) != b.edge_target(tp.c) {
             return (tp.a, ed == tp.b);
@@ -9187,7 +9187,7 @@ extend Opt {
     }
 
     // Whether only block `jb`'s own instructions read its parameters.
-    fn read_here(self: &Self, jb: Block) bool {
+    const fn read_here(self: &Self, jb: Block) bool {
         for q in jb.param_start..jb.param_start + jb.param_len as u32 {
             if self.preader[q as usize] != NONE {
                 return false;
@@ -9337,7 +9337,7 @@ extend Opt {
     // Whether edge `e` of block `k` into `j` is a side of a diamond the walk makes selects of (`diamond`):
     // `k` branches into `j` and into a small block of pure, speculable instructions (`arm`) that jumps to
     // `j`, or `k` is that block.
-    fn diamond_side(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, j: u32) bool {
+    const fn diamond_side(self: &Self, pk: &Package, b: &Body, k: u32, e: u32, j: u32) bool {
         let kt = term(b, k);
         let (p, other) = if kt.op == O_BR && (kt.b == e || kt.c == e) {
             (k, other_edge(kt, e))
@@ -9440,7 +9440,7 @@ extend Opt {
     // Whether reader `x` (`preader`, `ireader`: the block that dominates every block that reads a value of
     // block `j`) stays out of the paths an edge threaded along `j`'s edge `s` takes: none, or a block that
     // a block only `j` enters, through another edge, dominates.
-    fn apart(self: &Self, b: &Body, j: u32, s: u32, x: u32) bool {
+    const fn apart(self: &Self, b: &Body, j: u32, s: u32, x: u32) bool {
         if x == NONE {
             return true;
         }
@@ -9460,7 +9460,7 @@ extend Opt {
 
     // Value `v` of block `j` as it reaches `j` along edge `e`: a parameter of `j` is the edge's argument, a
     // value of another block itself; VNONE for an instruction of `j`.
-    fn along(self: &Self, b: &Body, j: u32, e: u32, v: Value) Value {
+    const fn along(self: &Self, b: &Body, j: u32, e: u32, v: Value) Value {
         if (v & VPARAM) != 0 {
             let jb = b.blocks[j as usize];
             let p = v & ~VPARAM;
@@ -9790,7 +9790,7 @@ extend Opt {
 
     // Value `v`, or, when `v` is a parameter of a block every edge into which passes it one value (a join
     // of two sides that both step an induction), that value.
-    fn one_arg(self: &Self, b: &Body, v: Value) Value {
+    const fn one_arg(self: &Self, b: &Body, v: Value) Value {
         if v == VNONE || (v & VPARAM) == 0 || (v & VFLAG) != 0 {
             return v;
         }
@@ -10153,7 +10153,7 @@ extend Opt {
 
     // The index of the parameter of block `j` that its branch tests, when `j` holds that branch alone,
     // heads no loop and is not block `k`, and neither side heads a loop; NONE when not.
-    fn threadable(self: &Self, b: &Body, k: u32, j: u32) u32 {
+    const fn threadable(self: &Self, b: &Body, k: u32, j: u32) u32 {
         let jb = b.blocks[j as usize];
         let t = term(b, j);
         if j == k || j == 0 || jb.len != 1 || t.op != O_BR || (t.a & VPARAM) == 0 || self.hdr[j as usize] || self.hdr[b.edge_target(
@@ -11656,7 +11656,7 @@ extend Opt {
     }
 
     // Whether edges `e` and `f` pass the same values.
-    fn args_alike(self: &Self, b: &Body, e: u32, f: u32) bool {
+    const fn args_alike(self: &Self, b: &Body, e: u32, f: u32) bool {
         if b.edge_nargs(e) != b.edge_nargs(f) {
             return false;
         }
@@ -12664,7 +12664,7 @@ extend Opt {
     }
 
     // Whether `v` is an `add` or `sub` of a value by a constant.
-    fn counter_step(self: &Self, b: &Body, v: Value) bool {
+    const fn counter_step(self: &Self, b: &Body, v: Value) bool {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
             return false;
         }
@@ -13490,7 +13490,7 @@ extend Opt {
     // `a` passes as its argument `k`, which the callee does not write: a read-only parameter's referent
     // (`REF_READONLY`, through constant offsets), or an exclusive parameter's that no other argument
     // reaches.
-    fn kept_source(self: &Self, b: &Body, i: u32, t: Inst, k: u32, a: Value) bool {
+    const fn kept_source(self: &Self, b: &Body, i: u32, t: Inst, k: u32, a: Value) bool {
         let mut x = a;
         // Each step goes back one offset.
         for _ in 0..FRAME_DEPTH {
@@ -13673,7 +13673,7 @@ extend Opt {
     }
 
     // Whether `c` is a parameter of the header of a loop holding block `k`: a value the loop carries.
-    fn carried(self: &Self, c: Value, k: u32) bool {
+    const fn carried(self: &Self, c: Value, k: u32) bool {
         if (c & (VPARAM | VFLAG)) != VPARAM {
             return false;
         }
@@ -13843,7 +13843,7 @@ extend Opt {
     // it reads the same value wherever it runs; else the value the stores that write exactly its bytes all
     // store when one of them dominates it (as LLVM's mem2reg promotes an alloca of one store: on any path
     // to the load the last write of those bytes is one of those stores').
-    fn private_load(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
+    const fn private_load(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
         let s = self.base(b, t.a) as usize;
         if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX {
             return PRIV_NONE;
@@ -13875,7 +13875,7 @@ extend Opt {
 
     // The address and offset load `t` (instruction `i` of block `k`) of private memory may read instead
     // (`copy_of`); VNONE for none.
-    fn copy_source(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) (Value, u32) {
+    const fn copy_source(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) (Value, u32) {
         let (src, rel, _) = self.copy_of(b, k, i, t.a, t.c as i32, type_bytes(t.ty, pk.ptr_bytes));
         return (src, rel);
     }
@@ -13883,7 +13883,7 @@ extend Opt {
     // The bytes `n` at offset `at` past address `a` of private memory hold at instruction `i` of block `k`:
     // when the one write of them is a copy that runs before `i` from private memory no write touches, that
     // copy's source, their offset into it and the copy; VNONE otherwise.
-    fn copy_of(self: &Self, b: &Body, k: u32, i: u32, a: Value, at: i64, n: i64) (Value, u32, u32) {
+    const fn copy_of(self: &Self, b: &Body, k: u32, i: u32, a: Value, at: i64, n: i64) (Value, u32, u32) {
         let s = self.base(b, a) as usize;
         if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX {
             return (VNONE, 0u32, NONE);
@@ -13930,7 +13930,7 @@ extend Opt {
     // The value a vector load `t` (instruction `i` of block `k`) of a private slot splats: one store alone
     // writes each of its lanes, each of the same value, and each runs before the load (`[x; N]` as a
     // vector); VNONE otherwise.
-    fn private_splat(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
+    const fn private_splat(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
         if !is_vec(t.ty) || lanes(t.ty) > 64 {
             return VNONE;
         }
@@ -14014,7 +14014,7 @@ extend Opt {
     // a data symbol the package defines (not a C library's, which another name may alias), or the block an
     // allocation returns (`ALLOC_FRESH`), through at most FRAME_DEPTH steps of address arithmetic; NONE for
     // any other.
-    fn object(self: &Self, pk: &Package, b: &Body, a: Value) u32 {
+    const fn object(self: &Self, pk: &Package, b: &Body, a: Value) u32 {
         if (a & (VPARAM | VFLAG)) != 0 {
             return NONE;
         }
@@ -14068,7 +14068,7 @@ extend Opt {
     // Whether instruction `t` accesses only a private slot's memory (`privates`): a load from one, or a
     // store, copy or fill into one. Inline: the walk and the block summaries call it per instruction.
     @always_inline
-    fn private(self: &Self, t: Inst) bool {
+    const fn private(self: &Self, t: Inst) bool {
         if t.op != O_LOAD && t.op != O_STORE && t.op != O_MEMCPY && t.op != O_MEMSET || (t.a & (VPARAM | VFLAG)) != 0 || t.a as usize >= self.pder.len() {
             return false;
         }
@@ -14344,7 +14344,7 @@ extend Opt {
     // address `a` in a slot whose address has not escaped before it (`sl_at`): a store through no value that
     // slot derives; a call none of whose arguments that slot derives, or each at a constant offset from the
     // same address, through which the callee reaches only bytes apart from those (`Sym.span`).
-    fn slot_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
+    const fn slot_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
         let q = self.der_slot(b, a);
         if q >= 64 || i as usize >= self.sl_at.len() || (self.sl_at[i as usize] >> q as u64 & 1) != 0 {
             return false;
@@ -14378,7 +14378,7 @@ extend Opt {
         return true;
     }
 
-    fn call_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
+    const fn call_apart(self: &Self, pk: &Package, b: &Body, i: u32, t: Inst, a: Value, lo: i64, hi: i64) bool {
         let c = self.class(a);
         if c < CL_NOALIAS || c >= CL_FROZEN || (class_bit(c) & self.sbits) != 0 || (self.owned_args(pk, b, i, t) & class_bit(
             c,
@@ -14411,7 +14411,7 @@ extend Opt {
     // Whether load `t` cannot fault wherever its address is defined: it reads inside a slot, a data
     // symbol of the package (a thread-local one's copy), an aggregate the caller passes by reference or a reference parameter's
     // referent (an entry block parameter: valid for the whole call).
-    fn safe_load(self: &Self, pk: &Package, b: &Body, t: Inst) bool {
+    const fn safe_load(self: &Self, pk: &Package, b: &Body, t: Inst) bool {
         if (t.a & VFLAG) != 0 {
             return false;
         }
@@ -14498,7 +14498,7 @@ extend Opt {
 
     // Whether a block of loop `h` of `b` holds a call, assembly or a system operation that writes memory: a
     // task may resume on another thread after it.
-    fn moves_task(self: &Self, pk: &Package, b: &Body, h: u32) bool {
+    const fn moves_task(self: &Self, pk: &Package, b: &Body, h: u32) bool {
         let r = self.lb_at[h as usize];
         for q in (r >> 32) as u32..r as u32 {
             let bk = b.blocks[self.lbs[q as usize] as usize];
@@ -14653,7 +14653,7 @@ extend Opt {
     // Whether instruction `i` of loop header `k` runs on every entry into the loop: no instruction before
     // it in `k` may leave the function or trap but by a fault of memory (a call, inline assembly, a system
     // operation, a division).
-    fn runs_first(self: &Self, b: &Body, k: u32, i: u32) bool {
+    const fn runs_first(self: &Self, b: &Body, k: u32, i: u32) bool {
         if self.inner[k as usize] != k {
             return false;
         }
@@ -15351,7 +15351,7 @@ fn pool_give<T>(lock: &UnsafeCell<i32>, v: &UnsafeCell<Vector<T>>, x: T) {
 // Keep the buffers of `x`, a body a job is done with, as the spare of a rebuild of `sc` whose own are
 // smaller (by instructions; the spare it takes the place of goes on to the next): the spares grow to the
 // largest body the scratch serves, and the rebuilds stop allocating.
-fn recycle(sc: &mut Box<Scratch>, done: Body) {
+const fn recycle(sc: &mut Box<Scratch>, done: Body) {
     let mut x = done;
     if x.insts.capacity() > sc.il.spare.insts.capacity() {
         x = replace(&mut sc.il.spare, x);
@@ -15538,7 +15538,7 @@ extend Run {
     }
 
     /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none).
-    pub(package) fn cost(self: &Self, j: u32) u64 {
+    pub(package) const fn cost(self: &Self, j: u32) u64 {
         if j >= self.held {
             return 0;
         }
@@ -15821,7 +15821,7 @@ extend Run {
 
     // Scratch `sc` set for body `j`: no analyses of another body, `param_slots` still to look at the body
     // (`pslots`), a quotient kept for the loop vectorizer (`deferred`).
-    fn ready(self: &Self, p: &Package, j: u32, sc: &mut Box<Scratch>, pslots: bool, deferred: bool) {
+    const fn ready(self: &Self, p: &Package, j: u32, sc: &mut Box<Scratch>, pslots: bool, deferred: bool) {
         sc.o.forget();
         sc.o.shared = self;
         sc.o.pslots = pslots;
@@ -15833,7 +15833,7 @@ extend Run {
 
     // The body a call of `b` that `only` marks at instruction `i` reaches when its level is lower than body
     // `j`'s (the copies brought those calls; no edge of `j` names their callees), else NONE.
-    fn marked_callee(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>, i: usize) u32 {
+    const fn marked_callee(self: &Self, p: &Package, j: u32, b: &Body, only: &Vector<bool>, i: usize) u32 {
         let c = if only[i] {
             call_target(p, b, b.insts[i])
         } else {
@@ -16029,7 +16029,7 @@ fn warm_copies(b: &Body, only: &mut Vector<bool>) bool {
 }
 
 // Whether `b` holds a vector value or stores one.
-fn packed(b: &Body) bool {
+const fn packed(b: &Body) bool {
     for i in 0..b.insts.len() {
         let t = b.insts[i];
         if is_vec(t.ty) || t.op == O_STORE && is_vec(b.type_of(t.b)) {
@@ -16447,14 +16447,14 @@ extend ConstSlot {
     }
 
     // Whether value `v` is an address a slot gives.
-    fn gives(self: &Self, v: Value) bool {
+    const fn gives(self: &Self, v: Value) bool {
         return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.slot[v as usize] != NONE;
     }
 
     // Whether a call passes the slot whose address `v` is as that address, not as its bytes in registers
     // or on the stack: every one on wasm32 (`Package.arg_copy` 0), elsewhere one larger than both
     // `arg_copy` and two pointers.
-    fn by_address(self: &Self, pk: &Package, b: &Body, v: Value) bool {
+    const fn by_address(self: &Self, pk: &Package, b: &Body, v: Value) bool {
         let size = b.slots[self.slot[v as usize] as usize].size;
         return pk.arg_copy == 0 || size > pk.arg_copy && size > 2 * pk.ptr_bytes;
     }
@@ -17246,7 +17246,7 @@ struct ShapeCtx {
     shape: *mut bool,
 }
 
-fn shape_chunk(ctx: *mut void, c: usize) {
+const fn shape_chunk(ctx: *mut void, c: usize) {
     let x = unsafe &*(ctx as *const ShapeCtx);
     let p = unsafe &*x.p;
     let bodies = unsafe &*x.bodies;
@@ -17511,7 +17511,7 @@ const fn span_shift(s: u64, off: i64) u64 {
 }
 
 // The parameter (of the first 64) value `v` of `b` is or is address arithmetic on (`der`), NONE for none.
-fn param_of(b: &Body, der: &Vector<u32>, v: Value) u32 {
+const fn param_of(b: &Body, der: &Vector<u32>, v: Value) u32 {
     if v == VNONE || (v & VFLAG) != 0 {
         return NONE;
     }
@@ -17528,14 +17528,14 @@ fn param_of(b: &Body, der: &Vector<u32>, v: Value) u32 {
 }
 
 // Whether address `v` of `b` is inside one of its slots (`root`).
-fn in_frame(b: &Body, v: Value) bool {
+const fn in_frame(b: &Body, v: Value) bool {
     let mut w: u64 = 0;
     return root(b, v, &mut w) == ROOT_FRAME;
 }
 
 // The effect (`FX_*`) of a write through address `v` of `b` on memory outside its frame: none in a slot,
 // FX_ARG through its parameters (added to `w`, a bit each), else FX_WRITE.
-fn write_effect(b: &Body, v: Value, w: &mut u64) u8 {
+const fn write_effect(b: &Body, v: Value, w: &mut u64) u8 {
     let r = root(b, v, w);
     return if r == ROOT_FRAME {
         0u8
@@ -17555,7 +17555,7 @@ const ROOT_ANY: u8 = 2;
 // `root`'s work list: each of its at most FRAME_DEPTH steps takes one value and puts back at most two.
 const ROOT_WORK: usize = FRAME_DEPTH as usize + 1;
 
-fn root(b: &Body, v: Value, w: &mut u64) u8 {
+const fn root(b: &Body, v: Value, w: &mut u64) u8 {
     let mut work = StaticVector::<Value, ROOT_WORK>::new();
     work.push(v);
     let mut steps: u32 = 0;
@@ -17826,7 +17826,7 @@ const fn umax_of(b: &Body, v: Value, ptr: u32, depth: u32) u64 {
 // offset, the bytes and the value of a store of a scalar of up to 8 bytes (no pointer, no vector), or of a
 // fill of 1 to 8 bytes with a constant byte at a constant offset, its value VNONE and its bytes' integer
 // fourth; the offset NONE when `j` is neither, or is volatile or past 16 bytes.
-fn ret_part(b: &Body, ptr: u32, j: u32, pv: Value) (u32, u32, Value, u64) {
+const fn ret_part(b: &Body, ptr: u32, j: u32, pv: Value) (u32, u32, Value, u64) {
     let none = (NONE, 0u32, VNONE, 0u64);
     let s = b.insts[j as usize];
     if (s.aux & MEM_VOLATILE) != 0 {
@@ -17868,7 +17868,7 @@ fn ret_part(b: &Body, ptr: u32, j: u32, pv: Value) (u32, u32, Value, u64) {
 
 // The `x` of comparison `v` of `b`, `x != 0` (`x == 0` when `eq`) of an integer `x` (no pointer); VNONE
 // when `v` is no such comparison.
-fn zero_test(b: &Body, v: Value, eq: bool) Value {
+const fn zero_test(b: &Body, v: Value, eq: bool) Value {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return VNONE;
     }
@@ -17889,7 +17889,7 @@ fn zero_test(b: &Body, v: Value, eq: bool) Value {
 
 // The `d` of comparison `v` of `b`, `(x & d) == 0` (`!= 0` when `ne`) with `d` = `x - 1` (`x + -1`),
 // pointers `ptr` bytes; VNONE when `v` is no such comparison (or `x` is VNONE).
-fn low_clear(b: &Body, ptr: u32, v: Value, ne: bool, x: Value) Value {
+const fn low_clear(b: &Body, ptr: u32, v: Value, ne: bool, x: Value) Value {
     if x == VNONE || (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return VNONE;
     }
@@ -17918,7 +17918,7 @@ fn low_clear(b: &Body, ptr: u32, v: Value, ne: bool, x: Value) Value {
 }
 
 // Whether condition `c` of `b` is condition `x` (1), its opposite comparison (2), or neither (0).
-fn same_test(b: &Body, x: Value, c: Value) u8 {
+const fn same_test(b: &Body, x: Value, c: Value) u8 {
     if x == c {
         return 1;
     }
@@ -17942,7 +17942,7 @@ fn same_test(b: &Body, x: Value, c: Value) u8 {
 // Operand `v` of block `jb`'s instructions along edge `e` into it (`Opt::ret_folded`): a parameter of `jb` is
 // the edge's argument, an instruction of `jb` its value in `sub`, another value itself; and whether it is
 // known (an instruction of `jb` that did not simplify is not).
-fn thru_val(b: &Body, jb: Block, e: u32, sub: &[Value; THREAD_BLOCK_MAX as usize], v: Value) (Value, bool) {
+const fn thru_val(b: &Body, jb: Block, e: u32, sub: &[Value; THREAD_BLOCK_MAX as usize], v: Value) (Value, bool) {
     if v == VNONE || (v & VFLAG) != 0 {
         return (v, true);
     }
@@ -17964,7 +17964,7 @@ fn thru_val(b: &Body, jb: Block, e: u32, sub: &[Value; THREAD_BLOCK_MAX as usize
 // whose element pointer address `p` of `b` (maybe as an integer, `ptrtoint`) offsets, through at most
 // NONNULL_STEPS offsets; VNONE when none. A slice that is not empty points at its elements, never null,
 // and an offset within them is not null either.
-fn slice_of(b: &Body, p: Value) Value {
+const fn slice_of(b: &Body, p: Value) Value {
     let mut q = p;
     if is_op(b, q, O_PTRTOINT) {
         q = b.insts[q as usize].a;
@@ -18007,7 +18007,7 @@ fn len_set(b: &Body, ptr: u32, s: Value, c: Value, holds: bool) bool {
 
 // Whether value `v` of `b` is 0 unless value `x` is 0: a test that `x` is 0 (`x == 0`, `x <u 1`), extended
 // or negated (`-y`, `0 - y`), at most ZERO_TEST_DEPTH times.
-fn zero_unless_zero(b: &Body, v: Value, x: Value) bool {
+const fn zero_unless_zero(b: &Body, v: Value, x: Value) bool {
     let mut u = v;
     for _ in 0..ZERO_TEST_DEPTH {
         if u == VNONE || (u & (VPARAM | VFLAG)) != 0 {
@@ -18031,7 +18031,7 @@ fn zero_unless_zero(b: &Body, v: Value, x: Value) bool {
 }
 
 // The words of 128-bit constant `v` (low, high), if it is one.
-fn wide_of(b: &Body, v: Value) Option<(u64, u64)> {
+const fn wide_of(b: &Body, v: Value) Option<(u64, u64)> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_WCONST || b.insts[v as usize].ty != T_I128 {
         return None;
     }
@@ -18113,7 +18113,7 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
 // scalar; a lane of an insert is the inserted scalar, or the same lane of the vector inserted into; an
 // insert of a vector's own lane is the vector; an insert into an insert of the same lane replaces it. The
 // value it equals, else VNONE (and maybe `i` rewritten in place).
-fn lane_fold(b: &mut Body, i: u32) Value {
+const fn lane_fold(b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VINSERT {
         if (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_VEXTRACT && b.insts[t.b as usize].a == t.a && b.insts[t.b as usize].aux == t.aux {
@@ -18323,7 +18323,7 @@ fn simplify_vec(b: &mut Body, i: u32) {
 }
 
 // Whether every lane of vector `v` of `b` (of type `vt`) is the constant `k`.
-fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
+const fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return false;
     }
@@ -18351,7 +18351,7 @@ fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
 
 // The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
 // `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
-fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
+const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
     if (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -18382,7 +18382,7 @@ fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
 }
 
 // The zero or sign extension that defines `v` (not of an overflow flag), else an `iconst` (no extension).
-fn extension(b: &Body, v: Value) Inst {
+const fn extension(b: &Body, v: Value) Inst {
     if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_ZEXT || b.insts[v as usize].op == O_SEXT) && (b.insts[v as usize].a & VFLAG) == 0 {
         return b.insts[v as usize];
     }
@@ -18966,7 +18966,7 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
 
 // The operand a sum or difference `t` leaves when one of its terms cancels: `(x + y) - x` is `y`,
 // `(x - y) + y` is `x`, also of the wrapped value of a checked sum or difference; VNONE when none does.
-fn cancel(b: &Body, t: Inst) Value {
+const fn cancel(b: &Body, t: Inst) Value {
     let a = if (t.a & (VPARAM | VFLAG)) == 0 {
         b.insts[t.a as usize]
     } else {
@@ -18994,7 +18994,7 @@ fn cancel(b: &Body, t: Inst) Value {
 
 // Whether `h` is at most half of `a`: `a >> c` for a constant `c` from 1 below the width, or `a / k` for
 // a constant `k` of at least 2. Then `a - h` does not wrap and is at least `h`.
-fn half_of(b: &Body, h: Value, a: Value) bool {
+const fn half_of(b: &Body, h: Value, a: Value) bool {
     if !is_op(b, h, O_LSHR) && !is_op(b, h, O_UDIV) {
         return false;
     }
@@ -19008,7 +19008,7 @@ fn half_of(b: &Body, h: Value, a: Value) bool {
 // whose arms are each 0, a value, or a difference `p - q` the arm's condition keeps from wrapping (`q <=u
 // p`, so at most `p`: `abs_diff`, `saturating_sub`); a midpoint `(a & b) + ((a ^ b) >> 1)`, at most the
 // larger of `a` and `b` (`midpoint`).
-fn max_parts(b: &Body, x: Value, out: &mut [Value; 2]) u32 {
+const fn max_parts(b: &Body, x: Value, out: &mut [Value; 2]) u32 {
     if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || is_vec(b.type_of(x)) {
         return 0;
     }
@@ -19046,7 +19046,7 @@ fn max_parts(b: &Body, x: Value, out: &mut [Value; 2]) u32 {
 
 // The value select arm `v` is at most where condition `c` is `holds`: a difference `p - q` the condition
 // keeps from wrapping (`q <=u p`): `p`; any other value: itself.
-fn arm_top(b: &Body, c: Value, v: Value, holds: bool) Value {
+const fn arm_top(b: &Body, c: Value, v: Value, holds: bool) Value {
     if !is_op(b, v, O_SUB) {
         return v;
     }
@@ -19066,7 +19066,7 @@ fn arm_top(b: &Body, c: Value, v: Value, holds: bool) Value {
 // `hi` when `a` is a midpoint `lo + ((hi - lo) >> c)` (`c` a constant from 1 below the width, or a quotient
 // by a constant of at least 2), which is below `hi` wherever `lo <u hi` holds: `hi - lo` does not wrap and
 // its part less than itself added to `lo` stays below `hi`; VNONE else.
-fn mid_top(b: &Body, a: Value, lo: Value) Value {
+const fn mid_top(b: &Body, a: Value, lo: Value) Value {
     if !is_op(b, a, O_ADD) || is_vec(b.insts[a as usize].ty) {
         return VNONE;
     }
@@ -19091,7 +19091,7 @@ fn mid_top(b: &Body, a: Value, lo: Value) Value {
 
 // `(x, y)` when `a` is `(x + y) >> k` (`k` from 1) or `(x + y) / k` (`k` from 2), a midpoint where the
 // sum does not wrap; `(VNONE, VNONE)` else.
-fn half_sum(b: &Body, a: Value) (Value, Value) {
+const fn half_sum(b: &Body, a: Value) (Value, Value) {
     let none = (VNONE, VNONE);
     if !is_op(b, a, O_LSHR) && !is_op(b, a, O_UDIV) || is_vec(b.insts[a as usize].ty) {
         return none;
@@ -19111,12 +19111,12 @@ fn half_sum(b: &Body, a: Value) (Value, Value) {
 }
 
 // Whether `a` is a midpoint of `lo` and `hi` (`mid_top`).
-fn midpoint(b: &Body, a: Value, lo: Value, hi: Value) bool {
+const fn midpoint(b: &Body, a: Value, lo: Value, hi: Value) bool {
     return hi != VNONE && mid_top(b, a, lo) == hi;
 }
 
 // Whether terms `x` and `y` of one sum are one value: the same, or equal constants not yet numbered one.
-fn same_term(b: &Body, x: Value, y: Value) bool {
+const fn same_term(b: &Body, x: Value, y: Value) bool {
     if x == y {
         return true;
     }
@@ -19125,7 +19125,7 @@ fn same_term(b: &Body, x: Value, y: Value) bool {
 }
 
 // Whether float bits `r` of type `ty` are a normal number: neither zero, subnormal, infinite nor NaN.
-fn regular(ty: u8, r: u64) bool {
+const fn regular(ty: u8, r: u64) bool {
     let e = if ty == T_F64 {
         r >> 52 & 0x7FF
     } else {
@@ -19136,13 +19136,13 @@ fn regular(ty: u8, r: u64) bool {
 }
 
 // Whether `v` of `b` is a scalar float product of type `ty`.
-fn is_fmul(b: &Body, v: Value, ty: u8) bool {
+const fn is_fmul(b: &Body, v: Value, ty: u8) bool {
     return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_FMUL && b.insts[v as usize].ty == ty;
 }
 
 // Whether signatures `s` and `r` of `b`'s pool are one: the parameter counts, the result and the
 // parameters' codes.
-fn same_sig(b: &Body, s: u32, r: u32) bool {
+const fn same_sig(b: &Body, s: u32, r: u32) bool {
     let n = b.pool[s as usize];
     if n != b.pool[r as usize] {
         return false;
@@ -19180,7 +19180,7 @@ const fn outcomes(c: u16) u32 {
 // The value of condition `q` of `b` where condition `p` is `truth`: 1 true, 0 false, 2 unknown. `q` is `p`,
 // or both are integer comparisons of the same two values (either order) whose outcomes, of one
 // signedness, one contains or excludes the other's (`a < b` decides `a <= b`, `b > a` and `a == b`).
-fn implied(b: &Body, p: Value, q: Value, truth: bool) u8 {
+const fn implied(b: &Body, p: Value, q: Value, truth: bool) u8 {
     if q == p {
         return truth as u8;
     }
@@ -19221,7 +19221,7 @@ fn implied(b: &Body, p: Value, q: Value, truth: bool) u8 {
 
 // Arm `v` of a select on `p`, taken where `p` is `truth`: through each select on a condition `p` decides
 // there (`implied`), the arm it takes. At most ZO_DEPTH steps.
-fn decided_arm(b: &Body, p: Value, v: Value, truth: bool) Value {
+const fn decided_arm(b: &Body, p: Value, v: Value, truth: bool) Value {
     let mut x = v;
     for _ in 0..ZO_DEPTH {
         if (x & (VPARAM | VFLAG)) != 0 || x == VNONE || b.insts[x as usize].op != O_SELECT {
@@ -19268,7 +19268,7 @@ fn cmp_arm(pk: &Package, b: &Body, t: Inst, left: bool, v: Value, depth: u32) bo
 }
 
 // Integer condition `c` between constants `x` and `y` of `bits` bits.
-fn holds_const(c: u16, x: u64, y: u64, bits: u32) bool {
+const fn holds_const(c: u16, x: u64, y: u64, bits: u32) bool {
     let xu = trunc_bits(x, bits);
     let yu = trunc_bits(y, bits);
     let xs = sign_extend(x, bits);
@@ -19298,7 +19298,7 @@ fn holds_const(c: u16, x: u64, y: u64, bits: u32) bool {
 
 // The two values and the signedness of three-way comparison `v` of `b`: `(x > y) - (x < y)` of flags
 // extended, the comparisons of one signedness and of one pair (either order). VNONE when `v` is not one.
-fn three_way(b: &Body, v: Value) (Value, Value, bool) {
+const fn three_way(b: &Body, v: Value) (Value, Value, bool) {
     let none = (VNONE, VNONE, false);
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SUB {
         return none;
@@ -19329,7 +19329,7 @@ fn three_way(b: &Body, v: Value) (Value, Value, bool) {
 
 // Comparison `t` of a three-way comparison of `x` and `y` (`three_way`, of -1, 0 or 1) with a constant: the
 // comparison of `x` and `y` that holds for the same outcomes, or a constant flag. None when `t` is not one.
-fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
+const fn order_test(b: &Body, t: Inst, ptr: u32) Option<Inst> {
     let (v, k, code) = if int_bits(b, t.b).is_some() {
         (t.a, int_bits(b, t.b).unwrap(), t.aux)
     } else if int_bits(b, t.a).is_some() {
@@ -19422,7 +19422,7 @@ fn self_bound(b: &Body, t: Inst) Option<Inst> {
 
 // Address `v` of `b` as base, index (VNONE: none), scale and offset: a `ptradd` in bounds of its base
 // (PTR_INBOUNDS), else `v` itself at offset 0.
-fn in_bounds_parts(b: &Body, v: Value) (Value, Value, u32, i64) {
+const fn in_bounds_parts(b: &Body, v: Value) (Value, Value, u32, i64) {
     if (v & (VPARAM | VFLAG)) == 0 && v != VNONE {
         let t = b.insts[v as usize];
         if t.op == O_PTRADD && (t.aux & PTR_INBOUNDS) != 0 {
@@ -19442,7 +19442,7 @@ fn in_bounds_parts(b: &Body, v: Value) (Value, Value, u32, i64) {
 // signed, which no product overflows (LLVM's `inbounds` compares). Of constant offsets alone, or of one
 // index, a constant; of two indices of one type, scale and offset, the indices' comparison (signed for an
 // order: `p + i < p + n` is `i <s n`). None for another comparison.
-fn in_bounds_test(b: &Body, t: Inst) Option<Inst> {
+const fn in_bounds_test(b: &Body, t: Inst) Option<Inst> {
     if b.type_of(t.a) != T_PTR || t.aux > C_UGE || t.aux >= C_SLT && t.aux <= C_SGE {
         return None;
     }
@@ -19570,7 +19570,7 @@ const REJOIN_MAX: usize = 8;
 // The value whose bits `v` of `b` keeps in place and their mask: `x`, `x & c`, `zext(trunc x)`,
 // `zext(trunc(x >> s)) << s`, `x >> s << s`, `x << s >> s`, each of `x` of `v`'s type; VNONE when `v` is
 // none of them.
-fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
+const fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
     let m = width_mask(ty, ptr);
     let bits = type_bits(ty, ptr) as u64;
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
@@ -19620,7 +19620,7 @@ fn in_place(b: &Body, v: Value, ty: u8, ptr: u32) (Value, u64) {
 }
 
 // `zext(trunc.N x)` or `zext(trunc.N(x >> s))` of `b`: `x`, `s` and the bytes N. VNONE when `v` is neither.
-fn piece_of(b: &Body, v: Value, ptr: u32) (Value, u64, u32) {
+const fn piece_of(b: &Body, v: Value, ptr: u32) (Value, u64, u32) {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ZEXT {
         return (VNONE, 0, 0);
     }
@@ -19631,7 +19631,7 @@ fn piece_of(b: &Body, v: Value, ptr: u32) (Value, u64, u32) {
 // `or` tree `i` of `b` whose leaves (at most REJOIN_MAX) each keep bits of one value `x` in place
 // (`in_place`) and together all of them: `x` (the pieces of a value a wide store split into fields, which a
 // wide load joins). VNONE when it is not one.
-fn rejoined(b: &Body, i: u32, ptr: u32) Value {
+const fn rejoined(b: &Body, i: u32, ptr: u32) Value {
     let t = b.insts[i as usize];
     if !is_int(t.ty) || t.ty == T_PTR || t.ty == T_I128 {
         return VNONE;
@@ -19938,14 +19938,14 @@ const fn header_read(b: &Body, t: Inst, v: Value) bool {
 
 // Whether allocation call `t` (`ALLOC_FRESH`) is a `realloc` of a block that may exist (its pointer not the
 // null constant), which frees that block: `dead_allocs` keeps it.
-fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
+const fn grows_block(pk: &Package, b: &Body, t: Inst) bool {
     let name = pk.spell(pk.syms[b.syms[t.a as usize] as usize].name);
     return name.ends_with("realloc") && int_bits(b, b.pool[t.c as usize]) != Some(0u64);
 }
 
 // The `Sym.alloc` of call `t`'s function by its name alone, whether the package defines it or not
 // (`dead_allocs`, `memcmp_eq`): ALLOC_NONE for another instruction.
-fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
+const fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     return if t.op == O_CALL {
         pk.syms[b.syms[t.a as usize] as usize].alloc
     } else {
@@ -19955,7 +19955,7 @@ fn named_alloc(pk: &Package, b: &Body, t: Inst) u8 {
 
 // The `Sym.alloc` of the function call `t` calls, ALLOC_NONE for any other instruction and for a function
 // the package defines: its own code (wasm's C library, the runtime's leak tracker) reads what it writes.
-fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
+const fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
     if t.op != O_CALL {
         return ALLOC_NONE;
     }
@@ -19966,7 +19966,7 @@ fn call_alloc(pk: &Package, b: &Body, t: Inst) u8 {
 // The type tag of the memory write `t` writes that the program may read (`TBAA_TAGS` past the tags: none):
 // a load's or a store's own, an allocation's `errno` (an `i32`); a free writes none; 0 for any other write,
 // which may touch any.
-fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
+const fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
     let a = call_alloc(pk, b, t);
     return if t.op == O_LOAD || t.op == O_STORE {
         tbaa(t)
@@ -19981,7 +19981,7 @@ fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
 
 // `writes_memory`, but for a call of a function whose body writes no memory outside its frame
 // (`Sym.fx`).
-fn writes(pk: &Package, b: &Body, t: Inst) bool {
+const fn writes(pk: &Package, b: &Body, t: Inst) bool {
     return writes_memory(t) && (t.op != O_CALL || (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) != 0);
 }
 
@@ -20047,7 +20047,7 @@ fn frozen(b: &Body, out: &mut Vector<bool>, fp: &mut Vector<bool>) {
 }
 
 // Whether `Body.owned` holds a field of parameter `k` at offset `off`.
-fn owned_at(b: &Body, k: u32, off: u32) bool {
+const fn owned_at(b: &Body, k: u32, off: u32) bool {
     for x in 0..b.owned.len() {
         if b.owned[x] == (k as u64 << 32 | off as u64) {
             return true;
@@ -20073,7 +20073,7 @@ const fn view_word(b: &Body, t: Inst) bool {
 // Whether value `v` of `b` is never null: a reference parameter (`ref_param`), the address a reference
 // takes (`PTR_NONNULL`) or a slot's, as a pointer or an integer as wide (`ptrtoint`, `inttoptr`), through at
 // most NONNULL_STEPS conversions.
-fn nonnull(b: &Body, v: Value, ptr: u32) bool {
+const fn nonnull(b: &Body, v: Value, ptr: u32) bool {
     let mut x = v;
     for _ in 0..NONNULL_STEPS {
         if ref_param(b, x) {
@@ -20095,7 +20095,7 @@ fn nonnull(b: &Body, v: Value, ptr: u32) bool {
 }
 
 // Whether value `v` is a reference parameter of `b` (`Body.refs`), not a view: never null.
-fn ref_param(b: &Body, v: Value) bool {
+const fn ref_param(b: &Body, v: Value) bool {
     if v == VNONE || (v & VPARAM) == 0 || (v & VFLAG) != 0 {
         return false;
     }
@@ -20109,7 +20109,7 @@ fn ref_param(b: &Body, v: Value) bool {
 }
 
 // Whether any signature parameter of `b` is a view (`inner`).
-fn any_inner(b: &Body) bool {
+const fn any_inner(b: &Body) bool {
     for k in 0..b.refs.len() {
         if (b.refs[k] & REF_INNER) != 0 {
             return true;
@@ -20170,7 +20170,7 @@ const fn pure_ops() [bool; 256] {
 // Whether pure `t` of `b` may run where the program would not run it: it has operands (a constant is
 // `tidy`'s to place), cannot trap and gives a defined value (a shift amount below the width; no division
 // or float to integer conversion). Checked arithmetic gives its wrapped value and its flag, defined both.
-fn speculable(pk: &Package, b: &Body, t: Inst) bool {
+const fn speculable(pk: &Package, b: &Body, t: Inst) bool {
     let op = t.op;
     if op <= O_SLOTADDR || op >= O_SDIV && op <= O_UREM || op == O_FPTOSI || op == O_FPTOUI {
         return false;
@@ -20190,7 +20190,7 @@ const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
 
 // Whether value `v` is an operand of call `t` of `b` only as by-value aggregate arguments of at most
 // `Package.arg_copy` bytes, which the backend copies: the callee never sees `v`.
-fn arg_copied(pk: &Package, b: &Body, t: Inst, v: Value) bool {
+const fn arg_copied(pk: &Package, b: &Body, t: Inst, v: Value) bool {
     if t.op != O_CALL && t.op != O_CALLIND || t.op == O_CALLIND && t.a == v {
         return false;
     }
@@ -20214,7 +20214,7 @@ fn arg_copied(pk: &Package, b: &Body, t: Inst, v: Value) bool {
 // Whether value `v` is an operand of call `t` of `b` only as arguments a direct call reads alone: the
 // callee writes no memory through those parameters and keeps no copy of them (`Sym.wargs`, `Sym.esc`), so
 // the call reads what `v` points to and no code writes it through `v` after the call.
-fn lends(pk: &Package, b: &Body, t: Inst, v: Value) bool {
+const fn lends(pk: &Package, b: &Body, t: Inst, v: Value) bool {
     if t.op != O_CALL {
         return false;
     }
@@ -20228,7 +20228,7 @@ fn lends(pk: &Package, b: &Body, t: Inst, v: Value) bool {
 }
 
 // Whether slot `s` is one `result_into`'s copy `t` and its copies `hops` pass the result through.
-fn result_slot(b: &Body, t: Inst, hops: &Vector<u32>, s: u32) bool {
+const fn result_slot(b: &Body, t: Inst, hops: &Vector<u32>, s: u32) bool {
     if b.insts[t.b as usize].a == s {
         return true;
     }
@@ -20241,7 +20241,7 @@ fn result_slot(b: &Body, t: Inst, hops: &Vector<u32>, s: u32) bool {
 }
 
 // Whether value `v` is the address of a slot `result_slot` names, as copy `t` or one of `hops` reads it.
-fn result_addr(b: &Body, t: Inst, hops: &Vector<u32>, v: Value) bool {
+const fn result_addr(b: &Body, t: Inst, hops: &Vector<u32>, v: Value) bool {
     if v == t.b {
         return true;
     }
@@ -20259,7 +20259,7 @@ const fn same(t: Inst, u: Inst) bool {
 }
 
 // `v` within `[lo, hi]`.
-fn clamp_i64(v: i128, lo: i64, hi: i64) i64 {
+const fn clamp_i64(v: i128, lo: i64, hi: i64) i64 {
     if v < lo {
         return lo;
     }
@@ -20267,13 +20267,13 @@ fn clamp_i64(v: i128, lo: i64, hi: i64) i64 {
 }
 
 // The signed bound a `SLO_KEY` or `SHI_KEY` entry `f` gives for a value of `w` bits: its constant plus its offset.
-fn signed_bound(b: &Body, f: u32, w: u32) i128 {
+const fn signed_bound(b: &Body, f: u32, w: u32) i128 {
     return sign_extend(int_bits(b, f >> 2).unwrap(), w) as i128 + (f & 3) - 1;
 }
 
 // The two values `s` is the signed maximum (`max`) or minimum of, as a select (a bound on `s` from above, or
 // below, bounds both); `(VNONE, VNONE)` else.
-fn extreme_arms(b: &Body, s: Value, max: bool) (Value, Value) {
+const fn extreme_arms(b: &Body, s: Value, max: bool) (Value, Value) {
     if (s & (VPARAM | VFLAG)) != 0 || s == VNONE || !is_op(b, s, O_SELECT) || is_vec(b.insts[s as usize].ty) {
         return (VNONE, VNONE);
     }
@@ -20291,7 +20291,7 @@ fn extreme_arms(b: &Body, s: Value, max: bool) (Value, Value) {
 
 // The constant step `k` (within 2^32 either way) of `a` as `p + k` or `p - (-k)`, as a signed value of the
 // type; 0 for none.
-fn step_of(b: &Body, a: Value, p: Value) i64 {
+const fn step_of(b: &Body, a: Value, p: Value) i64 {
     if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || is_vec(b.insts[a as usize].ty) || b.insts[a as usize].ty == T_I128 {
         return 0;
     }
@@ -20311,7 +20311,7 @@ fn step_of(b: &Body, a: Value, p: Value) i64 {
 }
 
 // Whether `a` is `p - 1` (or `p + ~0`).
-fn minus_one(b: &Body, a: Value, p: Value) bool {
+const fn minus_one(b: &Body, a: Value, p: Value) bool {
     if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].a != p || is_vec(b.insts[a as usize].ty) || b.insts[a as usize].ty == T_I128 {
         return false;
     }
@@ -20322,7 +20322,7 @@ fn minus_one(b: &Body, a: Value, p: Value) bool {
 }
 
 // The hash of pure instruction `t` of `b`, a wide constant's by its words.
-fn value_hash(b: &Body, t: Inst) u64 {
+const fn value_hash(b: &Body, t: Inst) u64 {
     if t.op == O_PTRADD {
         // Of the address alone: one a reference takes (`PTR_NONNULL`) is the same value.
         return hash(Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c });
@@ -20343,7 +20343,7 @@ fn value_hash(b: &Body, t: Inst) u64 {
 // the signed overflow (`< 0`) or its absence (`>= 0`). `s`, whether signed, whether `t` is the flag's
 // negation; VNONE when `t` is none of these (LLVM's `uadd.with.overflow` and `sadd.with.overflow`
 // idioms).
-fn flag_of(b: &Body, t: Inst) (Value, bool, bool) {
+const fn flag_of(b: &Body, t: Inst) (Value, bool, bool) {
     let none = (VNONE, false, false);
     // Most comparisons are equalities.
     if t.op != O_ICMP || t.aux < C_SLT || t.aux > C_UGE {
@@ -20369,7 +20369,7 @@ fn flag_of(b: &Body, t: Inst) (Value, bool, bool) {
 }
 
 // `flag_of` for signed comparison `t`.
-fn signed_flag_of(b: &Body, t: Inst) (Value, bool, bool) {
+const fn signed_flag_of(b: &Body, t: Inst) (Value, bool, bool) {
     let none = (VNONE, false, false);
     let (m, code) = if int_bits(b, t.b) == Some(0u64) {
         (t.a, t.aux)
@@ -20495,7 +20495,7 @@ fn bit_sources(b: &Body, v: Value, bits: u32, depth: u32, src: &mut [u8; 64]) Va
 }
 
 // Whether value `v` of `b` is a shift, a mask or a byte swap: what each side of a bit reversal's `or` is.
-fn moves_bits(b: &Body, v: Value) bool {
+const fn moves_bits(b: &Body, v: Value) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -20541,7 +20541,7 @@ const fn as_plain(t: Inst) Inst {
 }
 
 // Whether pure instructions `t` and `u` of `b` compute one value: equal, or wide constants of equal words.
-fn same_value(b: &Body, t: Inst, u: Inst) bool {
+const fn same_value(b: &Body, t: Inst, u: Inst) bool {
     if t.op == O_PTRADD && u.op == O_PTRADD {
         return same(
             Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c },
@@ -20717,7 +20717,7 @@ const fn magic(d: u64, bits: u32) (u64, u32, bool) {
 // Whether blocks `x` and `y`, without parameters, of at most TWIN_MAX instructions, compute the same values
 // from the same values and end by the same jump or return: a branch to one or the other jumps to `x` (LLVM
 // SimplifyCFG's merge of identical successors). Only `y` reads its own results, as it jumps or returns.
-fn twins(b: &Body, x: u32, y: u32) bool {
+const fn twins(b: &Body, x: u32, y: u32) bool {
     let bx = b.blocks[x as usize];
     let by = b.blocks[y as usize];
     if x == y || bx.len != by.len || bx.len > TWIN_MAX || bx.param_len != 0 || by.param_len != 0 {
@@ -20782,7 +20782,7 @@ const fn twin_val(bx: Block, by: Block, v: Value, w: Value) bool {
 
 // The value whose piece stored value `v` is, the piece's first byte and its byte count (`combine_stores`):
 // `trunc x` is the low bytes of `x`, `trunc (lshr x, 8j)` the bytes from `j`. VNONE when `v` is neither.
-fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
+const fn stored_piece(b: &Body, v: Value, ptr: u32) (Value, u32, u32) {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_TRUNC || !is_int(b.insts[v as usize].ty) {
         return (VNONE, 0, 0);
     }
@@ -20878,7 +20878,7 @@ const fn width_mask(ty: u8, ptr: u32) u64 {
 }
 
 // The edge branch or switch `t` takes for condition value `c`.
-fn decided(b: &Body, t: Inst, c: u64) u32 {
+const fn decided(b: &Body, t: Inst, c: u64) u32 {
     if t.op == O_BR {
         return side(t, c);
     }
@@ -20891,7 +20891,7 @@ fn decided(b: &Body, t: Inst, c: u64) u32 {
 }
 
 // Whether `c` calls body `j`'s own function.
-fn self_call(pk: &Package, b: &Body, j: u32, c: Inst) bool {
+const fn self_call(pk: &Package, b: &Body, j: u32, c: Inst) bool {
     return c.op == O_CALL && pk.syms[b.syms[c.a as usize] as usize].def == j && pk.syms[b.syms[c.a as usize] as usize].kind == SK_FUNC;
 }
 
@@ -20899,7 +20899,7 @@ fn self_call(pk: &Package, b: &Body, j: u32, c: Inst) bool {
 // before return `ri` combines with another value by an integer add, mul, and, or or xor of the call's
 // type (associative and commutative: accumulator recursion elimination, `Opt::tail_self`), the
 // instructions between them pure, unable to trap and not reading the call's result; else NONE.
-fn acc_call(pk: &Package, b: &Body, j: u32, start: u32, ri: u32) u32 {
+const fn acc_call(pk: &Package, b: &Body, j: u32, start: u32, ri: u32) u32 {
     let oi = ri - 1;
     let o = b.insts[oi as usize];
     let ops = o.op == O_ADD || o.op == O_MUL || o.op == O_AND || o.op == O_OR || o.op == O_XOR;
@@ -20930,7 +20930,7 @@ const NOBYTE: u8 = 0xFF;
 // When flag `v` is a comparison of an integer `x` of up to 64 bits with a constant that holds (with
 // `neg`, fails) on one interval of `x`: `x`, whether the order is signed, and the interval's bounds (each
 // in `x`'s bits); else VNONE.
-fn bound_by(pk: &Package, b: &Body, v: Value, neg: bool) (Value, bool, u64, u64) {
+const fn bound_by(pk: &Package, b: &Body, v: Value, neg: bool) (Value, bool, u64, u64) {
     let none = (VNONE, false, 0u64, 0u64);
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_ICMP {
         return none;
@@ -20979,7 +20979,7 @@ fn bound_by(pk: &Package, b: &Body, v: Value, neg: bool) (Value, bool, u64, u64)
 }
 
 // Whether `v` is an `or`, a shift or an `and`: what a byte permutation's operands are (`Opt::byte_perm`).
-fn byte_part(b: &Body, v: Value) bool {
+const fn byte_part(b: &Body, v: Value) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return false;
     }
@@ -21242,7 +21242,7 @@ fn specialize(pk: &mut Package) {
 
 // The entry parameter of entry block `e` that value `v` is, or stands for (`fwd`, `param_slots`); NONE for
 // another value.
-fn entry_of(e: Block, fwd: &Vector<Value>, v: Value) u32 {
+const fn entry_of(e: Block, fwd: &Vector<Value>, v: Value) u32 {
     if v == VNONE || (v & VPARAM) == 0 {
         return NONE;
     }
@@ -21258,7 +21258,7 @@ fn entry_of(e: Block, fwd: &Vector<Value>, v: Value) u32 {
 }
 
 // Into `out` the constant instruction value `v` of `b` is, when it is a scalar one of at most 64 bits.
-fn const_inst(b: &Body, v: Value, out: &mut Inst) bool {
+const fn const_inst(b: &Body, v: Value, out: &mut Inst) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -21396,7 +21396,7 @@ fn drop_params(b: &mut Body, mask: u64, cs: &Vector<Inst>) {
 }
 
 // Whether every argument of edge `e` of `b` is an argument of edge `o` too.
-fn args_among(b: &Body, e: u32, o: u32) bool {
+const fn args_among(b: &Body, e: u32, o: u32) bool {
     for q in 0..b.edge_nargs(e) {
         let mut found = false;
         for j in 0..b.edge_nargs(o) {
@@ -21498,7 +21498,7 @@ fn ret_edges(b: &mut Body, into: &mut Vector<u32>, es: &mut Vector<u32>) bool {
     return n != 0;
 }
 
-fn ret_through(b: &Body, e: u32) (bool, Value) {
+const fn ret_through(b: &Body, e: u32) (bool, Value) {
     let jb = b.blocks[b.edge_target(e) as usize];
     let r = b.insts[jb.start as usize];
     if jb.len != 1 || r.op != O_RET {
@@ -21515,7 +21515,7 @@ fn ret_through(b: &Body, e: u32) (bool, Value) {
 
 // The step of counter parameter `q` that `v` (what a loop passes it back) takes: 1 for `q + 1`, 2 for `q - 1`
 // (or `q + -1`), else 0.
-fn counter_step(b: &Body, v: Value, q: Value) u32 {
+const fn counter_step(b: &Body, v: Value, q: Value) u32 {
     if !is_op(b, v, O_ADD) && !is_op(b, v, O_SUB) || b.insts[v as usize].a != q {
         return 0;
     }
@@ -21537,7 +21537,7 @@ fn counter_step(b: &Body, v: Value, q: Value) u32 {
 
 // The constant positive byte step of pointer parameter `q` that `v` (what a loop passes it back) takes,
 // `ptradd q, k * scale + c` of a constant `k` or none (the step up to PTR_SCALE); else 0.
-fn ptr_step(b: &Body, v: Value, q: Value) u32 {
+const fn ptr_step(b: &Body, v: Value, q: Value) u32 {
     if !is_op(b, v, O_PTRADD) || b.insts[v as usize].a != q {
         return 0;
     }
@@ -21558,7 +21558,7 @@ fn ptr_step(b: &Body, v: Value, q: Value) u32 {
 }
 
 // The representative of parameter `q`'s set in union-find `uf`, its path halved (`param_cycles`).
-fn set_of(uf: &mut Vector<u32>, q: u32) u32 {
+const fn set_of(uf: &mut Vector<u32>, q: u32) u32 {
     let mut x = q;
     // Each step halves the path: at most its length.
     while uf[x as usize] != x {
@@ -21570,7 +21570,7 @@ fn set_of(uf: &mut Vector<u32>, q: u32) u32 {
 }
 
 // Whether values `x` and `y` of `b` are integer constants of one type and value.
-fn same_iconst(b: &Body, x: Value, y: Value) bool {
+const fn same_iconst(b: &Body, x: Value, y: Value) bool {
     if (x & (VPARAM | VFLAG)) != 0 || (y & (VPARAM | VFLAG)) != 0 || x == VNONE || y == VNONE {
         return false;
     }
@@ -21579,7 +21579,7 @@ fn same_iconst(b: &Body, x: Value, y: Value) bool {
 }
 
 // Whether value `v` of `b` is defined outside block `k`: not one of its instructions or parameters.
-fn outside(b: &Body, v: Value, k: u32) bool {
+const fn outside(b: &Body, v: Value, k: u32) bool {
     if v == VNONE || (v & VFLAG) != 0 {
         return false;
     }
@@ -21659,7 +21659,7 @@ fn eq_const(b: &Body, v: Value, want: bool, n: Value, depth: u32) Option<u64> {
 }
 
 // Whether instruction value `v` of `b` is one of block `k`'s.
-fn in_block(b: &Body, v: Value, k: u32) bool {
+const fn in_block(b: &Body, v: Value, k: u32) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }
@@ -21684,7 +21684,7 @@ const fn mix(h: u64, x: u64) u64 {
 }
 
 // The hash of call `t` of `b` by its callee, type and arguments.
-fn call_hash(b: &Body, t: Inst) u64 {
+const fn call_hash(b: &Body, t: Inst) u64 {
     let mut h = mix(O_CALL as u64 | t.ty as u64 << 8 | t.aux as u64 << 16, b.syms[t.a as usize]);
     for q in 0..t.aux as u32 {
         h = mix(h, b.pool[(t.c + q) as usize]);
@@ -21693,7 +21693,7 @@ fn call_hash(b: &Body, t: Inst) u64 {
 }
 
 // Whether calls `x` and `y` of `b` call one function with the same arguments and type.
-fn same_call(b: &Body, x: Inst, y: Inst) bool {
+const fn same_call(b: &Body, x: Inst, y: Inst) bool {
     if x.op != O_CALL || x.ty != y.ty || x.aux != y.aux || b.syms[x.a as usize] != b.syms[y.a as usize] {
         return false;
     }

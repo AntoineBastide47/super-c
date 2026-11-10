@@ -108,7 +108,7 @@ extend Program {
     }
 
     // The program of package `p`, which it takes; `take_package` gives it back and leaves the program empty.
-    pub(package) fn of_package(p: lir::Package) Program {
+    pub(package) const fn of_package(p: lir::Package) Program {
         return Program { p: p };
     }
 
@@ -118,13 +118,13 @@ extend Program {
     }
 
     // The package itself, to read.
-    pub(package) fn raw(self: &Self) &lir::Package {
+    pub(package) const fn raw(self: &Self) &lir::Package {
         return &self.p;
     }
 
     // The package itself, to build in with the calls the lowering makes (`lir::ir::Package::add_symbol`,
     // `Body::new`, `define`); `verify` afterwards.
-    pub(package) fn raw_mut(self: &mut Self) &mut lir::Package {
+    pub(package) const fn raw_mut(self: &mut Self) &mut lir::Package {
         return &mut self.p;
     }
 

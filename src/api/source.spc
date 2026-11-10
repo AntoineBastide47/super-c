@@ -125,7 +125,7 @@ extend MemoryFiles {
     }
 
     /// Remove file `name`; false when it is not there.
-    pub fn remove(self: &mut Self, name: str) bool {
+    pub const fn remove(self: &mut Self, name: str) bool {
         for i in 0..self.names.len() {
             if self.names[i].as_str() == name {
                 let _ = self.names.swap_remove(i);
@@ -242,6 +242,6 @@ pub fn apply_edits(text: str, edits: Slice<Edit>, out: &mut String) Result<Unit,
 }
 
 // Whether byte offset `at` of `text` starts a character or ends the text.
-fn boundary(text: str, at: u32) bool {
+const fn boundary(text: str, at: u32) bool {
     return at as usize == text.len() || (text.byte_at(at as usize) & 0xC0) != 0x80;
 }

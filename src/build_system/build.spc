@@ -336,7 +336,7 @@ pub(package) const fn apply_profile(m: &mf::Manifest, name: str, p: &mut loader:
 
 /// The command line's `-O<level>` (`opt`; OPT_NONE: none) and `-f` flags (`on`, `off`) over a build
 /// without a profile, as a profile with them sets it (`apply_profile`).
-pub(package) fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
+pub(package) const fn apply_flags(opt: i32, on: u64, off: u64, p: &mut loader::Package) {
     if opt != mf::OPT_NONE {
         let wrap = 1u32 << (ast::BC_OVERFLOW_CHECKS - ast::BC_LOCKDEP) as u32;
         p.opt = opt;
@@ -1566,7 +1566,7 @@ pub(package) fn ext_id(m: &mf::Manifest) u64 {
 }
 
 // `path` without leading `./`.
-fn plain_path(path: str) str {
+const fn plain_path(path: str) str {
     let mut p = path;
     while p.starts_with("./") {
         p = p.slice(2, p.len());

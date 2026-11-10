@@ -13,7 +13,7 @@ import std::testing::bench_sys as sys;
 import tests::cli_harness as cli;
 
 // Take ownership of `v`; it is freed on return.
-fn release<T>(_v: T) {}
+const fn release<T>(_v: T) {}
 
 @test
 fn zero_sized() {

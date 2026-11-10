@@ -560,7 +560,7 @@ extend Slp {
 
     // Whether value `v` is an inner add of a sum like root `r` in block `k`: the same operation and type,
     // one use, no pack's.
-    fn inner(self: &Self, b: &Body, v: Value, k: u32, r: Inst) bool {
+    const fn inner(self: &Self, b: &Body, v: Value, k: u32, r: Inst) bool {
         if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || self.iblk[v as usize] != k || self.iown[v as usize] != NONE {
             return false;
         }
@@ -724,7 +724,7 @@ extend Slp {
 
     // The last of the stores `stores[sat .. sat + m]` of one block, when each is apart from every access
     // between it and that last one but the group's (`apart`): the vector store goes there. NONE when not.
-    fn group_last(self: &mut Self, b: &Body, sat: usize, m: u32) u32 {
+    const fn group_last(self: &mut Self, b: &Body, sat: usize, m: u32) u32 {
         let mut last: u32 = 0;
         for q in 0..m {
             last = last.max(self.stores[sat + q as usize]);
@@ -979,7 +979,7 @@ extend Slp {
     // PK_LOAD when lanes `tmp[at .. at + n]` are loads of type `ty` from consecutive addresses in one block,
     // each apart from every write between the first lane and it (the vector load goes at the first); PK_OP when they are distinct instructions of one operation a vector has,
     // flags and type in one block; else 0. No pack holds any.
-    fn isomorphic(self: &mut Self, b: &Body, at: u32, n: u32, ty: u8) u8 {
+    const fn isomorphic(self: &mut Self, b: &Body, at: u32, n: u32, ty: u8) u8 {
         let l0 = self.tmp[at as usize];
         let mut lo = NONE;
         let mut hi: u32 = 0;
@@ -1044,7 +1044,7 @@ extend Slp {
     // each), when the others, at least half, are distinct instructions of one `add`, `or` or `xor` of one
     // block, its flags and type, no pack's: such a lane is an entry parameter or an instruction of that
     // block before the last of the others, and no other lane. 0 when not.
-    fn identity(self: &Self, b: &Body, at: u32, n: u32, ty: u8) u64 {
+    const fn identity(self: &Self, b: &Body, at: u32, n: u32, ty: u8) u64 {
         if !is_int(ty) || n > 64 {
             return 0;
         }
@@ -1103,14 +1103,14 @@ extend Slp {
     }
 
     // Count `d` (1 or -1) more uses of value `v` by the packs (`inuse`): none for a parameter or a flag.
-    fn use_lane(self: &mut Self, v: Value, d: i32) {
+    const fn use_lane(self: &mut Self, v: Value, d: i32) {
         if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
             self.inuse[v as usize] = (self.inuse[v as usize] as i32 + d) as u32;
         }
     }
 
     // Count `d` more uses (`use_lane`) of the arguments edge pack `eargs[x]` passes to a vector parameter.
-    fn use_edge(self: &mut Self, b: &Body, x: usize, d: i32) {
+    const fn use_edge(self: &mut Self, b: &Body, x: usize, d: i32) {
         let (pp, e, _) = self.eargs[x];
         let pk = self.packs[pp as usize];
         for q in 0..pk.n {
@@ -1121,7 +1121,7 @@ extend Slp {
 
     // Count `d` more uses (`use_lane`) of the operands of PK_OP pack `p`'s lanes: an operation's
     // operands, an identity lane's value.
-    fn use_operands(self: &mut Self, b: &Body, p: u32, d: i32) {
+    const fn use_operands(self: &mut Self, b: &Body, p: u32, d: i32) {
         let pk = self.packs[p as usize];
         for q in 0..pk.n {
             let v = self.lv[(pk.lane + q) as usize];
@@ -1141,12 +1141,12 @@ extend Slp {
     // lane whose value a use outside the packs reads keeps its scalar instruction, and so its operands',
     // and saves none; a gather of other values than constants adds its own. A splat or a constant, which
     // several seeds may share, counts in `plan`'s estimate of all seeds.
-    fn pays(self: &mut Self, b: &Body, np0: usize, saved: i64) bool {
+    const fn pays(self: &mut Self, b: &Body, np0: usize, saved: i64) bool {
         return self.pays_of(b, np0, self.packs.len(), saved);
     }
 
     // `pays` of the packs from `np0` to `np1`.
-    fn pays_of(self: &mut Self, b: &Body, np0: usize, np1: usize, saved: i64) bool {
+    const fn pays_of(self: &mut Self, b: &Body, np0: usize, np1: usize, saved: i64) bool {
         let mut gain = saved;
         for p in np0..np1 {
             let pk = self.packs[p];
@@ -1201,13 +1201,13 @@ extend Slp {
     }
 
     // `pays`: instruction value `v`'s scalar stays (`kept`).
-    fn keep(self: &mut Self, v: Value) {
+    const fn keep(self: &mut Self, v: Value) {
         if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
             self.kept[v as usize] = true;
         }
     }
 
-    fn unkeep(self: &mut Self, v: Value) {
+    const fn unkeep(self: &mut Self, v: Value) {
         if v != VNONE && (v & (VPARAM | VFLAG)) == 0 {
             self.kept[v as usize] = false;
         }
@@ -1218,7 +1218,7 @@ extend Slp {
     // alias classes the optimizer keeps apart (`aobj`, `acls`; a scope's class holds only for the loops its
     // roots are outside of, so none here). A volatile access keeps its place. Without the classes (`plan`
     // takes none at first) two accesses through different bases are not apart, and `wants` says so.
-    fn apart(self: &mut Self, b: &Body, x: u32, y: u32) bool {
+    const fn apart(self: &mut Self, b: &Body, x: u32, y: u32) bool {
         let tx = b.insts[x as usize];
         let ty = b.insts[y as usize];
         if tx.op != O_LOAD && tx.op != O_STORE || ty.op != O_LOAD && ty.op != O_STORE || ((tx.aux | ty.aux) & MEM_VOLATILE) != 0 {
@@ -1649,7 +1649,7 @@ const fn plain_load(b: &Body, v: Value, ty: u8) bool {
 
 // The bits of a lane `v` of a splat or gather: 0 for VNONE (an identity lane's second operand), else a
 // constant's (`const_bits`).
-fn lane_bits(b: &Body, v: Value) Option<u64> {
+const fn lane_bits(b: &Body, v: Value) Option<u64> {
     return if v == VNONE {
         Some(0u64)
     } else {

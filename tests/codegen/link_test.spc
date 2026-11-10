@@ -299,7 +299,7 @@ fn section_garbage_collection_drops_what_nothing_reaches() {
 }
 
 // Whether the bytes `b` hold those of `s`.
-fn has(b: str, s: str) bool {
+const fn has(b: str, s: str) bool {
     let n = s.len();
     if b.len() < n {
         return false;
@@ -446,7 +446,7 @@ fn a_string_literal_of_two_objects_links_once() {
 }
 
 // How many times the bytes `b` hold those of `s`.
-fn count(b: str, s: str) u32 {
+const fn count(b: str, s: str) u32 {
     let n = s.len();
     let mut c: u32 = 0;
     if b.len() < n {

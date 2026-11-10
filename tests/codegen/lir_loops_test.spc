@@ -64,7 +64,7 @@ fn text_of(p: &Package, name: str) String {
 }
 
 // The times `text` holds `pat`.
-fn count(text: &String, pat: str) u32 {
+const fn count(text: &String, pat: str) u32 {
     let mut n: u32 = 0;
     let mut s = text.as_str();
     let mut at = s.find(pat);
@@ -8162,7 +8162,7 @@ b0(v0: i64):
 }
 
 // The most `load.v4i32` lines of `text` in a row.
-fn loads_in_a_row(text: &String) u32 {
+const fn loads_in_a_row(text: &String) u32 {
     let mut most: u32 = 0;
     let mut run: u32 = 0;
     for line in text.as_str().split("\n") {

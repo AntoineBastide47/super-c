@@ -658,7 +658,7 @@ fn has_manifest(dir: str) bool {
 }
 
 // Whether `path` (project-relative, `./` allowed) is directory `dirs[k]` or lies under it, for some `k`.
-fn under_any(path: str, dirs: &Vector<String>) bool {
+const fn under_any(path: str, dirs: &Vector<String>) bool {
     let mut p = path;
     while p.starts_with("./") {
         p = p.slice(2, p.len());
@@ -825,7 +825,7 @@ const fn simp_cand_cmp(a: &SimpCand, b: &SimpCand) i32 {
 }
 
 // The end of the turbofish list `::<..>` at offset `at` of `src`, or 0 when none starts there.
-fn simp_targs_end(src: str, at: u32) u32 {
+const fn simp_targs_end(src: str, at: u32) u32 {
     let mut i = at as usize;
     if !src.slice(i, src.len()).starts_with("::<") {
         return 0;
@@ -850,7 +850,7 @@ fn simp_targs_end(src: str, at: u32) u32 {
 }
 
 // The offset of the `=` that ends the annotation starting at `at` of `src`, or 0.
-fn simp_ann_end(src: str, at: u32) u32 {
+const fn simp_ann_end(src: str, at: u32) u32 {
     let mut i = at as usize;
     while i < src.len() {
         let c = src.byte_at(i);
@@ -993,7 +993,7 @@ fn simp_fn_spans(a: &Ast) Vector<u64> {
 }
 
 // The start of the function of `spans` that holds offset `at`, or 0xFFFFFFFF.
-fn simp_fn_at(spans: &Vector<u64>, at: u32) u32 {
+const fn simp_fn_at(spans: &Vector<u64>, at: u32) u32 {
     let mut lo: usize = 0;
     let mut hi = spans.len();
     while lo < hi {
@@ -1011,7 +1011,7 @@ fn simp_fn_at(spans: &Vector<u64>, at: u32) u32 {
 }
 
 // Offset `q` of the source with `cs`'s removals made, in the original source (`edited`), else `q`.
-fn simp_orig(cs: &Vector<SimpCand>, q: u32, edited: bool) u32 {
+const fn simp_orig(cs: &Vector<SimpCand>, q: u32, edited: bool) u32 {
     if !edited {
         return q;
     }
@@ -1029,7 +1029,7 @@ fn simp_orig(cs: &Vector<SimpCand>, q: u32, edited: bool) u32 {
 }
 
 // Whether original offset `at` lies inside a removed candidate of `cs`.
-fn simp_in_removed(cs: &Vector<SimpCand>, at: u32) bool {
+const fn simp_in_removed(cs: &Vector<SimpCand>, at: u32) bool {
     let mut lo: usize = 0;
     let mut hi = cs.len();
     while lo < hi {
@@ -1105,7 +1105,7 @@ fn simp_type_name(p: &loader::Package, a: *const Ast, id: NodeId) bool {
 }
 
 // Whether `now` holds exactly the records of `want` for function `f` (both sorted).
-fn simp_same(want: &Vector<SimpRec>, now: &Vector<SimpRec>, f: u32) bool {
+const fn simp_same(want: &Vector<SimpRec>, now: &Vector<SimpRec>, f: u32) bool {
     let mut i: usize = 0;
     let mut j: usize = 0;
     while i < want.len() && want[i].f < f {

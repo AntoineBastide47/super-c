@@ -800,7 +800,7 @@ fn mark(x: u32, live: &mut Vector<bool>, work: &mut Vector<u32>) {
 
 // The item (`collect`) that defines the target of input symbol `k`: a body, `funcs.len()` plus a segment,
 // or NONE (an import, the linker's, a global).
-fn item_of(l: &L, k: u32) u32 {
+const fn item_of(l: &L, k: u32) u32 {
     let mut d = k;
     let g = gof(l, k);
     if g != NONE {
@@ -824,7 +824,7 @@ fn item_of(l: &L, k: u32) u32 {
 }
 
 // Whether garbage collection dropped the target of input symbol `k`.
-fn dropped(l: &L, k: u32) bool {
+const fn dropped(l: &L, k: u32) bool {
     let x = item_of(l, k);
     if x == NONE {
         return false;
@@ -1027,7 +1027,7 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
 
 // Where blob offset `src` (in some body) lands in the output code section's payload (`usize::MAX`: a
 // dropped body).
-fn code_pos(l: &L, src: usize) usize {
+const fn code_pos(l: &L, src: usize) usize {
     let fx = l.funcs[func_at(l, src)];
     if !fx.live {
         return usize::MAX;
@@ -1036,7 +1036,7 @@ fn code_pos(l: &L, src: usize) usize {
 }
 
 // The body that holds blob offset `src`.
-fn func_at(l: &L, src: usize) usize {
+const fn func_at(l: &L, src: usize) usize {
     // The bodies of one input are in order: a binary search over all of them would need them sorted by
     // blob offset, which input order gives.
     let mut lo: usize = 0;
@@ -1054,7 +1054,7 @@ fn func_at(l: &L, src: usize) usize {
 
 // Where blob offset `src` (in some segment) lands in the memory image (`usize::MAX`: a constructor table
 // or a dropped segment).
-fn data_pos(l: &L, src: usize) usize {
+const fn data_pos(l: &L, src: usize) usize {
     let sg = l.segs[seg_of(l, src)];
     if sg.addr == NONE {
         return usize::MAX;
@@ -1063,7 +1063,7 @@ fn data_pos(l: &L, src: usize) usize {
 }
 
 // The segment that holds blob offset `src`.
-fn seg_of(l: &L, src: usize) usize {
+const fn seg_of(l: &L, src: usize) usize {
     let mut lo: usize = 0;
     let mut hi = l.segs.len();
     while lo < hi {

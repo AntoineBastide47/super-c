@@ -355,7 +355,7 @@ extend Part as Copy {}
 
 // Whether section `k` splits at its symbols under `split` (`SPLIT_*`): the code with the functions, the
 // variables' kinds with the data; not the merged strings nor a named section.
-fn splits(k: u8, split: u8) bool {
+const fn splits(k: u8, split: u8) bool {
     if k == S_TEXT {
         return (split & SPLIT_FUNCS) != 0;
     }
@@ -403,7 +403,7 @@ pub(package) fn parts_of(o: &Obj, split: u8, parts: &mut Vector<Part>, first: &m
 
 /// The part of section `k` that holds byte `off`: the last one starting at or before it; NONE32 when the
 /// section has no part (it is empty).
-pub(package) fn part_at(parts: &Vector<Part>, first: &Vector<u32>, k: u8, off: u64) u32 {
+pub(package) const fn part_at(parts: &Vector<Part>, first: &Vector<u32>, k: u8, off: u64) u32 {
     let mut lo = first[k as usize];
     let mut hi = first[k as usize + 1];
     if lo == hi {

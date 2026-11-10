@@ -97,7 +97,7 @@ pub(package) fn splat_words(b: &mut Body, vt: u8, x: u64) (u32, u32) {
 
 /// The lane bits of vector `v` of `b` when every lane holds the same constant (a wide constant, or a splat
 /// of a constant), else None.
-pub(package) fn splat_of(b: &Body, v: Value) Option<u64> {
+pub(package) const fn splat_of(b: &Body, v: Value) Option<u64> {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return None;
     }
@@ -508,7 +508,7 @@ pub(package) const fn mask_of(w: u32) u64 {
 }
 
 /// Whether value `v` of `b` is an instruction of operation `op`.
-pub(package) fn is_op(b: &Body, v: Value, op: u8) bool {
+pub(package) const fn is_op(b: &Body, v: Value, op: u8) bool {
     return v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == op;
 }
 
@@ -599,7 +599,7 @@ pub(package) const fn edge_of(b: &Body, t: Inst, k: u32) u32 {
 }
 
 /// Whether edges `e` and `f` of `b` go to one block with the same arguments.
-pub(package) fn same_edge(b: &Body, e: u32, f: u32) bool {
+pub(package) const fn same_edge(b: &Body, e: u32, f: u32) bool {
     if b.edge_target(e) != b.edge_target(f) || b.edge_nargs(e) != b.edge_nargs(f) {
         return false;
     }

@@ -188,7 +188,7 @@ pub(package) fn symbol_table(b: &Body, t: Inst, bits: u32, st: &mut SymTable) bo
 
 // The `symaddr` edge `e` of `b` gives and how: the one argument it passes a block of one pointer parameter
 // (that block), or the value its block of that one instruction returns (NONE); (VNONE, NONE) else.
-fn sym_arg(b: &Body, e: u32) (Value, u32) {
+const fn sym_arg(b: &Body, e: u32) (Value, u32) {
     let j = b.edge_target(e);
     let jb = b.blocks[j as usize];
     if b.edge_nargs(e) == 1 && jb.param_len == 1 && b.params[jb.param_start as usize] == T_PTR {
@@ -266,7 +266,7 @@ pub(package) const TABLE_MAX: u32 = 4096;
 /// takes, when its cases are dense: at least TABLE_MIN of them, at least 40% of the entries (LLVM's
 /// density for jump tables), at most TABLE_MAX entries. The cases order as unsigned or as signed values,
 /// whichever spans fewer; value `v`'s entry is `v - min` wrapped at `bits`.
-pub(package) fn switch_span(b: &Body, t: Inst, bits: u32, min: &mut u64, span: &mut u32) bool {
+pub(package) const fn switch_span(b: &Body, t: Inst, bits: u32, min: &mut u64, span: &mut u32) bool {
     let n = t.aux as u32;
     if n < TABLE_MIN {
         return false;
@@ -360,7 +360,7 @@ extend Lookup {
 }
 
 // Whether edge `e` of `b` enters block `to` passing a constant to each of its `np` parameters.
-fn consts_to(b: &Body, e: u32, to: u32, np: u32) bool {
+const fn consts_to(b: &Body, e: u32, to: u32, np: u32) bool {
     if b.edge_target(e) != to || b.edge_nargs(e) != np {
         return false;
     }
@@ -564,14 +564,14 @@ fn table(b: &mut Body, sw: &Sw, vals: &Vector<u64>, first: &Map<u64, u32>, ptr: 
 
 // Edge `e` of `b`, or the jump of the block it enters when that block holds the jump alone and has no
 // parameters.
-fn forward(b: &Body, e: u32) u32 {
+const fn forward(b: &Body, e: u32) u32 {
     let bk = b.blocks[b.edge_target(e) as usize];
     let t = b.insts[(bk.start + bk.len - 1) as usize];
     return ast::pick(bk.len == 1 && bk.param_len == 0 && b.edge_nargs(e) == 0 && t.op == O_JMP, t.a, e);
 }
 
 // The bits of integer constant `v` of `b`, if it is one.
-fn konst_of(b: &Body, v: Value) Option<u64> {
+const fn konst_of(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_ICONST || b.insts[v as usize].ty == T_I128 {
         return None;
     }
@@ -627,7 +627,7 @@ fn top_of(b: &Body, v: Value, all: u64, ptr: u32, depth: u32, trunc: bool) u64 {
 }
 
 // The inline mark of instruction `i` of `b`, 0 when the body has none.
-fn inl_of(b: &Body, i: u32) u32 {
+const fn inl_of(b: &Body, i: u32) u32 {
     return if b.inl.len() != 0 {
         b.inl[i as usize]
     } else {
@@ -756,7 +756,7 @@ fn build(b: &mut Body, sw: &Sw, cls: &Vector<Cl>, l: usize, r: usize, lo: u64, h
 // Whether clusters `l` to `r` of `cls` are one bit test: more than one, spanning fewer than BT_SPAN values,
 // whose tests one after another would take at least 3 comparisons for one edge, 5 for two, 6 for three
 // (a range 2; LLVM's `isSuitableForBitTests`).
-fn bit_testable(b: &Body, cls: &Vector<Cl>, l: usize, r: usize) bool {
+const fn bit_testable(b: &Body, cls: &Vector<Cl>, l: usize, r: usize) bool {
     if r - l < 2 || cls[r - 1].hi - cls[l].lo >= BT_SPAN {
         return false;
     }
@@ -780,7 +780,7 @@ fn bit_testable(b: &Body, cls: &Vector<Cl>, l: usize, r: usize) bool {
 }
 
 // The index in `es` of an edge the same as `e`, `es.len()` when none.
-fn edge_index(b: &Body, es: &Vector<u32>, e: u32) usize {
+const fn edge_index(b: &Body, es: &Vector<u32>, e: u32) usize {
     for q in 0..es.len() {
         if same_edge(b, es[q], e) {
             return q;

@@ -1045,7 +1045,7 @@ extend Bce {
     }
 
     /// Can block `blk` fold: a branch of the fold shape with a pure panic successor?
-    fn fold_site(self: &Self, b: &ir::CoreBody, blk: u32) bool {
+    const fn fold_site(self: &Self, b: &ir::CoreBody, blk: u32) bool {
         let t = &b.blocks.at(blk as usize).term;
         if t.kind != ir::TM_SWITCH || t.sw_len != 1 || t.a == ir::IR_NONE || b.switch_pool[t.sw_start as usize] >> 32 != 1 {
             return false;
@@ -1059,7 +1059,7 @@ extend Bce {
     /// names (1 true, 2 false) when the other edge only panics: a goto that keeps the condition
     /// operand in `a`, the doomed block in `args_start` and `dir` in `args_len`, so the SC_CORE_IR
     /// re-proof can prove it again.
-    fn fold_to(self: &Self, b: &mut ir::CoreBody, blk: u32, t: &mut ir::Terminator, dir: u32, st: &mut BceStats) {
+    const fn fold_to(self: &Self, b: &mut ir::CoreBody, blk: u32, t: &mut ir::Terminator, dir: u32, st: &mut BceStats) {
         let tt9 = (b.switch_pool[t.sw_start as usize] & 0xFFFFFFFFu64) as u32;
         let doomed = if dir == 1 {
             t.t0
@@ -2215,7 +2215,7 @@ extend Bce {
     /// edge is a pure panic and the other needs a strict `index < len`, sets the index and length
     /// operands, the survivor and the doomed block, and `len_b` when the length is the canonical
     /// right side (`index < len`; else the guard panics on `len <= index`).
-    fn guard_shape(
+    const fn guard_shape(
         self: &Self,
         b: &ir::CoreBody,
         blk: u32,
@@ -3435,7 +3435,7 @@ extend Bce {
     }
 
     /// Does block `x` dominate every back edge's source into header `h`?
-    fn dominates_latches(self: &Self, x: u32, h: u32) bool {
+    const fn dominates_latches(self: &Self, x: u32, h: u32) bool {
         for k in 0..self.fx.backs.len() {
             let e9 = self.fx.backs[k];
             if (e9 & 0xFFFFFFFFu64) as u32 == h && !self.fx.dominates(x, (e9 >> 32) as u32) {

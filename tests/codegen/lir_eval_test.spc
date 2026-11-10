@@ -239,7 +239,7 @@ fn head_of(text: &String, name: str) String {
 }
 
 // The lines of `text` that hold `pat`.
-fn lines_with(text: str, pat: str) u32 {
+const fn lines_with(text: str, pat: str) u32 {
     let mut n: u32 = 0;
     for l in text.lines() {
         n += l.contains(pat) as u32;

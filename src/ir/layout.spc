@@ -275,7 +275,7 @@ pub(package) fn sort_members(ms: &mut Vector<MemberAt>, from: usize, prefix: u32
 
 // The size of members `ms[from..]` placed in their order, each at the next multiple of its alignment, rounded
 // up to the largest alignment; u64::MAX when it passes u64.
-fn extent(ms: &Vector<MemberAt>, from: usize) u64 {
+const fn extent(ms: &Vector<MemberAt>, from: usize) u64 {
     let mut size: u64 = 0;
     let mut align: u64 = 1;
     for k in from..ms.len() {

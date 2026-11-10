@@ -1180,7 +1180,7 @@ union AddrPtr<T> {
     p: *mut T,
 }
 
-fn addr_mut<T>(a: usize) *mut T {
+const fn addr_mut<T>(a: usize) *mut T {
     let u = AddrPtr::<T> { a: a };
     return u.p;
 }
