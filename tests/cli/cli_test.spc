@@ -2635,6 +2635,64 @@ fn test_timeout_dumps_child_processes() {
     }
 }
 
+// A process a test leaves running ends with the test: the test leads a process group, which the runner kills
+// when the test ends. On Linux the runner also adopts the orphan (a subreaper) and reaps it, so no init that
+// never reaps keeps it as a zombie; macOS's launchd reaps orphans. POSIX only.
+@test
+fn the_runner_ends_the_processes_its_tests_leave() {
+    if cli::on_windows() || cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    let root = p.dir();
+    p.mkfile(
+        "main.spc",
+        format(
+            "import stdlib;\n@test\nfn leaves_a_sleeper() {{\n  let _ = stdlib::system(\"sleep 60 >/dev/null 2>&1 & echo $! > {}/pid\");\n}}\nfn main() i32 {{ return 0; }}\n",
+            root,
+        ).as_str(),
+    );
+    assert(p.test_file("--quiet", "main.spc", "").ok(), "the test passes");
+    let pidf = loader::read_file(format("{}/pid", root).as_str()).unwrap();
+    let pid = pidf.as_str().trim();
+    // `ps` prints the state of a listed process: Z for a zombie, which its new parent may not have reaped
+    // yet.
+    let mut ps = format("ps -p {} -o stat=", pid);
+    let mut out = format("{}/ps", root);
+    let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
+    let st = loader::read_file(&out).unwrap();
+    assert(st.as_str().trim().is_empty() || st.as_str().trim().starts_with("Z"), "the left process is killed");
+    if PLATFORM == Platform::Linux {
+        assert(loader::read_file(format("/proc/{}/stat", pid).as_str()).is_none(), "and reaped");
+    }
+}
+
+// A stop signal to the runner (the terminal's Ctrl-C reaches its group alone) kills the running tests'
+// groups: here the test's own, which holds the test and a process it started. POSIX only.
+@test
+fn a_stopped_runner_ends_the_running_tests() {
+    if cli::on_windows() || cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    let root = p.dir();
+    // The shell's parent is the test, whose parent is the runner.
+    p.mkfile(
+        "main.spc",
+        format(
+            "import stdlib;\n@test\nfn stops_its_runner() {{\n  let _ = stdlib::system(\"sleep 60 >/dev/null 2>&1 & echo $! > {}/pid; kill -TERM $(ps -o ppid= -p $PPID)\");\n  let _ = stdlib::system(\"sleep 60\");\n}}\nfn main() i32 {{ return 0; }}\n",
+            root,
+        ).as_str(),
+    );
+    assert(!p.test_file("--quiet", "main.spc", "").ok(), "the stopped run fails");
+    let pidf = loader::read_file(format("{}/pid", root).as_str()).unwrap();
+    let mut ps = format("ps -p {} -o stat=", pidf.as_str().trim());
+    let mut out = format("{}/ps", root);
+    let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
+    let st = loader::read_file(&out).unwrap();
+    assert(st.as_str().trim().is_empty() || st.as_str().trim().starts_with("Z"), "the test's process is killed");
+}
+
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method
 // suites (fixture-as-self), should_panic, fork isolation, filtering, sharding, and --test-no-fork.
 @test

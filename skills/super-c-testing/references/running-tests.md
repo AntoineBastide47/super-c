@@ -52,6 +52,15 @@ which removes the project's cache root.
 Each test runs in a **forked child process**. A panic, failed assertion, or crash fails
 only that test. The other tests continue. The parent collects exit status and reports.
 
+Each forked test leads a process group of its own, which the runner kills (SIGKILL) when the test
+ends: what the test left running ends with it. The terminal's Ctrl-C then reaches the runner's group
+alone, so the runner answers SIGINT, SIGTERM and SIGHUP by killing the running tests' groups, then
+exits with 128 plus the signal. A process that leaves the group (a daemon, git's detached
+maintenance) escapes that kill. On Linux the runner is also a child subreaper
+(`PR_SET_CHILD_SUBREAPER`): an orphan comes to the runner, which reaps it, and the run kills and
+reaps what is still running at its end (`end_orphans` in `std/rt/test.spc`). So no zombie stays in
+a container whose init never reaps. On macOS, launchd takes and reaps orphans.
+
 `--test-no-fork` disables forking for debugger attachment. `should_panic` tests are
 skipped in this mode.
 

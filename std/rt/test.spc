@@ -224,6 +224,7 @@ pub fn test_main(
     } else {
         println("running {} test{}", sel.len(), s);
     }
+    adopt_orphans();
     let mut genv: *mut void = null;
     if sel.len() > 0 {
         genv = t.genv_init();
@@ -241,11 +242,12 @@ pub fn test_main(
     } else {
         run_pool(&t, &o, &sel, genv, &mut r, &mut d)
     };
+    if rc == 0 && genv != null {
+        t.genv_free(genv);
+    }
+    end_orphans();
     if rc != 0 {
         return rc;
-    }
-    if genv != null {
-        t.genv_free(genv);
     }
     if r.fails.len() != 0 {
         report_failures(&t, &r.fails);
@@ -1023,6 +1025,7 @@ extern "C" "stdlib.h" {
 extern "C" "unistd.h" {
     fn unlink(path: *const char) i32;
     fn alarm(seconds: u32) u32;
+    fn setpgid(pid: i32, pgid: i32) i32;
     @import("_exit")
     fn exit_now(code: i32);
 }
@@ -1030,6 +1033,13 @@ extern "C" "unistd.h" {
 @platform(macos | ios | linux | android)
 extern "C" "sys/wait.h" {
     fn wait(status: *mut i32) i32;
+    fn waitpid(pid: i32, status: *mut i32, options: i32) i32;
+}
+
+@platform(linux | android)
+extern "C" "sys/prctl.h" {
+    fn prctl(option: i32, ...) i32;
+    const PR_SET_CHILD_SUBREAPER: i32 = 36;
 }
 
 @platform(macos | ios | linux | android)
@@ -1095,6 +1105,9 @@ extern "C" "signal.h" {
     fn kill(pid: i32, sig: i32) i32;
     const SIGALRM: i32;
     const SIGKILL: i32;
+    const SIGINT: i32;
+    const SIGTERM: i32;
+    const SIGHUP: i32;
     @platform(macos | ios)
     const SIGURG: i32 = 16;
     @platform(linux | android)
@@ -1437,6 +1450,44 @@ fn kill_tree(root: i32) {
     }
 }
 
+// A process whose parent ended goes to the nearest subreaper. On Linux the runner is one: what its tests
+// leave (git's detached maintenance, the tree a timeout killed) comes to its wait loop, not to an init that
+// never reaps it (a container's), where each process held a pid until the container stopped. macOS's
+// launchd reaps orphans.
+@platform(linux | android)
+fn adopt_orphans() {
+    let _ = unsafe prctl(PR_SET_CHILD_SUBREAPER, 1u64);
+}
+
+@platform(macos | ios | windows | wasm)
+fn adopt_orphans() {}
+
+const ORPHAN_ROUNDS: u32 = 64;
+
+// At the run's end, kill what its tests left running and reap it. A killed process's children come to the
+// runner, so each round takes the tree again.
+@platform(linux | android)
+fn end_orphans() {
+    let me = unistd::getpid();
+    for _ in 0..ORPHAN_ROUNDS {
+        let tr = tree(me);
+        if tr.len() == 1 {
+            return;
+        }
+        for k in 1..tr.len() {
+            let _ = unsafe kill(tr[k], SIGKILL);
+        }
+        // A process of the tree that is not a child of the runner fails at once; a killed child ends.
+        for k in 1..tr.len() {
+            let mut st: i32 = 0;
+            let _ = unsafe waitpid(tr[k], &mut st, 0);
+        }
+    }
+}
+
+@platform(macos | ios | windows | wasm)
+fn end_orphans() {}
+
 // The parent's tick: SIGALRM every second while a timeout applies, without SA_RESTART, so wait(2) returns
 // and the runner checks the deadlines.
 @platform(macos | ios | linux | android)
@@ -1446,13 +1497,51 @@ fn tick(_sig: i32) {
 
 // Install `h` for SIGALRM, no flags (`h` null: the default action).
 @platform(macos | ios | linux | android)
-fn on_alarm(h: fn(i32), dfl: bool) {
+fn on_signal(sig: i32, h: fn(i32), dfl: bool) {
     let mut sa = unsafe zeroed::<sigaction>();
     if !dfl {
         sa.handler = h;
     }
     let _ = unsafe sigemptyset(&mut sa.sa_mask);
-    let _ = unsafe c_sigaction(SIGALRM, &sa, null);
+    let _ = unsafe c_sigaction(sig, &sa, null);
+}
+
+// Each test leads a process group of its own, killed when the test ends: what the test leaves running ends
+// with it, also after its parent ended (on macOS, launchd takes such an orphan). The terminal's Ctrl-C
+// reaches the runner's group alone, so the runner kills the running tests' groups on a stop signal. The
+// groups of the tests running now (0: a free entry): each holds a jobserver token, so at most JS_MAX + 1.
+@platform(macos | ios | linux | android)
+static mut LIVE: [i32; 1025] = [0i32; 1025];
+
+// Replace the entry `old` of LIVE with `new`.
+@platform(macos | ios | linux | android)
+fn live_set(old: i32, new: i32) {
+    for i in 0..1025usize {
+        if unsafe LIVE[i] == old {
+            unsafe LIVE[i] = new;
+            return;
+        }
+    }
+}
+
+// SIGINT, SIGTERM or SIGHUP: kill the running tests' groups, then end as the signal would have.
+@platform(macos | ios | linux | android)
+fn on_stop(sig: i32) {
+    for i in 0..1025usize {
+        let g = unsafe LIVE[i];
+        if g > 0 {
+            let _ = unsafe kill(-g, SIGKILL);
+        }
+    }
+    unsafe exit_now(128 + sig);
+}
+
+// Install (`dfl` false) or reset the stop signals' handler.
+@platform(macos | ios | linux | android)
+fn on_stops(dfl: bool) {
+    on_signal(SIGINT, on_stop, dfl);
+    on_signal(SIGTERM, on_stop, dfl);
+    on_signal(SIGHUP, on_stop, dfl);
 }
 
 @platform(macos | ios | linux | android)
@@ -1519,6 +1608,7 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
     let mut ticking = false;
     let mut next: usize = 0;
     let mut active: i32 = 0;
+    on_stops(false);
     while next < sel.len() || active > 0 {
         while active < o.jobs && next < sel.len() {
             let token = tokens.take();
@@ -1539,8 +1629,10 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
                     unsafe stdio::perror("dup2".ptr() as *const char);
                     unsafe exit_now(BROKEN);
                 }
-                // The parent's tick.
-                on_alarm(tick, true);
+                // The parent's tick and stop handler; a group of its own.
+                on_signal(SIGALRM, tick, true);
+                on_stops(true);
+                let _ = unsafe setpgid(0, 0);
                 let mut dn = String::from_str("SC_TEST_DIAG");
                 let _ = unsafe setenv(dn.cstr(), path.cstr(), 1);
                 unsafe __sc_diag_install();
@@ -1558,10 +1650,13 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
                 unsafe stdio::perror("fork".ptr() as *const char);
                 return BROKEN;
             }
+            // Both sides set the group, so it exists before the stop handler can see the entry.
+            let _ = unsafe setpgid(pid, pid);
+            live_set(0, pid);
             let limit = t.limit(ti, o.timeout);
             kids.push(Child { pid: pid, test: ti, path: path, token: token, start: now(), diag: 0.0, limit: limit });
             if limit != 0 && !ticking {
-                on_alarm(tick, false);
+                on_signal(SIGALRM, tick, false);
                 let _ = unsafe alarm(1);
                 ticking = true;
             }
@@ -1605,6 +1700,9 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
             continue;
         }
         let c = kids.swap_remove(found).unwrap();
+        // What the test left running in its group ends with it.
+        let _ = unsafe kill(-c.pid, SIGKILL);
+        live_set(c.pid, 0);
         active -= 1;
         tokens.give(c.token);
         let ti = c.test;
@@ -1638,6 +1736,7 @@ fn run_pool(t: &Table, o: &Opts, sel: &Vector<usize>, genv: *mut void, r: &mut R
     if ticking {
         let _ = unsafe alarm(0);
     }
+    on_stops(true);
     return 0;
 }
 
