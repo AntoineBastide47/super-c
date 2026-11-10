@@ -1889,6 +1889,66 @@ b2(v11: i64):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A masked vector access `vmem_masked` runs in general registers takes five temporaries and three operands:
+// a leaf body with one keeps ten of x0..x15 for temporaries (arm64 `plan_homes`), not six, so a loop that
+// keeps sixteen integers across a `compress_store` compiles.
+@test
+fn a_masked_access_in_a_leaf_keeps_its_temporaries() {
+    let lir = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, i64, ptr) -> i64
+  slot s0 size 16 align 3
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = slotaddr s0
+  store v2, v3 align 3
+  store v1, v3+8 align 3
+  v4 = iconst.i64 0
+  jmp b1(v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4, v4)
+b1(v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64, v12: i64, v13: i64, v14: i64, v15: i64, v16: i64, v17: i64, v18: i64, v19: i64, v20: i64):
+  v21 = load.v16f32 v0 align 2
+  v22 = trunc.i16 v6
+  v23 = vop.compress_store.s.i64 (v3, v5, v22, v21)
+  v24 = add.i64 v5, v23
+  v25 = add.i64 v6, v5
+  v26 = add.i64 v7, v6
+  v27 = add.i64 v8, v7
+  v28 = add.i64 v9, v8
+  v29 = add.i64 v10, v9
+  v30 = add.i64 v11, v10
+  v31 = add.i64 v12, v11
+  v32 = add.i64 v13, v12
+  v33 = add.i64 v14, v13
+  v34 = add.i64 v15, v14
+  v35 = add.i64 v16, v15
+  v36 = add.i64 v17, v16
+  v37 = add.i64 v18, v17
+  v38 = add.i64 v19, v18
+  v39 = add.i64 v20, v19
+  v40 = icmp.ult v24, v1
+  br v40, b1(v24, v25, v26, v27, v28, v29, v30, v31, v32, v33, v34, v35, v36, v37, v38, v39), b2
+b2:
+  v41 = add.i64 v5, v6
+  v42 = add.i64 v41, v7
+  v43 = add.i64 v42, v8
+  v44 = add.i64 v43, v9
+  v45 = add.i64 v44, v10
+  v46 = add.i64 v45, v11
+  v47 = add.i64 v46, v12
+  v48 = add.i64 v47, v13
+  v49 = add.i64 v48, v14
+  v50 = add.i64 v49, v15
+  v51 = add.i64 v50, v16
+  v52 = add.i64 v51, v17
+  v53 = add.i64 v52, v18
+  v54 = add.i64 v53, v19
+  v55 = add.i64 v54, v20
+  ret v55
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+}
+
 // A value a loop's entry edge passes that no block the loop reaches reads takes the same register as the
 // loop's parameter (`lv::Live::entry_partner`; arm64), its early return laid out before the loop
 // (`early_returns`): `@gcd`'s `a`, which that return reads, is the loop's first parameter in x0, so only the

@@ -13733,6 +13733,43 @@ data @wtbl size 16 align 3 bytes 00000000000000000000000000000000 reloc 8 @area
     same_result(&b, &a, "f", x, 21);
 }
 
+// A body waits for the functions whose address it takes (`Calls`): a call through one that an inlined
+// callee's parameter brings becomes direct and inlines (`Run::direct_known`). `@f`'s call of `@add1` through
+// `@apply` is gone, the sum in its place; `@apply`'s own call stays indirect.
+@test
+fn a_function_an_inlined_callee_calls_through_its_address_inlines() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @add1 fn global
+sym @apply fn global
+sym @f fn global
+fn @add1
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = add.i32 v0, v1
+  ret v2
+fn @apply
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = call.ind.i32 v0(v1) : (i32) -> i32
+  ret v2
+fn @f
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = symaddr @add1
+  v2 = call.i32 @apply(v1, v0) : (ptr, i32) -> i32
+  ret v2
+)",
+    );
+    let f = text_of(&a, "f");
+    assert(!f.contains("call") && f.contains("add.i32"), f.as_str());
+    let g = text_of(&a, "apply");
+    assert(g.contains("call.ind"), g.as_str());
+    let x: []u64 = [41];
+    same_result(&b, &a, "f", x, 42);
+}
+
 // A load of a slot that spans several writes (a tag byte and a payload word, one path filling the payload)
 // is a load of each written place combined: the slot then holds values, and the bits each reader takes
 // come from their writes.

@@ -875,6 +875,7 @@ extend Gen {
         // back to no code of the body (`call_tail_shape`; one that stays a call makes the shrink try fail).
         let mut leaf = true;
         let mut rare = true;
+        let mut masked = false;
         let tail = unsafe (*self.pkg).tail;
         for x in 0..ni {
             let t = b.insts[x];
@@ -883,6 +884,7 @@ extend Gen {
             let getter = t.op == O_SYMADDR && !self.remat_inst(x as u32);
             leaf = leaf && !calls && !other && !getter;
             rare = rare && !(calls && !self.rarec[x] && !(tail && self.cr.call_tail_shape(x as u32, t))) && !other;
+            masked = masked || Gen::masked_gp(b, t);
         }
         self.scr = if leaf {
             XSCR_LEAF
@@ -940,7 +942,7 @@ extend Gen {
         }
         // Six of x0..x15 stay for temporaries in a leaf (no call's arguments, no masked vector access),
         // ten of them else.
-        let xs: u32 = ast::pick(self.scr != XSCR, 10, 6);
+        let xs: u32 = ast::pick(self.scr != XSCR && !masked, 10, 6);
         // Twelve scratch homes of v16..v29 (the others, v30, v31 and v0..v7 stay for temporaries) and eight
         // callee-saved ones, v8..v15, twenty in all; shrink-wrapped, no callee-saved home.
         let (xc, vc, vs) = if self.shrink {
@@ -10581,6 +10583,22 @@ extend Gen {
     // Whether masked access `t` of `b` through a pointer (pointer, mask, vector) runs in a v register.
     const fn masked_reg(b: &Body, t: Inst) bool {
         return t.b == 3 && in_vreg(b.type_of(b.pool[(t.a + 2) as usize]));
+    }
+
+    // Whether vector operation `t` of `b` is a masked access `vmem_masked` runs in general registers: five
+    // temporaries and up to three operands.
+    const fn masked_gp(b: &Body, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+            return false;
+        }
+        let c = (code - core::OP_SIMD) as u8;
+        let rule = core::simd_op(c).rule;
+        if rule != core::SR_MLOAD && rule != core::SR_MSTORE {
+            return false;
+        }
+        let ptr = c == core::SIMD_LOAD_MASKED_PTR || c == core::SIMD_STORE_MASKED_PTR;
+        return !(ptr && Gen::masked_reg(b, t) || c == core::SIMD_GATHER_UNCHECKED && Gen::gather_reg(b, t));
     }
 
     // Masked load (into vector `i`, from the fallback's copy) or `store` through a pointer (`masked_reg`):

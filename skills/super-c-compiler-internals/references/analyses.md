@@ -47,7 +47,7 @@ then appended in body order, so the facts do not depend on the workers; `effects
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| Calls of each body: callee, argument roots | `calls_of` | `Calls` | `Run::new` |
+| Calls of each body: callee, argument roots; the functions whose address it takes and the functions of the read-only tables it names, which `effects` does not count | `calls_of` | `Calls` | `Run::new` |
 | Memory effects, written and escaping parameters | `effects` (over `Calls`; a worklist over the callers of each body, `rc`, and the bodies that pass to its parameters, `rp`), `own_effects`, `own_escapes`, `stalls` (counts over `rc`) | `Sym.fx`, `Sym.esc`, `Run.wargs` | end of the build |
 | Call-graph levels and job edges; the bodies whose job finished | `levels`; each job's end | `Run.level`, `Run.edges`, `Run.order`; `Run.fin` (`await_marked` waits on it) | end of the build |
 | Inliner shape test; a finished body's inliner facts (inlinable, `small` within `SHRINK` and the run's budget, `forwarder`, computes with floats) | `Run::new`; `il::facts` after the job (a held body's in `Run::new`) | `Run.shape`; `Run.ok` (`IL_*`) | end of the build |

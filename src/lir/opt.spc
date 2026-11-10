@@ -15283,7 +15283,7 @@ pub(package) struct Run {
     bodies: UnsafeCell<Vector<Body>>,
     // The first held body (`Package.held`), the body count without any.
     held: u32,
-    // Per body, its direct calls before optimization, as bodies in instruction order:
+    // Per body, its direct calls before optimization, as bodies in instruction order (`calls_of`):
     // `calls[call_at[k]..call_at[k + 1]]`.
     call_at: Vector<u32>,
     calls: Vector<u32>,
@@ -15602,8 +15602,8 @@ extend Run {
                 let _ = sc.o.run(p, b, true);
             }
         }
-        // The calls through a method of a constant table the walk read (`fold_ptr`, a known `&dyn`) inline as
-        // the direct ones did.
+        // The calls through a method of a constant table the walk read (`fold_ptr`, a known `&dyn`), or through
+        // a function address an inlined callee's parameter took, inline as the direct ones did.
         if r.inline && r.direct_known(p, j, b, &mut sc.il.only) {
             // The memory facts the walk kept know those calls as indirect ones: also when none inlines.
             sc.o.forget();
@@ -15965,8 +15965,8 @@ extend Run {
         return self.wargs[k as usize];
     }
 
-    /// The direct calls of body `k` before optimization, as bodies in instruction order, then the functions
-    /// of the read-only tables it names.
+    /// The direct calls of body `k` before optimization, as bodies in instruction order with the functions
+    /// whose address it takes, then the functions of the read-only tables it names.
     pub(package) const fn calls_of(self: &Self, k: u32) Slice<u32> {
         return self.calls[self.call_at[k as usize] as usize..self.call_at[k as usize + 1] as usize];
     }
@@ -16585,8 +16585,9 @@ extend ConstSlot {
     }
 }
 
-// The direct calls of the bodies (`Run::new`): per body, its range of `callee` (in instruction order, then the
-// functions of the read-only tables it names; a held body's from its record). Per call, whether `effects`
+// The direct calls of the bodies (`Run::new`): per body, its range of `callee` (in instruction order, with the
+// functions whose address it takes, then the functions of the read-only tables it names; a held body's from
+// its record). Per call, whether `effects`
 // counts it (`live`: one of a body below `held` outside a block that ends the program), and its range of
 // `arg` and `bits`: for each of its first 64
 // arguments, `q | root << 8` and the parameters the root takes (`root`).
@@ -16725,6 +16726,18 @@ fn call_chunk(ctx: *mut void, ci: usize) {
             let t = b.insts[i];
             let c = call_target(p, b, t);
             if c == NONE {
+                // A function whose address it takes, which `effects` does not count: a call through that
+                // address becomes direct when the walk forwards it (an inlined callee's parameter), and the body
+                // waits for it to inline it (`Run::direct_known`).
+                if t.op != O_SYMADDR {
+                    continue;
+                }
+                let sy = p.syms[b.syms[t.a as usize] as usize];
+                if sy.kind == SK_FUNC && sy.def != NONE {
+                    cs.callee.push(sy.def);
+                    cs.live.push(false);
+                    cs.arg_at.push(cs.arg.len() as u32);
+                }
                 continue;
             }
             cs.callee.push(c);
