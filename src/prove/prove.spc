@@ -480,7 +480,8 @@ struct Sub {
 const OVF_PROVE: u8 = 0;
 const OVF_KEEP: u8 = 1;
 
-// The wide integers' operations the walk reads as integer arithmetic (`wide_kind`).
+// The integer operations the walk reads as terms (`wide_kind`): the wide integers', then the
+// built-in integers' wrapping and rotating methods.
 const WK_FROM: u8 = 1;
 const WK_EQ: u8 = 2;
 const WK_CMP: u8 = 3;
@@ -495,6 +496,12 @@ const WK_XOR: u8 = 11;
 const WK_NOT: u8 = 12;
 const WK_SHL: u8 = 13;
 const WK_SHR: u8 = 14;
+const WK_WADD: u8 = 15;
+const WK_WSUB: u8 = 16;
+const WK_WMUL: u8 = 17;
+const WK_WNEG: u8 = 18;
+const WK_ROTL: u8 = 19;
+const WK_ROTR: u8 = 20;
 
 // `@prove_exhaustive`: the inputs of one function, and the evaluator steps of all its runs: each run
 // may take an equal share (`share`), so no split of the inputs changes a report, and the runs of every
@@ -567,6 +574,7 @@ struct Prover<const B: usize> {
     slice: loader::LookupHit, // the prelude's `Slice`
     wuint: loader::LookupHit, // the prelude's `UInt` and `Int` (`ty_of`, `wide_kind`)
     wint: loader::LookupHit,
+    wcore: loader::LookupHit, // an item of the prelude's `core` module, which extends the built-in integers
     line_mod: u32, // the module whose line starts `line_starts` holds (`source_line`), NONE before one
     line_starts: Vector<u32>,
     tm: Terms<B>,
@@ -637,6 +645,7 @@ extend<const B: usize> Prover<B> {
             slice: slice,
             wuint: p.prelude_lookup("UInt", true),
             wint: p.prelude_lookup("Int", true),
+            wcore: p.prelude_lookup("UnsafeCell", true),
             line_mod: NONE,
             line_starts: Vector::<u32>::new(),
             tm: Terms::<B>::new(),
@@ -1018,17 +1027,18 @@ extend<const B: usize> Prover<B> {
         }
     }
 
-    // Prove that the conditions `pc` imply `goal`; report obligation `key` when they do not.
     // Whether the facts `pc` imply `goal`: first without the facts derived for a division or a shift
     // by a constant, which most goals do not need and which make each simplex larger (on code with
-    // many divisions, about 40% more instructions to prove all goals with them), then with them.
+    // many divisions, about 40% more instructions to prove all goals with them), then with them, then
+    // without them again but refuting a branch by its bits (a SAT refutation), which costs more again
+    // and needs no derived fact: the bits define a division and a shift.
     fn holds(self: &mut Self, pc: &Vector<u32>, goal: u32) bool {
         let mut n: usize = 0;
         for j in 0..pc.len() {
             n += self.derived.contains_key(&pc[j]) as usize;
         }
         if n == 0 {
-            return self.sv.implies(&self.tm, pc, goal);
+            return self.sv.implies(&self.tm, pc, goal, true);
         }
         let mut base = Vector::<u32>::with_capacity(pc.len() - n);
         for j in 0..pc.len() {
@@ -1036,9 +1046,15 @@ extend<const B: usize> Prover<B> {
                 base.push(pc[j]);
             }
         }
-        return self.sv.implies(&self.tm, &base, goal) || self.sv.implies(&self.tm, pc, goal);
+        return self.sv.implies(&self.tm, &base, goal, false) || self.sv.implies(&self.tm, pc, goal, false) || self.sv.implies(
+            &self.tm,
+            &base,
+            goal,
+            true,
+        );
     }
 
+    // Prove that the conditions `pc` imply `goal`; report obligation `key` when they do not.
     fn oblige(self: &mut Self, pc: &Vector<u32>, goal: u32, key: u64, sp: tok::Span, msg: String, note: String) {
         if self.over || self.failed.contains_key(&key) || self.refining && key >> 56 != OB_REFINE {
             return;
@@ -1862,9 +1878,12 @@ extend<const B: usize> Prover<B> {
     // overflow as the built-in integers do), WK_DIV and WK_REM `div` and `rem` (a zero divisor and
     // `MIN / -1` trap), WK_AND, WK_OR, WK_XOR and WK_NOT the bit operations, WK_SHL and WK_SHR `shl`
     // and `shr` (a count of at least the width gives 0, or -1 for a negative `Int` shifted right: no
-    // trap); 0 for any other callee.
+    // trap); and of the built-in integers (std's `core` module): WK_WADD, WK_WSUB, WK_WMUL and WK_WNEG
+    // `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` (the result's low bits),
+    // WK_ROTL and WK_ROTR `rotate_left` and `rotate_right`; 0 for any other callee.
     fn wide_kind(self: &Self, d: DefId) u8 {
-        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.wuint.node == NODE_NONE || d.module != self.wuint.mid && d.module != self.wint.mid || !self.pkg().modules.at(
+        let core = self.wcore.node != NODE_NONE && d.module == self.wcore.mid;
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.wuint.node == NODE_NONE || d.module != self.wuint.mid && d.module != self.wint.mid && !core || !self.pkg().modules.at(
             d.module as usize,
         ).has_ast {
             return 0;
@@ -1878,6 +1897,23 @@ extend<const B: usize> Prover<B> {
             return 0;
         }
         let name = self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+        if core {
+            return if name == "wrapping_add" {
+                WK_WADD
+            } else if name == "wrapping_sub" {
+                WK_WSUB
+            } else if name == "wrapping_mul" {
+                WK_WMUL
+            } else if name == "wrapping_neg" {
+                WK_WNEG
+            } else if name == "rotate_left" {
+                WK_ROTL
+            } else if name == "rotate_right" {
+                WK_ROTR
+            } else {
+                0
+            };
+        }
         return if name == "from" {
             WK_FROM
         } else if name == "eq" {
@@ -1929,7 +1965,7 @@ extend<const B: usize> Prover<B> {
         sp: tok::Span,
     ) u32 {
         let k = self.wide_kind(t.callee);
-        let n = pick(k == WK_FROM || k == WK_NOT, 1u32, 2);
+        let n = pick(k == WK_FROM || k == WK_NOT || k == WK_WNEG, 1u32, 2);
         if k == 0 || t.args_len != n || t.dests_len != 1 {
             return NONE;
         }
@@ -1960,8 +1996,19 @@ extend<const B: usize> Prover<B> {
         if k == WK_CMP {
             return pick(w > W_BOOL, self.tm.ord(a, b, w, sg), NONE);
         }
-        if w <= W_BOOL {
+        if w <= W_BOOL || w > 64 && k >= WK_WADD {
             return NONE;
+        }
+        if k >= WK_WADD && k <= WK_WNEG {
+            let e = if k == WK_WNEG {
+                self.tm.neg(a, w, sg)
+            } else {
+                self.tm.arith(pick(k == WK_WADD, T_ADD, pick(k == WK_WSUB, T_SUB, T_MUL)), a, b, w, sg)
+            };
+            return self.tm.unary(T_CAST, e, w, sg);
+        }
+        if k == WK_ROTL || k == WK_ROTR {
+            return self.rotated(k == WK_ROTL, a, b, w, sg);
         }
         if k == WK_ADD || k == WK_SUB || k == WK_MUL {
             let op = if k == WK_ADD {
@@ -1999,6 +2046,40 @@ extend<const B: usize> Prover<B> {
             T_BXOR
         };
         return self.tm.arith(op, a, b, w, sg);
+    }
+
+    // `x` rotated left (`left`) or right by `n % w` bits, as its body computes it: for unsigned `x`,
+    // `x << k | x >> (w - k) % w` with `k = n % w`; a signed `x` rotates its bits as unsigned.
+    fn rotated(self: &mut Self, left: bool, x: u32, n: u32, w: u16, sg: bool) u32 {
+        let u = if sg {
+            self.tm.unary(T_CAST, x, w, false)
+        } else {
+            x
+        };
+        let nt = self.tm.at(n);
+        let mask = self.tm.int(wide::<B>(w as i64 - 1), nt.w, nt.sg);
+        let wv = wide::<B>(w);
+        let width = self.tm.int(wv, nt.w, nt.sg);
+        let k = if nt.op == T_INT {
+            self.tm.int(nt.k.rem_euclid(&wv), nt.w, nt.sg)
+        } else {
+            self.tm.arith(T_BAND, n, mask, nt.w, nt.sg)
+        };
+        let back = self.tm.arith(T_SUB, width, k, nt.w, nt.sg);
+        let kt = self.tm.at(back);
+        let j = if kt.op == T_INT {
+            self.tm.int(kt.k.rem_euclid(&wv), nt.w, nt.sg)
+        } else {
+            self.tm.arith(T_BAND, back, mask, nt.w, nt.sg)
+        };
+        let p = self.tm.arith(pick(left, T_SHL, T_SHR), u, k, w, false);
+        let q = self.tm.arith(pick(left, T_SHR, T_SHL), u, j, w, false);
+        let r = self.tm.arith(T_BOR, p, q, w, false);
+        return if sg {
+            self.tm.unary(T_CAST, r, w, true)
+        } else {
+            r
+        };
     }
 
     // `x / y` (`div`) or `x % y` of type (`w`, `sg`), truncated toward zero, `y` not zero on the path.

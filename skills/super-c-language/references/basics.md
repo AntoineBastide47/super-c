@@ -142,7 +142,11 @@ The proofs model integers exactly, `u128`, `i128` and `UInt<N>` or `Int<N>` of u
 (their comparisons, `+ - * / %`, bit operations, shifts, conversions and literals): a product of two
 unknowns lies within the products of its operands' ranges and is linear where the facts fix one
 operand (`requires k == 3` makes `a * k` the value `3 * a`), and a division or shift by a constant
-bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A wider integer and a float are
+bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A goal over bit operations, shifts,
+casts, divisions or products that the arithmetic cannot decide is decided on the bits of its values
+(a SAT refutation): `x ^ y ^ y == x`, `x & (x - 1) < x` for `x > 0`, and the built-in integers'
+`wrapping_add`, `wrapping_sub`, `wrapping_mul`, `wrapping_neg`, `rotate_left` and `rotate_right`
+(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer and a float are
 values the proofs do not take apart. They also model struct fields, arrays of a constant length and
 their views (an element read by an index the path proves in bounds), and references; a call that
 may write memory, a drop and a write through a pointer forget the values a reference reaches. Equal

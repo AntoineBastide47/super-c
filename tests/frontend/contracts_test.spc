@@ -201,6 +201,21 @@ fn unproved_contracts_are_errors() {
         "interface C {\n    fn get(self: &Self, k: u32) u32 requires k < 10 ensures |r| r <= k;\n}\nstruct A {}\nextend A as C {\n    fn get(self: &Self, k: u32) u32 { return k; }\n}\nfn f(x: &dyn C) u32 { return x.get(20); }\nfn main() i32 { return f(&A {}) as i32; }\n",
         "cannot prove the 'requires' of 'get' at this call",
     );
+    b.add(
+        "a bit operation's counterexample from the bits' model",
+        "fn f(x: u32, y: u32) u32 ensures |r| r == x { return x ^ y; }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
+        "for example: x = 0, y = 2147483648",
+    );
+    b.add(
+        "a wrapping sum past the maximum",
+        "fn f(x: u32) u32 ensures |r| r > x { return x.wrapping_add(1); }\nfn main() i32 { return f(1) as i32 - 2; }\n",
+        "for example: x = 4294967295",
+    );
+    b.add(
+        "a rotation the other rotation does not undo",
+        "fn f(x: u32, n: u32) u32 ensures |r| r == x { return x.rotate_left(n).rotate_left(n); }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
+        "cannot prove this 'ensures' clause",
+    );
     h::expect_build_errs(b);
 }
 
@@ -837,12 +852,92 @@ fn main() i32 {
     );
 }
 
+// Goals the arithmetic reads only as atoms, refuted by the bits of their terms (a SAT refutation).
+fn bit_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "bit operations and shifts, proved by their bits",
+        M"(fn xor_back(x: u32, y: u32) u32
+    ensures |r| r == x
+{
+    return x ^ y ^ y;
+}
+fn mask_le(x: u32) u32
+    ensures |r| r <= x
+{
+    return x & 0xF0F0;
+}
+fn low_clear(x: u32) u32
+    requires x > 0
+    ensures |r| r < x
+{
+    return x & (x - 1);
+}
+fn even(x: u32) bool
+    ensures |r| r == (x % 2 == 0)
+{
+    return (x & 1) == 0;
+}
+fn split_join(x: u64) u64
+    ensures |r| r == x
+{
+    let h = x >> 32;
+    let l = x & 0xFFFFFFFF;
+    return h << 32 | l;
+}
+fn main() i32 {
+    return (xor_back(5, 9) + mask_le(0x34) + low_clear(12) + even(4) as u32) as i32 + (split_join(7) - 7) as i32;
+}
+)",
+        62,
+    );
+    b.add(
+        "wrapping and rotating operations",
+        M"(fn wrap_back(x: u32, y: u32) u32
+    ensures |r| r == x
+{
+    return x.wrapping_add(y).wrapping_sub(y);
+}
+fn rot_back(x: u32, n: u32) u32
+    ensures |r| r == x
+{
+    return x.rotate_left(n).rotate_right(n);
+}
+fn quarter(a: u32, b: u32, d: u32) u32
+    ensures |r| (r.rotate_right(16) ^ a.wrapping_add(b)) == d
+{
+    return (d ^ a.wrapping_add(b)).rotate_left(16);
+}
+fn odd_times(x: u32) u32
+    ensures |r| (r & 1) == (x & 1)
+{
+    return x.wrapping_mul(3);
+}
+fn signed_rot(x: i32) i32
+    ensures |r| r.rotate_right(3) == x
+{
+    return x.rotate_left(3);
+}
+fn negated(x: i64) i64
+    ensures |r| r.wrapping_add(x) == 0
+{
+    return x.wrapping_neg();
+}
+fn main() i32 {
+    let q = quarter(1, 2, 3);
+    return (wrap_back(7, 4294967295) + rot_back(2, 33) + odd_times(5) % 2 + (q >> 16 ^ 3)) as i32 + signed_rot(-2) + negated(5) as i32 + 5;
+}
+)",
+        4,
+    );
+}
+
 @test
 fn exit_cases_00() {
     let mut b = h::ExitBatch::new();
     proved_contracts(&mut b);
     exhaustive_proofs(&mut b);
     theory_proofs(&mut b);
+    bit_proofs(&mut b);
     b.run();
 }
 

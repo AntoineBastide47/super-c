@@ -23,6 +23,21 @@ for target in macos linux windows wasm; do
     fi
 done
 
+# 2b) Every function the const lint proves evaluable is a `const fn` (its suggestions are the same on every
+# target). The check applies the fix; a commit hook runs after git built the commit, so a change fails
+# the check: stage the files and commit again.
+printf 'check: const fn (lint --const --fix)\n'
+before=$(git diff | git hash-object --stdin)
+if ! SC_LEAK_CHECK=fatal ./super-c lint --const --fix >/dev/null; then
+    printf 'check: FAILED -- lint --const --fix left the warnings above\n' >&2
+    exit 1
+fi
+if [ "$(git diff | git hash-object --stdin)" != "$before" ]; then
+    printf 'check: FAILED -- lint --const --fix declared functions const; stage the fixes and commit again (modified files):\n' >&2
+    git diff --name-only | sed 's/^/  /' >&2
+    exit 1
+fi
+
 # 3) Full test suite with the current compiler (built first if stale), leak-gated: every process in
 # the run (compiler, harness, spawned servers, compiled fixtures) exits nonzero on leaks/double frees.
 # SC_LIR checks both builds (the compiler under test and the suite) with LIR: every body lowers and

@@ -237,7 +237,8 @@ modular return-lifetime check) run alongside.
   (a `requires` at a call, an `ensures` at a return, a loop's invariant and measure at its header, a
   checked operation) refuted by `Solver::implies` (`src/prove/solver.spc`, over the terms of
   `src/prove/terms.spc`), first without the facts the walk derives for a division or shift by a
-  constant (`holds`), then with them: a case split into branches, then per branch a congruence closure over every
+  constant (`holds`), then with them, then without them and with bits (below): a case split into branches (`close`: each
+  branch a list of theory literals, `blast::tlit`), then per branch a congruence closure over every
   term operation and a simplex over exact rationals with branch and bound over the integers, which
   exchange equalities (the closure's integer classes become rows; equalities the rows imply between
   operands of one operation merge in the closure); integer equality elimination adds
@@ -247,15 +248,29 @@ modular return-lifetime check) run alongside.
   operand at its value and, below splits that fix it, adds the product's linear rows (`fix`). Each
   refuted branch writes a proof (equality facts, branch-and-bound trees
   with Farkas leaves, cuts, product rows the path's splits justify) that the kernel (`src/prove/kernel.spc`, its own checked arithmetic)
-  accepts before the branch counts. Over domains of at most 65536 values the obligation is decided
+  accepts before the branch counts; the kernel builds the rows of the branch's literals itself
+  (`Kernel::state`, `state_lit`, a `Built` only it constructs). With bits, a branch whose literals
+  hold an operation the arithmetic reads as an atom (`Terms.bitty`: a bit operation, shift, cast,
+  division, remainder, order, product of two unknowns) is first refuted on bits: the literals that
+  share unknowns with the goal's (`cone`) become clauses (`src/prove/blast.spc`, trusted: each term
+  the two's-complement bits of its exact value, each operation its circuit, an undefined one any
+  value of its type), a CDCL solver (`src/prove/sat.spc`: two watched literals, first-UIP learning
+  with minimization, activity order, saved phases, Luby restarts) refutes them with an LRAT proof,
+  and the kernel checks it (`Lrat::check`, reverse unit propagation over the hints). Each refuted
+  branch is a lemma; once every branch closes, the kernel encodes the skeleton of the formulas (each
+  atom a variable, an integer equality also its two orders) with the negation of each lemma
+  (`seal`), and the hypotheses imply the goal only when it checks an LRAT proof that these clauses
+  have no model (`covered`): the case split is checked. Over domains of at most 65536 values the obligation is decided
   by enumeration with an exact evaluator (`Eval`), which also confirms a counterexample; the
-  simplex's integer model seeds its candidates. A conformance's method walks again
+  simplex's integer model or the bits' model seeds its candidates. A conformance's method walks again
   from its interface's `requires` (`refine`). Every walk, search and elimination has a fixed budget;
   over one is not proved. The prover is generic over its numbers' width (`Prover<B>`,
   `terms::Num<B>`): a body proves with 256-bit numbers, or with 576-bit ones when a local's integer
   type is wider than 192 bits (`needs_wide`; `int_limit(B)` is the widest type a width reads, 512
   bits for 576), so wide numbers cost only the bodies that need them. `UInt<N>` and `Int<N>` are
-  integers through their std conformances, read as the integer operations (`wide_kind`, `wide_op`).
+  integers through their std conformances, read as the integer operations (`wide_kind`, `wide_op`),
+  and the built-in integers' `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are
+  the casts of the exact results, `rotate_left` and `rotate_right` their shifts (`rotated`).
   With more than one job, the bodies run on workers one at a time (`dpar`
   Dynamic schedule, grain 1; a narrow and a wide `Prover` each, the shells and components read from
   `Shared`),

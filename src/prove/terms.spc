@@ -86,6 +86,10 @@ pub(package) struct Terms<const B: usize> {
     pub(package) ix: Map<u64, u32>,
     pub(package) args: Vector<u32>,
     pub(package) nvars: u32,
+    // Per term: whether it holds an operation the arithmetic reads as an atom but the bits define (a
+    // bit operation, a shift, a cast, a division, a remainder, an order, a product of two unknowns),
+    // under sums, products and formulas.
+    pub(package) bitty: Vector<bool>,
 }
 
 pub(package) const fn hmix(h: u64, v: u64) u64 {
@@ -110,6 +114,7 @@ extend<const B: usize> Terms<B> {
             ix: Map::<u64, u32>::new(),
             args: Vector::<u32>::new(),
             nvars: 0,
+            bitty: Vector::<bool>::new(),
         };
     }
 
@@ -118,6 +123,7 @@ extend<const B: usize> Terms<B> {
         self.ix.clear();
         self.args.clear();
         self.nvars = 0;
+        self.bitty.clear();
     }
 
     pub(package) const fn at(self: &Self, t: u32) Term<B> {
@@ -174,6 +180,10 @@ extend<const B: usize> Terms<B> {
             return hit;
         }
         let n = self.ts.len() as u32;
+        let own = t.op >= T_DIV && t.op <= T_CAST || t.op == T_ORD || t.op == T_MUL && self.ts[t.a as usize].op != T_INT && self.ts[t.b as usize].op != T_INT;
+        let under = t.op >= T_ADD && t.op <= T_NEG || t.op >= T_LT && t.op <= T_OR;
+        let unary = t.op == T_NEG || t.op == T_NOT;
+        self.bitty.push(own || under && (self.bitty[t.a as usize] || !unary && self.bitty[t.b as usize]));
         self.ts.push(t);
         if hit == NONE {
             self.ix.insert(h, n);

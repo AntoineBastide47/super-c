@@ -1,8 +1,20 @@
-// The certificate checker of the contract prover: the solvers (`solver.spc`) are not trusted, so a
-// branch of a refutation counts only when this checker accepts the proof the solvers wrote for it.
-// It shares no code with them but the meaning of terms (`terms.spc`: `bounds`, `lin_form`), and does
-// its own arithmetic, every step checked for overflow. A solver defect can make a proof fail here,
-// never make a false one pass.
+// The certificate checker of the contract prover: the solvers (`solver.spc`, `sat.spc`) are not
+// trusted, so a refutation counts only when this checker accepts the proofs the solvers wrote for it.
+// It shares no code with them but the meaning of terms (`terms.spc`: `bounds`, `lin_form`; `blast.spc`:
+// the clauses; `state_lit` here: the rows of a literal), and does its own arithmetic, every step checked
+// for overflow. A solver defect can make a proof fail here, never make a false one pass.
+//
+// A refutation of hypotheses and a negated goal (`begin`) is:
+//
+// - lemmas: each one a set of theory literals (`blast::tlit`) that cannot all hold, by a proof of the
+//   theories below (`lemma`) or by an LRAT proof over their bits (`blast`, `blast_lemma`); its negation
+//   is a clause;
+// - an LRAT proof that the skeleton of the formulas and the lemmas' clauses (`seal`) have no model
+//   (`covered`): the case split covers every case.
+//
+// An LRAT proof adds clauses one at a time; each one names its hints, clauses that become unit in turn,
+// then empty, under the negation of the new clause (reverse unit propagation, `Lrat::check`). It ends
+// with the empty clause.
 //
 // A branch states integer rows (`sum(c * atom) + k <= 0`), equalities and disequalities of terms,
 // and boolean literals. A proof is:
@@ -21,6 +33,7 @@
 // combination of rows, divided by the gcd (a Chvatal-Gomory cut); it holds at every integer point of
 // the branch, so any leaf may use it.
 import prove::terms as *;
+import prove::blast as *;
 
 // The rows a leaf may name (`RowRef.kind`).
 pub(package) const RW_IN: u8 = 0; // `i`: the branch's row
@@ -159,19 +172,235 @@ extend<const B: usize> Stated<B> {
             lits: Vector::<u64>::new(),
         };
     }
+}
 
-    pub(package) fn copy(self: &Self) Stated<B> {
-        let mut rows = Vector::<Row<B>>::with_capacity(self.rows.len());
-        rows.extend_copy(&self.rows);
-        let mut pool = Vector::<LinTerm<B>>::with_capacity(self.pool.len());
-        pool.extend_copy(&self.pool);
-        return Stated::<B> {
-            rows: rows,
-            pool: pool,
-            eqs: self.eqs.clone(),
-            neqs: self.neqs.clone(),
-            lits: self.lits.clone(),
+// The row `a - b + off <= 0` into `st`. False when the form does not fit.
+fn add_le<const B: usize>(
+    tm: &Terms<B>,
+    st: &mut Stated<B>,
+    a: u32,
+    b: u32,
+    off: i64,
+    lin: &mut Vector<LinTerm<B>>,
+    stack: &mut Vector<LinTerm<B>>,
+) bool {
+    lin.clear();
+    let mut k = wide::<B>(off);
+    if !lin_form(tm, a, Num::<B>::one(), &mut k, lin, stack) || !lin_form(tm, b, wide::<B>(-1), &mut k, lin, stack) {
+        return false;
+    }
+    let n = lin.len();
+    let e = merge_terms(lin, 0, n);
+    let start = st.pool.len() as u32;
+    for j in 0..e {
+        st.pool.push(lin[j]);
+    }
+    st.rows.push(Row::<B> { k: k, start: start, len: e as u32 });
+    return true;
+}
+
+// What theory literal `l` (`blast::tlit`) states, into `st`: an order of integers is a row, an
+// equality of integers two rows and an equality, its orders (SEL_LT, SEL_GT) a row each; an equality
+// of other values an equality or a disequality; every other atom a literal. False when a row does not
+// fit. `lin` and `stack` are scratch.
+pub(package) fn state_lit<const B: usize>(
+    tm: &Terms<B>,
+    st: &mut Stated<B>,
+    l: u64,
+    lin: &mut Vector<LinTerm<B>>,
+    stack: &mut Vector<LinTerm<B>>,
+) bool {
+    let t = (l >> 3) as u32;
+    let sel = l >> 1 & 3;
+    let pos = (l & 1) != 0;
+    let x = tm.at(t);
+    let ints = tm.is_int(x.a) && tm.is_int(x.b);
+    if sel != SEL_ATOM {
+        if !(x.op == T_EQ || x.op == T_NE) || !ints || sel > SEL_GT {
+            return false;
+        }
+        // `a < b` (SEL_LT) or `b < a`, or (negative) `b <= a` or `a <= b`.
+        let (p, q) = pick(sel == SEL_LT, (x.a, x.b), (x.b, x.a));
+        return if pos {
+            add_le(tm, st, p, q, 1, lin, stack)
+        } else {
+            add_le(tm, st, q, p, 0, lin, stack)
         };
+    }
+    if (x.op == T_LT || x.op == T_LE) && ints {
+        // pos: a - b + (1 or 0) <= 0; else b - a + (0 or 1) <= 0
+        return if pos {
+            add_le(tm, st, x.a, x.b, pick(x.op == T_LT, 1i64, 0), lin, stack)
+        } else {
+            add_le(tm, st, x.b, x.a, pick(x.op == T_LT, 0i64, 1), lin, stack)
+        };
+    }
+    if (x.op == T_EQ || x.op == T_NE) && ints {
+        if x.op == T_EQ == pos {
+            if !add_le(tm, st, x.a, x.b, 0, lin, stack) || !add_le(tm, st, x.b, x.a, 0, lin, stack) {
+                return false;
+            }
+            st.eqs.push(pair(x.a, x.b));
+        }
+        return true;
+    }
+    if x.op == T_EQ || x.op == T_NE {
+        if x.op == T_EQ == pos {
+            st.eqs.push(pair(x.a, x.b));
+        } else {
+            st.neqs.push(pair(x.a, x.b));
+        }
+    }
+    st.lits.push(t as u64 << 1 | pos as u64);
+    return true;
+}
+
+// What theory literals state, built by the kernel only (`Kernel::state`): the solvers read it (`get`)
+// and hand it back with their proof (`Kernel::lemma`), so the rows the kernel checks are the literals'.
+pub(package) struct Built<const B: usize> {
+    st: Stated<B>,
+    lits: Vector<u64>,
+}
+
+extend<const B: usize> Built<B> {
+    pub(package) const fn get(self: &Self) &Stated<B> {
+        return &self.st;
+    }
+}
+
+// The LRAT checker's clauses (those a proof adds) and assignment.
+pub(package) struct Lrat {
+    start: Vector<u32>,
+    pool: Vector<u32>,
+    val: Vector<bool>, // by literal: true when it holds
+    touched: Vector<u32>,
+}
+
+extend Lrat {
+    pub(package) fn new() Lrat {
+        return Lrat {
+            start: Vector::<u32>::new(),
+            pool: Vector::<u32>::new(),
+            val: Vector::<bool>::new(),
+            touched: Vector::<u32>::new(),
+        };
+    }
+
+    // Whether `proof` (steps `id, n, n literals, m, m hints`) derives the empty clause from `cnf`. The
+    // clauses of `cnf` have ids 1 to its count; each step adds the next id. A step holds when its hints,
+    // each an earlier clause, become unit in turn and then empty under the negation of its literals.
+    pub(package) fn check(self: &mut Self, cnf: &Cnf, proof: &Vector<u32>) bool {
+        let m = cnf.ends.len() as u32;
+        self.start.clear();
+        self.pool.clear();
+        self.start.push(0);
+        self.val.clear();
+        for _j in 0..2 * cnf.nv {
+            self.val.push(false);
+        }
+        let mut p: usize = 0;
+        for _s in 0..proof.len() {
+            if p + 2 > proof.len() {
+                return false;
+            }
+            let id = proof[p];
+            let n = proof[p + 1] as usize;
+            if id != m + self.start.len() as u32 || p + 3 + n > proof.len() {
+                return false;
+            }
+            let ls = p + 2;
+            let nh = proof[ls + n] as usize;
+            let hs = ls + n + 1;
+            if hs + nh > proof.len() {
+                return false;
+            }
+            p = hs + nh;
+            self.touched.clear();
+            let mut holds = false;
+            for j in ls..ls + n {
+                let l = proof[j];
+                if l >= 2 * cnf.nv {
+                    self.undo();
+                    return false;
+                }
+                // A literal and its negation: the clause holds by itself.
+                holds = holds || self.val[l as usize];
+                self.set(l ^ 1);
+            }
+            for j in hs..hs + nh {
+                if holds {
+                    break;
+                }
+                let h = proof[j];
+                if h == 0 || h >= id {
+                    self.undo();
+                    return false;
+                }
+                let (cs, ce, own) = if h == 1 {
+                    (0u32, cnf.ends[0], false)
+                } else if h <= m {
+                    (cnf.ends[(h - 2) as usize], cnf.ends[(h - 1) as usize], false)
+                } else {
+                    let q = (h - m) as usize;
+                    (self.start[q - 1], self.start[q], true)
+                };
+                let mut free = NONE;
+                let mut sat = false;
+                for q in cs..ce {
+                    let l = if own {
+                        self.pool[q as usize]
+                    } else {
+                        cnf.lits[q as usize]
+                    };
+                    if self.val[l as usize] {
+                        sat = true;
+                        break;
+                    }
+                    if !self.val[(l ^ 1) as usize] && l != free {
+                        if free != NONE {
+                            sat = true;
+                            break;
+                        }
+                        free = l;
+                    }
+                }
+                if sat {
+                    self.undo();
+                    return false;
+                }
+                if free == NONE {
+                    holds = true;
+                } else {
+                    self.set(free);
+                }
+            }
+            self.undo();
+            if !holds {
+                return false;
+            }
+            if n == 0 {
+                return true;
+            }
+            for j in ls..ls + n {
+                self.pool.push(proof[j]);
+            }
+            self.start.push(self.pool.len() as u32);
+        }
+        return false;
+    }
+
+    fn set(self: &mut Self, l: u32) {
+        if !self.val[l as usize] {
+            self.val.set(l as usize, true);
+            self.touched.push(l);
+        }
+    }
+
+    fn undo(self: &mut Self) {
+        for j in 0..self.touched.len() {
+            self.val.set(self.touched[j] as usize, false);
+        }
+        self.touched.clear();
     }
 }
 
@@ -190,6 +419,14 @@ pub(package) struct Kernel<const B: usize> {
     cut_rows: Vector<Row<B>>,
     cut_pool: Vector<LinTerm<B>>,
     cacc: Vector<LinTerm<B>>,
+    // The lemmas accepted (`lems`, each one ending at `lend`), the skeleton with their clauses (`seal`),
+    // the bits of the last literals blasted (`blits`), the LRAT scratch.
+    lems: Vector<u64>,
+    lend: Vector<u32>,
+    sk: Blaster<B>,
+    bl: Blaster<B>,
+    blits: Vector<u64>,
+    lr: Lrat,
 }
 
 // A node of a tree to check: the length of the path above its parent, and its parent's side
@@ -225,7 +462,109 @@ extend<const B: usize> Kernel<B> {
             cut_rows: Vector::<Row<B>>::new(),
             cut_pool: Vector::<LinTerm<B>>::new(),
             cacc: Vector::<LinTerm<B>>::new(),
+            lems: Vector::<u64>::new(),
+            lend: Vector::<u32>::new(),
+            sk: Blaster::<B>::new(),
+            bl: Blaster::<B>::new(),
+            blits: Vector::<u64>::new(),
+            lr: Lrat::new(),
         };
+    }
+
+    // Start a refutation: no lemma yet.
+    pub(package) fn begin(self: &mut Self) {
+        self.lems.clear();
+        self.lend.clear();
+    }
+
+    fn accept(self: &mut Self, lits: &Vector<u64>) {
+        self.lems.extend_copy(lits);
+        self.lend.push(self.lems.len() as u32);
+    }
+
+    // What the theory literals `lits` state (`state_lit`), None when a row does not fit.
+    pub(package) fn state(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>) Option<Built<B>> {
+        let mut st = Stated::<B>::new();
+        for j in 0..lits.len() {
+            if !state_lit(tm, &mut st, lits[j], &mut self.row, &mut self.stack) {
+                return None;
+            }
+        }
+        return Some(Built::<B> { st: st, lits: lits.clone() });
+    }
+
+    // Whether `pf` refutes what `b` states; then its literals are a lemma.
+    pub(package) fn lemma(self: &mut Self, tm: &Terms<B>, b: Built<B>, pf: &Proof<B>) bool {
+        if !self.check(tm, &b.st, pf) {
+            return false;
+        }
+        self.accept(&b.lits);
+        return true;
+    }
+
+    // The skeleton of `hyps` and the negation of `goal`, and the negation of each lemma, as clauses
+    // (`skeleton`) for `covered`. False past a bound.
+    pub(package) fn seal(self: &mut Self, tm: &Terms<B>, hyps: &Vector<u32>, goal: u32) bool {
+        self.sk.reset(false);
+        for j in 0..hyps.len() {
+            if !self.sk.assert(tm, hyps[j], true) {
+                return false;
+            }
+        }
+        if !self.sk.assert(tm, goal, false) {
+            return false;
+        }
+        let mut c = Vector::<u64>::new();
+        let mut s: u32 = 0;
+        for j in 0..self.lend.len() {
+            c.clear();
+            for q in s..self.lend[j] {
+                c.push(self.lems[q as usize]);
+            }
+            s = self.lend[j];
+            if !self.sk.negation(tm, &c) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The bits of the theory literals `lits`, as clauses (`bits`), for a SAT refutation.
+    pub(package) fn blast(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>) bool {
+        self.bl.reset(true);
+        self.blits.clear();
+        self.blits.extend_copy(lits);
+        for j in 0..lits.len() {
+            let x = self.bl.lit_for(tm, lits[j]);
+            if x == NONE {
+                return false;
+            }
+            self.bl.unit(x);
+        }
+        return self.bl.ok;
+    }
+
+    // Whether `proof` refutes the clauses of `blast`; then their literals are a lemma.
+    pub(package) fn blast_lemma(self: &mut Self, proof: &Vector<u32>) bool {
+        if !self.lr.check(&self.bl.cnf, proof) {
+            return false;
+        }
+        let ls = self.blits.clone();
+        self.accept(&ls);
+        return true;
+    }
+
+    // Whether `proof` refutes the clauses of `seal`: then the hypotheses imply the goal.
+    pub(package) fn covered(self: &mut Self, proof: &Vector<u32>) bool {
+        return self.lr.check(&self.sk.cnf, proof);
+    }
+
+    pub(package) const fn skeleton(self: &Self) &Cnf {
+        return &self.sk.cnf;
+    }
+
+    pub(package) const fn bits(self: &Self) &Blaster<B> {
+        return &self.bl;
     }
 
     // Whether proof `pf` refutes the branch `st`: every fact and every tree it uses is valid.
