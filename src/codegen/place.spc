@@ -11,6 +11,8 @@ import std::float as fl;
 import ast::ast as ast;
 
 pub(package) const NOREG: u8 = 0xFF;
+/// `Core.seg_reg`: no register of the segment's class was free where it opened; it holds none.
+pub(package) const SEG_DEAD: u8 = 0xFE;
 
 // Homes.
 pub(package) const H_NONE: u8 = 0; // only a register
@@ -218,34 +220,50 @@ const fn blocked(mv: &Vector<Mv>, i: usize) bool {
 
 /// The header parameter whose home block parameter `x` (a value index of `b`, homes `va`) may share: the
 /// one its block's jump back passes it to alone, of a home of its own of the same type, when nothing in
-/// the block or the jump reads that parameter; else NONE.
+/// the block or the jump reads that parameter; else NONE. The block may end in a branch whose one edge
+/// goes back and whose other leaves with that parameter dead (no argument of the edge, not live into
+/// its target), when `x`'s range ends in the block: the parameter's home is `x`'s to the block's end.
 pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32 {
     let ni = b.insts.len() as u32;
     let p = x - ni;
     let j = lv.def_blk[x as usize];
     let jb = b.blocks[j as usize];
     let t = b.insts[(jb.start + jb.len - 1) as usize];
-    if t.op != O_JMP {
+    if t.op != O_JMP && t.op != O_BR {
         return NONE;
     }
-    let h = b.edge_target(t.a);
+    // The edge back (`be`) and, of a branch, the other (`oe`).
+    let mut be = t.a;
+    let mut oe = NONE;
+    if t.op == O_BR {
+        let pj = lv.pos[j as usize];
+        let back_b = lv.pos[b.edge_target(t.b) as usize] != NONE && lv.pos[b.edge_target(t.b) as usize] <= pj;
+        let back_c = lv.pos[b.edge_target(t.c) as usize] != NONE && lv.pos[b.edge_target(t.c) as usize] <= pj;
+        if back_b == back_c || lv.end[x as usize] != pj {
+            return NONE;
+        }
+        be = ast::pick(back_b, t.b, t.c);
+        oe = ast::pick(back_b, t.c, t.b);
+    }
+    let h = b.edge_target(be);
     let hb = b.blocks[h as usize];
     if lv.pos[h as usize] == NONE || lv.pos[h as usize] > lv.pos[j as usize] {
         return NONE;
     }
     let mut px = NONE;
-    for q in 0..b.edge_nargs(t.a) {
-        if b.edge_arg(t.a, q) == (VPARAM | p) {
+    for q in 0..b.edge_nargs(be) {
+        if b.edge_arg(be, q) == (VPARAM | p) {
             if px != NONE {
                 return NONE;
             }
             px = ni + hb.param_start + q;
         }
     }
+    // A value with segments changes places: it shares no home.
     if px == NONE || va[px as usize].home != H_FIXED && va[px as usize].home != H_SLOT || lv::xty(b, px) != lv::xty(
         b,
         x,
-    ) {
+    ) || lv.seg_val(px) || lv.seg_val(x) {
         return NONE;
     }
     // No instruction of the block, nor its jump, reads the header parameter.
@@ -259,8 +277,18 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
             }
         }
     }
-    for q in 0..b.edge_nargs(t.a) {
-        if b.edge_arg(t.a, q) == pv {
+    for q in 0..b.edge_nargs(be) {
+        if b.edge_arg(be, q) == pv {
+            return NONE;
+        }
+    }
+    if oe != NONE {
+        for q in 0..b.edge_nargs(oe) {
+            if b.edge_arg(oe, q) == pv {
+                return NONE;
+            }
+        }
+        if lv.live_in(b, px, b.edge_target(oe)) {
             return NONE;
         }
     }
@@ -285,7 +313,7 @@ pub(package) const fn tail_candidate(b: &Body) bool {
 /// a value in a register. NONE else.
 pub(package) fn step_slot(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32 {
     let ni = b.insts.len() as u32;
-    if x >= ni {
+    if x >= ni || lv.seg_val(x) {
         return NONE;
     }
     let us = lv.uses_of(x);
@@ -296,7 +324,9 @@ pub(package) fn step_slot(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32 
         }
         let px = ni + (v & ~VPARAM);
         let ty = lv::xty(b, px);
-        if va[px as usize].home != H_SLOT || lv.cut[px as usize] != NONE || ty != lv::xty(b, x) || in_mem(ty) {
+        if va[px as usize].home != H_SLOT || lv.cut[px as usize] != NONE || lv.seg_val(px) || ty != lv::xty(b, x) || in_mem(
+            ty,
+        ) {
             continue;
         }
         if lv.slot_partner(b, x, px) {
@@ -835,6 +865,14 @@ pub(package) struct Core {
     jlast: Vector<u32>,
     jbad: Vector<bool>,
     pub(package) stubbing: bool,
+    // Register segments (`lv::Live::segments`): per segment, its register (NOREG until a block or an edge
+    // opens it, `SEG_DEAD`); per value with segments, its stack home (`H_SLOT` or `H_ARG`; `H_NONE`: none
+    // yet) and that home's offset.
+    pub(package) seg_reg: Vector<u8>,
+    seg_on: Vector<u32>, // the segments that hold a register, until their span ends (`seg_leave`)
+    seg_done: Vector<bool>, // per segment, whether it gave its register back
+    pub(package) sv_home: Vector<u8>,
+    pub(package) sv_off: Vector<i32>,
     // Calls.
     pub(package) lay: ab::CallLayout,
     pub(package) self_lay: ab::CallLayout,
@@ -877,6 +915,11 @@ extend Core {
             jlast: Vector::<u32>::new(),
             jbad: Vector::<bool>::new(),
             stubbing: false,
+            seg_reg: Vector::<u8>::new(),
+            seg_on: Vector::<u32>::new(),
+            seg_done: Vector::<bool>::new(),
+            sv_home: Vector::<u8>::new(),
+            sv_off: Vector::<i32>::new(),
             free_slots: Vector::<u64>::new(),
             tail_ok: false,
             lay: ab::CallLayout::new(),
@@ -907,7 +950,7 @@ extend Core {
             if b.edge_arg(t.a, k) != v {
                 continue;
             }
-            let pva = self.va[b.insts.len() + (tb.param_start + k) as usize];
+            let pva = self.pva(b.insts.len() as u32 + tb.param_start + k);
             if r != NOREG || pva.home != H_FIXED {
                 return NOREG;
             }
@@ -919,6 +962,13 @@ extend Core {
     // Free value index `x`'s register and slot.
     pub(package) fn release(self: &mut Self, x: u32) {
         let va = self.va[x as usize];
+        // A segment keeps its register to its span's end (an edge into its parameter's block writes it
+        // there): its value gives the register up only in the span's last block.
+        let sg = if va.home == H_FIXED && self.lv.seg_val(x) {
+            self.lv.seg_of(x, self.pos)
+        } else {
+            NONE
+        };
         if va.reg != NOREG && self.owner[va.reg as usize] == x {
             // A later block's parameter that shares the register (`param_home`) holds it on.
             let to = self.heir[va.reg as usize];
@@ -929,8 +979,11 @@ extend Core {
                 self.set_owner(va.reg, to);
             } else {
                 self.set_owner(va.reg, NONE);
-                if va.home == H_FIXED {
+                if va.home == H_FIXED && (sg == NONE || self.lv.seg_b[sg as usize] <= self.pos) {
                     self.fixed_busy &= ~bit(va.reg);
+                    if sg != NONE {
+                        self.seg_done[sg as usize] = true;
+                    }
                 }
             }
         }
@@ -942,6 +995,11 @@ extend Core {
             };
             self.free_slots.push(n as u64 << 32 | (va.off as u32) as u64);
         }
+        // A segment's value that ends in the segment's register: its stack home too.
+        if va.home == H_FIXED && self.lv.seg_val(x) && self.sv_home[x as usize] == H_SLOT {
+            self.free_slots.push(8u64 << 32 | (self.sv_off[x as usize] as u32) as u64);
+            self.sv_home[x as usize] = H_NONE;
+        }
         let w = self.va.index_mut(x as usize);
         w.reg = NOREG;
         w.home = H_NONE;
@@ -950,6 +1008,10 @@ extend Core {
 
     // `same_moves` one way: each move of edge `e` is one of edge `o`'s.
     pub(package) const fn moves_within(self: &Self, e: u32, o: u32) bool {
+        // An edge into a segment loads its value on that edge alone.
+        if self.seg_enters(e) || self.seg_enters(o) {
+            return false;
+        }
         let b = self.b();
         let ni = b.insts.len() as u32;
         let tb = b.blocks[b.edge_target(e) as usize];
@@ -958,17 +1020,17 @@ extend Core {
             let px = ni + tb.param_start + q;
             let a = b.edge_arg(e, q);
             let ax = self.vx(a);
-            let pva = self.va[px as usize];
-            if ax == px || pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
+            let pva = self.pva(px);
+            if ax == px && !self.seg_moved(px) || ax != px && pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg {
                 continue;
             }
-            if pva.home != H_FIXED {
+            if pva.home != H_FIXED || ax == px {
                 return false;
             }
             let mut found = false;
             for j in 0..b.edge_nargs(o) {
-                let oy = ni + ob.param_start + j;
-                found = found || b.edge_arg(o, j) == a && self.va[oy as usize].home == H_FIXED && self.va[oy as usize].reg == pva.reg;
+                let oy = self.pva(ni + ob.param_start + j);
+                found = found || b.edge_arg(o, j) == a && oy.home == H_FIXED && oy.reg == pva.reg;
             }
             let y = self.owner[pva.reg as usize];
             let mine = y == NONE || y == px || self.lv.share[px as usize] == y || self.lv.end[y as usize] <= self.pos;
@@ -1095,9 +1157,10 @@ extend Core {
         }
         let va = self.va[x as usize];
         // Not one a later parameter shares (`heir`, unless the parameter is `x`, which took the register
-        // over), nor one that shares another's (`back_share`: the owner keeps it).
+        // over), nor one that shares another's (`back_share`: the owner keeps it), nor a segment's, which
+        // keeps it to its span's end.
         return ast::pick(
-            va.home == H_FIXED && va.reg != NOREG && self.owner[va.reg as usize] == x && (self.heir[va.reg as usize] == NONE || self.heir[va.reg as usize] == x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos,
+            va.home == H_FIXED && va.reg != NOREG && !self.lv.seg_val(x) && self.owner[va.reg as usize] == x && (self.heir[va.reg as usize] == NONE || self.heir[va.reg as usize] == x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos,
             va.reg,
             NOREG,
         );
@@ -1140,16 +1203,22 @@ extend Core {
         );
     }
 
-    // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen).
+    // Whether an argument of edge `e` is not in its parameter's home yet (the homes chosen), or the edge
+    // enters a segment (`seg_enters`).
     pub(package) const fn moves_needed(self: &Self, e: u32) bool {
+        if self.seg_enters(e) {
+            return true;
+        }
         let b = self.b();
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
         for q in 0..b.edge_nargs(e) {
             let px = ni + tb.param_start + q;
             let ax = self.vx(b.edge_arg(e, q));
-            let pva = self.va[px as usize];
-            if ax != px && !(pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg) {
+            let pva = self.pva(px);
+            if ax != px && !(pva.home == H_FIXED && self.va[ax as usize].reg == pva.reg) || ax == px && self.seg_moved(
+                px,
+            ) {
                 return true;
             }
         }
@@ -1177,7 +1246,7 @@ extend Core {
             return;
         }
         let va = self.va[x as usize];
-        if va.home == H_FIXED && va.reg == r && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
+        if va.home == H_FIXED && va.reg == r && !self.lv.seg_val(x) && self.lv.uses[x as usize] == 0 && self.lv.end[x as usize] == self.pos {
             self.fixed_busy &= ~bit(r);
         }
     }
@@ -1552,7 +1621,8 @@ extend Core {
         }
         for r in 0..self.owner.len() {
             let x = self.jpool[at as usize + r];
-            if x == NONE || self.owner[r] != NONE || self.va[x as usize].reg != NOREG {
+            // A register a segment opened since holds no temporary.
+            if x == NONE || self.owner[r] != NONE || self.va[x as usize].reg != NOREG || (self.fixed_busy & bit(r as u8)) != 0 {
                 continue;
             }
             let d = self.lv.def_blk[x as usize];
@@ -1565,5 +1635,205 @@ extend Core {
             va.dirty = false;
             va.clean = false;
         }
+    }
+}
+
+// Register segments (`lv::Live::segments`): a value holds its segment's register through the blocks the
+// plan lists it for (`lv::Live::sin`) and is in its stack home in the others. The plan's state per block is
+// the generator's: a block's start binds and unbinds (`seg_leave`, `seg_in`), and an edge from a block
+// that does not hold the value in the register into one that does moves it there (`seg_moves`).
+extend Core {
+    /// Before a body's code: no segment has a register, no segment's value a stack home.
+    pub(package) fn seg_reset(self: &mut Self) {
+        fill(&mut self.seg_reg, self.lv.seg_x.len(), NOREG);
+        fill(&mut self.seg_done, self.lv.seg_x.len(), false);
+        self.seg_on.truncate(0);
+        fill(&mut self.sv_home, self.lv.segd.len(), H_NONE);
+        fill(&mut self.sv_off, self.lv.segd.len(), 0);
+    }
+
+    /// The home of block parameter `px` as its own block holds it, which an edge into that block writes: its
+    /// home now, but for a parameter with segments, whose place in the current block may be another (the
+    /// segment's register when its block holds it there, opened at the first edge into it; else its stack
+    /// home).
+    pub(package) const fn pva(self: &Self, px: u32) Va {
+        let va = self.va[px as usize];
+        if !self.lv.seg_val(px) {
+            return va;
+        }
+        let s = self.lv.seg_of(px, self.lv.pos[self.lv.def_blk[px as usize] as usize]);
+        if s != NONE && self.seg_reg[s as usize] < SEG_DEAD {
+            return Va { reg: self.seg_reg[s as usize], home: H_FIXED, dirty: false, clean: false, off: va.off };
+        }
+        if va.home == H_FIXED {
+            return Va {
+                reg: NOREG,
+                home: self.sv_home[px as usize],
+                dirty: false,
+                clean: false,
+                off: self.sv_off[px as usize],
+            };
+        }
+        return va;
+    }
+
+    /// Whether parameter `px`, passed to itself by an edge into its block, moves: it has segments and is
+    /// not where its block holds it (`pva`).
+    pub(package) const fn seg_moved(self: &Self, px: u32) bool {
+        if !self.lv.seg_val(px) {
+            return false;
+        }
+        let va = self.va[px as usize];
+        let pva = self.pva(px);
+        return if pva.home == H_FIXED {
+            va.reg != pva.reg
+        } else {
+            va.home == H_FIXED
+        };
+    }
+
+    /// Whether segment `s`'s value is in the segment's register now.
+    pub(package) const fn seg_holds(self: &Self, s: u32) bool {
+        let r = self.seg_reg[s as usize];
+        let va = self.va[self.lv.seg_x[s as usize] as usize];
+        return r < SEG_DEAD && va.home == H_FIXED && va.reg == r;
+    }
+
+    // Whether edge `e`, into a block that segment `s` holds its value through, moves that value into the
+    // segment's register: the value is not there, and the target does not define it (an instruction of
+    // its own, or a parameter the edge's argument moves into).
+    const fn seg_entry(self: &Self, s: u32, e: u32) bool {
+        let x = self.lv.seg_x[s as usize];
+        let own = self.lv.def_blk[x as usize] == self.b().edge_target(e);
+        return self.seg_reg[s as usize] != SEG_DEAD && !own && !self.seg_holds(s);
+    }
+
+    /// Whether edge `e` of the current block's terminator enters a segment: its target holds a value in a
+    /// segment's register that is not there now. Not from a stub, which no block's state enters.
+    pub(package) const fn seg_enters(self: &Self, e: u32) bool {
+        if self.lv.segd.len() == 0 || self.stubbing {
+            return false;
+        }
+        let q = self.lv.pos[self.b().edge_target(e) as usize] as usize;
+        for j in self.lv.sin_at[q]..self.lv.sin_at[q + 1] {
+            if self.seg_entry(self.lv.sin[j as usize], e) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The moves of edge `e` into the segments it enters (`seg_enters`), onto `out`: each value from where
+    /// it is now (a temporary register, or its stack home at `sp` or `fp`) into its segment's register,
+    /// which the terminator's `edge_homes` opened.
+    pub(package) fn seg_moves(self: &Self, e: u32, sp: u8, fp: u8, out: &mut Vector<Mv>) {
+        if self.lv.segd.len() == 0 || self.stubbing {
+            return;
+        }
+        let q = self.lv.pos[self.b().edge_target(e) as usize] as usize;
+        for j in self.lv.sin_at[q]..self.lv.sin_at[q + 1] {
+            let s = self.lv.sin[j as usize];
+            if !self.seg_entry(s, e) {
+                continue;
+            }
+            let x = self.lv.seg_x[s as usize];
+            let r = self.seg_reg[s as usize];
+            let src = loc_of(&self.va, x, sp, fp);
+            assert(r != NOREG && src.kind != LC_VAL, "place: an edge enters a segment with no register or no value");
+            out.push(
+                Mv {
+                    src: src,
+                    dst: Lc { kind: LC_REG, reg: r, off: 0, val: x },
+                    v: false,
+                    bytes: type_bytes(self.xty(x), self.ptr),
+                    done: false,
+                },
+            );
+        }
+    }
+
+    /// Segment `s` opened with register `r` (NOREG: none was free, it holds none).
+    pub(package) fn seg_set(self: &mut Self, s: u32, r: u8) {
+        self.seg_reg[s as usize] = ast::pick(r == NOREG, SEG_DEAD, r);
+        if r != NOREG {
+            self.seg_on.push(s);
+        }
+    }
+
+    /// At the start of the block at layout position `q`: each segment that held its value through the block
+    /// before and does not hold it through this one gives the value back to its stack home, and each
+    /// segment whose span ended gives its register up.
+    pub(package) fn seg_leave(self: &mut Self, q: u32) {
+        if q != 0 {
+            for j in self.lv.sin_at[q as usize - 1]..self.lv.sin_at[q as usize] {
+                let s = self.lv.sin[j as usize];
+                let x = self.lv.seg_x[s as usize];
+                // A value that died in the block before gave its register up there (`release`).
+                if self.lv.seg_of(x, q) == s || !self.seg_holds(s) {
+                    continue;
+                }
+                assert(
+                    !self.lv.seg_mem[x as usize] || self.sv_home[x as usize] != H_NONE,
+                    "place: a segment's value leaves its register with no stack home",
+                );
+                self.set_owner(self.seg_reg[s as usize], NONE);
+                let home = self.sv_home[x as usize];
+                let off = self.sv_off[x as usize];
+                let w = self.va.index_mut(x as usize);
+                w.reg = NOREG;
+                w.home = home;
+                w.off = off;
+                w.dirty = false;
+                w.clean = false;
+            }
+        }
+        let mut j: usize = 0;
+        // Each step keeps a segment or drops one.
+        while j < self.seg_on.len() {
+            let s = self.seg_on[j] as usize;
+            if self.lv.seg_b[s] >= q {
+                j += 1;
+                continue;
+            }
+            if !self.seg_done[s] {
+                self.fixed_busy &= ~bit(self.seg_reg[s]);
+                self.seg_done[s] = true;
+            }
+            let _ = self.seg_on.swap_remove(j);
+        }
+    }
+
+    /// Segment `s`'s value is in the segment's register from here: its stack home, when it had one, stays
+    /// the segment value's (`sv_home`), and a temporary register that held it holds nothing.
+    pub(package) fn seg_in(self: &mut Self, s: u32) {
+        if self.seg_holds(s) {
+            return;
+        }
+        let x = self.lv.seg_x[s as usize];
+        let r = self.seg_reg[s as usize];
+        let va = self.va[x as usize];
+        if (va.home == H_SLOT || va.home == H_ARG) && self.sv_home[x as usize] == H_NONE {
+            self.sv_home[x as usize] = va.home;
+            self.sv_off[x as usize] = va.off;
+        }
+        if va.reg != NOREG && va.reg != r && self.owner[va.reg as usize] == x {
+            self.set_owner(va.reg, NONE);
+        }
+        self.set_owner(r, x);
+        let w = self.va.index_mut(x as usize);
+        w.reg = r;
+        w.home = H_FIXED;
+        w.dirty = false;
+        w.clean = false;
+    }
+
+    /// The stack slot of segment value `x`, made when it has no stack home yet: its offset.
+    pub(package) const fn seg_slot(self: &mut Self, x: u32) i32 {
+        if self.sv_home[x as usize] == H_NONE {
+            let n = type_bytes(self.xty(x), self.ptr);
+            self.sv_off[x as usize] = self.slot_alloc(n, n) as i32;
+            self.sv_home[x as usize] = H_SLOT;
+        }
+        return self.sv_off[x as usize];
     }
 }

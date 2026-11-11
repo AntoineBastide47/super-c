@@ -72,6 +72,117 @@ b2:
     assert_eq(live.splits.len(), 0);
 }
 
+// A value that lives through a loop's call and has no callee-saved register takes a caller-saved one over
+// the blocks that do not call (`Live::segments`): the call's block is out, the edge past it joins the
+// blocks around it into one span, and the value keeps a stack home. No segment without the generator's
+// call tables.
+@test
+fn a_value_without_a_home_holds_a_register_between_calls() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = add.i64 v0, v0
+  jmp b1(v0)
+b1(v3: i64):
+  v4 = add.i64 v3, v2
+  v5 = icmp.ult v4, v1
+  br v5, b2, b3
+b2:
+  v6 = call.i64 @g(v4) : (i64) -> i64
+  jmp b1(v6)
+b3:
+  v7 = add.i64 v4, v2
+  ret v7
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let mut live = lv::Live::new();
+    live.run(b);
+    live.split = true;
+    let np = live.order.len();
+    let mut want = Vector::<u8>::new();
+    want.resize_default(live.end.len());
+    want[0] = lv::WANT_CALLEE;
+    // The call is instruction 5, in block 2.
+    fill(&mut live.cfirst, np, NONE);
+    fill(&mut live.clast, np, NONE);
+    live.cfirst[live.pos[2] as usize] = 5;
+    live.clast[live.pos[2] as usize] = 5;
+    live.plan(b, &want, lv::Caps { xc: 0, xs: 1, xj: 1, vc: 0, vs: 0, vj: 0 });
+    assert_eq(live.home[0], lv::HOME_NONE);
+    assert(live.seg_val(0), "the value has a segment");
+    assert_eq(live.seg_x.len(), 1);
+    assert_eq(live.seg_a[0], live.pos[0]);
+    assert_eq(live.seg_b[0], live.pos[3]);
+    assert_eq(live.home_at(0, live.pos[0]), lv::HOME_SCRATCH);
+    assert_eq(live.home_at(0, live.pos[1]), lv::HOME_SCRATCH);
+    assert_eq(live.home_at(0, live.pos[2]), lv::HOME_NONE);
+    assert_eq(live.home_at(0, live.pos[3]), lv::HOME_SCRATCH);
+    assert(live.seg_mem[0], "the call's block reads it from its stack home");
+    // A block that nothing writes the argument registers in may hold it in one of them: the same span,
+    // of the wider class when the narrow one has no register left.
+    fill(&mut live.wfirst, np, NONE);
+    fill(&mut live.wlast, np, NONE);
+    live.wfirst[live.pos[2] as usize] = 5;
+    live.wlast[live.pos[2] as usize] = 5;
+    fill(&mut live.scap, np, 4);
+    live.plan(b, &want, lv::Caps { xc: 0, xs: 0, xj: 1, vc: 0, vs: 0, vj: 0 });
+    assert_eq(live.seg_x.len(), 1);
+    assert_eq(live.seg_h[0], lv::HOME_WIDE);
+    assert_eq(live.home_at(0, live.pos[2]), lv::HOME_NONE);
+    live.cfirst.truncate(0);
+    live.plan(b, &want, lv::Caps { xc: 0, xs: 1, xj: 1, vc: 0, vs: 0, vj: 0 });
+    assert(!live.seg_val(0), "no segment without the call tables");
+}
+
+// A loop header's parameter shares its entry value's register only where the other homes leave it one
+// within the joint cap of the blocks its range covers: `v2` fits in `b0` (cap 2) beside `v0`, the loop
+// (cap 1) holds `v0` alone, so `v3` takes no home.
+@test
+fn a_shared_register_keeps_the_joint_cap_of_the_sharers_blocks() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = add.i64 v0, v0
+  v2 = add.i64 v1, v0
+  jmp b1(v2)
+b1(v3: i64):
+  v4 = add.i64 v3, v0
+  v5 = icmp.ult v4, v0
+  br v5, b1(v4), b2
+b2:
+  ret v4
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let ni = b.insts.len();
+    let mut live = lv::Live::new();
+    live.run(b);
+    let np = live.order.len();
+    let mut want = Vector::<u8>::new();
+    want.resize_default(live.end.len());
+    want[ni] = lv::WANT_CALLEE;
+    want[1] = lv::WANT_CALLEE;
+    want[ni + 1] = lv::WANT_CALLEE;
+    fill(&mut live.jcap, np, 1);
+    live.jcap[live.pos[0] as usize] = 2;
+    live.plan(b, &want, lv::Caps { xc: 2, xs: 0, xj: 2, vc: 0, vs: 0, vj: 0 });
+    assert_eq(live.home[1], lv::HOME_CALLEE);
+    assert_eq(live.home_at(ni as u32, live.pos[1]), lv::HOME_CALLEE);
+    assert_eq(live.home_at(ni as u32 + 1, live.pos[1]), lv::HOME_NONE);
+}
+
 @test
 fn next_uses_follow_folded_operands_and_repeated_reads() {
     let mut err = String::new();

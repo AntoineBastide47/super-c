@@ -10884,6 +10884,80 @@ b0(v0: i64):
     same_result(&b, &a, "top", x, 3);
 }
 
+// A callee over the budget by its loads and stores through a parameter inlines where the argument is a
+// slot's address (`il::slot_params`, LLVM's SROA arguments): the copy's accesses become the slot's values.
+// Through another pointer the same callee stays a call.
+@test
+fn a_callee_that_accesses_a_slot_argument_inlines_by_its_other_instructions() {
+    let (b, a) = optimized_cfg(
+        M"(lir ptr 8
+file f0 "acc.spc"
+sym @acc fn global
+sym @top fn global
+sym @via fn global
+fn @acc
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0 align 3
+  v3 = add.i64 v2, v1
+  store v3, v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = mul.i64 v4, v1
+  store v5, v0+8 align 3
+  v6 = load.i64 v0+16 align 3
+  v7 = xor.i64 v6, v1
+  store v7, v0+16 align 3
+  ret
+fn @top
+  file f0
+  sig (i64) -> i64
+  slot s0 size 24 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 2
+  v4 = iconst.i64 3
+  store v2, v1 align 3
+  store v3, v1+8 align 3
+  store v4, v1+16 align 3
+  call @acc(v1, v0) : (ptr, i64) -> void !3:5
+  v5 = load.i64 v1 align 3
+  v6 = load.i64 v1+8 align 3
+  v7 = load.i64 v1+16 align 3
+  v8 = add.i64 v5, v6
+  v9 = add.i64 v8, v7
+  ret v9
+fn @via
+  file f0
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  call @acc(v0, v1) : (ptr, i64) -> void !9:5
+  ret
+)",
+        0,
+        false,
+        il::Budget { warm: 5, all: 20 },
+        lu::Budgets {
+            peel: 0,
+            partial: 0,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 0,
+            interleave: 0,
+            fin: 0,
+        },
+    );
+    let top = text_of(&a, "top");
+    assert(top.as_str().find("call") < 0, top.as_str());
+    assert(top.as_str().find("slotaddr") < 0, top.as_str());
+    let via = text_of(&a, "via");
+    assert(via.as_str().find("call @acc") >= 0, via.as_str());
+    let x: []u64 = [5];
+    same_result(&b, &a, "top", x, 22);
+}
+
 // A parser's position kept in a structure on the caller's frame, advanced by an inlined loop with an
 // inner loop, at -O3's budgets: the loops keep reading it.
 @test

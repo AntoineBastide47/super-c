@@ -10065,6 +10065,220 @@ fn register_hungry_instructions_compile_and_run() {
     assert_eq(run_native(lir, drv), 0);
 }
 
+// A leaf with more long-lived values than x0..x15 hold beside its instructions' registers: the first
+// instruction while the parameters arrive in x0..x7, a select of a folded comparison with constant
+// operands, values that live past both into a join. Its homes leave each instruction what `a64gen`'s
+// `need` counts, which `end_inst` asserts. It compiles for arm64 on every host and runs on the host.
+@test
+fn a_leafs_homes_leave_each_instruction_its_registers() {
+    let lir = "lir ptr 8\nsym @hungry fn global\nfn @hungry\n  sig (ptr, i64, i64, i64, i64, i64, i64, i64) -> i64\nb0(v0: ptr, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64):\n  v8 = load.i32 v0+64 align 2\n  v9 = iconst.i32 0\n  v10 = iconst.ptr 0\n  v11 = icmp.ne v8, v9\n  v12 = select.ptr v11, v10, v0\n  v13 = load.i64 v0 align 3\n  v14 = load.i64 v0+8 align 3\n  v15 = load.i64 v0+16 align 3\n  br v11, b1, b2\nb1:\n  v16 = add.i64 v1, v2\n  jmp b3(v16)\nb2:\n  v17 = load.i64 v12+24 align 3\n  jmp b3(v17)\nb3(v18: i64):\n  v19 = add.i64 v18, v3\n  v20 = add.i64 v19, v4\n  v21 = add.i64 v20, v5\n  v22 = add.i64 v21, v6\n  v23 = add.i64 v22, v7\n  v24 = add.i64 v23, v13\n  v25 = add.i64 v24, v14\n  v26 = add.i64 v25, v15\n  v27 = add.i64 v26, v1\n  v28 = add.i64 v27, v2\n  ret v28\n";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    assert(object_of(lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t hungry(const int64_t *, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);\nint main(void) {\n  int64_t m[9] = {10, 20, 30, 40, 0, 0, 0, 0, 0};\n  if (hungry(m, 1, 2, 3, 4, 5, 6, 7) != 40 + 3 + 4 + 5 + 6 + 7 + 60 + 1 + 2) return 1;\n  m[8] = 1;\n  if (hungry(m, 1, 2, 3, 4, 5, 6, 7) != 3 + 3 + 4 + 5 + 6 + 7 + 60 + 1 + 2) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// More values live through a loop than the register homes hold, and a call on one path of each iteration:
+// the values without a home take registers over the loop's blocks that do not call (`Live::segments`),
+// loaded on the edge out of the call's block, and each keeps its stack home. The loop's sum follows the
+// C driver's; the function compiles for every native target.
+@test
+fn values_past_the_homes_hold_registers_between_calls() {
+    let n: u32 = 24;
+    let mut lir = String::from(
+        "lir ptr 8\nsym @bump fn global\nsym @segs fn global\nfn @segs\n  sig (ptr, i64) -> i64\nb0(v0: ptr, v1: i64):\n",
+    );
+    for k in 0..n {
+        lir.push_str(format("  v{} = load.i64 v0+{} align 3\n", 2 + k, 8 * k).as_str());
+    }
+    let z = 2 + n;
+    lir.push_str(
+        format(
+            "  v{} = iconst.i64 0\n  v{} = iconst.i64 1\n  v{} = iconst.i64 7\n  jmp b1(v{}, v{})\n",
+            z,
+            z + 1,
+            z + 2,
+            z,
+            z,
+        ).as_str(),
+    );
+    let i = z + 3;
+    let acc = z + 4;
+    lir.push_str(
+        format("b1(v{}: i64, v{}: i64):\n  v{} = icmp.ult v{}, v1\n  br v{}, b2, b5\n", i, acc, z + 5, i, z + 5).as_str(),
+    );
+    lir.push_str(
+        format(
+            "b2:\n  v{} = and.i64 v{}, v{}\n  v{} = icmp.eq v{}, v{}\n  br v{}, b3, b4(v{})\n",
+            z + 6,
+            i,
+            z + 2,
+            z + 7,
+            z + 6,
+            z,
+            z + 7,
+            acc,
+        ).as_str(),
+    );
+    lir.push_str(format("b3:\n  v{} = call.i64 @bump(v{}) : (i64) -> i64\n  jmp b4(v{})\n", z + 8, acc, z + 8).as_str());
+    let mut cur = z + 9;
+    lir.push_str(format("b4(v{}: i64):\n", cur).as_str());
+    for k in 0..n {
+        lir.push_str(format("  v{} = add.i64 v{}, v{}\n", cur + 1, cur, 2 + k).as_str());
+        cur += 1;
+    }
+    lir.push_str(
+        format("  v{} = add.i64 v{}, v{}\n  jmp b1(v{}, v{})\nb5:\n", cur + 1, i, z + 1, cur + 1, cur).as_str(),
+    );
+    cur += 1;
+    let mut last = acc;
+    for k in 0..n {
+        lir.push_str(format("  v{} = add.i64 v{}, v{}\n", cur + 1, last, 2 + k).as_str());
+        cur += 1;
+        last = cur;
+    }
+    lir.push_str(format("  ret v{}\n", last).as_str());
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(&lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS arm64 object");
+    assert(object_of(&lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    assert(object_of(&lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(&lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nuint64_t segs(const uint64_t *, uint64_t);\nuint64_t bump(uint64_t x) { return x * 3 + 1; }\nint main(void) {\n  uint64_t a[24], s = 0, acc = 0;\n  for (int k = 0; k < 24; k++) { a[k] = (uint64_t)k * 1000003 + 1; s += a[k]; }\n  for (uint64_t i = 0; i < 37; i++) { if ((i & 7) == 0) acc = bump(acc); acc += s; }\n  if (segs(a, 37) != acc + s) return 1;\n  if (segs(a, 0) != s) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(&lir, drv), 0);
+}
+
+// A loop whose latch ends in a branch and passes its own parameter back to the header's (a value an arm of
+// the body may change): the latch's parameter shares the header parameter's register (`place::back_share`),
+// so neither the edge into the latch that passes the value on nor the edge back moves it. The one register
+// move left on arm64 is the result's into x0.
+@test
+fn a_branch_latch_shares_the_header_parameters_register() {
+    let lir = "lir ptr 8\nsym @drain fn global\nfn @drain\n  sig (ptr, i64, i64) -> i64\nb0(v0: ptr, v1: i64, v2: i64):\n  v3 = iconst.i64 0\n  v4 = iconst.i64 1\n  jmp b1(v3, v2)\nb1(v5: i64, v6: i64):\n  v7 = ptradd v0, v5 * 8\n  v8 = load.i64 v7 align 3\n  v9 = icmp.eq v8, v3\n  br v9, b3(v6), b2\nb2:\n  v10 = sub.i64 v6, v4\n  jmp b3(v10)\nb3(v11: i64):\n  v12 = add.i64 v5, v4\n  v13 = icmp.ult v12, v1\n  br v13, b1(v12, v11), b4(v11)\nb4(v14: i64):\n  ret v14\n";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // `mov xd, xm`.
+    assert(elf_text_count(&obj, 0xFFE0FFE0, 0xAA0003E0) <= 1, "the loop moves its value between registers");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t drain(const int64_t *, int64_t, int64_t);\nint main(void) {\n  int64_t a[6] = {1, 0, 2, 3, 0, 4};\n  if (drain(a, 6, 10) != 6) return 1;\n  if (drain(a, 1, 10) != 9) return 2;\n  if (drain(a + 1, 1, 10) != 10) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A value whose one use is the next instruction, a zero extension with a register home (it lives past
+// its block): the value is made in that home (`next_reg`), so the extension copies nothing from another
+// register. On arm64 no `mov wd, wm` between two registers is left.
+@test
+fn a_conversions_operand_is_made_in_its_home() {
+    let lir = "lir ptr 8\nsym @widen fn global\nfn @widen\n  sig (ptr, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = load.i32 v0 align 2\n  v3 = load.i32 v0+4 align 2\n  v4 = mul.i32 v2, v3\n  v5 = zext.i64 v4\n  v6 = icmp.ult v5, v1\n  br v6, b1, b2\nb1:\n  v7 = add.i64 v5, v1\n  jmp b3(v7)\nb2:\n  v8 = sub.i64 v5, v1\n  jmp b3(v8)\nb3(v9: i64):\n  v10 = add.i64 v9, v5\n  ret v10\n";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    let (off, size) = elf_text(&obj);
+    let mut copies: u32 = 0;
+    for k in 0..size / 4 {
+        let w = le_at(&obj, off + k * 4, 4) as u32;
+        // `mov wd, wm` with two registers.
+        copies += ((w & 0xFFE0FFE0) == 0x2A0003E0 && (w >> 16 & 31) != (w & 31)) as u32;
+    }
+    assert_eq(copies, 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t widen(const uint32_t *, int64_t);\nint main(void) {\n  uint32_t a[2] = {70000, 70000};\n  uint32_t b[2] = {3, 5};\n  /* 70000 * 70000 wraps to 605032704 in 32 bits. */\n  if (widen(a, 1) != 605032704 - 1 + 605032704) return 1;\n  if (widen(b, 100) != 15 + 100 + 15) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A rare block's call whose result a later join reads, in a body with more long-lived values than
+// register homes: the result holds a register over those blocks (`Live::segments`), which it takes at its
+// call. The registers saved around a rare call (`save_scratch`) come back after it, so a register that
+// held the result from the block's start would come back over it.
+@test
+fn a_rare_calls_result_takes_its_register_at_the_call() {
+    let n: u32 = 13;
+    let mut lir = String::from(
+        "lir ptr 8\nsym @bump fn global\nsym @late fn global\nfn @late\n  sig (ptr, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = call.i64 @bump(v1) : (i64) -> i64\n",
+    );
+    for k in 0..n {
+        lir.push_str(format("  v{} = load.i64 v0+{} align 3\n", 3 + k, 8 * k).as_str());
+    }
+    let z = 3 + n;
+    lir.push_str(
+        format(
+            "  v{} = iconst.i64 0\n  v{} = iconst.i64 2\n  v{} = icmp.ult v1, v{}\n  br v{}, b1, b4(v2)\n",
+            z,
+            z + 1,
+            z + 2,
+            z + 1,
+            z + 2,
+        ).as_str(),
+    );
+    lir.push_str(
+        format(
+            "b1: unlikely\n  v{} = call.i64 @bump(v2) : (i64) -> i64\n  v{} = call.i64 @bump(v{}) : (i64) -> i64\n  v{} = icmp.eq v1, v{}\n  br v{}, b2, b3(v{})\n",
+            z + 3,
+            z + 4,
+            z + 3,
+            z + 5,
+            z,
+            z + 5,
+            z + 4,
+        ).as_str(),
+    );
+    lir.push_str(format("b2:\n  v{} = add.i64 v{}, v{}\n  jmp b3(v{})\n", z + 6, z + 4, z + 1, z + 6).as_str());
+    // A join reads the first call's result: no block before it leaves that in a register.
+    lir.push_str(
+        format("b3(v{}: i64):\n  v{} = add.i64 v{}, v{}\n  jmp b4(v{})\n", z + 7, z + 8, z + 3, z + 7, z + 8).as_str(),
+    );
+    let mut cur = z + 9;
+    lir.push_str(format("b4(v{}: i64):\n", cur).as_str());
+    for k in 0..n {
+        lir.push_str(format("  v{} = add.i64 v{}, v{}\n", cur + 1, cur, 3 + k).as_str());
+        cur += 1;
+    }
+    // The pointer and the count live to the end too.
+    lir.push_str(
+        format(
+            "  v{} = load.i64 v0 align 3\n  v{} = add.i64 v{}, v{}\n  v{} = add.i64 v{}, v1\n  ret v{}\n",
+            cur + 1,
+            cur + 2,
+            cur,
+            cur + 1,
+            cur + 3,
+            cur + 2,
+            cur + 3,
+        ).as_str(),
+    );
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(&lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS arm64 object");
+    assert(object_of(&lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    assert(object_of(&lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(&lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nuint64_t late(const uint64_t *, uint64_t);\nuint64_t bump(uint64_t x) { return x * 3 + 1; }\nint main(void) {\n  uint64_t a[13], s = 0;\n  for (int k = 0; k < 13; k++) { a[k] = (uint64_t)k * 1000003 + 1; s += a[k]; }\n  s += a[0];\n  /* bump: 0, 1, 4, 13, 40. */\n  if (late(a, 0) != 4 + 13 + 2 + s) return 1;\n  if (late(a, 1) != 13 + 40 + s + 1) return 2;\n  if (late(a, 5) != 16 + s + 5) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(&lir, drv), 0);
+}
+
 // A vector join that a store writes to memory: the join's parameter takes an xmm register home on x86-64,
 // and the store writes that register, as it does an xmm-held vector of any other home. A loop's vector
 // sum that a reduction after the loop reads lane by lane in memory: it takes no register of the loop's

@@ -218,6 +218,9 @@ pub(package) const HOME_NONE: u8 = 0;
 pub(package) const HOME_CALLEE: u8 = 1;
 pub(package) const HOME_SCRATCH: u8 = 2;
 pub(package) const HOME_UPPER: u8 = 3;
+/// A segment's alone (`Live::segments`): a caller-saved register, one that passes arguments too; nothing
+/// writes those in the segment's blocks (`Live::wfirst`).
+pub(package) const HOME_WIDE: u8 = 4;
 /// `Live::plan`'s request per value: it may take a callee-saved register, a caller-saved one; it is of the
 /// vector file (else the general one); it may take an upper register (every instruction that reads or writes
 /// it has an encoding for one).
@@ -225,6 +228,8 @@ pub(package) const WANT_CALLEE: u8 = 1;
 pub(package) const WANT_SCRATCH: u8 = 2;
 pub(package) const WANT_V: u8 = 4;
 pub(package) const WANT_UPPER: u8 = 8;
+/// It takes a register for its whole range or none: no segment (a constant a generator rebuilds).
+pub(package) const WANT_WHOLE: u8 = 16;
 
 /// The registers `Live::plan` gives out at once per file (`x`: general, `v`: vector): callee-saved,
 /// caller-saved, and all together; and the vector file's upper registers (`vu`), which `vj` counts too.
@@ -360,12 +365,68 @@ pub(package) struct Live {
     cand: Vector<u64>,
     act: Vector<u32>,
     cnt: Vector<u32>,
+    /// Register segments (`segments`): a value `plan` gave no register holds one of class `seg_h`
+    /// (HOME_CALLEE, HOME_SCRATCH or HOME_WIDE) over the layout positions `seg_a..=seg_b`, in the blocks that list
+    /// it; in the others it is in its stack home. Per layout position, the segments whose value is in its
+    /// register through that block: `sin[sin_at[q]..sin_at[q + 1]]`.
+    pub(package) seg_x: Vector<u32>,
+    pub(package) seg_a: Vector<u32>,
+    pub(package) seg_b: Vector<u32>,
+    pub(package) seg_h: Vector<u8>,
+    pub(package) sin_at: Vector<u32>,
+    pub(package) sin: Vector<u32>,
+    /// Per value (empty: no segment), whether it has a segment, and whether a block of its range is outside
+    /// them all: it then keeps a stack home, written once, where it is defined.
+    pub(package) segd: Vector<bool>,
+    pub(package) seg_mem: Vector<bool>,
+    /// Per layout position (the generator's; empty: no segments), the first and the last instruction of its
+    /// block that write the caller-saved homes (a call that returns), NONE for none.
+    pub(package) cfirst: Vector<u32>,
+    pub(package) clast: Vector<u32>,
+    /// As `cfirst` and `clast` for the instructions that write an argument register a home could not keep (a
+    /// call that returns in a warm block, an intrinsic's too; a system operation; a variadic access; a
+    /// thread-local getter): a block without one may hold HOME_WIDE segments. Empty: the target has none.
+    pub(package) wfirst: Vector<u32>,
+    pub(package) wlast: Vector<u32>,
+    // `segments`' scratch: per candidate its reading blocks' positions (`su[su_at[x]..su_at[x + 1]]`); per
+    // plan position the homes that start and end there (`sadd`, `ssub`: all, callee-saved and caller-saved
+    // ones in 21 bits each); per layout position the homes held at once (`occ_j`, `occ_c`, `occ_s`); per
+    // block of a candidate's range whether it reads the value (`sread`), holds it live (`slive`), may hold
+    // it in a register of the class at hand (`sbit`) and lies between two such blocks an edge joins
+    // (`sbr_add`, `sbr_sub`); the spans of the class at hand and of the best one (`span`, `best`: first
+    // position, last, gain, the position that opens it) with their blocks' `sbit` (`spool`, `bpool`); the
+    // kept segments' (`gpool` from `seg_at`).
+    scand: Vector<bool>,
+    smark: Vector<u32>,
+    su_at: Vector<u32>,
+    su: Vector<u32>,
+    sadd: Vector<u64>,
+    ssub: Vector<u64>,
+    occ_j: Vector<u32>,
+    occ_c: Vector<u32>,
+    occ_s: Vector<u32>,
+    occ_w: Vector<u32>, // per layout position, the HOME_WIDE segments
+    sread: Vector<bool>,
+    slive: Vector<bool>,
+    sbit: Vector<bool>,
+    sbr_add: Vector<u32>,
+    sbr_sub: Vector<u32>,
+    span: Vector<(u32, u32, u64, u32)>,
+    best: Vector<(u32, u32, u64, u32)>,
+    spool: Vector<bool>,
+    bpool: Vector<bool>,
+    gpool: Vector<bool>,
+    seg_at: Vector<u32>,
     stepped: Vector<u64>, // `plan`: header parameter << 32 | the step that shares its register (`step_partner`)
     kept: Vector<bool>, // per value, whether a loop keeps it past its last use (`run`)
     /// Per layout position, the general registers `plan` may give out at once in that block (`Caps.xj`
     /// everywhere when empty); `jmin`, its minima over runs of 2^k blocks (a sparse table, level by level).
     pub(package) jcap: Vector<u32>,
     jmin: Vector<u32>,
+    /// Per layout position, the general caller-saved registers `plan` may give out as homes at once in that
+    /// block (`Caps.xs` everywhere when empty), and `smin` its sparse table as `jmin` is.
+    pub(package) scap: Vector<u32>,
+    smin: Vector<u32>,
     pub(package) rpo: Vector<u32>, // per block, its reverse postorder number (NONE: unreachable)
     succ: Vector<u32>,
     stack: Vector<u32>,
@@ -428,6 +489,39 @@ extend Live {
             cand: Vector::<u64>::new(),
             act: Vector::<u32>::new(),
             cnt: Vector::<u32>::new(),
+            seg_x: Vector::<u32>::new(),
+            seg_a: Vector::<u32>::new(),
+            seg_b: Vector::<u32>::new(),
+            seg_h: Vector::<u8>::new(),
+            sin_at: Vector::<u32>::new(),
+            sin: Vector::<u32>::new(),
+            segd: Vector::<bool>::new(),
+            seg_mem: Vector::<bool>::new(),
+            cfirst: Vector::<u32>::new(),
+            clast: Vector::<u32>::new(),
+            wfirst: Vector::<u32>::new(),
+            wlast: Vector::<u32>::new(),
+            occ_w: Vector::<u32>::new(),
+            scand: Vector::<bool>::new(),
+            smark: Vector::<u32>::new(),
+            su_at: Vector::<u32>::new(),
+            su: Vector::<u32>::new(),
+            sadd: Vector::<u64>::new(),
+            ssub: Vector::<u64>::new(),
+            occ_j: Vector::<u32>::new(),
+            occ_c: Vector::<u32>::new(),
+            occ_s: Vector::<u32>::new(),
+            sread: Vector::<bool>::new(),
+            slive: Vector::<bool>::new(),
+            sbit: Vector::<bool>::new(),
+            sbr_add: Vector::<u32>::new(),
+            sbr_sub: Vector::<u32>::new(),
+            span: Vector::<(u32, u32, u64, u32)>::new(),
+            best: Vector::<(u32, u32, u64, u32)>::new(),
+            spool: Vector::<bool>::new(),
+            bpool: Vector::<bool>::new(),
+            gpool: Vector::<bool>::new(),
+            seg_at: Vector::<u32>::new(),
             stepped: Vector::<u64>::new(),
             kept: Vector::<bool>::new(),
             sole: Vector::<u32>::new(),
@@ -445,6 +539,8 @@ extend Live {
             ep_min: Vector::<u32>::new(),
             ep_min_ok: false,
             jcap: Vector::<u32>::new(),
+            scap: Vector::<u32>::new(),
+            smin: Vector::<u32>::new(),
             jmin: Vector::<u32>::new(),
             fmass: Vector::<u64>::new(),
             fby: Vector::<u32>::new(),
@@ -2226,7 +2322,6 @@ extend Live {
     // range, and into `d`, which defines it).
     fn live_into(self: &Self, b: &Body, m: u32, d: u32, lo: u32, hi: u32, out: &mut Vector<bool>) {
         let n = (hi - lo + 1) as usize;
-        fill(out, n, false);
         let mut reads = Vector::<bool>::with_capacity(n);
         for p in lo..hi + 1 {
             let bk = b.blocks[self.order[p as usize] as usize];
@@ -2239,6 +2334,15 @@ extend Live {
             }
             reads.push(r);
         }
+        self.live_spread(b, d, lo, hi, &reads, out);
+    }
+
+    // Per layout position `lo..=hi` into `out`: whether the value block `d` (at `lo`) defines is live into
+    // the block there, given the blocks that read it (`reads`, per position): a backward fixpoint over the
+    // range (the value is dead outside it, and into `d`).
+    fn live_spread(self: &Self, b: &Body, d: u32, lo: u32, hi: u32, reads: &Vector<bool>, out: &mut Vector<bool>) {
+        let n = (hi - lo + 1) as usize;
+        fill(out, n, false);
         let mut changed = true;
         let mut passes: usize = 0;
         // Each pass that changes marks one more block: at most `n` of them, and one that settles.
@@ -3339,28 +3443,8 @@ extend Live {
         for p in 0..np {
             self.base[p + 1] = self.base[p] + b.blocks[self.order[p] as usize].len;
         }
-        // The caps' sparse table: level 0 the caps, each next level the minimum of two runs of the last.
-        self.jmin.truncate(0);
-        if np != 0 && self.jcap.len() == np {
-            for p in 0..np {
-                self.jmin.push(self.jcap[p]);
-            }
-            let mut w: usize = 1;
-            // Each level doubles the run: at most 32.
-            while 2 * w <= np {
-                let lv = self.jmin.len() - np;
-                for p in 0..np {
-                    let a = self.jmin[lv + p];
-                    let c = if p + w < np {
-                        self.jmin[lv + p + w]
-                    } else {
-                        a
-                    };
-                    self.jmin.push(a.min(c));
-                }
-                w *= 2;
-            }
-        }
+        min_table(&self.jcap, np, &mut self.jmin);
+        min_table(&self.scap, np, &mut self.smin);
         fill(&mut self.start, n, NONE);
         fill(&mut self.stop, n, 0);
         for p in 0..np {
@@ -3452,7 +3536,7 @@ extend Live {
                 while j < self.act.len() && self.act[j] != r {
                     j += 1;
                 }
-                if j < self.act.len() {
+                if j < self.act.len() && self.fits_shared(x, r, want) {
                     self.home[x as usize] = self.home[ep as usize];
                     self.stop[r as usize] = self.stop[r as usize].max(self.stop[x as usize]);
                     self.share[x as usize] = ep;
@@ -3472,7 +3556,7 @@ extend Live {
                 while j < self.act.len() && self.act[j] != r {
                     j += 1;
                 }
-                if j < self.act.len() {
+                if j < self.act.len() && self.fits_shared(x, r, want) {
                     self.home[x as usize] = self.home[ip as usize];
                     self.stop[r as usize] = self.stop[r as usize].max(self.stop[x as usize]);
                     self.share[x as usize] = ip;
@@ -3492,7 +3576,7 @@ extend Live {
                 while j < self.act.len() && self.act[j] != r {
                     j += 1;
                 }
-                if j < self.act.len() {
+                if j < self.act.len() && self.fits_shared(x, r, want) {
                     self.home[x as usize] = self.home[sp as usize];
                     self.stepped.push(r as u64 << 32 | x as u64);
                     continue;
@@ -3569,15 +3653,45 @@ extend Live {
             }
         }
         self.splits.sort();
+        self.segments(b, want, caps);
     }
 
-    /// The register home of value `x` in layout block `pos`.
+    /// The register home of value `x` in layout block `pos`: its home, before its cut; else its segment's
+    /// there (`segments`).
     pub(package) const fn home_at(self: &Self, x: u32, pos: u32) u8 {
-        return if pos < self.cut[x as usize] {
-            self.home[x as usize]
+        if pos >= self.cut[x as usize] {
+            return HOME_NONE;
+        }
+        let h = self.home[x as usize];
+        if h != HOME_NONE || !self.seg_val(x) {
+            return h;
+        }
+        let s = self.seg_of(x, pos);
+        return if s != NONE {
+            self.seg_h[s as usize]
         } else {
             HOME_NONE
         };
+    }
+
+    /// Whether value `x` has a register segment (`segments`).
+    pub(package) const fn seg_val(self: &Self, x: u32) bool {
+        return x as usize < self.segd.len() && self.segd[x as usize];
+    }
+
+    /// The segment that holds value `x` in its register through the block at layout position `q`, NONE
+    /// for none: at most one entry per register (`sin`).
+    pub(package) const fn seg_of(self: &Self, x: u32, q: u32) u32 {
+        if q as usize + 1 >= self.sin_at.len() {
+            return NONE;
+        }
+        for j in self.sin_at[q as usize]..self.sin_at[q as usize + 1] {
+            let s = self.sin[j as usize];
+            if self.seg_x[s as usize] == x {
+                return s;
+            }
+        }
+        return NONE;
     }
 
     /// Whether `plan` gave no register to a used value that `want` asked one for, in a block the layout
@@ -3590,6 +3704,22 @@ extend Live {
             }
         }
         return false;
+    }
+
+    // Whether value `x` can hold the register of active value `r` from its start on (a partner's, `share`,
+    // `stepped`): the other homes taken (`cnt`) leave it the register within the joint cap and, in a
+    // caller-saved home, the caller-saved cap of the blocks its range covers (`fits`). The global caps
+    // hold: the register is `r`'s.
+    const fn fits_shared(self: &Self, x: u32, r: u32, want: &Vector<u8>) bool {
+        let w = want[x as usize];
+        if (w & WANT_V) != 0 {
+            return true;
+        }
+        let s = self.cnt[Live::slot(w, HOME_SCRATCH)];
+        if self.jmin.len() != 0 && self.cnt[Live::slot(w, HOME_CALLEE)] + s > self.joint(x) {
+            return false;
+        }
+        return self.home[r as usize] != HOME_SCRATCH || self.smin.len() == 0 || s <= self.range_min(&self.smin, x);
     }
 
     // The home value `x` takes with `want`'s request among the registers taken (`cnt`), those of value
@@ -3615,13 +3745,16 @@ extend Live {
                 s -= 1;
             }
         }
-        let (cc, sc, jc) = if vf {
+        let (cc, mut sc, jc) = if vf {
             (caps.vc, caps.vs, caps.vj)
         } else if self.jmin.len() != 0 {
             (caps.xc, caps.xs, self.joint(x))
         } else {
             (caps.xc, caps.xs, caps.xj)
         };
+        if !vf && self.smin.len() != 0 {
+            sc = sc.min(self.range_min(&self.smin, x));
+        }
         if c + s + u >= jc {
             return HOME_NONE;
         }
@@ -3637,6 +3770,11 @@ extend Live {
     // The least cap (`jcap`) of the blocks value `x`'s range covers: where the count at its start holds
     // that many, no position of the range holds more (a value added later counts this one at its start).
     const fn joint(self: &Self, x: u32) u32 {
+        return self.range_min(&self.jmin, x);
+    }
+
+    // The least of the caps sparse table `tab` (`min_table`) holds over the blocks value `x`'s range covers.
+    const fn range_min(self: &Self, tab: &Vector<u32>, x: u32) u32 {
         let np = self.order.len();
         let ps = self.block_at(self.start[x as usize]);
         let pe = self.block_at(self.stop[x as usize]).max(ps);
@@ -3644,7 +3782,7 @@ extend Live {
         let k = 31 - n.leading_zeros();
         let w = 1usize << k;
         let lv = k * np;
-        return self.jmin[lv + ps].min(self.jmin[lv + pe + 1 - w]);
+        return tab[lv + ps].min(tab[lv + pe + 1 - w]);
     }
 
     // The layout position of the block that holds plan position `s` (`base`): at most 32 halvings.
@@ -4217,6 +4355,484 @@ extend Live {
                 self.end[x] = e;
             }
         }
+    }
+}
+
+// The most a candidate's weight counts in `Live::segments`' order, and a count of `Live::sadd`.
+const SEG_WT: u64 = (1u64 << 40) - 1;
+const SEG_FIELD: u64 = (1u64 << 21) - 1;
+
+extend Live {
+    // Register segments: live-range splitting at block borders, as LLVM's greedy allocator splits a range
+    // around a region (`RAGreedy::tryRegionSplit`) and its spiller stores a value once, where it is
+    // defined. A general-register value that `plan` left without a home (heaviest first) takes one
+    // register over spans of its range, in the blocks where it is live and the class keeps it: a
+    // callee-saved register in each, a caller-saved one in those where no call that returns runs while it
+    // lives (`cfirst`, `clast`), any caller-saved one in those where nothing writes an argument register
+    // (HOME_WIDE: `wfirst`, `wlast`). A span runs while its class has a register left (`seg_fits`: `occ_c`,
+    // `occ_s`, `occ_w`, `occ_j` against `caps` and the per-block caps) through such blocks and the blocks
+    // between two of them that an edge joins, so both ends of the edge hold the same register. An edge
+    // into a span's block from a block that does not hold the value in the register loads it there (the
+    // generator's), and the span is kept when those edges run less often than the blocks that load the
+    // value without it (`seg_gain`).
+    // The class that gains more takes the value. A value whose spans leave a live block out keeps a stack
+    // home (`seg_mem`).
+    fn segments(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
+        let n = self.home.len();
+        let ni = b.insts.len();
+        let nv = ni + b.params.len();
+        let np = self.order.len();
+        self.seg_x.truncate(0);
+        self.seg_a.truncate(0);
+        self.seg_b.truncate(0);
+        self.seg_h.truncate(0);
+        self.seg_at.truncate(0);
+        self.gpool.truncate(0);
+        self.sin.truncate(0);
+        self.sin_at.truncate(0);
+        self.segd.truncate(0);
+        self.seg_mem.truncate(0);
+        if !self.split || np < 2 || self.cfirst.len() != np || n >= 1usize << 20 {
+            return;
+        }
+        fill(&mut self.scand, nv, false);
+        self.cand.truncate(0);
+        for x in 0..nv {
+            let d = self.def_blk[x];
+            let w = want[x];
+            if (w & (WANT_CALLEE | WANT_SCRATCH)) == 0 || (w & (WANT_V | WANT_WHOLE)) != 0 || self.home[x] != HOME_NONE || self.start[x] == NONE || self.au[x] == 0 || d == NONE {
+                continue;
+            }
+            let dp = self.pos[d as usize];
+            if dp == NONE || self.end[x] <= dp || x >= ni && agg_param(b, VPARAM | (x - ni) as u32) {
+                continue;
+            }
+            self.scand[x] = true;
+            self.cand.push(SEG_WT - self.wt[x].min(SEG_WT) << 24 | x as u64);
+        }
+        if self.cand.len() == 0 {
+            return;
+        }
+        self.cand.sort();
+        self.seg_uses(b, nv);
+        self.seg_room(want, n);
+        // The callee-saved registers the body holds at once: one more costs a save and a restore.
+        let mut peak: u32 = 0;
+        for p in 0..np {
+            peak = peak.max(self.occ_c[p]);
+        }
+        for c in 0..self.cand.len() {
+            let x = (self.cand[c] & 0xFFFFFF) as usize;
+            let dp = self.pos[self.def_blk[x] as usize];
+            let e = self.end[x];
+            let len = (e - dp + 1) as usize;
+            self.seg_live(b, x, dp, e);
+            let mut gain: u64 = 0;
+            let mut bh = HOME_NONE;
+            for k in 0..3u32 {
+                let h = if k == 0 {
+                    HOME_SCRATCH
+                } else if k == 1 {
+                    HOME_WIDE
+                } else {
+                    HOME_CALLEE
+                };
+                if h == HOME_WIDE && self.wfirst.len() != np {
+                    continue;
+                }
+                let g = self.seg_spans(b, x as u32, dp, e, h, caps, peak);
+                if g > gain {
+                    gain = g;
+                    bh = h;
+                    let sp = replace(&mut self.span, Vector::<(u32, u32, u64, u32)>::new());
+                    self.span = replace(&mut self.best, sp);
+                    let pl = replace(&mut self.spool, Vector::<bool>::new());
+                    self.spool = replace(&mut self.bpool, pl);
+                }
+            }
+            if bh == HOME_NONE {
+                continue;
+            }
+            if self.segd.len() == 0 {
+                fill(&mut self.segd, n, false);
+                fill(&mut self.seg_mem, n, false);
+            }
+            // One span from the definition's block over every live block: no stack home.
+            let mut whole = self.best.len() == 1 && self.best[0].0 == dp;
+            for j in 0..len {
+                let q = dp + j as u32;
+                whole = whole && (!self.slive[j] || self.bpool[j] && q <= self.best[0].1);
+            }
+            self.segd[x] = true;
+            self.seg_mem[x] = !whole;
+            for k in 0..self.best.len() {
+                let a = self.best[k].0;
+                let bb = self.best[k].1;
+                self.seg_x.push(x as u32);
+                self.seg_a.push(a);
+                self.seg_b.push(bb);
+                self.seg_h.push(bh);
+                self.seg_at.push(self.gpool.len() as u32);
+                for q in a..bb + 1 {
+                    self.gpool.push(self.bpool[(q - dp) as usize]);
+                }
+                // The register is the segment's from the block whose edge opens it.
+                for q in self.best[k].3..bb + 1 {
+                    self.occ_j[q as usize] += 1;
+                    if bh == HOME_CALLEE {
+                        self.occ_c[q as usize] += 1;
+                        peak = peak.max(self.occ_c[q as usize]);
+                    } else if bh == HOME_WIDE {
+                        self.occ_w[q as usize] += 1;
+                    } else {
+                        self.occ_s[q as usize] += 1;
+                    }
+                }
+            }
+        }
+        // Per layout position, the segments that hold their value there.
+        let ns = self.seg_x.len();
+        if ns == 0 {
+            return;
+        }
+        fill(&mut self.sin_at, np + 1, 0);
+        for pass in 0..2u32 {
+            if pass == 1 {
+                let mut acc: u32 = 0;
+                for q in 0..np {
+                    let c = self.sin_at[q];
+                    self.sin_at[q] = acc;
+                    acc += c;
+                }
+                self.sin_at[np] = acc;
+                fill(&mut self.sin, acc as usize, 0);
+            }
+            for s in 0..ns {
+                let a = self.seg_a[s];
+                for q in a..self.seg_b[s] + 1 {
+                    if !self.gpool[(self.seg_at[s] + q - a) as usize] {
+                        continue;
+                    }
+                    if pass == 1 {
+                        self.sin[self.sin_at[q as usize] as usize] = s as u32;
+                    }
+                    self.sin_at[q as usize] += 1;
+                }
+            }
+        }
+        // The second pass left each position's end where its start goes.
+        for q0 in 0..np {
+            let q = np - 1 - q0;
+            self.sin_at[q + 1] = self.sin_at[q];
+        }
+        self.sin_at[0] = 0;
+    }
+
+    // `su`: per candidate of `segments` (`scand`), the layout positions of the blocks that read it, in
+    // order.
+    fn seg_uses(self: &mut Self, b: &Body, nv: usize) {
+        let np = self.order.len();
+        fill(&mut self.su_at, nv + 1, 0);
+        for pass in 0..2u32 {
+            fill(&mut self.smark, nv, NONE);
+            if pass == 1 {
+                let mut acc: u32 = 0;
+                for x in 0..nv {
+                    let c = self.su_at[x];
+                    self.su_at[x] = acc;
+                    acc += c;
+                }
+                self.su_at[nv] = acc;
+                fill(&mut self.su, acc as usize, 0);
+            }
+            for p in 0..np {
+                let bk = b.blocks[self.order[p] as usize];
+                for i in bk.start..bk.start + bk.len {
+                    let a = self.ua[i as usize];
+                    for u in a..a + self.un[i as usize] {
+                        let x = self.vix(b, self.uv[u as usize]) as usize;
+                        if x >= nv || !self.scand[x] || self.smark[x] == p as u32 {
+                            continue;
+                        }
+                        self.smark[x] = p as u32;
+                        if pass == 1 {
+                            self.su[self.su_at[x] as usize] = p as u32;
+                        }
+                        self.su_at[x] += 1;
+                    }
+                }
+            }
+        }
+        for x0 in 0..nv {
+            let x = nv - 1 - x0;
+            self.su_at[x + 1] = self.su_at[x];
+        }
+        self.su_at[0] = 0;
+    }
+
+    // `occ_j`, `occ_c`, `occ_s`: per layout position, the general registers the homes of `plan` hold at
+    // once in its block (all, callee-saved, caller-saved), from the plan positions where each starts and
+    // ends (a value that shares another's register counts with it).
+    fn seg_room(self: &mut Self, want: &Vector<u8>, n: usize) {
+        let np = self.order.len();
+        let nq = self.base[np] as usize;
+        fill(&mut self.sadd, nq + 2, 0);
+        fill(&mut self.ssub, nq + 2, 0);
+        for x in 0..n {
+            let h = self.home[x];
+            if h == HOME_NONE || (want[x] & WANT_V) != 0 || self.start[x] == NONE || self.share[x] != NONE {
+                continue;
+            }
+            let s = self.start[x];
+            let e = if self.cut[x] != NONE {
+                self.base[self.cut[x] as usize]
+            } else {
+                self.stop[x] + 1
+            };
+            if e <= s {
+                continue;
+            }
+            let d = 1u64 | (h == HOME_CALLEE) as u64 << 21 | (h == HOME_SCRATCH) as u64 << 42;
+            self.sadd[s as usize] += d;
+            self.ssub[e as usize] += d;
+        }
+        fill(&mut self.occ_j, np, 0);
+        fill(&mut self.occ_c, np, 0);
+        fill(&mut self.occ_s, np, 0);
+        fill(&mut self.occ_w, np, 0);
+        let mut run: u64 = 0;
+        for p in 0..np {
+            for o in self.base[p]..self.base[p + 1] {
+                run = run + self.sadd[o as usize] - self.ssub[o as usize];
+                self.occ_j[p] = self.occ_j[p].max((run & SEG_FIELD) as u32);
+                self.occ_c[p] = self.occ_c[p].max((run >> 21 & SEG_FIELD) as u32);
+                self.occ_s[p] = self.occ_s[p].max((run >> 42 & SEG_FIELD) as u32);
+            }
+        }
+    }
+
+    // `sread` and `slive` of candidate `x` over its range `dp..=e`: per block whether it reads `x` (`su`),
+    // and whether `x` is live into it (`live_spread`; the definition's block: live from the definition).
+    fn seg_live(self: &mut Self, b: &Body, x: usize, dp: u32, e: u32) {
+        let len = (e - dp + 1) as usize;
+        fill(&mut self.sread, len, false);
+        for k in self.su_at[x]..self.su_at[x + 1] {
+            let p = self.su[k as usize];
+            if p >= dp && p <= e {
+                self.sread[(p - dp) as usize] = true;
+            }
+        }
+        let reads = replace(&mut self.sread, Vector::<bool>::new());
+        let mut live = replace(&mut self.slive, Vector::<bool>::new());
+        self.live_spread(b, self.def_blk[x], dp, e, &reads, &mut live);
+        live[0] = true;
+        self.sread = reads;
+        self.slive = live;
+    }
+
+    // Whether nothing writes the registers of class `h` (HOME_SCRATCH: `cfirst`, `clast`; HOME_WIDE:
+    // `wfirst`, `wlast`) while value `x` (range `dp..=e`) lives in the block at layout position `q`: the
+    // block has no such instruction; or it defines `x` at or after its last one; or `x`'s range ends in
+    // it, at or before its first one.
+    const fn seg_clear(self: &Self, b: &Body, x: u32, q: u32, dp: u32, e: u32, h: u8) bool {
+        let (cf, cl) = if h == HOME_WIDE {
+            (self.wfirst[q as usize], self.wlast[q as usize])
+        } else {
+            (self.cfirst[q as usize], self.clast[q as usize])
+        };
+        if cf == NONE {
+            return true;
+        }
+        if q == dp {
+            return x as usize < b.insts.len() && cl <= x;
+        }
+        if q == e {
+            // The call may read it in a caller-saved register, but not in one that passes an argument.
+            let l = self.last_read(b, x);
+            return l != NONE && (l < cf || l == cf && h != HOME_WIDE);
+        }
+        return false;
+    }
+
+    // The spans of candidate `x` (range `dp..=e`, after `seg_live`) in registers of class `h` into `span`
+    // (first position, last, gain), their blocks' membership into `spool` (per block of the range), and
+    // their gain together; 0 for none.
+    fn seg_spans(self: &mut Self, b: &Body, x: u32, dp: u32, e: u32, h: u8, caps: Caps, peak: u32) u64 {
+        let len = (e - dp + 1) as usize;
+        fill(&mut self.sbit, len, false);
+        for j in 0..len {
+            self.sbit[j] = self.slive[j] && (h == HOME_CALLEE || self.seg_clear(b, x, dp + j as u32, dp, e, h));
+        }
+        // The blocks between two blocks of the class that an edge joins.
+        fill(&mut self.sbr_add, len + 1, 0);
+        fill(&mut self.sbr_sub, len + 1, 0);
+        for j in 0..len {
+            if !self.sbit[j] {
+                continue;
+            }
+            let q = dp + j as u32;
+            let t = term(b, self.order[q as usize]);
+            for k in 0..edge_count(t) {
+                let sp = self.pos[b.edge_target(edge_of(b, t, k)) as usize];
+                if sp == NONE || sp < dp || sp > e || !self.sbit[(sp - dp) as usize] {
+                    continue;
+                }
+                let lo = q.min(sp);
+                let hi = q.max(sp);
+                if hi > lo + 1 {
+                    self.sbr_add[(lo + 1 - dp) as usize] += 1;
+                    self.sbr_sub[(hi - dp) as usize] += 1;
+                }
+            }
+        }
+        self.span.truncate(0);
+        let mut br: u32 = 0;
+        let mut a = NONE;
+        let mut last = NONE;
+        for j in 0..len + 1 {
+            let mut ok = false;
+            if j < len {
+                br = br + self.sbr_add[j] - self.sbr_sub[j];
+                let q = dp + j as u32;
+                ok = self.seg_fits(q, h, caps) && (self.sbit[j] || br != 0);
+                if ok && self.sbit[j] {
+                    if a == NONE {
+                        a = q;
+                    }
+                    last = q;
+                }
+            }
+            if !ok && a != NONE {
+                let (g, lo) = self.seg_gain(b, x, dp, a, last, h, caps, peak);
+                if g != 0 {
+                    self.span.push((a, last, g, lo));
+                }
+                a = NONE;
+            }
+        }
+        let mut total: u64 = 0;
+        for k in 0..self.span.len() {
+            total += self.span[k].2;
+        }
+        self.spool.truncate(0);
+        self.spool.extend_copy(&self.sbit);
+        return total;
+    }
+
+    // Whether class `h` has a register left in the block at layout position `q` (`occ_c`, `occ_s`, `occ_w`,
+    // `occ_j` against `caps` and the block's own caps, `jcap` and `scap`): a HOME_WIDE segment takes what
+    // the block's temporaries leave of all the caller-saved registers, not of `caps.xs` of them.
+    const fn seg_fits(self: &Self, q: u32, h: u8, caps: Caps) bool {
+        let np = self.order.len();
+        let p = q as usize;
+        // The caller-saved homes of both kinds leave the block its temporaries (`scap`).
+        let scratch = self.occ_s[p] + self.occ_w[p];
+        if self.scap.len() == np && h != HOME_CALLEE && scratch >= self.scap[p] {
+            return false;
+        }
+        if h == HOME_WIDE {
+            return self.scap.len() == np && (self.jcap.len() != np || self.occ_j[p] < self.jcap[p]);
+        }
+        let joint = if self.jcap.len() == np {
+            caps.xj.min(self.jcap[p])
+        } else {
+            caps.xj
+        };
+        // `occ_j` counts the HOME_WIDE segments, which `caps.xj` does not hold.
+        if self.occ_j[p] - self.occ_w[p] >= joint {
+            return false;
+        }
+        if h == HOME_CALLEE {
+            return self.occ_c[p] < caps.xc;
+        }
+        return self.occ_s[p] < caps.xs;
+    }
+
+    // What the span `a..=bb` of candidate `x` in a register of class `h` gains (`sbit`, `sread` from
+    // position `dp`): how often the blocks that load `x` without it run (one load per block that reads it,
+    // but one that keeps the register state of a block that read or defined it; a parameter's own block
+    // loads it), less how often the edges into its blocks from blocks that do not hold `x` in the register
+    // run, and less a save and a restore per entry when a callee-saved register is one more than the body
+    // holds (`peak`). 0 when it gains nothing, when a late edge enters it (`late`: its stub cannot load), or
+    // when the class has no register left from the first block whose edge enters it, where the generator
+    // opens it; that block's position with the gain.
+    fn seg_gain(self: &mut Self, b: &Body, x: u32, dp: u32, a: u32, bb: u32, h: u8, caps: Caps, peak: u32) (u64, u32) {
+        let ni = b.insts.len() as u32;
+        let mut now: u64 = 0;
+        let mut cost: u64 = 0;
+        let mut most: u32 = 0;
+        let mut lo = a;
+        // The edges into a parameter's own block write it: the first one opens the segment.
+        if x >= ni && a == dp {
+            let k0 = self.order[dp as usize];
+            for i in self.pat[k0 as usize]..self.pat[k0 as usize + 1] {
+                lo = lo.min(self.pos[self.preds[i as usize] as usize]);
+            }
+        }
+        for q in a..bb + 1 {
+            most = most.max(self.occ_c[q as usize]);
+            let j = (q - dp) as usize;
+            if !self.sbit[j] {
+                continue;
+            }
+            let k = self.order[q as usize];
+            if self.sread[j] {
+                let loads = if q == dp {
+                    x >= ni
+                } else {
+                    !(self.continues(b, q) && (self.sread[j - 1] || q - 1 == dp))
+                };
+                if loads {
+                    now += self.freq[k as usize];
+                }
+            }
+            if q == dp {
+                continue;
+            }
+            for i in self.pat[k as usize]..self.pat[k as usize + 1] {
+                let p = self.preds[i as usize];
+                let pp = self.pos[p as usize];
+                if pp != NONE && pp >= a && pp <= bb && self.sbit[(pp - dp) as usize] {
+                    continue;
+                }
+                if self.late_target(b, p) == k {
+                    return (0, a);
+                }
+                lo = lo.min(pp);
+                cost += self.edge_freq(b, p, k);
+            }
+        }
+        for q in lo..a {
+            if !self.seg_fits(q, h, caps) {
+                return (0, a);
+            }
+            most = most.max(self.occ_c[q as usize]);
+        }
+        if h == HOME_CALLEE && most >= peak {
+            cost += 2 * FREQ_ENTRY;
+        }
+        return if now > cost {
+            (now - cost, lo)
+        } else {
+            (0, a)
+        };
+    }
+
+    // How often the edges from block `p` into block `k` run: `p`'s frequency by their weight among its
+    // edges (`frequencies`).
+    fn edge_freq(self: &mut Self, b: &Body, p: u32, k: u32) u64 {
+        b.succ_edges(term(b, p), &mut self.fedges);
+        let mut total: u64 = 0;
+        let mut mine: u64 = 0;
+        for e in 0..self.fedges.len() {
+            let t = b.edge_target(self.fedges[e]);
+            let w = ast::pick(self.rare[t as usize], 1u64, FREQ_SPLIT);
+            total += w;
+            if t == k {
+                mine += w;
+            }
+        }
+        return self.freq[p as usize] * mine / total.max(1);
     }
 }
 
@@ -5338,4 +5954,31 @@ const fn int_const(b: &Body, v: Value) u64 {
     }
     let t = b.insts[v as usize];
     return t.a as u64 | t.b as u64 << 32;
+}
+
+// The sparse table of per-block caps `caps` over `np` blocks into `out`: level 0 the caps, each next level
+// the minimum of two runs of the last; empty when `caps` has no entry per block.
+fn min_table(caps: &Vector<u32>, np: usize, out: &mut Vector<u32>) {
+    out.truncate(0);
+    if np == 0 || caps.len() != np {
+        return;
+    }
+    for p in 0..np {
+        out.push(caps[p]);
+    }
+    let mut w: usize = 1;
+    // Each level doubles the run: at most 32.
+    while 2 * w <= np {
+        let lv = out.len() - np;
+        for p in 0..np {
+            let a = out[lv + p];
+            let c = if p + w < np {
+                out[lv + p + w]
+            } else {
+                a
+            };
+            out.push(a.min(c));
+        }
+        w *= 2;
+    }
 }
