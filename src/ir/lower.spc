@@ -1335,6 +1335,7 @@ extend Lowerer {
                 }
                 self.lower_contracts(fnode, CT_REQUIRES, sp);
                 self.lower_contracts(fnode, CT_DECREASES, sp);
+                self.lower_olds(fnode, sp);
             }
             // A method of an interface without a body lowers its contracts only, for the prover: its
             // `ensures` read an unset result, and no other stage takes the body.
@@ -1520,10 +1521,14 @@ extend Lowerer {
                 self.lower_block(id);
             }
         } else if k == NodeKind::NODE_LET {
-            self.lower_let(id);
-        } else if k == NodeKind::NODE_EXPRESSION_STATEMENT && !self.ghost_fn && self.lemma_call(
+            if !self.ghost_fn && self.ghost_stmt(id) {
+                self.lower_ghost_site(id, CT_GHOST, u32::MAX);
+            } else {
+                self.lower_let(id);
+            }
+        } else if k == NodeKind::NODE_EXPRESSION_STATEMENT && !self.ghost_fn && (self.lemma_call(
             self.f.node(id).as_data.single.value,
-        ) {
+        ) || self.ghost_stmt(id)) {
             self.lower_ghost_site(id, CT_GHOST, u32::MAX);
         } else if k == NodeKind::NODE_EXPRESSION_STATEMENT {
             let v = self.f.node(id).as_data.single.value;
@@ -1752,9 +1757,154 @@ extend Lowerer {
         return unsafe (&*(&*self.pkg).module_ast_const(d.module)).ext(d.node).function.is_lemma();
     }
 
+    // Whether statement `id` is a `ghost` statement (it owns a CT_GHOST record).
+    fn ghost_stmt(self: &Self, id: NodeId) bool {
+        let (cs, ce) = unsafe (&*self.f.ast).contracts_of(id);
+        return ce > cs;
+    }
+
+    // The `old(e)` of function `fnode` (its CT_OLD and CT_OLD_RUN records), at the entry after the
+    // `requires`: one site each, which computes `e` into a temporary the `old` node reads (`bind`).
+    fn lower_olds(self: &mut Self, fnode: NodeId, sp: tok::Span) {
+        let (cs, ce) = unsafe (&*self.f.ast).contracts_of(fnode);
+        for i in cs..ce {
+            let c = *unsafe (&*self.f.ast).contracts.at(i as usize);
+            if c.kind != CT_OLD && c.kind != CT_OLD_RUN {
+                continue;
+            }
+            let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
+            let osp = self.f.node(c.expr).span;
+            let e = self.f.node(c.expr).as_data.single.value;
+            let pred = self.cur;
+            let chain = self.open_block();
+            self.seal(ir::goto_term(chain, sp), chain);
+            self.tp(ir::TP_MARK_PUSH, 0, e);
+            let cb = self.chk_open(e, false);
+            let op = self.lower_expr(e);
+            self.chk_close(cb);
+            self.tp(ir::TP_MARK_POP, 0, e);
+            if op == ir::IR_NONE {
+                return;
+            }
+            let ty = self.nty(c.expr);
+            let o = self.temp(ty, osp);
+            let opl = self.place_of_local(o);
+            self.assign(opl, self.rv_use(op, ty), osp);
+            self.bind(c.expr, o);
+            let mut tm = ir::term0(ir::TM_ASSERT, osp);
+            tm.a = self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), 1, osp);
+            let check = self.cur;
+            let cont = self.open_block();
+            tm.t0 = cont;
+            self.seal(tm, cont);
+            self.body.contract_blocks += (self.body.blocks.len() - b0) as u32;
+            self.body.contract_stmts += (self.body.statements.len() - s0) as u32;
+            self.body.contract_locals += (self.body.locals.len() - l0) as u32;
+            let value = self.copy_op(self.place_of_local(o));
+            self.body.contracts.push(
+                ir::ContractSite {
+                    pred: pred,
+                    chain: chain,
+                    check: check,
+                    cont: cont,
+                    clause: i,
+                    kind: c.kind,
+                    value: value,
+                },
+            );
+        }
+    }
+
+    // `forall i in lo..hi { E }` or `exists ..` (`ir::QuantSite`): `result = !exists; i = lo;` then, while
+    // `i` is in the range, `E` decides: a `forall` stops at a false `E`, an `exists` at a true one, and
+    // sets `result = exists`. `-fcontract-checks` runs it; the prover reads the record.
+    fn lower_quantifier(self: &mut Self, id: NodeId, dest: ir::PlaceId) ir::OperandId {
+        let d = unsafe self.f.ext(id).for_stmt;
+        let sp = self.f.node(id).span;
+        let ex = self.f.node(id).kind == NodeKind::NODE_EXISTS;
+        let rd = unsafe self.f.node(d.iterable).as_data.pattern_range;
+        let ity = self.nty(d.binding);
+        let bt = Ast::builtin(BuiltinType::BT_BOOL);
+        let lo = self.lower_expr(rd.start);
+        if lo == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let hi0 = self.lower_expr(rd.end);
+        if hi0 == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let ho = *self.body.operands.at(hi0 as usize);
+        let mut ecst = ir::IR_NONE;
+        let mut epl = ir::IR_NONE;
+        if ho.kind == ir::OP_CONST {
+            ecst = ho.data;
+        } else {
+            epl = self.spill(hi0, sp);
+        }
+        let rpl = self.out_place(dest, bt, sp);
+        let entry = self.open_block();
+        self.seal(ir::goto_term(entry, sp), entry);
+        let l = self.body.add_local(self.local_decl(ity, ir::LS_USER, true, self.f.node(d.binding).span, d.binding));
+        self.bind(d.binding, l);
+        let ipl = self.place_of_local(l);
+        let init = self.kop(ir::CK_BOOL, bt, (!ex) as i64, sp);
+        self.assign(rpl, self.rv_use(init, bt), sp);
+        self.assign(ipl, self.rv_use(lo, ity), sp);
+        let head = self.open_block();
+        let body_b = self.open_block();
+        let decided = self.open_block();
+        let step = self.open_block();
+        let exit = self.open_block();
+        self.seal(ir::goto_term(head, sp), head);
+        let iop = self.copy_op(ipl);
+        let eop = self.range_end(ecst, epl);
+        let cop = self.bool_bin(iop, eop, pick(rd.inclusive, tt::TokenType::LessThanEqual, tt::TokenType::LessThan), sp);
+        self.branch_bool(cop, body_b, exit, sp);
+        let c = self.lower_expr(d.body);
+        if c == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let check = self.cur;
+        if ex {
+            self.branch_on(c, decided, step, decided, sp);
+        } else {
+            self.branch_on(c, step, decided, decided, sp);
+        }
+        let fin = self.kop(ir::CK_BOOL, bt, ex as i64, sp);
+        self.assign(rpl, self.rv_use(fin, bt), sp);
+        self.seal(ir::goto_term(exit, sp), step);
+        if rd.inclusive {
+            // Step only below the end: an end at the type's maximum ends the loop.
+            let eop2 = self.range_end(ecst, epl);
+            let more = self.cmp_test(ipl, eop2, tt::TokenType::LessThan, sp);
+            let inc = self.open_block();
+            self.branch_bool(more, inc, exit, sp);
+        }
+        let iop2 = self.copy_op(ipl);
+        let one = self.kop(ir::CK_INT, ity, 1, sp);
+        self.assign(ipl, ir::rv(ir::RV_BINARY, iop2, one, tt::TokenType::Plus as u8, ity), sp);
+        self.seal(ir::goto_term(head, sp), exit);
+        let hop = self.range_end(ecst, epl);
+        self.body.quants.push(
+            ir::QuantSite {
+                entry: entry,
+                body: body_b,
+                check: check,
+                exit: exit,
+                var: l,
+                lo: lo,
+                hi: hop,
+                result: rpl,
+                flags: pick(ex, ir::QF_EXISTS, 0) | pick(rd.inclusive, ir::QF_INCLUSIVE, 0),
+            },
+        );
+        return self.out_op(dest, rpl);
+    }
+
     // Ghost code in place: `assert P by { B }` (`kind` CT_ASSERT, statement `id` the block B, `clause`
-    // its record), B then the check of P; or a lemma call statement `id` of a normal body (CT_GHOST, no
-    // record), the call then `true`. A contract site of its own, which every build skips.
+    // its record), B then the check of P; or a lemma call statement or a `ghost` statement `id` of a
+    // normal body (CT_GHOST, `clause` u32::MAX), the statement then `true`. A contract site of its own,
+    // which every build skips.
     fn lower_ghost_site(self: &mut Self, id: NodeId, kind: u32, clause: u32) {
         let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
         let sp = self.f.node(id).span;
@@ -1775,6 +1925,18 @@ extend Lowerer {
             tm.a = self.lower_loop_cond(c.expr, csp);
             self.chk_close(cb);
             self.tp(ir::TP_MARK_POP, 0, c.expr);
+        } else if self.f.node(id).kind == NodeKind::NODE_LET {
+            // `ghost let`: its bindings stay in scope; no storage end, as the site never runs.
+            let sl = self.scope_locals.len();
+            let lb = self.body.locals.len();
+            self.lower_let(id);
+            self.scope_locals.truncate(sl);
+            for l in lb..self.body.locals.len() {
+                if self.body.locals.at(l).storage == ir::LS_USER {
+                    self.body.locals.index_mut(l).dkind = ir::LK_GHOST;
+                }
+            }
+            tm.a = self.kop(ir::CK_BOOL, Ast::builtin(BuiltinType::BT_BOOL), 1, sp);
         } else {
             let v = self.f.node(id).as_data.single.value;
             self.tp(ir::TP_MARK_PUSH, 0, id);
@@ -4897,6 +5059,18 @@ extend Lowerer {
         if k == NodeKind::NODE_LITERAL {
             return self.lower_literal(id);
         }
+        if k == NodeKind::NODE_FORALL || k == NodeKind::NODE_EXISTS {
+            return self.lower_quantifier(id, dest);
+        }
+        if k == NodeKind::NODE_OLD {
+            // The value `lower_olds` computed at the entry.
+            let o = self.local_of(id);
+            if o == ir::IR_NONE {
+                self.fail_at("old", id);
+                return ir::IR_NONE;
+            }
+            return self.copy_op(self.place_of_local(o));
+        }
         if k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_MEMBER || k == NodeKind::NODE_INDEX {
             // An item that is a value, no place: its value, not a temporary that copies it.
             let vi = self.value_item(id);
@@ -5511,7 +5685,7 @@ extend Lowerer {
     // Whether node `id` is an `&&` or `||`.
     const fn short_circuit(self: &Self, id: NodeId) bool {
         let n = self.f.node(id);
-        return n.kind == NodeKind::NODE_BINARY && (unsafe n.as_data.binary.op == tt::TokenType::AmpersandAmpersand || unsafe n.as_data.binary.op == tt::TokenType::PipePipe);
+        return n.kind == NodeKind::NODE_BINARY && (unsafe n.as_data.binary.op == tt::TokenType::AmpersandAmpersand || unsafe n.as_data.binary.op == tt::TokenType::PipePipe || unsafe n.as_data.binary.op == tt::TokenType::Implies);
     }
 
     // The work of binary node `id` before its left operand: the result place of `&&`/`||`, which is
@@ -5530,11 +5704,19 @@ extend Lowerer {
         let d = unsafe self.f.node(id).as_data.binary;
         let ty = self.nty(id);
         let sp = self.f.node(id).span;
-        if d.op == tt::TokenType::AmpersandAmpersand || d.op == tt::TokenType::PipePipe {
-            // result = lhs; if (deciding) result = rhs
+        if d.op == tt::TokenType::AmpersandAmpersand || d.op == tt::TokenType::PipePipe || d.op == tt::TokenType::Implies {
+            // result = lhs; if (deciding) result = rhs. `a ==> b` is `!a || b`.
+            let imp = d.op == tt::TokenType::Implies;
             if lop != WROTE {
-                let rv = self.rv_use(lop, ty);
+                let rv = if imp {
+                    ir::rv(ir::RV_UNARY, lop, tt::TokenType::Bang as u32, 0, ty)
+                } else {
+                    self.rv_use(lop, ty)
+                };
                 self.assign(rpl, rv, sp);
+            } else if imp {
+                let cur = self.copy_op(rpl);
+                self.assign(rpl, ir::rv(ir::RV_UNARY, cur, tt::TokenType::Bang as u32, 0, ty), sp);
             }
             let rhs_b = self.open_block();
             let join = self.open_block();
@@ -6553,7 +6735,8 @@ extend Lowerer {
                 self.chk_nodes.push(nd.as_data.cast.expression);
             } else if k == NodeKind::NODE_BINARY {
                 self.chk_nodes.push(nd.as_data.binary.left);
-                if unsafe nd.as_data.binary.op == tt::TokenType::AmpersandAmpersand || unsafe nd.as_data.binary.op == tt::TokenType::PipePipe {
+                let bo = unsafe nd.as_data.binary.op;
+                if bo == tt::TokenType::AmpersandAmpersand || bo == tt::TokenType::PipePipe || bo == tt::TokenType::Implies {
                     self.chk_nodes.push(nd.as_data.binary.right);
                 }
             } else if k == NodeKind::NODE_ASSIGNMENT {

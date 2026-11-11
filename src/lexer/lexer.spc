@@ -1322,7 +1322,7 @@ extend Lexer {
             },
             '=' => {
                 if self.match_byte(b'=') {
-                    self.add_token(TokenType::EqualEqual);
+                    self.add_match(b'>', TokenType::Implies, TokenType::EqualEqual);
                     return;
                 }
                 self.add_match(b'>', TokenType::FatArrow, TokenType::Equal);

@@ -469,6 +469,62 @@ extend Path {
     }
 }
 
+// A quantifier the walk reached (`Prover::quantifier`): its atom `q` stands for its truth, and its
+// instances walk `E` again over the state it was reached in, with the binding set to a term.
+struct QClo {
+    cb: *const ir::CoreBody,
+    cm: ModuleId,
+    qi: u32, // the index in `cb.quants`
+    state: Vector<u32>,
+    mem: Vector<u32>, // the caller state of the frame it was reached in, when `has_mem`
+    has_mem: bool,
+    all: bool,
+    lo: u32,
+    hi: u32,
+    k: u32, // the witness
+    trig: Vector<u32>, // the terms of `E(k)` that take `k` as an operand (`triggers`)
+    w: u16,
+    sg: bool,
+}
+
+// The prover's own functions over sequences (`Prover::sqk`) and the modeled container methods.
+const SQ_EMPTY: u64 = 1;
+const SQ_LEN: u64 = 2; // a sequence's length, a `nat`
+const SQ_AT: u64 = 3; // a sequence's element
+const SQ_PUSH: u64 = 4;
+const SQ_UPD: u64 = 5;
+const SQ_SUB: u64 = 6;
+const SQ_CAT: u64 = 7;
+const SQ_VIEWV: u64 = 8; // the view of a vector's, a string's or a `str`'s value
+const SQ_VIEWS: u64 = 9; // the view of a slice's value in a memory epoch
+const SQ_VIEWA: u64 = 10; // the view of an array (its value, its length)
+const SQ_VLEN: u64 = 11; // the length of a vector's or a string's value, a `usize`
+const SQ_SLEN: u64 = 12; // the length of a slice, a `usize`
+const SQ_UTF8: u64 = 13;
+const SQ_EREF: u64 = 14; // a reference to an element of a vector (`T_MREF` of its local or slot, the index)
+const SQ_SEREF: u64 = 15; // a reference to an element of a `[]mut T` (the slice, the index)
+const SQ_VIEW: u64 = 16; // a `view()` call (`sq_kind`)
+const SQ_STRV: u64 = 17; // a string literal's value: a function of its bytes (their sequence)
+const VK_LEN: u64 = 32;
+const VK_EMPTY: u64 = 33;
+const VK_INDEX: u64 = 34;
+const VK_PUSH: u64 = 35;
+const VK_SPUSH: u64 = 36; // `String::push`, of a `char`
+const VK_PUSH_STR: u64 = 37;
+const VK_POP: u64 = 38;
+const VK_CLEAR: u64 = 39;
+const VK_INDEX_MUT: u64 = 40;
+const VK_NEW: u64 = 41;
+const VK_AS_SLICE: u64 = 42;
+const VK_SINDEX_MUT: u64 = 43;
+const VK_SLEN: u64 = 44; // a view's `len`
+const VK_SINDEX: u64 = 45; // a view's element read (`index`, `get`, `at`)
+
+// The rounds of quantifier instances a goal gets (an instance may name a nested quantifier), and the
+// terms each round instantiates a quantifier with.
+const QUANT_ROUNDS: u32 = 3;
+const QUANT_TERMS: usize = 32;
+
 // One path through a contract chain.
 struct Sub {
     state: Vector<u32>,
@@ -587,12 +643,24 @@ struct Prover<const B: usize> {
     // which `holds` adds to a goal's facts only when it fails without them.
     derived: Map<u32, bool>,
     fx: fx::Facts,
-    pw: u32,
+    pw: u16, // the width of `usize`, which lengths have
     errs: Vector<diag::Errors>, // per module
     failed: Map<u64, bool>, // the obligations already reported, per body
     pwrites: Map<u64, u64>, // callee -> `param_writes`
     b: *const ir::CoreBody,
     m: ModuleId,
+    // The place each `&mut T` parameter of the body under proof refers to: a local of its own past the
+    // body's locals (a slot), of type `slot_ty[j]` for slot `nlocals + j`; the parameter holds its
+    // `T_MREF`. The reference is exclusive: only it reaches the place, until it leaks (`leak`).
+    slot_ty: Vector<TypeId>,
+    slot_of: Vector<u32>, // per local of the body: its slot when it is such a parameter, else NONE
+    nlocals: u32,
+    // Per local: a temporary read once, as an argument of a call that cannot keep a reference (its
+    // results and its other arguments hold none that could): a `&mut` of a local it holds lends the
+    // local for the call only (`scan_tracked`). `dest_tmp`: the whole local the statement under walk
+    // writes, NONE else.
+    scoped: Vector<bool>,
+    dest_tmp: u32,
     tracked: Vector<bool>, // the locals the walk models by value
     is_mem: Vector<bool>, // the modeled locals a reference or pointer may change (`scan_tracked`)
     mem_list: Vector<u32>,
@@ -616,6 +684,31 @@ struct Prover<const B: usize> {
     def_of: Map<u32, u32>, // a defined call -> its index in `defs`
     defined: Map<u32, bool>,
     unfold: u32,
+    // The quantifiers the body's walk reached: per atom its closure (`qclo`, by `qof`); the instances
+    // made, (atom << 32 | term) -> the fact.
+    qclo: Vector<QClo>,
+    qof: Map<u32, u32>,
+    qinst: Map<u64, u32>,
+    qdef: Map<u32, bool>, // the witnesses' facts
+    seld: Map<u32, bool>, // the terms whose facts `sel`, `index_key` and the sequences made
+    // The views of the containers' values the modeled methods made (`view_v`), and of slices per
+    // memory epoch (`view_s`, key slice << 32 | epoch).
+    vdef: Map<u32, u32>,
+    // The type arguments of the generic spec function being unfolded (`define`): pairs (parameter's
+    // module << 32 | its declaration, the argument's module << 32 | its type).
+    subst: Vector<u64>,
+    // The sequences a spec function's result `r` may equal (its body's returns, `define`): r -> start
+    // << 32 | count in `alias_pool`. An element read of `r` reads them too (`seq_at`).
+    alias: Map<u32, u64>,
+    alias_pool: Vector<u32>,
+    sdef: Map<u64, u32>,
+    // `std::spec::seq` (-1 when the build has not loaded it) and its `Seq`; the prelude's containers.
+    seqm: i32,
+    seqd: NodeId,
+    vecl: loader::LookupHit,
+    strl: loader::LookupHit,
+    smut: loader::LookupHit,
+    strv: loader::LookupHit, // the prelude's `str`
     chain_ovf: u8, // the overflow model of a chain walk: OVF_PROVE, or OVF_EXACT in a definition
     chain_depth: u32, // the depth of chain walks (a clause, a definition): `derive` anchors their facts
     exact_body: bool, // the body under proof has a local of type `int` or `nat`
@@ -685,12 +778,17 @@ extend<const B: usize> Prover<B> {
             sv: Solver::<B>::new(),
             derived: Map::<u32, bool>::new(),
             fx: fx::Facts::new(false),
-            pw: lay::target_for(p.arch).ptr as u32 * 8,
+            pw: lay::target_for(p.arch).ptr as u16 * 8,
             errs: errs,
             failed: Map::<u64, bool>::new(),
             pwrites: Map::<u64, u64>::new(),
             b: null,
             m: 0,
+            slot_ty: Vector::<TypeId>::new(),
+            slot_of: Vector::<u32>::new(),
+            nlocals: 0,
+            scoped: Vector::<bool>::new(),
+            dest_tmp: NONE,
             tracked: Vector::<bool>::new(),
             is_mem: Vector::<bool>::new(),
             mem_list: Vector::<u32>::new(),
@@ -707,6 +805,26 @@ extend<const B: usize> Prover<B> {
             defs: Vector::<u32>::new(),
             def_of: Map::<u32, u32>::new(),
             defined: Map::<u32, bool>::new(),
+            qclo: Vector::<QClo>::new(),
+            qof: Map::<u32, u32>::new(),
+            qinst: Map::<u64, u32>::new(),
+            qdef: Map::<u32, bool>::new(),
+            seld: Map::<u32, bool>::new(),
+            vdef: Map::<u32, u32>::new(),
+            subst: Vector::<u64>::new(),
+            alias: Map::<u32, u64>::new(),
+            alias_pool: Vector::<u32>::new(),
+            sdef: Map::<u64, u32>::new(),
+            seqm: p.find("std::spec::seq"),
+            seqd: if p.find("std::spec::seq") >= 0 {
+                p.lookup(loader::FROM_ANY, p.find("std::spec::seq") as ModuleId, "Seq", true)
+            } else {
+                NODE_NONE
+            },
+            vecl: p.prelude_lookup("Vector", true),
+            strl: p.prelude_lookup("String", true),
+            smut: p.prelude_lookup("SliceMut", true),
+            strv: p.prelude_lookup("str", true),
             pvars: Map::<u64, u32>::new(),
             chk_ok: Map::<u32, bool>::new(),
             chk_dead: Map::<u32, bool>::new(),
@@ -805,10 +923,11 @@ extend<const B: usize> Prover<B> {
         return false;
     }
 
-    fn ty_of(self: &Self, m: ModuleId, ty: TypeId) (u16, bool) {
-        if ty == TYPE_NONE {
+    fn ty_of(self: &Self, m0: ModuleId, ty0: TypeId) (u16, bool) {
+        if ty0 == TYPE_NONE {
             return W_OTHER, false;
         }
+        let (m, ty) = self.resolve(m0, ty0);
         let a = self.ast_of(m);
         let y = a.type_at(ty);
         if y.kind == TypeKind::TYPE_INSTANCE {
@@ -837,9 +956,60 @@ extend<const B: usize> Prover<B> {
             BT_I32 | BT_U32 => 32,
             BT_I64 | BT_U64 => 64,
             BT_ISIZE | BT_USIZE => self.pw,
+            // A character is its code point.
+            BT_CHAR => 32,
             _ => 0,
         };
         return w as u16, sg;
+    }
+
+    // Type `ty` of module `m` with the type arguments of the unfolding under way (`subst`) in place of
+    // its type parameter: (module, type).
+    fn resolve(self: &Self, m: ModuleId, ty: TypeId) (ModuleId, TypeId) {
+        if self.subst.len() == 0 || ty == TYPE_NONE {
+            return m, ty;
+        }
+        let y = self.ast_of(m).type_at(ty);
+        if y.kind != TypeKind::TYPE_GENERIC {
+            return m, ty;
+        }
+        let k = y.module as u64 << 32 | y.as_data.decl as u64;
+        let mut j: usize = 0;
+        while j < self.subst.len() {
+            if self.subst[j] == k {
+                return (self.subst[j + 1] >> 32) as ModuleId, (self.subst[j + 1] & 0xFFFFFFFFu64) as TypeId;
+            }
+            j += 2;
+        }
+        return m, ty;
+    }
+
+    // Whether type `ty` (module `m`) names a type parameter, or is a type this walk does not take apart.
+    fn mentions_generic(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
+        let a = self.ast_of(m);
+        let y = a.type_at(ty);
+        if depth > 8 {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_BUILTIN || y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
+            return self.mentions_generic(m, y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() {
+            return self.mentions_generic(m, y.as_data.arr.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let inst = a.instance(y.as_data.inst);
+            for j in 0..inst.n {
+                if self.mentions_generic(m, inst.args[j as usize], depth + 1) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return true;
     }
 
     // Whether a value of type `ty` is frozen: a scalar or a shared view (`[]T`), which no shared
@@ -856,15 +1026,18 @@ extend<const B: usize> Prover<B> {
         if y.kind != TypeKind::TYPE_INSTANCE {
             return false;
         }
-        // A wide integer is a value of limbs, as a built-in integer is.
+        // A wide integer is a value of limbs, as a built-in integer is; a sequence a mathematical value.
         let (w, _sg) = self.ty_of(m, ty);
         if w > W_BOOL {
+            return true;
+        }
+        let inst = a.instance(y.as_data.inst);
+        if self.seqd != NODE_NONE && inst.module == self.seqm as ModuleId && inst.decl == self.seqd {
             return true;
         }
         if self.slice.node == NODE_NONE {
             return false;
         }
-        let inst = a.instance(y.as_data.inst);
         return inst.module == self.slice.mid && inst.decl == self.slice.node;
     }
 
@@ -1206,6 +1379,26 @@ extend<const B: usize> Prover<B> {
         } else {
             pc0
         };
+        if self.qclo.len() != 0 && !self.sv.implies(&self.tm, pc, goal, true) {
+            // The quantifiers the formulas name: their instances at the witnesses, then at the terms.
+            // The facts that share no unknown with the goal only add case splits: then without them.
+            for wide in 0..2 {
+                let mut inst = Vector::<u32>::new();
+                inst.extend_copy(pc0);
+                self.add_defs(goal, &mut inst);
+                let more = self.instantiate(goal, &mut inst, wide == 1);
+                if more && self.sv.implies(&self.tm, &inst, goal, true) {
+                    return true;
+                }
+                if more || wide == 0 {
+                    let c = self.cone(goal, &inst);
+                    if c.len() < inst.len() && self.sv.implies(&self.tm, &c, goal, true) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
         let mut n: usize = 0;
         for j in 0..pc.len() {
             n += self.derived.contains_key(&pc[j]) as usize;
@@ -1225,6 +1418,431 @@ extend<const B: usize> Prover<B> {
             goal,
             true,
         );
+    }
+
+    // The facts of `hyps` that share an unknown with `goal`, or with a fact that does, in their order.
+    fn cone(self: &Self, goal: u32, hyps: &Vector<u32>) Vector<u32> {
+        let mut leaves = Vector::<Vector<u32>>::with_capacity(hyps.len() + 1);
+        let mut ops = Vector::<u32>::new();
+        for k in 0..hyps.len() + 1 {
+            let root = if k == 0 {
+                goal
+            } else {
+                hyps[k - 1]
+            };
+            let mut ls = Vector::<u32>::new();
+            let mut seen = Map::<u32, bool>::new();
+            let mut stack = Vector::<u32>::new();
+            stack.push(root);
+            for _s in 0..LIN_MAX * 16 {
+                if stack.len() == 0 {
+                    break;
+                }
+                let t = stack.pop().unwrap();
+                if seen.contains_key(&t) {
+                    continue;
+                }
+                seen.insert(t, true);
+                if self.tm.at(t).op == T_VAR {
+                    ls.push(t);
+                    continue;
+                }
+                self.tm.operands(t, &mut ops);
+                for j in 0..ops.len() {
+                    stack.push(ops[j]);
+                }
+            }
+            leaves.push(ls);
+        }
+        let mut want = Map::<u32, bool>::new();
+        for j in 0..leaves[0].len() {
+            want.insert(leaves[0][j], true);
+        }
+        let mut keep = Vector::<bool>::with_capacity(hyps.len());
+        keep.resize_default(hyps.len());
+        for _round in 0..hyps.len() + 1 {
+            let mut changed = false;
+            for k in 0..hyps.len() {
+                if keep[k] {
+                    continue;
+                }
+                let mut hit = false;
+                for j in 0..leaves[k + 1].len() {
+                    hit = hit || want.contains_key(&leaves[k + 1][j]);
+                }
+                if hit {
+                    keep.set(k, true);
+                    changed = true;
+                    for j in 0..leaves[k + 1].len() {
+                        want.insert(leaves[k + 1][j], true);
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut out = Vector::<u32>::new();
+        for k in 0..hyps.len() {
+            if keep[k] {
+                out.push(hyps[k]);
+            }
+        }
+        return out;
+    }
+
+    // Append to `hyps` the instances of the quantifiers under `goal` and `hyps` (design rule 2: no
+    // matching, one bounded round over the ground terms): a `forall` the facts state, or an `exists` the
+    // goal states, over the terms of its binding's type: the witnesses of the other quantifiers, and with
+    // `wide` the integer terms under the goal, then under the facts; at most QUANT_TERMS each. Rounds for
+    // the quantifiers the instances name, at most QUANT_ROUNDS. Whether any instance was added.
+    fn instantiate(self: &mut Self, goal: u32, hyps: &mut Vector<u32>, wide: bool) bool {
+        let mut added = false;
+        let mut done = Map::<u32, bool>::new();
+        let mut ops = Vector::<u32>::new();
+        for _r in 0..QUANT_ROUNDS {
+            // The quantifiers by polarity (1: stated, 2: denied), and the integer terms, the goal's first.
+            let mut pol = Map::<u32, u8>::new();
+            let mut seen = Map::<u32, bool>::new();
+            let mut ints = Vector::<u32>::new();
+            let mut reach = Vector::<u32>::new();
+            let mut stack = Vector::<u64>::new();
+            for k in 0..hyps.len() + 1 {
+                let root = if k == 0 {
+                    goal
+                } else {
+                    hyps[hyps.len() - k]
+                };
+                stack.push(root as u64 << 2 | pick(k == 0, 2u64, 1u64));
+                for _s in 0..LIN_MAX * 16 {
+                    if stack.len() == 0 {
+                        break;
+                    }
+                    let e = stack.pop().unwrap();
+                    let t = (e >> 2) as u32;
+                    let p = (e & 3) as u8;
+                    if p != 0 {
+                        let old = switch pol.get(&t) {
+                            Some(x) => *x,
+                            None => 0u8,
+                        };
+                        if (old | p) == old && seen.contains_key(&t) {
+                            continue;
+                        }
+                        pol.insert(t, old | p);
+                    } else if seen.contains_key(&t) {
+                        continue;
+                    }
+                    let first = !seen.contains_key(&t);
+                    seen.insert(t, true);
+                    if first {
+                        reach.push(t);
+                    }
+                    if first && wide && self.tm.is_int(t) && ints.len() < QUANT_TERMS * 8 {
+                        ints.push(t);
+                    }
+                    let x = self.tm.at(t);
+                    // A witness's fact names its quantifier: no statement of it.
+                    let sk = self.qdef.contains_key(&t);
+                    self.tm.operands(t, &mut ops);
+                    for j in 0..ops.len() {
+                        let cp = if sk || p == 0 {
+                            0u8
+                        } else if x.op == T_NOT {
+                            3 - p
+                        } else if x.op == T_AND || x.op == T_OR {
+                            p
+                        } else if (x.op == T_EQ || x.op == T_NE) && self.tm.is_bool(ops[j]) {
+                            3
+                        } else {
+                            0
+                        };
+                        stack.push(ops[j] as u64 << 2 | cp as u64);
+                    }
+                }
+                stack.clear();
+            }
+            let mut qs = Vector::<u32>::new();
+            for (t, _v) in self.qof.iter() {
+                if pol.contains_key(t) && !done.contains_key(t) {
+                    qs.push(*t);
+                }
+            }
+            qs.sort();
+            if qs.len() == 0 {
+                return added;
+            }
+            for j in 0..qs.len() {
+                let q = qs[j];
+                done.insert(q, true);
+                let ci = *self.qof.get(&q).unwrap();
+                let c = &self.qclo[ci as usize];
+                let (w, sg, own) = (c.w, c.sg, c.k);
+                let ex = ((unsafe &*c.cb).quants[c.qi as usize].flags & ir::QF_EXISTS) != 0;
+                let p = *pol.get(&q).unwrap();
+                if (p & pick(ex, 2u8, 1u8)) == 0 {
+                    continue;
+                }
+                // The terms a trigger matches in the formulas, or with `wide` every integer term.
+                let mut cands = Vector::<u32>::new();
+                if wide {
+                    cands.extend_copy(&ints);
+                } else {
+                    let trig = self.qclo[ci as usize].trig.clone();
+                    for g in 0..trig.len() {
+                        for x in 0..reach.len() {
+                            let t = self.matched(trig[g], own, reach[x]);
+                            if t != NONE && !cands.contains(&t) {
+                                cands.push(t);
+                            }
+                        }
+                    }
+                }
+                let mut n: usize = 0;
+                for x in 0..cands.len() {
+                    let mut t = cands[x];
+                    let tt = self.tm.at(t);
+                    // A constant of another integer type is the binding's constant of its value.
+                    if tt.op == T_INT && (tt.w != w || tt.sg != sg) && w > W_BOOL {
+                        let (lo, hi) = Terms::<B>::range(w, sg);
+                        if !exact_w(w) && (tt.k < lo || hi < tt.k) || w == W_NAT && tt.k.is_negative() {
+                            continue;
+                        }
+                        t = self.tm.int(tt.k, w, sg);
+                    }
+                    let tt2 = self.tm.at(t);
+                    if tt2.w != w || tt2.sg != sg || t == own || n >= QUANT_TERMS {
+                        continue;
+                    }
+                    n += 1;
+                    let f = self.instance(q, ci, t);
+                    if !self.tm.is_true(f) && !hyps.contains(&f) {
+                        hyps.push(f);
+                        added = true;
+                    }
+                }
+                if !self.spend() {
+                    return added;
+                }
+            }
+        }
+        return added;
+    }
+
+    // The term `u` gives in place of `k` when it is trigger `g` with another term in place of `k`, NONE
+    // when it is not.
+    fn matched(self: &Self, g: u32, k: u32, u: u32) u32 {
+        let gx = self.tm.at(g);
+        let ux = self.tm.at(u);
+        if g == u || gx.op != ux.op || gx.w != ux.w || gx.sg != ux.sg || gx.k != ux.k {
+            return NONE;
+        }
+        let mut go = Vector::<u32>::new();
+        let mut uo = Vector::<u32>::new();
+        self.tm.operands(g, &mut go);
+        self.tm.operands(u, &mut uo);
+        if go.len() != uo.len() {
+            return NONE;
+        }
+        let mut t = NONE;
+        for j in 0..go.len() {
+            if go[j] == k {
+                if t != NONE && t != uo[j] {
+                    return NONE;
+                }
+                t = uo[j];
+            } else if go[j] != uo[j] {
+                return NONE;
+            }
+        }
+        return t;
+    }
+
+    // The instance of quantifier `q` (closure `ci`) at term `t`: `!q || !(lo <= t < hi) || E(t)` for
+    // `forall`, `q || !(lo <= t < hi) || !E(t)` for `exists`.
+    fn instance(self: &mut Self, q: u32, ci: u32, t: u32) u32 {
+        let key = q as u64 << 32 | t as u64;
+        if let Some(f) = self.qinst.get(&key) {
+            return *f;
+        }
+        let none = Vector::<u32>::new();
+        let co = replace(&mut self.chain_ovf, OVF_EXACT);
+        let e = self.quant_body(ci, t, &none);
+        self.chain_ovf = co;
+        let ex = ((unsafe &*self.qclo[ci as usize].cb).quants[self.qclo[ci as usize].qi as usize].flags & ir::QF_EXISTS) != 0;
+        let inr = self.quant_range(ci, t);
+        let out = self.tm.not(inr);
+        let f = if ex {
+            let ne = self.tm.not(e);
+            let a = self.tm.or(out, ne);
+            self.tm.or(q, a)
+        } else {
+            let nq = self.tm.not(q);
+            let a = self.tm.or(out, e);
+            self.tm.or(nq, a)
+        };
+        self.qinst.insert(key, f);
+        return f;
+    }
+
+    // `lo <= t < hi` (`<= hi` for an inclusive range) of quantifier closure `ci`.
+    fn quant_range(self: &mut Self, ci: u32, t: u32) u32 {
+        let c = &self.qclo[ci as usize];
+        let (lo, hi) = (c.lo, c.hi);
+        let incl = ((unsafe &*c.cb).quants[c.qi as usize].flags & ir::QF_INCLUSIVE) != 0;
+        let a = self.tm.cmp(T_LE, lo, t);
+        let b = self.tm.cmp(pick(incl, T_LE, T_LT), t, hi);
+        return self.tm.and(a, b);
+    }
+
+    // `E` of quantifier closure `ci` with its binding `t`, under `pc` (the range included): the paths
+    // to its value, a clause's condition (its own checks are part of it).
+    fn quant_body(self: &mut Self, ci: u32, t: u32, pc: &Vector<u32>) u32 {
+        let cbp = self.qclo[ci as usize].cb;
+        let cb = unsafe &*cbp;
+        let cm = self.qclo[ci as usize].cm;
+        let all = self.qclo[ci as usize].all;
+        let qs = cb.quants[self.qclo[ci as usize].qi as usize];
+        let mut st = self.qclo[ci as usize].state.clone();
+        st.set(qs.var as usize, t);
+        let site = ir::ContractSite {
+            pred: 0,
+            chain: qs.body,
+            check: qs.check,
+            cont: 0,
+            clause: 0,
+            kind: CT_INVARIANT,
+            value: ir::IR_NONE,
+        };
+        let mem = if self.qclo[ci as usize].has_mem {
+            (&self.qclo[ci as usize].mem) as *const Vector<u32>
+        } else {
+            null
+        };
+        let om = replace(&mut self.mem, mem);
+        let ig = replace(&mut self.in_ghost, false);
+        self.chain_depth += 1;
+        let none = tok::Span { start: 0, end: 0 };
+        let mut no = Vector::<u64>::new();
+        let (f, _v) = self.chain_in(cb, cm, site, &st, pc, all, none, &mut no);
+        self.chain_depth -= 1;
+        self.in_ghost = ig;
+        self.mem = om;
+        return f;
+    }
+
+    // Quantifier `qi` of body `cb`, reached in `state` under `pc`: a fresh atom `q` with its closure, and
+    // the fact of its witness `k` (the value where a `forall` fails, or an `exists` holds), anchored on
+    // `q`: `q || (lo <= k < hi && !E(k))`, or `!q || (lo <= k < hi && E(k))`. `E(k)` is walked with the
+    // walk's obligations (each check of `E` defined for every value in the range).
+    fn quantifier(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        qi: u32,
+        state: &mut Vector<u32>,
+        pc: &Vector<u32>,
+        all: bool,
+    ) u32 {
+        let qs = cb.quants[qi as usize];
+        let lo = self.operand(cb, cm, state, qs.lo, all);
+        let hi = self.operand(cb, cm, state, qs.hi, all);
+        let (w, sg) = self.ty_of(cm, cb.locals.at(qs.var as usize).ty);
+        let q = self.tm.var(W_BOOL, false);
+        if !self.tm.is_int(lo) || !self.tm.is_int(hi) {
+            return q;
+        }
+        let has_mem = self.mem != null;
+        let mem = if has_mem {
+            (unsafe &*self.mem).clone()
+        } else {
+            Vector::<u32>::new()
+        };
+        let ci = self.qclo.len() as u32;
+        self.qclo.push(
+            QClo {
+                cb: cb,
+                cm: cm,
+                qi: qi,
+                state: state.clone(),
+                mem: mem,
+                has_mem: has_mem,
+                all: all,
+                lo: lo,
+                hi: hi,
+                k: NONE,
+                trig: Vector::<u32>::new(),
+                w: w,
+                sg: sg,
+            },
+        );
+        self.qof.insert(q, ci);
+        let k = self.tm.var(w, sg);
+        self.qclo.index_mut(ci as usize).k = k;
+        let inr = self.quant_range(ci, k);
+        let mut pck = pc.clone();
+        pck.push(inr);
+        let e = self.quant_body(ci, k, &pck);
+        let f = if (qs.flags & ir::QF_EXISTS) != 0 {
+            let nq = self.tm.not(q);
+            let a = self.tm.and(inr, e);
+            self.tm.or(nq, a)
+        } else {
+            let ne = self.tm.not(e);
+            let a = self.tm.and(inr, ne);
+            self.tm.or(q, a)
+        };
+        self.qdef.insert(f, true);
+        self.anchor(q, f);
+        let tr = self.triggers(e, k);
+        self.qclo.index_mut(ci as usize).trig = tr;
+        return q;
+    }
+
+    // The terms under `e` (through the witnesses' facts of the quantifiers it names) that take `k` as an
+    // operand and are no formula: a term the facts name of one of these shapes with another operand
+    // in place of `k` gives the instance term (`instantiate`).
+    fn triggers(self: &Self, e: u32, k: u32) Vector<u32> {
+        let mut out = Vector::<u32>::new();
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(e);
+        for _s in 0..LIN_MAX * 16 {
+            if stack.len() == 0 {
+                break;
+            }
+            let t = stack.pop().unwrap();
+            if seen.contains_key(&t) {
+                continue;
+            }
+            seen.insert(t, true);
+            if let Some(d) = self.def_of.get(&t) {
+                if self.qof.contains_key(&t) {
+                    stack.push(self.defs[(*d) as usize]);
+                }
+            }
+            let x = self.tm.at(t);
+            self.tm.operands(t, &mut ops);
+            let formula = x.op >= T_LT && x.op <= T_OR;
+            if !formula && ops.contains(&k) && out.len() < 16 {
+                out.push(t);
+            }
+            for j in 0..ops.len() {
+                stack.push(ops[j]);
+            }
+        }
+        return out;
+    }
+
+    // The quantifier of body `cb` whose loop starts at block `blk`, NONE when none does.
+    const fn quant_at(cb: &ir::CoreBody, blk: u32) u32 {
+        for j in 0..cb.quants.len() {
+            if cb.quants[j].entry == blk {
+                return j as u32;
+            }
+        }
+        return NONE;
     }
 
     // Append to `hyps` (the path) the definitions of the spec function calls under `goal` and `hyps`,
@@ -1351,12 +1969,57 @@ extend<const B: usize> Prover<B> {
             } else {
                 let key = self.proj_key(cb, cm, state, &pj, ty, all);
                 let (w, sg) = self.ty_of(cm, pj.ty);
-                v = self.tm.sel(v, key, w, sg);
+                v = self.sel(v, key, w, sg);
             }
             self.pat_fact(cm, pj.ty, v);
             ty = pj.ty;
         }
         return v;
+    }
+
+    // Member `key` of `v`, of type (`w`, `sg`) (`Terms::sel`). A key that is no constant reads a member
+    // the fact of the read names, anchored on the read: through an update `(key == k && r == x) ||
+    // (key != k && r == v'[key])`; of an aggregate of at most 64 members `!(0 <= key < n) ||
+    // (key == 0 && r == m0) || ..`.
+    fn sel(self: &mut Self, v: u32, key: u32, w: u16, sg: bool) u32 {
+        let r = self.tm.sel(v, key, w, sg);
+        let rt = self.tm.at(r);
+        if rt.op != T_SEL || self.tm.at(key).op == T_INT || !self.tm.is_int(key) || self.seld.contains_key(&r) {
+            return r;
+        }
+        self.seld.insert(r, true);
+        let vx = self.tm.at(rt.a);
+        let (kw, ksg) = (self.tm.at(key).w, self.tm.at(key).sg);
+        if vx.op == T_UPD {
+            let base = self.tm.args[vx.a as usize];
+            let k2 = self.tm.args[(vx.a + 1) as usize];
+            let x = self.tm.args[(vx.a + 2) as usize];
+            let inner = self.sel(base, key, w, sg);
+            let same = self.tm.cmp(T_EQ, key, k2);
+            let e1 = self.tm.cmp(T_EQ, r, x);
+            let e2 = self.tm.cmp(T_EQ, r, inner);
+            let a1 = self.tm.and(same, e1);
+            let nsame = self.tm.not(same);
+            let a2 = self.tm.and(nsame, e2);
+            let f = self.tm.or(a1, a2);
+            self.anchor(r, f);
+        } else if vx.op == T_AGG && vx.b <= 64 {
+            let z = self.tm.int(Num::<B>::zero(), kw, ksg);
+            let n = self.tm.int(wide::<B>(vx.b), kw, ksg);
+            let c1 = self.tm.cmp(T_LE, z, key);
+            let c2 = self.tm.cmp(T_LT, key, n);
+            let inr = self.tm.and(c1, c2);
+            let mut f = self.tm.not(inr);
+            for j in 0..vx.b {
+                let kj = self.tm.int(wide::<B>(j), kw, ksg);
+                let at = self.tm.cmp(T_EQ, key, kj);
+                let e = self.tm.cmp(T_EQ, r, self.tm.args[(vx.a + j) as usize]);
+                let one = self.tm.and(at, e);
+                f = self.tm.or(f, one);
+            }
+            self.anchor(r, f);
+        }
+        return r;
     }
 
     // The member key of a field or index projection over a value of type `base`: the field's index
@@ -1372,7 +2035,8 @@ extend<const B: usize> Prover<B> {
         all: bool,
     ) u32 {
         if pj.kind == ir::PJ_INDEX_OP {
-            return self.operand(cb, cm, state, pj.data, all);
+            let x = self.operand(cb, cm, state, pj.data, all);
+            return self.index_key(x);
         }
         if pj.kind == ir::PJ_FIELD && pj.data == ir::IR_NONE {
             let ix = self.field_index(cm, base, pj.sub);
@@ -1382,6 +2046,32 @@ extend<const B: usize> Prover<B> {
             return self.tm.int(wide::<B>(pj.sub) + Num::<B>::one().shl(40), 64, false);
         }
         return self.tm.int(wide::<B>(pj.data), 64, false);
+    }
+
+    // Index `x` as a member key: a 64-bit unsigned integer, as the constant indexes are (the check
+    // compares it as `usize`): a constant at least 0 its value, another type a cast `c` with the fact
+    // `c == x` where `x` is at least 0, anchored on `c`.
+    fn index_key(self: &mut Self, x: u32) u32 {
+        let t = self.tm.at(x);
+        if t.w <= W_BOOL || t.w == 64 && !t.sg {
+            return x;
+        }
+        if t.op == T_INT && !t.k.is_negative() {
+            return self.tm.int(t.k, 64, false);
+        }
+        if exact_w(t.w) {
+            return x;
+        }
+        let c = self.tm.unary(T_CAST, x, 64, false);
+        if !self.seld.contains_key(&c) {
+            self.seld.insert(c, true);
+            let nn = self.nonneg(x);
+            let neg = self.tm.not(nn);
+            let eq = self.tm.cmp(T_EQ, c, x);
+            let f = self.tm.or(neg, eq);
+            self.anchor(c, f);
+        }
+        return c;
     }
 
     // The place of field declaration `sub` among the members of struct type `ty`, -1 when it is not one.
@@ -1427,6 +2117,28 @@ extend<const B: usize> Prover<B> {
         if x.op == T_REF {
             return x.a;
         }
+        // A reference to an element of a container: the element of its view.
+        let sk = self.sq_of(r);
+        if sk == SQ_EREF || sk == SQ_SEREF {
+            let (w, sg) = self.ty_of(cm, ty);
+            let a0 = self.tm.args[x.a as usize];
+            let i = self.tm.args[(x.a + 1) as usize];
+            let view = if sk == SQ_EREF {
+                let ms = if self.mem != null {
+                    unsafe &*self.mem
+                } else {
+                    state
+                };
+                let tg = self.tm.at(a0).a;
+                if tg as usize >= ms.len() || ms[tg as usize] == NONE {
+                    return self.tm.var(w, sg);
+                }
+                self.view_v(ms[tg as usize])
+            } else {
+                self.view_s(a0, state[state.len() - 1])
+            };
+            return self.seq_at(view, i, w, sg);
+        }
         if x.op == T_MREF {
             let ms = if self.mem != null {
                 unsafe &*self.mem
@@ -1454,6 +2166,9 @@ extend<const B: usize> Prover<B> {
 
     // Local `l` may be reached through a reference or pointer from here on.
     fn escape(self: &mut Self, l: u32) {
+        if l as usize < self.slot_of.len() && self.slot_of[l as usize] != NONE {
+            self.escape(self.slot_of[l as usize]);
+        }
         if !self.is_mem[l as usize] {
             return;
         }
@@ -1494,6 +2209,34 @@ extend<const B: usize> Prover<B> {
                     wide::<B>(v)
                 };
                 return self.tm.int(k, w, sg);
+            }
+        }
+        // A string literal without escapes: a function of its bytes, whose view is those bytes.
+        if c.kind == ir::CK_STR && c.raw.end > c.raw.start && c.raw.end - c.raw.start <= 64 {
+            let sm = if c.item.node != NODE_NONE {
+                c.item.module
+            } else {
+                cb.module
+            };
+            let src = self.pkg().modules.at(sm as usize).source.as_str();
+            if c.raw.end as usize <= src.len() {
+                let text = src.slice(c.raw.start as usize, c.raw.end as usize);
+                let mut plain = true;
+                for j in 0..text.len() {
+                    plain = plain && text.byte_at(j) != 92;
+                }
+                if plain {
+                    let mut seq = self.seq_make1(SQ_EMPTY, NONE);
+                    for j in 0..text.len() {
+                        let mut xs = Vector::<u32>::new();
+                        xs.push(seq);
+                        xs.push(self.tm.int(wide::<B>(text.byte_at(j)), 8, false));
+                        seq = self.seq_make(SQ_PUSH, &xs);
+                    }
+                    let v = self.sq1(SQ_STRV, seq, W_OTHER, false);
+                    self.vdef.insert(v, seq);
+                    return v;
+                }
             }
         }
         // A literal wider than 64 bits of a wide integer: its stored limbs, two's complement in `w` bits.
@@ -1544,7 +2287,16 @@ extend<const B: usize> Prover<B> {
         if dr < p.proj_len {
             let r = self.read_prefix(cb, cm, state, &p, dr, all);
             let x = self.tm.at(r);
+            let sk = self.sq_of(r);
+            if !all && (sk == SQ_EREF || sk == SQ_SEREF) {
+                self.leak(v);
+                self.elem_write(cb, cm, state, &p, dr, r, v);
+                return;
+            }
             if all || x.op != T_MREF || self.has_deref(cb, &p, dr + 1) {
+                if !all {
+                    self.leak(v);
+                }
                 self.mem_event(cb, cm, state);
                 return;
             }
@@ -1576,6 +2328,60 @@ extend<const B: usize> Prover<B> {
         } else {
             state.set(base as usize, nv);
         }
+    }
+
+    // A write of `v` (NONE: unknown) to place `p` through element reference `r` (its prefix of `dr`
+    // projections): the container's new view updates the element (an unknown one for a member of it).
+    fn elem_write(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        p: &ir::Place,
+        dr: u32,
+        r: u32,
+        v: u32,
+    ) {
+        let rt = self.tm.at(r);
+        let a0 = self.tm.args[rt.a as usize];
+        let i = self.tm.args[(rt.a + 1) as usize];
+        let ety = cb.projections.at((p.proj_start + dr) as usize).ty;
+        let (w, sg) = self.ty_of(cm, ety);
+        let x = if v == NONE || dr + 1 != p.proj_len {
+            self.tm.var(w, sg)
+        } else {
+            v
+        };
+        let mut xs = Vector::<u32>::new();
+        if self.sq_of(r) == SQ_EREF {
+            let tg = self.tm.at(a0).a;
+            if tg as usize >= state.len() || state[tg as usize] == NONE {
+                self.mem_event(cb, cm, state);
+                return;
+            }
+            xs.push(self.view_v(state[tg as usize]));
+            xs.push(i);
+            xs.push(x);
+            let nview = self.seq_make(SQ_UPD, &xs);
+            let ty = if tg as usize < cb.locals.len() {
+                cb.locals.at(tg as usize).ty
+            } else {
+                self.slot_ty[tg as usize - cb.locals.len()]
+            };
+            let nv = self.fresh(cm, ty);
+            self.vdef.insert(nv, nview);
+            state.set(tg as usize, nv);
+            return;
+        }
+        // Through a `[]mut T`: memory changes, and the slice's view in the new epoch is the update.
+        let ep0 = state[state.len() - 1];
+        xs.push(self.view_s(a0, ep0));
+        xs.push(i);
+        xs.push(x);
+        let nview = self.seq_make(SQ_UPD, &xs);
+        self.mem_event(cb, cm, state);
+        let ep1 = state[state.len() - 1];
+        self.sdef.insert(a0 as u64 << 32 | ep1 as u64, nview);
     }
 
     const fn has_deref(self: &Self, cb: &ir::CoreBody, p: &ir::Place, from: u32) bool {
@@ -1614,7 +2420,7 @@ extend<const B: usize> Prover<B> {
         };
         let key = self.proj_key(cb, cm, state, &pj, bty, all);
         let (w, sg) = self.ty_of(cm, pj.ty);
-        let sub = self.tm.sel(old, key, w, sg);
+        let sub = self.sel(old, key, w, sg);
         let inner = self.update(cb, cm, state, p, from + 1, sub, v, all);
         if inner == NONE {
             return NONE;
@@ -1625,8 +2431,23 @@ extend<const B: usize> Prover<B> {
     // Local `l` of body `cb` holds an unknown value from here on. The value is made now, not at the
     // next read: a chain reads a copy of the state, and the body must read the same value after it.
     fn forget(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, l: u32) {
-        let v = self.fresh(cm, cb.locals.at(l as usize).ty);
+        let ty = if l as usize >= cb.locals.len() {
+            self.slot_ty[l as usize - cb.locals.len()]
+        } else {
+            cb.locals.at(l as usize).ty
+        };
+        let v = self.fresh(cm, ty);
         state.set(l as usize, v);
+    }
+
+    // Value `v` may reach memory or a callee from here on: the local or slot a `T_MREF` names escapes.
+    fn leak(self: &mut Self, v: u32) {
+        if v != NONE && self.tm.at(v).op == T_MREF && self.tm.at(v).a as usize < self.is_mem.len() {
+            self.escape(self.tm.at(v).a);
+        }
+        if v != NONE && self.sq_of(v) == SQ_EREF {
+            self.leak(self.tm.args[self.tm.at(v).a as usize]);
+        }
     }
 
     // A checked operation's value `exact` (of a type that fits it only if it does not overflow): with
@@ -1678,8 +2499,23 @@ extend<const B: usize> Prover<B> {
             }
             return x;
         }
-        if !all && (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE) {
-            self.escape(cb.places.at(rv.a as usize).base);
+        // A `&mut` of a local lent to one call escapes at the call (`call`), for the call.
+        let lent = !all && rv.kind == ir::RV_REF && rv.b != 0 && cb.places.at(rv.a as usize).proj_len == 0 && self.dest_tmp != NONE && self.scoped[self.dest_tmp as usize];
+        if !all && !lent && (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE) {
+            let p = *cb.places.at(rv.a as usize);
+            self.escape(p.base);
+            // A borrow through a reference reaches what the reference refers to.
+            for j in 0..p.proj_len {
+                if cb.projections.at((p.proj_start + j) as usize).kind == ir::PJ_DEREF {
+                    let r = self.read_prefix(cb, cm, state, &p, j, all);
+                    self.leak(r);
+                    break;
+                }
+            }
+        }
+        if !all && rv.kind == ir::RV_CAST {
+            let x = self.operand(cb, cm, state, rv.a, all);
+            self.leak(x);
         }
         if !all && rv.kind == ir::RV_CLOSURE {
             for j in rv.a..rv.a + rv.b {
@@ -1688,6 +2524,9 @@ extend<const B: usize> Prover<B> {
                     self.escape(cb.places.at(op.data as usize).base);
                 }
             }
+        }
+        if rv.kind == ir::RV_SLICE && !all {
+            return self.slice_of(cb, cm, state, pc, &rv);
         }
         if rv.kind == ir::RV_REF {
             let p = *cb.places.at(rv.a as usize);
@@ -1698,11 +2537,30 @@ extend<const B: usize> Prover<B> {
                         Term::<B> { k: Num::<B>::zero(), a: p.base, b: 0, op: T_MREF, w: W_OTHER, sg: false },
                     );
                 }
-                if !self.ptr_cast && self.frozen(cm, cb.locals.at(p.base as usize).ty) {
+                if !self.ptr_cast && (self.frozen(cm, cb.locals.at(p.base as usize).ty) || self.container(
+                    cm,
+                    cb.locals.at(p.base as usize).ty,
+                )) {
                     return self.tm.unary(T_REF, v, W_OTHER, false);
                 }
             }
+            // A shared reborrow `&*x` of a reference to a frozen value is that reference.
+            if rv.b == 0 && p.proj_len == 1 && cb.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF && (all || self.tracked[p.base as usize]) {
+                let v = self.local_val(cb, cm, state, p.base);
+                if v != NONE && self.tm.at(v).op == T_REF {
+                    return v;
+                }
+            }
             return self.tm.var(W_OTHER, false);
+        }
+        if rv.kind == ir::RV_AGGREGATE && !all {
+            for j in rv.a..rv.a + rv.b {
+                let o = cb.oper_pool[j as usize];
+                if o != ir::IR_NONE && cb.operands.at(o as usize).kind != ir::OP_CONST {
+                    let x = self.operand(cb, cm, state, o, all);
+                    self.leak(x);
+                }
+            }
         }
         if rv.kind == ir::RV_AGGREGATE && (rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_ARRAY || rv.c == ir::AGG_STRUCT && rv.item.node != NODE_NONE) {
             let mut xs = Vector::<u32>::with_capacity(rv.b as usize);
@@ -1828,6 +2686,18 @@ extend<const B: usize> Prover<B> {
                     return self.tm.cmp(T_NE, x, y);
                 }
             }
+            // Equality of other values (ghost code's): a sequence's is extensional.
+            if !ints && !bools && (op == tt::TokenType::EqualEqual as u8 || op == tt::TokenType::BangEqual as u8) && self.tm.at(
+                x,
+            ).w == W_OTHER && self.tm.at(y).w == W_OTHER {
+                let e = self.tm.cmp(T_EQ, x, y);
+                let et = self.seq_elem(cm, cb.operands.at(rv.a as usize).ty);
+                if et != TYPE_NONE {
+                    let (ew, esg) = self.ty_of(cm, et);
+                    self.seq_ext(e, x, y, ew, esg);
+                }
+                return pick(op == tt::TokenType::EqualEqual as u8, e, self.tm.not(e));
+            }
             if bools {
                 if op == tt::TokenType::Ampersand as u8 {
                     return self.tm.and(x, y);
@@ -1902,8 +2772,12 @@ extend<const B: usize> Prover<B> {
             };
             let ints = self.tm.is_int(x) && self.tm.is_int(y) && (z == NONE || self.tm.is_int(z));
             let own = !all && cb as *const ir::CoreBody == self.b;
+            // The checks compare as `usize` (`__sc_bounds(size_t, size_t)`): a signed index below 0
+            // fails.
             if ints && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN) {
-                let f = self.tm.cmp(T_LT, x, y);
+                let lt = self.tm.cmp(T_LT, x, y);
+                let nn = self.nonneg(x);
+                let f = self.tm.and(nn, lt);
                 self.note_check(own && rv.c == ir::IN_BOUNDS, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return x;
@@ -1911,7 +2785,9 @@ extend<const B: usize> Prover<B> {
             if ints && z != NONE && (rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS_PROVEN) {
                 let c1 = self.tm.cmp(T_LE, x, y);
                 let c2 = self.tm.cmp(T_LE, y, z);
-                let f = self.tm.and(c1, c2);
+                let nn = self.nonneg(x);
+                let c12 = self.tm.and(c1, c2);
+                let f = self.tm.and(nn, c12);
                 self.note_check(own && rv.c == ir::IN_RANGE_BOUNDS, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return y;
@@ -1922,13 +2798,98 @@ extend<const B: usize> Prover<B> {
                 let c1 = self.tm.cmp(T_LE, x, y);
                 let end = self.tm.arith(T_ADD, x, z, xw, xsg);
                 let c2 = self.tm.cmp(T_LE, end, y);
-                let f = self.tm.and(c1, c2);
+                let nn = self.nonneg(x);
+                let c12 = self.tm.and(c1, c2);
+                let f = self.tm.and(nn, c12);
                 self.note_check(own && rv.c == ir::IN_BOUNDS_GROUP, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return x;
             }
         }
         return self.tm.var(w, sg);
+    }
+
+    // `0 <= x` for a signed integer `x`, `true` for an unsigned one.
+    fn nonneg(self: &mut Self, x: u32) u32 {
+        let t = self.tm.at(x);
+        if !t.sg {
+            return self.tm.boolean(true);
+        }
+        let z = self.tm.int(Num::<B>::zero(), t.w, t.sg);
+        return self.tm.cmp(T_LE, z, x);
+    }
+
+    // The length and the view of container place `pl` of body `cb` (an array of a known length, a
+    // view, a vector, a string); NONE both for another one.
+    fn cont_view(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, pl: u32) (u32, u32) {
+        let ty = cb.places.at(pl as usize).ty;
+        let n = self.array_len(cm, ty);
+        let v = self.read_place(cb, cm, state, pl, false);
+        if n >= 0 {
+            let mut xs = Vector::<u32>::new();
+            xs.push(v);
+            xs.push(self.tm.int(wide::<B>(n), W_NAT, false));
+            return self.tm.int(wide::<B>(n), self.pw, false), self.seq_make(SQ_VIEWA, &xs);
+        }
+        let (dm, dd) = self.decl_of(cm, ty);
+        if dd == NODE_NONE {
+            return NONE, NONE;
+        }
+        if dm == self.slice.mid && dd == self.slice.node || dm == self.smut.mid && dd == self.smut.node {
+            let l = self.sq1(SQ_SLEN, v, self.pw, false);
+            let ep = self.slice_ep(cm, ty, state);
+            return l, self.view_s(v, ep);
+        }
+        if dm == self.vecl.mid && dd == self.vecl.node || dm == self.strl.mid && dd == self.strl.node {
+            return self.vlen(v, self.pw, false), self.view_v(v);
+        }
+        return NONE, NONE;
+    }
+
+    // `base[lo..hi]` (RV_SLICE `rv`): a view whose length is `hi - lo` and whose elements, in this memory
+    // epoch, are the container's from `lo`, when the container is one the walk models; a fresh view
+    // otherwise.
+    fn slice_of(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+        rv: &ir::Rvalue,
+    ) u32 {
+        let s = self.fresh(cm, rv.target);
+        let (n, cv) = self.cont_view(cb, cm, state, rv.a);
+        if n == NONE {
+            return s;
+        }
+        let lo = if rv.b != ir::IR_NONE {
+            self.operand(cb, cm, state, rv.b, false)
+        } else {
+            self.tm.int(Num::<B>::zero(), self.pw, false)
+        };
+        let mut hi = if rv.item.node != ir::IR_NONE {
+            self.operand(cb, cm, state, rv.item.node, false)
+        } else {
+            n
+        };
+        if !self.tm.is_int(lo) || !self.tm.is_int(hi) {
+            return s;
+        }
+        if (rv.c & 1) != 0 && rv.item.node != ir::IR_NONE {
+            let one = self.tm.int(Num::<B>::one(), W_INT, true);
+            hi = self.tm.arith(T_ADD, hi, one, W_INT, true);
+        }
+        let l = self.sq1(SQ_SLEN, s, self.pw, false);
+        let d = self.tm.arith(T_SUB, hi, lo, W_INT, true);
+        pc.push(self.tm.cmp(T_EQ, l, d));
+        let mut xs = Vector::<u32>::new();
+        xs.push(cv);
+        xs.push(self.sq_index(lo));
+        xs.push(self.sq_index(hi));
+        let sub = self.seq_make(SQ_SUB, &xs);
+        let ep = self.slice_ep(cm, rv.target, state);
+        self.sdef.insert(s as u64 << 32 | ep as u64, sub);
+        return s;
     }
 
     // The effect of statement `sid` of body `cb` on `state` and `pc`.
@@ -1950,7 +2911,10 @@ extend<const B: usize> Prover<B> {
         if !all && rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE) {
             self.mem_event(cb, cm, state);
         }
+        let dp = *cb.places.at(s.place as usize);
+        self.dest_tmp = pick(dp.proj_len == 0, dp.base, NONE);
         let v = self.rvalue(cb, cm, state, pc, s.rvalue, all, ovf, OB_OVERFLOW << 56 | sid as u64, s.span);
+        self.dest_tmp = NONE;
         self.write_place(cb, cm, state, s.place, v, all);
     }
 
@@ -2027,13 +2991,19 @@ extend<const B: usize> Prover<B> {
     // Where its `requires` holds, the body ends on one of the paths (its own proof: no panic, a
     // measure), so one path's disjunct is true. A fact of every obligation of the body under proof
     // (`holds`). The calls the walk makes stay opaque: one unfolding, as a lemma about the next call
-    // (induction) gives the rest.
-    fn define(self: &mut Self, r: u32, d: DefId, xs: &Vector<u32>, state: &Vector<u32>) {
+    // (induction) gives the rest. A function without a body (`@trusted`) is defined by its `ensures`:
+    // `!requires || ensures(r)`. With `by_ref`, the function returns a reference and `r` is the value
+    // it refers to.
+    fn define(self: &mut Self, r: u32, d: DefId, xs: &Vector<u32>, state: &Vector<u32>, by_ref: bool) {
         if self.defined.contains_key(&r) {
             return;
         }
         self.defined.insert(r, true);
-        let cbp = self.kept(d);
+        let mut cbp = self.kept(d);
+        let axiom = cbp == null;
+        if axiom && self.ast_of(d.module).ext(d.node).function.body == NODE_NONE {
+            cbp = self.contract_body(d);
+        }
         if cbp == null || unsafe (*cbp).returns != 1 || (unsafe (*cbp).args) as usize != xs.len() {
             return;
         }
@@ -2069,18 +3039,55 @@ extend<const B: usize> Prover<B> {
                 pre = self.tm.and(pre, fr);
             }
         }
-        let _ = self.chain_in(cb, d.module, site, &frame, &pc0, true, none, &mut leaves);
+        let mut post = self.tm.boolean(true);
+        if axiom {
+            frame.set(0, pick(by_ref, self.tm.unary(T_REF, r, W_OTHER, false), r));
+            for j in 0..cb.contracts.len() {
+                if cb.contracts[j].kind == CT_ENSURES {
+                    let mut no = Vector::<u64>::new();
+                    let (fe, _v) = self.chain_in(cb, d.module, cb.contracts[j], &frame, &pc0, true, none, &mut no);
+                    post = self.tm.and(post, fe);
+                }
+            }
+        } else {
+            let _ = self.chain_in(cb, d.module, site, &frame, &pc0, true, none, &mut leaves);
+        }
         self.chain_ovf = co;
         self.chain_depth -= 1;
         self.unfold -= 1;
         self.in_ghost = ig;
         self.mem = om;
         let mut f = self.tm.not(pre);
+        if axiom {
+            f = self.tm.or(f, post);
+        }
+        let st = self.alias_pool.len() as u64;
+        for j in 0..leaves.len() {
+            let v = (leaves[j] & 0xFFFFFFFFu64) as u32;
+            if !by_ref && v != NONE && self.sq_of(v) != 0 {
+                self.alias_pool.push(v);
+            }
+        }
+        if self.alias_pool.len() as u64 != st {
+            self.alias.insert(r, st << 32 | self.alias_pool.len() as u64 - st);
+        }
         for j in 0..leaves.len() {
             let path = (leaves[j] >> 32) as u32;
-            let v = (leaves[j] & 0xFFFFFFFFu64) as u32;
-            let eq = self.tm.cmp(T_EQ, r, v);
-            let one = self.tm.and(path, eq);
+            let v0 = (leaves[j] & 0xFFFFFFFFu64) as u32;
+            // A reference result: the value it refers to; any value when the walk does not know it.
+            let v = if !by_ref {
+                v0
+            } else if v0 != NONE && self.tm.at(v0).op == T_REF {
+                self.tm.at(v0).a
+            } else {
+                NONE
+            };
+            let one = if v == NONE {
+                path
+            } else {
+                let eq = self.tm.cmp(T_EQ, r, v);
+                self.tm.and(path, eq)
+            };
             f = self.tm.or(f, one);
         }
         if !self.tm.is_true(f) && !self.tm.is_false(f) {
@@ -2114,11 +3121,21 @@ extend<const B: usize> Prover<B> {
                 return self.tm.boolean(false), NONE;
             }
             let mut sb = subs.pop().unwrap();
-            let bb = *cb.blocks.at(sb.blk as usize);
             let mut full = pc.clone();
             for j in 0..sb.conds.len() {
                 full.push(sb.conds[j]);
             }
+            // A quantifier: its atom, past its loop.
+            let qi = Prover::<B>::quant_at(cb, sb.blk);
+            if qi != NONE {
+                let qs = cb.quants[qi as usize];
+                let q = self.quantifier(cb, cm, qi, &mut sb.state, &full, all);
+                self.write_place(cb, cm, &mut sb.state, qs.result, q, all);
+                sb.blk = qs.exit;
+                subs.push(sb);
+                continue;
+            }
+            let bb = *cb.blocks.at(sb.blk as usize);
             let n0 = full.len();
             for sid in bb.stmt_start..bb.stmt_start + bb.stmt_len {
                 let st = *cb.statements.at(sid as usize);
@@ -2633,13 +3650,19 @@ extend<const B: usize> Prover<B> {
             TYPE_NONE
         };
         let (w, sg) = self.ty_of(cm, rty);
+        let sv = self.sq_value(cb, cm, state, t, all);
+        if sv != NONE {
+            return sv;
+        }
         if t.callee.node == NODE_NONE || !self.is_const_fn(t.callee) {
             return self.tm.var(w, sg);
         }
+        // A spec function reads its arguments at the call and changes none.
+        let ghost = self.is_ghost(t.callee);
         let mut xs = Vector::<u32>::with_capacity(t.args_len as usize);
         for j in t.args_start..t.args_start + t.args_len {
             let oid = cb.oper_pool[j as usize];
-            if !all && self.autoref(cb, cm, t, j - t.args_start) {
+            if !all && !ghost && self.autoref(cb, cm, t, j - t.args_start) {
                 return self.tm.var(w, sg);
             }
             let x = self.operand(cb, cm, state, oid, all);
@@ -2647,9 +3670,37 @@ extend<const B: usize> Prover<B> {
             if xt.w == W_OTHER && xt.op != T_REF && xt.op != T_VIEW && !self.frozen(cm, cb.operands.at(oid as usize).ty) {
                 return self.tm.var(w, sg);
             }
-            xs.push(x);
+            xs.push(self.implicit_ref(cb, t, j - t.args_start, x));
         }
-        // A view of an array has the array's length.
+        // An element of a view of an array is the array's member (a reference to it).
+        if xs.len() == 2 && self.is_slice_elem(t.callee) && self.tm.is_int(xs[1]) {
+            let x = self.tm.at(xs[0]);
+            let v = if x.op == T_REF {
+                self.tm.at(x.a)
+            } else {
+                x
+            };
+            let rt = *self.ast_of(cm).type_at(rty);
+            if v.op == T_VIEW && rt.kind == TypeKind::TYPE_REFERENCE {
+                let (ew, esg) = self.ty_of(cm, rt.as_data.elem);
+                let e = self.sel(v.a, xs[1], ew, esg);
+                return self.tm.unary(T_REF, e, W_OTHER, false);
+            }
+            // Another view's element is the element of its sequence in this memory epoch.
+            if rt.kind == TypeKind::TYPE_REFERENCE {
+                let (ew, esg) = self.ty_of(cm, rt.as_data.elem);
+                let sx = if x.op == T_REF {
+                    x.a
+                } else {
+                    xs[0]
+                };
+                let ep = self.slice_ep(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty, state);
+                let view = self.view_s(sx, ep);
+                let e = self.seq_at(view, xs[1], ew, esg);
+                return self.tm.unary(T_REF, e, W_OTHER, false);
+            }
+        }
+        // A view of an array has the array's length; another view's length is a function of the view.
         if xs.len() == 1 && w > W_BOOL && self.is_slice_len(t.callee) {
             let x = self.tm.at(xs[0]);
             let v = if x.op == T_REF {
@@ -2660,27 +3711,63 @@ extend<const B: usize> Prover<B> {
             if v.op == T_VIEW {
                 return self.tm.int(v.k, w, sg);
             }
+            let sx = if x.op == T_REF {
+                x.a
+            } else {
+                xs[0]
+            };
+            let n = self.sq1(SQ_SLEN, sx, self.pw, false);
+            return if w == self.pw && !sg {
+                n
+            } else {
+                self.tm.unary(T_CAST, n, w, sg)
+            };
         }
         // The type arguments are part of the callee; their ids are read in the body's module, which
         // the key names so that two modules' equal ids never meet.
+        // Inside a generic spec function's unfolding a type argument is the caller's type (`subst`);
+        // one that still names a type parameter has no meaning of its own: the call is unknown.
         let mut key = skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64);
-        if t.targs_len != 0 {
-            key = skey_mix(key, cm);
-            for j in t.targs_start..t.targs_start + t.targs_len {
-                key = skey_mix(key, cb.targ_pool[j as usize]);
+        let mut binds = Vector::<u64>::new();
+        let fg = pick(
+            ghost,
+            self.ast_of(t.callee.module).ext(t.callee.node).function.generics,
+            NodeList { start: 0, len: 0 },
+        );
+        let skip = pick(t.targs_len >= fg.len, t.targs_len - fg.len, 0u32);
+        for j in 0..t.targs_len {
+            let (m2, t2) = self.resolve(cm, cb.targ_pool[(t.targs_start + j) as usize]);
+            if self.subst.len() != 0 && self.mentions_generic(m2, t2, 0) {
+                return self.tm.var(w, sg);
+            }
+            key = skey_mix(skey_mix(key, m2), t2);
+            if j >= skip && t.targs_len >= fg.len {
+                let pn = unsafe self.ast_of(t.callee.module).list(fg)[(j - skip) as usize];
+                binds.push(t.callee.module as u64 << 32 | pn as u64);
+                binds.push(m2 as u64 << 32 | t2 as u64);
             }
         }
-        let r = self.tm.call(key, &xs, w, sg);
+        // A spec function's reference result refers to a value that is a function of the arguments.
+        let rt = *self.ast_of(cm).type_at(rty);
+        let by_ref = ghost && rty != TYPE_NONE && rt.kind == TypeKind::TYPE_REFERENCE;
+        let (vw, vsg) = if by_ref {
+            self.ty_of(cm, rt.as_data.elem)
+        } else {
+            (w, sg)
+        };
+        let r = self.tm.call(key, &xs, vw, vsg);
         // A call over constants unfolds again, to UNFOLD_MAX deep: `pow2(3) == 8` is computed.
         let mut lit = true;
         for j in 0..xs.len() {
             let op = self.tm.at(xs[j]).op;
             lit = lit && (op == T_INT || op == T_BOOL);
         }
-        if (self.unfold == 0 || lit && self.unfold < UNFOLD_MAX) && t.targs_len == 0 && self.is_ghost(t.callee) {
-            self.define(r, t.callee, &xs, state);
+        if (self.unfold == 0 || lit && self.unfold < UNFOLD_MAX) && ghost && (t.targs_len == 0 || binds.len() as u32 == 2 * fg.len) {
+            let outer = replace(&mut self.subst, binds);
+            self.define(r, t.callee, &xs, state, by_ref);
+            self.subst = outer;
         }
-        return r;
+        return pick(by_ref, self.tm.unary(T_REF, r, W_OTHER, false), r);
     }
 
     // Whether chain `s` of body `cb` only computes its condition: no drop, no call of a function that
@@ -2707,8 +3794,10 @@ extend<const B: usize> Prover<B> {
                 }
                 let p = *cb.places.at(st.place as usize);
                 let ld = cb.locals.at(p.base as usize);
+                // Ghost code writes its own locals and the ghost variables.
+                let gv = ld.dkind == ir::LK_GHOST && ir::is_ghost_site(s.kind);
                 let own = ld.storage == ir::LS_TEMP || ld.storage == ir::LS_USER && ld.span.start >= expr.start && ld.span.end <= expr.end;
-                if p.proj_len != 0 || !own {
+                if p.proj_len != 0 && !gv || !own && !gv {
                     return false;
                 }
             }
@@ -2733,6 +3822,19 @@ extend<const B: usize> Prover<B> {
         return true;
     }
 
+    // Whether `d` is an element read of the prelude's views (`index`, `get`, `at`, `get_unsafe`).
+    fn is_slice_elem(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || d.module != self.slice.mid || (d.node & NODE_BODY) != 0 {
+            return false;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return false;
+        }
+        let nm = self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+        return nm == "index" || nm == "get" || nm == "at" || nm == "get_unsafe";
+    }
+
     // Whether `d` is the prelude's `Slice::len`.
     fn is_slice_len(self: &Self, d: DefId) bool {
         if d.node == NODE_NONE || d.module != self.slice.mid || (d.node & NODE_BODY) != 0 {
@@ -2752,6 +3854,795 @@ extend<const B: usize> Prover<B> {
             return false;
         }
         return self.ast_of(d.module).attr_of(d.node, AttrKind::ATTR_NORETURN) != null;
+    }
+
+    // ---- sequences (`std::spec::seq`) ---------------------------------------------------------------
+
+    // The key of the prover's own function `op` (SQ_*): past every callee's `u64` key.
+    const fn sqk(op: u64) Num<B> {
+        return Num::<B>::one().shl(72) + u64_val::<B>(op);
+    }
+
+    // The SQ_* function term `t` applies, 0 for another term.
+    const fn sq_of(self: &Self, t: u32) u64 {
+        let x = self.tm.at(t);
+        if x.op != T_CALL || x.k < Num::<B>::one().shl(72) {
+            return 0;
+        }
+        return (x.k - Num::<B>::one().shl(72)).to_i64() as u64;
+    }
+
+    fn sq(self: &mut Self, op: u64, xs: &Vector<u32>, w: u16, sg: bool) u32 {
+        return self.tm.call_k(Prover::<B>::sqk(op), xs, w, sg);
+    }
+
+    fn sq1(self: &mut Self, op: u64, a: u32, w: u16, sg: bool) u32 {
+        let mut xs = Vector::<u32>::new();
+        xs.push(a);
+        return self.sq(op, &xs, w, sg);
+    }
+
+    fn sq2(self: &mut Self, op: u64, a: u32, b: u32, w: u16, sg: bool) u32 {
+        let mut xs = Vector::<u32>::new();
+        xs.push(a);
+        xs.push(b);
+        return self.sq(op, &xs, w, sg);
+    }
+
+    // An index of a sequence: a constant as an `int`, another integer as it is (its value is the index).
+    fn sq_index(self: &mut Self, i: u32) u32 {
+        let t = self.tm.at(i);
+        if t.op == T_INT {
+            return self.tm.int(t.k, W_INT, true);
+        }
+        return i;
+    }
+
+    // `len(s)`, a `nat`.
+    fn seq_len(self: &mut Self, s: u32) u32 {
+        return self.sq1(SQ_LEN, s, W_NAT, false);
+    }
+
+    // Element `i` of sequence `s`, of type (`w`, `sg`): its fact through the function that made `s`,
+    // anchored on the read, for `i` in the range that function defines.
+    fn seq_at(self: &mut Self, s: u32, i0: u32, w: u16, sg: bool) u32 {
+        let i = self.sq_index(i0);
+        let r = self.sq2(SQ_AT, s, i, w, sg);
+        if self.seld.contains_key(&r) {
+            return r;
+        }
+        self.seld.insert(r, true);
+        let op = self.sq_of(s);
+        let sx = self.tm.at(s);
+        let z = self.tm.int(Num::<B>::zero(), W_INT, true);
+        let c0 = self.tm.cmp(T_LE, z, i);
+        let f = if op == SQ_PUSH {
+            let s0 = self.tm.args[sx.a as usize];
+            let x = self.tm.args[(sx.a + 1) as usize];
+            let n0 = self.seq_len(s0);
+            let c1 = self.tm.cmp(T_LE, i, n0);
+            let g = self.tm.and(c0, c1);
+            let last = self.tm.cmp(T_EQ, i, n0);
+            let e1 = self.tm.cmp(T_EQ, r, x);
+            let a1 = self.tm.and(last, e1);
+            let inner = self.seq_at(s0, i, w, sg);
+            let e2 = self.tm.cmp(T_EQ, r, inner);
+            let nl = self.tm.not(last);
+            let a2 = self.tm.and(nl, e2);
+            let b = self.tm.or(a1, a2);
+            self.implied(g, b)
+        } else if op == SQ_UPD {
+            let s0 = self.tm.args[sx.a as usize];
+            let j = self.tm.args[(sx.a + 1) as usize];
+            let x = self.tm.args[(sx.a + 2) as usize];
+            let n0 = self.seq_len(s0);
+            let cj0 = self.tm.cmp(T_LE, z, j);
+            let cj1 = self.tm.cmp(T_LT, j, n0);
+            let ci1 = self.tm.cmp(T_LT, i, n0);
+            let g1 = self.tm.and(cj0, cj1);
+            let g2 = self.tm.and(c0, ci1);
+            let g = self.tm.and(g1, g2);
+            let at = self.tm.cmp(T_EQ, i, j);
+            let e1 = self.tm.cmp(T_EQ, r, x);
+            let a1 = self.tm.and(at, e1);
+            let inner = self.seq_at(s0, i, w, sg);
+            let e2 = self.tm.cmp(T_EQ, r, inner);
+            let na = self.tm.not(at);
+            let a2 = self.tm.and(na, e2);
+            let b = self.tm.or(a1, a2);
+            self.implied(g, b)
+        } else if op == SQ_SUB {
+            let s0 = self.tm.args[sx.a as usize];
+            let lo = self.tm.args[(sx.a + 1) as usize];
+            let hi = self.tm.args[(sx.a + 2) as usize];
+            let g0 = self.sub_ok(s0, lo, hi);
+            let d = self.tm.arith(T_SUB, hi, lo, W_INT, true);
+            let ci1 = self.tm.cmp(T_LT, i, d);
+            let gi = self.tm.and(c0, ci1);
+            let g = self.tm.and(g0, gi);
+            let li = self.tm.arith(T_ADD, lo, i, W_INT, true);
+            let inner = self.seq_at(s0, li, w, sg);
+            let e = self.tm.cmp(T_EQ, r, inner);
+            self.implied(g, e)
+        } else if op == SQ_CAT {
+            let s0 = self.tm.args[sx.a as usize];
+            let s1 = self.tm.args[(sx.a + 1) as usize];
+            let n0 = self.seq_len(s0);
+            let n1 = self.seq_len(s1);
+            let n = self.tm.arith(T_ADD, n0, n1, W_INT, true);
+            let ci1 = self.tm.cmp(T_LT, i, n);
+            let g = self.tm.and(c0, ci1);
+            let left = self.tm.cmp(T_LT, i, n0);
+            let in0 = self.seq_at(s0, i, w, sg);
+            let e1 = self.tm.cmp(T_EQ, r, in0);
+            let a1 = self.tm.and(left, e1);
+            let k = self.tm.arith(T_SUB, i, n0, W_INT, true);
+            let in1 = self.seq_at(s1, k, w, sg);
+            let e2 = self.tm.cmp(T_EQ, r, in1);
+            let nleft = self.tm.not(left);
+            let a2 = self.tm.and(nleft, e2);
+            let b = self.tm.or(a1, a2);
+            self.implied(g, b)
+        } else if op == SQ_VIEWA {
+            let arr = self.tm.args[sx.a as usize];
+            let n = self.tm.args[(sx.a + 1) as usize];
+            let ci1 = self.tm.cmp(T_LT, i, n);
+            let g = self.tm.and(c0, ci1);
+            let key = self.index_key(i);
+            let m = self.sel(arr, key, w, sg);
+            let e = self.tm.cmp(T_EQ, r, m);
+            self.implied(g, e)
+        } else {
+            self.tm.boolean(true)
+        };
+        if !self.tm.is_true(f) {
+            self.anchor(r, f);
+        }
+        // A spec function's result: where it equals a sequence its body returns, its elements are that one's.
+        if let Some(al) = self.alias.get(&s) {
+            let (st, n) = (*al >> 32, *al & 0xFFFFFFFFu64);
+            for j in st..st + n {
+                let v = self.alias_pool[j as usize];
+                let rv = self.seq_at(v, i, w, sg);
+                let ne = self.tm.cmp(T_NE, s, v);
+                let e = self.tm.cmp(T_EQ, r, rv);
+                let g = self.tm.or(ne, e);
+                self.anchor(r, g);
+            }
+        }
+        return r;
+    }
+
+    fn implied(self: &mut Self, g: u32, b: u32) u32 {
+        let ng = self.tm.not(g);
+        return self.tm.or(ng, b);
+    }
+
+    // `0 <= lo <= hi <= len(s)`.
+    fn sub_ok(self: &mut Self, s: u32, lo: u32, hi: u32) u32 {
+        let z = self.tm.int(Num::<B>::zero(), W_INT, true);
+        let n = self.seq_len(s);
+        let a = self.tm.cmp(T_LE, z, lo);
+        let b = self.tm.cmp(T_LE, lo, hi);
+        let c = self.tm.cmp(T_LE, hi, n);
+        let ab = self.tm.and(a, b);
+        return self.tm.and(ab, c);
+    }
+
+    // Sequence `op` over `xs` (SQ_EMPTY, SQ_PUSH, SQ_UPD, SQ_SUB, SQ_CAT, the views, SQ_UTF8), with the
+    // fact of its length anchored on it.
+    fn seq_make(self: &mut Self, op: u64, xs: &Vector<u32>) u32 {
+        let c = self.sq(op, xs, W_OTHER, false);
+        if self.seld.contains_key(&c) {
+            return c;
+        }
+        self.seld.insert(c, true);
+        let n = self.seq_len(c);
+        let f = if op == SQ_EMPTY {
+            let z = self.tm.int(Num::<B>::zero(), W_NAT, false);
+            self.tm.cmp(T_EQ, n, z)
+        } else if op == SQ_PUSH {
+            let n0 = self.seq_len(xs[0]);
+            let one = self.tm.int(Num::<B>::one(), W_NAT, false);
+            let m = self.tm.arith(T_ADD, n0, one, W_NAT, false);
+            self.tm.cmp(T_EQ, n, m)
+        } else if op == SQ_UPD {
+            let n0 = self.seq_len(xs[0]);
+            let z = self.tm.int(Num::<B>::zero(), W_INT, true);
+            let a = self.tm.cmp(T_LE, z, xs[1]);
+            let b = self.tm.cmp(T_LT, xs[1], n0);
+            let g = self.tm.and(a, b);
+            let e = self.tm.cmp(T_EQ, n, n0);
+            self.implied(g, e)
+        } else if op == SQ_SUB {
+            let g = self.sub_ok(xs[0], xs[1], xs[2]);
+            let d = self.tm.arith(T_SUB, xs[2], xs[1], W_INT, true);
+            let e = self.tm.cmp(T_EQ, n, d);
+            self.implied(g, e)
+        } else if op == SQ_CAT {
+            let n0 = self.seq_len(xs[0]);
+            let n1 = self.seq_len(xs[1]);
+            let m = self.tm.arith(T_ADD, n0, n1, W_NAT, false);
+            self.tm.cmp(T_EQ, n, m)
+        } else if op == SQ_VIEWA {
+            self.tm.cmp(T_EQ, n, xs[1])
+        } else if op == SQ_VIEWS {
+            let l = self.sq1(SQ_SLEN, xs[0], self.pw, false);
+            self.tm.cmp(T_EQ, n, l)
+        } else if op == SQ_UTF8 {
+            self.utf8_fact(c, xs[0])
+        } else {
+            self.tm.boolean(true)
+        };
+        if !self.tm.is_true(f) {
+            self.anchor(c, f);
+        }
+        return c;
+    }
+
+    // The length of `utf8(ch)` by the range of `ch`, and its byte when it is one.
+    fn utf8_fact(self: &mut Self, c: u32, ch: u32) u32 {
+        let n = self.seq_len(c);
+        let (cw, csg) = (self.tm.at(ch).w, self.tm.at(ch).sg);
+        let mut f = self.tm.boolean(true);
+        let bounds: [i64; 3] = [0x80, 0x800, 0x10000];
+        let mut prev = NONE;
+        for j in 0..4 {
+            let lt = if j < 3 {
+                let b = self.tm.int(wide::<B>(bounds[j]), cw, csg);
+                self.tm.cmp(T_LT, ch, b)
+            } else {
+                self.tm.boolean(true)
+            };
+            let here = if prev == NONE {
+                lt
+            } else {
+                let np = self.tm.not(prev);
+                self.tm.and(np, lt)
+            };
+            let k = self.tm.int(wide::<B>(j as i64 + 1), W_NAT, false);
+            let mut e = self.tm.cmp(T_EQ, n, k);
+            if j == 0 {
+                let z = self.tm.int(Num::<B>::zero(), W_INT, true);
+                let b0 = self.seq_at(c, z, 8, false);
+                let eb = self.tm.cmp(T_EQ, b0, ch);
+                e = self.tm.and(e, eb);
+            }
+            let one = self.implied(here, e);
+            f = self.tm.and(f, one);
+            prev = if prev == NONE {
+                lt
+            } else {
+                self.tm.or(prev, lt)
+            };
+        }
+        return f;
+    }
+
+    // Equality `e` of sequences `x` and `y` of elements (`w`, `sg`): extensional, by the fact of a
+    // witness `k` of a difference: `e || len(x) != len(y) || (0 <= k < len(x) && x[k] != y[k])`.
+    fn seq_ext(self: &mut Self, e: u32, x: u32, y: u32, w: u16, sg: bool) {
+        if self.seld.contains_key(&e) || self.tm.is_true(e) || self.tm.is_false(e) {
+            return;
+        }
+        self.seld.insert(e, true);
+        let nx = self.seq_len(x);
+        let ny = self.seq_len(y);
+        let ne = self.tm.cmp(T_NE, nx, ny);
+        let k = self.tm.var(W_INT, true);
+        let z = self.tm.int(Num::<B>::zero(), W_INT, true);
+        let a = self.tm.cmp(T_LE, z, k);
+        let b = self.tm.cmp(T_LT, k, nx);
+        let ax = self.seq_at(x, k, w, sg);
+        let ay = self.seq_at(y, k, w, sg);
+        let d = self.tm.cmp(T_NE, ax, ay);
+        let ab = self.tm.and(a, b);
+        let wit = self.tm.and(ab, d);
+        let o = self.tm.or(ne, wit);
+        let f = self.tm.or(e, o);
+        self.anchor(e, f);
+    }
+
+    // The element type of `Seq<T>` type `ty` (of module `m`), TYPE_NONE when `ty` is no sequence.
+    fn seq_elem(self: &Self, m: ModuleId, ty: TypeId) TypeId {
+        if ty == TYPE_NONE || self.seqd == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let mut t = ty;
+        let a = self.ast_of(m);
+        for _k in 0..4 {
+            if a.type_at(t).kind != TypeKind::TYPE_REFERENCE {
+                break;
+            }
+            t = a.type_at(t).as_data.elem;
+        }
+        let y = a.type_at(t);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return TYPE_NONE;
+        }
+        let inst = a.instance(y.as_data.inst);
+        if inst.module != self.seqm as ModuleId || inst.decl != self.seqd || inst.n == 0 {
+            return TYPE_NONE;
+        }
+        return inst.args[0];
+    }
+
+    // The declaration `ty` (of module `m`) is an instance of, through references: (module, node).
+    fn decl_of(self: &Self, m: ModuleId, ty: TypeId) (ModuleId, NodeId) {
+        if ty == TYPE_NONE {
+            return 0, NODE_NONE;
+        }
+        let a = self.ast_of(m);
+        let mut t = ty;
+        for _k in 0..4 {
+            if a.type_at(t).kind != TypeKind::TYPE_REFERENCE && a.type_at(t).kind != TypeKind::TYPE_POINTER {
+                break;
+            }
+            t = a.type_at(t).as_data.elem;
+        }
+        let y = a.type_at(t);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let inst = a.instance(y.as_data.inst);
+            return inst.module, inst.decl;
+        }
+        if y.kind == TypeKind::TYPE_STRUCT {
+            return y.module, y.as_data.decl;
+        }
+        return 0, NODE_NONE;
+    }
+
+    // Whether type `ty` (module `m`) is a vector or a string: a shared borrow of one cannot change its
+    // value, and the elements its view holds change only through a `&mut` of it.
+    fn container(self: &Self, m: ModuleId, ty: TypeId) bool {
+        let (dm, dd) = self.decl_of(m, ty);
+        return dd != NODE_NONE && self.ast_of(m).type_at(ty).kind != TypeKind::TYPE_REFERENCE && (dm == self.vecl.mid && dd == self.vecl.node || dm == self.strl.mid && dd == self.strl.node);
+    }
+
+    // What call `t` of body `cb` (module `cm`) is to the sequences: an SQ_* operation of `Seq` or a
+    // view (SQ_VIEW), or a modeled method of the containers (VK_*); 0 for any other call.
+    fn sq_kind(self: &Self, cb: &ir::CoreBody, cm: ModuleId, t: &ir::Terminator) u64 {
+        let d = t.callee;
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || !self.pkg().modules.at(d.module as usize).has_ast {
+            return 0;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return 0;
+        }
+        let nm = self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+        // The receiver's declaration (the first argument's type), or the result's for a constructor.
+        let (rm, rd) = if t.args_len != 0 {
+            self.decl_of(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty)
+        } else {
+            (0 as ModuleId, NODE_NONE)
+        };
+        let (om, od) = if t.dests_len == 1 {
+            self.decl_of(cm, cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty)
+        } else {
+            (0 as ModuleId, NODE_NONE)
+        };
+        if self.seqm >= 0 && d.module == self.seqm as ModuleId {
+            if nm == "view" {
+                return SQ_VIEW;
+            }
+            if nm == "utf8" {
+                return SQ_UTF8;
+            }
+            let on_seq = rm == self.seqm as ModuleId && rd == self.seqd;
+            if nm == "empty" && om == self.seqm as ModuleId && od == self.seqd {
+                return SQ_EMPTY;
+            }
+            if !on_seq {
+                return 0;
+            }
+            return if nm == "len" {
+                SQ_LEN
+            } else if nm == "index" {
+                SQ_AT
+            } else if nm == "push" {
+                SQ_PUSH
+            } else if nm == "update" {
+                SQ_UPD
+            } else if nm == "subrange" {
+                SQ_SUB
+            } else if nm == "concat" {
+                SQ_CAT
+            } else {
+                0
+            };
+        }
+        // The containers' own methods only: std's, which no program extends with a same-named one.
+        let mp = self.pkg().modules.at(d.module as usize).path.as_str();
+        if !mp.starts_with("std::") && !mp.starts_with("__std::") {
+            return 0;
+        }
+        let vec = rm == self.vecl.mid && rd == self.vecl.node && rd != NODE_NONE;
+        let st = rm == self.strl.mid && rd == self.strl.node && rd != NODE_NONE;
+        if rm == self.strv.mid && rd == self.strv.node && rd != NODE_NONE {
+            return if nm == "len" {
+                VK_LEN
+            } else if nm == "index" {
+                VK_INDEX
+            } else {
+                0
+            };
+        }
+        if vec || st {
+            return if nm == "len" {
+                VK_LEN
+            } else if nm == "is_empty" {
+                VK_EMPTY
+            } else if nm == "index" || vec && nm == "at" {
+                VK_INDEX
+            } else if nm == "push" {
+                pick(vec, VK_PUSH, VK_SPUSH)
+            } else if st && nm == "push_str" {
+                VK_PUSH_STR
+            } else if vec && nm == "pop" {
+                VK_POP
+            } else if nm == "clear" {
+                VK_CLEAR
+            } else if vec && nm == "index_mut" {
+                VK_INDEX_MUT
+            } else if vec && nm == "as_slice" || st && nm == "as_bytes" {
+                VK_AS_SLICE
+            } else {
+                0
+            };
+        }
+        if (nm == "new" || nm == "with_capacity") && t.args_len <= 1 && (om == self.vecl.mid && od == self.vecl.node || om == self.strl.mid && od == self.strl.node) && od != NODE_NONE {
+            return VK_NEW;
+        }
+        let view = rd != NODE_NONE && (rm == self.smut.mid && rd == self.smut.node || rm == self.slice.mid && rd == self.slice.node);
+        if view && nm == "index_mut" && rm == self.smut.mid && rd == self.smut.node {
+            return VK_SINDEX_MUT;
+        }
+        if view && nm == "len" {
+            return VK_SLEN;
+        }
+        if view && (nm == "index" || nm == "get" || nm == "at") {
+            return VK_SINDEX;
+        }
+        return 0;
+    }
+
+    // The value of the receiver of call `t` (its first argument): the place an implicit borrow takes,
+    // or what the reference passed refers to.
+    fn recv_value(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        t: &ir::Terminator,
+        all: bool,
+    ) u32 {
+        let oid = cb.oper_pool[t.args_start as usize];
+        let op = *cb.operands.at(oid as usize);
+        if self.autoref(cb, cm, t, 0) {
+            return self.read_place(cb, cm, state, op.data, all);
+        }
+        let x = self.operand(cb, cm, state, oid, all);
+        let y = self.ast_of(cm).type_at(op.ty);
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            return self.deref(state, x, cm, y.as_data.elem);
+        }
+        return x;
+    }
+
+    // The (width, signed) of the element type of the reference type `ty` (module `m`) points to.
+    fn pointee_w(self: &Self, m: ModuleId, ty: TypeId) (u16, bool) {
+        let y = *self.ast_of(m).type_at(ty);
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_POINTER {
+            return self.ty_of(m, y.as_data.elem);
+        }
+        return W_OTHER, false;
+    }
+
+    // The value of call `t` when it is a pure operation of the sequences or a modeled read of a
+    // container (`sq_kind`), NONE otherwise.
+    fn sq_value(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        t: &ir::Terminator,
+        all: bool,
+    ) u32 {
+        let k = self.sq_kind(cb, cm, t);
+        if k == 0 {
+            return NONE;
+        }
+        let rty = if t.dests_len == 1 {
+            cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty
+        } else {
+            TYPE_NONE
+        };
+        let mut xs = Vector::<u32>::new();
+        if k == SQ_VIEW {
+            let rt = cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty;
+            let v = self.recv_value(cb, cm, state, t, all);
+            let (vm, vd) = self.decl_of(cm, rt);
+            let vx = self.tm.at(v);
+            let slice = vm == self.slice.mid && vd == self.slice.node || vm == self.smut.mid && vd == self.smut.node;
+            if vx.op == T_VIEW {
+                // An array's view: its members.
+                xs.push(vx.a);
+                xs.push(self.tm.int(vx.k, W_NAT, false));
+                return self.seq_make(SQ_VIEWA, &xs);
+            }
+            if slice {
+                let ep = self.slice_ep(cm, rt, state);
+                return self.view_s(v, ep);
+            }
+            return self.view_v(v);
+        }
+        if k == SQ_EMPTY {
+            return self.seq_make(SQ_EMPTY, &xs);
+        }
+        if k == SQ_UTF8 {
+            xs.push(self.operand(cb, cm, state, cb.oper_pool[t.args_start as usize], all));
+            return self.seq_make(SQ_UTF8, &xs);
+        }
+        if k == SQ_LEN {
+            let s = self.recv_value(cb, cm, state, t, all);
+            return self.seq_len(s);
+        }
+        if k == SQ_AT {
+            let s = self.recv_value(cb, cm, state, t, all);
+            let i = self.operand(cb, cm, state, cb.oper_pool[(t.args_start + 1) as usize], all);
+            let (w, sg) = self.pointee_w(cm, rty);
+            let e = self.seq_at(s, i, w, sg);
+            return self.tm.unary(T_REF, e, W_OTHER, false);
+        }
+        if k == SQ_PUSH || k == SQ_UPD || k == SQ_SUB || k == SQ_CAT {
+            xs.push(self.recv_value(cb, cm, state, t, all));
+            for j in 1..t.args_len {
+                let x = self.operand(cb, cm, state, cb.oper_pool[(t.args_start + j) as usize], all);
+                xs.push(
+                    if j == 1 && k != SQ_PUSH && k != SQ_CAT || j == 2 && k == SQ_SUB {
+                        self.sq_index(x)
+                    } else {
+                        x
+                    },
+                );
+            }
+            return self.seq_make(k, &xs);
+        }
+        let v = self.recv_value(cb, cm, state, t, all);
+        let (w, sg) = self.ty_of(cm, rty);
+        if k == VK_LEN {
+            return self.vlen(v, w, sg);
+        }
+        if k == VK_SLEN || k == VK_SINDEX {
+            let vx = self.tm.at(v);
+            if k == VK_SLEN {
+                if vx.op == T_VIEW {
+                    return self.tm.int(vx.k, w, sg);
+                }
+                let n = self.sq1(SQ_SLEN, v, self.pw, false);
+                return pick(w == self.pw && !sg, n, self.tm.unary(T_CAST, n, w, sg));
+            }
+            let i = self.operand(cb, cm, state, cb.oper_pool[(t.args_start + 1) as usize], all);
+            let (ew, esg) = self.pointee_w(cm, rty);
+            let e = if vx.op == T_VIEW {
+                let key = self.index_key(i);
+                self.sel(vx.a, key, ew, esg)
+            } else {
+                let ep = self.slice_ep(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty, state);
+                let view = self.view_s(v, ep);
+                self.seq_at(view, i, ew, esg)
+            };
+            return self.tm.unary(T_REF, e, W_OTHER, false);
+        }
+        if k == VK_EMPTY {
+            let n = self.vlen(v, self.pw, false);
+            let z = self.tm.int(Num::<B>::zero(), self.pw, false);
+            return self.tm.cmp(T_EQ, n, z);
+        }
+        if k == VK_INDEX {
+            let i = self.operand(cb, cm, state, cb.oper_pool[(t.args_start + 1) as usize], all);
+            let view = self.view_v(v);
+            let (ew, esg) = self.pointee_w(cm, rty);
+            let e = self.seq_at(view, i, ew, esg);
+            return self.tm.unary(T_REF, e, W_OTHER, false);
+        }
+        return NONE;
+    }
+
+    // `seq_make` over one argument, none with NONE.
+    fn seq_make1(self: &mut Self, op: u64, a: u32) u32 {
+        let mut xs = Vector::<u32>::new();
+        if a != NONE {
+            xs.push(a);
+        }
+        return self.seq_make(op, &xs);
+    }
+
+    // The view of container value `v` (a vector's, a string's, a `str`'s): the sequence a modeled
+    // method made it (`vdef`), else its own term.
+    fn view_v(self: &mut Self, v: u32) u32 {
+        if let Some(d) = self.vdef.get(&v) {
+            return *d;
+        }
+        return self.seq_make1(SQ_VIEWV, v);
+    }
+
+    // The memory epoch the view of a slice of type `ty` (module `m`) depends on in `state`: the
+    // current one for a `[]mut T`; none for a `[]T`, whose elements no write reaches while it lives.
+    fn slice_ep(self: &mut Self, m: ModuleId, ty: TypeId, state: &Vector<u32>) u32 {
+        let (dm, dd) = self.decl_of(m, ty);
+        if dd != NODE_NONE && dm == self.smut.mid && dd == self.smut.node {
+            return state[state.len() - 1];
+        }
+        return self.tm.boolean(false);
+    }
+
+    // The view of slice value `xs` in memory epoch `ep`: the sequence a modeled call made it (`sdef`),
+    // else its own term.
+    fn view_s(self: &mut Self, xs: u32, ep: u32) u32 {
+        if let Some(d) = self.sdef.get(&(xs as u64 << 32 | ep as u64)) {
+            return *d;
+        }
+        let mut a = Vector::<u32>::new();
+        a.push(xs);
+        a.push(ep);
+        return self.seq_make(SQ_VIEWS, &a);
+    }
+
+    // The length of container value `v` (a vector's, a string's) as (`w`, `sg`): the length of its view.
+    fn vlen(self: &mut Self, v: u32, w: u16, sg: bool) u32 {
+        let n = self.sq1(SQ_VLEN, v, self.pw, false);
+        if !self.seld.contains_key(&n) {
+            self.seld.insert(n, true);
+            let view = self.view_v(v);
+            let m = self.seq_len(view);
+            let f = self.tm.cmp(T_EQ, n, m);
+            self.anchor(n, f);
+        }
+        if w == self.pw && !sg {
+            return n;
+        }
+        return self.tm.unary(T_CAST, n, w, sg);
+    }
+
+    // The local or slot the receiver of call `t` (a `&mut` of a container) names, NONE when the walk
+    // does not know it.
+    fn recv_target(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, t: &ir::Terminator) u32 {
+        let oid = cb.oper_pool[t.args_start as usize];
+        let op = *cb.operands.at(oid as usize);
+        if op.kind == ir::OP_CONST {
+            return NONE;
+        }
+        let p = *cb.places.at(op.data as usize);
+        if self.autoref(cb, cm, t, 0) {
+            return pick(p.proj_len == 0 && self.tracked[p.base as usize], p.base, NONE);
+        }
+        let x = self.operand(cb, cm, state, oid, false);
+        if self.tm.at(x).op == T_MREF {
+            return self.tm.at(x).a;
+        }
+        return NONE;
+    }
+
+    // Call `t` of the body when it changes a container the walk knows (`sq_kind`): the container's new
+    // value with the fact of its new view, and the call's result. Whether it did.
+    fn sq_effect(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) bool {
+        let k = self.sq_kind(b, b.module, t);
+        if k != VK_PUSH && k != VK_SPUSH && k != VK_PUSH_STR && k != VK_POP && k != VK_CLEAR && k != VK_INDEX_MUT && k != VK_NEW && k != VK_AS_SLICE && k != VK_SINDEX_MUT {
+            return false;
+        }
+        let cm = b.module;
+        let dest = if t.dests_len == 1 {
+            b.dest_pool[t.dests_start as usize]
+        } else {
+            ir::IR_NONE
+        };
+        if k == VK_NEW {
+            // A new container's view is empty.
+            if dest == ir::IR_NONE {
+                return false;
+            }
+            let v = self.fresh(cm, b.places.at(dest as usize).ty);
+            let empty = self.seq_make1(SQ_EMPTY, NONE);
+            self.vdef.insert(v, empty);
+            self.write_place(b, cm, &mut path.state, dest, v, false);
+            return true;
+        }
+        if k == VK_SINDEX_MUT {
+            // A reference to element `i` of the view: a write through it changes the view (`write_place`).
+            let s = self.recv_value(b, cm, &mut path.state, t, false);
+            let i = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
+            let i2 = self.sq_index(i);
+            let r = self.sq2(SQ_SEREF, s, i2, W_OTHER, false);
+            if dest != ir::IR_NONE {
+                self.write_place(b, cm, &mut path.state, dest, r, false);
+            }
+            return true;
+        }
+        let tg = self.recv_target(b, cm, &mut path.state, t);
+        if tg == NONE {
+            return false;
+        }
+        let old = path.state[tg as usize];
+        if old == NONE {
+            return false;
+        }
+        let ov = self.view_v(old);
+        if k == VK_AS_SLICE {
+            if dest == ir::IR_NONE {
+                return true;
+            }
+            // A shared view of the container's elements.
+            let xs = self.fresh(cm, b.places.at(dest as usize).ty);
+            let ep = self.slice_ep(cm, b.places.at(dest as usize).ty, &path.state);
+            self.sdef.insert(xs as u64 << 32 | ep as u64, ov);
+            let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
+            let ol = self.seq_len(ov);
+            path.pc.push(self.tm.cmp(T_EQ, sl, ol));
+            self.write_place(b, cm, &mut path.state, dest, xs, false);
+            return true;
+        }
+        if k == VK_INDEX_MUT {
+            let i = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
+            let i2 = self.sq_index(i);
+            let mr = self.tm.make(Term::<B> { k: Num::<B>::zero(), a: tg, b: 0, op: T_MREF, w: W_OTHER, sg: false });
+            let r = self.sq2(SQ_EREF, mr, i2, W_OTHER, false);
+            if dest != ir::IR_NONE {
+                self.write_place(b, cm, &mut path.state, dest, r, false);
+            }
+            return true;
+        }
+        let ty = if tg as usize < b.locals.len() {
+            b.locals.at(tg as usize).ty
+        } else {
+            self.slot_ty[tg as usize - b.locals.len()]
+        };
+        // The container's new value, whose view is the sequence the method makes (`vdef`).
+        let nv = self.fresh(cm, ty);
+        let mut xs = Vector::<u32>::new();
+        let view = if k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR {
+            let x = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
+            xs.push(ov);
+            if k == VK_PUSH {
+                xs.push(x);
+                self.seq_make(SQ_PUSH, &xs)
+            } else {
+                let tail = if k == VK_SPUSH {
+                    self.seq_make1(SQ_UTF8, x)
+                } else {
+                    self.view_v(x)
+                };
+                xs.push(tail);
+                self.seq_make(SQ_CAT, &xs)
+            }
+        } else if k == VK_CLEAR {
+            self.seq_make(SQ_EMPTY, &xs)
+        } else {
+            // `pop`: the elements before the last one; none of an empty one.
+            let n = self.seq_len(ov);
+            let m = self.tm.var(W_INT, true);
+            let z = self.tm.int(Num::<B>::zero(), W_NAT, false);
+            let zi = self.tm.int(Num::<B>::zero(), W_INT, true);
+            let one = self.tm.int(Num::<B>::one(), W_INT, true);
+            let empty = self.tm.cmp(T_EQ, n, z);
+            let m0 = self.tm.cmp(T_EQ, m, zi);
+            let n1 = self.tm.arith(T_SUB, n, one, W_INT, true);
+            let m1 = self.tm.cmp(T_EQ, m, n1);
+            let a = self.tm.and(empty, m0);
+            let ne = self.tm.not(empty);
+            let c = self.tm.and(ne, m1);
+            path.pc.push(self.tm.or(a, c));
+            xs.push(ov);
+            xs.push(zi);
+            xs.push(m);
+            self.seq_make(SQ_SUB, &xs)
+        };
+        self.vdef.insert(nv, view);
+        path.state.set(tg as usize, nv);
+        if dest != ir::IR_NONE {
+            self.write_place(b, cm, &mut path.state, dest, NONE, false);
+        }
+        return true;
     }
 
     // ---- the body ---------------------------------------------------------------------------------
@@ -2838,6 +4729,37 @@ extend<const B: usize> Prover<B> {
     // implicitly and may change: a parameter of reference or pointer type takes a value of another
     // type, unless a shared reference takes a frozen value. A call whose callee the walk cannot see
     // borrows every argument that is not a reference or a pointer.
+    // Argument `j` of call `t` of body `cb` with value `x`: a reference to `x` when the callee's parameter
+    // is a reference and the argument is the place it borrows (an implicit borrow of a frozen value).
+    fn implicit_ref(self: &mut Self, cb: &ir::CoreBody, t: &ir::Terminator, j: u32, x: u32) u32 {
+        let op = *cb.operands.at(cb.oper_pool[(t.args_start + j) as usize] as usize);
+        if op.kind == ir::OP_CONST || op.ty == TYPE_NONE {
+            return x;
+        }
+        let ok = self.ast_of(cb.module).type_at(op.ty).kind;
+        let xo = self.tm.at(x).op;
+        if ok == TypeKind::TYPE_REFERENCE || ok == TypeKind::TYPE_POINTER || xo == T_REF || xo == T_MREF {
+            return x;
+        }
+        let d = t.callee;
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || !self.pkg().modules.at(d.module as usize).has_ast {
+            return x;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return x;
+        }
+        let ps = a.ext(d.node).function.params;
+        if j >= ps.len {
+            return x;
+        }
+        let pt = a.type_of(unsafe a.list(ps)[j as usize]);
+        if pt == TYPE_NONE || a.type_at(pt).kind != TypeKind::TYPE_REFERENCE {
+            return x;
+        }
+        return self.tm.unary(T_REF, x, W_OTHER, false);
+    }
+
     fn autoref(self: &Self, cb: &ir::CoreBody, cm: ModuleId, t: &ir::Terminator, j: u32) bool {
         let op = *cb.operands.at(cb.oper_pool[(t.args_start + j) as usize] as usize);
         if op.kind == ir::OP_CONST || op.ty == TYPE_NONE {
@@ -2876,7 +4798,8 @@ extend<const B: usize> Prover<B> {
 
     // The locals the walk models: every one but a static's reference. A local a pointer, a mutable
     // reference, a slice or a closure may reach (`is_mem`; a shared reference too, unless the local's
-    // value is frozen and no reference becomes a pointer) also changes at each memory event.
+    // value is frozen or a container and no reference becomes a pointer; not a `&mut` lent to one
+    // call) also changes at each memory event.
     fn scan_tracked(self: &mut Self, b: &ir::CoreBody) {
         let nl = b.locals.len();
         self.tracked.clear();
@@ -2887,6 +4810,66 @@ extend<const B: usize> Prover<B> {
             self.is_mem.push(false);
         }
         self.ptr_cast = self.has_ptr_cast(b.module, b);
+        // The temporaries lent to one call (`scoped`): read once, by a call whose results and other
+        // arguments are values that hold no reference.
+        let mut uses = Vector::<u32>::with_capacity(nl);
+        uses.resize_default(nl);
+        for j in 0..b.operands.len() {
+            let o = *b.operands.at(j);
+            if o.kind == ir::OP_COPY || o.kind == ir::OP_MOVE {
+                let l = b.places.at(o.data as usize).base as usize;
+                uses.set(l, uses[l] + 1);
+            }
+        }
+        self.scoped.clear();
+        self.scoped.resize_default(nl);
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind != ir::TM_CALL || self.is_ghost(t.callee) {
+                continue;
+            }
+            let mut ok = true;
+            for j in t.dests_start..t.dests_start + t.dests_len {
+                ok = ok && self.frozen(b.module, b.places.at(b.dest_pool[j as usize] as usize).ty);
+            }
+            for j in 0..t.args_len {
+                let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+                let shared = self.ast_of(b.module).type_at(op.ty).kind == TypeKind::TYPE_REFERENCE && self.ast_of(
+                    b.module,
+                ).type_at(op.ty).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8;
+                let tmp = op.kind != ir::OP_CONST && b.places.at(op.data as usize).proj_len == 0 && b.locals.at(
+                    b.places.at(op.data as usize).base as usize,
+                ).storage == ir::LS_TEMP;
+                ok = ok && (op.kind == ir::OP_CONST || self.frozen(b.module, op.ty) || shared || tmp && !self.autoref(
+                    b,
+                    b.module,
+                    &t,
+                    j,
+                ));
+            }
+            if !ok {
+                continue;
+            }
+            // One `&mut` temporary per call: two could be the same local's.
+            let mut n: u32 = 0;
+            let mut last = NONE;
+            for j in 0..t.args_len {
+                let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+                if op.kind == ir::OP_CONST || self.frozen(b.module, op.ty) {
+                    continue;
+                }
+                let y = self.ast_of(b.module).type_at(op.ty);
+                if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && b.places.at(
+                    op.data as usize,
+                ).proj_len == 0 {
+                    n += 1;
+                    last = b.places.at(op.data as usize).base;
+                }
+            }
+            if n == 1 && uses[last as usize] == 1 && b.locals.at(last as usize).storage == ir::LS_TEMP {
+                self.scoped.set(last as usize, true);
+            }
+        }
         for sid in 0..b.statements.len() {
             let s = *b.statements.at(sid);
             if s.kind != ir::ST_ASSIGN {
@@ -2895,10 +4878,15 @@ extend<const B: usize> Prover<B> {
             let rv = *b.rvalues.at(s.rvalue as usize);
             if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF || rv.kind == ir::RV_SLICE {
                 let p = *b.places.at(rv.a as usize);
-                if rv.kind != ir::RV_REF || rv.b != 0 || self.ptr_cast || !self.frozen(
+                // A `&mut` of a whole local into a temporary lent to one call (`scoped`): the call's
+                // effect on it is `lent`'s, and no other memory event reaches it.
+                let dp = *b.places.at(s.place as usize);
+                let lent = rv.kind == ir::RV_REF && rv.b != 0 && p.proj_len == 0 && dp.proj_len == 0 && self.scoped[dp.base as usize] && !self.ptr_cast;
+                let lty = b.locals.at(p.base as usize).ty;
+                if !lent && (rv.kind != ir::RV_REF || rv.b != 0 || self.ptr_cast || !self.frozen(b.module, lty) && !self.container(
                     b.module,
-                    b.locals.at(p.base as usize).ty,
-                ) {
+                    lty,
+                )) {
                     self.is_mem.set(p.base as usize, true);
                 }
             } else if rv.kind == ir::RV_CLOSURE {
@@ -2910,10 +4898,11 @@ extend<const B: usize> Prover<B> {
                 }
             }
         }
-        // A call's implicit borrow of a place reaches its local.
+        // A call's implicit borrow of a place reaches its local; a modeled method of a container
+        // changes only what it models (`sq_effect`).
         for bi in 0..b.blocks.len() {
             let t = b.blocks.at(bi).term;
-            if t.kind != ir::TM_CALL {
+            if t.kind != ir::TM_CALL || self.sq_kind(b, b.module, &t) != 0 {
                 continue;
             }
             for j in 0..t.args_len {
@@ -2961,6 +4950,15 @@ extend<const B: usize> Prover<B> {
         self.defs.clear();
         self.def_of.clear();
         self.defined.clear();
+        self.qclo.clear();
+        self.qof.clear();
+        self.qinst.clear();
+        self.qdef.clear();
+        self.seld.clear();
+        self.vdef.clear();
+        self.sdef.clear();
+        self.alias.clear();
+        self.alias_pool.clear();
         self.pvars.clear();
         self.exact_body = false;
     }
@@ -3058,6 +5056,14 @@ extend<const B: usize> Prover<B> {
             if !self.fx.is_header(h) || !self.fn_dec && !self.gblk[h as usize] {
                 continue;
             }
+            // A quantifier's loop never runs in a proof (`quantifier`) and runs over a bounded range.
+            let mut quant = false;
+            for q in 0..b.quants.len() {
+                quant = quant || b.blocks.at(b.quants[q].entry as usize).term.t0 == h;
+            }
+            if quant {
+                continue;
+            }
             // A spec function's value is its body's at its returns: it has no loop (`define`).
             if spec {
                 self.report(
@@ -3074,6 +5080,7 @@ extend<const B: usize> Prover<B> {
                 let r = b.ranges[q];
                 ok = ok || r.head == h && (r.end_pl != ir::IR_NONE || r.end_k != ir::IR_NONE);
             }
+
             let mut x = self.site_of_pred[h as usize];
             for _k in 0..b.contracts.len() {
                 if ok || x == NONE || !self.loop_site(b, x) {
@@ -3586,12 +5593,36 @@ extend<const B: usize> Prover<B> {
             self.loops_end(b);
         }
         self.work.clear();
+        // A slot per `&mut T` parameter (`slot_ty`), past the locals; the memory epoch last.
+        self.slot_ty.clear();
+        self.slot_of.clear();
+        fill(&mut self.slot_of, b.locals.len());
+        self.nlocals = b.locals.len() as u32;
+        for l in b.returns..b.returns + b.args {
+            let py = *self.ast_of(b.module).type_at(b.locals.at(l as usize).ty);
+            if py.kind == TypeKind::TYPE_REFERENCE && py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.ptr_cast {
+                self.slot_of.set(l as usize, b.locals.len() as u32 + self.slot_ty.len() as u32);
+                self.slot_ty.push(py.as_data.elem);
+                self.tracked.push(true);
+                self.is_mem.push(true);
+                self.mem_list.push(self.slot_of[l as usize]);
+            }
+        }
         let mut st = Vector::<u32>::new();
-        fill(&mut st, b.locals.len() + 1);
-        let ne = b.locals.len();
+        fill(&mut st, b.locals.len() + self.slot_ty.len() + 1);
+        let ne = st.len() - 1;
         st.set(ne, self.tm.var(W_OTHER, false));
         self.vname.clear();
         for l in b.returns..b.returns + b.args {
+            let sl = self.slot_of[l as usize];
+            if sl != NONE {
+                self.forget(b, b.module, &mut st, sl);
+                st.set(
+                    l as usize,
+                    self.tm.make(Term::<B> { k: Num::<B>::zero(), a: sl, b: 0, op: T_MREF, w: W_OTHER, sg: false }),
+                );
+                continue;
+            }
             self.forget(b, b.module, &mut st, l);
             self.vname.insert(st[l as usize], l);
         }
@@ -3698,8 +5729,16 @@ extend<const B: usize> Prover<B> {
     // Enter block `to` from block `from` on `path`: a contract chain is evaluated in place, a loop
     // header cuts the loop at its invariants.
     fn enter(self: &mut Self, b: &ir::CoreBody, mut path: Path, from: u32, to: u32) {
+        let qi = Prover::<B>::quant_at(b, to);
+        if qi != NONE {
+            let qs = b.quants[qi as usize];
+            let q = self.quantifier(b, b.module, qi, &mut path.state, &path.pc, false);
+            self.write_place(b, b.module, &mut path.state, qs.result, q, false);
+            self.enter(b, path, to, qs.exit);
+            return;
+        }
         let s = self.site_of_chain[to as usize];
-        if s != NONE && b.contracts[s as usize].pred == from && !ir::is_ghost_site(b.contracts[s as usize].kind) {
+        if s != NONE && b.contracts[s as usize].pred == from && !ir::is_ghost_site(b.contracts[s as usize].kind) && b.contracts[s as usize].kind != CT_OLD_RUN {
             self.own_site(b, path, s);
             return;
         }
@@ -3896,6 +5935,18 @@ extend<const B: usize> Prover<B> {
                 let st = *b.statements.at(sid as usize);
                 if st.kind == ir::ST_ASSIGN {
                     let pl = *b.places.at(st.place as usize);
+                    // A write through a mutable reference to a local or a slot changes only that.
+                    let r = if pl.proj_len != 0 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF {
+                        path.state[pl.base as usize]
+                    } else {
+                        NONE
+                    };
+                    if r != NONE && self.tm.at(r).op == T_MREF && !self.has_deref(b, &pl, 1) {
+                        self.forget(b, b.module, &mut path.state, self.tm.at(r).a);
+                        let rv = *b.rvalues.at(st.rvalue as usize);
+                        event = event || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE);
+                        continue;
+                    }
                     event = event || self.has_deref(b, &pl, 0) || self.is_mem[pl.base as usize];
                     self.forget(b, b.module, &mut path.state, pl.base);
                     let rv = *b.rvalues.at(st.rvalue as usize);
@@ -3906,6 +5957,14 @@ extend<const B: usize> Prover<B> {
                 event = true;
                 for q in bb.term.dests_start..bb.term.dests_start + bb.term.dests_len {
                     self.forget(b, b.module, &mut path.state, b.places.at(b.dest_pool[q as usize] as usize).base);
+                }
+                // A modeled method that changes its container: the container.
+                let k = pick(bb.term.kind == ir::TM_CALL, self.sq_kind(b, b.module, &bb.term), 0);
+                if k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR || k == VK_POP || k == VK_CLEAR || k == VK_INDEX_MUT {
+                    let tg = self.recv_target(b, b.module, &mut path.state, &bb.term);
+                    if tg != NONE {
+                        self.forget(b, b.module, &mut path.state, tg);
+                    }
                 }
             }
         }
@@ -4043,7 +6102,8 @@ extend<const B: usize> Prover<B> {
         frame.set(ne, path.state[path.state.len() - 1]);
         for j in 0..t.args_len {
             if cb.returns + j < cb.locals.len() as u32 {
-                let x = self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + j) as usize], false);
+                let x0 = self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + j) as usize], false);
+                let x = self.implicit_ref(b, t, j, x0);
                 frame.set((cb.returns + j) as usize, x);
             }
         }
@@ -4075,6 +6135,10 @@ extend<const B: usize> Prover<B> {
                 return;
             }
         }
+        // A modeled method of a container: its new value and view (`sq_effect`).
+        if self.sq_effect(b, path, t) {
+            return;
+        }
         let d = t.callee;
         // Ghost code never runs: a panic in it is a check that fails.
         if self.in_ghost && self.panics(d) {
@@ -4088,15 +6152,24 @@ extend<const B: usize> Prover<B> {
                 String::from_str("ghost code never runs: each of its checks is an obligation"),
             );
         }
-        // A spec function or a lemma only reads its arguments.
+        // A spec function or a lemma only reads its arguments. A mutable reference passed on may be
+        // written through.
         let ghost = self.is_ghost(d);
         for j in 0..t.args_len {
+            let oid = b.oper_pool[(t.args_start + j) as usize];
+            let op = *b.operands.at(oid as usize);
             if self.autoref(b, b.module, t, j) && !ghost {
-                let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
                 self.escape(b.places.at(op.data as usize).base);
+            } else if !ghost && op.kind != ir::OP_CONST && !(b.places.at(op.data as usize).proj_len == 0 && self.scoped[b.places.at(
+                op.data as usize,
+            ).base as usize]) {
+                let v = self.operand(b, b.module, &mut path.state, oid, false);
+                self.leak(v);
             }
         }
         let r = self.call_value(b, b.module, &mut path.state, t, false);
+        // A `const fn` whose value the walk computed (no fresh unknown) writes no memory.
+        let pure = self.tm.at(r).op == T_CALL || self.is_const_fn(d) && self.tm.at(r).op != T_VAR;
         let own = d.module == b.owner.module && d.node == b.owner.node;
         let cbp = if d.node == NODE_NONE {
             null
@@ -4155,7 +6228,8 @@ extend<const B: usize> Prover<B> {
                             self.tm.var(W_OTHER, false)
                         }
                     } else {
-                        self.operand(b, b.module, &mut path.state, oid, false)
+                        let x0 = self.operand(b, b.module, &mut path.state, oid, false);
+                        self.implicit_ref(b, t, j, x0)
                     };
                     frame.set((cb.returns + j) as usize, x);
                 }
@@ -4166,6 +6240,17 @@ extend<const B: usize> Prover<B> {
             let name = String::from_str(self.text(cm, self.ast_of(cm).at_const(self.ast_of(cm).ext_name(d.node)).span));
             // The frame's references to the caller's locals read the caller's state.
             self.mem = &path.state;
+            // The callee's `old(e)` values: `e` in the frame before the call.
+            for j in 0..cb.contracts.len() {
+                let s = cb.contracts[j];
+                if (s.kind == CT_OLD || s.kind == CT_OLD_RUN) && s.value != ir::IR_NONE {
+                    let (_f, v) = self.chain(cb, cm, s, &frame, &path.pc, true, t.span);
+                    let o = cb.places.at(cb.operands.at(s.value as usize).data as usize).base;
+                    if v != NONE {
+                        frame.set(o as usize, v);
+                    }
+                }
+            }
             for j in 0..cb.contracts.len() {
                 let s = cb.contracts[j];
                 if s.kind == CT_REQUIRES {
@@ -4193,8 +6278,9 @@ extend<const B: usize> Prover<B> {
                 }
             }
             self.mem = null;
-            if self.tm.at(r).op != T_CALL && !ghost {
+            if !pure && !ghost {
                 self.mem_event(b, b.module, &mut path.state);
+                self.lent(b, &mut path.state, t);
             }
             let ne2 = cb.locals.len();
             frame.set(ne2, path.state[path.state.len() - 1]);
@@ -4214,15 +6300,34 @@ extend<const B: usize> Prover<B> {
                 }
             }
             self.mem = null;
-        } else if self.tm.at(r).op != T_CALL && !ghost {
+        } else if !pure && !ghost {
             // A call that may write memory: a const fn call of frozen values writes none.
             self.mem_event(b, b.module, &mut path.state);
+            self.lent(b, &mut path.state, t);
         }
         if t.dests_len == 1 {
             self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
         } else {
             for j in t.dests_start..t.dests_start + t.dests_len {
                 self.write_place(b, b.module, &mut path.state, b.dest_pool[j as usize], NONE, false);
+            }
+        }
+    }
+
+    // The locals call `t` was lent (`scoped`): the callee may have changed them.
+    fn lent(self: &mut Self, b: &ir::CoreBody, state: &mut Vector<u32>, t: &ir::Terminator) {
+        for j in 0..t.args_len {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+            if op.kind == ir::OP_CONST {
+                continue;
+            }
+            let p = *b.places.at(op.data as usize);
+            if p.proj_len != 0 || !self.scoped[p.base as usize] || state[p.base as usize] == NONE {
+                continue;
+            }
+            let v = self.tm.at(state[p.base as usize]);
+            if v.op == T_MREF && v.a as usize != p.base as usize {
+                self.forget(b, b.module, state, v.a);
             }
         }
     }
@@ -4241,9 +6346,15 @@ extend<const B: usize> Prover<B> {
             if s.kind != ir::ST_ASSIGN {
                 continue;
             }
-            m |= param_bit(cb, cb.places.at(s.place as usize).base);
+            // A write or a borrow through the parameter's reference leaves the parameter as it is.
+            if !through_ref(cb, s.place) {
+                m |= param_bit(cb, cb.places.at(s.place as usize).base);
+            }
             let rv = *cb.rvalues.at(s.rvalue as usize);
-            if rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && (rv.b != 0 || ptr_cast) || rv.kind == ir::RV_SLICE {
+            if (rv.kind == ir::RV_ADDR || rv.kind == ir::RV_REF && (rv.b != 0 || ptr_cast) || rv.kind == ir::RV_SLICE) && !through_ref(
+                cb,
+                rv.a,
+            ) {
                 m |= param_bit(cb, cb.places.at(rv.a as usize).base);
             }
         }
@@ -4258,6 +6369,12 @@ extend<const B: usize> Prover<B> {
         self.pwrites.insert(key, m);
         return m;
     }
+}
+
+// Whether place `pl` of `cb` starts with a dereference of its local.
+const fn through_ref(cb: &ir::CoreBody, pl: u32) bool {
+    let p = cb.places.at(pl as usize);
+    return p.proj_len != 0 && cb.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF;
 }
 
 // The bit of local `l` of `cb` in a parameter mask: none for another local or past the 64th.

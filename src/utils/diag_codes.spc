@@ -554,9 +554,16 @@ pub(package) const PATTERN_TYPE_BASE: u16 = 547;
 pub(package) const PATTERN_TYPE_PATTERN: u16 = 548;
 pub(package) const PATTERN_TYPE_VALUE: u16 = 549;
 pub(package) const CHECKED_CAST_TARGET: u16 = 550;
+pub(package) const SPEC_SYNTAX_OUTSIDE_GHOST: u16 = 551;
+pub(package) const QUANTIFIER_RANGE: u16 = 552;
+pub(package) const OLD_OUTSIDE_STATE: u16 = 553;
+pub(package) const GHOST_VAR_OUTSIDE_GHOST: u16 = 554;
+pub(package) const GHOST_WRITE_TARGET: u16 = 555;
+pub(package) const GHOST_VALUE_DROPS: u16 = 556;
+pub(package) const TRUSTED_PLACE: u16 = 557;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 551;
+pub(package) const COUNT: u16 = 558;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1110,6 +1117,13 @@ pub(package) const fn name(code: u16) str<'static> {
         548 => "pattern_type_pattern",
         549 => "value_does_not_match_pattern_type",
         550 => "checked_cast_needs_pattern_type",
+        551 => "spec_syntax_outside_ghost_code",
+        552 => "quantifier_range",
+        553 => "old_outside_function_state",
+        554 => "ghost_variable_outside_ghost_code",
+        555 => "ghost_assignment_target",
+        556 => "ghost_value_has_drop",
+        557 => "trusted_needs_bodiless_ghost_function",
         _ => "",
     };
 }

@@ -4,7 +4,7 @@
 // structural. Two things the AST does not carry are reconstructed here:
 //   - Parentheses (the parser drops them): re-inserted by precedence. The ladder mirrors the parser:
 //     postfix (call/index/member/?/turbofish) = 14, unary prefix = 13, cast = 12, binary ops use
-//     Parser::precedence (2..11), range = 1, assignment = 0, closures/switch = lowest.
+//     Parser::precedence (1..11), range = 1, assignment = 0, closures/switch = lowest.
 //   - Trivia (comments and @attributes): the bytes BETWEEN sibling elements are trivia-only (comments,
 //     attrs, separators, whitespace), so every list emitter extracts comment/attr segments from its
 //     inter-element gaps by byte scanning: a segment starting before the gap's first newline is a
@@ -94,7 +94,7 @@ pub(package) fn format_program(ast: *const Ast, source: str, width: i32, out: &m
     return b.emitted_trivia;
 }
 
-/// Precedence ladder for parenthesis re-insertion; binary operators use Parser::precedence (2..11).
+/// Precedence ladder for parenthesis re-insertion; binary operators use Parser::precedence (1..11).
 pub(package) const PREC_ASSIGN: i32 = 0;
 pub(package) const PREC_RANGE: i32 = 1;
 pub(package) const PREC_CAST: i32 = 12; // `as`: looser than prefix ops, tighter than any binary op (parser binary max = 11)
@@ -129,8 +129,13 @@ extend Builder {
     fn b_contracts(self: &mut Self, owner: NodeId, body: bool) bool {
         let (cs, ce) = unsafe (*self.ast).contracts_of(owner);
         let m = self.st.len();
+        let mut any = false;
         for i in cs..ce {
             let c = *unsafe (*self.ast).contracts.at(i as usize);
+            if c.kind == CT_OLD || c.kind == CT_OLD_RUN {
+                continue;
+            }
+            any = true;
             self.st.push(self.p.hardline());
             self.st.push(self.p.txt(contract_word(c.kind)));
             self.st.push(self.p.txt(" "));
@@ -141,7 +146,7 @@ extend Builder {
             }
             self.st.push(self.b_cond(c.expr));
         }
-        if ce == cs {
+        if !any {
             return false;
         }
         let ic = self.cat(m);
@@ -1104,19 +1109,25 @@ extend Builder {
             NODE_BINARY => {
                 // A left-associative chain nests on its left operand: its spine is walked with a loop
                 // and its parts form one flat concatenation, so neither building nor rendering the
-                // document recurses once per operator.
+                // document recurses once per operator. `==>` is right-associative: its spine ends
+                // at its left operand, which an `==>` of its own puts in parentheses.
                 let base = self.bin_spine.len();
                 let mut l = id;
                 while self.nd(l).kind == NodeKind::NODE_BINARY {
                     self.bin_spine.push(l);
+                    let bo = unsafe self.nd(l).as_data.binary.op;
                     l = self.nd(l).as_data.binary.left;
+                    if bo == tt::TokenType::Implies {
+                        break;
+                    }
                 }
                 self.st.push(self.b_expr(l));
                 while self.bin_spine.len() > base {
                     let b = self.bin_spine.pop().unwrap();
                     let bi = unsafe self.nd(b).as_data.binary;
                     let pr = par::Parser::precedence(bi.op);
-                    if self.expr_prec(l) < pr {
+                    let imp = bi.op == tt::TokenType::Implies;
+                    if self.expr_prec(l) < pr || imp && self.expr_prec(l) == pr {
                         let e = self.cat(v);
                         self.st.push(self.p.txt("("));
                         self.st.push(e);
@@ -1125,7 +1136,7 @@ extend Builder {
                     self.st.push(self.p.txt(" "));
                     self.st.push(self.op_text(bi.op));
                     self.st.push(self.p.txt(" "));
-                    self.st.push(self.b_expr_prec(bi.right, pr + 1));
+                    self.st.push(self.b_expr_prec(bi.right, pick(imp, pr, pr + 1)));
                     l = b;
                 }
             },
@@ -1253,6 +1264,20 @@ extend Builder {
             },
             NODE_MATCH => {
                 self.st.push(self.b_match(id));
+            },
+            NODE_FORALL | NODE_EXISTS => {
+                let f = unsafe self.ext(id).for_stmt;
+                self.st.push(self.p.txt(pick(n.kind == NodeKind::NODE_FORALL, "forall ", "exists ")));
+                self.st.push(self.node_text(f.binding));
+                self.st.push(self.p.txt(" in "));
+                self.st.push(self.b_cond(f.iterable));
+                self.st.push(self.p.txt(" "));
+                self.st.push(self.b_quant_block(f.body));
+            },
+            NODE_OLD => {
+                self.st.push(self.p.txt("old("));
+                self.st.push(self.b_expr(n.as_data.single.value));
+                self.st.push(self.p.txt(")"));
             },
             NODE_SIZEOF => {
                 self.st.push(self.p.txt("sizeof("));
@@ -1517,6 +1542,7 @@ extend Builder {
             GreaterThanEqual => ">=",
             AmpersandAmpersand => "&&",
             PipePipe => "||",
+            Implies => "==>",
             Ampersand => "&",
             Pipe => "|",
             Caret => "^",
@@ -1561,6 +1587,13 @@ extend Builder {
     fn b_stmt(self: &mut Self, id: NodeId) d::DocId {
         let n = self.nd(id);
         let v = self.st.len();
+        // `ghost let ..` and `ghost x = e;`: the statement owns a CT_GHOST record.
+        if n.kind == NodeKind::NODE_LET || n.kind == NodeKind::NODE_EXPRESSION_STATEMENT {
+            let (cs, ce) = unsafe (*self.ast).contracts_of(id);
+            if ce > cs {
+                self.st.push(self.p.txt("ghost "));
+            }
+        }
         switch n.kind {
             NODE_LET => {
                 let l = unsafe n.as_data.let_stmt;
@@ -1900,6 +1933,34 @@ extend Builder {
     }
 
     // A block: `{}` when empty (dangling comments kept), otherwise always broken.
+    // A quantifier's block: `{ E }` on one line when it holds only its value and no comment and fits,
+    // else as any block.
+    fn b_quant_block(self: &mut Self, id: NodeId) d::DocId {
+        let n = self.nd(id);
+        let stmts = n.as_data.block.statements;
+        if stmts.len == 1 {
+            let sid = self.list_at(stmts, 0);
+            let sn = self.nd(sid);
+            let mut segs = Vector::<TriviaSeg>::new();
+            self.scan_gap(n.span.start + 1, sn.span.start, &mut segs);
+            self.scan_gap(sn.span.end, n.span.end - 1, &mut segs);
+            if sn.kind == NodeKind::NODE_EXPRESSION_STATEMENT && !unsafe sn.as_data.single.semi && segs.len() == 0 {
+                let v = self.st.len();
+                self.st.push(self.p.txt("{"));
+                let body = self.st.len();
+                self.st.push(self.p.line());
+                self.st.push(self.b_expr(sn.as_data.single.value));
+                let ic = self.cat(body);
+                self.st.push(self.p.indent(ic));
+                self.st.push(self.p.line());
+                self.st.push(self.p.txt("}"));
+                let g = self.cat(v);
+                return self.p.group(g);
+            }
+        }
+        return self.b_block(id);
+    }
+
     fn b_block(self: &mut Self, id: NodeId) d::DocId {
         let n = self.nd(id);
         let stmts = n.as_data.block.statements;

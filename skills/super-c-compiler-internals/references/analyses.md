@@ -21,7 +21,12 @@ file is authoritative for where to look first.
 |------|----------|-----------|-------------|
 | The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
 | Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
-| The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is not frozen, a slice view, a closure or a call's implicit borrow may reach (`is_mem`) | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, per body | the next body |
+| The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is neither frozen nor a container, a slice view, a closure or a call's implicit borrow may reach (`is_mem`; not a `&mut` lent to one call); the temporaries lent to one call | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, `scoped`, per body | the next body |
+| The `&mut` parameters' slots past the locals, their types | `Prover::prove_body` | `slot_ty`, `slot_of`, `nlocals`, per body | the next body |
+| A quantifier's closure (body, state, range, witness, triggers) and its instances | `Prover::quantifier` (at its `QuantSite`, `quant_at`), `instantiate`, `triggers` | `qclo`, `qof`, `qinst`, `qdef`, per body | the next body |
+| The facts of a member read by an unknown key, of a sequence's element and length, of a normalized index | `Prover::sel`, `seq_at`, `seq_make`, `seq_ext`, `index_key` | `seld` (made once), the facts in `defs` | the next body |
+| The view a modeled method gave a container's value, or a slice in a memory epoch; the sequences a spec function's result may equal | `Prover::sq_effect`, `elem_write`, `slice_of`, `define` | `vdef`, `sdef`, `alias`, `alias_pool`, per body | the next body |
+| The type arguments of the generic spec function being unfolded | `Prover::call_value` | `subst`, during `define` | the unfolding's end |
 | The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
 | The contract site of each chain's first block and of each block that enters one | `Prover::begin_sites` | `site_of_chain`, `site_of_pred`, per body | the next body |
 | A `@prove_exhaustive` function's inputs: each parameter's domain (kind, range narrowed by its `requires`, count) | `exhaustive_job`, `pdim` | `PJob.dims`, per function | end of the function's proof |

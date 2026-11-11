@@ -450,6 +450,11 @@ pub(package) struct TypeChecker<'a> {
     // The depth of clauses that `-fcontract-checks` runs (`requires`, `ensures`, `invariant` of normal
     // code) around the check: they cannot call a spec function nor convert into `int` or `nat`.
     run_clause: u32,
+    // The depth of the places where `old(e)` may stand: a normal function's `ensures`, its loops'
+    // `invariant`s and its ghost code. `in_old`: the depth of `old` around the check, at `old_sp`.
+    old_ok: u32,
+    in_old: u32,
+    old_sp: tok::Span,
     pub(package) fields_depth: u32, // nesting inside `inline for .. in fields(..)` bodies (closures rejected there)
     guard_top: u32, // the innermost `if` around the check inside such a body (`Ast.ob_guards` + 1)
     // A closure block body without written results under check (`clos_ret_on`): the result its
@@ -1539,6 +1544,9 @@ extend<'a> TypeChecker<'a> {
             stmt_call: NODE_NONE,
             ghost_blk: 0,
             run_clause: 0,
+            old_ok: 0,
+            in_old: 0,
+            old_sp: tok::Span { start: 0, end: 0 },
             fields_depth: 0,
             guard_top: 0,
             clos_ret: TYPE_NONE,
@@ -2015,7 +2023,7 @@ extend<'a> TypeChecker<'a> {
             NODE_BINARY => {
                 let bd = unsafe n.as_data.binary;
                 let sl = self.tc_ct_scan(bd.left, generic, depth + 1);
-                if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe {
+                if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe || bd.op == TokenType::Implies {
                     // The right operand runs conditionally: its own check scanned it (check_binary_ops).
                     return pick(sl == 2, 2u8, 0u8);
                 }
@@ -23162,7 +23170,7 @@ extend TypeChecker {
     // literal-only. Not for a logical operator, whose operands are `bool`.
     fn tc_bin_adopts(self: &mut Self, b: NodeId, ln: NodeId) bool {
         let bd = unsafe (*self.cur_ast()).at_const(b).as_data.binary;
-        if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe {
+        if bd.op == TokenType::AmpersandAmpersand || bd.op == TokenType::PipePipe || bd.op == TokenType::Implies {
             return false;
         }
         return bd.left == ln && self.tc_lit_kind(bd.right) == 0 && self.tc_needs_want(ln, true);
@@ -23182,7 +23190,7 @@ extend TypeChecker {
         let ln = bd.left;
         let rn = bd.right;
         let op = bd.op;
-        let logic = op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe;
+        let logic = op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe || op == TokenType::Implies;
         let rlk = pick(logic, 0u8, self.tc_lit_kind(rn));
         // A wide-integer operand: the left side's UInt<N>/Int<N> is what an integer literal on the
         // right means, exactly as the operators' Rhs = Self default reads. Without this the literal
@@ -23264,7 +23272,13 @@ extend TypeChecker {
             }
             return self.binary_numeric(id, l, ln, lk, r, rn, rlk, true);
         }
-        if op == TokenType::AmpersandAmpersand || op == TokenType::PipePipe {
+        if logic {
+            if op == TokenType::Implies && self.ghost == 0 {
+                self.errors.emit_span(dc::SPEC_SYNTAX_OUTSIDE_GHOST, sp, format("'==>' is valid only in ghost code"));
+                self.errors.note(
+                    format("ghost code: a 'spec fn', a 'lemma', a contract clause, an 'assert .. by' block"),
+                );
+            }
             let lb = untyped(l) || self.is_bool(l) || self.type_at(l).kind == TypeKind::TYPE_NEVER;
             let rb = untyped(r) || self.is_bool(r) || self.type_at(r).kind == TypeKind::TYPE_NEVER;
             if !lb || !rb {
@@ -23332,6 +23346,19 @@ extend TypeChecker {
         let ls_enum = ls != TYPE_NONE && self.type_at(ls).kind == TypeKind::TYPE_ENUM;
         let mut native_enum = false;
         let lsk = pick(ls == TYPE_NONE, TypeKind::TYPE_ERROR, self.type_at(ls).kind);
+        // Ghost code compares any two values of one type (the prover's equality) when the type has no
+        // `eq` of its own: a sequence, an array, a generic parameter.
+        if self.ghost != 0 && eq && ls != TYPE_NONE && !untyped(ls) && (lsk == TypeKind::TYPE_ARRAY || lsk == TypeKind::TYPE_GENERIC || lsk == TypeKind::TYPE_STRUCT || lsk == TypeKind::TYPE_INSTANCE) && !self.tc_has_eq(
+            ls,
+        ) {
+            if rstrip != TYPE_NONE && !untyped(rstrip) && ls != rstrip && !self.compatible(ls, rn) {
+                self.err_mismatch(rn, ls);
+            }
+            if self.run_clause != 0 {
+                self.tc_not_checkable(sp, "compares values of a type without 'eq'");
+            }
+            return Ast::builtin(BuiltinType::BT_BOOL);
+        }
         if lsk == TypeKind::TYPE_SIMD || lsk == TypeKind::TYPE_ARRAY {
             // Float lanes are not reflexive and a lane comparison yields a mask, not a `bool`; C
             // compares arrays by address.
@@ -25407,7 +25434,17 @@ extend TypeChecker {
             return TYPE_ERROR;
         }
         let fm = self.lt_env.len();
+        // A lemma's arguments are ghost code (in a normal function, `old` may stand there).
+        let d = self.tc_call_callee(id);
+        let lem = (d.node != NODE_NONE && !Ast::in_body(d.node) && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_FUNCTION && unsafe (*self.mod_ast(
+            d.module,
+        )).ext(d.node).function.is_lemma()) as u32;
+        let ok = lem & (!self.tc_in_ghost_fn()) as u32;
+        self.ghost += lem;
+        self.old_ok += ok;
         let r = self.check_call_i(id, want);
+        self.old_ok -= ok;
+        self.ghost -= lem;
         self.lt_env.truncate(fm);
         self.tc_ghost_call(id);
         return r;
@@ -25421,6 +25458,177 @@ extend TypeChecker {
             format("this contract {}: '-fcontract-checks' cannot check it at run time", what),
         );
         self.errors.note(format("state it as a 'const fn' over the fixed integer types, or build without the flag"));
+    }
+
+    // Whether type `t` has an `eq` method (its own or an interface default; a generic parameter's bound).
+    fn tc_has_eq(self: &mut Self, t: TypeId) bool {
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_GENERIC {
+            return self.tc_param_bound_provides(y.module, y.as_data.decl, "eq");
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        if !self.aggregate_decl(t, &mut om, &mut od) {
+            return false;
+        }
+        let md = self.find_method_cstr(om, od, "eq");
+        return md.node != NODE_NONE || self.find_default_method_cstr(om, od, "eq").node != NODE_NONE;
+    }
+
+    // Whether the function under check is a spec function or a lemma.
+    fn tc_in_ghost_fn(self: &Self) bool {
+        let f = self.icx.current_fn;
+        return f != NODE_NONE && unsafe (*self.cur_ast()).at_const(f).kind == NodeKind::NODE_FUNCTION && unsafe (*self.cur_ast()).ext(
+            f,
+        ).function.is_ghost();
+    }
+
+    // Whether decl `d` is a binding of a `ghost let` (the let, or an element of its tuple pattern).
+    fn tc_ghost_decl(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || d.module != self.cur_module() {
+            return false;
+        }
+        let a = self.cur_ast();
+        let mut l = d.node;
+        if unsafe (*a).at_const(l).kind != NodeKind::NODE_LET {
+            l = unsafe (*a).resolution(l);
+            if l == NODE_NONE || unsafe (*a).at_const(l).kind != NodeKind::NODE_LET {
+                return false;
+            }
+        }
+        let (cs, ce) = unsafe (*a).contracts_of(l);
+        return ce > cs;
+    }
+
+    // Name `id` (decl `d`) inside `old(..)` or a clause `-fcontract-checks` runs: `old` reads only the
+    // function's parameters (and the bindings of its own quantifiers); a run clause no ghost variable.
+    fn tc_spec_name(self: &mut Self, id: NodeId, d: DefId) {
+        let a = self.cur_ast();
+        let sp = unsafe (*a).at_const(id).span;
+        if self.run_clause != 0 && self.tc_ghost_decl(d) {
+            self.tc_not_checkable(sp, "reads a ghost variable");
+        }
+        if self.in_old == 0 || d.node == NODE_NONE || d.module != self.cur_module() {
+            return;
+        }
+        let dn = unsafe (*a).at_const(d.node);
+        let k = dn.kind;
+        let local = k == NodeKind::NODE_LET || k == NodeKind::NODE_IDENTIFIER || k == NodeKind::NODE_PATTERN_NAME || k == NodeKind::NODE_FOR || k == NodeKind::NODE_PARAMETER || k == NodeKind::NODE_MATCH_ARM;
+        if !local || dn.span.start >= self.old_sp.start && dn.span.end <= self.old_sp.end {
+            return;
+        }
+        if k == NodeKind::NODE_PARAMETER {
+            let f = self.icx.current_fn;
+            if f != NODE_NONE {
+                let ps = unsafe (*a).ext(f).function.params;
+                for i in 0..ps.len {
+                    if unsafe (*a).list(ps)[i as usize] == d.node {
+                        return;
+                    }
+                }
+            }
+        }
+        self.errors.emit_span(
+            dc::OLD_OUTSIDE_STATE,
+            sp,
+            format(
+                "'old' reads the state at the function's entry: '{}' is not one of its parameters",
+                diag::span_str(self.source, sp.start, sp.end),
+            ),
+        );
+    }
+
+    // `forall i in a..b { E }` or `exists ..`: ghost code; the range's bounds are of one integer type,
+    // the binding's; the block is `bool`.
+    fn tc_quantifier(self: &mut Self, id: NodeId) TypeId {
+        let a = self.cur_ast();
+        let fr = unsafe (*a).ext(id).for_stmt;
+        let sp = unsafe (*a).at_const(id).span;
+        let word = pick(unsafe (*a).at_const(id).kind == NodeKind::NODE_FORALL, "forall", "exists");
+        if self.ghost == 0 {
+            self.errors.emit_span(dc::SPEC_SYNTAX_OUTSIDE_GHOST, sp, format("'{}' is valid only in ghost code", word));
+            self.errors.note(format("ghost code: a 'spec fn', a 'lemma', a contract clause, an 'assert .. by' block"));
+        }
+        let rn = unsafe (*a).at_const(fr.iterable);
+        let mut elem = TYPE_ERROR;
+        if rn.kind != NodeKind::NODE_RANGE || rn.as_data.pattern_range.start == NODE_NONE || rn.as_data.pattern_range.end == NODE_NONE {
+            let _ = self.check_expr(fr.iterable);
+            self.errors.emit_span(
+                dc::QUANTIFIER_RANGE,
+                rn.span,
+                format("'{}' ranges over 'a..b' or 'a..=b', a range with both ends", word),
+            );
+        } else {
+            let pr = unsafe rn.as_data.pattern_range;
+            let s = self.check_expr(pr.start);
+            let e = self.check_expr(pr.end);
+            let t = self.range_type(fr.iterable, s, e);
+            if t != TYPE_NONE && !untyped(t) && !self.is_int(self.strip(t)) {
+                let ty = self.type_str(t);
+                self.errors.emit_span(
+                    dc::QUANTIFIER_RANGE,
+                    rn.span,
+                    format("'{}' ranges over integers, found '{}'", word, ty.as_str()),
+                );
+            } else if t != TYPE_NONE && !untyped(t) {
+                elem = self.strip(t);
+                unsafe (*self.cur_ast()).set_type(fr.iterable, self.prelude_range_type(elem));
+                let bt = self.bt_of(elem);
+                if self.run_clause != 0 && (bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT) {
+                    self.tc_not_checkable(rn.span, "ranges over a specification type");
+                }
+            }
+        }
+        unsafe (*self.cur_ast()).set_type(fr.binding, elem);
+        let _ = self.check_cond(fr.body, word);
+        return Ast::builtin(BuiltinType::BT_BOOL);
+    }
+
+    // `old(e)`: the value `e` has at the function's entry, in a normal function's `ensures`, its loops'
+    // `invariant`s and its ghost code; `e` reads only parameters, and its type is `Copy`.
+    fn tc_old(self: &mut Self, id: NodeId, expected: TypeId) TypeId {
+        let a = self.cur_ast();
+        let sp = unsafe (*a).at_const(id).span;
+        if self.ghost == 0 {
+            self.errors.emit_span(dc::SPEC_SYNTAX_OUTSIDE_GHOST, sp, format("'old' is valid only in ghost code"));
+        } else if self.old_ok == 0 || self.in_old != 0 {
+            self.errors.emit_span(
+                dc::OLD_OUTSIDE_STATE,
+                sp,
+                format(
+                    "{}",
+                    pick(
+                        self.in_old != 0,
+                        "an 'old' inside 'old' means the same value",
+                        "'old' is valid only in a function's 'ensures', its loops' 'invariant's and its ghost code",
+                    ),
+                ),
+            );
+        }
+        // An `old` a run clause reads: its site runs with the checks.
+        if self.run_clause != 0 && self.icx.current_fn != NODE_NONE {
+            let (cs, ce) = unsafe (*a).contracts_of(self.icx.current_fn);
+            for i in cs..ce {
+                if unsafe (*a).contracts.at(i as usize).expr == id && unsafe (*a).contracts.at(i as usize).kind == CT_OLD {
+                    unsafe (*a).contracts.index_mut(i as usize).kind = CT_OLD_RUN;
+                }
+            }
+        }
+        let osp = self.old_sp;
+        self.in_old += 1;
+        self.old_sp = sp;
+        let t = self.check_expr_w(unsafe (*a).at_const(id).as_data.single.value, expected);
+        self.in_old -= 1;
+        self.old_sp = osp;
+        if !untyped(t) && !self.tc_copy_marker(t, 0) {
+            let ty = self.type_str(t);
+            self.errors.emit_span(
+                dc::GHOST_VALUE_DROPS,
+                sp,
+                format("'old' copies its value: '{}' is not 'Copy'", ty.as_str()),
+            );
+        }
+        return t;
     }
 
     // Call `id` of a spec function only in ghost code, of a lemma only as an expression statement.
@@ -31439,6 +31647,9 @@ extend TypeChecker {
                 if self.const_init != 0 {
                     self.tc_const_init_read(id, d);
                 }
+                if self.in_old != 0 || self.run_clause != 0 {
+                    self.tc_spec_name(id, d);
+                }
                 result = self.decl_type_in(d.module, d.node);
                 if d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_FUNCTION {
                     self.tc_check_test_ref(d, unsafe (*a).at_const(id).span);
@@ -31878,6 +32089,12 @@ extend TypeChecker {
             },
             NODE_BLOCK => {
                 result = self.check_block_value(id, expected);
+            },
+            NODE_FORALL | NODE_EXISTS => {
+                result = self.tc_quantifier(id);
+            },
+            NODE_OLD => {
+                result = self.tc_old(id, expected);
             },
             NODE_WHILE => {
                 self.loop_depth = self.loop_depth + 1;
@@ -34556,6 +34773,9 @@ extend TypeChecker {
         self.ghost += 1;
         for i in cs..ce {
             let c = *unsafe (*self.cur_ast()).contracts.at(i as usize);
+            if c.kind == CT_OLD || c.kind == CT_OLD_RUN {
+                continue;
+            }
             if c.binder != NODE_NONE {
                 if result == TYPE_NONE {
                     let sp = unsafe (*self.cur_ast()).at_const(c.binder).span;
@@ -34570,8 +34790,11 @@ extend TypeChecker {
             }
             if c.kind != CT_DECREASES {
                 let run = (c.kind != CT_ASSERT && self.ghost == 1 && (unsafe (&*self.package).cg & bman::CG_CONTRACT_CHECKS) != 0) as u32;
+                let ok = (c.kind != CT_REQUIRES && !self.tc_in_ghost_fn()) as u32;
                 self.run_clause += run;
+                self.old_ok += ok;
                 let _ = self.check_cond(c.expr, contract_word(c.kind));
+                self.old_ok -= ok;
                 self.run_clause -= run;
                 continue;
             }
@@ -34873,6 +35096,64 @@ extend TypeChecker {
             return;
         }
         let a = self.cur_ast();
+        let nk = unsafe (*a).at_const(id).kind;
+        let (gs, ge) = if nk == NodeKind::NODE_LET || nk == NodeKind::NODE_EXPRESSION_STATEMENT {
+            unsafe (*a).contracts_of(id)
+        } else {
+            (0u32, 0u32)
+        };
+        if ge == gs {
+            self.check_stmt_i(id);
+            return;
+        }
+        // A `ghost` statement: ghost code, which declares or writes only ghost variables.
+        let ok = (!self.tc_in_ghost_fn()) as u32;
+        self.ghost += 1;
+        self.old_ok += ok;
+        self.check_stmt_i(id);
+        self.old_ok -= ok;
+        self.ghost -= 1;
+        if nk == NodeKind::NODE_LET {
+            let nm = unsafe (*a).at_const(id).as_data.let_stmt.name;
+            let mut t = unsafe (*a).type_of(id);
+            if unsafe (*a).at_const(nm).kind == NodeKind::NODE_PATTERN_TUPLE {
+                t = unsafe (*a).type_of(nm);
+            }
+            if t != TYPE_NONE && !untyped(t) && !self.tc_copy_marker(t, 0) {
+                let ty = self.type_str(t);
+                self.errors.emit_span(
+                    dc::GHOST_VALUE_DROPS,
+                    unsafe (*a).at_const(id).span,
+                    format("a ghost variable's type must be 'Copy': '{}' is not", ty.as_str()),
+                );
+            }
+            return;
+        }
+        let asg = unsafe (*a).at_const(id).as_data.single.value;
+        let mut root = unsafe (*a).at_const(asg).as_data.binary.left;
+        for _k in 0..64 {
+            let rk = unsafe (*a).at_const(root).kind;
+            if rk == NodeKind::NODE_MEMBER && !unsafe (*a).at_const(root).as_data.member.path {
+                root = unsafe (*a).at_const(root).as_data.member.object;
+            } else if rk == NodeKind::NODE_INDEX {
+                root = unsafe (*a).at_const(root).as_data.index.object;
+            } else {
+                break;
+            }
+        }
+        if unsafe (*a).at_const(root).kind != NodeKind::NODE_IDENTIFIER || !self.tc_ghost_decl(
+            unsafe (*a).resolution_def(root),
+        ) {
+            self.errors.emit_span(
+                dc::GHOST_WRITE_TARGET,
+                unsafe (*a).at_const(asg).span,
+                format("a 'ghost' assignment writes only a ghost variable ('ghost let')"),
+            );
+        }
+    }
+
+    fn check_stmt_i(self: &mut Self, id: NodeId) {
+        let a = self.cur_ast();
         unsafe (*a).wl_yield();
         let nk = unsafe (*a).at_const(id).kind;
         switch nk {
@@ -34884,8 +35165,10 @@ extend TypeChecker {
                 // `assert P by { .. }`: a ghost block, then P.
                 let (cs, ce) = unsafe (*a).contracts_of(id);
                 let g = (ce > cs) as u32;
+                let ok = g & (!self.tc_in_ghost_fn()) as u32;
                 self.ghost += g;
                 self.ghost_blk += g;
+                self.old_ok += ok;
                 let saved_lf = self.loop_floor;
                 if g != 0 {
                     self.loop_floor = self.nloops;
@@ -34911,6 +35194,7 @@ extend TypeChecker {
                     }
                 }
                 self.loop_floor = saved_lf;
+                self.old_ok -= ok;
                 self.ghost_blk -= g;
                 self.ghost -= g;
                 if g != 0 {
@@ -35848,6 +36132,22 @@ extend TypeChecker {
                 self.icx.current_returns = fnd.returns;
                 self.icx.current_fn = id;
                 let g = fnd.is_ghost() as u32;
+                // `@trusted`: the axioms of a spec function or a lemma without a body.
+                let trusted = unsafe (*self.cur_ast()).attr_of(id, AttrKind::ATTR_TRUSTED) != null;
+                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE) {
+                    self.errors.emit_span(
+                        dc::TRUSTED_PLACE,
+                        unsafe (*self.cur_ast()).at_const(fnd.name).span,
+                        format(
+                            "{}",
+                            pick(
+                                trusted,
+                                "'@trusted' marks a spec function or a lemma without a body",
+                                "a spec function or a lemma without a body must be '@trusted': no proof checks its contracts",
+                            ),
+                        ),
+                    );
+                }
                 self.ghost += g;
                 let saved_cr = self.clos_ret_on;
                 self.clos_ret_on = false;

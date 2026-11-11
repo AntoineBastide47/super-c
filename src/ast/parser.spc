@@ -79,6 +79,13 @@ pub(package) struct Parser<'a> {
     pub(package) intrinsic_next: bool,
     // `lemma` was just read: the next function has no `fn`.
     pub(package) lemma_next: bool,
+    // The next function is a spec function or a lemma: `;` may stand for its body (`@trusted`).
+    pub(package) ghost_next: bool,
+    // The depth of specifications around the expression under parse (a contract clause, a spec
+    // function's or a lemma's body, an `assert .. by`, a `ghost` statement): `old(..)` is a word there.
+    pub(package) spec: u32,
+    // The `old(..)` nodes parsed in the open functions, innermost last (`parse_function` takes its own).
+    pub(package) olds: Vector<NodeId>,
     // Parsing the items of an `extern` block.
     pub(package) in_extern: bool,
     // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
@@ -1082,13 +1089,45 @@ extend Parser {
         return self.text_is(self.raw_peek(), "spec") && nk == TokenType::Fn || self.text_is(self.raw_peek(), "lemma") && nk == TokenType::Identifier;
     }
 
+    // Whether the next tokens start a quantifier: the word `forall` or `exists`, a name, `in`.
+    const fn at_quantifier(self: &Self) bool {
+        let i = self.current;
+        if i + 2 >= self.tokens.len() || self.tokens[i + 1].kind() != TokenType::Identifier || self.tokens[i + 2].kind() != TokenType::In {
+            return false;
+        }
+        return self.text_is(self.raw_peek(), "forall") || self.text_is(self.raw_peek(), "exists");
+    }
+
+    // `forall i in a..b { E }` or `exists i in a..b { E }` (`at_quantifier`).
+    fn parse_quantifier(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        let kind = if self.text_is(self.raw_peek(), "forall") {
+            NodeKind::NODE_FORALL
+        } else {
+            NodeKind::NODE_EXISTS
+        };
+        self.advance();
+        let binding = self.identifier();
+        self.expect(TokenType::In, "'in'");
+        let range = self.parse_range_mode(RangeContext::RANGE_FOR, ExpressionGrammar::EXPR_CONDITION);
+        let body = self.parse_block();
+        return self.mk_ext(
+            kind,
+            Span::new(start, self.node_span(body).end),
+            NodeExt { for_stmt: ForData { binding: binding, iterable: range, body: body, label: Span::empty() } },
+        );
+    }
+
     // A spec function or a lemma (`at_ghost_fn`).
     fn parse_ghost_fn(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         let lemma = self.text_is(self.raw_peek(), "lemma");
         self.advance();
         self.lemma_next = lemma;
+        self.ghost_next = true;
+        self.spec += 1;
         let f = self.parse_function(true, false);
+        self.spec -= 1;
         self.ast.ext_mut(f).function.set(pick(lemma, FN_LEMMA, FN_SPEC), true);
         self.ast.at(f).span.start = start;
         return f;
@@ -1124,6 +1163,7 @@ extend Parser {
     fn parse_assert_by(self: &mut Self) NodeId {
         let at = self.raw_peek().start();
         self.advance();
+        self.spec += 1;
         let expr = self.parse_condition_expression();
         if !self.at_word("by") {
             self.error_here("expected 'by' after the condition of 'assert'");
@@ -1131,11 +1171,51 @@ extend Parser {
             self.advance();
         }
         let blk = self.parse_block();
+        self.spec -= 1;
         self.expect(TokenType::Semicolon, "';'");
         let mut cs = Vector::<Contract>::new();
         cs.push(Contract { owner: NODE_NONE, binder: NODE_NONE, expr: expr, kind: CT_ASSERT, at: at });
         self.ast.set_contracts(blk, &cs);
         return blk;
+    }
+
+    // Whether the next tokens start a ghost statement: the word `ghost` before `let` or before the
+    // name an assignment writes (two names in a row start no other statement).
+    const fn at_ghost_stmt(self: &Self) bool {
+        if !self.at_word("ghost") || self.current + 1 >= self.tokens.len() {
+            return false;
+        }
+        let nk = self.tokens[self.current + 1].kind();
+        return nk == TokenType::Let || nk == TokenType::Identifier;
+    }
+
+    // `ghost let ..;` or `ghost x = e;`: the statement, the owner of a CT_GHOST record, its span from
+    // the word `ghost`.
+    fn parse_ghost_stmt(self: &mut Self) NodeId {
+        let at = self.raw_peek().start();
+        self.advance();
+        self.spec += 1;
+        let s = self.parse_statement_inner();
+        self.spec -= 1;
+        if s == NODE_NONE {
+            return s;
+        }
+        let k = self.ast.at_const(s).kind;
+        if k != NodeKind::NODE_LET && (k != NodeKind::NODE_EXPRESSION_STATEMENT || self.ast.at_const(
+            self.ast.at_const(s).as_data.single.value,
+        ).kind != NodeKind::NODE_ASSIGNMENT) {
+            self.errors.emit_span(
+                dc::SYNTAX_ERROR,
+                Span::new(at, at + 5),
+                String::from_str("'ghost' starts a 'let' or an assignment"),
+            );
+            return s;
+        }
+        let mut cs = Vector::<Contract>::new();
+        cs.push(Contract { owner: NODE_NONE, binder: NODE_NONE, expr: NODE_NONE, kind: CT_GHOST, at: at });
+        self.ast.set_contracts(s, &cs);
+        self.ast.at(s).span.start = at;
+        return s;
     }
 
     // Whether the next token starts a function's contract clause.
@@ -1148,6 +1228,12 @@ extend Parser {
     fn parse_contract_clause(self: &mut Self, kind: u32, out: &mut Vector<Contract>) {
         let at = self.raw_peek().start();
         self.advance();
+        self.spec += 1;
+        self.parse_clause_conditions(kind, at, out);
+        self.spec -= 1;
+    }
+
+    fn parse_clause_conditions(self: &mut Self, kind: u32, at: u32, out: &mut Vector<Contract>) {
         loop {
             let mut binder = NODE_NONE;
             if kind == CT_ENSURES && self.match(TokenType::Pipe) {
@@ -1363,6 +1449,7 @@ extend Parser {
     /// interface member and a generic extend's member are pinned here as well.
     pub(package) fn parse_function(self: &mut Self, require_body: bool, pinned: bool) NodeId {
         let start = self.raw_peek().start();
+        let omark = self.olds.len();
         let lemma = replace(&mut self.lemma_next, false);
         if !lemma {
             self.expect(TokenType::Fn, "'fn'");
@@ -1392,7 +1479,10 @@ extend Parser {
         let mut contracts = Vector::<Contract>::new();
         self.parse_fn_contracts(&mut contracts);
         let intrinsic = replace(&mut self.intrinsic_next, false) && require_body;
-        if intrinsic {
+        let ghost = replace(&mut self.ghost_next, false);
+        if ghost && self.match(TokenType::Semicolon) {
+            // A spec function or a lemma without a body: its contracts are axioms (`@trusted`).
+        } else if intrinsic {
             // No written body: an empty block the lowering fills with the operation, so a bound call
             // or a function value has a body to call.
             let bstart = self.raw_peek().start();
@@ -1414,6 +1504,14 @@ extend Parser {
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);
         }
+        // Each `old(e)` of the function, in its clauses or its body, is a CT_OLD record of it.
+        for i in omark..self.olds.len() {
+            let o = self.olds[i];
+            contracts.push(
+                Contract { owner: NODE_NONE, binder: NODE_NONE, expr: o, kind: CT_OLD, at: self.node_span(o).start },
+            );
+        }
+        self.olds.truncate(omark);
         self.ast.sink_body = outer_sink;
         self.nrets = outer_nrets;
         let __decl = self.mk_ext(
@@ -2902,6 +3000,18 @@ extend Parser {
             self.expect(TokenType::RightParen, "')'");
             return self.fin(NodeKind::NODE_VA_EXPR, start, NodeAs { va_op: VaOpData { op: va, ap: ap, extra: extra } });
         }
+        if kind == TokenType::Identifier && self.at_quantifier() {
+            return self.parse_quantifier();
+        }
+        if kind == TokenType::Identifier && self.spec != 0 && self.text_is(self.raw_peek(), "old") && self.current + 1 < self.tokens.len() && self.tokens[self.current + 1].kind() == TokenType::LeftParen {
+            self.advance();
+            self.advance();
+            let value = self.parse_expression();
+            self.expect(TokenType::RightParen, "')'");
+            let o = self.fin(NodeKind::NODE_OLD, start, NodeAs { single: SingleData { value: value } });
+            self.olds.push(o);
+            return o;
+        }
         // `Self` names the implementing type in a path (`Self::f()`, `Self::K`), as a type name does.
         if Parser::is_identifier_token(kind) || kind == TokenType::SelfUpper {
             let value = self.identifier();
@@ -3303,8 +3413,8 @@ extend Parser {
         return self.tokens[self.current + k - 1].end() == self.tokens[self.current + k].start();
     }
 
-    // Precedence climbing: one call per operand. Every binary operator is left-associative; the
-    // call returns at the first operator that binds looser than `level` (at least 1).
+    // Precedence climbing: one call per operand. Every binary operator but `==>` is left-associative;
+    // the call returns at the first operator that binds looser than `level` (at least 1).
     fn parse_binary_level_from_mode(self: &mut Self, left: NodeId, level: i32, grammar: ExpressionGrammar) NodeId {
         let mut expression = left;
         let mut chain: u32 = 0;
@@ -3321,8 +3431,10 @@ extend Parser {
             }
             self.current = self.current + Parser::op_tokens(op);
             let mut right = self.parse_cast_mode(grammar);
-            if Parser::precedence(self.binary_op()) > prec {
-                right = self.parse_binary_level_from_mode(right, prec + 1, grammar);
+            // `a ==> b ==> c` is `a ==> (b ==> c)`.
+            let rassoc = op == TokenType::Implies;
+            if Parser::precedence(self.binary_op()) > prec || rassoc && self.binary_op() == TokenType::Implies {
+                right = self.parse_binary_level_from_mode(right, pick(rassoc, prec, prec + 1), grammar);
             }
             expression = self.add_binary(expression, op, right);
         }
@@ -3746,6 +3858,9 @@ extend Parser {
         }
         if self.at_assert_by() {
             return self.parse_assert_by();
+        }
+        if self.at_ghost_stmt() {
+            return self.parse_ghost_stmt();
         }
         let mut result = NODE_NONE;
         switch self.peek_type() {
@@ -4660,6 +4775,8 @@ extend Parser {
             AttrKind::ATTR_ASSOCIATIVE_MATH as i32
         } else if self.text_is(ns, "prove_exhaustive") {
             AttrKind::ATTR_PROVE_EXHAUSTIVE as i32
+        } else if self.text_is(ns, "trusted") {
+            AttrKind::ATTR_TRUSTED as i32
         } else {
             -1
         };
@@ -5210,7 +5327,7 @@ extend Parser {
                     format("a '@no_const' function cannot be a 'const fn'"),
                 );
             }
-            let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 {
+            let place = if attr.kind == AttrKind::ATTR_TARGET_FEATURE as u8 || attr.kind == AttrKind::ATTR_SIMD_IMPL as u8 || attr.kind == AttrKind::ATTR_TRUSTED as u8 {
                 pick(fnk, "", "may only be applied to a function")
             } else if attr.kind == AttrKind::ATTR_TAIL_RECURSE as u8 || attr.kind == AttrKind::ATTR_ASSOCIATIVE_MATH as u8 || attr.kind == AttrKind::ATTR_PROVE_EXHAUSTIVE as u8 {
                 pick(
@@ -5533,6 +5650,7 @@ extend Parser {
             Pipe => 4,
             AmpersandAmpersand => 3,
             PipePipe => 2,
+            Implies => 1,
             _ => 0,
         };
     }
@@ -5620,6 +5738,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("prove_exhaustive");
         return;
     }
+    if kind == AttrKind::ATTR_TRUSTED as u8 {
+        out.push_str("trusted");
+        return;
+    }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
         out.push_str("layout");
         return;
@@ -5633,7 +5755,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes that are not C-facing, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 28] = [
+const ATTR_NAMES: [str<'static>; 29] = [
     "emit_macro",
     "bench",
     "test",
@@ -5662,6 +5784,7 @@ const ATTR_NAMES: [str<'static>; 28] = [
     "owned",
     "associative_math",
     "prove_exhaustive",
+    "trusted",
 ];
 
 // The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,

@@ -73,12 +73,22 @@ constant, of a function every call of which the build proves (not `@export`, not
 `driver::emit::req_ast`), notes the parameter's range (`CoreBody.entry_ranges`), which the LIR's entry
 ranges take; `skip_tail_ensures` drops a proved `ensures` that follows a
 self tail call. With the chains empty and the size counters subtracted, a body with contracts
-emits the same code as without them. The lowering of an interface's method without a body A bounds check the prover proves on every path of a kept body is its PROVEN twin before the
-inliner, the instances and the emitters copy the body, with `item.module` = `CHECK_PROVER`, which
-BCE's re-verification (`SC_CORE_IR`) accepts without its own proof.
-(`lower_fn`) gives the parameters and the sites only; the prover alone reads it. A spec function's
-and a lemma's bodies are kept for the prover and never emitted (`reach_root`, `seed_emits`, the
-instance seeds skip them).
+emits the same code as without them. The lowering of an interface's method without a body
+(`lower_fn`) gives the parameters and the sites only; the prover alone reads it, as it reads a
+bodiless `@trusted` spec function's or lemma's. A spec function's and a lemma's bodies are kept for
+the prover and never emitted (`reach_root`, `seed_emits`, the instance seeds skip them). A bounds
+check the prover proves on every path of a kept body is its PROVEN twin before the inliner, the
+instances and the emitters copy the body, with `item.module` = `CHECK_PROVER`, which BCE's
+re-verification (`SC_CORE_IR`) accepts without its own proof.
+
+Specifications add three forms. An `old(e)` is a `CT_OLD` site after the `requires` (`lower_olds`):
+its chain computes `e` and `value` is a copy of the temporary it writes, which the clauses read; a
+`-fcontract-checks` clause that reads it makes it `CT_OLD_RUN`, which runs, while `CT_OLD` is a ghost
+site. A `ghost let` is a `CT_GHOST` site whose locals have `dkind` `LK_GHOST` and no storage
+deaths; a `ghost x = e;` is a `CT_GHOST` site too. A `forall` or `exists` lowers to a loop over its
+range (`lower_quantifier`) recorded as a `QuantSite { entry, body, check, exit, var, lo, hi, result,
+flags }` in `CoreBody.quants` (`QF_EXISTS`, `QF_INCLUSIVE`): the prover reads it as one formula and
+never walks the loop; `-fcontract-checks` runs it.
 
 ## Locals
 

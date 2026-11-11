@@ -183,8 +183,8 @@ fn shifted(x: u32) u64
 ```
 
 Ghost code is proved and never runs: no build emits it, `-fcontract-checks` neither. It is the body
-of a `spec fn` or a `lemma`, every clause, an `assert P by { B };` block, and a lemma call
-statement with its arguments. `spec` and `lemma` are contextual words at item scope (top level and
+of a `spec fn` or a `lemma`, every clause, an `assert P by { B };` block, a lemma call
+statement with its arguments, and a `ghost` statement. `spec` and `lemma` are contextual words at item scope (top level and
 in an `extend`). A lemma has no return type; its `requires` and `ensures` are the theorem, its body
 the proof: a recursive call with `decreases` is induction, an `if` or `switch` a case split, a lemma
 call applies that lemma. A spec function is a mathematical function: the proofs read its body as
@@ -205,6 +205,61 @@ its definition, one unfolding per call (a call over constants unfolds further); 
 - `assert P by { B };` proves P after B (a lemma call, a case split) and then assumes it.
 - Under `-fcontract-checks` a clause that calls a spec function or converts into `int` or `nat` is
   error 545: it has no run-time form.
+
+- A spec function or a lemma without a body ends its clauses with `;` and must be `@trusted`
+  (error 557): an axiom, which no proof checks. Its `ensures` define its calls.
+- In ghost code `==` and `!=` compare any two values of one type without an `eq` method (a `Seq`, an
+  array, a type parameter): the proofs' equality, error 545 under `-fcontract-checks`.
+
+### Specifications
+
+```superc
+fn find(xs: []u32, v: u32) usize
+    requires exists k in 0..xs.len() { xs[k] == v }
+    ensures |r| r < xs.len() && xs[r] == v
+{
+    for i in 0..xs.len()
+        invariant forall k in 0..i { xs[k] != v }
+    {
+        if xs[i] == v {
+            return i;
+        }
+    }
+    return 0; // no index is left: the invariant and the requires exclude this end
+}
+
+fn bump(x: &mut u32)
+    requires *x < 100
+    ensures *x == old(*x) + 1
+{
+    *x += 1;
+}
+```
+
+`==>`, `forall`, `exists` and `old` are valid only in ghost code (error 551).
+
+- `a ==> b` is `!a || b`; it binds weakest of the operators and groups to the right
+  (`a ==> b ==> c` is `a ==> (b ==> c)`).
+- `forall i in a..b { E }` and `exists i in a..=b { E }` range over an integer range with both ends
+  (error 552); `i` has the range's type. The proofs instantiate a `forall` they assume at the terms
+  of the goal and the facts (a bounded number of rounds), and an `exists` they assume gives a
+  witness; a needed instance at a term the formulas do not name needs an `assert` of it.
+  `-fcontract-checks` runs them as loops.
+- `old(e)` is `e` at the function's entry: in an `ensures`, a loop's `invariant` and ghost code of
+  a function (error 553), of a `Copy` value over the parameters (`old(*x)`, `old(self.n)`,
+  `old(v.len())`). A call's `ensures` reads the callee's `old` at the call.
+- `ghost let mut seen: int = 0;` declares a ghost variable, of a `Copy` type (error 556), that only
+  ghost code reads or writes (error 554); `ghost seen = seen + 1;` writes it, and writes nothing
+  else (error 555). The proofs read it like a local; no build has it.
+
+`std::spec::seq` gives `Seq<T>`, a finite sequence, equal to another of the same length and
+elements: `Seq::<T>::empty()`, `s.len()` (a `nat`), `s[i]` (`i: int`), `s.push(x)`,
+`s.update(i, x)`, `s.subrange(lo, hi)`, `s.concat(t)`, `s.take(n)`, `s.skip(n)`, and `utf8(c)`, the
+bytes of a `char`. `view()` is the sequence a `Vector`, `String` (its bytes), `str`, `[]T` or
+`[]mut T` holds: `v[i]` is `v.view()[i]` and `v.len()` its length. The proofs know how `Vector`'s
+`push`, `pop`, `clear`, `new`, `with_capacity`, `as_slice` and `v[i] = x`, `String`'s `push`,
+`push_str`, `clear`, `new` and `as_bytes`, and a write `xs[i] = x` through a `[]mut T` change the
+view; another method that takes a container's `&mut` makes its view unknown.
 
 `std::spec::arith` holds proved lemmas: products (`mul_eq`, `mul_nonneg`, `mul_pos`, `mul_le`,
 `mul_lt`), powers of two (`pow2`, `pow2_pos`, `pow2_add`, `pow2_le`), division and remainders

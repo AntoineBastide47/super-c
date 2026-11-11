@@ -129,6 +129,8 @@ pub(package) enum TokenType {
     MatchertextBegin,
     MatchertextMid,
     MatchertextEnd,
+    // `==>`, implication: valid only in specifications.
+    Implies,
 }
 
 extend TokenType {

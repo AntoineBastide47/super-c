@@ -352,7 +352,7 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 40] = [
+const ATTR_DOCS: [AttrDoc; 41] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -435,6 +435,11 @@ const ATTR_DOCS: [AttrDoc; 40] = [
         name: "prove_exhaustive",
         sig: "@prove_exhaustive",
         doc: "The build proves the function's contracts and that it cannot panic by evaluating it on every value of its parameters (at most 65536), not symbolically.",
+    },
+    AttrDoc {
+        name: "trusted",
+        sig: "@trusted",
+        doc: "On a spec function or a lemma without a body: its contracts are axioms that no proof checks.",
     },
     AttrDoc {
         name: "associative_math",

@@ -64,6 +64,17 @@ fn golden_contracts() {
         "pub spec fn s(n: nat) int decreases n { return n; }\nlemma l(n: nat) ensures s(n) >= 0 { assert s(n) == n by { }; }\n",
         "pub spec fn s(n: nat) int\n    decreases n\n{\n    return n;\n}\nlemma l(n: nat)\n    ensures s(n) >= 0\n{\n    assert s(n) == n by {};\n}\n",
     );
+    // A trusted spec function without a body, quantifiers (a block on one line when it fits, else
+    // its condition on a line of its own), `==>` (right associative), `old` and ghost statements.
+    expect_fmt(
+        "@trusted\nspec fn ax(x: int) int ensures |r| r > x;\nfn f(xs: []u32, v: &mut Vector<u32>) u32 requires   forall i in 0..xs.len() {xs[i] > 0} ensures |r| exists i in 0..=xs.len()-1 { xs[i]==r } ensures v.len() == old(v.len()) && (xs.len() > 1 ==> (xs[0] > 0 ==> true)) {\nghost let mut seen: int = 0;\nghost seen = seen + 1;\nfor i in 0..xs.len() invariant forall k in 0..i { xs[k] > 0 } {}\nreturn xs[0];\n}\nfn g(xs: []u32, ys: []u32) bool requires forall i in 0..xs.len() { xs[i] > 0 && ys[i] > 0 && xs[i] + ys[i] < 1000000 && xs[i] * 2 < ys[i] * 3 + 77777 } { return true; }\n",
+        "@trusted\nspec fn ax(x: int) int\n    ensures |r| r > x;\nfn f(xs: []u32, v: &mut Vector<u32>) u32\n    requires forall i in 0..xs.len() { xs[i] > 0 }\n    ensures |r| exists i in 0..=xs.len() - 1 { xs[i] == r }\n    ensures v.len() == old(v.len()) && (xs.len() > 1 ==> xs[0] > 0 ==> true)\n{\n    ghost let mut seen: int = 0;\n    ghost seen = seen + 1;\n    for i in 0..xs.len()\n        invariant forall k in 0..i { xs[k] > 0 }\n    {}\n    return xs[0];\n}\nfn g(xs: []u32, ys: []u32) bool\n    requires forall i in 0..xs.len() {\n        xs[i] > 0 && ys[i] > 0 && xs[i] + ys[i] < 1000000 && xs[i] * 2 < ys[i] * 3 + 77777\n    }\n{\n    return true;\n}\n",
+    );
+    // A `==>` whose left operand is another keeps its parentheses.
+    expect_fmt(
+        "fn h(a: bool, b: bool) bool { return (a ==> b) ==> a; }\n",
+        "fn h(a: bool, b: bool) bool {\n    return (a ==> b) ==> a;\n}\n",
+    );
     // Pattern types, `as?`, and the `..` of a payload pattern, which stays `..`.
     expect_fmt(
         "fn f(x: u32   is 1..,s: S is Rect{..}, o: Option<u32> is Some( _ ), c: S is S::C(..)) u8 is -5..=-1 {\n    let y = x as?   u32 is 2..;\n    return switch s { Rect { w, .. } => 1, C(..) => 2, _ => 3 };\n}\n",

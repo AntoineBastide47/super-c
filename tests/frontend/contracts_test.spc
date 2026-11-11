@@ -311,6 +311,140 @@ fn unproved_ghost_code_is_an_error() {
     h::expect_build_errs(b);
 }
 
+// `==>`, the quantifiers, `old`, ghost variables and `@trusted` are ghost code, each in its place.
+@test
+fn spec_syntax_is_checked() {
+    h::expect_err_msg(
+        "an implication a build runs",
+        "fn f(x: u32) bool { return x > 1 ==> x > 0; }\nfn main() i32 { return 0; }\n",
+        "'==>' is valid only in ghost code",
+    );
+    h::expect_err_msg(
+        "a quantifier a build runs",
+        "fn f(x: u32) bool { return forall i in 0..x { i < x }; }\nfn main() i32 { return 0; }\n",
+        "'forall' is valid only in ghost code",
+    );
+    h::expect_err_msg(
+        "a quantifier over a collection",
+        "fn f(xs: []u32) bool requires exists x in xs { x > 0 } { return true; }\nfn main() i32 { return 0; }\n",
+        "'exists' ranges over 'a..b' or 'a..=b', a range with both ends",
+    );
+    h::expect_err_msg(
+        "old in a requires",
+        "fn f(x: u32) requires old(x) > 0 {}\nfn main() i32 { return 0; }\n",
+        "'old' is valid only in a function's 'ensures', its loops' 'invariant's and its ghost code",
+    );
+    h::expect_err_msg(
+        "old in a lemma",
+        "lemma l(a: int) ensures old(a) == a {}\nfn main() i32 { return 0; }\n",
+        "'old' is valid only in a function's 'ensures', its loops' 'invariant's and its ghost code",
+    );
+    h::expect_err_msg(
+        "a ghost variable read by code a build runs",
+        "fn f() u32 {\n    ghost let g: u32 = 1;\n    return g;\n}\nfn main() i32 { return 0; }\n",
+        "'g' is a ghost variable: only ghost code can read or write it",
+    );
+    h::expect_err_msg(
+        "a ghost assignment to a variable a build runs",
+        "fn f() u32 {\n    let mut z: u32 = 0;\n    ghost z = 1;\n    return z;\n}\nfn main() i32 { return 0; }\n",
+        "a 'ghost' assignment writes only a ghost variable ('ghost let')",
+    );
+    h::expect_err_msg(
+        "a ghost variable that owns memory",
+        "fn f(v: Vector<u32>) {\n    ghost let w = v;\n}\nfn main() i32 { return 0; }\n",
+        "a ghost variable's type must be 'Copy': 'Vector<u32, Global>' is not",
+    );
+    h::expect_err_msg(
+        "a spec function without a body or @trusted",
+        "spec fn s(a: int) int;\nfn main() i32 { return 0; }\n",
+        "a spec function or a lemma without a body must be '@trusted': no proof checks its contracts",
+    );
+    h::expect_err_msg(
+        "@trusted on a function with a body",
+        "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
+        "'@trusted' marks a spec function or a lemma without a body",
+    );
+}
+
+// What the quantifiers, `old`, ghost variables, `Seq` and `view()` do not give is an error.
+@test
+fn unproved_spec_syntax_is_an_error() {
+    let mut b = cli::Batch::new("import std::spec::seq as *;\n", "fn main() i32 {\n    return 0;\n}\n");
+    b.add_at(
+        "a forall over fewer indexes than the read",
+        "fn f(xs: []u32, i: usize) u32\n    requires i < xs.len()\n    requires forall k in 0..i { xs[k] > 0 }\n    ensures |r| r > 0\n{\n    return xs[i];\n}\n",
+        "cannot prove this 'ensures' clause",
+        "5:17",
+    );
+    b.add_at(
+        "an exists no index gives",
+        "fn f(xs: []u32) bool\n    requires xs.len() > 0\n    ensures |r| exists k in 0..xs.len() { xs[k] == 7 }\n{\n    return true;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "4:17",
+    );
+    b.add_at(
+        "an invariant forall the loop breaks",
+        "fn f(xs: []mut u32) {\n    for i in 0..xs.len()\n        invariant forall k in 0..i { xs.view()[k as int] == 0 }\n    {\n        xs[i] = 1;\n    }\n}\n",
+        "cannot prove that this 'invariant' holds after an iteration",
+        "4:19",
+    );
+    b.add_at(
+        "an old value the body does not keep",
+        "fn bump(x: &mut u32)\n    requires *x < 100\n    ensures *x == old(*x) + 1\n{\n    *x += 2;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "4:13",
+    );
+    b.add_at(
+        "a push that keeps the view",
+        "fn f(v: &mut Vector<u32>, x: u32)\n    ensures v.view() == old(v.view())\n{\n    v.push(x);\n}\n",
+        "cannot prove this 'ensures' clause",
+        "3:13",
+    );
+    b.add_at(
+        "a pop that keeps the length",
+        "fn f(v: &mut Vector<u32>)\n    ensures v.view().len() == old(v.view()).len()\n{\n    let _ = v.pop();\n}\n",
+        "cannot prove this 'ensures' clause",
+        "3:13",
+    );
+    b.add_at(
+        "two sequences of one length",
+        "fn f(s: Seq<u32>, t: Seq<u32>) bool\n    requires s.len() == t.len()\n    ensures |r| s == t\n{\n    return true;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "4:17",
+    );
+    b.add_at(
+        "a two-byte character as one byte",
+        "fn f(s: &mut String)\n    ensures s.view().len() == old(s.view()).len() + 1\n{\n    s.push('\u{e9}');\n}\n",
+        "cannot prove this 'ensures' clause",
+        "3:13",
+    );
+    b.add_at(
+        "more than a trusted function's ensures",
+        "@trusted\nspec fn ax(x: int) int\n    ensures |r| r > x;\nfn f(x: u32) bool\n    ensures |r| ax(x as int) > x as int + 1\n{\n    return true;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "6:17",
+    );
+    b.add_at(
+        "another element of a generic spec function's result",
+        "fn f(s: Seq<u32>) bool\n    requires s.len() == 3\n    ensures |r| s.skip(1)[0] == s[0]\n{\n    return true;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "4:17",
+    );
+    b.add_at(
+        "another value of a generic spec function",
+        "spec fn idf<U>(x: U) U {\n    return x;\n}\nfn f() bool\n    ensures |r| idf::<u32>(3) == 4\n{\n    return true;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "6:17",
+    );
+    b.add_at(
+        "a program's function named like a vector's constructor",
+        "fn new(x: u32) Vector<u32> {\n    let mut v = Vector::<u32>::new();\n    v.push(x);\n    return v;\n}\nfn f() bool\n    ensures |r| r\n{\n    let v = new(3);\n    return v.len() == 0;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "8:17",
+    );
+    h::expect_build_errs(b);
+}
+
 fn proved_contracts(b: &mut h::ExitBatch) {
     b.add(
         "a sum modulo a bound",
@@ -732,9 +866,37 @@ fn main() i32 {
 }
 
 // Proofs the theory solvers make together: congruence over equal operands (a `const fn` call, a
-// division, an array read), equalities the arithmetic implies (`x <= y, y <= x`), a product bounded by
-// its operands' ranges, and an integer equality with no solution (`x == 2 * y` against an odd value).
+// division, an array read, one at an index narrower than `usize` or under a bit operation), equalities
+// the arithmetic implies (`x <= y, y <= x`), a product bounded by its operands' ranges, and an integer
+// equality with no solution (`x == 2 * y` against an odd value).
 fn theory_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "reads at narrow indexes and bit operations over reads",
+        M"(fn read32(a: [u32; 4], i: u32, j: u32) u32
+    requires i == j, i < 4
+    ensures |r| r == a[j]
+{
+    return a[i];
+}
+fn read_signed(a: [u32; 4], i: i32, j: i32) u32
+    requires i == j, i >= 0, i < 4
+    ensures |r| r == a[j]
+{
+    return a[i];
+}
+fn low_bits(a: [u32; 4], i: usize, j: usize) bool
+    requires i == j, i < 4
+    ensures |r| r
+{
+    return (a[i] & 1) == (a[j] & 1);
+}
+fn main() i32 {
+    let a: [u32; 4] = [1, 2, 3, 4];
+    return (read32(a, 2, 2) + read_signed(a, 1, 1)) as i32 + low_bits(a, 3, 3) as i32;
+}
+)",
+        6,
+    );
     b.add(
         "congruence and implied equalities",
         M"(const fn half(x: u32) u32 {
@@ -1034,6 +1196,297 @@ fn exit_cases_00() {
     b.run();
 }
 
+@test
+fn exit_cases_01() {
+    let mut b = h::ExitBatch::new();
+    spec_syntax_proofs(&mut b);
+    seq_proofs(&mut b);
+    b.run();
+}
+
+// `==>`, `forall` and `exists` (their instances, a witness, a nested one, a loop invariant), `old`
+// through `&mut`, a ghost variable, and a signed index whose bounds check stays.
+fn spec_syntax_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "quantifiers and implications",
+        M"(fn get(xs: []u32, i: usize) u32
+    requires i < xs.len()
+    requires forall k in 0..xs.len() { xs[k] > 0 }
+    ensures |r| r > 0
+{
+    return xs[i];
+}
+fn find(xs: []u32, v: u32) usize
+    requires exists k in 0..xs.len() { xs[k] == v }
+    ensures |r| r < xs.len() && xs[r] == v
+{
+    for i in 0..xs.len()
+        invariant forall k in 0..i { xs[k] != v }
+    {
+        if xs[i] == v {
+            return i;
+        }
+    }
+    // No index is left: the loop's invariant and the requires exclude this end.
+    return 0;
+}
+fn first_pos(xs: []u32) u32
+    requires xs.len() > 0
+    requires forall k in 0..xs.len() { xs[k] > 0 }
+    ensures |r| exists k in 0..xs.len() { xs[k] == r }
+{
+    return xs[0];
+}
+fn zero(a: [u32; 4]) [u32; 4]
+    ensures |r| forall k in 0..4 { r[k] == 0 }
+{
+    let mut r = a;
+    for i in 0..4
+        invariant forall k in 0..i { r[k] == 0 }
+    {
+        r[i] = 0;
+    }
+    return r;
+}
+fn imp(x: u32, y: u32) u32
+    requires x > 10 ==> y > 5
+    requires x > 10
+    ensures |r| r > 5
+{
+    return y;
+}
+fn sorted3(xs: []u32) bool
+    requires forall i in 0..xs.len() { forall j in 0..i { xs[j] <= xs[i] } }
+    requires xs.len() >= 3
+    ensures |r| r
+{
+    return xs[0] <= xs[2];
+}
+fn main() i32 {
+    let a: [u32; 3] = [4, 5, 6];
+    let z = zero([1, 2, 3, 4]);
+    return (get(a, 1) + find(a, 6) as u32 + first_pos(a) + z[2] + imp(11, 6)) as i32 + sorted3(a) as i32;
+}
+)",
+        18,
+    );
+    b.add(
+        "old values through mutable references and a ghost counter",
+        M"(struct Acc {
+    n: u32,
+}
+extend Acc {
+    fn add(self: &mut Acc, k: u32)
+        requires self.n < 1000 && k < 1000
+        ensures self.n == old(self.n) + k
+    {
+        self.n += k;
+    }
+}
+fn bump(x: &mut u32)
+    requires *x < 100
+    ensures *x == old(*x) + 1
+{
+    *x += 1;
+}
+fn twice(x: &mut u32)
+    requires *x < 50
+    ensures *x == old(*x) + 2
+{
+    bump(x);
+    bump(x);
+}
+fn count(xs: []u32) usize
+    ensures |r| r == xs.len()
+{
+    ghost let mut seen: int = 0;
+    let mut n: usize = 0;
+    for i in 0..xs.len()
+        invariant n == i
+        invariant seen == i as int
+    {
+        n += 1;
+        ghost seen = seen + 1;
+    }
+    return n;
+}
+fn main() i32 {
+    let mut x: u32 = 5;
+    twice(&mut x);
+    let mut a = Acc { n: 1 };
+    a.add(3);
+    let v: [u32; 3] = [1, 2, 3];
+    return (x + a.n) as i32 + count(v) as i32;
+}
+)",
+        14,
+    );
+    b.add_trap(
+        "a signed index proved below the length keeps the check at 0",
+        M"(fn at(a: [u32; 4], k: i32) u32
+    requires k < 4
+{
+    return a[k];
+}
+fn main(args: Vector<str>) i32 {
+    // -1 at run time (the arguments hold the program's name): a value the build does not know.
+    let k: i32 = if args.len() > 0 {
+        -1
+    } else {
+        3
+    };
+    return at([1, 2, 3, 4], k) as i32;
+}
+)",
+        "index out of bounds",
+    );
+}
+
+// std::spec::seq: `Seq` operations, the views of vectors, strings, slices and arrays and the methods
+// that change them, extensionality, trusted and generic spec functions, and a spec function's reference.
+fn seq_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "the views of vectors and arrays and the sequence operations",
+        M"(import std::spec::seq as *;
+fn add(v: &mut Vector<u32>, x: u32)
+    ensures v.view() == old(v.view()).push(x)
+    ensures v.len() as int == old(v.len()) as int + 1
+{
+    v.push(x);
+}
+fn set0(v: &mut Vector<u32>)
+    requires v.len() > 0
+    ensures v.view()[0] == 7
+    ensures v.view().len() == old(v.view()).len()
+{
+    v[0] = 7;
+}
+fn shrink(v: &mut Vector<u32>)
+    requires v.len() > 0
+    ensures v.view() == old(v.view()).subrange(0, old(v.view()).len() - 1)
+{
+    let _ = v.pop();
+}
+fn build() Vector<u32>
+    ensures |r| r.view() == Seq::<u32>::empty().push(1).push(2)
+{
+    let mut v = Vector::<u32>::new();
+    v.push(1);
+    v.push(2);
+    return v;
+}
+fn third(v: &Vector<u32>) u32
+    requires v.len() > 2
+    ensures |r| r == v.view()[2]
+{
+    return v[2];
+}
+spec fn sum(s: Seq<u32>, n: nat) int
+    requires n <= s.len()
+    decreases n
+{
+    return if n == 0 {
+        0
+    } else {
+        sum(s, n - 1) + s[n - 1] as int
+    };
+}
+fn total(xs: []u32) u64
+    requires xs.len() <= 1000
+    ensures |r| r as int == sum(xs.view(), xs.len() as nat)
+{
+    let mut acc: u64 = 0;
+    for i in 0..xs.len()
+        invariant acc as int == sum(xs.view(), i as nat)
+        invariant acc <= i as u64 * 4294967295
+    {
+        acc += xs[i];
+    }
+    return acc;
+}
+fn split(xs: []u32) bool
+    requires xs.len() >= 2
+    ensures |r| xs.view().subrange(0, 1).concat(xs.view().subrange(1, xs.view().len())) == xs.view()
+    ensures |r| xs.view().take(1).len() == 1 && xs.view().skip(1)[0] == xs[1]
+{
+    return true;
+}
+fn main() i32 {
+    let mut v = build();
+    add(&mut v, 3);
+    set0(&mut v);
+    let t = third(&v);
+    shrink(&mut v);
+    let a: [u32; 3] = [1, 2, 3];
+    let s: [u32; 2] = [4, 5];
+    return (v[0] + v[1] + t) as i32 + total(a) as i32 + split(s) as i32;
+}
+)",
+        19,
+    );
+    b.add(
+        "the views of strings and mutable slices, ghost sequences and spec functions",
+        M"(import std::spec::seq as *;
+fn greet(s: &mut String)
+    ensures s.view() == old(s.view()).concat("hi".view())
+{
+    s.push_str("hi");
+}
+fn put(s: &mut String)
+    ensures s.view().len() == old(s.view()).len() + 3
+{
+    s.push('A');
+    s.push('\u{e9}');
+}
+fn fill(xs: []mut u32)
+    ensures forall k in 0..xs.len() { xs.view()[k as int] == 0 }
+{
+    for i in 0..xs.len()
+        invariant forall k in 0..i { xs.view()[k as int] == 0 }
+    {
+        xs[i] = 0;
+    }
+}
+@trusted
+spec fn grows(x: int) int
+    requires x >= 0
+    ensures |r| r >= x;
+lemma grows_pos(x: int)
+    requires x >= 1
+    ensures grows(x) >= 1
+{
+}
+spec fn head(s: &Seq<u32>) &u32
+    requires s.len() > 0
+{
+    return &s[0];
+}
+spec fn same<U>(x: U) U {
+    return x;
+}
+fn first(xs: []u32) u32
+    requires xs.len() > 0
+    ensures |r| same(xs.view()) == xs.view() && same::<u32>(r) == xs[0]
+{
+    ghost let s: Seq<u32> = xs.view();
+    assert *head(&s) == xs[0] by {};
+    grows_pos(xs.len() as int);
+    return xs[0];
+}
+fn main() i32 {
+    let mut s = String::new();
+    greet(&mut s);
+    put(&mut s);
+    let mut a: [u32; 3] = [1, 2, 3];
+    fill(&mut a[0..3]);
+    let b: [u32; 2] = [9, 8];
+    return s.len() as i32 + a[1] as i32 + first(b) as i32;
+}
+)",
+        14,
+    );
+}
+
 // Ghost code no build runs: spec functions and their definitions, lemmas by induction, `assert .. by`,
 // `int` and `nat`, and std::spec.
 fn ghost_proofs(b: &mut h::ExitBatch) {
@@ -1276,6 +1729,53 @@ fn contract_checks_run_on_request() {
     );
     assert(!spec.built && spec.diag.contains("this contract converts into 'int' or 'nat'"), "a conversion into int");
     assert(spec.diag.contains("this contract calls a spec function"), "a spec function's call");
+    // Quantifiers and `old` run as loops and saved values; a sequence's equality has no run-time check.
+    let q = h::diff_build(
+        M"(fn get(xs: []u32, i: usize) u32
+    requires i < xs.len()
+    requires forall k in 0..xs.len() { xs[k] > 0 }
+    requires exists k in 0..=i { xs[k] == 1 }
+{
+    return xs[i];
+}
+fn bump(x: &mut u32)
+    requires *x < 100
+    ensures *x == old(*x) + 1
+{
+    *x += 2;
+}
+fn main(args: Vector<str>) i32 {
+    let a: [u32; 3] = [1, 2, 3];
+    let b: [u32; 3] = [5, 0, 3];
+    let mut x: u32 = 5;
+    if args.len() > 2 {
+        return get(b, 2) as i32;
+    }
+    if args.len() > 1 {
+        bump(&mut x);
+    }
+    return get(a, 2) as i32 + x as i32;
+}
+)",
+        ["-fno-prove", "-fcontract-checks"],
+    );
+    assert(q.built, "quantifiers and old build with checks");
+    assert_eq(h::diff_run(&q, "").exit, 8);
+    let qr = h::diff_run(&q, "x y");
+    assert(
+        qr.exit != 0 && qr.err.contains("assertion failed: `requires forall k in 0..xs.len() { xs[k] > 0 }`"),
+        "the forall check traps",
+    );
+    let orun = h::diff_run(&q, "x");
+    assert(orun.exit != 0 && orun.err.contains("assertion failed: `ensures *x == old(*x) + 1`"), "the old check traps");
+    let seq = h::diff_build(
+        "import std::spec::seq as *;\nfn f(v: &mut Vector<u32>, x: u32) ensures v.view() == old(v.view()).push(x) { v.push(x); }\nfn main() i32 { return 0; }\n",
+        ["-fcontract-checks"],
+    );
+    assert(
+        !seq.built && seq.diag.contains("this contract compares values of a type without 'eq'"),
+        "a sequence's equality",
+    );
 }
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,

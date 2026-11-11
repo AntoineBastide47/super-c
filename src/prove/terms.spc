@@ -583,6 +583,15 @@ extend<const B: usize> Terms<B> {
         return self.make(Term::<B> { k: u64_val::<B>(key), a: a, b: xs.len() as u32, op: T_CALL, w: w, sg: sg });
     }
 
+    // A function term of key `k` (a key no callee's `u64` key reaches: the prover's own functions).
+    pub(package) fn call_k(self: &mut Self, k: Num<B>, xs: &Vector<u32>, w: u16, sg: bool) u32 {
+        let a = self.args.len() as u32;
+        for j in 0..xs.len() {
+            self.args.push(xs[j]);
+        }
+        return self.make(Term::<B> { k: k, a: a, b: xs.len() as u32, op: T_CALL, w: w, sg: sg });
+    }
+
     pub(package) fn pool(self: &mut Self, op: u8, xs: &Vector<u32>, k: Num<B>) u32 {
         let a = self.args.len() as u32;
         for j in 0..xs.len() {

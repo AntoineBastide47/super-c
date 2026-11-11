@@ -119,6 +119,9 @@ pub(package) enum AttrKind {
     // `@prove_exhaustive` on a function with a body: its obligations are proved by evaluating it on
     // every value of its parameters (`prove::exhaustive`), not by the symbolic walk.
     ATTR_PROVE_EXHAUSTIVE,
+    // `@trusted` on a spec function or a lemma without a body: its contracts are axioms, which no proof
+    // checks (an explicit, searchable trust point).
+    ATTR_TRUSTED,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;
@@ -159,11 +162,19 @@ pub(package) const CT_DECREASES: u32 = 2;
 pub(package) const CT_INVARIANT: u32 = 3;
 // `assert P by { B }`: the record's owner is block B, its expression P.
 pub(package) const CT_ASSERT: u32 = 4;
-// A lemma call statement in a normal body: a Core site only (no record), the call then `true`.
+// Ghost code in a normal body: a lemma call statement (a Core site only, no record: the call then
+// `true`), or a `ghost` statement (the record's owner is the `let` or the assignment's statement, its
+// expression NODE_NONE).
 pub(package) const CT_GHOST: u32 = 5;
 // A conversion into a pattern type the checker could not decide: a Core site only (no record), the
 // test of one bound or of the variant.
 pub(package) const CT_PATTERN: u32 = 6;
+// An `old(e)` of a function: the record's owner is the function, its expression the `old` node. Its
+// Core site computes `e` at the entry into a local the `old` node reads; no build runs it (ghost code).
+pub(package) const CT_OLD: u32 = 7;
+// An `old(e)` a clause `-fcontract-checks` runs reads (the checker sets it): the build runs its site
+// with the checks.
+pub(package) const CT_OLD_RUN: u32 = 8;
 
 /// The keyword of a contract clause of kind `k` (`CT_*`).
 pub(package) const fn contract_word(k: u32) str<'static> {
@@ -557,6 +568,12 @@ pub(package) enum NodeKind {
     // A pattern type `B is P` (PatternTypeData): base type node `base`, pattern node `pattern` (a
     // range pattern, or a variant pattern whose payload is only wildcards).
     NODE_PATTERN_TYPE,
+    // `forall i in a..b { E }` and `exists i in a..b { E }` (ForData: the binding's name, the range, the
+    // block): a `bool` of ghost code.
+    NODE_FORALL,
+    NODE_EXISTS,
+    // `old(e)` (SingleData): the value `e` has at the function's entry, in ghost code.
+    NODE_OLD,
 }
 
 pub(package) const VA_START: u8 = 0;
@@ -1113,6 +1130,8 @@ const EXT_KINDS: [bool; 128] = [
     [NodeKind::NODE_INLINE_FOR as usize] = true,
     [NodeKind::NODE_PARALLEL_FOR as usize] = true,
     [NodeKind::NODE_CLOSURE as usize] = true,
+    [NodeKind::NODE_FORALL as usize] = true,
+    [NodeKind::NODE_EXISTS as usize] = true,
 ];
 
 /// Whether `name` is a compiler intrinsic no declaration defines (`dyn_cast`, `type_info`, `fields`,

@@ -33,6 +33,7 @@ pub(package) const LK_NONE: u8 = 0;
 pub(package) const LK_LET: u8 = 1;
 pub(package) const LK_FOR: u8 = 3; // `for` / `inline for` binding
 pub(package) const LK_PATTERN: u8 = 4;
+pub(package) const LK_GHOST: u8 = 5; // a `ghost let` binding: only ghost code writes it
 
 // The `@derive(Copy)` tags of this file restate the derivation for the bootstrap compiler, which checks a
 // `Copy` bound against written conformances only.
@@ -1173,6 +1174,25 @@ pub(package) struct RangeLoop {
     pub(package) end_k: ConstId,
 }
 
+/// A quantifier (`forall i in lo..hi { E }`, `exists ..`): a loop over the range that `-fcontract-checks`
+/// runs, from `entry` (entered only from the block before it) to `exit`; its blocks are [entry, exit).
+/// `E`'s value is computed from `body` to `check`, whose switch reads it; `var` is the binding, `lo`
+/// and `hi` the bounds' operands (read before `entry`), `result` the place of the `bool`. The prover
+/// never walks the loop: it reads the quantifier from this record.
+pub(package) struct QuantSite {
+    pub(package) entry: BlockId,
+    pub(package) body: BlockId,
+    pub(package) check: BlockId,
+    pub(package) exit: BlockId,
+    pub(package) var: LocalId,
+    pub(package) lo: OperandId,
+    pub(package) hi: OperandId,
+    pub(package) result: PlaceId,
+    pub(package) flags: u32, // QF_*
+}
+pub(package) const QF_EXISTS: u32 = 1;
+pub(package) const QF_INCLUSIVE: u32 = 2;
+
 /// Skip each contract check of `b` the build does not run: every one, or with `keep_checks` only the
 /// `decreases` measures and the ghost code (`assert .. by`, lemma calls), which have no run-time
 /// check. A conversion into a pattern type (`CT_PATTERN`) runs with `keep_pats`: the build did not
@@ -1329,7 +1349,7 @@ const fn param_of(b: &CoreBody, x: OperandId) u32 {
 
 /// Whether a contract site of kind `k` is ghost code in a body: no build runs it.
 pub(package) const fn is_ghost_site(k: u32) bool {
-    return k == CT_ASSERT || k == CT_GHOST;
+    return k == CT_ASSERT || k == CT_GHOST || k == CT_OLD;
 }
 
 /// The block a jump of `b` to `blk` reaches: past a ghost site that starts there, which the evaluator
@@ -1463,6 +1483,8 @@ pub(package) struct CoreBody {
     pub(package) contracts: Vector<ContractSite>,
     /// The counted range loops, in lowering order.
     pub(package) ranges: Vector<RangeLoop>,
+    /// The quantifiers, in lowering order (an inner one after its outer one).
+    pub(package) quants: Vector<QuantSite>,
     /// The ranges of integer parameters each proved `requires` of a skipped check states
     /// (`skip_contracts`): three words each, `local << 1 | signed`, then the least and the greatest
     /// value in the parameter's width (signed ones sign-extended). The LIR's entry ranges.
@@ -1581,6 +1603,7 @@ extend CoreBody {
             tail_jumps: Vector::<BlockId>::new(),
             contracts: Vector::<ContractSite>::new(),
             ranges: Vector::<RangeLoop>::new(),
+            quants: Vector::<QuantSite>::new(),
             entry_ranges: Vector::<u64>::new(),
             entry: 0,
         };
@@ -1627,6 +1650,7 @@ extend CoreBody {
         self.tail_jumps.truncate(0);
         self.contracts.truncate(0);
         self.ranges.truncate(0);
+        self.quants.truncate(0);
         self.entry_ranges.truncate(0);
         self.entry = 0;
     }
@@ -1637,7 +1661,7 @@ extend CoreBody {
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
         n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
-        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4 + self.contracts.capacity() * sizeof(ContractSite) + self.ranges.capacity() * sizeof(RangeLoop) + self.entry_ranges.capacity() * 8;
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4 + self.contracts.capacity() * sizeof(ContractSite) + self.ranges.capacity() * sizeof(RangeLoop) + self.quants.capacity() * sizeof(QuantSite) + self.entry_ranges.capacity() * 8;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
         n += self.demands.capacity() * sizeof(Terminator) + self.bytes.capacity();
@@ -1684,6 +1708,7 @@ extend CoreBody {
         out.tail_jumps = exact(&src.tail_jumps);
         out.contracts = exact(&src.contracts);
         out.ranges = exact(&src.ranges);
+        out.quants = exact(&src.quants);
         out.entry_ranges = exact(&src.entry_ranges);
         return out;
     }

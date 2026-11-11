@@ -258,7 +258,9 @@ modular return-lifetime check) run alongside.
   the two's-complement bits of its exact value, each operation its circuit, an undefined one any
   value of its type), a CDCL solver (`src/prove/sat.spc`: two watched literals, first-UIP learning
   with minimization, activity order, saved phases, Luby restarts) refutes them with an LRAT proof,
-  and the kernel checks it (`Lrat::check`, reverse unit propagation over the hints). Each refuted
+  and the kernel checks it (`Lrat::check`, reverse unit propagation over the hints). A model of the
+  bits ends the branch unproved only when each term they leave free is an unknown: the bits let two
+  reads or calls over equal operands differ, so the theories try the branch then. Each refuted
   branch is a lemma; once every branch closes, the kernel encodes the skeleton of the formulas (each
   atom a variable, an integer equality also its two orders) with the negation of each lemma
   (`seal`), and the hypotheses imply the goal only when it checks an LRAT proof that these clauses
@@ -272,7 +274,18 @@ modular return-lifetime check) run alongside.
   widths `W_INT` and `W_NAT` (no upper bound; never bit-blasted). Each spec call term gets its
   definition once (`define`: the spec body walked without obligations, one disjunction over its
   paths to a return, guarded by its `requires`), anchored on the call and added to an obligation
-  whose terms reach it (`add_defs`). A product is distributed over sums with its factors ordered
+  whose terms reach it (`add_defs`); a bodiless `@trusted` one is defined by its `ensures`, a generic one
+unfolds with the call's type arguments (`subst`), and a sequence result's elements are those of
+the sequences its body returns (`alias`). Specifications (language skill, basics.md,
+Specifications): a quantifier is a bool atom with a closure and a skolem fact (`quantifier`, never
+walked as its loop); a failed obligation adds instances (`instantiate`: trigger terms, then every
+integer term, `QUANT_ROUNDS` rounds) and retries without the facts unrelated to the goal (`cone`).
+`old` sites are values of the entry state, a callee's evaluated in the frame before the call; a
+`&mut` parameter's target is a slot past the locals (`T_MREF`). `Seq` is native: `SQ_*` function
+terms whose length and element facts are anchored on them (`seq_make`, `seq_at`), extensional
+equality (`seq_ext`); `view()` of a vector or string is a function of its value, of a `[]mut T` of
+its value and memory epoch, of a `[]T` of its value only (`slice_ep`), and `sq_kind`, `sq_value` and
+`sq_effect` model the container methods' views. A product is distributed over sums with its factors ordered
   (`Terms::product`); a hypothesis's split and the goal's integer disequality wait until the
   branch's other formulas are done, and the theories first try the literals so far. Every walk,
   search and elimination has a fixed budget;

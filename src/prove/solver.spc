@@ -623,10 +623,11 @@ struct Edge {
 // ---- the branches ----------------------------------------------------------------------------------
 
 // One branch of a refutation: the formulas still to split (`term << 1 | polarity`) and the theory
-// literals it states (`blast::tlit`).
+// literals it states (`blast::tlit`), the goal's `goals` first.
 struct Branch {
     todo: Vector<u64>,
     lits: Vector<u64>,
+    goals: usize,
     // The formulas that split the branch, put off until the theories fail without them (`close`), and
     // the literal count of the last such attempt.
     split: Vector<u64>,
@@ -635,7 +636,23 @@ struct Branch {
 
 extend Branch {
     fn copy(self: &Self) Branch {
-        return Branch { todo: self.todo.clone(), lits: self.lits.clone(), split: self.split.clone(), tried: self.tried };
+        return Branch {
+            todo: self.todo.clone(),
+            lits: self.lits.clone(),
+            goals: self.goals,
+            split: self.split.clone(),
+            tried: self.tried,
+        };
+    }
+
+    // Literal `l`, of the goal when `g` is not 0.
+    fn state(self: &mut Self, l: u64, g: u64) {
+        if g == 0 {
+            self.lits.push(l);
+            return;
+        }
+        self.lits.insert(self.goals, l);
+        self.goals += 1;
     }
 }
 
@@ -781,6 +798,7 @@ extend<const B: usize> Solver<B> {
         let mut b0 = Branch {
             todo: Vector::<u64>::new(),
             lits: Vector::<u64>::new(),
+            goals: 0,
             split: Vector::<u64>::new(),
             tried: 0,
         };
@@ -799,7 +817,7 @@ extend<const B: usize> Solver<B> {
             let mut br = open.pop().unwrap();
             switch self.close(tm, &mut br, &mut open, &mut splits, bits) {
                 Some(closed) => {
-                    if !closed && !self.lemma(tm, &br.lits, bits) {
+                    if !closed && !self.lemma(tm, &br.lits, br.goals, bits) {
                         return false;
                     }
                 },
@@ -811,18 +829,18 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
-    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts. With `bits`, a
-    // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
-    // when they hold a bit operation; then the theory solvers.
-    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, bits: bool) bool {
-        return self.lemma_with(tm, lits, bits, true);
+    // Whether the theory literals `lits` (the goal's `goals` first) cannot all hold, by a proof the
+    // kernel accepts. With `bits`, a SAT refutation of the bits of the literals that share unknowns
+    // with the goal's (`cone`) first, when they hold a bit operation; then the theory solvers.
+    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, bits: bool) bool {
+        return self.lemma_with(tm, lits, goals, bits, true);
     }
 
     // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
-    fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, bits: bool, guess: bool) bool {
+    fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, bits: bool, guess: bool) bool {
         let mut sub = Vector::<u64>::new();
         if bits && Solver::<B>::has_bits(tm, lits) {
-            self.cone(tm, lits, &mut sub);
+            self.cone(tm, lits, goals, &mut sub);
         }
         if sub.len() != 0 && Solver::<B>::has_bits(tm, &sub) && self.kn.blast(tm, &sub) {
             let r = self.sat.solve(&self.kn.bits().cnf, self.sat_budget());
@@ -830,8 +848,9 @@ extend<const B: usize> Solver<B> {
             if r == SAT_REFUTED {
                 return self.kn.blast_lemma(&self.sat.proof);
             }
-            if r == SAT_MODEL {
-                // The goal's literals have a model; the others share none of its unknowns.
+            // The goal's literals have a model; the others share none of its unknowns. Not when the bits
+            // leave an application free: they do not make two over equal operands equal.
+            if r == SAT_MODEL && self.kn.bits().vars_only(tm) {
                 self.sat_model();
                 return false;
             }
@@ -857,20 +876,32 @@ extend<const B: usize> Solver<B> {
         return SAT_STEPS.min((STEP_BUDGET + 1 - self.steps.min(STEP_BUDGET)).saturating_mul(SAT_STEP_COST));
     }
 
-    // The literals of `lits` that share an unknown with the first one (the goal's, which `close` takes
-    // first), directly or through other literals: the rest hold none of their unknowns, so they cannot
-    // help refute it. A union of the unknowns of each literal.
-    fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, out: &mut Vector<u64>) {
+    // The literals of `lits` that share an unknown with the goal's (its `goals` first ones; every
+    // literal when there is none), directly or through other literals: the rest hold none of their
+    // unknowns, so they cannot help refute it. A union of the unknowns of each literal.
+    fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, out: &mut Vector<u64>) {
         out.clear();
+        if goals == 0 {
+            out.extend_copy(lits);
+            return;
+        }
         self.uf.clear();
         self.ufirst.clear();
         for j in 0..lits.len() {
             let f = self.unknowns(tm, (lits[j] >> 3) as u32);
             self.ufirst.push(f);
         }
-        let r0 = self.find(self.ufirst[0]);
+        let mut r0 = NONE;
+        for j in 0..goals {
+            let f = self.find(self.ufirst[j]);
+            if r0 == NONE {
+                r0 = f;
+            } else if f != NONE && f != r0 {
+                self.uf.insert(f, r0);
+            }
+        }
         for j in 0..lits.len() {
-            if j == 0 || r0 != NONE && self.find(self.ufirst[j]) == r0 {
+            if j < goals || r0 != NONE && self.find(self.ufirst[j]) == r0 {
                 out.push(lits[j]);
             }
         }
@@ -1000,7 +1031,7 @@ extend<const B: usize> Solver<B> {
                 }
                 if hyp && br.lits.len() > br.tried {
                     br.tried = br.lits.len();
-                    if self.lemma_with(tm, &br.lits, bits, false) {
+                    if self.lemma_with(tm, &br.lits, br.goals, bits, false) {
                         return Some(true);
                     }
                 }
@@ -1046,9 +1077,9 @@ extend<const B: usize> Solver<B> {
                     return None;
                 }
                 let mut other = br.copy();
-                other.lits.push(tlit(t, SEL_GT, true));
+                other.state(tlit(t, SEL_GT, true), g);
                 open.push(other);
-                br.lits.push(tlit(t, SEL_LT, true));
+                br.state(tlit(t, SEL_LT, true), g);
             } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
                 // Equal booleans: both hold or neither does.
                 *splits += 1;
@@ -1070,7 +1101,7 @@ extend<const B: usize> Solver<B> {
                         return Some(true);
                     }
                 }
-                br.lits.push(tlit(t, SEL_ATOM, pos));
+                br.state(tlit(t, SEL_ATOM, pos), g);
             }
         }
         return None;

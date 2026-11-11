@@ -50,8 +50,11 @@ pub(package) struct Resolver<'a> {
     pub(package) current_self: DefId, // decl 'Self' refers to inside the current interface/extension
     pub(package) cur_fn: NodeId, // the function whose body is being resolved (NODE_NONE: none)
     // The depth of ghost code around the name under resolution: a spec function or a lemma, a contract
-    // clause, an `assert .. by` block. Only ghost code names `int` and `nat`.
+    // clause, an `assert .. by` block, a `ghost` statement. Only ghost code names `int` and `nat`, and
+    // reads or writes a ghost variable.
     ghost: u32,
+    // The bindings of `ghost let` statements (their decl nodes).
+    ghost_decls: Set<NodeId>,
     // The type aliases of the open interface/extend blocks, innermost from `self_aliases_start`, for the
     // `Self::Assoc` projection.
     pub(package) self_aliases: Vector<NodeId>,
@@ -189,6 +192,7 @@ extend Resolver {
             self_aliases_start: 0,
             closures: Vector::<ClosureScope>::new(),
             cap_seen: Set::<u64>::new(),
+            ghost_decls: Set::<NodeId>::new(),
             package: package,
             mod_names: Vector::<ModEntry>::new(),
             mod_index: Map::<u32, u32>::new(),
@@ -808,6 +812,17 @@ extend Resolver {
                     }
                 }
             }
+        }
+        if ns == Namespace::NS_VALUE && self.ghost == 0 && self.ghost_decls.contains(&decl) {
+            let sp = self.ast.at_const(refn).span;
+            self.errors.emit_span(
+                dc::GHOST_VAR_OUTSIDE_GHOST,
+                sp,
+                format(
+                    "'{}' is a ghost variable: only ghost code can read or write it",
+                    diag::span_str(self.source, sp.start, sp.end),
+                ),
+            );
         }
         self.ast.set_resolution(refn, decl);
     }
@@ -1579,6 +1594,10 @@ extend Resolver {
         self.ghost += 1;
         for i in cs..ce {
             let c = *self.ast.contracts.at(i as usize);
+            // An `old` node's record: the node resolves where it stands.
+            if c.kind == CT_OLD || c.kind == CT_OLD_RUN {
+                continue;
+            }
             if c.binder != NODE_NONE {
                 self.scope_enter();
                 self.declare(self.ast.at_const(c.binder).as_data.parameter.name, c.binder, Namespace::NS_VALUE);
@@ -1616,8 +1635,13 @@ extend Resolver {
             },
             NODE_LET => {
                 let ld = unsafe self.ast.at_const(id).as_data.let_stmt;
+                // `ghost let`: ghost code, and its bindings are ghost variables.
+                let (gs, ge) = self.ast.contracts_of(id);
+                let g = (ge > gs) as u32;
+                self.ghost += g;
                 self.resolve_type(ld.ty);
                 self.resolve_expr(ld.value);
+                self.ghost -= g;
                 let nmkind = self.ast.at_const(ld.name).kind;
                 if nmkind == NodeKind::NODE_PATTERN_TUPLE {
                     // `let (a, b) = ..`: each element declares itself.
@@ -1627,10 +1651,16 @@ extend Resolver {
                         self.declare(cid, cid, Namespace::NS_VALUE);
                         // Back-point to the let so mutability is recoverable.
                         self.ast.set_resolution(cid, id);
+                        if g != 0 {
+                            self.ghost_decls.insert(cid);
+                        }
                     }
                 } else {
                     // Bound only after its initializer.
                     self.declare(ld.name, id, Namespace::NS_VALUE);
+                    if g != 0 {
+                        self.ghost_decls.insert(id);
+                    }
                 }
             },
             NODE_CONST => {
@@ -1719,7 +1749,12 @@ extend Resolver {
             },
             NODE_EXPRESSION_STATEMENT => {
                 let v = self.ast.at_const(id).as_data.single.value;
+                // `ghost x = e;`: ghost code.
+                let (gs, ge) = self.ast.contracts_of(id);
+                let g = (ge > gs) as u32;
+                self.ghost += g;
                 self.resolve_expr(v);
+                self.ghost -= g;
             },
             NODE_STATIC_ASSERT => {
                 let left = self.ast.at_const(id).as_data.binary.left;
@@ -1767,6 +1802,18 @@ extend Resolver {
                 let bd = unsafe self.ast.at_const(id).as_data.binary;
                 self.resolve_expr(bd.left);
                 self.resolve_expr(bd.right);
+            },
+            NODE_FORALL | NODE_EXISTS => {
+                // The range is evaluated before the binding is in scope; the binding is its own decl.
+                let fr = unsafe self.ast.ext(id).for_stmt;
+                self.resolve_expr(fr.iterable);
+                self.scope_enter();
+                self.declare(fr.binding, fr.binding, Namespace::NS_VALUE);
+                self.resolve_block(fr.body);
+                self.scope_exit();
+            },
+            NODE_OLD => {
+                self.resolve_expr(self.ast.at_const(id).as_data.single.value);
             },
             NODE_BINARY => {
                 // A left-associative chain (`x + x + ... + x`) nests on its left operand: descend that

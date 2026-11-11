@@ -191,6 +191,16 @@ extend<const B: usize> Blaster<B> {
         return self.slt(&x, &y);
     }
 
+    // Whether every leaf is an unknown (`T_VAR`): no application whose value its operands fix.
+    pub(package) const fn vars_only(self: &Self, tm: &Terms<B>) bool {
+        for j in 0..self.leaves.len() {
+            if tm.at(self.leaves[j]).op != T_VAR {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // The bits of leaf `t` (its type's width and a sign) into `out`.
     pub(package) fn leaf_bits(self: &Self, t: u32, out: &mut Vector<u32>) {
         out.clear();
