@@ -319,6 +319,10 @@ pub(package) struct Opt {
     // The walk gave a call's argument the source of the copy it took (`copied_args`): a change of the call's
     // arguments in the pool, which its instruction does not show.
     rewrote: bool,
+    // `copy_fed`: the loads made before a copy this walk: copy << 32 | offset, type, value.
+    fed_key: Vector<u64>,
+    fed_ty: Vector<u8>,
+    fed_v: Vector<Value>,
     pre_at: Vector<u32>, // the rebuild's ranges of `pre_list` per instruction
     // `param_cycles`' scratch, per parameter: its set (union-find), the set's one outside value, whether
     // the set has more than one.
@@ -624,6 +628,9 @@ extend Opt {
             rethru: false,
             unstored: false,
             rewrote: false,
+            fed_key: Vector::<u64>::new(),
+            fed_ty: Vector::<u8>::new(),
+            fed_v: Vector::<Value>::new(),
             pre_at: Vector::<u32>::new(),
             tdirty: Vector::<u32>::new(),
             pc_uf: Vector::<u32>::new(),
@@ -5167,6 +5174,9 @@ extend Opt {
         }
         let mut states: u32 = 0;
         self.rewrote = false;
+        self.fed_key.truncate(0);
+        self.fed_ty.truncate(0);
+        self.fed_v.truncate(0);
         let mut changed = self.param_cycles(b);
         // Preorder over the dominator tree: depth << 33 | block << 1 enters a block, n << 33 | 1 closes its
         // scope at log length n.
@@ -10783,6 +10793,9 @@ extend Opt {
                     p = self.private_load(pk, b, k, i, t);
                 }
             }
+            if p == PRIV_NONE {
+                p = self.copy_fed(pk, b, k, i, t);
+            }
             if p != PRIV_NONE && p != PRIV_KEPT {
                 self.repl[i as usize] = p;
                 return true;
@@ -13936,6 +13949,67 @@ extend Opt {
     const fn copy_source(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) (Value, u32) {
         let (src, rel, _) = self.copy_of(b, k, i, t.a, t.c as i32, type_bytes(t.ty, pk.ptr_bytes));
         return (src, rel);
+    }
+
+    // Load `t` (instruction `i` of block `k`) of private memory whose address does not escape, when the one
+    // write of its bytes is a copy of a constant size that runs before it, from other memory: the value of
+    // a load of the same bytes of the source, made right before the copy (LLVM's SROA splits such a copy
+    // into its fields' loads), so the copy and its memory may go when nothing else reads them. It keeps no
+    // alignment or type tag (the source may hold another type's bytes), and its bound only in the copy's
+    // block: elsewhere the load now runs on paths the first did not (`unguarded`). PRIV_NONE for none.
+    fn copy_fed(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) Value {
+        let s = self.base(b, t.a) as usize;
+        if s == NONE as usize || self.sesc[s] || self.wat[s + 1] - self.wat[s] > SLOT_WRITES_MAX || (t.aux & MEM_BLOCK) != 0 {
+            return PRIV_NONE;
+        }
+        let off = self.base_off(t.a) + (t.c as i32) as i64;
+        let end = off + type_bytes(t.ty, pk.ptr_bytes) as i64;
+        let mut one = NONE;
+        for q in self.wat[s]..self.wat[s + 1] {
+            let w = self.wl[q as usize];
+            if w.off < end && off < w.end {
+                if one != NONE || w.copy == NONE || off < w.off || w.end < end {
+                    return PRIV_NONE;
+                }
+                one = q;
+            }
+        }
+        if one == NONE {
+            return PRIV_NONE;
+        }
+        let w = self.wl[one as usize];
+        if w.blk == k && w.copy >= i || w.blk != k && !self.dominates(w.blk, k) {
+            return PRIV_NONE;
+        }
+        let c = b.insts[w.copy as usize];
+        let rel = off - w.off;
+        if c.op != O_MEMCPY || self.repl[w.copy as usize] != VNONE || self.base(b, c.a) != s as u32 || (c.aux & MEM_VOLATILE) != 0 || int_bits(
+            b,
+            c.c,
+        ).is_none() || w.end - w.off >= 1i64 << 31 || self.base(b, c.b) == s as u32 {
+            return PRIV_NONE;
+        }
+        let key = w.copy as u64 << 32 | rel as u64;
+        for q in 0..self.fed_key.len() {
+            if self.fed_key[q] == key && self.fed_ty[q] == t.ty && (w.blk != k || (b.insts[self.fed_v[q] as usize].aux & (MEM_BOOL | MEM_RANGE)) == (t.aux & (MEM_BOOL | MEM_RANGE)) && b.insts[self.fed_v[q] as usize].b == t.b) {
+                return self.fed_v[q];
+            }
+        }
+        // In the copy's block the load runs when the first did: it keeps its bound.
+        let mut u = if w.blk == k {
+            t
+        } else {
+            unguarded(t)
+        };
+        u.aux = u.aux & ~(MEM_TBAA | 15);
+        u.a = self.val(c.b);
+        u.c = rel as u32;
+        let v = self.before(b, w.blk, w.copy, u);
+        self.fed_key.push(key);
+        self.fed_ty.push(t.ty);
+        self.fed_v.push(v);
+        self.rewrote = true;
+        return v;
     }
 
     // The bytes `n` at offset `at` past address `a` of private memory hold at instruction `i` of block `k`:

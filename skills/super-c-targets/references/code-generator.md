@@ -51,6 +51,12 @@ set first: it states the value, register and frame model.
    through `Core::pva` at every edge site (the current block may hold it elsewhere). A segment
    keeps its register to its span's end: give it to no other value, and make no early edge move
    (before the branch) that writes it while another live value holds it.
+   Steps (`Live.steps`, set before `run`): `Live.fstep` names, per instruction, the header parameter
+   whose register it is made in when it is passed back from another block than its own. Take that
+   register where the instruction takes its home (`step_home` of the arm64 and x86-64 generators):
+   the parameter keeps the ownership, and a step that reads the parameter must be one machine
+   instruction that reads its operands before it writes its result. A generator that leaves the flag
+   clear gets no such step and no longer parameter ranges.
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
    home before the branch; an edge moves the block arguments (`edge_homes`). A block whose only
    predecessor falls into it keeps the register state (`Live::continues`); another, whose predecessors

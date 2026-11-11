@@ -10279,6 +10279,118 @@ fn a_rare_calls_result_takes_its_register_at_the_call() {
     assert_eq(run_native(&lir, drv), 0);
 }
 
+// A loop's count-down made in the header, read by nothing else and passed back from the latch, with a
+// rare call it lives across: it is made in its header parameter's register (`Live::far_steps`), so the
+// edge back moves nothing. On arm64 the count stays in x2, where it arrives: no move writes x2. The rare
+// block runs when the count's low three bits are 0.
+@test
+fn a_step_in_the_header_takes_its_parameters_register() {
+    let lir = "lir ptr 8\nsym @bump fn global\nsym @ticks fn global\nfn @ticks\n  sig (ptr, i64, i32) -> i64\nb0(v0: ptr, v1: i64, v2: i32):\n  v3 = iconst.i64 0\n  v4 = iconst.i32 1\n  v5 = iconst.i32 7\n  v6 = iconst.i32 0\n  v7 = iconst.i64 1\n  jmp b1(v3, v3, v2)\nb1(v8: i64, v9: i64, v10: i32):\n  v11 = sub.i32 v10, v4\n  v12 = and.i32 v11, v5\n  v13 = icmp.eq v12, v6\n  br v13, b2, b3\nb2: unlikely\n  v14 = call.i64 @bump(v9) : (i64) -> i64\n  jmp b3\nb3:\n  v15 = ptradd v0, v8 * 8\n  v16 = load.i64 v15 align 3\n  v17 = add.i64 v9, v16\n  v18 = add.i64 v8, v7\n  v19 = icmp.ult v18, v1\n  br v19, b1(v18, v17, v11), b4\nb4:\n  ret v17\n";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    let (off, size) = elf_text(&obj);
+    let mut copies: u32 = 0;
+    for k in 0..size / 4 {
+        let w = le_at(&obj, off + k * 4, 4) as u32;
+        // `mov xd, xm` into x2, the count's register.
+        copies += ((w & 0xFFE0FFFF) == 0xAA0003E2) as u32;
+    }
+    assert_eq(copies, 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t ticks(const int64_t *, int64_t, int32_t);\nstatic int calls;\nint64_t bump(int64_t x) { calls++; return x; }\nint main(void) {\n  int64_t a[16], s = 0;\n  for (int k = 0; k < 16; k++) { a[k] = k * 1000003 + 1; s += a[k]; }\n  /* The count runs 19 down to 4: 16 and 8 call. */\n  if (ticks(a, 16, 20) != s || calls != 2) return 1;\n  if (ticks(a, 1, 9) != a[0] || calls != 3) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A sum or difference with a constant of 12 bits shifted left by 12 (arm64's second immediate form):
+// one instruction, no constant built in a register (no `movz wd, #imm, lsl #16`).
+@test
+fn a_shifted_immediate_adds_in_one_instruction() {
+    let lir = "lir ptr 8\nsym @steps fn global\nfn @steps\n  sig (i32, i64) -> i64\nb0(v0: i32, v1: i64):\n  v2 = iconst.i32 2097152\n  v3 = sub.i32 v0, v2\n  v4 = iconst.i64 16773120\n  v5 = add.i64 v1, v4\n  v6 = zext.i64 v3\n  v7 = add.i64 v5, v6\n  ret v7\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    // `movz wd, #imm16, lsl #16` and its 64-bit form.
+    assert_eq(elf_text_count(&obj, 0x7FE00000, 0x52A00000), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t steps(int32_t, int64_t);\nint main(void) {\n  if (steps(2097152 + 5, 1) != 1 + 16773120 + 5) return 1;\n  /* 3 - 2097152 wraps in 32 bits and extends with zeros. */\n  if (steps(3, 0) != 16773120 + (int64_t)(uint32_t)(3 - 2097152)) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A truncation to 8 bits that two comparisons read alone: arm64 makes it extended once
+// (`Live.xtrunc`), so one `uxtb` serves both. A sum of 8 bits compared in one block and extended in a
+// later one that another path reaches: the comparison's extension stays out of the sum's register (its
+// range does not end in that block), and the later block extends it itself.
+@test
+fn narrow_values_extend_once_where_every_reader_follows() {
+    let lir = "lir ptr 8\nsym @pick fn global\nsym @paths fn global\nfn @pick\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = trunc.i8 v0\n  v3 = iconst.i8 3\n  v4 = icmp.eq v2, v3\n  br v4, b1, b2\nb1:\n  ret v1\nb2:\n  v5 = iconst.i8 200\n  v6 = icmp.ugt v2, v5\n  br v6, b3, b4\nb3:\n  v7 = add.i64 v1, v1\n  ret v7\nb4:\n  v8 = iconst.i64 0\n  ret v8\nfn @paths\n  sig (i64, i64, i64) -> i64\nb0(v0: i64, v1: i64, v2: i64):\n  v3 = trunc.i8 v0\n  v4 = trunc.i8 v1\n  v5 = add.i8 v3, v4\n  v6 = iconst.i64 0\n  v7 = icmp.eq v2, v6\n  br v7, b1, b2\nb1:\n  v8 = iconst.i8 5\n  v9 = icmp.ugt v5, v8\n  br v9, b3, b2\nb2:\n  v10 = zext.i64 v5\n  ret v10\nb3:\n  ret v6\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    let one = "lir ptr 8\nsym @pick fn global\nfn @pick\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = trunc.i8 v0\n  v3 = iconst.i8 3\n  v4 = icmp.eq v2, v3\n  br v4, b1, b2\nb1:\n  ret v1\nb2:\n  v5 = iconst.i8 200\n  v6 = icmp.ugt v2, v5\n  br v6, b3, b4\nb3:\n  v7 = add.i64 v1, v1\n  ret v7\nb4:\n  v8 = iconst.i64 0\n  ret v8\n";
+    assert(
+        object_of(one, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    // `uxtb wd, wn`.
+    assert_eq(elf_text_count(&obj, 0xFFFFFC00, 0x53001C00), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t pick(int64_t, int64_t);\nint64_t paths(int64_t, int64_t, int64_t);\nint main(void) {\n  if (pick(3 + 256 * 5, 9) != 9 || pick(201, 9) != 18 || pick(201 + 256, 9) != 18 || pick(7, 9) != 0) return 1;\n  /* 255 + 2 is 1 in 8 bits, on the path that skips the comparison and on the one through it. */\n  if (paths(255, 2, 1) != 1 || paths(255, 2, 0) != 1) return 2;\n  if (paths(10, 0, 0) != 0 || paths(4, 1, 0) != 5) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A loop whose exit edge moves two values (the block after it has its homes from an edge that skips the
+// loop) and whose edge back moves none: the exit's moves run on the exit's path, not before the branch on
+// every iteration (`place::Core::colder`), and the conditional branch is the edge back's. On arm64 a
+// conditional branch goes back, and no register move stands right before it.
+@test
+fn a_loop_exits_moves_stay_off_the_edge_back() {
+    let lir = "lir ptr 8\nsym @last fn global\nfn @last\n  sig (ptr, i64) -> i64\nb0(v0: ptr, v1: i64):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 1\n  v4 = icmp.eq v1, v2\n  br v4, b2(v1, v3), b1(v2, v2)\nb1(v5: i64, v6: i64):\n  v7 = ptradd v0, v5 * 8\n  v8 = load.i64 v7 align 3\n  v9 = add.i64 v6, v8\n  v10 = add.i64 v5, v3\n  v11 = icmp.ult v10, v1\n  br v11, b1(v10, v9), b2(v8, v9)\nb2(v12: i64, v13: i64):\n  v14 = mul.i64 v12, v13\n  ret v14\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    let (off, size) = elf_text(&obj);
+    let mut back: u32 = 0;
+    for k in 1..size / 4 {
+        let w = le_at(&obj, off + k * 4, 4) as u32;
+        // `b.cond` with a negative offset.
+        if (w & 0xFF800010) == 0x54800000 {
+            back += 1;
+            let p = le_at(&obj, off + (k - 1) * 4, 4) as u32;
+            assert((p & 0xFFE0FFE0) != 0xAA0003E0, "a move before the branch back");
+        }
+    }
+    assert_eq(back, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t last(const int64_t *, int64_t);\nint main(void) {\n  int64_t a[5] = {3, 1, 4, 1, 5};\n  if (last(a, 5) != 5 * 14 || last(a, 1) != 3 * 3 || last(a, 0) != 0) return 1;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // A vector join that a store writes to memory: the join's parameter takes an xmm register home on x86-64,
 // and the store writes that register, as it does an xmm-held vector of any other home. A loop's vector
 // sum that a reduction after the loop reads lane by lane in memory: it takes no register of the loop's

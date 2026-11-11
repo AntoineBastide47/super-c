@@ -1146,6 +1146,20 @@ extend Core {
         return r.op == O_RET && (r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) && (b.pool[t.b as usize + 2] & AGG) == 0;
     }
 
+    /// Whether edge `e` of the current block's terminator runs less often than its other edge `o`: its
+    /// target is a rare block and `o`'s is not, or it leaves the block's innermost loop and `o` stays in
+    /// it. Such an edge's moves go on its own path, and the branch taken is `o`'s.
+    pub(package) const fn colder(self: &Self, e: u32, o: u32) bool {
+        let b = self.b();
+        let te = b.edge_target(e);
+        let to = b.edge_target(o);
+        if self.lv.rare[te as usize] != self.lv.rare[to as usize] {
+            return self.lv.rare[te as usize];
+        }
+        let h = self.lv.inner[self.lv.order[self.pos as usize] as usize];
+        return h != NONE && self.lv.in_loop(h, to) && !self.lv.in_loop(h, te);
+    }
+
     // The register home of edge argument `v` when `v` dies at this terminator, NOREG else.
     pub(package) const fn home_dying(self: &Self, v: Value) u8 {
         if v == VNONE {

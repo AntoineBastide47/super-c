@@ -201,3 +201,72 @@ b0(v0: i64):
     live.run(b);
     assert(!live.pfold[2], "the truncation stays");
 }
+
+// One callee-saved register, a value read three times per iteration of a first loop and once after a
+// second loop, and a lighter value that the second loop reads across its call: the scan gives the
+// register to the first value for its whole range. `Live::seg_evict` splits it around the second loop: it
+// holds the register through the first loop, the second value holds it in the block that enters the
+// second loop and in the loop, and the block after the loop (an edge from the loop enters it) reads the
+// first value from its stack home. With two registers each value keeps a whole home.
+@test
+fn a_holder_idle_in_a_loop_gives_its_register_to_the_loops_value() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = add.i64 v0, v0
+  jmp b1(v0)
+b1(v3: i64):
+  v4 = add.i64 v3, v2
+  v5 = add.i64 v4, v2
+  v6 = add.i64 v5, v2
+  v7 = icmp.ult v6, v1
+  br v7, b1(v6), b2
+b2:
+  v8 = add.i64 v1, v1
+  jmp b3(v0)
+b3(v9: i64):
+  v10 = add.i64 v9, v8
+  v11 = call.i64 @g(v10) : (i64) -> i64
+  v12 = icmp.ult v11, v8
+  br v12, b3(v11), b4
+b4:
+  v13 = add.i64 v11, v2
+  ret v13
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let mut live = lv::Live::new();
+    live.run(b);
+    live.split = true;
+    let np = live.order.len();
+    let mut want = Vector::<u8>::new();
+    want.resize_default(live.end.len());
+    // Instruction 0 is the first value, instruction 7 the second.
+    want[0] = lv::WANT_CALLEE;
+    want[7] = lv::WANT_CALLEE;
+    // The call is instruction 10, in block 3.
+    fill(&mut live.cfirst, np, NONE);
+    fill(&mut live.clast, np, NONE);
+    live.cfirst[live.pos[3] as usize] = 10;
+    live.clast[live.pos[3] as usize] = 10;
+    live.plan(b, &want, lv::Caps { xc: 1, xs: 0, xj: 1, vc: 0, vs: 0, vj: 0 });
+    assert_eq(live.home[0], lv::HOME_NONE);
+    assert(live.seg_val(0) && live.seg_mem[0], "the first value has segments and a stack home");
+    assert_eq(live.home_at(0, live.pos[0]), lv::HOME_CALLEE);
+    assert_eq(live.home_at(0, live.pos[1]), lv::HOME_CALLEE);
+    assert_eq(live.home_at(0, live.pos[2]), lv::HOME_NONE);
+    assert_eq(live.home_at(0, live.pos[3]), lv::HOME_NONE);
+    assert_eq(live.home_at(0, live.pos[4]), lv::HOME_NONE);
+    assert_eq(live.home_at(7, live.pos[2]), lv::HOME_CALLEE);
+    assert_eq(live.home_at(7, live.pos[3]), lv::HOME_CALLEE);
+    live.plan(b, &want, lv::Caps { xc: 2, xs: 0, xj: 2, vc: 0, vs: 0, vj: 0 });
+    assert_eq(live.home[0], lv::HOME_CALLEE);
+    assert_eq(live.home[7], lv::HOME_CALLEE);
+    assert(!live.seg_val(0) && !live.seg_val(7), "no segment with a register for each");
+}

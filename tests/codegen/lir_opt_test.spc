@@ -18224,3 +18224,206 @@ b25:
         same_result(&b, &a, "f", [c, 17, 1, 1, 1, 16, 0, 2, 2], want);
     }
 }
+
+// `a && b` decides between four loads from consecutive addresses and four constants for a join's
+// parameters: the block that tests `a` and the block that tests `b` take the one edge of the block that
+// only jumped to the join with the constants (one record for both), the parameters pack into two
+// vectors, and each block passes a wide constant that its own edge can read (the body verifies: each use
+// is dominated by its definition).
+@test
+fn a_packed_joins_constants_dominate_each_edge() {
+    let text = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 -4294967296
+  v6 = iconst.i64 1
+  v7 = load.i64 v2+16 align 3
+  v8 = icmp.ne v7, v6
+  br v8, b1, b7
+b1:
+  v9 = load.i64 v1 align 0
+  v10 = load.i64 v1+8 align 0
+  v11 = load.i64 v1+16 align 0
+  v12 = load.i64 v1+24 align 0
+  v13 = icmp.eq v3, v4
+  br v13, b2, b4
+b2:
+  v14 = load.i64 v2 align 3
+  v15 = icmp.uge v3, v14
+  br v15, b6, b3
+b3:
+  v16 = load.i64 v2+8 align 3
+  v17 = icmp.eq v16, v3
+  br v17, b5(v9, v10, v11, v12), b4
+b4:
+  jmp b5(v4, v4, v5, v4)
+b5(v18: i64, v19: i64, v20: i64, v21: i64):
+  store v18, v0 align 0
+  store v19, v0+8 align 0
+  store v20, v0+16 align 0
+  store v21, v0+24 align 0
+  ret
+b6: unlikely
+  unreachable
+b7:
+  ret
+)";
+    let mut err = String::new();
+    let mut p = lparse::parse(text, &mut err).unwrap();
+    p.vector = 16;
+    p.apairs = false;
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut p,
+        &none,
+        lopt::Config {
+            inline: il::SPEED,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                version_checks: u32::MAX,
+                unswitch: 0,
+                rotate: 0,
+                vector: 2,
+                interleave: 2,
+                fin: 0,
+            },
+        },
+    );
+    verified(&p);
+    let t = text_of(&p, "f");
+    assert(t.contains("load.v2i64"), t.as_str());
+}
+
+// A local copy of a record in memory (`let t = table[i]`) that field loads read, and that one path
+// copies again (an inlined callee's by-value parameter) to read its words: each load reads the record,
+// right before the first copy, and both copies and their slots go (`Opt::copy_fed`). `pick` writes the
+// record after the copy: the fields it reads are the copy's.
+@test
+fn a_copied_records_fields_load_from_the_record() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @pick fn global noinline
+sym @drive fn global
+fn @pick
+  sig (ptr, i64) -> i64
+  slot s0 size 16 align 2
+  slot s1 size 16 align 2
+b0(v0: ptr, v1: i64):
+  v2 = slotaddr s0
+  v3 = slotaddr s1
+  v4 = iconst.i64 16
+  v5 = ptradd v0, v1 * 16
+  memcpy.overlap v2, v5, v4
+  v6 = iconst.i32 0
+  store v6, v5 align 2
+  store v6, v5+4 align 2
+  v7 = load.i8 v2+14 align 0
+  v8 = iconst.i8 7
+  v9 = icmp.eq v7, v8
+  br v9, b1, b2
+b1:
+  memcpy.overlap v3, v2, v4
+  v10 = load.i64 v3 align 2
+  v11 = load.i64 v3+8 align 2
+  v12 = iconst.i64 48
+  v13 = lshr.i64 v11, v12
+  v14 = iconst.i64 255
+  v15 = and.i64 v13, v14
+  v16 = trunc.i32 v10
+  v17 = zext.i64 v16
+  v18 = add.i64 v17, v15
+  ret v18
+b2:
+  v19 = load.i32 v2+4 align 2
+  v20 = zext.i64 v19
+  ret v20
+fn @drive
+  sig () -> i64
+  slot s0 size 32 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = iconst.i64 0
+  store v1, v0 align 3
+  store v1, v0+8 align 3
+  store v1, v0+16 align 3
+  store v1, v0+24 align 3
+  v2 = iconst.i32 11
+  v3 = iconst.i32 22
+  v4 = iconst.i32 33
+  v5 = iconst.i8 7
+  store v2, v0 align 2
+  store v3, v0+4 align 2
+  store v4, v0+8 align 2
+  store v5, v0+14 align 0
+  v6 = iconst.i32 44
+  v7 = iconst.i32 55
+  v8 = iconst.i32 66
+  v9 = iconst.i8 9
+  store v6, v0+16 align 2
+  store v7, v0+20 align 2
+  store v8, v0+24 align 2
+  store v9, v0+30 align 0
+  v10 = iconst.i64 1
+  v11 = call.i64 @pick(v0, v1) : (ptr, i64) -> i64
+  v12 = call.i64 @pick(v0, v10) : (ptr, i64) -> i64
+  v13 = add.i64 v11, v12
+  ret v13
+)",
+    );
+    let p = text_of(&a, "pick");
+    assert(!p.contains("memcpy") && !p.contains("slotaddr"), p.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 73);
+}
+
+// A copy of 8 bytes into a by-value aggregate parameter's memory, then a load of one of its bytes. The
+// write table, made before the walk, lists the copy; the walk makes the copy a load and a store (a
+// parameter's copy does not wait) before it reaches the byte's load. `Opt::copy_fed` then finds a store
+// where the table names a copy and forwards nothing. Without that check it reads the store's offset
+// field, 0, as the copy's size, which names the body's first instruction, and takes the stored value for
+// an address. The first instruction is an integer constant in every order of this body: each other
+// instruction reads a constant of the body, or follows the copy in memory order. So the case does not
+// rest on where the optimizer puts constants. The byte read is the copy's, although `byte` writes the
+// source after the copy.
+@test
+fn a_copy_the_walk_made_a_store_feeds_no_load() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @byte fn global noinline
+sym @drive fn global
+fn @byte
+  layout l0 size 8 align 3 [0 i64]
+  sig (ptr, l0) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 8
+  memcpy.overlap v1, v0, v2
+  v3 = iconst.i64 0
+  store v3, v0 align 3
+  v4 = load.i8 v1+1 align 0
+  v5 = zext.i64 v4
+  ret v5
+fn @drive
+  layout l0 size 8 align 3 [0 i64]
+  sig () -> i64
+  slot s0 size 8 align 3
+  slot s1 size 8 align 3
+b0:
+  v0 = slotaddr s0
+  v1 = slotaddr s1
+  v2 = iconst.i64 1234605616436508552
+  store v2, v0 align 3
+  v3 = iconst.i64 0
+  store v3, v1 align 3
+  v4 = call.i64 @byte(v0, v1) : (ptr, l0) -> i64
+  ret v4
+)",
+    );
+    let none: []u64 = [];
+    // 0x1122334455667788: the byte at offset 1 is 0x77.
+    same_result(&b, &a, "drive", none, 119);
+}

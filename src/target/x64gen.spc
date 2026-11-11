@@ -1061,6 +1061,15 @@ extend Gen {
         let x = self.cr.vx(v);
         let xa = self.cr.vx(a);
         let t = self.cr.vt(v);
+        // A step in another block than the edge back (`lv::Live::fstep`), over the parameter it reads.
+        if xa != NONE && self.cr.lv.fstep[x as usize] == xa && self.cr.va[xa as usize].reg == ra && self.step_home(
+            x,
+            true,
+        ) == ra {
+            self.cr.lock |= bit(ra);
+            self.cr.va.index_mut(x as usize).clean = false;
+            return ra;
+        }
         let sr = self.def_shared(v, a);
         if sr != NOREG {
             return sr;
@@ -1449,11 +1458,45 @@ extend Gen {
         return r;
     }
 
+    // The register of the header parameter that instruction `x` steps (`lv::Live::fstep`), now `x`'s home
+    // too: the parameter, whose value is dead from here on, keeps the register's ownership to the end of
+    // its range, which holds `x`'s. Not for an `x` that reads the parameter unless `reads` (the caller
+    // computes `x` in that register over the parameter: `def_over`). NOREG when `x` steps none, or the
+    // parameter has no register home.
+    fn step_home(self: &mut Self, x: u32, reads: bool) u8 {
+        let px = self.cr.lv.fstep[x as usize];
+        if px == NONE {
+            return NOREG;
+        }
+        let pa = self.cr.va[px as usize];
+        if pa.home != H_FIXED || pa.reg == NOREG {
+            return NOREG;
+        }
+        if !reads {
+            let pv = VPARAM | px - self.cr.b().insts.len() as u32;
+            let us = self.cr.lv.uses_of(x);
+            for k in 0..us.len() {
+                if us[k] == pv {
+                    return NOREG;
+                }
+            }
+        }
+        let w = self.cr.va.index_mut(x as usize);
+        w.reg = pa.reg;
+        w.home = H_FIXED;
+        w.dirty = false;
+        return pa.reg;
+    }
+
     // The register home `fix_class` gives value index `x` of file `vr`, taken (`prefer`, a register `x`
     // arrives in, when it may be its home); NOREG for none.
     fn take_home(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
         if self.cr.lv.seg_val(x) {
             return self.seg_take(x, prefer);
+        }
+        let sr = self.step_home(x, false);
+        if sr != NOREG {
+            return sr;
         }
         let fc = self.fix_class(x);
         if fc == FIX_CALLEE {
@@ -3440,6 +3483,7 @@ extend Gen {
         };
         let b = self.cr.b();
         self.cr.lv.fold_max = 8;
+        self.cr.lv.steps = true;
         // The parameters' places, which the folds read (`lv::Live::mem_params`).
         classify(self.win, self.sc_self, b, b.sig, self.cr.ptr, self.vregs, &mut self.cr.self_lay);
         self.cr.lv.mem_params = 0;
@@ -9236,6 +9280,9 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(x::invert(cc), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(cc, tt);
                 self.goto(tf, false);
@@ -9245,6 +9292,9 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(x::invert(cc), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(cc, tt);
                 self.goto(tf, false);
@@ -9259,23 +9309,32 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(x::invert(cc), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(cc, tt);
                 self.goto(tf, false);
             }
-        } else if mt && !mf && (tt != next && self.early_ok(et, ef) || self.early_moves(et, ef)) {
+        } else if mt && !mf && !self.cr.colder(et, ef) && (tt != next && self.early_ok(et, ef) || self.early_moves(
+            et,
+            ef,
+        )) {
             self.flag_moves(et);
             self.cbranch(cc, tt);
             self.goto(tf, false);
-        } else if !mt && mf && (tf != next && self.early_ok(ef, et) || self.early_moves(ef, et)) {
+        } else if !mt && mf && !self.cr.colder(ef, et) && (tf != next && self.early_ok(ef, et) || self.early_moves(
+            ef,
+            et,
+        )) {
             self.flag_moves(ef);
             self.cbranch(x::invert(cc), tf);
             self.goto(tt, false);
-        } else if mt && mf && tt != next && self.early_ok(et, ef) {
+        } else if mt && mf && tt != next && !self.cr.colder(et, ef) && self.early_ok(et, ef) {
             // The edge to the block that does not follow first: the other's moves fall through.
             self.flag_moves(et);
             self.branch_over(cc, tt, ef);
-        } else if mt && mf && tf != next && self.early_ok(ef, et) {
+        } else if mt && mf && tf != next && !self.cr.colder(ef, et) && self.early_ok(ef, et) {
             self.flag_moves(ef);
             self.branch_over(x::invert(cc), tf, et);
         } else if mt && !mf {
