@@ -2174,6 +2174,30 @@ b27(v85: i32):
     }
 }
 
+// The late edges' stubs go at the first place no block falls into, and a far conditional branch's test
+// (arm64, retried with every conditional branch over a `b`) jumps past that `b` to the next block: that is
+// such a place. `b2`'s bit test to `b4`, 40 KB away past `b3`, makes the retry; the stub of `b0`'s late edge
+// into `b2` went between the `b` and `b3`, so an odd count re-entered `b2` with 4.
+@test
+fn late_edge_stubs_skip_far_branch_landings() {
+    let mut lir = String::from_str(
+        "lir ptr 8\nsym @f fn global\nfn @f\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n  v2 = iconst.i64 0\n  v3 = iconst.i64 1\n  v4 = iconst.i64 4\n  v5 = icmp.ne v1, v2\n  br v5, b1(v2), b2(v4)\nb1(v6: i64):\n  v7 = add.i64 v6, v3\n  v8 = icmp.ult v7, v0\n  br v8, b1(v7), b2(v7)\nb2(v9: i64):\n  v10 = and.i64 v9, v3\n  v11 = icmp.ne v10, v2\n  br v11, b3, b4(v9)\nb3:\n  v12 = add.i64 v9, v3\n",
+    );
+    for k in 0..9999u32 {
+        lir.format_into("  v{} = add.i64 v{}, v3\n", 13 + k, 12 + k);
+    }
+    lir.push_str("  jmp b4(v10011)\nb4(v10012: i64):\n  ret v10012\n");
+    if cli::has_cc() {
+        assert_eq(
+            run_native(
+                &lir,
+                "long long f(long long, long long);\nint main(void) {\n  if (f(5, 1) != 10005) return 1;\n  if (f(4, 1) != 4) return 2;\n  if (f(9, 0) != 4) return 3;\n  return 0;\n}\n",
+            ),
+            0,
+        );
+    }
+}
+
 // A branch on an `and` of two comparisons whose second operand lives in memory across a call, its false
 // edge the next block: the jump after the first comparison does not take that block, which keeps the
 // registers the second comparison leaves (x86-64 `branch_conj`).

@@ -2669,6 +2669,7 @@ extend Gen {
     // The late edges' stubs (`lv::Live::late`): each edge's moves into its target's parameter homes as the
     // target started (`late_va`), then a jump to the target. The parameters' state comes back after.
     fn late_stubs(self: &mut Self) {
+        self.cr.stubbing = true;
         self.stubs_out = true;
         let nb = self.cr.b().blocks.len();
         let mut cur = Vector::<Va>::with_capacity(self.late_va.len());
@@ -2703,6 +2704,7 @@ extend Gen {
         for j in 0..self.late_va.len() {
             self.cr.va.set(self.late_va[j].0 as usize, cur[j]);
         }
+        self.cr.stubbing = false;
     }
 
     // ---- Frame ----
@@ -3333,6 +3335,7 @@ extend Gen {
         self.cr.held = 0;
         // Past the blocks, one per late edge: its stub (`lv::Live::late`).
         fill(&mut self.blk_at, b.blocks.len() + self.cr.lv.late.len(), NONE);
+        self.cr.join_tables();
         self.late_va.truncate(0);
         self.stubs_out = self.cr.lv.late.len() == 0;
         self.c.clear();
@@ -3951,6 +3954,7 @@ extend Gen {
                     self.cr.set_owner(r, NONE);
                 }
             }
+            self.cr.join_in(q, k);
         }
         let bk = b.blocks[k as usize];
         if self.upper_entry(q, k) {
@@ -8572,6 +8576,7 @@ extend Gen {
 
     // A conditional jump on condition `cc` to block `k`.
     fn cbranch(self: &mut Self, cc: u32, k: u32) {
+        self.cr.join_note(k);
         let at = self.c.jcc32(cc);
         self.fix.push(at as u64 << 32 | k as u64);
     }
@@ -8584,6 +8589,7 @@ extend Gen {
 
     // Jump to block `k` (nothing when it follows, unless `force`).
     fn goto(self: &mut Self, k: u32, force: bool) {
+        self.cr.join_note(k);
         let q = self.cr.pos as usize + 1;
         if !force && q < self.cr.lv.order.len() && self.cr.lv.order[q] == k && !self.crosses(k) {
             return;
@@ -9025,6 +9031,7 @@ extend Gen {
         };
         if !mt && !mf {
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
             } else {
                 self.cbranch(cc, tt);
@@ -9033,6 +9040,7 @@ extend Gen {
         } else if mt && mf && self.same_moves(et, ef) {
             self.flag_moves(et);
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
             } else {
                 self.cbranch(cc, tt);
@@ -9046,6 +9054,7 @@ extend Gen {
             // takes a value its back edge also passes on).
             self.flag_moves(ast::pick(self.cr.moves_within(et, ef), ef, et));
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(x::invert(cc), tf);
             } else {
                 self.cbranch(cc, tt);
@@ -9090,6 +9099,7 @@ extend Gen {
     // A branch on `cc` to block `k`, then the moves of edge `e` and a jump to its target. When the moves
     // leave no code (their arguments were in place), the branch inverted to that target alone.
     fn branch_over(self: &mut Self, cc: u32, k: u32, e: u32) {
+        self.cr.join_note(k);
         let at = self.c.jcc32(cc);
         self.edge_moves(e);
         let te = self.cr.b().edge_target(e);

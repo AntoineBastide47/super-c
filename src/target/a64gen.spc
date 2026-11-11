@@ -103,6 +103,7 @@ pub(package) struct Gen {
     suse: Vector<u32>, // per slot, the uses of its addresses (`place::slot_uses`)
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
+    landed: u32, // the code position the last branch `here` patched jumps to (NONE: none)
     // The bool value a select's `tst` tested in this block, the code index and word of that `tst`
     // (`select_op`), NONE.
     btest_x: u32,
@@ -223,6 +224,7 @@ extend Gen {
             suse: Vector::<u32>::new(),
             cur: 0,
             paired: NONE,
+            landed: NONE,
             btest_x: NONE,
             btest_at: 0,
             btest_w: 0,
@@ -1584,10 +1586,11 @@ extend Gen {
     }
 
     // Whether no block falls into layout position `q`: the code so far ends with a branch that nothing
-    // falls past (`b`, `br` or `ret`), and the block before `q` has code (an empty one falls through).
+    // falls past (`b`, `br` or `ret`), no branch lands past it (`here`: a far conditional branch over that
+    // `b` to the block at `q`), and the block before `q` has code (an empty one falls through).
     const fn ends_jump(self: &Self, q: u32) bool {
         let n = self.code.len();
-        if n == 0 || q == 0 || self.blk_at[self.cr.lv.order[q as usize - 1] as usize] == n as u32 {
+        if n == 0 || q == 0 || self.blk_at[self.cr.lv.order[q as usize - 1] as usize] == n as u32 || self.landed == n as u32 {
             return false;
         }
         let w = self.code[n - 1];
@@ -1598,6 +1601,7 @@ extend Gen {
     // target started (`late_va`), then a jump to the target. The parameters' state comes back after.
     fn late_stubs(self: &mut Self) {
         self.stubs_out = true;
+        self.cr.stubbing = true;
         let nb = self.cr.b().blocks.len();
         let mut cur = Vector::<Va>::with_capacity(self.late_va.len());
         for j in 0..self.late_va.len() {
@@ -1631,6 +1635,7 @@ extend Gen {
         for j in 0..self.late_va.len() {
             self.cr.va.set(self.late_va[j].0 as usize, cur[j]);
         }
+        self.cr.stubbing = false;
     }
 
     // ---- Frame ----
@@ -2099,9 +2104,11 @@ extend Gen {
         // Past the blocks, one per late edge: its stub (`lv::Live::late`).
         fill(&mut self.blk_at, b.blocks.len() + self.cr.lv.late.len(), NONE);
         fill(&mut self.zin, b.blocks.len(), 0);
+        self.cr.join_tables();
         self.late_va.truncate(0);
         self.stubs_out = self.cr.lv.late.len() == 0;
         self.code.truncate(0);
+        self.landed = NONE;
         self.fix.truncate(0);
         self.epi.truncate(0);
         self.tails.truncate(0);
@@ -2703,6 +2710,7 @@ extend Gen {
                     self.cr.set_owner(r, NONE);
                 }
             }
+            self.cr.join_in(q, k);
         }
         let bk = b.blocks[k as usize];
         let zk = if k as usize < self.zin.len() {
@@ -6955,6 +6963,7 @@ extend Gen {
 
     // A conditional branch on `test` to block `k`.
     fn cbranch(self: &mut Self, test: Test, k: u32) {
+        self.cr.join_note(k);
         // A `cbz` that alone enters a block without parameters leaves its register 0 there (a late edge's
         // stub, past the blocks, is none).
         if test.kind == T_CBZ && k as usize < self.zin.len() && self.cr.lv.npred[k as usize] == 1 && self.cr.b().blocks[k as usize].param_len == 0 {
@@ -6996,6 +7005,7 @@ extend Gen {
 
     // Jump to block `k` (nothing when it follows, unless `force`).
     fn goto(self: &mut Self, k: u32, force: bool) {
+        self.cr.join_note(k);
         let q = self.cr.pos as usize + 1;
         if !force && q < self.cr.lv.order.len() && self.cr.lv.order[q] == k && !self.crosses(k) {
             return;
@@ -7008,6 +7018,7 @@ extend Gen {
     const fn here(self: &mut Self, w: u32) {
         let off = ((self.code.len() as u32 - w) * 4) as i32;
         self.code[w as usize] = a::repatch(self.code[w as usize], off);
+        self.landed = self.code.len() as u32;
     }
 
     // x17 = switch value `r` (`bits` wide, zero-extended below 32 bits) minus `min`, wrapped at its width
@@ -7173,6 +7184,7 @@ extend Gen {
             let e = es[x as usize];
             let w = self.code.len() as u32;
             if !self.cr.moves_needed(e) {
+                self.cr.join_note(b.edge_target(e));
                 self.fix.push(w as u64 << 32 | b.edge_target(e) as u64);
             } else if e == d {
                 ds.push(w);
@@ -7413,6 +7425,7 @@ extend Gen {
         }
         if !mt && !mf {
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
             } else {
                 self.cbranch(test, tt);
@@ -7421,6 +7434,7 @@ extend Gen {
         } else if mt && mf && test.kind == T_CC && self.same_moves(et, ef) {
             self.edge_moves(et);
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
             } else {
                 self.cbranch(test, tt);
@@ -7434,6 +7448,7 @@ extend Gen {
             // takes a value its back edge also passes on).
             self.moves_before(test, ast::pick(self.cr.moves_within(et, ef), ef, et));
             if tt == next {
+                self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
             } else {
                 self.cbranch(test, tt);

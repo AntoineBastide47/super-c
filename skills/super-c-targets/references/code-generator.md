@@ -24,7 +24,10 @@ set first: it states the value, register and frame model.
    for the homes.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
    the LIR slots, then the spills; the callee-saved registers and the frame pointer last.
-3. Homes: `Live::plan` gives each value a home class per register file (none, callee-saved for a value
+3. Homes: `Live::plan` weighs each value by the frequencies of its definition's and uses' blocks
+   (`Live::frequencies`: a static estimate after LLVM's, propagated in reverse postorder, a branch
+   split evenly but a rare successor's share 1 in 16, a loop header 8 times its entering edges, an edge
+   out of a loop 8 times less per loop left) and gives each value a home class per register file (none, callee-saved for a value
    a loop keeps, caller-saved); constants and symbol and slot addresses rematerialize at each use.
    A displaced interval can keep its register prefix up to a block boundary no backward edge
    crosses. `cut` and sorted `splits` describe these prefixes; `home_at` selects the class at
@@ -33,7 +36,12 @@ set first: it states the value, register and frame model.
    leaves a prefix for a block that reads the value, including one that skips the cut block, writes
    the suffix slot (`save_splits`).
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
-   home before the branch; an edge moves the block arguments (`edge_homes`).
+   home before the branch; an edge moves the block arguments (`edge_homes`). A block whose only
+   predecessor falls into it keeps the register state (`Live::continues`); another, whose predecessors
+   the layout all puts before it, starts with the instruction values every branch into it left in one
+   register (`place::Core::join_note` at each branch, `join_in` at the block; an edge's moves write only
+   its parameters' homes). A late stub's branch or one from code outside the blocks gives its target no
+   such state (`jbad`).
 5. `finish`: branch fixups, relocations into the object, call frame rows, line rows. arm64 retries a
    body whose conditional branch is out of range with every one of them over an unconditional branch.
    A retry (`again`: that one, or a shrink-wrap attempt that failed) keeps the relays, the canary, the

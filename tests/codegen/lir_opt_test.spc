@@ -3152,7 +3152,8 @@ data @leaked size 8 align 3
 }
 
 // A copy between two slots of its size merges them (`lir::promote`): the source's last use is the copy
-// and the destination's first, the copy in no cycle. Not when the source is read after the copy.
+// and the destination's first, the copy in no cycle. Not when the source is read after the copy and the
+// call writes its copy (`take` stores into its argument).
 @test
 fn a_copy_between_slots_merges_them() {
     let (b, a) = optimized(
@@ -3167,6 +3168,7 @@ b0(v0: ptr):
   v1 = load.i64 v0 align 3
   v2 = load.i64 v0+8 align 3
   v3 = add.i64 v1, v2
+  store v3, v0 align 3
   ret v3
 fn @merged
   layout l0 size 16 align 3 [0 i64, 8 i64]
@@ -10705,6 +10707,59 @@ b0(v0: i64):
     same_result(&b, &a, "top", x, 42);
 }
 
+// A slot whose address goes to a call that keeps no pointer of it (`Sym.esc`) is a class of its own: a call
+// in the loop that takes no address of it writes none of its bytes, so its load leaves the loop.
+@test
+fn a_load_of_a_slot_no_call_of_the_loop_takes_leaves_it() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @fill fn global noinline
+sym @tick fn global noinline
+sym @f fn global noinline
+sym @g data global
+data @g size 8 align 3 bytes 0000000000000000
+fn @fill
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  store v1, v0+8 align 3
+  ret
+fn @tick
+  sig () -> i64
+b0:
+  v0 = symaddr @g
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 1
+  v3 = add.i64 v1, v2
+  store v3, v0 align 3
+  ret v3
+fn @f
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  call @fill(v1, v0) : (ptr, i64) -> void
+  jmp b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = load.i64 v1+8 align 3
+  v7 = call.i64 @tick() : () -> i64
+  v8 = add.i64 v5, v6
+  v9 = add.i64 v4, v3
+  v10 = icmp.slt v9, v0
+  br v10, b1(v9, v8), b2(v8)
+b2(v11: i64):
+  ret v11
+)",
+    );
+    let t = text_of(&a, "f");
+    let at = t.as_str().find("load.i64 v1+8");
+    let loop_at = t.as_str().find("b1(");
+    assert(at >= 0 && loop_at >= 0 && at < loop_at, t.as_str());
+    let x: []u64 = [4];
+    same_result(&b, &a, "f", x, 16);
+}
+
 // A loop that writes a private slot keeps that slot's loads: a counter kept in it counts.
 @test
 fn a_loop_writing_a_private_slot_keeps_its_loads() {
@@ -17366,7 +17421,7 @@ b0(v0: i64):
         16,
     );
     let r = text_of(&a, "relay");
-    assert(!r.contains("memcpy") && r.contains("call @bump(v1"), r.as_str());
+    assert(!r.contains("memcpy") && !r.contains("slot s2"), r.as_str());
 }
 
 // Seventy-two owned buffers before the three the loops reach; pushes through `&mut self.work`, whose growth

@@ -217,6 +217,8 @@ pub(package) struct Opt {
     obits: u64, // the classes of owned buffers (`owned_seeds`)
     cnext: u32, // the first class index past the parameters' and the scopes'
     fcall: Vector<u32>, // per class index, the allocation whose block it is (`fresh_seeds`)
+    sclass: Vector<u32>, // per slot, the class index of its memory (`slot_seeds`), NONE
+    sloop: Vector<bool>, // per slot, whether a load in a loop reads it (`slot_seeds`)
     oparam: Vector<u32>, // per class index, the parameter whose owned buffer it is (`owned_seeds`)
     ooff: Vector<u32>, // per class index, the owned field's offset in the parameter's referent
     oload: Vector<u32>, // per instruction, the class index of the owned field it loads (NONE: none)
@@ -555,6 +557,8 @@ extend Opt {
             obits: 0,
             cnext: 0,
             fcall: Vector::<u32>::new(),
+            sclass: Vector::<u32>::new(),
+            sloop: Vector::<bool>::new(),
             oparam: Vector::<u32>::new(),
             ooff: Vector::<u32>::new(),
             oload: Vector::<u32>::new(),
@@ -3414,6 +3418,11 @@ extend Opt {
     // to it: no other pointer reaches the block until the pointer escapes, and returning it or freeing it
     // is no escape (no access of the body follows the one, any access of the block after the other is
     // undefined).
+    //
+    // So is the memory of a slot whose address is no private one's (`privates`: it goes to calls), past
+    // those, its addresses (`O_SLOTADDR`) pinned to it: until the address escapes, only the calls it goes
+    // to reach the slot, which `write_bits` counts as writes of its class (`arg_bits`), and a call that
+    // takes no address of it touches none of its bytes (LLVM's no-capture allocas).
     fn classes(self: &mut Self, pk: &Package, b: &Body) {
         fill(&mut self.icls, b.insts.len(), CL_OTHER);
         fill(&mut self.pcls, b.params.len(), CL_OTHER);
@@ -3438,6 +3447,12 @@ extend Opt {
         if (b.pool[b.sig as usize + 2] & AGG) != 0 && np < (CL_FROZEN - CL_NOALIAS) as u32 && np < e.param_len as u32 {
             seeds |= 1u64 << np as u64;
         }
+        // The slots loads in loops read first (`slot_seeds`): their loads leave the loops past calls that take
+        // no address of them.
+        fill(&mut self.sclass, b.slots.len(), NONE);
+        let early = self.slot_seeds(b, self.cnext, true);
+        self.cnext += early.count_ones() as u32;
+        seeds |= early;
         let mut cand: u64 = 0;
         if b.scopes.len() != 0 {
             cand = self.scope_seeds(b, seeds);
@@ -3447,6 +3462,7 @@ extend Opt {
         seeds |= fresh;
         let owned = self.owned_seeds(b, seeds, self.cnext + fresh.count_ones() as u32);
         seeds |= owned;
+        seeds |= self.slot_seeds(b, self.cnext + fresh.count_ones() as u32 + owned.count_ones() as u32, false);
         if seeds != 0 {
             self.cf_work.truncate(0);
             for o in 0..self.order.len() {
@@ -3493,10 +3509,10 @@ extend Opt {
     // roots share one block and are no exclusive parameter; `csite`, `croot`, `sgroup` and the members
     // (`imem`) set.
     fn scope_seeds(self: &mut Self, b: &Body, params: u64) u64 {
-        let e = b.blocks[0];
         let ni = b.insts.len();
         fill(&mut self.cgroup, CL_MANY as usize, NONE);
-        let mut next = e.param_len as u32;
+        let first = self.cnext;
+        let mut next = first;
         let mut out: u64 = 0;
         fill(&mut self.sgroup, b.scopes.len(), NONE);
         for x in 0..b.scopes.len() {
@@ -3512,7 +3528,7 @@ extend Opt {
             let k = entry_param(b, r);
             // The class of an earlier scope of the same site and group; none once the classes ran out.
             let mut idx = NONE;
-            for c in CL_NOALIAS as u32 + e.param_len as u32..CL_NOALIAS as u32 + next {
+            for c in CL_NOALIAS as u32 + first..CL_NOALIAS as u32 + next {
                 if self.csite[c as usize] == sc.site && self.cgroup[c as usize] == sc.group {
                     idx = c - CL_NOALIAS as u32;
                 }
@@ -3566,6 +3582,40 @@ extend Opt {
 
     // The allocations' seeds (bits of their class indices, from `cnext`): each call of an `ALLOC_FRESH`
     // function that returns a pointer, while class indices are left; `fcall` set.
+    // The slots' seeds (bits of their class indices from `start`): with `looped`, up to SLOT_LOOP_CLASSES of
+    // the slots a load in a loop reads; else the others; each one whose address escapes the private slots'
+    // rules (`pesc`), while classes are left; `sclass` set.
+    fn slot_seeds(self: &mut Self, b: &Body, start: u32, looped: bool) u64 {
+        let ns = b.slots.len().min(self.pesc.len());
+        let mut out: u64 = 0;
+        let mut next = start;
+        let top: u32 = CL_FROZEN - CL_NOALIAS;
+        let end = ast::pick(looped, (start + SLOT_LOOP_CLASSES).min(top), top);
+        if looped {
+            fill(&mut self.sloop, ns, false);
+            for i in 0..b.insts.len() {
+                let t = b.insts[i];
+                if t.op == O_LOAD && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.pder[t.a as usize] != NONE && self.inner[self.blk_of[i] as usize] != NONE {
+                    let k = self.pder[t.a as usize] as usize;
+                    if k < ns {
+                        self.sloop[k] = true;
+                    }
+                }
+            }
+        }
+        for k in 0..ns {
+            if next >= end {
+                break;
+            }
+            if self.pesc[k] && self.sclass[k] == NONE && (!looped || self.sloop[k]) {
+                self.sclass[k] = next;
+                out |= 1u64 << next as u64;
+                next += 1;
+            }
+        }
+        return out;
+    }
+
     fn fresh_seeds(self: &mut Self, pk: &Package, b: &Body) u64 {
         fill(&mut self.fcall, CL_MANY as usize, NONE);
         let mut out: u64 = 0;
@@ -3877,6 +3927,14 @@ extend Opt {
             if ((seeds & fresh) >> idx as u64 & 1) != 0 {
                 let i = self.fcall[idx as usize] as usize;
                 self.icls[i] = CL_NOALIAS + idx as u8;
+                self.ipin[i] = true;
+            }
+        }
+        // The slots' addresses, pinned to their classes.
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            if t.op == O_SLOTADDR && t.a < self.sclass.len() as u32 && self.sclass[t.a as usize] != NONE && (seeds >> self.sclass[t.a as usize] as u64 & 1) != 0 {
+                self.icls[i] = CL_NOALIAS + self.sclass[t.a as usize] as u8;
                 self.ipin[i] = true;
             }
         }
@@ -20123,6 +20181,8 @@ const OFF_ANY: i64 = -0x8000000000000000;
 
 // An alias class (`CL_*`) not yet joined.
 const CL_UNSET: u8 = 65;
+// The classes a body's slots that loads in loops read take before the inlined scopes' (`slot_seeds`).
+const SLOT_LOOP_CLASSES: u32 = 16;
 // The rounds of joins `Opt::classes` runs before it gives up.
 const CLASS_ROUNDS: u32 = 8;
 // `Opt::cf_work`: an entry that is a terminator whose edges pass values (else address arithmetic or a select).

@@ -822,6 +822,19 @@ pub(package) struct Core {
     pub(package) spill_top: u32,
     pub(package) free_slots: Vector<u64>, // size << 32 | offset of a released spill slot
     pub(package) tail_ok: bool,
+    // A block that does not keep the register state (`lv::Live::continues`) and whose predecessors are all before it in
+    // the layout starts with the registers its branches into it agree on (`join_in`): per block, its
+    // predecessors' count when they are all before it (`jneed`, NONE), the snapshot of its branches'
+    // registers (`jat`, into `jpool`: per register the instruction value it holds, NONE), the predecessors
+    // that branched into it so far (`jcnt`, the last one `jlast`), and whether a stub branched into it
+    // (`jbad`); `stubbing` while the late stubs are emitted.
+    pub(package) jneed: Vector<u32>,
+    jat: Vector<u32>,
+    jpool: Vector<u32>,
+    jcnt: Vector<u32>,
+    jlast: Vector<u32>,
+    jbad: Vector<bool>,
+    pub(package) stubbing: bool,
     // Calls.
     pub(package) lay: ab::CallLayout,
     pub(package) self_lay: ab::CallLayout,
@@ -857,6 +870,13 @@ extend Core {
             ends_at: Vector::<u32>::new(),
             spill_base: 0,
             spill_top: 0,
+            jneed: Vector::<u32>::new(),
+            jat: Vector::<u32>::new(),
+            jpool: Vector::<u32>::new(),
+            jcnt: Vector::<u32>::new(),
+            jlast: Vector::<u32>::new(),
+            jbad: Vector::<bool>::new(),
+            stubbing: false,
             free_slots: Vector::<u64>::new(),
             tail_ok: false,
             lay: ab::CallLayout::new(),
@@ -1445,4 +1465,105 @@ pub(package) const fn func_flags(ps: Sym, global: bool, used: bool) u8 {
         ob::SF_USED,
         0,
     );
+}
+
+// The register state a block takes from its predecessors' branches (`join_in`), for a block that does not
+// keep its layout predecessor's (`lv::Live::continues`).
+extend Core {
+    // The join tables of the body (`jneed` ...): per block, its predecessors' count when the layout puts each
+    // before it, else NONE.
+    pub(package) fn join_tables(self: &mut Self) {
+        let nb = self.b().blocks.len();
+        fill(&mut self.jneed, nb, NONE);
+        fill(&mut self.jat, nb, NONE);
+        fill(&mut self.jcnt, nb, 0);
+        fill(&mut self.jlast, nb, NONE);
+        fill(&mut self.jbad, nb, false);
+        self.jpool.truncate(0);
+        let lv = &self.lv;
+        for k in 0..nb {
+            let pk = lv.pos[k];
+            if pk == NONE || lv.pat.len() <= k + 1 {
+                continue;
+            }
+            let mut n: u32 = 0;
+            let mut ok = true;
+            for j in lv.pat[k]..lv.pat[k + 1] {
+                let p = lv.preds[j as usize];
+                let pp = lv.pos[p as usize];
+                ok = ok && pp != NONE && pp < pk;
+                // A predecessor with two edges into the block counts once (`join_note`).
+                let mut seen = false;
+                for i in lv.pat[k]..j {
+                    seen = seen || lv.preds[i as usize] == p;
+                }
+                n += (!seen) as u32;
+            }
+            if ok && n != 0 {
+                self.jneed[k] = n;
+            }
+        }
+    }
+
+    // A branch into block `k` from the current block: the instruction values the registers hold, which the
+    // edge's moves (into its parameters' homes alone) leave, join `k`'s snapshot.
+    pub(package) fn join_note(self: &mut Self, k: u32) {
+        if k as usize >= self.jneed.len() || self.jneed[k as usize] == NONE {
+            return;
+        }
+        // From a stub, or from code outside the blocks: no block's state.
+        if self.stubbing || self.pos as usize >= self.lv.order.len() {
+            self.jbad[k as usize] = true;
+            return;
+        }
+        let p = self.lv.order[self.pos as usize];
+        let ni = self.b().insts.len() as u32;
+        let first = self.jat[k as usize] == NONE;
+        if first {
+            self.jat[k as usize] = self.jpool.len() as u32;
+            for _ in 0..self.owner.len() {
+                self.jpool.push(NONE);
+            }
+        }
+        let at = self.jat[k as usize] as usize;
+        for r in 0..self.owner.len() {
+            let x = self.owner[r];
+            let keep = (self.held & bit(r as u8)) != 0 && x != NONE && x < ni && self.va[x as usize].home != H_FIXED && self.va[x as usize].reg == r as u8;
+            let y = ast::pick(keep, x, NONE);
+            self.jpool[at + r] = if first {
+                y
+            } else {
+                ast::pick(self.jpool[at + r] == y, y, NONE)
+            };
+        }
+        if self.jlast[k as usize] != p {
+            self.jlast[k as usize] = p;
+            self.jcnt[k as usize] += 1;
+        }
+    }
+
+    // At the start of block `k` (layout position `q`), which does not keep the register state: when every
+    // predecessor branched into it (`jneed`, no stub), each instruction value they all left in one register,
+    // live into the block, stays there.
+    pub(package) fn join_in(self: &mut Self, q: u32, k: u32) {
+        let at = self.jat[k as usize];
+        if at == NONE || self.jbad[k as usize] || self.jcnt[k as usize] != self.jneed[k as usize] {
+            return;
+        }
+        for r in 0..self.owner.len() {
+            let x = self.jpool[at as usize + r];
+            if x == NONE || self.owner[r] != NONE || self.va[x as usize].reg != NOREG {
+                continue;
+            }
+            let d = self.lv.def_blk[x as usize];
+            if d == NONE || self.lv.pos[d as usize] >= q || self.lv.end[x as usize] < q {
+                continue;
+            }
+            self.set_owner(r as u8, x);
+            let va = self.va.index_mut(x as usize);
+            va.reg = r as u8;
+            va.dirty = false;
+            va.clean = false;
+        }
+    }
 }
