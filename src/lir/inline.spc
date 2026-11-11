@@ -88,7 +88,9 @@ pub(package) const fn bounded(b: &Body, bu: Budget) bool {
 
 /// Whether the blocks of body `e` that call `t` of `c` reaches fit budget `bu` (`small`): a branch or a
 /// switch on an entry parameter whose argument is a constant, or on its comparison with a constant, takes
-/// its one edge (`scale(x, 1)` reaches one arm of `switch mode`). `seen` and `work` are scratch.
+/// its one edge (`scale(x, 1)` reaches one arm of `switch mode`); a load or store through a parameter whose
+/// argument is a slot's address (`slot_params`) counts for none, as the copy's promotion removes it.
+/// `seen`, `work`, `der` and `us` are scratch.
 fn folds_small(
     e: &Body,
     c: &Body,
@@ -97,7 +99,10 @@ fn folds_small(
     seen: &mut Vector<bool>,
     work: &mut Vector<u32>,
     es: &mut Vector<u32>,
+    der: &mut Vector<u32>,
+    us: &mut Vector<Value>,
 ) bool {
+    let free = slot_params(e, c, t, der, us);
     fill(seen, e.blocks.len(), false);
     work.truncate(0);
     work.push(0);
@@ -108,9 +113,15 @@ fn folds_small(
     while work.len() != 0 {
         let k = work.pop().unwrap();
         let bk = e.blocks[k as usize];
-        all += bk.len;
+        let mut n = bk.len;
+        if free != 0 {
+            for i in bk.start..bk.start + bk.len {
+                n -= slot_access(e, der, free, e.insts[i as usize], i) as u32;
+            }
+        }
+        all += n;
         if (bk.flags & BLOCK_RARE) == 0 {
-            warm += bk.len;
+            warm += n;
         }
         let end = e.insts[(bk.start + bk.len - 1) as usize];
         e.succ_edges(end, es);
@@ -143,6 +154,88 @@ fn folds_small(
         }
     }
     return warm <= bu.warm && all <= bu.all;
+}
+
+// The entry parameters of callee `e` (a bit each, the first 64) whose argument at call `t` of `c` is the
+// address of a slot of `c` and whose every use in `e` is an access's address, a copy's or a fill's, or a
+// constant offset from it with such uses (LLVM's SROA arguments, `InlineCost.cpp`): once inlined, those
+// accesses address the caller's slot at constant offsets. Into `der`, per instruction of `e`, the
+// parameter its value is a constant offset from (NONE: none).
+fn slot_params(e: &Body, c: &Body, t: Inst, der: &mut Vector<u32>, us: &mut Vector<Value>) u64 {
+    let np = (e.blocks[0].param_len as u32).min(t.aux).min(64);
+    let mut m: u64 = 0;
+    for q in 0..np {
+        if slot_of(c, c.pool[(t.c + q) as usize]) != NONE {
+            m |= 1u64 << q as u64;
+        }
+    }
+    if m == 0 {
+        return 0;
+    }
+    let ni = e.insts.len();
+    fill(der, ni, NONE);
+    // Each pass takes at least one more offset or ends: at most `ni + 1`.
+    for _ in 0..ni + 1 {
+        let mut changed = false;
+        for i in 0..ni {
+            let x = e.insts[i];
+            if x.op == O_PTRADD && x.b == VNONE && der[i] == NONE {
+                let q = param_from(e, der, x.a);
+                if q != NONE {
+                    der[i] = q;
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for i in 0..ni {
+        let x = e.insts[i];
+        lv::uses_edges(e, x, us);
+        for u in 0..us.len() {
+            let v = us[u];
+            let q = param_from(e, der, v);
+            if q == NONE {
+                continue;
+            }
+            let simple = x.op == O_LOAD && x.a == v && u == 0 || x.op == O_STORE && x.a == v && x.b != v || x.op == O_MEMCPY && (x.a == v || x.b == v) && x.c != v || x.op == O_MEMSET && x.a == v && x.b != v && x.c != v || x.op == O_PTRADD && x.a == v && x.b == VNONE;
+            if !simple || is_terminator(x.op) {
+                m &= ~(1u64 << q as u64);
+            }
+        }
+    }
+    return m;
+}
+
+// The entry parameter of `e` value `v` is, or is a constant offset from (`der`), NONE for any other.
+const fn param_from(e: &Body, der: &Vector<u32>, v: Value) u32 {
+    if (v & VFLAG) != 0 || v == VNONE {
+        return NONE;
+    }
+    if (v & VPARAM) != 0 {
+        let k = (v & ~VPARAM) - e.blocks[0].param_start;
+        return ast::pick(k < e.blocks[0].param_len as u32, k, NONE);
+    }
+    return der[v as usize];
+}
+
+// Whether instruction `x` (`i`) of `e` is a load, a store or an offset through a parameter of `free`
+// (`slot_params`): a copy or a fill of the caller's slot stays one.
+const fn slot_access(e: &Body, der: &Vector<u32>, free: u64, x: Inst, i: u32) bool {
+    return if x.op == O_PTRADD {
+        in_mask(free, der[i as usize])
+    } else if x.op == O_LOAD || x.op == O_STORE {
+        in_mask(free, param_from(e, der, x.a))
+    } else {
+        false
+    };
+}
+
+// Whether parameter `q` (NONE: none) is one of `m`'s bits.
+const fn in_mask(m: u64, q: u32) bool {
+    return q < 64 && (m >> q as u64 & 1) != 0;
 }
 
 // The constant value `v` of callee `e` has at call `t` of `c`: an integer constant, or an entry parameter
@@ -253,6 +346,8 @@ pub(package) struct Inliner {
     edges: Vector<u32>,
     seen: Vector<bool>, // `folds_small`'s scratch
     work: Vector<u32>,
+    der: Vector<u32>,
+    us: Vector<Value>,
     /// Per caller instruction, whether `run` may inline its call; empty: every call.
     pub(package) only: Vector<bool>,
     pub(package) spare: Body, // the body `run` builds into (`build`)
@@ -285,6 +380,8 @@ extend Inliner {
             csym: Vector::<u32>::new(),
             cmsg: Vector::<u32>::new(),
             seen: Vector::<bool>::new(),
+            der: Vector::<u32>::new(),
+            us: Vector::<Value>::new(),
             work: Vector::<u32>::new(),
             edges: Vector::<u32>::new(),
             only: Vector::<bool>::new(),
@@ -391,6 +488,8 @@ extend Inliner {
                     &mut self.seen,
                     &mut self.work,
                     &mut self.edges,
+                    &mut self.der,
+                    &mut self.us,
                 ) {
                     self.cmap[i as usize] = ni;
                     ni += 1;

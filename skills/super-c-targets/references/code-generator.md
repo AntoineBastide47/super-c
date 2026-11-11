@@ -35,6 +35,22 @@ set first: it states the value, register and frame model.
    functions do not split. Reserve the suffix stack slots before emission. Every edge that
    leaves a prefix for a block that reads the value, including one that skips the cut block, writes
    the suffix slot (`save_splits`).
+   Register segments (`Live::segments`): a value the scan left without a home holds a register over
+   the blocks `Live.sin` lists it for and is in its stack home in the others. To take them, fill
+   `Live.cfirst` and `clast` before `plan` (per block, the first and last call that writes the
+   caller-saved homes; `wfirst` and `wlast` too when argument registers may hold a segment), mark
+   with `WANT_WHOLE` each value that must not change places, and call `place::Core`'s hooks:
+   `seg_reset` after `plan`; at a block's start, once the register state is set, `seg_leave`, then
+   open each listed segment and `seg_in` it unless an instruction of the block defines its value
+   (that definition takes the register: no register holds a value before the value exists, or code
+   that saves and restores registers around an instruction writes the old content over the
+   result), store a parameter that keeps a stack home (`seg_mem`) and load one that arrived in
+   memory; after an instruction that defines a segment's value, its store when it keeps a stack
+   home; before a terminator's branch, open the segments its edges enter and spill a value that
+   enters one from a temporary; in the edge's moves, `seg_moves`. Read a target parameter's home
+   through `Core::pva` at every edge site (the current block may hold it elsewhere). A segment
+   keeps its register to its span's end: give it to no other value, and make no early edge move
+   (before the branch) that writes it while another live value holds it.
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
    home before the branch; an edge moves the block arguments (`edge_homes`). A block whose only
    predecessor falls into it keeps the register state (`Live::continues`); another, whose predecessors

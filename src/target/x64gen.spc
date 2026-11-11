@@ -1071,11 +1071,13 @@ extend Gen {
         if !fixed && (temps & bit(ra)) != 0 && (is_v(t) || is_vec(t)) == ra >= V0 {
             let own = self.cr.owner[ra as usize];
             let temp = own == NONE && (self.cr.tmps & bit(ra)) != 0;
-            let dies = own == xa && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
+            // A segment keeps its register to its span's end: its value gives it to no other.
+            let seg = self.cr.lv.seg_val(xa);
+            let dies = own == xa && !seg && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
             // A loop header parameter whose last read this is, which only the back edge writes on, and each
             // value after it on the way to the one that edge passes (`step_chain`): `v` holds the register,
             // which the parameter keeps (owner, home) for that value (`step_reg`), as a jump's parameter home.
-            let first = own == xa && !temp && !dies && self.step_chain(x, xa, ra);
+            let first = own == xa && !seg && !temp && !dies && self.step_chain(x, xa, ra);
             let next = self.chain_x == xa && self.chain_r == ra && self.cr.va[xa as usize].reg == ra && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
             if first || next {
                 if next {
@@ -1237,6 +1239,24 @@ extend Gen {
         // The first of a chain of in-place operations the return takes the last of (`chain_ret`): the
         // return's register.
         let chain = !ext && !fv && self.chain_ret(b, bk, v);
+        // A conversion of `v` alone that keeps its bits in its register (an extension in place, a truncation,
+        // a cast between a pointer and an integer), whose result has a register home: `v` is made in that
+        // home, taken now, and the conversion moves nothing.
+        let w = v + 1;
+        let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST;
+        if !ext && !chain && keeps && t.a == v && !fv && (is_int(t.ty) || t.ty == T_PTR) && type_bits(t.ty, self.cr.ptr) <= 64 && self.fix_class(
+            w,
+        ) != FIX_NONE {
+            let wa = self.cr.va[w as usize];
+            let r = if wa.home == H_FIXED {
+                wa.reg
+            } else if wa.home == H_NONE {
+                self.take_home(w, false, NOREG)
+            } else {
+                NOREG
+            };
+            return ast::pick(r != NOREG && ((self.cr.lock | self.cr.tmps) & bit(r)) == 0, r, NOREG);
+        }
         if t.op == O_RET || chain {
             let rl = self.cr.self_lay.ret;
             if (t.a == v + ext as u32 || chain) && rl.kind == ab::L_REG && rl.n == 1 && self.cr.self_lay.parts[rl.p0 as usize].v == fv && (!vv || self.cr.self_lay.whole_vreg(
@@ -1340,10 +1360,11 @@ extend Gen {
             return NOREG;
         }
         let past = self.cr.lv.end[v as usize] != self.cr.pos;
+        // A value with segments changes places: it takes no parameter's register over.
         if self.cr.va[v as usize].home != H_NONE || !past && self.fix_class(v) != FIX_NONE || self.crosses_call(
             v,
             is_v(self.cr.vt(v)),
-        ) {
+        ) || self.cr.lv.seg_val(v) {
             return NOREG;
         }
         let b = self.cr.b();
@@ -1360,12 +1381,10 @@ extend Gen {
         let pv = VPARAM | px - b.insts.len() as u32;
         // `v` reads the parameter other than as `a`, maybe through an operand that folds into it.
         let other = self.reads(v, pv) && a != pv;
-        if self.cr.va[px as usize].home != H_FIXED || self.cr.lv.end[px as usize] < self.cr.pos || past && self.cr.lv.end[px as usize] != self.cr.pos || other || self.cr.lv.reads_after(
-            b,
-            k,
-            v,
-            pv,
-        ) {
+        // A segment's register stays the segment's: no value takes it over past the loop.
+        if self.cr.va[px as usize].home != H_FIXED || self.cr.lv.end[px as usize] < self.cr.pos || past && (self.cr.lv.end[px as usize] != self.cr.pos || self.cr.lv.seg_val(
+            px,
+        )) || other || self.cr.lv.reads_after(b, k, v, pv) {
             return NOREG;
         }
         return self.cr.va[px as usize].reg;
@@ -1407,7 +1426,7 @@ extend Gen {
             return NOREG;
         }
         self.param_home(x, NOREG);
-        let va = self.cr.va[x as usize];
+        let va = self.cr.pva(x);
         if va.home != H_FIXED || va.reg == NOREG || (self.cr.tmps & bit(va.reg)) != 0 {
             return NOREG;
         }
@@ -1433,6 +1452,9 @@ extend Gen {
     // The register home `fix_class` gives value index `x` of file `vr`, taken (`prefer`, a register `x`
     // arrives in, when it may be its home); NOREG for none.
     fn take_home(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
+        if self.cr.lv.seg_val(x) {
+            return self.seg_take(x, prefer);
+        }
         let fc = self.fix_class(x);
         if fc == FIX_CALLEE {
             return self.take_fixed(x, vr);
@@ -1511,6 +1533,139 @@ extend Gen {
         return op == O_FCONST || op == O_ICONST || op == O_WCONST || op == O_SPLAT || op == O_LOAD || op == O_STORE || op == O_FMA || op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_FCMP || op >= O_ADD && op <= O_NOT || op == O_PTRADD || is_terminator(
             op,
         );
+    }
+
+    // ---- Register segments (`lv::Live::segments`, `place::Core`) ----
+
+    // Open segment `s`: a register of its class is its own until it ends (`prefer`: the register its value
+    // arrives in), taken as a home of its value is (`take_fixed`, `take_scratch`) and left unbound: the
+    // value moves in at its block or on an edge. `SEG_DEAD` when none is free.
+    fn seg_open(self: &mut Self, s: u32, prefer: u8) {
+        let x = self.cr.lv.seg_x[s as usize];
+        let was = self.cr.va[x as usize];
+        let t = self.cr.xty(x);
+        let vr = is_v(t) || self.in_reg(t);
+        // The register that holds the value now is not the one freed for it.
+        let locked = self.cr.lock;
+        if was.reg != NOREG && was.reg != prefer {
+            self.cr.lock |= bit(was.reg);
+        }
+        let r = if self.cr.lv.seg_h[s as usize] == lv::HOME_CALLEE {
+            self.take_fixed(x, vr)
+        } else {
+            self.take_scratch(x, vr, prefer)
+        };
+        self.cr.lock = locked;
+        if r != NOREG {
+            // A value that arrived in the register holds it on as a temporary until its block binds it.
+            if was.reg != r {
+                self.cr.set_owner(r, NONE);
+            }
+            self.cr.va.set(x as usize, was);
+        }
+        self.cr.seg_set(s, r);
+    }
+
+    // The register of the segment that holds value index `x` through its own block; NOREG when none does.
+    // A parameter: the first edge into the block, or the entry, opens the segment, which holds `x` from
+    // there; a later edge finds the register (`place::Core::pva`) and binds nothing: the segment may have
+    // ended since. An instruction: its definition, the one caller, binds it (`seg_block`).
+    fn seg_take(self: &mut Self, x: u32, prefer: u8) u8 {
+        let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
+        if s == NONE {
+            return NOREG;
+        }
+        let opens = self.cr.seg_reg[s as usize] == NOREG;
+        if opens {
+            self.seg_open(s, prefer);
+        }
+        if self.cr.seg_reg[s as usize] == SEG_DEAD {
+            return NOREG;
+        }
+        if opens || x as usize < self.cr.b().insts.len() {
+            self.cr.seg_in(s);
+        }
+        return self.cr.seg_reg[s as usize];
+    }
+
+    // At the start of block `k` (layout position `q`), the register state set: the segments' values change
+    // places (`place::Core::seg_leave`, `seg_in`). A segment that no edge opened opens here. An instruction
+    // of `k` takes its segment's register at its definition (`seg_take`): until then the register holds no
+    // value, which an instruction that saves the registers around itself (`save_scratch`) would bring back
+    // over the result. A parameter of `k` that keeps a stack home is stored there, once per entry; an entry
+    // parameter that arrived in memory is loaded.
+    fn seg_block(self: &mut Self, q: u32, k: u32) {
+        self.cr.seg_leave(q);
+        let ni = self.cr.b().insts.len() as u32;
+        for j in self.cr.lv.sin_at[q as usize]..self.cr.lv.sin_at[q as usize + 1] {
+            let s = self.cr.lv.sin[j as usize];
+            if self.cr.seg_reg[s as usize] == NOREG {
+                self.seg_open(s, NOREG);
+            }
+            if self.cr.seg_reg[s as usize] == SEG_DEAD {
+                continue;
+            }
+            let x = self.cr.lv.seg_x[s as usize];
+            let r = self.cr.seg_reg[s as usize];
+            let was = self.cr.va[x as usize];
+            let own = x >= ni && self.cr.lv.def_blk[x as usize] == k;
+            let t = self.cr.xty(x);
+            if !self.cr.seg_holds(s) && (x >= ni || self.cr.lv.def_blk[x as usize] != k) {
+                self.cr.seg_in(s);
+                if own && was.home == H_ARG && was.reg == NOREG {
+                    self.ld(t, r, x::at(self.fb, was.off));
+                }
+            }
+            if own && self.cr.lv.seg_mem[x as usize] && self.cr.sv_home[x as usize] != H_ARG {
+                let off = self.cr.seg_slot(x);
+                self.st(t, r, x::at(x::RSP, off));
+            }
+        }
+    }
+
+    // After the instruction that defines a segment's value in the segment's register: its stack home,
+    // written once, when it keeps one (`lv::Live::seg_mem`).
+    fn seg_store(self: &mut Self) {
+        let i = self.cur;
+        if !self.cr.lv.seg_val(i) || !self.cr.lv.seg_mem[i as usize] {
+            return;
+        }
+        let va = self.cr.va[i as usize];
+        if va.home != H_FIXED || va.reg == NOREG {
+            return;
+        }
+        let off = self.cr.seg_slot(i);
+        self.st(self.cr.xty(i), va.reg, x::at(x::RSP, off));
+    }
+
+    // Before a terminator's branch, for its edge `e`: each segment the edge enters is open, and a value
+    // that enters one from a temporary register is in its stack home first when it keeps one.
+    fn seg_edge(self: &mut Self, e: u32) {
+        if self.cr.lv.segd.len() == 0 {
+            return;
+        }
+        let b = self.cr.b();
+        let k = b.edge_target(e);
+        let q = self.cr.lv.pos[k as usize] as usize;
+        for j in self.cr.lv.sin_at[q]..self.cr.lv.sin_at[q + 1] {
+            let s = self.cr.lv.sin[j as usize];
+            let x = self.cr.lv.seg_x[s as usize];
+            // The target defines it: a parameter opens its segment as it takes its home (`param_home`).
+            if self.cr.lv.def_blk[x as usize] == k {
+                continue;
+            }
+            if self.cr.seg_reg[s as usize] == NOREG {
+                self.on_edge = true;
+                self.seg_open(s, NOREG);
+                self.on_edge = false;
+            }
+            if self.cr.seg_reg[s as usize] == SEG_DEAD || self.cr.seg_holds(s) {
+                continue;
+            }
+            if self.cr.va[x as usize].dirty && self.cr.lv.seg_mem[x as usize] {
+                self.spill(x);
+            }
+        }
     }
 
     // Which register value index `x` holds for its whole range (`plan_homes`).
@@ -1638,6 +1793,11 @@ extend Gen {
                 } else if past && x < nv {
                     w = lv::WANT_CALLEE | lv::WANT_SCRATCH;
                 }
+                // A constant a loop keeps in a register is rebuilt elsewhere, and a value a call reads after
+                // its argument moves stays out of the registers they write: no segment.
+                if x < ni && self.remat_inst(x as u32) || x < nv && late[x] {
+                    w |= lv::WANT_WHOLE;
+                }
             }
             // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
             // the rare calls save around them, but for a value a call reads after its argument moves (none).
@@ -1700,19 +1860,30 @@ extend Gen {
             }
         }
         let most = self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - nd;
-        // Per block, the registers its own largest need leaves (`Live::jcap`).
+        // Per block, the registers its own largest need leaves (`Live::jcap`), and its first and last call
+        // that writes the caller-saved homes (`cpre`; `lv::Live::cfirst`, `clast`).
         self.cr.lv.jcap.truncate(0);
+        self.cr.lv.cfirst.truncate(0);
+        self.cr.lv.clast.truncate(0);
         for p in 0..self.cr.lv.order.len() {
             let k = self.cr.lv.order[p] as usize;
             let bk = b.blocks[k];
             let mut bn: u32 = 4;
             let mut calls = false;
+            let mut cf = NONE;
+            let mut cl = NONE;
             for i in bk.start..bk.start + bk.len {
                 let ni = self.need(i);
                 bn = bn.max(ni + ast::pick(k == 0 && !calls, pins, 0));
                 calls = calls || Gen::clobbers(b, b.insts[i as usize]);
+                if self.cpre[i as usize + 1] != self.cpre[i as usize] {
+                    cf = ast::pick(cf == NONE, i, cf);
+                    cl = i;
+                }
             }
             self.cr.lv.jcap.push(self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - bn);
+            self.cr.lv.cfirst.push(cf);
+            self.cr.lv.clast.push(cl);
         }
         self.xhome = self.xscr;
         if leaf {
@@ -2643,6 +2814,7 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        self.seg_store();
         self.cr.lv.advance(self.cr.b(), self.cur);
         // `plan_homes` leaves `need` integer and `vneed` xmm registers to each instruction.
         let used = ((self.cr.lock | self.cr.tmps) & ~self.cr.fixed_busy & (self.xalloc | self.xfix)).count_ones() as u32;
@@ -3436,6 +3608,7 @@ extend Gen {
         self.call_tables();
         self.cr.lv.split = !self.shrink;
         self.plan_homes();
+        self.cr.seg_reset();
         self.split_at = 0;
         fill(&mut self.split_off, n, -1);
         for j in 0..self.cr.lv.splits.len() {
@@ -3454,6 +3627,10 @@ extend Gen {
             if !self.block(q as u32) {
                 return false;
             }
+        }
+        // The segments whose spans end with the last block give their registers up.
+        if self.cr.lv.segd.len() != 0 {
+            self.cr.seg_leave(self.cr.lv.order.len() as u32);
         }
         assert(self.cr.fixed_busy == 0, "x64gen: a register home outlives its value");
         if !self.stubs_out {
@@ -3930,17 +4107,6 @@ extend Gen {
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.c.len();
-        // A late edge's target: its parameters' homes, for its stub.
-        for j in 0..self.cr.lv.late.len() {
-            if b.edge_target(self.cr.lv.late[j] as u32) == k {
-                let bk = b.blocks[k as usize];
-                for p in bk.param_start..bk.param_start + bk.param_len as u32 {
-                    let x = b.insts.len() as u32 + p;
-                    self.late_va.push((x, self.cr.va[x as usize]));
-                }
-                break;
-            }
-        }
         if !self.continues(q) {
             let mut m = self.cr.held;
             // Each step clears one register's bit: at most 64 steps.
@@ -3955,6 +4121,20 @@ extend Gen {
                 }
             }
             self.cr.join_in(q, k);
+        }
+        if self.cr.lv.segd.len() != 0 {
+            self.seg_block(q, k);
+        }
+        // A late edge's target: its parameters' homes, for its stub.
+        for j in 0..self.cr.lv.late.len() {
+            if b.edge_target(self.cr.lv.late[j] as u32) == k {
+                let bk = b.blocks[k as usize];
+                for p in bk.param_start..bk.param_start + bk.param_len as u32 {
+                    let x = b.insts.len() as u32 + p;
+                    self.late_va.push((x, self.cr.va[x as usize]));
+                }
+                break;
+            }
         }
         let bk = b.blocks[k as usize];
         if self.upper_entry(q, k) {
@@ -4079,6 +4259,7 @@ extend Gen {
             if self.cr.lv.late_index(self.cr.lv.order[self.cr.pos as usize], ed) != NONE {
                 continue;
             }
+            self.seg_edge(ed);
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
@@ -4104,7 +4285,7 @@ extend Gen {
                 self.on_edge = true;
                 self.param_home(x, pr);
                 self.on_edge = false;
-                if hd && r != NOREG && self.cr.va[x as usize].reg != r {
+                if hd && r != NOREG && self.cr.pva(x).reg != r {
                     self.cr.fixed_busy |= bit(r);
                 }
             }
@@ -4155,8 +4336,11 @@ extend Gen {
             return;
         }
         if self.take_home(x, is_v(t) || self.in_reg(t), prefer) != NOREG {
-            // The register holds nothing until the edge moves write it, or the dying argument it takes.
-            self.cr.set_owner(self.cr.va[x as usize].reg, x);
+            // The register holds nothing until the edge moves write it, or the dying argument it takes. A
+            // segment's that ended is no longer this parameter's to hold.
+            if self.cr.va[x as usize].home == H_FIXED {
+                self.cr.set_owner(self.cr.va[x as usize].reg, x);
+            }
             return;
         }
         let n = type_bytes(t, self.cr.ptr);
@@ -4174,7 +4358,7 @@ extend Gen {
     fn edge_moves(self: &mut Self, e: u32) {
         let b = self.cr.b();
         let n = b.edge_nargs(e);
-        if n == 0 {
+        if n == 0 && !self.cr.seg_enters(e) {
             return;
         }
         let tb = b.blocks[b.edge_target(e) as usize];
@@ -4187,11 +4371,12 @@ extend Gen {
             self.on_edge = false;
             let av = b.edge_arg(e, q);
             let ax = self.cr.vx(av);
-            if ax == px {
+            // Passed to itself, it stays, but a parameter with segments that is not where its block holds it.
+            if ax == px && !self.cr.seg_moved(px) {
                 continue;
             }
             let t = self.cr.xty(px);
-            let pva = self.cr.va[px as usize];
+            let pva = self.cr.pva(px);
             let dst = if pva.home == H_FIXED {
                 Lc { kind: LC_REG, reg: pva.reg, off: 0, val: px }
             } else {
@@ -4207,6 +4392,7 @@ extend Gen {
                 Mv { src: src, dst: dst, v: is_v(t) || in_mem(t), bytes: type_bytes(t, self.cr.ptr), done: false },
             );
         }
+        self.cr.seg_moves(e, x::RSP, self.fb, &mut self.mv);
         resolve_moves(self);
     }
 
@@ -8639,7 +8825,8 @@ extend Gen {
     fn lookup(self: &mut Self, t: Inst, r: u8, sz: u32) bool {
         let b = self.cr.b();
         let mut lk = sws::Lookup::new();
-        if !sws::switch_lookup(b, t, 8 * sz, self.cr.ptr, false, &mut lk) {
+        // Its cases' edges move through the table alone: none may enter a segment.
+        if !sws::switch_lookup(b, t, 8 * sz, self.cr.ptr, false, &mut lk) || self.cr.seg_enters(b.switch_edge(t, 0)) {
             return false;
         }
         let d = b.switch_edge(t, t.aux);
@@ -8666,7 +8853,7 @@ extend Gen {
                 let ty = self.cr.xty(px);
                 let e = type_bytes(ty, self.cr.ptr);
                 let m = x::ix(S1, S0, e.trailing_zeros() as u8, lk.off[q as usize] as i32);
-                let pva = self.cr.va[px as usize];
+                let pva = self.cr.pva(px);
                 if pva.home == H_FIXED {
                     if pass == 1 {
                         self.ld(ty, pva.reg, m);
@@ -8835,20 +9022,33 @@ extend Gen {
     // register they write, so the other path reads none of the homes they write. The moves keep the flags
     // (`keep_flags`). One branch then takes the edge.
     const fn early_moves(self: &Self, e: u32, o: u32) bool {
+        // An edge into a segment loads its value on that edge alone.
+        if self.cr.seg_enters(e) {
+            return false;
+        }
         let b = self.cr.b();
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
         for q in 0..tb.param_len as u32 {
-            if self.cr.lv.end[(ni + tb.param_start + q) as usize] > self.cr.pos {
+            let px = ni + tb.param_start + q;
+            if self.cr.lv.end[px as usize] > self.cr.pos {
                 return false;
+            }
+            // A segment that ended gave its register up: another value that lives on may hold it.
+            let pva = self.cr.pva(px);
+            if self.cr.lv.seg_val(px) && pva.home == H_FIXED && (self.cr.held & bit(pva.reg)) != 0 {
+                let y = self.cr.owner[pva.reg as usize];
+                if y != px && self.cr.live_on(y) {
+                    return false;
+                }
             }
         }
         // No argument of `o` is in a register home the moves write.
         for q in 0..b.edge_nargs(e) {
             let px = ni + tb.param_start + q;
             let ax = self.cr.vx(b.edge_arg(e, q));
-            let pva = self.cr.va[px as usize];
-            if ax == px || pva.home != H_FIXED || self.cr.va[ax as usize].reg == pva.reg {
+            let pva = self.cr.pva(px);
+            if ax == px && !self.cr.seg_moved(px) || pva.home != H_FIXED || self.cr.va[ax as usize].reg == pva.reg {
                 continue;
             }
             for j in 0..b.edge_nargs(o) {
@@ -8874,6 +9074,9 @@ extend Gen {
     // elsewhere) that `o`'s target does not keep; and, unless `o`'s moves are among `e`'s (`within`: those
     // moves then serve `o` too), no argument of `o` is in one.
     const fn moves_free(self: &Self, e: u32, o: u32, within: bool) bool {
+        if self.cr.seg_enters(e) {
+            return false;
+        }
         let b = self.cr.b();
         let sp = self.cr.lv.pos[b.edge_target(o) as usize];
         let kept = sp == self.cr.pos + 1 && self.continues(sp);
@@ -8884,8 +9087,8 @@ extend Gen {
         for q in 0..b.edge_nargs(e) {
             let px = ni + tb.param_start + q;
             let ax = self.cr.vx(b.edge_arg(e, q));
-            let pva = self.cr.va[px as usize];
-            if ax == px || pva.home == H_FIXED && self.cr.va[ax as usize].reg == pva.reg {
+            let pva = self.cr.pva(px);
+            if ax == px && !self.cr.seg_moved(px) || ax != px && pva.home == H_FIXED && self.cr.va[ax as usize].reg == pva.reg {
                 continue;
             }
             if pva.home != H_FIXED {
@@ -9169,7 +9372,7 @@ extend Gen {
                     self.c.mov_ri(S1, c);
                     self.c.alu_rr(x::CMP, sz, r, S1);
                 }
-                if b.edge_nargs(e) == 0 {
+                if b.edge_nargs(e) == 0 && !self.cr.seg_enters(e) {
                     self.cbranch(x::CC_E, b.edge_target(e));
                 } else {
                     stubs.push(self.c.jcc32(x::CC_E) as u64 << 32 | e as u64);
