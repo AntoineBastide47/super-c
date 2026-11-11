@@ -733,6 +733,13 @@ extend Gen {
     // an `i` with a home of its own or that lives across a call (the register may be caller-saved: the
     // parameter's range need not hold the call).
     fn def_step(self: &mut Self, i: u32) u8 {
+        // A step in another block than the edge back (`lv::Live::fstep`).
+        let sr = self.step_home(i, true);
+        if sr != NOREG {
+            self.cr.lock |= bit(sr);
+            self.cr.va.index_mut(i as usize).clean = false;
+            return sr;
+        }
         let rd = self.take_dying(i);
         if rd != NOREG {
             return rd;
@@ -835,6 +842,10 @@ extend Gen {
         if self.cr.lv.seg_val(x) {
             return self.seg_take(x, prefer);
         }
+        let sr = self.step_home(x, false);
+        if sr != NOREG {
+            return sr;
+        }
         let fc = self.fix_class(x);
         if fc == FIX_CALLEE {
             return self.take_fixed(x, vr);
@@ -843,6 +854,36 @@ extend Gen {
             return self.take_scratch(x, vr, prefer);
         }
         return NOREG;
+    }
+
+    // The register of the header parameter that instruction `x` steps (`lv::Live::fstep`), now `x`'s home
+    // too: the parameter, whose value is dead from here on, keeps the register's ownership to the end of
+    // its range, which holds `x`'s. Not for an `x` that reads the parameter unless `reads` (the caller
+    // emits one machine instruction that reads its operands before it writes its result: `def_step`).
+    // NOREG when `x` steps none, or the parameter has no register home.
+    fn step_home(self: &mut Self, x: u32, reads: bool) u8 {
+        let px = self.cr.lv.fstep[x as usize];
+        if px == NONE {
+            return NOREG;
+        }
+        let pa = self.cr.va[px as usize];
+        if pa.home != H_FIXED || pa.reg == NOREG {
+            return NOREG;
+        }
+        if !reads {
+            let pv = VPARAM | px - self.cr.b().insts.len() as u32;
+            let us = self.cr.lv.uses_of(x);
+            for k in 0..us.len() {
+                if us[k] == pv {
+                    return NOREG;
+                }
+            }
+        }
+        let w = self.cr.va.index_mut(x as usize);
+        w.reg = pa.reg;
+        w.home = H_FIXED;
+        w.dirty = false;
+        return pa.reg;
     }
 
     // Which register value index `x` holds for its whole range (`plan_homes`).
@@ -2370,7 +2411,8 @@ extend Gen {
         self.kcon.truncate(0);
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
+        self.cr.lv.steps = true;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -3893,6 +3935,17 @@ extend Gen {
         if s == v && (!signed && self.cr.va[x as usize].clean || self.arrived_ext(v, signed)) {
             return r;
         }
+        // The value's own register, whose bits above the value's are no value: extended in place, once for
+        // every reader after this one, all in this block (a later block's reader may come by another
+        // path). Not a parameter that arrived sign-extended, which its signed readers take as it is.
+        if s == v && !signed && self.cr.va[x as usize].reg == r && self.cr.lv.end[x as usize] == self.cr.pos && !self.arrived_ext(
+            v,
+            true,
+        ) {
+            self.emit(a::uxt(r, r, bits));
+            self.cr.va.index_mut(x as usize).clean = true;
+            return r;
+        }
         let d = self.tmp(false);
         if signed {
             self.emit(a::sxt(false, d, r, bits));
@@ -4550,17 +4603,31 @@ extend Gen {
         if kc && (op == O_ADD || op == O_SUB) {
             let kv = sign_extend(k, bits);
             let neg = op == O_SUB;
-            if kv >= 0 && kv < 4096 || kv < 0 && kv > -4096 {
-                let ra = self.reg(t.a);
-                let rd = self.def_step(i);
-                let sub = neg != kv < 0;
+            if kv > -(1 << 24) && kv < 1 << 24 {
                 let m = if kv < 0 {
                     -kv
                 } else {
                     kv
                 };
-                self.emit(a::addsub_imm(sf, ast::pick(sub, 1u32, 0u32), false, rd, ra, m as u32, false));
-                return true;
+                // 12 bits, or 12 bits shifted left by 12.
+                let high = m >= 4096 && (m & 0xFFF) == 0;
+                if m < 4096 || high {
+                    let ra = self.reg(t.a);
+                    let rd = self.def_step(i);
+                    let sub = neg != kv < 0;
+                    self.emit(
+                        a::addsub_imm(
+                            sf,
+                            ast::pick(sub, 1u32, 0u32),
+                            false,
+                            rd,
+                            ra,
+                            ast::pick(high, m >> 12, m) as u32,
+                            high,
+                        ),
+                    );
+                    return true;
+                }
             }
         }
         if kc && (op == O_AND || op == O_OR || op == O_XOR) {
@@ -4963,6 +5030,18 @@ extend Gen {
         }
         if op == O_TRUNC || op == O_PTRTOINT || op == O_INTTOPTR || op == O_BITCAST && !is_v(from) && !is_v(to) {
             let ra = self.reg(t.a);
+            // A truncation that several comparisons read alone (`lv::Live::xtrunc`) is made extended: they
+            // compare it as it is.
+            if self.cr.lv.xtrunc[i as usize] {
+                let rd = if self.takes(i, t.a, ra) {
+                    ra
+                } else {
+                    self.def(i)
+                };
+                self.emit(a::uxt(rd, ra, tb));
+                self.cr.va.index_mut(i as usize).clean = true;
+                return true;
+            }
             let _ = self.def_from(i, t.a, ra);
             return true;
         }
@@ -7772,6 +7851,9 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(invert_test(test), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(test, tt);
                 self.goto(tf, false);
@@ -7781,6 +7863,9 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(invert_test(test), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(test, tt);
                 self.goto(tf, false);
@@ -7795,23 +7880,34 @@ extend Gen {
             if tt == next {
                 self.cr.join_note(tt);
                 self.cbranch(invert_test(test), tf);
+            } else if tf != next && self.cr.colder(et, ef) {
+                self.cbranch(invert_test(test), tf);
+                self.goto(tt, false);
             } else {
                 self.cbranch(test, tt);
                 self.goto(tf, false);
             }
-        } else if mt && !mf && (tt != next && self.early_ok(test, et, ef) || self.early_moves(test, et, ef)) {
+        } else if mt && !mf && !self.cr.colder(et, ef) && (tt != next && self.early_ok(test, et, ef) || self.early_moves(
+            test,
+            et,
+            ef,
+        )) {
             self.moves_before(test, et);
             self.cbranch(test, tt);
             self.goto(tf, false);
-        } else if !mt && mf && (tf != next && self.early_ok(test, ef, et) || self.early_moves(test, ef, et)) {
+        } else if !mt && mf && !self.cr.colder(ef, et) && (tf != next && self.early_ok(test, ef, et) || self.early_moves(
+            test,
+            ef,
+            et,
+        )) {
             self.moves_before(test, ef);
             self.cbranch(invert_test(test), tf);
             self.goto(tt, false);
-        } else if mt && mf && tt != next && self.early_ok(test, et, ef) {
+        } else if mt && mf && tt != next && !self.cr.colder(et, ef) && self.early_ok(test, et, ef) {
             // The edge to the block that does not follow first: the other's moves fall through.
             self.moves_before(test, et);
             self.branch_over(test, tt, ef);
-        } else if mt && mf && tf != next && self.early_ok(test, ef, et) {
+        } else if mt && mf && tf != next && !self.cr.colder(ef, et) && self.early_ok(test, ef, et) {
             self.moves_before(test, ef);
             self.branch_over(invert_test(test), tf, et);
         } else if mt && !mf {

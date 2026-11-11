@@ -96,6 +96,8 @@ pub(package) struct Slp {
     insrc: Vector<u32>,
     cur: Vector<u32>,
     eargs: Vector<(u32, u32, u32)>, // (PK_PARAM pack, an edge into its block, the pack of its arguments)
+    esrc: Vector<u32>, // per `eargs` entry, the block whose terminator holds the edge
+    eown: Vector<(u32, u32, u32)>, // `emit`: (an edge, a block that holds it, that block's own record of it)
     stores: Vector<u32>, // the seeds' stores, by group
     groups: Vector<(u32, u32)>, // per store seed: its first `stores` index, the pack of its values
     reds: Vector<(u32, u32, u32)>, // per sum seed: its root add, its first pack in `rpk`, their count
@@ -147,6 +149,8 @@ extend Slp {
             insrc: Vector::<u32>::new(),
             cur: Vector::<u32>::new(),
             eargs: Vector::<(u32, u32, u32)>::new(),
+            esrc: Vector::<u32>::new(),
+            eown: Vector::<(u32, u32, u32)>::new(),
             stores: Vector::<u32>::new(),
             groups: Vector::<(u32, u32)>::new(),
             reds: Vector::<(u32, u32, u32)>::new(),
@@ -205,6 +209,7 @@ extend Slp {
         self.lv.truncate(0);
         self.tmp.truncate(0);
         self.eargs.truncate(0);
+        self.esrc.truncate(0);
         self.stores.truncate(0);
         self.groups.truncate(0);
         fill(&mut self.iown, ni, NONE);
@@ -354,8 +359,10 @@ extend Slp {
                 let _ = self.vector(b, p as u32);
             }
         }
+        self.eown.truncate(0);
         for x in 0..self.eargs.len() {
-            let (pp, e, ap) = self.eargs[x];
+            let (pp, e0, ap) = self.eargs[x];
+            let e = self.own_edge(b, e0, self.esrc[x]);
             let v = self.vector(b, ap);
             let p0 = self.lv[self.packs[pp as usize].lane as usize] & ~VPARAM;
             let q0 = p0 - b.blocks[self.pblk[p0 as usize] as usize].param_start;
@@ -556,6 +563,7 @@ extend Slp {
         self.packs.truncate(np0);
         self.lv.truncate(nl0);
         self.eargs.truncate(ne0);
+        self.esrc.truncate(ne0);
     }
 
     // Whether value `v` is an inner add of a sum like root `r` in block `k`: the same operation and type,
@@ -791,6 +799,7 @@ extend Slp {
                 let ap = self.build(b, top as u32, n, ty, self.insrc[j as usize], NONE, depth + 1);
                 self.tmp.truncate(top);
                 self.eargs.push((p, e, ap));
+                self.esrc.push(self.insrc[j as usize]);
                 self.use_edge(b, self.eargs.len() - 1, 1);
             }
             return p;
@@ -1309,6 +1318,51 @@ extend Slp {
         self.blk.push(k);
         self.fixed.push(fixed);
         return v;
+    }
+
+    // The record of edge `e` that block `k`'s terminator writes its vector arguments into (`eown`): `e`
+    // for the first block that asks; for another block, whose terminator holds the same record (a block
+    // that only jumped, threaded away, leaves its edge to each of its predecessors), a copy that its
+    // terminator takes. A vector made in one block is no argument of the other's edge.
+    fn own_edge(self: &mut Self, b: &mut Body, e: u32, k: u32) u32 {
+        let mut held = false;
+        for q in 0..self.eown.len() {
+            let (oe, ok, own) = self.eown[q];
+            if oe == e && ok == k {
+                return own;
+            }
+            held = held || oe == e;
+        }
+        if !held {
+            self.eown.push((e, k, e));
+            return e;
+        }
+        let own = b.pool.len() as u32;
+        for q in 0..b.edge_nargs(e) + 2 {
+            b.pool.push(b.pool[(e + q) as usize]);
+        }
+        let bk = b.blocks[k as usize];
+        let ti = (bk.start + bk.len - 1) as usize;
+        let mut t = b.insts[ti];
+        if t.op == O_JMP {
+            t.a = own;
+        } else if t.op == O_BR {
+            if t.b == e {
+                t.b = own;
+            }
+            if t.c == e {
+                t.c = own;
+            }
+        } else {
+            for q in 0..edge_count(t) {
+                if b.pool[(t.c + q) as usize] == e {
+                    b.pool[(t.c + q) as usize] = own;
+                }
+            }
+        }
+        b.insts[ti] = t;
+        self.eown.push((e, k, own));
+        return own;
     }
 
     // Where an instruction right after value `v`'s definition goes: its block, and the instruction it

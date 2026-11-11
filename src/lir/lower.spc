@@ -115,9 +115,11 @@ const CTFE_PROBE_STEPS: u32 = 1 << 18;
 const EVAL_STEPS: u64 = 1 << 21;
 // `Lower::frozen` enters at most FROZEN_DEPTH nested aggregates.
 const FROZEN_DEPTH: u32 = 8;
-// A preemption tick's cold path runs each time the low bits TICK_MASK of the counter reach 0: once in
-// TICK_MASK + 1 ticks.
-const TICK_MASK: u64 = 2047;
+// A preemption tick's cold path runs once in 2048 ticks. The counter holds the ticks left in its high
+// 11 bits (a count of 2048 wraps to 0): a tick takes TICK_STEP off, and the cold path runs when the
+// counter is 0, which a subtraction and one branch on its result test.
+const TICK_SHIFT: u64 = 21;
+const TICK_STEP: u64 = 1 << TICK_SHIFT;
 
 /// How CTFE ended test `(m, node)`: its trap kind (`ir::interp::IT_TRAP_*`), the message, and the
 /// line and column of the test's statement that trapped.
@@ -3252,7 +3254,7 @@ extend Lower {
         if c.ticks_on(b) {
             self.spc = self.var_ty.len() as u32;
             self.var_ty.push(T_I32);
-            let n = self.iconst(T_I32, TICK_MASK + 1);
+            let n = self.iconst(T_I32, 0);
             self.write_var(self.spc, n);
         }
         let e = self.edge(self.lblk[b.entry as usize], self.virt, b.entry);
@@ -5661,7 +5663,7 @@ extend Lower {
         if k == irc::IN_CHUNK {
             // The chunk's end: the loop's end where no tick prints, else as far as the tick budget
             // left reaches, which the chunk's other iterations are charged. The budget is the count of
-            // ticks before the counter's low bits next reach 0: 1 to TICK_MASK + 1.
+            // ticks before the counter next reaches 0: 1 to 2048.
             if self.spc == NONE {
                 return self.int_to(v[1], ti.mty, false);
             }
@@ -5670,7 +5672,8 @@ extend Lower {
             let d = self.arith(O_SUB, e, i);
             let cnt = self.read_var(self.spc, self.cur);
             let one32 = self.iconst(T_I32, 1);
-            let low = self.arith(O_AND, self.arith(O_SUB, cnt, one32), self.iconst(T_I32, TICK_MASK));
+            let sh = self.iconst(T_I32, TICK_SHIFT);
+            let low = self.arith(O_LSHR, self.arith(O_SUB, cnt, self.iconst(T_I32, TICK_STEP)), sh);
             let bud = self.arith(O_ADD, low, one32);
             let b64 = self.int_to(bud, T_I64, true);
             let over = self.icmp(C_UGT, d, b64);
@@ -5678,7 +5681,7 @@ extend Lower {
             let one = self.iconst(T_I64, 1);
             let used = self.arith(O_SUB, nn, one);
             let u32v = self.int_to(used, T_I32, false);
-            let left = self.arith(O_SUB, cnt, u32v);
+            let left = self.arith(O_SUB, cnt, self.arith(O_SHL, u32v, sh));
             self.write_var(self.spc, left);
             let r = self.arith(O_ADD, i, nn);
             return self.int_to(r, ti.mty, false);
@@ -7041,8 +7044,8 @@ extend Lower {
         return op.kind != irc::OP_CONST && b.places[op.data as usize].base == l;
     }
 
-    // A preemption tick: the counter goes down on every path, and the runtime's check runs each time its
-    // low bits (`TICK_MASK`) reach 0, so no path merges two counts and the join holds no counter. The
+    // A preemption tick: the counter goes down on every path (`TICK_STEP`), and the runtime's check runs
+    // each time it reaches 0, so no path merges two counts and the join holds no counter. The
     // combined form also asks for a pending cancellation (its result, 0 on the hot path, which passes the
     // cold path through memory).
     fn tick(self: &mut Self, cancel: bool) Value {
@@ -7050,8 +7053,8 @@ extend Lower {
             return self.iconst(T_I32, 0);
         }
         let n = self.read_var(self.spc, self.cur);
-        let one = self.iconst(T_I32, 1);
-        let m = self.arith(O_SUB, n, one);
+        let step = self.iconst(T_I32, TICK_STEP);
+        let m = self.arith(O_SUB, n, step);
         self.write_var(self.spc, m);
         let z = self.zero(T_I32);
         let r = if cancel {
@@ -7061,8 +7064,7 @@ extend Lower {
         } else {
             VNONE
         };
-        let low = self.arith(O_AND, m, self.iconst(T_I32, TICK_MASK));
-        let hit = self.icmp(C_EQ, low, z);
+        let hit = self.icmp(C_EQ, m, z);
         let cold = self.block();
         self.b.blocks.index_mut(cold as usize).flags = BLOCK_UNLIKELY;
         let join = self.block();
