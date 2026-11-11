@@ -207,6 +207,13 @@ pub(package) const fn free_conv(op: u8) bool {
 
 /// `Live::plan`'s homes per value: no register for the whole range, a callee-saved one, a caller-saved one, a
 /// caller-saved one of the vector file's upper registers (x86-64's xmm16..xmm31, which only EVEX encodes).
+// `Live::frequencies`: what the entry runs on, a loop header's factor, an ordinary successor's share against a
+// rare one's 1, and the most any block runs on (so sums of weights stay far from overflow).
+const FREQ_ENTRY: u64 = 4096;
+const FREQ_LOOP: u64 = 8;
+const FREQ_SPLIT: u64 = 15;
+const FREQ_MAX: u64 = 1u64 << 40;
+
 pub(package) const HOME_NONE: u8 = 0;
 pub(package) const HOME_CALLEE: u8 = 1;
 pub(package) const HOME_SCRATCH: u8 = 2;
@@ -340,7 +347,12 @@ pub(package) struct Live {
     // value its range's first and last ordinals, its weight and its uses by instructions and edges; the
     // candidates by start, the values holding a register, and the count per file and home.
     base: Vector<u32>,
-    freq: Vector<u64>,
+    freq: Vector<u64>, // per block, `frequencies`
+    // `frequencies`: per block, what its entering edges bring; per reverse postorder number, its block; a
+    // terminator's edges.
+    fmass: Vector<u64>,
+    fby: Vector<u32>,
+    fedges: Vector<u32>,
     start: Vector<u32>,
     stop: Vector<u32>,
     wt: Vector<u64>,
@@ -434,6 +446,9 @@ extend Live {
             ep_min_ok: false,
             jcap: Vector::<u32>::new(),
             jmin: Vector::<u32>::new(),
+            fmass: Vector::<u64>::new(),
+            fby: Vector::<u32>::new(),
+            fedges: Vector::<u32>::new(),
             rpo: Vector::<u32>::new(),
             succ: Vector::<u32>::new(),
             stack: Vector::<u32>::new(),
@@ -3076,29 +3091,7 @@ extend Live {
         fill(&mut self.un, ni, 0);
         self.uv.truncate(0);
         let np = self.order.len();
-        self.freq.truncate(0);
-        self.freq.resize_default(b.blocks.len());
-        for p in 0..np {
-            let k = self.order[p] as usize;
-            if (b.blocks[k].flags & BLOCK_COLD) != 0 {
-                continue;
-            }
-            let mut f: u64 = 1;
-            let mut h = self.inner[k];
-            // Each step leaves one loop, at most 5.
-            for _ in 0..5 {
-                if h == NONE {
-                    break;
-                }
-                f *= 8;
-                h = self.parent[h as usize];
-            }
-            self.freq[k] = if self.rare[k] {
-                f / 8
-            } else {
-                f
-            };
-        }
+        self.frequencies(b);
         fill(&mut self.au, n, 0);
         fill(&mut self.wt, n, 0);
         // Each instruction's uses (`uses_at`), into a scratch taken out for the walk.
@@ -3189,6 +3182,76 @@ extend Live {
         self.kept = kept;
     }
 
+    // `freq`: per block, how often it runs for one entry into the body (FREQ_ENTRY), a static estimate after
+    // LLVM's block frequencies: in reverse postorder, each block passes what it runs on to its successors by
+    // forward edges, split by weight (a rare successor 1, any other FREQ_SPLIT); a loop header runs
+    // FREQ_LOOP times what its entering edges bring, and an edge that leaves loops brings that much less per
+    // loop it leaves. A cold block runs never. Back edges bring nothing: the header's factor counts them.
+    fn frequencies(self: &mut Self, b: &Body) {
+        let nb = b.blocks.len();
+        self.freq.truncate(0);
+        self.freq.resize_default(nb);
+        fill(&mut self.fmass, nb, 0);
+        fill(&mut self.fby, nb, NONE);
+        for k in 0..nb {
+            if self.rpo[k] != NONE {
+                self.fby[self.rpo[k] as usize] = k as u32;
+            }
+        }
+        if nb == 0 {
+            return;
+        }
+        self.fmass[0] = FREQ_ENTRY;
+        for r in 0..nb {
+            let k = self.fby[r];
+            if k == NONE {
+                break;
+            }
+            let bk = b.blocks[k as usize];
+            let mut m = self.fmass[k as usize];
+            if self.inner[k as usize] == k {
+                m = (m * FREQ_LOOP).min(FREQ_MAX);
+            }
+            if (bk.flags & BLOCK_COLD) != 0 {
+                continue;
+            }
+            self.freq[k as usize] = m;
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.fedges);
+            let mut total: u64 = 0;
+            for e in 0..self.fedges.len() {
+                let t = b.edge_target(self.fedges[e]);
+                total += ast::pick(self.rare[t as usize], 1u64, FREQ_SPLIT);
+            }
+            for e in 0..self.fedges.len() {
+                let t = b.edge_target(self.fedges[e]);
+                if self.rpo[t as usize] == NONE || self.rpo[t as usize] <= r as u32 {
+                    continue;
+                }
+                let mut share = m * ast::pick(self.rare[t as usize], 1u64, FREQ_SPLIT) / total;
+                // Each loop the edge leaves: at most the nesting depth.
+                let mut h = self.inner[k as usize];
+                while h != NONE && !self.in_loop(h, t) {
+                    share /= FREQ_LOOP;
+                    h = self.parent[h as usize];
+                }
+                self.fmass[t as usize] += share;
+            }
+        }
+    }
+
+    // Whether block `t` is in the loop headed by `h`: `h` is its innermost loop's header or an enclosing one.
+    const fn in_loop(self: &Self, h: u32, t: u32) bool {
+        let mut l = self.inner[t as usize];
+        // Each step leaves one loop: at most the nesting depth.
+        while l != NONE {
+            if l == h {
+                return true;
+            }
+            l = self.parent[l as usize];
+        }
+        return false;
+    }
+
     /// The instruction of `b` where value `x`'s range ends in its last block (`end`): its last use, when it
     /// is in that block, a value it is, no loop keeps it past that use (`kept`) and, for a block parameter,
     /// no edge of that block or a later one writes it. NONE else (the range ends with the block).
@@ -3234,9 +3297,8 @@ extend Live {
 
     /// Plan which values hold one register for their whole range or a block prefix (`home`, `cut`): the ones `want` (WANT_* per
     /// value) asks one for, by a linear scan over the layout in the order the ranges start (Poletto and
-    /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequency of
-    /// its definition and uses: 8 per loop level up to 5, an eighth of that in an unlikely block, 0 in a
-    /// cold one) gives its register up to a heavier one. A range runs from its definition (a parameter's:
+    /// Sarkar's); when a file's registers are taken, the active value of least weight (the frequencies of
+    /// the blocks of its definition and uses, `frequencies`) gives its register up to a heavier one. A range runs from its definition (a parameter's:
     /// the first edge into it) to its last use (a kept value's, a parameter's or a flag's: the end of its
     /// last block). After `run`, before the generator counts the uses down.
     pub(package) fn plan(self: &mut Self, b: &Body, want: &Vector<u8>, caps: Caps) {
