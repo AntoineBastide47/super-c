@@ -6782,7 +6782,7 @@ extend Interp {
                 // no tick budget at compile time: one chunk runs to the loop's end
                 return self.operand(b, env, b.oper_pool[(rv.a + 1) as usize]);
             }
-            if rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY {
+            if rv.c == ir::IN_LIKELY || rv.c == ir::IN_UNLIKELY || rv.c == ir::IN_DECLASSIFY {
                 return self.operand(b, env, b.oper_pool[rv.a as usize]);
             }
             if rv.c == ir::IN_GROUP_FITS {

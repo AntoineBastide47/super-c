@@ -122,6 +122,9 @@ pub(package) enum AttrKind {
     // `@trusted` on a spec function or a lemma without a body: its contracts are axioms, which no proof
     // checks (an explicit, searchable trust point).
     ATTR_TRUSTED,
+    // `@constant_time` on a function with a body: no branch, memory address or variable-time operation
+    // of its final LIR depends on a secret (`lir::ct`).
+    ATTR_CONSTANT_TIME,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;

@@ -324,7 +324,14 @@ pub(package) const O_VSUMW: u8 = 88;
 /// operands of `2n` lanes (a split part's, `lir::wide`). A loop's widening product (`lir::loops`; arm64's
 /// SMULL and UMULL, x86-64's PMULDQ and PMULUDQ, wasm's `extmul`).
 pub(package) const O_VMULW: u8 = 89;
-pub(package) const OP_COUNT: u8 = 90;
+/// Value `a` unchanged, read from inside a `std::crypto::secret::Secret`: the constant-time check
+/// (`lir::ct`) counts it and every value computed from it as secret. No rewrite looks through it; the
+/// check replaces it by `a` before code generation.
+pub(package) const O_SECRET: u8 = 90;
+/// Value `a` unchanged, a secret `declassify` made public: the constant-time check does not count it as
+/// secret. No rewrite looks through it; the check replaces it by `a`.
+pub(package) const O_PUBLIC: u8 = 91;
+pub(package) const OP_COUNT: u8 = 92;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -332,7 +339,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 90] = [
+pub(package) const OPS: [OpInfo; 92] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -423,6 +430,8 @@ pub(package) const OPS: [OpInfo; 90] = [
     OpInfo { name: "bitrev", form: F_UN },
     OpInfo { name: "vsumw", form: F_BIN },
     OpInfo { name: "vmulw", form: F_BIN },
+    OpInfo { name: "secret", form: F_UN },
+    OpInfo { name: "public", form: F_UN },
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
@@ -1114,6 +1123,9 @@ pub(package) struct Sym {
     /// A function that runs rarely (`@cold`): the blocks that call it are unlikely, and its object places its
     /// code apart from the other functions'. Its own body is optimized as any other.
     pub(package) cold: bool,
+    /// A C function a parameter of which holds a `Secret` (through references, slices and fields too): it
+    /// may read the secret with any operation, so no body calls it or takes its address (`lir::ct`).
+    pub(package) sec: bool,
     /// Defined by its unit's own items, not added by the build (an instance, glue, data): a cached
     /// emission of the unit holds it. The text form does not carry it.
     pub(package) own: bool,
@@ -1339,6 +1351,8 @@ pub(package) struct Body {
     pub(package) fmath: u8,
     /// The scopes of the inlined calls' exclusive parameters (`Scope`); empty when there is none.
     pub(package) scopes: Vector<Scope>,
+    /// A `@constant_time` function's body (`lir::ct` checks it): only a constant-time caller inlines a copy.
+    pub(package) ct: bool,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
     /// without a prologue or an epilogue.
     pub(package) naked: bool,
@@ -1426,6 +1440,7 @@ extend Body {
             ranges: Vector::<u64>::new(),
             fmath: 0,
             scopes: Vector::<Scope>::new(),
+            ct: false,
             naked: false,
             cur: 0,
         };
@@ -1453,6 +1468,7 @@ extend Body {
         self.ranges.truncate(0);
         self.fmath = 0;
         self.scopes.truncate(0);
+        self.ct = false;
         self.naked = false;
         self.cur = 0;
     }
@@ -1477,6 +1493,7 @@ extend Body {
         assign(&mut o.ranges, &self.ranges);
         o.fmath = self.fmath;
         assign(&mut o.scopes, &self.scopes);
+        o.ct = self.ct;
         o.naked = self.naked;
         o.cur = 0;
     }
@@ -1502,6 +1519,7 @@ extend Body {
             ranges: exact(&self.ranges),
             fmath: self.fmath,
             scopes: exact(&self.scopes),
+            ct: self.ct,
             naked: self.naked,
             cur: 0,
         };
@@ -1527,6 +1545,7 @@ extend Body {
             ranges: settle(&mut self.ranges),
             fmath: self.fmath,
             scopes: settle(&mut self.scopes),
+            ct: self.ct,
             naked: self.naked,
             cur: 0,
         };
@@ -2109,6 +2128,8 @@ pub(package) const HELD_OK: u8 = 2;
 pub(package) const HELD_COLD: u8 = 4;
 /// The function is `@always_inline` (`Sym.always`), for the same reason.
 pub(package) const HELD_ALWAYS: u8 = 8;
+/// A parameter of the function holds a `Secret` (`Sym.sec`).
+pub(package) const HELD_SEC: u8 = 16;
 
 extend Held {
     pub(package) fn new() Held {
@@ -2277,6 +2298,7 @@ extend Package {
                 noinline: false,
                 always: false,
                 cold: false,
+                sec: false,
                 fx: ast::pick(kind == SK_FUNC && pure_libm(name), 0u8, FX_READ | FX_WRITE | FX_STALL),
                 esc: ~0u64,
                 wargs: ~0u64,
@@ -2460,6 +2482,8 @@ extend Package {
             if os.ext {
                 self.syms.index_mut(s as usize).ext = true;
             }
+            // A call marks its callee (`Sym.sec`) in the package that lowers the call.
+            self.syms.index_mut(s as usize).sec = self.syms[s as usize].sec || os.sec;
             if os.sig != NONE && self.syms[s as usize].sig == NONE {
                 self.decls.push(other.decls[os.sig as usize].compact());
                 self.syms.index_mut(s as usize).sig = self.decls.len() as u32 - 1;

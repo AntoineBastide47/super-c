@@ -2589,7 +2589,7 @@ fn addr_kept(pk: &loader::Package, b: &ir::CoreBody, a: &Ast, p: ir::PlaceId, cn
 
 // The intrinsics that write no memory.
 const fn pure_intrinsic(c: u8) bool {
-    return ir::type_payload(c) || c == ir::IN_ZEROED || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || c == ir::IN_UNLIKELY || c == ir::IN_GROUP_FITS || ir::is_check(
+    return ir::type_payload(c) || c == ir::IN_ZEROED || c == ir::IN_DYN_TID || c == ir::IN_DYN_DATA || c == ir::IN_LIKELY || c == ir::IN_UNLIKELY || c == ir::IN_DECLASSIFY || c == ir::IN_GROUP_FITS || ir::is_check(
         c,
     );
 }

@@ -697,6 +697,41 @@ b4:
     same_result(&b, &a, "drive", none, 24);
 }
 
+// A constant-time body (`ct`) is copied only into a constant-time caller, where the check sees the copy
+// (`lir::ct`); a caller that is not keeps the call, whose body the check saw.
+@test
+fn a_constant_time_body_inlines_only_into_a_constant_time_caller() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @k fn global
+sym @plain fn global
+sym @both fn global
+fn @k
+  sig (i64) -> i64
+  ct
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = add.i64 v0, v1
+  ret v2
+fn @plain
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @k(v0) : (i64) -> i64
+  ret v1
+fn @both
+  sig (i64) -> i64
+  ct
+b0(v0: i64):
+  v1 = call.i64 @k(v0) : (i64) -> i64
+  ret v1
+)",
+    );
+    let p = text_of(&a, "plain");
+    assert(p.as_str().find("call.i64 @k(") >= 0, p.as_str());
+    let b = text_of(&a, "both");
+    assert(b.as_str().find("call") < 0 && b.as_str().find("add.i64") >= 0, b.as_str());
+}
+
 // A view's length is at most `isize::MAX` over its element's bytes (`ref p0 4 inner`), so it never passes
 // `usize::MAX - 8`; a length of an element size unknown (`ref p1 0 inner`) may. The minimum of two values is
 // at most each, and a select is at most the larger of its sides: `min(len0, len2) <= usize::MAX - 8`.

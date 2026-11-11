@@ -76,7 +76,7 @@ the architecture modules `std::simd::x86`, `std::simd::aarch64` and `std::simd::
 Read only the file the task needs. Section names are kept, so a pointer such as
 "see Header Types" names a heading in one of these files.
 
-- [basics.md](references/basics.md): bindings and mutability, functions, contracts, ghost code and specifications (`forall`, `old`, `Seq`), structs and methods, enums and pattern matching.
+- [basics.md](references/basics.md): bindings and mutability, functions, contracts, ghost code and specifications (`forall`, `old`, `Seq`), constant-time code (`Secret`, `@constant_time`), structs and methods, enums and pattern matching.
 - [ownership.md](references/ownership.md): ownership and RAII, references and borrowing, unsafe.
 - [generics.md](references/generics.md): generics, closures, interfaces and @derive.
 - [modules.md](references/modules.md): import forms, module paths, visibility.

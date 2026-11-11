@@ -105,12 +105,12 @@ echo "gate: native objects byte-identical"
 
 step "readability and strict C warnings"
 # The one-worker tree: every record above equals it. `__units` names its compile units (a pack or unity
-# file is the only unit of the member files it includes) and `__cflags` their flags.
+# file is the only unit of the member files it includes; an object unit holds no C) and `__cflags` their flags.
 raw="$tmp/j1-build/debug/raw"
 [ -s "$raw/__units" ] || fail "strict warnings: no unit in $raw"
 if [ -n "${SC_TEST_CC:-}" ]; then
     # BSD xargs runs nothing on empty input and exits 0: the list is checked above.
-    ( cd "$raw" && while IFS= read -r c; do printf '%s\0' "$c"; done <__units |
+    ( cd "$raw" && while IFS= read -r c; do case $c in *.c) printf '%s\0' "$c" ;; esac; done <__units |
         xargs -0 -n 8 -P "$ncpu" $SC_TEST_CC $(cat __cflags) $CONTRACT_STRICT_CFLAGS -fsyntax-only ) || fail "strict warnings (above)"
     echo "gate: $(wc -l <"$raw/__units" | tr -d ' ') units clean"
 else

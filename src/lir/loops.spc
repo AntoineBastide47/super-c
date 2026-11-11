@@ -3832,7 +3832,9 @@ extend LoopOpt {
         }
         // A shift's amounts are lanes too (each below the width, as the scalar shift's).
         let shift = (op == O_SHL || op == O_LSHR || op == O_ASHR) && self.vops != 0 && !self.vone;
-        let int_op = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR || op == O_NEG || op == O_NOT || op == O_MUL || shift;
+        // A constant-time mark (`lir::ct`) is a lane identity: the vector value is as secret as each lane.
+        let mark = op == O_SECRET || op == O_PUBLIC;
+        let int_op = op == O_ADD || op == O_SUB || op == O_AND || op == O_OR || op == O_XOR || op == O_NEG || op == O_NOT || op == O_MUL || shift || mark;
         // A call of a C float function a vector operation computes per lane (`lane_fn`).
         if op == O_CALL && !self.vone && t.a as usize < self.vfn.len() && self.vfn[t.a as usize] != 0 && is_float(t.ty) && self.lane_size(
             t.ty,
@@ -3891,7 +3893,7 @@ extend LoopOpt {
         ).2 != 0 || (self.vmulh & 4) != 0)) {
             return 0;
         }
-        let k = self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT);
+        let k = self.lane_operands(b, u, t, op == O_NEG || op == O_NOT || op == O_FNEG || op == O_FSQRT || mark);
         if k != 0 && !self.vone && (t.a == self.viv || t.b == self.viv) {
             self.vctr = true;
         }
@@ -13029,7 +13031,7 @@ pub(package) const fn cf_pure(b: &Body, t: Inst) bool {
     if op >= O_SDIV && op <= O_UREM {
         return by_constant(b, t);
     }
-    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_SPLAT;
+    return op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_CLZ || op == O_CTZ || op == O_POPCNT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_SPLAT || op == O_SECRET || op == O_PUBLIC;
 }
 
 // Whether quotient or remainder `t` (a scalar) is by a constant it may take: not 0, a signed one not -1.

@@ -323,7 +323,9 @@ operand chooses, an unsuffixed literal taking the type of the one conformance it
 (`w * 3` with `W as Mul<u8>`). A compound assignment `x op= r` on a struct or a generic instance
 that defines the method is `x = x op r` through the same choice (`v += 1` takes `Add<i32>`), and
 the method's result must be the left operand's type ("mismatched types: the operator's result 'P'
-is not 'V'"). Indexing an aggregate calls its `Index`/`IndexMut` methods, std's views and
+is not 'V'"). `==` and `!=` call `eq`, `<` to `>=` call `cmp`, whose results must be `bool` and
+`i32` as `Eq` and `Ord` declare them: an `eq` of another result is no operator ("'Secret<u32>' has
+no 'eq' method for this operator (implement Eq): its 'eq' does not return 'bool'"). Indexing an aggregate calls its `Index`/`IndexMut` methods, std's views and
 containers included (`[]T`, `[]mut T`, `str`, `String`, `Vector`, `Array`): `obj[i]` reads through
 `index`, a written element (`obj[i] = v`, `obj[i] += v`, `&mut obj[i]`) goes through `index_mut`.
 The index method's parameter types the index expression, as a parameter types an argument (a view

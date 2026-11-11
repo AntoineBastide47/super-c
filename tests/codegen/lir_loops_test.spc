@@ -2182,6 +2182,52 @@ b0(v0: i64, v1: i32):
     }
 }
 
+// A loop over secret bytes as the lowering gives it, each read of a `Secret` marked: the mark of the wide
+// `xor`, whose operands are marked, goes (`opt::marked`), so the operation narrows to the bytes, and the
+// vectorizer widens the marks with the lanes, which stay marked for the constant-time check (`lir::ct`).
+@test
+fn a_loop_over_secrets_narrows_and_vectorizes() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @x fn global
+fn @x
+  sig (ptr, ptr, i64) -> void
+  ct
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v0, v5 * 1
+  v8 = load.i8 v7 align 0
+  v9 = secret.i8 v8
+  v10 = zext.i64 v9
+  v11 = ptradd v1, v5 * 1
+  v12 = load.i8 v11 align 0
+  v13 = secret.i8 v12
+  v14 = zext.i64 v13
+  v15 = xor.i64 v10, v14
+  v16 = secret.i64 v15
+  v17 = trunc.i8 v16
+  store v17, v7 align 0
+  v18 = add.i64 v5, v4
+  jmp b1(v18)
+b3:
+  ret
+)",
+        VECTOR,
+    );
+    let x = text_of(&a, "x");
+    let t = x.as_str();
+    assert(
+        t.contains("xor.v16i8") && t.contains("secret.v16i8") && !t.contains("secret.i64") && !t.contains("xor.i64"),
+        t,
+    );
+}
+
 // A loop of quotients or remainders by a constant vectorizes: the lanes' high products (`mulhs`, `mulhu`)
 // or, by a power of two, shifts; signed and unsigned, of 8, 16 and 32 bits, by positive and negative
 // divisors. Each kernel's driver fills its input (the type's extremes, -1 and 0, then a sequence that

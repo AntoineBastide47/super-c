@@ -2281,6 +2281,168 @@ fn template_registers_read_written_and_renamed() {
 
 // A result the body stores, then returns, is computed into the return register (`a64gen`'s `next_reg`),
 // which the dying load gives up after the call: no move follows the store.
+// Selects of integers and pointers on a computed condition, in every form the generators fold (plain, a
+// constant side, an increment, an absolute value, a maximum with 0, a 0 or 1, 32-bit and pointer ones): no
+// conditional branch, as the constant-time check relies on (`lir::ct`), on x86-64, arm64 and wasm32.
+const SELECTS: str = M"(lir ptr 8
+sym @sel fn global
+fn @sel
+  sig (i64, i64, i64, i32, ptr, ptr) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i32, v4: ptr, v5: ptr):
+  v6 = icmp.ult v0, v1
+  v7 = select.i64 v6, v1, v2
+  v8 = iconst.i64 7
+  v9 = select.i64 v6, v8, v7
+  v10 = select.i64 v6, v9, v8
+  v11 = iconst.i64 1
+  v12 = add.i64 v10, v11
+  v13 = select.i64 v6, v12, v10
+  v14 = iconst.i64 0
+  v15 = sub.i64 v14, v13
+  v16 = icmp.slt v13, v14
+  v17 = select.i64 v16, v15, v13
+  v18 = icmp.sgt v17, v14
+  v19 = select.i64 v18, v17, v14
+  v20 = select.i64 v6, v11, v14
+  v21 = iconst.i32 9
+  v22 = select.i32 v6, v3, v21
+  v23 = select.ptr v6, v4, v5
+  v24 = ptrtoint.i64 v23
+  v25 = sext.i64 v22
+  v26 = add.i64 v19, v20
+  v27 = add.i64 v26, v25
+  v28 = xor.i64 v27, v24
+  ret v28
+)";
+
+// `SELECTS` with 4-byte pointers.
+const SELECTS32: str = M"(lir ptr 4
+sym @sel fn global
+fn @sel
+  sig (i64, i64, i64, i32, ptr, ptr) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i32, v4: ptr, v5: ptr):
+  v6 = icmp.ult v0, v1
+  v7 = select.i64 v6, v1, v2
+  v8 = iconst.i64 7
+  v9 = select.i64 v6, v8, v7
+  v10 = select.i64 v6, v9, v8
+  v11 = iconst.i64 1
+  v12 = add.i64 v10, v11
+  v13 = select.i64 v6, v12, v10
+  v14 = iconst.i64 0
+  v15 = sub.i64 v14, v13
+  v16 = icmp.slt v13, v14
+  v17 = select.i64 v16, v15, v13
+  v18 = icmp.sgt v17, v14
+  v19 = select.i64 v18, v17, v14
+  v20 = select.i64 v6, v11, v14
+  v21 = iconst.i32 9
+  v22 = select.i32 v6, v3, v21
+  v23 = select.ptr v6, v4, v5
+  v24 = ptrtoint.i32 v23
+  v25 = sext.i64 v22
+  v26 = add.i64 v19, v20
+  v27 = add.i64 v26, v25
+  v28 = zext.i64 v24
+  v29 = xor.i64 v27, v28
+  ret v29
+)";
+
+@test
+fn integer_selects_compile_without_a_branch() {
+    let mut err = String::new();
+    let pk = lparse::parse(SELECTS, &mut err).unwrap();
+    let fs_: [u32; 1] = [pk.find_symbol("sel")];
+    let ds = Vector::<u32>::new();
+    // x86-64: cmov, no jcc.
+    let mut o = Vector::<u8>::new();
+    assert(
+        nat::object(
+            &pk,
+            tgt::axis_index("linux", false),
+            tgt::axis_index("x86_64", true),
+            fs_[0..1],
+            ds[0..0],
+            "",
+            &mut o,
+            &mut err,
+        ),
+        err.as_str(),
+    );
+    let t = text_section(&o);
+    let mut all = String::new();
+    let mut k: usize = 0;
+    while k < t.len() {
+        let mut s = String::new();
+        let n = xa::disassemble(&t, k, &mut s);
+        assert(n != 0, "the code decodes");
+        all.push_string(&s);
+        all.push_str("\n");
+        k += n as usize;
+    }
+    let mut jcc = false;
+    for line in all.as_str().split("\n") {
+        jcc = jcc || line.trim().starts_with("j") && !line.trim().starts_with("jmp");
+    }
+    assert(!jcc && all.as_str().find("cmov") >= 0, all.as_str());
+    // arm64: csel and its forms, no conditional branch.
+    o.clear();
+    assert(
+        nat::object(
+            &pk,
+            tgt::axis_index("macos", false),
+            tgt::axis_index("aarch64", true),
+            fs_[0..1],
+            ds[0..0],
+            "",
+            &mut o,
+            &mut err,
+        ),
+        err.as_str(),
+    );
+    let c = text_section(&o);
+    all.clear();
+    for q in 0..c.len() / 4 {
+        assert(aa::disassemble(le(&c, 4 * q, 4) as u32, &mut all), "the word disassembles");
+        all.push_str("\n");
+    }
+    let a = all.as_str();
+    assert(a.find("b.") < 0 && a.find("cbz") < 0 && a.find("cbnz") < 0 && a.find("tbz") < 0 && a.find("tbnz") < 0, a);
+    assert(a.find("csel") >= 0, a);
+    // wasm32: select, no conditional branch.
+    o.clear();
+    let pw = lparse::parse(SELECTS32, &mut err).unwrap();
+    let fw: [u32; 1] = [pw.find_symbol("sel")];
+    assert(
+        nat::object(
+            &pw,
+            tgt::axis_index("wasm", false),
+            tgt::axis_index("wasm32", true),
+            fw[0..1],
+            ds[0..0],
+            "",
+            &mut o,
+            &mut err,
+        ),
+        err.as_str(),
+    );
+    let mut bodies = Vector::<(usize, usize)>::new();
+    assert(wasm_bodies(&o, &mut bodies) && bodies.len() == 1, "one body");
+    let (w0, w1) = bodies[0];
+    all.clear();
+    let mut p2 = w0;
+    while p2 < w1 {
+        let mut s = String::new();
+        let l = wa::disassemble(&o, p2, w1, &mut s) as usize;
+        assert(l != 0, "the body decodes");
+        all.push_string(&s);
+        all.push_str("\n");
+        p2 += l;
+    }
+    let w = all.as_str();
+    assert(w.find("br_if") < 0 && w.find("\nif") < 0 && w.find("select") >= 0, w);
+}
+
 @test
 fn a_stored_and_returned_result_takes_the_return_register() {
     let lir = M"(lir ptr 8

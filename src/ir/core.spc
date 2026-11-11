@@ -642,7 +642,7 @@ pub(package) const SI_BINARY: u32 = 1; // RV_BINARY, c = the operator token
 pub(package) const SI_UNARY: u32 = 2; // RV_UNARY, b = the operator token
 pub(package) const SI_CAST: u32 = 3; // RV_CAST, c = the cast kind
 pub(package) const SI_SIMD: u32 = 4; // RV_SIMD, c = the code
-pub(package) const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY, IN_RETURN_ADDRESS, IN_VOLATILE_LOAD or IN_VOLATILE_STORE
+pub(package) const SI_HINT: u32 = 5; // RV_INTRINSIC, c = IN_LIKELY, IN_UNLIKELY, IN_RETURN_ADDRESS, IN_VOLATILE_LOAD, IN_VOLATILE_STORE or IN_DECLASSIFY
 
 /// The lowering of `@intrinsic("<name>")`: SI_* << 8 | c, or 0 for an unknown name.
 pub(package) const fn simd_intrinsic(name: str) u32 {
@@ -657,6 +657,9 @@ pub(package) const fn simd_intrinsic(name: str) u32 {
     }
     if name == "mem.volatile_load" || name == "mem.volatile_store" {
         return SI_HINT << 8 | pick(name == "mem.volatile_load", IN_VOLATILE_LOAD, IN_VOLATILE_STORE) as u32;
+    }
+    if name == "secret.declassify" {
+        return SI_HINT << 8 | IN_DECLASSIFY as u32;
     }
     if !name.starts_with("simd.") {
         return 0;
@@ -905,6 +908,9 @@ pub(package) const IN_GROUP_FITS: u8 = 28;
 /// IN_TYPE_NAME: `type_info::<T>().qualified_name` read alone, T in `b`: a `str` constant spelling T,
 /// with the trailing generic arguments that equal their parameter's default dropped (`Vector<i32>`).
 pub(package) const IN_TYPE_NAME: u8 = 29;
+/// IN_DECLASSIFY(x): `x` unchanged (`std::crypto::secret`'s `declassify`): the constant-time check
+/// (`lir::ct`) no longer counts the value as secret.
+pub(package) const IN_DECLASSIFY: u8 = 30;
 
 /// True for the intrinsics whose `b` is a type, not an operand count: the measuring, describing and
 /// naming intrinsics and `dangling`.

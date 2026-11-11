@@ -561,9 +561,10 @@ pub(package) const GHOST_VAR_OUTSIDE_GHOST: u16 = 554;
 pub(package) const GHOST_WRITE_TARGET: u16 = 555;
 pub(package) const GHOST_VALUE_DROPS: u16 = 556;
 pub(package) const TRUSTED_PLACE: u16 = 557;
+pub(package) const NOT_CONSTANT_TIME: u16 = 558;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 558;
+pub(package) const COUNT: u16 = 559;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1124,6 +1125,7 @@ pub(package) const fn name(code: u16) str<'static> {
         555 => "ghost_assignment_target",
         556 => "ghost_value_has_drop",
         557 => "trusted_needs_bodiless_ghost_function",
+        558 => "not_constant_time",
         _ => "",
     };
 }

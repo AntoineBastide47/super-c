@@ -382,8 +382,9 @@ extend Inliner {
                     (bu, IL_SMALL)
                 };
                 // A float rewrite the caller allows and the callee does not would apply to the copy (of a
-                // callee that computes with floats).
-                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
+                // callee that computes with floats). A constant-time callee's copy runs unchecked in a caller
+                // that is not.
+                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || e.ct && !c.ct || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
                     e,
                     c,
                     t,
@@ -447,6 +448,7 @@ extend Inliner {
         o.bools = c.bools;
         o.ranges.extend_copy(&c.ranges);
         o.fmath = c.fmath;
+        o.ct = c.ct;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];
             o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });

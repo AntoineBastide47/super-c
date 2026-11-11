@@ -15663,6 +15663,21 @@ extend<'a> TypeChecker<'a> {
     fn interface_declares_cstr(self: &Self, iface: DefId, m: str, depth: i32) bool {
         return iface.node != NODE_NONE && self.find_interface_method(iface.module, iface.node, m, depth).node != NODE_NONE;
     }
+    // Whether method `md` of `recv` returns what a comparison operator reads: a `bool` for `eq`, an `i32` for
+    // `cmp` (`ord`), as `Eq` and `Ord` declare them.
+    fn tc_op_result_ok(self: &mut Self, recv: TypeId, md: DefId, ord: bool) bool {
+        let rt = self.tc_method_ret(recv, md);
+        if rt == TYPE_NONE || untyped(rt) {
+            return true;
+        }
+        let y = *self.type_at(rt);
+        return y.kind == TypeKind::TYPE_BUILTIN && unsafe y.as_data.builtin == pick(
+            ord,
+            BuiltinType::BT_I32,
+            BuiltinType::BT_BOOL,
+        );
+    }
+
     fn tc_param_bound_provides(self: &mut Self, pmod: ModuleId, pdecl: NodeId, m: str) bool {
         let mut ifaces = BoundArr8 {};
         let ni = self.collect_param_bounds_full(pmod, pdecl, &mut ifaces[0], 8);
@@ -23416,6 +23431,21 @@ extend TypeChecker {
                         format("'{}' has no '{}' method for this operator (implement {})", ty.as_str(), mm, iface),
                     );
                     self.errors.note(format("operator overloads are resolved through interface-style methods"));
+                } else if !self.tc_op_result_ok(ls, md, ord) {
+                    // Another method of that name (`Secret::eq` gives a `Secret<bool>`) is no operator.
+                    let ty = self.type_str(ls);
+                    self.errors.emit_span(
+                        dc::HAS_NO_METHOD_OPERATOR_IMPLEMENT,
+                        sp,
+                        format(
+                            "'{}' has no '{}' method for this operator (implement {}): its '{}' does not return '{}'",
+                            ty.as_str(),
+                            mm,
+                            pick(ord, "Ord", "Eq"),
+                            mm,
+                            pick(ord, "i32", "bool"),
+                        ),
+                    );
                 } else if !self.method_extend_bounds_hold(ls, md) {
                     self.err_method_extend_bounds(sp, ls, md);
                 } else {
@@ -32623,9 +32653,11 @@ extend TypeChecker {
             return et;
         }
         let ek = unsafe (*self.cur_ast()).at_const(eid).kind;
+        // A generic call whose unsuffixed literals alone fix its type takes the slot's, as a `let` with a
+        // type and a call argument do (`[W::new(1)]` for `[W<u8>; 1]`).
         if ek == NodeKind::NODE_CLOSURE || ek == NodeKind::NODE_TUPLE || self.tc_bare_generic_variant(eid) || self.tc_bare_generic_struct_lit(
             eid,
-        ) {
+        ) || self.tc_needs_want(eid, true) {
             return self.check_expr_w(eid, we);
         }
         if ek == NodeKind::NODE_ARRAY_LITERAL && self.type_at(we).kind == TypeKind::TYPE_ARRAY {

@@ -4777,6 +4777,8 @@ extend Parser {
             AttrKind::ATTR_PROVE_EXHAUSTIVE as i32
         } else if self.text_is(ns, "trusted") {
             AttrKind::ATTR_TRUSTED as i32
+        } else if self.text_is(ns, "constant_time") {
+            AttrKind::ATTR_CONSTANT_TIME as i32
         } else {
             -1
         };
@@ -5335,6 +5337,12 @@ extend Parser {
                     "",
                     "may only be applied to a function with a body",
                 )
+            } else if attr.kind == AttrKind::ATTR_CONSTANT_TIME as u8 {
+                pick(
+                    fnk && self.ast.ext(owner).function.body != NODE_NONE && !self.ast.ext(owner).function.is_ghost(),
+                    "",
+                    "may only be applied to a function with a body, not a spec function or a lemma",
+                )
             } else if attr.kind == AttrKind::ATTR_THREAD_LOCAL as u8 {
                 pick(
                     owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_CONST && unsafe self.ast.at_const(
@@ -5742,6 +5750,10 @@ fn known_attr_name(kind: u8, out: &mut String) {
         out.push_str("trusted");
         return;
     }
+    if kind == AttrKind::ATTR_CONSTANT_TIME as u8 {
+        out.push_str("constant_time");
+        return;
+    }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
         out.push_str("layout");
         return;
@@ -5755,7 +5767,7 @@ fn known_attr_name(kind: u8, out: &mut String) {
 }
 
 // The attributes that are not C-facing, as `known_attributes` gives them.
-const ATTR_NAMES: [str<'static>; 29] = [
+const ATTR_NAMES: [str<'static>; 30] = [
     "emit_macro",
     "bench",
     "test",
@@ -5785,6 +5797,7 @@ const ATTR_NAMES: [str<'static>; 29] = [
     "associative_math",
     "prove_exhaustive",
     "trusted",
+    "constant_time",
 ];
 
 // The C-facing attributes (`@inline`) and their kinds. The first eight take no argument,

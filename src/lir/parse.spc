@@ -456,6 +456,7 @@ extend<'a> Parser<'a> {
             self.pkg.syms.index_mut(s as usize).noinline = self.keyword("noinline");
             self.pkg.syms.index_mut(s as usize).always = self.keyword("always");
             self.pkg.syms.index_mut(s as usize).cold = self.keyword("cold");
+            self.pkg.syms.index_mut(s as usize).sec = self.keyword("sec");
             self.pkg.syms.index_mut(s as usize).ext = self.keyword("ext");
             if self.keyword("section") {
                 let mut sp = String::new();
@@ -636,6 +637,11 @@ extend<'a> Parser<'a> {
                     return self.fail("expected 'fmath <bits>', at most 255");
                 }
                 self.body.fmath = k as u8;
+                return self.line_end_loc(&mut loc);
+            }
+            if w == "ct" {
+                // `ct`: a `@constant_time` function's body (`Body.ct`).
+                self.body.ct = true;
                 return self.line_end_loc(&mut loc);
             }
             if w == "scope" {

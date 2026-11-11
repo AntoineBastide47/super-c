@@ -92,6 +92,7 @@ extend Body as Persist {
         self.ranges.save(w);
         self.fmath.save(w);
         self.scopes.save(w);
+        self.ct.save(w);
         self.naked.save(w);
     }
 
@@ -114,6 +115,7 @@ extend Body as Persist {
         self.ranges.load(r);
         self.fmath.load(r);
         self.scopes.load(r);
+        self.ct.load(r);
         self.naked.load(r);
     }
 }
@@ -313,7 +315,7 @@ pub(package) fn record(pk: &mut Package, r: &mut lopt::Run, us: &Units, u: usize
                 sy.cold,
                 HELD_COLD,
                 0u8,
-            ) | ast::pick(sy.always, HELD_ALWAYS, 0u8),
+            ) | ast::pick(sy.always, HELD_ALWAYS, 0u8) | ast::pick(sy.sec, HELD_SEC, 0u8),
             fx: sy.fx,
             wargs: r.wargs_of(k),
             esc: sy.esc,
@@ -626,6 +628,7 @@ pub(package) fn add(pk: &mut Package, unit: u32, rec: &Rec) {
         y.own = true;
         y.cold = (f.flags & HELD_COLD) != 0;
         y.always = (f.flags & HELD_ALWAYS) != 0;
+        y.sec = (f.flags & HELD_SEC) != 0;
         pk.held.syms.push(s);
         pk.held.flags.push(f.flags);
         pk.held.fx.push(f.fx);

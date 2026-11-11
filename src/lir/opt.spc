@@ -18418,6 +18418,30 @@ const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
     return true;
 }
 
+// `marked` follows at most MARK_DEPTH operations.
+const MARK_DEPTH: u32 = 6;
+
+// Whether value `v` of `b` is an `O_SECRET`, or an operand of it is, `depth` operations deep: a value the
+// constant-time check counts as secret (`lir::ct`). Not through an `O_PUBLIC` or a block parameter.
+fn marked(b: &Body, v: Value, depth: u32) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_SECRET {
+        return true;
+    }
+    let f = OPS[t.op as usize].form;
+    if depth == 0 || t.op == O_PUBLIC || f < F_UN || f > F_TRI {
+        return false;
+    }
+    return marked(b, t.a, depth - 1) || f != F_UN && marked(b, t.b, depth - 1) || f == F_TRI && marked(
+        b,
+        t.c,
+        depth - 1,
+    );
+}
+
 // The zero or sign extension that defines `v` (not of an overflow flag), else an `iconst` (no extension).
 const fn extension(b: &Body, v: Value) Inst {
     if v != VNONE && (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_ZEXT || b.insts[v as usize].op == O_SEXT) && (b.insts[v as usize].a & VFLAG) == 0 {
@@ -18428,6 +18452,11 @@ const fn extension(b: &Body, v: Value) Inst {
 
 fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
+    // A secret mark of a value that depends on another mark adds nothing the check does not derive
+    // (`lir::ct`); without it, the rewrites that do not look through a mark see the operation.
+    if t.op == O_SECRET && marked(b, t.a, MARK_DEPTH) {
+        return t.a;
+    }
     if t.op == O_VEXTRACT || t.op == O_VINSERT {
         return lane_fold(b, i);
     }
@@ -20216,7 +20245,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_SECRET || op == O_PUBLIC;
         }
     }
     return t;
@@ -21204,6 +21233,7 @@ fn specialize(pk: &mut Package) {
         y.cold = f.cold;
         y.noinline = f.noinline;
         y.always = f.always;
+        y.sec = f.sec;
         copy[s] = c;
         made.push(pk.bodies[f.def as usize].compact());
         made_sym.push(c);

@@ -404,6 +404,8 @@ pub(package) struct Mangler {
     pub(package) mangle: bool,
     ph_global: loader::LookupHit,
     ph_box: loader::LookupHit, // the prelude `Box` (`niche`)
+    /// `std::crypto::secret::Secret`, NODE_NONE when the package does not load its module.
+    pub(package) secret: loader::LookupHit,
     nd: lay::NicheDecls, // the declarations whose values keep a niche (`niche`)
     // Per-module short-prefix verdicts (1 = short), a pure function of the package's module path
     // list, so every TU agrees: `short_ok` points into `short_own` (filled on first use) or into
@@ -787,6 +789,7 @@ extend Mangler {
             mangle: mangle,
             ph_global: ph_global,
             ph_box: ph_box,
+            secret: secret_decl(unsafe &*pkg),
             nd: nd,
             short_own: Vector::<u8>::new(),
             short_ok: null,
@@ -3707,6 +3710,98 @@ extend Mangler {
         return self.resolve(dm, t, rm, rt);
     }
 
+    /// Whether a value of `(m, t)` holds a `Secret` or reaches one through a reference, pointer, slice,
+    /// array, field or variant payload: a function that takes it may read a secret.
+    pub(package) fn holds_secret(self: &mut Self, m: ModuleId, t: TypeId) bool {
+        if self.secret.node == NODE_NONE {
+            return false;
+        }
+        let mut seen = Set::<u64>::new();
+        return self.reaches_secret(m, t, &mut seen, 0);
+    }
+
+    /// Whether a parameter of function `node` of module `m` holds a `Secret` (`holds_secret`): a C function
+    /// that takes one may read the secret (`lir::ct`).
+    pub(package) fn takes_secret(self: &mut Self, m: ModuleId, node: NodeId) bool {
+        if self.secret.node == NODE_NONE {
+            return false;
+        }
+        let a = unsafe &*self.p().module_ast_const(m);
+        let ps = a.ext(node).function.params;
+        for i in 0..ps.len {
+            let t = a.type_of(a.at_const(unsafe a.list(ps)[i as usize]).as_data.parameter.ty);
+            if t != TYPE_NONE && self.holds_secret(m, t) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    fn reaches_secret(self: &mut Self, m: ModuleId, t: TypeId, seen: &mut Set<u64>, depth: u32) bool {
+        let mut rm = m;
+        let mut rt = t;
+        // A type deeper than 32 levels counts as holding one: the answer stays sound.
+        if depth > 32 {
+            return true;
+        }
+        if t == TYPE_NONE || !self.resolve(m, t, &mut rm, &mut rt) {
+            return false;
+        }
+        let ra = unsafe &*self.p().module_ast_const(rm);
+        let y = *ra.type_at(rt);
+        if y.kind == TypeKind::TYPE_ARRAY || y.kind == TypeKind::TYPE_SLICE || y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
+            return self.reaches_secret(rm, y.as_data.elem, seen, depth + 1);
+        }
+        let mut it = TyInstance { n: 0 };
+        let mut dm: ModuleId = 0;
+        let mut dn = NODE_NONE;
+        if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
+            dm = y.module;
+            dn = y.as_data.decl;
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            it = *ra.instance(y.as_data.inst);
+            if it.module == self.secret.mid && it.decl == self.secret.node {
+                return true;
+            }
+            dm = it.module;
+            dn = it.decl;
+        } else {
+            return false;
+        }
+        // A type that holds itself through a pointer: its other members answer.
+        let key = rm as u64 << 32 | rt as u64;
+        if seen.contains(&key) {
+            return false;
+        }
+        seen.insert(key);
+        let da = unsafe &*self.p().module_ast_const(dm);
+        let n = da.at_const(dn);
+        if n.kind != NodeKind::NODE_STRUCT && n.kind != NodeKind::NODE_ENUM {
+            return false;
+        }
+        let mut nb: usize = 0;
+        if it.n != 0 {
+            nb = self.push_generics(dm, da.ext(dn).aggregate.generics, rm, &it);
+        }
+        let is_tuple = unsafe da.ext(dn).aggregate.is_tuple;
+        let ms = da.ext(dn).aggregate.members;
+        let mut hit = false;
+        for i in 0..ms.len {
+            let mid = unsafe da.list(ms)[i as usize];
+            let mk = da.at_const(mid).kind;
+            if n.kind == NodeKind::NODE_STRUCT && (mk == NodeKind::NODE_FIELD || is_tuple) {
+                hit = hit || self.reaches_secret(dm, da.member_ty(mid), seen, depth + 1);
+            } else if n.kind == NodeKind::NODE_ENUM && mk == NodeKind::NODE_VARIANT {
+                let pl = da.at_const(mid).as_data.variant.payload;
+                for j in 0..pl.len {
+                    hit = hit || self.reaches_secret(dm, da.member_ty(unsafe da.list(pl)[j as usize]), seen, depth + 1);
+                }
+            }
+        }
+        self.pop_subs(nb);
+        return hit;
+    }
+
     /// Whether a value of `t` (pool `m`) holds a std `Box` in its own bytes under the substitution
     /// stack: it is one, or a field, tuple member, array element or variant payload holds one by
     /// value (the checker's `tc_holds_box` for a concrete type). Such a value has no all-zero form.
@@ -4940,4 +5035,13 @@ pub(package) fn simd_enabled(pk: &loader::Package) bool {
         }
     }
     return false;
+}
+
+/// The declaration of `std::crypto::secret::Secret`, NODE_NONE when package `p` does not load its module.
+fn secret_decl(p: &loader::Package) loader::LookupHit {
+    let m = p.find("std::crypto::secret");
+    if m < 0 {
+        return loader::LookupHit { node: NODE_NONE, mid: 0 };
+    }
+    return loader::LookupHit { node: p.lookup(loader::FROM_ANY, m as ModuleId, "Secret", true), mid: m as ModuleId };
 }

@@ -267,6 +267,47 @@ view; another method that takes a container's `&mut` makes its view unknown.
 `mod_mul(a as int, b as int, m as int);` proves `a * b % m == (a % m) * (b % m) % m` at that
 point.
 
+### Constant-Time Code
+
+```superc
+import std::crypto::secret as *;
+
+@constant_time
+fn same(a: []Secret<u8>, b: []Secret<u8>) bool {
+    if a.len() != b.len() {
+        return false; // the lengths are public
+    }
+    let mut d = Secret::<u8>::new(0);
+    for i in 0..a.len() {
+        d = d | (a[i] ^ b[i]);
+    }
+    return d.eq(Secret::new(0)).declassify();
+}
+```
+
+`std::crypto::secret::Secret<T>` (`T` is `u8`, `u16`, `u32`, `u64`, `usize` or `bool`) holds a value
+whose bits no timing may reveal. Its methods are the only operations on it, each without a branch:
+`new`, `declassify` (the one way out), `+ - * -x` (wrapping), `& | ^ ~`, `<<` and `>>` by a public
+count below the width, `rotate_left`, `rotate_right`, `eq`, `ne`, `lt`, `le`, `gt`, `ge` (each a
+`Secret<bool>`), `Secret::pick(c, a, b)` (`a` where `c`, else `b`) and `cast::<U>()`. So the type
+checker rejects a branch on a secret, an index by one, a division, `==` and `<` (its `eq` gives no
+`bool`), a cast and a read of the field. A buffer of secret bytes is `[]Secret<u8>`: its length
+and its indexes are public.
+
+`@constant_time` on a function with a body (error 56 elsewhere) makes the build check the code it
+generates for it, after the optimizer (error 558), also when nothing calls it: no branch, memory
+address or size, division or remainder, float operation, atomic or vector operation, system call,
+indirect call or select of a float or a vector depends on a secret, and no secret passes to a call or
+returns other than inside a `Secret` in memory. Only such a function reads a secret (std's `Secret`
+methods are `@constant_time`), so a helper that only passes a `Secret` on, a generic function such as
+`Vector<Secret<u8>>::push`, a closure and a `dyn` call need no attribute. No function may call a C
+function that takes a `Secret` (through a reference, a slice or a field too) or take its address. A
+value `declassify` gives is public from there. A `@constant_time` function is inlined only into another
+one, so the code the check sees is the code that runs; loops over secrets vectorize. `--emit-c` puts the
+checked machine code in the C tree (`__sc_ct.o`, a unit): no C compiler compiles these functions, and a
+target without a native backend is an error. On wasm32 the engine compiles the checked wasm
+instructions: it is part of what the guarantee trusts, as the processor is.
+
 ## Structs and Methods
 
 ```superc

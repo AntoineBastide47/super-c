@@ -73,15 +73,19 @@ cemit_package             -- InstGraph.collect() over the kept Core IR bodies of
   |                          a module whose backend holds BK_LIR also lowers each body
   |                          and derived destructor to LIR (see LIR); it returns at S_LOWERED,
   |                          its emitters, lowerers, instance graph and inline store going with it
-syntax_done               -- the front end's data after its last reader: the line tables, then
+syntax_done               -- the front end's data after its last reader: the line tables (kept
+  |                          with std::crypto::secret, whose check reports at the sources), then
   |                          (unless a later stage reads them) every module's syntax and source,
   |                          the index, the item schedule and the build's evaluator, then
   |                          Global::trim gives the freed pages back (core-ir-publication.md)
 lir_stage                 -- the LIR optimizer (opt-level > 0), each module's held record into the
-  |                          next per-TU cache image, the LIR check (SC_LIR), the render boundary
+  |                          next per-TU cache image, the constant-time check of every body and
+  |                          the removal of the secret marks (lir::ct), with --emit-c the checked
+  |                          @constant_time bodies (cemit::BK_CT) compiled by the native backend
+  |                          (ct_object), the LIR check (SC_LIR), the render boundary
 serial write-out          -- __sc_fwd.h, one __sc_t/<type>.h per type, per-module .h, then
   |                          (--emit-c) the module TU shards (<module>.c, __p<k>), per-owner
-  |                          instance shards (<module>__inst.c), __sc_registry.c and
+  |                          instance shards (<module>__inst.c), __sc_registry.c, __sc_ct.o and
   |                          __sc_manifest (a shard streams out as includes, head, its chunks,
   |                          tail); then prune_orphans drops stale outputs
 native objects + link     -- a linking build: the generators (x64gen, a64gen, wasmgen) in

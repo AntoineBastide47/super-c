@@ -23,6 +23,7 @@ import std::float as fl;
 import lir::verify as lv;
 import lir::print as lp;
 import lir::eval as le;
+import lir::ct as lct;
 import stdlib;
 import ir::print as irp;
 import bindgen::bindgen as bg;
@@ -1734,6 +1735,7 @@ struct PlaceRef {
     pub(package) ti: TyI,
     pub(package) packed: bool,
     pub(package) in_union: bool, // a union member holds it: another member's type may view its bytes
+    pub(package) secret: bool, // inside a `Secret`: a read of it is an `O_SECRET` (`lir::ct`)
 }
 
 extend PlaceRef as Copy {}
@@ -2124,6 +2126,12 @@ extend Lower {
         self.pkg.syms.index_mut(s as usize).ext = true;
     }
 
+    // C function `name` takes a `Secret` (`Sym.sec`): no body may call it or take its address (`lir::ct`).
+    fn mark_sec(self: &mut Self, name: str) {
+        let s = self.pkg.symbol(name, SK_FUNC);
+        self.pkg.syms.index_mut(s as usize).sec = true;
+    }
+
     // A call of `name` with `args` of types `tys` (each a type code or AGG | layout) and result `ret`.
     fn call_sym(self: &mut Self, name: str, args: []Value, tys: []u32, ret: u32) Value {
         let sg = self.b.signature(tys, tys.len() as u32, false, ret);
@@ -2386,6 +2394,8 @@ extend Lower {
             FM_ASSOC,
             0u8,
         );
+        // `@constant_time` on the function (its closures' bodies too): `lir::ct` checks the body.
+        self.b.ct = b.owner.node != NODE_NONE && oa.attr_of(b.owner.node, AttrKind::ATTR_CONSTANT_TIME) != null;
         // Captures: the trailing argument locals of a closure body, read through its env.
         let mut ncaps: u32 = 0;
         let mut nparams = b.args;
@@ -3673,6 +3683,7 @@ extend Lower {
                     if variant != NODE_NONE {
                         off -= vbase;
                     }
+                    cur.secret = cur.secret || Lower::is_secret(c, rm, rt);
                     cur.addr = self.ptradd(cur.addr, VNONE, 0, off);
                     cur.packed = cur.packed || f.packed;
                     cur.in_union = cur.in_union || pj.data == irc::PJ_UNION_FIELD;
@@ -4050,7 +4061,25 @@ extend Lower {
         if zo == 0 && ub == VNONE && is_int(p.ti.mty) && p.ti.mty != T_I128 {
             ub = self.pat_bound(c, p.m, p.t);
         }
-        return self.load_bounded(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo, ub);
+        let v = self.load_bounded(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo, ub);
+        return if p.secret {
+            self.inst(O_SECRET, p.ti.mty, 0, v, VNONE, VNONE)
+        } else {
+            v
+        };
+    }
+
+    // Whether resolved `(rm, rt)` is `std::crypto::secret::Secret`: the reads of its field are secret.
+    const fn is_secret(c: &cbe::CEmit, rm: ModuleId, rt: TypeId) bool {
+        if c.mg.secret.node == NODE_NONE {
+            return false;
+        }
+        let y = Lower::ast(c, rm).type_at(rt);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = Lower::ast(c, rm).instance(y.as_data.inst);
+        return it.module == c.mg.secret.mid && it.decl == c.mg.secret.node;
     }
 
     fn write(self: &mut Self, p: PlaceRef, v: Value) bool {
@@ -4247,6 +4276,9 @@ extend Lower {
             let fnn = ia.at_const(k.item.node);
             if fnn.kind == NodeKind::NODE_FUNCTION && ia.ext(k.item.node).function.is_extern() {
                 self.mark_ext(&s);
+                if c.mg.takes_secret(k.item.module, k.item.node) {
+                    self.mark_sec(&s);
+                }
             }
             if fnn.kind == NodeKind::NODE_FUNCTION && k.targ_len() == 0 && !self.ref_sig(
                 c,
@@ -5459,6 +5491,13 @@ extend Lower {
             }
             let al = log2(type_align(ti.mty, self.pkg.ptr_bytes)) as u16;
             return self.inst(O_LOAD, ti.mty, al | MEM_VOLATILE, a, VNONE, 0);
+        }
+        if k == irc::IN_DECLASSIFY {
+            let x = self.operand(c, b, b.oper_pool[rv.a as usize]);
+            if x == VNONE {
+                return VNONE;
+            }
+            return self.inst(O_PUBLIC, ti.mty, 0, x, VNONE, VNONE);
         }
         if k == irc::IN_VA_ARG {
             let ap = self.place_addr_op(c, b, b.oper_pool[rv.a as usize]);
@@ -7609,6 +7648,9 @@ extend Lower {
                 pcallee.node,
                 AttrKind::ATTR_COLD,
             ) != null;
+            if ext && c.mg.takes_secret(pcallee.module, pcallee.node) {
+                self.mark_sec(name.as_str());
+            }
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
@@ -8699,6 +8741,12 @@ extend Lower {
     /// The `SC_LIR` checks over the merged package, reported on stderr: every body lowered and every
     /// body verified, and under `SC_LIR_EVAL` each test's evaluator run agrees with CTFE (`ctfe_agrees`).
     /// True when all hold.
+    /// The constant-time check of the `@constant_time` bodies, then the removal of the secret marks
+    /// (`lir::ct`). Whether no body broke a rule.
+    pub(package) fn ct_check(self: &mut Self, p: &mut loader::Package) bool {
+        return lct::run(p, &mut self.pkg);
+    }
+
     pub(package) fn check_all(self: &mut Self, pk: *const loader::Package) bool {
         // A body with inline assembly stays on the C path by design.
         let mut nasm: u64 = 0;
@@ -10256,7 +10304,7 @@ const fn sig_code(t: u8, signed: bool) u32 {
 // Whether instruction `t` has no effect but its value: dropped when nothing uses it.
 const fn pure_inst(t: Inst) bool {
     let op = t.op;
-    return op >= O_ICONST && op <= O_MUL || op >= O_AND && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_RETADDR || op == O_LOAD && (t.aux & MEM_VOLATILE) == 0;
+    return op >= O_ICONST && op <= O_MUL || op >= O_AND && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_RETADDR || op == O_SECRET || op == O_PUBLIC || op == O_LOAD && (t.aux & MEM_VOLATILE) == 0;
 }
 
 extend Lower {

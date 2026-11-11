@@ -65,6 +65,7 @@ extend Pairs {
         out.bools = b.bools;
         out.ranges.extend_copy(&b.ranges);
         out.fmath = b.fmath;
+        out.ct = b.ct;
         out.naked = b.naked;
         // The blocks, an i128 parameter of a block but the entry as its two words.
         for k in 0..b.blocks.len() {

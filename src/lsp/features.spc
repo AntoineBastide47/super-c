@@ -352,7 +352,7 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
-const ATTR_DOCS: [AttrDoc; 41] = [
+const ATTR_DOCS: [AttrDoc; 42] = [
     AttrDoc {
         name: "emit_macro",
         sig: "@emit_macro",
@@ -440,6 +440,11 @@ const ATTR_DOCS: [AttrDoc; 41] = [
         name: "trusted",
         sig: "@trusted",
         doc: "On a spec function or a lemma without a body: its contracts are axioms that no proof checks.",
+    },
+    AttrDoc {
+        name: "constant_time",
+        sig: "@constant_time",
+        doc: "The build checks the function's machine-level code: no branch, memory address, division or float operation depends on a `Secret` value, and it passes secrets only to `@constant_time` functions.",
     },
     AttrDoc {
         name: "associative_math",

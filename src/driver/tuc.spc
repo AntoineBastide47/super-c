@@ -21,6 +21,7 @@ import stdio;
 import utils::persist as *;
 import stdlib;
 import build_system::ext as ext;
+import lir::ct as lct;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
 const TUC_VER: u32 = 15;
@@ -411,8 +412,10 @@ pub(package) fn tuc_setup(
     t.hnat.resize_default(n);
     // The evaluator check runs every test's body as the emitter lowers it, and a build that asks for the
     // LIR text (`lir_out`) or whose hooks read the LIR (`ext::reads_ir`) needs every body: a replayed body is
-    // not rendered.
-    if gen_root.len() == 0 || n == 0 || p.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR_EVAL") != null {
+    // not rendered. So does `--emit-c` of constant-time code: their object holds every one (`ct_object`).
+    if gen_root.len() == 0 || n == 0 || p.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR_EVAL") != null || !p.native && lct::loaded(
+        p,
+    ) {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {

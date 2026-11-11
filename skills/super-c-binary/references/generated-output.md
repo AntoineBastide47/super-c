@@ -25,6 +25,8 @@ build/
     __sc_shards       # --emit-c: the shard counts this build used (read back by the next build)
     app.h             # --emit-c: one header per module (prototypes)
     app.c app__inst.c # --emit-c: the module's C and its generic instances, glue and constants
+    __sc_ct.o         # --emit-c with std::crypto::secret: the @constant_time functions, checked and
+                      # compiled by the native backend; a unit the link takes as it is
     __units __cflags  # --emit-c: the units to compile and the flags of every compile
     __sc_t/           # --emit-c: one definition header per type (app__Point.h: typedef, definition, layout check)
     __std/            # demanded prelude modules only
@@ -33,7 +35,10 @@ build/
 `--emit-c` writes the readable C tree in its place: `super_rt.h` (libc includes, arithmetic helpers,
 runtime prototypes), `__sc_fwd.h` (the runtime and extern-block includes shared by every unit), one
 `.h`/`.c` per module, one definition header per type in `__sc_t/`, `<module>__inst.c`, and
-`__units`, `__cflags`, `__ldflags`.
+`__units`, `__cflags`, `__ldflags`. A program that loads `std::crypto::secret` gets `__sc_ct.o` too: the
+`@constant_time` functions as the native backend compiled them after the constant-time check, which
+the C declares and never defines, so no C compiler changes their code (Constant-Time Code in the
+language skill's basics.md). A target without a native backend makes such a program an error.
 
 A manifest build (`super-c build` with `build.toml`) works in one directory per target and
 profile: `<out-dir>/<profile>` for the main binary, `<out-dir>/<profile>-bin-NAME` and
@@ -66,10 +71,12 @@ non-prelude source (`Package::analysis_jobs`,
 serial compile and gains a few milliseconds at most, so small compiles run serially and
 hand their jobserver slots back. The native compile of the modules is parallel either way.
 
-The C tree of `--emit-c` builds with any C compiler and no `-I` flag: compile each unit `__units`
-lists with the flags of `__cflags`, then link the objects with the flags of `__ldflags`, one per line
-(`ci/cc_tree.sh` does it: `sh ci/cc_tree.sh build/debug/raw app`). `__sc_unity.c` and
-`__sc_pack<k>.c` include other units, and `__units` names them in place of their members. `__cflags`
+The C tree of `--emit-c` builds with any C compiler and no `-I` flag: compile each C unit `__units`
+lists with the flags of `__cflags`, then link the objects, and an object unit (`__sc_ct.o`) as it is,
+with the flags of `__ldflags`, one per line (`ci/cc_tree.sh` does it: `sh ci/cc_tree.sh build/debug/raw
+app`). `__sc_unity.c` and `__sc_pack<k>.c` include other units, and `__units` names them in place of
+their members. On wasm32 `__ldflags` holds `-nostdlib`: the tree's `std::rt::libc` units are the C
+library. `__cflags`
 holds the dialect and the feature macros of `push_c_env` (without them Darwin's
 `struct stat` lacks the fields std binds), `-funsigned-char` (the language's `char` is unsigned, and
 `super_rt.h` fails to compile without it), `-ffp-contract=off` (only an explicit `fma` fuses, so float

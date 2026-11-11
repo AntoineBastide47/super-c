@@ -51,6 +51,9 @@ pub(package) fn print_package(p: &Package, out: &mut String) {
         if s.cold {
             out.push_str(" cold");
         }
+        if s.sec {
+            out.push_str(" sec");
+        }
         if s.ext {
             out.push_str(" ext");
         }
@@ -190,6 +193,9 @@ extend Printer {
         }
         if b.fmath != 0 {
             out.format_into("  fmath {}\n", b.fmath);
+        }
+        if b.ct {
+            out.push_str("  ct\n");
         }
         for x in 0..b.scopes.len() {
             let sc = b.scopes[x];

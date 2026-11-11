@@ -32,6 +32,7 @@ import ir::verify as irv;
 import ir::drops as ird;
 import ir::tailcall as irt;
 import prove::prove as prv;
+import lir::ct as lct;
 import ir::bce as bce;
 import ir::capture as cap;
 import ir::inline as inl;
@@ -1754,7 +1755,7 @@ extend SeedAcc {
     /// Append chunk `text` of TU `key` owned by `own`, with its prototype line; `rec` journals it
     /// in `evs` for the per-TU cache.
     fn chunk(self: &mut Self, key: u64, own: ModuleId, text: &String, rec: bool, evs: &mut Vector<mbe::RecEv>) {
-        proto_of(text, &mut self.protos);
+        cbe::proto_of(text.as_str(), &mut self.protos);
         self.ch.add(key, own, text);
         if rec {
             let mut ev = mbe::RecEv::blank(mbe::RK_CHUNK);
@@ -1864,6 +1865,8 @@ pub(package) struct CemitOut {
     /// (`module_has_asm`, `module_asm`), for the stages after the syntax goes (`syntax_done`).
     pub(package) asm_has: Vector<bool>,
     pub(package) asm_text: Vector<String>,
+    /// `--emit-c`: the object of the checked constant-time bodies (`ct_object`), empty for none.
+    pub(package) ct_obj: Vector<u8>,
 }
 
 extend CemitOut {
@@ -1912,6 +1915,7 @@ extend CemitOut {
             held: Vector::<Option<lhold::Rec>>::new(),
             asm_has: Vector::<bool>::new(),
             asm_text: Vector::<String>::new(),
+            ct_obj: Vector::<u8>::new(),
         };
         o.protos_h.resize_default(n);
         o.tu_incs.resize_default(n);
@@ -2881,6 +2885,14 @@ fn reach_root(p: &loader::Package, a: &Ast, m: ModuleId, nid: NodeId, testing: b
         a,
         nid,
     ) {
+        return true;
+    }
+    // A `@constant_time` function is lowered and checked though nothing calls it (`lir::ct`); a generic one
+    // is checked at each instance.
+    if a.at_const(nid).kind == NodeKind::NODE_FUNCTION && a.ext(nid).function.generics.len == 0 && a.attr_of(
+        nid,
+        AttrKind::ATTR_CONSTANT_TIME,
+    ) != null {
         return true;
     }
     return a.attr_of(nid, AttrKind::ATTR_EXPORT) != null || a.attr_of(nid, AttrKind::ATTR_USED) != null || (a.unsafe_claims(
@@ -4087,7 +4099,7 @@ fn cemit_drain_slice_one(
     if li2 != 0xFFFFFFFFFFFFFFFFu64 || !var_on {
         o.dvix.push(vix);
     }
-    proto_of(&sh.out, &mut o.acc.protos);
+    cbe::proto_of(&sh.out, &mut o.acc.protos);
     o.acc.ch.add(65534, d_def.module, &sh.out);
     sh.lir_claim(d_def.module, "an instance", false);
     let mut clsq = Vector::<NodeId>::new();
@@ -4147,7 +4159,7 @@ fn cemit_drain_slice_one(
                 o.acc.env_bodies.push(envs);
                 o.acc.env_own.push(d_def.module);
             }
-            proto_of(&sh.out, &mut o.acc.protos);
+            cbe::proto_of(&sh.out, &mut o.acc.protos);
             o.acc.ch.add(65534, d_def.module, &sh.out);
             sh.lir_claim(d_def.module, "a closure", false);
         } else {
@@ -5737,7 +5749,7 @@ pub(package) fn cemit_package(
                         cem.fs = p.fn_set(m9 as ModuleId, mid9);
                         cemit_fn_attrs(p, m9 as ModuleId, mid9, cem.fs, &mut cem.fn_attrs);
                         if cem.emit_fn(&mlw.body, &msym) {
-                            proto_of(&cem.out, &mut mb_dec);
+                            cbe::proto_of(&cem.out, &mut mb_dec);
                             mb_def.push_string(&cem.out);
                         } else {
                             okm = false;
@@ -6375,15 +6387,19 @@ pub(package) fn cemit_package(
 // type and item dumps, or a package kept for reuse (`carry.keep`). The module-level assembly the later
 // stages read stays in `o` (`asm_has`, `asm_text`).
 fn syntax_done(p: &mut loader::Package, testing: bool, wms: &Vector<facts::FactsWatermark>, o: &mut CemitOut) {
-    // The LIR lowering was the last reader of the line tables (`lir_lines`).
-    p.lines = Vector::<Vector<u32>>::new();
+    // The LIR lowering was the last reader of the line tables (`lir_lines`), but for the constant-time
+    // check, which reports at the sources after the optimizer (`lct::loaded`).
+    let ct = lct::loaded(p);
+    if !ct {
+        p.lines = Vector::<Vector<u32>>::new();
+    }
     for m in 0..p.modules.len() {
         o.asm_has.push(module_has_asm(p, m));
         o.asm_text.push(module_asm(p, m));
     }
     let cir = p.cir as *const iri::Interp;
     let folds = cir != null && unsafe (*cir).fold_errs.len() != 0;
-    if testing || !p.ok || folds || o.skips != 0 || o.refused.len() != 0 || p.lib_build || ext::hooks() != null {
+    if testing || !p.ok || folds || o.skips != 0 || o.refused.len() != 0 || p.lib_build || ext::hooks() != null || ct {
         return;
     }
     let dumps = unsafe TS_ON || stdlib::getenv("SC_TYPE_TABLE") != null || stdlib::getenv("SC_ITEM_STATS") != null;
@@ -6399,6 +6415,49 @@ fn syntax_done(p: &mut loader::Package, testing: bool, wms: &Vector<facts::Facts
     }
     // What this freed goes back to the system: the optimizer's workers would not take it.
     Global::trim();
+}
+
+/// The object `--emit-c` writes into the C tree (`CT_OBJ`), which `__units` names.
+const CT_OBJ: str<'static> = "__sc_ct.o";
+
+// `--emit-c`: the constant-time bodies of `pk` (`cemit::BK_CT`), checked (`lir::ct`), compiled by the native
+// backend into `out`, so that no C compiler changes their code. The C units define every other symbol, the
+// module data included; the object defines the literals its code reads (`obj::copy_flags`). Each function
+// takes C's convention: the C units call them and define their callees. False, with the error reported,
+// for a target the native backend does not compile.
+fn ct_object(p: &loader::Package, pk: &mut lir_ir::Package, out: &mut Vector<u8>) bool {
+    let mut funcs = Vector::<u32>::new();
+    for s in 0..pk.syms.len() {
+        let y = pk.syms[s];
+        if y.kind != lir_ir::SK_FUNC {
+            continue;
+        }
+        pk.syms.index_mut(s).used = true;
+        if y.def != lir_ir::NONE && pk.bodies[y.def as usize].ct {
+            funcs.push(s as u32);
+        }
+    }
+    if funcs.len() == 0 {
+        return true;
+    }
+    let mut why = String::new();
+    if nat::prepare(pk, p.build_target, p.arch, &mut why) && nat::object(
+        pk,
+        p.build_target,
+        p.arch,
+        funcs[0..funcs.len()],
+        [],
+        "",
+        out,
+        &mut why,
+    ) {
+        return true;
+    }
+    eprint(
+        "error: '--emit-c' cannot compile the '@constant_time' functions for this target ({}): their code comes from the native backend, never from a C compiler\n",
+        why.as_str(),
+    );
+    return false;
 }
 
 /// The render after the lowering (`cemit_package`): the optimization of the finished LIR, each module's
@@ -6513,6 +6572,15 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         o.tuc_keys = replace(&mut tuc.keys, Vector::<u64>::new());
         o.tuc_hit = replace(&mut tuc.hit, Vector::<bool>::new());
     }
+    // The constant-time check of the `@constant_time` bodies on the LIR the generators receive, which then
+    // holds no secret mark (`lir::ct`).
+    if o.lir.is_some() && p.ok {
+        let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();
+        if !l.deref_mut().ct_check(p) {
+            p.ok = false;
+        }
+        o.lir = Some(l);
+    }
     // The LIR check of the bodies this build rendered (a refused one fails the build already). A module
     // the per-TU cache replayed passed it in the build that recorded it: SC_LIR is part of the key. A
     // build that asks for the LIR text (`lir_out`) runs without that cache, so every body is rendered.
@@ -6539,6 +6607,12 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         o.lir = Some(l);
     }
     if !p.native {
+        if o.lir.is_some() && p.ok {
+            let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();
+            if !ct_object(p, &mut l.deref_mut().pkg, &mut o.ct_obj) {
+                p.ok = false;
+            }
+        }
         o.lir = None;
     }
     if unsafe TS_ON {
@@ -11350,7 +11424,8 @@ fn man_line(man: &mut String, kind: str, root: str, path: str, h: u64, own: u32,
 const LIBM_AS_WRITTEN: str<'static> = " -fno-builtin-sin -fno-builtin-cos -fno-builtin-tan -fno-builtin-asin -fno-builtin-acos -fno-builtin-atan -fno-builtin-atan2 -fno-builtin-sinh -fno-builtin-cosh -fno-builtin-tanh -fno-builtin-asinh -fno-builtin-acosh -fno-builtin-atanh -fno-builtin-exp -fno-builtin-exp2 -fno-builtin-expm1 -fno-builtin-log -fno-builtin-log2 -fno-builtin-log10 -fno-builtin-log1p -fno-builtin-pow -fno-builtin-cbrt -fno-builtin-hypot -fno-builtin-sinf -fno-builtin-cosf -fno-builtin-tanf -fno-builtin-asinf -fno-builtin-acosf -fno-builtin-atanf -fno-builtin-atan2f -fno-builtin-sinhf -fno-builtin-coshf -fno-builtin-tanhf -fno-builtin-asinhf -fno-builtin-acoshf -fno-builtin-atanhf -fno-builtin-expf -fno-builtin-exp2f -fno-builtin-expm1f -fno-builtin-logf -fno-builtin-log2f -fno-builtin-log10f -fno-builtin-log1pf -fno-builtin-powf -fno-builtin-cbrtf -fno-builtin-hypotf";
 
 /// What a C compiler needs to build the C tree at `root` (`--emit-c`): `__units`, the units to compile
-/// (one tree-relative path per line; the members of the packs `members` are not units), `__cflags`, the
+/// (one tree-relative path per line; the members of the packs `members` are not units) and the object
+/// of the constant-time functions (`CT_OBJ`), which the compile passes to the link, `__cflags`, the
 /// flags of every compile (the dialect and the target's defines, the target and its CPU features, the
 /// profile's optimization, debug information and overflow wrapping), and the target's link flags after
 /// the `@link` flags in `__ldflags`, one per line. The written paths join `keep`; false when a write
@@ -11363,7 +11438,8 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     let mut units = String::new();
     for i in 0..keep.len() {
         let f = keep.at(i).as_str();
-        if f.ends_with(".c") && !ms.contains(keep.at(i)) {
+        // A unit is a C file that no pack holds, or the object of the constant-time functions (`ct_object`).
+        if f.ends_with(".c") && !ms.contains(keep.at(i)) || f.ends_with(CT_OBJ) {
             units.push_str(f.slice(root.len() + 1, f.len()));
             units.push_byte(b'\n');
         }
@@ -11397,6 +11473,11 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     split_args(&mut lw, tgt::os(target).exe_link);
     for i in 0..lw.len() {
         ld.format_into("{}\n", lw.at(i).as_str());
+    }
+    // wasm's C library is a unit of the tree (`std::rt::libc`), which defines the entry point and the C
+    // functions in place of the toolchain's.
+    if p.rt_libc >= 0 {
+        ld.push_str("-nostdlib\n");
     }
     let up = build_out_path(root, "__units", "");
     let fp = build_out_path(root, "__cflags", "");
@@ -13519,55 +13600,6 @@ fn cemit_main_wrapper(out: &mut String, argv: bool) {
     out.push_str(
         "static Vector__str __sc_argv_to_vector(int argc, char **argv) {\n  Vector__str out = (Vector__str){0};\n  if (argc > 0) {\n    out.ptr = (str *)Global__alloc((Global *)&__sc_zst_1, sizeof(str) * (size_t)argc, _Alignof(str));\n    out.len = (size_t)argc;\n    out.cap = (size_t)argc;\n    for (int i = 0; i < argc; i++) { out.ptr[i] = str__from_cstr(argv[i]); }\n  }\n  return out;\n}\nint main(int argc, char **argv) { return __sc_user_main(__sc_argv_to_vector(argc, argv)); }\n",
     );
-}
-
-// The single-line signature prefix of an emitted function body (up to its ` {`, or the `;` of a
-// declaration the body's file-scope assembly defines), as a prototype.
-fn proto_of(body: &String, out: &mut String) {
-    let bs = body.as_str();
-    let n = bs.len();
-    // A shared declaration must not carry optimization-only specifiers: an `inline` prototype whose
-    // TU has no definition is flagged (`-Werror` inline-never-defined), and `__attribute__((always_
-    // inline, ...))` needs the `inline` keyword it would then lose. The definition keeps them; the
-    // `_Noreturn` specifier and return type follow this prefix and stay.
-    let mut start: usize = 0;
-    loop {
-        if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
-            start += 7;
-        } else if start + 13 <= n && bs.slice(start, start + 13) == "__attribute__" {
-            let mut j = start + 13;
-            let mut depth: i32 = 0;
-            let mut began = false;
-            while j < n {
-                let c = bs.byte_at(j);
-                if c == 40 {
-                    depth += 1;
-                    began = true;
-                } else if c == 41 {
-                    depth -= 1;
-                }
-                j += 1;
-                if began && depth == 0 {
-                    break;
-                }
-            }
-            while j < n && bs.byte_at(j) == 32 {
-                j += 1;
-            }
-            start = j;
-        } else {
-            break;
-        }
-    }
-    let mut i = start;
-    while i + 1 < n {
-        if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 || bs.byte_at(i) == 59 {
-            break;
-        }
-        i += 1;
-    }
-    out.push_str(bs.slice(start, i));
-    out.push_str(";\n");
 }
 
 // ---- The borrow check stage -----------------------------------------------------------------
@@ -17268,6 +17300,15 @@ pub(package) fn run_package(
         let smp = build_out_path(root, "__sc_shards", "");
         if !p.native && write_file(&smp, &shard_meta) {
             keep.push(smp);
+        }
+    }
+    if !err && !p.native && root.len() != 0 && co.ct_obj.len() != 0 {
+        let op = build_out_path(root, CT_OBJ, "");
+        if write_file_atomic(&op, unsafe str::from_raw(co.ct_obj.as_ptr(), co.ct_obj.len())) {
+            keep.push(op);
+        } else {
+            eprintln("super-c: cannot write '{}'", op.as_str());
+            err = true;
         }
     }
     if !err && !p.native && root.len() != 0 && !c_build_files(p, root, &members, &mut keep, target) {

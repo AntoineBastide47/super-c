@@ -23,6 +23,7 @@ import target::assembler as asmr;
 import target::ctxswitch as ctxs;
 import lir::lower as lw;
 import lir::ir as lir_ir;
+import lir::ct as lct;
 import codegen::obj as cob;
 import target::native as nat;
 import emit::rt_h as rth;
@@ -102,9 +103,12 @@ struct DynDue {
     pub(package) own9: ModuleId,
 }
 
-/// A module's backend bits: the C renderer emits its C; LIR lowers its bodies.
+/// A module's backend bits: the C renderer emits its C; LIR lowers its bodies; LIR lowers its
+/// constant-time bodies, whose C is their declarations alone (`--emit-c`: the native backend compiles them
+/// after the constant-time check, into `__sc_ct.o`).
 pub(package) const BK_C: u8 = 1;
 pub(package) const BK_LIR: u8 = 2;
+pub(package) const BK_CT: u8 = 4;
 
 // Whether `pk`'s target has CPU feature `name`.
 const fn feature(pk: &loader::Package, name: str) bool {
@@ -114,17 +118,68 @@ const fn feature(pk: &loader::Package, name: str) bool {
 
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
 /// modules `SC_LIR` names (`in_list`), which the LIR check covers (`Lower::check_all`); the C renderer
-/// for every module of a build that is not native. A native build's declarations still render.
+/// for every module of a build that is not native, and LIR for its constant-time bodies when it loads
+/// `std::crypto::secret` (`lir::ct`). A native build's declarations still render.
 pub(package) fn backends_of(pk: &loader::Package) Vector<u8> {
     let n = pk.modules.len();
     let mut out = Vector::<u8>::with_capacity(n);
     let all = pk.native;
+    let ct = !all && lct::loaded(pk);
     let sel = stdlib::get_env("SC_LIR").unwrap_or(String::new());
     for i in 0..n {
         let on = all || pk.lir_out != null || ext::reads_ir() || in_list(&sel, &pk.modules.at(i).path);
-        out.push(ast::pick(all, 0u8, BK_C) | ast::pick(on, BK_LIR, 0u8));
+        out.push(ast::pick(all, 0u8, BK_C) | ast::pick(on, BK_LIR, 0u8) | ast::pick(ct, BK_CT, 0u8));
     }
     return out;
+}
+
+/// The single-line signature prefix of an emitted function body (up to its ` {`, or the `;` of a
+/// declaration the body's file-scope assembly defines), as a prototype.
+pub(package) fn proto_of(body: str, out: &mut String) {
+    let bs = body;
+    let n = bs.len();
+    // A shared declaration must not carry optimization-only specifiers: an `inline` prototype whose
+    // TU has no definition is flagged (`-Werror` inline-never-defined), and `__attribute__((always_
+    // inline, ...))` needs the `inline` keyword it would then lose. The definition keeps them; the
+    // `_Noreturn` specifier and return type follow this prefix and stay.
+    let mut start: usize = 0;
+    loop {
+        if start + 7 <= n && bs.slice(start, start + 7) == "inline " {
+            start += 7;
+        } else if start + 13 <= n && bs.slice(start, start + 13) == "__attribute__" {
+            let mut j = start + 13;
+            let mut depth: i32 = 0;
+            let mut began = false;
+            while j < n {
+                let c = bs.byte_at(j);
+                if c == 40 {
+                    depth += 1;
+                    began = true;
+                } else if c == 41 {
+                    depth -= 1;
+                }
+                j += 1;
+                if began && depth == 0 {
+                    break;
+                }
+            }
+            while j < n && bs.byte_at(j) == 32 {
+                j += 1;
+            }
+            start = j;
+        } else {
+            break;
+        }
+    }
+    let mut i = start;
+    while i + 1 < n {
+        if bs.byte_at(i) == 32 && bs.byte_at(i + 1) == 123 || bs.byte_at(i) == 59 {
+            break;
+        }
+        i += 1;
+    }
+    out.push_str(bs.slice(start, i));
+    out.push_str(";\n");
 }
 
 /// Whether the build lowers bodies to LIR for the LIR check or for a client of it (`SC_LIR`,
@@ -614,7 +669,7 @@ extend CEmit {
         let simd_on = mg.vec_regs;
         let mut any = false;
         for i in 0..backends.len() {
-            any = any || (backends[i] & BK_LIR) != 0;
+            any = any || (backends[i] & (BK_LIR | BK_CT)) != 0;
         }
         let lir = if any {
             let mut l = Box::new(
@@ -1946,6 +2001,10 @@ extend CEmit {
         if ok && self.lir_on(b.module) {
             self.lir_body(b, name, 0, NODE_NONE, nr);
         }
+        if ok && self.ct_only(b) {
+            self.lir_body(b, name, 0, NODE_NONE, nr);
+            self.declare_only(mark);
+        }
         return self.close_body(b, mark, ok);
     }
 
@@ -1963,6 +2022,29 @@ extend CEmit {
     // Whether LIR lowers what module `m` emits (a `@emit_macro` template is C text only).
     const fn lir_on(self: &Self, m: ModuleId) bool {
         return self.lir.is_some() && !self.mg.macro_on && (self.backends[m as usize] & BK_LIR) != 0;
+    }
+
+    // The function the output holds from `mark` on, as its prototype alone (`ct_only`).
+    fn declare_only(self: &mut Self, mark: usize) {
+        let mut d = String::new();
+        proto_of(self.out.as_str().slice(mark, self.out.len()), &mut d);
+        self.out.truncate(mark);
+        self.out.push_string(&d);
+    }
+
+    // Whether body `b` is constant-time (its function's `@constant_time`, a closure's too) and its module
+    // lowers only those (BK_CT): LIR lowers it, and its C is its declaration alone.
+    fn ct_only(self: &Self, b: &ir::CoreBody) bool {
+        return self.ct_def(b.module, b.owner);
+    }
+
+    // Whether function `d`, emitted in module `m`, is constant-time and the module lowers only those
+    // (`ct_only`): its object entry has the declaration's ABI alone, with no `__r` split (`split_abi`).
+    fn ct_def(self: &Self, m: ModuleId, d: DefId) bool {
+        if self.lir.is_none() || self.mg.macro_on || (self.backends[m as usize] & (BK_CT | BK_LIR)) != BK_CT || d.node == NODE_NONE {
+            return false;
+        }
+        return unsafe (*self.p().module_ast_const(d.module)).attr_of(d.node, AttrKind::ATTR_CONSTANT_TIME) != null;
     }
 
     // Lower body `b` (symbol `name`; a closure's when `cnode` names it) to LIR with the bindings the
@@ -2519,7 +2601,7 @@ extend CEmit {
     // extern or variadic definition, a vector-backend entry or a macro template, whose C signatures
     // other code spells.
     fn split_abi(self: &mut Self, b: &ir::CoreBody) bool {
-        if self.no_split || self.mg.macro_on {
+        if self.no_split || self.mg.macro_on || self.ct_only(b) {
             return false;
         }
         let fnn = unsafe (*self.p().module_ast_const(b.owner.module)).at_const(b.owner.node);
@@ -2552,7 +2634,7 @@ extend CEmit {
         let fnn = unsafe (*ca).at_const(c.node);
         if fnn.kind != NodeKind::NODE_FUNCTION || unsafe (*ca).ext(c.node).function.is_extern() || unsafe (*ca).ext(
             c.node,
-        ).function.is_variadic() || unsafe (*ca).ext(c.node).function.body == NODE_NONE {
+        ).function.is_variadic() || unsafe (*ca).ext(c.node).function.body == NODE_NONE || self.ct_def(c.module, c) {
             return false;
         }
         return unsafe (*ca).attr_of(c.node, AttrKind::ATTR_SIMD_IMPL) == null;
@@ -7866,6 +7948,10 @@ extend CEmit {
         self.pr.stop_less(prb::P_RENDER, pm, prb::P_DECL, d0, a0, b0);
         if ok && self.lir_on(b.module) {
             self.lir_body(b, sym, cm, cnode, false);
+        }
+        if ok && self.ct_only(b) {
+            self.lir_body(b, sym, cm, cnode, false);
+            self.declare_only(mark);
         }
         self.cap_base = 0;
         self.cap_on = false;
@@ -18239,6 +18325,9 @@ extend CEmit {
             }
             if k == ir::IN_VOLATILE_LOAD as u32 {
                 return self.volatile_lvalue(b, b.oper_pool[rv.a as usize], rv.target, true, dst);
+            }
+            if k == ir::IN_DECLASSIFY as u32 {
+                return self.emit_operand(b, b.oper_pool[rv.a as usize], dst);
             }
             if k == ir::IN_LIKELY as u32 || k == ir::IN_UNLIKELY as u32 {
                 dst.push_str("__builtin_expect(");

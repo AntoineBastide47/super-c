@@ -120,6 +120,19 @@ thread_safety = "No run-time code."
 blocking = "No run-time code."
 errors = "No run-time code: a lemma the prover cannot prove is a compile error of the build that imports it."
 
+[package.crypto]
+# Tier 1: `Secret` and its operations need no operating system and no allocation.
+tier = 1
+targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
+limits = "WebAssembly: the engine compiles the module, so the constant-time check covers its instructions, not the machine code the engine makes of them."
+capabilities = []
+accelerations = []
+allocator = "Never allocates."
+thread_safety = "`Secret<T>` is a value: `Send` and `Sync` as `T` is."
+blocking = "Never blocks."
+errors = "A shift by an amount not below the width panics; a `@constant_time` function that branches, indexes or divides on a secret is a compile error of the build."
+c_functions = ["sc_wadd64", "sc_wsub64", "sc_wmul64", "sc_wshl64", "sc_wshr64"]
+
 [package.cpu]
 # Tier 1: the CPU feature query is a target capability that the vector code of tier 1 needs for its run-time
 # dispatch, not an operating-system service; it is an exempt substrate owner of its few platform calls.

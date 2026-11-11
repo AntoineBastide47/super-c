@@ -667,6 +667,14 @@ extend Eval {
         if op >= O_SEXT && op <= O_INTTOPTR {
             return self.convert(&f, b, t, dst);
         }
+        if op == O_SECRET || op == O_PUBLIC {
+            // The operand's words unchanged.
+            let w = self.word(&f, b, t.a);
+            for k in 0..value_words(t.ty, (unsafe &*self.pkg).ptr_bytes) {
+                self.vals[(dst + k) as usize] = self.vals[(w + k) as usize];
+            }
+            return true;
+        }
         if op == O_PTRADD {
             let mut p = self.val(&f, b, t.a);
             if t.b != VNONE {

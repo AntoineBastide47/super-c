@@ -307,9 +307,11 @@ b3: unlikely
   v51 = mulhs.i64 v50, v49
   v52 = bswap.i64 v51
   v53 = bitrev.i64 v52
-  jmp b4(v53)
-b4(v54: i64):
-  ret v54
+  v54 = secret.i64 v53
+  v55 = public.i64 v54
+  jmp b4(v55)
+b4(v56: i64):
+  ret v56
 b5:
   unreachable
 fn @floats

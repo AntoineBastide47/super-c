@@ -1171,7 +1171,8 @@ build/debug/raw/
   __sc_registry.c             # reflection table, when needed
   __sc_unity.c                # small program: includes every unit, compiled as one unit
   __sc_pack<k>.c              # larger program: groups of small units, compiled as one unit each
-  __units                     # the files to compile, one per line
+  __sc_ct.o                   # @constant_time functions, compiled by Super-C itself (std::crypto::secret)
+  __units                     # the files to compile, one per line (__sc_ct.o goes to the link as it is)
   __cflags                    # the flags of each compile: dialect, target, optimization level
   __ldflags                   # link flags, one per line
   __sc_shards  __sc_manifest  # split counts for the next build, and the list of outputs

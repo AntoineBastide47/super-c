@@ -494,6 +494,9 @@ extend Verifier {
         if op == O_FNEG || op == O_FSQRT {
             return self.need(name, b, i, float_like(t.ty) && ta == t.ty, "a float operand of the result's type");
         }
+        if op == O_SECRET || op == O_PUBLIC {
+            return self.need(name, b, i, t.ty != T_NONE && ta == t.ty, "an operand of the result's type");
+        }
         if op >= O_SEXT && op <= O_INTTOPTR {
             return self.need(
                 name,

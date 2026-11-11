@@ -132,6 +132,11 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 A pass that returns false must leave the body unchanged; the next pass then reuses the facts
 above. Recompute a fact only after a change that the "Valid until" column names.
 
+After the optimizer, `lir::ct` computes the secret values of each `@constant_time` body
+(`Check::violations`, a fixpoint over the block parameters) into `Check.taint`, valid for that body
+alone, and the replacement of each mark (`Check::strip`) into `Check.rep`; nothing after reads
+either.
+
 ## codegen (`native_plan` to `S_GENERATED`)
 
 | Fact | Producer | Stored in | Valid until |
