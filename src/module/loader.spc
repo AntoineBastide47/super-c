@@ -2547,6 +2547,8 @@ const fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
         }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         d = pub_child_depth(depth, y.as_data.proj.owner);
+    } else if k == TypeKind::TYPE_PATTERN {
+        d = pub_child_depth(depth, y.as_data.arr.elem).max(pub_child_depth(depth, y.as_data.arr.len));
     } else if y.rec() != NO_REC {
         if (y.rec() & TYPE_PROV) != 0 {
             let it = batch.instance((y.rec() & TYPE_PROV_MASK) as usize);
@@ -2557,6 +2559,9 @@ const fn pub_depth(batch: &TypePool, depth: &Vector<u32>, b: usize) u32 {
                 }
             }
         }
+    }
+    if y.has_pat() {
+        d = d.max(pub_child_depth(depth, y.pat()));
     }
     return d;
 }
@@ -2581,6 +2586,9 @@ fn pub_children(batch: &TypePool, b: usize, out: &mut Vector<u32>) {
         }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         pub_push_child(y.as_data.proj.owner, out);
+    } else if k == TypeKind::TYPE_PATTERN {
+        pub_push_child(y.as_data.arr.elem, out);
+        pub_push_child(y.as_data.arr.len, out);
     } else if y.rec() != NO_REC {
         if (y.rec() & TYPE_PROV) != 0 {
             let it = batch.instance((y.rec() & TYPE_PROV_MASK) as usize);
@@ -2588,6 +2596,9 @@ fn pub_children(batch: &TypePool, b: usize, out: &mut Vector<u32>) {
                 pub_push_child(unsafe it.args[q as usize], out);
             }
         }
+    }
+    if y.has_pat() {
+        pub_push_child(y.pat(), out);
     }
 }
 
@@ -2619,6 +2630,9 @@ fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>,
         }
     } else if k == TypeKind::TYPE_FIELD_PROJECTION {
         y.as_data.proj.owner = pub_fin(fin, y.as_data.proj.owner);
+    } else if k == TypeKind::TYPE_PATTERN {
+        y.as_data.arr.elem = pub_fin(fin, y.as_data.arr.elem);
+        y.as_data.arr.len = pub_fin(fin, y.as_data.arr.len);
     } else if y.rec() != NO_REC && (y.rec() & TYPE_PROV) != 0 {
         let bi = (y.rec() & TYPE_PROV_MASK) as usize;
         if ifin[bi] == 0xFFFFFFFFu32 {
@@ -2630,17 +2644,20 @@ fn pub_final_rec(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>,
         }
         y.set_rec(ifin[bi]);
     }
+    if y.has_pat() {
+        y.as_data.pat.slot = pub_fin(fin, y.pat());
+    }
     return y;
 }
 
 fn pub_key(batch: &TypePool, fin: &Vector<TypeId>, ifin: &mut Vector<u32>, g: &mut TypePool, b: usize) PubKey {
     let y = pub_final_rec(batch, fin, ifin, g, b);
     let mut k = PubKey { w: [[0] = 0u64], idx: b as u32, rec: y };
-    k.w[0] = y.kind as u64 << 56 | y.qualifier as u64 << 48 | y.module as u64 << 32;
+    k.w[0] = y.kind as u64 << 56 | y.qualifier as u64 << 48 | y.module as u64 << 32 | y.pat() as u64;
     let kd = y.kind;
     if kd == TypeKind::TYPE_POINTER || kd == TypeKind::TYPE_REFERENCE || kd == TypeKind::TYPE_SLICE {
         k.w[1] = y.as_data.elem;
-    } else if y.arr_like() {
+    } else if y.arr_like() || kd == TypeKind::TYPE_PATTERN {
         k.w[1] = y.as_data.arr.elem;
         k.w[2] = y.as_data.arr.len;
     } else if kd == TypeKind::TYPE_FIELD_PROJECTION {
@@ -3811,6 +3828,9 @@ extend Package {
                             }
                         } else if k == TypeKind::TYPE_FIELD_PROJECTION {
                             y.as_data.proj.owner = pub_child(&map, y.as_data.proj.owner, i);
+                        } else if k == TypeKind::TYPE_PATTERN {
+                            y.as_data.arr.elem = pub_child(&map, y.as_data.arr.elem, i);
+                            y.as_data.arr.len = pub_child(&map, y.as_data.arr.len, i);
                         } else if y.rec() != NO_REC {
                             let ii = y.rec();
                             if (ii & TYPE_PROV) != 0 {
@@ -3833,6 +3853,9 @@ extend Package {
                                 }
                                 y.as_data.inst = cmap[pi];
                             }
+                        }
+                        if y.has_pat() {
+                            y.as_data.pat.slot = pub_child(&map, y.pat(), i);
                         }
                         map.push(batch.insert_ty(y) | TYPE_PROV);
                     }
@@ -4021,8 +4044,16 @@ extend Package {
                 }
             } else if k == TypeKind::TYPE_CONST {
                 out.push_i64(y.as_data.value);
+            } else if k == TypeKind::TYPE_PATTERN {
+                out.push_u64(y.as_data.arr.elem);
+                out.push_byte(b' ');
+                out.push_u64(y.as_data.arr.len);
             } else {
                 out.push_u64(y.as_data.decl);
+            }
+            if y.has_pat() {
+                out.push_str(" P");
+                out.push_u64(y.pat());
             }
             out.push_byte(b'\n');
         }
@@ -7611,6 +7642,12 @@ extend Package {
     pub(package) fn is_prelude_item(self: &Self, d: DefId, name: str) bool {
         let h = self.prelude_lookup(name, true);
         return h.node != NODE_NONE && d.node == h.node && d.module == h.mid;
+    }
+
+    /// Whether the build runs the checks of conversions into pattern types (`ir::CT_PATTERN`): it does not
+    /// prove them (`-fno-prove`), or runs the contract checks (`-fcontract-checks`).
+    pub(package) const fn pat_checks_run(self: &Self) bool {
+        return (self.cg & (bman::CG_CONTRACT_CHECKS | bman::CG_NO_PROVE)) != 0;
     }
 
     pub(package) fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {

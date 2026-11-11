@@ -7289,7 +7289,7 @@ fn st_init(p: &loader::Package, cem: &mut cbe::CEmit, cev: &iri::Interp, name: s
                 out.push_str("{0}");
             } else {
                 out.push_str("{ ");
-                cem.mg.niche_path(dm, ns, nk.kind, ".", out);
+                cem.mg.niche_path(dm, ns, nk, ".", out);
                 out.push_str(" = ");
                 mbe::niche_none(nk, out);
                 out.push_str(" }");
@@ -8603,7 +8603,14 @@ extend DropCtx {
                     irc::skip_tail_ensures(&mut lw.body, &conv);
                 }
             }
-            irc::skip_contracts(&mut lw.body, self.contract_checks);
+            let pk = unsafe &*lw.pkg;
+            irc::skip_contracts(
+                &mut lw.body,
+                self.contract_checks,
+                pk.pat_checks_run(),
+                req_ast(pk, &lw.body),
+                lay::target_for(pk.arch).ptr == 4,
+            );
             let mut misses = Vector::<irt::TailMiss>::new();
             let _ = irt::convert(&mut lw.body, &mut self.ow, &mut misses);
         }
@@ -15536,7 +15543,17 @@ const fn splitmix(x: u64) u64 {
 // The prover over the kept bodies (`prv::check_kept`), skipping each module whose key the build
 // tree's proof record holds; the record then holds the keys of the modules whose proofs held. No
 // record without a build tree; a failed obligation is never recorded.
-fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, target: i32, tstat: bool) bool {
+// The facts the proofs give the build (`facts`: kept index << 32 | rvalue of each bounds check the
+// prover proved, `prv::check_kept`) come from the walk, or for a module the record holds from its
+// `p` lines: `p <module key> <owner module> <owner node> <rvalue>`, so a cached build has the same.
+fn prove_cached(
+    p: &mut loader::Package,
+    keep: &irl::Keep,
+    comp: &Vector<u32>,
+    target: i32,
+    tstat: bool,
+    facts: &mut Vector<u64>,
+) bool {
     if !prv::any_contracts(p) {
         return true;
     }
@@ -15554,6 +15571,9 @@ fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, t
         let old = loader::read_file(&path).unwrap_or(String::new());
         let mut have = Map::<u64, u64>::new();
         for line in old.as_str().split("\n") {
+            if line.starts_with("p ") {
+                continue;
+            }
             let f = line.find(" ");
             if f < 0 {
                 continue;
@@ -15572,6 +15592,32 @@ fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, t
                 None => {},
             }
         }
+        // The facts of each module the record lets the build skip.
+        let mut key_mod = Map::<u64, usize>::new();
+        for m in 0..n {
+            if skip[m] {
+                key_mod.insert(keys[2 * m], m);
+            }
+        }
+        for line in old.as_str().split("\n") {
+            if !line.starts_with("p ") {
+                continue;
+            }
+            let mut w = Vector::<u64>::new();
+            for part in line.slice(2, line.len()).split(" ") {
+                if let Some(v) = parse_hex64(part) {
+                    w.push(v);
+                }
+            }
+            if w.len() != 4 || !key_mod.contains_key(&w[0]) {
+                continue;
+            }
+            if let Some(k) = keep.ix.get(&skey_mix(0, w[1] << 32 | w[2])) {
+                if (*k) as usize < keep.kept.len() && w[3] < keep.kept.at((*k) as usize).body.rvalues.len() as u64 {
+                    facts.push(*k << 32 | w[3]);
+                }
+            }
+        }
     }
     let mut held = Vector::<bool>::with_capacity(n);
     held.resize_default(n);
@@ -15586,7 +15632,8 @@ fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, t
     if locks {
         set_stage_locks(p, true);
     }
-    let ok = prv::check_kept(p, keep, comp, &skip, &mut held);
+    let mut fresh = Vector::<u64>::new();
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut fresh);
     if locks {
         set_stage_locks(p, false);
     }
@@ -15607,8 +15654,32 @@ fn prove_cached(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, t
                 out.push_str(format("{:x} {:x}\n", keys[2 * m], keys[2 * m + 1]).as_str());
             }
         }
+        for j in 0..facts.len() + fresh.len() {
+            let f = if j < facts.len() {
+                facts[j]
+            } else {
+                fresh[j - facts.len()]
+            };
+            let b = &keep.kept.at((f >> 32) as usize).body;
+            if held[b.module as usize] {
+                out.push_str(
+                    format(
+                        "p {:x} {:x} {:x} {:x}\n",
+                        keys[2 * b.module as usize],
+                        b.owner.module,
+                        b.owner.node,
+                        f & 0xFFFFFFFFu64,
+                    ).as_str(),
+                );
+            }
+        }
         mkdir_p(&p.gen_root);
         let _ = write_file_atomic(&path, &out);
+    }
+    if ok {
+        facts.extend_copy(&fresh);
+    } else {
+        facts.clear();
     }
     return ok;
 }
@@ -15635,12 +15706,35 @@ const fn parse_hex64(s: str) Option<u64> {
 
 // Skip the contract checks of every kept body the build does not run (`irc::skip_contracts`), before
 // the inliner copies a callee or the evaluator runs one.
-fn skip_kept_contracts(keep: &mut irl::Keep, keep_checks: bool) {
+fn skip_kept_contracts(p: &loader::Package, keep: &mut irl::Keep, keep_checks: bool, keep_pats: bool) {
     for k in 0..keep.kept.len() {
         if keep.kept.at(k).body.contracts.len() != 0 {
-            irc::skip_contracts(&mut keep.kept.index_mut(k).body, keep_checks);
+            let req = req_ast(p, &keep.kept.at(k).body);
+            irc::skip_contracts(
+                &mut keep.kept.index_mut(k).body,
+                keep_checks,
+                keep_pats,
+                req,
+                lay::target_for(p.arch).ptr == 4,
+            );
         }
     }
+}
+
+// The module syntax of body `b` when every call of its function is proved, so that its `requires`
+// hold at its entry (`irc::skip_contracts`): the build proves, and `b`'s function is no `@export`,
+// which C calls with any value. Null else.
+fn req_ast(p: &loader::Package, b: &irc::CoreBody) *const Ast {
+    if (p.cg & bman::CG_NO_PROVE) != 0 || b.owner.node == NODE_NONE || (b.owner.node & NODE_BODY) != 0 || !p.modules.at(
+        b.owner.module as usize,
+    ).has_ast {
+        return null;
+    }
+    let oa = unsafe &*p.module_ast_const(b.owner.module);
+    if oa.at_const(b.owner.node).kind != NodeKind::NODE_FUNCTION || oa.attr_of(b.owner.node, AttrKind::ATTR_EXPORT) != null {
+        return null;
+    }
+    return p.module_ast_const(b.module);
 }
 
 // Unbounded recursion (`ir::recursion`) in the modules `lint_reported` selects; false when reported.
@@ -16495,14 +16589,27 @@ pub(package) fn run_package(
     stage_ms(tstat, &mut tp0, "phase recursion");
     // An ERROR on every build, over every module: a contract the prover cannot prove (`-fno-prove` skips it).
     if (p.cg & bman::CG_NO_PROVE) == 0 {
-        p.ok = prove_cached(p, &irkeep, &comp, target, tstat) && p.ok;
+        let mut facts = Vector::<u64>::new();
+        p.ok = prove_cached(p, &irkeep, &comp, target, tstat, &mut facts) && p.ok;
+        // Each bounds check the prover proved is its PROVEN twin before the inliner, the instances and
+        // the emitters copy the body (step 6: proved contracts and pattern types are facts).
+        for j in 0..facts.len() {
+            let f = facts[j];
+            let rv = (&mut irkeep.kept.index_mut((f >> 32) as usize).body.rvalues).index_mut(
+                (f & 0xFFFFFFFFu64) as usize,
+            );
+            if rv.kind == irc::RV_INTRINSIC && irc::is_check(rv.c) {
+                rv.c = irc::proven_twin(rv.c);
+                rv.item.module = irc::CHECK_PROVER;
+            }
+        }
         // The proofs restart the pool; release it again before any test-runner fork.
         if p.jobs != 1 {
             prt::shutdown();
         }
         stage_ms(tstat, &mut tp0, "phase prove");
     }
-    skip_kept_contracts(&mut irkeep, (p.cg & bman::CG_CONTRACT_CHECKS) != 0);
+    skip_kept_contracts(p, &mut irkeep, (p.cg & bman::CG_CONTRACT_CHECKS) != 0, p.pat_checks_run());
     // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let cirf = p.cir as *mut iri::Interp;
     if cirf != null {

@@ -1330,6 +1330,10 @@ pub(package) struct Body {
     pub(package) owned: Vector<u64>,
     /// Per signature parameter of the first 64, whether it holds 0 or 1 (a `bool`), a bit each.
     pub(package) bools: u64,
+    /// The ranges the entry parameters hold for the whole call (a pattern type, a proved `requires`):
+    /// three words each, `parameter << 1 | signed`, then the least and the greatest value in the
+    /// parameter's width (signed ones sign-extended). Empty when none.
+    pub(package) ranges: Vector<u64>,
     /// The float rewrites (`FM_*`) the function allows beyond the package's `fmath`: FM_ASSOC under
     /// `@associative_math`. A caller allowing one its callee does not inlines no copy of it.
     pub(package) fmath: u8,
@@ -1419,6 +1423,7 @@ extend Body {
             refs: Vector::<u32>::new(),
             owned: Vector::<u64>::new(),
             bools: 0,
+            ranges: Vector::<u64>::new(),
             fmath: 0,
             scopes: Vector::<Scope>::new(),
             naked: false,
@@ -1445,6 +1450,7 @@ extend Body {
         self.refs.truncate(0);
         self.owned.truncate(0);
         self.bools = 0;
+        self.ranges.truncate(0);
         self.fmath = 0;
         self.scopes.truncate(0);
         self.naked = false;
@@ -1468,6 +1474,7 @@ extend Body {
         assign(&mut o.refs, &self.refs);
         assign(&mut o.owned, &self.owned);
         o.bools = self.bools;
+        assign(&mut o.ranges, &self.ranges);
         o.fmath = self.fmath;
         assign(&mut o.scopes, &self.scopes);
         o.naked = self.naked;
@@ -1492,6 +1499,7 @@ extend Body {
             refs: exact(&self.refs),
             owned: exact(&self.owned),
             bools: self.bools,
+            ranges: exact(&self.ranges),
             fmath: self.fmath,
             scopes: exact(&self.scopes),
             naked: self.naked,
@@ -1516,6 +1524,7 @@ extend Body {
             refs: settle(&mut self.refs),
             owned: settle(&mut self.owned),
             bools: self.bools,
+            ranges: settle(&mut self.ranges),
             fmath: self.fmath,
             scopes: settle(&mut self.scopes),
             naked: self.naked,

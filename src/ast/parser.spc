@@ -423,7 +423,8 @@ extend Parser {
                 self.expect(TokenType::RightBrace, "'}'");
                 e
             } else if Parser::is_identifier_token(self.peek_type()) || self.check(TokenType::SelfUpper) {
-                self.parse_type_arg_path()
+                let st = self.raw_peek().start();
+                self.pattern_type_after(self.parse_type_arg_path(), st)
             } else {
                 self.parse_type()
             };
@@ -604,9 +605,168 @@ extend Parser {
             return self.error_skip("type nested too deeply");
         }
         self.depth = self.depth + 1;
-        let t = self.parse_type_inner();
+        let start = self.raw_peek().start();
+        let t = self.pattern_type_after(self.parse_type_inner(), start);
         self.depth = self.depth - 1;
         return t;
+    }
+
+    // Type `t` from `start`, or the pattern type `t is P` when `is` follows.
+    fn pattern_type_after(self: &mut Self, t: NodeId, start: u32) NodeId {
+        if !self.at_word("is") || t == NODE_NONE {
+            return t;
+        }
+        self.advance();
+        let pat = self.parse_type_pattern();
+        return self.fin(
+            NodeKind::NODE_PATTERN_TYPE,
+            start,
+            NodeAs { pattern_type: PatternTypeData { base: t, pattern: pat } },
+        );
+    }
+
+    // The pattern of a pattern type after `is`: a range whose bounds are integer literals, negated
+    // literals or paths, or one variant whose payload is only wildcards (`Some(_)`, `Circle(..)`,
+    // `Rect { .. }`, `None`). A bound takes no payload, and the braces of a struct variant hold only
+    // `..`: a body's `{` after the type stays the body's.
+    fn parse_type_pattern(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        let mut lo = NODE_NONE;
+        if !self.check(TokenType::Range) && !self.check(TokenType::RangeInclusive) {
+            if !self.check(TokenType::Minus) && !Parser::is_literal_token(self.peek_type()) && !Parser::is_identifier_token(
+                self.peek_type(),
+            ) {
+                return self.error_skip("expected a range or a variant after 'is'");
+            }
+            if !Parser::is_identifier_token(self.peek_type()) {
+                lo = self.type_pattern_bound();
+            } else {
+                let name = self.identifier();
+                let path = self.pattern_path(name);
+                if path == NODE_NONE {
+                    return NODE_NONE;
+                }
+                if !self.check(TokenType::Range) && !self.check(TokenType::RangeInclusive) {
+                    return self.type_pattern_variant(start, name, path);
+                }
+                lo = self.mk(
+                    NodeKind::NODE_PATTERN_LITERAL,
+                    self.node_span(path),
+                    NodeAs { single: SingleData { value: path } },
+                );
+            }
+            if !self.check(TokenType::Range) && !self.check(TokenType::RangeInclusive) {
+                self.error_here("a pattern type of an integer takes a range: write 'a..b', 'a..=b', 'a..' or '..=b'");
+                return lo;
+            }
+        }
+        let op_start = self.raw_peek().start();
+        let inclusive = self.advance().kind() == TokenType::RangeInclusive;
+        let k = self.peek_type();
+        let bound = k == TokenType::Minus || Parser::is_literal_token(k) || Parser::is_identifier_token(k) && !self.at_word(
+            "requires",
+        ) && !self.at_word("ensures") && !self.at_word("decreases") && !self.at_word("invariant");
+        let hi = if bound {
+            self.type_pattern_bound()
+        } else {
+            NODE_NONE
+        };
+        return self.finish_range(NodeKind::NODE_PATTERN_RANGE, lo, op_start, inclusive, hi);
+    }
+
+    // A range bound of a pattern type: an integer literal, a negated one, or a path to a constant or a
+    // const generic parameter.
+    fn type_pattern_bound(self: &mut Self) NodeId {
+        let start = self.raw_peek().start();
+        if self.match(TokenType::Minus) {
+            if !Parser::is_literal_token(self.peek_type()) {
+                return self.error_skip("expected literal");
+            }
+            let value = self.literal();
+            let neg = self.mk(
+                NodeKind::NODE_UNARY,
+                Span::new(start, self.node_span(value).end),
+                NodeAs { unary: UnaryData { op: Minus, operand: value, qualifier: TYPE_QUAL_NONE } },
+            );
+            return self.mk(
+                NodeKind::NODE_PATTERN_LITERAL,
+                self.node_span(neg),
+                NodeAs { single: SingleData { value: neg } },
+            );
+        }
+        if Parser::is_literal_token(self.peek_type()) {
+            let value = self.literal();
+            return self.mk(
+                NodeKind::NODE_PATTERN_LITERAL,
+                self.node_span(value),
+                NodeAs { single: SingleData { value: value } },
+            );
+        }
+        let name = self.identifier();
+        if name == NODE_NONE {
+            return NODE_NONE;
+        }
+        let path = self.pattern_path(name);
+        return self.mk(
+            NodeKind::NODE_PATTERN_LITERAL,
+            self.node_span(path),
+            NodeAs { single: SingleData { value: path } },
+        );
+    }
+
+    // The variant pattern of a pattern type at `start`: path `path` (`name` when it has one segment),
+    // then `(..)` or `(_, ..)`, `{ .. }`, or nothing.
+    fn type_pattern_variant(self: &mut Self, start: u32, name: NodeId, path: NodeId) NodeId {
+        let qual = if path != name {
+            path
+        } else {
+            NODE_NONE
+        };
+        let last = if path != name {
+            self.ast.at_const(path).as_data.member.member
+        } else {
+            name
+        };
+        if self.match(TokenType::LeftParen) {
+            let mark = self.ast.mark();
+            while !self.check(TokenType::RightParen) && !self.at_end() {
+                if !self.check(TokenType::Range) && !self.check(TokenType::Underscore) {
+                    self.error_here("the payload of a variant in a pattern type is '_' or '..'");
+                    break;
+                }
+                let t = self.advance();
+                self.ast.push(self.ast.add(Node { kind: NODE_PATTERN_WILDCARD, span: t.span() }));
+                if !self.match(TokenType::Comma) {
+                    break;
+                }
+            }
+            let children = self.ast.commit(mark);
+            self.expect(TokenType::RightParen, "')'");
+            return self.fin(
+                NodeKind::NODE_PATTERN_TUPLE,
+                start,
+                NodeAs { pattern: PatternData { name: last, children: children, qual: qual } },
+            );
+        }
+        let i = self.current;
+        if self.check(TokenType::LeftBrace) && i + 2 < self.tokens.len() && self.tokens[i + 1].kind() == TokenType::Range && self.tokens[i + 2].kind() == TokenType::RightBrace {
+            self.advance();
+            self.advance();
+            self.advance();
+            return self.fin(
+                NodeKind::NODE_PATTERN_STRUCT,
+                start,
+                NodeAs { pattern: PatternData { name: last, children: NodeList { start: 0, len: 0 }, qual: qual } },
+            );
+        }
+        if qual != NODE_NONE {
+            return self.mk(
+                NodeKind::NODE_PATTERN_LITERAL,
+                self.node_span(path),
+                NodeAs { single: SingleData { value: path } },
+            );
+        }
+        return self.fin(NodeKind::NODE_PATTERN_NAME, start, NodeAs { pattern: PatternData { name: name } });
     }
 
     // The rest of a pointer or reference type after its `*` / `&` opener at `start`.
@@ -3083,13 +3243,22 @@ extend Parser {
 
     // `as` binds looser than every prefix operator (`*x as T` is `(*x) as T`) and tighter than
     // any binary operator; left-associative chains (`x as A as B`) stay flat here.
+    // `x as? T` takes a pattern type, generic arguments included (`Option<u32> is Some(_)`).
     fn parse_cast_after(self: &mut Self, mut expr: NodeId) NodeId {
         while self.match(TokenType::As) {
-            let cast_type = self.parse_cast_type();
+            let checked = self.match(TokenType::Question);
+            let cast_type = if checked {
+                self.parse_type()
+            } else {
+                self.parse_cast_type()
+            };
+            if !checked && self.at_word("is") {
+                self.error_here("a cast cannot make a pattern type: 'as?' gives an Option of it");
+            }
             expr = self.mk(
                 NodeKind::NODE_CAST,
                 Span::new(self.outer(expr).start, self.node_span(cast_type).end),
-                NodeAs { cast: CastData { expression: expr, ty: cast_type } },
+                NodeAs { cast: CastData { expression: expr, ty: cast_type, checked: checked } },
             );
         }
         return expr;

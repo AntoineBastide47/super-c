@@ -1256,7 +1256,7 @@ extend tc::TypeChecker {
             // a copy without them answers.
             if tagged {
                 let mut conv = ir::CoreBody::compact_from(body);
-                ir::skip_contracts(&mut conv, false);
+                ir::skip_contracts(&mut conv, false, unsafe (&*ow.pkg).pat_checks_run(), null, false);
                 let mut cm = Vector::<irt::TailMiss>::new();
                 let done = irt::convert(&mut conv, ow, &mut cm);
                 for i in 0..cm.len() {

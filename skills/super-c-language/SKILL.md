@@ -53,7 +53,7 @@ the start:
 ## Quick Reference
 
 See [types.md](references/types.md) for the full type system reference (scalars, structs,
-enums, generics, closures, trait objects, slices, arrays, tuples, pointers, references).
+enums, pattern types, generics, closures, trait objects, slices, arrays, tuples, pointers, references).
 
 See [operations.md](references/operations.md) for the normative result of every scalar,
 conversion, float, pointer, atomic and control operation (wraps, traps, defined value, or

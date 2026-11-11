@@ -104,6 +104,21 @@ record at every intern (`TypePool::vec_of`), so `f32x4`, `Simd<f32, 4>` and a su
 vector or mask the instance record it stands for (`[T, N]`, `[N]`), which every stage that
 binds an extend, resolves a method or spells the type reads.
 
+A pattern type (`u32 is 1..`, `Option<u32> is Some(_)`) keeps its base's kind and first payload
+word, so every stage after the checker reads it as the base: qualifier bit `TQ_PAT` on a
+`TYPE_BUILTIN`, `TYPE_ENUM` or `TYPE_INSTANCE` says that `as_data.pat.slot` names a `TYPE_PATTERN`
+record (`PK_RANGE`: `arr.elem` and `arr.len` the inclusive bounds, a `TYPE_CONST` of the base or a
+const parameter with `PK_HI_EXCL`, `TYPE_NONE` open; `PK_VARIANT`: the variant's index). `ty_canon`,
+publication, `reintern`, the dump and the TU cache's table (`TT_PAT`, `TT_PATREC`) carry the slot;
+`Ast::with_pat` and `pat_base` add and drop it. A pattern with a const parameter bound
+(`usize is 0..N`) is not concrete (`tc_decide`, `decide_g`), and every substitution walker maps its
+base and its bounds, an exclusive bound made constant inclusive (`pat_hi_incl`): the checker's
+`subst_rec`, the instance graph's `subst_intern`, the mangler's `ground_l`, the inliner's `xty`,
+lowering's `proj_ty_map`; the layout service folds the bounds under its environment (`niche_on`),
+the mangler under its stack (`pat_bounds`). A pattern type as an argument names itself in symbols,
+since its niche may change the instance's layout: a range as `u32_r1_x`, a variant as `Shape_v1`
+(the variant's index; a value's own C type is its base's).
+
 Every walker that maps child types maps an array's element and symbolic length, and the
 record of every type `Ty::rec` names (an instance's arguments, a dyn's, a signature's results
 and parameters) through `rec()`, rebuilding a signature with `intern_sig_rec` /

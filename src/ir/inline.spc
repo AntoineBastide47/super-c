@@ -391,8 +391,68 @@ fn xty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, bind
 fn xty_i(pkg: *const loader::Package, km: ModuleId, kt: TypeId, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
     let p = unsafe &*pkg;
     let ka = unsafe &*p.module_ast_const(km);
-    let ca = unsafe &mut *p.module_ast_ptr(cm);
     let y = *ka.type_at(kt);
+    if y.has_pat() {
+        return xty_pat(pkg, km, kt, y, cm, binds, depth);
+    }
+    return xty_ty(pkg, km, kt, y, cm, binds, depth);
+}
+
+// `xty` of pattern type `y` (at `kt`): its base, then its pattern's bounds (`usize is 0..N`), an
+// exclusive bound made constant inclusive, as the checker's substitution leaves it.
+fn xty_pat(
+    pkg: *const loader::Package,
+    km: ModuleId,
+    kt: TypeId,
+    y: Ty,
+    cm: ModuleId,
+    binds: &Vector<GBind>,
+    depth: u32,
+) TypeId {
+    let p = unsafe &*pkg;
+    let ka = unsafe &*p.module_ast_const(km);
+    let ca = unsafe &mut *p.module_ast_ptr(cm);
+    if ka.type_concrete(kt) && (km == cm || (kt & TYPE_PROV) == 0) {
+        return kt;
+    }
+    let mut by = y;
+    by.qualifier = by.qualifier & ~TQ_PAT;
+    by.as_data.pat.slot = TYPE_NONE;
+    let b = xty_ty(pkg, km, TYPE_NONE, by, cm, binds, depth);
+    let py = *ka.type_at(y.pat());
+    let mut np = py;
+    for k in 0..2 {
+        let bt = pick(k == 0, py.as_data.arr.elem, py.as_data.arr.len);
+        let x = if bt == TYPE_NONE {
+            TYPE_NONE
+        } else {
+            xty(pkg, km, bt, cm, binds, depth + 1)
+        };
+        if bt != TYPE_NONE && x == TYPE_NONE || b == TYPE_NONE {
+            return TYPE_NONE;
+        }
+        if k == 0 {
+            np.as_data.arr.elem = x;
+        } else {
+            np.as_data.arr.len = x;
+        }
+    }
+    if np.as_data.arr.len != TYPE_NONE {
+        let hy = *ca.type_at(np.as_data.arr.len);
+        if let Some(v) = pat_hi_incl(&np, &hy, lay::target_for(p.arch).ptr == 4) {
+            np.as_data.arr.len = ca.const_value(cval_bits(v), hy.cbt());
+            np.qualifier = np.qualifier & ~PK_HI_EXCL;
+        }
+    }
+    let pt = ca.intern_type(np);
+    return ca.with_pat(b, pt);
+}
+
+// `xty` of type `y`, the record at `kt` (TYPE_NONE for a record no id names: a pattern type's base).
+fn xty_ty(pkg: *const loader::Package, km: ModuleId, kt: TypeId, y: Ty, cm: ModuleId, binds: &Vector<GBind>, depth: u32) TypeId {
+    let p = unsafe &*pkg;
+    let ka = unsafe &*p.module_ast_const(km);
+    let ca = unsafe &mut *p.module_ast_ptr(cm);
     return switch y.kind {
         TYPE_GENERIC => {
             let mut r = TYPE_NONE;

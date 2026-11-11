@@ -786,6 +786,24 @@ extend Builder {
                 }
                 self.st.push(self.b_type(n.as_data.indirect_type.ty));
             },
+            NODE_PATTERN_TYPE => {
+                // `B is P`: a struct variant's braces hold only `..`.
+                let pt = n.as_data.pattern_type;
+                self.st.push(self.b_type(pt.base));
+                self.st.push(self.p.txt(" is "));
+                let pn = self.nd(pt.pattern);
+                if pt.pattern != NODE_NONE && pn.kind == NodeKind::NODE_PATTERN_STRUCT {
+                    let pd = pn.as_data.pattern;
+                    if pd.qual != NODE_NONE {
+                        self.st.push(self.node_text(pd.qual));
+                    } else {
+                        self.st.push(self.b_pattern_path(pd.name));
+                    }
+                    self.st.push(self.p.txt(" { .. }"));
+                } else {
+                    self.st.push(self.b_pattern(pt.pattern));
+                }
+            },
             NODE_ARRAY_TYPE => {
                 self.st.push(self.p.txt("["));
                 self.st.push(self.b_type(n.as_data.array_type.element));
@@ -934,7 +952,8 @@ extend Builder {
         let v = self.st.len();
         switch n.kind {
             NODE_PATTERN_WILDCARD => {
-                self.st.push(self.p.txt("_"));
+                // `_`, or the `..` that ends a tuple payload (the same node).
+                self.st.push(self.p.txt(pick(n.span.end - n.span.start == 2, "..", "_")));
             },
             NODE_PATTERN_LITERAL | NODE_PATTERN_RANGE => {
                 self.st.push(self.node_text(id));
@@ -968,6 +987,18 @@ extend Builder {
                     }
                     let __h = self.list_at(p.children, i);
                     self.st.push(self.b_pattern(__h));
+                }
+                // A `..` before the `}` (the node keeps no mark of it): the source's last token.
+                let mut k = n.span.end;
+                while k > n.span.start && (self.src.byte_at((k - 1) as usize) == b'}' || self.src.byte_at(
+                    (k - 1) as usize,
+                ) == b' ' || self.src.byte_at((k - 1) as usize) == b'\n') {
+                    k -= 1;
+                }
+                if k >= n.span.start + 2 && self.src.byte_at((k - 1) as usize) == b'.' && self.src.byte_at(
+                    (k - 2) as usize,
+                ) == b'.' {
+                    self.st.push(self.p.txt(pick(p.children.len == 0, "..", ", ..")));
                 }
                 self.st.push(self.p.txt(" }"));
             },
@@ -1160,7 +1191,15 @@ extend Builder {
                 // `as` binds tighter than prefix ops. Relax to PREC_CAST once every bootstrap
                 // release contains the precedence flip.
                 self.st.push(self.b_expr_prec(n.as_data.cast.expression, PREC_POSTFIX));
-                self.st.push(self.p.txt(" as "));
+                self.st.push(
+                    self.p.txt(
+                        if unsafe n.as_data.cast.checked {
+                            " as? "
+                        } else {
+                            " as "
+                        },
+                    ),
+                );
                 self.st.push(self.b_type(n.as_data.cast.ty));
             },
             NODE_GENERIC_SPECIALIZATION => {

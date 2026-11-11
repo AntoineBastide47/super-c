@@ -63,6 +63,7 @@ pub(package) const T_MREF: u8 = 29; // a mutable reference to local `a` of the b
 pub(package) const T_VIEW: u8 = 30; // a view of array `a` of length k
 pub(package) const T_DOWN: u8 = 31; // `a` as its variant k
 pub(package) const T_ORD: u8 = 32; // the order of integers `a` and `b`: -1, 0 or 1 (a wide integer's `cmp`)
+pub(package) const T_TAG: u8 = 33; // the discriminant of enum value `a`, an integer
 
 // Whether an operand of operation `op` takes a product apart (`Terms::product`): a sum, a difference,
 // a negation or a product.
@@ -749,7 +750,7 @@ extend<const B: usize> Terms<B> {
             return;
         }
         out.push(x.a);
-        if !(x.op == T_NEG || x.op == T_BNOT || x.op == T_CAST || x.op == T_REF || x.op == T_NOT || x.op == T_VIEW || x.op == T_DOWN) {
+        if !(x.op == T_NEG || x.op == T_BNOT || x.op == T_CAST || x.op == T_REF || x.op == T_NOT || x.op == T_VIEW || x.op == T_DOWN || x.op == T_TAG) {
             out.push(x.b);
         }
     }

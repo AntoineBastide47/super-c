@@ -161,6 +161,9 @@ pub(package) const CT_INVARIANT: u32 = 3;
 pub(package) const CT_ASSERT: u32 = 4;
 // A lemma call statement in a normal body: a Core site only (no record), the call then `true`.
 pub(package) const CT_GHOST: u32 = 5;
+// A conversion into a pattern type the checker could not decide: a Core site only (no record), the
+// test of one bound or of the variant.
+pub(package) const CT_PATTERN: u32 = 6;
 
 /// The keyword of a contract clause of kind `k` (`CT_*`).
 pub(package) const fn contract_word(k: u32) str<'static> {
@@ -551,6 +554,9 @@ pub(package) enum NodeKind {
     // rewrites it in place into the same `sugar_fmt_*` value block `format()` desugars to, so
     // borrowck/const-eval/codegen never see this kind.
     NODE_INTERP,
+    // A pattern type `B is P` (PatternTypeData): base type node `base`, pattern node `pattern` (a
+    // range pattern, or a variant pattern whose payload is only wildcards).
+    NODE_PATTERN_TYPE,
 }
 
 pub(package) const VA_START: u8 = 0;
@@ -964,6 +970,8 @@ pub(package) struct MemberData {
 pub(package) struct CastData {
     pub(package) expression: NodeId,
     pub(package) ty: NodeId,
+    /// `x as? T`: the value as `Option<T>`, `None` when it does not match pattern type `T`.
+    pub(package) checked: bool,
 }
 pub(package) struct SpecializationData {
     pub(package) expression: NodeId,
@@ -1018,6 +1026,11 @@ pub(package) struct PatternRangeData {
     pub(package) inclusive: bool,
 }
 
+pub(package) struct PatternTypeData {
+    pub(package) base: NodeId,
+    pub(package) pattern: NodeId,
+}
+
 /// The payload of a node, by kind. A kind whose payload is larger than 20 bytes keeps it out of the
 /// node, in the `ext` table of the node's arena (`NodeExt`), and the node holds its index.
 pub(package) union NodeAs {
@@ -1058,6 +1071,7 @@ pub(package) union NodeAs {
     pub(package) field_initializer: FieldInitializerData,
     pub(package) pattern: PatternData,
     pub(package) pattern_range: PatternRangeData,
+    pub(package) pattern_type: PatternTypeData,
     pub(package) type_path: TypePathData,
     pub(package) ext: ExtRef,
 }
@@ -1250,6 +1264,11 @@ pub(package) enum TypeKind {
     TYPE_SIMD,
     /// `Mask<N>`, the prelude lane mask: as TYPE_SIMD with lane type `bool`.
     TYPE_MASK,
+    /// The pattern of a pattern type (`TQ_PAT`), never the type of a value: `qualifier` PK_RANGE or
+    /// PK_VARIANT. A range's `as_data.arr.elem` is its low bound and `len` its high bound, inclusive
+    /// unless PK_HI_EXCL: a TYPE_CONST of the base, a const parameter or a const expression, TYPE_NONE
+    /// when open. A variant's `elem` is its index as an i32 TYPE_CONST.
+    TYPE_PATTERN,
 }
 
 /// A const-generic expression in canonical form: `k + sum(c_i * P_i)`. Linear is exactly the closed set
@@ -1427,6 +1446,90 @@ pub(package) fn lin_acc(acc: &mut i128, c: i128, x: i128) bool {
             *acc = s;
             return true;
         }
+    }
+    return false;
+}
+
+/// The constant bounds of range pattern `p` of `a` (a TYPE_PATTERN), inclusive; `has_lo` and `has_hi`
+/// false at an open end. False for a variant or a symbolic bound.
+pub(package) fn pat_range(a: &Ast, p: TypeId, lo: &mut i128, hi: &mut i128, has_lo: &mut bool, has_hi: &mut bool) bool {
+    let y = *a.type_at(p);
+    if y.kind != TypeKind::TYPE_PATTERN || (y.qualifier & PK_VARIANT) != 0 {
+        return false;
+    }
+    *has_lo = y.as_data.arr.elem != TYPE_NONE;
+    *has_hi = y.as_data.arr.len != TYPE_NONE;
+    if *has_lo {
+        let l = *a.type_at(y.as_data.arr.elem);
+        if l.kind != TypeKind::TYPE_CONST {
+            return false;
+        }
+        *lo = l.cval();
+    }
+    if *has_hi {
+        let h = *a.type_at(y.as_data.arr.len);
+        if h.kind != TypeKind::TYPE_CONST {
+            return false;
+        }
+        *hi = h.cval();
+        if (y.qualifier & PK_HI_EXCL) != 0 {
+            *hi = *hi - i128::one();
+        }
+    }
+    return true;
+}
+
+/// The inclusive greatest value of range pattern record `p` whose greatest bound substitution made
+/// constant `hy` while it was exclusive (`0..N` with `N` 4): the bound to intern in its place, then the
+/// record without PK_HI_EXCL. None when `p` keeps it (another bound, or `0..0`, which has no value).
+pub(package) const fn pat_hi_incl(p: &Ty, hy: &Ty, ptr32: bool) Option<i128> {
+    if (p.qualifier & (PK_HI_EXCL | PK_VARIANT)) != PK_HI_EXCL || hy.kind != TypeKind::TYPE_CONST {
+        return None;
+    }
+    let v = hy.cval() - i128::one();
+    return if bt_holds(hy.cbt(), v, ptr32) {
+        Some(v)
+    } else {
+        None
+    };
+}
+
+/// A value of integer type `bt` outside range pattern `p` of `a`, a niche's `none` (usize and isize
+/// 32-bit under `ptr32`): 0, else the value above the range, else the one below. False when the range
+/// covers the type or a bound is symbolic.
+pub(package) fn pat_free(a: &Ast, p: TypeId, bt: BuiltinType, ptr32: bool, out: &mut i128) bool {
+    let mut lo = i128::zero();
+    let mut hi = i128::zero();
+    let mut has_lo = false;
+    let mut has_hi = false;
+    if !pat_range(a, p, &mut lo, &mut hi, &mut has_lo, &mut has_hi) {
+        return false;
+    }
+    return range_free(lo, hi, has_lo, has_hi, bt, ptr32, out);
+}
+
+/// `pat_free` of the inclusive range `lo..=hi` (each end open unless `has_lo`, `has_hi`).
+pub(package) const fn range_free(
+    lo: i128,
+    hi: i128,
+    has_lo: bool,
+    has_hi: bool,
+    bt: BuiltinType,
+    ptr32: bool,
+    out: &mut i128,
+) bool {
+    let zero = i128::zero();
+    if (has_lo && zero < lo || has_hi && hi < zero) && bt_holds(bt, zero, ptr32) {
+        *out = zero;
+        return true;
+    }
+    if has_hi && bt_holds(bt, hi + i128::one(), ptr32) {
+        *out = hi + i128::one();
+        return true;
+    }
+    if has_lo && bt_holds(bt, lo - i128::one(), ptr32) {
+        *out = lo - i128::one();
+        return true;
     }
     return false;
 }
@@ -2267,6 +2370,20 @@ pub(package) struct TyArr {
 }
 /// The `Ty.qualifier` of a TYPE_ARRAY whose `arr.len` names a symbolic length type, not a count.
 pub(package) const ARR_SYM: u8 = 1;
+/// The `Ty.qualifier` bit of a pattern type: a TYPE_BUILTIN, TYPE_ENUM or TYPE_INSTANCE whose values
+/// all match the pattern in `as_data.pat.slot` (a TYPE_PATTERN). Every reader of the kind and the first
+/// payload word reads it as its base.
+pub(package) const TQ_PAT: u8 = 0x40;
+/// TYPE_PATTERN qualifiers: a range of integers, or one variant of an enum; PK_HI_EXCL marks a range
+/// whose high bound is exclusive (a symbolic one: `0..N`).
+pub(package) const PK_RANGE: u8 = 0;
+pub(package) const PK_VARIANT: u8 = 1;
+pub(package) const PK_HI_EXCL: u8 = 2;
+/// The payload of a pattern type (`TQ_PAT`): the base's own word, then the pattern.
+pub(package) struct TyPat {
+    pub(package) head: u32,
+    pub(package) slot: TypeId,
+}
 pub(package) struct TyProj {
     pub(package) owner: TypeId, // the reflected type (may be a generic param); Ty.module is the binder's module
     pub(package) binder: NodeId, // the NODE_INLINE_FOR the projection belongs to
@@ -2378,6 +2495,7 @@ pub(package) union TyAs {
     pub(package) value: i64,
     pub(package) proj: TyProj, // TYPE_FIELD_PROJECTION
     pub(package) fnp: TyFn, // TYPE_FUNCTION with FN_SIG
+    pub(package) pat: TyPat, // a pattern type (`TQ_PAT`)
 }
 @derive(Copy)
 pub(package) struct Ty {
@@ -2413,6 +2531,20 @@ extend Ty {
     /// A TYPE_SIMD or TYPE_MASK.
     pub(package) const fn is_vec(self: &Self) bool {
         return self.kind == TypeKind::TYPE_SIMD || self.kind == TypeKind::TYPE_MASK;
+    }
+
+    /// A pattern type (`TQ_PAT`): its pattern is `pat()`.
+    pub(package) const fn has_pat(self: &Self) bool {
+        return (self.qualifier & TQ_PAT) != 0 && (self.kind == TypeKind::TYPE_BUILTIN || self.kind == TypeKind::TYPE_ENUM || self.kind == TypeKind::TYPE_INSTANCE);
+    }
+
+    /// A pattern type's TYPE_PATTERN, TYPE_NONE for any other type.
+    pub(package) const fn pat(self: &Self) TypeId {
+        return if self.has_pat() {
+            self.as_data.pat.slot
+        } else {
+            TYPE_NONE
+        };
     }
 
     /// A TYPE_DYN that owns its payload (`Box<dyn I>`): drops free it. `&dyn I` and `&mut dyn I`
@@ -3259,8 +3391,14 @@ extend TypePool {
     // Concreteness of a record whose children are this table's ids (one level, reading the
     // children's recorded answer).
     const fn decide_g(self: &Self, ty: &Ty) bool {
+        if ty.has_pat() && !self.at(ty.pat() as usize).concrete {
+            return false;
+        }
         return switch ty.kind {
             TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
+            TYPE_PATTERN => (ty.as_data.arr.elem == TYPE_NONE || self.at(ty.as_data.arr.elem as usize).concrete) && (ty.as_data.arr.len == TYPE_NONE || self.at(
+                ty.as_data.arr.len as usize,
+            ).concrete),
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.at(ty.as_data.elem as usize).concrete,
             TYPE_ARRAY => !ty.arr_sym() && self.at(ty.as_data.arr.elem as usize).concrete,
             TYPE_SIMD | TYPE_MASK => self.at(ty.as_data.arr.elem as usize).concrete && self.at(
@@ -4132,7 +4270,9 @@ extend Ast {
         };
         if t.kind == TypeKind::TYPE_CONST {
             c.as_data.value = t.as_data.value;
-        } else if t.arr_like() {
+        } else if t.has_pat() {
+            c.as_data.pat = t.as_data.pat;
+        } else if t.arr_like() || t.kind == TypeKind::TYPE_PATTERN {
             c.as_data.arr = t.as_data.arr;
         } else if t.kind == TypeKind::TYPE_FIELD_PROJECTION {
             c.as_data.proj = t.as_data.proj; // both words are significant: owner AND binder
@@ -5040,12 +5180,20 @@ extend Ast {
     // One level, reading the recorded answer for the children, which are interned before their parent.
     // `concrete` occupies Ty's former padding byte, so the cached answer needs no parallel allocation.
     fn tc_decide(self: &Self, ty: Ty) bool {
+        // A pattern type with a const parameter bound (`usize is 0..N`) is a value only once substitution
+        // folds the bound: an instance's layout and name depend on it.
+        if ty.has_pat() && !self.type_concrete(ty.pat()) {
+            return false;
+        }
         return switch ty.kind {
             // Not a value yet: an instance holding one must not be emitted until substitution folds it.
             TYPE_GENERIC | TYPE_CONST_EXPR | TYPE_FIELD_PROJECTION | TYPE_ASSOC => false,
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE => self.type_concrete(ty.as_data.elem),
             TYPE_ARRAY => !ty.arr_sym() && self.type_concrete(ty.as_data.arr.elem),
             TYPE_SIMD | TYPE_MASK => self.type_concrete(ty.as_data.arr.elem) && self.type_concrete(ty.as_data.arr.len),
+            TYPE_PATTERN => (ty.as_data.arr.elem == TYPE_NONE || self.type_concrete(ty.as_data.arr.elem)) && (ty.as_data.arr.len == TYPE_NONE || self.type_concrete(
+                ty.as_data.arr.len,
+            )),
             TYPE_INSTANCE | TYPE_FUNCTION | TYPE_DYN => {
                 let r = ty.rec();
                 if r != NO_REC {
@@ -5078,7 +5226,17 @@ extend Ast {
             unsafe TS_DEPTH += 1;
         }
         let ty = *src.type_at(t);
-        let r = switch ty.kind {
+        let mut r = switch ty.kind {
+            TYPE_PATTERN => {
+                let mut nt = ty;
+                if ty.as_data.arr.elem != TYPE_NONE {
+                    nt.as_data.arr.elem = self.reintern(src, ty.as_data.arr.elem);
+                }
+                if ty.as_data.arr.len != TYPE_NONE {
+                    nt.as_data.arr.len = self.reintern(src, ty.as_data.arr.len);
+                }
+                self.intern_type(nt)
+            },
             TYPE_POINTER | TYPE_REFERENCE | TYPE_SLICE | TYPE_ARRAY | TYPE_SIMD | TYPE_MASK => {
                 let mut nt = ty;
                 nt.as_data.elem = self.reintern(src, ty.as_data.elem);
@@ -5143,6 +5301,9 @@ extend Ast {
             },
             _ => self.intern_type(ty),
         };
+        if ty.has_pat() {
+            r = self.with_pat(r, self.reintern(src, ty.pat()));
+        }
         if unsafe TS_ON {
             unsafe TS_DEPTH -= 1;
             if t0 != 0 {
@@ -5150,6 +5311,31 @@ extend Ast {
             }
         }
         return r;
+    }
+
+    /// Type `t` (a TYPE_BUILTIN, TYPE_ENUM or TYPE_INSTANCE) with pattern `p` (a TYPE_PATTERN), or with
+    /// none when `p` is TYPE_NONE.
+    pub(package) fn with_pat(self: &mut Self, t: TypeId, p: TypeId) TypeId {
+        let mut y = *self.type_at(t);
+        if p == TYPE_NONE {
+            if !y.has_pat() {
+                return t;
+            }
+            y.qualifier = y.qualifier & ~TQ_PAT;
+            y.as_data.pat.slot = TYPE_NONE;
+            return self.intern_type(y);
+        }
+        y.qualifier = y.qualifier | TQ_PAT;
+        y.as_data.pat.slot = p;
+        return self.intern_type(y);
+    }
+
+    /// The base of type `t`: `t` without its pattern.
+    pub(package) fn pat_base(self: &mut Self, t: TypeId) TypeId {
+        if t == TYPE_NONE || !self.type_at(t).has_pat() {
+            return t;
+        }
+        return self.with_pat(t, TYPE_NONE);
     }
 
     /// Records the concrete type args a use site instantiates with. `n` is clamped to 8. Safety:
@@ -5644,7 +5830,7 @@ extend Ast {
     /// `F<{K}>`). The parser reads every other argument as a type, a lifetime or an integer literal.
     pub(package) const fn is_const_expr_arg(self: &Self, id: NodeId) bool {
         let k = self.at_const(id).kind;
-        return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL;
+        return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_PATTERN_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL;
     }
 
     /// The type node of signature slot `slot`: a parameter's declared type (NODE_NONE when it has none),

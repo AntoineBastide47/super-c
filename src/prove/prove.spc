@@ -625,6 +625,16 @@ struct Prover<const B: usize> {
     work: Vector<Path>,
     ev: Eval<B>,
     vname: Map<u32, u32>, // a parameter's unknown -> the parameter's local, for counterexamples
+    pvars: Map<u64, u32>, // a const generic parameter (module << 32 | node) -> its unknown
+    // The facts for the build (`check_kept`): the bounds checks of the body under proof that held on
+    // each path the walk reached them (`chk_ok`) and those that did not on one (`chk_dead`), by rvalue;
+    // `facts_on`: the body may give facts. `facts`: kept index << 32 | rvalue of each proved check.
+    chk_ok: Map<u32, bool>,
+    chk_dead: Map<u32, bool>,
+    facts_on: bool,
+    // The walk only gathers facts: the body has nothing to prove, so a spent budget gives no facts, no error.
+    facts_only: bool,
+    facts: Vector<u64>,
     // The refinement walk of a conformance's method: only its `OB_REFINE` obligations count, and
     // `refine` holds the interface's contracts (null: the interface's method has none).
     refining: bool,
@@ -652,6 +662,7 @@ const OB_BUDGET: u64 = 7;
 const OB_REFINE: u64 = 8; // a conformance's method against its interface's contracts
 const OB_EVAL: u64 = 9; // a `@prove_exhaustive` function: its setup and its runs
 const OB_GHOST: u64 = 10; // a check of ghost code
+const OB_PATTERN: u64 = 11; // a conversion into a pattern type
 // The depth of definitions of spec function calls over constants (`call_value`).
 const UNFOLD_MAX: u32 = 64;
 
@@ -696,6 +707,12 @@ extend<const B: usize> Prover<B> {
             defs: Vector::<u32>::new(),
             def_of: Map::<u32, u32>::new(),
             defined: Map::<u32, bool>::new(),
+            pvars: Map::<u64, u32>::new(),
+            chk_ok: Map::<u32, bool>::new(),
+            chk_dead: Map::<u32, bool>::new(),
+            facts_on: false,
+            facts_only: false,
+            facts: Vector::<u64>::new(),
             unfold: 0,
             chain_ovf: OVF_PROVE,
             chain_depth: 0,
@@ -865,7 +882,116 @@ extend<const B: usize> Prover<B> {
 
     fn fresh(self: &mut Self, m: ModuleId, ty: TypeId) u32 {
         let (w, sg) = self.ty_of(m, ty);
-        return self.tm.var(w, sg);
+        let v = self.tm.var(w, sg);
+        self.pat_fact(m, ty, v);
+        return v;
+    }
+
+    // The unknown of const generic parameter `d` of type `ty` (of module `m`): one per body, so a
+    // pattern's bound and each read of the parameter are one term.
+    fn param_var(self: &mut Self, d: DefId, m: ModuleId, ty: TypeId) u32 {
+        let key = d.module as u64 << 32 | d.node as u64;
+        if let Some(v) = self.pvars.get(&key) {
+            return *v;
+        }
+        let (w, sg) = self.ty_of(m, ty);
+        let v = self.tm.var(w, sg);
+        self.pvars.insert(key, v);
+        return v;
+    }
+
+    // Value `v` of type `ty` (of module `m`) matches the pattern of a pattern type: the fact joins each
+    // obligation whose terms reach `v`, as a spec function's definition does (`add_defs`). A range is
+    // linear; a variant fixes the discriminant (`T_TAG`), the tag it carries.
+    fn pat_fact(self: &mut Self, m: ModuleId, ty: TypeId, v: u32) {
+        if ty == TYPE_NONE {
+            return;
+        }
+        let a = self.ast_of(m);
+        let y = *a.type_at(ty);
+        if !y.has_pat() {
+            return;
+        }
+        let p = *a.type_at(y.pat());
+        let mut f = NONE;
+        if (p.qualifier & PK_VARIANT) != 0 {
+            let mut dm = y.module;
+            let mut dn = y.as_data.decl;
+            if y.kind == TypeKind::TYPE_INSTANCE {
+                let it = *a.instance(y.as_data.inst);
+                dm = it.module;
+                dn = it.decl;
+            }
+            // The tag the variant carries and the type a discriminant reads as (`lay::variant_tag`).
+            let mut k = a.type_at(p.as_data.arr.elem).as_data.value;
+            let mut neg = false;
+            if self.ast_of(dm).enum_explicit(dn) && !lay::variant_tag(self.pkg(), dm, dn, k, &mut k, &mut neg) {
+                return;
+            }
+            let t = self.tm.make(Term::<B> { k: Num::<B>::zero(), a: v, b: 0, op: T_TAG, w: 32, sg: neg });
+            let kt = self.tm.int(wide::<B>(k), 32, neg);
+            f = self.tm.cmp(T_EQ, t, kt);
+        } else {
+            if !self.tm.is_int(v) {
+                return;
+            }
+            let (xw, xsg) = (self.tm.at(v).w, self.tm.at(v).sg);
+            let base = self.pat_base_of(m, ty);
+            for j in 0..2 {
+                let bt = pick(j == 0, p.as_data.arr.elem, p.as_data.arr.len);
+                if bt == TYPE_NONE {
+                    continue;
+                }
+                let by = *self.ast_of(m).type_at(bt);
+                let bv = if by.kind == TypeKind::TYPE_CONST {
+                    let c = by.cval();
+                    let mut n = Num::<B>::zero();
+                    n.set_limb(0, c.limb(0));
+                    n.set_limb(1, c.limb(1));
+                    self.tm.int(Terms::<B>::wrap(n, 128, true), xw, xsg)
+                } else if by.kind == TypeKind::TYPE_GENERIC {
+                    self.param_var(DefId { module: by.module, node: by.as_data.decl }, m, base)
+                } else {
+                    NONE
+                };
+                if bv == NONE {
+                    continue;
+                }
+                let c = if j == 0 {
+                    self.tm.cmp(T_LE, bv, v)
+                } else if (p.qualifier & PK_HI_EXCL) != 0 {
+                    self.tm.cmp(T_LT, v, bv)
+                } else {
+                    self.tm.cmp(T_LE, v, bv)
+                };
+                f = if f == NONE {
+                    c
+                } else {
+                    self.tm.and(f, c)
+                };
+            }
+        }
+        if f == NONE {
+            return;
+        }
+        if let Some(d) = self.def_of.get(&v) {
+            let i = (*d) as usize;
+            let g = self.tm.and(self.defs[i], f);
+            self.defs.set(i, g);
+            return;
+        }
+        self.def_of.insert(v, self.defs.len() as u32);
+        self.defs.push(f);
+    }
+
+    // The base of pattern type `ty` of module `m`: the type of a bound.
+    fn pat_base_of(self: &Self, m: ModuleId, ty: TypeId) TypeId {
+        let y = *self.ast_of(m).type_at(ty);
+        return if y.kind == TypeKind::TYPE_BUILTIN {
+            Ast::builtin(unsafe y.as_data.builtin)
+        } else {
+            ty
+        };
     }
 
     const fn spend(self: &mut Self) bool {
@@ -1158,6 +1284,9 @@ extend<const B: usize> Prover<B> {
             return;
         }
         self.over = true;
+        if self.facts_only {
+            return;
+        }
         let b = unsafe &*self.b;
         let a = self.ast_of(self.m);
         let sp = if a.at_const(b.owner.node).kind == NodeKind::NODE_FUNCTION {
@@ -1179,7 +1308,13 @@ extend<const B: usize> Prover<B> {
     // The value of whole local `l` of body `cb` in `state`, made a fresh unknown at its first read.
     fn local_val(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, l: u32) u32 {
         if state[l as usize] == NONE {
-            let v = self.fresh(cm, cb.locals.at(l as usize).ty);
+            let ld = cb.locals.at(l as usize);
+            let d = ld.item;
+            let v = if d.node != NODE_NONE && (d.node & NODE_BODY) == 0 && self.ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
+                self.param_var(d, cm, ld.ty)
+            } else {
+                self.fresh(cm, ld.ty)
+            };
             state.set(l as usize, v);
         }
         return state[l as usize];
@@ -1218,6 +1353,7 @@ extend<const B: usize> Prover<B> {
                 let (w, sg) = self.ty_of(cm, pj.ty);
                 v = self.tm.sel(v, key, w, sg);
             }
+            self.pat_fact(cm, pj.ty, v);
             ty = pj.ty;
         }
         return v;
@@ -1529,6 +1665,10 @@ extend<const B: usize> Prover<B> {
     ) u32 {
         let rv = *cb.rvalues.at(rid as usize);
         let (w, sg) = self.ty_of(cm, rv.target);
+        if rv.kind == ir::RV_DISCRIMINANT && w > W_BOOL && w <= 64 {
+            let x = self.read_place(cb, cm, state, rv.a, all);
+            return self.tm.make(Term::<B> { k: Num::<B>::zero(), a: x, b: 0, op: T_TAG, w: w, sg: sg });
+        }
         if rv.kind == ir::RV_USE {
             let x = self.operand(cb, cm, state, rv.a, all);
             // An array's view (`b` 1 or 2) has the array's length.
@@ -1579,9 +1719,18 @@ extend<const B: usize> Prover<B> {
             return self.tm.pool(T_AGG, &xs, Num::<B>::zero());
         }
         if rv.kind == ir::RV_LEN {
-            let n = self.array_len(cm, cb.places.at(rv.a as usize).ty);
+            let at = cb.places.at(rv.a as usize).ty;
+            let n = self.array_len(cm, at);
             if n >= 0 && w > W_BOOL {
                 return self.tm.int(wide::<B>(n), w, sg);
+            }
+            // `[T; N]`: the length is const parameter N, the one unknown each read of N is.
+            let ay = *self.ast_of(cm).type_at(at);
+            if w > W_BOOL && ay.kind == TypeKind::TYPE_ARRAY && ay.arr_sym() && self.ast_of(cm).type_at(
+                ay.as_data.arr.len,
+            ).kind == TypeKind::TYPE_GENERIC {
+                let ly = *self.ast_of(cm).type_at(ay.as_data.arr.len);
+                return self.param_var(DefId { module: ly.module, node: ly.as_data.decl }, cm, rv.target);
             }
         }
         if rv.kind == ir::RV_UNARY {
@@ -1752,8 +1901,10 @@ extend<const B: usize> Prover<B> {
                 NONE
             };
             let ints = self.tm.is_int(x) && self.tm.is_int(y) && (z == NONE || self.tm.is_int(z));
+            let own = !all && cb as *const ir::CoreBody == self.b;
             if ints && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_BOUNDS_PROVEN) {
                 let f = self.tm.cmp(T_LT, x, y);
+                self.note_check(own && rv.c == ir::IN_BOUNDS, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return x;
             }
@@ -1761,6 +1912,7 @@ extend<const B: usize> Prover<B> {
                 let c1 = self.tm.cmp(T_LE, x, y);
                 let c2 = self.tm.cmp(T_LE, y, z);
                 let f = self.tm.and(c1, c2);
+                self.note_check(own && rv.c == ir::IN_RANGE_BOUNDS, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return y;
             }
@@ -1771,6 +1923,7 @@ extend<const B: usize> Prover<B> {
                 let end = self.tm.arith(T_ADD, x, z, xw, xsg);
                 let c2 = self.tm.cmp(T_LE, end, y);
                 let f = self.tm.and(c1, c2);
+                self.note_check(own && rv.c == ir::IN_BOUNDS_GROUP, rid, pc, f);
                 self.check_fact(pc, f, key, sp);
                 return x;
             }
@@ -2635,6 +2788,40 @@ extend<const B: usize> Prover<B> {
         return need;
     }
 
+    // Whether the walk of body `b` may give facts for the build (step 6): it holds a bounds check, and a
+    // fact the checks can use (a contract, a callee's contract, a value of a pattern type); its function
+    // is called only from code the build proves (not `@export`: C passes any value).
+    fn facts_wanted(self: &mut Self, b: &ir::CoreBody) bool {
+        let mut any = false;
+        for r in 0..b.rvalues.len() {
+            let rv = b.rvalues.at(r);
+            any = any || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_BOUNDS_GROUP);
+        }
+        if !any || b.owner.node == NODE_NONE || (b.owner.node & NODE_BODY) != 0 {
+            return false;
+        }
+        let a = self.ast_of(b.owner.module);
+        if a.at_const(b.owner.node).kind == NodeKind::NODE_FUNCTION && a.attr_of(b.owner.node, AttrKind::ATTR_EXPORT) != null {
+            return false;
+        }
+        if b.contracts.len() != 0 {
+            return true;
+        }
+        for l in 0..b.locals.len() {
+            let t = b.locals.at(l).ty;
+            if t != TYPE_NONE && self.ast_of(b.module).type_at(t).has_pat() {
+                return true;
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_CALL && (self.has_clause(t.callee, CT_ENSURES) || self.has_clause(t.callee, CT_REQUIRES)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     // Whether body `b` of module `m` casts a value to a pointer.
     fn has_ptr_cast(self: &Self, m: ModuleId, b: &ir::CoreBody) bool {
         let a = self.ast_of(m);
@@ -2745,6 +2932,9 @@ extend<const B: usize> Prover<B> {
 
     // The span of contract site `s` of body `cb` in module `cm`: its condition.
     fn site_span(self: &Self, cm: ModuleId, s: ir::ContractSite) tok::Span {
+        if s.kind == CT_PATTERN {
+            return unsafe (*self.b).blocks.at(s.check as usize).term.span;
+        }
         let a = self.ast_of(cm);
         return a.at_const(a.contracts.at(s.clause as usize).expr).span;
     }
@@ -2771,6 +2961,7 @@ extend<const B: usize> Prover<B> {
         self.defs.clear();
         self.def_of.clear();
         self.defined.clear();
+        self.pvars.clear();
         self.exact_body = false;
     }
 
@@ -2793,6 +2984,20 @@ extend<const B: usize> Prover<B> {
     }
 
     // Fact `f` of a check on the path `pc`: in ghost code an obligation first (`key` at `sp`).
+    // Bounds check `rid` of the body under proof (`own`), reached on a path with conditions `pc`: a fact
+    // for the build while `f` (the check's condition) holds on every path that reaches it.
+    fn note_check(self: &mut Self, own: bool, rid: u32, pc: &Vector<u32>, f: u32) {
+        if !own || !self.facts_on || self.in_ghost || self.chain_depth != 0 || self.chk_dead.contains_key(&rid) {
+            return;
+        }
+        if self.holds(pc, f) {
+            self.chk_ok.insert(rid, true);
+            return;
+        }
+        let _ = self.chk_ok.remove(&rid);
+        self.chk_dead.insert(rid, true);
+    }
+
     fn check_fact(self: &mut Self, pc: &mut Vector<u32>, f: u32, key: u64, sp: tok::Span) {
         if self.in_ghost {
             self.oblige(
@@ -3345,9 +3550,15 @@ extend<const B: usize> Prover<B> {
         self.m = b.module;
         self.refining = refining;
         self.ghost_fn = self.is_ghost(b.owner);
-        if !self.needs_proof(b) && !refining && !self.ghost_fn {
+        let facts = !refining && !self.ghost_fn && self.facts_wanted(b);
+        let needs = self.needs_proof(b) || refining || self.ghost_fn;
+        if !needs && !facts {
             return;
         }
+        self.facts_on = facts;
+        self.facts_only = !needs;
+        self.chk_ok.clear();
+        self.chk_dead.clear();
         self.b = bp;
         self.clear_terms();
         for l in 0..b.locals.len() {
@@ -3359,7 +3570,12 @@ extend<const B: usize> Prover<B> {
         self.over = false;
         self.failed.clear();
         self.begin_sites(b, refining);
-        self.ovf = if b.contracts.len() != 0 || self.ghost_fn {
+        // A conversion into a pattern type is no contract of the function: it proves no overflow.
+        let mut clauses = false;
+        for j in 0..b.contracts.len() {
+            clauses = clauses || b.contracts[j].kind != CT_PATTERN;
+        }
+        self.ovf = if clauses || self.ghost_fn {
             OVF_PROVE
         } else {
             OVF_KEEP
@@ -3406,7 +3622,21 @@ extend<const B: usize> Prover<B> {
             },
         );
         for _k in 0..STEP_BUDGET {
-            if self.work.len() == 0 || self.over {
+            if self.over {
+                return;
+            }
+            if self.work.len() == 0 {
+                // Every path ended: each check that held on every path that reached it is a fact.
+                if self.facts_on && !refining {
+                    let mut rs = Vector::<u32>::new();
+                    for (r, _v) in self.chk_ok.iter() {
+                        rs.push(*r);
+                    }
+                    rs.sort();
+                    for j in 0..rs.len() {
+                        self.facts.push(self.me as u64 << 32 | rs[j] as u64);
+                    }
+                }
                 return;
             }
             if !self.spend() {
@@ -3504,6 +3734,18 @@ extend<const B: usize> Prover<B> {
             if !self.loop_site(b, si) {
                 path.m0 = v;
             }
+        } else if s.kind == CT_PATTERN {
+            self.oblige(
+                &path.pc,
+                f,
+                OB_PATTERN << 56 | si as u64,
+                sp,
+                format("cannot prove that this value matches its pattern type"),
+                String::from_str(
+                    "a value of a pattern type is a constant that matches, an 'as?' conversion, or a value the path shows matches",
+                ),
+            );
+            path.pc.push(f);
         } else if s.kind == CT_ENSURES {
             let rs = self.return_span(b, s.cont);
             let note = if rs.end > rs.start {
@@ -4033,7 +4275,26 @@ pub(package) fn any_contracts(p: &loader::Package) bool {
         if p.modules.at(m).has_ast && (unsafe (&*p.module_ast_const(m as ModuleId)).contracts.len() != 0 || any_exhaustive_in(
             p,
             m,
-        )) {
+        ) || any_pattern_in(p, m)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether module `m` of `p` converts a value into a pattern type that its checker could not decide:
+// a `CT_PATTERN` site the prover proves.
+// A module that uses a pattern type (its facts may remove bounds checks) counts too.
+fn any_pattern_in(p: &loader::Package, m: usize) bool {
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    for j in 0..a.coerces.len() {
+        let c = a.coerces.at(j);
+        if c.method.node == NODE_NONE && a.type_at(c.target).has_pat() {
+            return true;
+        }
+    }
+    for j in 0..a.used.len() {
+        if a.type_at(a.used[j]).has_pat() {
             return true;
         }
     }
@@ -4361,6 +4622,7 @@ pub(package) fn check_kept(
     comp: &Vector<u32>,
     skip: &Vector<bool>,
     held: &mut Vector<bool>,
+    facts: &mut Vector<u64>,
 ) bool {
     let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
     let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
@@ -4388,14 +4650,18 @@ pub(package) fn check_kept(
             pw.prove_kept(k);
             let m = kb.body.module as usize;
             pv.errs.index_mut(m).append(pw.errs.index_mut(m));
+            pv.facts.extend_copy(&pw.facts);
+            pw.facts.clear();
         }
     } else {
         // One prover per chunk of bodies, each body's reports in a container of its own; a walk
         // reads only the package, the keep and the shared state. The reports merge in body order and
         // then by position, as one prover orders them (`Errors::emit_ordered`).
         let mut outs = Vector::<diag::Errors>::with_capacity(n);
+        let mut fouts = Vector::<Vector<u64>>::with_capacity(n);
         for _k in 0..n {
             outs.push(diag::Errors::new());
+            fouts.push(Vector::<u64>::new());
         }
         let chunks = if n < p.jobs as usize * 4 {
             n
@@ -4408,6 +4674,7 @@ pub(package) fn check_kept(
         let sa = (skip as *const Vector<bool>) as usize;
         let wa = ((&wide) as *const Vector<bool>) as usize;
         let oa = outs.as_mut_ptr() as usize;
+        let fa = fouts.as_mut_ptr() as usize;
         let slice = pv.slice;
         // A chunk's cost is its bodies': each worker claims one chunk at a time.
         dpar::range_with(
@@ -4436,6 +4703,12 @@ pub(package) fn check_kept(
                         replace(w.errs.index_mut(m), diag::Errors::new())
                     };
                     unsafe *(ptr::from_addr_mut::<diag::Errors>(oa) + k) = e;
+                    let f = if wd[k] {
+                        replace(&mut w2.facts, Vector::<u64>::new())
+                    } else {
+                        replace(&mut w.facts, Vector::<u64>::new())
+                    };
+                    unsafe *(ptr::from_addr_mut::<Vector<u64>>(fa) + k) = f;
                 }
             },
         );
@@ -4444,6 +4717,7 @@ pub(package) fn check_kept(
             if outs.at(k).errors.len() != 0 {
                 pv.errs.index_mut(m).append(outs.index_mut(k));
             }
+            pv.facts.extend_copy(fouts.at(k));
         }
         for m in 0..p.modules.len() {
             if pv.errs.at(m).errors.len() > 1 {
@@ -4462,6 +4736,8 @@ pub(package) fn check_kept(
         }
     }
     prove_exhaustive(&mut pv, p, keep, skip);
+    // The facts of a module whose proofs failed are no facts: the build stops.
+    *facts = replace(&mut pv.facts, Vector::<u64>::new());
     let mut ok = true;
     for m in 0..p.modules.len() {
         held.set(m, pv.errs.at(m).errors.len() == 0);

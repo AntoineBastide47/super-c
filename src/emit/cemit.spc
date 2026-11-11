@@ -18639,7 +18639,7 @@ extend CEmit {
                     if nk.none == 0 {
                         dst.push_str("0");
                     } else {
-                        self.mg.niche_path(am, ns, nk.kind, ".", dst);
+                        self.mg.niche_path(am, ns, nk, ".", dst);
                         dst.push_str(" = ");
                         mbe::niche_none(nk, dst);
                     }

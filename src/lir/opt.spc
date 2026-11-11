@@ -6286,7 +6286,7 @@ extend Opt {
             return false;
         }
         if (v & VPARAM) != 0 {
-            return true;
+            return param_range(b, v).is_none();
         }
         let op = b.insts[v as usize].op;
         return op != O_ICONST && op != O_LOAD && (depth == 0 || op != O_SELECT && op != O_ADD && op != O_SUB && op != O_MUL && op != O_SEXT && op != O_ZEXT);
@@ -6325,6 +6325,18 @@ extend Opt {
             }
             if let Some(f) = self.ub.get(&(SHI_KEY | v as u64)) {
                 hi = hi.min(clamp_i64(signed_bound(b, *f, w), tmin, tmax));
+                known = true;
+            }
+        }
+        // A parameter's range for the call (`param_range`): a signed one, or an unsigned one below the sign bit.
+        if let Some((sg, plo, phi)) = param_range(b, v) {
+            if sg {
+                lo = lo.max(sign_extend(plo, w));
+                hi = hi.min(sign_extend(phi, w));
+                known = true;
+            } else if phi <= tmax as u64 {
+                lo = lo.max(plo as i64);
+                hi = hi.min(phi as i64);
                 known = true;
             }
         }
@@ -6462,6 +6474,12 @@ extend Opt {
         if (best.is_none() || best.unwrap() == 0) && self.ub.get(&(NZ_KEY | v as u64)).is_some() {
             best = Some(1);
         }
+        // An unsigned parameter's range for the call (a signed one is `srange`'s, below).
+        if let Some((sg, plo, _)) = param_range(b, v) {
+            if !sg && (best.is_none() || plo > best.unwrap()) {
+                best = Some(plo);
+            }
+        }
         // A signed range at or above 0 bounds the unsigned value from below too.
         if !self.no_srange(b, v, depth) {
             if let Some(sr) = self.srange(pk, b, v, depth) {
@@ -6535,6 +6553,12 @@ extend Opt {
             } else {
                 Some(c - 1)
             };
+        }
+        // An unsigned parameter's range for the call (a signed one is `srange`'s, below).
+        if let Some((sg, _, phi)) = param_range(b, v) {
+            if !sg && (best.is_none() || phi < best.unwrap()) {
+                best = Some(phi);
+            }
         }
         // A value at least 0 as a signed one (`param_bounds`) clears its sign bit.
         if self.ub.get(&(NN_KEY | v as u64)).is_some() {
@@ -6744,6 +6768,19 @@ extend Opt {
             let at = b.type_of(t.a);
             if k.is_none() || is_vec(at) || at == T_I128 {
                 return VNONE;
+            }
+            // A signed compare that the value's signed range decides (a negative range too).
+            if t.aux >= C_SLT && t.aux <= C_SGE && !self.no_srange(b, t.a, UB_DEPTH) {
+                if let Some((lo, hi)) = self.srange(pk, b, t.a, UB_DEPTH) {
+                    let kv = sign_extend(k.unwrap(), type_bits(at, pk.ptr_bytes));
+                    let c = t.aux;
+                    let yes = c == C_SLT && hi < kv || c == C_SLE && hi <= kv || c == C_SGT && lo > kv || c == C_SGE && lo >= kv;
+                    let no = c == C_SLT && lo >= kv || c == C_SLE && lo > kv || c == C_SGT && hi <= kv || c == C_SGE && hi < kv;
+                    if yes || no {
+                        b.insts[i as usize] = iconst(t.ty, yes as u64);
+                        return VNONE;
+                    }
+                }
             }
             let x = self.ubound(pk, b, t.a, UB_DEPTH);
             if x.is_none() {
@@ -19994,6 +20031,24 @@ const fn entry_param(b: &Body, v: Value) u32 {
     return (v & ~VPARAM) - e.param_start;
 }
 
+// The range entry parameter `v` of `b` holds for the whole call (`Body.ranges`): whether it is a
+// signed one, its least and its greatest value in the parameter's width. None for another value.
+const fn param_range(b: &Body, v: Value) Option<(bool, u64, u64)> {
+    if b.ranges.len() == 0 {
+        return None;
+    }
+    let k = entry_param(b, v);
+    if k == NONE {
+        return None;
+    }
+    for x in 0..b.ranges.len() / 3 {
+        if b.ranges[3 * x] >> 1 == k as u64 {
+            return Some(((b.ranges[3 * x] & 1) != 0, b.ranges[3 * x + 1], b.ranges[3 * x + 2]));
+        }
+    }
+    return None;
+}
+
 // Per instruction of `b` into `out`: whether it is a load through a read-only parameter's referent
 // (`REF_READONLY`): through the parameter, or a view's (`REF_INNER`) pointer at its offset 0, then
 // offsets of either (`ptradd`, a `select` of two). One pass in order: a pointer defined after its use
@@ -21393,6 +21448,16 @@ fn drop_params(b: &mut Body, mask: u64, cs: &Vector<Inst>) {
         }
     }
     b.bools = bs;
+    let mut rs = Vector::<u64>::with_capacity(b.ranges.len());
+    for x in 0..b.ranges.len() / 3 {
+        let q = b.ranges[3 * x] >> 1;
+        if q >= 64 || (mask >> q & 1) == 0 {
+            rs.push(below(q) << 1 | b.ranges[3 * x] & 1);
+            rs.push(b.ranges[3 * x + 1]);
+            rs.push(b.ranges[3 * x + 2]);
+        }
+    }
+    b.ranges = rs;
 }
 
 // Whether every argument of edge `e` of `b` is an argument of edge `o` too.

@@ -1844,6 +1844,8 @@ extend Promoter {
         o.owned.truncate(0);
         o.owned.extend_copy(&b.owned);
         o.bools = b.bools;
+        o.ranges.truncate(0);
+        o.ranges.extend_copy(&b.ranges);
         o.fmath = b.fmath;
         // A scope's root: its replacement, renumbered; one in no reached block goes.
         o.scopes.truncate(0);

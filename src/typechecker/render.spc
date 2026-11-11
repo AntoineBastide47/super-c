@@ -513,6 +513,44 @@ fn default_arg(ma: *const Ast, decl: NodeId, i: u32, a: *const Ast, arg: TypeId)
 }
 
 fn render_ty(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bool, tid: TypeId, out: &mut String) {
+    render_ty_base(pkg, a, cur_src, elide, tid, out);
+    if tid == TYPE_NONE || !unsafe (*a).type_at(tid).has_pat() {
+        return;
+    }
+    // A pattern type: its base, then ` is ` and the pattern.
+    let ty = *unsafe (*a).type_at(tid);
+    let p = *unsafe (*a).type_at(ty.pat());
+    out.push_str(" is ");
+    if (p.qualifier & PK_VARIANT) != 0 {
+        let mut dm = ty.module;
+        let mut dn = ty.as_data.decl;
+        if ty.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*a).instance(ty.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        }
+        let ma = rt_ast(pkg, a, dm);
+        let ms = unsafe (*ma).ext(dn).aggregate.members;
+        let k = (unsafe (*a).type_at(p.as_data.arr.elem).as_data.value) as u32;
+        if k < ms.len {
+            let vd = unsafe (*ma).at_const(unsafe (*ma).list(ms)[k as usize]).as_data.variant;
+            rt_put_name(pkg, a, cur_src, dm, unsafe (*ma).at_const(vd.name).as_data.name.text, out);
+            if vd.payload.len != 0 {
+                out.push_str(pick(vd.struct_payload, " { .. }", "(..)"));
+            }
+        }
+        return;
+    }
+    if p.as_data.arr.elem != TYPE_NONE {
+        render_ty(pkg, a, cur_src, elide, p.as_data.arr.elem, out);
+    }
+    out.push_str(pick(p.as_data.arr.len == TYPE_NONE || (p.qualifier & PK_HI_EXCL) != 0, "..", "..="));
+    if p.as_data.arr.len != TYPE_NONE {
+        render_ty(pkg, a, cur_src, elide, p.as_data.arr.len, out);
+    }
+}
+
+fn render_ty_base(pkg: *const loader::Package, a: *const Ast, cur_src: str, elide: bool, tid: TypeId, out: &mut String) {
     if tid == TYPE_NONE {
         // No type was ever assigned: there is nothing IN the value to render. Instance arguments
         // recover the parameter's NAME from their declaration below; a bare hole has no declaration.

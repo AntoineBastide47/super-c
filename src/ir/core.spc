@@ -911,6 +911,23 @@ pub(package) const fn type_payload(c: u8) bool {
     return c == IN_SIZEOF || c == IN_ALIGNOF || c == IN_TYPE_INFO || c == IN_DANGLING || c == IN_TYPE_NAME;
 }
 
+/// The `item.module` of a check the prover proved (`prove::check_kept`), made its PROVEN twin before
+/// instances and emission copy the body: BCE's re-verification (`SC_CORE_IR`) cannot re-prove it.
+pub(package) const CHECK_PROVER: ModuleId = 0xFFFF;
+
+/// The PROVEN twin of check intrinsic `c` (`c` itself for a proven one).
+pub(package) const fn proven_twin(c: u8) u8 {
+    return if c == IN_BOUNDS {
+        IN_BOUNDS_PROVEN
+    } else if c == IN_RANGE_BOUNDS {
+        IN_RANGE_BOUNDS_PROVEN
+    } else if c == IN_BOUNDS_GROUP {
+        IN_BOUNDS_GROUP_PROVEN
+    } else {
+        c
+    };
+}
+
 /// True for the six safe-access check intrinsics.
 pub(package) const fn is_check(c: u8) bool {
     return c == IN_BOUNDS || c == IN_BOUNDS_PROVEN || c == IN_BOUNDS_GROUP || c == IN_BOUNDS_GROUP_PROVEN || c == IN_RANGE_BOUNDS || c == IN_RANGE_BOUNDS_PROVEN;
@@ -1158,14 +1175,156 @@ pub(package) struct RangeLoop {
 
 /// Skip each contract check of `b` the build does not run: every one, or with `keep_checks` only the
 /// `decreases` measures and the ghost code (`assert .. by`, lemma calls), which have no run-time
-/// check. A skipped chain's blocks become empty `unreachable` ones, so no later pass reads the check
-/// (the inliner's vet rejects an assertion).
-pub(package) const fn skip_contracts(b: &mut CoreBody, keep_checks: bool) {
+/// check. A conversion into a pattern type (`CT_PATTERN`) runs with `keep_pats`: the build did not
+/// prove it, or runs the contract checks. A skipped chain's blocks become empty `unreachable` ones, so
+/// no later pass reads the check (the inliner's vet rejects an assertion).
+/// `req`, the body's module syntax when every call of the body's function is proved (the build
+/// proves, and C calls no `@export`), else null: a skipped `requires` then holds at the entry, and its
+/// range of a parameter is noted (`entry_ranges`; usize 32-bit under `ptr32`).
+pub(package) fn skip_contracts(b: &mut CoreBody, keep_checks: bool, keep_pats: bool, req: *const Ast, ptr32: bool) {
     for i in 0..b.contracts.len() {
-        if !keep_checks || b.contracts[i].kind == CT_DECREASES || is_ghost_site(b.contracts[i].kind) {
+        let k = b.contracts[i].kind;
+        if k == CT_PATTERN && !keep_pats || k != CT_PATTERN && (!keep_checks || k == CT_DECREASES || is_ghost_site(k)) {
+            if k == CT_REQUIRES && req != null {
+                note_requires(b, i, unsafe &*req, ptr32);
+            }
             skip_site(b, i);
         }
     }
+}
+
+/// The range of an integer parameter that `requires` site `i` of `b` states (`entry_ranges`): its
+/// check asserts one comparison of the parameter with an integer constant (`x < 3`, `0 != x`).
+fn note_requires(b: &mut CoreBody, i: usize, a: &Ast, ptr32: bool) {
+    let s = b.contracts[i];
+    let t = b.blocks[s.check as usize].term;
+    if t.kind != TM_ASSERT {
+        return;
+    }
+    let co = b.operands[t.a as usize];
+    if co.kind != OP_COPY && co.kind != OP_MOVE {
+        return;
+    }
+    let cl = b.places[co.data as usize].base;
+    for blk in s.chain..s.check + 1 {
+        let bk = b.blocks[blk as usize];
+        for j in bk.stmt_start..bk.stmt_start + bk.stmt_len {
+            let st = b.statements[j as usize];
+            if st.kind != ST_ASSIGN || b.places[st.place as usize].base != cl || b.places[st.place as usize].proj_len != 0 {
+                continue;
+            }
+            let rv = b.rvalues[st.rvalue as usize];
+            if rv.kind == RV_BINARY {
+                note_compare(b, rv.a, rv.b, rv.c, a, ptr32);
+            }
+            return;
+        }
+    }
+}
+
+// `entry_ranges` of comparison `x op y` (token `op`) between a parameter and an integer constant.
+fn note_compare(b: &mut CoreBody, x: OperandId, y: OperandId, op: u8, a: &Ast, ptr32: bool) {
+    let mut p = param_of(b, x);
+    let mut k = y;
+    let mut o = op;
+    if p == u32::MAX {
+        // `3 > x` is `x < 3`.
+        p = param_of(b, y);
+        k = x;
+        o = if op == tt::TokenType::LessThan as u8 {
+            tt::TokenType::GreaterThan as u8
+        } else if op == tt::TokenType::LessThanEqual as u8 {
+            tt::TokenType::GreaterThanEqual as u8
+        } else if op == tt::TokenType::GreaterThan as u8 {
+            tt::TokenType::LessThan as u8
+        } else if op == tt::TokenType::GreaterThanEqual as u8 {
+            tt::TokenType::LessThanEqual as u8
+        } else {
+            op
+        };
+    }
+    let ko = b.operands[k as usize];
+    if p == u32::MAX || ko.kind != OP_CONST || b.constants[ko.data as usize].kind != CK_INT {
+        return;
+    }
+    let ly = *a.type_at(b.locals[p as usize].ty);
+    if ly.kind != TypeKind::TYPE_BUILTIN {
+        return;
+    }
+    let bt = unsafe ly.as_data.builtin;
+    let w = bt_int_width(bt, ptr32);
+    if w == 0 || w > 64 {
+        return;
+    }
+    let sg = !bt_is_unsigned(bt);
+    // The type's range, as two's complement patterns of width `w` (signed ones sign-extended).
+    let m = if w >= 64 {
+        ~0u64
+    } else {
+        (1u64 << w as u64) - 1
+    };
+    let (tmin, tmax) = if sg {
+        (~0u64 << (w - 1) as u64, m >> 1)
+    } else {
+        (0u64, m)
+    };
+    let c = b.constants[ko.data as usize].val as u64;
+    let less = |a: u64, z: u64| if sg {
+        a as i64 < z as i64
+    } else {
+        a < z
+    };
+    let (mut lo, mut hi) = (tmin, tmax);
+    if o == tt::TokenType::LessThan as u8 {
+        if !less(tmin, c) {
+            return;
+        }
+        hi = c - 1;
+    } else if o == tt::TokenType::LessThanEqual as u8 {
+        hi = c;
+    } else if o == tt::TokenType::GreaterThan as u8 {
+        if !less(c, tmax) {
+            return;
+        }
+        lo = c + 1;
+    } else if o == tt::TokenType::GreaterThanEqual as u8 {
+        lo = c;
+    } else if o == tt::TokenType::EqualEqual as u8 {
+        lo = c;
+        hi = c;
+    } else if o == tt::TokenType::BangEqual as u8 && c == tmin {
+        lo = c + 1;
+    } else if o == tt::TokenType::BangEqual as u8 && c == tmax {
+        hi = c - 1;
+    } else {
+        return;
+    }
+    // Two clauses on one parameter: the intersection.
+    for e in 0..b.entry_ranges.len() / 3 {
+        if b.entry_ranges[3 * e] >> 1 == p as u64 {
+            let (ol, oh) = (b.entry_ranges[3 * e + 1], b.entry_ranges[3 * e + 2]);
+            b.entry_ranges[3 * e + 1] = pick(less(ol, lo), lo, ol);
+            b.entry_ranges[3 * e + 2] = pick(less(hi, oh), hi, oh);
+            return;
+        }
+    }
+    b.entry_ranges.push(p as u64 << 1 | sg as u64);
+    b.entry_ranges.push(lo);
+    b.entry_ranges.push(hi);
+}
+
+// The parameter local operand `x` copies whole, u32::MAX for another operand.
+const fn param_of(b: &CoreBody, x: OperandId) u32 {
+    let o = b.operands[x as usize];
+    if o.kind != OP_COPY && o.kind != OP_MOVE {
+        return u32::MAX;
+    }
+    let pl = b.places[o.data as usize];
+    return if pl.proj_len == 0 && pl.base >= b.returns && pl.base < b.returns + b.args {
+        pl.base
+    } else {
+        u32::MAX
+    };
 }
 
 /// Whether a contract site of kind `k` is ghost code in a body: no build runs it.
@@ -1304,6 +1463,10 @@ pub(package) struct CoreBody {
     pub(package) contracts: Vector<ContractSite>,
     /// The counted range loops, in lowering order.
     pub(package) ranges: Vector<RangeLoop>,
+    /// The ranges of integer parameters each proved `requires` of a skipped check states
+    /// (`skip_contracts`): three words each, `local << 1 | signed`, then the least and the greatest
+    /// value in the parameter's width (signed ones sign-extended). The LIR's entry ranges.
+    pub(package) entry_ranges: Vector<u64>,
     pub(package) entry: BlockId,
 }
 
@@ -1418,6 +1581,7 @@ extend CoreBody {
             tail_jumps: Vector::<BlockId>::new(),
             contracts: Vector::<ContractSite>::new(),
             ranges: Vector::<RangeLoop>::new(),
+            entry_ranges: Vector::<u64>::new(),
             entry: 0,
         };
     }
@@ -1463,6 +1627,7 @@ extend CoreBody {
         self.tail_jumps.truncate(0);
         self.contracts.truncate(0);
         self.ranges.truncate(0);
+        self.entry_ranges.truncate(0);
         self.entry = 0;
     }
 
@@ -1472,7 +1637,7 @@ extend CoreBody {
         n += self.statements.capacity() * sizeof(Statement) + self.places.capacity() * sizeof(Place);
         n += self.projections.capacity() * sizeof(Projection) + self.operands.capacity() * sizeof(Operand);
         n += self.rvalues.capacity() * sizeof(Rvalue) + self.constants.capacity() * sizeof(Constant);
-        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4 + self.contracts.capacity() * sizeof(ContractSite) + self.ranges.capacity() * sizeof(RangeLoop);
+        n += (self.oper_pool.capacity() + self.dest_pool.capacity() + self.targ_pool.capacity() + self.simd_aux.capacity() + self.tail_jumps.capacity()) * 4 + self.contracts.capacity() * sizeof(ContractSite) + self.ranges.capacity() * sizeof(RangeLoop) + self.entry_ranges.capacity() * 8;
         n += (self.switch_pool.capacity() + self.user_moves.capacity()) * 8;
         n += self.asms.capacity() * sizeof(AsmRec) + self.asm_spans.capacity() * sizeof(tok::Span);
         n += self.demands.capacity() * sizeof(Terminator) + self.bytes.capacity();
@@ -1519,6 +1684,7 @@ extend CoreBody {
         out.tail_jumps = exact(&src.tail_jumps);
         out.contracts = exact(&src.contracts);
         out.ranges = exact(&src.ranges);
+        out.entry_ranges = exact(&src.entry_ranges);
         return out;
     }
 

@@ -2980,6 +2980,70 @@ extend Lower {
         };
     }
 
+    // The range parameter local `l` of `b` (signature parameter `k`) holds for the whole call
+    // (`Body.ranges`): its pattern type's (`usize is 0..N`, a const parameter folded in this instance)
+    // and the proved `requires` the body states (`CoreBody.entry_ranges`), both.
+    fn param_range(self: &mut Self, c: &cbe::CEmit, b: &irc::CoreBody, l: u32, k: u64) {
+        let mut rm = b.module;
+        let mut rt = TYPE_NONE;
+        let y = Lower::resolved(c, b.module, b.locals[l as usize].ty, &mut rm, &mut rt);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return;
+        }
+        let bt = unsafe y.as_data.builtin;
+        let w = bt_int_width(bt, self.pkg.ptr_bytes == 4);
+        if w == 0 || w > 64 {
+            return;
+        }
+        let sg = !bt_is_unsigned(bt);
+        let (mut lo, mut hi) = (i128::zero(), i128::zero());
+        if sg {
+            lo = i128::from_i64((~0u64 << (w - 1) as u64) as i64);
+            hi = i128::from_i64(((1u64 << (w - 1) as u64) - 1) as i64);
+        } else {
+            hi.set_limb(0, ~0u64 >> (64 - w) as u64);
+        }
+        let mut known = false;
+        let (mut plo, mut phi, mut hl, mut hh) = (i128::zero(), i128::zero(), false, false);
+        if y.has_pat() && c.mg.pat_bounds(rm, y.pat(), &mut plo, &mut phi, &mut hl, &mut hh) {
+            if hl && lo < plo {
+                lo = plo;
+            }
+            if hh && phi < hi {
+                hi = phi;
+            }
+            known = hl || hh;
+        }
+        for e in 0..b.entry_ranges.len() / 3 {
+            if b.entry_ranges[3 * e] >> 1 != l as u64 {
+                continue;
+            }
+            let mut rl = i128::zero();
+            let mut rh = i128::zero();
+            if sg {
+                rl = i128::from_i64(b.entry_ranges[3 * e + 1] as i64);
+                rh = i128::from_i64(b.entry_ranges[3 * e + 2] as i64);
+            } else {
+                rl.set_limb(0, b.entry_ranges[3 * e + 1]);
+                rh.set_limb(0, b.entry_ranges[3 * e + 2]);
+            }
+            if lo < rl {
+                lo = rl;
+            }
+            if rh < hi {
+                hi = rh;
+            }
+            known = true;
+        }
+        // An empty range: the function is never called; nothing to note.
+        if !known || hi < lo {
+            return;
+        }
+        self.b.ranges.push(k << 1 | sg as u64);
+        self.b.ranges.push(lo.limb(0));
+        self.b.ranges.push(hi.limb(0));
+    }
+
     // The signature, the entry block and the storage of every local in memory.
     fn entry(
         self: &mut Self,
@@ -2999,6 +3063,7 @@ extend Lower {
         self.b.refs.truncate(0);
         self.b.owned.truncate(0);
         self.b.bools = 0;
+        self.b.ranges.truncate(0);
         let mut any_ref = false;
         if ncaps != 0 {
             ptys.push(T_PTR);
@@ -3019,6 +3084,9 @@ extend Lower {
                 b.locals[l as usize].ty,
             ) == BuiltinType::BT_BOOL {
                 self.b.bools |= 1u64 << ptys.len() as u64;
+            }
+            if info.ti.cls == VC_SCALAR && is_int(info.ti.mty) && info.ti.mty != T_I128 {
+                self.param_range(c, b, l, ptys.len() as u64);
             }
             ptys.push(self.param_code(c, b.module, b.locals[l as usize].ty, info.ti));
             if info.ti.cls == VC_SCALAR {
@@ -3530,6 +3598,8 @@ extend Lower {
             }
         }
         let mut variant = NODE_NONE;
+        let mut pat_m: ModuleId = 0;
+        let mut pat_t = TYPE_NONE;
         let mut vbase: u32 = 0;
         for i in 0..pl.proj_len {
             let pj = b.projections[(pl.proj_start + i) as usize];
@@ -3593,6 +3663,11 @@ extend Lower {
                     let mut f = FIELD_NONE;
                     if !self.member(c, rm, rt, pj, variant, &mut f) {
                         return false;
+                    }
+                    // A field of a pattern type keeps it: its loads are bounded (`pat_bound`).
+                    if f.t != TYPE_NONE && Lower::ast(c, f.m).type_at(f.t).has_pat() {
+                        pat_m = f.m;
+                        pat_t = f.t;
                     }
                     let mut off = f.off;
                     if variant != NODE_NONE {
@@ -3682,6 +3757,11 @@ extend Lower {
                 if !self.ty(c, b.module, pj.ty, &mut cur.ti) {
                     return false;
                 }
+            }
+            if pat_t != TYPE_NONE {
+                cur.m = pat_m;
+                cur.t = pat_t;
+                pat_t = TYPE_NONE;
             }
         }
         if ptr_val != VNONE {
@@ -3821,6 +3901,30 @@ extend Lower {
         return self.tag_bound(c, it.module, it.decl);
     }
 
+    // The greatest value a place of range pattern type `(m, t)` holds as an unsigned load bound
+    // (MEM_RANGE): its greatest bound, when its least one is at least 0 and it fits a Value. VNONE else.
+    fn pat_bound(self: &Self, c: &cbe::CEmit, m: ModuleId, t: TypeId) u32 {
+        let mut rm = m;
+        let mut rt = t;
+        let y = Lower::resolved(c, m, t, &mut rm, &mut rt);
+        let (mut lo, mut hi, mut hl, mut hh) = (i128::zero(), i128::zero(), false, false);
+        if y.kind != TypeKind::TYPE_BUILTIN || !y.has_pat() || !c.mg.pat_bounds(
+            rm,
+            y.pat(),
+            &mut lo,
+            &mut hi,
+            &mut hl,
+            &mut hh,
+        ) || !hh {
+            return VNONE;
+        }
+        let unsigned = bt_is_unsigned(unsafe y.as_data.builtin);
+        if !unsigned && (!hl || lo.is_negative()) || hi.is_negative() || hi.limb(1) != 0 || hi.limb(0) >= VNONE as u64 {
+            return VNONE;
+        }
+        return hi.limb(0) as u32;
+    }
+
     // `enum_bound` of enum declaration `dn` of module `dm`.
     fn tag_bound(self: &mut Self, c: &cbe::CEmit, dm: ModuleId, dn: NodeId) u32 {
         let key = dm as u64 << 32 | dn as u64;
@@ -3942,7 +4046,10 @@ extend Lower {
             return self.fail_v("read");
         }
         let zo = ast::pick(p.ti.mty == T_I8 && Lower::builtin(c, p.m, p.t) == BuiltinType::BT_BOOL, MEM_BOOL, 0u16);
-        let ub = ast::pick(zo == 0 && is_int(p.ti.mty), self.enum_bound(c, p.m, p.t), VNONE);
+        let mut ub = ast::pick(zo == 0 && is_int(p.ti.mty), self.enum_bound(c, p.m, p.t), VNONE);
+        if zo == 0 && ub == VNONE && is_int(p.ti.mty) && p.ti.mty != T_I128 {
+            ub = self.pat_bound(c, p.m, p.t);
+        }
         return self.load_bounded(p.ti.mty, p.addr, 0, p.packed, self.tag_of(p.ti.mty, p.in_union) | zo, ub);
     }
 

@@ -611,6 +611,24 @@ extend<'a> Parser<'a> {
                 self.body.bools |= 1u64 << k as u64;
                 return self.line_end_loc(&mut loc);
             }
+            if w == "range" {
+                // `range p<k> s|u <lo> <hi>`: signature parameter k holds a value from lo to hi, signed or
+                // unsigned, for the whole call.
+                let mut k: u32 = 0;
+                let mut lo: i64 = 0;
+                let mut hi: i64 = 0;
+                if !self.numbered(b'p', &mut k) || k >= 65536 {
+                    return self.fail("expected 'range p<parameter> s|u <least> <greatest>'");
+                }
+                let sg = self.keyword("s");
+                if !sg && !self.expect_word("u", "expected 's' or 'u'") || !self.int(&mut lo) || !self.int(&mut hi) {
+                    return false;
+                }
+                self.body.ranges.push(k as u64 << 1 | sg as u64);
+                self.body.ranges.push(lo as u64);
+                self.body.ranges.push(hi as u64);
+                return self.line_end_loc(&mut loc);
+            }
             if w == "fmath" {
                 // `fmath <bits>`: the float rewrites (`FM_*`) the body allows.
                 let mut k: u32 = 0;

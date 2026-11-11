@@ -180,6 +180,14 @@ extend Printer {
                 out.format_into("  bool p{}\n", k);
             }
         }
+        for x in 0..b.ranges.len() / 3 {
+            let (q, lo, hi) = (b.ranges[3 * x], b.ranges[3 * x + 1], b.ranges[3 * x + 2]);
+            if (q & 1) != 0 {
+                out.format_into("  range p{} s {} {}\n", q >> 1, lo as i64, hi as i64);
+            } else {
+                out.format_into("  range p{} u {} {}\n", q >> 1, lo, hi);
+            }
+        }
         if b.fmath != 0 {
             out.format_into("  fmath {}\n", b.fmath);
         }

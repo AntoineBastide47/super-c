@@ -229,8 +229,10 @@ modular return-lifetime check) run alongside.
   call) are not ends, as in rustc's `unconditional_recursion`. About 4 ms on the compiler's
   own build with a release compiler (`SC_CEMIT_STATS`, `phase recursion`).
 - `prove_cached` (`src/driver/emit.spc`) over `prv::check_kept` (`src/prove/prove.spc`): an
-  **error**, after `check_recursion`, on every build whose modules state a contract
-  (`any_contracts`) unless `-fno-prove`. It lowers the contracts of each interface method without a
+  **error**, after `check_recursion`, on every build whose modules state a contract or use a
+  pattern type (`any_contracts`) unless `-fno-prove`. Its facts (`check_kept`'s `facts`): each
+  bounds check of a body that held on every path the walk reached it (`note_check`), made its
+  PROVEN twin in the kept body; the proof record keeps them (`p` lines) for a module it skips. It lowers the contracts of each interface method without a
   body (`lower_shells`), finds the components of the direct calls among the kept bodies that have a
   `decreases` (`components`), then walks each kept body: the paths of its CFG with hash-consed terms
   (`Terms`), the facts of each branch, assignment and callee `ensures` on the path, each obligation

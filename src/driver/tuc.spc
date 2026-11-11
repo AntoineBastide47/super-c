@@ -23,7 +23,7 @@ import stdlib;
 import build_system::ext as ext;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 14;
+const TUC_VER: u32 = 15;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -511,6 +511,10 @@ const TT_ARR: u8 = 2;
 const TT_INST: u8 = 3;
 const TT_PROJ: u8 = 4;
 const TT_LIN: u8 = 5;
+// A pattern type: `r0` its base, `aux` its pattern.
+const TT_PAT: u8 = 6;
+// A TYPE_PATTERN: `r0` and `aux` its bounds (TT_NONE when open).
+const TT_PATREC: u8 = 7;
 
 /// Structural type table under construction for one recorded section: types are written by
 /// structure, never by TypeId, so a replay re-interns them under any pool state.
@@ -540,7 +544,23 @@ pub(package) fn tt_ref(p: &loader::Package, r: &mut TtRec, am: ModuleId, at: Typ
     let a = unsafe &*p.module_ast_const(am);
     let ty = *a.type_at(at);
     let k = ty.kind;
-    if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
+    if ty.has_pat() {
+        // The base is interned already: the pattern type was built from it.
+        let br = tt_ref(p, r, am, unsafe (*p.module_ast_ptr(am)).pat_base(at));
+        let pr = tt_ref(p, r, am, ty.pat());
+        r.tab.push_byte(TT_PAT);
+        w32(&mut r.tab, br);
+        w32(&mut r.tab, pr);
+    } else if k == TypeKind::TYPE_PATTERN {
+        let lr = tt_ref(p, r, am, ty.as_data.arr.elem);
+        let hr = tt_ref(p, r, am, ty.as_data.arr.len);
+        r.tab.push_byte(TT_PATREC);
+        r.tab.push_byte(ty.qualifier);
+        r.tab.push_byte(ty.concrete as u8);
+        w32(&mut r.tab, ty.module);
+        w32(&mut r.tab, lr);
+        w32(&mut r.tab, hr);
+    } else if k == TypeKind::TYPE_POINTER || k == TypeKind::TYPE_REFERENCE || k == TypeKind::TYPE_SLICE {
         let er = tt_ref(p, r, am, ty.as_data.elem);
         r.tab.push_byte(TT_WRAP);
         r.tab.push_byte(k as u8);
@@ -712,6 +732,22 @@ pub(package) fn tt_id(p: &loader::Package, tab: &Vector<TtEnt>, cache: &mut Map<
         } else {
             a.intern_instance(e.im as ModuleId, e.idecl, &ar[0], e.n)
         };
+    } else if e.tag == TT_PAT {
+        let bt = tt_id(p, tab, cache, e.r0, am);
+        let pt = tt_id(p, tab, cache, e.aux, am);
+        id = a.with_pat(bt, pt);
+    } else if e.tag == TT_PATREC {
+        let lo = tt_id(p, tab, cache, e.r0, am);
+        let hi = tt_id(p, tab, cache, e.aux, am);
+        id = a.intern_type(
+            Ty {
+                kind: TYPE_PATTERN,
+                qualifier: e.qual,
+                concrete: e.conc != 0,
+                module: e.module as ModuleId,
+                as_data: TyAs { arr: TyArr { elem: lo, len: hi } },
+            },
+        );
     } else if e.tag == TT_PROJ {
         let ow = tt_id(p, tab, cache, e.r0, am);
         id = a.intern_type(
@@ -974,10 +1010,13 @@ extend Rd {
                     unsafe e.argr[i as usize] = self.r32();
                 }
                 e.lts = self.r64();
-            } else if e.tag == TT_PROJ {
+            } else if e.tag == TT_PROJ || e.tag == TT_PATREC {
                 e.qual = self.r8();
                 e.conc = self.r8();
                 e.module = self.r32();
+                e.r0 = self.r32();
+                e.aux = self.r32();
+            } else if e.tag == TT_PAT {
                 e.r0 = self.r32();
                 e.aux = self.r32();
             } else if e.tag == TT_LIN {
@@ -1011,7 +1050,9 @@ extend Rd {
                 return false;
             }
             let mut refs_ok = true;
-            if e.tag == TT_WRAP || e.tag == TT_ARR || e.tag == TT_PROJ {
+            if e.tag == TT_PAT || e.tag == TT_PATREC {
+                refs_ok = tt_earlier(e.r0, i) && tt_earlier(e.aux, i);
+            } else if e.tag == TT_WRAP || e.tag == TT_ARR || e.tag == TT_PROJ {
                 refs_ok = tt_earlier(e.r0, i) && (e.tag != TT_ARR || e.qual != ARR_SYM || tt_earlier(e.aux, i));
             } else if e.tag == TT_INST {
                 for k in 0..e.n {

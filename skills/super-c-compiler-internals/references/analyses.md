@@ -27,6 +27,9 @@ file is authoritative for where to look first.
 | A `@prove_exhaustive` function's inputs: each parameter's domain (kind, range narrowed by its `requires`, count) | `exhaustive_job`, `pdim` | `PJob.dims`, per function | end of the function's proof |
 | The failed assertion of an evaluated run: contract kind, clause, owner, frame depth, span | `Interp::assert_failed` (on a failed `TM_ASSERT` while `pa_on`) | `Interp.pa_*`, per run | the next `prove_run` |
 | The hash-consed terms of a body's values and formulas (commutative operands in index order) | `Terms::make` (`src/prove/terms.spc`) | `Prover.tm`, per body | the next body |
+| The facts of the pattern types of a body's values (a range, a variant's `T_TAG`), anchored on the value's term; one unknown per const parameter | `Prover::pat_fact`, `param_var` | `Prover.defs`/`def_of` (as definitions), `pvars`, per body | the next body |
+| The bounds checks that held on every path that reached them (facts for the build) | `Prover::note_check` | `chk_ok`, `chk_dead` per body, then `Prover.facts`; applied as PROVEN twins in `irl::Keep` and in the proof record (`p` lines) | the build |
+| The range of each integer parameter a proved `requires` states | `irc::skip_contracts` (`note_requires`) | `CoreBody.entry_ranges`; the LIR's `Body.ranges` (`Lower::param_range`) | the body |
 | Whether a term holds an operation the bits define and the arithmetic reads as an atom | `Terms::make` | `Terms.bitty` | the next body |
 | A branch's theory literals | `Solver::close` | `Branch.lits`, per branch | the branch's refutation |
 | What a branch's literals state: its rows, equalities, disequalities and literals | `Kernel::state` (`state_lit`) | `kernel::Built` (`Stated`), per branch | the branch's refutation |

@@ -56,7 +56,9 @@ indexes `Ast.contracts`, `kind` is `CT_REQUIRES`, `CT_ENSURES`, `CT_DECREASES`, 
 `CT_ASSERT` or `CT_GHOST`, and a `decreases` site asserts `true` and records its measure in `value`.
 Ghost code in a normal body is a site too (`lower_ghost_site`): an `assert P by { B };` is
 `CT_ASSERT` (B, then the check of P), a lemma call statement `CT_GHOST` (the call, then `true`,
-`clause` = `u32::MAX`). `requires` and the
+`clause` = `u32::MAX`). A conversion into a pattern type that the checker records (a `CoerceUse` with
+no method, `lower_pat_check`) is one `CT_PATTERN` site per bound of a range, or the variant's test
+(`clause` = `u32::MAX`); `x op= y` into one checks the result before the store. `requires` and the
 function's `decreases` follow the entry; `ensures` precede each return, after the defers and
 before the storage deaths; a loop's clauses follow its header. `RangeLoop { head, ind, end_pl,
 end_k }`: a range `for` with an immutable binding, or an indexed collection loop, whose induction
@@ -65,9 +67,15 @@ local `ind` runs from its start up to the end place or constant.
 The prover (`src/prove/prove.spc`) reads the sites of the kept bodies. Then `skip_contracts`
 (`skip_site` per site) empties each chain to `TM_UNREACHABLE` and makes `pred` jump to `cont`,
 unless `-fcontract-checks` keeps them (a ghost site is skipped in every build, `is_ghost_site`; the
-evaluator jumps past one, `past_ghost`); `skip_tail_ensures` drops a proved `ensures` that follows a
+evaluator jumps past one, `past_ghost`; a `CT_PATTERN` site runs under `-fcontract-checks` and
+`-fno-prove`, `Package::pat_checks_run`); a skipped `requires` that compares a parameter with an integer
+constant, of a function every call of which the build proves (not `@export`, not `-fno-prove`:
+`driver::emit::req_ast`), notes the parameter's range (`CoreBody.entry_ranges`), which the LIR's entry
+ranges take; `skip_tail_ensures` drops a proved `ensures` that follows a
 self tail call. With the chains empty and the size counters subtracted, a body with contracts
-emits the same code as without them. The lowering of an interface's method without a body
+emits the same code as without them. The lowering of an interface's method without a body A bounds check the prover proves on every path of a kept body is its PROVEN twin before the
+inliner, the instances and the emitters copy the body, with `item.module` = `CHECK_PROVER`, which
+BCE's re-verification (`SC_CORE_IR`) accepts without its own proof.
 (`lower_fn`) gives the parameters and the sites only; the prover alone reads it. A spec function's
 and a lemma's bodies are kept for the prover and never emitted (`reach_root`, `seed_emits`, the
 instance seeds skip them).

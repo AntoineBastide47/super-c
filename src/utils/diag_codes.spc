@@ -550,9 +550,13 @@ pub(package) const SPEC_CALL_OUTSIDE_GHOST: u16 = 543;
 pub(package) const LEMMA_CALL_NOT_STATEMENT: u16 = 544;
 pub(package) const GHOST_NOT_CHECKABLE: u16 = 545;
 pub(package) const GHOST_BLOCK_LEAVES: u16 = 546;
+pub(package) const PATTERN_TYPE_BASE: u16 = 547;
+pub(package) const PATTERN_TYPE_PATTERN: u16 = 548;
+pub(package) const PATTERN_TYPE_VALUE: u16 = 549;
+pub(package) const CHECKED_CAST_TARGET: u16 = 550;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 547;
+pub(package) const COUNT: u16 = 551;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1102,6 +1106,10 @@ pub(package) const fn name(code: u16) str<'static> {
         544 => "lemma_call_not_statement",
         545 => "ghost_code_has_no_run_time_check",
         546 => "ghost_block_cannot_leave",
+        547 => "pattern_type_base",
+        548 => "pattern_type_pattern",
+        549 => "value_does_not_match_pattern_type",
+        550 => "checked_cast_needs_pattern_type",
         _ => "",
     };
 }

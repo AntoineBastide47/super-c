@@ -97,6 +97,7 @@ pub enum SyntaxKind {
     InlineFor,
     ParallelFor,
     Interpolation,
+    PatternType,
 }
 
 /// What a token is.
@@ -850,6 +851,7 @@ pub(package) const fn kind_of(k: NodeKind) SyntaxKind {
         NODE_INLINE_FOR => InlineFor,
         NODE_PARALLEL_FOR => ParallelFor,
         NODE_INTERP => Interpolation,
+        NODE_PATTERN_TYPE => PatternType,
     };
 }
 

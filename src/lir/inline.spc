@@ -445,6 +445,7 @@ extend Inliner {
         o.refs.extend_copy(&c.refs);
         o.owned.extend_copy(&c.owned);
         o.bools = c.bools;
+        o.ranges.extend_copy(&c.ranges);
         o.fmath = c.fmath;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];

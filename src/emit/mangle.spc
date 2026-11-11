@@ -480,6 +480,8 @@ pub(package) struct Mangler {
     /// type: a module prefix spelled inside one is part of a symbol name, not a C use of the
     /// type or symbol, so it records no edge (the enclosing symbol records its owner).
     seg_depth: u32,
+    // `type_name` spells a value's own C type: a top-level variant pattern type is its enum's.
+    own_top: bool,
     /// Spare declarator buffers for `fn_ptr_ctype` (one taken per nesting level, returned empty).
     fp_bufs: Vector<String>,
     /// The spelling context: a module id (its TU), `CTX_INST | owner` (owner's instance shard)
@@ -816,6 +818,7 @@ extend Mangler {
             arr_const: false,
             type_depth: 0,
             seg_depth: 0,
+            own_top: false,
             fp_bufs: Vector::<String>::new(),
             mark_ctx: -1,
             last_method_def: DefId { module: 0, node: NODE_NONE },
@@ -1152,6 +1155,53 @@ extend Mangler {
             *out = unsafe (*da).reintern(unsafe &*pa, t);
             return true;
         }
+        if y.has_pat() {
+            // A pattern type: its base, then its pattern's bounds (`usize is 0..N`), an exclusive bound
+            // made constant inclusive, as the checker's substitution leaves it.
+            let mut by = y;
+            by.qualifier = by.qualifier & ~TQ_PAT;
+            by.as_data.pat.slot = TYPE_NONE;
+            let mut b = TYPE_NONE;
+            if !self.ground_ty(pm, TYPE_NONE, by, dm, lim, &mut b, depth) {
+                return false;
+            }
+            let p = *unsafe (*pa).type_at(y.pat());
+            let mut np = p;
+            for k in 0..2 {
+                let bt = pick(k == 0, p.as_data.arr.elem, p.as_data.arr.len);
+                let mut g = TYPE_NONE;
+                if bt != TYPE_NONE && !self.ground_l(pm, bt, dm, lim, &mut g, depth + 1) {
+                    return false;
+                }
+                if k == 0 {
+                    np.as_data.arr.elem = g;
+                } else {
+                    np.as_data.arr.len = g;
+                }
+            }
+            if np.as_data.arr.len != TYPE_NONE {
+                let hy = *unsafe (*da).type_at(np.as_data.arr.len);
+                if let Some(v) = pat_hi_incl(&np, &hy, lay::target_for(self.p().arch).ptr == 4) {
+                    np.as_data.arr.len = unsafe (*da).const_value(cval_bits(v), hy.cbt());
+                    np.qualifier = np.qualifier & ~PK_HI_EXCL;
+                }
+            }
+            let pt = unsafe (*da).intern_type(np);
+            *out = unsafe (*da).with_pat(b, pt);
+            return true;
+        }
+        return self.ground_ty(pm, t, y, dm, lim, out, depth);
+    }
+
+    // `ground_l` of type `y` of pool `pm`, the record at `t` (TYPE_NONE for a record no id names: a
+    // pattern type's base), not concrete unless `t` is TYPE_NONE.
+    fn ground_ty(self: &Self, pm: ModuleId, t: TypeId, y: Ty, dm: ModuleId, lim: usize, out: &mut TypeId, depth: u32) bool {
+        let pa = self.p().module_ast_const(pm);
+        let da = self.p().module_ast_ptr(dm);
+        if t == TYPE_NONE && (y.kind == TypeKind::TYPE_BUILTIN || y.kind == TypeKind::TYPE_ENUM) {
+            *out = unsafe (*da).intern_type(y);
+            return true;
+        }
         let mut cv: i64 = 0;
         let mut bt = BuiltinType::BT_COUNT;
         if y.kind == TypeKind::TYPE_GENERIC && self.fold_generic_d(&y, &mut cv, &mut bt, 0, lim) || y.kind == TypeKind::TYPE_CONST_EXPR && self.fold_cexpr_d(
@@ -1349,6 +1399,124 @@ extend Mangler {
 
     /// The element count of array type `y` (pool `pm`) under the active substitutions: its length,
     /// or its symbolic length folded through the bound const arguments; -1 when that does not fold.
+    /// The inclusive bounds of range pattern `p` of pool `pm` under the substitution stack: `pat_range`
+    /// with each const parameter bound folded (`usize is 0..N`). False for a variant pattern or a bound
+    /// that does not fold.
+    pub(package) fn pat_bounds(
+        self: &Self,
+        pm: ModuleId,
+        p: TypeId,
+        lo: &mut i128,
+        hi: &mut i128,
+        has_lo: &mut bool,
+        has_hi: &mut bool,
+    ) bool {
+        let y = *unsafe (*self.p().module_ast_const(pm)).type_at(p);
+        if y.kind != TypeKind::TYPE_PATTERN || (y.qualifier & PK_VARIANT) != 0 {
+            return false;
+        }
+        for k in 0..2 {
+            let b = pick(k == 0, y.as_data.arr.elem, y.as_data.arr.len);
+            let mut v: i64 = 0;
+            let mut bt = BuiltinType::BT_COUNT;
+            if b != TYPE_NONE && !self.fold_cval_at(pm, b, &mut v, &mut bt, self.subs.len()) {
+                return false;
+            }
+            if k == 0 {
+                *has_lo = b != TYPE_NONE;
+                *lo = cval_exact(v, bt);
+            } else {
+                *has_hi = b != TYPE_NONE;
+                *hi = cval_exact(v, bt);
+                if b != TYPE_NONE && (y.qualifier & PK_HI_EXCL) != 0 {
+                    *hi = *hi - i128::one();
+                }
+            }
+        }
+        return true;
+    }
+
+    // A variant pattern type as an argument (`Option<Shape is Rect { .. }>`): `_v<index>` after its
+    // enum, since the pattern may give the instance a niche. A value's own C type (`type_name`'s top
+    // level) is its enum's.
+    fn variant_segment(self: &Self, pm: ModuleId, y: &Ty, out: &mut String) {
+        if y.has_pat() && !(self.own_top && self.seg_depth == 1) {
+            let a = unsafe &*self.p().module_ast_const(pm);
+            out.push_str("_v");
+            out.push_u64(a.type_at(a.type_at(y.pat()).as_data.arr.elem).as_data.value as u64);
+        }
+    }
+
+    // Range pattern `p` of pool `pm` as a symbol segment (`range_segment`); false when a bound does not fold.
+    fn pat_segment(self: &Self, pm: ModuleId, p: TypeId, out: &mut String) bool {
+        let (mut lo, mut hi, mut has_lo, mut has_hi) = (i128::zero(), i128::zero(), false, false);
+        if !self.pat_bounds(pm, p, &mut lo, &mut hi, &mut has_lo, &mut has_hi) {
+            return false;
+        }
+        range_segment(lo, hi, has_lo, has_hi, out);
+        return true;
+    }
+
+    // The niche of payload type `t` of `a` (pool `pm`), kind `k` (`lay::niche_kind`), under the
+    // substitution stack: a range pattern type's bounds fold there (`pat_bounds`).
+    fn niche_sub(self: &Self, pm: ModuleId, a: &Ast, k: u8, t: TypeId) lay::Niche {
+        let y = *a.type_at(t);
+        if k == lay::NK_NONE && y.has_pat() && (a.type_at(y.pat()).qualifier & PK_VARIANT) != 0 {
+            return self.variant_niche(pm, t);
+        }
+        if y.kind != TypeKind::TYPE_BUILTIN || !y.has_pat() || a.type_concrete(y.pat()) {
+            return lay::niche_of(self.p(), a, k, t);
+        }
+        let (mut lo, mut hi, mut has_lo, mut has_hi) = (i128::zero(), i128::zero(), false, false);
+        if !self.pat_bounds(pm, y.pat(), &mut lo, &mut hi, &mut has_lo, &mut has_hi) {
+            return lay::NO_NICHE;
+        }
+        return lay::range_niche(self.p(), unsafe y.as_data.builtin, lo, hi, has_lo, has_hi);
+    }
+
+    // The niche of variant pattern type `t` of pool `pm` (`lay::NK_TAG`, `NK_DISC`, `NK_NEST`), as the
+    // layout service decides it (`Svc::variant_niche_on`); NO_NICHE when no value is free.
+    fn variant_niche(self: &Self, pm: ModuleId, t: TypeId) lay::Niche {
+        let a = unsafe &*self.p().module_ast_const(pm);
+        let y = *a.type_at(t);
+        let v = a.type_at(a.type_at(y.pat()).as_data.arr.elem).as_data.value;
+        let mut dm = y.module;
+        let mut dn = y.as_data.decl;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *a.instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        }
+        let da = unsafe &*self.p().module_ast_const(dm);
+        let mut none: u64 = 0;
+        if !da.enum_has_payload(dn) {
+            let bytes = (lay::bare_int(self.p(), dm, dn) & ~ENUM_INT_SIGNED) as u32;
+            if !lay::variant_none(self.p(), dm, dn, v, bytes, &mut none) {
+                return lay::NO_NICHE;
+            }
+            return lay::Niche { kind: lay::NK_DISC, off: 0, bytes: bytes, none: none };
+        }
+        let (mut im, mut idn, mut is, mut inn) = (dm, dn, NODE_NONE, NODE_NONE);
+        let inner = self.niche_ty(pm, t, &mut im, &mut idn, &mut is, &mut inn);
+        if inner.kind != lay::NK_NONE {
+            // The pattern's variant is `some`: the word never holds `none`; else it always does.
+            let flip: u64 = pick(unsafe da.list(da.ext(dn).aggregate.members)[v as usize] == is, 0u64, 1u64);
+            return lay::Niche {
+                kind: lay::NK_NEST,
+                off: inner.off,
+                bytes: inner.bytes,
+                none: inner.none ^ flip,
+                pm: pm,
+                pt: t,
+            };
+        }
+        let bytes = pick(da.enum_tag_is_byte(dn), 1u32, 4u32);
+        if !lay::variant_none(self.p(), dm, dn, v, bytes, &mut none) {
+            return lay::NO_NICHE;
+        }
+        return lay::Niche { kind: lay::NK_TAG, off: 0, bytes: bytes, none: none };
+    }
+
     pub(package) fn arr_len(self: &Self, pm: ModuleId, y: &Ty) i64 {
         if !y.arr_sym() {
             return y.as_data.arr.len;
@@ -2015,7 +2183,10 @@ extend Mangler {
     /// `type_m` for a C type name the output spells: records type edges.
     pub(package) fn type_name(self: &mut Self, pm: ModuleId, t: TypeId, out: &mut String) bool {
         self.type_depth += 1;
+        let top = self.own_top;
+        self.own_top = self.seg_depth == 0;
         let r = self.type_m(pm, t, out);
+        self.own_top = top;
         self.type_depth -= 1;
         return r;
     }
@@ -2025,11 +2196,13 @@ extend Mangler {
         let y = *unsafe (*a).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
             out.push_str(bt_name(unsafe y.as_data.builtin));
-            return true;
+            // A range pattern type as an argument may change the instance's layout (a niche).
+            return !y.has_pat() || self.pat_segment(pm, y.pat(), out);
         }
         if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_ENUM {
             let nm = unsafe (*self.p().module_ast_const(y.module)).ext_name(y.as_data.decl);
             self.qualified(y.module, nm, out);
+            self.variant_segment(pm, &y, out);
             return true;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE {
@@ -2067,7 +2240,9 @@ extend Mangler {
         }
         if y.kind == TypeKind::TYPE_INSTANCE {
             let it = *unsafe (*a).instance(y.as_data.inst);
-            return self.inst_name(pm, &it, out);
+            let ok = self.inst_name(pm, &it, out);
+            self.variant_segment(pm, &y, out);
+            return ok;
         }
         if y.is_vec() {
             // `__sc_v<N>_<lane>` and `__sc_mask<N>`: the runtime's reserved prefix, which no user type
@@ -3430,7 +3605,7 @@ extend Mangler {
             return lay::NO_NICHE;
         }
         let ra = unsafe &*self.p().module_ast_const(rm);
-        let k = lay::niche_kind(self.p(), ra, self.nd, rt);
+        let k = lay::niche_kind_of(self.p(), ra, self.nd, rt);
         if k == lay::NK_BOX {
             let it = *ra.instance(ra.type_at(rt).as_data.inst);
             let mut vm = rm;
@@ -3439,7 +3614,7 @@ extend Mangler {
                 return lay::NO_NICHE;
             }
         }
-        return lay::niche_of(self.p(), ra, k, rt);
+        return self.niche_sub(rm, ra, k, rt);
     }
 
     /// `niche` for enum type `(rm, rt)`, with its declaration in `dm`/`dn`: an instance's arguments
@@ -3483,7 +3658,7 @@ extend Mangler {
             return lay::NO_NICHE;
         }
         let pa = unsafe &*self.p().module_ast_const(pm);
-        let k = lay::niche_kind(self.p(), pa, self.nd, pt);
+        let k = lay::niche_kind_of(self.p(), pa, self.nd, pt);
         if k == lay::NK_BOX {
             let bi = *pa.instance(pa.type_at(pt).as_data.inst);
             let mut vm: ModuleId = 0;
@@ -3498,7 +3673,7 @@ extend Mangler {
                 return lay::NO_NICHE;
             }
         }
-        return lay::niche_of(self.p(), pa, k, pt);
+        return self.niche_sub(pm, pa, k, pt);
     }
 
     // Member type `t` (pool `dm`) of declaration `(dm, dn)` in its instance `it` (types of `am`;
@@ -3595,7 +3770,8 @@ extend Mangler {
     /// The C member path from a value of niche enum `(m, decl)` to its niche word, after `sep` (`.` or
     /// `->`): `payload.<some>.<member>`, then the box's pointer field for NK_BOX or the view's length for
     /// NK_VIEW; a `bool`'s byte (NK_BOOL) is the union's `__sc_niche`, which holds 2 as well.
-    pub(package) fn niche_path(self: &mut Self, m: ModuleId, some: NodeId, kind: u8, sep: str, out: &mut String) {
+    pub(package) fn niche_path(self: &mut Self, m: ModuleId, some: NodeId, k: lay::Niche, sep: str, out: &mut String) {
+        let kind = k.kind;
         let a = unsafe &*self.p().module_ast_const(m);
         let vd = unsafe a.at_const(some).as_data.variant;
         out.push_str(sep);
@@ -3611,6 +3787,17 @@ extend Mangler {
             self.ident(m, a.at_const(a.at_const(pid).as_data.field.name).as_data.name.text, out);
         } else {
             out.push_str("._0");
+        }
+        if kind == lay::NK_TAG {
+            out.push_str(".tag");
+            return;
+        }
+        if kind == lay::NK_NEST {
+            // The payload enum's own niche word.
+            let (mut im, mut idn, mut is, mut inn) = (k.pm, NODE_NONE, NODE_NONE, NODE_NONE);
+            let inner = self.niche_ty(k.pm, k.pt, &mut im, &mut idn, &mut is, &mut inn);
+            self.niche_path(im, is, inner, ".", out);
+            return;
         }
         if kind == lay::NK_VIEW {
             // `str`, `Slice` and `SliceMut` name their length `len`, their second field.
@@ -3660,7 +3847,7 @@ extend Mangler {
     ) {
         out.push_str("(");
         out.push_str(v);
-        self.niche_path(m, some, k.kind, if_s(arrow, "->", "."), out);
+        self.niche_path(m, some, k, if_s(arrow, "->", "."), out);
         out.push_str(" != ");
         niche_none(k, out);
         out.push_str(" ? ");
@@ -4601,6 +4788,12 @@ fn sig_ty(fa: *const Ast, y: &Ty, cf: *const ClosureFact, ret: bool, i: u32) Typ
 pub(package) fn niche_none(k: lay::Niche, out: &mut String) {
     if k.kind == lay::NK_VIEW {
         out.push_str("(size_t)-1");
+    } else if k.kind == lay::NK_RANGE {
+        out.format_into("{}u", k.none);
+    } else if k.kind == lay::NK_IRANGE && k.none == 0x8000000000000000u64 {
+        out.push_str("(-9223372036854775807 - 1)");
+    } else if k.kind == lay::NK_IRANGE || k.kind == lay::NK_TAG || k.kind == lay::NK_DISC {
+        out.format_into("{}", k.none as i64);
     } else {
         out.format_into("{}", k.none);
     }
@@ -4611,6 +4804,30 @@ pub(package) const fn if_s(c: bool, a: str<'static>, b: str<'static>) str<'stati
         return a;
     }
     return b;
+}
+
+// Range pattern bounds `lo..=hi` as a symbol segment after its base: `_r`, then each bound as
+// `push_cval` spells it or `x` when open (`u32_r1_x` is `u32 is 1..`).
+fn range_segment(lo: i128, hi: i128, has_lo: bool, has_hi: bool, out: &mut String) {
+    out.push_str("_r");
+    for k in 0..2 {
+        let (has, v) = if k == 0 {
+            (has_lo, lo)
+        } else {
+            (has_hi, hi)
+        };
+        if k == 1 {
+            out.push_str("_");
+        }
+        if !has {
+            out.push_str("x");
+        } else if v.is_negative() {
+            out.push_str("n");
+            out.push_u64((i128::zero() - v).limb(0));
+        } else {
+            out.push_u64(v.limb(0));
+        }
+    }
 }
 
 // A const-generic argument as a symbol segment: its decimal digits, with `n` for a minus sign (a C

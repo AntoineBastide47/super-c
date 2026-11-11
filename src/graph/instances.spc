@@ -587,6 +587,39 @@ extend InstGraph {
             return TYPE_NONE;
         }
         let y = *a.type_at(t);
+        if !y.has_pat() {
+            return self.subst_ty(a, t, y, frame, depth);
+        }
+        if (t & TYPE_PROV) == 0 && a.type_concrete(t) {
+            return t;
+        }
+        // A pattern type: its base and its pattern's bounds (`usize is 0..N`), an exclusive bound made
+        // constant inclusive, as the checker's substitution leaves it.
+        let mut by = y;
+        by.qualifier = by.qualifier & ~TQ_PAT;
+        by.as_data.pat.slot = TYPE_NONE;
+        let b = self.subst_ty(a, TYPE_NONE, by, frame, depth);
+        let p = *a.type_at(y.pat());
+        let mut np = p;
+        np.as_data.arr.elem = self.subst_intern(a, p.as_data.arr.elem, frame, depth + 1);
+        np.as_data.arr.len = self.subst_intern(a, p.as_data.arr.len, frame, depth + 1);
+        let g = self.g();
+        if np.as_data.arr.len != TYPE_NONE {
+            let hy = *g.at(np.as_data.arr.len as usize);
+            if let Some(v) = pat_hi_incl(&np, &hy, self.ptr32()) {
+                np.as_data.arr.len = g.const_value_g(cval_bits(v), hy.cbt());
+                np.qualifier = np.qualifier & ~PK_HI_EXCL;
+            }
+        }
+        let mut ry = *g.at(b as usize);
+        ry.qualifier = ry.qualifier | TQ_PAT;
+        ry.as_data.pat.slot = g.intern_g(np);
+        return g.intern_g(ry);
+    }
+
+    // `subst_intern` of type `y`, the record at `t` (TYPE_NONE for a record no id names: a pattern
+    // type's base).
+    fn subst_ty(self: &Self, a: &Ast, t: TypeId, y: Ty, frame: &Vector<Subst>, depth: i32) TypeId {
         let g = self.g();
         if y.kind == TypeKind::TYPE_GENERIC {
             for i in 0..frame.len() {
@@ -660,7 +693,7 @@ extend InstGraph {
                         unsafe it.args[i as usize] = self.subst_intern(a, unsafe it.args[i as usize], frame, depth + 1);
                     }
                     g.intern_sig_g(&it, y.qualifier)
-                } else if (t & TYPE_PROV) == 0 {
+                } else if t != TYPE_NONE && (t & TYPE_PROV) == 0 {
                     t
                 } else {
                     g.intern_g(y)
@@ -668,7 +701,7 @@ extend InstGraph {
                 r9
             },
             _ => {
-                let r9 = if (t & TYPE_PROV) == 0 {
+                let r9 = if t != TYPE_NONE && (t & TYPE_PROV) == 0 {
                     t
                 } else {
                     g.intern_g(y)

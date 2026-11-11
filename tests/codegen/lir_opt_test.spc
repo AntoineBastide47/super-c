@@ -657,6 +657,46 @@ b0(v0: i64):
     }
 }
 
+// A parameter's range for the call (`range`: a pattern type, a proved `requires`) settles a compare and
+// an overflow check of it, unsigned and signed; the same body without the range keeps both.
+@test
+fn parameter_ranges_settle_compares_and_overflow_checks() {
+    let body = M"(  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 3
+  v3, v4 = mulo.u.i32 v0, v2
+  br v4, b3, b1
+b1:
+  v5 = iconst.i32 200
+  v6 = icmp.ult v0, v5
+  br v6, b2, b4
+b2:
+  v7 = iconst.i32 -10
+  v8 = icmp.slt v1, v7
+  v9 = zext.i32 v8
+  v10 = add.i32 v3, v9
+  ret v10
+b3: cold
+  panic "attempt to multiply with overflow"
+b4:
+  v11 = iconst.i32 7
+  ret v11
+)";
+    let text = format(
+        "lir ptr 8\nsym @ranged fn global noinline\nsym @plain fn global noinline\nsym @drive fn global\nfn @ranged\n  range p0 u 1 99\n  range p1 s -5 5\n{}fn @plain\n{}fn @drive\n  sig () -> i32\nb0:\n  v0 = iconst.i32 4\n  v1 = iconst.i32 -2\n  v2 = call.i32 @ranged(v0, v1) : (i32, i32) -> i32\n  v3 = call.i32 @plain(v0, v1) : (i32, i32) -> i32\n  v4 = add.i32 v2, v3\n  ret v4\n",
+        body,
+        body,
+    );
+    let (b, a) = optimized(&text);
+    let r = text_of(&a, "ranged");
+    assert(r.contains("range p0 u 1 99") && r.contains("range p1 s -5 5"), "the ranges print");
+    assert(!r.contains("icmp") && !r.contains("mulo") && !r.contains("panic"), r.as_str());
+    let p = text_of(&a, "plain");
+    assert(p.contains("icmp.ult") && p.contains("mulo") && p.contains("icmp.slt"), p.as_str());
+    let none: []u64 = [];
+    same_result(&b, &a, "drive", none, 24);
+}
+
 // A view's length is at most `isize::MAX` over its element's bytes (`ref p0 4 inner`), so it never passes
 // `usize::MAX - 8`; a length of an element size unknown (`ref p1 0 inner`) may. The minimum of two values is
 // at most each, and a select is at most the larger of its sides: `min(len0, len2) <= usize::MAX - 8`.

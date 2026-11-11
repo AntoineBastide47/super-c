@@ -420,6 +420,8 @@ pub(package) struct TypeChecker<'a> {
     // The local constant initializer being checked (start << 32 | end, 0 = none): a variable bound
     // outside it has no compile-time value.
     const_init: u64,
+    // A constant's initializer is under conversion: its whole value is a constant (`tc_pat_const`).
+    const_value: bool,
     // Extends by peeled target, built on the first lookup (see `ext_begin`): `ext_heads` maps
     // (target module << 32 | target decl) to the target's list in `ext_lists`.
     ext_hits: Vector<ExtHit>,
@@ -1522,6 +1524,7 @@ extend<'a> TypeChecker<'a> {
             package: package,
             alias_depth: 0,
             const_init: 0,
+            const_value: false,
             ext_hits: Vector::<ExtHit>::new(),
             ext_heads: Map::<u64, u32>::new(),
             ext_lists: Vector::<ExtList>::new(),
@@ -8021,6 +8024,33 @@ extend<'a> TypeChecker<'a> {
             return ty;
         }
         let y = *self.type_at(ty);
+        if y.has_pat() {
+            // A pattern type: its base and its bounds (`usize is 0..N`); a bound made constant is inclusive.
+            let b0 = unsafe (*self.cur_ast()).pat_base(ty);
+            let b = self.subst_rec(b0, params, args, n, top);
+            let p = *self.type_at(y.pat());
+            let mut np = p;
+            if (p.qualifier & PK_VARIANT) == 0 {
+                if p.as_data.arr.elem != TYPE_NONE {
+                    np.as_data.arr.elem = self.subst_rec(p.as_data.arr.elem, params, args, n, false);
+                }
+                if p.as_data.arr.len != TYPE_NONE {
+                    np.as_data.arr.len = self.subst_rec(p.as_data.arr.len, params, args, n, false);
+                }
+                if np.as_data.arr.len != TYPE_NONE {
+                    let hy = *self.type_at(np.as_data.arr.len);
+                    if let Some(v) = pat_hi_incl(&np, &hy, self.tc_ptr32()) {
+                        np.as_data.arr.len = unsafe (*self.cur_ast()).const_value(cval_bits(v), hy.cbt());
+                        np.qualifier = np.qualifier & ~PK_HI_EXCL;
+                    }
+                }
+            }
+            if b == b0 && np.as_data.arr.elem == p.as_data.arr.elem && np.as_data.arr.len == p.as_data.arr.len {
+                return ty;
+            }
+            let pt = unsafe (*self.cur_ast()).intern_type(np);
+            return unsafe (*self.cur_ast()).with_pat(b, pt);
+        }
         if y.kind == TypeKind::TYPE_CONST_EXPR {
             let f = unsafe (*self.cur_ast()).const_lin_at(y.as_data.inst);
             let mut out = ConstLin::new(f.ty);
@@ -10427,6 +10457,286 @@ extend<'a> TypeChecker<'a> {
     // The array type `[elem; lenNode]` of array type node length `lenNode` (module `m`): a count,
     // or a symbolic length (a const generic parameter, or a linear expression over them) that
     // substitution folds. TYPE_ERROR when the length is invalid (reported here once).
+    // Pattern type node `id` (`B is P`): base B with its pattern (`TQ_PAT`). A built-in integer takes a
+    // range of constants or const parameters, an enum one variant whose payload is only wildcards.
+    fn tc_pattern_type(self: &mut Self, id: NodeId) TypeId {
+        let a = self.cur_ast();
+        let pt = unsafe (*a).at_const(id).as_data.pattern_type;
+        let base = self.resolve_type(pt.base);
+        if base == TYPE_ERROR || base == TYPE_NONE || pt.pattern == NODE_NONE {
+            return TYPE_ERROR;
+        }
+        let by = *self.type_at(base);
+        let sp = unsafe (*a).at_const(id).span;
+        let pn = *unsafe (*a).at_const(pt.pattern);
+        if by.has_pat() {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_BASE,
+                sp,
+                format("the base of a pattern type is not a pattern type: '{}'", self.type_str(base).as_str()),
+            );
+            return TYPE_ERROR;
+        }
+        if by.kind == TypeKind::TYPE_BUILTIN && bt_int_width(unsafe by.as_data.builtin, false) != 0 {
+            if pn.kind != NodeKind::NODE_PATTERN_RANGE {
+                self.errors.emit_span(
+                    dc::PATTERN_TYPE_PATTERN,
+                    pn.span,
+                    format(
+                        "a pattern type of '{}' takes a range: 'a..b', 'a..=b', 'a..' or '..=b'",
+                        self.type_str(base).as_str(),
+                    ),
+                );
+                return TYPE_ERROR;
+            }
+            return self.tc_range_type(base, unsafe pn.as_data.pattern_range, pn.span);
+        }
+        let mut dm: ModuleId = 0;
+        let mut dn = NODE_NONE;
+        if by.kind == TypeKind::TYPE_ENUM {
+            dm = by.module;
+            dn = by.as_data.decl;
+        } else if by.kind == TypeKind::TYPE_INSTANCE {
+            let it = *unsafe (*a).instance(by.as_data.inst);
+            if unsafe (*self.mod_ast(it.module)).at_const(it.decl).kind == NodeKind::NODE_ENUM {
+                dm = it.module;
+                dn = it.decl;
+            }
+        }
+        if dn == NODE_NONE {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_BASE,
+                sp,
+                format(
+                    "the base of a pattern type is a built-in integer or an enum, not '{}'",
+                    self.type_str(base).as_str(),
+                ),
+            );
+            return TYPE_ERROR;
+        }
+        if self.tc_holds_ref(base, 0) {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_BASE,
+                sp,
+                format("the base of a pattern type holds no reference: '{}'", self.type_str(base).as_str()),
+            );
+            return TYPE_ERROR;
+        }
+        return self.tc_variant_type(base, dm, dn, pt.pattern);
+    }
+
+    // The range pattern type over integer `base` of range `pr` at `sp`: constant bounds as values of the
+    // base, a const parameter or an expression over them as a symbol.
+    fn tc_range_type(self: &mut Self, base: TypeId, pr: PatternRangeData, sp: tok::Span) TypeId {
+        let bt = self.bt_of(base);
+        let lo = self.tc_pat_bound(pr.start, base);
+        let mut hi = self.tc_pat_bound(pr.end, base);
+        if lo == TYPE_ERROR || hi == TYPE_ERROR {
+            return TYPE_ERROR;
+        }
+        let mut q = PK_RANGE;
+        let ptr32 = target_for(unsafe (*self.package).arch).ptr == 4;
+        if hi != TYPE_NONE && !pr.inclusive {
+            let hy = *self.type_at(hi);
+            if hy.kind != TypeKind::TYPE_CONST {
+                q = PK_HI_EXCL;
+            } else if !bt_holds(bt, hy.cval() - i128::one(), ptr32) {
+                self.errors.emit_span(dc::PATTERN_TYPE_PATTERN, sp, format("this pattern type has no value"));
+                return TYPE_ERROR;
+            } else {
+                hi = unsafe (*self.cur_ast()).const_value(cval_bits(hy.cval() - i128::one()), bt);
+            }
+        }
+        let p = unsafe (*self.cur_ast()).intern_type(
+            Ty { kind: TYPE_PATTERN, qualifier: q, as_data: TyAs { arr: TyArr { elem: lo, len: hi } } },
+        );
+        let mut l = i128::zero();
+        let mut h = i128::zero();
+        let mut has_l = false;
+        let mut has_h = false;
+        if pat_range(unsafe &*self.cur_ast(), p, &mut l, &mut h, &mut has_l, &mut has_h) {
+            if has_l && has_h && h < l {
+                self.errors.emit_span(dc::PATTERN_TYPE_PATTERN, sp, format("this pattern type has no value"));
+                return TYPE_ERROR;
+            }
+            let mut v = i128::zero();
+            if !pat_free(unsafe &*self.cur_ast(), p, bt, ptr32, &mut v) && !pat_free(
+                unsafe &*self.cur_ast(),
+                p,
+                bt,
+                !ptr32,
+                &mut v,
+            ) {
+                self.errors.emit_span(
+                    dc::PATTERN_TYPE_PATTERN,
+                    sp,
+                    format("this pattern matches every value of '{}': write '{}'", bt_name(bt), bt_name(bt)),
+                );
+                return TYPE_ERROR;
+            }
+        }
+        return unsafe (*self.cur_ast()).with_pat(base, p);
+    }
+
+    // A range bound `b` (a NODE_PATTERN_LITERAL; NODE_NONE: open, TYPE_NONE) of a pattern type over
+    // `base`: a TYPE_CONST of the base, or a const parameter or an expression over them.
+    fn tc_pat_bound(self: &mut Self, b: NodeId, base: TypeId) TypeId {
+        if b == NODE_NONE {
+            return TYPE_NONE;
+        }
+        let v = unsafe (*self.cur_ast()).at_const(b).as_data.single.value;
+        let ct0 = self.ct_n;
+        let _ = self.check_expr_w(v, base);
+        if self.ct_n != ct0 || !self.compatible(base, v) {
+            if self.ct_n == ct0 {
+                self.err_mismatch(v, base);
+            }
+            return TYPE_ERROR;
+        }
+        let m = self.cur_module();
+        if self.tc_mentions_generic(m, v, 0) {
+            let st = self.tc_sym_len(m, v);
+            if st != TYPE_NONE && !self.lin_err && self.type_at(st).kind == TypeKind::TYPE_GENERIC {
+                return st;
+            }
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_PATTERN,
+                unsafe (*self.cur_ast()).at_const(v).span,
+                format("a bound of a pattern type is a constant or a const parameter"),
+            );
+            return TYPE_ERROR;
+        }
+        if self.cir() == null {
+            return TYPE_ERROR;
+        }
+        self.ev_err = false;
+        let lv = self.ev(m, v);
+        if lv.kind != iri::IV_INT || self.ev_err {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_PATTERN,
+                unsafe (*self.cur_ast()).at_const(v).span,
+                format("a bound of a pattern type is a constant or a const parameter"),
+            );
+            return TYPE_ERROR;
+        }
+        return unsafe (*self.cur_ast()).const_value(lv.i, self.bt_of(base));
+    }
+
+    // The variant pattern type over enum `base` (declaration `dn` of `dm`) of pattern node `pid`: one
+    // variant whose payload is only wildcards, of the variant's shape.
+    fn tc_variant_type(self: &mut Self, base: TypeId, dm: ModuleId, dn: NodeId, pid: NodeId) TypeId {
+        let a = self.cur_ast();
+        let pn = *unsafe (*a).at_const(pid);
+        let mut name = NODE_NONE;
+        let mut shape: u8 = 0; // 0 unit, 1 tuple, 2 struct
+        if pn.kind == NodeKind::NODE_PATTERN_TUPLE {
+            name = pn.as_data.pattern.name;
+            shape = 1;
+        } else if pn.kind == NodeKind::NODE_PATTERN_STRUCT {
+            name = pn.as_data.pattern.name;
+            shape = 2;
+        } else if pn.kind == NodeKind::NODE_PATTERN_NAME {
+            name = pn.as_data.pattern.name;
+        } else if pn.kind == NodeKind::NODE_PATTERN_LITERAL {
+            let v = pn.as_data.single.value;
+            if unsafe (*a).at_const(v).kind == NodeKind::NODE_MEMBER {
+                name = unsafe (*a).at_const(v).as_data.member.member;
+            }
+        }
+        let ea = self.mod_ast(dm);
+        let ms = unsafe (*ea).ext(dn).aggregate.members;
+        let mut k: u32 = 0;
+        let mut found = false;
+        if name != NODE_NONE {
+            let ns = self.name_span(name);
+            while k < ms.len {
+                let vn = unsafe (*ea).at_const(unsafe (*ea).list(ms)[k as usize]).as_data.variant.name;
+                let vs = unsafe (*ea).at_const(vn).as_data.name.text;
+                if self.source.slice(ns.start as usize, ns.end as usize) == self.mod_src(dm).slice(
+                    vs.start as usize,
+                    vs.end as usize,
+                ) {
+                    found = true;
+                    break;
+                }
+                k += 1;
+            }
+        }
+        if !found {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_PATTERN,
+                pn.span,
+                format("a pattern type of '{}' takes one of its variants", self.type_str(base).as_str()),
+            );
+            return TYPE_ERROR;
+        }
+        let vd = unsafe (*ea).at_const(unsafe (*ea).list(ms)[k as usize]).as_data.variant;
+        let want: u8 = if vd.payload.len == 0 {
+            0
+        } else if vd.struct_payload {
+            2
+        } else {
+            1
+        };
+        let mut fits = want == shape;
+        if fits && shape == 1 {
+            // `(..)` covers any payload; `_`s name each element.
+            let ch = pn.as_data.pattern.children;
+            let mut rest = false;
+            for i in 0..ch.len {
+                let c = unsafe (*a).list(ch)[i as usize];
+                let cs = unsafe (*a).at_const(c).span;
+                rest = rest || cs.end - cs.start == 2;
+            }
+            fits = rest || ch.len == vd.payload.len;
+        }
+        if !fits {
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_PATTERN,
+                pn.span,
+                format(
+                    "this pattern does not match the shape of variant '{}'",
+                    diag::span_str(
+                        self.mod_src(dm),
+                        unsafe (*ea).at_const(vd.name).as_data.name.text.start,
+                        unsafe (*ea).at_const(vd.name).as_data.name.text.end,
+                    ),
+                ),
+            );
+            return TYPE_ERROR;
+        }
+        let kv = unsafe (*self.cur_ast()).const_value(k, BuiltinType::BT_I32);
+        let p = unsafe (*self.cur_ast()).intern_type(
+            Ty { kind: TYPE_PATTERN, qualifier: PK_VARIANT, as_data: TyAs { arr: TyArr { elem: kv, len: TYPE_NONE } } },
+        );
+        return unsafe (*self.cur_ast()).with_pat(base, p);
+    }
+
+    // Whether type `t` holds a reference (behind any instance argument), at recursion `depth`.
+    fn tc_holds_ref(self: &Self, t: TypeId, depth: u32) bool {
+        if t == TYPE_NONE || depth > 16 {
+            return false;
+        }
+        let y = *self.type_at(t);
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_POINTER || y.arr_like() {
+            return self.tc_holds_ref(y.as_data.elem, depth + 1);
+        }
+        let r = y.rec();
+        if r == NO_REC || y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let it = *unsafe (*self.cur_ast()).instance(r);
+        for i in 0..it.n {
+            if self.tc_holds_ref(unsafe it.args[i as usize], depth + 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn tc_array_type(self: &mut Self, m: ModuleId, lenNode: NodeId, elem: TypeId) TypeId {
         self.eng_hold(true);
         let r9 = self.tc_array_type_i(m, lenNode, elem);
@@ -11665,6 +11975,9 @@ extend<'a> TypeChecker<'a> {
             },
             NODE_FUNCTION_TYPE => {
                 result = self.tc_fn_type(self.cur_module(), id);
+            },
+            NODE_PATTERN_TYPE => {
+                result = self.tc_pattern_type(id);
             },
             NODE_DYN_TYPE => {
                 let q = unsafe (*a).at_const(id).as_data.indirect_type.qualifier;
@@ -18659,6 +18972,179 @@ extend<'a> TypeChecker<'a> {
         return r;
     }
 
+    // `t` without its pattern, the type of value node `id` from now on: an operation reads the base.
+    fn tc_unpat(self: &mut Self, id: NodeId, t: TypeId) TypeId {
+        if t == TYPE_NONE || t == TYPE_ERROR || !self.type_at(t).has_pat() {
+            return t;
+        }
+        let b = unsafe (*self.cur_ast()).pat_base(t);
+        unsafe (*self.cur_ast()).set_type(id, b);
+        return b;
+    }
+
+    // `compatible_core` where `expected` or the type `actual` of `node` is a pattern type. Out of a
+    // pattern type the value converts as its base. Into one: a value of the same pattern type or of
+    // one whose constant range lies inside, a constant that matches, or any other value of the base,
+    // which the prover must show matches (a conversion recorded on `node`, lowered to a check).
+    fn tc_pat_compat(self: &mut Self, expected: TypeId, actual: TypeId, node: NodeId, probe: bool) bool {
+        let a = self.cur_ast();
+        let ep = self.type_at(expected).pat();
+        let ap = self.type_at(actual).pat();
+        let eb = unsafe (*a).pat_base(expected);
+        let ab = unsafe (*a).pat_base(actual);
+        if ep != TYPE_NONE && ap != TYPE_NONE && eb == ab && self.tc_pat_within(ap, ep) {
+            return true;
+        }
+        if ap != TYPE_NONE {
+            unsafe (*a).set_type(node, ab);
+        }
+        let ok = self.compatible_core(eb, node, probe);
+        if !ok || probe {
+            unsafe (*a).set_type(node, actual);
+        }
+        if !ok || ep == TYPE_NONE {
+            return ok;
+        }
+        let k = self.tc_pat_const(node, expected);
+        if k == 2 {
+            if !probe {
+                self.errors.emit_span(
+                    dc::PATTERN_TYPE_VALUE,
+                    unsafe (*a).at_const(node).span,
+                    format("this value does not match '{}'", self.type_str(expected).as_str()),
+                );
+            }
+            return probe == false;
+        }
+        if !probe {
+            unsafe (*a).set_type(node, expected);
+            if k == 0 {
+                unsafe (*a).set_coerce(node, expected, DefId { module: 0, node: NODE_NONE });
+            }
+        }
+        return true;
+    }
+
+    // `x as? T` at node `id`: `x` a value of the base of pattern type `T`, the result `Option<T>`, `None`
+    // when `x` does not match.
+    fn tc_checked_cast(self: &mut Self, id: NodeId) TypeId {
+        let a = self.cur_ast();
+        let cd = unsafe (*a).at_const(id).as_data.cast;
+        let dst = self.resolve_type(cd.ty);
+        if dst == TYPE_ERROR || dst == TYPE_NONE {
+            let _ = self.check_expr(cd.expression);
+            return TYPE_ERROR;
+        }
+        if !self.type_at(dst).has_pat() {
+            let _ = self.check_expr(cd.expression);
+            self.errors.emit_span(
+                dc::CHECKED_CAST_TARGET,
+                unsafe (*a).at_const(cd.ty).span,
+                format("'as?' converts into a pattern type, not '{}'", self.type_str(dst).as_str()),
+            );
+            return TYPE_ERROR;
+        }
+        let base = unsafe (*a).pat_base(dst);
+        let _ = self.check_expr_w(cd.expression, base);
+        if !self.compatible(base, cd.expression) {
+            self.err_mismatch(cd.expression, base);
+            return TYPE_ERROR;
+        }
+        if self.ph_option.node == NODE_NONE {
+            return TYPE_ERROR;
+        }
+        return unsafe (*self.cur_ast()).intern_instance(self.ph_option.mid, self.ph_option.node, &dst, 1);
+    }
+
+    // Whether every value of pattern `inner` matches pattern `outer` (both TYPE_PATTERN of one base):
+    // the same pattern, or constant ranges, `inner` inside `outer`.
+    fn tc_pat_within(self: &Self, inner: TypeId, outer: TypeId) bool {
+        if inner == outer {
+            return true;
+        }
+        let a = unsafe &*self.cur_ast();
+        let (mut il, mut ih, mut ol, mut oh) = (i128::zero(), i128::zero(), i128::zero(), i128::zero());
+        let (mut ihl, mut ihh, mut ohl, mut ohh) = (false, false, false, false);
+        if !pat_range(a, inner, &mut il, &mut ih, &mut ihl, &mut ihh) || !pat_range(
+            a,
+            outer,
+            &mut ol,
+            &mut oh,
+            &mut ohl,
+            &mut ohh,
+        ) {
+            return false;
+        }
+        return (!ohl || ihl && ol <= il) && (!ohh || ihh && ih <= oh);
+    }
+
+    // Whether value node `node` is a constant of pattern type `t`'s base that matches it (1), one that
+    // does not (2), or not a constant the checker decides (0): an integer constant for a range, a
+    // variant written in place (`Some(x)`, `None`, `Rect { .. }`) for a variant.
+    fn tc_pat_const(self: &mut Self, node: NodeId, t: TypeId) u8 {
+        let a = self.cur_ast();
+        let y = *self.type_at(t);
+        let p = *self.type_at(y.pat());
+        let n = node;
+        let nd = *unsafe (*a).at_const(n);
+        if (p.qualifier & PK_VARIANT) != 0 {
+            let mut vd = DefId { module: 0, node: NODE_NONE };
+            if nd.kind == NodeKind::NODE_CALL {
+                vd = unsafe (*a).resolution_def(nd.as_data.call.callee);
+                let cn = *unsafe (*a).at_const(nd.as_data.call.callee);
+                if cn.kind == NodeKind::NODE_MEMBER && unsafe cn.as_data.member.path {
+                    vd = unsafe (*a).resolution_def(cn.as_data.member.member);
+                }
+            } else if nd.kind == NodeKind::NODE_IDENTIFIER {
+                vd = unsafe (*a).resolution_def(n);
+            } else if nd.kind == NodeKind::NODE_MEMBER && unsafe nd.as_data.member.path {
+                vd = unsafe (*a).resolution_def(nd.as_data.member.member);
+            } else if nd.kind == NodeKind::NODE_STRUCT_INITIALIZER {
+                // `Rect { .. }`, or a path's last part (`Shape::Rect { .. }`).
+                let stn = nd.as_data.struct_initializer.ty;
+                vd = unsafe (*a).resolution_def(stn);
+                if unsafe (*a).at_const(stn).kind == NodeKind::NODE_TYPE_PATH {
+                    let tp = unsafe (*a).at_const(stn).as_data.type_path;
+                    if tp.parts.len != 0 {
+                        vd = unsafe (*a).resolution_def(unsafe (*a).list(tp.parts)[(tp.parts.len - 1) as usize]);
+                    }
+                }
+            }
+            if vd.node == NODE_NONE || unsafe (*self.mod_ast(vd.module)).at_const(vd.node).kind != NodeKind::NODE_VARIANT {
+                return 0;
+            }
+            let mut ord: i64 = 0;
+            let _ = unsafe (*self.package).variant_enum(vd, &mut ord);
+            return pick(ord == unsafe (*a).type_at(p.as_data.arr.elem).as_data.value, 1u8, 2u8);
+        }
+        let lit = nd.kind == NodeKind::NODE_LITERAL || nd.kind == NodeKind::NODE_UNARY && unsafe nd.as_data.unary.op == TokenType::Minus && unsafe (*a).at_const(
+            nd.as_data.unary.operand,
+        ).kind == NodeKind::NODE_LITERAL;
+        let mut named = false;
+        if nd.kind == NodeKind::NODE_IDENTIFIER || nd.kind == NodeKind::NODE_MEMBER && unsafe nd.as_data.member.path {
+            let d = unsafe (*a).resolution_def(pick(nd.kind == NodeKind::NODE_IDENTIFIER, n, nd.as_data.member.member));
+            named = d.node != NODE_NONE && unsafe (*self.mod_ast(d.module)).at_const(d.node).kind == NodeKind::NODE_CONST;
+        }
+        // A constant's initializer is evaluated whole: its value decides here.
+        if !lit && !named && !self.const_value || self.cir() == null {
+            return 0;
+        }
+        let mut l = i128::zero();
+        let mut h = i128::zero();
+        let mut hl = false;
+        let mut hh = false;
+        if !pat_range(unsafe &*a, y.pat(), &mut l, &mut h, &mut hl, &mut hh) {
+            return 0;
+        }
+        self.ev_err = false;
+        let lv = self.ev(self.cur_module(), n);
+        if lv.kind != iri::IV_INT || self.ev_err {
+            return 0;
+        }
+        let v = cval_exact(lv.i, unsafe y.as_data.builtin);
+        return pick((!hl || l <= v) && (!hh || v <= h), 1u8, 2u8);
+    }
+
     fn tc_coerce_from(self: &mut Self, expected: TypeId, node: NodeId, probe: bool) bool {
         if expected == TYPE_NONE || node == NODE_NONE || self.icx.coerce_depth > 2 {
             return false;
@@ -18905,6 +19391,9 @@ extend<'a> TypeChecker<'a> {
             // An untyped expression: only lenient as error recovery. In an error-free compile an
             // untyped node reaching a compat check is a typechecker hole, not a wildcard match.
             return self.errors.errors.len() != 0;
+        }
+        if self.type_at(expected).has_pat() || self.type_at(actual).has_pat() {
+            return self.tc_pat_compat(expected, actual, node, probe);
         }
         let ex = *self.type_at(expected);
         let ac = *self.type_at(actual);
@@ -22687,9 +23176,9 @@ extend TypeChecker {
     // The checks of binary node `id` whose left operand has type `l` and literal-only kind `lk`
     // (tc_lit_kind); with `rdone`, the right operand is checked already and has type `r0`.
     fn check_binary_ops(self: &mut Self, id: NodeId, l0: TypeId, lk: u8, r0: TypeId, rdone: bool) TypeId {
-        let mut l = l0;
         let a = self.cur_ast();
         let bd = unsafe (*a).at_const(id).as_data.binary;
+        let mut l = self.tc_unpat(bd.left, l0);
         let ln = bd.left;
         let rn = bd.right;
         let op = bd.op;
@@ -22730,11 +23219,14 @@ extend TypeChecker {
         )) {
             rwant = l;
         }
-        let r = if rdone {
-            r0
-        } else {
-            self.check_expr_w(rn, rwant)
-        };
+        let r = self.tc_unpat(
+            rn,
+            if rdone {
+                r0
+            } else {
+                self.check_expr_w(rn, rwant)
+            },
+        );
         // The mirror: a value `if`, `switch` or block on the left whose values are unpinned literals
         // takes the right operand's numeric type.
         if !logic && l != TYPE_NONE && r != l && self.tc_num_builtin(r) && self.tc_value_adopt(ln, r) {
@@ -28302,6 +28794,46 @@ extend TypeChecker {
         let mut gp = Defs8 {};
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
+        let bp = self.type_at(base).pat();
+        if !prefer_method && bp != TYPE_NONE && (self.type_at(bp).qualifier & PK_VARIANT) != 0 && self.aggregate_of(
+            base,
+            &mut bmod,
+            &mut bdecl,
+            &mut gp,
+            &mut ga,
+            &mut gn,
+        ) {
+            // A variant pattern type reads its variant's payload: `c.0`, `r.w`.
+            let ea = self.mod_ast(bmod);
+            let k = self.type_at(self.type_at(bp).as_data.arr.elem).as_data.value as u32;
+            let vid = unsafe (*ea).list(unsafe (*ea).ext(bdecl).aggregate.members)[k as usize];
+            let vd = unsafe (*ea).at_const(vid).as_data.variant;
+            let ms = self.source.slice(name.start as usize, name.end as usize);
+            for i in 0..vd.payload.len {
+                let pid = unsafe (*ea).list(vd.payload)[i as usize];
+                let hit = if vd.struct_payload {
+                    let fs = unsafe (*ea).at_const(unsafe (*ea).at_const(pid).as_data.field.name).as_data.name.text;
+                    self.mod_src(bmod).slice(fs.start as usize, fs.end as usize) == ms
+                } else {
+                    format("{}", i).as_str() == ms
+                };
+                if hit {
+                    unsafe (*self.cur_ast()).set_resolution_def(mname, DefId { module: bmod, node: pid });
+                    let pt = if vd.struct_payload {
+                        self.decl_type_in(bmod, pid)
+                    } else {
+                        self.node_type_in(bmod, pid)
+                    };
+                    return self.subst_type(pt, &gp[0], &ga[0], gn);
+                }
+            }
+            self.errors.emit_span(
+                dc::PATTERN_TYPE_VALUE,
+                name,
+                format("'{}' has no payload member '{}'", self.type_str(base).as_str(), ms),
+            );
+            return TYPE_NONE;
+        }
         if self.aggregate_of(base, &mut bmod, &mut bdecl, &mut gp, &mut ga, &mut gn) {
             let mut mhit = DefId { module: 0, node: NODE_NONE };
             let mut fhit = NODE_NONE;
@@ -29987,11 +30519,18 @@ extend TypeChecker {
             }
             return l;
         }
-        let pt = self.compound_param_type(bd.op, l);
+        // `x op= y` into a pattern type: the operation on the base, and its result checked against
+        // the pattern (a conversion recorded on the assignment, lowered after the operation).
+        let mut lw = l;
+        if bd.op != TokenType::Equal && l != TYPE_NONE && l != TYPE_ERROR && self.type_at(l).has_pat() {
+            lw = unsafe (*a).pat_base(l);
+            unsafe (*a).set_coerce(id, l, DefId { module: 0, node: NODE_NONE });
+        }
+        let pt = self.compound_param_type(bd.op, lw);
         // The right side is checked against the type the target's declaration writes.
         let fm = self.lt_env.len();
         self.tc_frame_target(bd.left, bd.right);
-        self.check_expr_w(bd.right, pick(pt != TYPE_NONE, pt, l));
+        self.check_expr_w(bd.right, pick(pt != TYPE_NONE, pt, lw));
         if !self.is_assignable(bd.left) {
             let sp = unsafe (*a).at_const(bd.left).span;
             self.errors.emit_span(dc::CANNOT_ASSIGN_EXPRESSION, sp, format("cannot assign to this expression"));
@@ -29999,12 +30538,12 @@ extend TypeChecker {
             if !self.operand_fits_param(pt, bd.right) {
                 self.err_mismatch(bd.right, pt);
             }
-        } else if !self.compatible(l, bd.right) {
+        } else if !self.compatible(lw, bd.right) {
             let fi = self.tc_frame_of(bd.right);
             if fi >= 0 {
-                self.err_mismatch_ann(bd.right, l, self.lt_env.at(fi as usize).m, self.lt_env.at(fi as usize).node);
+                self.err_mismatch_ann(bd.right, lw, self.lt_env.at(fi as usize).m, self.lt_env.at(fi as usize).node);
             } else {
-                self.err_mismatch(bd.right, l);
+                self.err_mismatch(bd.right, lw);
             }
         }
         self.lt_env.truncate(fm);
@@ -30629,7 +31168,8 @@ extend TypeChecker {
     // `stmt`: a statement holds the switch, so each arm is a statement and the switch is `void`.
     fn check_match_expr(self: &mut Self, id: NodeId, expected: TypeId, stmt: bool) TypeId {
         let a = self.cur_ast();
-        let scrut = self.check_expr(unsafe (*a).at_const(id).as_data.match_expr.value);
+        let sv = unsafe (*a).at_const(id).as_data.match_expr.value;
+        let scrut = self.tc_unpat(sv, self.check_expr(sv));
         let arms = unsafe (*a).at_const(id).as_data.match_expr.arms;
         let mut first = true;
         let mut result = TYPE_NONE;
@@ -30857,7 +31397,14 @@ extend TypeChecker {
         // A conversion while checking `id` against `expected` is `id`'s (`tc_ann_names`).
         let oc = self.lt_conv;
         self.lt_conv = id;
-        let r = self.check_expr_w_i(id, expected);
+        // A value of the base becomes a value of a pattern type at the conversion (`tc_pat_compat`):
+        // a literal or an operation takes the base.
+        let want = pick(
+            expected != TYPE_NONE && expected != TYPE_ERROR && self.type_at(expected).has_pat(),
+            unsafe (*self.cur_ast()).pat_base(expected),
+            expected,
+        );
+        let r = self.check_expr_w_i(id, want);
         self.lt_conv = oc;
         return r;
     }
@@ -30975,199 +31522,203 @@ extend TypeChecker {
                 }
             },
             NODE_CAST => {
-                let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
-                let tyn = unsafe (*a).at_const(id).as_data.cast.ty;
-                let dst = self.resolve_type(tyn);
-                if self.run_clause != 0 && (self.bt_of(dst) == BuiltinType::BT_INT || self.bt_of(dst) == BuiltinType::BT_NAT) {
-                    self.tc_not_checkable(unsafe (*a).at_const(id).span, "converts into 'int' or 'nat'");
-                }
-                // A cast to a type alias may be needed on another target (`x as mode_t`: `u16` on macOS,
-                // `u32` on Linux): it is not unnecessary.
-                let mut alias = false;
-                if unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH {
-                    let td = unsafe (*a).resolution_def(tyn);
-                    alias = td.node != NODE_NONE && (td.module == self.cur_module() || td.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
-                        td.module,
-                    )).at_const(td.node).kind == NodeKind::NODE_TYPE_ALIAS;
-                }
-                if self.lint && !alias && src != TYPE_NONE && src == dst && unsafe (*a).at_const(
-                    unsafe (*a).at_const(id).as_data.cast.expression,
-                ).kind != NodeKind::NODE_LITERAL {
-                    let csp = unsafe (*a).at_const(id).span;
-                    self.errors.warn_span(
-                        dc::UNNECESSARY_CAST_EXPRESSION_ALREADY_HAS_TYPE,
-                        csp,
-                        format("unnecessary cast: the expression already has this type"),
-                    );
-                    self.tc_cast_drop_fix(id);
-                }
-                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    dst,
-                ).kind == TypeKind::TYPE_REFERENCE {
-                    // Materializing a reference from a raw pointer asserts validity: unsafe territory.
-                    if self.tc_needs_unsafe() {
-                        let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(
-                            dc::CASTING_RAW_POINTER_REFERENCE_REQUIRES_UNSAFE,
-                            sp,
-                            format("casting a raw pointer to a reference requires 'unsafe'"),
-                        );
+                if unsafe (*a).at_const(id).as_data.cast.checked {
+                    result = self.tc_checked_cast(id);
+                } else {
+                    let src = self.check_expr(unsafe (*a).at_const(id).as_data.cast.expression);
+                    let tyn = unsafe (*a).at_const(id).as_data.cast.ty;
+                    let dst = self.resolve_type(tyn);
+                    if self.run_clause != 0 && (self.bt_of(dst) == BuiltinType::BT_INT || self.bt_of(dst) == BuiltinType::BT_NAT) {
+                        self.tc_not_checkable(unsafe (*a).at_const(id).span, "converts into 'int' or 'nat'");
                     }
-                }
-                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_BUILTIN && self.type_at(
-                    dst,
-                ).kind == TypeKind::TYPE_REFERENCE {
-                    let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(
-                        dc::REFERENCE_NEVER_COMES_NUMBER_CAST_RAW,
-                        sp,
-                        format(
-                            "a reference never comes from a number; cast to a raw pointer and dereference it inside 'unsafe'",
-                        ),
-                    );
-                }
-                // Forming a MUTABLE raw pointer from an IMMUTABLE reference launders the shared-borrow
-                // guarantee into mutation (interior mutability). Rejected everywhere except UnsafeCell::get,
-                // the one sanctioned hole: use `&mut`, or wrap the value in an `UnsafeCell`.
-                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
-                    src,
-                ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    dst,
-                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
-                    let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(
-                        dc::CANNOT_CAST_IMMUTABLE_REFERENCE_MUT_POINTER,
-                        sp,
-                        format(
-                            "cannot cast an immutable reference to a '*mut' pointer; use '&mut', or 'UnsafeCell' for interior mutability",
-                        ),
-                    );
-                }
-                // A `*const` pointer, which an immutable reference gives (`as_ptr`), never becomes a `*mut` one
-                // either: the two casts would launder the shared borrow into mutation the same way. A `*mut`
-                // pointer comes from `&mut` (`as_mut_ptr`), an `UnsafeCell`, a binding that declares it, or
-                // `std::mem::ptr::cast_mut`, the explicit conversion (a bit cast, no `as`).
-                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    src,
-                ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    dst,
-                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
-                    let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(
-                        dc::CANNOT_CAST_CONST_POINTER_MUT_POINTER,
-                        sp,
-                        format(
-                            "cannot cast a '*const' pointer to a '*mut' pointer; take it from '&mut' ('as_mut_ptr'), use 'UnsafeCell' for interior mutability, or 'std::mem::ptr::cast_mut' for a C interface",
-                        ),
-                    );
-                }
-                // Nor does a number: `p as usize as *mut T` would launder a `*const` pointer the same way. A
-                // `*mut` pointer from an address is `std::mem::ptr::from_addr_mut`, the explicit conversion (a bit cast).
-                if src != TYPE_NONE && dst != TYPE_NONE && self.is_int(src) && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
-                    dst,
-                ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
-                    let sp = unsafe (*a).at_const(id).span;
-                    self.errors.emit_span(
-                        dc::CANNOT_CAST_NUMBER_MUT_POINTER,
-                        sp,
-                        format(
-                            "cannot cast a number to a '*mut' pointer; keep the '*mut' pointer, or use 'std::mem::ptr::from_addr_mut' for an address that came from one",
-                        ),
-                    );
-                }
-                // A reference casts only to a pointer to its own referent type. Viewing the referent as
-                // another type is a second cast, from that pointer, so a reinterpretation is written out
-                // and never a side effect of one cast (`&mut x as *mut i32 as *mut usize`).
-                if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
-                    dst,
-                ).kind == TypeKind::TYPE_POINTER && !self.tc_same_shape(
-                    self.type_at(src).as_data.elem,
-                    self.type_at(dst).as_data.elem,
-                ) {
-                    let sp = unsafe (*a).at_const(id).span;
-                    let mut own = *self.type_at(dst);
-                    own.as_data.elem = self.type_at(src).as_data.elem;
-                    let ot = unsafe (*self.cur_ast()).intern_type(own);
-                    self.errors.emit_span(
-                        dc::REFERENCE_CASTS_ONLY_POINTER_CAST_FIRST,
-                        sp,
-                        format(
-                            "a reference to '{}' casts only to a pointer to '{}': cast to '{}' first, then to '{}'",
-                            self.type_str(self.type_at(src).as_data.elem).as_str(),
-                            self.type_str(self.type_at(src).as_data.elem).as_str(),
-                            self.type_str(ot).as_str(),
-                            self.type_str(dst).as_str(),
-                        ),
-                    );
-                }
-                // A cast whose source or target is a generic INSTANCE dispatches to a conversion: the
-                // implicit path first (`from`/`widen`, so `x as u256` behaves exactly like the binding
-                // it is redundant with), then the `cast_unsigned` / `cast_signed` pair, which carry C's
-                // cast semantics: truncate when narrower, sign- or zero-extend per the SOURCE's
-                // signedness when wider.
-                // A cast to a built-in integer goes through the value's own `to_u64`/`to_i64`, and the
-                // built-in cast then narrows that. Without a conversion the cast is invalid: the C a
-                // struct cast would emit does not compile.
-                // A cast to a dyn type is the erasure (or upcast) the coercion performs.
-                let vcast = src != TYPE_NONE && dst != TYPE_NONE && src != dst && (self.type_at(src).is_vec() || self.type_at(
-                    dst,
-                ).is_vec());
-                if vcast {
-                    self.tc_vec_cast(id, src, dst);
-                }
-                let erased = !vcast && src != TYPE_NONE && dst != TYPE_NONE && src != dst && self.type_at(dst).kind == TypeKind::TYPE_DYN && self.compatible_in(
-                    dst,
-                    unsafe (*a).at_const(id).as_data.cast.expression,
-                    false,
-                );
-                let converted = vcast || erased || src != TYPE_NONE && dst != TYPE_NONE && src != dst && self.tc_cast_conv(
-                    id,
-                    unsafe (*a).at_const(id).as_data.cast.expression,
-                    src,
-                    dst,
-                );
-                if !converted && src != TYPE_NONE && dst != TYPE_NONE && src != dst {
-                    let sk = self.type_at(src).kind;
-                    let dk = self.type_at(dst).kind;
-                    // An array reaches a slice by the implicit view (`let s: []T = a`, an argument), which
-                    // `as` does not spell.
-                    let mut se = TYPE_NONE;
-                    let array_view = sk == TypeKind::TYPE_ARRAY && self.slice_kind(dst, &mut se) != 0;
-                    let aggregate = array_view || sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_ENUM || sk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_ENUM || dk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_DYN;
-                    let enum_int = self.is_plain_enum(src) && self.is_int(dst) || self.is_plain_enum(dst) && self.is_int(
-                        src,
-                    );
-                    let complex_lossy = sk == TypeKind::TYPE_BUILTIN && bt_is_complex(
-                        unsafe self.type_at(src).as_data.builtin,
-                    ) && dk == TypeKind::TYPE_BUILTIN && !bt_is_complex(unsafe self.type_at(dst).as_data.builtin);
-                    // A function item casts to a function-pointer type of its signature (`f as fn() i32`).
-                    let fn_ptr = sk == TypeKind::TYPE_FUNCTION && self.type_at(dst).fn_sig() && self.fn_compatible(
+                    // A cast to a type alias may be needed on another target (`x as mode_t`: `u16` on macOS,
+                    // `u32` on Linux): it is not unnecessary.
+                    let mut alias = false;
+                    if unsafe (*a).at_const(tyn).kind == NodeKind::NODE_TYPE_PATH {
+                        let td = unsafe (*a).resolution_def(tyn);
+                        alias = td.node != NODE_NONE && (td.module == self.cur_module() || td.module as usize < self.pkg_count()) && unsafe (*self.mod_ast(
+                            td.module,
+                        )).at_const(td.node).kind == NodeKind::NODE_TYPE_ALIAS;
+                    }
+                    if self.lint && !alias && src != TYPE_NONE && src == dst && unsafe (*a).at_const(
+                        unsafe (*a).at_const(id).as_data.cast.expression,
+                    ).kind != NodeKind::NODE_LITERAL {
+                        let csp = unsafe (*a).at_const(id).span;
+                        self.errors.warn_span(
+                            dc::UNNECESSARY_CAST_EXPRESSION_ALREADY_HAS_TYPE,
+                            csp,
+                            format("unnecessary cast: the expression already has this type"),
+                        );
+                        self.tc_cast_drop_fix(id);
+                    }
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
                         dst,
-                        src,
-                    );
-                    // A function's address as `usize`, and back with `unsafe` (the address must be one of
-                    // a function of that signature).
-                    let usz = Ast::builtin(BuiltinType::BT_USIZE);
-                    let to_fn = src == usz && self.tc_fn_ptr(dst);
-                    let fn_addr = to_fn || dst == usz && self.tc_fn_ptr(src);
-                    if to_fn && self.tc_needs_unsafe() {
-                        self.err_unsafe(unsafe (*a).at_const(id).span, "casting an address to a function pointer");
-                    }
-                    if aggregate && !enum_int && !fn_ptr && !fn_addr || complex_lossy {
-                        let s = self.type_str(src);
-                        let d = self.type_str(dst);
-                        let sp = unsafe (*a).at_const(id).span;
-                        self.errors.emit_span(
-                            dc::INVALID_CAST,
-                            sp,
-                            format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()),
-                        );
-                        if array_view {
-                            self.errors.note(format("an array converts to a slice implicitly; drop the cast"));
+                    ).kind == TypeKind::TYPE_REFERENCE {
+                        // Materializing a reference from a raw pointer asserts validity: unsafe territory.
+                        if self.tc_needs_unsafe() {
+                            let sp = unsafe (*a).at_const(id).span;
+                            self.errors.emit_span(
+                                dc::CASTING_RAW_POINTER_REFERENCE_REQUIRES_UNSAFE,
+                                sp,
+                                format("casting a raw pointer to a reference requires 'unsafe'"),
+                            );
                         }
                     }
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_BUILTIN && self.type_at(
+                        dst,
+                    ).kind == TypeKind::TYPE_REFERENCE {
+                        let sp = unsafe (*a).at_const(id).span;
+                        self.errors.emit_span(
+                            dc::REFERENCE_NEVER_COMES_NUMBER_CAST_RAW,
+                            sp,
+                            format(
+                                "a reference never comes from a number; cast to a raw pointer and dereference it inside 'unsafe'",
+                            ),
+                        );
+                    }
+                    // Forming a MUTABLE raw pointer from an IMMUTABLE reference launders the shared-borrow
+                    // guarantee into mutation (interior mutability). Rejected everywhere except UnsafeCell::get,
+                    // the one sanctioned hole: use `&mut`, or wrap the value in an `UnsafeCell`.
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
+                        src,
+                    ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                        dst,
+                    ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
+                        let sp = unsafe (*a).at_const(id).span;
+                        self.errors.emit_span(
+                            dc::CANNOT_CAST_IMMUTABLE_REFERENCE_MUT_POINTER,
+                            sp,
+                            format(
+                                "cannot cast an immutable reference to a '*mut' pointer; use '&mut', or 'UnsafeCell' for interior mutability",
+                            ),
+                        );
+                    }
+                    // A `*const` pointer, which an immutable reference gives (`as_ptr`), never becomes a `*mut` one
+                    // either: the two casts would launder the shared borrow into mutation the same way. A `*mut`
+                    // pointer comes from `&mut` (`as_mut_ptr`), an `UnsafeCell`, a binding that declares it, or
+                    // `std::mem::ptr::cast_mut`, the explicit conversion (a bit cast, no `as`).
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_POINTER && self.type_at(
+                        src,
+                    ).qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                        dst,
+                    ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !self.in_unsafe_cell() {
+                        let sp = unsafe (*a).at_const(id).span;
+                        self.errors.emit_span(
+                            dc::CANNOT_CAST_CONST_POINTER_MUT_POINTER,
+                            sp,
+                            format(
+                                "cannot cast a '*const' pointer to a '*mut' pointer; take it from '&mut' ('as_mut_ptr'), use 'UnsafeCell' for interior mutability, or 'std::mem::ptr::cast_mut' for a C interface",
+                            ),
+                        );
+                    }
+                    // Nor does a number: `p as usize as *mut T` would launder a `*const` pointer the same way. A
+                    // `*mut` pointer from an address is `std::mem::ptr::from_addr_mut`, the explicit conversion (a bit cast).
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.is_int(src) && self.type_at(dst).kind == TypeKind::TYPE_POINTER && self.type_at(
+                        dst,
+                    ).qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                        let sp = unsafe (*a).at_const(id).span;
+                        self.errors.emit_span(
+                            dc::CANNOT_CAST_NUMBER_MUT_POINTER,
+                            sp,
+                            format(
+                                "cannot cast a number to a '*mut' pointer; keep the '*mut' pointer, or use 'std::mem::ptr::from_addr_mut' for an address that came from one",
+                            ),
+                        );
+                    }
+                    // A reference casts only to a pointer to its own referent type. Viewing the referent as
+                    // another type is a second cast, from that pointer, so a reinterpretation is written out
+                    // and never a side effect of one cast (`&mut x as *mut i32 as *mut usize`).
+                    if src != TYPE_NONE && dst != TYPE_NONE && self.type_at(src).kind == TypeKind::TYPE_REFERENCE && self.type_at(
+                        dst,
+                    ).kind == TypeKind::TYPE_POINTER && !self.tc_same_shape(
+                        self.type_at(src).as_data.elem,
+                        self.type_at(dst).as_data.elem,
+                    ) {
+                        let sp = unsafe (*a).at_const(id).span;
+                        let mut own = *self.type_at(dst);
+                        own.as_data.elem = self.type_at(src).as_data.elem;
+                        let ot = unsafe (*self.cur_ast()).intern_type(own);
+                        self.errors.emit_span(
+                            dc::REFERENCE_CASTS_ONLY_POINTER_CAST_FIRST,
+                            sp,
+                            format(
+                                "a reference to '{}' casts only to a pointer to '{}': cast to '{}' first, then to '{}'",
+                                self.type_str(self.type_at(src).as_data.elem).as_str(),
+                                self.type_str(self.type_at(src).as_data.elem).as_str(),
+                                self.type_str(ot).as_str(),
+                                self.type_str(dst).as_str(),
+                            ),
+                        );
+                    }
+                    // A cast whose source or target is a generic INSTANCE dispatches to a conversion: the
+                    // implicit path first (`from`/`widen`, so `x as u256` behaves exactly like the binding
+                    // it is redundant with), then the `cast_unsigned` / `cast_signed` pair, which carry C's
+                    // cast semantics: truncate when narrower, sign- or zero-extend per the SOURCE's
+                    // signedness when wider.
+                    // A cast to a built-in integer goes through the value's own `to_u64`/`to_i64`, and the
+                    // built-in cast then narrows that. Without a conversion the cast is invalid: the C a
+                    // struct cast would emit does not compile.
+                    // A cast to a dyn type is the erasure (or upcast) the coercion performs.
+                    let vcast = src != TYPE_NONE && dst != TYPE_NONE && src != dst && (self.type_at(src).is_vec() || self.type_at(
+                        dst,
+                    ).is_vec());
+                    if vcast {
+                        self.tc_vec_cast(id, src, dst);
+                    }
+                    let erased = !vcast && src != TYPE_NONE && dst != TYPE_NONE && src != dst && self.type_at(dst).kind == TypeKind::TYPE_DYN && self.compatible_in(
+                        dst,
+                        unsafe (*a).at_const(id).as_data.cast.expression,
+                        false,
+                    );
+                    let converted = vcast || erased || src != TYPE_NONE && dst != TYPE_NONE && src != dst && self.tc_cast_conv(
+                        id,
+                        unsafe (*a).at_const(id).as_data.cast.expression,
+                        src,
+                        dst,
+                    );
+                    if !converted && src != TYPE_NONE && dst != TYPE_NONE && src != dst {
+                        let sk = self.type_at(src).kind;
+                        let dk = self.type_at(dst).kind;
+                        // An array reaches a slice by the implicit view (`let s: []T = a`, an argument), which
+                        // `as` does not spell.
+                        let mut se = TYPE_NONE;
+                        let array_view = sk == TypeKind::TYPE_ARRAY && self.slice_kind(dst, &mut se) != 0;
+                        let aggregate = array_view || sk == TypeKind::TYPE_STRUCT || sk == TypeKind::TYPE_ENUM || sk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_STRUCT || dk == TypeKind::TYPE_ENUM || dk == TypeKind::TYPE_FUNCTION || dk == TypeKind::TYPE_DYN;
+                        let enum_int = self.is_plain_enum(src) && self.is_int(dst) || self.is_plain_enum(dst) && self.is_int(
+                            src,
+                        );
+                        let complex_lossy = sk == TypeKind::TYPE_BUILTIN && bt_is_complex(
+                            unsafe self.type_at(src).as_data.builtin,
+                        ) && dk == TypeKind::TYPE_BUILTIN && !bt_is_complex(unsafe self.type_at(dst).as_data.builtin);
+                        // A function item casts to a function-pointer type of its signature (`f as fn() i32`).
+                        let fn_ptr = sk == TypeKind::TYPE_FUNCTION && self.type_at(dst).fn_sig() && self.fn_compatible(
+                            dst,
+                            src,
+                        );
+                        // A function's address as `usize`, and back with `unsafe` (the address must be one of
+                        // a function of that signature).
+                        let usz = Ast::builtin(BuiltinType::BT_USIZE);
+                        let to_fn = src == usz && self.tc_fn_ptr(dst);
+                        let fn_addr = to_fn || dst == usz && self.tc_fn_ptr(src);
+                        if to_fn && self.tc_needs_unsafe() {
+                            self.err_unsafe(unsafe (*a).at_const(id).span, "casting an address to a function pointer");
+                        }
+                        if aggregate && !enum_int && !fn_ptr && !fn_addr || complex_lossy {
+                            let s = self.type_str(src);
+                            let d = self.type_str(dst);
+                            let sp = unsafe (*a).at_const(id).span;
+                            self.errors.emit_span(
+                                dc::INVALID_CAST,
+                                sp,
+                                format("invalid cast from '{}' to '{}'", s.as_str(), d.as_str()),
+                            );
+                            if array_view {
+                                self.errors.note(format("an array converts to a slice implicitly; drop the cast"));
+                            }
+                        }
+                    }
+                    result = dst;
                 }
-                result = dst;
             },
             NODE_SIZEOF | NODE_ALIGNOF => {
                 let v = unsafe (*a).at_const(id).as_data.single.value;
@@ -31400,6 +31951,14 @@ extend TypeChecker {
         }
         if result == TYPE_ERROR {
             self.err_exprs += 1;
+        }
+        // An operation on a value of a pattern type gives the base: `-x`, `!x`, `x + 1`.
+        if (nk == NodeKind::NODE_BINARY || nk == NodeKind::NODE_UNARY && unsafe (*a).at_const(id).as_data.unary.op != TokenType::Star && unsafe (*a).at_const(
+            id,
+        ).as_data.unary.op != TokenType::Ampersand) && result != TYPE_NONE && result != TYPE_ERROR && self.type_at(
+            result,
+        ).has_pat() {
+            result = unsafe (*self.cur_ast()).pat_base(result);
         }
         unsafe (*self.cur_ast()).set_type(id, result);
         if self.has_reg && (nk == NodeKind::NODE_ARRAY_LITERAL || nk == NodeKind::NODE_TUPLE || nk == NodeKind::NODE_UNARY || nk == NodeKind::NODE_CAST) {
@@ -35662,9 +36221,11 @@ extend TypeChecker {
             self.ct_item = item0;
             self.ct_cd = cd0;
             self.const_init = init0;
+            self.const_value = !cd.is_static_mut;
             if !self.compatible(declared, cd.value) {
                 self.err_mismatch_ann(cd.value, declared, self.cur_module(), cd.ty);
             }
+            self.const_value = false;
             // A `static mut` starts as static data too, so its initializer is evaluated as a constant's.
             if !cd.is_extern && self.ct_n == ct0 {
                 self.tc_mandatory_const(id, cd.value, declared);

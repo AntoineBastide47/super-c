@@ -3972,12 +3972,12 @@ extend Bce {
                     proven = wc.kind == ir::CK_INT && wc.val > 0 && self.prove_group(b, iop, lop, wc.val, &mut reason);
                 }
                 if check_only {
-                    if rv.c == ir::IN_BOUNDS_GROUP_PROVEN && !proven {
+                    if rv.c == ir::IN_BOUNDS_GROUP_PROVEN && !proven && rv.item.module != ir::CHECK_PROVER {
                         *err = "bce: unprovable IN_BOUNDS_GROUP_PROVEN";
                     }
                 } else {
                     st.total += 1;
-                    if proven {
+                    if proven || rv.c == ir::IN_BOUNDS_GROUP_PROVEN && rv.item.module == ir::CHECK_PROVER {
                         st.removed += 1;
                         b.rvalues[rid].c = ir::IN_BOUNDS_GROUP_PROVEN;
                     } else {
@@ -4011,12 +4011,12 @@ extend Bce {
             let mut reason: u8 = BR_UNKNOWN_INDEX;
             let proven = self.prove_elem(b, iop, lop, &mut reason);
             if check_only {
-                if rv.c == ir::IN_BOUNDS_PROVEN && !proven {
+                if rv.c == ir::IN_BOUNDS_PROVEN && !proven && rv.item.module != ir::CHECK_PROVER {
                     *err = "bce: unprovable IN_BOUNDS_PROVEN";
                 }
             } else {
                 st.total += 1;
-                if proven {
+                if proven || rv.c == ir::IN_BOUNDS_PROVEN && rv.item.module == ir::CHECK_PROVER {
                     st.removed += 1;
                     b.rvalues[rid].c = ir::IN_BOUNDS_PROVEN;
                 } else {
@@ -4044,12 +4044,12 @@ extend Bce {
             let mut reason: u8 = BR_UNKNOWN_INDEX;
             let proven = self.prove_range(b, sop, eop, lop, &mut reason);
             if check_only {
-                if rv.c == ir::IN_RANGE_BOUNDS_PROVEN && !proven {
+                if rv.c == ir::IN_RANGE_BOUNDS_PROVEN && !proven && rv.item.module != ir::CHECK_PROVER {
                     *err = "bce: unprovable IN_RANGE_BOUNDS_PROVEN";
                 }
             } else {
                 st.ranges_total += 1;
-                if proven {
+                if proven || rv.c == ir::IN_RANGE_BOUNDS_PROVEN && rv.item.module == ir::CHECK_PROVER {
                     st.ranges_removed += 1;
                     b.rvalues[rid].c = ir::IN_RANGE_BOUNDS_PROVEN;
                 } else {

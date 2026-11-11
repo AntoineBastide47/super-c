@@ -64,6 +64,11 @@ fn golden_contracts() {
         "pub spec fn s(n: nat) int decreases n { return n; }\nlemma l(n: nat) ensures s(n) >= 0 { assert s(n) == n by { }; }\n",
         "pub spec fn s(n: nat) int\n    decreases n\n{\n    return n;\n}\nlemma l(n: nat)\n    ensures s(n) >= 0\n{\n    assert s(n) == n by {};\n}\n",
     );
+    // Pattern types, `as?`, and the `..` of a payload pattern, which stays `..`.
+    expect_fmt(
+        "fn f(x: u32   is 1..,s: S is Rect{..}, o: Option<u32> is Some( _ ), c: S is S::C(..)) u8 is -5..=-1 {\n    let y = x as?   u32 is 2..;\n    return switch s { Rect { w, .. } => 1, C(..) => 2, _ => 3 };\n}\n",
+        "fn f(x: u32 is 1.., s: S is Rect { .. }, o: Option<u32> is Some(_), c: S is S::C(..)) u8 is -5..=-1 {\n    let y = x as? u32 is 2..;\n    return switch s {\n        Rect { w: w, .. } => 1,\n        C(..) => 2,\n        _ => 3,\n    };\n}\n",
+    );
 }
 
 @test

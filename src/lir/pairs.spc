@@ -63,6 +63,7 @@ extend Pairs {
         out.refs.extend_copy(&b.refs);
         out.owned.extend_copy(&b.owned);
         out.bools = b.bools;
+        out.ranges.extend_copy(&b.ranges);
         out.fmath = b.fmath;
         out.naked = b.naked;
         // The blocks, an i128 parameter of a block but the entry as its two words.

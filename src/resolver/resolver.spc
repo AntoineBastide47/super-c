@@ -1243,6 +1243,21 @@ extend Resolver {
             self.resolve_expr(at.length);
             return;
         }
+        if kind == NodeKind::NODE_PATTERN_TYPE {
+            // A range's bounds are values; a variant's name resolves through the base type, in the checker.
+            let pt = self.ast.at_const(id).as_data.pattern_type;
+            self.resolve_type(pt.base);
+            if pt.pattern != NODE_NONE && self.ast.at_const(pt.pattern).kind == NodeKind::NODE_PATTERN_RANGE {
+                let pr = unsafe self.ast.at_const(pt.pattern).as_data.pattern_range;
+                if pr.start != NODE_NONE {
+                    self.resolve_expr(self.ast.at_const(pr.start).as_data.single.value);
+                }
+                if pr.end != NODE_NONE {
+                    self.resolve_expr(self.ast.at_const(pr.end).as_data.single.value);
+                }
+            }
+            return;
+        }
         if kind == NodeKind::NODE_FUNCTION_TYPE {
             // A `for<'a>` function type binds its lifetimes over itself.
             let lt_mark = self.lt_open(id);
@@ -1808,7 +1823,7 @@ extend Resolver {
                 self.resolve_member(id);
             },
             NODE_CAST => {
-                let ct = self.ast.at_const(id).as_data.cast;
+                let ct = unsafe self.ast.at_const(id).as_data.cast;
                 self.resolve_expr(ct.expression);
                 self.resolve_type(ct.ty);
             },
@@ -2355,6 +2370,7 @@ extend Resolver {
             ),
             NODE_TUPLE_TYPE => self.leak_list(n.as_data.array_literal.elements, v),
             NODE_ARRAY_TYPE => self.leak_type(n.as_data.array_type.element, v),
+            NODE_PATTERN_TYPE => self.leak_type(n.as_data.pattern_type.base, v),
             NODE_FUNCTION_TYPE => {
                 self.leak_list(n.as_data.function_type.params, v);
                 self.leak_list(n.as_data.function_type.returns, v);

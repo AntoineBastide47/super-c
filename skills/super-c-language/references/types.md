@@ -568,7 +568,12 @@ variants without explicit discriminants, one without payload and one with a sing
 that is a reference (`&T`, `&mut T`) or a std `Box` of a value that is not `dyn`, neither of
 which is ever null. A null pointer in the payload is the variant without payload, so
 `Option<&T>` and `Option<Box<T>>` are the size of a pointer, and the all-zero value is that
-variant. A function pointer is no niche: C may pass a null one.
+variant. A function pointer is no niche: C may pass a null one. A payload of an integer pattern type
+with a value outside its range is a niche too: that value is `none` (0, else the one above the
+range, else the one below), so `Option<u32 is 1..>` is 4 bytes and `Option<u8 is 0..=254>` 1. A
+payload of a variant pattern type is one too: its tag is always the variant's, so another variant's
+tag is `none`, and a niche enum's word always or never holds its own `none`
+(`Option<Shape is Rect { .. }>` and `Option<Option<u32 is 1..> is Some(_)>` are their payload's size).
 A payload-less variant may take an explicit discriminant, a constant expression that may
 name constants and other enums' variants; a variant without one takes the previous
 discriminant plus one. The discriminant is the tag in memory and in the C tag enum, and
@@ -580,6 +585,33 @@ enum with the same discriminant, or a discriminant outside the i32 range, are er
 enum Result<T, E> {
     Ok(T),
     Err(E),
+}
+```
+
+## Pattern Types
+
+A pattern type is a base type with a pattern every value of it matches: a built-in integer with a
+range (`u32 is 1..`, `usize is 0..N`, `i8 is -5..=5`; each bound a literal, a constant or a const
+parameter), or an enum with one variant whose payload is only wildcards (`Option<T> is Some(_)`,
+`Shape is Rect { .. }`, `Shape is Circle(..)`). It has the base's representation. A value of it
+converts to the base implicitly, and an operation gives the base (`x + 1` is `u32`). Into it: the
+same pattern type or a narrower constant range, a constant that matches (checked at once: "this
+value does not match"), or any other value of the base, which the prover must show matches on its
+path ("cannot prove that this value matches its pattern type", with an input that breaks it); an arm
+or an `if` that tests the value is such a path. `x op= y` into one is checked the same way. A local
+keeps its type at every point: no flow narrowing.
+
+`x as? T` is `Option<T>`: `Some` when `x` matches pattern type `T`. A value of a variant pattern type
+reads its payload without a `switch`: `c.0`, `r.w`. A parameter, a result, a field or a read through
+a reference of a pattern type is a fact for the proofs and for the optimizer, and an index of type
+`usize is 0..N` into `[T; N]` needs no bounds check. A pattern type is a type argument too
+(`Vector<usize is 0..N>`, `Option<Shape is Rect { .. }>`); the base holds no reference. A proved
+`requires` that compares a parameter with a constant gives the optimizer the parameter's range.
+`-fno-prove` and `-fcontract-checks` check each conversion the checker does not decide at run time.
+
+```superc
+fn get<const N: usize>(a: &[u32; N], i: usize is 0..N) u32 {
+    return a[i];   // no bounds check
 }
 ```
 

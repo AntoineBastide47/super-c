@@ -198,8 +198,42 @@ fn main_2() i32 {
     let c = Cells { c: &mut z };
     return (take(&mut o) + look(&o) + cells(&c) as u64 - 10) as i32;
 }
+// The ranges the parameters hold for the call: a pattern type's (a const parameter folded), a proved
+// `requires`'s, none for an `@export` (C passes any value); a field of a pattern type loads bounded.
+@noinline
+fn ranged<const N: usize>(i: usize is 1..N, s: i8 is -5..=5) usize {
+    return i + s.unsigned_abs() as usize;
+}
+
+@noinline
+fn bounded(x: u32) u32
+    requires x < 100, x >= 2
+{
+    return x;
+}
+
+@export("lir_heads_exported")
+fn exported(x: u32) u32
+    requires x < 100
+{
+    return x;
+}
+
+struct Holds {
+    k: u16 is 3..=40,
+}
+
+@noinline
+fn read_k(h: &Holds) u16 {
+    return h.k;
+}
+
+fn main_3() i32 {
+    let h = Holds { k: 4 };
+    return (ranged::<8>(2, -1) + bounded(3) as usize + exported(4) as usize + read_k(&h) as usize - 14) as i32;
+}
 fn main() i32 {
-    return main_0() + main_1() + main_2();
+    return main_0() + main_1() + main_2() + main_3();
 }
 )";
 
@@ -224,6 +258,12 @@ fn lir_heads_name_their_facts() {
     assert(lines_with(&take, "owned p0 ") == 2 && take.contains("noalias"), text.as_str());
     assert(lines_with(&look, "owned p0 ") == 2 && look.contains("readonly"), text.as_str());
     assert(!head_of(&text, "main__cells").contains("owned"), text.as_str());
+    let rg = head_of(&text, "main__ranged__8");
+    assert(rg.contains("range p0 u 1 7") && rg.contains("range p1 s -5 5"), rg.as_str());
+    assert(head_of(&text, "main__bounded").contains("range p0 u 2 99"), text.as_str());
+    assert(!head_of(&text, "lir_heads_exported").contains("range"), text.as_str());
+    let rk = text.as_str().find("fn @main__read_k\n");
+    assert(rk >= 0 && text.as_str().slice(rk as usize, text.len()).find(" range 40 ") >= 0, text.as_str());
 }
 
 // The lines of function `name` in LIR text `text` before its entry block.

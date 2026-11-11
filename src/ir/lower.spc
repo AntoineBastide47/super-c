@@ -1810,6 +1810,160 @@ extend Lowerer {
         );
     }
 
+    // The checks that value `op` matches pattern type `t` (a conversion the checker could not decide),
+    // at `sp`: one contract site (`CT_PATTERN`) per bound of a range, or the variant's test. Every build
+    // skips them but `-fcontract-checks`; the prover must prove each.
+    fn lower_pat_check(self: &mut Self, op: ir::OperandId, t: TypeId, sp: tok::Span) {
+        let y = *self.f.ty(t);
+        let p = *self.f.ty(y.pat());
+        let base = self.pat_base_ty(t);
+        let pl = self.op_place(op, sp);
+        let n: u32 = if (p.qualifier & PK_VARIANT) != 0 {
+            1
+        } else {
+            2
+        };
+        for k in 0..n {
+            let bound = pick(k == 0, p.as_data.arr.elem, p.as_data.arr.len);
+            if (p.qualifier & PK_VARIANT) == 0 && bound == TYPE_NONE {
+                continue;
+            }
+            let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
+            let pred = self.cur;
+            let chain = self.open_block();
+            self.seal(ir::goto_term(chain, sp), chain);
+            let mut cond = ir::IR_NONE;
+            if (p.qualifier & PK_VARIANT) != 0 {
+                let vd = self.pat_variant(y, self.f.ty(bound).as_data.value as u32);
+                let mut payload = ir::IR_NONE;
+                cond = self.variant_test(pl, vd, sp, &mut payload);
+            } else {
+                let by = *self.f.ty(bound);
+                let bop = if by.kind == TypeKind::TYPE_CONST {
+                    self.kop(ir::CK_INT, base, by.as_data.value, sp)
+                } else {
+                    self.copy_op(
+                        self.place_of_local(
+                            self.item_local(DefId { module: by.module, node: by.as_data.decl }, base, sp),
+                        ),
+                    )
+                };
+                let rel = if k == 0 {
+                    tt::TokenType::GreaterThanEqual
+                } else if (p.qualifier & PK_HI_EXCL) != 0 {
+                    tt::TokenType::LessThan
+                } else {
+                    tt::TokenType::LessThanEqual
+                };
+                cond = self.cmp_test(pl, bop, rel, sp);
+            }
+            if self.err.len() != 0 || cond == ir::IR_NONE {
+                return;
+            }
+            let check = self.cur;
+            let cont = self.open_block();
+            let mut tm = ir::term0(ir::TM_ASSERT, sp);
+            tm.a = cond;
+            tm.t0 = cont;
+            self.seal(tm, cont);
+            self.body.contract_blocks += (self.body.blocks.len() - b0) as u32;
+            self.body.contract_stmts += (self.body.statements.len() - s0) as u32;
+            self.body.contract_locals += (self.body.locals.len() - l0) as u32;
+            self.body.contracts.push(
+                ir::ContractSite {
+                    pred: pred,
+                    chain: chain,
+                    check: check,
+                    cont: cont,
+                    clause: u32::MAX,
+                    kind: CT_PATTERN,
+                    value: ir::IR_NONE,
+                },
+            );
+        }
+    }
+
+    // `x as? T` at node `id` of type `ty` (`Option<T>`), into `dest`: `Some(x)` when `x` matches pattern
+    // type `T` (each bound or the variant tested), else `None`.
+    fn lower_checked_cast(self: &mut Self, id: NodeId, ty: TypeId, dest: ir::PlaceId) ir::OperandId {
+        let d = unsafe self.f.node(id).as_data.cast;
+        let sp = self.f.node(id).span;
+        let op = self.lower_expr(d.expression);
+        if op == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        let oy = *self.f.ty(ty);
+        if oy.kind != TypeKind::TYPE_INSTANCE {
+            self.fail_at("checked-cast-type", id);
+            return ir::IR_NONE;
+        }
+        let t = self.f.instance(oy.as_data.inst).args[0];
+        let mut sord: i64 = -1;
+        let svd = self.carrier_variant(ty, "Some", "Some", &mut sord);
+        let mut nord: i64 = -1;
+        let nvd = self.carrier_variant(ty, "None", "None", &mut nord);
+        if sord < 0 || nvd.node == NODE_NONE {
+            self.fail_at("checked-cast-carrier", id);
+            return ir::IR_NONE;
+        }
+        let pl = self.op_place(op, sp);
+        let rpl = self.out_place(dest, ty, sp);
+        let none_b = self.open_block();
+        let join = self.open_block();
+        let y = *self.f.ty(t);
+        let p = *self.f.ty(y.pat());
+        let base = self.pat_base_ty(t);
+        if (p.qualifier & PK_VARIANT) != 0 {
+            let vd = self.pat_variant(y, self.f.ty(p.as_data.arr.elem).as_data.value as u32);
+            let mut payload = ir::IR_NONE;
+            let cond = self.variant_test(pl, vd, sp, &mut payload);
+            if cond == ir::IR_NONE {
+                return ir::IR_NONE;
+            }
+            self.require(cond, none_b, sp);
+        } else {
+            for k in 0..2 {
+                let bound = pick(k == 0, p.as_data.arr.elem, p.as_data.arr.len);
+                if bound == TYPE_NONE {
+                    continue;
+                }
+                let bop = self.kop(ir::CK_INT, base, self.f.ty(bound).as_data.value, sp);
+                let rel = pick(k == 0, tt::TokenType::GreaterThanEqual, tt::TokenType::LessThanEqual);
+                let cond = self.cmp_test(pl, bop, rel, sp);
+                self.require(cond, none_b, sp);
+            }
+        }
+        let v = self.rv_temp(self.rv_use(self.copy_op(pl), t), sp);
+        let mut sargs = self.avget();
+        sargs.push(self.copy_op(v));
+        let _ = self.finish_aggregate(ir::AGG_VARIANT, svd, &sargs, ty, sp, rpl);
+        self.avput(sargs);
+        self.seal(ir::goto_term(join, sp), none_b);
+        let nargs = self.avget();
+        let _ = self.finish_aggregate(ir::AGG_VARIANT, nvd, &nargs, ty, sp, rpl);
+        self.avput(nargs);
+        self.seal(ir::goto_term(join, sp), join);
+        return self.out_op(dest, rpl);
+    }
+
+    // Pattern type `t` without its pattern, interned in the body's module.
+    fn pat_base_ty(self: &mut Self, t: TypeId) TypeId {
+        return unsafe (&mut *(&*self.pkg).module_ast_ptr(self.body.module)).pat_base(t);
+    }
+
+    // The variant of index `k` of enum pattern type `y`'s base.
+    fn pat_variant(self: &Self, y: Ty, k: u32) DefId {
+        let mut dm = y.module;
+        let mut dn = y.as_data.decl;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.f.instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+        }
+        let ea = unsafe &*(&*self.pkg).module_ast_const(dm);
+        return DefId { module: dm, node: unsafe ea.list(ea.ext(dn).aggregate.members)[k as usize] };
+    }
+
     // The `kind` clauses of `owner` (a function or a loop), each as a contract check
     // (`ir::ContractSite`): the condition evaluates in a scope of its own, and the assertion's span
     // is the condition's, so a failure names its text.
@@ -2272,6 +2426,30 @@ extend Lowerer {
             return t;
         }
         let y = *self.f.ty(t);
+        if y.has_pat() {
+            // A pattern type: its base and its pattern's bounds, an exclusive one made constant inclusive.
+            let b0 = unsafe (*(&*self.pkg).module_ast_ptr(self.module)).pat_base(t);
+            let b = self.proj_ty_map(b0, pm, params, args, n);
+            let py = *self.f.ty(y.pat());
+            let mut np = py;
+            if (py.qualifier & PK_VARIANT) == 0 {
+                np.as_data.arr.elem = self.proj_ty_map(py.as_data.arr.elem, pm, params, args, n);
+                np.as_data.arr.len = self.proj_ty_map(py.as_data.arr.len, pm, params, args, n);
+            }
+            if b == b0 && np.as_data.arr.elem == py.as_data.arr.elem && np.as_data.arr.len == py.as_data.arr.len {
+                return t;
+            }
+            let sa = unsafe &mut *(&*self.pkg).module_ast_ptr(self.module);
+            if np.as_data.arr.len != TYPE_NONE {
+                let hy = *sa.type_at(np.as_data.arr.len);
+                if let Some(v) = pat_hi_incl(&np, &hy, lay::target_for(unsafe (*self.pkg).arch).ptr == 4) {
+                    np.as_data.arr.len = sa.const_value(cval_bits(v), hy.cbt());
+                    np.qualifier = np.qualifier & ~PK_HI_EXCL;
+                }
+            }
+            let pt = sa.intern_type(np);
+            return sa.with_pat(b, pt);
+        }
         if y.kind == TypeKind::TYPE_GENERIC && args != null {
             let da = unsafe &*(&*self.pkg).module_ast_const(pm);
             for i in 0..n {
@@ -2550,16 +2728,9 @@ extend Lowerer {
     // The type a discriminant of enum declaration `dn` of module `dm` reads as, and in `tag` the
     // tag of its variant `idx`: i32 when a tag is negative, else u32.
     fn tag_ty(self: &mut Self, dm: ModuleId, dn: NodeId, idx: i64, tag: &mut i64) TypeId {
-        let da = unsafe &*(&*self.pkg).module_ast_const(dm);
-        let ms = da.ext(dn).aggregate.members;
-        let mut cur: i64 = 0 - 1;
         let mut neg = false;
-        for i in 0..ms.len {
-            cur = self.next_tag(dm, unsafe da.list(ms)[i as usize], cur);
-            neg = neg || cur < 0;
-            if i as i64 == idx {
-                *tag = cur;
-            }
+        if !lay::variant_tag(unsafe &*self.pkg, dm, dn, idx, tag, &mut neg) {
+            self.fail_at("enum-discriminant", dn);
         }
         return Ast::builtin(
             if neg {
@@ -2571,6 +2742,7 @@ extend Lowerer {
     }
 
     // An enum variant's discriminant: its explicit value, else the previous variant's plus one.
+    // `lay::variant_tag` folds the same values for a reader without a lowering.
     // An explicit value that does not fold fails the lowering (the type check reports it).
     fn next_tag(self: &mut Self, dm: ModuleId, vid: NodeId, prev: i64) i64 {
         if (unsafe &*(&*self.pkg).module_ast_const(dm)).at_const(vid).as_data.variant.value == NODE_NONE {
@@ -4593,6 +4765,23 @@ extend Lowerer {
             let wi = unsafe (&*(&*self.pkg).module_ast_const(self.body.module)).wide_lit_of(id);
             return self.kop(ir::CK_WIDE, target, wi, sp);
         }
+        if co != null && unsafe (*co).method.node == NODE_NONE && self.f.ty(unsafe (*co).target).has_pat() && self.f.node(
+            id,
+        ).kind == NodeKind::NODE_ASSIGNMENT {
+            // `x op= y` into a pattern type: `lower_assignment` checks the result; the unit value is no
+            // conversion.
+            co = null;
+        }
+        if co != null && unsafe (*co).method.node == NODE_NONE && self.f.ty(unsafe (*co).target).has_pat() {
+            // Into a pattern type: the value, checked against the pattern.
+            let target = unsafe (*co).target;
+            self.lower_pat_check(op, target, sp);
+            op = self.rv_out(pick(dy == null, dest, ir::IR_NONE), self.rv_use(op, target), sp);
+            if op == WROTE {
+                return op;
+            }
+            co = null;
+        }
         if co != null {
             let target = unsafe (*co).target;
             let method = unsafe (*co).method;
@@ -4762,8 +4951,11 @@ extend Lowerer {
         if k == NodeKind::NODE_CALL {
             return self.lower_call(id, dest);
         }
+        if k == NodeKind::NODE_CAST && unsafe self.f.node(id).as_data.cast.checked {
+            return self.lower_checked_cast(id, ty, dest);
+        }
         if k == NodeKind::NODE_CAST {
-            let d = self.f.node(id).as_data.cast;
+            let d = unsafe self.f.node(id).as_data.cast;
             // the walk erases the borrow on any ref -> ptr cast
             let er9 = ty != TYPE_NONE && self.f.ty(ty).kind == TypeKind::TYPE_POINTER && self.nty(d.expression) != TYPE_NONE && self.f.ty(
                 self.nty(d.expression),
@@ -7015,7 +7207,16 @@ extend Lowerer {
             // `x op= y` stores `x op y` into the place in one statement: the operator reads its
             // operands before the store.
             let lop = self.copy_op(pl);
-            self.assign(pl, ir::rv(ir::RV_BINARY, lop, rop, compound_base_op(d.op) as u8, lt), sp);
+            if self.f.ty(lt).has_pat() {
+                // Into a pattern type: the result, checked against the pattern, then the store.
+                let bt = self.pat_base_ty(lt);
+                let r = self.rv_temp(ir::rv(ir::RV_BINARY, lop, rop, compound_base_op(d.op) as u8, bt), sp);
+                let rc = self.copy_op(r);
+                self.lower_pat_check(rc, lt, sp);
+                self.assign(pl, self.rv_use(self.copy_op(r), lt), sp);
+            } else {
+                self.assign(pl, ir::rv(ir::RV_BINARY, lop, rop, compound_base_op(d.op) as u8, lt), sp);
+            }
         }
         self.tp(ir::TP_ASSIGN_POST, 0, id);
         return self.unit_op(ty, sp);
@@ -8134,6 +8335,37 @@ extend Lowerer {
             base = self.place_project(base, ir::Projection { kind: ir::PJ_DEREF, data: 0, sub: 0, ty: inner });
         }
         let fd = self.f.res(d.member);
+        {
+            // A variant pattern type's payload member: the variant's payload, with no test.
+            let by = *self.f.ty(self.body.places.at(base as usize).ty);
+            if by.has_pat() && (self.f.ty(by.pat()).qualifier & PK_VARIANT) != 0 {
+                let vd = self.pat_variant(by, self.f.ty(self.f.ty(by.pat()).as_data.arr.elem).as_data.value as u32);
+                let mut ord: i64 = 0;
+                let _ = unsafe (&*self.pkg).variant_enum(vd, &mut ord);
+                let dc = self.place_project(
+                    base,
+                    ir::Projection {
+                        kind: ir::PJ_DOWNCAST,
+                        data: ord as u32,
+                        sub: vd.node,
+                        ty: self.body.places.at(base as usize).ty,
+                    },
+                );
+                let va = unsafe (&*(&*self.pkg).module_ast_const(vd.module)).at_const(vd.node).as_data.variant;
+                let pa = unsafe &*(&*self.pkg).module_ast_const(vd.module);
+                for i in 0..va.payload.len {
+                    if unsafe pa.list(va.payload)[i as usize] == fd.node {
+                        return if va.struct_payload {
+                            self.struct_field(dc, i, fd.node, id)
+                        } else {
+                            self.tuple_field(dc, i, id)
+                        };
+                    }
+                }
+                self.fail_at("variant-payload-member", id);
+                return ir::IR_NONE;
+            }
+        }
         // Union members overlap: the marker data value makes place conflicts treat every field
         // pair of the same union as the same storage.
         let mut fdata = ir::IR_NONE;

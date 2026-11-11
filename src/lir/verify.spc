@@ -192,6 +192,21 @@ extend Verifier {
                 return self.fail_body(name, "a bool parameter is no i8 parameter of the signature");
             }
         }
+        for x in 0..b.ranges.len() / 3 {
+            let q = (b.ranges[3 * x] >> 1) as u32;
+            let (lo, hi) = (b.ranges[3 * x + 1], b.ranges[3 * x + 2]);
+            let ordered = if (b.ranges[3 * x] & 1) != 0 {
+                lo as i64 <= hi as i64
+            } else {
+                lo <= hi
+            };
+            if b.ranges.len() % 3 != 0 || q >= np || !is_int(b.params[(entry.param_start + q) as usize]) || !ordered {
+                return self.fail_body(
+                    name,
+                    "a parameter range is not an ordered range of an integer parameter of the signature",
+                );
+            }
+        }
         if (ret & AGG) != 0 && b.params[(entry.param_start + np) as usize] != T_PTR {
             return self.fail_body(name, "an aggregate result's entry parameter is not a pointer");
         }

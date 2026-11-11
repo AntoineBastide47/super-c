@@ -85,6 +85,19 @@ pub(package) const NK_ENUM: u8 = 4;
 /// The payload is a `str`, a `[]T` or a `[]mut T`: no view is `usize::MAX` elements long, and that
 /// length is `none`.
 pub(package) const NK_VIEW: u8 = 5;
+/// The payload is an integer pattern type (`u32 is 1..`) with a value outside its range (`pat_free`):
+/// that value is `none`. NK_IRANGE for a signed integer, whose `none` is sign-extended.
+pub(package) const NK_RANGE: u8 = 6;
+pub(package) const NK_IRANGE: u8 = 7;
+/// The payload is a variant pattern type (`Shape is Circle(..)`) of an enum with a tag: its value's tag
+/// is always the variant's, so another variant's tag is `none` (`variant_none`). NK_TAG for an enum
+/// with payloads (its tag member), NK_DISC for one without (the value itself).
+pub(package) const NK_TAG: u8 = 8;
+pub(package) const NK_DISC: u8 = 9;
+/// The payload is a variant pattern type of a niche enum (`Option<&T> is Some(_)`): the enum's niche
+/// word never holds its `none` (the `some` variant) or always does (the other one), so that value, or
+/// that value with its lowest bit flipped, is `none`. `Niche.pm`, `pt`: the payload's type.
+pub(package) const NK_NEST: u8 = 10;
 
 /// The declarations whose values keep a niche (`niche_kind`): the prelude `Box`, `Slice`, `SliceMut`
 /// and `str`.
@@ -114,13 +127,53 @@ const fn is_decl(h: loader::LookupHit, m: ModuleId, n: NodeId) bool {
 
 /// The niche kind of a payload of concrete type `t` of `a` in package `p`. For NK_BOX the caller checks,
 /// under its own substitution, that the box's value is not `dyn`.
+/// `niche_kind` for a reader whose substitution folds a range pattern's const parameter bounds
+/// (`usize is 0..N`): such a type's kind is its range kind, and the folded niche (`range_niche`) may be
+/// none.
+pub(package) fn niche_kind_of(p: &loader::Package, a: &Ast, d: NicheDecls, t: TypeId) u8 {
+    let y = *a.type_at(t);
+    if y.kind == TypeKind::TYPE_BUILTIN && y.has_pat() && !a.type_concrete(y.pat()) {
+        return if bt_is_unsigned(unsafe y.as_data.builtin) {
+            NK_RANGE
+        } else {
+            NK_IRANGE
+        };
+    }
+    return niche_kind(p, a, d, t);
+}
+
+/// The niche of integer type `bt` limited to `lo..=hi` (each end open unless `has_lo`, `has_hi`):
+/// the value `range_free` finds, NO_NICHE when the range leaves none.
+pub(package) const fn range_niche(p: &loader::Package, bt: BuiltinType, lo: i128, hi: i128, has_lo: bool, has_hi: bool) Niche {
+    let ptr32 = target_for(p.arch).ptr == 4;
+    let mut v = i128::zero();
+    if !range_free(lo, hi, has_lo, has_hi, bt, ptr32, &mut v) {
+        return NO_NICHE;
+    }
+    return Niche {
+        kind: pick(bt_is_unsigned(bt), NK_RANGE, NK_IRANGE),
+        off: 0,
+        bytes: bt_int_width(bt, ptr32) / 8,
+        none: v.limb(0),
+    };
+}
+
 pub(package) fn niche_kind(p: &loader::Package, a: &Ast, d: NicheDecls, t: TypeId) u8 {
     let y = *a.type_at(t);
     if y.kind == TypeKind::TYPE_REFERENCE {
         return NK_REF;
     }
     if y.kind == TypeKind::TYPE_BUILTIN {
-        return if unsafe y.as_data.builtin == BuiltinType::BT_BOOL {
+        let bt = unsafe y.as_data.builtin;
+        let mut v = i128::zero();
+        if y.has_pat() && pat_free(a, y.pat(), bt, target_for(p.arch).ptr == 4, &mut v) {
+            return if bt_is_unsigned(bt) {
+                NK_RANGE
+            } else {
+                NK_IRANGE
+            };
+        }
+        return if bt == BuiltinType::BT_BOOL {
             NK_BOOL
         } else {
             NK_NONE
@@ -172,6 +225,9 @@ pub(package) struct Niche {
     pub(package) off: u32,
     pub(package) bytes: u32,
     pub(package) none: u64,
+    // NK_NEST: the payload's type and its pool, whose own niche word this one is.
+    pub(package) pm: ModuleId,
+    pub(package) pt: TypeId,
 }
 
 extend Niche as Copy {}
@@ -199,7 +255,71 @@ pub(package) fn niche_of(p: &loader::Package, a: &Ast, k: u8, t: TypeId) Niche {
     if k == NK_VIEW {
         return Niche { kind: k, off: ptr, bytes: ptr, none: ~0u64 >> (64 - 8 * ptr) as u64 };
     }
+    if k == NK_RANGE || k == NK_IRANGE {
+        let y = *a.type_at(t);
+        let (mut lo, mut hi, mut has_lo, mut has_hi) = (i128::zero(), i128::zero(), false, false);
+        let _ = pat_range(a, y.pat(), &mut lo, &mut hi, &mut has_lo, &mut has_hi);
+        return range_niche(p, unsafe y.as_data.builtin, lo, hi, has_lo, has_hi);
+    }
     return Niche { kind: k, off: 0, bytes: ptr, none: 0 };
+}
+
+/// The tag variant `idx` of enum declaration `dn` of module `dm` carries (an `RV_DISCRIMINANT` read):
+/// its discriminant, an explicit value or the previous one's plus one, into `tag`; `neg` when one of
+/// the enum's tags is negative, so that a discriminant reads as i32, else u32. False when an explicit
+/// value does not fold.
+pub(package) fn variant_tag(p: &loader::Package, dm: ModuleId, dn: NodeId, idx: i64, tag: &mut i64, neg: &mut bool) bool {
+    let da = unsafe &*p.module_ast_const(dm);
+    let ms = da.ext(dn).aggregate.members;
+    let cev = p.cir as *mut iri::Interp;
+    let mut cur: i64 = 0 - 1;
+    *neg = false;
+    for i in 0..ms.len {
+        let vid = unsafe da.list(ms)[i as usize];
+        if da.at_const(vid).as_data.variant.value == NODE_NONE {
+            cur += 1;
+        } else {
+            let mut v: i64 = 0;
+            if cev == null || !unsafe (*cev).discr(dm, vid, cur, &mut v) {
+                return false;
+            }
+            cur = v;
+        }
+        *neg = *neg || cur < 0;
+        if i as i64 == idx {
+            *tag = cur;
+        }
+    }
+    return true;
+}
+
+/// The `none` of a value of enum `(dm, dn)` whose tag is always variant `v`'s, `bytes` wide: the tag
+/// of the first other variant, else `v`'s plus one where the width holds it, as the bits the tag's
+/// store writes (sign-extended to 64). False when no value is free or a discriminant does not fold.
+pub(package) fn variant_none(p: &loader::Package, dm: ModuleId, dn: NodeId, v: i64, bytes: u32, out: &mut u64) bool {
+    let n = (unsafe &*p.module_ast_const(dm)).ext(dn).aggregate.members.len as i64;
+    let mut tag: i64 = 0;
+    let mut neg = false;
+    if n > 1 {
+        if !variant_tag(p, dm, dn, pick(v == 0, 1i64, 0i64), &mut tag, &mut neg) {
+            return false;
+        }
+        *out = tag as u64;
+        return true;
+    }
+    if !variant_tag(p, dm, dn, v, &mut tag, &mut neg) {
+        return false;
+    }
+    let top = if bytes >= 8 {
+        i64::MAX
+    } else {
+        ((1u64 << (8 * bytes - pick(neg, 1u32, 0u32)) as u64) - 1) as i64
+    };
+    if tag >= top {
+        return false;
+    }
+    *out = (tag + 1) as u64;
+    return true;
 }
 
 /// The integer a value of payload-less enum `dn` of module `dm` is (`Ast::enum_int`): the C enum, an
@@ -451,6 +571,34 @@ extend Svc {
             self.nd = niche_decls(self.p());
             self.box_on = true;
         }
+        // A range pattern type whose const parameter bounds `renv` folds (`usize is 0..N`).
+        let ry = *self.a(rm).type_at(rt);
+        if ry.has_pat() && (self.a(rm).type_at(ry.pat()).qualifier & PK_VARIANT) != 0 && niche_kind(
+            self.p(),
+            self.a(rm),
+            self.nd,
+            rt,
+        ) == NK_NONE {
+            return self.variant_niche_on(rm, rt, renv, depth);
+        }
+        if ry.kind == TypeKind::TYPE_BUILTIN && ry.has_pat() && !self.a(rm).type_concrete(ry.pat()) {
+            let py = *self.a(rm).type_at(ry.pat());
+            let (mut lo, mut hi) = (i128::zero(), i128::zero());
+            let (has_lo, has_hi) = (py.as_data.arr.elem != TYPE_NONE, py.as_data.arr.len != TYPE_NONE);
+            if has_lo && !self.cval_of(rm, py.as_data.arr.elem, renv, depth + 1, &mut lo) || has_hi && !self.cval_of(
+                rm,
+                py.as_data.arr.len,
+                renv,
+                depth + 1,
+                &mut hi,
+            ) {
+                return false;
+            }
+            if has_hi && (py.qualifier & PK_HI_EXCL) != 0 {
+                hi = hi - i128::one();
+            }
+            return range_niche(self.p(), unsafe ry.as_data.builtin, lo, hi, has_lo, has_hi).kind != NK_NONE;
+        }
         let k = niche_kind(self.p(), self.a(rm), self.nd, rt);
         if k != NK_BOX {
             return k != NK_NONE;
@@ -460,6 +608,33 @@ extend Svc {
         let mut vt = TYPE_NONE;
         let mut venv: *const LayoutEnv = null;
         return self.ground(rm, it.args[0], renv, depth + 1, &mut vm, &mut vt, &mut venv) && self.a(vm).type_at(vt).kind != TypeKind::TYPE_DYN;
+    }
+
+    // Whether variant pattern type `(m, t)` under `env` keeps a niche (`NK_TAG`, `NK_DISC`, `NK_NEST`): an
+    // enum whose own niche word or tag has a free value.
+    fn variant_niche_on(self: &mut Self, m: ModuleId, t: TypeId, env: *const LayoutEnv, depth: i32) bool {
+        let y = *self.a(m).type_at(t);
+        let v = self.a(m).type_at(self.a(m).type_at(y.pat()).as_data.arr.elem).as_data.value;
+        let mut dm = y.module;
+        let mut dn = y.as_data.decl;
+        let mut frame = LayoutEnv { parent: env, penv: env, pmod: 0, params: null, argm: m, n: 0 };
+        let mut fp: *const LayoutEnv = null;
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.a(m).instance(y.as_data.inst);
+            dm = it.module;
+            dn = it.decl;
+            frame = inst_frame(self.a(dm), &it, m, env);
+            fp = &frame;
+        }
+        let mut none: u64 = 0;
+        if !self.a(dm).enum_has_payload(dn) {
+            return variant_none(self.p(), dm, dn, v, bare_int(self.p(), dm, dn) & ~ENUM_INT_SIGNED, &mut none);
+        }
+        let el = self.enum_shape(dm, dn, fp, depth + 1);
+        if el.ok && el.niche {
+            return true;
+        }
+        return el.ok && variant_none(self.p(), dm, dn, v, pick(self.a(dm).enum_tag_is_byte(dn), 1u32, 4u32), &mut none);
     }
 
     /// Drop every cached answer: the keys name type ids of one publication, so a checkpoint that
