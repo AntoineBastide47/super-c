@@ -1373,9 +1373,24 @@ pub(package) const fn past_ghost(b: &CoreBody, blk: BlockId) BlockId {
 /// Skip contract check `i` of `b` (`skip_contracts`).
 pub(package) const fn skip_site(b: &mut CoreBody, i: usize) {
     let s = b.contracts[i];
-    let t = b.blocks[s.pred as usize].term;
-    if t.kind == TM_GOTO && t.t0 == s.chain {
-        b.blocks[s.pred as usize].term.t0 = s.cont;
+    // Every edge into the check goes to its continuation: the site's predecessor's, and the edges of
+    // the blocks the drop elaboration put before it (a local dropped before an `ensures`).
+    for blk in 0..b.blocks.len() {
+        if blk as u32 >= s.chain && blk as u32 < s.cont {
+            continue;
+        }
+        let t = b.blocks[blk].term;
+        if t.kind == TM_SWITCH {
+            for k in t.sw_start..t.sw_start + t.sw_len {
+                let e = b.switch_pool[k as usize];
+                if e as u32 == s.chain {
+                    b.switch_pool.set(k as usize, e >> 32 << 32 | s.cont as u64);
+                }
+            }
+        }
+        if t.kind != TM_RETURN && t.kind != TM_UNREACHABLE && t.t0 == s.chain {
+            b.blocks[blk].term.t0 = s.cont;
+        }
     }
     for blk in s.chain..s.cont {
         let sp = b.blocks[blk as usize].term.span;

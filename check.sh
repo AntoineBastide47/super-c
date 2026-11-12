@@ -71,8 +71,9 @@ done
 rm -f "$runlog" ./hunt-bin
 
 # 4) Bootstrap from the latest release binary; any failure fails the check.
-# Stage 0: the release binary builds current source (`--bootstrap-tags`). Stage 0 then rebuilds itself:
-# two generations from current source.
+# Stage 0: the release binary builds current source (`--bootstrap-tags`, `-fno-prove`: the release's prover
+# may be weaker than the source's proofs need). Stage 0 then rebuilds itself, checking every proof: two
+# generations from current source.
 printf 'check: bootstrap rebuild from the latest release\n'
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -83,7 +84,7 @@ fi
 tar xzf "$tmp/super-c-macos-arm64.tar.gz" -C "$tmp" super-c-macos-arm64/super-c
 mv "$tmp/super-c-macos-arm64/super-c" ./super-c
 chmod +x ./super-c
-if ! ./super-c build --bootstrap-tags -o stage0-super-c; then
+if ! ./super-c build --bootstrap-tags -fno-prove -o stage0-super-c; then
     printf 'check: FAILED -- the release binary cannot build the current source\n' >&2
     exit 1
 fi

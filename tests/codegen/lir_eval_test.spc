@@ -8,10 +8,11 @@ import lir::print as lprint;
 import lir::parse as lparse;
 
 // The evaluator check over the tests whose name holds `filter`, built in scratch project `p` (the LIR
-// text into `<p>/pkg.lir` when `text`; optimized, `lir::opt`, when `opt`). Its tally: the tests, those compared with CTFE, those that
+// text into `<p>/pkg.lir` when `text`; optimized, `lir::opt`, when `opt`; without the proofs of the
+// contracts, `-fno-prove`, when `!prove`). Its tally: the tests, those compared with CTFE, those that
 // disagree, those CTFE does not finish checked against their expectation, those that fail it, those
 // that call FFI and those past a budget.
-fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool) Vector<u64> {
+fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool, prove: bool) Vector<u64> {
     let mut env = String::from_str("SC_LIR=1 SC_LIR_EVAL=1 SC_LIR_STATS=1");
     env.push_str(
         if opt {
@@ -23,7 +24,13 @@ fn eval_check(p: &cli::Proj, filter: str, text: bool, opt: bool) Vector<u64> {
     if text {
         env.format_into(" SC_LIR_TEXT={}/pkg.lir", p.dir());
     }
-    let mut cmd = format("\"{}\" test --quiet --filter={} --out-dir={}/out", cli::superc_path(), filter, p.dir());
+    let mut cmd = format(
+        "\"{}\" test --quiet{} --filter={} --out-dir={}/out",
+        cli::superc_path(),
+        pick(prove, "", " -fno-prove"),
+        filter,
+        p.dir(),
+    );
     let mut log = format("{}/log", p.dir());
     let rc = cli::run_with(cmd.cstr(), null, log.cstr(), null, &env);
     let out = cli::read_text(&log);
@@ -71,7 +78,7 @@ fn the_evaluator_agrees_with_ctfe_on_the_math_tests() {
 // The math tests' check (`eval_check`), optimized or not; then the build's LIR text parses, each body
 // verifies and takes its callees' signatures, and it prints back to the same text.
 fn read_back(p: &cli::Proj, opt: bool) {
-    let _ = eval_check(p, "tests::math::", true, opt);
+    let _ = eval_check(p, "tests::math::", true, opt, true);
     let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
     let mut err = String::new();
     let q = lparse::parse(&text, &mut err);
@@ -96,7 +103,8 @@ fn the_evaluator_agrees_with_ctfe_on_the_std_tests() {
         return;
     }
     let p = cli::proj_new();
-    let _ = eval_check(&p, "tests::stdlib::", false, false);
+    // Without the proofs: the std crypto proofs take most of a build and change no test's result.
+    let _ = eval_check(&p, "tests::stdlib::", false, false, false);
 }
 
 // The optimizer (`lir::opt`, the inliner first) keeps the evaluator's results: the optimized LIR of the

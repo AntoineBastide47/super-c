@@ -20,6 +20,7 @@ import ir::facts as fx;
 import ir::layout as lay;
 import module::loader as loader;
 import stdlib;
+import std::spec::arith as arith;
 
 // Retained-check reasons (report order).
 pub(package) const BR_UNKNOWN_INDEX: u8 = 0;
@@ -622,6 +623,7 @@ extend Bce {
 
     /// Prove `ik OP lk` (OP is < unless `need_le`, then <=) from the standing facts. The length
     /// side matches by value identity or by the captured place identity `l_lp`.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_chain`.
     fn fold_proved(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, need_le: bool) bool {
         if !ik.is_const && !ik.is_local {
             return false;
@@ -680,6 +682,7 @@ extend Bce {
     /// the same value at another offset counts where neither sum wraps (`i <= 16` bounds `i - 1` for
     /// `1 <= i`), and an unsigned value of a known stride lies at or below the greatest value of its
     /// phase under the bound (`i < 16` with `i` even: `i + 1 <= 15`).
+    /// Its steps are proved by the lemmas at the end of the file: `bc_const`, `bc_stride`.
     fn const_hi(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64, hops: u32) i64 {
         let mut hi = CMAX + 1;
         let mut hx = CMAX + 1; // the bound on `(l, v)` itself, from the facts whose sums do not wrap
@@ -728,6 +731,7 @@ extend Bce {
 
     /// `ik < lk` (`<=` with `le`) through constants: a constant bound on `ik` (`const_hi`) against a
     /// constant `lk`, or below a constant bound on `lk` (`i < 10`, `20 < len`).
+    /// Its steps are proved by the lemmas at the end of the file: `bc_const`.
     fn const_lt(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, le: bool) bool {
         if !ik.is_local {
             return false;
@@ -773,6 +777,7 @@ extend Bce {
     /// `ik < lk` (`ik <= lk` with `le`) from a fact over the same two values at other offsets, where
     /// no offset sum wraps (`nowrap`): `xs[i - 1]` after `i < len` and `1 <= i`, `xs[i + 1]` after
     /// `i < len - 1`, `xs[len - 1]` after `0 < len`.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_offset`.
     fn offset_lt(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, lk: &fx::VKey, l_lp: &LenBind, le: bool) bool {
         if !ik.is_local {
             return false;
@@ -835,6 +840,8 @@ extend Bce {
     /// Is `(l, v) + off` computed without wrapping: a lower bound of at least `-off` below 0; above, an
     /// interval whose top leaves room for `off`, or strict bounds `x + k < y` for every `k < off` (each
     /// sum lies below the largest value, so the next one does not wrap: `x < y` for `+1`)?
+    /// Its steps are proved by the lemmas at the end of the file: `bc_nowrap`, `bc_nowrap_len`,
+    /// `bc_nowrap_strict`.
     fn nowrap(self: &Self, b: &ir::CoreBody, l: u32, v: u32, off: i64) bool {
         if off == 0 {
             return true;
@@ -1313,6 +1320,7 @@ extend Bce {
     /// Does a chain of at most `hops + 1` facts `x <= y` (each over a whole value) lead from value
     /// `(l, v)` to the length operand `lop`? A guard (`if s.len() < n { return; }`) bounds a loop's
     /// limit this way.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_chain`.
     fn le_len(self: &mut Self, b: &ir::CoreBody, l: u32, v: u32, lop: u32, hops: u32) bool {
         for i in 0..self.facts.len() {
             let f = *self.facts.at(i);
@@ -1368,6 +1376,7 @@ extend Bce {
 
     /// Prove `index < length` for one IN_BOUNDS site. Returns true when removable; fills the
     /// retained reason otherwise.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_chain`.
     fn prove_elem(self: &mut Self, b: &ir::CoreBody, iop: u32, lop: u32, reason: &mut u8) bool {
         let ik = self.vkey(b, iop);
         let lk = self.vkey(b, lop);
@@ -1480,6 +1489,7 @@ extend Bce {
 
     /// Is index `ik` an unsigned value of fewer bits cast up, whole, so that it stays below the
     /// constant length `len` (a `u8` index into 256 elements)?
+    /// Its steps are proved by the lemmas at the end of the file: `bc_narrow`.
     fn narrow_below(self: &Self, b: &ir::CoreBody, ik: &fx::VKey, len: i64) bool {
         if !ik.is_local || ik.off != 0 {
             return false;
@@ -1517,6 +1527,7 @@ extend Bce {
 
     /// Prove `start <= len && w <= len - start` for the group check of a vector access: its last lane
     /// `start + w - 1` is below the length, by the facts, the aligned strides or the intervals.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_group`.
     fn prove_group(self: &mut Self, b: &ir::CoreBody, iop: u32, lop: u32, w: i64, reason: &mut u8) bool {
         let mut ik = self.vkey(b, iop);
         let lk = self.vkey(b, lop);
@@ -1567,6 +1578,7 @@ extend Bce {
     }
 
     /// Prove `start <= end <= len` for one IN_RANGE_BOUNDS site.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_ints`.
     fn prove_range(self: &mut Self, b: &ir::CoreBody, sop: u32, eop: u32, lop: u32, reason: &mut u8) bool {
         let sk = self.vkey(b, sop);
         let ek = self.vkey(b, eop);
@@ -1645,6 +1657,7 @@ extend Bce {
 
     /// Do the solved integer facts prove `x < y` (`strict`) or `x <= y` here? A signed operand counts when
     /// its interval is non-negative, where its value is its unsigned one (an `i32` counter from 0).
+    /// Its steps are proved by the lemmas at the end of the file: `bc_ints`.
     fn int_le(self: &Self, b: &ir::CoreBody, xop: u32, yop: u32, strict: bool) bool {
         let mut xw: u32 = 0;
         let mut xs = false;
@@ -1701,6 +1714,7 @@ extend Bce {
     /// Prove `l + c < len` (the index key `ik`) from a fact `l < y` (or `l <= y`) and a fact `y <= len`
     /// (or `y < len`): `l` and `y` are multiples of a common stride A with the same phase, so `l < y`
     /// gives `l + c < y` for every `c < A`, with no wrap of `l + c`.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_chain`, `bc_aligned`, `bc_phase`.
     fn prove_aligned(self: &mut Self, b: &ir::CoreBody, ik: &fx::VKey, lop: u32) bool {
         if !ik.is_local || ik.off < 0 {
             return false;
@@ -1798,6 +1812,7 @@ extend Bce {
     /// Can a window's `+` or `-` not panic? Where overflow wraps, always. Where it traps, only a step of
     /// the root (`aff`) to an offset `off` among the members' (`root` to `root + 7`): the first check
     /// passed, so `root + root_off` lies below the length and such a sum cannot overflow.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_reach`.
     const fn quiet_step(self: &Self, aff: bool, off: i64, root_off: i64) bool {
         return !self.traps || aff && off >= root_off && self.reach_ok(off - root_off);
     }
@@ -1806,6 +1821,7 @@ extend Bce {
     /// Further only where the members index elements of a nonzero size (`wsized`): a zero-sized element's
     /// length bounds no byte range, and `root + d` could wrap (a widened guard would then panic where
     /// the member's index wrapped, or before its overflow trap).
+    /// Its steps are proved by the lemmas at the end of the file: `bc_reach`.
     const fn reach_ok(self: &Self, d: i64) bool {
         return d <= 1 || self.wsized && d < 8;
     }
@@ -2585,6 +2601,7 @@ extend Bce {
     /// `IN_GROUP_FITS(index, len, width)` over the widest offset and keeps its panic: a member that
     /// would fail panics with the same panic, only before pure statements. The true edge then
     /// proves every member, which folds. Returns the number of members.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_group_fits`.
     fn try_widen(self: &mut Self, b: &mut ir::CoreBody, blk: u32, cl: u32, cb: &CmpBind) u32 {
         let sid = self.def_in(b, blk, cl);
         if sid == ir::IR_NONE || self.local_reads(b, cl) != 1 {
@@ -2834,6 +2851,7 @@ extend Bce {
     /// `x + y` (operands `xo`, `yo`, either order) where a fact `x <= d` (or `x < d + 1`) names a
     /// difference `d = a - y` (`diffof`) that is exact (overflow traps, or `y <= a`): the sum is at
     /// most `a`, and exact. Returns `a`'s key, or none.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_window`.
     fn window_fact(self: &Self, b: &ir::CoreBody, xo: u32, yo: u32) fx::VKey {
         for side in 0..2u32 {
             let xk = self.vkey(
@@ -2882,6 +2900,7 @@ extend Bce {
     /// and `x`, its parts defined once in statements `s0 ..` of its block before its own `sid`, with
     /// no write of `lo` or `x` from the first part on? Where `lo <= x` holds, `m <= x`, and where
     /// `lo < x`, `m < x` (a wrapped sum is below `x` too).
+    /// Its steps are proved by the lemmas at the end of the file: `bc_mid_div`, `bc_mid_shr`, `bc_mid_sum`.
     fn mid_shape(
         self: &Self,
         b: &ir::CoreBody,
@@ -3114,6 +3133,7 @@ extend Bce {
     /// (`stay_rel`: `<` or `!=` for a step up, `>` or `!= 0` for a step down). Before the step, the
     /// staying edge dominates the step and the step every back edge; after it (a step up), the step
     /// dominates the test and the staying edge every back edge.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_iv_up`, `bc_iv_down`.
     fn iv_scan(self: &mut Self, b: &mut ir::CoreBody, h: u32) {
         self.ivs.clear();
         self.ivb.clear();
@@ -3226,6 +3246,7 @@ extend Bce {
 
     /// Record the bound a loop write `pl = rv` gives an unsigned local (`x % n`: below `n`, `x & m`:
     /// at most `m`, through one temporary): one value for every write, else none.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_iv_bound`.
     fn iv_bound_write(self: &mut Self, b: &ir::CoreBody, pl: u32, rvid: u32) {
         let d = self.fx.whole_local(b, pl);
         if d == ir::IR_NONE || !self.uns_ty(b, b.locals.at(d as usize).ty) {
@@ -3521,12 +3542,14 @@ extend Bce {
     /// `in_facts[st0]` on: an order (`a < b`, `a <= b`) or its negation, an equality as two `<=`
     /// facts, a disequality as a strict bound (`0 < x` for an unsigned `x != 0`, `a < b` where
     /// `a <= b` holds), and `!c` as `c` with the other value.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_cond`.
     fn cond_facts(self: &mut Self, b: &ir::CoreBody, opid: u32, val: bool, st0: usize, depth: u32) {
         let ck = self.vkey(b, opid);
         self.cond_key_facts(b, &ck, val, st0, depth);
     }
 
     /// `cond_facts` for the condition's value key `ck`.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_rem_align`.
     fn cond_key_facts(self: &mut Self, b: &ir::CoreBody, ck: &fx::VKey, val: bool, st0: usize, depth: u32) {
         if !ck.is_local || ck.off != 0 {
             return;
@@ -3905,6 +3928,9 @@ extend Bce {
         return lenbind_none();
     }
 
+    /// Do the solved integer facts prove `x < len` (`strict`) or `x <= len`: the interval of `x` against the
+    /// least value of a local that holds the length operand `lop` reads?
+    /// Its steps are proved by the lemmas at the end of the file: `bc_ints`.
     fn int_len_bound(self: &Self, b: &ir::CoreBody, xop: u32, lop: u32, strict: bool) bool {
         let mut xw: u32 = 0;
         let mut xs = false;
@@ -3939,6 +3965,7 @@ extend Bce {
 
     /// Process statement `stm` (index `si` of block `bb`): prove its check, record what it binds,
     /// and apply its effect to the versions and the integer facts.
+    /// Its steps are proved by the lemmas at the end of the file: `bc_rem_align`.
     fn statement(
         self: &mut Self,
         b: &mut ir::CoreBody,
@@ -4706,3 +4733,204 @@ pub(package) fn run(b: &mut ir::CoreBody, pkg: *const loader::Package, z: &mut B
     }
     return err;
 }
+
+// ---- The bounds-check rules, proved ----------------------------------------------------------------------
+
+// Each lemma states one arithmetic step of the rules above, for every value it covers; the build proves it.
+// A key `(l, v) + off` is the exact sum where the rule reads it (`sum_ok`), so the steps are over `int`; the
+// steps that keep a sum from wrapping are over the type's mask `m`. A rule's comment names its lemmas.
+
+// `fold_proved`, `le_len`, `prove_elem`, `prove_aligned`: two facts chain (`i < n`, `n <= len`), each over a value
+// at an offset.
+lemma bc_chain(x: int, y: int, z: int, a: int, b: int)
+    requires x + a <= y && y + b <= z
+    ensures x + a + b <= z
+{}
+
+// `offset_lt`: a fact `x + fo + fneed <= y + flo` gives `x + io + need <= y + lo` where
+// `io - fo + need - fneed <= lo - flo` (one value or one length place on the right).
+lemma bc_offset(x: int, y: int, fo: int, fneed: int, flo: int, io: int, need: int, lo: int)
+    requires x + fo + fneed <= y + flo && io - fo + need - fneed <= lo - flo
+    ensures x + io + need <= y + lo
+{}
+
+// `const_hi`, `const_lt`: a constant bound `x + ioff <= c` bounds `x + off` by `c - ioff + off`; a bound `hi`
+// with `hi + need <= lo` and `lo <= y` gives `x + need <= y`.
+lemma bc_const(x: int, ioff: int, c: int, off: int, need: int, lo: int, y: int)
+    requires x + ioff <= c
+    ensures x + off <= c - ioff + off
+    ensures !(c - ioff + off + need <= lo && lo <= y) || x + off + need <= y
+{}
+
+// `const_hi`: a value of stride `st` and phase `ph` at most `hx` is at most the greatest value of its phase
+// there: `hx - (hx - ph) % st`.
+lemma bc_stride(x: int, q: int, st: int, ph: int, hx: int)
+    requires st >= 1 && 0 <= ph && ph < st && q >= 0 && x == q * st + ph && x <= hx
+    ensures x <= hx - (hx - ph) % st
+{
+    let d = hx - ph;
+    arith::div_mod(d, st);
+    let qq = d / st;
+    if q > qq {
+        arith::mul_le(qq + 1, q, st);
+    }
+    arith::mul_le(q, qq, st);
+}
+
+// `nowrap`: a step down by at most the least value, or up by at most the room above the greatest, stays in
+// the type; a value at most a length of elements of a nonzero size (at most `isize::MAX`) has room for 64;
+// strict bounds `x + k < y` for every `k < off` leave `x + off <= y`.
+lemma bc_nowrap(x: int, lo: int, hi: int, d: int, m: int)
+    requires lo <= x && x <= hi && 0 <= lo && hi <= m
+    ensures !(0 <= d && d <= lo) || 0 <= x - d
+    ensures !(0 <= d && hi <= m - d) || x + d <= m
+{}
+
+// `nowrap`: the length case.
+lemma bc_nowrap_len(x: int, n: int, d: int, m: int)
+    requires x <= n && n <= m / 2 && 0 <= d && d <= 64 && m >= 255
+    ensures x + d <= m
+{}
+
+// `nowrap`: the strict-bounds case, by the last one (`x + off - 1 < y`).
+lemma bc_nowrap_strict(x: int, y: int, off: int, m: int)
+    requires off >= 1 && x + off - 1 < y && y <= m
+    ensures x + off <= m
+{}
+
+// `narrow_below`: an unsigned value of `w0` bits (at most `2^w0 - 1`) is below a length of at least `2^w0`.
+lemma bc_narrow(x: int, w0: nat, len: int)
+    requires 0 <= x && x < arith::pow2(w0) && arith::pow2(w0) <= len
+    ensures x < len
+{}
+
+// `prove_group`: a last lane `start + w - 1` below the length (`w` at least 1) leaves `start <= len` and
+// `w <= len - start`; so do intervals with `start <= len.lo - w`.
+lemma bc_group(s: int, w: int, len: int, sh: int, ll: int)
+    requires 0 <= s && w >= 1
+    ensures !(s + w - 1 < len) || s <= len && w <= len - s
+    ensures !(s <= sh && ll <= len && w <= ll && sh <= ll - w) || s <= len && w <= len - s
+{}
+
+// `int_le`, `int_len_bound`, `prove_range`: intervals `x <= xh` and `yl <= y` with `xh < yl` (`<=`) order the
+// values; a signed value of a non-negative interval is its unsigned one.
+lemma bc_ints(x: int, xh: int, y: int, yl: int)
+    requires x <= xh && yl <= y
+    ensures !(xh < yl) || x < y
+    ensures !(xh <= yl) || x <= y
+{}
+
+// `prove_aligned`: `l` and `y` of one phase `ph` of stride `a`, `l < y`: `l + c < y` for every `c < a`.
+lemma bc_aligned(l: int, y: int, q1: int, q2: int, a: int, ph: int, c: int)
+    requires a >= 1 && l == q1 * a + ph && y == q2 * a + ph && l < y && 0 <= c && c < a
+    ensures l + c < y
+{
+    if q1 >= q2 {
+        arith::mul_le(q2, q1, a);
+    }
+    arith::mul_le(q1 + 1, q2, a);
+}
+
+// `prove_aligned`: a value of stride `a * s` and phase `p` has stride `a` (the strides' common divisor) and
+// phase `p % a`.
+lemma bc_phase(l: int, i: int, a: int, s: int, p: int)
+    requires a >= 1 && p >= 0 && l == i * (a * s) + p
+    ensures l == (i * s + p / a) * a + p % a
+{
+    arith::div_mod(p, a);
+}
+
+// `quiet_step`, `reach_ok`: past a first member `x + o < n` (an index below its length), `x + o + d` stays in
+// the type for `d <= 1`, and for `d < 8` where `n` is at most `isize::MAX`.
+lemma bc_reach(x: int, o: int, n: int, d: int, m: int)
+    requires x + o < n && n <= m && 0 <= d && (d <= 1 || n <= m / 2 && d < 8) && m >= 255
+    ensures x + o + d <= m
+{}
+
+// `window_fact`: `x <= a - y` with `y <= a` gives `x + y <= a`, so the sum does not wrap.
+lemma bc_window(x: int, y: int, a: int)
+    requires 0 <= y && y <= a && x <= a - y
+    ensures x + y <= a
+{}
+
+// `mid_shape`: a midpoint `lo + (x - lo) / c` (`c` at least 2) is at most `x` where `lo <= x`, below it where
+// `lo < x`.
+lemma bc_mid_div(lo: int, x: int, c: int)
+    requires 0 <= lo && lo <= x && c >= 2
+    ensures lo + (x - lo) / c <= x
+    ensures !(lo < x) || lo + (x - lo) / c < x
+{
+    arith::div_mod(x - lo, c);
+    arith::mul_le(2, c, (x - lo) / c);
+}
+
+// `mid_shape`: a midpoint `lo + ((x - lo) >> c)` (`c` at least 1) likewise.
+lemma bc_mid_shr(lo: u64, x: u64, c: u64)
+    requires lo <= x && c >= 1 && c < 64
+    ensures lo + (x - lo >> c) <= x
+    ensures !(lo < x) || lo + (x - lo >> c) < x
+{}
+
+// `mid_shape`: a midpoint `(lo + x) / c` of the wrapped sum (`c` at least 2) likewise: a sum that wraps is
+// below `x`.
+lemma bc_mid_sum(lo: int, x: int, c: int, m: int)
+    requires 0 <= lo && lo <= x && x <= m && c >= 2
+    ensures (lo + x) % (m + 1) / c <= x
+    ensures !(lo < x) || (lo + x) % (m + 1) / c < x
+{
+    let s = lo + x;
+    let mm = m + 1;
+    if s <= m {
+        arith::mod_unique(s, 0, s, mm);
+    } else {
+        arith::mod_unique(s, 1, s - mm, mm);
+    }
+    let r = s % mm;
+    arith::div_mod(r, c);
+    arith::mul_le(2, c, r / c);
+}
+
+// `iv_scan`: a step `k` up from a test `l + d < y` with `d >= k - 1` (or `l + d <= y` with `d >= k`) leaves
+// `l + k <= y`: by induction over the iterations, `entry <= l <= y` at the header where the entry meets it.
+lemma bc_iv_up(l: int, d: int, k: int, y: int, e: int)
+    requires e <= l && k >= 1 && (l + d < y && d >= k - 1 || l + d <= y && d >= k)
+    ensures e <= l + k && l + k <= y
+{}
+
+// `iv_scan`: a step down by 1 past a test `l > lo` (or `l != 0`, unsigned) does not wrap and keeps
+// `l <= entry`.
+lemma bc_iv_down(l: int, lo: int, e: int)
+    requires 0 <= lo && l <= e && (l > lo || l != 0 && l >= 0)
+    ensures 0 <= l - 1 && l - 1 <= e
+{}
+
+// `iv_bound_write`: a write `x % n` (`n` at least 1) is below `n`; `x & m` is at most `m`.
+lemma bc_iv_bound(x: u64, n: u64, m: u64)
+    requires n >= 1
+    ensures x % n < n && (x & m) <= m
+{}
+
+// `cond_facts`: the false edge of `a < b` gives `b <= a`; an equality two `<=`; `x != 0` for an unsigned `x`
+// gives `0 < x`; `a != b` where `a <= b` gives `a < b`.
+lemma bc_cond(a: int, b: int)
+    ensures a < b || b <= a
+    ensures !(a == b) || a <= b && b <= a
+    ensures !(a != b && a <= b) || a < b
+    ensures !(0 <= a && a != 0) || 0 < a
+{}
+
+// `statement`, `cond_key_facts`: `l = x % c` (`c` at least 1) gives `x - l <= x`, a multiple of `c`; `IN_CHUNK`'s
+// `l <= e` passes a bound `i < l` on to `e`.
+lemma bc_rem_align(x: int, c: int, i: int, e: int)
+    requires x >= 0 && c >= 1
+    ensures x - x % c <= x && x - x % c == x / c * c
+    ensures !(i < x % c && x % c <= e) || i < e
+{
+    arith::div_mod(x, c);
+}
+
+// `try_widen`: `IN_GROUP_FITS(a, b, w)` true gives `a + k < b` for every `k < w` (from `a + w <= b`).
+lemma bc_group_fits(a: int, b: int, w: int, k: int)
+    requires a + w <= b && 0 <= k && k < w
+    ensures a + k < b
+{}

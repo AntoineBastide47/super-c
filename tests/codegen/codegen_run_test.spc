@@ -1057,6 +1057,32 @@ fn closures_nest_to_any_depth(b: &mut h::ExitBatch) {
     );
 }
 
+// One closure node is one closure type in every instance of its generic function, but its environment
+// holds what the instance binds: each instance's environment has its own size (one cached size made the
+// larger instance write past the smaller's slot).
+fn closure_env_per_instance(b: &mut h::ExitBatch) {
+    b.add(
+        "a closure capturing an array of a const parameter's length in two instances",
+        M"(struct S<const N: usize> {
+    a: [u8; N],
+}
+extend<const N: usize> S<N> {
+    fn f(self: &Self) u32 {
+        let big = self.a;
+        let g = |i: usize| big[i] as u32;
+        return g(0) + g(N - 1);
+    }
+}
+fn main() i32 {
+    let s = S::<4> { a: [1, 2, 3, 4] };
+    let t = S::<64> { a: [5; 64] };
+    return (s.f() + t.f()) as i32;
+}
+)",
+        15,
+    );
+}
+
 // A `dyn fn` type written in a function body names its signature node, which is the type's
 // identity; emission read it after the body syntax was released (an out-of-bounds node read).
 // The signature is module syntax now. Covered with a capturing closure, a closure without
@@ -6253,6 +6279,7 @@ fn exit_cases_11() {
     array_field_coerces_to_slice(&mut b);
     array_coerces_to_slice_everywhere(&mut b);
     closures_nest_to_any_depth(&mut b);
+    closure_env_per_instance(&mut b);
     dyn_fn_types_in_bodies(&mut b);
     closure_captures_every_binding_kind(&mut b);
     ref_mutability_mangles_apart_cases(&mut b);

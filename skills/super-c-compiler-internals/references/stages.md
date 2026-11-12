@@ -258,9 +258,7 @@ modular return-lifetime check) run alongside.
   the two's-complement bits of its exact value, each operation its circuit, an undefined one any
   value of its type), a CDCL solver (`src/prove/sat.spc`: two watched literals, first-UIP learning
   with minimization, activity order, saved phases, Luby restarts) refutes them with an LRAT proof,
-  and the kernel checks it (`Lrat::check`, reverse unit propagation over the hints). A model of the
-  bits ends the branch unproved only when each term they leave free is an unknown: the bits let two
-  reads or calls over equal operands differ, so the theories try the branch then. Each refuted
+  and the kernel checks it (`Lrat::check`, reverse unit propagation over the hints). Each refuted
   branch is a lemma; once every branch closes, the kernel encodes the skeleton of the formulas (each
   atom a variable, an integer equality also its two orders) with the negation of each lemma
   (`seal`), and the hypotheses imply the goal only when it checks an LRAT proof that these clauses

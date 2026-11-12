@@ -638,6 +638,12 @@ for p in enumerate(v.iter()) { .. }   // p.0 = index, p.1 = &element
 let picked: Vector<i32> = collect(map(v.iter(), |x: &i32| *x + 1));
 ```
 
+`std::crypto` holds proved implementations: SHA-256 (`sha256`), SHA-3 and SHAKE (`sha3`),
+ChaCha20-Poly1305 (`chacha20poly1305`), X25519 (`x25519`), and ML-KEM-512, ML-KEM-768 and
+ML-KEM-1024 (`mlkem`, FIPS 203). The build proves that each one computes exactly what its standard
+specifies and that no operation panics, and it checks that the code it generates for each function on
+`Secret` values runs in constant time.
+
 `print`, `println` and `stdio::File` use C stdio, and file system access goes through C bindings
 (`ffi/filesystem.spc`).
 

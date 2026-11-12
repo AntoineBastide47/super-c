@@ -14508,8 +14508,9 @@ fn lint_build_entries(p: &loader::Package, m: usize, only_mod: i32, ents: &mut V
             continue;
         }
         let mut root = !(reported && lint_item_candidate(a, iid, false, lint_pub_applies(p, m)));
-        // The program entry `main` is never reported, always a root.
-        if !root && it.kind == NodeKind::NODE_FUNCTION && p.is_entry(m as ModuleId, iid) {
+        // The program entry `main` is never reported, always a root; so is a lemma, a statement the build
+        // proves, which uses the spec functions it names.
+        if !root && it.kind == NodeKind::NODE_FUNCTION && (p.is_entry(m as ModuleId, iid) || unsafe (*a).ext(iid).function.is_lemma()) {
             root = true;
         }
         ents.push(LintEnt { start: it.span.start, end: it.span.end, node: iid, root: root });

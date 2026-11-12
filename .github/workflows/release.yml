@@ -130,7 +130,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags -fno-prove
           test -x "./$bin"
 
       # Against the arm64 C library (headers and libraries, no compiler); the test shards rebuild it on arm64.
@@ -662,7 +662,7 @@ jobs:
           target: linux
 
       - name: Build the native compiler
-        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
 
       # The native wasm backend and linker, over the wasi-sdk's sysroot (headers and C library).
       - name: Build the wasm compiler

@@ -4133,7 +4133,8 @@ extend<'a> TypeChecker<'a> {
 
     // Literal-only arithmetic `id` of kind `k` (tc_lit_kind). With an expected builtin type of its kind
     // it is computed in that type; without one, in the first of i32, i64 and u64 where no step
-    // overflows (a float expression: f32, or f64 past the f32 range). The type.
+    // overflows, else in ghost code in `int` (a float expression: f32, or f64 past the f32 range). The
+    // type.
     fn tc_lit_arith(self: &mut Self, id: NodeId, k: u8, expected: TypeId) TypeId {
         let eb = if expected != TYPE_NONE {
             self.bt_of(expected)
@@ -4161,6 +4162,12 @@ extend<'a> TypeChecker<'a> {
                 let _ = self.tc_lit_set_int(id, t, true, false, true);
                 return t;
             }
+        }
+        if self.ghost != 0 {
+            // Ghost code: an `int`, which holds every value.
+            let t = Ast::builtin(BuiltinType::BT_INT);
+            let _ = self.tc_lit_set_int(id, t, true, false, true);
+            return t;
         }
         let sp = unsafe (*self.cur_ast()).at_const(id).span;
         self.errors.emit_span(
@@ -23165,6 +23172,13 @@ extend TypeChecker {
             r0 = self.check_expr(unsafe (*a).at_const(*self.bin_spine.at(top - 1)).as_data.binary.right);
             rdone = true;
             l = self.check_expr_w(n, pick(self.tc_num_builtin(r0), r0, TYPE_NONE));
+        } else if self.tc_spine_takes(base, n, expected) {
+            l = self.check_expr_w(n, expected);
+            // A literal bottom takes the type at once: the right operands read it.
+            if k != 0 && self.lit_adopt(n, k, expected) {
+                l = expected;
+                k = 0;
+            }
         } else {
             l = self.check_expr(n);
         }
@@ -23189,6 +23203,27 @@ extend TypeChecker {
             return false;
         }
         return bd.left == ln && self.tc_lit_kind(bd.right) == 0 && self.tc_needs_want(ln, true);
+    }
+
+    // Whether the binary chain `bin_spine[base..]` over its bottom left operand `n` holds no typed value:
+    // `n` is a value `if`, `switch` or block of unpinned literals, each right operand a literal-only
+    // expression or such a value, each operator arithmetic. Its literals then take the context's numeric
+    // type `expected`, as a literal-only expression's do (`tc_lit_arith`).
+    fn tc_spine_takes(self: &mut Self, base: usize, n: NodeId, expected: TypeId) bool {
+        if !self.tc_num_builtin(expected) || !self.tc_lits_adopt(n, TYPE_NONE, true) {
+            return false;
+        }
+        for j in base..self.bin_spine.len() {
+            let bd = unsafe (*self.cur_ast()).at_const(*self.bin_spine.at(j)).as_data.binary;
+            if lit_arith_op(bd.op) == 0 || self.tc_lit_kind(bd.right) == 0 && !self.tc_lits_adopt(
+                bd.right,
+                TYPE_NONE,
+                true,
+            ) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Whether `t` is a builtin numeric type.
@@ -23251,8 +23286,8 @@ extend TypeChecker {
             },
         );
         // The mirror: a value `if`, `switch` or block on the left whose values are unpinned literals
-        // takes the right operand's numeric type.
-        if !logic && l != TYPE_NONE && r != l && self.tc_num_builtin(r) && self.tc_value_adopt(ln, r) {
+        // takes the typed right operand's numeric type (an unpinned literal there takes the left's).
+        if !logic && rlk == 0 && l != TYPE_NONE && r != l && self.tc_num_builtin(r) && self.tc_value_adopt(ln, r) {
             l = r;
         }
         self.ct_dead -= skip as u32;
@@ -25661,8 +25696,12 @@ extend TypeChecker {
         return t;
     }
 
-    // Call `id` of a spec function only in ghost code, of a lemma only as an expression statement.
+    // Call `id` of a spec function only in ghost code, of a lemma only as an expression statement. A call
+    // the checker rewrote (`print`'s format) is no call any more.
     fn tc_ghost_call(self: &mut Self, id: NodeId) {
+        if unsafe (*self.cur_ast()).at_const(id).kind != NodeKind::NODE_CALL {
+            return;
+        }
         let d = self.tc_call_callee(id);
         if d.node == NODE_NONE || Ast::in_body(d.node) {
             return;
@@ -31689,14 +31728,14 @@ extend TypeChecker {
                 self.tc_fn_value_use(id, d);
             },
             NODE_UNARY => {
-                // `-(2 * 3)` and `-5` are literal-only arithmetic; a negative literal expecting Int<N> is
-                // check_unary's.
+                // `-(2 * 3)` and `-5` are literal-only arithmetic; a negative literal expecting Int<N>, `int` or
+                // `nat` is check_unary's.
                 let mut wb: i64 = 0;
                 let mut k: u8 = 0;
                 if unsafe (*a).at_const(id).as_data.unary.op == TokenType::Minus && (expected == TYPE_NONE || self.tc_wide_target(
                     expected,
                     &mut wb,
-                ) == 0) {
+                ) == 0 && !self.tc_unbounded(expected)) {
                     k = self.tc_lit_kind(id);
                 }
                 result = if k != 0 {
@@ -32288,6 +32327,11 @@ extend TypeChecker {
         return unsafe (*self.cur_ast()).intern_instance(hit.mid, hit.node, &arg, 1);
     }
 
+    // Whether `t` is `int` or `nat`, whose literals may pass 64 bits (`tc_wide_literal_at`).
+    fn tc_unbounded(self: &Self, t: TypeId) bool {
+        return t != TYPE_NONE && self.type_at(t).kind == TypeKind::TYPE_BUILTIN && bt_unbounded(self.bt_of(t));
+    }
+
     fn tc_wide_literal(self: &mut Self, lit: NodeId, outer: NodeId, neg: bool, expected: TypeId) bool {
         return self.tc_wide_literal_at(lit, outer, neg, expected, 0, false);
     }
@@ -32302,7 +32346,12 @@ extend TypeChecker {
         forced: bool,
     ) bool {
         let mut bits: i64 = 0;
-        let kind = self.tc_wide_target(expected, &mut bits);
+        let mut kind = self.tc_wide_target(expected, &mut bits);
+        if kind == 0 && self.tc_unbounded(expected) {
+            // An `int` or `nat` past 64 bits: a wide value, of at most the widest literal.
+            kind = pick(self.bt_of(expected) == BuiltinType::BT_NAT, 1, 2);
+            bits = 1024;
+        }
         if kind == 0 {
             return false;
         }
@@ -32518,6 +32567,15 @@ extend TypeChecker {
                 // Wider than a 64-bit carrier (or past i64 with a signed wide expectation): where the
                 // context expects UInt<N>/Int<N>, the literal becomes that value directly.
                 if self.tc_wide_literal(id, id, false, expected) {
+                    return unsafe (*self.cur_ast()).type_of(id);
+                }
+                // Ghost code without a context: the literal is an `int`, which holds it.
+                if overflow && expected == TYPE_NONE && sb == BuiltinType::BT_COUNT && self.ghost != 0 && self.tc_wide_literal(
+                    id,
+                    id,
+                    false,
+                    Ast::builtin(BuiltinType::BT_INT),
+                ) {
                     return unsafe (*self.cur_ast()).type_of(id);
                 }
             }

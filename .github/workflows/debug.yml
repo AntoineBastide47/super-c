@@ -43,7 +43,7 @@ jobs:
       - name: Build the compiler
         run: |
           set -eu
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags -fno-prove
           test -x "./super-c${BINEXT:-}"
 
       - name: Cross-build the arm64 compiler

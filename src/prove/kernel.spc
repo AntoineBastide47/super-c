@@ -190,7 +190,12 @@ fn add_le<const B: usize>(
         return false;
     }
     let n = lin.len();
-    let e = merge_terms(lin, 0, n);
+    let e = switch merge_terms(lin, 0, n) {
+        Some(v) => v,
+        None => {
+            return false;
+        },
+    };
     let start = st.pool.len() as u32;
     for j in 0..e {
         st.pool.push(lin[j]);
@@ -647,6 +652,10 @@ extend<const B: usize> Kernel<B> {
             if !same_op(&x, &y) || pooled(x.op) && x.b != y.b {
                 return false;
             }
+            // Two constants of one value at two types are one value.
+            if x.op == T_INT {
+                return f.q == 0;
+            }
             tm.operands(f.a, &mut self.ops_a);
             tm.operands(f.b, &mut self.ops_b);
             if self.ops_a.len() == 0 || self.ops_a.len() != self.ops_b.len() || f.q as usize != self.ops_a.len() {
@@ -750,16 +759,16 @@ extend<const B: usize> Kernel<B> {
             }
             for q in 0..self.row.len() {
                 let x = self.row[q];
-                switch x.c.checked_mul(&m.m) {
+                switch ck(x.c.checked_mul(&m.m)) {
                     Some(v) => self.acc.push(LinTerm::<B> { c: v, atom: x.atom }),
                     None => {
                         return false;
                     },
                 }
             }
-            switch k.checked_mul(&m.m) {
+            switch ck(k.checked_mul(&m.m)) {
                 Some(v) => {
-                    switch total.checked_add(&v) {
+                    switch ck(total.checked_add(&v)) {
                         Some(s) => total = s,
                         None => {
                             return false;
@@ -854,7 +863,7 @@ extend<const B: usize> Kernel<B> {
             }
             self.row.push(LinTerm::<B> { c: wide::<B>(-1), atom: nd.atom });
             let one = Num::<B>::one();
-            switch nd.v.checked_add(&one) {
+            switch ck(nd.v.checked_add(&one)) {
                 Some(v) => *k = v,
                 None => {
                     return false;
@@ -956,7 +965,7 @@ extend<const B: usize> Kernel<B> {
                 continue;
             }
             let one = Num::<B>::one();
-            let v1 = switch nd.v.checked_add(&one) {
+            let v1 = switch ck(nd.v.checked_add(&one)) {
                 Some(v) => v,
                 None => {
                     return None;
@@ -1001,16 +1010,16 @@ extend<const B: usize> Kernel<B> {
                     }
                     for q in 0..self.row.len() {
                         let e = self.row[q];
-                        switch e.c.checked_mul(&m.m) {
+                        switch ck(e.c.checked_mul(&m.m)) {
                             Some(v) => self.cacc.push(LinTerm::<B> { c: v, atom: e.atom }),
                             None => {
                                 ok = false;
                             },
                         }
                     }
-                    switch k.checked_mul(&m.m) {
+                    switch ck(k.checked_mul(&m.m)) {
                         Some(v) => {
-                            switch total.checked_add(&v) {
+                            switch ck(total.checked_add(&v)) {
                                 Some(s) => total = s,
                                 None => {
                                     ok = false;
@@ -1057,7 +1066,7 @@ fn sum_up<const B: usize>(v: &mut Vector<LinTerm<B>>) bool {
         let mut x = v[j];
         j += 1;
         while j < n && v[j].atom == x.atom {
-            switch x.c.checked_add(&v[j].c) {
+            switch ck(x.c.checked_add(&v[j].c)) {
                 Some(s) => x.c = s,
                 None => {
                     return false;

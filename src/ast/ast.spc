@@ -1644,10 +1644,15 @@ pub(package) fn vec_err(mask: bool, bt: BuiltinType, tname: str, n: u64) String 
     );
 }
 
+/// Whether `bt` is `int` or `nat`: the ghost integers, which have no bounds.
+pub(package) const fn bt_unbounded(bt: BuiltinType) bool {
+    return bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT;
+}
+
 /// Whether integer type `bt` holds `v` (usize and isize are 32-bit under `ptr32`); false for any
 /// other type.
 pub(package) const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
-    if bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT {
+    if bt_unbounded(bt) {
         return bt == BuiltinType::BT_INT || !v.is_negative();
     }
     let w = bt_int_width(bt, ptr32);
@@ -1670,7 +1675,7 @@ pub(package) const fn bt_holds(bt: BuiltinType, v: i128, ptr32: bool) bool {
 /// The least and the greatest value of integer type `bt` (usize and isize are 32-bit under `ptr32`);
 /// for `int` and `nat`, which have no bounds, those of `i128` (`nat` from 0).
 pub(package) const fn bt_range(bt: BuiltinType, ptr32: bool, lo: &mut i128, hi: &mut i128) {
-    if bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT {
+    if bt_unbounded(bt) {
         *hi = i128::max();
         *lo = if bt == BuiltinType::BT_INT {
             i128::min()

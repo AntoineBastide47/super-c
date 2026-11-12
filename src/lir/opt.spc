@@ -41,6 +41,7 @@ import lir::switches as sws;
 import stdlib;
 import std::platform::clock as pclock;
 import ast::ast as ast;
+import std::spec::arith as arith;
 
 // `Opt.repl` of an instruction without a value that the rebuild drops.
 const DROPPED: u32 = 0xFFFFFFFE;
@@ -6080,6 +6081,8 @@ extend Opt {
 
     // Condition `c`, `holds` on the edge into the scope: `x <u y` decided, and with it `x <u u` for each value
     // `u` that `y` is at most (`upper_parts`).
+    // Its steps are proved by the lemmas at the end of the file: `ub_below`, `of_shr_nonzero`, `of_slt_as_ult`,
+    // `of_chain`, `of_below`.
     fn order_facts(self: &mut Self, pk: &Package, b: &Body, c: Value, holds: bool) {
         // An equality that holds here: its sides are one value below, each at most the other, and one
         // with a constant bounds the other from both sides.
@@ -6223,6 +6226,7 @@ extend Opt {
     // `x == c` (`c` a constant value) holds: each value the facts keep `x` at most (`note_le`) is at least `c`,
     // and equal to it where it is at most `x` too (`i == j`, then `i == 5`); a value the facts keep other than `x`
     // (`NE_KEY`) has its bound at `c` moved by one (`not_bound`).
+    // Its steps are proved by the lemmas at the end of the file: `ec_bounds`.
     fn equal_const(self: &mut Self, pk: &Package, b: &Body, x: Value, c: Value) {
         let m = width_mask(b.type_of(x), pk.ptr_bytes);
         let cv = int_bits(b, c).unwrap() & m;
@@ -6260,6 +6264,7 @@ extend Opt {
 
     // `x != k` holds: a least value `k` of `x` becomes `k + 1`, a greatest `k - 1` (where the body holds that
     // constant: `known_const`).
+    // Its steps are proved by the lemmas at the end of the file: `of_ne`.
     fn not_bound(self: &mut Self, pk: &Package, b: &Body, x: Value, k: u64) {
         let ty = b.type_of(x);
         let m = width_mask(ty, pk.ptr_bytes);
@@ -6296,6 +6301,8 @@ extend Opt {
     // constant's; the signed bounds the branches in scope and the loop counters set (`SLO_KEY`, `SHI_KEY`:
     // `order_facts`, `signed_counter`); a sum or difference with a constant, a product by a constant of at
     // least 0, an extension, when neither end leaves the type. None when nothing bounds it.
+    // Its steps are proved by the lemmas at the end of the file: `sr_unsigned`, `sr_least`, `sr_select`, `sr_add`,
+    // `sr_sub`, `sr_mul`, `sr_zext`, `sr_sext`.
     fn srange(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<(i64, i64)> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -6450,6 +6457,8 @@ extend Opt {
     // The least unsigned value `v` takes here: a constant's, a bound the branches in scope set
     // (`order_facts`), or one a subtraction of a constant (`a + k` as `a - d`, which does not wrap when
     // `a`'s bound is at least `d`) or a zero extension keeps, `depth` instructions deep; None when unknown.
+    // Its steps are proved by the lemmas at the end of the file: `ub_srange`, `lb_above`, `lb_nonzero`,
+    // `lb_sub_const`, `lb_add_as_sub`, `lb_or`.
     fn lbound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -6534,6 +6543,9 @@ extend Opt {
     // (`load_bound`) or view length's (`view_len_max`), or one an `and` with a constant, a right shift, a
     // remainder or quotient by a constant, a zero extension, or a shift, product by a constant or sum that
     // cannot wrap keeps, `depth` instructions deep; None when unknown.
+    // Its steps are proved by the lemmas at the end of the file: `ub_below`, `ub_nonneg`, `ub_up`, `ub_srange`,
+    // `ub_and`, `ub_lshr`, `ub_urem`, `ub_udiv`, `ub_shl`, `ub_mul`, `ub_add`, `ub_sub_const`, `ub_sext`,
+    // `ub_trunc`, `lb_sub_const`, `ub_cmp_zext`, `ub_zeros`.
     fn ubound(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) Option<u64> {
         if v == VNONE || (v & VFLAG) != 0 {
             return None;
@@ -6719,6 +6731,8 @@ extend Opt {
     // low mask that covers its operand's bound, a low mask less a value within it (an `xor`, in place), an integer comparison with a constant that every value
     // up to the bound answers alike (a signed one when the bound leaves the sign bit clear).
     // Its replacement value (VNONE: none); a constant result rewrites `i` in place.
+    // Its steps are proved by the lemmas at the end of the file: `rf_sub_xor`, `rf_sub_xor_mask`, `rf_urem`,
+    // `rf_lshr`, `rf_and`, `rf_signed`, `rf_signed_as_unsigned`, `rf_unsigned`.
     fn range_fold(self: &mut Self, pk: &Package, b: &mut Body, i: u32) Value {
         let t = b.insts[i as usize];
         if is_vec(t.ty) || t.ty == T_I128 {
@@ -6829,6 +6843,7 @@ extend Opt {
     // The value `p` that `v` is at most by its form, and whether below it: `p - w` where `w <=u p` holds (a
     // constant within `p`'s lower bound, strictly below `p` from 1 on), `p >> c` and `p / c` by a nonzero
     // constant, `p & m`; `(VNONE, false)` else.
+    // Its steps are proved by the lemmas at the end of the file: `ub_and`, `ub_lshr`, `ub_udiv`, `am_sub`.
     fn at_most_of(self: &Self, pk: &Package, b: &Body, v: Value) (Value, bool) {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
             return (VNONE, false);
@@ -6860,6 +6875,7 @@ extend Opt {
 
     // `(k, s)` when `v` is `(k << s) + c` (`k * 2^s`, the value of a checked sum too) with `c` a constant
     // from 1 to `2^s` and `s` the constant shift's value; `(VNONE, VNONE)` else.
+    // Its steps are proved by the lemmas at the end of the file: `od_chunk`.
     const fn chunk_end(self: &Self, pk: &Package, b: &Body, v: Value) (Value, Value) {
         let none = (VNONE, VNONE);
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
@@ -6893,6 +6909,7 @@ extend Opt {
     // Whether the product of `w` and `h`, computed in scope, wraps nowhere and is at most `y`: a product
     // whose operands' bounds (`ubound`) multiply within the type, or an unsigned checked one whose flag
     // the branches in scope clear.
+    // Its steps are proved by the lemmas at the end of the file: `od_row`.
     fn product_le(self: &Self, pk: &Package, b: &Body, w: Value, h: Value, y: Value) bool {
         let ty = b.type_of(w);
         let m = width_mask(ty, pk.ptr_bytes);
@@ -6980,6 +6997,8 @@ extend Opt {
     // of a constant at most `n`'s lower bound, or of a value the branches keep at most `n`); `n` of `n >> c`,
     // `n / c` by a constant below the width, above 0; both operands of `n & m`; `n` and `w` of `w % n` where
     // `n` is at least 1; the values the branches in scope keep `y` at most (`note_le`).
+    // Its steps are proved by the lemmas at the end of the file: `ub_and`, `ub_lshr`, `ub_udiv`, `lb_sub_const`,
+    // `am_sub`, `up_min`, `up_urem`.
     fn upper_parts(self: &mut Self, pk: &Package, b: &Body, x: Value, y: Value, depth: u32) {
         if depth == 0 || (y & VFLAG) != 0 || y == VNONE {
             return;
@@ -7073,6 +7092,8 @@ extend Opt {
     // `p` from a constant of at least 0 by steps of 1 under the test `p <s n` stays at least 0 (its bound
     // clears the sign bit, `ubound`): the step never passes `n`; under `p <u n`, at least its start (`lbound`,
     // or `p >=u s` for a start `s` that is no constant).
+    // Its steps are proved by the lemmas at the end of the file: `pb_mid`, `pb_mid_div`, `pb_half_sum`, `pb_down`,
+    // `pb_up`.
     fn param_bounds(self: &mut Self, pk: &Package, b: &Body, h: u32) {
         let hb = b.blocks[h as usize];
         let th = term(b, h);
@@ -7242,6 +7263,7 @@ extend Opt {
     // header's `hc` (holding into the loop where `tin`) keeps `p` below a constant `c` (`c - 1 + k`) or at most
     // it (`c + k`), else the argument's bound in the header's scope. None when some edge has none, or a sum
     // passes the type.
+    // Its steps are proved by the lemmas at the end of the file: `eu_below`, `eu_at_most`.
     fn edge_ub(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value, hc: Value, tin: bool) Option<u64> {
         let m = width_mask(b.type_of(p), pk.ptr_bytes);
         let mut best: u64 = 0;
@@ -7301,6 +7323,7 @@ extend Opt {
     // at least the start's signed bound from below; under every edge's test against a constant (the entry's
     // too), also within that constant. Up from a constant `e` of at least 0 under every edge's `a <s n`: `p` is
     // below `n` as an unsigned value too, and `n` above `e`.
+    // Its steps are proved by the lemmas at the end of the file: `shv`, `sc_nonneg_below`, `sc_up`, `sc_down`.
     fn signed_counter(self: &mut Self, pk: &Package, b: &Body, h: u32, q: u32, p: Value, hc: Value, tin: bool) {
         if is_vec(b.type_of(p)) || type_bits(b.type_of(p), pk.ptr_bytes) > 64 {
             return;
@@ -7496,6 +7519,7 @@ extend Opt {
 
     // A counter down from a value before its loop (`SHV_KEY`) that `v` is, at least 0 here, is at most that value
     // as an unsigned one too, and below `n` where that value is `n - 1`.
+    // Its steps are proved by the lemmas at the end of the file: `shv`, `shv_pred`.
     fn shv_le(self: &mut Self, pk: &Package, b: &Body, v: Value) {
         let e = switch self.ub.get(&(SHV_KEY | v as u64)) {
             Some(f) => *f,
@@ -7611,6 +7635,7 @@ extend Opt {
     // Fact `f` of a parameter of join block `j` joined with argument `a` of one more edge into it, in that edge's
     // scope: the ranges' union; of the values `f` is at most, those `a` is at most too (`le_of`); the first edge
     // that is no constant 0 gives them: the values from before the join that `a` is at most (`uppers`).
+    // Its steps are proved by the lemmas at the end of the file: `jn_sle_sub`.
     fn join_arg(self: &Self, pk: &Package, b: &Body, j: u32, a: Value, f: &mut JoinFact) {
         let ty = b.type_of(a);
         if a == VNONE || (a & VFLAG) != 0 || !is_int(ty) || ty == T_I128 || is_vec(ty) {
@@ -8148,6 +8173,8 @@ extend Opt {
     // The low bits of `v` known to be 0 (at most the width), `depth` operations deep: a constant's, a sum's or
     // difference's fewest, a product's or shift's sum, an `and`'s most. Parameter `p` counts `assume`; any
     // other parameter counts its own (`param_zeros`) while `depth` lasts.
+    // Its steps are proved by the lemmas at the end of the file: `lz_wrap`, `lz_add`, `lz_sub`, `lz_fewer`,
+    // `lz_mul`, `lz_and`.
     fn low_zeros(self: &Self, b: &Body, v: Value, p: Value, assume: u32, depth: u32) u32 {
         if v == p {
             return assume;
@@ -8234,6 +8261,8 @@ extend Opt {
     // The value of condition `c` the order facts in scope decide (`order_facts`), if any: `x <u y` itself,
     // or `x <u a + 1` false where `a <u x` holds (`a + 1` does not wrap: an inclusive range's second test,
     // `i + 1 <=u last` after `i <u last`).
+    // Its steps are proved by the lemmas at the end of the file: `lb_nonzero`, `rf_urem`, `up_urem`, `od_succ`,
+    // `od_diff_nonzero`, `od_succ_nonzero`, `od_chunk`, `od_less_k`, `od_row`, `od_offset`, `od_bounds`.
     fn order_decided(self: &Self, pk: &Package, b: &Body, c: Value) Option<u64> {
         let (x, y, neg) = Opt::as_ult(b, c);
         if x == VNONE {
@@ -8645,6 +8674,7 @@ extend Opt {
     // holds where an upper value `u + d` of `xa` has `u` equal to `ya` (`d + dx < dy`), below it (`d + dx <= dy`)
     // or at most it (`d + dx < dy`); it fails where an upper value of `ya` meets `xa` the same way (`y <= x`).
     // None when neither (`s[i - 32..i]` under `i <= len`, `a[i + 32]` under `i <= len - 128`).
+    // Its steps are proved by the lemmas at the end of the file: `oo_below`, `oo_not_below`.
     fn offset_order(self: &Self, pk: &Package, b: &Body, x: Value, y: Value) Option<bool> {
         let ty = b.type_of(x);
         if !is_int(ty) || ty == T_I128 || is_vec(ty) || (x & VFLAG) != 0 || (y & VFLAG) != 0 {
@@ -8676,6 +8706,7 @@ extend Opt {
     // Integer `v` as `a + d` (`d` a constant within 2^62 either way) where the sum or difference does not wrap:
     // `a - k` where `a` is at least `k` or the result at most the greatest value less `k`; `a + k` where `a`'s
     // room (`room`) is at least `k` or the result at least `k`. `(v, 0)` else.
+    // Its steps are proved by the lemmas at the end of the file: `lb_add_as_sub`.
     fn offset_form(self: &Self, pk: &Package, b: &Body, v: Value) (Value, i64) {
         if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || is_vec(b.type_of(v)) || b.type_of(v) == T_I128 {
             return (v, 0);
@@ -8737,6 +8768,7 @@ extend Opt {
     // The least distance from integer `v` up to its type's greatest value here, `depth` steps deep (0 when none
     // is known): its bound's (`ubound`); that of a value the facts keep `v` at most (`note_le`), one more where
     // `v` is below it; `k` more than `a`'s for `v` a difference `a - k` that does not wrap.
+    // Its steps are proved by the lemmas at the end of the file: `am_sub`, `room_sub`.
     fn room(self: &Self, pk: &Package, b: &Body, v: Value, depth: u32) u64 {
         if v == VNONE || (v & VFLAG) != 0 || !is_int(b.type_of(v)) || is_vec(b.type_of(v)) || b.type_of(v) == T_I128 {
             return 0;
@@ -21809,4 +21841,707 @@ const fn hash(t: Inst) u64 {
 
 const fn place_hash(addr: u32, off: u32, ty: u8, state: u32) u64 {
     return mix(mix(addr as u64 | ty as u64 << 32, off), state);
+}
+
+// ---- The range and order rules, proved ---------------------------------------------------------------
+
+// Each lemma states one arithmetic step of the range and order rules above, for every value it covers; the
+// build proves it. A value of an integer type of `w` bits is a `u64` at most the type's mask `m`
+// (`2^w - 1`, `width`); its signed value is `sv`; a sum, difference or product of the type is the exact
+// result wrapped (`wrap`). A rule's comment names its lemmas.
+
+// `m` is the mask of a LIR integer type: 8, 16, 32 or 64 bits.
+spec fn width(m: u64) bool {
+    return m == 0xFF || m == 0xFFFF || m == 0xFFFF_FFFF || m == 0xFFFF_FFFF_FFFF_FFFF;
+}
+
+// The signed value of `x`, a value of the type of mask `m`.
+spec fn sv(x: u64, m: u64) int {
+    return if x > m >> 1 {
+        x as int - m as int - 1
+    } else {
+        x as int
+    };
+}
+
+// `v` (at least 0) as a value of the type of mask `m`: its low bits, `v` modulo `2^w`. A sum, difference or
+// product of the type is the exact result wrapped: a difference `x - y` is `x + (2^w - y)`.
+spec fn wrap(v: int, m: u64) int {
+    return v % (m as int + 1);
+}
+
+// `wrap(v, m)` is `r` where `v` is `q` times `2^w` plus `r`.
+lemma wrap_is(v: int, q: int, r: int, m: u64)
+    requires 0 <= v && 0 <= r && r <= m as int && v == q * (m as int + 1) + r
+    ensures wrap(v, m) == r
+{
+    arith::mod_unique(v, q, r, m as int + 1);
+}
+// The signed value of a value `r` of the type, from 0 to `2^w - 1`, that is `s` modulo `2^w`, `s` within the signed range.
+lemma sv_of(r: int, s: int, m: u64)
+    requires width(m)
+    requires 0 <= r
+    requires r <= m as int
+    requires -((m >> 1) as int) - 1 <= s
+    requires s <= (m >> 1) as int
+    requires r == s || r == s + m as int + 1
+    ensures sv(r as u64, m) == s
+{
+    assert (r as u64) as int == r by {};
+}
+
+// `ubound`, `order_facts`: a value below `c` is at most `c - 1`.
+lemma ub_below(x: u64, c: u64)
+    requires x < c
+    ensures 1 <= c && x <= c - 1
+{}
+
+// `ubound`: a value at least 0 as a signed one clears its sign bit.
+lemma ub_nonneg(x: u64, m: u64)
+    requires width(m) && x <= m && sv(x, m) >= 0
+    ensures x <= m >> 1
+{}
+
+// `ubound`: at most a value `f` at most `u` is at most `u`, and below `f` at most `u - 1`.
+lemma ub_up(x: u64, f: u64, u: u64)
+    requires x <= f && f <= u
+    ensures x <= u
+    ensures !(x < f) || 1 <= u && x <= u - 1
+{}
+
+// `ubound`, `lbound`: a signed range at or above 0 is the unsigned one.
+lemma ub_srange(x: u64, m: u64, lo: int, hi: int)
+    requires width(m) && x <= m && lo <= sv(x, m) && sv(x, m) <= hi && lo >= 0
+    ensures lo <= x as int && x as int <= hi
+{}
+
+// `ubound`, `at_most_of`, `upper_parts`: an `and` is at most each operand.
+lemma ub_and(x: u64, y: u64, ux: u64)
+    requires x <= ux
+    ensures (x & y) <= ux && (y & x) <= ux
+{}
+
+// `ubound`, `at_most_of`, `upper_parts`: a right shift by a count below the width keeps the order, and is at
+// most its operand.
+lemma ub_lshr(x: u64, hi: u64, s: u64)
+    requires x <= hi && s < 64
+    ensures x >> s <= hi >> s && x >> s <= x
+{}
+
+// `ubound`: a remainder by a nonzero constant is below it.
+lemma ub_urem(x: u64, d: u64)
+    requires d != 0
+    ensures x % d <= d - 1
+{}
+
+// `ubound`, `at_most_of`, `upper_parts`: a quotient by a nonzero constant keeps the order, and is at most its
+// operand.
+lemma ub_udiv(x: u64, hi: u64, d: u64)
+    requires x <= hi && d != 0
+    ensures x / d <= hi / d && x / d <= x
+{}
+
+// `ubound`: a left shift whose bound keeps every bit in the type.
+lemma ub_shl(x: u64, ux: u64, s: u64, m: u64)
+    requires width(m) && x <= ux && s < 64 && ux <= m >> s
+    ensures (x << s & m) <= ux << s
+{}
+
+// `ubound`: a product whose bounds multiply within the type.
+lemma ub_mul(x: u64, y: u64, ux: u64, uy: u64, m: u64)
+    requires x <= ux && y <= uy && (uy == 0 || ux <= m / uy)
+    ensures (x.wrapping_mul(y) & m) <= ux * uy
+{
+    assert ux as int * uy as int <= m as int by {};
+    assert x as int * y as int <= ux as int * uy as int by {};
+    assert x.wrapping_mul(y) as int == x as int * y as int by {};
+}
+
+// `ubound`: a sum whose bounds add within the type.
+lemma ub_add(x: u64, y: u64, ux: u64, uy: u64, m: u64)
+    requires width(m) && x <= ux && y <= uy && uy <= m && ux <= m - uy
+    ensures (x.wrapping_add(y) & m) <= ux + uy
+{}
+
+// `ubound`: a difference with a constant at most the operand's least value.
+lemma ub_sub_const(x: u64, lo: u64, hi: u64, k: u64, m: u64)
+    requires width(m) && lo <= x && x <= hi && hi <= m && k <= lo
+    ensures (x.wrapping_sub(k) & m) <= hi - k
+{}
+
+// `ubound`: a sign extension of a value whose bound clears its sign bit extends with zeros.
+lemma ub_sext(x: u64, ux: u64, ms: u64)
+    requires width(ms) && x <= ux && ux <= ms >> 1
+    ensures sv(x, ms) == x as int
+{}
+
+// `ubound`: a truncation keeps a value the narrower type holds, and any value is at most its mask.
+lemma ub_trunc(x: u64, ux: u64, m: u64)
+    requires width(m) && x <= ux && ux <= m
+    ensures (x & m) == x
+{}
+
+// `ubound`: a comparison is 0 or 1; a zero extension keeps the value, at most the operand type's mask.
+lemma ub_cmp_zext(c: bool, x: u64, m: u64)
+    requires x <= m
+    ensures if c {
+        1u64
+    } else {
+        0u64
+    } <= 1 && x <= m
+{}
+
+// `ubound`: the top set bit of a value at least `lo` is at or above `lo`'s.
+lemma top_bit_order(x: u64, lo: u64, rx: usize, rl: usize)
+    requires 1 <= lo && lo <= x && rx < 64 && rl < 64
+    requires x >> (63 - rx) as u64 == 1 && lo >> (63 - rl) as u64 == 1
+    ensures rx <= rl
+{}
+
+// `ubound`: `clz` of a value at least `lo` (above 0) is at most `lo`'s (of a `w`-bit value, both less
+// `64 - w`); `ctz` of a value other than 0 is below the width, of 0 the width.
+lemma ub_zeros(x: u64, lo: u64)
+    requires 1 <= lo && lo <= x
+    ensures x.leading_zeros() <= lo.leading_zeros()
+    ensures x.trailing_zeros() <= 63
+{
+    assert x.leading_zeros() < 64 && lo.leading_zeros() < 64 by {};
+    top_bit_order(x, lo, x.leading_zeros(), lo.leading_zeros());
+}
+
+// `lbound`: a value above `c` is at least `c + 1`.
+lemma lb_above(x: u64, c: u64, m: u64)
+    requires c < x && x <= m
+    ensures c + 1 <= x
+{}
+
+// `lbound`, `order_decided`: a nonzero value is at least 1.
+lemma lb_nonzero(x: u64)
+    requires x != 0
+    ensures 1 <= x
+{}
+
+// `lbound`, `ubound`, `upper_parts`: a difference with a constant at most the operand's least value wraps
+// nowhere.
+lemma lb_sub_const(x: u64, lx: u64, d: u64, m: u64)
+    requires width(m) && x <= m && lx <= x && d <= lx
+    ensures (x.wrapping_sub(d) & m) == x - d && x - d >= lx - d
+{}
+
+// `lbound`, `offset_form`: a sum with `k` is a difference with `2^w - k`.
+lemma lb_add_as_sub(x: u64, k: u64, m: u64)
+    requires width(m) && x <= m && k <= m
+    ensures (x.wrapping_add(k) & m) == (x.wrapping_sub((m - k).wrapping_add(1) & m) & m)
+{}
+
+// `lbound`: an `or` is at least each operand.
+lemma lb_or(x: u64, y: u64)
+    ensures (x | y) >= x && (x | y) >= y
+{}
+
+// `srange`: an unsigned range below the sign bit is the signed one.
+lemma sr_unsigned(x: u64, lo: u64, hi: u64, m: u64)
+    requires width(m) && lo <= x && x <= hi && hi <= m >> 1
+    ensures lo as int <= sv(x, m) && sv(x, m) <= hi as int
+{}
+
+// `srange`: the unsigned least value of a value at least 0 as a signed one is a signed one too.
+lemma sr_least(x: u64, c: u64, m: u64)
+    requires width(m) && x <= m && sv(x, m) >= 0 && c <= x
+    ensures c as int <= sv(x, m)
+{}
+
+// `srange`: a select of the greater (smaller) of two values, or either, within the arms' ranges.
+lemma sr_select(a: int, b: int, al: int, ah: int, bl: int, bh: int)
+    requires al <= a && a <= ah && bl <= b && b <= bh
+    ensures if a >= b {
+        a
+    } else {
+        b
+    } >= if al >= bl {
+        al
+    } else {
+        bl
+    }
+    ensures if a >= b {
+        a
+    } else {
+        b
+    } <= if ah >= bh {
+        ah
+    } else {
+        bh
+    }
+    ensures if a <= b {
+        a
+    } else {
+        b
+    } >= if al <= bl {
+        al
+    } else {
+        bl
+    }
+    ensures if a <= b {
+        a
+    } else {
+        b
+    } <= if ah <= bh {
+        ah
+    } else {
+        bh
+    }
+    ensures if al <= bl {
+        al
+    } else {
+        bl
+    } <= a
+    ensures a <= if ah >= bh {
+        ah
+    } else {
+        bh
+    }
+{}
+
+// `srange`: a sum with a constant where neither end leaves the type.
+lemma sr_add(x: u64, c: u64, m: u64)
+    requires width(m) && x <= m && c <= m
+    requires -((m >> 1) as int) - 1 <= sv(x, m) + sv(c, m) && sv(x, m) + sv(c, m) <= (m >> 1) as int
+    ensures sv(wrap(x as int + c as int, m) as u64, m) == sv(x, m) + sv(c, m)
+{
+    let s = sv(x, m) + sv(c, m);
+    let v = x as int + c as int;
+    let r = if s >= 0 {
+        s
+    } else {
+        s + m as int + 1
+    };
+    assert v == r || v == r + m as int + 1 by {};
+    if v == r {
+        wrap_is(v, 0, r, m);
+    } else {
+        wrap_is(v, 1, r, m);
+    }
+    sv_of(r, s, m);
+}
+
+// `srange`: a difference with a constant where neither end leaves the type.
+lemma sr_sub(x: u64, c: u64, m: u64)
+    requires width(m) && x <= m && c <= m
+    requires -((m >> 1) as int) - 1 <= sv(x, m) - sv(c, m) && sv(x, m) - sv(c, m) <= (m >> 1) as int
+    ensures sv(wrap(x as int + m as int + 1 - c as int, m) as u64, m) == sv(x, m) - sv(c, m)
+{
+    let mm = m as int + 1;
+    let s = sv(x, m) - sv(c, m);
+    let v = x as int + mm - c as int;
+    let r = if s >= 0 {
+        s
+    } else {
+        s + mm
+    };
+    assert v == r || v == r + mm || v == r + 2 * mm by {};
+    if v == r {
+        wrap_is(v, 0, r, m);
+    } else if v == r + mm {
+        wrap_is(v, 1, r, m);
+    } else {
+        wrap_is(v, 2, r, m);
+    }
+    sv_of(r, s, m);
+}
+
+// `srange`: a product by a constant at least 0 where neither end leaves the type.
+lemma sr_mul(x: u64, c: u64, m: u64)
+    requires width(m) && x <= m && c <= m >> 1
+    requires -((m >> 1) as int) - 1 <= sv(x, m) * c as int && sv(x, m) * c as int <= (m >> 1) as int
+    ensures sv(wrap(x as int * c as int, m) as u64, m) == sv(x, m) * c as int
+{
+    let mm = m as int + 1;
+    let s = sv(x, m) * c as int;
+    let v = x as int * c as int;
+    let r = if s >= 0 {
+        s
+    } else {
+        s + mm
+    };
+    if x > m >> 1 {
+        arith::mul_eq(c as int, x as int, sv(x, m) + mm);
+        assert v == s + c as int * mm by {};
+        if s >= 0 {
+            wrap_is(v, c as int, r, m);
+        } else {
+            wrap_is(v, c as int - 1, r, m);
+        }
+    } else {
+        wrap_is(v, 0, r, m);
+    }
+    sv_of(r, s, m);
+}
+
+// `srange`: a zero extension of a value at least 0 as a signed one keeps its signed value.
+lemma sr_zext(x: u64, ms: u64, md: u64)
+    requires width(ms) && width(md) && ms <= md && x <= ms && sv(x, ms) >= 0
+    ensures sv(x, md) == sv(x, ms)
+{}
+
+// `srange`: a sign extension keeps the signed value: its bits are that value wrapped to the wider type.
+lemma sr_sext(x: u64, ms: u64, md: u64)
+    requires width(ms) && width(md) && ms <= md && x <= ms
+    ensures sv(wrap(sv(x, ms) + md as int + 1, md) as u64, md) == sv(x, ms)
+{
+    let s = sv(x, ms);
+    let mm = md as int + 1;
+    let r = if s >= 0 {
+        s
+    } else {
+        s + mm
+    };
+    if s >= 0 {
+        wrap_is(s + mm, 1, r, md);
+    } else {
+        wrap_is(s + mm, 0, r, md);
+    }
+    sv_of(r, s, md);
+}
+
+// `range_fold`: a low mask less a value its bound keeps within the mask is their `xor`.
+lemma rf_sub_xor(k: u64, x: u64)
+    requires (k & k.wrapping_add(1)) == 0 && x <= k
+    ensures k - x == (x ^ k)
+{}
+
+// `range_fold`: the type's mask less any value is their `xor`.
+lemma rf_sub_xor_mask(x: u64, m: u64)
+    requires width(m) && x <= m
+    ensures (m.wrapping_sub(x) & m) == (x ^ m)
+{}
+
+// `range_fold`, `order_decided`: a remainder or quotient by a constant above the dividend's bound.
+lemma rf_urem(x: u64, hi: u64, c: u64)
+    requires x <= hi && hi < c
+    ensures x % c == x && x / c == 0
+{}
+
+// `range_fold`: a right shift that leaves nothing.
+lemma rf_lshr(x: u64, hi: u64, c: u64)
+    requires x <= hi && c < 64 && hi >> c == 0
+    ensures x >> c == 0
+{}
+
+// `range_fold`: an `and` with a low mask that covers the operand's bound.
+lemma rf_and(x: u64, hi: u64, c: u64)
+    requires (c & c.wrapping_add(1)) == 0 && x <= hi && hi <= c
+    ensures (x & c) == x
+{}
+
+// `range_fold`: a signed comparison with a constant that the signed range decides.
+lemma rf_signed(x: int, lo: int, hi: int, k: int)
+    requires lo <= x && x <= hi
+    ensures !(hi < k) || x < k
+    ensures !(hi <= k) || x <= k
+    ensures !(lo > k) || x > k
+    ensures !(lo >= k) || x >= k
+{}
+
+// `range_fold`: values without the sign bit compare signed as unsigned, above a negative constant.
+lemma rf_signed_as_unsigned(x: u64, hi: u64, k: u64, m: u64)
+    requires width(m) && x <= hi && hi <= m >> 1 && k <= m
+    ensures !(k > m >> 1) || sv(x, m) > sv(k, m)
+    ensures k > m >> 1 || sv(x, m) < sv(k, m) == x < k && sv(x, m) <= sv(k, m) == x <= k
+{}
+
+// `range_fold`: an unsigned comparison with a constant that every value up to the bound answers alike.
+lemma rf_unsigned(x: u64, hi: u64, k: u64)
+    requires x <= hi
+    ensures !(hi < k) || x < k && x != k
+    ensures !(hi <= k) || x <= k
+{}
+
+// `at_most_of`, `upper_parts`, `room`: a difference that does not wrap is at most its first operand, below
+// it for a second operand above 0.
+lemma am_sub(x: u64, y: u64)
+    requires y <= x
+    ensures x - y <= x && (y == 0 || x - y < x)
+{}
+
+// `upper_parts`: below the lesser of two values is below each.
+lemma up_min(x: u64, u: u64, w: u64)
+    requires x < if u < w {
+        u
+    } else {
+        w
+    }
+    ensures x < u && x < w
+{}
+
+// `upper_parts`, `order_decided`: a remainder by a value at least 1 is below it and at most the dividend.
+lemma up_urem(w: u64, n: u64)
+    requires n >= 1
+    ensures w % n < n && w % n <= w
+{}
+
+// `order_facts`: a right shift that is not 0 has an operand of at least 1.
+lemma of_shr_nonzero(a: u64, k: u64)
+    requires k < 64 && a >> k != 0
+    ensures a >= 1
+{}
+
+// `equal_const`: `x == c` and `x <= f` give `c <= f`, and `f == c` where `f <= x` too.
+lemma ec_bounds(x: u64, c: u64, f: u64)
+    requires x == c && x <= f
+    ensures c <= f && (!(f <= x) || f == c)
+{}
+
+// `not_bound`: a value other than `k` moves its bound at `k` by one.
+lemma of_ne(x: u64, k: u64)
+    requires x != k
+    ensures !(k <= x) || k + 1 <= x
+    ensures !(x <= k) || 1 <= k && x <= k - 1
+{}
+
+// `order_facts`: `x <s y` with `x` at least 0 is `x <u y`; `x >=s y` with `y` at least 0 is `x >=u y`.
+lemma of_slt_as_ult(x: u64, y: u64, m: u64)
+    requires width(m) && x <= m && y <= m
+    ensures !(sv(x, m) >= 0 && sv(x, m) < sv(y, m)) || x < y
+    ensures !(sv(y, m) >= 0 && sv(x, m) >= sv(y, m)) || x >= y
+{}
+
+// `order_facts`: the smaller's bound from below bounds the larger, the larger's from above the smaller, one
+// apart where strict.
+lemma of_chain(lo: int, hi: int, d: int, l: int, h: int)
+    requires d == 0 || d == 1
+    requires lo + d <= hi
+    ensures !(l <= lo) || l + d <= hi
+    ensures !(hi <= h) || lo <= h - d
+{}
+
+// `order_facts`: below a value, a value is not 0; both values of a maximum are below what it is below.
+lemma of_below(x: u64, y: u64, u: u64, w: u64)
+    requires x < y
+    ensures 1 <= y
+    ensures !(x == if u < w {
+        w
+    } else {
+        u
+    }) || u < y && w < y
+{}
+
+// `shv_le`, `signed_counter`: a value at least 0 at most another as signed values is at most it unsigned.
+lemma shv(v: u64, e: u64, m: u64)
+    requires width(m) && v <= m && e <= m && sv(v, m) >= 0 && sv(v, m) <= sv(e, m)
+    ensures v <= e
+{}
+
+// `shv_le`: and below `n` where the other is `n - 1`.
+lemma shv_pred(v: u64, n: u64, m: u64)
+    requires width(m) && v <= m && n <= m && sv(v, m) >= 0
+    requires sv(v, m) <= sv(wrap(n as int + m as int, m) as u64, m)
+    ensures v < n
+{}
+
+// `signed_counter`: up from 0 under `p <s n`, the counter is below `n` unsigned too.
+lemma sc_nonneg_below(p: u64, n: u64, m: u64)
+    requires width(m) && p <= m && n <= m && sv(p, m) >= 0 && sv(p, m) < sv(n, m)
+    ensures p < n
+{}
+
+// `signed_counter`: a step `k` up from within `[e, b]` where `b + k` stays in the type: by induction over the
+// iterations, the counter stays in `[e, max(e, b + k)]` and no step wraps.
+lemma sc_up(e: int, p: int, b: int, k: int, tmax: int)
+    requires e <= p && p <= b && k > 0 && b + k <= tmax
+    ensures e <= p + k && p + k <= b + k && p + k <= tmax
+{}
+
+// `signed_counter`: the mirror, a step down.
+lemma sc_down(e: int, p: int, b: int, k: int, tmin: int)
+    requires b <= p && p <= e && k < 0 && b + k >= tmin
+    ensures b + k <= p + k && p + k <= e && tmin <= p + k
+{}
+
+// `param_bounds`: a midpoint `lo + ((p - lo) >> c)` below `p` where `lo <u p`.
+lemma pb_mid(lo: u64, p: u64, c: u64)
+    requires lo < p && c >= 1 && c < 64
+    ensures lo + (p - lo >> c) < p
+{}
+
+// `param_bounds`: a midpoint `lo + (p - lo) / c` below `p` where `lo <u p`, for `c` at least 2.
+lemma pb_mid_div(lo: u64, p: u64, c: u64)
+    requires lo < p && c >= 2
+    ensures lo + (p - lo) / c < p
+{
+    let d = (p - lo) as int;
+    arith::div_mod(d, c as int);
+    arith::mul_le(2, c as int, d / c as int);
+}
+
+// `param_bounds`: `(lo + p) >> 1` below `p` where `lo <u p` and the start's bound keeps the sum in the type.
+lemma pb_half_sum(lo: u64, p: u64, m: u64)
+    requires width(m) && lo < p && p <= m >> 1
+    ensures lo + p <= m && lo + p >> 1 < p
+{}
+
+// `param_bounds`: a step down by at most the least value wraps nowhere (`p - 1` below a nonzero `p` too).
+lemma pb_down(p: u64, k: u64, lo: u64, m: u64)
+    requires p <= m && lo <= p && k <= lo
+    ensures wrap(p as int + m as int + 1 - k as int, m) == p as int - k as int && p - k <= p
+{
+    arith::mod_unique(p as int + m as int + 1 - k as int, 1, p as int - k as int, m as int + 1);
+}
+
+// `param_bounds`: a step up by `k` with room for it wraps nowhere.
+lemma pb_up(p: u64, k: u64, m: u64)
+    requires k <= m && p <= m - k
+    ensures wrap(p as int + k as int, m) == p as int + k as int && p <= p + k
+{}
+
+// `edge_ub`: one step `k` past a test `p <u c` is at most `c - 1 + k` where that stays in the type.
+lemma eu_below(p: u64, c: u64, k: u64, m: u64)
+    requires c <= m && k <= m && p < c && c - 1 <= m - k
+    ensures wrap(p as int + k as int, m) <= c as int - 1 + k as int
+{}
+
+// `edge_ub`: one step `k` past a test `p <=u c` is at most `c + k` where that stays in the type.
+lemma eu_at_most(p: u64, c: u64, k: u64, m: u64)
+    requires c <= m && k <= m && p <= c && c <= m - k
+    ensures wrap(p as int + k as int, m) <= c as int + k as int
+{}
+
+// `order_decided`: `x <u a + 1` fails where `a <u x` (the sum does not wrap).
+lemma od_succ(a: u64, x: u64, m: u64)
+    requires a < x && x <= m
+    ensures wrap(a as int + 1, m) == a as int + 1 && !(x < a + 1)
+{}
+
+// `order_decided`: `a - q == 0` fails where `q <u a`.
+lemma od_diff_nonzero(a: u64, q: u64)
+    requires q < a
+    ensures a - q != 0
+{}
+
+// `order_decided`: `a + 1 == 0` fails where `a` is below some value.
+lemma od_succ_nonzero(a: u64, f: u64, m: u64)
+    requires f <= m && a < f
+    ensures wrap(a as int + 1, m) != 0
+{}
+
+// `order_decided`, `chunk_end`: `n <u (k << s) + c` fails where `k <u n >> s` and `1 <= c <= 2^s`: the sum does not wrap and
+// is at most `n`.
+lemma od_chunk(k: u64, n: u64, s: u64, c: u64)
+    requires s < 64 && k < n >> s && 1 <= c && c <= 1 << s
+    ensures (k << s) as int + c as int <= n as int
+{
+    let p = 1u64 << s;
+    let q = n >> s;
+    assert q as int * p as int <= n as int by {};
+    arith::mul_le(k as int + 1, q as int, p as int);
+    assert k <= 0xFFFF_FFFF_FFFF_FFFF >> s by {};
+    assert (k << s) as int == k as int * p as int by {};
+}
+
+// `order_decided`: a value at most `y - k` (`k` at least 1, `y` at least `k`) is below `y`.
+lemma od_less_k(x: u64, y: u64, k: u64)
+    requires 1 <= k && k <= y && x <= y - k
+    ensures x < y
+{}
+
+// `order_decided`, `product_le`: a row's element `q * w + z <u y` where `z <u w`, `q <u h` and `w * h` wraps
+// nowhere and is at most `y`.
+lemma od_row(q: u64, w: u64, z: u64, h: u64, y: u64)
+    requires z < w && q < h && w as int * h as int <= y as int
+    ensures q as int * w as int + z as int < y as int
+{
+    arith::mul_le(q as int + 1, h as int, w as int);
+}
+
+// `order_decided`: `p + k <u y` where `p <u w - k`, `k <=u w` and `w <=u y`.
+lemma od_offset(p: u64, k: u64, w: u64, y: u64)
+    requires k <= w && p < w - k && w <= y
+    ensures p + k < y
+{}
+
+// `order_decided`: bounds that keep every value of `x` below every value of `y`, or none.
+lemma od_bounds(x: u64, y: u64, hx: u64, ly: u64, lx: u64, hy: u64)
+    requires x <= hx && ly <= y && lx <= x && y <= hy
+    ensures !(hx < ly) || x < y
+    ensures !(lx >= hy) || !(x < y)
+{}
+
+// `offset_order`: `x <u y` holds where an upper value `u + s` of `x` has `u` at most `ya` and `s + 1 <= dy`
+// (`y` is `ya + dy`), or `u` below `ya` and `s <= dy`.
+lemma oo_below(x: int, u: int, s: int, ya: int, dy: int)
+    requires x <= u + s && (u <= ya && s + 1 <= dy || u < ya && s <= dy)
+    ensures x < ya + dy
+{}
+
+// `offset_order`: it fails where an upper value `u + s` of `y` meets `xa` (`x` is `xa + dx`) the same way: `y`
+// at most `x`.
+lemma oo_not_below(y: int, u: int, s: int, xa: int, dx: int)
+    requires y <= u + s && (u <= xa && s <= dx || u < xa && s <= dx + 1)
+    ensures y <= xa + dx
+{}
+
+// `room`: the room above a difference `a - k` that does not wrap is `k` more than `a`'s.
+lemma room_sub(a: u64, k: u64, ra: u64, m: u64)
+    requires width(m) && a <= m && k <= a && ra <= m && a <= m - ra
+    ensures a - k <= m - ra - k
+{}
+
+// `low_zeros`: a multiple of `p`, a divisor of `2^w`, wraps to a multiple of `p`.
+lemma lz_wrap(v: int, i: int, p: int, n: int, m: u64)
+    requires v >= 0 && p >= 1 && v == i * p && m as int + 1 == n * p
+    ensures wrap(v, m) % p == 0
+{
+    let mm = m as int + 1;
+    arith::div_mod(v, mm);
+    let q = v / mm;
+    arith::mul_eq(q, mm, n * p);
+    assert v % mm == (i - q * n) * p by {};
+    arith::mod_unique(v % mm, i - q * n, 0, p);
+}
+
+// `low_zeros`: a sum of multiples of `p` (the fewer low zeros of the two) is one, after the wrap.
+lemma lz_add(x: u64, y: u64, i: int, j: int, p: int, n: int, m: u64)
+    requires p >= 1 && x as int == i * p && y as int == j * p && m as int + 1 == n * p
+    ensures wrap(x as int + y as int, m) % p == 0
+{
+    lz_wrap(x as int + y as int, i + j, p, n, m);
+}
+
+// `low_zeros`: and so is a difference (`x + 2^w - y`).
+lemma lz_sub(x: u64, y: u64, i: int, j: int, p: int, n: int, m: u64)
+    requires p >= 1 && x as int == i * p && y as int == j * p && m as int + 1 == n * p && y <= m
+    ensures wrap(x as int + m as int + 1 - y as int, m) % p == 0
+{
+    lz_wrap(x as int + m as int + 1 - y as int, i + n - j, p, n, m);
+}
+
+// `low_zeros`: a multiple of `p * r` is a multiple of `p` (the fewest of two counts holds for both).
+lemma lz_fewer(x: int, i: int, p: int, r: int)
+    requires x == i * (p * r)
+    ensures x == i * r * p
+{}
+
+// `low_zeros`: a product of a multiple of `p` and one of `q` is a multiple of `p * q`; a left shift by `s` is a
+// product by `2^s`. With `p * q` a divisor of `2^w` (else `2^w` itself, the count capped at the width), so is
+// the wrapped product.
+lemma lz_mul(x: u64, y: u64, i: int, j: int, p: int, q: int)
+    requires x as int == i * p && y as int == j * q
+    ensures x as int * y as int == i * j * (p * q)
+{
+    arith::mul_eq(x as int, y as int, j * q);
+    arith::mul_eq(j * q, x as int, i * p);
+}
+
+// `low_zeros`: an `and` has the low zeros of either operand.
+lemma lz_and(x: u64, y: u64, lo: u64)
+    requires (lo & lo.wrapping_add(1)) == 0 && (x & lo) == 0
+    ensures (x & y & lo) == 0 && (y & x & lo) == 0
+{}
+
+// `join_arg`: `p - k` (`k` at least 0) that does not wrap, of a `p <=s w`, is `<=s w` too.
+lemma jn_sle_sub(p: u64, k: u64, w: u64, m: u64)
+    requires width(m) && p <= m && k <= m >> 1 && w <= m
+    requires sv(p, m) <= sv(w, m) && -((m >> 1) as int) - 1 + k as int <= sv(p, m)
+    ensures sv(wrap(p as int + m as int + 1 - k as int, m) as u64, m) <= sv(w, m)
+{
+    sr_sub(p, k, m);
 }

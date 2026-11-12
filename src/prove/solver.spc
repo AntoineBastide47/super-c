@@ -25,11 +25,15 @@ import prove::blast as *;
 import prove::sat as *;
 
 // The blocks, chain blocks and solver steps one body may spend.
-pub(package) const STEP_BUDGET: u32 = 200000;
+pub(package) const STEP_BUDGET: u32 = 4000000;
 // The branches of one refutation.
 const SPLITS_MAX: u32 = 256;
+// The levels of `and`, `or` and `not` that `refuted` reads.
+const REFUTE_DEPTH: u32 = 8;
 // The steps of one SAT run (watched clauses visited), and how many make one step of the budget.
 const SAT_STEPS: u32 = 4000000;
+// The SAT steps of an attempt before a split (`lemma_with`).
+const SAT_EARLY_STEPS: u32 = 250000;
 const SAT_STEP_COST: u32 = 64;
 // The cells of one simplex tableau, and the nodes of one branch-and-bound tree.
 const LP_CELLS_MAX: usize = 65536;
@@ -48,10 +52,20 @@ const APPS_MAX: usize = 512;
 // The products one branch and bound may make linear (`fix`).
 const FIXES_MAX: usize = 4;
 // The rounds of Gomory cuts at the root of one branch and bound, and the cuts of one round (`gomory`).
+// The tableau cells a simplex pivot updates for one step of the budget.
+const PIVOT_CELLS: usize = 16;
 const GOMORY_ROUNDS: u32 = 8;
 const GOMORY_CUTS: u32 = 4;
 
 // ---- exact rationals -----------------------------------------------------------------------------
+
+// Whether `a + b` is 0.
+fn opposite<const B: usize>(a: Num<B>, b: Num<B>) bool {
+    return switch ck(a.checked_add(&b)) {
+        Some(s) => s.is_zero(),
+        None => false,
+    };
+}
 
 // `n / d`, reduced, `d > 0`. An operation whose result leaves B bits sets the overflow flag and
 // gives 0: the caller then answers "not proved".
@@ -77,8 +91,8 @@ fn q_make<const B: usize>(n: Num<B>, d: Num<B>, ovf: &mut bool) Q<B> {
     let mut nn = n.div_euclid(&g);
     let mut dd = d.div_euclid(&g);
     if dd.is_negative() {
-        let a = Num::<B>::zero().checked_sub(&nn);
-        let b = Num::<B>::zero().checked_sub(&dd);
+        let a = ck(Num::<B>::zero().checked_sub(&nn));
+        let b = ck(Num::<B>::zero().checked_sub(&dd));
         if a.is_none() || b.is_none() {
             *ovf = true;
             return q_int(Num::<B>::zero());
@@ -90,7 +104,7 @@ fn q_make<const B: usize>(n: Num<B>, d: Num<B>, ovf: &mut bool) Q<B> {
 }
 
 fn q_mul_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
-    switch a.checked_mul(&b) {
+    switch ck(a.checked_mul(&b)) {
         Some(v) => {
             return v;
         },
@@ -102,7 +116,7 @@ fn q_mul_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
 }
 
 fn q_add_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
-    switch a.checked_add(&b) {
+    switch ck(a.checked_add(&b)) {
         Some(v) => {
             return v;
         },
@@ -216,6 +230,7 @@ struct Lp<const B: usize> {
     tab: Vector<Q<B>>, // nr x nv
     expl: Vector<QMult<B>>, // the last conflict
     ovf: bool,
+    ovf_seen: bool, // a load since `Solver::clear_overflow` ran out of bits
     pivots: u32,
 }
 
@@ -241,6 +256,7 @@ extend<const B: usize> Lp<B> {
             tab: Vector::<Q<B>>::new(),
             expl: Vector::<QMult<B>>::new(),
             ovf: false,
+            ovf_seen: false,
             pivots: 0,
         };
     }
@@ -262,6 +278,7 @@ extend<const B: usize> Lp<B> {
         if self.nr * self.nv > LP_CELLS_MAX {
             return false;
         }
+        self.ovf_seen = self.ovf_seen || self.ovf;
         self.ovf = false;
         self.pivots = 0;
         self.lo.clear();
@@ -623,36 +640,38 @@ struct Edge {
 // ---- the branches ----------------------------------------------------------------------------------
 
 // One branch of a refutation: the formulas still to split (`term << 1 | polarity`) and the theory
-// literals it states (`blast::tlit`), the goal's `goals` first.
+// literals it states (`blast::tlit`).
 struct Branch {
     todo: Vector<u64>,
     lits: Vector<u64>,
-    goals: usize,
     // The formulas that split the branch, put off until the theories fail without them (`close`), and
     // the literal count of the last such attempt.
     split: Vector<u64>,
     tried: usize,
+    // The goal's first literal, or NONE_LIT: the bits of the literals that share its unknowns decide the
+    // branch (`Solver::cone`).
+    root: u64,
 }
+
+const NONE_LIT: u64 = 0xFFFFFFFFFFFFFFFF;
 
 extend Branch {
     fn copy(self: &Self) Branch {
         return Branch {
             todo: self.todo.clone(),
             lits: self.lits.clone(),
-            goals: self.goals,
             split: self.split.clone(),
             tried: self.tried,
+            root: self.root,
         };
     }
 
-    // Literal `l`, of the goal when `g` is not 0.
-    fn state(self: &mut Self, l: u64, g: u64) {
-        if g == 0 {
-            self.lits.push(l);
-            return;
+    // Adds literal `l`, the goal's (`from_goal`) first as the root.
+    fn push_lit(self: &mut Self, l: u64, from_goal: bool) {
+        if from_goal && self.root == NONE_LIT {
+            self.root = l;
         }
-        self.lits.insert(self.goals, l);
-        self.goals += 1;
+        self.lits.push(l);
     }
 }
 
@@ -662,6 +681,12 @@ const fn pair(a: u32, b: u32) u64 {
 
 pub(package) struct Solver<const B: usize> {
     pub(package) steps: u32, // the steps spent, against `STEP_BUDGET` with the walk's
+    // The steps a check may reach: STEP_BUDGET, or fewer for a stage that rarely proves (`Prover::holds_in`).
+    pub(package) limit: u32,
+    // Whether a number past B bits that the rows of small numbers do not avoid ends the check (`refute`):
+    // the wide prover proves the body again (`Prover::oblige`). `gave_up` once it did.
+    pub(package) stop_on_ovf: bool,
+    pub(package) gave_up: bool,
     // The integer model of the last branch no solver refuted: atom << 32 | its index in `mval`.
     pub(package) model: Vector<u32>,
     pub(package) mval: Vector<Num<B>>,
@@ -722,6 +747,9 @@ extend<const B: usize> Solver<B> {
     pub(package) fn new() Solver<B> {
         return Solver::<B> {
             steps: 0,
+            limit: STEP_BUDGET,
+            stop_on_ovf: false,
+            gave_up: false,
             model: Vector::<u32>::new(),
             mval: Vector::<Num<B>>::new(),
             lin: Vector::<LinTerm<B>>::new(),
@@ -774,7 +802,7 @@ extend<const B: usize> Solver<B> {
 
     const fn spend(self: &mut Self, n: u32) bool {
         self.steps = self.steps.saturating_add(n);
-        return self.steps <= STEP_BUDGET;
+        return self.steps <= self.limit && !self.gave_up;
     }
 
     // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
@@ -783,6 +811,22 @@ extend<const B: usize> Solver<B> {
     // `bits`, a SAT refutation of their bits does when they hold a bit operation. Then the skeleton of
     // the formulas and the lemmas' clauses must have no model: the kernel checks that the split covers
     // every case.
+    // Whether a simplex ran out of the numbers' bits since `clear_overflow`: wider numbers may prove what
+    // these did not.
+    pub(package) const fn overflowed(self: &Self) bool {
+        return self.lp.ovf_seen || self.lp.ovf;
+    }
+
+    // A value of the proof that leaves B bits.
+    pub(package) const fn note_overflow(self: &mut Self) {
+        self.lp.ovf_seen = true;
+    }
+
+    pub(package) const fn clear_overflow(self: &mut Self) {
+        self.lp.ovf_seen = false;
+        self.lp.ovf = false;
+    }
+
     pub(package) fn implies(self: &mut Self, tm: &Terms<B>, hyps: &Vector<u32>, goal: u32, bits: bool) bool {
         self.model.clear();
         self.mval.clear();
@@ -798,9 +842,9 @@ extend<const B: usize> Solver<B> {
         let mut b0 = Branch {
             todo: Vector::<u64>::new(),
             lits: Vector::<u64>::new(),
-            goals: 0,
             split: Vector::<u64>::new(),
             tried: 0,
+            root: NONE_LIT,
         };
         // Each formula to do: its term, whether the goal's (2), its polarity (1).
         for j in 0..hyps.len() {
@@ -817,7 +861,7 @@ extend<const B: usize> Solver<B> {
             let mut br = open.pop().unwrap();
             switch self.close(tm, &mut br, &mut open, &mut splits, bits) {
                 Some(closed) => {
-                    if !closed && !self.lemma(tm, &br.lits, br.goals, bits) {
+                    if !closed && !self.lemma(tm, &br.lits, br.root, bits) {
                         return false;
                     }
                 },
@@ -829,79 +873,157 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
-    // Whether the theory literals `lits` (the goal's `goals` first) cannot all hold, by a proof the
-    // kernel accepts. With `bits`, a SAT refutation of the bits of the literals that share unknowns
-    // with the goal's (`cone`) first, when they hold a bit operation; then the theory solvers.
-    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, bits: bool) bool {
-        return self.lemma_with(tm, lits, goals, bits, true);
+    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts. With `bits`, a
+    // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
+    // when they hold a bit operation; then the theory solvers.
+    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool) bool {
+        return self.lemma_with(tm, lits, root, bits, true);
     }
 
     // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
-    fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, bits: bool, guess: bool) bool {
+    fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
+        // The theories first: where they decide, they cost a fraction of a SAT search.
+        if let Some(built) = self.kn.state(tm, lits) {
+            if self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf) {
+                return true;
+            }
+        }
         let mut sub = Vector::<u64>::new();
         if bits && Solver::<B>::has_bits(tm, lits) {
-            self.cone(tm, lits, goals, &mut sub);
+            self.cone(tm, lits, root, &mut sub);
         }
         if sub.len() != 0 && Solver::<B>::has_bits(tm, &sub) && self.kn.blast(tm, &sub) {
-            let r = self.sat.solve(&self.kn.bits().cnf, self.sat_budget());
+            // An attempt before a split (no `guess`) has a smaller SAT search: its literals often have a
+            // model the split then removes, and a search for that model can take all the steps.
+            let r = self.sat.solve(&self.kn.bits().cnf, self.sat_budget(pick(guess, SAT_STEPS, SAT_EARLY_STEPS)));
             let _ = self.spend(self.sat.steps / SAT_STEP_COST);
             if r == SAT_REFUTED {
                 return self.kn.blast_lemma(&self.sat.proof);
             }
-            // The goal's literals have a model; the others share none of its unknowns. Not when the bits
-            // leave an application free: they do not make two over equal operands equal.
-            if r == SAT_MODEL && self.kn.bits().vars_only(tm) {
+            if r == SAT_MODEL {
+                // The goal's literals have a model; the others share none of its unknowns.
                 self.sat_model();
-                return false;
             }
         }
-        let built = switch self.kn.state(tm, lits) {
-            Some(x) => x,
-            None => {
+        return false;
+    }
+
+    // Whether formula `t` taken with polarity `pos` (a side of a split: an `or` that holds, an `and` that
+    // fails) is false by the literals `lits` alone: a constant, an atom whose opposite literal they hold, a
+    // conjunction with such a part, a disjunction of such parts; `depth` levels deep.
+    fn refuted(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, t: u32, pos: bool, depth: u32) bool {
+        let x = tm.at(t);
+        if x.op == T_BOOL {
+            return x.k == wide::<B>(1) != pos;
+        }
+        if x.op == T_NOT {
+            return depth != 0 && self.refuted(tm, lits, x.a, !pos, depth - 1);
+        }
+        if x.op == T_AND || x.op == T_OR {
+            if depth == 0 {
                 return false;
-            },
-        };
-        return self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf);
+            }
+            let ra = self.refuted(tm, lits, x.a, pos, depth - 1);
+            // A conjunction that holds (a disjunction that fails) is false where one part is.
+            if x.op == T_AND == pos {
+                return ra || self.refuted(tm, lits, x.b, pos, depth - 1);
+            }
+            return ra && self.refuted(tm, lits, x.b, pos, depth - 1);
+        }
+        // A boolean compared with a constant is that boolean or its negation.
+        if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && depth != 0 {
+            let (k, v) = pick(tm.at(x.b).op == T_BOOL, (x.b, x.a), (x.a, x.b));
+            if tm.at(k).op == T_BOOL {
+                let same = tm.at(k).k == wide::<B>(1) == (x.op == T_EQ);
+                return self.refuted(tm, lits, v, pos == same, depth - 1);
+            }
+        }
+        if (x.op == T_EQ || x.op == T_NE) && (tm.is_bool(x.a) || tm.is_int(x.a) && x.op == T_EQ != pos) {
+            return false;
+        }
+        // `v == k` is false where the literals state `v == k2` for another constant `k2`.
+        if (x.op == T_EQ || x.op == T_NE) && x.op == T_EQ == pos && tm.is_int(x.a) {
+            let (k, v) = pick(tm.at(x.b).op == T_INT, (x.b, x.a), (x.a, x.b));
+            if tm.at(k).op == T_INT && tm.at(v).op != T_INT {
+                for j in 0..lits.len() {
+                    let l = lits[j];
+                    if (l >> 1 & 3) != SEL_ATOM {
+                        continue;
+                    }
+                    let y = tm.at((l >> 3) as u32);
+                    if y.op == T_EQ != ((l & 1) == 1) || y.op != T_EQ && y.op != T_NE {
+                        continue;
+                    }
+                    let (k2, v2) = pick(tm.at(y.b).op == T_INT, (y.b, y.a), (y.a, y.b));
+                    if v2 == v && tm.at(k2).op == T_INT && tm.at(k2).k != tm.at(k).k {
+                        // A lemma the kernel accepts, for the skeleton (`covered`).
+                        let mut two = Vector::<u64>::with_capacity(2);
+                        two.push(l);
+                        two.push(tlit(t, SEL_ATOM, pos));
+                        return self.lemma_with(tm, &two, NONE_LIT, false, false);
+                    }
+                }
+            }
+        }
+        // An order its operands' types decide: `256 <= b` for a byte `b` is false.
+        if (x.op == T_LT || x.op == T_LE) && tm.is_int(x.a) && tm.is_int(x.b) {
+            let strict = x.op == T_LT;
+            if pos {
+                // False where `a`'s least value exceeds (or reaches) `b`'s greatest.
+                if let Some(al) = tm.low(x.a) {
+                    if let Some(bh) = tm.high(x.b) {
+                        if bh < al || strict && bh == al {
+                            return true;
+                        }
+                    }
+                }
+            } else if let Some(ah) = tm.high(x.a) {
+                if let Some(bl) = tm.low(x.b) {
+                    if ah < bl || !strict && ah == bl {
+                        return true;
+                    }
+                }
+            }
+        }
+        let want = tlit(t, SEL_ATOM, !pos);
+        for j in 0..lits.len() {
+            if lits[j] == want {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Whether the skeleton and the lemmas have no model, by a proof the kernel accepts.
     fn covered(self: &mut Self) bool {
-        let r = self.sat.solve(self.kn.skeleton(), self.sat_budget());
+        let r = self.sat.solve(self.kn.skeleton(), self.sat_budget(SAT_STEPS));
         let _ = self.spend(self.sat.steps / SAT_STEP_COST);
         return r == SAT_REFUTED && self.kn.covered(&self.sat.proof);
     }
 
     // The SAT steps one run may take: SAT_STEPS, and no more than the steps left.
-    const fn sat_budget(self: &Self) u32 {
-        return SAT_STEPS.min((STEP_BUDGET + 1 - self.steps.min(STEP_BUDGET)).saturating_mul(SAT_STEP_COST));
+    const fn sat_budget(self: &Self, cap: u32) u32 {
+        return cap.min((self.limit + 1 - self.steps.min(self.limit)).saturating_mul(SAT_STEP_COST));
     }
 
-    // The literals of `lits` that share an unknown with the goal's (its `goals` first ones; every
-    // literal when there is none), directly or through other literals: the rest hold none of their
-    // unknowns, so they cannot help refute it. A union of the unknowns of each literal.
-    fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, goals: usize, out: &mut Vector<u64>) {
+    // The literals of `lits` that share an unknown with `root` (the goal's first, `Branch.root`; the
+    // first literal when the goal has none), directly or through other literals: the rest hold none of
+    // their unknowns, so they cannot help refute it. A union of the unknowns of each literal.
+    fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, out: &mut Vector<u64>) {
         out.clear();
-        if goals == 0 {
-            out.extend_copy(lits);
-            return;
-        }
         self.uf.clear();
         self.ufirst.clear();
+        let mut r = 0usize;
         for j in 0..lits.len() {
             let f = self.unknowns(tm, (lits[j] >> 3) as u32);
             self.ufirst.push(f);
-        }
-        let mut r0 = NONE;
-        for j in 0..goals {
-            let f = self.find(self.ufirst[j]);
-            if r0 == NONE {
-                r0 = f;
-            } else if f != NONE && f != r0 {
-                self.uf.insert(f, r0);
+            if lits[j] == root {
+                r = j;
             }
         }
+        let r0 = self.find(self.ufirst[r]);
         for j in 0..lits.len() {
-            if j < goals || r0 != NONE && self.find(self.ufirst[j]) == r0 {
+            if j == r || r0 != NONE && self.find(self.ufirst[j]) == r0 {
                 out.push(lits[j]);
             }
         }
@@ -1022,20 +1144,22 @@ extend<const B: usize> Solver<B> {
                 if br.split.len() == 0 {
                     return Some(false);
                 }
-                // The literals so far may conflict already: then no split is needed. Only a hypothesis's
-                // split makes the attempt: without one the literals are the hypotheses', which have a
-                // model. The model's guesses wait for the leaves.
-                let mut hyp = false;
-                for j in 0..br.split.len() {
-                    hyp = hyp || (br.split[j] & 2) == 0;
-                }
-                if hyp && br.lits.len() > br.tried {
+                // The literals so far may conflict already: then no split is needed. The model's guesses
+                // wait for the leaves.
+                if br.lits.len() > br.tried {
                     br.tried = br.lits.len();
-                    if self.lemma_with(tm, &br.lits, br.goals, bits, false) {
+                    if self.lemma_with(tm, &br.lits, br.root, bits, false) {
                         return Some(true);
                     }
                 }
-                br.todo.push(br.split.pop().unwrap());
+                // The goal's own cases first: its literals are what the hypotheses' cases close against.
+                let mut at = br.split.len() - 1;
+                for j in 0..br.split.len() {
+                    if (br.split[j] & 2) != 0 {
+                        at = j;
+                    }
+                }
+                br.todo.push(br.split.remove(at).unwrap());
                 deferred = true;
             }
             let e = br.todo.pop().unwrap();
@@ -1046,9 +1170,8 @@ extend<const B: usize> Solver<B> {
             let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
                 x.a,
             ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
-            // The goal's own cases split at once: its literals are what the hypotheses' cases close
-            // against.
-            if splitting && !deferred && !(g != 0 && (x.op == T_AND || x.op == T_OR)) {
+            // Every split waits for the literals: a side they already refute needs none (`refuted`).
+            if splitting && !deferred {
                 br.split.push(e);
                 continue;
             }
@@ -1062,6 +1185,26 @@ extend<const B: usize> Solver<B> {
                 br.todo.push(x.a as u64 << 2 | g | pos as u64);
                 br.todo.push(x.b as u64 << 2 | g | pos as u64);
             } else if x.op == T_AND || x.op == T_OR {
+                // A side the branch's literals already make true satisfies the formula, which then states
+                // nothing the branch does not: no split.
+                if self.refuted(tm, &br.lits, x.a, !pos, REFUTE_DEPTH) || self.refuted(
+                    tm,
+                    &br.lits,
+                    x.b,
+                    !pos,
+                    REFUTE_DEPTH,
+                ) {
+                    continue;
+                }
+                // A side the branch's literals already make false leaves the other alone: no split.
+                if self.refuted(tm, &br.lits, x.a, pos, REFUTE_DEPTH) {
+                    br.todo.push(x.b as u64 << 2 | g | pos as u64);
+                    continue;
+                }
+                if self.refuted(tm, &br.lits, x.b, pos, REFUTE_DEPTH) {
+                    br.todo.push(x.a as u64 << 2 | g | pos as u64);
+                    continue;
+                }
                 *splits += 1;
                 if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
                     return None;
@@ -1077,9 +1220,9 @@ extend<const B: usize> Solver<B> {
                     return None;
                 }
                 let mut other = br.copy();
-                other.state(tlit(t, SEL_GT, true), g);
+                other.push_lit(tlit(t, SEL_GT, true), g != 0);
                 open.push(other);
-                br.state(tlit(t, SEL_LT, true), g);
+                br.push_lit(tlit(t, SEL_LT, true), g != 0);
             } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
                 // Equal booleans: both hold or neither does.
                 *splits += 1;
@@ -1087,6 +1230,11 @@ extend<const B: usize> Solver<B> {
                     return None;
                 }
                 let same = x.op == T_EQ == pos;
+                // The equality stays a literal of both sides: the closure merges the two booleans, so
+                // that `f(a)` and `f(b)` are one value (the skeleton spells it by its operands).
+                if same {
+                    br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
+                }
                 let mut other = br.copy();
                 other.todo.push(x.a as u64 << 2 | g);
                 other.todo.push(x.b as u64 << 2 | g | (!same) as u64);
@@ -1101,7 +1249,7 @@ extend<const B: usize> Solver<B> {
                         return Some(true);
                     }
                 }
-                br.state(tlit(t, SEL_ATOM, pos), g);
+                br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
             }
         }
         return None;
@@ -1116,9 +1264,24 @@ extend<const B: usize> Solver<B> {
         self.pf.clear();
         self.cc_on = false;
         self.cut_for = NONE;
+        // The atoms of the rows, but of the rows of a stated equality of two atoms: the closure takes
+        // that one, and its atoms need no row of the class (`eq_rows`).
         self.ratoms.clear();
-        for j in 0..st.pool.len() {
-            self.ratoms.insert(st.pool[j].atom, true);
+        let mut stated = Map::<u64, bool>::new();
+        for j in 0..st.eqs.len() {
+            stated.insert(st.eqs[j], true);
+        }
+        for r in 0..st.rows.len() {
+            let x = st.rows[r];
+            if x.len == 2 && x.k.is_zero() && opposite(st.pool[x.start as usize].c, st.pool[x.start as usize + 1].c) {
+                let (u, v) = (st.pool[x.start as usize].atom, st.pool[x.start as usize + 1].atom);
+                if stated.contains_key(&pair(u, v)) || stated.contains_key(&pair(v, u)) {
+                    continue;
+                }
+            }
+            for j in x.start..x.start + x.len {
+                self.ratoms.insert(st.pool[j as usize].atom, true);
+            }
         }
         // The atoms of a product's operands too: an equality that fixes one (`a == 0`) reaches the
         // simplex, which then fixes the product (`fix`).
@@ -1160,6 +1323,9 @@ extend<const B: usize> Solver<B> {
                     return false;
                 },
             }
+            if self.class_row(tm, st) {
+                return true;
+            }
         }
         let mut tests: u32 = 0;
         for _round in 0..ROUNDS_MAX {
@@ -1168,8 +1334,19 @@ extend<const B: usize> Solver<B> {
             }
             self.rows_of(tm, st, NONE, NONE);
             let upto = self.pf.facts.len() as u32;
-            let (r, root) = self.bb(tm);
+            let (mut r, mut root) = self.bb(tm);
+            // A number past B bits stops the simplex: the rows of small numbers alone may conflict still
+            // (`x <= 1`, `1 <= x`, `x <= 0` beside a row of 2^200), first those below the size whose
+            // products fit B bits, then those below a quarter of B bits.
+            for shift in [B / 2 - 8, B / 4] {
+                if r == L_ABORT && self.lp.ovf && self.keep_small_rows(shift) {
+                    let again = self.bb(tm);
+                    r = again.0;
+                    root = again.1;
+                }
+            }
             if r == L_ABORT {
+                self.gave_up = self.gave_up || self.stop_on_ovf && self.lp.ovf;
                 return false;
             }
             if r == L_CONFLICT {
@@ -1240,6 +1417,99 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
+    // Whether a row of `st` over atoms of one class, whose coefficients cancel and whose constant is
+    // positive (`a < b` with `a == b`), refutes the branch: it and the class's equalities alone, a few
+    // rows where the whole branch's may not fit the tableau (`LP_CELLS_MAX`).
+    fn class_row(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) bool {
+        for r in 0..st.rows.len() {
+            let x = st.rows[r];
+            if x.len < 2 || !(Num::<B>::zero() < x.k) {
+                continue;
+            }
+            let u0 = switch self.cc_ix.get(&st.pool[x.start as usize].atom) {
+                Some(u) => *u,
+                None => {
+                    continue;
+                },
+            };
+            let mut sum = Num::<B>::zero();
+            let mut one = true;
+            for j in x.start..x.start + x.len {
+                let t = st.pool[j as usize];
+                switch ck(sum.checked_add(&t.c)) {
+                    Some(s) => sum = s,
+                    None => {
+                        one = false;
+                    },
+                }
+                switch self.cc_ix.get(&t.atom) {
+                    Some(u) => {
+                        one = one && self.rep[(*u) as usize] == self.rep[u0 as usize];
+                    },
+                    None => {
+                        one = false;
+                    },
+                }
+            }
+            if !one || !sum.is_zero() {
+                continue;
+            }
+            let mut fs = Vector::<u32>::new();
+            for j in x.start + 1..x.start + x.len {
+                let u = *self.cc_ix.get(&st.pool[j as usize].atom).unwrap();
+                let f = if u == u0 {
+                    NONE
+                } else {
+                    self.explain(u0, u, 0)
+                };
+                if u != u0 && f == NONE {
+                    fs.clear();
+                    break;
+                }
+                if f != NONE {
+                    fs.push(f);
+                }
+            }
+            if fs.len() == 0 {
+                continue;
+            }
+            self.lrows.clear();
+            self.lpool.clear();
+            self.lin.clear();
+            for j in x.start..x.start + x.len {
+                self.lin.push(st.pool[j as usize]);
+            }
+            self.push_lrow(x.k, RowRef { i: r as u32, kind: RW_IN });
+            for j in 0..fs.len() {
+                let f = self.pf.facts[fs[j] as usize];
+                for d in 0..2 {
+                    let (a, b) = pick(d == 0, (f.a, f.b), (f.b, f.a));
+                    self.lin.clear();
+                    let mut k = Num::<B>::zero();
+                    if lin_form(tm, a, Num::<B>::one(), &mut k, &mut self.lin, &mut self.stack) && lin_form(
+                        tm,
+                        b,
+                        wide::<B>(-1),
+                        &mut k,
+                        &mut self.lin,
+                        &mut self.stack,
+                    ) {
+                        self.push_lrow(k, RowRef { i: fs[j], kind: pick(d == 0, RW_EQ_LE, RW_EQ_GE) });
+                    }
+                }
+            }
+            let upto = self.pf.facts.len() as u32;
+            let (res, root) = self.bb(tm);
+            if res == L_CONFLICT {
+                self.pf.trees.push(Tree { root: root, ha: NONE, hb: NONE, upto: upto });
+                self.pf.end = X_LA;
+                self.pf.p = (self.pf.trees.len() - 1) as u32;
+                return true;
+            }
+        }
+        return false;
+    }
+
     // The tree that refutes the rows with the hypothesis `a < b`, NONE when there is none.
     fn implied(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, a: u32, b: u32) u32 {
         self.rows_of(tm, st, a, b);
@@ -1254,11 +1524,31 @@ extend<const B: usize> Solver<B> {
 
     // The simplex rows: the branch's, two per equality fact of `eqf`, and the hypothesis `ha < hb`
     // when `ha` is not NONE; each divided by the gcd of its coefficients.
+    // Whether `p + q` is `a - b` (or `b - a`) for two atoms `a` and `b` the closure merged.
+    fn same_class(self: &Self, p: &LinTerm<B>, q: &LinTerm<B>) bool {
+        if !opposite(p.c, q.c) || !(p.c == Num::<B>::one() || q.c == Num::<B>::one()) {
+            return false;
+        }
+        let (u, v) = (self.cc_ix.get(&p.atom), self.cc_ix.get(&q.atom));
+        if u.is_none() || v.is_none() {
+            return false;
+        }
+        return self.rep[(*u.unwrap()) as usize] == self.rep[(*v.unwrap()) as usize];
+    }
+
     fn rows_of(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, ha: u32, hb: u32) {
         self.lrows.clear();
         self.lpool.clear();
         for r in 0..st.rows.len() {
             let x = st.rows[r];
+            // Half of a stated equality of two atoms of one class: the class's own rows (`eq_rows`)
+            // state it, and a second copy only widens the tableau.
+            if self.cc_on && x.len == 2 && x.k.is_zero() && self.same_class(
+                &st.pool[x.start as usize],
+                &st.pool[x.start as usize + 1],
+            ) {
+                continue;
+            }
             self.lin.clear();
             for j in x.start..x.start + x.len {
                 self.lin.push(st.pool[j as usize]);
@@ -1339,14 +1629,14 @@ extend<const B: usize> Solver<B> {
             }
             for j in i + 1..n {
                 let y = self.lrows[j];
-                if y.len != x.len || Num::<B>::zero() - x.k != y.k || self.erows.len() >= ELIM_EQS_MAX {
+                if y.len != x.len || !opposite(x.k, y.k) || self.erows.len() >= ELIM_EQS_MAX {
                     continue;
                 }
                 let mut opp = true;
                 for q in 0..x.len {
                     let a = self.lpool[(x.start + q) as usize];
                     let b = self.lpool[(y.start + q) as usize];
-                    opp = opp && a.atom == b.atom && Num::<B>::zero() - a.c == b.c;
+                    opp = opp && a.atom == b.atom && opposite(a.c, b.c);
                 }
                 if opp {
                     let start = self.epool.len() as u32;
@@ -1396,7 +1686,7 @@ extend<const B: usize> Solver<B> {
                 }
                 // f - m * e cancels the pivot: c - m * pc == 0 with pc * pc == 1.
                 let mo = if pc.is_negative() {
-                    Num::<B>::zero().checked_sub(&c)
+                    ck(Num::<B>::zero().checked_sub(&c))
                 } else {
                     Some(c)
                 };
@@ -1418,7 +1708,7 @@ extend<const B: usize> Solver<B> {
                 }
                 for q in ex.start..ex.start + ex.len {
                     let t = self.epool[q as usize];
-                    switch t.c.checked_mul(&m) {
+                    switch ck(t.c.checked_mul(&m)) {
                         Some(v) => self.lin.push(LinTerm::<B> { c: Num::<B>::zero() - v, atom: t.atom }),
                         None => {
                             ok = false;
@@ -1426,9 +1716,9 @@ extend<const B: usize> Solver<B> {
                     }
                 }
                 let mut k = fx.k;
-                switch ex.k.checked_mul(&m) {
+                switch ck(ex.k.checked_mul(&m)) {
                     Some(v) => {
-                        switch k.checked_sub(&v) {
+                        switch ck(k.checked_sub(&v)) {
                             Some(d) => k = d,
                             None => {
                                 ok = false;
@@ -1439,11 +1729,14 @@ extend<const B: usize> Solver<B> {
                         ok = false;
                     },
                 }
-                if !ok {
-                    continue;
-                }
                 let len0 = self.lin.len();
-                let len = merge_terms(&mut self.lin, 0, len0);
+                let len = switch merge_terms(&mut self.lin, 0, len0) {
+                    Some(v) if ok => v,
+                    _ => {
+                        self.lp.ovf_seen = true;
+                        continue;
+                    },
+                };
                 self.lin.truncate(len);
                 let cp = self.add_cut(fx.pos, sp, am, upto);
                 let cn = self.add_cut(fx.neg, sn, am, upto);
@@ -1552,7 +1845,13 @@ extend<const B: usize> Solver<B> {
     // up), into the simplex rows. Dropped when a value leaves B bits: fewer rows refute less.
     fn push_lrow(self: &mut Self, k0: Num<B>, r: RowRef) {
         let n0 = self.lin.len();
-        let n = merge_terms(&mut self.lin, 0, n0);
+        let n = switch merge_terms(&mut self.lin, 0, n0) {
+            Some(v) => v,
+            None => {
+                self.lp.ovf_seen = true;
+                return;
+            },
+        };
         let g = switch coef_gcd(&self.lin, 0, n) {
             Some(x) => x,
             None => {
@@ -1576,6 +1875,29 @@ extend<const B: usize> Solver<B> {
 
     // Branch and bound over the simplex rows (`lrows`): L_CONFLICT with the root of a tree that
     // refutes them, L_FEAS with an integer model in `lp.val`, or L_ABORT past a bound.
+    // Drop the simplex rows that hold a number of at least 2^`shift` in magnitude; whether some rows go
+    // and some stay.
+    fn keep_small_rows(self: &mut Self, shift: usize) bool {
+        let big = Num::<B>::one().shl(shift);
+        let nbig = Num::<B>::zero() - big;
+        let small = |x: Num<B>| x < big && nbig < x;
+        let mut w: usize = 0;
+        for i in 0..self.lrows.len() {
+            let x = self.lrows[i];
+            let mut keep = small(x.k);
+            for j in x.start..x.start + x.len {
+                keep = keep && small(self.lpool[j as usize].c);
+            }
+            if keep {
+                self.lrows.set(w, x);
+                w += 1;
+            }
+        }
+        let dropped = w < self.lrows.len();
+        self.lrows.truncate(w);
+        return dropped && w != 0;
+    }
+
     fn bb(self: &mut Self, tm: &Terms<B>) (u8, u32) {
         if !self.lp.load(tm, &self.lrows, &self.lpool) {
             return L_ABORT, NONE;
@@ -1590,10 +1912,12 @@ extend<const B: usize> Solver<B> {
             if !self.spend(1) {
                 return L_ABORT, NONE;
             }
-            let room = STEP_BUDGET + 1 - self.steps;
+            // A pivot updates every cell of the tableau: it costs a step per PIVOT_CELLS cells.
+            let cost = 1 + (self.lp.nr * self.lp.nv / PIVOT_CELLS) as u32;
+            let room = (self.limit + 1 - self.steps.min(self.limit)) / cost + 1;
             let p0 = self.lp.pivots;
             let r = self.lp.check(room);
-            let _ = self.spend(self.lp.pivots - p0);
+            let _ = self.spend((self.lp.pivots - p0).saturating_mul(cost));
             if r == L_ABORT {
                 return L_ABORT, NONE;
             }
@@ -1726,7 +2050,7 @@ extend<const B: usize> Solver<B> {
             let m = if za || zb {
                 Some(Num::<B>::zero())
             } else {
-                oa.unwrap().checked_mul(&vb)
+                ck(oa.unwrap().checked_mul(&vb))
             };
             if m.is_some() && m.unwrap() == self.lp.val[a].n {
                 continue;
@@ -1790,7 +2114,13 @@ extend<const B: usize> Solver<B> {
         ) {
             return false;
         }
-        let n = merge_terms(&mut self.lin, 0, self.lin.len());
+        let n = switch merge_terms(&mut self.lin, 0, self.lin.len()) {
+            Some(v) => v,
+            None => {
+                self.lp.ovf_seen = true;
+                return false;
+            },
+        };
         let g = switch coef_gcd(&self.lin, 0, n) {
             Some(v) => v,
             None => {
@@ -1896,7 +2226,7 @@ extend<const B: usize> Solver<B> {
                 return false;
             }
             let g = gcd(l, a.d);
-            switch l.div_euclid(&g).checked_mul(&a.d) {
+            switch ck(l.div_euclid(&g).checked_mul(&a.d)) {
                 Some(v) => l = v,
                 None => {
                     self.pf.mults.truncate(ms);
@@ -1920,7 +2250,7 @@ extend<const B: usize> Solver<B> {
             let mut e = self.pf.mults[ms + q];
             let d = self.gden[dens + q];
             let scale = l.div_euclid(&d);
-            let m = switch e.m.checked_mul(&scale) {
+            let m = switch ck(e.m.checked_mul(&scale)) {
                 Some(v) => v,
                 None => {
                     ok = false;
@@ -1936,7 +2266,14 @@ extend<const B: usize> Solver<B> {
             self.pf.mults.truncate(ms);
             return false;
         }
-        let n = merge_terms(&mut self.lin, 0, self.lin.len());
+        let n = switch merge_terms(&mut self.lin, 0, self.lin.len()) {
+            Some(v) => v,
+            None => {
+                self.pf.mults.truncate(ms);
+                self.lp.ovf_seen = true;
+                return false;
+            },
+        };
         self.lin.truncate(n);
         let g = switch coef_gcd(&self.lin, 0, n) {
             Some(v) => v,
@@ -2021,16 +2358,16 @@ extend<const B: usize> Solver<B> {
         }
         for t in 0..terms.len() {
             let e = terms[t];
-            switch e.c.checked_mul(&m) {
+            switch ck(e.c.checked_mul(&m)) {
                 Some(c) => self.lin.push(LinTerm::<B> { c: c, atom: e.atom }),
                 None => {
                     return false;
                 },
             }
         }
-        return switch rk.checked_mul(&m) {
+        return switch ck(rk.checked_mul(&m)) {
             Some(v) => {
-                switch k.checked_add(&v) {
+                switch ck(k.checked_add(&v)) {
                     Some(s) => {
                         *k = s;
                         true
@@ -2066,9 +2403,9 @@ extend<const B: usize> Solver<B> {
                     return None;
                 },
             };
-            switch e.c.checked_mul(&v) {
+            switch ck(e.c.checked_mul(&v)) {
                 Some(m) => {
-                    switch s.checked_add(&m) {
+                    switch ck(s.checked_add(&m)) {
                         Some(r) => s = r,
                         None => {
                             return None;
@@ -2107,7 +2444,7 @@ extend<const B: usize> Solver<B> {
         for j in 0..self.lp.expl.len() {
             let d = self.lp.expl[j].q.d;
             let g = gcd(l, d);
-            switch l.div_euclid(&g).checked_mul(&d) {
+            switch ck(l.div_euclid(&g).checked_mul(&d)) {
                 Some(v) => l = v,
                 None => {
                     return false;
@@ -2118,7 +2455,7 @@ extend<const B: usize> Solver<B> {
         for j in 0..self.lp.expl.len() {
             let e = self.lp.expl[j];
             let scale = l.div_euclid(&e.q.d);
-            switch e.q.n.checked_mul(&scale) {
+            switch ck(e.q.n.checked_mul(&scale)) {
                 Some(m) => self.pf.mults.push(Mult::<B> { m: m, r: e.r }),
                 None => {
                     return false;
@@ -2162,9 +2499,9 @@ extend<const B: usize> Solver<B> {
             if v.d != Num::<B>::one() {
                 return None;
             }
-            switch e.c.checked_mul(&v.n) {
+            switch ck(e.c.checked_mul(&v.n)) {
                 Some(p) => {
-                    switch s.checked_add(&p) {
+                    switch ck(s.checked_add(&p)) {
                         Some(q) => s = q,
                         None => {
                             return None;
@@ -2202,28 +2539,33 @@ extend<const B: usize> Solver<B> {
         for j in 0..st.pool.len() {
             self.queue.push(st.pool[j].atom);
         }
-        // Each term, then its operands, in first-seen order.
+        // Each term, then its operands, in first-seen order: a term takes its index when first queued,
+        // so one shared by many others is queued once.
+        let roots = self.queue.len();
         let mut q: usize = 0;
-        for _s in 0..CC_MAX * 4 {
-            if q == self.queue.len() {
-                break;
-            }
-            let t = self.queue[q];
-            q += 1;
-            if self.cc_ix.contains_key(&t) {
-                continue;
-            }
-            if self.cc_term.len() >= CC_MAX {
-                return false;
-            }
-            self.cc_ix.insert(t, self.cc_term.len() as u32);
-            self.cc_term.push(t);
-            tm.operands(t, &mut self.ops);
-            for j in 0..self.ops.len() {
-                self.queue.push(self.ops[j]);
+        for j in 0..roots {
+            let t = self.queue[j];
+            if !self.cc_ix.contains_key(&t) {
+                self.cc_ix.insert(t, self.cc_term.len() as u32);
+                self.cc_term.push(t);
             }
         }
-        if q != self.queue.len() {
+        for _s in 0..CC_MAX + 1 {
+            if q == self.cc_term.len() || self.cc_term.len() > CC_MAX {
+                break;
+            }
+            let t = self.cc_term[q];
+            q += 1;
+            tm.operands(t, &mut self.ops);
+            for j in 0..self.ops.len() {
+                let o = self.ops[j];
+                if !self.cc_ix.contains_key(&o) {
+                    self.cc_ix.insert(o, self.cc_term.len() as u32);
+                    self.cc_term.push(o);
+                }
+            }
+        }
+        if q != self.cc_term.len() || self.cc_term.len() > CC_MAX {
             return false;
         }
         let n = self.cc_term.len();
@@ -2282,7 +2624,7 @@ extend<const B: usize> Solver<B> {
         self.enext.clear();
         self.memo.clear();
         for i in 0..n {
-            if self.ostart[i] != self.ostart[i + 1] {
+            if self.ostart[i] != self.ostart[i + 1] || tm.at(self.cc_term[i]).op == T_INT {
                 let h = self.sig_of(tm, i as u32);
                 // Two terms of one value at two types (`same_op`) are congruent from the start.
                 let hit = switch self.sig.get(&h) {
@@ -2302,8 +2644,9 @@ extend<const B: usize> Solver<B> {
     // The signature of application `u`: its operation and its operands' classes.
     const fn sig_of(self: &Self, tm: &Terms<B>, u: u32) u64 {
         let x = tm.at(self.cc_term[u as usize]);
-        // A sum, difference, product or negation of any type is one operation (`same_op`).
-        let ty = if x.op >= T_ADD && x.op <= T_NEG {
+        // A constant, sum, difference, product, negation, quotient or remainder of any type is one
+        // operation (`same_op`).
+        let ty = if exact_op(x.op) || x.op == T_INT {
             0u64
         } else {
             x.w as u64 << 1 | x.sg as u64
@@ -2333,10 +2676,10 @@ extend<const B: usize> Solver<B> {
         let y = tm.at(self.cc_term[v as usize]);
         let nu = self.ostart[u as usize + 1] - self.ostart[u as usize];
         let nv = self.ostart[v as usize + 1] - self.ostart[v as usize];
-        if !same_op(&x, &y) || nu != nv || nu == 0 {
+        if !same_op(&x, &y) || nu != nv || nu == 0 && x.op != T_INT {
             return false;
         }
-        return self.paired(u, v, false) || nu == 2 && commutes(x.op) && self.paired(u, v, true);
+        return nu == 0 || self.paired(u, v, false) || nu == 2 && commutes(x.op) && self.paired(u, v, true);
     }
 
     // Whether each operand of application `u` is in the class of `v`'s at its place, or with `swap` at
@@ -2721,7 +3064,7 @@ extend<const B: usize> Solver<B> {
         ) {
             return false;
         }
-        return k.is_zero() && merge_terms(&mut self.lin, 0, self.lin.len()) == 0;
+        return k.is_zero() && merge_terms(&mut self.lin, 0, self.lin.len()) == Some(0);
     }
 
     // The equalities to test: for two applications of one operation in different classes, each pair

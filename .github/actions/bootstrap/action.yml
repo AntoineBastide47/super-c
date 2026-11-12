@@ -3,7 +3,9 @@ description: >
   The latest release's compiler for `target`, as ./super-c-boot (.exe on Windows). It lands beside the
   checkout under its own name, never as `super-c`: it resolves std/ffi relative to its OWN executable, so
   at the repo root it picks up the current std/ffi (which is the point of --bootstrap-tags), and a
-  distinct name keeps it intact instead of having the first build replace the binary producing it.
+  distinct name keeps it intact instead of having the first build replace the binary producing it. A
+  build by it passes -fno-prove: its prover may be weaker than the source's proofs need, and the next
+  build from the tree checks them.
 inputs:
   target:
     description: "linux, macos or windows (the release archive's platform)"

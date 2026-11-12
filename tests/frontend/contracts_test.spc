@@ -195,6 +195,12 @@ fn unproved_contracts_are_errors() {
         "fn f(x: u64, y: u64) bool requires x <= y ensures |r| r { return x % 7 == y % 7; }\nfn main() i32 { return f(9, 9) as i32 - 1; }\n",
         "cannot prove this 'ensures' clause",
     );
+    // `k < 4` leaves `k` negative: a function with contracts proves each check of its body.
+    b.add(
+        "a signed index the requires leave negative",
+        "fn at(a: [u32; 4], k: i32) u32 requires k < 4 { return a[k]; }\nfn main() i32 { return at([1, 2, 3, 4], 3) as i32 - 4; }\n",
+        "for example: k = -1",
+    );
     // `u128::MAX + 1` overflows: the counterexample is a 128-bit value.
     b.add(
         "a wide integer's overflow",
@@ -241,7 +247,7 @@ fn unproved_contracts_are_errors() {
     b.add(
         "a bit operation's counterexample from the bits' model",
         "fn f(x: u32, y: u32) u32 ensures |r| r == x { return x ^ y; }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
-        "for example: x = 0, y = 2147483648",
+        "for example: x = 0, y = 1",
     );
     b.add(
         "a wrapping sum past the maximum",
@@ -252,6 +258,21 @@ fn unproved_contracts_are_errors() {
         "a rotation the other rotation does not undo",
         "fn f(x: u32, n: u32) u32 ensures |r| r == x { return x.rotate_left(n).rotate_left(n); }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
         "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "an index past a view's length in a function with contracts",
+        "fn f(v: []u8) u8 requires v.len() == 1 { return v[5]; }\nfn main() i32 { return 0; }\n",
+        "cannot prove that this index is in bounds",
+    );
+    b.add(
+        "a write through a reborrow of the parameter whose view the ensures reads",
+        "import std::spec::seq as *;\nfn f(a: []mut u8) requires a.len() == 3 ensures a.view()[1] == 5 {\n    a[1] = 5;\n    let s = &mut a[0..3];\n    s[1] = 0;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a range past a view's length in a function with contracts",
+        "fn f(v: []u8) u8 requires v.len() == 4 { let s = &v[1..9]; return s[0]; }\nfn main() i32 { return 0; }\n",
+        "cannot prove that this index is in bounds",
     );
     h::expect_build_errs(b);
 }
@@ -1201,7 +1222,149 @@ fn exit_cases_01() {
     let mut b = h::ExitBatch::new();
     spec_syntax_proofs(&mut b);
     seq_proofs(&mut b);
+    view_proofs(&mut b);
     b.run();
+}
+
+// Views and the values a proof keeps: a range of a view or a vector, a `[]mut` parameter a call or a
+// loop's writes through another cannot reach, a `[]mut` read as `[]T`, a drop beside a written view, a
+// choice of equal booleans, a named constant's value.
+fn view_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "ranges of a view and of a vector",
+        M"(import std::spec::seq as *;
+fn mid(v: []u8) u8
+    requires v.len() == 4
+    ensures |r| r == v.view()[1]
+{
+    let s = &v[1..4];
+    return s[0];
+}
+fn tail_sum(v: &Vector<u8>) u32
+    requires v.len() == 3
+{
+    let s = &v[1..=2];
+    return s[0] as u32 + s[1] as u32;
+}
+fn main() i32 {
+    let a: [u8; 4] = [1, 5, 2, 3];
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    v.push(4);
+    if v.len() != 3 {
+        return 1;
+    }
+    return mid(&a[0..4]) as i32 + tail_sum(&v) as i32;
+}
+)",
+        11,
+    );
+    b.add(
+        "a named constant and a choice of equal booleans",
+        M"(import std::spec::seq as *;
+spec fn h(c: bool, a: Seq<u8>, n: int) Seq<u8>
+    decreases n
+{
+    return if n <= 0 || n > a.len() { a } else { h(c, a, n - 1).push(a[n - 1]) };
+}
+lemma same_choice(c1: bool, c2: bool, a: Seq<u8>)
+    requires c1 == c2
+    ensures h(c1, a, 3) == h(c2, a, 3)
+{}
+const N: usize = 4;
+fn at_most_four(k: usize) usize
+    requires k <= 4
+{
+    return k;
+}
+fn total() usize {
+    let mut s = 0usize;
+    for k in 2..N + 1 {
+        s += at_most_four(k);
+    }
+    return s;
+}
+fn main() i32 {
+    return total() as i32;
+}
+)",
+        9,
+    );
+    b.add(
+        "a view a loop's writes through another parameter keep",
+        M"(import std::spec::seq as *;
+fn clear(a: []mut u8, b: []mut u8)
+    requires a.len() == 3 && b.len() == 3
+    ensures a.view()[2] == 0 && b.view()[1] == 5
+{
+    b[1] = 5;
+    for i in 0usize..3
+        invariant a.len() == 3 && b.len() == 3 && b.view()[1] == 5
+        invariant i > 2 ==> a.view()[2] == 0
+    {
+        let mut v = Vector::<u8>::new();
+        v.push(0);
+        a[i] = v[0];
+    }
+}
+fn main() i32 {
+    let mut x: [u8; 3] = [1, 1, 1];
+    let mut y: [u8; 3] = [0, 0, 0];
+    clear(&mut x[0..3], &mut y[0..3]);
+    return (x[0] + x[1] + x[2] + y[1]) as i32;
+}
+)",
+        5,
+    );
+    b.add(
+        "views a call or a drop cannot change",
+        M"(import std::spec::seq as *;
+fn set0(b: []mut u8)
+    requires b.len() == 2
+    ensures b.len() == 2 && b.view()[0] == 7
+{
+    b[0] = 7;
+}
+fn both(a: []mut u8, b: []mut u8)
+    requires a.len() == 2 && b.len() == 2
+    ensures a.view()[0] == 7 && b.view()[0] == 7
+{
+    set0(a);
+    set0(b);
+}
+fn first(x: []u8) u8
+    requires x.len() == 2
+    ensures |r| r == x.view()[0]
+{
+    return x[0];
+}
+fn shared(a: []mut u8) u8
+    requires a.len() == 2
+    ensures |r| r == 9
+{
+    a[0] = 9;
+    return first(a);
+}
+fn kept(a: []mut u8) u32
+    requires a.len() == 2
+    ensures |r| r == 3
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    a[1] = 3;
+    return a[1] as u32;
+}
+fn main() i32 {
+    let mut x: [u8; 2] = [0, 0];
+    let mut y: [u8; 2] = [0, 0];
+    both(&mut x[0..2], &mut y[0..2]);
+    let s = shared(&mut y[0..2]);
+    return (x[0] + y[0] + s) as i32 + kept(&mut x[0..2]) as i32;
+}
+)",
+        28,
+    );
 }
 
 // `==>`, `forall` and `exists` (their instances, a witness, a nested one, a loop invariant), `old`
@@ -1320,25 +1483,6 @@ fn main() i32 {
 }
 )",
         14,
-    );
-    b.add_trap(
-        "a signed index proved below the length keeps the check at 0",
-        M"(fn at(a: [u32; 4], k: i32) u32
-    requires k < 4
-{
-    return a[k];
-}
-fn main(args: Vector<str>) i32 {
-    // -1 at run time (the arguments hold the program's name): a value the build does not know.
-    let k: i32 = if args.len() > 0 {
-        -1
-    } else {
-        3
-    };
-    return at([1, 2, 3, 4], k) as i32;
-}
-)",
-        "index out of bounds",
     );
 }
 

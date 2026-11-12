@@ -65,7 +65,7 @@ jobs:
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
-          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags
+          SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags -fno-prove
           test -x "./$bin"
 
       - uses: actions/upload-artifact@v7
@@ -94,7 +94,7 @@ jobs:
       - name: Build the native and the wasm compiler
         run: |
           set -eu
-          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags
+          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
           ./super-c build --target=wasm --profile=release -o super-c.wasm
 
       - uses: actions/upload-artifact@v7

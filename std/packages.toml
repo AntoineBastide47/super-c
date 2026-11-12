@@ -121,16 +121,17 @@ blocking = "No run-time code."
 errors = "No run-time code: a lemma the prover cannot prove is a compile error of the build that imports it."
 
 [package.crypto]
-# Tier 1: `Secret` and its operations need no operating system and no allocation.
-tier = 1
+# Tier 3: ML-KEM's `keygen` and `encaps` draw their seeds from the operating system's entropy
+# (std::platform::entropy). `Secret`, SHA-256, SHA-3, ChaCha20-Poly1305 and X25519 need no operating system.
+tier = 3
 targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "reduced" }
 limits = "WebAssembly: the engine compiles the module, so the constant-time check covers its instructions, not the machine code the engine makes of them."
-capabilities = []
+capabilities = ["an operating-system entropy source for ML-KEM's `keygen` and `encaps` (through std::platform::entropy)"]
 accelerations = []
-allocator = "Never allocates."
-thread_safety = "`Secret<T>` is a value: `Send` and `Sync` as `T` is."
-blocking = "Never blocks."
-errors = "A shift by an amount not below the width panics; a `@constant_time` function that branches, indexes or divides on a secret is a compile error of the build."
+allocator = "`Secret`, the hashes, ChaCha20-Poly1305 and X25519 never allocate; ML-KEM's functions allocate their working vectors from the global allocator."
+thread_safety = "`Secret<T>` is a value: `Send` and `Sync` as `T` is. No function keeps state between calls."
+blocking = "ML-KEM's `keygen` and `encaps` block while the entropy source is not yet seeded; nothing else blocks."
+errors = "A shift by an amount not below the width panics; a `@constant_time` function that branches, indexes or divides on a secret is a compile error of the build. The proved functions do not panic: ML-KEM's `keygen`, `encaps` and `decaps` return false for a wrong rank or length, a key that fails its check, a failed entropy source, or SampleNTT at its iteration bound."
 c_functions = ["sc_wadd64", "sc_wsub64", "sc_wmul64", "sc_wshl64", "sc_wshr64"]
 
 [package.cpu]

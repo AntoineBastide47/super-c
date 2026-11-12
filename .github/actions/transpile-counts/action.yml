@@ -4,7 +4,8 @@ description: >
   built by clang with its frontend counters from its release profile's C (`--emit-c`, ci/cc_tree.sh): this
   commit's by the compiler under test, the last release's from its tagged sources by its own binary. Both
   then emit this commit's sources as C (`--emit-c`) with `--bootstrap-tags` (which the last release always
-  builds: the bootstrap step), every cache off, on one worker, and llvm-profdata totals each run's counters. A count repeats
+  builds: the bootstrap step; the last release's with -fno-prove, as there), every cache off, on one worker, and
+  llvm-profdata totals each run's counters. A count repeats
   within 0.0001% and covers the compiler's own code only: libc and the kernel are not counted. A growth of WARN_PCT
   percent or more is a warning; LIMIT_PCT percent or more is an error, and the release then waits for an
   approval (.github/actions/transpile-counts-save). Uploads `<target>.tsv`, `<target>-base.tsv` (counts.py
@@ -68,12 +69,13 @@ runs:
         mkdir -p build/counts-base
         cp "$base/build/counts/super-c-counts$x" "build/counts-base/super-c-counts$x"
 
-        # One counted C emission of this commit: $1 the output name, $2 the compiler, $3 its label.
+        # One counted C emission of this commit: $1 the output name, $2 the compiler, $3 its label, $4 its
+        # extra flags (the last release's: -fno-prove, since its prover may not prove this commit's lemmas).
         count() {
           mkdir -p "$w/raw-$1"
           set +e
           env SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
-            "$2" build --profile=debug --jobs=1 --emit-c --bootstrap-tags --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
+            "$2" build --profile=debug --jobs=1 --emit-c --bootstrap-tags ${4:-} --out-dir="$w/tree-$1" >/dev/null 2>"$w/$1.err"
           status=$?
           set -e
           if [ "$status" -ne 0 ]; then
@@ -85,7 +87,7 @@ runs:
           "$pd" merge --text -o "$w/$1.txt" "$w/out/$1.profdata"
           "$py" -I "$GITHUB_ACTION_PATH/counts.py" summarize "$w/$1.txt" "$w/out/$1.tsv" "$3" "$ccv"
         }
-        count "$TARGET-base" "./build/counts-base/super-c-counts$x" "$BASE_TAG ($(git rev-parse --short "$BASE_TAG^{commit}"))"
+        count "$TARGET-base" "./build/counts-base/super-c-counts$x" "$BASE_TAG ($(git rev-parse --short "$BASE_TAG^{commit}"))" -fno-prove
         count "$TARGET" "./build/counts/super-c-counts$x" "(${SHA:0:7})"
 
         "$py" -I "$GITHUB_ACTION_PATH/counts.py" check "$TARGET" "$w/out/$TARGET-base.tsv" "$w/out/$TARGET.tsv" \

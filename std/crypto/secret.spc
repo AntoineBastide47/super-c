@@ -43,6 +43,12 @@ extend<T: SecretWord> Secret<T> {
         return Secret::<T> { v: x };
     }
 
+    /// The value, for proofs: the prover gives each method its meaning on it (`add` wraps, `pick`
+    /// selects, ...), so a specification states what a function on secrets computes.
+    pub spec fn value(self: Secret<T>) T {
+        return self.v;
+    }
+
     /// The value, which no check counts as secret from here on: the one way out of a `Secret`.
     @constant_time
     pub const fn declassify(self: Secret<T>) T {

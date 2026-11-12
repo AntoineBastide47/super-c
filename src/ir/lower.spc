@@ -1788,6 +1788,11 @@ extend Lowerer {
             }
             let ty = self.nty(c.expr);
             let o = self.temp(ty, osp);
+            // The snapshot lives for the whole body: each `old` node reads it, in a loop's invariant at
+            // every iteration, so no reading expression owns it (`own_temp`) and none ends its storage.
+            let mut ld = *self.body.locals.at(o as usize);
+            ld.decl = c.expr;
+            self.body.locals.set(o as usize, ld);
             let opl = self.place_of_local(o);
             self.assign(opl, self.rv_use(op, ty), osp);
             self.bind(c.expr, o);

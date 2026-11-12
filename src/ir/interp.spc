@@ -8505,6 +8505,10 @@ extend Interp {
                     o = po;
                 }
                 if o || !fits(ob, u as i64, self.pw()) {
+                    if bt_unbounded(ob) {
+                        // An `int` or `nat` value past 64 bits: no overflow, only one this engine cannot hold.
+                        return self.bail();
+                    }
                     self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
                     return none();
                 }
@@ -8558,6 +8562,9 @@ extend Interp {
                 mul_ovf(a, c)
             };
             if o.ovf {
+                if bt_unbounded(ob) {
+                    return self.bail();
+                }
                 self.it_trap(IT_TRAP_UB_OVERFLOW, "arithmetic overflow");
                 return none();
             }

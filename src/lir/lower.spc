@@ -406,10 +406,27 @@ extend Lower {
             return false;
         }
         // A type naming a parameter means what the bindings in place make it.
-        if Lower::ast(c, m).type_concrete(t) {
+        if Lower::same_in_every_body(c, m, t) {
             self.cc.tcache.insert(key, *out);
         }
         return true;
+    }
+
+    // Whether type `(m, t)` means one thing in every body: a concrete type other than a closure with
+    // captures, whose environment holds the types the enclosing instance binds (one closure type, the
+    // closure node's, in every instance).
+    fn same_in_every_body(c: &mut cbe::CEmit, m: ModuleId, t: TypeId) bool {
+        let a = Lower::ast(c, m);
+        if !a.type_concrete(t) {
+            return false;
+        }
+        let y = *a.type_at(t);
+        if y.kind != TypeKind::TYPE_FUNCTION || y.fn_sig() {
+            return true;
+        }
+        let mut tys = Vector::<TypeId>::new();
+        let mut by_ref: u64 = 0;
+        return !Lower::ast(c, y.module).closure_env(y.as_data.decl, &mut tys, &mut by_ref);
     }
 
     fn ty_raw(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId, out: &mut TyI) bool {
@@ -823,7 +840,7 @@ extend Lower {
                 if !self.leaves(c, m, t, 0, &mut leaves, 0) {
                     leaves.truncate(ast::pick(leaves.len() > 16, 16usize, 0usize));
                 }
-                if self.err.len() == 0 && Lower::ast(c, gm).type_concrete(gt) {
+                if self.err.len() == 0 && Lower::same_in_every_body(c, gm, gt) {
                     self.cc.lcache.insert(key, self.cc.lpool.len() as u64 << 32 | leaves.len() as u64);
                     self.cc.lpool.extend_copy(&leaves);
                 }
@@ -1005,7 +1022,7 @@ extend Lower {
         if !self.fields_of_i(c, rm, rt, out) {
             return false;
         }
-        if Lower::ast(c, rm).type_concrete(rt) {
+        if Lower::same_in_every_body(c, rm, rt) {
             self.cc.fcache.insert(key, self.cc.fpool.len() as u64 << 32 | (out.len() - n0) as u64);
             for k in n0..out.len() {
                 self.cc.fpool.push(out[k]);
@@ -2815,7 +2832,7 @@ extend Lower {
         for x in 0..offs.len() {
             self.b.owned.push(k << 32 | offs[x] as u64);
         }
-        if Lower::ast(c, gm).type_concrete(gt) {
+        if Lower::same_in_every_body(c, gm, gt) {
             self.cc.ocache.insert(key, self.cc.opool.len() as u64 << 32 | offs.len() as u64);
             self.cc.opool.extend_copy(&offs);
         }
@@ -2871,7 +2888,7 @@ extend Lower {
         self.give_fields(fl);
     }
 
-    // `frozen` at FROZEN_DEPTH, once per concrete type.
+    // `frozen` at FROZEN_DEPTH, once per type of one meaning in every body.
     fn frozen_top(self: &mut Self, c: &mut cbe::CEmit, m: ModuleId, t: TypeId) bool {
         let (gm, gt) = self.grounded(c, m, t);
         let key = Lower::tkey(c, gm, gt);
@@ -2879,7 +2896,7 @@ extend Lower {
             return *z;
         }
         let z = self.frozen(c, m, t, FROZEN_DEPTH);
-        if Lower::ast(c, gm).type_concrete(gt) {
+        if Lower::same_in_every_body(c, gm, gt) {
             self.cc.zcache.insert(key, z);
         }
         return z;
@@ -3867,7 +3884,7 @@ extend Lower {
         if !self.enum_of_i(c, rm, rt, out) {
             return false;
         }
-        if Lower::ast(c, rm).type_concrete(rt) {
+        if Lower::same_in_every_body(c, rm, rt) {
             self.cc.ecache.insert(key, *out);
         }
         return true;

@@ -23,7 +23,7 @@ pub(package) const NONE: u32 = 0xFFFFFFFF;
 // 830).
 pub(package) const LIN_MAX: u32 = 4096;
 // The most products of atoms a product of sums expands into (`Terms::product`).
-const MUL_TERMS_MAX: usize = 16;
+const MUL_TERMS_MAX: usize = 32;
 const GCD_MAX: u32 = 900;
 
 // Term operations. Integers are exact (mathematical) values of their type; booleans are formulas.
@@ -72,10 +72,17 @@ const fn compound(op: u8) bool {
 }
 
 // Whether terms `x` and `y` are one operation (their operands aside): the same operation of the same
-// type, or the same sum, difference, product or negation, whose exact value no type changes.
+// type, or the same constant, sum, difference, product, negation, quotient or remainder, whose exact
+// value no type changes (a quotient truncates toward zero and a remainder takes the dividend's sign at
+// every type).
 pub(package) const fn same_op<const B: usize>(x: &Term<B>, y: &Term<B>) bool {
-    let ring = x.op >= T_ADD && x.op <= T_NEG;
-    return x.op == y.op && x.k == y.k && (ring || x.w == y.w && x.sg == y.sg);
+    return x.op == y.op && x.k == y.k && (exact_op(x.op) || x.op == T_INT || x.w == y.w && x.sg == y.sg);
+}
+
+// Whether operation `op` has one exact value at every type: a sum, difference, product, negation,
+// quotient or remainder.
+pub(package) const fn exact_op(op: u8) bool {
+    return op >= T_ADD && op <= T_REM;
 }
 
 // Whether binary operation `op` gives the same value with its operands swapped: congruence then
@@ -122,6 +129,10 @@ pub(package) struct Terms<const B: usize> {
     // bit operation, a shift, a cast, a division, a remainder, an order, a product of two unknowns),
     // under sums, products and formulas.
     pub(package) bitty: Vector<bool>,
+    // A constant of at least 2^(B/2 - 8) in magnitude was made since the prover last cleared it: a product
+    // or a sum of such constants can leave B bits, which drops a fact (`prove_fits`).
+    pub(package) big_seen: bool,
+    big: Num<B>,
 }
 
 pub(package) const fn hmix(h: u64, v: u64) u64 {
@@ -147,6 +158,8 @@ extend<const B: usize> Terms<B> {
             args: Vector::<u32>::new(),
             nvars: 0,
             bitty: Vector::<bool>::new(),
+            big_seen: false,
+            big: Num::<B>::one().shl(B / 2 - 8),
         };
     }
 
@@ -224,6 +237,13 @@ extend<const B: usize> Terms<B> {
     }
 
     pub(package) fn int(self: &mut Self, k: Num<B>, w: u16, sg: bool) u32 {
+        if !self.big_seen && (!(k < self.big) || !(Num::<B>::zero() - self.big < k)) {
+            self.big_seen = true;
+        }
+        // The least number has no negation: no term holds it (`ck`), an unknown value stands for it.
+        if ck(Some(k)).is_none() {
+            return self.var(w, sg);
+        }
         return self.make(Term::<B> { k: k, a: 0, b: 0, op: T_INT, w: w, sg: sg });
     }
 
@@ -257,16 +277,47 @@ extend<const B: usize> Terms<B> {
 
     // An arithmetic or bit operation of type (`w`, `sg`); two constants fold when the exact result fits
     // B bits (an arithmetic one only: the atoms keep their node).
-    pub(package) fn arith(self: &mut Self, op: u8, a: u32, b: u32, w: u16, sg: bool) u32 {
+    pub(package) fn arith(self: &mut Self, op: u8, a: u32, b0: u32, w: u16, sg: bool) u32 {
         let x = self.ts[a as usize];
+        // A shift's count has one term whatever its type: `x << 24u32` is `x << 24usize`, `x >> (n as u32)`
+        // is `x >> n`. Every path that shifts has a count below the width (the check before the shift),
+        // which each integer type holds.
+        let mut b = b0;
+        if op == T_SHL || op == T_SHR {
+            for _k in 0..4 {
+                let c = self.ts[b as usize];
+                if c.op != T_CAST || !self.is_int(c.a) {
+                    break;
+                }
+                b = c.a;
+            }
+            let c = self.ts[b as usize];
+            if c.op == T_INT && !c.k.is_negative() && c.w != 64 {
+                b = self.int(c.k, 64, false);
+            }
+        }
         let y = self.ts[b as usize];
         if x.op == T_INT && y.op == T_INT {
             let r = if op == T_ADD {
-                x.k.checked_add(&y.k)
+                ck(x.k.checked_add(&y.k))
             } else if op == T_SUB {
-                x.k.checked_sub(&y.k)
+                ck(x.k.checked_sub(&y.k))
             } else if op == T_MUL {
-                x.k.checked_mul(&y.k)
+                ck(x.k.checked_mul(&y.k))
+            } else if (op == T_DIV || op == T_REM) && !y.k.is_zero() {
+                // Truncated toward zero; the remainder takes the dividend's sign.
+                let z = Num::<B>::zero();
+                let ya = y.k.abs();
+                let q0 = x.k.abs().div_euclid(&ya);
+                let q = pick(x.k.is_negative() != y.k.is_negative(), z - q0, q0);
+                let (lo, hi) = Terms::<B>::range(w, sg);
+                if !exact_w(w) && (q < lo || hi < q) {
+                    Option::<Num<B>>::None
+                } else if op == T_DIV {
+                    Some(q)
+                } else {
+                    Some(x.k - y.k * q)
+                }
             } else {
                 Option::<Num<B>>::None
             };
@@ -274,11 +325,49 @@ extend<const B: usize> Terms<B> {
                 return self.int(v, w, sg);
             }
         }
-        if (op == T_ADD || op == T_SUB) && y.op == T_INT && y.k.is_zero() {
+        if (op == T_ADD || op == T_SUB || op == T_SHL || op == T_SHR) && y.op == T_INT && y.k.is_zero() {
             return a;
         }
-        if op == T_ADD && x.op == T_INT && x.k.is_zero() {
+        // A sum or difference with constant parts is its base plus one constant, as `u + c` or `u - c` (`c`
+        // above 0): one term for one value (`t + 16 - 2` and `14 + (t + 2)` are `t + 16`).
+        if (op == T_ADD || op == T_SUB) && (x.op == T_INT || y.op == T_INT) && !(x.op == T_INT && y.op == T_INT) {
+            let (bx, cx) = self.off_split(a, w, sg);
+            let (by, cy) = self.off_split(b, w, sg);
+            let folds = bx != a || by != b;
+            if folds && (op == T_ADD && bx == NONE != (by == NONE) || op == T_SUB && by == NONE && bx != NONE) {
+                let base = pick(bx == NONE, by, bx);
+                let sum = if op == T_ADD {
+                    ck(cx.checked_add(&cy))
+                } else {
+                    ck(cx.checked_sub(&cy))
+                };
+                if let Some(c) = sum {
+                    if c.is_zero() {
+                        return base;
+                    }
+                    let neg = c.is_negative();
+                    let kv = self.int(pick(neg, Num::<B>::zero() - c, c), w, sg);
+                    if neg {
+                        return self.make(Term::<B> { k: Num::<B>::zero(), a: base, b: kv, op: T_SUB, w: w, sg: sg });
+                    }
+                    return self.make(
+                        Term::<B> {
+                            k: Num::<B>::zero(),
+                            a: pick(base < kv, base, kv),
+                            b: pick(base < kv, kv, base),
+                            op: T_ADD,
+                            w: w,
+                            sg: sg,
+                        },
+                    );
+                }
+            }
+        }
+        if (op == T_ADD || op == T_BOR || op == T_BXOR) && x.op == T_INT && x.k.is_zero() {
             return b;
+        }
+        if (op == T_BOR || op == T_BXOR) && y.op == T_INT && y.k.is_zero() {
+            return a;
         }
         if op == T_MUL && x.op != T_INT && y.op != T_INT && (compound(x.op) || compound(y.op)) {
             let r = self.product(a, b, w, sg);
@@ -291,6 +380,26 @@ extend<const B: usize> Terms<B> {
             return self.make(Term::<B> { k: Num::<B>::zero(), a: b, b: a, op: op, w: w, sg: sg });
         }
         return self.make(Term::<B> { k: Num::<B>::zero(), a: a, b: b, op: op, w: w, sg: sg });
+    }
+
+    // Term `t` of type (`w`, `sg`) as a base and a constant offset: `u + c` and `c + u` are (`u`, `c`), `u - c`
+    // is (`u`, `-c`), a constant `c` is (NONE, `c`), another term is (`t`, 0).
+    pub(package) const fn off_split(self: &Self, t: u32, w: u16, sg: bool) (u32, Num<B>) {
+        let x = self.ts[t as usize];
+        if x.op == T_INT {
+            return NONE, x.k;
+        }
+        if (x.op == T_ADD || x.op == T_SUB) && x.w == w && x.sg == sg {
+            let xa = self.ts[x.a as usize];
+            let xb = self.ts[x.b as usize];
+            if xb.op == T_INT && xa.op != T_INT {
+                return x.a, pick(x.op == T_ADD, xb.k, Num::<B>::zero() - xb.k);
+            }
+            if x.op == T_ADD && xa.op == T_INT && xb.op != T_INT {
+                return x.b, xa.k;
+            }
+        }
+        return t, Num::<B>::zero();
     }
 
     // `a * b` as a sum of products of atoms with constant coefficients, each product's factors in
@@ -312,9 +421,13 @@ extend<const B: usize> Terms<B> {
         ) {
             return NONE;
         }
-        let na = merge_terms(&mut la, 0, la.len());
+        let (na, nb) = switch (merge_terms(&mut la, 0, la.len()), merge_terms(&mut lb, 0, lb.len())) {
+            (Some(x), Some(y)) => (x, y),
+            _ => {
+                return NONE;
+            },
+        };
         la.truncate(na);
-        let nb = merge_terms(&mut lb, 0, lb.len());
         lb.truncate(nb);
         let ca = na + (!ka.is_zero()) as usize;
         let cb = nb + (!kb.is_zero()) as usize;
@@ -325,7 +438,7 @@ extend<const B: usize> Terms<B> {
         for i in 0..na {
             for j in 0..nb {
                 let m = self.monomial(la[i].atom, lb[j].atom, w, sg);
-                switch la[i].c.checked_mul(&lb[j].c) {
+                switch ck(la[i].c.checked_mul(&lb[j].c)) {
                     Some(c) => out.push(LinTerm::<B> { c: c, atom: m }),
                     None => {
                         return NONE;
@@ -333,7 +446,7 @@ extend<const B: usize> Terms<B> {
                 }
             }
             if !kb.is_zero() {
-                switch la[i].c.checked_mul(&kb) {
+                switch ck(la[i].c.checked_mul(&kb)) {
                     Some(c) => out.push(LinTerm::<B> { c: c, atom: la[i].atom }),
                     None => {
                         return NONE;
@@ -343,7 +456,7 @@ extend<const B: usize> Terms<B> {
         }
         if !ka.is_zero() {
             for j in 0..nb {
-                switch lb[j].c.checked_mul(&ka) {
+                switch ck(lb[j].c.checked_mul(&ka)) {
                     Some(c) => out.push(LinTerm::<B> { c: c, atom: lb[j].atom }),
                     None => {
                         return NONE;
@@ -351,13 +464,18 @@ extend<const B: usize> Terms<B> {
                 }
             }
         }
-        let k = switch ka.checked_mul(&kb) {
+        let k = switch ck(ka.checked_mul(&kb)) {
             Some(v) => v,
             None => {
                 return NONE;
             },
         };
-        let n = merge_terms(&mut out, 0, out.len());
+        let n = switch merge_terms(&mut out, 0, out.len()) {
+            Some(v) => v,
+            None => {
+                return NONE;
+            },
+        };
         let mut r = self.int(k, w, sg);
         for j in 0..n {
             let e = out[j];
@@ -415,7 +533,7 @@ extend<const B: usize> Terms<B> {
     pub(package) fn neg(self: &mut Self, a: u32, w: u16, sg: bool) u32 {
         let x = self.ts[a as usize];
         if x.op == T_INT {
-            if let Some(v) = Num::<B>::zero().checked_sub(&x.k) {
+            if let Some(v) = ck(Num::<B>::zero().checked_sub(&x.k)) {
                 return self.int(v, w, sg);
             }
         }
@@ -444,6 +562,50 @@ extend<const B: usize> Terms<B> {
         }
         if a == b {
             return self.boolean(op == T_LE || op == T_EQ);
+        }
+        // A constant against a value of another integer type is the constant of the value's type where it
+        // fits, so that `n as int == 4` and `n == 4` are one atom.
+        if x.op == T_INT != (y.op == T_INT) {
+            let (c, v) = pick(x.op == T_INT, (x, y), (y, x));
+            if v.w > W_BOOL && (c.w != v.w || c.sg != v.sg) {
+                let (lo, hi) = Terms::<B>::range(v.w, v.sg);
+                let fits = if exact_w(v.w) {
+                    v.w != W_NAT || !c.k.is_negative()
+                } else {
+                    lo <= c.k && c.k <= hi
+                };
+                if fits {
+                    let k = self.int(c.k, v.w, v.sg);
+                    if x.op == T_INT {
+                        return self.cmp(op, k, b);
+                    }
+                    return self.cmp(op, a, k);
+                }
+            }
+        }
+        // Two aggregates of one shape are equal where each two members at one place are; an aggregate and
+        // another value of its type, where each member is that value's member at its place.
+        if (op == T_EQ || op == T_NE) && (x.op == T_AGG || y.op == T_AGG) && (x.op != T_AGG || y.op != T_AGG || x.b == y.b) && x.w == W_OTHER && y.w == W_OTHER {
+            let (ag, other) = pick(x.op == T_AGG, (x, b), (y, a));
+            let both = x.op == T_AGG && y.op == T_AGG;
+            let mut r = self.boolean(true);
+            for j in 0..ag.b {
+                let m = self.args[(ag.a + j) as usize];
+                let o = if both {
+                    self.args[(pick(x.op == T_AGG && ag.a == x.a, y.a, x.a) + j) as usize]
+                } else {
+                    let key = self.int(wide::<B>(j), 64, false);
+                    let mt = self.ts[m as usize];
+                    self.sel(other, key, mt.w, mt.sg)
+                };
+                let e = self.cmp(T_EQ, m, o);
+                r = self.and(r, e);
+            }
+            return if op == T_EQ {
+                r
+            } else {
+                self.not(r)
+            };
         }
         // An order against a constant is a comparison of its operands.
         if x.op == T_ORD && y.op == T_INT {
@@ -654,6 +816,23 @@ extend<const B: usize> Terms<B> {
     }
 
     // Whether integer `t` is in its type's range, as a formula.
+    // Whether the value of integer `t` is one of type (`w`, `sg`).
+    pub(package) fn in_type(self: &mut Self, t: u32, w: u16, sg: bool) u32 {
+        if w == W_INT {
+            return self.boolean(true);
+        }
+        let z = self.int(Num::<B>::zero(), w, sg);
+        if w == W_NAT {
+            return self.cmp(T_LE, z, t);
+        }
+        let (lo, hi) = Terms::<B>::range(w, sg);
+        let l = self.int(lo, w, sg);
+        let h = self.int(hi, w, sg);
+        let c1 = self.cmp(T_LE, l, t);
+        let c2 = self.cmp(T_LE, t, h);
+        return self.and(c1, c2);
+    }
+
     pub(package) fn in_range(self: &mut Self, t: u32) u32 {
         let x = self.ts[t as usize];
         if exact_w(x.w) {
@@ -673,11 +852,12 @@ extend<const B: usize> Terms<B> {
 
     // The bounds of atom `t`, None where it has none: its type's range, narrowed for a remainder by a
     // positive constant and a mask of an unsigned value. A product of two unknowns is an exact value,
-    // which may lie outside its type (an overflow obligation asks whether it does): its bounds are the
-    // products of its operands' ranges, None when one leaves B bits or an operand is such a product.
+    // which may lie outside its type (an overflow obligation asks whether it does), an `int` or `nat`
+    // one too: its bounds are the products of its operands' ranges, None when one leaves B bits or an
+    // operand is such a product or an `int` or `nat`.
     pub(package) fn bounds(self: &Self, t: u32) Option<(Num<B>, Num<B>)> {
         let x = self.ts[t as usize];
-        if x.w <= W_BOOL || exact_w(x.w) {
+        if x.w <= W_BOOL {
             return None;
         }
         if x.op == T_ORD {
@@ -695,7 +875,7 @@ extend<const B: usize> Terms<B> {
             let mut lo = Num::<B>::zero();
             let mut hi = Num::<B>::zero();
             for j in 0..4 {
-                switch ends[j / 2].checked_mul(&ends[2 + j % 2]) {
+                switch ck(ends[j / 2].checked_mul(&ends[2 + j % 2])) {
                     Some(v) => {
                         if j == 0 || v < lo {
                             lo = v;
@@ -710,6 +890,9 @@ extend<const B: usize> Terms<B> {
                 }
             }
             return Some((lo, hi));
+        }
+        if exact_w(x.w) {
+            return None;
         }
         let (lo, hi) = Terms::<B>::range(x.w, x.sg);
         if !x.sg && (x.op == T_REM || x.op == T_BAND) {
@@ -783,7 +966,7 @@ pub(package) fn gcd<const B: usize>(a0: Num<B>, b0: Num<B>) Num<B> {
 // |x|, None for the one value whose magnitude leaves B bits.
 pub(package) fn mag<const B: usize>(x: Num<B>) Option<Num<B>> {
     if x.is_negative() {
-        return Num::<B>::zero().checked_sub(&x);
+        return ck(Num::<B>::zero().checked_sub(&x));
     }
     return Some(x);
 }
@@ -812,8 +995,25 @@ pub(package) struct LinTerm<const B: usize> {
     pub(package) atom: u32,
 }
 
-// Sort the terms [s, e) of `v` by atom and merge equal atoms, dropping zero coefficients; the new end.
-pub(package) fn merge_terms<const B: usize>(v: &mut Vector<LinTerm<B>>, s: usize, e: usize) usize {
+// `r` unless it is the least number of B bits, which has no negation: no number of the prover is, so
+// each negation fits. A checked operation's result goes through it.
+pub(package) const fn ck<const B: usize>(r: Option<Num<B>>) Option<Num<B>> {
+    if let Some(v) = r {
+        if v.limb(B / 64 - 1) == 1u64 << 63 && v.is_negative() {
+            for j in 0..B / 64 - 1 {
+                if v.limb(j) != 0 {
+                    return r;
+                }
+            }
+            return None;
+        }
+    }
+    return r;
+}
+
+// Sort the terms [s, e) of `v` by atom and merge equal atoms, dropping zero coefficients; the new end,
+// none when a merged coefficient leaves B bits.
+pub(package) fn merge_terms<const B: usize>(v: &mut Vector<LinTerm<B>>, s: usize, e: usize) Option<usize> {
     for j in s + 1..e {
         let x = v[j];
         let mut q = j;
@@ -829,7 +1029,12 @@ pub(package) fn merge_terms<const B: usize>(v: &mut Vector<LinTerm<B>>, s: usize
         let mut x = v[j];
         j += 1;
         while j < e && v[j].atom == x.atom {
-            x.c = x.c + v[j].c;
+            x.c = (switch ck(x.c.checked_add(&v[j].c)) {
+                Some(c) => c,
+                None => {
+                    return None;
+                },
+            });
             j += 1;
         }
         if !x.c.is_zero() {
@@ -837,7 +1042,7 @@ pub(package) fn merge_terms<const B: usize>(v: &mut Vector<LinTerm<B>>, s: usize
             o += 1;
         }
     }
-    return o;
+    return Some(o);
 }
 
 // `sum(c * atom) + k <= 0`, its terms [start, start + len) of a pool, sorted by atom.
@@ -868,8 +1073,8 @@ pub(package) fn lin_form<const B: usize>(
         let x = tm.at(e.atom);
         if x.op == T_INT {
             let mut ok = false;
-            if let Some(v) = e.c.checked_mul(&x.k) {
-                if let Some(sum) = k.checked_add(&v) {
+            if let Some(v) = ck(e.c.checked_mul(&x.k)) {
+                if let Some(sum) = ck(k.checked_add(&v)) {
                     *k = sum;
                     ok = true;
                 }
@@ -882,7 +1087,7 @@ pub(package) fn lin_form<const B: usize>(
             let cb = if x.op == T_ADD {
                 Some(e.c)
             } else {
-                Num::<B>::zero().checked_sub(&e.c)
+                ck(Num::<B>::zero().checked_sub(&e.c))
             };
             switch cb {
                 Some(v) => stack.push(LinTerm::<B> { c: v, atom: x.b }),
@@ -891,7 +1096,7 @@ pub(package) fn lin_form<const B: usize>(
                 },
             }
         } else if x.op == T_NEG {
-            switch Num::<B>::zero().checked_sub(&e.c) {
+            switch ck(Num::<B>::zero().checked_sub(&e.c)) {
                 Some(v) => stack.push(LinTerm::<B> { c: v, atom: x.a }),
                 None => {
                     return false;
@@ -903,7 +1108,7 @@ pub(package) fn lin_form<const B: usize>(
             } else {
                 (tm.at(x.b).k, x.a)
             };
-            switch e.c.checked_mul(&kc) {
+            switch ck(e.c.checked_mul(&kc)) {
                 Some(v) => stack.push(LinTerm::<B> { c: v, atom: other }),
                 None => {
                     return false;

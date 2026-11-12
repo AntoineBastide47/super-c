@@ -248,16 +248,16 @@ extend<const B: usize> Eval<B> {
         let one = Num::<B>::one();
         let z = Num::<B>::zero();
         if x.op == T_ADD {
-            return a.checked_add(&b);
+            return ck(a.checked_add(&b));
         }
         if x.op == T_SUB {
-            return a.checked_sub(&b);
+            return ck(a.checked_sub(&b));
         }
         if x.op == T_MUL {
-            return a.checked_mul(&b);
+            return ck(a.checked_mul(&b));
         }
         if x.op == T_NEG {
-            return z.checked_sub(&a);
+            return ck(z.checked_sub(&a));
         }
         if x.op == T_DIV || x.op == T_REM {
             if b.is_zero() {
@@ -280,8 +280,8 @@ extend<const B: usize> Eval<B> {
             return if x.op == T_DIV {
                 Some(q)
             } else {
-                switch b.checked_mul(&q) {
-                    Some(bq) => a.checked_sub(&bq),
+                switch ck(b.checked_mul(&q)) {
+                    Some(bq) => ck(a.checked_sub(&bq)),
                     None => Option::<Num<B>>::None,
                 }
             };
@@ -449,6 +449,7 @@ struct Path {
     state: Vector<u32>,
     pc: Vector<u32>,
     esc: Vector<u32>, // the locals a reference or pointer made on the path may reach
+    views: Vector<u64>, // escaped vectors lent only as `[]mut` views: local << 32 | the view
     lm: Vector<u64>, // per loop the path is in: header << 32 | its measure at the iteration's start
     blk: u32,
     from: u32,
@@ -461,6 +462,7 @@ extend Path {
             state: self.state.clone(),
             pc: self.pc.clone(),
             esc: self.esc.clone(),
+            views: self.views.clone(),
             lm: self.lm.clone(),
             blk: self.blk,
             from: self.from,
@@ -519,10 +521,44 @@ const VK_AS_SLICE: u64 = 42;
 const VK_SINDEX_MUT: u64 = 43;
 const VK_SLEN: u64 = 44; // a view's `len`
 const VK_SINDEX: u64 = 45; // a view's element read (`index`, `get`, `at`)
+const VK_SHARE: u64 = 46; // `[]mut`'s `as_slice`
+const VK_RANGE: u64 = 47; // a vector's or a view's `index_range` (`v[lo..hi]`), a shared view
+const VK_RANGE_MUT: u64 = 48; // its `index_range_mut`, a `[]mut` view
 
 // The rounds of quantifier instances a goal gets (an instance may name a nested quantifier), and the
 // terms each round instantiates a quantifier with.
 const QUANT_ROUNDS: u32 = 3;
+// The terms `op_facts` states facts of, and the terms of one operation and second operand it orders each
+// one against.
+const OP_TERMS: usize = 48;
+// Why a check of a body with contracts is an obligation.
+const NO_PANIC_NOTE: str = "a function with contracts proves that no operation of its body panics";
+// The structs within structs `frozen` reads.
+const FROZEN_DEPTH: u32 = 4;
+// The members and the depth of the frozen aggregates an unknown value of is spelled as (`eta`).
+const ETA_MAX: u64 = 32;
+// The kinds of `add_defs_of`.
+const DEFS_ALL: u8 = 0;
+const DEFS_QUANTS: u8 = 1;
+const DEFS_NEAR: u8 = 2;
+const DEFS_REC: u8 = 3;
+// The most elements of an aggregate a read at an unknown index gets one case each of (`sel`).
+const SEL_CASES: u32 = 32;
+// The most disjunctions over a conjunction one goal splits (`holds_in`).
+const SPLIT_PARTS: u32 = 16;
+// The most steps a stage of `holds_in` that most goals pass at once takes (`capped`).
+const STAGE_STEPS: u32 = 200000;
+// The most steps a set of operation facts takes (`ops_imply`): the casts and remainders it states need
+// more than a plain stage.
+const OPS_STEPS: u32 = 800000;
+// The most parts of one fact `stated` reads.
+const STATED_PARTS: u32 = 256;
+// The most distinct subterms of a spec value that stands for its call (`small`).
+const EXACT_TERMS: usize = 256;
+const ETA_DEPTH: u32 = 3;
+// The equalities with a constant `op_facts` reads per term (a type's masks: four).
+const CONST_EQS: usize = 8;
+const PEERS_MAX: usize = 8;
 const QUANT_TERMS: usize = 32;
 
 // One path through a contract chain.
@@ -562,6 +598,8 @@ const WK_WMUL: u8 = 17;
 const WK_WNEG: u8 = 18;
 const WK_ROTL: u8 = 19;
 const WK_ROTR: u8 = 20;
+const WK_CLZ: u8 = 21;
+const WK_CTZ: u8 = 22;
 
 // `@prove_exhaustive`: the inputs of one function, and the evaluator steps of all its runs: each run
 // may take an equal share (`share`), so no split of the inputs changes a report, and the runs of every
@@ -644,6 +682,8 @@ struct Prover<const B: usize> {
     derived: Map<u32, bool>,
     fx: fx::Facts,
     pw: u16, // the width of `usize`, which lengths have
+    // The sizes of element types (`len_cap`).
+    lsv: lay::Svc,
     errs: Vector<diag::Errors>, // per module
     failed: Map<u64, bool>, // the obligations already reported, per body
     pwrites: Map<u64, u64>, // callee -> `param_writes`
@@ -663,8 +703,11 @@ struct Prover<const B: usize> {
     dest_tmp: u32,
     tracked: Vector<bool>, // the locals the walk models by value
     is_mem: Vector<bool>, // the modeled locals a reference or pointer may change (`scan_tracked`)
+    vborrow: Map<u32, bool>, // the borrows only a container's view call reads (`sq_effect` escapes them)
+    in_vborrow: bool, // the statement walked is one of `vborrow`
     mem_list: Vector<u32>,
     esc: Vector<u32>, // the walked path's `Path.esc`, while `run_block` walks it
+    views: Vector<u64>, // the walked path's `Path.views`
     me: u32, // the kept index of the body under proof
     fn_dec: bool, // the body's function has a `decreases` measure
     ptr_cast: bool, // the body casts a value to a pointer
@@ -678,6 +721,8 @@ struct Prover<const B: usize> {
     ghost_fn: bool,
     gblk: Vector<bool>,
     in_ghost: bool,
+    // The body has contract clauses: each check of its own walk is an obligation (no operation panics).
+    no_panic: bool,
     // The definitions of the spec function calls the body's walk made (`define`), facts of every
     // obligation; the calls defined; the depth of definition walks, whose calls stay opaque.
     defs: Vector<u32>,
@@ -697,6 +742,23 @@ struct Prover<const B: usize> {
     // The type arguments of the generic spec function being unfolded (`define`): pairs (parameter's
     // module << 32 | its declaration, the argument's module << 32 | its type).
     subst: Vector<u64>,
+    // The spec functions being unfolded (`define`), module << 32 | node; per definition with one path and
+    // no `requires`, its value (`exact`): the call is that value.
+    unfolding: Vector<u64>,
+    exact: Map<u32, u32>,
+    // Per such call whose value names a quantifier (which stays the call: each call has its own atom),
+    // that value: the quantifier stages read it where the call stands (`instantiate`).
+    qvalue: Map<u32, u32>,
+    // Per aggregate `eta` spelled, the unknown value it spells: a member at an unknown place is that
+    // value's.
+    eta_src: Map<u32, u32>,
+    // The lengths `len_cap` bounded.
+    capd: Map<u32, bool>,
+    // The spec function calls `define` gave a definition.
+    specd: Map<u32, bool>,
+    // The calls of recursive spec functions (a `decreases` clause) `define` met.
+    recd: Map<u32, bool>,
+    parts: u32, // the disjunctions `holds_in` split for the current goal
     // The sequences a spec function's result `r` may equal (its body's returns, `define`): r -> start
     // << 32 | count in `alias_pool`. An element read of `r` reads them too (`seq_at`).
     alias: Map<u32, u64>,
@@ -705,6 +767,9 @@ struct Prover<const B: usize> {
     // `std::spec::seq` (-1 when the build has not loaded it) and its `Seq`; the prelude's containers.
     seqm: i32,
     seqd: NodeId,
+    // `std::crypto::secret` (-1 when the build has not loaded it) and its `Secret`.
+    secm: i32,
+    secd: NodeId,
     vecl: loader::LookupHit,
     strl: loader::LookupHit,
     smut: loader::LookupHit,
@@ -756,8 +821,12 @@ const OB_REFINE: u64 = 8; // a conformance's method against its interface's cont
 const OB_EVAL: u64 = 9; // a `@prove_exhaustive` function: its setup and its runs
 const OB_GHOST: u64 = 10; // a check of ghost code
 const OB_PATTERN: u64 = 11; // a conversion into a pattern type
+const OB_PANIC: u64 = 12; // a check of a body with contracts, which proves that none of its operations panics
 // The depth of definitions of spec function calls over constants (`call_value`).
 const UNFOLD_MAX: u32 = 64;
+// The depth to which a spec function's body unfolds the calls of other spec functions (none that is being
+// unfolded: recursion unfolds once).
+const NEST_MAX: u32 = 8;
 
 extend<const B: usize> Prover<B> {
     fn new(p: &loader::Package, keep: &irl::Keep, slice: loader::LookupHit) Prover<B> {
@@ -779,6 +848,7 @@ extend<const B: usize> Prover<B> {
             derived: Map::<u32, bool>::new(),
             fx: fx::Facts::new(false),
             pw: lay::target_for(p.arch).ptr as u16 * 8,
+            lsv: lay::Svc::new(p),
             errs: errs,
             failed: Map::<u64, bool>::new(),
             pwrites: Map::<u64, u64>::new(),
@@ -791,8 +861,11 @@ extend<const B: usize> Prover<B> {
             dest_tmp: NONE,
             tracked: Vector::<bool>::new(),
             is_mem: Vector::<bool>::new(),
+            vborrow: Map::<u32, bool>::new(),
+            in_vborrow: false,
             mem_list: Vector::<u32>::new(),
             esc: Vector::<u32>::new(),
+            views: Vector::<u64>::new(),
             me: NONE,
             fn_dec: false,
             ptr_cast: false,
@@ -800,6 +873,7 @@ extend<const B: usize> Prover<B> {
             site_of_chain: Vector::<u32>::new(),
             site_of_pred: Vector::<u32>::new(),
             ghost_fn: false,
+            no_panic: false,
             gblk: Vector::<bool>::new(),
             in_ghost: false,
             defs: Vector::<u32>::new(),
@@ -812,12 +886,26 @@ extend<const B: usize> Prover<B> {
             seld: Map::<u32, bool>::new(),
             vdef: Map::<u32, u32>::new(),
             subst: Vector::<u64>::new(),
+            unfolding: Vector::<u64>::new(),
+            exact: Map::<u32, u32>::new(),
+            qvalue: Map::<u32, u32>::new(),
+            eta_src: Map::<u32, u32>::new(),
+            capd: Map::<u32, bool>::new(),
+            specd: Map::<u32, bool>::new(),
+            recd: Map::<u32, bool>::new(),
+            parts: 0,
             alias: Map::<u32, u64>::new(),
             alias_pool: Vector::<u32>::new(),
             sdef: Map::<u64, u32>::new(),
             seqm: p.find("std::spec::seq"),
             seqd: if p.find("std::spec::seq") >= 0 {
                 p.lookup(loader::FROM_ANY, p.find("std::spec::seq") as ModuleId, "Seq", true)
+            } else {
+                NODE_NONE
+            },
+            secm: p.find("std::crypto::secret"),
+            secd: if p.find("std::crypto::secret") >= 0 {
+                p.lookup(loader::FROM_ANY, p.find("std::crypto::secret") as ModuleId, "Secret", true)
             } else {
                 NODE_NONE
             },
@@ -984,6 +1072,118 @@ extend<const B: usize> Prover<B> {
         return m, ty;
     }
 
+    // The type arguments of call `t` (in body `cb` of module `cm`) as `subst` pairs into `out`: the
+    // callee's `extend` block's type parameters, then its own. Whether every one is bound: the call names
+    // one argument per parameter, none of which still names a type parameter of an outer unfolding.
+    fn call_binds(self: &Self, cb: &ir::CoreBody, cm: ModuleId, t: &ir::Terminator, out: &mut Vector<u64>) bool {
+        let d = t.callee;
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || !self.pkg().modules.at(d.module as usize).has_ast {
+            return t.targs_len == 0;
+        }
+        let a = self.ast_of(d.module);
+        let c = a.container_of(d.node);
+        let eg = if c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_EXTEND {
+            a.ext(c).extend_def.generics
+        } else {
+            NodeList { start: 0, len: 0 }
+        };
+        let fg = a.ext(d.node).function.generics;
+        // A method call names no type arguments: its arguments' types bind the parameters' types.
+        if t.targs_len == 0 && eg.len + fg.len != 0 {
+            let cbc = self.contract_body(d);
+            if cbc == null {
+                return false;
+            }
+            let callee = unsafe &*cbc;
+            for j in 0..t.args_len {
+                if callee.returns + j < callee.locals.len() as u32 {
+                    let oid = cb.oper_pool[(t.args_start + j) as usize];
+                    self.unify(
+                        d.module,
+                        callee.locals.at((callee.returns + j) as usize).ty,
+                        cm,
+                        cb.operands.at(oid as usize).ty,
+                        out,
+                        0,
+                    );
+                }
+            }
+            for j in 0..eg.len + fg.len {
+                let pn = if j < eg.len {
+                    unsafe a.list(eg)[j as usize]
+                } else {
+                    unsafe a.list(fg)[(j - eg.len) as usize]
+                };
+                if !out.contains(&(d.module as u64 << 32 | pn as u64)) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if t.targs_len != eg.len + fg.len {
+            return false;
+        }
+        for j in 0..t.targs_len {
+            let (m2, t2) = self.resolve(cm, cb.targ_pool[(t.targs_start + j) as usize]);
+            if self.subst.len() != 0 && self.mentions_generic(m2, t2, 0) {
+                return false;
+            }
+            let pn = if j < eg.len {
+                unsafe a.list(eg)[j as usize]
+            } else {
+                unsafe a.list(fg)[(j - eg.len) as usize]
+            };
+            out.push(d.module as u64 << 32 | pn as u64);
+            out.push(m2 as u64 << 32 | t2 as u64);
+        }
+        return true;
+    }
+
+    // The `subst` pairs that make type `pt` (module `pm`) the type `at` (module `am`): each type parameter
+    // `pt` names, bound to the part of `at` in its place, into `out` (once each); `depth` levels deep. A
+    // reference parameter takes a value argument too (an automatic reference).
+    fn unify(self: &Self, pm: ModuleId, pt: TypeId, am: ModuleId, at: TypeId, out: &mut Vector<u64>, depth: u32) {
+        if depth > 8 || pt == TYPE_NONE || at == TYPE_NONE {
+            return;
+        }
+        let (xm, xt) = self.resolve(am, at);
+        let p = *self.ast_of(pm).type_at(pt);
+        let x = *self.ast_of(xm).type_at(xt);
+        if p.kind == TypeKind::TYPE_GENERIC {
+            let k = p.module as u64 << 32 | p.as_data.decl as u64;
+            let mut j: usize = 0;
+            while j < out.len() {
+                if out[j] == k {
+                    return;
+                }
+                j += 2;
+            }
+            out.push(k);
+            out.push(xm as u64 << 32 | xt as u64);
+            return;
+        }
+        if p.kind == TypeKind::TYPE_REFERENCE && x.kind != TypeKind::TYPE_REFERENCE {
+            self.unify(pm, p.as_data.elem, xm, xt, out, depth + 1);
+            return;
+        }
+        if p.kind != x.kind {
+            return;
+        }
+        if p.kind == TypeKind::TYPE_REFERENCE || p.kind == TypeKind::TYPE_POINTER {
+            self.unify(pm, p.as_data.elem, xm, x.as_data.elem, out, depth + 1);
+        } else if p.kind == TypeKind::TYPE_ARRAY && !p.arr_sym() && !x.arr_sym() {
+            self.unify(pm, p.as_data.arr.elem, xm, x.as_data.arr.elem, out, depth + 1);
+        } else if p.kind == TypeKind::TYPE_INSTANCE {
+            let pi = *self.ast_of(pm).instance(p.as_data.inst);
+            let xi = *self.ast_of(xm).instance(x.as_data.inst);
+            if pi.module == xi.module && pi.decl == xi.decl && pi.n == xi.n {
+                for j in 0..pi.n {
+                    self.unify(pm, pi.args[j as usize], xm, xi.args[j as usize], out, depth + 1);
+                }
+            }
+        }
+    }
+
     // Whether type `ty` (module `m`) names a type parameter, or is a type this walk does not take apart.
     fn mentions_generic(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
         let a = self.ast_of(m);
@@ -1015,6 +1215,11 @@ extend<const B: usize> Prover<B> {
     // Whether a value of type `ty` is frozen: a scalar or a shared view (`[]T`), which no shared
     // reference can change and whose elements no write can reach while it lives.
     fn frozen(self: &Self, m: ModuleId, ty: TypeId) bool {
+        return self.frozen_d(m, ty, 0);
+    }
+
+    // `frozen`, `depth` structs deep.
+    fn frozen_d(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
         if ty == TYPE_NONE {
             return false;
         }
@@ -1022,6 +1227,18 @@ extend<const B: usize> Prover<B> {
         let y = a.type_at(ty);
         if y.kind == TypeKind::TYPE_BUILTIN {
             return true;
+        }
+        // A struct whose members are all frozen (a member of a type parameter's type: the argument's), or an
+        // array of a fixed length of frozen elements, is the value of its members.
+        if (y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE) && depth < FROZEN_DEPTH && self.frozen_struct(
+            m,
+            ty,
+            depth,
+        ) {
+            return true;
+        }
+        if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && depth < FROZEN_DEPTH {
+            return self.frozen_d(m, y.as_data.arr.elem, depth + 1);
         }
         if y.kind != TypeKind::TYPE_INSTANCE {
             return false;
@@ -1041,6 +1258,51 @@ extend<const B: usize> Prover<B> {
         return inst.module == self.slice.mid && inst.decl == self.slice.node;
     }
 
+    // Whether struct type `ty` (module `m`, a struct or an instance of one) has only frozen members.
+    fn frozen_struct(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
+        let y = self.ast_of(m).type_at(ty);
+        let (dm, dn, inst) = if y.kind == TypeKind::TYPE_STRUCT {
+            (y.module, y.as_data.decl, TyInstance { module: 0, decl: NODE_NONE, n: 0, args: [TYPE_NONE; 8], lts: 0 })
+        } else {
+            let it = *self.ast_of(m).instance(y.as_data.inst);
+            (it.module, it.decl, it)
+        };
+        if dn == NODE_NONE || dm as usize >= self.pkg().modules.len() || !self.pkg().modules.at(dm as usize).has_ast {
+            return false;
+        }
+        let da = self.ast_of(dm);
+        if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return false;
+        }
+        let ag = unsafe da.ext(dn).aggregate;
+        if ag.is_union || ag.is_extern || ag.members.len == 0 {
+            return false;
+        }
+        for j in 0..ag.members.len {
+            let mt = da.member_ty(unsafe da.list(ag.members)[j as usize]);
+            if mt == TYPE_NONE {
+                return false;
+            }
+            let my = da.type_at(mt);
+            if my.kind != TypeKind::TYPE_GENERIC {
+                if !self.frozen_d(dm, mt, depth + 1) {
+                    return false;
+                }
+                continue;
+            }
+            let mut found = false;
+            for i in 0..ag.generics.len {
+                if my.module == dm && unsafe da.list(ag.generics)[i as usize] == my.as_data.decl && i as u8 < inst.n {
+                    found = self.frozen_d(m, inst.args[i as usize], depth + 1);
+                }
+            }
+            if !found {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // The length of array type `ty`, -1 for another type or a symbolic length.
     fn array_len(self: &Self, m: ModuleId, ty: TypeId) i64 {
         if ty == TYPE_NONE {
@@ -1057,7 +1319,127 @@ extend<const B: usize> Prover<B> {
         let (w, sg) = self.ty_of(m, ty);
         let v = self.tm.var(w, sg);
         self.pat_fact(m, ty, v);
-        return v;
+        self.len_cap(m, ty, v);
+        return self.eta(m, ty, v, 0);
+    }
+
+    // The bound on the length of `v`, a slice or vector of type `ty` (module `m`, or a reference to
+    // one) whose element has a size: at most `isize::MAX` over that size, since no object is larger.
+    fn len_cap(self: &mut Self, m: ModuleId, ty: TypeId, v: u32) {
+        if ty == TYPE_NONE {
+            return;
+        }
+        let (m0, t0) = self.resolve(m, ty);
+        let y0 = *self.ast_of(m0).type_at(t0);
+        let (m1, t1) = if y0.kind == TypeKind::TYPE_REFERENCE {
+            self.resolve(m0, y0.as_data.elem)
+        } else {
+            (m0, t0)
+        };
+        let y = *self.ast_of(m1).type_at(t1);
+        let (view, et) = if y.kind == TypeKind::TYPE_SLICE {
+            (true, y.as_data.elem)
+        } else if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_of(m1).instance(y.as_data.inst);
+            let view = it.module == self.slice.mid && it.decl == self.slice.node || it.module == self.smut.mid && it.decl == self.smut.node;
+            let vec = it.module == self.vecl.mid && it.decl == self.vecl.node;
+            if !view && !vec || it.decl == NODE_NONE || it.n < 1 {
+                return;
+            }
+            (view, it.args[0])
+        } else {
+            return;
+        };
+        let l = self.lsv.layout(m1, et);
+        if !l.ok || l.size == 0 {
+            return;
+        }
+        let n = self.sq1(pick(view, SQ_SLEN, SQ_VLEN), v, self.pw, false);
+        if self.capd.contains_key(&n) {
+            return;
+        }
+        self.capd.insert(n, true);
+        let cap = self.tm.int(wide::<B>((((1u64 << self.pw - 1) - 1) / l.size) as i64), self.pw, false);
+        let f = self.tm.cmp(T_LE, n, cap);
+        self.anchor(n, f);
+    }
+
+    // Value `v` of type `ty` (module `m`) as the aggregate of its members where `ty` is a small frozen
+    // struct or array (at most ETA_MAX members, ETA_DEPTH deep): an unknown value of `[Secret<u32>; 16]`
+    // is the array of its sixteen members, so two values of the type are equal where their members are
+    // (`Terms::cmp`).
+    fn eta(self: &mut Self, m: ModuleId, ty: TypeId, v: u32, depth: u32) u32 {
+        // A value the walk reads as a number (a wide integer's struct) stays one term.
+        if depth >= ETA_DEPTH || ty == TYPE_NONE || self.tm.at(v).op == T_AGG || self.tm.at(v).w != W_OTHER || !self.frozen(
+            m,
+            ty,
+        ) {
+            return v;
+        }
+        let (m1, t1) = self.resolve(m, ty);
+        let y = *self.ast_of(m1).type_at(t1);
+        let mut tys = Vector::<u64>::new();
+        if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && y.as_data.arr.len >= 1 && y.as_data.arr.len as u64 <= ETA_MAX {
+            for _k in 0..y.as_data.arr.len {
+                tys.push(m1 as u64 << 32 | y.as_data.arr.elem as u64);
+            }
+        } else if y.kind == TypeKind::TYPE_STRUCT || y.kind == TypeKind::TYPE_INSTANCE {
+            let (dm, dn, inst) = if y.kind == TypeKind::TYPE_STRUCT {
+                (
+                    y.module,
+                    y.as_data.decl,
+                    TyInstance { module: 0, decl: NODE_NONE, n: 0, args: [TYPE_NONE; 8], lts: 0 }
+                )
+            } else {
+                let it = *self.ast_of(m1).instance(y.as_data.inst);
+                (it.module, it.decl, it)
+            };
+            let da = self.ast_of(dm);
+            if da.at_const(dn).kind != NodeKind::NODE_STRUCT {
+                return v;
+            }
+            let ag = unsafe da.ext(dn).aggregate;
+            if ag.is_tuple || ag.members.len as u64 > ETA_MAX {
+                return v;
+            }
+            for j in 0..ag.members.len {
+                let mt = da.member_ty(unsafe da.list(ag.members)[j as usize]);
+                let my = da.type_at(mt);
+                // A handle (`Seq`'s pointer) is a value the walk models by its own term.
+                if my.kind == TypeKind::TYPE_POINTER || my.kind == TypeKind::TYPE_REFERENCE {
+                    return v;
+                }
+                if my.kind != TypeKind::TYPE_GENERIC {
+                    tys.push(dm as u64 << 32 | mt as u64);
+                    continue;
+                }
+                let mut at = TYPE_NONE;
+                for i in 0..ag.generics.len {
+                    if unsafe da.list(ag.generics)[i as usize] == my.as_data.decl && i as u8 < inst.n {
+                        at = inst.args[i as usize];
+                    }
+                }
+                let ak = pick(at == TYPE_NONE, TypeKind::TYPE_POINTER, self.ast_of(m1).type_at(at).kind);
+                if ak == TypeKind::TYPE_POINTER || ak == TypeKind::TYPE_REFERENCE {
+                    return v;
+                }
+                tys.push(m1 as u64 << 32 | at as u64);
+            }
+        } else {
+            return v;
+        }
+        let mut xs = Vector::<u32>::with_capacity(tys.len());
+        for j in 0..tys.len() {
+            let em = (tys[j] >> 32) as ModuleId;
+            let et = (tys[j] & 0xFFFFFFFFu64) as TypeId;
+            let (ew, esg) = self.ty_of(em, et);
+            let key = self.tm.int(wide::<B>(j as i64), 64, false);
+            let e = self.tm.sel(v, key, ew, esg);
+            xs.push(self.eta(em, et, e, depth + 1));
+        }
+        let agg = self.tm.pool(T_AGG, &xs, Num::<B>::zero());
+        self.eta_src.insert(agg, v);
+        return agg;
     }
 
     // The unknown of const generic parameter `d` of type `ty` (of module `m`): one per body, so a
@@ -1367,34 +1749,320 @@ extend<const B: usize> Prover<B> {
     // many divisions, about 40% more instructions to prove all goals with them), then with them, then
     // without them again but refuting a branch by its bits (a SAT refutation), which costs more again
     // and needs no derived fact: the bits define a division and a shift.
+    // Whether `q` is a quantifier (an `exists` where `ex`, else a `forall`) whose range its constant bounds
+    // leave empty.
+    fn vacuous(self: &Self, q: u32, ex: bool) bool {
+        let ci = switch self.qof.get(&q) {
+            Some(c) => *c,
+            None => {
+                return false;
+            },
+        };
+        let c = &self.qclo[ci as usize];
+        let flags = unsafe (&*c.cb).quants[c.qi as usize].flags;
+        let (lo, hi) = (self.tm.at(c.lo), self.tm.at(c.hi));
+        if (flags & ir::QF_EXISTS) != 0 != ex || lo.op != T_INT || hi.op != T_INT {
+            return false;
+        }
+        return if (flags & ir::QF_INCLUSIVE) != 0 {
+            hi.k < lo.k
+        } else {
+            !(lo.k < hi.k)
+        };
+    }
+
+    // Push onto `out` the `bool` calls `pc` states, whole or as parts of conjunctions (at most
+    // STATED_PARTS parts read for each fact), that share an argument with call `goal`, and their
+    // definitions.
+    fn stated_preds(self: &Self, pc: &Vector<u32>, goal: u32, out: &mut Vector<u32>) {
+        let g = self.tm.at(goal);
+        if g.op != T_CALL {
+            return;
+        }
+        let mut stack = Vector::<u32>::new();
+        for j in 0..pc.len() {
+            stack.push(pc[j]);
+            for _s in 0..STATED_PARTS {
+                if stack.len() == 0 {
+                    break;
+                }
+                let t = stack.pop().unwrap();
+                let x = self.tm.at(t);
+                if x.op == T_AND {
+                    stack.push(x.b);
+                    stack.push(x.a);
+                    continue;
+                }
+                if x.op != T_CALL || t == goal {
+                    continue;
+                }
+                let d = switch self.def_of.get(&t) {
+                    Some(d) => self.defs[(*d) as usize],
+                    None => {
+                        continue;
+                    },
+                };
+                let mut shared = false;
+                for a in x.a..x.a + x.b {
+                    for b in g.a..g.a + g.b {
+                        shared = shared || self.tm.args[a as usize] == self.tm.args[b as usize];
+                    }
+                }
+                if shared && !out.contains(&d) {
+                    out.push(t);
+                    out.push(d);
+                }
+            }
+            stack.clear();
+        }
+    }
+
+    // Whether `c` is a part of conjunction `f`, at most STATED_PARTS parts read.
+    fn conjunct(self: &Self, f: u32, c: u32) bool {
+        let mut stack = Vector::<u32>::new();
+        stack.push(f);
+        for _s in 0..STATED_PARTS {
+            if stack.len() == 0 {
+                break;
+            }
+            let t = stack.pop().unwrap();
+            if t == c {
+                return true;
+            }
+            let x = self.tm.at(t);
+            if x.op == T_AND {
+                stack.push(x.b);
+                stack.push(x.a);
+            }
+        }
+        return false;
+    }
+
+    // Whether `hyps` imply `goal` within STAGE_STEPS: for a stage that proves most goals at once, and
+    // the rest with the facts of a later one.
+    fn capped(self: &mut Self, hyps: &Vector<u32>, goal: u32) bool {
+        return self.capped_at(hyps, goal, STAGE_STEPS);
+    }
+
+    // `capped` within `steps`.
+    fn capped_at(self: &mut Self, hyps: &Vector<u32>, goal: u32, steps: u32) bool {
+        let limit = self.sv.limit;
+        self.sv.limit = limit.min(self.sv.steps.saturating_add(steps));
+        let ok = self.sv.implies(&self.tm, hyps, goal, false);
+        self.sv.limit = limit;
+        return ok;
+    }
+
+    // Whether formula `goal` is one of `pc`, a part of a conjunction of `pc`, or a part of the body of a
+    // spec function call `pc` states (`times19(g, h)` states `h[9] == 19 * g[9]`): at most STATED_PARTS
+    // parts read for each fact. Each entry pairs a part with the call known to hold whose definition it
+    // is a part of, the equality of the call and its body.
+    fn stated(self: &Self, pc: &Vector<u32>, goal: u32) bool {
+        let mut stack = Vector::<u64>::new();
+        for j in 0..pc.len() {
+            stack.push(NONE as u64 << 32 | pc[j] as u64);
+            for _s in 0..STATED_PARTS {
+                if stack.len() == 0 {
+                    break;
+                }
+                let e = stack.pop().unwrap();
+                let (call, t) = ((e >> 32) as u32, e as u32);
+                if t == goal {
+                    return true;
+                }
+                let x = self.tm.at(t);
+                if x.op == T_AND {
+                    stack.push(call as u64 << 32 | x.b as u64);
+                    stack.push(call as u64 << 32 | x.a as u64);
+                } else if x.op == T_EQ && call != NONE && (x.a == call || x.b == call) {
+                    stack.push(NONE as u64 << 32 | pick(x.a == call, x.b, x.a) as u64);
+                } else if call == NONE {
+                    if let Some(d) = self.def_of.get(&t) {
+                        stack.push(t as u64 << 32 | self.defs[(*d) as usize] as u64);
+                    }
+                }
+            }
+            stack.clear();
+        }
+        return false;
+    }
+
     fn holds(self: &mut Self, pc0: &Vector<u32>, goal: u32) bool {
+        self.parts = 0;
+        return self.holds_in(pc0, goal);
+    }
+
+    fn holds_in(self: &mut Self, pc0: &Vector<u32>, goal: u32) bool {
+        // A goal the path states, whole or as a part of a conjunction it states, holds; so does a
+        // `forall` over a range its constant bounds leave empty, and the negation of such an `exists`.
+        if self.stated(pc0, goal) || self.vacuous(goal, false) || self.tm.at(goal).op == T_NOT && self.vacuous(
+            self.tm.at(goal).a,
+            true,
+        ) {
+            return true;
+        }
+        // A conjunction holds where each part does: each is proved alone, with the facts it names.
+        let g = self.tm.at(goal);
+        if g.op == T_AND {
+            return self.holds_in(pc0, g.a) && self.holds_in(pc0, g.b);
+        }
+        // `x || (y && z)` holds where `x || y` and `x || z` do: a conjunction a path merge put under a
+        // disjunction (`(a ==> b) && (c ==> d)`) splits as one at the top does. At most SPLIT_PARTS
+        // parts, so a merge of many paths does not multiply the goals.
+        if g.op == T_OR && self.parts < SPLIT_PARTS {
+            let (x, y) = if self.tm.at(g.b).op == T_AND {
+                (g.a, g.b)
+            } else {
+                (g.b, g.a)
+            };
+            let yt = self.tm.at(y);
+            if yt.op == T_AND {
+                self.parts += 1;
+                let l = self.tm.or(x, yt.a);
+                let r = self.tm.or(x, yt.b);
+                return self.holds_in(pc0, l) && self.holds_in(pc0, r);
+            }
+        }
+        // A goal that holds by itself (`0 <= b as int`): no case of the path's facts to split.
+        if self.tm.is_true(goal) {
+            return true;
+        }
+        // A call goal with the predicates the path states on its arguments and the definitions of both:
+        // `carried(x)` proves `loose(x)`.
+        if g.op == T_CALL && self.def_of.contains_key(&goal) {
+            let mut own = Vector::<u32>::new();
+            self.add_defs_of(goal, &mut own, DEFS_ALL);
+            let n = own.len();
+            self.stated_preds(pc0, goal, &mut own);
+            if own.len() > n && self.sv.implies(&self.tm, &own, goal, false) {
+                return true;
+            }
+        }
+        let none = Vector::<u32>::new();
+        if pc0.len() > 2 && self.sv.implies(&self.tm, &none, goal, false) {
+            return true;
+        }
+        // The path's bounds that name an unknown of the goal, with the definitions of the terms they
+        // name: a bound (`i < 10`, a length's) proves most range goals, and the large facts beside it
+        // only add cases. Not for an equality, which bounds rarely decide.
+        let mut near = self.near_atoms(goal, pc0);
+        if g.op != T_EQ && near.len() != 0 && near.len() < pc0.len() && pc0.len() > 2 {
+            if self.defs.len() != 0 {
+                let t = self.tm.boolean(true);
+                self.add_defs_of(t, &mut near, DEFS_NEAR);
+            }
+            if self.capped(&near, goal) {
+                return true;
+            }
+        }
         // The definitions of the spec function calls the formulas name hold on every path.
         let mut withdefs = Vector::<u32>::new();
         if self.defs.len() != 0 {
             withdefs.extend_copy(pc0);
             self.add_defs(goal, &mut withdefs);
         }
-        let pc = if withdefs.len() > pc0.len() {
+        let more = withdefs.len() > pc0.len();
+        if more {
+            // First the path's facts alone: a composition of facts (`a == b`, `b == c`) needs no
+            // unfolding, and the definitions only add cases.
+            if self.capped(pc0, goal) {
+                return true;
+            }
+            // Then the definitions of the calls the formulas name, without those of the calls the
+            // definitions name: a step of a recursion needs the one level, and the levels below only
+            // fill the closure.
+            if g.op == T_EQ {
+                // An equality of calls one side's unfolding proves by congruence (`f(x) == g(y)` where `f`
+                // spells `g`): each side's definition alone first, without those of the calls it names,
+                // and without the instances of the quantifiers.
+                for side in [g.a, g.b] {
+                    if let Some(d) = self.def_of.get(&side) {
+                        let mut one = pc0.clone();
+                        one.push(self.defs[(*d) as usize]);
+                        if self.capped(&one, goal) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            if self.qclo.len() == 0 {
+                // A goal a spec function states (`below(h, 4)`) needs its own unfolding, and the
+                // definitions of the calls the facts name only add cases: first the goal's alone.
+                let mut own = Vector::<u32>::new();
+                self.add_defs_of(goal, &mut own, DEFS_ALL);
+                if own.len() != 0 && pc0.len() + own.len() < withdefs.len() {
+                    own.extend_copy(pc0);
+                    if self.capped(&own, goal) {
+                        return true;
+                    }
+                }
+                // A step of a recursion needs its unfolding alone, and the other calls' definitions
+                // only add cases: first the recursive calls' definitions.
+                let mut rec = Vector::<u32>::new();
+                rec.extend_copy(pc0);
+                self.add_defs_of(goal, &mut rec, DEFS_REC);
+                if rec.len() > pc0.len() && rec.len() < withdefs.len() && self.capped(&rec, goal) {
+                    return true;
+                }
+                let mut one = Vector::<u32>::new();
+                one.extend_copy(pc0);
+                self.add_defs_of(goal, &mut one, DEFS_NEAR);
+                if one.len() > pc0.len() && one.len() < withdefs.len() && self.capped(&one, goal) {
+                    return true;
+                }
+            }
+        }
+        let pc = if more {
             &withdefs
         } else {
             pc0
         };
-        if self.qclo.len() != 0 && !self.sv.implies(&self.tm, pc, goal, true) {
+        if self.qclo.len() != 0 {
             // The quantifiers the formulas name: their instances at the witnesses, then at the terms.
-            // The facts that share no unknown with the goal only add case splits: then without them.
-            for wide in 0..2 {
-                let mut inst = Vector::<u32>::new();
-                inst.extend_copy(pc0);
-                self.add_defs(goal, &mut inst);
-                let more = self.instantiate(goal, &mut inst, wide == 1);
-                if more && self.sv.implies(&self.tm, &inst, goal, true) {
-                    return true;
-                }
-                if more || wide == 0 {
-                    let c = self.cone(goal, &inst);
-                    if c.len() < inst.len() && self.sv.implies(&self.tm, &c, goal, true) {
+            // The facts that share no unknown with the goal only add case splits: first without them.
+            // Each set without bits first: the bits of the definitions' operations rarely decide an
+            // instance and cost the most. First the instances with the definitions of the terms they and
+            // the goal name, then with those of all but the spec functions' calls: a step that moves a
+            // fact from one index to another needs no deeper unfolding.
+            if self.defs.len() != 0 {
+                let mut first = Vector::<u32>::new();
+                first.extend_copy(pc0);
+                if self.instantiate(goal, &mut first, false) {
+                    let mut near = first.clone();
+                    self.add_defs_of(goal, &mut near, DEFS_NEAR);
+                    if self.sv.implies(&self.tm, &near, goal, false) {
                         return true;
                     }
+                }
+                let mut inst = Vector::<u32>::new();
+                inst.extend_copy(pc0);
+                self.add_defs_of(goal, &mut inst, DEFS_QUANTS);
+                if self.instantiate(goal, &mut inst, false) && self.sv.implies(&self.tm, &inst, goal, false) {
+                    return true;
+                }
+            }
+            if self.sv.implies(&self.tm, pc, goal, false) {
+                return true;
+            }
+            for bits in 0..2 {
+                for wide in 0..2 {
+                    let mut inst = Vector::<u32>::new();
+                    inst.extend_copy(pc0);
+                    self.add_defs(goal, &mut inst);
+                    let more = self.instantiate(goal, &mut inst, wide == 1);
+                    // The facts that share an unknown with the goal first: fewer case splits.
+                    if more || wide == 0 {
+                        let c = self.cone(goal, &inst);
+                        if c.len() < inst.len() && self.sv.implies(&self.tm, &c, goal, bits == 1) {
+                            return true;
+                        }
+                    }
+                    if more && self.sv.implies(&self.tm, &inst, goal, bits == 1) {
+                        return true;
+                    }
+                }
+                if bits == 0 && self.sv.implies(&self.tm, pc, goal, true) {
+                    return true;
                 }
             }
             return false;
@@ -1403,8 +2071,16 @@ extend<const B: usize> Prover<B> {
         for j in 0..pc.len() {
             n += self.derived.contains_key(&pc[j]) as usize;
         }
+        // A goal of bit operations: their bits decide it, where their facts add only cases. The theories
+        // still try each branch first (`Solver::lemma_with`).
+        let bitty = self.names_bit_op(goal);
         if n == 0 {
-            return self.sv.implies(&self.tm, pc, goal, true);
+            return self.sv.implies(&self.tm, pc, goal, bitty) || self.ops_imply(pc, pc, goal) || !bitty && self.sv.implies(
+                &self.tm,
+                pc,
+                goal,
+                true,
+            );
         }
         let mut base = Vector::<u32>::with_capacity(pc.len() - n);
         for j in 0..pc.len() {
@@ -1412,12 +2088,130 @@ extend<const B: usize> Prover<B> {
                 base.push(pc[j]);
             }
         }
-        return self.sv.implies(&self.tm, &base, goal, false) || self.sv.implies(&self.tm, pc, goal, false) || self.sv.implies(
-            &self.tm,
+        return self.sv.implies(&self.tm, &base, goal, bitty) || self.sv.implies(&self.tm, pc, goal, false) || self.ops_imply(
             &base,
+            pc,
             goal,
-            true,
-        );
+        ) || !bitty && self.sv.implies(&self.tm, &base, goal, true);
+    }
+
+    // Whether term `t` names a bit operation (`&`, `|`, `^`, `!`, a shift) among its first OP_TERMS terms.
+    fn names_bit_op(self: &Self, t: u32) bool {
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(t);
+        for _k in 0..OP_TERMS {
+            if stack.len() == 0 {
+                return false;
+            }
+            let u = stack.pop().unwrap();
+            if seen.contains_key(&u) {
+                continue;
+            }
+            seen.insert(u, true);
+            let op = self.tm.at(u).op;
+            if op == T_BAND || op == T_BOR || op == T_BXOR || op == T_BNOT || op == T_SHL || op == T_SHR {
+                return true;
+            }
+            self.tm.operands(u, &mut ops);
+            stack.extend_copy(&ops);
+        }
+        return false;
+    }
+
+    // Whether `goal` follows by the theories from `near` with the facts of the operations the goal names, or
+    // from `all` with those of the operations it and `all` name, each first without the deep facts
+    // (`op_facts`): tried before any search of the bits, which can take every step.
+    fn ops_imply(self: &mut Self, near: &Vector<u32>, all: &Vector<u32>, goal: u32) bool {
+        // The goal's terms, then every term; the plain facts, then the deep ones. Each set within
+        // OPS_STEPS: the bits of the operations, the next stage, decide what their facts do not.
+        let mut last = Vector::<u32>::new();
+        for k in 0..4u32 {
+            let goal_only = k < 2;
+            let base = pick(goal_only, near, all);
+            let mut hs = base.clone();
+            self.op_facts(goal, &mut hs, goal_only, (k & 1) != 0);
+            if hs.len() > base.len() && hs != last && self.capped_at(&hs, goal, OPS_STEPS) {
+                return true;
+            }
+            last = hs;
+        }
+        return false;
+    }
+    // The order atoms of `hyps` (their conjuncts `a < b`, `a <= b` and their negations) that name an
+    // unknown `goal` names, in their order.
+    fn near_atoms(self: &Self, goal: u32, hyps: &Vector<u32>) Vector<u32> {
+        let mut out = Vector::<u32>::new();
+        let mut want = Map::<u32, bool>::new();
+        self.leaves_into(goal, &mut want);
+        if want.len() == 0 {
+            return out;
+        }
+        let mut stack = Vector::<u32>::new();
+        for j in 0..hyps.len() {
+            stack.push(hyps[j]);
+            for _s in 0..LIN_MAX * 16 {
+                if stack.len() == 0 {
+                    break;
+                }
+                let t = stack.pop().unwrap();
+                let x = self.tm.at(t);
+                if x.op == T_AND {
+                    stack.push(x.b);
+                    stack.push(x.a);
+                    continue;
+                }
+                // Bounds and equalities of `int` and `nat` values only: an equality of other values brings
+                // the definitions of its operations, which a range or index goal does not need.
+                let y = if x.op == T_NOT {
+                    self.tm.at(x.a)
+                } else {
+                    x
+                };
+                let int_eq = y.op == T_EQ && x.op != T_NOT && exact_w(self.tm.at(y.a).w);
+                if y.op != T_LT && y.op != T_LE && !int_eq || out.contains(&t) {
+                    continue;
+                }
+                let mut ls = Map::<u32, bool>::new();
+                self.leaves_into(t, &mut ls);
+                let mut hit = false;
+                for (k, _v) in ls.iter() {
+                    hit = hit || want.contains_key(k);
+                }
+                if hit {
+                    out.push(t);
+                }
+            }
+            stack.clear();
+        }
+        return out;
+    }
+
+    // Add the unknowns term `t` names to `out`, within LIN_MAX * 16 terms.
+    fn leaves_into(self: &Self, t: u32, out: &mut Map<u32, bool>) {
+        let mut ops = Vector::<u32>::new();
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        stack.push(t);
+        for _s in 0..LIN_MAX * 16 {
+            if stack.len() == 0 {
+                return;
+            }
+            let u = stack.pop().unwrap();
+            if seen.contains_key(&u) {
+                continue;
+            }
+            seen.insert(u, true);
+            if self.tm.at(u).op == T_VAR {
+                out.insert(u, true);
+                continue;
+            }
+            self.tm.operands(u, &mut ops);
+            for j in 0..ops.len() {
+                stack.push(ops[j]);
+            }
+        }
     }
 
     // The facts of `hyps` that share an unknown with `goal`, or with a fact that does, in their order.
@@ -1500,6 +2294,7 @@ extend<const B: usize> Prover<B> {
         let mut added = false;
         let mut done = Map::<u32, bool>::new();
         let mut ops = Vector::<u32>::new();
+        let mut extra = Vector::<u32>::new();
         for _r in 0..QUANT_ROUNDS {
             // The quantifiers by polarity (1: stated, 2: denied), and the integer terms, the goal's first.
             let mut pol = Map::<u32, u8>::new();
@@ -1541,6 +2336,19 @@ extend<const B: usize> Prover<B> {
                     if first && wide && self.tm.is_int(t) && ints.len() < QUANT_TERMS * 8 {
                         ints.push(t);
                     }
+                    // A call whose value names a quantifier states it with the call's polarity, and its
+                    // definition joins the facts.
+                    if first {
+                        if let Some(v) = self.qvalue.get(&t) {
+                            if let Some(i) = self.def_of.get(&t) {
+                                stack.push((*v) as u64 << 2 | p as u64);
+                                let d = self.defs[(*i) as usize];
+                                if !hyps.contains(&d) && !extra.contains(&d) {
+                                    extra.push(d);
+                                }
+                            }
+                        }
+                    }
                     let x = self.tm.at(t);
                     // A witness's fact names its quantifier: no statement of it.
                     let sk = self.qdef.contains_key(&t);
@@ -1562,6 +2370,11 @@ extend<const B: usize> Prover<B> {
                 }
                 stack.clear();
             }
+            for j in 0..extra.len() {
+                hyps.push(extra[j]);
+                added = true;
+            }
+            extra.clear();
             let mut qs = Vector::<u32>::new();
             for (t, _v) in self.qof.iter() {
                 if pol.contains_key(t) && !done.contains_key(t) {
@@ -1610,12 +2423,19 @@ extend<const B: usize> Prover<B> {
                         }
                         t = self.tm.int(tt.k, w, sg);
                     }
+                    // Any integer term stands for an `int` binding, and for a `nat` one where it is at least 0
+                    // (`k as int` is `k`'s own term).
                     let tt2 = self.tm.at(t);
-                    if tt2.w != w || tt2.sg != sg || t == own || n >= QUANT_TERMS {
+                    let other = tt2.w != w || tt2.sg != sg;
+                    if other && (!exact_w(w) || tt2.w <= W_BOOL) || t == own || n >= QUANT_TERMS {
                         continue;
                     }
                     n += 1;
-                    let f = self.instance(q, ci, t);
+                    let mut f = self.instance(q, ci, t);
+                    if other && w != W_INT {
+                        let fits = self.tm.in_type(t, w, sg);
+                        f = self.imp(fits, f);
+                    }
                     if !self.tm.is_true(f) && !hyps.contains(&f) {
                         hyps.push(f);
                         added = true;
@@ -1848,6 +2668,40 @@ extend<const B: usize> Prover<B> {
     // Append to `hyps` (the path) the definitions of the spec function calls under `goal` and `hyps`,
     // and of the calls under those definitions.
     fn add_defs(self: &mut Self, goal: u32, hyps: &mut Vector<u32>) {
+        self.add_defs_of(goal, hyps, DEFS_ALL);
+    }
+
+    // Whether term `t` has at most EXACT_TERMS distinct subterms, no call of a recursive spec function
+    // (`recd`) and no quantifier (each call's own atom): a value that can stand for the call that returns
+    // it (`exact`). Another stays the call,
+    // and its definition joins only the goals that need it: congruence relates two such calls, where
+    // their values would unfold each recursion into every goal.
+    fn small(self: &Self, t: u32) bool {
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(t);
+        while stack.len() != 0 {
+            let u = stack.pop().unwrap();
+            if seen.contains_key(&u) {
+                continue;
+            }
+            if seen.len() >= EXACT_TERMS || self.recd.contains_key(&u) || self.qof.contains_key(&u) {
+                return false;
+            }
+            seen.insert(u, true);
+            self.tm.operands(u, &mut ops);
+            for j in 0..ops.len() {
+                stack.push(ops[j]);
+            }
+        }
+        return true;
+    }
+
+    // `add_defs` of the kind `mode` names: DEFS_ALL; DEFS_QUANTS, without the definitions of spec
+    // function calls (`specd`); DEFS_NEAR, only those of the terms `goal` and `hyps` name, not of the
+    // terms the definitions name; DEFS_REC, only those of the recursive calls (`recd`) these name.
+    fn add_defs_of(self: &mut Self, goal: u32, hyps: &mut Vector<u32>, mode: u8) {
         let mut seen = Map::<u32, bool>::new();
         let mut stack = Vector::<u32>::new();
         let mut ops = Vector::<u32>::new();
@@ -1864,12 +2718,21 @@ extend<const B: usize> Prover<B> {
                 continue;
             }
             seen.insert(t, true);
+            if mode == DEFS_QUANTS && self.specd.contains_key(&t) {
+                self.tm.operands(t, &mut ops);
+                for j in 0..ops.len() {
+                    stack.push(ops[j]);
+                }
+                continue;
+            }
             if let Some(d) = self.def_of.get(&t) {
                 let f = self.defs[(*d) as usize];
-                if !hyps.contains(&f) {
+                if !hyps.contains(&f) && (mode != DEFS_REC || self.recd.contains_key(&t)) {
                     hyps.push(f);
                 }
-                stack.push(f);
+                if mode != DEFS_NEAR && mode != DEFS_REC {
+                    stack.push(f);
+                }
             }
             self.tm.operands(t, &mut ops);
             for j in 0..ops.len() {
@@ -1883,7 +2746,19 @@ extend<const B: usize> Prover<B> {
         if self.over || self.failed.contains_key(&key) || self.refining && key >> 56 != OB_REFINE {
             return;
         }
-        if self.holds(pc, goal) {
+        // With constants of half the narrow width, an overflow sends the body to the wide prover at once:
+        // one already seen fails this obligation unproved.
+        if B == NUM_NARROW && self.tm.big_seen && self.sv.overflowed() {
+            self.report2(key, dc::CANNOT_PROVE_CONTRACT, sp, msg, note, String::new());
+            self.over = true;
+            return;
+        }
+        self.sv.stop_on_ovf = B == NUM_NARROW && self.tm.big_seen;
+        self.sv.gave_up = false;
+        let ok = self.holds(pc, goal);
+        self.sv.stop_on_ovf = false;
+        self.sv.gave_up = false;
+        if ok {
             return;
         }
         if self.steps + self.sv.steps > STEP_BUDGET {
@@ -1930,6 +2805,29 @@ extend<const B: usize> Prover<B> {
             let d = ld.item;
             let v = if d.node != NODE_NONE && (d.node & NODE_BODY) == 0 && self.ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_GENERIC_PARAM {
                 self.param_var(d, cm, ld.ty)
+            } else if self.const_local(cb, l) {
+                // A named constant: an integer or a boolean is its value (the evaluator's), another
+                // (`const K: [u32; 64]`) one unknown wherever it is read, in a body or a clause.
+                let (w, sg) = self.ty_of(cm, ld.ty);
+                let cev = self.pkg().cir as *mut iri::Interp;
+                let cv = if w != W_OTHER && cev != null {
+                    unsafe (*cev).eval(d.module, d.node)
+                } else {
+                    iri::IVal { kind: iri::IV_NONE, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 }
+                };
+                if cv.kind == iri::IV_INT && w > W_BOOL {
+                    let k = if !sg && cv.i < 0 {
+                        u64_val::<B>(cv.i as u64)
+                    } else {
+                        wide::<B>(cv.i)
+                    };
+                    self.tm.int(k, w, sg)
+                } else if cv.kind == iri::IV_BOOL && w == W_BOOL {
+                    self.tm.boolean(cv.i != 0)
+                } else {
+                    let none = Vector::<u32>::new();
+                    self.tm.call(skey_mix(6, d.module as u64 << 32 | d.node as u64), &none, w, sg)
+                }
             } else {
                 self.fresh(cm, ld.ty)
             };
@@ -1938,11 +2836,20 @@ extend<const B: usize> Prover<B> {
         return state[l as usize];
     }
 
+    // Whether local `l` of body `cb` names a `const` item, a value nothing writes.
+    fn const_local(self: &Self, cb: &ir::CoreBody, l: u32) bool {
+        let ld = cb.locals.at(l as usize);
+        let d = ld.item;
+        return ld.storage == ir::LS_STATIC_REF && d.node != NODE_NONE && (d.node & NODE_BODY) == 0 && self.pkg().modules.at(
+            d.module as usize,
+        ).has_ast && self.ast_of(d.module).at_const(d.node).kind == NodeKind::NODE_CONST;
+    }
+
     // The value place `pl` of body `cb` holds. `all`: every whole local is modeled (a callee frame).
     // The state's last entry is the memory epoch.
     fn read_place(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, pl: u32, all: bool) u32 {
         let p = *cb.places.at(pl as usize);
-        if !all && !self.tracked[p.base as usize] {
+        if !all && !self.tracked[p.base as usize] && !self.const_local(cb, p.base) {
             return self.fresh(cm, p.ty);
         }
         return self.read_prefix(cb, cm, state, &p, p.proj_len, all);
@@ -1970,6 +2877,12 @@ extend<const B: usize> Prover<B> {
                 let key = self.proj_key(cb, cm, state, &pj, ty, all);
                 let (w, sg) = self.ty_of(cm, pj.ty);
                 v = self.sel(v, key, w, sg);
+                // A small aggregate member is the aggregate of its own members (`eta`), as a call's result
+                // is: `g[c]` of a long array of secrets and `Secret::new(x)` are one term where their
+                // values are.
+                if w == W_OTHER {
+                    v = self.eta(cm, pj.ty, v, 0);
+                }
             }
             self.pat_fact(cm, pj.ty, v);
             ty = pj.ty;
@@ -1982,12 +2895,20 @@ extend<const B: usize> Prover<B> {
     // (key != k && r == v'[key])`; of an aggregate of at most 64 members `!(0 <= key < n) ||
     // (key == 0 && r == m0) || ..`.
     fn sel(self: &mut Self, v: u32, key: u32, w: u16, sg: bool) u32 {
+        if self.tm.at(key).op != T_INT {
+            if let Some(src) = self.eta_src.get(&v) {
+                return self.sel(*src, key, w, sg);
+            }
+        }
         let r = self.tm.sel(v, key, w, sg);
         let rt = self.tm.at(r);
-        if rt.op != T_SEL || self.tm.at(key).op == T_INT || !self.tm.is_int(key) || self.seld.contains_key(&r) {
+        if rt.op != T_SEL || self.seld.contains_key(&r) {
             return r;
         }
         self.seld.insert(r, true);
+        if self.tm.at(key).op == T_INT || !self.tm.is_int(key) {
+            return r;
+        }
         let vx = self.tm.at(rt.a);
         let (kw, ksg) = (self.tm.at(key).w, self.tm.at(key).sg);
         if vx.op == T_UPD {
@@ -2003,7 +2924,10 @@ extend<const B: usize> Prover<B> {
             let a2 = self.tm.and(nsame, e2);
             let f = self.tm.or(a1, a2);
             self.anchor(r, f);
-        } else if vx.op == T_AGG && vx.b <= 64 {
+        } else if vx.op == T_AGG && vx.b > 0 && self.tm.is_int(r) {
+            self.table_bounds(r, key, kw, ksg);
+        }
+        if vx.op == T_AGG && vx.b <= SEL_CASES {
             let z = self.tm.int(Num::<B>::zero(), kw, ksg);
             let n = self.tm.int(wide::<B>(vx.b), kw, ksg);
             let c1 = self.tm.cmp(T_LE, z, key);
@@ -2020,6 +2944,38 @@ extend<const B: usize> Prover<B> {
             self.anchor(r, f);
         }
         return r;
+    }
+
+    // A read `r` at key `key` of an aggregate of integer constants (a table) lies between its least and
+    // its greatest member for a key in range: `!(0 <= key < n) || (lo <= r && r <= hi)`.
+    fn table_bounds(self: &mut Self, r: u32, key: u32, kw: u16, ksg: bool) {
+        let vx = self.tm.at(self.tm.at(r).a);
+        let first = self.tm.at(self.tm.args[vx.a as usize]);
+        if first.op != T_INT {
+            return;
+        }
+        let (mut lo, mut hi) = (first.k, first.k);
+        for j in 1..vx.b {
+            let m = self.tm.at(self.tm.args[(vx.a + j) as usize]);
+            if m.op != T_INT {
+                return;
+            }
+            lo = pick(m.k < lo, m.k, lo);
+            hi = pick(hi < m.k, m.k, hi);
+        }
+        let (w, sg) = (self.tm.at(r).w, self.tm.at(r).sg);
+        let z = self.tm.int(Num::<B>::zero(), kw, ksg);
+        let n = self.tm.int(wide::<B>(vx.b), kw, ksg);
+        let c1 = self.tm.cmp(T_LE, z, key);
+        let c2 = self.tm.cmp(T_LT, key, n);
+        let inr = self.tm.and(c1, c2);
+        let lot = self.tm.int(lo, w, sg);
+        let hit = self.tm.int(hi, w, sg);
+        let b1 = self.tm.cmp(T_LE, lot, r);
+        let b2 = self.tm.cmp(T_LE, r, hit);
+        let inb = self.tm.and(b1, b2);
+        let f = self.imp(inr, inb);
+        self.anchor(r, f);
     }
 
     // The member key of a field or index projection over a value of type `base`: the field's index
@@ -2157,15 +3113,126 @@ extend<const B: usize> Prover<B> {
     // A memory event (a call, a drop, a write through a pointer): every local a reference or pointer
     // made on the path may reach holds an unknown value, and loads read a new epoch.
     fn mem_event(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>) {
-        for j in 0..self.esc.len() {
-            self.forget(cb, cm, state, self.esc[j]);
-        }
-        let n = state.len() - 1;
-        state.set(n, self.tm.var(W_OTHER, false));
+        self.mem_event_of(cb, cm, state, true);
     }
 
-    // Local `l` may be reached through a reference or pointer from here on.
+    // `mem_event`; with `keep`, a vector lent as a view (`views`) not in `vx` keeps its value.
+    fn mem_event_keep(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        keep: bool,
+        vx: &Vector<u32>,
+    ) {
+        let n = state.len() - 1;
+        state.set(n, self.tm.var(W_OTHER, false));
+        let ep = state[n];
+        for j in 0..self.esc.len() {
+            let l = self.esc[j];
+            let mut q0 = NONE;
+            for q in 0..self.views.len() {
+                if (self.views[q] >> 32) as u32 == l {
+                    q0 = q as u32;
+                    break;
+                }
+            }
+            if keep && q0 != NONE && !vx.contains(&(self.views[q0 as usize] as u32)) {
+                continue;
+            }
+            self.forget(cb, cm, state, l);
+            if q0 != NONE {
+                self.link_view(state, l, self.views[q0 as usize] as u32, ep);
+            }
+        }
+    }
+
+    // Vector local `l`, lent as view `xs`: its length the view's, and its elements the view's in epoch `ep`
+    // (a view writes elements only).
+    fn link_view(self: &mut Self, state: &Vector<u32>, l: u32, xs: u32, ep: u32) {
+        let v = state[l as usize];
+        let sv = self.view_s(xs, ep);
+        self.vdef.insert(v, sv);
+        let n = self.seq_len(sv);
+        let k = self.sq1(SQ_SLEN, xs, self.pw, false);
+        let f = self.tm.cmp(T_EQ, n, k);
+        self.anchor(n, f);
+    }
+
+    // `mem_event`; the locals a reference reaches change only with `locals` (a call given no reference
+    // reaches none).
+    fn mem_event_of(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, locals: bool) {
+        let n = state.len() - 1;
+        state.set(n, self.tm.var(W_OTHER, false));
+        let ep = state[n];
+        if !locals {
+            return;
+        }
+        for j in 0..self.esc.len() {
+            let l = self.esc[j];
+            self.forget(cb, cm, state, l);
+            // A vector lent only as `[]mut` views keeps their length, and its elements are theirs in the
+            // new epoch (`link_view`).
+            for q in 0..self.views.len() {
+                if (self.views[q] >> 32) as u32 == l {
+                    self.link_view(state, l, self.views[q] as u32, ep);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Local `l` may be reached through a reference or pointer from here on: through what it was lent as,
+    // which may change its length (`views` keeps none of it).
     fn escape(self: &mut Self, l: u32) {
+        self.escape_as(l, NONE);
+    }
+
+    // `escape`, through `[]mut` view `xs` of vector `l` when `xs` is not NONE (`views`).
+    // Local `l` no longer escaped, with no view lent.
+    const fn unescape(self: &mut Self, l: u32) {
+        let mut q: usize = 0;
+        while q < self.views.len() {
+            if (self.views[q] >> 32) as u32 == l {
+                let _ = self.views.swap_remove(q);
+            } else {
+                q += 1;
+            }
+        }
+        q = 0;
+        while q < self.esc.len() {
+            if self.esc[q] == l {
+                let _ = self.esc.swap_remove(q);
+            } else {
+                q += 1;
+            }
+        }
+    }
+
+    fn escape_as(self: &mut Self, l: u32, xs: u32) {
+        if xs == NONE {
+            let mut q: usize = 0;
+            while q < self.views.len() {
+                if (self.views[q] >> 32) as u32 == l {
+                    let _ = self.views.swap_remove(q);
+                } else {
+                    q += 1;
+                }
+            }
+        } else {
+            // A new view ends the borrow of the one before: the vector's elements are the new view's.
+            let mut had = false;
+            for q in 0..self.views.len() {
+                if (self.views[q] >> 32) as u32 == l {
+                    self.views.set(q, l as u64 << 32 | xs as u64);
+                    had = true;
+                    break;
+                }
+            }
+            if !had && !self.esc.contains(&l) {
+                self.views.push(l as u64 << 32 | xs as u64);
+            }
+        }
         if l as usize < self.slot_of.len() && self.slot_of[l as usize] != NONE {
             self.escape(self.slot_of[l as usize]);
         }
@@ -2257,6 +3324,38 @@ extend<const B: usize> Prover<B> {
                 return self.tm.int(k, w, sg);
             }
         }
+        // An `int` or `nat` literal past 64 bits: its limbs, two's complement in 1024 bits, when the value
+        // fits the prover's numbers (every limb past them repeats the sign); else an unknown value, and
+        // the proof runs again with wider numbers.
+        if c.kind == ir::CK_WIDE && exact_w(w) {
+            let sm = if c.item.node != NODE_NONE {
+                c.item.module
+            } else {
+                cb.module
+            };
+            let lits = &self.ast_of(sm).wide_lits;
+            if c.val >= 0 && c.val as usize < lits.len() {
+                let wl = *lits.at(c.val as usize);
+                let n = B / 64;
+                let fill = if wl.limbs[n - 1] >> 63 != 0 {
+                    ~0u64
+                } else {
+                    0u64
+                };
+                let mut fits = true;
+                for j in n..16 {
+                    fits = fits && wl.limbs[j] == fill;
+                }
+                if fits {
+                    let mut k = Num::<B>::zero();
+                    for j in 0..n {
+                        k.set_limb(j, wl.limbs[j]);
+                    }
+                    return self.tm.int(k, w, sg);
+                }
+                self.sv.note_overflow();
+            }
+        }
         return self.tm.var(w, sg);
     }
 
@@ -2306,7 +3405,9 @@ extend<const B: usize> Prover<B> {
         if !all && self.is_mem[base as usize] {
             // A load may read this local's storage: it reads a new epoch.
             let n = state.len() - 1;
+            let ep0 = state[n];
             state.set(n, self.tm.var(W_OTHER, false));
+            self.keep_param_views(cb, cm, state, ep0, 0);
         }
         if from == p.proj_len {
             if v != NONE {
@@ -2373,13 +3474,23 @@ extend<const B: usize> Prover<B> {
             state.set(tg as usize, nv);
             return;
         }
-        // Through a `[]mut T`: memory changes, and the slice's view in the new epoch is the update.
+        // Through a `[]mut T`: memory changes, and the slice's view in the new epoch is the update. Through
+        // a `[]mut` parameter, the other parameters' views stay: no two exclusive borrows overlap.
         let ep0 = state[state.len() - 1];
         xs.push(self.view_s(a0, ep0));
         xs.push(i);
         xs.push(x);
         let nview = self.seq_make(SQ_UPD, &xs);
         self.mem_event(cb, cm, state);
+        let mut own: u64 = 0;
+        for l in cb.returns..cb.returns + cb.args {
+            if state[l as usize] == a0 {
+                own |= param_bit(cb, l);
+            }
+        }
+        if own != 0 {
+            self.keep_param_views(cb, cm, state, ep0, own);
+        }
         let ep1 = state[state.len() - 1];
         self.sdef.insert(a0 as u64 << 32 | ep1 as u64, nview);
     }
@@ -2500,7 +3611,7 @@ extend<const B: usize> Prover<B> {
             return x;
         }
         // A `&mut` of a local lent to one call escapes at the call (`call`), for the call.
-        let lent = !all && rv.kind == ir::RV_REF && rv.b != 0 && cb.places.at(rv.a as usize).proj_len == 0 && self.dest_tmp != NONE && self.scoped[self.dest_tmp as usize];
+        let lent = !all && rv.kind == ir::RV_REF && (rv.b != 0 && cb.places.at(rv.a as usize).proj_len == 0 && self.dest_tmp != NONE && self.scoped[self.dest_tmp as usize] || self.in_vborrow);
         if !all && !lent && (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE) {
             let p = *cb.places.at(rv.a as usize);
             self.escape(p.base);
@@ -2544,6 +3655,20 @@ extend<const B: usize> Prover<B> {
                     return self.tm.unary(T_REF, v, W_OTHER, false);
                 }
             }
+            // A shared reference to a member of a frozen local (`&s[7]`, `&p.x`) refers to the member's value.
+            if rv.b == 0 && p.proj_len != 0 && !self.ptr_cast && (all || self.tracked[p.base as usize]) && self.frozen(
+                cm,
+                cb.locals.at(p.base as usize).ty,
+            ) {
+                let mut direct = true;
+                for j in 0..p.proj_len {
+                    direct = direct && cb.projections.at((p.proj_start + j) as usize).kind != ir::PJ_DEREF;
+                }
+                if direct {
+                    let v = self.read_place(cb, cm, state, rv.a, all);
+                    return self.tm.unary(T_REF, v, W_OTHER, false);
+                }
+            }
             // A shared reborrow `&*x` of a reference to a frozen value is that reference.
             if rv.b == 0 && p.proj_len == 1 && cb.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF && (all || self.tracked[p.base as usize]) {
                 let v = self.local_val(cb, cm, state, p.base);
@@ -2562,13 +3687,28 @@ extend<const B: usize> Prover<B> {
                 }
             }
         }
-        if rv.kind == ir::RV_AGGREGATE && (rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_ARRAY || rv.c == ir::AGG_STRUCT && rv.item.node != NODE_NONE) {
+        // A struct literal the lowering made (a range `lo..hi`) names no declaration: a value of its members
+        // where its type is a value.
+        if rv.kind == ir::RV_AGGREGATE && (rv.c == ir::AGG_TUPLE || rv.c == ir::AGG_ARRAY || rv.c == ir::AGG_STRUCT && (rv.item.node != NODE_NONE || self.frozen(
+            cm,
+            rv.target,
+        ))) {
+            // A constant element of an array is a value of the element type, whatever type the literal
+            // kept: `[0x61707865, k]` of `[u32; 2]` holds a `u32` constant, one term with every other.
+            let ay = *self.ast_of(cm).type_at(rv.target);
+            let ety = if rv.c == ir::AGG_ARRAY && ay.kind == TypeKind::TYPE_ARRAY {
+                ay.as_data.arr.elem
+            } else {
+                TYPE_NONE
+            };
             let mut xs = Vector::<u32>::with_capacity(rv.b as usize);
             for j in rv.a..rv.a + rv.b {
                 let o = cb.oper_pool[j as usize];
                 xs.push(
                     if o == ir::IR_NONE {
                         self.tm.var(W_OTHER, false)
+                    } else if ety != TYPE_NONE && cb.operands.at(o as usize).kind == ir::OP_CONST {
+                        self.constant(cb, cm, cb.operands.at(o as usize).data, ety)
                     } else {
                         self.operand(cb, cm, state, o, all)
                     },
@@ -2805,6 +3945,20 @@ extend<const B: usize> Prover<B> {
                 self.check_fact(pc, f, key, sp);
                 return x;
             }
+            // A check over values the walk does not model: no proof that it holds, and no fact.
+            if !ints && (self.in_ghost || self.no_panic && self.chain_depth == 0) && (rv.c == ir::IN_BOUNDS || rv.c == ir::IN_RANGE_BOUNDS || rv.c == ir::IN_BOUNDS_GROUP) {
+                let no = self.tm.boolean(false);
+                self.oblige(
+                    pc,
+                    no,
+                    OB_PANIC << 56 | key & 0xFFFFFFFFFFFFFFu64,
+                    sp,
+                    format("cannot prove that this check holds"),
+                    String::from_str(
+                        pick(self.in_ghost, "ghost code never runs: each of its checks is an obligation", NO_PANIC_NOTE),
+                    ),
+                );
+            }
         }
         return self.tm.var(w, sg);
     }
@@ -2904,6 +4058,10 @@ extend<const B: usize> Prover<B> {
         ovf: u8,
     ) {
         let s = *cb.statements.at(sid as usize);
+        // A local's storage starts again (a loop's local): no reference reaches it yet.
+        if s.kind == ir::ST_STORAGE_LIVE && !all {
+            self.unescape(s.a);
+        }
         if s.kind != ir::ST_ASSIGN {
             return;
         }
@@ -2913,8 +4071,21 @@ extend<const B: usize> Prover<B> {
         }
         let dp = *cb.places.at(s.place as usize);
         self.dest_tmp = pick(dp.proj_len == 0, dp.base, NONE);
-        let v = self.rvalue(cb, cm, state, pc, s.rvalue, all, ovf, OB_OVERFLOW << 56 | sid as u64, s.span);
+        self.in_vborrow = self.vborrow.contains_key(&sid);
+        let v0 = self.rvalue(cb, cm, state, pc, s.rvalue, all, ovf, OB_OVERFLOW << 56 | sid as u64, s.span);
         self.dest_tmp = NONE;
+        self.in_vborrow = false;
+        let v = if !all && (rv.kind == ir::RV_USE || rv.kind == ir::RV_CAST) && cb.operands.at(rv.a as usize).kind != ir::OP_CONST {
+            let sp = *cb.places.at(cb.operands.at(rv.a as usize).data as usize);
+            let sty = if sp.proj_len == 0 && sp.base as usize < cb.locals.len() {
+                cb.locals.at(sp.base as usize).ty
+            } else {
+                sp.ty
+            };
+            self.share_arg(cm, sty, cm, dp.ty, v0, state, pc)
+        } else {
+            v0
+        };
         self.write_place(cb, cm, state, s.place, v, all);
     }
 
@@ -3061,6 +4232,17 @@ extend<const B: usize> Prover<B> {
         if axiom {
             f = self.tm.or(f, post);
         }
+        // One path and no `requires`: the call is the value it returns. A recursive function's call stays a
+        // term: its value would name every level below.
+        if !axiom && !by_ref && leaves.len() == 1 && self.tm.is_true(pre) && !self.has_clause(d, CT_DECREASES) {
+            let path = (leaves[0] >> 32) as u32;
+            let v = (leaves[0] & 0xFFFFFFFFu64) as u32;
+            if v != NONE && self.tm.is_true(path) && self.small(v) {
+                self.exact.insert(r, v);
+            } else if v != NONE && self.tm.is_true(path) && self.tm.is_bool(v) {
+                self.qvalue.insert(r, v);
+            }
+        }
         let st = self.alias_pool.len() as u64;
         for j in 0..leaves.len() {
             let v = (leaves[j] & 0xFFFFFFFFu64) as u32;
@@ -3070,6 +4252,28 @@ extend<const B: usize> Prover<B> {
         }
         if self.alias_pool.len() as u64 != st {
             self.alias.insert(r, st << 32 | self.alias_pool.len() as u64 - st);
+        }
+        // A `bool` result every path knows: the call is the disjunction of its paths with the values they
+        // return, one formula without a case per path (`a && b && c` is the conjunction). The paths are
+        // disjoint, and they cover the body: it does not panic.
+        let mut known = !by_ref && leaves.len() > 1 && self.tm.is_bool(r);
+        for j in 0..leaves.len() {
+            known = known && (leaves[j] & 0xFFFFFFFFu64) as u32 != NONE;
+        }
+        if known {
+            let mut g = self.tm.boolean(false);
+            for j in 0..leaves.len() {
+                let (path, v) = ((leaves[j] >> 32) as u32, (leaves[j] & 0xFFFFFFFFu64) as u32);
+                // A path that tested the value it returns false (an early exit of `&&`) returns false.
+                let nv = self.tm.not(v);
+                if !self.conjunct(path, nv) {
+                    let both = self.tm.and(path, v);
+                    g = self.tm.or(g, both);
+                }
+            }
+            let eq = self.tm.cmp(T_EQ, r, g);
+            f = self.tm.or(f, eq);
+            leaves.clear();
         }
         for j in 0..leaves.len() {
             let path = (leaves[j] >> 32) as u32;
@@ -3085,13 +4289,20 @@ extend<const B: usize> Prover<B> {
             let one = if v == NONE {
                 path
             } else {
-                let eq = self.tm.cmp(T_EQ, r, v);
+                // The result as its members, of the types the callee declares (`eta`), as each call
+                // site spells it.
+                let re = pick(by_ref, r, self.eta(d.module, cb.locals.at(0).ty, r, 0));
+                let eq = self.tm.cmp(T_EQ, re, v);
                 self.tm.and(path, eq)
             };
             f = self.tm.or(f, one);
         }
         if !self.tm.is_true(f) && !self.tm.is_false(f) {
             self.anchor(r, f);
+            self.specd.insert(r, true);
+        }
+        if self.has_clause(d, CT_DECREASES) {
+            self.recd.insert(r, true);
         }
     }
 
@@ -3166,7 +4377,14 @@ extend<const B: usize> Prover<B> {
                 continue;
             }
             if sb.blk == s.check {
-                let c = self.operand(cb, cm, &mut sb.state, t.a, all);
+                let mut c = self.operand(cb, cm, &mut sb.state, t.a, all);
+                // A value the path decides (a short-circuit's result): a refuted one adds no leaf.
+                let nc = self.tm.not(c);
+                if sb.conds.contains(&nc) || pc.contains(&nc) {
+                    c = self.tm.boolean(false);
+                } else if sb.conds.contains(&c) || pc.contains(&c) {
+                    c = self.tm.boolean(true);
+                }
                 let mut path = self.tm.boolean(true);
                 for j in 0..sb.conds.len() {
                     path = self.tm.and(path, sb.conds[j]);
@@ -3195,8 +4413,15 @@ extend<const B: usize> Prover<B> {
                 edges.clear();
                 self.switch_edges(cb, cm, &mut sb.state, &t, all, &mut edges);
                 for j in 0..edges.len() {
+                    // An edge whose condition the path refutes is never taken (a short-circuit's
+                    // repeated test of one value): no leaf.
+                    let c = (edges[j] & 0xFFFFFFFFu64) as u32;
+                    let nc = self.tm.not(c);
+                    if self.tm.is_false(c) || sb.conds.contains(&nc) || pc.contains(&nc) {
+                        continue;
+                    }
                     let mut cs = sb.conds.clone();
-                    cs.push((edges[j] & 0xFFFFFFFFu64) as u32);
+                    cs.push(c);
                     subs.push(Sub { state: sb.state.clone(), conds: cs, blk: (edges[j] >> 32) as u32 });
                 }
             } else if t.kind == ir::TM_CALL {
@@ -3234,6 +4459,9 @@ extend<const B: usize> Prover<B> {
         sp: tok::Span,
     ) {
         let mut r = self.wide_op(cb, cm, state, pc, t, all, self.chain_ovf, key, sp);
+        if r == NONE && t.dests_len == 1 {
+            r = self.secret_op(cb, cm, state, pc, t, all);
+        }
         if r == NONE {
             r = self.call_value(cb, cm, state, t, all);
         }
@@ -3254,7 +4482,8 @@ extend<const B: usize> Prover<B> {
     // and `shr` (a count of at least the width gives 0, or -1 for a negative `Int` shifted right: no
     // trap); and of the built-in integers (std's `core` module): WK_WADD, WK_WSUB, WK_WMUL and WK_WNEG
     // `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` (the result's low bits),
-    // WK_ROTL and WK_ROTR `rotate_left` and `rotate_right`; 0 for any other callee.
+    // WK_ROTL and WK_ROTR `rotate_left` and `rotate_right`, WK_CLZ and WK_CTZ `leading_zeros` and
+    // `trailing_zeros`; 0 for any other callee.
     fn wide_kind(self: &Self, d: DefId) u8 {
         let core = self.wcore.node != NODE_NONE && d.module == self.wcore.mid;
         if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.wuint.node == NODE_NONE || d.module != self.wuint.mid && d.module != self.wint.mid && !core || !self.pkg().modules.at(
@@ -3284,6 +4513,10 @@ extend<const B: usize> Prover<B> {
                 WK_ROTL
             } else if name == "rotate_right" {
                 WK_ROTR
+            } else if name == "leading_zeros" {
+                WK_CLZ
+            } else if name == "trailing_zeros" {
+                WK_CTZ
             } else {
                 0
             };
@@ -3339,7 +4572,7 @@ extend<const B: usize> Prover<B> {
         sp: tok::Span,
     ) u32 {
         let k = self.wide_kind(t.callee);
-        let n = pick(k == WK_FROM || k == WK_NOT || k == WK_WNEG, 1u32, 2);
+        let n = pick(k == WK_FROM || k == WK_NOT || k == WK_WNEG || k == WK_CLZ || k == WK_CTZ, 1u32, 2);
         if k == 0 || t.args_len != n || t.dests_len != 1 {
             return NONE;
         }
@@ -3384,6 +4617,9 @@ extend<const B: usize> Prover<B> {
         if k == WK_ROTL || k == WK_ROTR {
             return self.rotated(k == WK_ROTL, a, b, w, sg);
         }
+        if k == WK_CLZ || k == WK_CTZ {
+            return self.zeros(pc, k == WK_CLZ, a, w, sg);
+        }
         if k == WK_ADD || k == WK_SUB || k == WK_MUL {
             let op = if k == WK_ADD {
                 T_ADD
@@ -3398,7 +4634,8 @@ extend<const B: usize> Prover<B> {
         if k == WK_DIV || k == WK_REM {
             // A zero divisor traps: past the operation it is not zero.
             let z = self.tm.int(Num::<B>::zero(), self.tm.at(b).w, self.tm.at(b).sg);
-            pc.push(self.tm.cmp(T_NE, b, z));
+            let nz = self.tm.cmp(T_NE, b, z);
+            self.check_fact(pc, nz, key, sp);
             return self.divided(pc, k == WK_DIV, a, b, w, sg);
         }
         if k == WK_NOT {
@@ -3420,6 +4657,212 @@ extend<const B: usize> Prover<B> {
             T_BXOR
         };
         return self.tm.arith(op, a, b, w, sg);
+    }
+
+    // The width of the integer a `Secret` of type `ty` (module `m`, through a reference) holds: (W_OTHER,
+    // false) for another type.
+    fn secret_elem(self: &Self, m: ModuleId, ty: TypeId) (u16, bool) {
+        if self.secd == NODE_NONE || ty == TYPE_NONE {
+            return W_OTHER, false;
+        }
+        let (m1, t1) = self.resolve(m, ty);
+        let mut y = *self.ast_of(m1).type_at(t1);
+        if y.kind == TypeKind::TYPE_REFERENCE {
+            y = *self.ast_of(m1).type_at(y.as_data.elem);
+        }
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return W_OTHER, false;
+        }
+        let inst = self.ast_of(m1).instance(y.as_data.inst);
+        if inst.module != self.secm as ModuleId || inst.decl != self.secd || inst.n != 1 {
+            return W_OTHER, false;
+        }
+        return self.ty_of(m1, inst.args[0]);
+    }
+
+    // The value of call `t` of a method of `std::crypto::secret`'s `Secret<T>`, as its body computes it
+    // from the integer `v` each `Secret` holds (member 0), at `T`'s width: `new` and `declassify` move
+    // it in and out; `eq`, `ne`, `lt`, `le`, `gt` and `ge` compare (a `Secret<bool>`); `pick(c, a, b)`
+    // is `a` where `c`, else `b`; `rotate_left` and `rotate_right` rotate (`rotated`); `cast` zero-extends
+    // or truncates; `add`, `sub`, `mul` and `neg` wrap; the bit operations, and `shl` and `shr` by a count
+    // below the width (the body's assertion, a check as for `<<`). NONE for another call.
+    fn secret_op(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+        t: &ir::Terminator,
+        all: bool,
+    ) u32 {
+        let d = t.callee;
+        if self.secm < 0 || d.module != self.secm as ModuleId || d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || t.args_len == 0 || t.args_len > 3 {
+            return NONE;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return NONE;
+        }
+        let owned = String::from_str(self.text(d.module, a.at_const(a.ext_name(d.node)).span));
+        let name = owned.as_str();
+        let rty = cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty;
+        let (rw, _rsg) = self.secret_elem(cm, rty);
+        // The arguments: a `Secret`'s integer, or the value of another argument.
+        let mut xs: [u32; 3] = [NONE, NONE, NONE];
+        let mut ws: [u16; 3] = [W_OTHER, W_OTHER, W_OTHER];
+        for j in 0..t.args_len {
+            let oid = cb.oper_pool[(t.args_start + j) as usize];
+            let mut x = self.operand(cb, cm, state, oid, all);
+            let oty = cb.operands.at(oid as usize).ty;
+            let oy = *self.ast_of(cm).type_at(oty);
+            if !self.autoref(cb, cm, t, j) && oy.kind == TypeKind::TYPE_REFERENCE {
+                x = self.deref(state, x, cm, oy.as_data.elem);
+            }
+            let (ew, _esg) = self.secret_elem(cm, oty);
+            if ew != W_OTHER {
+                let k0 = self.tm.int(Num::<B>::zero(), 64, false);
+                x = self.sel(x, k0, ew, false);
+            }
+            xs[j as usize] = x;
+            ws[j as usize] = ew;
+        }
+        let w = ws[0];
+        let x = xs[0];
+        let y = xs[1];
+        let n = t.args_len;
+        let v = if name == "new" && n == 1 && rw != W_OTHER {
+            x
+        } else if name == "declassify" && n == 1 && w != W_OTHER {
+            return x;
+        } else if n == 2 && w != W_OTHER && ws[1] == w && (name == "eq" || name == "ne" || name == "lt" || name == "le" || name == "gt" || name == "ge") {
+            if name == "eq" {
+                self.tm.cmp(T_EQ, x, y)
+            } else if name == "ne" {
+                self.tm.cmp(T_NE, x, y)
+            } else if name == "lt" {
+                self.tm.cmp(T_LT, x, y)
+            } else if name == "le" {
+                self.tm.cmp(T_LE, x, y)
+            } else if name == "gt" {
+                self.tm.cmp(T_LT, y, x)
+            } else {
+                self.tm.cmp(T_LE, y, x)
+            }
+        } else if name == "pick" && n == 3 && w == W_BOOL && ws[1] == rw && ws[2] == rw && rw != W_OTHER {
+            let r = self.tm.var(rw, false);
+            let e1 = self.tm.cmp(T_EQ, r, y);
+            let e2 = self.tm.cmp(T_EQ, r, xs[2]);
+            let nc = self.tm.not(x);
+            let f1 = self.tm.or(nc, e1);
+            let f2 = self.tm.or(x, e2);
+            let f = self.tm.and(f1, f2);
+            self.derive(pc, f, r);
+            r
+        } else if w == W_BOOL && rw == W_BOOL && (name == "bit_and" || name == "bit_or" || name == "bit_xor") && n == 2 {
+            if name == "bit_and" {
+                self.tm.and(x, y)
+            } else if name == "bit_or" {
+                self.tm.or(x, y)
+            } else {
+                self.tm.cmp(T_NE, x, y)
+            }
+        } else if w == W_BOOL && rw == W_BOOL && name == "bit_not" && n == 1 {
+            self.tm.not(x)
+        } else if w <= W_BOOL || w > 64 || rw == W_OTHER {
+            return NONE;
+        } else if (name == "rotate_left" || name == "rotate_right") && n == 2 && self.tm.is_int(y) {
+            self.rotated(name == "rotate_left", x, y, w, false)
+        } else if name == "cast" && n == 1 {
+            if rw >= w {
+                self.widened(x, rw, false)
+            } else {
+                self.tm.unary(T_CAST, x, rw, false)
+            }
+        } else if (name == "add" || name == "sub" || name == "mul") && n == 2 && ws[1] == w {
+            let op = if name == "add" {
+                T_ADD
+            } else if name == "sub" {
+                T_SUB
+            } else {
+                T_MUL
+            };
+            let e = self.tm.arith(op, x, y, w, false);
+            self.tm.unary(T_CAST, e, w, false)
+        } else if name == "neg" && n == 1 {
+            let e = self.tm.neg(x, w, false);
+            self.tm.unary(T_CAST, e, w, false)
+        } else if (name == "bit_and" || name == "bit_or" || name == "bit_xor") && n == 2 && ws[1] == w {
+            let op = if name == "bit_and" {
+                T_BAND
+            } else if name == "bit_or" {
+                T_BOR
+            } else {
+                T_BXOR
+            };
+            self.tm.arith(op, x, y, w, false)
+        } else if name == "bit_not" && n == 1 {
+            self.tm.unary(T_BNOT, x, w, false)
+        } else if (name == "shl" || name == "shr") && n == 2 && self.tm.is_int(y) {
+            let yx = self.tm.at(y);
+            let wv = self.tm.int(wide::<B>(w), yx.w, yx.sg);
+            let c = self.tm.cmp(T_LT, y, wv);
+            self.check_fact(pc, c, (cm as u64 & 0xFFFF) << 40 | 1 << 38 | t.span.start as u64, t.span);
+            let r = self.tm.arith(pick(name == "shl", T_SHL, T_SHR), x, y, w, false);
+            self.shifted(pc, r);
+            r
+        } else {
+            return NONE;
+        };
+        let mut one = Vector::<u32>::with_capacity(1);
+        one.push(v);
+        return self.tm.pool(T_AGG, &one, Num::<B>::zero());
+    }
+
+    // The count of `x`'s leading (`lead`) or trailing zero bits, of type (`w`, `sg`): a function of `x`
+    // (a key past every callee's, below the sequences' functions), defined by facts on `pc`: the width
+    // for 0; else for `leading_zeros` the bit below them is set (`x >> (xw - 1 - r) == 1`), for
+    // `trailing_zeros` the bit above them is set and the bits below it are clear.
+    fn zeros(self: &mut Self, pc: &mut Vector<u32>, lead: bool, x: u32, w: u16, sg: bool) u32 {
+        let xt = self.tm.at(x);
+        let xw = xt.w;
+        let u = if xt.sg {
+            self.tm.unary(T_CAST, x, xw, false)
+        } else {
+            x
+        };
+        // A function of `u`: one term for each evaluation.
+        let mut xs = Vector::<u32>::with_capacity(1);
+        xs.push(u);
+        let r = self.tm.call_k(Num::<B>::one().shl(71) + wide::<B>(pick(lead, 1i64, 2)), &xs, w, sg);
+        let z = self.tm.int(Num::<B>::zero(), xw, false);
+        let one = self.tm.int(Num::<B>::one(), xw, false);
+        let wv = self.tm.int(wide::<B>(xw), w, sg);
+        let is0 = self.tm.cmp(T_EQ, u, z);
+        let rw = self.tm.cmp(T_EQ, r, wv);
+        let at0 = self.tm.and(is0, rw);
+        let n0 = self.tm.not(is0);
+        let below = self.tm.cmp(T_LT, r, wv);
+        let mut set = self.tm.and(n0, below);
+        if lead {
+            let top = self.tm.int(wide::<B>(xw as i64 - 1), w, sg);
+            let cnt = self.tm.arith(T_SUB, top, r, w, sg);
+            let sh = self.tm.arith(T_SHR, u, cnt, xw, false);
+            let e = self.tm.cmp(T_EQ, sh, one);
+            set = self.tm.and(set, e);
+        } else {
+            let sh = self.tm.arith(T_SHR, u, r, xw, false);
+            let bit = self.tm.arith(T_BAND, sh, one, xw, false);
+            let e = self.tm.cmp(T_EQ, bit, one);
+            let p = self.tm.arith(T_SHL, one, r, xw, false);
+            let mask = self.tm.arith(T_SUB, p, one, xw, false);
+            let low = self.tm.arith(T_BAND, u, mask, xw, false);
+            let e2 = self.tm.cmp(T_EQ, low, z);
+            set = self.tm.and(set, e);
+            set = self.tm.and(set, e2);
+        }
+        let f = self.tm.or(at0, set);
+        self.derive(pc, f, r);
+        return r;
     }
 
     // `x` rotated left (`left`) or right by `n % w` bits, as its body computes it: for unsigned `x`,
@@ -3579,16 +5022,501 @@ extend<const B: usize> Prover<B> {
         self.anchor(anchor, f);
     }
 
-    // Fact `f` of every obligation that names term `r` (`add_defs`).
+    // Fact `f` of every obligation that names term `r` (`add_defs`). A definition made of derived facts alone
+    // is derived too (`holds` tries a goal without it first).
     fn anchor(self: &mut Self, r: u32, f: u32) {
         if let Some(i) = self.def_of.get(&r) {
             let j = (*i) as usize;
             let g = self.tm.and(self.defs[j], f);
+            if self.derived.contains_key(&self.defs[j]) && self.derived.contains_key(&f) {
+                self.derived.insert(g, true);
+            }
             self.defs.set(j, g);
             return;
         }
         self.def_of.insert(r, self.defs.len() as u32);
         self.defs.push(f);
+    }
+
+    // The facts of the shifts, quotients, remainders, bit operations, products and casts that `goal` and
+    // `hyps` name, into `hyps` (`holds` adds them only to a goal that fails without them), each true by the
+    // meaning of its operation (`terms.spc`):
+    // - a bound by its operands: `a & b` at most each operand at least 0; `a | b` at least each and at most
+    //   their sum, `a ^ b` from 0 to their sum, for operands at least 0; `a >> b`, and `a / b` and `a % b`
+    //   with `b` at least 1, at most `a` at least 0, and `a >> b` below `a` at least 1 for `b` at least 1;
+    //   `a * b` at least 0 for factors at least 0, and at least one factor where the other is at least 1;
+    // - `a & c` is `a` for a constant low mask `c` (`2^j - 1`) and `a` from 0 to `c`; a cast is its operand
+    //   where its type holds that value;
+    // - an order between two terms of the same operation and type by the same second operand: a right shift
+    //   and a quotient by at least 1 keep the order of their first operands, a left shift where no bit
+    //   leaves the type (`a` at most `max >> b`); a product of factors at least 0 keeps the order of both.
+    // `deep` adds a shift by an unknown count as a product or quotient by `1 << b`, the strict order of two
+    // products, and the facts of an operand an equality makes a constant (`const_facts`). At most OP_TERMS terms, and PEERS_MAX others for each one's order; with `goal_only`, the terms
+    // `goal` names alone (fewer facts: fewer cases to split).
+    fn op_facts(self: &mut Self, goal: u32, hyps: &mut Vector<u32>, goal_only: bool, deep: bool) {
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        let mut found = Vector::<u32>::new();
+        stack.push(goal);
+        for j in 0..pick(goal_only, 0, hyps.len()) {
+            stack.push(hyps[j]);
+        }
+        for _s in 0..LIN_MAX * 16 {
+            if stack.len() == 0 || found.len() >= OP_TERMS {
+                break;
+            }
+            let t = stack.pop().unwrap();
+            if seen.contains_key(&t) {
+                continue;
+            }
+            seen.insert(t, true);
+            let x = self.tm.at(t);
+            // A product, quotient or remainder of exact integers (`int`, `nat`) too: their facts hold there.
+            let exact_ok = x.op == T_MUL || x.op == T_DIV || x.op == T_REM || !exact_w(x.w) && x.w <= 64;
+            if self.tm.is_int(t) && exact_ok && (x.op >= T_DIV && x.op <= T_SHR || x.op == T_CAST || x.op == T_MUL && self.tm.at(
+                x.a,
+            ).op != T_INT && self.tm.at(x.b).op != T_INT) {
+                found.push(t);
+            }
+            self.tm.operands(t, &mut ops);
+            for j in 0..ops.len() {
+                stack.push(ops[j]);
+            }
+        }
+        // The comparisons of a term with a constant (`x <= 7`, `3 < x`) anywhere in the facts: each bounds a
+        // product the term is a factor of by a linear form, under that comparison as a condition.
+        let mut cbound = Map::<u32, u32>::new();
+        // The equalities of a term with a constant: an operation's operand that one makes a constant gets the
+        // facts of that constant, under the equality.
+        let mut ceq = Map::<u32, Vector<u32>>::new();
+        let mut cstack = Vector::<u32>::new();
+        for j in 0..hyps.len() {
+            cstack.push(hyps[j]);
+        }
+        for _s in 0..LIN_MAX {
+            if cstack.len() == 0 {
+                break;
+            }
+            let h = cstack.pop().unwrap();
+            let x = self.tm.at(h);
+            if x.op == T_AND || x.op == T_OR {
+                cstack.push(x.a);
+                cstack.push(x.b);
+            } else if x.op == T_NOT {
+                cstack.push(x.a);
+            } else if (x.op == T_LE || x.op == T_LT || x.op == T_EQ) && self.tm.is_int(x.a) && self.tm.is_int(x.b) && self.tm.at(
+                x.a,
+            ).op == T_INT != (self.tm.at(x.b).op == T_INT) {
+                let v = pick(self.tm.at(x.a).op == T_INT, x.b, x.a);
+                if x.op == T_EQ {
+                    let mut l = switch ceq.get(&v) {
+                        Some(e) => e.clone(),
+                        None => Vector::<u32>::new(),
+                    };
+                    if l.len() < CONST_EQS && !l.contains(&h) {
+                        l.push(h);
+                        ceq.insert(v, l);
+                    }
+                } else if !cbound.contains_key(&v) {
+                    cbound.insert(v, h);
+                }
+            }
+        }
+        let mut peers = Map::<u64, Vector<u32>>::new();
+        // A left shift adds its bound (`lim`) to `found`: the walk reads the new ends too.
+        let mut f: usize = 0;
+        while f < found.len() && f < 2 * OP_TERMS {
+            let r = found[f];
+            f += 1;
+            self.op_bounds(r, hyps, &cbound, &ceq, deep);
+            let t = self.tm.at(r);
+            if !(t.op == T_SHR || t.op == T_SHL || t.op == T_DIV || t.op == T_MUL) {
+                continue;
+            }
+            let key = if t.op == T_MUL {
+                hmix(T_MUL, 0)
+            } else {
+                hmix(hmix(t.op as u64 << 32 | t.w as u64 << 1 | t.sg as u64, t.k.limb(0)), t.b)
+            };
+            let mut list = switch peers.get(&key) {
+                Some(v) => v.clone(),
+                None => Vector::<u32>::new(),
+            };
+            // A left shift keeps no order past `max >> b`: that bound is a right shift by `b` too, ordered
+            // against the right shifts by `b`.
+            let lim = if t.op == T_SHL {
+                let (_lo, hi) = Terms::<B>::range(t.w, t.sg);
+                let mx = self.tm.int(hi, t.w, t.sg);
+                let l = self.tm.arith(T_SHR, mx, t.b, t.w, t.sg);
+                if !seen.contains_key(&l) {
+                    seen.insert(l, true);
+                    found.push(l);
+                }
+                l
+            } else {
+                NONE
+            };
+            let pb = self.at_least(t.b, 1);
+            for j in 0..list.len().min(PEERS_MAX) {
+                let q = list[j];
+                for dir in 0..2u32 {
+                    let (u, v) = pick(dir == 0, (r, q), (q, r));
+                    let (ut, vt) = (self.tm.at(u), self.tm.at(v));
+                    let mut cond = self.tm.cmp(T_LE, ut.a, vt.a);
+                    if t.op == T_DIV {
+                        cond = self.tm.and(cond, pb);
+                    } else if t.op == T_SHL {
+                        let n0 = self.at_least(ut.a, 0);
+                        let fit = self.tm.cmp(T_LE, vt.a, lim);
+                        let both = self.tm.and(n0, fit);
+                        cond = self.tm.and(cond, both);
+                    } else if t.op == T_MUL {
+                        // Either pairing of the factors, each at least 0.
+                        let n1 = self.at_least(ut.a, 0);
+                        let n2 = self.at_least(ut.b, 0);
+                        let n0 = self.tm.and(n1, n2);
+                        let b1 = self.tm.cmp(T_LE, ut.b, vt.b);
+                        let s1 = self.tm.and(cond, b1);
+                        let c1 = self.tm.cmp(T_LE, ut.a, vt.b);
+                        let c2 = self.tm.cmp(T_LE, ut.b, vt.a);
+                        let s2 = self.tm.and(c1, c2);
+                        let either = self.tm.or(s1, s2);
+                        cond = self.tm.and(n0, either);
+                    }
+                    let le = self.tm.cmp(T_LE, u, v);
+                    let g = self.imp(cond, le);
+                    if !hyps.contains(&g) {
+                        hyps.push(g);
+                    }
+                    // A product whose first factor is below the other's by at least 1 is below it by the second
+                    // factor (`a < a'`, `0 <= b <= b'`: `a * b + b <= a' * b'`), in term order.
+                    if deep && t.op == T_MUL {
+                        let n1 = self.at_least(ut.a, 0);
+                        let n2 = self.at_least(ut.b, 0);
+                        let n0 = self.tm.and(n1, n2);
+                        let lt = self.tm.cmp(T_LT, ut.a, vt.a);
+                        let b1 = self.tm.cmp(T_LE, ut.b, vt.b);
+                        let c3 = self.tm.and(n0, self.tm.and(lt, b1));
+                        let ub = self.tm.arith(T_ADD, u, ut.b, W_INT, true);
+                        let f3 = self.tm.cmp(T_LE, ub, v);
+                        let g3 = self.imp(c3, f3);
+                        if !hyps.contains(&g3) {
+                            hyps.push(g3);
+                        }
+                    }
+                }
+            }
+            list.push(r);
+            peers.insert(key, list);
+        }
+    }
+
+    // The bounds `op_facts` states of term `r` by its operands, into `hyps`; `cbound`: per term, a fact that
+    // bounds it by a constant; `ceq`: one that makes it a constant.
+    fn op_bounds(
+        self: &mut Self,
+        r: u32,
+        hyps: &mut Vector<u32>,
+        cbound: &Map<u32, u32>,
+        ceq: &Map<u32, Vector<u32>>,
+        deep: bool,
+    ) {
+        let t = self.tm.at(r);
+        let mut fs = Vector::<u32>::new();
+        if t.op == T_CAST {
+            let e = t.a;
+            let et = self.tm.at(e);
+            if !self.tm.is_int(e) || et.op == T_INT {
+                return;
+            }
+            let (lo, hi) = Terms::<B>::range(t.w, t.sg);
+            let l = self.tm.int(lo, et.w, et.sg);
+            let h = self.tm.int(hi, et.w, et.sg);
+            let c1 = self.tm.cmp(T_LE, l, e);
+            let c2 = self.tm.cmp(T_LE, e, h);
+            let inr = self.tm.and(c1, c2);
+            let eq = self.tm.cmp(T_EQ, r, e);
+            fs.push(self.imp(inr, eq));
+        } else if t.op == T_MUL {
+            // A product of factors at least 0 is at least 0, and at least one factor where the other is at
+            // least 1.
+            let (a, b) = (t.a, t.b);
+            let na = self.at_least(a, 0);
+            let nb = self.at_least(b, 0);
+            let both = self.tm.and(na, nb);
+            let z = self.tm.int(Num::<B>::zero(), t.w, t.sg);
+            let p0 = self.tm.cmp(T_LE, z, r);
+            fs.push(self.imp(both, p0));
+            // A factor at most 0 times one at least 0 is at most 0.
+            for side in 0..2u32 {
+                let (u, v) = pick(side == 0, (a, b), (b, a));
+                let za = self.tm.int(Num::<B>::zero(), self.tm.at(u).w, self.tm.at(u).sg);
+                let up = self.tm.cmp(T_LE, u, za);
+                let nv = self.at_least(v, 0);
+                let c = self.tm.and(up, nv);
+                let le0 = self.tm.cmp(T_LE, r, z);
+                fs.push(self.imp(c, le0));
+            }
+            for side in 0..2u32 {
+                let (u, v) = pick(side == 0, (a, b), (b, a));
+                let u1 = self.at_least(u, 1);
+                let nv = self.at_least(v, 0);
+                let c = self.tm.and(u1, nv);
+                let ge = self.tm.cmp(T_LE, v, r);
+                fs.push(self.imp(c, ge));
+                // A factor `u` at most (at least) a constant `k`: the product is at most (at least) `k * v`.
+                if let Some(h) = cbound.get(&u) {
+                    let hx = self.tm.at(*h);
+                    let upper = self.tm.at(hx.b).op == T_INT;
+                    let kt = self.tm.at(pick(upper, hx.b, hx.a));
+                    // A step past a constant at the end of the range leaves the bound out.
+                    let one = Num::<B>::one();
+                    let k = if hx.op != T_LT {
+                        Some(kt.k)
+                    } else if upper {
+                        ck(kt.k.checked_sub(&one))
+                    } else {
+                        ck(kt.k.checked_add(&one))
+                    }.unwrap_or(wide::<B>(-1));
+                    if !k.is_negative() {
+                        let kv = self.tm.int(k, t.w, t.sg);
+                        let kp = self.tm.arith(T_MUL, kv, v, t.w, t.sg);
+                        let ord = pick(upper, self.tm.cmp(T_LE, r, kp), self.tm.cmp(T_LE, kp, r));
+                        let cond = self.tm.and(both, *h);
+                        fs.push(self.imp(cond, ord));
+                    }
+                }
+            }
+        } else if t.op != T_SHL {
+            let (a, b) = (t.a, t.b);
+            let na = self.at_least(a, 0);
+            let nb = self.at_least(b, 0);
+            let pb = self.at_least(b, 1);
+            let le_a = self.tm.cmp(T_LE, r, a);
+            if t.op == T_BAND {
+                fs.push(self.imp(na, le_a));
+                let le_b = self.tm.cmp(T_LE, r, b);
+                fs.push(self.imp(nb, le_b));
+                for side in 0..2u32 {
+                    let (m, v) = pick(side == 0, (b, a), (a, b));
+                    let mt = self.tm.at(m);
+                    if mt.op == T_INT && !mt.k.is_negative() && low_mask(mt.k) {
+                        let nv = self.at_least(v, 0);
+                        let within = self.tm.cmp(T_LE, v, m);
+                        let cond = self.tm.and(nv, within);
+                        let eq = self.tm.cmp(T_EQ, r, v);
+                        fs.push(self.imp(cond, eq));
+                    }
+                }
+            } else if t.op == T_BOR || t.op == T_BXOR {
+                let both = self.tm.and(na, nb);
+                let sum = self.tm.arith(T_ADD, a, b, W_INT, true);
+                let mut f = self.tm.cmp(T_LE, r, sum);
+                if t.op == T_BOR {
+                    let ga = self.tm.cmp(T_LE, a, r);
+                    let gb = self.tm.cmp(T_LE, b, r);
+                    let g2 = self.tm.and(ga, gb);
+                    f = self.tm.and(f, g2);
+                } else {
+                    let z = self.tm.int(Num::<B>::zero(), t.w, t.sg);
+                    let g0 = self.tm.cmp(T_LE, z, r);
+                    f = self.tm.and(f, g0);
+                }
+                fs.push(self.imp(both, f));
+            } else {
+                let cond = if t.op == T_SHR {
+                    na
+                } else {
+                    self.tm.and(na, pb)
+                };
+                fs.push(self.imp(cond, le_a));
+                // A quotient or remainder of a value at least 0 by one at least 1 is at least 0.
+                if t.op != T_SHR {
+                    let z = self.tm.int(Num::<B>::zero(), t.w, t.sg);
+                    let ge0 = self.tm.cmp(T_LE, z, r);
+                    fs.push(self.imp(cond, ge0));
+                }
+                if t.op == T_SHR {
+                    let a1 = self.at_least(a, 1);
+                    let lt = self.tm.cmp(T_LT, r, a);
+                    let c = self.tm.and(a1, pb);
+                    fs.push(self.imp(c, lt));
+                }
+            }
+        }
+        // A shift of an unsigned value by an unknown count `b` is a product or quotient by `p = 1 << b` (at least
+        // 1, the count below the width on the path): `a >> b` is `t` with `t * p <= a <= t * p + p - 1`; `a << b`
+        // is `a * p` where no bit leaves the type (`a` at most `max >> b`).
+        if deep && (t.op == T_SHR || t.op == T_SHL) && !t.sg && self.tm.at(t.b).op != T_INT && self.tm.is_int(t.b) {
+            let one = self.tm.int(Num::<B>::one(), t.w, false);
+            let p = self.tm.arith(T_SHL, one, t.b, t.w, false);
+            let p1 = self.tm.cmp(T_LE, one, p);
+            fs.push(p1);
+            if t.op == T_SHR {
+                let tp = self.tm.arith(T_MUL, r, p, W_INT, true);
+                let lo = self.tm.cmp(T_LE, tp, t.a);
+                let top = self.tm.arith(T_ADD, tp, p, W_INT, true);
+                let hi = self.tm.cmp(T_LT, t.a, top);
+                fs.push(self.tm.and(lo, hi));
+            } else {
+                let (_l, h) = Terms::<B>::range(t.w, false);
+                let mx = self.tm.int(h, t.w, false);
+                let lim = self.tm.arith(T_SHR, mx, t.b, t.w, false);
+                let fit = self.tm.cmp(T_LE, t.a, lim);
+                let ap = self.tm.arith(T_MUL, t.a, p, W_INT, true);
+                let eq = self.tm.cmp(T_EQ, r, ap);
+                fs.push(self.imp(fit, eq));
+            }
+        }
+        if deep {
+            self.const_facts(r, ceq, &mut fs);
+        }
+        for j in 0..fs.len() {
+            if !self.tm.is_true(fs[j]) && !hyps.contains(&fs[j]) {
+                hyps.push(fs[j]);
+            }
+        }
+    }
+
+    // The facts of term `r` whose second operand (an `and`'s either one) the equalities `ceq` make a constant
+    // `c`, under them, into `fs`: an `and` with a low mask `c` over a value from 0 to `c` is that value; a
+    // quotient and a remainder by `c` above 0 of a value at least 0, and a shift by `c` below the width, have
+    // the facts of `c` itself (`quotient`, `shifted`).
+    fn const_facts(self: &mut Self, r: u32, ceq: &Map<u32, Vector<u32>>, fs: &mut Vector<u32>) {
+        let t = self.tm.at(r);
+        if !(t.op == T_BAND || t.op == T_DIV || t.op == T_REM || t.op == T_SHR || t.op == T_SHL) || ceq.len() == 0 {
+            return;
+        }
+        for side in 0..pick(t.op == T_BAND, 2u32, 1u32) {
+            let (y, x) = pick(side == 0, (t.b, t.a), (t.a, t.b));
+            if self.tm.at(y).op == T_INT {
+                continue;
+            }
+            let mut cases = Vector::<(Num<B>, u32)>::new();
+            self.const_of(y, ceq, 3, &mut cases);
+            for ci in 0..cases.len() {
+                let (c, cond0) = cases[ci];
+                self.const_fact(r, t, x, y, c, cond0, fs);
+            }
+        }
+    }
+
+    // `const_facts` for one constant `c` of operand `y` (the other `x`) under formula `cond0`.
+    fn const_fact(self: &mut Self, r: u32, t: Term<B>, x: u32, y: u32, c: Num<B>, cond0: u32, fs: &mut Vector<u32>) {
+        let nx = self.at_least(x, 0);
+        let cond = self.tm.and(cond0, nx);
+        if t.op == T_BAND {
+            if c.is_negative() || !low_mask(c) {
+                return;
+            }
+            let within = self.tm.cmp(T_LE, x, y);
+            let g = self.tm.and(cond, within);
+            let eq = self.tm.cmp(T_EQ, r, x);
+            fs.push(self.imp(g, eq));
+            return;
+        }
+        let w = t.w;
+        let shift = t.op == T_SHR || t.op == T_SHL;
+        if shift && (exact_w(w) || c.is_negative() || !(c < wide::<B>(w))) || !shift && !(Num::<B>::zero() < c) {
+            return;
+        }
+        let d = pick(shift, Num::<B>::one().shl(c.to_i64() as usize), c);
+        let dv = self.tm.int(d, W_INT, true);
+        if t.op == T_SHL {
+            if t.sg {
+                return;
+            }
+            let lim = self.tm.int(
+                Num::<B>::one().shl(w as usize - c.to_i64() as usize),
+                self.tm.at(x).w,
+                self.tm.at(x).sg,
+            );
+            let fit = self.tm.cmp(T_LT, x, lim);
+            let g = self.tm.and(cond0, fit);
+            let m = self.tm.arith(T_MUL, x, dv, W_INT, true);
+            let eq = self.tm.cmp(T_EQ, r, m);
+            fs.push(self.imp(g, eq));
+            return;
+        }
+        // `x - d * q` from 0 to `d - 1`: the floor of `x / d` (a right shift at either sign, a quotient of a
+        // value at least 0).
+        let q = if t.op == T_REM {
+            self.tm.arith(T_DIV, t.a, t.b, w, t.sg)
+        } else {
+            r
+        };
+        let dq = self.tm.arith(T_MUL, dv, q, W_INT, true);
+        let rest = self.tm.arith(T_SUB, x, dq, W_INT, true);
+        let zero = self.tm.int(Num::<B>::zero(), W_INT, true);
+        let top = self.tm.int(d - Num::<B>::one(), W_INT, true);
+        let lo = self.tm.cmp(T_LE, zero, rest);
+        let hi = self.tm.cmp(T_LE, rest, top);
+        let mut f = self.tm.and(lo, hi);
+        if t.op == T_REM {
+            let eq = self.tm.cmp(T_EQ, r, rest);
+            f = self.tm.and(f, eq);
+        }
+        fs.push(self.imp(pick(t.op == T_SHR, cond0, cond), f));
+    }
+
+    // The constants integer `t` is where equalities of `ceq` hold, each with the formula of those it needs, into
+    // `out`: a constant's value; each of a term's equalities; a sum or difference of such (CONST_EQS at most);
+    // `depth` levels deep.
+    fn const_of(self: &mut Self, t: u32, ceq: &Map<u32, Vector<u32>>, depth: u32, out: &mut Vector<(Num<B>, u32)>) {
+        let x = self.tm.at(t);
+        if x.op == T_INT {
+            out.push((x.k, self.tm.boolean(true)));
+            return;
+        }
+        if let Some(hs) = ceq.get(&t) {
+            for j in 0..hs.len() {
+                let hx = self.tm.at(hs[j]);
+                let k = pick(self.tm.at(hx.a).op == T_INT, self.tm.at(hx.a).k, self.tm.at(hx.b).k);
+                out.push((k, hs[j]));
+            }
+            return;
+        }
+        if depth == 0 || x.op != T_ADD && x.op != T_SUB {
+            return;
+        }
+        let mut av = Vector::<(Num<B>, u32)>::new();
+        let mut bv = Vector::<(Num<B>, u32)>::new();
+        self.const_of(x.a, ceq, depth - 1, &mut av);
+        self.const_of(x.b, ceq, depth - 1, &mut bv);
+        for i in 0..av.len() {
+            for j in 0..bv.len() {
+                if out.len() < CONST_EQS {
+                    let v = if x.op == T_ADD {
+                        ck(av[i].0.checked_add(&bv[j].0))
+                    } else {
+                        ck(av[i].0.checked_sub(&bv[j].0))
+                    };
+                    if let Some(v) = v {
+                        out.push((v, self.tm.and(av[i].1, bv[j].1)));
+                    }
+                }
+            }
+        }
+    }
+
+    // `c ==> f`: `f` when `c` is true.
+    fn imp(self: &mut Self, c: u32, f: u32) u32 {
+        if self.tm.is_true(c) {
+            return f;
+        }
+        let nc = self.tm.not(c);
+        return self.tm.or(nc, f);
+    }
+
+    // `x >= k` as a formula: true where `x`'s type has no value below `k` (an unsigned type and `k` 0).
+    fn at_least(self: &mut Self, x: u32, k: i64) u32 {
+        let xt = self.tm.at(x);
+        if k == 0 && (xt.w == W_NAT || !exact_w(xt.w) && !xt.sg) || xt.op == T_INT && !(xt.k < wide::<B>(k)) {
+            return self.tm.boolean(true);
+        }
+        let c = self.tm.int(wide::<B>(k), xt.w, xt.sg);
+        return self.tm.cmp(T_LE, c, x);
     }
 
     // The facts of shift `r` by a constant count `c` below its width: `x >> c` is `x` divided by `2^c`
@@ -3625,7 +5553,21 @@ extend<const B: usize> Prover<B> {
         if w <= W_BOOL || xt.w <= W_BOOL {
             return NONE;
         }
-        // `int` holds every integer, `nat` every one at least 0; a fixed type no exact one.
+        // `int` holds every integer, `nat` every one at least 0; a fixed type no exact one. Into `int`, a
+        // fixed type's sum with a constant is the base's value plus the constant (`(p + 1) as int` is
+        // `p as int + 1`): one term for one value.
+        if w == W_INT && !exact_w(xt.w) {
+            let (base, c) = self.tm.off_split(x, xt.w, xt.sg);
+            if base != x && base != NONE {
+                let neg = c.is_negative();
+                let k = self.tm.int(pick(neg, Num::<B>::zero() - c, c), W_INT, true);
+                return self.tm.arith(pick(neg, T_SUB, T_ADD), base, k, W_INT, true);
+            }
+        }
+        // A constant as the constant of the exact type: `2usize as nat` is the `nat` 2 a literal spells.
+        if exact_w(w) && !exact_w(xt.w) && xt.op == T_INT && (w == W_INT || !xt.k.is_negative()) {
+            return self.tm.int(xt.k, w, sg);
+        }
         if exact_w(w) || exact_w(xt.w) {
             return pick(w == W_INT || w == W_NAT && (xt.w == W_NAT || !exact_w(xt.w) && !xt.sg), x, NONE);
         }
@@ -3717,6 +5659,7 @@ extend<const B: usize> Prover<B> {
                 xs[0]
             };
             let n = self.sq1(SQ_SLEN, sx, self.pw, false);
+            self.len_cap(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty, sx);
             return if w == self.pw && !sg {
                 n
             } else {
@@ -3728,25 +5671,15 @@ extend<const B: usize> Prover<B> {
         // Inside a generic spec function's unfolding a type argument is the caller's type (`subst`);
         // one that still names a type parameter has no meaning of its own: the call is unknown.
         let mut key = skey_mix(0, t.callee.module as u64 << 32 | t.callee.node as u64);
-        let mut binds = Vector::<u64>::new();
-        let fg = pick(
-            ghost,
-            self.ast_of(t.callee.module).ext(t.callee.node).function.generics,
-            NodeList { start: 0, len: 0 },
-        );
-        let skip = pick(t.targs_len >= fg.len, t.targs_len - fg.len, 0u32);
         for j in 0..t.targs_len {
             let (m2, t2) = self.resolve(cm, cb.targ_pool[(t.targs_start + j) as usize]);
             if self.subst.len() != 0 && self.mentions_generic(m2, t2, 0) {
                 return self.tm.var(w, sg);
             }
             key = skey_mix(skey_mix(key, m2), t2);
-            if j >= skip && t.targs_len >= fg.len {
-                let pn = unsafe self.ast_of(t.callee.module).list(fg)[(j - skip) as usize];
-                binds.push(t.callee.module as u64 << 32 | pn as u64);
-                binds.push(m2 as u64 << 32 | t2 as u64);
-            }
         }
+        let mut binds = Vector::<u64>::new();
+        let bound = ghost && self.call_binds(cb, cm, t, &mut binds);
         // A spec function's reference result refers to a value that is a function of the arguments.
         let rt = *self.ast_of(cm).type_at(rty);
         let by_ref = ghost && rty != TYPE_NONE && rt.kind == TypeKind::TYPE_REFERENCE;
@@ -3762,12 +5695,25 @@ extend<const B: usize> Prover<B> {
             let op = self.tm.at(xs[j]).op;
             lit = lit && (op == T_INT || op == T_BOOL);
         }
-        if (self.unfold == 0 || lit && self.unfold < UNFOLD_MAX) && ghost && (t.targs_len == 0 || binds.len() as u32 == 2 * fg.len) {
+
+        let ck = t.callee.module as u64 << 32 | t.callee.node as u64;
+        let nested = self.unfold < NEST_MAX && !self.unfolding.contains(&ck);
+        if (self.unfold == 0 || lit && self.unfold < UNFOLD_MAX || nested) && bound {
             let outer = replace(&mut self.subst, binds);
+            self.unfolding.push(ck);
             self.define(r, t.callee, &xs, state, by_ref);
+            let _ = self.unfolding.pop();
             self.subst = outer;
         }
-        return pick(by_ref, self.tm.unary(T_REF, r, W_OTHER, false), r);
+        if !by_ref {
+            if let Some(v) = self.exact.get(&r) {
+                return *v;
+            }
+            // A small aggregate result is the aggregate of its members (`eta`): two equal ones are one
+            // term to the closure.
+            return self.eta(cm, rty, r, 0);
+        }
+        return self.tm.unary(T_REF, r, W_OTHER, false);
     }
 
     // Whether chain `s` of body `cb` only computes its condition: no drop, no call of a function that
@@ -4284,8 +6230,12 @@ extend<const B: usize> Prover<B> {
                 VK_CLEAR
             } else if vec && nm == "index_mut" {
                 VK_INDEX_MUT
-            } else if vec && nm == "as_slice" || st && nm == "as_bytes" {
+            } else if vec && (nm == "as_slice" || nm == "as_mut_slice") || st && nm == "as_bytes" {
                 VK_AS_SLICE
+            } else if vec && nm == "index_range" {
+                VK_RANGE
+            } else if vec && nm == "index_range_mut" {
+                VK_RANGE_MUT
             } else {
                 0
             };
@@ -4300,10 +6250,110 @@ extend<const B: usize> Prover<B> {
         if view && nm == "len" {
             return VK_SLEN;
         }
+        if view && nm == "as_slice" && rm == self.smut.mid && rd == self.smut.node {
+            return VK_SHARE;
+        }
         if view && (nm == "index" || nm == "get" || nm == "at") {
             return VK_SINDEX;
         }
+        if view && nm == "index_range" {
+            return VK_RANGE;
+        }
+        if view && nm == "index_range_mut" && rm == self.smut.mid && rd == self.smut.node {
+            return VK_RANGE_MUT;
+        }
         return 0;
+    }
+
+    // The length and the view of the receiver of call `t` (a vector, a string, a view), NONE where it is
+    // no modeled container.
+    fn recv_cont(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) (u32, u32) {
+        let v = self.recv_value(b, b.module, &mut path.state, t, false);
+        if v == NONE {
+            return NONE, NONE;
+        }
+        let mut ty = b.operands.at(b.oper_pool[t.args_start as usize] as usize).ty;
+        let a = self.ast_of(b.module);
+        if a.type_at(ty).kind == TypeKind::TYPE_REFERENCE || a.type_at(ty).kind == TypeKind::TYPE_POINTER {
+            ty = a.type_at(ty).as_data.elem;
+        }
+        let (dm, dd) = self.decl_of(b.module, ty);
+        if dd == NODE_NONE {
+            return NONE, NONE;
+        }
+        if dm == self.slice.mid && dd == self.slice.node || dm == self.smut.mid && dd == self.smut.node {
+            let ep = self.slice_ep(b.module, ty, &path.state);
+            return self.sq1(SQ_SLEN, v, self.pw, false), self.view_s(v, ep);
+        }
+        if dm == self.vecl.mid && dd == self.vecl.node || dm == self.strl.mid && dd == self.strl.node {
+            return self.vlen(v, self.pw, false), self.view_v(v);
+        }
+        return NONE, NONE;
+    }
+
+    // The bounds check of modeled element or range call `t` (`index`, `index_mut`, `index_range`): an
+    // obligation, then a fact of the path. A range's bounds: `lo <= hi <= len`, its end inclusive with
+    // `inclusive` (`hi < len`, the range one longer).
+    fn bounds_check(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) {
+        let k = self.sq_kind(b, b.module, t);
+        let elem = k == VK_INDEX || k == VK_SINDEX || k == VK_INDEX_MUT || k == VK_SINDEX_MUT;
+        if !elem && k != VK_RANGE && k != VK_RANGE_MUT || t.args_len != 2 {
+            return;
+        }
+        let (n, _view) = self.recv_cont(b, path, t);
+        if n == NONE {
+            return;
+        }
+        let x = self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
+        let c = if elem {
+            if !self.tm.is_int(x) {
+                return;
+            }
+            self.tm.cmp(T_LT, x, n)
+        } else {
+            let (lo, hi, inc) = self.range_parts(x);
+            if lo == NONE {
+                return;
+            }
+            let l1 = self.tm.cmp(T_LE, lo, hi);
+            let h1 = self.tm.cmp(T_LE, hi, n);
+            let ex = self.tm.and(l1, h1);
+            let h2 = self.tm.cmp(T_LT, hi, n);
+            let one = self.tm.int(Num::<B>::one(), W_INT, true);
+            let hi1 = self.tm.arith(T_ADD, hi, one, W_INT, true);
+            let l2 = self.tm.cmp(T_LE, lo, hi1);
+            let incl = self.tm.and(h2, l2);
+            let a = self.tm.and(self.tm.not(inc), ex);
+            let bb = self.tm.and(inc, incl);
+            self.tm.or(a, bb)
+        };
+        let key = pick(self.in_ghost, OB_GHOST, OB_PANIC) << 56 | 3 << 53 | t.span.start as u64;
+        self.oblige(
+            &path.pc,
+            c,
+            key,
+            t.span,
+            format("cannot prove that this index is in bounds"),
+            String::from_str(
+                pick(self.in_ghost, "ghost code never runs: each of its checks is an obligation", NO_PANIC_NOTE),
+            ),
+        );
+        path.pc.push(c);
+    }
+
+    // The start, the end and the inclusive flag of range value `r` (`Range<usize>`), NONE where it is no
+    // value of three members.
+    fn range_parts(self: &mut Self, r: u32) (u32, u32, u32) {
+        if r == NONE || self.tm.at(r).w != W_OTHER {
+            return NONE, NONE, NONE;
+        }
+        let k0 = self.tm.int(Num::<B>::zero(), 64, false);
+        let k1 = self.tm.int(Num::<B>::one(), 64, false);
+        let k2 = self.tm.int(wide::<B>(2), 64, false);
+        let lo = self.sel(r, k0, self.pw, false);
+        let hi = self.sel(r, k1, self.pw, false);
+        let inc = self.sel(r, k2, W_BOOL, false);
+        return lo, hi, inc;
     }
 
     // The value of the receiver of call `t` (its first argument): the place an implicit borrow takes,
@@ -4410,6 +6460,9 @@ extend<const B: usize> Prover<B> {
         }
         let v = self.recv_value(cb, cm, state, t, all);
         let (w, sg) = self.ty_of(cm, rty);
+        if k == VK_LEN || k == VK_SLEN {
+            self.len_cap(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty, v);
+        }
         if k == VK_LEN {
             return self.vlen(v, w, sg);
         }
@@ -4528,7 +6581,7 @@ extend<const B: usize> Prover<B> {
     // value with the fact of its new view, and the call's result. Whether it did.
     fn sq_effect(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) bool {
         let k = self.sq_kind(b, b.module, t);
-        if k != VK_PUSH && k != VK_SPUSH && k != VK_PUSH_STR && k != VK_POP && k != VK_CLEAR && k != VK_INDEX_MUT && k != VK_NEW && k != VK_AS_SLICE && k != VK_SINDEX_MUT {
+        if k != VK_PUSH && k != VK_SPUSH && k != VK_PUSH_STR && k != VK_POP && k != VK_CLEAR && k != VK_INDEX_MUT && k != VK_NEW && k != VK_AS_SLICE && k != VK_SINDEX_MUT && k != VK_SHARE && k != VK_RANGE && k != VK_RANGE_MUT {
             return false;
         }
         let cm = b.module;
@@ -4559,6 +6612,82 @@ extend<const B: usize> Prover<B> {
             }
             return true;
         }
+        if k == VK_SHARE {
+            if dest == ir::IR_NONE {
+                return true;
+            }
+            // A shared view of a `[]mut`: its elements now, which no write changes while it lives.
+            let sv = self.recv_value(b, cm, &mut path.state, t, false);
+            let ov = self.view_s(sv, path.state[path.state.len() - 1]);
+            let xs = self.fresh(cm, b.places.at(dest as usize).ty);
+            self.sdef.insert(xs as u64 << 32 | self.tm.boolean(false) as u64, ov);
+            let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
+            let ol = self.sq1(SQ_SLEN, sv, self.pw, false);
+            path.pc.push(self.tm.cmp(T_EQ, sl, ol));
+            self.write_place(b, cm, &mut path.state, dest, xs, false);
+            return true;
+        }
+        if k == VK_RANGE || k == VK_RANGE_MUT {
+            if dest == ir::IR_NONE {
+                return true;
+            }
+            // A view of elements `lo` to `hi - 1` (`hi` included with `inclusive`), in this memory epoch.
+            // A `[]mut` one may write them: the container is memory from here on, as for `as_mut_slice`.
+            let dty = b.places.at(dest as usize).ty;
+            let xs = self.fresh(cm, dty);
+            let (n, view) = self.recv_cont(b, path, t);
+            let r = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
+            let (lo, hi0, inc) = self.range_parts(r);
+            if n != NONE && lo != NONE && (self.tm.is_false(inc) || self.tm.is_true(inc)) {
+                let hi = if self.tm.is_true(inc) {
+                    let one = self.tm.int(Num::<B>::one(), W_INT, true);
+                    self.tm.arith(T_ADD, hi0, one, W_INT, true)
+                } else {
+                    hi0
+                };
+                let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
+                let d = self.tm.arith(T_SUB, hi, lo, W_INT, true);
+                path.pc.push(self.tm.cmp(T_EQ, sl, d));
+                let mut ys = Vector::<u32>::new();
+                ys.push(view);
+                ys.push(self.sq_index(lo));
+                ys.push(self.sq_index(hi));
+                let sub = self.seq_make(SQ_SUB, &ys);
+                let ep = self.slice_ep(cm, dty, &path.state);
+                self.sdef.insert(xs as u64 << 32 | ep as u64, sub);
+            }
+            self.write_place(b, cm, &mut path.state, dest, xs, false);
+            if k == VK_RANGE_MUT {
+                let tg = self.recv_target(b, cm, &mut path.state, t);
+                if tg != NONE {
+                    self.escape(tg);
+                }
+            }
+            return true;
+        }
+        if k == VK_AS_SLICE {
+            if dest == ir::IR_NONE {
+                return true;
+            }
+            // A view of the container's elements: its length and, in this memory epoch, its elements, the
+            // receiver a place or a reference (`&v` converts to the view). A `[]mut` one may write them:
+            // the container is memory from here on (`escape`).
+            let tg = self.recv_target(b, cm, &mut path.state, t);
+            let cv = self.recv_value(b, cm, &mut path.state, t, false);
+            let ov = self.view_v(cv);
+            let xs = self.fresh(cm, b.places.at(dest as usize).ty);
+            let ep = self.slice_ep(cm, b.places.at(dest as usize).ty, &path.state);
+            self.sdef.insert(xs as u64 << 32 | ep as u64, ov);
+            let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
+            let ol = self.seq_len(ov);
+            path.pc.push(self.tm.cmp(T_EQ, sl, ol));
+            self.write_place(b, cm, &mut path.state, dest, xs, false);
+            let (dm, dd) = self.decl_of(cm, b.places.at(dest as usize).ty);
+            if tg != NONE && dd != NODE_NONE && dm == self.smut.mid && dd == self.smut.node {
+                self.escape_as(tg, xs);
+            }
+            return true;
+        }
         let tg = self.recv_target(b, cm, &mut path.state, t);
         if tg == NONE {
             return false;
@@ -4568,20 +6697,6 @@ extend<const B: usize> Prover<B> {
             return false;
         }
         let ov = self.view_v(old);
-        if k == VK_AS_SLICE {
-            if dest == ir::IR_NONE {
-                return true;
-            }
-            // A shared view of the container's elements.
-            let xs = self.fresh(cm, b.places.at(dest as usize).ty);
-            let ep = self.slice_ep(cm, b.places.at(dest as usize).ty, &path.state);
-            self.sdef.insert(xs as u64 << 32 | ep as u64, ov);
-            let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
-            let ol = self.seq_len(ov);
-            path.pc.push(self.tm.cmp(T_EQ, sl, ol));
-            self.write_place(b, cm, &mut path.state, dest, xs, false);
-            return true;
-        }
         if k == VK_INDEX_MUT {
             let i = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
             let i2 = self.sq_index(i);
@@ -4898,6 +7013,27 @@ extend<const B: usize> Prover<B> {
                 }
             }
         }
+        // A borrow that only a container's view call reads, its block's last statement: the call
+        // escapes the container (`sq_effect`), so far as the view lets it change.
+        self.vborrow.clear();
+        for bi in 0..b.blocks.len() {
+            let bk = *b.blocks.at(bi);
+            if bk.term.kind != ir::TM_CALL || bk.term.args_len != 1 || bk.stmt_len == 0 || self.sq_kind(
+                b,
+                b.module,
+                &bk.term,
+            ) != VK_AS_SLICE {
+                continue;
+            }
+            let sid = bk.stmt_start + bk.stmt_len - 1;
+            let st = *b.statements.at(sid as usize);
+            let op = *b.operands.at(b.oper_pool[bk.term.args_start as usize] as usize);
+            if st.kind == ir::ST_ASSIGN && op.kind != ir::OP_CONST && b.places.at(op.data as usize).proj_len == 0 && st.place == op.data && b.rvalues.at(
+                st.rvalue as usize,
+            ).kind == ir::RV_REF {
+                self.vborrow.insert(sid, true);
+            }
+        }
         // A call's implicit borrow of a place reaches its local; a modeled method of a container
         // changes only what it models (`sq_effect`).
         for bi in 0..b.blocks.len() {
@@ -4959,6 +7095,13 @@ extend<const B: usize> Prover<B> {
         self.sdef.clear();
         self.alias.clear();
         self.alias_pool.clear();
+        self.exact.clear();
+        self.qvalue.clear();
+        self.unfolding.clear();
+        self.eta_src.clear();
+        self.capd.clear();
+        self.specd.clear();
+        self.recd.clear();
         self.pvars.clear();
         self.exact_body = false;
     }
@@ -5005,6 +7148,15 @@ extend<const B: usize> Prover<B> {
                 sp,
                 format("cannot prove that this check of ghost code holds"),
                 String::from_str("ghost code never runs: each of its checks is an obligation"),
+            );
+        } else if self.no_panic && self.chain_depth == 0 {
+            self.oblige(
+                pc,
+                f,
+                OB_PANIC << 56 | key & 0xFFFFFFFFFFFFFFu64,
+                sp,
+                format("cannot prove that this check holds"),
+                String::from_str(NO_PANIC_NOTE),
             );
         }
         pc.push(f);
@@ -5161,6 +7313,25 @@ extend<const B: usize> Prover<B> {
 
     // Both walks of kept body `k`: its own obligations, then for a conformance's method the
     // refinement of its interface's contracts.
+    // Prove kept body `k`; false, its reports and facts dropped, when a proof failed where a simplex ran
+    // out of the numbers' bits: the wide numbers then prove it.
+    fn prove_fits(self: &mut Self, k: usize) bool {
+        let m = (unsafe (&*self.keep).kept.at(k).body.module) as usize;
+        let held = replace(self.errs.index_mut(m), diag::Errors::new());
+        let nf = self.facts.len();
+        self.sv.clear_overflow();
+        self.tm.big_seen = false;
+        self.prove_kept(k);
+        let fits = self.errs.at(m).errors.len() == 0 || !self.sv.overflowed() && !self.tm.big_seen;
+        let mut e = replace(self.errs.index_mut(m), held);
+        if fits {
+            self.errs.index_mut(m).append(&mut e);
+        } else {
+            self.facts.truncate(nf);
+        }
+        return fits;
+    }
+
     fn prove_kept(self: &mut Self, k: usize) {
         let kb = unsafe (&*self.keep).kept.at(k);
         self.me = k as u32;
@@ -5587,6 +7758,7 @@ extend<const B: usize> Prover<B> {
         } else {
             OVF_KEEP
         };
+        self.no_panic = clauses && !self.ghost_fn;
         // Ghost code must end: a spec function or a lemma as a function with a measure does.
         self.fn_dec = self.has_fn_dec(b) || self.ghost_fn;
         if !refining {
@@ -5646,6 +7818,7 @@ extend<const B: usize> Prover<B> {
                 state: st,
                 pc: pc0,
                 esc: Vector::<u32>::new(),
+                views: Vector::<u64>::new(),
                 lm: Vector::<u64>::new(),
                 blk: b.entry,
                 from: NONE,
@@ -5928,7 +8101,39 @@ extend<const B: usize> Prover<B> {
             }
         }
         self.fx.loop_scan(h);
+        // The element references of `[]mut` parameters (`param_write` calls' results): a write through one
+        // reaches only that parameter's memory, a new epoch with no local changed.
+        let mut prefs = Vector::<u32>::new();
+        let mut pskip: u64 = 0;
+        let mut ldef = Map::<u32, u32>::new();
+        for j in 0..self.fx.lblocks.len() {
+            let bb = b.blocks.at(self.fx.lblocks[j] as usize);
+            for sid in bb.stmt_start..bb.stmt_start + bb.stmt_len {
+                let st = *b.statements.at(sid as usize);
+                if st.kind == ir::ST_ASSIGN && b.places.at(st.place as usize).proj_len == 0 {
+                    ldef.insert(b.places.at(st.place as usize).base, st.rvalue);
+                }
+            }
+        }
+        for j in 0..self.fx.lblocks.len() {
+            let t = b.blocks.at(self.fx.lblocks[j] as usize).term;
+            if t.kind != ir::TM_CALL || t.dests_len != 1 || t.args_len == 0 || self.sq_kind(b, b.module, &t) != VK_SINDEX_MUT {
+                continue;
+            }
+            let op = *b.operands.at(b.oper_pool[t.args_start as usize] as usize);
+            if op.kind == ir::OP_CONST || b.places.at(op.data as usize).proj_len != 0 {
+                continue;
+            }
+            let pb = param_bit(b, ref_origin(b, &ldef, b.places.at(op.data as usize).base));
+            if pb != 0 {
+                pskip |= pb;
+                prefs.push(b.places.at(b.dest_pool[t.dests_start as usize] as usize).base);
+            }
+        }
         let mut event = false;
+        let mut pevent = false;
+        // The `[]mut` parameters the loop's memory events may reach (`reached_params`; all bits: unknown).
+        let mut lreach: u64 = 0;
         for j in 0..self.fx.lblocks.len() {
             let bb = *b.blocks.at(self.fx.lblocks[j] as usize);
             for sid in bb.stmt_start..bb.stmt_start + bb.stmt_len {
@@ -5947,19 +8152,43 @@ extend<const B: usize> Prover<B> {
                         event = event || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE);
                         continue;
                     }
-                    event = event || self.has_deref(b, &pl, 0) || self.is_mem[pl.base as usize];
-                    self.forget(b, b.module, &mut path.state, pl.base);
                     let rv = *b.rvalues.at(st.rvalue as usize);
-                    event = event || rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE);
+                    let plain = !(rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE));
+                    if pl.proj_len != 0 && b.projections.at(pl.proj_start as usize).kind == ir::PJ_DEREF && prefs.contains(
+                        &ref_origin(b, &ldef, pl.base),
+                    ) && !self.has_deref(b, &pl, 1) && plain {
+                        pevent = true;
+                        continue;
+                    }
+                    event = event || self.has_deref(b, &pl, 0) || self.is_mem[pl.base as usize];
+                    if self.has_deref(b, &pl, 0) {
+                        let o = ref_origin(b, &ldef, pl.base);
+                        lreach |= pick(param_bit(b, o) != 0 && !self.has_deref(b, &pl, 1), param_bit(b, o), ~0u64);
+                    }
+                    self.forget(b, b.module, &mut path.state, pl.base);
+                    event = event || !plain;
+                    lreach |= pick(plain, 0u64, ~0u64);
                 }
             }
             if bb.term.kind == ir::TM_CALL || bb.term.kind == ir::TM_DROP {
-                event = true;
                 for q in bb.term.dests_start..bb.term.dests_start + bb.term.dests_len {
                     self.forget(b, b.module, &mut path.state, b.places.at(b.dest_pool[q as usize] as usize).base);
                 }
-                // A modeled method that changes its container: the container.
+                // A modeled method that changes its container: the container. One that writes no other
+                // memory (`push`, `pop`, `clear`, a length, a shared element read, a view) is no event,
+                // nor is a ghost call.
                 let k = pick(bb.term.kind == ir::TM_CALL, self.sq_kind(b, b.module, &bb.term), 0);
+                // An element write through a `[]mut` parameter reaches only the parameter's memory, which
+                // no local shares.
+                let param_write = k == VK_SINDEX_MUT && bb.term.dests_len == 1 && prefs.contains(
+                    &b.places.at(b.dest_pool[bb.term.dests_start as usize] as usize).base,
+                );
+                let quiet = k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR || k == VK_POP || k == VK_CLEAR || k == VK_LEN || k == VK_EMPTY || k == VK_SLEN || k == VK_INDEX || k == VK_SINDEX || k == VK_SHARE || k == VK_RANGE || k == SQ_VIEW;
+                let ghost = bb.term.kind == ir::TM_CALL && self.is_ghost(bb.term.callee);
+                event = event || !(quiet || ghost || param_write);
+                if !(quiet || ghost || param_write) {
+                    lreach |= self.loop_reach(b, &ldef, &bb.term);
+                }
                 if k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR || k == VK_POP || k == VK_CLEAR || k == VK_INDEX_MUT {
                     let tg = self.recv_target(b, b.module, &mut path.state, &bb.term);
                     if tg != NONE {
@@ -5969,13 +8198,22 @@ extend<const B: usize> Prover<B> {
             }
         }
         if event {
-            // An earlier iteration may have reached any such local.
+            // An earlier iteration may have reached any such local, and the parameters it reaches.
+            let ep0 = path.state[path.state.len() - 1];
             self.esc = replace(&mut path.esc, Vector::<u32>::new());
+            self.views = replace(&mut path.views, Vector::<u64>::new());
             for j in 0..self.mem_list.len() {
                 self.escape(self.mem_list[j]);
             }
             self.mem_event(b, b.module, &mut path.state);
             path.esc = replace(&mut self.esc, Vector::<u32>::new());
+            path.views = replace(&mut self.views, Vector::<u64>::new());
+            self.keep_param_views(b, b.module, &path.state, ep0, lreach | pskip);
+        }
+        if pevent && !event {
+            let ep0 = path.state[path.state.len() - 1];
+            self.mem_event_of(b, b.module, &mut path.state, false);
+            self.keep_param_views(b, b.module, &path.state, ep0, pskip);
         }
         if rg != NONE && self.tm.is_int(lo) {
             let x = self.local_val(b, b.module, &mut path.state, b.ranges[rg as usize].ind);
@@ -6010,6 +8248,7 @@ extend<const B: usize> Prover<B> {
     // Walk block `path.blk`: its statements, then its terminator.
     fn run_block(self: &mut Self, b: &ir::CoreBody, mut path: Path) {
         self.esc = replace(&mut path.esc, Vector::<u32>::new());
+        self.views = replace(&mut path.views, Vector::<u64>::new());
         self.in_ghost = self.ghost_fn || self.gblk[path.blk as usize];
         let bb = *b.blocks.at(path.blk as usize);
         let ovf = self.ovf;
@@ -6021,9 +8260,15 @@ extend<const B: usize> Prover<B> {
         if t.kind == ir::TM_CALL {
             self.call(b, &mut path, &t);
         } else if t.kind == ir::TM_DROP {
-            // A destructor runs code: a memory event.
+            // A destructor runs code: a memory event, which reaches no `[]mut` parameter where the value
+            // owns its memory (`owns`).
+            let ep0 = path.state[path.state.len() - 1];
+            let pl = *b.places.at(t.a as usize);
+            let skip = pick(pl.proj_len == 0 && self.owns(b.module, b.locals.at(pl.base as usize).ty), 0u64, ~0u64);
             self.mem_event(b, b.module, &mut path.state);
+            self.keep_param_views(b, b.module, &path.state, ep0, skip);
         }
+        path.views = replace(&mut self.views, Vector::<u64>::new());
         path.esc = replace(&mut self.esc, Vector::<u32>::new());
         if t.kind == ir::TM_GOTO {
             self.enter(b, path, me, t.t0);
@@ -6049,6 +8294,21 @@ extend<const B: usize> Prover<B> {
                     msg,
                     String::from_str(pick(assert_by, "", "ghost code never runs: each of its checks is an obligation")),
                 );
+            } else if self.no_panic && !assert_by {
+                self.oblige(
+                    &path.pc,
+                    c,
+                    OB_PANIC << 56 | 1 << 55 | me as u64,
+                    t.span,
+                    format("cannot prove that this check holds"),
+                    String::from_str(NO_PANIC_NOTE),
+                );
+            }
+            // The path where the check fails ends: the obligation covers it (a short-circuit's false
+            // branch of `assert a && b` states `!a`).
+            let nc = self.tm.not(c);
+            if self.tm.is_false(c) || path.pc.contains(&nc) {
+                return;
             }
             path.pc.push(c);
             self.enter(b, path, me, t.t0);
@@ -6056,8 +8316,14 @@ extend<const B: usize> Prover<B> {
             let mut edges = Vector::<u64>::new();
             self.switch_edges(b, b.module, &mut path.state, &t, false, &mut edges);
             for j in 0..edges.len() {
+                // An edge whose condition the path refutes is never taken (`chain`).
+                let c = (edges[j] & 0xFFFFFFFFu64) as u32;
+                let nc = self.tm.not(c);
+                if self.tm.is_false(c) || path.pc.contains(&nc) {
+                    continue;
+                }
                 let mut q = path.copy();
-                q.pc.push((edges[j] & 0xFFFFFFFFu64) as u32);
+                q.pc.push(c);
                 self.enter(b, q, me, (edges[j] >> 32) as u32);
             }
         } else if t.kind == ir::TM_CALL {
@@ -6135,12 +8401,25 @@ extend<const B: usize> Prover<B> {
                 return;
             }
         }
+        // An element or a range of a modeled container panics outside its bounds: a check of a body with
+        // contracts or of ghost code.
+        if self.in_ghost || self.no_panic {
+            self.bounds_check(b, path, t);
+        }
         // A modeled method of a container: its new value and view (`sq_effect`).
         if self.sq_effect(b, path, t) {
             return;
         }
+        // A method of `Secret`: its value (`secret_op`), as for an operation on its integer.
+        if t.dests_len == 1 {
+            let r = self.secret_op(b, b.module, &mut path.state, &mut path.pc, t, false);
+            if r != NONE {
+                self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
+                return;
+            }
+        }
         let d = t.callee;
-        // Ghost code never runs: a panic in it is a check that fails.
+        // Ghost code never runs: a panic in it is a check that fails. A body with contracts reaches none.
         if self.in_ghost && self.panics(d) {
             let f = self.tm.boolean(false);
             self.oblige(
@@ -6151,23 +8430,44 @@ extend<const B: usize> Prover<B> {
                 format("cannot prove that ghost code does not panic here"),
                 String::from_str("ghost code never runs: each of its checks is an obligation"),
             );
+        } else if self.no_panic && self.panics(d) {
+            let f = self.tm.boolean(false);
+            self.oblige(
+                &path.pc,
+                f,
+                OB_PANIC << 56 | 2 << 53 | t.span.start as u64,
+                t.span,
+                format("cannot prove that this panic is unreachable"),
+                String::from_str(NO_PANIC_NOTE),
+            );
         }
-        // A spec function or a lemma only reads its arguments. A mutable reference passed on may be
-        // written through.
+        // A spec function or a lemma only reads its arguments, and a container's length query only its
+        // receiver, whose borrow ends with the call. A modeled method that changes its container
+        // (`push`, `pop`, `clear`) returns no reference: its borrow ends with the call too, and the model
+        // gives the container's new value. A mutable reference passed on may be written through.
+        let sk = self.sq_kind(b, b.module, t);
         let ghost = self.is_ghost(d);
+        let reads = ghost || sk == VK_LEN || sk == VK_EMPTY || sk == VK_SLEN;
+        let modeled = sk == VK_PUSH || sk == VK_SPUSH || sk == VK_PUSH_STR || sk == VK_POP || sk == VK_CLEAR;
         for j in 0..t.args_len {
             let oid = b.oper_pool[(t.args_start + j) as usize];
             let op = *b.operands.at(oid as usize);
-            if self.autoref(b, b.module, t, j) && !ghost {
+            if self.autoref(b, b.module, t, j) && !reads && !(modeled && j == 0) {
                 self.escape(b.places.at(op.data as usize).base);
-            } else if !ghost && op.kind != ir::OP_CONST && !(b.places.at(op.data as usize).proj_len == 0 && self.scoped[b.places.at(
+            } else if !reads && op.kind != ir::OP_CONST && !(b.places.at(op.data as usize).proj_len == 0 && self.scoped[b.places.at(
                 op.data as usize,
             ).base as usize]) {
                 let v = self.operand(b, b.module, &mut path.state, oid, false);
                 self.leak(v);
             }
         }
-        let r = self.call_value(b, b.module, &mut path.state, t, false);
+        let r0 = self.call_value(b, b.module, &mut path.state, t, false);
+        // An unknown result of a small frozen aggregate type is the aggregate of its members (`eta`).
+        let r = if t.dests_len == 1 && self.tm.at(r0).op == T_VAR {
+            self.eta(b.module, b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty, r0, 0)
+        } else {
+            r0
+        };
         // A `const fn` whose value the walk computed (no fresh unknown) writes no memory.
         let pure = self.tm.at(r).op == T_CALL || self.is_const_fn(d) && self.tm.at(r).op != T_VAR;
         let own = d.module == b.owner.module && d.node == b.owner.node;
@@ -6229,7 +8529,26 @@ extend<const B: usize> Prover<B> {
                         }
                     } else {
                         let x0 = self.operand(b, b.module, &mut path.state, oid, false);
-                        self.implicit_ref(b, t, j, x0)
+                        let x1 = self.implicit_ref(b, t, j, x0);
+                        let op = *b.operands.at(oid as usize);
+                        // The value's own type: a place's local for a whole local (the coercion to the
+                        // parameter's type gives the place that type).
+                        let aty = if op.kind == ir::OP_CONST {
+                            op.ty
+                        } else if b.places.at(op.data as usize).proj_len == 0 {
+                            b.locals.at(b.places.at(op.data as usize).base as usize).ty
+                        } else {
+                            b.places.at(op.data as usize).ty
+                        };
+                        self.share_arg(
+                            b.module,
+                            aty,
+                            cm,
+                            cb.locals.at((cb.returns + j) as usize).ty,
+                            x1,
+                            &mut path.state,
+                            &mut path.pc,
+                        )
                     };
                     frame.set((cb.returns + j) as usize, x);
                 }
@@ -6238,6 +8557,12 @@ extend<const B: usize> Prover<B> {
                 frame.set(0, r);
             }
             let name = String::from_str(self.text(cm, self.ast_of(cm).at_const(self.ast_of(cm).ext_name(d.node)).span));
+            // A generic callee's clauses read its type parameters as the call's type arguments.
+            let mut binds = Vector::<u64>::new();
+            if !self.call_binds(b, b.module, t, &mut binds) {
+                binds.clear();
+            }
+            let outer = replace(&mut self.subst, binds);
             // The frame's references to the caller's locals read the caller's state.
             self.mem = &path.state;
             // The callee's `old(e)` values: `e` in the frame before the call.
@@ -6279,8 +8604,7 @@ extend<const B: usize> Prover<B> {
             }
             self.mem = null;
             if !pure && !ghost {
-                self.mem_event(b, b.module, &mut path.state);
-                self.lent(b, &mut path.state, t);
+                self.call_event(b, path, t);
             }
             let ne2 = cb.locals.len();
             frame.set(ne2, path.state[path.state.len() - 1]);
@@ -6292,6 +8616,9 @@ extend<const B: usize> Prover<B> {
                 }
             }
             self.mem = &path.state;
+            // The callee proves that its `ensures` clauses do not overflow under its `requires`, which
+            // the call proved: here their arithmetic is exact.
+            let co = replace(&mut self.chain_ovf, OVF_EXACT);
             for j in 0..cb.contracts.len() {
                 let s = cb.contracts[j];
                 if s.kind == CT_ENSURES && (!self.in_ghost || self.total(d)) {
@@ -6299,11 +8626,12 @@ extend<const B: usize> Prover<B> {
                     path.pc.push(f);
                 }
             }
+            self.chain_ovf = co;
             self.mem = null;
+            self.subst = outer;
         } else if !pure && !ghost {
             // A call that may write memory: a const fn call of frozen values writes none.
-            self.mem_event(b, b.module, &mut path.state);
-            self.lent(b, &mut path.state, t);
+            self.call_event(b, path, t);
         }
         if t.dests_len == 1 {
             self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
@@ -6312,6 +8640,165 @@ extend<const B: usize> Prover<B> {
                 self.write_place(b, b.module, &mut path.state, b.dest_pool[j as usize], NONE, false);
             }
         }
+    }
+
+    // Call `t` may write memory: a new epoch, and the locals it was lent. It reaches no `[]mut` parameter
+    // of the body that its arguments do not reach, which only the body may write while it holds it: their
+    // views stay (`keep_param_views`).
+    fn call_event(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) {
+        let ep0 = path.state[path.state.len() - 1];
+        let mut passed: u64 = 0;
+        let mut vx = Vector::<u32>::new();
+        for j in 0..t.args_len {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+            if op.kind != ir::OP_CONST {
+                passed |= self.reached_params(b, &mut path.state, b.places.at(op.data as usize).base, op.ty, &mut vx);
+            }
+        }
+        // The vectors lent as views the call is not given keep their values (their views' borrows have
+        // ended or are not the call's).
+        let keep = passed != ~0u64;
+        self.mem_event_keep(b, b.module, &mut path.state, keep, &vx);
+        self.lent(b, &mut path.state, t);
+        self.keep_param_views(b, b.module, &path.state, ep0, passed);
+    }
+
+    // The `[]mut` parameters loop terminator `t` (a call or a drop) may reach, the arguments' origins
+    // through `ldef` (`ref_origin`): a value's (`frozen`) or a local's of an owning type (`owns`) none, a
+    // parameter's that one, another's all.
+    fn loop_reach(self: &Self, b: &ir::CoreBody, ldef: &Map<u32, u32>, t: &ir::Terminator) u64 {
+        if t.kind == ir::TM_DROP {
+            let pl = *b.places.at(t.a as usize);
+            return pick(pl.proj_len == 0 && self.owns(b.module, b.locals.at(pl.base as usize).ty), 0u64, ~0u64);
+        }
+        let mut m: u64 = 0;
+        for j in 0..t.args_len {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+            if op.kind == ir::OP_CONST || self.frozen(b.module, op.ty) {
+                continue;
+            }
+            if b.places.at(op.data as usize).proj_len != 0 {
+                return ~0u64;
+            }
+            let o = ref_origin(b, ldef, b.places.at(op.data as usize).base);
+            if param_bit(b, o) != 0 {
+                m |= param_bit(b, o);
+            } else if o as usize >= b.locals.len() || !self.owns(b.module, b.locals.at(o as usize).ty) {
+                return ~0u64;
+            }
+        }
+        return m;
+    }
+
+    // Value `x` of type `aty` (module `am`) used as type `pty` (module `pm`): a `[]mut` used as a shared
+    // `[]T` (an argument, a copy) is a new view of its elements now (as `[]mut`'s `as_slice`,
+    // `sq_effect`), which no write changes while it lives.
+    fn share_arg(
+        self: &mut Self,
+        am: ModuleId,
+        aty: TypeId,
+        pm: ModuleId,
+        pty: TypeId,
+        x: u32,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+    ) u32 {
+        if x == NONE || self.slice.node == NODE_NONE || aty == TYPE_NONE || pty == TYPE_NONE {
+            return x;
+        }
+        let (dam, dad) = self.decl_of(am, aty);
+        let (dpm, dpd) = self.decl_of(pm, pty);
+        if dad == NODE_NONE || dpd == NODE_NONE || dam != self.smut.mid || dad != self.smut.node || dpm != self.slice.mid || dpd != self.slice.node {
+            return x;
+        }
+        let ov = self.view_s(x, state[state.len() - 1]);
+        let xs = self.fresh(pm, pty);
+        self.sdef.insert(xs as u64 << 32 | self.tm.boolean(false) as u64, ov);
+        let sl = self.sq1(SQ_SLEN, xs, self.pw, false);
+        let ol = self.sq1(SQ_SLEN, x, self.pw, false);
+        pc.push(self.tm.cmp(T_EQ, sl, ol));
+        return xs;
+    }
+
+    // The parameters (`param_bit`) a value of type `ty` in local `l` may reach: none for a value
+    // (`frozen`) or a reference to a local of an owning type (`owns`), the parameter whose value or
+    // reference it holds, none but the vector for a view a vector was lent (`views`, the view into `vx`),
+    // and all of them for another.
+    fn reached_params(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        state: &mut Vector<u32>,
+        l: u32,
+        ty: TypeId,
+        vx: &mut Vector<u32>,
+    ) u64 {
+        if self.frozen(b.module, ty) {
+            return 0;
+        }
+        let own = param_bit(b, l);
+        if own != 0 {
+            return own;
+        }
+        let v = state[l as usize];
+        if v == NONE {
+            return ~0u64;
+        }
+        if self.tm.at(v).op == T_MREF {
+            let x = self.tm.at(v).a;
+            let xb = param_bit(b, x);
+            if xb != 0 {
+                return xb;
+            }
+            let xt = if x as usize >= b.locals.len() {
+                self.slot_ty[x as usize - b.locals.len()]
+            } else {
+                b.locals.at(x as usize).ty
+            };
+            return pick(self.owns(b.module, xt), 0u64, ~0u64);
+        }
+        let mut m: u64 = 0;
+        for p in b.returns..b.returns + b.args {
+            if state[p as usize] == v {
+                m |= param_bit(b, p);
+            }
+        }
+        // A view a local vector of values lent (`escape_as`) reaches that vector only.
+        for q in 0..self.views.len() {
+            let x = (self.views[q] >> 32) as u32;
+            if self.views[q] as u32 == v && x as usize < b.locals.len() && param_bit(b, x) == 0 && self.owns(
+                b.module,
+                b.locals.at(x as usize).ty,
+            ) {
+                vx.push(v);
+                return m;
+            }
+        }
+        return pick(m != 0, m, ~0u64);
+    }
+
+    // Whether a value of type `ty` (module `m`) holds memory of its own only: a value (`frozen`), or a
+    // vector of values or a string, whose elements no other value shares.
+    fn owns(self: &Self, m: ModuleId, ty: TypeId) bool {
+        if self.frozen(m, ty) {
+            return true;
+        }
+        let (dm, dd) = self.decl_of(m, ty);
+        if dd == NODE_NONE {
+            return false;
+        }
+        if dm == self.strl.mid && dd == self.strl.node {
+            return true;
+        }
+        if dm != self.vecl.mid || dd != self.vecl.node {
+            return false;
+        }
+        let (m1, t1) = self.resolve(m, ty);
+        let y = self.ast_of(m1).type_at(t1);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return false;
+        }
+        let inst = self.ast_of(m1).instance(y.as_data.inst);
+        return inst.n >= 1 && self.frozen(m1, inst.args[0]);
     }
 
     // The locals call `t` was lent (`scoped`): the callee may have changed them.
@@ -6329,6 +8816,26 @@ extend<const B: usize> Prover<B> {
             if v.op == T_MREF && v.a as usize != p.base as usize {
                 self.forget(b, b.module, state, v.a);
             }
+        }
+    }
+
+    // A `[]mut` parameter the body never reassigns refers to the caller's memory, which no local of the
+    // body is part of: a write to a local leaves its view in the new epoch as it was in epoch `ep0`.
+    fn keep_param_views(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &Vector<u32>, ep0: u32, skip: u64) {
+        let wm = self.param_writes(cb.owner, cb) | skip;
+        let ep1 = state[state.len() - 1];
+        for l in cb.returns..cb.returns + cb.args {
+            let k = l - cb.returns;
+            if k >= 64 || (wm >> k as u64 & 1) != 0 || state[l as usize] == NONE {
+                continue;
+            }
+            let (dm, dd) = self.decl_of(cm, cb.locals.at(l as usize).ty);
+            if dd == NODE_NONE || dm != self.smut.mid || dd != self.smut.node {
+                continue;
+            }
+            let xs = state[l as usize];
+            let v = self.view_s(xs, ep0);
+            self.sdef.insert(xs as u64 << 32 | ep1 as u64, v);
         }
     }
 
@@ -6378,6 +8885,38 @@ const fn through_ref(cb: &ir::CoreBody, pl: u32) bool {
 }
 
 // The bit of local `l` of `cb` in a parameter mask: none for another local or past the 64th.
+// The local whose reference local `l` holds, through the whole-local copies and reborrows (`&mut *x`)
+// of `ldef` (a local's defining rvalue): `l` itself when it holds no such copy.
+fn ref_origin(cb: &ir::CoreBody, ldef: &Map<u32, u32>, l: u32) u32 {
+    let mut x = l;
+    for _k in 0..8 {
+        if !ldef.contains_key(&x) {
+            return x;
+        }
+        let rid = *ldef.get(&x).unwrap();
+        let rv = *cb.rvalues.at(rid as usize);
+        if rv.kind == ir::RV_USE && rv.b == 0 {
+            let op = *cb.operands.at(rv.a as usize);
+            if op.kind == ir::OP_CONST || cb.places.at(op.data as usize).proj_len != 0 {
+                return x;
+            }
+            x = cb.places.at(op.data as usize).base;
+        } else if rv.kind == ir::RV_REF {
+            let p = *cb.places.at(rv.a as usize);
+            if p.proj_len == 0 {
+                return p.base;
+            }
+            if p.proj_len != 1 || cb.projections.at(p.proj_start as usize).kind != ir::PJ_DEREF {
+                return x;
+            }
+            x = p.base;
+        } else {
+            return x;
+        }
+    }
+    return x;
+}
+
 const fn param_bit(cb: &ir::CoreBody, l: u32) u64 {
     if l < cb.returns || l >= cb.returns + cb.args || l - cb.returns >= 64 {
         return 0;
@@ -6760,8 +9299,7 @@ pub(package) fn check_kept(
             if kb.body.blocks.len() == 0 || skip[kb.body.module as usize] {
                 continue;
             }
-            if !wide[k] {
-                pv.prove_kept(k);
+            if !wide[k] && pv.prove_fits(k) {
                 continue;
             }
             pw.prove_kept(k);
@@ -6812,19 +9350,16 @@ pub(package) fn check_kept(
                         continue;
                     }
                     let m = kb.body.module as usize;
-                    let e = if wd[k] {
-                        w2.prove_kept(k);
-                        replace(w2.errs.index_mut(m), diag::Errors::new())
+                    let (e, f) = if !wd[k] && w.prove_fits(k) {
+                        (replace(w.errs.index_mut(m), diag::Errors::new()), replace(&mut w.facts, Vector::<u64>::new()))
                     } else {
-                        w.prove_kept(k);
-                        replace(w.errs.index_mut(m), diag::Errors::new())
+                        w2.prove_kept(k);
+                        (
+                            replace(w2.errs.index_mut(m), diag::Errors::new()),
+                            replace(&mut w2.facts, Vector::<u64>::new())
+                        )
                     };
                     unsafe *(ptr::from_addr_mut::<diag::Errors>(oa) + k) = e;
-                    let f = if wd[k] {
-                        replace(&mut w2.facts, Vector::<u64>::new())
-                    } else {
-                        replace(&mut w.facts, Vector::<u64>::new())
-                    };
                     unsafe *(ptr::from_addr_mut::<Vector<u64>>(fa) + k) = f;
                 }
             },
@@ -6865,4 +9400,20 @@ pub(package) fn check_kept(
         }
     }
     return ok;
+}
+
+// Whether `c` (at least 0) is `2^j - 1` for some `j`: `c + 1` a power of two.
+const fn low_mask<const B: usize>(c: Num<B>) bool {
+    let n = c + Num::<B>::one();
+    let mut p = Num::<B>::one();
+    for _j in 0..B {
+        if p == n {
+            return true;
+        }
+        if n < p {
+            return false;
+        }
+        p = p.shl(1);
+    }
+    return false;
 }
