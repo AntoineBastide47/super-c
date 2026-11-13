@@ -25494,7 +25494,7 @@ extend TypeChecker {
                     diag::span_str(self.source, at.start, at.end),
                 ),
             );
-        } else if self.tc_holds_cell(self.node_type_in(m, field), 0) {
+        } else if self.tc_holds_cell(self.resolve_type(fd.ty), 0) {
             self.errors.emit_span(
                 dc::INVARIANT_FIELD,
                 at,
@@ -25513,7 +25513,7 @@ extend TypeChecker {
         if ty == TYPE_NONE || depth > BOUND_MAX_DEPTH {
             return true;
         }
-        let y = *self.type_at(self.strip(ty));
+        let y = *self.type_at(ty);
         if y.kind == TypeKind::TYPE_BUILTIN || y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_SIMD || y.kind == TypeKind::TYPE_MASK {
             return false;
         }
@@ -25531,15 +25531,12 @@ extend TypeChecker {
         let mut gp = Defs8 {};
         let mut ga = Tys8 {};
         let mut gn: i32 = 0;
-        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) || self.is_unsafe_cell_decl(
-            om,
-            od,
-        ) {
+        if !self.aggregate_of(ty, &mut om, &mut od, &mut gp, &mut ga, &mut gn) || self.is_unsafe_cell_decl(om, od) {
             return true;
         }
         let mut fts = Vector::<TypeId>::new();
         let enm = unsafe (*self.mod_ast(om)).at_const(od).kind == NodeKind::NODE_ENUM;
-        self.tc_field_types(self.strip(ty), pick(enm, 2u8, 0u8), &mut fts);
+        self.tc_field_types(ty, pick(enm, 2u8, 0u8), &mut fts);
         for i in 0..fts.len() {
             if self.tc_holds_cell(fts[i], depth + 1) {
                 return true;
@@ -34963,6 +34960,13 @@ extend TypeChecker {
             if c.kind == CT_OLD || c.kind == CT_OLD_RUN {
                 continue;
             }
+            if c.kind == CT_PANICS && self.tc_in_ghost_fn() {
+                self.errors.emit_span(
+                    dc::GHOST_PANICS,
+                    tok::Span { start: c.at, end: c.at + 6 },
+                    format("ghost code never panics: a spec function or a lemma has no 'panics if'"),
+                );
+            }
             if c.binder != NODE_NONE {
                 if result == TYPE_NONE {
                     let sp = unsafe (*self.cur_ast()).at_const(c.binder).span;
@@ -34976,8 +34980,10 @@ extend TypeChecker {
                 unsafe (*self.cur_ast()).set_type(c.binder, result);
             }
             if c.kind != CT_DECREASES {
-                let run = (c.kind != CT_ASSERT && self.ghost == 1 && (unsafe (&*self.package).cg & bman::CG_CONTRACT_CHECKS) != 0) as u32;
-                let ok = (c.kind != CT_REQUIRES && !self.tc_in_ghost_fn()) as u32;
+                // A `panics if` states where the function may panic: no build runs it, and it reads the
+                // entry, as a `requires` does.
+                let run = (c.kind != CT_ASSERT && c.kind != CT_PANICS && self.ghost == 1 && (unsafe (&*self.package).cg & bman::CG_CONTRACT_CHECKS) != 0) as u32;
+                let ok = (c.kind != CT_REQUIRES && c.kind != CT_PANICS && !self.tc_in_ghost_fn()) as u32;
                 self.run_clause += run;
                 self.old_ok += ok;
                 let _ = self.check_cond(c.expr, contract_word(c.kind));

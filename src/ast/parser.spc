@@ -674,7 +674,9 @@ extend Parser {
         let k = self.peek_type();
         let bound = k == TokenType::Minus || Parser::is_literal_token(k) || Parser::is_identifier_token(k) && !self.at_word(
             "requires",
-        ) && !self.at_word("ensures") && !self.at_word("decreases") && !self.at_word("invariant");
+        ) && !self.at_word("ensures") && !self.at_word("decreases") && !self.at_word("invariant") && !self.at_word(
+            "panics",
+        );
         let hi = if bound {
             self.type_pattern_bound()
         } else {
@@ -1222,14 +1224,20 @@ extend Parser {
 
     // Whether the next token starts a function's contract clause.
     const fn at_fn_contract(self: &Self) bool {
-        return self.at_word("requires") || self.at_word("ensures") || self.at_word("decreases");
+        return self.at_word("requires") || self.at_word("ensures") || self.at_word("decreases") || self.at_word(
+            "panics",
+        );
     }
 
     // One clause's conditions after its keyword: `E, E` (a comma continues only `requires` and
     // `invariant`), each pushed as a `Contract` of `kind`; `ensures` may bind the result first (`|r| E`).
+    // `panics` takes `if` before its condition.
     fn parse_contract_clause(self: &mut Self, kind: u32, out: &mut Vector<Contract>) {
         let at = self.raw_peek().start();
         self.advance();
+        if kind == CT_PANICS {
+            self.expect(TokenType::If, "'if'");
+        }
         self.spec += 1;
         self.parse_clause_conditions(kind, at, out);
         self.spec -= 1;
@@ -1249,7 +1257,7 @@ extend Parser {
             }
             let expr = self.parse_condition_expression();
             out.push(Contract { owner: NODE_NONE, binder: binder, expr: expr, kind: kind, at: at });
-            if kind == CT_ENSURES || kind == CT_DECREASES || out.len() >= PARSE_MAX_CONTRACTS || !self.match(
+            if kind == CT_ENSURES || kind == CT_DECREASES || kind == CT_PANICS || out.len() >= PARSE_MAX_CONTRACTS || !self.match(
                 TokenType::Comma,
             ) {
                 return;
@@ -1264,6 +1272,8 @@ extend Parser {
                 CT_REQUIRES
             } else if self.at_word("ensures") {
                 CT_ENSURES
+            } else if self.at_word("panics") {
+                CT_PANICS
             } else {
                 CT_DECREASES
             };

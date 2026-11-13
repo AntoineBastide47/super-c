@@ -1334,6 +1334,7 @@ extend Lowerer {
                     }
                 }
                 self.lower_contracts(fnode, CT_REQUIRES, sp);
+                self.lower_contracts(fnode, CT_PANICS, sp);
                 self.lower_contracts(fnode, CT_DECREASES, sp);
                 self.lower_olds(fnode, sp);
             }

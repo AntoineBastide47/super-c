@@ -13831,6 +13831,18 @@ fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
                 confs.index_mut((*conf_ix.get(&key).unwrap()) as usize).push(k);
             }
         }
+        // A struct's invariant method: no body calls it, and the proofs unfold it wherever a value of the
+        // type is (`prove::Prover::inv_of`).
+        for c in 0..a.contracts.len() {
+            let r = *a.contracts.at(c);
+            if r.kind != CT_TYPE_INVARIANT || r.binder == NODE_NONE {
+                continue;
+            }
+            let it = p.item_of(m as ModuleId, r.binder);
+            if it != loader::ITEM_NONE && bc_body_item(p, p.idx().items.at(it as usize)) {
+                bc_queue(&mut queued, &mut round, it);
+            }
+        }
     }
     let kp = unsafe &mut *st.master;
     let mut slot = bc_slot_take(unsafe &*st.slots, unsafe &*st.freed, st.p);

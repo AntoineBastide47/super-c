@@ -1210,7 +1210,9 @@ pub(package) const QF_INCLUSIVE: u32 = 2;
 pub(package) fn skip_contracts(b: &mut CoreBody, keep_checks: bool, keep_pats: bool, req: *const Ast, ptr32: bool) {
     for i in 0..b.contracts.len() {
         let k = b.contracts[i].kind;
-        if k == CT_PATTERN && !keep_pats || k != CT_PATTERN && (!keep_checks || k == CT_DECREASES || is_ghost_site(k)) {
+        if k == CT_PATTERN && !keep_pats || k != CT_PATTERN && (!keep_checks || k == CT_DECREASES || k == CT_PANICS || is_ghost_site(
+            k,
+        )) {
             if k == CT_REQUIRES && req != null {
                 note_requires(b, i, unsafe &*req, ptr32);
             }

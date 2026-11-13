@@ -764,18 +764,27 @@ struct Prover<const B: usize> {
     in_ghost: bool,
     // The body has contract clauses: each check of its own walk is an obligation (no operation panics).
     no_panic: bool,
-    // The accesses to `@owned` blocks the walk read since the last check (`own_check`): the index's term
-    // then the block's, each pair two entries.
+    // The accesses to `@owned` blocks the walk read since the last check (`own_check`): the index's term,
+    // the block's and the element size's, three entries each.
     own_chk: Vector<u32>,
     // The prelude's `Allocator`; the allocations of the body's walk: per result term (`alloc_of`), its
     // record in `alloc_rec` (the kind AK_*, the size's term, the block it moves for a `realloc`).
     allocl: loader::LookupHit,
+    // The prelude's `Free` interface: its `free` ends its receiver's life (`inv_scan`).
+    freel: loader::LookupHit,
     alloc_of: Map<u32, u32>,
     alloc_rec: Vector<u32>,
     // A call of the allocator's: its memory event leaves the `@owned` blocks (`mem_event_of`).
     keep_own: bool,
     // The locals and slots of the body under proof whose type has an invariant its file proves (`inv_scan`).
     inv_locs: Vector<u32>,
+    // The slot of the receiver of the `Free::free` body under proof, else NONE (`inv_scan`).
+    inv_end: u32,
+    // The body's `panics if` conditions at its entry, or'ed (`own_site`), NONE without one: its no-panic
+    // obligations hold where it is false.
+    pan_cond: u32,
+    // In a refinement walk, the interface method's `panics if` at the entry, NONE without one.
+    refine_pan: u32,
     // Per local and slot of the body under proof: its code reads the pointer of an `@owned` field of it
     // (`own_scan`), so a memory event may reach the block.
     own_exp: Vector<bool>,
@@ -956,9 +965,13 @@ extend<const B: usize> Prover<B> {
             no_panic: false,
             own_chk: Vector::<u32>::new(),
             allocl: p.prelude_lookup("Allocator", true),
+            freel: p.prelude_lookup("Free", true),
             alloc_of: Map::<u32, u32>::new(),
             alloc_rec: Vector::<u32>::new(),
             inv_locs: Vector::<u32>::new(),
+            inv_end: NONE,
+            pan_cond: NONE,
+            refine_pan: NONE,
             own_exp: Vector::<bool>::new(),
             gblk: Vector::<bool>::new(),
             in_ghost: false,
@@ -1542,16 +1555,46 @@ extend<const B: usize> Prover<B> {
         key: u64,
         sp: tok::Span,
         what: str,
+        skip: u32,
     ) {
         if self.ghost_fn {
             return;
         }
+        // An operation or a check of a body with contracts panics only where its `panics if` holds (keys 7
+        // and 6); a call or a drop runs code that may panic anywhere.
+        let mut pcp = Vector::<u32>::new();
+        let own = key >> 52 == 6 || key >> 52 == 7;
+        let cond = own && self.no_panic && self.pan_cond != NONE;
+        if cond {
+            pcp = pc.clone();
+            pcp.push(self.pan_cond);
+        }
+        let pu = pick(cond, &pcp, pc);
         for j in 0..self.inv_locs.len() {
             let l = self.inv_locs[j] as usize;
+            if l as u32 == skip {
+                continue;
+            }
             let v = state[l];
             let ty = self.loc_ty(b, l);
-            self.inv_need(b, state, pc, ty, v, key | l as u64 << 32, sp, what);
+            self.inv_need(b, state, pu, ty, v, key | l as u64 << 32, sp, what);
         }
+    }
+
+    // Whether rvalue `rv` may panic: arithmetic that may overflow, a division or a remainder, a shift, a
+    // negation, a library conversion, a check.
+    const fn may_panic(rv: &ir::Rvalue) bool {
+        if rv.kind == ir::RV_BINARY {
+            let op = rv.c;
+            return op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 || op == tt::TokenType::Star as u8 || op == tt::TokenType::Slash as u8 || op == tt::TokenType::Percent as u8 || op == tt::TokenType::LeftShift as u8 || op == tt::TokenType::RightShift as u8;
+        }
+        if rv.kind == ir::RV_UNARY {
+            return rv.b as u8 == tt::TokenType::Minus as u8;
+        }
+        if rv.kind == ir::RV_CAST {
+            return rv.b == ir::CAST_COERCE_FROM as u32;
+        }
+        return rv.kind == ir::RV_INTRINSIC && ir::is_check(rv.c);
     }
 
     // The type of local or slot `l` of body `b`.
@@ -1566,10 +1609,24 @@ extend<const B: usize> Prover<B> {
     // The locals and slots of body `b` of a struct type with an invariant its file proves (`inv_here`).
     fn inv_scan(self: &mut Self, b: &ir::CoreBody) {
         self.inv_locs.clear();
+        self.inv_end = NONE;
         if self.ghost_fn {
             return;
         }
+        // `Free::free` ends its receiver's life: nothing reads the receiver after it, also not after its
+        // panic, so the invariant holds only at its entry.
+        let ends = self.iface_method(b.owner, &self.freel) == "free" && b.args != 0;
+        let recv = b.returns as usize;
+        let recv_slot = if ends {
+            self.slot_of[recv]
+        } else {
+            NONE
+        };
+        self.inv_end = recv_slot;
         for l in 0..b.locals.len() + self.slot_ty.len() {
+            if ends && (l == recv || l as u32 == recv_slot) {
+                continue;
+            }
             if self.inv_here(b.module, self.loc_ty(b, l)) {
                 self.inv_locs.push(l as u32);
             }
@@ -1613,7 +1670,15 @@ extend<const B: usize> Prover<B> {
                 "at this call",
             );
         }
-        self.inv_unwind(b, &path.state, &path.pc, 3 << 52 | t.span.start as u64, t.span, "where this call may panic");
+        self.inv_unwind(
+            b,
+            &path.state,
+            &path.pc,
+            3 << 52 | t.span.start as u64,
+            t.span,
+            "where this call may panic",
+            NONE,
+        );
     }
 
     // After call `t` of body `b`: each local and `&mut` parameter of a struct type with an invariant
@@ -1623,11 +1688,38 @@ extend<const B: usize> Prover<B> {
         if self.ghost_fn || self.is_ghost(t.callee) {
             return;
         }
+        self.inv_resume(b, path, 3 << 52 | t.span.start as u64, NONE);
+    }
+
+    // After the code a call or a drop runs (unwind check `key`): each local but `dead`, and each target of a
+    // shared reference parameter, satisfies its invariant again.
+    fn inv_resume(self: &mut Self, b: &ir::CoreBody, path: &mut Path, key: u64, dead: u32) {
         for j in 0..self.inv_locs.len() {
             let l = self.inv_locs[j] as usize;
             let v = path.state[l];
-            if v != NONE {
+            // A local whose invariant the check could not prove keeps its facts: assuming it would hide the
+            // errors after it.
+            let lk = OB_TYPE_INV << 56 | key | l as u64 << 32;
+            if v != NONE && l as u32 != dead && !self.failed.contains_key(&lk) {
                 let f = self.inv_of(b.module, self.loc_ty(b, l), v, &path.state);
+                if f != NONE && !path.pc.contains(&f) {
+                    path.pc.push(f);
+                }
+            }
+        }
+        // A shared reference parameter's target: nothing changes the fields its invariant reads while the
+        // body runs (they hold no cell), and it held at the entry.
+        for l in b.returns..b.returns + b.args {
+            let y = *self.ast_of(b.module).type_at(b.locals.at(l as usize).ty);
+            if y.kind != TypeKind::TYPE_REFERENCE || y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 || !self.inv_here(
+                b.module,
+                y.as_data.elem,
+            ) {
+                continue;
+            }
+            let v = self.deref(&path.state, path.state[l as usize], b.module, y.as_data.elem);
+            if v != NONE {
+                let f = self.inv_of(b.module, y.as_data.elem, v, &path.state);
                 if f != NONE && !path.pc.contains(&f) {
                     path.pc.push(f);
                 }
@@ -1679,6 +1771,9 @@ extend<const B: usize> Prover<B> {
             );
         }
         for k in 0..self.slot_ty.len() {
+            if (b.locals.len() + k) as u32 == self.inv_end {
+                continue;
+            }
             let v = path.state[b.locals.len() + k];
             let ty = self.slot_ty[k];
             self.inv_need(
@@ -3337,10 +3432,18 @@ extend<const B: usize> Prover<B> {
     }
 
     // Prove that the conditions `pc` imply `goal`; report obligation `key` when they do not.
-    fn oblige(self: &mut Self, pc: &Vector<u32>, goal: u32, key: u64, sp: tok::Span, msg: String, note: String) {
+    fn oblige(self: &mut Self, pc: &Vector<u32>, goal0: u32, key: u64, sp: tok::Span, msg: String, note: String) {
         if self.over || self.failed.contains_key(&key) || self.refining && key >> 56 != OB_REFINE {
             return;
         }
+        // A body with a `panics if` may panic where it holds: a check, a panic or an overflow of its own
+        // code is an obligation only where it is false.
+        let kind = key >> 56;
+        let goal = if self.pan_cond != NONE && !self.in_ghost && self.chain_depth == 0 && (kind == OB_PANIC || kind == OB_OVERFLOW) {
+            self.tm.or(self.pan_cond, goal0)
+        } else {
+            goal0
+        };
         // With constants of half the narrow width, an overflow sends the body to the wide prover at once:
         // one already seen fails this obligation unproved.
         if B == NUM_NARROW && self.tm.big_seen && self.sv.overflowed() {
@@ -3488,6 +3591,7 @@ extend<const B: usize> Prover<B> {
                 if !all {
                     self.own_chk.push(key);
                     self.own_chk.push(v);
+                    self.own_chk.push(self.size_term(cm, pj.ty));
                 }
                 v = self.seq_at(v, key, w, sg);
                 if w == W_OTHER {
@@ -4388,34 +4492,39 @@ extend<const B: usize> Prover<B> {
         return self.tm.int(wide::<B>(pick(ix >= 0, ix, pj.sub)) + Num::<B>::one().shl(41), 64, false);
     }
 
-    // The kind of an allocator method `d` is (AK_*): `alloc`, `realloc` or `dealloc` of the `Allocator`
-    // interface, or of a conformance to it.
-    fn alloc_call(self: &Self, d: DefId) u32 {
-        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.allocl.node == NODE_NONE || !self.pkg().modules.at(
+    // The name of method `d` when it is a method of interface `hit` or of a conformance to it, else "".
+    fn iface_method(self: &Self, d: DefId, hit: &loader::LookupHit) str {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || hit.node == NODE_NONE || !self.pkg().modules.at(
             d.module as usize,
         ).has_ast {
-            return AK_NONE;
+            return "";
         }
         let a = self.ast_of(d.module);
         if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
-            return AK_NONE;
+            return "";
         }
         let c = a.container_of(d.node);
         if c == NODE_NONE {
-            return AK_NONE;
+            return "";
         }
-        let mut ours = d.module == self.allocl.mid && c == self.allocl.node;
+        let mut ours = d.module == hit.mid && c == hit.node;
         if !ours && a.at_const(c).kind == NodeKind::NODE_EXTEND {
             let it = a.ext(c).extend_def.interface_type;
             if it != NODE_NONE {
                 let r = a.resolution_def(it);
-                ours = r.module == self.allocl.mid && r.node == self.allocl.node;
+                ours = r.module == hit.mid && r.node == hit.node;
             }
         }
         if !ours {
-            return AK_NONE;
+            return "";
         }
-        let nm = self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+        return self.text(d.module, a.at_const(a.ext_name(d.node)).span);
+    }
+
+    // The kind of an allocator method `d` is (AK_*): `alloc`, `realloc` or `dealloc` of the `Allocator`
+    // interface, or of a conformance to it.
+    fn alloc_call(self: &Self, d: DefId) u32 {
+        let nm = self.iface_method(d, &self.allocl);
         return if nm == "alloc" {
             AK_ALLOC
         } else if nm == "realloc" {
@@ -4498,12 +4607,15 @@ extend<const B: usize> Prover<B> {
         } else {
             s
         };
-        // A size `x * sizeof(T)` holds `x` elements (any number of zero-sized ones), another one its
-        // length times the element's size.
+        // A size `sizeof(T)` holds one element, `x * sizeof(T)` holds `x` (any number of zero-sized ones),
+        // another size its length times the element's.
         let n = self.seq_len(blk);
         let st = self.tm.at(size);
         let et_size = self.size_term(m, et);
-        let f = if st.op == T_MUL && (st.b == et_size || st.a == et_size) {
+        let f = if size == et_size {
+            let one = self.tm.int(Num::<B>::one(), W_INT, true);
+            self.tm.cmp(T_EQ, n, one)
+        } else if st.op == T_MUL && (st.b == et_size || st.a == et_size) {
             let x = self.widened(pick(st.b == et_size, st.a, st.b), W_INT, true);
             if x == NONE {
                 self.tm.boolean(true)
@@ -4526,24 +4638,29 @@ extend<const B: usize> Prover<B> {
             return;
         }
         let mut j: usize = 0;
-        while j + 1 < self.own_chk.len() {
+        while j + 2 < self.own_chk.len() {
             let i = self.sq_index(self.own_chk[j]);
             let n = self.seq_len(self.own_chk[j + 1]);
             let z = self.tm.int(Num::<B>::zero(), W_INT, true);
             let lo = self.tm.cmp(T_LE, z, i);
             let hi = self.tm.cmp(T_LT, i, n);
-            let g = self.tm.and(lo, hi);
+            // An element of no bytes occupies no memory: any index of it is inside the block.
+            let es = self.own_chk[j + 2];
+            let zs = self.tm.int(Num::<B>::zero(), self.tm.at(es).w, false);
+            let none = self.tm.cmp(T_EQ, es, zs);
+            let inb = self.tm.and(lo, hi);
+            let g = self.tm.or(inb, none);
             self.oblige(
                 pc,
                 g,
-                OB_BLOCK << 56 | j as u64 << 32 | sp.start as u64,
+                OB_BLOCK << 56 | (j / 3) as u64 << 32 | sp.start as u64,
                 sp,
                 format("cannot prove that this index is inside the block of the '@owned' field"),
                 String::from_str(
                     "the elements of the block are 'std::spec::seq::block(ptr)': the index must be below its length",
                 ),
             );
-            j += 2;
+            j += 3;
         }
         self.own_chk.clear();
     }
@@ -4644,8 +4761,16 @@ extend<const B: usize> Prover<B> {
         for j in 0..ag.members.len {
             let f = unsafe self.ast_of(dm).list(ag.members)[j as usize];
             if self.ast_of(dm).attr_of(f, AttrKind::ATTR_OWNED) != null {
+                // A write through a copy of the field changes the elements; only an allocator, whose calls
+                // keep the blocks, changes the length.
                 let k = self.tm.int(wide::<B>(j) + Num::<B>::one().shl(41), 64, false);
-                out = self.tm.upd(out, k, self.tm.var(W_OTHER, false));
+                let old = self.sel(out, k, W_OTHER, false);
+                let s = self.tm.var(W_OTHER, false);
+                let n0 = self.seq_len(old);
+                let n1 = self.seq_len(s);
+                let f = self.tm.cmp(T_EQ, n1, n0);
+                self.anchor(s, f);
+                out = self.tm.upd(out, k, s);
             }
         }
         return out;
@@ -4688,6 +4813,7 @@ extend<const B: usize> Prover<B> {
             if !all {
                 self.own_chk.push(i);
                 self.own_chk.push(old);
+                self.own_chk.push(self.size_term(cm, pj.ty));
             }
             let e = self.seq_at(old, i, w, sg);
             let inner = self.update(cb, cm, state, p, from + 1, e, v, all);
@@ -5279,10 +5405,10 @@ extend<const B: usize> Prover<B> {
         if !all && rv.kind == ir::RV_INTRINSIC && (rv.c == ir::IN_ASM || rv.c == ir::IN_VOLATILE_STORE) {
             self.mem_event(cb, cm, state);
         }
-        // An operation that may panic (an overflow, a division by zero, a shift count, a checked cast, a
-        // bounds check) unwinds past the body's values.
-        if !all && self.inv_locs.len() != 0 && (rv.kind == ir::RV_BINARY || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_INTRINSIC) {
-            self.inv_unwind(cb, state, pc, 7 << 52 | sid as u64, s.span, "where this operation may panic");
+        // An operation that may panic (an overflow, a division by zero, a shift count, a conversion, a
+        // check) unwinds past the body's values; in a body with contracts none does.
+        if !all && (!self.no_panic || self.pan_cond != NONE) && self.inv_locs.len() != 0 && Self::may_panic(&rv) {
+            self.inv_unwind(cb, state, pc, 7 << 52 | sid as u64, s.span, "where this operation may panic", NONE);
         }
         let dp = *cb.places.at(s.place as usize);
         self.dest_tmp = pick(dp.proj_len == 0, dp.base, NONE);
@@ -9010,7 +9136,7 @@ extend<const B: usize> Prover<B> {
         if im.node != NODE_NONE && (self.has_clause(im, CT_REQUIRES) || self.has_clause(im, CT_ENSURES) || self.has_clause(
             kb.body.owner,
             CT_REQUIRES,
-        )) {
+        ) || self.has_clause(kb.body.owner, CT_PANICS)) {
             self.refine = self.contract_body(im);
             self.prove_body(&kb.body, true);
             self.refine = null;
@@ -9402,6 +9528,8 @@ extend<const B: usize> Prover<B> {
         self.facts_only = !needs;
         self.chk_ok.clear();
         self.chk_dead.clear();
+        self.pan_cond = NONE;
+        self.refine_pan = NONE;
         self.b = bp;
         self.clear_terms();
         for l in 0..b.locals.len() {
@@ -9477,6 +9605,13 @@ extend<const B: usize> Prover<B> {
                 if ib.contracts[j].kind == CT_REQUIRES {
                     let (f, _v) = self.chain(ib, ib.module, ib.contracts[j], &frame, &pc0, true, none);
                     pc0.push(f);
+                } else if ib.contracts[j].kind == CT_PANICS {
+                    let (f, _v) = self.chain(ib, ib.module, ib.contracts[j], &frame, &pc0, true, none);
+                    self.refine_pan = if self.refine_pan == NONE {
+                        f
+                    } else {
+                        self.tm.or(self.refine_pan, f)
+                    };
                 }
             }
             self.mem = null;
@@ -9614,6 +9749,28 @@ extend<const B: usize> Prover<B> {
             if !self.loop_site(b, si) {
                 path.m0 = v;
             }
+        } else if s.kind == CT_PANICS {
+            // A call through the interface proved its `panics if` false: the method's must be false too.
+            if self.refining {
+                let nf = self.tm.not(f);
+                let ip = pick(self.refine_pan == NONE, self.tm.boolean(false), self.refine_pan);
+                let g = self.tm.or(nf, ip);
+                self.oblige(
+                    &path.pc,
+                    g,
+                    OB_REFINE << 56 | si as u64,
+                    sp,
+                    format("cannot prove this 'panics if' from the interface's 'panics if'"),
+                    String::from_str(
+                        "a call through the interface proves only that the interface's 'panics if' is false",
+                    ),
+                );
+            }
+            self.pan_cond = if self.pan_cond == NONE {
+                f
+            } else {
+                self.tm.or(self.pan_cond, f)
+            };
         } else if s.kind == CT_PATTERN {
             self.oblige(
                 &path.pc,
@@ -9964,14 +10121,16 @@ extend<const B: usize> Prover<B> {
         if t.kind == ir::TM_CALL {
             self.call(b, &mut path, &t);
         } else if t.kind == ir::TM_DROP {
-            // The destructor assumes the value's invariant.
+            // The destructor assumes the value's invariant, and may panic past the other values.
             let dty = b.places.at(t.a as usize).ty;
+            let pl = *b.places.at(t.a as usize);
+            let dead = pick(pl.proj_len == 0, pl.base, NONE);
             if !self.ghost_fn && self.inv_here(b.module, dty) {
                 let dv = self.read_place(b, b.module, &mut path.state, t.a, false);
                 self.own_check(&path.pc, t.span);
                 self.inv_need(b, &path.state, &path.pc, dty, dv, 5 << 52 | t.span.start as u64, t.span, "at this drop");
-            } else if self.inv_locs.len() != 0 {
-                // Another value's destructor may panic.
+            }
+            if self.inv_locs.len() != 0 {
                 self.inv_unwind(
                     b,
                     &path.state,
@@ -9979,15 +10138,22 @@ extend<const B: usize> Prover<B> {
                     8 << 52 | t.span.start as u64,
                     t.span,
                     "where this drop may panic",
+                    dead,
                 );
             }
             // A destructor runs code: a memory event, which reaches no `[]mut` parameter where the value
             // owns its memory (`owns`).
             let ep0 = path.state[path.state.len() - 1];
-            let pl = *b.places.at(t.a as usize);
             let skip = pick(pl.proj_len == 0 && self.owns(b.module, b.locals.at(pl.base as usize).ty), 0u64, ~0u64);
             self.mem_event(b, b.module, &mut path.state);
             self.keep_param_views(b, b.module, &path.state, ep0, skip);
+            if !self.ghost_fn {
+                self.inv_resume(b, &mut path, 8 << 52 | t.span.start as u64, dead);
+            }
+            // A dropped local holds no value: no later check reads it, and a write gives it a new one.
+            if dead != NONE && self.inv_locs.contains(&dead) {
+                path.state.set(dead as usize, NONE);
+            }
         }
         path.views = replace(&mut self.views, Vector::<u64>::new());
         path.esc = replace(&mut self.esc, Vector::<u32>::new());
@@ -9998,7 +10164,7 @@ extend<const B: usize> Prover<B> {
         } else if t.kind == ir::TM_ASSERT {
             let c = self.operand(b, b.module, &mut path.state, t.a, false);
             self.own_check(&path.pc, t.span);
-            if !self.in_ghost && !self.no_panic {
+            if !self.in_ghost && (!self.no_panic || self.pan_cond != NONE) {
                 self.inv_unwind(
                     b,
                     &path.state,
@@ -10006,6 +10172,7 @@ extend<const B: usize> Prover<B> {
                     6 << 52 | t.span.start as u64,
                     t.span,
                     "where this check may panic",
+                    NONE,
                 );
             }
             let mut assert_by = false;
@@ -10139,6 +10306,7 @@ extend<const B: usize> Prover<B> {
             }
         }
         self.inv_call(b, path, t);
+        let esc0 = self.esc.len();
         // An allocator's call: its size, and the block it moves (`own_after`).
         let ak = self.alloc_call(t.callee);
         let mut asize = NONE;
@@ -10270,7 +10438,10 @@ extend<const B: usize> Prover<B> {
         } else if self.fn_dec && cycle {
             self.mutual(b, path, t, ci);
         }
-        let has_req = self.has_clause(d, CT_REQUIRES);
+        let has_req = self.has_clause(d, CT_REQUIRES) || (self.no_panic || self.in_ghost) && self.has_clause(
+            d,
+            CT_PANICS,
+        );
         if cbp == null && has_req {
             self.report(
                 OB_REQUIRES << 56 | t.span.start as u64,
@@ -10368,6 +10539,19 @@ extend<const B: usize> Prover<B> {
                         format("cannot prove the 'requires' of '{}' at this call", name.as_str()),
                         format("the clause: {}", self.text(cm, csp)),
                     );
+                } else if s.kind == CT_PANICS && (self.in_ghost || self.no_panic && self.chain_depth == 0) {
+                    // A body with contracts, and ghost code, proves that the callee does not panic.
+                    let (f, _v) = self.chain(cb, cm, s, &frame, &path.pc, true, t.span);
+                    let nf = self.tm.not(f);
+                    let csp = self.site_span(cm, s);
+                    self.oblige(
+                        &path.pc,
+                        nf,
+                        pick(self.in_ghost, OB_GHOST, OB_PANIC) << 56 | 3 << 53 | t.span.start as u64 << 16 | j as u64,
+                        t.span,
+                        format("cannot prove that '{}' does not panic at this call", name.as_str()),
+                        format("the clause: {}", self.text(cm, csp)),
+                    );
                 } else if s.kind == CT_DECREASES && own {
                     let (_f, v) = self.chain(cb, cm, s, &frame, &path.pc, true, t.span);
                     let goal = self.decrease(v, path.m0);
@@ -10432,6 +10616,42 @@ extend<const B: usize> Prover<B> {
             self.alloc_rec.push(adir);
         }
         self.inv_called(b, path, t);
+        // A borrow nothing keeps past the call ends with it: its local is no longer reached.
+        if self.borrow_ends(b, t) {
+            self.esc.truncate(esc0);
+        }
+    }
+
+    // Whether call `t` of body `b` ends every borrow it takes: its results are frozen values, and its
+    // arguments but one mutable borrow (an automatic one of a place, or a `&mut`) are constants, frozen
+    // values or shared references to them, none of which can hold a reference. The callee then keeps the
+    // borrow nowhere: its effect on the borrowed local is the call's own (`call_event`, `param_writes`).
+    fn borrow_ends(self: &Self, b: &ir::CoreBody, t: &ir::Terminator) bool {
+        for j in t.dests_start..t.dests_start + t.dests_len {
+            if !self.frozen(b.module, b.places.at(b.dest_pool[j as usize] as usize).ty) {
+                return false;
+            }
+        }
+        let mut muts: u32 = 0;
+        for j in 0..t.args_len {
+            let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
+            if op.kind == ir::OP_CONST || op.ty == TYPE_NONE || self.frozen(b.module, op.ty) {
+                continue;
+            }
+            let y = *self.ast_of(b.module).type_at(op.ty);
+            if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 && self.frozen(
+                b.module,
+                y.as_data.elem,
+            ) {
+                continue;
+            }
+            if self.autoref(b, b.module, t, j) || y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 {
+                muts += 1;
+                continue;
+            }
+            return false;
+        }
+        return muts <= 1;
     }
 
     // Struct literal `rv` of body `cb` with members `xs` (value `agg`): the block of each `@owned` field is

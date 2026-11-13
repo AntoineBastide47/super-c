@@ -182,6 +182,9 @@ pub(package) const CT_OLD_RUN: u32 = 8;
 // first record's binder is the struct's `invariant` method (`Parser::expand_invariants`), NODE_NONE where
 // the parser built none (the formatter's parse).
 pub(package) const CT_TYPE_INVARIANT: u32 = 9;
+// A function's `panics if E`: the function may panic only where `E` holds at its entry, and its other
+// clauses state its normal returns. No build runs it: a caller with contracts proves `!E`.
+pub(package) const CT_PANICS: u32 = 10;
 
 /// The keyword of a contract clause of kind `k` (`CT_*`).
 pub(package) const fn contract_word(k: u32) str<'static> {
@@ -195,6 +198,8 @@ pub(package) const fn contract_word(k: u32) str<'static> {
         "decreases"
     } else if k == CT_ASSERT {
         "assert"
+    } else if k == CT_PANICS {
+        "panics if"
     } else {
         "invariant"
     };

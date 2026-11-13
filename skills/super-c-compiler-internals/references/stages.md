@@ -302,10 +302,19 @@ parameters bound to the instance's arguments): a fact of every value of the type
 module (`inv_fact`, from `pat_fact`); in it every non-ghost body that holds the type is walked
 (`inv_body`), assumes the invariant at the entry and after each call (`inv_enter`, `inv_called`) and
 proves it (OB_TYPE_INV) at returns, calls, drops and every point that may panic (`inv_unwind` over
-`inv_locs`). The block of an `@owned` field is the value's ghost member (`own_key`), a `Seq`: an index
+`inv_locs`; `may_panic` for an rvalue); after a call or a drop it assumes it again of the locals whose
+check held and of the targets of `&` parameters (`inv_resume`); a dropped local holds no value; a
+`Free::free` body proves it of its receiver nowhere (`inv_end`). A call ends a borrow nothing can keep
+(`borrow_ends`: frozen results, at most one mutable borrow): `esc` returns to its length before the
+call. The lazy std closure (`bc_std_closure`) queues every struct's invariant method, which no body
+calls. A `panics if` (CT_PANICS, lowered at the entry after `requires`, never run) is or'ed into
+`pan_cond` (`own_site`); `oblige` weakens the body's own OB_PANIC and OB_OVERFLOW goals to
+`pan_cond || goal`; a caller with contracts, or ghost code, proves the callee's clause false (OB_PANIC);
+a refinement walk proves the method's clause implies the interface's (`refine_pan`). The block of an `@owned` field is the value's ghost member (`own_key`), a `Seq`: an index
 through the field is `seq_at`/`SQ_UPD` with a bounds obligation (OB_BLOCK, `own_check`); an index
 through any other raw pointer is memory (a load in the epoch, a write a memory event: `ptr_index`); a
-memory event forgets the blocks the body copies the pointer of (`own_scan`); an allocator's call keeps
+memory event forgets the elements, not the length, of the blocks the body copies the pointer of
+(`own_scan`, `own_forget`); an allocator's call keeps
 them and its result sets the block it is stored as (`alloc_call`, `own_after`); `std::spec::seq::block`
 reads it (SQ_BLOCK). `null` and `sizeof(T)` are one term each (`null_ptr`, `size_term`). A product is distributed over sums with its factors ordered
   (`Terms::product`); a hypothesis's split and the goal's integer disequality wait until the

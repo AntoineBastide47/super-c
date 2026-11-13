@@ -340,6 +340,41 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a call where the callee's 'panics if' may hold",
+        "fn at(xs: []u32, i: usize) u32\n    panics if i >= xs.len()\n{\n    if i >= xs.len() {\n        panic(\"at: out of bounds\");\n    }\n    return xs[i];\n}\nfn bad(xs: []u32) u32\n    requires xs.len() > 2\n{\n    return at(xs, 5);\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that 'at' does not panic at this call",
+    );
+    b.add(
+        "a panic where the 'panics if' is false",
+        "fn f(x: u32) u32\n    panics if x > 10\n{\n    if x > 5 {\n        panic(\"no\");\n    }\n    return x;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that this panic is unreachable",
+    );
+    b.add(
+        "an overflow where the 'panics if' is false",
+        "fn h(x: u8) u8\n    panics if x == 255\n{\n    return x + 2;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that this operation does not overflow",
+    );
+    b.add(
+        "a conformance that may panic where its interface does not",
+        "interface C {\n    fn get(self: &Self, k: u32) u32 panics if k > 9;\n}\nstruct A {}\nextend A as C {\n    fn get(self: &Self, k: u32) u32\n        panics if k > 5\n    {\n        if k > 5 {\n            panic(\"big\");\n        }\n        return k;\n    }\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'panics if' from the interface's 'panics if'",
+    );
+    b.add(
+        "an invariant broken where an operation may panic under the 'panics if'",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nextend C {\n    fn reset(self: &mut C, k: u32)\n        panics if k == 0\n    {\n        self.n = 1;\n        self.max = 0;\n        let q = 10 / k;\n        self.n = q - q;\n    }\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove the invariant of 'C' where this operation may panic",
+    );
+    b.add(
+        "an invariant the check at a call could not prove is not assumed after it",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\n\nfn other()\n    ensures true\n{\n    let _x = 1;\n}\n\nfn bad() u32\n    ensures |r| r == 1\n{\n    let mut c = C { n: 0, max: 5 };\n    c.n = 100;\n    other();\n    c.n = 0;\n    return 2;\n}\n\nfn main() i32 {\n    return bad() as i32 - 2;\n}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a receiver whose borrow a returned reference keeps",
+        "struct P {\n    x: u32,\n    v: Vector<u32>,\n}\nextend P {\n    fn xr(self: &mut P) &mut u32 {\n        return &mut self.x;\n    }\n}\nfn other() {\n    print(\"\");\n}\nfn lent() u32 ensures |r| r == 1 {\n    let mut p = P { x: 1, v: Vector::<u32>::new() };\n    let r = p.xr();\n    *r = 7;\n    other();\n    return p.x;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a write through an alias of a raw pointer",
         "fn f(p: *mut u32, q: *mut u32) ensures true {\n    unsafe {\n        p[0] = 1;\n        q[0] = 2;\n        assert(p[0] == 1);\n    }\n}\nfn main() i32 { return 0; }\n",
         "cannot prove that this check holds",
@@ -439,6 +474,16 @@ fn spec_syntax_is_checked() {
         "an invariant over a field a shared reference may change",
         "struct S<T>\n    invariant self.x == self.x\n{\n    x: T,\n}\nfn main() i32 { return 0; }\n",
         "an invariant cannot read 'x': a shared reference can change it (it may hold an 'UnsafeCell')",
+    );
+    h::expect_err_msg(
+        "a spec function with a panics clause",
+        "spec fn g(x: int) int panics if x < 0 { return x; }\nfn main() i32 { return 0; }\n",
+        "ghost code never panics: a spec function or a lemma has no 'panics if'",
+    );
+    h::expect_err_msg(
+        "old in a panics clause",
+        "fn f(x: u32) u32 panics if old(x) > 3 { return x; }\nfn main() i32 { return 0; }\n",
+        "'old' is valid only in a function's 'ensures', its loops' 'invariant's and its ghost code",
     );
     h::expect_err_msg(
         "old in a requires",
@@ -1317,6 +1362,31 @@ fn exit_cases_02() {
 // A struct's invariant, which its own file's code keeps, and the blocks of `@owned` fields: an allocation,
 // a `realloc` that keeps the elements, null, a generic element type.
 fn invariant_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "functions that may panic where their 'panics if' holds, called where it does not",
+        "fn at(xs: []u32, i: usize) u32\n    panics if i >= xs.len()\n{\n    if i >= xs.len() {\n        panic(\"at: out of bounds\");\n    }\n    return xs[i];\n}\n\nfn inc(x: u8) u8\n    panics if x == 255\n    ensures |r| r as int == x as int + 1\n{\n    return x + 1;\n}\n\nfn user(xs: []u32) u32\n    requires xs.len() > 2\n{\n    return at(xs, 1) / 2 + inc(3) as u32;\n}\n\ninterface C {\n    fn get(self: &Self, k: u32) u32 panics if k > 9;\n}\n\nstruct A {}\n\nextend A as C {\n    fn get(self: &Self, k: u32) u32\n        panics if k > 20\n    {\n        if k > 20 {\n            panic(\"big\");\n        }\n        return k;\n    }\n}\n\nfn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(1);\n    v.push(2);\n    v.push(3);\n    let a = A {};\n    return user(v.as_slice()) as i32 + a.get(1) as i32 - 6;\n}\n",
+        0,
+    );
+    b.add(
+        "an invariant broken after the only operation that may panic",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nextend C {\n    fn reset(self: &mut C, k: u32)\n        panics if k == 0\n    {\n        let q = 10 / k;\n        self.n = 1;\n        self.max = 0;\n        self.n = q - q;\n    }\n}\nfn main() i32 {\n    let mut c = C { n: 0, max: 3 };\n    c.reset(2);\n    return c.n as i32;\n}\n",
+        0,
+    );
+    b.add(
+        "a box with an invariant over its block: zero-sized values, a destructor, shared parameters",
+        "import std::spec::seq as *;\n\nstruct Bx<T, A = Global>\n    invariant sizeof(T) == 0 || block(self.ptr).len() == 1\n{\n    @owned\n    ptr: *mut T,\n    alloc: A,\n}\n\nextend<T, A: Allocator> Bx<T, A> {\n    fn new_in(alloc: A, value: T) Bx<T, A> {\n        let mut a = alloc;\n        let p = if sizeof(T) == 0 {\n            dangling::<T>()\n        } else {\n            (unsafe a.alloc(sizeof(T), alignof(T))) as *mut T\n        };\n        unsafe p[0] = value;\n        return Bx::<T, A> { ptr: p, alloc: a };\n    }\n\n    fn get(self: &Bx<T, A>) &T {\n        return unsafe &self.ptr[0];\n    }\n\n    fn set(self: &mut Bx<T, A>, value: T) {\n        unsafe self.ptr[0].free();\n        unsafe self.ptr[0] = value;\n    }\n}\n\nextend<T, A: Allocator> Bx<T, A> as Free {\n    fn free(self: &mut Bx<T, A>) {\n        self.ptr.free();\n        if sizeof(T) != 0 {\n            unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));\n        }\n    }\n}\n\nextend<T: Eq, A: Allocator> Bx<T, A> as Eq {\n    fn eq(self: &Bx<T, A>, other: &Bx<T, A>) bool {\n        let a = self.get();\n        let b = other.get();\n        return *a == *b;\n    }\n}\n\nstruct E {}\n\nfn main() i32 {\n    let mut b = Bx::<u32, Global>::new_in(Global {}, 3);\n    b.set(4);\n    let c = Bx::<u32, Global>::new_in(Global {}, 4);\n    let _z = Bx::<E, Global>::new_in(Global {}, E {});\n    if !(b == c) {\n        return 1;\n    }\n    return *b.get() as i32 - 4;\n}\n",
+        0,
+    );
+    b.add(
+        "a write through a copy of an owned field keeps the block's length",
+        "import std::spec::seq as *;\n\nstruct B\n    invariant block(self.p).len() == 4\n{\n    @owned\n    p: *mut u32,\n}\n\nextend B {\n    fn poke(self: &mut B) u32 {\n        let q = self.p;\n        unsafe q[1] = 5;\n        return unsafe self.p[3];\n    }\n}\n\nfn main() i32 {\n    return 0;\n}\n",
+        0,
+    );
+    b.add(
+        "a receiver lent to a call that keeps no borrow keeps its facts past later calls",
+        "struct P {\n    x: u32,\n    v: Vector<u32>,\n}\nextend P {\n    fn bump(self: &mut P) requires self.x < 10 ensures self.x == old(self.x) + 1 {\n        self.x += 1;\n    }\n}\nfn other() {\n    print(\"\");\n}\nfn kept() u32 ensures |r| r == 2 {\n    let mut p = P { x: 1, v: Vector::<u32>::new() };\n    p.bump();\n    other();\n    return p.x;\n}\nfn main() i32 {\n    return kept() as i32 - 2;\n}\n",
+        0,
+    );
     b.add(
         "struct invariants and owned blocks",
         M"(import std::spec::seq as *;
@@ -2446,6 +2516,13 @@ fn contract_checks_run_on_request() {
     assert(checked.built, "a build with checks accepts it too");
     let r = h::diff_run(&checked, "");
     assert(r.exit != 0 && r.err.contains("assertion failed: `ensures |r| r > x`"), "the ensures check traps");
+    // A `panics if` states where the function may panic: no check runs it.
+    let pan = h::diff_build(
+        "fn f(x: u32) u32 panics if x > 3 { return x; }\nfn main() i32 { return f(5) as i32; }\n",
+        ["-fno-prove", "-fcontract-checks"],
+    );
+    assert(pan.built, "a panics clause builds with checks");
+    assert_eq(h::diff_run(&pan, "").exit, 5);
     // A clause that names a spec function or converts into `int` has no run-time check.
     let spec = h::diff_build(
         "spec fn s(x: u32) u32 { return x; }\nfn f(x: u32) u32 requires x as int < 10, s(x) < 10 { return x; }\nfn main() i32 { return f(3) as i32; }\n",

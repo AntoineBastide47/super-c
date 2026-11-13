@@ -28,7 +28,7 @@ file is authoritative for where to look first.
 | A trigger's match at a term, at any depth (`MATCH_WORK` steps), and whether a term holds another | `Prover::matched`, `match_at`, `mentions` | not stored | per call |
 | The model-based instances of a failed check: the terms its model puts in a quantifier's range, one per value | `Prover::model_instances` (`instantiate` with `QI_MODEL`, `model_value`) | the instances in the check's facts | the obligation's end |
 | The references to members of locals and slots | `Prover::place_ref` | `pref_tg`, `pref_tgty`, `pref_m`, `pref_at`, `pref_key`, `pref_ty`, per body | the next body |
-| The locals and slots of a struct type with an invariant its module proves | `Prover::inv_scan` | `inv_locs`, per body | the next body |
+| The locals and slots of a struct type with an invariant its module proves | `Prover::inv_scan` | `inv_locs`, and `inv_end` (a `Free::free` receiver's slot), per body | the next body |
 | The locals and slots whose `@owned` field's pointer the body's code reads | `Prover::own_scan` (`own_mark`, `tailcall::rv_operands`) | `own_exp`, per body | the next body |
 | The allocator calls of a path: kind, size, the block a `realloc` moves, its direction | `Prover::call` (`alloc_call`, `block_of_ptr`) | `alloc_of`, `alloc_rec`, per body | the next body |
 | The `@owned` block accesses since the last check | `read_prefix`, `update` | `own_chk`, drained by `own_check` | the statement's or terminator's end |

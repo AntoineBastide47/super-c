@@ -95,7 +95,10 @@ fn add_mod(a: u32, b: u32, m: u32) u32
 
 Clauses follow the signature, before the body: `requires C` (each caller proves it), `ensures C` or
 `ensures |r| C` (`r` names the single result; a function with none or several has no binder, error
-534) and `decreases E` (an integer measure, error 535). A comma list is several clauses. A `while`,
+534), `decreases E` (an integer measure, error 535) and `panics if C` (the function may panic only
+where `C` holds at its entry, as `requires` reads it; its `ensures` state its normal returns; no
+`old`, no comma list, no run-time check, none on a spec function or a lemma, error 562). A comma list
+is several clauses. A `while`,
 a `loop` and a `for` over a range written in place (`for i in a..n`) take `invariant C` and
 `decreases E` after the header; another `for` takes none (error 536). The words are contextual
 keywords. A clause only computes its condition: it calls only `const fn`s, drops nothing and writes
@@ -109,8 +112,10 @@ when it finds one (`for example: x = 0, y = 3`). It proves:
 - each `ensures` at each return;
 - an `invariant` when the loop starts and after each iteration (a counted range loop knows its
   binding lies from the start up to the end);
-- each operation that can trap (overflow, a division by zero, a shift count, a narrowing) does not,
-  in a function with clauses;
+- each operation that can trap (overflow, a division by zero, a shift count, a narrowing), each
+  `assert` and each `panic` call of its own code does not, in a function with clauses, except where
+  its `panics if` holds; a callee's `panics if` is false at each call from such a function or from
+  ghost code. A conformance's `panics if` implies its interface method's (none: `false`);
 - `decreases`: at each call of the function to itself, and at each call to a function of the same
   cycle of calls, the measure is at least 0 and below its value at the caller's start; every
   function of a cycle needs a measure; in a function with one, each loop needs its own unless it
@@ -311,14 +316,19 @@ pub struct Buf
 - Code in another file assumes it of every value of the type. The file's own code assumes it of the
   values that enter a body (parameters and their targets, call results) and proves it where a value
   leaves: at each return (results, `&mut` parameters), each call and drop that receives it, and each
-  call, check, operation and drop that may panic (a panic unwinds past it). Between those points a body
-  may break it (two field writes in a row).
+  call, check, arithmetic operation and drop that may panic (a panic unwinds past it). Between those
+  points a body may break it (two field writes in a row). A `&T` parameter's target keeps it through
+  the body. `Free::free` assumes it of its receiver and proves it nowhere: the value ends there.
 - `std::spec::seq::block(p)` is the block an `@owned` field `p` points to, a `Seq`: `self.ptr[i]` is
   `block(self.ptr)[i]`, a write through the field changes it, and in proved code each index into the
-  field must be below its length. A write through a copy of the field, or a call that may write
-  memory once the body copied it, makes the block unknown; of another pointer `block` is unknown.
-  Storing an allocator's result in the field sets the block: `alloc(n * sizeof(T), ..)` gives `n`
-  elements, `realloc` keeps the old ones, `null` gives none, another pointer an unknown block.
+  field must be below its length (any index of a zero-sized `T`). A write through a copy of the field,
+  or a call that may write memory once the body copied it, makes its elements unknown and keeps its
+  length; of another pointer `block` is unknown. Storing an allocator's result in the field sets the
+  block: `alloc(sizeof(T), ..)` gives one element, `alloc(n * sizeof(T), ..)` `n`, `realloc` keeps the
+  old ones, `null` gives none, another pointer an unknown block.
+- A method that panics by design (a bounds or capacity check) states where with `panics if`. An
+  operation of its own code may then panic past a broken invariant only where the clause holds; a
+  call or a drop may panic anywhere.
 
 ### Constant-Time Code
 
