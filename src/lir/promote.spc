@@ -39,6 +39,8 @@ import ast::ast as ast;
 const FIELDS_MAX: u32 = 64;
 // `bound_after` looks at most this many instructions past a copy.
 const AFTER_MAX: u32 = 16;
+// `stored_before` looks at most this many instructions before a call.
+const BEFORE_MAX: u32 = 64;
 // The copies a body tries to merge at most (`Promoter::merges`: one walk of its blocks each).
 const MERGE_TRIES: u32 = 256;
 const PROMOTE_WORK_MAX: u64 = 1 << 22;
@@ -90,6 +92,13 @@ extend Fld as Copy {}
 /// The promotion's scratch, reused from body to body.
 pub(package) struct Promoter {
     ptr: u32, // the data model's pointer size
+    // The largest aggregate the backend passes by value in registers (0: none): a call that takes a
+    // slot as such an argument reads the slot's bytes, each 8-byte chunk as an integer (`by_value`).
+    argreg: u32,
+    cargs: Vector<u64>, // those arguments, in `collect`'s order: call << 32 | argument
+    cfirst: Vector<u32>, // per instruction, its first entry of `cargs` (NONE: none)
+    cblk: Vector<u32>, // per entry of `cargs`, the first instruction of the call's block
+    sread: Vector<bool>, // per slot, whether a load or a copy touches it, or a call takes it not right after its chunks' stores
     dslot: Vector<u32>, // per instruction, the slot its address value points into (NONE: none)
     doff: Vector<i64>, // and the offset
     cand: Vector<bool>, // per slot, whether it promotes
@@ -212,6 +221,11 @@ extend Promoter {
             eargs: Map::<u64, u32>::new(),
             evals: Vector::<u32>::new(),
             xins: Vector::<(u32, Inst)>::new(),
+            argreg: 0,
+            cargs: Vector::<u64>::new(),
+            cfirst: Vector::<u32>::new(),
+            cblk: Vector::<u32>::new(),
+            sread: Vector::<bool>::new(),
             xat: Vector::<u32>::new(),
             xorder: Vector::<u32>::new(),
             cmap: Vector::<u32>::new(),
@@ -224,8 +238,9 @@ extend Promoter {
     /// Promote the private slots of `b`, whose graph is given: successors and predecessors as ranges,
     /// immediate dominators (NONE: unreached), the reverse postorder, the dominator tree's children as
     /// ranges, each instruction's block (NONE: none), each instruction's operands then its edges'
-    /// arguments (`ops[ops_at[i]..ops_at[i + 1]]`, the arguments from `ops_arg[i]`). The new body goes to
-    /// `out`; false when no slot promotes (`out` untouched).
+    /// arguments (`ops[ops_at[i]..ops_at[i + 1]]`, the arguments from `ops_arg[i]`); pointers of `ptr`
+    /// bytes; `argreg`, the largest aggregate the backend passes by value in registers. The new body goes
+    /// to `out`; false when no slot promotes (`out` untouched).
     pub(package) fn run(
         self: &mut Self,
         b: &Body,
@@ -242,9 +257,11 @@ extend Promoter {
         ops_arg: []u32,
         ops: []Value,
         ptr: u32,
+        argreg: u32,
         out: &mut Body,
     ) bool {
         self.ptr = ptr;
+        self.argreg = argreg;
         let ns = b.slots.len();
         if ns == 0 || b.naked {
             return false;
@@ -551,6 +568,10 @@ extend Promoter {
         }
         self.accs.truncate(0);
         self.copies.truncate(0);
+        self.cargs.truncate(0);
+        self.cblk.truncate(0);
+        fill(&mut self.cfirst, ni, NONE);
+        fill(&mut self.sread, ns, false);
         // The derived addresses: a base dominates its uses, so the blocks in array order may see a use
         // first; two passes settle a chain whose links come in that order, which the second checks.
         for _pass in 0..2 {
@@ -586,7 +607,25 @@ extend Promoter {
             let reached = idom[k] != NONE;
             for i in bk.start..bk.start + bk.len {
                 let t = b.insts[i as usize];
-                self.check_uses(b, i, t, reached, ops_at, ops);
+                self.check_uses(b, i, t, bk.start, reached, ops_at, ops);
+            }
+        }
+        // A slot only whole chunks' stores write, each call that takes it right after its chunks' stores,
+        // is as the promotion leaves it: no candidate.
+        for x in 0..self.cargs.len() {
+            let i = (self.cargs[x] >> 32) as u32;
+            let t = b.insts[i as usize];
+            let v = b.pool[(t.c + self.cargs[x] as u32) as usize];
+            let sl = self.slot_of(v);
+            if self.cand[sl as usize] && !self.sread[sl as usize] && !self.stored_before(b, i, self.cblk[x], v) {
+                self.sread[sl as usize] = true;
+            }
+        }
+        for x in 0..self.cargs.len() {
+            let t = b.insts[(self.cargs[x] >> 32) as usize];
+            let sl = self.slot_of(b.pool[(t.c + self.cargs[x] as u32) as usize]);
+            if !self.sread[sl as usize] {
+                self.cand[sl as usize] = false;
             }
         }
         for s in 0..ns {
@@ -595,6 +634,82 @@ extend Promoter {
             }
         }
         return false;
+    }
+
+    // Whether argument `q` of call `t` of `b` is a slot's address the call takes by value, as an aggregate
+    // the backend passes in integer registers (`argreg`), its 8-byte chunks of 4 or 8 bytes each, every
+    // leaf an integer of at most 8 bytes or a pointer, inside the slot: the callee's is a copy, and the
+    // call reads each chunk as an integer.
+    const fn by_value(self: &Self, b: &Body, t: Inst, q: u32) bool {
+        let v = b.pool[(t.c + q) as usize];
+        let sl = self.slot_of(v);
+        let pt = b.pool[(t.b + 3 + q) as usize];
+        if sl == NONE || (pt & AGG) == 0 {
+            return false;
+        }
+        let lay = (pt & ~AGG) as usize;
+        let size = b.pool[lay];
+        let off = self.doff[v as usize];
+        if size == 0 || size > self.argreg || (size & 3) != 0 || off < 0 || off + size as i64 > b.slots[sl as usize].size as i64 {
+            return false;
+        }
+        for l in 0..b.pool[lay + 2] as usize {
+            let ty = b.pool[lay + 4 + 2 * l] as u8;
+            if ty != T_PTR && (!is_int(ty) || ty == T_I128) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The bytes argument `q` of call `t` of `b` reads (`by_value`).
+    const fn arg_size(b: &Body, t: Inst, q: u32) i64 {
+        return b.pool[(b.pool[(t.b + 3 + q) as usize] & ~AGG) as usize];
+    }
+
+    // Whether the instructions before call `i` of `b` in its block (from instruction `first`, at most
+    // BEFORE_MAX of them) store each chunk of the aggregate at `v` whole, with no other access of its slot
+    // between: what `rename_call` leaves, and what the code generator passes in registers.
+    const fn stored_before(self: &Self, b: &Body, i: u32, first: u32, v: Value) bool {
+        let sl = self.slot_of(v);
+        let base = self.doff[v as usize];
+        let mut size: i64 = 0;
+        let t = b.insts[i as usize];
+        for q in 0..b.pool[t.b as usize].min(t.aux) {
+            if b.pool[(t.c + q) as usize] == v {
+                size = Promoter::arg_size(b, t, q);
+            }
+        }
+        let need = ((size + 7) / 8) as u32;
+        let mut seen: u32 = 0;
+        let lo = if i - first > BEFORE_MAX {
+            i - BEFORE_MAX
+        } else {
+            first
+        };
+        let mut j = i;
+        // Each step goes back one instruction.
+        while j > lo {
+            j -= 1;
+            let u = b.insts[j as usize];
+            if u.op == O_STORE && self.slot_of(u.a) == sl {
+                let c = self.doff[u.a as usize] + (u.c as i32) as i64 - base;
+                // Not a whole chunk: the slot's fields are narrower.
+                if c < 0 || c % 8 != 0 || c / 8 >= need as i64 || size_of(b.type_of(u.b), self.ptr) != (size - c).min(8) {
+                    break;
+                }
+                seen |= 1u32 << (c / 8) as u32;
+                continue;
+            }
+            // An access of the slot, or a call (which may take it): the run of stores ends.
+            let f = op_info(u.op).form;
+            if (f == F_LOAD || u.op == O_MEMCPY || u.op == O_MEMSET) && self.slot_of(u.a) == sl || u.op == O_MEMCPY && self.slot_of(
+                u.b,
+            ) == sl || f == F_CALL || f == F_CALLIND {
+                break;
+            }
+        }
+        return need != 0 && seen == (1u32 << need) - 1;
     }
 
     // The slot address value `v` points into (NONE: none).
@@ -612,12 +727,13 @@ extend Promoter {
         }
     }
 
-    // Record instruction `i`'s accesses, and reject the slots it lets escape (an unreached block's
-    // access too).
-    fn check_uses(self: &mut Self, b: &Body, i: u32, t: Inst, reached: bool, ops_at: []u32, ops: []Value) {
+    // Record the accesses of instruction `i`, of the block that starts at instruction `first`, and reject
+    // the slots it lets escape (an unreached block's access too).
+    fn check_uses(self: &mut Self, b: &Body, i: u32, t: Inst, first: u32, reached: bool, ops_at: []u32, ops: []Value) {
         let op = t.op;
         if op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && self.slot_of(t.a) != NONE {
             let s = self.slot_of(t.a);
+            self.sread[s as usize] = true;
             self.cand[s as usize] = self.cand[s as usize] && reached;
             self.accs.push(
                 Acc {
@@ -673,6 +789,12 @@ extend Promoter {
                 self.reject(t.b);
                 return;
             }
+            if d != NONE {
+                self.sread[d as usize] = true;
+            }
+            if sv != NONE {
+                self.sread[sv as usize] = true;
+            }
             self.copies.push(
                 Copy {
                     inst: i,
@@ -693,6 +815,47 @@ extend Promoter {
                 },
             );
             return;
+        }
+        // A call that takes a slot by value reads its chunks as integers, which may span its fields
+        // (`by_value`); its other operands escape.
+        if (op == O_CALL || op == O_CALLIND) && self.argreg != 0 {
+            let np = b.pool[t.b as usize].min(t.aux);
+            let mut any = false;
+            for q in 0..np {
+                any = any || self.by_value(b, t, q);
+            }
+            if any {
+                if op == O_CALLIND {
+                    self.reject(t.a);
+                }
+                for q in 0..t.aux as u32 {
+                    let v = b.pool[(t.c + q) as usize];
+                    if q >= np || !self.by_value(b, t, q) {
+                        self.reject(v);
+                        continue;
+                    }
+                    let s = self.slot_of(v);
+                    self.cand[s as usize] = self.cand[s as usize] && reached;
+                    let n = Promoter::arg_size(b, t, q);
+                    for c in 0..(n + 7) / 8 {
+                        self.accs.push(
+                            Acc {
+                                slot: s,
+                                off: self.doff[v as usize] + 8 * c,
+                                size: 0,
+                                ty: int_type((n - 8 * c).min(8) as u32),
+                                kind: W_LOAD,
+                            },
+                        );
+                    }
+                    if self.cfirst[i as usize] == NONE {
+                        self.cfirst[i as usize] = self.cargs.len() as u32;
+                    }
+                    self.cargs.push(i as u64 << 32 | q as u64);
+                    self.cblk.push(first);
+                }
+                return;
+            }
         }
         // Any other use of a derived address lets it escape: an operand or an edge's argument (`ops`).
         for u in ops_at[i as usize]..ops_at[i as usize + 1] {
@@ -848,6 +1011,26 @@ extend Promoter {
                                 dropped = true;
                             }
                         }
+                    }
+                }
+            }
+            // A call's chunk is a field, or spans the fields in it.
+            for x in 0..self.cargs.len() {
+                let t = b.insts[(self.cargs[x] >> 32) as usize];
+                let q = self.cargs[x] as u32;
+                let v = b.pool[(t.c + q) as usize];
+                let s = self.slot_of(v);
+                let n = Promoter::arg_size(b, t, q);
+                for c in 0..(n + 7) / 8 {
+                    let off = self.doff[v as usize] + 8 * c;
+                    let cn = (n - 8 * c).min(8);
+                    if self.cand[s as usize] && self.field_at(s, off, int_type(cn as u32)) == NONE && !self.spannable(
+                        s,
+                        off,
+                        cn,
+                    ) {
+                        self.cand[s as usize] = false;
+                        dropped = true;
                     }
                 }
             }
@@ -1326,6 +1509,21 @@ extend Promoter {
     // the block (`ublk`, by `isdef` per field: the last block that defined it in this scan).
     fn reads_writes(self: &mut Self, b: &Body, i: u32, k: u32) {
         let t = b.insts[i as usize];
+        let mut x = self.cfirst[i as usize] as usize;
+        // A call reads the fields in the aggregates it takes by value.
+        while x < self.cargs.len() && (self.cargs[x] >> 32) as u32 == i {
+            let q = self.cargs[x] as u32;
+            let v = b.pool[(t.c + q) as usize];
+            let s = self.slot_of(v);
+            if self.cand[s as usize] {
+                for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
+                    if in_range(self.flds[f2 as usize], self.doff[v as usize], Promoter::arg_size(b, t, q), self.ptr) {
+                        self.read(f2, k);
+                    }
+                }
+            }
+            x += 1;
+        }
         if self.spanned[i as usize] {
             let s = self.slot_of(t.a);
             let off = self.doff[t.a as usize] + (t.c as i32) as i64;
@@ -1531,6 +1729,10 @@ extend Promoter {
     // stand for returns its slot (NONE: none).
     fn rename_inst(self: &mut Self, b: &Body, i: u32) u32 {
         let t = b.insts[i as usize];
+        if self.cfirst[i as usize] != NONE {
+            self.rename_call(b, i, t);
+            return NONE;
+        }
         if self.spanned[i as usize] && t.op == O_STORE {
             self.drop[i as usize] = true;
             if int_bits(b, t.b).is_some() {
@@ -1715,11 +1917,54 @@ extend Promoter {
         }
     }
 
+    // Call `t` (instruction `i`), each promoted slot it takes by value: the slot stays for the call
+    // alone, each chunk's value (its field's, or its fields' combined, `span_value`) stored into it right
+    // before the call. The code generator passes such stores' values in the argument's registers.
+    fn rename_call(self: &mut Self, b: &Body, i: u32, t: Inst) {
+        let mut x = self.cfirst[i as usize] as usize;
+        while x < self.cargs.len() && (self.cargs[x] >> 32) as u32 == i {
+            let q = self.cargs[x] as u32;
+            x += 1;
+            let v = b.pool[(t.c + q) as usize];
+            let s = self.slot_of(v);
+            if !self.cand[s as usize] {
+                continue;
+            }
+            let n = Promoter::arg_size(b, t, q);
+            // The values first, then the stores together (`by_value`: two chunks at most).
+            let mut vals: [u32; 2] = [NONE; 2];
+            for c in 0..(n + 7) / 8 {
+                let off = self.doff[v as usize] + 8 * c;
+                let ct = int_type((n - 8 * c).min(8) as u32);
+                let f = self.field_at(s, off, ct);
+                vals[c as usize] = if f != NONE {
+                    let fv = self.value(b, f);
+                    self.convert(b, i, fv, self.flds[f as usize].ty, ct)
+                } else {
+                    self.span_value(b, i, s, off, ct)
+                };
+            }
+            for c in 0..(n + 7) / 8 {
+                self.xins.push(
+                    (i, Inst { op: O_STORE, ty: T_NONE, aux: 0, a: v, b: vals[c as usize], c: (8 * c) as u32 }),
+                );
+            }
+        }
+    }
+
     // Spanning load `t` (instruction `i`): its fields' bits, each zero-extended and shifted to its place,
     // combined.
     fn rename_span(self: &mut Self, b: &Body, i: u32, t: Inst) {
         let s = self.slot_of(t.a);
         let off = self.doff[t.a as usize] + (t.c as i32) as i64;
+        self.repl[i as usize] = self.span_value(b, i, s, off, t.ty);
+    }
+
+    // The integer of type `ty` that the bytes of slot `s` from `off` hold, made before instruction `i`:
+    // the bits of the fields in them, each zero-extended and shifted to its place, combined; 0 where no
+    // field is.
+    fn span_value(self: &mut Self, b: &Body, i: u32, s: u32, off: i64, ty: u8) u32 {
+        let t = Inst { op: O_LOAD, ty: ty, aux: 0, a: VNONE, b: VNONE, c: 0 };
         let n = size_of(t.ty, self.ptr);
         let mut acc = NONE;
         for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
@@ -1744,7 +1989,7 @@ extend Promoter {
                 self.push(b, i, Inst { op: O_OR, ty: t.ty, aux: 0, a: acc, b: v, c: VNONE })
             };
         }
-        self.repl[i as usize] = if acc == NONE {
+        return if acc == NONE {
             self.zero(b, t.ty)
         } else {
             acc
