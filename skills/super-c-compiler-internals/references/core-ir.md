@@ -66,9 +66,11 @@ local `ind` runs from its start up to the end place or constant.
 
 The prover (`src/prove/prove.spc`) reads the sites of the kept bodies. Then `skip_contracts`
 (`skip_site` per site) empties each chain to `TM_UNREACHABLE` and makes `pred` jump to `cont`,
-unless `-fcontract-checks` keeps them (a ghost site is skipped in every build, `is_ghost_site`; the
-evaluator jumps past one, `past_ghost`; a `CT_PATTERN` site runs under `-fcontract-checks` and
-`-fno-prove`, `Package::pat_checks_run`); a skipped `requires` that compares a parameter with an integer
+unless `-fcontract-checks` keeps them in a program module (`Package::contract_checks_run`; a ghost
+site is skipped in every build, `is_ghost_site`; the evaluator jumps past a site it does not run,
+`past_site`; a `CT_PATTERN` site runs under `-fcontract-checks` and `-fno-prove`,
+`Package::pat_checks_run`). A site's blocks are those its chain reaches before `cont` (`site_mark`):
+the drop elaboration appends some at the body's end, outside `[chain, cont)`; a skipped `requires` that compares a parameter with an integer
 constant, of a function every call of which the build proves (not `@export`, not `-fno-prove`:
 `driver::emit::req_ast`), notes the parameter's range (`CoreBody.entry_ranges`), which the LIR's entry
 ranges take; `skip_tail_ensures` drops a proved `ensures` that follows a

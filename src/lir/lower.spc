@@ -4839,7 +4839,8 @@ extend Lower {
             let one = self.iconst(T_I8, 1);
             return self.arith(O_XOR, r, one);
         }
-        if ai.cls == VC_MEM && c.op_dispatch_agg(am, at) && (cmp || t.op_method().len() != 0) {
+        // A zero-sized struct's operator is its method too: `Z {} == Z {}` calls `Z::eq`.
+        if (ai.cls == VC_MEM || ai.cls == VC_ZST) && c.op_dispatch_agg(am, at) && (cmp || t.op_method().len() != 0) {
             return self.agg_op(c, b, rv, am, at, aref, ti, VNONE);
         }
         let mut bm = b.module;

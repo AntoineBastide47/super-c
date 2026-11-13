@@ -38,6 +38,13 @@ fn operator_overload_lowering(b: &mut h::ExitBatch) {
         "struct M { pub b: u32, }\nextend M { pub fn bit_and(self: &M, o: &M) M { return M { b: self.b & o.b }; } pub fn bit_or(self: &M, o: &M) M { return M { b: self.b | o.b }; } pub fn bit_xor(self: &M, o: &M) M { return M { b: self.b ^ o.b }; } pub fn bit_not(self: &M) M { return M { b: ~self.b }; } pub fn shl(self: &M, n: usize) M { return M { b: self.b << n as u32 }; } pub fn shr(self: &M, n: usize) M { return M { b: self.b >> n as u32 }; } }\nfn main() i32 {\n    let a = M { b: 0b1100 };\n    let b = M { b: 0b1010 };\n    let mut acc = a;\n    acc &= b;\n    acc |= M { b: 1 };\n    acc ^= M { b: 2 };\n    acc <<= 2;\n    acc >>= 1;\n    let n = (~a).b & 0xF;\n    unsafe exit(((a & b).b + (a | b).b + (a ^ b).b + (a << 1).b + (a >> 2).b + acc.b + n) as i32);\n}\n",
         80,
     );
+    // A zero-sized struct's comparison calls its method too, also through references in a generic body.
+    exit_case(
+        b,
+        "zero-sized struct operator",
+        "@derive(Eq)\nstruct Z {}\nfn same<T: Eq>(a: &T, b: &T) bool { return *a == *b; }\nfn main() i32 { let a = Z {}; let b = Z {}; unsafe exit(same(&a, &b) as i32 * 5 + (a != b) as i32); }\n",
+        5,
+    );
     // String patterns in switch compare through str's eq, incl. inside an enum payload.
     exit_case(
         b,

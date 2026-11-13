@@ -32,7 +32,8 @@ cemit-relower <template> (zero-size): <n> instances, <n> re-lowerings, <n> ident
 - An **instance** is a distinct symbol emitted from that template.
 - A **re-lowering** is one more `lower_fn` of the template under a demand env: one per
   instance for reflection, one per zero-size signature (`lw_cache` keyed by the signature
-  bits) for zero-size conditions. The two probe regions `relower-refl` and `relower-zst`
+  bits, each argument resolved through the demand chain: `Mangler::chain_zst_bits`, so `T := K` and
+  `T := V` from one generic caller differ) for zero-size conditions. The two probe regions `relower-refl` and `relower-zst`
   hold their wall time, calls, allocation calls and requested bytes.
 - **Identical** counts re-lowerings whose printed IR (`ir::print::print_body`) equals an
   earlier re-lowering of the same template: a zero-size template with several parameters

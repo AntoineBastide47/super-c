@@ -1509,9 +1509,10 @@ extend Parser {
         } else if require_body {
             self.error_here("expected function body");
         }
-        // An interface's method may state contracts without a body; an extern function cannot.
-        if contracts.len() != 0 && (intrinsic || body == NODE_NONE && self.in_extern) {
-            self.error_here("an extern or intrinsic function cannot have a contract");
+        // An interface's method and an extern function (`@trusted`) may state contracts without a body;
+        // an intrinsic cannot.
+        if contracts.len() != 0 && intrinsic {
+            self.error_here("an intrinsic function cannot have a contract");
         }
         if self.nrets.len() != 0 && body != NODE_NONE {
             self.bind_named_returns(body);

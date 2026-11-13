@@ -339,7 +339,7 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
         }
     }
     for i in 0..n {
-        if !p.modules[i].prelude && !p.modules[i].backend && by[i] != 1 {
+        if !p.modules[i].prelude && !p.prelude_dep(i) && !p.modules[i].backend && by[i] != 1 {
             live[i] = true;
         }
     }
@@ -410,7 +410,8 @@ fn compute_emit_live(p: &loader::Package) Vector<bool> {
     return live;
 }
 
-// Whether module `m` emits a unit: it has an AST, is not an unreachable prelude module (`live`), and
+// Whether module `m` emits a unit: it has an AST, is not an unreachable prelude module or prelude
+// dependency (`live`, `Package::prelude_dep`), and
 // is not the vector backend file, whose entries render apart (`cemit_simd_entries`).
 // The module whose files hold module `m`'s definitions: the core module for the backend file, which
 // emits no unit of its own.
@@ -419,7 +420,7 @@ const fn emit_owner(p: &loader::Package, m: ModuleId) ModuleId {
 }
 
 const fn module_emits(p: &loader::Package, live: *const bool, m: usize) bool {
-    return p.modules[m].has_ast && !(live != null && p.modules[m].prelude && !unsafe live[m]) && !p.modules[m].backend;
+    return p.modules[m].has_ast && !(live != null && (p.modules[m].prelude || p.prelude_dep(m)) && !unsafe live[m]) && !p.modules[m].backend;
 }
 
 // Pipeline stages over one module (move the Ast out of its slot, run, and restore it).
@@ -3686,14 +3687,11 @@ fn bound_calls(
 }
 
 // The re-lowering cache key of definition `d` under `subs`: one bit per type argument (ZST or not),
-// the only part of an instantiation a ZST-conditional body's lowering depends on.
+// the only part of an instantiation a ZST-conditional body's lowering depends on. Each argument is
+// resolved through the chain: `T := K` and `T := V` from one generic caller differ when only `V` is
+// zero-sized.
 fn zst_key(mg: &mut mbe::Mangler, d: DefId, subs: &Vector<mbe::MSub>) u64 {
-    let mut zb: u64 = 1;
-    for i in 0..subs.len() {
-        let sb = *subs.at(i);
-        zb = zb << 1 | mg.is_zst(sb.am, sb.at) as u64;
-    }
-    return skey_mix(skey_mix(0, d.module as u64 << 32 | d.node as u64), zb);
+    return skey_mix(skey_mix(0, d.module as u64 << 32 | d.node as u64), mg.chain_zst_bits(subs));
 }
 
 // Apply one shard's gated first-claimant emissions into the master emitter, in module order: the
@@ -8606,7 +8604,6 @@ struct DropCtx {
     pub(package) core_ir: bool, // SC_CORE_IR development re-verification
     pub(package) bce_stats: bool, // SC_BCE_STATS per-owner report lines
     pub(package) validate: bool, // SC_BC_VALIDATE: every body elaborated here is verified like a kept one
-    pub(package) contract_checks: bool, // `-fcontract-checks`: contract checks run at run time
     pub(package) proved: bool, // the build proves the contracts (no `-fno-prove`)
     /// Emission counters (SC_CEMIT_STATS): acquisition, re-lowering, inlining, drop preparation.
     pub(package) pr: prb::Probe,
@@ -8632,7 +8629,6 @@ extend DropCtx {
             core_ir: stdlib::getenv("SC_CORE_IR") != null,
             bce_stats: stdlib::getenv("SC_BCE_STATS") != null,
             validate: stdlib::getenv("SC_BC_VALIDATE") != null,
-            contract_checks: (unsafe (&*p).cg & bman::CG_CONTRACT_CHECKS) != 0,
             proved: (unsafe (&*p).cg & bman::CG_NO_PROVE) == 0,
             pr: prb::Probe::new(stdlib::getenv("SC_CEMIT_STATS") != null, stdlib::getenv("SC_BUILD_MEM") != null),
             lc: lw::LCaches::new(),
@@ -8684,7 +8680,8 @@ extend DropCtx {
         // a call of the function to itself that an `ensures` check kept from the tail becomes a jump then
         // (the borrow pass left such a body as it is).
         if lw.body.contracts.len() != 0 {
-            if self.contract_checks && self.proved {
+            let checks = unsafe (&*lw.pkg).contract_checks_run(lw.body.module);
+            if checks && self.proved {
                 // A proved `ensures` check after a tail call of the function to itself leaves with
                 // the jump, so the checked build recurses in constant stack too.
                 let mut conv = irc::CoreBody::compact_from(&lw.body);
@@ -8701,7 +8698,7 @@ extend DropCtx {
             let pk = unsafe &*lw.pkg;
             irc::skip_contracts(
                 &mut lw.body,
-                self.contract_checks,
+                checks,
                 pk.pat_checks_run(),
                 req_ast(pk, &lw.body),
                 lay::target_for(pk.arch).ptr == 4,
@@ -15521,7 +15518,7 @@ const PROVE_RECORD: str<'static> = "__sc_prove";
 
 // The proof key of each module: what its proofs read, the module's own source, the sources of every
 // module it imports or names (`mod_refs`), transitively, and of the prelude, the compiler, the target
-// and the code-generation settings. Two independent 64-bit lanes per module (`2 * m`, `2 * m + 1`);
+// and the code-generation settings (`prove_cached` adds the bodies the build keeps). Two independent 64-bit lanes per module (`2 * m`, `2 * m + 1`);
 // the set of sources is summed, so the module numbering of a build does not matter.
 fn prove_keys(p: &loader::Package, target: i32) Vector<u64> {
     let n = p.modules.len();
@@ -15627,11 +15624,22 @@ fn prove_cached(
     let mut skip = Vector::<bool>::with_capacity(n);
     skip.resize_default(n);
     let cache = p.gen_root.len() != 0 && compiler_id() != 0;
-    let keys = if cache {
+    let mut keys = if cache {
         prove_keys(p, target)
     } else {
         Vector::<u64>::new()
     };
+    // A module's proofs are those of the bodies the build keeps of it, which for a std module depend on
+    // the program (`bc_lazy`): the key holds them too.
+    if cache {
+        for k in 0..keep.kept.len() {
+            let b = &keep.kept.at(k).body;
+            let m = b.module as usize;
+            let h = splitmix(b.owner.module as u64 << 32 | b.owner.node as u64);
+            keys.set(2 * m, keys[2 * m].wrapping_add(h));
+            keys.set(2 * m + 1, keys[2 * m + 1].wrapping_add(splitmix(h ^ 0xC2B2AE3D27D4EB4Fu64)));
+        }
+    }
     let path = build_out_path(&p.gen_root, PROVE_RECORD, "");
     if cache {
         let old = loader::read_file(&path).unwrap_or(String::new());
@@ -15687,10 +15695,11 @@ fn prove_cached(
     }
     let mut held = Vector::<bool>::with_capacity(n);
     held.resize_default(n);
-    // The proofs lower the contracts of interfaces' methods and, for `@prove_exhaustive` functions, the
-    // evaluator lowers their callees: the types they touch are no use by the program (as the
-    // always-panics probes' are), and several workers lower under the stage locks.
-    let locks = p.jobs != 1 && prv::any_exhaustive(p);
+    // The proofs lower the contracts of interfaces' methods, evaluate named constants (`local_val`) and,
+    // for `@prove_exhaustive` functions, the evaluator lowers their callees: the types they touch are
+    // no use by the program (as the always-panics probes' are), and several workers use the evaluator
+    // under the stage locks.
+    let locks = p.jobs != 1;
     let mut marks = Vector::<u64>::with_capacity(n);
     for m in 0..n {
         marks.push(p.modules[m].ast.get_ref().used_mark());
@@ -15772,10 +15781,11 @@ const fn parse_hex64(s: str) Option<u64> {
 
 // Skip the contract checks of every kept body the build does not run (`irc::skip_contracts`), before
 // the inliner copies a callee or the evaluator runs one.
-fn skip_kept_contracts(p: &loader::Package, keep: &mut irl::Keep, keep_checks: bool, keep_pats: bool) {
+pub(package) fn skip_kept_contracts(p: &loader::Package, keep: &mut irl::Keep, keep_pats: bool) {
     for k in 0..keep.kept.len() {
         if keep.kept.at(k).body.contracts.len() != 0 {
             let req = req_ast(p, &keep.kept.at(k).body);
+            let keep_checks = p.contract_checks_run(keep.kept.at(k).body.module);
             irc::skip_contracts(
                 &mut keep.kept.index_mut(k).body,
                 keep_checks,
@@ -16674,7 +16684,7 @@ pub(package) fn run_package(
         }
         stage_ms(tstat, &mut tp0, "phase prove");
     }
-    skip_kept_contracts(p, &mut irkeep, (p.cg & bman::CG_CONTRACT_CHECKS) != 0, p.pat_checks_run());
+    skip_kept_contracts(p, &mut irkeep, p.pat_checks_run());
     // The static_asserts undecidable in module order re-evaluate now that every module is fully typed.
     let cirf = p.cir as *mut iri::Interp;
     if cirf != null {

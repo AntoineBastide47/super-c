@@ -127,6 +127,34 @@ pub(package) const fn is_prelude_len_call(pkg: *const loader::Package, b: &ir::C
     return src.slice(ns.start as usize, ns.end as usize) == "len";
 }
 
+/// Whether argument `i` of call `t` is an elided automatic borrow that the callee changes: a place of
+/// the value's type (`v` of `v.pop()`) for a parameter the callee declares `&mut`.
+pub(package) const fn elided_mut(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator, i: u32) bool {
+    let op = *b.operands.at(b.oper_pool[(t.args_start + i) as usize] as usize);
+    if op.kind == ir::OP_CONST || op.ty == TYPE_NONE || t.callee.node == NODE_NONE || Ast::in_body(t.callee.node) {
+        return false;
+    }
+    let pk = unsafe &*pkg;
+    let ok = (unsafe &*pk.module_ast_const(b.module)).type_at(op.ty).kind;
+    if ok == TypeKind::TYPE_REFERENCE || ok == TypeKind::TYPE_POINTER {
+        return false;
+    }
+    let a = unsafe &*pk.module_ast_const(t.callee.module);
+    if a.at_const(t.callee.node).kind != NodeKind::NODE_FUNCTION {
+        return false;
+    }
+    let ps = a.ext(t.callee.node).function.params;
+    if i >= ps.len {
+        return false;
+    }
+    let pt = a.type_of(unsafe a.list(ps)[i as usize]);
+    if pt == TYPE_NONE {
+        return false;
+    }
+    let py = a.type_at(pt);
+    return py.kind == TypeKind::TYPE_REFERENCE && py.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8;
+}
+
 /// The effect of terminator `t`. A call's destinations are written after its effect.
 pub(package) fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &ir::Terminator) Effect {
     if t.kind == ir::TM_DROP {
@@ -175,9 +203,12 @@ pub(package) fn term_effect(pkg: *const loader::Package, b: &ir::CoreBody, t: &i
             continue;
         }
         let y = da.type_at(op.ty);
-        if y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 && !b.place_has_deref(
-            op.data,
-        ) {
+        if (y.kind == TypeKind::TYPE_REFERENCE && y.qualifier == TypeQualifier::TYPE_QUAL_MUT as u8 || elided_mut(
+            pkg,
+            b,
+            t,
+            i,
+        )) && !b.place_has_deref(op.data) {
             push_root(&mut e, b.places.at(op.data as usize).base);
         }
     }
@@ -2362,6 +2393,13 @@ extend Facts {
                 let y = *da.type_at(op.ty);
                 if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_DYN || y.kind == TypeKind::TYPE_OPAQUE {
                     ok = false;
+                } else if elided_mut(pkg, b, &t, k) {
+                    // The callee changes the place it borrows: its subtree, or anything through a deref.
+                    if b.place_has_deref(op.data) {
+                        ok = false;
+                    } else {
+                        self.lop(2, b.places.at(op.data as usize).base, op.data);
+                    }
                 } else if y.kind == TypeKind::TYPE_REFERENCE {
                     if y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                         continue;
@@ -2825,7 +2863,15 @@ extend Facts {
             let mut victim = ir::IR_NONE;
             let mut victim2 = ir::IR_NONE;
             let mut vpl = ir::IR_NONE;
-            if y.kind == TypeKind::TYPE_REFERENCE {
+            if elided_mut(self.pkg, b, t, i) {
+                // An elided `&mut` borrow: the callee changes the place's subtree (through a deref,
+                // anything).
+                if b.place_has_deref(op.data) {
+                    return false;
+                }
+                victim = b.places.at(op.data as usize).base;
+                vpl = op.data;
+            } else if y.kind == TypeKind::TYPE_REFERENCE {
                 if y.qualifier != TypeQualifier::TYPE_QUAL_MUT as u8 {
                     continue; // a shared reference cannot mutate the header it points at
                 }

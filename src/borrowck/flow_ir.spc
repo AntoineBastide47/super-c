@@ -1427,7 +1427,11 @@ extend tc::TypeChecker {
                 cap_hi = body.returns + body.args;
             }
         }
+        let ghost = ir::ghost_blocks(body, unsafe (*self.package).contract_checks_run(body.module));
         for bi in 0..body.blocks.len() {
+            if ir::in_blocks(&ghost, bi as u32) {
+                continue;
+            }
             let blk = *body.blocks.at(bi);
             for si in 0..blk.stmt_len {
                 let s = *body.statements.at((blk.stmt_start + si) as usize);

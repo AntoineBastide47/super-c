@@ -715,7 +715,7 @@ extend Mangler {
         let p = unsafe &*pkg;
         let mut user_mods: usize = 0;
         for i in 0..p.modules.len() {
-            if !p.modules.at(i).prelude && !p.is_rt(i as i32) {
+            if !p.modules.at(i).prelude && !p.is_rt(i as i32) && !p.prelude_dep(i) {
                 user_mods += 1;
             }
         }
@@ -934,6 +934,25 @@ extend Mangler {
     pub(package) fn pop_subs(self: &mut Self, n: usize) {
         self.subs.truncate(self.subs.len() - n);
         self.subs_gen += 1;
+    }
+    /// One bit per binding of demand chain `chain` (first binding highest, above a leading 1): whether
+    /// its payload is zero-sized, resolved through the bindings below its env (`MSub.lim`). A payload
+    /// that names a caller's parameter (`T := V`) takes the bit of that parameter's binding.
+    pub(package) fn chain_zst_bits(self: &mut Self, chain: &Vector<MSub>) u64 {
+        let outer = replace(&mut self.subs, Vector::<MSub>::with_capacity(chain.len()));
+        let mut zb: u64 = 1;
+        for i in 0..chain.len() {
+            let sb = *chain.at(i);
+            self.subs.truncate(0);
+            for k in 0..(sb.lim as usize).min(i) {
+                self.subs.push(*chain.at(k));
+            }
+            self.subs_gen += 1;
+            zb = zb << 1 | self.is_zst(sb.am, sb.at) as u64;
+        }
+        self.subs = outer;
+        self.subs_gen += 1;
+        return zb;
     }
     /// Drop every binding.
     pub(package) fn clear_subs(self: &mut Self) {
@@ -2018,7 +2037,7 @@ extend Mangler {
     /// a symbol segment, else a symbol edge.
     pub(package) fn modpfx(self: &mut Self, m: ModuleId, out: &mut String) {
         self.spell_edge(m);
-        if !self.mangle && !self.p().is_rt(m) || self.p().modules.at(m as usize).prelude {
+        if !self.mangle && !self.p().is_rt(m) && !self.p().prelude_dep(m as usize) || self.p().modules.at(m as usize).prelude {
             return;
         }
         let path = self.p().modules.at(m as usize).path.as_str();

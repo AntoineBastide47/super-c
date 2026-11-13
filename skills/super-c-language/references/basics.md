@@ -102,7 +102,10 @@ is several clauses. A `while`,
 a `loop` and a `for` over a range written in place (`for i in a..n`) take `invariant C` and
 `decreases E` after the header; another `for` takes none (error 536). The words are contextual
 keywords. A clause only computes its condition: it calls only `const fn`s, drops nothing and writes
-nothing (error 537). An extern or intrinsic function has no clause.
+nothing (error 537). An intrinsic function has no clause. An extern function may state `requires` and
+`ensures` when it is `@trusted` (error 557 otherwise): the C library's promises, which no proof checks;
+each call proves its `requires` and assumes its `ensures`. A `@noreturn` extern function (`abort`,
+`exit`) ends the process: a call to it ends the path, with no panic obligation.
 
 The compiler proves every clause in every build; one it cannot prove fails the build (error 538,
 "cannot prove ..."), and the note gives the parameters of a counterexample the evaluator confirms
@@ -140,8 +143,29 @@ proves a table: `@prove_exhaustive lemma inv(x: u8) ensures g(f(x)) == x {}`. Th
 A call assumes the callee's `ensures`, never its body. An interface's method may state `requires`
 and `ensures` without a body (a `decreases` needs a body, error 539): a call through a bound or a
 `dyn` proves the interface's `requires` and assumes its `ensures`; each conformance's method proves
-its own `requires` from the interface's and the interface's `ensures` at its returns. A function
-with a `requires` clause cannot be a value: a call through the value would prove nothing.
+its own `requires` from the interface's and the interface's `ensures` at its returns. A conformance's
+method with no clause of its own has the interface's: a direct call proves and assumes them too, and
+its body is proved once, from them. A function with a `requires` clause cannot be a value: a call
+through the value would prove nothing.
+
+Choosing clauses:
+
+- A bound in a `requires` is the condition the body needs, never a convenient constant. Find it in
+  the clauses of what the body does: the negation of a callee's `panics if`, a callee's `requires`,
+  the range in which an operation does not overflow. `Vector::push` states
+  `panics if self.view().len() + 1 > Vector::<T, A>::max_len()`, so a function with clauses that
+  pushes once onto `v: &mut Vector<u32>` requires `v.len() as int < Vector::<u32>::max_len()`, not
+  `v.len() < 1000`. `self.n += 1` on a `u32` needs `self.n < u32::MAX`. A constant bound rejects valid
+  callers and hides which operation needs the bound.
+- Where the body cannot know the bound, do not invent one: state the callee's condition as the
+  function's own `panics if` (its callers then carry it), or give the function no clause (then nothing
+  proves that it does not panic).
+- Std containers prove for every method that it keeps the struct invariant and has no undefined
+  behavior (memory, `free`, unwinding). The core methods (`new`, `with_capacity`, `push`, `pop`,
+  `len`, `at`, `set`, `insert`, `remove`, `truncate`, `clear`) state their full effect on `view()`,
+  which a caller's proof reads. The other methods (sorts, dedups, `map`, `retain`, `extend_*`,
+  `resize_default`) state only the length, which a caller needs for its bounds, until a proof needs
+  more: a full content contract costs lemmas and loop invariants in each change of the body.
 
 The proofs model integers exactly, `u128`, `i128` and `UInt<N>` or `Int<N>` of up to 512 bits too
 (their comparisons, `+ - * / %`, bit operations, shifts, conversions and literals): a product of two
@@ -154,7 +178,12 @@ casts, divisions or products that the arithmetic cannot decide is decided on the
 (`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer and a float are
 values the proofs do not take apart. They also model struct fields, arrays of a constant length and
 their views (an element read by an index the path proves in bounds), and references; a call that
-may write memory, a drop and a write through a pointer forget the values a reference reaches. Equal
+may write memory, a drop and a write through a pointer forget the values a reference reaches. A
+pointer is `null` or an address: `p as usize` is 0 exactly for `null`, `p + n` of a pointer that is
+not null is not null and lies `n * sizeof(T)` bytes past it (arithmetic stays inside its object), and
+a reference, its cast to a pointer and the `ptr` of a slice with a `len` above 0 are not null.
+`sizeof(T)` of a type parameter is at most `isize::MAX` and `alignof(T)` at least 1. A literal's
+omitted fields are 0. Equal
 operands give equal results: `requires i == j` proves `a[i] == a[j]`, `half(x) == half(y)` for a
 `const fn`, `x / 3 == y / 3`, also where the rows imply the equality (`x <= y, y <= x`). A
 proof that goes over its fixed budget is not proved. `-fno-prove` skips the proofs;
@@ -212,7 +241,8 @@ its definition, one unfolding per call (a call over constants unfolds further); 
   error 545: it has no run-time form.
 
 - A spec function or a lemma without a body ends its clauses with `;` and must be `@trusted`
-  (error 557): an axiom, which no proof checks. Its `ensures` define its calls.
+  (error 557): an axiom, which no proof checks. Its `ensures` define its calls. `@trusted` marks only
+  these and an extern function with clauses.
 - In ghost code `==` and `!=` compare any two values of one type without an `eq` method (a `Seq`, an
   array, a type parameter): the proofs' equality, error 545 under `-fcontract-checks`.
 
@@ -314,11 +344,14 @@ pub struct Buf
   break it. The clauses are the struct's spec method `invariant(self: &S) bool`, which ghost code
   calls (`requires b.invariant()`).
 - Code in another file assumes it of every value of the type. The file's own code assumes it of the
-  values that enter a body (parameters and their targets, call results) and proves it where a value
-  leaves: at each return (results, `&mut` parameters), each call and drop that receives it, and each
-  call, check, arithmetic operation and drop that may panic (a panic unwinds past it). Between those
-  points a body may break it (two field writes in a row). A `&T` parameter's target keeps it through
-  the body. `Free::free` assumes it of its receiver and proves it nowhere: the value ends there.
+  values that enter a body (parameters and their targets, call results and the targets of returned
+  references, values it reaches through a raw pointer) and proves it where a value leaves: at each
+  return (results, `&mut` parameters), each call and drop that receives it, each call, check,
+  arithmetic operation and drop that may panic (a panic unwinds past it), each safepoint that may
+  accept a cancellation, and after each write through a raw pointer or a returned reference into a
+  value of the type. Between those points a body may break it (two field writes in a row). A `&T`
+  parameter's target keeps it through the body. `Free::free` assumes it of its receiver and proves it
+  nowhere: the value ends there.
 - `std::spec::seq::block(p)` is the block an `@owned` field `p` points to, a `Seq`: `self.ptr[i]` is
   `block(self.ptr)[i]`, a write through the field changes it, and in proved code each index into the
   field must be below its length (any index of a zero-sized `T`). A write through a copy of the field,

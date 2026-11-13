@@ -464,6 +464,8 @@ fn emit_from(p: &mut loader::Package, from: usize, user_only: bool, code: &mut S
     if rr.errors != 0 {
         return rr.errors;
     }
+    // The contract checks the build does not run leave the kept bodies, as the driver's run does.
+    demit::skip_kept_contracts(p, &mut keep, p.pat_checks_run());
     // Whole-package emission through the production backend; the text keeps the shared headers (`str`,
     // monomorphized Slice/Box, ...) and the instance code.
     let tplan = dtest::TestPlan::new(n);

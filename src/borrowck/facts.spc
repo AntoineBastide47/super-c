@@ -611,6 +611,8 @@ pub(package) struct Gen {
     pub(package) f: BodyFacts,
     pub(package) assign_sites: Vector<KillSite>, // every overwrite, paired against loans for kills afterwards
     pub(package) cur_block: u32,
+    pub(package) ghost: Vector<u64>, // the blocks of the contract sites no build runs (`ir::ghost_blocks`)
+    pub(package) in_ghost: bool, // walking one of them: a read moves and uses nothing
     pub(package) in_caps: bool, // reading closure-capture operands: owned moves record ACC_CAP
     pub(package) calling: bool, // reading a callee-position operand: calling borrows the env, never moves it
     pub(package) plain_copy: bool, // reading an RV_USE operand: a `&mut` place copy consumes the binding
@@ -2036,7 +2038,7 @@ extend Gen {
     @always_inline
     fn op_read(self: &mut Self, opid: ir::OperandId, point: u32, sp: tok::Span) {
         let op = *self.body().operands.at(opid as usize);
-        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+        if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE || self.in_ghost {
             return;
         }
         let pl = self.place_of(op.data);
@@ -4051,6 +4053,7 @@ extend Gen {
         }
         for bi in 0..nb {
             self.cur_block = bi as u32;
+            self.in_ghost = ir::in_blocks(&self.ghost, bi as u32);
             let ne = self.f.events.len() as u32;
             self.f.ev_start.push(ne);
             self.f.mev_start.push(self.f.mev.len() as u32);
@@ -6577,6 +6580,8 @@ extend Owner {
             f: replace(dst, BodyFacts::empty()),
             assign_sites: sites,
             cur_block: 0,
+            ghost: ir::ghost_blocks(b, unsafe (&*self.pkg).contract_checks_run(b.module)),
+            in_ghost: false,
             in_caps: false,
             plain_copy: false,
             no_drop: false,

@@ -913,6 +913,12 @@ fn loop_header_kills_lengths_the_loop_writes() {
 
 fn loop_header_kills_lengths_the_loop_writes_cases(b: &mut h::ExitBatch) {
     b.add_trap("the stale bound panics", LOOP_HEADER_KILLS_LENGTHS_THE_LOOP_WRITES_SRC, "index out of bounds");
+    // A call that is not inlined changes what its elided `&mut` receiver borrows (`w.drop_last()`).
+    b.add_trap(
+        "an elided mutable receiver kills the bound",
+        "struct W { pub v: Vector<i32> }\nextend W {\n    @noinline\n    fn drop_last(self: &mut W) {\n        let _ = self.v.pop();\n    }\n}\nfn main(argv: Vector<str>) i32 {\n    let mut w = W { v: Vector::<i32>::new() };\n    for k in 0..argv.len() + 2 {\n        w.v.push(k as i32);\n    }\n    let n = w.v.len();\n    let mut i: usize = 0;\n    let mut x = 0;\n    while i < n {\n        x += w.v[i];\n        w.drop_last();\n        i += 1;\n    }\n    return x;\n}\n",
+        "index out of bounds",
+    );
 }
 
 fn interval_facts_remove_strided_checks(b: &mut h::ExitBatch) {

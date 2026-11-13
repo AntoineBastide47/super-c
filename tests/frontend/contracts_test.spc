@@ -49,7 +49,7 @@ fn clauses_are_checked_like_conditions() {
     );
     assert(h::parse_has_error("fn f(x: u32) requires x > 0;\n"), "a contract without a body");
     assert(
-        h::parse_has_error("extern \"C\" {\n    fn g(x: u32) requires x > 0;\n}\n"),
+        !h::parse_has_error("extern \"C\" {\n    @trusted\n    fn g(x: u32) requires x > 0;\n}\n"),
         "a contract on an extern function",
     );
     assert(
@@ -147,6 +147,16 @@ fn unproved_contracts_are_errors() {
         "a function with requires as a value",
         "fn inc(x: u32) u32 requires x < 100 { return x + 1; }\nfn main() i32 {\n    let g = inc;\n    return g(1) as i32;\n}\n",
         "a function with a 'requires' clause cannot be used as a value",
+    );
+    b.add(
+        "a trusted extern function's requires at a call",
+        "extern \"C\" {\n    @trusted\n    fn labs(x: i64) i64 requires x > 0 ensures |r| r == x;\n}\nfn f(a: i64) i64 { return unsafe labs(a); }\nfn main() i32 { return f(1) as i32 - 1; }\n",
+        "cannot prove the 'requires' of 'labs' at this call",
+    );
+    b.add(
+        "a shared borrow of a cell's holder",
+        "import std::mem::cell;\nstruct S { pub c: cell::Cell<u32> }\nfn bump(s: &S) {\n    s.c.set(s.c.get() + 1);\n}\nfn f() u32 ensures |r| r == 1 {\n    let s = S { c: cell::Cell::<u32>::new(1) };\n    bump(&s);\n    return s.c.get();\n}\nfn main() i32 { return f() as i32; }\n",
+        "cannot prove this 'ensures' clause",
     );
     b.add(
         "a field a method call changes",
@@ -516,6 +526,11 @@ fn spec_syntax_is_checked() {
         "a spec function or a lemma without a body must be '@trusted': no proof checks its contracts",
     );
     h::expect_err_msg(
+        "an extern function's contract without @trusted",
+        "extern \"C\" {\n    fn g(x: u32) u32 requires x > 0;\n}\nfn main() i32 { return 0; }\n",
+        "an extern function with contracts must be '@trusted': no proof checks them",
+    );
+    h::expect_err_msg(
         "@trusted on a function with a body",
         "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
         "'@trusted' marks a spec function or a lemma without a body",
@@ -602,6 +617,56 @@ fn unproved_spec_syntax_is_an_error() {
 }
 
 fn proved_contracts(b: &mut h::ExitBatch) {
+    // A clause's `const fn` call through a `&mut` parameter (`c.get()`) reads the caller's value at the
+    // call; a call that only reads leaves the parameter's target as it was (`old(c.get())`).
+    b.add(
+        "a const fn of a mutable parameter in clauses",
+        M"(struct C { n: u32 }
+extend C {
+    const fn get(self: &C) u32 ensures |r| r == self.n { return self.n; }
+    fn need(self: &mut C) requires self.n < u32::MAX { self.n += 1; }
+}
+fn f(c: &mut C)
+    requires c.get() < u32::MAX
+    ensures old(c.get()) < u32::MAX
+{
+    c.need();
+}
+fn g(c: &mut C) u32 requires c.get() < u32::MAX {
+    return 1;
+}
+fn main() i32 {
+    let mut c = C { n: 0 };
+    let mut d = C { n: 5 };
+    let k = g(&mut d);
+    f(&mut c);
+    return (c.n + k) as i32;
+}
+)",
+        2,
+    );
+    // A trusted extern function's `ensures` holds at its calls; a `@noreturn` one ends the path.
+    b.add(
+        "trusted extern contracts",
+        M"(extern "C" {
+    @trusted
+    fn llabs(x: i64) i64 requires x > -1000, x < 1000 ensures |r| r >= 0 && r < 1000;
+    @noreturn
+    fn abort() void;
+}
+fn small(a: i64) u8 requires a > -1000, a < 1000 ensures |r| r < 250 {
+    let k = unsafe llabs(a);
+    if k >= 250 {
+        unsafe abort();
+    }
+    return k as u8;
+}
+fn main() i32 {
+    return small(-7);
+}
+)",
+        7,
+    );
     b.add(
         "a sum modulo a bound",
         M"(fn add_mod(a: u32, b: u32, m: u32) u32

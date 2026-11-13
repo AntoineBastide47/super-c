@@ -693,6 +693,32 @@ const fn func_index(l: &L, k: u32) u32 {
     return l.funcs[(f.fn0 + y.index - f.nimp) as usize].index;
 }
 
+// The output type of input function symbol `k` as its file declares it.
+const fn sym_type(l: &L, k: u32) u32 {
+    let y = l.syms[k as usize];
+    let f = l.files[y.file as usize];
+    if y.index < f.nimp {
+        return l.fimps[(f.imp0 + y.index) as usize].ty;
+    }
+    return l.funcs[(f.fn0 + y.index - f.nimp) as usize].ty;
+}
+
+// The output type of the function input symbol `k` stands for (`func_index`).
+const fn target_type(l: &L, k: u32) u32 {
+    let g = gof(l, k);
+    if g == NONE {
+        return sym_type(l, k);
+    }
+    let gy = l.gs[g as usize];
+    if gy.kind == G_DEF {
+        return sym_type(l, gy.sym);
+    }
+    if gy.kind == G_IMPORT {
+        return l.oimps[gy.imp as usize].ty;
+    }
+    return l.ctor_ty;
+}
+
 // ---- garbage collection ---------------------------------------------------------------------------------
 
 // Keep only the bodies and data segments a root reaches through relocations (`--gc-sections`, as wasm-ld
@@ -967,6 +993,15 @@ fn apply_rels(l: &mut L, f: IFile, b: []u8, sc: ISec, out: &mut Vector<u8>, mode
             if fx == NONE {
                 l.err.format_into(
                     "'{}': a call of undefined weak function '{}'",
+                    l.paths[f.path as usize].as_str(),
+                    l.names.spell(l.syms[(f.sym0 + k) as usize].name),
+                );
+                return false;
+            }
+            if sym_type(l, f.sym0 + k) != target_type(l, f.sym0 + k) {
+                // A call through a declaration of another type than the definition's: invalid code.
+                l.err.format_into(
+                    "'{}': function '{}' is declared with another type than its definition",
                     l.paths[f.path as usize].as_str(),
                     l.names.spell(l.syms[(f.sym0 + k) as usize].name),
                 );

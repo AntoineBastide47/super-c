@@ -724,6 +724,9 @@ pub(package) struct PkgIndex {
     /// top-level non-extern names that a top-level prelude declaration also has, so would spell the
     /// prelude's C symbol. The mangler escapes them (`Mangler::ident`). Empty with more user modules.
     pub(package) shadow: Set<SymbolId>,
+    /// Per module: a std module that only prelude modules import, directly or through other such
+    /// modules (`Package::prelude_dep`).
+    pub(package) pl_dep: Vector<bool>,
     /// Function-item signatures as package metadata (see ensure_sigs): sig_of keys
     /// skey_mix(module << 32 | fn node) (MIXED: u64 maps hash by identity and structured keys
     /// cluster) to a `sigs` record whose types live in the `sig_types` CSR pool,
@@ -2720,6 +2723,15 @@ extend Package {
     /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
     pub(package) const fn is_rt(self: &Self, m: i32) bool {
         return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
+    }
+
+    /// Whether module `m` is a std module that only prelude modules import, directly or through other
+    /// such modules (`std::spec::seq` for `Vector`'s `view`): part of the prelude, not of the program.
+    /// Its symbols always take their module prefix, it does not count as a program module (the one
+    /// program module's symbols take none), and it emits only what live code names.
+    pub(package) const fn prelude_dep(self: &Self, m: usize) bool {
+        let d = &self.idx().pl_dep;
+        return m < d.len() && d[m];
     }
 
     /// Whether the borrow pass lowers module `m`'s bodies only where the build reaches them
@@ -7089,6 +7101,7 @@ extend Package {
             tgt.push(idx.imports[e]);
         }
         let _ = gitems::condense(n, &idx.mod_imports, &tgt, &mut idx.scc_of);
+        self.index_pl_deps(&mut idx);
         // The prelude name map: every public top-level name of every prelude module, keyed by
         // (symbol, namespace), the first prelude module in module order winning (the order a walk
         // over the modules would answer in). prelude_lookup answers from it alone.
@@ -7183,6 +7196,7 @@ extend Package {
         idx.conf_of = Map::<u64, u64>::new();
         idx.sigs_built = false;
         idx.shadow = Set::<SymbolId>::new();
+        self.index_pl_deps(&mut idx);
         self.index_shadows(&mut idx);
         *self.idx_mut() = idx;
         for si in 0..SI_COUNT_N {
@@ -7423,13 +7437,54 @@ extend Package {
         }
     }
 
+    // Fill `idx.pl_dep` from the import graph: a std module stays one while every module that imports
+    // it is a prelude module or another one, and one of them is (a module the program or the build's
+    // root names is not). Each pass only clears entries, so at most one pass per module.
+    fn index_pl_deps(self: &Self, idx: &mut PkgIndex) {
+        let n = self.modules.len();
+        let mut dep = Vector::<bool>::with_capacity(n);
+        for m in 0..n {
+            dep.push(
+                self.modules[m].has_ast && !self.modules[m].prelude && self.modules[m].pkg == PKG_STD && !self.is_rt(
+                    m as i32,
+                ),
+            );
+        }
+        // Per module: bit 0 a prelude module or a candidate imports it, bit 1 another module does.
+        let mut by = Vector::<u8>::new();
+        by.resize_default(n);
+        for _pass in 0..n + 1 {
+            for m in 0..n {
+                by.set(m, 0);
+            }
+            for x in 0..n {
+                let from = pick(self.modules[x].prelude || dep[x], 1u8, 2u8);
+                for e in idx.mod_imports[x]..idx.mod_imports[x + 1] {
+                    let d = idx.imports[e as usize] as usize;
+                    by.set(d, by[d] | from);
+                }
+            }
+            let mut changed = false;
+            for m in 0..n {
+                if dep[m] && by[m] != 1 {
+                    dep.set(m, false);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        idx.pl_dep = dep;
+    }
+
     // Fill `idx.shadow` (see PkgIndex) when the package holds exactly one program module besides the
     // runtime.
     fn index_shadows(self: &Self, idx: &mut PkgIndex) {
         let n = self.modules.len();
         let mut user = n;
         for m in 0..n {
-            if !self.modules[m].prelude && !self.is_rt(m as i32) {
+            if !self.modules[m].prelude && !self.is_rt(m as i32) && !idx.pl_dep[m] {
                 if user != n {
                     return;
                 }
@@ -7634,6 +7689,13 @@ extend Package {
     /// prove them (`-fno-prove`), or runs the contract checks (`-fcontract-checks`).
     pub(package) const fn pat_checks_run(self: &Self) bool {
         return (self.cg & (bman::CG_CONTRACT_CHECKS | bman::CG_NO_PROVE)) != 0;
+    }
+
+    /// Whether the build runs the contract checks of module `m`'s code (`-fcontract-checks`): the
+    /// program's. A std module's clauses are proved and may name spec functions, which have no run-time
+    /// form.
+    pub(package) const fn contract_checks_run(self: &Self, m: ModuleId) bool {
+        return (self.cg & bman::CG_CONTRACT_CHECKS) != 0 && self.modules.at(m as usize).pkg != PKG_STD;
     }
 
     pub(package) fn prelude_lookup(self: &Self, name: str, want_type: bool) LookupHit {

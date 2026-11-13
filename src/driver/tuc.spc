@@ -308,7 +308,7 @@ fn keys_compute(p: &loader::Package, live: *const bool, keys: &mut Vector<u64>) 
                 h = fnv_mix(h, srch[i]);
             }
         }
-        if live != null && p.modules[m].prelude {
+        if live != null && (p.modules[m].prelude || p.prelude_dep(m)) {
             h = fnv_mix(
                 h,
                 if unsafe live[m] {

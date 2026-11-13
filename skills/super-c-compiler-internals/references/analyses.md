@@ -11,6 +11,7 @@ file is authoritative for where to look first.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
+| The std modules only prelude modules import, directly or through each other (`std::spec::seq`): no program module, their symbols prefixed, emitted only where live code names them | `Package::index_pl_deps` (at each index build, from the import adjacency) | `PkgIndex.pl_dep`, read by `Package::prelude_dep` | the next index build |
 | The lazy modules' bodies a build reaches: roots, call targets, function values, the conformance methods of a called interface member, every `free` conformance once a body drops | `bc_std_closure` (scans each kept body once, after the jobs) | `irl::Keep` (the bodies), a local queue per item | end of `borrowck_all` |
 | The lazy modules' conformance methods by name hash | `bc_std_closure` (`fn_name_key`) | local map | end of `bc_std_closure` |
 | Whether the instance graph seeds a lazy module's function | `InstGraph::seeds` (reads `Keep.ix`) | not stored | per call |
@@ -33,6 +34,8 @@ file is authoritative for where to look first.
 | The allocator calls of a path: kind, size, the block a `realloc` moves, its direction | `Prover::call` (`alloc_call`, `block_of_ptr`) | `alloc_of`, `alloc_rec`, per body | the next body |
 | The `@owned` block accesses since the last check | `read_prefix`, `update` | `own_chk`, drained by `own_check` | the statement's or terminator's end |
 | The facts of a member read by an unknown key, of a sequence's element and length, of a normalized index | `Prover::sel`, `seq_at`, `seq_make`, `seq_ext`, `index_key` | `seld` (made once), the facts in `defs` | the next body |
+| The null and address facts of pointers: an offset (`p + n`, no wrap, null only from null), an address (`p as usize`, 0 only for null), `from_addr_mut`, a slice's `ptr` (not null where `len` is not 0), a reference or its pointer cast (not null) | `Prover::ptr_offset`, `ptr_addr`, `ptr_at`, `slice_field`, `rvalue` | `ptrd` (made once), the facts in `defs` | the next body |
+| The locals of member references made once outside every loop and used only to read or write a member (`let c = &mut self.f[i]`): their target escapes only where such a reference is passed on | `Prover::scan_lazy` (`Facts::loop_scan`, reused) | `lazy`, per body | the next body |
 | The view a modeled method gave a container's value, or a slice in a memory epoch; the sequences a spec function's result may equal | `Prover::sq_effect`, `elem_write`, `slice_of`, `define` | `vdef`, `sdef`, `alias`, `alias_pool`, per body | the next body |
 | The type arguments of the generic spec function being unfolded | `Prover::call_value` | `subst`, during `define` | the unfolding's end |
 | The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
@@ -184,6 +187,9 @@ either.
 These recompute a fact the compiler already holds. Remove each line when it is fixed. Do
 not copy their pattern into new code.
 
+- borrow, prove, lower: each reader of a contract site's blocks marks them again (`ir::site_mark`:
+  `ghost_blocks` in the borrow facts and in the flow conversion, the prover's `begin_sites` and
+  `own_scan`, `skip_contracts` per site); the walk visits only the site's blocks.
 - lower: a native build still renders the C text of its constants and statics, of its aggregates'
   definitions and of the extern headers' checks, which only the C backend reads, and spells each
   callee's symbol again per calling module for the cross-unit edges (which choose the objects too);

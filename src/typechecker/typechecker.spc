@@ -25610,7 +25610,8 @@ extend TypeChecker {
         self.errors.note(format("state it as a 'const fn' over the fixed integer types, or build without the flag"));
     }
 
-    // Whether type `t` has an `eq` method (its own or an interface default; a generic parameter's bound).
+    // Whether type `t` has an `eq` method (its own or an interface default; a generic parameter's bound)
+    // whose extend's bounds hold for it (`Option<T>` has none for a `T` without `Eq`).
     fn tc_has_eq(self: &mut Self, t: TypeId) bool {
         let y = *self.type_at(t);
         if y.kind == TypeKind::TYPE_GENERIC {
@@ -25622,7 +25623,11 @@ extend TypeChecker {
             return false;
         }
         let md = self.find_method_cstr(om, od, "eq");
-        return md.node != NODE_NONE || self.find_default_method_cstr(om, od, "eq").node != NODE_NONE;
+        if md.node != NODE_NONE {
+            return self.method_extend_bounds_hold(t, md);
+        }
+        let dm = self.find_default_method_cstr(om, od, "eq");
+        return dm.node != NODE_NONE && self.method_extend_bounds_hold(t, dm);
     }
 
     // Whether the function under check is a spec function or a lemma.
@@ -34982,7 +34987,9 @@ extend TypeChecker {
             if c.kind != CT_DECREASES {
                 // A `panics if` states where the function may panic: no build runs it, and it reads the
                 // entry, as a `requires` does.
-                let run = (c.kind != CT_ASSERT && c.kind != CT_PANICS && self.ghost == 1 && (unsafe (&*self.package).cg & bman::CG_CONTRACT_CHECKS) != 0) as u32;
+                let run = (c.kind != CT_ASSERT && c.kind != CT_PANICS && self.ghost == 1 && unsafe (&*self.package).contract_checks_run(
+                    self.cur_module(),
+                )) as u32;
                 let ok = (c.kind != CT_REQUIRES && c.kind != CT_PANICS && !self.tc_in_ghost_fn()) as u32;
                 self.run_clause += run;
                 self.old_ok += ok;
@@ -36325,19 +36332,24 @@ extend TypeChecker {
                 self.icx.current_returns = fnd.returns;
                 self.icx.current_fn = id;
                 let g = fnd.is_ghost() as u32;
-                // `@trusted`: the axioms of a spec function or a lemma without a body.
+                // `@trusted`: the axioms of a spec function or a lemma without a body, and the contracts of an
+                // extern function.
                 let trusted = unsafe (*self.cur_ast()).attr_of(id, AttrKind::ATTR_TRUSTED) != null;
-                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE) {
+                let (tcs, tce) = unsafe (*self.cur_ast()).contracts_of(id);
+                let ext = fnd.is_extern() && tce > tcs;
+                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE || ext) {
                     self.errors.emit_span(
                         dc::TRUSTED_PLACE,
                         unsafe (*self.cur_ast()).at_const(fnd.name).span,
                         format(
                             "{}",
-                            pick(
-                                trusted,
-                                "'@trusted' marks a spec function or a lemma without a body",
-                                "a spec function or a lemma without a body must be '@trusted': no proof checks its contracts",
-                            ),
+                            if trusted {
+                                "'@trusted' marks a spec function or a lemma without a body, or an extern function with contracts"
+                            } else if ext {
+                                "an extern function with contracts must be '@trusted': no proof checks them"
+                            } else {
+                                "a spec function or a lemma without a body must be '@trusted': no proof checks its contracts"
+                            },
                         ),
                     );
                 }

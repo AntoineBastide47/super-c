@@ -1234,8 +1234,14 @@ fn note_requires(b: &mut CoreBody, i: usize, a: &Ast, ptr32: bool) {
         return;
     }
     let cl = b.places[co.data as usize].base;
-    for blk in s.chain..s.check + 1 {
-        let bk = b.blocks[blk as usize];
+    let mut bits = Vector::<u64>::new();
+    bits.resize_default((b.blocks.len() + 63) / 64);
+    site_mark(b, s, &mut bits);
+    for blk in 0..b.blocks.len() {
+        if !in_blocks(&bits, blk as u32) {
+            continue;
+        }
+        let bk = b.blocks[blk];
         for j in bk.stmt_start..bk.stmt_start + bk.stmt_len {
             let st = b.statements[j as usize];
             if st.kind != ST_ASSIGN || b.places[st.place as usize].base != cl || b.places[st.place as usize].proj_len != 0 {
@@ -1355,17 +1361,67 @@ const fn param_of(b: &CoreBody, x: OperandId) u32 {
     };
 }
 
+/// The blocks of the contract sites of `b` that no build runs, as bits: every site but a pattern type's
+/// without `checks_run`, else the ghost code and the measures (as `skip_contracts`). A read in them moves
+/// nothing and uses no value: the borrow check skips it.
+pub(package) fn ghost_blocks(b: &CoreBody, checks_run: bool) Vector<u64> {
+    let mut out = Vector::<u64>::new();
+    for i in 0..b.contracts.len() {
+        let s = b.contracts[i];
+        if s.kind == CT_PATTERN || checks_run && s.kind != CT_DECREASES && s.kind != CT_PANICS && !is_ghost_site(s.kind) {
+            continue;
+        }
+        if out.len() == 0 {
+            out.resize_default((b.blocks.len() + 63) / 64);
+        }
+        site_mark(b, s, &mut out);
+    }
+    return out;
+}
+
+/// Mark in `bits` (one per block of `b`) the blocks of contract site `s`: those its chain reaches
+/// before its continuation. The drop elaboration appends the blocks of a chain's drops at the body's
+/// end, so they need not lie in `[s.chain, s.cont)`. Each block enters once.
+pub(package) fn site_mark(b: &CoreBody, s: ContractSite, bits: &mut Vector<u64>) {
+    if s.chain == s.cont || s.chain as usize >= b.blocks.len() {
+        return;
+    }
+    let mut stack = Vector::<u32>::new();
+    stack.push(s.chain);
+    while let Some(x) = stack.pop() {
+        if x == s.cont || x as usize >= b.blocks.len() || in_blocks(bits, x) {
+            continue;
+        }
+        bits.set(x as usize / 64, bits[x as usize / 64] | 1u64 << (x % 64) as u64);
+        let t = b.blocks[x as usize].term;
+        if t.kind == TM_SWITCH {
+            for k in t.sw_start..t.sw_start + t.sw_len {
+                stack.push(b.switch_pool[k as usize] as u32);
+            }
+        }
+        if t.kind != TM_RETURN && t.kind != TM_UNREACHABLE && t.t0 != IR_NONE {
+            stack.push(t.t0);
+        }
+    }
+}
+
+/// Whether block `blk` is in set `bits` (`ghost_blocks`).
+pub(package) const fn in_blocks(bits: &Vector<u64>, blk: u32) bool {
+    return (blk / 64) as usize < bits.len() && (bits[(blk / 64) as usize] >> (blk % 64) as u64 & 1u64) != 0;
+}
+
 /// Whether a contract site of kind `k` is ghost code in a body: no build runs it.
 pub(package) const fn is_ghost_site(k: u32) bool {
     return k == CT_ASSERT || k == CT_GHOST || k == CT_OLD;
 }
 
-/// The block a jump of `b` to `blk` reaches: past a ghost site that starts there, which the evaluator
-/// does not run (a body it runs before the proofs still holds the site).
-pub(package) const fn past_ghost(b: &CoreBody, blk: BlockId) BlockId {
+/// The block a jump of `b` to `blk` reaches: past a site that starts there, which the evaluator does not
+/// run (a body it runs before the proofs still holds the site): a ghost site, and with `all` a contract
+/// check too (no `-fcontract-checks`, no proof run: a clause may call a spec function).
+pub(package) const fn past_site(b: &CoreBody, blk: BlockId, all: bool) BlockId {
     for i in 0..b.contracts.len() {
         let s = b.contracts[i];
-        if s.chain == blk && is_ghost_site(s.kind) {
+        if s.chain == blk && (all || is_ghost_site(s.kind)) {
             return s.cont;
         }
     }
@@ -1373,12 +1429,15 @@ pub(package) const fn past_ghost(b: &CoreBody, blk: BlockId) BlockId {
 }
 
 /// Skip contract check `i` of `b` (`skip_contracts`).
-pub(package) const fn skip_site(b: &mut CoreBody, i: usize) {
+pub(package) fn skip_site(b: &mut CoreBody, i: usize) {
     let s = b.contracts[i];
+    let mut bits = Vector::<u64>::new();
+    bits.resize_default((b.blocks.len() + 63) / 64);
+    site_mark(b, s, &mut bits);
     // Every edge into the check goes to its continuation: the site's predecessor's, and the edges of
     // the blocks the drop elaboration put before it (a local dropped before an `ensures`).
     for blk in 0..b.blocks.len() {
-        if blk as u32 >= s.chain && blk as u32 < s.cont {
+        if in_blocks(&bits, blk as u32) {
             continue;
         }
         let t = b.blocks[blk].term;
@@ -1394,10 +1453,12 @@ pub(package) const fn skip_site(b: &mut CoreBody, i: usize) {
             b.blocks[blk].term.t0 = s.cont;
         }
     }
-    for blk in s.chain..s.cont {
-        let sp = b.blocks[blk as usize].term.span;
-        b.blocks[blk as usize].stmt_len = 0;
-        b.blocks[blk as usize].term = term0(TM_UNREACHABLE, sp);
+    for blk in 0..b.blocks.len() {
+        if in_blocks(&bits, blk as u32) {
+            let sp = b.blocks[blk].term.span;
+            b.blocks[blk].stmt_len = 0;
+            b.blocks[blk].term = term0(TM_UNREACHABLE, sp);
+        }
     }
 }
 

@@ -544,6 +544,22 @@ extend<const B: usize> Terms<B> {
     }
 
     pub(package) fn unary(self: &mut Self, op: u8, a: u32, w: u16, sg: bool) u32 {
+        let x = self.ts[a as usize];
+        // An integer constant converted: its value in the new type (the low bits for a fixed width; an
+        // exact integer keeps it, a `nat` one at least 0).
+        if op == T_CAST && x.op == T_INT && w > W_BOOL && (!exact_w(w) || w == W_INT || !x.k.is_negative()) {
+            return self.int(pick(exact_w(w), x.k, Terms::<B>::wrap(x.k, w, sg)), w, sg);
+        }
+        // `~k` of a constant of a fixed width: `-k - 1` signed, `max - k` unsigned.
+        if op == T_BNOT && x.op == T_INT && w > W_BOOL && w <= 64 {
+            let r = if sg {
+                Num::<B>::zero() - x.k - Num::<B>::one()
+            } else {
+                let (_lo, hi) = Terms::<B>::range(w, false);
+                hi - x.k
+            };
+            return self.int(r, w, sg);
+        }
         return self.make(Term::<B> { k: Num::<B>::zero(), a: a, b: 0, op: op, w: w, sg: sg });
     }
 
@@ -588,6 +604,23 @@ extend<const B: usize> Terms<B> {
         }
         // Two aggregates of one shape are equal where each two members at one place are; an aggregate and
         // another value of its type, where each member is that value's member at its place.
+        // Two variant literals (`T_AGG` marked with the variant, `Prover::rvalue`) of different variants differ;
+        // a variant literal and another value are an atom (their variants may differ).
+        if (op == T_EQ || op == T_NE) && x.op == T_AGG && y.op == T_AGG && x.k != y.k && x.w == W_OTHER && y.w == W_OTHER {
+            return self.boolean(op == T_NE);
+        }
+        if (op == T_EQ || op == T_NE) && (x.op == T_AGG && !x.k.is_zero() || y.op == T_AGG && !y.k.is_zero()) && !(x.op == T_AGG && y.op == T_AGG) {
+            return self.make(
+                Term::<B> {
+                    k: Num::<B>::zero(),
+                    a: pick(a < b, a, b),
+                    b: pick(a < b, b, a),
+                    op: op,
+                    w: W_BOOL,
+                    sg: false,
+                },
+            );
+        }
         if (op == T_EQ || op == T_NE) && (x.op == T_AGG || y.op == T_AGG) && (x.op != T_AGG || y.op != T_AGG || x.b == y.b) && x.w == W_OTHER && y.w == W_OTHER {
             let (ag, other) = pick(x.op == T_AGG, (x, b), (y, a));
             let both = x.op == T_AGG && y.op == T_AGG;

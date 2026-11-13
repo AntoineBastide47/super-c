@@ -3049,7 +3049,12 @@ extend Interp {
                 unsafe (*self.obj_ptr(env)).slots.set(li, av);
             }
         }
+        // Contract checks run under `-fcontract-checks` and in a proof's runs (`pa_on`) only.
+        let all = !self.pa_on && !unsafe (&*self.pkg).contract_checks_run(b.module);
         let mut blk = b.entry;
+        if b.contracts.len() != 0 {
+            blk = ir::past_site(b, blk, all);
+        }
         let mut r = none();
         loop {
             if blk as usize >= b.blocks.len() {
@@ -3096,7 +3101,7 @@ extend Interp {
             if t.kind == ir::TM_GOTO || t.kind == ir::TM_DROP {
                 blk = t.t0;
                 if b.contracts.len() != 0 {
-                    blk = ir::past_ghost(b, blk);
+                    blk = ir::past_site(b, blk, all);
                 }
             } else if t.kind == ir::TM_SWITCH {
                 let d = self.operand(b, env, t.a);

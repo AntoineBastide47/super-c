@@ -122,7 +122,9 @@ signatures for less visible types (`check_leaks`) and the typechecker field and 
 
 - Module prefixing is on only when the package holds **more than one non-prelude
   module besides the runtime** (`Package::rt_module`, `std/rt/base.spc`, whose own symbols
-  always take its prefix); single-file programs emit plain C names, except a top-level name that a prelude
+  always take its prefix) **and the prelude's dependencies** (`Package::prelude_dep`: a std module
+  that only prelude modules import, such as `std::spec::seq`; its symbols always take their prefix,
+  and it emits only what live code names, as a prelude module); single-file programs emit plain C names, except a top-level name that a prelude
   item also has (`PkgIndex.pl_names`, the shadow set), which `Mangler::ident` escapes with `_`
   (`format` becomes `format_`).
 - A module prefixes with just its **last path segment** when no other non-prelude module

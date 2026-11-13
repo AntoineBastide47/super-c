@@ -282,7 +282,8 @@ fn lsp_engine(p: &mut loader::Package) iri::Interp {
     return e;
 }
 
-// Lints run for non-prelude modules other than the runtime (like `super-c build`), for the package's
+// Lints run for non-prelude modules other than the runtime and the prelude's dependencies
+// (`Package::prelude_dep`) (like `super-c build`), for the package's
 // root file when it IS a prelude module (the `super-c lint <std file>` recipe), and: when `lint_dir` is
 // non-empty (the manifest root's build passes the canonical workspace root): for every prelude module
 // under that directory, so a repo carrying its own std/ lints it like `super-c lint std`. Gating on the
@@ -293,7 +294,7 @@ fn lsp_lint_wanted(p: &mut loader::Package, i: usize, root_file: str, lint_dir: 
     if p.lint_set.len() != 0 {
         return p.lint_set[i];
     }
-    if !p.modules[i].prelude && !p.is_rt(i as i32) {
+    if !p.modules[i].prelude && !p.is_rt(i as i32) && !p.prelude_dep(i) {
         return true;
     }
     if dutil::same_file(&p.modules[i].file, root_file) {

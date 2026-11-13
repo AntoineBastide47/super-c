@@ -38,6 +38,16 @@ fn zst_box_and_map_and_set(b: &mut h::ExitBatch) {
     );
 }
 
+// Two instances of one zero-size template from one generic caller: `T := K` and `T := V` resolve to
+// their own arguments, so each instance keeps its own branch.
+fn zst_branches_per_argument(b: &mut h::ExitBatch) {
+    b.add(
+        "a zero-size branch per argument through a generic caller",
+        "struct Z {}\nstruct P<K, V> { pub k: usize, pub v: usize }\nextend<K, V> P<K, V> {\n    fn fill(self: &mut P<K, V>) {\n        self.k = tag::<K>();\n        self.v = tag::<V>();\n    }\n}\nfn tag<T>() usize {\n    if sizeof(T) == 0 {\n        return 7;\n    }\n    return sizeof(T);\n}\nfn main() i32 {\n    let mut p = P::<u32, Z> { k: 0, v: 0 };\n    p.fill();\n    return (p.k * 10 + p.v) as i32 - 47;\n}\n",
+        0,
+    );
+}
+
 fn zst_arrays_construct_and_iterate(b: &mut h::ExitBatch) {
     // NOTE: [T; N] locals with Free elements refuse emission for MATERIAL elements too (a
     // pre-existing drop gap): ZST arrays keep parity, so this covers trivially-droppable ones.
@@ -233,6 +243,7 @@ fn exit_cases_00() {
     zst_vector_lifecycle(&mut b);
     zst_vector_iteration_counts(&mut b);
     zst_box_and_map_and_set(&mut b);
+    zst_branches_per_argument(&mut b);
     zst_arrays_construct_and_iterate(&mut b);
     zst_references_and_pointer_rules(&mut b);
     zst_in_tuples_and_generics(&mut b);

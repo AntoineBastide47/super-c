@@ -735,11 +735,28 @@ pub(package) fn insert_drops(b: &mut ir::CoreBody, cx: &mut ElabCtx, forest: &mp
             };
             cur = next;
         }
-        // The final part carries the original run tail and terminator.
+        // The final part carries the original run tail and terminator, and so the sites that name the
+        // block by its terminator: a contract's check and the block that enters its chain, a quantifier's
+        // check.
         b.blocks[cur as usize].stmt_start = run_start;
         b.blocks[cur as usize].stmt_len = blk.stmt_start + blk.stmt_len - run_start;
         b.blocks[cur as usize].term = blk.term;
         b.blocks[cur as usize].sealed = true;
+        for j in 0..b.contracts.len() {
+            let mut cs = b.contracts[j];
+            if cs.check == bi as u32 || cs.pred == bi as u32 {
+                cs.check = pick(cs.check == bi as u32, cur, cs.check);
+                cs.pred = pick(cs.pred == bi as u32, cur, cs.pred);
+                b.contracts.set(j, cs);
+            }
+        }
+        for j in 0..b.quants.len() {
+            if b.quants[j].check == bi as u32 {
+                let mut q = b.quants[j];
+                q.check = cur;
+                b.quants.set(j, q);
+            }
+        }
     }
     // Materialize the flag statements: every block's run is re-copied to the pool's end with the
     // inits/retrues/clears spliced in (runs stay contiguous), then the old entries are removed: the

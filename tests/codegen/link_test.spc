@@ -445,6 +445,26 @@ fn a_string_literal_of_two_objects_links_once() {
     assert_eq(cli::run_with(wrun.cstr(), null, null, null, ""), 0);
 }
 
+// A C function declared with another type than libc's (`long` is 32 bits on wasm32): the call would be
+// invalid code, so the link fails.
+@test
+fn a_call_of_another_type_than_the_definition_does_not_link() {
+    if stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new()).len() == 0 || cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "extern \"C\" {\n    fn labs(x: i64) i64;\n}\n\nfn main() i32 {\n    return unsafe labs(-7) as i32;\n}\n",
+    );
+    let r = cli::superc_in(p.dir(), "build main.spc --target=wasm -o bin.wasm");
+    assert(!r.ok(), "the link fails");
+    assert(
+        r.out_has("function 'labs' is declared with another type than its definition"),
+        "the link names the function",
+    );
+}
+
 // How many times the bytes `b` hold those of `s`.
 const fn count(b: str, s: str) u32 {
     let n = s.len();
