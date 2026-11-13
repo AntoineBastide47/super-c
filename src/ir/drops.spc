@@ -1048,7 +1048,8 @@ pub(package) fn verify_drops(ow: &mut bf::Owner, b: &ir::CoreBody) str<'static> 
     let mut tracked = Vector::<bool>::new();
     for l in 0..nl {
         let ld = *b.locals.at(l);
-        let declared = ld.decl != NODE_NONE || ld.storage == ir::LS_INL;
+        // A ghost variable holds a snapshot nothing destroys: no code reads it at run time.
+        let declared = (ld.decl != NODE_NONE || ld.storage == ir::LS_INL) && ld.dkind != ir::LK_GHOST;
         let cap = l as u32 >= cap_lo && l as u32 < cap_hi;
         tracked.push(
             declared && !cap && l as u32 >= b.returns && ld.ty != TYPE_NONE && ow.owns(b.owner, b.module, ld.ty),

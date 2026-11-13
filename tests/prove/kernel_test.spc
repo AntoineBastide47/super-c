@@ -185,6 +185,45 @@ fn products_of_fixed_operands() {
     assert(!fixed_product(3), "a term that is not a product");
 }
 
+// `a <= c`, `b >= 0` and `a * b >= c * b + 1`: the product of the first two rows is `a * b - c * b <= 0`
+// (`RW_PROD`), which sums with the last to `1 <= 0`.
+fn row_product(which: u32) bool {
+    let mut tm = Terms::<B>::new();
+    let a = tm.var(8, false);
+    let b = tm.var(8, false);
+    let c = tm.var(8, false);
+    let p1 = tm.arith(T_MUL, a, b, 16, false);
+    let p2 = tm.arith(T_MUL, c, b, 16, false);
+    let mut st = Stated::<B>::new();
+    let mut v = Vector::<LinTerm<B>>::new();
+    v.push(LinTerm::<B> { c: wide::<B>(1), atom: a });
+    v.push(LinTerm::<B> { c: wide::<B>(-1), atom: c });
+    row(&mut st, &v, 0);
+    row1(&mut st, -1, b, 0);
+    v.clear();
+    v.push(LinTerm::<B> { c: wide::<B>(-1), atom: p1 });
+    v.push(LinTerm::<B> { c: wide::<B>(1), atom: p2 });
+    row(&mut st, &v, 1);
+    let mut pf = Proof::<B>::new();
+    pf.monos.push(p1);
+    if which != 1 {
+        pf.monos.push(p2);
+    }
+    let first = RowRef { i: 0, kind: pick(which == 2, RW_HYP, RW_IN) };
+    pf.prods.push(Prod { a: first, b: RowRef { i: 1, kind: RW_IN }, ms: 0, mn: pf.monos.len() as u32 });
+    let n = leaf2(&mut pf, mult(1, pick(which == 3, 1u32, 0), RW_PROD), mult(1, 2, RW_IN));
+    end_tree(&mut pf, n, 0);
+    return accepts(&tm, &st, &pf);
+}
+
+@test
+fn products_of_rows() {
+    assert(row_product(VALID), "the product of `a <= c` and `b >= 0`");
+    assert(!row_product(1), "a product of two atoms that is no product atom of the pool");
+    assert(!row_product(2), "a factor that holds on part of the branch only");
+    assert(!row_product(3), "a product the proof does not hold");
+}
+
 // `x == y` and `f(x) < f(y)`: the congruence `f(x) == f(y)` as rows refutes the branch.
 fn congruence(which: u32) bool {
     let mut tm = Terms::<B>::new();

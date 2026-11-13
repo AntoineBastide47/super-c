@@ -858,6 +858,7 @@ pub(package) const fn kind_of(k: NodeKind) SyntaxKind {
         NODE_FORALL => Forall,
         NODE_EXISTS => Exists,
         NODE_OLD => Old,
+        NODE_BOOL_TYPE => TypePath,
     };
 }
 

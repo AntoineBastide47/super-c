@@ -109,7 +109,9 @@ codegen never see one.
 - Adding a sugar keyword = a lexer token, a parser marker, one lowering entry here, and
   a formatter arm.
 
-Other sugar lives elsewhere: `@derive` synthesis is parse-time; `format()`, compound
+Other sugar lives elsewhere: `@derive` synthesis and a struct's `invariant` method
+(`Parser::expand_invariants`: `extend S { spec fn invariant(self: &S) bool }` over its clauses, its
+result a `NODE_BOOL_TYPE`, a `bool` node without text) are parse-time; `format()`, compound
 assignment, and string-switch lowering happen in the typechecker.
 
 ## The Freeze Contract

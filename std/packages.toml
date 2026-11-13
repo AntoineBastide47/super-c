@@ -115,10 +115,10 @@ tier = 1
 targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
 capabilities = []
 accelerations = []
-allocator = "Never allocates: spec functions and lemmas are proofs, which no build emits."
-thread_safety = "No run-time code."
-blocking = "No run-time code."
-errors = "No run-time code: a lemma the prover cannot prove is a compile error of the build that imports it."
+allocator = "Never allocates: spec functions and lemmas are proofs, which no build emits; the one run-time function, `quant::trigger`, returns its argument."
+thread_safety = "No shared state."
+blocking = "Never blocks."
+errors = "A lemma the prover cannot prove is a compile error of the build that imports it; `quant::trigger` has no error."
 
 [package.crypto]
 # Tier 3: ML-KEM's `keygen` and `encaps` draw their seeds from the operating system's entropy

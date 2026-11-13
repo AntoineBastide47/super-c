@@ -11994,6 +11994,9 @@ extend<'a> TypeChecker<'a> {
             NODE_PATTERN_TYPE => {
                 result = self.tc_pattern_type(id);
             },
+            NODE_BOOL_TYPE => {
+                result = Ast::builtin(BuiltinType::BT_BOOL);
+            },
             NODE_DYN_TYPE => {
                 let q = unsafe (*a).at_const(id).as_data.indirect_type.qualifier;
                 if q == TypeQualifier::TYPE_QUAL_NONE {
@@ -25442,6 +25445,7 @@ extend TypeChecker {
     }
 
     fn check_field_visibility(self: &mut Self, m: ModuleId, field: NodeId, at: tok::Span) {
+        self.check_invariant_field(m, field, at);
         let f = unsafe (*self.mod_ast(m)).at_const(field);
         if f.kind == NodeKind::NODE_FIELD && !self.vis_seen(m, f.as_data.field.vis) {
             self.errors.emit_span(
@@ -25458,6 +25462,90 @@ extend TypeChecker {
                 ),
             );
         }
+    }
+
+    // In the `invariant` method of a struct (`Parser::expand_invariants`), a field of that struct is one
+    // only its own file writes (private) and that no shared reference changes (no `UnsafeCell`): no other
+    // code can break the invariant.
+    fn check_invariant_field(self: &mut Self, m: ModuleId, field: NodeId, at: tok::Span) {
+        if m != self.cur_module() || self.current_self == NODE_NONE {
+            return;
+        }
+        let a = self.cur_ast();
+        let (cs, ce) = unsafe (*a).contracts_of(self.current_self);
+        if cs == ce || unsafe (*a).contracts.at(cs as usize).binder != self.icx.current_fn {
+            return;
+        }
+        let ms = unsafe (*a).ext(self.current_self).aggregate.members;
+        let mut own = false;
+        for i in 0..ms.len {
+            own = own || unsafe (*a).list(ms)[i as usize] == field;
+        }
+        if !own {
+            return;
+        }
+        let fd = unsafe (*a).at_const(field).as_data.field;
+        if fd.vis != VIS_PRIVATE {
+            self.errors.emit_span(
+                dc::INVARIANT_FIELD,
+                at,
+                format(
+                    "an invariant reads only fields private to its file: code in another file can write '{}'",
+                    diag::span_str(self.source, at.start, at.end),
+                ),
+            );
+        } else if self.tc_holds_cell(self.node_type_in(m, field), 0) {
+            self.errors.emit_span(
+                dc::INVARIANT_FIELD,
+                at,
+                format(
+                    "an invariant cannot read '{}': a shared reference can change it (it may hold an 'UnsafeCell')",
+                    diag::span_str(self.source, at.start, at.end),
+                ),
+            );
+        }
+    }
+
+    // Whether a value of `ty` may hold an `UnsafeCell`, which a shared reference can change: in its
+    // members, elements or the targets of its references. A type parameter, an associated type and a `dyn`
+    // may; a raw pointer's target is no part of the value.
+    fn tc_holds_cell(self: &mut Self, ty: TypeId, depth: i32) bool {
+        if ty == TYPE_NONE || depth > BOUND_MAX_DEPTH {
+            return true;
+        }
+        let y = *self.type_at(self.strip(ty));
+        if y.kind == TypeKind::TYPE_BUILTIN || y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_NEVER || y.kind == TypeKind::TYPE_SIMD || y.kind == TypeKind::TYPE_MASK {
+            return false;
+        }
+        if y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_SLICE {
+            return self.tc_holds_cell(y.as_data.elem, depth + 1);
+        }
+        if y.kind == TypeKind::TYPE_ARRAY {
+            return self.tc_holds_cell(y.as_data.arr.elem, depth + 1);
+        }
+        if y.kind != TypeKind::TYPE_STRUCT && y.kind != TypeKind::TYPE_ENUM && y.kind != TypeKind::TYPE_INSTANCE {
+            return true;
+        }
+        let mut om: ModuleId = 0;
+        let mut od = NODE_NONE;
+        let mut gp = Defs8 {};
+        let mut ga = Tys8 {};
+        let mut gn: i32 = 0;
+        if !self.aggregate_of(self.strip(ty), &mut om, &mut od, &mut gp, &mut ga, &mut gn) || self.is_unsafe_cell_decl(
+            om,
+            od,
+        ) {
+            return true;
+        }
+        let mut fts = Vector::<TypeId>::new();
+        let enm = unsafe (*self.mod_ast(om)).at_const(od).kind == NodeKind::NODE_ENUM;
+        self.tc_field_types(self.strip(ty), pick(enm, 2u8, 0u8), &mut fts);
+        for i in 0..fts.len() {
+            if self.tc_holds_cell(fts[i], depth + 1) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Whether the module being checked sees an item or field of module `m` with visibility `v`: one of its own,
@@ -25685,12 +25773,13 @@ extend TypeChecker {
         let t = self.check_expr_w(unsafe (*a).at_const(id).as_data.single.value, expected);
         self.in_old -= 1;
         self.old_sp = osp;
-        if !untyped(t) && !self.tc_copy_marker(t, 0) {
+        // Ghost code only reads the snapshot: a value of any type. A clause `-fcontract-checks` runs copies it.
+        if self.run_clause != 0 && !untyped(t) && !self.tc_copy_marker(t, 0) {
             let ty = self.type_str(t);
             self.errors.emit_span(
                 dc::GHOST_VALUE_DROPS,
                 sp,
-                format("'old' copies its value: '{}' is not 'Copy'", ty.as_str()),
+                format("'old' in a clause '-fcontract-checks' runs copies its value: '{}' is not 'Copy'", ty.as_str()),
             );
         }
         return t;

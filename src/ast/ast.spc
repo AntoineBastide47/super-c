@@ -150,10 +150,10 @@ pub(package) struct LifetimeDecl {
 }
 
 // A contract clause: `requires`, `ensures` and `decreases` after a function's signature, `invariant`
-// after a loop's header. Held in an Ast SIDE TABLE (`Ast::contracts`), as `LifetimeDecl` is: contracts
+// after a loop's header or a struct's name and generics. Held in an Ast SIDE TABLE (`Ast::contracts`), as `LifetimeDecl` is: contracts
 // are rare, and `FunctionData` keeps its size.
 pub(package) struct Contract {
-    pub(package) owner: NodeId, // the function or the loop
+    pub(package) owner: NodeId, // the function, the loop or the struct
     pub(package) binder: NodeId, // the `ensures |r|` binder, NODE_NONE without one
     pub(package) expr: NodeId,
     pub(package) kind: u32, // CT_*; four bytes leave no padding in the persisted record
@@ -178,6 +178,10 @@ pub(package) const CT_OLD: u32 = 7;
 // An `old(e)` a clause `-fcontract-checks` runs reads (the checker sets it): the build runs its site
 // with the checks.
 pub(package) const CT_OLD_RUN: u32 = 8;
+// A struct's `invariant`: the record's owner is the struct, its expression reads `self`, the value. The
+// first record's binder is the struct's `invariant` method (`Parser::expand_invariants`), NODE_NONE where
+// the parser built none (the formatter's parse).
+pub(package) const CT_TYPE_INVARIANT: u32 = 9;
 
 /// The keyword of a contract clause of kind `k` (`CT_*`).
 pub(package) const fn contract_word(k: u32) str<'static> {
@@ -577,6 +581,9 @@ pub(package) enum NodeKind {
     NODE_EXISTS,
     // `old(e)` (SingleData): the value `e` has at the function's entry, in ghost code.
     NODE_OLD,
+    // The type `bool` with no source text: the result of a struct's `invariant` method, which the parser
+    // builds (`Parser::expand_invariants`). Its span is the first clause's keyword.
+    NODE_BOOL_TYPE,
 }
 
 pub(package) const VA_START: u8 = 0;
@@ -5857,7 +5864,7 @@ extend Ast {
     /// `F<{K}>`). The parser reads every other argument as a type, a lifetime or an integer literal.
     pub(package) const fn is_const_expr_arg(self: &Self, id: NodeId) bool {
         let k = self.at_const(id).kind;
-        return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_PATTERN_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL;
+        return k != NodeKind::NODE_TYPE_PATH && k != NodeKind::NODE_POINTER_TYPE && k != NodeKind::NODE_REFERENCE_TYPE && k != NodeKind::NODE_SLICE_TYPE && k != NodeKind::NODE_ARRAY_TYPE && k != NodeKind::NODE_FUNCTION_TYPE && k != NodeKind::NODE_DYN_TYPE && k != NodeKind::NODE_TUPLE_TYPE && k != NodeKind::NODE_PATTERN_TYPE && k != NodeKind::NODE_LIFETIME && k != NodeKind::NODE_LITERAL && k != NodeKind::NODE_BOOL_TYPE;
     }
 
     /// The type node of signature slot `slot`: a parameter's declared type (NODE_NONE when it has none),

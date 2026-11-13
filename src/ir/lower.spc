@@ -1790,8 +1790,13 @@ extend Lowerer {
             let o = self.temp(ty, osp);
             // The snapshot lives for the whole body: each `old` node reads it, in a loop's invariant at
             // every iteration, so no reading expression owns it (`own_temp`) and none ends its storage.
+            // A ghost `old` (no run-time check reads it) is a ghost variable: a snapshot of any type, which
+            // nothing destroys.
             let mut ld = *self.body.locals.at(o as usize);
             ld.decl = c.expr;
+            if c.kind == CT_OLD {
+                ld.dkind = ir::LK_GHOST;
+            }
             self.body.locals.set(o as usize, ld);
             let opl = self.place_of_local(o);
             self.assign(opl, self.rv_use(op, ty), osp);

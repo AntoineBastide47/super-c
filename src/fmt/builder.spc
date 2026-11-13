@@ -123,9 +123,9 @@ extend Builder {
         return r;
     }
 
-    // The contract clauses of `owner` (a function or a loop), one condition per line, indented by
-    // one level after the signature or the header, then a break before the `{` when a `body`
-    // follows. Whether it has any.
+    // The contract clauses of `owner` (a function, a loop or a struct), one condition per line,
+    // indented by one level after the signature or the header, then a break before the `{` when a
+    // `body` follows. Whether it has any.
     fn b_contracts(self: &mut Self, owner: NodeId, body: bool) bool {
         let (cs, ce) = unsafe (*self.ast).contracts_of(owner);
         let m = self.st.len();
@@ -2123,6 +2123,7 @@ extend Builder {
             },
             NODE_STRUCT | NODE_ENUM => {
                 let a = unsafe self.ext(id).aggregate;
+                let (ics, ice) = unsafe (*self.ast).contracts_of(id);
                 if a.vis != VIS_PRIVATE {
                     self.st.push(self.p.txt(vis_text(a.vis)));
                 }
@@ -2143,14 +2144,17 @@ extend Builder {
                     }
                     self.st.push(self.b_comma_list("(", fz, ")", false));
                     self.st.push(self.p.txt(";"));
-                } else if a.members.len == 0 {
+                } else if a.members.len == 0 && ics == ice {
                     if n.span.end > n.span.start && self.src.byte_at((n.span.end - 1) as usize) == b';' {
                         self.st.push(self.p.txt(";"));
                     } else {
                         self.st.push(self.p.txt(" {}"));
                     }
                 } else {
-                    self.st.push(self.p.txt(" {"));
+                    if !self.b_contracts(id, true) {
+                        self.st.push(self.p.txt(" "));
+                    }
+                    self.st.push(self.p.txt("{"));
                     self.b_vertical(
                         a.members,
                         n.span,

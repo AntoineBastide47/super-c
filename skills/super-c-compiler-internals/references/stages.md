@@ -247,9 +247,14 @@ modular return-lifetime check) run alongside.
   Chvatal-Gomory cuts, and the root of branch and bound adds Gomory cuts of a fractional point
   from its tableau rows (`gomory`: a slab of rational points with no integer one, which splits of
   one atom never end); at an integer model that breaks a product, branch and bound splits an
-  operand at its value and, below splits that fix it, adds the product's linear rows (`fix`). Each
+  operand at its value and, below splits that fix it, adds the product's linear rows (`fix`). An obligation over a product of two unknowns that fails
+  is tried once more (`oblige`, `has_product`, `nla_allowed`): its branches' simplex rows take
+  products of two rows (`nla_rows`, `RW_PROD`: `-(L1 * L2) <= 0` of two rows `L1 <= 0`, `L2 <= 0`,
+  at most `NLA_ROWS`), and branch and bound adds, at a model that breaks a product, a tangent plane
+  at a corner of its factors' bounds (`tangent`, at most `TANGENTS_MAX`; `nla_attempt`). Each
   refuted branch writes a proof (equality facts, branch-and-bound trees
-  with Farkas leaves, cuts, product rows the path's splits justify) that the kernel (`src/prove/kernel.spc`, its own checked arithmetic)
+  with Farkas leaves, cuts, product rows the path's splits justify, products of two rows that
+  `product_row` rebuilds from factor rows of the kinds `prod_base` names) that the kernel (`src/prove/kernel.spc`, its own checked arithmetic)
   accepts before the branch counts; the kernel builds the rows of the branch's literals itself
   (`Kernel::state`, `state_lit`, a `Built` only it constructs). With bits, a branch whose literals
   hold an operation the arithmetic reads as an atom (`Terms.bitty`: a bit operation, shift, cast,
@@ -276,14 +281,33 @@ modular return-lifetime check) run alongside.
 unfolds with the call's type arguments (`subst`), and a sequence result's elements are those of
 the sequences its body returns (`alias`). Specifications (language skill, basics.md,
 Specifications): a quantifier is a bool atom with a closure and a skolem fact (`quantifier`, never
-walked as its loop); a failed obligation adds instances (`instantiate`: trigger terms, then every
-integer term, `QUANT_ROUNDS` rounds) and retries without the facts unrelated to the goal (`cone`).
+walked as its loop); a failed obligation adds instances (`instantiate`, `QUANT_ROUNDS` rounds) and
+retries without the facts unrelated to the goal (`cone`). The stages: the terms a trigger matches
+(`QI_TRIG`; a trigger is a body term that holds the binding, or the argument of each
+`std::spec::quant::trigger` call the body's walk meets, `utrig`; `match_at` matches at any depth,
+`MATCH_WORK` steps per match), then where the formulas hold more than `QUANT_TERMS` integer terms
+the terms the failed check's model puts in range, one per value (`QI_MODEL`, `model_instances`,
+`MODEL_ROUNDS` rounds), then every integer term (`QI_WIDE`).
 `old` sites are values of the entry state, a callee's evaluated in the frame before the call; a
-`&mut` parameter's target is a slot past the locals (`T_MREF`). `Seq` is native: `SQ_*` function
+ghost `old` snapshot is an `LK_GHOST` local, which no code drops (`verify_drops` skips it). A `&mut` parameter's target
+is a slot past the locals (`T_MREF`); a reference to a member of a local or slot is a `T_PREF` (the
+local or slot and the member keys), so a call that borrows `&mut q.v` changes only `q.v`, and a loop
+forgets every place it lends by `&mut`. `Seq` is native: `SQ_*` function
 terms whose length and element facts are anchored on them (`seq_make`, `seq_at`), extensional
 equality (`seq_ext`); `view()` of a vector or string is a function of its value, of a `[]mut T` of
 its value and memory epoch, of a `[]T` of its value only (`slice_ep`), and `sq_kind`, `sq_value` and
-`sq_effect` model the container methods' views. A product is distributed over sums with its factors ordered
+`sq_effect` model the container methods' views (`vk_change`: `VK_SET` to `VK_SWAPREM`; `decided`
+takes a case split's branch the path facts decide). A struct's invariant is `S::invariant(&v)` (`inv_of`, the extend's
+parameters bound to the instance's arguments): a fact of every value of the type outside the struct's
+module (`inv_fact`, from `pat_fact`); in it every non-ghost body that holds the type is walked
+(`inv_body`), assumes the invariant at the entry and after each call (`inv_enter`, `inv_called`) and
+proves it (OB_TYPE_INV) at returns, calls, drops and every point that may panic (`inv_unwind` over
+`inv_locs`). The block of an `@owned` field is the value's ghost member (`own_key`), a `Seq`: an index
+through the field is `seq_at`/`SQ_UPD` with a bounds obligation (OB_BLOCK, `own_check`); an index
+through any other raw pointer is memory (a load in the epoch, a write a memory event: `ptr_index`); a
+memory event forgets the blocks the body copies the pointer of (`own_scan`); an allocator's call keeps
+them and its result sets the block it is stored as (`alloc_call`, `own_after`); `std::spec::seq::block`
+reads it (SQ_BLOCK). `null` and `sizeof(T)` are one term each (`null_ptr`, `size_term`). A product is distributed over sums with its factors ordered
   (`Terms::product`); a hypothesis's split and the goal's integer disequality wait until the
   branch's other formulas are done, and the theories first try the literals so far. Every walk,
   search and elimination has a fixed budget;

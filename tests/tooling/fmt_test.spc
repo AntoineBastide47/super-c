@@ -75,6 +75,11 @@ fn golden_contracts() {
         "@trusted\nspec fn ax(x: int) int ensures |r| r > x;\nfn f(xs: []u32, v: &mut Vector<u32>) u32 requires   forall i in 0..xs.len() {xs[i] > 0} ensures |r| exists i in 0..=xs.len()-1 { xs[i]==r } ensures v.len() == old(v.len()) && (xs.len() > 1 ==> (xs[0] > 0 ==> true)) {\nghost let mut seen: int = 0;\nghost seen = seen + 1;\nfor i in 0..xs.len() invariant forall k in 0..i { xs[k] > 0 } {}\nreturn xs[0];\n}\nfn g(xs: []u32, ys: []u32) bool requires forall i in 0..xs.len() { xs[i] > 0 && ys[i] > 0 && xs[i] + ys[i] < 1000000 && xs[i] * 2 < ys[i] * 3 + 77777 } { return true; }\n",
         "@trusted\nspec fn ax(x: int) int\n    ensures |r| r > x;\nfn f(xs: []u32, v: &mut Vector<u32>) u32\n    requires forall i in 0..xs.len() { xs[i] > 0 }\n    ensures |r| exists i in 0..=xs.len() - 1 { xs[i] == r }\n    ensures v.len() == old(v.len()) && (xs.len() > 1 ==> xs[0] > 0 ==> true)\n{\n    ghost let mut seen: int = 0;\n    ghost seen = seen + 1;\n    for i in 0..xs.len()\n        invariant forall k in 0..i { xs[k] > 0 }\n    {}\n    return xs[0];\n}\nfn g(xs: []u32, ys: []u32) bool\n    requires forall i in 0..xs.len() {\n        xs[i] > 0 && ys[i] > 0 && xs[i] + ys[i] < 1000000 && xs[i] * 2 < ys[i] * 3 + 77777\n    }\n{\n    return true;\n}\n",
     );
+    // A struct's invariants: clauses between its name and its fields, as a function's.
+    expect_fmt(
+        "pub struct B<T> invariant self.n <= self.c, self.c < 9 {n: u32, c: u32, x: T}\nstruct E invariant self.a > 0 {a: u8}\n",
+        "pub struct B<T>\n    invariant self.n <= self.c\n    invariant self.c < 9\n{\n    n: u32,\n    c: u32,\n    x: T,\n}\nstruct E\n    invariant self.a > 0\n{\n    a: u8,\n}\n",
+    );
     // A `==>` whose left operand is another keeps its parentheses.
     expect_fmt(
         "fn h(a: bool, b: bool) bool { return (a ==> b) ==> a; }\n",

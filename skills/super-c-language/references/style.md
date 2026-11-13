@@ -149,7 +149,8 @@ the vectorizer then needs no run-time overlap check:
   parameters, which the inliner copies into the caller, is enough). Two raw pointers, or the buffers
   of two `Vector` fields, may overlap: the loop keeps a check, or stays scalar past 8 pairs.
 - Prefer the slice operations: `copy_from_slice`, `fill`.
-- Do not use `@owned` in `std` or the compiler: it is a promise for user code only.
+- `@owned` marks only a container's own buffer field (`Vector.ptr`, `Box.ptr`); a loop over several
+  buffers still takes views.
 
 ```superc
 fn copy_words(dst: []mut u64, src: []u64) {

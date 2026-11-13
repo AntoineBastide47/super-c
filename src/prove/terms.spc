@@ -64,6 +64,9 @@ pub(package) const T_VIEW: u8 = 30; // a view of array `a` of length k
 pub(package) const T_DOWN: u8 = 31; // `a` as its variant k
 pub(package) const T_ORD: u8 = 32; // the order of integers `a` and `b`: -1, 0 or 1 (a wide integer's `cmp`)
 pub(package) const T_TAG: u8 = 33; // the discriminant of enum value `a`, an integer
+// A reference to a member of a local or a slot of the body under proof: entry `a` of the prover's
+// table (`Prover::pref_tg`), which holds the local and the members' keys. No operand.
+pub(package) const T_PREF: u8 = 34;
 
 // Whether an operand of operation `op` takes a product apart (`Terms::product`): a sum, a difference,
 // a negation or a product.
@@ -938,7 +941,7 @@ extend<const B: usize> Terms<B> {
             }
             return;
         }
-        if x.op == T_INT || x.op == T_BOOL || x.op == T_VAR || x.op == T_MREF {
+        if x.op == T_INT || x.op == T_BOOL || x.op == T_VAR || x.op == T_MREF || x.op == T_PREF {
             return;
         }
         out.push(x.a);

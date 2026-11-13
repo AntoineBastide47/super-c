@@ -243,11 +243,18 @@ fn bump(x: &mut u32)
 - `forall i in a..b { E }` and `exists i in a..=b { E }` range over an integer range with both ends
   (error 552); `i` has the range's type. The proofs instantiate a `forall` they assume at the terms
   of the goal and the facts (a bounded number of rounds), and an `exists` they assume gives a
-  witness; a needed instance at a term the formulas do not name needs an `assert` of it.
+  witness. By default an instance is made at each term of the shape of a term of the body that holds
+  the binding, at any depth (`f(g(k) + 1)` matches `f(g(a) + 1)`). `trigger(e)` of
+  `std::spec::quant` (a `const fn` that returns `e`) in the body gives the shapes instead:
+  `forall k in 0..n { trigger(u(k)) > 0 }` is instantiated at each `u(t)`. When the formulas hold
+  more integer terms than the proofs try one by one, the counterexample's values give the instances.
+  A needed instance at a term the formulas do not name needs an `assert` of it.
   `-fcontract-checks` runs them as loops.
 - `old(e)` is `e` at the function's entry: in an `ensures`, a loop's `invariant` and ghost code of
-  a function (error 553), of a `Copy` value over the parameters (`old(*x)`, `old(self.n)`,
-  `old(v.len())`). A call's `ensures` reads the callee's `old` at the call.
+  a function (error 553), of a value over the parameters (`old(*x)`, `old(self.n)`,
+  `old(v.len())`, `old(v.view())`). It is of any type, except in a clause `-fcontract-checks`
+  runs, which copies it: there the type is `Copy`. A call's `ensures` reads the callee's `old` at
+  the call.
 - `ghost let mut seen: int = 0;` declares a ghost variable, of a `Copy` type (error 556), that only
   ghost code reads or writes (error 554); `ghost seen = seen + 1;` writes it, and writes nothing
   else (error 555). The proofs read it like a local; no build has it.
@@ -256,16 +263,62 @@ fn bump(x: &mut u32)
 elements: `Seq::<T>::empty()`, `s.len()` (a `nat`), `s[i]` (`i: int`), `s.push(x)`,
 `s.update(i, x)`, `s.subrange(lo, hi)`, `s.concat(t)`, `s.take(n)`, `s.skip(n)`, and `utf8(c)`, the
 bytes of a `char`. `view()` is the sequence a `Vector`, `String` (its bytes), `str`, `[]T` or
-`[]mut T` holds: `v[i]` is `v.view()[i]` and `v.len()` its length. The proofs know how `Vector`'s
-`push`, `pop`, `clear`, `new`, `with_capacity`, `as_slice` and `v[i] = x`, `String`'s `push`,
-`push_str`, `clear`, `new` and `as_bytes`, and a write `xs[i] = x` through a `[]mut T` change the
-view; another method that takes a container's `&mut` makes its view unknown.
+`[]mut T` holds: `v[i]` is `v.view()[i]` and `v.len()` its length. The proofs know how these
+change the view:
+- `Vector`: `new`, `with_capacity`, `push`, `pop`, `clear`, `as_slice`, `v[i] = x`, `set`,
+  `insert`, `remove`, `swap`, `swap_remove`, `truncate`, `resize_default`, `extend_copy`,
+  `extend_from_slice`, `reserve`, `reserve_exact`, `shrink_to_fit`, and as to the length only,
+  `reverse`, the sorts and `dedup`.
+- `String`: `new`, `push`, `push_str`, `push_byte`, `push_bytes`, `pop_byte`, `set_byte`,
+  `insert_byte`, `remove_byte`, `clear`, `truncate`, `reserve`, `reserve_exact`, `shrink_to_fit`,
+  `as_bytes`.
+- A write `xs[i] = x` through a `[]mut T`.
 
-`std::spec::arith` holds proved lemmas: products (`mul_eq`, `mul_nonneg`, `mul_pos`, `mul_le`,
-`mul_lt`), powers of two (`pow2`, `pow2_pos`, `pow2_add`, `pow2_le`), division and remainders
-(`div_mod`, `mod_unique`, `mod_mod`, `mod_add_multiple`, `mod_add`, `mod_mul`). A call
-`mod_mul(a as int, b as int, m as int);` proves `a * b % m == (a % m) * (b % m) % m` at that
-point.
+`set`, `insert`, `swap`, `set_byte`, `insert_byte` and `remove_byte` in a function with contracts
+must prove their indexes in bounds. Another method that takes a container's `&mut` makes its view
+unknown. A container may be a member: `p.v.push(1)` and a call that takes `&mut q.v` change only
+that member, and a callee's `ensures` can state its effect (`ensures q.v.len() == old(q.v.len()) + 1`).
+
+The proofs multiply two proved bounds by themselves when a goal over a product of unknowns fails:
+`a <= c` and `b >= 0` give `a * b <= c * b`, and bounds of the factors give bounds, signs and
+squares of their product. Other nonlinear facts need a lemma. `std::spec::arith` holds proved
+lemmas: products (`mul_eq`, `mul_nonneg`, `mul_pos`, `mul_le`, `mul_lt`), powers of two (`pow2`,
+`pow2_pos`, `pow2_add`, `pow2_le`), division and remainders (`div_mod`, `mod_unique`, `mod_mod`,
+`mod_add_multiple`, `mod_add`, `mod_mul`). A call `mod_mul(a as int, b as int, m as int);` proves
+`a * b % m == (a % m) * (b % m) % m` at that point.
+
+### Struct Invariants and Owned Blocks
+
+```superc
+import std::spec::seq as *;
+
+pub struct Buf
+    invariant self.len <= self.cap
+    invariant block(self.ptr).len() == self.cap as nat
+{
+    @owned
+    ptr: *mut u32,
+    len: usize,
+    cap: usize,
+}
+```
+
+- `invariant E` clauses stand between a struct's name (and generics) and its fields. Each reads
+  `self` (error 559); a union has none (560). An invariant reads only fields private to its file and
+  holding no `UnsafeCell` (a field of a type parameter may hold one) (561): only the file's code can
+  break it. The clauses are the struct's spec method `invariant(self: &S) bool`, which ghost code
+  calls (`requires b.invariant()`).
+- Code in another file assumes it of every value of the type. The file's own code assumes it of the
+  values that enter a body (parameters and their targets, call results) and proves it where a value
+  leaves: at each return (results, `&mut` parameters), each call and drop that receives it, and each
+  call, check, operation and drop that may panic (a panic unwinds past it). Between those points a body
+  may break it (two field writes in a row).
+- `std::spec::seq::block(p)` is the block an `@owned` field `p` points to, a `Seq`: `self.ptr[i]` is
+  `block(self.ptr)[i]`, a write through the field changes it, and in proved code each index into the
+  field must be below its length. A write through a copy of the field, or a call that may write
+  memory once the body copied it, makes the block unknown; of another pointer `block` is unknown.
+  Storing an allocator's result in the field sets the block: `alloc(n * sizeof(T), ..)` gives `n`
+  elements, `realloc` keeps the old ones, `null` gives none, another pointer an unknown block.
 
 ### Constant-Time Code
 

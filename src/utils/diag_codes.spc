@@ -562,9 +562,12 @@ pub(package) const GHOST_WRITE_TARGET: u16 = 555;
 pub(package) const GHOST_VALUE_DROPS: u16 = 556;
 pub(package) const TRUSTED_PLACE: u16 = 557;
 pub(package) const NOT_CONSTANT_TIME: u16 = 558;
+pub(package) const INVARIANT_READS_SELF: u16 = 559;
+pub(package) const UNION_INVARIANT: u16 = 560;
+pub(package) const INVARIANT_FIELD: u16 = 561;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 559;
+pub(package) const COUNT: u16 = 562;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1126,6 +1129,9 @@ pub(package) const fn name(code: u16) str<'static> {
         556 => "ghost_value_has_drop",
         557 => "trusted_needs_bodiless_ghost_function",
         558 => "not_constant_time",
+        559 => "invariant_reads_self",
+        560 => "union_invariant",
+        561 => "invariant_field",
         _ => "",
     };
 }

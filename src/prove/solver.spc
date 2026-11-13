@@ -37,6 +37,10 @@ const SAT_EARLY_STEPS: u32 = 250000;
 const SAT_STEP_COST: u32 = 64;
 // The cells of one simplex tableau, and the nodes of one branch-and-bound tree.
 const LP_CELLS_MAX: usize = 65536;
+// The product rows (`RW_PROD`) of one set of simplex rows (`nla_rows`).
+const NLA_ROWS: u32 = 24;
+// The product rows of operand bounds one branch and bound adds at integer models (`tangent`).
+const TANGENTS_MAX: u32 = 32;
 const NODES_MAX: usize = 256;
 // The terms of one congruence closure, its facts, and the nesting of one explanation.
 const CC_MAX: usize = 4096;
@@ -697,6 +701,13 @@ pub(package) struct Solver<const B: usize> {
     lp: Lp<B>,
     frames: Vector<Frame<B>>,
     fixes: Vector<Fix<B>>, // the operands `fix` set to a value in this branch and bound
+    tangents: u32, // the rows `tangent` added in this branch and bound
+    // Whether the simplex rows hold products of rows (`nla_rows`) and branch and bound adds them at
+    // integer models (`tangent`): a second attempt, after one without them found an integer model.
+    nla_on: bool,
+    // Whether a branch with such a model makes that attempt (`nla_attempt`): the prover's last try at an
+    // obligation (`Prover::oblige`), so a proof that holds without it costs nothing more.
+    pub(package) nla_allowed: bool,
     gden: Vector<Num<B>>, // `gomory_row`'s denominators
     pf: Proof<B>,
     kn: Kernel<B>,
@@ -759,6 +770,9 @@ extend<const B: usize> Solver<B> {
             lp: Lp::<B>::new(),
             frames: Vector::<Frame<B>>::new(),
             fixes: Vector::<Fix<B>>::new(),
+            tangents: 0,
+            nla_on: false,
+            nla_allowed: false,
             gden: Vector::<Num<B>>::new(),
             pf: Proof::<B>::new(),
             kn: Kernel::<B>::new(),
@@ -1401,7 +1415,7 @@ extend<const B: usize> Solver<B> {
                 }
             }
             if !merged {
-                return false;
+                return self.nla_attempt(tm, st);
             }
             switch self.cc_run(tm, st) {
                 Some(c) => {
@@ -1590,6 +1604,9 @@ extend<const B: usize> Solver<B> {
             }
             self.lrows.push(LRow::<B> { k: x.k, start: start, len: x.len, r: x.r });
         }
+        if self.nla_on {
+            self.nla_rows(tm, st);
+        }
         if ha != NONE {
             self.lin.clear();
             let mut k = Num::<B>::one();
@@ -1604,6 +1621,367 @@ extend<const B: usize> Solver<B> {
                 self.push_lrow(k, RowRef { i: NONE, kind: RW_HYP });
             }
         }
+    }
+
+    // Products of rows (`RW_PROD`) for the product atoms `p == x * y` of the simplex rows: each branch row
+    // that names `x` (and `x`'s own bounds) times each bound of `y` (its type's, a branch row of `y`
+    // alone), and the same with `x` and `y` exchanged, when every product of two atoms is a product atom
+    // of the rows. So `a <= c` and `b >= 0` give `a * b <= c * b`, and two bounds give a bound of their
+    // product. At most NLA_ROWS rows.
+    fn nla_rows(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) {
+        let ms = self.pf.monos.len() as u32;
+        for r in 0..self.lrows.len() {
+            let x = self.lrows[r];
+            for q in x.start..x.start + x.len {
+                let a = self.lpool[q as usize].atom;
+                let y = tm.at(a);
+                if y.op != T_MUL || tm.at(y.a).op == T_INT || tm.at(y.b).op == T_INT {
+                    continue;
+                }
+                let mut seen = false;
+                for j in ms..self.pf.monos.len() as u32 {
+                    seen = seen || self.pf.monos[j as usize] == a;
+                }
+                if !seen {
+                    self.pf.monos.push(a);
+                }
+            }
+        }
+        let mn = self.pf.monos.len() as u32 - ms;
+        let mut added: u32 = 0;
+        let mut firsts = Vector::<RowRef>::new();
+        let mut seconds = Vector::<RowRef>::new();
+        let mut ra = Vector::<LinTerm<B>>::new();
+        let mut rb = Vector::<LinTerm<B>>::new();
+        for pi in 0..mn {
+            let x = tm.at(self.pf.monos[(ms + pi) as usize]);
+            for side in 0..2u32 {
+                let (u, v) = if side == 0 {
+                    (x.a, x.b)
+                } else {
+                    (x.b, x.a)
+                };
+                firsts.clear();
+                seconds.clear();
+                for r in 0..st.rows.len() {
+                    let row = st.rows[r];
+                    let mut has_u = false;
+                    for j in row.start..row.start + row.len {
+                        has_u = has_u || st.pool[j as usize].atom == u;
+                    }
+                    if has_u {
+                        firsts.push(RowRef { i: r as u32, kind: RW_IN });
+                    }
+                    if row.len == 1 && st.pool[row.start as usize].atom == v {
+                        seconds.push(RowRef { i: r as u32, kind: RW_IN });
+                    }
+                }
+                for (t0, list) in [(u, 0u32), (v, 1u32)] {
+                    if tm.low(t0).is_some() {
+                        if list == 0 {
+                            firsts.push(RowRef { i: t0, kind: RW_LO });
+                        } else {
+                            seconds.push(RowRef { i: t0, kind: RW_LO });
+                        }
+                    }
+                    if tm.high(t0).is_some() {
+                        if list == 0 {
+                            firsts.push(RowRef { i: t0, kind: RW_HI });
+                        } else {
+                            seconds.push(RowRef { i: t0, kind: RW_HI });
+                        }
+                    }
+                }
+                for f in 0..firsts.len() {
+                    for g in 0..seconds.len() {
+                        if added >= NLA_ROWS {
+                            return;
+                        }
+                        let mut ka = Num::<B>::zero();
+                        let mut kb = Num::<B>::zero();
+                        if !self.base_row(tm, st, firsts[f], &mut ra, &mut ka) || !self.base_row(
+                            tm,
+                            st,
+                            seconds[g],
+                            &mut rb,
+                            &mut kb,
+                        ) {
+                            continue;
+                        }
+                        let mut k = Num::<B>::zero();
+                        if !product_row(tm, &ra, ka, &rb, kb, &self.pf.monos, ms, mn, &mut self.lin, &mut k) {
+                            continue;
+                        }
+                        let idx = self.pf.prods.len() as u32;
+                        self.pf.prods.push(Prod { a: firsts[f], b: seconds[g], ms: ms, mn: mn });
+                        self.push_lrow(k, RowRef { i: idx, kind: RW_PROD });
+                        added += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    // At an integer model that gives a product atom `p == x * y` another value than its operands'
+    // product: a product row of a bound of `x` and a bound of `y` in place (a branch row, a type's bound,
+    // a split of this subtree; `RW_PROD`) that the model breaks, one of the tangent planes at the corners
+    // of their box, kept for the subtree (a frame). Whether one was added; at most TANGENTS_MAX.
+    fn tangent(self: &mut Self, tm: &Terms<B>, cur: u32) bool {
+        if self.tangents >= TANGENTS_MAX {
+            return false;
+        }
+        let mut rx = Vector::<LinTerm<B>>::new();
+        let mut ry = Vector::<LinTerm<B>>::new();
+        for a in 0..self.lp.na {
+            let p = self.lp.atom[a];
+            let x = tm.at(p);
+            if x.op != T_MUL || tm.at(x.a).op == T_INT || tm.at(x.b).op == T_INT {
+                continue;
+            }
+            let xj = switch self.lp.ix.get(&x.a) {
+                Some(v) => (*v) as usize,
+                None => {
+                    continue;
+                },
+            };
+            let yj = switch self.lp.ix.get(&x.b) {
+                Some(v) => (*v) as usize,
+                None => {
+                    continue;
+                },
+            };
+            let m = ck(self.lp.val[xj].n.checked_mul(&self.lp.val[yj].n));
+            if m.is_none() || m.unwrap() == self.lp.val[a].n {
+                continue;
+            }
+            for cx in 0..2u32 {
+                for cy in 0..2u32 {
+                    let fx = self.bound_ref(xj, cx == 1);
+                    let fy = self.bound_ref(yj, cy == 1);
+                    if fx.i == NONE || fy.i == NONE {
+                        continue;
+                    }
+                    let mut kx = Num::<B>::zero();
+                    let mut ky = Num::<B>::zero();
+                    if !self.factor_row(tm, fx, &mut rx, &mut kx) || !self.factor_row(tm, fy, &mut ry, &mut ky) {
+                        continue;
+                    }
+                    let ms = self.pf.monos.len() as u32;
+                    self.pf.monos.push(p);
+                    let mut k = Num::<B>::zero();
+                    if !product_row(tm, &rx, kx, &ry, ky, &self.pf.monos, ms, 1, &mut self.lin, &mut k) || !self.breaks(
+                        &self.lin,
+                        k,
+                    ) {
+                        self.pf.monos.truncate(ms as usize);
+                        continue;
+                    }
+                    let idx = self.pf.prods.len() as u32;
+                    self.pf.prods.push(Prod { a: fx, b: fy, ms: ms, mn: 1 });
+                    if self.scoped_row(k, RowRef { i: idx, kind: RW_PROD }, cur) {
+                        self.tangents += 1;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+        }
+        return false;
+    }
+
+    // The reason of the lower (`upper` false) or upper bound in place of simplex variable `j` when the
+    // kernel can read it as a factor of a product row (`kernel::prod_base`), else a reference with `i`
+    // NONE.
+    const fn bound_ref(self: &Self, j: usize, upper: bool) RowRef {
+        let none = RowRef { i: NONE, kind: RW_IN };
+        let (has, r) = if upper {
+            (self.lp.has_hi[j], self.lp.hi_r[j])
+        } else {
+            (self.lp.has_lo[j], self.lp.lo_r[j])
+        };
+        if !has || r.i == NONE {
+            return none;
+        }
+        let ok = r.kind == RW_LO || r.kind == RW_HI || r.kind == RW_SPLIT_LO || r.kind == RW_SPLIT_HI;
+        return pick(ok, r, none);
+    }
+
+    // The row of factor `r` (`RW_LO`, `RW_HI`, a split) as the kernel reads it, into `out` and `k`.
+    fn factor_row(self: &Self, tm: &Terms<B>, r: RowRef, out: &mut Vector<LinTerm<B>>, k: &mut Num<B>) bool {
+        if r.kind != RW_SPLIT_LO && r.kind != RW_SPLIT_HI {
+            out.clear();
+            let b = if r.kind == RW_LO {
+                tm.low(r.i)
+            } else {
+                tm.high(r.i)
+            };
+            if b.is_none() {
+                return false;
+            }
+            if r.kind == RW_LO {
+                out.push(LinTerm::<B> { c: wide::<B>(-1), atom: r.i });
+                *k = b.unwrap();
+            } else {
+                out.push(LinTerm::<B> { c: Num::<B>::one(), atom: r.i });
+                *k = Num::<B>::zero() - b.unwrap();
+            }
+            return true;
+        }
+        let nd = self.pf.nodes[r.i as usize];
+        out.clear();
+        if r.kind == RW_SPLIT_LO {
+            out.push(LinTerm::<B> { c: Num::<B>::one(), atom: nd.atom });
+            *k = Num::<B>::zero() - nd.v;
+            return true;
+        }
+        out.push(LinTerm::<B> { c: wide::<B>(-1), atom: nd.atom });
+        let one = Num::<B>::one();
+        switch ck(nd.v.checked_add(&one)) {
+            Some(v) => *k = v,
+            None => {
+                return false;
+            },
+        }
+        return true;
+    }
+
+    // Whether the simplex's point breaks row `row + k <= 0`.
+    fn breaks(self: &Self, row: &Vector<LinTerm<B>>, k: Num<B>) bool {
+        let mut s = k;
+        for q in 0..row.len() {
+            let j = switch self.lp.ix.get(&row[q].atom) {
+                Some(v) => (*v) as usize,
+                None => {
+                    return false;
+                },
+            };
+            if self.lp.val[j].d != Num::<B>::one() {
+                return false;
+            }
+            switch ck(row[q].c.checked_mul(&self.lp.val[j].n)) {
+                Some(m) => {
+                    switch ck(s.checked_add(&m)) {
+                        Some(t) => s = t,
+                        None => {
+                            return false;
+                        },
+                    }
+                },
+                None => {
+                    return false;
+                },
+            }
+        }
+        return Num::<B>::zero() < s;
+    }
+
+    // Row `lin + k <= 0` of reason `r` as a new simplex row whose slack's upper bound is the row, undone
+    // with the subtree of node `cur` (a frame). False when an atom is not the simplex's or the tableau
+    // is full.
+    fn scoped_row(self: &mut Self, k: Num<B>, r: RowRef, cur: u32) bool {
+        let n = switch merge_terms(&mut self.lin, 0, self.lin.len()) {
+            Some(v) => v,
+            None => {
+                self.lp.ovf_seen = true;
+                return false;
+            },
+        };
+        let g = switch coef_gcd(&self.lin, 0, n) {
+            Some(v) => v,
+            None => {
+                return false;
+            },
+        };
+        if n == 0 || g.is_zero() {
+            return false;
+        }
+        for j in 0..n {
+            let e = self.lin[j];
+            self.lin.set(j, LinTerm::<B> { c: e.c.div_euclid(&g), atom: e.atom });
+        }
+        // `s + ceil(k / g) <= 0` for the slack `s` of the divided form.
+        let hi = (Num::<B>::zero() - k).div_euclid(&g);
+        let sj = self.lp.add_row(&self.lin, n);
+        if sj == NONE {
+            return false;
+        }
+        self.keep_row(n, Num::<B>::zero() - hi, r);
+        let s0 = sj as usize;
+        self.frames.push(
+            Frame::<B> {
+                lo: self.lp.lo[s0],
+                hi: self.lp.hi[s0],
+                lo_r: self.lp.lo_r[s0],
+                hi_r: self.lp.hi_r[s0],
+                node: cur,
+                j: sj,
+                has_lo: false,
+                has_hi: false,
+                right: true,
+            },
+        );
+        self.lp.bound(s0, true, hi, r);
+        return true;
+    }
+
+    // The last attempt at a branch whose rows have an integer model and products of atoms: the rows with
+    // the products of rows (`nla_rows`), and branch and bound that adds them at its models (`tangent`).
+    fn nla_attempt(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) bool {
+        if !self.nla_allowed || !self.has_products(tm) {
+            return false;
+        }
+        self.nla_on = true;
+        self.rows_of(tm, st, NONE, NONE);
+        let upto = self.pf.facts.len() as u32;
+        let (r, root) = self.bb(tm);
+        self.nla_on = false;
+        if r != L_CONFLICT {
+            return false;
+        }
+        self.pf.trees.push(Tree { root: root, ha: NONE, hb: NONE, upto: upto });
+        self.pf.end = X_LA;
+        self.pf.p = (self.pf.trees.len() - 1) as u32;
+        return true;
+    }
+
+    // Whether the simplex rows name a product of two atoms.
+    const fn has_products(self: &Self, tm: &Terms<B>) bool {
+        for a in 0..self.lp.na {
+            let x = tm.at(self.lp.atom[a]);
+            if x.op == T_MUL && tm.at(x.a).op != T_INT && tm.at(x.b).op != T_INT {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // The row of `r` (`RW_IN`, `RW_LO`, `RW_HI`) as the kernel reads it, into `out` and `k`.
+    fn base_row(self: &Self, tm: &Terms<B>, st: &Stated<B>, r: RowRef, out: &mut Vector<LinTerm<B>>, k: &mut Num<B>) bool {
+        out.clear();
+        if r.kind == RW_IN {
+            let x = st.rows[r.i as usize];
+            for j in x.start..x.start + x.len {
+                out.push(st.pool[j as usize]);
+            }
+            *k = x.k;
+            return true;
+        }
+        let b = if r.kind == RW_LO {
+            tm.low(r.i)
+        } else {
+            tm.high(r.i)
+        };
+        if b.is_none() {
+            return false;
+        }
+        if r.kind == RW_LO {
+            out.push(LinTerm::<B> { c: wide::<B>(-1), atom: r.i });
+            *k = b.unwrap();
+        } else {
+            out.push(LinTerm::<B> { c: Num::<B>::one(), atom: r.i });
+            *k = Num::<B>::zero() - b.unwrap();
+        }
+        return true;
     }
 
     // Integer elimination over the equalities among the simplex rows (two rows of opposite forms):
@@ -1904,6 +2282,7 @@ extend<const B: usize> Solver<B> {
         }
         self.frames.clear();
         self.fixes.clear();
+        self.tangents = 0;
         let mut rounds: u32 = 0;
         let root = self.new_node();
         let mut cur = root;
@@ -1976,6 +2355,9 @@ extend<const B: usize> Solver<B> {
                 if self.gomory() {
                     continue;
                 }
+            }
+            if j == NONE && self.nla_on && self.tangent(tm, cur) {
+                continue;
             }
             if j == NONE {
                 let (fx, fj, fv) = self.fix(tm, cur);

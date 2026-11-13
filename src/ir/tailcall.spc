@@ -524,7 +524,7 @@ fn op_reads(b: &ir::CoreBody, o: u32, l: u32) bool {
 }
 
 // The operands of `rv` (the places of the place-reading kinds go through `rv_places`).
-fn rv_operands(b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut Vector<u32>) {
+pub(package) fn rv_operands(b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut Vector<u32>) {
     out.truncate(0);
     if rv.kind == ir::RV_USE || rv.kind == ir::RV_UNARY || rv.kind == ir::RV_CAST || rv.kind == ir::RV_DYN {
         out.push(rv.a);
@@ -549,7 +549,7 @@ fn rv_operands(b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut Vector<u32>) {
 }
 
 // Is `rv` a kind whose `a` is a place (a borrow, an address, a length or a discriminant read)?
-const fn rv_place(rv: &ir::Rvalue) bool {
+pub(package) const fn rv_place(rv: &ir::Rvalue) bool {
     return rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_LEN || rv.kind == ir::RV_DISCRIMINANT || rv.kind == ir::RV_SLICE;
 }
 

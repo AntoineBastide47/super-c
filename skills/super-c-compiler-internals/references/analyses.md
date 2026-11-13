@@ -24,6 +24,14 @@ file is authoritative for where to look first.
 | The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is neither frozen nor a container, a slice view, a closure or a call's implicit borrow may reach (`is_mem`; not a `&mut` lent to one call); the temporaries lent to one call | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, `scoped`, per body | the next body |
 | The `&mut` parameters' slots past the locals, their types | `Prover::prove_body` | `slot_ty`, `slot_of`, `nlocals`, per body | the next body |
 | A quantifier's closure (body, state, range, witness, triggers) and its instances | `Prover::quantifier` (at its `QuantSite`, `quant_at`), `instantiate`, `triggers` | `qclo`, `qof`, `qinst`, `qdef`, per body | the next body |
+| The user triggers of the quantifier whose body the walk evaluates (`std::spec::quant::trigger` arguments) | `Prover::trigger_value` (from `call` and `chain_call`, while `utrig_on`) | `utrig`, then the closure's triggers | the closure's end |
+| A trigger's match at a term, at any depth (`MATCH_WORK` steps), and whether a term holds another | `Prover::matched`, `match_at`, `mentions` | not stored | per call |
+| The model-based instances of a failed check: the terms its model puts in a quantifier's range, one per value | `Prover::model_instances` (`instantiate` with `QI_MODEL`, `model_value`) | the instances in the check's facts | the obligation's end |
+| The references to members of locals and slots | `Prover::place_ref` | `pref_tg`, `pref_tgty`, `pref_m`, `pref_at`, `pref_key`, `pref_ty`, per body | the next body |
+| The locals and slots of a struct type with an invariant its module proves | `Prover::inv_scan` | `inv_locs`, per body | the next body |
+| The locals and slots whose `@owned` field's pointer the body's code reads | `Prover::own_scan` (`own_mark`, `tailcall::rv_operands`) | `own_exp`, per body | the next body |
+| The allocator calls of a path: kind, size, the block a `realloc` moves, its direction | `Prover::call` (`alloc_call`, `block_of_ptr`) | `alloc_of`, `alloc_rec`, per body | the next body |
+| The `@owned` block accesses since the last check | `read_prefix`, `update` | `own_chk`, drained by `own_check` | the statement's or terminator's end |
 | The facts of a member read by an unknown key, of a sequence's element and length, of a normalized index | `Prover::sel`, `seq_at`, `seq_make`, `seq_ext`, `index_key` | `seld` (made once), the facts in `defs` | the next body |
 | The view a modeled method gave a container's value, or a slice in a memory epoch; the sequences a spec function's result may equal | `Prover::sq_effect`, `elem_write`, `slice_of`, `define` | `vdef`, `sdef`, `alias`, `alias_pool`, per body | the next body |
 | The type arguments of the generic spec function being unfolded | `Prover::call_value` | `subst`, during `define` | the unfolding's end |
@@ -45,6 +53,7 @@ file is authoritative for where to look first.
 | A branch's congruence classes, their signatures and the forest of merges | `Solver::cc_build`, `cc_run` | `Solver.rep`, `sig`, `edges`, per branch | the next branch |
 | A branch's simplex: tableau, bounds and their rows, assignment | `Lp::load`, `check`, `Solver::bb` | `Solver.lp`, per query | the next query |
 | The product operands branch and bound set to a value, and their rows | `Solver::fix`, `fix_rows` (`Lp::add_row`) | `Solver.fixes`, the tableau's added rows | the next `bb` |
+| The products of two rows of a retried obligation, and the tangent planes at its models | `Solver::nla_rows`, `tangent` (`nla_attempt`, while `nla_allowed`) | the tableau's added rows, `Proof.prods`, `Proof.monos`, `tangents` | the next branch |
 | The cuts of a branch's integer equalities | `Solver::eliminate` | `Solver.crows`, per set of equality facts | a new equality fact |
 | The Gomory cuts of the root's fractional points | `Solver::gomory`, `gomory_row` (`Lp::add_row`) | the tableau's added rows, `lrows` (`keep_row`), `pf.cuts` | the next `bb` |
 | A branch's proof: facts, trees, cuts, multipliers | the solvers | `Solver.pf` (`kernel::Proof`), checked by `Kernel::check` | the next branch |

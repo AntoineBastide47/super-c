@@ -88,6 +88,8 @@ pub(package) struct Parser<'a> {
     pub(package) olds: Vector<NodeId>,
     // Parsing the items of an `extern` block.
     pub(package) in_extern: bool,
+    // The first `self` of the invariants of the struct just parsed (`parse_struct`), empty without one.
+    pub(package) inv_self: Span,
     // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
     // end`, 0 when none). The node keeps its own span, which the formatter prints verbatim; a node built around it
     // covers the parentheses (`outer`).
@@ -1631,9 +1633,33 @@ extend Parser {
         let name = self.identifier();
         let mut lifetimes = NodeList { start: 0, len: 0 };
         let generics = self.parse_generics_split(&mut lifetimes);
+        // The invariants, before the fields' braces, and the first `self` they read.
+        let mut invariants = Vector::<Contract>::new();
+        let tstart = self.current;
+        while self.at_word("invariant") && invariants.len() < PARSE_MAX_CONTRACTS {
+            self.parse_contract_clause(CT_TYPE_INVARIANT, &mut invariants);
+        }
+        self.inv_self = Span::empty();
+        for i in tstart..self.current {
+            if self.tokens[i].kind() == TokenType::SelfLower {
+                self.inv_self = self.tokens[i].span();
+                break;
+            }
+        }
+        if invariants.len() != 0 && self.inv_self.end == 0 {
+            self.errors.emit_span(
+                dc::INVARIANT_READS_SELF,
+                Span::new(invariants[0].at, invariants[0].at),
+                format("a struct's invariant states a fact of its value: it reads 'self'"),
+            );
+        }
         let mut members = NodeList { start: 0, len: 0 };
         let mut is_tuple = false;
-        if self.match(TokenType::LeftParen) {
+        if invariants.len() != 0 {
+            self.expect(TokenType::LeftBrace, "'{' (a struct with invariants names its fields)");
+            members = self.parse_fields();
+            self.expect(TokenType::RightBrace, "'}'");
+        } else if self.match(TokenType::LeftParen) {
             members = self.parse_comma_types(TokenType::RightParen);
             is_tuple = true;
             self.expect(TokenType::RightParen, "')'");
@@ -1651,6 +1677,7 @@ extend Parser {
             },
         );
         self.ast.set_lifetimes(decl, lifetimes);
+        self.ast.set_contracts(decl, &invariants);
         return decl;
     }
 
@@ -2340,7 +2367,157 @@ extend Parser {
         if self.derive_ifaces.len() > 0 {
             self.expand_derives(id, &attrs);
         }
+        if id != NODE_NONE && self.ast.at_const(id).kind == NodeKind::NODE_STRUCT {
+            self.expand_invariants(id, &attrs);
+        }
         return id;
+    }
+
+    // The invariants of struct `decl`: `extend<'a.., G..> T<'a.., G..> { spec fn invariant(self: &T<'a.., G..>)
+    // bool { return E1 && E2 ..; } }`, pushed as `expand_derives` pushes its extends (the same generic
+    // nodes, the same gates). The function's name is the first clause's keyword, its parameter the first
+    // `self` the clauses read; ghost code calls it as a method (`v.invariant()`), and the proofs read it
+    // as the invariant of each value of the type. A union has none: its active member is unknown.
+    fn expand_invariants(self: &mut Self, decl: NodeId, attrs: &Vector<Attr>) {
+        let (cs, ce) = self.ast.contracts_of(decl);
+        if cs == ce {
+            return;
+        }
+        let agg = unsafe self.ast.ext(decl).aggregate;
+        let at = self.ast.contracts.at(cs as usize).at;
+        if agg.is_union {
+            self.errors.emit_span(dc::UNION_INVARIANT, Span::new(at, at), format("a union has no invariant"));
+            return;
+        }
+        if !self.expand_derive || self.inv_self.end == 0 {
+            return;
+        }
+        let kw = Span::new(at, at + 9);
+        let nsp = self.ast.at_const(agg.name).as_data.name.text;
+        let mut gid_copy = Vector::<NodeId>::new();
+        let mut gsp_copy = Vector::<Span>::new();
+        let mut lid_copy = Vector::<NodeId>::new();
+        let mut lsp_copy = Vector::<Span>::new();
+        let lts = self.ast.lifetimes_of(decl);
+        for l in 0..lts.len {
+            let lid = unsafe self.ast.list(lts)[l as usize];
+            lid_copy.push(lid);
+            lsp_copy.push(self.ast.at_const(self.ast.ext_name(lid)).as_data.name.text);
+        }
+        for g in 0..agg.generics.len {
+            let gid = unsafe self.ast.list(agg.generics)[g as usize];
+            gid_copy.push(gid);
+            gsp_copy.push(self.ast.at_const(self.ast.ext_name(gid)).as_data.name.text);
+        }
+        // The extend's target, then the parameter's: each its own name references.
+        let mut targets = [NODE_NONE; 2];
+        for k in 0..2 {
+            let pmark = self.ast.mark();
+            self.ast.push(self.make_name(nsp));
+            let parts = self.ast.commit(pmark);
+            let amark = self.ast.mark();
+            for l in 0..lsp_copy.len() {
+                self.ast.push(
+                    self.mk(NodeKind::NODE_LIFETIME, lsp_copy[l], NodeAs { name: NameData { text: lsp_copy[l] } }),
+                );
+            }
+            for g in 0..gsp_copy.len() {
+                self.ast.push(self.make_simple_type(gsp_copy[g]));
+            }
+            let targs = self.ast.commit(amark);
+            targets[k] = self.mk(
+                NodeKind::NODE_TYPE_PATH,
+                nsp,
+                NodeAs { type_path: TypePathData { parts: parts, args: targs } },
+            );
+        }
+        let last = self.ast.contracts.at((ce - 1) as usize).expr;
+        let sp = Span::new(at, self.node_span(last).end);
+        let sty = self.mk(
+            NodeKind::NODE_REFERENCE_TYPE,
+            nsp,
+            NodeAs {
+                indirect_type: IndirectTypeData { ty: targets[1], qualifier: TYPE_QUAL_NONE, lifetime: NODE_NONE },
+            },
+        );
+        let sname = self.make_name(self.inv_self);
+        let param = self.mk(
+            NodeKind::NODE_PARAMETER,
+            self.inv_self,
+            NodeAs { parameter: ParameterData { name: sname, ty: sty } },
+        );
+        let pmark = self.ast.mark();
+        self.ast.push(param);
+        let params = self.ast.commit(pmark);
+        let rmark = self.ast.mark();
+        self.ast.push(self.mk(NodeKind::NODE_BOOL_TYPE, kw, NodeAs { name: NameData { text: kw } }));
+        let returns = self.ast.commit(rmark);
+        let mut cond = self.ast.contracts.at(cs as usize).expr;
+        for i in cs + 1..ce {
+            let e = self.ast.contracts.at(i as usize).expr;
+            cond = self.add_binary(cond, TokenType::AmpersandAmpersand, e);
+        }
+        let vmark = self.ast.mark();
+        self.ast.push(cond);
+        let values = self.ast.commit(vmark);
+        let ret = self.mk(NodeKind::NODE_RETURN, sp, NodeAs { return_stmt: ReturnData { values: values } });
+        let smark = self.ast.mark();
+        self.ast.push(ret);
+        let stmts = self.ast.commit(smark);
+        let body = self.mk(NodeKind::NODE_BLOCK, sp, NodeAs { block: BlockData { statements: stmts } });
+        let f = self.mk_ext(
+            NodeKind::NODE_FUNCTION,
+            sp,
+            NodeExt {
+                function: FunctionData {
+                    name: self.make_name(kw),
+                    params: params,
+                    returns: returns,
+                    body: body,
+                    flags: FN_SPEC,
+                    vis: agg.vis,
+                },
+            },
+        );
+        // Proofs read it where no code calls it: no unused-item lint.
+        self.ast.add_attr(Attr { owner: f, kind: AttrKind::ATTR_USED as u8, arg: 0, str_span: Span::empty() });
+        // The struct's first record names its method (`binder`): the checker and the proofs find it there.
+        let mut c0 = *self.ast.contracts.at(cs as usize);
+        c0.binder = f;
+        self.ast.contracts.set(cs as usize, c0);
+        let imark = self.ast.mark();
+        self.ast.push(f);
+        let items = self.ast.commit(imark);
+        let gmark = self.ast.mark();
+        for g in 0..gid_copy.len() {
+            self.ast.push(gid_copy[g]);
+        }
+        let egen = self.ast.commit(gmark);
+        let ext = self.mk_ext(
+            NodeKind::NODE_EXTEND,
+            sp,
+            NodeExt {
+                extend_def: ExtendData {
+                    generics: egen,
+                    interface_type: NODE_NONE,
+                    target_type: targets[0],
+                    items: items,
+                },
+            },
+        );
+        let lmark = self.ast.mark();
+        for l in 0..lid_copy.len() {
+            self.ast.push(lid_copy[l]);
+        }
+        let elts = self.ast.commit(lmark);
+        self.ast.set_lifetimes(ext, elts);
+        for a in 0..attrs.len() {
+            let ga = *attrs.at(a);
+            if ga.kind == AttrKind::ATTR_PLATFORM as u8 || ga.kind == AttrKind::ATTR_ARCH as u8 || ga.kind == AttrKind::ATTR_WHEN as u8 {
+                self.ast.add_attr(Attr { owner: ext, kind: ga.kind, arg: ga.arg, str_span: ga.str_span });
+            }
+        }
+        self.ast.push(ext);
     }
 
     // A pending `@derive` reached a position that cannot take it: report and drop it.

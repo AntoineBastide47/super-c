@@ -59,6 +59,13 @@ extend<T> Seq<T> {
     }
 }
 
+/// The elements of the block an `@owned` field points to, in order: `block(self.ptr)[i]` is
+/// `self.ptr[i]`, and an index into the field below `block(self.ptr).len()` is inside the block. A write
+/// through the field changes it; a write through another pointer, or a call that receives one, may.
+/// The argument is the field itself: of another pointer the sequence is unknown.
+@trusted
+pub spec fn block<T>(p: *mut T) Seq<T>;
+
 /// The UTF-8 encoding of `c`, the bytes `String::push` appends: one byte below 0x80, two below 0x800,
 /// three below 0x10000, four else; a single byte is `c` itself.
 @trusted

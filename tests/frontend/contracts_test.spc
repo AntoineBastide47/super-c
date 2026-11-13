@@ -265,6 +265,31 @@ fn unproved_contracts_are_errors() {
         "cannot prove that this index is in bounds",
     );
     b.add(
+        "a loop that lends a local to a call keeps none of its values",
+        "fn put(v: &mut Vector<u8>)\n    requires v.len() < 100\n    ensures v.len() == old(v.len()) + 1\n{\n    v.push(1);\n}\nfn f() usize\n    ensures |r| r == 0\n{\n    let mut v = Vector::<u8>::new();\n    for i in 0usize..3\n        invariant i <= 3\n    {\n        if v.len() < 50 {\n            put(&mut v);\n        }\n    }\n    return v.len();\n}\nfn main() i32 {\n    return f() as i32;\n}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a member lent to a call holds the callee's value",
+        "import std::spec::seq as *;\nstruct P {\n    v: Vector<u8>,\n}\nfn put(v: &mut Vector<u8>) requires v.len() < 100 ensures v.view() == old(v.view()).push(1) {\n    v.push(1);\n}\nfn f() usize ensures |r| r == 0 {\n    let mut q = P { v: Vector::<u8>::new() };\n    put(&mut q.v);\n    return q.v.len();\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "an instance at a deep trigger that does not give the claim",
+        "@trusted\nspec fn f(x: int) int;\n@trusted\nspec fn g(x: int) int;\nlemma deep(a: int) requires forall k in 0 as int..10 { f(g(k) + 1) >= 3 } requires 0 <= a && a < 10 ensures f(g(a) + 1) >= 4 {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a product's monotonicity without the factor's sign",
+        "lemma mono(a: int, b: int, c: int) requires a <= c ensures a * b <= c * b {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "an insertion past a vector's end in a function with contracts",
+        "fn f(v: &mut Vector<u8>) requires v.len() == 1 {\n    v.insert(3, 0);\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that this index is in bounds",
+    );
+    b.add(
         "a write through a reborrow of the parameter whose view the ensures reads",
         "import std::spec::seq as *;\nfn f(a: []mut u8) requires a.len() == 3 ensures a.view()[1] == 5 {\n    a[1] = 5;\n    let s = &mut a[0..3];\n    s[1] = 0;\n}\nfn main() i32 { return 0; }\n",
         "cannot prove this 'ensures' clause",
@@ -273,6 +298,51 @@ fn unproved_contracts_are_errors() {
         "a range past a view's length in a function with contracts",
         "fn f(v: []u8) u8 requires v.len() == 4 { let s = &v[1..9]; return s[0]; }\nfn main() i32 { return 0; }\n",
         "cannot prove that this index is in bounds",
+    );
+    b.add(
+        "a method that breaks its struct's invariant",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nextend C {\n    fn bump(self: &mut C) {\n        self.n += 1;\n    }\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove the invariant of 'C' at this return",
+    );
+    b.add(
+        "a literal that breaks its struct's invariant",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nfn make() C {\n    return C { n: 5, max: 3 };\n}\nfn main() i32 { return make().n as i32; }\n",
+        "cannot prove the invariant of 'C' at this return",
+    );
+    b.add(
+        "a call that receives a value whose invariant is broken",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nfn look(c: &C) {}\nfn f(c: &mut C) {\n    c.n = c.max + 1;\n    look(c);\n    c.n = 0;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove the invariant of 'C' at this call",
+    );
+    b.add(
+        "an operation that may panic while an invariant is broken",
+        "struct C\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nfn f(c: &mut C, d: u32) u32 {\n    c.n = c.max + 1;\n    let q = 10 / d;\n    c.n = 0;\n    return q;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove the invariant of 'C' where this operation may panic",
+    );
+    b.add(
+        "an index past an owned block",
+        "import std::spec::seq as *;\nstruct B {\n    @owned\n    p: *mut u32,\n    cap: usize,\n}\nfn f(b: &mut B) requires block(b.p).len() >= 2 {\n    unsafe b.p[2] = 1;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that this index is inside the block of the '@owned' field",
+    );
+    b.add(
+        "a write through a copy of an owned field",
+        "import std::spec::seq as *;\nstruct B {\n    @owned\n    p: *mut u32,\n    cap: usize,\n}\nfn f(b: &mut B, x: u32) requires block(b.p).len() >= 1 ensures block(b.p)[0] == x {\n    unsafe b.p[0] = x;\n    let q = b.p;\n    unsafe q[0] = 0;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "another pointer stored in an owned field",
+        "import std::spec::seq as *;\nstruct B {\n    @owned\n    p: *mut u32,\n    cap: usize,\n}\nfn f(b: &mut B, q: *mut u32) requires block(b.p).len() >= 1 ensures block(b.p).len() >= 1 {\n    b.p = q;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a new element of a reallocated block",
+        "import std::spec::seq as *;\nstruct B {\n    @owned\n    p: *mut u32,\n    cap: usize,\n}\nfn f(b: &mut B, x: u32) requires block(b.p).len() == b.cap as nat && b.cap > 0 && b.cap < 1000 ensures block(b.p)[old(b.cap) as int] == x {\n    unsafe b.p[0] = x;\n    let mut g = Global {};\n    b.p = unsafe g.realloc(b.p, b.cap * 4, b.cap * 8, 4) as *mut u32;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a write through an alias of a raw pointer",
+        "fn f(p: *mut u32, q: *mut u32) ensures true {\n    unsafe {\n        p[0] = 1;\n        q[0] = 2;\n        assert(p[0] == 1);\n    }\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove that this check holds",
     );
     h::expect_build_errs(b);
 }
@@ -349,6 +419,26 @@ fn spec_syntax_is_checked() {
         "a quantifier over a collection",
         "fn f(xs: []u32) bool requires exists x in xs { x > 0 } { return true; }\nfn main() i32 { return 0; }\n",
         "'exists' ranges over 'a..b' or 'a..=b', a range with both ends",
+    );
+    h::expect_err_msg(
+        "a struct invariant that reads no value",
+        "struct S\n    invariant true\n{\n    n: u32,\n}\nfn main() i32 { return 0; }\n",
+        "a struct's invariant states a fact of its value: it reads 'self'",
+    );
+    h::expect_err_msg(
+        "a union with an invariant",
+        "union U\n    invariant self.a > 0\n{\n    a: u32,\n    b: i32,\n}\nfn main() i32 { return 0; }\n",
+        "a union has no invariant",
+    );
+    h::expect_err_msg(
+        "an invariant over a public field",
+        "struct S\n    invariant self.a < 10\n{\n    pub a: u32,\n}\nfn main() i32 { return 0; }\n",
+        "an invariant reads only fields private to its file: code in another file can write 'a'",
+    );
+    h::expect_err_msg(
+        "an invariant over a field a shared reference may change",
+        "struct S<T>\n    invariant self.x == self.x\n{\n    x: T,\n}\nfn main() i32 { return 0; }\n",
+        "an invariant cannot read 'x': a shared reference can change it (it may hold an 'UnsafeCell')",
     );
     h::expect_err_msg(
         "old in a requires",
@@ -1218,15 +1308,476 @@ fn exit_cases_00() {
 }
 
 @test
+fn exit_cases_02() {
+    let mut b = h::ExitBatch::new();
+    invariant_proofs(&mut b);
+    b.run();
+}
+
+// A struct's invariant, which its own file's code keeps, and the blocks of `@owned` fields: an allocation,
+// a `realloc` that keeps the elements, null, a generic element type.
+fn invariant_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "struct invariants and owned blocks",
+        M"(import std::spec::seq as *;
+
+pub struct Counter
+    invariant self.n <= self.max
+{
+    n: u32,
+    max: u32,
+}
+
+extend Counter {
+    pub fn new(max: u32) Counter {
+        return Counter { n: 0, max: max };
+    }
+
+    pub fn bump(self: &mut Counter) {
+        if self.n < self.max {
+            self.n += 1;
+        }
+    }
+
+    pub const fn get(self: &Counter) u32 {
+        return self.n;
+    }
+
+    pub fn reset(self: &mut Counter, m: u32) {
+        self.max = m;
+        self.n = 0;
+    }
+}
+
+fn within(c: &Counter)
+    ensures c.n <= c.max
+{}
+
+spec fn small(c: &Counter) bool {
+    return c.n <= 100;
+}
+
+lemma same(c: &Counter)
+    requires small(c)
+    ensures small(c)
+{}
+
+pub struct Buf {
+    @owned
+    p: *mut u32,
+    cap: usize,
+}
+
+extend Buf {
+    pub fn make(n: usize) Buf
+        requires n > 0 && n < 1000
+        ensures |r| block(r.p).len() == n as nat && r.cap == n
+    {
+        let mut g = Global {};
+        let p = unsafe g.alloc(n * 4, 4) as *mut u32;
+        return Buf { p: p, cap: n };
+    }
+
+    pub fn grow(self: &mut Buf, x: u32)
+        requires block(self.p).len() == self.cap as nat && self.cap > 0 && self.cap < 1000
+        ensures block(self.p).len() == old(self.cap) as nat * 2 && self.cap == old(self.cap) * 2
+        ensures block(self.p)[0] == x
+    {
+        unsafe self.p[0] = x;
+        let mut g = Global {};
+        let np = unsafe g.realloc(self.p, self.cap * 4, self.cap * 8, 4) as *mut u32;
+        self.p = np;
+        self.cap = self.cap * 2;
+    }
+
+    pub const fn first(self: &Buf) u32
+        requires block(self.p).len() >= 1
+        ensures |r| r == block(self.p)[0]
+    {
+        return unsafe self.p[0];
+    }
+
+    pub fn set0(self: &mut Buf, x: u32)
+        requires block(self.p).len() >= 1
+        ensures block(self.p)[0] == x && block(self.p).len() == old(block(self.p).len()) && self.cap == old(self.cap)
+    {
+        unsafe self.p[0] = x;
+    }
+
+    pub fn release(self: &mut Buf)
+        requires self.cap < 1000
+        ensures block(self.p).len() == 0
+    {
+        let mut g = Global {};
+        unsafe g.dealloc(self.p, self.cap * 4, 4);
+        self.p = null;
+        self.cap = 0;
+    }
+}
+
+pub struct Many<T> {
+    @owned
+    p: *mut T,
+    cap: usize,
+}
+
+extend<T> Many<T> {
+    pub fn make(n: usize) Many<T>
+        requires n > 0 && n < 1000 && sizeof(T) < 1000
+        ensures |r| block(r.p).len() == n as nat && r.cap == n
+    {
+        let mut g = Global {};
+        let p = unsafe g.alloc(n * sizeof(T), alignof(T)) as *mut T;
+        return Many::<T> { p: p, cap: n };
+    }
+
+    pub fn release(self: &mut Many<T>)
+        requires self.cap < 1000 && sizeof(T) < 1000
+    {
+        let mut g = Global {};
+        unsafe g.dealloc(self.p, self.cap * sizeof(T), alignof(T));
+        self.p = null;
+        self.cap = 0;
+    }
+}
+
+fn main() i32 {
+    let mut c = Counter::new(3);
+    c.bump();
+    c.bump();
+    within(&c);
+    let mut m = Many::<u64>::make(3);
+    m.release();
+    let mut b = Buf::make(2);
+    b.grow(7);
+    b.release();
+    let mut d = Buf::make(1);
+    d.set0(5);
+    let v = unsafe d.p[0];
+    d.release();
+    return (c.get() + v) as i32 - 7;
+}
+)",
+        0,
+    );
+}
+
+@test
 fn exit_cases_01() {
     let mut b = h::ExitBatch::new();
     spec_syntax_proofs(&mut b);
     seq_proofs(&mut b);
     view_proofs(&mut b);
+    container_proofs(&mut b);
+    nonlinear_proofs(&mut b);
+    trigger_proofs(&mut b);
     b.run();
 }
 
-// Views and the values a proof keeps: a range of a view or a vector, a `[]mut` parameter a call or a
+// The instances of quantifiers: at a match of a trigger deep in the body; where the formulas hold more
+// integer terms than the wide stage takes, at those the model puts in range (`model`), and at the
+// matches of a user's trigger the body's value does not hold (`user`).
+fn trigger_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "quantifier instances at triggers and at the model's terms",
+        M"(import std::spec::quant as *;
+@trusted
+spec fn f(x: int) int;
+@trusted
+spec fn g(x: int) int;
+@trusted
+spec fn h(x: int) int;
+@trusted
+spec fn u(x: int) int;
+lemma deep(a: int)
+    requires forall k in 0 as int..10 { f(g(k) + 1) >= 3 }
+    requires 0 <= a && a < 10
+    ensures f(g(a) + 1) >= 3
+{}
+lemma model(p0: int, p1: int, p2: int, p3: int, p4: int, p5: int, p6: int, p7: int, p8: int, p9: int, p10: int, p11: int, p12: int, p13: int, p14: int, p15: int, p16: int, p17: int, p18: int, p19: int, p20: int, p21: int, p22: int, p23: int, p24: int, p25: int, p26: int, p27: int, p28: int, p29: int, p30: int, p31: int, p32: int, p33: int, p34: int, p35: int, p36: int, p37: int, p38: int, p39: int, a: int, b: int, c: int)
+    requires 0 <= c && c < 100 && a <= c && c < b
+    requires forall k in 0 as int..100 { k < a || k >= b }
+    requires p0 >= 200
+    requires p1 >= 201
+    requires p2 >= 202
+    requires p3 >= 203
+    requires p4 >= 204
+    requires p5 >= 205
+    requires p6 >= 206
+    requires p7 >= 207
+    requires p8 >= 208
+    requires p9 >= 209
+    requires p10 >= 210
+    requires p11 >= 211
+    requires p12 >= 212
+    requires p13 >= 213
+    requires p14 >= 214
+    requires p15 >= 215
+    requires p16 >= 216
+    requires p17 >= 217
+    requires p18 >= 218
+    requires p19 >= 219
+    requires p20 >= 220
+    requires p21 >= 221
+    requires p22 >= 222
+    requires p23 >= 223
+    requires p24 >= 224
+    requires p25 >= 225
+    requires p26 >= 226
+    requires p27 >= 227
+    requires p28 >= 228
+    requires p29 >= 229
+    requires p30 >= 230
+    requires p31 >= 231
+    requires p32 >= 232
+    requires p33 >= 233
+    requires p34 >= 234
+    requires p35 >= 235
+    requires p36 >= 236
+    requires p37 >= 237
+    requires p38 >= 238
+    requires p39 >= 239
+    ensures h(p0 + p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + p11 + p12 + p13 + p14 + p15 + p16 + p17 + p18 + p19 + p20 + p21 + p22 + p23 + p24 + p25 + p26 + p27 + p28 + p29 + p30 + p31 + p32 + p33 + p34 + p35 + p36 + p37 + p38 + p39) == 7
+{}
+lemma user(p0: int, p1: int, p2: int, p3: int, p4: int, p5: int, p6: int, p7: int, p8: int, p9: int, p10: int, p11: int, p12: int, p13: int, p14: int, p15: int, p16: int, p17: int, p18: int, p19: int, p20: int, p21: int, p22: int, p23: int, p24: int, p25: int, p26: int, p27: int, p28: int, p29: int, p30: int, p31: int, p32: int, p33: int, p34: int, p35: int, p36: int, p37: int, p38: int, p39: int, a: int, b: int, c: int, d: int)
+    requires u(c * d) == 1
+    requires forall k in 0 as int..100 { (k < a || k >= b) && trigger(u(k)) * 0 == 0 }
+    requires p0 >= 200
+    requires p1 >= 201
+    requires p2 >= 202
+    requires p3 >= 203
+    requires p4 >= 204
+    requires p5 >= 205
+    requires p6 >= 206
+    requires p7 >= 207
+    requires p8 >= 208
+    requires p9 >= 209
+    requires p10 >= 210
+    requires p11 >= 211
+    requires p12 >= 212
+    requires p13 >= 213
+    requires p14 >= 214
+    requires p15 >= 215
+    requires p16 >= 216
+    requires p17 >= 217
+    requires p18 >= 218
+    requires p19 >= 219
+    requires p20 >= 220
+    requires p21 >= 221
+    requires p22 >= 222
+    requires p23 >= 223
+    requires p24 >= 224
+    requires p25 >= 225
+    requires p26 >= 226
+    requires p27 >= 227
+    requires p28 >= 228
+    requires p29 >= 229
+    requires p30 >= 230
+    requires p31 >= 231
+    requires p32 >= 232
+    requires p33 >= 233
+    requires p34 >= 234
+    requires p35 >= 235
+    requires p36 >= 236
+    requires p37 >= 237
+    requires p38 >= 238
+    requires p39 >= 239
+    ensures c * d < 0 || c * d >= 100 || c * d < a || c * d >= b || h(p0 + p1 + p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9 + p10 + p11 + p12 + p13 + p14 + p15 + p16 + p17 + p18 + p19 + p20 + p21 + p22 + p23 + p24 + p25 + p26 + p27 + p28 + p29 + p30 + p31 + p32 + p33 + p34 + p35 + p36 + p37 + p38 + p39) == 7
+{}
+fn main() i32 {
+    return 0;
+}
+)",
+        0,
+    );
+}
+
+// Products of unknowns over `int`: monotonicity, a product of two bounds, signs, a square.
+fn nonlinear_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "products of unknowns",
+        M"(lemma mono(a: int, b: int, c: int)
+    requires 0 <= b && a <= c
+    ensures a * b <= c * b
+{}
+lemma mono2(a: int, b: int, c: int, d: int)
+    requires 0 <= a && a <= c && 0 <= b && b <= d
+    ensures a * b <= c * d
+{}
+lemma box(a: int, b: int)
+    requires 0 <= a && a <= 10 && 0 <= b && b <= 20
+    ensures a * b <= 200
+{}
+lemma sign(a: int, b: int)
+    requires 1 <= a && 1 <= b
+    ensures a * b >= 1
+{}
+lemma sq(a: int)
+    requires 3 <= a
+    ensures a * a >= 9
+{}
+fn main() i32 { return 0; }
+)",
+        0,
+    );
+}
+
+// Containers held in members: a callee's contract through `&mut q.v`, a method of `p.v` behind `&mut p`;
+// and the methods that change a vector or a string, each by its effect on the view.
+fn container_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "containers held in members",
+        M"(import std::spec::seq as *;
+struct P {
+    x: u32,
+    v: Vector<u8>,
+}
+fn put(v: &mut Vector<u8>)
+    requires v.len() < 100
+    ensures v.view() == old(v.view()).push(1)
+{
+    v.push(1);
+}
+fn c(p: &mut P)
+    requires p.v.len() < 100
+    ensures p.v.view() == old(p.v.view()).push(1) && p.x == old(p.x)
+{
+    put(&mut p.v);
+}
+fn d() u32
+    ensures |r| r == 2
+{
+    let mut q = P { x: 2, v: Vector::<u8>::new() };
+    put(&mut q.v);
+    assert q.v.view().len() == 1 by {};
+    return q.x;
+}
+fn e(p: &mut P) u8
+    requires p.v.len() == 0
+    ensures |r| r == 6 && p.x == old(p.x)
+{
+    p.v.push(5);
+    p.v.push(6);
+    return p.v[1];
+}
+fn main() i32 {
+    let mut p = P { x: 1, v: Vector::<u8>::new() };
+    c(&mut p);
+    let mut q = P { x: 0, v: Vector::<u8>::new() };
+    return (p.x + d() + e(&mut q) as u32) as i32;
+}
+)",
+        9,
+    );
+    b.add(
+        "the methods that change a vector or a string",
+        M"(import std::spec::seq as *;
+fn t_set() u8
+    ensures |r| r == 9
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    v.set(1, 9);
+    return v[1];
+}
+fn t_trunc() usize
+    ensures |r| r == 1
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    v.truncate(1);
+    v.truncate(5);
+    return v.len();
+}
+fn t_insert() u8
+    ensures |r| r == 7
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    v.insert(1, 7);
+    assert v.len() == 3 by {};
+    return v[1];
+}
+fn t_remove() u8
+    ensures |r| r == 2
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    let _ = v.remove(0);
+    let _ = v.remove(5);
+    assert v.len() == 1 by {};
+    return v[0];
+}
+fn t_swap() u8
+    ensures |r| r == 2
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    v.push(2);
+    v.swap(0, 1);
+    return v[0];
+}
+fn t_extend() usize
+    ensures |r| r == 4
+{
+    let mut v = Vector::<u8>::new();
+    v.push(1);
+    let mut w = Vector::<u8>::new();
+    w.push(2);
+    w.push(3);
+    v.extend_copy(&w);
+    v.extend_from_slice(&w[0..1]);
+    v.reserve(10);
+    return v.len();
+}
+fn t_same() usize
+    ensures |r| r == 2
+{
+    let mut v = Vector::<u8>::new();
+    v.push(3);
+    v.push(1);
+    v.sort();
+    v.reverse();
+    v.dedup();
+    return v.len() + (2 - v.len());
+}
+fn t_str() u8
+    ensures |r| r == 66
+{
+    let mut s = String::new();
+    s.push_byte(65);
+    s.push_byte(66);
+    s.insert_byte(0, 64);
+    s.set_byte(0, 1);
+    let x = s.pop_byte();
+    let y = s.remove_byte(0);
+    assert y == 1 && s.len() == 1 by {};
+    s.truncate(0);
+    assert s.len() == 0 by {};
+    return x;
+}
+fn t_resize() usize
+    ensures |r| r == 4
+{
+    let mut v = Vector::<u8>::new();
+    v.push(5);
+    v.resize_default(4);
+    let _ = v.swap_remove(9);
+    return v.len();
+}
+fn main() i32 {
+    return (t_set() as usize + t_trunc() + t_insert() as usize + t_remove() as usize + t_swap() as usize + t_extend() + t_same() + t_str() as usize + t_resize()) as i32;
+}
+)",
+        97,
+    );
+}
+
+// Views and the values a proof keeps: an `old` value that is not `Copy`, a range of a view or a vector, a `[]mut` parameter a call or a
 // loop's writes through another cannot reach, a `[]mut` read as `[]T`, a drop beside a written view, a
 // choice of equal booleans, a named constant's value.
 fn view_proofs(b: &mut h::ExitBatch) {
@@ -1290,6 +1841,35 @@ fn main() i32 {
 }
 )",
         9,
+    );
+    b.add(
+        "old values that are not Copy",
+        M"(import std::spec::seq as *;
+struct P {
+    x: u32,
+    v: Vector<u8>,
+}
+fn c(p: &mut P)
+    requires p.x < 100
+    ensures p.x == old(*p).x + 1 && p.v.view() == old(*p).v.view()
+{
+    p.x += 1;
+}
+fn d(v: &mut Vector<u8>)
+    requires v.len() < 100
+    ensures v.view() == old(*v).view().push(3)
+{
+    v.push(3);
+}
+fn main() i32 {
+    let mut p = P { x: 1, v: Vector::<u8>::new() };
+    c(&mut p);
+    let mut v = Vector::<u8>::new();
+    d(&mut v);
+    return (p.x as usize + v.len()) as i32;
+}
+)",
+        3,
     );
     b.add(
         "a view a loop's writes through another parameter keep",
@@ -1920,6 +2500,17 @@ fn main(args: Vector<str>) i32 {
         !seq.built && seq.diag.contains("this contract compares values of a type without 'eq'"),
         "a sequence's equality",
     );
+    // A clause the checks run copies its `old` value at the entry: only a `Copy` one.
+    let whole = h::diff_build(
+        "struct P {\n    x: u32,\n    v: Vector<u8>,\n}\nfn c(p: &mut P) requires p.x < 100 ensures p.x == old(*p).x + 1 { p.x += 1; }\nfn main() i32 { return 0; }\n",
+        ["-fcontract-checks"],
+    );
+    assert(
+        !whole.built && whole.diag.contains(
+            "'old' in a clause '-fcontract-checks' runs copies its value: 'P' is not 'Copy'",
+        ),
+        "an old value that is not Copy in a run clause",
+    );
 }
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,
@@ -1953,6 +2544,24 @@ fn proofs_are_recorded_per_module() {
     let still = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
     assert(still.exit != 0 && still.out_has("prove: 1 to prove"), "only the module whose proof failed proves again");
     assert(still.out_has("cannot prove this 'ensures' clause"), "a failed proof is not recorded");
+}
+
+// A struct's invariant is a fact of each of its values in another module: a proof there uses it.
+@test
+fn invariants_hold_in_other_modules() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/counter.spc",
+        "pub struct Counter\n    invariant self.n <= self.max\n{\n    n: u32,\n    max: u32,\n}\nextend Counter {\n    pub fn new(max: u32) Counter {\n        return Counter { n: 0, max: max };\n    }\n    pub spec fn count(self: &Counter) u32 {\n        return self.n;\n    }\n    pub spec fn limit(self: &Counter) u32 {\n        return self.max;\n    }\n}\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "import counter as *;\nfn check(c: &Counter) ensures c.count() <= c.limit() {}\nfn wrong(c: &Counter) ensures c.count() < c.limit() {}\nfn main() i32 {\n    let c = Counter::new(3);\n    check(&c);\n    wrong(&c);\n    return 0;\n}\n",
+    );
+    let r = cli::superc_in(p.dir(), "build");
+    assert(r.exit != 0 && r.out_has("main.spc:3:"), "the false ensures is reported");
+    assert(!r.out_has("main.spc:2:"), "the invariant proves the true one");
 }
 
 // The diagnostics of a build's output: its error, location and note lines.

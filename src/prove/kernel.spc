@@ -49,6 +49,18 @@ pub(package) const RW_CUT: u8 = 8; // `i`: a cut of `Proof.cuts`
 // and the splits above the leaf fix at `c`: `p - c * x <= 0` (LE) and `c * x - p <= 0` (GE).
 pub(package) const RW_FIX_LE: u8 = 9;
 pub(package) const RW_FIX_GE: u8 = 10;
+// `i`: product `Proof.prods[i]` of two rows `L1 <= 0` and `L2 <= 0` (`prod_base`): `-(L1 * L2) <= 0`,
+// each product of two atoms a product atom of its pool (`product_row`).
+pub(package) const RW_PROD: u8 = 11;
+
+// A product row (`RW_PROD`): its two rows, and the product atoms [ms, ms + mn) of `Proof.monos` its
+// terms of degree 2 name.
+pub(package) struct Prod {
+    pub(package) a: RowRef,
+    pub(package) b: RowRef,
+    pub(package) ms: u32,
+    pub(package) mn: u32,
+}
 
 pub(package) struct RowRef {
     pub(package) i: u32,
@@ -119,6 +131,8 @@ pub(package) struct Proof<const B: usize> {
     pub(package) mults: Vector<Mult<B>>,
     pub(package) trees: Vector<Tree>,
     pub(package) cuts: Vector<Cut>,
+    pub(package) prods: Vector<Prod>,
+    pub(package) monos: Vector<u32>,
     pub(package) end: u8,
     pub(package) p: u32,
     pub(package) q: u32,
@@ -133,6 +147,8 @@ extend<const B: usize> Proof<B> {
             mults: Vector::<Mult<B>>::new(),
             trees: Vector::<Tree>::new(),
             cuts: Vector::<Cut>::new(),
+            prods: Vector::<Prod>::new(),
+            monos: Vector::<u32>::new(),
             end: X_LA,
             p: NONE,
             q: NONE,
@@ -146,6 +162,8 @@ extend<const B: usize> Proof<B> {
         self.mults.clear();
         self.trees.clear();
         self.cuts.clear();
+        self.prods.clear();
+        self.monos.clear();
         self.end = X_LA;
         self.p = NONE;
         self.q = NONE;
@@ -834,6 +852,29 @@ extend<const B: usize> Kernel<B> {
                 },
             }
         }
+        if r.kind == RW_PROD {
+            if r.i as usize >= pf.prods.len() {
+                return false;
+            }
+            let x = pf.prods[r.i as usize];
+            if !prod_base(x.a.kind) || !prod_base(x.b.kind) || x.ms as usize + x.mn as usize > pf.monos.len() {
+                return false;
+            }
+            let mut ka = Num::<B>::zero();
+            if !self.row_of(tm, st, pf, t, x.a, depth, &mut ka) {
+                return false;
+            }
+            let mut ra = Vector::<LinTerm<B>>::with_capacity(self.row.len());
+            ra.extend_copy(&self.row);
+            let mut kb = Num::<B>::zero();
+            if !self.row_of(tm, st, pf, t, x.b, depth, &mut kb) {
+                return false;
+            }
+            let mut rb = Vector::<LinTerm<B>>::with_capacity(self.row.len());
+            rb.extend_copy(&self.row);
+            self.row.clear();
+            return product_row(tm, &ra, ka, &rb, kb, &pf.monos, x.ms, x.mn, &mut self.row, k);
+        }
         if r.kind == RW_CUT {
             if r.i as usize >= pf.cuts.len() || pf.cuts[r.i as usize].upto > t.upto || !self.cuts_to(tm, st, pf, r.i) {
                 return false;
@@ -1048,8 +1089,77 @@ extend<const B: usize> Kernel<B> {
     }
 }
 
+// Whether a row of kind `k` may be a factor of a product row: a branch row, a type's bound, a fact, or a
+// split above the leaf (`row_of` checks it is).
+const fn prod_base(k: u8) bool {
+    return k == RW_IN || k == RW_LO || k == RW_HI || k == RW_EQ_LE || k == RW_EQ_GE || k == RW_SPLIT_LO || k == RW_SPLIT_HI;
+}
+
+// The product row of `a + ka <= 0` and `b + kb <= 0`: `-(a + ka) * (b + kb) <= 0` (the product of two
+// values at most 0 is at least 0), into `out` and `k`. Each product of two atoms is a product atom of
+// `monos[ms, ms + mn)` (`x * y` or `y * x`); false when one is not, or a value leaves B bits.
+pub(package) fn product_row<const B: usize>(
+    tm: &Terms<B>,
+    a: &Vector<LinTerm<B>>,
+    ka: Num<B>,
+    b: &Vector<LinTerm<B>>,
+    kb: Num<B>,
+    monos: &Vector<u32>,
+    ms: u32,
+    mn: u32,
+    out: &mut Vector<LinTerm<B>>,
+    k: &mut Num<B>,
+) bool {
+    out.clear();
+    for i in 0..a.len() {
+        for j in 0..b.len() {
+            let (x, y) = (a[i].atom, b[j].atom);
+            let mut p = NONE;
+            for q in ms..ms + mn {
+                let m = tm.at(monos[q as usize]);
+                if m.op == T_MUL && (m.a == x && m.b == y || m.a == y && m.b == x) {
+                    p = monos[q as usize];
+                    break;
+                }
+            }
+            if p == NONE {
+                return false;
+            }
+            switch ck(a[i].c.checked_mul(&b[j].c)) {
+                Some(v) => out.push(LinTerm::<B> { c: Num::<B>::zero() - v, atom: p }),
+                None => {
+                    return false;
+                },
+            }
+        }
+    }
+    for i in 0..a.len() {
+        switch ck(a[i].c.checked_mul(&kb)) {
+            Some(v) => out.push(LinTerm::<B> { c: Num::<B>::zero() - v, atom: a[i].atom }),
+            None => {
+                return false;
+            },
+        }
+    }
+    for j in 0..b.len() {
+        switch ck(b[j].c.checked_mul(&ka)) {
+            Some(v) => out.push(LinTerm::<B> { c: Num::<B>::zero() - v, atom: b[j].atom }),
+            None => {
+                return false;
+            },
+        }
+    }
+    switch ck(ka.checked_mul(&kb)) {
+        Some(v) => *k = Num::<B>::zero() - v,
+        None => {
+            return false;
+        },
+    }
+    return sum_up(out);
+}
+
 // Order `v` by atom, add the terms of one atom and drop zeros; false when a value leaves B bits.
-fn sum_up<const B: usize>(v: &mut Vector<LinTerm<B>>) bool {
+pub(package) fn sum_up<const B: usize>(v: &mut Vector<LinTerm<B>>) bool {
     let n = v.len();
     for j in 1..n {
         let x = v[j];
