@@ -303,11 +303,26 @@ pub(package) struct Opt {
     rsums: Vector<u64>,
     pre: Vector<u64>, // instruction << 32 | an instruction the walk made to run right before it, in order
     unbiased: Map<u32, u32>, // per indexed address with an offset, the address without it (`visit`)
+    // `thread`'s merge of the blocks that end the program (`dead_rep`): per hash, the first such block; per
+    // block its hash (0: none yet) and an edge into it without arguments (NONE: none yet); per slot the
+    // one block whose instructions name its address (NONE: none, MULTI: several; `dead_slots`, once
+    // `dslots_ok`); the slots one comparison paired; an instruction's operands.
+    dfirst: Map<u64, u32>,
+    dhash: Vector<u64>,
+    dedge: Vector<u32>,
+    dslot: Vector<u32>,
+    dslots_ok: bool,
+    dpair: Vector<u64>,
+    duse: Vector<Value>,
+    dcopy: Map<u32, u32>, // per constant or address `dead_hoist` copied to the entry, its copy
+    dxs: Vector<u32>, // `dead_twins`: each block's instructions but its constants and addresses
+    dys: Vector<u32>,
     merged: bool, // the last rebuild left a block one edge enters that several entered at the walk
     selected: bool, // the last walk made selects (`diamond`), which no walk simplified
     // The last walk folded a value its readers saw before (`null_test`, `merge_exits`), or made instructions
     // it did not visit (`copysign_bits`).
     refold: bool,
+    exits: bool, // the last walk made two branches into one block one (`merge_exits`)
     // The walks before a promotion leave a copy of 1, 2, 4 or 8 bytes into or out of a slot that does not
     // escape a copy (`slot_copy`): the promotion makes it loads and stores of the slot's fields, in their
     // types, where an integer of the copy's size would pack the fields. `waited`: such a copy stayed.
@@ -621,9 +636,20 @@ extend Opt {
             rsums: Vector::<u64>::new(),
             pre: Vector::<u64>::new(),
             unbiased: Map::<u32, u32>::new(),
+            dfirst: Map::<u64, u32>::new(),
+            dhash: Vector::<u64>::new(),
+            dedge: Vector::<u32>::new(),
+            dslot: Vector::<u32>::new(),
+            dslots_ok: false,
+            dpair: Vector::<u64>::new(),
+            duse: Vector::<Value>::new(),
+            dcopy: Map::<u32, u32>::new(),
+            dxs: Vector::<u32>::new(),
+            dys: Vector::<u32>::new(),
             merged: false,
             selected: false,
             refold: false,
+            exits: false,
             wait_copies: false,
             waited: false,
             rethru: false,
@@ -838,8 +864,9 @@ extend Opt {
                     let ed = self.edges[x];
                     let ps = b.blocks[b.edge_target(ed) as usize].param_start;
                     for q in 0..b.edge_nargs(ed) {
-                        if self.pok[(ps + q) as usize] {
-                            let a = b.edge_arg(ed, q);
+                        // An edge two terminators share comes twice: its argument is rewritten once.
+                        let a = b.edge_arg(ed, q);
+                        if self.pok[(ps + q) as usize] && is_op(b, a, O_PTRTOINT) {
                             b.pool[(ed + 2 + q) as usize] = b.insts[a as usize].a;
                         }
                     }
@@ -1213,6 +1240,7 @@ extend Opt {
             &self.ops_arg,
             &self.ops,
             pk.ptr_bytes,
+            pk.arg_copy.min(16),
             &mut self.pbody,
         );
         if let Some(x) = own {
@@ -1271,6 +1299,18 @@ extend Opt {
         self.tables(pk, b, K_SLOTS);
         let _ = self.walk(pk, b);
         self.rebuild(b);
+        // Two checks into one failure block that only that walk made one branch (`merge_exits`): once
+        // more, with the preheaders `bound_min` puts the one bound in, the form the loop transforms read.
+        if self.exits {
+            self.tables(pk, b, K_NEST);
+            let entered = self.preheaders(b, false);
+            self.tables(pk, b, K_SLOTS);
+            let _ = self.walk(pk, b);
+            if entered {
+                self.unenter(b);
+            }
+            self.rebuild(b);
+        }
         return true;
     }
 
@@ -5125,6 +5165,7 @@ extend Opt {
         self.made.clear_keeping(KEEP_SLOTS);
         self.selected = false;
         self.refold = false;
+        self.exits = false;
         self.unstored = false;
         // What `thread` made and replaced.
         for x in 0..self.textra.len() {
@@ -5342,6 +5383,7 @@ extend Opt {
                         if self.merge_exits(b, k as u32, i) {
                             changed = true;
                             self.refold = true;
+                            self.exits = true;
                         }
                     }
                     if u.op == O_LOAD && self.repl[i as usize] == VNONE && is_op(b, u.a, O_SLOTADDR) && self.rslot[b.insts[u.a as usize].a as usize] != NONE {
@@ -9044,6 +9086,11 @@ extend Opt {
         self.tdirty.truncate(0);
         let nb = b.blocks.len();
         fill(&mut self.hdr, nb, false);
+        self.dfirst.clear_keeping(KEEP_SLOTS);
+        self.dcopy.clear_keeping(KEEP_SLOTS);
+        fill(&mut self.dhash, nb, 0);
+        fill(&mut self.dedge, nb, NONE);
+        self.dslots_ok = false;
         for k in 0..nb {
             for x in self.pred_at[k]..self.pred_at[k + 1] {
                 if self.rpo[k] != NONE && self.dominates(k as u32, self.preds[x as usize]) {
@@ -9132,6 +9179,7 @@ extend Opt {
             let mut t = b.insts[i as usize];
             if t.op == O_JMP {
                 t.a = self.follow(pk, b, k as u32, t.a, VNONE, 0);
+                t.a = self.dead_rep(b, k as u32, t.a);
                 let j = b.edge_target(t.a);
                 let r = self.ret_folded(pk, b, k as u32, t.a);
                 if r.is_some() {
@@ -9159,6 +9207,8 @@ extend Opt {
             } else if t.op == O_BR {
                 t.b = self.follow(pk, b, k as u32, t.b, t.a, 1);
                 t.c = self.follow(pk, b, k as u32, t.c, t.a, 0);
+                t.b = self.dead_rep(b, k as u32, t.b);
+                t.c = self.dead_rep(b, k as u32, t.c);
                 if same_edge(b, t.b, t.c) || b.edge_nargs(t.b) == 0 && b.edge_nargs(t.c) == 0 && twins(
                     b,
                     b.edge_target(t.b),
@@ -9170,7 +9220,8 @@ extend Opt {
                 for q in 0..t.aux as u32 + 1 {
                     let at = (t.c + q) as usize;
                     let e = b.pool[at];
-                    let ne = self.follow(pk, b, k as u32, e, VNONE, 0);
+                    let ne0 = self.follow(pk, b, k as u32, e, VNONE, 0);
+                    let ne = self.dead_rep(b, k as u32, ne0);
                     if ne != e {
                         b.pool[at] = ne;
                         any = true;
@@ -9293,6 +9344,336 @@ extend Opt {
         }
         self.textra.push(i);
         return i;
+    }
+
+    // ---- Blocks that end the program ----
+
+    // Edge `e` of block `k`, into the first block that does what its target does when that target ends the
+    // program (a failure path: a call that does not return, a panic) and takes no value: the copies of one
+    // callee each bring such a block, and one serves them all (LLVM's tail merging of blocks without
+    // successors). The values the block reads from outside it must reach `k`.
+    fn dead_rep(self: &mut Self, b: &mut Body, k: u32, e: u32) u32 {
+        let x = b.edge_target(e);
+        if b.edge_nargs(e) != 0 || !self.dead_end(b, x) {
+            return e;
+        }
+        if self.dhash[x as usize] == 0 {
+            self.dhash[x as usize] = self.dead_hash(b, x);
+        }
+        let h = self.dhash[x as usize];
+        let a = switch self.dfirst.get(&h) {
+            Some(q) => *q,
+            None => NONE,
+        };
+        if a == NONE {
+            self.dfirst.insert(h, x);
+            return e;
+        }
+        if a == x || !self.dead_twins(b, a, x) {
+            return e;
+        }
+        if !self.dead_reaches(b, a, k) {
+            // The constants and addresses `a` reads move to the entry: they reach every block.
+            self.dead_hoist(b, a);
+            if !self.dead_reaches(b, a, k) {
+                return e;
+            }
+        }
+        if self.dedge[a as usize] == NONE {
+            let none: []Value = [];
+            self.dedge[a as usize] = b.edge(a, none);
+        }
+        return self.dedge[a as usize];
+    }
+
+    // Whether block `x` of `b` ends the program and takes no value: at most TWIN_MAX instructions, the
+    // last `unreachable` or a panic.
+    const fn dead_end(self: &Self, b: &Body, x: u32) bool {
+        let bx = b.blocks[x as usize];
+        if bx.param_len != 0 || bx.len > TWIN_MAX || self.rpo[x as usize] == NONE {
+            return false;
+        }
+        let op = b.insts[(bx.start + bx.len - 1) as usize].op;
+        return op == O_UNREACHABLE || op == O_PANIC;
+    }
+
+    // A hash of what `dead_twins` compares in block `x` of `b`: each instruction's operation but the
+    // constants' and addresses', a call's callee, a panic's message, and the constants and symbols its
+    // operands are. Never 0.
+    fn dead_hash(self: &mut Self, b: &Body, x: u32) u64 {
+        let bx = b.blocks[x as usize];
+        let mut h: u64 = 0x51;
+        for j in 0..bx.len {
+            let t = b.insts[(bx.start + j) as usize];
+            if const_like(t.op) {
+                continue;
+            }
+            h = mix(h, t.op as u64 | t.ty as u64 << 8 | t.aux as u64 << 16);
+            let f = op_info(t.op).form;
+            if f == F_CALL || f == F_PANIC {
+                h = mix(h, t.a);
+            }
+            lv::uses(b, t, &mut self.duse);
+            for q in 0..self.duse.len() {
+                let v = self.duse[q];
+                if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+                    continue;
+                }
+                let c = b.insts[v as usize];
+                if c.op == O_ICONST || c.op == O_FCONST || c.op == O_SYMADDR {
+                    h = mix(mix(h, c.op as u64 | c.ty as u64 << 8), c.a as u64 | c.b as u64 << 32);
+                }
+            }
+        }
+        return h | 1;
+    }
+
+    // Whether blocks `x` and `y` of `b`, each a `dead_end`, do the same: but for the constants and
+    // addresses they make, which their readers compare (`dead_val`), instruction by instruction the same
+    // operation on the same values, a call with the same callee and signature.
+    fn dead_twins(self: &mut Self, b: &Body, x: u32, y: u32) bool {
+        let bx = b.blocks[x as usize];
+        let by = b.blocks[y as usize];
+        self.dpair.truncate(0);
+        self.dxs.truncate(0);
+        self.dys.truncate(0);
+        for j in 0..bx.len {
+            if !const_like(b.insts[(bx.start + j) as usize].op) {
+                self.dxs.push(bx.start + j);
+            }
+        }
+        for j in 0..by.len {
+            if !const_like(b.insts[(by.start + j) as usize].op) {
+                self.dys.push(by.start + j);
+            }
+        }
+        if self.dxs.len() != self.dys.len() {
+            return false;
+        }
+        for j in 0..self.dxs.len() {
+            let s = b.insts[self.dxs[j] as usize];
+            let u = b.insts[self.dys[j] as usize];
+            if s.op != u.op || s.ty != u.ty || s.aux != u.aux {
+                return false;
+            }
+            let f = op_info(s.op).form;
+            if f == F_CALL {
+                if s.a != u.a || !same_call_sig(b, s.b, u.b) {
+                    return false;
+                }
+                for q in 0..s.aux as u32 {
+                    if !self.dead_val(b, x, y, b.pool[(s.c + q) as usize], b.pool[(u.c + q) as usize]) {
+                        return false;
+                    }
+                }
+                continue;
+            }
+            if f > F_STORE && f != F_PANIC && s.op != O_UNREACHABLE {
+                return false;
+            }
+            let a = if lv::operand_a(f) {
+                self.dead_val(b, x, y, s.a, u.a)
+            } else {
+                s.a == u.a
+            };
+            let bb = if lv::operand_b(f) {
+                self.dead_val(b, x, y, s.b, u.b)
+            } else {
+                s.b == u.b
+            };
+            let c = if lv::operand_c(f) {
+                self.dead_val(b, x, y, s.c, u.c)
+            } else {
+                s.c == u.c
+            };
+            if !a || !bb || !c {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether value `v` in block `x` stands where value `w` in block `y` does (`dead_twins`): one value,
+    // two constants or symbol addresses of the same bits (wherever each is made), the addresses of two
+    // slots only their own block names, of one size and alignment (each slot of `x` with one slot of `y`),
+    // or the results of the instructions at the same place in each (`dxs`, `dys`).
+    fn dead_val(self: &mut Self, b: &Body, x: u32, y: u32, v: Value, w: Value) bool {
+        if v == VNONE || w == VNONE || ((v | w) & VPARAM) != 0 {
+            return v == w;
+        }
+        if (v & VFLAG) != (w & VFLAG) {
+            return false;
+        }
+        let i = v & ~VFLAG;
+        let j = w & ~VFLAG;
+        let s = b.insts[i as usize];
+        let u = b.insts[j as usize];
+        if const_like(s.op) {
+            if s.op != u.op || s.ty != u.ty || s.aux != u.aux {
+                return false;
+            }
+            return if s.op == O_SLOTADDR {
+                s.a == u.a || self.dead_slot_pair(b, x, y, s.a, u.a)
+            } else {
+                s.a == u.a && s.b == u.b
+            };
+        }
+        let bx = b.blocks[x as usize];
+        let by = b.blocks[y as usize];
+        let inx = i >= bx.start && i < bx.start + bx.len;
+        let iny = j >= by.start && j < by.start + by.len;
+        if !inx || !iny {
+            return v == w && !inx && !iny;
+        }
+        for q in 0..self.dxs.len() {
+            if self.dxs[q] == i {
+                return self.dys[q] == j;
+            }
+        }
+        return false;
+    }
+
+    // Whether slot `sx`, which block `x` alone names, pairs with slot `sy`, which block `y` alone names
+    // (`dpair`: each with one partner).
+    fn dead_slot_pair(self: &mut Self, b: &Body, x: u32, y: u32, sx: u32, sy: u32) bool {
+        if !self.dslots_ok {
+            self.dead_slots(b);
+        }
+        let a = b.slots[sx as usize];
+        let c = b.slots[sy as usize];
+        if self.dslot[sx as usize] != x || self.dslot[sy as usize] != y || a.size != c.size || a.align_log2 != c.align_log2 {
+            return false;
+        }
+        let pair = sx as u64 << 32 | sy as u64;
+        for q in 0..self.dpair.len() {
+            let e = self.dpair[q];
+            if (e >> 32) as u32 == sx || e as u32 == sy {
+                return e == pair;
+            }
+        }
+        self.dpair.push(pair);
+        return true;
+    }
+
+    // Per slot of `b`, the one reached block whose instructions or edges name its address or an address
+    // made from it (`dslot`).
+    fn dead_slots(self: &mut Self, b: &Body) {
+        fill(&mut self.dslot, b.slots.len(), NONE);
+        for k in 0..b.blocks.len() {
+            if self.rpo[k] == NONE {
+                continue;
+            }
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                lv::uses_edges(b, b.insts[i as usize], &mut self.duse);
+                for q in 0..self.duse.len() {
+                    let v = self.duse[q];
+                    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SLOTADDR && b.insts[v as usize].op != O_PTRADD {
+                        continue;
+                    }
+                    let s = slot_of(b, v);
+                    if s != NONE {
+                        let was = self.dslot[s as usize];
+                        self.dslot[s as usize] = if was == NONE || was == k as u32 {
+                            k as u32
+                        } else {
+                            MULTI
+                        };
+                    }
+                }
+            }
+        }
+        self.dslots_ok = true;
+    }
+
+    // The constants and the symbol and slot addresses block `a` of `b` reads from blocks other than the
+    // entry: each a copy in the entry (`dead_entry`), so `a` may take an edge from any block.
+    fn dead_hoist(self: &mut Self, b: &mut Body, a: u32) {
+        let ba = b.blocks[a as usize];
+        for j in 0..ba.len {
+            let i = ba.start + j;
+            let mut t = b.insts[i as usize];
+            let f = op_info(t.op).form;
+            let mut any = false;
+            if f == F_CALL {
+                for q in 0..t.aux as u32 {
+                    let at = (t.c + q) as usize;
+                    let v = self.dead_entry(b, b.pool[at]);
+                    any = any || v != b.pool[at];
+                    b.pool[at] = v;
+                }
+            } else {
+                if lv::operand_a(f) {
+                    let v = self.dead_entry(b, t.a);
+                    any = any || v != t.a;
+                    t.a = v;
+                }
+                if lv::operand_b(f) {
+                    let v = self.dead_entry(b, t.b);
+                    any = any || v != t.b;
+                    t.b = v;
+                }
+                if lv::operand_c(f) {
+                    let v = self.dead_entry(b, t.c);
+                    any = any || v != t.c;
+                    t.c = v;
+                }
+            }
+            if any {
+                b.insts[i as usize] = t;
+                self.tdirty.push(i);
+            }
+        }
+    }
+
+    // Value `v` of `b`, or the entry's copy of it when it is a constant or a symbol's or slot's address
+    // that a block other than the entry defines.
+    fn dead_entry(self: &mut Self, b: &mut Body, v: Value) Value {
+        if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+            return v;
+        }
+        let t = b.insts[v as usize];
+        let d = self.def_blk(v);
+        if d == 0 || d == NONE || !const_like(t.op) {
+            return v;
+        }
+        let have = switch self.dcopy.get(&v) {
+            Some(q) => *q,
+            None => NONE,
+        };
+        if have != NONE {
+            return have;
+        }
+        // In no block, for the walk's `extra` (`textra`), as `tconst`'s.
+        let i = b.insts.len() as u32;
+        b.insts.push(t);
+        b.locs.push(0);
+        if b.inl.len() != 0 {
+            b.inl.push(0);
+        }
+        self.textra.push(i);
+        self.dcopy.insert(v, i);
+        return i;
+    }
+
+    // Whether every value block `a` of `b` reads from outside it is defined in a block that dominates
+    // block `k`: an edge from `k` may then enter `a`.
+    fn dead_reaches(self: &mut Self, b: &Body, a: u32, k: u32) bool {
+        let ba = b.blocks[a as usize];
+        for j in 0..ba.len {
+            lv::uses(b, b.insts[(ba.start + j) as usize], &mut self.duse);
+            for q in 0..self.duse.len() {
+                let v = self.duse[q];
+                if v == VNONE || (v & VPARAM) == 0 && (v & ~VFLAG) >= ba.start && (v & ~VFLAG) < ba.start + ba.len {
+                    continue;
+                }
+                let d = self.def_blk(v);
+                if d != NONE && !self.dominates(d, k) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     // Edge `e0` of block `k`'s terminator, threaded (`thread`): the edge it becomes. Along it, value `cond`
@@ -10546,6 +10927,13 @@ extend Opt {
                     b.pool[at] = self.val(b.pool[at]);
                 }
             }
+            // A branch on a flag's `xor` with 1 (`!f`) is one on the flag, its edges swapped.
+            if t.op == O_BR && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
+                let n = b.insts[t.a as usize];
+                if n.op == O_XOR && int_bits(b, n.b) == Some(1u64) && zero_one(b, n.a, ZO_DEPTH) {
+                    t = Inst { op: O_BR, ty: t.ty, aux: t.aux, a: n.a, b: t.c, c: t.b };
+                }
+            }
             // A branch or a switch on a constant jumps, and so does a branch on a condition the edge into a
             // dominating block decides.
             let mut c = if t.op == O_BR || t.op == O_SWITCH {
@@ -10673,6 +11061,38 @@ extend Opt {
                     if y.is_some() {
                         t = iconst(t.ty, (x.unwrap() == y.unwrap() == (t.aux == C_EQ)) as u64);
                     }
+                }
+            }
+        }
+        // A load or a store through a constant index of a slot's address, its bytes inside the slot and aligned
+        // as the verifier asks: the index joins the offset (`simplify` keeps a slot's index, which may be past
+        // the slot on a path that never runs), so the access is a place of the slot for `recall` and the
+        // promotion.
+        if (t.op == O_LOAD || t.op == O_STORE) && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_PTRADD && b.insts[t.a as usize].b != VNONE {
+            let pa = b.insts[t.a as usize];
+            let ix = int_bits(b, pa.b);
+            let mut base: i64 = 0;
+            let s = if ix.is_some() {
+                slot_place(b, pa.a, &mut base)
+            } else {
+                NONE
+            };
+            if s != NONE {
+                let rel = (t.c as i32) as i128 + pa.c as i32 + sign_extend(
+                    ix.unwrap(),
+                    type_bits(b.type_of(pa.b), pk.ptr_bytes),
+                ) as i128 * scale_of(pa);
+                let off = base as i128 + rel;
+                let vt = if t.op == O_LOAD {
+                    t.ty
+                } else {
+                    b.type_of(t.b)
+                };
+                let al = (t.aux & 15) as u64;
+                let sl = b.slots[s as usize];
+                if off >= 0 && off + type_bytes(vt, pk.ptr_bytes) <= sl.size && al <= sl.align_log2 as u64 && (off as u64 & (1u64 << al) - 1) == 0 && rel >= -0x80000000 && rel <= 0x7FFFFFFF {
+                    t.a = pa.a;
+                    t.c = rel as u32;
                 }
             }
         }
@@ -15968,6 +16388,7 @@ extend Run {
         if ret_edges(b, &mut so.mark, &mut so.edges) {
             so.forget();
         }
+        let _ = param_twins(b, p.ptr_bytes);
         sc.o.estimate(p, b);
         if r.print.len() != 0 {
             r.print_body(p, j, b);
@@ -19370,6 +19791,45 @@ const fn is_fmul(b: &Body, v: Value, ty: u8) bool {
     return (v & (VPARAM | VFLAG)) == 0 && v != VNONE && b.insts[v as usize].op == O_FMUL && b.insts[v as usize].ty == ty;
 }
 
+// Whether `op` makes a constant or a symbol's or slot's address: the same value wherever it is made.
+const fn const_like(op: u8) bool {
+    return op == O_ICONST || op == O_FCONST || op == O_SYMADDR || op == O_SLOTADDR;
+}
+
+// Whether signatures `s` and `r` of `b`'s pool say the same: the parameter counts, the result and each
+// parameter's code, two layouts of the same bytes and leaves alike.
+const fn same_call_sig(b: &Body, s: u32, r: u32) bool {
+    if s == r {
+        return true;
+    }
+    let n = b.pool[s as usize];
+    if n != b.pool[r as usize] || b.pool[s as usize + 1] != b.pool[r as usize + 1] {
+        return false;
+    }
+    for k in 0..n + 1 {
+        let p = b.pool[(s + 2 + k) as usize];
+        let q = b.pool[(r + 2 + k) as usize];
+        if p != q && ((p & q & AGG) == 0 || !same_layout(b, p & ~AGG, q & ~AGG)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether layouts `x` and `y` of `b`'s pool are of the same size, alignment and leaves.
+const fn same_layout(b: &Body, x: u32, y: u32) bool {
+    let n = b.pool[x as usize + 2];
+    if n != b.pool[y as usize + 2] {
+        return false;
+    }
+    for k in 0..3 + 2 * n {
+        if b.pool[(x + k) as usize] != b.pool[(y + k) as usize] {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Whether signatures `s` and `r` of `b`'s pool are one: the parameter counts, the result and the
 // parameters' codes.
 const fn same_sig(b: &Body, s: u32, r: u32) bool {
@@ -20037,6 +20497,30 @@ fn zero_one(b: &Body, v: Value, depth: u32) bool {
     return (t.op == O_ZEXT || t.op == O_TRUNC) && zero_one(b, t.a, depth - 1);
 }
 
+// The slot whose address plus constant offsets address `v` of `b` is, their sum in `off`; NONE when `v` is
+// no such address.
+const fn slot_place(b: &Body, v: Value, off: &mut i64) u32 {
+    let mut x = v;
+    let mut sum: i64 = 0;
+    // Each step goes to an earlier address of the chain: at most the instruction count.
+    for _ in 0..b.insts.len() {
+        if (x & (VPARAM | VFLAG)) != 0 {
+            return NONE;
+        }
+        let t = b.insts[x as usize];
+        if t.op == O_SLOTADDR {
+            *off = sum;
+            return t.a;
+        }
+        if t.op != O_PTRADD || t.b != VNONE {
+            return NONE;
+        }
+        sum += t.c as i32;
+        x = t.a;
+    }
+    return NONE;
+}
+
 // Whether address `v` of `b` is a slot's address plus constant offsets.
 const fn slot_based(b: &Body, v: Value) bool {
     let mut x = v;
@@ -20213,6 +20697,58 @@ const fn write_tag(pk: &Package, b: &Body, t: Inst) usize {
 // (`Sym.fx`).
 const fn writes(pk: &Package, b: &Body, t: Inst) bool {
     return writes_memory(t) && (t.op != O_CALL || (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) != 0);
+}
+
+// `param_twins` looks back at most TWIN_READS loads.
+const TWIN_READS: usize = 8;
+
+// The loads of the entry block of `b` that read a word of an aggregate parameter the body takes by value
+// a second time, as an integer where an earlier load read a pointer or as a pointer where it read an
+// integer as wide (`ptr` bytes), no instruction that writes memory between the two: each becomes the
+// first load's bits (`ptrtoint`, `inttoptr`). The walks number a load with its type, so a niche enum's
+// test and its payload's read stay two loads of one word; one load per word lets a parameter that arrives
+// in registers stay there (`place::parts_taken`). On the body's final form, after every pass that tells
+// more of a pointer's load than of a conversion; a caller that inlines the body reads the argument's
+// values, where the two conversions cancel. Whether any changed.
+const fn param_twins(b: &mut Body, ptr: u32) bool {
+    let e = b.blocks[0];
+    let wide = int_type(ptr);
+    let mut seen: [u32; TWIN_READS] = [NONE; TWIN_READS];
+    let mut n: usize = 0;
+    let mut any = false;
+    for i in e.start..e.start + e.len {
+        let t = b.insts[i as usize];
+        if writes_memory(t) {
+            n = 0;
+            continue;
+        }
+        let k = entry_param(b, t.a);
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || t.ty != T_PTR && t.ty != wide || k == NONE || (b.pool[(b.sig + 3 + k) as usize] & AGG) == 0 {
+            continue;
+        }
+        let mut first = NONE;
+        for q in 0..n {
+            let o = b.insts[(unsafe seen[q]) as usize];
+            if o.a == t.a && o.c == t.c {
+                first = unsafe seen[q];
+            }
+        }
+        if first == NONE {
+            if n < TWIN_READS {
+                unsafe {
+                    seen[n] = i;
+                }
+                n += 1;
+            }
+            continue;
+        }
+        if b.insts[first as usize].ty != t.ty {
+            let op = ast::pick(t.ty == T_PTR, O_INTTOPTR, O_PTRTOINT);
+            b.insts[i as usize] = Inst { op: op, ty: t.ty, aux: 0, a: first, b: VNONE, c: VNONE };
+            any = true;
+        }
+    }
+    return any;
 }
 
 // The signature parameter value `v` of `b` is (its index), else NONE.

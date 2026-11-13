@@ -1964,7 +1964,7 @@ b2:
 }
 
 // A value a loop's entry edge passes that no block the loop reaches reads takes the same register as the
-// loop's parameter (`lv::Live::entry_partner`; arm64), its early return laid out before the loop
+// loop's parameter (`lv::Live::assign`; arm64), its early return laid out before the loop
 // (`early_returns`): `@gcd`'s `a`, which that return reads, is the loop's first parameter in x0, so only the
 // loop's two moves stay (no copy on the entry or the exit). It gives the C results.
 @test
@@ -1999,7 +1999,7 @@ b3:
 
 // An edge that passes only constants past a loop has its moves in a stub at the first place no block falls
 // into (`lv::Live::late`); a block with no code falls into the next, so that is not such a place: `b27`,
-// whose arguments already sit in `b1`'s parameter registers (`lv::Live::entry_partner`), has none after
+// whose arguments already sit in `b1`'s parameter registers (`lv::Live::assign`), has none after
 // loop `b14` ends with a jump. The stub of `b0`'s edge to `b27` went between them and jumped to itself
 // (arm64: a `b` one word back, to its move). It gives the C results.
 @test
@@ -4811,7 +4811,7 @@ fn splats_of_every_lane_type_run() {
 }
 
 // Six sums a loop updates on one side of a branch, then passes through a block that jumps back to the
-// header: that block's parameters share the header parameters' registers or slots (`back_share`), and
+// header: that block's parameters share the header parameters' registers (`Live::assign`) or slots (`back_share`), and
 // the updates write them in place.
 @test
 fn sums_through_a_join_into_the_loop_header_run() {
@@ -6703,7 +6703,7 @@ b0(v0: ptr, v1: ptr, v2: ptr):
 
 // arm64: the side of a `cbnz` taken when the register is 0, which that branch alone enters, starts with it 0
 // (`zin`): its `return 0` moves nothing (no `mov w0, #0`, 52800000). A parameter whose range holds no
-// instruction that writes an argument register keeps the register it arrives in (`quiet_arg`): `@half`'s
+// instruction that writes an argument register keeps the register it arrives in (`quiet_param`): `@half`'s
 // `n` stays in x0 across its blocks (no `mov xN, x0`). x86-64 reads a float constant operand from its data
 // (`mulsd xmm0, [rip + d]`: F2 0F 59 05). They give the C results.
 @test
@@ -7016,7 +7016,7 @@ int main(void) {
 }
 
 // A loop's entry values made for the entry edge alone take their header parameters' registers
-// (`Live::entry_partner`): 20 `v4f32` sums loaded before the loop, more than the temporaries, spill none
+// (`Live::assign`): 20 `v4f32` sums loaded before the loop, more than the temporaries, spill none
 // with AVX-512 (no `sub rsp`: 48 83 EC or 48 81 EC). It gives the C sums.
 @test
 fn a_loops_loaded_entry_values_take_its_registers() {
@@ -7082,7 +7082,7 @@ int main(void) {
 }
 
 // A second loop's parameters share the registers of the values its one entry passes, also when those
-// continue the first loop's parameters (`Live::entry_partner` through `Live::root`): a 128-bit sum of
+// continue the first loop's parameters (`Live::assign`): a 128-bit sum of
 // products over an unrolled loop and its remainder loop keeps every value in a register on x86-64 without
 // a frame pointer, no frame below the saved registers (no `sub rsp`: 48 83 EC or 48 81 EC). It gives the C
 // sum.
@@ -7166,6 +7166,9 @@ b4(v77: i64, v78: i64):
     let s8: [u8; 3] = [0x48, 0x83, 0xEC];
     let s32: [u8; 3] = [0x48, 0x81, 0xEC];
     assert(!holds(&obj, s8[0..3]) && !holds(&obj, s32[0..3]), "no frame below the saved registers");
+    // The remainder loop's high sum (`adc`) is written over its accumulator, which ends there
+    // (`lv::Live.two`): 16 register copies in all, 19 with a register of its own.
+    assert(x64_copies(&obj) <= 16, "the sums are made in place");
     if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
     }
@@ -7969,8 +7972,8 @@ int main(void) {
 
 // Late edges alike (one target, the same arguments) share one stub of moves: `@find`'s two edges into
 // the scalar search from 0 (`b1(v3)`, from the entry and the first vector block) take one stub that
-// zeroes the counter. x86-64 has two stubs of `xor r32, r32` then a jump (the other one starts the vector
-// loop), arm64 one of `mov x, #0` then `b`. It finds the C index.
+// zeroes the counter: one stub of `xor r32, r32` then a jump on x86-64 (the vector loop, which follows its
+// entry, starts in line), one of `mov x, #0` then `b` on arm64. It finds the C index.
 @test
 fn alike_late_edges_share_one_stub() {
     let lir = M"(lir ptr 8
@@ -8053,7 +8056,7 @@ b9:
         }
         x += 1;
     }
-    assert_eq(zx, 2);
+    assert_eq(zx, 1);
     let mut ao = Vector::<u8>::new();
     assert(
         object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut ao),
@@ -8358,8 +8361,9 @@ int main(void) {
 }
 
 // A Microsoft x64 body that calls nothing and keeps no slot or spill needs no home area for callees: `@sum`
-// (a vector loop and its scalar rest, the optimizer's output for a slice's sum) keeps the rest's sum in a
-// callee-saved register (`push rbx`), with no `sub rsp, 32`. It gives the C result.
+// (a vector loop and its scalar rest, the optimizer's output for a slice's sum) keeps every value in a
+// caller-saved register (the slice's parts in the ones they arrive in: no `push rbx`), with no
+// `sub rsp, 32`. It gives the C result.
 @test
 fn microsoft_x64_leaves_take_no_home_area() {
     let lir = M"(lir ptr 8
@@ -8414,7 +8418,7 @@ b7:
     assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Microsoft x64 object");
     let sub: [u8; 4] = [0x48, 0x83, 0xEC, 0x20];
     let push: [u8; 1] = [0x53];
-    assert(!holds(&obj, sub[0..4]) && holds(&obj, push[0..1]), "sum");
+    assert(!holds(&obj, sub[0..4]) && !holds(&obj, push[0..1]), "sum");
     let drv = M"(#include <stdint.h>
 struct s { const int32_t *p; int64_t n; };
 int32_t sum(struct s);
@@ -10084,7 +10088,7 @@ fn a_leafs_homes_leave_each_instruction_its_registers() {
 }
 
 // More values live through a loop than the register homes hold, and a call on one path of each iteration:
-// the values without a home take registers over the loop's blocks that do not call (`Live::segments`),
+// the values without a home take registers over the loop's blocks that do not call (`Live::spans`),
 // loaded on the edge out of the call's block, and each keeps its stack home. The loop's sum follows the
 // C driver's; the function compiles for every native target.
 @test
@@ -10147,9 +10151,20 @@ fn values_past_the_homes_hold_registers_between_calls() {
     let a64 = tgt::axis_index("aarch64", true);
     let x64 = tgt::axis_index("x86_64", true);
     assert(object_of(&lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS arm64 object");
-    assert(object_of(&lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
     assert(object_of(&lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
     assert(object_of(&lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(&lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // arm64: the 24 values live across the call; 10 hold x19..x28, and the others hold x9..x15 and the
+    // argument registers in the blocks that do not call, so the sums read few of them from the stack
+    // (`ldr x, [sp, #n]`: F94003E0 under the offset and the register).
+    let mut loads: u32 = 0;
+    let mut at: usize = 0;
+    while at + 4 <= obj.len() {
+        let w = obj[at] as u32 | obj[at + 1] as u32 << 8 | obj[at + 2] as u32 << 16 | obj[at + 3] as u32 << 24;
+        loads += ((w & 0xFFC003E0) == 0xF94003E0) as u32;
+        at += 4;
+    }
+    assert(loads <= 26, format("{} stack loads", loads).as_str());
     if !cli::has_cc() {
         return; // a C driver links it
     }
@@ -10158,7 +10173,7 @@ fn values_past_the_homes_hold_registers_between_calls() {
 }
 
 // A loop whose latch ends in a branch and passes its own parameter back to the header's (a value an arm of
-// the body may change): the latch's parameter shares the header parameter's register (`place::back_share`),
+// the body may change): the latch's parameter shares the header parameter's register (`Live::assign`),
 // so neither the edge into the latch that passes the value on nor the edge back moves it. The one register
 // move left on arm64 is the result's into x0.
 @test
@@ -10206,7 +10221,7 @@ fn a_conversions_operand_is_made_in_its_home() {
 }
 
 // A rare block's call whose result a later join reads, in a body with more long-lived values than
-// register homes: the result holds a register over those blocks (`Live::segments`), which it takes at its
+// register homes: the result holds a register over those blocks (`Live::spans`), which it takes at its
 // call. The registers saved around a rare call (`save_scratch`) come back after it, so a register that
 // held the result from the block's start would come back over it.
 @test
@@ -10280,7 +10295,7 @@ fn a_rare_calls_result_takes_its_register_at_the_call() {
 }
 
 // A loop's count-down made in the header, read by nothing else and passed back from the latch, with a
-// rare call it lives across: it is made in its header parameter's register (`Live::far_steps`), so the
+// rare call it lives across: it is made in its header parameter's register (`Live::assign`), so the
 // edge back moves nothing. On arm64 the count stays in x2, where it arrives: no move writes x2. The rare
 // block runs when the count's low three bits are 0.
 @test
@@ -18408,5 +18423,761 @@ b6:
     if !cli::has_cc() {
         return; // a C driver links it
     }
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Four values in caller-saved registers live past a call in a rare block: arm64 saves them around it
+// two per `stp` and brings them back two per `ldp`, from the stack pointer when the offsets fit 7 bits
+// (`near`), else from x17 set to the run of saved bytes (`far`, whose 4096-byte slot lies below it).
+@test
+fn a_rare_calls_saved_registers_go_in_pairs() {
+    let mut lir = String::from(
+        "lir ptr 8\nsym @bump fn global noinline\nsym @fill fn global noinline\nsym @near fn global\nsym @far fn global\nfn @bump\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 1\n  v2 = add.i64 v0, v1\n  ret v2\nfn @fill\n  sig (ptr) -> void\nb0(v0: ptr):\n  v1 = iconst.i64 9\n  store v1, v0 align 3\n  ret\n",
+    );
+    for f in 0..2u32 {
+        let far = f == 1;
+        if far {
+            lir.push_str("fn @far\n  sig (ptr, i64) -> i64\n  slot s0 size 4096 align 3\n");
+        } else {
+            lir.push_str("fn @near\n  sig (ptr, i64) -> i64\n");
+        }
+        lir.push_str(
+            "b0(v0: ptr, v1: i64):\n  v2 = load.i64 v0 align 3\n  v3 = load.i64 v0+8 align 3\n  v4 = load.i64 v0+16 align 3\n  v5 = load.i64 v0+24 align 3\n  v6 = iconst.i64 0\n  v7 = icmp.eq v1, v6\n  br v7, b1, b2(v1)\nb1: unlikely\n",
+        );
+        if far {
+            lir.push_str("  v8 = slotaddr s0\n  call @fill(v8) : (ptr) -> void\n  v9 = load.i64 v8 align 3\n");
+        } else {
+            lir.push_str("  v8 = iconst.i64 8\n  v9 = call.i64 @bump(v8) : (i64) -> i64\n");
+        }
+        lir.push_str(
+            "  jmp b2(v9)\nb2(v10: i64):\n  v11 = add.i64 v2, v3\n  v12 = add.i64 v11, v4\n  v13 = add.i64 v12, v5\n  v14 = add.i64 v13, v10\n  ret v14\n",
+        );
+    }
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    assert(
+        object_of(&lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(object_of(&lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // `stp xa, xb, [sp, #off]` and `ldp` of x0..x15: two pairs in `near`.
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA90003E0), 2);
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA94003E0), 2);
+    // The same from x17: two pairs in `far`.
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA9000220), 2);
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA9400220), 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t near(const int64_t *, int64_t);\nint64_t far(const int64_t *, int64_t);\nint main(void) {\n  int64_t a[4] = {1, 20, 300, 4000};\n  if (near(a, 5) != 4326) return 1;\n  if (near(a, 0) != 4330) return 2;\n  if (far(a, 5) != 4326) return 3;\n  if (far(a, 0) != 4330) return 4;\n  return 0;\n}\n";
+    assert_eq(run_native(&lir, drv), 0);
+}
+
+// A call in a rare block saves the caller-saved registers whose values a path from it reads, not the
+// ones their ranges alone keep there: `b1` joins `b3`, which lies inside the ranges of `v5` and `v6`
+// (`b4`, laid out after it, reads them), so both are in registers at the call; no path from `b1` reads
+// them. It stores through `v0` after the call. arm64 saves that one register, so no pair.
+@test
+fn a_rare_call_saves_only_the_values_read_after_it() {
+    let lir = M"(lir ptr 8
+sym @bump fn global noinline
+sym @pick fn global
+fn @bump
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = add.i64 v0, v1
+  ret v2
+fn @pick
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = load.i64 v0 align 3
+  v4 = load.i64 v0+8 align 3
+  v5 = load.i64 v0+16 align 3
+  v6 = load.i64 v0+24 align 3
+  v7 = iconst.i64 0
+  v8 = icmp.eq v1, v7
+  br v8, b2, b1
+b1: unlikely
+  v9 = iconst.i64 8
+  v10 = call.i64 @bump(v9) : (i64) -> i64
+  store v10, v0 align 3
+  jmp b3
+b2:
+  v11 = add.i64 v3, v4
+  store v11, v0 align 3
+  v12 = icmp.ne v2, v7
+  br v12, b4, b3
+b3:
+  v13 = iconst.i64 1
+  ret v13
+b4:
+  v14 = add.i64 v5, v6
+  ret v14
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    // `stp xa, xb, [sp, #off]` and `ldp` of x0..x15: none. `str xa, [sp, #off]` and `ldr`: one each.
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA90003E0), 0);
+    assert_eq(elf_text_count(&obj, 0xFFC043F0, 0xA94003E0), 0);
+    assert_eq(elf_text_count(&obj, 0xFFC003F0, 0xF90003E0), 1);
+    assert_eq(elf_text_count(&obj, 0xFFC003F0, 0xF94003E0), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t pick(int64_t *, int64_t, int64_t);\nint main(void) {\n  int64_t a[4] = {1, 20, 300, 4000};\n  int64_t r = pick(a, 0, 0);\n  if (r != 1 || a[0] != 21) return 1;\n  a[0] = 1;\n  r = pick(a, 0, 1);\n  if (r != 4300 || a[0] != 21) return 2;\n  a[0] = 1;\n  r = pick(a, 1, 1);\n  return !(r == 1 && a[0] == 9);\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A 64-bit extension of a 32-bit value that only comparisons with a register and address sums read takes
+// no register of its own (`lv::FOLD_XUSE`): arm64 compares and adds the narrow register extended (`cmp
+// x, w, uxtw`, `add x, x, w, uxtw #2`), and a load that takes the sum extends its index. `at` bounds an
+// index and reads the element; `bump` reads it, adds 1 and writes it back, so its address is a value.
+@test
+fn an_extended_index_a_bound_compares_takes_no_copy() {
+    let lir = M"(lir ptr 8
+sym @at fn global
+sym @bump fn global
+fn @at
+  sig (ptr, i32, i64) -> i32
+b0(v0: ptr, v1: i32, v2: i64):
+  v3 = zext.i64 v1
+  v4 = icmp.ult v3, v2
+  br v4, b1, b2
+b1:
+  v5 = ptradd v0, v3 * 4
+  v6 = load.i32 v5 align 2
+  ret v6
+b2:
+  v7 = iconst.i32 0
+  ret v7
+fn @bump
+  sig (ptr, i32, i64) -> i32
+b0(v0: ptr, v1: i32, v2: i64):
+  v3 = zext.i64 v1
+  v4 = icmp.ult v3, v2
+  br v4, b1, b2
+b1:
+  v5 = ptradd v0, v3 * 4
+  v6 = load.i32 v5 align 2
+  v7 = iconst.i32 1
+  v8 = add.i32 v6, v7
+  store v8, v5 align 2
+  ret v8
+b2:
+  v9 = iconst.i32 0
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    // `cmp xn, wm, uxtw` in both; `ldr wt, [xn, wm, uxtw #2]` in `at`; `add xd, xn, wm, uxtw #2` in `bump`.
+    assert_eq(elf_text_count(&obj, 0xFFE0FC1F, 0xEB20401F), 2);
+    assert_eq(elf_text_count(&obj, 0xFFE0FC00, 0xB8605800), 1);
+    assert_eq(elf_text_count(&obj, 0xFFE0FC00, 0x8B204800), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint32_t at(const int32_t *, uint32_t, int64_t);\nint32_t bump(int32_t *, uint32_t, int64_t);\nint main(void) {\n  int32_t a[4] = {10, 20, 30, 40};\n  if (at(a, 2, 4) != 30 || at(a, 3, 4) != 40 || at(a, 4, 4) != 0 || at(a, 0xFFFFFFFFu, 4) != 0) return 1;\n  if (bump(a, 1, 4) != 21 || a[1] != 21 || bump(a, 7, 4) != 0 || a[3] != 40) return 2;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A branch whose taken edge enters the block that follows, its moves made before the branch, falls into
+// that block: the other edge alone branches, and no jump follows the branch. `sums`' entry passes the
+// loop its first index and a sum of 0, or leaves when the index is past the bound; the loop's exit is
+// the same block, laid out after the loop.
+@test
+fn a_branch_into_the_next_block_after_its_moves_falls_through() {
+    let lir = M"(lir ptr 8
+sym @sums fn global
+fn @sums
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = icmp.ult v1, v2
+  br v5, b1(v1, v3), b2
+b1(v6: i64, v7: i64):
+  v8 = add.i64 v7, v6
+  store v8, v0 align 3
+  v9 = add.i64 v6, v4
+  v10 = icmp.ult v9, v2
+  br v10, b1(v9, v8), b2
+b2:
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Linux x86-64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj),
+        "the Linux arm64 object",
+    );
+    // No `b`.
+    assert_eq(elf_text_count(&obj, 0xFC000000, 0x14000000), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nint64_t sums(int64_t *, int64_t, int64_t);\nint main(void) {\n  int64_t out = -1;\n  if (sums(&out, 5, 4) != 4 || out != -1) return 1;\n  if (sums(&out, 0, 4) != 4 || out != 6) return 2;\n  if (sums(&out, 3, 5) != 5 || out != 7) return 3;\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A block the layout puts after the block it jumps to (`b5`, after the return's block `b6`) reads a value
+// that is live into that block (the result's pointer, which the return gives back), and is not rare: the
+// value's range runs to the later block's end (`Live::rare_entries`, for every such edge), so it keeps
+// its register to the jump. `@scaled` returns what the C driver expects on each path; it compiles for
+// every native target.
+@test
+fn a_value_read_in_a_block_laid_out_after_its_successor_lives_to_the_jump() {
+    let lir = M"(lir ptr 8
+sym @scaled fn global
+fn @scaled
+  layout l0 size 24 align 3 [0 i64, 8 i64, 16 i8, 17 i8, 18 i8, 19 i8, 20 i8]
+  sig (l0, i32) -> l0
+b0(v0: ptr, v1: i32, v2: ptr):
+  v3 = iconst.i8 1
+  v4 = iconst.i8 0
+  v5 = iconst.i64 0
+  v6 = iconst.i64 24
+  v7 = load.i8 v0+16 align 0
+  v8 = icmp.ne v7, v3
+  br v8, b2(v8), b1
+b1:
+  v9 = load.i8 v0+20 align 0 bool
+  jmp b2(v9)
+b2(v10: i8):
+  br v10, b5, b3
+b3:
+  v11 = load.i8 v0+18 align 0
+  v12 = zext.i32 v11
+  v13 = icmp.ult v12, v1
+  br v13, b4(v12), b4(v1)
+b4(v14: i32):
+  v15 = trunc.i8 v14
+  store v3, v2+16 align 0
+  v16 = load.i8 v0+17 align 0
+  store v16, v2+17 align 0
+  store v15, v2+18 align 0
+  store v4, v2+19 align 0
+  store v5, v2 align 3
+  store v5, v2+8 align 3
+  store v4, v2+20 align 0
+  jmp b6
+b5:
+  memcpy.overlap v2, v0, v6
+  jmp b6
+b6:
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS arm64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+typedef struct { int64_t lo, hi; uint8_t st, deg, m, rng, tog; } P;
+P scaled(P, uint32_t);
+int main(void) {
+  P a = {3, 4, 1, 2, 9, 1, 0}, b = {3, 4, 2, 2, 9, 1, 0}, c = {3, 4, 1, 2, 9, 1, 1};
+  P r = scaled(a, 5);
+  if (r.st != 1 || r.deg != 2 || r.m != 5 || r.rng != 0 || r.lo != 0 || r.hi != 0 || r.tog != 0) return 1;
+  r = scaled(a, 12);
+  if (r.m != 9) return 2;
+  r = scaled(b, 5);
+  if (r.st != 2 || r.m != 9 || r.lo != 3 || r.hi != 4 || r.rng != 1) return 3;
+  r = scaled(c, 5);
+  if (r.st != 1 || r.m != 9 || r.tog != 1 || r.lo != 3) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A sum of bytes that lives past its block, read by unsigned comparisons in two blocks and by an
+// extension: it is extended once, in its own register at the first reader in its block, and the readers
+// after take it as it is. arm64 has one `uxtb` (53001C00 under the registers); x86-64 compiles it too. It
+// gives the C results.
+@test
+fn a_narrow_value_in_its_register_is_extended_once() {
+    let lir = M"(lir ptr 8
+sym @cls fn global
+fn @cls
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = load.i8 v0+1 align 0
+  v3 = add.i8 v1, v2
+  v4 = iconst.i8 7
+  v5 = icmp.ult v3, v4
+  br v5, b1, b2
+b1:
+  v6 = iconst.i8 3
+  v7 = icmp.ugt v3, v6
+  br v7, b3, b2
+b2:
+  v8 = iconst.i64 100
+  ret v8
+b3:
+  v9 = zext.i64 v3
+  ret v9
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    let mut ext: u32 = 0;
+    let mut at: usize = 0;
+    while at + 4 <= obj.len() {
+        let w = obj[at] as u32 | obj[at + 1] as u32 << 8 | obj[at + 2] as u32 << 16 | obj[at + 3] as u32 << 24;
+        ext += ((w & 0xFFFFFC00) == 0x53001C00) as u32;
+        at += 4;
+    }
+    assert_eq(ext, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t cls(const uint8_t *);
+int main(void) {
+  uint8_t a[2] = {2, 3}, b[2] = {1, 1}, c[2] = {200, 61}, d[2] = {250, 4};
+  if (cls(a) != 5) return 1;
+  if (cls(b) != 100) return 2;
+  if (cls(c) != 5) return 3;
+  if (cls(d) != 100) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An overflow flag that lives past its block, a call after it in that block, holds a register of the plan
+// from its block's start: the sum that sets it writes that register (`seg_take` binds a flag at its
+// definition), so the branch in the next block reads the flag, not what a temporary held before the call. `@chk` gives the C results; it
+// compiles for every native target.
+@test
+fn a_flag_that_lives_across_a_call_is_set_in_its_register() {
+    let lir = M"(lir ptr 8
+sym @twice fn global
+sym @chk fn global
+fn @chk
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2, v3 = addo.s.i64 v0, v1
+  v4 = call.i64 @twice(v2) : (i64) -> i64
+  jmp b1
+b1:
+  br v3, b2, b3
+b2:
+  v5 = iconst.i64 -1
+  ret v5
+b3:
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("macos", false), a64, 0, &mut obj), "the macOS arm64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t chk(int64_t, int64_t);
+int64_t twice(int64_t x) { volatile int64_t junk[8] = {1, 1, 1, 1, 1, 1, 1, 1}; return x * 2 + junk[3] - 1; }
+int main(void) {
+  if (chk(3, 4) != 14) return 1;
+  if (chk(INT64_MAX, 1) != -1) return 2;
+  if (chk(-5, 5) != 0) return 3;
+  if (chk(INT64_MIN, -1) != -1) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The 32-bit words of object `obj` that are `val` under `mask`: an arm64 instruction's count.
+const fn a64_words(obj: &Vector<u8>, mask: u32, val: u32) u32 {
+    let mut n: u32 = 0;
+    let mut at: usize = 0;
+    while at + 4 <= obj.len() {
+        let w = obj[at] as u32 | obj[at + 1] as u32 << 8 | obj[at + 2] as u32 << 16 | obj[at + 3] as u32 << 24;
+        n += ((w & mask) == val) as u32;
+        at += 4;
+    }
+    return n;
+}
+
+// A loop that steps a pointer and sums into accumulators holds each of them in one register around the
+// back edge: the step and the sum write over the value they replace (`lv::over_inst`, `lv::Live.three`).
+// arm64 then steps the pointer in its last access (a post-indexed `ldp` and `ldrb`) and accumulates in
+// place (`uadalp` over the accumulator): the two vector copies are the accumulators' first values.
+// `@u8sum` sums bytes: 32 at a time, then one at a time; it compiles for every native target.
+@test
+fn a_loops_pointer_and_accumulators_keep_their_registers() {
+    let lir = M"(lir ptr 8
+sym @u8sum fn global
+fn @u8sum
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 -32
+  v3 = and.i64 v1, v2
+  v4 = iconst.i64 0
+  v5 = iconst.i32 0
+  v6 = ptradd v0, v1 * 1
+  v7 = icmp.ne v3, v4
+  br v7, b1, b4(v0, v5)
+b1:
+  v8 = wconst.v4i32 0x0, 0x0
+  v9 = ptradd v0, v3 * 1
+  jmp b2(v8, v8, v0)
+b2(v10: v4i32, v11: v4i32, v12: ptr):
+  v13 = load.v16i8 v12 align 0
+  v14 = load.v16i8 v12+16 align 0
+  v15 = vsumw.v4i32 v10, v13
+  v16 = vsumw.v4i32 v11, v14
+  v17 = ptradd v12+32
+  v18 = icmp.ult v17, v9
+  br v18, b2(v15, v16, v17), b3
+b3:
+  v19 = add.v4i32 v15, v16
+  v20 = vop.reduce_add.i32 (v19)
+  jmp b4(v9, v20)
+b4(v21: ptr, v22: i32):
+  v23 = icmp.ult v21, v6
+  br v23, b5(v21, v22), b6(v22)
+b5(v24: ptr, v25: i32):
+  v26 = load.i8 v24 align 0
+  v27 = zext.i32 v26
+  v28 = add.i32 v25, v27
+  v29 = ptradd v24+1
+  v30 = icmp.ult v29, v6
+  br v30, b5(v29, v28), b6(v28)
+b6(v31: i32):
+  ret v31
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // LDP post-indexed; LDRB post-indexed; ORR Vd.16B, Vn.16B, Vn.16B (a vector copy).
+    let pairs = a64_words(&obj, 0xFFC00000, 0xACC00000);
+    let bytes = a64_words(&obj, 0xFFE00C00, 0x38400400);
+    let copies = a64_words(&obj, 0xFFE0FC00, 0x4EA01C00);
+    assert_eq(pairs, 1);
+    assert_eq(bytes, 1);
+    assert_eq(copies, 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int32_t u8sum(const uint8_t *, int64_t);
+int main(void) {
+  static uint8_t a[1000];
+  static const int64_t ns[6] = {0, 5, 32, 77, 96, 1000};
+  for (int i = 0; i < 1000; i++) a[i] = (uint8_t)(i * 7 + 3);
+  for (int k = 0; k < 6; k++) {
+    int32_t want = 0;
+    for (int64_t i = 0; i < ns[k]; i++) want += a[i];
+    if (u8sum(a, ns[k]) != want) return k + 1;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// Values stay in the registers they are in. `@slsum`: the parts of a slice passed in registers, which the
+// entry's loads take, stay there (`lv::Live.part_in`), and nothing is stored. `@keep`: a cast of a pointer
+// that ends there takes its register, though the plan held it (no other value of the plan takes it in the
+// block: `lv::Live.solo`); the second load of the pair moves to the result register, which the address
+// that ended there leaves without a store. `@dm`: the sum is made in the result register, which a
+// parameter that ended before held. `@ix`: an indexed pointer sum that lives on takes the register of an
+// operand that ends there. arm64 then copies three registers: the loop's stepped pointer, read after its
+// step, and the sum into the result register (`@slsum`); the loaded word into it (`@keep`).
+@test
+fn values_stay_in_the_registers_they_are_in() {
+    let lir = M"(lir ptr 8
+sym @slsum fn global
+sym @keep fn global
+sym @dm fn global
+sym @ix fn global
+fn @slsum
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.ptr v0 align 0
+  v2 = load.i64 v0+8 align 0
+  v3 = iconst.i32 0
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = icmp.eq v2, v4
+  br v6, b3, b1(v1, v2, v3)
+b1(v7: ptr, v8: i64, v9: i32):
+  v10 = ptradd v7+4
+  v11 = sub.i64 v8, v5
+  v12 = load.i32 v7 align 2
+  v13 = add.i32 v9, v12
+  v14 = icmp.eq v11, v4
+  br v14, b2(v13), b1(v10, v11, v13)
+b2(v15: i32):
+  ret v15
+b3:
+  ret v3
+fn @keep
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.ptr v0 align 3
+  v3 = load.i64 v0+8 align 3
+  v4 = iconst.i64 0
+  v5 = icmp.ne v3, v4
+  br v5, b1, b2
+b1:
+  v6 = ptrtoint.i64 v2
+  store v6, v1 align 3
+  ret v3
+b2:
+  ret v4
+fn @dm
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = iconst.i32 0
+  v3 = icmp.eq v1, v2
+  br v3, b2, b1
+b1:
+  v4 = udiv.i32 v0, v1
+  v5 = urem.i32 v0, v1
+  v6 = add.i32 v4, v5
+  ret v6
+b2:
+  ret v2
+fn @ix
+  sig (ptr, i64) -> ptr
+b0(v0: ptr, v1: i64):
+  v2 = ptradd v0, v1 * 8
+  jmp b1
+b1:
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // ORR Xd/Wd, zr, Xm/Wm (a register copy); STR Xt, [sp, #imm].
+    let copies = a64_words(&obj, 0x7FE0FFE0, 0x2A0003E0);
+    let stores = a64_words(&obj, 0xFFC003E0, 0xF90003E0);
+    assert_eq(copies, 3);
+    assert_eq(stores, 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct sl { const int32_t *p; int64_t n; };
+int32_t slsum(struct sl);
+int64_t keep(void **, uint64_t *);
+int32_t dm(uint32_t, uint32_t);
+const int64_t *ix(const int64_t *, int64_t);
+int main(void) {
+  static const int32_t w[5] = {3, 5, 7, 11, 13};
+  struct sl s = {w, 5}, e = {w, 0};
+  if (slsum(s) != 39 || slsum(e) != 0) return 1;
+  void *q[2] = {(void *)w, (void *)(uintptr_t)9};
+  uint64_t out = 0;
+  if (keep(q, &out) != 9 || out != (uint64_t)(uintptr_t)w) return 2;
+  q[1] = 0;
+  out = 1;
+  if (keep(q, &out) != 0 || out != 1) return 3;
+  if (dm(47, 5) != 11 || dm(47, 0) != 0) return 4;
+  static const int64_t v[3] = {4, 0, 21};
+  if (ix(v, 2) != v + 2 || ix(v + 1, 0) != v + 1) return 5;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The `mov r64, r64` instructions in x86-64 object `obj` (REX.W 89 /r with two registers).
+const fn x64_copies(obj: &Vector<u8>) u32 {
+    let mut n: u32 = 0;
+    let mut at: usize = 0;
+    while at + 3 <= obj.len() {
+        let rex = obj[at];
+        n += ((rex == 0x48 || rex == 0x49 || rex == 0x4C || rex == 0x4D) && obj[at + 1] == 0x89 && obj[at + 2] >= 0xC0) as u32;
+        at += 1;
+    }
+    return n;
+}
+
+// On x86-64 a result that lives on takes the register of an operand that ends at its instruction when
+// the instruction may be written over that operand (`lv::Live.two`), and the emitter writes it there
+// (`def_over` names the operand). A binary search keeps its two bounds in one register each around the
+// loop: the selects are written over the side that is the old bound (the true side with the condition
+// inverted), so the back edge copies nothing; the one copy is the length before the loop. `@find` gives
+// the C result.
+@test
+fn an_x86_64_binary_search_keeps_its_bounds_in_place() {
+    let lir = M"(lir ptr 8
+sym @find fn global
+fn @find
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = icmp.eq v1, v3
+  br v5, b2(v3), b1(v3, v1)
+b1(v6: i64, v7: i64):
+  v8 = sub.i64 v7, v6
+  v9 = lshr.i64 v8, v4
+  v10 = add.i64 v6, v9
+  v11 = ptradd v0, v10 * 8
+  v12 = load.i64 v11 align 3
+  v13 = icmp.ult v12, v2
+  v14 = add.i64 v10, v4
+  v15 = select.i64 v13, v14, v6
+  v16 = select.i64 v13, v7, v10
+  v17 = icmp.ult v15, v16
+  br v17, b1(v15, v16), b2(v15)
+b2(v18: i64):
+  ret v18
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the Linux object");
+    assert_eq(x64_copies(&obj), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t find(const uint64_t *, int64_t, uint64_t);
+int main(void) {
+  static const uint64_t w[7] = {1, 3, 5, 7, 9, 11, 13};
+  for (int64_t k = 0; k <= 14; k++) {
+    int64_t want = 0;
+    while (want < 7 && w[want] < (uint64_t)k) want++;
+    if (find(w, 7, (uint64_t)k) != want) return (int)k + 1;
+  }
+  if (find(w, 0, 5) != 0) return 20;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The `movaps xmm, xmm` instructions in x86-64 object `obj` (0F 28 /r with two registers).
+const fn x64_vcopies(obj: &Vector<u8>) u32 {
+    let mut n: u32 = 0;
+    let mut at: usize = 0;
+    while at + 3 <= obj.len() {
+        n += (obj[at] == 0x0F && obj[at + 1] == 0x28 && obj[at + 2] >= 0xC0) as u32;
+        at += 1;
+    }
+    return n;
+}
+
+// On x86-64 the emitters write a result over the operand that holds the plan's register: a sum over its
+// second operand (`@addb`: `swaps`), an indexed pointer sum over its index (`@lea`: one `lea` reads both
+// operands before it writes, `def_read`), a vector select over its false side, the accumulator of a
+// maximum (`@vmax`). Two register copies are left (the product into the result register, the count
+// before its shift) and four vector copies (the selects' temporaries). They give the C results.
+@test
+fn x86_64_emitters_write_over_the_operand_in_the_plans_register() {
+    let lir = M"(lir ptr 8
+sym @addb fn global
+sym @lea fn global
+sym @vmax fn global
+fn @addb
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = load.i64 v0+8 align 3
+  jmp b1
+b1:
+  v3 = add.i64 v1, v2
+  jmp b2
+b2:
+  v4 = mul.i64 v3, v1
+  ret v4
+fn @lea
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3
+  v2 = load.i64 v0+8 align 3
+  jmp b1
+b1:
+  v3 = ptradd v1, v2 * 8
+  jmp b2
+b2:
+  store v3, v0 align 3
+  v4 = load.i64 v1 align 3
+  ret v4
+fn @vmax
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = wconst.v4i32 0x0, 0x0
+  v3 = ptradd v0, v1 * 16
+  jmp b1(v2, v0)
+b1(v4: v4i32, v5: ptr):
+  v6 = load.v4i32 v5 align 2
+  v7 = vcmp.sgt.v4i32 v6, v4
+  v8 = vsel.v4i32 v7, v6, v4
+  v9 = ptradd v5+16
+  v10 = icmp.ult v9, v3
+  br v10, b1(v8, v9), b2
+b2:
+  v11 = vop.reduce_max.s.i32 (v8)
+  ret v11
+)";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, OMIT_FP, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, OMIT_FP, &mut obj), "the Linux object");
+    assert_eq(x64_copies(&obj), 2);
+    assert_eq(x64_vcopies(&obj), 4);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t addb(const int64_t *);
+int64_t lea(void **);
+int32_t vmax(const int32_t *, int64_t);
+int main(void) {
+  static const int64_t a[2] = {3, 4};
+  if (addb(a) != 21) return 1;
+  static const int64_t w[3] = {7, 9, 11};
+  void *q[2] = {(void *)w, (void *)(uintptr_t)2};
+  if (lea(q) != 7 || q[0] != (void *)(w + 2)) return 2;
+  static const int32_t v[12] = {1, 2, 3, 4, 9, 0, 70, 1, 5, 6, 2, 3};
+  if (vmax(v, 3) != 70) return 3;
+  return 0;
+}
+)";
     assert_eq(run_native(lir, drv), 0);
 }

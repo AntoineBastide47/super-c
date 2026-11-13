@@ -21,44 +21,100 @@ set first: it states the value, register and frame model.
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
    take the registers first; a call in a rare block
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
-   for the homes.
+   for the homes. A value's range runs through the rare blocks before its last read, so the save
+   leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
+   over the laid-out blocks made on first use), and arm64 saves two registers per `stp`.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
    the LIR slots, then the spills; the callee-saved registers and the frame pointer last.
-3. Homes: `Live::plan` weighs each value by the frequencies of its definition's and uses' blocks
-   (`Live::frequencies`: a static estimate after LLVM's, propagated in reverse postorder, a branch
-   split evenly but a rare successor's share 1 in 16, a loop header 8 times its entering edges, an edge
-   out of a loop 8 times less per loop left) and gives each value a home class per register file (none, callee-saved for a value
-   a loop keeps, caller-saved); constants and symbol and slot addresses rematerialize at each use.
-   A displaced interval can keep its register prefix up to a block boundary no backward edge
-   crosses. `cut` and sorted `splits` describe these prefixes; `home_at` selects the class at
-   the current layout position. Shared homes, aggregate entry pointers and shrink-wrapped
-   functions do not split. Reserve the suffix stack slots before emission. Every edge that
-   leaves a prefix for a block that reads the value, including one that skips the cut block, writes
-   the suffix slot (`save_splits`).
-   Register segments (`Live::segments`): a value the scan left without a home holds a register over
-   the blocks `Live.sin` lists it for and is in its stack home in the others. To take them, fill
-   `Live.cfirst` and `clast` before `plan` (per block, the first and last call that writes the
-   caller-saved homes; `wfirst` and `wlast` too when argument registers may hold a segment), mark
-   with `WANT_WHOLE` each value that must not change places, and call `place::Core`'s hooks:
-   `seg_reset` after `plan`; at a block's start, once the register state is set, `seg_leave`, then
-   open each listed segment and `seg_in` it unless an instruction of the block defines its value
-   (that definition takes the register: no register holds a value before the value exists, or code
-   that saves and restores registers around an instruction writes the old content over the
-   result), store a parameter that keeps a stack home (`seg_mem`) and load one that arrived in
-   memory; after an instruction that defines a segment's value, its store when it keeps a stack
-   home; before a terminator's branch, open the segments its edges enter and spill a value that
-   enters one from a temporary; in the edge's moves, `seg_moves`. Read a target parameter's home
-   through `Core::pva` at every edge site (the current block may hold it elsewhere). A segment
-   keeps its register to its span's end: give it to no other value, and make no early edge move
-   (before the branch) that writes it while another live value holds it.
-   Steps (`Live.steps`, set before `run`): `Live.fstep` names, per instruction, the header parameter
-   whose register it is made in when it is passed back from another block than its own. Take that
-   register where the instruction takes its home (`step_home` of the arm64 and x86-64 generators):
-   the parameter keeps the ownership, and a step that reads the parameter must be one machine
-   instruction that reads its operands before it writes its result. A generator that leaves the flag
-   clear gets no such step and no longer parameter ranges.
+3. Homes: `Live::assign` gives each value that asks for one (`want`: `WANT_CALLEE`, `WANT_SCRATCH`,
+   `WANT_V`, `WANT_UPPER`, `WANT_WHOLE`) a specific register per block. It weighs each value by the
+   frequencies of its definition's and uses' blocks (`Live::frequencies`: a static estimate after
+   LLVM's, propagated in reverse postorder, a branch split evenly but a rare successor's share 1 in
+   16, a loop header 8 times its entering edges, an edge out of a loop 8 times less per loop left; a
+   block that runs passes each successor a share of at least 1, so no chain of branches leaves the
+   blocks after it a frequency of 0) and places the heaviest first. Constants and symbol and slot
+   addresses rematerialize at each use.
+   - Liveness is exact per value: the blocks it is live in (a backward walk from its reads), and in
+     each block the positions from its definition to its last read. Two values hold one register when
+     they are live at no common position. A block parameter takes the register of the argument an
+     edge passes it, and a result that of its first operand when that ends there (`Live::over_inst`: a
+     `step_op`, a checked sum or difference, an integer conversion, a pointer plus a constant, a
+     widening sum over its accumulator), so those moves are not made. Set `Live.three` to let the
+     result of a `three_op` take the register of any operand that ends there (a select's side, a
+     commutative operation's second operand, an index): arm64 sets it alone (its instructions name
+     their result apart from their operands, and every emitter reads all of them before it writes);
+     x86-64 sets `Live.two` with it, so only an operand the instruction may be written over gives its
+     register (`Live::two_op`: either operand of an operation that commutes, the accumulator of a sum
+     with a carry, a select's side, the base or index of a pointer sum, a load's address). Without
+     these rules a loop's stepped pointer or accumulator has a register of its own, the back edge
+     copies it, and no access steps the pointer (arm64's post-indexed loads and stores). The planner prefers such registers
+     (`Live::hints`: placed partners weighed by edge frequency, the register a parameter arrives in,
+     the return register `Live.rhint`).
+   - The heaviest value is placed first, but a block parameter that lives across a call is placed no
+     later than the step that replaces it after the call (`Live.kw`): the parameter takes a
+     callee-saved register, and the step, which alone could take a caller-saved one, follows it there.
+   - Fill `Live.part_in` (and `part_quiet`) before `assign` for the loads that take the part
+     registers of an aggregate the body receives in registers (`place::parts_taken`, which the entry
+     decides the same way): the plan then leaves each load in the register it arrives in, as it
+     leaves a parameter of the signature (`arr`).
+   - Pass the register sets (`Sets`: callee-saved, caller-saved, the caller-saved ones that pass
+     arguments too, the arrival registers a quiet parameter may keep, x86-64's upper vector registers,
+     the ones to give out first), the counts each block may hold (`Caps`, `Live.jcap`, `scap`), per
+     signature parameter the registers it arrives in (`arr`), and the call tables: fill `Live.cfirst`
+     and `clast` before `assign` (per block, the first and last call that writes the caller-saved
+     registers; `wfirst` and `wlast` for the argument registers). A caller-saved register holds a
+     value only in the blocks where no such call runs while it lives (`Live::calm`), so a value that
+     lives across a call may ask for both classes.
+   - A value no register holds in all of its blocks takes the one that gains most over a part of them
+     (`Live::spans`): it keeps a stack home (`Live.seg_mem`), written once where it is defined, and
+     an edge into such a block from one that does not hold it loads it. A span is kept when the loads
+     it saves run more often than the edges that enter it; a load on one of a terminator's several
+     edges weighs `EDGE_BLOCK` times (a block of its own that jumps on), and a late edge's stub loads
+     nothing, so no span starts there. A value that finds no register over all of its blocks may take
+     one from a holder that is idle in those blocks (`Live::evict`: the holder lives through them and
+     reads nothing there); the holder then keeps a stack home and is loaded on the edges back into
+     its other blocks.
+   - The plan is the segments (`Live.seg_x`, `seg_a`, `seg_b`, `seg_r`, `sin`, `sin_at`, `segd`,
+     `seg_mem`) and, per layout position, the registers of the plan in that block (`Live.bmask`) and
+     those of them one value alone holds there and no edge out of the block writes (`Live.solo`).
+   The generator's contract (`place::Core`'s hooks and its own):
+   - `seg_reset` after `assign`. At a block's start set `fixed_busy` to the pinned registers and
+     `bmask` of the block: no temporary takes a register of the plan in that block, but a `solo`
+     one after its value ends (`Core::release` clears it from `fixed_busy`; a result that only
+     renames an operand that ends there takes it: arm64 `takes`, x86-64 `def_over`). Then `seg_leave`,
+     and bind each listed segment whose value an earlier block defines (`seg_bind`: a temporary in the
+     register leaves it first, `vacate_temp`); store a parameter that keeps a stack home and load one
+     that arrived in memory or in a slot.
+   - A definition takes the plan's register (`seg_take`). When an operand the instruction still
+     reads holds that register, only an emitter that reads its operands before it writes its result
+     may write it (arm64: `def_step` sets `stepping`; x86-64: `def_over` and `def_pass` name the
+     operand the result is computed over, `def_read` marks one instruction that reads them all, a
+     `lea`); another result is made in a temporary and moves there after the instruction
+     (`settle` in `end_inst`: an operand that ended at the instruction leaves the register without a
+     store, and a value that arrived in its plan register stays). A value made before its own instruction (a pair's second access, a
+     call result's part) takes the register only when nothing takes it in between (`early`). A flag
+     is bound by the instruction that sets it.
+   - After an instruction that defines a value with a stack home, store it (`seg_store`). Before a
+     terminator's branch, for each edge: a temporary that lives on leaves the registers the edge
+     writes (`seg_edge`, `param_home`: `vacate_live`); in the edge's moves, `seg_moves`. Read a target
+     parameter's home through `Core::pva` at every edge site. Make no early edge move (before the
+     branch) that writes a register of the plan on an edge that enters a segment (`keeps_test`).
+   - An x86-64 emitter that may compute its result over either of two operands takes the one that
+     holds the plan's register (`planned`: `swaps` for a commutative operation, the select's side
+     with the condition inverted, the vector emitters' second operand).
+   - A value that takes a parameter's register at its definition without a register of the plan (a
+     step the back edge passes) owns the register as a temporary (`set_owner`), so a value the plan
+     puts there later evicts it.
+   - A value's zero-extended state (`Va.clean`) holds wherever the plan moves it (`Core::seg_in` keeps
+     it for a value made before): reload a narrow value zero-extended, and extend one in place only
+     where every later reader comes through (its defining block, or the block where it ends).
+   - A range runs to the last block in the layout that reads the value. A block the layout puts after
+     a block it branches to runs inside the ranges of the values live at that target: `Live::
+     rare_entries` extends and keeps them for every such edge.
 4. Blocks in layout order, each instruction emitted by its op. A value live past its block is in its
-   home before the branch; an edge moves the block arguments (`edge_homes`). A block whose only
+   home before the branch; an edge moves the block arguments (`edge_homes`). A two-way branch whose
+   taken edge enters the block that follows, its moves made before the branch, falls into that block:
+   the other edge alone branches (`branch2`). A block whose only
    predecessor falls into it keeps the register state (`Live::continues`); another, whose predecessors
    the layout all puts before it, starts with the instruction values every branch into it left in one
    register (`place::Core::join_note` at each branch, `join_in` at the block; an edge's moves write only
@@ -143,6 +199,10 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   select by an even-lanes mask of a float difference and sum is x86-64's `addsubps` or `addsubpd` (SSE3;
   `FOLD_ADDSUB_WIDE` of 32 bytes with AVX). An 8-byte vector moves to an integer register by FMOV (arm64)
   or MOVQ (x86-64).
+- Extension folds (arm64, `lv::FOLD_XUSE`): a 64-bit zero or sign extension of a 32-bit value that only
+  comparisons with a register and the indices of address sums read takes no register: each use extends
+  the narrow register (`cmp x, w, uxtw`, `add x, x, w, uxtw #2`, and a load or store that takes the sum
+  extends its index as under `lv::FOLD_XIDX`). x86-64 has no such operand form and keeps its copy.
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is

@@ -14632,8 +14632,10 @@ fn optimized_copying(text: str, arg_copy: u32) (Package, Package) {
 
 // A by-value aggregate argument that a copy into a slot wrote, with no write since, passes the copy's
 // source in its place when the target copies such an argument itself (`Package.arg_copy`): `pick`'s copy
-// goes. `wrote`'s source changes between the copy and the call, `big`'s aggregate is larger than the
-// target copies, and with no `arg_copy` `pick`'s copy stays. The results are the same.
+// goes. `wrote`'s source changes between the copy and the call: its call takes the slot, which holds the
+// bytes from before the write (the copy is the loads of its two words, stored into the slot before the
+// call). `big`'s aggregate is larger than the target copies, and with no `arg_copy` `pick`'s copy stays.
+// The results are the same.
 @test
 fn copies_into_aggregate_arguments_pass_their_source() {
     let src = M"(lir ptr 8
@@ -14721,7 +14723,11 @@ b0(v0: i64):
     let (b, a) = optimized_copying(src, 16);
     let pick = text_of(&a, "pick");
     assert(pick.as_str().find("memcpy") < 0 && pick.as_str().find("slotaddr") < 0, pick.as_str());
-    assert(text_of(&a, "wrote").as_str().find("memcpy") >= 0, "a write to the source keeps the copy");
+    let wrote = text_of(&a, "wrote");
+    assert(
+        wrote.as_str().find("slotaddr") >= 0 && wrote.as_str().find("load.i64") < wrote.as_str().find("store v1"),
+        "a write to the source keeps the copy",
+    );
     assert(text_of(&a, "big").as_str().find("memcpy") >= 0, "a larger aggregate keeps its copy");
     // pick: 5 - 1; wrote: 5 - 1, the copy's bytes from before the store, which then writes 1 over the 5;
     // big: 1 - 100.
@@ -18501,4 +18507,575 @@ b0:
     let none: []u64 = [];
     // 0x1122334455667788: the byte at offset 1 is 0x77.
     same_result(&b, &a, "drive", none, 119);
+}
+
+// A store at a constant index of a slot is a store at that offset when its bytes stay inside the slot:
+// it leaves the other elements as they are, so the load of element 0 after it takes the value stored
+// there (the slot's address goes to a call: no promotion). `past` stores at index 4 of a slot of 4
+// elements on a path its test guards: that index stays an index, which the verifier does not hold
+// against the slot.
+@test
+fn an_access_at_a_constant_index_of_a_slot_takes_the_offset() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @sink fn global ext
+sym @f fn global
+sym @past fn global
+fn @f
+  sig (i64, i64) -> i64
+  slot s0 size 32 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 2
+  store v0, v2 align 3
+  v4 = ptradd v2, v3 * 8
+  store v1, v4 align 3
+  v5 = load.i64 v2 align 3
+  call @sink(v2) : (ptr) -> void
+  ret v5
+fn @past
+  sig (i64, ptr) -> i64
+  slot s0 size 32 align 3
+b0(v0: i64, v1: ptr):
+  v2 = slotaddr s0
+  v3 = iconst.i64 4
+  v4 = iconst.i64 0
+  store v0, v2 align 3
+  v5 = icmp.eq v0, v4
+  br v5, b1, b2
+b1:
+  v6 = ptradd v2, v3 * 8
+  store v0, v6 align 3
+  call @sink(v2) : (ptr) -> void
+  ret v4
+b2:
+  call @sink(v2) : (ptr) -> void
+  ret v0
+)",
+    );
+    verified(&a);
+    let f = text_of(&a, "f");
+    assert(!f.contains("load"), f.as_str());
+    assert(f.contains("store v1, v2+16"), f.as_str());
+    let p = text_of(&a, "past");
+    assert(p.contains("* 8"), p.as_str());
+}
+
+const FILLS: str<'static> = M"(@noinline
+fn count(a: []*mut u8, x: *mut u8) usize {
+    let mut n: usize = 0;
+    for i in 0..a.len() {
+        if a[i] == x {
+            n += 1;
+        }
+    }
+    return n;
+}
+@noinline
+fn nulls() usize {
+    let f = [null as *mut u8; 40];
+    return count(f[0..40], null);
+}
+@noinline
+fn same(x: *mut u8) usize {
+    let f = [x; 40];
+    return count(f[0..40], x);
+}
+fn main() i32 {
+    let mut b: u8 = 0;
+    println("{} {}", nulls(), same(&mut b));
+    return 0;
+}
+)";
+
+// `[v; n]` of a scalar: null pointers (bits all zero) are one fill, and any other value is stored into
+// each element, with no element read back. Both profiles print the same counts.
+@test
+fn an_array_of_one_scalar_fills_without_reading_an_element_back() {
+    let text = same_and_printed("fills", FILLS, "s");
+    let z = printed(&text, "nulls");
+    let s = printed(&text, "same");
+    if z.len() == 0 || s.len() == 0 {
+        eprintln("{}", text.as_str());
+    }
+    assert(z.contains("memset"), z);
+    assert(!z.contains("load"), z);
+    assert(s.contains("store"), s);
+    assert(!s.contains("load"), s);
+}
+
+// The occurrences of `pat` in `text`.
+const fn occurrences(text: &String, pat: str) u32 {
+    let mut n: u32 = 0;
+    let mut rest = text.as_str();
+    // Each step leaves one occurrence behind: at most the text's bytes.
+    for _ in 0..text.len() {
+        let at = rest.find(pat);
+        if at < 0 {
+            break;
+        }
+        n += 1;
+        rest = rest.slice(at as usize + pat.len(), rest.len());
+    }
+    return n;
+}
+
+// Two blocks that end the program the same way (the failure paths of two copies of one checked access:
+// each fills a slot of its own and calls the same function with it) are one block, which both branches
+// enter. The second block's slot address comes from a block that does not reach the first branch: the
+// shared block reads a copy of it in the entry. `other` fails with another value: its two blocks stay.
+@test
+fn blocks_that_end_the_program_alike_are_one() {
+    let (_, a) = optimized(
+        M"(lir ptr 8
+sym @fail fn global ext
+sym @f fn global
+sym @other fn global
+fn @f
+  sig (i64, i64, i64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = icmp.uge v0, v2
+  br v3, b2, b1
+b1:
+  v4 = slotaddr s1
+  v5 = icmp.uge v1, v2
+  br v5, b4, b3
+b2: unlikely
+  v6 = slotaddr s0
+  v7 = iconst.i64 7
+  store v7, v6 align 3
+  store v7, v6+8 align 3
+  call @fail(v6) : (ptr) -> void
+  unreachable
+b3:
+  v8 = add.i64 v0, v1
+  ret v8
+b4: unlikely
+  v9 = iconst.i64 7
+  store v9, v4 align 3
+  store v9, v4+8 align 3
+  call @fail(v4) : (ptr) -> void
+  unreachable
+fn @other
+  sig (i64, i64, i64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = icmp.uge v0, v2
+  br v3, b2, b1
+b1:
+  v4 = icmp.uge v1, v2
+  br v4, b4, b3
+b2: unlikely
+  v5 = slotaddr s0
+  v6 = iconst.i64 7
+  store v6, v5 align 3
+  call @fail(v5) : (ptr) -> void
+  unreachable
+b3:
+  v7 = add.i64 v0, v1
+  ret v7
+b4: unlikely
+  v8 = slotaddr s1
+  v9 = iconst.i64 8
+  store v9, v8 align 3
+  call @fail(v8) : (ptr) -> void
+  unreachable
+)",
+    );
+    verified(&a);
+    let f = text_of(&a, "f");
+    assert_eq(occurrences(&f, "call @fail"), 1);
+    assert_eq(occurrences(&f, "slot s"), 1);
+    let o = text_of(&a, "other");
+    assert_eq(occurrences(&o, "call @fail"), 2);
+}
+
+// A slot a call takes by value, as an aggregate the target passes in registers, is values all the same:
+// the call reads its two 8-byte chunks. `read` copies an element into the slot, writes a field, reads
+// another and passes the slot on: the copy is the loads of the element's first chunk and of the bytes
+// the write leaves, the field read a part of that chunk, and the chunks are stored into the slot right
+// before the call (the code generator passes such stores' values in the argument's registers). `made`
+// writes six fields and passes the slot: each chunk is its fields' bits combined. With no `arg_copy` the
+// slot keeps its memory. The results are the same.
+@test
+fn a_slot_passed_by_value_is_values() {
+    let src = M"(lir ptr 8
+sym @take fn global noinline
+sym @read fn global noinline
+sym @made fn global noinline
+sym @drive fn global
+fn @take
+  layout l0 size 16 align 2 [0 i32, 4 i32, 8 i32, 12 i16, 14 i8, 15 i8]
+  sig (l0) -> i64
+b0(v0: ptr):
+  v1 = load.i32 v0+4 align 2
+  v2 = load.i8 v0+14 align 0
+  v3 = zext.i64 v1
+  v4 = zext.i64 v2
+  v5 = add.i64 v3, v4
+  v6 = load.i16 v0+12 align 1
+  v7 = zext.i64 v6
+  v8 = add.i64 v5, v7
+  ret v8
+fn @read
+  layout l0 size 16 align 2 [0 i32, 4 i32, 8 i32, 12 i16, 14 i8, 15 i8]
+  sig (ptr) -> i64
+  slot s0 size 16 align 2
+b0(v0: ptr):
+  v1 = slotaddr s0
+  v2 = iconst.i64 16
+  memcpy v1, v0, v2
+  v3 = iconst.i32 40
+  store v3, v1+8 align 2
+  v4 = load.i32 v1 align 2
+  v5 = zext.i64 v4
+  v6 = call.i64 @take(v1) : (l0) -> i64
+  v7 = add.i64 v5, v6
+  ret v7
+fn @made
+  layout l0 size 16 align 2 [0 i32, 4 i32, 8 i32, 12 i16, 14 i8, 15 i8]
+  sig (i32, i32, i8) -> i64
+  slot s0 size 16 align 2
+b0(v0: i32, v1: i32, v2: i8):
+  v3 = slotaddr s0
+  v4 = iconst.i32 9
+  v5 = iconst.i16 300
+  v6 = iconst.i8 1
+  store v0, v3 align 2
+  store v1, v3+4 align 2
+  store v4, v3+8 align 2
+  store v5, v3+12 align 1
+  store v2, v3+14 align 0
+  store v6, v3+15 align 0
+  v7 = call.i64 @take(v3) : (l0) -> i64
+  ret v7
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 16 align 2
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i32 5
+  v3 = trunc.i32 v0
+  v4 = iconst.i32 7
+  v5 = iconst.i16 2
+  v6 = iconst.i8 3
+  v7 = iconst.i8 4
+  store v2, v1 align 2
+  store v3, v1+4 align 2
+  store v4, v1+8 align 2
+  store v5, v1+12 align 1
+  store v6, v1+14 align 0
+  store v7, v1+15 align 0
+  v8 = call.i64 @read(v1) : (ptr) -> i64
+  v9 = iconst.i32 11
+  v10 = iconst.i8 6
+  v11 = call.i64 @made(v3, v9, v10) : (i32, i32, i8) -> i64
+  v12 = iconst.i64 1000
+  v13 = mul.i64 v8, v12
+  v14 = add.i64 v13, v11
+  ret v14
+)";
+    let (b, a) = optimized_copying(src, 16);
+    let read = text_of(&a, "read");
+    // No copy, and every load reads the element (`v0`), none the slot.
+    assert(read.as_str().find("memcpy") < 0, read.as_str());
+    assert_eq(occurrences(&read, "= load."), occurrences(&read, " v0 align") + occurrences(&read, " v0+"));
+    assert(read.as_str().find("load.i64 v0 ") >= 0 && read.as_str().find("or.i64") >= 0, read.as_str());
+    assert_eq(occurrences(&read, "store "), 2);
+    let made = text_of(&a, "made");
+    assert(made.as_str().find("or.i64") >= 0, made.as_str());
+    assert_eq(occurrences(&made, "store "), 2);
+    // read: 5 + (5 + 3 + 2); made: 11 + 6 + 300.
+    let args: [u64; 1] = [5];
+    same_result(&b, &a, "drive", args[0..1], 15 * 1000 + 317);
+    let (_, n) = optimized_copying(src, 0);
+    assert(text_of(&n, "read").as_str().find("memcpy") >= 0, "with no arg_copy the slot keeps its memory");
+}
+
+// A word of an aggregate parameter the body takes by value, read in the entry block as a pointer and as
+// an integer as wide (a niche enum's payload and its test), is one load: the second read is the first
+// one's bits, whichever comes first (`deref`, `fered`), so a parameter that arrives in a register needs
+// no memory. `apart` reads two words: both stay loads. The results are the same.
+@test
+fn a_by_value_word_read_twice_is_one_load() {
+    let src = M"(lir ptr 8
+sym @deref fn global noinline
+sym @fered fn global noinline
+sym @apart fn global noinline
+sym @drive fn global
+fn @deref
+  layout l0 size 8 align 3 [0 ptr]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = load.i64 v0 align 3
+  v5 = icmp.ne v4, v2
+  br v5, b1, b2
+b1:
+  v6 = load.i32 v1 align 2
+  ret v6
+b2:
+  ret v3
+fn @fered
+  layout l0 size 8 align 3 [0 ptr]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.i64 v0 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = load.ptr v0 align 3
+  v5 = icmp.ne v1, v2
+  br v5, b1, b2
+b1:
+  v6 = load.i32 v4 align 2
+  ret v6
+b2:
+  ret v3
+fn @apart
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0) -> i32
+b0(v0: ptr):
+  v1 = load.ptr v0 align 3
+  v2 = iconst.i64 0
+  v3 = iconst.i32 0
+  v4 = load.i64 v0+8 align 3
+  v5 = icmp.ne v4, v2
+  br v5, b1, b2
+b1:
+  v6 = load.i32 v1 align 2
+  ret v6
+b2:
+  ret v3
+fn @drive
+  layout l0 size 8 align 3 [0 ptr]
+  layout l1 size 16 align 3 [0 ptr, 8 i64]
+  sig (i64) -> i64
+  slot s0 size 8 align 3
+  slot s1 size 4 align 2
+  slot s2 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s1
+  v2 = trunc.i32 v0
+  store v2, v1 align 2
+  v3 = slotaddr s0
+  store v1, v3 align 3
+  v4 = call.i32 @deref(v3) : (l0) -> i32
+  v5 = call.i32 @fered(v3) : (l0) -> i32
+  v6 = slotaddr s2
+  v7 = iconst.i64 1
+  store v1, v6 align 3
+  store v7, v6+8 align 3
+  v8 = call.i32 @apart(v6) : (l1) -> i32
+  v9 = iconst.i64 0
+  store v9, v3 align 3
+  v10 = call.i32 @deref(v3) : (l0) -> i32
+  v11 = add.i32 v4, v5
+  v12 = add.i32 v11, v8
+  v13 = add.i32 v12, v10
+  v14 = zext.i64 v13
+  ret v14
+)";
+    let (b, a) = optimized(src);
+    let deref = text_of(&a, "deref");
+    assert_eq(occurrences(&deref, "= load."), 2);
+    assert(deref.as_str().find("load.ptr v0 ") >= 0 && deref.as_str().find("ptrtoint.i64") >= 0, deref.as_str());
+    let fered = text_of(&a, "fered");
+    assert_eq(occurrences(&fered, "= load."), 2);
+    assert(fered.as_str().find("load.i64 v0 ") >= 0 && fered.as_str().find("inttoptr") >= 0, fered.as_str());
+    let apart = text_of(&a, "apart");
+    assert(apart.as_str().find("load.ptr v0 ") >= 0 && apart.as_str().find("load.i64 v0+8 ") >= 0, apart.as_str());
+    // Three reads of 7 through the reference, and 0 for the null word.
+    let args: [u64; 1] = [7];
+    same_result(&b, &a, "drive", args[0..1], 21);
+}
+
+// Two branches that take one edge (what `thread` leaves of two edges through a block that only jumps),
+// which passes a pointer's `ptrtoint` to a parameter every edge passes one to: the parameter becomes a
+// pointer and each edge passes the pointer itself, the shared edge's argument rewritten once
+// (`ptr_params`). `@pick` reads through the pointer its two arguments select.
+@test
+fn a_shared_edges_pointer_argument_is_rewritten_once() {
+    let src = M"(lir ptr 8
+sym @cell fn global
+sym @pick fn global
+fn @cell
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = ptradd v0+8
+  v4 = ptrtoint.i64 v3
+  v5 = ptradd v0+16
+  v6 = ptrtoint.i64 v5
+  v7 = iconst.i64 0
+  v8 = icmp.ne v1, v7
+  br v8, b1, b3(v4)
+b1:
+  v9 = load.ptr v0 align 3
+  v10 = load.i64 v9 align 3
+  v11 = icmp.ne v10, v7
+  br v11, b2, b3(v4)
+b2:
+  store v2, v0+24 align 3
+  jmp b3(v6)
+b3(v12: i64):
+  v13 = inttoptr.ptr v12
+  v14 = load.i64 v13 align 3
+  ret v14
+fn @pick
+  slot s0 size 32 align 3
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = ptradd v2+24
+  v4 = iconst.i64 11
+  v5 = iconst.i64 22
+  store v3, v2 align 3
+  store v4, v2+8 align 3
+  store v5, v2+16 align 3
+  store v1, v2+24 align 3
+  v6 = call.i64 @cell(v2, v0, v1) : (ptr, i64, i64) -> i64
+  ret v6
+)";
+    let mut err = String::new();
+    let b = lparse::parse(src, &mut err).unwrap();
+    let mut a = lparse::parse(src, &mut err).unwrap();
+    // The second branch takes the first one's edge into the last block.
+    let cell = a.find_symbol("cell");
+    let body = a.bodies.index_mut(a.syms[cell as usize].def as usize);
+    let mut edge = NONE;
+    for i in 0..body.insts.len() {
+        if body.insts[i].op == O_BR {
+            if edge == NONE {
+                edge = body.insts[i].c;
+            } else {
+                body.insts.index_mut(i).c = edge;
+            }
+        }
+    }
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut a,
+        &none,
+        lopt::Config {
+            inline: il::NONE_INLINES,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                version_checks: u32::MAX,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
+        },
+    );
+    verified(&a);
+    let a00: [u64; 2] = [0, 0];
+    let a10: [u64; 2] = [1, 0];
+    let a11: [u64; 2] = [1, 1];
+    same_result(&b, &a, "pick", a00[0..2], 11);
+    same_result(&b, &a, "pick", a10[0..2], 11);
+    same_result(&b, &a, "pick", a11[0..2], 22);
+    let text = text_of(&a, "cell");
+    assert(text.as_str().find("inttoptr") < 0 && text.as_str().find("ptrtoint") < 0, text.as_str());
+}
+
+// A branch on a flag's `xor` with 1 (`!f`) is a branch on the flag, its edges swapped: `@neg` tests its
+// `bool` parameter itself and no `xor` is left. A parameter that is no `bool` keeps the `xor` (`@raw`: 2
+// gives 3, which is true). Each argument gives what it gave.
+@test
+fn a_branch_on_a_negated_flag_tests_the_flag() {
+    let src = M"(lir ptr 8
+sym @neg fn global
+sym @raw fn global
+sym @run fn global
+fn @neg
+  sig (i8, ptr) -> i64
+  bool p0
+b0(v0: i8, v1: ptr):
+  v2 = iconst.i8 1
+  v3 = xor.i8 v0, v2
+  br v3, b1, b2
+b1:
+  v4 = iconst.i64 7
+  store v4, v1 align 3
+  ret v4
+b2:
+  v5 = iconst.i64 9
+  ret v5
+fn @raw
+  sig (i8, ptr) -> i64
+b0(v0: i8, v1: ptr):
+  v2 = iconst.i8 1
+  v3 = xor.i8 v0, v2
+  br v3, b1, b2
+b1:
+  v4 = iconst.i64 7
+  store v4, v1 align 3
+  ret v4
+b2:
+  v5 = iconst.i64 9
+  ret v5
+fn @run
+  slot s0 size 8 align 3
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  store v3, v2 align 3
+  v4 = trunc.i8 v0
+  v5 = icmp.ne v1, v3
+  br v5, b1, b2
+b1:
+  v6 = call.i64 @raw(v4, v2) : (i8, ptr) -> i64
+  jmp b3(v6)
+b2:
+  v7 = call.i64 @neg(v4, v2) : (i8, ptr) -> i64
+  jmp b3(v7)
+b3(v8: i64):
+  v9 = load.i64 v2 align 3
+  v10 = add.i64 v8, v9
+  ret v10
+)";
+    let mut err = String::new();
+    let b = lparse::parse(src, &mut err).unwrap();
+    let mut a = lparse::parse(src, &mut err).unwrap();
+    let none = Vector::<bool>::new();
+    lopt::optimize(
+        &mut a,
+        &none,
+        lopt::Config {
+            inline: il::NONE_INLINES,
+            loops: lu::Budgets {
+                peel: 0,
+                partial: 0,
+                version: 0,
+                version_checks: u32::MAX,
+                unswitch: 0,
+                rotate: 0,
+                vector: 0,
+                interleave: 0,
+                fin: 0,
+            },
+        },
+    );
+    verified(&a);
+    let neg = text_of(&a, "neg");
+    assert(neg.as_str().find("xor") < 0 && neg.as_str().find("br v0, ") >= 0, neg.as_str());
+    let raw = text_of(&a, "raw");
+    assert(raw.as_str().find("xor.i8 v0") >= 0, raw.as_str());
+    let n0: [u64; 2] = [0, 0];
+    let n1: [u64; 2] = [1, 0];
+    let r0: [u64; 2] = [0, 1];
+    let r2: [u64; 2] = [2, 1];
+    same_result(&b, &a, "run", n0[0..2], 14);
+    same_result(&b, &a, "run", n1[0..2], 9);
+    same_result(&b, &a, "run", r0[0..2], 14);
+    same_result(&b, &a, "run", r2[0..2], 14);
 }

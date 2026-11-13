@@ -55,6 +55,8 @@ const S1: u8 = 11; // r11
 const JT_CODE: u32 = 0x80000000;
 // A division looks this many instructions ahead for its remainder (`int_op`).
 const DIV_REACH: u32 = 8;
+// `Gen.over_x`: the emitter at hand reads every operand before it writes its result (`def_read`).
+const OVER_ALL: u32 = NONE - 1;
 // `zero_run` takes runs of ZERO_RUN to ZERO_RUN_MAX stores.
 const ZERO_RUN: u32 = 4;
 const ZERO_RUN_MAX: u32 = 32;
@@ -66,7 +68,7 @@ const XALLOC_SYSV: u64 = 0x3C7; // rax rcx rdx rsi rdi r8 r9
 const XFIX_SYSV: u64 = 0xF008; // rbx r12 r13 r14 r15
 const VALLOC_SYSV: u64 = 0x3FFF0000; // xmm0..xmm13
 const XALLOC_WIN: u64 = 0x307; // rax rcx rdx r8 r9
-// The caller-saved registers a value may hold for its whole range (`Gen::fix_class`): no register an
+// The caller-saved registers the plan may give a value (`plan_homes`): no register an
 // instruction takes for itself (rax, rcx, rdx).
 const XSCR_SYSV: u64 = 0x3C0; // rsi rdi r8 r9
 const XSCR_WIN: u64 = 0x300; // r8 r9
@@ -75,21 +77,13 @@ const VSCR_SYSV: u64 = 0x3F000000; // xmm8..xmm13
 // intrinsic's template take xmm4..xmm7 there.
 const VSCR_SYSV_BARE: u64 = 0x3FF00000; // xmm4..xmm13
 
-// `Gen::fix_class`: no fixed register, a callee-saved one, a caller-saved one, one of xmm16..xmm31.
-const FIX_NONE: u8 = 0;
-const FIX_CALLEE: u8 = 1;
-const FIX_UPPER: u8 = 3;
-const FIX_SCRATCH: u8 = 2;
 const XFIX_WIN: u64 = 0xF0C8; // rbx rsi rdi r12 r13 r14 r15
 const VALLOC_WIN: u64 = 0x3FCF0000; // xmm0..xmm3, xmm6..xmm13
 // The caller-saved xmm homes of a body that calls nothing that returns (`plan_homes`).
 const VSCR_WIN_BARE: u64 = 0xF0000; // xmm0..xmm3
 const VSAVE_WIN: u64 = 0xFFC00000; // xmm6..xmm15
-// The callee-saved xmm registers a value may hold for its whole range (Microsoft x64), in the order taken:
-// xmm14 and xmm15 (no temporary's), then xmm8..xmm13 (no intrinsic's template names xmm8 and up).
-const VFIX_WIN: [u8; 8] = [30, 31, 24, 25, 26, 27, 28, 29];
 // xmm16..xmm31 (AVX-512): caller-saved under both ABIs. Only EVEX encodes them, so they hold homes alone
-// (`FIX_UPPER`), of values whose instructions all have EVEX forms (`Gen.vlow`).
+// (`lv::Sets.vu`), of values whose instructions all have EVEX forms (`Gen.vlow`).
 const VUPPER: u64 = 0xFFFF00000000;
 
 // `Gen::bytes_only` follows at most this many logic operations.
@@ -242,11 +236,12 @@ pub(package) struct Gen {
     vscr: u64,
     vfix: u64, // the callee-saved xmm registers a value may hold for its whole range (Microsoft x64)
     vlow: Vector<bool>, // per value index, whether it stays out of xmm16..xmm31 (`upper_marks`)
-    on_edge: bool, // a terminator places its edges' parameter homes: each register's value has an owner
     vs0: u8, // the vector scratch registers
     vs1: u8,
-    split_at: usize,
-    split_off: Vector<i32>, // per split value, its stack home, reserved before emission
+    entering: bool, // `entry` places the parameters: a planned one is bound as it arrives
+    stepping: bool, // the current instruction's result takes the register of the first operand it read (`lv::step_op`)
+    over_x: u32, // the operand (a value index) the emitter at hand writes its result over (`def_over`), OVER_ALL for any (`def_read`); NONE outside
+    arrm: Vector<u64>, // `plan_homes`: per parameter of the signature, the registers it arrives in
     c: x::Code,
     clob: u64, // the caller-saved registers the current call writes: all, or an intrinsic's
     // The registers of the aggregate parameters a call takes as they arrive (`pass_parts`), held until it;
@@ -401,7 +396,6 @@ extend Gen {
             xhome: 0,
             vscr: ast::pick(win, 0, VSCR_SYSV),
             vlow: Vector::<bool>::new(),
-            on_edge: false,
             vfix: ast::pick(win, 0xFF000000, 0),
             vs0: if win {
                 V0 + 4
@@ -413,8 +407,10 @@ extend Gen {
             } else {
                 V0 + 15
             },
-            split_at: 0,
-            split_off: Vector::<i32>::new(),
+            entering: false,
+            stepping: false,
+            over_x: NONE,
+            arrm: Vector::<u64>::new(),
             c: x::Code::new(),
             clob: ~0u64,
             pin: 0,
@@ -661,40 +657,6 @@ extend Gen {
         self.cr.set_owner(r, NONE);
     }
 
-    // Free register `r` for a home (`take_scratch`, `take_fixed`): while a terminator places its edges'
-    // parameter homes (`on_edge`, `edge_homes`, `edge_moves`; elsewhere a register may hold a value no
-    // `owner` names, a call's result), a value there that lives on or that the edge passes moves to a free
-    // temporary register of its file, outside the homes first, when one is; else to its home (`evict`).
-    fn evict_home(self: &mut Self, r: u8) {
-        let x = self.cr.owner[r as usize];
-        if !self.on_edge || x == NONE || self.cr.va[x as usize].home == H_FIXED || !self.cr.live_on(x) && !self.cr.read_now(
-            x,
-        ) {
-            self.evict(r);
-            return;
-        }
-        let vr = r >= V0;
-        let free = ast::pick(vr, self.valloc, self.xalloc) & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.resv);
-        if free == 0 {
-            self.evict(r);
-            return;
-        }
-        let out = free & ~if vr {
-            self.vscr
-        } else {
-            self.xhome
-        };
-        let r2 = if out != 0 {
-            out.trailing_zeros() as u8
-        } else {
-            free.trailing_zeros() as u8
-        };
-        self.move_reg(self.cr.xty(x), r2, r);
-        self.cr.set_owner(r, NONE);
-        self.cr.set_owner(r2, x);
-        self.cr.va.index_mut(x as usize).reg = r2;
-    }
-
     // Whether evicting register `r`'s value stores it (`evict`).
     const fn stores(self: &Self, r: u8) bool {
         let x = self.cr.owner[r as usize];
@@ -820,7 +782,7 @@ extend Gen {
             }
         }
         let vr = is_v(self.cr.vt(v)) || self.in_reg(self.cr.vt(v));
-        let r = self.take_home(x, vr, NOREG);
+        let r = self.seg_take(x);
         if r != NOREG {
             self.cr.lock |= bit(r);
             return r;
@@ -873,12 +835,16 @@ extend Gen {
     }
 
     // Whether commutative instruction `i` should write over its second operand `b` (in `rb`), not its first
-    // (in `ra`): `b` dies here, and the return or call after, or the result part the stores before the
+    // (in `ra`): `b` dies here, and the plan holds `i` in `rb`, or the return or call after, or the result part the stores before the
     // return move it into (`ret_part`), or the return after a chain of in-place operations (`chain_ret`),
     // takes `i` in `rb` (`next_reg`, `ret_want`; a jump's would place a parameter's home, which may take
     // `rb`).
     fn swaps(self: &mut Self, i: u32, b: Value, ra: u8, rb: u8) bool {
         let xb = self.cr.vx(b);
+        // The plan holds `i` in the register `b` ends in.
+        if ra != rb && self.planned(i, b, rb) {
+            return true;
+        }
         let bd = self.cr.b();
         let bk = bd.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let nx = if i + 1 < bk.start + bk.len {
@@ -1040,7 +1006,7 @@ extend Gen {
             rd = self.def_shared(i, f.index);
         }
         if rd == NOREG {
-            rd = self.def(i);
+            rd = self.def_read(i);
         }
         let d = f.disp as i32;
         let m = if ri == NOREG {
@@ -1061,20 +1027,11 @@ extend Gen {
         let x = self.cr.vx(v);
         let xa = self.cr.vx(a);
         let t = self.cr.vt(v);
-        // A step in another block than the edge back (`lv::Live::fstep`), over the parameter it reads.
-        if xa != NONE && self.cr.lv.fstep[x as usize] == xa && self.cr.va[xa as usize].reg == ra && self.step_home(
-            x,
-            true,
-        ) == ra {
-            self.cr.lock |= bit(ra);
-            self.cr.va.index_mut(x as usize).clean = false;
-            return ra;
-        }
         let sr = self.def_shared(v, a);
         if sr != NOREG {
             return sr;
         }
-        let fixed = self.cr.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
+        let fixed = self.cr.va[x as usize].home == H_FIXED || self.homed(x);
         // A callee-saved register `alloc` gave a loop's temporary (saved, no home) counts as a caller-saved one.
         let temps = self.xalloc | self.valloc | self.xfix & self.csr & ~self.cr.fixed_busy;
         if !fixed && (temps & bit(ra)) != 0 && (is_v(t) || is_vec(t)) == ra >= V0 {
@@ -1082,11 +1039,19 @@ extend Gen {
             let temp = own == NONE && (self.cr.tmps & bit(ra)) != 0;
             // A segment keeps its register to its span's end: its value gives it to no other.
             let seg = self.cr.lv.seg_val(xa);
-            let dies = own == xa && !seg && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
+            // Under a plan the register of an operand that ends here is free of the plan's values until the
+            // next instruction's result: a temporary that instruction alone reads takes it.
+            let brief = seg && x as usize < self.cr.b().insts.len() && self.cr.lv.uses[x as usize] == 1 && x + 1 < self.cr.b().insts.len() as u32 && self.cr.lv.def_blk[x as usize + 1] == self.cr.lv.def_blk[x as usize] && self.reads(
+                x + 1,
+                v,
+            );
+            // Or the plan gives the register to no other value in the block (`lv::Live::solo`).
+            let solo = (self.cr.lv.solo[self.cr.pos as usize] & bit(ra)) != 0;
+            let dies = own == xa && (!seg || brief || solo) && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
             // A loop header parameter whose last read this is, which only the back edge writes on, and each
             // value after it on the way to the one that edge passes (`step_chain`): `v` holds the register,
             // which the parameter keeps (owner, home) for that value (`step_reg`), as a jump's parameter home.
-            let first = own == xa && !seg && !temp && !dies && self.step_chain(x, xa, ra);
+            let first = own == xa && !temp && !dies && self.step_chain(x, xa, ra);
             let next = self.chain_x == xa && self.chain_r == ra && self.cr.va[xa as usize].reg == ra && self.cr.lv.uses[xa as usize] == 0 && self.cr.lv.end[xa as usize] == self.cr.pos;
             if first || next {
                 if next {
@@ -1099,10 +1064,7 @@ extend Gen {
                 // The chain's last value read past the loop owns the register there, no longer the
                 // parameter's home (its range ends in the block): the calls after spill it, and no other
                 // value takes the register while it lives.
-                if self.cr.lv.end[x as usize] != self.cr.pos {
-                    self.cr.set_owner(ra, x);
-                    self.cr.fixed_busy &= ~bit(ra);
-                }
+                self.cr.set_owner(ra, x);
                 let w = self.cr.va.index_mut(x as usize);
                 w.reg = ra;
                 w.dirty = true;
@@ -1111,11 +1073,6 @@ extend Gen {
             }
             if temp || dies {
                 if dies {
-                    // A register home (a caller-saved one, which `take_scratch` would evict a value from)
-                    // frees too.
-                    if self.cr.va[xa as usize].home == H_FIXED {
-                        self.cr.fixed_busy &= ~bit(ra);
-                    }
                     self.cr.va.index_mut(xa as usize).reg = NOREG;
                     self.cr.va.index_mut(xa as usize).dirty = false;
                 }
@@ -1124,7 +1081,11 @@ extend Gen {
                 return ra;
             }
         }
-        return self.def(v);
+        // The plan's register for `v` may be `ra`: the emitter reads `a` before it writes.
+        self.over_x = xa;
+        let rd = self.def(v);
+        self.over_x = NONE;
+        return rd;
     }
 
     // Whether instruction `x`, which reads header parameter value index `xa` (its home `ra`) last in its block,
@@ -1180,32 +1141,36 @@ extend Gen {
         if sr == NOREG || !self.up_ok(self.cr.vx(v), sr) {
             return NOREG;
         }
-        // The parameter keeps the register, which its release frees; a `v` that outlives its block takes
-        // it over as its home.
+        // `v` holds the register from here, as a temporary: a value the plan puts there before the edge
+        // moves it out (`vacate_temp`).
         let x = self.cr.vx(v);
-        let past = self.cr.lv.end[x as usize] != self.cr.pos;
         self.cr.lock |= bit(sr);
-        if past {
-            self.cr.set_owner(sr, x);
-        }
+        self.cr.set_owner(sr, x);
         let w = self.cr.va.index_mut(x as usize);
         w.reg = sr;
         w.dirty = false;
         w.clean = false;
-        if past {
-            w.home = H_FIXED;
-        }
         return sr;
+    }
+
+    // `def` of value `v` by one instruction that reads every operand before it writes (a `lea`): the
+    // plan's register for `v` may be any operand's.
+    fn def_read(self: &mut Self, v: Value) u8 {
+        self.over_x = OVER_ALL;
+        let rd = self.def(v);
+        self.over_x = NONE;
+        return rd;
     }
 
     // `def` of value `v`, which reads `a` before it writes: `def_shared`'s register when it gives one.
     fn def_pass(self: &mut Self, v: Value, a: Value) u8 {
-        let r = self.def_shared(v, a);
-        return if r == NOREG {
-            self.def(v)
-        } else {
-            r
-        };
+        let mut r = self.def_shared(v, a);
+        if r == NOREG {
+            self.over_x = self.cr.vx(a);
+            r = self.def(v);
+            self.over_x = NONE;
+        }
+        return r;
     }
 
     // The register the instruction after instruction `v` in its block takes `v` in, when that is `v`'s
@@ -1253,14 +1218,14 @@ extend Gen {
         // home, taken now, and the conversion moves nothing.
         let w = v + 1;
         let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST;
-        if !ext && !chain && keeps && t.a == v && !fv && (is_int(t.ty) || t.ty == T_PTR) && type_bits(t.ty, self.cr.ptr) <= 64 && self.fix_class(
+        if !ext && !chain && keeps && t.a == v && !fv && (is_int(t.ty) || t.ty == T_PTR) && type_bits(t.ty, self.cr.ptr) <= 64 && self.homed(
             w,
-        ) != FIX_NONE {
+        ) {
             let wa = self.cr.va[w as usize];
             let r = if wa.home == H_FIXED {
                 wa.reg
             } else if wa.home == H_NONE {
-                self.take_home(w, false, NOREG)
+                self.seg_take(w)
             } else {
                 NOREG
             };
@@ -1300,7 +1265,7 @@ extend Gen {
                 let tb = b.blocks[tg as usize];
                 for q in 0..b.edge_nargs(t.a) {
                     if b.edge_arg(t.a, q) == v {
-                        self.param_home(b.insts.len() as u32 + tb.param_start + q, NOREG);
+                        self.param_home(b.insts.len() as u32 + tb.param_start + q);
                     }
                 }
             }
@@ -1368,9 +1333,8 @@ extend Gen {
         if (v & (VPARAM | VFLAG)) != 0 {
             return NOREG;
         }
-        let past = self.cr.lv.end[v as usize] != self.cr.pos;
-        // A value with segments changes places: it takes no parameter's register over.
-        if self.cr.va[v as usize].home != H_NONE || !past && self.fix_class(v) != FIX_NONE || self.crosses_call(
+        // Only a value that ends in its block, with no register of the plan.
+        if self.cr.lv.end[v as usize] != self.cr.pos || self.cr.va[v as usize].home != H_NONE || self.crosses_call(
             v,
             is_v(self.cr.vt(v)),
         ) || self.cr.lv.seg_val(v) {
@@ -1390,10 +1354,12 @@ extend Gen {
         let pv = VPARAM | px - b.insts.len() as u32;
         // `v` reads the parameter other than as `a`, maybe through an operand that folds into it.
         let other = self.reads(v, pv) && a != pv;
-        // A segment's register stays the segment's: no value takes it over past the loop.
-        if self.cr.va[px as usize].home != H_FIXED || self.cr.lv.end[px as usize] < self.cr.pos || past && (self.cr.lv.end[px as usize] != self.cr.pos || self.cr.lv.seg_val(
-            px,
-        )) || other || self.cr.lv.reads_after(b, k, v, pv) {
+        if self.cr.va[px as usize].home != H_FIXED || self.cr.lv.end[px as usize] < self.cr.pos || other || self.cr.lv.reads_after(
+            b,
+            k,
+            v,
+            pv,
+        ) {
             return NOREG;
         }
         return self.cr.va[px as usize].reg;
@@ -1405,9 +1371,9 @@ extend Gen {
     // `back_share` gave it, which `v` reads as `a` alone if at all and nothing after `v` reads, so the
     // jump's move vanishes. NOREG when not.
     fn fwd_reg(self: &mut Self, v: Value, a: Value) u8 {
-        if (v & (VPARAM | VFLAG)) != 0 || self.cr.lv.end[v as usize] != self.cr.pos || self.cr.va[v as usize].home != H_NONE || self.fix_class(
+        if (v & (VPARAM | VFLAG)) != 0 || self.cr.lv.end[v as usize] != self.cr.pos || self.cr.va[v as usize].home != H_NONE || self.homed(
             v,
-        ) != FIX_NONE || self.crosses_call(v, is_v(self.cr.vt(v))) {
+        ) || self.crosses_call(v, is_v(self.cr.vt(v))) {
             return NOREG;
         }
         let b = self.cr.b();
@@ -1434,7 +1400,7 @@ extend Gen {
         if x == NONE || self.cr.xty(x) != self.cr.vt(v) || in_mem(self.cr.xty(x)) {
             return NOREG;
         }
-        self.param_home(x, NOREG);
+        self.param_home(x);
         let va = self.cr.pva(x);
         if va.home != H_FIXED || va.reg == NOREG || (self.cr.tmps & bit(va.reg)) != 0 {
             return NOREG;
@@ -1455,81 +1421,6 @@ extend Gen {
                 }
             }
         }
-        return r;
-    }
-
-    // The register of the header parameter that instruction `x` steps (`lv::Live::fstep`), now `x`'s home
-    // too: the parameter, whose value is dead from here on, keeps the register's ownership to the end of
-    // its range, which holds `x`'s. Not for an `x` that reads the parameter unless `reads` (the caller
-    // computes `x` in that register over the parameter: `def_over`). NOREG when `x` steps none, or the
-    // parameter has no register home.
-    fn step_home(self: &mut Self, x: u32, reads: bool) u8 {
-        let px = self.cr.lv.fstep[x as usize];
-        if px == NONE {
-            return NOREG;
-        }
-        let pa = self.cr.va[px as usize];
-        if pa.home != H_FIXED || pa.reg == NOREG {
-            return NOREG;
-        }
-        if !reads {
-            let pv = VPARAM | px - self.cr.b().insts.len() as u32;
-            let us = self.cr.lv.uses_of(x);
-            for k in 0..us.len() {
-                if us[k] == pv {
-                    return NOREG;
-                }
-            }
-        }
-        let w = self.cr.va.index_mut(x as usize);
-        w.reg = pa.reg;
-        w.home = H_FIXED;
-        w.dirty = false;
-        return pa.reg;
-    }
-
-    // The register home `fix_class` gives value index `x` of file `vr`, taken (`prefer`, a register `x`
-    // arrives in, when it may be its home); NOREG for none.
-    fn take_home(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
-        if self.cr.lv.seg_val(x) {
-            return self.seg_take(x, prefer);
-        }
-        let sr = self.step_home(x, false);
-        if sr != NOREG {
-            return sr;
-        }
-        let fc = self.fix_class(x);
-        if fc == FIX_CALLEE {
-            return self.take_fixed(x, vr);
-        }
-        if fc == FIX_SCRATCH {
-            return self.take_scratch(x, vr, prefer);
-        }
-        if fc == FIX_UPPER {
-            return self.take_upper(x, prefer);
-        }
-        return NOREG;
-    }
-
-    // Give value index `x` a free register of xmm16..xmm31 as its home (`prefer` when it is one), else a
-    // caller-saved one (`take_scratch`). Those registers hold nothing but homes.
-    fn take_upper(self: &mut Self, x: u32, prefer: u8) u8 {
-        let open = VUPPER & ~self.cr.fixed_busy & ~self.cr.lock & ~self.cr.tmps;
-        if open == 0 {
-            return self.take_scratch(x, true, prefer);
-        }
-        let r = if prefer != NOREG && (open & bit(prefer)) != 0 {
-            prefer
-        } else {
-            open.trailing_zeros() as u8
-        };
-        self.evict(r);
-        self.cr.fixed_busy |= bit(r);
-        self.cr.set_owner(r, x);
-        let va = self.cr.va.index_mut(x as usize);
-        va.reg = r;
-        va.home = H_FIXED;
-        va.dirty = false;
         return r;
     }
 
@@ -1580,55 +1471,133 @@ extend Gen {
 
     // ---- Register segments (`lv::Live::segments`, `place::Core`) ----
 
-    // Open segment `s`: a register of its class is its own until it ends (`prefer`: the register its value
-    // arrives in), taken as a home of its value is (`take_fixed`, `take_scratch`) and left unbound: the
-    // value moves in at its block or on an edge. `SEG_DEAD` when none is free.
-    fn seg_open(self: &mut Self, s: u32, prefer: u8) {
-        let x = self.cr.lv.seg_x[s as usize];
-        let was = self.cr.va[x as usize];
-        let t = self.cr.xty(x);
-        let vr = is_v(t) || self.in_reg(t);
-        // The register that holds the value now is not the one freed for it.
-        let locked = self.cr.lock;
-        if was.reg != NOREG && was.reg != prefer {
-            self.cr.lock |= bit(was.reg);
-        }
-        let r = if self.cr.lv.seg_h[s as usize] == lv::HOME_CALLEE {
-            self.take_fixed(x, vr)
-        } else {
-            self.take_scratch(x, vr, prefer)
-        };
-        self.cr.lock = locked;
-        if r != NOREG {
-            // A value that arrived in the register holds it on as a temporary until its block binds it.
-            if was.reg != r {
-                self.cr.set_owner(r, NONE);
-            }
-            self.cr.va.set(x as usize, was);
-        }
-        self.cr.seg_set(s, r);
-    }
-
     // The register of the segment that holds value index `x` through its own block; NOREG when none does.
     // A parameter: the first edge into the block, or the entry, opens the segment, which holds `x` from
     // there; a later edge finds the register (`place::Core::pva`) and binds nothing: the segment may have
     // ended since. An instruction: its definition, the one caller, binds it (`seg_block`).
-    fn seg_take(self: &mut Self, x: u32, prefer: u8) u8 {
+    fn seg_take(self: &mut Self, x: u32) u8 {
+        if !self.cr.lv.seg_val(x) {
+            return NOREG;
+        }
         let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
         if s == NONE {
             return NOREG;
         }
-        let opens = self.cr.seg_reg[s as usize] == NOREG;
-        if opens {
-            self.seg_open(s, prefer);
+        let r = self.cr.seg_reg[s as usize];
+        let b = self.cr.b();
+        let ni = b.insts.len();
+        // A parameter is bound at its block's start (`seg_block`; the entry's as it arrives); the edges
+        // write its register.
+        if x as usize >= ni && x as usize < ni + b.params.len() {
+            if self.entering {
+                self.seg_bind(s);
+            }
+            return r;
         }
-        if self.cr.seg_reg[s as usize] == SEG_DEAD {
+        // A flag holds its register from its block's start: the instruction that sets it binds it.
+        if x as usize >= ni {
+            self.seg_bind(s);
+            return r;
+        }
+        // An operand the instruction reads holds the register: the result is written over it only by
+        // an instruction whose every emitter reads its first operand before (`lv::over_inst`), or by an
+        // emitter that names that operand (`def_over`, `def_pass`: `over_x`) or reads them all before
+        // (`def_read`); another's result moves there after the instruction (`settle`).
+        let o = self.cr.owner[r as usize];
+        let it = b.insts[x as usize];
+        if o != NONE && o != x && self.cr.read_now(o) {
+            if o != self.over_x && self.over_x != OVER_ALL && !(lv::over_inst(b, it) && it.a != VNONE && self.cr.vx(
+                it.a,
+            ) == o) {
+                return NOREG;
+            }
+            self.stepping = true;
+        }
+        // Made before its own instruction: the register may hold a value that ends in between, so it
+        // moves there at its place too.
+        if x > self.cur && !self.early(x, r) {
             return NOREG;
         }
-        if opens || x as usize < self.cr.b().insts.len() {
-            self.cr.seg_in(s);
+        self.seg_bind(s);
+        return r;
+    }
+
+    // Whether instruction `x`, made at the current instruction, an earlier one of its block, may take the
+    // plan's register `r` now: no value holds `r` (but one of the plan with no read left), and no
+    // instruction up to `x` takes `r` by the plan.
+    const fn early(self: &Self, x: u32, r: u8) bool {
+        let o = self.cr.owner[r as usize];
+        if o != NONE && o != x && (self.cr.va[o as usize].home != H_FIXED || self.cr.lv.uses[o as usize] != 0) {
+            return false;
         }
-        return self.cr.seg_reg[s as usize];
+        for j in self.cur..x {
+            if !self.cr.lv.seg_val(j) {
+                continue;
+            }
+            let s = self.cr.lv.seg_of(j, self.cr.pos);
+            if s != NONE && self.cr.seg_reg[s as usize] == r {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Segment `s`'s value is in the plan's register from here (`place::Core::seg_in`): a temporary there
+    // leaves it first.
+    fn seg_bind(self: &mut Self, s: u32) {
+        self.vacate_temp(self.cr.seg_reg[s as usize]);
+        self.cr.seg_in(s);
+    }
+
+    // The plan's register `r` holds a value of the plan from here: a temporary's value there goes to its
+    // home; one with no read left, which the current instruction read already (`stepping`), only leaves.
+    fn vacate_temp(self: &mut Self, r: u8) {
+        let o = self.cr.owner[r as usize];
+        if o == NONE || self.cr.va[o as usize].home == H_FIXED {
+            return;
+        }
+        if !self.cr.live_on(o) && (self.stepping || !self.cr.read_now(o)) {
+            self.cr.va.index_mut(o as usize).reg = NOREG;
+            self.cr.va.index_mut(o as usize).dirty = false;
+            self.cr.set_owner(r, NONE);
+            return;
+        }
+        self.evict(r);
+    }
+
+    // An edge's move writes the plan's register `r`: a temporary there that lives on goes to its home; one
+    // that ends at this terminator stays, as the terminator and its moves still read it.
+    fn vacate_live(self: &mut Self, r: u8) {
+        let o = self.cr.owner[r as usize];
+        if o != NONE && self.cr.va[o as usize].home != H_FIXED && self.cr.live_on(o) {
+            self.evict(r);
+        }
+    }
+
+    // Instruction `i`, whose value is not in the plan's register for its block (`seg_take` refused it, or it
+    // arrived in a register: `entry_reg`), moves there.
+    fn settle(self: &mut Self, i: u32) {
+        if !self.cr.lv.seg_val(i) || self.cr.lv.uses[i as usize] == 0 {
+            return;
+        }
+        let s = self.cr.lv.seg_of(i, self.cr.pos);
+        if s == NONE || self.cr.seg_holds(s) {
+            return;
+        }
+        let r = self.cr.seg_reg[s as usize];
+        let va = self.cr.va[i as usize];
+        // The plan's register may be the one it arrived in: it is there already. Else an operand the
+        // instruction read for the last time leaves it (the instruction is emitted: `stepping`).
+        if va.reg != r || self.cr.owner[r as usize] != i {
+            self.stepping = true;
+            self.vacate_temp(r);
+            if va.reg != NOREG {
+                self.move_reg(self.cr.xty(i), r, va.reg);
+            } else {
+                self.materialize(i, r);
+            }
+        }
+        self.cr.seg_in(s);
     }
 
     // At the start of block `k` (layout position `q`), the register state set: the segments' values change
@@ -1642,21 +1611,20 @@ extend Gen {
         let ni = self.cr.b().insts.len() as u32;
         for j in self.cr.lv.sin_at[q as usize]..self.cr.lv.sin_at[q as usize + 1] {
             let s = self.cr.lv.sin[j as usize];
-            if self.cr.seg_reg[s as usize] == NOREG {
-                self.seg_open(s, NOREG);
-            }
-            if self.cr.seg_reg[s as usize] == SEG_DEAD {
-                continue;
-            }
             let x = self.cr.lv.seg_x[s as usize];
             let r = self.cr.seg_reg[s as usize];
             let was = self.cr.va[x as usize];
             let own = x >= ni && self.cr.lv.def_blk[x as usize] == k;
             let t = self.cr.xty(x);
             if !self.cr.seg_holds(s) && (x >= ni || self.cr.lv.def_blk[x as usize] != k) {
-                self.cr.seg_in(s);
+                self.seg_bind(s);
                 if own && was.home == H_ARG && was.reg == NOREG {
                     self.ld(t, r, x::at(self.fb, was.off));
+                }
+                // An entry parameter whose parts the entry stored into a slot.
+                if own && was.home == H_SLOT && was.reg == NOREG {
+                    self.ld(t, r, x::at(x::RSP, was.off));
+                    continue;
                 }
             }
             if own && self.cr.lv.seg_mem[x as usize] && self.cr.sv_home[x as usize] != H_ARG {
@@ -1697,23 +1665,38 @@ extend Gen {
             if self.cr.lv.def_blk[x as usize] == k {
                 continue;
             }
-            if self.cr.seg_reg[s as usize] == NOREG {
-                self.on_edge = true;
-                self.seg_open(s, NOREG);
-                self.on_edge = false;
-            }
-            if self.cr.seg_reg[s as usize] == SEG_DEAD || self.cr.seg_holds(s) {
+            if self.cr.seg_holds(s) {
                 continue;
             }
             if self.cr.va[x as usize].dirty && self.cr.lv.seg_mem[x as usize] {
                 self.spill(x);
             }
+            self.vacate_live(self.cr.seg_reg[s as usize]);
         }
     }
 
-    // Which register value index `x` holds for its whole range (`plan_homes`).
-    const fn fix_class(self: &Self, x: u32) u8 {
-        return self.cr.lv.home_at(x, self.cr.pos);
+    // Whether the plan holds value index `x` in a register in the current block.
+    const fn homed(self: &Self, x: u32) bool {
+        return self.cr.lv.seg_val(x) && self.cr.lv.seg_of(x, self.cr.pos) != NONE;
+    }
+
+    // Whether the plan holds the result `i` in register `r`, which its operand `v` holds: the plan ends
+    // `v` at this read, and an emitter that may write `i` over `v` does.
+    const fn planned(self: &Self, i: u32, v: Value, r: u8) bool {
+        return r != NOREG && self.plan_reg(i) == r && self.cr.owner[r as usize] == self.cr.vx(v);
+    }
+
+    // The register the plan holds value index `x` in in the current block; NOREG for none.
+    const fn plan_reg(self: &Self, x: u32) u8 {
+        if !self.cr.lv.seg_val(x) {
+            return NOREG;
+        }
+        let s = self.cr.lv.seg_of(x, self.cr.pos);
+        return if s == NONE {
+            NOREG
+        } else {
+            self.cr.seg_reg[s as usize]
+        };
     }
 
     // Plan the homes (`Live::plan`) over each value's request: none in memory or rematerialized; an integer a call that
@@ -1829,11 +1812,11 @@ extend Gen {
                     if x < nv && past && (self.win || !cross) {
                         w = vw;
                     }
-                } else if cross || x >= nv && self.cr.lv.end[x] > self.cr.lv.pos[d as usize] {
+                } else if x >= nv && self.cr.lv.end[x] > self.cr.lv.pos[d as usize] || (past || cross) && x < nv && late[x] {
                     w = lv::WANT_CALLEE;
-                } else if past && x < nv && late[x] {
-                    w = lv::WANT_CALLEE;
-                } else if past && x < nv {
+                } else if (past || cross) && x < nv {
+                    // A caller-saved register holds a value only in the blocks where no call runs while it
+                    // lives (`lv::Live::calm`): a value that lives across a call asks for both classes too.
                     w = lv::WANT_CALLEE | lv::WANT_SCRATCH;
                 }
                 // A constant a loop keeps in a register is rebuilt elsewhere, and a value a call reads after
@@ -1858,6 +1841,48 @@ extend Gen {
                 w |= lv::WANT_UPPER;
             }
             self.want.push(w);
+        }
+        // A value that dies in its block as an edge's argument asks too: in the register of the parameter
+        // the edge passes it to, the edge moves nothing.
+        for p in 0..self.cr.lv.order.len() {
+            let k = self.cr.lv.order[p];
+            let bk = b.blocks[k as usize];
+            let t = b.insts[(bk.start + bk.len - 1) as usize];
+            for e in 0..edge_count(t) {
+                let ed = edge_of(b, t, e);
+                for j in 0..b.edge_nargs(ed) {
+                    let av = b.edge_arg(ed, j);
+                    if av == VNONE || (av & VFLAG) != 0 {
+                        continue;
+                    }
+                    let a = self.cr.vx(av);
+                    if self.want[a as usize] != 0 || self.cr.lv.def_blk[a as usize] != k || late[a as usize] {
+                        continue;
+                    }
+                    let ty = self.cr.xty(a);
+                    if in_mem(ty) || is_v(ty) || a as usize < ni && (self.cr.lv.pfold[a as usize] || self.remat_inst(a)) {
+                        continue;
+                    }
+                    let mut w = lv::WANT_CALLEE | lv::WANT_SCRATCH;
+                    if self.shrink {
+                        w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
+                    }
+                    self.want[a as usize] = w;
+                }
+            }
+        }
+        // An aggregate parameter whose memory is the body's (its parts arrive in registers or on the stack;
+        // a result no pointer of the caller's holds) is that memory's address, which each use computes.
+        let e0 = b.blocks[0].param_start as usize;
+        let sn = b.pool[b.sig as usize] as usize;
+        for k in 0..sn {
+            let kd = self.cr.self_lay.locs[k].kind;
+            if (b.pool[b.sig as usize + 3 + k] & AGG) != 0 && kd != ab::L_REF_REG && kd != ab::L_REF_STACK {
+                self.want[ni + e0 + k] = 0;
+            }
+        }
+        if (b.pool[b.sig as usize + 2] & AGG) != 0 && self.cr.self_lay.ret.kind != ab::L_SRET {
+            self.want[ni + e0 + sn] = 0;
         }
         // The value the one entry into a loop passes a header parameter that asks for a home (`Live::
         // entry_partner`), when that edge is its one use and it asked for none, asks for the parameter's: it
@@ -1946,7 +1971,74 @@ extend Gen {
             (0u32, self.vscr.count_ones() as u32)
         };
         let vu: u32 = ast::pick(self.z512, 16, 0);
-        self.cr.lv.plan(
+        // A scalar the body returns from a register: the plan gives it that register when it can.
+        fill(&mut self.cr.lv.rhint, n, lv::REG_NONE);
+        let rl = self.cr.self_lay.ret;
+        if rl.kind == ab::L_REG && rl.n == 1 {
+            let pa = self.cr.self_lay.parts[rl.p0 as usize];
+            for k in 0..b.blocks.len() {
+                let t = term(b, k as u32);
+                if self.cr.lv.pos[k] == NONE || t.op != O_RET || t.a == VNONE || (t.a & VFLAG) != 0 {
+                    continue;
+                }
+                let ty = self.cr.vt(t.a);
+                if !in_mem(ty) && is_v(ty) == pa.v {
+                    self.cr.lv.rhint[self.cr.vx(t.a) as usize] = preg(pa);
+                }
+            }
+        }
+        // The registers each parameter of the signature arrives in, and the result pointer's.
+        self.arrm.truncate(0);
+        fill(&mut self.cr.lv.part_in, n, lv::REG_NONE);
+        self.cr.lv.part_quiet = 0;
+        for k in 0..sn {
+            let loc = self.cr.self_lay.locs[k];
+            let mut m: u64 = 0;
+            if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
+                for q in 0..loc.n as u32 {
+                    m |= bit(preg(self.cr.self_lay.parts[(loc.p0 + q) as usize]));
+                }
+            }
+            self.arrm.push(m);
+            // The loads that take an aggregate's part registers (`parts_taken`, which the entry decides
+            // the same way): each is in its part's register when it is made.
+            let mark = self.taken.len();
+            if (b.pool[b.sig as usize + 3 + k] & AGG) != 0 && loc.kind == ab::L_REG && place::parts_taken(
+                b,
+                &self.cr.lv,
+                &self.cr.self_lay,
+                self.cr.ptr,
+                Gen::clobbers,
+                (b.insts.len() + e0 + k) as u32,
+                loc,
+                &mut self.taken,
+                &mut self.cr.uses,
+            ) {
+                for q in mark..self.taken.len() {
+                    let i = self.taken[q] as u32;
+                    let part = (self.taken[q] >> 32) as u32;
+                    if (part & place::SPAN) == 0 {
+                        self.cr.lv.part_in[i as usize] = preg(self.cr.self_lay.parts[(loc.p0 + part) as usize]);
+                    }
+                }
+            }
+            self.taken.truncate(mark);
+        }
+        if self.cr.self_lay.ret.kind == ab::L_SRET {
+            self.arrm.push(bit(self.arg(0)));
+        }
+        let sets = lv::Sets {
+            xc: self.xfix,
+            xs: self.xhome & ~self.resv,
+            xw: 0,
+            vc: ast::pick(self.win, self.vfix, 0u64),
+            vs: self.vscr,
+            xa: 0,
+            vu: ast::pick(self.z512, VUPPER, 0u64),
+            // The callee-saved xmm registers no temporary takes (Microsoft x64's xmm14 and xmm15).
+            first: self.vfix & ~self.valloc,
+        };
+        self.cr.lv.assign(
             b,
             &self.want,
             lv::Caps {
@@ -1963,9 +2055,20 @@ extend Gen {
                 vj: (vc + vs).min((self.valloc | self.vfix).count_ones() as u32 - vd) + vu,
                 vu: vu,
             },
+            sets,
+            &self.arrm,
+            0,
         );
+        // The callee-saved registers the plan holds.
+        for s in 0..self.cr.lv.seg_r.len() {
+            let r = self.cr.lv.seg_r[s];
+            self.csr |= bit(r) & self.xfix;
+            if self.win {
+                self.csr |= VSAVE_WIN & bit(r);
+            }
+        }
         for x in 0..ni {
-            if self.lconst[x] && self.fix_class(x as u32) != FIX_NONE {
+            if self.lconst[x] && self.cr.lv.seg_val(x as u32) {
                 self.cr.va.index_mut(x).home = H_NONE;
             }
         }
@@ -2218,7 +2321,8 @@ extend Gen {
     }
 
     // Before instruction `i` of a rare block or a shrink-wrapped body that calls and returns: each scratch
-    // home whose value lives past it into a slot of its own (`csave`). The count saved.
+    // home whose value lives past it into a slot of its own (`csave`). Not a value its range alone keeps
+    // (`Live::dead_past`). The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
         if !self.rarec[i as usize] {
             return 0;
@@ -2228,7 +2332,8 @@ extend Gen {
         while m != 0 {
             let r = m.trailing_zeros() as u8;
             m &= m - 1;
-            if !self.cr.live_on(self.cr.owner[r as usize]) {
+            let x = self.cr.owner[r as usize];
+            if !self.cr.live_on(x) || self.cr.lv.dead_past(self.cr.b(), x, i) {
                 continue;
             }
             let off = self.cr.slot_alloc(16, 16) as i64;
@@ -2591,77 +2696,9 @@ extend Gen {
         return free;
     }
 
-    // Give value index `x` a caller-saved register of file `vr` (`xhome`, `vscr`) as its home, the value
-    // there evicted: `prefer` when it is one (the register `x` arrives in), else one the current
-    // instruction does not use; NOREG when none is.
-    fn take_scratch(self: &mut Self, x: u32, vr: bool, prefer: u8) u8 {
-        let set = ast::pick(vr, self.vscr, self.xhome) & ~self.cr.fixed_busy & ~self.resv;
-        let open = set & ~(self.cr.lock | self.cr.tmps);
-        let r = if prefer != NOREG && (set & bit(prefer)) != 0 {
-            prefer
-        } else if (open & ~self.cr.held) != 0 {
-            (open & ~self.cr.held).trailing_zeros() as u8
-        } else if open != 0 {
-            self.cheapest(open)
-        } else {
-            NOREG
-        };
-        // None free (a home the plan saw end in this block holds on to its end): a callee-saved one, which a
-        // later home may not take over.
-        if r == NOREG {
-            return self.take_fixed(x, vr);
-        }
-        if r != prefer {
-            self.evict_home(r);
-        }
-        self.cr.fixed_busy |= bit(r);
-        self.cr.set_owner(r, x);
-        let va = self.cr.va.index_mut(x as usize);
-        va.reg = r;
-        va.home = H_FIXED;
-        va.dirty = false;
-        return r;
-    }
-
     // Whether callee-saved register `r` holds no loop value and the current instruction does not use it.
     const fn fixed_free(self: &Self, r: u8) bool {
         return (self.xfix & ~self.cr.fixed_busy & ~self.cr.lock & ~self.cr.tmps & bit(r)) != 0;
-    }
-
-    // Give value index `x` a free callee-saved register of file `vr` as its home (an xmm one under
-    // Microsoft x64 only), the value there (from `alloc`'s fallback) evicted; NOREG when none is free.
-    fn take_fixed(self: &mut Self, x: u32, vr: bool) u8 {
-        if vr {
-            let open = self.vfix & ~self.cr.fixed_busy & ~self.cr.lock & ~self.cr.tmps;
-            for r in VFIX_WIN {
-                if (open & bit(r)) != 0 {
-                    self.evict_home(r);
-                    self.cr.fixed_busy |= bit(r);
-                    self.csr |= bit(r);
-                    self.cr.set_owner(r, x);
-                    let va = self.cr.va.index_mut(x as usize);
-                    va.reg = r;
-                    va.home = H_FIXED;
-                    va.dirty = false;
-                    return r;
-                }
-            }
-            return NOREG;
-        }
-        for r in 0..16u32 {
-            if self.fixed_free(r as u8) {
-                self.evict_home(r as u8);
-                self.cr.fixed_busy |= bit(r as u8);
-                self.csr |= bit(r as u8);
-                self.cr.set_owner(r as u8, x);
-                let va = self.cr.va.index_mut(x as usize);
-                va.reg = r as u8;
-                va.home = H_FIXED;
-                va.dirty = false;
-                return r as u8;
-            }
-        }
-        return NOREG;
     }
 
     // Value `v` in a register of its file, locked for the current instruction.
@@ -2857,6 +2894,10 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        if self.cr.va[self.cur as usize].home != H_FIXED {
+            self.settle(self.cur);
+        }
+        self.stepping = false;
         self.seg_store();
         self.cr.lv.advance(self.cr.b(), self.cur);
         // `plan_homes` leaves `need` integer and `vneed` xmm registers to each instruction.
@@ -3483,7 +3524,6 @@ extend Gen {
         };
         let b = self.cr.b();
         self.cr.lv.fold_max = 8;
-        self.cr.lv.steps = true;
         // The parameters' places, which the folds read (`lv::Live::mem_params`).
         classify(self.win, self.sc_self, b, b.sig, self.cr.ptr, self.vregs, &mut self.cr.self_lay);
         self.cr.lv.mem_params = 0;
@@ -3497,6 +3537,8 @@ extend Gen {
                 }
             }
         }
+        self.cr.lv.three = true;
+        self.cr.lv.two = true;
         self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
@@ -3547,7 +3589,6 @@ extend Gen {
             }
         }
         fill(&mut self.cr.owner, 48, NONE);
-        fill(&mut self.cr.heir, 48, NONE);
         self.cr.held = 0;
         // Past the blocks, one per late edge: its stub (`lv::Live::late`).
         fill(&mut self.blk_at, b.blocks.len() + self.cr.lv.late.len(), NONE);
@@ -3650,16 +3691,8 @@ extend Gen {
         self.pass_parts();
         self.cr.bucket_ends();
         self.call_tables();
-        self.cr.lv.split = !self.shrink;
         self.plan_homes();
         self.cr.seg_reset();
-        self.split_at = 0;
-        fill(&mut self.split_off, n, -1);
-        for j in 0..self.cr.lv.splits.len() {
-            let x = self.cr.lv.splits[j] as u32;
-            let sz = type_bytes(self.cr.xty(x), self.cr.ptr);
-            self.split_off[x as usize] = self.cr.slot_alloc(sz.max(8), sz.min(16)) as i32;
-        }
         if self.shrink && self.cr.lv.homeless(&self.want) {
             return self.unshrunk(s, local);
         }
@@ -3676,6 +3709,7 @@ extend Gen {
         if self.cr.lv.segd.len() != 0 {
             self.cr.seg_leave(self.cr.lv.order.len() as u32);
         }
+        self.cr.fixed_busy &= self.pin;
         assert(self.cr.fixed_busy == 0, "x64gen: a register home outlives its value");
         if !self.stubs_out {
             self.late_stubs();
@@ -3889,6 +3923,7 @@ extend Gen {
     // The entry block's parameters where the calling convention passes them.
     fn entry(self: &mut Self) {
         let b = self.cr.b();
+        self.entering = true;
         if self.canary >= 0 {
             self.guard(S1);
             self.c.store(8, S1, x::at(x::RSP, self.canary as i32));
@@ -3962,7 +3997,7 @@ extend Gen {
                 } else if self.in_reg(t) {
                     // A vector loaded into its home, else a register it spills from.
                     if self.cr.lv.uses[x as usize] != 0 {
-                        let mut f = self.take_home(x, true, NOREG);
+                        let mut f = self.seg_take(x);
                         if f == NOREG {
                             f = self.alloc(true);
                             self.cr.set_owner(f, x);
@@ -4008,6 +4043,7 @@ extend Gen {
             }
         }
         self.cr.lock = 0;
+        self.entering = false;
     }
 
     // Whether the aggregate parameter `x`, passed in registers (`loc`), is read only by loads of the entry
@@ -4114,7 +4150,13 @@ extend Gen {
             return;
         }
         let t = self.cr.xty(x);
-        let f = self.take_home(x, is_v(t) || is_vec(t), r);
+        // A load that takes its part's register moves to the plan's at its place (`settle`): that register
+        // may hold another value until then.
+        let f = if x as usize < self.cr.b().insts.len() {
+            NOREG
+        } else {
+            self.seg_take(x)
+        };
         if f != NOREG {
             self.move_reg(t, f, r);
             return;
@@ -4132,25 +4174,13 @@ extend Gen {
             self.late_stubs();
         }
         self.cr.pos = q;
-        while self.split_at < self.cr.lv.splits.len() && (self.cr.lv.splits[self.split_at] >> 32) as u32 == q {
-            let x = self.cr.lv.splits[self.split_at] as u32;
-            let va = self.cr.va[x as usize];
-            if va.reg != NOREG && self.cr.owner[va.reg as usize] == x {
-                self.cr.set_owner(va.reg, NONE);
-                self.cr.fixed_busy &= ~bit(va.reg);
-            }
-            let w = self.cr.va.index_mut(x as usize);
-            w.home = H_SLOT;
-            w.reg = NOREG;
-            w.off = self.split_off[x as usize];
-            w.dirty = false;
-            self.split_at += 1;
-        }
         self.chain_x = NONE;
         self.btest_x = NONE;
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.c.len();
+        // The plan's registers of this block are homes through it: no temporary takes one.
+        self.cr.fixed_busy = self.cr.fixed_busy & self.pin | self.cr.lv.bmask[q as usize];
         if !self.continues(q) {
             let mut m = self.cr.held;
             // Each step clears one register's bit: at most 64 steps.
@@ -4228,7 +4258,6 @@ extend Gen {
         let k = self.cr.lv.order[self.cr.pos as usize];
         let t = b.insts[(b.blocks[k as usize].start + b.blocks[k as usize].len - 1) as usize];
         let ne = edge_count(t);
-        self.save_splits(t, ne);
         let mut m = self.cr.held;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
@@ -4254,43 +4283,6 @@ extend Gen {
         }
     }
 
-    // Every edge leaving a register prefix for a block that reads the value writes the suffix's stack
-    // home, including edges that skip the cut's block. No edge can return from the suffix to the prefix.
-    fn save_splits(self: &mut Self, t: Inst, ne: u32) {
-        let b = self.cr.b();
-        let mut end = self.cr.pos;
-        for e in 0..ne {
-            end = end.max(self.cr.lv.pos[b.edge_target(edge_of(b, t, e)) as usize]);
-        }
-        for j in self.split_at..self.cr.lv.splits.len() {
-            let entry = self.cr.lv.splits[j];
-            let cut = (entry >> 32) as u32;
-            if cut > end {
-                break;
-            }
-            let x = entry as u32;
-            if self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize] > self.cr.pos || !self.cr.lv.enters_split(
-                b,
-                t,
-                ne,
-                x,
-                cut,
-            ) {
-                continue;
-            }
-            let ty = self.cr.xty(x);
-            let va = self.cr.va[x as usize];
-            let r = if va.reg != NOREG {
-                va.reg
-            } else {
-                let scratch = ast::pick(is_v(ty) || is_vec(ty), self.vs0, S0);
-                self.materialize(self.xval(x), scratch);
-                scratch
-            };
-            self.st(ty, r, x::at(x::RSP, self.split_off[x as usize]));
-        }
-    }
-
     // The homes of the parameters terminator `t`'s edges write, chosen before its branch: what a home's
     // register held moves to its own home on every path.
     fn edge_homes(self: &mut Self, t: Inst) {
@@ -4307,84 +4299,38 @@ extend Gen {
             let tb = b.blocks[b.edge_target(ed) as usize];
             for q in 0..tb.param_len as u32 {
                 let x = ni + tb.param_start + q;
-                // The return register when no home holds it, else the register home of an argument that dies
-                // here, given up: kept busy again when the parameter does not take it (its class is another),
-                // as the argument holds it until the edge moves.
-                let mut r = self.cr.ret_reg(b, x);
-                if r != NOREG && (self.cr.fixed_busy & bit(r)) != 0 {
-                    r = NOREG;
-                }
-                let hd = r == NOREG;
-                if hd {
-                    r = self.cr.home_dying(b.edge_arg(ed, q));
-                }
-                if r != NOREG {
-                    self.cr.free_home(b.edge_arg(ed, q), r);
-                }
-                let pr = if r != NOREG {
-                    r
-                } else {
-                    self.cr.dying_reg(b.edge_arg(ed, q))
-                };
-                self.on_edge = true;
-                self.param_home(x, pr);
-                self.on_edge = false;
-                if hd && r != NOREG && self.cr.pva(x).reg != r {
-                    self.cr.fixed_busy |= bit(r);
-                }
+                self.param_home(x);
             }
         }
     }
 
-    // The home of block parameter value index `x`, chosen at the first edge into its block: register
-    // `prefer` when it may take it (`dying_reg`).
-    fn param_home(self: &mut Self, x: u32, prefer: u8) {
+    // The home of block parameter value index `x`, chosen at the first edge into its block: the plan's
+    // register, else a stack slot.
+    fn param_home(self: &mut Self, x: u32) {
+        // The plan's register, which the edges write: its block's start binds the parameter. A temporary
+        // that lives on leaves it first.
+        if self.cr.lv.seg_val(x) {
+            let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
+            if s != NONE {
+                if !self.cr.stubbing {
+                    self.vacate_live(self.cr.seg_reg[s as usize]);
+                }
+                return;
+            }
+        }
         if self.cr.va[x as usize].home != H_NONE {
             return;
         }
         let t = self.cr.xty(x);
-        // The register of the loop parameter it continues (`lv::Live::share`), which passes to it when that
-        // parameter's range ends (`release`).
-        let sp = self.cr.lv.share[x as usize];
-        if sp != NONE {
-            // A parameter takes its home here; an instruction (a loop's entry value) took its own when made.
-            if sp as usize >= self.cr.b().insts.len() {
-                self.param_home(sp, NOREG);
-            }
-            let spa = self.cr.va[sp as usize];
-            if spa.home == H_FIXED {
-                let va = self.cr.va.index_mut(x as usize);
-                va.home = H_FIXED;
-                va.reg = spa.reg;
-                va.dirty = false;
-                self.cr.heir[spa.reg as usize] = x;
-                // The register stays a home (an argument that dies at this edge gave it up, `free_home`).
-                self.cr.fixed_busy |= bit(spa.reg);
-                return;
-            }
-        }
         let px = back_share(self.cr.b(), &self.cr.lv, &self.cr.va, x);
-        if px != NONE && (self.cr.va[px as usize].home != H_FIXED || self.up_ok(x, self.cr.va[px as usize].reg)) {
-            // The header parameter keeps the register's ownership and the slot: its range holds this
-            // block's.
+        if px != NONE {
+            // The header parameter keeps the slot: its range holds this block's.
             let pva = self.cr.va[px as usize];
             let va = self.cr.va.index_mut(x as usize);
             va.home = pva.home;
             va.dirty = false;
-            if pva.home == H_FIXED {
-                va.reg = pva.reg;
-            } else {
-                va.off = pva.off;
-                self.cr.shared.push(x);
-            }
-            return;
-        }
-        if self.take_home(x, is_v(t) || self.in_reg(t), prefer) != NOREG {
-            // The register holds nothing until the edge moves write it, or the dying argument it takes. A
-            // segment's that ended is no longer this parameter's to hold.
-            if self.cr.va[x as usize].home == H_FIXED {
-                self.cr.set_owner(self.cr.va[x as usize].reg, x);
-            }
+            va.off = pva.off;
+            self.cr.shared.push(x);
             return;
         }
         let n = type_bytes(t, self.cr.ptr);
@@ -4410,9 +4356,7 @@ extend Gen {
         self.mv.truncate(0);
         for q in 0..n {
             let px = ni + tb.param_start + q;
-            self.on_edge = true;
-            self.param_home(px, NOREG);
-            self.on_edge = false;
+            self.param_home(px);
             let av = b.edge_arg(e, q);
             let ax = self.cr.vx(av);
             // Passed to itself, it stays, but a parameter with segments that is not where its block holds it.
@@ -4902,7 +4846,7 @@ extend Gen {
         if !self.cr.live_on(x) {
             return;
         }
-        if self.cr.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE {
+        if self.cr.va[x as usize].home == H_FIXED || self.homed(x) {
             let rd = self.def(i);
             self.move_reg(self.cr.vt(i), rd, r);
             return;
@@ -4997,6 +4941,15 @@ extend Gen {
         let r = self.reg(v);
         let xv = self.cr.vx(v);
         if !signed && self.cr.va[xv as usize].clean {
+            return r;
+        }
+        // A value in the plan's register in the block that defines it is extended in place, once for
+        // every reader after this one: each comes through here, and the value stays extended where the
+        // plan moves it (`place::Core::seg_in`; its stack home is read back extended).
+        let va = self.cr.va[xv as usize];
+        if !signed && va.home == H_FIXED && va.reg == r && self.cr.lv.def_blk[xv as usize] == self.cr.lv.order[self.cr.pos as usize] {
+            self.c.ext(bits / 8, 4, false, r, r);
+            self.cr.va.index_mut(xv as usize).clean = true;
             return r;
         }
         let d = self.tmp(false);
@@ -6290,8 +6243,15 @@ extend Gen {
                 self.cond = Cond { inst: f, cc: cc };
             } else if self.cr.lv.uses[f as usize] != 0 {
                 self.keep_flags = true;
-                let r = self.alloc(false);
-                self.cr.bind(f, r);
+                // The plan's register for it, else a temporary.
+                let mut r = NOREG;
+                if self.cr.lv.seg_val(f) {
+                    r = self.seg_take(f);
+                }
+                if r == NOREG {
+                    r = self.alloc(false);
+                    self.cr.bind(f, r);
+                }
                 self.c.setcc(cc, r);
                 self.c.ext(1, 4, false, r, r);
                 self.cr.va.index_mut(f as usize).clean = true;
@@ -6647,7 +6607,11 @@ extend Gen {
         let ib = type_bits(ity, self.cr.ptr);
         let ri = self.reg(t.b);
         let scale = scale_of(t);
-        let rd = self.def_pass(i, t.a);
+        // The `lea` reads the base and the index (or its copy in the scratch register) before it writes.
+        let mut rd = self.def_shared(i, t.a);
+        if rd == NOREG {
+            rd = self.def_read(i);
+        }
         // The index sign-extended to 64 bits, scaled.
         let mut idx = ri;
         if ib < 64 {
@@ -6687,6 +6651,7 @@ extend Gen {
         // A part of a register-passed aggregate: its register already.
         for q in 0..self.taken.len() {
             if self.taken[q] as u32 == i {
+                self.settle(i);
                 return true;
             }
         }
@@ -6775,7 +6740,7 @@ extend Gen {
                 if !self.cr.live_on(x) {
                     continue;
                 }
-                let fixed = self.cr.va[x as usize].home == H_FIXED || self.fix_class(x) != FIX_NONE;
+                let fixed = self.cr.va[x as usize].home == H_FIXED || self.homed(x);
                 if fixed != (pass == 0) {
                     continue;
                 }
@@ -7317,9 +7282,15 @@ extend Gen {
         // wants): the constant into the result's register, the false side moved in with the condition inverted.
         let mut kc: u64 = 0;
         let rcw = self.cr.va[self.cr.vx(t.c) as usize].reg;
+        // The register the result is wanted in: a return's right after, else the plan's.
+        let want = if self.ret_want(i) != NOREG {
+            self.ret_want(i)
+        } else {
+            self.plan_reg(i)
+        };
         if t.b != t.c && self.cr.const_of(t.b, &mut kc) && !self.cr.const_of(t.c, &mut kc) && rcw != NOREG && !(self.dies_here(
             t.c,
-        ) && self.ret_want(i) == rcw) {
+        ) && want == rcw) && !self.planned(i, t.c, rcw) {
             let rc = self.reg(t.c);
             let rd = self.def(i);
             self.materialize(t.b, rd);
@@ -7329,9 +7300,13 @@ extend Gen {
         // The false side straight into the result's register: a constant or a spilled value takes no
         // register of its own.
         let rb = self.reg(t.b);
-        // A constant false side when the return right after wants the true side's register, which dies
-        // here: the result takes it, and the constant moves in with the condition inverted.
-        if t.b != t.c && self.cr.const_of(t.c, &mut kc) && self.dies_here(t.b) && self.ret_want(i) == rb {
+        // A constant false side when the true side's register, which dies here, is the one wanted: the
+        // result takes it, and the constant moves in with the condition inverted.
+        if t.b != t.c && self.cr.const_of(t.c, &mut kc) && (self.dies_here(t.b) && want == rb || self.planned(
+            i,
+            t.b,
+            rb,
+        )) {
             let rk = self.tmp(false);
             self.materialize(t.c, rk);
             let rd = self.def_over(i, t.b, rb);
@@ -7347,14 +7322,12 @@ extend Gen {
             self.c.cmov(cc, 8, rd, rb);
             return true;
         }
-        // Both in registers: the result takes the register of a side that dies here when a return right
-        // after wants that one, or wants none and the result has no home (the true side's with the
-        // condition inverted).
+        // Both in registers: the result takes the register of a side that dies here when that one is
+        // wanted, or none is and the result has no home (the true side's with the condition inverted).
         let rc = self.reg(t.c);
-        let want = self.ret_want(i);
-        let free = want == NOREG && self.fix_class(self.cr.vx(i)) == FIX_NONE;
-        let dc = self.dies_here(t.c);
-        let db = self.dies_here(t.b);
+        let free = want == NOREG && !self.homed(self.cr.vx(i));
+        let dc = self.dies_here(t.c) || self.planned(i, t.c, rc);
+        let db = self.dies_here(t.b) || self.planned(i, t.b, rb);
         let tb = db && (want == rb || free && !dc);
         if !tb && !(dc && (want == rc || free)) {
             let rd = self.def(i);
@@ -8893,7 +8866,7 @@ extend Gen {
         for pass in 0..2u32 {
             for q in 0..tb.param_len as u32 {
                 let px = ni + tb.param_start + q;
-                self.param_home(px, NOREG);
+                self.param_home(px);
                 let ty = self.cr.xty(px);
                 let e = type_bytes(ty, self.cr.ptr);
                 let m = x::ix(S1, S0, e.trailing_zeros() as u8, lk.off[q as usize] as i32);
@@ -9320,16 +9293,27 @@ extend Gen {
             et,
             ef,
         )) {
+            // Into the block that follows, the other edge alone branches.
             self.flag_moves(et);
-            self.cbranch(cc, tt);
-            self.goto(tf, false);
+            if tt == next {
+                self.cr.join_note(tt);
+                self.cbranch(x::invert(cc), tf);
+            } else {
+                self.cbranch(cc, tt);
+                self.goto(tf, false);
+            }
         } else if !mt && mf && !self.cr.colder(ef, et) && (tf != next && self.early_ok(ef, et) || self.early_moves(
             ef,
             et,
         )) {
             self.flag_moves(ef);
-            self.cbranch(x::invert(cc), tf);
-            self.goto(tt, false);
+            if tf == next {
+                self.cr.join_note(tf);
+                self.cbranch(cc, tt);
+            } else {
+                self.cbranch(x::invert(cc), tf);
+                self.goto(tt, false);
+            }
         } else if mt && mf && tt != next && !self.cr.colder(et, ef) && self.early_ok(et, ef) {
             // The edge to the block that does not follow first: the other's moves fall through.
             self.flag_moves(et);
@@ -10676,7 +10660,7 @@ extend Gen {
             r = self.def_shared(i, yv);
         }
         if r == NOREG {
-            r = if !self.dies_here(xv) && self.dies_here(yv) {
+            r = if self.planned(i, yv, ry) || self.dies_here(yv) && !self.dies_here(xv) {
                 self.def_over(i, yv, ry)
             } else {
                 self.def_over(i, xv, rx)
@@ -12658,7 +12642,7 @@ extend Gen {
                     r = self.def_shared(i, ops[1]);
                 }
                 if r == NOREG {
-                    r = if self.dies_here(ops[1]) && !self.dies_here(ops[0]) {
+                    r = if self.planned(i, ops[1], ry + V0) || self.dies_here(ops[1]) && !self.dies_here(ops[0]) {
                         self.def_over(i, ops[1], ry + V0)
                     } else {
                         self.def_over(i, ops[0], rx + V0)

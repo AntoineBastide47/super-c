@@ -6159,7 +6159,7 @@ extend Lower {
         return true;
     }
 
-    // `[v; n]` at `dst`: a fill of zero bytes, unrolled stores up to 16 elements, else a loop.
+    // `[v; n]` at `dst`: a fill for a scalar whose bits are all zero, stores up to 16 elements, else a loop.
     fn repeat(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, rv: irc::Rvalue, dst: Value, place_ty: TypeId) bool {
         // The element type is the array's: the operand converts to it.
         let mut rm = b.module;
@@ -6185,28 +6185,44 @@ extend Lower {
         if ei.cls == VC_ZST || n == 0 {
             return true;
         }
-        let mut z: i64 = 1;
-        if ei.cls == VC_SCALAR && !is_float(ei.mty) && self.const_int(c, b, rv.a, &mut z) && z == 0 {
-            self.memset0(dst, ei.size * n as u32);
-            return true;
+        let scalar = ei.cls == VC_SCALAR;
+        let mut fv = VNONE;
+        if scalar {
+            // The element's value, made once: every element stores it.
+            self.hint = ei;
+            let v = self.operand(c, b, rv.a);
+            if v == VNONE {
+                return self.fail("operand");
+            }
+            let ot = Lower::op_ty(b, rv.a);
+            fv = self.fit(v, ei.mty, ot != TYPE_NONE && Lower::signed(c, b.module, ot));
+            // A constant whose bits are all zero (an integer 0, a null pointer, `false`, +0.0): one fill.
+            let k = const_bits(&self.b, fv);
+            if k.is_some() && k.unwrap() == 0 {
+                self.memset0(dst, ei.size * n as u32);
+                return true;
+            }
         }
         if n <= 16 {
             for i in 0..n as u32 {
                 let ea = self.ptradd(dst, VNONE, 0, i * ei.size);
-                if !self.operand_into(c, b, rv.a, ea, ei) {
+                if scalar {
+                    self.store(fv, ea, 0, false);
+                } else if !self.operand_into(c, b, rv.a, ea, ei) {
                     return false;
                 }
             }
             return true;
         }
-        // The first element, then a loop copying it into the others (a counter in memory).
-        if !self.operand_into(c, b, rv.a, dst, ei) {
+        // A loop over the elements (a counter in memory): a scalar's value into each; else the first element,
+        // then a copy of it into the others.
+        if !scalar && !self.operand_into(c, b, rv.a, dst, ei) {
             return false;
         }
         let pi = self.ptr_int();
         let cnt = self.temp(TyI { cls: VC_SCALAR, mty: pi, size: self.pkg.ptr_bytes, align: self.pkg.ptr_bytes });
-        let one = self.iconst(pi, 1);
-        self.store(one, cnt, 0, false);
+        let first = self.iconst(pi, (!scalar) as u64);
+        self.store(first, cnt, 0, false);
         let head = self.block();
         let body = self.block();
         let done = self.block();
@@ -6222,14 +6238,13 @@ extend Lower {
         self.b.begin(body);
         let i2 = self.load(pi, cnt, 0, false);
         let ea = self.ptradd(dst, i2, ei.size, 0);
-        if ei.cls == VC_SCALAR {
-            let v = self.load(ei.mty, dst, 0, false);
-            self.store(v, ea, 0, false);
+        if scalar {
+            self.store(fv, ea, 0, false);
         } else {
             self.memcpy(ea, dst, ei.size);
         }
-        let one2 = self.iconst(pi, 1);
-        let nx = self.arith(O_ADD, i2, one2);
+        let one = self.iconst(pi, 1);
+        let nx = self.arith(O_ADD, i2, one);
         self.store(nx, cnt, 0, false);
         let eh2 = self.edge(head, NONE, NONE);
         let _ = self.inst(O_JMP, T_NONE, 0, eh2, VNONE, VNONE);
