@@ -297,7 +297,7 @@ fn unproved_contracts_are_errors() {
     b.add(
         "an insertion past a vector's end in a function with contracts",
         "fn f(v: &mut Vector<u8>) requires v.len() == 1 {\n    v.insert(3, 0);\n}\nfn main() i32 { return 0; }\n",
-        "cannot prove that this index is in bounds",
+        "cannot prove that 'insert' does not panic at this call",
     );
     b.add(
         "a write through a reborrow of the parameter whose view the ensures reads",
@@ -2208,6 +2208,7 @@ fn seq_proofs(b: &mut h::ExitBatch) {
         "the views of vectors and arrays and the sequence operations",
         M"(import std::spec::seq as *;
 fn add(v: &mut Vector<u32>, x: u32)
+    requires v.len() as int < Vector::<u32>::max_len()
     ensures v.view() == old(v.view()).push(x)
     ensures v.len() as int == old(v.len()) as int + 1
 {

@@ -548,14 +548,14 @@ extend Sat {
     // ---- decisions: a max-heap of the variables by activity ---------------------------------------
 
     // Every activity and the increment halved 30 times: each stays below 2 * ACT_MAX.
-    fn rescale(self: &mut Self) {
+    const fn rescale(self: &mut Self) {
         for v in 0..self.act.len() {
             self.act.set(v, self.act[v] >> 30);
         }
         self.inc = (self.inc >> 30) + 1;
     }
 
-    fn bump(self: &mut Self, v: u32) {
+    const fn bump(self: &mut Self, v: u32) {
         self.act.set(v as usize, self.act[v as usize] + self.inc);
         if self.act[v as usize] > ACT_MAX {
             self.rescale();
@@ -601,7 +601,7 @@ extend Sat {
         return x > y || x == y && a < b;
     }
 
-    fn heap_up(self: &mut Self, p0: u32) {
+    const fn heap_up(self: &mut Self, p0: u32) {
         let mut p = p0;
         let v = self.heap[p as usize];
         for _k in 0..32 {
@@ -621,7 +621,7 @@ extend Sat {
         self.hpos.set(v as usize, p);
     }
 
-    fn heap_down(self: &mut Self, p0: u32) {
+    const fn heap_down(self: &mut Self, p0: u32) {
         let mut p = p0;
         let n = self.heap.len() as u32;
         let v = self.heap[p as usize];

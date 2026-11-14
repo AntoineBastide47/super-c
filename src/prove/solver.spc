@@ -2809,7 +2809,7 @@ extend<const B: usize> Solver<B> {
         return (self.pf.nodes.len() - 1) as u32;
     }
 
-    fn restore(self: &mut Self, f: &Frame<B>) {
+    const fn restore(self: &mut Self, f: &Frame<B>) {
         let j = f.j as usize;
         self.lp.lo.set(j, f.lo);
         self.lp.hi.set(j, f.hi);

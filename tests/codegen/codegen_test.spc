@@ -157,6 +157,17 @@ fn pointer_compare() {
     h::expect_c_absent("integer order", "fn f(a: usize, b: usize) bool { return a < b; }\n", "uintptr_t");
 }
 
+// The temporaries of a contract the build does not check are `int` values (`Vector::push`'s
+// `max_len`): they have no C storage, and `void _6;` is no C.
+@test
+fn skipped_contract_temporaries_declare_nothing() {
+    h::expect_c_absent(
+        "Vector::push",
+        "fn main() i32 {\n    let mut v = Vector::<u32>::new();\n    v.push(1);\n    return v.len() as i32 - 1;\n}\n",
+        "  void _",
+    );
+}
+
 // A bare `*T` is `*const T`: a shared borrow converts to it, it spells `const T *` in C, and it never
 // converts to `*mut T`.
 @test

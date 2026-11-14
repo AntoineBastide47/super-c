@@ -469,7 +469,7 @@ const fn co_bytes() usize {
 
 fn co_alloc() *mut Coroutine {
     let mut g = Global {};
-    let base = unsafe g.alloc(co_bytes(), 16);
+    let base = unsafe g.alloc(alloc_size(co_bytes()), 16);
     let co = (unsafe (base as *mut u8 + (CO_ALIGN - base as usize % CO_ALIGN) % CO_ALIGN)) as *mut Coroutine;
     unsafe (*co).base = base;
     return co;
@@ -1351,7 +1351,7 @@ fn timer_shrink(s: *mut Scheduler, len: usize) {
 fn timer_resize(s: *mut Scheduler, ncap: usize, len: usize) {
     let mut g = Global {};
     // `Global` aborts with a message when the allocation fails: nothing to test here.
-    let nt = (unsafe g.alloc(ncap * sizeof(TimerEntry), alignof(TimerEntry))) as *mut TimerEntry;
+    let nt = (unsafe g.alloc(array_bytes::<TimerEntry>(ncap), alignof(TimerEntry))) as *mut TimerEntry;
     for i in 0..len {
         unsafe nt[i] = unsafe (*s).timers[i];
     }
@@ -2347,11 +2347,11 @@ fn build_scheduler() *mut Scheduler {
     };
     // Line-aligned for real: the allocator only promises malloc alignment, so the array sits inside an
     // over-sized block (`deques_base` is what gets freed); see Worker.pad for why the alignment matters.
-    let deques_base = unsafe g.alloc(nw * sizeof(Worker) + LINE, 16);
+    let deques_base = unsafe g.alloc(alloc_size(nw * sizeof(Worker) + LINE), 16);
     let deques = (unsafe (deques_base as *mut u8 + (LINE - deques_base as usize % LINE) % LINE)) as *mut Worker;
-    let parkers = (unsafe g.alloc(nw * sizeof(Parker), LINE)) as *mut Parker;
+    let parkers = (unsafe g.alloc(array_bytes::<Parker>(nw), LINE)) as *mut Parker;
     let words = (nw + 63) / 64;
-    let idle = (unsafe g.alloc(words * sizeof(u64), alignof(u64))) as *mut u64;
+    let idle = (unsafe g.alloc(array_bytes::<u64>(words), alignof(u64))) as *mut u64;
     for i in 0..words {
         unsafe idle[i] = 0;
     }

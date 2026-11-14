@@ -70,7 +70,9 @@ struct PoolClass {
     chunk_count: usize,
 }
 
-struct PoolState<A> {
+struct PoolState<A>
+    invariant forall k in 0..CLASS_COUNT { self.classes[k].cur != null || self.classes[k].cur == self.classes[k].end }
+{
     classes: [PoolClass; CLASS_COUNT],
     reserved: usize, // bytes of the chunks held
     unpooled: usize, // bytes of the live unpooled blocks
@@ -93,7 +95,10 @@ pub struct PoolAlloc<'a, A = Global> {
 // 4. `CLASS_COUNT` or more means unpooled. `align` is a power of two, so the larger of the two rounds up to
 // the same power.
 @always_inline
-const fn class_index(size: usize, align: usize) usize {
+const fn class_index(size: usize, align: usize) usize
+    panics if true
+    ensures size != 0 || align != 0
+{
     let n = if size > align {
         size
     } else {
@@ -102,16 +107,20 @@ const fn class_index(size: usize, align: usize) usize {
     return USIZE_BITS - (n - 1 | POOL_BLOCK_SIZE_MIN - 1).leading_zeros() - CLASS_SHIFT_MIN;
 }
 
-// The block count of chunk `k` (0 the oldest) of class `i`: 1 KiB of blocks (at least one), doubled per
+// The bytes of chunk `k` (0 the oldest) of class `i`: 1 KiB of blocks (at least one block), doubled per
 // chunk up to 64 KiB (at least one block).
-const fn chunk_blocks(i: usize, k: usize) usize {
-    let size = POOL_BLOCK_SIZE_MIN << i;
-    let mut n: usize = 1;
-    if CHUNK_BYTES_MIN > size {
-        n = CHUNK_BYTES_MIN / size;
+const fn chunk_bytes(i: usize, k: usize) usize
+    requires i < CLASS_COUNT
+    ensures |r| r <= 2 * CHUNK_BYTES_MAX
+{
+    let mut n = POOL_BLOCK_SIZE_MIN << i;
+    if n < CHUNK_BYTES_MIN {
+        n = CHUNK_BYTES_MIN;
     }
     let mut j: usize = 0;
-    while j < k && n * size < CHUNK_BYTES_MAX {
+    while j < k && n < CHUNK_BYTES_MAX
+        invariant n <= 2 * CHUNK_BYTES_MAX
+    {
         n = n * 2;
         j += 1;
     }
@@ -120,7 +129,11 @@ const fn chunk_blocks(i: usize, k: usize) usize {
 
 extend<A: Allocator> PoolState<A> {
     @always_inline
-    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {
+    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void
+        requires size as int <= isize::MAX as int
+        panics if true
+        ensures |r| r != null
+    {
         let i = class_index(size, align);
         if unlikely(i >= CLASS_COUNT || size == 0) {
             return unsafe self.alloc_unpooled(size, align);
@@ -140,7 +153,11 @@ extend<A: Allocator> PoolState<A> {
     }
 
     @noinline
-    unsafe fn alloc_unpooled(self: &mut Self, size: usize, align: usize) *mut void {
+    unsafe fn alloc_unpooled(self: &mut Self, size: usize, align: usize) *mut void
+        requires size as int <= isize::MAX as int && (size != 0 || align != 0)
+        panics if true
+        ensures |r| r != null
+    {
         if size == 0 {
             return ptr::from_addr_mut::<void>(align);
         }
@@ -150,23 +167,40 @@ extend<A: Allocator> PoolState<A> {
 
     // Class `i` has no free or uncarved block: request its next chunk and hand out the chunk's first block.
     @noinline
-    unsafe fn refill(self: &mut Self, i: usize) *mut void {
+    unsafe fn refill(self: &mut Self, i: usize) *mut void
+        requires i < CLASS_COUNT
+        panics if true
+        ensures |r| r != null
+    {
+        let mut desc: *mut PoolChunk = null;
+        if i != 0 {
+            desc = (unsafe self.alloc(sizeof(PoolChunk), alignof(PoolChunk))) as *mut PoolChunk;
+        }
+        return unsafe self.add_chunk(i, desc);
+    }
+
+    // Request class `i`'s next chunk, record it in `desc` (null for class 0: the chunk's first block), and
+    // hand out the chunk's first free block.
+    unsafe fn add_chunk(self: &mut Self, i: usize, desc: *mut PoolChunk) *mut void
+        requires i < CLASS_COUNT
+        panics if true
+        ensures |r| r != null
+    {
         let size = POOL_BLOCK_SIZE_MIN << i;
         let k = unsafe self.classes[i].chunk_count;
-        let bytes = chunk_blocks(i, k) * size;
+        let bytes = chunk_bytes(i, k);
         let base = (unsafe self.upstream.alloc(bytes, size)) as *mut u8;
         self.reserved += bytes;
         let mut first = base;
-        let mut desc = base as *mut PoolChunk;
-        if i == 0 {
+        let mut d = desc;
+        if d == null {
+            d = base as *mut PoolChunk;
             first = unsafe (base + size);
-        } else {
-            desc = (unsafe self.alloc(sizeof(PoolChunk), alignof(PoolChunk))) as *mut PoolChunk;
         }
         let c = unsafe &mut self.classes[i];
-        unsafe (*desc).next = c.chunks;
-        unsafe (*desc).base = base;
-        c.chunks = desc;
+        unsafe (*d).next = c.chunks;
+        unsafe (*d).base = base;
+        c.chunks = d;
         c.chunk_count = k + 1;
         c.cur = unsafe (first + size);
         c.end = unsafe (base + bytes);
@@ -194,8 +228,12 @@ extend<A: Allocator> PoolState<A> {
         unsafe self.upstream.dealloc(ptr, size, align);
     }
 
-    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
-        if old_size != 0 && new_size != 0 {
+    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
+        requires new_size as int <= isize::MAX as int
+        panics if true
+        ensures |r| r != null
+    {
+        if old_size != 0 && new_size != 0 && ptr != null {
             let oi = class_index(old_size, align);
             let ni = class_index(new_size, align);
             if oi == ni && oi < CLASS_COUNT {
@@ -221,23 +259,32 @@ extend<A: Allocator> PoolState<A> {
 
     // Return every chunk of class `i` upstream. A class-0 descriptor lives in its own chunk, so it is read
     // before the chunk goes.
-    fn release_class(self: &mut Self, i: usize) {
+    fn release_class(self: &mut Self, i: usize)
+        requires i < CLASS_COUNT
+        panics if true
+    {
         let size = POOL_BLOCK_SIZE_MIN << i;
         let mut d = unsafe self.classes[i].chunks;
         let mut k = unsafe self.classes[i].chunk_count;
-        while d != null {
+        while d != null
+            invariant self.invariant()
+        {
             let next = unsafe (*d).next;
             let base = unsafe (*d).base;
             k -= 1;
-            unsafe self.upstream.dealloc(base, chunk_blocks(i, k) * size, size);
+            unsafe self.upstream.dealloc(base, chunk_bytes(i, k), size);
             d = next;
         }
         unsafe self.classes[i] = PoolClass { free: null, cur: null, end: null, chunks: null, chunk_count: 0 };
     }
 
-    fn release(self: &mut Self) {
+    fn release(self: &mut Self)
+        panics if true
+    {
         // The descriptors of classes 1 and up live in class-0 blocks: class 0 goes last.
-        for i in 1..CLASS_COUNT {
+        for i in 1..CLASS_COUNT
+            invariant self.invariant()
+        {
             self.release_class(i);
         }
         self.release_class(0);

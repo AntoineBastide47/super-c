@@ -1919,14 +1919,14 @@ extend Facts {
         return g;
     }
 
-    fn bump_base(self: &mut Self, l: u32) {
+    const fn bump_base(self: &mut Self, l: u32) {
         self.vclock += 1;
         self.basegen.set(l as usize, self.vclock);
     }
 
     // A fresh version of local `l` at a block entry: the value is no other path's, and no binding
     // names the new version. Not a write: a later join finds the writes that caused it in the log.
-    fn rekey(self: &mut Self, l: u32) {
+    const fn rekey(self: &mut Self, l: u32) {
         self.vclock += 1;
         self.lver.set(l as usize, self.vclock);
     }
@@ -2190,7 +2190,7 @@ extend Facts {
     /// locals' versions instead: every write since its predecessor was left is another path's.
     // Entering block `blk` in the walk: the versions it starts with (a header then bumps its loop's
     // writes: `loop_scan`, `loop_bump`).
-    pub(package) fn enter_block(self: &mut Self, blk: u32) {
+    pub(package) const fn enter_block(self: &mut Self, blk: u32) {
         if self.rpo.len() != 0 && blk != self.rpo[0] {
             let d = self.idom[blk as usize];
             let from = if d == ir::IR_NONE {
@@ -2218,7 +2218,7 @@ extend Facts {
     }
 
     /// Leave block `blk` in the walk.
-    pub(package) fn leave_block(self: &mut Self, blk: u32) {
+    pub(package) const fn leave_block(self: &mut Self, blk: u32) {
         self.clk_end.set(blk as usize, self.wlog.len() as u32);
     }
 
@@ -2500,7 +2500,7 @@ extend Facts {
     }
 
     // One loop-scan bump of local `l` (`root`: its base generation too), once per scan.
-    fn lbump(self: &mut Self, l: u32, root: bool) {
+    const fn lbump(self: &mut Self, l: u32, root: bool) {
         if root {
             self.bump_base(l);
         }
@@ -2745,7 +2745,7 @@ extend Facts {
     }
 
     // Mark a whole-local operand's local as used past derefs, copies and calls.
-    fn esc_op(self: &mut Self, b: &ir::CoreBody, opid: u32) {
+    const fn esc_op(self: &mut Self, b: &ir::CoreBody, opid: u32) {
         if opid == ir::IR_NONE {
             return;
         }
@@ -3797,7 +3797,7 @@ extend Facts {
     }
 
     // Mark the whole-local integer operand `opid` tracked; true when newly marked.
-    fn irel_op(self: &mut Self, b: &ir::CoreBody, opid: u32) bool {
+    const fn irel_op(self: &mut Self, b: &ir::CoreBody, opid: u32) bool {
         if opid == ir::IR_NONE {
             return false;
         }

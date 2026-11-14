@@ -1170,7 +1170,7 @@ extend Bce {
     }
 
     /// Record that block `cur_blk` wrote local `l` last with a copy of `k` (none: another write).
-    fn note_copy(self: &mut Self, l: u32, k: &fx::VKey) {
+    const fn note_copy(self: &mut Self, l: u32, k: &fx::VKey) {
         if self.cp1b[l as usize] == self.cur_blk {
             self.cp1.set(l as usize, *k); // the block's last write
             return;
@@ -3285,7 +3285,7 @@ extend Bce {
     }
 
     /// Record a whole write of place `pl` (`n` writes) in the loop `iv_scan` reads.
-    fn iv_write(self: &mut Self, b: &ir::CoreBody, pl: u32, n: u32, blk: u32, sid: u32) {
+    const fn iv_write(self: &mut Self, b: &ir::CoreBody, pl: u32, n: u32, blk: u32, sid: u32) {
         let d = self.fx.whole_local(b, pl);
         if d == ir::IR_NONE {
             return;

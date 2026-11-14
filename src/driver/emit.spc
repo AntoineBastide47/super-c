@@ -13064,7 +13064,7 @@ fn nat_join(pk: &lir_ir::Package, at: &Map<u32, u32>, up: &mut Vector<u32>, i: u
 }
 
 // The group of item `i` (`nat_pieces`), its path halved on the way.
-fn nat_root(up: &mut Vector<u32>, i: u32) u32 {
+const fn nat_root(up: &mut Vector<u32>, i: u32) u32 {
     let mut x = i;
     for _ in 0..up.len() {
         if up[x as usize] == x {
@@ -15729,7 +15729,21 @@ fn prove_cached(
                 out.push_str(format("{:x} {:x}\n", keys[2 * m], keys[2 * m + 1]).as_str());
             }
         }
+        // By each fact's identity, its owner's module and node, then its rvalue: the record's bytes do not
+        // depend on the kept order (the workers'), nor on which facts the old record gave.
+        let mut order = Vector::<u128>::with_capacity(facts.len() + fresh.len());
         for j in 0..facts.len() + fresh.len() {
+            let f = if j < facts.len() {
+                facts[j]
+            } else {
+                fresh[j - facts.len()]
+            };
+            let o = keep.kept.at((f >> 32) as usize).body.owner;
+            order.push(o.module as u128 << 96 | o.node as u128 << 64 | (f & 0xFFFFFFFFu64) as u128 << 32 | j as u64);
+        }
+        order.sort();
+        for q in 0..order.len() {
+            let j = (order[q] & 0xFFFFFFFFu128) as usize;
             let f = if j < facts.len() {
                 facts[j]
             } else {

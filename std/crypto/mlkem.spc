@@ -4691,6 +4691,7 @@ lemma reduced_push(s: Seq<Secret<u32>>, x: Secret<u32>)
 
 // `n` zero coefficients, a vector of `n / 256` polynomials.
 fn new_polys(n: usize) Vector<Secret<u32>>
+    requires n as int <= isize::MAX as int / 4
     ensures |v| v.len() == n && v.view() == zeros32(n as int) && reduced(v.view())
 {
     let mut v = Vector::<Secret<u32>>::with_capacity(n);
@@ -4705,6 +4706,7 @@ fn new_polys(n: usize) Vector<Secret<u32>>
 
 // `n` zero bytes.
 fn new_bytes(n: usize) Vector<Secret<u8>>
+    requires n as int <= isize::MAX as int
     ensures |v| v.len() == n && v.view() == zeros8(n as int)
 {
     let mut v = Vector::<Secret<u8>>::with_capacity(n);
@@ -4724,6 +4726,7 @@ lemma take_next(s: Seq<Secret<u8>>, j: int)
 
 // `src` followed by byte `n`.
 fn with_byte(src: []Secret<u8>, n: Secret<u8>) Vector<Secret<u8>>
+    requires src.len() as int < isize::MAX as int
     ensures |v| v.view() == src.view().push(n) && v.len() == src.len() + 1
 {
     let mut v = Vector::<Secret<u8>>::with_capacity(src.len() + 1);
@@ -5675,7 +5678,7 @@ lemma mat_next(a: Seq<Secret<u32>>, rho: Seq<Secret<u8>>, k: int, m: int, b: Seq
 // The matrix of seed `rho` into `a` (FIPS 203, Algorithm 13, lines 3 to 7): whether every entry was
 // sampled within the iteration bound.
 fn sample_matrix(a: []mut Secret<u32>, rho: []Secret<u8>, k: usize) bool
-    requires 2 <= k && k <= 4 && a.len() as int == 256 * k as int * k as int && reduced(a.view())
+    requires rho.len() == 32 && 2 <= k && k <= 4 && a.len() as int == 256 * k as int * k as int && reduced(a.view())
     ensures |ok| a.len() == old(a.len()) && reduced(a.view()) && a.view() == mat(old(a.view()), rho.view(), k as int, 0)
     ensures |ok| ok == mat_ok(rho.view(), k as int, 0)
 {
@@ -5740,7 +5743,9 @@ fn noise_poly(f: []mut Secret<u32>, fo: usize, seed: []Secret<u8>, eta: usize)
 // The noise vector of seed `s` with counters from `n0` into `f` (FIPS 203, Algorithm 13, lines 8 to 15).
 @constant_time
 fn sample_noise(f: []mut Secret<u32>, s: []Secret<u8>, eta: usize, k: usize, n0: usize)
-    requires 1 <= k && k <= 4 && eta_ok(eta as int) && n0 <= 8 && f.len() as int == 256 * k as int && reduced(f.view())
+    requires s.len() == 32 && 1 <= k && k <= 4 && eta_ok(eta as int) && n0 <= 8 && f.len() as int == 256 * k as int && reduced(
+        f.view(),
+    )
     ensures f.len() == old(f.len()) && reduced(f.view()) && f.view() == cbd_vec(
         old(f.view()),
         s.view(),
@@ -5808,7 +5813,7 @@ pub spec fn t_hat(rho: Seq<Secret<u8>>, sigma: Seq<Secret<u8>>, k: int, eta1: in
 // 16; Algorithm 14, lines 9 to 12 without the NTT).
 @constant_time
 fn noise_vec(sigma: []Secret<u8>, eta: usize, k: usize, n0: usize, hat: bool) Vector<Secret<u32>>
-    requires 1 <= k && k <= 4 && eta_ok(eta as int) && n0 <= 8
+    requires sigma.len() == 32 && 1 <= k && k <= 4 && eta_ok(eta as int) && n0 <= 8
     ensures |v| v.len() as int == 256 * k as int && reduced(v.view())
     ensures |v| hat ==> v.view() == ntt_vec(
         cbd_vec(zeros32(256 * k as int), sigma.view(), eta as int, k as int, n0 as int, 0),
@@ -5848,7 +5853,7 @@ fn mat_vec_add(a: []Secret<u32>, s: []Secret<u32>, e: []Secret<u32>, k: usize) V
 
 // The matrix A-hat of seed `rho`: whether SampleNTT set every coefficient within its iteration bound.
 fn matrix(a: []mut Secret<u32>, rho: []Secret<u8>, k: usize) bool
-    requires 2 <= k && k <= 4 && a.len() as int == 256 * k as int * k as int && a.view() == zeros32(
+    requires rho.len() == 32 && 2 <= k && k <= 4 && a.len() as int == 256 * k as int * k as int && a.view() == zeros32(
         256 * k as int * k as int,
     )
     ensures |ok| a.len() == old(a.len()) && reduced(a.view()) && a.view() == a_hat(rho.view(), k as int) && ok == mat_ok(
@@ -5885,7 +5890,7 @@ fn kpke_core(
     dk: []mut Secret<u8>,
     dko: usize,
 ) bool
-    requires rho.len() == 32 && 2 <= k && k <= 4 && eta_ok(eta1 as int)
+    requires rho.len() == 32 && sigma.len() == 32 && 2 <= k && k <= 4 && eta_ok(eta1 as int)
     requires eo as int + 384 * k as int + 32 <= ek.len() as int && dko as int + 384 * k as int <= dk.len() as int
     ensures |ok| ek.len() == old(ek.len()) && dk.len() == old(dk.len()) && ok == mat_ok(rho.view(), k as int, 0)
     ensures |ok| ek.view() == copied(

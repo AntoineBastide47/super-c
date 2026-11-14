@@ -3007,7 +3007,7 @@ extend<T: Copy> SplitVec<T> {
         return self.ovf.index_mut(i - self.split);
     }
 
-    pub(package) fn set(self: &mut Self, i: usize, v: T) {
+    pub(package) const fn set(self: &mut Self, i: usize, v: T) {
         if i < self.split {
             self.base.set(i, v);
         } else {

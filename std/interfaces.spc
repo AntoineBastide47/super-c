@@ -255,10 +255,17 @@ pub interface Hash {
     }
 }
 
+// The C library's promises, which no proof checks: `malloc` and `realloc` give null or a block of
+// `size` bytes (C17 7.22.3), aligned for any fundamental type; a size of 0 may give null.
 extern "C" {
-    fn malloc(size: usize) *mut void;
-    fn realloc(ptr: *mut void, size: usize) *mut void;
+    @trusted
+    fn malloc(size: usize) *mut void
+        requires size != 0;
+    @trusted
+    fn realloc(ptr: *mut void, size: usize) *mut void
+        requires size != 0;
     fn free(ptr: *mut void) void;
+    @noreturn
     fn abort() void;
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
 }
@@ -276,16 +283,47 @@ extern "C" {
 /// block's `size` and `align`, and an allocator that trusts them (a bump or arena one must) corrupts its
 /// own free list when they are wrong. Nothing checks that the numbers describe the block `ptr` came from, or
 /// that `ptr` came from this allocator at all, so the caller says so.
+/// No block is larger than `isize::MAX` bytes (`requires`), and a result is never null (`ensures`): an
+/// allocator that cannot serve a request aborts or panics.
 pub interface Allocator: Copy {
-    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void;
-    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void;
+    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void
+        requires size as int <= isize::MAX as int
+        ensures |r| r != null;
+    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
+        requires new_size as int <= isize::MAX as int
+        ensures |r| r != null;
     unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
+}
+
+/// The bytes of `n` values of `T`, `n * sizeof(T)`. Panics when they are more than `isize::MAX`, the
+/// largest block.
+pub const fn array_bytes<T>(n: usize) usize
+    panics if sizeof(T) != 0 && n as int > isize::MAX as int / sizeof(T) as int
+    ensures |r| r as int == n as int * sizeof(T) as int && r as int <= isize::MAX as int
+{
+    if sizeof(T) != 0 && n > isize::MAX as usize / sizeof(T) {
+        panic("array_bytes: more than isize::MAX bytes");
+    }
+    return n * sizeof(T);
+}
+
+/// `n`, the byte size of one block. Panics when it is more than `isize::MAX`, the largest block.
+pub const fn alloc_size(n: usize) usize
+    panics if n as int > isize::MAX as int
+    ensures |r| r == n && r as int <= isize::MAX as int
+{
+    if n > isize::MAX as usize {
+        panic("alloc_size: more than isize::MAX bytes");
+    }
+    return n;
 }
 
 // Over-aligned blocks: the runtime's leak tracker allocates them with the target's call (`aligned_alloc`,
 // or `_aligned_malloc` on Windows), records them, and releases them with the matching call.
 extern "C" {
-    fn sc_lk_aligned_alloc(size: usize, align: usize) *mut void;
+    @trusted
+    fn sc_lk_aligned_alloc(size: usize, align: usize) *mut void
+        requires size != 0;
     fn sc_lk_aligned_free(ptr: *mut void) void;
 }
 
@@ -306,12 +344,18 @@ pub struct Global {}
 // Each method inlines into its caller, so the leak tracker records the allocation at the container code
 // that asked for the block, in every profile.
 extend Global as Allocator {
+    // A request of 0 bytes takes 1: the C library's `malloc(0)` may give null.
     @always_inline
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {
-        let p = if align > MALLOC_ALIGN {
-            unsafe sc_lk_aligned_alloc(size, align)
+        let n = if size == 0 {
+            1
         } else {
-            unsafe malloc(size)
+            size
+        };
+        let p = if align > MALLOC_ALIGN {
+            unsafe sc_lk_aligned_alloc(n, align)
+        } else {
+            unsafe malloc(n)
         };
         if p == null {
             unsafe abort();
@@ -334,7 +378,13 @@ extend Global as Allocator {
             }
             return p;
         }
-        let p = unsafe realloc(ptr, new_size);
+        // A size of 0 takes 1, as in `alloc` (C23 leaves `realloc(p, 0)` undefined).
+        let n = if new_size == 0 {
+            1
+        } else {
+            new_size
+        };
+        let p = unsafe realloc(ptr, n);
         if p == null {
             unsafe abort();
         }

@@ -291,7 +291,7 @@ extend<T, A: Allocator> Hive<T, A> {
 
     // A block of `cap` slots from the allocator, its links not set.
     fn alloc_block(self: &mut Hive<T, A>, cap: usize) *mut Block<T> {
-        let b = (unsafe self.alloc.alloc(Block::<T>::bytes(cap), Block::<T>::align())) as *mut Block<T>;
+        let b = (unsafe self.alloc.alloc(alloc_size(Block::<T>::bytes(cap)), Block::<T>::align())) as *mut Block<T>;
         unsafe (*b).cap = cap as u16;
         self.cap += cap;
         return b;

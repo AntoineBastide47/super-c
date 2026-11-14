@@ -65,7 +65,7 @@ extend<T> ChannelState<T> {
     /// lock, with `count <= ncap`. `pub` for linkage, like `grow`.
     pub fn resize(self: &mut ChannelState<T>, ncap: usize) {
         let mut g = Global {};
-        let ns = (unsafe g.alloc(ncap * sizeof(T), alignof(T))) as *mut T;
+        let ns = (unsafe g.alloc(array_bytes::<T>(ncap), alignof(T))) as *mut T;
         for i in 0..self.count {
             let idx = (self.head + i) % self.cap;
             unsafe ns[i] = unsafe {
@@ -194,7 +194,7 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
         bytes = ring_offset::<T>() + cap * sizeof(T);
     }
     let mut g = Global {};
-    let p = (unsafe g.alloc(bytes, block_align::<T>())) as *mut ChannelInner<T>;
+    let p = (unsafe g.alloc(alloc_size(bytes), block_align::<T>())) as *mut ChannelInner<T>;
     let mut slots = dangling::<T>();
     if sizeof(T) != 0 {
         slots = (unsafe (p as *mut u8 + ring_offset::<T>())) as *mut T;

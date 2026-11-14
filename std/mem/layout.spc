@@ -14,7 +14,9 @@ const ISIZE_MAX: usize = isize::MAX as usize;
 /// The size and alignment of a block of memory. Construct it with `new`, `array` or `from_size_align`;
 /// every value satisfies the invariant above.
 @derive(Copy, Eq, Hash, Format)
-pub struct Layout {
+pub struct Layout
+    invariant self.size as int <= isize::MAX as int
+{
     size: usize,
     align: usize,
 }
@@ -53,10 +55,10 @@ pub const fn is_aligned<T>(p: *const T, align: usize) bool {
 // Inlined so the leak tracker records the allocation at the caller, as `Global`'s methods are.
 @always_inline
 pub fn alloc_layout<A: Allocator>(a: &mut A, l: Layout) *mut void {
-    if l.size() == 0 {
-        return ptr::from_addr_mut::<void>(l.align());
+    if l.size == 0 {
+        return ptr::from_addr_mut::<void>(l.align);
     }
-    return unsafe a.alloc(l.size(), l.align());
+    return unsafe a.alloc(l.size, l.align);
 }
 
 /// Release a block that `alloc_layout(a, l)` returned. A zero-size layout calls no allocator.
@@ -119,6 +121,11 @@ extend Layout {
     /// overflow, by the invariant.
     pub const fn pad_to_align(self: &Layout) Layout {
         let size = self.size + (self.align - 1) & ~(self.align - 1);
+        // Never true (the documented invariant bounds the rounded size), but the proofs cannot follow the
+        // rounding's bits.
+        if size > ISIZE_MAX {
+            panic("Layout::pad_to_align: the rounded size passes isize::MAX");
+        }
         return Layout { size: size, align: self.align };
     }
 

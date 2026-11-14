@@ -5501,7 +5501,7 @@ extend Package {
 
     /// The coordinator's re-analysis reset (the language server checks a module again): every
     /// item of module `m` returns to Resolved. Not a monotone transition; no reader runs meanwhile.
-    pub(package) fn reset_module_states(self: &mut Self, m: usize) {
+    pub(package) const fn reset_module_states(self: &mut Self, m: usize) {
         if !self.sched.built {
             return;
         }

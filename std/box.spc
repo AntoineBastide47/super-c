@@ -5,8 +5,12 @@
 // `new()` uses a default-constructed allocator; pass a stateful one (an arena/pool handle) with `new_in`, or
 // pick a non-default zero-sized allocator with a turbofish: `Box::<T, MyAlloc>::new(v)`.
 
+import std::spec::seq as *;
+
 /// An owned heap allocation of one T through allocator A; freeing the box frees the value.
-pub struct Box<T, A = Global> {
+pub struct Box<T, A = Global>
+    invariant sizeof(T) == 0 || block(self.ptr).len() == 1
+{
     @owned
     ptr: *mut T, // owns one T (private)
     alloc: A, // the allocator the block was obtained through (private; zero-sized for Global)
@@ -21,16 +25,15 @@ unsafe extend<T: Sync, A: Sync> Box<T, A> as Sync {}
 extend<T, A: Allocator> Box<T, A> {
     /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).
     pub const fn new_in(alloc: A, value: T) Box<T, A> {
-        let mut b = Box::<T, A> { ptr: null, alloc: alloc };
-        if sizeof(T) == 0 {
-            // A zero-sized value occupies no bytes: the aligned sentinel, no allocator call.
-            b.ptr = dangling::<T>();
-            unsafe b.ptr[0] = value;
-            return b;
-        }
-        b.ptr = (unsafe b.alloc.alloc(sizeof(T), alignof(T))) as *mut T;
-        unsafe b.ptr[0] = value;
-        return b;
+        let mut a = alloc;
+        // A zero-sized value occupies no bytes: the aligned sentinel, no allocator call.
+        let p = if sizeof(T) == 0 {
+            dangling::<T>()
+        } else {
+            (unsafe a.alloc(sizeof(T), alignof(T))) as *mut T
+        };
+        unsafe p[0] = value;
+        return Box::<T, A> { ptr: p, alloc: a };
     }
 
     /// The boxed value.

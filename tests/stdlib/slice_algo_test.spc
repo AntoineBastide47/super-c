@@ -240,12 +240,12 @@ extend Adversary {
         return Adversary { val: val, gas: n as i64, nsolid: 0, candidate: 0, count: 0 };
     }
 
-    fn freeze(self: &mut Adversary, x: i64) {
+    const fn freeze(self: &mut Adversary, x: i64) {
         self.val.set(x as usize, self.nsolid);
         self.nsolid += 1;
     }
 
-    fn cmp(self: &mut Adversary, x: i64, y: i64) i32 {
+    const fn cmp(self: &mut Adversary, x: i64, y: i64) i32 {
         self.count += 1;
         let gx = *self.val.at(x as usize) == self.gas;
         let gy = *self.val.at(y as usize) == self.gas;

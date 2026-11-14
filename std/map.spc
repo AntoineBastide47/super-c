@@ -158,6 +158,36 @@ unsafe extend<K: Send, V: Send, A: Send, S: Send> Map<K, V, A, S> as Send {}
 
 unsafe extend<K: Sync, V: Sync, A: Sync, S: Sync> Map<K, V, A, S> as Sync {}
 
+extend<K, V, A: Allocator, S> Map<K, V, A, S> {
+    // Take `n` empty slots (the old arrays stay the caller's): the keys, the values and the occupancy
+    // bytes, all 0. Three separate arrays by REQUIREMENT, not oversight: the compile-time evaluator's
+    // abstract heap types each allocation by its element: a single block carved with byte-offset interior
+    // pointers is not evaluable, and Map folds at compile time are a language feature.
+    const fn alloc_slots(self: &mut Map<K, V, A, S>, n: usize) {
+        // No array is larger than `isize::MAX` bytes.
+        let lim = isize::MAX as usize;
+        if n > lim || sizeof(K) != 0 && n > lim / sizeof(K) || sizeof(V) != 0 && n > lim / sizeof(V) {
+            panic("Map: capacity overflow");
+        }
+        self.keys = alloc_array::<K, A>(&mut self.alloc, n);
+        self.vals = alloc_array::<V, A>(&mut self.alloc, n);
+        self.used = alloc_array::<u8, A>(&mut self.alloc, n);
+        unsafe memset(self.used, 0, n);
+        self.cap = n;
+    }
+}
+
+// An array of `n` values of `T` from `a`. Zero-sized values occupy no bytes: the aligned sentinel, no
+// allocator call.
+const fn alloc_array<T, A: Allocator>(a: &mut A, n: usize) *mut T
+    requires sizeof(T) == 0 || n as int <= isize::MAX as int / sizeof(T) as int
+{
+    if sizeof(T) == 0 {
+        return dangling::<T>();
+    }
+    return (unsafe a.alloc(n * sizeof(T), alignof(T))) as *mut T;
+}
+
 extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     /// Empty map backed by an explicit allocator and hash builder; no allocation until the first insert.
     pub const fn with_hasher_in(alloc: A, hasher: S) Map<K, V, A, S> {
@@ -211,29 +241,12 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
     }
 
     // Reallocate to `newcap` slots (a power of two, at least 8) and rehash every occupied entry into it.
-    // (Three separate arrays by REQUIREMENT, not oversight: the compile-time evaluator's abstract heap
-    // types each allocation by its element: a single block carved with byte-offset interior pointers is
-    // not evaluable, and Map folds at compile time are a language feature.)
     const fn rehash_to(self: &mut Map<K, V, A, S>, newcap: usize) {
         let oldkeys = self.keys;
         let oldvals = self.vals;
         let oldused = self.used;
         let oldcap = self.cap;
-        // Zero-sized keys or values occupy no bytes: the aligned sentinel, no allocator call.
-        if sizeof(K) == 0 {
-            self.keys = dangling::<K>();
-        } else {
-            self.keys = (unsafe self.alloc.alloc(newcap * sizeof(K), alignof(K))) as *mut K;
-        }
-        if sizeof(V) == 0 {
-            self.vals = dangling::<V>();
-        } else {
-            self.vals = (unsafe self.alloc.alloc(newcap * sizeof(V), alignof(V))) as *mut V;
-        }
-        self.used = (unsafe self.alloc.alloc(newcap, alignof(u8))) as *mut u8;
-        // Mark every slot empty.
-        unsafe memset(self.used, 0, newcap);
-        self.cap = newcap;
+        self.alloc_slots(newcap);
         self.len = 0;
         for i in 0..oldcap {
             if unsafe oldused[i] == 1 {
@@ -577,19 +590,7 @@ extend<K: Hash + Eq + Clone, V: Clone, A: Allocator, S: BuildHasher> Map<K, V, A
         if self.cap == 0 {
             return out;
         }
-        if sizeof(K) == 0 {
-            out.keys = dangling::<K>();
-        } else {
-            out.keys = (unsafe out.alloc.alloc(self.cap * sizeof(K), alignof(K))) as *mut K;
-        }
-        if sizeof(V) == 0 {
-            out.vals = dangling::<V>();
-        } else {
-            out.vals = (unsafe out.alloc.alloc(self.cap * sizeof(V), alignof(V))) as *mut V;
-        }
-        out.used = (unsafe out.alloc.alloc(self.cap, alignof(u8))) as *mut u8;
-        unsafe memset(out.used, 0, self.cap);
-        out.cap = self.cap;
+        out.alloc_slots(self.cap);
         for i in 0..self.cap {
             if unsafe self.used[i] != 0 {
                 unsafe out.keys[i] = (unsafe self.keys[i]).clone();

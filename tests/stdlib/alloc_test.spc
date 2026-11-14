@@ -96,7 +96,9 @@ const fn random_align(rng: &mut random::Pcg32) usize {
 }
 
 // A random size: mostly pooled sizes, some unpooled ones, some zero.
-const fn random_size(rng: &mut random::Pcg32) usize {
+const fn random_size(rng: &mut random::Pcg32) usize
+    ensures |r| r <= 10096
+{
     let r = rng.next_u32();
     if r % 16 == 0 {
         return 0;
