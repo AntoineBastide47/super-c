@@ -43,8 +43,12 @@ const fn preg(pa: ab::Part) u8 {
 // Register sets: bit `r` for register number `r`.
 const XALLOC: u64 = 0xFFFF;
 const XFIX: u64 = 0x1FF80000;
+// The lower register of each pair of callee-saved registers `finish` saves together: x19/x20 to x27/x28,
+// d8/d9 to d14/d15.
+const PAIRS: u64 = 0x0AA80000 | 0x55u64 << 40;
 // The caller-saved x registers a value may hold for its whole range: x9..x15 (no argument register); in
-// a body that calls nothing, x0..x8 too; in one that calls in rare blocks only, x2..x8 too (`Gen.scr`).
+// a body that calls nothing, x0..x8 too; in one whose every call saves the homes around it (a rare
+// block's, a shrink-wrapped body's), x2..x8 too (`Gen.scr`).
 const XSCR: u64 = 0xFE00;
 const XSCR_LEAF: u64 = 0xFFFF;
 const XSCR_RARE: u64 = 0xFFFC;
@@ -108,7 +112,8 @@ pub(package) struct Gen {
     btest_w: u32,
     stepped: Vector<u32>, // accesses paired early and pointer steps taken as post-index updates
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
-    csave: Vector<u8>, // the scratch homes saved around a rare call (`save_scratch`)
+    csave: Vector<u8>, // the scratch homes saved around a call (`save_scratch`)
+    csown: Vector<u32>, // per register of `csave`, the value it held
     csoff: i64, // the stack offset of their run of bytes
     cssize: u32, // its size
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -161,13 +166,14 @@ pub(package) struct Gen {
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
     far: bool,
-    // Shrink-wrapping: the frame is set up on the edges into the rare blocks and taken down on the edges out
-    // (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no callee-saved
-    // register, has none. Whether the body is compiled so, whether it touched the frame in a warm block
-    // (`frame_use`: the body is compiled again without), and whether that try failed.
+    // Shrink-wrapping: the frame is set up on the edges into the blocks laid out last and taken down on
+    // the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no
+    // callee-saved register, has none. Whether the body is compiled so, whether it touched the frame in a
+    // warm block (`frame_use`: the body is compiled again without), and whether that try failed.
     shrink: bool,
     shrink_bad: bool,
     no_shrink: bool,
+    laid: bool, // `shrinkable` made the body's layout, with no block put last
     // Stack parameters read through sp, the body tried as one that keeps no frame (`sp_args`; else, or once
     // that try fails, `no_sp_args`, through x29).
     sp_args: bool,
@@ -233,6 +239,7 @@ extend Gen {
             arrm: Vector::<u64>::new(),
             taken: Vector::<u64>::new(),
             csave: Vector::<u8>::new(),
+            csown: Vector::<u32>::new(),
             csoff: 0,
             cssize: 0,
             rarec: Vector::<bool>::new(),
@@ -272,6 +279,7 @@ extend Gen {
             shrink: false,
             shrink_bad: false,
             no_shrink: false,
+            laid: false,
             sp_args: false,
             no_sp_args: false,
             again: false,
@@ -542,10 +550,10 @@ extend Gen {
         }
         let t = b.insts[v as usize + 1 + ext as usize + st as usize];
         // A conversion of `v` alone that keeps its bits in its register (an extension in place, a truncation,
-        // a cast between a pointer and an integer), whose result has a register home: `v` is made in that
-        // home, taken now, and the conversion moves nothing.
+        // a cast between a pointer and an integer, a pointer's copy: `PTR_NONNULL`), whose result has a
+        // register home: `v` is made in that home, taken now, and the conversion moves nothing.
         let w = v + 1;
-        let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST;
+        let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST || t.op == O_PTRADD && t.b == VNONE && t.c == 0;
         if !ext && !st && keeps && t.a == v && !fv && (is_int(t.ty) || t.ty == T_PTR) && type_bits(t.ty, self.cr.ptr) <= 64 && self.homed(
             w,
         ) {
@@ -822,10 +830,11 @@ extend Gen {
         self.vec_homes();
         // A body that calls nothing that returns (no instruction `clobbers` but one before a trap, no
         // thread-local address's getter) and runs no system operation or variadic access: its homes may
-        // take x0..x8; x2..x8 when it calls in rare blocks only, as a call's result arrives in x0 and x1,
-        // where a home saved around it (`save_scratch`) would come back, or calls a getter, which keeps
-        // x1..x15 (`sym_addr`). A call right before the return of its result, a sibling call's shape, comes
-        // back to no code of the body (`call_tail_shape`; one that stays a call makes the shrink try fail).
+        // take x0..x8; x2..x8 when every call saves the homes around it (`rarec`), as a call's result
+        // arrives in x0 and x1, where a home saved around it (`save_scratch`) would come back, or calls a
+        // getter, which keeps x1..x15 (`sym_addr`). A call right before the return of its result, a sibling
+        // call's shape, comes back to no code of the body (`call_tail_shape`; one that stays a call makes
+        // the shrink try fail).
         let mut leaf = true;
         let mut rare = true;
         let mut masked = false;
@@ -873,7 +882,7 @@ extend Gen {
                 }
             }
             // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
-            // the rare calls save around them.
+            // the calls save around them.
             if self.shrink && (w & lv::WANT_CALLEE) != 0 {
                 w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
             }
@@ -955,7 +964,7 @@ extend Gen {
         // Per block, the caller-saved registers its instructions' most (`need`) leaves homes (`lv::Live::scap`),
         // its first and last call that writes them (`cpre`; `lv::Live::cfirst`, `clast`), and its first and
         // last instruction that writes an argument register no home there survives (`lv::Live::wfirst`,
-        // `wlast`): those that make a body no leaf, but a call of a rare block, saved around.
+        // `wlast`): those that make a body no leaf, but a call saved around (`rarec`).
         self.cr.lv.scap.truncate(0);
         self.cr.lv.cfirst.truncate(0);
         self.cr.lv.clast.truncate(0);
@@ -1067,6 +1076,7 @@ extend Gen {
             xa: (0xFFu64 | 0xFFu64 << 32) & ~self.scr & ~ast::pick(self.scr == XSCR, XSCR_RARE, 0u64),
             vu: 0,
             first: 0,
+            pair: PAIRS,
         };
         self.cr.lv.assign(
             b,
@@ -1243,9 +1253,10 @@ extend Gen {
         return self.cr.lv.rare[self.cr.lv.def_blk[i as usize] as usize];
     }
 
-    // Before instruction `i` of a rare block that calls and returns: the scratch homes whose values live
-    // past it (`csave`, the x registers first) into one run of stack bytes at `csoff`, two registers of a
-    // file per `stp`. Not a value its range alone keeps (`Live::dead_past`). The count saved.
+    // Before instruction `i` of a rare block or a shrink-wrapped body that calls and returns: the scratch
+    // homes whose values live past it (`csave`, the x registers first) into one run of stack bytes at
+    // `csoff`, two registers of a file per `stp`. Not a value its range alone keeps (`Live::dead_past`).
+    // The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
         if !self.rarec[i as usize] {
             return 0;
@@ -1259,6 +1270,7 @@ extend Gen {
             let x = self.cr.owner[r as usize];
             if self.cr.live_on(x) && !self.cr.lv.dead_past(self.cr.b(), x, i) {
                 self.csave.push(r);
+                self.csown.push(x);
                 nx += (r < V0) as u32;
             }
         }
@@ -1280,7 +1292,8 @@ extend Gen {
 
     // Store (or `load`) the registers of `csave`, the first `nx` of them x registers, in their run at
     // `csoff`: from the stack pointer when every pair's offset fits its 7 bits, else from x17 set to the
-    // run's start.
+    // run's start. A load leaves out a register that no longer holds its value (`csown`): the value's
+    // segment ended at the instruction, whose result may hold the register now.
     fn scratch_run(self: &mut Self, load: bool, nx: u32) {
         let n = self.csave.len() as u32;
         let vat = 8 * nx as i64 + 15 & ~15i64;
@@ -1304,7 +1317,12 @@ extend Gen {
             } else {
                 d + 8 * k as i64
             };
-            if k + 1 < n && k + 1 >= nx == v {
+            if load && self.cr.owner[r as usize] != self.csown[k as usize] {
+                k += 1;
+                continue;
+            }
+            let two = k + 1 < n && k + 1 >= nx == v;
+            if two && !(load && self.cr.owner[self.csave[k as usize + 1] as usize] != self.csown[k as usize + 1]) {
                 self.emit(a::ldstp(m, load, 2, r as u32 & 31, self.csave[k as usize + 1] as u32 & 31, base, off as i32));
                 k += 2;
             } else {
@@ -1326,6 +1344,7 @@ extend Gen {
         self.scratch_run(true, nx);
         self.cr.free_slots.push(self.cssize as u64 << 32 | (self.csoff as u32) as u64);
         self.csave.truncate(0);
+        self.csown.truncate(0);
     }
 
     // `cpre` and `cpos`: the calls that return to a use (`clobbers`, not `dead_end`)
@@ -1409,7 +1428,7 @@ extend Gen {
             // scratch home.
             let t = b.insts[i];
             let cl = Gen::clobbers(b, t);
-            self.hpre[i + 1] = (cl || t.op == O_RET || t.op == O_PANIC || t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
+            self.hpre[i + 1] = (cl || t.op == O_PANIC || t.op == O_SYS || t.op == O_VASTART || t.op == O_VAARG || t.op == O_SYMADDR && !self.remat_inst(
                 i as u32,
             )) as u32;
             if !cl {
@@ -1422,7 +1441,8 @@ extend Gen {
                 t,
             )) && !self.cr.mem_tail(i as u32, t);
             self.cret[i] = c;
-            if c && self.rare(i as u32) {
+            // Shrink-wrapped, every call saves the scratch homes that live past it.
+            if c && (self.rare(i as u32) || self.shrink) {
                 self.rarec[i] = true;
             } else if c && !intr {
                 self.cpre[i + 1] = 1;
@@ -1453,7 +1473,8 @@ extend Gen {
     }
 
     // Whether nothing writes the argument register entry parameter value index `x` arrives in before its
-    // range ends (`hpre`, as `quiet_arg`): the plan may leave it there.
+    // range ends (`hpre`, as `quiet_arg`): the plan may leave it there. A return is no such write: it
+    // writes its result where no path reads the parameter after.
     const fn quiet_param(self: &Self, x: u32) bool {
         let b = self.cr.b();
         if self.cr.lv.def_blk[x as usize] != 0 || self.cr.lv.pos[0] != 0 || self.cr.lv.uses[x as usize] == 0 {
@@ -1461,9 +1482,8 @@ extend Gen {
         }
         let e = self.cr.lv.end[x as usize];
         let l = self.cr.lv.last_read(b, x);
-        let past = (l != NONE && b.insts[l as usize].op != O_RET) as usize;
         let tail = if l != NONE {
-            self.hpre[l as usize + past] == self.hpre[b.blocks[self.cr.lv.order[e as usize] as usize].start as usize]
+            self.hpre[l as usize + 1] == self.hpre[b.blocks[self.cr.lv.order[e as usize] as usize].start as usize]
         } else {
             self.hpos[e as usize + 1] == self.hpos[e as usize]
         };
@@ -1533,12 +1553,19 @@ extend Gen {
     }
 
     // Whether instruction `x`, made at the current instruction, an earlier one of its block, may take the
-    // plan's register `r` now: no value holds `r` (but one of the plan with no read left), and no
-    // instruction up to `x` takes `r` by the plan.
+    // plan's register `r` now: no value holds `r` (but one of the plan with no read left, or none left in
+    // the block: the plan gives `x` the register there, so that value leaves the block in another place),
+    // and no instruction up to `x` takes `r` by the plan.
     const fn early(self: &Self, x: u32, r: u8) bool {
         let o = self.cr.owner[r as usize];
         if o != NONE && o != x && (self.cr.va[o as usize].home != H_FIXED || self.cr.lv.uses[o as usize] != 0) {
-            return false;
+            if !self.cr.lv.seg_val(o) {
+                return false;
+            }
+            let l = self.cr.lv.read_last(o, self.cr.pos);
+            if l != NONE && l > self.cur {
+                return false;
+            }
         }
         for j in self.cur..x {
             if !self.cr.lv.seg_val(j) {
@@ -2454,10 +2481,14 @@ extend Gen {
             self.cr.lv.after.truncate(0);
             self.cr.lv.analyze(b);
         }
-        // The layout once shrink-wrapping chose the blocks it puts last (`shrinkable`, `after`).
+        // The layout once shrink-wrapping chose the blocks it puts last (`shrinkable`, `after`), which made
+        // it when it read the live ranges and chose none (`laid`).
+        self.laid = false;
         self.shrink = !self.no_shrink && self.shrinkable();
         self.shrink_bad = false;
-        self.cr.lv.relayout(b);
+        if !self.laid {
+            self.cr.lv.relayout(b);
+        }
         if self.shrink {
             // A shrink-wrapped body places no code past its blocks: each late edge moves in place.
             self.cr.lv.late.truncate(0);
@@ -2620,11 +2651,14 @@ extend Gen {
         return ok;
     }
 
-    // Whether the body may set its frame up in its rare blocks alone (`shrink`): every call (one that does
-    // not return too: it needs the frame's alignment) is in a rare block (`Live::rare`), there is one, and
-    // the body reads no return address, variadic argument or inline assembly, runs no system operation,
-    // aligns no slot past 16 bytes and has no canary. The rare blocks connected to one with a call by edges
-    // between rare blocks set the frame up: `Live::after`, which the layout puts after the others.
+    // Whether the body may set its frame up in some blocks alone (`shrink`): every call (one that does not
+    // return too: it needs the frame's alignment) is in a rare block (`Live::rare`), or the frame on the
+    // edges into those blocks costs less than one at the entry (`Live::frame_pays`, with the live ranges of
+    // a layout made here, `laid` when it stands; at most WARM_CALLS calls outside rare blocks); there is
+    // one, and the body reads no return address, variadic argument or inline assembly, runs no system
+    // operation, aligns no slot past 16 bytes and has no canary. Those blocks, and the rare blocks
+    // connected to one with a call by edges between rare blocks, set the frame up: `Live::after`, which the
+    // layout puts after the others.
     fn shrinkable(self: &mut Self) bool {
         let b = self.cr.b();
         if self.prot || self.opf != 0 {
@@ -2638,6 +2672,8 @@ extend Gen {
         let mut framed = Vector::<bool>::new();
         framed.resize_default(b.blocks.len());
         let mut any = false;
+        // The instructions outside rare blocks that need the frame.
+        let mut warm = Vector::<u32>::new();
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.cr.lv.def_blk[i];
@@ -2652,15 +2688,41 @@ extend Gen {
                 continue;
             }
             if !self.cr.lv.rare[d as usize] {
-                return false;
+                if warm.len() as u32 == lv::WARM_CALLS {
+                    return false;
+                }
+                warm.push(i as u32);
             }
             framed[d as usize] = true;
             any = true;
         }
-        if any {
-            self.cr.lv.set_after(b, &framed);
+        if !any {
+            return false;
         }
-        return any;
+        self.cr.lv.set_after(b, &framed);
+        if warm.len() == 0 {
+            return true;
+        }
+        let into = self.cr.lv.after_into(b);
+        if !self.cr.lv.frame_pays(into, 0) {
+            self.cr.lv.after.truncate(0);
+            return false;
+        }
+        // What those instructions save around them (`Live::around_cost`: two registers per `stp`), by the
+        // live ranges of the layout with no block put last: a range there ends at the value's last read,
+        // not past the blocks put last that do not read it.
+        self.cr.lv.after.truncate(0);
+        self.cr.lv.relayout(b);
+        let mut around: u64 = 0;
+        for q in 0..warm.len() {
+            around += self.cr.lv.around_cost(unsafe &*self.pkg, b, self.cr.lv.def_blk[warm[q] as usize], warm[q], 2);
+        }
+        if !self.cr.lv.frame_pays(into, around) {
+            self.laid = true;
+            return false;
+        }
+        self.cr.lv.set_after(b, &framed);
+        return true;
     }
 
     // Under `shrink`, a stack or frame address `base` (sp, x29) in a warm block: the try fails.
@@ -5136,11 +5198,18 @@ extend Gen {
         }
         let scale = scale_of(t);
         // An index that is a folded extension of a 32-bit value (`lv::FOLD_XUSE`): the sum extends its
-        // register and shifts it by up to 4; another scale multiplies its copy in x16.
+        // register and shifts it by up to 4; another scale, which fits 32 bits, multiplies it as it is
+        // (SMADDL, UMADDL).
         let xi = self.ext_use(t.b);
         if xi != 0 {
             let rw = self.reg(self.cr.b().insts[t.b as usize].a) as u32;
-            let rd = self.def(i) as u32;
+            // A base in a register: the one instruction that reads it and the index writes the result,
+            // which may take the register of either.
+            let rd = if base == a::SP || base == a::FP && boff != 0 {
+                self.def(i)
+            } else {
+                self.def_step(i)
+            } as u32;
             if scale != 0 && (scale & scale - 1) == 0 && scale <= 16 {
                 let rb = if base == a::FP && boff != 0 {
                     self.add_off(rd as u8, base, boff);
@@ -5153,11 +5222,6 @@ extend Gen {
                 self.add_imm_any(rd as u8, ast::pick(rb == base, boff, 0) + off);
                 return true;
             }
-            if xi == 2 {
-                self.emit(a::mov_reg(false, a::IP0, rw));
-            } else {
-                self.emit(a::sxt(true, a::IP0, rw, 32));
-            }
             let rb = if base == a::SP || base == a::FP && boff != 0 {
                 self.add_off(rd as u8, base, boff);
                 rd
@@ -5165,7 +5229,7 @@ extend Gen {
                 base
             };
             self.mov_imm(a::IP1 as u8, scale, true);
-            self.emit(a::madd(true, false, rd, a::IP0, a::IP1, rb));
+            self.emit(a::maddl(xi != 2, rd, rw, a::IP1, rb));
             self.add_imm_any(rd as u8, ast::pick(rb == base, boff, 0) + off);
             return true;
         }
@@ -8309,7 +8373,7 @@ extend Gen {
             pro.push(a::mov_sp(a::IP1, a::SP));
             pro.push(a::logic_imm(true, 0, a::SP, a::IP1, a::logical_imm(~(self.max_align as u64 - 1), true)));
         }
-        // Shrink-wrapped (`shrink`), the prologue runs on each edge into the rare code (its words before the
+        // Shrink-wrapped (`shrink`), the prologue runs on each edge into the framed code (its words before the
         // warm code's end, `ra`), the epilogue but its `ret` on each edge out; a return from the warm code is a
         // `ret` alone.
         let sw = self.shrink;
@@ -8379,7 +8443,7 @@ extend Gen {
         }
         // An epilogue of `ret` alone (no frame, no canary check) takes each branch's place.
         let lone = epi.len() == 1 && self.code.len() as u32 == body_n;
-        // Shrink-wrapped, the epilogue is in the code when the rare code returns (it falls into it, or
+        // Shrink-wrapped, the epilogue is in the code when the framed code returns (it falls into it, or
         // branches); its words `elen`.
         let mut used = !sw || popped;
         for q in 0..self.epi.len() {
@@ -8392,7 +8456,7 @@ extend Gen {
         };
         let mut stubs = Vector::<u32>::new();
         // Shrink-wrapped: per target word, its entry or exit stub (NONE: none yet); the warm code's `ret`, and
-        // the rare code's copy of the epilogue when the code holds none.
+        // the framed code's copy of the epilogue when the code holds none.
         let mut enter = Map::<u32, u32>::new();
         let mut leave = Map::<u32, u32>::new();
         let mut wret = NONE;
@@ -8425,7 +8489,8 @@ extend Gen {
                 continue;
             }
             if sw && w < ra && to >= ra {
-                // From the warm code into the rare code: through the prologue, or to a `ret` for the epilogue.
+                // From the warm code into the framed code: through the prologue, or to a `ret` for the
+                // epilogue.
                 let base = body_n + elen;
                 to = if to >= body_n {
                     if wret == NONE {
@@ -8447,14 +8512,14 @@ extend Gen {
                     }
                 };
             } else if sw && w >= ra && to >= body_n && !used {
-                // From the rare code to the epilogue, which is not in the code: a copy of it.
+                // From the framed code to the epilogue, which is not in the code: a copy of it.
                 if fret == NONE {
                     fret = body_n + elen + stubs.len() as u32;
                     stubs.extend_copy(&epi);
                 }
                 to = fret;
             } else if sw && w >= ra && to < ra {
-                // From the rare code into the warm code: through the epilogue but its `ret`.
+                // From the framed code into the warm code: through the epilogue but its `ret`.
                 let base = body_n + elen;
                 to = (switch leave.get(&to) {
                     Some(x) => *x,
@@ -8735,7 +8800,7 @@ fn frame_rules(o: &mut ob::Obj, sym: u32, size: u32, xs: &Vector<u32>, vs: &Vect
 }
 
 // The unwind rules of shrink-wrapped function `sym` (`size` bytes) for `.eh_frame`: the common entry's
-// (no frame, the return address in x30) to its rare code's first word `ra`; from there the frame record (CFA
+// (no frame, the return address in x30) to its framed code's first word `ra`; from there the frame record (CFA
 // = x29 + 16, x29 and x30 saved below it).
 fn shrink_rules(o: &mut ob::Obj, sym: u32, size: u32, ra: u32) {
     let c0 = o.cfi.len() as u32;

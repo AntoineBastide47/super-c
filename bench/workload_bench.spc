@@ -200,8 +200,10 @@ fn sockets_once() {
     let wg2 = wg.clone();
     let e2 = echoed.clone();
     launch || {
+        // A deadline on every accept, as in `shape_once`: a client whose connect failed fails the round's
+        // check instead of parking this task for ever.
         for _c in 0..CONNS {
-            switch listener.accept() {
+            switch listener.accept_until(time::deadline_in(time::Duration::from_secs(10))) {
                 Ok(stream) => {
                     let w = wg2.clone();
                     let e = e2.clone();

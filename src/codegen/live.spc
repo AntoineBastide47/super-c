@@ -259,7 +259,7 @@ pub(package) struct Live {
     pub(package) parent: Vector<u32>, // per loop header, the header of the loop around it, NONE
     pub(package) rare: Vector<bool>, // per block, whether the entry reaches it only through a block marked rare
     /// Per block (empty: none), whether the layout puts it after every other block, in layout order: a
-    /// generator's rare blocks that alone set its frame up, after the code that has none.
+    /// generator's blocks that alone set its frame up, after the code that has none.
     pub(package) after: Vector<bool>,
     pub(package) def_blk: Vector<u32>, // per value, its block
     // Per block, its predecessors that the entry reaches: `preds[pat[k]..pat[k + 1]]` (`loops`).
@@ -458,6 +458,7 @@ pub(package) struct Live {
     ev: Vector<u32>,
     evb: Vector<u32>,
     rsig: Vector<u64>, // `assign`: per register, a hash of the candidate's blocks it is free in
+    rtop: Vector<u64>, // `assign`: per register, how often those blocks load the candidate (the most it gains)
     rdone: Vector<u64>, // the hashes of the registers `spans` tried for the candidate
     /// Per layout position (the generator's; empty: no segments), the first and the last instruction of its
     /// block that write the caller-saved homes (a call that returns), NONE for none.
@@ -598,6 +599,7 @@ extend Live {
             ev: Vector::<u32>::new(),
             evb: Vector::<u32>::new(),
             rsig: Vector::<u64>::new(),
+            rtop: Vector::<u64>::new(),
             rdone: Vector::<u64>::new(),
             kept: Vector::<bool>::new(),
             sole: Vector::<u32>::new(),
@@ -687,7 +689,8 @@ extend Live {
     }
 
     /// `run` but the layout and the live ranges, which a generator makes once it chose the blocks laid out
-    /// last (`after`): the reverse postorder, the rare blocks, the loops, the folds and `def_blk`.
+    /// last (`after`): the reverse postorder, the rare blocks, the loops, the block frequencies, the folds
+    /// and `def_blk`.
     pub(package) fn analyze(self: &mut Self, b: &Body) {
         let nb = b.blocks.len();
         fill(&mut self.npred, nb, 0);
@@ -707,6 +710,7 @@ extend Live {
         }
         self.rare_blocks(b);
         self.loops(b);
+        self.frequencies(b);
         self.folds(b);
         self.def_blocks(b, b.insts.len() + b.params.len());
     }
@@ -2307,10 +2311,10 @@ extend Live {
         }
     }
 
-    /// Whether a value of `b` made before call `i` of block `d` (in an earlier block of the layout, or in `d`)
-    /// is live past it: in a later block, or read after it in `d`; not one the code makes again where it is
-    /// read (`remat_inst`), nor the result's address, whose stores the return's registers take.
-    pub(package) fn lives_across(self: &mut Self, p: &Package, b: &Body, d: u32, i: u32) bool {
+    /// How many values of `b` made before call `i` of block `d` (in an earlier block of the layout, or in
+    /// `d`) are live past it: in a later block, or read after it in `d`; not one the code makes again where
+    /// it is read (`remat_inst`), nor the result's address, whose stores the return's registers take.
+    pub(package) fn lives_across(self: &mut Self, p: &Package, b: &Body, d: u32, i: u32) u32 {
         let ni = b.insts.len() as u32;
         let pd = self.pos[d as usize];
         let res = if (b.pool[b.sig as usize + 2] & AGG) != 0 {
@@ -2318,6 +2322,7 @@ extend Live {
         } else {
             NONE
         };
+        let mut n: u32 = 0;
         for x in 0..self.end.len() as u32 {
             let k = self.def_blk[x as usize];
             if x == i || x == res || k == NONE || self.pos[k as usize] == NONE || x < ni && remat_inst(p, b, x) {
@@ -2334,10 +2339,61 @@ extend Live {
                 VPARAM | x - ni
             };
             if before && (self.end[x as usize] > pd || self.end[x as usize] == pd && self.reads_after(b, d, i, v)) {
-                return true;
+                n += 1;
             }
         }
-        return false;
+        return n;
+    }
+
+    /// What the homes saved around call `i` of block `d` cost a body that sets its frame up in `after`
+    /// alone: a store and a load per `per` values live past the call (`lives_across`), as often as `d` runs.
+    pub(package) fn around_cost(self: &mut Self, p: &Package, b: &Body, d: u32, i: u32, per: u32) u64 {
+        let n = self.lives_across(p, b, d, i);
+        return self.freq[d as usize] * 2 * ((n + per - 1) / per) as u64;
+    }
+
+    /// How often the edges from the other blocks into the blocks of `after` run (`frequencies`' shares);
+    /// FREQ_MAX when the entry is one of those blocks.
+    pub(package) fn after_into(self: &mut Self, b: &Body) u64 {
+        if self.after[0] {
+            return FREQ_MAX;
+        }
+        let mut into: u64 = 0;
+        for p in 0..b.blocks.len() {
+            if self.rpo[p] == NONE || self.after[p] {
+                continue;
+            }
+            let bk = b.blocks[p];
+            b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut self.fedges);
+            let mut total: u64 = 0;
+            for e in 0..self.fedges.len() {
+                total += ast::pick(self.rare[b.edge_target(self.fedges[e]) as usize], 1u64, FREQ_SPLIT);
+            }
+            for e in 0..self.fedges.len() {
+                let t = b.edge_target(self.fedges[e]);
+                if !self.after[t as usize] {
+                    continue;
+                }
+                let mut share = self.freq[p] * ast::pick(self.rare[t as usize], 1u64, FREQ_SPLIT) / total;
+                // Each loop the edge leaves: at most the nesting depth.
+                let mut h = self.inner[p];
+                while h != NONE && !self.in_loop(h, t) {
+                    share /= FREQ_LOOP;
+                    h = self.parent[h as usize];
+                }
+                into += share;
+            }
+        }
+        return into;
+    }
+
+    /// Whether a frame set up on the edges into the blocks of `after`, which run `into` (`after_into`),
+    /// costs less than one at the entry: its save, its restore and the jump out of the stub that holds
+    /// them as often as those edges run, plus `around` (the homes saved around the calls outside rare
+    /// blocks, `around_cost`), against a save and a restore per entry, and a callee-saved register's when
+    /// a home lives past such a call.
+    pub(package) const fn frame_pays(self: &Self, into: u64, around: u64) bool {
+        return 3 * into + around < ast::pick(around != 0, 4u64, 2u64) * FREQ_ENTRY;
     }
 
     /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
@@ -3335,7 +3391,6 @@ extend Live {
         fill(&mut self.un, ni, 0);
         self.uv.truncate(0);
         let np = self.order.len();
-        self.frequencies(b);
         fill(&mut self.au, n, 0);
         fill(&mut self.wt, n, 0);
         // Each instruction's uses (`uses_at`), into a scratch taken out for the walk.
@@ -3856,7 +3911,8 @@ extend Live {
         return ast::pick(self.ep_read[yx as usize] == self.ep_gen, NONE, yx);
     }
 
-    /// Whether value index `x` of `b`, in a register by its range at instruction `i` of a rare block, is
+    /// Whether value index `x` of `b`, in a register by its range at instruction `i` of a rare block or of
+    /// a block laid out last (`after`), is
     /// dead past `i`: no instruction after `i` in its block reads it (`uses_at`: an edge's arguments too),
     /// and it is not live into a block the block's edges enter. A range runs to the last block in the
     /// layout that reads the value, through the rare blocks before it that no path joins to a read. Only
@@ -3893,19 +3949,22 @@ extend Live {
         return true;
     }
 
-    // `past_id`, `past_in` and `past_def` for `b`, after `plan`: the liveness of the instructions a rare
-    // block's call may find in a caller-saved register, a backward fixpoint over the laid-out blocks. A
-    // block reads a value from before it when an instruction of it uses the value another block defines.
+    // `past_id`, `past_in` and `past_def` for `b`, after `plan`: the liveness of the instructions a call
+    // of a rare block, or of a block laid out last (`after`), may find in a caller-saved register, a
+    // backward fixpoint over the laid-out blocks. A block reads a value from before it when an instruction
+    // of it uses the value another block defines.
     fn pasts(self: &mut Self, b: &Body) {
         self.past_ok = true;
         let ni = b.insts.len();
         let np = self.order.len();
         fill(&mut self.past_id, ni, NONE);
-        // The rare blocks before each layout position.
+        // The rare blocks, and the ones laid out last, before each layout position.
         self.work.truncate(0);
         self.work.push(0);
+        let aft = self.after.len() != 0;
         for p in 0..np {
-            self.work.push(self.work[p] + self.rare[self.order[p] as usize] as u32);
+            let k = self.order[p] as usize;
+            self.work.push(self.work[p] + (self.rare[k] || aft && self.after[k]) as u32);
         }
         let mut n: u32 = 0;
         for x in 0..ni {
@@ -4196,6 +4255,12 @@ const SEG_WT: u64 = (1u64 << 40) - 1;
 // build of itself: 2, 3, 5 and 8 each ran fewer instructions in less code than the one before, 5 and 8
 // the same count.
 const EDGE_BLOCK: u64 = 8;
+// What a callee-saved register the body does not save yet costs the value that takes it (`Live::assign`,
+// `Live::spans`): two entries, its save and its restore. Measured: at one entry, and at a sixteenth, the
+// compiler's build of itself runs 1% fewer cycles, and a wait group's fan-in 2 to 12% more: a body that
+// takes the register for a path it seldom runs saves it at every entry (the scheduler's search for work
+// saves 6 registers in place of 2).
+const SAVE_COST: u64 = 2 * FREQ_ENTRY;
 // The most segments of one register `Live::evict` searches for a holder.
 const EVICT_SCAN: u32 = 64;
 
@@ -4225,7 +4290,8 @@ extend Live {
 /// only the parameter that arrives in it keeps, when the generator finds nothing writes it in the
 /// parameter's range; and the vector file's upper registers (`vu`: x86-64's xmm16..xmm31), for the values
 /// that ask for one (`WANT_UPPER`). `first`: the registers of those classes the plan gives out before
-/// the others of their class (the ones no temporary takes).
+/// the others of their class (the ones no temporary takes). `pair`: the lower register of each two
+/// callee-saved registers the generator saves together (a body that holds a value in one saves both).
 pub(package) struct Sets {
     pub(package) xc: u64,
     pub(package) xs: u64,
@@ -4235,9 +4301,20 @@ pub(package) struct Sets {
     pub(package) xa: u64,
     pub(package) vu: u64,
     pub(package) first: u64,
+    pub(package) pair: u64,
 }
 
 extend Sets as Copy {}
+
+extend Sets {
+    // The callee-saved registers a body saves once a value holds `r`: `r`, and the other register of its
+    // pair (`pair`).
+    const fn saved(self: &Self, r: u8) u64 {
+        let bit = 1u64 << r as u64;
+        let lo = (bit | bit >> 1) & self.pair;
+        return (bit | lo | lo << 1) & (self.xc | self.vc);
+    }
+}
 
 /// `Live::seg_r`: no register.
 pub(package) const REG_NONE: u8 = 0xFF;
@@ -4293,12 +4370,15 @@ extend Live {
         }
         fill(&mut self.scand, n, false);
         self.cand.truncate(0);
-        // A step that replaces a block parameter (an instruction of the block where the parameter's range
-        // ends, which may write over it and which that block's edge passes to it, nothing reading the
-        // parameter after) follows it into its register. When a call runs between the parameter's block
-        // and the step (in a block laid out from the one to the other, or before the step in its own),
-        // the parameter lives across it and the step does not: the parameter is ordered no later than
-        // the step, so the register it takes is one both may hold. Each edge's arguments once.
+        // A step that replaces a block parameter (an instruction of a block whose edge passes it to the
+        // parameter of that block or of an earlier one, nothing in its block reading the parameter after it)
+        // shares the parameter's register. The parameter is ordered no later than the step: the register
+        // it takes over all of its range is one the step, which lives to the edge alone, may hold; a step
+        // placed first takes one that another value may hold in the parameter's blocks. When a call runs
+        // between the parameter's block and the step (in a block laid out from the one to the other, or
+        // before the step in its own), the parameter lives across it and the step does not: only a step
+        // that may write over the parameter, in the block where the parameter's range ends. Each edge's
+        // arguments once.
         self.kw.truncate(0);
         self.kw.extend_copy(&self.wt);
         // `kc`: the blocks with a call before each layout position.
@@ -4308,9 +4388,6 @@ extend Live {
             self.kc[p + 1] = self.kc[p] + (calls && self.cfirst[p] != NONE) as u32;
         }
         for p in 0..np {
-            if self.kc[p + 1] == 0 {
-                continue;
-            }
             let k = self.order[p];
             let t = term(b, k);
             for e in 0..edge_count(t) {
@@ -4323,13 +4400,14 @@ extend Live {
                 for j in 0..b.edge_nargs(ed) as usize {
                     let a = b.edge_arg(ed, j as u32);
                     let y = ni + ps + j;
-                    if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || self.def_blk[a as usize] != k || self.end[y] != p as u32 || self.kw[y] >= self.wt[a as usize] {
+                    if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || self.def_blk[a as usize] != k || self.kw[y] >= self.wt[a as usize] {
                         continue;
                     }
-                    if self.kc[p] == self.kc[pt as usize] && (self.cfirst[p] == NONE || a < self.cfirst[p]) {
+                    let near = self.kc[p] == self.kc[pt as usize] && (!calls || self.cfirst[p] == NONE || a < self.cfirst[p]);
+                    if !near && (self.end[y] != p as u32 || !self.over(b, y as u32, a)) {
                         continue;
                     }
-                    if self.over(b, y as u32, a) && !self.reads_after(b, k, a, VPARAM | (y - ni) as u32) {
+                    if !self.reads_after(b, k, a, VPARAM | (y - ni) as u32) {
                         self.kw[y] = self.wt[a as usize];
                     }
                 }
@@ -4457,7 +4535,7 @@ extend Live {
                     let r = self.evict(b, want, caps, sets, x as u32, dp, st, own, pinm, keep, bare, 0);
                     if r != REG_NONE {
                         fill(&mut self.lbest, nl, true);
-                        cused |= 1u64 << r as u64 & cs;
+                        cused |= sets.saved(r);
                         self.seg_put(b, x, dp, st, r, true);
                     }
                 }
@@ -4465,10 +4543,10 @@ extend Live {
             }
             self.hints(b, x as u32, dp, st, own);
             if all != 0 {
-                let r = self.pick(all, sets, cused, bare >= 2 * FREQ_ENTRY, pinm);
+                let r = self.pick(all, sets, cused, bare >= SAVE_COST, pinm);
                 if r != REG_NONE {
                     fill(&mut self.lbest, nl, true);
-                    cused |= 1u64 << r as u64 & cs;
+                    cused |= sets.saved(r);
                     self.seg_put(b, x, dp, st, r, true);
                 }
                 continue;
@@ -4480,8 +4558,10 @@ extend Live {
             let mut br = REG_NONE;
             let mut left = any;
             // Per register, a hash of the blocks it is free in: two registers free in the same blocks gain
-            // the same, so the second is not tried.
+            // the same, so the second is not tried. And the loads those blocks make (`rtop`): a register
+            // gains no more, so one that cannot pass the best so far is not tried.
             fill(&mut self.rsig, 64, 0);
+            fill(&mut self.rtop, 64, 0);
             for i in 0..nl {
                 let mut m = self.lav[i];
                 // Each step clears one register's bit.
@@ -4489,6 +4569,7 @@ extend Live {
                     let r = m.trailing_zeros();
                     m &= m - 1;
                     self.rsig[r] = (self.rsig[r] ^ i as u64 + 1).wrapping_mul(0x9E3779B97F4A7C15);
+                    self.rtop[r] += self.lnow[i];
                 }
             }
             self.rdone.truncate(0);
@@ -4497,6 +4578,9 @@ extend Live {
                 let r = self.pick(left, sets, cused, true, pinm);
                 let bit = 1u64 << r as u64;
                 left &= ~bit;
+                if self.rtop[r as usize] <= gain {
+                    continue;
+                }
                 let key = self.rsig[r as usize] ^ ((bit & cs & ~cused) != 0) as u64;
                 let mut tried = false;
                 for j in 0..self.rdone.len() {
@@ -4519,13 +4603,13 @@ extend Live {
                 let r = self.evict(b, want, caps, sets, x as u32, dp, st, own, pinm, keep, bare, gain);
                 if r != REG_NONE {
                     fill(&mut self.lbest, nl, true);
-                    cused |= 1u64 << r as u64 & cs;
+                    cused |= sets.saved(r);
                     self.seg_put(b, x, dp, st, r, true);
                     continue;
                 }
             }
             if br != REG_NONE {
-                cused |= 1u64 << br as u64 & cs;
+                cused |= sets.saved(br);
                 self.seg_put(b, x, dp, st, br, false);
             }
         }
@@ -4692,9 +4776,9 @@ extend Live {
         self.lblk.sort();
     }
 
-    // The last instruction of the block at layout position `q` that reads value `x` (`sul`), NONE for none:
-    // at most 32 halvings.
-    const fn read_last(self: &Self, x: u32, q: u32) u32 {
+    /// The last instruction of the block at layout position `q` that reads value `x` (`sul`), NONE for none:
+    /// at most 32 halvings.
+    pub(package) const fn read_last(self: &Self, x: u32, q: u32) u32 {
         let mut lo = self.su_at[x as usize] as usize;
         let mut hi = self.su_at[x as usize + 1] as usize;
         while lo < hi {
@@ -5228,7 +5312,7 @@ extend Live {
 
     // The register of `mask` the value at hand takes first: the one that saves most moves (`hq`), else a
     // caller-saved one, an argument one, a callee-saved one the body saves already (`cused`), then, when
-    // `pay` (it weighs no less than the save and the restore), another callee-saved one; the lowest of each,
+    // `pay` (it weighs no less than `SAVE_COST`), another callee-saved one; the lowest of each,
     // one no parameter of the signature arrives in (`pinm`) first: that parameter may keep it. REG_NONE
     // for none.
     const fn pick(self: &Self, mask: u64, sets: Sets, cused: u64, pay: bool, pinm: u64) u8 {
@@ -5272,7 +5356,7 @@ extend Live {
     // those blocks into `lkeep`: per group of such blocks that edges join, how often the blocks that load
     // the value without it run (`lnow`), less how often the edges into the group from blocks that do not hold
     // it in `r` run; a group that gains nothing, or that a late edge enters (its stub cannot load), is left
-    // out. Less a save and a restore when `fresh` (a callee-saved register the body does not save yet).
+    // out. Less `SAVE_COST` when `fresh` (a callee-saved register the body does not save yet).
     // A register for candidate `x` (weight `bare`) over all of its blocks, which no register is free in
     // (`lav`): one whose holder in each block where it is not free holds it through that block and reads
     // nothing there (a value that lives through a loop it is idle in). The holder leaves those blocks: it
@@ -5497,7 +5581,7 @@ extend Live {
             }
         }
         if fresh {
-            total = total - total.min(2 * FREQ_ENTRY);
+            total = total - total.min(SAVE_COST);
         }
         return total;
     }

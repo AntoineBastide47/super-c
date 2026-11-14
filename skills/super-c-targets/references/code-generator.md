@@ -12,14 +12,15 @@ set first: it states the value, register and frame model.
 
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
    `Live::run` (`Live::analyze`, then `Live::relayout`; arm64 runs the two apart, with `shrinkable`
-   between them, so a shrink-wrapped body is laid out once). It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
+   between them, so a body shrink-wrapped for its rare blocks is laid out once; one with a call
+   outside them is laid out with no block last first, for the ranges `Live::around_cost` reads). It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
    `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one; none under `Live::in_place`,
    which wasm sets because its structured code emits each block where reverse postorder puts it), the loop nesting, each
    value's last live position, use count and next-use chain. `end_inst` calls `Live::advance`
    after emission, so unread current operands remain near uses during allocation. Eviction
    prefers no store, then the farthest next use. A folded instruction emits no code; its user reads its
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
-   take the registers first; a call in a rare block
+   take the registers first; a call in a rare block, and each call of a shrink-wrapped body,
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
    for the homes. A value's range runs through the rare blocks before its last read, so the save
    leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
@@ -50,9 +51,20 @@ set first: it states the value, register and frame model.
      copies it, and no access steps the pointer (arm64's post-indexed loads and stores). The planner prefers such registers
      (`Live::hints`: placed partners weighed by edge frequency, the register a parameter arrives in,
      the return register `Live.rhint`).
-   - The heaviest value is placed first, but a block parameter that lives across a call is placed no
-     later than the step that replaces it after the call (`Live.kw`): the parameter takes a
-     callee-saved register, and the step, which alone could take a caller-saved one, follows it there.
+   - The heaviest value is placed first, but a block parameter is placed no later than the step that
+     replaces it (`Live.kw`: a value of a block whose edge passes it to the parameter of that block
+     or of an earlier one, nothing in its block reading the parameter after it). The parameter takes
+     a register it may hold over all of its range and the step, which lives to the edge alone,
+     follows it there; a step placed first takes one that another value may hold in the parameter's
+     blocks, and the back edge copies it. When a call runs between the parameter's block and the
+     step, only a step that may write over the parameter where its range ends: the parameter takes a
+     callee-saved register, and the step, which alone could take a caller-saved one, follows it.
+   - A callee-saved register the body does not save yet costs the value that takes it `SAVE_COST`,
+     two entries (`Live::pick`, `Live::spans`): its save and its restore. A lower cost makes a body
+     save the register at every entry for a path it seldom runs. Give `Sets.pair` the lower register
+     of each two callee-saved registers the prologue saves together (arm64: x19/x20 to x27/x28,
+     d8/d9 to d14/d15; x86-64: none, each has a push or a store of its own): a body that holds a
+     value in one saves both, so the other costs nothing (`Sets::saved`).
    - Fill `Live.part_in` (and `part_quiet`) before `assign` for the loads that take the part
      registers of an aggregate the body receives in registers (`place::parts_taken`, which the entry
      decides the same way): the plan then leaves each load in the register it arrives in, as it
@@ -92,7 +104,9 @@ set first: it states the value, register and frame model.
      `lea`); another result is made in a temporary and moves there after the instruction
      (`settle` in `end_inst`: an operand that ended at the instruction leaves the register without a
      store, and a value that arrived in its plan register stays). A value made before its own instruction (a pair's second access, a
-     call result's part) takes the register only when nothing takes it in between (`early`). A flag
+     call result's part, a conversion's home its operand is made in) takes the register only when no
+     value holds it, but one of the plan with no read left in the block (the plan gives the register
+     to the later value there), and nothing takes it in between (`early`). A flag
      is bound by the instruction that sets it.
    - After an instruction that defines a value with a stack home, store it (`seg_store`). Before a
      terminator's branch, for each edge: a temporary that lives on leaves the registers the edge
@@ -131,16 +145,19 @@ the reason. Never emit code for an unsupported case.
 
 ## Rare code
 
-Shrink-wrapping (`shrinkable`): when every call is in a rare block (x86-64: or in a block outside loops
-that no value lives across a call of, `Live::lives_across`, at most `lv::WARM_CALLS` such calls, with a
-return in the warm code), the warm code keeps no frame and returns with `ret`; the blocks with a call,
+Shrink-wrapping (`shrinkable`): when every call is in a rare block, or the frame on the edges into the
+blocks with a call costs less than one at the entry (`Live::frame_pays`: the save, the restore and the
+stub's jump as often as those edges run, `Live::after_into`, plus the homes saved around the calls
+outside rare blocks, `Live::around_cost`, at most `lv::WARM_CALLS` such calls, against a frame per
+entry and a callee-saved register when a home lives past such a call), the warm code keeps no frame
+and returns with `ret`; the blocks with a call,
 the rare blocks joined by edges to one, and the blocks the entry reaches only through those set the
 frame up (`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge
 out. Every call of a shrink-wrapped body saves the scratch homes live past it (`save_scratch`). x86-64:
 the warm jumps into the first framed block take the prologue `relax` inserts before it (a jump table's
-entry takes a stub); the other entries take stubs. arm64 keeps the frame in rare blocks alone: there a
-warm return between the entry and the framed code writes x0, which would move the parameters off their
-registers. On arm64 a call right before the return of its
+entry takes a stub); the other entries take stubs. After the call, a saved register is loaded back only
+when it still holds the saved value (`csown`): a value whose segment ended at the call left its register
+to the result. On arm64 a call right before the return of its
 result (a sibling call's shape under `Package.tail`, `place::call_tail_shape`) needs no frame either: it is
 the warm code's `b`; one that stays a call makes the try fail. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
 variadic access; nor when the entry's code uses the frame (a parameter's register parts stored into its
@@ -202,7 +219,9 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
 - Extension folds (arm64, `lv::FOLD_XUSE`): a 64-bit zero or sign extension of a 32-bit value that only
   comparisons with a register and the indices of address sums read takes no register: each use extends
   the narrow register (`cmp x, w, uxtw`, `add x, x, w, uxtw #2`, and a load or store that takes the sum
-  extends its index as under `lv::FOLD_XIDX`). x86-64 has no such operand form and keeps its copy.
+  extends its index as under `lv::FOLD_XIDX`; an address sum of a scale that is no power of two up to
+  16 multiplies the narrow register by the scale and adds the base in one `umaddl` or `smaddl`).
+  x86-64 has no such operand form and keeps its copy.
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is
