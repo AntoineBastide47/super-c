@@ -238,10 +238,15 @@ pub(package) const fn mul(sf: bool, rd: u32, rn: u32, rm: u32) u32 {
     return madd(sf, false, rd, rn, rm, ZR);
 }
 
+/// SMADDL (`signed`) or UMADDL: `rd` = ra + the 64-bit product of two 32-bit registers.
+pub(package) const fn maddl(signed: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {
+    let b = ast::pick(signed, 0x9B200000u32, 0x9BA00000u32);
+    return b | rm << 16 | ra << 10 | rn << 5 | rd;
+}
+
 /// SMULL (`signed`) or UMULL: the 64-bit product of two 32-bit registers.
 pub(package) const fn mull(signed: bool, rd: u32, rn: u32, rm: u32) u32 {
-    let b = ast::pick(signed, 0x9B200000u32, 0x9BA00000u32);
-    return b | rm << 16 | ZR << 10 | rn << 5 | rd;
+    return maddl(signed, rd, rn, rm, ZR);
 }
 
 /// SMULH (`signed`) or UMULH: the high 64 bits of the 128-bit product.

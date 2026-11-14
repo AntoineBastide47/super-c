@@ -10692,10 +10692,11 @@ b6:
     assert_eq(run_wasm(lir, drv), 0);
 }
 
-// x86-64 shrink-wrapping of a call outside rare blocks that no value lives across: the entry tests and
-// returns without a frame, and the frame's set-up runs before the call's block alone (in place, not in a
-// stub, which jumps to the block). The block the call's block alone reaches comes after it. A
-// value that lives across the call keeps the frame at the entry.
+// x86-64 shrink-wrapping of a call outside rare blocks: the entry tests and returns without a frame, and
+// the frame's set-up runs before the call's block alone (in place, not in a stub, which jumps to the
+// block). The block the call's block alone reaches comes after it. A value that lives across the call is
+// saved around it, the frame still on the call's path; three of them cost more than a frame at the entry
+// (`Live::frame_pays`), which keeps it.
 @test
 fn a_warm_call_sets_the_frame_up_in_its_block_alone() {
     let lir = M"(lir ptr 8
@@ -10758,9 +10759,187 @@ b2:
         "the kept object",
     );
     let (ko0, _) = elf_text(&ko);
-    assert(!(ko[ko0] == 0x48 && ko[ko0 + 1] == 0x85), "the frame first");
+    assert(ko[ko0] == 0x48 && ko[ko0 + 1] == 0x85 && ko[ko0 + 2] == 0xFF, "no frame before the test, one value saved");
+    let many = M"(lir ptr 8
+sym @many fn global
+sym @leaf fn global ext
+fn @many
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = icmp.eq v0, v3
+  br v4, b2, b1
+b1:
+  v5 = call.i64 @leaf(v0) : (i64) -> i64
+  v6 = add.i64 v5, v0
+  v7 = add.i64 v6, v1
+  v8 = add.i64 v7, v2
+  ret v8
+b2:
+  ret v3
+)";
+    let mut mo = Vector::<u8>::new();
+    assert(
+        object_of(many, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut mo),
+        "the object of three values",
+    );
+    let (mo0, _) = elf_text(&mo);
+    assert(!(mo[mo0] == 0x48 && mo[mo0 + 1] == 0x85), "the frame first");
     let drv = "#include <stdint.h>\nint64_t half(int64_t);\nint main(void) {\n  if (half(0) != 0 || half(1) != 0 || half(10) != 10 || half(-4) != -4) return 1;\n  return 0;\n}\n";
     if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
+// A call outside rare blocks sets the frame up on its path on arm64 too: the entry tests and returns with
+// no frame (its first word is no `stp` that moves sp), and a value that lives across the call is saved
+// around it. Five such values (three `stp`) cost more than a frame at the entry, which keeps it. The
+// functions give the C results on the host.
+@test
+fn a_call_outside_rare_blocks_sets_the_frame_up_on_its_path() {
+    let one = M"(lir ptr 8
+sym @keep fn global
+sym @leaf fn global ext
+fn @keep
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = call.i64 @leaf(v0) : (i64) -> i64
+  v4 = add.i64 v3, v0
+  ret v4
+b2:
+  ret v1
+)";
+    let five = M"(lir ptr 8
+sym @five fn global
+sym @leaf fn global ext
+fn @five
+  sig (i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5 = iconst.i64 0
+  v6 = icmp.eq v0, v5
+  br v6, b2, b1
+b1:
+  v7 = call.i64 @leaf(v0) : (i64) -> i64
+  v8 = add.i64 v7, v0
+  v9 = add.i64 v8, v1
+  v10 = add.i64 v9, v2
+  v11 = add.i64 v10, v3
+  v12 = add.i64 v11, v4
+  ret v12
+b2:
+  ret v5
+)";
+    let a64 = tgt::axis_index("aarch64", true);
+    let mut o1 = Vector::<u8>::new();
+    assert(object_of(one, tgt::axis_index("linux", false), a64, 0, &mut o1), "the object of one value");
+    let (t1, _) = elf_text(&o1);
+    assert((le_at(&o1, t1, 4) as u32 & 0xFFC00000) != 0xA9800000, "no frame at the entry");
+    assert(elf_text_count(&o1, 0xFFFFFFFF, 0xA9BF7BFD) == 1, "the frame on the call's path");
+    let mut o5 = Vector::<u8>::new();
+    assert(object_of(five, tgt::axis_index("linux", false), a64, 0, &mut o5), "the object of five values");
+    let (t5, _) = elf_text(&o5);
+    assert((le_at(&o5, t5, 4) as u32 & 0xFFC00000) == 0xA9800000, "the frame at the entry");
+    let both = M"(lir ptr 8
+sym @keep fn global
+sym @five fn global
+sym @leaf fn global ext
+fn @keep
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = call.i64 @leaf(v0) : (i64) -> i64
+  v4 = add.i64 v3, v0
+  ret v4
+b2:
+  ret v1
+fn @five
+  sig (i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64):
+  v5 = iconst.i64 0
+  v6 = icmp.eq v0, v5
+  br v6, b2, b1
+b1:
+  v7 = call.i64 @leaf(v0) : (i64) -> i64
+  v8 = add.i64 v7, v0
+  v9 = add.i64 v8, v1
+  v10 = add.i64 v9, v2
+  v11 = add.i64 v10, v3
+  v12 = add.i64 v11, v4
+  ret v12
+b2:
+  ret v5
+)";
+    // `leaf` writes every caller-saved register it may: a value not saved around the call is lost.
+    let drv = "#include <stdint.h>\nint64_t keep(int64_t);\nint64_t five(int64_t, int64_t, int64_t, int64_t, int64_t);\n__attribute__((noinline)) int64_t leaf(int64_t x) {\n  volatile int64_t a[16];\n  for (int i = 0; i < 16; i++) a[i] = x * (i + 3);\n  int64_t s = 0;\n  for (int i = 0; i < 16; i++) s += a[i];\n  return s - x * 183 + 100;\n}\nint main(void) {\n  if (keep(0) != 0 || keep(7) != 2 || keep(-3) != 142) return 1;\n  if (five(0, 1, 2, 3, 4) != 0 || five(5, 1, 2, 3, 4) != 40) return 2;\n  return 0;\n}\n";
+    if cli::has_cc() {
+        assert_eq(run_native(both, drv), 0);
+    }
+}
+
+// A register saved around a call is loaded back only when it still holds the saved value. Here a block
+// parameter's last read on the call's path is before the call, and a rare block laid out after the
+// call's block reads it too, so the save takes it for live; the call's result, which lives past its
+// block, takes the parameter's register. The result must reach its readers.
+@test
+fn a_saved_register_the_result_took_is_not_loaded_back() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+sym @leaf fn global ext
+sym @slow fn global ext
+fn @pick
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0+8
+  v4 = icmp.eq v1, v2
+  br v4, b6, b1(v3)
+b1(v5: ptr):
+  v6 = iconst.i64 100
+  v7 = load.i64 v5 align 3
+  v8 = add.i64 v7, v1
+  v9 = icmp.ult v8, v6
+  br v9, b3, b2
+b2: unlikely
+  v10 = load.i64 v5 align 3
+  v11 = call.i64 @slow(v10) : (i64) -> i64
+  jmp b3
+b3:
+  v12 = load.i64 v5 align 3
+  v13 = load.i64 v5 align 3
+  v14 = add.i64 v12, v13
+  v15 = call.i64 @leaf(v14) : (i64) -> i64
+  v16 = icmp.ult v15, v6
+  br v16, b4, b5
+b4:
+  v17 = load.i64 v0 align 3
+  v18 = add.i64 v15, v17
+  ret v18
+b5:
+  v19 = sub.i64 v15, v6
+  ret v19
+b6:
+  ret v2
+)";
+    // `leaf` and `slow` write every caller-saved register they may.
+    let drv = "#include <stdint.h>\nint64_t pick(int64_t *, int64_t);\nstatic int64_t seen;\n__attribute__((noinline)) int64_t leaf(int64_t x) {\n  volatile int64_t a[16];\n  for (int i = 0; i < 16; i++) a[i] = x + i;\n  int64_t s = 0;\n  for (int i = 0; i < 16; i++) s += a[i];\n  return (s - 120) / 16 * 3;\n}\n__attribute__((noinline)) int64_t slow(int64_t x) {\n  volatile int64_t a[16];\n  for (int i = 0; i < 16; i++) a[i] = x + i;\n  seen += a[15];\n  return seen;\n}\nint main(void) {\n  int64_t x[2] = {7, 7}, y[2] = {50, 50};\n  if (pick(x, 0) != 0) return 1;\n  if (pick(x, 5) != 49) return 2;\n  if (pick(y, 5) != 200) return 3;\n  if (pick(x, 200) != 49 || seen != 22) return 4;\n  if (pick(y, 300) != 200 || seen != 87) return 5;\n  return 0;\n}\n";
+    let mut a64 = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64),
+        "the arm64 object",
+    );
+    let mut x64 = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut x64),
+        "the x86-64 object",
+    );
+    if cli::has_cc() {
         assert_eq(run_native(lir, drv), 0);
     }
 }
@@ -19017,6 +19196,64 @@ int main(void) {
   if (dm(47, 5) != 11 || dm(47, 0) != 0) return 4;
   static const int64_t v[3] = {4, 0, 21};
   if (ix(v, 2) != v + 2 || ix(v + 1, 0) != v + 1) return 5;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A reference to an element of one of two tables, made on each side of a branch and read past it: the
+// indexed address is made in the register of the block parameter that takes its reference, which a value
+// read on both sides held before (no read of it is left on that side), and the 32-bit index is extended
+// and multiplied by the element size in the one sum (arm64: `umaddl`). arm64 copies no register.
+@test
+fn a_reference_to_an_element_is_made_in_its_register() {
+    let lir = M"(lir ptr 8
+sym @elt fn global
+fn @elt
+  sig (ptr, i32, i32) -> i64
+b0(v0: ptr, v1: i32, v2: i32):
+  v3 = load.ptr v0 align 3
+  v4 = zext.i64 v1
+  v5 = icmp.ult v1, v2
+  br v5, b1, b2
+b1:
+  v6 = load.ptr v3 align 3
+  v7 = ptradd v6, v4 * 24
+  v8 = ptradd v7 nonnull
+  jmp b3(v8)
+b2:
+  v9 = load.ptr v3+8 align 3
+  v10 = ptradd v9, v4 * 24
+  v11 = ptradd v10 nonnull
+  jmp b3(v11)
+b3(v12: ptr):
+  v13 = load.i64 v12+8 align 3
+  ret v13
+)";
+    let mut obj = Vector::<u8>::new();
+    let a64 = tgt::axis_index("aarch64", true);
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut obj), "the Linux x86-64 object");
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Windows object");
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut obj), "the Linux arm64 object");
+    // ORR Xd/Wd, zr, Xm/Wm (a register copy); UMADDL.
+    assert_eq(a64_words(&obj, 0x7FE0FFE0, 0x2A0003E0), 0);
+    assert_eq(a64_words(&obj, 0xFFE08000, 0x9BA00000), 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct e { int64_t a, b, c; };
+struct t { const struct e *lo, *hi; };
+int64_t elt(const struct t *const *, uint32_t, uint32_t);
+int main(void) {
+  static const struct e lo[3] = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
+  static const struct e hi[3] = {{10, 20, 30}, {40, 50, 60}, {70, 80, 90}};
+  static const struct t t = {lo, hi};
+  const struct t *p = &t;
+  if (elt(&p, 0, 3) != 2 || elt(&p, 2, 3) != 8) return 1;
+  if (elt(&p, 1, 1) != 50 || elt(&p, 2, 0) != 80) return 2;
   return 0;
 }
 )";

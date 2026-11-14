@@ -256,7 +256,8 @@ pub(package) struct Gen {
     cur: u32, // the instruction being compiled
     called: bool, // the body's code calls
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
-    csave: Vector<(u8, i64)>, // the scratch homes saved around a rare call (`save_scratch`)
+    // The scratch homes saved around a call (`save_scratch`): the register, its slot, the value it held.
+    csave: Vector<(u8, i64, u32)>,
     fused: u32, // the last instruction an earlier one did (`rmw`), NONE
     // The value of a loop step's chain that holds its header parameter's register `chain_r` (`def_over`),
     // NONE.
@@ -278,9 +279,9 @@ pub(package) struct Gen {
     zeroed: u8,
     zx: bool,
     raw: bool, // the next `cond_value` sets its byte alone (`bytes_only`)
-    // Shrink-wrapping (System V): the frame is set up on the edges into the rare blocks and taken down on
-    // the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and no
-    // callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
+    // Shrink-wrapping (System V): the frame is set up on the edges into the blocks laid out last and taken
+    // down on the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and
+    // no callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
     // warm code used the stack: the body is compiled again without).
     shrink: bool,
     no_shrink: bool,
@@ -423,7 +424,7 @@ extend Gen {
             cur: 0,
             called: false,
             taken: Vector::<u64>::new(),
-            csave: Vector::<(u8, i64)>::new(),
+            csave: Vector::<(u8, i64, u32)>::new(),
             fused: NONE,
             chain_x: NONE,
             chain_r: NOREG,
@@ -1214,10 +1215,10 @@ extend Gen {
         // return's register.
         let chain = !ext && !fv && self.chain_ret(b, bk, v);
         // A conversion of `v` alone that keeps its bits in its register (an extension in place, a truncation,
-        // a cast between a pointer and an integer), whose result has a register home: `v` is made in that
-        // home, taken now, and the conversion moves nothing.
+        // a cast between a pointer and an integer, a pointer's copy: `PTR_NONNULL`), whose result has a
+        // register home: `v` is made in that home, taken now, and the conversion moves nothing.
         let w = v + 1;
-        let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST;
+        let keeps = t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_PTRTOINT || t.op == O_INTTOPTR || t.op == O_BITCAST || t.op == O_PTRADD && t.b == VNONE && t.c == 0;
         if !ext && !chain && keeps && t.a == v && !fv && (is_int(t.ty) || t.ty == T_PTR) && type_bits(t.ty, self.cr.ptr) <= 64 && self.homed(
             w,
         ) {
@@ -1523,12 +1524,19 @@ extend Gen {
     }
 
     // Whether instruction `x`, made at the current instruction, an earlier one of its block, may take the
-    // plan's register `r` now: no value holds `r` (but one of the plan with no read left), and no
-    // instruction up to `x` takes `r` by the plan.
+    // plan's register `r` now: no value holds `r` (but one of the plan with no read left, or none left in
+    // the block: the plan gives `x` the register there, so that value leaves the block in another place),
+    // and no instruction up to `x` takes `r` by the plan.
     const fn early(self: &Self, x: u32, r: u8) bool {
         let o = self.cr.owner[r as usize];
         if o != NONE && o != x && (self.cr.va[o as usize].home != H_FIXED || self.cr.lv.uses[o as usize] != 0) {
-            return false;
+            if !self.cr.lv.seg_val(o) {
+                return false;
+            }
+            let l = self.cr.lv.read_last(o, self.cr.pos);
+            if l != NONE && l > self.cur {
+                return false;
+            }
         }
         for j in self.cur..x {
             if !self.cr.lv.seg_val(j) {
@@ -1826,7 +1834,7 @@ extend Gen {
                 }
             }
             // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
-            // the rare calls save around them, but for a value a call reads after its argument moves (none).
+            // the calls save around them, but for a value a call reads after its argument moves (none).
             if self.shrink && late[x] {
                 w = 0;
             } else if self.shrink && (w & lv::WANT_CALLEE) != 0 {
@@ -2037,6 +2045,8 @@ extend Gen {
             vu: ast::pick(self.z512, VUPPER, 0u64),
             // The callee-saved xmm registers no temporary takes (Microsoft x64's xmm14 and xmm15).
             first: self.vfix & ~self.valloc,
+            // Each callee-saved register has a push or a store of its own.
+            pair: 0,
         };
         self.cr.lv.assign(
             b,
@@ -2338,16 +2348,20 @@ extend Gen {
             }
             let off = self.cr.slot_alloc(16, 16) as i64;
             self.save_reg(r, off, true);
-            self.csave.push((r, off));
+            self.csave.push((r, off, x));
         }
         return self.csave.len();
     }
 
-    // After the instruction `save_scratch` saved `n` registers around: those registers back.
+    // After the instruction `save_scratch` saved `n` registers around: those registers back, but one that
+    // no longer holds its value (the value's segment ended at the instruction, whose result may hold the
+    // register now).
     fn restore_scratch(self: &mut Self, n: usize) {
         for k in 0..n {
-            let (r, off) = self.csave[k];
-            self.save_reg(r, off, false);
+            let (r, off, x) = self.csave[k];
+            if self.cr.owner[r as usize] == x {
+                self.save_reg(r, off, false);
+            }
             self.cr.free_slots.push(16u64 << 32 | (off as u32) as u64);
         }
         self.csave.truncate(0);
@@ -2373,8 +2387,7 @@ extend Gen {
                 t,
             )) && !self.cr.mem_tail(i as u32, t);
             self.cret[i] = c;
-            // Shrink-wrapped, every call saves the scratch homes that live past it (`shrinkable` let none
-            // outside rare blocks have one).
+            // Shrink-wrapped, every call saves the scratch homes that live past it.
             if c && (self.rare(i as u32) || self.shrink) {
                 self.rarec[i] = true;
             } else if c {
@@ -3765,13 +3778,14 @@ extend Gen {
     }
 
     // Whether the body may set its frame up in some blocks alone (`shrink`): every call (one that does not
-    // return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), or in a block
-    // outside loops that no value lives across a call of (at most WARM_CALLS of those calls), and a block
-    // without one returns; there is one, and the body reads no return address, variadic argument or inline
-    // assembly, runs no system operation, aligns no slot past 16 bytes and has no canary. Those blocks, and
-    // the rare blocks connected to one with a call by edges between rare blocks, set the frame up:
-    // `Live::after`, which the layout puts after the others. Under Microsoft x64 no edge leaves them for the
-    // warm code: its unwinder reads an epilogue only where it ends in `ret` or a jump out of the function.
+    // return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), or the frame
+    // on the edges into those blocks costs less than one at the entry (`Live::frame_pays`; at most
+    // WARM_CALLS calls outside rare blocks); there is one, and the body reads no return address, variadic
+    // argument or inline assembly, runs no system operation, aligns no slot past 16 bytes and has no canary.
+    // Those blocks, and the rare blocks connected to one with a call by edges between rare blocks, set the
+    // frame up: `Live::after`, which the layout puts after the others. Under Microsoft x64 no edge leaves
+    // them for the warm code: its unwinder reads an epilogue only where it ends in `ret` or a jump out of
+    // the function.
     fn shrinkable(self: &mut Self) bool {
         let b = self.cr.b();
         if self.prot || self.opf != 0 {
@@ -3785,7 +3799,8 @@ extend Gen {
         let mut framed = Vector::<bool>::new();
         framed.resize_default(b.blocks.len());
         let mut any = false;
-        let mut warm: u32 = 0;
+        // The calls outside rare blocks.
+        let mut warm = Vector::<u32>::new();
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.cr.lv.def_blk[i];
@@ -3797,15 +3812,10 @@ extend Gen {
                 continue;
             }
             if !self.cr.lv.rare[d as usize] {
-                warm += 1;
-                if warm > lv::WARM_CALLS || self.cr.lv.inner[d as usize] != NONE || self.cr.lv.lives_across(
-                    unsafe &*self.pkg,
-                    b,
-                    d,
-                    i as u32,
-                ) {
+                if warm.len() as u32 == lv::WARM_CALLS {
                     return false;
                 }
+                warm.push(i as u32);
             }
             framed[d as usize] = true;
             any = true;
@@ -3814,13 +3824,22 @@ extend Gen {
             return false;
         }
         self.cr.lv.set_after(b, &framed);
-        if warm != 0 {
-            let mut ret = false;
-            for k in 0..b.blocks.len() {
-                let bk = b.blocks[k];
-                ret = ret || !self.cr.lv.after[k] && self.cr.lv.pos[k] != NONE && b.insts[(bk.start + bk.len - 1) as usize].op == O_RET;
+        if warm.len() != 0 {
+            let into = self.cr.lv.after_into(b);
+            // What those calls save around them (`Live::around_cost`: one register per store).
+            let mut around: u64 = 0;
+            if self.cr.lv.frame_pays(into, 0) {
+                for q in 0..warm.len() {
+                    around += self.cr.lv.around_cost(
+                        unsafe &*self.pkg,
+                        b,
+                        self.cr.lv.def_blk[warm[q] as usize],
+                        warm[q],
+                        1,
+                    );
+                }
             }
-            if !ret {
+            if !self.cr.lv.frame_pays(into, around) {
                 self.cr.lv.after.truncate(0);
                 return false;
             }
@@ -6598,6 +6617,11 @@ extend Gen {
             }
         }
         let (base, boff) = self.addr(t.a, 0);
+        if t.b == VNONE && off + boff == 0 && !self.frame_addr(t.a).0 {
+            // The pointer itself (a reference's copy of it, `PTR_NONNULL`): its register when it dies here.
+            let _ = self.def_from(i, t.a, base);
+            return true;
+        }
         if t.b == VNONE {
             let rd = self.def_pass(i, t.a);
             self.add_off(rd, base, boff + off);

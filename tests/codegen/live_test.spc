@@ -6,6 +6,11 @@ import codegen::live as lv;
 // `Live::assign` over `b` with the callee-saved registers `xc`, the caller-saved ones `xs` and the ones
 // that pass arguments too `xw`; no parameter arrives in a register.
 fn plan(live: &mut lv::Live, b: &Body, want: &Vector<u8>, xc: u64, xs: u64, xw: u64) {
+    plan_paired(live, b, want, xc, xs, xw, 0);
+}
+
+// `plan` where each register of `pair` is saved together with the next one.
+fn plan_paired(live: &mut lv::Live, b: &Body, want: &Vector<u8>, xc: u64, xs: u64, xw: u64, pair: u64) {
     let mut arr = Vector::<u64>::new();
     arr.resize_default(b.blocks[0].param_len as usize + 1);
     let n = (xc | xs | xw).count_ones() as u32;
@@ -13,7 +18,7 @@ fn plan(live: &mut lv::Live, b: &Body, want: &Vector<u8>, xc: u64, xs: u64, xw: 
         b,
         want,
         lv::Caps { xc: xc.count_ones() as u32, xs: xs.count_ones() as u32, xj: n.max(1), vc: 0, vs: 0, vj: 0, vu: 0 },
-        lv::Sets { xc: xc, xs: xs, xw: xw, vc: 0, vs: 0, xa: 0, vu: 0, first: 0 },
+        lv::Sets { xc: xc, xs: xs, xw: xw, vc: 0, vs: 0, xa: 0, vu: 0, first: 0, pair: pair },
         &arr,
         0,
     );
@@ -534,7 +539,7 @@ b2:
         b,
         &want,
         lv::Caps { xc: 0, xs: 1, xj: 1, vc: 0, vs: 1, vj: 1, vu: 0 },
-        lv::Sets { xc: 0, xs: 1 << 9, xw: 0, vc: 0, vs: 1 << 48, xa: 0, vu: 0, first: 0 },
+        lv::Sets { xc: 0, xs: 1 << 9, xw: 0, vc: 0, vs: 1 << 48, xa: 0, vu: 0, first: 0, pair: 0 },
         &arr,
         0,
     );
@@ -658,7 +663,7 @@ b1:
             b,
             &want,
             lv::Caps { xc: 0, xs: 4, xj: 4, vc: 0, vs: 0, vj: 0, vu: 0 },
-            lv::Sets { xc: 0, xs: 15, xw: 0, vc: 0, vs: 0, xa: 0, vu: 0, first: 0 },
+            lv::Sets { xc: 0, xs: 15, xw: 0, vc: 0, vs: 0, xa: 0, vu: 0, first: 0, pair: 0 },
             &arr,
             0,
         );
@@ -719,6 +724,183 @@ b2:
     plan(&mut live, b, &want, 1 << 19, 1 << 9, 0);
     assert_eq(reg_in(&live, ni + 1, 1), 19);
     assert_eq(reg_in(&live, 6, 1), 19);
+}
+
+// A loop's parameter and the step that replaces it, which reads no parameter and weighs more, with no
+// call: the heaviest value takes the first register while the parameter lives, and ends before the step.
+// The parameter is ordered no later than the step, so it takes the second register and the step follows
+// it there. The step placed first would take the first register, which the parameter cannot hold, and
+// the back edge would copy it.
+@test
+fn a_step_that_reads_no_parameter_follows_its_parameter() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  jmp b1(v0)
+b1(v2: i64):
+  v3 = add.i64 v1, v1
+  v4 = add.i64 v3, v3
+  v5 = xor.i64 v2, v3
+  v6 = mul.i64 v5, v4
+  v7 = icmp.ult v6, v1
+  br v7, b1(v6), b2
+b2:
+  ret v6
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let mut live = lv::Live::new();
+    live.run(b);
+    let ni = b.insts.len();
+    let mut want = Vector::<u8>::new();
+    want.resize_default(live.end.len());
+    // Instruction 1 is the heaviest value, instruction 4 the step; the loop's parameter is value `ni + 2`.
+    assert(b.insts[1].op == O_ADD && b.insts[4].op == O_MUL, "the heaviest value and the step");
+    want[1] = lv::WANT_SCRATCH;
+    want[4] = lv::WANT_SCRATCH;
+    want[ni + 2] = lv::WANT_SCRATCH;
+    plan(&mut live, b, &want, 0, 3 << 9, 0);
+    assert_eq(reg_in(&live, 1, 1), 9);
+    assert_eq(reg_in(&live, ni + 2, 1), 10);
+    assert_eq(reg_in(&live, 4, 1), 10);
+}
+
+// A callee-saved register the body does not save yet costs two entries (`SAVE_COST`); the other register
+// of a pair the body saves costs nothing (`Sets.pair`). A value made and read twice on one side of an
+// even branch (one and a half entries), live there with a heavier value that holds x19: it takes x20
+// where x19 and x20 are saved together, and no register where each is saved alone.
+@test
+fn a_value_takes_the_other_register_of_a_saved_pair() {
+    for paired in 0..2u32 {
+        let mut err = String::new();
+        let p = lparse::parse(
+            M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = add.i64 v0, v1
+  call @g() : () -> void
+  v3 = icmp.ult v2, v1
+  br v3, b1, b2
+b1:
+  v4 = add.i64 v2, v2
+  call @g() : () -> void
+  v5 = add.i64 v4, v2
+  v6 = add.i64 v5, v4
+  ret v6
+b2:
+  ret v2
+)",
+            &mut err,
+        ).unwrap();
+        let b = &p.bodies[0];
+        let mut live = lv::Live::new();
+        live.run(b);
+        let mut want = Vector::<u8>::new();
+        want.resize_default(live.end.len());
+        // Instruction 0 is the heavier value, instruction 4 the lighter one; a call follows each.
+        assert(b.insts[0].op == O_ADD && b.insts[1].op == O_CALL, "the heavier value and its call");
+        assert(b.insts[4].op == O_ADD && b.insts[5].op == O_CALL, "the lighter value and its call");
+        want[0] = lv::WANT_CALLEE;
+        want[4] = lv::WANT_CALLEE;
+        plan_paired(&mut live, b, &want, 3 << 19, 0, 0, paired as u64 << 19);
+        assert_eq(reg_in(&live, 0, 1), 19);
+        let r = if paired == 1 {
+            20u8
+        } else {
+            lv::REG_NONE
+        };
+        assert_eq(reg_in(&live, 4, 1), r);
+    }
+}
+
+// The frame a generator sets up on the edges into the blocks it lays out last (`set_after`) pays when
+// those edges run less often than the entry (`after_into`, `frame_pays`): on one side of an even branch
+// it does, also with one value saved around the call there (`around_cost`), not with three; not when the
+// entry block is one of those blocks, nor when the block is in a loop.
+@test
+fn a_frame_on_a_path_pays_when_its_edges_run_less_often_than_the_entry() {
+    let texts: [str; 3] = [
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2, b1
+b1:
+  v3 = call.i64 @g(v0) : (i64) -> i64
+  v4 = add.i64 v3, v0
+  ret v4
+b2:
+  ret v1
+)",
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @g(v0) : (i64) -> i64
+  ret v1
+)",
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  jmp b1(v1)
+b1(v2: i64):
+  v3 = icmp.ult v2, v0
+  br v3, b2, b4
+b2:
+  v4 = iconst.i64 1
+  v5 = add.i64 v2, v4
+  v6 = and.i64 v2, v4
+  v7 = icmp.eq v6, v1
+  br v7, b3, b1(v5)
+b3:
+  v8 = call.i64 @g(v5) : (i64) -> i64
+  jmp b1(v8)
+b4:
+  ret v2
+)",
+    ];
+    // Per body, the block that holds the call.
+    let blocks: [usize; 3] = [1, 0, 3];
+    for k in 0..3usize {
+        let mut err = String::new();
+        let p = lparse::parse(texts[k], &mut err).unwrap();
+        let b = &p.bodies[0];
+        let mut live = lv::Live::new();
+        live.run(b);
+        let mut framed = Vector::<bool>::new();
+        framed.resize_default(b.blocks.len());
+        framed[blocks[k]] = true;
+        // The call is its block's first instruction; in the first body the parameter lives past it.
+        let call = b.blocks[blocks[k]].start;
+        assert(b.insts[call as usize].op == O_CALL, "the call");
+        let around = live.around_cost(&p, b, blocks[k] as u32, call, 1);
+        live.set_after(b, &framed);
+        let into = live.after_into(b);
+        assert_eq(live.frame_pays(into, 0), k == 0);
+        if k == 0 {
+            assert(around != 0, "the parameter is saved around the call");
+            assert(live.frame_pays(into, around), "one value saved around the call");
+            assert(!live.frame_pays(into, 3 * around), "three values saved around the call");
+        }
+    }
 }
 
 // On a target whose instructions write over an operand (`Live.two`), a result takes the register of an
