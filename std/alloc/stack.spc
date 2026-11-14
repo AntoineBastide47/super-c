@@ -154,9 +154,13 @@ fn region_new() *mut Region {
 @platform(!wasm)
 extend Region {
     @always_inline
-    unsafe fn alloc(self: &mut Region, size: usize, align: usize) *mut void {
+    unsafe fn alloc(self: &mut Region, size: usize, align: usize) *mut void
+        panics if true
+        ensures |r| r != null
+    {
         let a = align.max(8);
-        let p = self.top + HDR + a - 1 & ~(a - 1);
+        let at = self.top + HDR;
+        let p = at + (at.wrapping_neg() & a - 1);
         let limit = self.limit();
         if unlikely(p > limit || size > limit - p) {
             panic("Stack: the region is full");
@@ -187,7 +191,10 @@ extend Region {
         }
     }
 
-    unsafe fn realloc(self: &mut Region, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
+    unsafe fn realloc(self: &mut Region, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
+        panics if true
+        ensures |r| r != null
+    {
         let at = ptr as usize;
         if at == 0 {
             return unsafe self.alloc(new_size, align);

@@ -5812,7 +5812,13 @@ extend usize {
         return self != 0 && (self & self - 1) == 0;
     }
     /// The smaller of the two.
-    pub const fn min(self: usize, other: usize) usize {
+    pub const fn min(self: usize, other: usize) usize
+        ensures |r| r == if self < other {
+            self
+        } else {
+            other
+        }
+    {
         if self < other {
             return self;
         }

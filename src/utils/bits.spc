@@ -3,13 +3,13 @@
 // borrowck/dataflow.spc).
 
 /// Set bit `i`. Panics: word `i / 64` is out of bounds.
-pub(package) fn bit_set(v: &mut Vector<u64>, i: u32) {
+pub(package) const fn bit_set(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
     v.set(w, v[w] | 1u64 << (i & 63) as u64);
 }
 
 /// Clear bit `i`. Panics: word `i / 64` is out of bounds.
-pub(package) fn bit_clear(v: &mut Vector<u64>, i: u32) {
+pub(package) const fn bit_clear(v: &mut Vector<u64>, i: u32) {
     let w = (i / 64) as usize;
     v.set(w, v[w] & ~(1u64 << (i & 63) as u64));
 }

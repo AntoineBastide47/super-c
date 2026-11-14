@@ -120,7 +120,7 @@ extend<const B: usize> Eval<B> {
         self.now += 1;
     }
 
-    fn set(self: &mut Self, t: u32, v: Num<B>) {
+    const fn set(self: &mut Self, t: u32, v: Num<B>) {
         self.val.set(t as usize, v);
         self.ok.set(t as usize, true);
         self.stamp.set(t as usize, self.now);
@@ -422,7 +422,7 @@ extend<const B: usize> Eval<B> {
 
     // Assign the leaves the `k`-th combination of their candidate values (`cands`, `cstart` per
     // leaf; or with `cands` empty every value of their domains). False when `k` is past the end.
-    fn assign(self: &mut Self, k0: u64, cands: &Vector<Num<B>>, cstart: &Vector<u32>) bool {
+    const fn assign(self: &mut Self, k0: u64, cands: &Vector<Num<B>>, cstart: &Vector<u32>) bool {
         self.now += 1;
         let mut k = k0;
         for j in 0..self.leaves.len() {
@@ -5509,7 +5509,7 @@ extend<const B: usize> Prover<B> {
 
     // The local, or the slot of the `&mut` parameter it goes through, of owned element place `pl`
     // (`owned_elem`): its blocks are `own_exp`.
-    fn own_expose(self: &mut Self, b: &ir::CoreBody, pl: u32) {
+    const fn own_expose(self: &mut Self, b: &ir::CoreBody, pl: u32) {
         let p = *b.places.at(pl as usize);
         let deref0 = p.proj_len != 0 && b.projections.at(p.proj_start as usize).kind == ir::PJ_DEREF;
         let sl = self.slot_of[p.base as usize];

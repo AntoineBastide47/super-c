@@ -189,8 +189,9 @@ order costs nothing at run time.
 | a call through an invalid dispatch table | undefined |
 | a variadic argument of the wrong kind | undefined |
 | an invalid alignment value | undefined |
-| an invalid allocator size or alignment | undefined |
-| element count times element size overflows in `Vector` or `String` | traps ("Vector: capacity overflow", "String: capacity overflow") |
+| an invalid allocator alignment | undefined |
+| an allocator size above `isize::MAX` | a proof error: the `requires` of `Allocator::alloc` and `realloc` |
+| element count times element size above `isize::MAX` in a std container | traps ("Vector: capacity overflow", "String: capacity overflow", "Map: capacity overflow", "array_bytes: more than isize::MAX bytes") |
 | a program's own `n * sizeof(T)` | follows the integer rules above |
 
 ## Traps and exit status

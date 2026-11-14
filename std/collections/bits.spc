@@ -595,7 +595,7 @@ extend<A: Allocator> BitVec<A> {
     @noinline
     fn grow(self: &mut BitVec<A>, need: usize) {
         let cap = need.max(self.cap * 2);
-        let p = unsafe self.alloc.realloc(self.words, self.cap * sizeof(u64), cap * sizeof(u64), alignof(u64));
+        let p = unsafe self.alloc.realloc(self.words, self.cap * sizeof(u64), array_bytes::<u64>(cap), alignof(u64));
         self.words = p as *mut u64;
         self.cap = cap;
     }

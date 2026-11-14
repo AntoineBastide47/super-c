@@ -3090,8 +3090,8 @@ fn string_non_default_allocator(b: &mut h::ExitBatch) {
         M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
-  unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe malloc(n); }
-  unsafe fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
+  unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { let q = unsafe malloc(n); if q == null { panic("out of memory"); } return q; }
+  unsafe fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic("out of memory"); } return q; }
   unsafe fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe free(p); }
 }
 fn main() i32 {

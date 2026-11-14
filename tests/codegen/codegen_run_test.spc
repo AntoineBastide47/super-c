@@ -4051,8 +4051,8 @@ static mut DEFAULTS: i32 = 0;
 @derive(Copy)
 struct Tagged { pub tag: u64 }
 extend Tagged as Allocator {
-    unsafe fn alloc(self: &mut Tagged, n: usize, align: usize) *mut void { unsafe { LIVE += 1; } return unsafe malloc(n); }
-    unsafe fn realloc(self: &mut Tagged, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe realloc(p, n); }
+    unsafe fn alloc(self: &mut Tagged, n: usize, align: usize) *mut void { unsafe { LIVE += 1; } let q = unsafe malloc(n); if q == null { panic("out of memory"); } return q; }
+    unsafe fn realloc(self: &mut Tagged, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic("out of memory"); } return q; }
     unsafe fn dealloc(self: &mut Tagged, p: *mut void, n: usize, align: usize) { if self.tag == 7 { unsafe { LIVE -= 1; } } unsafe free(p); }
 }
 extend Tagged as Default { fn default() Tagged { unsafe { DEFAULTS += 1; } return Tagged { tag: 7 }; } }

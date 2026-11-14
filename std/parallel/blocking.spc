@@ -1068,11 +1068,13 @@ fn cache_alloc(p: *mut Pool, bytes: usize) *mut void {
     }
     let mut g = Global {};
     return unsafe g.alloc(
-        if c < CLASSES {
-            CACHE_MIN << c
-        } else {
-            bytes
-        },
+        alloc_size(
+            if c < CLASSES {
+                CACHE_MIN << c
+            } else {
+                bytes
+            },
+        ),
         16,
     );
 }

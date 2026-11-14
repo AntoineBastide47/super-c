@@ -166,7 +166,9 @@ extend<A: Allocator> String<A> {
     // Ensure the heap buffer holds at least `new_cap` bytes, transitioning inline -> heap if needed
     // (copying the inline bytes out first). `new_cap` must exceed the inline budget. Allocates through the
     // STORED allocator (a String buffer is a byte array, so the alignment is always 1).
-    fn grow_to(self: &mut String<A>, new_cap: usize) {
+    fn grow_to(self: &mut String<A>, new_cap: usize)
+        requires new_cap < LARGE_BIT
+    {
         if self.is_large() {
             let p = (unsafe self.alloc.realloc(self.repr.large.ptr, self.capacity(), new_cap, 1)) as *mut u8;
             self.repr.large.ptr = p;
@@ -274,7 +276,10 @@ extend<A: Allocator> String<A> {
 
     // `len + additional`, which must stay below LARGE_BIT: the capacity's top bit is the discriminant.
     // Panics otherwise.
-    const fn checked_needed(self: &String<A>, additional: usize) usize {
+    const fn checked_needed(self: &String<A>, additional: usize) usize
+        panics if additional as int + self.len() as int >= LARGE_BIT as int
+        ensures |r| r < LARGE_BIT
+    {
         if additional >= LARGE_BIT - self.len() {
             panic("String: capacity overflow");
         }

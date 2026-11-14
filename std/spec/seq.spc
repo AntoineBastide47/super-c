@@ -71,13 +71,6 @@ pub spec fn block<T>(p: *mut T) Seq<T>;
 @trusted
 pub spec fn utf8(c: char) Seq<u8>;
 
-extend<T, A: Allocator> Vector<T, A> {
-    /// Its elements in order: `v[i]` is `v.view()[i]`, `v.len()` its length. `push`, `pop`, `clear`, a
-    /// write `v[i] = x`, `Vector::new` and `with_capacity` change the view as they change the vector.
-    @trusted
-    pub spec fn view(self: &Vector<T, A>) Seq<T>;
-}
-
 extend<A: Allocator> String<A> {
     /// Its bytes in order: `s.len()` is its length. `push`, `push_str`, `clear` and `String::new` change
     /// the view as they change the string.

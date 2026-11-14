@@ -297,10 +297,7 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
             cap = cap * 2;
         }
         let mut g = Global {};
-        let t = (unsafe g.alloc(cap * sizeof(FdRec), alignof(FdRec))) as *mut FdRec;
-        if t == null {
-            panic("reactor: cannot grow the record table");
-        }
+        let t = (unsafe g.alloc(array_bytes::<FdRec>(cap), alignof(FdRec))) as *mut FdRec;
         let old = unsafe (*r).recs;
         let n = unsafe (*r).nrec;
         for k in 0..n {
@@ -745,12 +742,9 @@ fn build_reactor() *mut Reactor {
         panic("reactor: cannot create the I/O poller");
     }
     let mut g = Global {};
-    let base = unsafe g.alloc(reactor_bytes(), 16);
+    let base = unsafe g.alloc(alloc_size(reactor_bytes()), 16);
     let recs = (unsafe g.alloc(REC_INIT * sizeof(FdRec), alignof(FdRec))) as *mut FdRec;
     let regs = (unsafe g.alloc((REG_SLOTS + 1) * R_ALIGN, R_ALIGN)) as *mut i32;
-    if base == null || recs == null || regs == null {
-        panic("reactor: cannot allocate the reactor");
-    }
     for k in 0..(REG_SLOTS + 1) * (R_ALIGN / 4) {
         unsafe regs[k] = 0;
     }
@@ -1143,9 +1137,6 @@ pub fn close(fd: i32) i32 {
     if st == 2 {
         let mut g = Global {};
         n = (unsafe g.alloc(sizeof(IoWait), alignof(IoWait))) as *mut IoWait;
-        if n == null {
-            panic("reactor: cannot allocate a close report");
-        }
         unsafe n[0] = IoWait {
             co: null,
             token: 0,

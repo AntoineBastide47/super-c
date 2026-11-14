@@ -412,7 +412,7 @@ extend CFlow {
 
     // One Cooper-Harvey-Kennedy round of immediate dominators over the reachable RPO; true when an
     // entry changed.
-    fn idom_round(self: &mut Self) bool {
+    const fn idom_round(self: &mut Self) bool {
         let mut changed = false;
         for i in 1..self.order.len() {
             let x = *self.order.at(i);
@@ -508,7 +508,7 @@ extend CFlow {
     // One Cooper-Harvey-Kennedy round on the reverse graph (the exit is last in postorder, so it is
     // skipped); reverse-preds of x = its forward successors, plus the exit when x is a sink. True
     // when an entry changed.
-    fn pdom_round(self: &mut Self) bool {
+    const fn pdom_round(self: &mut Self) bool {
         let e = self.n;
         let m = self.s_post.len();
         let mut changed = false;
@@ -745,7 +745,7 @@ extend CFlow {
     // an arm because it post-dominates through a path that leaves the branch). A multi-way switch in
     // a loop whose arms continue the loop or leave it joins where its other arms reconverge: their
     // targets' nearest common post-dominator, under the same conditions.
-    fn compute_follows(self: &mut Self, b: &ir::CoreBody) {
+    const fn compute_follows(self: &mut Self, b: &ir::CoreBody) {
         for x in 0..self.n {
             if !*self.reach.at(x as usize) {
                 continue;

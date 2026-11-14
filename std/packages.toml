@@ -109,7 +109,7 @@ blocking = "Never blocks."
 errors = "Float results follow IEEE and the C library; an index out of bounds, an easing input outside [0, 1], `LargeVec` and `LargeMat` operands of different sizes, and a random rejection loop past `MAX_TRIES` panic."
 
 [package.spec]
-tier = 1
+tier = 0
 targets = { macos = "full", ios = "full", linux = "full", android = "full", windows = "full", wasm = "full" }
 capabilities = []
 accelerations = []

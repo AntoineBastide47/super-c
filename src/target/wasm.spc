@@ -331,7 +331,7 @@ pub(package) fn sleb5(o: &mut Vector<u8>, x: i32) {
 }
 
 /// `sleb5` of `x` over the 5 bytes at `at`.
-pub(package) fn patch_sleb5(o: &mut Vector<u8>, at: usize, x: i32) {
+pub(package) const fn patch_sleb5(o: &mut Vector<u8>, at: usize, x: i32) {
     for k in 0..4u32 {
         o.set(at + k as usize, (x as u32 >> 7 * k & 0x7F) as u8 | 0x80);
     }
@@ -339,7 +339,7 @@ pub(package) fn patch_sleb5(o: &mut Vector<u8>, at: usize, x: i32) {
     o.set(at + 4, (x >> 28 & 0x7F) as u8);
 }
 
-pub(package) fn patch_uleb5(o: &mut Vector<u8>, at: usize, x: u32) {
+pub(package) const fn patch_uleb5(o: &mut Vector<u8>, at: usize, x: u32) {
     for k in 0..4u32 {
         o.set(at + k as usize, (x >> 7 * k & 0x7F) as u8 | 0x80);
     }

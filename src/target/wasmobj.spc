@@ -501,7 +501,7 @@ fn debug_info(o: &WObj, inst_at: &Vector<u32>, body_size: &Vector<u32>) dw::Dwar
 
 // The object's own value of relocated field `r` at `at` of `sec`: the index a function, the stack pointer,
 // a type or the table has in this object. A memory address or table index stays for the linker.
-fn fill_reloc(sec: &mut Vector<u8>, at: usize, r: WRel, sp: &Spaces) {
+const fn fill_reloc(sec: &mut Vector<u8>, at: usize, r: WRel, sp: &Spaces) {
     if r.kind == w::R_FUNCTION_INDEX_LEB {
         w::patch_uleb5(sec, at, sp.fidx[r.sym as usize]);
     } else if r.kind == w::R_TYPE_INDEX_LEB {

@@ -46,9 +46,11 @@ struct ArenaChunk {
 
 static_assert(sizeof(ArenaChunk) == CHUNK_ALIGN, "the chunk header keeps the data at CHUNK_ALIGN");
 
-// The bump state. `cur <= end` always; `cur` and `end` are never null, so a null pointer with a zero size
-// (an empty container's buffer) never ends at the cursor.
-struct ArenaState<A> {
+// The bump state. `base` is never null, so a null pointer (an empty container's buffer) never ends at the
+// cursor.
+struct ArenaState<A>
+    invariant self.base != null && self.base as usize <= self.cur as usize && self.cur as usize <= self.end as usize && (self.buf_len == 0 || self.buf != null) && self.next_size <= CHUNK_SIZE_GROWTH_MAX
+{
     cur: *mut u8, // next free byte of the current region
     end: *mut u8, // one past the current region
     base: *mut u8, // start of the current region
@@ -75,12 +77,16 @@ pub struct ArenaAlloc<'a, A = Global> {
 }
 
 // The address of an empty region: non-null and aligned, never dereferenced.
-const fn empty_region() *mut u8 {
+const fn empty_region() *mut u8
+    ensures |r| r != null
+{
     return ptr::from_addr_mut::<u8>(CHUNK_ALIGN);
 }
 
 // The chunk size after `n`: twice as large, up to `CHUNK_SIZE_GROWTH_MAX`.
-const fn grown(n: usize) usize {
+const fn grown(n: usize) usize
+    ensures |r| r <= CHUNK_SIZE_GROWTH_MAX
+{
     if n >= CHUNK_SIZE_GROWTH_MAX / 2 {
         return CHUNK_SIZE_GROWTH_MAX;
     }
@@ -88,15 +94,17 @@ const fn grown(n: usize) usize {
 }
 
 extend<A: Allocator> ArenaState<A> {
-    const fn new(buf: *mut u8, buf_len: usize, upstream: A) ArenaState<A> {
+    const fn new(buf: *mut u8, buf_len: usize, upstream: A) ArenaState<A>
+        requires buf_len == 0 || buf != null
+    {
         let mut next_size = grown(buf_len);
         if next_size < CHUNK_SIZE_INITIAL {
             next_size = CHUNK_SIZE_INITIAL;
         }
         let mut s = ArenaState::<A> {
-            cur: null,
-            end: null,
-            base: null,
+            cur: empty_region(),
+            end: empty_region(),
+            base: empty_region(),
             used_closed: 0,
             chunks: null,
             spare: null,
@@ -112,19 +120,24 @@ extend<A: Allocator> ArenaState<A> {
 
     // Point the cursor at the start of the caller buffer, or at an empty region when there is none.
     const fn restart(self: &mut Self) {
+        let mut base = empty_region();
+        let mut end = base;
         if self.buf_len != 0 {
-            self.base = self.buf;
-            self.end = unsafe (self.buf + self.buf_len);
-        } else {
-            self.base = empty_region();
-            self.end = self.base;
+            base = self.buf;
+            end = unsafe (self.buf + self.buf_len);
         }
-        self.cur = self.base;
+        self.base = base;
+        self.end = end;
+        self.cur = base;
         self.used_closed = 0;
     }
 
     @always_inline
-    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {
+    unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void
+        requires size as int <= isize::MAX as int
+        panics if align == 0 || size as int + align as int + CHUNK_ALIGN as int > isize::MAX as int || self.used_closed as int + (self.cur as usize - self.base as usize) as int > usize::MAX as int || self.reserved as int + CHUNK_SIZE_GROWTH_MAX as int + size as int + align as int + CHUNK_ALIGN as int > usize::MAX as int
+        ensures |r| r != null
+    {
         let at = self.cur as usize;
         let pad = at.wrapping_neg() & align - 1;
         let avail = self.end as usize - at;
@@ -138,25 +151,32 @@ extend<A: Allocator> ArenaState<A> {
 
     // The request does not fit the current region: take the spare chunk or a new one from upstream.
     @noinline
-    unsafe fn alloc_slow(self: &mut Self, size: usize, align: usize) *mut void {
+    unsafe fn alloc_slow(self: &mut Self, size: usize, align: usize) *mut void
+        requires size as int <= isize::MAX as int && align != 0
+        panics if size as int + align as int + CHUNK_ALIGN as int > isize::MAX as int || self.used_closed as int + (self.cur as usize - self.base as usize) as int > usize::MAX as int || self.reserved as int + CHUNK_SIZE_GROWTH_MAX as int + size as int + align as int + CHUNK_ALIGN as int > usize::MAX as int
+        ensures |r| r != null
+    {
         if size == 0 {
             return ptr::from_addr_mut::<void>(align);
         }
-        // The chunk data starts at `CHUNK_ALIGN`, so a larger alignment may need this much padding.
-        let mut pad_max: usize = 0;
-        if align > CHUNK_ALIGN {
-            pad_max = align - CHUNK_ALIGN;
+        // The padding that aligns the data after the chunk header: at most `align - 1` bytes.
+        let pad_max = align - 1;
+        // No block is larger than `isize::MAX` bytes.
+        let limit = isize::MAX as usize - sizeof(ArenaChunk);
+        if pad_max > limit || size > limit - pad_max {
+            panic("Arena: allocation size overflow");
         }
-        let need = switch size.checked_add(sizeof(ArenaChunk) + pad_max) {
-            Some(n) => n,
-            None => panic("Arena: allocation size overflow"),
-        };
+        let need = size + sizeof(ArenaChunk) + pad_max;
         self.used_closed += self.cur as usize - self.base as usize;
         let mut chunk = self.spare;
-        if chunk != null && unsafe (*chunk).size >= need {
+        let mut bytes: usize = 0;
+        if chunk != null {
+            bytes = unsafe (*chunk).size;
+        }
+        if chunk != null && bytes >= need {
             self.spare = null;
         } else {
-            let mut bytes = self.next_size;
+            bytes = self.next_size;
             if bytes < need {
                 bytes = need;
             }
@@ -167,28 +187,37 @@ extend<A: Allocator> ArenaState<A> {
         }
         unsafe (*chunk).next = self.chunks;
         self.chunks = chunk;
-        self.base = unsafe (chunk as *mut u8 + sizeof(ArenaChunk));
-        self.end = unsafe (chunk as *mut u8 + (*chunk).size);
-        let p = unsafe (self.base + ((self.base as usize).wrapping_neg() & align - 1));
-        self.cur = unsafe (p + size);
+        let base = unsafe (chunk as *mut u8 + sizeof(ArenaChunk));
+        let p = unsafe (base + ((base as usize).wrapping_neg() & pad_max));
+        let end = unsafe (chunk as *mut u8 + bytes);
+        let cur = unsafe (p + size);
+        self.base = base;
+        self.end = end;
+        self.cur = cur;
         return p;
     }
 
+    // The block of the current region that ends at the cursor gives its bytes back. Integer arithmetic:
+    // `ptr` may be null with a zero size.
     @always_inline
     unsafe const fn dealloc(self: &mut Self, ptr: *mut void, size: usize) {
-        // Integer arithmetic: `ptr` may be null with a zero size.
-        if ptr as usize + size == self.cur as usize {
+        let at = ptr as usize;
+        if at <= self.cur as usize && self.cur as usize - at == size && at >= self.base as usize {
             self.cur = ptr as *mut u8;
         }
     }
 
-    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
+    unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
+        requires new_size as int <= isize::MAX as int
+        panics if align == 0 || new_size as int + align as int + CHUNK_ALIGN as int > isize::MAX as int || self.used_closed as int + (self.cur as usize - self.base as usize) as int > usize::MAX as int || self.reserved as int + CHUNK_SIZE_GROWTH_MAX as int + new_size as int + align as int + CHUNK_ALIGN as int > usize::MAX as int
+        ensures |r| r != null
+    {
         let at = ptr as usize;
-        if at + old_size == self.cur as usize && new_size <= self.end as usize - at {
+        if at <= self.cur as usize && self.cur as usize - at == old_size && at >= self.base as usize && new_size <= self.end as usize - at {
             self.cur = unsafe (ptr as *mut u8 + new_size);
             return ptr;
         }
-        if new_size <= old_size && old_size != 0 {
+        if new_size <= old_size && ptr != null {
             return ptr;
         }
         let p = unsafe self.alloc(new_size, align);
@@ -201,7 +230,9 @@ extend<A: Allocator> ArenaState<A> {
     // Return `chunk` and every older chunk of its list upstream.
     fn free_chunks(self: &mut Self, chunk: *mut ArenaChunk) {
         let mut c = chunk;
-        while c != null {
+        while c != null
+            invariant self.invariant()
+        {
             let next = unsafe (*c).next;
             unsafe self.upstream.dealloc(c, (*c).size, CHUNK_ALIGN);
             c = next;
@@ -211,7 +242,9 @@ extend<A: Allocator> ArenaState<A> {
     fn reset(self: &mut Self) {
         let mut keep = self.spare;
         let mut c = self.chunks;
-        while c != null {
+        while c != null
+            invariant self.invariant()
+        {
             let next = unsafe (*c).next;
             unsafe (*c).next = null;
             if keep == null || unsafe ((*c).size > (*keep).size) {
@@ -229,6 +262,15 @@ extend<A: Allocator> ArenaState<A> {
             self.reserved = unsafe (*keep).size;
         }
         self.restart();
+    }
+
+    // Return every chunk upstream.
+    fn free(self: &mut Self) {
+        self.free_chunks(self.chunks);
+        self.free_chunks(self.spare);
+        self.chunks = null;
+        self.spare = null;
+        self.reserved = 0;
     }
 
     const fn bytes_used(self: &Self) usize {
@@ -309,12 +351,7 @@ extend<'a, A: Allocator> ArenaAlloc<'a, A> as Allocator {
 
 extend<'b, A: Allocator> Arena<'b, A> as Free {
     pub fn free(self: &mut Self) {
-        let st = unsafe &mut *self.state.get();
-        st.free_chunks(st.chunks);
-        st.free_chunks(st.spare);
-        st.chunks = null;
-        st.spare = null;
-        st.reserved = 0;
+        unsafe (*self.state.get()).free();
     }
 }
 

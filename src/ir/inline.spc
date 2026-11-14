@@ -2407,7 +2407,7 @@ fn reads_exposure(b: &ir::CoreBody, a: &Ast, t: &ir::Terminator, wire: &Vector<u
 }
 
 // Mark (`mark[o] = 2`) operand `o` when it is a candidate (`mark[o] == 1`): something references it.
-fn ref_mark(o: ir::OperandId, mark: &mut Vector<u32>) {
+const fn ref_mark(o: ir::OperandId, mark: &mut Vector<u32>) {
     if o != ir::IR_NONE && mark[o as usize] == 1 {
         mark.set(o as usize, 2);
     }
@@ -2595,7 +2595,7 @@ const fn pure_intrinsic(c: u8) bool {
 }
 
 // Add `bits` to the facts of the parameter place `p` of `k` names, if any.
-fn pmark(k: &ir::CoreBody, p: ir::PlaceId, bits: u8, pf: &mut Vector<u8>) {
+const fn pmark(k: &ir::CoreBody, p: ir::PlaceId, bits: u8, pf: &mut Vector<u8>) {
     let x = k.places.at(p as usize).base;
     if x >= k.returns && x < k.returns + k.args {
         let j = (x - k.returns) as usize;
@@ -2603,7 +2603,7 @@ fn pmark(k: &ir::CoreBody, p: ir::PlaceId, bits: u8, pf: &mut Vector<u8>) {
     }
 }
 
-fn pmark_op(k: &ir::CoreBody, o: ir::OperandId, bits: u8, pf: &mut Vector<u8>) {
+const fn pmark_op(k: &ir::CoreBody, o: ir::OperandId, bits: u8, pf: &mut Vector<u8>) {
     if o != ir::IR_NONE && k.operands.at(o as usize).kind != ir::OP_CONST {
         let p = k.operands.at(o as usize).data;
         if !k.place_has_deref(p) {
@@ -2758,7 +2758,7 @@ pub(package) struct Writes {
 const WR_MULTI: u32 = 0xFFFFFFFF;
 
 // Add the writes of statement `st`.
-fn writes_stmt(b: &ir::CoreBody, st: &ir::Statement, w: &mut Writes) {
+const fn writes_stmt(b: &ir::CoreBody, st: &ir::Statement, w: &mut Writes) {
     if st.kind != ir::ST_ASSIGN {
         return;
     }
@@ -2781,7 +2781,7 @@ fn writes_stmt(b: &ir::CoreBody, st: &ir::Statement, w: &mut Writes) {
 }
 
 // Add (`up`) or remove the call results of terminator `t`.
-fn writes_term(b: &ir::CoreBody, t: &ir::Terminator, w: &mut Writes, up: bool) {
+const fn writes_term(b: &ir::CoreBody, t: &ir::Terminator, w: &mut Writes, up: bool) {
     if t.kind != ir::TM_CALL {
         return;
     }

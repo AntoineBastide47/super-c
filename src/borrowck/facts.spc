@@ -1191,7 +1191,7 @@ extend Gen {
         return false;
     }
 
-    fn live_use(self: &mut Self, l: ir::LocalId) {
+    const fn live_use(self: &mut Self, l: ir::LocalId) {
         if !self.loans {
             return;
         }

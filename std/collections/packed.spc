@@ -146,9 +146,9 @@ extend<E, A: Allocator> PackedEnums<E, A> {
             cap = self.used + n;
         }
         if self.cap == 0 {
-            self.ptr = (unsafe self.alloc.alloc(cap, alignof(E))) as *mut E;
+            self.ptr = (unsafe self.alloc.alloc(alloc_size(cap), alignof(E))) as *mut E;
         } else {
-            self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap, cap, alignof(E))) as *mut E;
+            self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap, alloc_size(cap), alignof(E))) as *mut E;
         }
         self.cap = cap;
     }

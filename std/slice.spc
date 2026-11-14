@@ -984,7 +984,10 @@ fn stable_merge<T, L: SortLess<T>>(v: *mut T, n: usize, mid: usize, buf: *mut T,
 // ascending or strictly descending run finishes in n - 1 comparisons. Otherwise blocks of
 // STABLE_BLOCK elements are insertion sorted, then merged bottom-up, each pass from one buffer into the
 // other; a pair already in order is copied without comparisons.
-fn sort_stable_impl<T, A: Allocator, L: SortLess<T>>(v: *mut T, n: usize, alloc0: A, less: L, natural: bool) {
+fn sort_stable_impl<T, A: Allocator, L: SortLess<T>>(v: *mut T, n: usize, alloc0: A, less: L, natural: bool)
+    requires sizeof(T) == 0 || n as int <= isize::MAX as int / sizeof(T) as int
+    panics if true
+{
     if sizeof(T) == 0 || n < 2 {
         return;
     }

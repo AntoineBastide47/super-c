@@ -42,7 +42,7 @@ extend LoanMat {
     }
 
     /// OR scratch row `s` into row `row`; true when the row changed.
-    pub(package) fn or_scratch(self: &mut Self, row: u32, s: &Vector<u64>) bool {
+    pub(package) const fn or_scratch(self: &mut Self, row: u32, s: &Vector<u64>) bool {
         let mut changed = false;
         for w in 0..self.words {
             let d = (row * self.words + w) as usize;

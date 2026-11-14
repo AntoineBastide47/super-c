@@ -1793,7 +1793,9 @@ extend CEmit {
         }
         let y = *unsafe (*self.p().module_ast_const(b.module)).type_at(t);
         if y.kind == TypeKind::TYPE_BUILTIN {
-            return unsafe y.as_data.builtin == BuiltinType::BT_VOID;
+            // `int` and `nat` exist in ghost code only: a skipped contract's temporaries.
+            let bt = unsafe y.as_data.builtin;
+            return bt == BuiltinType::BT_VOID || bt == BuiltinType::BT_INT || bt == BuiltinType::BT_NAT;
         }
         if y.kind == TypeKind::TYPE_POINTER || y.kind == TypeKind::TYPE_REFERENCE || y.kind == TypeKind::TYPE_FUNCTION || y.kind == TypeKind::TYPE_DYN {
             return false;
@@ -2821,7 +2823,7 @@ extend CEmit {
 
     // Count one reference to place `pid`'s base into refs (and a definition into defs when it is a
     // whole-local assignment target).
-    fn count_place(
+    const fn count_place(
         self: &Self,
         b: &ir::CoreBody,
         pid: ir::PlaceId,
@@ -3790,7 +3792,7 @@ extend CEmit {
     }
 
     // `fold_addresses`: a use of place `p` disqualifies its root unless it dereferences it first.
-    fn addr_use(self: &Self, b: &ir::CoreBody, p: u32, bad: &mut Vector<bool>) {
+    const fn addr_use(self: &Self, b: &ir::CoreBody, p: u32, bad: &mut Vector<bool>) {
         let pl = *b.places.at(p as usize);
         if pl.proj_len == 0 || b.projections.at(pl.proj_start as usize).kind != ir::PJ_DEREF {
             bad.set((*self.sx_coal.at(pl.base as usize)) as usize, true);
@@ -3959,7 +3961,7 @@ extend CEmit {
     // a bare operand (the one link shape whose fold relays the operand's spelled expression). Each
     // untainted operand local after `l` gets `fwd[x] = pass`: when this pass taints it later, the next
     // pass checks `l` again.
-    fn rvalue_reads_tainted(
+    const fn rvalue_reads_tainted(
         self: &Self,
         b: &ir::CoreBody,
         rid: u32,
@@ -5542,7 +5544,7 @@ extend CEmit {
     // Domination probe over one written place: if local `p.base` is a fusion candidate whose init
     // block does not dominate the writing block `bi`, the fused declaration would not dominate that
     // write, so the candidate is withdrawn.
-    fn dom_check_place(
+    const fn dom_check_place(
         self: &Self,
         b: &ir::CoreBody,
         cf: &cfl::CFlow,
@@ -11278,7 +11280,7 @@ extend CEmit {
     // Read `x` (an operand of statement `k` of block `bi`, or of its terminator at `k` = its statement
     // count) for `lf_scan`: counted in `seen`, and `bad` for its local unless the local's one
     // definition (`dblk`, `dk`) dominates it.
-    fn lf_read(
+    const fn lf_read(
         b: &ir::CoreBody,
         cf: &cfl::CFlow,
         x: u32,
@@ -11546,7 +11548,7 @@ extend CEmit {
     }
 
     // Lane-mask local `l` keeps its bits too (LF_BITS).
-    fn lf_keep_bits(self: &mut Self, l: usize) {
+    const fn lf_keep_bits(self: &mut Self, l: usize) {
         let f = self.ml_lf[l];
         self.ml_lf.set(l, LfMask { state: LF_BITS, u: f.u, n: f.n, pl: f.pl });
     }

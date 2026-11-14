@@ -214,17 +214,17 @@ extend<T, A: Allocator> Deque<T, A> {
                 panic("Deque: capacity overflow");
             }
             d.cap = next_pow2(cap);
-            d.ptr = (unsafe d.alloc.alloc(d.cap * sizeof(T), alignof(T))) as *mut T;
+            d.ptr = (unsafe d.alloc.alloc(array_bytes::<T>(d.cap), alignof(T))) as *mut T;
         }
         return d;
     }
 
-    // The largest power of two whose byte size fits a usize.
+    // The largest power of two whose byte size fits a block (at most `isize::MAX` bytes).
     const fn max_cap() usize {
         if sizeof(T) == 0 {
             return ZST_CAP;
         }
-        let m = ~(0 as usize) / sizeof(T);
+        let m = isize::MAX as usize / sizeof(T);
         return 1 as usize << USIZE_BITS - 1 - m.leading_zeros();
     }
 
@@ -288,9 +288,9 @@ extend<T, A: Allocator> Deque<T, A> {
     fn grow_to(self: &mut Deque<T, A>, new_cap: usize) {
         let old_cap = self.cap;
         if old_cap == 0 {
-            self.ptr = (unsafe self.alloc.alloc(new_cap * sizeof(T), alignof(T))) as *mut T;
+            self.ptr = (unsafe self.alloc.alloc(array_bytes::<T>(new_cap), alignof(T))) as *mut T;
         } else {
-            self.ptr = (unsafe self.alloc.realloc(self.ptr, old_cap * sizeof(T), new_cap * sizeof(T), alignof(T))) as *mut T;
+            self.ptr = (unsafe self.alloc.realloc(self.ptr, old_cap * sizeof(T), array_bytes::<T>(new_cap), alignof(T))) as *mut T;
         }
         self.cap = new_cap;
         if self.head + self.len > old_cap {
@@ -332,7 +332,7 @@ extend<T, A: Allocator> Deque<T, A> {
             unsafe memmove(self.ptr, self.ptr + self.head, self.len * sizeof(T));
             self.head = 0;
         }
-        self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), target * sizeof(T), alignof(T))) as *mut T;
+        self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), array_bytes::<T>(target), alignof(T))) as *mut T;
         self.cap = target;
     }
 

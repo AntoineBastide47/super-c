@@ -275,7 +275,7 @@ pub unsafe fn dispatch(total: usize, opts: Options, entry: fn(*mut void) void, s
     // this frame's; the runtime reads a header only until the chunk's entry runs, and the join below
     // outlives every chunk's last touch of the descriptor (`finish` is the last thing an entry does).
     let mut g = Global {};
-    let jobs = (unsafe g.alloc(nchunks * sizeof(ChunkJob), alignof(ChunkJob))) as *mut ChunkJob;
+    let jobs = (unsafe g.alloc(array_bytes::<ChunkJob>(nchunks), alignof(ChunkJob))) as *mut ChunkJob;
     let base = total / nchunks;
     let extra = total % nchunks;
     let mut at: usize = 0;
@@ -570,7 +570,7 @@ pub fn reduce_with<T, A, MK: fn() A + Send + Sync, FOLD: fn(A, &T) A + Send + Sy
         return make();
     }
     let mut g = Global {};
-    let out = (unsafe g.alloc(nslots * sizeof(A), alignof(A))) as *mut A;
+    let out = (unsafe g.alloc(array_bytes::<A>(nslots), alignof(A))) as *mut A;
     let mut sh = ReduceShared::<T, A, MK, FOLD> { make: make, fold: fold, items: items.as_ptr(), out: out };
     unsafe dispatch(n, opts, reduce_chunk::<T, A, MK, FOLD>, &mut sh);
     // Every chunk wrote its slot (a chunk that drew no work wrote the identity), so all `nslots` are live.

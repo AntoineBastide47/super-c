@@ -880,7 +880,7 @@ const fn dv_all(row: &Vector<u64>, sub: &Vector<u32>) bool {
 }
 
 // Release the paths of `sub` in the rows (what a drop does to the state).
-fn dv_release(mi: &mut Vector<u64>, di: &mut Vector<u64>, mm: &mut Vector<u64>, sub: &Vector<u32>) {
+const fn dv_release(mi: &mut Vector<u64>, di: &mut Vector<u64>, mm: &mut Vector<u64>, sub: &Vector<u32>) {
     for i in 0..sub.len() {
         bits::bit_clear(mi, sub[i]);
         bits::bit_clear(di, sub[i]);
