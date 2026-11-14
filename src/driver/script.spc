@@ -63,7 +63,7 @@ pub(package) fn run_script(
     p.bootstrap = bootstrap_tags;
     let mut cirv = iri::interp_master((&mut p) as *mut loader::Package, ce_steps, ce_mem);
     let cdir = ocache::object_cache_dir("");
-    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, ce_steps, ce_mem, &cdir) {
+    if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, &cdir) {
         p.load_user(path, std_dir, target);
     }
     if stdlib::getenv("SC_CEMIT_STATS") != null {

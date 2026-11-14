@@ -9353,3 +9353,14 @@ fn exit_cases_05() {
     interface_call_stores_cases(&mut b);
     b.run();
 }
+
+// A tuple binding of another module's call reads the callee's result slots in the callee's module, as a
+// build checks it: past the count mismatch, the binding has the callee's result type.
+@test
+fn tuple_binding_of_a_foreign_call() {
+    h::expect_build_err(
+        "a tuple binding of another module's single result",
+        "fn f() str {\n    let (a, b) = f64_bits(1.0);\n    return a;\n}\n\nfn main() i32 {\n    return 0;\n}\n",
+        "expected 'str', found 'u64'",
+    );
+}

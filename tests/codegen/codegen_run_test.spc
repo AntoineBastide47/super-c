@@ -321,6 +321,17 @@ fn float_constants_exact(b: &mut h::ExitBatch) {
     );
 }
 
+// Below 1, `acosh` is NaN (C Annex F). On wasm the C library is std's (`std::rt::libm`), also from -2
+// down, where musl's cancels to -inf or a number for a large magnitude (-8192 gives -inf).
+fn acosh_domain(b: &mut h::ExitBatch) {
+    exit_case(
+        b,
+        "acosh below 1",
+        "fn main() i32 {\n    let xs: [f64; 6] = [0.5, -1.0, -2.0, -8192.0, -1.0e7, -6.0e7];\n    let mut bad = 0;\n    for i in 0..6 {\n        if !xs[i].acosh().is_nan() { bad |= 1 << i; }\n    }\n    unsafe exit(bad);\n}\n",
+        0,
+    );
+}
+
 fn switches(b: &mut h::ExitBatch) {
     exit_case(
         b,
@@ -5520,6 +5531,7 @@ fn exit_cases_01() {
     arithmetic(&mut b);
     control_flow(&mut b);
     float_constants_exact(&mut b);
+    acosh_domain(&mut b);
     switches(&mut b);
     enum_discriminant_references(&mut b);
     constant_aggregate_holds_empty_string(&mut b);

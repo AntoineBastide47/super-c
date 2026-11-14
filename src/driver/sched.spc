@@ -166,10 +166,9 @@ pub(package) fn run_jobs(
     prt::set_stack_size(8usize << 20); // the checker's expression recursion outgrows the default task stack
     let wg = psync::WaitGroup::new();
     wg.add(g.n as i64);
-    let dv = stdlib::getenv("SC_TASK_DELAY");
     let mut seed: u32 = 0;
-    if dv != null {
-        seed = (unsafe stdlib::atoi(dv)) as u32;
+    if let Some(dv) = stdlib::get_env("SC_TASK_DELAY") {
+        seed = dv.as_str().parse_u32().unwrap_or(0);
         if seed == 0 {
             seed = 1;
         }

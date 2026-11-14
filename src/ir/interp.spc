@@ -934,6 +934,10 @@ pub(package) struct Interp {
     pub(package) steps: u32,
     pub(package) max_steps: u32,
     pub(package) max_slots: u64,
+    // The build's budgets (`interp_master`; 0: none), which `eval_reset` gives the program's
+    // evaluations: a step count and a byte count.
+    pub(package) build_steps: u32,
+    pub(package) build_mem: u64,
     // The objects, in a cell: `obj_ptr` gives one to change through the shared interpreter.
     pub(package) objs: UnsafeCell<Vector<IObj>>,
     pub(package) objs_live: usize, // ids in use: live, dead, or on `free_ids`
@@ -1137,6 +1141,8 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         steps: 0,
         max_steps: IT_DEFAULT_STEPS,
         max_slots: IT_DEFAULT_SLOTS,
+        build_steps: 0,
+        build_mem: 0,
         objs: UnsafeCell::<Vector<IObj>>::new(Vector::<IObj>::new()),
         objs_live: 0,
         live_slots: 0,
@@ -1277,16 +1283,12 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
 }
 
 /// The master engine of a package build: it records the index's dynamic item edges, and a nonzero
-/// `steps` or `mem` (bytes) replaces the default step or memory budget.
+/// `steps` or `mem` (bytes) replaces the default step or memory budget of the program's evaluations.
 pub(package) fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64) Interp {
     let mut e = interp_new(pkg);
     e.dyn_rec = true;
-    if steps != 0 {
-        e.max_steps = steps;
-    }
-    if mem != 0 {
-        e.max_slots = mem / sizeof(IVal) as u64;
-    }
+    e.build_steps = steps;
+    e.build_mem = mem;
     return e;
 }
 
@@ -1368,7 +1370,7 @@ extend Interp {
     /// lowered-callee cache and the referenced-constant memos persist -- one interpreter serves a
     /// whole emission pass.
     pub(package) fn eval_const_in(self: &mut Self, m: ModuleId, cnode: NodeId) IVal {
-        self.eval_reset();
+        self.eval_reset(m);
         self.subst.truncate(0);
         self.sub_base = 0;
         let mut lw = self.lowerer(m, cnode);
@@ -1382,10 +1384,20 @@ extend Interp {
         return r;
     }
 
-    /// Clear the per-evaluation state: the step count, the trap, the frames, the call memo, and the
-    /// object store. The dead objects keep their slot storage for reuse while it totals at most
-    /// IT_RETAIN_SLOTS.
-    fn eval_reset(self: &mut Self) {
+    /// Clear the per-evaluation state of an evaluation of module `m`: the step count, the trap, the
+    /// frames, the call memo, and the object store. The dead objects keep their slot storage for reuse
+    /// while it totals at most IT_RETAIN_SLOTS. A build's budget applies to the program's evaluations;
+    /// std's have the default: the build's bound the program's constants, not std's.
+    fn eval_reset(self: &mut Self, m: ModuleId) {
+        if self.build_steps != 0 || self.build_mem != 0 {
+            let in_std = self.p().in_std(m as usize);
+            if self.build_steps != 0 {
+                self.max_steps = pick(in_std, IT_DEFAULT_STEPS, self.build_steps);
+            }
+            if self.build_mem != 0 {
+                self.max_slots = pick(in_std, IT_DEFAULT_SLOTS, self.build_mem / sizeof(IVal) as u64);
+            }
+        }
         if self.slot_cap > IT_RETAIN_SLOTS {
             self.objs.get_mut().clear();
             self.slot_cap = 0;
@@ -5331,7 +5343,7 @@ extend Interp {
         at: *const TypeId,
         n: usize,
     ) IVal {
-        self.eval_reset();
+        self.eval_reset(m);
         self.subst.truncate(0);
         self.sub_base = 0;
         return self.inst_value(m, cnode, pm, pn, am, at, n);
@@ -10144,7 +10156,7 @@ extend Interp {
         if fd.params.len == 0 && self.ran0.contains(&(m as u64 << 32 | fn_id as u64)) {
             return zero;
         }
-        self.eval_reset();
+        self.eval_reset(m);
         self.subst.truncate(0);
         self.sub_base = 0;
         self.top_span = zero;
@@ -10198,7 +10210,7 @@ extend Interp {
     /// (`PR_*`); the `pa_*`, `trap*` or `unsup_*` fields describe a failure.
     pub(package) fn prove_run(self: &mut Self, b: &ir::CoreBody, args: &Vector<IVal>, refs: u64, steps: u32) u8 {
         self.eng_enter();
-        self.eval_reset();
+        self.eval_reset(b.module);
         self.subst.truncate(0);
         self.sub_base = 0;
         let zero = tok::Span { start: 0, end: 0 };
@@ -10258,7 +10270,7 @@ extend Interp {
     /// that trapped. A call the interpreter cannot run ends it with no trap and `failed` set.
     pub(package) fn probe_test(self: &mut Self, m: ModuleId, fn_id: NodeId) u8 {
         self.eng_enter();
-        self.eval_reset();
+        self.eval_reset(m);
         self.subst.truncate(0);
         self.sub_base = 0;
         let zero = tok::Span { start: 0, end: 0 };
@@ -11152,7 +11164,7 @@ extend Interp {
             },
             None => {},
         }
-        self.eval_reset();
+        self.eval_reset(m);
         self.ev_depth += 1;
         self.ndepth += 1;
         let v = self.run_root(m, id);
@@ -11282,7 +11294,7 @@ extend Interp {
         }
         let top = self.ev_depth == 0 && self.in_run == 0;
         if top {
-            self.eval_reset();
+            self.eval_reset(m);
             return self.eval_g_run(m, id, key, true);
         }
         // a fold a lowering asks for inside a run: once per evaluation, and within the native
@@ -11499,7 +11511,7 @@ extend Interp {
     fn eval_lanes_run(self: &mut Self, m: ModuleId, id: NodeId, env: &Vector<irl::LSub>, out: &mut Vector<u64>) u8 {
         let top = self.ev_depth == 0 && self.in_run == 0;
         if top {
-            self.eval_reset();
+            self.eval_reset(m);
         }
         let failed0 = self.failed;
         let sb0 = self.subst.len();
@@ -11589,7 +11601,7 @@ extend Interp {
         if id == NODE_NONE || self.ev_depth != 0 || self.in_run != 0 {
             return none();
         }
-        self.eval_reset();
+        self.eval_reset(m);
         let sb0 = self.subst.len();
         for i in 0..n {
             self.subst.push(
@@ -11857,7 +11869,7 @@ extend Interp {
         if tih.node == NODE_NONE {
             return bad;
         }
-        self.eval_reset();
+        self.eval_reset(m);
         self.ev_depth += 1;
         let v = self.type_info_decl(m, tih.mid, tih.node, rty, am, at);
         self.ev_depth -= 1;
@@ -11900,7 +11912,7 @@ extend Interp {
             },
             None => {},
         }
-        self.eval_reset();
+        self.eval_reset(m);
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
         let mut v = self.run_root(m, id);

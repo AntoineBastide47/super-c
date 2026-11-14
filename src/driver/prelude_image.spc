@@ -22,16 +22,15 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 6;
+const IMAGE_VER: u64 = 7;
 
 /// How long before the load a std file's modification time must lie for that time to vouch for its
 /// content: a file system with a coarse clock (two seconds on FAT) gives an edit made just after the load
 /// the time the file had at the load.
 const SAME_SECOND: i64 = 2000000000;
 
-/// The cache name of the prelude image for `p`'s settings, the constant-evaluation budgets and the
-/// type-table hash mode.
-pub(package) fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, mem: u64) u64 {
+/// The cache name of the prelude image for `p`'s settings and the type-table hash mode.
+pub(package) fn key(p: &loader::Package, std_dir: str, target: i32) u64 {
     let mut h = skey_mix(FNV_BASIS, IMAGE_VER);
     h = mix_str(h, std_dir);
     h = mix_str(h, &p.std_root);
@@ -49,8 +48,6 @@ pub(package) fn key(p: &loader::Package, std_dir: str, target: i32, steps: u32, 
     for i in 0..p.profiles.len() {
         h = mix_str(h, p.profiles.at(i).as_str());
     }
-    h = skey_mix(h, steps);
-    h = skey_mix(h, mem);
     // The type tables' hash index differs under SC_TYPE_COLLIDE.
     return skey_mix(h, (unsafe TS_COLLIDE) as u64);
 }
@@ -226,8 +223,6 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.modules.save(w);
     q.mod_index.save(w);
     q.mod_chain.save(w);
-    q.alias_path.save(w);
-    q.alias_id.save(w);
     q.simd_levels.save(w);
     q.build_module.save(w);
     q.build_target.save(w);
@@ -258,8 +253,6 @@ pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) boo
     p.modules.load(&mut r);
     p.mod_index.load(&mut r);
     p.mod_chain.load(&mut r);
-    p.alias_path.load(&mut r);
-    p.alias_id.load(&mut r);
     p.simd_levels.load(&mut r);
     p.build_module.load(&mut r);
     p.build_target.load(&mut r);

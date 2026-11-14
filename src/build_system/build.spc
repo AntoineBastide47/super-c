@@ -30,7 +30,6 @@ import build_system::objcache as *;
 import ast::ast as ast;
 import ast::parser as par;
 import ir::cpu_features as cf;
-import lsp::json as json;
 import link::link as lk;
 import link::util as lu;
 import build_system::ext as ext;
@@ -986,7 +985,7 @@ fn emit_closure(
     let pkg = (&mut p) as *mut loader::Package;
     let mut cirv = iri::interp_master(pkg, cx.ce_steps, cx.ce_mem);
     let cdir = object_cache_dir(project_name(m));
-    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, cx.ce_steps, cx.ce_mem, &cdir) {
+    if prelude_stage(&mut p, &mut cirv, cx.std_dir, root, cx.target, jobs, &cdir) {
         // After the prelude stage, which may swap in a saved prelude package.
         p.std_internals = m.std_internals;
         p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();

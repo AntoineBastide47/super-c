@@ -163,11 +163,6 @@ pub(package) struct Package {
     /// chain). `add_module` is the one place modules join the package, and paths never change.
     pub(package) mod_index: Map<u64, u32>,
     pub(package) mod_chain: Vector<u32>,
-    /// `std::` paths that name a prelude file loaded before them under its `__std::` path (the batch
-    /// `lint` and the LSP load the prelude first), and that module: `find` falls back to them, so an
-    /// explicit import gets the prelude module, as `load_prelude` gives a file imported first.
-    pub(package) alias_path: Vector<String>,
-    pub(package) alias_id: Vector<u32>,
     /// Instruction set `@arch` items are gated against: 0 x86_64, 1 aarch64, 2 wasm32, -1 unknown.
     /// Defaults to the host the compiler runs on; the driver overwrites it for `--arch=`.
     pub(package) arch: i32,
@@ -2736,6 +2731,12 @@ extend Package {
         return self.lazy_std && self.modules.at(m).prelude && !self.is_rt(m as i32) && m as i32 != self.rt_lanes;
     }
 
+    /// Whether module `m` belongs to the standard library: a prelude file, or a module of `std::`.
+    pub(package) const fn in_std(self: &Self, m: usize) bool {
+        let pth = self.modules.at(m).path.as_str();
+        return pth.starts_with("std::") || pth.starts_with("__std::");
+    }
+
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
     /// alone, with `-fno-builtin` (`libc_unit`).
     pub(package) const fn is_libc(self: &Self, m: i32) bool {
@@ -3108,16 +3109,12 @@ extend Package {
         let mut s = Box::<UserSpec>::new(
             UserSpec { v: self.settings_copy(), units: PUnits {}, wg: psy::WaitGroup::new() },
         );
-        // The prelude's module table, which `find`, `find_file` and `std_shadowed` read.
+        // The prelude's module table, which `find` and `std_shadowed` read.
         let v = &mut s.v;
         for i in 0..q.modules.len() {
             let m = q.modules.at(i);
             let _ = v.add_module(m.path.clone(), m.file.clone(), String::new(), m.src_id, m.mtime, Ast::new(0), false);
             v.modules[i].prelude = m.prelude;
-        }
-        for i in 0..q.alias_path.len() {
-            v.alias_path.push(q.alias_path.at(i).clone());
-            v.alias_id.push(q.alias_id[i]);
         }
         v.root_module = q.modules.len() as u32;
         s.units.push(&rp, root_file, false);
@@ -3144,10 +3141,6 @@ extend Package {
             "the package holds the prelude the user closure was read against",
         );
         self.dir_cache = replace(&mut s.v.dir_cache, DirCache {});
-        for i in self.alias_path.len()..s.v.alias_path.len() {
-            self.alias_path.push(s.v.alias_path.at(i).clone());
-            self.alias_id.push(s.v.alias_id[i]);
-        }
         self.spec = replace(&mut s.units, PUnits {});
     }
 
@@ -5558,10 +5551,9 @@ extend Package {
             }
             m = self.mod_chain[m as usize];
         }
-        for i in 0..self.alias_path.len() {
-            if self.alias_path[i].as_str() == path {
-                return self.alias_id[i] as i32;
-            }
+        // `std::<name>` names the prelude module of top-level std file `<name>.spc`.
+        if path.starts_with("std::") && path.slice(5, path.len()).find("::") < 0 {
+            return self.find(format("__std::{}", path.slice(5, path.len())).as_str());
         }
         return -1;
     }
@@ -5589,25 +5581,6 @@ extend Package {
             }
         }
         return self.find(path);
-    }
-
-    // `find`, or the prelude module of `file` when a `std::` path names it: recorded as an alias.
-    fn find_file(self: &mut Self, path: str, file: str) i32 {
-        let ex = self.find(path);
-        if ex >= 0 || !path.starts_with("std::") {
-            return ex;
-        }
-        for i in 0..self.modules.len() {
-            if self.modules[i].prelude && basename_of(&self.modules[i].file) == basename_of(file) && dutil::same_file(
-                file,
-                &self.modules[i].file,
-            ) {
-                self.alias_path.push(String::from_str(path));
-                self.alias_id.push(i as u32);
-                return i as i32;
-            }
-        }
-        return -1;
     }
 
     /// Append in-memory source `src` as module "main" (file "<harness>"), last, to a package from
@@ -5968,6 +5941,17 @@ extend Package {
                         cp = vp;
                     }
                 }
+                // A top-level std file is a prelude module: its import names the module the prelude
+                // loads it as, also while the prelude loads (a prelude file importing another), so the
+                // file loads once.
+                let mut pfile = String::new();
+                if vfile.is_empty() && parts.len == 2 && cp.starts_with("std::") && !std_root.is_empty() {
+                    let f = module_file_path(std_root, a, src, parts);
+                    if dc.exists(&f) {
+                        cp = format("__std::{}", cp.as_str().slice(5, cp.len()));
+                        pfile = f;
+                    }
+                }
                 let found = self.find(&cp);
                 if found >= 0 {
                     if found as u32 < self.root_module && vfile.is_empty() {
@@ -5978,6 +5962,8 @@ extend Package {
                 let u = queued.find(&cp);
                 if !vfile.is_empty() {
                     child_files.push(vfile);
+                } else if !pfile.is_empty() {
+                    child_files.push(pfile);
                 } else if u < queued.units.len() && queued.units.at(u).resolved {
                     child_files.push(queued.units.at(u).file.clone());
                 } else {
@@ -6050,7 +6036,7 @@ extend Package {
     // A unit that failed to read or parse falls back to the serial loader at replay, so its
     // diagnostics print with the serial wording, position and order.
     fn load_module_par(self: &mut Self, mod_path: str, file_path: str, bootstrap_tags: bool, target: i32) i32 {
-        let existing = self.find_file(mod_path, file_path);
+        let existing = self.find(mod_path);
         if existing >= 0 {
             return existing;
         }
@@ -6132,7 +6118,7 @@ extend Package {
                 us.units.index_mut(k).log = log;
                 for c in 0..all_paths.len() {
                     let cp = all_paths[c].as_str();
-                    if self.find_file(cp, &all_files[c]) >= 0 {
+                    if self.find(cp) >= 0 {
                         continue;
                     }
                     let seen = us.find(cp) < us.units.len();
@@ -6178,7 +6164,7 @@ extend Package {
             stack.set(top, stack[top] + 1);
             let cp = us.units.at(ui).child_paths.at(c).as_str();
             // A visited unit gave its path away, so a loaded import is found here, not among the units.
-            if self.find_file(cp, us.units.at(ui).child_files.at(c).as_str()) >= 0 {
+            if self.find(cp) >= 0 {
                 continue;
             }
             // The discovery gave every recorded import its own unit.
@@ -6209,7 +6195,7 @@ extend Package {
         expand: &mut bool,
     ) i32 {
         *expand = false;
-        let ex = self.find_file(&us.units.at(ui).path, &us.units.at(ui).file);
+        let ex = self.find(&us.units.at(ui).path);
         if ex >= 0 {
             return ex;
         }
@@ -6249,7 +6235,7 @@ extend Package {
         bootstrap_tags: bool,
         target: i32,
     ) i32 {
-        let existing = self.find_file(mod_path, file_path);
+        let existing = self.find(mod_path);
         if existing >= 0 {
             return existing;
         }
@@ -6275,7 +6261,7 @@ extend Package {
             let cf = replace(stack.index_mut(top).files.index_mut(k), String::new());
             let from = stack.at(top).owner;
             let off = stack.at(top).offs[k];
-            if self.find_file(&cp, &cf) >= 0 {
+            if self.find(&cp) >= 0 {
                 continue;
             }
             if unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set() {
@@ -8102,6 +8088,7 @@ extend Package {
         // With parallel loading every file parses in one wave, then each takes its id in name order.
         let par = unsafe G_LOAD_JOBS != 1 && self.overlay_files.len() == 0 && !files_set();
         let mut us = PUnits {};
+        let mut rpaths = Vector::<String>::new(); // the parallel roots' module paths
         for k in 0..names.len() {
             let file = join2(std_dir, &names[k]);
             let mut dup = false;
@@ -8119,8 +8106,15 @@ extend Package {
                 let stem = stem_of(&names[k]);
                 let mut modpath = String::from_str("__std::");
                 modpath.push_str(&stem);
+                // An earlier prelude file's import loaded it already, under this path.
+                let ex = self.find(&modpath);
+                if ex >= 0 {
+                    self.modules[ex as usize].prelude = true;
+                    continue;
+                }
                 if par {
                     us.push(&modpath, &file, false);
+                    rpaths.push(modpath);
                 } else {
                     let id = self.load_module(&modpath, &file, self.bootstrap, target);
                     if id >= 0 {
@@ -8134,7 +8128,11 @@ extend Package {
             self.par_discover(&mut us, self.bootstrap, target);
         }
         for k in 0..roots {
-            let id = self.par_replay(&mut us, k, self.bootstrap, target);
+            // An earlier root's import replayed this root already, and took its unit.
+            let mut id = self.find(&rpaths[k]);
+            if id < 0 {
+                id = self.par_replay(&mut us, k, self.bootstrap, target);
+            }
             if id >= 0 {
                 self.modules[id as usize].prelude = true;
             }

@@ -1778,6 +1778,11 @@ fn main() i32 { return (A % 7) as i32; }
     p.mkfile("calls.spc", calls);
     let cs = p.compile_flags("--const-eval-memory=16K", "calls.spc");
     assert(cs.ok(), "the frames of returned calls leave a 16 KiB budget");
+    // std's constants and statics (the runtime's too) evaluate under the default budgets, which the
+    // build's do not bound.
+    p.mkfile("bare.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let bare = p.compile_flags("--const-eval-steps=1 --const-eval-memory=1K", "bare.spc");
+    assert(bare.ok(), "std evaluates under the default budgets");
     h::expect_ok(
         "70000 live objects fold inside the budget",
         M"(struct Pair { pub a: u32, pub b: u32 }

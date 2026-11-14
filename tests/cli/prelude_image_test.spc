@@ -1,6 +1,7 @@
 // The checked prelude image (`driver::prelude_image`): a build that loads it publishes what a build that
 // checks the prelude publishes, and a std edit makes the next build check the prelude again. Also the
-// interface-default bound a conformance in another module must meet.
+// std modules a prelude file imports, and the interface-default bound a conformance in another module
+// must meet.
 import tests::cli_harness as cli;
 import driver::util as du;
 import driver::prelude_image as pimg;
@@ -11,6 +12,7 @@ import time;
 import utils::persist as per;
 import std::platform::clock;
 import std::platform::fs;
+import std::parallel::runtime as prt;
 
 // Copy the files and directories under `src` to `dst`.
 fn copy_tree(src: str, dst: str) {
@@ -99,6 +101,43 @@ fn load_prelude(root: str, sd: str) loader::Package {
     let q = loader::package_load_prelude(root, "", sd, host, Vector::<String>::new(), Vector::<String>::new());
     assert(q.ok && q.modules.len() != 0, "the prelude loads");
     return q;
+}
+
+// A prelude file imports another, listed after it, which loads once, as a prelude module, and a std
+// module that is no prelude file, of which the prelude reaches one function: the module's other function
+// is checked before the prelude's types publish too, so its call of the helper both share gets the
+// helper's type, not a stale id.
+@test
+fn a_prelude_file_imports_std_modules() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    cli::copy_std(root);
+    p.mkfile(
+        "sc/std/zz_lib/m.spc",
+        "fn h() i32 {\n    return 2;\n}\n\npub fn f() i32 {\n    return h();\n}\n\npub fn g() i32 {\n    return h() + 1;\n}\n",
+    );
+    p.mkfile("sc/std/zz_p.spc", "import std::zz_lib::m;\n\npub fn zz_p() i32 {\n    return m::f();\n}\n");
+    p.mkfile("sc/std/zz_o.spc", "import std::zz_p;\n\npub fn zz_o() i32 {\n    return zz_p::zz_p() + 40;\n}\n");
+    p.mkfile("main.spc", "fn main() i32 {\n    return zz_o();\n}\n");
+    let sd = format("{}/sc/std", root);
+    // The serial loader and the parallel one, which replays the roots after reading them all.
+    for jobs in [1u32, 2u32] {
+        loader::set_load_jobs(jobs);
+        let q = load_prelude(root, &sd);
+        let mut copies: usize = 0;
+        for i in 0..q.modules.len() {
+            assert(q.modules.at(i).path.len() != 0, "every module has a path");
+            if q.modules.at(i).file.as_str().ends_with("/zz_p.spc") {
+                copies += 1;
+                assert(q.modules.at(i).prelude, "the imported prelude file is a prelude module");
+            }
+        }
+        assert_eq(copies, 1);
+    }
+    loader::set_load_jobs(1);
+    prt::shutdown();
+    let _ = build(root, "0");
+    assert(run(root, "0") == 42, "the program runs");
 }
 
 // The image records the std text the prelude check read: a std file edited after the load (during the

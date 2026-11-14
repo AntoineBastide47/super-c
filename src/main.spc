@@ -32,16 +32,14 @@ import ir::cpu_features as cf;
 import typechecker::render as rnd;
 
 // Parse the one-based K/N used by --test-shard. Both numbers must consume the full argument.
-fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
-    let mut slash: *mut char = null;
-    let shard = unsafe stdlib::strtoul(s, &mut slash, 10);
-    if slash as usize == s as usize || unsafe *slash != '/' as char {
+const fn parse_test_shard(s: str, topts: &mut TestOpts) bool {
+    let slash = s.find("/");
+    if slash < 0 {
         return false;
     }
-    let next = unsafe (slash + 1);
-    let mut endp: *mut char = null;
-    let shards = unsafe stdlib::strtoul(next, &mut endp, 10);
-    if endp as usize == next as usize || unsafe *endp != 0 as char || shard < 1 || shard > shards || shards > 2147483647 {
+    let shard = s.slice(0, slash as usize).parse_u64().unwrap_or(0);
+    let shards = s.slice(slash as usize + 1, s.len()).parse_u64().unwrap_or(0);
+    if shard < 1 || shard > shards || shards > 2147483647 {
         return false;
     }
     topts.shard = shard as i32;
@@ -49,20 +47,20 @@ fn parse_test_shard(s: *const char, topts: &mut TestOpts) bool {
     return true;
 }
 
-fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
+const fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     if arg.starts_with("--test-jobs=") {
-        topts.jobs = unsafe stdlib::atoi((arg.ptr() + 12) as *const char);
+        topts.jobs = arg.slice(12, arg.len()).parse_i32().unwrap_or(0);
         if topts.jobs < 1 {
             *bad = true;
         }
     } else if arg.starts_with("--test-timeout=") {
-        let digits = (unsafe (arg.ptr() + 15)) as *const char; // argv text: NUL-terminated
-        let mut endp: *mut char = null;
-        let v = unsafe stdlib::strtoul(digits, &mut endp, 10);
-        if endp as usize == digits as usize || unsafe *endp != 0 as char || v > 2147483647 {
-            *bad = true;
-        } else {
-            topts.timeout = v as i32;
+        switch arg.slice(15, arg.len()).parse_i32() {
+            Some(v) if v >= 0 => {
+                topts.timeout = v;
+            },
+            _ => {
+                *bad = true;
+            },
         }
     } else if arg == "--test-record-durations" {
         topts.record = true;
@@ -78,7 +76,7 @@ fn parse_test_flag(arg: str, topts: &mut TestOpts, bad: &mut bool) bool {
     } else if arg.starts_with("--filter=") {
         topts.filter = (unsafe (arg.ptr() + 9)) as *const char;
     } else if arg.starts_with("--test-shard=") {
-        if !parse_test_shard((unsafe (arg.ptr() + 13)) as *const char, topts) {
+        if !parse_test_shard(arg.slice(13, arg.len()), topts) {
             *bad = true;
         }
     } else {
@@ -1501,7 +1499,7 @@ struct BuildOpts<'a> {
 }
 
 extend<'a> BuildOpts<'a> {
-    fn build_flag(self: &mut Self, co: &mut CommonOpts, arg: str<'a>) bool {
+    const fn build_flag(self: &mut Self, co: &mut CommonOpts, arg: str<'a>) bool {
         if arg.starts_with("--profile=") {
             self.profile = arg[10..];
         } else if arg.starts_with("--out-dir=") {
@@ -1513,7 +1511,7 @@ extend<'a> BuildOpts<'a> {
         } else if arg == "--lib" {
             self.lib_sel = true;
         } else if arg.starts_with("--jobs=") {
-            let v = unsafe stdlib::atoi(((&arg[7]) as *const u8) as *const char);
+            let v = arg[7..].parse_i32().unwrap_or(0);
             if v < 1 {
                 co.bad = true;
             } else {

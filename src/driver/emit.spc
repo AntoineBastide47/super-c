@@ -747,12 +747,12 @@ fn tc_item(st: &TcStage, it: loader::ItemId, meta: loader::ItemMeta) {
     chk.clear();
 }
 
-// The serial order of the components, module-major: the modules by import level (prelude
-// modules first, a module after the modules it imports, ties by id), each module's components
-// in item order with their unfinished dependencies before them (a depth-first walk, every
-// component once). A module's checker then lives from its first item to its last with as few
-// other modules open as the dependencies allow.
-fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
+// The serial order of the components, module-major: the modules by import level (the modules
+// `pre_mod` places before the prelude gate first, a module after the modules it imports, ties by
+// id), each module's components in item order with their unfinished dependencies before them (a
+// depth-first walk, every component once). A module's checker then lives from its first item to
+// its last with as few other modules open as the dependencies allow.
+fn tc_order(p: &loader::Package, pre_mod: &Vector<bool>, order: &mut Vector<u32>) {
     let s = &p.sched;
     let nc = s.ncomp as usize;
     let nm = p.modules.len();
@@ -769,7 +769,7 @@ fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
     for pass in 0..2 {
         for mi in 0..nm {
             let m = (mods[mi] & 0xFFFFFFFFu64) as usize;
-            if p.modules.at(m).prelude != (pass == 0) {
+            if pre_mod[m] != (pass == 0) {
                 continue;
             }
             for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
@@ -807,25 +807,40 @@ fn tc_order(p: &loader::Package, order: &mut Vector<u32>) {
     }
 }
 
+// Mark the components of module `m`'s items in `pre`, each one new to it pushed on `stack`.
+fn tc_push_module(p: &loader::Package, m: usize, pre: &mut Vector<bool>, stack: &mut Vector<u32>) {
+    for it in p.idx().mod_items[m] as usize..p.idx().mod_items[m + 1] as usize {
+        let c = p.sched.comp[it] as usize;
+        if !pre[c] {
+            pre.set(c, true);
+            stack.push(c as u32);
+        }
+    }
+}
+
 // The job graph over the components: their dependency graph plus the prelude gate (a virtual
 // job after every prelude component and before every other one).
 fn tc_jobs(p: &loader::Package) sch::Jobs {
     let s = &p.sched;
     let nc = s.ncomp as usize;
     let gate = nc as u64;
-    // The components the gate waits for: the prelude's, and every component they depend on (a module
-    // a prelude file imports), as `tc_order` places them before the gate.
+    // The components the gate waits for: the prelude's, every component they depend on (a module a
+    // prelude file imports), and every other component of a module one of those belongs to, as
+    // `tc_order` places them before the gate. So every module checker open at the gate has closed:
+    // its memos hold provisional ids, which the gate's publication renumbers.
+    let nm = p.modules.len();
     let mut pre = Vector::<bool>::new();
     pre.resize_default(nc);
+    let mut pre_mod = Vector::<bool>::new();
+    pre_mod.resize_default(nm);
     let mut stack = Vector::<u32>::new();
-    for c in 0..nc {
-        let first = s.citem[s.citem_off[c] as usize];
-        if p.modules.at(p.idx().items.at(first as usize).module as usize).prelude {
-            pre.set(c, true);
-            stack.push(c as u32);
+    for m in 0..nm {
+        if p.modules.at(m).prelude {
+            pre_mod.set(m, true);
+            tc_push_module(p, m, &mut pre, &mut stack);
         }
     }
-    // Each component enters the stack once.
+    // Each component enters the stack once, and each module's components once.
     for _ in 0..nc {
         if stack.len() == 0 {
             break;
@@ -836,6 +851,13 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
             if !pre[d] {
                 pre.set(d, true);
                 stack.push(d as u32);
+            }
+        }
+        for i in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
+            let m = p.idx().items.at(s.citem[i] as usize).module as usize;
+            if !pre_mod[m] {
+                pre_mod.set(m, true);
+                tc_push_module(p, m, &mut pre, &mut stack);
             }
         }
     }
@@ -851,11 +873,10 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
         }
     }
     let mut order = Vector::<u32>::with_capacity(nc + 1);
-    tc_order(p, &mut order);
+    tc_order(p, &pre_mod, &mut order);
     if p.icost_on {
         // The measurement: how many module checkers the serial order keeps open at once (a
         // module's checker lives from its first component to its last).
-        let nm = p.modules.len();
         let mut first = Vector::<u32>::new();
         first.resize_default(nm);
         let mut last = Vector::<u32>::new();
@@ -5804,8 +5825,8 @@ pub(package) fn cemit_package(
     cdit.parent = p.cir as *const iri::Interp;
     if cdit.parent != null {
         // the type check's budgets: a constant it accepted must evaluate here too
-        cdit.max_steps = unsafe (*cdit.parent).max_steps;
-        cdit.max_slots = unsafe (*cdit.parent).max_slots;
+        cdit.build_steps = unsafe (*cdit.parent).build_steps;
+        cdit.build_mem = unsafe (*cdit.parent).build_mem;
     }
     // A native build reads the entries alone (`native_assemble`).
     let mut cdefs = Segs::keeping(!p.native);
@@ -15415,8 +15436,8 @@ fn ap_engine_take(st: &ApStage) Box<iri::Interp> {
     let mut cev = iri::interp_new(st.p);
     let master = (unsafe (&*st.p).cir) as *mut iri::Interp;
     cev.all_typed = true;
-    cev.max_steps = unsafe (&*master).max_steps;
-    cev.max_slots = unsafe (&*master).max_slots;
+    cev.build_steps = unsafe (&*master).build_steps;
+    cev.build_mem = unsafe (&*master).build_mem;
     cev.keep_view = unsafe (&*master).keep_view;
     cev.record_folds = unsafe (&*master).record_folds;
     for k in unsafe (*st.ran0).iter() {
@@ -16349,9 +16370,10 @@ fn c_types(m: ModuleId, a: &Ast, list: NodeList, work: &mut Vector<DefId>) {
 /// the stored image of an earlier build with these settings and std files. While the prelude checks,
 /// the closure of `root_file` (the module `load_user` loads next) reads and parses in tasks
 /// (`Package::spec_user`). `p` holds no module yet and `e` is its engine, which takes the prelude's
-/// deferred checks. `jobs` is the requested worker count, `steps` and `mem` the evaluation budgets of
-/// `e`, `cache` the build's cache root (`objcache::object_cache_dir`; empty: no image is kept). False,
-/// with the errors logged, when the prelude does not check.
+/// deferred checks. The prelude checks under the engine's default evaluation budgets, not the
+/// build's: they bound the program's constants, not std's. `jobs` is the requested worker count,
+/// `cache` the build's cache root (`objcache::object_cache_dir`; empty: no image is kept). False, with
+/// the errors logged, when the prelude does not check.
 pub(package) fn prelude_stage(
     p: &mut loader::Package,
     e: &mut iri::Interp,
@@ -16359,11 +16381,9 @@ pub(package) fn prelude_stage(
     root_file: str,
     target: i32,
     jobs: u32,
-    steps: u32,
-    mem: u64,
     cache: str,
 ) bool {
-    let key = pimg::key(p, std_dir, target, steps, mem);
+    let key = pimg::key(p, std_dir, target);
     let cid = pimg::cache_id(cache); // 0: no object cache, or an unreadable compiler: no image is kept
     if cid != 0 {
         let mut at: usize = 0;
@@ -16406,7 +16426,7 @@ pub(package) fn prelude_stage(
         }
         spec = p.spec_user(&q, root_file, target);
         q.jobs = jobs;
-        let mut qe = iri::interp_master((&mut q) as *mut loader::Package, steps, mem);
+        let mut qe = iri::interp_master((&mut q) as *mut loader::Package, 0, 0);
         q.cir = &mut qe;
         if !check_prelude(&mut q, target) {
             spec.join();

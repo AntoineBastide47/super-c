@@ -37,14 +37,12 @@
 [ffi]
 # The ffi/ modules that do not reach the operating system.
 modules = ["atomic", "ctype", "math", "string", "immintrin", "arm_neon", "wasm_simd128", "sc_sme"]
-# The C library functions that are not operating-system calls: memory, string, allocation, `abort`,
-# <ctype.h> and <math.h>.
+# The C library functions that are not operating-system calls: memory, string, allocation, `abort` and
+# <math.h>.
 functions = [
     "memcpy", "memmove", "memset", "memcmp", "memchr",
     "strlen", "strcmp", "strncmp", "strchr", "strrchr", "strstr",
     "malloc", "calloc", "realloc", "free", "abort",
-    "isalpha", "isdigit", "isalnum", "isspace", "isupper", "islower", "ispunct", "iscntrl", "isprint",
-    "isgraph", "isblank", "isxdigit", "toupper", "tolower",
     "acos", "asin", "atan", "atan2", "cos", "sin", "tan", "acosh", "asinh", "atanh", "cosh", "sinh", "tanh",
     "exp", "exp2", "expm1", "frexp", "ilogb", "ldexp", "log", "log10", "log1p", "log2", "logb", "modf",
     "scalbn", "scalbln", "cbrt", "fabs", "hypot", "pow", "sqrt", "erf", "erfc", "lgamma", "tgamma",

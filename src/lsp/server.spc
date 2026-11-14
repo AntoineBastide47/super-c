@@ -1490,11 +1490,14 @@ extend Server {
     fn enforce_budget(self: &mut Self) {
         let mut mb = self.budget_mb;
         if mb <= 0 {
-            let e = stdlib::getenv("SC_LSP_BUDGET_MB");
-            if e == null {
-                return;
+            switch stdlib::get_env("SC_LSP_BUDGET_MB") {
+                Some(e) => {
+                    mb = e.as_str().parse_i32().unwrap_or(0);
+                },
+                None => {
+                    return;
+                },
             }
-            mb = unsafe stdlib::atoi(e);
         }
         if mb <= 0 {
             return;

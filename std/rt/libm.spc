@@ -2,7 +2,8 @@
 // prelude, the ffi bindings and the compiler call, as wasi-libc computes them. `sqrt`, `floor`, `ceil`,
 // `trunc`, `rint`, `nearbyint`, `fabs` and `copysign` are single wasm instructions, as wasi-libc compiles
 // them; the others are ports of musl's code (FreeBSD's msun and ARM's optimized routines), so every
-// result is wasi-libc's to the bit. See LICENSE in this directory.
+// result is wasi-libc's to the bit, but `acosh`'s from -2 down: NaN, where musl's is -inf or a number for
+// a large magnitude. See LICENSE in this directory.
 //
 // wasm has no floating-point exceptions and one rounding mode, to nearest: musl's code that only raises
 // an exception (`FORCE_EVAL`) is left out. Its unsigned arithmetic that wraps on purpose uses the
@@ -5898,17 +5899,19 @@ pub fn asinhf(x0: f32) f32 {
 /// The inverse hyperbolic cosine of x.
 @export("acosh")
 pub fn acosh(x: f64) f64 {
-    let e = (bits(x) >> 52 & 0x7ff) as u32;
+    // The second test keeps the sign, as `acoshf`'s does: musl's drops it, so its x <= -2 takes the
+    // second branch, which gives -inf or a number instead of NaN.
+    let se = (bits(x) >> 52) as u32;
     // x < 1 domain error is handled in the called functions
-    if e < 0x3ff + 1 {
+    if (se & 0x7ff) < 0x3ff + 1 {
         // |x| < 2, up to 2ulp error in [1,1.125]
         return log1p(x - 1.0 + sqrt((x - 1.0) * (x - 1.0) + 2.0 * (x - 1.0)));
     }
-    if e < 0x3ff + 26 {
-        // |x| < 0x1p26
+    if se < 0x3ff + 26 {
+        // 2 <= x < 0x1p26
         return log(2.0 * x - 1.0 / (x + sqrt(x * x - 1.0)));
     }
-    // |x| >= 0x1p26 or nan
+    // x >= 0x1p26, x <= -2 or nan
     return log(x) + LN2;
 }
 

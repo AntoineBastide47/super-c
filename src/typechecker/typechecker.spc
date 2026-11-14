@@ -33592,7 +33592,9 @@ extend TypeChecker {
                 TUPLE_MAX as i32,
             );
         }
+        // The callee's result slots, in the syntax of module `rm`.
         let mut returns = NodeList { start: 0, len: 0 };
+        let mut rm = self.cur_module();
         let mut ok = false;
         if core != NODE_NONE && unsafe (*a).at_const(core).kind == NodeKind::NODE_CALL {
             let calleeId = unsafe (*a).at_const(core).as_data.call.callee;
@@ -33604,6 +33606,7 @@ extend TypeChecker {
                     let fnn = unsafe (*self.mod_ast(ct.module)).at_const(ct.as_data.decl);
                     if fnn.kind == NodeKind::NODE_FUNCTION {
                         returns = unsafe (*self.mod_ast(ct.module)).ext(ct.as_data.decl).function.returns;
+                        rm = ct.module;
                     }
                     ok = true;
                 }
@@ -33647,8 +33650,13 @@ extend TypeChecker {
             } else if tn >= 0 {
                 et = pick(i < tn as u32, targs[i as usize], TYPE_NONE);
             } else if i < returns.len {
-                let r0 = unsafe (*self.cur_ast()).list(returns)[i as usize];
-                et = self.resolve_type(unsafe (*self.cur_ast()).slot_type_node(r0));
+                let ra = self.mod_ast(rm);
+                let r0 = unsafe (*ra).list(returns)[i as usize];
+                et = if rm == self.cur_module() {
+                    self.resolve_type(unsafe (*ra).slot_type_node(r0))
+                } else {
+                    self.node_type_in(rm, unsafe (*ra).slot_type_node(r0))
+                };
             }
             unsafe (*self.cur_ast()).set_type(unsafe (*self.cur_ast()).list(names)[i as usize], et);
         }

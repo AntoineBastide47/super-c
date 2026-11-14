@@ -5,7 +5,6 @@
 // output (the wire format must be valid JSON) and integral numbers print without a ".0" suffix (LSP
 // positions and ids are integers).
 import string as cstring;
-import stdlib;
 import lsp::text as text;
 import std::mem::ptr;
 
@@ -677,8 +676,7 @@ extend JSONParser {
             self.fail("Invalid character in number");
             return 0.0;
         }
-        let mut text = String::from_str(self.src.slice(from, to));
-        return unsafe stdlib::strtod(text.cstr(), null);
+        return self.src.slice(from, to).parse_f64().unwrap();
     }
 
     // The parseBuffer main loop over the whole (in-memory) input; returns the consumed byte count.
