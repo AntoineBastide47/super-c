@@ -296,8 +296,9 @@ forgets every place it lends by `&mut`. `Seq` is native: `SQ_*` function
 terms whose length and element facts are anchored on them (`seq_make`, `seq_at`), extensional
 equality (`seq_ext`); `view()` of a vector or string is a function of its value, of a `[]mut T` of
 its value and memory epoch, of a `[]T` of its value only (`slice_ep`), and `sq_kind`, `sq_value` and
-`sq_effect` model the container methods' views (`vk_change`: `VK_SET` to `VK_SWAPREM`; `decided`
-takes a case split's branch the path facts decide). A struct's invariant is `S::invariant(&v)` (`inv_of`, the extend's
+`sq_effect` model a string's methods (`vk_change`: `VK_SET` to `VK_PUSH_B`) and a vector's element
+borrows (`at`, `index`, `index_mut`, `as_slice`, `index_range`); a vector's other methods are calls
+whose contracts give their effects (`decided` takes a case split's branch the path facts decide). A struct's invariant is `S::invariant(&v)` (`inv_of`, the extend's
 parameters bound to the instance's arguments): a fact of every value of the type outside the struct's
 module (`inv_fact`, from `pat_fact`); in it every non-ghost body that holds the type is walked
 (`inv_body`), assumes the invariant at the entry and after each call (`inv_enter`, `inv_called`) and

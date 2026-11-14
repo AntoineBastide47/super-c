@@ -514,10 +514,8 @@ const SQ_SKIP: u64 = 20; // `s.skip(n)`: `s.subrange(n, s.len())` (SQ_SUB)
 const VK_LEN: u64 = 32;
 const VK_EMPTY: u64 = 33;
 const VK_INDEX: u64 = 34;
-const VK_PUSH: u64 = 35;
 const VK_SPUSH: u64 = 36; // `String::push`, of a `char`
 const VK_PUSH_STR: u64 = 37;
-const VK_POP: u64 = 38;
 const VK_CLEAR: u64 = 39;
 const VK_INDEX_MUT: u64 = 40;
 const VK_NEW: u64 = 41;
@@ -528,21 +526,15 @@ const VK_SINDEX: u64 = 45; // a view's element read (`index`, `get`, `at`)
 const VK_SHARE: u64 = 46; // `[]mut`'s `as_slice`
 const VK_RANGE: u64 = 47; // a vector's or a view's `index_range` (`v[lo..hi]`), a shared view
 const VK_RANGE_MUT: u64 = 48; // its `index_range_mut`, a `[]mut` view
-// The other methods of a vector or a string that change it, each by its effect on the view:
-const VK_SET: u64 = 49; // `set(i, x)`, `set_byte(i, b)`: element `i` is `x` (`i < len`)
-const VK_TRUNC: u64 = 50; // `truncate(n)`: the first `min(n, len)` elements
-const VK_INSERT: u64 = 51; // `insert(i, x)`, `insert_byte(i, b)`: `x` before element `i` (`i <= len`)
-const VK_REMOVE: u64 = 52; // a vector's `remove(i)`: without element `i`, none when `i >= len`
-const VK_REMOVE_B: u64 = 53; // a string's `remove_byte(i)`: without byte `i` (`i < len`), the byte
-const VK_SWAP: u64 = 54; // `swap(i, j)`: elements `i` and `j` exchanged (both `< len`)
-const VK_KEEP: u64 = 55; // `reserve`, `reserve_exact`, `shrink_to_fit`: the same elements
-const VK_EXTEND: u64 = 56; // `extend_copy(&w)`, `extend_from_slice(s)`, `push_bytes(s)`: the elements, then `s`'s
-const VK_POP_B: u64 = 57; // a string's `pop_byte()`: without its last byte, the byte (0 when empty)
-const VK_PUSH_B: u64 = 58; // a string's `push_byte(b)`: `b` after the last byte
-const VK_SAMELEN: u64 = 59; // `reverse`, `sort`, `sort_stable`, `sort_stable_in_place`: as many elements
-const VK_SHRINK: u64 = 60; // `dedup`: at most as many elements
-const VK_RESIZE: u64 = 61; // `resize_default(n)`: `n` elements, the first `min(n, len)` the same
-const VK_SWAPREM: u64 = 62; // `swap_remove(i)`: one element fewer when `i < len`
+// The other methods of a string that change it, each by its effect on the view:
+const VK_SET: u64 = 49; // `set_byte(i, b)`: byte `i` is `b` (`i < len`)
+const VK_TRUNC: u64 = 50; // `truncate(n)`: the first `min(n, len)` bytes
+const VK_INSERT: u64 = 51; // `insert_byte(i, b)`: `b` before byte `i` (`i <= len`)
+const VK_REMOVE_B: u64 = 52; // `remove_byte(i)`: without byte `i` (`i < len`), the byte
+const VK_KEEP: u64 = 53; // `reserve`, `reserve_exact`, `shrink_to_fit`: the same bytes
+const VK_EXTEND: u64 = 54; // `push_bytes(s)`: the bytes, then `s`'s
+const VK_POP_B: u64 = 55; // `pop_byte()`: without its last byte, the byte (0 when empty)
+const VK_PUSH_B: u64 = 56; // `push_byte(b)`: `b` after the last byte
 
 // The rounds of quantifier instances a goal gets (an instance may name a nested quantifier), and the
 // terms each round instantiates a quantifier with.
@@ -8804,43 +8796,47 @@ extend<const B: usize> Prover<B> {
                 0
             };
         }
-        // A vector's method with contracts is a call as any other: its contracts give its effect. A borrow
-        // of its elements (`at`, `index`, a view) is modeled, in its own module too, but in the body that
+        // A vector's other methods are calls as any other: their contracts give their effects. A borrow of
+        // its elements (`at`, `index`, a view) is modeled, in its own module too, but in the body that
         // defines it.
-        let borrow = nm == "at" || nm == "index" || nm == "index_mut" || nm == "as_slice" || nm == "as_mut_slice" || nm == "index_range" || nm == "index_range_mut";
-        if vec && (!borrow && self.contracted(d) || self.m == self.vecl.mid && self.owner.module == d.module && self.owner.node == d.node) {
-            return 0;
+        if vec {
+            if self.m == self.vecl.mid && self.owner.module == d.module && self.owner.node == d.node {
+                return 0;
+            }
+            return if nm == "index" || nm == "at" {
+                VK_INDEX
+            } else if nm == "index_mut" {
+                VK_INDEX_MUT
+            } else if nm == "as_slice" || nm == "as_mut_slice" {
+                VK_AS_SLICE
+            } else if nm == "index_range" {
+                VK_RANGE
+            } else if nm == "index_range_mut" {
+                VK_RANGE_MUT
+            } else {
+                0
+            };
         }
-        if vec || st {
+        if st {
             return if nm == "len" {
                 VK_LEN
             } else if nm == "is_empty" {
                 VK_EMPTY
-            } else if nm == "index" || vec && nm == "at" {
+            } else if nm == "index" {
                 VK_INDEX
             } else if nm == "push" {
-                pick(vec, VK_PUSH, VK_SPUSH)
-            } else if st && nm == "push_str" {
+                VK_SPUSH
+            } else if nm == "push_str" {
                 VK_PUSH_STR
-            } else if vec && nm == "pop" {
-                VK_POP
             } else if nm == "clear" {
                 VK_CLEAR
-            } else if vec && nm == "index_mut" {
-                VK_INDEX_MUT
-            } else if vec && (nm == "as_slice" || nm == "as_mut_slice") || st && nm == "as_bytes" {
+            } else if nm == "as_bytes" {
                 VK_AS_SLICE
-            } else if vec && nm == "index_range" {
-                VK_RANGE
-            } else if vec && nm == "index_range_mut" {
-                VK_RANGE_MUT
             } else {
-                self.vk_change(vec, nm, t.args_len)
+                Self::vk_change(nm, t.args_len)
             };
         }
-        if (nm == "new" || nm == "with_capacity") && t.args_len <= 1 && (om == self.vecl.mid && od == self.vecl.node && !self.contracted(
-            d,
-        ) || om == self.strl.mid && od == self.strl.node) && od != NODE_NONE {
+        if (nm == "new" || nm == "with_capacity") && t.args_len <= 1 && om == self.strl.mid && od == self.strl.node && od != NODE_NONE {
             return VK_NEW;
         }
         let view = rd != NODE_NONE && (rm == self.smut.mid && rd == self.smut.node || rm == self.slice.mid && rd == self.slice.node);
@@ -8865,9 +8861,9 @@ extend<const B: usize> Prover<B> {
         return 0;
     }
 
-    // The effect of container method `k` (`VK_SET` to `VK_SWAPREM`) of call `t` on a receiver of view `ov`
-    // whose new value is `nv`: its view (`vdef`) or the facts of its length; the call's result (NONE:
-    // unknown).
+    // The effect of string method `k` (`VK_SET` to `VK_PUSH_B`) of call `t` on a receiver of view `ov`
+    // whose new value is `nv`: its view (`vdef`), NONE where the walk does not know it; the call's result
+    // (NONE: unknown).
     fn vk_apply(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator, k: u64, ov: u32, nv: u32) u32 {
         let cm = b.module;
         let n = self.seq_len(ov);
@@ -8910,63 +8906,17 @@ extend<const B: usize> Prover<B> {
             let pushed = self.seq_make(SQ_PUSH, &xs);
             let tail = self.sub_seq(ov, i, n);
             self.cat_seq(pushed, tail)
-        } else if k == VK_REMOVE || k == VK_REMOVE_B {
-            // Without element `i`: none when `i >= len` (`remove`; `remove_byte` proved `i < len`).
+        } else if k == VK_REMOVE_B {
+            // Without byte `i` (the call proved `i < len`), and the byte.
             let i = self.sq_index(a1);
             let i1 = self.tm.arith(T_ADD, i, one, W_INT, true);
-            let lt0 = self.tm.cmp(T_LT, i, n);
-            let d = pick(k == VK_REMOVE_B, 1u32, self.decided(path, lt0));
-            let (j, j1) = if d == 1 {
-                (i, i1)
-            } else if d == 0 {
-                (n, n)
-            } else {
-                let j = self.tm.var(W_INT, true);
-                let j1 = self.tm.var(W_INT, true);
-                let lt = self.tm.cmp(T_LT, i, n);
-                let e0 = self.tm.cmp(T_EQ, j, i);
-                let e1 = self.tm.cmp(T_EQ, j1, i1);
-                let e2 = self.tm.cmp(T_EQ, j, n);
-                let e3 = self.tm.cmp(T_EQ, j1, n);
-                let in0 = self.tm.and(e0, e1);
-                let inside = self.tm.and(lt, in0);
-                let out0 = self.tm.and(e2, e3);
-                let nlt = self.tm.not(lt);
-                let outside = self.tm.and(nlt, out0);
-                path.pc.push(self.tm.or(inside, outside));
-                (j, j1)
-            };
-            if k == VK_REMOVE_B {
+            if t.dests_len == 1 {
                 let (w, sg) = self.ty_of(cm, b.places.at(b.dest_pool[t.dests_start as usize] as usize).ty);
-                r = if t.dests_len == 1 {
-                    self.seq_at(ov, i, w, sg)
-                } else {
-                    NONE
-                };
+                r = self.seq_at(ov, i, w, sg);
             }
-            if d == 0 {
-                // The path proves `i >= len`: no element removed.
-                ov
-            } else {
-                let head = self.sub_seq(ov, zi, j);
-                let tail = self.sub_seq(ov, j1, n);
-                self.cat_seq(head, tail)
-            }
-        } else if k == VK_SWAP {
-            let i = self.sq_index(a1);
-            let j = self.sq_index(a2);
-            let (w, sg) = (W_OTHER, false);
-            let xi = self.seq_at(ov, i, w, sg);
-            let xj = self.seq_at(ov, j, w, sg);
-            xs.push(ov);
-            xs.push(i);
-            xs.push(xj);
-            let u = self.seq_make(SQ_UPD, &xs);
-            let mut ys = Vector::<u32>::new();
-            ys.push(u);
-            ys.push(j);
-            ys.push(xi);
-            self.seq_make(SQ_UPD, &ys)
+            let head = self.sub_seq(ov, zi, i);
+            let tail = self.sub_seq(ov, i1, n);
+            self.cat_seq(head, tail)
         } else if k == VK_EXTEND {
             let src = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
             let sty = b.operands.at(b.oper_pool[(t.args_start + 1) as usize] as usize).ty;
@@ -9012,42 +8962,6 @@ extend<const B: usize> Prover<B> {
         };
         if view != NONE {
             self.vdef.insert(nv, view);
-            return r;
-        }
-        // Only the length is known.
-        let nview = self.view_v(nv);
-        let nn = self.seq_len(nview);
-        let i1 = if a1 == NONE {
-            NONE
-        } else {
-            self.sq_index(a1)
-        };
-        let f = if k == VK_SAMELEN {
-            self.tm.cmp(T_EQ, nn, n)
-        } else if k == VK_SHRINK {
-            self.tm.cmp(T_LE, nn, n)
-        } else if k == VK_RESIZE {
-            self.tm.cmp(T_EQ, nn, i1)
-        } else if k == VK_SWAPREM {
-            // One fewer when `i < len`, as many else.
-            let lt = self.tm.cmp(T_LT, i1, n);
-            let n1 = self.tm.arith(T_SUB, n, one, W_INT, true);
-            let e1 = self.tm.cmp(T_EQ, nn, n1);
-            let e0 = self.tm.cmp(T_EQ, nn, n);
-            let a = self.tm.and(lt, e1);
-            let nlt = self.tm.not(lt);
-            let c = self.tm.and(nlt, e0);
-            self.tm.or(a, c)
-        } else {
-            self.tm.boolean(true)
-        };
-        path.pc.push(f);
-        if k == VK_RESIZE {
-            // The first `min(n, len)` elements stay.
-            let m = self.min_index(path, i1, n);
-            let p1 = self.sub_seq(nview, zi, m);
-            let p0 = self.sub_seq(ov, zi, m);
-            path.pc.push(self.tm.cmp(T_EQ, p1, p0));
         }
         return r;
     }
@@ -9131,37 +9045,25 @@ extend<const B: usize> Prover<B> {
         return NONE;
     }
 
-    // The kind of a method of a vector (`vec`) or a string, `nm` of `n` arguments, that changes it
-    // (`VK_SET` to `VK_SWAPREM`); 0 for another.
-    const fn vk_change(self: &Self, vec: bool, nm: str, n: u32) u64 {
-        return if (vec && nm == "set" || !vec && nm == "set_byte") && n == 3 {
+    // The kind of a method of a string, `nm` of `n` arguments, that changes it (`VK_SET` to `VK_PUSH_B`);
+    // 0 for another.
+    const fn vk_change(nm: str, n: u32) u64 {
+        return if nm == "set_byte" && n == 3 {
             VK_SET
         } else if nm == "truncate" && n == 2 {
             VK_TRUNC
-        } else if (vec && nm == "insert" || !vec && nm == "insert_byte") && n == 3 {
+        } else if nm == "insert_byte" && n == 3 {
             VK_INSERT
-        } else if vec && nm == "remove" && n == 2 {
-            VK_REMOVE
-        } else if !vec && nm == "remove_byte" && n == 2 {
+        } else if nm == "remove_byte" && n == 2 {
             VK_REMOVE_B
-        } else if vec && nm == "swap" && n == 3 {
-            VK_SWAP
         } else if (nm == "reserve" || nm == "reserve_exact") && n == 2 || nm == "shrink_to_fit" && n == 1 {
             VK_KEEP
-        } else if (vec && (nm == "extend_copy" || nm == "extend_from_slice") || !vec && nm == "push_bytes") && n == 2 {
+        } else if nm == "push_bytes" && n == 2 {
             VK_EXTEND
-        } else if !vec && nm == "pop_byte" && n == 1 {
+        } else if nm == "pop_byte" && n == 1 {
             VK_POP_B
-        } else if !vec && nm == "push_byte" && n == 2 {
+        } else if nm == "push_byte" && n == 2 {
             VK_PUSH_B
-        } else if vec && (nm == "reverse" || nm == "sort" || nm == "sort_stable" || nm == "sort_stable_in_place") && n == 1 {
-            VK_SAMELEN
-        } else if vec && nm == "dedup" && n == 1 {
-            VK_SHRINK
-        } else if vec && nm == "resize_default" && n == 2 {
-            VK_RESIZE
-        } else if vec && nm == "swap_remove" && n == 2 {
-            VK_SWAPREM
         } else {
             0
         };
@@ -9170,7 +9072,7 @@ extend<const B: usize> Prover<B> {
     // Whether container method kind `k` changes its receiver and nothing else (the model gives its new
     // value): no memory event, and the receiver's borrow ends with the call.
     const fn vk_changes_only_receiver(k: u64) bool {
-        return k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR || k == VK_POP || k == VK_CLEAR || k >= VK_SET && k <= VK_SWAPREM;
+        return k == VK_SPUSH || k == VK_PUSH_STR || k == VK_CLEAR || k >= VK_SET && k <= VK_PUSH_B;
     }
 
     // The length and the view of the receiver of call `t` (a vector, a string, a view), NONE where it is
@@ -9256,9 +9158,9 @@ extend<const B: usize> Prover<B> {
     // `inclusive` (`hi < len`, the range one longer).
     fn bounds_check(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) {
         let k = self.sq_kind(b, b.module, t);
-        // A method that panics outside the bounds: `i < len` (`set`, `remove_byte`, `swap`), `i <= len`
-        // (`insert`).
-        if k == VK_SET || k == VK_REMOVE_B || k == VK_SWAP || k == VK_INSERT {
+        // A method that panics outside the bounds: `i < len` (`set_byte`, `remove_byte`), `i <= len`
+        // (`insert_byte`).
+        if k == VK_SET || k == VK_REMOVE_B || k == VK_INSERT {
             let (n, _view) = self.recv_cont(b, path, t);
             if n == NONE {
                 return;
@@ -9267,15 +9169,7 @@ extend<const B: usize> Prover<B> {
             if !self.tm.is_int(i) {
                 return;
             }
-            let mut c = self.tm.cmp(pick(k == VK_INSERT, T_LE, T_LT), i, n);
-            if k == VK_SWAP {
-                let j = self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + 2) as usize], false);
-                if !self.tm.is_int(j) {
-                    return;
-                }
-                let cj = self.tm.cmp(T_LT, j, n);
-                c = self.tm.and(c, cj);
-            }
+            let c = self.tm.cmp(pick(k == VK_INSERT, T_LE, T_LT), i, n);
             let key = pick(self.in_ghost, OB_GHOST, OB_PANIC) << 56 | 3 << 53 | t.span.start as u64;
             self.oblige(
                 &path.pc,
@@ -9778,7 +9672,7 @@ extend<const B: usize> Prover<B> {
             return true;
         }
         let (tm0, ty) = self.ref_ty(b, rr);
-        if k >= VK_SET && k <= VK_SWAPREM {
+        if k >= VK_SET && k <= VK_PUSH_B {
             let nv = self.fresh(tm0, ty);
             let r = self.vk_apply(b, path, t, k, ov, nv);
             self.ref_set(b, &mut path.state, rr, nv);
@@ -9790,42 +9684,19 @@ extend<const B: usize> Prover<B> {
         // The container's new value, whose view is the sequence the method makes (`vdef`).
         let nv = self.fresh(tm0, ty);
         let mut xs = Vector::<u32>::new();
-        let view = if k == VK_PUSH || k == VK_SPUSH || k == VK_PUSH_STR {
-            let x = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
-            xs.push(ov);
-            if k == VK_PUSH {
-                xs.push(x);
-                self.seq_make(SQ_PUSH, &xs)
-            } else {
-                let tail = if k == VK_SPUSH {
-                    self.seq_make1(SQ_UTF8, x)
-                } else {
-                    self.view_v(x)
-                };
-                xs.push(tail);
-                self.seq_make(SQ_CAT, &xs)
-            }
-        } else if k == VK_CLEAR {
+        let view = if k == VK_CLEAR {
             self.seq_make(SQ_EMPTY, &xs)
         } else {
-            // `pop`: the elements before the last one; none of an empty one.
-            let n = self.seq_len(ov);
-            let m = self.tm.var(W_INT, true);
-            let z = self.tm.int(Num::<B>::zero(), W_NAT, false);
-            let zi = self.tm.int(Num::<B>::zero(), W_INT, true);
-            let one = self.tm.int(Num::<B>::one(), W_INT, true);
-            let empty = self.tm.cmp(T_EQ, n, z);
-            let m0 = self.tm.cmp(T_EQ, m, zi);
-            let n1 = self.tm.arith(T_SUB, n, one, W_INT, true);
-            let m1 = self.tm.cmp(T_EQ, m, n1);
-            let a = self.tm.and(empty, m0);
-            let ne = self.tm.not(empty);
-            let c = self.tm.and(ne, m1);
-            path.pc.push(self.tm.or(a, c));
+            // `push` of a `char`, `push_str`: the bytes, then the new ones.
+            let x = self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false);
             xs.push(ov);
-            xs.push(zi);
-            xs.push(m);
-            self.seq_make(SQ_SUB, &xs)
+            let tail = if k == VK_SPUSH {
+                self.seq_make1(SQ_UTF8, x)
+            } else {
+                self.view_v(x)
+            };
+            xs.push(tail);
+            self.seq_make(SQ_CAT, &xs)
         };
         self.vdef.insert(nv, view);
         self.ref_set(b, &mut path.state, rr, nv);
@@ -13086,7 +12957,7 @@ fn fail_report(p: &loader::Package, b: &ir::CoreBody, e: &mut iri::Interp, k: u8
         let mut detail = String::from_str(e.trap);
         let mut calls = String::new();
         // A panic's innermost frame is the panic itself.
-        e.trap_frames(pick(tk == iri::IT_TRAP_PANIC, 1u32, 0), &mut calls);
+        e.trap_frames(pick(tk == iri::IT_TRAP_PANIC, 1, 0), &mut calls);
         if calls.len() != 0 {
             detail.format_into(" (in {})", calls.as_str());
         }
