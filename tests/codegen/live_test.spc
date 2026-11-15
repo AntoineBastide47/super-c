@@ -783,11 +783,15 @@ b2:
 
 // The frame a generator sets up on the edges into the blocks it lays out last (`set_after`) pays when
 // those edges run less often than the entry (`after_into`, `frame_pays`): on one side of an even branch
-// it does, also with one value saved around the call there (`around_cost`), not with three; not when the
-// entry block is one of those blocks, nor when the block is in a loop.
+// it does, also with one value saved around the call there (`around_cost`), not with three; with values
+// in callee-saved registers there it does for any count (`frame_keeps`, `frame_half`), and no longer
+// when the edges run more often, or when the code goes back out to the other blocks as often
+// (`after_out`: a jump and moves there too). Not when the entry block is one of those blocks, nor when
+// the block is in a loop the entry runs into: the frame stays up through the loop, and through the
+// blocks only it reaches.
 @test
 fn a_frame_on_a_path_pays_when_its_edges_run_less_often_than_the_entry() {
-    let texts: [str; 3] = [
+    let texts: [str; 4] = [
         M"(lir ptr 8
 sym @g fn global
 sym @f fn global
@@ -836,10 +840,26 @@ b3:
 b4:
   ret v2
 )",
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2(v1), b1
+b1:
+  v3 = call.i64 @g(v0) : (i64) -> i64
+  jmp b2(v3)
+b2(v4: i64):
+  v5 = add.i64 v4, v0
+  ret v5
+)",
     ];
     // Per body, the block that holds the call.
-    let blocks: [usize; 3] = [1, 0, 3];
-    for k in 0..3usize {
+    let blocks: [usize; 4] = [1, 0, 3, 1];
+    for k in 0..4usize {
         let mut err = String::new();
         let p = lparse::parse(texts[k], &mut err).unwrap();
         let b = &p.bodies[0];
@@ -851,16 +871,190 @@ b4:
         // The call is its block's first instruction; in the first body the parameter lives past it.
         let call = b.blocks[blocks[k]].start;
         assert(b.insts[call as usize].op == O_CALL, "the call");
-        let around = live.around_cost(&p, b, blocks[k] as u32, call, 1);
+        let around = live.around_cost(blocks[k] as u32, live.lives_across(&p, b, blocks[k] as u32, call), 1);
         live.set_after(b, &framed);
         let into = live.after_into(b);
-        assert_eq(live.frame_pays(into, 0), k == 0);
+        assert_eq(live.frame_pays(into, 0), k == 0 || k == 3);
         if k == 0 {
             assert(around != 0, "the parameter is saved around the call");
             assert(live.frame_pays(into, around), "one value saved around the call");
             assert(!live.frame_pays(into, 3 * around), "three values saved around the call");
+            assert_eq(live.after_out(b), 0);
+            assert(live.frame_half(into, 0) && live.frame_keeps(into, 0, 5, 2), "five values in callee-saved registers");
+            assert(live.frame_keeps(into + into / 4, 0, 1, 2), "one value, edges that run five times in eight");
+            assert(
+                !live.frame_keeps(into + into / 4, 0, 2, 2) && !live.frame_half(into + into / 4, 0),
+                "two values there",
+            );
+            assert(!live.frame_keeps(2 * into, 0, 0, 2), "edges that run as often as the entry");
+            assert(live.frame_keeps(into, 0, 2, 2) && !live.frame_keeps(into, into, 2, 2), "two values, a way back out");
+            assert(!live.frame_half(into, into), "a way back out that runs as often as the way in");
+        }
+        if k == 2 {
+            assert(!live.after[0] && live.after[1] && live.after[2] && live.after[3], "the loop of the call");
+            assert_eq(live.after_out(b), 0);
+        }
+        if k == 3 {
+            assert(!live.after[2] && live.after_out(b) == into, "the block after the call's is the other side's too");
         }
     }
+}
+
+// In a body that sets its frame up in the call's block alone, a value made before it has no stack home
+// in the other blocks (`frame_put`). Past three calls it holds a caller-saved register in those blocks
+// and a callee-saved one in the call's block, which the frame's setup saves: the edge between them
+// moves it. Past one call a caller-saved register over all of its blocks costs less: the call saves it
+// around itself (`seg_past`). A parameter that arrives in a register nothing writes outside the call's
+// block stays there (`quiet_out`), also past one call: the entry moves nothing.
+@test
+fn a_value_made_before_the_frame_holds_a_callee_saved_register_in_the_framed_blocks() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b2, b1
+b1:
+  v4 = call.i64 @g(v0) : (i64) -> i64
+  v5 = call.i64 @g(v4) : (i64) -> i64
+  v6 = call.i64 @g(v5) : (i64) -> i64
+  v7 = add.i64 v6, v1
+  ret v7
+b2:
+  ret v1
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let ni = b.insts.len();
+    // The second parameter.
+    let x = ni + 1;
+    // Per case: the calls counted, whether the parameter arrives in x0, its register outside the call's
+    // block and in it.
+    let cases: [(u32, bool, u8, u8); 3] = [(3, false, 9, 19), (1, false, 9, 9), (1, true, 0, 19)];
+    for (c, arrives, outside, inside) in cases {
+        let mut live = lv::Live::new();
+        live.run(b);
+        let mut framed = Vector::<bool>::new();
+        framed.resize_default(b.blocks.len());
+        framed[1] = true;
+        live.set_after(b, &framed);
+        live.relayout(b);
+        let np = live.order.len();
+        let mut want = Vector::<u8>::new();
+        want.resize_default(live.end.len());
+        want[x] = lv::WANT_CALLEE | lv::WANT_SCRATCH;
+        // The calls a generator counts: the first `c` of instructions 3 to 5, in block 1.
+        fill(&mut live.cfirst, np, NONE);
+        fill(&mut live.clast, np, NONE);
+        live.cfirst[live.pos[1] as usize] = 3;
+        live.clast[live.pos[1] as usize] = 2 + c;
+        fill(&mut live.ccount, ni + 1, 0);
+        for i in 0..ni {
+            live.ccount[i + 1] = live.ccount[i] + (i >= 3 && i < 3 + c as usize) as u32;
+        }
+        let mut arr = Vector::<u64>::new();
+        arr.resize_default(3);
+        if arrives {
+            arr[1] = 1;
+            live.quiet_out = 2;
+        }
+        live.assign(
+            b,
+            &want,
+            lv::Caps { xc: 1, xs: 1, xj: 3, vc: 0, vs: 0, vj: 0, vu: 0 },
+            lv::Sets { xc: 1 << 19, xs: 1 << 9, xw: 0, vc: 0, vs: 0, xa: 3, vu: 0, first: 0, pair: 0 },
+            &arr,
+            0,
+        );
+        assert_eq(reg_in(&live, x, 0), outside);
+        assert_eq(reg_in(&live, x, 2), outside);
+        assert_eq(reg_in(&live, x, 1), inside);
+        assert_eq(live.seg_past[x], outside == inside);
+        assert(!live.seg_mem[x], "no stack home");
+    }
+}
+
+// A value too light for a callee-saved register the body does not save yet, which lives across a call:
+// a caller-saved register over all of its blocks, which the call saves around itself (`past_put`), when
+// that costs less than a stack home (its store, and a load in the block that joins the call's path).
+// Not when the generator counts no calls. An argument register too, where calls alone write the
+// argument registers (`calls_alone`).
+@test
+fn a_light_value_that_lives_across_a_call_is_saved_around_it() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @g fn global
+sym @f fn global
+fn @f
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.eq v0, v1
+  br v2, b4, b1
+b1:
+  v3 = add.i64 v0, v0
+  v4 = icmp.ult v0, v1
+  br v4, b2, b3
+b2:
+  v5 = call.i64 @g(v1) : (i64) -> i64
+  jmp b3
+b3:
+  v6 = add.i64 v3, v1
+  ret v6
+b4:
+  ret v1
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let ni = b.insts.len();
+    let mut live = lv::Live::new();
+    live.run(b);
+    let np = live.order.len();
+    let mut want = Vector::<u8>::new();
+    want.resize_default(live.end.len());
+    // The sum of block 1 is instruction 2; the call is instruction 5, in block 2.
+    want[2] = lv::WANT_CALLEE | lv::WANT_SCRATCH;
+    fill(&mut live.cfirst, np, NONE);
+    fill(&mut live.clast, np, NONE);
+    live.cfirst[live.pos[2] as usize] = 5;
+    live.clast[live.pos[2] as usize] = 5;
+    plan(&mut live, b, &want, 1 << 19, 1 << 9, 0);
+    assert(!live.seg_val(2), "no register when no call is counted");
+    fill(&mut live.ccount, ni + 1, 0);
+    for i in 5..ni {
+        live.ccount[i + 1] = 1;
+    }
+    plan(&mut live, b, &want, 1 << 19, 1 << 9, 0);
+    for k in 1..4usize {
+        assert_eq(reg_in(&live, 2, k), 9);
+    }
+    assert(live.seg_past[2] && !live.seg_mem[2], "saved around the call, no stack home");
+    // An argument register: the call is the one instruction that writes them.
+    fill(&mut live.wfirst, np, NONE);
+    fill(&mut live.wlast, np, NONE);
+    live.wfirst[live.pos[2] as usize] = 5;
+    live.wlast[live.pos[2] as usize] = 5;
+    fill(&mut live.scap, np, 4);
+    live.wcount.truncate(0);
+    live.wcount.extend_copy(&live.ccount);
+    plan(&mut live, b, &want, 1 << 19, 0, 1 << 3);
+    for k in 1..4usize {
+        assert_eq(reg_in(&live, 2, k), 3);
+    }
+    assert(live.seg_past[2], "saved around the call");
+    // Another instruction writes them before the call: no register.
+    for i in 5..ni {
+        live.wcount[i + 1] = 2;
+    }
+    plan(&mut live, b, &want, 1 << 19, 0, 1 << 3);
+    assert(!live.seg_val(2), "an argument register another instruction writes");
 }
 
 // On a target whose instructions write over an operand (`Live.two`), a result takes the register of an

@@ -13,16 +13,17 @@ set first: it states the value, register and frame model.
 1. Analysis: set `Live.fold_ops` to the `FOLD_*` patterns the backend fuses into their users, then
    `Live::run` (`Live::analyze`, then `Live::relayout`; arm64 runs the two apart, with `shrinkable`
    between them, so a body shrink-wrapped for its rare blocks is laid out once; one with a call
-   outside them is laid out with no block last first, for the ranges `Live::around_cost` reads). It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
+   outside them is laid out with no block last first, for the ranges `Live::lives_across` reads, but
+   when the frame's edges run seldom enough, `Live::frame_half`). It gives the block layout (reverse postorder, each loop contiguous, rare blocks last:
    `Live::rare`, a block the entry reaches only through a `BLOCK_RARE` one; none under `Live::in_place`,
    which wasm sets because its structured code emits each block where reverse postorder puts it), the loop nesting, each
    value's last live position, use count and next-use chain. `end_inst` calls `Live::advance`
    after emission, so unread current operands remain near uses during allocation. Eviction
    prefers no store, then the farthest next use. A folded instruction emits no code; its user reads its
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
-   take the registers first; a call in a rare block, and each call of a shrink-wrapped body,
+   take the registers first; a call in a rare block
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
-   for the homes. A value's range runs through the rare blocks before its last read, so the save
+   for the homes; another call saves the homes the plan holds across calls (`Live.seg_past`). A value's range runs through the rare blocks before its last read, so the save
    leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
    over the laid-out blocks made on first use), and arm64 saves two registers per `stp`.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
@@ -64,7 +65,24 @@ set first: it states the value, register and frame model.
      save the register at every entry for a path it seldom runs. Give `Sets.pair` the lower register
      of each two callee-saved registers the prologue saves together (arm64: x19/x20 to x27/x28,
      d8/d9 to d14/d15; x86-64: none, each has a push or a store of its own): a body that holds a
-     value in one saves both, so the other costs nothing (`Sets::saved`).
+     value in one saves both, so the other costs nothing (`Sets::saved`). In a body that sets its
+     frame up late (`Live.after`) the register is saved on the frame's edges: it costs two runs of
+     those edges when that is less (`Live.save`).
+   - A value no register holds takes a caller-saved register over all of its blocks when the saves
+     around the calls it lives across cost less than a stack home (`Live::past_put`, `Live.seg_past`).
+     Give `Live.ccount` (per instruction, the calls before it that write the caller-saved homes) and,
+     where the argument registers are a class of their own (`Sets.xw`), `Live.wcount` (the
+     instructions that write them): the register may be an argument register where calls alone
+     write them (`Live::calls_alone`). `save_scratch` saves such a home around each call its value
+     lives past (`Core::seg_lives_past`) and loads it back after.
+   - In a body that sets its frame up late a callee-saved register holds a value in the blocks of
+     `Live.after` alone, and a value made outside them has no stack home there: it takes the
+     caller-saved register saved around the calls, or two segments, one outside those blocks and one
+     in them (a callee-saved register, or a caller-saved one where no call runs), with a move on each
+     edge between the two; the one that costs less (`Live::frame_put`). Where the argument registers
+     are a class of their own, set a bit of `Live.quiet_out` per parameter whose arrival register
+     nothing writes outside `Live.after` (arm64 `quiet_warm`): its outside segment is that register,
+     and the entry moves nothing.
    - Fill `Live.part_in` (and `part_quiet`) before `assign` for the loads that take the part
      registers of an aggregate the body receives in registers (`place::parts_taken`, which the entry
      decides the same way): the plan then leaves each load in the register it arrives in, as it
@@ -87,7 +105,7 @@ set first: it states the value, register and frame model.
      reads nothing there); the holder then keeps a stack home and is loaded on the edges back into
      its other blocks.
    - The plan is the segments (`Live.seg_x`, `seg_a`, `seg_b`, `seg_r`, `sin`, `sin_at`, `segd`,
-     `seg_mem`) and, per layout position, the registers of the plan in that block (`Live.bmask`) and
+     `seg_mem`, `seg_past`; one per value, two after a `frame_put` split) and, per layout position, the registers of the plan in that block (`Live.bmask`) and
      those of them one value alone holds there and no edge out of the block writes (`Live.solo`).
    The generator's contract (`place::Core`'s hooks and its own):
    - `seg_reset` after `assign`. At a block's start set `fixed_busy` to the pinned registers and
@@ -146,20 +164,34 @@ the reason. Never emit code for an unsupported case.
 ## Rare code
 
 Shrink-wrapping (`shrinkable`): when every call is in a rare block, or the frame on the edges into the
-blocks with a call costs less than one at the entry (`Live::frame_pays`: the save, the restore and the
-stub's jump as often as those edges run, `Live::after_into`, plus the homes saved around the calls
-outside rare blocks, `Live::around_cost`, at most `lv::WARM_CALLS` such calls, against a frame per
-entry and a callee-saved register when a home lives past such a call), the warm code keeps no frame
-and returns with `ret`; the blocks with a call,
+blocks with a call costs less than one at the entry, the warm code keeps no frame and returns with
+`ret`. That frame costs less when those edges (`Live::after_into`), and for half the edges back out of
+the framed blocks (`Live::after_out`: each takes the frame down and jumps on), run at most half as often
+as the entry (`Live::frame_half`; a body of more than `lv::WARM_SIZE` instructions then has at most
+`lv::WARM_CALLS` calls outside rare blocks: a try that fails compiles the body again), or when, with at
+most `WARM_CALLS` such calls, the values live past them are saved around them (`Live::frame_pays`: the
+save, the restore and the stub's jump as often as those edges run, plus those saves,
+`Live::around_cost`, against a frame per entry and a callee-saved register when a home lives past such a
+call) or hold callee-saved registers on that path (`Live::frame_keeps`: the frame's and the registers'
+saves and restores, the jump and a move per value as often as those edges run, two jumps and a move per
+value as often as the edges back out run, against the saves and restores per entry). The blocks with a call, the outermost loop of one outside the rare blocks (the
+frame stays up through the loop),
 the rare blocks joined by edges to one, and the blocks the entry reaches only through those set the
 frame up (`Live::after`, laid out last), the prologue on each edge into them, the epilogue on each edge
-out. Every call of a shrink-wrapped body saves the scratch homes live past it (`save_scratch`). x86-64:
-the warm jumps into the first framed block take the prologue `relax` inserts before it (a jump table's
-entry takes a stub); the other entries take stubs. After the call, a saved register is loaded back only
+out. Those blocks hold values in callee-saved registers, which that prologue saves; the unwind rules of
+the framed code name them (arm64 `pair_rules` after `shrink_rules`, the System V rows, Microsoft x64's
+codes). An edge into the framed code whose moves need the frame (a callee-saved register's first
+write, a stack home) keeps them, with the jump to its target, for the start of the framed code
+(`entry_code`, `entry_flush`): its branch goes there, through the prologue. Such moves left in the warm
+code, and a callee-saved temporary there (x86-64 `saves`), make the try fail. x86-64:
+the warm jumps into the first framed code take the prologue `relax` inserts before it (a jump table's
+entry takes a stub); the other entries take stubs. After a call that saved registers around itself, a
+saved register is loaded back only
 when it still holds the saved value (`csown`): a value whose segment ended at the call left its register
 to the result. On arm64 a call right before the return of its
-result (a sibling call's shape under `Package.tail`, `place::call_tail_shape`) needs no frame either: it is
-the warm code's `b`; one that stays a call makes the try fail. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
+result (a sibling call's shape under `Package.tail`, `place::call_tail_shape`, when the body may make
+sibling calls: `tail_ok`, known before `shrinkable`) needs no frame either: it is
+the warm code's `b`; one that stays a call all the same makes the try fail. Not with a canary, a slot aligned past 16 bytes, inline assembly, a return address or
 variadic access; nor when the entry's code uses the frame (a parameter's register parts stored into its
 slot): it runs in the warm entry block (`frame_use` at the entry's layout position). Microsoft x64: no
 edge may leave them for the warm code (its unwinder reads an epilogue only where it ends in `ret` or a

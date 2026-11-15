@@ -207,6 +207,23 @@ extend Code {
         self.stack_at = 0xFFFFFFFF;
     }
 
+    /// Add the code of `o` at the end, with its jumps and its operands based on `IN`: its first position
+    /// here.
+    pub(package) fn append(self: &mut Self, o: &Code) u32 {
+        let base = self.len();
+        self.b.extend_from_slice(o.b[0..o.b.len()]);
+        for k in 0..o.jumps.len() {
+            self.jumps.push(base + o.jumps[k]);
+        }
+        for k in 0..o.in_at.len() {
+            self.in_at.push(base + o.in_at[k]);
+        }
+        if self.stack_at == 0xFFFFFFFF && o.stack_at != 0xFFFFFFFF {
+            self.stack_at = base + o.stack_at;
+        }
+        return base;
+    }
+
     // An instruction that uses the stack is being written (`stack_at`).
     const fn stack_use(self: &mut Self) {
         if self.stack_at == 0xFFFFFFFF {

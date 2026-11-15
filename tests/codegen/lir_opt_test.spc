@@ -16756,6 +16756,48 @@ b12:
     }
 }
 
+// A rare block that only jumps on holds the mark of its edge (a hinted branch's rare side into a block
+// the other side enters too): the edge from the warm block is not threaded through it, so the mark
+// stays.
+@test
+fn a_rare_block_that_only_jumps_is_not_threaded_through() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @leaf fn global noinline
+sym @hinted fn global
+fn @leaf
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  ret v2
+fn @hinted
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = icmp.sgt v0, v1
+  br v3, b1, b2
+b1:
+  v4 = call.i64 @leaf(v0) : (i64) -> i64
+  jmp b3(v4)
+b2: unlikely
+  jmp b3(v2)
+b3(v5: i64):
+  v6 = add.i64 v5, v2
+  ret v6
+)",
+    );
+    let s = text_of(&a, "hinted");
+    assert(s.contains(": unlikely"), s.as_str());
+    let cases: [u64; 2] = [5, 0];
+    let want: [u64; 2] = [16, 2];
+    for c in 0..2 {
+        let x: [u64; 1] = [cases[c]];
+        same_result(&b, &a, "hinted", x[0..1], want[c]);
+    }
+}
+
 // A branch on a parameter every edge into its block passes as a constant threads along each edge,
 // though two blocks below its taken side read the block's other parameters: the block only that side
 // enters dominates both (`Opt::apart`, the readers' nearest common dominator). No block is left that

@@ -1566,6 +1566,9 @@ struct LScratch {
     pub(package) cf_stack: Vector<u64>,
     pub(package) cf_seen: Vector<bool>,
     pub(package) cf_pairs: Vector<u64>,
+    // `returns_past`'s: the blocks its walk reached, and whether it reached each (all false between walks).
+    pub(package) rp_work: Vector<u32>,
+    pub(package) rp_seen: Vector<bool>,
     pub(package) sh_out: Vector<u32>, // `share_plan`'s result
     pub(package) sh_scratch: ShareScratch,
     // `entry`'s: the signature's parameter codes, the entry block's parameter types, their locals, the
@@ -1595,6 +1598,8 @@ extend LScratch {
             cf_stack: Vector::<u64>::new(),
             cf_seen: Vector::<bool>::new(),
             cf_pairs: Vector::<u64>::new(),
+            rp_work: Vector::<u32>::new(),
+            rp_seen: Vector::<bool>::new(),
             sh_out: Vector::<u32>::new(),
             sh_scratch: ShareScratch::new(),
             en_ptys: Vector::<u32>::new(),
@@ -4524,7 +4529,15 @@ extend Lower {
         }
         if t == tt::TokenType::Bang && !is_vec(ty) && Lower::builtin(c, b.module, at) == BuiltinType::BT_BOOL {
             let one = self.iconst(T_I8, 1);
-            return self.arith(O_XOR, x, one);
+            let r = self.arith(O_XOR, x, one);
+            // A hint on the operand is the opposite hint on its negation.
+            for q in 0..self.hints.len() {
+                if (self.hints[q] >> 1) as u32 == x {
+                    self.hints.push(r as u64 << 1 | (self.hints[q] ^ 1) & 1);
+                    break;
+                }
+            }
+            return r;
         }
         if t == tt::TokenType::Bang || t == tt::TokenType::Tilde {
             return self.inst(O_NOT, ty, 0, x, VNONE, VNONE);
@@ -6989,6 +7002,36 @@ extend Lower {
         let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
     }
 
+    // Whether a block that returns follows core block `from` on a path that does not take the edge from
+    // the block being lowered to its successor `not`.
+    fn returns_past(self: &mut Self, b: &irc::CoreBody, from: u32, not: u32) bool {
+        if self.ls.rp_seen.len() < b.blocks.len() {
+            fill(&mut self.ls.rp_seen, b.blocks.len(), false);
+        }
+        self.ls.rp_work.truncate(0);
+        self.ls.rp_work.push(from);
+        self.ls.rp_seen[from as usize] = true;
+        let mut found = false;
+        let mut at: usize = 0;
+        // Each block enters the list once.
+        while at < self.ls.rp_work.len() && !found {
+            let k = self.ls.rp_work[at];
+            at += 1;
+            found = b.blocks[k as usize].term.kind == irc::TM_RETURN;
+            for e in self.sat[k as usize]..self.sat[k as usize + 1] {
+                let x = self.sl[e as usize];
+                if !self.ls.rp_seen[x as usize] && (k != self.cur || x != not) {
+                    self.ls.rp_seen[x as usize] = true;
+                    self.ls.rp_work.push(x);
+                }
+            }
+        }
+        for q in 0..self.ls.rp_work.len() {
+            self.ls.rp_seen[self.ls.rp_work[q] as usize] = false;
+        }
+        return found;
+    }
+
     fn switch_term(self: &mut Self, c: &mut cbe::CEmit, b: &irc::CoreBody, t: irc::Terminator) bool {
         let mut v = self.operand(c, b, t.a);
         if v == VNONE {
@@ -7004,24 +7047,52 @@ extend Lower {
             let to = pr as u32;
             let ec = self.edge(self.lblk[to as usize], self.cur, to);
             let ed = self.edge(self.lblk[t.t0 as usize], self.cur, t.t0);
-            // A hinted condition: the side it makes rare is unlikely, when the branch alone enters it.
+            // A hinted condition: the side it makes rare is unlikely. Not a side every return passes
+            // through after the branch (a loop's one exit): it runs as often as the branch's function
+            // returns.
             let (yes, no) = if pr >> 32 == 0 {
                 (t.t0, to)
             } else {
                 (to, t.t0)
             };
+            let mut rare = NONE;
             for q in 0..self.hints.len() {
                 if (self.hints[q] >> 1) as u32 == v {
-                    let rare = ast::pick((self.hints[q] & 1) != 0, no, yes);
-                    if self.npred[rare as usize + 1] - self.npred[rare as usize] == 1 && self.lblk[rare as usize] != NONE {
-                        self.b.blocks.index_mut(self.lblk[rare as usize] as usize).flags |= BLOCK_UNLIKELY;
+                    let (r, warm) = if (self.hints[q] & 1) != 0 {
+                        (no, yes)
+                    } else {
+                        (yes, no)
+                    };
+                    if yes != no && self.lblk[r as usize] != NONE && self.returns_past(b, warm, r) {
+                        rare = r;
                     }
+                    break;
                 }
             }
-            if pr >> 32 == 0 {
-                let _ = self.inst(O_BR, T_NONE, 0, v, ed, ec);
+            // The rare side's block when the branch alone enters it; else an unlikely block of the edge's
+            // own, which jumps on: the mark is the edge's, not the block's the other edges enter too.
+            let mut own = NONE;
+            if rare != NONE && self.npred[rare as usize + 1] - self.npred[rare as usize] == 1 {
+                self.b.blocks.index_mut(self.lblk[rare as usize] as usize).flags |= BLOCK_UNLIKELY;
+            } else if rare != NONE {
+                own = self.block();
+                self.b.blocks.index_mut(own as usize).flags = BLOCK_UNLIKELY;
+            }
+            let (bc, bd) = if own == NONE {
+                (ec, ed)
+            } else if rare == to {
+                (self.edge(own, NONE, NONE), ed)
             } else {
-                let _ = self.inst(O_BR, T_NONE, 0, v, ec, ed);
+                (ec, self.edge(own, NONE, NONE))
+            };
+            if pr >> 32 == 0 {
+                let _ = self.inst(O_BR, T_NONE, 0, v, bd, bc);
+            } else {
+                let _ = self.inst(O_BR, T_NONE, 0, v, bc, bd);
+            }
+            if own != NONE {
+                self.b.begin(own);
+                let _ = self.inst(O_JMP, T_NONE, 0, ast::pick(rare == to, ec, ed), VNONE, VNONE);
             }
             return true;
         }
@@ -10171,8 +10242,8 @@ const fn pure_inst(t: Inst) bool {
 
 extend Lower {
     // Compact the finished body: drop the pure instructions nothing uses, send each edge to a block
-    // that only jumps on to that jump's target, drop the blocks the entry no longer reaches, and
-    // renumber what is left in block order. Every step is linear in the body.
+    // that only jumps on (and has no rare mark) to that jump's target, drop the blocks the entry no
+    // longer reaches, and renumber what is left in block order. Every step is linear in the body.
     // The tidy body, then slot forwarding over its merged blocks, which a second pass applies.
     fn tidy(self: &mut Self) {
         fill(&mut self.td.kill, self.b.insts.len(), false);
@@ -10239,7 +10310,9 @@ extend Lower {
             }
             let end = bk.start + bk.len - 1;
             let j = self.b.insts[end as usize];
-            let mut only = j.op == O_JMP && (bk.param_len == 0 || self.b.edge_nargs(j.a) == bk.param_len as u32);
+            // Not a block with a rare mark: the mark is its edge's (a hinted branch's rare side that only
+            // jumps on), which the block its jump enters has no place for.
+            let mut only = j.op == O_JMP && (bk.flags & BLOCK_RARE) == 0 && (bk.param_len == 0 || self.b.edge_nargs(j.a) == bk.param_len as u32);
             // Each parameter is used by the `jmp` alone: the edges that bypass the block pass it on.
             for q in 0..bk.param_len as u32 {
                 only = only && self.b.edge_arg(j.a, q) == (VPARAM | bk.param_start + q) && self.td.puse[(bk.param_start + q) as usize] == 1;

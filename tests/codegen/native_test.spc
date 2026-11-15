@@ -10791,10 +10791,12 @@ b2:
     }
 }
 
-// A call outside rare blocks sets the frame up on its path on arm64 too: the entry tests and returns with
-// no frame (its first word is no `stp` that moves sp), and a value that lives across the call is saved
-// around it. Five such values (three `stp`) cost more than a frame at the entry, which keeps it. The
-// functions give the C results on the host.
+// A call outside rare blocks sets the frame up on its path on arm64 too: the entry tests the parameter in
+// the register it arrived in and returns with no frame (its first word is no `stp` that moves sp), and a
+// value that lives across the call holds a callee-saved register on the call's path, which the frame's
+// setup saves. Of five such values, three hold callee-saved registers there, and two stay in the registers
+// they arrived in (x2 and x3) up to the call, which saves them around itself with one `stp`. The functions
+// give the C results on the host.
 @test
 fn a_call_outside_rare_blocks_sets_the_frame_up_on_its_path() {
     let one = M"(lir ptr 8
@@ -10837,12 +10839,18 @@ b2:
     let mut o1 = Vector::<u8>::new();
     assert(object_of(one, tgt::axis_index("linux", false), a64, 0, &mut o1), "the object of one value");
     let (t1, _) = elf_text(&o1);
-    assert((le_at(&o1, t1, 4) as u32 & 0xFFC00000) != 0xA9800000, "no frame at the entry");
-    assert(elf_text_count(&o1, 0xFFFFFFFF, 0xA9BF7BFD) == 1, "the frame on the call's path");
+    // `cbz` or `cbnz` of x0.
+    assert((le_at(&o1, t1, 4) as u32 & 0x7E00001F) == 0x34000000, "the entry tests x0, with no frame");
+    // `stp x20, x19, [sp, #-32]!`.
+    assert(elf_text_count(&o1, 0xFFFFFFFF, 0xA9BE4FF4) == 1, "the frame on the call's path, with the value's register");
     let mut o5 = Vector::<u8>::new();
     assert(object_of(five, tgt::axis_index("linux", false), a64, 0, &mut o5), "the object of five values");
     let (t5, _) = elf_text(&o5);
-    assert((le_at(&o5, t5, 4) as u32 & 0xFFC00000) == 0xA9800000, "the frame at the entry");
+    assert((le_at(&o5, t5, 4) as u32 & 0x7E00001F) == 0x34000000, "the entry tests x0, with no frame, five values");
+    // `stp x22, x21, [sp, #-48]!`.
+    assert(elf_text_count(&o5, 0xFFFFFFFF, 0xA9BD57F6) == 1, "the frame on the call's path, five values");
+    // `stp x2, x3, [sp]`.
+    assert(elf_text_count(&o5, 0xFFFFFFFF, 0xA9000FE2) == 1, "two values saved from the registers they arrived in");
     let both = M"(lir ptr 8
 sym @keep fn global
 sym @five fn global
@@ -10880,6 +10888,112 @@ b2:
     let drv = "#include <stdint.h>\nint64_t keep(int64_t);\nint64_t five(int64_t, int64_t, int64_t, int64_t, int64_t);\n__attribute__((noinline)) int64_t leaf(int64_t x) {\n  volatile int64_t a[16];\n  for (int i = 0; i < 16; i++) a[i] = x * (i + 3);\n  int64_t s = 0;\n  for (int i = 0; i < 16; i++) s += a[i];\n  return s - x * 183 + 100;\n}\nint main(void) {\n  if (keep(0) != 0 || keep(7) != 2 || keep(-3) != 142) return 1;\n  if (five(0, 1, 2, 3, 4) != 0 || five(5, 1, 2, 3, 4) != 40) return 2;\n  return 0;\n}\n";
     if cli::has_cc() {
         assert_eq(run_native(both, drv), 0);
+    }
+}
+
+// Values that live past several calls outside rare blocks hold callee-saved registers on the calls' path
+// alone: the entry tests and returns with no frame, the edge into that path sets the frame up, saves the
+// registers and moves the values into them (on arm64 from the registers they arrived in: the entry
+// moves nothing), and no call saves a register around itself; the unwind rules of that path name the
+// saved registers. A call in a loop: the frame is set up once, before the loop. The functions give the
+// C results on the host.
+@test
+fn values_past_several_calls_hold_callee_saved_registers_on_the_calls_path() {
+    let head = "lir ptr 8\nsym @two fn global\nsym @lp fn global\nsym @leaf fn global ext\n";
+    let two = M"(fn @two
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b2, b1
+b1:
+  v4 = call.i64 @leaf(v0) : (i64) -> i64
+  v5 = call.i64 @leaf(v4) : (i64) -> i64
+  v6 = call.i64 @leaf(v5) : (i64) -> i64
+  v7 = add.i64 v6, v1
+  v8 = add.i64 v7, v0
+  ret v8
+b2:
+  ret v1
+)";
+    let lp = M"(fn @lp
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.eq v0, v2
+  br v3, b4, b1(v2, v2)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = call.i64 @leaf(v4) : (i64) -> i64
+  v8 = add.i64 v5, v7
+  v9 = iconst.i64 1
+  v10 = add.i64 v4, v9
+  jmp b1(v10, v8)
+b3:
+  v11 = add.i64 v5, v1
+  ret v11
+b4:
+  ret v1
+)";
+    let texts: [String; 2] = [format("{}{}", head, two), format("{}{}", head, lp)];
+    let linux = tgt::axis_index("linux", false);
+    for k in 0..2usize {
+        let mut o = Vector::<u8>::new();
+        assert(object_of(&texts[k], linux, tgt::axis_index("aarch64", true), 0, &mut o), "the arm64 object");
+        let (t, _) = elf_text(&o);
+        assert((le_at(&o, t, 4) as u32 & 0xFFC00000) != 0xA9800000, "arm64: no frame at the entry");
+        // `stp x29, x30, [sp, #n]`, after the callee-saved pair's `stp` that moves sp.
+        assert(elf_text_count(&o, 0xFFC07FFF, 0xA9007BFD) == 1, "arm64: the frame set up once");
+        let mut x = Vector::<u8>::new();
+        assert(object_of(&texts[k], linux, tgt::axis_index("x86_64", true), 0, &mut x), "the x86-64 object");
+        // `test rdi, rdi` first; `push rbp; mov rbp, rsp; push rbx` once.
+        let (xt, _) = elf_text(&x);
+        assert(x[xt] == 0x48 && x[xt + 1] == 0x85 && x[xt + 2] == 0xFF, "x86-64: no frame before the test");
+        let pro: [u8; 5] = [0x55, 0x48, 0x89, 0xE5, 0x53];
+        assert(holds(&x, pro[0..5]), "x86-64: the frame and a pushed register");
+        // `cbz` or `cbnz` of x0: the parameter stays in the register it arrives in up to the frame's edge.
+        assert((le_at(&o, t, 4) as u32 & 0x7E00001F) == 0x34000000, "arm64: the entry tests x0");
+        if k == 0 {
+            // Three `bl` in a row; `call; mov rdi, rax; call; mov rdi, rax; call`.
+            let bls: [u8; 12] = [0, 0, 0, 0x94, 0, 0, 0, 0x94, 0, 0, 0, 0x94];
+            assert(holds(&o, bls[0..12]), "arm64: no register saved around a call");
+            let calls: [u8; 21] = [
+                0xE8,
+                0,
+                0,
+                0,
+                0,
+                0x48,
+                0x89,
+                0xC7,
+                0xE8,
+                0,
+                0,
+                0,
+                0,
+                0x48,
+                0x89,
+                0xC7,
+                0xE8,
+                0,
+                0,
+                0,
+                0,
+            ];
+            assert(holds(&x, calls[0..21]), "x86-64: no register saved around a call");
+            // The unwind rules of the framed code name the saved registers: the CFA is x29 + 16 with x29,
+            // x30, x19 and x20 below it; rbp + 16 with rbp, rbx and r12 below it.
+            let arules: [u8; 13] = [0x0C, 0x1D, 0x10, 0x9D, 0x02, 0x9E, 0x01, 0x05, 0x13, 0x03, 0x05, 0x14, 0x04];
+            assert(holds(&o, arules[0..13]), "arm64: the unwind rules of the saved pair");
+            let xrules: [u8; 10] = [0x0E, 0x10, 0x86, 0x02, 0x0D, 0x06, 0x83, 0x03, 0x8C, 0x04];
+            assert(holds(&x, xrules[0..10]), "x86-64: the unwind rules of the pushed registers");
+        }
+    }
+    let drv = "#include <stdint.h>\nint64_t two(int64_t, int64_t);\nint64_t lp(int64_t, int64_t);\n__attribute__((noinline)) int64_t leaf(int64_t x) {\n  volatile int64_t a[16];\n  for (int i = 0; i < 16; i++) a[i] = x * (i + 3);\n  int64_t s = 0;\n  for (int i = 0; i < 16; i++) s += a[i];\n  return s - x * 183 + 100;\n}\nint main(void) {\n  if (two(0, 9) != 9 || two(5, 9) != 4239) return 1;\n  if (lp(0, 7) != 7 || lp(3, 7) != 262) return 2;\n  return 0;\n}\n";
+    if cli::has_cc() {
+        assert_eq(run_native(format("{}{}{}", head, two, lp).as_str(), drv), 0);
     }
 }
 

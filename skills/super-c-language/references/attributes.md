@@ -62,8 +62,13 @@ or loop condition that tests the call tells the C compiler of an `--emit-c` tree
 branch usually goes: `if (__builtin_expect(c, 1))` or `(c, 0)`. The native build marks the rare
 side unlikely: its blocks go after the warm code, the branch stays a branch (no select), the warm
 code gets the registers first, and a body whose calls are all on rare sides sets its frame up only
-there (shrink-wrapping). Wrap the WHOLE condition: a hint on one operand of
-`||` or `&&` stays inside the lowered short circuit and the final branch has none.
+there (shrink-wrapping). The rare side is the other side of the test: the `else` of
+`if likely(c)`, the code after `if likely(c) { return ...; }` or after a likely `continue`, the
+`if` side of `if !likely(c)`; with no code of its own (`if likely(c) { ... }` with no `else`) it is
+the path that skips the `if` side. A hint on a loop's only exit (`while likely(c)`) marks nothing:
+the code after the loop runs once per run of the loop, however many times the loop turns. Wrap
+the WHOLE condition: a hint on one operand of `||` or `&&` stays inside the lowered short circuit
+and the final branch has none.
 
 ```superc
 for x in xs {

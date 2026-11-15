@@ -9004,7 +9004,7 @@ extend Opt {
     // ---- Jump threading ----
 
     // Thread the edges of the graph (`follow`): through a block that holds only a jump (its parameters
-    // read by the jump alone), and through a block whose branch or switch the edge's constant arguments decide (a `&&`
+    // read by the jump alone; not one whose rare mark the edge's block has not), and through a block whose branch or switch the edge's constant arguments decide (a `&&`
     // or `||` joins there, an `Option` a call returned is tested there: `through`); a jump into a block
     // that only branches on one of its parameters becomes a branch on its argument. Neither kind of block
     // heads a loop, and no edge moves into a loop header: an edge into a block that heads no loop comes
@@ -9616,7 +9616,9 @@ extend Opt {
             let j = b.edge_target(e);
             let jb = b.blocks[j as usize];
             let jt = term(b, j);
-            if j != k && j != 0 && jb.len == 1 && jt.op == O_JMP && !self.hdr[j as usize] && !self.hdr[b.edge_target(
+            // Not through a block with a rare mark `k` has not: the mark is that edge's (a hinted branch's
+            // rare side that only jumps on).
+            if j != k && j != 0 && jb.len == 1 && jt.op == O_JMP && (jb.flags & ~b.blocks[k as usize].flags & BLOCK_RARE) == 0 && !self.hdr[j as usize] && !self.hdr[b.edge_target(
                 jt.a,
             ) as usize] && self.read_here(jb) {
                 e = if jb.param_len == 0 {

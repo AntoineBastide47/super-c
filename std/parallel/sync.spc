@@ -322,7 +322,7 @@ pub unsafe fn commit_raw_unlock(p: *mut void) {
 
 /// Acquire the lock, parking the calling coroutine (or blocking the calling thread) while it is held.
 pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
-    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0) {
+    if likely(unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0)) {
         unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
         // Uncontended: one CAS.
         return;
@@ -336,7 +336,7 @@ pub unsafe fn raw_mutex_lock(m: *mut RawMutex) {
 /// caller that can propagate cancellation (the compiler's cancellation edge) may use this form: it must
 /// never hand a guard to code that would unlock a lock it does not hold. `pub` for linkage.
 pub unsafe fn raw_mutex_lock_c(m: *mut RawMutex) bool {
-    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0) {
+    if likely(unsafe atomic::cas_i32(&mut unsafe (*m).locked, 0, 1, false, 1, 0)) {
         unsafe sc_runtime::sc_rt_lockdep_acquire(&mut unsafe (*m).id);
         return true;
     }
@@ -500,7 +500,7 @@ pub unsafe fn raw_mutex_try_lock(m: *mut RawMutex) bool {
 pub unsafe fn raw_mutex_unlock(m: *mut RawMutex) {
     // BEFORE the release: once published, another thread may take and even free this lock.
     unsafe sc_runtime::sc_rt_lockdep_release(&mut unsafe (*m).id);
-    if unsafe atomic::cas_i32(&mut unsafe (*m).locked, 1, 0, false, 2, 0) {
+    if likely(unsafe atomic::cas_i32(&mut unsafe (*m).locked, 1, 0, false, 2, 0)) {
         // Nobody parked: one CAS, and the lock is never touched again.
         return;
     }
@@ -1373,7 +1373,7 @@ extend WaitGroup {
         let inner = self.inner.get();
         // Release: everything this task did happens-before the waiter's Acquire read of zero.
         let left = inner.count.fetch_sub(1, atomics::MemoryOrder::AcqRel) - 1;
-        if left > 0 {
+        if likely(left > 0) {
             // The common case, and it costs one atomic: no lock, no wake, no park.
             return;
         }
