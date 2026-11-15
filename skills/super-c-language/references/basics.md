@@ -243,6 +243,8 @@ its definition, one unfolding per call (a call over constants unfolds further); 
 - A spec function or a lemma without a body ends its clauses with `;` and must be `@trusted`
   (error 557): an axiom, which no proof checks. Its `ensures` define its calls. `@trusted` marks only
   these and an extern function with clauses.
+- An interface may declare a `spec fn` without a body, which each conformance
+  defines; one with a body is an error. The interface's clauses state facts with it.
 - In ghost code `==` and `!=` compare any two values of one type without an `eq` method (a `Seq`, an
   array, a type parameter): the proofs' equality, error 545 under `-fcontract-checks`.
 
@@ -362,6 +364,9 @@ pub struct Buf
 - A method that panics by design (a bounds or capacity check) states where with `panics if`. An
   operation of its own code may then panic past a broken invariant only where the clause holds; a
   call or a drop may panic anywhere.
+- A `static mut` takes `invariant E` clauses after its value: `static mut G: u32 = 3 invariant G > 1;`.
+  Each reads the static (error 559). The clauses become the spec function of the static's value, and
+  a lemma, which the proofs check, states that the first value holds them.
 
 ### Constant-Time Code
 

@@ -90,6 +90,10 @@ pub(package) struct Parser<'a> {
     pub(package) in_extern: bool,
     // The first `self` of the invariants of the struct just parsed (`parse_struct`), empty without one.
     pub(package) inv_self: Span,
+    // The first tokens of the type and the value of the static just parsed (`parse_static`), which its
+    // invariant's expansion parses again (`expand_static_invariants`).
+    pub(package) static_ty: usize,
+    pub(package) static_val: usize,
     // Per node (`paren_key`): the parenthesized expression's text with its parentheses (`start << 32 |
     // end`, 0 when none). The node keeps its own span, which the formatter prints verbatim; a node built around it
     // covers the parentheses (`outer`).
@@ -1867,14 +1871,47 @@ extend Parser {
         );
     }
 
+    // `static mut NAME: T = VALUE`, then its `invariant` clauses, which read the static.
     pub(package) fn parse_static(self: &mut Self) NodeId {
         let start = self.raw_peek().start();
         self.advance();
         if !self.match(TokenType::Mut) {
             self.error_here("expected 'mut' after 'static' (immutable module-level data is a 'const')");
         }
-        let c = self.parse_const_after(start);
-        self.ast.at(c).as_data.const_def.is_static_mut = true;
+        let name = self.identifier();
+        self.expect(TokenType::Colon, "':'");
+        self.static_ty = self.current;
+        let ty = self.parse_type();
+        self.expect(TokenType::Equal, "'='");
+        self.static_val = self.current;
+        let value = self.parse_expression();
+        let mut invariants = Vector::<Contract>::new();
+        let istart = self.current;
+        while self.at_word("invariant") && invariants.len() < PARSE_MAX_CONTRACTS {
+            self.parse_contract_clause(CT_TYPE_INVARIANT, &mut invariants);
+        }
+        self.expect(TokenType::Semicolon, "';'");
+        let c = self.fin(
+            NodeKind::NODE_CONST,
+            start,
+            NodeAs { const_def: ConstData { name: name, ty: ty, value: value, is_static_mut: true } },
+        );
+        if invariants.len() != 0 {
+            let nt = self.node_span(name);
+            let nm = self.source.slice(nt.start as usize, nt.end as usize);
+            let mut reads = false;
+            for i in istart..self.current {
+                reads = reads || self.tokens[i].kind() == TokenType::Identifier && self.text_is(self.tokens[i], nm);
+            }
+            if !reads {
+                self.errors.emit_span(
+                    dc::INVARIANT_READS_SELF,
+                    Span::new(invariants[0].at, invariants[0].at),
+                    format("a static's invariant states a fact of its value: it reads the static"),
+                );
+            }
+            self.ast.set_contracts(c, &invariants);
+        }
         return c;
     }
 
@@ -1961,6 +1998,25 @@ extend Parser {
             } else if self.check(TokenType::Type) {
                 let ta = self.parse_type_alias(true);
                 self.ast.push(ta);
+            } else if self.at_ghost_fn() && self.text_is(self.raw_peek(), "spec") {
+                // A spec function each conformance defines (no default body): the interface's clauses state
+                // facts with it (`Allocator::owns`).
+                let sstart = self.raw_peek().start();
+                self.advance();
+                self.ghost_next = true;
+                self.spec += 1;
+                let f = self.parse_function(false, true);
+                self.spec -= 1;
+                self.ast.ext_mut(f).function.set(FN_SPEC, true);
+                self.ast.at(f).span.start = sstart;
+                if self.ast.ext(f).function.body != NODE_NONE {
+                    self.errors.emit_span(
+                        dc::SYNTAX_ERROR,
+                        Span::new(sstart, sstart),
+                        format("an interface's spec function has no body: each conformance defines it"),
+                    );
+                }
+                self.ast.push(f);
             } else {
                 self.error_here("expected interface item");
                 self.advance();
@@ -2286,6 +2342,9 @@ extend Parser {
                 self.ast.at(sid).as_data.const_def.vis = vis;
             }
             self.add_attrs_to(&mut attrs, sid);
+            if sid != NODE_NONE {
+                self.expand_static_invariants(sid, &attrs);
+            }
             return sid;
         }
         // The item's own `@reflect` entries and `@derive` list survive the nested attribute scans
@@ -2384,6 +2443,117 @@ extend Parser {
         return id;
     }
 
+    // The invariants of static `decl` (`static mut G: T = V invariant E1, E2;`): `spec fn I(G: T) bool {
+    // return E1 && E2; }` and `lemma L() ensures I(V) {}`, the type and the value parsed again from their
+    // tokens. The proofs read `I` of the static's value at each read and write (the first record's
+    // `binder`), and prove `L`: the first value holds it. The names are the texts from the static's name
+    // to its last clause's end (`I`) and from `static` to it (`L`), which no identifier spells.
+    fn expand_static_invariants(self: &mut Self, decl: NodeId, attrs: &Vector<Attr>) {
+        let (cs, ce) = self.ast.contracts_of(decl);
+        if cs == ce || !self.expand_derive || self.errors.has_errors() {
+            return;
+        }
+        let cd = unsafe self.ast.at_const(decl).as_data.const_def;
+        let at = self.ast.contracts.at(cs as usize).at;
+        let last = self.ast.contracts.at((ce - 1) as usize).expr;
+        let end = self.node_span(last).end;
+        let nsp = self.node_span(cd.name);
+        let isp = Span::new(nsp.start, end);
+        let lsp = Span::new(self.ast.at_const(decl).span.start, end);
+        let save = self.current;
+        self.current = self.static_ty;
+        let pty = self.parse_type();
+        self.current = self.static_val;
+        let v2 = self.parse_expression();
+        self.current = save;
+        let param = self.mk(
+            NodeKind::NODE_PARAMETER,
+            nsp,
+            NodeAs { parameter: ParameterData { name: self.make_name(nsp), ty: pty } },
+        );
+        let pmark = self.ast.mark();
+        self.ast.push(param);
+        let params = self.ast.commit(pmark);
+        let kw = Span::new(at, at + 9);
+        let rmark = self.ast.mark();
+        self.ast.push(self.mk(NodeKind::NODE_BOOL_TYPE, kw, NodeAs { name: NameData { text: kw } }));
+        let returns = self.ast.commit(rmark);
+        let mut cond = self.ast.contracts.at(cs as usize).expr;
+        for i in cs + 1..ce {
+            let e = self.ast.contracts.at(i as usize).expr;
+            cond = self.add_binary(cond, TokenType::AmpersandAmpersand, e);
+        }
+        let sp = Span::new(at, end);
+        let f = self.ghost_item(isp, sp, params, returns, cond, FN_SPEC, cd.vis);
+        let mut c0 = *self.ast.contracts.at(cs as usize);
+        c0.binder = f;
+        self.ast.contracts.set(cs as usize, c0);
+        // The lemma: no parameter, no result, an empty body, `ensures I(V)`.
+        let amark = self.ast.mark();
+        self.ast.push(v2);
+        let args = self.ast.commit(amark);
+        let call = self.mk(
+            NodeKind::NODE_CALL,
+            sp,
+            NodeAs { call: CallData { callee: self.make_name(isp), args: args } },
+        );
+        let none = self.ast.commit(self.ast.mark());
+        let none2 = self.ast.commit(self.ast.mark());
+        let l = self.ghost_item(lsp, sp, none, none2, NODE_NONE, FN_LEMMA, VIS_PRIVATE);
+        let mut lc = Vector::<Contract>::new();
+        lc.push(Contract { owner: NODE_NONE, binder: NODE_NONE, expr: call, kind: CT_ENSURES, at: at });
+        self.ast.set_contracts(l, &lc);
+        for a in 0..attrs.len() {
+            let ga = *attrs.at(a);
+            if ga.kind == AttrKind::ATTR_PLATFORM as u8 || ga.kind == AttrKind::ATTR_ARCH as u8 || ga.kind == AttrKind::ATTR_WHEN as u8 {
+                self.ast.add_attr(Attr { owner: f, kind: ga.kind, arg: ga.arg, str_span: ga.str_span });
+                self.ast.add_attr(Attr { owner: l, kind: ga.kind, arg: ga.arg, str_span: ga.str_span });
+            }
+        }
+        self.ast.push(f);
+        self.ast.push(l);
+    }
+
+    // A ghost function `name(params) returns { return value; }` (an empty body where `value` is none),
+    // of `flags` (FN_SPEC, FN_LEMMA), spanning `sp`. Proofs read it where no code calls it: no unused-item
+    // lint.
+    fn ghost_item(
+        self: &mut Self,
+        name: Span,
+        sp: Span,
+        params: NodeList,
+        returns: NodeList,
+        value: NodeId,
+        flags: u8,
+        vis: u8,
+    ) NodeId {
+        let smark = self.ast.mark();
+        if value != NODE_NONE {
+            let vmark = self.ast.mark();
+            self.ast.push(value);
+            let values = self.ast.commit(vmark);
+            self.ast.push(self.mk(NodeKind::NODE_RETURN, sp, NodeAs { return_stmt: ReturnData { values: values } }));
+        }
+        let stmts = self.ast.commit(smark);
+        let body = self.mk(NodeKind::NODE_BLOCK, sp, NodeAs { block: BlockData { statements: stmts } });
+        let f = self.mk_ext(
+            NodeKind::NODE_FUNCTION,
+            sp,
+            NodeExt {
+                function: FunctionData {
+                    name: self.make_name(name),
+                    params: params,
+                    returns: returns,
+                    body: body,
+                    flags: flags,
+                    vis: vis,
+                },
+            },
+        );
+        self.ast.add_attr(Attr { owner: f, kind: AttrKind::ATTR_USED as u8, arg: 0, str_span: Span::empty() });
+        return f;
+    }
+
     // The invariants of struct `decl`: `extend<'a.., G..> T<'a.., G..> { spec fn invariant(self: &T<'a.., G..>)
     // bool { return E1 && E2 ..; } }`, pushed as `expand_derives` pushes its extends (the same generic
     // nodes, the same gates). The function's name is the first clause's keyword, its parameter the first
@@ -2468,30 +2638,7 @@ extend Parser {
             let e = self.ast.contracts.at(i as usize).expr;
             cond = self.add_binary(cond, TokenType::AmpersandAmpersand, e);
         }
-        let vmark = self.ast.mark();
-        self.ast.push(cond);
-        let values = self.ast.commit(vmark);
-        let ret = self.mk(NodeKind::NODE_RETURN, sp, NodeAs { return_stmt: ReturnData { values: values } });
-        let smark = self.ast.mark();
-        self.ast.push(ret);
-        let stmts = self.ast.commit(smark);
-        let body = self.mk(NodeKind::NODE_BLOCK, sp, NodeAs { block: BlockData { statements: stmts } });
-        let f = self.mk_ext(
-            NodeKind::NODE_FUNCTION,
-            sp,
-            NodeExt {
-                function: FunctionData {
-                    name: self.make_name(kw),
-                    params: params,
-                    returns: returns,
-                    body: body,
-                    flags: FN_SPEC,
-                    vis: agg.vis,
-                },
-            },
-        );
-        // Proofs read it where no code calls it: no unused-item lint.
-        self.ast.add_attr(Attr { owner: f, kind: AttrKind::ATTR_USED as u8, arg: 0, str_span: Span::empty() });
+        let f = self.ghost_item(kw, sp, params, returns, cond, FN_SPEC, agg.vis);
         // The struct's first record names its method (`binder`): the checker and the proofs find it there.
         let mut c0 = *self.ast.contracts.at(cs as usize);
         c0.binder = f;

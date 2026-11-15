@@ -54,6 +54,11 @@ fn golden_contracts() {
         "fn g(n: u32) {\nlet mut k = n;\nwhile k > 0 invariant k <= n decreases k { k -= 1; }\n}\ninterface I { fn h(self: &Self, x: u32) u32 requires x > 0 ensures |r| r < x; }\n",
         "fn g(n: u32) {\n    let mut k = n;\n    while k > 0\n        invariant k <= n\n        decreases k\n    {\n        k -= 1;\n    }\n}\ninterface I {\n    fn h(self: &Self, x: u32) u32\n        requires x > 0\n        ensures |r| r < x;\n}\n",
     );
+    // A static's invariants follow its value, one per line.
+    expect_fmt(
+        "static mut H: u32 = 3 invariant H > 1, H < 9;\n",
+        "static mut H: u32 = 3\n    invariant H > 1\n    invariant H < 9;\n",
+    );
     // A `panics if` is a clause of its own.
     expect_fmt(
         "fn at(xs: []u32, i: usize) u32 requires xs.len() > 0 panics if i >= xs.len() { return xs[i]; }\n",

@@ -440,6 +440,11 @@ fn unproved_ghost_code_is_an_error() {
         "cannot prove that this value is at least 0",
     );
     b.add(
+        "a static whose first value breaks its invariant",
+        "static mut H: u32 = 3\n    invariant H > 1, H > 5;\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "the ensures of a callee that may not end",
         "const fn lie() bool ensures |r| false {\n    while true {}\n    return true;\n}\nlemma l() ensures false { let _ = lie(); }\n",
         "cannot prove this 'ensures' clause",
@@ -469,6 +474,11 @@ fn spec_syntax_is_checked() {
         "a struct invariant that reads no value",
         "struct S\n    invariant true\n{\n    n: u32,\n}\nfn main() i32 { return 0; }\n",
         "a struct's invariant states a fact of its value: it reads 'self'",
+    );
+    h::expect_err_msg(
+        "a static invariant that reads no static",
+        "static mut H: u32 = 3\n    invariant 1 > 0;\nfn main() i32 { return 0; }\n",
+        "a static's invariant states a fact of its value: it reads the static",
     );
     h::expect_err_msg(
         "a union with an invariant",

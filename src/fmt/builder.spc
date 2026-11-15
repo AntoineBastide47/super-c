@@ -2231,6 +2231,7 @@ extend Builder {
                     self.st.push(self.p.txt(" = "));
                     self.st.push(self.b_expr(c.value));
                 }
+                let _ = self.b_contracts(id, false);
                 self.st.push(self.p.txt(";"));
             },
             NODE_STATIC_ASSERT => {
