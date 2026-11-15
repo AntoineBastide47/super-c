@@ -32,6 +32,7 @@ symbols with no wrapper or mangling.
 | Passing a Super-C struct to C through a `*void` variable or a Super-C wrapper | The compiler reorders its fields: pass it in the `extern "C"` call itself, declare it as a header type, or tag it `@ordered` (Field Order) |
 | A typedef'd header type declared as `struct pthread_attr_t {}` | That spells `struct pthread_attr_t`: add `@import("pthread_attr_t")` |
 | `@import` before the extern block | Put it on the `fn` inside the block |
+| Declaring `bool` for a C function that returns `int` | Declare `i32` and compare with 0: a `bool` result must be a C `bool` (0 or 1), and the compiler tests only its low bit |
 
 ## Reference files
 

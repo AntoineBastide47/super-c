@@ -721,17 +721,18 @@ extend<'a> Parser<'a> {
         }
         let w = self.word();
         let s = w.ends_with(".s");
+        let bo = w.ends_with(".b");
         let t = type_of_text(
-            if s {
+            if s || bo {
                 w.slice(0, w.len() - 2)
             } else {
                 w
             },
         );
-        if t == T_NONE || s && t != T_I8 && t != T_I16 {
+        if t == T_NONE || s && t != T_I8 && t != T_I16 || bo && t != T_I8 {
             return self.fail("expected a machine type");
         }
-        *out = t as u32 | ast::pick(s, SIG_SEXT, 0);
+        *out = t as u32 | ast::pick(s, SIG_SEXT, 0) | ast::pick(bo, SIG_BOOL, 0);
         return true;
     }
 

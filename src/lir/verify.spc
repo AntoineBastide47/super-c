@@ -1400,7 +1400,7 @@ const fn sig_valid(b: &Body, s: u32, ptr: u32) bool {
             }
         } else if k == np && pt == T_NONE as u32 {
             continue;
-        } else if (pt & SIG_SEXT) != 0 && pt != (SIG_SEXT | T_I8 as u32) && pt != (SIG_SEXT | T_I16 as u32) || (pt & ~SIG_SEXT) > 255 || !type_ok(
+        } else if (pt & SIG_SEXT) != 0 && pt != (SIG_SEXT | T_I8 as u32) && pt != (SIG_SEXT | T_I16 as u32) || (pt & SIG_BOOL) != 0 && (k != np || pt != (SIG_BOOL | T_I8 as u32)) || (pt & ~(SIG_SEXT | SIG_BOOL)) > 255 || !type_ok(
             pt as u8,
         ) {
             return false;
@@ -1549,5 +1549,6 @@ fn push_sig_type(b: &Body, t: u32, out: &mut String) {
         out.push_str("]");
     } else {
         lprint::push_type(t as u8, out);
+        out.push_str(ast::pick((t & SIG_SEXT) != 0, ".s", ast::pick((t & SIG_BOOL) != 0, ".b", "")));
     }
 }

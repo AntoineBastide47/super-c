@@ -235,6 +235,10 @@ alias beside their binding (`time::clock_t`: `u64` on Apple, `i64` on Linux and 
 Windows). A Windows C runtime function that counts in `int` (`read`, `write`, `getcwd`) gets a
 `@platform(windows)` binding with the C width and a wrapper that clamps the count.
 
+A `bool` result or parameter is C's `bool` (`_Bool`): one byte that is 0 or 1. The compiler takes
+a call's `bool` result as 0 or 1 and may test its low bit alone, so a C function that returns an
+`int` truth value (`isalpha`, a status code) is bound with `i32` and compared with 0.
+
 ## Macro Objects and Thread-Locals
 
 A C macro that names an object is bound per target to what it expands to, never through a C shim:

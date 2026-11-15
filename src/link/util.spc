@@ -274,6 +274,88 @@ pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }
 
+/// arm64 code stays off a boundary of this many bytes (`keep_pad`): a processor runs code that holds one
+/// a cycle late each time it passes it (Apple M-series: a function of 5 instructions or a loop of 7 that
+/// holds one takes 4 cycles in place of 3; boundaries of 64 to 2048 bytes cost nothing).
+const KEEP_PAGE: u64 = 4096;
+// A function or a loop of at most this many bytes stays off the boundary: longer code passes it once in
+// more cycles, and each move costs up to this many bytes of padding.
+const KEEP_MAX: u64 = 128;
+// `keep_pad` moves its code at most this many times.
+const KEEP_TRIES: u32 = 8;
+
+/// The bytes to leave before arm64 code `code` (a function, or an object's whole code) that would start
+/// at address `addr`, a multiple of `align` (a power of two, 4 at least): the fewest `keep_pad` finds, a
+/// multiple of `align`, after which no KEEP_PAGE boundary falls inside the code when it has at most
+/// KEEP_MAX bytes, nor inside a loop of at most KEEP_MAX bytes of it. 0 when KEEP_TRIES moves find no
+/// such place.
+pub(package) const fn keep_pad(code: []u8, addr: u64, align: u64) u64 {
+    let n = code.len() as u64;
+    let mut pad: u64 = 0;
+    for _ in 0..KEEP_TRIES {
+        let start = addr + pad;
+        let mut bd = align_up(start + 1, KEEP_PAGE);
+        let mut d: u64 = 0;
+        // One step per boundary inside the code.
+        for _ in 0..n / KEEP_PAGE + 1 {
+            if d != 0 || bd >= start + n {
+                break;
+            }
+            d = bd - start - kept_start(code, bd - start);
+            bd += KEEP_PAGE;
+        }
+        if d == 0 {
+            return pad;
+        }
+        pad += align_up(d, align);
+    }
+    return 0;
+}
+
+// The least offset in arm64 code `code` of what must not hold a boundary at offset `o` inside (`keep_pad`):
+// 0 for code of at most KEEP_MAX bytes, else the head of the widest loop of at most KEEP_MAX bytes (the
+// target of a backward branch, up to the branch) that begins before `o` and ends at it or after; `o`
+// when none does.
+const fn kept_start(code: []u8, o: u64) u64 {
+    let n = code.len() as u64;
+    if n <= KEEP_MAX {
+        return 0;
+    }
+    let mut h = o;
+    let mut x = o & ~3u64;
+    // The branch of such a loop is less than KEEP_MAX bytes after `o`.
+    for _ in 0..KEEP_MAX / 4 {
+        if x + 4 > n {
+            break;
+        }
+        let back = a64_back(r32(code, x as usize));
+        if back != 0 && back <= x && back <= KEEP_MAX && x - back < h {
+            h = x - back;
+        }
+        x += 4;
+    }
+    return h;
+}
+
+// The bytes arm64 instruction `w` branches back by: a conditional branch, a compare or test and branch, or
+// a jump, to a lower address; 0 for any other word.
+const fn a64_back(w: u32) u64 {
+    let (bits, at) = if (w & 0xFF000010) == 0x54000000 || (w & 0x7E000000) == 0x34000000 {
+        (19u32, 5u32)
+    } else if (w & 0x7E000000) == 0x36000000 {
+        (14u32, 5u32)
+    } else if (w & 0xFC000000) == 0x14000000 {
+        (26u32, 0u32)
+    } else {
+        return 0;
+    };
+    let f = w >> at & (1u32 << bits) - 1;
+    if f >> bits - 1 == 0 {
+        return 0;
+    }
+    return ((1u32 << bits) - f) as u64 * 4;
+}
+
 /// Whether export list `exports` (None: every global) names `name`.
 pub(package) fn listed(exports: &Option<Set<String>>, name: str) bool {
     return switch exports {

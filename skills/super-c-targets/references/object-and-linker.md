@@ -54,7 +54,15 @@ A linker:
 1. reads the objects and the archives' members that define a needed symbol, and the system's shared
    libraries for their exported names (and versions, ELF);
 2. resolves symbols: one definition each, weak rules, undefined ones bound to a library or an error;
-3. lays out the image: segments, sections merged by kind, alignment, the entry point's start code;
+3. lays out the image: segments, sections merged by kind, alignment, the entry point's start code.
+   arm64 (Mach-O and ELF, `keep_code`): once a code section's address is known, each input section of
+   it (a function, under `-ffunction-sections` or Mach-O's split at symbols) moves forward by the
+   fewest bytes after which no 4096-byte boundary falls inside a function of at most 128 bytes or a
+   loop of at most 128 bytes (`link::util::keep_pad`, which finds the loops by their backward
+   branches): code that holds one runs a cycle late each pass (Apple M-series: 4 cycles in place of 3
+   for a 5-instruction function or a 7-instruction loop; boundaries of 64 to 2048 bytes cost nothing).
+   The padding is between functions and never runs; it adds about 0.1% to the compiler's code.
+   x86-64 has no such rule: the cost is not measured there;
 4. applies the relocations, relaxing where the format allows (ELF GOT and TLS relaxations);
 5. binds imports: stubs and GOT or import address table slots, dynamic relocations for pointers in data;
 6. writes unwind tables, the symbol table and debug sections unless stripped, and the format's extras

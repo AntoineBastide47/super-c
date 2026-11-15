@@ -269,6 +269,20 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   when its emitter left it not `clean`) and is stored 8 bytes wide (`Core::xty`), so a read at the
   extension's type from its home is right. No view of a constant or an address, which each use makes
   again, of a folded instruction, or of a 128-bit, float or vector value.
+- Byte conditions (arm64 `cond_test`): a branch on an `i8` value that no comparison folds into tests
+  the register with `cbz`/`cbnz` when it holds zeros above the byte (`clean`), bit 0 with `tbz`/`tbnz`
+  when the value is 0 or 1 (`lir::ir::zero_one`: a call's `bool` result, whose register may hold
+  anything above the byte), else the byte (`tst #0xff` and `b.cond`). x86-64 tests the byte register.
+- Flags kept in a block (`btest_x`, `flags_kept`): a select or branch whose condition is the one the
+  block tested last (a folded comparison, `folded_cmp`; a byte condition's test) reads those flags
+  when every instruction emitted since writes none: on arm64 immediate moves, sums and logic without
+  flags, conditional selects, loads and stores; on x86-64 `mov` of an immediate, between registers
+  or from memory, `movzx`, `cmov`. The check decodes the emitted code, so a new flag-neutral
+  instruction form stops the reuse until the decoder lists it.
+- Flag joins (`lv::FOLD_FJOIN`, arm64): an `and` or `or` of flags of a comparison or `FOLD_CCMP` chain
+  it alone uses and a value that is 0 or 1 folds the comparison (`Live::join_part`) and is one
+  conditional select on its flags: `csel rd, y, wzr, cc` (`and`), `csinc rd, y, wzr, !cc` (`or`).
+  x86-64 keeps `setcc` and the byte operation, which take as many instructions.
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is

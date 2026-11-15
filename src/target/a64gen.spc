@@ -105,11 +105,13 @@ pub(package) struct Gen {
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
     landed: u32, // the code position the last branch `here` patched jumps to (NONE: none)
-    // The bool value a select's `tst` tested in this block, the code index and word of that `tst`
-    // (`select_op`), NONE.
+    // The condition value whose flags the block's last test set (a bool's `tst`, `select_op` and
+    // `cond_test`; a folded comparison, `folded_cmp`), NONE; the code index and word of the test's last
+    // instruction, and the condition on its flags.
     btest_x: u32,
     btest_at: u32,
     btest_w: u32,
+    btest_cc: u32,
     stepped: Vector<u32>, // accesses paired early and pointer steps taken as post-index updates
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<u8>, // the scratch homes saved around a call (`save_scratch`)
@@ -250,6 +252,7 @@ extend Gen {
             btest_x: NONE,
             btest_at: 0,
             btest_w: 0,
+            btest_cc: 0,
             stepped: Vector::<u32>::new(),
             arrm: Vector::<u64>::new(),
             taken: Vector::<u64>::new(),
@@ -2536,7 +2539,7 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -4270,15 +4273,30 @@ extend Gen {
     }
 
     // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
-    // set here; NONE when it does not fold.
+    // set here; NONE when it does not fold. A comparison an earlier select of the block made, with no
+    // write of the flags since, is not made again.
     fn folded_cmp(self: &mut Self, v: Value) u32 {
         if (v & (VPARAM | VFLAG)) != 0 || !self.cr.lv.pfold[v as usize] {
             return NONE;
         }
-        if self.cr.lv.conj[v as usize] != 0 {
-            return self.conj_flags(v);
+        if self.btest_x == self.cr.vx(v) && self.flags_kept(self.btest_at, self.btest_w) {
+            return self.btest_cc;
         }
-        return self.compare(self.cr.b().insts[v as usize]);
+        let cc = if self.cr.lv.conj[v as usize] != 0 {
+            self.conj_flags(v)
+        } else {
+            self.compare(self.cr.b().insts[v as usize])
+        };
+        self.tested(self.cr.vx(v), cc);
+        return cc;
+    }
+
+    // The flags hold condition `cc` of value index `x` from the instruction just written on.
+    fn tested(self: &mut Self, x: u32, cc: u32) {
+        self.btest_x = x;
+        self.btest_at = self.code.len() as u32 - 1;
+        self.btest_w = self.code[self.btest_at as usize];
+        self.btest_cc = cc;
     }
 
     // The flags of `and` or `or` `v` of flags folded into conditional comparisons (`lv::FOLD_CCMP`): its
@@ -4699,6 +4717,27 @@ extend Gen {
         if self.cr.lv.conj[i as usize] != 0 {
             let c = self.conj_flags(i);
             self.cond_value(i, c, NONE);
+            return true;
+        }
+        let jp = self.cr.lv.join_part(self.cr.b(), i);
+        if jp != VNONE {
+            // The flags of the folded comparisons, then the other operand (0 or 1) where they let it decide,
+            // else 0 (`and`) or 1 (`or`) (`lv::FOLD_FJOIN`).
+            let y = ast::pick(t.a == jp, t.b, t.a);
+            let c = if self.cr.lv.conj[jp as usize] != 0 {
+                self.conj_flags(jp)
+            } else {
+                self.compare(self.cr.b().insts[jp as usize])
+            };
+            let ry = self.reg(y) as u32;
+            let clean = self.cr.va[self.cr.vx(y) as usize].clean && !self.cr.narrow(y);
+            let rd = self.def_step(i) as u32;
+            if op == O_AND {
+                self.emit(a::csel(false, 0, 0, rd, ry, a::ZR, c));
+            } else {
+                self.emit(a::csel(false, 0, 1, rd, ry, a::ZR, a::invert(c)));
+            }
+            self.cr.va.index_mut(i as usize).clean = clean;
             return true;
         }
         if ty == T_I128 {
@@ -6336,13 +6375,11 @@ extend Gen {
             self.pend.cc
         } else if self.btest_x == cx && self.flags_kept(self.btest_at, self.btest_w) {
             // An earlier select of the block tested it, and nothing since wrote the flags.
-            a::NE
+            self.btest_cc
         } else {
             let rc = self.reg(t.a);
             self.emit(a::logic_imm(false, 3, a::ZR, rc, a::logical_imm(0xFF, false)));
-            self.btest_x = cx;
-            self.btest_at = self.code.len() as u32 - 1;
-            self.btest_w = self.code[self.btest_at as usize];
+            self.tested(cx, a::NE);
             a::NE
         };
         if in_mem(ty) {
@@ -7465,7 +7502,7 @@ extend Gen {
         let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
         let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.cr.self_lay.ret.kind == ab::L_SRET;
         let into = into0 || fwd;
-        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
+        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (((rt ^ b.pool[b.sig as usize + 2]) & ~SIG_BOOL) != 0 || (rt & AGG) != 0) && !into {
             return false;
         }
         self.call_layout(t);
@@ -7687,6 +7724,13 @@ extend Gen {
         let r = self.reg(v) as u32;
         if self.cr.va[cx as usize].clean && !self.cr.narrow(v) {
             return Test { kind: T_CBNZ, cc: 0, reg: r };
+        }
+        // A value that is 0 or 1 (a call's `bool` result): its low bit, whatever the register holds above.
+        if zero_one(self.cr.b(), v, ZO_DEPTH) {
+            return Test { kind: T_TBNZ, cc: 0, reg: r };
+        }
+        if self.btest_x == cx && self.flags_kept(self.btest_at, self.btest_w) {
+            return Test { kind: T_CC, cc: self.btest_cc, reg: 0 };
         }
         self.emit(a::logic_imm(false, 3, a::ZR, r, a::logical_imm(0xFF, false)));
         return Test { kind: T_CC, cc: a::NE, reg: 0 };

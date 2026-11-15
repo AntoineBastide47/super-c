@@ -1521,16 +1521,20 @@ fn layout(l: &mut L, b: []u8) bool {
         let mut at: u64 = ast::pick(k == 0 || l.segs[k - 1].name.as_str() == "__PAGEZERO", hdr, 0u64);
         let mut fend: u64 = at;
         for q in first..first + cnt {
+            let zf = zerofill(l.osecs[q].flags);
+            at = lu::align_up(at, 1u64 << l.osecs[q].align as u64);
+            let addr = l.base + seg_va + at;
+            let size = keep_code(l, b, q as u32, addr);
             let os = l.osecs.index_mut(q);
-            at = lu::align_up(at, 1u64 << os.align as u64);
-            os.addr = l.base + seg_va + at;
-            os.off = if zerofill(os.flags) {
+            os.addr = addr;
+            os.off = if zf {
                 0u64
             } else {
                 seg_fo + at
             };
-            at += os.size;
-            if !zerofill(os.flags) {
+            os.size = size;
+            at += size;
+            if !zf {
                 fend = at;
             }
         }
@@ -1559,6 +1563,30 @@ fn layout(l: &mut L, b: []u8) bool {
         }
     }
     return true;
+}
+
+// The input sections of output section `q`, whose address is `addr`, placed again in their order, each
+// one of code moved forward off a page boundary that would fall inside a short function or loop of it
+// (`lu::keep_pad`): the bytes between two functions never run. The output section's size.
+fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
+    let mut size = l.osecs[q as usize].size;
+    // The bytes the sections before the one at hand moved by.
+    let mut moved: u64 = 0;
+    for s in 0..l.secs.len() {
+        let sc = l.secs[s];
+        if sc.out != q {
+            continue;
+        }
+        let a = 1u64 << sc.align as u64;
+        let mut at = lu::align_up(sc.at + moved, a);
+        if code(sc) && (sc.flags & S_TYPE) == S_REGULAR {
+            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, a.max(4));
+        }
+        moved = at - sc.at;
+        l.secs.index_mut(s).at = at;
+        size = at + sc.size;
+    }
+    return size;
 }
 
 const fn remap(o: u32, newix: &Vector<u32>) u32 {

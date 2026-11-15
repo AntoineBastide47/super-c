@@ -19667,3 +19667,199 @@ b2(v10: i64, v11: i64):
     assert_eq(elf_text_count(&o, 0x7E000000, 0x34000000), 1);
     assert_eq(elf_text_count(&o, 0xFC000000, 0x14000000), 0);
 }
+
+// A branch on a call's `bool` result (`i8.b`: 0 or 1) tests its low bit in one instruction, whatever the
+// callee left above it; a result that may be any byte is tested as a byte. The functions give the C
+// results on the host.
+@test
+fn a_bool_result_is_tested_by_its_low_bit() {
+    let lir = M"(lir ptr 8
+sym @flag fn global
+sym @byte fn global
+sym @pass fn global
+sym @pred fn global ext
+sym @code fn global ext
+fn @flag
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i8 @pred(v0) : (i64) -> i8.b
+  v2 = iconst.i64 10
+  v3 = iconst.i64 20
+  br v1, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @byte
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i8 @code(v0) : (i64) -> i8
+  v2 = iconst.i64 10
+  v3 = iconst.i64 20
+  br v1, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @pass
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = call.i8 @pred(v0) : (i64) -> i8.b
+  ret v1
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // One `tbz` or `tbnz` of bit 0 of w0 (the `bool`), one `tst w0, #0xff` (the byte).
+    assert_eq(elf_text_count(&o, 0x7EF8001F, 0x36000000), 1);
+    assert_eq(elf_text_count(&o, 0xFFFFFFFF, 0x72001C1F), 1);
+    // A body that returns a byte jumps to the callee whose `bool` result it returns (`Package.tail`): two
+    // calls are left on each target.
+    o.truncate(0);
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), TAIL, &mut o),
+        "the arm64 object",
+    );
+    assert_eq(elf_text_count(&o, 0xFC000000, 0x94000000), 2);
+    let mut x = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), TAIL, &mut x),
+        "the x86-64 object",
+    );
+    let (off, size) = elf_text(&x);
+    let mut calls: u32 = 0;
+    for at in off..off + size - 4 {
+        calls += (x[at] == 0xE8 && x[at + 1] == 0 && x[at + 2] == 0 && x[at + 3] == 0 && x[at + 4] == 0) as u32;
+    }
+    assert_eq(calls, 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdbool.h>
+#include <stdint.h>
+uint64_t flag(uint64_t);
+uint64_t byte(uint64_t);
+uint8_t pass(uint64_t);
+bool pred(uint64_t x) { return x > 5; }
+uint8_t code(uint64_t x) { return (uint8_t)(x * 2); }
+int main(void) {
+  if (flag(9) != 10 || flag(3) != 20) return 1;
+  if (byte(1) != 10 || byte(0) != 20 || byte(128) != 20) return 2;
+  if (pass(9) != 1 || pass(3) != 0) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+}
+
+// Two selects of a block on one folded comparison compare once: the second reads the flags the first
+// left, though a load is between them. The function gives the C results on the host.
+@test
+fn selects_on_one_comparison_compare_once() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+fn @pick
+  sig (i64, i64, ptr, i64) -> i64
+b0(v0: i64, v1: i64, v2: ptr, v3: i64):
+  v4 = icmp.slt v0, v1
+  v5 = select.i64 v4, v0, v1
+  v6 = load.i64 v2 align 3
+  v7 = select.i64 v4, v6, v3
+  v8 = add.i64 v5, v7
+  ret v8
+)";
+    let linux = tgt::axis_index("linux", false);
+    let mut o = Vector::<u8>::new();
+    assert(object_of(lir, linux, tgt::axis_index("aarch64", true), 0, &mut o), "the arm64 object");
+    // One `cmp` of two registers, two `csel`.
+    assert_eq(elf_text_count(&o, 0x7F20001F, 0x6B00001F), 1);
+    assert_eq(elf_text_count(&o, 0x7FE00C00, 0x1A800000), 2);
+    let mut x = Vector::<u8>::new();
+    assert(object_of(lir, linux, tgt::axis_index("x86_64", true), 0, &mut x), "the x86-64 object");
+    // One 64-bit `cmp` of two registers (REX.W 39 or 3B).
+    let (off, size) = elf_text(&x);
+    let mut cmps: u32 = 0;
+    for at in off..off + size - 1 {
+        cmps += (x[at] == 0x48 && (x[at + 1] == 0x39 || x[at + 1] == 0x3B)) as u32;
+    }
+    assert_eq(cmps, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t pick(int64_t, int64_t, int64_t *, int64_t);
+int main(void) {
+  int64_t m = 100;
+  if (pick(1, 5, &m, 7) != 101) return 1;
+  if (pick(5, 1, &m, 7) != 8) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An `and` or `or` of a comparison and a value that is 0 or 1 (a `bool` load) is one conditional select
+// on the comparison's flags on arm64: the value where they let it decide, else 0 or 1; no flag is set
+// into a register. A chain of comparisons joins the same way. The functions give the C results on the host.
+@test
+fn a_comparison_joins_a_flag_in_one_select() {
+    let lir = M"(lir ptr 8
+sym @either fn global
+sym @both fn global
+sym @any fn global
+fn @either
+  sig (i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = load.i8 v2 align 0 bool
+  v4 = icmp.eq v0, v1
+  v5 = or.i8 v4, v3
+  ret v5
+fn @both
+  sig (i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = load.i8 v2 align 0 bool
+  v4 = icmp.eq v0, v1
+  v5 = and.i8 v3, v4
+  ret v5
+fn @any
+  sig (i64, i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: i64, v3: ptr):
+  v4 = load.i8 v3 align 0 bool
+  v5 = icmp.eq v0, v1
+  v6 = icmp.eq v0, v2
+  v7 = or.i8 v5, v6
+  v8 = or.i8 v7, v4
+  ret v8
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // No `cset` (csinc of the zero register twice), two `csinc` and one `csel` with the zero register, and
+    // one `ccmp`.
+    assert_eq(elf_text_count(&o, 0x7FFF0FE0, 0x1A9F07E0), 0);
+    assert_eq(elf_text_count(&o, 0x7FFF0C00, 0x1A9F0400), 2);
+    assert_eq(elf_text_count(&o, 0x7FFF0C00, 0x1A9F0000), 1);
+    assert_eq(elf_text_count(&o, 0x7FE00C10, 0x7A400000), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdbool.h>
+#include <stdint.h>
+bool either(uint64_t, uint64_t, bool *);
+bool both(uint64_t, uint64_t, bool *);
+bool any(uint64_t, uint64_t, uint64_t, bool *);
+int main(void) {
+  bool t = true, f = false;
+  if (!either(1, 1, &f) || !either(1, 2, &t) || either(1, 2, &f)) return 1;
+  if (!both(1, 1, &t) || both(1, 1, &f) || both(1, 2, &t)) return 2;
+  if (!any(1, 1, 2, &f) || !any(1, 2, 1, &f) || !any(1, 2, 3, &t) || any(1, 2, 3, &f)) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}

@@ -8,6 +8,7 @@ import codegen::obj as ob;
 import target::assembler as asmr;
 import target::coff as coff;
 import link::pe;
+import link::util as lu;
 import std::platform::fs;
 import module::loader as loader;
 import std::platform::dylib;
@@ -460,4 +461,156 @@ const fn count(b: str, s: str) u32 {
         c += (k == n) as u32;
     }
     return c;
+}
+
+// `n` arm64 `nop` words, the word at index `at` a `b.ne` back by `back` words (0: none).
+fn nops_with_loop(n: usize, at: usize, back: u32) Vector<u8> {
+    let mut b = Vector::<u8>::new();
+    for i in 0..n {
+        let w: u32 = if back != 0 && i == at {
+            0x54000001 | (0x80000 - back & 0x7FFFF) << 5
+        } else {
+            0xD503201F
+        };
+        ob::w32(&mut b, w);
+    }
+    return b;
+}
+
+// The bytes the linkers leave before arm64 code so that no 4096-byte boundary falls inside a short function
+// or loop of it (`link::util::keep_pad`): none when the boundary is at the start, at the end, at a loop's
+// head, after its branch or outside every loop; else the bytes that bring the function's or the widest
+// loop's first instruction to the boundary, rounded up to the alignment. A loop of more than 128 bytes may
+// hold one.
+@test
+fn short_code_stays_off_a_page_boundary() {
+    let small = nops_with_loop(5, 0, 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 4), 16);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFFC, 4), 4);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x1000, 4), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFEC, 4), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 64), 64);
+    // Words 54 to 60 are a loop.
+    let f = nops_with_loop(100, 60, 6);
+    let c = f[0..f.len()];
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 4), 12);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 60, 4), 24);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 54, 4), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 61, 4), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 10, 4), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 16), 16);
+    // Words 50 to 70 are a loop around it: the outer one moves to the boundary.
+    let mut g = nops_with_loop(100, 60, 6);
+    let outer = nops_with_loop(100, 70, 20);
+    for k in 280usize..284 {
+        g[k] = outer[k];
+    }
+    assert_eq(lu::keep_pad(g[0..g.len()], 0x2000 - 4 * 57, 4), 28);
+    // Words 20 to 60 are a loop of 164 bytes.
+    let wide = nops_with_loop(100, 60, 40);
+    assert_eq(lu::keep_pad(wide[0..wide.len()], 0x2000 - 4 * 40, 4), 0);
+}
+
+// A little-endian value of `n` bytes at `at` of the bytes `b`.
+const fn le(b: str, at: usize, n: usize) u64 {
+    let mut v: u64 = 0;
+    for k in 0..n {
+        v |= b.byte_at(at + k) as u64 << (8 * k) as u64;
+    }
+    return v;
+}
+
+// The start and end addresses of each function of arm64 image `b`, a Mach-O or ELF executable, into `out`
+// (start << 32 | end, sorted); false when `b` is neither. A Mach-O function ends where the next symbol of
+// its section starts.
+fn function_ranges(b: str, out: &mut Vector<u64>) bool {
+    if le(b, 0, 4) == 0xFEEDFACF && le(b, 4, 4) == 0x0100000C {
+        let mut at: usize = 32;
+        let mut starts = Vector::<u64>::new();
+        for _ in 0..le(b, 16, 4) as usize {
+            if le(b, at, 4) == 2 {
+                let (symoff, nsyms) = (le(b, at + 8, 4) as usize, le(b, at + 12, 4) as usize);
+                for k in 0..nsyms {
+                    let y = symoff + 16 * k;
+                    // A symbol defined in section 1, the code; no debugger entry.
+                    if (le(b, y + 4, 1) & 0xEE) == 0x0E && le(b, y + 5, 1) == 1 {
+                        starts.push(le(b, y + 8, 8));
+                    }
+                }
+            }
+            at += le(b, at + 4, 4) as usize;
+        }
+        starts.sort();
+        for k in 1..starts.len() {
+            if starts[k] != starts[k - 1] {
+                out.push((starts[k - 1] & 0xFFFFFFFF) << 32 | starts[k] & 0xFFFFFFFF);
+            }
+        }
+        return true;
+    }
+    if le(b, 0, 4) == 0x464C457F && le(b, 18, 2) == 183 {
+        let (shoff, shsize, shnum) = (le(b, 0x28, 8) as usize, le(b, 0x3A, 2) as usize, le(b, 0x3C, 2) as usize);
+        for k in 0..shnum {
+            let sh = shoff + k * shsize;
+            if le(b, sh + 4, 4) != 2 {
+                continue;
+            }
+            let (off, size) = (le(b, sh + 0x18, 8) as usize, le(b, sh + 0x20, 8) as usize);
+            for q in 0..size / 24 {
+                let y = off + 24 * q;
+                // A function with a size.
+                if (le(b, y + 4, 1) & 0xF) == 2 && le(b, y + 16, 8) != 0 {
+                    let a = le(b, y + 8, 8);
+                    out.push((a & 0xFFFFFFFF) << 32 | a + le(b, y + 16, 8) & 0xFFFFFFFF);
+                }
+            }
+        }
+        out.sort();
+        return true;
+    }
+    return false;
+}
+
+// Three thousand functions of a few instructions each, linked for arm64: none of at most 128 bytes holds
+// a 4096-byte boundary between two of its instructions, and the program runs.
+@test(timeout = 300)
+fn the_link_keeps_short_functions_off_page_boundaries() {
+    if cli::on_wasm() {
+        return;
+    }
+    let mut src = String::new();
+    for k in 0..3000 {
+        src.format_into("@noinline\nfn f{}(x: i64) i64 {{\n    return x * 3 + {};\n}}\n\n", k, k);
+    }
+    // A table keeps them: the link drops a function nothing names.
+    src.push_str("static mut TABLE: [fn(i64) i64; 3000] = [");
+    for k in 0..3000 {
+        src.format_into("f{}, ", k);
+    }
+    src.push_str("];\n\nfn main() i32 {\n    let mut s: i64 = 1;\n    for k in 0..3000usize {\n");
+    src.push_str("        let f = unsafe TABLE[k];\n        s = f(s) & 0xFFFF;\n    }\n");
+    src.push_str("    return (s >> 16) as i32;\n}\n");
+    let p = cli::proj_new();
+    p.mkfile("main.spc", &src);
+    let exe = format("{}/keep{}", p.dir(), unsafe str::from_cstr(cli::binext()));
+    let a = format("build main.spc -O2 -o \"{}\"", exe.as_str());
+    assert(cli::superc_in(p.dir(), &a).ok(), "the build");
+    let img = loader::read_file(&exe).unwrap();
+    let mut fns = Vector::<u64>::new();
+    if !function_ranges(&img, &mut fns) {
+        return; // no arm64 image: the rule is arm64's
+    }
+    let mut short: u32 = 0;
+    for k in 0..fns.len() {
+        let (lo, hi) = (fns[k] >> 32, fns[k] & 0xFFFFFFFF);
+        if hi - lo > 128 {
+            continue;
+        }
+        short += 1;
+        // The first boundary after the function's first instruction is at its end or after.
+        assert((lo | 4095) + 1 >= hi, format("a function at {} to {} holds a boundary", lo, hi).as_str());
+    }
+    assert(short >= 3000, "the image names its functions");
+    let mut run = format("\"{}\"", exe.as_str());
+    assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
 }

@@ -263,11 +263,11 @@ pub(package) struct Gen {
     // NONE.
     chain_x: u32,
     chain_r: u8,
-    // The boolean value whose low byte the block's last `test` of one (`cond_of`) tested, that `test`'s
-    // first byte and its end, NONE.
+    // The condition value whose flags the block's last test set (a boolean's `test`, `cond_of`; a folded
+    // comparison, `folded_cmp`), NONE; the code byte the test ends at, and the condition on its flags.
     btest_x: u32,
-    btest_at: u32,
     btest_end: u32,
+    btest_cc: u32,
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
     // The operands of the last plain compare and the code length up to which its flags hold (past only a
     // `setcc` and `movzx` of its value), NONE: a compare of the same values there sets nothing.
@@ -449,8 +449,8 @@ extend Gen {
             chain_x: NONE,
             chain_r: NOREG,
             btest_x: NONE,
-            btest_at: 0,
             btest_end: 0,
+            btest_cc: 0,
             cmp_at: NONE,
             held_a: VNONE,
             held_b: VNONE,
@@ -5322,14 +5322,19 @@ extend Gen {
     }
 
     // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
-    // set here and kept; NONE when it does not fold.
+    // set here and kept; NONE when it does not fold. A comparison an earlier select of the block made,
+    // with no write of the flags since, is not made again.
     fn folded_cmp(self: &mut Self, v: Value) u32 {
         if (v & (VPARAM | VFLAG)) != 0 || !self.cr.lv.pfold[v as usize] {
             return NONE;
         }
-        let cc = self.compare(self.cr.b().insts[v as usize], NONE);
+        if self.btest_x != self.cr.vx(v) || !self.flags_kept() {
+            self.btest_cc = self.compare(self.cr.b().insts[v as usize], NONE);
+            self.btest_x = self.cr.vx(v);
+            self.btest_end = self.c.len();
+        }
         self.keep_flags = true;
-        return cc;
+        return self.btest_cc;
     }
 
     // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
@@ -7415,33 +7420,26 @@ extend Gen {
         // An earlier `test` of it in the block, and nothing since wrote the flags.
         if self.btest_x == cx && self.flags_kept() {
             self.keep_flags = true;
-            return x::CC_NE;
+            return self.btest_cc;
         }
         let r = self.reg(v);
-        let at = self.c.len();
         self.c.test_ri(1, r, 0xFF);
         self.btest_x = cx;
-        self.btest_at = at;
         self.btest_end = self.c.len();
+        self.btest_cc = x::CC_NE;
         self.keep_flags = true;
         return x::CC_NE;
     }
 
-    // Whether the flags of the `test` `cond_of` noted still hold: its bytes are a `test` of a byte with 0xFF
-    // there (A8 FF, or F6 /0 FF maybe after a REX), and each instruction after it writes no flags, as it is
-    // a `mov` of an immediate or between registers or a `cmov` between registers.
+    // Whether the flags of the test the block noted last (`btest_end`) still hold: each instruction after it
+    // writes no flags, as it is a `mov` of an immediate, a `mov` between registers or from memory, a
+    // `movzx`, or a `cmov`. Code goes back only at a block's end, so the test's bytes are there.
     const fn flags_kept(self: &Self) bool {
         let n = self.c.len();
-        let (at, end) = (self.btest_at, self.btest_end);
-        if end > n || end < at + 2 || self.c.b[end as usize - 1] != 0xFF {
+        if self.btest_end > n {
             return false;
         }
-        let al = end == at + 2 && self.c.b[at as usize] == 0xA8;
-        let rm = end >= at + 3 && self.c.b[end as usize - 3] == 0xF6 && (self.c.b[end as usize - 2] & 0xF8) == 0xC0;
-        if !al && !rm {
-            return false;
-        }
-        let mut p = end;
+        let mut p = self.btest_end;
         // Each step passes one instruction of at least 2 bytes.
         while p < n {
             let rex = self.c.b[p as usize] >= 0x40 && self.c.b[p as usize] <= 0x4F;
@@ -7464,16 +7462,42 @@ extend Gen {
                 }
             } else if op == 0xC7 && m >= 0xC0 && (m & 0x38) == 0 {
                 6
-            } else if (op == 0x89 || op == 0x8B) && m >= 0xC0 {
+            } else if op == 0x89 && m >= 0xC0 {
                 2
-            } else if op == 0x0F && (m & 0xF0) == 0x40 && q + 2 < n && self.c.b[q as usize + 2] >= 0xC0 {
-                3
+            } else if op == 0x8B {
+                1 + self.modrm_len(q + 1)
+            } else if op == 0x0F && ((m & 0xF0) == 0x40 || m == 0xB6 || m == 0xB7) {
+                2 + self.modrm_len(q + 2)
             } else {
                 return false;
             };
             p = q + len;
         }
         return p == n;
+    }
+
+    // The bytes the ModRM byte at code byte `p` takes with its SIB byte and displacement; past the code's
+    // end when `p` is.
+    const fn modrm_len(self: &Self, p: u32) u32 {
+        let n = self.c.len();
+        if p >= n {
+            return n;
+        }
+        let m = self.c.b[p as usize];
+        let (md, rm) = (m >> 6, m & 7);
+        if md == 3 {
+            return 1;
+        }
+        let sib = rm == 4;
+        let base5 = sib && p + 1 < n && (self.c.b[p as usize + 1] & 7) == 5;
+        let disp: u32 = if md == 1 {
+            1
+        } else if md == 2 || rm == 5 || base5 {
+            4
+        } else {
+            0
+        };
+        return 1 + sib as u32 + disp;
     }
 
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
@@ -8141,7 +8165,7 @@ extend Gen {
         let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
         let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.cr.self_lay.ret.kind == ab::L_SRET;
         let into = into0 || fwd;
-        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
+        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (((rt ^ b.pool[b.sig as usize + 2]) & ~SIG_BOOL) != 0 || (rt & AGG) != 0) && !into {
             return false;
         }
         self.call_layout(t);
