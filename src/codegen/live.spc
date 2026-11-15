@@ -182,6 +182,13 @@ pub(package) const FOLD_ADDSUB: u64 = 1125899906842624;
 /// compared with a length takes no copy.
 pub(package) const FOLD_XUSE: u64 = 9007199254740992;
 pub(package) const FOLD_ADDSUB_WIDE: u64 = 2251799813685248;
+/// `FOLD_VIEW`: an instruction that keeps its operand's bits (a truncation, a cast between a pointer and
+/// an integer no wider, a pointer's copy: `ptradd` of nothing) makes no value of its own: it is a view of
+/// its operand (`Live::view`), which every read of it reads, at its own type (a target whose registers hold
+/// both). The operand lives to the view's last read, in one register for both. So is a zero extension of
+/// a load or of a zero extension: the generator keeps the bits above such a value zero in its register
+/// and its home (`Live::wide`).
+pub(package) const FOLD_VIEW: u64 = 18014398509481984;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -325,6 +332,11 @@ pub(package) struct Live {
     /// Per instruction, a truncation to 8 or 16 bits that comparisons alone read, more than one, under
     /// `FOLD_TRUNC_ONCE`: it is made extended, so no reader extends it.
     pub(package) xtrunc: Vector<bool>,
+    /// Per instruction, the value it is a view of (`FOLD_VIEW`; no view itself), else VNONE; empty when no
+    /// instruction is one. A view has the value index of that value (`vix`).
+    pub(package) view: Vector<Value>,
+    /// Per instruction, whether a zero extension is a view of it; empty when of none.
+    pub(package) wide: Vector<bool>,
     pub(package) sunk: Vector<bool>, // per instruction, a store computes it after its address (`FOLD_SINK`)
     pub(package) carry: Vector<u8>, // per instruction, its CARRY_* part of a `FOLD_ADC` sum
     /// Per instruction, the comparisons of the `and` or `or` of flags it is when `FOLD_CCMP` folds them into
@@ -542,6 +554,8 @@ extend Live {
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
             xtrunc: Vector::<bool>::new(),
+            view: Vector::<Value>::new(),
+            wide: Vector::<bool>::new(),
             sunk: Vector::<bool>::new(),
             carry: Vector::<u8>::new(),
             conj: Vector::<u8>::new(),
@@ -683,7 +697,31 @@ extend Live {
         if (v & VFLAG) != 0 {
             return self.flag_of[(v & ~VFLAG) as usize];
         }
+        if v as usize < self.view.len() && self.view[v as usize] != VNONE {
+            let r = self.view[v as usize];
+            return ast::pick((r & VPARAM) != 0, b.insts.len() as u32 + (r & ~VPARAM), r);
+        }
         return v;
+    }
+
+    /// Whether a zero extension is a view of value index `x` (`wide`): its register and its home hold zeros
+    /// above its bits, up to 64.
+    pub(package) const fn wide_at(self: &Self, x: u32) bool {
+        return x as usize < self.wide.len() && self.wide[x as usize];
+    }
+
+    /// Argument `j` of edge `ed` of `b`, as a read of it reads it (`seen`).
+    pub(package) const fn arg(self: &Self, b: &Body, ed: u32, j: u32) Value {
+        return self.seen(b.edge_arg(ed, j));
+    }
+
+    /// The value a read of `v` reads: the one `v` is a view of (`view`), else `v`.
+    pub(package) const fn seen(self: &Self, v: Value) Value {
+        return if (v & (VPARAM | VFLAG)) == 0 && v as usize < self.view.len() && self.view[v as usize] != VNONE {
+            self.view[v as usize]
+        } else {
+            v
+        };
     }
 
     /// Whether the block at layout position `q` of `b` keeps the register state: its only predecessor is
@@ -1262,6 +1300,8 @@ extend Live {
         self.xtrunc.resize_default(ni);
         self.sunk.truncate(0);
         self.sunk.resize_default(ni);
+        self.view.truncate(0);
+        self.wide.truncate(0);
         fill(&mut self.conj, ni, 0);
         fill(&mut self.carry, ni, CARRY_NONE);
         if self.fold_max == 0 && self.fold_ops == 0 {
@@ -1584,6 +1624,9 @@ extend Live {
             self.count_exts(b);
             // Last: the values that stay where they are include every other fold.
             self.sinks(b);
+            if (self.fold_ops & FOLD_VIEW) != 0 {
+                self.views(b);
+            }
             return;
         }
         self.scan_ops([O_LOAD, O_STORE]);
@@ -1985,6 +2028,69 @@ extend Live {
         }
         self.count_exts(b);
         self.sinks(b);
+        if (self.fold_ops & FOLD_VIEW) != 0 {
+            self.views(b);
+        }
+    }
+
+    // `FOLD_VIEW`, after every other fold: `view` per instruction no fold takes, whose operand is no folded
+    // instruction and none a generator recomputes at each use (a constant, an address). A view of a view is
+    // a view of that one's value (an operand may come later in the instruction array: a second pass).
+    fn views(self: &mut Self, b: &Body) {
+        let ni = b.insts.len();
+        let mut any = false;
+        for i in 0..ni {
+            let t = b.insts[i];
+            let copy = t.op == O_PTRADD && t.b == VNONE && t.c == 0;
+            let zx = t.op == O_ZEXT;
+            if t.op != O_TRUNC && !free_conv(t.op) && !copy && !zx || t.a == VNONE || (t.a & VFLAG) != 0 || self.pfold[i] || self.xtrunc[i] || self.sunk[i] || self.carry[i] != CARRY_NONE {
+                continue;
+            }
+            let (fb, tb) = (word_bits(b.type_of(t.a)), word_bits(t.ty));
+            if fb == 0 || tb == 0 || tb > fb != zx {
+                continue;
+            }
+            // A zero extension: of an instruction whose register holds zeros above its bits, a load or
+            // a zero extension (a view of such a one, or one made).
+            if zx {
+                if !is_inst(t.a) {
+                    continue;
+                }
+                let o = b.insts[t.a as usize].op;
+                if o != O_LOAD && o != O_ZEXT || self.sunk[t.a as usize] || self.carry[t.a as usize] != CARRY_NONE {
+                    continue;
+                }
+            }
+            let r = self.seen(t.a);
+            if is_inst(r) {
+                let o = b.insts[r as usize].op;
+                if self.pfold[r as usize] || o == O_ICONST || o == O_FCONST || o == O_SLOTADDR || o == O_SYMADDR {
+                    continue;
+                }
+            }
+            if !any {
+                fill(&mut self.view, ni, VNONE);
+                any = true;
+            }
+            self.view[i] = r;
+        }
+        if !any {
+            return;
+        }
+        for i in 0..ni {
+            let mut r = self.view[i];
+            // Each step follows one view of the chain: at most `ni`.
+            while r != VNONE && self.seen(r) != r {
+                r = self.seen(r);
+            }
+            self.view[i] = r;
+            if r != VNONE && b.insts[i].op == O_ZEXT {
+                if self.wide.len() == 0 {
+                    fill(&mut self.wide, ni, false);
+                }
+                self.wide[r as usize] = true;
+            }
+        }
     }
 
     // `FOLD_XUSE`, after the other folds: `xuse` per extension, 1 while every use seen takes it extended,
@@ -2253,13 +2359,14 @@ extend Live {
             }
             let tb = b.blocks[tk as usize];
             for q in 0..b.edge_nargs(x) {
-                if b.edge_arg(x, q) != v {
+                if self.arg(b, x, q) != v {
                     continue;
                 }
                 let px = b.insts.len() as u32 + tb.param_start + q;
                 if ne == 2 {
                     let o = self.pos[b.edge_target(edge_of(b, t, 1 - e)) as usize];
                     if self.lend[tk as usize] == NONE || o >= self.pos[tk as usize] && o <= self.lend[tk as usize] || self.end[px as usize] > self.lend[tk as usize] && reads_before(
+                        self,
                         b,
                         b.edge_target(edge_of(b, t, 1 - e)),
                         tk,
@@ -2531,7 +2638,7 @@ extend Live {
                 let ed = edge_of(b, t, e);
                 let j = b.edge_target(ed);
                 if j == h {
-                    other = other || b.edge_arg(ed, q) != m;
+                    other = other || self.arg(b, ed, q) != m;
                     continue;
                 }
                 let jt = term(b, j);
@@ -2539,8 +2646,9 @@ extend Live {
                     continue;
                 }
                 let jb = b.blocks[j as usize];
-                let a = b.edge_arg(jt.a, q);
-                other = other || (a & VPARAM) != 0 && (a & ~VPARAM) >= jb.param_start && (a & ~VPARAM) < jb.param_start + jb.param_len as u32 && b.edge_arg(
+                let a = self.arg(b, jt.a, q);
+                other = other || (a & VPARAM) != 0 && (a & ~VPARAM) >= jb.param_start && (a & ~VPARAM) < jb.param_start + jb.param_len as u32 && self.arg(
+                    b,
                     ed,
                     (a & ~VPARAM) - jb.param_start,
                 ) != m;
@@ -2559,7 +2667,7 @@ extend Live {
                     return false;
                 }
                 for a in 0..b.edge_nargs(ed) {
-                    if b.edge_arg(ed, a) == m {
+                    if self.arg(b, ed, a) == m {
                         return false;
                     }
                 }
@@ -2712,7 +2820,7 @@ extend Live {
             for e in 0..ne {
                 let ed = edge_of(b, t, e);
                 let mut c: u64 = 0;
-                if b.edge_target(ed) == k && !const_of(b, b.edge_arg(ed, q), &mut c) {
+                if b.edge_target(ed) == k && !const_of(b, self.arg(b, ed, q), &mut c) {
                     return false;
                 }
             }
@@ -2734,7 +2842,7 @@ extend Live {
     /// The values instruction `i` of `b` uses, as `each_use` gives them but for the folded instructions
     /// (`pfold`): a use of one is a use of its operands, and one uses none.
     pub(package) fn uses_at(self: &Self, b: &Body, i: u32, out: &mut Vector<Value>) {
-        if self.pfold[i as usize] || self.relay.len() != 0 && self.relay[i as usize] != NONE {
+        if self.pfold[i as usize] || self.relay.len() != 0 && self.relay[i as usize] != NONE || self.seen(i) != i {
             out.truncate(0);
             return;
         }
@@ -2742,7 +2850,9 @@ extend Live {
         let mut u: usize = 0;
         let mut n: u32 = 0;
         while u < out.len() {
-            let v = out[u];
+            // A read of a view reads its value, which is no folded instruction.
+            let v = self.seen(out[u]);
+            out[u] = v;
             if (v & (VPARAM | VFLAG)) != 0 || !self.pfold[v as usize] {
                 u += 1;
                 continue;
@@ -3372,13 +3482,13 @@ extend Live {
                 continue;
             }
             for a in 0..b.edge_nargs(es[e]) {
-                let v = b.edge_arg(es[e], a);
+                let v = self.arg(b, es[e], a);
                 if (v & (VPARAM | VFLAG)) == 0 && v != VNONE && (b.insts[v as usize].op == O_ICONST || b.insts[v as usize].op == O_FCONST) {
                     return false;
                 }
             }
             for a in 0..b.edge_nargs(es[e]) {
-                let v = b.edge_arg(es[e], a);
+                let v = self.arg(b, es[e], a);
                 for i in bk.start..bk.start + bk.len {
                     each_use(b, b.insts[i as usize], &mut self.succ);
                     for u in 0..self.succ.len() {
@@ -3963,10 +4073,10 @@ extend Live {
                 if b.edge_target(ed) != k {
                     continue;
                 }
-                let v = b.edge_arg(ed, q);
+                let v = self.arg(b, ed, q);
                 let mut n: u32 = 0;
                 for a in 0..b.edge_nargs(ed) {
-                    n += (b.edge_arg(ed, a) == v) as u32;
+                    n += (self.arg(b, ed, a) == v) as u32;
                 }
                 if y != VNONE || n != 1 || (v & VFLAG) != 0 || v == VNONE {
                     return NONE;
@@ -4208,13 +4318,13 @@ extend Live {
     // one the other edge of `t`, a back edge to `h`, passes it to (that edge's moves before the branch then
     // serve `ed` too), else `header_of_value`.
     const fn exit_value(self: &Self, b: &Body, h: u32, t: Inst, ed: u32, q: u32) u32 {
-        let v = b.edge_arg(ed, q);
+        let v = self.arg(b, ed, q);
         if t.op == O_BR {
             let o = ast::pick(ed == t.b, t.c, t.b);
             if b.edge_target(o) == h {
                 let hb = b.blocks[h as usize];
                 for j in 0..hb.param_len as u32 {
-                    if b.edge_arg(o, j) == v {
+                    if self.arg(b, o, j) == v {
                         return b.insts.len() as u32 + hb.param_start + j;
                     }
                 }
@@ -4250,7 +4360,7 @@ extend Live {
                     continue;
                 }
                 for q in 0..hb.param_len as u32 {
-                    if b.edge_arg(ed, q) == v {
+                    if self.arg(b, ed, q) == v {
                         return ni + hb.param_start + q;
                     }
                 }
@@ -4498,7 +4608,7 @@ extend Live {
                 }
                 let ps = b.blocks[b.edge_target(ed) as usize].param_start as usize;
                 for j in 0..b.edge_nargs(ed) as usize {
-                    let a = b.edge_arg(ed, j as u32);
+                    let a = self.arg(b, ed, j as u32);
                     let y = ni + ps + j;
                     if a == VNONE || (a & (VPARAM | VFLAG)) != 0 || self.def_blk[a as usize] != k || self.kw[y] >= self.wt[a as usize] {
                         continue;
@@ -5159,16 +5269,16 @@ extend Live {
         }
         if is_terminator(t.op) {
             // A switch reads its scrutinee before any of its edges moves.
-            let mut m = (t.op == O_SWITCH && t.a == v) as u32;
+            let mut m = (t.op == O_SWITCH && self.seen(t.a) == v) as u32;
             for e in 0..edge_count(t) {
                 let ed = edge_of(b, t, e);
                 for j in 0..b.edge_nargs(ed) {
-                    m += (b.edge_arg(ed, j) == v) as u32;
+                    m += (self.arg(b, ed, j) == v) as u32;
                 }
             }
             return m == n;
         }
-        return n == 1 && t.a == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
+        return n == 1 && self.seen(t.a) == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
             b,
             l,
             v,
@@ -5186,14 +5296,15 @@ extend Live {
         if o == O_VOP {
             return true;
         }
+        let (ta, tb, tc) = (self.seen(t.a), self.seen(t.b), self.seen(t.c));
         if o == O_SELECT {
-            return t.b == v || t.c == v;
+            return tb == v || tc == v;
         }
         if o == O_VSEL {
-            return t.c == v;
+            return tc == v;
         }
         if o == O_LOAD {
-            return t.a == v;
+            return ta == v;
         }
         if self.carry.len() == b.insts.len() && self.carry[l as usize] == CARRY_ADC {
             // The folded high sum is one of the two operands.
@@ -5205,7 +5316,7 @@ extend Live {
             }
         }
         let commutes = o == O_ADD || o == O_MUL || o == O_AND || o == O_OR || o == O_XOR || o == O_FADD || o == O_FMUL;
-        return (commutes || o == O_PTRADD) && (t.a == v || t.b == v);
+        return (commutes || o == O_PTRADD) && (ta == v || tb == v);
     }
 
     // The positions value `x` holds a register at in the block at layout position `q` where it is live
@@ -5389,7 +5500,7 @@ extend Live {
                 let tk = b.edge_target(ed);
                 for j in 0..b.edge_nargs(ed) {
                     let y = ni + b.blocks[tk as usize].param_start + j;
-                    if b.edge_arg(ed, j) != v {
+                    if self.arg(b, ed, j) != v {
                         continue;
                     }
                     let s = self.held(y, self.pos[tk as usize]);
@@ -5482,7 +5593,7 @@ extend Live {
             for e in 0..edge_count(t) {
                 let ed = edge_of(b, t, e);
                 for ja in 0..b.edge_nargs(ed) {
-                    let a = b.edge_arg(ed, ja);
+                    let a = self.arg(b, ed, ja);
                     if a == VNONE {
                         continue;
                     }
@@ -5536,10 +5647,10 @@ extend Live {
             let t = term(b, self.preds[i as usize]);
             for e in 0..edge_count(t) {
                 let ed = edge_of(b, t, e);
-                if b.edge_target(ed) != k || j >= b.edge_nargs(ed) || b.edge_arg(ed, j) == VNONE {
+                if b.edge_target(ed) != k || j >= b.edge_nargs(ed) || self.arg(b, ed, j) == VNONE {
                     continue;
                 }
-                let ax = self.vix(b, b.edge_arg(ed, j));
+                let ax = self.vix(b, self.arg(b, ed, j));
                 if ax >= n || self.vseg[ax as usize] != NONE {
                     continue;
                 }
@@ -5604,10 +5715,10 @@ extend Live {
                 let t = term(b, p);
                 for e in 0..edge_count(t) {
                     let ed = edge_of(b, t, e);
-                    if b.edge_target(ed) != k || j >= b.edge_nargs(ed) || b.edge_arg(ed, j) == VNONE {
+                    if b.edge_target(ed) != k || j >= b.edge_nargs(ed) || self.arg(b, ed, j) == VNONE {
                         continue;
                     }
-                    let ax = self.vix(b, b.edge_arg(ed, j));
+                    let ax = self.vix(b, self.arg(b, ed, j));
                     if ax >= n {
                         continue;
                     }
@@ -5654,7 +5765,7 @@ extend Live {
                     let tk = b.edge_target(ed);
                     for j in 0..b.edge_nargs(ed) {
                         let y = ni + b.blocks[tk as usize].param_start + j;
-                        if b.edge_arg(ed, j) != v || self.pos[tk as usize] == NONE {
+                        if self.arg(b, ed, j) != v || self.pos[tk as usize] == NONE {
                             continue;
                         }
                         let s = self.held(y, self.pos[tk as usize]);
@@ -6120,7 +6231,7 @@ pub(package) fn each_edge_param(b: &Body, t: Inst, out: &mut Vector<u32>) {
 // Whether a path from block `from` reads value `v` before it reaches block `stop`: an instruction or an
 // edge argument of a block on it; true too past BACK_SCAN blocks. A block laid out past `last` (`pos`),
 // the end of `v`'s range, has `v` dead: no such path passes it.
-fn reads_before(b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, last: u32) bool {
+fn reads_before(lv: &Live, b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, last: u32) bool {
     let mut seen = Vector::<u32>::new();
     let mut work = Vector::<u32>::new();
     let mut us = Vector::<Value>::new();
@@ -6140,7 +6251,7 @@ fn reads_before(b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, las
             let t = b.insts[i as usize];
             each_use(b, t, &mut us);
             for u in 0..us.len() {
-                if us[u] == v {
+                if lv.seen(us[u]) == v {
                     return true;
                 }
             }
@@ -6148,7 +6259,7 @@ fn reads_before(b: &Body, from: u32, stop: u32, v: Value, pos: &Vector<u32>, las
                 b.succ_edges(t, &mut es);
                 for x in 0..es.len() {
                     for q in 0..b.edge_nargs(es[x]) {
-                        if b.edge_arg(es[x], q) == v {
+                        if lv.arg(b, es[x], q) == v {
                             return true;
                         }
                     }
@@ -6982,6 +7093,12 @@ const fn is_inst(v: Value) bool {
 const fn sext_bits(k: u64, bits: u32) i64 {
     let s = 64 - bits as u64;
     return (k << s) as i64 >> s as i64;
+}
+
+// The bits of a value of type `t` a general register holds whole (an integer of up to 64 bits, a pointer of
+// 8 bytes), else 0.
+const fn word_bits(t: u8) u32 {
+    return ast::pick(t == T_PTR || is_int(t) && t != T_I128, type_bits(t, 8), 0u32);
 }
 
 // The bits of integer constant `v`, u64::MAX for a value that is no constant (or that constant).

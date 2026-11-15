@@ -10794,8 +10794,9 @@ b2:
 // the register it arrived in and returns with no frame (its first word is no `stp` that moves sp), and a
 // value that lives across the call holds a callee-saved register on the call's path, which the frame's
 // setup saves. Of five such values, three hold callee-saved registers there, and two stay in the registers
-// they arrived in (x2 and x3) up to the call, which saves them around itself with one `stp`. The functions
-// give the C results on the host.
+// they arrived in (x2 and x3) up to the call, which saves them around itself with one `stp`. The call's
+// argument is still in x0, the register the edge's move read: no move brings it back. The functions give
+// the C results on the host.
 @test
 fn a_call_outside_rare_blocks_sets_the_frame_up_on_its_path() {
     let one = M"(lir ptr 8
@@ -10842,6 +10843,9 @@ b2:
     assert((le_at(&o1, t1, 4) as u32 & 0x7E00001F) == 0x34000000, "the entry tests x0, with no frame");
     // `stp x20, x19, [sp, #-32]!`.
     assert(elf_text_count(&o1, 0xFFFFFFFF, 0xA9BE4FF4) == 1, "the frame on the call's path, with the value's register");
+    // `mov x19, x0`, then `bl`: x0 still holds the argument, which no move brings back.
+    let kept: [u8; 8] = [0xF3, 0x03, 0x00, 0xAA, 0, 0, 0, 0x94];
+    assert(holds(&o1, kept[0..8]), "the argument stays in the register the value left");
     let mut o5 = Vector::<u8>::new();
     assert(object_of(five, tgt::axis_index("linux", false), a64, 0, &mut o5), "the object of five values");
     let (t5, _) = elf_text(&o5);
@@ -10850,6 +10854,9 @@ b2:
     assert(elf_text_count(&o5, 0xFFFFFFFF, 0xA9BD57F6) == 1, "the frame on the call's path, five values");
     // `stp x2, x3, [sp]`.
     assert(elf_text_count(&o5, 0xFFFFFFFF, 0xA9000FE2) == 1, "two values saved from the registers they arrived in");
+    // That `stp`, then `bl`: the saves write no register, so x0 still holds the argument.
+    let kept5: [u8; 8] = [0xE2, 0x0F, 0x00, 0xA9, 0, 0, 0, 0x94];
+    assert(holds(&o5, kept5[0..8]), "the argument stays in the register the value left, past the saves");
     let both = M"(lir ptr 8
 sym @keep fn global
 sym @five fn global
@@ -10955,6 +10962,12 @@ b4:
         // `cbz` or `cbnz` of x0: the parameter stays in the register it arrives in up to the frame's edge.
         assert((le_at(&o, t, 4) as u32 & 0x7E00001F) == 0x34000000, "arm64: the entry tests x0");
         if k == 0 {
+            // `mov x19, x0; mov x20, x1; bl`; `mov rbx, rdi; mov r12, rsi; call`: the first argument is
+            // still in the register the edge's move read.
+            let ain: [u8; 12] = [0xF3, 0x03, 0x00, 0xAA, 0xF4, 0x03, 0x01, 0xAA, 0, 0, 0, 0x94];
+            assert(holds(&o, ain[0..12]), "arm64: no move of the argument back");
+            let xin: [u8; 7] = [0x48, 0x89, 0xFB, 0x49, 0x89, 0xF4, 0xE8];
+            assert(holds(&x, xin[0..7]), "x86-64: no move of the argument back");
             // Three `bl` in a row; `call; mov rdi, rax; call; mov rdi, rax; call`.
             let bls: [u8; 12] = [0, 0, 0, 0x94, 0, 0, 0, 0x94, 0, 0, 0, 0x94];
             assert(holds(&o, bls[0..12]), "arm64: no register saved around a call");
@@ -19565,4 +19578,126 @@ int main(void) {
 }
 )";
     assert_eq(run_native(lir, drv), 0);
+}
+
+// A conversion that keeps its operand's bits (a truncation, a pointer made an integer, a zero extension of
+// a load) reads its operand's register: no copy, also when the operand lives on. A truncation's reader
+// ignores the bits above it and a zero extension's reads zeros there, past calls too, where the value
+// waits in a callee-saved register or in its home. The functions give the C results on the host.
+@test
+fn a_conversion_reads_its_operands_register() {
+    let views = M"(fn @views
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i32 v0 align 2
+  v3 = zext.i64 v2
+  v4 = trunc.i32 v1
+  v5 = add.i32 v4, v2
+  v6 = zext.i64 v5
+  v7 = add.i64 v6, v3
+  v8 = add.i64 v7, v1
+  v9 = ptrtoint.i64 v0
+  v10 = add.i64 v8, v9
+  v11 = load.i64 v0+8 align 3
+  v12 = add.i64 v10, v11
+  ret v12
+)";
+    let one = format("lir ptr 8\nsym @views fn global\n{}", views);
+    let linux = tgt::axis_index("linux", false);
+    let mut o = Vector::<u8>::new();
+    assert(object_of(&one, linux, tgt::axis_index("aarch64", true), 0, &mut o), "the arm64 object");
+    // No `mov xd, xm` and no `mov wd, wm`.
+    assert_eq(elf_text_count(&o, 0xFFE0FFE0, 0xAA0003E0), 0);
+    assert_eq(elf_text_count(&o, 0xFFE0FFE0, 0x2A0003E0), 0);
+    let mut x = Vector::<u8>::new();
+    assert(object_of(&one, linux, tgt::axis_index("x86_64", true), 0, &mut x), "the x86-64 object");
+    // `mov eax, [rdi]; lea ecx, [rsi + rax]`: the sum reads the parameter's low half and the load.
+    // `lea rax, [rcx + rdi]`: the pointer's register is the integer's.
+    let sum: [u8; 5] = [0x8B, 0x07, 0x8D, 0x0C, 0x06];
+    let ptr: [u8; 4] = [0x48, 0x8D, 0x04, 0x39];
+    assert(holds(&x, sum[0..5]) && holds(&x, ptr[0..4]), "x86-64: the operands' registers");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let past = M"(fn @past
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i32 v0 align 2
+  v3 = zext.i64 v2
+  v4 = trunc.i32 v1
+  v5 = call.i64 @leaf(v1) : (i64) -> i64
+  v6 = zext.i64 v4
+  v7 = add.i64 v5, v6
+  v8 = add.i64 v7, v3
+  v9 = trunc.i8 v1
+  v10 = zext.i64 v9
+  v11 = add.i64 v8, v10
+  v12 = call.i64 @leaf(v11) : (i64) -> i64
+  v13 = add.i64 v12, v3
+  v14 = load.i8 v0 align 0
+  v15 = zext.i64 v14
+  v16 = add.i64 v13, v15
+  v17 = trunc.i16 v1
+  v18 = zext.i64 v17
+  v19 = add.i64 v16, v18
+  v20 = call.i64 @leaf(v19) : (i64) -> i64
+  v21 = zext.i32 v14
+  v22 = zext.i64 v21
+  v23 = add.i64 v20, v22
+  v24 = add.i64 v23, v1
+  ret v24
+)";
+    let lir = format("lir ptr 8\nsym @views fn global\nsym @past fn global\nsym @leaf fn global ext\n{}{}", views, past);
+    let drv = M"(#include <stdint.h>
+uint64_t views(void *, uint64_t);
+uint64_t past(void *, uint64_t);
+uint64_t leaf(uint64_t x) { return x * 3 + 1; }
+int main(void) {
+  uint64_t m[2] = {UINT64_C(0xFFFFFFF0FFFFFFF5), 7};
+  uint64_t n = UINT64_C(0xFFFFFFFF80000081);
+  uint32_t w = (uint32_t)m[0];
+  uint8_t c = (uint8_t)m[0];
+  if (views(m, n) != (uint64_t)(uint32_t)((uint32_t)n + w) + w + n + (uint64_t)(uintptr_t)m + m[1]) return 1;
+  uint64_t a = leaf(n) + (uint32_t)n + w + (uint8_t)n;
+  uint64_t b = leaf(a) + w + c + (uint16_t)n;
+  if (past(m, n) != leaf(b) + c + n) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(&lir, drv), 0);
+}
+
+// A branch on a register whose value an edge passes to a parameter that takes that register (a zero
+// extension of the tested load): the argument is in its home, so that edge's other move runs before the
+// branch, which falls through into the next block. No jump over a block of moves.
+@test
+fn a_tested_register_passed_in_its_home_keeps_the_moves_before_the_branch() {
+    let lir = M"(lir ptr 8
+sym @find fn global
+fn @find
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i16 v0+10 align 1
+  v3 = zext.i64 v2
+  v4 = iconst.i16 0
+  v5 = icmp.eq v2, v4
+  v6 = iconst.i64 0
+  br v5, b2(v6, v3), b1
+b1:
+  v7 = mul.i64 v3, v1
+  v8 = load.i64 v0+16 align 3
+  v9 = add.i64 v7, v8
+  jmp b2(v9, v3)
+b2(v10: i64, v11: i64):
+  v12 = add.i64 v10, v11
+  ret v12
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // One `cbz` or `cbnz`, no `b`.
+    assert_eq(elf_text_count(&o, 0x7E000000, 0x34000000), 1);
+    assert_eq(elf_text_count(&o, 0xFC000000, 0x14000000), 0);
 }

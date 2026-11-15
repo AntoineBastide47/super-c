@@ -257,6 +257,21 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   extends its index as under `lv::FOLD_XIDX`; an address sum of a scale that is no power of two up to
   16 multiplies the narrow register by the scale and adds the base in one `umaddl` or `smaddl`).
   x86-64 has no such operand form and keeps its copy.
+- Views (arm64 and x86-64, `lv::FOLD_VIEW`): a conversion that keeps its operand's bits makes no value
+  of its own. `Live::view` names, per such instruction, the value it is a view of: a truncation, a
+  cast between a pointer and an integer no wider, a pointer's copy (`ptradd` of nothing), and a zero
+  extension of a load or of a zero extension. The view has that value's index (`Live::vix`), so it
+  has no register, no home and no range; `Live::uses_at` lists the value for each read of the view
+  (`Live::seen`, `Live::arg` for an edge's argument), and the value lives to the view's last read. A
+  generator emits nothing for the instruction and reads the operand's register at the view's type.
+  The rules a generator keeps: a scan that asks whether an instruction or an edge reads a value
+  compares `seen` of the operand; a reload binds the whole value (`reg` loads at the value's type,
+  not the view's); the bits above a narrower view are the value's, so `Core::narrow` turns off the
+  `clean` shortcut and every extension in place for it; a value a zero extension is a view of
+  (`Live::wide`) holds zeros above its bits from its definition on (`end_inst` extends it in place
+  when its emitter left it not `clean`) and is stored 8 bytes wide (`Core::xty`), so a read at the
+  extension's type from its home is right. No view of a constant or an address, which each use makes
+  again, of a folded instruction, or of a 128-bit, float or vector value.
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is
@@ -270,7 +285,11 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   passed on, both results in memory), which returns as the body would. Before a sibling call only the
   values the call reads go to their homes (`spill_around_call`, `back`): no code of the body runs after
   it. arm64: a parameter a call of the entry block takes before any instruction ran is read in the
-  register it arrived in (`arrived_in`), not in its home; not where a branch enters the entry block. arm64 joins up to 8 integer
+  register it arrived in (`arrived_in`), not in its home; not where a branch enters the entry block. On
+  both targets, a block that one edge enters through moves that wait for the frame (`entry_code`) starts
+  with each register those moves read still holding its value (`left`; arm64 `arrived_in`, x86-64
+  `left_in`): a call's argument that is that value in that register takes no move, when no instruction
+  of the block ran before the call but its saves. arm64 joins up to 8 integer
   comparisons into one conditional-comparison chain (`lv::FOLD_CCMP`); each comparison's extensions and
   operand locks end after its `ccmp` (`conj_flags`), so a chain of spilled values needs no more than the
   16 registers `alloc` has.

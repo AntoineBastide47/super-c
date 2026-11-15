@@ -1142,3 +1142,64 @@ b2:
         assert_eq(both, sum == 1);
     }
 }
+
+// Under `FOLD_VIEW` a conversion that keeps its operand's bits is a view of the operand: a truncation, a
+// pointer made an integer, a zero extension of a load, and a view of a view (of the first one's value).
+// Each has its value's index, a read of it is a read of that value, and it reads nothing itself. A zero
+// extension of a sum is none (the sum's register may hold bits above it), nor is a truncation of a
+// constant (each use makes a constant again).
+@test
+fn a_conversion_that_keeps_its_operands_bits_is_a_view() {
+    let mut err = String::new();
+    let p = lparse::parse(
+        M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i32 v0 align 2
+  v3 = zext.i64 v2
+  v4 = trunc.i32 v1
+  v5 = trunc.i8 v4
+  v6 = add.i32 v4, v2
+  v7 = zext.i64 v6
+  v8 = ptrtoint.i64 v0
+  v9 = iconst.i64 300
+  v10 = trunc.i8 v9
+  v11 = add.i8 v5, v10
+  v12 = zext.i64 v11
+  v13 = add.i64 v3, v7
+  v14 = add.i64 v13, v8
+  v15 = add.i64 v14, v12
+  ret v15
+)",
+        &mut err,
+    ).unwrap();
+    let b = &p.bodies[0];
+    let ni = b.insts.len() as u32;
+    let mut live = lv::Live::new();
+    live.fold_ops = lv::FOLD_VIEW;
+    live.run(b);
+    // Instruction k is v(k + 2).
+    assert_eq(live.seen(1), 0);
+    assert_eq(live.seen(2), VPARAM | 1);
+    assert_eq(live.seen(3), VPARAM | 1);
+    assert_eq(live.seen(6), VPARAM | 0);
+    assert_eq(live.seen(5), 5);
+    assert_eq(live.seen(8), 8);
+    assert_eq(live.seen(10), 10);
+    assert_eq(live.vix(b, 3), ni + 1);
+    assert(live.wide_at(0) && !live.wide_at(4), "the load holds zeros above its bits, the sum may not");
+    // The sum of the two truncations' readers: the 64-bit parameter and the load.
+    let us = live.uses_of(4);
+    assert_eq(us.len(), 2);
+    assert_eq(us[0], VPARAM | 1);
+    assert_eq(us[1], 0);
+    assert_eq(live.uses_of(2).len(), 0);
+    // The parameter's reads: the two sums that read its truncations.
+    assert_eq(live.uses[(ni + 1) as usize], 2);
+    live.fold_ops = 0;
+    live.run(b);
+    assert_eq(live.seen(1), 1);
+    assert_eq(live.vix(b, 3), 3);
+}

@@ -143,9 +143,14 @@ pub(package) struct Gen {
     frameless: bool,
     sret_off: i64, // the slot of x8 for a vector result in memory, -1 when none
     // The parameter each of x0..x8 arrived with when the entry moved it into its home (`entry_reg`), NONE
-    // for none, valid while the code ends at `arr_at` (no instruction ran since).
+    // for none, valid while the code ends at `arr_at` (no instruction ran since) in block `arr_blk`. At
+    // the start of a block one edge enters with moves that wait for the frame (`entry_code`), the value
+    // each of those moves took out of such a register (`left`: block, register, value index): the
+    // register still holds it.
     arrived: Vector<u32>,
     arr_at: u32,
+    arr_blk: u32,
+    left: Vector<(u32, u8, u32)>,
     canary: i64, // the stack canary's slot above the LIR slots, -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
@@ -275,6 +280,8 @@ extend Gen {
             sret_off: -1,
             arrived: Vector::new(),
             arr_at: NONE,
+            arr_blk: 0,
+            left: Vector::<(u32, u8, u32)>::new(),
             canary: -1,
             va_save: NONE,
             late_va: Vector::<(u32, Va)>::new(),
@@ -1787,7 +1794,8 @@ extend Gen {
             self.cr.lock |= bit(va.reg);
             return va.reg;
         }
-        let t = self.cr.vt(v);
+        // The register holds the whole value `v` is a view of (`lv::FOLD_VIEW`).
+        let t = self.cr.vt(self.cr.lv.seen(v));
         if va.home == H_REMAT || va.home == H_SPADDR || va.home == H_FPADDR {
             // Once per instruction: a second operand of the same value reads the first one's register.
             for k in 0..self.remat.len() {
@@ -1882,7 +1890,7 @@ extend Gen {
         let x = self.cr.vx(v);
         let va = self.cr.va[x as usize];
         // A narrow load zero-extends.
-        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.cr.lv.zero_param(
+        let clean = va.reg != NOREG && va.clean && !self.cr.narrow(v) || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.cr.lv.zero_param(
             self.cr.b(),
             v,
         ) || self.arrived_ext(v, false);
@@ -2023,6 +2031,17 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        // A value a zero extension is a view of (`lv::Live::wide`) holds zeros above its bits from here on.
+        let w = self.cr.va[self.cur as usize];
+        if self.cr.lv.wide_at(self.cur) && w.reg != NOREG && !w.clean {
+            let bits = type_bits(self.cr.b().insts[self.cur as usize].ty, self.cr.ptr);
+            if bits == 32 {
+                self.emit(a::mov_reg(false, w.reg, w.reg));
+            } else {
+                self.emit(a::uxt(w.reg, w.reg, bits));
+            }
+            self.cr.va.index_mut(self.cur as usize).clean = true;
+        }
         if self.cr.va[self.cur as usize].home != H_FIXED {
             self.settle(self.cur);
         }
@@ -2517,7 +2536,7 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -2593,6 +2612,8 @@ extend Gen {
         self.tail_ret = NONE;
         fill(&mut self.arrived, 9, NONE);
         self.arr_at = NONE;
+        self.arr_blk = 0;
+        self.left.truncate(0);
         self.rels.truncate(0);
         self.cr.free_slots.truncate(0);
         self.taken.truncate(0);
@@ -3219,9 +3240,10 @@ extend Gen {
 
     // Whether register `r` still holds value index `x`, the parameter that arrived in it: in the entry block,
     // no instruction ran since the entry moved it into its home (a later block may start at that position
-    // when the entry block emits no code).
+    // when the entry block emits no code). Or the value an edge's move took out of it: in the block that
+    // edge alone enters, no instruction ran since (`left`).
     const fn arrived_in(self: &Self, x: u32, r: u8) bool {
-        return r <= 8 && self.code.len() as u32 == self.arr_at && self.cr.lv.def_blk[self.cur as usize] == 0 && self.arrived[r as usize] == x;
+        return r <= 8 && self.code.len() as u32 == self.arr_at && self.cr.lv.def_blk[self.cur as usize] == self.arr_blk && self.arrived[r as usize] == x;
     }
 
     // Compile the block at layout position `q`.
@@ -3279,6 +3301,26 @@ extend Gen {
         };
         self.zwide = zk > 256;
         self.zat = self.code.len() as u32;
+        // The registers the one edge into the block took values out of (`left`) hold them still, when the
+        // block's start left no code.
+        if self.zat == self.blk_at[k as usize] {
+            let mut any = false;
+            for j in 0..self.left.len() {
+                let (lk, r, x) = self.left[j];
+                if lk != k {
+                    continue;
+                }
+                if !any {
+                    fill(&mut self.arrived, 9, NONE);
+                    any = true;
+                }
+                self.arrived[r as usize] = x;
+            }
+            if any {
+                self.arr_at = self.zat;
+                self.arr_blk = k;
+            }
+        }
         let dbg = unsafe (*self.pkg).debug;
         for i in bk.start..bk.start + bk.len {
             if dbg {
@@ -3301,7 +3343,12 @@ extend Gen {
                 self.end_inst();
                 continue;
             }
+            // The saves write no register: what the argument registers hold stands (`arrived_in`).
+            let fresh = self.code.len() as u32 == self.arr_at;
             let saved = self.save_scratch(i);
+            if fresh {
+                self.arr_at = self.code.len() as u32;
+            }
             if !self.inst(i) {
                 return false;
             }
@@ -3467,9 +3514,24 @@ extend Gen {
         self.zat = NONE;
         self.arr_at = NONE;
         self.landed = NONE;
+        // The edge alone enters its target: an argument register a move reads, and none writes, still
+        // holds the moved value when the target starts (`left`).
+        let k = self.cr.b().edge_target(e);
+        if self.cr.lv.npred[k as usize] == 1 {
+            for i in 0..self.mv.len() {
+                let m = self.mv[i];
+                let mut kept = m.src.kind == LC_REG && m.src.reg <= 8 && m.dst.kind == LC_REG && m.dst.val != NONE;
+                for j in 0..self.mv.len() {
+                    kept = kept && !(self.mv[j].dst.kind == LC_REG && self.mv[j].dst.reg == m.src.reg);
+                }
+                if kept {
+                    self.left.push((k, m.src.reg, m.dst.val));
+                }
+            }
+        }
         self.framing = true;
         resolve_moves(self);
-        self.goto(self.cr.b().edge_target(e), true);
+        self.goto(k, true);
         self.framing = false;
         self.zat = zat;
         self.arr_at = arr_at;
@@ -3733,6 +3795,9 @@ extend Gen {
         let op = t.op;
         if self.cr.va[i as usize].home == H_REMAT {
             return true;
+        }
+        if self.cr.lv.seen(i) != i {
+            return true; // its readers read its value (`lv::FOLD_VIEW`)
         }
         if op == O_FCONST {
             let r = self.def(i);
@@ -4114,7 +4179,7 @@ extend Gen {
         let s = self.cr.narrow_src(v);
         let r = self.reg(s);
         let x = self.cr.vx(v);
-        if s == v && (!signed && self.cr.va[x as usize].clean || self.arrived_ext(v, signed)) {
+        if s == v && (!signed && self.cr.va[x as usize].clean && !self.cr.narrow(v) || self.arrived_ext(v, signed)) {
             return r;
         }
         // The value's own register, whose bits above the value's are no value: extended in place, once for
@@ -4124,7 +4189,9 @@ extend Gen {
         // seg_in`; its stack home is read back extended). Not a parameter that arrived sign-extended, which
         // its signed readers take as it is.
         let here = self.cr.lv.end[x as usize] == self.cr.pos || self.cr.va[x as usize].home == H_FIXED && self.cr.lv.def_blk[x as usize] == self.cr.lv.order[self.cr.pos as usize];
-        if s == v && !signed && self.cr.va[x as usize].reg == r && here && !self.arrived_ext(v, true) {
+        if s == v && !signed && self.cr.va[x as usize].reg == r && here && !self.arrived_ext(v, true) && !self.cr.narrow(
+            v,
+        ) {
             self.emit(a::uxt(r, r, bits));
             self.cr.va.index_mut(x as usize).clean = true;
             return r;
@@ -4856,7 +4923,9 @@ extend Gen {
                 };
                 self.emit(a::logic_imm(sf, opc, rd, ra, li));
                 // A mask within the width clears the bits above it; an `or` or `xor` of one keeps them clear.
-                if small && (k & 0xFFFFFFFF) >> bits as u64 == 0 && (op == O_AND || self.cr.va[self.cr.vx(t.a) as usize].clean) {
+                if small && (k & 0xFFFFFFFF) >> bits as u64 == 0 && (op == O_AND || self.cr.va[self.cr.vx(t.a) as usize].clean && !self.cr.narrow(
+                    t.a,
+                )) {
                     self.cr.va.index_mut(i as usize).clean = true;
                 }
                 return true;
@@ -4919,8 +4988,8 @@ extend Gen {
             self.reg(t.b)
         };
         // An `and` of a value whose bits above the type are 0, an `or` or `xor` of two: so are the result's.
-        let ca = self.cr.va[self.cr.vx(t.a) as usize].clean;
-        let cb = self.cr.va[self.cr.vx(t.b) as usize].clean;
+        let ca = self.cr.va[self.cr.vx(t.a) as usize].clean && !self.cr.narrow(t.a);
+        let cb = self.cr.va[self.cr.vx(t.b) as usize].clean && !self.cr.narrow(t.b);
         let rd = self.def_step(i);
         let xa = ra as u32;
         let xb = rb as u32;
@@ -5221,7 +5290,7 @@ extend Gen {
         let tb = type_bits(to, self.cr.ptr);
         // A zero extension of a value whose register holds nothing above its bits (a byte load's, say)
         // gives it another type.
-        if op == O_ZEXT && self.cr.va[self.cr.vx(t.a) as usize].clean {
+        if op == O_ZEXT && self.cr.va[self.cr.vx(t.a) as usize].clean && !self.cr.narrow(t.a) {
             let ra = self.reg(t.a);
             let _ = self.def_from(i, t.a, ra);
             self.cr.va.index_mut(i as usize).clean = true;
@@ -5630,7 +5699,7 @@ extend Gen {
             return NONE;
         }
         for q in i..i + n {
-            if b.insts[q as usize].op == O_STORE && b.insts[q as usize].b == p {
+            if b.insts[q as usize].op == O_STORE && self.cr.lv.seen(b.insts[q as usize].b) == p {
                 return NONE;
             }
         }
@@ -5886,7 +5955,7 @@ extend Gen {
                 lv::each_use(b, t, &mut self.cr.uses);
                 let mut reads = false;
                 for q in 0..self.cr.uses.len() {
-                    reads = reads || self.cr.uses[q] == pv;
+                    reads = reads || self.cr.lv.seen(self.cr.uses[q]) == pv;
                 }
                 if !reads {
                     continue;
@@ -7151,7 +7220,9 @@ extend Gen {
                 self.cclean.push(false);
                 continue;
             }
-            self.cclean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
+            self.cclean.push(
+                va.reg != NOREG && va.clean && !self.cr.narrow(v) || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG),
+            );
             if !mv {
                 continue;
             }
@@ -7614,7 +7685,7 @@ extend Gen {
             return Test { kind: T_CC, cc: self.pend.cc, reg: 0 };
         }
         let r = self.reg(v) as u32;
-        if self.cr.va[cx as usize].clean {
+        if self.cr.va[cx as usize].clean && !self.cr.narrow(v) {
             return Test { kind: T_CBNZ, cc: 0, reg: r };
         }
         self.emit(a::logic_imm(false, 3, a::ZR, r, a::logical_imm(0xFF, false)));
@@ -8017,7 +8088,13 @@ extend Gen {
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
         for q in 0..b.edge_nargs(e) {
-            let pva = self.cr.pva(ni + tb.param_start + q);
+            let px = ni + tb.param_start + q;
+            let pva = self.cr.pva(px);
+            // An argument in its parameter's home moves nothing.
+            let ax = self.cr.vx(b.edge_arg(e, q));
+            if ax != px && pva.home == H_FIXED && self.cr.va[ax as usize].reg == pva.reg {
+                continue;
+            }
             if pva.home != H_FIXED || pva.reg as u32 == test.reg {
                 return false;
             }

@@ -297,6 +297,14 @@ pub(package) struct Gen {
     erels: Vector<CRel>,
     framing: bool,
     fat: u32,
+    // At the start of a block one edge enters with moves that wait for the frame (`entry_code`), the
+    // value each of those moves took out of a general register (`left`: block, register, value index):
+    // the register still holds it (`arrived`, per register, NONE for none) while the code ends at
+    // `arr_at` in block `arr_blk` (no instruction ran since).
+    left: Vector<(u32, u8, u32)>,
+    arrived: Vector<u32>,
+    arr_at: u32,
+    arr_blk: u32,
     again: bool, // the next `func` compiles the body it compiled last again (`unshrunk`, `far`)
     /// The run-time copies the body's CPU-level check chooses (`dispatch_of`): per copy, its level << 32 |
     /// its body symbol, the highest first. Empty: no check.
@@ -459,6 +467,10 @@ extend Gen {
             erels: Vector::<CRel>::new(),
             framing: false,
             fat: NONE,
+            left: Vector::<(u32, u8, u32)>::new(),
+            arrived: Vector::<u32>::new(),
+            arr_at: NONE,
+            arr_blk: 0,
             again: false,
             disp: Vector::<u64>::new(),
             disp_lv: 0,
@@ -716,7 +728,7 @@ extend Gen {
     const fn reads(self: &Self, i: u32, v: Value) bool {
         let us = self.cr.lv.uses_of(i);
         for k in 0..us.len() {
-            if us[k] == v {
+            if us[k] == self.cr.lv.seen(v) {
                 return true;
             }
         }
@@ -1143,7 +1155,7 @@ extend Gen {
             lv::each_use(b, t, &mut us);
             let mut n: u32 = 0;
             for q in 0..us.len() {
-                n += (us[q] == cur) as u32;
+                n += (self.cr.lv.seen(us[q]) == cur) as u32;
             }
             if n == 0 {
                 continue;
@@ -1445,7 +1457,7 @@ extend Gen {
                 return NOREG;
             }
             for q in 0..b.edge_nargs(tm.a) {
-                if b.edge_arg(tm.a, q) == pv {
+                if self.cr.lv.arg(b, tm.a, q) == pv {
                     return NOREG;
                 }
             }
@@ -2790,7 +2802,8 @@ extend Gen {
             self.cr.lock |= bit(va.reg);
             return va.reg;
         }
-        let t = self.cr.vt(v);
+        // The register holds the whole value `v` is a view of (`lv::FOLD_VIEW`).
+        let t = self.cr.vt(self.cr.lv.seen(v));
         if va.home == H_REMAT || va.home == H_SPADDR || va.home == H_FPADDR {
             let r = self.tmp(is_v(t));
             self.materialize(v, r);
@@ -2859,7 +2872,7 @@ extend Gen {
         let x = self.cr.vx(v);
         let va = self.cr.va[x as usize];
         // A narrow load zero-extends.
-        let clean = va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.cr.lv.zero_param(
+        let clean = va.reg != NOREG && va.clean && !self.cr.narrow(v) || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG) || self.cr.lv.zero_param(
             self.cr.b(),
             v,
         );
@@ -2962,6 +2975,12 @@ extend Gen {
 
     // End the current instruction: its locks and temporaries end and its dead values free.
     fn end_inst(self: &mut Self) {
+        // A value a zero extension is a view of (`lv::Live::wide`) holds zeros above its bits from here on.
+        let w = self.cr.va[self.cur as usize];
+        if self.cr.lv.wide_at(self.cur) && w.reg != NOREG && !w.clean {
+            self.c.ext(type_bytes(self.cr.b().insts[self.cur as usize].ty, self.cr.ptr), 4, false, w.reg, w.reg);
+            self.cr.va.index_mut(self.cur as usize).clean = true;
+        }
         if self.cr.va[self.cur as usize].home != H_FIXED {
             self.settle(self.cur);
         }
@@ -3607,7 +3626,7 @@ extend Gen {
         }
         self.cr.lv.three = true;
         self.cr.lv.two = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | if self.avx {
+        self.cr.lv.fold_ops = lv::FOLD_VIEW | lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
             0
@@ -3646,6 +3665,8 @@ extend Gen {
         self.efix.truncate(0);
         self.erels.truncate(0);
         self.fat = NONE;
+        self.left.truncate(0);
+        self.arr_at = NONE;
         if self.shrink {
             self.cr.lv.relayout(b);
             // A shrink-wrapped body places no code past its blocks: each late edge moves in place.
@@ -4323,6 +4344,26 @@ extend Gen {
             }
         }
         let bk = b.blocks[k as usize];
+        // The registers the one edge into the block took values out of (`left`) hold them still, when the
+        // block's start left no code.
+        if self.c.len() == self.blk_at[k as usize] {
+            let mut any = false;
+            for j in 0..self.left.len() {
+                let (lk, r, x) = self.left[j];
+                if lk != k {
+                    continue;
+                }
+                if !any {
+                    fill(&mut self.arrived, 16, NONE);
+                    any = true;
+                }
+                self.arrived[r as usize] = x;
+            }
+            if any {
+                self.arr_at = self.c.len();
+                self.arr_blk = k;
+            }
+        }
         if self.upper_entry(q, k) {
             self.c.vzeroupper();
         }
@@ -4339,7 +4380,12 @@ extend Gen {
                 self.end_inst();
                 continue;
             }
+            // The saves write no register: what the registers hold stands (`left_in`).
+            let fresh = self.c.len() == self.arr_at;
             let saved = self.save_scratch(i);
+            if fresh {
+                self.arr_at = self.c.len();
+            }
             if !self.inst(i) {
                 return false;
             }
@@ -4502,9 +4548,24 @@ extend Gen {
         let code = replace(&mut self.c, replace(&mut self.ec, x::Code::new()));
         let nf = self.fix.len();
         let nr = self.rels.len();
+        // The edge alone enters its target: a general register a move reads, and none writes, still
+        // holds the moved value when the target starts (`left`).
+        let k = self.cr.b().edge_target(e);
+        if self.cr.lv.npred[k as usize] == 1 {
+            for i in 0..self.mv.len() {
+                let m = self.mv[i];
+                let mut kept = m.src.kind == LC_REG && m.src.reg < 16 && m.dst.kind == LC_REG && m.dst.val != NONE;
+                for j in 0..self.mv.len() {
+                    kept = kept && !(self.mv[j].dst.kind == LC_REG && self.mv[j].dst.reg == m.src.reg);
+                }
+                if kept {
+                    self.left.push((k, m.src.reg, m.dst.val));
+                }
+            }
+        }
         self.framing = true;
         resolve_moves(self);
-        self.goto(self.cr.b().edge_target(e), true);
+        self.goto(k, true);
         self.framing = false;
         for j in nf..self.fix.len() {
             self.efix.push(self.fix[j]);
@@ -4736,6 +4797,9 @@ extend Gen {
         let op = t.op;
         if self.cr.va[i as usize].home == H_REMAT {
             return true;
+        }
+        if self.cr.lv.seen(i) != i {
+            return true; // its readers read its value (`lv::FOLD_VIEW`)
         }
         if op == O_FCONST {
             let r = self.def(i);
@@ -5137,14 +5201,16 @@ extend Gen {
     fn ext(self: &mut Self, v: Value, signed: bool, bits: u32) u8 {
         let r = self.reg(v);
         let xv = self.cr.vx(v);
-        if !signed && self.cr.va[xv as usize].clean {
+        if !signed && self.cr.va[xv as usize].clean && !self.cr.narrow(v) {
             return r;
         }
         // A value in the plan's register in the block that defines it is extended in place, once for
         // every reader after this one: each comes through here, and the value stays extended where the
         // plan moves it (`place::Core::seg_in`; its stack home is read back extended).
         let va = self.cr.va[xv as usize];
-        if !signed && va.home == H_FIXED && va.reg == r && self.cr.lv.def_blk[xv as usize] == self.cr.lv.order[self.cr.pos as usize] {
+        if !signed && va.home == H_FIXED && va.reg == r && self.cr.lv.def_blk[xv as usize] == self.cr.lv.order[self.cr.pos as usize] && !self.cr.narrow(
+            v,
+        ) {
             self.c.ext(bits / 8, 4, false, r, r);
             self.cr.va.index_mut(xv as usize).clean = true;
             return r;
@@ -5270,7 +5336,7 @@ extend Gen {
         let b = self.cr.b();
         for e in [t.b, t.c] {
             for q in 0..b.edge_nargs(e) {
-                if b.edge_arg(e, q) == v {
+                if self.cr.lv.arg(b, e, q) == v {
                     return true;
                 }
             }
@@ -5932,8 +5998,8 @@ extend Gen {
             let mut rb = self.reg(t.b);
             // An `and` of a value whose bits above the type are 0, an `or` or `xor` of two: so are the
             // result's.
-            let ca = self.cr.va[self.cr.vx(t.a) as usize].clean;
-            let cb = self.cr.va[self.cr.vx(t.b) as usize].clean;
+            let ca = self.cr.va[self.cr.vx(t.a) as usize].clean && !self.cr.narrow(t.a);
+            let cb = self.cr.va[self.cr.vx(t.b) as usize].clean && !self.cr.narrow(t.b);
             let mut a = t.a;
             if op != O_SUB && self.swaps(i, t.b, ra, rb) {
                 a = t.b;
@@ -6532,7 +6598,7 @@ extend Gen {
             let ra = self.reg(t.a);
             // A zero extension of a value whose register holds nothing above its bits (a byte load's, say)
             // gives it another type.
-            if op == O_ZEXT && self.cr.va[self.cr.vx(t.a) as usize].clean {
+            if op == O_ZEXT && self.cr.va[self.cr.vx(t.a) as usize].clean && !self.cr.narrow(t.a) {
                 let _ = self.def_from(i, t.a, ra);
                 self.cr.va.index_mut(i as usize).clean = true;
                 return true;
@@ -6995,7 +7061,7 @@ extend Gen {
                 lv::each_use(b, t, &mut self.cr.uses);
                 let mut reads = false;
                 for q in 0..self.cr.uses.len() {
-                    reads = reads || self.cr.uses[q] == pv;
+                    reads = reads || self.cr.lv.seen(self.cr.uses[q]) == pv;
                 }
                 if !reads {
                     continue;
@@ -8542,6 +8608,10 @@ extend Gen {
             } else {
                 preg(pa)
             };
+            // The register still holds the value the edge into the block moved out of it.
+            if !pa.v && self.left_in(self.cr.vx(v), r) {
+                continue;
+            }
             self.mv.push(
                 Mv {
                     src: src,
@@ -8580,7 +8650,9 @@ extend Gen {
                     vty,
                 )) && self.loc_of(x).kind != LC_VAL || self.cren[k as usize] || self.crelay[k as usize],
             );
-            self.cclean.push(va.reg != NOREG && va.clean || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG));
+            self.cclean.push(
+                va.reg != NOREG && va.clean && !self.cr.narrow(v) || va.reg == NOREG && (va.home == H_SLOT || va.home == H_ARG),
+            );
         }
         resolve_moves(self);
         // The moved values' registers now hold arguments; the parts passed on are in theirs.
@@ -9878,6 +9950,12 @@ extend Gen {
         }
         let (_, _, from, to) = self.jt[q - self.fix.len()];
         return (from, ast::pick((to & JT_CODE) != 0, NONE, to));
+    }
+
+    // Whether general register `r` still holds value index `x`, which the one edge into the current block
+    // moved out of it: no instruction ran since the block started (`left`).
+    const fn left_in(self: &Self, x: u32, r: u8) bool {
+        return r < 16 && self.c.len() == self.arr_at && self.cr.lv.def_blk[self.cur as usize] == self.arr_blk && self.arrived[r as usize] == x;
     }
 
     // `finish_in` with the prologue's code (`pro`), kept across bodies.
