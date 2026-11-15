@@ -460,9 +460,22 @@ fn mid(n: i64) i64 {{
     return s + a as i64;
 }}
 
+// Sets its frame up on the calls' path alone, where it saves the callee-saved registers that hold `n`
+// and `k` past the calls.
+@noinline
+fn late(n: i64, k: i64) i64 {{
+    if n == 0 {{
+        return k;
+    }}
+    let a = unsafe probe();
+    let b = unsafe probe();
+    let c = unsafe probe();
+    return a + b + c + n + k;
+}}
+
 @export("sc_entry")
 pub fn entry(n: i64) i64 {{
-    return mid(n);
+    return mid(n) + late(n, 0 - n);
 }}
 
 fn main() i32 {{

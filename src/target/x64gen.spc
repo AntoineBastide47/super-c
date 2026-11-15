@@ -281,10 +281,22 @@ pub(package) struct Gen {
     raw: bool, // the next `cond_value` sets its byte alone (`bytes_only`)
     // Shrink-wrapping (System V): the frame is set up on the edges into the blocks laid out last and taken
     // down on the edges out (`shrinkable`); the warm code, which calls nothing, keeps no value in memory and
-    // no callee-saved register, has none. Whether the body is compiled so, and whether that try failed (the
-    // warm code used the stack: the body is compiled again without).
+    // no callee-saved register, has none. Whether the body is compiled so, whether the warm code wrote a
+    // callee-saved register (an edge's moves, a temporary: `saves`), and whether that try failed (that, or
+    // the warm code used the stack: the body is compiled again without).
     shrink: bool,
+    shrink_bad: bool,
     no_shrink: bool,
+    // The moves of the edges into the framed code that need the frame (`entry_code`), each with its jump
+    // to the edge's target: their code (`ec`), each edge's first byte (`eat`), their branches and
+    // relocations at positions in `ec` (`efix`, `erels`), and whether one is being made (`framing`).
+    // They go before the first framed block, where the framed code starts (`fat`, NONE until then).
+    ec: x::Code,
+    eat: Vector<u32>,
+    efix: Vector<u64>,
+    erels: Vector<CRel>,
+    framing: bool,
+    fat: u32,
     again: bool, // the next `func` compiles the body it compiled last again (`unshrunk`, `far`)
     /// The run-time copies the body's CPU-level check chooses (`dispatch_of`): per copy, its level << 32 |
     /// its body symbol, the highest first. Empty: no check.
@@ -439,7 +451,14 @@ extend Gen {
             zx: false,
             raw: false,
             shrink: false,
+            shrink_bad: false,
             no_shrink: false,
+            ec: x::Code::new(),
+            eat: Vector::<u32>::new(),
+            efix: Vector::<u64>::new(),
+            erels: Vector::<CRel>::new(),
+            framing: false,
+            fat: NONE,
             again: false,
             disp: Vector::<u64>::new(),
             disp_lv: 0,
@@ -599,7 +618,7 @@ extend Gen {
         if !vreg && self.cr.lv.inner[blk] != NONE && !self.cr.lv.rare[blk] {
             for r in 0..16u32 {
                 if self.fixed_free(r as u8) && (self.cr.held & bit(r as u8)) == 0 {
-                    self.csr |= bit(r as u8);
+                    self.saves(bit(r as u8));
                     return r as u8;
                 }
             }
@@ -615,7 +634,7 @@ extend Gen {
         for r in 0..16u32 {
             if !vreg && self.fixed_free(r as u8) {
                 self.evict(r as u8);
-                self.csr |= bit(r as u8);
+                self.saves(bit(r as u8));
                 return r as u8;
             }
         }
@@ -627,9 +646,18 @@ extend Gen {
     // then saves.
     const fn taken(self: &mut Self, r: u8) u8 {
         if self.win {
-            self.csr |= VSAVE_WIN & bit(r);
+            self.saves(VSAVE_WIN & bit(r));
         }
         return r;
+    }
+
+    // The callee-saved registers `m` hold values the plan did not place (a temporary's, an intrinsic's
+    // argument): the prologue saves them. Shrink-wrapped, in a block without the frame, the try fails.
+    const fn saves(self: &mut Self, m: u64) {
+        self.csr |= m;
+        if m != 0 && self.shrink && !self.framing && self.cr.pos as usize < self.cr.lv.order.len() && !self.cr.lv.after[self.cr.lv.order[self.cr.pos as usize] as usize] {
+            self.shrink_bad = true;
+        }
     }
 
     // Integer argument register `k` of the calling convention.
@@ -1833,12 +1861,13 @@ extend Gen {
                     w |= lv::WANT_WHOLE;
                 }
             }
-            // Shrink-wrapped, the warm code saves no callee-saved register: every home is a scratch one, which
-            // the calls save around them, but for a value a call reads after its argument moves (none).
+            // Shrink-wrapped, the warm code saves no callee-saved register (the plan gives one in the framed
+            // blocks alone): a value that asks for one asks for a scratch one too, but a value a call reads
+            // after its argument moves (no home).
             if self.shrink && late[x] {
                 w = 0;
             } else if self.shrink && (w & lv::WANT_CALLEE) != 0 {
-                w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
+                w |= lv::WANT_SCRATCH;
             }
             // AVX-512: one of xmm16..xmm31 too, for a value no call's range crosses whose instructions all
             // encode it (`vlow`).
@@ -1871,11 +1900,7 @@ extend Gen {
                     if in_mem(ty) || is_v(ty) || a as usize < ni && (self.cr.lv.pfold[a as usize] || self.remat_inst(a)) {
                         continue;
                     }
-                    let mut w = lv::WANT_CALLEE | lv::WANT_SCRATCH;
-                    if self.shrink {
-                        w = w & ~lv::WANT_CALLEE | lv::WANT_SCRATCH;
-                    }
-                    self.want[a as usize] = w;
+                    self.want[a as usize] = lv::WANT_CALLEE | lv::WANT_SCRATCH;
                 }
             }
         }
@@ -1961,6 +1986,8 @@ extend Gen {
             self.cr.lv.cfirst.push(cf);
             self.cr.lv.clast.push(cl);
         }
+        self.cr.lv.ccount.truncate(0);
+        self.cr.lv.ccount.extend_copy(&self.cpre);
         self.xhome = self.xscr;
         if leaf {
             self.xhome |= self.homes_free(b);
@@ -2052,11 +2079,7 @@ extend Gen {
             b,
             &self.want,
             lv::Caps {
-                xc: if self.shrink {
-                    0
-                } else {
-                    self.xfix.count_ones() as u32
-                },
+                xc: self.xfix.count_ones() as u32,
                 xs: xs,
                 xj: most,
                 vc: vc,
@@ -2072,10 +2095,13 @@ extend Gen {
         // The callee-saved registers the plan holds.
         for s in 0..self.cr.lv.seg_r.len() {
             let r = self.cr.lv.seg_r[s];
-            self.csr |= bit(r) & self.xfix;
-            if self.win {
-                self.csr |= VSAVE_WIN & bit(r);
-            }
+            let m = bit(r) & (self.xfix | ast::pick(self.win, VSAVE_WIN, 0u64));
+            self.csr |= m;
+            // Shrink-wrapped, a callee-saved register holds a value in the framed blocks alone.
+            assert(
+                !self.shrink || m == 0 || self.cr.lv.seg_framed(s as u32),
+                "x64gen: a callee-saved home in a block without the frame",
+            );
         }
         for x in 0..ni {
             if self.lconst[x] && self.cr.lv.seg_val(x as u32) {
@@ -2330,11 +2356,13 @@ extend Gen {
         return self.cr.lv.rare[self.cr.lv.def_blk[i as usize] as usize];
     }
 
-    // Before instruction `i` of a rare block or a shrink-wrapped body that calls and returns: each scratch
-    // home whose value lives past it into a slot of its own (`csave`). Not a value its range alone keeps
-    // (`Live::dead_past`). The count saved.
+    // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
+    // past it into a slot of its own (`csave`). Not a value its range alone keeps (`Live::dead_past`).
+    // Before another call that writes the caller-saved homes (`cpre`): the homes the plan holds across
+    // calls (`Live::seg_past`) whose values live past it. The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
-        if !self.rarec[i as usize] {
+        let all = self.rarec[i as usize];
+        if !all && (self.cpre[i as usize + 1] == self.cpre[i as usize] || self.cr.lv.seg_past.len() == 0) {
             return 0;
         }
         let mut m = self.cr.held & self.cr.fixed_busy & ~self.xfix & ~self.vsave();
@@ -2343,7 +2371,12 @@ extend Gen {
             let r = m.trailing_zeros() as u8;
             m &= m - 1;
             let x = self.cr.owner[r as usize];
-            if !self.cr.live_on(x) || self.cr.lv.dead_past(self.cr.b(), x, i) {
+            let lives = if all {
+                self.cr.live_on(x) && !self.cr.lv.dead_past(self.cr.b(), x, i)
+            } else {
+                self.cr.lv.seg_past[x as usize] && self.cr.seg_lives_past(x, i)
+            };
+            if !lives {
                 continue;
             }
             let off = self.cr.slot_alloc(16, 16) as i64;
@@ -2387,8 +2420,7 @@ extend Gen {
                 t,
             )) && !self.cr.mem_tail(i as u32, t);
             self.cret[i] = c;
-            // Shrink-wrapped, every call saves the scratch homes that live past it.
-            if c && (self.rare(i as u32) || self.shrink) {
+            if c && self.rare(i as u32) {
                 self.rarec[i] = true;
             } else if c {
                 self.cpre[i + 1] = 1;
@@ -3585,6 +3617,12 @@ extend Gen {
             self.cr.lv.run(b);
         }
         self.shrink = !self.no_shrink && self.shrinkable();
+        self.shrink_bad = false;
+        self.ec.clear();
+        self.eat.truncate(0);
+        self.efix.truncate(0);
+        self.erels.truncate(0);
+        self.fat = NONE;
         if self.shrink {
             self.cr.lv.relayout(b);
             // A shrink-wrapped body places no code past its blocks: each late edge moves in place.
@@ -3714,6 +3752,9 @@ extend Gen {
             return false;
         }
         for q in 0..self.cr.lv.order.len() {
+            if self.shrink && self.fat == NONE && self.cr.lv.after[self.cr.lv.order[q] as usize] {
+                self.entry_flush(self.cr.lv.order[q]);
+            }
             if !self.block(q as u32) {
                 return false;
             }
@@ -3727,7 +3768,7 @@ extend Gen {
         if !self.stubs_out {
             self.late_stubs();
         }
-        if self.shrink && (self.c.stack_at < self.rare_at() || self.csr != 0) {
+        if self.shrink && (self.c.stack_at < self.rare_at() || self.shrink_bad) {
             return self.unshrunk(s, local);
         }
         let rt = b.pool[b.sig as usize + 2];
@@ -3779,8 +3820,12 @@ extend Gen {
 
     // Whether the body may set its frame up in some blocks alone (`shrink`): every call (one that does not
     // return too, a panic's: it needs the frame's alignment) is in a rare block (`Live::rare`), or the frame
-    // on the edges into those blocks costs less than one at the entry (`Live::frame_pays`; at most
-    // WARM_CALLS calls outside rare blocks); there is one, and the body reads no return address, variadic
+    // on the edges into those blocks costs less than one at the entry: those edges, and the edges back out
+    // of those blocks for half, run at most half as often as the entry (`Live::frame_half`; a body of more
+    // than WARM_SIZE instructions has at most WARM_CALLS calls outside rare blocks); or, with at most WARM_CALLS such calls, the values live past
+    // them are saved around them (`Live::frame_pays`) or hold callee-saved registers there
+    // (`Live::frame_keeps`); there is one,
+    // and the body reads no return address, variadic
     // argument or inline assembly, runs no system operation, aligns no slot past 16 bytes and has no canary.
     // Those blocks, and the rare blocks connected to one with a call by edges between rare blocks, set the
     // frame up: `Live::after`, which the layout puts after the others. Under Microsoft x64 no edge leaves
@@ -3799,8 +3844,9 @@ extend Gen {
         let mut framed = Vector::<bool>::new();
         framed.resize_default(b.blocks.len());
         let mut any = false;
-        // The calls outside rare blocks.
+        // The calls outside rare blocks: the first WARM_CALLS, and whether there are more.
         let mut warm = Vector::<u32>::new();
+        let mut more = false;
         for i in 0..b.insts.len() {
             let t = b.insts[i];
             let d = self.cr.lv.def_blk[i];
@@ -3812,10 +3858,13 @@ extend Gen {
                 continue;
             }
             if !self.cr.lv.rare[d as usize] {
-                if warm.len() as u32 == lv::WARM_CALLS {
+                if warm.len() as u32 < lv::WARM_CALLS {
+                    warm.push(i as u32);
+                } else if b.insts.len() as u32 > lv::WARM_SIZE {
                     return false;
+                } else {
+                    more = true;
                 }
-                warm.push(i as u32);
             }
             framed[d as usize] = true;
             any = true;
@@ -3826,20 +3875,21 @@ extend Gen {
         self.cr.lv.set_after(b, &framed);
         if warm.len() != 0 {
             let into = self.cr.lv.after_into(b);
-            // What those calls save around them (`Live::around_cost`: one register per store).
+            let out = self.cr.lv.after_out(b);
+            let half = self.cr.lv.frame_half(into, out);
+            // What those calls save around them (`Live::around_cost`: one register per store), and the most
+            // values live past one.
             let mut around: u64 = 0;
-            if self.cr.lv.frame_pays(into, 0) {
+            let mut most: u32 = 0;
+            if self.cr.lv.frame_pays(into, 0) && !half && !more {
                 for q in 0..warm.len() {
-                    around += self.cr.lv.around_cost(
-                        unsafe &*self.pkg,
-                        b,
-                        self.cr.lv.def_blk[warm[q] as usize],
-                        warm[q],
-                        1,
-                    );
+                    let d = self.cr.lv.def_blk[warm[q] as usize];
+                    let n = self.cr.lv.lives_across(unsafe &*self.pkg, b, d, warm[q]);
+                    around += self.cr.lv.around_cost(d, n, 1);
+                    most = most.max(n);
                 }
             }
-            if !self.cr.lv.frame_pays(into, around) {
+            if !half && (more || !self.cr.lv.frame_pays(into, around) && !self.cr.lv.frame_keeps(into, out, most, 1)) {
                 self.cr.lv.after.truncate(0);
                 return false;
             }
@@ -3862,16 +3912,36 @@ extend Gen {
         return true;
     }
 
-    // The first code byte of the blocks that set the frame up, which the layout puts last (`Live::after`);
-    // the code's length when there is none.
+    // The first byte of the framed code: the moves of the edges into it (`entry_flush`), then the blocks
+    // that set the frame up, which the layout puts last (`Live::after`); the code's length when there is
+    // none.
     const fn rare_at(self: &Self) u32 {
-        for q in 0..self.cr.lv.order.len() {
-            let k = self.cr.lv.order[q] as usize;
-            if self.cr.lv.after[k] && self.blk_at[k] != NONE {
-                return self.blk_at[k];
-            }
+        return ast::pick(self.fat != NONE, self.fat, self.c.len());
+    }
+
+    // Before block `k`, the first one that sets the frame up: the framed code starts here, with the moves
+    // of the edges into it (`entry_code`). The last one's jump goes when `k` is its target.
+    fn entry_flush(self: &mut Self, k: u32) {
+        let ne = self.efix.len();
+        if ne != 0 && (self.efix[ne - 1] >> 32) as u32 + 4 == self.ec.len() && self.efix[ne - 1] as u32 == k {
+            let _ = self.efix.pop();
+            let _ = self.ec.jumps.pop();
+            let n = self.ec.len();
+            self.ec.b.truncate(n as usize - 5);
         }
-        return self.c.len();
+        let base = self.c.append(&self.ec);
+        self.fat = base;
+        let nb = self.blk_at.len() - self.eat.len();
+        for j in 0..self.eat.len() {
+            self.blk_at[nb + j] = base + self.eat[j];
+        }
+        for j in 0..self.efix.len() {
+            self.fix.push(self.efix[j] + (base as u64 << 32));
+        }
+        for j in 0..self.erels.len() {
+            let r = self.erels[j];
+            self.rels.push(CRel { at: r.at + base, kind: r.kind, sym: r.sym, addend: r.addend });
+        }
     }
 
     // Whether block `k` is on the other side of the frame's edge from the current one (`shrink`).
@@ -4363,12 +4433,97 @@ extend Gen {
         return place::loc_of(&self.cr.va, x, x::RSP, self.fb);
     }
 
-    // Move edge `e`'s arguments into its target's parameter homes.
+    // Move edge `e`'s arguments into its target's parameter homes. Shrink-wrapped, moves that write a
+    // callee-saved register, from a block without the frame (an edge `entry_code` was not asked for), make
+    // the try fail.
     fn edge_moves(self: &mut Self, e: u32) {
+        if !self.edge_list(e) {
+            return;
+        }
+        if !self.framing && self.frame_edge(e) && self.frame_moves() {
+            self.shrink_bad = true;
+        }
+        resolve_moves(self);
+    }
+
+    // Whether edge `e` goes from a block without the frame into one that sets it up (`shrink`).
+    const fn frame_edge(self: &Self, e: u32) bool {
+        let k = self.cr.b().edge_target(e);
+        return self.crosses(k) && self.cr.lv.after[k as usize];
+    }
+
+    // Whether a pending move (`mv`) needs the frame: it writes a callee-saved register, which the frame's
+    // setup saves, or reads or writes the stack.
+    const fn frame_moves(self: &Self) bool {
+        let cs = self.xfix | ast::pick(self.win, VSAVE_WIN, 0u64);
+        for i in 0..self.mv.len() {
+            let m = self.mv[i];
+            if m.src.kind == LC_MEM || m.dst.kind == LC_MEM || m.dst.kind == LC_REG && (bit(m.dst.reg) & cs) != 0 {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Edge `e` into the framed code, when its moves need the frame (`frame_moves`): the moves and the jump
+    // to its target, made now for the code that starts the framed code (`ec`, `entry_flush`): the edge's
+    // branch goes there, through the frame's setup. That code's place as a block (`blk_at`); NONE when
+    // the moves stay with the branch.
+    fn entry_code(self: &mut Self, e: u32) u32 {
+        if !self.frame_edge(e) || !self.edge_list(e) || !self.frame_moves() {
+            return NONE;
+        }
+        let at = self.blk_at.len() as u32;
+        self.blk_at.push(NONE);
+        self.eat.push(self.ec.len());
+        let code = replace(&mut self.c, replace(&mut self.ec, x::Code::new()));
+        let nf = self.fix.len();
+        let nr = self.rels.len();
+        self.framing = true;
+        resolve_moves(self);
+        self.goto(self.cr.b().edge_target(e), true);
+        self.framing = false;
+        for j in nf..self.fix.len() {
+            self.efix.push(self.fix[j]);
+        }
+        self.fix.truncate(nf);
+        for j in nr..self.rels.len() {
+            self.erels.push(self.rels[j]);
+        }
+        self.rels.truncate(nr);
+        self.ec = replace(&mut self.c, code);
+        return at;
+    }
+
+    // The code edge `e`'s branch goes to in place of its target, as a block (`blk_at`): a late edge's stub
+    // past the blocks (`lv::Live::late`), or the moves that wait for the frame (`entry_code`). NONE: its
+    // target.
+    fn stub_of(self: &mut Self, e: u32) u32 {
+        let li = self.cr.lv.late_index(self.cr.lv.order[self.cr.pos as usize], e);
+        if li != NONE {
+            return self.cr.b().blocks.len() as u32 + li;
+        }
+        return self.entry_code(e);
+    }
+
+    // Edge `e`'s moves and the jump to its target (`force`: also when the target follows).
+    fn edge_jump(self: &mut Self, e: u32, force: bool) {
+        let s = self.entry_code(e);
+        if s != NONE {
+            self.goto(s, true);
+            return;
+        }
+        self.edge_moves(e);
+        self.goto(self.cr.b().edge_target(e), force);
+    }
+
+    // The pending moves (`mv`) of edge `e`: its arguments into its target's parameter homes, and the values
+    // that enter a segment. Whether the edge may move.
+    fn edge_list(self: &mut Self, e: u32) bool {
         let b = self.cr.b();
         let n = b.edge_nargs(e);
         if n == 0 && !self.cr.seg_enters(e) {
-            return;
+            return false;
         }
         let tb = b.blocks[b.edge_target(e) as usize];
         let ni = b.insts.len() as u32;
@@ -4400,7 +4555,7 @@ extend Gen {
             );
         }
         self.cr.seg_moves(e, x::RSP, self.fb, &mut self.mv);
-        resolve_moves(self);
+        return true;
     }
 
     // The value of value index `x` (an instruction or a parameter).
@@ -8209,7 +8364,7 @@ extend Gen {
                 "x64: an intrinsic with arguments in r10 or r11 takes integers alone",
             );
             let keep_cs = args & (bit(x::RDI) | bit(x::RSI)) & self.xfix;
-            self.csr |= keep_cs;
+            self.saves(keep_cs);
             let mut m = keep_cs & self.cr.held;
             // Each step clears one register's bit: at most 2 steps.
             while m != 0 {
@@ -8919,8 +9074,7 @@ extend Gen {
             for q in 0..stubs.len() {
                 self.c.land(stubs[q], self.c.len());
             }
-            self.edge_moves(d);
-            self.goto(b.edge_target(d), false);
+            self.edge_jump(d, false);
         }
         return true;
     }
@@ -9005,17 +9159,15 @@ extend Gen {
             for q in 0..dx.len() {
                 self.jt.push((tat + 4 * dx[q], tat, from, JT_CODE | self.c.len()));
             }
-            self.edge_moves(d);
             done += 1;
-            self.goto(b.edge_target(d), done < total);
+            self.edge_jump(d, done < total);
         }
         for q in 0..cs.len() {
             let x = (cs[q] >> 32) as u32;
             self.jt.push((tat + 4 * x, tat, from, JT_CODE | self.c.len()));
             let e = cs[q] as u32;
-            self.edge_moves(e);
             done += 1;
-            self.goto(b.edge_target(e), done < total);
+            self.edge_jump(e, done < total);
         }
         return true;
     }
@@ -9252,21 +9404,14 @@ extend Gen {
     // before the branch (`early_moves`).
     fn branch2(self: &mut Self, cc: u32, et: u32, ef: u32) {
         let b = self.cr.b();
-        // A late edge goes to its stub past the blocks, which moves (`lv::Live::late`).
-        let lt = self.cr.lv.late_index(self.cr.lv.order[self.cr.pos as usize], et);
-        let lf = self.cr.lv.late_index(self.cr.lv.order[self.cr.pos as usize], ef);
-        let mt = lt == NONE && self.cr.moves_needed(et);
-        let mf = lf == NONE && self.cr.moves_needed(ef);
-        let tt = if lt != NONE {
-            b.blocks.len() as u32 + lt
-        } else {
-            b.edge_target(et)
-        };
-        let tf = if lf != NONE {
-            b.blocks.len() as u32 + lf
-        } else {
-            b.edge_target(ef)
-        };
+        // A late edge goes to its stub past the blocks, which moves (`lv::Live::late`); an edge whose moves
+        // need the frame, to those moves (`entry_code`).
+        let st = self.stub_of(et);
+        let sf = self.stub_of(ef);
+        let mt = st == NONE && self.cr.moves_needed(et);
+        let mf = sf == NONE && self.cr.moves_needed(ef);
+        let tt = ast::pick(st != NONE, st, b.edge_target(et));
+        let tf = ast::pick(sf != NONE, sf, b.edge_target(ef));
         let q = self.cr.pos as usize + 1;
         let next = if q < self.cr.lv.order.len() && !self.crosses(self.cr.lv.order[q]) {
             self.cr.lv.order[q]
@@ -9390,10 +9535,10 @@ extend Gen {
         self.edge_homes(t);
         if op == O_JMP {
             self.spill_live_out();
-            let li = self.cr.lv.late_index(self.cr.lv.order[self.cr.pos as usize], t.a);
-            if li != NONE {
-                // Its moves wait in its stub past the blocks (`lv::Live::late`).
-                self.goto(b.blocks.len() as u32 + li, true);
+            let st = self.stub_of(t.a);
+            if st != NONE {
+                // Its moves wait in its stub past the blocks (`lv::Live::late`), or for the frame.
+                self.goto(st, true);
                 return true;
             }
             self.edge_moves(t.a);
@@ -9456,13 +9601,11 @@ extend Gen {
                 self.cbranch(x::CC_NE, b.edge_target(d));
                 return true;
             }
-            self.edge_moves(d);
-            self.goto(b.edge_target(d), stubs.len() != 0);
+            self.edge_jump(d, stubs.len() != 0);
             for k in 0..stubs.len() {
                 self.c.land((stubs[k] >> 32) as u32, self.c.len());
                 let e = stubs[k] as u32;
-                self.edge_moves(e);
-                self.goto(b.edge_target(e), k + 1 < stubs.len());
+                self.edge_jump(e, k + 1 < stubs.len());
             }
             return true;
         }
@@ -10313,9 +10456,10 @@ extend Gen {
             return true;
         }
         if sw {
-            // Shrink-wrapped: the entry's rule (the CFA rsp + 8) up to the framed code, then the frame's (no
-            // register pushed).
+            // Shrink-wrapped: the entry's rule (the CFA rsp + 8) up to the framed code, then the frame's, with
+            // each pushed register below the return address (and rbp).
             cfa_advance(&mut o.cfi, framed_at);
+            let dr: []u8 = DWARF_REG;
             if !omit {
                 o.cfi.push(0x0E);
                 o.cfi.push(16);
@@ -10323,9 +10467,13 @@ extend Gen {
                 o.cfi.push(2);
                 o.cfi.push(0x0D);
                 o.cfi.push(6);
-            } else if local != 0 {
+            } else if local != 0 || npush != 0 {
                 o.cfi.push(0x0E);
-                ob::uleb(&mut o.cfi, 8 + local);
+                ob::uleb(&mut o.cfi, 8 + 8 * npush + local);
+            }
+            for k in 0..regs.len() {
+                o.cfi.push(0x80 | dr[regs[k] as usize]);
+                o.cfi.push((ast::pick(omit, 2u32, 3u32) + k as u32) as u8);
             }
             o.frames.push(ob::OFrame { sym: k2, size: size, cfi_at: c0, cfi_len: o.cfi.len() as u32 - c0 });
             return true;

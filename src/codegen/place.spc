@@ -1107,8 +1107,9 @@ extend Core {
     }
 
     // Whether call `t`, instruction `i`, is right before the return of its result (or of nothing, for a call
-    // of no result), not into memory: a sibling call's shape, which `shrinkable` reads before `tail_ok` is
-    // known (when the call is no sibling call, the warm code calls, and the body is compiled again unshrunk).
+    // of no result), not into memory: a sibling call's shape, which `shrinkable` reads with `tail_ok` (when
+    // the call is no sibling call all the same, the warm code calls, and the body is compiled again
+    // unshrunk).
     pub(package) const fn call_tail_shape(self: &Self, i: u32, t: Inst) bool {
         let b = self.b();
         if t.op != O_CALL && t.op != O_CALLIND {
@@ -1743,6 +1744,26 @@ extend Core {
         w.home = H_FIXED;
         w.dirty = false;
         w.clean = made && va.clean;
+    }
+
+    /// Whether segment value `x`, in its register over all of its live blocks (`lv::Live::seg_past`), lives
+    /// past instruction `i` of the current block: a later instruction of the block reads it, or a block the
+    /// block's edges enter holds it from its start.
+    pub(package) const fn seg_lives_past(self: &Self, x: u32, i: u32) bool {
+        let l = self.lv.read_last(x, self.pos);
+        if l != NONE && l > i {
+            return true;
+        }
+        let b = self.b();
+        let bk = b.blocks[self.lv.order[self.pos as usize] as usize];
+        let t = b.insts[(bk.start + bk.len - 1) as usize];
+        for e in 0..edge_count(t) {
+            let k = b.edge_target(edge_of(b, t, e));
+            if self.lv.def_blk[x as usize] != k && self.lv.seg_of(x, self.lv.pos[k as usize]) != NONE {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// The stack slot of segment value `x`, made when it has no stack home yet: its offset.

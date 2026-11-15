@@ -192,8 +192,12 @@ pub(package) const CARRY_ADC: u8 = 3;
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
-/// The most calls outside rare blocks a shrink-wrapped body makes (`lives_across` reads every value per call).
+/// The most calls outside rare blocks whose live values a generator reads (`lives_across` reads every
+/// value per call) when it chooses where a body sets its frame up. A body with more sets it up late only
+/// when it has at most WARM_SIZE instructions (a try that fails compiles the body again) and the frame's
+/// edges run seldom enough (`Live::frame_half`).
 pub(package) const WARM_CALLS: u32 = 4;
+pub(package) const WARM_SIZE: u32 = 256;
 
 /// `cs_kind`: a `select`'s side as the other side plus 1, negated, inverted; none of these.
 pub(package) const CS_NONE: u8 = 0;
@@ -388,10 +392,13 @@ pub(package) struct Live {
     pub(package) seg_b: Vector<u32>,
     pub(package) sin_at: Vector<u32>,
     pub(package) sin: Vector<u32>,
-    /// Per value (empty: no segment), whether it has a segment, and whether a block of its range is outside
-    /// them all: it then keeps a stack home, written once, where it is defined.
+    /// Per value (empty: no segment), whether it has a segment, whether a block of its range is outside
+    /// them all (it then keeps a stack home, written once, where it is defined), and whether its register
+    /// is a caller-saved one it holds over all of its live blocks, across calls: each such call saves the
+    /// register around itself.
     pub(package) segd: Vector<bool>,
     pub(package) seg_mem: Vector<bool>,
+    pub(package) seg_past: Vector<bool>,
     /// Per segment its register (the generator's number), and per layout position the registers that hold
     /// a value of the plan somewhere in its block.
     pub(package) seg_r: Vector<u8>,
@@ -411,17 +418,28 @@ pub(package) struct Live {
     pub(package) part_in: Vector<u8>,
     /// The `part_in` registers nothing writes before their loads' ranges end (as `assign`'s `quiet`).
     pub(package) part_quiet: u64,
-    // `assign`'s scratch: per value its segment; per layout position the registers held through the whole
+    /// Bit `k` when nothing writes the one register parameter `k` of the signature arrives in, in the
+    /// blocks outside `after` (the generator's, as `assign`'s `quiet`): a parameter that holds one
+    /// register there and another in the blocks of `after` may stay in it (`frame_put`).
+    pub(package) quiet_out: u64,
+    // `assign`'s scratch: per value its last segment and per segment the value's one before (`vseg`,
+    // `vnext`); per layout position the registers held through the whole
     // block (`thru`), and per position of an instruction's reads and of its result (two per instruction)
     // the registers held there by a value that begins or ends in the block (`part`); the candidate's live
     // blocks (`lblk`, in layout order), with per layout position the stamps of the candidate live into the
-    // block (`lin`), out of it (`lout`), read in it (`lrd`), kept in its register there (`lsel`), and the
+    // block (`lin`), out of it (`lout`), read in it (`lrd`), of the segment that keeps it in its register
+    // there (`lsel`, a stamp per segment: `sgen`), and the
     // block's entry in `lblk` (`lix`); per entry of `lblk` the positions it holds a register at (`llo`,
     // `lhi`), the registers free for it (`lav`), how often the block loads it without one (`lnow`), and
     // `spans`' groups (`lcomp`, `lgain`, `lcost`, `lbad`), kept blocks (`lkeep`) and best ones (`lbest`);
     // per entry of `su` the block's last instruction that reads the value (`sul`); the registers that save
     // moves (`hq`); per register, the last position a parameter that arrived in it holds it (`arr_hi`).
     vseg: Vector<u32>,
+    vnext: Vector<u32>,
+    sgen: u32,
+    // What a callee-saved register the body does not save yet costs the value that takes it (`assign`):
+    // SAVE_COST, less in a body that sets its frame up on the edges into the blocks of `after` alone.
+    save: u64,
     thru: Vector<u64>,
     part: Vector<u64>,
     lblk: Vector<u32>,
@@ -464,6 +482,11 @@ pub(package) struct Live {
     /// block that write the caller-saved homes (a call that returns), NONE for none.
     pub(package) cfirst: Vector<u32>,
     pub(package) clast: Vector<u32>,
+    /// Per instruction index and past the last (the generator's; empty: none), the instructions before it
+    /// that write the caller-saved homes (`cfirst`): the calls a value lives across are counted from it.
+    /// `wcount`: the same for the instructions that write the argument registers (`wfirst`).
+    pub(package) ccount: Vector<u32>,
+    pub(package) wcount: Vector<u32>,
     /// As `cfirst` and `clast` for the instructions that write an argument register a home could not keep (a
     /// call that returns in a warm block, an intrinsic's too; a system operation; a variadic access; a
     /// thread-local getter): a block without one may hold a value in such a register (`Sets.xw`). Empty: the target has none.
@@ -550,8 +573,11 @@ extend Live {
             sin: Vector::<u32>::new(),
             segd: Vector::<bool>::new(),
             seg_mem: Vector::<bool>::new(),
+            seg_past: Vector::<bool>::new(),
             cfirst: Vector::<u32>::new(),
             clast: Vector::<u32>::new(),
+            ccount: Vector::<u32>::new(),
+            wcount: Vector::<u32>::new(),
             wfirst: Vector::<u32>::new(),
             wlast: Vector::<u32>::new(),
             scand: Vector::<bool>::new(),
@@ -567,7 +593,11 @@ extend Live {
             rhint: Vector::<u8>::new(),
             part_in: Vector::<u8>::new(),
             part_quiet: 0,
+            quiet_out: 0,
             vseg: Vector::<u32>::new(),
+            vnext: Vector::<u32>::new(),
+            sgen: 0,
+            save: SAVE_COST,
             thru: Vector::<u64>::new(),
             part: Vector::<u64>::new(),
             lblk: Vector::<u32>::new(),
@@ -2247,8 +2277,9 @@ extend Live {
     }
 
     /// The rare blocks of `b` (`rare`) that edges between rare blocks connect to one of `framed` (per block:
-    /// it holds a call that needs the frame), the other blocks of `framed`, and the blocks the entry reaches
-    /// only through those: `after`, which the next `run` lays out last.
+    /// it holds a call that needs the frame), the other blocks of `framed`, with each one's outermost loop
+    /// (the frame is set up before the loop, not on each turn), and the blocks the entry reaches only
+    /// through those: `after`, which the next `run` lays out last.
     pub(package) fn set_after(self: &mut Self, b: &Body, framed: &Vector<bool>) {
         // Per block, its component's root (union by index, paths halved: each step shortens a path).
         let nb = b.blocks.len();
@@ -2281,9 +2312,21 @@ extend Live {
                 fr[find_root(&mut root, k as u32) as usize] = true;
             }
         }
+        // Per loop header, whether its loop is the outermost one of a block of `framed` that is not rare.
+        let mut looped = Vector::<bool>::new();
+        looped.resize_default(nb);
+        for k in 0..nb {
+            if framed[k] && !self.rare[k] && self.inner[k] != NONE {
+                looped[self.outermost(k as u32) as usize] = true;
+            }
+        }
         self.after.truncate(0);
         for k in 0..nb {
-            self.after.push(self.rare[k] && fr[find_root(&mut root, k as u32) as usize] || framed[k]);
+            self.after.push(
+                self.rare[k] && fr[find_root(&mut root, k as u32) as usize] || framed[k] || self.inner[k] != NONE && looped[self.outermost(
+                    k as u32,
+                ) as usize],
+            );
         }
         // The blocks the entry reaches through the others alone (each pushed once).
         let mut seen = Vector::<bool>::new();
@@ -2309,6 +2352,16 @@ extend Live {
                 self.after[k] = true;
             }
         }
+    }
+
+    // The header of the outermost loop that holds block `k`, which is in a loop.
+    const fn outermost(self: &Self, k: u32) u32 {
+        let mut h = self.inner[k as usize];
+        // Each step leaves one loop: at most the nesting depth.
+        while self.parent[h as usize] != NONE {
+            h = self.parent[h as usize];
+        }
+        return h;
     }
 
     /// How many values of `b` made before call `i` of block `d` (in an earlier block of the layout, or in
@@ -2345,10 +2398,10 @@ extend Live {
         return n;
     }
 
-    /// What the homes saved around call `i` of block `d` cost a body that sets its frame up in `after`
-    /// alone: a store and a load per `per` values live past the call (`lives_across`), as often as `d` runs.
-    pub(package) fn around_cost(self: &mut Self, p: &Package, b: &Body, d: u32, i: u32, per: u32) u64 {
-        let n = self.lives_across(p, b, d, i);
+    /// What the homes saved around a call of block `d` cost a body that sets its frame up in `after`
+    /// alone: a store and a load per `per` of the `n` values live past the call (`lives_across`), as often
+    /// as `d` runs.
+    pub(package) const fn around_cost(self: &Self, d: u32, n: u32, per: u32) u64 {
         return self.freq[d as usize] * 2 * ((n + per - 1) / per) as u64;
     }
 
@@ -2358,9 +2411,21 @@ extend Live {
         if self.after[0] {
             return FREQ_MAX;
         }
+        return self.after_edges(b, false);
+    }
+
+    /// How often the edges out of the blocks of `after` into the others run, as `after_into`: each takes
+    /// the frame down and jumps on.
+    pub(package) fn after_out(self: &mut Self, b: &Body) u64 {
+        return self.after_edges(b, true);
+    }
+
+    // The frequency of the edges from the blocks outside `after` into its blocks (`leave`: from its blocks
+    // into the others).
+    fn after_edges(self: &mut Self, b: &Body, leave: bool) u64 {
         let mut into: u64 = 0;
         for p in 0..b.blocks.len() {
-            if self.rpo[p] == NONE || self.after[p] {
+            if self.rpo[p] == NONE || self.after[p] != leave {
                 continue;
             }
             let bk = b.blocks[p];
@@ -2371,7 +2436,7 @@ extend Live {
             }
             for e in 0..self.fedges.len() {
                 let t = b.edge_target(self.fedges[e]);
-                if !self.after[t as usize] {
+                if self.after[t as usize] == leave {
                     continue;
                 }
                 let mut share = self.freq[p] * ast::pick(self.rare[t as usize], 1u64, FREQ_SPLIT) / total;
@@ -2394,6 +2459,22 @@ extend Live {
     /// a home lives past such a call.
     pub(package) const fn frame_pays(self: &Self, into: u64, around: u64) bool {
         return 3 * into + around < ast::pick(around != 0, 4u64, 2u64) * FREQ_ENTRY;
+    }
+
+    /// Whether that frame costs less than one at the entry when `n` values live past a call outside rare
+    /// blocks, each in a callee-saved register in the blocks of `after` (`per` of them per save): the
+    /// frame's save, restore and jump, the registers' saves and restores, and a move per value on the
+    /// way in, as often as those edges run, and two jumps and a move per value on each edge back out
+    /// (`out`, `after_out`), against the saves and restores per entry.
+    pub(package) const fn frame_keeps(self: &Self, into: u64, out: u64, n: u32, per: u32) bool {
+        let saves = 2 * ((n + per - 1) / per) as u64;
+        return (3 + saves + n as u64) * into + (2 + n as u64) * out < (2 + saves) * FREQ_ENTRY;
+    }
+
+    /// Whether `frame_keeps` holds for any count of values: the edges in, and half of the edges back out,
+    /// run at most half as often as the entry.
+    pub(package) const fn frame_half(self: &Self, into: u64, out: u64) bool {
+        return 2 * into + out <= FREQ_ENTRY;
     }
 
     /// Whether an instruction of block `k` of `b` after instruction `i`, its terminator's edges included,
@@ -3598,6 +3679,16 @@ extend Live {
         }
     }
 
+    /// Whether every block segment `s` holds its value through is one of `after`.
+    pub(package) const fn seg_framed(self: &Self, s: u32) bool {
+        for q in self.seg_a[s as usize]..self.seg_b[s as usize] + 1 {
+            if self.holds_at(s, q) && !self.after[self.order[q as usize] as usize] {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Whether value `x` has a register segment (`segments`).
     pub(package) const fn seg_val(self: &Self, x: u32) bool {
         return x as usize < self.segd.len() && self.segd[x as usize];
@@ -4263,6 +4354,9 @@ const EDGE_BLOCK: u64 = 8;
 const SAVE_COST: u64 = 2 * FREQ_ENTRY;
 // The most segments of one register `Live::evict` searches for a holder.
 const EVICT_SCAN: u32 = 64;
+// The most segments one value has (`Live::frame_put`): a register outside the blocks that set the frame
+// up, another in them.
+const SEG_PARTS: u32 = 2;
 
 extend Live {
     // How often the edges from block `p` into block `k` run: `p`'s frequency by their weight among its
@@ -4330,11 +4424,16 @@ extend Live {
     /// value lives (`calm`) and the block has room (`addable`: `caps`, `scap`, `jcap`). A value no
     /// register holds everywhere takes the register that gains most over the blocks where it is free
     /// (`spans`): it keeps a stack home, and an edge into such a block from one that does not hold it
-    /// loads it. `arr`: per parameter of the signature (and the result pointer after them), the registers
-    /// it arrives in, which no other value takes while it is there; `quiet`: bit `k` when nothing writes
-    /// the one register parameter `k` arrives in before its range ends, so it may stay there (`Sets.xa`). The plan is the segments (`seg_*`,
-    /// `sin`), one per value, with their registers (`seg_r`). After `run`, before the generator counts the
-    /// uses down.
+    /// loads it; or a caller-saved register over all of its blocks, which each call it lives across saves
+    /// around itself, when that costs less than no register (`past_put`). In a body that sets its frame
+    /// up in the blocks of `after` alone, a callee-saved register holds a value only in those blocks, and
+    /// a value made in another block keeps a register everywhere: one in those blocks, another in the
+    /// others, with a move on each edge between the two (`frame_put`). `arr`: per parameter of the
+    /// signature (and the result pointer after them), the registers it arrives in, which no other value
+    /// takes while it is there; `quiet`: bit `k` when nothing writes the one register parameter `k`
+    /// arrives in before its range ends, so it may stay there (`Sets.xa`). The plan is the segments
+    /// (`seg_*`, `sin`), one per value (two for one `frame_put` split), with their registers (`seg_r`).
+    /// After `run`, before the generator counts the uses down.
     pub(package) fn assign(
         self: &mut Self,
         b: &Body,
@@ -4359,6 +4458,7 @@ extend Live {
         self.sin_at.truncate(0);
         self.segd.truncate(0);
         self.seg_mem.truncate(0);
+        self.seg_past.truncate(0);
         fill(&mut self.bmask, np, 0);
         fill(&mut self.solo, np, 0);
         fill(&mut self.base, np + 1, 0);
@@ -4437,6 +4537,7 @@ extend Live {
         self.read_blocks(b, n);
         fill(&mut self.segd, n, false);
         fill(&mut self.seg_mem, n, false);
+        fill(&mut self.seg_past, n, false);
         fill(&mut self.vseg, n, NONE);
         fill(&mut self.thru, np, 0);
         fill(&mut self.part, 2 * self.base[np] as usize, 0);
@@ -4447,6 +4548,15 @@ extend Live {
         fill(&mut self.lix, np, 0);
         fill(&mut self.rhead, 64, NONE);
         self.rnext.truncate(0);
+        self.vnext.truncate(0);
+        self.sgen = 0;
+        // A body that sets its frame up on the edges into the blocks of `after` saves a callee-saved
+        // register there, as often as those edges run.
+        self.save = if self.after.len() != 0 {
+            SAVE_COST.min(2 * self.after_into(b))
+        } else {
+            SAVE_COST
+        };
         fill(&mut self.emark, np, 0);
         self.egen = 0;
         // The registers the parameters arrive in, each until its parameter's last read in the entry block.
@@ -4511,7 +4621,7 @@ extend Live {
                 let (lo, hi) = self.ends(b, x as u32, q, dp, st);
                 self.llo[i] = lo;
                 self.lhi[i] = hi;
-                let a = self.room(b, w, caps, sets, x as u32, q, dp, lo, hi, st, own, pinm, keep);
+                let a = self.room(b, w, caps, sets, x as u32, q, dp, lo, hi, st, own, pinm, keep, false);
                 self.lav[i] = a;
                 all &= a;
                 any |= a;
@@ -4530,28 +4640,65 @@ extend Live {
             // A constant a generator rebuilds, a flag and an aggregate's pointer take a register for all of
             // their range or none.
             let whole = (w & WANT_WHOLE) != 0 || x >= nv || x >= ni && agg_param(b, VPARAM | (x - ni) as u32);
+            // Its home's store, when it has no register: not a parameter that arrives in memory.
+            let stored = !(entry && own == 0);
+            // In a body that sets its frame up in the blocks of `after` alone, a value made in another block
+            // has no stack home there (`frame_put`); a parameter may hold the register it arrives in over
+            // those other blocks (`quiet_out`).
+            let bound = self.after.len() != 0 && !self.after[self.def_blk[x] as usize];
+            let stay = if bound && entry && x - ni - e0 < 64 && (self.quiet_out >> (x - ni - e0) as u64 & 1) != 0 && (own & own - 1) == 0 {
+                own & sets.xa
+            } else {
+                0
+            };
             if any == 0 {
                 if !whole && bare >= 2 * FREQ_ENTRY {
                     let r = self.evict(b, want, caps, sets, x as u32, dp, st, own, pinm, keep, bare, 0);
                     if r != REG_NONE {
                         fill(&mut self.lbest, nl, true);
                         cused |= sets.saved(r);
-                        self.seg_put(b, x, dp, st, r, true);
+                        self.seg_put(b, x, dp, r);
+                    }
+                }
+                if !self.segd[x] && (bound || !whole) {
+                    self.hints(b, x as u32, dp, st, own);
+                    if bound {
+                        let _ = self.frame_put(
+                            b,
+                            w,
+                            caps,
+                            sets,
+                            x as u32,
+                            dp,
+                            st,
+                            own,
+                            pinm,
+                            keep,
+                            stay,
+                            whole,
+                            &mut cused,
+                        );
+                    } else {
+                        self.past_put(b, w, caps, sets, x as u32, dp, st, own, pinm, keep, stored, cused);
                     }
                 }
                 continue;
             }
             self.hints(b, x as u32, dp, st, own);
             if all != 0 {
-                let r = self.pick(all, sets, cused, bare >= SAVE_COST, pinm);
+                let r = self.pick(all, sets, cused, bare >= self.save, pinm);
                 if r != REG_NONE {
                     fill(&mut self.lbest, nl, true);
                     cused |= sets.saved(r);
-                    self.seg_put(b, x, dp, st, r, true);
+                    self.seg_put(b, x, dp, r);
+                } else if bound {
+                    let _ = self.frame_put(b, w, caps, sets, x as u32, dp, st, own, pinm, keep, stay, whole, &mut cused);
+                } else if !whole {
+                    self.past_put(b, w, caps, sets, x as u32, dp, st, own, pinm, keep, stored, cused);
                 }
                 continue;
             }
-            if whole {
+            if bound && self.frame_put(b, w, caps, sets, x as u32, dp, st, own, pinm, keep, stay, whole, &mut cused) || whole {
                 continue;
             }
             let mut gain: u64 = 0;
@@ -4604,21 +4751,207 @@ extend Live {
                 if r != REG_NONE {
                     fill(&mut self.lbest, nl, true);
                     cused |= sets.saved(r);
-                    self.seg_put(b, x, dp, st, r, true);
+                    self.seg_put(b, x, dp, r);
                     continue;
                 }
             }
             if br != REG_NONE {
                 cused |= sets.saved(br);
-                self.seg_put(b, x, dp, st, br, false);
+                self.seg_put(b, x, dp, br);
+                self.seg_mem[x] = true;
+            } else {
+                self.past_put(b, w, caps, sets, x as u32, dp, st, own, pinm, keep, stored, cused);
             }
         }
         if self.seg_x.len() == 0 {
             self.segd.truncate(0);
             self.seg_mem.truncate(0);
+            self.seg_past.truncate(0);
             return;
         }
         self.seg_lists(b);
+    }
+
+    // The caller-saved registers candidate `x` may hold over all of its blocks (`lblk`, `llo`, `lhi`) when
+    // each call it lives across saves its register around itself (`room` with `past`): an argument
+    // register too, where those calls alone write the argument registers.
+    fn across(
+        self: &mut Self,
+        b: &Body,
+        w: u8,
+        caps: Caps,
+        sets: Sets,
+        x: u32,
+        dp: u32,
+        st: u32,
+        own: u64,
+        pinm: u64,
+        keep: u64,
+    ) u64 {
+        let mut m = sets.xs | sets.vs | sets.xw;
+        for i in 0..self.lblk.len() {
+            if m == 0 {
+                break;
+            }
+            m &= self.room(b, w, caps, sets, x, self.lblk[i], dp, self.llo[i], self.lhi[i], st, own, pinm, keep, true);
+        }
+        return m;
+    }
+
+    // What the saves around the calls the candidate lives across cost (`across`): a store and a load per
+    // call after its definition (or from the block's start) and before its last read in each of its
+    // blocks (`ccount`), as often as the block runs.
+    const fn saves_cost(self: &Self, b: &Body) u64 {
+        let mut cost: u64 = 0;
+        for i in 0..self.lblk.len() {
+            let q = self.lblk[i];
+            let (first, last) = self.crossed(b, q, self.llo[i], self.lhi[i]);
+            cost += (self.ccount[last as usize] - self.ccount[first as usize]) as u64 * 2 * self.freq[self.order[q as usize] as usize];
+        }
+        return cost;
+    }
+
+    // The instructions a value that holds the positions `lo..=hi` of the block at layout position `q` lives
+    // across: from the one after its definition (or the block's first) up to its last read there, that
+    // one not counted (the first, and the one past the last; none: both the same).
+    const fn crossed(self: &Self, b: &Body, q: u32, lo: u32, hi: u32) (u32, u32) {
+        let start = b.blocks[self.order[q as usize] as usize].start;
+        let first = start + ((lo + 1) / 2 - self.base[q as usize]);
+        let last = start + (hi / 2 - self.base[q as usize]);
+        return (first, last.max(first));
+    }
+
+    // Candidate `x`, which no register holds: a caller-saved one over all of its blocks, saved around the
+    // calls it lives across (`across`, `seg_past`), when that costs less (`saves_cost`) than no register
+    // does: its home's store (`stored`) and a load in each block that reads it (`lnow`). Not when the
+    // generator counts no calls (`ccount`).
+    fn past_put(
+        self: &mut Self,
+        b: &Body,
+        w: u8,
+        caps: Caps,
+        sets: Sets,
+        x: u32,
+        dp: u32,
+        st: u32,
+        own: u64,
+        pinm: u64,
+        keep: u64,
+        stored: bool,
+        cused: u64,
+    ) {
+        if self.ccount.len() != b.insts.len() + 1 {
+            return;
+        }
+        let nl = self.lblk.len();
+        let mut mem = ast::pick(stored, self.freq[self.def_blk[x as usize] as usize], 0u64);
+        for i in 0..nl {
+            mem += self.lnow[i];
+        }
+        if self.saves_cost(b) >= mem {
+            return;
+        }
+        let m = self.across(b, w, caps, sets, x, dp, st, own, pinm, keep);
+        if m == 0 {
+            return;
+        }
+        let r = self.pick(m, sets, cused, false, pinm);
+        fill(&mut self.lbest, nl, true);
+        self.seg_put(b, x as usize, dp, r);
+        self.seg_past[x as usize] = true;
+    }
+
+    // In a body that sets its frame up in the blocks of `after` alone, candidate `x`, made in another block,
+    // which no one register holds everywhere (`lav`): it has no stack home in those other blocks, so it
+    // takes a caller-saved register over all of its blocks, saved around the calls it lives across
+    // (`across`, `seg_past`), or (not when `whole`) one register over its blocks outside `after` and
+    // another, which may be a callee-saved one, over those in it, with a move on each edge between the
+    // two: the choice that costs less (those saves; those moves and a callee-saved register's first save).
+    // The register outside `after` is the one a parameter arrives in (`stay`) when no value holds it
+    // there: the entry then moves nothing. Whether it took one.
+    fn frame_put(
+        self: &mut Self,
+        b: &Body,
+        w: u8,
+        caps: Caps,
+        sets: Sets,
+        x: u32,
+        dp: u32,
+        st: u32,
+        own: u64,
+        pinm: u64,
+        keep: u64,
+        stay: u64,
+        whole: bool,
+        cused: &mut u64,
+    ) bool {
+        let counted = self.ccount.len() == b.insts.len() + 1;
+        let m = if counted {
+            self.across(b, w, caps, sets, x, dp, st, own, pinm, keep)
+        } else {
+            0
+        };
+        let nl = self.lblk.len();
+        // The registers free in every block outside `after`, in every block in it, and how often the
+        // edges between the two run.
+        let mut out: u64 = ~0u64;
+        let mut into: u64 = ~0u64;
+        let mut moves: u64 = 0;
+        for i in 0..nl {
+            let q = self.lblk[i];
+            let k = self.order[q as usize];
+            if self.after[k as usize] {
+                into &= self.lav[i];
+            } else if stay != 0 {
+                out &= self.room(b, w, caps, sets, x, q, dp, self.llo[i], self.lhi[i], st, own, pinm, stay, false);
+            } else {
+                out &= self.lav[i];
+            }
+            if q == dp {
+                continue;
+            }
+            for j in self.pat[k as usize]..self.pat[k as usize + 1] {
+                let p = self.preds[j as usize];
+                if self.pos[p as usize] != NONE && self.after[p as usize] != self.after[k as usize] {
+                    moves += self.edge_freq(b, p, k);
+                }
+            }
+        }
+        let split = !whole && out != 0 && into != 0 && into != ~0u64;
+        let rin = if split {
+            self.pick(into, sets, *cused, true, pinm)
+        } else {
+            REG_NONE
+        };
+        let fresh = split && (1u64 << rin as u64 & (sets.xc | sets.vc) & ~*cused) != 0;
+        // A parameter that takes another register than the one it arrives in moves at the entry.
+        let moved = ast::pick(split && (out & stay) != 0, self.freq[self.def_blk[x as usize] as usize], 0u64);
+        if m != 0 && (!split || self.saves_cost(b) + moved <= moves + ast::pick(fresh, self.save, 0u64)) {
+            let r = self.pick(m, sets, *cused, false, pinm);
+            fill(&mut self.lbest, nl, true);
+            self.seg_put(b, x as usize, dp, r);
+            self.seg_past[x as usize] = true;
+            return true;
+        }
+        if !split {
+            return false;
+        }
+        let rout = if (out & stay) != 0 {
+            stay.trailing_zeros() as u8
+        } else {
+            self.pick(out, sets, *cused, false, pinm)
+        };
+        fill(&mut self.lbest, nl, false);
+        for i in 0..nl {
+            self.lbest[i] = !self.after[self.order[self.lblk[i] as usize] as usize];
+        }
+        self.seg_put(b, x as usize, dp, rout);
+        for i in 0..nl {
+            self.lbest[i] = !self.lbest[i];
+        }
+        self.seg_put(b, x as usize, dp, rin);
+        *cused |= sets.saved(rin);
+        return true;
     }
 
     // `sin`, `sin_at`: per layout position, the segments that hold their value there (`gpool`).
@@ -4913,14 +5246,17 @@ extend Live {
         return 0;
     }
 
-    // Whether segment value `y` holds its register through the block at layout position `q`.
-    const fn held(self: &Self, y: u32, q: u32) bool {
-        let s = self.vseg[y as usize];
-        if s == NONE {
-            return false;
+    // The segment that holds value `y` in its register through the block at layout position `q` (`vseg`,
+    // `vnext`: at most SEG_PARTS per value), NONE for none.
+    const fn held(self: &Self, y: u32, q: u32) u32 {
+        let mut s = self.vseg[y as usize];
+        for _ in 0..SEG_PARTS {
+            if s == NONE || self.holds_at(s, q) {
+                return s;
+            }
+            s = self.vnext[s as usize];
         }
-        let a = self.seg_a[s as usize];
-        return q >= a && q <= self.seg_b[s as usize] && self.gpool[(self.seg_at[s as usize] + q - a) as usize];
+        return NONE;
     }
 
     // Whether nothing writes the caller-saved registers (`wide`: the argument registers) while a value
@@ -4952,6 +5288,17 @@ extend Live {
         }
         let li = hi >> 1;
         return li < pf || li == pf && !wide;
+    }
+
+    // Whether the instructions that write the argument registers while a value lives over the positions
+    // `lo..=hi` of the block at layout position `q` (`crossed`) are all calls that write the caller-saved
+    // homes (`wcount`, `ccount`): each saves a home it lives across around itself (`past_put`).
+    const fn calls_alone(self: &Self, b: &Body, q: u32, lo: u32, hi: u32) bool {
+        if self.wcount.len() != self.ccount.len() {
+            return false;
+        }
+        let (first, last) = self.crossed(b, q, lo, hi);
+        return self.wcount[last as usize] - self.wcount[first as usize] == self.ccount[last as usize] - self.ccount[first as usize];
     }
 
     // The registers a value may be the first to hold in the block at layout position `q`, with those it
@@ -4999,7 +5346,9 @@ extend Live {
     }
 
     // The registers value `x` (request `w`) may hold over the positions `lo..=hi` of the block at layout
-    // position `q`: of the classes it asks for that are calm there, with room (`addable`), that no value
+    // position `q`: of the classes it asks for that are calm there (the caller-saved ones also where a call
+    // writes them, when `past`: the call saves the register around itself; the argument ones then where
+    // such calls alone write them, `calls_alone`), with room (`addable`), that no value
     // holds at one of those positions (`thru`, `part`), nor a parameter of the signature that arrived
     // there (`pinm`, `arr_hi`; not `own`, the ones `x` arrives in); `keep`, the one it arrives in outside the
     // classes, too. A value live at the terminator leaves
@@ -5022,6 +5371,7 @@ extend Live {
         own: u64,
         pinm: u64,
         keep: u64,
+        past: bool,
     ) u64 {
         let ni = b.insts.len() as u32;
         let n = self.end.len() as u32;
@@ -5039,8 +5389,12 @@ extend Live {
                 let tk = b.edge_target(ed);
                 for j in 0..b.edge_nargs(ed) {
                     let y = ni + b.blocks[tk as usize].param_start + j;
-                    if b.edge_arg(ed, j) == v && self.held(y, self.pos[tk as usize]) {
-                        recv |= 1u64 << self.seg_r[self.vseg[y as usize] as usize] as u64;
+                    if b.edge_arg(ed, j) != v {
+                        continue;
+                    }
+                    let s = self.held(y, self.pos[tk as usize]);
+                    if s != NONE {
+                        recv |= 1u64 << self.seg_r[s as usize] as u64;
                     }
                 }
             }
@@ -5078,14 +5432,16 @@ extend Live {
             (sets.xc, sets.xs, sets.xw)
         };
         let mut m = keep;
-        if (w & WANT_CALLEE) != 0 {
+        // A body that sets its frame up in the blocks of `after` alone saves no callee-saved register in the
+        // others.
+        if (w & WANT_CALLEE) != 0 && (self.after.len() == 0 || self.after[k as usize]) {
             m |= c;
         }
         if (w & WANT_SCRATCH) != 0 {
-            if self.calm(b, q, lo, hi, false) {
+            if past || self.calm(b, q, lo, hi, false) {
                 m |= s;
             }
-            if wd != 0 && self.calm(b, q, lo, hi, true) {
+            if wd != 0 && (self.calm(b, q, lo, hi, true) || past && self.calls_alone(b, q, lo, hi)) {
                 m |= wd;
             }
         }
@@ -5101,8 +5457,13 @@ extend Live {
         // (`exit_partner`): on each such edge its register holds `x`'s value, or the edge writes that value
         // there.
         let ep = self.exit_partner(b, x);
-        let epm = if ep != NONE && self.held(ep, self.pos[self.def_blk[ep as usize] as usize]) {
-            1u64 << self.seg_r[self.vseg[ep as usize] as usize] as u64
+        let es = if ep != NONE {
+            self.held(ep, self.pos[self.def_blk[ep as usize] as usize])
+        } else {
+            NONE
+        };
+        let epm = if es != NONE {
+            1u64 << self.seg_r[es as usize] as u64
         } else {
             0
         };
@@ -5130,8 +5491,9 @@ extend Live {
                         continue;
                     }
                     let mut r: u64 = 0;
-                    if self.held(ax, pp) {
-                        r = 1u64 << self.seg_r[self.vseg[ax as usize] as usize] as u64;
+                    let s = self.held(ax, pp);
+                    if s != NONE {
+                        r = 1u64 << self.seg_r[s as usize] as u64;
                     } else if pp == 0 && self.vseg[ax as usize] == NONE {
                         // A parameter of the signature, or a part of one, still in the register it
                         // arrived in.
@@ -5227,8 +5589,11 @@ extend Live {
             let k = self.order[dp as usize];
             let j = x - ni - b.blocks[k as usize].param_start;
             let ep = self.exit_partner(b, x);
-            if ep != NONE && self.held(ep, self.pos[self.def_blk[ep as usize] as usize]) {
-                self.hint(self.seg_r[self.vseg[ep as usize] as usize], self.freq[k as usize]);
+            if ep != NONE {
+                let s = self.held(ep, self.pos[self.def_blk[ep as usize] as usize]);
+                if s != NONE {
+                    self.hint(self.seg_r[s as usize], self.freq[k as usize]);
+                }
             }
             for i in self.pat[k as usize]..self.pat[k as usize + 1] {
                 let p = self.preds[i as usize];
@@ -5249,8 +5614,9 @@ extend Live {
                     // No edge runs more often than its target (an edge out of a loop runs less than
                     // `edge_freq` gives it).
                     let f = self.edge_freq(b, p, k).min(self.freq[k as usize]);
-                    if self.held(ax, pp) {
-                        self.hint(self.seg_r[self.vseg[ax as usize] as usize], f);
+                    let s = self.held(ax, pp);
+                    if s != NONE {
+                        self.hint(self.seg_r[s as usize], f);
                         continue;
                     }
                     // A parameter of the signature, or a part of one, the plan has not placed: the register
@@ -5267,8 +5633,12 @@ extend Live {
             // Each operand it may write over: the instruction's own reads bound the walk.
             for u in self.ua[x as usize]..self.ua[x as usize] + self.un[x as usize] {
                 let ax = self.vix(b, self.uv[u as usize]);
-                if ax < n && self.held(ax, dp) && self.over(b, ax, x) {
-                    self.hint(self.seg_r[self.vseg[ax as usize] as usize], self.freq[self.order[dp as usize] as usize]);
+                if ax >= n {
+                    continue;
+                }
+                let s = self.held(ax, dp);
+                if s != NONE && self.over(b, ax, x) {
+                    self.hint(self.seg_r[s as usize], self.freq[self.order[dp as usize] as usize]);
                 }
             }
         }
@@ -5287,9 +5657,10 @@ extend Live {
                         if b.edge_arg(ed, j) != v || self.pos[tk as usize] == NONE {
                             continue;
                         }
-                        if self.held(y, self.pos[tk as usize]) {
+                        let s = self.held(y, self.pos[tk as usize]);
+                        if s != NONE {
                             let f = self.edge_freq(b, k, tk).min(self.freq[tk as usize]);
-                            self.hint(self.seg_r[self.vseg[y as usize] as usize], f);
+                            self.hint(self.seg_r[s as usize], f);
                         } else if self.vseg[y as usize] == NONE {
                             // That parameter has no register yet: the one a parameter of the signature that
                             // another edge passes it arrives in (the least reason).
@@ -5300,19 +5671,18 @@ extend Live {
                         }
                     }
                 }
-            } else if self.lout[q as usize] != st && self.vseg[l as usize] != NONE && self.held(l, q) && self.over(
-                b,
-                x,
-                l,
-            ) {
-                self.hint(self.seg_r[self.vseg[l as usize] as usize], self.freq[k as usize]);
+            } else if self.lout[q as usize] != st {
+                let s = self.held(l, q);
+                if s != NONE && self.over(b, x, l) {
+                    self.hint(self.seg_r[s as usize], self.freq[k as usize]);
+                }
             }
         }
     }
 
     // The register of `mask` the value at hand takes first: the one that saves most moves (`hq`), else a
     // caller-saved one, an argument one, a callee-saved one the body saves already (`cused`), then, when
-    // `pay` (it weighs no less than `SAVE_COST`), another callee-saved one; the lowest of each,
+    // `pay` (it weighs no less than `save`), another callee-saved one; the lowest of each,
     // one no parameter of the signature arrives in (`pinm`) first: that parameter may keep it. REG_NONE
     // for none.
     const fn pick(self: &Self, mask: u64, sets: Sets, cused: u64, pay: bool, pinm: u64) u8 {
@@ -5356,7 +5726,7 @@ extend Live {
     // those blocks into `lkeep`: per group of such blocks that edges join, how often the blocks that load
     // the value without it run (`lnow`), less how often the edges into the group from blocks that do not hold
     // it in `r` run; a group that gains nothing, or that a late edge enters (its stub cannot load), is left
-    // out. Less `SAVE_COST` when `fresh` (a callee-saved register the body does not save yet).
+    // out. Less `save` when `fresh` (a callee-saved register the body does not save yet).
     // A register for candidate `x` (weight `bare`) over all of its blocks, which no register is free in
     // (`lav`): one whose holder in each block where it is not free holds it through that block and reads
     // nothing there (a value that lives through a loop it is idle in). The holder leaves those blocks: it
@@ -5464,6 +5834,7 @@ extend Live {
                     own,
                     pinm,
                     keep,
+                    false,
                 ) & bit) != 0;
                 let k = self.order[q as usize];
                 let t = term(b, k);
@@ -5581,7 +5952,7 @@ extend Live {
             }
         }
         if fresh {
-            total = total - total.min(SAVE_COST);
+            total = total - total.min(self.save);
         }
         return total;
     }
@@ -5598,15 +5969,17 @@ extend Live {
         return j;
     }
 
-    // Value `x` holds register `r` through the blocks of `lblk` that `lbest` keeps: its segment (`seg_*`,
-    // `gpool`, `vseg`), with no stack home when `whole` (every live block), and the positions the register
-    // is its own (`thru`, `part`, `bmask`; a parameter's too at the end of each block that enters its own).
-    fn seg_put(self: &mut Self, b: &Body, x: usize, dp: u32, st: u32, r: u8, whole: bool) {
+    // Value `x` holds register `r` through the blocks of `lblk` that `lbest` keeps: one more segment of
+    // it (`seg_*`, `gpool`, `vseg`, `vnext`), and the positions the register is its own (`thru`, `part`,
+    // `bmask`; a parameter's too at the end of each block that enters its own).
+    fn seg_put(self: &mut Self, b: &Body, x: usize, dp: u32, r: u8) {
         let ni = b.insts.len();
         let nl = self.lblk.len();
         let bit = 1u64 << r as u64;
         let mut a = NONE;
         let mut bb: u32 = 0;
+        self.sgen += 1;
+        let st = self.sgen;
         for i in 0..nl {
             if !self.lbest[i] {
                 continue;
@@ -5629,6 +6002,7 @@ extend Live {
         if a == NONE {
             return;
         }
+        self.vnext.push(self.vseg[x]);
         self.vseg[x] = self.seg_x.len() as u32;
         self.rnext.push(self.rhead[r as usize]);
         self.rhead[r as usize] = self.seg_x.len() as u32;
@@ -5641,7 +6015,6 @@ extend Live {
             self.gpool.push(self.lsel[q as usize] == st);
         }
         self.segd[x] = true;
-        self.seg_mem[x] = !whole;
         if x < ni || x >= ni + b.params.len() || self.lsel[dp as usize] != st {
             return;
         }

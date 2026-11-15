@@ -240,14 +240,88 @@ fn main_3() i32 {
     let h = Holds { k: 4 };
     return (ranged::<8>(2, -1) + bounded(3) as usize + exported(4) as usize + read_k(&h) as usize - 14) as i32;
 }
+
+// A branch hint marks the side it makes rare `unlikely`: the code after a likely early return or a
+// likely `continue` (a block that only jumps on keeps the mark), the side a negated hint makes rare, a
+// rare edge into a block the other side enters too (a block of the edge's own), a rare way out of a
+// loop that has another. Not a loop's one way out: every return passes through it.
+@noinline
+fn tripled(x: i64) i64 {
+    return x * 3;
+}
+
+@noinline
+fn hint_return(x: i64) i64 {
+    if likely(x > 0) {
+        return 1;
+    }
+    return tripled(x) + tripled(x + 1);
+}
+
+@noinline
+fn hint_not(x: i64) i64 {
+    if !likely(x > 0) {
+        return tripled(x) + tripled(x + 1);
+    }
+    return 1;
+}
+
+@noinline
+fn hint_edge(x: i64) i64 {
+    let mut r: i64 = 1;
+    if likely(x > 0) {
+        r = tripled(x);
+    }
+    return r * 5;
+}
+
+@noinline
+fn hint_exit(x: i64) i64 {
+    let mut i = x;
+    let mut s: i64 = 0;
+    while likely(i > 0) {
+        s = s + tripled(i);
+        i = i - 1;
+    }
+    return tripled(s) + tripled(i);
+}
+
+@noinline
+fn hint_continue(x: i64) i64 {
+    let mut s: i64 = 0;
+    for i in 0..x {
+        if likely(i != 7) {
+            continue;
+        }
+        s = s + tripled(i);
+    }
+    return s;
+}
+
+@noinline
+fn hint_leave(x: i64) i64 {
+    let mut s: i64 = 0;
+    for i in 0..x {
+        if unlikely(i == 21) {
+            return tripled(s) + tripled(i);
+        }
+        s = s + i;
+    }
+    return s;
+}
+
+fn main_4() i32 {
+    return (hint_return(3) + hint_not(3) + hint_edge(3) + hint_exit(3) + hint_continue(9) + hint_leave(9) - 158) as i32;
+}
+
 fn main() i32 {
-    return main_0() + main_1() + main_2() + main_3();
+    return main_0() + main_1() + main_2() + main_3() + main_4();
 }
 )";
 
 // The program above, built once with its LIR text written (`SC_LIR_TEXT`), unoptimized.
 @test(timeout = 300)
-fn lir_heads_name_their_facts() {
+fn the_lowered_lir_names_its_facts() {
     if cli::on_wasm() {
         return;
     }
@@ -272,6 +346,33 @@ fn lir_heads_name_their_facts() {
     assert(!head_of(&text, "lir_heads_exported").contains("range"), text.as_str());
     let rk = text.as_str().find("fn @main__read_k\n");
     assert(rk >= 0 && text.as_str().slice(rk as usize, text.len()).find(" range 40 ") >= 0, text.as_str());
+    assert_eq(rare_blocks(&text, "main__hint_return"), 1);
+    assert_eq(rare_blocks(&text, "main__hint_not"), 1);
+    let edge = body_of(&text, "main__hint_edge");
+    assert(lines_with(&edge, ": unlikely") == 1 && edge.contains(": unlikely\n  jmp "), edge.as_str());
+    assert_eq(rare_blocks(&text, "main__hint_exit"), 0);
+    assert_eq(rare_blocks(&text, "main__hint_continue"), 1);
+    assert_eq(rare_blocks(&text, "main__hint_leave"), 1);
+}
+
+// The blocks of function `name` in LIR text `text` that have the `unlikely` mark.
+fn rare_blocks(text: &String, name: str) u32 {
+    let body = body_of(text, name);
+    return lines_with(&body, ": unlikely");
+}
+
+// The lines of function `name` in LIR text `text`.
+fn body_of(text: &String, name: str) String {
+    let t = text.as_str();
+    let h = format("fn @{}\n", name);
+    let at = t.find(&h);
+    assert(at >= 0, h.as_str());
+    let rest = t.slice(at as usize + h.len(), t.len());
+    let end = rest.find("\nfn @");
+    if end < 0 {
+        return String::from_str(rest);
+    }
+    return String::from_str(rest.slice(0, end as usize));
 }
 
 // The lines of function `name` in LIR text `text` before its entry block.
