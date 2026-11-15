@@ -4,7 +4,7 @@
 // per element. Per boundary size (64 bytes to 65536) the function, then the loop, is placed so that an
 // odd multiple of that size falls after each of its instructions; the other one stays inside a 64-byte
 // line. The time per element is the least of REPS runs, printed as its ratio to the run with both inside
-// a line.
+// a line. A second table does the same for a loop of the same work that calls nothing.
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +35,12 @@ static const uint32_t LOOP_W[] = {0xa9bd7bfd, 0xa90153f3, 0xf90013f5, 0xaa0003f3
 // at the start.
 static const int KCUT[] = {4, 8, 12, 16, 20, 0};
 static const int LCUT[] = {4, 8, 12, 16, 20, 24, 28, 0};
+static const uint32_t PLAIN_W[] = {0xd2800002, 0xb8404403, 0x51018464, 0x12001c84, 0x7100649f,
+                                   0x9a828442, 0xeb01001f, 0x54ffff43, 0xaa0203e0, 0xd65f03c0};
+#define PLAIN_CODE PLAIN_W
+#define PLAIN_N 40
+#define PLAIN_HEAD 4
+static const int PCUT[] = {4, 8, 12, 16, 20, 24, 28, 0};
 #define ABI
 #elif defined(__x86_64__)
 #define ARCH "x86-64"
@@ -50,12 +56,20 @@ static const uint8_t LOOP_B[] = {0x53, 0x41, 0x54, 0x41, 0x55, 0x48, 0x89, 0xfb,
 // The boundary inside the first instruction, after each instruction, at the end and at the start.
 static const int KCUT[] = {1, 3, 5, 8, 9, 0};
 static const int LCUT[] = {3, 7, 12, 15, 18, 21, 23, 0};
+static const uint8_t PLAIN_B[] = {0x31, 0xc0, 0x0f, 0xb6, 0x0f, 0x48, 0x83, 0xc7, 0x04, 0x80,
+                                  0xe9, 0x61, 0x80, 0xf9, 0x19, 0x0f, 0x96, 0xc1, 0x0f, 0xb6,
+                                  0xc9, 0x48, 0x01, 0xc8, 0x48, 0x39, 0xf7, 0x72, 0xe5, 0xc3};
+#define PLAIN_CODE PLAIN_B
+#define PLAIN_N 30
+#define PLAIN_HEAD 2
+static const int PCUT[] = {3, 7, 10, 13, 16, 19, 22, 25, 27, 0};
 #define ABI __attribute__((sysv_abi))
 #else
 #error "arm64 or x86-64"
 #endif
 #define NK (int)(sizeof KCUT / sizeof KCUT[0])
 #define NL (int)(sizeof LCUT / sizeof LCUT[0])
+#define NP (int)(sizeof PCUT / sizeof PCUT[0])
 
 typedef uint64_t (ABI *loop_fn)(const uint32_t *, const uint32_t *);
 
@@ -115,6 +129,24 @@ static loop_fn place(uint8_t *k, uint8_t *head) {
 #else
     FlushInstructionCache(GetCurrentProcess(), k, KERNEL_N);
     FlushInstructionCache(GetCurrentProcess(), l, LOOP_N);
+#endif
+    return (loop_fn)l;
+}
+
+// The loop that calls nothing, its head at `head`: its entry.
+static loop_fn place_plain(uint8_t *head) {
+    uint8_t *l = head - PLAIN_HEAD;
+#ifdef __APPLE__
+    pthread_jit_write_protect_np(0);
+#endif
+    memcpy(l, PLAIN_CODE, PLAIN_N);
+#ifdef __APPLE__
+    pthread_jit_write_protect_np(1);
+    sys_icache_invalidate(l, PLAIN_N);
+#elif !defined(_WIN32)
+    __builtin___clear_cache((char *)l, (char *)l + PLAIN_N);
+#else
+    FlushInstructionCache(GetCurrentProcess(), l, PLAIN_N);
 #endif
     return (loop_fn)l;
 }
@@ -197,8 +229,30 @@ int main(void) {
         printf("\n");
         fflush(stdout);
     }
+    // The loop that calls nothing, in the region's last quarter.
+    uint8_t *bp = base + 0xc0000, *pn = bp - 0x1000 + 0x108;
+    double pbase = measure(place_plain(pn));
+    printf("a loop that calls nothing, inside a line: %.3f ns per element\n", pbase);
+    printf("%-9s loop", "boundary");
+    for (int i = 0; i < NP; i++) printf(" %5d", PCUT[i]);
+    printf("\n");
+    double worst_p[16];
+    nx = 0;
+    for (long x = 64; x <= 65536; x *= 2, nx++) {
+        double b = measure(place_plain(pn));
+        printf("%-9ld     ", x);
+        worst_p[nx] = 0;
+        for (int i = 0; i < NP; i++) {
+            double r = measure(place_plain(bp + x - PCUT[i])) / b;
+            printf(" %5.2f", r);
+            if (PCUT[i] != 0 && PCUT[i] != PCUT[NP - 2] && r > worst_p[nx]) worst_p[nx] = r;
+        }
+        printf("\n");
+        fflush(stdout);
+    }
     printf("worst ratio with the boundary inside, per boundary size:\n");
     nx = 0;
-    for (long x = 64; x <= 65536; x *= 2, nx++) printf("  %-6ld function %.2f  loop %.2f\n", x, worst_k[nx], worst_l[nx]);
+    for (long x = 64; x <= 65536; x *= 2, nx++)
+        printf("  %-6ld function %.2f  loop %.2f  loop without a call %.2f\n", x, worst_k[nx], worst_l[nx], worst_p[nx]);
     return 0;
 }
