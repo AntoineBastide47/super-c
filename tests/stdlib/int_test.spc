@@ -232,6 +232,38 @@ fn division_and_remainder() {
     assert(q * b + r == a);
 }
 
+// Operands of one limb: truncating division and its remainder in every sign case, MIN / -1 of `i64`
+// (in range at 256 bits), the Euclidean remainder, and a product that needs the second limb.
+@test
+fn one_limb_operands() {
+    let p7 = i256::from_i64(7);
+    let n7 = i256::from_i64(-7);
+    let p2 = i256::from_i64(2);
+    let n2 = i256::from_i64(-2);
+    let n1 = i256::from_i64(-1);
+    let mut r = i256::zero();
+    assert(n7.divmod(&p2, &mut r) == i256::from_i64(-3));
+    assert(r == n1);
+    assert(p7.divmod(&n2, &mut r) == i256::from_i64(-3));
+    assert(r == i256::from_i64(1));
+    assert(n7.divmod(&n2, &mut r) == i256::from_i64(3));
+    assert(r == n1);
+    let q = i256::from_i64(i64::MIN).divmod(&n1, &mut r);
+    assert(q.to_string().as_str() == "9223372036854775808");
+    assert(r.is_zero());
+    assert(n7.rem_euclid(&p2) == i256::from_i64(1));
+    let m = u256::from_u64(0xFFFFFFFFFFFFFFFF);
+    let sq = m * m;
+    assert_eq(sq.limb(0), 1u64);
+    assert_eq(sq.limb(1), 0xFFFFFFFFFFFFFFFEu64);
+    assert_eq(sq.limb(2), 0u64);
+    let hundred = u256::from_u64(100);
+    let seven = u256::from_u64(7);
+    let mut ur = u256::zero();
+    assert(hundred.divmod(&seven, &mut ur) == u256::from_u64(14));
+    assert_eq(ur.to_u64(), 2u64);
+}
+
 @test
 fn shifts_move_bits_across_limbs() {
     let one = u128::one();

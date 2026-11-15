@@ -15693,6 +15693,24 @@ fn prove_cached(
             }
         }
     }
+    // A module the tree's record misses: the shared record of its key (`prove_dir`), from any build tree.
+    let shared = cache && p.prove_dir.len() != 0;
+    if shared {
+        let mut by_file = Map::<u64, usize>::new();
+        for m in 0..n {
+            by_file.insert(fnv_cont(FNV_BASIS, &p.modules.at(m).file), m);
+        }
+        for m in 0..n {
+            if skip[m] {
+                continue;
+            }
+            let rec = shared_record(p, keys[2 * m], keys[2 * m + 1]);
+            if let Some(text) = loader::read_file(&rec) {
+                skip.set(m, true);
+                shared_facts(p, keep, &by_file, &text, facts);
+            }
+        }
+    }
     let mut held = Vector::<bool>::with_capacity(n);
     held.resize_default(n);
     // The proofs lower the contracts of interfaces' methods, evaluate named constants (`local_val`) and,
@@ -15765,12 +15783,82 @@ fn prove_cached(
         mkdir_p(&p.gen_root);
         let _ = write_file_atomic(&path, &out);
     }
+    // The shared record of each module this build proved: its facts, each owner by its file, sorted.
+    if shared {
+        let mut lines = Vector::<Vector<String>>::with_capacity(n);
+        for _m in 0..n {
+            lines.push(Vector::<String>::new());
+        }
+        for j in 0..fresh.len() {
+            let b = &keep.kept.at((fresh[j] >> 32) as usize).body;
+            lines.index_mut(b.module as usize).push(
+                format(
+                    "{:x} {:x} {}",
+                    b.owner.node,
+                    fresh[j] & 0xFFFFFFFFu64,
+                    p.modules.at(b.owner.module as usize).file.as_str(),
+                ),
+            );
+        }
+        mkdir_p(&p.prove_dir);
+        for m in 0..n {
+            if held[m] && !skip[m] {
+                lines.index_mut(m).sort();
+                let mut body = String::new();
+                for q in 0..lines[m].len() {
+                    body.push_str(lines[m].at(q).as_str());
+                    body.push_byte(b'\n');
+                }
+                let rec = shared_record(p, keys[2 * m], keys[2 * m + 1]);
+                let _ = write_file_atomic(&rec, &body);
+            }
+        }
+    }
     if ok {
         facts.extend_copy(&fresh);
     } else {
         facts.clear();
     }
     return ok;
+}
+
+// The shared proof record of the module whose key is `k1`, `k2` (`prove_cached`).
+fn shared_record(p: &loader::Package, k1: u64, k2: u64) String {
+    return loader::join2(&p.prove_dir, format("{:x}-{:x}", k1, k2).as_str());
+}
+
+// The facts of shared proof record `text` (`<owner node> <rvalue> <owner file>` lines, hex) into `facts`
+// (kept index << 32 | rvalue): an owner the build does not keep gives none.
+fn shared_facts(p: &loader::Package, keep: &irl::Keep, by_file: &Map<u64, usize>, text: str, facts: &mut Vector<u64>) {
+    for line in text.split("\n") {
+        let a = line.find(" ");
+        if a < 0 {
+            continue;
+        }
+        let rest = line.slice(a as usize + 1, line.len());
+        let b = rest.find(" ");
+        if b < 0 {
+            continue;
+        }
+        let file = rest.slice(b as usize + 1, rest.len());
+        let mut om = usize::MAX;
+        if let Some(m) = by_file.get(&fnv_cont(FNV_BASIS, file)) {
+            om = *m;
+        }
+        if om == usize::MAX || p.modules.at(om).file.as_str() != file {
+            continue;
+        }
+        switch (parse_hex64(line.slice(0, a as usize)), parse_hex64(rest.slice(0, b as usize))) {
+            (Some(node), Some(rv)) => {
+                if let Some(k) = keep.ix.get(&skey_mix(0, om as u64 << 32 | node)) {
+                    if (*k) as usize < keep.kept.len() && rv < keep.kept.at((*k) as usize).body.rvalues.len() as u64 {
+                        facts.push(*k << 32 | rv);
+                    }
+                }
+            },
+            _ => {},
+        }
+    }
 }
 
 // The value of hex digits `s`, None for another text or more than 16 digits.

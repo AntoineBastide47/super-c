@@ -363,6 +363,14 @@ extend<const BITS: usize> IntBits<BITS> {
         }
         let mut r = IntBits::<BITS>::zero();
         let n = IntBits::<BITS>::nlimbs();
+        // One limb each, two full limbs of room: one wide multiplication, which cannot overflow.
+        if BITS >= 128 && self.len() <= 1 && other.len() <= 1 {
+            let mut hi: u64 = 0;
+            r.set(0, mul_wide(self.get(0), other.get(0), &mut hi));
+            r.set(1, hi);
+            unsafe *overflow = false;
+            return r;
+        }
         // Up to four limbs the rows run over the whole width, loops the C compiler unrolls, and each row
         // checks the limbs of b past the top. Wider, they run over the limbs up to the top nonzero ones,
         // whose product lands at limb na + nb - 2: at or past n, a bit the width cannot hold.
@@ -688,6 +696,14 @@ extend<const BITS: usize> IntBits<BITS> {
         if m < n {
             unsafe *quot = q;
             unsafe *rem = *self;
+            return;
+        }
+        // One limb each: one machine division.
+        if m == 1 {
+            q.set(0, self.get(0) / divisor.get(0));
+            r.set(0, self.get(0) % divisor.get(0));
+            unsafe *quot = q;
+            unsafe *rem = r;
             return;
         }
         // Normalized copies: the divisor in n limbs, the dividend in m + 1.
@@ -1842,6 +1858,17 @@ extend<const BITS: usize> Int<BITS> {
         return self.bits.get(0) as i64;
     }
 
+    // Whether the value fits in an `i64`: every limb past the first is the first's sign.
+    const fn in_i64(self: &Int<BITS>) bool {
+        let fill = (self.bits.get(0) as i64 >> 63) as u64;
+        for i in 1..(BITS + 63) / 64 {
+            if self.bits.get(i) != fill {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /// Limb `i` (little-endian); `i` must be below `limbs()`.
     pub const fn limb(self: &Int<BITS>, i: usize) u64 {
         return self.bits.get(i);
@@ -2269,6 +2296,15 @@ extend<const BITS: usize> Int<BITS> {
         }
         if self.is_min_by_neg1(other) {
             unsafe sc_int_div_overflow("attempt to divide with overflow".ptr());
+        }
+        // Both in `i64` (the one overflow there, MIN / -1, is in range here): the machine division.
+        if BITS > 64 && self.in_i64() && other.in_i64() {
+            let a = self.to_i64();
+            let b = other.to_i64();
+            if a != i64::MIN || b != -1 {
+                *rem = Int::<BITS>::from_i64(a % b);
+                return Int::<BITS>::from_i64(a / b);
+            }
         }
         let neg_a = self.is_negative();
         let neg_b = other.is_negative();

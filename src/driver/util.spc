@@ -626,11 +626,10 @@ pub(package) fn write_file_atomic_parts(path: str, head: str, body: str) bool {
     return settle(&tmp, path, write_file_parts(&tmp, head, body));
 }
 
-/// The temporary file an atomic write of `path` goes through.
+/// The temporary file an atomic write of `path` goes through, one per process: two builds that write
+/// one cache entry at once each rename a whole file of their own.
 pub(package) fn tmp_of(path: str) String {
-    let mut tmp = String::from_str(path);
-    tmp.push_str(".tmp");
-    return tmp;
+    return format("{}.{}.tmp", path, process::pid().unwrap_or(0));
 }
 
 /// Move `tmp` onto `path` when it was written (`wrote`), else remove it; whether `path` holds it.

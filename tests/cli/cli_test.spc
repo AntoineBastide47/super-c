@@ -9406,6 +9406,31 @@ fn cache_version(p: &cli::Proj, v: i32) {
     p.mkfile("src/main.spc", &src);
 }
 
+// The sweep of the proof records every build tree shares (`<cache base>/.prove`, every 30 minutes): a
+// record written 30 days before goes, the ones the build just wrote stay.
+@test
+fn proof_record_sweep_removes_idle_records() {
+    if cli::on_windows() || cli::on_wasm() {
+        return; // `find` and `touch -t` need a POSIX host
+    }
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    cache_version(&p, 0);
+    let root = p.dir();
+    let cache = format("{}/cache", root);
+    let _env = cli::set_env("SC_CACHE_DIR", &cache);
+    assert(cli::superc_in(root, "build").ok(), "the first build");
+    p.mkfile("cache/.prove/0-0", "");
+    let dead = format("{}/.prove/0-0", cache.as_str());
+    age_tree(&dead);
+    age_tree(format("{}/.prove/.sweep", cache.as_str()).as_str());
+    cache_version(&p, 1);
+    assert(cli::superc_in(root, "build").ok(), "a build under an old stamp");
+    assert(du::file_mtime(&dead) == 0, "the idle record goes");
+    let left = du::list_dir(format("{}/.prove", cache.as_str()).as_str(), false).unwrap_or(Vector::<String>::new());
+    assert(left.len() != 0, "the records the builds wrote stay");
+}
+
 // The project sweep (every 30 minutes, after a successful build): an out-dir entry with nothing written
 // for 30 days goes (a build tree, a link record), unless a build holds the lock of a tree in it; the
 // build's own tree stays. A fresh stamp skips the sweep.

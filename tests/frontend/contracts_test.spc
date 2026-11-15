@@ -2667,10 +2667,14 @@ fn main(args: Vector<str>) i32 {
 }
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,
-// an edit of a module proves it and its importers again, and a failed proof is never recorded.
+// an edit of a module proves it and its importers again, and a failed proof is never recorded. The
+// records every build tree shares give a new project std's proofs. A cache of its own: the suite's
+// holds other tests' records.
 @test
 fn proofs_are_recorded_per_module() {
     let p = cli::proj_new();
+    let cache = format("{}/cache", p.dir());
+    let _env = cli::set_env("SC_CACHE_DIR", &cache);
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/lib.spc", "pub fn inc(x: u32) u32 requires x < 100 ensures |r| r == x + 1 { return x + 1; }\n");
     p.mkfile(
@@ -2680,6 +2684,20 @@ fn proofs_are_recorded_per_module() {
     let root = p.dir();
     let first = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
     assert(first.ok() && first.out_has(", 0 from the proof record"), "the first build proves every module");
+    // Another project's tree with an edited root: it proves the root alone; the unchanged `lib` and std
+    // take their proofs from the records every tree shares.
+    let q = cli::proj_new();
+    q.mkfile("build.toml", "bin = \"other\"\nroot = \"src/main.spc\"\n");
+    q.mkfile("src/lib.spc", "pub fn inc(x: u32) u32 requires x < 100 ensures |r| r == x + 1 { return x + 1; }\n");
+    q.mkfile(
+        "src/main.spc",
+        "import lib;\nfn twice(x: u32) u32 requires x < 50 ensures |r| r == x + 2 { return lib::inc(lib::inc(x)); }\nfn main() i32 { return twice(4) as i32; }\n",
+    );
+    let other = cli::superc_env_in(q.dir(), "SC_CEMIT_STATS", "1", "build");
+    assert(
+        other.ok() && other.out_has("prove: 1 to prove"),
+        "a new project takes the unchanged modules' proofs from the shared records",
+    );
     // An unchanged build is skipped whole; a comment changes the root module only.
     p.mkfile(
         "src/main.spc",

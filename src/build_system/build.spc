@@ -123,6 +123,10 @@ pub(package) fn sweep(m: *const mf::Manifest, now: i64, clean: bool) {
     if croot.len() != 0 && (clean || sweep_due(&croot, now)) {
         sweep_cache(&croot, now);
     }
+    let pdir = prove_dir();
+    if pdir.len() != 0 && (clean || sweep_due(&pdir, now)) {
+        sweep_proofs(&pdir, now);
+    }
     if m != null && (clean || sweep_due(unsafe (*m).out_dir.as_str(), now)) {
         sweep_project(unsafe &*m, now);
     }
@@ -154,6 +158,24 @@ pub(package) const fn project_name<'a>(m: &'a mf::Manifest) str<'a> {
 /// (`prelude_image::sweep`).
 fn sweep_cache(root: str, now: i64) {
     pimg::sweep(root, now);
+}
+
+/// Delete the shared proof records (`prove_dir`) written TREE_IDLE before `now`, and temp files left for
+/// TMP_IDLE: a record a build still uses is proved and written once more.
+fn sweep_proofs(dir: str, now: i64) {
+    let names = list_dir(dir, false).unwrap_or(Vector::<String>::new());
+    for i in 0..names.len() {
+        let n = names.at(i).as_str();
+        let p = loader::join2(dir, n);
+        let idle = if n.ends_with(".tmp") {
+            TMP_IDLE
+        } else {
+            TREE_IDLE
+        };
+        if now - file_mtime(&p) >= idle {
+            let _ = fs::unlink(&p);
+        }
+    }
 }
 
 /// Delete what no build of manifest `m` reads again: every entry of its out-dir with nothing written
@@ -991,6 +1013,7 @@ fn emit_closure(
         p.lib_build = m.lib_name.len() != 0 && root == m.lib_root.as_str();
         p.load_user(root, cx.std_dir, cx.target);
     }
+    p.prove_dir = prove_dir();
     bst::mark(bst::B_LOAD);
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprintln("phase load: {} ms", ticks_ms() - tl0);

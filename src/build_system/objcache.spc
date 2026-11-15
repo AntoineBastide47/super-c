@@ -39,6 +39,19 @@ pub(package) fn cache_base() String {
     return out;
 }
 
+/// The directory of the proof records below the cache base, which every project's builds share (the
+/// proof key holds each module's sources and the compiler): empty when caching is disabled.
+pub(package) fn prove_dir() String {
+    if object_cache_dir("").len() == 0 {
+        return String::new();
+    }
+    let base = cache_base();
+    return loader::join2(&base, PROVE_DIR);
+}
+
+/// The proof records' directory name below the cache base.
+pub(package) const PROVE_DIR: str<'static> = ".prove";
+
 /// The cache directory of script builds below the cache base.
 pub(package) const SCRIPTS_DIR: str<'static> = ".scripts";
 

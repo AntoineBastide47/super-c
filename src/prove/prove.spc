@@ -558,6 +558,10 @@ const SEL_CASES: u32 = 32;
 // The most disjunctions over a conjunction one goal splits (`holds_in`).
 const SPLIT_PARTS: u32 = 16;
 // The most steps a stage of `holds_in` that most goals pass at once takes (`capped`).
+// The walk steps (blocks entered, over every path) of a body walked only for bounds-check facts. Past
+// them the walk stops and the body keeps no fact. The facts the compiler's own build keeps need at most
+// 161,043; the bodies that spend the full STEP_BUDGET there keep none.
+const FACTS_WALK: u32 = 262144;
 const STAGE_STEPS: u32 = 200000;
 // The steps of the last attempt at a goal over sequences (`holds`).
 const SEQ_STEPS: u32 = 50000;
@@ -800,6 +804,10 @@ struct Prover<const B: usize> {
     qinst: Map<u64, u32>,
     qdef: Map<u32, bool>, // the witnesses' facts
     seld: Map<u32, bool>, // the terms whose facts `sel`, `index_key` and the sequences made
+    // Whether no value of a type holds a cell (`no_cell`), by module << 32 | type, for the build: the
+    // struct whose generic parameters the type may name (NODE_NONE for none) << 1 | the result. A type's
+    // members do not change while the proofs run.
+    cell_free: Map<u64, u64>,
     ptrd: Map<u32, bool>, // the pointers whose null and address facts are made (`ptr_addr`, `ptr_offset`)
     seqeqs: Vector<u32>, // each equality of sequences `seq_ext` made: the equality, then its two sides
     seqwit: Map<u32, u32>, // each equality of sequences no goal named yet: its witness (`goal_witnesses`)
@@ -994,6 +1002,7 @@ extend<const B: usize> Prover<B> {
             qinst: Map::<u64, u32>::new(),
             qdef: Map::<u32, bool>::new(),
             seld: Map::<u32, bool>::new(),
+            cell_free: Map::<u64, u64>::new(),
             ptrd: Map::<u32, bool>::new(),
             seqeqs: Vector::<u32>::new(),
             seqwit: Map::<u32, u32>::new(),
@@ -2271,7 +2280,7 @@ extend<const B: usize> Prover<B> {
 
     const fn spend(self: &mut Self) bool {
         self.steps += 1;
-        return self.steps + self.sv.steps <= STEP_BUDGET;
+        return self.steps + self.sv.steps <= STEP_BUDGET && (!self.facts_only || self.steps <= FACTS_WALK);
     }
 
     // ---- reports ----------------------------------------------------------------------------------
@@ -4531,7 +4540,7 @@ extend<const B: usize> Prover<B> {
     // Value `fixed` of type `ty` (module `m`) with each member that may hold an `UnsafeCell` (`no_cell`)
     // taken from `now`: `now` when the type itself may.
     fn cell_members(self: &mut Self, m: ModuleId, ty: TypeId, fixed: u32, now: u32) u32 {
-        if self.no_cell(m, ty, 0, 0, NODE_NONE) {
+        if self.cell_free_of(m, ty, NODE_NONE) {
             return fixed;
         }
         let (rm, rt) = self.resolve(m, ty);
@@ -4569,13 +4578,11 @@ extend<const B: usize> Prover<B> {
             } else {
                 self.ast_of(am).type_at(at).kind
             };
-            if ay == TypeKind::TYPE_POINTER || ay == TypeKind::TYPE_REFERENCE || at != TYPE_NONE && my.kind != TypeKind::TYPE_GENERIC && self.no_cell(
+            if ay == TypeKind::TYPE_POINTER || ay == TypeKind::TYPE_REFERENCE || at != TYPE_NONE && my.kind != TypeKind::TYPE_GENERIC && self.cell_free_of(
                 dm,
                 mt,
-                0,
-                dm,
                 dn,
-            ) || at != TYPE_NONE && my.kind == TypeKind::TYPE_GENERIC && self.no_cell(am, at, 0, 0, NODE_NONE) {
+            ) || at != TYPE_NONE && my.kind == TypeKind::TYPE_GENERIC && self.cell_free_of(am, at, NODE_NONE) {
                 continue;
             }
             let key = self.tm.int(wide::<B>(j), 64, false);
@@ -5763,11 +5770,9 @@ extend<const B: usize> Prover<B> {
         let lazy = rv.kind == ir::RV_REF && self.dest_tmp != NONE && self.lazy[self.dest_tmp as usize];
         // A shared borrow of a cell-free place (`no_cell`) lets nothing write it, where the body makes no
         // pointer from a reference (`ptr_cast`).
-        let ro = !all && rv.kind == ir::RV_REF && rv.b == 0 && !self.ptr_cast && self.no_cell(
+        let ro = !all && rv.kind == ir::RV_REF && rv.b == 0 && !self.ptr_cast && self.cell_free_of(
             cm,
             cb.places.at(rv.a as usize).ty,
-            0,
-            0,
             NODE_NONE,
         );
         if !all && !lent && !lazy && !ro && (rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE) && !self.owned_elem(
@@ -12470,7 +12475,7 @@ extend<const B: usize> Prover<B> {
     // Whether argument `j` of call `t` of body `b` is a shared borrow (an automatic one, a `&`, or a `&mut`
     // the shared parameter takes as a `&`) of a place whose type holds no `UnsafeCell` (`no_cell`): the
     // callee changes neither its value nor the blocks of its `@owned` fields.
-    fn shared_read(self: &Self, b: &ir::CoreBody, t: &ir::Terminator, j: u32) bool {
+    fn shared_read(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, j: u32) bool {
         let op = *b.operands.at(b.oper_pool[(t.args_start + j) as usize] as usize);
         if op.kind == ir::OP_CONST || op.ty == TYPE_NONE {
             return false;
@@ -12497,12 +12502,26 @@ extend<const B: usize> Prover<B> {
         }
         let oy = *self.ast_of(b.module).type_at(op.ty);
         let vty = pick(oy.kind == TypeKind::TYPE_REFERENCE, oy.as_data.elem, op.ty);
-        return self.no_cell(b.module, vty, 0, 0, NODE_NONE);
+        return self.cell_free_of(b.module, vty, NODE_NONE);
     }
 
     // Whether a value of type `ty` (module `m`) holds no `UnsafeCell`, in its members, the elements its
     // pointers reach and its type arguments; a type parameter of struct `gd` (module `gm`) is one whose
     // argument was checked. `depth` levels deep.
+    // `no_cell` of type `ty` of module `m`, a member of struct `gd` of `m` (NODE_NONE outside one), once
+    // per type and struct (`cell_free`).
+    fn cell_free_of(self: &mut Self, m: ModuleId, ty: TypeId, gd: NodeId) bool {
+        let k = m as u64 << 32 | ty as u64;
+        if let Some(e) = self.cell_free.get(&k) {
+            if *e >> 1 == gd as u64 {
+                return (*e & 1) != 0;
+            }
+        }
+        let r = self.no_cell(m, ty, 0, pick(gd == NODE_NONE, 0, m), gd);
+        self.cell_free.insert(k, gd as u64 << 1 | r as u64);
+        return r;
+    }
+
     fn no_cell(self: &Self, m: ModuleId, ty: TypeId, depth: u32, gm: ModuleId, gd: NodeId) bool {
         if ty == TYPE_NONE || depth > 6 {
             return false;
@@ -13124,6 +13143,15 @@ pub(package) fn check_kept(
         } else {
             p.jobs as usize * 4
         };
+        // The bodies by size, largest first (ties by index): chunk `c` takes every `chunks`-th from the
+        // `c`-th, so the large bodies spread over the chunks and start first.
+        let mut order = Vector::<u64>::with_capacity(n);
+        for k in 0..n {
+            let nb = keep.kept.at(k).body.blocks.len() as u64;
+            order.push(0xFFFFFFFFu64 - nb << 32 | k as u64);
+        }
+        order.sort();
+        let da = ((&order) as *const Vector<u64>) as usize;
         let pa = (p as *const loader::Package) as usize;
         let ka = (keep as *const irl::Keep) as usize;
         let ha = ((&sh) as *const Shared) as usize;
@@ -13132,7 +13160,7 @@ pub(package) fn check_kept(
         let oa = outs.as_mut_ptr() as usize;
         let fa = fouts.as_mut_ptr() as usize;
         let slice = pv.slice;
-        // A chunk's cost is its bodies': each worker claims one chunk at a time.
+        // Each worker claims one chunk at a time.
         dpar::range_with(
             0..chunks,
             dpar::Options { schedule: dpar::Schedule::Dynamic, grain_size: 1 },
@@ -13145,7 +13173,9 @@ pub(package) fn check_kept(
                 w.sh = ptr::from_addr_mut::<Shared>(ha);
                 let mut w2 = Prover::<NUM_WIDE>::new(pk, kp, slice);
                 w2.sh = ptr::from_addr_mut::<Shared>(ha);
-                for k in c * n / chunks..(c + 1) * n / chunks {
+                let od = unsafe &*ptr::from_addr_mut::<Vector<u64>>(da);
+                for i in 0..(n - c + chunks - 1) / chunks {
+                    let k = (od[c + i * chunks] & 0xFFFFFFFFu64) as usize;
                     let kb = kp.kept.at(k);
                     if kb.body.blocks.len() == 0 || sk[kb.body.module as usize] {
                         continue;

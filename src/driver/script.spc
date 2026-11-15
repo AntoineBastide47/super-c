@@ -66,6 +66,7 @@ pub(package) fn run_script(
     if prelude_stage(&mut p, &mut cirv, std_dir, path, target, jobs, &cdir) {
         p.load_user(path, std_dir, target);
     }
+    p.prove_dir = ocache::prove_dir();
     if stdlib::getenv("SC_CEMIT_STATS") != null {
         eprintln("phase load: {} ms", ticks_ms() - tl0);
     }
