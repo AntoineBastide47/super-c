@@ -252,7 +252,7 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
     }
     let mut px = NONE;
     for q in 0..b.edge_nargs(be) {
-        if b.edge_arg(be, q) == (VPARAM | p) {
+        if lv.arg(b, be, q) == (VPARAM | p) {
             if px != NONE {
                 return NONE;
             }
@@ -272,19 +272,19 @@ pub(package) fn back_share(b: &Body, lv: &lv::Live, va: &Vector<Va>, x: u32) u32
     for i in jb.start..jb.start + jb.len - 1 {
         lv::each_use(b, b.insts[i as usize], &mut us);
         for u in 0..us.len() {
-            if us[u] == pv {
+            if lv.seen(us[u]) == pv {
                 return NONE;
             }
         }
     }
     for q in 0..b.edge_nargs(be) {
-        if b.edge_arg(be, q) == pv {
+        if lv.arg(b, be, q) == pv {
             return NONE;
         }
     }
     if oe != NONE {
         for q in 0..b.edge_nargs(oe) {
-            if b.edge_arg(oe, q) == pv {
+            if lv.arg(b, oe, q) == pv {
                 return NONE;
             }
         }
@@ -1301,7 +1301,8 @@ extend Core {
 
     // The type of value index `x`.
     pub(package) const fn xty(self: &Self, x: u32) u8 {
-        return lv::xty(self.b(), x);
+        // A value a zero extension is a view of is stored with the zeros above its bits (`lv::Live::wide`).
+        return ast::pick(self.lv.wide_at(x), T_I64, lv::xty(self.b(), x));
     }
 
     // The body being compiled and the object: both outlive the generator's borrows.
@@ -1331,6 +1332,13 @@ extend Core {
     // The value index of `v`.
     pub(package) const fn vx(self: &Self, v: Value) u32 {
         return self.lv.vix(self.b(), v);
+    }
+
+    // Whether `v` is a view (`lv::FOLD_VIEW`) of a wider value: its register's bits above `v`'s are that
+    // value's, which no reader of `v` may write.
+    pub(package) const fn narrow(self: &Self, v: Value) bool {
+        let r = self.lv.seen(v);
+        return r != v && type_bits(self.vt(v), self.ptr) < type_bits(self.vt(r), self.ptr);
     }
 
     pub(package) fn data(self: &mut Self, p: &Package, s: u32, local: bool, coff: bool, abs64: u8) bool {
