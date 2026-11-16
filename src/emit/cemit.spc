@@ -704,7 +704,7 @@ extend CEmit {
             };
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.align_loops = pk.opt > 0 && pk.opt != bman::OPT_S && pk.opt != bman::OPT_Z;
-            l.pkg.fit_lines = false;
+            l.pkg.fit_lines = l.pkg.align_loops && nat::obj_kind(pk.build_target) != nat::OBJ_MACHO;
             l.pkg.popcnt = tgt::isa(pk.arch).popcount || feature(pk, "popcnt");
             l.pkg.sse41 = feature(pk, "sse4.1");
             l.pkg.vtbl = feature(pk, "ssse3");
