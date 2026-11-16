@@ -10231,6 +10231,32 @@ fn build_link_failure_keeps_artifact() {
     assert(p13_mtime(&bin) > b1, "and links the newer object over the stale binary");
 }
 
+// The own linker is the compiler: the link record names the compiler that linked, and a build finds the
+// record of another compiler's link stale, so it links again though no object changed.
+@test
+fn build_links_again_after_another_compilers_link() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    return 0;\n}\n");
+    let root = p.dir();
+    let r0 = cli::superc_in(root, "build");
+    assert(r0.ok(), "initial build");
+    let mut cmdp = bsys::link_record(
+        format("{}/build", root).as_str(),
+        format("build/debug/app{}", unsafe str::from_cstr(cli::binext())).as_str(),
+    );
+    cmdp.push_str(".cmd");
+    let l1 = loader::read_file(&cmdp).unwrap();
+    let at = l1.as_str().find(" +linker ");
+    assert(at > 0, "the link record names the compiler");
+    assert(
+        du::write_file(&cmdp, format("{} +linker 1", l1.as_str().slice(0, at as usize)).as_str()),
+        "the other record",
+    );
+    assert(cli::superc_in(root, "build").ok(), "the next build succeeds");
+    assert(loader::read_file(&cmdp).unwrap().as_str() == l1.as_str(), "and links again");
+}
+
 // A failed link is redone by the next build even when the binary, the objects and the generated tree
 // all carry one mtime second: the pending link record, not the mtime order, forces the link.
 @test

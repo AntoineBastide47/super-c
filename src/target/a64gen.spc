@@ -6185,17 +6185,16 @@ extend Gen {
         return true;
     }
 
-    // `memcpy` and `memset`: inline for a constant size up to 128 bytes (an overlapping copy loads every
-    // chunk before storing one, up to 64 bytes), else a call of the C library's routine.
+    // `memcpy` and `memset`: inline for a constant size up to MEM_INLINE bytes (an overlapping copy loads
+    // every chunk before storing one), else a call of the C library's routine.
     fn mem_block(self: &mut Self, i: u32, t: Inst) bool {
         let mut n: u64 = 0;
         let known = self.cr.const_of(t.c, &mut n);
         let overlap = t.op == O_MEMCPY && t.aux == MEM_OVERLAP;
-        let lim: u64 = ast::pick(overlap, 64, 128);
         if known && n == 0 {
             return true; // no byte to write
         }
-        if known && n <= lim {
+        if known && n <= MEM_INLINE {
             let (db, doff) = self.addr(t.a, 0);
             if t.op == O_MEMSET {
                 let mut k: u64 = 0;
@@ -6233,15 +6232,14 @@ extend Gen {
                 return true;
             }
             // Every chunk into a register first; two 16-byte chunks by one LDP and one STP where the pair
-            // forms reach both offsets.
+            // forms reach both of their offsets.
             let mut regs = Vector::<u8>::new();
             let mut at: u32 = 0;
-            let pairs = qpair_fits(soff) && qpair_fits(doff) && qpair_fits(soff + 32) && qpair_fits(doff + 32);
             while at as u64 < n {
                 let left = n as u32 - at;
                 let step = chunk(left, 16);
                 let r = self.tmp(step == 16);
-                if pairs && left >= 32 {
+                if left >= 32 && qpair_fits(soff + at as i64) && qpair_fits(doff + at as i64) {
                     let r2 = self.tmp(true);
                     self.frame_use(sb);
                     self.emit(a::ldstp(a::M_VQ, true, 2, r - V0, r2 - V0, sb, (soff + at as i64) as i32));
@@ -6259,7 +6257,7 @@ extend Gen {
             while q < regs.len() {
                 let left = n as u32 - at;
                 let step = chunk(left, 16);
-                if pairs && left >= 32 {
+                if left >= 32 && qpair_fits(soff + at as i64) && qpair_fits(doff + at as i64) {
                     self.frame_use(db);
                     self.emit(
                         a::ldstp(a::M_VQ, false, 2, regs[q] - V0, regs[q + 1] - V0, db, (doff + at as i64) as i32),

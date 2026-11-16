@@ -19,6 +19,9 @@ pub(package) const H_NONE: u8 = 0; // only a register
 pub(package) const H_SLOT: u8 = 1; // a stack slot at the stack pointer + off
 pub(package) const H_ARG: u8 = 2; // an incoming stack argument at the frame pointer + off (read-only)
 pub(package) const H_FIXED: u8 = 3; // `reg` for its whole range
+/// A copy or fill of a constant size up to this many bytes is inline (`mem_block` of each generator): 8
+/// vector registers hold an overlapping copy's bytes before its first store.
+pub(package) const MEM_INLINE: u64 = 128;
 pub(package) const H_REMAT: u8 = 4; // a constant or an address, recomputed at each use
 pub(package) const H_SPADDR: u8 = 5; // the address stack pointer + off
 pub(package) const H_FPADDR: u8 = 6; // the address frame pointer + off
@@ -1097,8 +1100,7 @@ extend Core {
             return false;
         }
         let mut n: u64 = 0;
-        let lim: u64 = ast::pick(t.op == O_MEMCPY && t.aux == MEM_OVERLAP, 64, 128);
-        if self.const_of(t.c, &mut n) && n <= lim {
+        if self.const_of(t.c, &mut n) && n <= MEM_INLINE {
             return false;
         }
         let bk = b.blocks[self.lv.def_blk[i as usize] as usize];

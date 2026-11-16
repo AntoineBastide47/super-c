@@ -73,6 +73,11 @@ A linker:
    x86-64: the code generator places the functions, not the link (`Package.fit_lines`, see
    [code-generator.md](code-generator.md));
 4. applies the relocations, relaxing where the format allows (ELF GOT and TLS relaxations);
+   A Mach-O image names in `LC_BUILD_VERSION` the oldest system it runs on (macOS 12.0) and the
+   version of the SDK it was linked with (`sdk_version`, from the SDK's `SDKSettings.json`; `ld` does
+   the same). The system's libraries read that SDK version: with 12.0 there, macOS gave the image its
+   older allocator, which cost the compiler 0.65 G instructions on the self-compile workload and 60 MiB
+   of resident memory;
 5. binds imports: stubs and GOT or import address table slots, dynamic relocations for pointers in data;
 6. writes unwind tables, the symbol table and debug sections unless stripped, and the format's extras
    (Mach-O exports trie, chained fixups and ad-hoc signature; PE base relocations and exception table).

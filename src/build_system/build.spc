@@ -2048,9 +2048,11 @@ fn engine_build_i(
         if strip {
             fp.push_str(" +strip");
         }
+        // The own linker is this compiler: another compiler links again, and one with no identity always.
+        fp.format_into(" +linker {}", compiler_id());
         // 3) Link when anything changed: a new object, a missing binary, or another command than the
         // recorded one.
-        let mut need = bmt == 0 || file_mtime(&ns.pending) != 0;
+        let mut need = bmt == 0 || file_mtime(&ns.pending) != 0 || compiler_id() == 0;
         for i in 0..objs.len() {
             need = need || file_mtime(objs.at(i).as_str()) > bmt;
         }
