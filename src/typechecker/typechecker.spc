@@ -36337,7 +36337,10 @@ extend TypeChecker {
                 let trusted = unsafe (*self.cur_ast()).attr_of(id, AttrKind::ATTR_TRUSTED) != null;
                 let (tcs, tce) = unsafe (*self.cur_ast()).contracts_of(id);
                 let ext = fnd.is_extern() && tce > tcs;
-                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE || ext) {
+                // An interface's spec function: each conformance defines it.
+                let ic = unsafe (*self.cur_ast()).container_of(id);
+                let in_iface = ic != NODE_NONE && unsafe (*self.cur_ast()).at_const(ic).kind == NodeKind::NODE_INTERFACE;
+                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE && !in_iface || ext) {
                     self.errors.emit_span(
                         dc::TRUSTED_PLACE,
                         unsafe (*self.cur_ast()).at_const(fnd.name).span,

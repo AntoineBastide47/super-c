@@ -427,7 +427,13 @@ pub type FlattenIter<I, J, U> = FlatMapIter<I, J, J, U, fn(J) J>;
 /// An iterator over the items of each iterator `f(x)`, for each item `x` of `it`. An inner iterator is
 /// made when the previous one ends, and dropped when it ends.
 pub const fn flat_map<I: Iterator<T>, T, J: Iterator<U>, U, F: fn(T) J>(it: I, f: F) FlatMapIter<I, T, J, U, F> {
-    return FlatMapIter::<I, T, J, U, F> { it: it, f: f, front: Option::<J>::None, back: Option::<J>::None, done: false };
+    return FlatMapIter::<I, T, J, U, F> {
+        it: it,
+        f: f,
+        front: Option::<J>::none(),
+        back: Option::<J>::none(),
+        done: false,
+    };
 }
 
 /// An iterator over the items of each iterator `it` yields, in order.
@@ -435,8 +441,8 @@ pub const fn flatten<I: Iterator<J>, J: Iterator<U>, U>(it: I) FlattenIter<I, J,
     return FlatMapIter::<I, J, J, U, fn(J) J> {
         it: it,
         f: flatten_identity::<J>,
-        front: Option::<J>::None,
-        back: Option::<J>::None,
+        front: Option::<J>::none(),
+        back: Option::<J>::none(),
         done: false,
     };
 }
@@ -685,7 +691,7 @@ pub struct PeekableIter<I, T> {
 
 /// An iterator over the items of `it` with `peek` and `next_if`.
 pub const fn peekable<I: Iterator<T>, T>(it: I) PeekableIter<I, T> {
-    return PeekableIter::<I, T> { it: it, peeked: Option::<Option<T>>::None };
+    return PeekableIter::<I, T> { it: it, peeked: Option::<Option<T>>::none() };
 }
 
 extend<I: Iterator<T>, T> PeekableIter<I, T> {
