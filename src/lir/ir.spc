@@ -1290,7 +1290,59 @@ pub(package) const AGG: u32 = 0x80000000;
 /// An `i8` or `i16` parameter or result that is signed: the calling convention sign-extends it, else
 /// zero-extends it.
 pub(package) const SIG_SEXT: u32 = 0x40000000;
+/// An `i8` result that is a `bool`: 0 or 1 (`zero_one`).
+pub(package) const SIG_BOOL: u32 = 0x20000000;
 pub(package) const SIG_VARIADIC: u32 = 0x80000000;
+/// `zero_one` follows at most ZO_DEPTH operations.
+pub(package) const ZO_DEPTH: u32 = 3;
+
+/// Whether value `v` of `b` is 0 or 1: a comparison, an overflow flag, a `bool` parameter (`Body.bools`), a
+/// `bool` load (`MEM_BOOL`), a call's `bool` result (`SIG_BOOL`), and the `and`, `or`, `xor`, select,
+/// extension or truncation of such values, `depth` operations deep.
+pub(package) fn zero_one(b: &Body, v: Value, depth: u32) bool {
+    if v == VNONE {
+        return false;
+    }
+    if (v & VFLAG) != 0 {
+        return true;
+    }
+    if (v & VPARAM) != 0 {
+        let k = entry_param(b, v);
+        return k < 64 && (b.bools >> k as u64 & 1) != 0;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_ICMP || t.op == O_FCMP || t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
+        return true;
+    }
+    if t.op == O_CALL || t.op == O_CALLIND {
+        return (b.pool[t.b as usize + 2] & (AGG | SIG_BOOL)) == SIG_BOOL;
+    }
+    if depth == 0 || !is_int(t.ty) {
+        return false;
+    }
+    if t.op == O_AND {
+        return zero_one(b, t.a, depth - 1) || zero_one(b, t.b, depth - 1);
+    }
+    if t.op == O_OR || t.op == O_XOR {
+        return zero_one(b, t.a, depth - 1) && (zero_one(b, t.b, depth - 1) || t.op == O_XOR && int_bits(b, t.b) == Option::<
+            u64
+        >::Some(1));
+    }
+    if t.op == O_SELECT {
+        return zero_one(b, t.b, depth - 1) && zero_one(b, t.c, depth - 1);
+    }
+    return (t.op == O_ZEXT || t.op == O_TRUNC) && zero_one(b, t.a, depth - 1);
+}
+
+/// The signature parameter value `v` of `b` is (its index), else NONE.
+pub(package) const fn entry_param(b: &Body, v: Value) u32 {
+    let e = b.blocks[0];
+    if v == VNONE || (v & VPARAM) == 0 || (v & ~VPARAM) < e.param_start || (v & ~VPARAM) >= e.param_start + e.param_len as u32 {
+        return NONE;
+    }
+    return (v & ~VPARAM) - e.param_start;
+}
+
 /// `Package.vops`: conversions and shifts in registers but a 64-bit integer to or from f64, an unsigned
 /// integer to or from a float, and a shift of 16-byte vectors or of lanes of 1, 2 or (arithmetic) 8 bytes
 /// (x86-64); each one (aarch64).
@@ -2026,6 +2078,14 @@ pub(package) struct Package {
     /// The native backend starts each loop at a 16-byte boundary, as compilers do for speed but not size
     /// (x86-64: a loop's branches then share fewer fetch blocks and decoded-instruction cache lines).
     pub(package) align_loops: bool,
+    /// The x86-64 backend places each function so that no boundary between two 64-byte lines falls inside
+    /// one of its loops that holds a call and fits a line, nor inside it when it fits one (16, 32 or 64
+    /// bytes of alignment and fill bytes before it): such a boundary costs up to a third of that code's
+    /// time on the processors measured. A loop without a call stays where it is: AMD Zen 3 and Zen 4 run
+    /// one faster with a boundary inside. With `align_loops`, in ELF and COFF objects; a Mach-O link
+    /// gives every part of a section the section's alignment, and no processor that runs its images
+    /// showed the cost.
+    pub(package) fit_lines: bool,
     /// The processor counts set bits in one instruction: wasm32's every one, x86-64's where that is optional
     /// (`popcnt`, from x86-64-v2 or `-mpopcnt`).
     pub(package) popcnt: bool,
@@ -2206,6 +2266,7 @@ extend Package {
             vec_reduce: 0,
             pairs: false,
             align_loops: false,
+            fit_lines: false,
             popcnt: false,
             sse41: false,
             vtbl: false,

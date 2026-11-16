@@ -314,8 +314,21 @@ fn main_4() i32 {
     return (hint_return(3) + hint_not(3) + hint_edge(3) + hint_exit(3) + hint_continue(9) + hint_leave(9) - 158) as i32;
 }
 
+// A `bool` result is 0 or 1: the signature of the function and of each call of it says so (`i8.b`).
+@noinline
+fn is_big(x: i64) bool {
+    return x > 100;
+}
+
+fn main_5() i32 {
+    if !is_big(7) {
+        return 0;
+    }
+    return 1;
+}
+
 fn main() i32 {
-    return main_0() + main_1() + main_2() + main_3() + main_4();
+    return main_0() + main_1() + main_2() + main_3() + main_4() + main_5();
 }
 )";
 
@@ -353,6 +366,13 @@ fn the_lowered_lir_names_its_facts() {
     assert_eq(rare_blocks(&text, "main__hint_exit"), 0);
     assert_eq(rare_blocks(&text, "main__hint_continue"), 1);
     assert_eq(rare_blocks(&text, "main__hint_leave"), 1);
+    assert(head_of(&text, "main__is_big").contains("sig (i64) -> i8.b"), text.as_str());
+    assert(
+        body_of(&text, "main__main_5").contains("@main__is_big(") && body_of(&text, "main__main_5").contains(
+            ": (i64) -> i8.b",
+        ),
+        text.as_str(),
+    );
 }
 
 // The blocks of function `name` in LIR text `text` that have the `unlikely` mark.

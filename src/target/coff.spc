@@ -268,7 +268,8 @@ pub(package) fn write(o: &ob::Obj, split: u8, out: &mut Vector<u8>) {
     );
     for q in 0..parts.len() {
         let pt = parts[q];
-        let mut fl = sec_flags(o, pt.k);
+        // The part's own alignment in place of its section's.
+        let mut fl = sec_flags(o, pt.k) & ~0x00F00000u32 | pt.al as u32 + 1 << 20;
         let comdat = pt.sym != ob::NONE32 && !kept[q];
         if comdat {
             fl |= SCN_LNK_COMDAT;

@@ -19121,3 +19121,53 @@ b3(v8: i64):
     same_result(&b, &a, "run", r0[0..2], 14);
     same_result(&b, &a, "run", r2[0..2], 14);
 }
+
+// A call's `bool` result (`i8.b` in its signature) is 0 or 1: a branch on its inversion (`xor` with 1)
+// is a branch on the result with the sides exchanged. The result of a call whose signature does not say
+// so may be any byte, so its `xor` stays.
+@test
+fn a_calls_bool_result_is_zero_or_one() {
+    for flagged in 0..2 {
+        let mark = if flagged == 1 {
+            ".b"
+        } else {
+            ""
+        };
+        let text = format(
+            M"(lir ptr 8
+sym @pred fn global noinline
+sym @use fn global
+fn @pred
+  sig (i64) -> i8{}
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = icmp.ugt v0, v1
+  ret v2
+fn @use
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i8 @pred(v0) : (i64) -> i8{}
+  v2 = iconst.i8 1
+  v3 = xor.i8 v1, v2
+  v4 = iconst.i64 10
+  v5 = iconst.i64 20
+  br v3, b1, b2
+b1:
+  ret v4
+b2:
+  ret v5
+)",
+            mark,
+            mark,
+        );
+        let (b, a) = optimized(&text);
+        let s = text_of(&a, "use");
+        assert_eq(s.contains("xor"), flagged == 0);
+        let cases: [u64; 2] = [1, 9];
+        let want: [u64; 2] = [10, 20];
+        for c in 0..2 {
+            let x: [u64; 1] = [cases[c]];
+            same_result(&b, &a, "use", x[0..1], want[c]);
+        }
+    }
+}

@@ -20,7 +20,8 @@ import module::loader;
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
 // acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
 // optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
-// multiply-add (`Package.fma`: x86-64's FMA3); and x86-64's `lzcnt` (`Package.lzcnt`).
+// multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); and loops at 16-byte
+// boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -33,6 +34,7 @@ const SHARE: u32 = 256;
 const OMIT_FP: u32 = 512;
 const FMA: u32 = 1024;
 const LZCNT: u32 = 2048;
+const LINES: u32 = 4096;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -173,6 +175,8 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.omit_fp = (opts & OMIT_FP) != 0;
     p.popcnt = (opts & POPCNT) != 0;
     p.lzcnt = (opts & LZCNT) != 0;
+    p.align_loops = (opts & LINES) != 0;
+    p.fit_lines = p.align_loops;
     // The lanes the target counts and swaps in registers, as a build sets them (`CEmit`): with AVX-512 also
     // the leading zeros of 4- and 8-byte lanes (CD and VL).
     p.vec_bits = tgt::isa(isa).vector_bits;
@@ -19700,4 +19704,442 @@ b2(v10: i64, v11: i64):
     // One `cbz` or `cbnz`, no `b`.
     assert_eq(elf_text_count(&o, 0x7E000000, 0x34000000), 1);
     assert_eq(elf_text_count(&o, 0xFC000000, 0x14000000), 0);
+}
+
+// A branch on a call's `bool` result (`i8.b`: 0 or 1) tests its low bit in one instruction, whatever the
+// callee left above it; a result that may be any byte is tested as a byte. The functions give the C
+// results on the host.
+@test
+fn a_bool_result_is_tested_by_its_low_bit() {
+    let lir = M"(lir ptr 8
+sym @flag fn global
+sym @byte fn global
+sym @pass fn global
+sym @pred fn global ext
+sym @code fn global ext
+fn @flag
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i8 @pred(v0) : (i64) -> i8.b
+  v2 = iconst.i64 10
+  v3 = iconst.i64 20
+  br v1, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @byte
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i8 @code(v0) : (i64) -> i8
+  v2 = iconst.i64 10
+  v3 = iconst.i64 20
+  br v1, b1, b2
+b1:
+  ret v2
+b2:
+  ret v3
+fn @pass
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = call.i8 @pred(v0) : (i64) -> i8.b
+  ret v1
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // One `tbz` or `tbnz` of bit 0 of w0 (the `bool`), one `tst w0, #0xff` (the byte).
+    assert_eq(elf_text_count(&o, 0x7EF8001F, 0x36000000), 1);
+    assert_eq(elf_text_count(&o, 0xFFFFFFFF, 0x72001C1F), 1);
+    // A body that returns a byte jumps to the callee whose `bool` result it returns (`Package.tail`): two
+    // calls are left on each target.
+    o.truncate(0);
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), TAIL, &mut o),
+        "the arm64 object",
+    );
+    assert_eq(elf_text_count(&o, 0xFC000000, 0x94000000), 2);
+    let mut x = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), TAIL, &mut x),
+        "the x86-64 object",
+    );
+    let (off, size) = elf_text(&x);
+    let mut calls: u32 = 0;
+    for at in off..off + size - 4 {
+        calls += (x[at] == 0xE8 && x[at + 1] == 0 && x[at + 2] == 0 && x[at + 3] == 0 && x[at + 4] == 0) as u32;
+    }
+    assert_eq(calls, 2);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdbool.h>
+#include <stdint.h>
+uint64_t flag(uint64_t);
+uint64_t byte(uint64_t);
+uint8_t pass(uint64_t);
+bool pred(uint64_t x) { return x > 5; }
+uint8_t code(uint64_t x) { return (uint8_t)(x * 2); }
+int main(void) {
+  if (flag(9) != 10 || flag(3) != 20) return 1;
+  if (byte(1) != 10 || byte(0) != 20 || byte(128) != 20) return 2;
+  if (pass(9) != 1 || pass(3) != 0) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_native_with(lir, drv, TAIL), 0);
+}
+
+// Two selects of a block on one folded comparison compare once: the second reads the flags the first
+// left, though a load is between them. The function gives the C results on the host.
+@test
+fn selects_on_one_comparison_compare_once() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+fn @pick
+  sig (i64, i64, ptr, i64) -> i64
+b0(v0: i64, v1: i64, v2: ptr, v3: i64):
+  v4 = icmp.slt v0, v1
+  v5 = select.i64 v4, v0, v1
+  v6 = load.i64 v2 align 3
+  v7 = select.i64 v4, v6, v3
+  v8 = add.i64 v5, v7
+  ret v8
+)";
+    let linux = tgt::axis_index("linux", false);
+    let mut o = Vector::<u8>::new();
+    assert(object_of(lir, linux, tgt::axis_index("aarch64", true), 0, &mut o), "the arm64 object");
+    // One `cmp` of two registers, two `csel`.
+    assert_eq(elf_text_count(&o, 0x7F20001F, 0x6B00001F), 1);
+    assert_eq(elf_text_count(&o, 0x7FE00C00, 0x1A800000), 2);
+    let mut x = Vector::<u8>::new();
+    assert(object_of(lir, linux, tgt::axis_index("x86_64", true), 0, &mut x), "the x86-64 object");
+    // One 64-bit `cmp` of two registers (REX.W 39 or 3B).
+    let (off, size) = elf_text(&x);
+    let mut cmps: u32 = 0;
+    for at in off..off + size - 1 {
+        cmps += (x[at] == 0x48 && (x[at + 1] == 0x39 || x[at + 1] == 0x3B)) as u32;
+    }
+    assert_eq(cmps, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t pick(int64_t, int64_t, int64_t *, int64_t);
+int main(void) {
+  int64_t m = 100;
+  if (pick(1, 5, &m, 7) != 101) return 1;
+  if (pick(5, 1, &m, 7) != 8) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An `and` or `or` of a comparison and a value that is 0 or 1 (a `bool` load) is one conditional select
+// on the comparison's flags on arm64: the value where they let it decide, else 0 or 1; no flag is set
+// into a register. A chain of comparisons joins the same way. The functions give the C results on the host.
+@test
+fn a_comparison_joins_a_flag_in_one_select() {
+    let lir = M"(lir ptr 8
+sym @either fn global
+sym @both fn global
+sym @any fn global
+fn @either
+  sig (i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = load.i8 v2 align 0 bool
+  v4 = icmp.eq v0, v1
+  v5 = or.i8 v4, v3
+  ret v5
+fn @both
+  sig (i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: ptr):
+  v3 = load.i8 v2 align 0 bool
+  v4 = icmp.eq v0, v1
+  v5 = and.i8 v3, v4
+  ret v5
+fn @any
+  sig (i64, i64, i64, ptr) -> i8.b
+b0(v0: i64, v1: i64, v2: i64, v3: ptr):
+  v4 = load.i8 v3 align 0 bool
+  v5 = icmp.eq v0, v1
+  v6 = icmp.eq v0, v2
+  v7 = or.i8 v5, v6
+  v8 = or.i8 v7, v4
+  ret v8
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // No `cset` (csinc of the zero register twice), two `csinc` and one `csel` with the zero register, and
+    // one `ccmp`.
+    assert_eq(elf_text_count(&o, 0x7FFF0FE0, 0x1A9F07E0), 0);
+    assert_eq(elf_text_count(&o, 0x7FFF0C00, 0x1A9F0400), 2);
+    assert_eq(elf_text_count(&o, 0x7FFF0C00, 0x1A9F0000), 1);
+    assert_eq(elf_text_count(&o, 0x7FE00C10, 0x7A400000), 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdbool.h>
+#include <stdint.h>
+bool either(uint64_t, uint64_t, bool *);
+bool both(uint64_t, uint64_t, bool *);
+bool any(uint64_t, uint64_t, uint64_t, bool *);
+int main(void) {
+  bool t = true, f = false;
+  if (!either(1, 1, &f) || !either(1, 2, &t) || either(1, 2, &f)) return 1;
+  if (!both(1, 1, &t) || both(1, 1, &f) || both(1, 2, &t)) return 2;
+  if (!any(1, 1, 2, &f) || !any(1, 2, 1, &f) || !any(1, 2, 3, &t) || any(1, 2, 3, &f)) return 3;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An indirect call's target that lives past the call in the argument register it arrived in (a call in a
+// rare block saves that home around itself) is read before the argument moves write that register:
+// never from the register after them. The function gives the C results on the host.
+@test
+fn an_indirect_calls_target_is_read_before_the_arguments_overwrite_it() {
+    let lir = M"(lir ptr 8
+sym @walk fn global
+fn @walk
+  sig (ptr, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = icmp.eq v1, v3
+  br v4, b1, b2
+b1: unlikely
+  v5 = call.ind.i64 v2(v0, v1, v1) : (ptr, i64, i64) -> i64
+  v6 = call.ind.i64 v2(v0, v5, v1) : (ptr, i64, i64) -> i64
+  ret v6
+b2:
+  ret v1
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // No `mov x16, x2`: x2 holds the third argument by then.
+    assert_eq(elf_text_count(&o, 0xFFFFFFFF, 0xAA0203F0), 0);
+    let mut x = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut x),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t walk(void *, int64_t, int64_t (*)(void *, int64_t, int64_t));
+static int64_t add3(void *c, int64_t a, int64_t b) { return *(int64_t *)c + a + 2 * b; }
+int main(void) {
+  int64_t k = 100;
+  if (walk(&k, 0, add3) != 200) return 1;
+  if (walk(&k, 5, add3) != 5) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The functions (type FUNC) of ELF object `o`: each one's offset in its section and its size.
+fn elf_funcs(o: &Vector<u8>) Vector<(usize, usize)> {
+    let mut fs_ = Vector::<(usize, usize)>::new();
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        if le_at(o, sh + 4, 4) != 2 {
+            continue;
+        }
+        let off = le_at(o, sh + 0x18, 8) as usize;
+        for y in 0..le_at(o, sh + 0x20, 8) as usize / 24 {
+            if (o[off + y * 24 + 4] & 0xF) == 2 {
+                fs_.push((le_at(o, off + y * 24 + 8, 8) as usize, le_at(o, off + y * 24 + 16, 8) as usize));
+            }
+        }
+    }
+    return fs_;
+}
+
+// The alignment of the `.text` section of ELF object `o`.
+const fn elf_text_align(o: &Vector<u8>) usize {
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        let name = strs + le_at(o, sh, 4) as usize;
+        if o[name] == b'.' && o[name + 1] == b't' && o[name + 2] == b'e' && o[name + 3] == b'x' && o[name + 4] == b't' && o[name + 5] == 0 {
+            return le_at(o, sh + 0x30, 8) as usize;
+        }
+    }
+    return 0;
+}
+
+// The text of `n` functions `f0`, `f1`, ...: function k multiplies `first + k` times, then runs a loop
+// that calls `leaf` (`call`) or only adds.
+fn loops_text(n: u32, first: u32, call: bool) String {
+    let mut text = String::from("lir ptr 8\nsym @leaf fn global ext\n");
+    for k in 0..n {
+        text.format_into("sym @f{} fn global\n", k);
+    }
+    for k in 0..n {
+        let m = first + k;
+        text.format_into("fn @f{}\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n", k);
+        for q in 0..m {
+            // The product so far: v0, then the value before.
+            text.format_into("  v{} = mul.i64 v{}, v1\n", 2 + q, (1 + q) * (q != 0) as u32);
+        }
+        let a = (1 + m) * (m != 0) as u32;
+        let z = 2 + m;
+        text.format_into("  v{} = iconst.i64 0\n  v{} = icmp.eq v1, v{}\n", z, z + 1, z);
+        text.format_into("  br v{}, b2(v{}), b1(v{}, v{})\n", z + 1, a, a, z);
+        text.format_into("b1(v{}: i64, v{}: i64):\n", z + 2, z + 3);
+        // The loop's value: `leaf`'s result, or a product mixed with its high bits (3 more instructions).
+        let d = if call {
+            text.format_into("  v{} = call.i64 @leaf(v{}) : (i64) -> i64\n", z + 4, z + 2);
+            0u32
+        } else {
+            text.format_into("  v{} = mul.i64 v{}, v1\n", z + 4, z + 2);
+            text.format_into("  v{} = iconst.i64 7\n", z + 5);
+            text.format_into("  v{} = lshr.i64 v{}, v{}\n", z + 6, z + 4, z + 5);
+            text.format_into("  v{} = xor.i64 v{}, v{}\n", z + 7, z + 6, z + 4);
+            3u32
+        };
+        let y = z + d;
+        text.format_into("  v{} = add.i64 v{}, v{}\n", y + 5, y + 4, z + 3);
+        text.format_into("  v{} = iconst.i64 1\n", y + 6);
+        text.format_into("  v{} = add.i64 v{}, v{}\n", y + 7, z + 3, y + 6);
+        text.format_into("  v{} = icmp.ult v{}, v1\n", y + 8, y + 7);
+        text.format_into("  br v{}, b1(v{}, v{}), b2(v{})\n", y + 8, y + 5, y + 7, y + 5);
+        text.format_into("b2(v{}: i64):\n  ret v{}\n", y + 9, y + 9);
+    }
+    return text;
+}
+
+// An x86-64 function of an ELF object takes the alignment (16, 32 or 64 bytes) and the fill bytes before
+// it that keep each of its loops of at most 64 bytes that hold a call inside one 64-byte line, and itself
+// when it has at most 64 bytes (`Package.fit_lines`): a boundary between two lines there costs up to a
+// third of that code's time. Six functions with one such loop each, after 0 to 5 multiplications: every
+// loop begins at a 16-byte boundary and ends in its line, and at least one function is not where 16 bytes
+// of alignment alone put it. A loop without a call asks nothing: functions of more than 64 bytes with one
+// keep 16 bytes.
+@test
+fn x86_64_loops_with_a_call_that_fit_a_line_stay_inside_one() {
+    let text = loops_text(6, 0, true);
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(&text, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut o),
+        "the x86-64 object",
+    );
+    let (t, _) = elf_text(&o);
+    let fs_ = elf_funcs(&o);
+    assert_eq(fs_.len(), 6);
+    let mut moved: u32 = 0;
+    for k in 0..6usize {
+        let (at, size) = fs_[k];
+        assert_eq(at % 16, 0);
+        moved += (at % 64 != 0) as u32;
+        // The loop's branch: the one short conditional jump back to a 16-byte boundary.
+        let mut loops: u32 = 0;
+        for j in at..at + size - 1 {
+            let d = o[t + j + 1] as usize;
+            if (o[t + j] & 0xF0) != 0x70 || d < 0x80 || j + 2 + d < 256 + at || (j + 2 + d - 256) % 16 != 0 {
+                continue;
+            }
+            let head = j + 2 + d - 256;
+            loops += 1;
+            assert(j + 2 - head > 16 && j + 2 - head <= 64, "the loop fits a line and not 16 bytes");
+            assert(head % 64 + (j + 2 - head) <= 64, "the loop is inside one line");
+        }
+        assert_eq(loops, 1);
+    }
+    assert(moved != 0, "a function starts off a line's first byte");
+    let plain = loops_text(4, 16, false);
+    let mut p = Vector::<u8>::new();
+    assert(
+        object_of(&plain, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut p),
+        "the x86-64 object of the loops without a call",
+    );
+    let ps = elf_funcs(&p);
+    assert_eq(ps.len(), 4);
+    let (pt, _) = elf_text(&p);
+    let mut cut: u32 = 0;
+    for k in 0..4usize {
+        let (at, size) = ps[k];
+        assert(size > 64, "a function of more than a line");
+        // Its loop's branch, as above: a loop of more than 16 bytes may hold a boundary.
+        for j in at..at + size - 1 {
+            let d = p[pt + j + 1] as usize;
+            if (p[pt + j] & 0xF0) == 0x70 && d >= 0x80 && j + 2 + d >= 256 + at && (j + 2 + d - 256) % 16 == 0 {
+                let head = j + 2 + d - 256;
+                assert(j + 2 - head > 16 && j + 2 - head <= 64, "the loop fits a line and not 16 bytes");
+                cut += (head % 64 + (j + 2 - head) > 64) as u32;
+            }
+        }
+    }
+    assert_eq(elf_text_align(&p), 16);
+    assert(cut != 0, "a loop without a call holds a line boundary");
+}
+
+// A call that takes an aggregate from the stores into its slot reads each stored value, also one that
+// is a view of another (an integer read as a pointer): a call in a rare block before it saves the
+// register that holds that value. `grow` writes the caller-saved registers.
+@test
+fn a_relayed_view_lives_past_a_rare_call() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @take fn global ext
+sym @grow fn global ext
+sym @pass fn global
+fn @pass
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (i64, i64, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = add.i64 v0, v1
+  v4 = inttoptr.ptr v3
+  v5 = iconst.i64 0
+  v6 = icmp.eq v2, v5
+  br v6, b1, b2
+b1: unlikely
+  v7 = call.i64 @grow(v2) : (i64) -> i64
+  jmp b2
+b2:
+  v8 = slotaddr s0
+  store v4, v8 align 3
+  store v1, v8+8 align 3
+  v9 = call.i64 @take(v8, v2) : (l0, i64) -> i64
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+struct pair { void *p; int64_t n; };
+int64_t pass(int64_t, int64_t, int64_t);
+int64_t take(struct pair s, int64_t k) { return (int64_t)s.p * 3 + s.n + k; }
+__attribute__((noinline)) int64_t grow(int64_t x) {
+#if defined(__aarch64__)
+  __asm__ volatile("mov x1, #0\nmov x2, #0\nmov x3, #0\nmov x4, #0\nmov x5, #0\nmov x6, #0\nmov x7, #0\nmov x9, #0\nmov x10, #0\nmov x11, #0\nmov x12, #0\nmov x13, #0\nmov x14, #0\nmov x15, #0" : : : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13", "x14", "x15");
+#elif defined(__x86_64__)
+  __asm__ volatile("xor %%ecx, %%ecx\nxor %%edx, %%edx\nxor %%esi, %%esi\nxor %%edi, %%edi\nxor %%r8d, %%r8d\nxor %%r9d, %%r9d\nxor %%r10d, %%r10d\nxor %%r11d, %%r11d" : : : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc");
+#endif
+  return x + 1;
+}
+int main(void) {
+  if (pass(5, 6, 2) != 11 * 3 + 6 + 2) return 1;
+  if (pass(5, 6, 0) != 11 * 3 + 6) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
 }

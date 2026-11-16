@@ -20461,44 +20461,6 @@ fn demanded_fold(b: &mut Body, i: u32, ptr: u32) Value {
 // `Opt::entry_expr` follows at most ENTRY_DEPTH operations.
 const ENTRY_DEPTH: u32 = 3;
 
-// `zero_one` follows at most ZO_DEPTH operations.
-const ZO_DEPTH: u32 = 3;
-
-// Whether value `v` of `b` is 0 or 1: a comparison, an overflow flag, a `bool` parameter (`Body.bools`), a
-// `bool` load (`MEM_BOOL`), and the `and`, `or`, `xor`, select, extension or truncation of such values,
-// `depth` operations deep.
-fn zero_one(b: &Body, v: Value, depth: u32) bool {
-    if v == VNONE {
-        return false;
-    }
-    if (v & VFLAG) != 0 {
-        return true;
-    }
-    if (v & VPARAM) != 0 {
-        let k = entry_param(b, v);
-        return k < 64 && (b.bools >> k as u64 & 1) != 0;
-    }
-    let t = b.insts[v as usize];
-    if t.op == O_ICMP || t.op == O_FCMP || t.op == O_LOAD && (t.aux & MEM_BOOL) != 0 {
-        return true;
-    }
-    if depth == 0 || !is_int(t.ty) {
-        return false;
-    }
-    if t.op == O_AND {
-        return zero_one(b, t.a, depth - 1) || zero_one(b, t.b, depth - 1);
-    }
-    if t.op == O_OR || t.op == O_XOR {
-        return zero_one(b, t.a, depth - 1) && (zero_one(b, t.b, depth - 1) || t.op == O_XOR && int_bits(b, t.b) == Option::<
-            u64
-        >::Some(1));
-    }
-    if t.op == O_SELECT {
-        return zero_one(b, t.b, depth - 1) && zero_one(b, t.c, depth - 1);
-    }
-    return (t.op == O_ZEXT || t.op == O_TRUNC) && zero_one(b, t.a, depth - 1);
-}
-
 // The slot whose address plus constant offsets address `v` of `b` is, their sum in `off`; NONE when `v` is
 // no such address.
 const fn slot_place(b: &Body, v: Value, off: &mut i64) u32 {
@@ -20751,15 +20713,6 @@ const fn param_twins(b: &mut Body, ptr: u32) bool {
         }
     }
     return any;
-}
-
-// The signature parameter value `v` of `b` is (its index), else NONE.
-const fn entry_param(b: &Body, v: Value) u32 {
-    let e = b.blocks[0];
-    if v == VNONE || (v & VPARAM) == 0 || (v & ~VPARAM) < e.param_start || (v & ~VPARAM) >= e.param_start + e.param_len as u32 {
-        return NONE;
-    }
-    return (v & ~VPARAM) - e.param_start;
 }
 
 // The range entry parameter `v` of `b` holds for the whole call (`Body.ranges`): whether it is a

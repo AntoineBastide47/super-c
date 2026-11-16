@@ -742,7 +742,7 @@ extend Lower {
             return NONE;
         }
         if ti.cls == VC_SCALAR {
-            return sig_code(ti.mty, Lower::signed(c, m, rts[0]));
+            return ret_code(c, m, rts[0], ti.mty);
         }
         if ti.cls == VC_MEM {
             return AGG | self.layout_of(c, m, rts[0], ti);
@@ -5203,7 +5203,7 @@ extend Lower {
             unsafe tys[k] = self.vty(v);
         }
         if eq {
-            let r = self.call_sym(&s, args, tys, T_I8);
+            let r = self.call_sym(&s, args, tys, T_I8 as u32 | SIG_BOOL);
             if t == tt::TokenType::EqualEqual {
                 return r;
             }
@@ -5216,7 +5216,7 @@ extend Lower {
             return self.compare(t, r, z, true, true);
         }
         if ti.cls == VC_SCALAR {
-            return self.call_sym(&s, args, tys, ti.mty);
+            return self.call_sym(&s, args, tys, ret_code(c, b.module, rv.target, ti.mty));
         }
         let lt = self.layout_of(c, b.module, rv.target, ti);
         let all: []Value = [args[0], args[1], dst];
@@ -5830,7 +5830,7 @@ extend Lower {
                 tys.push(self.vty(args[i]));
             }
             // A narrow result of a signed type comes back sign-extended, as the entry's own signature says.
-            let ret = sig_code(ti.mty, rv.target != TYPE_NONE && Lower::signed(c, b.module, rv.target));
+            let ret = ret_code(c, b.module, rv.target, ti.mty);
             return self.call_sym(&ename, args[0..args.len()], tys[0..tys.len()], ret);
         }
         if ti.cls == VC_MEM {
@@ -6879,7 +6879,7 @@ extend Lower {
         all.extend_copy(args);
         let mut out = VNONE;
         if ti.cls == VC_SCALAR {
-            ret = sig_code(ti.mty, t != TYPE_NONE && Lower::signed(c, m, t));
+            ret = ret_code(c, m, t, ti.mty);
         } else if ti.cls == VC_MEM {
             out = dst;
             if out == VNONE {
@@ -10407,6 +10407,16 @@ const fn sig_code(t: u8, signed: bool) u32 {
     return t as u32 | ast::pick(signed && (t == T_I8 || t == T_I16), SIG_SEXT, 0);
 }
 
+// The signature code of a scalar result of `(m, t)`, machine type `mty`: `sig_code`, a `bool`'s with SIG_BOOL.
+fn ret_code(c: &cbe::CEmit, m: ModuleId, t: TypeId, mty: u8) u32 {
+    let known = t != TYPE_NONE;
+    return sig_code(mty, known && Lower::signed(c, m, t)) | ast::pick(
+        known && mty == T_I8 && Lower::builtin(c, m, t) == BuiltinType::BT_BOOL,
+        SIG_BOOL,
+        0,
+    );
+}
+
 // Whether instruction `t` has no effect but its value: dropped when nothing uses it.
 const fn pure_inst(t: Inst) bool {
     let op = t.op;
@@ -11234,7 +11244,7 @@ extend Lower {
         }
         let slot = self.temp(ti);
         if ti.cls == VC_SCALAR {
-            let sg = self.b.signature(none, 0, false, ti.mty);
+            let sg = self.b.signature(none, 0, false, ret_code(c, m, ty, ti.mty));
             let at = self.b.pool_list(nv);
             let r = self.inst(O_CALL, ti.mty, 0, k, sg, at);
             self.store(r, slot, 0, false);
@@ -11353,7 +11363,7 @@ extend Lower {
         }
         let mut ret = T_NONE as u32;
         if ri.cls == VC_SCALAR {
-            ret = sig_code(ri.mty, Lower::signed(c, m, rt));
+            ret = ret_code(c, m, rt, ri.mty);
         } else if ri.cls == VC_MEM {
             ret = AGG | self.layout_of(c, m, rt, ri);
             etys.push(T_PTR);
@@ -11550,7 +11560,7 @@ extend Lower {
                 return false;
             }
             if ri.cls == VC_SCALAR {
-                ret = sig_code(ri.mty, Lower::signed(c, m, rs[0]));
+                ret = ret_code(c, m, rs[0], ri.mty);
                 rty = ri.mty;
             } else if ri.cls == VC_MEM {
                 ret = AGG | self.layout_of(c, m, rs[0], ri);

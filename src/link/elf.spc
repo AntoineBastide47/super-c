@@ -1811,11 +1811,13 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
             }
             off = no;
         }
+        let size = keep_code(l, b, i as u32, va);
         let m = l.osecs.index_mut(i);
         m.addr = va;
         m.off = off;
-        off += os.size;
-        va += os.size;
+        m.size = size;
+        off += size;
+        va += size;
     }
     // The thread-local template: `.tdata` then `.tbss`.
     let mut first = true;
@@ -1830,6 +1832,34 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
             l.tls_align = l.tls_align.max(os.align);
         }
     }
+}
+
+// The input sections of output section `q`, whose address is `addr`, placed again in their order, each
+// one of arm64 code moved forward off a page boundary that would fall inside a short function or loop of
+// it, and one that fits a 64-byte line into one line (`lu::keep_pad`): the bytes between two functions
+// never run. The output section's size.
+fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
+    let os = l.osecs[q as usize];
+    let mut size = os.size;
+    if !l.a64 || (os.flags & SHF_EXECINSTR) == 0 || os.ty != SHT_PROGBITS {
+        return size;
+    }
+    // The bytes the sections before the one at hand moved by.
+    let mut moved: u64 = 0;
+    for s in 0..l.secs.len() {
+        let sc = l.secs[s];
+        if sc.out != q {
+            continue;
+        }
+        let mut at = lu::align_up(sc.at + moved, sc.align);
+        if sc.ty == SHT_PROGBITS && (sc.flags & SHF_EXECINSTR) != 0 {
+            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4), lu::KEEP_LINE);
+        }
+        moved = at - sc.at;
+        l.secs.index_mut(s).at = at;
+        size = at + sc.size;
+    }
+    return size;
 }
 
 // The output section of role `r`, added when new.

@@ -105,15 +105,23 @@ pub(package) struct Gen {
     cur: u32, // the instruction being compiled
     paired: u32, // the last access the one before it took into an `ldp` or `stp` (NONE: none)
     landed: u32, // the code position the last branch `here` patched jumps to (NONE: none)
-    // The bool value a select's `tst` tested in this block, the code index and word of that `tst`
-    // (`select_op`), NONE.
+    // The condition value whose flags the block's last test set (a bool's `tst`, `select_op` and
+    // `cond_test`; a folded comparison, `folded_cmp`), NONE; the code index and word of the test's last
+    // instruction, and the condition on its flags.
     btest_x: u32,
     btest_at: u32,
     btest_w: u32,
+    btest_cc: u32,
     stepped: Vector<u32>, // accesses paired early and pointer steps taken as post-index updates
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<u8>, // the scratch homes saved around a call (`save_scratch`)
     csown: Vector<u32>, // per register of `csave`, the value it held
+    // The values a call reads from another place until its instruction (`late_away`), where each was, the
+    // scratch registers that hold them, and the registers they left: these still own them.
+    lwas: Vector<u32>,
+    lva: Vector<Va>,
+    llock: u64,
+    lreg: u64,
     csoff: i64, // the stack offset of their run of bytes
     cssize: u32, // its size
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -250,11 +258,16 @@ extend Gen {
             btest_x: NONE,
             btest_at: 0,
             btest_w: 0,
+            btest_cc: 0,
             stepped: Vector::<u32>::new(),
             arrm: Vector::<u64>::new(),
             taken: Vector::<u64>::new(),
             csave: Vector::<u8>::new(),
             csown: Vector::<u32>::new(),
+            lwas: Vector::<u32>::new(),
+            lva: Vector::<Va>::new(),
+            llock: 0,
+            lreg: 0,
             csoff: 0,
             cssize: 0,
             rarec: Vector::<bool>::new(),
@@ -2536,7 +2549,7 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -4270,15 +4283,30 @@ extend Gen {
     }
 
     // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
-    // set here; NONE when it does not fold.
+    // set here; NONE when it does not fold. A comparison an earlier select of the block made, with no
+    // write of the flags since, is not made again.
     fn folded_cmp(self: &mut Self, v: Value) u32 {
         if (v & (VPARAM | VFLAG)) != 0 || !self.cr.lv.pfold[v as usize] {
             return NONE;
         }
-        if self.cr.lv.conj[v as usize] != 0 {
-            return self.conj_flags(v);
+        if self.btest_x == self.cr.vx(v) && self.flags_kept(self.btest_at, self.btest_w) {
+            return self.btest_cc;
         }
-        return self.compare(self.cr.b().insts[v as usize]);
+        let cc = if self.cr.lv.conj[v as usize] != 0 {
+            self.conj_flags(v)
+        } else {
+            self.compare(self.cr.b().insts[v as usize])
+        };
+        self.tested(self.cr.vx(v), cc);
+        return cc;
+    }
+
+    // The flags hold condition `cc` of value index `x` from the instruction just written on.
+    const fn tested(self: &mut Self, x: u32, cc: u32) {
+        self.btest_x = x;
+        self.btest_at = self.code.len() as u32 - 1;
+        self.btest_w = self.code[self.btest_at as usize];
+        self.btest_cc = cc;
     }
 
     // The flags of `and` or `or` `v` of flags folded into conditional comparisons (`lv::FOLD_CCMP`): its
@@ -4699,6 +4727,27 @@ extend Gen {
         if self.cr.lv.conj[i as usize] != 0 {
             let c = self.conj_flags(i);
             self.cond_value(i, c, NONE);
+            return true;
+        }
+        let jp = self.cr.lv.join_part(self.cr.b(), i);
+        if jp != VNONE {
+            // The flags of the folded comparisons, then the other operand (0 or 1) where they let it decide,
+            // else 0 (`and`) or 1 (`or`) (`lv::FOLD_FJOIN`).
+            let y = ast::pick(t.a == jp, t.b, t.a);
+            let c = if self.cr.lv.conj[jp as usize] != 0 {
+                self.conj_flags(jp)
+            } else {
+                self.compare(self.cr.b().insts[jp as usize])
+            };
+            let ry = self.reg(y) as u32;
+            let clean = self.cr.va[self.cr.vx(y) as usize].clean && !self.cr.narrow(y);
+            let rd = self.def_step(i) as u32;
+            if op == O_AND {
+                self.emit(a::csel(false, 0, 0, rd, ry, a::ZR, c));
+            } else {
+                self.emit(a::csel(false, 0, 1, rd, ry, a::ZR, a::invert(c)));
+            }
+            self.cr.va.index_mut(i as usize).clean = clean;
             return true;
         }
         if ty == T_I128 {
@@ -6336,13 +6385,11 @@ extend Gen {
             self.pend.cc
         } else if self.btest_x == cx && self.flags_kept(self.btest_at, self.btest_w) {
             // An earlier select of the block tested it, and nothing since wrote the flags.
-            a::NE
+            self.btest_cc
         } else {
             let rc = self.reg(t.a);
             self.emit(a::logic_imm(false, 3, a::ZR, rc, a::logical_imm(0xFF, false)));
-            self.btest_x = cx;
-            self.btest_at = self.code.len() as u32 - 1;
-            self.btest_w = self.code[self.btest_at as usize];
+            self.tested(cx, a::NE);
             a::NE
         };
         if in_mem(ty) {
@@ -6773,7 +6820,7 @@ extend Gen {
     // only the values `keep` (the register arguments' sources) keep their registers, until
     // `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>, back: bool) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob;
+        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -6803,9 +6850,56 @@ extend Gen {
         self.cr.tmps = 0;
     }
 
+    // A value the call reads after its argument moves (`late`: the callee, an address passed after them)
+    // whose fixed home is a register the argument setup writes (`wr`: the plan holds homes in argument
+    // registers across calls, `Live::seg_past`) goes to a free scratch register before the moves, else to
+    // a slot, and is read there until `late_back`.
+    fn late_away(self: &mut Self, late: &Vector<u32>, wr: u64) {
+        for q in 0..late.len() {
+            let x = late[q];
+            let va = self.cr.va[x as usize];
+            if va.home != H_FIXED || va.reg == NOREG || va.reg >= V0 || (wr & bit(va.reg)) == 0 {
+                continue;
+            }
+            self.lwas.push(x);
+            self.lva.push(va);
+            self.lreg |= bit(va.reg);
+            let free = XSCR & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.llock);
+            if free != 0 {
+                let f = free.trailing_zeros() as u8;
+                self.emit(a::mov_reg(true, f, va.reg));
+                self.llock |= bit(f);
+                self.cr.va.index_mut(x as usize).reg = f;
+            } else {
+                let off = self.cr.slot_alloc(8, 8);
+                self.mem(a::M_X, false, va.reg, a::SP, off);
+                let w = self.cr.va.index_mut(x as usize);
+                w.reg = NOREG;
+                w.home = H_SLOT;
+                w.off = off as i32;
+            }
+        }
+    }
+
+    // The values `late_away` moved are in their homes again for the reads after the call: the argument
+    // setup is done.
+    fn late_back(self: &mut Self) {
+        for q in 0..self.lwas.len() {
+            let x = self.lwas[q] as usize;
+            if self.cr.va[x].home == H_SLOT {
+                self.cr.free_slots.push(8u64 << 32 | (self.cr.va[x].off as u32) as u64);
+            }
+            *self.cr.va.index_mut(x) = self.lva[q];
+        }
+        self.lwas.truncate(0);
+        self.lva.truncate(0);
+        self.llock = 0;
+        self.lreg = 0;
+    }
+
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob;
+        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -7026,9 +7120,22 @@ extend Gen {
                 keep.push(x);
             }
         }
+        // The registers the argument setup writes: the call's argument registers, x8 and the scratch x16
+        // and x17.
+        let mut args: u64 = bit(8) | bit(a::IP0 as u8) | bit(a::IP1 as u8);
+        for k in 0..np {
+            let loc = self.cr.lay.locs[k as usize];
+            if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
+                for q in 0..loc.n as u32 {
+                    let pa = self.cr.lay.parts[(loc.p0 + q) as usize];
+                    if !pa.v {
+                        args |= bit(pa.reg);
+                    }
+                }
+            }
+        }
         // An indirect call's target that no argument is and that dies at the call, in a register the
-        // argument setup leaves (none of the call's argument registers, x8 or the scratch x16 and x17; else
-        // one of x9..x15), for `blr`; not through its slot.
+        // argument setup leaves (none of `args`; else one of x9..x15), for `blr`; not through its slot.
         let mut target = NOREG;
         if t.op == O_CALLIND {
             let x = self.cr.vx(t.a);
@@ -7036,18 +7143,6 @@ extend Gen {
             let mut arg = false;
             for k in 0..nops {
                 arg = arg || self.cr.vx(b.pool[(t.c + k) as usize]) == x;
-            }
-            let mut args: u64 = bit(8) | bit(a::IP0 as u8) | bit(a::IP1 as u8);
-            for k in 0..np {
-                let loc = self.cr.lay.locs[k as usize];
-                if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
-                    for q in 0..loc.n as u32 {
-                        let pa = self.cr.lay.parts[(loc.p0 + q) as usize];
-                        if !pa.v {
-                            args |= bit(pa.reg);
-                        }
-                    }
-                }
             }
             let free = XSCR & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy);
             if r != NOREG && r < V0 && !arg && !self.cr.live_on(x) && self.cr.va[x as usize].home != H_FIXED && ((args & bit(
@@ -7067,11 +7162,23 @@ extend Gen {
                 keep.push(x);
             }
         }
+        self.late_away(&late, args);
+        // The callee `late_away` put in a scratch register is called there.
+        let cr = if t.op == O_CALLIND {
+            self.cr.va[self.cr.vx(t.a) as usize].reg
+        } else {
+            NOREG
+        };
+        if target == NOREG && cr != NOREG && cr < V0 && (self.llock & bit(cr)) != 0 {
+            target = cr;
+        }
         // A sibling call's return is not emitted: only its arguments read the values after it.
         let back = !self.sib_shape(i, t);
         self.spill_around_call(&keep, back);
         let mut rvals = Vector::<u64>::new();
-        // The registers the template reads in place of its argument registers hold no temporary.
+        // The registers the template reads in place of its argument registers hold no temporary, nor do the
+        // ones `late_away` took.
+        self.cr.lock |= self.llock;
         for j in 0..to.len() {
             self.cr.lock |= bit(V0 + to[j] as u8);
         }
@@ -7337,6 +7444,11 @@ extend Gen {
                 self.add_off(8, a::SP, d);
             }
         }
+        if t.op == O_CALLIND && target == NOREG {
+            self.materialize(t.a, a::IP0 as u8);
+            target = a::IP0 as u8;
+        }
+        self.late_back();
         if t.op == O_CALL {
             if tpl.len() != 0 {
                 // An intrinsic: its instructions in place of the call, over the same registers.
@@ -7367,10 +7479,6 @@ extend Gen {
                 self.emit(a::bl(0));
             }
         } else {
-            if target == NOREG {
-                self.materialize(t.a, a::IP0 as u8);
-                target = a::IP0 as u8;
-            }
             if self.sibling(i, t) {
                 // A sibling call's `br` restores the frame first: through x16, which the epilogue keeps.
                 if target != a::IP0 as u8 {
@@ -7465,7 +7573,7 @@ extend Gen {
         let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
         let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.cr.self_lay.ret.kind == ab::L_SRET;
         let into = into0 || fwd;
-        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
+        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (((rt ^ b.pool[b.sig as usize + 2]) & ~SIG_BOOL) != 0 || (rt & AGG) != 0) && !into {
             return false;
         }
         self.call_layout(t);
@@ -7687,6 +7795,13 @@ extend Gen {
         let r = self.reg(v) as u32;
         if self.cr.va[cx as usize].clean && !self.cr.narrow(v) {
             return Test { kind: T_CBNZ, cc: 0, reg: r };
+        }
+        // A value that is 0 or 1 (a call's `bool` result): its low bit, whatever the register holds above.
+        if zero_one(self.cr.b(), v, ZO_DEPTH) {
+            return Test { kind: T_TBNZ, cc: 0, reg: r };
+        }
+        if self.btest_x == cx && self.flags_kept(self.btest_at, self.btest_w) {
+            return Test { kind: T_CC, cc: self.btest_cc, reg: 0 };
         }
         self.emit(a::logic_imm(false, 3, a::ZR, r, a::logical_imm(0xFF, false)));
         return Test { kind: T_CC, cc: a::NE, reg: 0 };

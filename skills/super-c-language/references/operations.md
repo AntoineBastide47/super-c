@@ -109,7 +109,8 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 
 A value of these types holds one of its valid bit patterns. The optimizer assumes it: a load of
 such a value carries the fact (an enum's tag is at most its greatest discriminant, a `bool` is 0
-or 1), so a comparison the fact decides folds, a `switch` over every variant needs no test of
+or 1), and so does a call's `bool` result, an `extern "C"` function's too (the C function must
+return a C `bool`), so a comparison the fact decides folds, a `switch` over every variant needs no test of
 its default, and a table indexed by the tag needs no bound test. A value that breaks it is
 undefined. Only `unsafe` code, `std::mem::ptr::cast_mut` and values from C can make one. An
 integer cast to a plain enum (`n as Color`) checks the value outside `unsafe`: a value that is no

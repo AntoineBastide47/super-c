@@ -297,11 +297,10 @@ pub(package) fn write(o: &ob::Obj, a64: bool, split: u8, out: &mut Vector<u8>) {
     let mut pos: u64 = 0;
     for q in 0..np {
         let pt = parts[q];
-        let s = &o.secs[pt.k as usize];
         let mut name: str = "";
         let mut ty: u32 = 0;
         let fl = sec_info(o, pt.k, &mut name, &mut ty) | ast::pick(retain[q], SHF_GNU_RETAIN, 0u64);
-        let al = 1u64 << s.align_log2 as u64;
+        let al = 1u64 << pt.al as u64;
         let mut off: u64 = 0;
         if ty != SHT_NOBITS {
             pos = up(pos, al);

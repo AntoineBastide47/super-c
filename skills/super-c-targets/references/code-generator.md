@@ -272,6 +272,20 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   when its emitter left it not `clean`) and is stored 8 bytes wide (`Core::xty`), so a read at the
   extension's type from its home is right. No view of a constant or an address, which each use makes
   again, of a folded instruction, or of a 128-bit, float or vector value.
+- Byte conditions (arm64 `cond_test`): a branch on an `i8` value that no comparison folds into tests
+  the register with `cbz`/`cbnz` when it holds zeros above the byte (`clean`), bit 0 with `tbz`/`tbnz`
+  when the value is 0 or 1 (`lir::ir::zero_one`: a call's `bool` result, whose register may hold
+  anything above the byte), else the byte (`tst #0xff` and `b.cond`). x86-64 tests the byte register.
+- Flags kept in a block (`btest_x`, `flags_kept`): a select or branch whose condition is the one the
+  block tested last (a folded comparison, `folded_cmp`; a byte condition's test) reads those flags
+  when every instruction emitted since writes none: on arm64 immediate moves, sums and logic without
+  flags, conditional selects, loads and stores; on x86-64 `mov` of an immediate, between registers
+  or from memory, `movzx`, `cmov`. The check decodes the emitted code, so a new flag-neutral
+  instruction form stops the reuse until the decoder lists it.
+- Flag joins (`lv::FOLD_FJOIN`, arm64): an `and` or `or` of flags of a comparison or `FOLD_CCMP` chain
+  it alone uses and a value that is 0 or 1 folds the comparison (`Live::join_part`) and is one
+  conditional select on its flags: `csel rd, y, wzr, cc` (`and`), `csinc rd, y, wzr, !cc` (`or`).
+  x86-64 keeps `setcc` and the byte operation, which take as many instructions.
 - Load folds (`lv::FOLD_LDOP`): a load of a call's aggregate result right after the call stays a load
   only when registers may return that result (`Live::ret_regs`, the largest such result: 16 bytes on
   x86-64), whose registers the generator then takes; a slot copied to the stack as a by-value argument is
@@ -317,6 +331,37 @@ Where the program takes such a function's address, the address names a local thu
 (`w64::thunks`, from `native::prepare`), in the object of the code that takes it.
 Check every rule against the C compiler with a C driver (`tests/codegen/native_test.spc`): aggregates
 of each size class, floats in aggregates, i128, vectors, variadic calls, results in memory.
+
+A call reads some values after its argument moves: an indirect call's target, an address passed after
+them. Those moves write a home the plan holds in an argument register across calls (`Live::seg_past`,
+a rare block's saved homes). Never read a late value from a register the argument setup writes.
+x86-64: the plan gives such a value no home there (`plan_homes`'s `late`). arm64: the value leaves
+that register before the moves (`late_away`: to a free x9..x15, which `blr` then takes, else to a
+slot) and is back in its home for the code after the call (`late_back`).
+
+## Code placement
+
+x86-64 (`Package.fit_lines`: a build that aligns loops, in ELF and COFF objects). A boundary between two
+64-byte lines costs a cycle each pass when it falls inside:
+
+- a function that fits one line (AMD Zen 3 and Zen 4: 20% of a 5-instruction function; Zen 5, Intel
+  Granite Rapids: nothing; Emerald Rapids and Ice Lake: 3 to 7%);
+- a loop that holds a call and fits one line (Zen 3 and Zen 4: 20%; Emerald Rapids: 30%; Zen 5 and
+  Granite Rapids: 17 to 24% at some places of the boundary).
+
+`relax` starts each loop at a 16-byte boundary of the function; `line_fit` then gives the function the
+least alignment (16, 32 or 64 bytes) and the fill bytes before it (a multiple of 16) that leave the fewest
+such boundaries inside its loops with a call of at most 64 bytes (a loop's first byte to the end of its
+last block of the body, but a rare one) and inside it when it has at most 64 bytes. The fill is before
+the function and never runs; the rule adds about 0.65% to the compiler's code.
+
+A loop without a call is not placed: Zen 3 and Zen 4 run one 16% faster with a boundary inside than
+inside one line, Zen 5 and Granite Rapids lose 12 to 25% only when the boundary falls in its last
+compare and branch, and the other processors show nothing.
+
+A Mach-O object keeps 16 bytes: its link gives every part of a section the section's alignment, and
+the processors that run its images showed no cost. arm64: the link places the code (see
+[object-and-linker.md](object-and-linker.md)).
 
 ## Instruction set parts
 

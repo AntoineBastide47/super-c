@@ -37,6 +37,37 @@ import ast::ast as ast;
 
 const V0: u8 = 16; // register number of xmm0: general registers are 0..15, xmm0..xmm31 16..47
 
+// Where a function of `size` bytes goes, whose loops of at most LINE bytes that hold a call are `loops`
+// (start << 32 | end, offsets in it): the log2 of its alignment (16, 32 or 64 bytes) and the fill
+// bytes between that boundary and its first byte (a multiple of 16), the least alignment that leaves the
+// fewest line boundaries inside those loops and, when it has at most LINE bytes, inside it.
+const fn line_fit(size: u32, loops: &Vector<u64>) (u8, u8) {
+    let mut bad: [u32; 4] = [0, 0, 0, 0];
+    for r in 0..4u32 {
+        bad[r as usize] = (size <= LINE && 16 * r + size > LINE) as u32;
+        for q in 0..loops.len() {
+            let s = (loops[q] >> 32) as u32;
+            bad[r as usize] += ((16 * r + s) % LINE + (loops[q] as u32 - s) > LINE) as u32;
+        }
+    }
+    let m = bad[0].min(bad[1]).min(bad[2]).min(bad[3]);
+    if bad[0] == m && bad[1] == m && bad[2] == m && bad[3] == m {
+        return (4, 0);
+    }
+    if bad[0] == m && bad[2] == m {
+        return (5, 0);
+    }
+    if bad[1] == m && bad[3] == m {
+        return (5, 16);
+    }
+    for r in 0..4u8 {
+        if bad[r as usize] == m {
+            return (6, 16 * r);
+        }
+    }
+    return (4, 0);
+}
+
 // The register number of part `pa`.
 const fn preg(pa: ab::Part) u8 {
     return pa.reg + ast::pick(pa.v, V0, 0);
@@ -48,6 +79,10 @@ const CHAIN_STEPS: u32 = 4;
 const FF_NONE: u8 = 0;
 const FF_ABS: u8 = 1;
 const FF_ROUND: u8 = 2;
+// A line of the instruction cache and of the processor's fetch, in bytes: a boundary between two lines
+// inside a function, or a loop with a call, that fits one line costs up to a third of its time
+// (`line_fit`).
+const LINE: u32 = 64;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
@@ -263,11 +298,11 @@ pub(package) struct Gen {
     // NONE.
     chain_x: u32,
     chain_r: u8,
-    // The boolean value whose low byte the block's last `test` of one (`cond_of`) tested, that `test`'s
-    // first byte and its end, NONE.
+    // The condition value whose flags the block's last test set (a boolean's `test`, `cond_of`; a folded
+    // comparison, `folded_cmp`), NONE; the code byte the test ends at, and the condition on its flags.
     btest_x: u32,
-    btest_at: u32,
     btest_end: u32,
+    btest_cc: u32,
     cmp_at: u32, // the code byte the last compare starts at (`reflag`), NONE
     // The operands of the last plain compare and the code length up to which its flags hold (past only a
     // `setcc` and `movzx` of its value), NONE: a compare of the same values there sets nothing.
@@ -449,8 +484,8 @@ extend Gen {
             chain_x: NONE,
             chain_r: NOREG,
             btest_x: NONE,
-            btest_at: 0,
             btest_end: 0,
+            btest_cc: 0,
             cmp_at: NONE,
             held_a: VNONE,
             held_b: VNONE,
@@ -5345,14 +5380,19 @@ extend Gen {
     }
 
     // The flags of the comparison condition value `v` folds into its select or branch (`lv::FOLD_CMP`),
-    // set here and kept; NONE when it does not fold.
+    // set here and kept; NONE when it does not fold. A comparison an earlier select of the block made,
+    // with no write of the flags since, is not made again.
     fn folded_cmp(self: &mut Self, v: Value) u32 {
         if (v & (VPARAM | VFLAG)) != 0 || !self.cr.lv.pfold[v as usize] {
             return NONE;
         }
-        let cc = self.compare(self.cr.b().insts[v as usize], NONE);
+        if self.btest_x != self.cr.vx(v) || !self.flags_kept() {
+            self.btest_cc = self.compare(self.cr.b().insts[v as usize], NONE);
+            self.btest_x = self.cr.vx(v);
+            self.btest_end = self.c.len();
+        }
         self.keep_flags = true;
-        return cc;
+        return self.btest_cc;
     }
 
     // Comparison `t` of integers of at most 64 bits into the flags: its condition. A folded `and` compared
@@ -7438,33 +7478,26 @@ extend Gen {
         // An earlier `test` of it in the block, and nothing since wrote the flags.
         if self.btest_x == cx && self.flags_kept() {
             self.keep_flags = true;
-            return x::CC_NE;
+            return self.btest_cc;
         }
         let r = self.reg(v);
-        let at = self.c.len();
         self.c.test_ri(1, r, 0xFF);
         self.btest_x = cx;
-        self.btest_at = at;
         self.btest_end = self.c.len();
+        self.btest_cc = x::CC_NE;
         self.keep_flags = true;
         return x::CC_NE;
     }
 
-    // Whether the flags of the `test` `cond_of` noted still hold: its bytes are a `test` of a byte with 0xFF
-    // there (A8 FF, or F6 /0 FF maybe after a REX), and each instruction after it writes no flags, as it is
-    // a `mov` of an immediate or between registers or a `cmov` between registers.
+    // Whether the flags of the test the block noted last (`btest_end`) still hold: each instruction after it
+    // writes no flags, as it is a `mov` of an immediate, a `mov` between registers or from memory, a
+    // `movzx`, or a `cmov`. Code goes back only at a block's end, so the test's bytes are there.
     const fn flags_kept(self: &Self) bool {
         let n = self.c.len();
-        let (at, end) = (self.btest_at, self.btest_end);
-        if end > n || end < at + 2 || self.c.b[end as usize - 1] != 0xFF {
+        if self.btest_end > n {
             return false;
         }
-        let al = end == at + 2 && self.c.b[at as usize] == 0xA8;
-        let rm = end >= at + 3 && self.c.b[end as usize - 3] == 0xF6 && (self.c.b[end as usize - 2] & 0xF8) == 0xC0;
-        if !al && !rm {
-            return false;
-        }
-        let mut p = end;
+        let mut p = self.btest_end;
         // Each step passes one instruction of at least 2 bytes.
         while p < n {
             let rex = self.c.b[p as usize] >= 0x40 && self.c.b[p as usize] <= 0x4F;
@@ -7487,16 +7520,42 @@ extend Gen {
                 }
             } else if op == 0xC7 && m >= 0xC0 && (m & 0x38) == 0 {
                 6
-            } else if (op == 0x89 || op == 0x8B) && m >= 0xC0 {
+            } else if op == 0x89 && m >= 0xC0 {
                 2
-            } else if op == 0x0F && (m & 0xF0) == 0x40 && q + 2 < n && self.c.b[q as usize + 2] >= 0xC0 {
-                3
+            } else if op == 0x8B {
+                1 + self.modrm_len(q + 1)
+            } else if op == 0x0F && ((m & 0xF0) == 0x40 || m == 0xB6 || m == 0xB7) {
+                2 + self.modrm_len(q + 2)
             } else {
                 return false;
             };
             p = q + len;
         }
         return p == n;
+    }
+
+    // The bytes the ModRM byte at code byte `p` takes with its SIB byte and displacement; past the code's
+    // end when `p` is.
+    const fn modrm_len(self: &Self, p: u32) u32 {
+        let n = self.c.len();
+        if p >= n {
+            return n;
+        }
+        let m = self.c.b[p as usize];
+        let (md, rm) = (m >> 6, m & 7);
+        if md == 3 {
+            return 1;
+        }
+        let sib = rm == 4;
+        let base5 = sib && p + 1 < n && (self.c.b[p as usize + 1] & 7) == 5;
+        let disp: u32 = if md == 1 {
+            1
+        } else if md == 2 || rm == 5 || base5 {
+            4
+        } else {
+            0
+        };
+        return 1 + sib as u32 + disp;
     }
 
     fn select_op(self: &mut Self, i: u32, t: Inst) bool {
@@ -8164,7 +8223,7 @@ extend Gen {
         let own = VPARAM | b.blocks[0].param_start + b.pool[b.sig as usize];
         let fwd = (rt & AGG) != 0 && rt == b.pool[b.sig as usize + 2] && t.ty == T_NONE && b.pool[(t.c + b.pool[t.b as usize]) as usize] == own && self.cr.self_lay.ret.kind == ab::L_SRET;
         let into = into0 || fwd;
-        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (rt != b.pool[b.sig as usize + 2] || (rt & AGG) != 0) && !into {
+        if r.op != O_RET || !(r.a == i && t.ty != T_NONE || r.a == VNONE && t.ty == T_NONE) || (((rt ^ b.pool[b.sig as usize + 2]) & ~SIG_BOOL) != 0 || (rt & AGG) != 0) && !into {
             return false;
         }
         self.call_layout(t);
@@ -10410,6 +10469,65 @@ extend Gen {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
         ats.extend_from_slice(&jto);
+        // Each loop that holds a call, in a block that is not rare: its first byte and the end of its last
+        // such block of the body, for `line_fit`.
+        let lp0 = ats.len();
+        if unsafe (*self.pkg).fit_lines {
+            let lv = &self.cr.lv;
+            let mut starts = Vector::<u32>::with_capacity(self.blk_at.len());
+            for q in 0..self.blk_at.len() {
+                if self.blk_at[q] != NONE && self.blk_at[q] < body_n {
+                    starts.push(self.blk_at[q]);
+                }
+            }
+            starts.sort();
+            let mut lend = Vector::<u32>::new();
+            lend.resize_default(lv.inner.len());
+            let mut calls = Vector::<bool>::new();
+            calls.resize_default(lv.inner.len());
+            for q in 0..lv.order.len() {
+                let j = lv.order[q] as usize;
+                if lv.rare[j] || self.blk_at[j] == NONE || self.blk_at[j] >= body_n {
+                    continue;
+                }
+                // The next block's first byte. Each step halves the range: at most 32 steps.
+                let mut n: usize = 0;
+                let mut hi = starts.len();
+                while n < hi {
+                    let mid = (n + hi) / 2;
+                    if starts[mid] <= self.blk_at[j] {
+                        n = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let e = if n < starts.len() {
+                    starts[n]
+                } else {
+                    body_n
+                };
+                let call = self.cpos[q + 1] != self.cpos[q];
+                let mut h = lv.inner[j];
+                // At most one step per enclosing loop.
+                while h != NONE {
+                    if lend[h as usize] < e {
+                        *lend.index_mut(h as usize) = e;
+                    }
+                    if call {
+                        *calls.index_mut(h as usize) = true;
+                    }
+                    h = lv.parent[h as usize];
+                }
+            }
+            for q in 1..lv.order.len() {
+                let k = lv.order[q] as usize;
+                if lv.inner[k] == k as u32 && calls[k] {
+                    ats.push(self.blk_at[k]);
+                    ats.push(lend[k]);
+                }
+            }
+        }
+        let nlp = (ats.len() - lp0) / 2;
         ats.extend_from_slice(&stubs);
         ats.push(tails_end);
         ats.push(ra);
@@ -10472,7 +10590,21 @@ extend Gen {
             return self.cr.refuse("too many sections");
         }
         let fl = place::func_flags(ps, !self.local && !self.base, !self.base);
-        let at = o.define(k2, sec, 4, size, fl);
+        // The loops with a call that fit a line.
+        let mut loops = Vector::<u64>::new();
+        for q in 0..nlp {
+            let ls = lead + ats[lp0 + 2 * q];
+            let le = lead + ats[lp0 + 2 * q + 1];
+            if le > ls && le - ls <= LINE {
+                loops.push(ls as u64 << 32 | le as u64);
+            }
+        }
+        let (fal, fill) = if unsafe (*self.pkg).fit_lines {
+            line_fit(size, &loops)
+        } else {
+            (4u8, 0u8)
+        };
+        let at = o.define_led(k2, sec, fal, fill, size, fl);
         o.put(sec, pro.b[0..lead as usize]);
         o.put(sec, self.c.b[0..self.c.b.len()]);
         for q in 0..self.rels.len() {

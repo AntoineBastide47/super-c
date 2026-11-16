@@ -13,7 +13,11 @@ Models: `src/target/macho.spc`, `src/target/elf.spc`, `src/target/coff.spc`, `sr
 A writer:
 
 - lays out one section per non-empty kind and per named section (`-ffunction-sections` and
-  `-fdata-sections` split code and data per symbol; COFF uses COMDAT sections);
+  `-fdata-sections` split code and data per symbol; COFF uses COMDAT sections). A part of a code
+  section takes its symbol's own alignment and begins at the fill bytes the symbol's definition put
+  before it (`ob::Obj::define_led`, `OSym.al`, `OSym.lead`, `ob::Part.al`; ELF and COFF): one function
+  aligned to 64 bytes does not align the others. A symbol with no alignment of its own (an assembler
+  label) and a part of data take the section's;
 - writes a weak definition (`ob::SF_WEAK`: Mach-O `N_WEAK_DEF`, ELF `STB_WEAK`, a COFF COMDAT section
   of selection `ANY`, wasm `WASM_SYM_BINDING_WEAK`): each object's copy of data no unit owns (a string
   literal) is one when the data splits (`ob::copy_flags`), so the link keeps one copy and drops the
@@ -54,7 +58,20 @@ A linker:
 1. reads the objects and the archives' members that define a needed symbol, and the system's shared
    libraries for their exported names (and versions, ELF);
 2. resolves symbols: one definition each, weak rules, undefined ones bound to a library or an error;
-3. lays out the image: segments, sections merged by kind, alignment, the entry point's start code;
+3. lays out the image: segments, sections merged by kind, alignment, the entry point's start code.
+   arm64 (Mach-O and ELF, `keep_code`): once a code section's address is known, each input section of
+   it (a function, under `-ffunction-sections` or Mach-O's split at symbols) moves forward by the
+   fewest bytes after which no 4096-byte boundary falls inside a function of at most 128 bytes or a
+   loop of at most 128 bytes (`link::util::keep_pad`, which finds the loops by their backward
+   branches): code that holds one runs a cycle late each pass (Apple M-series: 4 cycles in place of 3
+   for a 5-instruction function or a 7-instruction loop; boundaries of 64 to 2048 bytes cost nothing).
+   The padding is between functions and never runs; it adds about 0.1% to the compiler's code.
+   The ELF link also keeps lines of 64 bytes (`lu::KEEP_LINE`): an input section that fits one line
+   and would hold a boundary between two moves to the next line (Neoverse N2: such a function runs 6%
+   slower; a loop shows no cost, so the link scans none); a move off a page boundary then keeps the
+   place in the line. The Mach-O link keeps no lines: Apple's processors show no cost below 4096 bytes.
+   x86-64: the code generator places the functions, not the link (`Package.fit_lines`, see
+   [code-generator.md](code-generator.md));
 4. applies the relocations, relaxing where the format allows (ELF GOT and TLS relaxations);
 5. binds imports: stubs and GOT or import address table slots, dynamic relocations for pointers in data;
 6. writes unwind tables, the symbol table and debug sections unless stripped, and the format's extras

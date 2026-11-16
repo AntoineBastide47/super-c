@@ -336,6 +336,9 @@ extend Printer {
             if (pt & SIG_SEXT) != 0 {
                 out.push_str(".s");
             }
+            if (pt & SIG_BOOL) != 0 {
+                out.push_str(".b");
+            }
         }
     }
 

@@ -189,6 +189,11 @@ pub(package) const FOLD_ADDSUB_WIDE: u64 = 2251799813685248;
 /// a load or of a zero extension: the generator keeps the bits above such a value zero in its register
 /// and its home (`Live::wide`).
 pub(package) const FOLD_VIEW: u64 = 18014398509481984;
+/// `FOLD_FJOIN`: an `and` or `or` of flags that is no `FOLD_CCMP` chain, of a comparison (or a chain) it
+/// alone uses and a value that is 0 or 1 (`zero_one`): the comparison folds into it (`Live::join_part`),
+/// and it takes the value where the flags let the value decide, else 0 (`and`) or 1 (`or`), in one
+/// conditional select (arm64 `csel`, `csinc`).
+pub(package) const FOLD_FJOIN: u64 = 36028797018963968;
 /// `Live::carry`: per instruction, its part of a `FOLD_ADC` sum: none, the `addo` or `subo` whose carry the
 /// flags keep, a folded sum or extension, the sum with the carry.
 pub(package) const CARRY_NONE: u8 = 0;
@@ -2885,7 +2890,8 @@ extend Live {
         }
         let (lo, hi) = self.relayed_of(i);
         for q in lo..hi {
-            out.push(b.insts[(self.relayed[q as usize] & 0xFFFFFFFF) as usize].b);
+            // A relayed view too is a read of its value.
+            out.push(self.seen(b.insts[(self.relayed[q as usize] & 0xFFFFFFFF) as usize].b));
         }
     }
 
@@ -2936,6 +2942,15 @@ extend Live {
                 nb = 1;
             }
             if na == 0 || nb == 0 || !leaf_a && !leaf_b || na + nb > CCMP_MAX {
+                // No chain: `FOLD_FJOIN` folds one side's comparisons when the other side is 0 or 1.
+                let (p, y) = if na != 0 {
+                    (t.a, t.b)
+                } else {
+                    (t.b, t.a)
+                };
+                if (self.fold_ops & FOLD_FJOIN) != 0 && na + nb != 0 && zero_one(b, y, ZO_DEPTH) {
+                    self.pfold[p as usize] = true;
+                }
                 continue;
             }
             self.conj[i] = na + nb;
@@ -2943,6 +2958,25 @@ extend Live {
             self.pfold[t.b as usize] = true;
             self.pfold[i] = self.cnd[i] == self.count[i];
         }
+    }
+
+    /// The operand whose comparisons `and` or `or` `i` of flags folds (`FOLD_FJOIN`): a comparison or a
+    /// chain of them (`conj`); VNONE when it folds none. No other fold leaves a folded comparison under an
+    /// `and` or `or` that is neither a chain nor folded itself.
+    pub(package) const fn join_part(self: &Self, b: &Body, i: u32) Value {
+        let t = b.insts[i as usize];
+        if (self.fold_ops & FOLD_FJOIN) == 0 || t.op != O_AND && t.op != O_OR || t.ty != T_I8 || self.pfold[i as usize] || self.conj[i as usize] != 0 {
+            return VNONE;
+        }
+        if self.flag_part(b, t.a) {
+            return t.a;
+        }
+        return ast::pick(self.flag_part(b, t.b), t.b, VNONE);
+    }
+
+    // Whether `v` is a folded comparison or chain of them.
+    const fn flag_part(self: &Self, b: &Body, v: Value) bool {
+        return is_inst(v) && self.pfold[v as usize] && (b.insts[v as usize].op == O_ICMP || self.conj[v as usize] != 0);
     }
 
     // Whether `v` is an integer comparison of up to 64 bits with one use that folds into nothing
