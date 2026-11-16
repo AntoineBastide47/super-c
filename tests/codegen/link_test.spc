@@ -13,6 +13,7 @@ import std::platform::fs;
 import module::loader as loader;
 import std::platform::dylib;
 import target::table as tgt;
+import bindgen::ctarget as ct;
 
 @test
 fn link_record_names_fit_and_differ() {
@@ -633,6 +634,54 @@ fn the_link_keeps_short_functions_off_page_boundaries() {
         assert((lo | 4095) + 1 >= hi, format("a function at {} to {} holds a boundary", lo, hi).as_str());
     }
     assert(short >= 3000, "the image names its functions");
+    // A Mach-O image names the SDK it was linked with, as the SDK's settings give its version.
+    let mut sdk = String::new();
+    let t = tgt::target_of(tgt::axis_index("macos", false), tgt::axis_index("aarch64", true)).unwrap();
+    if le(&img, 0, 4) == 0xFEEDFACF && ct::apple_sdk(&t, &mut sdk) {
+        let settings = lu::read(format("{}/SDKSettings.json", sdk.as_str()).as_str());
+        if settings.is_some() {
+            let v = lu::sdk_settings_version(settings.unwrap().as_slice());
+            assert(v > 0x000C0000, "the SDK's version");
+            assert_eq(macho_sdk(&img), v);
+        }
+    }
     let mut run = format("\"{}\"", exe.as_str());
     assert_eq(cli::run_with(run.cstr(), null, null, null, ""), 0);
+}
+
+// The SDK version of Mach-O image `b` (LC_BUILD_VERSION), 0 without one.
+const fn macho_sdk(b: str) u32 {
+    let mut at: usize = 32;
+    for _ in 0..le(b, 16, 4) as usize {
+        if le(b, at, 4) == 0x32 {
+            return le(b, at + 16, 4) as u32;
+        }
+        at += le(b, at + 4, 4) as usize;
+    }
+    return 0;
+}
+
+// The version word of settings text `s`.
+fn settings_version(s: str) u32 {
+    let mut b = Vector::<u8>::new();
+    for i in 0..s.len() {
+        b.push(s.byte_at(i));
+    }
+    return lu::sdk_settings_version(b[0..b.len()]);
+}
+
+// The version an Apple SDK's settings name becomes the Mach-O version word of an image linked with it
+// (`link::util::sdk_settings_version`): major, minor and patch, 0 when the settings name none.
+@test
+fn an_sdks_settings_give_its_version() {
+    let s = "{\"DisplayName\":\"macOS 27.2\",\"VersionMap\":{},\"Version\":\"27.2\",\"CanonicalName\":\"macosx27.2\"}";
+    assert_eq(settings_version(s), 0x001B0200);
+    let t = "{ \"Version\" : \"14.5.1\" }";
+    assert_eq(settings_version(t), 0x000E0501);
+    let u = "{\"Version\":\"15\"}";
+    assert_eq(settings_version(u), 0x000F0000);
+    let none = "{\"VersionMap\":{}}";
+    assert_eq(settings_version(none), 0);
+    let odd = "{\"Version\":15}";
+    assert_eq(settings_version(odd), 0);
 }

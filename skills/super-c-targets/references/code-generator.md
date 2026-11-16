@@ -273,6 +273,14 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   the register with `cbz`/`cbnz` when it holds zeros above the byte (`clean`), bit 0 with `tbz`/`tbnz`
   when the value is 0 or 1 (`lir::ir::zero_one`: a call's `bool` result, whose register may hold
   anything above the byte), else the byte (`tst #0xff` and `b.cond`). x86-64 tests the byte register.
+- Block copies and fills (`mem_block`): a `memcpy` or `memset` of a constant size up to
+  `place::MEM_INLINE` (128 bytes) is inline, else a call of the C library's routine. A copy whose
+  regions may overlap (`memcpy.overlap`: every aggregate assignment the optimizer cannot prove apart)
+  loads every chunk before its first store, a vector register per 16 bytes (8 at most; x86-64 plans
+  them free, `vneed`), so it is right for any overlap. arm64 takes two chunks by one LDP or STP only
+  where that pair's own offsets are in reach (`qpair_fits`). Do not copy such regions chunk by chunk:
+  two fields of an enum's variants overlap in part. A self-compile ran 14 M `memmove` calls of 65 to
+  128 bytes before these copies were inline.
 - Flags kept in a block (`btest_x`, `flags_kept`): a select or branch whose condition is the one the
   block tested last (a folded comparison, `folded_cmp`; a byte condition's test) reads those flags
   when every instruction emitted since writes none: on arm64 immediate moves, sums and logic without

@@ -2605,6 +2605,22 @@ const fn cu_names<'a>(l: &L, b: Slice<'a, u8>, f: IFile, dir: &mut str<'a>, name
 }
 
 // Build `__LINKEDIT`, write the header and load commands, then the UUID and the signature.
+// The oldest macOS an image runs on, as a Mach-O version word: 12.0.
+const MIN_OS: u32 = 0x000C0000;
+
+// The version of the SDK whose libraries link `o` reads, for LC_BUILD_VERSION: its `SDKSettings.json`
+// names it; MIN_OS when the SDK has no such file. The system's libraries behave as that version asks
+// (macOS picks its newer allocator for an image linked with a recent SDK), so the image names the SDK
+// it was linked with, as `ld` does, not the oldest system it runs on.
+fn sdk_version(o: &Opts) u32 {
+    let data = lu::read(format("{}/SDKSettings.json", o.sdk.as_str()).as_str());
+    if data.is_none() {
+        return MIN_OS;
+    }
+    let v = lu::sdk_settings_version(data.unwrap().as_slice());
+    return ast::pick(v == 0, MIN_OS, v);
+}
+
 fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     let fixups = chained_fixups(l, img);
     // The symbol table: the debug map and the local symbols, the exported ones, the imports.
@@ -2906,8 +2922,8 @@ fn finish(l: &mut L, o: &Opts, b: []u8, img: &mut Vector<u8>) {
     ob::w32(&mut h, LC_BUILD_VERSION);
     ob::w32(&mut h, 24);
     ob::w32(&mut h, 1);
-    ob::w32(&mut h, 0x000C0000);
-    ob::w32(&mut h, 0x000C0000);
+    ob::w32(&mut h, MIN_OS);
+    ob::w32(&mut h, sdk_version(o));
     ob::w32(&mut h, 0);
     ncmds += 2;
     if l.kind == K_EXE {

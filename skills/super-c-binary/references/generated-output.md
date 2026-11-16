@@ -43,7 +43,8 @@ what it holds and writes only the files whose content changed, so an unchanged f
 (`publish_file`). A build whose emission fails writes no unit or header, so the tree stays as the
 last successful emission left it. The emit stamp `.emit_stamp` lands beside `raw/`. The link record
 `<out-dir>/__link-<hash of the binary's path>.cmd` holds the own linker's command line (` +archive` for
-a static library, ` +strip` for a stripped link): another command, a missing binary or a newer object
+a static library, ` +strip` for a stripped link) and the compiler that linked (` +linker <compiler_id>`:
+the linker is the compiler): another command, another compiler, a missing binary or a newer object
 links again. `super-c test` runs the same engine on the generated test root under the `test` profile
 in `<out-dir>/test/` (`raw/`, the runner `__tests`), with the emit stamp, the per-TU cache and the
 native record making an unchanged suite a link check; `super-c bench` uses `<out-dir>/bench/<profile>/`.
