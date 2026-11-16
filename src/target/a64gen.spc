@@ -116,11 +116,12 @@ pub(package) struct Gen {
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<u8>, // the scratch homes saved around a call (`save_scratch`)
     csown: Vector<u32>, // per register of `csave`, the value it held
-    // The values a call reads from another place until its instruction (`late_away`), where each was, and
-    // the scratch registers that hold them.
+    // The values a call reads from another place until its instruction (`late_away`), where each was, the
+    // scratch registers that hold them, and the registers they left: these still own them.
     lwas: Vector<u32>,
     lva: Vector<Va>,
     llock: u64,
+    lreg: u64,
     csoff: i64, // the stack offset of their run of bytes
     cssize: u32, // its size
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -266,6 +267,7 @@ extend Gen {
             lwas: Vector::<u32>::new(),
             lva: Vector::<Va>::new(),
             llock: 0,
+            lreg: 0,
             csoff: 0,
             cssize: 0,
             rarec: Vector::<bool>::new(),
@@ -6818,7 +6820,7 @@ extend Gen {
     // only the values `keep` (the register arguments' sources) keep their registers, until
     // `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>, back: bool) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob;
+        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -6861,6 +6863,7 @@ extend Gen {
             }
             self.lwas.push(x);
             self.lva.push(va);
+            self.lreg |= bit(va.reg);
             let free = XSCR & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.llock);
             if free != 0 {
                 let f = free.trailing_zeros() as u8;
@@ -6891,11 +6894,12 @@ extend Gen {
         self.lwas.truncate(0);
         self.lva.truncate(0);
         self.llock = 0;
+        self.lreg = 0;
     }
 
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob;
+        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;

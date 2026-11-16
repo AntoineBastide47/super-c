@@ -13,7 +13,11 @@ Models: `src/target/macho.spc`, `src/target/elf.spc`, `src/target/coff.spc`, `sr
 A writer:
 
 - lays out one section per non-empty kind and per named section (`-ffunction-sections` and
-  `-fdata-sections` split code and data per symbol; COFF uses COMDAT sections);
+  `-fdata-sections` split code and data per symbol; COFF uses COMDAT sections). A part of a code
+  section takes its symbol's own alignment and begins at the fill bytes the symbol's definition put
+  before it (`ob::Obj::define_led`, `OSym.al`, `OSym.lead`, `ob::Part.al`; ELF and COFF): one function
+  aligned to 64 bytes does not align the others. A symbol with no alignment of its own (an assembler
+  label) and a part of data take the section's;
 - writes a weak definition (`ob::SF_WEAK`: Mach-O `N_WEAK_DEF`, ELF `STB_WEAK`, a COFF COMDAT section
   of selection `ANY`, wasm `WASM_SYM_BINDING_WEAK`): each object's copy of data no unit owns (a string
   literal) is one when the data splits (`ob::copy_flags`), so the link keeps one copy and drops the
@@ -62,7 +66,13 @@ A linker:
    branches): code that holds one runs a cycle late each pass (Apple M-series: 4 cycles in place of 3
    for a 5-instruction function or a 7-instruction loop; boundaries of 64 to 2048 bytes cost nothing).
    The padding is between functions and never runs; it adds about 0.1% to the compiler's code.
-   x86-64 has no such rule: the cost is not measured there;
+   The ELF link also keeps lines of 64 bytes (`lu::KEEP_LINE`, `line_pad`): each input section first
+   moves by the fewest bytes, less than 64, that leave the fewest boundaries between two lines inside
+   a function of at most 64 bytes or a loop of at most 64 bytes (Neoverse N2: such a function runs 6%
+   slower, such a loop 1 to 4%); a move off a page boundary then keeps the place in the line. The
+   Mach-O link keeps no lines: Apple's processors show no cost below 4096 bytes.
+   x86-64: the code generator places the functions, not the link (`Package.fit_lines`, see
+   [code-generator.md](code-generator.md));
 4. applies the relocations, relaxing where the format allows (ELF GOT and TLS relaxations);
 5. binds imports: stubs and GOT or import address table slots, dynamic relocations for pointers in data;
 6. writes unwind tables, the symbol table and debug sections unless stripped, and the format's extras

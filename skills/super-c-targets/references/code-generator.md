@@ -329,6 +329,27 @@ Where the program takes such a function's address, the address names a local thu
 Check every rule against the C compiler with a C driver (`tests/codegen/native_test.spc`): aggregates
 of each size class, floats in aggregates, i128, vectors, variadic calls, results in memory.
 
+A call reads some values after its argument moves: an indirect call's target, an address passed after
+them. Those moves write a home the plan holds in an argument register across calls (`Live::seg_past`,
+a rare block's saved homes). Never read a late value from a register the argument setup writes.
+x86-64: the plan gives such a value no home there (`plan_homes`'s `late`). arm64: the value leaves
+that register before the moves (`late_away`: to a free x9..x15, which `blr` then takes, else to a
+slot) and is back in its home for the code after the call (`late_back`).
+
+## Code placement
+
+x86-64 (`Package.fit_lines`: a build that aligns loops, in ELF and COFF objects): a boundary between
+two 64-byte lines inside a function or a loop that fits one line costs a cycle each pass (measured:
+AMD Zen 3 and Zen 4 20% for a 5-instruction function and for a loop that calls
+it; Zen 5 23 to 25% for a loop; Intel Granite Rapids 12 to 17%, Emerald Rapids about 30% for a loop
+with a call; Ice Lake 3%). `relax` starts each loop at a 16-byte boundary of the function; `line_fit`
+then gives the function the least alignment (16, 32 or 64 bytes) and the fill bytes before it (a
+multiple of 16) that leave the fewest such boundaries inside its loops of at most 64 bytes (a loop's
+first byte to the end of its last block of the body, but a rare one) and inside it when it has at most
+64 bytes. The fill is before the function and never runs. A Mach-O object keeps 16 bytes: its link
+gives every part of a section the section's alignment, and the processors that run its images showed
+no cost. arm64: the link places the code (see [object-and-linker.md](object-and-linker.md)).
+
 ## Instruction set parts
 
 | Part | Models | Role |

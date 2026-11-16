@@ -22,7 +22,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
           # No release ships a Linux arm64 compiler: the x86-64 runner cross-builds it against the arm64
           # C library. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
@@ -66,87 +65,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # The suite with the compiler `compile` built. Leak-gated: a process that leaks or double-frees exits
-  # nonzero. The first shard of each target also checks the builds with LIR (SC_LIR).
-  test:
-    needs: compile
-    name: test (${{ matrix.target }} ${{ matrix.shard }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, target: macos, shard: "1/2" }
-          - { os: macos-latest, target: macos, shard: "2/2" }
-          - { os: ubuntu-latest, target: linux, shard: "1/2" }
-          - { os: ubuntu-latest, target: linux, shard: "2/2" }
-          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "1/2" }
-          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "2/2" }
-          - { os: windows-latest, target: windows, shard: "1/3" }
-          - { os: windows-latest, target: windows, shard: "2/3" }
-          - { os: windows-latest, target: windows, shard: "3/3" }
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: ${{ matrix.target }}
-          sha: ${{ github.sha }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: compiler-${{ matrix.target }}
-
-      - name: Run the test suite
-        run: |
-          set -eu
-          bin="super-c${BINEXT:-}"
-          chmod +x "./$bin"
-          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
-          case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
-          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
-
-  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
-  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
-  # agree on it within the targets' differences; time and cycles follow each runner's machine.
-  bench:
-    needs: compile
-    name: self-compile bench (${{ matrix.target }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: macos-latest, target: macos }
-          - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
-          - { os: windows-latest, target: windows }
-    runs-on: ${{ matrix.os }}
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: ./.github/actions/toolchain
-        with:
-          target: ${{ matrix.target }}
-          sha: ${{ github.sha }}
-
-      - uses: actions/download-artifact@v8
-        with:
-          name: compiler-${{ matrix.target }}
-
-      - name: Self-compile benchmark
-        run: |
-          set -eu
-          bin="super-c${BINEXT:-}"
-          chmod +x "./$bin"
-          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
-          "./$bin" bench --filter=self_compile
-
   # What a short function, or the short loop that calls it, costs when a boundary of 64 to 65536 bytes
   # falls inside it, on this runner's processor (ci/boundary_cost.c places the machine code itself).
   # The code generation suite: each kernel as this tree compiles it against the runner's C compiler at -O2.
@@ -157,9 +75,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
           - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
@@ -202,6 +118,7 @@ jobs:
               for n in parent new; do
                 echo "== $n round $r"
                 "$gen/$n$x" bench --filter=codegen_
+                cp "build/bench-bin$x" "bench-$n$x"
               done
             done
           } | tee codegen-${{ matrix.target }}.txt
@@ -209,81 +126,79 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: codegen-${{ matrix.target }}
-          path: codegen-${{ matrix.target }}.txt
+          path: |
+            codegen-${{ matrix.target }}.txt
+            bench-parent*
+            bench-new*
           if-no-files-found: error
           retention-days: 3
 
-  # This tree's compiler against its parent commit's, each the second generation (its code is its own
-  # tree's code generation), both started from the compiler `compile` built: the sizes, and the time of
-  # one native release build of this tree with one job, three times each in turn.
-  text:
+  # Linux arm64: each variant of the tree, built by the artifact without optimization, builds itself with
+  # optimization; that compiler then builds itself. A failure prints the log and a debugger's backtrace.
+  diagnose:
     needs: compile
-    name: size and build time (${{ matrix.target }})
+    name: arm64 self-build (${{ matrix.variant }})
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest, target: macos }
-          - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
-          - { os: windows-latest, target: windows }
-    runs-on: ${{ matrix.os }}
+        variant: [tree, nokeep, nojoin, nobool, dd390676, 536da004, e0c573a1]
+    runs-on: ubuntu-26.04-arm
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - uses: ./.github/actions/toolchain
         with:
-          target: ${{ matrix.target }}
+          target: linux_arm64
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
         with:
-          name: compiler-${{ matrix.target }}
+          name: compiler-linux_arm64
 
-      - name: Build both compilers and compare
+      - name: Self-build
         run: |
-          set -euxo pipefail
-          x="${BINEXT:-}"
-          # A path the compiler takes on every runner.
-          native() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else echo "$1"; fi; }
-          here="$(native "$PWD")"
-          chmod +x "./super-c$x"
-          git worktree add -q ../parent HEAD~1
+          set -euo pipefail
+          v="${{ matrix.variant }}"
+          here="$PWD"
+          chmod +x ./super-c
           mkdir -p ../gen
-          gen="$(native "$(cd ../gen && pwd)")"
-          export SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
-          # two <tree> <name>: the tree's compiler built by the artifact, then by itself.
-          two() {
-            ( cd "$1" && export SC_STD_DIR="$(native "$PWD")/std" && "$here/super-c$x" build --profile=release --out-dir="$gen/$2-o1" -o "$gen/$2-1$x" >"$gen/$2-1.log" 2>&1 \
-              && "$gen/$2-1$x" build --profile=release --out-dir="$gen/$2-o2" -o "$gen/$2-2$x" >"$gen/$2-2.log" 2>&1 ) \
-              || { tail -20 "$gen/$2-1.log" "$gen/$2-2.log" || true; echo "BUILD FAILED: $2"; exit 1; }
+          gen="$(cd ../gen && pwd)"
+          src="$here"
+          edit() { python3 - "$1" "$2" "$3" <<'PY'
+          import sys
+          p, a, b = sys.argv[1:4]
+          s = open(p).read()
+          assert s.count(a) == 1, (p, a, s.count(a))
+          open(p, "w").write(s.replace(a, b))
+          PY
           }
-          two . new
-          two ../parent parent
-          {
-            for n in parent new; do
-              echo "$n: $(wc -c < "$gen/$n-2$x") bytes"
-              size "$gen/$n-2$x" 2>/dev/null | tail -1 || true
-            done
-            TIMEFORMAT='%R s real, %U s user, %S s system'
-            export SC_STD_DIR="$here/std"
-            for r in 1 2 3; do
-              for n in parent new; do
-                printf '%s build %s: ' "$n" "$r"
-                { time "$gen/$n-2$x" build --jobs=1 --profile=release --out-dir="$gen/t-o" -o "$gen/t$x" >"$gen/t.log" 2>&1; } 2>&1
-                rm -rf "$gen/t-o"
-              done
-            done
-          } | tee text-${{ matrix.target }}.txt
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: text-${{ matrix.target }}
-          path: text-${{ matrix.target }}.txt
-          if-no-files-found: error
-          retention-days: 3
+          case "$v" in
+            tree) ;;
+            nokeep) edit src/link/elf.spc 'at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4), lu::KEEP_LINE);' 'at += 0 * b.len() as u64;' ;;
+            nojoin) edit src/codegen/live.spc 'const FOLD_FJOIN: u64 = 36028797018963968;' 'const FOLD_FJOIN: u64 = 0;' ;;
+            nobool) edit src/lir/ir.spc 'return (b.pool[t.b as usize + 2] & (AGG | SIG_BOOL)) == SIG_BOOL;' 'return (b.pool[t.b as usize + 2] & (AGG | SIG_BOOL)) == SIG_BOOL && b.pool.len() == 0;' ;;
+            *) git worktree add -q ../v "$v"; src="$(cd ../v && pwd)" ;;
+          esac
+          export SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1
+          cd "$src"
+          export SC_STD_DIR="$src/std"
+          "$here/super-c" build --out-dir="$gen/o-dbg" -o "$gen/v-dbg" >"$gen/dbg.log" 2>&1 \
+            || { tail -n 30 "$gen/dbg.log"; echo "RESULT $v: the build without optimization FAILED"; exit 1; }
+          "$gen/v-dbg" build --profile=release --out-dir="$gen/o-rel" -o "$gen/v-rel" >"$gen/rel.log" 2>&1 \
+            || { tail -n 30 "$gen/rel.log"; echo "RESULT $v: the optimized build by the unoptimized compiler FAILED"; exit 1; }
+          if "$gen/v-rel" build --profile=release --out-dir="$gen/o-2" -o "$gen/v-2" >"$gen/self.log" 2>&1; then
+            echo "RESULT $v: self-build OK"
+            if cmp -s "$gen/v-rel" "$gen/v-2"; then echo "RESULT $v: fixpoint OK"; else echo "RESULT $v: fixpoint DIFFERS"; fi
+          else
+            echo "RESULT $v: self-build FAILED (exit $?)"
+            tail -n 30 "$gen/self.log" || true
+            sudo apt-get install -y gdb >/dev/null 2>&1 || true
+            rm -rf "$gen/o-2"
+            gdb -batch -ex run -ex bt -ex 'info registers' -ex 'x/16i $pc-40' --args "$gen/v-rel" build --profile=release --out-dir="$gen/o-2" -o "$gen/v-2" 2>&1 | tail -n 70 || true
+            exit 1
+          fi

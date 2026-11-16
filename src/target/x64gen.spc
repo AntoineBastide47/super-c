@@ -263,9 +263,6 @@ pub(package) struct Gen {
     yvals: Vector<u32>, // the 32-byte vector values (indices)
     xalloc: u64,
     xfix: u64,
-    // The values a call reads from a slot until its instruction (`late_away`), and where each was.
-    lwas: Vector<u32>,
-    lva: Vector<Va>,
     valloc: u64,
     xscr: u64,
     xscr_cap: u32, // the values `xscr` may hold at a time
@@ -448,8 +445,6 @@ extend Gen {
             yvals: Vector::<u32>::new(),
             xalloc: ast::pick(win, XALLOC_WIN, XALLOC_SYSV),
             xfix: ast::pick(win, XFIX_WIN, XFIX_SYSV),
-            lwas: Vector::<u32>::new(),
-            lva: Vector::<Va>::new(),
             valloc: ast::pick(win, VALLOC_WIN, VALLOC_SYSV),
             xscr: ast::pick(win, XSCR_WIN, XSCR_SYSV),
             xscr_cap: ast::pick(win, 1, 2),
@@ -2405,40 +2400,6 @@ extend Gen {
     // it are saved around it (`save_scratch`), so it counts as no call for the homes.
     const fn rare(self: &Self, i: u32) bool {
         return self.cr.lv.rare[self.cr.lv.def_blk[i as usize] as usize];
-    }
-
-    // A value the call reads after its argument moves (`late`: the callee, an address passed after them)
-    // whose fixed home is a caller-saved register (an argument register: the plan holds homes there
-    // across calls, `Live::seg_past`) goes to a slot before the moves, and is read there until
-    // `late_back`.
-    fn late_away(self: &mut Self, late: &Vector<u32>) {
-        for q in 0..late.len() {
-            let x = late[q];
-            let va = self.cr.va[x as usize];
-            if va.home != H_FIXED || va.reg == NOREG || va.reg >= V0 || (bit(va.reg) & self.xfix) != 0 {
-                continue;
-            }
-            self.lwas.push(x);
-            self.lva.push(va);
-            let off = self.cr.slot_alloc(8, 8) as i64;
-            self.save_reg(va.reg, off, true);
-            let w = self.cr.va.index_mut(x as usize);
-            w.reg = NOREG;
-            w.home = H_SLOT;
-            w.off = off as i32;
-        }
-    }
-
-    // The values `late_away` moved are in their homes again for the reads after the call: the argument
-    // setup is done.
-    fn late_back(self: &mut Self) {
-        for q in 0..self.lwas.len() {
-            let x = self.lwas[q] as usize;
-            self.cr.free_slots.push(8u64 << 32 | (self.cr.va[x].off as u32) as u64);
-            *self.cr.va.index_mut(x) = self.lva[q];
-        }
-        self.lwas.truncate(0);
-        self.lva.truncate(0);
     }
 
     // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
@@ -8494,7 +8455,6 @@ extend Gen {
                 keep.push(x);
             }
         }
-        self.late_away(&late);
         // A sibling call's return is not emitted: only its arguments read the values after it.
         let back = !((t.op == O_CALL || !self.win) && self.sib_shape(i, t));
         self.spill_around_call(&keep, back);
@@ -8825,7 +8785,6 @@ extend Gen {
         if t.op == O_CALLIND {
             self.materialize(t.a, S1);
         }
-        self.late_back();
         if (b.pool[sig as usize + 1] & SIG_VARIADIC) != 0 && !self.win {
             // al: an upper bound of the vector registers the arguments take.
             self.c.mov_ri(x::RAX, self.cr.lay.vr_used);

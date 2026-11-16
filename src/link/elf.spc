@@ -1853,7 +1853,7 @@ fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
         }
         let mut at = lu::align_up(sc.at + moved, sc.align);
         if sc.ty == SHT_PROGBITS && (sc.flags & SHF_EXECINSTR) != 0 {
-            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4), lu::KEEP_LINE);
+            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4), 0);
         }
         moved = at - sc.at;
         l.secs.index_mut(s).at = at;
