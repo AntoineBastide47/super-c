@@ -2890,7 +2890,8 @@ extend Live {
         }
         let (lo, hi) = self.relayed_of(i);
         for q in lo..hi {
-            out.push(b.insts[(self.relayed[q as usize] & 0xFFFFFFFF) as usize].b);
+            // A relayed view too is a read of its value.
+            out.push(self.seen(b.insts[(self.relayed[q as usize] & 0xFFFFFFFF) as usize].b));
         }
     }
 

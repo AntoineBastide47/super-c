@@ -66,11 +66,10 @@ A linker:
    branches): code that holds one runs a cycle late each pass (Apple M-series: 4 cycles in place of 3
    for a 5-instruction function or a 7-instruction loop; boundaries of 64 to 2048 bytes cost nothing).
    The padding is between functions and never runs; it adds about 0.1% to the compiler's code.
-   The ELF link also keeps lines of 64 bytes (`lu::KEEP_LINE`, `line_pad`): each input section first
-   moves by the fewest bytes, less than 64, that leave the fewest boundaries between two lines inside
-   a function of at most 64 bytes or a loop of at most 64 bytes (Neoverse N2: such a function runs 6%
-   slower, such a loop 1 to 4%); a move off a page boundary then keeps the place in the line. The
-   Mach-O link keeps no lines: Apple's processors show no cost below 4096 bytes.
+   The ELF link also keeps lines of 64 bytes (`lu::KEEP_LINE`): an input section that fits one line
+   and would hold a boundary between two moves to the next line (Neoverse N2: such a function runs 6%
+   slower; a loop shows no cost, so the link scans none); a move off a page boundary then keeps the
+   place in the line. The Mach-O link keeps no lines: Apple's processors show no cost below 4096 bytes.
    x86-64: the code generator places the functions, not the link (`Package.fit_lines`, see
    [code-generator.md](code-generator.md));
 4. applies the relocations, relaxing where the format allows (ELF GOT and TLS relaxations);

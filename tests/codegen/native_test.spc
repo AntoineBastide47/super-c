@@ -19936,40 +19936,72 @@ fn elf_funcs(o: &Vector<u8>) Vector<(usize, usize)> {
     return fs_;
 }
 
-// An x86-64 function of an ELF object takes the alignment (16, 32 or 64 bytes) and the fill bytes before
-// it that keep each of its loops of at most 64 bytes inside one 64-byte line, and itself when it has at
-// most 64 bytes (`Package.fit_lines`): a boundary between two lines there costs up to a quarter of the
-// loop's time. Six functions with one loop each, after 0 to 5 multiplications: every loop begins at a
-// 16-byte boundary and ends in its line, and at least one function is not where 16 bytes of alignment
-// alone put it.
-@test
-fn x86_64_loops_that_fit_a_line_stay_inside_one() {
-    let mut text = String::from("lir ptr 8\n");
-    for k in 0..6u32 {
+// The alignment of the `.text` section of ELF object `o`.
+const fn elf_text_align(o: &Vector<u8>) usize {
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    let strs = le_at(o, shoff + le_at(o, 0x3E, 2) as usize * shsize + 0x18, 8) as usize;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        let name = strs + le_at(o, sh, 4) as usize;
+        if o[name] == b'.' && o[name + 1] == b't' && o[name + 2] == b'e' && o[name + 3] == b'x' && o[name + 4] == b't' && o[name + 5] == 0 {
+            return le_at(o, sh + 0x30, 8) as usize;
+        }
+    }
+    return 0;
+}
+
+// The text of `n` functions `f0`, `f1`, ...: function k multiplies `first + k` times, then runs a loop
+// that calls `leaf` (`call`) or only adds.
+fn loops_text(n: u32, first: u32, call: bool) String {
+    let mut text = String::from("lir ptr 8\nsym @leaf fn global ext\n");
+    for k in 0..n {
         text.format_into("sym @f{} fn global\n", k);
     }
-    for k in 0..6u32 {
+    for k in 0..n {
+        let m = first + k;
         text.format_into("fn @f{}\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n", k);
-        for q in 0..k {
+        for q in 0..m {
             // The product so far: v0, then the value before.
             text.format_into("  v{} = mul.i64 v{}, v1\n", 2 + q, (1 + q) * (q != 0) as u32);
         }
-        let a = (1 + k) * (k != 0) as u32;
-        let n = 2 + k;
-        text.format_into("  v{} = iconst.i64 0\n  v{} = icmp.eq v1, v{}\n", n, n + 1, n);
-        text.format_into("  br v{}, b2(v{}), b1(v{}, v{})\n", n + 1, a, a, n);
-        text.format_into("b1(v{}: i64, v{}: i64):\n", n + 2, n + 3);
-        text.format_into("  v{} = mul.i64 v{}, v1\n", n + 4, n + 2);
-        text.format_into("  v{} = iconst.i64 7\n", n + 5);
-        text.format_into("  v{} = lshr.i64 v{}, v{}\n", n + 6, n + 4, n + 5);
-        text.format_into("  v{} = xor.i64 v{}, v{}\n", n + 7, n + 6, n + 4);
-        text.format_into("  v{} = add.i64 v{}, v{}\n", n + 8, n + 7, n + 3);
-        text.format_into("  v{} = iconst.i64 1\n", n + 9);
-        text.format_into("  v{} = add.i64 v{}, v{}\n", n + 10, n + 3, n + 9);
-        text.format_into("  v{} = icmp.ult v{}, v1\n", n + 11, n + 10);
-        text.format_into("  br v{}, b1(v{}, v{}), b2(v{})\n", n + 11, n + 8, n + 10, n + 8);
-        text.format_into("b2(v{}: i64):\n  ret v{}\n", n + 12, n + 12);
+        let a = (1 + m) * (m != 0) as u32;
+        let z = 2 + m;
+        text.format_into("  v{} = iconst.i64 0\n  v{} = icmp.eq v1, v{}\n", z, z + 1, z);
+        text.format_into("  br v{}, b2(v{}), b1(v{}, v{})\n", z + 1, a, a, z);
+        text.format_into("b1(v{}: i64, v{}: i64):\n", z + 2, z + 3);
+        // The loop's value: `leaf`'s result, or a product mixed with its high bits (3 more instructions).
+        let d = if call {
+            text.format_into("  v{} = call.i64 @leaf(v{}) : (i64) -> i64\n", z + 4, z + 2);
+            0u32
+        } else {
+            text.format_into("  v{} = mul.i64 v{}, v1\n", z + 4, z + 2);
+            text.format_into("  v{} = iconst.i64 7\n", z + 5);
+            text.format_into("  v{} = lshr.i64 v{}, v{}\n", z + 6, z + 4, z + 5);
+            text.format_into("  v{} = xor.i64 v{}, v{}\n", z + 7, z + 6, z + 4);
+            3u32
+        };
+        let y = z + d;
+        text.format_into("  v{} = add.i64 v{}, v{}\n", y + 5, y + 4, z + 3);
+        text.format_into("  v{} = iconst.i64 1\n", y + 6);
+        text.format_into("  v{} = add.i64 v{}, v{}\n", y + 7, z + 3, y + 6);
+        text.format_into("  v{} = icmp.ult v{}, v1\n", y + 8, y + 7);
+        text.format_into("  br v{}, b1(v{}, v{}), b2(v{})\n", y + 8, y + 5, y + 7, y + 5);
+        text.format_into("b2(v{}: i64):\n  ret v{}\n", y + 9, y + 9);
     }
+    return text;
+}
+
+// An x86-64 function of an ELF object takes the alignment (16, 32 or 64 bytes) and the fill bytes before
+// it that keep each of its loops of at most 64 bytes that hold a call inside one 64-byte line, and itself
+// when it has at most 64 bytes (`Package.fit_lines`): a boundary between two lines there costs up to a
+// third of that code's time. Six functions with one such loop each, after 0 to 5 multiplications: every
+// loop begins at a 16-byte boundary and ends in its line, and at least one function is not where 16 bytes
+// of alignment alone put it. A loop without a call asks nothing: functions of more than 64 bytes with one
+// keep 16 bytes.
+@test
+fn x86_64_loops_with_a_call_that_fit_a_line_stay_inside_one() {
+    let text = loops_text(6, 0, true);
     let mut o = Vector::<u8>::new();
     assert(
         object_of(text.as_str(), tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut o),
@@ -19998,4 +20030,82 @@ fn x86_64_loops_that_fit_a_line_stay_inside_one() {
         assert_eq(loops, 1);
     }
     assert(moved != 0, "a function starts off a line's first byte");
+    let plain = loops_text(4, 16, false);
+    let mut p = Vector::<u8>::new();
+    assert(
+        object_of(plain.as_str(), tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut p),
+        "the x86-64 object of the loops without a call",
+    );
+    let ps = elf_funcs(&p);
+    assert_eq(ps.len(), 4);
+    let (pt, _) = elf_text(&p);
+    let mut cut: u32 = 0;
+    for k in 0..4usize {
+        let (at, size) = ps[k];
+        assert(size > 64, "a function of more than a line");
+        // Its loop's branch, as above: a loop of more than 16 bytes may hold a boundary.
+        for j in at..at + size - 1 {
+            let d = p[pt + j + 1] as usize;
+            if (p[pt + j] & 0xF0) == 0x70 && d >= 0x80 && j + 2 + d >= 256 + at && (j + 2 + d - 256) % 16 == 0 {
+                let head = j + 2 + d - 256;
+                assert(j + 2 - head > 16 && j + 2 - head <= 64, "the loop fits a line and not 16 bytes");
+                cut += (head % 64 + (j + 2 - head) > 64) as u32;
+            }
+        }
+    }
+    assert_eq(elf_text_align(&p), 16);
+    assert(cut != 0, "a loop without a call holds a line boundary");
+}
+
+// A call that takes an aggregate from the stores into its slot reads each stored value, also one that
+// is a view of another (an integer read as a pointer): a call in a rare block before it saves the
+// register that holds that value. `grow` writes the caller-saved registers.
+@test
+fn a_relayed_view_lives_past_a_rare_call() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @take fn global ext
+sym @grow fn global ext
+sym @pass fn global
+fn @pass
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (i64, i64, i64) -> i64
+  slot s0 size 16 align 3
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = add.i64 v0, v1
+  v4 = inttoptr.ptr v3
+  v5 = iconst.i64 0
+  v6 = icmp.eq v2, v5
+  br v6, b1, b2
+b1: unlikely
+  v7 = call.i64 @grow(v2) : (i64) -> i64
+  jmp b2
+b2:
+  v8 = slotaddr s0
+  store v4, v8 align 3
+  store v1, v8+8 align 3
+  v9 = call.i64 @take(v8, v2) : (l0, i64) -> i64
+  ret v9
+)";
+    let drv = M"(#include <stdint.h>
+struct pair { void *p; int64_t n; };
+int64_t pass(int64_t, int64_t, int64_t);
+int64_t take(struct pair s, int64_t k) { return (int64_t)s.p * 3 + s.n + k; }
+__attribute__((noinline)) int64_t grow(int64_t x) {
+#if defined(__aarch64__)
+  __asm__ volatile("mov x1, #0\nmov x2, #0\nmov x3, #0\nmov x4, #0\nmov x5, #0\nmov x6, #0\nmov x7, #0\nmov x9, #0\nmov x10, #0\nmov x11, #0\nmov x12, #0\nmov x13, #0\nmov x14, #0\nmov x15, #0" : : : "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x9", "x10", "x11", "x12", "x13", "x14", "x15");
+#elif defined(__x86_64__)
+  __asm__ volatile("xor %%ecx, %%ecx\nxor %%edx, %%edx\nxor %%esi, %%esi\nxor %%edi, %%edi\nxor %%r8d, %%r8d\nxor %%r9d, %%r9d\nxor %%r10d, %%r10d\nxor %%r11d, %%r11d" : : : "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11", "cc");
+#endif
+  return x + 1;
+}
+int main(void) {
+  if (pass(5, 6, 2) != 11 * 3 + 6 + 2) return 1;
+  if (pass(5, 6, 0) != 11 * 3 + 6) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
 }

@@ -2051,10 +2051,12 @@ pub(package) struct Package {
     /// (x86-64: a loop's branches then share fewer fetch blocks and decoded-instruction cache lines).
     pub(package) align_loops: bool,
     /// The x86-64 backend places each function so that no boundary between two 64-byte lines falls inside
-    /// one of its loops that fits a line, nor inside it when it fits one (16, 32 or 64 bytes of alignment
-    /// and fill bytes before it): such a boundary costs up to a quarter of the loop's time on the
-    /// processors measured. With `align_loops`, in ELF and COFF objects; a Mach-O link gives every part of
-    /// a section the section's alignment, and no processor that runs its images showed the cost.
+    /// one of its loops that holds a call and fits a line, nor inside it when it fits one (16, 32 or 64
+    /// bytes of alignment and fill bytes before it): such a boundary costs up to a third of that code's
+    /// time on the processors measured. A loop without a call stays where it is: AMD Zen 3 and Zen 4 run
+    /// one faster with a boundary inside. With `align_loops`, in ELF and COFF objects; a Mach-O link
+    /// gives every part of a section the section's alignment, and no processor that runs its images
+    /// showed the cost.
     pub(package) fit_lines: bool,
     /// The processor counts set bits in one instruction: wasm32's every one, x86-64's where that is optional
     /// (`popcnt`, from x86-64-v2 or `-mpopcnt`).

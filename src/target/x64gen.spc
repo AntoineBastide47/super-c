@@ -37,8 +37,8 @@ import ast::ast as ast;
 
 const V0: u8 = 16; // register number of xmm0: general registers are 0..15, xmm0..xmm31 16..47
 
-// Where a function of `size` bytes goes, whose loops of at most LINE bytes are `loops` (start << 32 | end,
-// offsets in it): the log2 of its alignment (16, 32 or 64 bytes) and the fill
+// Where a function of `size` bytes goes, whose loops of at most LINE bytes that hold a call are `loops`
+// (start << 32 | end, offsets in it): the log2 of its alignment (16, 32 or 64 bytes) and the fill
 // bytes between that boundary and its first byte (a multiple of 16), the least alignment that leaves the
 // fewest line boundaries inside those loops and, when it has at most LINE bytes, inside it.
 const fn line_fit(size: u32, loops: &Vector<u64>) (u8, u8) {
@@ -80,7 +80,8 @@ const FF_NONE: u8 = 0;
 const FF_ABS: u8 = 1;
 const FF_ROUND: u8 = 2;
 // A line of the instruction cache and of the processor's fetch, in bytes: a boundary between two lines
-// inside a function or a loop that fits one line costs up to a quarter of its time (`line_fit`).
+// inside a function, or a loop with a call, that fits one line costs up to a third of its time
+// (`line_fit`).
 const LINE: u32 = 64;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
@@ -10445,7 +10446,8 @@ extend Gen {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
         ats.extend_from_slice(&jto);
-        // Each loop's first byte and the end of its last block of the body, but a rare one, for `line_fit`.
+        // Each loop that holds a call, in a block that is not rare: its first byte and the end of its last
+        // such block of the body, for `line_fit`.
         let lp0 = ats.len();
         if unsafe (*self.pkg).fit_lines {
             let lv = &self.cr.lv;
@@ -10458,6 +10460,8 @@ extend Gen {
             starts.sort();
             let mut lend = Vector::<u32>::new();
             lend.resize_default(lv.inner.len());
+            let mut calls = Vector::<bool>::new();
+            calls.resize_default(lv.inner.len());
             for q in 0..lv.order.len() {
                 let j = lv.order[q] as usize;
                 if lv.rare[j] || self.blk_at[j] == NONE || self.blk_at[j] >= body_n {
@@ -10479,18 +10483,22 @@ extend Gen {
                 } else {
                     body_n
                 };
+                let call = self.cpos[q + 1] != self.cpos[q];
                 let mut h = lv.inner[j];
                 // At most one step per enclosing loop.
                 while h != NONE {
                     if lend[h as usize] < e {
                         *lend.index_mut(h as usize) = e;
                     }
+                    if call {
+                        *calls.index_mut(h as usize) = true;
+                    }
                     h = lv.parent[h as usize];
                 }
             }
             for q in 1..lv.order.len() {
                 let k = lv.order[q] as usize;
-                if lv.inner[k] == k as u32 && lend[k] != 0 {
+                if lv.inner[k] == k as u32 && calls[k] {
                     ats.push(self.blk_at[k]);
                     ats.push(lend[k]);
                 }
@@ -10559,7 +10567,7 @@ extend Gen {
             return self.cr.refuse("too many sections");
         }
         let fl = place::func_flags(ps, !self.local && !self.base, !self.base);
-        // The loops that fit a line.
+        // The loops with a call that fit a line.
         let mut loops = Vector::<u64>::new();
         for q in 0..nlp {
             let ls = lead + ats[lp0 + 2 * q];

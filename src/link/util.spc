@@ -284,20 +284,24 @@ const KEEP_MAX: u64 = 128;
 // `keep_pad` moves its code at most this many times.
 const KEEP_TRIES: u32 = 8;
 
-/// Code that fits one line of this many bytes stays inside one where the link's processors show the cost
-/// of the boundary between two (`line_pad`; a Neoverse N2: a function of 5 instructions that holds one
-/// runs 6% slower, a loop of 7 instructions 1 to 4%; Apple M-series: nothing).
+/// A function that fits one line of this many bytes stays inside one where the link's processors show
+/// the cost of the boundary between two (`keep_pad`; a Neoverse N2 runs a function of 5 instructions
+/// that holds one 6% slower and a loop no slower; Apple M-series: nothing).
 pub(package) const KEEP_LINE: u64 = 64;
 
 /// The bytes to leave before arm64 code `code` (a function, or an object's whole code) that would start
-/// at address `addr`, a multiple of `align` (a power of two, 4 at least): first the move that leaves the
-/// fewest boundaries between lines of `line` bytes (0: the link keeps no lines) inside what fits a line
-/// (`line_pad`), then the fewest more, the place in the line kept, after which no KEEP_PAGE boundary
-/// falls inside the code when it has at most KEEP_MAX bytes, nor inside a loop of at most KEEP_MAX bytes
-/// of it. The first move alone when KEEP_TRIES moves find no such place.
+/// at address `addr`, a multiple of `align` (a power of two, 4 at least): first, with lines of `line`
+/// bytes (0: the link keeps no lines), the move to the next line of code that fits one line and would
+/// hold a boundary between two; then the fewest more, the place in the line kept, after which no
+/// KEEP_PAGE boundary falls inside the code when it has at most KEEP_MAX bytes, nor inside a loop of at
+/// most KEEP_MAX bytes of it. The first move alone when KEEP_TRIES moves find no such place.
 pub(package) const fn keep_pad(code: []u8, addr: u64, align: u64, line: u64) u64 {
     let n = code.len() as u64;
-    let first = line_pad(code, addr, align, line);
+    let first = if line != 0 && n <= line && addr % line + n > line {
+        align_up(addr, line) - addr
+    } else {
+        0u64
+    };
     let mut pad = first;
     for _ in 0..KEEP_TRIES {
         let start = addr + pad;
@@ -317,42 +321,6 @@ pub(package) const fn keep_pad(code: []u8, addr: u64, align: u64, line: u64) u64
         pad += align_up(d, align.max(line));
     }
     return first;
-}
-
-// The least move (a multiple of `align`, below `line`) of arm64 code `code` from address `addr` that
-// leaves the fewest boundaries between lines of `line` bytes inside what fits a line (`line_cuts`); 0
-// when the link keeps no lines (`line` 0).
-const fn line_pad(code: []u8, addr: u64, align: u64, line: u64) u64 {
-    let mut best: u64 = 0;
-    if line == 0 || align >= line {
-        return best;
-    }
-    let mut least = ~0u64;
-    // One step per place in a line.
-    for k in 0..line / align {
-        let c = line_cuts(code, addr + k * align, line);
-        if c < least {
-            least = c;
-            best = k * align;
-        }
-        if c == 0 {
-            break;
-        }
-    }
-    return best;
-}
-
-// The boundaries between lines of `line` bytes inside what fits a line of arm64 code `code` at address
-// `start`: the code itself when it has at most `line` bytes, and each loop of at most `line` bytes of it
-// (the target of a backward branch, up to the branch).
-const fn line_cuts(code: []u8, start: u64, line: u64) u64 {
-    let n = code.len() as u64;
-    let mut c = (n <= line && start % line + n > line) as u64;
-    for k in 0..n / 4 {
-        let back = a64_back(r32(code, 4 * k as usize));
-        c += (back != 0 && back <= 4 * k && back + 4 <= line && (start + 4 * k - back) % line + back + 4 > line) as u64;
-    }
-    return c;
 }
 
 // The least offset in arm64 code `code` of what must not hold a boundary at offset `o` inside (`keep_pad`):
