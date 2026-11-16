@@ -3,10 +3,10 @@ description: >
   The C toolchain and object cache of one CI job: the platform's cache base (`~/.super-c/cache`: each
   project's cache root, the script builds' `.scripts` and the tests' `.tests`, `SC_TEST_CACHE_DIR`), the
   newest `objcache-<target>-<sha>`, with the job's own delta (`objdelta-<target>-<role>-<sha>`) over it
-  when it has a `role`; the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64
-  gcc on Windows), for `target: wasm` the wasi-sdk and wasmtime, and with `llvm-mingw: true` on Windows
-  the llvm-mingw clang (`LLVM_MINGW`, its bin directory). Only a release run on main saves (`save:
-  true`): the installation caches here after installing, the object cache in the job's last step
+  when it has a `role`; the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc
+  on Windows), for `target: wasm` or `wasi: true` the wasi-sdk and wasmtime, and with `llvm-mingw: true`
+  on Windows the llvm-mingw clang (`LLVM_MINGW`, its bin directory). Only a release run on main saves
+  (`save: true`): the installation caches here after installing, the object cache in the job's last step
   (`./.github/actions/cache-save`), so no other workflow or branch adds to the repository's cache and
   evicts the release's entries.
 inputs:
@@ -26,6 +26,10 @@ inputs:
     default: "false"
   llvm-mingw:
     description: "Windows: also install llvm-mingw, whose clang has the mingw profile runtime"
+    required: false
+    default: "false"
+  wasi:
+    description: "Linux x86_64: also install the wasi-sdk and wasmtime"
     required: false
     default: "false"
 runs:
@@ -196,7 +200,7 @@ runs:
 
     - name: Restore wasi toolchain
       id: wasi
-      if: inputs.target == 'wasm'
+      if: inputs.target == 'wasm' || inputs.wasi == 'true'
       uses: actions/cache/restore@v6
       with:
         path: |
@@ -205,7 +209,7 @@ runs:
         key: wasi-toolchain-sdk25-wasmtime49.0.2-v1
 
     - name: Set up wasi-sdk + wasmtime
-      if: inputs.target == 'wasm'
+      if: inputs.target == 'wasm' || inputs.wasi == 'true'
       shell: bash
       run: |
         set -eu
@@ -228,7 +232,7 @@ runs:
         echo "WASI_SDK_PATH=$HOME/wasi-sdk" >> "$GITHUB_ENV"
 
     - name: Save wasi toolchain (release on main)
-      if: inputs.target == 'wasm' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.wasi.outputs.cache-hit != 'true'
+      if: (inputs.target == 'wasm' || inputs.wasi == 'true') && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.wasi.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
         path: |

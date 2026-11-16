@@ -396,10 +396,11 @@ jobs:
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The comparison job, the only one with a C compiler: the suite with clang 22 as the C compiler of the
-  # tests that compile C (`SC_TEST_CC`: the C oracles, the C libraries tests link, the emitted C's
-  # builds), bindgen's C environment tables (src/bindgen/ctarget_data.spc) against what that pinned clang
-  # answers (a missing one fails them), and on the first shard the correctness gate with the strict C
-  # warnings of the emitted C. Beside the gate: it needs only the compiler `compile` built.
+  # tests that compile C (`SC_TEST_CC`: the C oracles, the wasi-sdk's clang among them, the C libraries
+  # tests link, the emitted C's builds), bindgen's C environment tables (src/bindgen/ctarget_data.spc)
+  # against what that pinned clang answers (a missing one fails them), and on the first shard the
+  # correctness gate with the strict C warnings of the emitted C. Beside the gate: it needs only the
+  # compiler `compile` built.
   compare:
     needs: [resolve, compile]
     if: github.actor == github.repository_owner
@@ -422,6 +423,7 @@ jobs:
           target: linux
           role: compare
           save: true
+          wasi: true
           sha: ${{ needs.resolve.outputs.sha }}
 
       - uses: actions/download-artifact@v8

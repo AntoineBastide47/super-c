@@ -5,9 +5,9 @@
 // qsort; the Super-C program's debug binary holds no wasi-libc function (its name section names none). The
 // second pair: the scanf family over strings, files and stdin, setlocale and localeconv with UTF-8
 // characters, the broken-down time functions, signal and raise, sbrk beside malloc, creat, setvbuf, environ,
-// pthread_self and pthread_exit. The test needs a wasi-sdk in WASI_SDK_PATH, wasmtime on the PATH, and a C
-// compiler in SC_TEST_CC (the wasi-sdk's clang is a C oracle: the comparison job runs it); without them it
-// returns early.
+// pthread_self, and pthread_exit against `exit(0)` (wasi-libc has no pthread_exit since wasi-sdk 26). The
+// test needs a wasi-sdk in WASI_SDK_PATH, wasmtime on the PATH, and a C compiler in SC_TEST_CC (the
+// wasi-sdk's clang is a C oracle: the comparison job runs it); without them it returns early.
 
 import std::platform::env;
 import std::platform::fs;
@@ -1567,7 +1567,6 @@ const REFERENCE2: str = M"(
 #include <wchar.h>
 
 extern char **environ;
-_Noreturn void pthread_exit(void *);
 
 static uint64_t st = 0x2545f4914f6cdd1dULL;
 static uint64_t rnd(void) { st = st * 6364136223846793005ULL + 1442695040888963407ULL; return st; }
@@ -1806,7 +1805,7 @@ int main(void) {
   printf("V1 %d %d %d\n", setvbuf(stdout, NULL, _IOLBF, 0), setvbuf(stdout, NULL, 7, 0), setvbuf(stdout, NULL, _IOFBF, 0));
   for (char **e = environ; *e; e++) printf("E %s\n", *e);
   printf("P %d %d\n", pthread_equal(pthread_self(), pthread_self()), pthread_self() != 0);
-  pthread_exit(NULL);
+  exit(0);
 }
 )";
 
