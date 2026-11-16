@@ -3801,7 +3801,8 @@ extend Live {
     /// lives past its block. No instruction takes a float as an immediate, and a wide integer takes several
     /// to build, so recomputing one at each use costs instructions every iteration: a generator asks a
     /// register for its whole range instead (an integer one when building it takes more than one
-    /// instruction). After `run`.
+    /// instruction), and a symbol's address (arm64 builds one with ADRP and ADD; x86-64 one LEA at each
+    /// indexed access, which takes no RIP-relative base). After `run`.
     pub(package) fn loop_consts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
         out.truncate(0);
         out.resize_default(b.insts.len());
@@ -3814,7 +3815,12 @@ extend Live {
                 let a = self.ua[i as usize];
                 for u in a..a + self.un[i as usize] {
                     let v = self.uv[u as usize];
-                    if (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_FCONST || b.insts[v as usize].op == O_ICONST) {
+                    let op = if (v & (VPARAM | VFLAG)) == 0 {
+                        b.insts[v as usize].op
+                    } else {
+                        O_RET
+                    };
+                    if op == O_FCONST || op == O_ICONST || op == O_SYMADDR {
                         let d = self.def_blk[v as usize];
                         out[v as usize] = out[v as usize] || self.end[v as usize] > self.pos[d as usize];
                     }

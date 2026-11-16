@@ -104,6 +104,9 @@ pub(package) struct Isa {
     /// The native backend makes the bits of a 16-byte lane mask of bytes (bit `k` for byte `k`) in one
     /// instruction: `lir::ir::Package::mask_bits`. x86-64 PMOVMSKB.
     pub(package) mask_bits: bool,
+    /// The native backend inserts a scalar into any lane of a vector in a register (arm64 INS, wasm32
+    /// `replace_lane`): `lir::ir::Package::lane_insert`. x86-64's SSE2 inserts 2-byte lanes and lane 0 only.
+    pub(package) lane_insert: bool,
     /// The instructions a permutation of the lanes of up to three vectors takes in registers, 0 for none:
     /// `lir::ir::Package::vec_perm3`. arm64 9 (per vector an index table's ADRP and LDR, and TBL or TBX),
     /// wasm32 2 (two `i8x16.shuffle`); x86-64 0, 9 with SSSE3 (`emit::cemit`, PSHUFB).
@@ -292,6 +295,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 3,
         vector_bits: 0x0E0000,
         mask_bits: true,
+        lane_insert: false,
         vector_perm3: 0,
         vector_sumw: 0x8,
         vector_mulw: 0x4,
@@ -338,6 +342,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 7,
         vector_bits: 0x0E0F07,
         mask_bits: false,
+        lane_insert: true,
         vector_perm3: 9,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
@@ -384,6 +389,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_absd: 7,
         vector_bits: 0x0E0700,
         mask_bits: false,
+        lane_insert: true,
         vector_perm3: 2,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
@@ -737,6 +743,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_absd: 0,
     vector_bits: 0,
     mask_bits: false,
+    lane_insert: false,
     vector_perm3: 0,
     vector_sumw: 0,
     vector_mulw: 0,

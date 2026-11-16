@@ -648,6 +648,64 @@ extend Wide {
         return true;
     }
 
+    // `low_half` or `high_half` of a split vector, or `concat` into one: a selection of the operand's parts
+    // or a join of the operands' parts, no instruction (the lowering halves wide vectors to an entry's lanes,
+    // `Lower::split_entry`). A half one register wide is that part; an operand one register wide is one
+    // part. Whether it did.
+    fn half_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        let lo = code == core::OP_SIMD + core::SIMD_LOW_HALF as u32;
+        let hi = code == core::OP_SIMD + core::SIMD_HIGH_HALF as u32;
+        let cat = code == core::OP_SIMD + core::SIMD_CONCAT as u32;
+        if !(lo || hi || cat) || t.c != VNONE || t.b != ast::pick(cat, 2u32, 1u32) {
+            return false;
+        }
+        let v0 = b.pool[t.a as usize];
+        let t0 = b.type_of(v0);
+        if (v0 & VFLAG) != 0 || !is_vec(t0) {
+            return false;
+        }
+        if !cat {
+            if !self.splits(t0) || 2 * type_bytes(t.ty, 8) != type_bytes(t0, 8) || self.count(t0) % 2 != 0 {
+                return false;
+            }
+            self.parts_of(b, out, i, v0);
+            let h = self.tmp.len() / 2;
+            let from = ast::pick(hi, h, 0);
+            if h == 1 {
+                self.val[i as usize] = self.tmp[from];
+                return true;
+            }
+            let first = self.parts.len() as u32;
+            for j in 0..h {
+                self.parts.push(self.tmp[from + j]);
+            }
+            self.at[i as usize] = first;
+            return true;
+        }
+        let v1 = b.pool[(t.a + 1) as usize];
+        let one = !self.splits(t0) && type_bytes(t0, 8) == self.rb;
+        if (v1 & VFLAG) != 0 || b.type_of(v1) != t0 || 2 * type_bytes(t0, 8) != type_bytes(t.ty, 8) || !self.splits(
+            t.ty,
+        ) || !(one || self.splits(t0)) {
+            return false;
+        }
+        let first = self.parts.len() as u32;
+        for v in [v0, v1] {
+            if one {
+                let w = self.whole(b, out, i, v);
+                self.parts.push(w);
+            } else {
+                self.parts_of(b, out, i, v);
+                for j in 0..self.tmp.len() {
+                    self.parts.push(self.tmp[j]);
+                }
+            }
+        }
+        self.at[i as usize] = first;
+        return true;
+    }
+
     // Masked load or store through a pointer `t` (instruction `i`: `load_masked_ptr`, `store_masked_ptr`;
     // pointer, mask, vector) by parts, each at its bytes: a part a constant mask sets whole is a plain
     // load or store, one it leaves out the fallback or nothing. Whether it did.
@@ -814,12 +872,12 @@ extend Wide {
     fn by_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
         if op == O_VOP {
-            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(b, out, i, t) || self.slide_parts(
+            return self.half_parts(b, out, i, t) || self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(
                 b,
                 out,
                 i,
                 t,
-            );
+            ) || self.slide_parts(b, out, i, t);
         }
         if (op == O_AND || op == O_OR || op == O_XOR) && is_int(t.ty) {
             return self.mask_op(b, out, i, t);

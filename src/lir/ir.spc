@@ -6,6 +6,7 @@
 // no pointer: its symbols and messages index its package's tables through the body's own `syms` and
 // `msgs`, so moving a body between packages rewrites only those two tables.
 import ast::ast as ast;
+import ir::core as core;
 import utils::names as nm;
 
 /// A value: the index of the instruction that defines it, `VFLAG | i` for the overflow flag of checked
@@ -435,8 +436,8 @@ pub(package) const OPS: [OpInfo; 92] = [
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
-/// or `xor` of masks, a mask's sign extension, or a mask's low or high lanes interleaved with themselves
-/// (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
+/// or `xor` of masks, a mask's sign extension or truncation, or a mask's low or high lanes interleaved with
+/// themselves (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
 pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return false;
@@ -448,7 +449,7 @@ pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     if depth == 0 {
         return false;
     }
-    if t.op == O_SEXT && is_vec(t.ty) {
+    if (t.op == O_SEXT || t.op == O_TRUNC) && is_vec(t.ty) {
         return lane_mask(b, t.a, depth - 1);
     }
     if t.op == O_BITCAST && is_vec(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
@@ -463,6 +464,21 @@ pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
         t.b,
         depth - 1,
     );
+}
+
+/// The LIR condition of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`): of floats, else signed or not.
+pub(package) const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
+    let k = (c - core::SIMD_CMP_EQ) as usize;
+    let f: [u16; 6] = [C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, C_OGE];
+    let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
+    let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
+    return if fl {
+        unsafe f[k]
+    } else if sg {
+        unsafe s[k]
+    } else {
+        unsafe u[k]
+    };
 }
 
 /// The mask a lane-wise comparison of vectors of type `t` gives (`O_VCMP`): integer lanes of its lanes'
@@ -538,6 +554,83 @@ pub(package) const fn sign_extend(bits: u64, w: u32) i64 {
 /// The constant `v` of type `ty`.
 pub(package) const fn iconst(ty: u8, v: u64) Inst {
     return Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE };
+}
+
+/// When `ya` is `bits(x) & sign` and `k` a constant without the sign bit whose `w`-bit float is a nonzero
+/// number (`copysign_bits`' parts of `copysign(k, x)`): `x`'s bits as their `bitcast`'s operand, else VNONE.
+pub(package) const fn sign_and(b: &Body, ya: Value, k: Value, w: u32) Value {
+    let sign = 1u64 << (w - 1) as u64;
+    let kb = int_bits(b, k);
+    if !is_op(b, ya, O_AND) || kb.is_none() || (int_bits(b, b.insts[ya as usize].b).unwrap_or(0) & mask_of(w)) != sign {
+        return VNONE;
+    }
+    let kv = kb.unwrap() & mask_of(w);
+    // The exponent's bits: all set is an infinity or a NaN.
+    let ex = mask_of(w) & ~sign & ~ast::pick(w == 32, 0x7FFFFFu64, 0xFFFFFFFFFFFFFu64);
+    let xb = b.insts[ya as usize].a;
+    if (kv & sign) != 0 || kv == 0 || (kv & ex) == ex || !is_op(b, xb, O_BITCAST) {
+        return VNONE;
+    }
+    return b.insts[xb as usize].a;
+}
+
+/// When `o` is `(bits(x) & sign) | k` (`sign_and`, in either order) of `w`-bit floats: the `and` and `k`,
+/// else (VNONE, VNONE).
+pub(package) const fn sign_or(b: &Body, o: Value, w: u32) (Value, Value) {
+    if !is_op(b, o, O_OR) {
+        return (VNONE, VNONE);
+    }
+    let t = b.insts[o as usize];
+    if sign_and(b, t.a, t.b, w) != VNONE {
+        return (t.a, t.b);
+    }
+    if sign_and(b, t.b, t.a, w) != VNONE {
+        return (t.b, t.a);
+    }
+    return (VNONE, VNONE);
+}
+
+/// Sign test `c` of a float `x`: `x` and whether `c` holds when `x`'s sign bit is set (it holds exactly
+/// then, or exactly when clear); (VNONE, false) when `c` is none. `copysign(k, x) < 0.0` (`<=`; `>`, `>=`
+/// the negation) as `copysign_bits` expands it (`sign_or`), its fold `(bits(x) & sign) >u k` (`>=u`;
+/// `<u`, `<=u`), and `bits(x) <s 0` (`>=s`).
+pub(package) const fn sign_test(b: &Body, c: Value) (Value, bool) {
+    if (c & (VPARAM | VFLAG)) != 0 || c == VNONE {
+        return (VNONE, false);
+    }
+    let t = b.insts[c as usize];
+    if t.op == O_ICMP && !is_vec(b.type_of(t.a)) {
+        let w = type_bits(b.type_of(t.a), 8);
+        let x = if w == 32 || w == 64 {
+            sign_and(b, t.a, t.b, w)
+        } else {
+            VNONE
+        };
+        if x != VNONE && (t.aux == C_UGT || t.aux == C_UGE || t.aux == C_ULT || t.aux == C_ULE) {
+            return (x, t.aux == C_UGT || t.aux == C_UGE);
+        }
+        if is_op(b, t.a, O_BITCAST) && is_float(b.type_of(b.insts[t.a as usize].a)) && int_bits(b, t.b) == Some(0u64) && (t.aux == C_SLT || t.aux == C_SGE) {
+            return (b.insts[t.a as usize].a, t.aux == C_SLT);
+        }
+        return (VNONE, false);
+    }
+    if t.op != O_FCMP || t.aux < C_OLT || t.aux > C_OGE || !is_op(b, t.a, O_BITCAST) || is_vec(t.ty) {
+        return (VNONE, false);
+    }
+    let w = type_bits(b.type_of(t.a), 8);
+    let z = if b.insts[t.b as usize].op == O_FCONST && (t.b & (VPARAM | VFLAG)) == 0 {
+        b.insts[t.b as usize].b as u64 << 32 | b.insts[t.b as usize].a as u64
+    } else {
+        1
+    };
+    if w != 32 && w != 64 || (z & mask_of(w - 1)) != 0 {
+        return (VNONE, false);
+    }
+    let (ya, k) = sign_or(b, b.insts[t.a as usize].a, w);
+    if ya == VNONE {
+        return (VNONE, false);
+    }
+    return (sign_and(b, ya, k, w), t.aux == C_OLT || t.aux == C_OLE);
 }
 
 /// The bits of `v` of `b` when an `iconst` defines it.
@@ -2101,6 +2194,13 @@ pub(package) struct Package {
     /// (`target::table::Isa`, x86-64's PMOVMSKB): an unbounded scan finds the lane that leaves by them
     /// (`lir::loops::scan_bits`), else by a nibble a byte (`lir::loops::nibbles`).
     pub(package) mask_bits: bool,
+    /// The native backend inserts a scalar into any lane of a vector in a register (`target::table::Isa`):
+    /// else an unchecked gather builds its vector by interleaves of splats (`lir::opt` `gather_lanes`).
+    pub(package) lane_insert: bool,
+    /// The instruction set whose intrinsics the native backend expands from templates (`target::intrin`),
+    /// empty for none: `lir::opt::Run::new` takes a call of one that computes from its arguments alone
+    /// (`intrin::pure`) for a call that touches no memory.
+    pub(package) isa: str<'static>,
     /// The processor subtracts the even lanes and adds the odd ones of float vectors in one instruction
     /// (x86-64's SSE3 `addsubps`, `addsubpd`; from x86-64-v2 or `-msse3`): `codegen::live::FOLD_ADDSUB`.
     pub(package) addsub: bool,
@@ -2271,6 +2371,8 @@ extend Package {
             sse41: false,
             vtbl: false,
             mask_bits: false,
+            lane_insert: true,
+            isa: "",
             addsub: false,
             lzcnt: false,
             lse: false,

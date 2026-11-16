@@ -196,6 +196,7 @@ pub(package) const V128_LOAD: u32 = 0x00;
 pub(package) const V128_STORE: u32 = 0x0B;
 pub(package) const V128_CONST: u32 = 0x0C;
 pub(package) const I8X16_SHUFFLE: u32 = 0x0D;
+pub(package) const I8X16_SWIZZLE: u32 = 0x0E;
 pub(package) const I8X16_POPCNT: u32 = 0x62;
 pub(package) const I16X8_EXTADD_PAIRWISE_I8X16_U: u32 = 0x7D;
 pub(package) const I32X4_EXTADD_PAIRWISE_I16X8_U: u32 = 0x7F;

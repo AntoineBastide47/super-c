@@ -1949,31 +1949,7 @@ extend Facts {
 
     /// Is `sub` the field named `name` of the prelude view `view_ty` (a type of `b`'s module)?
     pub(package) const fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
-        if view_ty == TYPE_NONE || sub == NODE_NONE {
-            return false;
-        }
-        let pk = unsafe &*self.pkg;
-        let da = unsafe &*pk.module_ast_const(b.module);
-        let y = *da.type_at(view_ty);
-        let mut m9: ModuleId = 0;
-        if y.kind == TypeKind::TYPE_STRUCT {
-            m9 = y.module;
-        } else if y.kind == TypeKind::TYPE_INSTANCE {
-            m9 = da.instance(y.as_data.inst).module;
-        } else {
-            return false;
-        }
-        if m9 as usize >= pk.modules.len() || !pk.modules.at(m9 as usize).prelude {
-            return false;
-        }
-        let fa = unsafe &*pk.module_ast_const(m9);
-        let fnode = fa.at_const(sub);
-        if fnode.kind != NodeKind::NODE_FIELD {
-            return false;
-        }
-        let ns = fa.at_const(fnode.as_data.field.name).as_data.name.text;
-        let src = pk.modules.at(m9 as usize).source.as_str();
-        return src.slice(ns.start as usize, ns.end as usize) == name;
+        return cap::prelude_field(self.pkg, b, view_ty, sub, name);
     }
 
     /// Does place `pl` reach into a prelude view's element buffer (its `ptr` field, then an index or
@@ -3003,6 +2979,7 @@ extend Facts {
             for i in 0..t.dests_len {
                 self.write_place(b, b.dest_pool[(t.dests_start + i) as usize]);
             }
+            self.call_view_len(b, t);
             return !pure;
         }
         let e = term_effect(self.pkg, b, t);
@@ -3024,8 +3001,31 @@ extend Facts {
             for i in 0..t.dests_len {
                 self.write_place(b, b.dest_pool[(t.dests_start + i) as usize]);
             }
+            self.call_view_len(b, t);
         }
         return false;
+    }
+
+    // A call whose callee returns a view of the length its argument `j` gives (`ir::capture`
+    // `returns_len`): its one whole-local destination has that length, as a struct literal's `len` does.
+    fn call_view_len(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator) {
+        let cs = unsafe (&*self.pkg).cap_store;
+        if cs == null || t.dests_len != 1 || t.intr != ir::CI_NONE {
+            return;
+        }
+        let dest = self.whole_local(b, b.dest_pool[t.dests_start as usize]);
+        if dest == ir::IR_NONE {
+            return;
+        }
+        let j = unsafe (*(cs as *const cap::CaptureStore)).returns_len(self.pkg, t);
+        if j >= t.args_len {
+            return;
+        }
+        let k = self.vkey(b, b.oper_pool[(t.args_start + j) as usize]);
+        if k.is_local && k.off == 0 {
+            self.lenval.set(dest as usize, CopyBind { src: k.l, src_v: k.v, my_v: self.ver(dest), ok: true });
+            self.views = true;
+        }
     }
 
     // The storage an unknown call writes through its mutable reference arguments: each argument
@@ -3136,11 +3136,22 @@ extend Facts {
                     let srcl = self.whole_local(b, op.data);
                     if srcl != ir::IR_NONE {
                         let sv = self.ver(srcl);
+                        // the view length the source holds: a fact of the value, which stays when the
+                        // source dies (an inlined callee's moved result)
+                        let rs = self.copy_root(srcl);
+                        let lb = *self.lenval.at(rs as usize);
+                        let keep_len = lb.ok && lb.my_v == self.ver(rs) && self.ver(lb.src) == lb.src_v;
                         self.write_place(b, s.place);
                         self.copyof.set(
                             dest as usize,
                             CopyBind { src: srcl, src_v: sv, my_v: self.ver(dest), ok: true },
                         );
+                        if keep_len && lb.src != dest {
+                            self.lenval.set(
+                                dest as usize,
+                                CopyBind { src: lb.src, src_v: lb.src_v, my_v: self.ver(dest), ok: true },
+                            );
+                        }
                         // a recorded read the copy takes on (its source may die, as a moved temporary)
                         for i in 0..self.reads.len() {
                             let r = self.reads[i];
@@ -3246,19 +3257,12 @@ extend Facts {
 
     // The value key of the `len` operand of a struct literal of a prelude view, else none.
     fn view_len_key(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) VKey {
-        let pk = unsafe &*self.pkg;
-        if rv.item.node == NODE_NONE || !pk.modules.at(rv.item.module as usize).prelude {
-            return vkey_none();
-        }
-        let da = unsafe &*pk.module_ast_const(rv.item.module);
-        let members = da.ext(rv.item.node).aggregate.members;
-        for j in 0..members.len {
-            let opid = b.oper_pool[(rv.a + j) as usize];
-            if opid != ir::IR_NONE && self.is_prelude_field(b, rv.target, unsafe da.list(members)[j as usize], "len") {
-                return self.vkey(b, opid);
-            }
-        }
-        return vkey_none();
+        let opid = cap::view_len_operand(self.pkg, b, rv);
+        return if opid == ir::IR_NONE {
+            vkey_none()
+        } else {
+            self.vkey(b, opid)
+        };
     }
 
     // A numeric cast of a whole local of an unsigned integer type into one at least as wide.

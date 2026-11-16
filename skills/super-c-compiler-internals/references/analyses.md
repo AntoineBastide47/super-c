@@ -74,6 +74,7 @@ file is authoritative for where to look first.
 |------|----------|-----------|-------------|
 | Core CFG, RPO, idom | `ir::facts` `build_cfg` (bce) | facts state, per body | bce folds an edge |
 | The reference and pointer parameters each kept body may let outlive a call, and what each result may point into | `ir::capture` `CaptureStore::build` (one scan per kept lowering, then one worklist over the call edges), in `cemit_package` | `Package.cap_store` (`ir::facts` `callee_keeps`, `callee_returns_none` read it) | end of `cemit_package` |
+| The parameter whose value every view a kept body returns has as its length (`fn view(p, n) []T` of length `n`) | `ir::capture` `CaptureStore::build` (`view_len_param`, at most `RET_SCANS` rounds after the result fixpoint) | `CaptureStore.rlen`, per entry (`returns_len`; `ir::facts` `call_view_len` binds the call's result length to the argument) | end of `cemit_package` |
 | The version of a place's one dynamic index local | `Facts::index_ver` | not stored | per call |
 | C control-flow shape (RPO, idom, postdominators, loops) | `emit::cflow` `build_into` | `cem.cf_ext` | read only by the C renderer; not built in a native build |
 | LIR lowering CFG (every core block's successors, which `share_plan` reads too) and dominators | `Lower::cfg`, `Lower::dominators` | `Lower` (`sat`, `sl`, `order`, `preds`, `idom`), per body | end of `Lower::body` |

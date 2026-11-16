@@ -8029,6 +8029,12 @@ extend Gen {
         }
         let c = (code - core::OP_SIMD) as u8;
         let rule = core::simd_op(c).rule;
+        if c == core::SIMD_SWIZZLE_ZERO && t.c == VNONE {
+            // Bytes by run-time byte indices: `i8x16.swizzle` (an index past 15 gives 0).
+            return t.b == 2 && t.ty == t0 && lane_type(t0) == T_I8 && type_bytes(t0, 4) == 16 && self.vt(
+                b.pool[t.a as usize + 1],
+            ) == t0;
+        }
         if rule == core::SR_INDEX {
             // A shuffle of two or three vectors of one type (the third through a second `i8x16.shuffle`).
             let two = c == core::SIMD_SHUFFLE && (t.b == 2 || t.b == 3) && self.vt(b.pool[t.a as usize + 1]) == t0 && (t.b == 2 || self.vt(
@@ -8099,6 +8105,13 @@ extend Gen {
             return true;
         }
         self.vpre(i);
+        if c == core::SIMD_SWIZZLE_ZERO && t.c == VNONE {
+            self.vget(a);
+            self.vget(b.pool[t.a as usize + 1]);
+            self.sop(w::I8X16_SWIZZLE);
+            self.vpost(i);
+            return true;
+        }
         if rule == core::SR_INDEX {
             // Lane j is lane idx[j] of `a` (`a ++ b` for a shuffle, `b`'s lanes from byte 16). Of three
             // vectors, a second shuffle takes the third's lanes (from byte 16) beside the first's others.

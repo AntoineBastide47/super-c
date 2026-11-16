@@ -38,6 +38,7 @@ import lir::wide as wd;
 import lir::print as lp;
 import utils::par as par;
 import lir::switches as sws;
+import target::intrin as intrin;
 import stdlib;
 import std::platform::clock as pclock;
 import ast::ast as ast;
@@ -93,8 +94,10 @@ const ROOM_DEPTH: u32 = 2;
 // An if-conversion makes at most MAX_SELECTS selects; the values an order fact's bound is at most are
 // followed MIN_DEPTH deep (`Opt::upper_parts`).
 const MAX_SELECTS: u32 = 2;
-// The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`).
+// The instructions but constants an if-conversion moves out of its two sides (`Opt::speculate`); in a loop,
+// where a branch a select replaces may stand between the body and the vectorizer, SPEC_LOOP.
 const SPEC_MAX: u32 = 4;
+const SPEC_LOOP: u32 = 8;
 // `ConstSlot::find` follows address chains at most CONST_PASSES deep.
 const CONST_PASSES: u32 = 8;
 // `bit_set` takes at most SET_MAX comparisons.
@@ -1309,6 +1312,14 @@ extend Opt {
             if entered {
                 self.unenter(b);
             }
+            self.rebuild(b);
+        }
+        // A block this rebuild left with one predecessor (`merged`; the sides of a choice of two loads
+        // become one): one more walk forwards its parameters, and the rebuild joins it to that predecessor,
+        // so a loop's body is one block for the loop transforms.
+        if self.merged {
+            self.tables(pk, b, K_SLOTS);
+            let _ = self.walk(pk, b);
             self.rebuild(b);
         }
         return true;
@@ -5659,8 +5670,9 @@ extend Opt {
     // to the end of `k`; when the two sides alone enter `j`, its parameters take them in the rest of the
     // walk. NONE when not.
     fn diamond(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: Inst) u32 {
-        let (e0, s0) = self.arm(b, k, t.b);
-        let (e1, s1) = self.arm(b, k, t.c);
+        let budget = ast::pick(k as usize < self.inner.len() && self.inner[k as usize] != NONE, SPEC_LOOP, SPEC_MAX);
+        let (e0, s0) = self.arm(b, k, t.b, budget);
+        let (e1, s1) = self.arm(b, k, t.c, budget);
         let j = b.edge_target(e0);
         // A rare side of a warm branch keeps its branch: the warm path then neither runs its code nor waits for
         // a select.
@@ -5670,7 +5682,7 @@ extend Opt {
             b,
             k,
             s1,
-        ) > SPEC_MAX {
+        ) > budget {
             return NONE;
         }
         // The join's parameters are the selects when the two sides alone enter it.
@@ -5955,13 +5967,13 @@ extend Opt {
     }
 
     // Side `e` of a branch ending block `k`, as `diamond` takes it: the edge out of the block without
-    // parameters it alone enters that holds at most SPEC_MAX instructions besides its jump, and that block;
+    // parameters it alone enters that holds at most `budget` instructions besides its jump, and that block;
     // else `e` and `k`.
-    const fn arm(self: &Self, b: &Body, k: u32, e: u32) (u32, u32) {
+    const fn arm(self: &Self, b: &Body, k: u32, e: u32, budget: u32) (u32, u32) {
         let a = b.edge_target(e);
         let ab = b.blocks[a as usize];
         let ta = term(b, a);
-        if a != k && ab.param_len == 0 && ab.len <= SPEC_MAX + 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
+        if a != k && ab.param_len == 0 && ab.len <= budget + 1 && ta.op == O_JMP && self.pred_at[a as usize + 1] - self.pred_at[a as usize] == 1 {
             return (ta.a, a);
         }
         return (e, k);
@@ -5969,7 +5981,7 @@ extend Opt {
 
     // The weighted cost, excluding constants, of side `a` of block `k`'s branch (`arm`) that `speculate`
     // would move into `k`: each must be pure and speculable, or a load that cannot fault (`safe_load`);
-    // SPEC_MAX + 1 when one is not.
+    // SPEC_LOOP + 1 when one is not.
     const fn speculated(self: &Self, pk: &Package, b: &Body, k: u32, a: u32) u32 {
         if a == k {
             return 0;
@@ -5990,12 +6002,12 @@ extend Opt {
                 pure_op(t.op) && speculable(pk, b, t)
             };
             if !ok {
-                return SPEC_MAX + 1;
+                return SPEC_LOOP + 1;
             }
             // Expensive arithmetic must not run on both sides of a select. Other multiplies and
             // loads consume more of the budget than a register operation.
             n += if t.op == O_FDIV || t.op == O_FSQRT || t.ty == T_I128 {
-                SPEC_MAX + 1
+                SPEC_LOOP + 1
             } else if t.op == O_MUL || t.op == O_FMUL || t.op == O_FMA || t.op == O_LOAD {
                 2
             } else {
@@ -9873,7 +9885,7 @@ extend Opt {
         };
         let pt = term(b, p);
         let direct = other_edge(pt, other);
-        let (oe, os) = self.arm(b, p, other);
+        let (oe, os) = self.arm(b, p, other, SPEC_MAX);
         if os == p || b.edge_target(oe) != j || b.edge_target(direct) != j {
             return false;
         }
@@ -11007,6 +11019,25 @@ extend Opt {
             b.insts[i as usize] = t;
             return !same(t, t0);
         }
+        // A choice or a count by the bits of a lane-wise comparison's mask uses the comparison's lane mask,
+        // which stays in vector registers (`mask_choose`, `mask_count`); the bits sum each lane's bit where
+        // the target has no instruction for them (`mask_sum`). An unchecked gather of known lanes loads each
+        // lane itself (`gather_lanes`), and an integer lane of a vector load is a load of its own
+        // (`lane_load`).
+        if t.op == O_VEXTRACT && self.lane_load(pk, b, k, i, &mut t) || t.op == O_VOP && (self.mask_choose(
+            b,
+            k,
+            i,
+            &mut t,
+        ) || self.mask_sum(pk, b, k, i, &mut t) || self.gather_lanes(pk, b, k, i, &mut t)) || t.op == O_POPCNT && self.mask_count(
+            b,
+            k,
+            i,
+            &mut t,
+        ) {
+            b.insts[i as usize] = t;
+            return true;
+        }
         // A reference is never null (`nonnull`).
         if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (int_bits(b, t.b) == Some(0u64) && nonnull(
             b,
@@ -11508,6 +11539,400 @@ extend Opt {
             return self.number(pk, b, k, i) || !same(b.insts[i as usize], t0);
         }
         return !same(t, t0);
+    }
+
+    // Vector choice `t` (instruction `i` of block `k`) by the bits of a lane mask (`lane_mask_of`): a select
+    // by the lane mask (`O_VSEL`), narrowed or widened to the chosen lanes (`mask_width`). Whether it did.
+    fn mask_choose(self: &mut Self, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if code != core::OP_SIMD + core::SIMD_CHOOSE as u32 || t.b != 3 || t.c != VNONE || !is_vec(t.ty) {
+            return false;
+        }
+        let x = b.pool[(t.a + 1) as usize];
+        let y = b.pool[(t.a + 2) as usize];
+        if b.type_of(x) != t.ty || b.type_of(y) != t.ty {
+            return false;
+        }
+        let mk = self.lane_mask_of(b, k, i, b.pool[t.a as usize], lanes(t.ty));
+        if mk == VNONE {
+            return false;
+        }
+        let m = self.mask_width(b, k, i, mk, mask_type(t.ty));
+        *t = Inst { op: O_VSEL, ty: t.ty, aux: 0, a: m, b: x, c: y };
+        return true;
+    }
+
+    // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`lane_mask_of`), extended or
+    // not: the negated sum of the lane mask, each lane -1 or 0, in the count's type. A mask has at most 64
+    // lanes, so the sum fits the lanes' width. Whether it did.
+    fn mask_count(self: &mut Self, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        if !is_int(t.ty) {
+            return false;
+        }
+        let mk = self.lane_mask_of(b, k, i, t.a, 0);
+        if mk == VNONE {
+            return false;
+        }
+        let mt = b.type_of(mk);
+        let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
+        let at = b.pool_list([mk]);
+        let sum = self.before(b, k, i, Inst { op: O_VOP, ty: lane_type(mt), aux: code, a: at, b: 1, c: VNONE });
+        let sw = type_bytes(lane_type(mt), 8);
+        let cw = type_bytes(t.ty, 8);
+        let w = if sw == cw {
+            sum
+        } else {
+            self.before(
+                b,
+                k,
+                i,
+                Inst { op: ast::pick(sw < cw, O_SEXT, O_TRUNC), ty: t.ty, aux: 0, a: sum, b: VNONE, c: VNONE },
+            )
+        };
+        *t = Inst { op: O_NEG, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+        return true;
+    }
+
+    // Mask bits `t` (instruction `i` of block `k`) of a lane-wise comparison (`mask_cmp`), on a target that
+    // makes no bits of a lane mask in one instruction (`Package.mask_bits`): the comparison's lane mask
+    // (`O_VCMP`), widened until each lane holds its bit (`mask_width`; at most 64 bytes), ANDed with each
+    // lane's bit (a wide constant, which leaves a loop) and summed (`reduce_add`). Whether it did.
+    fn mask_sum(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        if pk.mask_bits || !is_int(t.ty) {
+            return false;
+        }
+        let mc = mask_cmp(b, i);
+        if mc.is_none() {
+            return false;
+        }
+        let (c, p, q) = mc.unwrap();
+        let tp = b.type_of(p);
+        let n = lanes(tp);
+        let mut w = type_bytes(lane_type(tp), 8);
+        // Each step doubles the lanes' width: at most 3 steps.
+        while 8 * w < n && w < 8 {
+            w *= 2;
+        }
+        if 8 * w < n || n * w > 64 || n * w % 8 != 0 || type_bits(t.ty, 8) < n {
+            return false;
+        }
+        let wt = vec_type(int_type(w), n);
+        let mk = self.before(b, k, i, Inst { op: O_VCMP, ty: mask_type(tp), aux: c, a: p, b: q, c: VNONE });
+        let m = self.mask_width(b, k, i, mk, wt);
+        let at = b.words.len() as u32;
+        let per = 8 / w;
+        for qw in 0..n * w / 8 {
+            let mut word: u64 = 0;
+            for l in 0..per {
+                word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
+            }
+            b.words.push(word);
+        }
+        let wc = self.before(b, k, i, Inst { op: O_WCONST, ty: wt, aux: 0, a: at, b: n * w / 8, c: VNONE });
+        let a = self.before(b, k, i, Inst { op: O_AND, ty: wt, aux: 0, a: m, b: wc, c: VNONE });
+        let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
+        let pl = b.pool_list([a]);
+        let sum = Inst { op: O_VOP, ty: int_type(w), aux: code, a: pl, b: 1, c: VNONE };
+        if w == type_bytes(t.ty, 8) {
+            *t = sum;
+        } else {
+            let sv = self.before(b, k, i, sum);
+            *t = Inst {
+                op: ast::pick(w < type_bytes(t.ty, 8), O_ZEXT, O_TRUNC),
+                ty: t.ty,
+                aux: 0,
+                a: sv,
+                b: VNONE,
+                c: VNONE,
+            };
+        }
+        return true;
+    }
+
+    // Integer lane `t` (`O_VEXTRACT`, instruction `i` of block `k`) of a vector a plain load in the block
+    // reads, nothing between writing its bytes (a store into a slot whose address leaks nowhere writes none
+    // of a load not derived from it): a load of the lane's element (one instruction, as the lane's
+    // move to a general register; neighbouring ones pair, `lir::pairs`). Whether it did.
+    const fn lane_load(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        let lv = t.a;
+        if !is_int(t.ty) || (lv & (VPARAM | VFLAG)) != 0 || lv == VNONE {
+            return false;
+        }
+        let l = b.insts[lv as usize];
+        if l.op != O_LOAD || !is_vec(l.ty) || (l.aux & MEM_VOLATILE) != 0 || self.blk_of[lv as usize] != k || self.moved[lv as usize] {
+            return false;
+        }
+        // A store into a slot whose address leaks nowhere holds no byte of a load not derived from it.
+        let ls = if (l.a & (VPARAM | VFLAG)) == 0 && l.a as usize < self.pder.len() {
+            self.pder[l.a as usize]
+        } else {
+            NONE
+        };
+        for q in lv + 1..i {
+            let w = b.insts[q as usize];
+            let ws = if w.op == O_STORE && (w.a & (VPARAM | VFLAG)) == 0 && w.a as usize < self.pder.len() && (w.aux & MEM_VOLATILE) == 0 {
+                self.pder[w.a as usize]
+            } else {
+                NONE
+            };
+            if writes_memory(w) && !(ws != NONE && !self.pleak[ws as usize] && ws != ls) {
+                return false;
+            }
+        }
+        let eb = type_bytes(t.ty, pk.ptr_bytes);
+        let off = (l.c as i32) as i64 + (t.aux as u32 * eb) as i64;
+        if off > 0x7FFFFFFF {
+            return false;
+        }
+        let al = (l.aux & 15).min(eb.trailing_zeros() as u16);
+        *t = Inst { op: O_LOAD, ty: t.ty, aux: al | l.aux & MEM_TBAA, a: l.a, b: VNONE, c: (off as i32) as u32 };
+        return true;
+    }
+
+    // Unchecked gather `t` (instruction `i` of block `k`; `SIMD_GATHER_UNCHECKED` of a slice's address, an
+    // index vector, a constant mask and a fallback vector): each active lane a load of its element, at the
+    // slice's pointer plus its index zero-extended (the caller keeps it in bounds), inserted into the
+    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); every backend
+    // loads a gather's lanes one by one, and the slice's pointer, the index lanes and the addresses are then
+    // the optimizer's values. Whether it did.
+    fn gather_lanes(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        if code != core::OP_SIMD + core::SIMD_GATHER_UNCHECKED as u32 || t.b != 4 || t.c != VNONE || !is_vec(t.ty) {
+            return false;
+        }
+        let s = b.pool[t.a as usize];
+        let ix = b.pool[(t.a + 1) as usize];
+        let mb = int_bits(b, b.pool[(t.a + 2) as usize]);
+        let fb = b.pool[(t.a + 3) as usize];
+        let n = lanes(t.ty);
+        let lt = lane_type(t.ty);
+        let lb = type_bytes(lt, pk.ptr_bytes);
+        let it = lane_type(b.type_of(ix));
+        if mb.is_none() || lanes(b.type_of(ix)) != n || b.type_of(fb) != t.ty || !is_int(it) || lb > PTR_SCALE as u32 {
+            return false;
+        }
+        let m = mb.unwrap() & ~0u64 >> (64 - n) as u64;
+        if m == 0 {
+            return false;
+        }
+        let pi = int_type(pk.ptr_bytes);
+        let ptr = self.before(
+            b,
+            k,
+            i,
+            Inst { op: O_LOAD, ty: T_PTR, aux: pk.ptr_bytes.trailing_zeros() as u16, a: s, b: VNONE, c: 0 },
+        );
+        // The indices first, then the elements: neighbouring index reads pair.
+        let mut ads = Vector::<Value>::with_capacity(n as usize);
+        for q in 0..n {
+            if (m >> q as u64 & 1) == 0 {
+                ads.push(VNONE);
+                continue;
+            }
+            let e = self.before(b, k, i, Inst { op: O_VEXTRACT, ty: it, aux: q as u16, a: ix, b: VNONE, c: VNONE });
+            let z = if type_bytes(it, pk.ptr_bytes) < pk.ptr_bytes {
+                self.before(b, k, i, Inst { op: O_ZEXT, ty: pi, aux: 0, a: e, b: VNONE, c: VNONE })
+            } else {
+                e
+            };
+            ads.push(z);
+        }
+        if !pk.lane_insert {
+            *t = self.gather_zips(pk, b, k, i, *t, ptr, &ads, m, fb);
+            return true;
+        }
+        let mut acc = fb;
+        let last = (63 - m.leading_zeros()) as u32;
+        for q in 0..n {
+            if (m >> q as u64 & 1) == 0 {
+                continue;
+            }
+            let ad = self.before(
+                b,
+                k,
+                i,
+                Inst { op: O_PTRADD, ty: T_PTR, aux: lb as u16 | PTR_INBOUNDS, a: ptr, b: ads[q as usize], c: 0 },
+            );
+            let x = self.before(
+                b,
+                k,
+                i,
+                Inst { op: O_LOAD, ty: lt, aux: lb.trailing_zeros() as u16, a: ad, b: VNONE, c: 0 },
+            );
+            // Every lane loaded: the first one's splat replaces the fallback.
+            let ins = if acc == fb && m == ~0u64 >> (64 - n) as u64 {
+                Inst { op: O_SPLAT, ty: t.ty, aux: 0, a: x, b: VNONE, c: VNONE }
+            } else {
+                Inst { op: O_VINSERT, ty: t.ty, aux: q as u16, a: acc, b: x, c: VNONE }
+            };
+            if q == last {
+                *t = ins;
+            } else {
+                acc = self.before(b, k, i, ins);
+            }
+        }
+        return true;
+    }
+
+    // Gather `t`'s vector (instruction `i` of block `k`) from its lanes, where the target inserts no lane in a
+    // register (`Package.lane_insert`): per chunk of at most 16 bytes the splat of each lane's element (at
+    // `ptr` plus index `ads[q]` scaled; an inactive lane, not in `m`, the fallback `fb`'s), interleaved in
+    // pairs at the lanes' width, then at twice it, until one vector holds the chunk's lanes in order (x86-64
+    // `punpckl*`); the chunks joined (`concat`). The instruction that gives the vector, of `t`'s type.
+    fn gather_zips(
+        self: &mut Self,
+        pk: &Package,
+        b: &mut Body,
+        k: u32,
+        i: u32,
+        t: Inst,
+        ptr: Value,
+        ads: &Vector<Value>,
+        m: u64,
+        fb: Value,
+    ) Inst {
+        let lt = lane_type(t.ty);
+        let eb = type_bytes(lt, pk.ptr_bytes);
+        let nb = type_bytes(t.ty, pk.ptr_bytes);
+        let cb = nb.min(16);
+        let cl = cb / eb;
+        let ct = vec_type(lt, cl);
+        let mut chunks = Vector::<Value>::new();
+        let mut level = Vector::<Value>::new();
+        let mut next = Vector::<Value>::new();
+        // Each chunk's lanes, then at most 4 levels of interleaves (2 to 16 lanes).
+        for c in 0..nb / cb {
+            level.truncate(0);
+            for j in 0..cl {
+                let q = c * cl + j;
+                let x = if (m >> q as u64 & 1) != 0 {
+                    let ad = self.before(
+                        b,
+                        k,
+                        i,
+                        Inst {
+                            op: O_PTRADD,
+                            ty: T_PTR,
+                            aux: eb as u16 | PTR_INBOUNDS,
+                            a: ptr,
+                            b: ads[q as usize],
+                            c: 0,
+                        },
+                    );
+                    self.before(
+                        b,
+                        k,
+                        i,
+                        Inst { op: O_LOAD, ty: lt, aux: eb.trailing_zeros() as u16, a: ad, b: VNONE, c: 0 },
+                    )
+                } else {
+                    self.before(b, k, i, Inst { op: O_VEXTRACT, ty: lt, aux: q as u16, a: fb, b: VNONE, c: VNONE })
+                };
+                level.push(self.before(b, k, i, Inst { op: O_SPLAT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }));
+            }
+            let mut w = eb;
+            while level.len() > 1 {
+                next.truncate(0);
+                let wt = vec_type(int_type(w), cb / w);
+                for p in 0..level.len() / 2 {
+                    let mut ab = [level[2 * p], level[2 * p + 1]];
+                    for h in 0..2usize {
+                        if b.type_of(unsafe ab[h]) != wt {
+                            unsafe ab[h] = self.before(
+                                b,
+                                k,
+                                i,
+                                Inst { op: O_BITCAST, ty: wt, aux: 0, a: ab[h], b: VNONE, c: VNONE },
+                            );
+                        }
+                    }
+                    next.push(self.before(b, k, i, Inst { op: O_VZIPLO, ty: wt, aux: 0, a: ab[0], b: ab[1], c: VNONE }));
+                }
+                level.truncate(0);
+                level.extend_copy(&next);
+                w *= 2;
+            }
+            chunks.push(level[0]);
+        }
+        let cat = (core::OP_SIMD + core::SIMD_CONCAT as u32) as u16;
+        // Each round halves the chunks: at most 2 rounds (64 bytes).
+        while chunks.len() > 1 {
+            next.truncate(0);
+            for p in 0..chunks.len() / 2 {
+                let mut ab = [chunks[2 * p], chunks[2 * p + 1]];
+                let ht = vec_type(lt, lanes(t.ty) * type_bytes(b.type_of(ab[0]), pk.ptr_bytes) / nb);
+                for h in 0..2usize {
+                    if b.type_of(unsafe ab[h]) != ht {
+                        unsafe ab[h] = self.before(
+                            b,
+                            k,
+                            i,
+                            Inst { op: O_BITCAST, ty: ht, aux: 0, a: ab[h], b: VNONE, c: VNONE },
+                        );
+                    }
+                }
+                let wt = vec_type(lt, 2 * lanes(ht));
+                let at = b.pool_list([ab[0], ab[1]]);
+                next.push(self.before(b, k, i, Inst { op: O_VOP, ty: wt, aux: cat, a: at, b: 2, c: VNONE }));
+            }
+            chunks.truncate(0);
+            chunks.extend_copy(&next);
+        }
+        return Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: chunks[0], b: VNONE, c: VNONE };
+    }
+
+    // The lane mask (each lane all ones or 0) of `n` lanes (0: any) whose bits value `v` of `b` is, for
+    // instruction `i` of block `k`: a new comparison (`O_VCMP`) for a `vop` comparison (`mask_cmp`), or the
+    // lane mask a sum of each lane's bit reads (`bits_mask`), each zero-extended or truncated to no fewer
+    // bits than lanes, or not. VNONE when neither.
+    fn lane_mask_of(self: &mut Self, b: &mut Body, k: u32, i: u32, v: Value, n: u32) Value {
+        let mut x = v;
+        let mut kept: u32 = 64;
+        // Each step takes one extension or truncation: at most 6 (1 to 8 bytes and back).
+        for _ in 0..6 {
+            if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
+                if b.insts[x as usize].op == O_TRUNC {
+                    kept = kept.min(type_bits(b.insts[x as usize].ty, 8));
+                }
+                x = b.insts[x as usize].a;
+            }
+        }
+        let mc = mask_cmp(b, x);
+        if mc.is_some() {
+            let (c, p, q) = mc.unwrap();
+            let tp = b.type_of(p);
+            if n != 0 && lanes(tp) != n || kept < lanes(tp) {
+                return VNONE;
+            }
+            return self.before(b, k, i, Inst { op: O_VCMP, ty: mask_type(tp), aux: c, a: p, b: q, c: VNONE });
+        }
+        let m = bits_mask(b, x);
+        return ast::pick(m != VNONE && (n == 0 || lanes(b.type_of(m)) == n) && kept >= lanes(b.type_of(m)), m, VNONE);
+    }
+
+    // Lane mask `mk` (each lane all ones or 0; instruction `i` of block `k` reads it) as a lane mask of type
+    // `to`, of as many lanes: truncated or sign-extended one width at a time, which keeps each lane all ones
+    // or 0.
+    fn mask_width(self: &mut Self, b: &mut Body, k: u32, i: u32, mk: Value, to: u8) Value {
+        let mut v = mk;
+        let tw = type_bytes(lane_type(to), 8);
+        // Each step halves or doubles the lanes' width: at most 3 steps (1 to 8 bytes).
+        for _ in 0..3 {
+            let ft = b.type_of(v);
+            let fw = type_bytes(lane_type(ft), 8);
+            if fw == tw {
+                return v;
+            }
+            let nw = ast::pick(fw > tw, fw / 2, fw * 2);
+            let nt = vec_type(int_type(nw), lanes(ft));
+            v = self.before(
+                b,
+                k,
+                i,
+                Inst { op: ast::pick(fw > tw, O_TRUNC, O_SEXT), ty: nt, aux: 0, a: v, b: VNONE, c: VNONE },
+            );
+        }
+        return v;
     }
 
     // Comparison `i` (block `k`) of integer lanes of vectors of at most 32 bytes as unsigned, on a target
@@ -14593,7 +15018,8 @@ extend Opt {
     // The private slots: those whose address and the addresses derived from it (`ptradd`) are only the
     // addresses of loads, stores, copies and fills (`pder`, `pesc`). No pointer but these reaches their
     // memory, so no other access touches it. A derived address another way used (stored, passed, joined,
-    // compared) escapes; one that is not a by-value aggregate argument the backend copies leaks (`pleak`).
+    // compared) escapes; one that is not a by-value aggregate argument the backend copies or a vector
+    // operation's operand leaks (`pleak`).
     fn privates(self: &mut Self, pk: &Package, b: &Body) {
         let ni = b.insts.len();
         fill(&mut self.pder, ni, NONE);
@@ -14625,7 +15051,8 @@ extend Opt {
                 let addr = t.op == O_LOAD && t.a == v && u == 0 || t.op == O_STORE && t.a == v && t.b != v || t.op == O_MEMCPY && (t.a == v || t.b == v) && t.c != v || t.op == O_MEMSET && t.a == v && t.b != v && t.c != v || t.op == O_PTRADD && t.a == v && t.b != v;
                 if !addr || (t.op == O_LOAD || t.op == O_STORE) && (t.aux & MEM_VOLATILE) != 0 {
                     self.pesc[self.pder[v as usize] as usize] = true;
-                    if !arg_copied(pk, b, t, v) {
+                    // A vector operation accesses memory through its operands and stores none of them.
+                    if !arg_copied(pk, b, t, v) && t.op != O_VOP {
                         self.pleak[self.pder[v as usize] as usize] = true;
                     }
                 }
@@ -16029,6 +16456,16 @@ extend Run {
         for s in 0..pk.syms.len() {
             let d = pk.syms[s].def;
             pk.syms.index_mut(s).span = NONE;
+            if pk.syms[s].kind == SK_FUNC && d == NONE && pk.isa.len() != 0 && intrin::pure(
+                pk.isa,
+                pk.spell(pk.syms[s].name),
+            ) {
+                // An intrinsic that computes from its arguments alone.
+                let y = pk.syms.index_mut(s);
+                y.fx = 0;
+                y.esc = 0;
+                y.wargs = 0;
+            }
             if pk.syms[s].kind == SK_FUNC && d != NONE {
                 pk.syms.index_mut(s).fx = fx[d as usize];
                 pk.syms.index_mut(s).esc = esc[d as usize];
@@ -16371,6 +16808,7 @@ extend Run {
             } else {
                 p.vector.min(32)
             },
+            p.vec_absd,
         );
         if minmax {
             sc.o.forget();
@@ -18309,9 +18747,73 @@ const fn call_target(p: &Package, b: &Body, t: Inst) u32 {
     return ast::pick(sy.kind == SK_FUNC && sy.def != NONE, sy.def, NONE);
 }
 
-// Whether `t` has no effect but its value: dropped when nothing uses it.
+// Whether `t` has no effect but its value: dropped when nothing uses it. A lane-wise comparison of vectors
+// into mask bits and an integer lane sum (which wraps) trap in no lane.
 const fn droppable(t: Inst) bool {
-    return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0;
+    let code = (t.aux & VOP_CODE) as u32;
+    let cmp = code >= core::OP_SIMD + core::SIMD_CMP_EQ as u32 && code <= core::OP_SIMD + core::SIMD_CMP_GE as u32;
+    let sum = code == core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 && is_int(t.ty);
+    return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_VOP && (cmp || sum);
+}
+
+// The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
+// mask a `reduce_add` of its AND with the lanes' bits reads. VNONE when it is none.
+const fn bits_mask(b: &Body, v: Value) Value {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return VNONE;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_VOP || t.b != 1 || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
+        return VNONE;
+    }
+    let a = b.pool[t.a as usize];
+    if (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_AND {
+        return VNONE;
+    }
+    let at = b.insts[a as usize];
+    let wt = at.ty;
+    let n = lanes(wt);
+    let w = type_bytes(lane_type(wt), 8);
+    let mut words: [u64; 8] = [0; 8];
+    if n * w % 8 != 0 || !vec_words(b, at.b, wt, &mut words) || !lane_mask(b, at.a, 4) {
+        return VNONE;
+    }
+    let per = 8 / w;
+    for qw in 0..n * w / 8 {
+        let mut word: u64 = 0;
+        for l in 0..per {
+            word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
+        }
+        if words[qw as usize] != word {
+            return VNONE;
+        }
+    }
+    return at.a;
+}
+
+// The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
+// of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
+const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
+    if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
+        return None;
+    }
+    let t = b.insts[m as usize];
+    let code = (t.aux & VOP_CODE) as u32;
+    if t.op != O_VOP || t.b != 2 || t.c != VNONE || code < core::OP_SIMD + core::SIMD_CMP_EQ as u32 || code > core::OP_SIMD + core::SIMD_CMP_GE as u32 {
+        return None;
+    }
+    let p = b.pool[t.a as usize];
+    let q = b.pool[(t.a + 1) as usize];
+    let tp = b.type_of(p);
+    if !is_vec(tp) || b.type_of(q) != tp || is_vec(t.ty) {
+        return None;
+    }
+    let lt = lane_type(tp);
+    let c = simd_cond((code - core::OP_SIMD) as u8, (t.aux & VOP_SIGNED) != 0, is_float(lt));
+    if !vcmp_ok(c, lt) {
+        return None;
+    }
+    return Some((c, p, q));
 }
 
 // ---- Folding ------------------------------------------------------------------------------------------
@@ -18817,16 +19319,65 @@ const fn float_const(b: &Body, v: Value) Option<u64> {
 // an address with its constant index and its base address's offset in its own.
 // Each vector select of integer lanes of at most 4 bytes, of `x` or `y` by their comparison `x REL y` (an
 // order, signed or not) of at most `max` bytes: the lanes' maximum or minimum (`vop.max`, `vop.min`; arm64
-// `smax`, x86-64 `pmaxsw`), as LLVM InstCombine's select of a compare. Outside the walk, which reads a
-// vector operation's operands in the pool only where it numbers them. Whether any changed.
-fn vec_minmaxes(b: &mut Body, max: u32) bool {
+// `smax`, x86-64 `pmaxsw`), as LLVM InstCombine's select of a compare; of `x - y` or `y - x` by it, of lanes
+// of a size in `absd` (`Package.vec_absd`): their absolute difference (`vop.abs_diff`; arm64 `uabd`).
+// Outside the walk, which reads a vector operation's operands in the pool only where it numbers them.
+// Whether any changed.
+fn vec_minmaxes(b: &mut Body, max: u32, absd: u8) bool {
     let mut any = false;
     for i in 0..b.insts.len() {
-        if b.insts[i].op == O_VSEL && type_bytes(b.insts[i].ty, 8) <= max && vec_minmax(b, i as u32) {
+        if b.insts[i].op == O_VSEL && type_bytes(b.insts[i].ty, 8) <= max && (vec_minmax(b, i as u32) || vec_absdiff(
+            b,
+            i as u32,
+            absd,
+        )) {
             any = true;
         }
     }
     return any;
+}
+
+// `vec_minmaxes`' absolute difference of vector select `i`: whether it changed.
+fn vec_absdiff(b: &mut Body, i: u32, absd: u8) bool {
+    let t = b.insts[i as usize];
+    let lt = lane_type(t.ty);
+    if !is_int(lt) || (absd & type_bytes(lt, 8) as u8) == 0 || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
+        return false;
+    }
+    let (m, d, e) = (unflip(b, b.insts[t.a as usize]), t.b, t.c);
+    if m.op != O_VCMP || (d & (VPARAM | VFLAG)) != 0 || (e & (VPARAM | VFLAG)) != 0 || d == VNONE || e == VNONE {
+        return false;
+    }
+    let (sd, se) = (b.insts[d as usize], b.insts[e as usize]);
+    let gt = m.aux == C_SGT || m.aux == C_SGE || m.aux == C_UGT || m.aux == C_UGE;
+    let lt_ = m.aux == C_SLT || m.aux == C_SLE || m.aux == C_ULT || m.aux == C_ULE;
+    // `x > y ? x - y : y - x`, or `x < y ? y - x : x - y`.
+    let (hi, lo) = ast::pick(gt, (m.a, m.b), (m.b, m.a));
+    if !gt && !lt_ || sd.op != O_SUB || se.op != O_SUB || sd.ty != t.ty || se.ty != t.ty || sd.a != hi || sd.b != lo || se.a != lo || se.b != hi {
+        return false;
+    }
+    let signed = m.aux == C_SGT || m.aux == C_SGE || m.aux == C_SLT || m.aux == C_SLE;
+    let code = (core::OP_SIMD + core::SIMD_ABS_DIFF as u32) as u16 | ast::pick(signed, VOP_SIGNED, 0);
+    let ops = [hi, lo];
+    let at = b.pool_list(ops[0..2]);
+    b.insts[i as usize] = Inst { op: O_VOP, ty: t.ty, aux: code, a: at, b: 2, c: VNONE };
+    return true;
+}
+
+// Vector comparison `m` as the unsigned comparison it computes when it compares signed its operands with
+// their sign bits flipped (`signed_vcmp`, a target without unsigned vector comparisons): of the operands
+// themselves; else `m`.
+const fn unflip(b: &Body, m: Inst) Inst {
+    if m.op != O_VCMP || m.aux < C_SLT || m.aux > C_SGE || !is_op(b, m.a, O_XOR) || !is_op(b, m.b, O_XOR) {
+        return m;
+    }
+    let (x, y) = (b.insts[m.a as usize], b.insts[m.b as usize]);
+    let vt = b.type_of(m.a);
+    let sign = 1u64 << (8 * type_bytes(lane_type(vt), 8) - 1) as u64;
+    if x.b != y.b || !lanes_are(b, x.b, vt, sign) {
+        return m;
+    }
+    return Inst { op: O_VCMP, ty: m.ty, aux: m.aux - C_SLT + C_ULT, a: x.a, b: y.a, c: VNONE };
 }
 
 // `vec_minmaxes` of vector select `i`: whether it changed.
@@ -18836,7 +19387,7 @@ fn vec_minmax(b: &mut Body, i: u32) bool {
     if !is_int(lt) || type_bytes(lt, 8) > 4 || (t.a & (VPARAM | VFLAG)) != 0 || t.a == VNONE {
         return false;
     }
-    let m = b.insts[t.a as usize];
+    let m = unflip(b, b.insts[t.a as usize]);
     let same = m.a == t.b && m.b == t.c;
     if m.op != O_VCMP || !same && !(m.a == t.c && m.b == t.b) || m.a == m.b {
         return false;
@@ -19402,6 +19953,42 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             );
         }
         return VNONE;
+    }
+    // A scalar constant's bits read as another type of its width, a float constant negated (its sign bit
+    // flipped): constants.
+    if (t.op == O_BITCAST || t.op == O_FNEG) && !is_vec(t.ty) && t.ty != T_I128 && t.ty != T_PTR && (t.a & (VPARAM | VFLAG)) == 0 {
+        let x = b.insts[t.a as usize];
+        if (x.op == O_FCONST || x.op == O_ICONST && t.op == O_BITCAST) && type_bits(x.ty, 8) == type_bits(t.ty, 8) {
+            let w = type_bits(t.ty, 8);
+            let flip = ast::pick(t.op == O_FNEG, 1u64 << (w - 1) as u64, 0u64);
+            let r = trunc_bits(x.b as u64 << 32 | x.a as u64, w) ^ flip;
+            b.insts[i as usize] = Inst {
+                op: ast::pick(is_float(t.ty), O_FCONST, O_ICONST),
+                ty: t.ty,
+                aux: 0,
+                a: r as u32,
+                b: (r >> 32) as u32,
+                c: VNONE,
+            };
+            return VNONE;
+        }
+    }
+    // `copysign(k, x) < 0.0` (`<=`), `> 0.0` (`>=`), `k` a nonzero number: whether `x`'s sign bit is set (clear),
+    // as `(bits(x) & sign) >u bits(k)` (`<u`): the sign bit alone is above the magnitude (`sign_test`).
+    if t.op == O_FCMP && is_op(b, t.a, O_BITCAST) {
+        let (x, neg) = sign_test(b, i);
+        if x != VNONE {
+            let (ya, k) = sign_or(b, b.insts[t.a as usize].a, type_bits(b.type_of(t.a), 8));
+            b.insts[i as usize] = Inst {
+                op: O_ICMP,
+                ty: t.ty,
+                aux: ast::pick(neg, C_UGT, C_ULT),
+                a: ya,
+                b: k,
+                c: VNONE,
+            };
+            return VNONE;
+        }
     }
     if t.op >= O_FADD && t.op <= O_FDIV {
         let x = float_const(b, t.a);

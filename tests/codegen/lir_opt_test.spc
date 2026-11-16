@@ -209,6 +209,57 @@ fn main() i32 {
 }
 )";
 
+// `copysign(1.0, x) < 0.0` (`f32::is_sign_negative` as `copysign_bits` expands it) is the test of `x`'s sign
+// bit, `> 0.0` its negation, on any `x`: zeros, NaNs and infinities of either sign. A constant's bits read
+// as a float, and the float negated, are constants.
+@test
+fn a_copysign_test_of_zero_is_a_sign_bit_test() {
+    let src = M"(lir ptr 8
+sym @neg fn global noinline
+sym @pos fn global noinline
+fn @neg
+  sig (f32) -> i8
+b0(v0: f32):
+  v1 = fconst.f32 0x3f800000
+  v2 = bitcast.i32 v1
+  v3 = iconst.i32 2147483647
+  v4 = and.i32 v2, v3
+  v5 = bitcast.i32 v0
+  v6 = iconst.i32 -2147483648
+  v7 = and.i32 v5, v6
+  v8 = or.i32 v4, v7
+  v9 = bitcast.f32 v8
+  v10 = fconst.f32 0x0
+  v11 = fcmp.olt v9, v10
+  ret v11
+fn @pos
+  sig (f32) -> i8
+b0(v0: f32):
+  v1 = iconst.i32 1073741824
+  v2 = bitcast.i32 v0
+  v3 = iconst.i32 -2147483648
+  v4 = and.i32 v2, v3
+  v5 = or.i32 v1, v4
+  v6 = bitcast.f32 v5
+  v7 = fconst.f32 0x80000000
+  v8 = fneg.f32 v7
+  v9 = fcmp.ogt v6, v8
+  ret v9
+)";
+    let (b, a) = optimized(src);
+    for f in ["neg", "pos"] {
+        let t = text_of(&a, f);
+        assert(!t.contains("fcmp") && !t.contains("bitcast.f32") && !t.contains("fneg"), t.as_str());
+    }
+    let xs: [u64; 8] = [0x80000000, 0, 0x7FC00000, 0xFFC00000, 0x7F800000, 0xFF800000, 0xBF800000, 0x00000001];
+    for k in 0..8usize {
+        let args: []u64 = [unsafe xs[k]];
+        let neg = unsafe xs[k] >> 31;
+        same_result(&b, &a, "neg", args, neg);
+        same_result(&b, &a, "pos", args, 1 - neg);
+    }
+}
+
 // Assert that `src` gives the same output built for debug and for release, and return the release
 // build's `SC_LIR_PRINT=name` output: one release build serves both. The vector lane builds every
 // differential program for wasm32, so there the text comes from a host build of its own.

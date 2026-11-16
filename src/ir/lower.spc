@@ -6129,6 +6129,10 @@ extend Lowerer {
         }
         // A `const fn` call with constant arguments runs at compile time: its value replaces it.
         if target.node != NODE_NONE {
+            let lp = self.literal_ptr(id, ty);
+            if lp != ir::IR_NONE {
+                return lp;
+            }
             let fo = self.fold_call(id, target, ty, sp);
             if fo != ir::IR_NONE {
                 return fo;
@@ -8670,6 +8674,36 @@ extend Lowerer {
         }
         self.tp(ir::TP_CALL, 0, id);
         return op;
+    }
+
+    // `"text".ptr()` (call `id` of result type `ty`): the literal's bytes as a constant of the pointer type,
+    // which C spells as the literal itself (a format string the C compiler checks) and the native lowering
+    // as its read-only data's address. IR_NONE for another call.
+    fn literal_ptr(self: &mut Self, id: NodeId, ty: TypeId) ir::OperandId {
+        let d = self.f.node(id).as_data.call;
+        let ck = self.f.node(d.callee).kind;
+        if ck != NodeKind::NODE_MEMBER || d.args.len != 0 || self.f.ty(ty).kind != TypeKind::TYPE_POINTER {
+            return ir::IR_NONE;
+        }
+        let m = unsafe self.f.node(d.callee).as_data.member;
+        if m.path || self.f.node(m.object).kind != NodeKind::NODE_LITERAL {
+            return ir::IR_NONE;
+        }
+        let obj = m.object;
+        let lit = unsafe self.f.node(obj).as_data.literal;
+        let t = lit.token_type;
+        let oty = self.nty(obj);
+        let ot = *self.f.ty(oty);
+        let vs = self.view_decls().v_str;
+        let is_str = ot.kind == TypeKind::TYPE_STRUCT && vd_is(vs, ot.as_data.decl, ot.module);
+        let ms = self.f.node(m.member).span;
+        if !is_str || lit.seg || self.f.wide_lit(obj) != null || self.src.slice(ms.start as usize, ms.end as usize) != "ptr" || t != tt::TokenType::StringLiteral && t != tt::TokenType::MatchertextLiteral && t != tt::TokenType::RawStringLiteral {
+            return ir::IR_NONE;
+        }
+        // The replay still sees the call boundary; the receiver is borrowed.
+        self.tp(ir::TP_CALL_MARK, 0, id);
+        self.tp(ir::TP_CALL, 0, id);
+        return self.kop(ir::CK_STR, ty, t as i64, lit.raw);
     }
 
     // Whether a value of type `ty` (nested `depth` aggregates deep) folds to constants: an integer,

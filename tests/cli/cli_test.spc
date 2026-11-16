@@ -7109,6 +7109,35 @@ fn main() i32 {
     assert(c.ok() && c.out_shows("2 7 4000000000 5 6 1"), "the C program reads every constant back");
 }
 
+// A string literal's pointer (`"text".ptr()`) is the literal itself: C passes `printf` its format as a
+// literal, which `-Wformat-security` accepts, and compile-time code reads its bytes.
+@test
+fn a_literals_pointer_is_the_literal() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/main.spc",
+        M"(import stdio;
+const FIRST: u8 = unsafe *"xyz".ptr();
+fn main() i32 {
+    let _ = unsafe stdio::printf("no format arguments\n".ptr() as *const char);
+    let _ = unsafe stdio::printf("%d\n".ptr() as *const char, FIRST as i32);
+    return 0;
+}
+)",
+    );
+    let root = p.dir();
+    let r = cli::superc_in(root, "run");
+    assert(r.ok() && r.out_shows("no format arguments") && r.out_shows("120"), "the program runs");
+    if !cli::has_cc() {
+        return; // the C compiler builds the C tree
+    }
+    assert(cli::superc_in(root, "build --emit-c").ok(), "the C tree");
+    assert(p.cc_build_plain("-Wformat -Wformat-security -Werror").ok(), "the C tree compiles under -Werror");
+    let c = p.run_bin_env("");
+    assert(c.ok() && c.out_shows("no format arguments") && c.out_shows("120"), "the C program prints both lines");
+}
+
 // An array length an instance folds out of range is an error at the instance: the length as written, the
 // bindings it folded with, and the site that demanded the instance. A concrete type that holds such a
 // length is reported where it is used. No C is emitted for it and no internal refusal follows. `f` takes

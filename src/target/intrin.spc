@@ -212,21 +212,28 @@ pub(package) const fn vnames(a64: bool, text: str, r: u32) bool {
     return false;
 }
 
-/// Whether arm64 template `text` names vector register `r` in a register list (`{ v0.16b, v1.16b }`),
-/// whose registers must be consecutive: the generators keep it.
+/// Whether arm64 template `text` names vector register `r` in a register list of two or more
+/// (`{ v0.16b, v1.16b }`), whose registers must be consecutive: the generators keep it.
 pub(package) const fn vlisted(text: str, r: u32) bool {
     let mut depth: i32 = 0;
+    let mut found = false;
+    let mut commas = 0u32;
     for i in 0..text.len() {
         let c = text.byte_at(i);
         if c == b'{' {
             depth += 1;
+            found = false;
+            commas = 0;
         } else if c == b'}' {
             depth -= 1;
-        } else if depth > 0 {
-            let (k, _l) = vreg_at(true, text, i);
-            if k == r {
+            if found && commas != 0 {
                 return true;
             }
+        } else if depth > 0 && c == b',' {
+            commas += 1;
+        } else if depth > 0 {
+            let (k, _l) = vreg_at(true, text, i);
+            found = found || k == r;
         }
     }
     return false;
@@ -297,20 +304,32 @@ pub(package) const fn vwrites(a64: bool, text: str, r: u32) bool {
 }
 
 /// Template `text` with each spelling of vector register `from[j]` (`vreg_at`) spelled as register
-/// `to[j]`, onto `out`.
-pub(package) fn vrename(a64: bool, text: str, from: []u32, to: []u32, out: &mut String) {
+/// `to[j]`, onto `out`; outside the destination operand of a one-instruction template (`vsplit_dest`),
+/// register `src.0` as `src.1` instead (99: none).
+pub(package) fn vrename(a64: bool, text: str, from: []u32, to: []u32, src: (u32, u32), out: &mut String) {
+    let (ds, de) = if src.0 == 99 {
+        (0usize, 0usize)
+    } else {
+        dest_span(a64, text)
+    };
     let mut i: usize = 0;
     while i < text.len() {
         let (k, l) = vreg_at(a64, text, i);
         let mut q = from.len();
-        if l != 0 {
+        let mut r: u32 = 99;
+        if l != 0 && k == src.0 && (i < ds || i >= de) {
+            r = src.1;
+        } else if l != 0 {
             for j in 0..from.len() {
                 if from[j] == k {
                     q = j;
                 }
             }
+            if q != from.len() {
+                r = to[q];
+            }
         }
-        if q == from.len() {
+        if r == 99 {
             out.push_byte(text.byte_at(i));
             i += 1;
             continue;
@@ -318,9 +337,189 @@ pub(package) fn vrename(a64: bool, text: str, from: []u32, to: []u32, out: &mut 
         // The spelling's letters, then the new number.
         let letters = ast::pick(a64, 1usize, 4usize);
         out.push_str(text.slice(i, i + letters));
-        out.push_u64(to[q]);
+        out.push_u64(r);
         i += l;
     }
+}
+
+// The bytes of the destination operand of one-instruction template `text`: arm64's first operand (to its
+// first comma outside brackets), x86-64's last (from its last such comma).
+const fn dest_span(a64: bool, text: str) (usize, usize) {
+    let mut depth: i32 = 0;
+    let mut first = text.len();
+    let mut last = text.len();
+    for j in 0..text.len() {
+        let c = text.byte_at(j);
+        if c == b'{' || c == b'[' || c == b'(' {
+            depth += 1;
+        } else if c == b'}' || c == b']' || c == b')' {
+            depth -= 1;
+        } else if c == b',' && depth == 0 {
+            if first == text.len() {
+                first = j;
+            }
+            last = j;
+        }
+    }
+    return ast::pick(a64, (0usize, first), (last, text.len()));
+}
+
+// The arm64 vector instructions that read their destination register: accumulations, bit selects,
+// inserts, table extensions, narrowings into the high half, the cryptographic rounds.
+const READS_DEST: [str; 63] = [
+    "bsl",
+    "bit",
+    "bif",
+    "mla",
+    "mls",
+    "fmla",
+    "fmls",
+    "fmlal",
+    "fmlal2",
+    "fmlsl",
+    "fmlsl2",
+    "sdot",
+    "udot",
+    "usdot",
+    "sudot",
+    "bfdot",
+    "bfmmla",
+    "smmla",
+    "ummla",
+    "usmmla",
+    "saba",
+    "uaba",
+    "sabal",
+    "sabal2",
+    "uabal",
+    "uabal2",
+    "sadalp",
+    "uadalp",
+    "smlal",
+    "smlal2",
+    "umlal",
+    "umlal2",
+    "smlsl",
+    "smlsl2",
+    "umlsl",
+    "umlsl2",
+    "sqdmlal",
+    "sqdmlal2",
+    "sqdmlsl",
+    "sqdmlsl2",
+    "sqrdmlah",
+    "sqrdmlsh",
+    "ssra",
+    "usra",
+    "srsra",
+    "ursra",
+    "sri",
+    "sli",
+    "tbx",
+    "ins",
+    "fcmla",
+    "aese",
+    "aesd",
+    "sha1c",
+    "sha1m",
+    "sha1p",
+    "sha1su0",
+    "sha1su1",
+    "sha256h",
+    "sha256h2",
+    "sha256su0",
+    "sha256su1",
+    "sm4e",
+];
+
+// The x86-64 three-operand (VEX) vector instructions that read their destination register: the fused
+// multiply-adds, the dot products, the two-table permutations, the gathers and scatters, the funnel shifts
+// by vector amounts.
+const READS_DEST_X64: [str; 13] = [
+    "vfmadd",
+    "vfmsub",
+    "vfnmadd",
+    "vfnmsub",
+    "vpdp",
+    "vpermi2",
+    "vpermt2",
+    "vpgather",
+    "vgather",
+    "vpscatter",
+    "vscatter",
+    "vpshldv",
+    "vpshrdv",
+];
+
+/// Whether template `text` is one instruction that writes vector register `r` whole as its destination
+/// (arm64's first operand: no lane, no list; x86-64's last, of a three-operand `v` form without masking),
+/// does not read its destination (`READS_DEST`, an arm64 narrowing into the high half: a mnemonic of `hn2`
+/// or `n2`; `READS_DEST_X64`), and names `r` again as a source: its sources may then read `r`'s value from
+/// another register, its destination left as it is (`vrename`'s `src`).
+pub(package) const fn vsplit_dest(a64: bool, text: str, r: u32) bool {
+    for j in 0..text.len() {
+        let c = text.byte_at(j);
+        if c == b'\n' || c == b';' || !a64 && c == b'{' {
+            return false;
+        }
+    }
+    let mut m: usize = 0;
+    while m < text.len() && text.byte_at(m) == b' ' {
+        m += 1;
+    }
+    let ms = m;
+    while m < text.len() && text.byte_at(m) != b' ' {
+        m += 1;
+    }
+    let mn = text.slice(ms, m);
+    if a64 {
+        if mn.ends_with("n2") || mn.starts_with("ld") {
+            return false;
+        }
+        for k in 0..63usize {
+            if mn == unsafe READS_DEST[k] {
+                return false;
+            }
+        }
+    } else {
+        if !mn.starts_with("v") {
+            return false;
+        }
+        for k in 0..13usize {
+            if mn.starts_with(unsafe READS_DEST_X64[k]) {
+                return false;
+            }
+        }
+    }
+    let (ds, de) = dest_span(a64, text);
+    if a64 && de == text.len() || !a64 && ds == text.len() {
+        return false;
+    }
+    // The destination: register `r` alone.
+    let mut d0 = ast::pick(a64, m, ds + 1);
+    while d0 < de && text.byte_at(d0) == b' ' {
+        d0 += 1;
+    }
+    let (k, l) = vreg_at(a64, text, d0);
+    if l == 0 || k != r {
+        return false;
+    }
+    for j in d0..de {
+        let c = text.byte_at(j);
+        if c == b'[' || c == b'{' || c == b'(' {
+            return false;
+        }
+    }
+    for j in m..text.len() {
+        if j >= ds && j < de {
+            continue;
+        }
+        let (k2, l2) = vreg_at(a64, text, j);
+        if l2 != 0 && k2 == r {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Whether byte `c` continues a word: a letter, a digit or `_`.
@@ -354,6 +553,142 @@ pub(package) fn lane_form(isa: str, name: str) u32 {
         }
     }
     return 0;
+}
+
+// The mnemonics, or for x86-64 their prefixes, of instructions that access no memory operand but change or
+// read machine state beyond their operands: time stamps, random numbers, fences, system registers, hints,
+// traps, the stack, the implicit memory of `maskmovdqu`, the x87 and MMX state, cache maintenance.
+const IMPURE_X64: [str; 32] = [
+    "rdtsc",
+    "rdrand",
+    "rdseed",
+    "rdpid",
+    "rdpmc",
+    "rdfsbase",
+    "rdgsbase",
+    "wrfsbase",
+    "wrgsbase",
+    "cpuid",
+    "xgetbv",
+    "xsetbv",
+    "lfence",
+    "mfence",
+    "sfence",
+    "pause",
+    "serialize",
+    "xbegin",
+    "xend",
+    "xabort",
+    "xtest",
+    "maskmov",
+    "push",
+    "pop",
+    "ud2",
+    "vzero",
+    "emms",
+    "femms",
+    "monitor",
+    "mwait",
+    "umonitor",
+    "tpause",
+];
+const IMPURE_A64: [str; 21] = [
+    "mrs",
+    "msr",
+    "rndr",
+    "rndrrs",
+    "dmb",
+    "dsb",
+    "isb",
+    "yield",
+    "wfe",
+    "wfi",
+    "sev",
+    "sevl",
+    "hint",
+    "svc",
+    "brk",
+    "clrex",
+    "dc",
+    "ic",
+    "tlbi",
+    "sys",
+    "udf",
+];
+
+/// Whether intrinsic `name` of `isa` computes its result from its arguments alone: its instructions have no
+/// memory operand (x86-64's `(`, arm64's `[`, no wasm load, store, atomic or memory operation) and are none
+/// of `IMPURE_X64` or `IMPURE_A64`. The floating-point environment counts as no state, as C compilers count
+/// it without `#pragma STDC FENV_ACCESS`. A call of one is a value the optimizer numbers and hoists.
+pub(package) const fn pure(isa: str, name0: str) bool {
+    let name = if name0.starts_with("__sc_x_") {
+        name0.slice(7, name0.len())
+    } else {
+        name0
+    };
+    let t = find(isa, name);
+    let x64 = isa == "x86_64";
+    let a64 = isa == "aarch64";
+    if t.len() == 0 || x64 && t.contains("(") || a64 && t.contains("[") {
+        return false;
+    }
+    if !x64 && !a64 && (t.contains("load") || t.contains("store") || t.contains("atomic") || t.contains("memory")) {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < t.len() {
+        // Instruction by instruction: its mnemonic.
+        while i < t.len() && (t.byte_at(i) == b' ' || t.byte_at(i) == b'\n' || t.byte_at(i) == b';' || t.byte_at(i) == b'\t') {
+            i += 1;
+        }
+        let ms = i;
+        while i < t.len() && word_byte(t.byte_at(i)) {
+            i += 1;
+        }
+        let mn = t.slice(ms, i);
+        if x64 {
+            for k in 0..32usize {
+                if mn.starts_with(unsafe IMPURE_X64[k]) {
+                    return false;
+                }
+            }
+        } else if a64 {
+            for k in 0..21usize {
+                if mn == unsafe IMPURE_A64[k] {
+                    return false;
+                }
+            }
+        }
+        while i < t.len() && t.byte_at(i) != b'\n' && t.byte_at(i) != b';' {
+            i += 1;
+        }
+    }
+    return true;
+}
+
+/// The lanes intrinsic `name` fills with its one scalar argument: their bytes and whether they hold floats
+/// (`_mm_set1_epi32`: (4, false), its x86 vector type of 8-byte lanes notwithstanding); (0, false) for the
+/// lanes of its result type (`vdupq_n_u8`, `vmov_n_f32`, `wasm_i32x4_splat`), (0, true) for another name.
+/// The lowering makes it a `splat`.
+pub(package) const fn splat_form(name: str) (u32, bool) {
+    let pre: []str = ["_mm_set1_", "_mm256_set1_", "_mm512_set1_"];
+    for p in 0..pre.len() {
+        if name.starts_with(pre[p]) {
+            return switch name.slice(pre[p].len(), name.len()) {
+                "epi8" => (1u32, false),
+                "epi16" => (2u32, false),
+                "epi32" => (4u32, false),
+                "epi64x" | "epi64" => (8u32, false),
+                "ps" => (4u32, true),
+                "pd" => (8u32, true),
+                _ => (0u32, true),
+            };
+        }
+    }
+    let lanes = name.starts_with("vdup_n_") || name.starts_with("vdupq_n_") || name.starts_with("vmov_n_") || name.starts_with(
+        "vmovq_n_",
+    ) || name.starts_with("wasm_") && name.ends_with("_splat");
+    return (0u32, !lanes);
 }
 
 /// Whether intrinsic `name` reads one lane of a vector at an index its second argument gives

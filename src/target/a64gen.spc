@@ -97,6 +97,7 @@ pub(package) struct Gen {
     arrm: Vector<u64>, // `plan_homes`: per parameter of the signature, the x registers it arrives in
     pin: u64, // the registers of the aggregate parameters a call takes as they arrive (`pass_parts`), held until it
     csr: u64, // callee-saved registers the body uses
+    vcs_tmp: u64, // the callee-saved v registers `alloc` gave a loop's values: a call writes their upper halves
     rows: Vector<u64>, // with debug information, per change of location: its code word << 32 | its `lines` index
     rparts: u64, // the registers of the result parts when stores move values into them (`rstore`), which `alloc` takes last
     rload: Vector<u32>, // per call, the loads after it its result's registers give (`res_relays`)
@@ -247,6 +248,7 @@ extend Gen {
             remat: Vector::<u64>::new(),
             pin: 0,
             csr: 0,
+            vcs_tmp: 0,
             rows: Vector::<u64>::new(),
             rparts: 0,
             rload: Vector::<u32>::new(),
@@ -390,6 +392,12 @@ extend Gen {
         if vreg && high != 0 {
             return high.trailing_zeros() as u8;
         }
+        // In a loop, a callee-saved vector register before v0 to v7, which each intrinsic's template and call
+        // may write (`loop_csv`).
+        let cv = ast::pick(vreg, self.loop_csv(0), NOREG);
+        if cv != NOREG {
+            return cv;
+        }
         // The result parts' registers last: the values the return takes there go there (`ret_part`).
         let pref = open & ~self.cr.held & ~self.rparts;
         if pref != 0 {
@@ -407,6 +415,28 @@ extend Gen {
         }
         assert(false, "a64gen: every register is locked");
         return 0;
+    }
+
+    // In a warm block of a loop, a callee-saved vector register outside `taken` that no value holds, which the
+    // prologue then saves once (its upper half is a call's to write: `vcs_tmp`); NOREG when none is free.
+    const fn loop_csv(self: &mut Self, taken: u64) u8 {
+        let blk = self.cr.lv.order[self.cr.pos as usize] as usize;
+        let csv = vfix() & ~(taken | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.cr.held);
+        if csv == 0 || self.cr.lv.inner[blk] == NONE || self.cr.lv.rare[blk] {
+            return NOREG;
+        }
+        let r = csv.trailing_zeros() as u8;
+        self.csr |= bit(r);
+        self.vcs_tmp |= bit(r);
+        self.frame_use(a::SP);
+        return r;
+    }
+
+    // Whether `loop_csv` has a register outside `taken`.
+    const fn loop_csv_free(self: &Self, taken: u64) bool {
+        let blk = self.cr.lv.order[self.cr.pos as usize] as usize;
+        let csv = vfix() & ~(taken | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.cr.held);
+        return csv != 0 && self.cr.lv.inner[blk] != NONE && !self.cr.lv.rare[blk];
     }
 
     // Free register `r`: its value moves to its home first when the home lacks it.
@@ -1166,7 +1196,14 @@ extend Gen {
             ) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && in_vreg(
                 t.ty,
             ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a));
-            if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
+            // An intrinsic's template reads its arguments and writes its result in v registers when the call
+            // passes them whole there (`call` renames them in place).
+            let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
+            if intr {
+                self.call_layout(t);
+            }
+            let ret_reg = intr && self.cr.lay.whole_vreg(self.cr.lay.ret, t.ty);
+            if is_vec(t.ty) && !reg_op && t.op != O_LOAD && !ret_reg {
                 self.vmem[i] = true;
             }
             if t.op == O_RET && t.a != VNONE && is_vec(self.cr.vt(t.a)) && !self.cr.self_lay.whole_vreg(
@@ -1179,9 +1216,10 @@ extend Gen {
             if reg_op || is_terminator(t.op) || lv::lane0_op(b, &self.cr.lv.pfold, t) {
                 continue;
             }
-            // A call takes a vector argument it passes whole in a register from that register.
-            let call = t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND;
-            if call {
+            // A call takes a vector argument it passes whole in a register from that register, an intrinsic's
+            // template too.
+            let call = t.op == O_CALL || t.op == O_CALLIND;
+            if call && !intr {
                 self.call_layout(t);
             }
             lv::each_use(b, t, &mut self.cr.uses);
@@ -1205,7 +1243,7 @@ extend Gen {
         if lv::lane_perm(self.cr.b(), t) != 0 || lv::lane_slide(self.cr.b(), t) != 0 {
             return in_vreg(t.ty);
         }
-        if self.tbl_shuffle(t) {
+        if self.tbl_shuffle(t) || self.tbl_swizzle(t) {
             return true;
         }
         if t.b == 0 || t.c != VNONE {
@@ -2636,6 +2674,7 @@ extend Gen {
         self.cr.tmps = 0;
         self.cr.fixed_busy = 0;
         self.csr = 0;
+        self.vcs_tmp = 0;
         self.rows.truncate(0);
         self.cond = Cond { inst: NONE, cc: 0 };
         if b.naked {
@@ -3847,6 +3886,12 @@ extend Gen {
                 }
                 self.mem(a::M_X, false, r, a::SP, off + 8 * k as i64);
             }
+            return true;
+        }
+        if op == O_SYMADDR && !self.tls_sym(t.a) {
+            // An address a loop keeps in a register (`Live::loop_consts`).
+            let rd = self.def(i);
+            self.sym_addr(rd, t.a, t.b as i32);
             return true;
         }
         if op == O_SYMADDR {
@@ -6820,7 +6865,7 @@ extend Gen {
     // only the values `keep` (the register arguments' sources) keep their registers, until
     // `forget_caller_saved`.
     fn spill_around_call(self: &mut Self, keep: &Vector<u32>, back: bool) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
+        let mut m = self.cr.held & ~(XFIX | vfix() & ~self.vcs_tmp) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -6899,7 +6944,7 @@ extend Gen {
 
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
-        let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob & ~self.lreg;
+        let mut m = self.cr.held & ~(XFIX | vfix() & ~self.vcs_tmp) & self.clob & ~self.lreg;
         // Each step clears one register's bit: at most 64 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -6977,6 +7022,9 @@ extend Gen {
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
+        // An argument a one-instruction template reads and overwrites, which lives on: its sources read it in
+        // its register, the destination stays (`intrin::vsplit_dest`).
+        let mut src: (u32, u32) = (99, 99);
         for k in 0..np {
             let loc = self.cr.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
@@ -6994,16 +7042,21 @@ extend Gen {
                 0u32
             };
             ok = ok && !intrin::vlisted(tx, pr);
+            let mut split = false;
             if ok && intrin::vwrites(true, tx, pr) {
                 let rl = self.cr.lay.ret;
-                ok = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                ok = ok && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x);
-                if ok {
+                let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
+                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x) {
                     rres = vr;
+                } else {
+                    split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
+                    ok = split;
                 }
             }
             self.cren.push(ok);
-            if ok {
+            if split {
+                src = (pr, (vr - V0) as u32);
+            } else if ok {
                 from.push(pr);
                 to.push(vr - V0);
                 self.clob &= ~bit(V0 + pr as u8);
@@ -7018,11 +7071,27 @@ extend Gen {
             for j in 0..to.len() {
                 taken |= bit(V0 + to[j] as u8);
             }
-            // A register no value holds: a scratch home may live across the template.
+            // A register no value holds: a scratch home may live across the template. The plan's register for
+            // the result first (`seg_take`), then one of v16..v29, which no template names, then in a loop a
+            // callee-saved one (`alloc`).
             let free = valloc() & ~taken & ~self.cr.held;
             let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
-            if free != 0 && !intrin::vlisted(tx, pr) {
-                let f = free.trailing_zeros() as u8;
+            let csv = (free & vscr()) == 0 && self.loop_csv_free(taken);
+            if (free != 0 || csv) && !intrin::vlisted(tx, pr) {
+                let x = self.cr.vx(i);
+                let mut f = NOREG;
+                if self.cr.lv.seg_val(x) {
+                    let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
+                    if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
+                        f = self.seg_take(x);
+                    }
+                }
+                if f == NOREG && csv {
+                    f = self.loop_csv(taken);
+                } else if f == NOREG {
+                    let high = free & vscr();
+                    f = ast::pick(high != 0, high, free).trailing_zeros() as u8;
+                }
                 rmov = pr;
                 rres = f;
                 from.push(pr);
@@ -7031,9 +7100,9 @@ extend Gen {
                 self.clob |= bit(f);
             }
         }
-        if from.len() != 0 {
+        if from.len() != 0 || src.0 != 99 {
             let mut renamed = String::new();
-            intrin::vrename(true, tx, from[0..from.len()], to[0..to.len()], &mut renamed);
+            intrin::vrename(true, tx, from[0..from.len()], to[0..to.len()], src, &mut renamed);
             text = renamed;
             if rres != NOREG {
                 self.clob |= bit(rres);
@@ -9715,6 +9784,18 @@ extend Gen {
         return true;
     }
 
+    // Whether `vop` `t` is a `swizzle_or_zero` of a vector of 8 or 16 bytes by run-time byte indices of its
+    // type: TBL of the vector as a one-register table.
+    const fn tbl_swizzle(self: &Self, t: Inst) bool {
+        let b = self.cr.b();
+        let nb = type_bytes(t.ty, 8);
+        return t.op == O_VOP && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_SWIZZLE_ZERO as u32 && t.b == 2 && t.c == VNONE && lane_type(
+            t.ty,
+        ) == T_I8 && (nb == 8 || nb == 16) && in_vreg(t.ty) && self.cr.vt(b.pool[t.a as usize]) == t.ty && self.cr.vt(
+            b.pool[(t.a + 1) as usize],
+        ) == t.ty;
+    }
+
     // Shuffle `t` of vectors `ops` into vector `i` (`tbl_shuffle`): per operand a table of the bytes it gives,
     // 0xFF where another gives them, into v30; TBL of the first, TBX of each other into a temporary (no
     // operand's register), which then moves into the result.
@@ -9883,7 +9964,8 @@ extend Gen {
     }
 
     // Lane access `t` (`O_VEXTRACT`, `O_VINSERT`, lane `t.aux`) into `i`: DUP (a float) or UMOV (an
-    // integer) of the lane, or a copy of the vector then INS of the scalar; a vector outside a v register
+    // integer) of the lane, or INS of the scalar into the vector's register when it dies here, else into a
+    // copy; a vector outside a v register
     // loads the lane, or copies its bytes and stores the lane.
     fn vlane(self: &mut Self, i: u32, t: Inst) {
         let k = t.aux as u32;
@@ -9923,7 +10005,12 @@ extend Gen {
         }
         let mut rs = self.reg(t.b) as u32;
         let ra = self.vec_use(t.a, V0 + 30);
-        let rd = self.vec_def(i);
+        // A vector that dies here takes the lane in place.
+        let rd = if self.takes(i, t.a, ra) {
+            ra
+        } else {
+            self.vec_def(i)
+        };
         if is_float(lt) && rs == rd as u32 {
             // The scalar shares the result's register: kept in v31 across the vector's copy.
             self.emit(a::vmov(true, 31, rd - V0));
@@ -10622,6 +10709,16 @@ extend Gen {
         }
         if self.tbl_shuffle(t) {
             self.tbl_lanes(i, t, &ops);
+            return true;
+        }
+        if self.tbl_swizzle(t) {
+            // TBL of a one-register table: an index past its 16 bytes gives 0.
+            let rv = self.vec_use(ops[0], V0 + 30);
+            let rx = self.vec_use(ops[1], V0 + 31);
+            let rd = self.def_step(i);
+            self.emit(
+                0x0E000000 | a::on(type_bytes(t.ty, 8) == 16, 1u32 << 30) | (rx - V0) as u32 << 16 | (rv - V0) as u32 << 5 | (rd - V0) as u32,
+            );
             return true;
         }
         let perm = lv::lane_perm(self.cr.b(), t);

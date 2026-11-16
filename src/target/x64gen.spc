@@ -2296,7 +2296,14 @@ extend Gen {
             ) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && self.in_reg(
                 t.ty,
             );
-            if is_vec(t.ty) && !reg_op && t.op != O_LOAD {
+            // An intrinsic's template reads its arguments and writes its result in xmm registers when the call
+            // passes them whole there (`call` renames them in place).
+            let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
+            if intr {
+                self.call_layout(t);
+            }
+            let ret_reg = intr && self.cr.lay.whole_vreg(self.cr.lay.ret, t.ty);
+            if is_vec(t.ty) && !reg_op && t.op != O_LOAD && !ret_reg {
                 self.vmem[i] = true;
             }
             self.vreg[i] = reg_op && is_vec(t.ty) || self.reduce_reg(t) || t.op == O_VOP && self.cr.lv.pfold[i];
@@ -2311,9 +2318,10 @@ extend Gen {
             if reg_op || is_terminator(t.op) || lv::lane0_op(b, &self.cr.lv.pfold, t) {
                 continue;
             }
-            // A call takes a vector argument it passes whole in a register from that register.
-            let call = t.op == O_CALL && self.intrinsic(t.a).len() == 0 || t.op == O_CALLIND;
-            if call {
+            // A call takes a vector argument it passes whole in a register from that register, an intrinsic's
+            // template too.
+            let call = t.op == O_CALL || t.op == O_CALLIND;
+            if call && !intr {
                 self.call_layout(t);
             }
             lv::each_use(b, t, &mut self.cr.uses);
@@ -4871,6 +4879,12 @@ extend Gen {
                     self.c.store(8, S0, x::at(x::RSP, off + 8 * k as i32));
                 }
             }
+            return true;
+        }
+        if op == O_SYMADDR && !self.tls_sym(t.a) {
+            // An address a loop keeps in a register (`Live::loop_consts`).
+            let rd = self.def(i);
+            self.sym_addr(rd, t.a, t.b as i32);
             return true;
         }
         if op == O_SYMADDR && (self.win || self.tls_local(t.a)) {
@@ -8343,6 +8357,9 @@ extend Gen {
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
+        // An argument a one-instruction three-operand template reads and overwrites, which lives on: its
+        // sources read it in its register, the destination stays (`intrin::vsplit_dest`).
+        let mut src: (u32, u32) = (99, 99);
         for k in 0..np {
             let loc = self.cr.lay.locs[k as usize];
             let v = b.pool[(t.c + k) as usize];
@@ -8359,16 +8376,21 @@ extend Gen {
             } else {
                 0u32
             };
+            let mut split = false;
             if ok && intrin::vwrites(false, tx, pr) {
                 let rl = self.cr.lay.ret;
-                ok = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                ok = ok && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x);
-                if ok {
+                let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
+                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x) {
                     rres = vr;
+                } else {
+                    split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(false, tx, pr);
+                    ok = split;
                 }
             }
             self.cren.push(ok);
-            if ok {
+            if split {
+                src = (pr, (vr - V0) as u32);
+            } else if ok {
                 from.push(pr);
                 to.push(vr - V0);
                 self.clob &= ~bit(V0 + pr as u8);
@@ -8383,10 +8405,23 @@ extend Gen {
             for j in 0..to.len() {
                 taken |= bit(V0 + to[j] as u8);
             }
-            // A register no value holds: a scratch home may live across the template.
+            // A register no value holds: a scratch home may live across the template. The plan's register for
+            // the result first (`seg_take`), then one of xmm8 and up under System V, which no template names
+            // (`alloc`).
             let free = self.valloc & ~taken & ~self.cr.held;
             if free != 0 {
-                let f = free.trailing_zeros() as u8;
+                let x = self.cr.vx(i);
+                let mut f = NOREG;
+                if self.cr.lv.seg_val(x) {
+                    let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
+                    if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
+                        f = self.seg_take(x);
+                    }
+                }
+                if f == NOREG {
+                    let high = ast::pick(self.win, 0u64, free & ~(0xFFu64 << V0 as u64));
+                    f = ast::pick(high != 0, high, free).trailing_zeros() as u8;
+                }
                 let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
                 rmov = pr;
                 rres = f;
@@ -8396,9 +8431,32 @@ extend Gen {
                 self.clob |= bit(f);
             }
         }
-        if from.len() != 0 {
+        // An argument the result's template register holds, which the result left (`rmov`; a two-operand
+        // SSE template writes its first argument's register): the template reads it there, under that name.
+        if rmov != NONE {
+            for k in 0..np {
+                let loc = self.cr.lay.locs[k as usize];
+                let v = b.pool[(t.c + k) as usize];
+                let vr = self.cr.va[self.cr.vx(v) as usize].reg;
+                if self.cren[k as usize] || vr != V0 + rmov as u8 || !self.cr.lay.whole_vreg(loc, self.cr.vt(v)) {
+                    continue;
+                }
+                let pa = self.cr.lay.parts[loc.p0 as usize].reg as u32;
+                let mut named = pa == rmov || intrin::vwrites(false, tx, pa);
+                for j in 0..from.len() {
+                    named = named || from[j] == pa;
+                }
+                if !named {
+                    self.cren[k as usize] = true;
+                    from.push(pa);
+                    to.push(rmov);
+                    self.clob &= ~bit(V0 + pa as u8);
+                }
+            }
+        }
+        if from.len() != 0 || src.0 != 99 {
             let mut renamed = String::new();
-            intrin::vrename(false, tx, from[0..from.len()], to[0..to.len()], &mut renamed);
+            intrin::vrename(false, tx, from[0..from.len()], to[0..to.len()], src, &mut renamed);
             text = renamed;
             if rres != NOREG {
                 self.clob |= bit(rres);
@@ -11763,7 +11821,7 @@ extend Gen {
 
     // Lane access `t` (lane `t.aux`) into `i`. Out of an xmm register (`lane_reg`): the lane moved to lane 0
     // by `pshufd`, then a float as it is, an integer by `movd`, `movq` or `pextrw`. Into one: the vector's
-    // copy, then `movss` or `movsd` (lane 0), `unpcklpd` (lane 1 of two), `pinsrw`. Else through memory:
+    // copy (none when it dies here), then `movss` or `movsd` (lane 0), `unpcklpd` (lane 1 of two), `pinsrw`. Else through memory:
     // the lane's load, or the vector's bytes copied and the lane stored.
     fn vlane(self: &mut Self, i: u32, t: Inst) {
         let k = t.aux as u32;
@@ -11820,14 +11878,18 @@ extend Gen {
             return;
         }
         let mut rs = self.reg(t.b);
-        let ra = self.vec_use(t.a, self.vs0) - V0;
-        let rd = self.vec_def(i) - V0;
+        let ra0 = self.vec_use(t.a, self.vs0);
+        // A vector that dies here takes the lane in place (`def_over`).
+        let rd = self.def_over(i, t.a, ra0) - V0;
+        let ra = ra0 - V0;
         if is_float(lt) && rs - V0 == rd {
             // The scalar shares the result's register: kept in the second scratch across the copy.
             self.c.vmov(self.vs1 - V0, rd);
             rs = self.vs1;
         }
-        self.c.vmov(rd, ra);
+        if rd != ra {
+            self.c.vmov(rd, ra);
+        }
         if eb == 2 {
             self.c.sse_rr(0x66, 0x0FC4, rd, rs);
             self.c.byte(k);
