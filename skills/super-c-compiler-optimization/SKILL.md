@@ -74,5 +74,5 @@ Read only the file the task needs. Section names are kept, so a pointer such as
 "see Header Types" names a heading in one of these files.
 
 - [phases.md](references/phases.md): phases 0 to 6: profile, hotspots and allocations, hot structs, complexity, stack over heap, assembly, compiler-specific work.
-- [measurement.md](references/measurement.md): before starting, the A/B protocol, what to report, whole-build phases, transpile work count, SIMD baselines, borrow-check probe, instance budget, bench gate.
+- [measurement.md](references/measurement.md): before starting, the A/B protocol, what to report, whole-build phases, build work count, SIMD baselines, borrow-check probe, instance budget, bench gate.
 - [compiler-patterns.md](references/compiler-patterns.md): optimization patterns proven in this codebase.

@@ -1,11 +1,16 @@
-"""The transpile work counts of one platform: the last release's compiler and this commit's on the same
-sources, and the threshold check of their change.
+"""The build work counts of one platform: this commit's compiler against the last release's, and the
+threshold check of their change.
 
-summarize TEXT OUT LABEL CC: reads the `llvm-profdata merge --text` profile TEXT of one workload run and
-writes OUT, a TSV of `label` (the compiler measured), `cc`, `total` (every counter summed: llvm-profdata's
-"Total count"), `functions`, then one `module<TAB>name<TAB>count` line per module, the largest first. A
-module is the mangled prefix before the first `__` (`typechecker__check_expr` is `typechecker`); a
-function without one (`__sc_add_usize`, a runtime helper) is its own module.
+summarize TEXT OUT LABEL CC WORKLOAD: reads the `llvm-profdata merge --text` profile TEXT of one workload
+run and writes OUT, a TSV of `label` (the compiler measured), `cc`, `workload`, `source` (`measured`),
+`total` (every counter summed: llvm-profdata's "Total count"), `functions`, then one
+`module<TAB>name<TAB>count` line per module, the largest first. A module is the mangled prefix before the
+first `__` (`typechecker__check_expr` is `typechecker`); a function without one (`__sc_add_usize`, a
+runtime helper) is its own module.
+
+saved PREV OUT SHA CC WORKLOAD LABEL: when PREV (a saved `<target>.tsv`) counts commit SHA (its label
+`(SHA)`) with clang CC and workload WORKLOAD, writes it to OUT with label LABEL and `source` `saved`, and
+exits 0; else exits 1.
 
 check TARGET BASE HEAD MD WARN LIMIT VERDICT: writes the Markdown table of HEAD's total against BASE's
 (and the modules that moved most) to MD, prints a warning annotation for a growth of WARN percent or more
@@ -24,7 +29,7 @@ import sys
 TOP = 8  # modules listed per platform, the largest changes first
 
 
-def summarize(text, out, label, cc):
+def summarize(text, out, label, cc, workload):
     lines = open(text).read().split("\n")
     modules = {}
     functions = 0
@@ -42,7 +47,8 @@ def summarize(text, out, label, cc):
             continue
         i += 1
     with open(out, "w") as f:
-        f.write(f"label\t{label}\ncc\t{cc}\ntotal\t{sum(modules.values())}\nfunctions\t{functions}\n")
+        f.write(f"label\t{label}\ncc\t{cc}\nworkload\t{workload}\nsource\tmeasured\n")
+        f.write(f"total\t{sum(modules.values())}\nfunctions\t{functions}\n")
         for k, v in sorted(modules.items(), key=lambda kv: -kv[1]):
             f.write(f"module\t{k}\t{v}\n")
 
@@ -58,6 +64,21 @@ def load(path):
     return meta, modules
 
 
+def saved(prev, out, sha, cc, workload, label):
+    meta, _ = load(prev)
+    if meta.get("label") != f"({sha})" or meta.get("cc") != cc or meta.get("workload") != workload:
+        sys.exit(1)
+    lines = open(prev).read().splitlines()
+    with open(out, "w") as f:
+        for line in lines:
+            key = line.split("\t")[0]
+            if key == "label":
+                line = f"label\t{label}"
+            elif key == "source":
+                line = "source\tsaved"
+            f.write(line + "\n")
+
+
 def pct(old, new):
     return f"{(new - old) / old * 100:+.4f}%" if old else "new"
 
@@ -68,7 +89,7 @@ def check(target, base, head, md, warn, limit, verdict):
     old, cur = int(bm["total"]), int(hm["total"])
     growth = (cur - old) / old * 100
     warn, limit = float(warn), float(limit)
-    msg = f"{target}: transpile work {pct(old, cur)} against the last release on the same sources"
+    msg = f"{target}: build work {pct(old, cur)} against the last release"
     if growth >= limit:
         v, note = "over", f"**{limit}% or more: the release waits for an approval**"
         alert = f"> [!CAUTION]\n> {msg}, at or over the {limit}% limit. The release waits for an approval.\n"
@@ -82,9 +103,14 @@ def check(target, base, head, md, warn, limit, verdict):
     with open(verdict, "w") as f:
         f.write(v + "\n")
     out = [
-        f"### {target}: transpile work on the same sources\n",
+        f"### {target}: build work\n",
         alert,
-        f"Both compilers transpile this commit with `--bootstrap-tags`, one worker, every cache off ({hm['cc']}).\n",
+        (
+            f"This commit's {hm['workload']} against the saved count of the last release's ({hm['cc']}).\n"
+            if bm.get("source") == "saved"
+            else f"Both compilers on this commit's sources, no saved count of the last release to compare: a "
+            f"{hm['workload']} ({hm['cc']}).\n"
+        ),
         "| compiler | total count | functions |\n|---|---|---|",
         f"| last release {bm['label']} | {old:,} | {bm['functions']} |",
         f"| this commit {hm['label']} | {cur:,} | {hm['functions']} |",
@@ -116,4 +142,4 @@ def merge(prev, new, out):
 
 
 if __name__ == "__main__":
-    {"summarize": summarize, "check": check, "merge": merge}[sys.argv[1]](*sys.argv[2:])
+    {"summarize": summarize, "saved": saved, "check": check, "merge": merge}[sys.argv[1]](*sys.argv[2:])

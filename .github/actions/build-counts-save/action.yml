@@ -1,0 +1,80 @@
+name: Save build counts
+description: >
+  For a run whose `counts` jobs uploaded `counts-part-<target>` artifacts (.github/actions/build-counts).
+  Without `store`: writes every platform's table (this commit against the last release) to the job
+  summary, and sets `approval` to true when a platform reached the limit (verdict `over`) or has no
+  verdict (its count failed). With `store`, once the release is published: uploads every platform's
+  counts as the repository's one `build-counts` artifact (a platform whose job measured nothing keeps its
+  last counts), the base of the next release's comparison, and deletes every other counts artifact (this
+  run's parts, the earlier `build-counts`). The job needs `actions: write` with `store`.
+inputs:
+  targets:
+    description: "the platforms the counts jobs measure, as words"
+    required: true
+  store:
+    description: "true: store the counts of the published release"
+    required: false
+    default: "false"
+outputs:
+  approval:
+    description: "true when the release needs an approval (without `store`)"
+    value: ${{ steps.verdict.outputs.approval }}
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/latest-artifact
+      if: inputs.store == 'true'
+      with:
+        name: build-counts
+        path: counts/prev
+
+    - uses: actions/download-artifact@v8
+      with:
+        pattern: counts-part-*
+        merge-multiple: true
+        path: counts/new
+
+    - name: Decide on the approval
+      id: verdict
+      if: inputs.store != 'true'
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+      run: |
+        set -eu
+        approval=false
+        for t in $TARGETS; do
+          v=$(cat "counts/new/$t.verdict" 2>/dev/null || echo missing)
+          case "$v" in
+            over) approval=true ;;
+            missing) approval=true
+              echo "::error::$t: no build count (its counts job failed): the release waits for an approval"
+              printf '> [!CAUTION]\n> %s: no build count (its counts job failed). The release waits for an approval.\n\n' "$t" >> "$GITHUB_STEP_SUMMARY" ;;
+          esac
+        done
+        echo "approval=$approval" >> "$GITHUB_OUTPUT"
+        cat counts/new/*.md 2>/dev/null >> "$GITHUB_STEP_SUMMARY" || true
+
+    - name: Merge the platforms
+      if: inputs.store == 'true'
+      shell: bash
+      run: |
+        set -eu
+        python3 -I "$GITHUB_ACTION_PATH/../build-counts/counts.py" merge counts/prev counts/new counts/out | tee -a "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/upload-artifact@v7
+      id: upload
+      if: inputs.store == 'true'
+      with:
+        name: build-counts
+        path: counts/out
+        if-no-files-found: error
+        retention-days: 90
+
+    # One counts artifact remains: the one just uploaded.
+    - uses: ./.github/actions/keep-one-artifact
+      if: inputs.store == 'true'
+      with:
+        name: build-counts
+        keep: ${{ steps.upload.outputs.artifact-id }}
+        parts: counts-part-

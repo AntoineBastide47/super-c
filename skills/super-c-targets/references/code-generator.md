@@ -25,7 +25,9 @@ set first: it states the value, register and frame model.
    saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
    for the homes; another call saves the homes the plan holds across calls (`Live.seg_past`). A value's range runs through the rare blocks before its last read, so the save
    leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
-   over the laid-out blocks made on first use), and arm64 saves two registers per `stp`.
+   over the laid-out blocks made on first use), and arm64 saves two registers per `stp`. The restore
+   (`restore_scratch`) loads back only a register that still holds the saved value: a plan's register
+   holds values in turn, and the call's result may take it.
 2. Frame: the outgoing argument area (the largest call's stack arguments, from the calling convention),
    the LIR slots, then the spills; the callee-saved registers and the frame pointer last.
 3. Homes: `Live::assign` gives each value that asks for one (`want`: `WANT_CALLEE`, `WANT_SCRATCH`,

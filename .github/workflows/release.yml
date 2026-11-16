@@ -23,7 +23,7 @@ on:
 
 permissions:
   contents: write            # needed to create the tag + release
-  actions: write             # the test-durations and transpile-counts artifacts: read, then replaced
+  actions: write             # the test-durations and build-counts artifacts: read, then replaced
 
 concurrency:
   group: release-${{ github.event.inputs.tag }}
@@ -62,7 +62,7 @@ jobs:
 
   # The pipeline of macOS, Linux, Linux arm64, Windows and wasm: one job builds the compiler, the test
   # shards (three on Windows, the slowest runner, two elsewhere), the x86-64 levels, the correctness gate
-  # and the transpile work count (not on Linux arm64) run in parallel on that binary, and the release
+  # and the build work count (not on Linux arm64) run in parallel on that binary, and the release
   # binary is built only after all but the count pass. A count that grew by the limit or more, or that
   # failed, holds only the publishing: `counts approval` waits for an approval in the `release-approval`
   # environment (required reviewer: the owner):
@@ -70,7 +70,7 @@ jobs:
   #   compile --+--> test 1/N .. N/N -----------+
   #             +--> levels (Linux, Windows) ---+--> package -----------------------+--> release
   #             +--> gate, compare -------------+                                   |
-  #             +--> counts --> transpile counts --> counts approval (when held) ---+
+  #             +--> counts --> build counts --> counts approval (when held) -------+
   #
   # Caches: only this workflow on main saves (the toolchain action restores, `cache-save` saves last), so
   # no other workflow or branch evicts these entries from the repository's cache. Each platform keeps one
@@ -458,9 +458,10 @@ jobs:
           role: compare
           sha: ${{ needs.resolve.outputs.sha }}
 
-  # The transpile work count beside the shards (.github/actions/transpile-counts): this commit's compiler
-  # against the last release's on the same sources, built by clang with counters (llvm-mingw's on
-  # Windows). A growth of 1% or more is an error annotation, and the release waits for an approval.
+  # The build work count beside the shards (.github/actions/build-counts): this commit's compiler, built
+  # by clang with counters (llvm-mingw's on Windows), builds its sources natively, against the count the
+  # last release's run saved. A growth of 1% or more is an error annotation, and the release waits for an
+  # approval.
   # No Linux arm64 row: no earlier release has a Linux arm64 compiler to count against.
   counts:
     needs: [resolve, compile]
@@ -503,7 +504,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
 
-      - uses: ./.github/actions/transpile-counts
+      - uses: ./.github/actions/build-counts
         with:
           target: ${{ matrix.target }}
           sha: ${{ needs.resolve.outputs.sha }}
@@ -515,12 +516,12 @@ jobs:
           role: counts
           sha: ${{ needs.resolve.outputs.sha }}
 
-  # Every platform's table in one summary; the counts replace the repository's one `transpile-counts`
-  # artifact, even when a platform failed.
-  transpile-counts:
+  # Every platform's table in one summary, and whether the release waits for an approval. The `release` job
+  # stores the counts once the release is published.
+  build-counts:
     needs: [resolve, counts]
     if: always() && github.actor == github.repository_owner
-    name: transpile counts
+    name: build counts
     runs-on: ubuntu-latest
     outputs:
       approval: ${{ steps.save.outputs.approval }}
@@ -529,7 +530,7 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
-      - uses: ./.github/actions/transpile-counts-save
+      - uses: ./.github/actions/build-counts-save
         id: save
         with:
           targets: macos linux windows
@@ -538,16 +539,16 @@ jobs:
   # counts could not be measured or saved. The environment's required reviewer makes the wait; without
   # that rule an environment passes at once.
   counts-approval:
-    needs: [package, wasm-package, transpile-counts]
+    needs: [package, wasm-package, build-counts]
     if: >-
       always() && github.actor == github.repository_owner &&
       needs.package.result == 'success' && needs.wasm-package.result == 'success' &&
-      (needs.transpile-counts.result != 'success' || needs.transpile-counts.outputs.approval != 'false')
+      (needs.build-counts.result != 'success' || needs.build-counts.outputs.approval != 'false')
     name: counts approval
     runs-on: ubuntu-latest
     environment: release-approval
     steps:
-      - run: echo "the release of a transpile count at or over the limit, or of a failed count, was approved"
+      - run: echo "the release of a build count at or over the limit, or of a failed count, was approved"
 
   # The release binary, built by the compiler the suite and the gate passed with.
   package:
@@ -947,13 +948,13 @@ jobs:
 
   # Publishes without a wait when the counts need no approval (`counts approval` skipped).
   release:
-    needs: [resolve, package, wasm-package, transpile-counts, counts-approval]
+    needs: [resolve, package, wasm-package, build-counts, counts-approval]
     if: >-
       always() && github.actor == github.repository_owner &&
       needs.package.result == 'success' && needs.wasm-package.result == 'success' &&
       (needs.counts-approval.result == 'success' ||
-       (needs.counts-approval.result == 'skipped' && needs.transpile-counts.result == 'success' &&
-        needs.transpile-counts.outputs.approval == 'false'))
+       (needs.counts-approval.result == 'skipped' && needs.build-counts.result == 'success' &&
+        needs.build-counts.outputs.approval == 'false'))
     runs-on: ubuntu-latest
     steps:
       # Only the archives: the compiler artifacts the jobs above pass along are not part of a release.
@@ -976,3 +977,14 @@ jobs:
             --title "${{ github.event.inputs.tag }}" \
             --generate-notes \
             dist/*
+
+      # The published release's counts: the base of the next release's comparison. The checkout comes after
+      # the release: it may clean the archives out of the workspace.
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: ./.github/actions/build-counts-save
+        with:
+          targets: macos linux windows
+          store: true

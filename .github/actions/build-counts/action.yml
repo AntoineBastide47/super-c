@@ -1,0 +1,127 @@
+name: Build counts
+description: >
+  The build work of this commit's compiler against the last release's. The counted compiler is built by
+  clang with its frontend counters from its release profile's C (`--emit-c`, ci/cc_tree.sh), and the
+  workload is a native debug build of a commit's own sources with `--bootstrap-tags`, every cache off, on
+  one worker; llvm-profdata totals the counters. A count repeats within 0.0001% and covers the compiler's
+  own code only: libc, the kernel and the linker are not counted. The base is the last release's count
+  that its run saved (the repository's `build-counts` artifact, .github/actions/build-counts-save) when
+  that count is of the release's commit with the same clang and workload. Else the last release's compiler
+  is built from its tagged sources by its own binary, and both compilers build this commit's sources
+  without the prover (the last release's prover may not prove this commit's lemmas); this commit's
+  count with the prover is then taken too, as the next release's base. A growth of WARN_PCT percent or
+  more is a warning; LIMIT_PCT percent or more is an error, and the release then waits for an approval
+  (.github/actions/build-counts-save). Uploads `<target>.tsv` (counts.py summarize: the count a later
+  run compares with), `<target>-base.tsv`, the `.profdata` files, the summary table `<target>.md` and
+  `<target>.verdict` (`ok`, `warn` or `over`) as the `counts-part-<target>` artifact. Needs the compiler
+  under test at ./super-c and the bootstrap action's ./super-c-boot (.exe on Windows), on Windows the
+  toolchain action's `llvm-mingw: true`, and `actions: read`.
+inputs:
+  target:
+    description: "linux, macos or windows"
+    required: true
+  sha:
+    description: "the commit under test"
+    required: true
+  base-tag:
+    description: "the release tag of ./super-c-boot (the bootstrap action's `tag` output)"
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/latest-artifact
+      with:
+        name: build-counts
+        path: ${{ runner.temp }}/counts-prev
+
+    - name: Count the build work
+      shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        SHA: ${{ inputs.sha }}
+        BASE_TAG: ${{ inputs.base-tag }}
+        WARN_PCT: "0.1"
+        LIMIT_PCT: "1"
+        WORKLOAD: "native debug build of its commit's sources with --bootstrap-tags, one worker, every cache off"
+      run: |
+        set -eu
+        x=${BINEXT:-}
+        # Each clang with the llvm-profdata of its own version: the raw profile format is per version.
+        case "$RUNNER_OS" in
+          Linux) cc=clang; pd="llvm-profdata-$(clang -dumpversion | cut -d. -f1)" ;;
+          macOS) cc=cc; pd="$(xcrun -f llvm-profdata)" ;;
+          *) cc="$LLVM_MINGW/x86_64-w64-mingw32-clang.exe"; pd="$LLVM_MINGW/llvm-profdata.exe" ;;
+        esac
+        ccv=$("$cc" --version | head -1)
+        py=$(command -v python3 || command -v python)
+        counts="$GITHUB_ACTION_PATH/counts.py"
+        w="$RUNNER_TEMP/counts"
+        rm -rf "$w" && mkdir -p "$w/out"
+        chmod +x "./super-c$x" "./super-c-boot$x"
+        here=$(pwd)
+
+        # The counts compiler of the sources in the working directory, built by compiler $1 into
+        # build/counts/super-c-counts (two levels under the sources, so it finds their std and ffi): its
+        # release C (`--emit-c`) compiled without asserts and with the counters.
+        counts_build() {
+          "$1" build --profile=release --emit-c --out-dir="$w/counts-tree" &&
+            CC="$cc" sh "$here/ci/cc_tree.sh" "$w/counts-tree/release/raw" "build/counts/super-c-counts$x" -DNDEBUG -fprofile-instr-generate
+        }
+        mkdir -p build/counts
+        counts_build "./super-c$x"
+
+        # One counted native build of this commit's sources: $1 the output name, $2 the compiler, $3 its
+        # label, $4 the workload, $5 its extra flags.
+        count() {
+          mkdir -p "$w/raw-$1"
+          set +e
+          env SC_NO_CACHE=1 SC_NO_EMIT_CACHE=1 SC_NO_TU_CACHE=1 LLVM_PROFILE_FILE="$w/raw-$1/%p.profraw" \
+            "$2" build --profile=debug --jobs=1 --bootstrap-tags ${5:-} --out-dir="$w/tree-$1" -o "$w/tree-$1/bin$x" >/dev/null 2>"$w/$1.err"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            cat "$w/$1.err"
+            echo "::error::the counted build of $3 failed (exit $status)"
+            exit 1
+          fi
+          rm -rf "$w/tree-$1"
+          "$pd" merge -o "$w/out/$1.profdata" "$w/raw-$1"/*.profraw
+          "$pd" merge --text -o "$w/$1.txt" "$w/out/$1.profdata"
+          "$py" -I "$counts" summarize "$w/$1.txt" "$w/out/$1.tsv" "$3" "$ccv" "$4"
+        }
+        head="(${SHA:0:7})"
+        count "$TARGET" "./build/counts/super-c-counts$x" "$head" "$WORKLOAD"
+
+        git fetch -q --depth=1 origin "refs/tags/$BASE_TAG:refs/tags/$BASE_TAG"
+        bsha=$(git rev-parse "$BASE_TAG^{commit}" | cut -c1-7)
+        prev="$RUNNER_TEMP/counts-prev/$TARGET.tsv"
+        cmp="$TARGET"
+        if [ -f "$prev" ] && "$py" -I "$counts" saved "$prev" "$w/out/$TARGET-base.tsv" "$bsha" "$ccv" "$WORKLOAD" "$BASE_TAG ($bsha)"; then
+          echo "base: the saved count of $BASE_TAG"
+        else
+          echo "base: no saved count of $BASE_TAG ($bsha) with this clang and workload; both compilers count this commit's sources"
+          base="$RUNNER_TEMP/counts-base"
+          rm -rf "$base" && mkdir -p "$base/build/counts"
+          # No `tar -C "$base"`: Windows GNU tar reads `D:\...` as a remote `host:path`.
+          git archive "$BASE_TAG" | (cd "$base" && tar -x)
+          cp "super-c-boot$x" "$base/"
+          ( cd "$base" && counts_build "./super-c-boot$x" )
+          mkdir -p build/counts-base
+          cp "$base/build/counts/super-c-counts$x" "build/counts-base/super-c-counts$x"
+          nw="native debug build of this commit's sources with --bootstrap-tags -fno-prove, one worker, every cache off"
+          count "$TARGET-base" "./build/counts-base/super-c-counts$x" "$BASE_TAG ($bsha)" "$nw" -fno-prove
+          count "$TARGET-noprove" "./build/counts/super-c-counts$x" "$head" "$nw" -fno-prove
+          cmp="$TARGET-noprove"
+        fi
+
+        "$py" -I "$counts" check "$TARGET" "$w/out/$TARGET-base.tsv" "$w/out/$cmp.tsv" \
+          "$w/out/$TARGET.md" "$WARN_PCT" "$LIMIT_PCT" "$w/out/$TARGET.verdict"
+        cat "$w/out/$TARGET.md" >> "$GITHUB_STEP_SUMMARY"
+
+    - uses: actions/upload-artifact@v7
+      if: always()
+      with:
+        name: counts-part-${{ inputs.target }}
+        path: ${{ runner.temp }}/counts/out
+        if-no-files-found: ignore
+        retention-days: 1

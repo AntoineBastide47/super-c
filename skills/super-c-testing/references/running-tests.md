@@ -81,7 +81,7 @@ it, as `package` ships a release build of the native binary. The Linux arm64 com
 `linux_arm64` in the release matrices, `linux-arm64-compile` in the debug workflow) is cross-built
 natively on the x86-64 runner by the x86-64 one against the arm64 C library
 (`libc6-dev-arm64-cross`: headers and libraries, no compiler); the arm64 runner (`ubuntu-26.04-arm`)
-runs its test shards, gate and package, which rebuild the compiler there. No transpile count runs
+runs its test shards, gate and package, which rebuild the compiler there. No build work count runs
 for it: no earlier release has a Linux arm64 compiler to count against.
 In the release workflow (macOS, Linux, Linux arm64 and Windows in one matrix)
 the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `compare` job (Linux, clang 22:

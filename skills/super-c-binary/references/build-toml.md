@@ -123,11 +123,15 @@ root below it, `<base>/<project>` (`cache_root`: the manifest's `bin`, else its 
 outside `[A-Za-z0-9._-]` or a leading `.` made `_`); script builds cache in
 `<base>/.scripts`. Projects of one name share a root (the worktrees and copies of a project), and no
 sweep reads or deletes outside the root of the build that runs it: not the base, not another
-project's root. Only `super-c clean --full` deletes a root, its project's.
+project's root. The one exception is `<base>/.prove`, the proof records every project's builds share
+(`prove_dir`, keyed by each module's sources and the compiler; none when caching is off). Only
+`super-c clean --full` deletes a root, its project's.
 
 The sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of
 the build's project (or `.scripts`). The cache sweep (`<root>/.sweep`, `sweep_cache`) deletes the stale
-prelude images (below). The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry
+prelude images (below). The proof sweep (`<base>/.prove/.sweep`, `sweep_proofs`) deletes the proof
+records nothing wrote for 30 days and the temporary files of an hour (a build that still needs a record
+proves and writes it again). The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry
 with nothing written for 30 days (a build tree, a link record, a binary) goes unless a build holds the
 lock of a tree in it, as do the emitted trees below the root directory idle as long. `super-c clean`
 runs the same sweeps at once; `super-c clean --full` removes the out-dir, the emitted trees and the

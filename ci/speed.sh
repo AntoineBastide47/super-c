@@ -2,8 +2,8 @@
 # The native backend against the emitted C built by the C compiler on this runner, from the compiler at
 # ./super-c (BINEXT on Windows): cold self-builds with every worker and with one (the C side writes the C
 # tree with `--emit-c` and builds it with $CC through ci/cc_tree.sh), the speed of the compiler each side
-# produces (one serial C emission of the compiler's sources, the same work for both), and the transpile
-# count of each side's work as .github/actions/transpile-counts takes it (the compiler's own code only).
+# produces (one serial C emission of the compiler's sources, the same work for both), and the work count
+# of each side's build as .github/actions/build-counts takes it (the compiler's own code only).
 # Each time is the fastest of RUNS runs, every cache off. The count needs CC_COUNTS (a clang with profile
 # counters) and PROFDATA (its llvm-profdata); without them it is left out. Prints a Markdown table, also
 # into GITHUB_STEP_SUMMARY when set.
@@ -91,7 +91,7 @@ size_of() {
 }
 row "compiler binary bytes" "$(size_of "build/speed-native/sc$x")" "$(size_of "build/speed-c/sc$x")" "-" >> "$out"
 
-# The transpile count of each side's work, by a counted build of the compiler under test: the native
+# The work count of each side's build, by a counted build of the compiler under test: the native
 # build (objects and link) and the C emission.
 if [ -n "${CC_COUNTS:-}" ] && [ -n "${PROFDATA:-}" ]; then
   py=$(command -v python3 || command -v python)
@@ -114,12 +114,12 @@ if [ -n "${CC_COUNTS:-}" ] && [ -n "${PROFDATA:-}" ]; then
     }
     "$PROFDATA" merge -o "$w/$1.profdata" "$raw"/*.profraw
     "$PROFDATA" merge --text -o "$w/$1.txt" "$w/$1.profdata"
-    "$py" -I .github/actions/transpile-counts/counts.py summarize "$w/$1.txt" "$w/$1.tsv" "$1" "$CC_COUNTS"
+    "$py" -I .github/actions/build-counts/counts.py summarize "$w/$1.txt" "$w/$1.tsv" "$1" "$CC_COUNTS" "$1 build"
     awk -F'\t' '$1 == "total" { print $2 }' "$w/$1.tsv"
   }
   kn=$(count native "-o $w/ctree/bin$x")
   kc=$(count c --emit-c)
-  row "transpile count (compiler code only)" "$kn" "$kc" "$(ratio "$kn" "$kc")" >> "$out"
+  row "work count (compiler code only)" "$kn" "$kc" "$(ratio "$kn" "$kc")" >> "$out"
 fi
 cat "$out"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then

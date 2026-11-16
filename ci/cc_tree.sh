@@ -2,7 +2,7 @@
 # Build the C tree `super-c build --emit-c` wrote at $1 into the program $2 with $CC (default cc): each
 # C unit of `__units` compiled with the tree's `__cflags` and the remaining arguments, $JOBS at a time
 # (default: one per core), then the objects linked with the same arguments and the tree's `__ldflags`.
-# The C pipeline of ci/speed.sh and .github/actions/transpile-counts.
+# The C pipeline of ci/speed.sh and .github/actions/build-counts.
 set -eu
 raw=$1
 out=$2
