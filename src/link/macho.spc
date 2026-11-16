@@ -1580,7 +1580,7 @@ fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
         let a = 1u64 << sc.align as u64;
         let mut at = lu::align_up(sc.at + moved, a);
         if code(sc) && (sc.flags & S_TYPE) == S_REGULAR {
-            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, a.max(4));
+            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, a.max(4), 0);
         }
         moved = at - sc.at;
         l.secs.index_mut(s).at = at;

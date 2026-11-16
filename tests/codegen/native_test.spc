@@ -20,7 +20,8 @@ import module::loader;
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
 // acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
 // optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
-// multiply-add (`Package.fma`: x86-64's FMA3); and x86-64's `lzcnt` (`Package.lzcnt`).
+// multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); and loops at 16-byte
+// boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -33,6 +34,7 @@ const SHARE: u32 = 256;
 const OMIT_FP: u32 = 512;
 const FMA: u32 = 1024;
 const LZCNT: u32 = 2048;
+const LINES: u32 = 4096;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -173,6 +175,8 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.omit_fp = (opts & OMIT_FP) != 0;
     p.popcnt = (opts & POPCNT) != 0;
     p.lzcnt = (opts & LZCNT) != 0;
+    p.align_loops = (opts & LINES) != 0;
+    p.fit_lines = p.align_loops;
     // The lanes the target counts and swaps in registers, as a build sets them (`CEmit`): with AVX-512 also
     // the leading zeros of 4- and 8-byte lanes (CD and VL).
     p.vec_bits = tgt::isa(isa).vector_bits;
@@ -19862,4 +19866,136 @@ int main(void) {
 }
 )";
     assert_eq(run_native(lir, drv), 0);
+}
+
+// An indirect call's target that lives past the call in the argument register it arrived in (a call in a
+// rare block saves that home around itself) is read before the argument moves write that register:
+// never from the register after them. The function gives the C results on the host.
+@test
+fn an_indirect_calls_target_is_read_before_the_arguments_overwrite_it() {
+    let lir = M"(lir ptr 8
+sym @walk fn global
+fn @walk
+  sig (ptr, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = icmp.eq v1, v3
+  br v4, b1, b2
+b1: unlikely
+  v5 = call.ind.i64 v2(v0, v1, v1) : (ptr, i64, i64) -> i64
+  v6 = call.ind.i64 v2(v0, v5, v1) : (ptr, i64, i64) -> i64
+  ret v6
+b2:
+  ret v1
+)";
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut o),
+        "the arm64 object",
+    );
+    // No `mov x16, x2`: x2 holds the third argument by then.
+    assert_eq(elf_text_count(&o, 0xFFFFFFFF, 0xAA0203F0), 0);
+    let mut x = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut x),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t walk(void *, int64_t, int64_t (*)(void *, int64_t, int64_t));
+static int64_t add3(void *c, int64_t a, int64_t b) { return *(int64_t *)c + a + 2 * b; }
+int main(void) {
+  int64_t k = 100;
+  if (walk(&k, 0, add3) != 200) return 1;
+  if (walk(&k, 5, add3) != 5) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// The functions (type FUNC) of ELF object `o`: each one's offset in its section and its size.
+fn elf_funcs(o: &Vector<u8>) Vector<(usize, usize)> {
+    let mut fs_ = Vector::<(usize, usize)>::new();
+    let shoff = le_at(o, 0x28, 8) as usize;
+    let shsize = le_at(o, 0x3A, 2) as usize;
+    for k in 0..le_at(o, 0x3C, 2) as usize {
+        let sh = shoff + k * shsize;
+        if le_at(o, sh + 4, 4) != 2 {
+            continue;
+        }
+        let off = le_at(o, sh + 0x18, 8) as usize;
+        for y in 0..le_at(o, sh + 0x20, 8) as usize / 24 {
+            if (o[off + y * 24 + 4] & 0xF) == 2 {
+                fs_.push((le_at(o, off + y * 24 + 8, 8) as usize, le_at(o, off + y * 24 + 16, 8) as usize));
+            }
+        }
+    }
+    return fs_;
+}
+
+// An x86-64 function of an ELF object takes the alignment (16, 32 or 64 bytes) and the fill bytes before
+// it that keep each of its loops of at most 64 bytes inside one 64-byte line, and itself when it has at
+// most 64 bytes (`Package.fit_lines`): a boundary between two lines there costs up to a quarter of the
+// loop's time. Six functions with one loop each, after 0 to 5 multiplications: every loop begins at a
+// 16-byte boundary and ends in its line, and at least one function is not where 16 bytes of alignment
+// alone put it.
+@test
+fn x86_64_loops_that_fit_a_line_stay_inside_one() {
+    let mut text = String::from("lir ptr 8\n");
+    for k in 0..6u32 {
+        text.format_into("sym @f{} fn global\n", k);
+    }
+    for k in 0..6u32 {
+        text.format_into("fn @f{}\n  sig (i64, i64) -> i64\nb0(v0: i64, v1: i64):\n", k);
+        for q in 0..k {
+            // The product so far: v0, then the value before.
+            text.format_into("  v{} = mul.i64 v{}, v1\n", 2 + q, (1 + q) * (q != 0) as u32);
+        }
+        let a = (1 + k) * (k != 0) as u32;
+        let n = 2 + k;
+        text.format_into("  v{} = iconst.i64 0\n  v{} = icmp.eq v1, v{}\n", n, n + 1, n);
+        text.format_into("  br v{}, b2(v{}), b1(v{}, v{})\n", n + 1, a, a, n);
+        text.format_into("b1(v{}: i64, v{}: i64):\n", n + 2, n + 3);
+        text.format_into("  v{} = mul.i64 v{}, v1\n", n + 4, n + 2);
+        text.format_into("  v{} = iconst.i64 7\n", n + 5);
+        text.format_into("  v{} = lshr.i64 v{}, v{}\n", n + 6, n + 4, n + 5);
+        text.format_into("  v{} = xor.i64 v{}, v{}\n", n + 7, n + 6, n + 4);
+        text.format_into("  v{} = add.i64 v{}, v{}\n", n + 8, n + 7, n + 3);
+        text.format_into("  v{} = iconst.i64 1\n", n + 9);
+        text.format_into("  v{} = add.i64 v{}, v{}\n", n + 10, n + 3, n + 9);
+        text.format_into("  v{} = icmp.ult v{}, v1\n", n + 11, n + 10);
+        text.format_into("  br v{}, b1(v{}, v{}), b2(v{})\n", n + 11, n + 8, n + 10, n + 8);
+        text.format_into("b2(v{}: i64):\n  ret v{}\n", n + 12, n + 12);
+    }
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(text.as_str(), tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut o),
+        "the x86-64 object",
+    );
+    let (t, _) = elf_text(&o);
+    let fs_ = elf_funcs(&o);
+    assert_eq(fs_.len(), 6);
+    let mut moved: u32 = 0;
+    for k in 0..6usize {
+        let (at, size) = fs_[k];
+        assert_eq(at % 16, 0);
+        moved += (at % 64 != 0) as u32;
+        // The loop's branch: the one short conditional jump back to a 16-byte boundary.
+        let mut loops: u32 = 0;
+        for j in at..at + size - 1 {
+            let d = o[t + j + 1] as usize;
+            if (o[t + j] & 0xF0) != 0x70 || d < 0x80 || j + 2 + d < 256 + at || (j + 2 + d - 256) % 16 != 0 {
+                continue;
+            }
+            let head = j + 2 + d - 256;
+            loops += 1;
+            assert(j + 2 - head > 16 && j + 2 - head <= 64, "the loop fits a line and not 16 bytes");
+            assert(head % 64 + (j + 2 - head) <= 64, "the loop is inside one line");
+        }
+        assert_eq(loops, 1);
+    }
+    assert(moved != 0, "a function starts off a line's first byte");
 }

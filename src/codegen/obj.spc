@@ -87,6 +87,10 @@ pub(package) struct OSym {
     pub(package) name: u32, // `names` id
     pub(package) sec: u8,
     pub(package) flags: u8,
+    /// The log2 of the alignment its definition asked for, and the fill bytes before it that belong to its
+    /// part (`define_led`): the part of a code section that starts at it aligns so and starts at them.
+    pub(package) al: u8,
+    pub(package) lead: u8,
     pub(package) off: u64,
     pub(package) size: u64,
 }
@@ -246,7 +250,7 @@ extend Obj {
             self.sym_of.push(0);
         }
         if self.sym_of[id as usize] == 0 {
-            self.syms.push(OSym { name: id, sec: NOSEC, flags: 0, off: 0, size: 0 });
+            self.syms.push(OSym { name: id, sec: NOSEC, flags: 0, al: 0, lead: 0, off: 0, size: 0 });
             self.sym_of[id as usize] = self.syms.len() as u32;
         }
         return self.sym_of[id as usize] - 1;
@@ -273,12 +277,28 @@ extend Obj {
     /// Define symbol `k` at the end of section `s`, aligned to `1 << al`, as the next `size` bytes;
     /// their offset. Bytes are the caller's to append (`put`), none in a zero-filled section.
     pub(package) fn define(self: &mut Self, k: u32, s: u8, al: u8, size: u64, flags: u8) u64 {
-        let at = self.align(s, al);
+        return self.define_led(k, s, al, 0, size, flags);
+    }
+
+    /// `define`, `lead` fill bytes after the alignment and before the symbol: its address is `lead` past a
+    /// multiple of `1 << al`, also when its section splits at its symbols (the part starts at the fill).
+    pub(package) fn define_led(self: &mut Self, k: u32, s: u8, al: u8, lead: u8, size: u64, flags: u8) u64 {
+        let at = self.align(s, al) + lead as u64;
+        if lead != 0 {
+            let fill = self.code_fill;
+            let sec = self.secs.index_mut(s as usize);
+            for _ in 0..lead {
+                sec.bytes.push(fill);
+            }
+            sec.size = at;
+        }
         let y = self.syms.index_mut(k as usize);
         y.sec = s;
         y.off = at;
         y.size = size;
         y.flags = flags;
+        y.al = al;
+        y.lead = lead;
         if s == S_BSS || s == S_TBSS {
             self.secs.index_mut(s as usize).size = at + size;
         }
@@ -345,6 +365,9 @@ extend Obj {
 /// section number `hdr`.
 pub(package) struct Part {
     pub(package) k: u8,
+    /// The log2 of its alignment: its section's, or in a code section its symbol's own (`OSym.al`, when
+    /// set).
+    pub(package) al: u8,
     pub(package) lo: u64,
     pub(package) hi: u64,
     pub(package) sym: u32,
@@ -374,28 +397,43 @@ pub(package) fn parts_of(o: &Obj, split: u8, parts: &mut Vector<Part>, first: &m
             continue;
         }
         starts.truncate(0);
+        let sal = o.secs[k].align_log2;
+        // A code section's parts start at their symbols' lead bytes and take their symbols' alignments.
+        let code = k == S_TEXT as usize || o.secs[k].code;
         if splits(k as u8, split) {
             for y in 0..o.syms.len() {
                 let sy = o.syms[y];
                 if sy.sec as usize == k && sy.off < size {
-                    starts.push(sy.off << 32 | y as u64);
+                    starts.push(sy.off - ast::pick(code, sy.lead, 0) as u64 << 32 | y as u64);
                 }
             }
             starts.sort();
         }
         if starts.len() == 0 || starts[0] >> 32 != 0 {
-            parts.push(Part { k: k as u8, lo: 0, hi: size, sym: NONE32, hdr: 0 });
+            parts.push(Part { k: k as u8, al: sal, lo: 0, hi: size, sym: NONE32, hdr: 0 });
         }
         for i in 0..starts.len() {
             let lo = starts[i] >> 32;
+            let y = (starts[i] & 0xFFFFFFFF) as u32;
+            // A symbol defined with no alignment of its own (an assembler label): the section's.
+            let al = if code && o.syms[y as usize].al != 0 {
+                o.syms[y as usize].al
+            } else {
+                sal
+            };
             if i > 0 && starts[i - 1] >> 32 == lo {
+                // Another symbol at the part's start: the greater alignment.
+                let last = parts.len() - 1;
+                if al > parts[last].al {
+                    parts.index_mut(last).al = al;
+                }
                 continue;
             }
             // The section's previous part ends here.
             if parts.len() as u32 > first[k] {
                 parts.index_mut(parts.len() - 1).hi = lo;
             }
-            parts.push(Part { k: k as u8, lo: lo, hi: size, sym: (starts[i] & 0xFFFFFFFF) as u32, hdr: 0 });
+            parts.push(Part { k: k as u8, al: al, lo: lo, hi: size, sym: y, hdr: 0 });
         }
     }
     first[o.secs.len()] = parts.len() as u32;

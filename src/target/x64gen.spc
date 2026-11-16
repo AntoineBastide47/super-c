@@ -37,6 +37,37 @@ import ast::ast as ast;
 
 const V0: u8 = 16; // register number of xmm0: general registers are 0..15, xmm0..xmm31 16..47
 
+// Where a function of `size` bytes goes, whose loops of at most LINE bytes are `loops` (start << 32 | end,
+// offsets in it): the log2 of its alignment (16, 32 or 64 bytes) and the fill
+// bytes between that boundary and its first byte (a multiple of 16), the least alignment that leaves the
+// fewest line boundaries inside those loops and, when it has at most LINE bytes, inside it.
+const fn line_fit(size: u32, loops: &Vector<u64>) (u8, u8) {
+    let mut bad: [u32; 4] = [0, 0, 0, 0];
+    for r in 0..4u32 {
+        bad[r as usize] = (size <= LINE && 16 * r + size > LINE) as u32;
+        for q in 0..loops.len() {
+            let s = (loops[q] >> 32) as u32;
+            bad[r as usize] += ((16 * r + s) % LINE + (loops[q] as u32 - s) > LINE) as u32;
+        }
+    }
+    let m = bad[0].min(bad[1]).min(bad[2]).min(bad[3]);
+    if bad[0] == m && bad[1] == m && bad[2] == m && bad[3] == m {
+        return (4, 0);
+    }
+    if bad[0] == m && bad[2] == m {
+        return (5, 0);
+    }
+    if bad[1] == m && bad[3] == m {
+        return (5, 16);
+    }
+    for r in 0..4u8 {
+        if bad[r as usize] == m {
+            return (6, 16 * r);
+        }
+    }
+    return (4, 0);
+}
+
 // The register number of part `pa`.
 const fn preg(pa: ab::Part) u8 {
     return pa.reg + ast::pick(pa.v, V0, 0);
@@ -48,6 +79,9 @@ const CHAIN_STEPS: u32 = 4;
 const FF_NONE: u8 = 0;
 const FF_ABS: u8 = 1;
 const FF_ROUND: u8 = 2;
+// A line of the instruction cache and of the processor's fetch, in bytes: a boundary between two lines
+// inside a function or a loop that fits one line costs up to a quarter of its time (`line_fit`).
+const LINE: u32 = 64;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
 const S1: u8 = 11; // r11
@@ -229,6 +263,9 @@ pub(package) struct Gen {
     yvals: Vector<u32>, // the 32-byte vector values (indices)
     xalloc: u64,
     xfix: u64,
+    // The values a call reads from a slot until its instruction (`late_away`), and where each was.
+    lwas: Vector<u32>,
+    lva: Vector<Va>,
     valloc: u64,
     xscr: u64,
     xscr_cap: u32, // the values `xscr` may hold at a time
@@ -411,6 +448,8 @@ extend Gen {
             yvals: Vector::<u32>::new(),
             xalloc: ast::pick(win, XALLOC_WIN, XALLOC_SYSV),
             xfix: ast::pick(win, XFIX_WIN, XFIX_SYSV),
+            lwas: Vector::<u32>::new(),
+            lva: Vector::<Va>::new(),
             valloc: ast::pick(win, VALLOC_WIN, VALLOC_SYSV),
             xscr: ast::pick(win, XSCR_WIN, XSCR_SYSV),
             xscr_cap: ast::pick(win, 1, 2),
@@ -2366,6 +2405,40 @@ extend Gen {
     // it are saved around it (`save_scratch`), so it counts as no call for the homes.
     const fn rare(self: &Self, i: u32) bool {
         return self.cr.lv.rare[self.cr.lv.def_blk[i as usize] as usize];
+    }
+
+    // A value the call reads after its argument moves (`late`: the callee, an address passed after them)
+    // whose fixed home is a caller-saved register (an argument register: the plan holds homes there
+    // across calls, `Live::seg_past`) goes to a slot before the moves, and is read there until
+    // `late_back`.
+    fn late_away(self: &mut Self, late: &Vector<u32>) {
+        for q in 0..late.len() {
+            let x = late[q];
+            let va = self.cr.va[x as usize];
+            if va.home != H_FIXED || va.reg == NOREG || va.reg >= V0 || (bit(va.reg) & self.xfix) != 0 {
+                continue;
+            }
+            self.lwas.push(x);
+            self.lva.push(va);
+            let off = self.cr.slot_alloc(8, 8) as i64;
+            self.save_reg(va.reg, off, true);
+            let w = self.cr.va.index_mut(x as usize);
+            w.reg = NOREG;
+            w.home = H_SLOT;
+            w.off = off as i32;
+        }
+    }
+
+    // The values `late_away` moved are in their homes again for the reads after the call: the argument
+    // setup is done.
+    fn late_back(self: &mut Self) {
+        for q in 0..self.lwas.len() {
+            let x = self.lwas[q] as usize;
+            self.cr.free_slots.push(8u64 << 32 | (self.cr.va[x].off as u32) as u64);
+            *self.cr.va.index_mut(x) = self.lva[q];
+        }
+        self.lwas.truncate(0);
+        self.lva.truncate(0);
     }
 
     // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
@@ -8421,6 +8494,7 @@ extend Gen {
                 keep.push(x);
             }
         }
+        self.late_away(&late);
         // A sibling call's return is not emitted: only its arguments read the values after it.
         let back = !((t.op == O_CALL || !self.win) && self.sib_shape(i, t));
         self.spill_around_call(&keep, back);
@@ -8751,6 +8825,7 @@ extend Gen {
         if t.op == O_CALLIND {
             self.materialize(t.a, S1);
         }
+        self.late_back();
         if (b.pool[sig as usize + 1] & SIG_VARIADIC) != 0 && !self.win {
             // al: an upper bound of the vector registers the arguments take.
             self.c.mov_ri(x::RAX, self.cr.lay.vr_used);
@@ -10411,6 +10486,58 @@ extend Gen {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
         ats.extend_from_slice(&jto);
+        // Each loop's first byte and the end of its last block of the body, but a rare one, for `line_fit`.
+        let lp0 = ats.len();
+        if unsafe (*self.pkg).fit_lines {
+            let lv = &self.cr.lv;
+            let mut starts = Vector::<u32>::with_capacity(self.blk_at.len());
+            for q in 0..self.blk_at.len() {
+                if self.blk_at[q] != NONE && self.blk_at[q] < body_n {
+                    starts.push(self.blk_at[q]);
+                }
+            }
+            starts.sort();
+            let mut lend = Vector::<u32>::new();
+            lend.resize_default(lv.inner.len());
+            for q in 0..lv.order.len() {
+                let j = lv.order[q] as usize;
+                if lv.rare[j] || self.blk_at[j] == NONE || self.blk_at[j] >= body_n {
+                    continue;
+                }
+                // The next block's first byte. Each step halves the range: at most 32 steps.
+                let mut n: usize = 0;
+                let mut hi = starts.len();
+                while n < hi {
+                    let mid = (n + hi) / 2;
+                    if starts[mid] <= self.blk_at[j] {
+                        n = mid + 1;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let e = if n < starts.len() {
+                    starts[n]
+                } else {
+                    body_n
+                };
+                let mut h = lv.inner[j];
+                // At most one step per enclosing loop.
+                while h != NONE {
+                    if lend[h as usize] < e {
+                        *lend.index_mut(h as usize) = e;
+                    }
+                    h = lv.parent[h as usize];
+                }
+            }
+            for q in 1..lv.order.len() {
+                let k = lv.order[q] as usize;
+                if lv.inner[k] == k as u32 && lend[k] != 0 {
+                    ats.push(self.blk_at[k]);
+                    ats.push(lend[k]);
+                }
+            }
+        }
+        let nlp = (ats.len() - lp0) / 2;
         ats.extend_from_slice(&stubs);
         ats.push(tails_end);
         ats.push(ra);
@@ -10473,7 +10600,21 @@ extend Gen {
             return self.cr.refuse("too many sections");
         }
         let fl = place::func_flags(ps, !self.local && !self.base, !self.base);
-        let at = o.define(k2, sec, 4, size, fl);
+        // The loops that fit a line.
+        let mut loops = Vector::<u64>::new();
+        for q in 0..nlp {
+            let ls = lead + ats[lp0 + 2 * q];
+            let le = lead + ats[lp0 + 2 * q + 1];
+            if le > ls && le - ls <= LINE {
+                loops.push(ls as u64 << 32 | le as u64);
+            }
+        }
+        let (fal, fill) = if unsafe (*self.pkg).fit_lines {
+            line_fit(size, &loops)
+        } else {
+            (4u8, 0u8)
+        };
+        let at = o.define_led(k2, sec, fal, fill, size, fl);
         o.put(sec, pro.b[0..lead as usize]);
         o.put(sec, self.c.b[0..self.c.b.len()]);
         for q in 0..self.rels.len() {

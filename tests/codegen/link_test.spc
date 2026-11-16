@@ -485,30 +485,60 @@ fn nops_with_loop(n: usize, at: usize, back: u32) Vector<u8> {
 @test
 fn short_code_stays_off_a_page_boundary() {
     let small = nops_with_loop(5, 0, 0);
-    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 4), 16);
-    assert_eq(lu::keep_pad(small[0..small.len()], 0xFFC, 4), 4);
-    assert_eq(lu::keep_pad(small[0..small.len()], 0x1000, 4), 0);
-    assert_eq(lu::keep_pad(small[0..small.len()], 0xFEC, 4), 0);
-    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 64), 64);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 4, 0), 16);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFFC, 4, 0), 4);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x1000, 4, 0), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFEC, 4, 0), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 64, 0), 64);
     // Words 54 to 60 are a loop.
     let f = nops_with_loop(100, 60, 6);
     let c = f[0..f.len()];
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 4), 12);
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 60, 4), 24);
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 54, 4), 0);
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 61, 4), 0);
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 10, 4), 0);
-    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 16), 16);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 4, 0), 12);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 60, 4, 0), 24);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 54, 4, 0), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 61, 4, 0), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 10, 4, 0), 0);
+    assert_eq(lu::keep_pad(c, 0x2000 - 4 * 57, 16, 0), 16);
     // Words 50 to 70 are a loop around it: the outer one moves to the boundary.
     let mut g = nops_with_loop(100, 60, 6);
     let outer = nops_with_loop(100, 70, 20);
     for k in 280usize..284 {
         g[k] = outer[k];
     }
-    assert_eq(lu::keep_pad(g[0..g.len()], 0x2000 - 4 * 57, 4), 28);
+    assert_eq(lu::keep_pad(g[0..g.len()], 0x2000 - 4 * 57, 4, 0), 28);
     // Words 20 to 60 are a loop of 164 bytes.
     let wide = nops_with_loop(100, 60, 40);
-    assert_eq(lu::keep_pad(wide[0..wide.len()], 0x2000 - 4 * 40, 4), 0);
+    assert_eq(lu::keep_pad(wide[0..wide.len()], 0x2000 - 4 * 40, 4, 0), 0);
+}
+
+// With lines of 64 bytes (a Linux arm64 link), code that fits a line moves to where it holds the fewest
+// boundaries between two: a function of at most 64 bytes, and each loop of at most 64 bytes. The move off
+// a page boundary then keeps the place in the line.
+@test
+fn code_that_fits_a_line_stays_inside_one() {
+    let small = nops_with_loop(5, 0, 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x30, 4, 64), 16);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x2C, 4, 64), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x40, 4, 64), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0x30, 4, 0), 0);
+    assert_eq(lu::keep_pad(small[0..small.len()], 0xFF0, 4, 64), 16);
+    // Words 54 to 60 are a loop: bytes 216 to 244.
+    let f = nops_with_loop(100, 60, 6);
+    let c = f[0..f.len()];
+    assert_eq(lu::keep_pad(c, 0, 4, 64), 0);
+    assert_eq(lu::keep_pad(c, 16, 4, 64), 24);
+    // Words 36 to 60 are a loop of 100 bytes that holds the page boundary: it moves past it by whole lines.
+    let g = nops_with_loop(100, 60, 24);
+    assert_eq(lu::keep_pad(g[0..g.len()], 0x2000 - 200, 4, 0), 56);
+    assert_eq(lu::keep_pad(g[0..g.len()], 0x2000 - 200, 4, 64), 64);
+    // Two loops of 60 bytes, 8 bytes apart: one place holds a boundary in neither.
+    let mut two = nops_with_loop(40, 14, 14);
+    let w: u32 = 0x54000001 | (0x80000 - 14u32 & 0x7FFFF) << 5;
+    for q in 0..4usize {
+        two[4 * 31 + q] = (w >> 8 * q as u32) as u8;
+    }
+    assert_eq(lu::keep_pad(two[0..two.len()], 0x40, 4, 64), 0);
+    assert_eq(lu::keep_pad(two[0..two.len()], 0x44, 4, 64), 60);
 }
 
 // A little-endian value of `n` bytes at `at` of the bytes `b`.

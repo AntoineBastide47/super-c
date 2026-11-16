@@ -116,6 +116,11 @@ pub(package) struct Gen {
     taken: Vector<u64>, // the loads of a register-passed aggregate that take its registers (`parts_taken`): part << 32 | load
     csave: Vector<u8>, // the scratch homes saved around a call (`save_scratch`)
     csown: Vector<u32>, // per register of `csave`, the value it held
+    // The values a call reads from another place until its instruction (`late_away`), where each was, and
+    // the scratch registers that hold them.
+    lwas: Vector<u32>,
+    lva: Vector<Va>,
+    llock: u64,
     csoff: i64, // the stack offset of their run of bytes
     cssize: u32, // its size
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -258,6 +263,9 @@ extend Gen {
             taken: Vector::<u64>::new(),
             csave: Vector::<u8>::new(),
             csown: Vector::<u32>::new(),
+            lwas: Vector::<u32>::new(),
+            lva: Vector::<Va>::new(),
+            llock: 0,
             csoff: 0,
             cssize: 0,
             rarec: Vector::<bool>::new(),
@@ -6840,6 +6848,51 @@ extend Gen {
         self.cr.tmps = 0;
     }
 
+    // A value the call reads after its argument moves (`late`: the callee, an address passed after them)
+    // whose fixed home is a register the argument setup writes (`wr`: the plan holds homes in argument
+    // registers across calls, `Live::seg_past`) goes to a free scratch register before the moves, else to
+    // a slot, and is read there until `late_back`.
+    fn late_away(self: &mut Self, late: &Vector<u32>, wr: u64) {
+        for q in 0..late.len() {
+            let x = late[q];
+            let va = self.cr.va[x as usize];
+            if va.home != H_FIXED || va.reg == NOREG || va.reg >= V0 || (wr & bit(va.reg)) == 0 {
+                continue;
+            }
+            self.lwas.push(x);
+            self.lva.push(va);
+            let free = XSCR & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy | self.llock);
+            if free != 0 {
+                let f = free.trailing_zeros() as u8;
+                self.emit(a::mov_reg(true, f, va.reg));
+                self.llock |= bit(f);
+                self.cr.va.index_mut(x as usize).reg = f;
+            } else {
+                let off = self.cr.slot_alloc(8, 8);
+                self.mem(a::M_X, false, va.reg, a::SP, off);
+                let w = self.cr.va.index_mut(x as usize);
+                w.reg = NOREG;
+                w.home = H_SLOT;
+                w.off = off as i32;
+            }
+        }
+    }
+
+    // The values `late_away` moved are in their homes again for the reads after the call: the argument
+    // setup is done.
+    fn late_back(self: &mut Self) {
+        for q in 0..self.lwas.len() {
+            let x = self.lwas[q] as usize;
+            if self.cr.va[x].home == H_SLOT {
+                self.cr.free_slots.push(8u64 << 32 | (self.cr.va[x].off as u32) as u64);
+            }
+            *self.cr.va.index_mut(x) = self.lva[q];
+        }
+        self.lwas.truncate(0);
+        self.lva.truncate(0);
+        self.llock = 0;
+    }
+
     // After a call's arguments are in place: the caller-saved registers hold no value.
     fn forget_caller_saved(self: &mut Self) {
         let mut m = self.cr.held & ~(XFIX | vfix()) & self.clob;
@@ -7063,9 +7116,22 @@ extend Gen {
                 keep.push(x);
             }
         }
+        // The registers the argument setup writes: the call's argument registers, x8 and the scratch x16
+        // and x17.
+        let mut args: u64 = bit(8) | bit(a::IP0 as u8) | bit(a::IP1 as u8);
+        for k in 0..np {
+            let loc = self.cr.lay.locs[k as usize];
+            if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
+                for q in 0..loc.n as u32 {
+                    let pa = self.cr.lay.parts[(loc.p0 + q) as usize];
+                    if !pa.v {
+                        args |= bit(pa.reg);
+                    }
+                }
+            }
+        }
         // An indirect call's target that no argument is and that dies at the call, in a register the
-        // argument setup leaves (none of the call's argument registers, x8 or the scratch x16 and x17; else
-        // one of x9..x15), for `blr`; not through its slot.
+        // argument setup leaves (none of `args`; else one of x9..x15), for `blr`; not through its slot.
         let mut target = NOREG;
         if t.op == O_CALLIND {
             let x = self.cr.vx(t.a);
@@ -7073,18 +7139,6 @@ extend Gen {
             let mut arg = false;
             for k in 0..nops {
                 arg = arg || self.cr.vx(b.pool[(t.c + k) as usize]) == x;
-            }
-            let mut args: u64 = bit(8) | bit(a::IP0 as u8) | bit(a::IP1 as u8);
-            for k in 0..np {
-                let loc = self.cr.lay.locs[k as usize];
-                if loc.kind == ab::L_REG || loc.kind == ab::L_REF_REG {
-                    for q in 0..loc.n as u32 {
-                        let pa = self.cr.lay.parts[(loc.p0 + q) as usize];
-                        if !pa.v {
-                            args |= bit(pa.reg);
-                        }
-                    }
-                }
             }
             let free = XSCR & ~(self.cr.held | self.cr.lock | self.cr.tmps | self.cr.fixed_busy);
             if r != NOREG && r < V0 && !arg && !self.cr.live_on(x) && self.cr.va[x as usize].home != H_FIXED && ((args & bit(
@@ -7104,11 +7158,23 @@ extend Gen {
                 keep.push(x);
             }
         }
+        self.late_away(&late, args);
+        // The callee `late_away` put in a scratch register is called there.
+        let cr = if t.op == O_CALLIND {
+            self.cr.va[self.cr.vx(t.a) as usize].reg
+        } else {
+            NOREG
+        };
+        if target == NOREG && cr != NOREG && cr < V0 && (self.llock & bit(cr)) != 0 {
+            target = cr;
+        }
         // A sibling call's return is not emitted: only its arguments read the values after it.
         let back = !self.sib_shape(i, t);
         self.spill_around_call(&keep, back);
         let mut rvals = Vector::<u64>::new();
-        // The registers the template reads in place of its argument registers hold no temporary.
+        // The registers the template reads in place of its argument registers hold no temporary, nor do the
+        // ones `late_away` took.
+        self.cr.lock |= self.llock;
         for j in 0..to.len() {
             self.cr.lock |= bit(V0 + to[j] as u8);
         }
@@ -7374,6 +7440,11 @@ extend Gen {
                 self.add_off(8, a::SP, d);
             }
         }
+        if t.op == O_CALLIND && target == NOREG {
+            self.materialize(t.a, a::IP0 as u8);
+            target = a::IP0 as u8;
+        }
+        self.late_back();
         if t.op == O_CALL {
             if tpl.len() != 0 {
                 // An intrinsic: its instructions in place of the call, over the same registers.
@@ -7404,10 +7475,6 @@ extend Gen {
                 self.emit(a::bl(0));
             }
         } else {
-            if target == NOREG {
-                self.materialize(t.a, a::IP0 as u8);
-                target = a::IP0 as u8;
-            }
             if self.sibling(i, t) {
                 // A sibling call's `br` restores the frame first: through x16, which the epilogue keeps.
                 if target != a::IP0 as u8 {

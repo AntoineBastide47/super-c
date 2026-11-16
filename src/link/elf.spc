@@ -1836,7 +1836,8 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
 
 // The input sections of output section `q`, whose address is `addr`, placed again in their order, each
 // one of arm64 code moved forward off a page boundary that would fall inside a short function or loop of
-// it (`lu::keep_pad`): the bytes between two functions never run. The output section's size.
+// it, and to where its functions and loops that fit a line hold the fewest line boundaries
+// (`lu::keep_pad`): the bytes between two functions never run. The output section's size.
 fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
     let os = l.osecs[q as usize];
     let mut size = os.size;
@@ -1852,7 +1853,7 @@ fn keep_code(l: &mut L, b: []u8, q: u32, addr: u64) u64 {
         }
         let mut at = lu::align_up(sc.at + moved, sc.align);
         if sc.ty == SHT_PROGBITS && (sc.flags & SHF_EXECINSTR) != 0 {
-            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4));
+            at += lu::keep_pad(b[sc.off..sc.off + sc.size as usize], addr + at, sc.align.max(4), 0);
         }
         moved = at - sc.at;
         l.secs.index_mut(s).at = at;
