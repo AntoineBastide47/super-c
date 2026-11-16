@@ -3552,6 +3552,20 @@ fn objects_of(dir: str, rel: str, out: &mut Vector<(String, String)>) {
     }
 }
 
+// A minimumNumber and maximumNumber loop (`x < lo || x == lo && x.is_sign_negative()`), which the release
+// build vectorizes (`lir::loops` `num_red`), over NaNs (quiet and signaling), zeros of both signs and 0.25:
+// a signaling NaN lane skips as a quiet one, and -0 stays below +0, as the scalar steps give.
+@test
+fn a_minimum_number_loop_skips_signaling_nans_in_its_lanes() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "const fn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\n\n@noinline\nfn min_max(xp: *const f32, n: usize) (f32, f32) {\n    let mut lo: f32 = 1.0 / 0.0;\n    let mut hi: f32 = -1.0 / 0.0;\n    for x in view(xp, n) {\n        if x < lo || x == lo && x.is_sign_negative() {\n            lo = x;\n        }\n        if x > hi || x == hi && !x.is_sign_negative() {\n            hi = x;\n        }\n    }\n    return (lo, hi);\n}\n\n@noinline\nfn step(x: f32, lo: &mut f32, hi: &mut f32) {\n    if x < *lo || x == *lo && x.is_sign_negative() {\n        *lo = x;\n    }\n    if x > *hi || x == *hi && !x.is_sign_negative() {\n        *hi = x;\n    }\n}\n\nfn main() i32 {\n    let specials: [u32; 6] = [0x7fc00000, 0x7fa00000, 0xffa00000, 0x80000000, 0, 0x3e800000];\n    let mut r: u64 = 12345;\n    let mut bad: i32 = 0;\n    for trial in 0..3000u32 {\n        let n = (trial % 70) as usize;\n        let mut v = Vector::<f32>::new();\n        for _ in 0..n {\n            r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);\n            v.push(f32::from_bits(specials[((r >> 33) % 6) as usize]));\n        }\n        let (a, b) = min_max(v.as_ptr(), n);\n        let mut lo: f32 = 1.0 / 0.0;\n        let mut hi: f32 = -1.0 / 0.0;\n        for k in 0..n {\n            step(v[k], &mut lo, &mut hi);\n        }\n        if a.to_bits() != lo.to_bits() || b.to_bits() != hi.to_bits() {\n            bad += 1;\n        }\n    }\n    return bad.min(100);\n}\n",
+    );
+    assert(cli::superc_in(p.dir(), "build --profile=release main.spc -o bin").ok(), "the build");
+    assert_eq(p.run_bin(), 0);
+}
+
 // A build that replays a module's cached emission restores the module's LIR: the optimizer inlines its
 // functions (`free` into `Box<a::S>`'s drop, `freed` into main) as a clean build does, so both write the same
 // objects.

@@ -2164,8 +2164,8 @@ extend Gen {
     // operation, but an operation on vectors in xmm registers alone (`vreg`); 8 for an unsigned 64-bit
     // multiplication with overflow (rax and rdx, the values moved out of them, the operands, the flag and
     // the result); 7 for a division and a high multiplication (the same but the flag); 6 for an atomic
-    // operation; 5 for a shift and a select; a branch on two folded comparisons by `conj_need`; 4 for the
-    // others.
+    // operation and a select on a folded comparison; 5 for a shift and another select; a branch on two
+    // folded comparisons by `conj_need`; 4 for the others.
     fn need(self: &mut Self, i: u32) u32 {
         let t = self.cr.b().insts[i as usize];
         if t.op == O_BR && self.folded(t.a) && (self.cr.b().insts[t.a as usize].op == O_AND || self.cr.b().insts[t.a as usize].op == O_OR) {
@@ -2194,6 +2194,11 @@ extend Gen {
             return 6;
         }
         if t.op == O_ARMW || t.op == O_ACAS {
+            return 6;
+        }
+        // A select on a comparison folded into it: the comparison's two operands, the sides, the result and
+        // a constant's temporary.
+        if t.op == O_SELECT && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE && self.cr.lv.pfold[t.a as usize] {
             return 6;
         }
         if t.op >= O_SHL && t.op <= O_ASHR || t.op == O_SELECT || self.folds_both(t) {

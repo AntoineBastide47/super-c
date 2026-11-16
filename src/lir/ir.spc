@@ -1129,6 +1129,10 @@ pub(package) const VOP_UNCHECKED: u16 = 1024;
 /// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`). A
 /// SIMD_ROUND_EVEN that computes C's `round`: halfway away from zero (arm64 `frinta`, `Package.vround_away`).
 pub(package) const VOP_NUM: u16 = 2048;
+/// `Package.vminnum`: a minimumNumber of float vectors by SIMD_MIN and SIMD_MAX, or by VOP_NUM ones of a
+/// quieted operand.
+pub(package) const VMIN_EXACT: u8 = 1;
+pub(package) const VMIN_QUIET: u8 = 2;
 /// The operation code of a `vop` (an `ir::core::OP_*` code).
 pub(package) const VOP_CODE: u16 = 255;
 
@@ -2197,6 +2201,10 @@ pub(package) struct Package {
     /// The native backend inserts a scalar into any lane of a vector in a register (`target::table::Isa`):
     /// else an unchecked gather builds its vector by interleaves of splats (`lir::opt` `gather_lanes`).
     pub(package) lane_insert: bool,
+    /// How the native backend computes a minimumNumber of float vectors in registers
+    /// (`target::table::Isa`): 0 lane by lane, VMIN_EXACT by SIMD_MIN and SIMD_MAX, VMIN_QUIET by VOP_NUM
+    /// ones of a number and an operand quieted by a VOP_NUM SIMD_MAX of itself (`lir::loops` `num_red`).
+    pub(package) vminnum: u8,
     /// The instruction set whose intrinsics the native backend expands from templates (`target::intrin`),
     /// empty for none: `lir::opt::Run::new` takes a call of one that computes from its arguments alone
     /// (`intrin::pure`) for a call that touches no memory.
@@ -2372,6 +2380,7 @@ extend Package {
             vtbl: false,
             mask_bits: false,
             lane_insert: true,
+            vminnum: VMIN_EXACT,
             isa: "",
             addsub: false,
             lzcnt: false,

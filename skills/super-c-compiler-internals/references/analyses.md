@@ -143,6 +143,11 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | Closed form's leaving values and their targets | `LoopOpt::close_plan` (no change), then `close_apply` | `LoopOpt` (`lout`, `tgt_of`, `tused`, `cf_leave`) | `close_apply` |
 | Promotion candidates, the slots addresses derive (`collect`, for `merges` too) | `Promoter::collect`, `Promoter::merges` (`lir::promote`; graph and operand lists from `Opt`) | `Promoter` | the promotion |
 | The loads made before a copy for the loads of the slot it feeds (copy, offset, type -> value) | `Opt::copy_fed`, from `slot_writes`' tables | `Opt` (`fed_key`, `fed_ty`, `fed_v`) | each walk |
+| A loop's carried modulo accumulators: the accesses through a `VK_MADDR` address whose copies cover all `K` lanes, of a slot only accesses and offsets read | `LoopOpt::carry` (`slot_root`, `slot_private`), in `vectorize` | `LoopOpt` (`vcar`, `vcur`) | the loop's vectorization |
+| A vector loop's aligned-block loads: contiguous loads before an early exit through no counted slice (`vblk`), and the loads of a branch's side through no counted slice with their condition and side (`lcl`, `lclc`, `lclw`, from `linearize`) | `LoopOpt::vplan_with`, `linearize` | `LoopOpt` | the loop's vectorization |
+| A loop's loads through one pointer after stores through another: both bases, scales and byte ranges | `LoopOpt::apart_plan` | `LoopOpt` (`abase`, `ascale`, `alo`, `ahi`) | the loop's `version` (`apart_guard`, `copy_at`) |
+| A minimumNumber or maximumNumber reduction's select chain, its sign test any form (`ir::sign_test`, shared with `Opt::simplify`'s copysign fold) | `LoopOpt::num_red` | `LoopOpt` (`vfr`, `vk` VK_RCMP) | the loop's vectorization |
+| Whether the bits of a multi-register lane mask have a reader besides a count of them | `Opt::bits_kept` (one walk of the body's operand lists) | not stored | per call |
 | SLP predecessor tables | `Slp::plan` (`lir::slp`; block map and use counts from `Opt`'s `blk_of`, `pblock`, `ops`) | `Slp` | the packing |
 | Operand lists of one instruction | `lir::verify` `uses`, `uses_into` | caller's vector | per call |
 
@@ -178,6 +183,7 @@ either.
 | Wasm structure (idom, loop headers, forward edges) | `codegen::structure` `Shape::run` (reads `Live`'s `rpo`, `pat`, `preds`) | `Shape` | end of the function |
 | Call layout of a signature | `call_layout` (a64gen, x64gen), `cc::classify` | `Gen` (`lays`, `lay_at`) | end of the function |
 | Intrinsic template of each body symbol | `intrin::of_symbols` | `Gen.itpl` | end of the function |
+| Per intrinsic call, the argument whose register its template writes the result into (arm64) | `a64gen` `call_over`, before `assign` | `Live.cover` (read by `Live::over`) | each plan of the body |
 | Calls that return, clobber, dead ends | `call_tables` | `Gen` (`cret`, `cpre`, `rarec`) | end of the function |
 | Object symbol of a package symbol | `osym_of` (wasm `pkg_osym`) | `Gen.osym` (`place::Osyms`, from the native objects' pool) | end of the object |
 | Object sections, symbols, relocations | `codegen::obj` `Obj` | `Obj`, then the object bytes | the object write |

@@ -429,6 +429,10 @@ pub(package) struct Live {
     /// (the result's register for a returned value), REG_NONE for none: the plan gives it that one when it
     /// can.
     pub(package) rhint: Vector<u8>,
+    /// Per instruction (the generator's, before `assign`; empty: none), the argument a call writes its
+    /// result over (an intrinsic's template that writes the register both arrive in, which the generator
+    /// renames when the argument ends there: `over`), NONE for none.
+    pub(package) cover: Vector<u32>,
     /// Per value (the generator's, before `assign`; empty: none), the register a load of one part of an
     /// aggregate the body takes in registers finds its value in (`place::parts_taken`), REG_NONE for
     /// another value: the plan leaves it there when it can, as a parameter of the signature (`arr`).
@@ -610,6 +614,7 @@ extend Live {
             solo: Vector::<u64>::new(),
             multi: Vector::<u64>::new(),
             rhint: Vector::<u8>::new(),
+            cover: Vector::<u32>::new(),
             part_in: Vector::<u8>::new(),
             part_quiet: 0,
             quiet_out: 0,
@@ -5295,7 +5300,8 @@ extend Live {
     // argument before they write a parameter) or as a switch's scrutinee, or an instruction every generator
     // emits reading its first operand before it writes its result (`over_inst`), `x` its first operand
     // alone; on a target that reads them all before (`three`), any operand of a `three_op`; on one that
-    // writes over an operand (`two`), an operand a `two_op` may be written over.
+    // writes over an operand (`two`), an operand a `two_op` may be written over; a call's argument the
+    // generator writes its result over (`cover`).
     const fn over(self: &Self, b: &Body, x: u32, l: u32) bool {
         let v = Live::val_of(b, x);
         if v == VNONE {
@@ -5317,6 +5323,9 @@ extend Live {
                 }
             }
             return m == n;
+        }
+        if t.op == O_CALL && l as usize < self.cover.len() && self.cover[l as usize] != NONE {
+            return n == 1 && self.seen(b.pool[(t.c + self.cover[l as usize]) as usize]) == v;
         }
         return n == 1 && self.seen(t.a) == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
             b,

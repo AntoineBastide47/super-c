@@ -765,6 +765,7 @@ extend CEmit {
             l.pkg.vtbl = feature(pk, "ssse3");
             l.pkg.mask_bits = tgt::isa(pk.arch).mask_bits;
             l.pkg.lane_insert = tgt::isa(pk.arch).lane_insert;
+            l.pkg.vminnum = tgt::isa(pk.arch).vminnum;
             l.pkg.isa = tgt::isa(pk.arch).name;
             l.pkg.addsub = feature(pk, "sse3");
             l.pkg.lzcnt = feature(pk, "lzcnt");

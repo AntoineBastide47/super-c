@@ -1655,6 +1655,7 @@ extend Opt {
         self.unr.apairs = pk.apairs;
         self.unr.vmulh = pk.vec_mulh;
         self.unr.vaccs = pk.vec_accs;
+        self.unr.vminnum = pk.vminnum;
         self.unr.vsat = pk.vec_sat;
         self.unr.vabsd = pk.vec_absd;
         self.unr.vbits = pk.vec_bits;
@@ -11564,9 +11565,11 @@ extend Opt {
 
     // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`lane_mask_of`), extended or
     // not: the negated sum of the lane mask, each lane -1 or 0, in the count's type. A mask has at most 64
-    // lanes, so the sum fits the lanes' width. Whether it did.
+    // lanes, so the sum fits the lanes' width. Not of the bits of a mask of several registers another
+    // instruction reads (`bits_kept`): their count takes fewer instructions than a second sum. Whether it
+    // did.
     fn mask_count(self: &mut Self, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        if !is_int(t.ty) {
+        if !is_int(t.ty) || self.bits_kept(b, t.a, i) {
             return false;
         }
         let mk = self.lane_mask_of(b, k, i, t.a, 0);
@@ -11591,6 +11594,53 @@ extend Opt {
         };
         *t = Inst { op: O_NEG, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
         return true;
+    }
+
+    // Whether bits `v` (through extensions and truncations) are the bits of a lane mask of more than 16 bytes
+    // (`mask_cmp`, or their sum: `bits_mask`) that an instruction besides `i` or an edge reads.
+    fn bits_kept(self: &mut Self, b: &Body, v: Value, i: u32) bool {
+        // The chain from `v` down to the sum: at most 7 values.
+        let mut chain: [Value; 7] = [VNONE; 7];
+        let mut n: usize = 0;
+        let mut x = v;
+        // Each step takes one extension or truncation: at most 6, as `lane_mask_of`.
+        for _ in 0..6 {
+            if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
+                chain[n] = x;
+                n += 1;
+                x = b.insts[x as usize].a;
+            }
+        }
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+            return false;
+        }
+        // The mask's bytes: a sum over one register's lanes takes fewer instructions than a count.
+        let bm = bits_mask(b, x);
+        let mc = mask_cmp(b, x);
+        let nb = if bm != VNONE {
+            type_bytes(b.type_of(bm), 8)
+        } else if mc.is_some() {
+            type_bytes(b.type_of(mc.unwrap().1), 8)
+        } else {
+            0u32
+        };
+        if nb <= 16 {
+            return false;
+        }
+        chain[n] = x;
+        n += 1;
+        for j in 0..b.insts.len() as u32 {
+            if j == i || chain[0..n].contains(&j) {
+                continue;
+            }
+            lv::uses_edges(b, b.insts[j as usize], &mut self.uses);
+            for q in 0..self.uses.len() {
+                if chain[0..n].contains(&self.uses[q]) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Mask bits `t` (instruction `i` of block `k`) of a lane-wise comparison (`mask_cmp`), on a target that
@@ -11650,12 +11700,21 @@ extend Opt {
     }
 
     // Integer lane `t` (`O_VEXTRACT`, instruction `i` of block `k`) of a vector a plain load in the block
-    // reads, nothing between writing its bytes (a store into a slot whose address leaks nowhere writes none
+    // reads (or of its lane-wise extension: the lane's load extended), nothing between writing its bytes (a store into a slot whose address leaks nowhere writes none
     // of a load not derived from it): a load of the lane's element (one instruction, as the lane's
     // move to a general register; neighbouring ones pair, `lir::pairs`). Whether it did.
     const fn lane_load(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        let lv = t.a;
+        let mut lv = t.a;
         if !is_int(t.ty) || (lv & (VPARAM | VFLAG)) != 0 || lv == VNONE {
+            return false;
+        }
+        // Through a lane-wise extension: the narrow lane's load, extended.
+        let x = b.insts[lv as usize];
+        let ext = x.op == O_ZEXT || x.op == O_SEXT;
+        if ext {
+            lv = x.a;
+        }
+        if (lv & (VPARAM | VFLAG)) != 0 || lv == VNONE {
             return false;
         }
         let l = b.insts[lv as usize];
@@ -11679,13 +11738,20 @@ extend Opt {
                 return false;
             }
         }
-        let eb = type_bytes(t.ty, pk.ptr_bytes);
+        let et = ast::pick(ext, lane_type(l.ty), t.ty);
+        let eb = type_bytes(et, pk.ptr_bytes);
         let off = (l.c as i32) as i64 + (t.aux as u32 * eb) as i64;
-        if off > 0x7FFFFFFF {
+        if off > 0x7FFFFFFF || (l.aux & MEM_BLOCK) != 0 {
             return false;
         }
         let al = (l.aux & 15).min(eb.trailing_zeros() as u16);
-        *t = Inst { op: O_LOAD, ty: t.ty, aux: al | l.aux & MEM_TBAA, a: l.a, b: VNONE, c: (off as i32) as u32 };
+        let ld = Inst { op: O_LOAD, ty: et, aux: al | l.aux & MEM_TBAA, a: l.a, b: VNONE, c: (off as i32) as u32 };
+        *t = if ext {
+            let e = self.before(b, k, i, ld);
+            Inst { op: x.op, ty: t.ty, aux: 0, a: e, b: VNONE, c: VNONE }
+        } else {
+            ld
+        };
         return true;
     }
 
@@ -19602,6 +19668,15 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return simplify_wide(b, i);
     }
     if is_vec(t.ty) {
+        // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
+        if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
+            if splat_of(b, t.b) == Some(0) {
+                return t.a;
+            }
+            if t.op != O_SUB && splat_of(b, t.a) == Some(0) {
+                return t.b;
+            }
+        }
         simplify_vec(b, i);
         return VNONE;
     }

@@ -2,8 +2,8 @@
 // a scalar lane loop: an entry of fewer lanes per chunk (`min_num` of 16 lanes as four of 4), a choice, a
 // count and the bits of a comparison's mask between lane widths (`lir::opt` `mask_choose`, `mask_count`,
 // `mask_sum`), `compress_store` by chunks with and without room after the packed lanes
-// (`lir::lower` `compress_chunks`), and an unchecked gather of a constant mask lane by lane
-// (`gather_lanes`, `lane_load`).
+// (`lir::lower` `compress_chunks`), an unchecked gather of a constant mask lane by lane (`gather_lanes`,
+// `lane_load`), and a float sum by halves in registers (`a64gen` `reduce_reg`).
 import std::simd;
 
 // A deterministic sequence: the next value of a 64-bit linear congruential generator.
@@ -266,4 +266,44 @@ fn unchecked_gathers_load_each_active_lane() {
         };
     }
     assert(gather_mix(x[0..256], ix[0..256]) == want, "the gathered lanes");
+}
+
+@noinline
+const fn tree16(x: []f32) f32 {
+    return simd::reduce_add_tree(simd::load::<f32, 16>(x, 0));
+}
+
+@noinline
+const fn tree2(x: []f64) f64 {
+    return simd::reduce_add_tree(simd::load::<f64, 2>(x, 0));
+}
+
+// A float sum by halves in registers (arm64 EXT, FADD and FADDP): the lanes pair as the halving defines,
+// which a sum in lane order would not give for these values.
+@test
+fn a_tree_sum_adds_by_halves() {
+    let mut x = Vector::<f32>::new();
+    for k in 0..16usize {
+        x.push(
+            if k % 2 == 0 {
+                1.0e8
+            } else {
+                -1.0e8
+            } + k as f32 * 0.25,
+        );
+    }
+    let mut w: [f32; 16] = [0.0; 16];
+    for k in 0..16usize {
+        w[k] = x[k];
+    }
+    let mut h: usize = 8;
+    while h >= 1 {
+        for k in 0..h {
+            w[k] = w[k] + w[k + h];
+        }
+        h /= 2;
+    }
+    assert(tree16(x[0..16]).to_bits() == w[0].to_bits(), "16 f32 lanes by halves");
+    let d: [f64; 2] = [0.1, 0.2];
+    assert(tree2(d[0..2]).to_bits() == (0.1f64 + 0.2f64).to_bits(), "2 f64 lanes");
 }

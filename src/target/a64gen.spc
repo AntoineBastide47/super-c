@@ -808,6 +808,15 @@ extend Gen {
         if rd != NOREG {
             return rd;
         }
+        let px = self.step_param(i);
+        if px == NONE {
+            return self.def(i);
+        }
+        return self.step_into(i, px);
+    }
+
+    // The value index of the parameter `def_step` gives result `i` the register of, NONE for none.
+    fn step_param(self: &mut Self, i: u32) u32 {
         let b = self.cr.b();
         let k = self.cr.lv.def_blk[i as usize];
         let bk = b.blocks[k as usize];
@@ -816,7 +825,7 @@ extend Gen {
         if self.cr.lv.end[i as usize] != self.cr.pos || self.cr.lv.pos[k as usize] != self.cr.pos || self.cr.va[i as usize].home != H_NONE || self.crosses_call(
             i,
         ) || self.cr.lv.seg_val(i) {
-            return self.def(i);
+            return NONE;
         }
         let px = self.cr.lv.back_param(b, tm, i, self.cr.pos);
         if px == NONE || self.cr.va[px as usize].home != H_FIXED || self.cr.lv.end[px as usize] < self.cr.pos || self.cr.lv.reads_after(
@@ -825,10 +834,14 @@ extend Gen {
             i,
             VPARAM | px - b.insts.len() as u32,
         ) {
-            return self.def(i);
+            return NONE;
         }
-        // `i` holds the register from here, as a temporary: a value the plan puts there before the edge
-        // moves it out (`vacate_temp`).
+        return px;
+    }
+
+    // Result `i` in the register of parameter `px` (`step_param`), as a temporary from here: a value the
+    // plan puts there before the edge moves it out (`vacate_temp`).
+    fn step_into(self: &mut Self, i: u32, px: u32) u8 {
         let r = self.cr.va[px as usize].reg;
         self.cr.lock |= bit(r);
         self.cr.set_owner(r, i);
@@ -1060,6 +1073,15 @@ extend Gen {
         fill(&mut self.cr.lv.wcount, ni + 1, 0);
         for i in 0..ni {
             self.cr.lv.wcount[i + 1] = self.cr.lv.wcount[i] + self.wide(i as u32) as u32;
+        }
+        // An intrinsic whose template writes its result over a vector argument in the register both arrive
+        // in: the plan may give them one register (`Live::cover`), which `call` renames the template's to.
+        fill(&mut self.cr.lv.cover, ni, NONE);
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                self.cr.lv.cover[i] = self.call_over(t);
+            }
         }
         // A scalar the body returns from a register: the plan gives it that register when it can.
         fill(&mut self.cr.lv.rhint, n, lv::REG_NONE);
@@ -7022,6 +7044,9 @@ extend Gen {
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
+        // The result in the register of the parameter the back edge passes it to, which the template reads
+        // as the written argument (`step_param`): an accumulator.
+        let mut stepped = NONE;
         // An argument a one-instruction template reads and overwrites, which lives on: its sources read it in
         // its register, the destination stays (`intrin::vsplit_dest`).
         let mut src: (u32, u32) = (99, 99);
@@ -7046,8 +7071,16 @@ extend Gen {
             if ok && intrin::vwrites(true, tx, pr) {
                 let rl = self.cr.lay.ret;
                 let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x) {
+                let px = if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && !self.cr.dies(x) {
+                    self.step_param(i)
+                } else {
+                    NONE
+                };
+                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && (self.cr.dies(x) || px == x) {
                     rres = vr;
+                    if px == x {
+                        stepped = px;
+                    }
                 } else {
                     split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
                     ok = split;
@@ -7082,7 +7115,12 @@ extend Gen {
                 let mut f = NOREG;
                 if self.cr.lv.seg_val(x) {
                     let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
-                    if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
+                    if s != NONE && src.0 != 99 && self.cr.seg_reg[s as usize] == V0 + src.1 as u8 {
+                        // The written argument's register, which the plan gives the result (`Live::cover`):
+                        // the one instruction reads it before it writes (`vsplit_dest`); the result binds it
+                        // after.
+                        f = V0 + src.1 as u8;
+                    } else if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
                         f = self.seg_take(x);
                     }
                 }
@@ -7576,7 +7614,9 @@ extend Gen {
         }
         if self.cr.lay.whole_vreg(rl, t.ty) {
             let x = self.cr.vx(i);
-            if self.cr.live_on(x) {
+            if stepped != NONE {
+                let _ = self.step_into(x, stepped);
+            } else if self.cr.live_on(x) {
                 self.cr.bind(
                     x,
                     if rres != NOREG {
@@ -7708,6 +7748,31 @@ extend Gen {
 
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
     // function.
+    // The argument of intrinsic call `t` whose register its template writes the result into, both whole
+    // vectors in that register, NONE for none (`Live::cover`).
+    fn call_over(self: &mut Self, t: Inst) u32 {
+        let b = self.cr.b();
+        let tpl = self.intrinsic(t.a);
+        let np = b.pool[t.b as usize];
+        self.call_layout(t);
+        let rl = self.cr.lay.ret;
+        if !self.cr.lay.whole_vreg(rl, t.ty) {
+            return NONE;
+        }
+        let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
+        if !intrin::vwrites(true, tpl, pr) {
+            return NONE;
+        }
+        for k in 0..np {
+            let loc = self.cr.lay.locs[k as usize];
+            let v = b.pool[(t.c + k) as usize];
+            if self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && self.cr.lay.parts[loc.p0 as usize].reg as u32 == pr {
+                return k;
+            }
+        }
+        return NONE;
+    }
+
     const fn intrinsic(self: &Self, s: u32) str<'static> {
         return self.itpl[s as usize];
     }
@@ -9176,6 +9241,9 @@ const fn movi_imm(k: u64) u32 {
 // sum, or a minimum or maximum of lanes below 8 bytes (of 8-byte ones, a sum of two).
 const fn reduce_in_reg(c: u8, vt: u8, ty: u8) bool {
     let lt = lane_type(vt);
+    if in_vreg(vt) && is_float(lt) && ty == lt && c == core::SIMD_REDUCE_ADD_TREE {
+        return type_bytes(vt, 8) / type_bytes(lt, 8) <= 4;
+    }
     if !in_vreg(vt) || is_float(lt) || type_bytes(ty, 8) != type_bytes(lt, 8) {
         return false;
     }
@@ -12000,8 +12068,9 @@ extend Gen {
     // Integer reduction `c` (`reduce_add`, `reduce_min`, `reduce_max`, signed `sg`) `t` (instruction `i`) of
     // vector `v` of type `vt` (8 or 16 bytes) into a result of its lane type, in v registers: ADDV, SMAXV,
     // UMAXV, SMINV or UMINV across the lanes (the pairwise ADDP, SMAXP and the like for two), then UMOV of
-    // lane 0, which zero-extends it; an `and`, `or` or `xor` in `reduce_bits`. Whether it did: not for
-    // floats, nor for a minimum or maximum of 8-byte lanes.
+    // lane 0, which zero-extends it; an `and`, `or` or `xor` in `reduce_bits`; a float `reduce_add_tree` of
+    // up to four lanes by halves. Whether it did: not for other float reductions, nor for a minimum or
+    // maximum of 8-byte lanes.
     fn reduce_reg(self: &mut Self, i: u32, t: Inst, c: u8, sg: bool, v: Value, vt: u8) bool {
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -12015,6 +12084,19 @@ extend Gen {
             return true;
         }
         let s = (self.vec_use(v, V0 + 31) - V0) as u32;
+        if is_float(lt) {
+            // The sum by halves: of four lanes the high pair (EXT into v30) plus the low one (FADD .2S),
+            // then the two lanes' pairwise sum (FADDP), as of two.
+            let mut p = s;
+            if n == 4 {
+                self.emit(0x6E000000 | s << 16 | 8 << 11 | s << 5 | 30);
+                self.emit(0x0E20D400 | 30 << 16 | s << 5 | 30);
+                p = 30;
+            }
+            let rd = (self.def(i) - V0) as u32;
+            self.emit(0x7E30D800 | (eb == 8) as u32 << 22 | p << 5 | rd);
+            return true;
+        }
         if n == 2 && eb == 8 {
             self.emit(0x5EF1B800 | s << 5 | 31); // ADDP Dd, Vn.2D
         } else if n == 2 {
