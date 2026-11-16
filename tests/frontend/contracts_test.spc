@@ -627,6 +627,47 @@ fn unproved_spec_syntax_is_an_error() {
 }
 
 fn proved_contracts(b: &mut h::ExitBatch) {
+    // Twenty branches in a row make 2^20 paths: the walk that merges them at each join proves the call's
+    // `requires` past the exact walk's budget.
+    b.add(
+        "a call after twenty branches in a row",
+        M"(fn quarter(i: usize) usize
+    requires i < 1000
+    ensures |r| r < 4
+{
+    return i % 4;
+}
+fn many(a: &[u32; 4], x: u32, n: usize) u32 {
+    let mut s: u32 = 0;
+    if (x & 1) != 0 { s += 1; }
+    if (x & 2) != 0 { s += 1; }
+    if (x & 4) != 0 { s += 1; }
+    if (x & 8) != 0 { s += 1; }
+    if (x & 16) != 0 { s += 1; }
+    if (x & 32) != 0 { s += 1; }
+    if (x & 64) != 0 { s += 1; }
+    if (x & 128) != 0 { s += 1; }
+    if (x & 256) != 0 { s += 1; }
+    if (x & 512) != 0 { s += 1; }
+    if (x & 1024) != 0 { s += 1; }
+    if (x & 2048) != 0 { s += 1; }
+    if (x & 4096) != 0 { s += 1; }
+    if (x & 8192) != 0 { s += 1; }
+    if (x & 16384) != 0 { s += 1; }
+    if (x & 32768) != 0 { s += 1; }
+    if (x & 65536) != 0 { s += 1; }
+    if (x & 131072) != 0 { s += 1; }
+    if (x & 262144) != 0 { s += 1; }
+    if (x & 524288) != 0 { s += 1; }
+    return s + a[quarter(n % 1000)];
+}
+fn main() i32 {
+    let a = [1u32, 2, 3, 4];
+    return many(&a, 5, 1002) as i32;
+}
+)",
+        5,
+    );
     // A clause's `const fn` call through a `&mut` parameter (`c.get()`) reads the caller's value at the
     // call; a call that only reads leaves the parameter's target as it was (`old(c.get())`).
     b.add(

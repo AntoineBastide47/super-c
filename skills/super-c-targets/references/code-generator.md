@@ -22,7 +22,8 @@ set first: it states the value, register and frame model.
    prefers no store, then the farthest next use. A folded instruction emits no code; its user reads its
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
    take the registers first; a call in a rare block
-   saves around it the scratch registers whose values live past it (`save_scratch`), so it is no call
+   saves around it the scratch registers whose values live past it (`save_scratch`; a vector register
+   at its value's width, a 256- or 512-bit one whole), so it is no call
    for the homes; another call saves the homes the plan holds across calls (`Live.seg_past`). A value's range runs through the rare blocks before its last read, so the save
    leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
    over the laid-out blocks made on first use), and arm64 saves two registers per `stp`. The restore

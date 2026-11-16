@@ -32,6 +32,7 @@ import ir::interp as iri;
 import atomic;
 import std::parallel::data as dpar;
 import std::mem::ptr;
+import std::collections::heap as hp;
 import ir::facts as fx;
 import ir::layout as lay;
 import ir::tailcall as tcl;
@@ -458,6 +459,20 @@ struct Path {
 }
 
 extend Path {
+    // A path that holds nothing: a free slot of the walk's queue.
+    fn empty() Path {
+        return Path {
+            state: Vector::<u32>::new(),
+            pc: Vector::<u32>::new(),
+            esc: Vector::<u32>::new(),
+            views: Vector::<u64>::new(),
+            lm: Vector::<u64>::new(),
+            blk: NONE,
+            from: NONE,
+            m0: NONE,
+        };
+    }
+
     fn copy(self: &Self) Path {
         return Path {
             state: self.state.clone(),
@@ -557,11 +572,16 @@ const DEFS_REC: u8 = 3;
 const SEL_CASES: u32 = 32;
 // The most disjunctions over a conjunction one goal splits (`holds_in`).
 const SPLIT_PARTS: u32 = 16;
+// The walk steps (blocks entered, over every path) of the exact walk of a body walked only for facts,
+// before the merged walk (`prove_body`). In the compiler's build the exact walks for facts take at most
+// 21,529 steps, but one that takes 161,043 (`memcmp_eq`), whose fact the merged walk keeps too.
+const FACTS_WALK: u32 = 32768;
+// The same for a body with obligations: ML-KEM's largest takes 49,213.
+const PROOF_WALK: u32 = 262144;
+// The walk steps per block of the merged walk (`merge_paths`): it visits each block about once (the
+// compiler's build: at most 2.3 per block where it gives facts).
+const MERGED_PER_BLOCK: u32 = 4;
 // The most steps a stage of `holds_in` that most goals pass at once takes (`capped`).
-// The walk steps (blocks entered, over every path) of a body walked only for bounds-check facts. Past
-// them the walk stops and the body keeps no fact. The facts the compiler's own build keeps need at most
-// 161,043; the bodies that spend the full STEP_BUDGET there keep none.
-const FACTS_WALK: u32 = 262144;
 const STAGE_STEPS: u32 = 200000;
 // The steps of the last attempt at a goal over sequences (`holds`).
 const SEQ_STEPS: u32 = 50000;
@@ -866,7 +886,20 @@ struct Prover<const B: usize> {
     ovf: u8,
     steps: u32,
     over: bool, // the body spent its budget
+    // The paths to walk (`push_path`, `pop_path`): the exact walk's stack (depth first); while `merging`,
+    // the slots of a max-heap of keys, the inverted reverse postorder of the path's block << 32 | the
+    // push count's low 20 bits << 12 | the slot, so the walk takes the earliest block first and every
+    // path into a join reaches it before the join is walked; the free slots; the slot of the latest
+    // path queued per block, which an arriving path merges into (`merge_paths`); the paths queued; the
+    // pushes.
     work: Vector<Path>,
+    work_q: hp::BinaryHeap<u64>,
+    work_free: Vector<u32>,
+    work_at: Map<u32, u32>,
+    work_n: u32,
+    work_seq: u32,
+    merging: bool, // the walk after the exact one spent its budget: it merges paths (`push_path`)
+    walk_cap: u32, // the walk steps of a walk for facts or a merged walk (`spend`): FACTS_WALK, or MERGED_PER_BLOCK per block
     ev: Eval<B>,
     vname: Map<u32, u32>, // a parameter's unknown -> the parameter's local, for counterexamples
     pvars: Map<u64, u32>, // a const generic parameter (module << 32 | node) -> its unknown
@@ -1062,6 +1095,13 @@ extend<const B: usize> Prover<B> {
             steps: 0,
             over: false,
             work: Vector::<Path>::new(),
+            work_q: hp::BinaryHeap::<u64>::new(),
+            work_free: Vector::<u32>::new(),
+            work_at: Map::<u32, u32>::new(),
+            work_n: 0,
+            work_seq: 0,
+            merging: false,
+            walk_cap: FACTS_WALK,
             ev: Eval::<B>::new(),
             vname: Map::<u32, u32>::new(),
             refining: false,
@@ -2280,7 +2320,7 @@ extend<const B: usize> Prover<B> {
 
     const fn spend(self: &mut Self) bool {
         self.steps += 1;
-        return self.steps + self.sv.steps <= STEP_BUDGET && (!self.facts_only || self.steps <= FACTS_WALK);
+        return self.steps + self.sv.steps <= STEP_BUDGET && self.steps <= self.walk_cap;
     }
 
     // ---- reports ----------------------------------------------------------------------------------
@@ -6651,6 +6691,8 @@ extend<const B: usize> Prover<B> {
         subs.push(Sub { state: state.clone(), conds: Vector::<u32>::new(), blk: s.chain });
         let mut leaves: u32 = 0;
         let mut edges = Vector::<u64>::new();
+        // The path condition of the sub-path walked: `pc`, then its conditions (one buffer for the walk).
+        let mut full = Vector::<u32>::with_capacity(pc.len() + 8);
         for _k in 0..STEP_BUDGET {
             if subs.len() == 0 {
                 break;
@@ -6660,10 +6702,9 @@ extend<const B: usize> Prover<B> {
                 return self.tm.boolean(false), NONE;
             }
             let mut sb = subs.pop().unwrap();
-            let mut full = pc.clone();
-            for j in 0..sb.conds.len() {
-                full.push(sb.conds[j]);
-            }
+            full.clear();
+            full.extend_copy(pc);
+            full.extend_copy(&sb.conds);
             // A quantifier: its atom, past its loop.
             let qi = Prover::<B>::quant_at(cb, sb.blk);
             if qi != NONE {
@@ -6741,17 +6782,26 @@ extend<const B: usize> Prover<B> {
             } else if t.kind == ir::TM_SWITCH {
                 edges.clear();
                 self.switch_edges(cb, cm, &mut sb.state, &t, all, &mut edges);
+                // An edge whose condition the path refutes is never taken (a short-circuit's repeated
+                // test of one value): no leaf. Each edge but the last takes a copy of the sub-path.
+                let mut live: usize = 0;
                 for j in 0..edges.len() {
-                    // An edge whose condition the path refutes is never taken (a short-circuit's
-                    // repeated test of one value): no leaf.
                     let c = (edges[j] & 0xFFFFFFFFu64) as u32;
                     let nc = self.tm.not(c);
-                    if self.tm.is_false(c) || sb.conds.contains(&nc) || pc.contains(&nc) {
-                        continue;
+                    if !self.tm.is_false(c) && !sb.conds.contains(&nc) && !pc.contains(&nc) {
+                        edges.set(live, edges[j]);
+                        live += 1;
                     }
-                    let mut cs = sb.conds.clone();
-                    cs.push(c);
-                    subs.push(Sub { state: sb.state.clone(), conds: cs, blk: (edges[j] >> 32) as u32 });
+                }
+                if live != 0 {
+                    for j in 0..live - 1 {
+                        let mut cs = sb.conds.clone();
+                        cs.push((edges[j] & 0xFFFFFFFFu64) as u32);
+                        subs.push(Sub { state: sb.state.clone(), conds: cs, blk: (edges[j] >> 32) as u32 });
+                    }
+                    sb.conds.push((edges[live - 1] & 0xFFFFFFFFu64) as u32);
+                    sb.blk = (edges[live - 1] >> 32) as u32;
+                    subs.push(sb);
                 }
             } else if t.kind == ir::TM_CALL {
                 let sp = if wsp.end > wsp.start {
@@ -10822,7 +10872,36 @@ extend<const B: usize> Prover<B> {
         self.mem = null;
     }
 
+    // The exact walk is exponential in the branches in a row: past its first cap body `bp` is walked
+    // once more with paths merged at joins, each block about once (`merge_paths`). A merge forgets: a
+    // body with obligations the merged walk cannot prove is walked exactly with the whole budget, and a
+    // walk for facts keeps none. Only the walk's own limits, its steps and its paths, start the merged
+    // walk: a solver that spent the budget would spend it again. Each walk starts afresh: the facts a
+    // walk makes once per term (`clear_terms`) are not in the next one's paths.
     fn prove_body(self: &mut Self, bp: *const ir::CoreBody, refining: bool) {
+        let m = (unsafe (*bp).module) as usize;
+        let held = replace(self.errs.index_mut(m), diag::Errors::new());
+        let nf = self.facts.len();
+        self.over = false;
+        self.walk_body(bp, refining, 0);
+        if self.over && (self.steps > self.walk_cap || self.work_n as usize >= PATHS_MAX) {
+            self.errs.set(m, diag::Errors::new());
+            self.merging = true;
+            self.walk_body(bp, refining, MERGED_PER_BLOCK * (unsafe (*bp).blocks.len()) as u32);
+            self.merging = false;
+            if !self.facts_only && (self.over || self.errs.at(m).errors.len() != 0) {
+                self.facts.truncate(nf);
+                self.errs.set(m, diag::Errors::new());
+                self.walk_body(bp, refining, u32::MAX);
+            }
+        }
+        let mut e = replace(self.errs.index_mut(m), held);
+        self.errs.index_mut(m).append(&mut e);
+    }
+
+    // One walk of body `bp` with a budget of `cap` walk steps (`spend`), or with 0 the exact walk's
+    // first (FACTS_WALK or PROOF_WALK).
+    fn walk_body(self: &mut Self, bp: *const ir::CoreBody, refining: bool, cap: u32) {
         let b = unsafe &*bp;
         self.m = b.module;
         self.owner = b.owner;
@@ -10838,6 +10917,13 @@ extend<const B: usize> Prover<B> {
         }
         self.facts_on = facts;
         self.facts_only = !needs;
+        self.walk_cap = if cap != 0 {
+            cap
+        } else if needs {
+            PROOF_WALK
+        } else {
+            FACTS_WALK
+        };
         self.chk_ok.clear();
         self.chk_dead.clear();
         self.pan_cond = NONE;
@@ -10869,7 +10955,7 @@ extend<const B: usize> Prover<B> {
         if own {
             self.loops_end(b);
         }
-        self.work.clear();
+        self.work_reset();
         // A slot per `&mut T` parameter (`slot_ty`), past the locals; the memory epoch last.
         self.slot_ty.clear();
         self.slot_of.clear();
@@ -10933,23 +11019,28 @@ extend<const B: usize> Prover<B> {
             }
             self.mem = null;
         }
-        self.work.push(
-            Path {
-                state: st,
-                pc: pc0,
-                esc: Vector::<u32>::new(),
-                views: Vector::<u64>::new(),
-                lm: Vector::<u64>::new(),
-                blk: b.entry,
-                from: NONE,
-                m0: NONE,
-            },
-        );
+        let first = Path {
+            state: st,
+            pc: pc0,
+            esc: Vector::<u32>::new(),
+            views: Vector::<u64>::new(),
+            lm: Vector::<u64>::new(),
+            blk: b.entry,
+            from: NONE,
+            m0: NONE,
+        };
+        self.push_path(first);
+        self.walk_paths(b, own);
+    }
+
+    // Walk the queued paths of body `b` (its own walk when `own`): at the end each check that held on
+    // every path that reached it is a fact.
+    fn walk_paths(self: &mut Self, b: &ir::CoreBody, own: bool) {
         for _k in 0..STEP_BUDGET {
             if self.over {
                 return;
             }
-            if self.work.len() == 0 {
+            if self.work_n == 0 {
                 // Every path ended: each check that held on every path that reached it is a fact.
                 if self.facts_on && own {
                     let mut rs = Vector::<u32>::new();
@@ -10967,7 +11058,7 @@ extend<const B: usize> Prover<B> {
                 self.budget_spent();
                 return;
             }
-            let path = self.work.pop().unwrap();
+            let path = self.pop_path();
             self.run_block(b, path);
         }
         self.budget_spent();
@@ -11015,11 +11106,163 @@ extend<const B: usize> Prover<B> {
     }
 
     fn push_path(self: &mut Self, path: Path) {
-        if self.work.len() >= PATHS_MAX {
+        // The exact walk: a stack, depth first.
+        if !self.merging {
+            if self.work.len() >= PATHS_MAX {
+                self.budget_spent();
+                return;
+            }
+            self.work.push(path);
+            self.work_n += 1;
+            return;
+        }
+        let blk = path.blk;
+        let mut at = NONE;
+        if let Some(s) = self.work_at.get(&blk) {
+            at = *s;
+        }
+        if at != NONE {
+            let mut a = replace(self.work.index_mut(at as usize), Path::empty());
+            let ok = self.merge_paths(&mut a, &path);
+            self.work.set(at as usize, a);
+            if ok {
+                return;
+            }
+        }
+        if self.work_n as usize >= PATHS_MAX {
             self.budget_spent();
             return;
         }
-        self.work.push(path);
+        let slot = switch self.work_free.pop() {
+            Some(x) => x,
+            None => {
+                self.work.push(Path::empty());
+                (self.work.len() - 1) as u32
+            },
+        };
+        self.work.set(slot as usize, path);
+        let rpo = if blk as usize < self.fx.rpo_of.len() {
+            self.fx.rpo_of[blk as usize]
+        } else {
+            0
+        };
+        let key = (u32::MAX - rpo) as u64 << 32 | (self.work_seq & 0xFFFFF) as u64 << 12 | slot as u64;
+        self.work_q.push(key);
+        self.work_seq = self.work_seq.wrapping_add(1);
+        self.work_n += 1;
+        self.work_at.insert(blk, slot);
+    }
+
+    // An empty walk queue.
+    fn work_reset(self: &mut Self) {
+        self.work.clear();
+        self.work_q.clear();
+        self.work_free.clear();
+        self.work_at.clear();
+        self.work_n = 0;
+        self.work_seq = 0;
+    }
+
+    // The next queued path (`work_q`); one is queued.
+    fn pop_path(self: &mut Self) Path {
+        if !self.merging {
+            self.work_n -= 1;
+            return self.work.pop().unwrap();
+        }
+        let key = self.work_q.pop().unwrap();
+        let slot = (key & 0xFFFu64) as u32;
+        let path = replace(self.work.index_mut(slot as usize), Path::empty());
+        self.work_free.push(slot);
+        self.work_n -= 1;
+        if let Some(s) = self.work_at.get(&path.blk) {
+            if *s == slot {
+                let _ = self.work_at.remove(&path.blk);
+            }
+        }
+        return path;
+    }
+
+    // Merge path `b` into path `a`, both at one block, for the walk that merges (`merging`): they must
+    // agree on the loop measures and the function's measure, and each local's two values must have one
+    // width. A local valued on one side only gets none: the next read makes an unknown (`local_val`),
+    // which any value is. Each other local whose values differ gets an unknown; the facts are the common
+    // prefix, the facts both rest lists hold, and one disjunction, each side the rest of its facts with
+    // the unknowns equal to its values. The locals references may reach and the views are the unions:
+    // a memory event forgets more. False, `a` unchanged, where they do not agree.
+    fn merge_paths(self: &mut Self, a: &mut Path, b: &Path) bool {
+        if a.m0 != b.m0 || a.state.len() != b.state.len() || a.lm.as_slice() != b.lm.as_slice() {
+            return false;
+        }
+        let mut diff = Vector::<u32>::new();
+        for i in 0..a.state.len() {
+            let (x, y) = (a.state[i], b.state[i]);
+            if x == y || x == NONE || y == NONE {
+                continue;
+            }
+            let (tx, ty) = (self.tm.at(x), self.tm.at(y));
+            if ty.w != tx.w || ty.sg != tx.sg {
+                return false;
+            }
+            diff.push(i as u32);
+        }
+        for i in 0..a.state.len() {
+            if b.state[i] == NONE {
+                a.state.set(i, NONE);
+            }
+        }
+        for j in 0..b.esc.len() {
+            if !a.esc.contains(&b.esc[j]) {
+                a.esc.push(b.esc[j]);
+            }
+        }
+        for j in 0..b.views.len() {
+            if !a.views.contains(&b.views[j]) {
+                a.views.push(b.views[j]);
+            }
+        }
+        let mut k: usize = 0;
+        while k < a.pc.len() && k < b.pc.len() && a.pc[k] == b.pc[k] {
+            k += 1;
+        }
+        let mut in_b = Set::<u32>::new();
+        for j in k..b.pc.len() {
+            in_b.insert(b.pc[j]);
+        }
+        let mut both = Set::<u32>::new();
+        let mut kept = Vector::<u32>::new();
+        let mut ca = self.tm.boolean(true);
+        for j in k..a.pc.len() {
+            let f = a.pc[j];
+            if !in_b.contains(&f) {
+                ca = self.tm.and(ca, f);
+            } else if !both.contains(&f) {
+                both.insert(f);
+                kept.push(f);
+            }
+        }
+        let mut cb = self.tm.boolean(true);
+        for j in k..b.pc.len() {
+            if !both.contains(&b.pc[j]) {
+                cb = self.tm.and(cb, b.pc[j]);
+            }
+        }
+        for q in 0..diff.len() {
+            let i = diff[q] as usize;
+            let t = self.tm.at(a.state[i]);
+            let x = self.tm.var(t.w, t.sg);
+            let ea = self.tm.cmp(T_EQ, x, a.state[i]);
+            let eb = self.tm.cmp(T_EQ, x, b.state[i]);
+            ca = self.tm.and(ca, ea);
+            cb = self.tm.and(cb, eb);
+            a.state.set(i, x);
+        }
+        let f = self.tm.or(ca, cb);
+        a.pc.truncate(k);
+        a.pc.extend_copy(&kept);
+        if !self.tm.is_true(f) {
+            a.pc.push(f);
+        }
+        return true;
     }
 
     // Enter block `to` from block `from` on `path`: a contract chain is evaluated in place, a loop
@@ -11611,17 +11854,27 @@ extend<const B: usize> Prover<B> {
             let mut edges = Vector::<u64>::new();
             self.switch_edges(b, b.module, &mut path.state, &t, false, &mut edges);
             self.own_check(&mut path.pc, t.span);
+            // An edge whose condition the path refutes is never taken (`chain`).
+            let mut live = Vector::<u64>::with_capacity(edges.len());
             for j in 0..edges.len() {
-                // An edge whose condition the path refutes is never taken (`chain`).
                 let c = (edges[j] & 0xFFFFFFFFu64) as u32;
                 let nc = self.tm.not(c);
-                if self.tm.is_false(c) || path.pc.contains(&nc) {
-                    continue;
+                if !self.tm.is_false(c) && !path.pc.contains(&nc) {
+                    live.push(edges[j]);
                 }
-                let mut q = path.copy();
-                q.pc.push(c);
-                self.enter(b, q, me, (edges[j] >> 32) as u32);
             }
+            if live.len() == 0 {
+                return;
+            }
+            // Each edge but the last takes a copy of the path, the last the path itself.
+            for j in 0..live.len() - 1 {
+                let mut q = path.copy();
+                q.pc.push((live[j] & 0xFFFFFFFFu64) as u32);
+                self.enter(b, q, me, (live[j] >> 32) as u32);
+            }
+            let e = live[live.len() - 1];
+            path.pc.push((e & 0xFFFFFFFFu64) as u32);
+            self.enter(b, path, me, (e >> 32) as u32);
         } else if t.kind == ir::TM_CALL {
             self.enter(b, path, me, t.t0);
         } else if t.kind == ir::TM_RETURN {

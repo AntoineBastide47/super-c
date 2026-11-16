@@ -18827,6 +18827,41 @@ b4:
     let drv = "#include <stdint.h>\nint64_t pick(int64_t *, int64_t, int64_t);\nint main(void) {\n  int64_t a[4] = {1, 20, 300, 4000};\n  int64_t r = pick(a, 0, 0);\n  if (r != 1 || a[0] != 21) return 1;\n  a[0] = 1;\n  r = pick(a, 0, 1);\n  if (r != 4300 || a[0] != 21) return 2;\n  a[0] = 1;\n  r = pick(a, 1, 1);\n  return !(r == 1 && a[0] == 9);\n}\n";
     assert_eq(run_native(lir, drv), 0);
 }
+// A 256-bit value in a vector scratch home that lives across a call in a rare block is saved around the
+// call whole: a save of its low 16 bytes alone loses lanes 4 to 7.
+@test
+fn a_rare_call_saves_a_256_bit_value_whole() {
+    let lir = M"(lir ptr 8
+sym @bump fn global noinline
+sym @twice fn global
+fn @bump
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = add.i64 v0, v1
+  ret v2
+fn @twice
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = load.v8f32 v0 align 2
+  v3 = iconst.i64 0
+  v4 = icmp.ne v1, v3
+  br v4, b1, b2
+b1: unlikely
+  v5 = call.i64 @bump(v1) : (i64) -> i64
+  store v5, v0+32 align 3
+  jmp b2
+b2:
+  v6 = fadd.v8f32 v2, v2
+  store v6, v0 align 2
+  ret
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = "#include <stdint.h>\nstruct s { float l[8]; int64_t n; };\nvoid twice(struct s *, int64_t);\nint main(void) {\n  struct s v;\n  for (int i = 0; i < 8; i++) v.l[i] = (float)(i + 1);\n  v.n = 0;\n  twice(&v, 5);\n  if (v.n != 6) return 1;\n  for (int i = 0; i < 8; i++) if (v.l[i] != (float)(2 * (i + 1))) return 2 + i;\n  return 0;\n}\n";
+    assert_eq(run_wide(lir, drv), 0);
+}
 
 // A 64-bit extension of a 32-bit value that only comparisons with a register and address sums read takes
 // no register of its own (`lv::FOLD_XUSE`): arm64 compares and adds the narrow register extended (`cmp

@@ -2693,9 +2693,18 @@ fn a_stopped_runner_ends_the_running_tests() {
     let pidf = loader::read_file(format("{}/pid", root).as_str()).unwrap();
     let mut ps = format("ps -p {} -o stat=", pidf.as_str().trim());
     let mut out = format("{}/ps", root);
-    let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
-    let st = loader::read_file(&out).unwrap();
-    assert(st.as_str().trim().is_empty() || st.as_str().trim().starts_with("Z"), "the test's process is killed");
+    // The orphaned process may still be ending when the runner returns: up to 10 s, far below its 60.
+    let mut gone = false;
+    for _ in 0..200 {
+        let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
+        let st = loader::read_file(&out).unwrap();
+        gone = st.as_str().trim().is_empty() || st.as_str().trim().starts_with("Z");
+        if gone {
+            break;
+        }
+        ptime::sleep(ptime::Duration::from_millis(50));
+    }
+    assert(gone, "the test's process is killed");
 }
 
 // The --test pipeline end to end: @test collection across modules, per-module and global fixtures, method

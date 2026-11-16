@@ -2379,11 +2379,33 @@ extend Gen {
             if !lives {
                 continue;
             }
-            let off = self.cr.slot_alloc(16, 16) as i64;
-            self.save_reg(r, off, true);
+            let n = self.scratch_bytes(r, x);
+            let off = self.cr.slot_alloc(n, 16) as i64;
+            self.scratch_reg(r, off, n, true);
             self.csave.push((r, off, x));
         }
         return self.csave.len();
+    }
+
+    // The bytes a save of scratch home `r` holding value `x` takes: a vector register's whole value (a 256-
+    // or 512-bit one too), at least 16.
+    const fn scratch_bytes(self: &Self, r: u8, x: u32) u32 {
+        return if r >= V0 {
+            type_bytes(self.cr.xty(x), self.cr.ptr).max(16)
+        } else {
+            16
+        };
+    }
+
+    // Save (`store`) or restore scratch home `r` at slot `off`: `n` bytes of a vector register.
+    fn scratch_reg(self: &mut Self, r: u8, off: i64, n: u32, store: bool) {
+        if r < V0 {
+            self.save_reg(r, off, store);
+        } else if store {
+            self.c.vstore(n, r - V0, x::at(x::RSP, off as i32));
+        } else {
+            self.c.vload(n, r - V0, x::at(x::RSP, off as i32));
+        }
     }
 
     // After the instruction `save_scratch` saved `n` registers around: those registers back, but one that
@@ -2392,10 +2414,11 @@ extend Gen {
     fn restore_scratch(self: &mut Self, n: usize) {
         for k in 0..n {
             let (r, off, x) = self.csave[k];
+            let w = self.scratch_bytes(r, x);
             if self.cr.owner[r as usize] == x {
-                self.save_reg(r, off, false);
+                self.scratch_reg(r, off, w, false);
             }
-            self.cr.free_slots.push(16u64 << 32 | (off as u32) as u64);
+            self.cr.free_slots.push(w as u64 << 32 | (off as u32) as u64);
         }
         self.csave.truncate(0);
     }

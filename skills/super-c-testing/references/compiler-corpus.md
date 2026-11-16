@@ -210,7 +210,7 @@ The release workflow's `wasm-target` job runs it in two shards.
 On an aarch64 host every build calls the Neon entries (`neon` is the baseline), so without the
 lane `expect_run` builds again with `SC_SIMD_SCALAR=1` and requires the same output, the entry
 model runs over `std/simd/backend/aarch64.spc`. `SC_SIMD_FEATURES=+dotprod,+i8mm,+rdm`
-adds features to every differential build: the conformance run on Linux aarch64 (the arm64
+adds features to every differential build for the host (not a wasm one): the conformance run on Linux aarch64 (the arm64
 runner, with the cross-built compiler) uses the default set and that one. An entry whose key another entry holds with other features is called in one of the two
 sets only (`dot` with and without `dotprod`): the model accepts it uncalled when its sibling is
 called.

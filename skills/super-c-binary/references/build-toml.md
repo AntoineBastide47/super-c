@@ -113,7 +113,10 @@ A build tree records the proofs that held (`__sc_prove`, `prove_cached` in `src/
 key per module whose obligations all held, over the module's source, the sources of every module it
 imports or names (transitively) and of the prelude, the compiler identity, the target, the
 architecture, the level and the flags. A later build skips the proofs of each module whose key the
-record holds; a failed obligation is never recorded. `SC_CEMIT_STATS=1` prints
+record holds; a failed obligation is never recorded. A module the tree's record misses reads the
+shared record of its key in the cache base (`<base>/.prove/<key>`, `shared_record`), which every tree
+of any project shares, and writes it once its proofs held: a second tree of the same sources proves
+nothing again. `SC_CEMIT_STATS=1` prints
 `prove: <n> to prove, <k> from the proof record, <w> workers` (`<w>`: the workers the proofs run on).
 
 ### Build cache
@@ -122,16 +125,14 @@ The build cache base is `$SC_CACHE_DIR`, else `~/.super-c/cache`. Each project c
 root below it, `<base>/<project>` (`cache_root`: the manifest's `bin`, else its `[lib]` name, a byte
 outside `[A-Za-z0-9._-]` or a leading `.` made `_`); script builds cache in
 `<base>/.scripts`. Projects of one name share a root (the worktrees and copies of a project), and no
-sweep reads or deletes outside the root of the build that runs it: not the base, not another
-project's root. The one exception is `<base>/.prove`, the proof records every project's builds share
-(`prove_dir`, keyed by each module's sources and the compiler; none when caching is off). Only
-`super-c clean --full` deletes a root, its project's.
+sweep reads or deletes outside the root of the build that runs it and the shared proof records
+(`<base>/.prove`): not another project's root. Only `super-c clean --full` deletes a root, its
+project's.
 
 The sweeps (`sweep`) run after a successful build, at most once every 30 minutes each, in the root of
 the build's project (or `.scripts`). The cache sweep (`<root>/.sweep`, `sweep_cache`) deletes the stale
-prelude images (below). The proof sweep (`<base>/.prove/.sweep`, `sweep_proofs`) deletes the proof
-records nothing wrote for 30 days and the temporary files of an hour (a build that still needs a record
-proves and writes it again). The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry
+prelude images (below). The proof sweep (`<base>/.prove/.sweep`, `sweep_proofs`) deletes the shared
+proof records idle for 30 days and the temporary files idle for an hour. The project sweep (`<out-dir>/.sweep`, `sweep_project`): every out-dir entry
 with nothing written for 30 days (a build tree, a link record, a binary) goes unless a build holds the
 lock of a tree in it, as do the emitted trees below the root directory idle as long. `super-c clean`
 runs the same sweeps at once; `super-c clean --full` removes the out-dir, the emitted trees and the

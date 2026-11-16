@@ -1006,10 +1006,10 @@ pub(package) fn diff_build_in(p: cli::Proj, opts: []str) DiffBuild {
     if simd_lane() {
         cmd.push_str(" --target=wasm --target-feature=+simd128");
     }
-    // `SC_SIMD_FEATURES`: more CPU features for every differential build (a conformance run with
-    // `+dotprod,+i8mm,+rdm`, or an x86-64 level).
+    // `SC_SIMD_FEATURES`: more CPU features of the host for every differential build that targets it (a
+    // conformance run with `+dotprod,+i8mm,+rdm`, or an x86-64 level); not a wasm build.
     let more = stdlib::getenv("SC_SIMD_FEATURES");
-    if more != null && unsafe *more != 0 as char {
+    if more != null && unsafe *more != 0 as char && !wasm {
         cmd.format_into(" --target-feature={}", unsafe str::from_cstr(more));
     }
     // `SC_SIMD_WIDTH`: the preferred width on AVX-512 (`--simd-width`), 512 for the 512-bit entries.

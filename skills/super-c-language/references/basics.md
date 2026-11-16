@@ -186,7 +186,10 @@ a reference, its cast to a pointer and the `ptr` of a slice with a `len` above 0
 omitted fields are 0. Equal
 operands give equal results: `requires i == j` proves `a[i] == a[j]`, `half(x) == half(y)` for a
 `const fn`, `x / 3 == y / 3`, also where the rows imply the equality (`x <= y, y <= x`). A
-proof that goes over its fixed budget is not proved. `-fno-prove` skips the proofs;
+proof walks each path of the body; past a cap of steps it walks the body once more with the paths
+merged where branches join, so many branches in a row do not exhaust it. A body whose merged walk
+cannot prove its obligations gets the path walk with the whole budget. A proof that goes over its
+fixed budget is not proved. `-fno-prove` skips the proofs;
 `-fcontract-checks` also checks the clauses at run time (binary skill, build-toml.md). Without it a
 build emits no check: the output is the same as without the clauses.
 

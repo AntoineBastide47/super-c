@@ -39,7 +39,7 @@ file is authoritative for where to look first.
 | The locals of member references made once outside every loop and used only to read or write a member (`let c = &mut self.f[i]`): their target escapes only where such a reference is passed on | `Prover::scan_lazy` (`Facts::loop_scan`, reused) | `lazy`, per body | the next body |
 | The view a modeled method gave a container's value, or a slice in a memory epoch; the sequences a spec function's result may equal | `Prover::sq_effect`, `elem_write`, `slice_of`, `define` | `vdef`, `sdef`, `alias`, `alias_pool`, per body | the next body |
 | The type arguments of the generic spec function being unfolded | `Prover::call_value` | `subst`, during `define` | the unfolding's end |
-| The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path | the path's end |
+| The locals a reference made on the path may reach, which a memory event forgets | `Prover::escape` | `Path.esc`, per path (the union where the merged walk joins two paths, `merge_paths`) | the path's end |
 | The contract site of each chain's first block and of each block that enters one | `Prover::begin_sites` | `site_of_chain`, `site_of_pred`, per body | the next body |
 | A `@prove_exhaustive` function's inputs: each parameter's domain (kind, range narrowed by its `requires`, count) | `exhaustive_job`, `pdim` | `PJob.dims`, per function | end of the function's proof |
 | The failed assertion of an evaluated run: contract kind, clause, owner, frame depth, span | `Interp::assert_failed` (on a failed `TM_ASSERT` while `pa_on`) | `Interp.pa_*`, per run | the next `prove_run` |
