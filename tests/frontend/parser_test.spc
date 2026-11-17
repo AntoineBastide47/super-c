@@ -1394,7 +1394,7 @@ fn diagnostics_by_message() {
     h::expect_err_msg(
         "field attribute",
         "struct S { @test pub x: i32 }\nfn main() i32 { return 0; }\n",
-        "only '@reflect', '@ordered' and '@owned' apply to a field declaration",
+        "only '@reflect', '@ordered', '@owned', '@counter' and '@counter_lock' apply to a field declaration",
     );
     h::expect_err_msg(
         "owned off a field",

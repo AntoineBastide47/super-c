@@ -799,6 +799,9 @@ const SRC_LOC: u32 = 0x10000000;
 // A value a call is given from memory (`arg_foreign`): its claims are distinct from each other alone, as a
 // raw pointer may reach a value another source holds.
 const SRC_MEM: u32 = 0x08000000;
+// A loop's invariants at its header: their claims are distinct (`loop_apart` proved it where they were
+// established), but any other source's may be among them, as memory's.
+const SRC_LOOP: u32 = SRC_MEM | 0x04000000;
 
 // The nesting of the branch splits `factor_parts` makes.
 const FACTOR_DEPTH: u32 = 16;
@@ -893,6 +896,8 @@ struct Prover<const B: usize> {
     // gave (`sh_gv`); the counts made before their version's units were known (`nsh_wait`).
     sh_p: Map<u32, u64>,
     sh_kn: Map<u32, u64>,
+    ctr_tmp: Map<u32, u32>, // a temporary that holds a counter field's address: that place (`ctr_scan`)
+    ctr_ty: Map<u64, bool>, // module << 32 | struct type: whether it has counter fields (`counted`)
     sh_mode: bool,
     ov_take_sh: Vector<u32>,
     sh_seen: Vector<u32>,
@@ -1100,6 +1105,7 @@ struct Prover<const B: usize> {
     held_k: Map<u32, u64>, // a held atom: its allocator's key (`alloc_key`)
     ov_defd: Map<u32, bool>,
     ov_pre: u32, // the version before the walked call's or drop's (`inv_resume`)
+    recv_pre: u32, // `free`'s receiver before the walked call or drop (`inv_resume`), else NONE
     ov_terms: Map<u64, u32>,
     ov_fr: Map<u32, u64>, // a framed term: the term of its earlier version << 32 | the side (`ov_frame`)
     fr_depth: u32,
@@ -1214,6 +1220,19 @@ const OB_PATTERN: u64 = 11; // a conversion into a pattern type
 const OB_PANIC: u64 = 12; // a check of a body with contracts, which proves that none of its operations panics
 const OB_TYPE_INV: u64 = 13; // a struct's invariant where its value leaves a body of the struct's file
 const OB_BLOCK: u64 = 14; // an index into an `@owned` field's block
+const OB_COUNTER: u64 = 15; // a step of an `@counter` field (`count_step`)
+
+// The operations of a counter step (`count_step`): a plain store, an atomic add, sub, compare-and-swap
+// or store, and the write of a whole struct.
+const CS_PLAIN: u8 = 0;
+const CS_ADD: u8 = 1;
+const CS_SUB: u8 = 2;
+const CS_CAS: u8 = 3;
+const CS_STORE: u8 = 4;
+const CS_INIT: u8 = 5;
+
+// The counter a lock's unit counts: LOCK_UNIT + the locked counter (`count_step`).
+const LOCK_UNIT: u32 = 64;
 // A projection that indexes a raw pointer (`ptr_index`): none, the block of an `@owned` field, memory.
 const PI_NONE: u8 = 0;
 const PI_OWNED: u8 = 1;
@@ -1252,6 +1271,8 @@ extend<const B: usize> Prover<B> {
             fn_binds: Vector::<Vector<u64>>::new(),
             sh_p: Map::<u32, u64>::new(),
             sh_kn: Map::<u32, u64>::new(),
+            ctr_tmp: Map::<u32, u32>::new(),
+            ctr_ty: Map::<u64, bool>::new(),
             sh_mode: false,
             ov_take_sh: Vector::<u32>::new(),
             sh_seen: Vector::<u32>::new(),
@@ -1384,6 +1405,7 @@ extend<const B: usize> Prover<B> {
             held_k: Map::<u32, u64>::new(),
             ov_defd: Map::<u32, bool>::new(),
             ov_pre: 0,
+            recv_pre: NONE,
             ov_terms: Map::<u64, u32>::new(),
             ov_fr: Map::<u32, u64>::new(),
             fr_depth: 0,
@@ -1820,16 +1842,26 @@ extend<const B: usize> Prover<B> {
     // Whether a value of type `ty` is frozen: a scalar or a shared view (`[]T`), which no shared
     // reference can change and whose elements no write can reach while it lives.
     fn frozen(self: &Self, m: ModuleId, ty: TypeId) bool {
-        return self.frozen_d(m, ty, 0);
+        return self.frozen_d(m, ty, 0, false);
     }
 
-    // `frozen`, `depth` structs deep.
-    fn frozen_d(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
+    // Whether a value of type `ty`, a call's result, can hold no borrow the call takes: `frozen`, where a
+    // type parameter of the body counts as frozen. Its lifetimes outlive the body's parameters, so none is
+    // a borrow the body makes of a parameter's target.
+    fn holds_no_borrow(self: &Self, m: ModuleId, ty: TypeId) bool {
+        return self.frozen_d(m, ty, 0, true);
+    }
+
+    // `frozen`, `depth` structs deep; with `gen`, `holds_no_borrow`.
+    fn frozen_d(self: &Self, m: ModuleId, ty: TypeId, depth: u32, gen: bool) bool {
         if ty == TYPE_NONE {
             return false;
         }
         let a = self.ast_of(m);
         let y = a.type_at(ty);
+        if gen && y.kind == TypeKind::TYPE_GENERIC {
+            return true;
+        }
         // A raw pointer is its address, which no shared reference changes; its target is memory (an
         // `@owned` field's block only its struct's `&mut` writes).
         if y.kind == TypeKind::TYPE_BUILTIN {
@@ -1841,17 +1873,19 @@ extend<const B: usize> Prover<B> {
             m,
             ty,
             depth,
+            gen,
         ) {
             return true;
         }
         if y.kind == TypeKind::TYPE_ARRAY && !y.arr_sym() && depth < FROZEN_DEPTH {
-            return self.frozen_d(m, y.as_data.arr.elem, depth + 1);
+            return self.frozen_d(m, y.as_data.arr.elem, depth + 1, gen);
         }
         // An enum whose payloads are all frozen is its discriminant and their values.
         if (y.kind == TypeKind::TYPE_ENUM || y.kind == TypeKind::TYPE_INSTANCE) && depth < FROZEN_DEPTH && self.frozen_enum(
             m,
             ty,
             depth,
+            gen,
         ) {
             return true;
         }
@@ -1874,7 +1908,7 @@ extend<const B: usize> Prover<B> {
     }
 
     // Whether enum type `ty` (module `m`) holds frozen payloads only (`frozen_d`, `depth` levels deep).
-    fn frozen_enum(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
+    fn frozen_enum(self: &Self, m: ModuleId, ty: TypeId, depth: u32, gen: bool) bool {
         let y = self.ast_of(m).type_at(ty);
         let (dm, dn, inst) = if y.kind == TypeKind::TYPE_ENUM {
             (y.module, y.as_data.decl, TyInstance { module: 0, decl: NODE_NONE, n: 0, args: [TYPE_NONE; 8], lts: 0 })
@@ -1903,7 +1937,7 @@ extend<const B: usize> Prover<B> {
                 }
                 let py = da.type_at(pt);
                 if py.kind != TypeKind::TYPE_GENERIC {
-                    if !self.frozen_d(dm, pt, depth + 1) {
+                    if !self.frozen_d(dm, pt, depth + 1, gen) {
                         return false;
                     }
                     continue;
@@ -1911,7 +1945,7 @@ extend<const B: usize> Prover<B> {
                 let mut found = false;
                 for i in 0..ag.generics.len {
                     if py.module == dm && unsafe da.list(ag.generics)[i as usize] == py.as_data.decl && i as u8 < inst.n {
-                        found = self.frozen_d(m, inst.args[i as usize], depth + 1);
+                        found = self.frozen_d(m, inst.args[i as usize], depth + 1, gen);
                     }
                 }
                 if !found {
@@ -1923,7 +1957,7 @@ extend<const B: usize> Prover<B> {
     }
 
     // Whether struct type `ty` (module `m`, a struct or an instance of one) has only frozen members.
-    fn frozen_struct(self: &Self, m: ModuleId, ty: TypeId, depth: u32) bool {
+    fn frozen_struct(self: &Self, m: ModuleId, ty: TypeId, depth: u32, gen: bool) bool {
         let y = self.ast_of(m).type_at(ty);
         let (dm, dn, inst) = if y.kind == TypeKind::TYPE_STRUCT {
             (y.module, y.as_data.decl, TyInstance { module: 0, decl: NODE_NONE, n: 0, args: [TYPE_NONE; 8], lts: 0 })
@@ -1949,7 +1983,7 @@ extend<const B: usize> Prover<B> {
             }
             let my = da.type_at(mt);
             if my.kind != TypeKind::TYPE_GENERIC {
-                if !self.frozen_d(dm, mt, depth + 1) {
+                if !self.frozen_d(dm, mt, depth + 1, gen) {
                     return false;
                 }
                 continue;
@@ -1957,7 +1991,7 @@ extend<const B: usize> Prover<B> {
             let mut found = false;
             for i in 0..ag.generics.len {
                 if my.module == dm && unsafe da.list(ag.generics)[i as usize] == my.as_data.decl && i as u8 < inst.n {
-                    found = self.frozen_d(m, inst.args[i as usize], depth + 1);
+                    found = self.frozen_d(m, inst.args[i as usize], depth + 1, gen);
                 }
             }
             if !found {
@@ -2514,8 +2548,9 @@ extend<const B: usize> Prover<B> {
                 stack.extend_copy(&hl);
             }
         }
-        // First each part alone, with the facts on its compared pointers: the path's other cases only
-        // add splits.
+        // First each part alone, with the facts on its compared pointers and their distinctness facts
+        // (a frame's side compares a pointer with one a version took): the path's other cases only add
+        // splits.
         let mut parts = Vector::<u32>::new();
         self.conjuncts(goal, &mut parts, 0);
         let mut all = true;
@@ -2529,6 +2564,15 @@ extend<const B: usize> Prover<B> {
             for j in 0..hyps.len() {
                 if self.on_ptrs(hyps[j], &pq) {
                     few.push(hyps[j]);
+                }
+            }
+            for j in 0..pq.len() {
+                if let Some(ds) = self.ptr_apart.get(&pq[j]) {
+                    for i in 0..ds.len() {
+                        if !few.contains(&ds[i]) {
+                            few.push(ds[i]);
+                        }
+                    }
                 }
             }
             all = self.capped(&few, parts[q]);
@@ -3074,7 +3118,37 @@ extend<const B: usize> Prover<B> {
         self.ov = ov0;
     }
 
+    // The value of `free`'s receiver (`inv_end`) in `state`, NONE in another body.
+    const fn recv_val(self: &Self, state: &Vector<u32>) u32 {
+        return if self.inv_end == NONE {
+            NONE
+        } else {
+            state[self.inv_end as usize]
+        };
+    }
+
     fn inv_resume_at(self: &mut Self, b: &ir::CoreBody, path: &mut Path, key: u64, dead: u32) {
+        // `free`'s receiver, which `inv_locs` leaves out: memory holds the invariant of a value (code of the
+        // struct's file writes it, and proves it), so it holds after the call or the drop where it held
+        // before.
+        let rs = self.inv_end;
+        let r1 = self.recv_val(&path.state);
+        // Not where a reference reaches a member of it (`aesc`): through one, code of another file may write
+        // a member the invariant reads. A reference to the whole value writes none of its private members
+        // but by a method of its file, which keeps the invariant.
+        let mut reached = false;
+        for j in 0..self.aesc.len() {
+            reached = reached || self.ref_target(self.aesc[j]) == rs;
+        }
+        if r1 != NONE && self.recv_pre != NONE && r1 != self.recv_pre && !reached {
+            let rty = self.loc_ty(b, rs as usize);
+            let f0 = self.inv_of(b.module, rty, self.recv_pre, &path.state);
+            let f1 = self.inv_of(b.module, rty, r1, &path.state);
+            if f0 != NONE && f1 != NONE {
+                let nf0 = self.tm.not(f0);
+                path.pc.push(self.tm.or(nf0, f1));
+            }
+        }
         for j in 0..self.inv_locs.len() {
             let l = self.inv_locs[j] as usize;
             let v = path.state[l];
@@ -3342,13 +3416,27 @@ extend<const B: usize> Prover<B> {
                     let p = (*self.held_p.get(&ats[i]).unwrap() >> 32) as u32;
                     let p2 = (*self.held_p.get(&ats[j]).unwrap() >> 32) as u32;
                     let d = self.apart_need(ats[i + 1], p, ats[j + 1], p2);
-                    g = self.tm.and(g, d);
+                    let e = self.held_apart(ats[i], ats[j], d);
+                    g = self.tm.and(g, e);
                 }
                 j += 3;
             }
             i += 3;
         }
         return g;
+    }
+
+    // `d`, the distinctness of the blocks of held atoms `h` and `h2`, where both hold: the obligations
+    // that name them prove that they hold, and their definitions say which versions gave the blocks
+    // (an ADD's are no block held before it).
+    fn held_apart(self: &mut Self, h: u32, h2: u32, d: u32) u32 {
+        if self.tm.is_true(d) {
+            return d;
+        }
+        let nh = self.tm.not(h);
+        let nh2 = self.tm.not(h2);
+        let o = self.tm.or(nh2, d);
+        return self.tm.or(nh, o);
     }
 
     // Whether body `b`, outside ghost code, holds a value of a struct type with an invariant its own file
@@ -6839,7 +6927,8 @@ extend<const B: usize> Prover<B> {
     }
 
     // Reference `r` (`T_MREF`, `T_PREF`) of body `cb` now refers to value `nv`: its local or slot changes
-    // in that member only. A local loads may read (`is_mem`) makes a new epoch, as `write_place` does.
+    // in that member only. A local a load may read (`is_mem`, and a pointer or reference of the path reaches
+    // it) makes a new epoch, as `write_place` does: no other load reads a `&mut` parameter's referent.
     fn ref_set(self: &mut Self, cb: &ir::CoreBody, state: &mut Vector<u32>, r: u32, nv: u32) {
         let x = self.tm.at(r);
         let tg = self.ref_target(r);
@@ -6880,7 +6969,7 @@ extend<const B: usize> Prover<B> {
         } else {
             state.set(tg as usize, nv);
         }
-        if tg as usize < self.is_mem.len() && self.is_mem[tg as usize] {
+        if tg as usize < self.is_mem.len() && self.is_mem[tg as usize] && self.reached(tg) {
             let k = state.len() - 1;
             let ep0 = state[k];
             state.set(k, self.tm.var(W_OTHER, false));
@@ -7556,6 +7645,671 @@ extend<const B: usize> Prover<B> {
         }
         let k = self.tm.at(x).k;
         return self.tm.int(k, W_INT, true);
+    }
+
+    // ---- counters (`@counter`) ----------------------------------------------------------------------
+
+    // Whether struct type `ty` of module `m` has counter fields (`counters_of`), cached per type.
+    fn counted(self: &mut Self, m: ModuleId, ty: TypeId) bool {
+        let k = m as u64 << 32 | ty as u64;
+        if let Some(x) = self.ctr_ty.get(&k) {
+            return *x;
+        }
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(m, ty, &mut fs);
+        self.ctr_ty.insert(k, fs.len() != 0);
+        return fs.len() != 0;
+    }
+
+    // The member indexes of the counter fields of struct type `ty` (module `m`), in order: counter k is
+    // `out[k]`.
+    fn counters_of(self: &Self, m: ModuleId, ty: TypeId, out: &mut Vector<u32>) {
+        let (dm, dn) = self.decl_of(m, ty);
+        if dn == NODE_NONE || !self.pkg().modules.at(dm as usize).has_ast || self.ast_of(dm).at_const(dn).kind != NodeKind::NODE_STRUCT {
+            return;
+        }
+        let a = self.ast_of(dm);
+        let ag = unsafe a.ext(dn).aggregate;
+        for j in 0..ag.members.len {
+            if a.attr_of(unsafe a.list(ag.members)[j as usize], AttrKind::ATTR_COUNTER) != null {
+                out.push(j);
+            }
+        }
+    }
+
+    // The counter of member `fi` of struct type `ty` (module `m`): its index among the counter fields,
+    // its guard's spec function, and whether it locks (`@counter_lock`); NONE as the index for another
+    // member.
+    fn counter_field(self: &Self, m: ModuleId, ty: TypeId, fi: u32) (u32, DefId, bool) {
+        let none = DefId { module: 0, node: NODE_NONE };
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(m, ty, &mut fs);
+        for k in 0..fs.len() {
+            if fs[k] != fi {
+                continue;
+            }
+            let (dm, dn) = self.decl_of(m, ty);
+            let a = self.ast_of(dm);
+            let f = unsafe a.list(a.ext(dn).aggregate.members)[fi as usize];
+            let at = a.attr_of(f, AttrKind::ATTR_COUNTER);
+            let name = self.text(dm, unsafe (*at).str_span);
+            let gn = self.pkg().lookup_own(dm, name, false);
+            let lock = a.attr_of(f, AttrKind::ATTR_COUNTER_LOCK) != null;
+            return k as u32, DefId { module: dm, node: gn }, lock;
+        }
+        return NONE, none, false;
+    }
+
+    // The member index of the counter field place `pl` names (`... (*q).f`, `q` a raw pointer to a
+    // struct with `@counter` fields): (struct type, member index); TYPE_NONE for another place. With
+    // `whole`, the place of the whole struct (`*q`): its member index NONE.
+    fn counter_place(self: &Self, cb: &ir::CoreBody, cm: ModuleId, pl: &ir::Place, whole: bool) (TypeId, u32) {
+        let n = pl.proj_len;
+        let d = pick(whole, 1u32, 2u32);
+        if n < d {
+            return TYPE_NONE, NONE;
+        }
+        let dj = *cb.projections.at((pl.proj_start + n - d) as usize);
+        if dj.kind != ir::PJ_DEREF {
+            return TYPE_NONE, NONE;
+        }
+        let pty = if n - d == 0 {
+            cb.locals.at(pl.base as usize).ty
+        } else {
+            cb.projections.at((pl.proj_start + n - d - 1) as usize).ty
+        };
+        if pty == TYPE_NONE || self.ast_of(cm).type_at(pty).kind != TypeKind::TYPE_POINTER {
+            return TYPE_NONE, NONE;
+        }
+        let sty = dj.ty;
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(cm, sty, &mut fs);
+        if fs.len() == 0 {
+            return TYPE_NONE, NONE;
+        }
+        if whole {
+            return sty, NONE;
+        }
+        let fj = *cb.projections.at((pl.proj_start + n - 1) as usize);
+        if fj.kind != ir::PJ_FIELD {
+            return TYPE_NONE, NONE;
+        }
+        let fi = if fj.sub != NODE_NONE {
+            self.field_index(cm, sty, fj.sub)
+        } else {
+            fj.data as i64
+        };
+        if fi < 0 || !fs.contains(&(fi as u32)) {
+            return TYPE_NONE, NONE;
+        }
+        return sty, fi as u32;
+    }
+
+    // The members of struct type `ty` the guards of its counters read through the block's pointer: they
+    // keep their values while a counter lives, so a write of one goes only with the struct's start (a
+    // write of the whole struct, `count_start`).
+    fn guard_fields(self: &Self, m: ModuleId, ty: TypeId, out: &mut Vector<u32>) {
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(m, ty, &mut fs);
+        for k in 0..fs.len() {
+            let (_k, gd, _l) = self.counter_field(m, ty, fs[k]);
+            if gd.node == NODE_NONE {
+                continue;
+            }
+            let gp = self.kept(gd);
+            if gp == null {
+                continue;
+            }
+            let gb = unsafe &*gp;
+            if gb.args == 0 {
+                continue;
+            }
+            for pi in 0..gb.places.len() {
+                let pl = *gb.places.at(pi);
+                if pl.base != gb.returns || pl.proj_len < 2 || gb.projections.at(pl.proj_start as usize).kind != ir::PJ_DEREF {
+                    continue;
+                }
+                let fj = *gb.projections.at((pl.proj_start + 1) as usize);
+                if fj.kind != ir::PJ_FIELD {
+                    continue;
+                }
+                let fi = if fj.sub != NODE_NONE {
+                    self.field_index(gd.module, gb.projections.at(pl.proj_start as usize).ty, fj.sub)
+                } else {
+                    fj.data as i64
+                };
+                if fi >= 0 && !out.contains(&(fi as u32)) {
+                    out.push(fi as u32);
+                }
+            }
+        }
+    }
+
+    // Whether place `pl` (module `cm`) is a member a counter's guard reads (`guard_fields`) of a struct
+    // through its block's pointer.
+    fn guard_place(self: &Self, cb: &ir::CoreBody, cm: ModuleId, pl: &ir::Place) bool {
+        let n = pl.proj_len;
+        if n < 2 || cb.projections.at((pl.proj_start + n - 2) as usize).kind != ir::PJ_DEREF {
+            return false;
+        }
+        let fj = *cb.projections.at((pl.proj_start + n - 1) as usize);
+        if fj.kind != ir::PJ_FIELD {
+            return false;
+        }
+        let sty = cb.projections.at((pl.proj_start + n - 2) as usize).ty;
+        let mut gf = Vector::<u32>::new();
+        self.guard_fields(cm, sty, &mut gf);
+        if gf.len() == 0 {
+            return false;
+        }
+        let fi = if fj.sub != NODE_NONE {
+            self.field_index(cm, sty, fj.sub)
+        } else {
+            fj.data as i64
+        };
+        return fi >= 0 && gf.contains(&(fi as u32));
+    }
+
+    // The atomic operation callee `c` is (`atomic::add_usize`, ..): CS_ADD, CS_SUB, CS_CAS, CS_STORE, 9 for
+    // a load, NONE as u8 for another callee.
+    fn atomic_op(self: &Self, c: DefId) u8 {
+        if c.node == NODE_NONE || (c.node & NODE_BODY) != 0 || self.pkg().modules.at(c.module as usize).path.as_str() != "atomic" {
+            return 255;
+        }
+        let a = self.ast_of(c.module);
+        if a.at_const(c.node).kind != NodeKind::NODE_FUNCTION {
+            return 255;
+        }
+        let nm = self.text(c.module, a.at_const(a.ext_name(c.node)).span);
+        return if nm.starts_with("add_") {
+            CS_ADD
+        } else if nm.starts_with("sub_") {
+            CS_SUB
+        } else if nm.starts_with("cas_") {
+            CS_CAS
+        } else if nm.starts_with("store_") {
+            CS_STORE
+        } else if nm.starts_with("load_") {
+            9
+        } else {
+            255
+        };
+    }
+
+    // The temporaries of body `b` that hold a counter field's address (`ctr_tmp`). Such an address goes
+    // only to an atomic operation (the first argument of `atomic::add_usize`, ..), which steps the counter
+    // there (`count_step`): any other use of it is an error.
+    fn ctr_scan(self: &mut Self, b: &ir::CoreBody) {
+        self.ctr_tmp.clear();
+        self.m = b.module;
+        let mut tsp = Map::<u32, u64>::new();
+        if self.ghost_fn {
+            return;
+        }
+        for sid in 0..b.statements.len() {
+            let st = *b.statements.at(sid);
+            if st.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let rv = *b.rvalues.at(st.rvalue as usize);
+            if rv.kind != ir::RV_ADDR && rv.kind != ir::RV_REF {
+                continue;
+            }
+            if (rv.kind == ir::RV_ADDR || rv.b != 0) && self.guard_place(b, b.module, b.places.at(rv.a as usize)) {
+                self.report(
+                    OB_COUNTER << 56 | 5 << 40 | sid as u64,
+                    dc::COUNTER_STEP,
+                    st.span,
+                    format("a member a counter's guard reads is written only where its struct starts"),
+                    String::from_str("write the whole struct (`*p = S { .. }`) where the body holds the guard"),
+                );
+                continue;
+            }
+            let (sty, _fi) = self.counter_place(b, b.module, b.places.at(rv.a as usize), false);
+            if sty == TYPE_NONE {
+                continue;
+            }
+            let dp = *b.places.at(st.place as usize);
+            if dp.proj_len != 0 {
+                self.report(
+                    OB_COUNTER << 56 | 1 << 40 | sid as u64,
+                    dc::COUNTER_STEP,
+                    st.span,
+                    format("a counter field's address goes only to an atomic operation"),
+                    String::from_str("an '@counter' field changes only at the steps the prover counts"),
+                );
+                continue;
+            }
+            self.ctr_tmp.insert(dp.base, rv.a);
+            tsp.insert(dp.base, st.span.start as u64 << 32 | st.span.end as u64);
+        }
+        if self.ctr_tmp.len() == 0 {
+            return;
+        }
+        // The operands an atomic operation's first argument is, and the copies and casts of such an
+        // address into another temporary: the uses allowed.
+        let mut ok = Map::<u32, bool>::new();
+        for _r in 0..4 {
+            let n0 = self.ctr_tmp.len();
+            for sid in 0..b.statements.len() {
+                let st = *b.statements.at(sid);
+                if st.kind != ir::ST_ASSIGN || b.places.at(st.place as usize).proj_len != 0 {
+                    continue;
+                }
+                let rv = *b.rvalues.at(st.rvalue as usize);
+                if rv.kind != ir::RV_USE && rv.kind != ir::RV_CAST {
+                    continue;
+                }
+                let op = *b.operands.at(rv.a as usize);
+                if op.kind == ir::OP_CONST || b.places.at(op.data as usize).proj_len != 0 {
+                    continue;
+                }
+                if let Some(cp) = self.ctr_tmp.get(&b.places.at(op.data as usize).base) {
+                    let c = *cp;
+                    let dl = b.places.at(st.place as usize).base;
+                    ok.insert(rv.a, true);
+                    if !self.ctr_tmp.contains_key(&dl) {
+                        self.ctr_tmp.insert(dl, c);
+                        tsp.insert(dl, st.span.start as u64 << 32 | st.span.end as u64);
+                    }
+                }
+            }
+            if self.ctr_tmp.len() == n0 {
+                break;
+            }
+        }
+        for bi in 0..b.blocks.len() {
+            let t = b.blocks.at(bi).term;
+            if t.kind == ir::TM_CALL && t.args_len != 0 && self.atomic_op(t.callee) != 255 {
+                ok.insert(b.oper_pool[t.args_start as usize], true);
+            }
+        }
+        let mut bad = Vector::<u32>::new();
+        for oi in 0..b.operands.len() {
+            let op = *b.operands.at(oi);
+            if op.kind == ir::OP_CONST {
+                continue;
+            }
+            let pl = *b.places.at(op.data as usize);
+            if self.ctr_tmp.contains_key(&pl.base) && (pl.proj_len != 0 || !ok.contains_key(&(oi as u32))) {
+                bad.push(pl.base);
+            }
+        }
+        for pi in 0..b.places.len() {
+            let pl = *b.places.at(pi);
+            if self.ctr_tmp.contains_key(&pl.base) && pl.proj_len != 0 {
+                bad.push(pl.base);
+            }
+        }
+        bad.sort();
+        for j in 0..bad.len() {
+            if j > 0 && bad[j] == bad[j - 1] {
+                continue;
+            }
+            let l = &bad[j];
+            let e = *tsp.get(l).unwrap();
+            let sp = tok::Span { start: (e >> 32) as u32, end: e as u32 };
+            self.report(
+                OB_COUNTER << 56 | 2 << 40 | (*l) as u64,
+                dc::COUNTER_STEP,
+                sp,
+                format("a counter field's address goes only to an atomic operation"),
+                String::from_str("an '@counter' field changes only at the steps the prover counts"),
+            );
+        }
+    }
+
+    // The guard of counter field `gd` (`@counter`'s spec function) of block `p` of struct type `ty`: the
+    // call `gd(p)` with the struct's type arguments as its own, defined; NONE where they are unknown.
+    fn counter_guard(self: &mut Self, m: ModuleId, ty: TypeId, gd: DefId, p: u32, state: &Vector<u32>) u32 {
+        if gd.node == NODE_NONE {
+            return NONE;
+        }
+        let ga = self.ast_of(gd.module);
+        if ga.at_const(gd.node).kind != NodeKind::NODE_FUNCTION {
+            return NONE;
+        }
+        let fg = ga.ext(gd.node).function.generics;
+        let mut binds = Vector::<u64>::new();
+        let (rm, rt) = self.resolve(m, ty);
+        let y = *self.ast_of(rm).type_at(rt);
+        if y.kind == TypeKind::TYPE_INSTANCE {
+            let it = *self.ast_of(rm).instance(y.as_data.inst);
+            if it.n as u32 != fg.len {
+                return NONE;
+            }
+            for j in 0..fg.len {
+                let (am, at) = self.resolve(rm, it.args[j as usize]);
+                if self.subst.len() != 0 && !self.bound_generic(rm, it.args[j as usize]) && self.mentions_generic(
+                    am,
+                    at,
+                    0,
+                ) {
+                    return NONE;
+                }
+                binds.push(gd.module as u64 << 32 | (unsafe self.ast_of(gd.module).list(fg)[j as usize]) as u64);
+                binds.push(am as u64 << 32 | at as u64);
+            }
+        } else if fg.len != 0 {
+            return NONE;
+        }
+        return self.inv_term(gd, binds, p, p, state);
+    }
+
+    // The units of counter `k` of block `p` that formula `g` (a guard) claims, in the walk's version.
+    fn guard_units(self: &mut Self, g: u32, p: u32, k: u32) i64 {
+        if g == NONE {
+            return 0;
+        }
+        let mut sg = Vector::<u64>::new();
+        let v = self.ov;
+        self.sh_g(g, v, &mut sg);
+        let mut n: i64 = 0;
+        for j in 0..sg.len() {
+            let h = (sg[j] >> 32) as u32;
+            let pv = *self.sh_p.get(&h).unwrap();
+            let kn = *self.sh_kn.get(&h).unwrap();
+            let (kc, nc) = ((kn >> 32) as u32, kn as u32);
+            if (pv >> 32) as u32 == p && self.tm.at(kc).k.to_i64() == k as i64 {
+                n += self.tm.at(nc).k.to_i64();
+            }
+        }
+        return n;
+    }
+
+    // `n` units of counter `k` of block `p` (`share_atom`), in the walk's version.
+    fn unit_atom(self: &mut Self, p: u32, k: u32, n: i64) u32 {
+        let kt = self.tm.int(wide::<B>(k), W_INT, true);
+        let nt = self.tm.int(wide::<B>(n), W_INT, true);
+        return self.share_atom(p, kt, nt);
+    }
+
+    // `c(x) >= r`, `x` a counter's value and `xi` it as an `int`: a lock's all-ones value `a1` counts 1.
+    fn count_ge(self: &mut Self, x: u32, xi: u32, lock: bool, a1: u32, r: u32) u32 {
+        let ge = self.tm.cmp(T_LE, r, xi);
+        if !lock {
+            return ge;
+        }
+        let one = self.tm.int(Num::<B>::one(), W_INT, true);
+        let isl = self.tm.cmp(T_EQ, x, a1);
+        let nl = self.tm.not(isl);
+        let a = self.tm.or(isl, ge);
+        let b = self.tm.or(nl, self.tm.cmp(T_LE, r, one));
+        return self.tm.and(a, b);
+    }
+
+    // A step of counter field `fi` of struct type `ty` of block `p`: operation `op` with old value `o`
+    // (NONE: unknown) and new value `n`, `d` an add's or a sub's operand, `g` a compare-and-swap's success
+    // (else true), at `sp`. The count is the field's value (a lock's all-ones value counts 1); it counts
+    // the units of the counter that exist, and a live counter holds its guard. The step takes and gives
+    // units as a lemma call would (`call`): an increase by the holder of a unit of the block gives one,
+    // a decrease takes one and gives the guard where the count reaches 0, a lock gives the lock's unit
+    // (LOCK_UNIT) and the store that unlocks takes it, and a start (the guard held: the counter is not
+    // live) takes the guard and gives the count's units. Another change is an error.
+    fn count_step(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+        ty: TypeId,
+        fi: u32,
+        p: u32,
+        o: u32,
+        n: u32,
+        d: u32,
+        g: u32,
+        op: u8,
+        sp: tok::Span,
+        key: u64,
+    ) {
+        let (k, gd, lock) = self.counter_field(cm, ty, fi);
+        if k == NONE || p == NONE || n == NONE {
+            return;
+        }
+        let mut mts = Vector::<u64>::new();
+        self.member_types(cm, ty, &mut mts);
+        let (w, sg) = self.ty_of((mts[fi as usize] >> 32) as ModuleId, (mts[fi as usize] & 0xFFFFFFFFu64) as TypeId);
+        let a1 = if sg {
+            self.tm.int(wide::<B>(-1), w, sg)
+        } else {
+            let (_lo, hi) = Terms::<B>::range(w, sg);
+            self.tm.int(hi, w, sg)
+        };
+        let one = self.tm.int(Num::<B>::one(), w, sg);
+        let one_i = self.tm.int(Num::<B>::one(), W_INT, true);
+        let zero_i = self.tm.int(Num::<B>::zero(), W_INT, true);
+        let v = self.ov;
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(cm, ty, &mut fs);
+        let oi = if o == NONE {
+            NONE
+        } else {
+            self.widened(o, W_INT, true)
+        };
+        let ni = self.widened(n, W_INT, true);
+        // The count before the step: at least the units the body holds or a shared parameter lends it
+        // (`lent_claims`, in this version), and those the guards of the counters it holds units of claim
+        // (the guard of a live counter is the counter's).
+        let mut lc = Vector::<u32>::new();
+        self.lent_claims(cb, state, pc, &mut lc);
+        let kt = self.tm.int(wide::<B>(k), W_INT, true);
+        let nk = self.nsh(p, kt, v);
+        let mut alive = self.tm.boolean(false);
+        for j in 0..fs.len() {
+            let jt = self.tm.int(wide::<B>(j as i64), W_INT, true);
+            let nj = self.nsh(p, jt, v);
+            alive = self.tm.or(alive, self.tm.cmp(T_LE, one_i, nj));
+            if oi == NONE || j as u32 == k {
+                continue;
+            }
+            let (_kj, gj, _lj) = self.counter_field(cm, ty, fs[j]);
+            let gt = self.counter_guard(cm, ty, gj, p, state);
+            let mk = self.guard_units(gt, p, k);
+            if mk > 0 {
+                let live = self.tm.cmp(T_LE, one_i, nj);
+                let s0 = self.tm.arith(T_ADD, nk, self.tm.int(wide::<B>(mk), W_INT, true), W_INT, true);
+                let f = self.tm.or(self.tm.not(live), self.count_ge(o, oi, lock, a1, s0));
+                pc.push(self.tm.or(self.tm.not(g), f));
+            }
+        }
+        // A compare-and-swap's old value is the count where it succeeds.
+        if oi != NONE {
+            let f = self.count_ge(o, oi, lock, a1, nk);
+            pc.push(self.tm.or(self.tm.not(g), f));
+        }
+        // Which step: by the operation, then by what the path proves of the values.
+        let mut pg = pc.clone();
+        pg.push(g);
+        let gt0 = self.counter_guard(cm, ty, gd, p, state);
+        if gt0 == NONE {
+            self.report(
+                OB_COUNTER << 56 | 4 << 40 | key,
+                dc::COUNTER_STEP,
+                sp,
+                format("cannot find this counter's guard: the '@counter' spec function of the struct's file"),
+                String::from_str("the guard takes the block's pointer and has the struct's type parameters"),
+            );
+            return;
+        }
+        let mut excl = true;
+        for j in 0..fs.len() {
+            excl = excl && self.guard_units(gt0, p, j as u32) == 0;
+        }
+        // 1 inc, 2 dec, 3 lock, 4 unlock, 5 start, 0 none.
+        let mut kind: u8 = 0;
+        if op == CS_INIT {
+            kind = 5;
+        } else if op == CS_STORE {
+            kind = pick(lock, 4u8, 0u8);
+        } else if op == CS_ADD || op == CS_SUB {
+            if self.holds(&pg, self.tm.cmp(T_EQ, d, one)) {
+                kind = pick(op == CS_ADD, 1u8, 2u8);
+            }
+        } else if o != NONE && lock && self.holds(&pg, self.tm.cmp(T_EQ, n, a1)) {
+            kind = 3;
+        } else if o != NONE && self.holds(&pg, self.tm.cmp(T_EQ, n, self.tm.arith(T_ADD, o, one, w, sg))) {
+            kind = 1;
+        } else if o != NONE && self.holds(&pg, self.tm.cmp(T_EQ, n, self.tm.arith(T_SUB, o, one, w, sg))) {
+            kind = 2;
+        } else if op == CS_PLAIN && excl {
+            kind = 5;
+        }
+        let nlit = if self.tm.is_int(n) {
+            self.tm.at(n).k.to_i64()
+        } else {
+            0
+        };
+        if kind == 0 || kind == 5 && nlit < 1 || (kind == 1 || kind == 2) && oi == NONE || ni == NONE {
+            self.report(
+                OB_COUNTER << 56 | key,
+                dc::COUNTER_STEP,
+                sp,
+                format("cannot prove that this write changes the counter by one, or starts it"),
+                String::from_str(
+                    "an '@counter' field steps by one (a plain or atomic add, sub or compare-and-swap), or starts at a positive literal where the body holds its guard",
+                ),
+            );
+            return;
+        }
+        let ng = self.tm.not(g);
+        let (req, pre, msg) = if kind == 1 {
+            let ge1 = self.count_ge(o, oi, lock, a1, one_i);
+            (
+                NONE,
+                self.tm.and(alive, self.tm.or(ng, ge1)),
+                "cannot prove that the body holds a unit of this counter's block, and the count is at least 1"
+            )
+        } else if kind == 2 {
+            (self.unit_atom(p, k, 1), self.tm.boolean(true), "cannot prove that the body holds a unit of this counter")
+        } else if kind == 3 {
+            (NONE, self.tm.or(ng, self.tm.cmp(T_EQ, o, one)), "cannot prove that this lock finds the count at 1")
+        } else if kind == 4 {
+            (
+                self.unit_atom(p, LOCK_UNIT + k, 1),
+                self.tm.cmp(T_EQ, n, one),
+                "cannot prove that the body holds this counter's lock, and stores 1"
+            )
+        } else {
+            (gt0, self.tm.boolean(true), "cannot prove that the body holds this counter's guard where it starts")
+        };
+        // The step as a lemma call: it takes `req`'s claims, then gives its own. A null block has no count:
+        // its write faults, so past the step the block is not null.
+        let nl = self.null_ptr();
+        let isn = self.tm.cmp(T_EQ, p, nl);
+        self.ov_take.clear();
+        self.ov_take_sh.clear();
+        self.tk_atoms.clear();
+        self.tk_src.clear();
+        self.ov_pre = self.ov;
+        self.recv_pre = self.recv_val(state);
+        let ob = if req == NONE {
+            self.tm.or(isn, pre)
+        } else {
+            let rq = self.tm.or(isn, req);
+            self.ov_name(rq, SRC_REQ);
+            self.tm.or(isn, self.tm.and(req, pre))
+        };
+        self.oblige(pc, ob, OB_COUNTER << 56 | 1 << 39 | key, sp, String::from_str(msg), String::new());
+        self.ov_apart(pc, sp);
+        let tk = self.ov_take.clone();
+        self.lent_take(cb, state, pc, &tk, sp);
+        self.ov_switch();
+        let lockok = if lock && o != NONE {
+            self.tm.and(self.tm.cmp(T_NE, o, a1), self.tm.cmp(T_NE, n, a1))
+        } else {
+            self.tm.boolean(true)
+        };
+        let ens = if kind == 1 {
+            let st = self.tm.cmp(T_EQ, ni, self.tm.arith(T_ADD, oi, one_i, W_INT, true));
+            let c = self.tm.and(g, self.tm.and(st, lockok));
+            self.tm.or(self.tm.not(c), self.unit_atom(p, k, 1))
+        } else if kind == 2 {
+            let st = self.tm.cmp(T_EQ, ni, self.tm.arith(T_SUB, oi, one_i, W_INT, true));
+            let z = self.tm.and(g, self.tm.and(st, self.tm.and(lockok, self.tm.cmp(T_EQ, ni, zero_i))));
+            let gt1 = self.counter_guard(cm, ty, gd, p, state);
+            let e0 = self.tm.or(self.tm.not(z), pick(gt1 == NONE, self.tm.boolean(true), gt1));
+            if op == CS_CAS {
+                self.tm.and(e0, self.tm.or(g, self.unit_atom(p, k, 1)))
+            } else {
+                e0
+            }
+        } else if kind == 3 {
+            self.tm.or(ng, self.unit_atom(p, LOCK_UNIT + k, 1))
+        } else if kind == 4 {
+            self.tm.boolean(true)
+        } else {
+            self.unit_atom(p, k, nlit)
+        };
+        pc.push(self.tm.not(isn));
+        pc.push(ens);
+        self.src_mark(ens, SRC_RES);
+        self.sh_give(ens);
+        self.ov_end();
+    }
+
+    // The start of the counters of the struct `x` written whole through block pointer `p` (`*p = S {..}`,
+    // struct type `ty`): first the counters whose guards claim no unit of the block, then the others, which
+    // may claim the units the first ones gave.
+    fn count_start(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        pc: &mut Vector<u32>,
+        ty: TypeId,
+        p: u32,
+        x: u32,
+        sp: tok::Span,
+        key: u64,
+    ) {
+        let mut fs = Vector::<u32>::new();
+        self.counters_of(cm, ty, &mut fs);
+        let xa = self.tm.at(x);
+        for pass in 0..2u32 {
+            for k in 0..fs.len() {
+                let (_k, gd, _l) = self.counter_field(cm, ty, fs[k]);
+                let gt = self.counter_guard(cm, ty, gd, p, state);
+                let mut shared = false;
+                for j in 0..fs.len() {
+                    shared = shared || self.guard_units(gt, p, j as u32) != 0;
+                }
+                if shared != (pass == 1) {
+                    continue;
+                }
+                let n = if xa.op == T_AGG && fs[k] < xa.b {
+                    self.tm.args[(xa.a + fs[k]) as usize]
+                } else {
+                    NONE
+                };
+                if n == NONE {
+                    self.report(
+                        OB_COUNTER << 56 | key | 3 << 40,
+                        dc::COUNTER_STEP,
+                        sp,
+                        format("cannot prove that this write starts the counters at positive literals"),
+                        String::new(),
+                    );
+                    return;
+                }
+                self.count_step(
+                    cb,
+                    cm,
+                    state,
+                    pc,
+                    ty,
+                    fs[k],
+                    p,
+                    NONE,
+                    n,
+                    NONE,
+                    self.tm.boolean(true),
+                    CS_INIT,
+                    sp,
+                    key | k as u64 << 44,
+                );
+            }
+        }
     }
 
     // `rc_share(p, k, n)` in the walk's version: an atom true where the body holds `n` units of counter `k`
@@ -8266,6 +9020,44 @@ extend<const B: usize> Prover<B> {
         );
     }
 
+    // Where a loop's invariants `fs` are established (the loop's start, the end of an iteration): the blocks
+    // they name are distinct, which the header assumes (SRC_LOOP).
+    fn loop_apart(self: &mut Self, pc: &Vector<u32>, fs: &Vector<u32>, sp: tok::Span, key: u64) {
+        let mut all = self.tm.boolean(true);
+        for j in 0..fs.len() {
+            all = self.tm.and(all, fs[j]);
+        }
+        let mut hg = Vector::<u64>::new();
+        let v = self.ov;
+        self.held_g(all, v, &mut hg);
+        let mut g = self.tm.boolean(true);
+        for i in 0..hg.len() {
+            for j in i + 1..hg.len() {
+                let (h, g1) = ((hg[i] >> 32) as u32, (hg[i] & 0xFFFFFFFFu64) as u32);
+                let (h2, g2) = ((hg[j] >> 32) as u32, (hg[j] & 0xFFFFFFFFu64) as u32);
+                if g1 == NONE || g2 == NONE || h == h2 || self.held_alt_of(h, h2) || self.held_alt_of(h2, h) {
+                    continue;
+                }
+                let p = (*self.held_p.get(&h).unwrap() >> 32) as u32;
+                let p2 = (*self.held_p.get(&h2).unwrap() >> 32) as u32;
+                let d = self.apart_need(g1, p, g2, p2);
+                let e = self.held_apart(h, h2, d);
+                g = self.tm.and(g, e);
+            }
+        }
+        if self.tm.is_true(g) || self.apart_holds(pc, g) {
+            return;
+        }
+        self.oblige(
+            pc,
+            g,
+            key,
+            sp,
+            String::from_str("cannot prove that the blocks the loop's invariants name are distinct"),
+            String::from_str("each block has one holder: the 'owns' of the invariants name distinct blocks"),
+        );
+    }
+
     // A REMOVE version after the walk's for the blocks and units taken (`ov_take`, `ov_take_sh`), if any.
     fn ov_remove(self: &mut Self) {
         if self.ov_take.len() == 0 && self.ov_take_sh.len() == 0 {
@@ -8507,7 +9299,26 @@ extend<const B: usize> Prover<B> {
     // `owns`, or a call or a drop of a value whose invariant (this file's) does.
     fn loop_owns(self: &mut Self, b: &ir::CoreBody) bool {
         for j in 0..self.fx.lblocks.len() {
-            let t = b.blocks.at(self.fx.lblocks[j] as usize).term;
+            let bb = *b.blocks.at(self.fx.lblocks[j] as usize);
+            // A write through a raw pointer to a struct whose invariant names blocks gives and takes them
+            // (`mi_open`, `mi_close`).
+            for sid in bb.stmt_start..bb.stmt_start + bb.stmt_len {
+                let st = *b.statements.at(sid as usize);
+                if st.kind != ir::ST_ASSIGN {
+                    continue;
+                }
+                let pl = *b.places.at(st.place as usize);
+                for q in 0..pl.proj_len {
+                    let pj = *b.projections.at((pl.proj_start + q) as usize);
+                    if pj.kind == ir::PJ_DEREF && self.raw_ptr_ty(b.module, self.proj_base_ty(b, &pl, q)) && self.inv_owns(
+                        b.module,
+                        pj.ty,
+                    ) {
+                        return true;
+                    }
+                }
+            }
+            let t = bb.term;
             if t.kind == ir::TM_DROP {
                 if self.inv_owns(b.module, b.places.at(t.a as usize).ty) {
                     return true;
@@ -9473,8 +10284,18 @@ extend<const B: usize> Prover<B> {
         let t = self.tm.call(key, &none, self.pw, false);
         if !self.seld.contains_key(&t) {
             self.seld.insert(t, true);
-            let one = self.tm.int(Num::<B>::one(), self.pw, false);
-            let mut f = self.tm.cmp(T_LE, one, t);
+            // At least the alignment of each member whose layout is known (a pointer in a generic struct).
+            let mut lo: u64 = 1;
+            let mut mts = Vector::<u64>::new();
+            self.member_types(rm, rt, &mut mts);
+            for j in 0..mts.len() {
+                let ml = self.lsv.layout((mts[j] >> 32) as ModuleId, (mts[j] & 0xFFFFFFFFu64) as TypeId);
+                if ml.ok && ml.align > lo {
+                    lo = ml.align;
+                }
+            }
+            let lo_t = self.tm.int(wide::<B>(lo as i64), self.pw, false);
+            let mut f = self.tm.cmp(T_LE, lo_t, t);
             // In the program's arithmetic and in a clause's exact one.
             for wi in 0..2 {
                 let (w, sg) = if wi == 0 {
@@ -9504,7 +10325,16 @@ extend<const B: usize> Prover<B> {
             let isn = self.tm.cmp(T_EQ, p, nl);
             let z = self.tm.int(Num::<B>::zero(), self.pw, false);
             let az = self.tm.cmp(T_EQ, r, z);
-            let f = self.tm.cmp(T_EQ, isn, az);
+            let mut f = self.tm.cmp(T_EQ, isn, az);
+            // A pointer is its address: the pointer at this address (`ptr_at`) is `p`, so a pointer at an
+            // address equal to this one is `p` too. The term is made here, as `ptr_at` folds it to `p`.
+            let px = self.tm.at(p);
+            if px.op != T_CALL || px.b != 1 || px.k != u64_val::<B>(skey_mix(17, 0)) {
+                let mut ys = Vector::<u32>::new();
+                ys.push(r);
+                let back = self.tm.call(skey_mix(17, 0), &ys, W_OTHER, false);
+                f = self.tm.and(f, self.tm.cmp(T_EQ, back, p));
+            }
             self.anchor(r, f);
         }
         return r;
@@ -9553,8 +10383,13 @@ extend<const B: usize> Prover<B> {
         return r;
     }
 
-    // The pointer at address `a` (`std::mem::ptr::from_addr_mut`).
+    // The pointer at address `a` (`std::mem::ptr::from_addr_mut`): `p` at the address of `p`, where the
+    // address comes from.
     fn ptr_at(self: &mut Self, a: u32) u32 {
+        let x = self.tm.at(a);
+        if x.op == T_CALL && x.b == 1 && x.k == u64_val::<B>(skey_mix(18, 0)) {
+            return self.tm.args[x.a as usize];
+        }
         let mut xs = Vector::<u32>::new();
         xs.push(a);
         let r = self.tm.call(skey_mix(17, 0), &xs, W_OTHER, false);
@@ -10085,6 +10920,13 @@ extend<const B: usize> Prover<B> {
             return nu;
         }
         return self.tm.upd(old, key, inner);
+    }
+
+    // `forget` each local of `ls`.
+    fn forget_all(self: &mut Self, cb: &ir::CoreBody, state: &mut Vector<u32>, ls: &Vector<u32>) {
+        for j in 0..ls.len() {
+            self.forget(cb, cb.module, state, ls[j]);
+        }
     }
 
     // Local `l` of body `cb` holds an unknown value from here on. The value is made now, not at the
@@ -11048,7 +11890,43 @@ extend<const B: usize> Prover<B> {
             };
             fx1 = self.update(cb, cm, state, &dp, fk + 1, x0, y, false);
         }
+        // A counter field's step (`count_step`): its value before the write, and the block's pointer.
+        let (cty, cfi) = if all || self.ghost_fn {
+            (TYPE_NONE, NONE)
+        } else {
+            self.counter_place(cb, cm, &dp, false)
+        };
+        let (wty, _wfi) = if all || self.ghost_fn || cty != TYPE_NONE {
+            (TYPE_NONE, NONE)
+        } else {
+            self.counter_place(cb, cm, &dp, true)
+        };
+        if cty == TYPE_NONE && wty == TYPE_NONE && !all && !self.ghost_fn && self.guard_place(cb, cm, &dp) {
+            self.report(
+                OB_COUNTER << 56 | 6 << 40 | sid as u64,
+                dc::COUNTER_STEP,
+                s.span,
+                format("a member a counter's guard reads is written only where its struct starts"),
+                String::from_str("write the whole struct (`*p = S { .. }`) where the body holds the guard"),
+            );
+        }
+        let (cp, co) = if cty != TYPE_NONE {
+            (
+                self.read_prefix(cb, cm, state, &dp, dp.proj_len - 2, false),
+                self.read_place(cb, cm, state, s.place, false)
+            )
+        } else if wty != TYPE_NONE {
+            (self.read_prefix(cb, cm, state, &dp, dp.proj_len - 1, false), NONE)
+        } else {
+            (NONE, NONE)
+        };
         self.write_place(cb, cm, state, s.place, v, all);
+        if cty != TYPE_NONE {
+            let t = self.tm.boolean(true);
+            self.count_step(cb, cm, state, pc, cty, cfi, cp, co, v, NONE, t, CS_PLAIN, s.span, sid);
+        } else if wty != TYPE_NONE && v != NONE {
+            self.count_start(cb, cm, state, pc, wty, cp, v, s.span, sid);
+        }
         if !all {
             self.st_report(pc, s.span);
         }
@@ -14399,6 +15277,26 @@ extend<const B: usize> Prover<B> {
 
     fn needs_proof(self: &mut Self, b: &ir::CoreBody) bool {
         let mut need = b.contracts.len() != 0 || self.inv_body(b);
+        // A body that reaches a counter field, or a member its guard reads (`count_step`).
+        for pi in 0..b.places.len() {
+            if need {
+                break;
+            }
+            let pl = b.places.at(pi);
+            let mut c = false;
+            for d in 1..3u32 {
+                if pl.proj_len >= d {
+                    let pj = *b.projections.at((pl.proj_start + pl.proj_len - d) as usize);
+                    c = c || pj.kind == ir::PJ_DEREF && self.counted(b.module, pj.ty);
+                }
+            }
+            need = c && (self.counter_place(b, b.module, pl, false).0 != TYPE_NONE || self.counter_place(
+                b,
+                b.module,
+                pl,
+                true,
+            ).0 != TYPE_NONE || self.guard_place(b, b.module, pl));
+        }
         // A body that reads or writes a static with an invariant (its own or its type's).
         for l in 0..b.locals.len() {
             need = need || self.static_inv_fn(b, l as u32) != NODE_NONE || self.static_tinv(b, l as u32);
@@ -15739,6 +16637,7 @@ extend<const B: usize> Prover<B> {
         }
         self.inv_scan(b);
         self.own_scan(b);
+        self.ctr_scan(b);
         let mut st = Vector::<u32>::new();
         fill(&mut st, b.locals.len() + self.slot_ty.len() + 1);
         let ne = st.len() - 1;
@@ -16237,9 +17136,11 @@ extend<const B: usize> Prover<B> {
                 );
             }
         }
+        let mut lfs = Vector::<u32>::new();
         for j in 0..invs.len() {
             let s = b.contracts[invs[j] as usize];
             let (f, _v) = self.chain(b, b.module, s, &path.state, &path.pc, false, none);
+            lfs.push(f);
             let sp = self.site_span(b.module, s);
             if back {
                 self.oblige(
@@ -16260,6 +17161,31 @@ extend<const B: usize> Prover<B> {
                     String::new(),
                 );
             }
+        }
+        if invs.len() != 0 {
+            let sp = self.site_span(b.module, b.contracts[invs[0] as usize]);
+            self.loop_apart(&path.pc, &lfs, sp, OB_INV_STEP << 56 | 1 << 55 | invs[0] as u64);
+        }
+        // `free`'s receiver, which `inv_locs` leaves out: a call of the loop may need its invariant, so it
+        // holds where the loop starts and at the end of each iteration, and the header assumes it.
+        let rs = self.inv_end;
+        if rs != NONE && path.state[rs as usize] != NONE {
+            let (rk, rsp, what) = if back {
+                (9u64 << 52, b.blocks.at(from as usize).term.span, "at the end of this iteration")
+            } else {
+                (14u64 << 52, b.blocks.at(h as usize).term.span, "where this loop starts")
+            };
+            let rty = self.loc_ty(b, rs as usize);
+            let _ = self.inv_need(
+                b,
+                &path.state,
+                &path.pc,
+                rty,
+                path.state[rs as usize],
+                rk | rs as u64 << 32 | h as u64,
+                rsp,
+                what,
+            );
         }
         // A value of a struct type whose invariant this file proves (`inv_locs`) holds it at the end of each
         // iteration, and the values hold distinct blocks, none a shared parameter lends: the header assumes
@@ -16548,8 +17474,12 @@ extend<const B: usize> Prover<B> {
                 path.pc.push(self.tm.or(first, below));
             }
         }
-        for j in 0..self.inv_locs.len() {
-            let l = self.inv_locs[j];
+        let mut ils = self.inv_locs.clone();
+        if rs != NONE {
+            ils.push(rs);
+        }
+        for j in 0..ils.len() {
+            let l = ils[j];
             let v = path.state[l as usize];
             if v != NONE {
                 let f = self.inv_of(b.module, self.loc_ty(b, l as usize), v, &path.state);
@@ -16561,11 +17491,14 @@ extend<const B: usize> Prover<B> {
         }
         let mut lc = Vector::<u32>::new();
         self.lent_claims(b, &path.state, &mut path.pc, &mut lc);
+        let mut lall = self.tm.boolean(true);
         for j in 0..invs.len() {
             let s = b.contracts[invs[j] as usize];
             let (f, _v) = self.chain(b, b.module, s, &path.state, &path.pc, false, none);
             path.pc.push(f);
+            lall = self.tm.and(lall, f);
         }
+        self.src_mark(lall, SRC_LOOP);
         for j in 0..decs.len() {
             let s = b.contracts[decs[j] as usize];
             let (_f, v) = self.chain(b, b.module, s, &path.state, &path.pc, false, none);
@@ -16622,6 +17555,7 @@ extend<const B: usize> Prover<B> {
         } else if t.kind == ir::TM_DROP {
             // The destructor assumes the value's invariant, and may panic past the other values.
             self.ov_pre = self.ov;
+            self.recv_pre = self.recv_val(&path.state);
             let dty = b.places.at(t.a as usize).ty;
             let pl = *b.places.at(t.a as usize);
             let dead = pick(pl.proj_len == 0, pl.base, NONE);
@@ -16867,6 +17801,7 @@ extend<const B: usize> Prover<B> {
         self.tk_atoms.clear();
         self.tk_src.clear();
         self.ov_pre = self.ov;
+        self.recv_pre = self.recv_val(&path.state);
         // A lemma whose clauses name blocks or units takes and gives them as a call does; other ghost code
         // reads only.
         let ghost_callee = self.is_ghost(t.callee) && !(self.is_lemma(t.callee) && self.mentions_owns(t.callee));
@@ -16880,6 +17815,8 @@ extend<const B: usize> Prover<B> {
         }
         let esc0 = self.esc.len();
         let aesc0 = self.aesc.len();
+        // The `&mut` parameters' targets the call borrows (`param_reborrow`).
+        let mut prb = Vector::<u32>::new();
         // An allocator's call: its size, and the block it moves (`own_after`).
         let ak = self.alloc_call(t.callee);
         let mut asize = NONE;
@@ -17033,14 +17970,25 @@ extend<const B: usize> Prover<B> {
                 // borrow reaches that member alone (`borrow_reach`).
                 let pl = *b.places.at(op.data as usize);
                 if !self.raw_reach(b, b.module, &mut path.state, &pl) {
-                    self.borrow_reach(b, b.module, &mut path.state, &pl);
+                    let pr = self.place_ref(b, b.module, &mut path.state, &pl);
+                    if pr != NONE && self.tm.at(pr).op == T_MREF && self.param_reborrow(b, t, pr) {
+                        prb.push(self.ref_target(pr));
+                    } else {
+                        self.borrow_reach(b, b.module, &mut path.state, &pl);
+                    }
                 }
             } else if !reads && op.kind != ir::OP_CONST && !self.shared_read(b, t, j) && !(b.places.at(op.data as usize).proj_len == 0 && self.scoped[b.places.at(
                 op.data as usize,
             ).base as usize]) {
                 // A shared read (`shared_read`) lets the callee keep no way to write what it reads.
                 let v = self.operand(b, b.module, &mut path.state, oid, false);
-                self.leak(v);
+                // A `&mut` parameter's whole target the call reborrows: the call's event gives it a new
+                // value, and no pointer reaches it after the call.
+                if v != NONE && self.tm.at(v).op == T_MREF && self.param_reborrow(b, t, v) {
+                    prb.push(self.ref_target(v));
+                } else {
+                    self.leak(v);
+                }
             }
         }
         let r0 = self.call_value(b, b.module, &mut path.state, t, false);
@@ -17222,6 +18170,7 @@ extend<const B: usize> Prover<B> {
             self.mem = null;
             if !pure && !ghost {
                 self.alloc_event(b, path, t, ak, arecv);
+                self.forget_all(b, &mut path.state, &prb);
             }
             let ne2 = cb.locals.len();
             frame.set(ne2, path.state[path.state.len() - 1]);
@@ -17269,6 +18218,7 @@ extend<const B: usize> Prover<B> {
         } else if !pure && !ghost {
             // A call that may write memory: a const fn call of frozen values writes none.
             self.alloc_event(b, path, t, ak, arecv);
+            self.forget_all(b, &mut path.state, &prb);
         }
         if self.ov_col == NONE && !ghost_callee {
             self.ov_apart(&path.pc, t.span);
@@ -17318,6 +18268,54 @@ extend<const B: usize> Prover<B> {
         }
         self.inv_called(b, path, t);
         self.ov_end();
+        // An atomic operation on a counter field (`ctr_tmp`): the counter's step.
+        if !self.ghost_fn && t.args_len != 0 && self.ctr_tmp.len() != 0 {
+            let aop = self.atomic_op(t.callee);
+            let op0 = *b.operands.at(b.oper_pool[t.args_start as usize] as usize);
+            if aop != 255 && aop != 9 && op0.kind != ir::OP_CONST && b.places.at(op0.data as usize).proj_len == 0 {
+                if let Some(cpl) = self.ctr_tmp.get(&b.places.at(op0.data as usize).base) {
+                    let cpi = *cpl;
+                    let cplace = *b.places.at(cpi as usize);
+                    let (cty, cfi) = self.counter_place(b, b.module, &cplace, false);
+                    let cp = self.read_prefix(b, b.module, &mut path.state, &cplace, cplace.proj_len - 2, false);
+                    let arg1 = if t.args_len > 1 {
+                        self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false)
+                    } else {
+                        NONE
+                    };
+                    let arg2 = if t.args_len > 2 {
+                        self.operand(b, b.module, &mut path.state, b.oper_pool[(t.args_start + 2) as usize], false)
+                    } else {
+                        NONE
+                    };
+                    let tr = self.tm.boolean(true);
+                    let (o, n, d, g) = if aop == CS_ADD || aop == CS_SUB {
+                        let (w, sg) = (self.tm.at(r).w, self.tm.at(r).sg);
+                        (r, self.tm.arith(pick(aop == CS_ADD, T_ADD, T_SUB), r, arg1, w, sg), arg1, tr)
+                    } else if aop == CS_CAS {
+                        (arg1, arg2, NONE, r)
+                    } else {
+                        (NONE, arg1, NONE, tr)
+                    };
+                    self.count_step(
+                        b,
+                        b.module,
+                        &mut path.state,
+                        &mut path.pc,
+                        cty,
+                        cfi,
+                        cp,
+                        o,
+                        n,
+                        d,
+                        g,
+                        aop,
+                        t.span,
+                        1 << 38 | t.span.start as u64,
+                    );
+                }
+            }
+        }
         self.inv_lent(b, path, t);
         // A local the call took by value holds no value: its blocks are the callee's, and no later check
         // reads it. Its invariant names `owns`: a type that holds a block is no `Copy` type.
@@ -17468,6 +18466,21 @@ extend<const B: usize> Prover<B> {
             }
         }
         return self.one_borrow(b, t);
+    }
+
+    // Whether `v`, an argument of call `t`, refers to the referent of a `&mut` parameter of body `b` and
+    // the call's results hold no reference. The parameter is live while the body runs, and no other path
+    // may reach its referent while it is: no pointer the callee keeps reaches it after the call.
+    fn param_reborrow(self: &Self, b: &ir::CoreBody, t: &ir::Terminator, v: u32) bool {
+        if v == NONE || self.tm.at(v).op != T_MREF && self.tm.at(v).op != T_PREF || self.ref_target(v) as usize < b.locals.len() {
+            return false;
+        }
+        for j in t.dests_start..t.dests_start + t.dests_len {
+            if !self.holds_no_borrow(b.module, b.places.at(b.dest_pool[j as usize] as usize).ty) {
+                return false;
+            }
+        }
+        return true;
     }
 
     // Whether the arguments of call `t` but one mutable borrow are constants, frozen values or shared

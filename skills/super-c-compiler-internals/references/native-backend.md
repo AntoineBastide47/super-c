@@ -79,7 +79,8 @@ A module the backend cannot compile (module-level assembly the target's assemble
 body the lowering or the backend refuses, a call of a header's `static` function or of an intrinsic
 without a template) is a build error that names the module and why (`native_plan`); `SC_NATIVE_STATS`
 reports each module. Each native module gives `m.o` (its own items, reused by the emission cache) and
-`m__inst.o` (the rest). The record `__sc_native` holds, per module, the key its own part was compiled
+`m__inst.o` (the rest). A function of the module outside the seed set (`fn_pred`), emitted because a text
+named it, is in the rest: the set keys the emission cache, and a later build may not name it. The record `__sc_native` holds, per module, the key its own part was compiled
 under (its emission cache key xor `nat_base`, which mixes in the build configuration, the CPU
 features, the LIR optimizer's switches, the header facts and, with debug information, the compile
 directory), its low bit `NAT_OBJ`

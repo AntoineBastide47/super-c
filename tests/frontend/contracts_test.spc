@@ -280,6 +280,11 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a `&mut` parameter's target lent to a call holds the callee's value",
+        "struct C {\n    n: u32,\n}\nfn bump(c: &mut C)\n    requires c.n < 100\n    ensures c.n == old(c.n) + 1\n{\n    c.n = c.n + 1;\n}\nfn f(c: &mut C)\n    requires c.n < 100\n    ensures c.n == old(c.n)\n{\n    bump(c);\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a member lent to a call holds the callee's value",
         "import std::spec::seq as *;\nstruct P {\n    v: Vector<u8>,\n}\nfn put(v: &mut Vector<u8>) requires v.len() < 100 ensures v.view() == old(v.view()).push(1) {\n    v.push(1);\n}\nfn f() usize ensures |r| r == 0 {\n    let mut q = P { v: Vector::<u8>::new() };\n    put(&mut q.v);\n    return q.v.len();\n}\nfn main() i32 { return 0; }\n",
         "cannot prove this 'ensures' clause",
@@ -649,6 +654,93 @@ fn bad(c: &C, prev: usize) {
 )",
         "cannot prove that this takes no block a shared parameter lends",
         "20:9",
+    );
+    b.add_at(
+        "a counter step by two",
+        M"(import atomic;
+
+struct Blk {
+    @counter("blk_guard")
+    n: usize,
+}
+
+spec fn blk_guard(p: *mut Blk) bool {
+    return Global::owns(p, sizeof(Blk), alignof(Blk));
+}
+
+fn bad(p: *mut Blk)
+    requires rc_share(p, 0, 1)
+{
+    let _ = unsafe atomic::add_usize(&mut (*p).n, 2, 0);
+}
+)",
+        "cannot prove that this write changes the counter by one, or starts it",
+        "15:20",
+    );
+    b.add_at(
+        "a counter's address given to a plain function",
+        M"(struct Blk {
+    @counter("blk_guard")
+    n: usize,
+}
+
+spec fn blk_guard(p: *mut Blk) bool {
+    return Global::owns(p, sizeof(Blk), alignof(Blk));
+}
+
+fn set(x: *mut usize) {
+    unsafe *x = 0;
+}
+
+fn bad(p: *mut Blk) {
+    set(&mut unsafe (*p).n);
+}
+)",
+        "a counter field's address goes only to an atomic operation",
+        "15:5",
+    );
+    b.add_at(
+        "a decrease without the unit",
+        M"(import atomic;
+
+struct Blk {
+    @counter("blk_guard")
+    n: usize,
+}
+
+spec fn blk_guard(p: *mut Blk) bool {
+    return Global::owns(p, sizeof(Blk), alignof(Blk));
+}
+
+fn bad(p: *mut Blk) {
+    if unsafe atomic::sub_usize(&mut (*p).n, 1, 4) == 1 {
+        let mut g = Global {};
+        unsafe g.dealloc(p, sizeof(Blk), alignof(Blk));
+    }
+}
+)",
+        "cannot prove that the body holds a unit of this counter",
+        "13:15",
+    );
+    b.add_at(
+        "a start without the guard",
+        M"(struct Blk {
+    @counter("blk_guard")
+    n: usize,
+}
+
+spec fn blk_guard(p: *mut Blk) bool {
+    return Global::owns(p, sizeof(Blk), alignof(Blk));
+}
+
+fn bad(p: *mut Blk)
+    requires rc_share(p, 0, 1)
+{
+    unsafe (*p).n = 5;
+}
+)",
+        "cannot prove that the body holds this counter's guard where it starts",
+        "13:5",
     );
     b.add_at(
         "a handoff of a block the body does not hold",
@@ -2100,6 +2192,82 @@ fn main() i32 {
 }
 )",
         3,
+    );
+    b.add(
+        "a counter field: a start, an increase, a lock, the last decrease frees",
+        M"(import atomic;
+
+struct Blk {
+    @counter("blk_guard")
+    @counter_lock
+    n: usize,
+}
+
+spec fn blk_guard(p: *mut Blk) bool {
+    return Global::owns(p, sizeof(Blk), alignof(Blk));
+}
+
+struct C
+    invariant self.p == null || rc_share(self.p, 0, 1)
+{
+    p: *mut Blk,
+}
+
+fn make() C {
+    let mut g = Global {};
+    let p = (unsafe g.alloc(sizeof(Blk), alignof(Blk))) as *mut Blk;
+    unsafe *p = Blk { n: 1 };
+    return C { p: p };
+}
+
+fn dup(c: &C) C {
+    let p = c.p;
+    if p == null {
+        return C { p: null };
+    }
+    let old = unsafe atomic::add_usize(&mut (*p).n, 1, 4);
+    if old > 1000 {
+        panic("count");
+    }
+    return C { p: p };
+}
+
+fn alone(c: &mut C) bool {
+    let p = c.p;
+    if p == null || !unsafe atomic::cas_usize(&mut (*p).n, 1, ~(0 as usize), false, 4, 4) {
+        return false;
+    }
+    unsafe atomic::store_usize(&mut (*p).n, 1, 4);
+    return true;
+}
+
+fn release(c: C) {
+    let p = c.p;
+    forget(c);
+    if p == null {
+        return;
+    }
+    if unsafe atomic::sub_usize(&mut (*p).n, 1, 4) == 1 {
+        let mut g = Global {};
+        unsafe g.dealloc(p, sizeof(Blk), alignof(Blk));
+    }
+}
+
+fn main() i32 {
+    let mut c = make();
+    let d = dup(&c);
+    let a = alone(&mut c);
+    release(d);
+    let b = alone(&mut c);
+    release(c);
+    return if !a && b {
+        5
+    } else {
+        1
+    };
+}
+)",
+        5,
     );
     b.add(
         "a handoff gives the block to the entry",

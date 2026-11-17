@@ -321,8 +321,10 @@ pub spec fn pre_any<R>(f: fn(*mut void) R) bool;
 
 /// `n` units of reference counter `k` of block `p`: a counter counts the units that exist, so the holder
 /// of the last one holds what the counter guards. A unit is linear, as a block is: a call takes the units
-/// its clauses name and gives those its `ensures` name. A counted type's file states each step of its
-/// counters in trusted lemmas, called next to the count operation they describe (std/parallel/arc.spc).
+/// its clauses name and gives those its `ensures` name. Counter k is the k-th `@counter("guard")` field of
+/// the block's struct; the prover gives and takes units at each step of the field (an add, sub or
+/// compare-and-swap by one, the store that starts it), and the guard spec function names what the live
+/// counter holds (std/parallel/arc.spc).
 @trusted
 pub spec fn rc_share(p: *mut void, k: usize, n: usize) bool;
 

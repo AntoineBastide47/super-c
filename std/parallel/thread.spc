@@ -35,32 +35,16 @@ import sc_runtime;
 /// The shared result cell: raw value storage plus the two-party bookkeeping. `pub` for linkage only.
 @no_const
 pub struct Cell<T> {
-    pub refs: i32, // atomic: the thread and the handle hold one each
+    @counter("cell_guard")
+    pub refs: i32, // atomic: the thread and the handle hold one unit each
     pub done: i32, // atomic: 1 once `value` holds the thread's result
     pub value: T, // written by the thread before `done`; raw storage until then
 }
 
-// The count as units (`rc_share`): counter 0 counts the thread's reference and the handle's, and guards
-// the cell. Each lemma states the step of the count operation it follows; no proof checks it.
-
-// A new cell, count 2: both units.
-@trusted
-lemma cell_new<T>(c: *mut Cell<T>)
-    requires Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>))
-    ensures rc_share(c, 0, 2);
-
-// A decrement of the count from `prev`: the last unit gives the cell.
-@trusted
-lemma cell_dec<T>(c: *mut Cell<T>, prev: i32)
-    requires rc_share(c, 0, 1)
-    ensures prev == 1 ==> rc_units(c, 0) == 0 && Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>));
-
-// A joined thread has dropped its reference (`thread_entry`'s `cell_drop` happens before the join
-// returns): the handle's unit is the last.
-@trusted
-lemma cell_joined<T>(c: *mut Cell<T>)
-    requires rc_share(c, 0, 1)
-    ensures rc_units(c, 0) == 0 && Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>));
+// What the live count of cell `c` holds: the cell.
+spec fn cell_guard<T>(c: *mut Cell<T>) bool {
+    return Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>));
+}
 
 // Drop one reference. The last one frees the value (when the thread produced it and nobody moved it out)
 // and the cell. Release/acquire on the count orders the thread's writes before the last holder's reads.
@@ -68,7 +52,6 @@ fn cell_drop<T>(c: *mut Cell<T>)
     requires rc_share(c, 0, 1)
 {
     let prev = unsafe atomic::sub_i32(&mut unsafe (*c).refs, 1, 3);
-    cell_dec(c, prev);
     if prev != 1 {
         return;
     }
@@ -154,14 +137,16 @@ extend<T> JoinHandle<T> {
             panic("thread::join: the OS refused to join the thread");
         }
         // The thread has exited, so its `done` store and its reference drop happen-before this point:
-        // the value is initialized and this is the last reference.
+        // the value is initialized and this is the last reference, which leaves the count at 0.
         // The handle is consumed: its drop does not run.
         let c = me.cell;
         forget(me);
+        if !unsafe atomic::cas_i32(&mut unsafe (*c).refs, 1, 0, false, 1, 1) {
+            panic("thread::join: the thread still holds the result after it ended");
+        }
         let v = unsafe {
             (*c).value
         };
-        cell_joined(c);
         let mut g = Global {};
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
         return v;
@@ -191,9 +176,8 @@ extend<T> JoinHandle<T> as Free {
 pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
     let mut g = Global {};
     let c = (unsafe g.alloc(sizeof(Cell<T>), alignof(Cell<T>))) as *mut Cell<T>;
-    unsafe (*c).refs = 2;
     unsafe (*c).done = 0;
-    cell_new(c);
+    unsafe (*c).refs = 2;
     let env = (unsafe g.alloc(sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>))) as *mut ThreadPayload<F, T>;
     unsafe env[0] = ThreadPayload::<F, T> { body: f, cell: c };
     let mut h: *mut void = null;

@@ -60,54 +60,69 @@ union Slot<T> {
 }
 
 // A block header. The slots follow it at offset `slot_offset()`, the skipfield follows the slots. Every
-// active block holds an element; every active block other than the tail has used all its slots.
-struct Block<T> {
-    next: *mut Block<T>, // the next active block; in the reserved list, the next reserved block
-    prev: *mut Block<T>, // the previous active block
-    erased_next: *mut Block<T>, // the next block with a skipblock
-    erased_prev: *mut Block<T>,
+// active block holds an element; every active block other than the tail has used all its slots. Each list
+// holds its blocks through `next`, the hive's `head` and `reserved` and the size each holder states; `prev`
+// and the erased list only name blocks.
+struct Block<T, A: Allocator>
+    invariant self.next == null || A::owns(
+        self.next,
+        Block::<T, A>::bytes(self.next_cap as usize),
+        Block::<T, A>::align(),
+    )
+{
+    next: *mut Block<T, A>, // the next active block; in the reserved list, the next reserved block
+    prev: *mut Block<T, A>, // the previous active block
+    erased_next: *mut Block<T, A>, // the next block with a skipblock
+    erased_prev: *mut Block<T, A>,
     cap: u16,
     len: u16, // live elements
     free_head: u16, // the first slot of the first skipblock, or NONE
+    next_cap: u16, // the slots of `next`
 }
-
-// A reserved block that `trim_capacity` frees as it unlinks it: the block of `size` bytes the hive's
-// allocator gave for it, which the hive holds once. No invariant states the blocks of the hive's lists: a
-// block's size follows from its own `cap`, which an invariant of the block that links it cannot read.
-@trusted
-lemma hive_block<T, A: Allocator>(b: *mut Block<T>, size: usize, align: usize)
-    ensures A::owns(b, size, align);
 
 /// A container whose elements keep their address until removed, in blocks from allocator A. An insert
 /// reuses the slot of a removed element first; iteration skips removed slots in O(1) per step.
-pub struct Hive<T, A = Global> {
-    head: *mut Block<T>, // the first active block, null when no element is stored
-    tail: *mut Block<T>, // the last active block: the only one with slots not used yet
+pub struct Hive<T, A: Allocator = Global>
+    invariant self.head == null || A::owns(
+        self.head,
+        Block::<T, A>::bytes(self.head_cap as usize),
+        Block::<T, A>::align(),
+    )
+    invariant self.reserved == null || A::owns(
+        self.reserved,
+        Block::<T, A>::bytes(self.reserved_cap as usize),
+        Block::<T, A>::align(),
+    )
+{
+    head: *mut Block<T, A>, // the first active block, null when no element is stored
+    tail: *mut Block<T, A>, // the last active block: the only one with slots not used yet
     tail_used: usize, // slots of `tail` used, live or removed
-    erased: *mut Block<T>, // the first block with a skipblock
-    reserved: *mut Block<T>, // the blocks without an element, linked through `next`
+    erased: *mut Block<T, A>, // the first block with a skipblock
+    reserved: *mut Block<T, A>, // the blocks without an element, linked through `next`
     len: usize,
     cap: usize, // slots of every block, active and reserved
+    head_cap: u16, // the slots of `head`
+    reserved_cap: u16, // the slots of `reserved`
     alloc: A,
 }
 
 // A Hive owns its elements, so it is Send / Sync when its elements and allocator are (the block pointers
 // make it structurally neither).
-unsafe extend<T: Send, A: Send> Hive<T, A> as Send {}
+unsafe extend<T: Send, A: Allocator + Send> Hive<T, A> as Send {}
 
-unsafe extend<T: Sync, A: Sync> Hive<T, A> as Sync {}
+unsafe extend<T: Sync, A: Allocator + Sync> Hive<T, A> as Sync {}
 
 /// The slot of one element of a Hive: valid from the `insert` that returns it until the element is removed.
 /// A copy that does not borrow the hive.
 @derive(Copy)
 pub struct HiveHandle<T> {
     slot: *mut Slot<T>,
-    block: *mut Block<T>,
+    block: *mut void, // the `Block` of `slot`
 }
 
 // The position of a walk over the live elements: `block` and `i` name the next one, while `rem` > 0.
-struct Cursor<T> {
-    block: *mut Block<T>,
+struct Cursor<T, A: Allocator> {
+    block: *mut Block<T, A>,
     slots: *mut Slot<T>, // the slots of `block`
     skip: *const u8, // the skipfield of `block`
     cap: usize, // the slots of `block`
@@ -116,19 +131,25 @@ struct Cursor<T> {
 }
 
 /// A borrowing iterator over a Hive, in block and slot order; exact size.
-pub struct HiveIter<'a, T> {
-    c: Cursor<T>,
+pub struct HiveIter<'a, T, A: Allocator = Global> {
+    c: Cursor<T, A>,
 }
 
 /// A mutably borrowing iterator over a Hive, in block and slot order; exact size.
-pub struct HiveIterMut<'a, T> {
-    c: Cursor<T>,
+pub struct HiveIterMut<'a, T, A: Allocator = Global> {
+    c: Cursor<T, A>,
 }
 
-// Skipfield entry `i`, u8 or u16 as Block<T>::narrow() selects.
+// True when the skipfield entries are u8: plf::hive's rule, a slot of at most 10 bytes in size and
+// alignment, where a u16 entry would add more than 20% to each slot.
+const fn narrow<T>() bool {
+    return sizeof(Slot<T>) <= 10 && alignof(Slot<T>) <= 10;
+}
+
+// Skipfield entry `i`, u8 or u16 as `narrow` selects.
 @always_inline
 const fn skip_get<T>(sk: *const u8, i: usize) usize {
-    if Block::<T>::narrow() {
+    if narrow::<T>() {
         return (unsafe sk[i]) as usize;
     }
     return (unsafe (sk as *const u16)[i]) as usize;
@@ -136,7 +157,7 @@ const fn skip_get<T>(sk: *const u8, i: usize) usize {
 
 @always_inline
 const fn skip_set<T>(sk: *mut u8, i: usize, v: usize) {
-    if Block::<T>::narrow() {
+    if narrow::<T>() {
         unsafe sk[i] = v as u8;
     } else {
         unsafe (sk as *mut u16)[i] = v as u16;
@@ -147,6 +168,50 @@ const fn skip_set<T>(sk: *mut u8, i: usize, v: usize) {
 @always_inline
 const fn link<T>(slots: *mut Slot<T>, i: usize) *mut u16 {
     return (unsafe (slots + i)) as *mut u16;
+}
+
+// Free the blocks of the list from `first`, of `first_cap` slots, through `alloc`; the slots they had.
+fn free_blocks<T, A: Allocator>(alloc: &mut A, first: *mut Block<T, A>, first_cap: u16) usize
+    requires first == null || A::owns(first, Block::<T, A>::bytes(first_cap as usize), Block::<T, A>::align())
+    panics if true
+{
+    let mut b = first;
+    let mut bc = first_cap;
+    let mut freed: usize = 0;
+    while b != null
+        invariant b == null || A::owns(b, Block::<T, A>::bytes(bc as usize), Block::<T, A>::align())
+    {
+        let n = unsafe (*b).next;
+        let nc = unsafe (*b).next_cap;
+        freed += bc as usize;
+        unsafe alloc.dealloc(b, Block::<T, A>::bytes(bc as usize), Block::<T, A>::align());
+        b = n;
+        bc = nc;
+    }
+    return freed;
+}
+
+// A block of `cap` slots from `alloc`, no element in it, before block `next` of `next_cap` slots.
+fn new_block<T, A: Allocator>(alloc: &mut A, cap: u16, next: *mut Block<T, A>, next_cap: u16) *mut Block<T, A>
+    requires next == null || A::owns(next, Block::<T, A>::bytes(next_cap as usize), Block::<T, A>::align())
+    ensures |r| A::owns(r, Block::<T, A>::bytes(cap as usize), Block::<T, A>::align())
+    panics if true
+{
+    let b = (unsafe alloc.alloc(alloc_size(Block::<T, A>::bytes(cap as usize)), Block::<T, A>::align())) as *mut Block<
+        T,
+        A
+    >;
+    unsafe *b = Block::<T, A> {
+        next: next,
+        prev: null,
+        erased_next: null,
+        erased_prev: null,
+        cap: cap,
+        len: 0,
+        free_head: NONE as u16,
+        next_cap: next_cap,
+    };
+    return b;
 }
 
 extend<T, A: Allocator> Hive<T, A> {
@@ -160,6 +225,8 @@ extend<T, A: Allocator> Hive<T, A> {
             reserved: null,
             len: 0,
             cap: 0,
+            head_cap: 0,
+            reserved_cap: 0,
             alloc: alloc,
         };
     }
@@ -182,7 +249,7 @@ extend<T, A: Allocator> Hive<T, A> {
     /// Stores `value` and returns its handle: in a free slot when a block has one, else in a slot not used
     /// yet, else in a reserved or a new block. O(1); no element moves.
     pub fn insert(self: &mut Hive<T, A>, value: T) HiveHandle<T> {
-        let b: *mut Block<T>;
+        let b: *mut Block<T, A>;
         let i: usize;
         if self.erased != null {
             b = self.erased;
@@ -195,10 +262,10 @@ extend<T, A: Allocator> Hive<T, A> {
             i = self.tail_used;
             self.tail_used += 1;
         }
+        self.len += 1;
+        unsafe (*b).len += 1;
         let p = unsafe (b.slots() + i);
         unsafe *(p as *mut T) = value;
-        unsafe (*b).len += 1;
-        self.len += 1;
         return HiveHandle::<T> { slot: p, block: b };
     }
 
@@ -215,14 +282,15 @@ extend<T, A: Allocator> Hive<T, A> {
     /// Removes the element `h` names and moves it to the caller; O(1), no other element moves. Its slot goes
     /// to the free list; a block left without an element becomes a reserved block. Safety: as for `get`.
     pub unsafe const fn remove(self: &mut Hive<T, A>, h: HiveHandle<T>) T {
-        let i = (h.slot as usize - h.block.slots() as usize) / sizeof(Slot<T>);
-        return self.remove_at(h.block, i);
+        let b = h.block as *mut Block<T, A>;
+        let i = (h.slot as usize - b.slots() as usize) / sizeof(Slot<T>);
+        return self.remove_at(b, i);
     }
 
     /// Keeps the elements for which `pred` returns true and frees the others (C++ `erase_if`). `pred` borrows
     /// each element once, in iteration order. No element moves.
     pub fn retain<F: fn(&T) bool>(self: &mut Hive<T, A>, pred: F) {
-        let mut c = Cursor::<T>::new(self.head, self.len);
+        let mut c = Cursor::<T, A>::new(self.head, self.len);
         while c.rem > 0 {
             let b = c.block;
             let i = c.i;
@@ -235,23 +303,45 @@ extend<T, A: Allocator> Hive<T, A> {
 
     /// Frees every element and keeps every block as a reserved block.
     pub fn clear(self: &mut Hive<T, A>) {
-        let mut c = Cursor::<T>::new(self.head, self.len);
+        let mut c = Cursor::<T, A>::new(self.head, self.len);
         while c.rem > 0 {
             let p = c.next();
             unsafe (*(p as *mut T)).free();
         }
+        self.reserve_active();
+    }
+
+    // Move every active block to the reserved list.
+    const fn reserve_active(self: &mut Hive<T, A>) {
         let mut b = self.head;
-        while b != null {
-            let n = unsafe (*b).next;
-            unsafe (*b).next = self.reserved;
-            self.reserved = b;
-            b = n;
-        }
+        let mut bc = self.head_cap;
+        let mut r = self.reserved;
+        let mut rc = self.reserved_cap;
         self.head = null;
+        self.head_cap = 0;
+        self.reserved = null;
+        self.reserved_cap = 0;
         self.tail = null;
         self.tail_used = 0;
         self.erased = null;
         self.len = 0;
+        while b != null
+            invariant b == null || A::owns(b, Block::<T, A>::bytes(bc as usize), Block::<T, A>::align())
+            invariant r == null || A::owns(r, Block::<T, A>::bytes(rc as usize), Block::<T, A>::align())
+        {
+            let n = unsafe (*b).next;
+            let nc = unsafe (*b).next_cap;
+            unsafe {
+                (*b).next = r;
+                (*b).next_cap = rc;
+            }
+            r = b;
+            rc = bc;
+            b = n;
+            bc = nc;
+        }
+        self.reserved = r;
+        self.reserved_cap = rc;
     }
 
     /// Makes room for at least `additional` more elements: allocates reserved blocks (of at most 8192 slots
@@ -267,80 +357,90 @@ extend<T, A: Allocator> Hive<T, A> {
         }
         let mut need = additional - free;
         while need > 0 {
-            let c = need.max(Block::<T>::min_cap()).min(Block::<T>::max_cap());
-            let b = self.alloc_block(c);
-            unsafe (*b).next = self.reserved;
-            self.reserved = b;
+            let c = need.max(Block::<T, A>::min_cap()).min(Block::<T, A>::max_cap());
+            self.add_reserved(c as u16);
             need -= need.min(c);
         }
     }
 
     /// Frees every reserved block (C++ `trim_capacity`). No element moves.
     pub fn trim_capacity(self: &mut Hive<T, A>) {
-        while self.reserved != null {
-            let b = self.reserved;
-            self.reserved = unsafe (*b).next;
-            let c = b.cap();
-            self.cap -= c;
-            let size = Block::<T>::bytes(c);
-            let align = Block::<T>::align();
-            hive_block::<T, A>(b, size, align);
-            unsafe self.alloc.dealloc(b, size, align);
-        }
+        let b = self.reserved;
+        let bc = self.reserved_cap;
+        self.reserved = null;
+        self.reserved_cap = 0;
+        let freed = free_blocks::<T, A>(&mut self.alloc, b, bc);
+        self.cap -= freed;
     }
 
     /// A borrowing iterator in block and slot order; exact size.
-    pub const fn iter(self: &Hive<T, A>) HiveIter<T> {
-        return HiveIter::<T> { c: Cursor::<T>::new(self.head, self.len) };
+    pub const fn iter(self: &Hive<T, A>) HiveIter<T, A> {
+        return HiveIter::<T, A> { c: Cursor::<T, A>::new(self.head, self.len) };
     }
 
     /// A mutably borrowing iterator in block and slot order; exact size.
-    pub const fn iter_mut(self: &mut Hive<T, A>) HiveIterMut<T> {
-        return HiveIterMut::<T> { c: Cursor::<T>::new(self.head, self.len) };
+    pub const fn iter_mut(self: &mut Hive<T, A>) HiveIterMut<T, A> {
+        return HiveIterMut::<T, A> { c: Cursor::<T, A>::new(self.head, self.len) };
     }
 
-    // A block of `cap` slots from the allocator, its links not set.
-    fn alloc_block(self: &mut Hive<T, A>, cap: usize) *mut Block<T> {
-        let b = (unsafe self.alloc.alloc(alloc_size(Block::<T>::bytes(cap)), Block::<T>::align())) as *mut Block<T>;
-        unsafe (*b).cap = cap as u16;
-        self.cap += cap;
-        return b;
+    // Add a new block of `cap` slots, no element in it, to the reserved list.
+    fn add_reserved(self: &mut Hive<T, A>, cap: u16) {
+        let r = self.reserved;
+        let rc = self.reserved_cap;
+        self.reserved = null;
+        self.reserved_cap = 0;
+        self.reserved = new_block::<T, A>(&mut self.alloc, cap, r, rc);
+        self.reserved_cap = cap;
+        self.cap += cap as usize;
     }
 
     // Append a reserved block, or else a new one, as the empty tail. A new block has as many slots as the hive
     // has elements, within the block limits: every active block is full at this point, so the capacity doubles.
     @noinline
     fn push_block(self: &mut Hive<T, A>) {
-        let b: *mut Block<T>;
-        if self.reserved != null {
-            b = self.reserved;
-            self.reserved = unsafe (*b).next;
+        let b: *mut Block<T, A>;
+        let bc: u16;
+        if self.reserved == null {
+            bc = self.len.max(Block::<T, A>::min_cap()).min(Block::<T, A>::max_cap()) as u16;
+            b = new_block::<T, A>(&mut self.alloc, bc, null, 0);
+            self.cap += bc as usize;
         } else {
-            b = self.alloc_block(self.len.max(Block::<T>::min_cap()).min(Block::<T>::max_cap()));
+            b = self.reserved;
+            bc = self.reserved_cap;
+            let n = unsafe (*b).next;
+            let nc = unsafe (*b).next_cap;
+            self.reserved = n;
+            self.reserved_cap = nc;
         }
-        let cap = b.cap();
-        unsafe memset(b.skips(), 0, (cap + 1) * Block::<T>::skip_bytes());
+        let t = self.tail;
+        if t == null {
+            self.head = b;
+            self.head_cap = bc;
+        }
+        self.tail = b;
+        self.tail_used = 0;
         unsafe {
             (*b).len = 0;
             (*b).free_head = NONE as u16;
             (*b).next = null;
-            (*b).prev = self.tail;
+            (*b).next_cap = 0;
+            (*b).prev = t;
             (*b).erased_next = null;
             (*b).erased_prev = null;
         }
-        if self.tail == null {
-            self.head = b;
-        } else {
-            unsafe (*self.tail).next = b;
+        if t != null {
+            unsafe {
+                (*t).next = b;
+                (*t).next_cap = bc;
+            }
         }
-        self.tail = b;
-        self.tail_used = 0;
+        unsafe memset(b.skips(), 0, (b.cap() + 1) * Block::<T, A>::skip_bytes());
     }
 
     // Take the first slot of the first skipblock of `b` (the head of the erased list) and return its index.
     // The skipblock shrinks from its front, or leaves the free list when it was one slot long; `b` leaves the
     // erased list with its last skipblock.
-    const fn take_free_slot(self: &mut Hive<T, A>, b: *mut Block<T>) usize {
+    const fn take_free_slot(self: &mut Hive<T, A>, b: *mut Block<T, A>) usize {
         let slots = b.slots();
         let sk = b.skips();
         let i = (unsafe (*b).free_head) as usize;
@@ -373,7 +473,7 @@ extend<T, A: Allocator> Hive<T, A> {
     // Move the live element in slot `i` of `b` out and add the slot to the skipfield: a new skipblock, the
     // extension of a neighbor one, or the merge of both neighbors. Only the end entries of a skipblock are
     // read (an element is never next to the inside of one), so only those are written.
-    const fn remove_at(self: &mut Hive<T, A>, b: *mut Block<T>, i: usize) T {
+    const fn remove_at(self: &mut Hive<T, A>, b: *mut Block<T, A>, i: usize) T {
         let slots = b.slots();
         let sk = b.skips();
         let v = unsafe *((slots + i) as *mut T);
@@ -429,14 +529,38 @@ extend<T, A: Allocator> Hive<T, A> {
 
     // Unlink `b`, which has no element left, from the active and the erased lists and add it to the reserved
     // list. A cursor leaves a block when it yields the block's last live element, before that element can be
-    // removed, so `retain` never reads the `next` this overwrites.
-    const fn retire(self: &mut Hive<T, A>, b: *mut Block<T>) {
+    // removed, so `retain` never reads the `next` this overwrites. The link that holds `b` is checked: `b`
+    // comes from a handle, and only that link states its size.
+    const fn retire(self: &mut Hive<T, A>, b: *mut Block<T, A>) {
         let p = unsafe (*b).prev;
         let n = unsafe (*b).next;
+        let nc = unsafe (*b).next_cap;
+        let r = self.reserved;
+        let rc = self.reserved_cap;
+        self.reserved = null;
+        self.reserved_cap = 0;
+        // `n` leaves `b`, and the reserved list follows it.
+        unsafe {
+            (*b).next = r;
+            (*b).next_cap = rc;
+        }
+        let bc: u16;
         if p == null {
+            if self.head != b {
+                panic("Hive: a block is not linked from the one before it");
+            }
+            bc = self.head_cap;
             self.head = n;
+            self.head_cap = nc;
         } else {
-            unsafe (*p).next = n;
+            if unsafe (*p).next != b {
+                panic("Hive: a block is not linked from the one before it");
+            }
+            bc = unsafe (*p).next_cap;
+            unsafe {
+                (*p).next = n;
+                (*p).next_cap = nc;
+            }
         }
         if n == null {
             self.tail = p;
@@ -448,23 +572,24 @@ extend<T, A: Allocator> Hive<T, A> {
         } else {
             unsafe (*n).prev = p;
         }
-        self.unlink_erased(b);
-        unsafe (*b).next = self.reserved;
         self.reserved = b;
+        self.reserved_cap = bc;
+        self.unlink_erased(b);
     }
 
-    const fn link_erased(self: &mut Hive<T, A>, b: *mut Block<T>) {
+    const fn link_erased(self: &mut Hive<T, A>, b: *mut Block<T, A>) {
+        let e = self.erased;
+        self.erased = b;
         unsafe {
             (*b).erased_prev = null;
-            (*b).erased_next = self.erased;
+            (*b).erased_next = e;
         }
-        if self.erased != null {
-            unsafe (*self.erased).erased_prev = b;
+        if e != null {
+            unsafe (*e).erased_prev = b;
         }
-        self.erased = b;
     }
 
-    const fn unlink_erased(self: &mut Hive<T, A>, b: *mut Block<T>) {
+    const fn unlink_erased(self: &mut Hive<T, A>, b: *mut Block<T, A>) {
         let p = unsafe (*b).erased_prev;
         let n = unsafe (*b).erased_next;
         if p == null {
@@ -485,65 +610,68 @@ extend<T, A: Allocator + Default> Hive<T, A> {
     }
 }
 
-extend<T> Block<T> {
-    // True when the skipfield entries are u8: plf::hive's rule, a slot of at most 10 bytes in size and
-    // alignment, where a u16 entry would add more than 20% to each slot.
-    const fn narrow() bool {
-        return sizeof(Slot<T>) <= 10 && alignof(Slot<T>) <= 10;
-    }
-
+extend<T, A: Allocator> Block<T, A> {
     const fn skip_bytes() usize {
-        if Block::<T>::narrow() {
+        if narrow::<T>() {
             return 1;
         }
         return 2;
     }
 
-    const fn max_cap() usize {
-        if Block::<T>::narrow() {
+    const fn max_cap() usize
+        ensures |r| r <= MAX_CAP_WIDE
+    {
+        if narrow::<T>() {
             return MAX_CAP_NARROW;
         }
         return MAX_CAP_WIDE;
     }
 
     const fn min_cap() usize {
-        return (MIN_SLOT_BYTES / sizeof(Slot<T>)).max(MIN_CAP).min(Block::<T>::max_cap());
+        return (MIN_SLOT_BYTES / sizeof(Slot<T>)).max(MIN_CAP).min(Block::<T, A>::max_cap());
     }
 
     // The bytes of a block of `cap` slots; `reserve` and the block limits keep it within an isize.
     const fn bytes(cap: usize) usize {
-        return Block::<T>::slot_offset() + cap * sizeof(Slot<T>) + (cap + 1) * Block::<T>::skip_bytes();
+        return Block::<T, A>::slot_offset() + cap * sizeof(Slot<T>) + (cap + 1) * Block::<T, A>::skip_bytes();
     }
 
     // The header rounded up to the alignment of a slot.
     const fn slot_offset() usize {
-        return sizeof(Block<T>) + alignof(Slot<T>) - 1 & ~(alignof(Slot<T>) - 1);
+        return sizeof(Block<T, A>) + alignof(Slot<T>) - 1 & ~(alignof(Slot<T>) - 1);
     }
 
     const fn align() usize
         ensures |r| r != 0 && (r & r - 1) == 0
     {
-        return alignof(Block<T>).max(alignof(Slot<T>));
+        return alignof(Block<T, A>).max(alignof(Slot<T>));
     }
 
     @always_inline
-    const fn cap(self: *mut Block<T>) usize {
+    const fn cap(self: *mut Block<T, A>) usize {
         return (unsafe (*self).cap) as usize;
     }
 
     @always_inline
-    const fn slots(self: *mut Block<T>) *mut Slot<T> {
-        return (unsafe (self as *mut u8 + Block::<T>::slot_offset())) as *mut Slot<T>;
+    const fn slots(self: *mut Block<T, A>) *mut Slot<T> {
+        return (unsafe (self as *mut u8 + Block::<T, A>::slot_offset())) as *mut Slot<T>;
     }
 
     @always_inline
-    const fn skips(self: *mut Block<T>) *mut u8 {
+    const fn skips(self: *mut Block<T, A>) *mut u8 {
         return (unsafe (self.slots() + self.cap())) as *mut u8;
     }
 
     // Point the free-list neighbors `prev` and `next` (NONE at an end) of a skipblock at `to_next` and
     // `to_prev`: the first slot of a moved skipblock for both, or each other when the skipblock leaves the list.
-    const fn relink(self: *mut Block<T>, slots: *mut Slot<T>, prev: usize, next: usize, to_next: usize, to_prev: usize) {
+    const fn relink(
+        self: *mut Block<T, A>,
+        slots: *mut Slot<T>,
+        prev: usize,
+        next: usize,
+        to_next: usize,
+        to_prev: usize,
+    ) {
         if prev == NONE {
             unsafe (*self).free_head = to_next as u16;
         } else {
@@ -555,9 +683,9 @@ extend<T> Block<T> {
     }
 }
 
-extend<T> Cursor<T> {
-    const fn new(head: *mut Block<T>, len: usize) Cursor<T> {
-        let mut c = Cursor::<T> { block: head, slots: null, skip: null, cap: 0, i: 0, rem: len };
+extend<T, A: Allocator> Cursor<T, A> {
+    const fn new(head: *mut Block<T, A>, len: usize) Cursor<T, A> {
+        let mut c = Cursor::<T, A> { block: head, slots: null, skip: null, cap: 0, i: 0, rem: len };
         if len > 0 {
             c.enter(head);
         }
@@ -566,7 +694,7 @@ extend<T> Cursor<T> {
 
     // Start at the first live slot of `b`, which holds an element.
     @always_inline
-    const fn enter(self: &mut Cursor<T>, b: *mut Block<T>) {
+    const fn enter(self: &mut Cursor<T, A>, b: *mut Block<T, A>) {
         self.block = b;
         self.slots = b.slots();
         self.skip = b.skips();
@@ -577,7 +705,7 @@ extend<T> Cursor<T> {
     // The slot of the next live element; the cursor then names the one after it, in the next block when the
     // slot was the last live one of its block. Needs rem > 0.
     @always_inline
-    const fn next(self: &mut Cursor<T>) *mut Slot<T> {
+    const fn next(self: &mut Cursor<T, A>) *mut Slot<T> {
         let p = unsafe (self.slots + self.i);
         self.rem -= 1;
         self.i += 1;
@@ -589,8 +717,8 @@ extend<T> Cursor<T> {
     }
 }
 
-extend<'a, T> HiveIter<'a, T> as Iterator<&'a T> {
-    pub fn next(self: &mut HiveIter<'a, T>) Option<&'a T> {
+extend<'a, T, A: Allocator> HiveIter<'a, T, A> as Iterator<&'a T> {
+    pub fn next(self: &mut HiveIter<'a, T, A>) Option<&'a T> {
         if self.c.rem == 0 {
             return None;
         }
@@ -598,13 +726,13 @@ extend<'a, T> HiveIter<'a, T> as Iterator<&'a T> {
         return Some(unsafe &*(p as *const T));
     }
 
-    pub const fn size_hint(self: &HiveIter<'a, T>) (usize, Option<usize>) {
+    pub const fn size_hint(self: &HiveIter<'a, T, A>) (usize, Option<usize>) {
         return (self.c.rem, Option::<usize>::Some(self.c.rem));
     }
 }
 
-extend<'a, T> HiveIterMut<'a, T> as Iterator<&'a mut T> {
-    pub fn next(self: &mut HiveIterMut<'a, T>) Option<&'a mut T> {
+extend<'a, T, A: Allocator> HiveIterMut<'a, T, A> as Iterator<&'a mut T> {
+    pub fn next(self: &mut HiveIterMut<'a, T, A>) Option<&'a mut T> {
         if self.c.rem == 0 {
             return None;
         }
@@ -612,7 +740,7 @@ extend<'a, T> HiveIterMut<'a, T> as Iterator<&'a mut T> {
         return Some(unsafe &mut *(p as *mut T));
     }
 
-    pub const fn size_hint(self: &HiveIterMut<'a, T>) (usize, Option<usize>) {
+    pub const fn size_hint(self: &HiveIterMut<'a, T, A>) (usize, Option<usize>) {
         return (self.c.rem, Option::<usize>::Some(self.c.rem));
     }
 }

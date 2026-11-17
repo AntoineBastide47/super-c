@@ -3761,6 +3761,32 @@ fn data_the_optimizer_defines_outlive_the_held_data() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A function the seed pass does not predict (`late`, which only the instance `G<i32>`'s `free` names) is
+// added by the build's demand, not one of its module's own items: a build that replays the module's cached
+// emission and no longer demands it links with no reference to the constant it reads.
+@test
+fn a_replayed_module_holds_no_function_only_an_earlier_build_demanded() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "a.spc",
+        "const K: i32 = 7;\n\nstatic mut FREED: i32 = 0;\n\npub struct G<T> {\n    pub v: T,\n}\n\n@noinline\nfn late() i32 {\n    return K;\n}\n\nextend<T> G<T> as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED = unsafe FREED + late();\n    }\n}\n\npub fn freed() i32 {\n    return unsafe FREED;\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import a;\n\nfn main() i32 {\n    {\n        let _g = a::G::<i32> { v: 3 };\n    }\n    return a::freed() - 7;\n}\n",
+    );
+    let args = "build main.spc -o bin";
+    assert(cli::superc_in(p.dir(), args).ok(), "the first build");
+    assert_eq(p.run_bin(), 0);
+    p.mkfile("main.spc", "import a;\n\nfn main() i32 {\n    return a::freed() + 5;\n}\n");
+    let r = cli::superc_in(p.dir(), args);
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the build that no longer demands `late`");
+    assert_eq(p.run_bin(), 5);
+}
+
 // A wasm build that replays a module's cached emission keeps its object, and compiles the module's statics
 // again: the address of a function a static holds takes its type from the static's type, as the function's
 // body is not lowered.

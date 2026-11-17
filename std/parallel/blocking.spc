@@ -81,13 +81,16 @@ static mut G_AT_EXIT: bool = false; // `exit_release` is registered (written by 
 // The header every job carries: its queue link, the trampoline that runs and settles it, and who waits.
 // A coroutine waits through its park token; a plain thread waits on `done`.
 @no_const
-pub struct Job {
+pub struct Job
+    invariant self.unit == null || rc_share(self.unit, 0, 1)
+{
     pub next: *mut Job,
     pub run: fn(*mut Job) void,
     pub co: *mut runtime::Coroutine,
     pub token: u32,
     pub done: i32, // atomic latch for a plain-thread caller
     pub t: *mut PThread, // the pool thread running the job; null for a job run in place
+    unit: *mut void, // a `call_c` record's unit for the pool thread (`run_ccall`); null for another job
 }
 
 // A coroutine waiting for admission: the node lives in its frame, on the pool's list under the lock.
@@ -947,7 +950,15 @@ fn call_ext<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     }
     let mut fr = Frame::<Call<F, T>> { none: 0 };
     let rp = ((&mut fr) as *mut Frame<Call<F, T>>) as *mut Call<F, T>;
-    unsafe (*rp).job = Job { next: null, run: unsafe run_call::<F, T>, co: null, token: 0, done: 0, t: null };
+    unsafe (*rp).job = Job {
+        next: null,
+        run: unsafe run_call::<F, T>,
+        co: null,
+        token: 0,
+        done: 0,
+        t: null,
+        unit: null,
+    };
     unsafe (*rp).body = f;
     if submit_ext(p, rp as *mut Job) {
         wait_ext(rp as *mut Job);
@@ -982,7 +993,15 @@ pub fn call<F: fn move() T + Send + 'static, T: Send>(f: F) T {
     let mut fr = Frame::<Call<F, T>> { none: 0 };
     let rp = ((&mut fr) as *mut Frame<Call<F, T>>) as *mut Call<F, T>;
     let token = unsafe runtime::park_begin(co);
-    unsafe (*rp).job = Job { next: null, run: unsafe run_call::<F, T>, co: co, token: token, done: 0, t: null };
+    unsafe (*rp).job = Job {
+        next: null,
+        run: unsafe run_call::<F, T>,
+        co: co,
+        token: token,
+        done: 0,
+        t: null,
+        unit: null,
+    };
     unsafe (*rp).body = f;
     let reason = unsafe runtime::park_timed(token, 0, commit_submit, rp, false);
     if reason != runtime::WR_BLOCKING {
@@ -1024,7 +1043,7 @@ pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
         return;
     }
     let mut rec = Raw {
-        job: Job { next: null, run: run_raw, co: null, token: 0, done: 0, t: null },
+        job: Job { next: null, run: run_raw, co: null, token: 0, done: 0, t: null, unit: null },
         run: run,
         env: env,
     };
@@ -1055,7 +1074,7 @@ pub unsafe fn run_blocking(run: fn(*mut void) void, env: *mut void) {
         return;
     }
     let token = runtime::park_begin(co);
-    unsafe (*rp).job = Job { next: null, run: run_raw, co: co, token: token, done: 0, t: null };
+    unsafe (*rp).job = Job { next: null, run: run_raw, co: co, token: token, done: 0, t: null, unit: null };
     let reason = runtime::park_timed(token, 0, commit_submit, rp, false);
     if reason != runtime::WR_BLOCKING {
         panic("a non-cancellable blocking park has exactly one waker");
@@ -1071,16 +1090,28 @@ const BS_PENDING: i32 = 0;
 const BS_COMPLETE: i32 = 1;
 const BS_ABANDONED: i32 = 2;
 
-// The record of a cancellable call, heap-owned and reference-counted (task and pool thread). `bytes` is
-// its allocation size, which the cache classes by.
+// The record of a cancellable call, heap-owned and reference-counted (task and pool thread): a block of
+// `crec_bytes` bytes, which the cache classes by.
 @no_const
 struct CCall<F, T> {
     pub job: Job,
-    pub refs: i32, // atomic
+    @counter("crec_guard")
+    pub refs: i32, // atomic: the task and the pool thread hold one unit each
     pub state: i32, // atomic BS_*
-    pub bytes: usize,
     pub body: F,
     pub value: T,
+}
+
+// The block size of a record of `(F, T)`.
+const fn crec_bytes<F, T>() usize
+    ensures |r| r != 0 && r as int <= isize::MAX as int
+{
+    return rec_size(sizeof(CCall<F, T>));
+}
+
+// What the live count of record `rp` holds: its block.
+spec fn crec_guard<F, T>(rp: *mut CCall<F, T>) bool {
+    return Global::owns(rp, crec_bytes::<F, T>(), 16);
 }
 
 // The block size of a record of `bytes` bytes: the size of the smallest class that holds it, or `bytes`
@@ -1197,39 +1228,14 @@ fn cache_drain(p: *mut Pool) {
     unsafe (*p).cache_bytes = 0;
 }
 
-// The count of a `call_c` record as units (`rc_share`, counter 0): the task's reference and the pool
-// thread's, which guard the block. Each lemma states the step of the count operation it is called after;
-// no proof checks it.
-
-// A new record of `size` bytes, count 2: one unit for the task and one for the pool thread.
-@trusted
-lemma crec_new<F, T>(rp: *mut CCall<F, T>, size: usize)
-    requires Global::owns(rp, size, 16)
-    ensures rc_share(rp, 0, 2);
-
-// The pool thread's unit, at the start of `run_ccall`: it comes with the job, through the queue and the
-// call through `Job.run`, which carry no clause.
-@trusted
-lemma crec_recv<F, T>(rp: *mut CCall<F, T>)
-    ensures rc_share(rp, 0, 1);
-
-// A decrement of the count from `prev`, of a record of `size` bytes: the last unit gives the block.
-@trusted
-lemma crec_dec<F, T>(rp: *mut CCall<F, T>, size: usize, prev: i32)
-    requires rc_share(rp, 0, 1)
-    ensures prev == 1 ==> Global::owns(rp, size, 16);
-
-// Drop one reference; the last one recycles the record (its value was settled by then). The size is read
-// first: past the decrement, the other side may recycle the record.
+// Drop one reference; the last one recycles the record (its value was settled by then).
 fn crec_drop<F, T>(rp: *mut CCall<F, T>)
     requires rc_share(rp, 0, 1)
     panics if true
 {
-    let size = unsafe (*rp).bytes;
     let prev = unsafe atomic::sub_i32(&mut unsafe (*rp).refs, 1, 3);
-    crec_dec(rp, size, prev);
     if prev == 1 {
-        cache_free(unsafe G_POOL, rp, size);
+        cache_free(unsafe G_POOL, rp, crec_bytes::<F, T>());
     }
 }
 
@@ -1238,7 +1244,12 @@ fn crec_drop<F, T>(rp: *mut CCall<F, T>)
 /// touches the coroutine after an abandonment. `pub` for linkage.
 pub unsafe fn run_ccall<F: fn move() T + Send, T>(j: *mut Job) {
     let rp = j as *mut CCall<F, T>;
-    crec_recv(rp);
+    // The pool thread's unit leaves the job.
+    let u = (unsafe (*j).unit) as *mut CCall<F, T>;
+    unsafe (*j).unit = null;
+    if u == null {
+        panic("blocking: a call_c job without its unit");
+    }
     let f = unsafe (*rp).body;
     unsafe (*rp).value = f();
     release(j);
@@ -1248,7 +1259,7 @@ pub unsafe fn run_ccall<F: fn move() T + Send, T>(j: *mut Job) {
         let vp = (&mut unsafe (*rp).value) as *mut T;
         vp.free();
     }
-    crec_drop::<F, T>(rp);
+    crec_drop::<F, T>(u);
 }
 
 /// `call`, but the park is a cancellation point: `None` means the wait was cancelled, before the call was
@@ -1272,15 +1283,14 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
         }
         return Some(f());
     }
-    let bytes = rec_size(sizeof(CCall<F, T>));
-    let rp = cache_alloc(p, bytes) as *mut CCall<F, T>;
+    let rp = cache_alloc(p, crec_bytes::<F, T>()) as *mut CCall<F, T>;
     let token = unsafe runtime::park_begin(co);
-    unsafe (*rp).job = Job { next: null, run: unsafe run_ccall::<F, T>, co: co, token: token, done: 0, t: null };
-    unsafe (*rp).refs = 2;
     unsafe (*rp).state = BS_PENDING;
-    unsafe (*rp).bytes = bytes;
     unsafe (*rp).body = f;
-    crec_new(rp, bytes);
+    unsafe (*rp).refs = 2;
+    // The job carries the pool thread's unit.
+    let jp = rp as *mut Job;
+    unsafe *jp = Job { next: null, run: unsafe run_ccall::<F, T>, co: co, token: token, done: 0, t: null, unit: rp };
     let _ = unsafe runtime::park_timed(token, 0, commit_submit, rp, true);
     if runtime::cancel_after_wait(true) {
         if !unsafe atomic::cas_i32(&mut unsafe (*rp).state, BS_PENDING, BS_ABANDONED, false, 4, 0) {

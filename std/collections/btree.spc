@@ -57,6 +57,8 @@
 // over the vector (0.16 against 0.5). A small or read-mostly map is a sorted Vector; a map that changes
 // is a BTreeMap.
 
+import std::mem::ptr;
+
 extern "C" {
     fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
@@ -86,29 +88,162 @@ struct Leaf<K, V> {
     vals: [V; CAPACITY],
 }
 
-// An internal node: edge i leads to the keys between keys[i - 1] and keys[i]; edges 0..=len are live.
-struct Internal<K, V> {
+// An internal node: edge i leads to the keys between keys[i - 1] and keys[i]; edges 0..=len are live, the
+// others empty.
+struct Internal<K, V, A: Allocator> {
     @ordered
     data: Leaf<K, V>, // first, so a `*mut Internal` is a `*mut Leaf`
-    edges: [*mut Leaf<K, V>; CAPACITY + 1],
+    edges: [Edge<K, V, A>; CAPACITY + 1],
 }
 
-// A node a tree frees as it unlinks it: the block `A` gave for it, of a leaf or (`leaf` false) an
-// internal node, which the tree holds once. No invariant states the blocks of the tree's edges: a node's
-// kind follows from the map's height, which an invariant of the node that links it cannot read.
-@trusted
-lemma tree_node<K, V, A: Allocator>(node: *mut Leaf<K, V>, leaf: bool)
-    ensures leaf ==> A::owns(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>))
-    ensures !leaf ==> A::owns(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
+// The link to a child node, which holds the child's block: its address, plus 1 for a leaf (a node is
+// aligned to a pointer, so bit 0 tells the kind); 0 for none. Both kinds of node take the alignment of
+// an internal one, so that one clause states either block.
+struct Edge<K, V, A: Allocator>
+    invariant edge_ok::<K, V, A>(self.bits)
+{
+    bits: usize,
+}
 
-// Free tree node `node` (`tree_node`) through `alloc`.
-fn free_node<K, V, A: Allocator>(alloc: &mut A, node: *mut Leaf<K, V>, leaf: bool) {
-    tree_node::<K, V, A>(node, leaf);
-    if leaf {
-        unsafe alloc.dealloc(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>));
-    } else {
-        unsafe alloc.dealloc(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
+// Whether `bits` is no edge, or names a node block that `A` gave.
+spec fn edge_ok<K, V, A: Allocator>(bits: usize) bool {
+    return bits == 0 || A::owns(
+        ptr::from_addr_mut::<Leaf<K, V>>(bits - (bits & 1)),
+        node_bytes::<K, V, A>(bits),
+        alignof(Internal<K, V, A>),
+    );
+}
+
+// The block size of the node edge `bits` names.
+spec fn node_bytes<K, V, A: Allocator>(bits: usize) usize {
+    if (bits & 1) == 1 {
+        return sizeof(Leaf<K, V>);
     }
+    return sizeof(Internal<K, V, A>);
+}
+
+// `node_bytes` in code.
+@always_inline
+const fn node_size<K, V, A: Allocator>(bits: usize) usize
+    ensures |r| r == node_bytes::<K, V, A>(bits)
+{
+    return if (bits & 1) == 1 {
+        sizeof(Leaf<K, V>)
+    } else {
+        sizeof(Internal<K, V, A>)
+    };
+}
+
+// The node edge `bits` names.
+@always_inline
+const fn edge_node<K, V>(bits: usize) *mut Leaf<K, V>
+    ensures |r| r == ptr::from_addr_mut::<Leaf<K, V>>(bits - (bits & 1))
+{
+    return ptr::from_addr_mut::<Leaf<K, V>>(bits - (bits & 1));
+}
+
+// The edges of internal node `n`, for writes.
+@always_inline
+const fn edges<K, V, A: Allocator>(n: *mut Leaf<K, V>) *mut Edge<K, V, A> {
+    let i = n as *mut Internal<K, V, A>;
+    return &mut unsafe (*i).edges[0];
+}
+
+// Take edge `i` of internal node `n`: its child leaves the node, which keeps no edge there.
+const fn take_edge<K, V, A: Allocator>(n: *mut Leaf<K, V>, i: usize) Edge<K, V, A> {
+    let ep = edges::<K, V, A>(n);
+    let e = unsafe ep[i];
+    unsafe ep[i] = Edge::<K, V, A> { bits: 0 };
+    return e;
+}
+
+// Link `e` as edge `i` of internal node `n`, a slot without a child.
+const fn put_edge<K, V, A: Allocator>(n: *mut Leaf<K, V>, i: usize, e: Edge<K, V, A>) {
+    let ep = edges::<K, V, A>(n);
+    unsafe ep[i] = e;
+}
+
+// Move `count` edges of internal node `src` from `si` to node `dst` at `di`, each taken before it is
+// linked; within one node the ranges may overlap.
+const fn move_edges<K, V, A: Allocator>(dst: *mut Leaf<K, V>, di: usize, src: *mut Leaf<K, V>, si: usize, count: usize) {
+    if dst == src && di > si {
+        let mut j = count;
+        while j > 0 {
+            j -= 1;
+            put_edge::<K, V, A>(dst, di + j, take_edge::<K, V, A>(src, si + j));
+        }
+    } else {
+        for j in 0..count {
+            put_edge::<K, V, A>(dst, di + j, take_edge::<K, V, A>(src, si + j));
+        }
+    }
+}
+
+// A new empty leaf from `alloc`, without a parent.
+fn new_leaf<K, V, A: Allocator>(alloc: &mut A) Edge<K, V, A>
+    panics if true
+{
+    let n = (unsafe alloc.alloc(sizeof(Leaf<K, V>), alignof(Internal<K, V, A>))) as *mut Leaf<K, V>;
+    n.set_parent(null, 0);
+    n.set_len(0);
+    return Edge::<K, V, A> { bits: n as usize + 1 };
+}
+
+// A new empty internal node from `alloc`, without a parent or a child.
+fn new_internal<K, V, A: Allocator>(alloc: &mut A) Edge<K, V, A>
+    panics if true
+{
+    let node = (unsafe alloc.alloc(sizeof(Internal<K, V, A>), alignof(Internal<K, V, A>))) as *mut Internal<K, V, A>;
+    let n: *mut Leaf<K, V> = &mut unsafe (*node).data;
+    n.set_parent(null, 0);
+    n.set_len(0);
+    unsafe (*node).edges = [Edge::<K, V, A> { bits: 0 }; CAPACITY + 1];
+    return Edge::<K, V, A> { bits: node as usize };
+}
+
+// A new chain of nodes from `alloc` of height `h - 1` down to a leaf, each the first child of the one
+// above and without keys: its top edge and its leaf.
+fn new_spine<K, V, A: Allocator>(alloc: &mut A, h: usize) (Edge<K, V, A>, *mut Leaf<K, V>)
+    panics if true
+{
+    let le = new_leaf::<K, V, A>(alloc);
+    let leaf = edge_node::<K, V>(le.bits);
+    let mut child = le;
+    for _ in 1..h {
+        let ue = new_internal::<K, V, A>(alloc);
+        let up = edge_node::<K, V>(ue.bits);
+        edge_node::<K, V>(child.bits).set_parent(up, 0);
+        put_edge::<K, V, A>(up, 0, child);
+        child = ue;
+    }
+    return (child, leaf);
+}
+
+// Free the node `e` names through `alloc`.
+fn free_edge<K, V, A: Allocator>(alloc: &mut A, e: Edge<K, V, A>) {
+    let b = e.bits;
+    if b != 0 {
+        unsafe alloc.dealloc(edge_node::<K, V>(b), node_size::<K, V, A>(b), alignof(Internal<K, V, A>));
+    }
+}
+
+// Take the edge that holds `node`: its parent's, or `root` at the top. The link is checked: `node` comes
+// from a walk up through `parent`, and only the link states its block.
+const fn unlink<K, V, A: Allocator>(node: *mut Leaf<K, V>, root: &mut Edge<K, V, A>) Edge<K, V, A> {
+    let p = node.parent();
+    let i = node.parent_idx();
+    let bits = if p == null {
+        root.bits
+    } else {
+        unsafe edges::<K, V, A>(p)[i].bits
+    };
+    if edge_node::<K, V>(bits) != node {
+        panic("BTreeMap: a node is not linked from its parent");
+    }
+    if p == null {
+        return replace(root, Edge::<K, V, A> { bits: 0 });
+    }
+    return take_edge::<K, V, A>(p, i);
 }
 
 /// One end of a range: `Included(x)` and `Excluded(x)` bound the range at `x`, `Unbounded` does not
@@ -121,17 +256,19 @@ pub enum Bound<T> {
 
 /// An ordered map from K to V through allocator A: a B-tree of nodes that hold up to 15 keys and
 /// values each in flat arrays. Iteration is in increasing key order.
-pub struct BTreeMap<K, V, A = Global> {
-    root: *mut Leaf<K, V>, // null exactly when len == 0
+pub struct BTreeMap<K, V, A: Allocator = Global>
+    invariant edge_ok::<K, V, A>(self.root.bits)
+{
+    root: Edge<K, V, A>, // no edge exactly when len == 0
     height: usize, // edges from the root to every leaf
     len: usize,
     alloc: A,
 }
 
 // A BTreeMap owns its keys and values, so it is Send / Sync when they and its allocator are.
-unsafe extend<K: Send, V: Send, A: Send> BTreeMap<K, V, A> as Send {}
+unsafe extend<K: Send, V: Send, A: Allocator + Send> BTreeMap<K, V, A> as Send {}
 
-unsafe extend<K: Sync, V: Sync, A: Sync> BTreeMap<K, V, A> as Sync {}
+unsafe extend<K: Sync, V: Sync, A: Allocator + Sync> BTreeMap<K, V, A> as Sync {}
 
 // The two leaf positions an iterator has not passed: the gap before its next element from the front,
 // and the gap after its next element from the back. Every gap between two neighbor elements is exactly
@@ -145,10 +282,13 @@ struct Gaps<K, V> {
 
 // Moves every element out in key order and frees each node once it has passed the node. Dropping it
 // drops the elements it did not reach and frees the rest of the nodes.
-struct Drain<K, V, A> {
+struct Drain<K, V, A: Allocator>
+    invariant edge_ok::<K, V, A>(self.root.bits)
+{
     front: *mut Leaf<K, V>,
     idx: usize,
     len: usize,
+    root: Edge<K, V, A>, // the tree's root, whose nodes the drain frees as it passes them
     alloc: A,
 }
 
@@ -185,13 +325,13 @@ pub struct BTreeRange<'a, K, V> {
 }
 
 /// The slot of one key in a map, from `BTreeMap::entry`: occupied or vacant.
-pub enum BTreeEntry<'a, K, V, A> {
+pub enum BTreeEntry<'a, K, V, A: Allocator> {
     Occupied(BTreeOccupiedEntry<'a, K, V, A>),
     Vacant(BTreeVacantEntry<'a, K, V, A>),
 }
 
 /// An entry whose key is in the map. Holds the map borrowed mutably.
-pub struct BTreeOccupiedEntry<'a, K, V, A> {
+pub struct BTreeOccupiedEntry<'a, K, V, A: Allocator> {
     map: &'a mut BTreeMap<K, V, A>,
     node: *mut Leaf<K, V>,
     idx: usize,
@@ -200,7 +340,7 @@ pub struct BTreeOccupiedEntry<'a, K, V, A> {
 
 /// An entry whose key is not in the map; it owns the key until `insert`. Holds the map borrowed
 /// mutably.
-pub struct BTreeVacantEntry<'a, K, V, A> {
+pub struct BTreeVacantEntry<'a, K, V, A: Allocator> {
     map: &'a mut BTreeMap<K, V, A>,
     key: K,
     leaf: *mut Leaf<K, V>, // where the key goes, null for an empty map
@@ -211,7 +351,7 @@ pub struct BTreeVacantEntry<'a, K, V, A> {
 struct Member {}
 
 /// An ordered set of T through allocator A: a BTreeMap<T, Member, A> whose value takes no space.
-pub struct BTreeSet<T, A = Global> {
+pub struct BTreeSet<T, A: Allocator = Global> {
     m: BTreeMap<T, Member, A>,
 }
 
@@ -326,15 +466,12 @@ extend<K, V> Leaf<K, V> {
         return &mut unsafe (*self).vals[0];
     }
 
-    @always_inline
-    const fn edges(self: *mut Leaf<K, V>) *mut *mut Leaf<K, V> {
-        let n = self as *mut Internal<K, V>;
-        return &mut unsafe (*n).edges[0];
-    }
-
+    // The child at edge `i` of this internal node. An edge's layout does not depend on the allocator, so
+    // its bits are read through any one.
     @always_inline
     const fn edge(self: *mut Leaf<K, V>, i: usize) *mut Leaf<K, V> {
-        return unsafe self.edges()[i];
+        let ep = edges::<K, V, Global>(self) as *mut usize;
+        return edge_node::<K, V>(unsafe ep[i]);
     }
 
     @always_inline
@@ -355,9 +492,8 @@ extend<K, V> Leaf<K, V> {
 
     // Point the children at edges lo..=hi of this internal node back at it.
     const fn adopt(self: *mut Leaf<K, V>, lo: usize, hi: usize) {
-        let ep = self.edges();
         for i in lo..hi + 1 {
-            (unsafe ep[i]).set_parent(self, i);
+            self.edge(i).set_parent(self, i);
         }
     }
 
@@ -392,18 +528,17 @@ extend<K, V> Leaf<K, V> {
     }
 
     // Insert into an internal node with room: the key at `idx`, `edge` to its right.
-    const fn insert_fit_edge(self: *mut Leaf<K, V>, idx: usize, key: K, value: V, edge: *mut Leaf<K, V>) {
+    const fn insert_fit_edge<A: Allocator>(self: *mut Leaf<K, V>, idx: usize, key: K, value: V, edge: Edge<K, V, A>) {
         let n = self.len();
         self.insert_fit(idx, key, value);
-        let ep = self.edges();
-        unsafe memmove(ep + idx + 2, ep + idx + 1, (n - idx) * sizeof(*mut Leaf<K, V>));
-        unsafe ep[idx + 1] = edge;
+        move_edges::<K, V, A>(self, idx + 2, self, idx + 1, n - idx);
+        put_edge::<K, V, A>(self, idx + 1, edge);
         self.adopt(idx + 1, n + 1);
     }
 
     // Move the keys after `mid` (and for an internal node the edges after it) into the empty node
     // `right`, and return the key and value at `mid`, which leave this node.
-    const fn split(self: *mut Leaf<K, V>, right: *mut Leaf<K, V>, mid: usize, internal: bool) (K, V) {
+    const fn split<A: Allocator>(self: *mut Leaf<K, V>, right: *mut Leaf<K, V>, mid: usize, internal: bool) (K, V) {
         let n = self.len();
         let rn = n - mid - 1;
         right.copy_kvs(0, self, mid + 1, rn);
@@ -412,7 +547,7 @@ extend<K, V> Leaf<K, V> {
         self.set_len(mid);
         right.set_len(rn);
         if internal {
-            unsafe memcpy(right.edges(), self.edges() + mid + 1, (rn + 1) * sizeof(*mut Leaf<K, V>));
+            move_edges::<K, V, A>(right, 0, self, mid + 1, rn + 1);
             right.adopt(0, rn);
         }
         return (k, v);
@@ -441,7 +576,7 @@ extend<K, V> Leaf<K, V> {
 // (right), at height `h`. The parent key `kv` separates them.
 extend<K, V> Leaf<K, V> {
     // Move `count` keys from the left child through the parent key into the front of the right child.
-    const fn steal_left(self: *mut Leaf<K, V>, kv: usize, h: usize, count: usize) {
+    const fn steal_left<A: Allocator>(self: *mut Leaf<K, V>, kv: usize, h: usize, count: usize) {
         let left = self.edge(kv);
         let right = self.edge(kv + 1);
         let ln = left.len();
@@ -453,15 +588,14 @@ extend<K, V> Leaf<K, V> {
         left.set_len(ln - count);
         right.set_len(rn + count);
         if h > 0 {
-            let rp = right.edges();
-            unsafe memmove(rp + count, rp, (rn + 1) * sizeof(*mut Leaf<K, V>));
-            unsafe memcpy(rp, left.edges() + ln - count + 1, count * sizeof(*mut Leaf<K, V>));
+            move_edges::<K, V, A>(right, count, right, 0, rn + 1);
+            move_edges::<K, V, A>(right, 0, left, ln - count + 1, count);
             right.adopt(0, rn + count);
         }
     }
 
     // Move one key from the right child through the parent key onto the end of the left child.
-    const fn steal_right(self: *mut Leaf<K, V>, kv: usize, h: usize) {
+    const fn steal_right<A: Allocator>(self: *mut Leaf<K, V>, kv: usize, h: usize) {
         let left = self.edge(kv);
         let right = self.edge(kv + 1);
         let ln = left.len();
@@ -472,17 +606,16 @@ extend<K, V> Leaf<K, V> {
         left.set_len(ln + 1);
         right.set_len(rn - 1);
         if h > 0 {
-            let rp = right.edges();
-            unsafe left.edges()[ln + 1] = unsafe rp[0];
-            unsafe memmove(rp, rp + 1, rn * sizeof(*mut Leaf<K, V>));
+            move_edges::<K, V, A>(left, ln + 1, right, 0, 1);
+            move_edges::<K, V, A>(right, 0, right, 1, rn);
             left.adopt(ln + 1, ln + 1);
             right.adopt(0, rn - 1);
         }
     }
 
-    // Merge the right child and the parent key into the left child, and return the right child, which
-    // the caller frees. The parent loses one key and one edge.
-    const fn merge(self: *mut Leaf<K, V>, kv: usize, h: usize) *mut Leaf<K, V> {
+    // Merge the right child and the parent key into the left child, and return the right child's edge,
+    // through which the caller frees it. The parent loses one key and one edge.
+    const fn merge<A: Allocator>(self: *mut Leaf<K, V>, kv: usize, h: usize) Edge<K, V, A> {
         let left = self.edge(kv);
         let right = self.edge(kv + 1);
         let ln = left.len();
@@ -492,17 +625,17 @@ extend<K, V> Leaf<K, V> {
         left.copy_kvs(ln + 1, right, 0, rn);
         left.set_len(ln + 1 + rn);
         self.shift_kvs(kv, kv + 1, pn - kv - 1);
-        let ep = self.edges();
-        unsafe memmove(ep + kv + 1, ep + kv + 2, (pn - kv - 1) * sizeof(*mut Leaf<K, V>));
+        let gone = take_edge::<K, V, A>(self, kv + 1);
+        move_edges::<K, V, A>(self, kv + 1, self, kv + 2, pn - kv - 1);
         self.set_len(pn - 1);
         if kv + 1 < pn {
             self.adopt(kv + 1, pn - 1);
         }
         if h > 0 {
-            unsafe memcpy(left.edges() + ln + 1, right.edges(), (rn + 1) * sizeof(*mut Leaf<K, V>));
+            move_edges::<K, V, A>(left, ln + 1, right, 0, rn + 1);
             left.adopt(ln + 1, ln + 1 + rn);
         }
-        return right;
+        return gone;
     }
 }
 
@@ -557,20 +690,20 @@ extend<K, V> Gaps<K, V> {
 }
 
 extend<K, V, A: Allocator> Drain<K, V, A> {
-    fn free_node(self: &mut Drain<K, V, A>, node: *mut Leaf<K, V>, leaf: bool) {
-        free_node(&mut self.alloc, node, leaf);
+    // Free `node`, which the drain has passed, through the link that holds it.
+    fn free_node(self: &mut Drain<K, V, A>, node: *mut Leaf<K, V>) {
+        let e = unlink::<K, V, A>(node, &mut self.root);
+        free_edge::<K, V, A>(&mut self.alloc, e);
     }
 
     fn next(self: &mut Drain<K, V, A>) Option<(K, V)> {
         if self.len == 0 {
             // Every element is out: free the nodes from the last leaf up to the root.
             let mut n = self.front;
-            let mut leaf = true;
             while n != null {
                 let p = n.parent();
-                self.free_node(n, leaf);
+                self.free_node(n);
                 n = p;
-                leaf = false;
             }
             self.front = null;
             return None;
@@ -582,7 +715,7 @@ extend<K, V, A: Allocator> Drain<K, V, A> {
         while i >= n.len() {
             let p = n.parent();
             i = n.parent_idx();
-            self.free_node(n, h == 0);
+            self.free_node(n);
             n = p;
             h += 1;
         }
@@ -608,7 +741,7 @@ extend<K, V, A: Allocator> Drain<K, V, A> as Free {
 extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     /// An empty map backed by an explicit allocator value; no allocation until the first insert.
     pub const fn new_in(alloc: A) BTreeMap<K, V, A> {
-        return BTreeMap::<K, V, A> { root: null, height: 0, len: 0, alloc: alloc };
+        return BTreeMap::<K, V, A> { root: Edge::<K, V, A> { bits: 0 }, height: 0, len: 0, alloc: alloc };
     }
 
     /// Number of entries.
@@ -621,36 +754,30 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         return self.len == 0;
     }
 
-    fn new_leaf(self: &mut BTreeMap<K, V, A>) *mut Leaf<K, V> {
-        let n = (unsafe self.alloc.alloc(sizeof(Leaf<K, V>), alignof(Leaf<K, V>))) as *mut Leaf<K, V>;
-        n.set_parent(null, 0);
-        n.set_len(0);
-        return n;
-    }
-
-    fn new_internal(self: &mut BTreeMap<K, V, A>) *mut Leaf<K, V> {
-        let node = (unsafe self.alloc.alloc(sizeof(Internal<K, V>), alignof(Internal<K, V>))) as *mut Internal<K, V>;
-        let n: *mut Leaf<K, V> = &mut unsafe (*node).data;
-        n.set_parent(null, 0);
-        n.set_len(0);
-        return n;
-    }
-
-    fn free_node(self: &mut BTreeMap<K, V, A>, node: *mut Leaf<K, V>, leaf: bool) {
-        free_node(&mut self.alloc, node, leaf);
+    // The root node, null for none.
+    @always_inline
+    const fn root_node(self: &BTreeMap<K, V, A>) *mut Leaf<K, V> {
+        return edge_node::<K, V>(self.root.bits);
     }
 
     // Moves every element out into a drain and leaves the map empty.
     const fn drain(self: &mut BTreeMap<K, V, A>) Drain<K, V, A> {
         let mut front: *mut Leaf<K, V> = null;
-        if self.root != null {
-            front = self.root.first_leaf(self.height);
+        let r = self.root_node();
+        if r != null {
+            front = r.first_leaf(self.height);
         }
-        let d = Drain::<K, V, A> { front: front, idx: 0, len: self.len, alloc: self.alloc };
-        self.root = null;
+        let root = replace(&mut self.root, Edge::<K, V, A> { bits: 0 });
+        let d = Drain::<K, V, A> { front: front, idx: 0, len: self.len, root: root, alloc: self.alloc };
         self.height = 0;
         self.len = 0;
         return d;
+    }
+
+    // Moves every element of the map out into a drain.
+    const fn into_drain(self: BTreeMap<K, V, A>) Drain<K, V, A> {
+        let mut m = self;
+        return m.drain();
     }
 
     /// Drops every entry and frees every node.
@@ -660,7 +787,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
 
     // The node, index and node height of `key`, or a null node.
     fn find(self: &BTreeMap<K, V, A>, key: &K) (*mut Leaf<K, V>, usize, usize) {
-        let mut node = self.root;
+        let mut node = self.root_node();
         let mut h = self.height;
         while node != null {
             let (found, i) = search_node(node, key);
@@ -711,19 +838,19 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
 
     /// The entry with the smallest key, or `None` when empty.
     pub const fn first_key_value(self: &BTreeMap<K, V, A>) Option<(&K, &V)> {
-        if self.root == null {
+        if self.root.bits == 0 {
             return None;
         }
-        let n = self.root.first_leaf(self.height);
+        let n = self.root_node().first_leaf(self.height);
         return Some((&unsafe n.keys()[0], &unsafe n.vals()[0]));
     }
 
     /// The entry with the largest key, or `None` when empty.
     pub const fn last_key_value(self: &BTreeMap<K, V, A>) Option<(&K, &V)> {
-        if self.root == null {
+        if self.root.bits == 0 {
             return None;
         }
-        let n = self.root.last_leaf(self.height);
+        let n = self.root_node().last_leaf(self.height);
         let i = n.len() - 1;
         return Some((&unsafe n.keys()[i], &unsafe n.vals()[i]));
     }
@@ -731,7 +858,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     /// Insert `key` -> `value` and return the replaced value, or `None` when the key is new. On
     /// replacement the stored key stays and the argument key is dropped.
     pub fn insert(self: &mut BTreeMap<K, V, A>, key: K, value: V) Option<V> {
-        let mut node = self.root;
+        let mut node = self.root_node();
         let mut h = self.height;
         while node != null {
             let (found, i) = search_node(node, &key);
@@ -757,9 +884,10 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     ) {
         self.len += 1;
         if leaf == null {
-            let root = self.new_leaf();
+            let e = new_leaf::<K, V, A>(&mut self.alloc);
+            let root = edge_node::<K, V>(e.bits);
             root.insert_fit(0, key, value);
-            self.root = root;
+            self.root = e;
             self.height = 0;
             return (root, 0);
         }
@@ -768,21 +896,22 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             return (leaf, idx);
         }
         let (mid, into_left, at) = splitpoint(idx);
-        let right = self.new_leaf();
-        let (mk, mv) = leaf.split(right, mid, false);
+        let re = new_leaf::<K, V, A>(&mut self.alloc);
+        let right = edge_node::<K, V>(re.bits);
+        let (mk, mv) = leaf.split::<A>(right, mid, false);
         let target = if into_left {
             leaf
         } else {
             right
         };
         target.insert_fit(at, key, value);
-        self.insert_up(leaf, mk, mv, right);
+        self.insert_up(leaf, mk, mv, re);
         return (target, at);
     }
 
     // Insert the key and value that a split of `left` moved up, with the new node `right` after it,
     // into the parent of `left`, splitting full ancestors.
-    fn insert_up(self: &mut BTreeMap<K, V, A>, left: *mut Leaf<K, V>, key: K, value: V, right: *mut Leaf<K, V>) {
+    fn insert_up(self: &mut BTreeMap<K, V, A>, left: *mut Leaf<K, V>, key: K, value: V, right: Edge<K, V, A>) {
         let mut l = left;
         let mut r = right;
         let mut k = key;
@@ -794,31 +923,46 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             }
             let idx = l.parent_idx();
             if parent.len() < CAPACITY {
-                parent.insert_fit_edge(idx, k, v, r);
+                parent.insert_fit_edge::<A>(idx, k, v, r);
                 return;
             }
             let (mid, into_left, at) = splitpoint(idx);
-            let pright = self.new_internal();
-            let (mk, mv) = parent.split(pright, mid, true);
+            let pe = new_internal::<K, V, A>(&mut self.alloc);
+            let pright = edge_node::<K, V>(pe.bits);
+            let (mk, mv) = parent.split::<A>(pright, mid, true);
             let target = if into_left {
                 parent
             } else {
                 pright
             };
-            target.insert_fit_edge(at, k, v, r);
+            target.insert_fit_edge::<A>(at, k, v, r);
             l = parent;
-            r = pright;
+            r = pe;
             k = mk;
             v = mv;
         }
         // `l` is the root: a new root above it holds the moved-up key.
-        let root = self.new_internal();
-        root.insert_fit(0, k, v);
-        unsafe root.edges()[0] = l;
-        unsafe root.edges()[1] = r;
-        root.adopt(0, 1);
-        self.root = root;
+        self.grow_root(k, v, r);
+    }
+
+    // Put a new root above the root, with `key` and `value` and the edge `right` after them.
+    fn grow_root(self: &mut BTreeMap<K, V, A>, key: K, value: V, right: Edge<K, V, A>) {
+        let root = self.push_root();
+        root.insert_fit(0, key, value);
+        put_edge::<K, V, A>(root, 1, right);
+        root.adopt(1, 1);
+    }
+
+    // Put a new root without keys above the root, which becomes its first child, and return it.
+    fn push_root(self: &mut BTreeMap<K, V, A>) *mut Leaf<K, V> {
+        let old = replace(&mut self.root, Edge::<K, V, A> { bits: 0 });
+        let re = new_internal::<K, V, A>(&mut self.alloc);
+        let root = edge_node::<K, V>(re.bits);
+        put_edge::<K, V, A>(root, 0, old);
+        root.adopt(0, 0);
+        self.root = re;
         self.height += 1;
+        return root;
     }
 
     /// Remove `key` and return its value, or `None` when absent. The stored key is dropped.
@@ -843,20 +987,20 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
 
     /// Remove and return the entry with the smallest key, or `None` when empty.
     pub fn pop_first(self: &mut BTreeMap<K, V, A>) Option<(K, V)> {
-        if self.root == null {
+        if self.root.bits == 0 {
             return None;
         }
-        let n = self.root.first_leaf(self.height);
+        let n = self.root_node().first_leaf(self.height);
         let (k, v, _, _) = self.remove_kv(n, 0, 0);
         return Some((k, v));
     }
 
     /// Remove and return the entry with the largest key, or `None` when empty.
     pub fn pop_last(self: &mut BTreeMap<K, V, A>) Option<(K, V)> {
-        if self.root == null {
+        if self.root.bits == 0 {
             return None;
         }
-        let n = self.root.last_leaf(self.height);
+        let n = self.root_node().last_leaf(self.height);
         let (k, v, _, _) = self.remove_kv(n, n.len() - 1, 0);
         return Some((k, v));
     }
@@ -907,17 +1051,10 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             if parent == null {
                 if len == 0 {
                     if h == 0 {
-                        self.free_node(node, true);
-                        self.root = null;
                         gnode = null;
                         gidx = 0;
-                    } else {
-                        let child = node.edge(0);
-                        child.set_parent(null, 0);
-                        self.free_node(node, false);
-                        self.root = child;
-                        self.height -= 1;
                     }
+                    self.shrink_root();
                 }
                 break;
             }
@@ -926,34 +1063,46 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
                 let left = parent.edge(pi - 1);
                 let ln = left.len();
                 if ln > MIN_LEN {
-                    parent.steal_left(pi - 1, h, 1);
+                    parent.steal_left::<A>(pi - 1, h, 1);
                     if h == 0 {
                         gidx += 1;
                     }
                     break;
                 }
-                let gone = parent.merge(pi - 1, h);
-                self.free_node(gone, h == 0);
+                let gone = parent.merge::<A>(pi - 1, h);
+                free_edge::<K, V, A>(&mut self.alloc, gone);
                 if h == 0 {
                     gnode = left;
                     gidx += ln + 1;
                 }
             } else {
                 if parent.edge(1).len() > MIN_LEN {
-                    parent.steal_right(0, h);
+                    parent.steal_right::<A>(0, h);
                     break;
                 }
-                let gone = parent.merge(0, h);
-                self.free_node(gone, h == 0);
+                let gone = parent.merge::<A>(0, h);
+                free_edge::<K, V, A>(&mut self.alloc, gone);
             }
             node = parent;
         }
         return (gnode, gidx);
     }
 
+    // Free the empty root: the map holds no node when it was a leaf, else the root's one child is the root.
+    fn shrink_root(self: &mut BTreeMap<K, V, A>) {
+        let old = replace(&mut self.root, Edge::<K, V, A> { bits: 0 });
+        if self.height > 0 {
+            let child = take_edge::<K, V, A>(edge_node::<K, V>(old.bits), 0);
+            edge_node::<K, V>(child.bits).set_parent(null, 0);
+            self.root = child;
+            self.height -= 1;
+        }
+        free_edge::<K, V, A>(&mut self.alloc, old);
+    }
+
     /// The entry of `key`, for an in-place update or insert with one search.
     pub fn entry(self: &mut BTreeMap<K, V, A>, key: K) BTreeEntry<K, V, A> {
-        let mut node = self.root;
+        let mut node = self.root_node();
         let mut h = self.height;
         while node != null {
             let (found, i) = search_node(node, &key);
@@ -970,11 +1119,16 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     }
 
     const fn gaps_all(self: &BTreeMap<K, V, A>) Gaps<K, V> {
-        if self.root == null {
+        if self.root.bits == 0 {
             return Gaps::<K, V> { front: null, front_idx: 0, back: null, back_idx: 0 };
         }
-        let last = self.root.last_leaf(self.height);
-        return Gaps::<K, V> { front: self.root.first_leaf(self.height), front_idx: 0, back: last, back_idx: last.len() };
+        let last = self.root_node().last_leaf(self.height);
+        return Gaps::<K, V> {
+            front: self.root_node().first_leaf(self.height),
+            front_idx: 0,
+            back: last,
+            back_idx: last.len(),
+        };
     }
 
     /// An iterator over the `(&K, &V)` pairs in key order.
@@ -1005,7 +1159,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     // The leaf position before the first key that `b` admits as a lower bound (`lower`), or after the
     // last key it admits as an upper bound.
     fn gap_of(self: &BTreeMap<K, V, A>, b: &Bound<&K>, lower: bool) (*mut Leaf<K, V>, usize) {
-        if self.root == null {
+        if self.root.bits == 0 {
             return (null, 0);
         }
         let mut strict = false;
@@ -1021,13 +1175,13 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             },
             Unbounded => {
                 if lower {
-                    return (self.root.first_leaf(self.height), 0);
+                    return (self.root_node().first_leaf(self.height), 0);
                 }
-                let last = self.root.last_leaf(self.height);
+                let last = self.root_node().last_leaf(self.height);
                 return (last, last.len());
             },
         }
-        let mut node = self.root;
+        let mut node = self.root_node();
         for _ in 0..self.height {
             node = node.edge(count_below(node, &unsafe *key, strict));
         }
@@ -1081,7 +1235,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
 
     /// Keep only the entries for which `pred` returns true, in key order; drops the others.
     pub fn retain<F: fn(&K, &mut V) bool>(self: &mut BTreeMap<K, V, A>, pred: F) {
-        if self.root == null {
+        if self.root.bits == 0 {
             return;
         }
         let mut g = self.gaps_all();
@@ -1125,9 +1279,10 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     fn push_last(self: &mut BTreeMap<K, V, A>, tail: *mut Leaf<K, V>, key: K, value: V) *mut Leaf<K, V> {
         self.len += 1;
         if tail == null {
-            let root = self.new_leaf();
+            let e = new_leaf::<K, V, A>(&mut self.alloc);
+            let root = edge_node::<K, V>(e.bits);
             root.insert_fit(0, key, value);
-            self.root = root;
+            self.root = e;
             self.height = 0;
             return root;
         }
@@ -1144,39 +1299,28 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
             h += 1;
         }
         if open == null {
-            open = self.new_internal();
-            unsafe open.edges()[0] = self.root;
-            self.root.set_parent(open, 0);
-            self.root = open;
-            self.height += 1;
+            open = self.push_root();
         }
         // A new right spine of empty nodes from height h - 1 down to a leaf, under the new key.
-        let leaf = self.new_leaf();
-        let mut child = leaf;
-        for _ in 1..h {
-            let up = self.new_internal();
-            unsafe up.edges()[0] = child;
-            child.set_parent(up, 0);
-            child = up;
-        }
+        let (child, leaf) = new_spine::<K, V, A>(&mut self.alloc, h);
         let on = open.len();
         open.move_kv_in(on, key, value);
-        unsafe open.edges()[on + 1] = child;
-        child.set_parent(open, on + 1);
+        edge_node::<K, V>(child.bits).set_parent(open, on + 1);
+        put_edge::<K, V, A>(open, on + 1, child);
         return leaf;
     }
 
     // Fill each node on the right border to MIN_LEN keys from its left sibling, which `push_last` left
     // full.
     const fn fix_right_border(self: &mut BTreeMap<K, V, A>) {
-        let mut node = self.root;
+        let mut node = self.root_node();
         let mut h = self.height;
         while h > 0 {
             let last = node.len() - 1;
             let right = node.edge(last + 1);
             let rn = right.len();
             if rn < MIN_LEN {
-                node.steal_left(last, h - 1, MIN_LEN - rn);
+                node.steal_left::<A>(last, h - 1, MIN_LEN - rn);
             }
             node = right;
             h -= 1;
@@ -1189,44 +1333,32 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         if other.len == 0 {
             return;
         }
-        let mut b = other.drain();
-        if b.len < self.len / APPEND_INSERT_RATIO {
-            while let Some((k, v)) = b.next() {
+        let m = replace(other, BTreeMap::<K, V, A>::new_in(other.alloc));
+        self.take_all(m.into_drain());
+    }
+
+    // Move every element of `b` into this map, as `append` does.
+    fn take_all(self: &mut BTreeMap<K, V, A>, b: Drain<K, V, A>) {
+        let mut d = b;
+        if d.len < self.len / APPEND_INSERT_RATIO {
+            while let Some((k, v)) = d.next() {
                 self.insert(k, v);
             }
             return;
         }
-        let mut a = self.drain();
-        let mut pa = a.next();
-        let mut pb = b.next();
+        let a = self.drain();
+        self.merge_from(a, d);
+    }
+
+    // Build this map, which `a` drained, from the elements of `a` and `b` in key order, `b`'s value for a
+    // key in both.
+    fn merge_from(self: &mut BTreeMap<K, V, A>, a: Drain<K, V, A>, b: Drain<K, V, A>) {
+        let mut m = MergeDrain::<K, V, A> { a: a, b: b, pa: None, pb: None };
+        m.pa = m.a.next();
+        m.pb = m.b.next();
         let mut tail: *mut Leaf<K, V> = null;
-        loop {
-            let mut c: i32 = 0;
-            if pa.is_none() {
-                if pb.is_none() {
-                    break;
-                }
-                c = 1;
-            } else if pb.is_none() {
-                c = -1;
-            } else {
-                c = key_of(&pa).cmp(key_of(&pb));
-            }
-            if c < 0 {
-                let (k, v) = pa.take().unwrap();
-                tail = self.push_last(tail, k, v);
-                pa = a.next();
-            } else if c > 0 {
-                let (k, v) = pb.take().unwrap();
-                tail = self.push_last(tail, k, v);
-                pb = b.next();
-            } else {
-                let (k, _) = pa.take().unwrap();
-                let (_, v) = pb.take().unwrap();
-                tail = self.push_last(tail, k, v);
-                pa = a.next();
-                pb = b.next();
-            }
+        while let Some((k, v)) = m.next() {
+            tail = self.push_last(tail, k, v);
         }
         self.fix_right_border();
     }
@@ -1237,6 +1369,46 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
         while let Some((k, v)) = it.next() {
             self.insert(k, v);
         }
+    }
+}
+
+// The elements of two drains in key order, the second one's value for a key in both: `pa` and `pb` are
+// the next element of each, None at its end.
+struct MergeDrain<K, V, A: Allocator> {
+    a: Drain<K, V, A>,
+    b: Drain<K, V, A>,
+    pa: Option<(K, V)>,
+    pb: Option<(K, V)>,
+}
+
+extend<K: Ord, V, A: Allocator> MergeDrain<K, V, A> {
+    fn next(self: &mut MergeDrain<K, V, A>) Option<(K, V)> {
+        let mut c: i32 = 0;
+        if self.pa.is_none() {
+            if self.pb.is_none() {
+                return None;
+            }
+            c = 1;
+        } else if self.pb.is_none() {
+            c = -1;
+        } else {
+            c = key_of(&self.pa).cmp(key_of(&self.pb));
+        }
+        if c < 0 {
+            let r = self.pa.take();
+            self.pa = self.a.next();
+            return r;
+        }
+        if c > 0 {
+            let r = self.pb.take();
+            self.pb = self.b.next();
+            return r;
+        }
+        let (k, _) = self.pa.take().unwrap();
+        let (_, v) = self.pb.take().unwrap();
+        self.pa = self.a.next();
+        self.pb = self.b.next();
+        return Some((k, v));
     }
 }
 
@@ -1264,13 +1436,13 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     /// parent edge, every leaf is at one depth and `len` counts the elements. Returns the height: the
     /// edges from the root to every leaf.
     pub fn check_invariants(self: &BTreeMap<K, V, A>) usize {
-        if self.root == null {
+        if self.root.bits == 0 {
             assert(self.len == 0, "BTreeMap: a map without nodes has elements");
             assert(self.height == 0, "BTreeMap: a map without nodes has a height");
             return 0;
         }
-        assert(self.root.parent() == null, "BTreeMap: the root has a parent");
-        let n = check_node(self.root, self.height, null, null, true);
+        assert(self.root_node().parent() == null, "BTreeMap: the root has a parent");
+        let n = check_node(self.root_node(), self.height, null, null, true);
         assert(n == self.len, "BTreeMap: len differs from the element count");
         return self.height;
     }

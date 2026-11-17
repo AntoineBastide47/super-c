@@ -3038,7 +3038,7 @@ fn cemit_seed_module(
     for i in 0..cands.len() {
         let nid = cands[i];
         // The seed pass emits the functions the reachability walk predicts (`fn_pred`); a function
-        // only the emitted text names comes later (`cemit_drain_late`).
+        // only the emitted text names comes later (`fn_ref`, the demand drain).
         if cem.mg.fn_pred != null && !unsafe (*cem.mg.fn_pred).contains(&(m as u64 << 32 | nid as u64)) {
             continue;
         }
@@ -3093,6 +3093,9 @@ fn cemit_seed_fn(
     if !cemit_seed_take(g, p, m as ModuleId, nid, &mut lw, kl, false, &mut dow.pr) {
         return;
     }
+    // A function of the seed set (`fn_pred`) is of its module's own items, which a cached emission holds
+    // (the set keys it); one only an emitted text names is added by this build's demand.
+    let own = cem.mg.fn_pred == null || unsafe (*cem.mg.fn_pred).contains(&(m as u64 << 32 | nid as u64));
     if lw.body.is_generic {
         return;
     }
@@ -3147,7 +3150,7 @@ fn cemit_seed_fn(
             }
         }
         acc.chunk(m as u64, m as ModuleId, &cem.out, cem.mg.rec_on, &mut cem.mg.rec);
-        cem.lir_claim(m as u32, "a function", true);
+        cem.lir_claim(m as u32, "a function", own);
         if is_glue {
             // The public wrapper: its C where C renders, then its LIR.
             let mut wok = true;
@@ -3215,7 +3218,7 @@ fn cemit_seed_fn(
                 );
                 let wsym = sym.as_str().slice(0, sym.len() - 4);
                 cem.lir_free_wrapper(m as ModuleId, st9, wsym, &sym, gns[0..gns.len()]);
-                cem.lir_claim(m as u32, "a `free` wrapper", true);
+                cem.lir_claim(m as u32, "a `free` wrapper", own);
             }
         }
         cemit_closure_queue(
@@ -3230,6 +3233,7 @@ fn cemit_seed_fn(
             m as u64,
             &lw.closures,
             cem.mg.rec_on,
+            own,
             acc,
         );
     } else {
@@ -3243,7 +3247,7 @@ fn cemit_seed_fn(
 // Emit the closures `roots` of one emitted body, then the closures nested in them, in queue order.
 // Each closure is lowered once (`cl_cache` maps it to its slot in `clws`), lands in `ch` under chunk
 // key `key`, and puts its environment struct, if any, in the env vectors. `rec` journals both
-// for the per-TU cache.
+// for the per-TU cache; `own` claims their LIR as the module's own items (`Lower::claim`).
 fn cemit_closure_queue(
     p: &mut loader::Package,
     cem: &mut cbe::CEmit,
@@ -3256,6 +3260,7 @@ fn cemit_closure_queue(
     key: u64,
     roots: &Vector<NodeId>,
     rec: bool,
+    own: bool,
     acc: &mut SeedAcc,
 ) {
     let mut clsq = roots.clone();
@@ -3303,7 +3308,7 @@ fn cemit_closure_queue(
             acc.env_own.push(m);
         }
         acc.chunk(key, m, &cem.out, rec, &mut cem.mg.rec);
-        cem.lir_claim(m, "a closure", key != 65534);
+        cem.lir_claim(m, "a closure", own);
     }
 }
 
@@ -3871,6 +3876,7 @@ fn cemit_drain_demand(
             d_def.module,
             65534,
             &lws.at(li2 as usize).closures,
+            false,
             false,
             acc,
         );
@@ -14641,6 +14647,20 @@ fn bc_removed_names(p: &loader::Package) Vector<u64> {
     return all;
 }
 
+// Whether an `@counter("name")` attribute of the module names the function whose name is at `nsp`: the
+// prover reads that guard.
+const fn counter_guard(a: *const Ast, src: str, nsp: tok::Span) bool {
+    let nm = src.slice(nsp.start as usize, nsp.end as usize);
+    let ats = unsafe &(*a).attrs;
+    for k in 0..ats.len() {
+        let at = ats.at(k);
+        if at.kind == AttrKind::ATTR_COUNTER as u8 && src.slice(at.str_span.start as usize, at.str_span.end as usize) == nm {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast, m: ModuleId, iid: NodeId) {
     let it = unsafe (*a).at_const(iid);
     // A `@reflect`-tagged declaration is REACHED at startup: its exported descriptor registers
@@ -14669,7 +14689,7 @@ fn lint_report_item(p: &loader::Package, errs: &mut diag::Errors, a: *const Ast,
     };
     let nid = lint_item_name(a, iid);
     let nsp = unsafe (*a).at_const(nid).as_data.name.text;
-    if it.kind == NodeKind::NODE_FUNCTION && p.is_entry(m, iid) {
+    if it.kind == NodeKind::NODE_FUNCTION && (p.is_entry(m, iid) || counter_guard(a, src, nsp)) {
         return;
     }
     if it.kind == NodeKind::NODE_FUNCTION && vis_exported(unsafe (*a).ext(iid).function.vis) {

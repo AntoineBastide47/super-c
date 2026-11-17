@@ -7628,6 +7628,30 @@ extend Package {
         return self.lookup_sym(from, mid, s, want_type);
     }
 
+    /// A top-level declaration named `name` that module `mid` declares, exported or not: a type when
+    /// `want_type`, otherwise a value; NODE_NONE when it declares none.
+    pub(package) fn lookup_own(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
+        if !self.modules[mid as usize].has_ast {
+            return NODE_NONE;
+        }
+        self.ensure_index();
+        let s = self.idx().syms.find(name);
+        if s == SYM_NONE {
+            return NODE_NONE;
+        }
+        let key = s as u64 * 4u64 + if want_type {
+            2u64
+        } else {
+            0u64
+        };
+        for e in 0..2u64 {
+            if let Some(it) = self.idx().name_maps[mid as usize].get(&(key + e)) {
+                return self.idx().items.at((*it) as usize).node;
+            }
+        }
+        return NODE_NONE;
+    }
+
     /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
     /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
     @always_inline

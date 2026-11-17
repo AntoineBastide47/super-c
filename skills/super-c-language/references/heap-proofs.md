@@ -63,50 +63,74 @@ A struct with an invariant behind a raw pointer is memory that holds the struct'
   bytes, and `PoolClass` in `std/alloc/size_class.spc` does the same for `std/alloc/pool.spc`. The pool record
   holds one field per class, and a `switch` on the class picks the field. Keep the list in its own file:
   the file that holds the list's fields proves its invariant, and every other file assumes it.
-- **Trusted lemmas for facts no invariant can state.** A record two threads hold (the `call_c` record
-  of `std/parallel/blocking.spc`: `crec_new`, `crec_recv`, `crec_dec`), a pointer a C caller gives
-  back (`c_handle` in `src/api/c_abi.spc`), a block whose size a flag selects (`tree_node` in
-  `std/collections/btree.spc`, `hive_block` in `std/collections/hive.spc`). Each lemma is `@trusted`,
-  has no body and is called next to the operation it describes:
-
-```superc
-@trusted
-lemma tree_node<K, V, A: Allocator>(node: *mut Leaf<K, V>, leaf: bool)
-    ensures leaf ==> A::owns(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>))
-    ensures !leaf ==> A::owns(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
-```
+- **A block whose size a flag selects: one clause over the flag.** A BTree link (`Edge` in
+  `std/collections/btree.spc`) holds a node's address plus 1 for a leaf, and its invariant states either
+  block with one `owns`: a spec function of the bits gives the size, and both kinds take one alignment. A
+  Hive block (`std/collections/hive.spc`) stores the next block's slot count beside its pointer
+  (`next_cap`), so its invariant states that block's size.
+- **A record two threads hold: a unit each.** The `call_c` record of `std/parallel/blocking.spc` counts
+  its holders in an `@counter` field (Counted Shares); the pool thread's unit travels in the job
+  (`invariant self.unit == null || rc_share(self.unit, 0, 1)`), and the last holder frees the record.
+- **Trusted lemmas only for facts no code can give.** A pointer a C caller gives back (`c_handle` in
+  `src/api/c_abi.spc`) is the one left in std and the compiler. A trusted lemma is `@trusted`, has no
+  body, and is called next to the operation it describes; no proof checks that pairing.
 
 - **A conformance proves its interface's contract.** Its `requires` and `panics if` must follow from the
   interface's ("cannot prove this 'panics if' from the interface's 'panics if'"), and the interface's
   `ensures` must hold at each return. A conformance that may panic where its interface states no
   `panics if` cannot be written: change the interface, or prove that the body does not panic.
-- **A function used as a value has no `requires`**, except as a handoff's entry (Handoffs). Move the
-  facts it needs into a trusted lemma that the body calls first (`crec_recv` at the start of
-  `run_ccall`).
+- **A function used as a value has no `requires`**, except as a handoff's entry (Handoffs). Give it the
+  blocks it needs through an invariant of its argument's type: `run_ccall` takes the record's unit out of
+  its `Job`.
 
 ## Counted Shares
 
 A reference count's holders share a block. `rc_share(p, k, n)` is `n` units of counter `k` of block `p`;
 `rc_units(p, k)` is the units the body holds now. Units are linear, as blocks are, and at each return
-and lent take the units the clauses name must fit in the units held. The counted type's file states
-each step of its counters in `@trusted` bodiless lemmas and calls each one next to the count operation
-it describes (no proof checks that pairing). From `std/parallel/arc.spc`:
+and lent take the units the clauses name must fit in the units held.
+
+Counter `k` is the `k`-th field of the block's struct marked `@counter("guard")`, an integer. The guard
+is a spec function of the same file, `guard<struct's generics>(p: *mut S) bool`: what the live
+counter holds (the block, or a unit of another counter). The prover counts the units of each counter
+and checks every write of the field (error 564):
+
+- **Start:** a whole-struct write `*p = S { .. }`, or a plain store while no unit of `p` exists, takes the
+  guard and gives as many units as the literal count.
+- **Increase:** `atomic::add_*(&mut (*p).n, 1, ..)`, a `cas` from `o` to `o + 1`, or a plain store of
+  the count plus one needs a live block (a unit of `p`) and gives a unit. Check for overflow with a panic.
+- **Decrease:** a `sub` of one, a `cas` down by one, or a plain store of the count minus one takes a unit; where the old count was 1 the body
+  holds the guard. A `cas(n, 1, 0)` that fails keeps the unit.
+- **Lock:** with `@counter_lock`, the all-ones value locks the counter: a `cas` to it gives a lock unit,
+  and the atomic store of 1 that unlocks takes it back.
+
+A counter field's address goes only to an atomic operation's first argument (copies and casts are
+followed), and a member a guard reads changes only by a whole-struct write. Write the count right after
+the reads that decide it, with no call or allocation between. From `std/parallel/arc.spc`:
 
 ```superc
-@trusted
-lemma arc_strong_inc<T>(p: *mut ArcInner<T>)
-    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
-    ensures p == null || rc_share(p, 0, 1);
+struct ArcInner<T> {
+    @counter("arc_value_guard")
+    pub strong: usize,
+    @counter("arc_block_guard")
+    @counter_lock
+    pub weak: usize,
+    pub value: T,
+}
 
-@trusted
-lemma arc_weak_dec<T>(p: *mut ArcInner<T>, prev: usize)
-    requires p == null || rc_share(p, 1, 1)
-    ensures p == null || prev == 1 ==> rc_units(p, 1) == 0 && Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));
+// What the live strong count of block `p` holds: the strong handles' weak unit (and the value).
+spec fn arc_value_guard<T>(p: *mut ArcInner<T>) bool {
+    return rc_share(p, 1, 1);
+}
+
+// What the live weak count of block `p` holds: the block.
+spec fn arc_block_guard<T>(p: *mut ArcInner<T>) bool {
+    return Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));
+}
 ```
 
-The handle's invariant names one unit: `invariant self.ptr == null || rc_share(self.ptr, 0, 1)`. A
-lemma whose clauses name blocks or units takes and gives them as a call does. Std uses this model for
-`Arc`/`Weak`, `Rc` and its `Weak`, the thread result cell and the channel handles.
+The handle's invariant names one unit: `invariant self.ptr == null || rc_share(self.ptr, 0, 1)`. Std
+counts `Arc`/`Weak`, `Rc` and its `Weak`, the thread result cell, the channel handles and the `call_c`
+record this way.
 
 ## Handoffs
 
