@@ -20216,6 +20216,115 @@ int main(void) {
     assert_eq(run_native(format("{}{}{}", head, assign, far).as_str(), drv), 0);
 }
 
+// A loop's accumulators that step through intrinsics keep their registers. arm64: a `vbslq` whose mask
+// lives on writes its result over the operand that ends there (`bif`, `bit`), and the minimum that operand
+// is, made in a register of its own, takes the accumulator's (`chain_home`): the loop copies no vector
+// register. x86-64: a result made in a register of its own that the next intrinsic writes the step over
+// takes the accumulator's too. Both give the C results.
+@test
+fn accumulators_stepped_through_intrinsics_keep_their_registers() {
+    let a64 = M"(lir ptr 8
+sym @vmaxq_f32 fn global
+sym @vceqq_f32 fn global
+sym @vminnmq_f32 fn global
+sym @vmaxnmq_f32 fn global
+sym @vbslq_f32 fn global
+sym @mm fn global
+fn @mm
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = load.v4f32 v2 align 0
+  v6 = load.v4f32 v2+16 align 0
+  jmp b1(v3, v5, v6)
+b1(v7: i64, v8: v4f32, v9: v4f32):
+  v10 = ptradd v0, v7 * 4
+  v11 = load.v4f32 v10 align 0
+  v12 = call.v4f32 @vmaxq_f32(v8, v8) : (v4f32, v4f32) -> v4f32
+  v13 = call.v4i32 @vceqq_f32(v11, v11) : (v4f32, v4f32) -> v4i32
+  v14 = call.v4f32 @vminnmq_f32(v12, v11) : (v4f32, v4f32) -> v4f32
+  v15 = call.v4f32 @vbslq_f32(v13, v14, v12) : (v4i32, v4f32, v4f32) -> v4f32
+  v16 = call.v4f32 @vmaxq_f32(v9, v9) : (v4f32, v4f32) -> v4f32
+  v17 = call.v4f32 @vmaxnmq_f32(v16, v11) : (v4f32, v4f32) -> v4f32
+  v18 = call.v4f32 @vbslq_f32(v13, v17, v16) : (v4i32, v4f32, v4f32) -> v4f32
+  v19 = add.i64 v7, v4
+  v20 = icmp.ult v19, v1
+  br v20, b1(v19, v15, v18), b2(v15, v18)
+b2(v21: v4f32, v22: v4f32):
+  store v21, v2 align 0
+  store v22, v2+16 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(a64, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // Vector register copies (`mov vd.16b, vn.16b`: ORR of a register with itself).
+    let mut copies: u32 = 0;
+    for r in 0..32u32 {
+        copies += elf_text_count(&obj, 0xFFFFFFE0, 0x4EA01C00 | r << 16 | r << 5);
+    }
+    assert_eq(copies, 0);
+    // `bif` (6EE01C00) for both selects, no `bsl` (6E601C00).
+    assert_eq(elf_text_count(&obj, 0xFFE0FC00, 0x6EE01C00), 2);
+    assert_eq(elf_text_count(&obj, 0xFFE0FC00, 0x6E601C00), 0);
+    let x64 = M"(lir ptr 8
+sym @_mm_min_ps fn global
+sym @_mm_max_ps fn global
+sym @_mm_add_ps fn global
+sym @_mm_sub_ps fn global
+sym @mm fn global
+fn @mm
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = load.v4f32 v2 align 0
+  v6 = load.v4f32 v2+16 align 0
+  jmp b1(v3, v5, v6)
+b1(v7: i64, v8: v4f32, v9: v4f32):
+  v10 = ptradd v0, v7 * 4
+  v11 = load.v4f32 v10 align 0
+  v12 = call.v4f32 @_mm_min_ps(v11, v8) : (v4f32, v4f32) -> v4f32
+  v13 = call.v4f32 @_mm_add_ps(v12, v11) : (v4f32, v4f32) -> v4f32
+  v14 = call.v4f32 @_mm_max_ps(v11, v9) : (v4f32, v4f32) -> v4f32
+  v15 = call.v4f32 @_mm_sub_ps(v14, v11) : (v4f32, v4f32) -> v4f32
+  v16 = add.i64 v7, v4
+  v17 = icmp.ult v16, v1
+  br v17, b1(v16, v13, v15), b2(v13, v15)
+b2(v18: v4f32, v19: v4f32):
+  store v18, v2 align 0
+  store v19, v2+16 align 0
+  ret
+)";
+    assert(object_of(x64, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let drv = M"(#include <math.h>
+#include <string.h>
+void mm(const float *, long, float *);
+int main(void) {
+  float x[16], acc[8], lo[4], hi[4];
+  for (int k = 0; k < 16; k++) x[k] = (float)((k * 37) % 23) - 11.0f;
+  for (int k = 0; k < 4; k++) { acc[k] = lo[k] = 100.0f; acc[4 + k] = hi[k] = -100.0f; }
+  mm(x, 16, acc);
+  for (int k = 0; k < 16; k++) {
+#if defined(__aarch64__)
+    lo[k % 4] = fminf(lo[k % 4], x[k]);
+    hi[k % 4] = fmaxf(hi[k % 4], x[k]);
+#else
+    lo[k % 4] = (x[k] < lo[k % 4] ? x[k] : lo[k % 4]) + x[k];
+    hi[k % 4] = (x[k] > hi[k % 4] ? x[k] : hi[k % 4]) - x[k];
+#endif
+  }
+  return memcmp(acc, lo, 16) != 0 ? 1 : memcmp(acc + 4, hi, 16) != 0 ? 2 : 0;
+}
+)";
+    if cli::has_cc() && tgt::host_isa() == tgt::axis_index("aarch64", true) {
+        assert_eq(run_native(a64, drv), 0);
+    }
+    if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(x64, drv), 0);
+    }
+}
+
 // A cast between two vectors of one size is a view of its operand (`lv::FOLD_VIEW`): its readers read
 // the operand's register, also where the operand lives on, so arm64 copies no vector register. Sizes of
 // one register and of several (x86-64 with and without AVX2) give the C results.

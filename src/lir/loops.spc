@@ -3504,8 +3504,13 @@ extend LoopOpt {
                 c /= 2;
             }
         }
-        if self.vmodk != 0 && self.vmodk % self.vlanes == 0 && (self.vmodk / self.vlanes).is_power_of_two() && self.vmodk / self.vlanes <= MOD_COPIES && (self.vblk.len() == 0 || self.vmodk / self.vlanes <= c) {
-            return self.vmodk / self.vlanes;
+        // Those copies need not be a power of 2 (`vectorize` then takes the trip count's remainder), but
+        // with an aligned-block load, whose blocks are.
+        if self.vmodk != 0 && self.vmodk % self.vlanes == 0 && self.vmodk / self.vlanes <= MOD_COPIES {
+            let mc = self.vmodk / self.vlanes;
+            if self.vblk.len() == 0 || mc.is_power_of_two() && mc <= c {
+                return mc;
+            }
         }
         while self.vmodk != 0 && c > 1 && self.vmodk % (self.vlanes * c) != 0 {
             c /= 2;
@@ -6207,8 +6212,16 @@ extend LoopOpt {
         } else {
             self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0)
         };
-        let mk = self.vconst(b, qt, ~((step - 1) as u64) & mask_of(type_bits(qt, 8)), l0);
-        let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
+        // The trips the vector iterations take: a multiple of the step (a mask for a power of 2; else less
+        // the remainder: the copies of a modulo address, `vcopies`).
+        let cnt = if step.is_power_of_two() {
+            let mk = self.vconst(b, qt, ~((step - 1) as u64) & mask_of(type_bits(qt, 8)), l0);
+            self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0)
+        } else {
+            let sv = self.vconst(b, qt, step, l0);
+            let rem = self.vi(b, Inst { op: O_UREM, ty: qt, aux: 0, a: trips, b: sv, c: 0 }, l0);
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: trips, b: rem, c: 0 }, l0)
+        };
         let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
         for k in 0..self.vca.len() {
             let (alo, ahi) = self.vrange(b, self.vca[k], i0, l0);
@@ -14070,8 +14083,9 @@ const fn mult_of(b: &Body, v: Value, k: u64, depth: u32) bool {
 }
 
 // Whether slot address `s` reaches no access but through addresses that offset it: every reader of it or of
-// such an address is a load's or store's address or another offset's base, never a stored value, an
-// argument or an edge's (its bytes are no other pointer's).
+// such an address is a load's or store's address, a fill's destination (an array's initial value), a
+// copy's destination or source, or another offset's base, never a stored value, an argument or an edge's
+// (its bytes are no other pointer's).
 fn slot_private(b: &Body, s: Value) bool {
     let mut d = Vector::<bool>::new();
     d.resize_default(b.insts.len());
@@ -14099,7 +14113,8 @@ fn slot_private(b: &Body, s: Value) bool {
             } else if t.op == O_STORE {
                 at_a && !((t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && d[t.b as usize])
             } else {
-                false
+                // The address and the length are no value the fill or the copy writes.
+                t.op == O_MEMSET || t.op == O_MEMCPY
             };
             if !ok {
                 return false;

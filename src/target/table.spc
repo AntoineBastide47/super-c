@@ -108,9 +108,10 @@ pub(package) struct Isa {
     /// `replace_lane`): `lir::ir::Package::lane_insert`. x86-64's SSE2 inserts 2-byte lanes and lane 0 only.
     pub(package) lane_insert: bool,
     /// How the native backend computes an IEEE 754-2019 minimumNumber or maximumNumber of float vectors in
-    /// registers (`lir::ir::Package::vminnum`): 0 lane by lane (x86-64); VMIN_EXACT by its SIMD_MIN and
-    /// SIMD_MAX (wasm32); VMIN_QUIET by the C `fmin` and `fmax` of a number and a quieted operand (arm64
-    /// `fminnm`, which orders -0 below +0).
+    /// registers (`lir::ir::Package::vminnum`): 0 lane by lane; VMIN_EXACT by its SIMD_MIN and SIMD_MAX
+    /// (wasm32); VMIN_QUIET by the C `fmin` and `fmax` of a number and a quieted operand (arm64 `fminnm`,
+    /// which orders -0 below +0 and gives a NaN for a signaling one); VMIN_NUM by the C `fmin` and `fmax`
+    /// of a number and any operand (x86-64: the packed form gives the number for a NaN of either kind).
     pub(package) vminnum: u8,
     /// The instructions a permutation of the lanes of up to three vectors takes in registers, 0 for none:
     /// `lir::ir::Package::vec_perm3`. arm64 9 (per vector an index table's ADRP and LDR, and TBL or TBX),
@@ -301,7 +302,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bits: 0x0E0000,
         mask_bits: true,
         lane_insert: false,
-        vminnum: 0,
+        vminnum: 3,
         vector_perm3: 0,
         vector_sumw: 0x8,
         vector_mulw: 0x4,

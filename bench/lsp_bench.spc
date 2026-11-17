@@ -35,7 +35,9 @@ import std::mem::ptr;
 // The edited document, and the edits: a statement with a type error at the top of the `str_id` body (a
 // body-only edit), and the `str_id` return type (a signature edit; four other modules call it).
 const DOC: str = "src/driver/util.spc";
-const SIG_AT: str = "pub fn str_id(s: str) u64 {";
+const SIG_AT: str = "pub(package) fn str_id(s: str) u64 {";
+const SIG_NAME: usize = SIG_AT.len() - 20; // where `str_id` starts: "str_id(s: str) u64 {" is 20 bytes
+const SIG_RET: usize = SIG_AT.len() - 5; // where the return type `u64` starts
 const BODY_LINE: str = "    let sc_probe: i32 = true;\n";
 const QUERY_ROUNDS: usize = 20;
 const EDIT_ROUNDS: usize = 10;
@@ -410,8 +412,8 @@ fn drive(d: &mut Drv, root: &String, text: &String) bool {
     }
     let body = Edit { at: body_at as usize, cut: 0, put: BODY_LINE };
     let body_rev = Edit { at: body_at as usize, cut: BODY_LINE.len(), put: "" };
-    let sig_e = Edit { at: sig as usize + 22, cut: 3, put: "u32" };
-    let sig_rev = Edit { at: sig as usize + 22, cut: 3, put: "u64" };
+    let sig_e = Edit { at: sig as usize + SIG_RET, cut: 3, put: "u32" };
+    let sig_rev = Edit { at: sig as usize + SIG_RET, cut: 3, put: "u64" };
     let t_body = spliced(t, &body);
     let t_sig = spliced(t, &sig_e);
 
@@ -436,7 +438,7 @@ fn drive(d: &mut Drv, root: &String, text: &String) bool {
     let spots = Spots {
         def: def_at as usize,
         hover: hover_at as usize,
-        name: sig as usize + 7,
+        name: sig as usize + SIG_NAME,
         compl: compl_at as usize,
     };
     for _ in 0..QUERY_ROUNDS {
@@ -732,7 +734,7 @@ fn reuse() bool {
         return false;
     }
     let body = Edit { at: sig as usize + SIG_AT.len() + 1, cut: 0, put: BODY_LINE };
-    let sig_e = Edit { at: sig as usize + 22, cut: 3, put: "u32" };
+    let sig_e = Edit { at: sig as usize + SIG_RET, cut: 3, put: "u32" };
     let mut root_file = root.clone();
     root_file.push_str("/src/main.spc");
     let mut root_dir = root.clone();

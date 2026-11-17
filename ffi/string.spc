@@ -37,6 +37,10 @@ extern "C" {
         }
         return n;
     }
+    /// The length of NUL-terminated `s`, at most `max` (the bytes it reads).
+    @trusted
+    pub fn strnlen(s: *const char, max: usize) usize
+        ensures |r| r <= max;
     /// Compare NUL-terminated strings; negative, zero, or positive.
     pub fn strcmp(a: *const char, b: *const char) i32;
     /// strcmp over at most `n` bytes.

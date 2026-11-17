@@ -18,6 +18,10 @@ struct CountAlloc {
 }
 
 extend CountAlloc as Allocator {
+    spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return Global::owns(ptr, size, align);
+    }
+
     pub unsafe fn alloc(self: &mut CountAlloc, size: usize, align: usize) *mut void {
         unsafe (*self.c).live += 1;
         unsafe (*self.c).allocs += 1;

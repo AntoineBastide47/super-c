@@ -114,22 +114,36 @@ extend Reader {
         }
         body.push_bytes(self.buf[self.pos..self.pos + have]);
         self.pos += have;
-        // Each read adds at least one byte, so the loop runs at most n - have times.
-        while body.len() < n {
-            if self.eof {
-                return None;
-            }
-            let want = n - body.len();
-            let dst = body.spare_mut(want);
-            let r = read_raw(self.f, dst, want);
-            if r <= 0 {
-                self.eof = true;
-                return None;
-            }
-            body.advance_len(r as usize);
+        // The rest is read into the spare bytes, then committed once.
+        let rest = n - have;
+        if rest == 0 {
+            return Some(body);
         }
+        if self.eof {
+            return None;
+        }
+        if !read_exact(self.f, body.spare_mut(rest), rest) {
+            self.eof = true;
+            return None;
+        }
+        body.advance_len(rest);
         return Some(body);
     }
+}
+
+// Fill the `n` bytes at `dst` from stream `f`: whether they all arrived before the end of the stream or
+// an error.
+fn read_exact(f: *mut stdio::FILE, dst: *mut u8, n: usize) bool {
+    let mut got: usize = 0;
+    // Each read adds at least one byte, so the loop runs at most `n` times.
+    while got < n {
+        let r = read_raw(f, unsafe (dst + got), n - got);
+        if r <= 0 {
+            return false;
+        }
+        got += r as usize;
+    }
+    return true;
 }
 
 // One read of at most `n` bytes of stream `f`'s descriptor into `dst`, past the stdio buffer: what the

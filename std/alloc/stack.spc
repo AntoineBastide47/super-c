@@ -66,6 +66,11 @@ extend Stack as Default {
 
 @platform(!wasm)
 extend Stack as Allocator {
+    // A block of a region: not null, aligned as asked.
+    pub spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return ptr != null && align != 0 && (ptr as usize & align - 1) == 0;
+    }
+
     @always_inline
     pub unsafe fn alloc(self: &mut Stack, size: usize, align: usize) *mut void {
         return unsafe (*region()).alloc(size, align);
@@ -82,6 +87,11 @@ extend Stack as Allocator {
 
 @platform(wasm)
 extend Stack as Allocator {
+    // A block of the C heap.
+    pub spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return Global::owns(ptr, size, align);
+    }
+
     @always_inline
     pub unsafe fn alloc(self: &mut Stack, size: usize, align: usize) *mut void {
         let mut g = Global {};
@@ -155,8 +165,9 @@ fn region_new() *mut Region {
 extend Region {
     @always_inline
     unsafe fn alloc(self: &mut Region, size: usize, align: usize) *mut void
+        requires align != 0 && (align & align - 1) == 0
         panics if true
-        ensures |r| r != null
+        ensures |r| r != null && (r as usize & align - 1) == 0
     {
         let a = align.max(8);
         let at = self.top + HDR;
@@ -192,8 +203,9 @@ extend Region {
     }
 
     unsafe fn realloc(self: &mut Region, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
+        requires align != 0 && (align & align - 1) == 0 && (ptr as usize & align - 1) == 0
         panics if true
-        ensures |r| r != null
+        ensures |r| r != null && (r as usize & align - 1) == 0
     {
         let at = ptr as usize;
         if at == 0 {

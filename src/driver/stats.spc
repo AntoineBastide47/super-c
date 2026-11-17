@@ -76,7 +76,8 @@ pub(package) struct PhaseHook {
     pub(package) at: fn(*mut void, usize) void,
 }
 
-static mut G_STATS: *mut BuildStats = null;
+static mut G_STATS: *mut BuildStats = null
+    invariant G_STATS == null || Global::owns(G_STATS, sizeof(BuildStats), alignof(BuildStats));
 static mut G_ARMED: bool = false;
 static mut G_HOOK: *const PhaseHook = null;
 

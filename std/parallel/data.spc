@@ -596,6 +596,15 @@ pub struct SectionJob {
     pub env: *mut void,
 }
 
+extend SectionJob {
+    // A section that runs `entry(env)` once: the call hands `env` over (`pre_of`).
+    fn new(entry: fn(*mut void) void, env: *mut void) SectionJob
+        requires pre_of(entry, env)
+    {
+        return SectionJob { entry: entry, env: env };
+    }
+}
+
 /// The builder `sections` hands to its closure: call `add` once per independent piece of work.
 @no_const
 pub struct Sections {
@@ -603,7 +612,9 @@ pub struct Sections {
 }
 
 /// Runs one section: take the closure out of its box, release the box, call it. `pub` for linkage.
-pub unsafe fn section_entry<F: fn() + Send + Sync>(env: *mut void) {
+pub unsafe fn section_entry<F: fn() + Send + Sync>(env: *mut void)
+    requires Global::owns(env, sizeof(F), alignof(F))
+{
     let pp = env as *mut F;
     let f = unsafe {
         pp[0]
@@ -620,7 +631,7 @@ extend Sections {
         let mut g = Global {};
         let slot = (unsafe g.alloc(sizeof(F), alignof(F))) as *mut F;
         unsafe slot[0] = f;
-        self.entries.push(SectionJob { entry: unsafe section_entry::<F>, env: slot });
+        self.entries.push(SectionJob::new(unsafe section_entry::<F>, slot));
     }
     /// How many sections are registered.
     pub fn len(self: &Sections) usize {

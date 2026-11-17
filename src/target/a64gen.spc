@@ -58,6 +58,34 @@ const fn vscr() u64 {
     return 0x3FFFu64 << 48;
 }
 
+// The `bsl` of template text `tx` (`bsl <mask>, <true>, <false>`) as the instruction that writes the same
+// result over its true operand (`k` 1: `bif <true>, <false>, <mask>`) or its false one (`k` 2:
+// `bit <false>, <true>, <mask>`).
+fn select_form(tx: str, k: u32) String {
+    let ops = tx.slice(4, tx.len());
+    let c1 = ops.find(", ") as usize;
+    let rest = ops.slice(c1 + 2, ops.len());
+    let c2 = rest.find(", ") as usize;
+    let mask = ops.slice(0, c1);
+    let yes = rest.slice(0, c2);
+    let no = rest.slice(c2 + 2, rest.len());
+    let mut s = String::new();
+    if k == 1 {
+        s.push_str("bif ");
+        s.push_str(yes);
+        s.push_str(", ");
+        s.push_str(no);
+    } else {
+        s.push_str("bit ");
+        s.push_str(no);
+        s.push_str(", ");
+        s.push_str(yes);
+    }
+    s.push_str(", ");
+    s.push_str(mask);
+    return s;
+}
+
 // The allocatable v registers: v0..v7 and v16..v29.
 const fn valloc() u64 {
     return 0xFFu64 << 32 | 0x3FFFu64 << 48;
@@ -7005,6 +7033,23 @@ extend Gen {
                 return self.cr.refuse("an intrinsic's immediate argument of no constant value");
             }
         }
+        // A `bsl` in the form that writes its result over the operand `select_over` names.
+        let sel = if tpl.len() != 0 && np == 3 {
+            self.select_over(i, t, &text)
+        } else {
+            0u32
+        };
+        if sel != 0 {
+            text = select_form(&text, sel);
+        }
+        // The template register the result arrives in: the result's, or the written operand's of that form.
+        let rreg = if sel != 0 {
+            self.cr.lay.parts[self.cr.lay.locs[sel as usize].p0 as usize].reg as u32
+        } else if self.cr.lay.ret.kind == ab::L_REG {
+            self.cr.lay.parts[self.cr.lay.ret.p0 as usize].reg as u32
+        } else {
+            NONE
+        };
         let tx = text.as_str();
         if tpl.len() != 0 {
             // An intrinsic writes the registers it names and its arguments' and result's: the others
@@ -7069,12 +7114,12 @@ extend Gen {
             if ok && intrin::vwrites(true, tx, pr) {
                 let rl = self.cr.lay.ret;
                 let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                let px = if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && !self.cr.dies(x) {
+                let px = if whole && rreg == pr && !self.cr.dies(x) {
                     self.step_param(i)
                 } else {
                     NONE
                 };
-                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && (self.cr.dies(x) || px == x) {
+                if whole && rreg == pr && (self.cr.dies(x) || px == x) {
                     rres = vr;
                     if px == x {
                         stepped = px;
@@ -7106,7 +7151,7 @@ extend Gen {
             // the result first (`seg_take`), then one of v16..v29, which no template names, then in a loop a
             // callee-saved one (`alloc`).
             let free = valloc() & ~taken & ~self.cr.held;
-            let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
+            let pr = rreg;
             let csv = (free & vscr()) == 0 && self.loop_csv_free(taken);
             if (free != 0 || csv) && !intrin::vlisted(tx, pr) {
                 let x = self.cr.vx(i);
@@ -7120,6 +7165,14 @@ extend Gen {
                         f = V0 + src.1 as u8;
                     } else if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
                         f = self.seg_take(x);
+                    }
+                }
+                // The register of the parameter the result's chain ends in (`chain_home`).
+                if f == NOREG {
+                    let px = self.chain_home(i);
+                    if px != NONE && (taken & bit(self.cr.va[px as usize].reg)) == 0 {
+                        f = self.cr.va[px as usize].reg;
+                        stepped = px;
                     }
                 }
                 if f == NOREG && csv {
@@ -7620,7 +7673,7 @@ extend Gen {
                     if rres != NOREG {
                         rres
                     } else {
-                        self.cr.lay.parts[rl.p0 as usize].reg + V0
+                        V0 + rreg as u8
                     },
                 );
             }
@@ -7744,8 +7797,131 @@ extend Gen {
         return q;
     }
 
-    // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
-    // function.
+    // The operand (0 the mask, 1 the true one, 2 the false one) that the one `bsl` of template text `tx`
+    // of call `i` (`t`, three vectors in v registers, no two the same) writes its result over: `bif` writes
+    // the same result over the true operand and `bit` over the false one (`select_form`). The operand that
+    // is the parameter the result steps (`step_param`), else one that ends here: first one in that
+    // parameter's register (`chain_home` put it there), then the mask, the true one, the false one. 0 for
+    // none and for another template.
+    fn select_over(self: &mut Self, i: u32, t: Inst, tx: str) u32 {
+        if !tx.starts_with("bsl ") || tx.find("\n") >= 0 {
+            return 0;
+        }
+        let b = self.cr.b();
+        let mut xs = Vector::<u32>::with_capacity(3);
+        for k in 0usize..3 {
+            let v = b.pool[t.c as usize + k];
+            if (v & VFLAG) != 0 || !self.cr.lay.whole_vreg(self.cr.lay.locs[k], self.cr.vt(v)) {
+                return 0;
+            }
+            xs.push(self.cr.vx(v));
+        }
+        if xs[0] == xs[1] || xs[0] == xs[2] || xs[1] == xs[2] {
+            return 0;
+        }
+        let px = self.step_param(i);
+        let pr = if px != NONE {
+            self.cr.va[px as usize].reg
+        } else {
+            NOREG
+        };
+        let mut best: u32 = 0;
+        let mut top: u32 = 0;
+        for k in 0u32..3 {
+            let x = xs[k as usize];
+            let vr = self.cr.va[x as usize].reg;
+            let sc = if vr == NOREG || vr < V0 {
+                0u32
+            } else if x == px {
+                5
+            } else if !self.cr.dies(x) {
+                0
+            } else if vr == pr {
+                4
+            } else {
+                3 - k
+            };
+            if sc > top {
+                top = sc;
+                best = k;
+            }
+        }
+        return best;
+    }
+
+    // The header parameter whose register intrinsic result `i`, made in a register of its own, takes: `i`
+    // starts a chain that ends in the value its block's back edge passes to the parameter. Each value of
+    // the chain but the last has one use, an argument the next intrinsic of the chain writes its result
+    // over (`Live::cover`; any operand of a `bsl`, `select_over`), no folded one, with no call that returns
+    // between; the block's edges alone read the last one. The parameter's register is one no template
+    // names (`vscr`), and neither `i` nor an instruction after it reads the parameter (`step_param`: the
+    // same for a result written over the parameter itself). NONE for none.
+    fn chain_home(self: &mut Self, i: u32) u32 {
+        let b = self.cr.b();
+        let ni = b.insts.len() as u32;
+        let k = self.cr.lv.def_blk[i as usize];
+        // Only a value that ends in its block, with no register of the plan.
+        if self.cr.lv.end[i as usize] != self.cr.pos || self.cr.lv.pos[k as usize] != self.cr.pos || self.cr.va[i as usize].home != H_NONE || self.cr.lv.seg_val(
+            i,
+        ) {
+            return NONE;
+        }
+        let bk = b.blocks[k as usize];
+        let last = bk.start + bk.len - 1;
+        let mut us = Vector::<Value>::with_capacity(4);
+        let mut cur = i;
+        for u in i + 1..last {
+            let t = b.insts[u as usize];
+            let tpl = if t.op == O_CALL {
+                self.intrinsic(t.a)
+            } else {
+                ""
+            };
+            if tpl.len() == 0 && Gen::clobbers(b, t) {
+                return NONE;
+            }
+            lv::each_use(b, t, &mut us);
+            let mut n: u32 = 0;
+            for q in 0..us.len() {
+                n += (self.cr.lv.seen(us[q]) == cur) as u32;
+            }
+            if n == 0 {
+                continue;
+            }
+            let c = if tpl.len() != 0 {
+                self.cr.lv.cover[u as usize]
+            } else {
+                NONE
+            };
+            let over = c != NONE && self.cr.lv.seen(b.pool[(t.c + c) as usize]) == cur || tpl.starts_with("bsl ") && b.pool[t.b as usize] == 3;
+            if n != 1 || !over || self.cr.lv.uses[cur as usize] != 1 || self.cr.lv.pfold[u as usize] || self.cr.lv.end[u as usize] != self.cr.pos {
+                return NONE;
+            }
+            cur = u;
+        }
+        let px = self.cr.lv.back_param(b, b.insts[last as usize], cur, self.cr.pos);
+        if px == NONE {
+            return NONE;
+        }
+        let va = self.cr.va[px as usize];
+        let pv = VPARAM | px - ni;
+        if va.home != H_FIXED || va.reg == NOREG || (vscr() & bit(va.reg)) == 0 || self.cr.owner[va.reg as usize] != px || self.cr.lv.end[px as usize] < self.cr.pos || self.cr.lv.reads_after(
+            b,
+            k,
+            i,
+            pv,
+        ) {
+            return NONE;
+        }
+        let rs = self.cr.lv.uses_of(i);
+        for q in 0..rs.len() {
+            if rs[q] == self.cr.lv.seen(pv) {
+                return NONE;
+            }
+        }
+        return px;
+    }
+
     // The argument of intrinsic call `t` whose register its template writes the result into, both whole
     // vectors in that register, NONE for none (`Live::cover`).
     fn call_over(self: &mut Self, t: Inst) u32 {
@@ -7771,6 +7947,8 @@ extend Gen {
         return NONE;
     }
 
+    // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
+    // function.
     const fn intrinsic(self: &Self, s: u32) str<'static> {
         return self.itpl[s as usize];
     }

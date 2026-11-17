@@ -7,11 +7,11 @@
 // O(len(a) + len(b)) lookups in total.
 
 /// A hash set of T (a Map<T, Present> underneath) through allocator A, hashed by S.
-pub struct Set<T, A = Global, S = DefaultHash> {
+pub struct Set<T, A: Allocator = Global, S = DefaultHash> {
     m: Map<T, Present, A, S>,
 }
 
-unsafe extend<T, A, S> Set<T, A, S> as Zeroable {}
+unsafe extend<T, A: Allocator, S> Set<T, A, S> as Zeroable {}
 
 // The zero-sized value every member maps to.
 @derive(Clone)
@@ -224,25 +224,25 @@ extend<T: Hash + Eq + Clone, A: Allocator + Default, S: BuildHasher + Default> S
 }
 
 /// The elements of one set that another lacks (`Set::difference`); borrows both.
-pub struct SetDifference<'b, T, A, S> {
+pub struct SetDifference<'b, T, A: Allocator, S> {
     it: MapKeys<'b, T>,
     other: &'b Set<T, A, S>,
 }
 
 /// The elements two sets share (`Set::intersection`); borrows both.
-pub struct SetIntersection<'b, T, A, S> {
+pub struct SetIntersection<'b, T, A: Allocator, S> {
     it: MapKeys<'b, T>,
     other: &'b Set<T, A, S>,
 }
 
 /// Every element of either set once (`Set::set_union`); borrows both.
-pub struct SetUnion<'b, T, A, S> {
+pub struct SetUnion<'b, T, A: Allocator, S> {
     first: MapKeys<'b, T>,
     rest: SetDifference<'b, T, A, S>,
 }
 
 /// The elements in exactly one of two sets (`Set::symmetric_difference`); borrows both.
-pub struct SetSymmetricDifference<'b, T, A, S> {
+pub struct SetSymmetricDifference<'b, T, A: Allocator, S> {
     first: SetDifference<'b, T, A, S>,
     rest: SetDifference<'b, T, A, S>,
 }

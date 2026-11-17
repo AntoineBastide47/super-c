@@ -40,10 +40,36 @@ pub struct Cell<T> {
     pub value: T, // written by the thread before `done`; raw storage until then
 }
 
+// The count as units (`rc_share`): counter 0 counts the thread's reference and the handle's, and guards
+// the cell. Each lemma states the step of the count operation it follows; no proof checks it.
+
+// A new cell, count 2: both units.
+@trusted
+lemma cell_new<T>(c: *mut Cell<T>)
+    requires Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>))
+    ensures rc_share(c, 0, 2);
+
+// A decrement of the count from `prev`: the last unit gives the cell.
+@trusted
+lemma cell_dec<T>(c: *mut Cell<T>, prev: i32)
+    requires rc_share(c, 0, 1)
+    ensures prev == 1 ==> rc_units(c, 0) == 0 && Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>));
+
+// A joined thread has dropped its reference (`thread_entry`'s `cell_drop` happens before the join
+// returns): the handle's unit is the last.
+@trusted
+lemma cell_joined<T>(c: *mut Cell<T>)
+    requires rc_share(c, 0, 1)
+    ensures rc_units(c, 0) == 0 && Global::owns(c, sizeof(Cell<T>), alignof(Cell<T>));
+
 // Drop one reference. The last one frees the value (when the thread produced it and nobody moved it out)
 // and the cell. Release/acquire on the count orders the thread's writes before the last holder's reads.
-fn cell_drop<T>(c: *mut Cell<T>) {
-    if unsafe atomic::sub_i32(&mut unsafe (*c).refs, 1, 3) != 1 {
+fn cell_drop<T>(c: *mut Cell<T>)
+    requires rc_share(c, 0, 1)
+{
+    let prev = unsafe atomic::sub_i32(&mut unsafe (*c).refs, 1, 3);
+    cell_dec(c, prev);
+    if prev != 1 {
         return;
     }
     let mut g = Global {};
@@ -74,10 +100,13 @@ pub struct ThreadPayload<F, T> {
 /// The C-ABI thread entry point: reconstruct the payload, release its block, run the body into the cell,
 /// publish the result, drop the producer's reference. Monomorphized per (F, T); its address is handed to
 /// `sc_rt_thread_create`. `pub` for linkage.
-pub unsafe fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
-    unsafe sc_runtime::sc_rt_stack_guard_install(); // report an overflow rather than dying on a bare fault
+pub unsafe fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void
+    requires Global::owns(arg, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>))
+    requires rc_share(unsafe (*(arg as *mut ThreadPayload<F, T>)).cell, 0, 1)
+{
     let pp = arg as *mut ThreadPayload<F, T>;
     let c = unsafe (*pp).cell;
+    unsafe sc_runtime::sc_rt_stack_guard_install(); // report an overflow rather than dying on a bare fault
     {
         // Each field is read out of the block once: the body moves to `f`, and the block is released raw.
         // The body and its captures are gone before the result is published, so the last release the
@@ -96,15 +125,19 @@ pub unsafe fn thread_entry<F: fn move() T, T>(arg: *mut void) *mut void {
 /// is consumed. Dropping a handle without joining detaches the thread: it runs on, and its value is
 /// destroyed when it finishes (or here, if it already has).
 @no_const
-pub struct JoinHandle<T> {
+pub struct JoinHandle<T>
+    invariant rc_share(self.cell, 0, 1)
+{
     handle: *mut void, // the substrate's opaque thread handle; join or detach consumes it
-    cell: *mut Cell<T>, // the shared result cell; null once consumed
+    cell: *mut Cell<T>, // the shared result cell
 }
 
 extend<T> JoinHandle<T> {
     /// `pub` for external linkage: `spawn` is monomorphized in the CALLER's module, so its call to this
     /// constructor must reach a non-static symbol. Not part of the intended surface: use `spawn`.
-    pub unsafe fn from_parts(handle: *mut void, cell: *mut Cell<T>) JoinHandle<T> {
+    pub unsafe fn from_parts(handle: *mut void, cell: *mut Cell<T>) JoinHandle<T>
+        requires rc_share(cell, 0, 1)
+    {
         return JoinHandle::<T> { handle: handle, cell: cell };
     }
     /// Whether the thread has finished: its value is published and it holds no reference to the result,
@@ -115,19 +148,20 @@ extend<T> JoinHandle<T> {
     /// Block until the thread finishes and take its return value. Consumes the handle. A join the OS
     /// refuses is fatal: the value cannot be read and the cell cannot be released.
     pub fn join(self: JoinHandle<T>) T {
-        let mut me = self;
+        let me = self;
         let rc = unsafe sc_runtime::sc_rt_thread_join(me.handle);
         if rc != 0 {
             panic("thread::join: the OS refused to join the thread");
         }
         // The thread has exited, so its `done` store and its reference drop happen-before this point:
         // the value is initialized and this is the last reference.
+        // The handle is consumed: its drop does not run.
         let c = me.cell;
-        me.handle = null;
-        me.cell = null;
+        forget(me);
         let v = unsafe {
             (*c).value
         };
+        cell_joined(c);
         let mut g = Global {};
         unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
         return v;
@@ -137,16 +171,11 @@ extend<T> JoinHandle<T> {
 extend<T> JoinHandle<T> as Free {
     /// Detach the thread and give up this side's reference to its result.
     pub fn free(self: &mut JoinHandle<T>) {
-        if self.cell == null {
-            return;
-        }
         if unsafe sc_runtime::sc_rt_thread_detach(self.handle) != 0 {
             panic("thread: the OS refused to detach the thread");
         }
         self.handle = null;
-        let c = self.cell;
-        self.cell = null;
-        cell_drop(c);
+        cell_drop(self.cell);
     }
 }
 
@@ -164,6 +193,7 @@ pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
     let c = (unsafe g.alloc(sizeof(Cell<T>), alignof(Cell<T>))) as *mut Cell<T>;
     unsafe (*c).refs = 2;
     unsafe (*c).done = 0;
+    cell_new(c);
     let env = (unsafe g.alloc(sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>))) as *mut ThreadPayload<F, T>;
     unsafe env[0] = ThreadPayload::<F, T> { body: f, cell: c };
     let mut h: *mut void = null;
@@ -178,7 +208,9 @@ pub fn spawn<F: fn move() T + Send + 'static, T: Send>(f: F) JoinHandle<T> {
             };
             unsafe g.dealloc(env, sizeof(ThreadPayload<F, T>), alignof(ThreadPayload<F, T>));
         }
-        unsafe g.dealloc(c, sizeof(Cell<T>), alignof(Cell<T>));
+        // Both references are this side's: the second drop frees the cell.
+        cell_drop(c);
+        cell_drop(c);
         panic("thread::spawn: the OS cannot create a thread");
     }
     return unsafe JoinHandle::<T>::from_parts(h, c);

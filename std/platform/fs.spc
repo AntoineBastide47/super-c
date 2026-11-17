@@ -340,7 +340,9 @@ extern "C" "windows.h" {
         flags: u32,
         template: *mut void,
     ) *mut void;
-    fn ReadFile(h: *mut void, buf: *mut void, n: u32, done: *mut void, ov: *mut OVERLAPPED) i32;
+    @trusted
+    fn ReadFile(h: *mut void, buf: *mut void, n: u32, done: *mut void, ov: *mut OVERLAPPED) i32
+        ensures |r| r == 0 || unsafe *(done as *mut u32) <= n;
     fn WriteFile(h: *mut void, buf: *const void, n: u32, done: *mut void, ov: *mut OVERLAPPED) i32;
     fn SetFilePointerEx(h: *mut void, distance: LARGE_INTEGER, pos: *mut LARGE_INTEGER, method: u32) i32;
     fn FlushFileBuffers(h: *mut void) i32;
@@ -1244,7 +1246,7 @@ pub fn realpath(path: str) Result<String, IoError> {
     if r == null {
         return fail::<String>(IoOp::RealPath);
     }
-    out.advance_len(unsafe cstring::strlen(r));
+    out.advance_len(unsafe cstring::strnlen(r, 4096));
     return Ok(out);
 }
 /// The absolute path of `path`, which must exist, with every symbolic link and `..` resolved. Windows gives
@@ -1509,6 +1511,14 @@ fn fail<T>(op: IoOp) Result<T, IoError> {
 
 // ---- File -------------------------------------------------------------------------------------------
 
+/// Whether read result `r` is an error or a count of at most `n` bytes (`File::read_full`).
+pub spec fn read_at_most(r: Result<usize, IoError>, n: usize) bool {
+    return switch r {
+        Ok(k) => k <= n,
+        Err(_) => true,
+    };
+}
+
 extend File {
     fn adopt(raw: RawHandle) File {
         return File { raw: raw };
@@ -1553,10 +1563,14 @@ extend File {
 
     /// Read until `buf` is full or the stream ends: the count read. A failure after a partial read is
     /// returned, and the bytes read before it are lost.
-    pub fn read_full(self: &mut File, mut buf: []mut u8) Result<usize, IoError> {
+    pub fn read_full(self: &mut File, mut buf: []mut u8) Result<usize, IoError>
+        ensures |r| read_at_most(r, buf.len())
+    {
         let mut got: usize = 0;
         // Each pass reads at least one byte or ends the loop.
-        while got < buf.len() {
+        while got < buf.len()
+            invariant got <= buf.len()
+        {
             let n = self.read(buf.index_range_mut(got..buf.len()))?;
             if n == 0 {
                 break;
@@ -1801,7 +1815,9 @@ extend File as Reader {
     /// One read of at most `buf.len()` bytes (at most 1 GiB): the count, 0 at the end of the stream. A
     /// pipe whose writers all closed reads as its end.
     @platform(!windows)
-    pub fn read(self: &mut File, buf: []mut u8) Result<usize, IoError> {
+    pub fn read(self: &mut File, buf: []mut u8) Result<usize, IoError>
+        ensures |r| read_at_most(r, buf.len())
+    {
         // Bounded by the signals that interrupt the read.
         loop {
             let n = unsafe unistd::read(self.raw, buf.as_mut_ptr(), buf.len().min(1 << 30));
@@ -1809,14 +1825,16 @@ extend File as Reader {
                 return Ok(n as usize);
             }
             if !error::interrupted() {
-                return fail::<usize>(IoOp::Read);
+                return Err(error::last_error(IoOp::Read));
             }
         }
     }
     /// One read of at most `buf.len()` bytes (at most 1 GiB): the count, 0 at the end of the stream. A
     /// pipe whose writers all closed reads as its end.
     @platform(windows)
-    pub fn read(self: &mut File, buf: []mut u8) Result<usize, IoError> {
+    pub fn read(self: &mut File, buf: []mut u8) Result<usize, IoError>
+        ensures |r| read_at_most(r, buf.len())
+    {
         let mut got: u32 = 0;
         let n = buf.len().min(1 << 30) as u32;
         if unsafe ReadFile(self.raw, buf.as_mut_ptr(), n, &mut got, null) == 0 {

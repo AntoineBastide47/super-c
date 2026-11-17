@@ -45,14 +45,17 @@ struct CancelShared {
 }
 
 // One membership: the task's record, linked into the source's list. Storage belongs to the task (inline in
-// its block, or heap for a second source); the source only ever follows the links under its lock.
+// its block, or heap for a second source); the source only ever follows the links under its lock. The
+// task's list starts at the inline record, and each record holds the heap record after it.
 @no_const
-struct Member {
+struct Member
+    invariant self.tnext == null || Global::owns(self.tnext, sizeof(Member), alignof(Member))
+{
     pub src: arc::Arc<CancelShared>, // keeps the source state alive for as long as this record exists
     pub key: runtime::TaskKey, // the task, for the generation-checked request
     pub snext: *mut Member, // source list
     pub sprev: *mut Member,
-    pub tnext: *mut Member, // the task's own list, walked at completion
+    tnext: *mut Member, // the task's own list, walked at completion
     pub linked: i32, // atomic: still on the source list; cleared under the lock, read before taking it
 }
 
@@ -138,11 +141,18 @@ fn unlink_locked(sh: &CancelShared, m: *mut Member) {
 // heap records are freed. Runs on the worker, outside any task, holding no lock across records.
 fn membership_release(mb: *mut runtime::Membership) {
     let inl = ((&mut unsafe (*mb).inline_mem[0]) as *mut u64) as *mut Member;
-    let mut m = (unsafe (*mb).head) as *mut Member;
+    if unsafe (*mb).head == null {
+        return;
+    }
     unsafe (*mb).head = null;
     let mut g = Global {};
-    while m != null {
+    let mut m = inl;
+    while m != null
+        invariant m == null || m == inl || Global::owns(m, sizeof(Member), alignof(Member))
+    {
+        // The record gives up the next one: this walk frees it.
         let nx = unsafe (*m).tnext;
+        unsafe (*m).tnext = null;
         let sh = unsafe (*m).src.get();
         // A member the cancel sweep already drained needs no lock: a thousand children unwinding at once
         // would otherwise serialise on their source. Re-checked under the lock, since the sweep may be
@@ -203,7 +213,9 @@ const fn child_inline<F>() bool {
 /// a copy the trampoline now owns, and the record is abandoned, or freed when boxed), bind the group token,
 /// run the body. The finish runs from a `defer`, so a body that ends through cancellation cleanup still
 /// reports. `pub` for linkage.
-pub unsafe fn child_entry<F: fn move() + Send + 'static>(env: *mut void) {
+pub unsafe fn child_entry<F: fn move() + Send + 'static>(env: *mut void)
+    requires child_inline::<F>() || Global::owns(env, sizeof(ChildEnv<F>), alignof(ChildEnv<F>))
+{
     let pp = env as *mut ChildEnv<F>;
     let refs = unsafe (*pp).refs;
     let f = unsafe (*pp).f;
@@ -328,23 +340,21 @@ extend CancelToken {
             m = unsafe (*m).tnext;
         }
         // Records are only ever unlinked at completion, so the inline slot is free exactly when the task
-        // has no membership yet.
-        let mut g = Global {};
-        m = if unsafe (*mb).head == null {
+        // has no membership yet. A further record goes right after it.
+        let src = self.shared.clone();
+        let key = runtime::current_key();
+        if unsafe (*mb).head == null {
             unsafe (*mb).hook = membership_release;
-            inl
+            m = inl;
+            unsafe m[0] = Member { src: src, key: key, snext: null, sprev: null, tnext: null, linked: 1 };
+            unsafe (*mb).head = m;
         } else {
-            (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member
-        };
-        unsafe m[0] = Member {
-            src: self.shared.clone(),
-            key: runtime::current_key(),
-            snext: null,
-            sprev: null,
-            tnext: (unsafe (*mb).head) as *mut Member,
-            linked: 1,
-        };
-        unsafe (*mb).head = m;
+            let mut g = Global {};
+            m = (unsafe g.alloc(sizeof(Member), alignof(Member))) as *mut Member;
+            let after = unsafe (*inl).tnext;
+            unsafe (*inl).tnext = m;
+            unsafe m[0] = Member { src: src, key: key, snext: null, sprev: null, tnext: after, linked: 1 };
+        }
         unsafe sc_runtime::sc_rt_spin_lock(sh.spin.get());
         let cancelled = sh.flag.load(atomics::MemoryOrder::Relaxed) != 0;
         let reason = sh.reason.load(atomics::MemoryOrder::Relaxed) as u32;

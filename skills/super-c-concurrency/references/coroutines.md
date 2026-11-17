@@ -107,6 +107,13 @@ A per-worker counter must fold into the process-lifetime total in `destroy_pool`
 does not makes every runtime program abort at shutdown, the installed compiler included
 (recover with an older `super-c` binary).
 
+**Proved ownership.** The runtime's frees are proved (see the language skill's heap-proofs
+reference): the Scheduler's line-aligned worker and parker arrays through its invariant, the
+idle mask, timer storage, worker rings and registry segments through owning containers, the
+record itself through `G_SCHED`'s invariant. A task block's registry slot holds the block from
+its creation (`reg_assign`) to its release (`reg_take`), the pooled time included; a spawn that
+finds the registry full (`REG_SEG_SIZE * REG_MAX_SEGS` live blocks) releases the block and panics.
+
 **Measured scheduler decisions.** Before a tuning change, read the constant's comment and
 the lists in this skill; measure again only with a new argument. Interleaved A/B results
 that set the current design:
@@ -117,9 +124,11 @@ that set the current design:
 - `Worker` keeps the ring, `head` and `tail` on its first line. `head` and `tail` on a line
   of their own cost 12% (a push touches two lines); per-task counters on the ring's line
   cost 10%. New counters go on the later lines.
-- `Scheduler` and task records are line-aligned (`CO_ALIGN`, `sched_alloc`, `co_alloc`).
-  New `Scheduler` fields go last: a field inserted in the middle moved the hot atomics and
-  cost 37% on the spawn lane. Malloc-placed task records cost 5% to 40%.
+- `Scheduler` and task records are line-aligned (`CO_ALIGN`, `sched_alloc`, `co_alloc`, from
+  `Global` with that alignment). New `Scheduler` fields go last: a field inserted in the middle
+  moved the hot atomics and cost 37% on the spawn lane; `Scheduler.pad` keeps the offsets the
+  removed base pointers held, and the timer storage is a 16-byte `RawBuf` (pointer and count):
+  a 24-byte `Vector` there cost 1.5% on spawn_latency. Malloc-placed task records cost 5% to 40%.
 - `STASH_MAX` is both the stash cap and the per-lock batch: a larger value halves pool
   lock traffic and doubles each worker's idle retention. Left at its value.
 - Idle-stack trim is rate-limited (`TRIM_INTERVAL_NS`): a trim on every park cost 22% on

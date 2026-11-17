@@ -2048,7 +2048,7 @@ extend Opt {
         if self.kept < K_GRAPH {
             self.cfg(b);
         }
-        self.wide.run(b, pk.vector, &self.order, &self.rpo, &mut self.pbody);
+        self.wide.run(b, pk.vector, pk.vec_accs, &self.order, &self.rpo, &mut self.pbody);
         let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
         self.kept = K_NONE;
@@ -11555,8 +11555,9 @@ extend Opt {
         return !same(t, t0);
     }
 
-    // Vector choice `t` (instruction `i` of block `k`) by the bits of a lane mask (`lane_mask_of`): a select
-    // by the lane mask (`O_VSEL`), narrowed or widened to the chosen lanes (`mask_width`). Whether it did.
+    // Vector choice `t` (instruction `i` of block `k`) by the bits of a lane mask (`lane_mask_of`), or by
+    // other bits made a lane mask (`bits_lanes`): a select by the lane mask (`O_VSEL`), narrowed or widened
+    // to the chosen lanes (`mask_width`). Whether it did.
     fn mask_choose(self: &mut Self, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if code != core::OP_SIMD + core::SIMD_CHOOSE as u32 || t.b != 3 || t.c != VNONE || !is_vec(t.ty) {
@@ -11567,13 +11568,86 @@ extend Opt {
         if b.type_of(x) != t.ty || b.type_of(y) != t.ty {
             return false;
         }
-        let mk = self.lane_mask_of(b, k, i, b.pool[t.a as usize], lanes(t.ty));
+        let mut mk = self.lane_mask_of(b, k, i, b.pool[t.a as usize], lanes(t.ty));
+        if mk == VNONE {
+            mk = self.bits_lanes(b, k, i, b.pool[t.a as usize], t.ty);
+        }
         if mk == VNONE {
             return false;
         }
         let m = self.mask_width(b, k, i, mk, mask_type(t.ty));
         *t = Inst { op: O_VSEL, ty: t.ty, aux: 0, a: m, b: x, c: y };
         return true;
+    }
+
+    // The lane mask of the bits of integer `v` for the lanes of vector type `vt` (instruction `i` of block
+    // `k` reads it): `v` in every lane of integer lanes wide enough to hold each lane's bit (the lanes'
+    // width, or twice it: 16 byte lanes take 16-bit ones, which `mask_width` narrows; 8-byte lanes take two
+    // 4-byte ones each, which every target compares in a register, cast to the 8-byte mask), ANDed with
+    // each lane's bit (`lane_bits`) and compared with it. The splat, the constant and the mask are values
+    // the walk numbers and moves out of a loop. VNONE for bits of no such width.
+    fn bits_lanes(self: &mut Self, b: &mut Body, k: u32, i: u32, v: Value, vt: u8) Value {
+        let bt = b.type_of(v);
+        let n = lanes(vt);
+        let eb = type_bytes(lane_type(vt), 8);
+        let rep = ast::pick(eb == 8, 2u32, 1u32);
+        let w = if eb == 8 {
+            4u32
+        } else if 8 * eb < n {
+            2 * eb
+        } else {
+            eb
+        };
+        if !is_int(bt) || bt == T_I128 || bt == T_PTR || 8 * w < n || type_bits(bt, 8) < n {
+            return VNONE;
+        }
+        let it = int_type(w);
+        let wt = vec_type(it, n * rep);
+        let x = if type_bits(bt, 8) == 8 * w {
+            v
+        } else {
+            self.before(
+                b,
+                k,
+                i,
+                Inst {
+                    op: ast::pick(type_bits(bt, 8) < 8 * w, O_ZEXT, O_TRUNC),
+                    ty: it,
+                    aux: 0,
+                    a: v,
+                    b: VNONE,
+                    c: VNONE,
+                },
+            )
+        };
+        let s = self.before(b, k, i, Inst { op: O_SPLAT, ty: wt, aux: 0, a: x, b: VNONE, c: VNONE });
+        let wc = self.lane_bits(b, k, i, wt, rep);
+        let a = self.before(b, k, i, Inst { op: O_AND, ty: wt, aux: 0, a: s, b: wc, c: VNONE });
+        let mk = self.before(b, k, i, Inst { op: O_VCMP, ty: mask_type(wt), aux: C_EQ, a: a, b: wc, c: VNONE });
+        if rep == 1 {
+            return mk;
+        }
+        return self.before(b, k, i, Inst { op: O_BITCAST, ty: mask_type(vt), aux: 0, a: mk, b: VNONE, c: VNONE });
+    }
+
+    // The wide constant of integer vector type `wt` whose lane `l` holds bit `l / rep` (before instruction
+    // `i` of block `k`).
+    fn lane_bits(self: &mut Self, b: &mut Body, k: u32, i: u32, wt: u8, rep: u32) Value {
+        let n = lanes(wt);
+        let w = type_bytes(lane_type(wt), 8);
+        let at = b.words.len() as u32;
+        let per = 8 / w;
+        let nw = (n * w + 7) / 8;
+        for qw in 0..nw {
+            let mut word: u64 = 0;
+            for l in 0..per {
+                if qw * per + l < n {
+                    word |= 1u64 << ((qw * per + l) / rep) as u64 << (8 * w * l) as u64;
+                }
+            }
+            b.words.push(word);
+        }
+        return self.before(b, k, i, Inst { op: O_WCONST, ty: wt, aux: 0, a: at, b: nw, c: VNONE });
     }
 
     // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`lane_mask_of`), extended or
@@ -11682,16 +11756,7 @@ extend Opt {
         let wt = vec_type(int_type(w), n);
         let mk = self.before(b, k, i, Inst { op: O_VCMP, ty: mask_type(tp), aux: c, a: p, b: q, c: VNONE });
         let m = self.mask_width(b, k, i, mk, wt);
-        let at = b.words.len() as u32;
-        let per = 8 / w;
-        for qw in 0..n * w / 8 {
-            let mut word: u64 = 0;
-            for l in 0..per {
-                word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
-            }
-            b.words.push(word);
-        }
-        let wc = self.before(b, k, i, Inst { op: O_WCONST, ty: wt, aux: 0, a: at, b: n * w / 8, c: VNONE });
+        let wc = self.lane_bits(b, k, i, wt, 1);
         let a = self.before(b, k, i, Inst { op: O_AND, ty: wt, aux: 0, a: m, b: wc, c: VNONE });
         let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
         let pl = b.pool_list([a]);
@@ -14187,8 +14252,9 @@ extend Opt {
     // (Warren, Hacker's Delight, 10-1). Not by 0, nor a signed one by -1 (the minimum's overflow stays the
     // division's), nor an unsigned one by a power of two (`pow2`). A vector's divisor is one constant in
     // every lane, of a size whose high products the backend computes (`Package.vec_mulh`); a scalar of such
-    // a size stays while the loop vectorizer may take it (`defer_div`); a scalar one stays without
-    // `Package.mul_high`. Whether it did.
+    // a size, and an unsigned remainder of a pointer's width (the index of a modulo address,
+    // `loops::mod_index`), stays while the loop vectorizer may take it (`defer_div`); a scalar one stays
+    // without `Package.mul_high`. Whether it did.
     fn divide(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
         let t = b.insts[i as usize];
         if t.op < O_SDIV || t.op > O_UREM || t.ty == T_I128 || t.ty == T_PTR {
@@ -14219,7 +14285,8 @@ extend Opt {
         if signed && (d == 0 || d == width_mask(lt, pk.ptr_bytes)) || !signed && (d == 0 || (d & d - 1) == 0 || bits == 64 && !pk.mul_high) {
             return false;
         }
-        if self.defer_div && !vec && (pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) != 0 {
+        let index = t.op == O_UREM && type_bytes(lt, pk.ptr_bytes) == pk.ptr_bytes;
+        if self.defer_div && !vec && ((pk.vec_mulh & type_bytes(lt, pk.ptr_bytes) as u8) != 0 || index) {
             self.deferred = true;
             return false;
         }
@@ -16975,7 +17042,7 @@ extend Run {
         sc.o.pslots = pslots;
         sc.o.unit = self.bunit[j as usize];
         // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
-        sc.o.defer_div = self.cf.loops.vector != 0 && p.vector != 0 && p.vec_mulh != 0;
+        sc.o.defer_div = self.cf.loops.vector != 0 && p.vector != 0;
         sc.o.deferred = deferred;
     }
 

@@ -21,6 +21,13 @@
 // Thread safety: no internal synchronization. BitSet is `Send` and `Sync`; BitVec is when its allocator is.
 // Shared reads may run concurrently; a mutation needs exclusive access, as the borrow rules require.
 
+import std::spec::seq as *;
+
+// The most words of a BitVec: its capacity in bits is a `usize` (and the bytes fit a block).
+const BITVEC_WORDS_MAX: usize = usize::MAX / 64;
+
+static_assert(BITVEC_WORDS_MAX <= isize::MAX as usize / sizeof(u64), "the words of a BitVec fit a block");
+
 // The referents of `index`: a bit is not addressable, so `s[i]` borrows one of these.
 const BOOLS: [bool; 2] = [false, true];
 
@@ -31,7 +38,11 @@ pub struct BitSet<const N: usize> {
 }
 
 /// A growable array of bits in words from allocator A. The default value is empty and allocates nothing.
-pub struct BitVec<A = Global> {
+pub struct BitVec<A: Allocator = Global>
+    invariant words_for(self.len) <= self.cap && block(self.words).len() == self.cap as int && self.cap <= BITVEC_WORDS_MAX
+    invariant owns_array::<u64, A>(self.words, self.cap)
+{
+    @owned
     words: *mut u64, // owned block of `cap` words; null while cap == 0
     len: usize, // bits in use; the bits past len in word (len - 1) / 64 stay zero
     cap: usize, // words allocated
@@ -39,9 +50,9 @@ pub struct BitVec<A = Global> {
 }
 
 // A BitVec owns its words, so it may cross threads when its allocator may.
-unsafe extend<A: Send> BitVec<A> as Send {}
+unsafe extend<A: Allocator + Send> BitVec<A> as Send {}
 
-unsafe extend<A: Sync> BitVec<A> as Sync {}
+unsafe extend<A: Allocator + Sync> BitVec<A> as Sync {}
 
 /// The indices of the set bits of a `BitSet` or `BitVec`, in increasing order from `next` and in
 /// decreasing order from `next_back`. A clear word costs one test; a set bit costs one count-zeros.
@@ -204,7 +215,9 @@ const fn field_max(lo: u32, width: u32) u64 {
 }
 
 // The words that hold `nbits` bits, without the overflow of `(nbits + 63) / 64`.
-const fn words_for(nbits: usize) usize {
+const fn words_for(nbits: usize) usize
+    ensures |r| r as int == (nbits as int + 63) / 64
+{
     return nbits / 64 + (nbits % 64 + 63) / 64;
 }
 
@@ -552,7 +565,9 @@ extend<const N: usize> BitSet<N> {
 
 extend<A: Allocator> BitVec<A> {
     /// Empty, with no allocation, through allocator `alloc`.
-    pub const fn new_in(alloc: A) BitVec<A> {
+    pub const fn new_in(alloc: A) BitVec<A>
+        ensures |r| r.len() == 0 && r.capacity() == 0
+    {
         return BitVec::<A> { words: null, len: 0, cap: 0, alloc: alloc };
     }
 
@@ -565,7 +580,9 @@ extend<A: Allocator> BitVec<A> {
     }
 
     /// The number of bits.
-    pub const fn len(self: &BitVec<A>) usize {
+    pub const fn len(self: &BitVec<A>) usize
+        ensures |r| r == self.len
+    {
         return self.len;
     }
 
@@ -575,13 +592,18 @@ extend<A: Allocator> BitVec<A> {
     }
 
     /// The bits the allocation holds without growing: a multiple of 64.
-    pub const fn capacity(self: &BitVec<A>) usize {
+    pub const fn capacity(self: &BitVec<A>) usize
+        ensures |r| r as int == self.cap as int * 64
+    {
         return self.cap * 64;
     }
 
     /// Room for `additional` more bits, growing the words geometrically. Panics on size overflow.
-    pub fn reserve(self: &mut BitVec<A>, additional: usize) {
-        if additional > usize::MAX - self.len {
+    pub fn reserve(self: &mut BitVec<A>, additional: usize)
+        panics if (self.len as int + additional as int + 63) / 64 > BITVEC_WORDS_MAX as int
+        ensures self.len == old(self.len) && (self.len as int + additional as int + 63) / 64 <= self.cap as int
+    {
+        if additional > BITVEC_WORDS_MAX * 64 - self.len {
             panic("BitVec: capacity overflow");
         }
         let need = words_for(self.len + additional);
@@ -590,12 +612,19 @@ extend<A: Allocator> BitVec<A> {
         }
     }
 
-    // Grows to at least `need` words, doubling. `need` is at most usize::MAX / 64 + 1 words (a bit count is a
-    // usize), so neither the doubling nor the byte size overflows.
+    // Grows to at least `need` words, doubling up to BITVEC_WORDS_MAX.
     @noinline
-    fn grow(self: &mut BitVec<A>, need: usize) {
-        let cap = need.max(self.cap * 2);
-        let p = unsafe self.alloc.realloc(self.words, self.cap * sizeof(u64), array_bytes::<u64>(cap), alignof(u64));
+    fn grow(self: &mut BitVec<A>, need: usize)
+        requires need > self.cap && need <= BITVEC_WORDS_MAX
+        ensures self.len == old(self.len) && self.cap >= need
+    {
+        let cap = need.max((self.cap * 2).min(BITVEC_WORDS_MAX));
+        let p = unsafe self.alloc.realloc(
+            self.words,
+            array_bytes::<u64>(self.cap),
+            array_bytes::<u64>(cap),
+            alignof(u64),
+        );
         self.words = p as *mut u64;
         self.cap = cap;
     }
@@ -663,7 +692,9 @@ extend<A: Allocator> BitVec<A> {
     }
 
     /// Makes the length `n`: drops the bits past n, or appends bits of `value`. Panics on size overflow.
-    pub fn resize(self: &mut BitVec<A>, n: usize, value: bool) {
+    pub fn resize(self: &mut BitVec<A>, n: usize, value: bool)
+        panics if n > self.len && (n as int + 63) / 64 > BITVEC_WORDS_MAX as int
+    {
         if n <= self.len {
             self.truncate(n);
             return;
@@ -679,7 +710,10 @@ extend<A: Allocator> BitVec<A> {
             i += 1;
         }
         let used = words_for(n);
-        for k in i..used {
+        let m = self.len;
+        for k in i..used
+            invariant self.invariant() && self.len == m && used <= self.cap
+        {
             unsafe self.words[k] = fill;
         }
         self.len = n;
@@ -805,7 +839,9 @@ extend<A: Allocator> BitVec<A> {
 
 extend<A: Allocator + Default> BitVec<A> {
     /// Empty, with no allocation, through the default allocator.
-    pub const fn new() BitVec<A> {
+    pub const fn new() BitVec<A>
+        ensures |r| r.len() == 0 && r.capacity() == 0
+    {
         return BitVec::<A>::new_in(A::default());
     }
 
@@ -1016,7 +1052,7 @@ extend<const N: usize> BitSet<N> as Index<bool, u64> {
 extend<A: Allocator> BitVec<A> as Free {
     pub fn free(self: &mut BitVec<A>) {
         if self.cap > 0 {
-            unsafe self.alloc.dealloc(self.words, self.cap * sizeof(u64), alignof(u64));
+            unsafe self.alloc.dealloc(self.words, array_bytes::<u64>(self.cap), alignof(u64));
         }
         self.words = null;
         self.len = 0;
@@ -1085,7 +1121,9 @@ extend<A: Allocator + Default> BitVec<A> as From<[]bool> {
     pub fn from(value: []bool) BitVec<A> {
         let mut v = BitVec::<A>::new();
         v.reserve(value.len);
-        for i in 0..value.len {
+        for i in 0..value.len
+            invariant v.invariant()
+        {
             v.push(unsafe value.ptr[i]);
         }
         return v;

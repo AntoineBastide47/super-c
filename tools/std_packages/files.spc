@@ -15,11 +15,16 @@ pub fn read_file(path: str) Option<String> {
     }
     let n = md.unwrap().size as usize;
     let mut text = String::with_capacity(n);
-    let got = f.read_full(unsafe SliceMut::<u8> { ptr: text.spare_mut(n), len: n });
-    if got.is_err() || f.close().is_err() {
+    let got = switch f.read_full(unsafe SliceMut::<u8> { ptr: text.spare_mut(n), len: n }) {
+        Ok(k) => k,
+        Err(_) => {
+            return None;
+        },
+    };
+    if f.close().is_err() {
         return None;
     }
-    text.advance_len(got.unwrap());
+    text.advance_len(got);
     return Some(text);
 }
 

@@ -73,8 +73,16 @@ fn to_heap<T>(v: T) *mut T {
     return p;
 }
 
+// A handle C gives back to its free function: null, or the block `to_heap` gave it. The header states that
+// each handle is freed once, by its own free function; a C call carries no clause.
+@trusted
+lemma c_handle<T>(p: *mut T)
+    ensures p == null || Global::owns(p, sizeof(T), alignof(T));
+
 // The value of handle `p`, its heap block released.
-fn from_heap<T>(p: *mut T) T {
+fn from_heap<T>(p: *mut T) T
+    requires Global::owns(p, sizeof(T), alignof(T))
+{
     let v = unsafe p[0];
     let mut g = Global {};
     unsafe g.dealloc(p, sizeof(T), alignof(T));
@@ -143,6 +151,7 @@ pub fn session_open_project(dir: *const u8, dir_len: usize, std_dir: *const u8, 
 /// `superc_session_free`.
 @export("superc_session_free")
 pub fn session_free(h: *mut Handle) {
+    c_handle(h);
     if h != null {
         let _ = from_heap(h);
     }
@@ -343,6 +352,7 @@ pub const fn result_item(r: *const Res, i: usize, item: *mut CItem) i32 {
 /// `superc_result_free`.
 @export("superc_result_free")
 pub fn result_free(r: *mut Res) {
+    c_handle(r);
     if r != null {
         let _ = from_heap(r);
     }

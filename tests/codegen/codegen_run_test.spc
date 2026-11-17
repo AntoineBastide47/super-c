@@ -1477,7 +1477,7 @@ fn a_harness_run_fails_on_a_leak_without_the_gate() {
 @test
 fn qualified_name_spells_each_instance() {
     let r = h::compile_and_run(
-        "struct P {\n    pub x: i32,\n}\n@derive(Copy)\nstruct Arena {}\nextend Arena as Allocator {\n    pub unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {\n        return unsafe Global {}.alloc(size, align);\n    }\n    pub unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {\n        return unsafe Global {}.realloc(ptr, old_size, new_size, align);\n    }\n    pub unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) {\n        unsafe Global {}.dealloc(ptr, size, align);\n    }\n}\nfn show<T>() {\n    println(\"{}\", type_info::<T>().qualified_name);\n}\nconst K: str = type_info::<Vector<P>>().qualified_name;\nfn main() i32 {\n    show::<Vector<i32>>();\n    show::<Vector<Vector<str>>>();\n    show::<Vector<i32, Arena>>();\n    show::<Array<P, 4>>();\n    show::<String>();\n    show::<[i64; 3]>();\n    show::<&mut Vector<u8>>();\n    let t = type_info::<Vector<P>>();\n    println(\"{} {}\", t.name, t.qualified_name);\n    println(\"{}\", K);\n    return 0;\n}\n",
+        "struct P {\n    pub x: i32,\n}\n@derive(Copy)\nstruct Arena {}\nextend Arena as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {\n        return unsafe Global {}.alloc(size, align);\n    }\n    pub unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {\n        return unsafe Global {}.realloc(ptr, old_size, new_size, align);\n    }\n    pub unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) {\n        unsafe Global {}.dealloc(ptr, size, align);\n    }\n}\nfn show<T>() {\n    println(\"{}\", type_info::<T>().qualified_name);\n}\nconst K: str = type_info::<Vector<P>>().qualified_name;\nfn main() i32 {\n    show::<Vector<i32>>();\n    show::<Vector<Vector<str>>>();\n    show::<Vector<i32, Arena>>();\n    show::<Array<P, 4>>();\n    show::<String>();\n    show::<[i64; 3]>();\n    show::<&mut Vector<u8>>();\n    let t = type_info::<Vector<P>>();\n    println(\"{} {}\", t.name, t.qualified_name);\n    println(\"{}\", K);\n    return 0;\n}\n",
     );
     assert(r.built, "qualified_name builds");
     assert_eq(r.exit, 0);
@@ -4045,15 +4045,15 @@ fn main(args: Vector<str>) i32 {
 fn boxed_dyn_frees_through_its_allocator(b: &mut h::ExitBatch) {
     b.add(
         "Box<T, A> as Box<dyn I>",
-        M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }
-static mut LIVE: i32 = 0;
+        M"(static mut LIVE: i32 = 0;
 static mut DEFAULTS: i32 = 0;
 @derive(Copy)
 struct Tagged { pub tag: u64 }
 extend Tagged as Allocator {
-    unsafe fn alloc(self: &mut Tagged, n: usize, align: usize) *mut void { unsafe { LIVE += 1; } let q = unsafe malloc(n); if q == null { panic("out of memory"); } return q; }
-    unsafe fn realloc(self: &mut Tagged, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic("out of memory"); } return q; }
-    unsafe fn dealloc(self: &mut Tagged, p: *mut void, n: usize, align: usize) { if self.tag == 7 { unsafe { LIVE -= 1; } } unsafe free(p); }
+    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }
+    unsafe fn alloc(self: &mut Tagged, n: usize, align: usize) *mut void { unsafe { LIVE += 1; } return unsafe Global {}.alloc(n, align); }
+    unsafe fn realloc(self: &mut Tagged, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe Global {}.realloc(p, old_n, n, align); }
+    unsafe fn dealloc(self: &mut Tagged, p: *mut void, n: usize, align: usize) { if self.tag == 7 { unsafe { LIVE -= 1; } } unsafe Global {}.dealloc(p, n, align); }
 }
 extend Tagged as Default { fn default() Tagged { unsafe { DEFAULTS += 1; } return Tagged { tag: 7 }; } }
 interface Shape { fn area(self: &Self) i32; }
@@ -5914,12 +5914,17 @@ fn zero_sized_fields_of_generic_instances(b: &mut h::ExitBatch) {
     pub n: usize,
     pub alloc: A,
 }
-fn release<A: Allocator>(alloc: &mut A, p: *mut void) usize {
+fn release<A: Allocator>(alloc: &mut A, p: *mut void) usize
+    requires A::owns(p, 8, 8)
+{
     unsafe alloc.dealloc(p, 8, 8);
     return alloc as *mut A as usize;
 }
 extend<A: Allocator> Holder<A> {
-    fn drop_block(self: &mut Holder<A>, p: *mut void) usize {
+    fn drop_block(self: &mut Holder<A>, p: *mut void) usize
+        requires A::owns(p, 8, 8)
+        panics if true
+    {
         return release(&mut self.alloc, p) - (self as *mut Holder<A> as usize);
     }
 }

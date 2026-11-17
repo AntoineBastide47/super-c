@@ -35,7 +35,10 @@ pub fn read_text(path: str) String {
     let mut f = fs::open(path, fs::OpenOptions { read: true }).unwrap();
     let n = f.metadata().unwrap().size as usize;
     let mut out = String::with_capacity(n + 1);
-    let got = f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(n), len: n }).unwrap();
+    let got = switch f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(n), len: n }) {
+        Ok(k) => k,
+        Err(_) => panic("read_text: the read failed"),
+    };
     out.advance_len(got);
     return out;
 }

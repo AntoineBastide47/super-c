@@ -2849,14 +2849,25 @@ pub(package) const POOL_CHUNK: usize = 1usize << 12;
 pub(package) const POOL_SLOTS: usize = 512;
 
 pub(package) struct ChunkPool<T: Copy> {
-    tab: *mut *mut T,
+    // POOL_SLOTS chunks reserved at the first push, each chunk POOL_CHUNK entries: neither moves. Readers
+    // reach a chunk through the table's pointer (`chunk`), never its length, which a push writes.
+    tab: Vector<Vector<T>>,
     nchunks: u32,
     n: usize,
 }
 
 extend<T: Copy> ChunkPool<T> {
     pub(package) const fn new() ChunkPool<T> {
-        return ChunkPool::<T> { tab: null, nchunks: 0, n: 0 };
+        return ChunkPool::<T> { tab: Vector::<Vector<T>>::new(), nchunks: 0, n: 0 };
+    }
+
+    // The entries of chunk `c` (below `nchunks`).
+    const fn chunk(self: &Self, c: usize) *const T {
+        return unsafe (*(self.tab.as_ptr() + c)).as_ptr();
+    }
+
+    const fn chunk_mut(self: &mut Self, c: usize) *mut T {
+        return unsafe (*(self.tab.as_mut_ptr() + c)).as_mut_ptr();
     }
 
     pub(package) fn len(self: &Self) usize {
@@ -2864,32 +2875,31 @@ extend<T: Copy> ChunkPool<T> {
     }
 
     pub(package) const fn at(self: &Self, i: usize) &T {
-        return unsafe &*(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+        return unsafe &*(self.chunk(i >> POOL_SHIFT) + (i & POOL_CHUNK - 1));
     }
 
     pub(package) fn push(self: &mut Self, v: T) {
         let i = self.n;
         if i >> POOL_SHIFT >= self.nchunks as usize {
-            let mut g = Global {};
-            if self.tab == null {
-                self.tab = (unsafe g.alloc(POOL_SLOTS * sizeof(*mut T), alignof(*mut T))) as *mut *mut T;
+            if self.tab.capacity() == 0 {
+                self.tab = Vector::<Vector<T>>::with_capacity(POOL_SLOTS);
             }
             if self.nchunks as usize >= POOL_SLOTS {
                 panic("intern pool exceeded its fixed capacity");
             }
-            unsafe self.tab[self.nchunks as usize] = (unsafe g.alloc(POOL_CHUNK * sizeof(T), alignof(T))) as *mut T;
+            self.tab.push(Vector::<T>::with_capacity(POOL_CHUNK));
             self.nchunks += 1;
         }
-        unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
+        unsafe self.chunk_mut(i >> POOL_SHIFT)[i & POOL_CHUNK - 1] = v;
         unsafe atomic::store_usize(&mut self.n, i + 1, 2);
     }
 
     pub(package) const fn index_mut(self: &mut Self, i: usize) &mut T {
-        return unsafe &mut *(unsafe self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+        return unsafe &mut *(self.chunk_mut(i >> POOL_SHIFT) + (i & POOL_CHUNK - 1));
     }
 
     pub(package) const fn set(self: &mut Self, i: usize, v: T) {
-        unsafe (unsafe self.tab[i >> POOL_SHIFT])[i & POOL_CHUNK - 1] = v;
+        unsafe self.chunk_mut(i >> POOL_SHIFT)[i & POOL_CHUNK - 1] = v;
     }
 
     /// Pad with copies of `v` until a run of `need` entries fits inside ONE chunk, then return its
@@ -2908,10 +2918,10 @@ extend<T: Copy> ChunkPool<T> {
     /// index one past the end of the last chunk answers a stable dummy -- an empty run's start is
     /// never dereferenced.
     pub(package) const fn ptr_at(self: &Self, i: usize) *const T {
-        if self.tab == null || i >> POOL_SHIFT >= self.nchunks as usize {
-            return self.tab as *const T;
+        if i >> POOL_SHIFT >= self.nchunks as usize {
+            return self.tab.as_ptr() as *const T;
         }
-        return unsafe (self.tab[i >> POOL_SHIFT] + (i & POOL_CHUNK - 1));
+        return unsafe (self.chunk(i >> POOL_SHIFT) + (i & POOL_CHUNK - 1));
     }
 
     /// Reset the length; chunks stay allocated for reuse.
@@ -2921,22 +2931,6 @@ extend<T: Copy> ChunkPool<T> {
 
     pub(package) const fn retained(self: &Self) usize {
         return self.nchunks as usize * POOL_CHUNK * sizeof(T);
-    }
-}
-
-extend<T: Copy> ChunkPool<T> as Free {
-    pub fn free(self: &mut Self) {
-        if self.tab == null {
-            return;
-        }
-        let mut g = Global {};
-        for c in 0..self.nchunks as usize {
-            unsafe g.dealloc(unsafe self.tab[c], POOL_CHUNK * sizeof(T), alignof(T));
-        }
-        unsafe g.dealloc(self.tab, POOL_SLOTS * sizeof(*mut T), alignof(*mut T));
-        self.tab = null;
-        self.nchunks = 0;
-        self.n = 0;
     }
 }
 

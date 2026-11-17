@@ -19,8 +19,13 @@ import std::spec::seq as *;
 
 /// A growable heap array of T through allocator A; capacity grows geometrically, elements are freed
 /// with the vector.
-pub struct Vector<T, A = Global>
+pub struct Vector<T, A: Allocator = Global>
     invariant self.len <= self.cap && block(self.ptr).len() == self.cap as int && self.cap as int <= Vector::<T, A>::max_len() && (sizeof(T) != 0 || self.cap == 0 || self.cap == usize::MAX)
+    invariant self.cap == 0 && self.ptr == null || self.cap != 0 && (sizeof(T) == 0 || A::owns(
+        self.ptr,
+        Vector::<T, A>::bytes(self.cap),
+        alignof(T),
+    ))
 {
     @owned
     ptr: *mut T, // owned storage; null while cap == 0 (private)
@@ -31,12 +36,12 @@ pub struct Vector<T, A = Global>
 
 // A Vector owns its elements, so it is Send / Sync when its elements and allocator are (the owned buffer
 // pointer would otherwise make it structurally neither).
-unsafe extend<T, A> Vector<T, A> as Zeroable {}
-unsafe extend<T: Send, A: Send> Vector<T, A> as Send {}
+unsafe extend<T, A: Allocator> Vector<T, A> as Zeroable {}
+unsafe extend<T: Send, A: Allocator + Send> Vector<T, A> as Send {}
 
-unsafe extend<T: Sync, A: Sync> Vector<T, A> as Sync {}
+unsafe extend<T: Sync, A: Allocator + Sync> Vector<T, A> as Sync {}
 
-extend<T, A> Vector<T, A> {
+extend<T, A: Allocator> Vector<T, A> {
     /// The most elements a vector holds: as many as keep its block's byte size at most `isize::MAX`,
     /// `usize::MAX` zero-sized ones.
     pub spec fn max_len() int {
@@ -45,6 +50,14 @@ extend<T, A> Vector<T, A> {
         } else {
             (isize::MAX as usize / sizeof(T)) as int
         };
+    }
+
+    // The byte size of `n` elements, for `n` at most `max_len`: the size each allocator call states.
+    const fn bytes(n: usize) usize
+        requires n as int <= Vector::<T, A>::max_len()
+        ensures |r| r as int == n as int * sizeof(T) as int && r as int <= isize::MAX as int
+    {
+        return n * sizeof(T);
     }
 }
 
@@ -78,7 +91,7 @@ extend<T, A: Allocator> Vector<T, A> {
             if cap > isize::MAX as usize / sizeof(T) {
                 panic("Vector: capacity overflow");
             }
-            v.ptr = (unsafe v.alloc.alloc(cap * sizeof(T), alignof(T))) as *mut T;
+            v.ptr = (unsafe v.alloc.alloc(Vector::<T, A>::bytes(cap), alignof(T))) as *mut T;
             v.cap = cap;
         }
         return v;
@@ -177,7 +190,12 @@ extend<T, A: Allocator> Vector<T, A> {
         ensures self.view() == old(self.view())
         ensures self.len == old(self.len) && self.cap == new_cap
     {
-        let p = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), new_cap * sizeof(T), alignof(T))) as *mut T;
+        let p = (unsafe self.alloc.realloc(
+            self.ptr,
+            Vector::<T, A>::bytes(self.cap),
+            Vector::<T, A>::bytes(new_cap),
+            alignof(T),
+        )) as *mut T;
         self.ptr = p;
         self.cap = new_cap;
     }
@@ -391,6 +409,29 @@ extend<T, A: Allocator> Vector<T, A> {
         let n = self.len;
         ghost let b0 = block(self.ptr);
         let removed = unsafe self.ptr[index];
+        take_at(b0, n as int, index as int);
+        self.shift_left(index);
+        // The first `index`, then the old ones after `index`.
+        take_cat(block(self.ptr), index as int, n as int - 1);
+        take_take(b0, n as int, index as int);
+        take_sub(b0, n as int, index as int + 1, n as int);
+        self.len = n - 1;
+        return Some(removed);
+    }
+
+    // Move the elements after `index` one place left: the first `index` stay, and the old element `j + 1`
+    // is element `j` from `index` to the length less one.
+    const fn shift_left(self: &mut Vector<T, A>, index: usize)
+        requires index < self.len
+        ensures self.len == old(self.len) && self.cap == old(self.cap) && block(self.ptr).len() == old(block(self.ptr)).len()
+        ensures block(self.ptr).take(index as int) == old(block(self.ptr)).take(index as int)
+        ensures block(self.ptr).subrange(index as int, self.len as int - 1) == old(block(self.ptr)).subrange(
+            index as int + 1,
+            self.len as int,
+        )
+    {
+        let n = self.len;
+        ghost let b0 = block(self.ptr);
         let mut i = index;
         while i + 1 < n
             invariant self.invariant() && self.len == n && index <= i && i < n && block(self.ptr).len() == b0.len()
@@ -398,11 +439,17 @@ extend<T, A: Allocator> Vector<T, A> {
             invariant block(self.ptr).subrange(index as int, i as int) == b0.subrange(index as int + 1, i as int + 1)
             invariant block(self.ptr).subrange(i as int + 1, n as int) == b0.subrange(i as int + 1, n as int)
         {
+            ghost let bi = block(self.ptr);
             unsafe self.ptr[i] = unsafe self.ptr[i + 1];
+            // Element `i` is element `i + 1` of `b0`; the others stay.
+            sub_eq_head(bi, b0, i as int + 1, n as int);
+            upd_take_out(bi, index as int, i as int, bi[i as int + 1]);
+            upd_sub_out(bi, i as int, index as int, i as int, bi[i as int + 1]);
+            upd_sub_out(bi, i as int, i as int + 2, n as int, bi[i as int + 1]);
+            sub_tail(block(self.ptr), index as int, i as int);
+            sub_tail(b0, index as int + 1, i as int + 1);
             i = i + 1;
         }
-        self.len = n - 1;
-        return Some(removed);
     }
 
     /// Exchange the elements at `i` and `j`. Panics when either is `>= len`.
@@ -510,60 +557,6 @@ extend<T, A: Allocator> Vector<T, A> {
     }
 }
 
-// The view after a push of `x` at index `n` of block `b1`, of length `m`: the elements before (`b0`), then `x`.
-lemma push_view<T>(b0: Seq<T>, b1: Seq<T>, n: int, m: int, x: T)
-    requires 0 <= n && n < b1.len() && m == n + 1 && b1.take(n) == b0
-    ensures b1.update(n, x).take(m) == b0.push(x)
-{}
-
-// An update of an element among the first `n`, then the first `n`: the first `n`, then the update.
-lemma upd_take<T>(b: Seq<T>, n: int, i: int, x: T)
-    requires 0 <= i && i < n && n <= b.len()
-    ensures b.update(i, x).take(n) == b.take(n).update(i, x)
-{}
-
-// An update of an element past the first `n`, then the first `n`: the first `n`.
-lemma upd_take_out<T>(b: Seq<T>, n: int, i: int, x: T)
-    requires 0 <= n && n <= i && i < b.len()
-    ensures b.update(i, x).take(n) == b.take(n)
-{}
-
-// The elements from `lo` to before `hi`: element `lo`, then the elements after it.
-lemma sub_head<T>(b: Seq<T>, lo: int, hi: int)
-    requires 0 <= lo && lo < hi && hi <= b.len()
-    ensures b.subrange(lo, hi) == Seq::<T>::empty().push(b[lo]).concat(b.subrange(lo + 1, hi))
-{}
-
-// An update of element `i` that a subrange leaves out: the subrange.
-lemma upd_sub_out<T>(b: Seq<T>, i: int, lo: int, hi: int, x: T)
-    requires 0 <= i && i < b.len() && 0 <= lo && lo <= hi && hi <= b.len() && (i < lo || hi <= i)
-    ensures b.update(i, x).subrange(lo, hi) == b.subrange(lo, hi)
-{}
-
-// A subrange of the first `n` elements: the subrange.
-lemma take_sub<T>(b: Seq<T>, n: int, lo: int, hi: int)
-    requires 0 <= lo && lo <= hi && hi <= n && n <= b.len()
-    ensures b.take(n).subrange(lo, hi) == b.subrange(lo, hi)
-{}
-
-// The first `n + 1` elements, element `i` among them: the ones before it, it, then the ones after it.
-lemma take_split<T>(f: Seq<T>, i: int, n: int)
-    requires 0 <= i && i <= n && n < f.len()
-    ensures f.take(n + 1) == f.take(i).push(f[i]).concat(f.subrange(i + 1, n + 1))
-{}
-
-// Element `j` of the first `n`: element `j`.
-lemma take_at<T>(b: Seq<T>, n: int, j: int)
-    requires 0 <= j && j < n && n <= b.len()
-    ensures b.take(n)[j] == b[j]
-{}
-
-// The first `m` elements of the first `n`: the first `m`.
-lemma take_take<T>(b: Seq<T>, n: int, m: int)
-    requires 0 <= m && m <= n && n <= b.len()
-    ensures b.take(n).take(m) == b.take(m)
-{}
-
 // Convenience constructors for a default-constructible allocator (`Global`, or any zero-sized tag).
 extend<T, A: Allocator + Default> Vector<T, A> {
     /// An empty vector using the default allocator; no allocation until the first push.
@@ -652,7 +645,7 @@ extend<T, A: Allocator> Vector<T, A> as Free {
             // The sentinel was never allocated.
             return;
         }
-        unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
+        unsafe self.alloc.dealloc(self.ptr, Vector::<T, A>::bytes(self.cap), alignof(T));
         self.ptr = null;
         self.cap = 0;
     }

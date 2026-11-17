@@ -283,6 +283,8 @@ pub(package) fn state_lit<const B: usize>(
 pub(package) struct Built<const B: usize> {
     st: Stated<B>,
     lits: Vector<u64>,
+    // Per literal, the counts of rows, equalities, disequalities and literals of `st` after it.
+    ends: Vector<u32>,
 }
 
 extend<const B: usize> Built<B> {
@@ -442,14 +444,22 @@ pub(package) struct Kernel<const B: usize> {
     cut_rows: Vector<Row<B>>,
     cut_pool: Vector<LinTerm<B>>,
     cacc: Vector<LinTerm<B>>,
-    // The lemmas accepted (`lems`, each one ending at `lend`), the skeleton with their clauses (`seal`),
-    // the bits of the last literals blasted (`blits`), the LRAT scratch.
+    // The lemmas accepted (`lems`, each one's literals sorted, ending at `lend`), the skeleton with their
+    // clauses (`seal`), the bits of the last literals blasted (`blits`), the LRAT scratch.
     lems: Vector<u64>,
     lend: Vector<u32>,
+    // The lemmas by their least literal (`subsumed`); the first lemma of the current refutation, and the
+    // earlier ones it used (`seal`).
+    lwatch: Map<u64, Vector<u32>>,
+    call0: u32,
+    lused: Vector<u32>,
     sk: Blaster<B>,
     bl: Blaster<B>,
     blits: Vector<u64>,
     lr: Lrat,
+    // The stated entries the last `check` read (`U_ROW`, `U_EQ`, `U_NEQ`, `U_LIT` << 32 | index): the
+    // literals that made them are the lemma (`core`).
+    used: Vector<u64>,
 }
 
 // A node of a tree to check: the length of the path above its parent, and its parent's side
@@ -461,6 +471,16 @@ struct Visit {
 }
 
 const NO_MARK: u64 = 0xFFFFFFFFFFFFFFFFu64;
+
+// The lemmas kept across refutations until the terms are cleared (`Kernel::forget`), and their literals.
+const LEMMAS_KEPT: usize = 4096;
+const LEMMA_LITS_KEPT: usize = 131072;
+
+// The kinds of stated entries a check reads (`Kernel.used`).
+const U_ROW: u64 = 0;
+const U_EQ: u64 = 1;
+const U_NEQ: u64 = 2;
+const U_LIT: u64 = 3;
 
 const fn pair(a: u32, b: u32) u64 {
     return a as u64 << 32 | b as u64;
@@ -487,33 +507,151 @@ extend<const B: usize> Kernel<B> {
             cacc: Vector::<LinTerm<B>>::new(),
             lems: Vector::<u64>::new(),
             lend: Vector::<u32>::new(),
+            lwatch: Map::<u64, Vector<u32>>::new(),
+            call0: 0,
+            lused: Vector::<u32>::new(),
             sk: Blaster::<B>::new(),
             bl: Blaster::<B>::new(),
             blits: Vector::<u64>::new(),
             lr: Lrat::new(),
+            used: Vector::<u64>::new(),
         };
     }
 
-    // Start a refutation: no lemma yet.
+    // Start a refutation. The lemmas of the earlier ones stay (`subsumed`), but past LEMMAS_KEPT.
     pub(package) fn begin(self: &mut Self) {
+        if self.lend.len() > LEMMAS_KEPT || self.lems.len() > LEMMA_LITS_KEPT {
+            self.forget();
+        }
+        self.call0 = self.lend.len() as u32;
+        self.lused.clear();
+    }
+
+    // The first literal of lemma `id` in `lems`.
+    const fn lemma_start(self: &Self, id: usize) usize {
+        if id == 0 {
+            return 0;
+        }
+        return self.lend[id - 1] as usize;
+    }
+
+    /// Drop every lemma: their terms are gone.
+    pub(package) fn forget(self: &mut Self) {
         self.lems.clear();
         self.lend.clear();
+        self.lwatch.clear();
+    }
+
+    // The literals of `b` that made an entry the last `check` read: the proof refutes them alone. All of
+    // them when it read none.
+    fn core(self: &Self, b: &Built<B>) Vector<u64> {
+        let n = [b.st.rows.len(), b.st.eqs.len(), b.st.neqs.len(), b.st.lits.len()];
+        let mut mark = Vector::<bool>::new();
+        mark.resize_default(n[0] + n[1] + n[2] + n[3]);
+        for j in 0..self.used.len() {
+            let (kind, i) = ((self.used[j] >> 32) as usize, (self.used[j] & 0xFFFFFFFFu64) as usize);
+            let mut at = i;
+            for q in 0..kind {
+                at += n[q];
+            }
+            mark.set(at, true);
+        }
+        let mut out = Vector::<u64>::new();
+        let mut from = [0usize, 0, 0, 0];
+        for j in 0..b.lits.len() {
+            let mut hit = false;
+            let mut base: usize = 0;
+            for q in 0..4usize {
+                let e = b.ends[4 * j + q] as usize;
+                for i in from[q]..e {
+                    hit = hit || mark[base + i];
+                }
+                from[q] = e;
+                base += n[q];
+            }
+            if hit {
+                out.push(b.lits[j]);
+            }
+        }
+        if out.len() == 0 {
+            return b.lits.clone();
+        }
+        return out;
     }
 
     fn accept(self: &mut Self, lits: &Vector<u64>) {
-        self.lems.extend_copy(lits);
+        let mut c = lits.clone();
+        c.sort();
+        let id = self.lend.len() as u32;
+        self.lems.extend_copy(&c);
         self.lend.push(self.lems.len() as u32);
+        if c.len() != 0 {
+            if !self.lwatch.contains_key(&c[0]) {
+                self.lwatch.insert(c[0], Vector::<u32>::new());
+            }
+            self.lwatch.get_mut(&c[0]).unwrap().push(id);
+        }
+    }
+
+    /// Whether literals `lits` hold every literal of a lemma: they cannot all hold. A lemma of an earlier
+    /// refutation joins this one's (`seal`).
+    pub(package) fn subsumed(self: &mut Self, lits: &Vector<u64>) bool {
+        if self.lend.len() == 0 {
+            return false;
+        }
+        let mut have = lits.clone();
+        have.sort();
+        for h in 0..have.len() {
+            if h > 0 && have[h] == have[h - 1] {
+                continue;
+            }
+            let ids = switch self.lwatch.get(&have[h]) {
+                Some(v) => v,
+                None => {
+                    continue;
+                },
+            };
+            for x in 0..ids.len() {
+                let id = ids[x] as usize;
+                let s = self.lemma_start(id);
+                let e = self.lend[id] as usize;
+                let mut k = h;
+                let mut all = true;
+                for q in s..e {
+                    while k < have.len() && have[k] < self.lems[q] {
+                        k += 1;
+                    }
+                    if k == have.len() || have[k] != self.lems[q] {
+                        all = false;
+                        break;
+                    }
+                }
+                if all {
+                    let idu = id as u32;
+                    if idu < self.call0 && !self.lused.contains(&idu) {
+                        self.lused.push(idu);
+                    }
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     // What the theory literals `lits` state (`state_lit`), None when a row does not fit.
     pub(package) fn state(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>) Option<Built<B>> {
         let mut st = Stated::<B>::new();
+        let mut ends = Vector::<u32>::with_capacity(4 * lits.len());
         for j in 0..lits.len() {
             if !state_lit(tm, &mut st, lits[j], &mut self.row, &mut self.stack) {
                 return None;
             }
+            ends.push(st.rows.len() as u32);
+            ends.push(st.eqs.len() as u32);
+            ends.push(st.neqs.len() as u32);
+            ends.push(st.lits.len() as u32);
         }
-        return Some(Built::<B> { st: st, lits: lits.clone() });
+        return Some(Built::<B> { st: st, lits: lits.clone(), ends: ends });
     }
 
     // Whether `pf` refutes what `b` states; then its literals are a lemma.
@@ -521,7 +659,8 @@ extend<const B: usize> Kernel<B> {
         if !self.check(tm, &b.st, pf) {
             return false;
         }
-        self.accept(&b.lits);
+        let core = self.core(&b);
+        self.accept(&core);
         return true;
     }
 
@@ -538,13 +677,17 @@ extend<const B: usize> Kernel<B> {
             return false;
         }
         let mut c = Vector::<u64>::new();
-        let mut s: u32 = 0;
-        for j in 0..self.lend.len() {
+        let n = self.lend.len() - self.call0 as usize;
+        for j in 0..n + self.lused.len() {
+            let id = if j < n {
+                self.call0 as usize + j
+            } else {
+                self.lused[j - n] as usize
+            };
             c.clear();
-            for q in s..self.lend[j] {
-                c.push(self.lems[q as usize]);
+            for q in self.lemma_start(id)..self.lend[id] as usize {
+                c.push(self.lems[q]);
             }
-            s = self.lend[j];
             if !self.sk.negation(tm, &c) {
                 return false;
             }
@@ -592,6 +735,7 @@ extend<const B: usize> Kernel<B> {
 
     // Whether proof `pf` refutes the branch `st`: every fact and every tree it uses is valid.
     pub(package) fn check(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, pf: &Proof<B>) bool {
+        self.used.clear();
         self.ncut = 0;
         self.cut_ok.clear();
         self.cut_rows.clear();
@@ -614,6 +758,7 @@ extend<const B: usize> Kernel<B> {
         }
         let f = pf.facts[pf.p as usize];
         if pf.end == X_NEQ {
+            self.used.push(U_NEQ << 32 | pf.q as u64);
             return pf.q as usize < st.neqs.len() && same_pair(st.neqs[pf.q as usize], f.a, f.b);
         }
         if pf.end == X_LITS {
@@ -623,6 +768,9 @@ extend<const B: usize> Kernel<B> {
             let mut bn = false;
             for j in 0..st.lits.len() {
                 let l = st.lits[j];
+                if l >> 1 == f.a as u64 || l >> 1 == f.b as u64 {
+                    self.used.push(U_LIT << 32 | j as u64);
+                }
                 ap = ap || l == (f.a as u64 << 1 | 1);
                 an = an || l == f.a as u64 << 1;
                 bp = bp || l == (f.b as u64 << 1 | 1);
@@ -646,6 +794,7 @@ extend<const B: usize> Kernel<B> {
             return false;
         }
         if f.kind == F_IN {
+            self.used.push(U_EQ << 32 | f.p as u64);
             return f.p as usize < st.eqs.len() && same_pair(st.eqs[f.p as usize], f.a, f.b);
         }
         if f.kind == F_TRANS {
@@ -821,6 +970,7 @@ extend<const B: usize> Kernel<B> {
                 return false;
             }
             let x = st.rows[r.i as usize];
+            self.used.push(U_ROW << 32 | r.i as u64);
             for j in x.start..x.start + x.len {
                 self.row.push(st.pool[j as usize]);
             }

@@ -3096,12 +3096,13 @@ fn main() i32 { let w = Wrap::<Plain> { v: Plain { n: 5 } }; unsafe exit(w.raw()
 fn string_non_default_allocator(b: &mut h::ExitBatch) {
     b.add(
         "string non default allocator",
-        M"(extern "C" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; fn exit(code: i32) void; }
+        M"(extern "C" { fn exit(code: i32) void; }
 struct RawAlloc {}
 extend RawAlloc as Allocator {
-  unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { let q = unsafe malloc(n); if q == null { panic("out of memory"); } return q; }
-  unsafe fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic("out of memory"); } return q; }
-  unsafe fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe free(p); }
+  spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }
+  unsafe fn alloc(self: &mut RawAlloc, n: usize, align: usize) *mut void { return unsafe Global {}.alloc(n, align); }
+  unsafe fn realloc(self: &mut RawAlloc, p: *mut void, old_n: usize, n: usize, align: usize) *mut void { return unsafe Global {}.realloc(p, old_n, n, align); }
+  unsafe fn dealloc(self: &mut RawAlloc, p: *mut void, n: usize, align: usize) { unsafe Global {}.dealloc(p, n, align); }
 }
 fn main() i32 {
   let a = RawAlloc {};
@@ -3561,6 +3562,148 @@ fn a_minimum_number_loop_skips_signaling_nans_in_its_lanes() {
     p.mkfile(
         "main.spc",
         "const fn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\n\n@noinline\nfn min_max(xp: *const f32, n: usize) (f32, f32) {\n    let mut lo: f32 = 1.0 / 0.0;\n    let mut hi: f32 = -1.0 / 0.0;\n    for x in view(xp, n) {\n        if x < lo || x == lo && x.is_sign_negative() {\n            lo = x;\n        }\n        if x > hi || x == hi && !x.is_sign_negative() {\n            hi = x;\n        }\n    }\n    return (lo, hi);\n}\n\n@noinline\nfn step(x: f32, lo: &mut f32, hi: &mut f32) {\n    if x < *lo || x == *lo && x.is_sign_negative() {\n        *lo = x;\n    }\n    if x > *hi || x == *hi && !x.is_sign_negative() {\n        *hi = x;\n    }\n}\n\nfn main() i32 {\n    let specials: [u32; 6] = [0x7fc00000, 0x7fa00000, 0xffa00000, 0x80000000, 0, 0x3e800000];\n    let mut r: u64 = 12345;\n    let mut bad: i32 = 0;\n    for trial in 0..3000u32 {\n        let n = (trial % 70) as usize;\n        let mut v = Vector::<f32>::new();\n        for _ in 0..n {\n            r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);\n            v.push(f32::from_bits(specials[((r >> 33) % 6) as usize]));\n        }\n        let (a, b) = min_max(v.as_ptr(), n);\n        let mut lo: f32 = 1.0 / 0.0;\n        let mut hi: f32 = -1.0 / 0.0;\n        for k in 0..n {\n            step(v[k], &mut lo, &mut hi);\n        }\n        if a.to_bits() != lo.to_bits() || b.to_bits() != hi.to_bits() {\n            bad += 1;\n        }\n    }\n    return bad.min(100);\n}\n",
+    );
+    assert(cli::superc_in(p.dir(), "build --profile=release main.spc -o bin").ok(), "the build");
+    assert_eq(p.run_bin(), 0);
+}
+
+// Sums into an array by the counter modulo its length (12 and 16 elements, the array filled by its
+// initial value), which the release build carries in registers (`lir::loops` `carry`: 3 and 4 vectors),
+// and a choice by a mask's bits in a loop, whose lane mask the build makes once (`lir::opt`
+// `bits_lanes`): every length and every mask give what the scalar steps give.
+@test
+fn modulo_sums_and_choices_by_bits_run_as_their_scalar_steps() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+
+const fn view<'a, T>(p: *const T, n: usize) []'a T {
+    return unsafe Slice::<T> { ptr: p, len: n };
+}
+
+@noinline
+fn mod12(wp: *const i32, n: usize) i32 {
+    let w = view(wp, n);
+    let mut l: [i32; 12] = [0; 12];
+    for i in 0..n {
+        l[i % 12] += w[i];
+    }
+    let mut s: i32 = 0;
+    for k in 0..12usize {
+        s = s.wrapping_mul(31).wrapping_add(l[k]);
+    }
+    return s;
+}
+
+@noinline
+fn ref12(wp: *const i32, n: usize) i32 {
+    let w = view(wp, n);
+    let mut l: [i32; 12] = [0; 12];
+    let mut j: usize = 0;
+    for i in 0..n {
+        l[j] += w[i];
+        j += 1;
+        if j == 12 {
+            j = 0;
+        }
+    }
+    let mut s: i32 = 0;
+    for k in 0..12usize {
+        s = s.wrapping_mul(31).wrapping_add(l[k]);
+    }
+    return s;
+}
+
+@noinline
+fn mod16(wp: *const i32, n: usize) i32 {
+    let w = view(wp, n);
+    let mut l: [i32; 16] = [0; 16];
+    for i in 0..n {
+        l[i % 16] += w[i];
+    }
+    let mut s: i32 = 0;
+    for k in 0..16usize {
+        s = s.wrapping_mul(31).wrapping_add(l[k]);
+    }
+    return s;
+}
+
+@noinline
+fn ref16(wp: *const i32, n: usize) i32 {
+    let w = view(wp, n);
+    let mut l: [i32; 16] = [0; 16];
+    let mut j: usize = 0;
+    for i in 0..n {
+        l[j] += w[i];
+        j += 1;
+        if j == 16 {
+            j = 0;
+        }
+    }
+    let mut s: i32 = 0;
+    for k in 0..16usize {
+        s = s.wrapping_mul(31).wrapping_add(l[k]);
+    }
+    return s;
+}
+
+@noinline
+fn pick(xp: *const f32, yp: *const f32, n: usize, bits: u64) f32 {
+    let x = view(xp, n);
+    let y = view(yp, n);
+    let mk = Mask::<4>::from_bits_truncate(bits);
+    let mut acc = Simd::<f32, 4>::splat(0.0);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        acc = acc + mk.choose(simd::load::<f32, 4>(x, i), simd::load::<f32, 4>(y, i));
+        i += 4;
+    }
+    return simd::reduce_add_tree(acc);
+}
+
+@noinline
+fn pick_ref(xp: *const f32, yp: *const f32, n: usize, bits: u64) f32 {
+    let x = view(xp, n);
+    let y = view(yp, n);
+    let mut s: f32 = 0.0;
+    for i in 0..n - n % 4 {
+        if (bits >> (i % 4) as u64 & 1) != 0 {
+            s += x[i];
+        } else {
+            s += y[i];
+        }
+    }
+    return s;
+}
+
+fn main() i32 {
+    let mut w = Vector::<i32>::new();
+    let mut x = Vector::<f32>::new();
+    let mut y = Vector::<f32>::new();
+    for k in 0..4099usize {
+        w.push((k * 7 % 101) as i32 - 50);
+        x.push((k % 13) as f32 - 6.0);
+        y.push((k % 5) as f32);
+    }
+    let ns: [usize; 8] = [0, 1, 11, 12, 13, 47, 96, 4099];
+    for q in 0..8usize {
+        let n = unsafe ns[q];
+        if mod12(w.as_ptr(), n) != ref12(w.as_ptr(), n) {
+            return 1 + q as i32;
+        }
+        if mod16(w.as_ptr(), n) != ref16(w.as_ptr(), n) {
+            return 11 + q as i32;
+        }
+    }
+    for bits in 0..16u64 {
+        if pick(x.as_ptr(), y.as_ptr(), 1024, bits) != pick_ref(x.as_ptr(), y.as_ptr(), 1024, bits) {
+            return 30 + bits as i32;
+        }
+    }
+    return 0;
+}
+)",
     );
     assert(cli::superc_in(p.dir(), "build --profile=release main.spc -o bin").ok(), "the build");
     assert_eq(p.run_bin(), 0);

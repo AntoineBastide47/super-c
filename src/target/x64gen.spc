@@ -1203,6 +1203,78 @@ extend Gen {
         return self.cr.lv.back_param(b, b.insts[last as usize], cur, self.cr.pos) == xa;
     }
 
+    // The fixed register of the header parameter that the chain intrinsic result `i` starts ends in: each
+    // value of the chain but the last has one use, the argument a later intrinsic of the block writes its
+    // result over (`Live::cover`), no folded one, with no call that returns and no template that names the
+    // register between; the block's edges alone read the last one, its back edge passing it to the
+    // parameter, which neither `i` nor an instruction after it reads (`step_chain`, `step_reg`: for a chain
+    // that starts at a copy, as a two-operand template's of an argument that lives on). `i` made there, the
+    // edge's move vanishes. NOREG for none.
+    fn chain_home(self: &mut Self, i: u32) u8 {
+        let b = self.cr.b();
+        let ni = b.insts.len() as u32;
+        let k = self.cr.lv.def_blk[i as usize];
+        // Only a value that ends in its block, with no register of the plan.
+        if self.cr.lv.end[i as usize] != self.cr.pos || self.cr.lv.pos[k as usize] != self.cr.pos || self.cr.va[i as usize].home != H_NONE || self.cr.lv.seg_val(
+            i,
+        ) || self.vmem[i as usize] {
+            return NOREG;
+        }
+        let bk = b.blocks[k as usize];
+        let last = bk.start + bk.len - 1;
+        let mut us = Vector::<Value>::with_capacity(4);
+        let mut cur = i;
+        let mut names: u64 = 0;
+        for u in i + 1..last {
+            let t = b.insts[u as usize];
+            if self.calls(t) {
+                return NOREG;
+            }
+            let tpl = if t.op == O_CALL {
+                self.intrinsic(t.a)
+            } else {
+                ""
+            };
+            if tpl.len() != 0 {
+                names |= self.intrin_clob(t, tpl);
+            }
+            lv::each_use(b, t, &mut us);
+            let mut n: u32 = 0;
+            for q in 0..us.len() {
+                n += (self.cr.lv.seen(us[q]) == cur) as u32;
+            }
+            if n == 0 {
+                continue;
+            }
+            let c = if tpl.len() != 0 && u as usize < self.cr.lv.cover.len() {
+                self.cr.lv.cover[u as usize]
+            } else {
+                NONE
+            };
+            if n != 1 || c == NONE || self.cr.lv.seen(b.pool[(t.c + c) as usize]) != cur || self.cr.lv.uses[cur as usize] != 1 || self.cr.lv.pfold[u as usize] || self.cr.lv.end[u as usize] != self.cr.pos {
+                return NOREG;
+            }
+            cur = u;
+        }
+        let px = self.cr.lv.back_param(b, b.insts[last as usize], cur, self.cr.pos);
+        if px == NONE {
+            return NOREG;
+        }
+        let va = self.cr.va[px as usize];
+        let pv = VPARAM | px - ni;
+        if va.home != H_FIXED || va.reg == NOREG || va.reg < V0 || self.cr.owner[va.reg as usize] != px || (names & bit(
+            va.reg,
+        )) != 0 || self.cr.lv.end[px as usize] < self.cr.pos || !self.up_ok(i, va.reg) || self.reads(i, pv) || self.cr.lv.reads_after(
+            b,
+            k,
+            i,
+            pv,
+        ) {
+            return NOREG;
+        }
+        return va.reg;
+    }
+
     // The register `step_reg` or `fwd_reg` gives value `v`, which reads `a` before it writes, taken for
     // `v`: the edge's move vanishes. NOREG when neither gives one.
     fn def_shared(self: &mut Self, v: Value, a: Value) u8 {
@@ -2108,6 +2180,15 @@ extend Gen {
         }
         if self.cr.self_lay.ret.kind == ab::L_SRET {
             self.arrm.push(bit(self.arg(0)));
+        }
+        // An intrinsic whose template writes its result over a vector argument in the register both arrive
+        // in: the plan may give them one register (`Live::cover`), which `call` renames the template's to.
+        fill(&mut self.cr.lv.cover, ni, NONE);
+        for i in 0..ni {
+            let t = b.insts[i];
+            if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
+                self.cr.lv.cover[i] = self.call_over(t);
+            }
         }
         let sets = lv::Sets {
             xc: self.xfix,
@@ -8209,6 +8290,31 @@ extend Gen {
         };
     }
 
+    // The argument of intrinsic call `t` whose register its template writes the result into, both whole
+    // vectors in that register, NONE for none (`Live::cover`).
+    fn call_over(self: &mut Self, t: Inst) u32 {
+        let b = self.cr.b();
+        let tpl = self.intrinsic(t.a);
+        let np = b.pool[t.b as usize];
+        self.call_layout(t);
+        let rl = self.cr.lay.ret;
+        if !self.cr.lay.whole_vreg(rl, t.ty) {
+            return NONE;
+        }
+        let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
+        if !intrin::vwrites(false, tpl, pr) {
+            return NONE;
+        }
+        for k in 0..np {
+            let loc = self.cr.lay.locs[k as usize];
+            let v = b.pool[(t.c + k) as usize];
+            if self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && self.cr.lay.parts[loc.p0 as usize].reg as u32 == pr {
+                return k;
+            }
+        }
+        return NONE;
+    }
+
     // The instructions of the intrinsic body symbol `s` names (`target::intrin`, `itpl`); empty for another
     // function.
     const fn intrinsic(self: &Self, s: u32) str<'static> {
@@ -8408,6 +8514,8 @@ extend Gen {
         // A result that lives on gets a register no later template names, when none is renamed yet: the
         // template's result register takes its name, and an argument there moves to it instead.
         let mut rmov = NONE;
+        // The result in the register of the header parameter its chain ends in (`chain_home`).
+        let mut chained = false;
         let rl = self.cr.lay.ret;
         if tpl.len() != 0 && rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty) && self.cr.live_on(self.cr.vx(i)) {
             let mut taken = self.clob | self.cr.lock | self.cr.tmps;
@@ -8425,6 +8533,13 @@ extend Gen {
                     let s = self.cr.lv.seg_of(x, self.cr.lv.pos[self.cr.lv.def_blk[x as usize] as usize]);
                     if s != NONE && (free & bit(self.cr.seg_reg[s as usize])) != 0 {
                         f = self.seg_take(x);
+                    }
+                }
+                if f == NOREG {
+                    let sr = self.chain_home(i);
+                    if sr != NOREG && (taken & bit(sr)) == 0 {
+                        f = sr;
+                        chained = true;
                     }
                 }
                 if f == NOREG {
@@ -8936,6 +9051,17 @@ extend Gen {
                 let pa = self.cr.lay.parts[(rl.p0 + q) as usize];
                 self.store_part(pa, S1, pa.off);
             }
+            return true;
+        }
+        if chained {
+            // The result holds the parameter's register from here, as a temporary (`def_shared`): the
+            // edge's move vanishes.
+            self.cr.lock |= bit(rres);
+            self.cr.set_owner(rres, i);
+            let w = self.cr.va.index_mut(i as usize);
+            w.reg = rres;
+            w.dirty = false;
+            w.clean = false;
             return true;
         }
         if self.cr.lay.whole_vreg(rl, t.ty) {
@@ -14118,6 +14244,10 @@ extend Gen {
         let mul = c == core::SIMD_REDUCE_MUL || c == core::SIMD_REDUCE_MUL_ORD || c == core::SIMD_REDUCE_MUL_TREE;
         let dot = c == core::SIMD_DOT;
         if is_float(lt) {
+            if self.reduce_reg(t) {
+                self.reduce_tree(i, ops[0], lt == T_F64, n);
+                return;
+            }
             self.reduce_float(i, c, add, mul, dot, at, ops, lt, n);
             return;
         }
@@ -14177,8 +14307,9 @@ extend Gen {
         self.c.mov_rr(8, rd, acc);
     }
 
-    // Whether `O_VOP` `t` is an integer reduction `reduce_halves` computes in xmm registers: a sum, `and`,
-    // `or`, `xor`, minimum or maximum of a 16-byte vector in a register, at its lanes' width.
+    // Whether `O_VOP` `t` is a reduction of a 16-byte vector in a register that xmm registers compute: an
+    // integer sum, `and`, `or`, `xor`, minimum or maximum at its lanes' width (`reduce_halves`), or a float
+    // sum by halves (`reduce_tree`).
     const fn reduce_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
@@ -14187,12 +14318,30 @@ extend Gen {
         let c = (code - core::OP_SIMD) as u8;
         let vt = self.cr.vt(self.cr.b().pool[t.a as usize]);
         let lt = lane_type(vt);
-        return (c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && is_vec(
-            vt,
-        ) && !is_float(lt) && type_bytes(vt, self.cr.ptr) == 16 && self.in_reg(vt) && type_bits(t.ty, self.cr.ptr) == type_bits(
-            lt,
-            self.cr.ptr,
-        );
+        let ints = c == core::SIMD_REDUCE_ADD || c == core::SIMD_REDUCE_ADD_TREE || c == core::SIMD_REDUCE_AND || c == core::SIMD_REDUCE_OR || c == core::SIMD_REDUCE_XOR || c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX;
+        let kind = if is_float(lt) {
+            c == core::SIMD_REDUCE_ADD_TREE && t.ty == lt
+        } else {
+            ints && type_bits(t.ty, self.cr.ptr) == type_bits(lt, self.cr.ptr)
+        };
+        return kind && is_vec(vt) && type_bytes(vt, self.cr.ptr) == 16 && self.in_reg(vt);
+    }
+
+    // The float sum by halves of 16-byte vector `v` (`reduce_reg`; `n` lanes, doubles with `dd`) into
+    // instruction `i`: the upper half (`pshufd` across the qwords) added onto the lower, then of four lanes
+    // lane 1 onto lane 0, each sum's first operand the lower one as the lane loop's.
+    fn reduce_tree(self: &mut Self, i: u32, v: Value, dd: bool, n: u32) {
+        let rv = self.vec_use(v, self.vs0) - V0;
+        let ta = self.tmp(true) - V0;
+        let tb = self.tmp(true) - V0;
+        self.shuf(0x66, ta, rv, 0x4E);
+        self.fop(16, dd, 0x58, tb, rv, ta);
+        if n == 4 {
+            self.shuf(0x66, ta, tb, 0x55);
+            self.fop(16, dd, 0x58, tb, tb, ta);
+        }
+        let rd = self.def(i);
+        self.c.vmov(rd - V0, tb);
     }
 
     // Whether `O_VOP` `t` is the lanes' minimum or maximum of two vectors of integer lanes of at most 4
@@ -14380,22 +14529,28 @@ extend Gen {
         self.fop(nb, dd, ast::pick(lo, 0x56u32, 0x54u32), b, b, a);
         // The NaN lanes' mask, then y under it: `vblendvps` (AVX: VEX.66.0F3A 4A, 4B for doubles, the mask's
         // register in the immediate's high bits), `blendvps` (SSE4.1: 66 0F 38 14, 15, the mask in xmm0), else
-        // `andps`, `andnps`, `orps`.
-        let r = if nb <= 32 && self.avx {
-            self.fop_cmp(nb, dd, 3, a, rx, rx);
-            self.c.vex_rr(0x66, 3, 0x4A + dd as u32, false, nb == 32, a, b, ry);
-            self.c.byte(a << 4);
-            a
-        } else if xmm0 {
+        // y ^ (~mask & (b ^ y)) (`xorps`, `andnps`, `xorps`), the mask made in the result's register (over
+        // an x that ends here: a loop's accumulator keeps its register) unless that one holds y.
+        if !xmm0 && (nb > 32 || !self.avx) {
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            let m = ast::pick(rd == ry, a, rd);
+            self.fop_cmp(nb, dd, 3, m, rx, rx);
+            self.fop(nb, dd, 0x57, b, b, ry);
+            self.fop(nb, dd, 0x55, m, m, b);
+            self.fop(nb, dd, 0x57, m, m, ry);
+            if m != rd {
+                self.fop(nb, dd, 0x28, rd, 0, m);
+            }
+            return;
+        }
+        let r = if xmm0 {
             self.fop_cmp(nb, dd, 3, 0, rx, rx);
             self.c.sse_rr(0x66, 0x0F3814 + dd as u32, b, ry);
             b
         } else {
-            let e = self.tmp(true) - V0;
             self.fop_cmp(nb, dd, 3, a, rx, rx);
-            self.fop(nb, dd, 0x54, e, ry, a);
-            self.fop(nb, dd, 0x55, a, a, b);
-            self.fop(nb, dd, 0x56, a, a, e);
+            self.c.vex_rr(0x66, 3, 0x4A + dd as u32, false, nb == 32, a, b, ry);
+            self.c.byte(a << 4);
             a
         };
         // The result takes temporary `r` unless it shares a loop parameter's register.

@@ -35,16 +35,22 @@ const UNBOUNDED_START: usize = 8;
 
 // The mutex-guarded state: a ring buffer of `cap` slots plus the live-handle counts and the closed flag.
 @no_const
-pub struct ChannelState<T> {
-    pub slots: *mut T,
-    pub cap: usize,
+pub struct ChannelState<T>
+    invariant !self.heap_ring || self.cap as int * sizeof(T) as int <= isize::MAX as int && Global::owns(
+        self.slots,
+        self.cap * sizeof(T),
+        alignof(T),
+    )
+{
+    slots: *mut T,
+    cap: usize,
     pub head: usize, // index of the oldest buffered item
     pub count: usize, // number of buffered items
     pub senders: i64,
     pub receivers: i64,
     pub closed: bool,
     pub unbounded: bool, // grow the ring instead of making a sender wait
-    pub heap_ring: bool, // `slots` is its own heap block (an unbounded channel that outgrew the inline ring)
+    heap_ring: bool, // `slots` is its own heap block (an unbounded channel that outgrew the inline ring)
 }
 
 extend<T> ChannelState<T> {
@@ -140,22 +146,28 @@ pub struct ChannelInner<T> {
 /// A bounded MPMC channel. Create it with `Channel::<T>::bounded(n)`, then hand out `sender()` / `receiver()`
 /// handles. The `Channel` value is only a factory: dropping it does not close the channel (its handles do).
 @no_const
-pub struct Channel<T> {
-    pub inner: *mut ChannelInner<T>, // `pub` for linkage (generic methods build handles in the caller's module)
+pub struct Channel<T>
+    invariant rc_share(self.inner, 0, 1)
+{
+    inner: *mut ChannelInner<T>,
 }
 
 /// A sending endpoint. Cloneable (each clone is another producer); the channel closes for receiving once the
 /// last one is dropped.
 @no_const
-pub struct Sender<T> {
-    pub inner: *mut ChannelInner<T>, // `pub` for linkage
+pub struct Sender<T>
+    invariant rc_share(self.inner, 0, 1)
+{
+    inner: *mut ChannelInner<T>,
 }
 
 /// A receiving endpoint. Cloneable (each clone is another consumer); the channel closes for sending once the
 /// last one is dropped.
 @no_const
-pub struct Receiver<T> {
-    pub inner: *mut ChannelInner<T>, // `pub` for linkage
+pub struct Receiver<T>
+    invariant rc_share(self.inner, 0, 1)
+{
+    inner: *mut ChannelInner<T>,
 }
 
 // The endpoints move a `Send` payload between threads, so they are Send + Sync when `T` is Send. Explicit
@@ -180,15 +192,41 @@ const fn ring_offset<T>() usize {
 }
 
 // The block's alignment: the header's or the payload's, whichever is larger.
-const fn block_align<T>() usize {
+const fn block_align<T>() usize
+    ensures |r| r == alignof(T) || r == alignof(ChannelInner<T>)
+{
     if alignof(T) > alignof(ChannelInner<T>) {
         return alignof(T);
     }
     return alignof(ChannelInner<T>);
 }
 
+// The count as units (`rc_share`): counter 0 counts the handles and guards the block, of the size its
+// `bytes` field records. Each lemma states the step of the count operation it follows; no proof checks it.
+
+// A new block, count 1: one unit.
+@trusted
+lemma chan_new<T>(p: *mut ChannelInner<T>)
+    requires Global::owns(p, unsafe (*p).bytes, block_align::<T>())
+    ensures rc_share(p, 0, 1);
+
+// An increment of the count by the holder of a unit.
+@trusted
+lemma chan_inc<T>(p: *mut ChannelInner<T>)
+    requires rc_units(p, 0) >= 1
+    ensures rc_share(p, 0, 1);
+
+// A decrement of the count from `prev`: the last unit gives the block.
+@trusted
+lemma chan_dec<T>(p: *mut ChannelInner<T>, prev: usize)
+    requires rc_share(p, 0, 1)
+    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, unsafe (*p).bytes, block_align::<T>());
+
 /// Allocate and initialise a block with a `cap`-slot inline ring and a count of one. `pub` for linkage.
-pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
+pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T>
+    panics if sizeof(T) != 0 && ring_offset::<T>() as int + cap as int * sizeof(T) as int > isize::MAX as int
+    ensures |r| rc_share(r, 0, 1)
+{
     let mut bytes = sizeof(ChannelInner<T>);
     if sizeof(T) != 0 {
         bytes = ring_offset::<T>() + cap * sizeof(T);
@@ -217,20 +255,28 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T> {
         not_empty: sync::Condvar::new(),
         bytes: bytes,
     };
+    chan_new(p);
     return p;
 }
 
 /// Another handle to the block: one relaxed increment, as for an `Arc`. `pub` for linkage.
-pub unsafe fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T> {
+pub unsafe fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T>
+    requires rc_units(p, 0) >= 1
+    ensures |r| r == p && rc_share(p, 0, 1)
+{
     let _ = unsafe atomic::add_usize(&mut (*p).strong, 1, atomics::MemoryOrder::Relaxed as i32);
+    chan_inc(p);
     return p;
 }
 
 /// Drop one handle; the one that observes the count fall to zero frees the state (buffered payloads and a
 /// heap ring included) and the block. AcqRel, as for an `Arc`: the decrement chain orders every handle's
 /// last touch before the free. `pub` for linkage.
-pub unsafe fn release<T>(p: *mut ChannelInner<T>) {
+pub unsafe fn release<T>(p: *mut ChannelInner<T>)
+    requires rc_share(p, 0, 1)
+{
     let prev = unsafe atomic::sub_usize(&mut (*p).strong, 1, atomics::MemoryOrder::AcqRel as i32);
+    chan_dec(p, prev);
     if prev != 1 {
         return;
     }

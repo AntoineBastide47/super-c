@@ -84,18 +84,27 @@ fn blocks_freed_out_of_order_are_reclaimed_from_the_top() {
     assert_eq(alloc::Stack::used(), u0);
 }
 
+// A block of 3 bytes that the stack allocator gave for `align`.
+struct Held
+    invariant alloc::Stack::owns(self.ptr, 3, self.align)
+{
+    ptr: *mut void,
+    align: usize,
+}
+
 @test
 fn blocks_are_aligned() {
     let mut s = alloc::Stack::new();
     let aligns: []usize = [1, 2, 8, 16, 64, 4096];
-    let mut ps = Vector::<*mut void>::new();
+    let mut held = Vector::<Held>::new();
     for i in 0..aligns.len() {
         let p = unsafe s.alloc(3, aligns[i]);
         assert_eq(p as usize % aligns[i], 0);
-        ps.push(p);
+        held.push(Held { ptr: p, align: aligns[i] });
     }
-    for i in 0..ps.len() {
-        unsafe s.dealloc(ps[ps.len() - 1 - i], 3, aligns[ps.len() - 1 - i]);
+    // Freed in reverse order.
+    while let Some(b) = held.pop() {
+        unsafe s.dealloc(b.ptr, 3, b.align);
     }
 }
 
