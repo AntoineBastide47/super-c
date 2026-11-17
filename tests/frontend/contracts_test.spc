@@ -3603,6 +3603,29 @@ fn main() i32 {
 // Ghost code no build runs: spec functions and their definitions, lemmas by induction, `assert .. by`,
 // `int` and `nat`, and std::spec.
 fn ghost_proofs(b: &mut h::ExitBatch) {
+    // The lemma call is a statement of the assert's own site: the build counted its blocks twice and the
+    // inliner's size of `f` underflowed.
+    b.add(
+        "a lemma call inside an 'assert .. by' block",
+        M"(lemma pos(x: u32)
+    requires x > 0
+    ensures x >= 1
+{}
+fn f(x: u32) u32
+    requires x > 0
+    ensures |r| r >= 1
+{
+    assert x >= 1 by {
+        pos(x);
+    };
+    return x;
+}
+fn main() i32 {
+    return f(3) as i32;
+}
+)",
+        3,
+    );
     b.add(
         "a spec function, a lemma by induction and a loop invariant over int",
         M"(spec fn sum_spec(xs: []u32, n: usize) int
