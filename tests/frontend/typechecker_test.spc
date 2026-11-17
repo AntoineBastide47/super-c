@@ -2294,11 +2294,11 @@ fn bools_and_enums_hold_only_their_values() {
 fn dyn_t() {
     h::expect_ok(
         "Box erase with a Default custom allocator",
-        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct Fwd { pub g: Global }\nextend Fwd as Default { pub fn default() Fwd { return Fwd { g: Global::default() }; } }\nextend Fwd as Allocator {\n  pub unsafe fn alloc(self: &mut Fwd, size: usize, align: usize) *mut void { return unsafe self.g.alloc(size, align); }\n  pub unsafe fn realloc(self: &mut Fwd, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return unsafe self.g.realloc(ptr, old_size, new_size, align); }\n  pub unsafe fn dealloc(self: &mut Fwd, ptr: *mut void, size: usize, align: usize) { unsafe self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, Fwd>::new_in(Fwd::default(), S { v: 2 }); let d: Box<dyn A> = b; let n = d.a(); d.free(); return n; }\n",
+        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct Fwd { pub g: Global }\nextend Fwd as Default { pub fn default() Fwd { return Fwd { g: Global::default() }; } }\nextend Fwd as Allocator {\n  spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n  pub unsafe fn alloc(self: &mut Fwd, size: usize, align: usize) *mut void { return unsafe self.g.alloc(size, align); }\n  pub unsafe fn realloc(self: &mut Fwd, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return unsafe self.g.realloc(ptr, old_size, new_size, align); }\n  pub unsafe fn dealloc(self: &mut Fwd, ptr: *mut void, size: usize, align: usize) { unsafe self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, Fwd>::new_in(Fwd::default(), S { v: 2 }); let d: Box<dyn A> = b; let n = d.a(); d.free(); return n; }\n",
     );
     h::expect_err_msg(
         "Box erase requires a Default allocator",
-        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct NoDef { pub g: Global }\nextend NoDef as Allocator {\n  pub unsafe fn alloc(self: &mut NoDef, size: usize, align: usize) *mut void { return unsafe self.g.alloc(size, align); }\n  pub unsafe fn realloc(self: &mut NoDef, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return unsafe self.g.realloc(ptr, old_size, new_size, align); }\n  pub unsafe fn dealloc(self: &mut NoDef, ptr: *mut void, size: usize, align: usize) { unsafe self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, NoDef>::new_in(NoDef { g: Global::default() }, S { v: 2 }); let d: Box<dyn A> = b; d.free(); return 0; }\n",
+        "interface A { fn a(self: &Self) i32; }\nstruct S { pub v: i32 }\nextend S as A { pub fn a(self: &S) i32 { return self.v; } }\nstruct NoDef { pub g: Global }\nextend NoDef as Allocator {\n  spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n  pub unsafe fn alloc(self: &mut NoDef, size: usize, align: usize) *mut void { return unsafe self.g.alloc(size, align); }\n  pub unsafe fn realloc(self: &mut NoDef, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void { return unsafe self.g.realloc(ptr, old_size, new_size, align); }\n  pub unsafe fn dealloc(self: &mut NoDef, ptr: *mut void, size: usize, align: usize) { unsafe self.g.dealloc(ptr, size, align); }\n}\nfn main() i32 { let b = Box::<S, NoDef>::new_in(NoDef { g: Global::default() }, S { v: 2 }); let d: Box<dyn A> = b; d.free(); return 0; }\n",
         "must implement 'Default'",
     );
     h::expect_ok(
@@ -6005,18 +6005,18 @@ fn owning_constants() {
     // describes memory that does not exist, and a pointer field would bake its block into the binary.
     b.add(
         "a zero-sized allocator is fine in a constant",
-        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Tag> {\n    let mut v = Vector::<i32, Tag>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Tag> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
+        "pub struct Tag {}\nextend Tag as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Tag> {\n    let mut v = Vector::<i32, Tag>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Tag> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
         0,
     );
     h::expect_err_msg(
         "a stateful allocator is rejected",
-        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Pool> = mk();\nfn main() i32 { return 0; }\n",
+        "pub struct Tag {}\nextend Tag as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nconst V: Vector<i32, Pool> = mk();\nfn main() i32 { return 0; }\n",
         "cannot use the stateful allocator",
     );
     // A constant in a block gets the same checks as one at item level.
     h::expect_err_msg(
         "a local constant with a stateful allocator is rejected",
-        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nfn main() i32 {\n    const V: Vector<i32, Pool> = mk();\n    return 0;\n}\n",
+        "pub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<i32, Pool> {\n    let mut v = Vector::<i32, Pool>::new();\n    v.push(7);\n    return v;\n}\nfn main() i32 {\n    const V: Vector<i32, Pool> = mk();\n    return 0;\n}\n",
         "cannot use the stateful allocator",
     );
     b.add(
@@ -6026,7 +6026,7 @@ fn owning_constants() {
     );
     b.add(
         "allocators stored as DATA are not the container's allocator",
-        "extern \"C\" { fn malloc(n: usize) *mut void; fn realloc(p: *mut void, n: usize) *mut void; fn free(p: *mut void) void; }\npub struct Tag {}\nextend Tag as Allocator {\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { let q = unsafe malloc(size); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { let q = unsafe realloc(p, n); if q == null { panic(\"out of memory\"); } return q; }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe free(p); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<Pool> {\n    let mut v = Vector::<Pool>::new();\n    v.push(Pool { used: 3 });\n    return v;\n}\nconst V: Vector<Pool> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
+        "pub struct Tag {}\nextend Tag as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Tag, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Tag, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Tag, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Tag as Default { pub const fn default() Tag { return Tag {}; } }\npub struct Pool { pub used: i64 }\nextend Pool as Allocator {\n    spec fn owns(p: *mut void, n: usize, align: usize) bool { return Global::owns(p, n, align); }\n    pub unsafe const fn alloc(self: &mut Pool, size: usize, align: usize) *mut void { return unsafe Global {}.alloc(size, align); }\n    pub unsafe const fn realloc(self: &mut Pool, p: *mut void, o: usize, n: usize, a: usize) *mut void { return unsafe Global {}.realloc(p, o, n, a); }\n    pub unsafe const fn dealloc(self: &mut Pool, p: *mut void, s: usize, a: usize) void { unsafe Global {}.dealloc(p, s, a); }\n}\nextend Pool as Default { pub const fn default() Pool { return Pool { used: 0 }; } }\nfn mk() Vector<Pool> {\n    let mut v = Vector::<Pool>::new();\n    v.push(Pool { used: 3 });\n    return v;\n}\nconst V: Vector<Pool> = mk();\nfn main() i32 { return (V.len() as i32) - 1; }\n",
         0,
     );
     h::expect_err_msg(
@@ -9157,6 +9157,60 @@ fn main() i32 {
     let c = chain(0, None, None) + chain(1, None, None) + chain(2, Some(10), None) + chain(2, None, Some(20)) + chain(2, None, None);
     let w = value(0, None) + value(1, Some(30)) + value(1, None);
     return (s + c + w) as i32 - 185;
+})",
+        0,
+    );
+    // A generic struct literal with its type arguments given: a field's type is the expected type of its
+    // value also where it names the enclosing generic's parameters (`None` takes `Option<X>`).
+    b.add(
+        "a field type with the enclosing generic's parameters",
+        M"(struct U<X> {
+    o: Option<X>,
+    k: usize,
+}
+fn mk<X>(x: X, some: bool) U<X> {
+    if some {
+        return U::<X> { o: Some(x), k: 2 };
+    }
+    return U::<X> { o: None, k: 1 };
+}
+fn main() i32 {
+    let a = mk::<u8>(5, true);
+    let b = mk::<u8>(5, false);
+    if b.o.is_some() {
+        return 1;
+    }
+    return (a.k + b.k) as i32 + a.o.unwrap_or(0) as i32 - 8;
+})",
+        0,
+    );
+    // An `if let` statement's `else if` chain is a statement too: its last `if` needs no `else`.
+    b.add(
+        "else if after if let in a statement chain",
+        M"(fn tail(o: Option<u32>, c: bool, p: Option<u32>) u32 {
+    let mut r: u32 = 0;
+    if let Some(x) = o {
+        r = x;
+    } else if let Some(y) = p {
+        r = y + 100;
+    } else if c {
+        r = 2;
+    }
+    return r;
+}
+fn value(o: Option<u32>, c: bool) u32 {
+    return if let Some(x) = o {
+        x
+    } else if c {
+        4
+    } else {
+        5
+    };
+}
+fn main() i32 {
+    let t = tail(Some(10), false, None) + tail(None, true, None) + tail(None, false, Some(20)) + tail(None, false, None);
+    let w = value(Some(1), false) + value(None, true) + value(None, false);
+    return (t + w) as i32 - 142;
 })",
         0,
     );

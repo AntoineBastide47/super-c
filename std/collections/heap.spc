@@ -17,7 +17,7 @@
 // synchronization; a heap is Send / Sync when its elements and allocator are.
 
 /// A max-heap of T through allocator A.
-pub struct BinaryHeap<T, A = Global> {
+pub struct BinaryHeap<T, A: Allocator = Global> {
     data: Vector<T, A>,
 }
 
@@ -34,7 +34,7 @@ extend<T: Ord> Reverse<T> as Ord {
 }
 
 /// A writable borrow of a heap's top (`BinaryHeap::peek_mut`); dropping it restores the heap order.
-pub struct PeekMut<'a, T, A> {
+pub struct PeekMut<'a, T, A: Allocator> {
     heap: &'a mut BinaryHeap<T, A>,
 }
 

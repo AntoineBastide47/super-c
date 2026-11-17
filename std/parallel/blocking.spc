@@ -53,6 +53,7 @@ import stdlib;
 import std::parallel::runtime as runtime;
 import std::parallel::platform as platform;
 import std::mem::ptr;
+import std::parallel::rec_cache as rc;
 
 /// The most threads the blocking pool starts: the effective concurrency limit of `call`.
 pub const MAX_THREADS: usize = 64; // enough concurrent blocking calls for real programs, bounded for safety
@@ -65,12 +66,13 @@ pub const CACHE_BUDGET: usize = 65536;
 const IDLE_NS_DEFAULT: i64 = 10000000000; // a thread with nothing to do for ten seconds goes away again
 const SPIN_MIN: i32 = 32; // the spinner's look-again floor: see `pool_main`
 const SPIN_MAX: i32 = 512; // and its ceiling: a spin longer than the wake it stands in for cannot pay
-const CACHE_MIN: usize = 64; // the smallest record class
-const CLASSES: usize = 7; // classes double from CACHE_MIN: 64, 128, ..., 4096
+const CACHE_MIN: usize = rc::CACHE_MIN; // the smallest record class
+const CLASSES: usize = rc::CLASSES; // classes double from CACHE_MIN: 64, 128, ..., 4096
 const POOL_THREAD: i32 = -2; // the worker-index slot of a pool thread: off the scheduler, may block
 
 static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 closing (a bounded shutdown is on)
-static mut G_POOL: *mut Pool = null;
+static mut G_POOL: *mut Pool = null
+    invariant G_POOL == null || Global::owns(G_POOL, sizeof(Pool), alignof(Pool));
 static mut G_EXT: usize = 0; // atomic: plain threads between reading state 2 and leaving the pool's lock
 static mut G_IDLE_NS: i64 = IDLE_NS_DEFAULT;
 static mut G_PUBLISH_DELAY_NS: i64 = 0; // test hook: a pause between creating a thread and publishing it
@@ -100,23 +102,19 @@ pub struct Admit {
 // an idle thread parks on `park` from the idle stack; retirement moves the record from `live` to
 // `retired`, whose handles a reap joins.
 @no_const
-pub struct PThread {
+pub struct PThread
+    invariant self.next == null || Global::owns(self.next, sizeof(PThread), alignof(PThread))
+{
     pub handle: *mut void,
     pub mtx: *mut void, // where this thread sleeps when idle: its own, so a wake is an uncontended
     pub cv: *mut void, // lock and one signal that reaches exactly this thread
-    pub next: *mut PThread, // the live list, then the retired list
+    next: *mut PThread, // the live list, then the retired list
     pub inext: *mut PThread, // the idle stack
     pub pool: *mut Pool,
     pub published: i32, // atomic: the handle is stored
     pub park: i32, // atomic: 1 = popped from the idle stack with work to take
     pub wakes: i32, // atomic: wakes a submitter still owes this thread (popped idle, signal not yet sent)
     pub covering: i32, // became the spinner when it released its last call (pool lock)
-}
-
-// A recycled `call_c` record, linked by class.
-@no_const
-pub struct CacheBlk {
-    pub next: *mut CacheBlk,
 }
 
 /// Pool counters, read under the pool lock: a consistent snapshot.
@@ -144,7 +142,10 @@ pub struct ShutdownReport {
 }
 
 @no_const
-pub struct Pool {
+pub struct Pool
+    invariant self.live_list == null || Global::owns(self.live_list, sizeof(PThread), alignof(PThread))
+    invariant self.retired == null || Global::owns(self.retired, sizeof(PThread), alignof(PThread))
+{
     pub spin: i32, // the queue lock: guards everything below but the atomics and the cache
     pub head: *mut Job, // written with atomic stores: the spinner reads it without the lock
     pub tail: *mut Job,
@@ -156,8 +157,8 @@ pub struct Pool {
     pub spinner: i32, // a thread is spinning for the next job: a linked job needs no wake
     pub spin_budget: i32, // SPIN_MIN..SPIN_MAX
     pub shutting: i32,
-    pub live_list: *mut PThread,
-    pub retired: *mut PThread,
+    live_list: *mut PThread,
+    retired: *mut PThread,
     pub admit_head: *mut Admit,
     pub admit_tail: *mut Admit,
     pub ext_waiters: usize, // plain threads parked on `admit_gen`
@@ -176,13 +177,22 @@ pub struct Pool {
     pub pad_c: Array<u64, 15>, // the lock, and the cache below, must not share these lines
     pub cache_spin: i32, // the record cache has its own lock: freeing a record must not take the queue lock
     pub cache_bytes: usize,
-    pub cache: Array<*mut CacheBlk, CLASSES>,
+    c0: rc::RecList<0>, // the recycled records by class
+    c1: rc::RecList<1>,
+    c2: rc::RecList<2>,
+    c3: rc::RecList<3>,
+    c4: rc::RecList<4>,
+    c5: rc::RecList<5>,
+    c6: rc::RecList<6>,
 }
 
 // --- the pool -----------------------------------------------------------------------------------------.
 
 @platform(!wasm)
-fn build_pool() *mut Pool {
+fn build_pool() *mut Pool
+    panics if true
+    ensures |r| Global::owns(r, sizeof(Pool), alignof(Pool))
+{
     let mut g = Global {};
     let p = (unsafe g.alloc(sizeof(Pool), alignof(Pool))) as *mut Pool;
     unsafe p[0] = Pool {
@@ -217,7 +227,13 @@ fn build_pool() *mut Pool {
         pad_c: Array::<u64, 15> {},
         cache_spin: 0,
         cache_bytes: 0,
-        cache: Array::<*mut CacheBlk, CLASSES> {},
+        c0: rc::RecList::<0>::empty(),
+        c1: rc::RecList::<1>::empty(),
+        c2: rc::RecList::<2>::empty(),
+        c3: rc::RecList::<3>::empty(),
+        c4: rc::RecList::<4>::empty(),
+        c5: rc::RecList::<5>::empty(),
+        c6: rc::RecList::<6>::empty(),
     };
     return p;
 }
@@ -316,17 +332,19 @@ fn done_bump(p: *mut Pool) {
 
 // Join every announced exit. Caller holds the lock, which the joins release: each waits for at most an
 // exiting thread's last instructions, never for a running one.
-fn reap(p: *mut Pool) {
+fn reap(p: *mut Pool)
+    panics if true
+{
     let mut t = unsafe (*p).retired;
     if t == null {
         return;
     }
     unsafe (*p).retired = null;
     unlock(p);
-    let mut g = Global {};
     let mut n: usize = 0;
-    while t != null {
-        let nx = unsafe (*t).next;
+    while t != null
+        invariant t == null || Global::owns(t, sizeof(PThread), alignof(PThread))
+    {
         if unsafe sc_runtime::sc_rt_thread_join((*t).handle) != 0 {
             panic("blocking pool: cannot join an exited pool thread");
         }
@@ -336,15 +354,37 @@ fn reap(p: *mut Pool) {
         while unsafe atomic::load_i32(&mut unsafe (*t).wakes, 1) != 0 {
             sc_runtime::sc_rt_thread_yield();
         }
-        unsafe sc_runtime::sc_rt_cond_free((*t).cv);
-        unsafe sc_runtime::sc_rt_mutex_free((*t).mtx);
-        unsafe g.dealloc(t, sizeof(PThread), alignof(PThread));
+        t = free_thread(t);
         n = n + 1;
-        t = nx;
     }
     lock(p);
     unsafe (*p).exited = unsafe (*p).exited - n;
     unsafe (*p).reaped = unsafe (*p).reaped + n;
+}
+
+// Free thread record `t`, which no thread runs, with its lock and condition variable. Returns the next
+// record of its list.
+fn free_thread(t: *mut PThread) *mut PThread
+    requires Global::owns(t, sizeof(PThread), alignof(PThread))
+    ensures |r| r == null || Global::owns(r, sizeof(PThread), alignof(PThread))
+{
+    unsafe sc_runtime::sc_rt_cond_free((*t).cv);
+    unsafe sc_runtime::sc_rt_mutex_free((*t).mtx);
+    let nx = unsafe (*t).next;
+    let mut g = Global {};
+    unsafe g.dealloc(t, sizeof(PThread), alignof(PThread));
+    return nx;
+}
+
+// Put thread record `t`, which thread `h` runs, on the live list. Caller holds the lock. The record is
+// written last: a write through `t` ends what the proof knows of `*p`, which `t` may alias.
+fn push_live(p: *mut Pool, t: *mut PThread, h: *mut void)
+    requires Global::owns(t, sizeof(PThread), alignof(PThread))
+{
+    let old = unsafe (*p).live_list;
+    unsafe (*p).live_list = t;
+    unsafe (*t).handle = h;
+    unsafe (*t).next = old;
 }
 
 // What a job just linked needs from the caller once the lock is released: the idle thread to unpark, or a
@@ -450,9 +490,7 @@ fn spawn_thread(p: *mut Pool) {
         // or a shutdown running meanwhile sees neither and releases the pool under this publication.
         reap(p);
         unsafe (*p).starting = unsafe (*p).starting - 1;
-        unsafe (*t).handle = h;
-        unsafe (*t).next = unsafe (*p).live_list;
-        unsafe (*p).live_list = t;
+        push_live(p, t, h);
         unsafe (*p).live = unsafe (*p).live + 1;
         unsafe (*p).created = unsafe (*p).created + 1;
         unsafe atomic::store_i32(&mut unsafe (*t).published, 1, 2);
@@ -461,9 +499,7 @@ fn spawn_thread(p: *mut Pool) {
         return;
     }
     unsafe (*p).starting = unsafe (*p).starting - 1;
-    unsafe sc_runtime::sc_rt_cond_free(cv);
-    unsafe sc_runtime::sc_rt_mutex_free(mtx);
-    unsafe g.dealloc(t, sizeof(PThread), alignof(PThread));
+    let _ = free_thread(t);
     let stranded = unsafe (*p).live == 0 && unsafe (*p).starting == 0 && unsafe (*p).head != null;
     done_bump(p); // a shutdown counting reservations
     unlock(p);
@@ -475,11 +511,16 @@ fn spawn_thread(p: *mut Pool) {
 
 // Take this thread off the live list and announce its exit. Caller holds the lock.
 fn retire(p: *mut Pool, t: *mut PThread) {
-    let mut pp = (&mut unsafe (*p).live_list) as *mut *mut PThread;
-    while unsafe pp[0] != t {
-        pp = &mut unsafe (*pp[0]).next;
+    let nx = unsafe (*t).next;
+    if unsafe (*p).live_list == t {
+        unsafe (*p).live_list = nx;
+    } else {
+        let mut q = unsafe (*p).live_list;
+        while unsafe (*q).next != t {
+            q = unsafe (*q).next;
+        }
+        unsafe (*q).next = nx;
     }
-    unsafe pp[0] = unsafe (*t).next;
     unsafe (*t).next = unsafe (*p).retired;
     unsafe (*p).retired = t;
     unsafe (*p).live = unsafe (*p).live - 1;
@@ -1042,84 +1083,153 @@ struct CCall<F, T> {
     pub value: T,
 }
 
-// The cache class of a record size: 0 for the smallest, or CLASSES for a size the cache does not keep.
-const fn cache_class(bytes: usize) usize {
-    let mut c: usize = 0;
-    let mut sz = CACHE_MIN;
-    while sz < bytes && c < CLASSES {
-        sz = sz * 2;
-        c = c + 1;
+// The block size of a record of `bytes` bytes: the size of the smallest class that holds it, or `bytes`
+// past the classes.
+const fn rec_size(bytes: usize) usize
+    requires bytes as int <= isize::MAX as int
+    ensures |r| r != 0 && r as int <= isize::MAX as int
+{
+    if bytes > CACHE_MIN << CLASSES - 1 {
+        return bytes;
     }
-    return c;
+    for c in 0..CLASSES - 1 {
+        if bytes <= CACHE_MIN << c {
+            return CACHE_MIN << c;
+        }
+    }
+    return CACHE_MIN << CLASSES - 1;
 }
 
-fn cache_alloc(p: *mut Pool, bytes: usize) *mut void {
-    let c = cache_class(bytes);
+// The class of `size`-byte records, or CLASSES when no class has that size.
+const fn size_class(size: usize) usize
+    ensures |c| c == CLASSES || c < CLASSES && size == CACHE_MIN << c
+{
+    for c in 0..CLASSES {
+        if size == CACHE_MIN << c {
+            return c;
+        }
+    }
+    return CLASSES;
+}
+
+// The cache's last record of class `c`, which leaves the cache; null when it has none. Caller holds the
+// cache lock.
+fn cache_take(p: *mut Pool, c: usize) *mut void
+    requires c < CLASSES
+    ensures |r| r == null || Global::owns(r, CACHE_MIN << c, 16)
+{
+    return switch c {
+        0 => unsafe (*p).c0.take(),
+        1 => unsafe (*p).c1.take(),
+        2 => unsafe (*p).c2.take(),
+        3 => unsafe (*p).c3.take(),
+        4 => unsafe (*p).c4.take(),
+        5 => unsafe (*p).c5.take(),
+        _ => unsafe (*p).c6.take(),
+    };
+}
+
+// Cache record `b` of class `c`. Caller holds the cache lock.
+fn cache_give(p: *mut Pool, c: usize, b: *mut void)
+    requires c < CLASSES && Global::owns(b, CACHE_MIN << c, 16)
+{
+    switch c {
+        0 => unsafe (*p).c0.give(b),
+        1 => unsafe (*p).c1.give(b),
+        2 => unsafe (*p).c2.give(b),
+        3 => unsafe (*p).c3.give(b),
+        4 => unsafe (*p).c4.give(b),
+        5 => unsafe (*p).c5.give(b),
+        _ => unsafe (*p).c6.give(b),
+    }
+}
+
+// A record block of `size` bytes (`rec_size`): a cached one of its class, else a new one.
+fn cache_alloc(p: *mut Pool, size: usize) *mut void
+    requires size != 0 && size as int <= isize::MAX as int
+    ensures |r| Global::owns(r, size, 16)
+    panics if true
+{
+    let c = size_class(size);
     if c < CLASSES {
         unsafe sc_runtime::sc_rt_spin_lock(&mut (*p).cache_spin);
-        let b = unsafe (*p).cache[c];
+        let b = cache_take(p, c);
         if b != null {
-            unsafe (*p).cache[c] = unsafe (*b).next;
-            unsafe (*p).cache_bytes = unsafe (*p).cache_bytes - (CACHE_MIN << c);
+            unsafe (*p).cache_bytes = unsafe (*p).cache_bytes - size;
             unsafe sc_runtime::sc_rt_spin_unlock(&mut (*p).cache_spin);
             return b;
         }
         unsafe sc_runtime::sc_rt_spin_unlock(&mut (*p).cache_spin);
     }
     let mut g = Global {};
-    return unsafe g.alloc(
-        alloc_size(
-            if c < CLASSES {
-                CACHE_MIN << c
-            } else {
-                bytes
-            },
-        ),
-        16,
-    );
+    return unsafe g.alloc(size, 16);
 }
 
-fn cache_free(p: *mut Pool, blk: *mut void, bytes: usize) {
-    let c = cache_class(bytes);
+// Recycle record block `blk` of `size` bytes: into the cache within its budget, else back to the heap.
+fn cache_free(p: *mut Pool, blk: *mut void, size: usize)
+    requires Global::owns(blk, size, 16)
+    panics if true
+{
+    let c = size_class(size);
     if c < CLASSES {
-        let sz = CACHE_MIN << c;
         unsafe sc_runtime::sc_rt_spin_lock(&mut (*p).cache_spin);
-        if unsafe (*p).cache_bytes + sz <= CACHE_BUDGET {
-            let b = blk as *mut CacheBlk;
-            unsafe (*b).next = unsafe (*p).cache[c];
-            unsafe (*p).cache[c] = b;
-            unsafe (*p).cache_bytes = unsafe (*p).cache_bytes + sz;
+        if unsafe (*p).cache_bytes + size <= CACHE_BUDGET {
+            cache_give(p, c, blk);
+            unsafe (*p).cache_bytes = unsafe (*p).cache_bytes + size;
             unsafe sc_runtime::sc_rt_spin_unlock(&mut (*p).cache_spin);
             return;
         }
         unsafe sc_runtime::sc_rt_spin_unlock(&mut (*p).cache_spin);
-        let mut g = Global {};
-        unsafe g.dealloc(blk, sz, 16);
-        return;
     }
     let mut g = Global {};
-    unsafe g.dealloc(blk, bytes, 16);
+    unsafe g.dealloc(blk, size, 16);
 }
 
 // Release every cached record. No thread runs.
 fn cache_drain(p: *mut Pool) {
-    let mut g = Global {};
-    for c in 0..CLASSES {
-        let mut b = unsafe (*p).cache[c];
-        while b != null {
-            let nx = unsafe (*b).next;
-            unsafe g.dealloc(b, CACHE_MIN << c, 16);
-            b = nx;
-        }
-        unsafe (*p).cache[c] = null;
-    }
+    unsafe (*p).c0.drain();
+    unsafe (*p).c1.drain();
+    unsafe (*p).c2.drain();
+    unsafe (*p).c3.drain();
+    unsafe (*p).c4.drain();
+    unsafe (*p).c5.drain();
+    unsafe (*p).c6.drain();
     unsafe (*p).cache_bytes = 0;
 }
 
-// Drop one reference; the last one recycles the record (its value was settled by then).
-fn crec_drop<F, T>(rp: *mut CCall<F, T>) {
-    if unsafe atomic::sub_i32(&mut unsafe (*rp).refs, 1, 3) == 1 {
-        cache_free(unsafe G_POOL, rp, unsafe (*rp).bytes);
+// The count of a `call_c` record as units (`rc_share`, counter 0): the task's reference and the pool
+// thread's, which guard the block. Each lemma states the step of the count operation it is called after;
+// no proof checks it.
+
+// A new record of `size` bytes, count 2: one unit for the task and one for the pool thread.
+@trusted
+lemma crec_new<F, T>(rp: *mut CCall<F, T>, size: usize)
+    requires Global::owns(rp, size, 16)
+    ensures rc_share(rp, 0, 2);
+
+// The pool thread's unit, at the start of `run_ccall`: it comes with the job, through the queue and the
+// call through `Job.run`, which carry no clause.
+@trusted
+lemma crec_recv<F, T>(rp: *mut CCall<F, T>)
+    ensures rc_share(rp, 0, 1);
+
+// A decrement of the count from `prev`, of a record of `size` bytes: the last unit gives the block.
+@trusted
+lemma crec_dec<F, T>(rp: *mut CCall<F, T>, size: usize, prev: i32)
+    requires rc_share(rp, 0, 1)
+    ensures prev == 1 ==> Global::owns(rp, size, 16);
+
+// Drop one reference; the last one recycles the record (its value was settled by then). The size is read
+// first: past the decrement, the other side may recycle the record.
+fn crec_drop<F, T>(rp: *mut CCall<F, T>)
+    requires rc_share(rp, 0, 1)
+    panics if true
+{
+    let size = unsafe (*rp).bytes;
+    let prev = unsafe atomic::sub_i32(&mut unsafe (*rp).refs, 1, 3);
+    crec_dec(rp, size, prev);
+    if prev == 1 {
+        cache_free(unsafe G_POOL, rp, size);
     }
 }
 
@@ -1128,6 +1238,7 @@ fn crec_drop<F, T>(rp: *mut CCall<F, T>) {
 /// touches the coroutine after an abandonment. `pub` for linkage.
 pub unsafe fn run_ccall<F: fn move() T + Send, T>(j: *mut Job) {
     let rp = j as *mut CCall<F, T>;
+    crec_recv(rp);
     let f = unsafe (*rp).body;
     unsafe (*rp).value = f();
     release(j);
@@ -1161,7 +1272,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
         }
         return Some(f());
     }
-    let bytes = sizeof(CCall<F, T>);
+    let bytes = rec_size(sizeof(CCall<F, T>));
     let rp = cache_alloc(p, bytes) as *mut CCall<F, T>;
     let token = unsafe runtime::park_begin(co);
     unsafe (*rp).job = Job { next: null, run: unsafe run_ccall::<F, T>, co: co, token: token, done: 0, t: null };
@@ -1169,6 +1280,7 @@ pub fn call_c<F: fn move() T + Send + 'static, T: Send>(f: F) Option<T> {
     unsafe (*rp).state = BS_PENDING;
     unsafe (*rp).bytes = bytes;
     unsafe (*rp).body = f;
+    crec_new(rp, bytes);
     let _ = unsafe runtime::park_timed(token, 0, commit_submit, rp, true);
     if runtime::cancel_after_wait(true) {
         if !unsafe atomic::cas_i32(&mut unsafe (*rp).state, BS_PENDING, BS_ABANDONED, false, 4, 0) {
@@ -1320,9 +1432,13 @@ pub fn try_shutdown(grace_ns: u64) ShutdownReport {
         sc_runtime::sc_rt_sleep_ns(200000);
     }
     cache_drain(p);
-    let mut g = Global {};
-    unsafe g.dealloc(p, sizeof(Pool), alignof(Pool));
+    // The record leaves the static, then goes: the static's invariant gives its block.
+    let gone = unsafe G_POOL;
     unsafe G_POOL = null;
+    if gone != null {
+        let mut g = Global {};
+        unsafe g.dealloc(gone, sizeof(Pool), alignof(Pool));
+    }
     unsafe atomic::store_i32(sp, 0, 4);
     return r;
 }

@@ -8,8 +8,8 @@
 import std::spec::seq as *;
 
 /// An owned heap allocation of one T through allocator A; freeing the box frees the value.
-pub struct Box<T, A = Global>
-    invariant sizeof(T) == 0 || block(self.ptr).len() == 1
+pub struct Box<T, A: Allocator = Global>
+    invariant sizeof(T) == 0 || block(self.ptr).len() == 1 && A::owns(self.ptr, sizeof(T), alignof(T))
 {
     @owned
     ptr: *mut T, // owns one T (private)
@@ -18,9 +18,9 @@ pub struct Box<T, A = Global>
 
 // A Box owns its value, so it is Send / Sync when the value and allocator are (the owned pointer would
 // otherwise make it structurally neither).
-unsafe extend<T: Send, A: Send> Box<T, A> as Send {}
+unsafe extend<T: Send, A: Allocator + Send> Box<T, A> as Send {}
 
-unsafe extend<T: Sync, A: Sync> Box<T, A> as Sync {}
+unsafe extend<T: Sync, A: Allocator + Sync> Box<T, A> as Sync {}
 
 extend<T, A: Allocator> Box<T, A> {
     /// Allocate through an explicit allocator value (a stateful arena/pool handle, or a zero-sized tag).

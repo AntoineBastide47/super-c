@@ -29,7 +29,9 @@ struct RcInner<T> {
 
 /// A shared, reference-counted handle to a `T` in a block from allocator `A`. Not thread-safe.
 @no_const
-pub struct Rc<T, A = Global> {
+pub struct Rc<T, A: Allocator = Global>
+    invariant self.ptr == null || rc_share(self.ptr, 0, 1)
+{
     ptr: *mut RcInner<T>, // null only in an all-zero seed
     alloc: A,
 }
@@ -37,10 +39,49 @@ pub struct Rc<T, A = Global> {
 /// A handle to the block of an `Rc` that does not keep its value alive; `upgrade` gives an `Rc` while
 /// the value lives. `Weak::new` points at nothing.
 @no_const
-pub struct Weak<T, A = Global> {
+pub struct Weak<T, A: Allocator = Global>
+    invariant self.ptr == null || rc_share(self.ptr, 1, 1)
+{
     ptr: *mut RcInner<T>, // null for `Weak::new`
     alloc: A,
 }
+
+// The counts as units (`rc_share`): counter 0 counts the strong handles and guards the value and the
+// strong handles' one weak reference; counter 1 counts that reference and the `Weak` handles, and guards
+// the block. Each lemma states the step of the count write it follows, with the count's new value; no
+// proof checks it. A null handle has no count.
+
+// A new block, counts 1 and 1: one strong unit.
+@trusted
+lemma rc_new<T, A: Allocator>(p: *mut RcInner<T>)
+    requires A::owns(p, sizeof(RcInner<T>), alignof(RcInner<T>))
+    ensures rc_share(p, 0, 1);
+
+// An increment of the strong count by the holder of a strong unit, or of a weak unit that saw the count
+// above zero (`upgrade`).
+@trusted
+lemma rc_strong_inc<T>(p: *mut RcInner<T>)
+    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
+    ensures p == null || rc_share(p, 0, 1);
+
+// An increment of the weak count by the holder of a strong or a weak unit.
+@trusted
+lemma rc_weak_inc<T>(p: *mut RcInner<T>)
+    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
+    ensures p == null || rc_share(p, 1, 1);
+
+// A decrement of the strong count to `now`: at 0 the strong handles' weak unit is given, and the value
+// is the holder's.
+@trusted
+lemma rc_strong_dec<T>(p: *mut RcInner<T>, now: usize)
+    requires p == null || rc_share(p, 0, 1)
+    ensures p == null || now == 0 ==> rc_units(p, 0) == 0 && rc_share(p, 1, 1);
+
+// A decrement of the weak count to `now`: at 0 the block is given.
+@trusted
+lemma rc_weak_dec<T, A: Allocator>(p: *mut RcInner<T>, now: usize)
+    requires p == null || rc_share(p, 1, 1)
+    ensures p == null || now == 0 ==> rc_units(p, 1) == 0 && A::owns(p, sizeof(RcInner<T>), alignof(RcInner<T>));
 
 // Increment a count. Panics past `usize::MAX`, where the count would wrap to zero and free a value
 // still in use.
@@ -60,6 +101,7 @@ extend<T, A: Allocator> Rc<T, A> {
         let mut rc = Rc::<T, A> { ptr: null, alloc: alloc };
         rc.ptr = (unsafe rc.alloc.alloc(sizeof(RcInner<T>), alignof(RcInner<T>))) as *mut RcInner<T>;
         unsafe rc.ptr[0] = RcInner::<T> { strong: 1, weak: 1, value: value };
+        rc_new::<T, A>(rc.ptr);
         return rc;
     }
 
@@ -81,6 +123,7 @@ extend<T, A: Allocator> Rc<T, A> {
     /// A new `Weak` handle to this block.
     pub fn downgrade(self: &Rc<T, A>) Weak<T, A> {
         unsafe count_inc(&mut (*self.ptr).weak);
+        rc_weak_inc(self.ptr);
         return Weak::<T, A>::from_block(self.ptr, self.alloc);
     }
 
@@ -102,6 +145,7 @@ extend<T, A: Allocator> Rc<T, A> {
         let alloc = self.alloc;
         forget(self);
         unsafe (*p).strong = 0;
+        rc_strong_dec(p, 0);
         let value = unsafe (*p).value;
         // Releases the strong handles' weak reference: frees the block when no `Weak` remains.
         let _collective = Weak::<T, A>::from_block(p, alloc);
@@ -119,7 +163,9 @@ extend<T, A: Allocator> Rc<T, A> {
     }
 
     // A strong handle for block `p`, whose strong count already counts it.
-    fn from_block(p: *mut RcInner<T>, alloc: A) Rc<T, A> {
+    fn from_block(p: *mut RcInner<T>, alloc: A) Rc<T, A>
+        requires p == null || rc_share(p, 0, 1)
+    {
         return Rc::<T, A> { ptr: p, alloc: alloc };
     }
 }
@@ -137,7 +183,9 @@ extend<T: Clone, A: Allocator> Rc<T, A> {
     /// clone and those handles no longer upgrade. A unique handle borrows in place.
     pub fn make_mut(self: &mut Rc<T, A>) &mut T {
         if unsafe (*self.ptr).strong != 1 {
-            let fresh = Rc::<T, A>::new_in(self.alloc, self.get().clone());
+            // The value's own borrow, not `get`'s result: the proofs end it with the clone.
+            let v = (unsafe &(*self.ptr).value).clone();
+            let fresh = Rc::<T, A>::new_in(self.alloc, v);
             *self = fresh;
         } else if unsafe (*self.ptr).weak != 1 {
             let old = self.ptr;
@@ -149,6 +197,9 @@ extend<T: Clone, A: Allocator> Rc<T, A> {
                 (*old).strong = 0;
                 (*old).weak = (*old).weak - 1;
             }
+            rc_new::<T, A>(p);
+            rc_strong_dec(old, 0);
+            rc_weak_dec::<T, A>(old, unsafe (*old).weak);
             self.ptr = p;
         }
         return &mut unsafe (*self.ptr).value;
@@ -167,6 +218,7 @@ extend<T, A: Allocator> Weak<T, A> {
             return None;
         }
         unsafe count_inc(&mut (*self.ptr).strong);
+        rc_strong_inc(self.ptr);
         return Some(Rc::<T, A>::from_block(self.ptr, self.alloc));
     }
 
@@ -187,7 +239,9 @@ extend<T, A: Allocator> Weak<T, A> {
     }
 
     // A weak handle for block `p`, whose weak count already counts it.
-    fn from_block(p: *mut RcInner<T>, alloc: A) Weak<T, A> {
+    fn from_block(p: *mut RcInner<T>, alloc: A) Weak<T, A>
+        requires p == null || rc_share(p, 1, 1)
+    {
         return Weak::<T, A> { ptr: p, alloc: alloc };
     }
 }
@@ -209,6 +263,7 @@ extend<T, A: Allocator> Rc<T, A> as Deref<T> {
 extend<T, A: Allocator> Rc<T, A> as Clone {
     pub fn clone(self: &Rc<T, A>) Rc<T, A> {
         unsafe count_inc(&mut (*self.ptr).strong);
+        rc_strong_inc(self.ptr);
         return Rc::<T, A>::from_block(self.ptr, self.alloc);
     }
 }
@@ -217,6 +272,7 @@ extend<T, A: Allocator> Weak<T, A> as Clone {
     pub fn clone(self: &Weak<T, A>) Weak<T, A> {
         if self.ptr != null {
             unsafe count_inc(&mut (*self.ptr).weak);
+            rc_weak_inc(self.ptr);
         }
         return Weak::<T, A>::from_block(self.ptr, self.alloc);
     }
@@ -236,6 +292,7 @@ extend<T, A: Allocator> Rc<T, A> as Free {
         unsafe {
             (*p).strong = (*p).strong - 1;
         }
+        rc_strong_dec(p, unsafe (*p).strong);
         if unsafe (*p).strong != 0 {
             return;
         }
@@ -256,6 +313,7 @@ extend<T, A: Allocator> Weak<T, A> as Free {
         unsafe {
             (*p).weak = (*p).weak - 1;
         }
+        rc_weak_dec::<T, A>(p, unsafe (*p).weak);
         if unsafe (*p).weak == 0 {
             unsafe self.alloc.dealloc(p, sizeof(RcInner<T>), alignof(RcInner<T>));
         }

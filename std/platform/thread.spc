@@ -56,10 +56,13 @@ union KeyDestructor {
     pub p: *mut void,
 }
 
-/// Start an OS thread that runs `entry(arg)`. Unsupported on WASI.
+/// Start an OS thread that runs `entry(arg)`; the call hands `arg` over (`pre_of`). Unsupported on WASI.
 /// Safety: `arg` stays valid, and is safe to use from the new thread, for as long as `entry` uses it.
 @platform(!wasm)
-pub unsafe fn spawn(entry: fn(*mut void) *mut void, arg: *mut void) Result<Thread, IoError> {
+pub unsafe fn spawn(entry: fn(*mut void) *mut void, arg: *mut void) Result<Thread, IoError>
+    requires pre_of(entry, arg)
+    panics if true
+{
     let mut h: *mut void = null;
     let rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, entry, arg);
     if rc != 0 {
@@ -67,10 +70,12 @@ pub unsafe fn spawn(entry: fn(*mut void) *mut void, arg: *mut void) Result<Threa
     }
     return Ok(Thread::adopt(h));
 }
-/// Start an OS thread that runs `entry(arg)`. Unsupported on WASI.
+/// Start an OS thread that runs `entry(arg)`; the call hands `arg` over (`pre_of`). Unsupported on WASI.
 /// Safety: `arg` stays valid, and is safe to use from the new thread, for as long as `entry` uses it.
 @platform(wasm)
-pub unsafe fn spawn(_entry: fn(*mut void) *mut void, _arg: *mut void) Result<Thread, IoError> {
+pub unsafe fn spawn(_entry: fn(*mut void) *mut void, _arg: *mut void) Result<Thread, IoError>
+    requires pre_of(_entry, _arg)
+{
     return Err(error::unsupported(IoOp::ThreadCreate));
 }
 

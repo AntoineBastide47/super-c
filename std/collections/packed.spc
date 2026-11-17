@@ -13,6 +13,8 @@
 // Allocation: one block of bytes from `A`, grown geometrically (64 bytes first, then at least doubling); no
 // allocation per value. Thread safety: no internal synchronization; Send and Sync when `E` and `A` are.
 
+import std::spec::seq as *;
+
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
 }
@@ -23,8 +25,12 @@ const MIN_BYTES: usize = 64; // the first block
 const fn release<T>(_: T) {}
 
 /// Values of enum `E` stored back to back at the size of their own variant. Read in order; no indexing.
-pub struct PackedEnums<E, A = Global> {
-    ptr: *mut E, // the block of bytes (a value at any byte offset); null while cap == 0
+pub struct PackedEnums<E, A: Allocator = Global>
+    invariant self.used <= self.cap && block(self.ptr).len() == self.cap as int && self.cap as int <= isize::MAX as int
+    invariant self.ptr == null && self.cap == 0 || A::owns(self.ptr, self.cap, alignof(E))
+{
+    @owned
+    ptr: *mut u8, // the block of bytes (a value at any byte offset); null while cap == 0
     used: usize, // the bytes the values take
     cap: usize, // the bytes of the block
     count: usize, // the values
@@ -33,9 +39,9 @@ pub struct PackedEnums<E, A = Global> {
 
 // The container owns its values, so it is Send / Sync when they and the allocator are (the block pointer
 // makes it structurally neither).
-unsafe extend<E: Send, A: Send> PackedEnums<E, A> as Send {}
+unsafe extend<E: Send, A: Allocator + Send> PackedEnums<E, A> as Send {}
 
-unsafe extend<E: Sync, A: Sync> PackedEnums<E, A> as Sync {}
+unsafe extend<E: Sync, A: Allocator + Sync> PackedEnums<E, A> as Sync {}
 
 /// The bytes enum value `e` takes in a `PackedEnums`: its variant's `v.size`.
 pub const fn packed_size<E>(e: &E) usize {
@@ -75,7 +81,7 @@ extend<E, A: Allocator> PackedEnums<E, A> {
         if n > self.cap - self.used {
             self.grow(n);
         }
-        unsafe memcpy(self.ptr as *mut u8 + self.used, (&v) as *const E, n);
+        unsafe memcpy(self.ptr + self.used, (&v) as *const E, n);
         self.used += n;
         self.count += 1;
         forget(v);
@@ -125,31 +131,31 @@ extend<E, A: Allocator> PackedEnums<E, A> {
     unsafe fn read_at(self: &PackedEnums<E, A>, off: usize) (E, usize) {
         let mut v = unsafe zeroed::<E>();
         let n = (self.used - off).min(sizeof(E));
-        unsafe memcpy((&mut v) as *mut E, self.ptr as *const u8 + off, n);
+        unsafe memcpy((&mut v) as *mut E, self.ptr + off, n);
         let k = packed_size(&v);
         return (v, k);
     }
 
     // Make room for `n` more bytes: at least double the block.
     @noinline
-    fn grow(self: &mut PackedEnums<E, A>, n: usize) {
-        if n > usize::MAX - self.used {
+    fn grow(self: &mut PackedEnums<E, A>, n: usize)
+        panics if self.used as int + n as int > isize::MAX as int
+        ensures self.used == old(self.used) && self.count == old(self.count) && self.used as int + n as int <= self.cap as int
+    {
+        if n > isize::MAX as usize - self.used {
             panic("PackedEnums: capacity overflow");
         }
+        // Doubling stops at the largest block, so only a need beyond it panics.
         let mut cap = self.cap.max(MIN_BYTES / 2);
-        if cap > usize::MAX / 2 {
-            cap = usize::MAX;
+        if cap > isize::MAX as usize / 2 {
+            cap = isize::MAX as usize;
         } else {
             cap = cap * 2;
         }
         if cap < self.used + n {
             cap = self.used + n;
         }
-        if self.cap == 0 {
-            self.ptr = (unsafe self.alloc.alloc(alloc_size(cap), alignof(E))) as *mut E;
-        } else {
-            self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap, alloc_size(cap), alignof(E))) as *mut E;
-        }
+        self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap, cap, alignof(E))) as *mut u8;
         self.cap = cap;
     }
 }
@@ -169,7 +175,7 @@ extend<E: Copy, A: Allocator> PackedEnums<E, A> {
 }
 
 /// An iterator over the values of a `PackedEnums` of a `Copy` enum, in order; exact size.
-pub struct PackedIter<'a, E, A> {
+pub struct PackedIter<'a, E, A: Allocator> {
     s: &'a PackedEnums<E, A>,
     off: usize, // the byte of the next value
     rem: usize, // the values left

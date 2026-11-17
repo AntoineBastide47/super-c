@@ -66,16 +66,115 @@ extend<T> Seq<T> {
 @trusted
 pub spec fn block<T>(p: *mut T) Seq<T>;
 
-/// The UTF-8 encoding of `c`, the bytes `String::push` appends: one byte below 0x80, two below 0x800,
-/// three below 0x10000, four else; a single byte is `c` itself.
-@trusted
-pub spec fn utf8(c: char) Seq<u8>;
+/// The UTF-8 encoding of scalar value `c`, the bytes `String::push` appends: one byte below 0x80, two
+/// below 0x800, three below 0x10000, four else.
+pub spec fn utf8(c: u32) Seq<u8> {
+    let e = Seq::<u8>::empty();
+    return if c < 0x80 {
+        e.push(c as u8)
+    } else if c < 0x800 {
+        e.push((0xC0 | c >> 6) as u8).push((0x80 | c & 0x3F) as u8)
+    } else if c < 0x10000 {
+        e.push((0xE0 | c >> 12) as u8).push((0x80 | c >> 6 & 0x3F) as u8).push((0x80 | c & 0x3F) as u8)
+    } else {
+        e.push((0xF0 | c >> 18) as u8).push((0x80 | c >> 12 & 0x3F) as u8).push((0x80 | c >> 6 & 0x3F) as u8).push(
+            (0x80 | c & 0x3F) as u8,
+        )
+    };
+}
 
-extend<A: Allocator> String<A> {
-    /// Its bytes in order: `s.len()` is its length. `push`, `push_str`, `clear` and `String::new` change
-    /// the view as they change the string.
-    @trusted
-    pub spec fn view(self: &String<A>) Seq<u8>;
+// The view after a push of `x` at index `n` of block `b1`, of length `m`: the elements before (`b0`), then `x`.
+pub lemma push_view<T>(b0: Seq<T>, b1: Seq<T>, n: int, m: int, x: T)
+    requires 0 <= n && n < b1.len() && m == n + 1 && b1.take(n) == b0
+    ensures b1.update(n, x).take(m) == b0.push(x)
+{}
+
+// An update of an element among the first `n`, then the first `n`: the first `n`, then the update.
+pub lemma upd_take<T>(b: Seq<T>, n: int, i: int, x: T)
+    requires 0 <= i && i < n && n <= b.len()
+    ensures b.update(i, x).take(n) == b.take(n).update(i, x)
+{}
+
+// An update of an element past the first `n`, then the first `n`: the first `n`.
+pub lemma upd_take_out<T>(b: Seq<T>, n: int, i: int, x: T)
+    requires 0 <= n && n <= i && i < b.len()
+    ensures b.update(i, x).take(n) == b.take(n)
+{}
+
+// The elements from `lo` to before `hi`: element `lo`, then the elements after it.
+pub lemma sub_head<T>(b: Seq<T>, lo: int, hi: int)
+    requires 0 <= lo && lo < hi && hi <= b.len()
+    ensures b.subrange(lo, hi) == Seq::<T>::empty().push(b[lo]).concat(b.subrange(lo + 1, hi))
+{}
+
+// An update of element `i` that a subrange leaves out: the subrange.
+pub lemma upd_sub_out<T>(b: Seq<T>, i: int, lo: int, hi: int, x: T)
+    requires 0 <= i && i < b.len() && 0 <= lo && lo <= hi && hi <= b.len() && (i < lo || hi <= i)
+    ensures b.update(i, x).subrange(lo, hi) == b.subrange(lo, hi)
+{}
+
+// A subrange of the first `n` elements: the subrange.
+pub lemma take_sub<T>(b: Seq<T>, n: int, lo: int, hi: int)
+    requires 0 <= lo && lo <= hi && hi <= n && n <= b.len()
+    ensures b.take(n).subrange(lo, hi) == b.subrange(lo, hi)
+{}
+
+// The first `n + 1` elements, element `i` among them: the ones before it, it, then the ones after it.
+pub lemma take_split<T>(f: Seq<T>, i: int, n: int)
+    requires 0 <= i && i <= n && n < f.len()
+    ensures f.take(n + 1) == f.take(i).push(f[i]).concat(f.subrange(i + 1, n + 1))
+{}
+
+// Element `j` of the first `n`: element `j`.
+pub lemma take_at<T>(b: Seq<T>, n: int, j: int)
+    requires 0 <= j && j < n && n <= b.len()
+    ensures b.take(n)[j] == b[j]
+{}
+
+// A sequence and one element after it: the sequence with the element pushed.
+pub lemma concat_one<T>(s: Seq<T>, x: T)
+    ensures s.concat(Seq::<T>::empty().push(x)) == s.push(x)
+{}
+
+// The first `m` elements of the first `n`: the first `m`.
+pub lemma take_take<T>(b: Seq<T>, n: int, m: int)
+    requires 0 <= m && m <= n && n <= b.len()
+    ensures b.take(n).take(m) == b.take(m)
+{}
+
+// The first `n` elements: the first `i`, then the ones from `i` to before `n`.
+pub lemma take_cat<T>(b: Seq<T>, i: int, n: int)
+    requires 0 <= i && i <= n && n <= b.len()
+    ensures b.take(n) == b.take(i).concat(b.subrange(i, n))
+{}
+
+// The elements from `lo` to `hi`: the ones before `hi`, then element `hi`.
+pub lemma sub_tail<T>(b: Seq<T>, lo: int, hi: int)
+    requires 0 <= lo && lo <= hi && hi < b.len()
+    ensures b.subrange(lo, hi + 1) == b.subrange(lo, hi).push(b[hi])
+{}
+
+// Element `j` of the elements from `lo` to before `hi`: element `lo + j`.
+pub lemma sub_at<T>(b: Seq<T>, lo: int, hi: int, j: int)
+    requires 0 <= lo && lo <= hi && hi <= b.len() && 0 <= j && j < hi - lo
+    ensures b.subrange(lo, hi)[j] == b[lo + j]
+{}
+
+// A subrange of a subrange: the subrange of the shifted bounds.
+pub lemma sub_sub<T>(b: Seq<T>, lo: int, hi: int, lo2: int, hi2: int)
+    requires 0 <= lo && lo <= hi && hi <= b.len() && 0 <= lo2 && lo2 <= hi2 && hi2 <= hi - lo
+    ensures b.subrange(lo, hi).subrange(lo2, hi2) == b.subrange(lo + lo2, lo + hi2)
+{}
+
+// Two equal subranges from `lo`: equal first elements, and equal subranges from `lo + 1`.
+pub lemma sub_eq_head<T>(a: Seq<T>, b: Seq<T>, lo: int, hi: int)
+    requires 0 <= lo && lo < hi && hi <= a.len() && hi <= b.len() && a.subrange(lo, hi) == b.subrange(lo, hi)
+    ensures a[lo] == b[lo] && a.subrange(lo + 1, hi) == b.subrange(lo + 1, hi)
+{
+    sub_at(a, lo, hi, 0);
+    sub_at(b, lo, hi, 0);
+    sub_sub(a, lo, hi, 1, hi - lo);
+    sub_sub(b, lo, hi, 1, hi - lo);
 }
 
 extend str {

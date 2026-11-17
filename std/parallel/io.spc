@@ -89,7 +89,9 @@ pub struct IoStats {
 // and publishes it through the park hand-off; from then on only the reactor reads or writes it, except
 // `ack`, which the task writes before publishing its disarm and the reactor reads after popping that.
 @no_const
-pub struct IoWait {
+pub struct IoWait
+    invariant self.heap == null || Global::owns(self.heap, sizeof(IoWait), alignof(IoWait))
+{
     pub co: *mut runtime::Coroutine,
     pub token: u32, // the wait's park token: what a readiness event claims
     pub ack: u32, // the acknowledgement park's token: what the disarm's completion claims
@@ -102,6 +104,7 @@ pub struct IoWait {
     pub anext: usize, // command-list link while the arm command is queued (tagged, see `push_cmd`)
     pub dnext: usize, // the same for the disarm command
     pub lnext: *mut IoWait, // the record's waiter list
+    heap: *mut IoWait, // a close command's own block, which the reactor frees; null for a wait in a frame
 }
 
 // Command tags, in the low bit of a queued node pointer.
@@ -139,19 +142,21 @@ struct EvBuf {
     pub e: [i32; 3 * sc_io::EV_MAX as usize],
 }
 
-// Line-aligned (see `reactor_alloc`), with the fields workers write and the fields the reactor reads on
+// Line-aligned (see `reactor_bytes`), with the fields workers write and the fields the reactor reads on
 // every event on separate lines: the command head takes a compare-and-swap from every worker that arms,
 // and must not invalidate the line the reactor finds its poller and table on.
 @no_const
-pub struct Reactor {
-    pub base: *mut void, // the allocation this line-aligned record lives in
+pub struct Reactor
+    invariant owns_array::<FdRec, Global>(self.recs, self.nrec)
+    invariant Global::owns(self.regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN)
+{
     pub poller: *mut void,
     pub thread: *mut void,
-    pub recs: *mut FdRec, // the record table, indexed by descriptor number; reactor-owned
-    pub nrec: usize,
+    recs: *mut FdRec, // the record table, indexed by descriptor number; reactor-owned
+    nrec: usize,
     pub deferred: i32, // acknowledgements waiting for an arm still on its way: see `do_disarm`
     pub pad4: i32,
-    pub regs: *mut i32, // REG_SLOTS + 1 registration counters, one line each: see `G_CLOSING`
+    regs: *mut i32, // REG_SLOTS + 1 registration counters, one line each: see `G_CLOSING`
     pub pad0: Array<u64, 9>,
     pub cmds: usize, // atomic: the command list head, tagged with CMD_*, 0 when empty
     pub pad1: Array<u64, 15>,
@@ -174,7 +179,8 @@ struct Batch {
 
 static mut G_STATE: i32 = 0; // 0 uninit / 1 building / 2 ready / 3 stopping / 4 stopping with no reactor
 
-static mut G_REACTOR: *mut Reactor = null;
+static mut G_REACTOR: *mut Reactor = null
+    invariant G_REACTOR == null || Global::owns(G_REACTOR, reactor_bytes(), R_ALIGN);
 
 // Close calls and park hand-offs still accessing the reactor. A task can resume and clear its wait
 // before its publishing worker finishes the wake, so wait records alone do not protect the poller.
@@ -306,14 +312,23 @@ fn rec_for(r: *mut Reactor, fd: i32) *mut FdRec {
         for k in n..cap {
             unsafe t[k] = FdRec { rd: null, wr: null, evt: 0, gen: 0, known: 0, stale: 0 };
         }
-        unsafe g.dealloc(old, n * sizeof(FdRec), alignof(FdRec));
-        unsafe (*r).recs = t;
-        unsafe (*r).nrec = cap;
+        set_recs(r, t, cap);
         if io_stats_on() {
             unsafe atomic::store_u64(&mut unsafe (*r).st.records, cap as u64, 0);
         }
     }
     return unsafe ((*r).recs + i);
+}
+
+// Give reactor `r` the record table `t` of `cap` records; the table it held goes back to the heap.
+fn set_recs(r: *mut Reactor, t: *mut FdRec, cap: usize)
+    requires owns_array::<FdRec, Global>(t, cap)
+{
+    let (old, n) = unsafe ((*r).recs, (*r).nrec);
+    unsafe (*r).recs = t;
+    unsafe (*r).nrec = cap;
+    let mut g = Global {};
+    unsafe g.dealloc(old, array_bytes::<FdRec>(n), alignof(FdRec));
 }
 
 // Count this thread into its registration slot, backing off while a close is pending (see `G_CLOSING`).
@@ -486,8 +501,13 @@ fn do_close(r: *mut Reactor, n: *mut IoWait) {
         fire_list(r, &mut unsafe (*rec).wr, runtime::WR_TIMEOUT, &mut b);
         batch_flush(r, &mut b);
     }
-    let mut g = Global {};
-    unsafe g.dealloc(n, sizeof(IoWait), alignof(IoWait));
+    // The command's block leaves the record (it holds no block after), then goes back to the heap.
+    let blk = unsafe (*n).heap;
+    unsafe (*n).heap = null;
+    if blk != null {
+        let mut g = Global {};
+        unsafe g.dealloc(blk, sizeof(IoWait), alignof(IoWait));
+    }
 }
 
 // Take an armed node off its record's list.
@@ -731,19 +751,36 @@ fn push_cmd(r: *mut Reactor, n: *mut IoWait, tag: usize, wake: bool) {
     }
 }
 
-// The reactor record's allocation: the record rounded up to a line, plus a line of slack for alignment.
+// The reactor record's allocation, line-aligned: the record rounded up to a line.
 const fn reactor_bytes() usize {
-    return (sizeof(Reactor) + R_ALIGN - 1) / R_ALIGN * R_ALIGN + R_ALIGN;
+    return (sizeof(Reactor) + R_ALIGN - 1) / R_ALIGN * R_ALIGN;
 }
 
-fn build_reactor() *mut Reactor {
+// Free reactor record `r`, then its record table and counters, which it holds until it goes.
+fn free_reactor(r: *mut Reactor)
+    requires r == null || Global::owns(r, reactor_bytes(), R_ALIGN)
+{
+    if r == null {
+        return;
+    }
+    let (recs, nrec, regs) = unsafe ((*r).recs, (*r).nrec, (*r).regs);
+    let mut g = Global {};
+    unsafe g.dealloc(r, reactor_bytes(), R_ALIGN);
+    unsafe g.dealloc(recs, array_bytes::<FdRec>(nrec), alignof(FdRec));
+    unsafe g.dealloc(regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN);
+}
+
+fn build_reactor() *mut Reactor
+    panics if true
+    ensures |r| Global::owns(r, reactor_bytes(), R_ALIGN)
+{
     let poller = unsafe sc_io::sc_io_new();
     if poller == null {
         panic("reactor: cannot create the I/O poller");
     }
     let mut g = Global {};
-    let base = unsafe g.alloc(alloc_size(reactor_bytes()), 16);
-    let recs = (unsafe g.alloc(REC_INIT * sizeof(FdRec), alignof(FdRec))) as *mut FdRec;
+    let r = (unsafe g.alloc(alloc_size(reactor_bytes()), R_ALIGN)) as *mut Reactor;
+    let recs = (unsafe g.alloc(array_bytes::<FdRec>(REC_INIT), alignof(FdRec))) as *mut FdRec;
     let regs = (unsafe g.alloc((REG_SLOTS + 1) * R_ALIGN, R_ALIGN)) as *mut i32;
     for k in 0..(REG_SLOTS + 1) * (R_ALIGN / 4) {
         unsafe regs[k] = 0;
@@ -751,9 +788,7 @@ fn build_reactor() *mut Reactor {
     for k in 0..REC_INIT {
         unsafe recs[k] = FdRec { rd: null, wr: null, evt: 0, gen: 0, known: 0, stale: 0 };
     }
-    let r = (unsafe (base as *mut u8 + (R_ALIGN - base as usize % R_ALIGN) % R_ALIGN)) as *mut Reactor;
     unsafe r[0] = Reactor {
-        base: base,
         poller: poller,
         thread: null,
         recs: recs,
@@ -786,9 +821,7 @@ fn build_reactor() *mut Reactor {
         // Nothing has seen `r`: release the poller and the record, then stop (a reactor that never
         // polls would park every I/O task forever).
         unsafe sc_io::sc_io_free(poller);
-        unsafe g.dealloc(recs, REC_INIT * sizeof(FdRec), alignof(FdRec));
-        unsafe g.dealloc(regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN);
-        unsafe g.dealloc(base, reactor_bytes(), 16);
+        free_reactor(r);
         panic("reactor: cannot create the poller thread");
     }
     unsafe (*r).thread = h;
@@ -1081,6 +1114,7 @@ pub fn wait_until(fd: i32, write: bool, deadline: u64) bool {
         anext: 0,
         dnext: 0,
         lnext: null,
+        heap: null,
     };
     let token = unsafe runtime::park_begin(co);
     n.token = token;
@@ -1150,6 +1184,7 @@ pub fn close(fd: i32) i32 {
             anext: 0,
             dnext: 0,
             lnext: null,
+            heap: n,
         };
     }
     // No registration may overlap the close (see `G_CLOSING`): raise the flag, wait out the ones under
@@ -1270,11 +1305,10 @@ pub fn shutdown() {
             let _ = unsafe atomic::add_u64(gp + i, unsafe rp[i], 0);
         }
     }
-    let mut g = Global {};
-    unsafe g.dealloc((*r).recs, (*r).nrec * sizeof(FdRec), alignof(FdRec));
-    unsafe g.dealloc((*r).regs, (REG_SLOTS + 1) * R_ALIGN, R_ALIGN);
-    unsafe g.dealloc((*r).base, reactor_bytes(), 16);
+    // The record leaves the static, then goes.
+    let gone = unsafe G_REACTOR;
     unsafe G_REACTOR = null;
+    free_reactor(gone);
     unsafe atomic::store_i32(sp, 0, 4);
     // Clear the reactor's leaving mark once the state says no reactor runs (a closer that counts in from
     // here on closes plainly). A compare-and-swap, as the builder's: a reactor started since may already

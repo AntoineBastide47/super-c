@@ -186,6 +186,7 @@ pub(package) struct Lowerer {
     free_mask: bool, // a `Free::free` body that can accept a cancellation: it runs masked
     contract_fn: NodeId, // the function whose `ensures` clauses each return checks, NODE_NONE: none
     ghost_fn: bool, // the body is a spec function's or a lemma's: its lemma calls are plain calls
+    in_site: bool, // lowering a ghost site (`lower_ghost_site`): its own ghost statements are plain code
     // The clean nodes of the open root (`chk_nodes[chk_base..]`, see `chk_open`): the calls among
     // them may carry a cancellation check. Any other call is evaluated with pending sibling
     // temporaries (evaluated arguments, a left operand) that the ladder cannot see.
@@ -435,6 +436,7 @@ extend Lowerer {
             free_mask: false,
             contract_fn: NODE_NONE,
             ghost_fn: false,
+            in_site: false,
             chk_nodes: Vector::<NodeId>::new(),
             chk_base: 0,
             chk_lbase: 0,
@@ -1514,20 +1516,22 @@ extend Lowerer {
             return;
         }
         let k = self.f.node(id).kind;
+        // Inside a ghost site, a nested one's code is the site's (one count of its blocks).
+        let site = !self.ghost_fn && !self.in_site;
         if k == NodeKind::NODE_BLOCK {
             let (cs, ce) = unsafe (&*self.f.ast).contracts_of(id);
-            if ce > cs {
+            if ce > cs && !self.in_site {
                 self.lower_ghost_site(id, CT_ASSERT, cs);
             } else {
                 self.lower_block(id);
             }
         } else if k == NodeKind::NODE_LET {
-            if !self.ghost_fn && self.ghost_stmt(id) {
+            if site && self.ghost_stmt(id) {
                 self.lower_ghost_site(id, CT_GHOST, u32::MAX);
             } else {
                 self.lower_let(id);
             }
-        } else if k == NodeKind::NODE_EXPRESSION_STATEMENT && !self.ghost_fn && (self.lemma_call(
+        } else if k == NodeKind::NODE_EXPRESSION_STATEMENT && site && (self.lemma_call(
             self.f.node(id).as_data.single.value,
         ) || self.ghost_stmt(id)) {
             self.lower_ghost_site(id, CT_GHOST, u32::MAX);
@@ -1917,6 +1921,12 @@ extend Lowerer {
     // normal body (CT_GHOST, `clause` u32::MAX), the statement then `true`. A contract site of its own,
     // which every build skips.
     fn lower_ghost_site(self: &mut Self, id: NodeId, kind: u32, clause: u32) {
+        let outer = replace(&mut self.in_site, true);
+        self.lower_site_in(id, kind, clause);
+        self.in_site = outer;
+    }
+
+    fn lower_site_in(self: &mut Self, id: NodeId, kind: u32, clause: u32) {
         let (b0, s0, l0) = (self.body.blocks.len(), self.body.statements.len(), self.body.locals.len());
         let sp = self.f.node(id).span;
         let pred = self.cur;

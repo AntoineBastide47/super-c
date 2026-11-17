@@ -32,16 +32,56 @@ struct ArcInner<T> {
 /// A shared, atomically reference-counted handle to a `T`. Cloning is cheap and hands back another owner;
 /// the value is freed exactly once, when the final strong handle is dropped.
 @no_const
-pub struct Arc<T> {
+pub struct Arc<T>
+    invariant self.ptr == null || rc_share(self.ptr, 0, 1)
+{
     ptr: *mut ArcInner<T>,
 }
 
 /// A handle to an `Arc`'s block that does not keep the value alive: `upgrade` gives an `Arc` while the
 /// value lives, `None` from the moment its strong count reaches zero. `Weak::new` points at nothing.
 @no_const
-pub struct Weak<T> {
+pub struct Weak<T>
+    invariant self.ptr == null || rc_share(self.ptr, 1, 1)
+{
     ptr: *mut ArcInner<T>, // null for `Weak::new`
 }
+
+// The counts as units (`rc_share`): counter 0 counts the strong handles and guards the value and the
+// strong handles' one weak reference; counter 1 counts that reference and the `Weak` handles, and guards
+// the block. Each lemma states the step of the count operation it is called after; no proof checks it.
+
+// A new block, counts 1 and 1: one strong unit.
+@trusted
+lemma arc_new<T>(p: *mut ArcInner<T>)
+    requires Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>))
+    ensures rc_share(p, 0, 1);
+
+// An increment of the strong count by the holder of a strong unit, or of a weak unit whose count it saw
+// above zero (`upgrade`). A null handle has no count: it gives nothing.
+@trusted
+lemma arc_strong_inc<T>(p: *mut ArcInner<T>)
+    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
+    ensures p == null || rc_share(p, 0, 1);
+
+// An increment of the weak count by the holder of a strong or a weak unit.
+@trusted
+lemma arc_weak_inc<T>(p: *mut ArcInner<T>)
+    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
+    ensures p == null || rc_share(p, 1, 1);
+
+// A decrement of the strong count from `prev`: the last unit (`prev == 1`) gives the strong handles' weak
+// unit, and the value is the holder's.
+@trusted
+lemma arc_strong_dec<T>(p: *mut ArcInner<T>, prev: usize)
+    requires p == null || rc_share(p, 0, 1)
+    ensures p == null || prev == 1 ==> rc_units(p, 0) == 0 && rc_share(p, 1, 1);
+
+// A decrement of the weak count from `prev`: the last unit gives the block.
+@trusted
+lemma arc_weak_dec<T>(p: *mut ArcInner<T>, prev: usize)
+    requires p == null || rc_share(p, 1, 1)
+    ensures p == null || prev == 1 ==> rc_units(p, 1) == 0 && Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));
 
 extend<T> Arc<T> {
     /// Allocate `value` on the heap with a strong count of one.
@@ -49,6 +89,7 @@ extend<T> Arc<T> {
         let mut g = Global {};
         let p = (unsafe g.alloc(sizeof(ArcInner<T>), alignof(ArcInner<T>))) as *mut ArcInner<T>;
         unsafe p[0] = ArcInner::<T> { strong: 1, weak: 1, value: value };
+        arc_new(p);
         return Arc::<T> { ptr: p };
     }
     /// Another owning handle to the same value (atomic increment of the strong count). Panics: the count
@@ -60,6 +101,7 @@ extend<T> Arc<T> {
         if old > MAX_REFCOUNT {
             panic("Arc: reference count overflow");
         }
+        arc_strong_inc(self.ptr);
         return Arc::<T> { ptr: self.ptr };
     }
     /// Borrow the shared value. Valid while this handle is alive.
@@ -100,6 +142,7 @@ extend<T> Arc<T> {
                     atomics::MemoryOrder::Acquire as i32,
                     atomics::MemoryOrder::Relaxed as i32,
                 ) {
+                    arc_weak_inc(self.ptr);
                     return Weak::<T>::from_block(self.ptr);
                 }
             }
@@ -131,6 +174,7 @@ extend<T> Arc<T> {
         }
         let p = self.ptr;
         forget(self);
+        arc_strong_dec(p, 1);
         let value = unsafe (*p).value;
         // Releases the strong handles' weak reference: frees the block when no `Weak` remains.
         let _collective = Weak::<T>::from_block(p);
@@ -167,7 +211,9 @@ extend<T> Arc<T> {
     }
 
     // A strong handle for block `p`, whose strong count already counts it.
-    fn from_block(p: *mut ArcInner<T>) Arc<T> {
+    fn from_block(p: *mut ArcInner<T>) Arc<T>
+        requires p == null || rc_share(p, 0, 1)
+    {
         return Arc::<T> { ptr: p };
     }
 
@@ -213,6 +259,7 @@ extend<T> Weak<T> {
                 atomics::MemoryOrder::Acquire as i32,
                 atomics::MemoryOrder::Relaxed as i32,
             ) {
+                arc_strong_inc(self.ptr);
                 return Some(Arc::<T>::from_block(self.ptr));
             }
             n = unsafe atomic::load_usize(s, atomics::MemoryOrder::Relaxed as i32);
@@ -235,12 +282,15 @@ extend<T> Weak<T> {
             if old > MAX_REFCOUNT {
                 panic("Arc: reference count overflow");
             }
+            arc_weak_inc(self.ptr);
         }
         return Weak::<T> { ptr: self.ptr };
     }
 
     // A weak handle for block `p`, whose weak count already counts it.
-    fn from_block(p: *mut ArcInner<T>) Weak<T> {
+    fn from_block(p: *mut ArcInner<T>) Weak<T>
+        requires p == null || rc_share(p, 1, 1)
+    {
         return Weak::<T> { ptr: p };
     }
 }
@@ -266,6 +316,7 @@ extend<T> Arc<T> as Free {
         // after publishing zero, and only this drop orders that use before a free), and a standalone fence
         // is outside TSan's memory model, so the race gate could never check the fence form.
         let prev = unsafe atomic::sub_usize(self.strong_ptr(), 1, atomics::MemoryOrder::AcqRel as i32);
+        arc_strong_dec(self.ptr, prev);
         if prev == 1 {
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free; freeing the
             // place directly would be a conditional move out of a dereference.
@@ -288,6 +339,7 @@ extend<T> Weak<T> as Free {
         }
         self.ptr = null;
         let prev = unsafe atomic::sub_usize(&mut (*p).weak, 1, atomics::MemoryOrder::AcqRel as i32);
+        arc_weak_dec(p, prev);
         if prev == 1 {
             let mut g = Global {};
             unsafe g.dealloc(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));

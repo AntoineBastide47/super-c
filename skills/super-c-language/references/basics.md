@@ -367,9 +367,8 @@ pub struct Buf
 - A method that panics by design (a bounds or capacity check) states where with `panics if`. An
   operation of its own code may then panic past a broken invariant only where the clause holds; a
   call or a drop may panic anywhere.
-- A `static mut` takes `invariant E` clauses after its value: `static mut G: u32 = 3 invariant G > 1;`.
-  Each reads the static (error 559). The clauses become the spec function of the static's value, and
-  a lemma, which the proofs check, states that the first value holds them.
+- The blocks an invariant names (`A::owns`), a struct behind a raw pointer, reference counts and
+  `static mut` invariants: see [heap-proofs.md](heap-proofs.md).
 
 ### Constant-Time Code
 

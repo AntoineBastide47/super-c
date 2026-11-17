@@ -142,7 +142,12 @@ extend<K, V, F: fn(&K) bool> KeyKeep<F> as MapKeep<K, V> {
 
 /// An open-addressing hash map from K to V through allocator A, hashed by S. Iteration order is slot
 /// order, not insertion order.
-pub struct Map<K, V, A = Global, S = DefaultHash> {
+pub struct Map<K, V, A: Allocator = Global, S = DefaultHash>
+    invariant owns_array::<K, A>(self.keys, self.cap) && owns_array::<V, A>(self.vals, self.cap) && owns_array::<u8, A>(
+        self.used,
+        self.cap,
+    )
+{
     keys: *mut K, // parallel arrays, slot i valid when used[i] == 1 (private)
     vals: *mut V,
     used: *mut u8, // 0 = empty, 1 = occupied
@@ -152,11 +157,11 @@ pub struct Map<K, V, A = Global, S = DefaultHash> {
     hasher: S, // the hash builder (private; zero-sized for DefaultHash)
 }
 
-unsafe extend<K, V, A, S> Map<K, V, A, S> as Zeroable {}
+unsafe extend<K, V, A: Allocator, S> Map<K, V, A, S> as Zeroable {}
 // A Map owns its keys and values, so it is Send / Sync when they, its allocator and its builder are.
-unsafe extend<K: Send, V: Send, A: Send, S: Send> Map<K, V, A, S> as Send {}
+unsafe extend<K: Send, V: Send, A: Allocator + Send, S: Send> Map<K, V, A, S> as Send {}
 
-unsafe extend<K: Sync, V: Sync, A: Sync, S: Sync> Map<K, V, A, S> as Sync {}
+unsafe extend<K: Sync, V: Sync, A: Allocator + Sync, S: Sync> Map<K, V, A, S> as Sync {}
 
 extend<K, V, A: Allocator, S> Map<K, V, A, S> {
     // Take `n` empty slots (the old arrays stay the caller's): the keys, the values and the occupancy
@@ -164,15 +169,10 @@ extend<K, V, A: Allocator, S> Map<K, V, A, S> {
     // abstract heap types each allocation by its element: a single block carved with byte-offset interior
     // pointers is not evaluable, and Map folds at compile time are a language feature.
     const fn alloc_slots(self: &mut Map<K, V, A, S>, n: usize) {
-        // No array is larger than `isize::MAX` bytes.
-        let lim = isize::MAX as usize;
-        if n > lim || sizeof(K) != 0 && n > lim / sizeof(K) || sizeof(V) != 0 && n > lim / sizeof(V) {
-            panic("Map: capacity overflow");
-        }
-        self.keys = alloc_array::<K, A>(&mut self.alloc, n);
-        self.vals = alloc_array::<V, A>(&mut self.alloc, n);
-        self.used = alloc_array::<u8, A>(&mut self.alloc, n);
-        unsafe memset(self.used, 0, n);
+        let t = new_slots::<K, V, A>(&mut self.alloc, n);
+        self.keys = t.keys;
+        self.vals = t.vals;
+        self.used = t.used;
         self.cap = n;
     }
 }
@@ -181,11 +181,44 @@ extend<K, V, A: Allocator, S> Map<K, V, A, S> {
 // allocator call.
 const fn alloc_array<T, A: Allocator>(a: &mut A, n: usize) *mut T
     requires sizeof(T) == 0 || n as int <= isize::MAX as int / sizeof(T) as int
+    ensures |r| owns_array::<T, A>(r, n)
 {
     if sizeof(T) == 0 {
         return dangling::<T>();
     }
-    return (unsafe a.alloc(n * sizeof(T), alignof(T))) as *mut T;
+    return (unsafe a.alloc(array_bytes::<T>(n), alignof(T))) as *mut T;
+}
+
+// A table's three arrays (`new_slots`).
+struct Slots<K, V> {
+    keys: *mut K,
+    vals: *mut V,
+    used: *mut u8,
+}
+
+// The arrays of `n` slots, no slot used. No array is larger than `isize::MAX` bytes.
+const fn new_slots<K, V, A: Allocator>(a: &mut A, n: usize) Slots<K, V>
+    panics if n > isize::MAX as usize || sizeof(K) != 0 && n > isize::MAX as usize / sizeof(K) || sizeof(V) != 0 && n > isize::MAX as usize / sizeof(V)
+    ensures |r| owns_array::<K, A>(r.keys, n) && owns_array::<V, A>(r.vals, n) && owns_array::<u8, A>(r.used, n)
+{
+    let lim = isize::MAX as usize;
+    if n > lim || sizeof(K) != 0 && n > lim / sizeof(K) || sizeof(V) != 0 && n > lim / sizeof(V) {
+        panic("Map: capacity overflow");
+    }
+    let keys = alloc_array::<K, A>(a, n);
+    let vals = alloc_array::<V, A>(a, n);
+    let used = alloc_array::<u8, A>(a, n);
+    unsafe memset(used, 0, n);
+    return Slots::<K, V> { keys: keys, vals: vals, used: used };
+}
+
+// Free an array `alloc_array` gave, or none.
+const fn free_array<T, A: Allocator>(a: &mut A, p: *mut T, n: usize)
+    requires owns_array::<T, A>(p, n)
+{
+    if sizeof(T) != 0 {
+        unsafe a.dealloc(p, array_bytes::<T>(n), alignof(T));
+    }
 }
 
 extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
@@ -246,7 +279,12 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
         let oldvals = self.vals;
         let oldused = self.used;
         let oldcap = self.cap;
-        self.alloc_slots(newcap);
+        // The old arrays stay the body's: the new ones replace them in the map.
+        let t = new_slots::<K, V, A>(&mut self.alloc, newcap);
+        self.keys = t.keys;
+        self.vals = t.vals;
+        self.used = t.used;
+        self.cap = newcap;
         self.len = 0;
         for i in 0..oldcap {
             if unsafe oldused[i] == 1 {
@@ -258,13 +296,9 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
             }
         }
         if oldcap > 0 {
-            if sizeof(K) != 0 {
-                unsafe self.alloc.dealloc(oldkeys, oldcap * sizeof(K), alignof(K));
-            }
-            if sizeof(V) != 0 {
-                unsafe self.alloc.dealloc(oldvals, oldcap * sizeof(V), alignof(V));
-            }
-            unsafe self.alloc.dealloc(oldused, oldcap, alignof(u8));
+            free_array::<K, A>(&mut self.alloc, oldkeys, oldcap);
+            free_array::<V, A>(&mut self.alloc, oldvals, oldcap);
+            free_array::<u8, A>(&mut self.alloc, oldused, oldcap);
         }
     }
 
@@ -333,20 +367,18 @@ extend<K: Hash + Eq, V, A: Allocator, S: BuildHasher> Map<K, V, A, S> {
         self.len = 0;
     }
 
-    // Return the table storage to the allocator: the map holds no entry, and grows again from empty.
+    // Return the table storage to the allocator: the map holds no entry, and grows again from empty. The map
+    // is empty before the first block goes: a panic of the allocator leaves no freed block in it.
     fn release(self: &mut Map<K, V, A, S>) {
-        if sizeof(K) != 0 {
-            unsafe self.alloc.dealloc(self.keys, self.cap * sizeof(K), alignof(K));
-        }
-        if sizeof(V) != 0 {
-            unsafe self.alloc.dealloc(self.vals, self.cap * sizeof(V), alignof(V));
-        }
-        unsafe self.alloc.dealloc(self.used, self.cap, alignof(u8));
+        let (keys, vals, used, cap) = (self.keys, self.vals, self.used, self.cap);
         self.keys = null;
         self.vals = null;
         self.used = null;
         self.len = 0;
         self.cap = 0;
+        free_array::<K, A>(&mut self.alloc, keys, cap);
+        free_array::<V, A>(&mut self.alloc, vals, cap);
+        free_array::<u8, A>(&mut self.alloc, used, cap);
     }
 
     /// Insert or overwrite `key` -> `value`. On overwrite the existing key is kept; the duplicate key and the
@@ -651,19 +683,19 @@ extend<K: Hash + Eq + Format, V: Format, A: Allocator, S: BuildHasher> Map<K, V,
 }
 
 /// The slot of a map an `entry` call found: the key is present, or absent with its slot reserved.
-pub enum Entry<'a, K, V, A, S> {
+pub enum Entry<'a, K, V, A: Allocator, S> {
     Occupied(OccupiedEntry<'a, K, V, A, S>),
     Vacant(VacantEntry<'a, K, V, A, S>),
 }
 
 /// A present key's entry; it borrows the map.
-pub struct OccupiedEntry<'a, K, V, A, S> {
+pub struct OccupiedEntry<'a, K, V, A: Allocator, S> {
     map: &'a mut Map<K, V, A, S>,
     slot: usize,
 }
 
 /// An absent key's entry: the key and the empty slot it takes; it borrows the map.
-pub struct VacantEntry<'a, K, V, A, S> {
+pub struct VacantEntry<'a, K, V, A: Allocator, S> {
     map: &'a mut Map<K, V, A, S>,
     key: K,
     slot: usize,
@@ -849,7 +881,7 @@ pub struct MapIterMut<'a, K, V> {
 
 /// The entries of a map moved out one by one (`Map::drain`); dropping it frees the rest and leaves the
 /// map empty.
-pub struct MapDrain<'a, K, V, A, S> {
+pub struct MapDrain<'a, K, V, A: Allocator, S> {
     map: &'a mut Map<K, V, A, S>,
     idx: usize,
 }

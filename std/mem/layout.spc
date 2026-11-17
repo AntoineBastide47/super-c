@@ -15,7 +15,7 @@ const ISIZE_MAX: usize = isize::MAX as usize;
 /// every value satisfies the invariant above.
 @derive(Copy, Eq, Hash, Format)
 pub struct Layout
-    invariant self.size as int <= isize::MAX as int
+    invariant self.size as int <= isize::MAX as int && self.align != 0 && (self.align & self.align - 1) == 0
 {
     size: usize,
     align: usize,
@@ -54,7 +54,9 @@ pub const fn is_aligned<T>(p: *const T, align: usize) bool {
 /// alignment are valid. Release the block with `dealloc_layout` and the same layout.
 // Inlined so the leak tracker records the allocation at the caller, as `Global`'s methods are.
 @always_inline
-pub fn alloc_layout<A: Allocator>(a: &mut A, l: Layout) *mut void {
+pub fn alloc_layout<A: Allocator>(a: &mut A, l: Layout) *mut void
+    ensures |r| l.size() == 0 || A::owns(r, l.size(), l.align())
+{
     if l.size == 0 {
         return ptr::from_addr_mut::<void>(l.align);
     }
@@ -65,7 +67,9 @@ pub fn alloc_layout<A: Allocator>(a: &mut A, l: Layout) *mut void {
 /// Safety: `p` came from `alloc_layout` with an allocator that can release it (the same value or a copy
 /// of it) and with this `l`, and it is not released yet.
 @always_inline
-pub unsafe fn dealloc_layout<A: Allocator>(a: &mut A, p: *mut void, l: Layout) {
+pub unsafe fn dealloc_layout<A: Allocator>(a: &mut A, p: *mut void, l: Layout)
+    requires l.size() == 0 || A::owns(p, l.size(), l.align())
+{
     if l.size() == 0 {
         return;
     }
@@ -97,12 +101,16 @@ extend Layout {
     }
 
     /// The size in bytes.
-    pub const fn size(self: &Layout) usize {
+    pub const fn size(self: &Layout) usize
+        ensures |r| r == self.size
+    {
         return self.size;
     }
 
     /// The alignment in bytes, a power of two.
-    pub const fn align(self: &Layout) usize {
+    pub const fn align(self: &Layout) usize
+        ensures |r| r == self.align
+    {
         return self.align;
     }
 

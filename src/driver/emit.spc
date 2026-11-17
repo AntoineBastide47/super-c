@@ -8514,12 +8514,14 @@ const U_TU: u8 = 1;
 /// `CemitOut.unit`: the module's instance unit holds anything.
 const U_INST: u8 = 2;
 
-static mut G_DPOOL: *mut Vector<DropCtx> = null;
+static mut G_DPOOL: *mut Vector<DropCtx> = null
+    invariant G_DPOOL == null || Global::owns(G_DPOOL, sizeof(Vector<DropCtx>), alignof(Vector<DropCtx>));
 static mut G_DPOOL_LOCK: i32 = 0;
 // One permit per worker: a task that waits on `kl` or the evaluator's lock holds its context, and the
 // task its worker runs meanwhile waits for a returned one instead of filling a new one's caches. A
 // waiting task holds no context and no lock; each holder runs on to its end and gives its context back.
-static mut G_DSEM: *mut psync::Semaphore = null;
+static mut G_DSEM: *mut psync::Semaphore = null
+    invariant G_DSEM == null || Global::owns(G_DSEM, sizeof(psync::Semaphore), alignof(psync::Semaphore));
 
 fn dctx_take(p: *const loader::Package) DropCtx {
     unsafe sc_runtime::sc_rt_spin_lock(&mut G_DPOOL_LOCK);

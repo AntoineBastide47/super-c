@@ -4327,17 +4327,13 @@ extend Parser {
             If => {
                 let f = self.parse_if();
                 // if-let desugars to a match EXPRESSION; wrap it so it statement-positions, also as
-                // the last `else` of an `if` chain (`} else if let ..`), which is a statement there too
-                if f != NODE_NONE && self.ast.at_const(f).kind == NodeKind::NODE_MATCH {
-                    result = self.mk(
-                        NodeKind::NODE_EXPRESSION_STATEMENT,
-                        self.node_span(f),
-                        NodeAs { single: SingleData { value: f } },
-                    );
-                } else {
-                    result = f;
-                    let mut c = f;
-                    while c != NODE_NONE && self.ast.at_const(c).kind == NodeKind::NODE_IF {
+                // the last `else` of an `if` chain (`} else if let ..`), which is a statement there too.
+                // An if-let's `else if` chain is the match's other arm: a statement in a block there, so its
+                // last `if` needs no `else`.
+                let mut c = f;
+                while c != NODE_NONE {
+                    let k = self.ast.at_const(c).kind;
+                    if k == NodeKind::NODE_IF {
                         let e = self.ast.at_const(c).as_data.if_stmt.else_branch;
                         if e != NODE_NONE && self.ast.at_const(e).kind == NodeKind::NODE_MATCH {
                             let w = self.mk(
@@ -4348,7 +4344,32 @@ extend Parser {
                             self.ast.at(c).as_data.if_stmt.else_branch = w;
                         }
                         c = e;
+                    } else if k == NodeKind::NODE_MATCH {
+                        let arm = unsafe self.ast.list(self.ast.at_const(c).as_data.match_expr.arms)[1];
+                        let b = self.ast.at_const(arm).as_data.match_arm.body;
+                        if self.ast.at_const(b).kind == NodeKind::NODE_IF {
+                            let mark = self.ast.mark();
+                            self.ast.push(b);
+                            let blk = self.mk(
+                                NodeKind::NODE_BLOCK,
+                                self.node_span(b),
+                                NodeAs { block: BlockData { statements: self.ast.commit(mark) } },
+                            );
+                            self.ast.at(arm).as_data.match_arm.body = blk;
+                        }
+                        c = b;
+                    } else {
+                        c = NODE_NONE;
                     }
+                }
+                if f != NODE_NONE && self.ast.at_const(f).kind == NodeKind::NODE_MATCH {
+                    result = self.mk(
+                        NodeKind::NODE_EXPRESSION_STATEMENT,
+                        self.node_span(f),
+                        NodeAs { single: SingleData { value: f } },
+                    );
+                } else {
+                    result = f;
                 }
             },
             Label => {

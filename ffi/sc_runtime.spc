@@ -1223,7 +1223,11 @@ fn own_stack_bounds() (usize, usize) {
 /// Start an OS thread running `entry(arg)`: 0 on success with `*out` the handle `sc_rt_thread_join`
 /// consumes (a handle never joined or detached leaks the thread's bookkeeping), else an errno value.
 @platform(macos | ios | linux | android)
-pub unsafe fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32 {
+pub unsafe fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32
+    requires pre_of(entry, arg)
+    ensures |r| r != 0 ==> pre_of(entry, arg)
+    panics if true
+{
     // A heap `pthread_t` rather than a cast: `pthread_t` is opaque and need not fit a pointer.
     let h = rt_alloc(sizeof(pthread_t), false);
     if h == null {
@@ -1980,7 +1984,11 @@ fn thread_tramp(p: *mut void) u32 {
 /// Start an OS thread running `entry(arg)`: 0 on success with `*out` the handle `sc_rt_thread_join`
 /// consumes (a handle never joined or detached leaks the thread's bookkeeping), else nonzero.
 @platform(windows)
-pub unsafe fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32 {
+pub unsafe fn sc_rt_thread_create(out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32
+    requires pre_of(entry, arg)
+    ensures |r| r != 0 ==> pre_of(entry, arg)
+    panics if true
+{
     let t = rt_alloc(sizeof(ThreadStart), false) as *mut ThreadStart;
     if t == null {
         return -1;
@@ -2223,7 +2231,11 @@ pub unsafe fn sc_rt_stack_note_size(_bytes: usize) {}
 /// `spawn` hands the result slot to a `JoinHandle` without running the body, so a quiet failure reads
 /// back as the closure's return value.
 @platform(wasm)
-pub unsafe fn sc_rt_thread_create(_out: *mut *mut void, _entry: fn(*mut void) *mut void, _arg: *mut void) i32 {
+pub unsafe fn sc_rt_thread_create(_out: *mut *mut void, entry: fn(*mut void) *mut void, arg: *mut void) i32
+    requires pre_of(entry, arg)
+    ensures |r| r != 0 ==> pre_of(entry, arg)
+    panics if true
+{
     die("wasm has one thread; 'thread::spawn' has nothing to run the closure on");
     return -1;
 }

@@ -808,7 +808,7 @@ extend<const B: usize> Terms<B> {
     }
 
     // Member `key` of `v`, of type (`w`, `sg`): an aggregate's member, through its updates where the
-    // keys are the same term or two different constants.
+    // keys are the same term or two constants (one key where their values are equal, of any widths).
     pub(package) fn sel(self: &mut Self, v0: u32, key: u32, w: u16, sg: bool) u32 {
         let mut v = v0;
         let kx = self.ts[key as usize];
@@ -821,10 +821,11 @@ extend<const B: usize> Terms<B> {
                 break;
             }
             let k2 = self.args[(x.a + 1) as usize];
-            if k2 == key {
+            let k2x = self.ts[k2 as usize];
+            if k2 == key || kx.op == T_INT && k2x.op == T_INT && kx.k == k2x.k {
                 return self.args[(x.a + 2) as usize];
             }
-            if kx.op != T_INT || self.ts[k2 as usize].op != T_INT {
+            if kx.op != T_INT || k2x.op != T_INT {
                 break;
             }
             v = self.args[x.a as usize];

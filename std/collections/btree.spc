@@ -93,6 +93,24 @@ struct Internal<K, V> {
     edges: [*mut Leaf<K, V>; CAPACITY + 1],
 }
 
+// A node a tree frees as it unlinks it: the block `A` gave for it, of a leaf or (`leaf` false) an
+// internal node, which the tree holds once. No invariant states the blocks of the tree's edges: a node's
+// kind follows from the map's height, which an invariant of the node that links it cannot read.
+@trusted
+lemma tree_node<K, V, A: Allocator>(node: *mut Leaf<K, V>, leaf: bool)
+    ensures leaf ==> A::owns(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>))
+    ensures !leaf ==> A::owns(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
+
+// Free tree node `node` (`tree_node`) through `alloc`.
+fn free_node<K, V, A: Allocator>(alloc: &mut A, node: *mut Leaf<K, V>, leaf: bool) {
+    tree_node::<K, V, A>(node, leaf);
+    if leaf {
+        unsafe alloc.dealloc(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>));
+    } else {
+        unsafe alloc.dealloc(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
+    }
+}
+
 /// One end of a range: `Included(x)` and `Excluded(x)` bound the range at `x`, `Unbounded` does not
 /// bound that end.
 pub enum Bound<T> {
@@ -540,11 +558,7 @@ extend<K, V> Gaps<K, V> {
 
 extend<K, V, A: Allocator> Drain<K, V, A> {
     fn free_node(self: &mut Drain<K, V, A>, node: *mut Leaf<K, V>, leaf: bool) {
-        if leaf {
-            unsafe self.alloc.dealloc(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>));
-        } else {
-            unsafe self.alloc.dealloc(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
-        }
+        free_node(&mut self.alloc, node, leaf);
     }
 
     fn next(self: &mut Drain<K, V, A>) Option<(K, V)> {
@@ -623,11 +637,7 @@ extend<K: Ord, V, A: Allocator> BTreeMap<K, V, A> {
     }
 
     fn free_node(self: &mut BTreeMap<K, V, A>, node: *mut Leaf<K, V>, leaf: bool) {
-        if leaf {
-            unsafe self.alloc.dealloc(node, sizeof(Leaf<K, V>), alignof(Leaf<K, V>));
-        } else {
-            unsafe self.alloc.dealloc(node, sizeof(Internal<K, V>), alignof(Internal<K, V>));
-        }
+        free_node(&mut self.alloc, node, leaf);
     }
 
     // Moves every element out into a drain and leaves the map empty.

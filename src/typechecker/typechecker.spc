@@ -21343,6 +21343,14 @@ extend<'a> TypeChecker<'a> {
                 at,
                 format("method '{}' is declared 'const fn' by this interface", name),
             );
+        } // A spec function is ghost code; another function runs: neither stands for the other.
+        if rf.is_spec() != hf.is_spec() {
+            let what = if rf.is_spec() {
+                "is declared 'spec fn' by this interface"
+            } else {
+                "is not declared 'spec fn' by this interface"
+            };
+            self.errors.emit_span(dc::METHOD_QUALIFIER_MISMATCH, at, format("method '{}' {}", name, what));
         }
     }
 
@@ -30249,8 +30257,11 @@ extend TypeChecker {
             // `let` with an annotation gives. Without it an array literal in field position has nothing to
             // widen towards, so `Plain { b: [3, 0, 0, 7] }` typed itself `[i32]` and was rejected against a
             // `[i64; 4]` field. The reason applies to every initializer, not only an interface assoc call.
+            // The literal's type arguments are given (not inferred): the field's type is known in context
+            // even where it names the enclosing generic's parameters (`S::<A> { o: None }`), as a `let`'s
+            // annotation is.
             if !inferred {
-                self.check_expr_w(fval, pick(self.tc_expected_known(ft), ft, TYPE_NONE));
+                self.check_expr_w(fval, ft);
             }
             if variant == NODE_NONE && decl == NODE_NONE {
                 self.lt_env.truncate(fm2);
