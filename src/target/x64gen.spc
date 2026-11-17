@@ -3844,6 +3844,11 @@ extend Gen {
         } else {
             0
         };
+        // Microsoft x64: a frame aligned past 16 bytes keeps its bottom in a callee-saved register the body
+        // leaves alone (the unwind information's frame register): no value takes r15.
+        if self.win && self.max_align > 16 {
+            self.xfix &= ~bit(15);
+        }
         if self.cr.self_lay.unknown {
             return self.cr.refuse("the signature passes an aggregate whose C class is unknown");
         }
@@ -10206,7 +10211,9 @@ extend Gen {
         // leaves alone (the unwind information's frame register), then aligns rsp.
         let mut fp: u8 = NOREG;
         if self.win && self.max_align > 16 {
-            let free: [u8; 7] = [3, 6, 7, 12, 13, 14, 15];
+            // r15 first, which no value holds (`func_body` keeps it out of `xfix`); an inline assembly
+            // statement may name it.
+            let free: [u8; 7] = [15, 3, 6, 7, 12, 13, 14];
             for r in free {
                 if fp == NOREG && (self.csr & bit(r)) == 0 {
                     fp = r;

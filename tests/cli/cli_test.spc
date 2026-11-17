@@ -3712,7 +3712,8 @@ fn main() i32 {
 // Vector kernels of a release build give their lanes' values: a minimumNumber and maximumNumber of loaded
 // operands and of accumulators (8 and 16 f32 lanes, 4 f64 lanes) over both zeros, infinities and quiet and
 // signaling NaNs, against the operation on the encodings, a product and sum of 8 lanes, and the operations a
-// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones. On
+// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones, and
+// the lanes a constant mask selects through pointers. On
 // x86-64 the run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then
 // the build's own bodies (`SC_SIMD_LEVEL=0`).
 @test
@@ -3931,6 +3932,27 @@ fn bytes_ref(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8
     return s;
 }
 
+// The lanes a constant mask selects, through pointers: each row's first 13 of 16 lanes scaled into rows 16
+// apart (the other elements keep their values), and the bytes of a mask with gaps (the lanes it leaves out
+// load the fallback and store nothing).
+@noinline
+fn rows(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
+    let av = Simd::<f32, 16>::splat(a);
+    let fb = Simd::<f32, 16>::splat(-1.0);
+    let row = Mask::<16>::from_bits_truncate(0x1FFF);
+    for r in 0..n {
+        unsafe simd::store_masked_ptr(yp + r * 16, row, av * simd::load_masked_ptr(xp + r * 13, row, fb));
+    }
+}
+
+@noinline
+fn gaps(xp: *const u8, yp: *mut u8, zp: *mut u8) {
+    let m = Mask::<16>::from_bits_truncate(0xB0F6);
+    let v = unsafe simd::load_masked_ptr(xp, m, Simd::<u8, 16>::splat(7));
+    simd::store(view_mut(zp, 16), 0, v);
+    unsafe simd::store_masked_ptr(yp, m, v + Simd::<u8, 16>::splat(1));
+}
+
 fn main() i32 {
     let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
     let n: usize = 144;
@@ -4048,6 +4070,43 @@ fn main() i32 {
             if bo[k] != br[k] {
                 return 8;
             }
+        }
+    }
+    let mut rx = Vector::<f32>::new();
+    let mut ry = Vector::<f32>::new();
+    for k in 0..64usize {
+        rx.push((k * 7 % 23) as f32 - 9.5);
+        ry.push(-5.0);
+    }
+    rows(1.5, rx.as_ptr(), ry.as_mut_ptr(), 4);
+    for k in 0..64usize {
+        let want = if k % 16 < 13 {
+            1.5 * rx[k / 16 * 13 + k % 16]
+        } else {
+            -5.0
+        };
+        if ry[k] != want {
+            return 9;
+        }
+    }
+    let mut gy: [u8; 16] = [200; 16];
+    let mut gz: [u8; 16] = [0; 16];
+    gaps(ba.as_ptr(), &mut gy[0], &mut gz[0]);
+    for k in 0..16usize {
+        let on = (0xB0F6u32 >> k as u32 & 1) != 0;
+        if gz[k] != if on {
+            ba[k]
+        } else {
+            7
+        } {
+            return 10;
+        }
+        if gy[k] != if on {
+            ba[k].wrapping_add(1)
+        } else {
+            200
+        } {
+            return 11;
         }
     }
     return 0;

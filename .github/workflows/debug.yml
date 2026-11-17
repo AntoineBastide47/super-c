@@ -375,7 +375,23 @@ jobs:
           cp build/bench-bin build/bench-nat.wasm
           ./super-c build build/bench_root.spc --profile=bench --emit-c --target=wasm --out-dir=build/ctree
           raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
-          CC="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1" sh ci/cc_tree.sh "$raw" build/bench-clang.wasm -O3
+          # The tree's own C library (std/rt/libc, libm) compiles with -fno-builtin: at -O3 the C compiler
+          # must not turn a loop of `memset`'s helper into a call of `memset`.
+          ccw="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1"
+          fl="$(cat "$raw/__cflags") -O3"
+          top=$PWD
+          mkdir -p build/co
+          i=0
+          while IFS= read -r u; do
+            i=$((i + 1))
+            nb=
+            case $u in std/rt/libc*|std/rt/libm*) nb=-fno-builtin ;; esac
+            case $u in
+            *.o) cp "$raw/$u" "build/co/$i.o" ;;
+            *) (cd "$raw" && $ccw $fl $nb -c "$u" -o "$top/build/co/$i.o") ;;
+            esac
+          done < "$raw/__units"
+          $ccw $fl build/co/*.o $(cat "$raw/__ldflags") -o build/bench-clang.wasm
           for k in 1 2 3 4 5; do
             wasmtime build/bench-nat.wasm > "timing/nat-r$k.txt" 2>&1 || true
             wasmtime build/bench-clang.wasm > "timing/clang-r$k.txt" 2>&1 || true

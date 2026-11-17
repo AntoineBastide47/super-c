@@ -20566,6 +20566,57 @@ int main(void) {
     assert_eq(run_x64_feature(x64, drv, "avx2", 0), 0);
 }
 
+// Under Microsoft x64 a frame aligned past 16 bytes keeps its bottom in a callee-saved register the body
+// leaves alone (the unwind information's frame register): a body with such a slot and more values across
+// a call than callee-saved registers still compiles.
+@test
+fn an_over_aligned_windows_frame_keeps_a_register_for_itself() {
+    let lir = M"(lir ptr 8
+sym @ext fn global
+sym @busy fn global
+fn @busy
+  sig (i64, i64, i64, i64) -> i64
+  slot s0 size 32 align 5
+b0(v0: i64, v1: i64, v2: i64, v3: i64):
+  v4 = add.i64 v0, v1
+  v5 = add.i64 v1, v2
+  v6 = add.i64 v2, v3
+  v7 = add.i64 v3, v0
+  v8 = slotaddr s0
+  store v4, v8 align 3
+  v9 = call.i64 @ext(v8) : (ptr) -> i64
+  v10 = add.i64 v9, v0
+  v11 = add.i64 v10, v1
+  v12 = add.i64 v11, v2
+  v13 = add.i64 v12, v3
+  v14 = add.i64 v13, v4
+  v15 = add.i64 v14, v5
+  v16 = add.i64 v15, v6
+  v17 = add.i64 v16, v7
+  ret v17
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the Microsoft x64 object",
+    );
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the System V object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t busy(int64_t, int64_t, int64_t, int64_t);
+int64_t ext(int64_t *p) { return ((uintptr_t)p % 32 != 0) * 1000 + *p; }
+int main(void) {
+  return busy(1, 2, 3, 4) != (1 + 2) + (1 + 2 + 3 + 4) + ((1 + 2) + (2 + 3) + (3 + 4) + (4 + 1));
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // Under Microsoft x64, an intrinsic's result that lives on takes a register its template does not name:
 // when that is one of the callee-saved xmm6..xmm13, the prologue saves it (MOVDQU to the stack).
 @test
