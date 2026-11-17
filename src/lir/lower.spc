@@ -4795,6 +4795,183 @@ extend Lower {
         return self.inst(O_VOP, ty, op, at, args.len() as u32, lanes);
     }
 
+    // Vector `v` halved (`low_half`, `high_half`) down to `chunks` parts (a power of two), pushed on `out`
+    // in lane order.
+    fn halves(self: &mut Self, v: Value, chunks: u32, out: &mut Vector<Value>) {
+        let lo = (irc::OP_SIMD + irc::SIMD_LOW_HALF as u32) as u16;
+        let hi = (irc::OP_SIMD + irc::SIMD_HIGH_HALF as u32) as u16;
+        let mut level = Vector::<Value>::new();
+        let mut next = Vector::<Value>::new();
+        level.push(v);
+        // Each round doubles the parts: at most 6 rounds (64 lanes).
+        while level.len() as u32 < chunks {
+            next.truncate(0);
+            for k in 0..level.len() {
+                let x = level[k];
+                let ht = vec_type(lane_type(self.vty(x)), lanes(self.vty(x)) / 2);
+                next.push(self.vop(lo, ht, [x], VNONE));
+                next.push(self.vop(hi, ht, [x], VNONE));
+            }
+            level.truncate(0);
+            level.extend_copy(&next);
+        }
+        out.extend_copy(&level);
+    }
+
+    // `compress_store(s, start, m, v)` (`args`, `s` by its address) by chunks of 16 or 8 bytes, as the C
+    // path's chunk form (`CEmit::compress_store_planned`): after the bounds check, when at least a chunk's
+    // lanes follow the packed ones, each chunk's active lanes move to the front by one byte shuffle (the
+    // `u8` `swizzle_zero` entry; its indices a row of a read-only table by the chunk's mask bits) and the
+    // whole chunk is stored at the running offset, which grows by the row's lane count (a second table,
+    // whose address an index reaches without an offset); the lanes that
+    // follow the packed ones are saved first and written back last. Else the lane loop (`vop` `code`).
+    // VNONE when no entry swizzles the chunk's bytes or the lanes do not chunk.
+    fn compress_chunks(self: &mut Self, c: &mut cbe::CEmit, args: []Value, code: u16, rt: u8) Value {
+        let vt = self.vty(args[3]);
+        let lb = type_bytes(lane_type(vt), self.pkg.ptr_bytes);
+        let n = lanes(vt);
+        let mut cb: u32 = ast::pick(n * lb >= 16, 16u32, 8u32);
+        let mut swz = String::new();
+        if !c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, cb, &mut swz) && cb == 16 {
+            cb = 8;
+            swz.clear();
+            if !c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, 8, &mut swz) {
+                return VNONE;
+            }
+        }
+        let cl = cb / lb;
+        if swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0 {
+            return VNONE;
+        }
+        // Row r of the table: the bytes of the lanes of mask r in order, then the others. Byte r of the
+        // second: row r's lane count.
+        let rows = 1u32 << cl;
+        let mut tb = String::with_capacity((rows * cb) as usize);
+        let mut tc = String::with_capacity(rows as usize);
+        for r in 0..rows {
+            for pass in 0..2u32 {
+                for i in 0..cl {
+                    if (r >> i & 1) == 1 - pass {
+                        for j in 0..lb {
+                            tb.push_byte((i * lb + j) as u8);
+                        }
+                    }
+                }
+            }
+        }
+        for r in 0..rows {
+            tc.push_byte(r.count_ones() as u8);
+        }
+        let it = int_type(self.pkg.ptr_bytes);
+        let bt = vec_type(T_I8, cb);
+        let m = self.int_to(args[2], T_I64, false);
+        let cnt = self.inst(O_POPCNT, T_I64, 0, m, VNONE, VNONE);
+        let st = self.int_to(args[1], it, false);
+        let ptr = self.load(T_PTR, args[0], 0, false);
+        let len = self.load(it, args[0], self.pkg.ptr_bytes, false);
+        let cw = self.int_to(cnt, it, false);
+        // `start > len`, then `count > len - start`: the trap names the count, the start and the length.
+        let pb = self.cold_block();
+        let f1 = self.icmp(C_UGT, st, len);
+        self.split(f1, pb, true);
+        let room = self.arith(O_SUB, len, st);
+        let f2 = self.icmp(C_UGT, cw, room);
+        self.split(f2, pb, true);
+        let after = self.arith(O_SUB, room, cw);
+        let wide = self.icmp(C_UGE, after, self.iconst(it, cl));
+        let fb = self.block();
+        let sb = self.block();
+        // The lane loop runs only where the output ends within a chunk of the packed lanes.
+        self.b.blocks.index_mut(sb as usize).flags = BLOCK_UNLIKELY;
+        let join = self.block();
+        let ef = self.edge(fb, NONE, NONE);
+        let es = self.edge(sb, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, wide, ef, es);
+        self.b.begin(pb);
+        let tys: [u32; 3] = [T_I64 as u32, T_I64 as u32, T_I64 as u32];
+        let targs: [Value; 3] = [cnt, self.int_to(st, T_I64, false), self.int_to(len, T_I64, false)];
+        let _ = self.call_sym("__sc_vec_bounds", targs[0..3], tys[0..3], T_NONE);
+        let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
+        self.b.begin(fb);
+        let p = self.ptradd(ptr, st, lb, 0);
+        let end = self.ptradd(p, cw, lb, 0);
+        let saved = self.load(bt, end, 0, true);
+        let s = self.rodata(&mut tb);
+        let ks = self.sym_of(s);
+        let tbl = self.inst(O_SYMADDR, T_PTR, 0, ks, 0, VNONE);
+        let sc = self.rodata(&mut tc);
+        let kc = self.sym_of(sc);
+        let tcnt = self.inst(O_SYMADDR, T_PTR, 0, kc, 0, VNONE);
+        let mut parts = Vector::<Value>::with_capacity((n / cl) as usize);
+        self.halves(args[3], n / cl, &mut parts);
+        let sty: [u32; 2] = [bt as u32, bt as u32];
+        let mut k = self.iconst(it, 0);
+        for j in 0..n / cl {
+            let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, j * cl), VNONE);
+            let bits = self.arith(O_AND, sh, self.iconst(T_I64, rows - 1));
+            // An index has a pointer's width.
+            let row = self.int_to(bits, it, false);
+            let ix = self.load(bt, self.ptradd(tbl, row, cb, 0), 0, true);
+            let x = self.inst(O_BITCAST, bt, 0, parts[j as usize], VNONE, VNONE);
+            let sargs: [Value; 2] = [x, ix];
+            let r = self.call_sym(&swz, sargs[0..2], sty[0..2], sig_code(bt, false));
+            self.store(r, self.ptradd(p, k, lb, 0), 0, true);
+            let rc = self.load(T_I8, self.ptradd(tcnt, row, 1, 0), 0, true);
+            k = self.arith(O_ADD, k, self.int_to(rc, it, false));
+        }
+        self.store(saved, end, 0, true);
+        let ej = self.edge(join, NONE, NONE);
+        let _ = self.inst(O_JMP, T_NONE, 0, ej, VNONE, VNONE);
+        self.b.begin(sb);
+        let _ = self.vop(code, rt, args, VNONE);
+        let ej2 = self.edge(join, NONE, NONE);
+        let _ = self.inst(O_JMP, T_NONE, 0, ej2, VNONE, VNONE);
+        self.b.begin(join);
+        return self.int_to(cnt, rt, false);
+    }
+
+    // Lane-wise vector operation `ename` (an entry of `chunks` times fewer lanes, `chunks` a power of two)
+    // over vector arguments `args`, of result type `rt`: each argument halved (`low_half`, `high_half`)
+    // down to the entry's lanes, one call per chunk, and the results joined (`concat`) in lane order. The
+    // splitting of wide vectors (`lir::wide`) makes the halves and joins parts of registers.
+    fn split_entry(self: &mut Self, ename: &String, args: []Value, chunks: u32, rt: u8) Value {
+        assert(chunks >= 2 && (chunks & chunks - 1) == 0, "split_entry: a power-of-two chunk count");
+        let cat = (irc::OP_SIMD + irc::SIMD_CONCAT as u32) as u16;
+        // Argument q's chunk j at q * chunks + j.
+        let mut parts = Vector::<Value>::with_capacity(args.len() * chunks as usize);
+        for q in 0..args.len() {
+            self.halves(args[q], chunks, &mut parts);
+        }
+        let mut level = Vector::<Value>::new();
+        let mut next = Vector::<Value>::new();
+        let mut tys = Vector::<u32>::with_capacity(args.len());
+        for q in 0..args.len() {
+            tys.push(self.vty(parts[q * chunks as usize]));
+        }
+        let ct = vec_type(lane_type(rt), lanes(rt) / chunks);
+        let cret = sig_code(ct, false);
+        level.truncate(0);
+        let mut one = Vector::<Value>::with_capacity(args.len());
+        for j in 0..chunks as usize {
+            one.truncate(0);
+            for q in 0..args.len() {
+                one.push(parts[q * chunks as usize + j]);
+            }
+            level.push(self.call_sym(ename.as_str(), one[0..one.len()], tys[0..tys.len()], cret));
+        }
+        while level.len() > 1 {
+            next.truncate(0);
+            for k in 0..level.len() / 2 {
+                let x = level[2 * k];
+                let wt = vec_type(lane_type(self.vty(x)), 2 * lanes(self.vty(x)));
+                next.push(self.vop(cat, wt, [x, level[2 * k + 1]], VNONE));
+            }
+            level.truncate(0);
+            level.extend_copy(&next);
+        }
+        return level[0];
+    }
+
     // The operand `opid` of a binary operator as a value: a reference operand reads its referent.
     fn bin_operand(
         self: &mut Self,
@@ -5822,16 +5999,27 @@ extend Lower {
             return acc;
         }
         // An operation one backend entry computes whole calls it (`CEmit::lir_simd_entry`): its intrinsics
-        // in place of the lane loop, which the inliner then splices.
+        // in place of the lane loop, which the inliner then splices; an entry of fewer lanes runs once per
+        // chunk (`split_entry`).
         let mut ename = String::new();
-        if ti.cls == VC_SCALAR && !mem_arg && c.lir_simd_entry(b, &rv, &mut ename) {
+        let mut chunks: u64 = 1;
+        if ti.cls == VC_SCALAR && !mem_arg && c.lir_simd_entry(b, &rv, &mut ename, &mut chunks) {
+            // A narrow result of a signed type comes back sign-extended, as the entry's own signature says.
+            let ret = ret_code(c, b.module, rv.target, ti.mty);
+            if chunks > 1 {
+                return self.split_entry(&ename, args[0..args.len()], chunks as u32, ti.mty);
+            }
             let mut tys = Vector::<u32>::with_capacity(args.len());
             for i in 0..args.len() {
                 tys.push(self.vty(args[i]));
             }
-            // A narrow result of a signed type comes back sign-extended, as the entry's own signature says.
-            let ret = ret_code(c, b.module, rv.target, ti.mty);
             return self.call_sym(&ename, args[0..args.len()], tys[0..tys.len()], ret);
+        }
+        if rv.c == irc::SIMD_COMPRESS_STORE && ti.cls == VC_SCALAR {
+            let r = self.compress_chunks(c, args[0..args.len()], code, rt);
+            if r != VNONE {
+                return r;
+            }
         }
         if ti.cls == VC_MEM {
             args.push(dst);
@@ -7935,8 +8123,9 @@ extend Lower {
     // An intrinsic that only loads or stores one vector (`intrin::mem_form`) as that load or store, with
     // no alignment; one of no instruction as its argument's bytes (a bitcast, a vector's low half, else
     // through a slot: a low part, or a wider value whose other bytes are zero; an argument through memory,
-    // `tys` its signature type, is read from its bytes); a lane read at a constant index as a `vextract`
-    // (`intrin::lane_read`): true, with the value in `out` (VNONE for a store), when `name` is one.
+    // `tys` its signature type, is read from its bytes); one scalar in every lane as a `splat`
+    // (`intrin::splat_form`); a lane read at a constant index as a `vextract` (`intrin::lane_read`): true,
+    // with the value in `out` (VNONE for a store), when `name` is one.
     fn mem_intrin(
         self: &mut Self,
         c: &cbe::CEmit,
@@ -7988,6 +8177,34 @@ extend Lower {
                 *out = self.load(ti.mty, s, 0, false);
             }
             return true;
+        }
+        // One scalar in every lane (`intrin::splat_form`), of the lanes' type or a wider integer.
+        let (sb, sf) = intrin::splat_form(name);
+        if (sb != 0 || !sf) && a.len() == 1 && ti.cls == VC_SCALAR && is_vec(ti.mty) {
+            let rb = type_bytes(ti.mty, 8);
+            let lt = if sb == 0 {
+                lane_type(ti.mty)
+            } else if sf {
+                ast::pick(sb == 4, T_F32, T_F64)
+            } else {
+                int_type(sb)
+            };
+            let vt = vec_type(lt, rb / type_bytes(lt, 8));
+            let at = self.vty(a[0]);
+            if at == lt || is_int(lt) && is_int(at) && type_bytes(at, 8) > type_bytes(lt, 8) {
+                let x = if at == lt {
+                    a[0]
+                } else {
+                    self.inst(O_TRUNC, lt, 0, a[0], VNONE, VNONE)
+                };
+                let v = self.inst(O_SPLAT, vt, 0, x, VNONE, VNONE);
+                *out = if vt == ti.mty {
+                    v
+                } else {
+                    self.inst(O_BITCAST, ti.mty, 0, v, VNONE, VNONE)
+                };
+                return true;
+            }
         }
         // A lane read at a constant index (`intrin::lane_read`).
         if intrin::lane_read(name) && a.len() == 2 && ti.cls == VC_SCALAR && is_vec(self.vty(a[0])) && lane_type(

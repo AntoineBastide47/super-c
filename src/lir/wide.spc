@@ -1,10 +1,11 @@
 // Splitting of vectors wider than a register into register-wide parts, for the native backends
 // (`Package.vector`: the bytes of a register), which hold such a vector in memory and compute it chunk by
 // chunk through it (LLVM's type legalization of vectors by splitting). A lane-wise operation of a wide
-// vector (arithmetic, a square root, a fused multiply-add, a comparison, a select, a splat, a constant, a
-// lane's insert or extraction, which touch one part, a `vop` that traps in no lane: lane rules, a shift by
-// a scalar, a bitcast, an absolute difference, a lane mask's comparison and choice, an unchecked gather, a
-// masked load or store through a pointer), its load and its store become one per part, each part
+// vector (arithmetic, a square root, a fused multiply-add, a comparison, a select, a cast to a vector of as
+// many bytes, a splat, a constant, a lane's insert or extraction, which touch one part, a `vop` that traps
+// in no lane: lane rules, a shift by a scalar, a bitcast, an absolute difference, a lane mask's comparison
+// and choice, an unchecked gather, a masked load or store through a pointer), its load and its store
+// become one per part, each part
 // `Package.vector` bytes of consecutive lanes, which the register allocator keeps in registers; a block
 // parameter becomes one per part. A conversion of one width converts by parts, and an integer of a
 // register widens to two parts or narrows from two (`conv_parts`). A lane mask of a `vop` comparison (an
@@ -16,6 +17,12 @@
 // back, and a use that needs the whole stores the parts there and loads it, each at the use (its block
 // need not be dominated by another use's). The body is rebuilt in reverse postorder, so each value is
 // split before its uses; an unreached block becomes `unreachable`.
+//
+// Instructions in a row that each make part j from their operands' part j alone, with no trap and no
+// write (`riders`), go part by part when their parts may not fit the target's registers (`crowded`): a
+// part's values end before the next part's begin, so the run holds fewer registers than instruction by
+// instruction, which keeps every part of an operand to its last reader's last part (and keeps the parts'
+// loads in a row, which arm64 pairs).
 import lir::ir as *;
 import lir::verify as lv;
 import ir::core as core;
@@ -31,6 +38,9 @@ pub(package) struct Wide {
     mask: Vector<u32>, // per split old lane mask: its part count << 16 | the lanes of a part; else 0
     tmp: Vector<Value>, // one operand's parts (`parts_of`)
     types: Vector<u8>, // a block's new parameter types
+    pj: u32, // the one part the instructions of a run make now (`run_parts`), NONE: every part
+    accs: u32, // the vector registers a loop's reductions may hold (`Package.vec_accs`), half the target's
+    seen: Vector<Value>, // the split values a run reads or makes (`crowded`)
 }
 
 extend Wide {
@@ -45,17 +55,21 @@ extend Wide {
             mask: Vector::<u32>::new(),
             tmp: Vector::<Value>::new(),
             types: Vector::<u8>::new(),
+            pj: NONE,
+            accs: 0,
+            seen: Vector::<Value>::new(),
         };
     }
 
     /// Split the vectors of `b` wider than `rb` bytes, which holds one (`has_wide`) and is not naked,
     /// whose reached blocks are `order` in reverse postorder (`rpo`: per block, its position there, NONE
-    /// when unreached), into `out`.
-    pub(package) fn run(self: &mut Self, b: &Body, rb: u32, order: []u32, rpo: []u32, out: &mut Body) {
+    /// when unreached), into `out`; `accs` the target's `Package.vec_accs`.
+    pub(package) fn run(self: &mut Self, b: &Body, rb: u32, accs: u32, order: []u32, rpo: []u32, out: &mut Body) {
         let ni = b.insts.len();
         let np = b.params.len();
         self.ni = ni;
         self.rb = rb;
+        self.accs = accs;
         fill(&mut self.val, ni + np, VNONE);
         fill(&mut self.at, ni + np, NONE);
         fill(&mut self.slot, ni + np, NONE);
@@ -124,8 +138,18 @@ extend Wide {
             let k = order[n];
             let bk = b.blocks[k as usize];
             out.begin(k);
-            for i in bk.start..bk.start + bk.len {
-                self.inst(b, out, i);
+            let end = bk.start + bk.len;
+            let mut i = bk.start;
+            // Each step takes at least one instruction of the block.
+            while i < end {
+                let e = self.riders(b, i, end);
+                if e > i + 1 && self.crowded(b, i, e) {
+                    self.run_parts(b, out, i, e);
+                    i = e;
+                } else {
+                    self.inst(b, out, i);
+                    i += 1;
+                }
             }
         }
         // A scope's root, renumbered; one in no reached block goes.
@@ -152,6 +176,143 @@ extend Wide {
     // The type of a part of a vector of type `t` (`splits`).
     const fn part_type(self: &Self, t: u8) u8 {
         return vec_type(lane_type(t), lanes(t) / self.count(t));
+    }
+
+    // The end of the run of instructions from `i0` (before `end`) that go part by part (`run_parts`): each
+    // makes part j of its split result, of the run's part count, from part j of its split operands alone,
+    // traps in no lane and writes nothing: a load, a lane-wise operation but an integer division or
+    // remainder, a `vop` of rule `SR_VEC` over operands of its type (`vop_parts`). Each operand's part is at
+    // hand with no new instruction (`at_hand`). `i0` when the instruction there is none.
+    const fn riders(self: &Self, b: &Body, i0: u32, end: u32) u32 {
+        let mut n: u32 = 0;
+        for j in i0..end {
+            let t = b.insts[j as usize];
+            if !self.splits(t.ty) {
+                return j;
+            }
+            if j == i0 {
+                n = self.count(t.ty);
+            }
+            if self.count(t.ty) != n || !self.rides(b, t, i0, j, n) {
+                return j;
+            }
+        }
+        return end;
+    }
+
+    // Whether the run `i0..i1` (`riders`) may hold more vectors than the target has registers (twice
+    // `accs`; 0: a target that states none) instruction by instruction: the parts of every split value it
+    // reads or makes.
+    fn crowded(self: &mut Self, b: &Body, i0: u32, i1: u32) bool {
+        self.seen.truncate(0);
+        let mut us = Vector::<Value>::with_capacity(4);
+        for i in i0..i1 {
+            let t = b.insts[i as usize];
+            self.seen.push(i);
+            lv::uses_edges(b, t, &mut us);
+            for q in 0..us.len() {
+                let v = us[q];
+                if (v & VFLAG) == 0 && self.splits(b.type_of(v)) && !self.seen.contains(&v) {
+                    self.seen.push(v);
+                }
+            }
+        }
+        return self.accs != 0 && self.seen.len() as u32 * self.count(b.insts[i0 as usize].ty) > 2 * self.accs;
+    }
+
+    // Whether instruction `t` (`j`, of `n` parts) may join the run from `i0` (`riders`).
+    const fn rides(self: &Self, b: &Body, t: Inst, i0: u32, j: u32, n: u32) bool {
+        let op = t.op;
+        if op == O_LOAD {
+            return (t.aux & MEM_VOLATILE) == 0 && (t.c as i32) as i64 + (n * self.rb) as i64 <= 0x7FFFFFFF && self.at_hand(
+                b,
+                t.a,
+                i0,
+                j,
+                n,
+            );
+        }
+        if op == O_VOP {
+            let code = (t.aux & VOP_CODE) as u32;
+            if t.c != VNONE || t.b == 0 || t.b > 4 || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
+                return false;
+            }
+            let so = core::simd_op((code - core::OP_SIMD) as u8);
+            let signed_abs = code == core::OP_SIMD + core::SIMD_ABS as u32 && !is_float(lane_type(t.ty)) && (t.aux & VOP_SIGNED) != 0;
+            if so.rule != core::SR_VEC || so.effect != core::SM_NONE || signed_abs {
+                return false;
+            }
+            for q in 0..t.b {
+                let v = b.pool[(t.a + q) as usize];
+                if (v & VFLAG) != 0 || b.type_of(v) != t.ty || !self.at_hand(b, v, i0, j, n) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        let lane = op >= O_ADD && op <= O_MUL || op >= O_AND && op <= O_NOT || op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_FMA || op == O_VCMP || op == O_VSEL || op == O_SELECT;
+        if !lane {
+            return false;
+        }
+        let f = op_info(op).form;
+        return (!lv::operand_a(f) || t.a == VNONE || self.at_hand(b, t.a, i0, j, n)) && (!lv::operand_b(f) || t.b == VNONE || self.at_hand(
+            b,
+            t.b,
+            i0,
+            j,
+            n,
+        )) && (!lv::operand_c(f) || t.c == VNONE || self.at_hand(b, t.c, i0, j, n));
+    }
+
+    // Whether operand `v` of instruction `j` of the run from `i0` has its parts at hand with no new
+    // instruction: a split vector of `n` parts that the run makes or that is split already, or a value kept
+    // whole that is no split lane mask.
+    const fn at_hand(self: &Self, b: &Body, v: Value, i0: u32, j: u32, n: u32) bool {
+        if (v & VFLAG) != 0 {
+            return false;
+        }
+        let t = b.type_of(v);
+        if self.splits(t) {
+            return self.count(t) == n && (self.at[self.ix(v)] != NONE || (v & VPARAM) == 0 && v >= i0 && v < j);
+        }
+        return self.at[self.ix(v)] == NONE;
+    }
+
+    // The instructions `i0..i1` of a run (`riders`) part by part: the parts' places first, then each part's
+    // instructions in a row.
+    fn run_parts(self: &mut Self, b: &Body, out: &mut Body, i0: u32, i1: u32) {
+        let n = self.count(b.insts[i0 as usize].ty);
+        for i in i0..i1 {
+            self.at[i as usize] = self.parts.len() as u32;
+            for _ in 0..n {
+                self.parts.push(VNONE);
+            }
+        }
+        for j in 0..n {
+            self.pj = j;
+            for i in i0..i1 {
+                let _ = self.by_parts(b, out, i, b.insts[i as usize]);
+            }
+        }
+        self.pj = NONE;
+    }
+
+    // The first of the parts an instruction of `n` parts makes now, and the one past the last: every part,
+    // or the run's one (`pj`).
+    const fn span(self: &Self, n: u32) (u32, u32) {
+        if self.pj == NONE {
+            return (0, n);
+        }
+        return (self.pj, self.pj + 1);
+    }
+
+    // Part `j` of the value whose parts start at `first` is `p`: the next one, or in its place in a run.
+    fn set_part(self: &mut Self, first: u32, j: u32, p: Value) {
+        if self.pj == NONE {
+            self.parts.push(p);
+        } else {
+            self.parts[(first + j) as usize] = p;
+        }
     }
 
     // The value index of `v` in `val` and `at`.
@@ -630,21 +791,80 @@ extend Wide {
                 self.operand_parts(b, out, i, v, n, &mut ops);
             }
         }
-        let first = self.parts.len() as u32;
+        let first = ast::pick(self.pj == NONE, self.parts.len() as u32, self.at[i as usize]);
         let mut vs = Vector::<Value>::with_capacity(k as usize);
-        for j in 0..n as usize {
+        let (lo, hi) = self.span(n);
+        for j in lo..hi {
             vs.truncate(0);
-            for q in 0..k as usize {
-                vs.push(ops[q * n as usize + j]);
+            for q in 0..k {
+                vs.push(ops[(q * n + j) as usize]);
             }
             let list = out.pool_list(&vs);
             let p = self.put(b, out, i, Inst { op: O_VOP, ty: pt, aux: t.aux, a: list, b: k, c: VNONE });
-            self.parts.push(p);
+            self.set_part(first, j, p);
         }
         self.at[i as usize] = first;
         if cmp {
             self.mask[i as usize] = n << 16 | l;
         }
+        return true;
+    }
+
+    // `low_half` or `high_half` of a split vector, or `concat` into one: a selection of the operand's parts
+    // or a join of the operands' parts, no instruction (the lowering halves wide vectors to an entry's lanes,
+    // `Lower::split_entry`). A half one register wide is that part; an operand one register wide is one
+    // part. Whether it did.
+    fn half_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        let lo = code == core::OP_SIMD + core::SIMD_LOW_HALF as u32;
+        let hi = code == core::OP_SIMD + core::SIMD_HIGH_HALF as u32;
+        let cat = code == core::OP_SIMD + core::SIMD_CONCAT as u32;
+        if !(lo || hi || cat) || t.c != VNONE || t.b != ast::pick(cat, 2u32, 1u32) {
+            return false;
+        }
+        let v0 = b.pool[t.a as usize];
+        let t0 = b.type_of(v0);
+        if (v0 & VFLAG) != 0 || !is_vec(t0) {
+            return false;
+        }
+        if !cat {
+            if !self.splits(t0) || 2 * type_bytes(t.ty, 8) != type_bytes(t0, 8) || self.count(t0) % 2 != 0 {
+                return false;
+            }
+            self.parts_of(b, out, i, v0);
+            let h = self.tmp.len() / 2;
+            let from = ast::pick(hi, h, 0);
+            if h == 1 {
+                self.val[i as usize] = self.tmp[from];
+                return true;
+            }
+            let first = self.parts.len() as u32;
+            for j in 0..h {
+                self.parts.push(self.tmp[from + j]);
+            }
+            self.at[i as usize] = first;
+            return true;
+        }
+        let v1 = b.pool[(t.a + 1) as usize];
+        let one = !self.splits(t0) && type_bytes(t0, 8) == self.rb;
+        if (v1 & VFLAG) != 0 || b.type_of(v1) != t0 || 2 * type_bytes(t0, 8) != type_bytes(t.ty, 8) || !self.splits(
+            t.ty,
+        ) || !(one || self.splits(t0)) {
+            return false;
+        }
+        let first = self.parts.len() as u32;
+        for v in [v0, v1] {
+            if one {
+                let w = self.whole(b, out, i, v);
+                self.parts.push(w);
+            } else {
+                self.parts_of(b, out, i, v);
+                for j in 0..self.tmp.len() {
+                    self.parts.push(self.tmp[j]);
+                }
+            }
+        }
+        self.at[i as usize] = first;
         return true;
     }
 
@@ -814,12 +1034,12 @@ extend Wide {
     fn by_parts(self: &mut Self, b: &Body, out: &mut Body, i: u32, t: Inst) bool {
         let op = t.op;
         if op == O_VOP {
-            return self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(b, out, i, t) || self.slide_parts(
+            return self.half_parts(b, out, i, t) || self.masked_parts(b, out, i, t) || self.vop_parts(b, out, i, t) || self.reduce_parts(
                 b,
                 out,
                 i,
                 t,
-            );
+            ) || self.slide_parts(b, out, i, t);
         }
         if (op == O_AND || op == O_OR || op == O_XOR) && is_int(t.ty) {
             return self.mask_op(b, out, i, t);
@@ -898,16 +1118,22 @@ extend Wide {
         }
         let n = self.count(t.ty);
         let pt = self.part_type(t.ty);
-        let lane_op = op >= O_ADD && op <= O_NOT || op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_FMA || op == O_VCMP || op == O_VSEL || op == O_SELECT;
+        // A cast of a split vector of as many bytes casts each part.
+        let cast = op == O_BITCAST && (t.a & VFLAG) == 0 && self.splits(b.type_of(t.a)) && type_bytes(b.type_of(t.a), 8) == type_bytes(
+            t.ty,
+            8,
+        );
+        let lane_op = op >= O_ADD && op <= O_NOT || op >= O_FADD && op <= O_FNEG || op == O_FSQRT || op == O_FMA || op == O_VCMP || op == O_VSEL || op == O_SELECT || cast;
         let load = op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 && (t.c as i32) as i64 + (n * self.rb) as i64 <= 0x7FFFFFFF;
         if !lane_op && !load && op != O_SPLAT && op != O_WCONST {
             return false;
         }
         let x = i as usize;
-        let first = self.parts.len() as u32;
+        let first = ast::pick(self.pj == NONE, self.parts.len() as u32, self.at[x]);
+        let (lo, hi) = self.span(n);
         if load {
             let a = self.whole(b, out, i, t.a);
-            for j in 0..n {
+            for j in lo..hi {
                 let p = self.put(
                     b,
                     out,
@@ -921,7 +1147,7 @@ extend Wide {
                         c: (t.c as i32 + (j * self.rb) as i32) as u32,
                     },
                 );
-                self.parts.push(p);
+                self.set_part(first, j, p);
             }
         } else if op == O_SPLAT {
             // One splat for every part.
@@ -952,7 +1178,7 @@ extend Wide {
             if lv::operand_c(f) && t.c != VNONE {
                 self.operand_parts(b, out, i, t.c, n, &mut oc);
             }
-            for j in 0..n as usize {
+            for j in lo..hi {
                 let mut u = t;
                 u.ty = if op == O_VCMP {
                     mask_type(self.part_type(b.type_of(t.a)))
@@ -960,16 +1186,16 @@ extend Wide {
                     pt
                 };
                 if oa.len() != 0 {
-                    u.a = oa[j];
+                    u.a = oa[j as usize];
                 }
                 if ob.len() != 0 {
-                    u.b = ob[j];
+                    u.b = ob[j as usize];
                 }
                 if oc.len() != 0 {
-                    u.c = oc[j];
+                    u.c = oc[j as usize];
                 }
                 let p = self.put(b, out, i, u);
-                self.parts.push(p);
+                self.set_part(first, j, p);
             }
         }
         self.at[x] = first;

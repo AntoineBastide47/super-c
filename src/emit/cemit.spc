@@ -764,6 +764,9 @@ extend CEmit {
             l.pkg.sse41 = feature(pk, "sse4.1");
             l.pkg.vtbl = feature(pk, "ssse3");
             l.pkg.mask_bits = tgt::isa(pk.arch).mask_bits;
+            l.pkg.lane_insert = tgt::isa(pk.arch).lane_insert;
+            l.pkg.vminnum = tgt::isa(pk.arch).vminnum;
+            l.pkg.isa = tgt::isa(pk.arch).name;
             l.pkg.addsub = feature(pk, "sse3");
             l.pkg.lzcnt = feature(pk, "lzcnt");
             l.pkg.lse = feature(pk, "lse");
@@ -10381,10 +10384,18 @@ extend CEmit {
     }
 
     /// The symbol of the `@simd_impl` entry that computes lane-wise or reducing vector operation `rv` of
-    /// `b` whole under the current features (`simd_plan`'s PF_NATIVE), into `out`: the native lowering
-    /// calls it in place of its lane loop, as the C path does. False for an operation that traps (the
-    /// lane loop checks its lanes first), a mask result, operands of other shapes, or another plan.
-    pub(package) fn lir_simd_entry(self: &mut Self, b: &ir::CoreBody, rv: &ir::Rvalue, out: &mut String) bool {
+    /// `b` under the current features, into `out`, and in `chunks` the calls it takes: 1 for an entry of
+    /// all the lanes (`simd_plan`'s PF_NATIVE), the plan's chunk count for a lane-wise operation the
+    /// widest entry computes in chunks (PF_SPLIT). The native lowering calls it in place of its lane
+    /// loop, as the C path does. False for an operation that traps (the lane loop checks its lanes
+    /// first), a mask result, operands of other shapes, a split reduction, or the lane loop's plan.
+    pub(package) fn lir_simd_entry(
+        self: &mut Self,
+        b: &ir::CoreBody,
+        rv: &ir::Rvalue,
+        out: &mut String,
+        chunks: &mut u64,
+    ) bool {
         let c = rv.c;
         if !self.simd_on || rv.kind != ir::RV_SIMD || rv.b == 0 {
             return false;
@@ -10426,10 +10437,26 @@ extend CEmit {
         let fl = bt == BuiltinType::BT_F32 || bt == BuiltinType::BT_F64;
         let op = ir::OP_SIMD + pick(c == ir::SIMD_ABS && !fl, ir::SIMD_WRAP_ABS, c) as u32;
         let pl = self.vplan_quiet(op, bt, r, n);
-        if pl.form != sp::PF_NATIVE {
+        if pl.form == sp::PF_NATIVE {
+            *chunks = 1;
+        } else if pl.form == sp::PF_SPLIT && rule != ir::SR_REDUCE && pl.chunks >= 2 {
+            *chunks = pl.chunks;
+        } else {
             return false;
         }
-        let en = *self.p().simd_table.at(pl.entry as usize);
+        return self.lir_entry_sym(pl.entry, out);
+    }
+
+    /// The symbol of the `@simd_impl` entry that computes vector operation `c` over `n` lanes of `t` whole,
+    /// result lanes `r`, under the current features (`ventry`), into `out`; false when none does.
+    pub(package) fn lir_entry(self: &mut Self, c: u8, t: BuiltinType, r: BuiltinType, n: u64, out: &mut String) bool {
+        let e = self.ventry(ir::OP_SIMD + c as u32, t, r, n);
+        return self.simd_on && e >= 0 && self.lir_entry_sym(e as u32, out);
+    }
+
+    // The native symbol of table entry `e`, into `out`.
+    fn lir_entry_sym(self: &mut Self, e: u32, out: &mut String) bool {
+        let en = *self.p().simd_table.at(e as usize);
         out.push_str("__sc_si_");
         let tg = self.mg.method_target(en.module, en.node);
         return self.mg.fn_sym(en.module, en.node, tg, out);

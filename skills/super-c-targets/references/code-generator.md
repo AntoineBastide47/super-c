@@ -259,7 +259,8 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   x86-64 has no such operand form and keeps its copy.
 - Views (arm64 and x86-64, `lv::FOLD_VIEW`): a conversion that keeps its operand's bits makes no value
   of its own. `Live::view` names, per such instruction, the value it is a view of: a truncation, a
-  cast between a pointer and an integer no wider, a pointer's copy (`ptradd` of nothing), and a zero
+  cast between a pointer and an integer no wider, a pointer's copy (`ptradd` of nothing), a cast
+  between two vectors of one size (the lanes' bits as they are, in the same home), and a zero
   extension of a load or of a zero extension. The view has that value's index (`Live::vix`), so it
   has no register, no home and no range; `Live::uses_at` lists the value for each read of the view
   (`Live::seen`, `Live::arg` for an edge's argument), and the value lives to the view's last read. A
@@ -270,8 +271,8 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   `clean` shortcut and every extension in place for it; a value a zero extension is a view of
   (`Live::wide`) holds zeros above its bits from its definition on (`end_inst` extends it in place
   when its emitter left it not `clean`) and is stored 8 bytes wide (`Core::xty`), so a read at the
-  extension's type from its home is right. No view of a constant or an address, which each use makes
-  again, of a folded instruction, or of a 128-bit, float or vector value.
+  extension's type from its home is right. No view of a constant (a vector's too) or an address,
+  which each use makes again, of a folded instruction, or of a 128-bit or float value.
 - Byte conditions (arm64 `cond_test`): a branch on an `i8` value that no comparison folds into tests
   the register with `cbz`/`cbnz` when it holds zeros above the byte (`clean`), bit 0 with `tbz`/`tbnz`
   when the value is 0 or 1 (`lir::ir::zero_one`: a call's `bool` result, whose register may hold

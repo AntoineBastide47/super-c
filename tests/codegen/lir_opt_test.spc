@@ -209,6 +209,57 @@ fn main() i32 {
 }
 )";
 
+// `copysign(1.0, x) < 0.0` (`f32::is_sign_negative` as `copysign_bits` expands it) is the test of `x`'s sign
+// bit, `> 0.0` its negation, on any `x`: zeros, NaNs and infinities of either sign. A constant's bits read
+// as a float, and the float negated, are constants.
+@test
+fn a_copysign_test_of_zero_is_a_sign_bit_test() {
+    let src = M"(lir ptr 8
+sym @neg fn global noinline
+sym @pos fn global noinline
+fn @neg
+  sig (f32) -> i8
+b0(v0: f32):
+  v1 = fconst.f32 0x3f800000
+  v2 = bitcast.i32 v1
+  v3 = iconst.i32 2147483647
+  v4 = and.i32 v2, v3
+  v5 = bitcast.i32 v0
+  v6 = iconst.i32 -2147483648
+  v7 = and.i32 v5, v6
+  v8 = or.i32 v4, v7
+  v9 = bitcast.f32 v8
+  v10 = fconst.f32 0x0
+  v11 = fcmp.olt v9, v10
+  ret v11
+fn @pos
+  sig (f32) -> i8
+b0(v0: f32):
+  v1 = iconst.i32 1073741824
+  v2 = bitcast.i32 v0
+  v3 = iconst.i32 -2147483648
+  v4 = and.i32 v2, v3
+  v5 = or.i32 v1, v4
+  v6 = bitcast.f32 v5
+  v7 = fconst.f32 0x80000000
+  v8 = fneg.f32 v7
+  v9 = fcmp.ogt v6, v8
+  ret v9
+)";
+    let (b, a) = optimized(src);
+    for f in ["neg", "pos"] {
+        let t = text_of(&a, f);
+        assert(!t.contains("fcmp") && !t.contains("bitcast.f32") && !t.contains("fneg"), t.as_str());
+    }
+    let xs: [u64; 8] = [0x80000000, 0, 0x7FC00000, 0xFFC00000, 0x7F800000, 0xFF800000, 0xBF800000, 0x00000001];
+    for k in 0..8usize {
+        let args: []u64 = [unsafe xs[k]];
+        let neg = unsafe xs[k] >> 31;
+        same_result(&b, &a, "neg", args, neg);
+        same_result(&b, &a, "pos", args, 1 - neg);
+    }
+}
+
 // Assert that `src` gives the same output built for debug and for release, and return the release
 // build's `SC_LIR_PRINT=name` output: one release build serves both. The vector lane builds every
 // differential program for wasm32, so there the text comes from a host build of its own.
@@ -1866,7 +1917,9 @@ b0(v0: i32, v1: i32):
 // A remainder by the divisor of a dominating quotient is a product and a difference (`dm`); a signed
 // remainder by 2^s compared with a constant is a mask of the low bits and the sign (`odd`, `neg`), or a
 // constant when no remainder equals it (`never`); a bit count of a zero extension counts at the narrow
-// type, and the truncations of its sums back to that type drop their extensions (`clz`, `ctz`).
+// type, and the truncations of its sums back to that type drop their extensions (`clz`, `ctz`); a
+// population count of an extension another instruction reads stays wide, as the narrow one would extend
+// its operand a second time (`pop2`), one of an extension it alone reads counts narrow (`pop`).
 @test
 fn quotient_remainders_and_narrow_counts_simplify() {
     let (b, a) = optimized(
@@ -1877,6 +1930,8 @@ sym @neg fn global
 sym @never fn global
 sym @clz fn global
 sym @ctz fn global
+sym @pop fn global
+sym @pop2 fn global
 fn @dm
   sig (i32, i32) -> i32
 b0(v0: i32, v1: i32):
@@ -1934,6 +1989,21 @@ b0(v0: i16):
   v4 = ctz.i64 v3
   v5 = trunc.i32 v4
   ret v5
+fn @pop
+  sig (i16) -> i64
+b0(v0: i16):
+  v1 = zext.i64 v0
+  v2 = popcnt.i64 v1
+  ret v2
+fn @pop2
+  sig (i16) -> i64
+b0(v0: i16):
+  v1 = zext.i64 v0
+  v2 = popcnt.i64 v1
+  v3 = iconst.i64 8
+  v4 = shl.i64 v1, v3
+  v5 = add.i64 v2, v4
+  ret v5
 )",
     );
     let d = text_of(&a, "dm");
@@ -1949,6 +2019,10 @@ b0(v0: i16):
     assert(c.contains("clz.i32") && !c.contains("i64"), c.as_str());
     let z = text_of(&a, "ctz");
     assert(z.contains("ctz.i16") && !z.contains("i64"), z.as_str());
+    let pc = text_of(&a, "pop");
+    assert(pc.contains("popcnt.i16"), pc.as_str());
+    let pw = text_of(&a, "pop2");
+    assert(pw.contains("popcnt.i64") && !pw.contains("popcnt.i16"), pw.as_str());
     let x: []u64 = [100, 7];
     same_result(&b, &a, "dm", x, 16);
     let o: []u64 = [0xFFFFFFFF];
@@ -1966,6 +2040,9 @@ b0(v0: i16):
     same_result(&b, &a, "ctz", u, 16);
     let v: []u64 = [0x40];
     same_result(&b, &a, "ctz", v, 6);
+    let w: []u64 = [0xF0F1];
+    same_result(&b, &a, "pop", w, 9);
+    same_result(&b, &a, "pop2", w, 9 + 0xF0F100);
 }
 
 // A jump to a block that only returns returns itself: the value the edge passes (`arms`, whose calls then

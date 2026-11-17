@@ -1417,21 +1417,6 @@ const fn oref(p: *mut ob::Obj) &'static mut ob::Obj {
     return unsafe &mut *p;
 }
 
-/// The LIR condition of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`): of floats, else signed or not.
-pub(package) const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
-    let k = (c - core::SIMD_CMP_EQ) as usize;
-    let f: [u16; 6] = [C_OEQ, C_UNE, C_OLT, C_OLE, C_OGT, C_OGE];
-    let s: [u16; 6] = [C_EQ, C_NE, C_SLT, C_SLE, C_SGT, C_SGE];
-    let u: [u16; 6] = [C_EQ, C_NE, C_ULT, C_ULE, C_UGT, C_UGE];
-    return if fl {
-        unsafe f[k]
-    } else if sg {
-        unsafe s[k]
-    } else {
-        unsafe u[k]
-    };
-}
-
 /// The chunk of a copy with `left` bytes to go: the largest power of two up to both `left` and `max` (a
 /// power of two), at least 1.
 pub(package) const fn chunk(left: u32, max: u32) u32 {

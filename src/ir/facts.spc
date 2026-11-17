@@ -1949,7 +1949,7 @@ extend Facts {
 
     /// Is `sub` the field named `name` of the prelude view `view_ty` (a type of `b`'s module)?
     pub(package) const fn is_prelude_field(self: &Self, b: &ir::CoreBody, view_ty: TypeId, sub: NodeId, name: str) bool {
-        return cap::prelude_field(self.pkg, b.module, view_ty, sub, name);
+        return cap::prelude_field(self.pkg, b, view_ty, sub, name);
     }
 
     /// Does place `pl` reach into a prelude view's element buffer (its `ptr` field, then an index or
@@ -2975,7 +2975,7 @@ extend Facts {
     /// call kept collection facts through signature transparency.
     pub(package) fn apply_term(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, pure: bool) bool {
         // A call that returns a view of an argument's length (`ir::capture`): that argument's value
-        // before the call.
+        // before the call, which may write the argument's local (through a pointer to it).
         let vk = self.call_view_len(b, t);
         if t.kind == ir::TM_CALL && t.intr == ir::CI_NONE && (pure || self.call_transparent(b, t)) {
             // the prelude length getter writes nothing; a transparent call killed its roots
@@ -3009,21 +3009,24 @@ extend Facts {
         return false;
     }
 
-    // The value of the argument of call `t` that is the length of the view it returns, else none.
+    // The value, read before the call, of the argument of call `t` whose callee returns a view of that
+    // argument's length (`ir::capture` `returns_len`), else none.
     const fn call_view_len(self: &Self, b: &ir::CoreBody, t: &ir::Terminator) VKey {
         let cs = unsafe (&*self.pkg).cap_store;
-        if t.kind != ir::TM_CALL || t.dests_len != 1 || cs == null {
+        if t.kind != ir::TM_CALL || t.dests_len != 1 || t.intr != ir::CI_NONE || cs == null {
             return vkey_none();
         }
-        let i = unsafe (*(cs as *const cap::CaptureStore)).view_len_arg(self.pkg, t);
-        if i == ir::IR_NONE || i >= t.args_len {
+        let j = unsafe (*(cs as *const cap::CaptureStore)).returns_len(self.pkg, t);
+        if j >= t.args_len {
             return vkey_none();
         }
-        let k = self.vkey(b, b.oper_pool[(t.args_start + i) as usize]);
+        let k = self.vkey(b, b.oper_pool[(t.args_start + j) as usize]);
         return pick(k.is_local && k.off == 0, k, vkey_none());
     }
 
-    // Call `t`'s result, written now, is a view whose length is the value `k` (`call_view_len`).
+    // Call `t`'s one whole-local destination, written now, is a view whose length is the value `k`
+    // (`call_view_len`), as a struct literal's `len` is: only when the call and its destination's write
+    // left `k`'s local as it was (a callee that writes the local through a pointer gives no length).
     const fn bind_view_len(self: &mut Self, b: &ir::CoreBody, t: &ir::Terminator, k: &VKey) {
         if !k.is_local || self.ver(k.l) != k.v {
             return;
@@ -3143,11 +3146,22 @@ extend Facts {
                     let srcl = self.whole_local(b, op.data);
                     if srcl != ir::IR_NONE {
                         let sv = self.ver(srcl);
+                        // the view length the source holds: a fact of the value, which stays when the
+                        // source dies (an inlined callee's moved result)
+                        let rs = self.copy_root(srcl);
+                        let lb = *self.lenval.at(rs as usize);
+                        let keep_len = lb.ok && lb.my_v == self.ver(rs) && self.ver(lb.src) == lb.src_v;
                         self.write_place(b, s.place);
                         self.copyof.set(
                             dest as usize,
                             CopyBind { src: srcl, src_v: sv, my_v: self.ver(dest), ok: true },
                         );
+                        if keep_len && lb.src != dest {
+                            self.lenval.set(
+                                dest as usize,
+                                CopyBind { src: lb.src, src_v: lb.src_v, my_v: self.ver(dest), ok: true },
+                            );
+                        }
                         // a recorded read the copy takes on (its source may die, as a moved temporary)
                         for i in 0..self.reads.len() {
                             let r = self.reads[i];
@@ -3254,10 +3268,11 @@ extend Facts {
     // The value key of the `len` operand of a struct literal of a prelude view, else none.
     fn view_len_key(self: &Self, b: &ir::CoreBody, rv: &ir::Rvalue) VKey {
         let opid = cap::view_len_operand(self.pkg, b, rv);
-        if opid == ir::IR_NONE {
-            return vkey_none();
-        }
-        return self.vkey(b, opid);
+        return if opid == ir::IR_NONE {
+            vkey_none()
+        } else {
+            self.vkey(b, opid)
+        };
     }
 
     // A numeric cast of a whole local of an unsigned integer type into one at least as wide.

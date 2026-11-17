@@ -85,7 +85,7 @@ file is authoritative for where to look first.
 |------|----------|-----------|-------------|
 | Core CFG, RPO, idom | `ir::facts` `build_cfg` (bce) | facts state, per body | bce folds an edge |
 | The reference and pointer parameters each kept body may let outlive a call, and what each result may point into | `ir::capture` `CaptureStore::build` (one scan per kept lowering, then one worklist over the call edges), in `cemit_package` | `Package.cap_store` (`ir::facts` `callee_keeps`, `callee_returns_none` read it) | end of `cemit_package` |
-| The parameter whose value is the `len` of the prelude view a kept body returns (the body calls nothing and borrows no local; the literal's `len` copies, through copies, a parameter nothing writes) | `ir::capture` `view_len_param`, in `CaptureStore::build`; `view_len_arg` maps a call to the argument | `CaptureStore` `vlen`, per entry (`ir::facts` `call_view_len`, `bind_view_len` bind the result to the argument's length in `lenval`) | end of `cemit_package` |
+| The parameter whose value every view a kept body returns has as its length (`fn view(p, n) []T` of length `n`) | `ir::capture` `CaptureStore::build` (`view_len_param`, at most `RET_SCANS` rounds after the result fixpoint) | `CaptureStore.rlen`, per entry (`returns_len`; `ir::facts` `call_view_len` reads the argument's value before the call, `bind_view_len` binds the result's length to it when the call left the argument's local unchanged) | end of `cemit_package` |
 | The version of a place's one dynamic index local | `Facts::index_ver` | not stored | per call |
 | C control-flow shape (RPO, idom, postdominators, loops) | `emit::cflow` `build_into` | `cem.cf_ext` | read only by the C renderer; not built in a native build |
 | LIR lowering CFG (every core block's successors, which `share_plan` reads too) and dominators | `Lower::cfg`, `Lower::dominators` | `Lower` (`sat`, `sl`, `order`, `preds`, `idom`), per body | end of `Lower::body` |
@@ -148,12 +148,18 @@ keeps `K_NEST` (`enter_tables` gives the tables a fresh computation gives), and 
 | What the edges into a join block give its integer parameters: unsigned and signed ranges, values from before the join they are at most | `Opt::join_out` per edge, `join_in` at the join | `Opt` (`jat`, `jcnt`, `jfacts`: `JoinFact`) | the walk (cleared at its start) |
 | A loop's blocks and the block of each instruction for the loop transforms | `LoopOpt::shape` (from `Opt`'s `lb_at`, `lbs`), `LoopOpt::candidates` (a copy of `blk_of`, `pblock`, which the transforms extend) | `LoopOpt` (`inl`, `lblocks`, `owner`, `powner`) | the loop's transform |
 | Loop counter, trip count, exit test | `LoopOpt::counted_by`, `trip`, `cf_test` (`lir::loops`) | `LoopOpt`, per loop | the loop's transform |
+| The constant a back edge adds to a header parameter (`steps_by_one` asks it for 1), and whether an integer is a multiple of a power of 2 (`mult_of`: by its form alone; `Opt::low_zeros` reads the walk's replacement maps, which the loop transforms do not hold), and the bound and offset a bound of `opt`'s `offset_test` stands for (`offset_bound`) | `LoopOpt::step_of`, `mult_of`, `offset_bound` (`lir::loops`) | not stored (`checks` keeps the guard's reduction in `gred`) | per call |
 | The bounds checks a versioned loop drops and their count (a check against the lesser of two lengths counts two) | `LoopOpt::checks` | `LoopOpt` (`gchecks`, `cap_len`, `cap_v`) | the loop's transform |
 | Header counts and shape test of a loop | `LoopOpt::header_counts` | caller | the loop's transform |
 | Per candidate loop, the blocks that read its values | `LoopOpt::close_index` (one walk of the body over the blocks a candidate header dominates), `close_scan` | `LoopOpt` (`xs_at`, `xs`, `xdone`, `xof`) | the loop's transform |
 | Closed form's leaving values and their targets | `LoopOpt::close_plan` (no change), then `close_apply` | `LoopOpt` (`lout`, `tgt_of`, `tused`, `cf_leave`) | `close_apply` |
 | Promotion candidates, the slots addresses derive (`collect`, for `merges` too) | `Promoter::collect`, `Promoter::merges` (`lir::promote`; graph and operand lists from `Opt`) | `Promoter` | the promotion |
 | The loads made before a copy for the loads of the slot it feeds (copy, offset, type -> value) | `Opt::copy_fed`, from `slot_writes`' tables | `Opt` (`fed_key`, `fed_ty`, `fed_v`) | each walk |
+| A loop's carried modulo accumulators: the accesses through a `VK_MADDR` address whose copies cover all `K` lanes, of a slot only accesses and offsets read | `LoopOpt::carry` (`slot_root`, `slot_private`), in `vectorize` | `LoopOpt` (`vcar`, `vcur`) | the loop's vectorization |
+| A vector loop's aligned-block loads: contiguous loads before an early exit through no counted slice (`vblk`), and the loads of a branch's side through no counted slice with their condition and side (`lcl`, `lclc`, `lclw`, from `linearize`) | `LoopOpt::vplan_with`, `linearize` | `LoopOpt` | the loop's vectorization |
+| A loop's loads through one pointer after stores through another: both bases, scales and byte ranges | `LoopOpt::apart_plan` | `LoopOpt` (`abase`, `ascale`, `alo`, `ahi`) | the loop's `version` (`apart_guard`, `copy_at`) |
+| A minimumNumber or maximumNumber reduction's select chain, its sign test any form (`ir::sign_test`, shared with `Opt::simplify`'s copysign fold) | `LoopOpt::num_red` | `LoopOpt` (`vfr`, `vk` VK_RCMP) | the loop's vectorization |
+| Whether the bits of a multi-register lane mask have a reader besides a count of them | `Opt::bits_kept` (one walk of the body's operand lists) | not stored | per call |
 | SLP predecessor tables | `Slp::plan` (`lir::slp`; block map and use counts from `Opt`'s `blk_of`, `pblock`, `ops`) | `Slp` | the packing |
 | Operand lists of one instruction | `lir::verify` `uses`, `uses_into` | caller's vector | per call |
 
@@ -189,6 +195,7 @@ either.
 | Wasm structure (idom, loop headers, forward edges) | `codegen::structure` `Shape::run` (reads `Live`'s `rpo`, `pat`, `preds`) | `Shape` | end of the function |
 | Call layout of a signature | `call_layout` (a64gen, x64gen), `cc::classify` | `Gen` (`lays`, `lay_at`) | end of the function |
 | Intrinsic template of each body symbol | `intrin::of_symbols` | `Gen.itpl` | end of the function |
+| Per intrinsic call, the argument whose register its template writes the result into (arm64, x86-64) | `a64gen`, `x64gen` `call_over`, before `assign` | `Live.cover` (read by `Live::over`) | each plan of the body |
 | Calls that return, clobber, dead ends | `call_tables` | `Gen` (`cret`, `cpre`, `rarec`) | end of the function |
 | Object symbol of a package symbol | `osym_of` (wasm `pkg_osym`) | `Gen.osym` (`place::Osyms`, from the native objects' pool) | end of the object |
 | Object sections, symbols, relocations | `codegen::obj` `Obj` | `Obj`, then the object bytes | the object write |

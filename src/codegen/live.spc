@@ -183,7 +183,8 @@ pub(package) const FOLD_ADDSUB: u64 = 1125899906842624;
 pub(package) const FOLD_XUSE: u64 = 9007199254740992;
 pub(package) const FOLD_ADDSUB_WIDE: u64 = 2251799813685248;
 /// `FOLD_VIEW`: an instruction that keeps its operand's bits (a truncation, a cast between a pointer and
-/// an integer no wider, a pointer's copy: `ptradd` of nothing) makes no value of its own: it is a view of
+/// an integer no wider, a pointer's copy: `ptradd` of nothing, a cast between two vectors of one size)
+/// makes no value of its own: it is a view of
 /// its operand (`Live::view`), which every read of it reads, at its own type (a target whose registers hold
 /// both). The operand lives to the view's last read, in one register for both. So is a zero extension of
 /// a load or of a zero extension: the generator keeps the bits above such a value zero in its register
@@ -429,6 +430,10 @@ pub(package) struct Live {
     /// (the result's register for a returned value), REG_NONE for none: the plan gives it that one when it
     /// can.
     pub(package) rhint: Vector<u8>,
+    /// Per instruction (the generator's, before `assign`; empty: none), the argument a call writes its
+    /// result over (an intrinsic's template that writes the register both arrive in, which the generator
+    /// renames when the argument ends there: `over`), NONE for none.
+    pub(package) cover: Vector<u32>,
     /// Per value (the generator's, before `assign`; empty: none), the register a load of one part of an
     /// aggregate the body takes in registers finds its value in (`place::parts_taken`), REG_NONE for
     /// another value: the plan leaves it there when it can, as a parameter of the signature (`arr`).
@@ -610,6 +615,7 @@ extend Live {
             solo: Vector::<u64>::new(),
             multi: Vector::<u64>::new(),
             rhint: Vector::<u8>::new(),
+            cover: Vector::<u32>::new(),
             part_in: Vector::<u8>::new(),
             part_quiet: 0,
             quiet_out: 0,
@@ -2052,7 +2058,12 @@ extend Live {
                 continue;
             }
             let (fb, tb) = (word_bits(b.type_of(t.a)), word_bits(t.ty));
-            if fb == 0 || tb == 0 || tb > fb != zx {
+            // A cast between two vectors of one size: the lanes' bits as they are, in the same home.
+            let vcast = t.op == O_BITCAST && is_vec(t.ty) && is_vec(b.type_of(t.a)) && type_bytes(t.ty, 8) == type_bytes(
+                b.type_of(t.a),
+                8,
+            );
+            if !vcast && (fb == 0 || tb == 0 || tb > fb != zx) {
                 continue;
             }
             // A zero extension: of an instruction whose register holds zeros above its bits, a load or
@@ -2069,7 +2080,7 @@ extend Live {
             let r = self.seen(t.a);
             if is_inst(r) {
                 let o = b.insts[r as usize].op;
-                if self.pfold[r as usize] || o == O_ICONST || o == O_FCONST || o == O_SLOTADDR || o == O_SYMADDR {
+                if self.pfold[r as usize] || o == O_ICONST || o == O_FCONST || o == O_SLOTADDR || o == O_SYMADDR || o == O_WCONST {
                     continue;
                 }
             }
@@ -3801,7 +3812,8 @@ extend Live {
     /// lives past its block. No instruction takes a float as an immediate, and a wide integer takes several
     /// to build, so recomputing one at each use costs instructions every iteration: a generator asks a
     /// register for its whole range instead (an integer one when building it takes more than one
-    /// instruction). After `run`.
+    /// instruction), and a symbol's address (arm64 builds one with ADRP and ADD; x86-64 one LEA at each
+    /// indexed access, which takes no RIP-relative base). After `run`.
     pub(package) fn loop_consts(self: &mut Self, b: &Body, out: &mut Vector<bool>) {
         out.truncate(0);
         out.resize_default(b.insts.len());
@@ -3814,7 +3826,12 @@ extend Live {
                 let a = self.ua[i as usize];
                 for u in a..a + self.un[i as usize] {
                     let v = self.uv[u as usize];
-                    if (v & (VPARAM | VFLAG)) == 0 && (b.insts[v as usize].op == O_FCONST || b.insts[v as usize].op == O_ICONST) {
+                    let op = if (v & (VPARAM | VFLAG)) == 0 {
+                        b.insts[v as usize].op
+                    } else {
+                        O_RET
+                    };
+                    if op == O_FCONST || op == O_ICONST || op == O_SYMADDR {
                         let d = self.def_blk[v as usize];
                         out[v as usize] = out[v as usize] || self.end[v as usize] > self.pos[d as usize];
                     }
@@ -5289,7 +5306,8 @@ extend Live {
     // argument before they write a parameter) or as a switch's scrutinee, or an instruction every generator
     // emits reading its first operand before it writes its result (`over_inst`), `x` its first operand
     // alone; on a target that reads them all before (`three`), any operand of a `three_op`; on one that
-    // writes over an operand (`two`), an operand a `two_op` may be written over.
+    // writes over an operand (`two`), an operand a `two_op` may be written over; a call's argument the
+    // generator writes its result over (`cover`).
     const fn over(self: &Self, b: &Body, x: u32, l: u32) bool {
         let v = Live::val_of(b, x);
         if v == VNONE {
@@ -5311,6 +5329,9 @@ extend Live {
                 }
             }
             return m == n;
+        }
+        if t.op == O_CALL && l as usize < self.cover.len() && self.cover[l as usize] != NONE {
+            return n == 1 && self.seen(b.pool[(t.c + self.cover[l as usize]) as usize]) == v;
         }
         return n == 1 && self.seen(t.a) == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
             b,

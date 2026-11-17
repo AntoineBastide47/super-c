@@ -5626,12 +5626,14 @@ extend Interp {
         return self.str_object(m, v.ty, &mut bytes);
     }
 
-    // A `str` value of type `ty` (of module `m`) over a static copy of `bytes`.
+    // A `str` value of type `ty` (of module `m`) over a static copy of `bytes`; for a pointer type, the
+    // copy's address.
     fn str_object(self: &mut Self, m: ModuleId, ty: TypeId, bytes: &mut Vector<u8>) IVal {
-        // the str struct decl comes from the value's own type
+        // the str struct decl comes from the value's own type; a pointer type takes the bytes' address
         let a = unsafe &*self.p().module_ast_const(m);
         let mut dm: ModuleId = 0;
         let mut dn = NODE_NONE;
+        let ptr = ty != TYPE_NONE && a.type_at(ty).kind == TypeKind::TYPE_POINTER;
         if ty != TYPE_NONE {
             let y = *a.type_at(ty);
             if y.kind == TypeKind::TYPE_STRUCT {
@@ -5643,7 +5645,7 @@ extend Interp {
                 dn = it2.decl;
             }
         }
-        if dn == NODE_NONE {
+        if dn == NODE_NONE && !ptr {
             return self.bail();
         }
         // The C literal the emitter spells ends in a NUL past `len`, which code that hands a literal's
@@ -5665,6 +5667,9 @@ extend Interp {
                 k as usize,
                 iv_int(0, Ast::builtin(BuiltinType::BT_U8), bytes[k as usize]),
             );
+        }
+        if ptr {
+            return iv_ptr(0, ty, block, 0);
         }
         let so = self.obj_decl(self.field_count(dm, dn), dm, dn);
         if so == 0 {
@@ -6456,13 +6461,19 @@ extend Interp {
         if c.kind == ir::CK_STR {
             let sp = c.raw;
             // `f` carries the literal form: token type | seg << 8 (the lowering encodes it)
-            return IVal {
+            let v = IVal {
                 kind: IV_STR,
                 tm: b.module,
                 ty: c.ty,
                 i: sp.start as i64 << 32 | sp.end as i64,
                 f: c.val as f64,
             };
+            // A literal's pointer (`"text".ptr()`): the address of its bytes.
+            let pa = unsafe &*self.p().module_ast_const(b.module);
+            if c.ty != TYPE_NONE && pa.type_at(c.ty).kind == TypeKind::TYPE_POINTER {
+                return self.str_materialize(b.module, v);
+            }
+            return v;
         }
         return self.bail();
     }

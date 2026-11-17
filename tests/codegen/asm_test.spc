@@ -2264,18 +2264,39 @@ fn template_registers_read_written_and_renamed() {
     let tbl = "tbl v0.16b, { v0.16b, v1.16b }, v2.16b";
     let listed = intrin::vlisted(tbl, 0) && intrin::vlisted(tbl, 1);
     assert(listed && !intrin::vlisted(tbl, 2), "a register list keeps its registers");
+    assert(!intrin::vlisted("tbl v0.16b, { v0.16b }, v1.16b", 0), "a list of one register is any register");
     let mut o = String::new();
     let f: []u32 = [1, 0];
     let t: []u32 = [17, 5];
-    intrin::vrename(true, a, f, t, &mut o);
+    intrin::vrename(true, a, f, t, (99, 99), &mut o);
     assert_eq(o.as_str(), "fmla v5.4s, v2.4s, v17.4s\nfmov w0, s5");
+    // One instruction that writes its first source: the sources read the argument's register, the
+    // destination stays; never for an instruction that reads its destination or for several instructions.
+    let fm = "fmax v0.4s, v0.4s, v1.4s";
+    assert(intrin::vsplit_dest(true, fm, 0) && !intrin::vsplit_dest(true, fm, 1), "a split destination");
+    assert(!intrin::vsplit_dest(true, "bsl v0.16b, v0.16b, v1.16b", 0), "a bit select reads its destination");
+    assert(!intrin::vsplit_dest(true, "xtn2 v0.16b, v0.8h", 0), "a narrowing into the high half");
+    assert(!intrin::vsplit_dest(true, "mov v0.s[1], v0.s[0]", 0), "a lane destination");
+    assert(!intrin::vsplit_dest(true, a, 0), "several instructions");
+    let vx = "vaddps %xmm1, %xmm0, %xmm0";
+    assert(intrin::vsplit_dest(false, vx, 0) && !intrin::vsplit_dest(false, vx, 1), "an x86-64 three-operand form");
+    assert(!intrin::vsplit_dest(false, "addps %xmm1, %xmm0", 0), "a two-operand form reads its destination");
+    assert(!intrin::vsplit_dest(false, "vfmadd231ps %xmm2, %xmm1, %xmm0", 0), "a fused multiply-add reads it");
+    let mut os = String::new();
+    let fs: []u32 = [0];
+    let ts: []u32 = [21];
+    intrin::vrename(true, fm, fs, ts, (0, 19), &mut os);
+    assert_eq(os.as_str(), "fmax v21.4s, v19.4s, v1.4s");
+    let mut ox = String::new();
+    intrin::vrename(false, vx, fs, ts, (0, 19), &mut ox);
+    assert_eq(ox.as_str(), "vaddps %xmm1, %xmm19, %xmm21");
     let x = "vpcmpd $2, %ymm1, %ymm0, %k0\naddps %xmm1, %xmm0";
     assert(intrin::vwrites(false, x, 0) && !intrin::vwrites(false, x, 1), "x86-64 writes the last operand");
     assert(intrin::vwrites(false, "vpgatherdd %xmm2, (%rdi,%xmm1,4), %xmm0", 2), "a gather writes its mask");
     let mut o2 = String::new();
     let f2: []u32 = [1];
     let t2: []u32 = [12];
-    intrin::vrename(false, x, f2, t2, &mut o2);
+    intrin::vrename(false, x, f2, t2, (99, 99), &mut o2);
     assert_eq(o2.as_str(), "vpcmpd $2, %ymm12, %ymm0, %k0\naddps %xmm12, %xmm0");
 }
 
