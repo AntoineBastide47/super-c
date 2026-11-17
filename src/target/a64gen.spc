@@ -422,7 +422,11 @@ extend Gen {
         }
         // In a loop, a callee-saved vector register before v0 to v7, which each intrinsic's template and call
         // may write (`loop_csv`).
-        let cv = ast::pick(vreg, self.loop_csv(0), NOREG);
+        let cv = if vreg {
+            self.loop_csv(0)
+        } else {
+            NOREG
+        };
         if cv != NOREG {
             return cv;
         }
@@ -7054,10 +7058,15 @@ extend Gen {
         if tpl.len() != 0 {
             // An intrinsic writes the registers it names and its arguments' and result's: the others
             // keep their values.
+            // An integer argument whose register the template does not name is an immediate of its
+            // instructions (`@k`): its register keeps its value (`imm_arg`).
             self.clob = 0;
+            let na = self.cr.lay.nargs();
             for q in 0..self.cr.lay.parts.len() {
                 let pa = self.cr.lay.parts[q];
-                self.clob |= 1u64 << preg(pa) as u64;
+                if pa.v || q >= na {
+                    self.clob |= 1u64 << preg(pa) as u64;
+                }
             }
             let mut j: usize = 0;
             while j < tx.len() {
@@ -7405,6 +7414,12 @@ extend Gen {
                 loc,
                 vty,
             )) && src.kind != LC_VAL;
+            if tpl.len() != 0 && self.cr.lay.imm_arg(loc, self.clob) {
+                // An immediate of the template's instructions is in no register.
+                self.cmoved.push(true);
+                self.cclean.push(true);
+                continue;
+            }
             if self.crefmv[k as usize] && self.arrived_in(x, self.cr.lay.parts[loc.p0 as usize].reg) {
                 // The address is still in the register it arrived in.
                 self.cmoved.push(true);

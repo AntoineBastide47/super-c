@@ -15793,9 +15793,15 @@ fn a_minimum_number_of_a_number_keeps_no_quieting() {
 // parts, and only a caller with those facts inlines a copy of it. A function that chooses its run-time
 // copies before its own code (`lir::inline::dispatch_of`) runs that code for the build's features: the
 // copy of a callee with such a choice takes the callee's own code alone (`strip_checks`), where a plain
-// caller keeps the choice.
+// caller keeps the choice. A body that reads the level and branches on another value (`odd`: a call's
+// result) holds no choice. A body of the build's features with a wider vector gives its callers its form
+// before the split into parts.
 const LEVELS: str = M"(lir ptr 8
 sym @__sc_simd_lv data global
+sym @flag fn global
+sym @odd fn global
+sym @whole fn global
+sym @halves fn global
 sym @leaf__fs fn global
 sym @top__fs fn global
 sym @leaf fn global
@@ -15869,6 +15875,30 @@ b0(v0: ptr, v1: ptr):
   v4 = fadd.v8f32 v2, v3
   store v4, v1 align 0
   ret
+fn @whole
+  sig (ptr, ptr) -> void
+  cpu 32 921351 9 1799 319 1
+b0(v0: ptr, v1: ptr):
+  call @parts(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @halves
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  call @parts(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @odd
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64):
+  v12 = symaddr @__sc_simd_lv
+  v13 = aload.i8 v12 relaxed
+  v14 = call.i8 @flag(v0, v1) : (i64, i64) -> i8
+  br v14, b1, b2
+b1:
+  v15 = call.i64 @leaf(v0) : (i64) -> i64
+  ret v15
+b2:
+  v16 = zext.i64 v13
+  ret v16
 data @__sc_simd_lv size 1 align 0
 )";
 
@@ -15883,10 +15913,18 @@ fn a_body_for_more_features_keeps_its_registers_and_its_callers() {
     assert(b.contains("call @wide") && !b.contains("cpu") && !b.contains("fadd"), b.as_str());
     let p = text_of(&a, "parts");
     assert(!p.contains("v8f32") && p.contains("fadd.v4f32") && !p.contains("cpu"), p.as_str());
+    // Its callers inline its form before the split (`Package.vec_max`): whole in 32-byte registers (of
+    // facts that hold the build's, `Cpu::within`), in parts in the build's.
+    let h = text_of(&a, "whole");
+    assert(h.contains("fadd.v8f32") && !h.contains("v4f32") && !h.contains("call"), h.as_str());
+    let l = text_of(&a, "halves");
+    assert(!l.contains("v8f32") && l.contains("fadd.v4f32") && !l.contains("call"), l.as_str());
     // The choice of the caller alone; the callee's own code after it.
     let t = text_of(&a, "top");
     assert(t.contains("@top__fs") && !t.contains("@leaf") && t.contains("mul.i64"), t.as_str());
     assert_eq(count(&t, "aload"), 1);
     let q = text_of(&a, "plain");
     assert(q.contains("aload") && q.contains("@leaf__fs"), q.as_str());
+    let o = text_of(&a, "odd");
+    assert(o.contains("aload") && o.contains("call.i8 @flag"), o.as_str());
 }

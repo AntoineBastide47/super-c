@@ -16686,8 +16686,9 @@ pub(package) struct Run {
     level: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: UnsafeCell<Vector<u8>>, // per body, its inliner facts (`il::facts`; 0: callers may not inline it)
-    // Per body whose loop transforms or packing made vectors, its final form: `bodies` holds the form
-    // before them, which callers inline (`job`), until `finish` swaps the two (`take_inlined`). Boxed: few
+    // Per body whose loop transforms or packing made vectors, or whose wide vectors split while a caller
+    // may hold them whole, its final form: `bodies` holds the form before them, which callers inline
+    // (`job`), until `finish` swaps the two (`take_inlined`). Boxed: few
     // bodies have one, and the table holds a pointer per body.
     finals: UnsafeCell<Vector<Option<Box<Body>>>>,
     inline: bool,
@@ -17028,6 +17029,19 @@ extend Run {
         if sc.o.split_pairs(p, b) {
             let _ = sc.o.run(p, b, true);
         }
+        // A body callers may inline keeps its form before the split of its wide vectors when a caller may
+        // compile for wider registers (`Package.vec_max`: a run-time copy that takes a backend entry made
+        // for the build's registers): that caller splits no vector its own registers hold.
+        let vec = p.cpu_of(b).vector;
+        let mut wpre = Option::<Body>::None;
+        if vec != 0 && vec < p.vec_max && r.inline && r.shape[j as usize] && !b.naked && (il::bounded(b, r.cf.inline) || r.always[j as usize]) && wd::has_wide(
+            b,
+            vec,
+        ) {
+            let mut s = Body::empty();
+            b.copy_into(&mut s);
+            wpre = Some(s);
+        }
         if sc.o.split_wide(p, b) {
             let _ = sc.o.run(p, b, true);
         }
@@ -17184,23 +17198,32 @@ extend Run {
         b.compact_pool(&mut sc.o.cps);
         let mut fits = r.inline && r.shape[j as usize];
         let keep = snap && (packed(b) || rotated);
+        // The form callers inline: the one before the split of wide vectors, else the one before the loop
+        // transforms and the packing.
+        let mut form = Option::<Body>::None;
         switch pre {
             Some(s) => {
-                if keep {
-                    let fin = replace(b, s);
-                    b.compact_pool(&mut sc.o.cps);
-                    unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
-                    recycle(&mut sc, fin);
+                if keep && wpre.is_none() {
+                    form = Some(s);
                 } else {
                     recycle(&mut sc, s);
                 }
             },
             None => {
-                if keep && packed(b) {
+                if keep && packed(b) && wpre.is_none() {
                     assert(!straight, "opt: only the packing makes vectors in a straight body");
                     fits = false;
                 }
             },
+        }
+        if let Some(w) = wpre {
+            form = Some(w);
+        }
+        if let Some(s) = form {
+            let fin = replace(b, s);
+            b.compact_pool(&mut sc.o.cps);
+            unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
+            recycle(&mut sc, fin);
         }
         // An `@always_inline` body inlines whatever its size.
         let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {

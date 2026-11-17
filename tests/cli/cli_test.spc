@@ -3711,9 +3711,10 @@ fn main() i32 {
 
 // Vector kernels of a release build give their lanes' values: a minimumNumber and maximumNumber of loaded
 // operands and of accumulators (8 and 16 f32 lanes, 4 f64 lanes) over both zeros, infinities and quiet and
-// signaling NaNs, against the operation on the encodings, and a product and sum of 8 lanes. On x86-64 the
-// run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then the
-// build's own bodies (`SC_SIMD_LEVEL=0`).
+// signaling NaNs, against the operation on the encodings, a product and sum of 8 lanes, and the operations a
+// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones. On
+// x86-64 the run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then
+// the build's own bodies (`SC_SIMD_LEVEL=0`).
 @test
 fn vector_kernels_run_as_their_lanes_at_every_level() {
     let p = cli::proj_new();
@@ -3848,6 +3849,88 @@ fn scaled(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
     }
 }
 
+// Operations a level may compute with its own entries (the absolute value, the square root, the floor, the
+// minimum, the fused product and sum), a selection of them, and a sum by halves of the 8 accumulators.
+@noinline
+fn rooted(xp: *const f32, n: usize, op: *mut f32) f32 {
+    let x = view(xp, n);
+    let o = view_mut(op, n);
+    let one = Simd::<f32, 8>::splat(1.0);
+    let mut acc = Simd::<f32, 8>::splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        let v = simd::load::<f32, 8>(x, i);
+        let r = v.abs().sqrt().floor();
+        acc = acc + one.less_than(v).choose(r, v.minimum(r));
+        simd::store(o, i, r.fma(v, acc));
+        i += 8;
+    }
+    return simd::reduce_add_tree(acc);
+}
+
+fn rooted_ref(xp: *const f32, n: usize, op: *mut f32) f32 {
+    let x = view(xp, n);
+    let o = view_mut(op, n);
+    let mut acc: [f32; 8] = [0.0; 8];
+    for i in 0..n - n % 8 {
+        let v = x[i];
+        let r = v.abs().sqrt().floor();
+        acc[i % 8] = acc[i % 8] + if 1.0 < v {
+            r
+        } else {
+            v.minimum(r)
+        };
+        o[i] = r.mul_add(v, acc[i % 8]);
+    }
+    let mut h: usize = 4;
+    while h != 0 {
+        for j in 0..h {
+            acc[j] = acc[j] + acc[j + h];
+        }
+        h /= 2;
+    }
+    return acc[0];
+}
+
+// Byte lanes over 32 bytes (a saturating sum or the larger byte, by a comparison) and a sum of 8 lanes of
+// 4 bytes.
+@noinline
+fn bytes(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8) u32 {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let w = view(wp, n / 4);
+    let o = view_mut(op, n);
+    let mut acc = Simd::<u32, 8>::splat(0);
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        let x = simd::load::<u8, 32>(a, i);
+        let y = simd::load::<u8, 32>(b, i);
+        simd::store(o, i, x.less_than(y).choose(x.saturating_add(y), x.max(y)));
+        acc = acc + simd::load::<u32, 8>(w, i / 4);
+        i += 32;
+    }
+    return simd::reduce_add(acc);
+}
+
+fn bytes_ref(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8) u32 {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let w = view(wp, n / 4);
+    let o = view_mut(op, n);
+    let mut s: u32 = 0;
+    for i in 0..n - n % 32 {
+        o[i] = if a[i] < b[i] {
+            a[i].saturating_add(b[i])
+        } else {
+            a[i].max(b[i])
+        };
+        if i % 4 == 0 {
+            s = s.wrapping_add(w[i / 4]);
+        }
+    }
+    return s;
+}
+
 fn main() i32 {
     let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
     let n: usize = 144;
@@ -3910,6 +3993,61 @@ fn main() i32 {
     for k in 0..64usize {
         if y[k] != 1.5 * ((k % 13) as f32 - 6.5) + (k % 5) as f32 * 0.25 {
             return 4;
+        }
+    }
+    // Both zeros, fractions below and above 1, negative values.
+    let mut r = Vector::<f32>::new();
+    let mut ro = Vector::<f32>::new();
+    let mut rr = Vector::<f32>::new();
+    let mut ba = Vector::<u8>::new();
+    let mut bb = Vector::<u8>::new();
+    let mut bo = Vector::<u8>::new();
+    let mut br = Vector::<u8>::new();
+    let mut bw = Vector::<u32>::new();
+    for k in 0..136usize {
+        r.push(
+            if k % 17 == 0 {
+                -0.0
+            } else if k % 19 == 0 {
+                0.0
+            } else {
+                ((k * 37 % 101) as f32 - 40.0) * 1.37
+            },
+        );
+        ro.push(0.0);
+        rr.push(0.0);
+        ba.push((k * 91 % 256) as u8);
+        bb.push((k * 57 % 256) as u8);
+        bo.push(0);
+        br.push(0);
+        bw.push((k as u32).wrapping_mul(0x9E3779B9));
+    }
+    for m in [0usize, 8, 24, 136] {
+        let a = rooted(r.as_ptr(), m, ro.as_mut_ptr());
+        let b = rooted_ref(r.as_ptr(), m, rr.as_mut_ptr());
+        if fl::f32_bits(a) != fl::f32_bits(b) {
+            return 5;
+        }
+        for k in 0..m {
+            if fl::f32_bits(ro[k]) != fl::f32_bits(rr[k]) {
+                return 6;
+            }
+        }
+    }
+    for m in [0usize, 32, 96, 136] {
+        if bytes(ba.as_ptr(), bb.as_ptr(), bw.as_ptr(), m, bo.as_mut_ptr()) != bytes_ref(
+            ba.as_ptr(),
+            bb.as_ptr(),
+            bw.as_ptr(),
+            m,
+            br.as_mut_ptr(),
+        ) {
+            return 7;
+        }
+        for k in 0..m - m % 32 {
+            if bo[k] != br[k] {
+                return 8;
+            }
         }
     }
     return 0;

@@ -26,7 +26,8 @@ baseline by default); `bsys::features_for` computes it from build.toml and `--ta
 `Package::new`). `Package.simd_width` (256 or 512) is the planner's preferred width on AVX-512.
 A function's effective set is `Package::fn_set(m, f)`: the build's and its `@target_feature`'s
 (`fn_features`), closed (on wasm32 the build's alone); `Package.fn_union` joins every function's
-set, so the entries any function may call render. Both, and every backend entry's key, features and
+set, so the entries any function may call render, and with the levels it gives the widest register a
+body compiles for (`lir::ir::Package.vec_max`). Both, and every backend entry's key, features and
 name, mix into the TU cache header hash (`driver::tuc`), so a changed set or table never replays a cached unit.
 
 ## Attributes

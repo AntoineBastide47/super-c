@@ -657,6 +657,7 @@ extend<'a> Parser<'a> {
                     return self.fail("a 'cpu' fact out of range");
                 }
                 self.body.cpu = Cpu::of_words(k[0], k[1], k[2], k[3], k[4], k[5]);
+                self.pkg.vec_max = self.pkg.vec_max.max(k[0]);
                 return self.line_end_loc(&mut loc);
             }
             if w == "scope" {

@@ -746,6 +746,13 @@ extend CEmit {
                 0u8,
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             l.pkg.cpu = cpu_facts(pk, pk.features);
+            // The widest registers a body may get: a function's own features, a run-time copy's level.
+            l.pkg.vec_max = l.pkg.cpu.vector.max(cpu_facts(pk, cf::close(cf::join(pk.features, pk.fn_union))).vector);
+            for i in 0..pk.simd_levels.len() {
+                l.pkg.vec_max = l.pkg.vec_max.max(
+                    cpu_facts(pk, cf::close(cf::join(pk.features, pk.simd_levels[i]))).vector,
+                );
+            }
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.bswap = tgt::isa(pk.arch).bswap;
             l.pkg.bitrev = tgt::isa(pk.arch).bitrev;

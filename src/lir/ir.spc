@@ -2336,6 +2336,10 @@ pub(package) struct Package {
     /// What the build's processor features give the backend; a body compiled for more holds its own
     /// (`cpu_of`).
     pub(package) cpu: Cpu,
+    /// The bytes of the widest vector register any body of the program compiles for (`Cpu.vector` of the
+    /// build's features, of its run-time copies' levels and of its functions' own sets): a body of
+    /// narrower registers that callers may inline keeps its wide vectors whole for them (`lir::opt`).
+    pub(package) vec_max: u32,
     /// The object sections split at their symbols, so the link can drop what nothing reaches
     /// (`codegen::obj::SPLIT_*`, `-ffunction-sections` and `-fdata-sections`); Mach-O splits at the link
     /// instead.
@@ -2491,6 +2495,7 @@ extend Package {
             tail: false,
             protect: PROTECT_NONE,
             fmath: 0,
+            vec_max: 16,
             cpu: Cpu {
                 own: false,
                 vector: 16,

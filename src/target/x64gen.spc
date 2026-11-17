@@ -357,7 +357,7 @@ pub(package) struct Gen {
     want: Vector<u8>, // per value, its request to `Live::plan`
     lconst: Vector<bool>, // per instruction, a constant a loop keeps in a register (`Live::loop_consts`)
     vmem: Vector<bool>, // per value, a vector some instruction reads or writes in memory (`vec_homes`)
-    vreg: Vector<bool>, // per instruction, one on vectors in xmm registers alone (`vec_homes`)
+    vreg: Vector<bool>, // per instruction, one on vectors in vector registers alone (`vec_homes`)
     cpre: Vector<u32>, // per instruction index, the calls that return before it (`call_tables`)
     cpos: Vector<u32>, // per layout position, the blocks before it that hold one
     vpre: Vector<u32>, // `cpre` and `cpos` without the intrinsics, which write no vector scratch home
@@ -2419,6 +2419,7 @@ extend Gen {
                 self.call_layout(t);
             }
             lv::each_use(b, t, &mut self.cr.uses);
+            let mut whole = true;
             for k in 0..self.cr.uses.len() {
                 let u = self.cr.uses[k];
                 if t.op == O_STORE && u == t.b || call && self.cr.whole_arg(t, u) {
@@ -2427,7 +2428,13 @@ extend Gen {
                 let x = self.cr.vx(u);
                 if x != NONE && is_vec(self.cr.xty(x)) {
                     self.vmem[x as usize] = true;
+                    whole = false;
                 }
+            }
+            // An intrinsic whose template reads and writes vector registers alone (`calls`), its vectors
+            // whole in them: no general register computes it (`need`).
+            if intr && whole && (ret_reg || !in_mem(t.ty)) && !self.calls(t) {
+                self.vreg[i] = true;
             }
         }
         // A vector load into a register, a store of a vector from one, and a jump or branch that passes vectors
@@ -8125,16 +8132,20 @@ extend Gen {
         }
     }
 
-    // The registers intrinsic call `t` writes when its instructions are `tx`: its arguments' and result's
-    // (`ab::intrinsic_layout`) and those `tx` names.
+    // The registers intrinsic call `t` writes when its instructions are `tx`: its vector arguments' and
+    // its result's (`ab::intrinsic_layout`) and those `tx` names. An integer argument whose register `tx`
+    // does not name is an immediate of the instructions (`@k`): its register keeps its value (`imm_arg`).
     fn intrin_clob(self: &Self, t: Inst, tx: str) u64 {
         let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
         let mut lay = ab::CallLayout::new();
         ab::intrinsic_layout(self.cr.b(), t.b, self.cr.ptr, gp[0..8], x::RAX, &mut lay);
+        let na = lay.nargs();
         let mut m: u64 = 0;
         for q in 0..lay.parts.len() {
             let pa = lay.parts[q];
-            m |= bit(preg(pa));
+            if pa.v || q >= na {
+                m |= bit(preg(pa));
+            }
         }
         let mut j: usize = 0;
         while j < tx.len() {
@@ -8164,6 +8175,8 @@ extend Gen {
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
             let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
             ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], x::RAX, &mut self.cr.lay);
+            // A template names registers of the body's width: a vector that wide stays in its register.
+            self.cr.lay.wide = self.cpu.vector.max(16);
             return;
         }
         let q = self.lay_index(t);
@@ -8432,7 +8445,8 @@ extend Gen {
                     ok = split;
                 }
             }
-            self.cren.push(ok);
+            // An immediate of the template's instructions is in no register.
+            self.cren.push(ok || self.cr.lay.imm_arg(loc, self.clob));
             if split {
                 src = (pr, (vr - V0) as u32);
             } else if ok {
@@ -8623,7 +8637,7 @@ extend Gen {
                 !vec || (args & (bit(S0) | bit(S1))) == 0,
                 "x64: an intrinsic with arguments in r10 or r11 takes integers alone",
             );
-            let keep_cs = args & (bit(x::RDI) | bit(x::RSI)) & self.xfix;
+            let keep_cs = args & (bit(x::RDI) | bit(x::RSI)) & self.xfix & self.clob;
             self.saves(keep_cs);
             let mut m = keep_cs & self.cr.held;
             // Each step clears one register's bit: at most 2 steps.
@@ -14173,7 +14187,7 @@ extend Gen {
         let dot = c == core::SIMD_DOT;
         if is_float(lt) {
             if self.reduce_reg(t) {
-                self.reduce_tree(i, ops[0], lt == T_F64, n);
+                self.reduce_tree(i, ops[0], lt == T_F64);
                 return;
             }
             self.reduce_float(i, c, add, mul, dot, at, ops, lt, n);
@@ -14235,9 +14249,10 @@ extend Gen {
         self.c.mov_rr(8, rd, acc);
     }
 
-    // Whether `O_VOP` `t` is a reduction of a 16-byte vector in a register that xmm registers compute: an
-    // integer sum, `and`, `or`, `xor`, minimum or maximum at its lanes' width (`reduce_halves`), or a float
-    // sum by halves (`reduce_tree`).
+    // Whether `O_VOP` `t` is a reduction of a vector of 16 bytes or more in a register that vector registers
+    // compute: an integer sum, `and`, `or`, `xor`, minimum or maximum at its lanes' width (`reduce_halves`),
+    // or a float sum by halves (`reduce_tree`). A wider vector's halves combine down to 16 bytes first
+    // (`reduce_wide`), but for a minimum or maximum of 8-byte lanes, which no ymm instruction computes.
     const fn reduce_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
@@ -14252,19 +14267,57 @@ extend Gen {
         } else {
             ints && type_bits(t.ty, self.cr.ptr) == type_bits(lt, self.cr.ptr)
         };
-        return kind && is_vec(vt) && type_bytes(vt, self.cr.ptr) == 16 && self.in_reg(vt);
+        let nb = type_bytes(vt, self.cr.ptr);
+        let ext8 = (c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && type_bytes(lt, 8) == 8;
+        return kind && is_vec(vt) && nb >= 16 && self.in_reg(vt) && !(nb > 16 && ext8);
     }
 
-    // The float sum by halves of 16-byte vector `v` (`reduce_reg`; `n` lanes, doubles with `dd`) into
-    // instruction `i`: the upper half (`pshufd` across the qwords) added onto the lower, then of four lanes
-    // lane 1 onto lane 0, each sum's first operand the lower one as the lane loop's.
-    fn reduce_tree(self: &mut Self, i: u32, v: Value, dd: bool, n: u32) {
-        let rv = self.vec_use(v, self.vs0) - V0;
+    // Vector `v` of a reduction of rule `c` (`reduce_reg`; signed lanes with `sg`) as the 16 bytes that
+    // reduce to the same value, in a register: `v` itself, or of a wider one its upper half (VEXTRACTF128,
+    // VEXTRACTF64X4) combined onto its lower half, the lower lane the first operand, until 16 bytes are
+    // left.
+    fn reduce_wide(self: &mut Self, v: Value, c: u8, sg: bool) u8 {
+        let vt = self.cr.vt(v);
+        let lt = lane_type(vt);
+        let lb = type_bits(lt, 8);
+        let mut nb = type_bytes(vt, 8);
+        let mut cur = self.vec_use(v, self.vs0) - V0;
+        if nb == 16 {
+            return cur;
+        }
+        let w = self.tmp(true) - V0;
+        let h = self.vs1 - V0;
+        // Each step halves `nb`: at most 2 steps.
+        while nb > 16 {
+            if nb == 64 {
+                self.c.evex_rr(0x66, 3, 0x1B, true, cur, 0, h);
+            } else {
+                self.c.vex_rr(0x66, 3, 0x19, false, true, cur, 0, h);
+            }
+            self.c.byte(1);
+            nb /= 2;
+            if is_float(lt) {
+                self.fop(nb, lt == T_F64, 0x58, w, cur, h);
+            } else if c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX {
+                self.lane_ext(c == core::SIMD_REDUCE_MIN, sg, lb, nb == 32, w, cur, h);
+            } else {
+                self.c.vex_rr(0x66, 1, reduce_op(c, lb) & 0xFF, false, nb == 32, w, cur, h);
+            }
+            cur = w;
+        }
+        return cur;
+    }
+
+    // The float sum by halves of vector `v` (`reduce_reg`; doubles with `dd`) into instruction `i`: of its
+    // 16 bytes (`reduce_wide`) the upper half (`pshufd` across the qwords) added onto the lower, then of
+    // four lanes lane 1 onto lane 0, each sum's first operand the lower one as the lane loop's.
+    fn reduce_tree(self: &mut Self, i: u32, v: Value, dd: bool) {
+        let rv = self.reduce_wide(v, core::SIMD_REDUCE_ADD_TREE, false);
         let ta = self.tmp(true) - V0;
         let tb = self.tmp(true) - V0;
         self.shuf(0x66, ta, rv, 0x4E);
         self.fop(16, dd, 0x58, tb, rv, ta);
-        if n == 4 {
+        if !dd {
             self.shuf(0x66, ta, tb, 0x55);
             self.fop(16, dd, 0x58, tb, tb, ta);
         }
@@ -15063,7 +15116,7 @@ extend Gen {
     // `pshuflw` across the words, `psrlw` across the bytes), then one `movd`, as LLVM's x86 lowering of
     // `vector.reduce`. The minimum or maximum of two 64-bit lanes is one `cmov` of both lanes.
     fn reduce_halves(self: &mut Self, i: u32, c: u8, sg: bool, v: Value, lb: u32) {
-        let rv = self.vec_use(v, self.vs0) - V0;
+        let rv = self.reduce_wide(v, c, sg);
         let ta = self.tmp(true) - V0;
         let ext = c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX;
         let lo = c == core::SIMD_REDUCE_MIN;
@@ -15079,22 +15132,7 @@ extend Gen {
             return;
         }
         let tb = self.tmp(true) - V0;
-        // paddb/w/d/q, pand, por, pxor.
-        let op: u32 = if c == core::SIMD_REDUCE_AND {
-            0x0FDB
-        } else if c == core::SIMD_REDUCE_OR {
-            0x0FEB
-        } else if c == core::SIMD_REDUCE_XOR {
-            0x0FEF
-        } else if lb == 8 {
-            0x0FFC
-        } else if lb == 16 {
-            0x0FFD
-        } else if lb == 32 {
-            0x0FFE
-        } else {
-            0x0FD4
-        };
+        let op = reduce_op(c, lb);
         // ta = the qwords swapped, combined with v; each step the lanes' halves in the low half.
         self.shuf(0x66, ta, rv, 0x4E);
         if ext {
@@ -16118,6 +16156,26 @@ fn x64_operand_text(o: &mut String, c: u8, rg: u8, ty: u8, kv: i64, md: u8, out:
 
 // The register a clobber names (`rax`, `eax`, `ax`, `al`, `r12`, `r12d`, `xmm6`), NOREG for none
 // (`memory`, `cc`, `dirflag`, `fpsr`, `flags`).
+// The 66-prefixed lane operation (`0F xx`) that combines the lanes of `lb` bits of integer reduction `c`
+// (a sum, `and`, `or` or `xor`): paddb/w/d/q, pand, por, pxor.
+const fn reduce_op(c: u8, lb: u32) u32 {
+    return if c == core::SIMD_REDUCE_AND {
+        0x0FDB
+    } else if c == core::SIMD_REDUCE_OR {
+        0x0FEB
+    } else if c == core::SIMD_REDUCE_XOR {
+        0x0FEF
+    } else if lb == 8 {
+        0x0FFC
+    } else if lb == 16 {
+        0x0FFD
+    } else if lb == 32 {
+        0x0FFE
+    } else {
+        0x0FD4
+    };
+}
+
 const fn x64_clobber(s0: str) u8 {
     let s = if s0.starts_with("%") {
         s0.slice(1, s0.len())

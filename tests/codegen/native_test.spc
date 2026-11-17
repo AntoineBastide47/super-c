@@ -20325,6 +20325,120 @@ int main(void) {
     }
 }
 
+// An intrinsic's template reads a constant argument as an immediate of its instructions: no general
+// register takes it, and the intrinsic writes vector registers alone. x86-64, in a body of 32-byte
+// registers (`Body.cpu`): the templates compute in ymm registers (VROUNDPS with its immediate), the sum by
+// halves takes the upper half first (VEXTRACTF128), and the body has no frame. arm64: a store's template
+// reads its vector where it is (no copy to v0), and a general temporary of a loop claims no callee-saved
+// vector register (no d8 and d9 pair in the prologue). Both give the C results.
+@test
+fn intrinsics_take_immediates_and_registers_as_they_are() {
+    let x64 = M"(lir ptr 8
+sym @_mm256_andnot_ps fn global
+sym @_mm256_round_ps fn global
+sym @_mm256_min_ps fn global
+sym @roots fn global
+fn @roots
+  sig (ptr, i64, ptr) -> f32
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 8
+  v5 = fconst.f32 0x80000000
+  v6 = splat.v8f32 v5
+  v7 = fconst.f32 0x0
+  v8 = splat.v8f32 v7
+  v9 = iconst.i32 9
+  jmp b1(v3, v8)
+b1(v10: i64, v11: v8f32):
+  v12 = ptradd v0, v10 * 4
+  v13 = load.v8f32 v12 align 0
+  v14 = call.v8f32 @_mm256_andnot_ps(v6, v13) : (v8f32, v8f32) -> v8f32
+  v15 = call.v8f32 @_mm256_round_ps(v14, v9) : (v8f32, i32) -> v8f32
+  v16 = call.v8f32 @_mm256_min_ps(v15, v13) : (v8f32, v8f32) -> v8f32
+  v17 = fadd.v8f32 v11, v16
+  v18 = ptradd v2, v10 * 4
+  store v15, v18 align 0
+  v19 = add.i64 v10, v4
+  v20 = icmp.ult v19, v1
+  br v20, b1(v19, v17), b2(v17)
+b2(v21: v8f32):
+  v22 = vop.reduce_add_tree.f32 (v21)
+  ret v22
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(x64, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    assert(holds_vex3(&obj, 0x08, 9), "vroundps with its immediate");
+    assert(holds_vex3(&obj, 0x19, 1), "vextractf128");
+    // `mov $9, %edi`; `sub $n, %rsp`.
+    let imm: [u8; 5] = [0xBF, 9, 0, 0, 0];
+    let frame: [u8; 3] = [0x48, 0x83, 0xEC];
+    assert(!holds(&obj, imm[0..5]), "the immediate in no register");
+    assert(!holds(&obj, frame[0..3]), "no frame");
+    let a64 = M"(lir ptr 8
+sym @vst1q_lane_f32 fn global
+sym @lanes fn global
+fn @lanes
+  sig (ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i32 2
+  v5 = iconst.i64 4
+  jmp b1(v3, v3)
+b1(v6: i64, v7: i64):
+  v8 = ptradd v1, v6 * 4
+  v9 = load.v4f32 v8 align 0
+  v10 = ptradd v0, v6 * 4
+  call @vst1q_lane_f32(v10, v9, v4) : (ptr, v4f32, i32) -> void
+  v11 = add.i64 v7, v6
+  v12 = add.i64 v6, v5
+  v13 = icmp.ult v12, v2
+  br v13, b1(v12, v11), b2(v11)
+b2(v14: i64):
+  ret v14
+)";
+    assert(object_of(a64, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // `st1 { v.s }[2], [x]` once; no `mov w1, #2`, no `mov v0.16b, vn.16b`, no `stp d9, d8, [sp, #-16]!`.
+    assert_eq(elf_text_count(&obj, 0xFFFFFC00, 0x4D008000), 1);
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x52800041), 0);
+    let mut copies: u32 = 0;
+    for r in 1..32u32 {
+        copies += elf_text_count(&obj, 0xFFFFFFFF, 0x4EA01C00 | r << 16 | r << 5);
+    }
+    assert_eq(copies, 0);
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x6DBF23E9), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <math.h>
+#include <string.h>
+float roots(const float *, long, float *);
+long lanes(float *, const float *, long);
+int main(void) {
+  float x[24], o[24], w[24], acc[8], y[16], z[16];
+  for (int k = 0; k < 24; k++) x[k] = (float)((k * 37) % 23) * 0.75f - 8.0f;
+  for (int k = 0; k < 8; k++) acc[k] = 0.0f;
+  for (int k = 0; k < 24; k++) {
+    w[k] = floorf(fabsf(x[k]));
+    acc[k % 8] += w[k] < x[k] ? w[k] : x[k];
+  }
+  for (int h = 4; h != 0; h /= 2)
+    for (int j = 0; j < h; j++) acc[j] += acc[j + h];
+#if defined(__x86_64__)
+  if (roots(x, 24, o) != acc[0] || memcmp(o, w, sizeof o) != 0) return 1;
+#else
+  for (int k = 0; k < 16; k++) { y[k] = -1.0f; z[k] = k % 4 == 0 ? x[k + 2] : -1.0f; }
+  if (lanes(y, x, 16) != 0 + 4 + 8 + 12 || memcmp(y, z, sizeof y) != 0) return 2;
+#endif
+  return 0;
+}
+)";
+    if tgt::host_isa() == tgt::axis_index("aarch64", true) {
+        assert_eq(run_native(a64, drv), 0);
+    }
+    assert_eq(run_x64_feature(x64, drv, "avx2", 0), 0);
+}
+
 // A cast between two vectors of one size is a view of its operand (`lv::FOLD_VIEW`): its readers read
 // the operand's register, also where the operand lives on, so arm64 copies no vector register. Sizes of
 // one register and of several (x86-64 with and without AVX2) give the C results.

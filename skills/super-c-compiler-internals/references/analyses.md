@@ -109,6 +109,7 @@ file is authoritative for where to look first.
 | Uses of each instruction during slot forwarding | `forward_slots` (`lir::verify::uses_edges`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
 | Package part of the native cache key | `nat_base` | a local per loop (a module's key: its emission key xor it) | per loop |
 | The processor facts of a body compiled for more features than the build's (`lir::ir::Cpu`: register bytes, instruction flags) | `CEmit::body_cpu` (`cpu_facts` of `CEmit.fs`), at `Lower::body_i` | `lir::ir::Body.cpu` (carried by `copy_into`, `compact`, `pairs`, `promote`, `wide`, the inliner and the held records; read through `Package::cpu_of`) | the body's end |
+| The widest vector register any body of the program compiles for | `cemit` at the lowering context's setup (`cpu_facts` of the build's features, `Package.fn_union` and each `simd_levels` entry); the text parser from the `cpu` lines | `lir::ir::Package.vec_max` (read by `Run::job` to keep a body's form before `split_wide` for its callers) | never (a changed feature set changes the TU cache header) |
 
 ## optimize (`lir::opt` `Run`, `S_LOWERED` to the end of the `lir_opt` block)
 

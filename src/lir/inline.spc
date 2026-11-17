@@ -367,8 +367,11 @@ pub(package) fn dispatch_of(p: &Package, b: &Body, exact: bool, out: &mut Vector
             break;
         }
         let c = b.insts[tm.a as usize];
+        if c.op != O_ICMP || c.aux != C_UGE || c.a != lvl {
+            break;
+        }
         let lev = int_bits(b, c.b).unwrap_or(0);
-        if c.op != O_ICMP || c.aux != C_UGE || c.a != lvl || lev == 0 || lev > 255 {
+        if lev == 0 || lev > 255 {
             break;
         }
         let tb = b.blocks[b.edge_target(tm.b) as usize];
