@@ -7620,6 +7620,11 @@ extend Interp {
                 p = unsafe (*self.obj_ptr(x0.i as u32)).slots[dv.fp as usize];
                 at = x1.i;
             }
+            // No pointer value (a slice built from a parameter the probe has no value of): no trap is
+            // provable.
+            if p.kind != IV_PTR {
+                return self.bail();
+            }
             let mut id: u32 = 0;
             if c == ir::SIMD_LOAD || c == ir::SIMD_LOAD_RAW {
                 id = self.obj_new(n);

@@ -14253,7 +14253,7 @@ extend Gen {
     // Whether `O_VOP` `t` is a reduction of a vector of 16 bytes or more in a register that vector registers
     // compute: an integer sum, `and`, `or`, `xor`, minimum or maximum at its lanes' width (`reduce_halves`),
     // or a float sum by halves (`reduce_tree`). A wider vector's halves combine down to 16 bytes first
-    // (`reduce_wide`), but for a minimum or maximum of 8-byte lanes, which no ymm instruction computes.
+    // (`reduce_wide`).
     const fn reduce_reg(self: &Self, t: Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || code < core::OP_SIMD || code >= core::OP_CMP_LANES || t.b != 1 {
@@ -14268,15 +14268,13 @@ extend Gen {
         } else {
             ints && type_bits(t.ty, self.cr.ptr) == type_bits(lt, self.cr.ptr)
         };
-        let nb = type_bytes(vt, self.cr.ptr);
-        let ext8 = (c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX) && type_bytes(lt, 8) == 8;
-        return kind && is_vec(vt) && nb >= 16 && self.in_reg(vt) && !(nb > 16 && ext8);
+        return kind && is_vec(vt) && type_bytes(vt, self.cr.ptr) >= 16 && self.in_reg(vt);
     }
 
     // Vector `v` of a reduction of rule `c` (`reduce_reg`; signed lanes with `sg`) as the 16 bytes that
     // reduce to the same value, in a register: `v` itself, or of a wider one its upper half (VEXTRACTF128,
     // VEXTRACTF64X4) combined onto its lower half, the lower lane the first operand, until 16 bytes are
-    // left.
+    // left (a minimum or maximum of 8-byte lanes by `lane_ext8`).
     fn reduce_wide(self: &mut Self, v: Value, c: u8, sg: bool) u8 {
         let vt = self.cr.vt(v);
         let lt = lane_type(vt);
@@ -14288,6 +14286,13 @@ extend Gen {
         }
         let w = self.tmp(true) - V0;
         let h = self.vs1 - V0;
+        let ext = c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX;
+        // The scratch registers of a minimum or maximum of 8-byte lanes (`lane_ext8`).
+        let (s, g) = if ext && lb == 64 {
+            (self.tmp(true) - V0, self.tmp(true) - V0)
+        } else {
+            (NOREG, NOREG)
+        };
         // Each step halves `nb`: at most 2 steps.
         while nb > 16 {
             if nb == 64 {
@@ -14299,7 +14304,9 @@ extend Gen {
             nb /= 2;
             if is_float(lt) {
                 self.fop(nb, lt == T_F64, 0x58, w, cur, h);
-            } else if c == core::SIMD_REDUCE_MIN || c == core::SIMD_REDUCE_MAX {
+            } else if ext && lb == 64 {
+                self.lane_ext8(c == core::SIMD_REDUCE_MIN, sg, nb == 32, w, cur, h, s, g);
+            } else if ext {
                 self.lane_ext(c == core::SIMD_REDUCE_MIN, sg, lb, nb == 32, w, cur, h);
             } else {
                 self.c.vex_rr(0x66, 1, reduce_op(c, lb) & 0xFF, false, nb == 32, w, cur, h);
@@ -14307,6 +14314,32 @@ extend Gen {
             cur = w;
         }
         return cur;
+    }
+
+    // xmm (ymm with `y`) `dst` = the minimum (`lo`) or maximum of the 8-byte lanes of `a` and `b`, signed
+    // with `sg` (AVX2): VPCMPGTQ's mask of the lanes where `a` is greater, of operands whose sign bits are
+    // flipped when unsigned (the sign bits: VPCMPEQQ's ones shifted left by 63), then VPBLENDVB, which
+    // takes `b` there for the minimum and `a` for the maximum. `s` and `g` are scratch; `a` and `b` keep
+    // their values unless one is `dst`.
+    fn lane_ext8(self: &mut Self, lo: bool, sg: bool, y: bool, dst: u8, a: u8, b: u8, s: u8, g: u8) {
+        let mut x = a;
+        let mut z = b;
+        if !sg {
+            self.c.vex_rr(0x66, 2, 0x29, false, y, s, s, s);
+            self.c.vex_rr(0x66, 1, 0x73, false, y, 6, s, s);
+            self.c.byte(63);
+            self.c.vex_rr(0x66, 1, 0xEF, false, y, g, a, s);
+            self.c.vex_rr(0x66, 1, 0xEF, false, y, s, b, s);
+            x = g;
+            z = s;
+        }
+        self.c.vex_rr(0x66, 2, 0x37, false, y, g, x, z);
+        if lo {
+            self.c.vex_rr(0x66, 3, 0x4C, false, y, dst, a, b);
+        } else {
+            self.c.vex_rr(0x66, 3, 0x4C, false, y, dst, b, a);
+        }
+        self.c.byte((g as u32 & 15) << 4);
     }
 
     // The float sum by halves of vector `v` (`reduce_reg`; doubles with `dd`) into instruction `i`: of its

@@ -272,3 +272,120 @@ jobs:
           chmod +x ./super-c
           dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
           SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+
+  # The SIMD kernels of bench/simd_baseline: the hand-written C kernels, and the scalar and portable
+  # kernels built by the native backend and through the C tree with the C compiler at -O3 (clang where
+  # the runner has it). Five interleaved runs of each; the benchmark's own checks do not stop a run.
+  simd-timing:
+    needs: compile
+    if: ${{ always() }}
+    name: simd timing (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux }
+          - { os: ubuntu-26.04-arm, target: linux_arm64 }
+          - { os: windows-latest, target: windows }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Time the kernels
+        run: |
+          set -u
+          x=${BINEXT:-}
+          chmod +x "./super-c$x"
+          mkdir -p timing
+          if [ "${{ matrix.target }}" != windows ] && command -v clang >/dev/null 2>&1; then export CC=clang; fi
+          {
+            grep -m1 'model name' /proc/cpuinfo || true
+            uname -sm
+            ${CC:-cc} --version | head -n 1
+          } > timing/machine.txt 2>&1
+          cat timing/machine.txt
+          f=bench/simd_baseline/kernels.spc
+          awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          sh bench/simd_baseline/kernels.sh
+          "./super-c$x" bench --no-run --filter=simd_baseline
+          cp "build/bench-bin$x" "build/bench-nat$x"
+          "./super-c$x" build build/bench_root.spc --profile=bench --emit-c --out-dir=build/ctree
+          raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
+          sh ci/cc_tree.sh "$raw" "build/bench-clang$x" -O3
+          for k in 1 2 3 4 5; do
+            "build/bench-nat$x" > "timing/nat-r$k.txt" 2>&1 || true
+            "build/bench-clang$x" > "timing/clang-r$k.txt" 2>&1 || true
+            if [ "${{ matrix.target }}" != linux_arm64 ]; then
+              SC_SIMD_LEVEL=0 "build/bench-nat$x" > "timing/base-r$k.txt" 2>&1 || true
+            fi
+          done
+          grep -c '^simd' timing/*.txt
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: simd-timing-${{ matrix.target }}
+          path: timing/*.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  simd-timing-wasm:
+    needs: wasm-compile
+    name: simd timing (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Time the kernels under wasmtime
+        run: |
+          set -u
+          chmod +x ./super-c
+          mkdir -p timing
+          {
+            grep -m1 'model name' /proc/cpuinfo || true
+            wasmtime --version
+            "${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang" --version | head -n 1
+          } > timing/machine.txt 2>&1
+          cat timing/machine.txt
+          f=bench/simd_baseline/kernels.spc
+          awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          sh bench/simd_baseline/kernels.sh --target=wasm
+          ./super-c bench --no-run --filter=simd_baseline --target=wasm
+          cp build/bench-bin build/bench-nat.wasm
+          ./super-c build build/bench_root.spc --profile=bench --emit-c --target=wasm --out-dir=build/ctree
+          raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
+          CC="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1" sh ci/cc_tree.sh "$raw" build/bench-clang.wasm -O3
+          for k in 1 2 3 4 5; do
+            wasmtime build/bench-nat.wasm > "timing/nat-r$k.txt" 2>&1 || true
+            wasmtime build/bench-clang.wasm > "timing/clang-r$k.txt" 2>&1 || true
+          done
+          grep -c '^simd' timing/*.txt
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: simd-timing-wasm
+          path: timing/*.txt
+          if-no-files-found: error
+          retention-days: 3

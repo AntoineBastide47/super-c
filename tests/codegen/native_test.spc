@@ -12629,7 +12629,8 @@ b0(v0: ptr, v1: ptr):
 // The reductions of 32-byte vectors: with AVX2 the upper half combines onto the lower one in a ymm
 // register's halves (`reduce_wide`: VEXTRACTF128), then the 16 bytes reduce as an xmm register's; a float
 // sum by halves adds lane k + 4 (k + 2 of doubles) onto lane k first. A minimum or maximum of 8-byte lanes
-// reduces lane by lane. Each gives the C result.
+// takes each half's lane by VPCMPGTQ's mask (VPBLENDVB), the sign bits flipped when unsigned. Each gives
+// the C result.
 @test
 fn reductions_of_32_byte_vectors_run() {
     let lir = M"(lir ptr 8
@@ -12661,6 +12662,8 @@ b0(v0: ptr, v1: ptr):
   v23 = vop.reduce_add_tree.f32 (v22)
   v24 = load.v4f64 v0+64 align 0
   v25 = vop.reduce_add_tree.f64 (v24)
+  v26 = vop.reduce_max.s.i64 (v17)
+  v27 = vop.reduce_min.i64 (v17)
   store v3, v1 align 2
   store v4, v1+4 align 2
   store v5, v1+8 align 2
@@ -12679,6 +12682,8 @@ b0(v0: ptr, v1: ptr):
   store v21, v1+56 align 3
   store v23, v1+64 align 2
   store v25, v1+72 align 3
+  store v26, v1+80 align 3
+  store v27, v1+88 align 3
   ret
 )";
     let mut obj = Vector::<u8>::new();
@@ -12687,6 +12692,16 @@ b0(v0: ptr, v1: ptr):
         "the AVX2 object",
     );
     assert(holds_vex3(&obj, 0x19, 1), "vextractf128");
+    // VPCMPGTQ (VEX map 0F38, opcode 37) and VPBLENDVB (map 0F3A, opcode 4C), each on registers.
+    let mut gt: u32 = 0;
+    let mut blend: u32 = 0;
+    for i in 0..obj.len() - 4 {
+        let c4 = obj[i] == 0xC4 && obj[i + 4] >= 0xC0;
+        gt += (c4 && (obj[i + 1] & 0x1F) == 2 && obj[i + 3] == 0x37) as u32;
+        blend += (c4 && (obj[i + 1] & 0x1F) == 3 && obj[i + 3] == 0x4C) as u32;
+    }
+    assert_eq(gt, 4);
+    assert_eq(blend, 4);
     if !cli::has_cc() {
         return; // a C driver links it
     }
@@ -12695,7 +12710,7 @@ b0(v0: ptr, v1: ptr):
 void wr(const void *, void *);
 #define RED(T, n, op, at) { T x[n], r; memcpy(x, in, 32); r = x[0]; for (int k = 1; k < n; k++) r = op; if (memcmp(o + at, &r, sizeof r) != 0) return at + 1; }
 int main(void) {
-  unsigned char in[96], o[80];
+  unsigned char in[96], o[96];
   for (int k = 0; k < 32; k++) in[k] = (unsigned char)(k * 73 + 41);
   float f[8];
   double d[4];
@@ -12721,6 +12736,8 @@ int main(void) {
   RED(uint64_t, 4, r ^ x[k], 40)
   RED(int64_t, 4, x[k] < r ? x[k] : r, 48)
   RED(uint64_t, 4, x[k] > r ? x[k] : r, 56)
+  RED(int64_t, 4, x[k] > r ? x[k] : r, 80)
+  RED(uint64_t, 4, x[k] < r ? x[k] : r, 88)
   for (int h = 4; h != 0; h /= 2)
     for (int j = 0; j < h; j++) f[j] = f[j] + f[j + h];
   for (int h = 2; h != 0; h /= 2)

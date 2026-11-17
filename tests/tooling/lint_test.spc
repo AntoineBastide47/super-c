@@ -390,6 +390,16 @@ fn always_panics_lint() {
     let q = p.run_raw(&qargs);
     assert_eq(q.exit, 0);
     assert(!q.out_has("always panics"), "intent, run-time indexes and folded guards are silent");
+
+    // Silent: a vector load through a slice built from a pointer parameter and a constant length (the
+    // probe has no value of the pointer).
+    p.mkfile(
+        "vec.spc",
+        "import std::simd;\n\nconst fn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\n\nfn first(p: *const u64) u64 {\n    return simd::reduce_min(simd::load::<u64, 4>(view(p, 4), 0));\n}\n\nfn main() i32 {\n    let a: [u64; 4] = [5, 7, 3, 9];\n    return first(&a[0]) as i32 - 3;\n}\n",
+    );
+    let v = p.compile("vec.spc");
+    assert(!v.out_has("undefined behavior when executed"), "a load through a parameter's pointer is silent");
+    assert_eq(v.exit, 0);
 }
 
 // A build checks the project's modules, not the std and ffi trees (check.sh lints those): a provable
