@@ -1,10 +1,12 @@
 name: Toolchain
 description: >
-  The C toolchain and object cache of one CI job: the platform's cache base (`~/.super-c/cache`: each
-  project's cache root, the script builds' `.scripts` and the tests' `.tests`, `SC_TEST_CACHE_DIR`), the
-  newest `objcache-<target>-<sha>`, with the job's own delta (`objdelta-<target>-<role>-<sha>`) over it
+  The C toolchain and object cache of one CI job: the platform's cache base (`~/.super-c/cache`, on
+  Windows `SC_CACHE_DIR` in the runner's temporary directory: each project's cache root, the script
+  builds' `.scripts` and the tests' `.tests`, `SC_TEST_CACHE_DIR`), the newest `objcache-<target>-<sha>`, with the job's own delta (`objdelta-<target>-<role>-<sha>`) over it
   when it has a `role`; the platform's C compiler (the preinstalled cc on Linux and macOS, mingw-w64 gcc
-  on Windows), for `target: wasm` or `wasi: true` the wasi-sdk and wasmtime. Only a release run on main
+  on Windows), for `target: wasm` or `wasi: true` the wasi-sdk and wasmtime. On Windows every cache,
+  download and temporary file (`TMP`, `TEMP`) is on the runner's work drive (D:), which writes files
+  several times faster than the system drive (C:) of the home directory. Only a release run on main
   saves (`save: true`): the installation caches here after installing, the object cache in the job's last
   step (`./.github/actions/cache-save`), so no other workflow or branch adds to the repository's cache
   and evicts the release's entries.
@@ -30,11 +32,27 @@ inputs:
 runs:
   using: composite
   steps:
+    # `super-c test` gives the compilers its tests start this cache base, inside the restored and saved
+    # cache, so the fixtures' objects carry over between runs (unset, a run deletes its own at its end).
+    - name: Set the cache base and the temporary directory
+      shell: bash
+      run: |
+        b=$HOME/.super-c/cache
+        if [ "$RUNNER_OS" = Windows ]; then
+          b=$(cygpath -m "$RUNNER_TEMP/sc-cache")
+          echo "SC_CACHE_DIR=$b" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/tmp"
+          t=$(cygpath -w "$RUNNER_TEMP/tmp")
+          echo "TMP=$t" >> "$GITHUB_ENV"
+          echo "TEMP=$t" >> "$GITHUB_ENV"
+        fi
+        echo "SC_TEST_CACHE_DIR=$b/.tests" >> "$GITHUB_ENV"
+
     # One cache per platform, which the release's `caches` job merges from its jobs' deltas.
     - name: Restore object cache
       uses: actions/cache/restore@v6
       with:
-        path: ~/.super-c/cache
+        path: ${{ runner.os == 'Windows' && format('{0}/sc-cache', runner.temp) || '~/.super-c/cache' }}
         key: objcache-${{ inputs.target }}-${{ inputs.sha }}
         restore-keys: objcache-${{ inputs.target }}-
 
@@ -63,15 +81,6 @@ runs:
       run: |
         py=$(command -v python3 || command -v python)
         "$py" -I "$GITHUB_ACTION_PATH/../cache-save/delta.py" apply "$RUNNER_TEMP/sc-cache-delta.tar" --keep
-
-    # `super-c test` gives the compilers its tests start this cache base, inside the restored and saved
-    # cache, so the fixtures' objects carry over between runs (unset, a run deletes its own at its end).
-    - name: Keep the test cache
-      shell: bash
-      run: |
-        h=$HOME
-        if [ "$RUNNER_OS" = Windows ]; then h=$(cygpath -m "$HOME"); fi
-        echo "SC_TEST_CACHE_DIR=$h/.super-c/cache/.tests" >> "$GITHUB_ENV"
 
     - name: Restore Homebrew downloads (macOS)
       id: brew
@@ -119,15 +128,13 @@ runs:
       if: runner.os == 'Windows'
       uses: actions/cache/restore@v6
       with:
-        path: |
-          C:\ProgramData\chocolatey\lib\mingw
-          C:\ProgramData\mingw64
-          C:\tools\mingw64
-        key: mingw-w64-${{ runner.os }}-choco-v3
+        path: ${{ runner.temp }}/mingw64
+        key: mingw-w64-${{ runner.os }}-choco-v4
         restore-keys: mingw-w64-${{ runner.os }}-
 
     # Windows ships no Unix C toolchain; pull in mingw-w64 gcc + GNU make. The compiler source is
     # mingw-clean: realpath/dirent/unistd are provided and it makes no real fork/popen/mmap call.
+    # Chocolatey installs on C:; the job uses and caches a copy on D:.
     - name: Set up mingw-w64 (Windows)
       if: runner.os == 'Windows'
       shell: bash
@@ -141,13 +148,15 @@ runs:
               fi
             done
         }
-        mingw_bin="$(find_mingw_bin)"
-        if [ -z "$mingw_bin" ]; then
+        m="$(cygpath -u "$RUNNER_TEMP")/mingw64"
+        if [ ! -x "$m/bin/gcc.exe" ]; then
           choco install -y --no-progress mingw
           mingw_bin="$(find_mingw_bin)"
+          test -n "$mingw_bin"
+          rm -rf "$m"
+          cp -R "$(dirname "$mingw_bin")" "$m"
         fi
-        test -n "$mingw_bin"
-        cygpath -w "$mingw_bin" >> "$GITHUB_PATH"
+        cygpath -w "$m/bin" >> "$GITHUB_PATH"
         echo "CC=gcc" >> "$GITHUB_ENV"
         echo "BINEXT=.exe" >> "$GITHUB_ENV"
 
@@ -155,11 +164,8 @@ runs:
       if: runner.os == 'Windows' && inputs.save == 'true' && github.ref == 'refs/heads/main' && steps.mingw.outputs.cache-hit != 'true'
       uses: actions/cache/save@v6
       with:
-        path: |
-          C:\ProgramData\chocolatey\lib\mingw
-          C:\ProgramData\mingw64
-          C:\tools\mingw64
-        key: mingw-w64-${{ runner.os }}-choco-v3
+        path: ${{ runner.temp }}/mingw64
+        key: mingw-w64-${{ runner.os }}-choco-v4
 
     - name: Restore wasi toolchain
       id: wasi
