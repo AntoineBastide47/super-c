@@ -254,8 +254,8 @@ extend<T, E> Result<T, E> {
     /// An iterator over the success value: one `&T` for `Ok`, nothing for `Err`.
     pub const fn iter(self: &Result<T, E>) OptionIter<T> {
         return switch self {
-            Ok(v) => OptionIter::<T> { item: Option::<&T>::Some(v) },
-            Err(_) => OptionIter::<T> { item: Option::<&T>::None },
+            Ok(v) => OptionIter::<T> { item: Option::<&T>::some(v) },
+            Err(_) => OptionIter::<T> { item: Option::<&T>::none() },
         };
     }
 

@@ -14901,3 +14901,93 @@ fn narrow_counts_of_8_byte_vectors_take_no_byte_lookups() {
     let t = text_of(&a, "pop");
     assert(t.contains(".v4i16") && !t.contains("swizzle_or_zero.v8i8"), t.as_str());
 }
+
+// A counter stepping by 4 from 0 below a multiple of 4 (`n & -4`), its check `i + 3 <u len`: its last
+// value is `n - 4`, so the check holds wherever `n <= len` does (`checks`, `step_of`, `mult_of`), and the
+// guard compares `n` with `len` itself, no `len - 3`. Each count and length stores or panics as before.
+@test
+fn a_stepped_counters_check_holds_to_its_last_value() {
+    let src = M"(lir ptr 8
+sym @st fn global noinline
+sym @drive fn global
+fn @st
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = iconst.i64 3
+  v6 = iconst.i64 -4
+  v7 = and.i64 v1, v6
+  jmp b1(v3)
+b1(v8: i64):
+  v9 = icmp.ult v8, v7
+  br v9, b2, b5
+b2:
+  v10 = add.i64 v8, v5
+  v11 = icmp.ult v10, v2
+  br v11, b3, b4
+b3:
+  v12 = ptradd v0, v10 * 4
+  v13 = trunc.i32 v8
+  store v13, v12 align 2
+  v14 = add.i64 v8, v4
+  jmp b1(v14)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v5
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = ptradd v2, v6 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v6, v4
+  jmp b1(v10)
+b3:
+  call @st(v2, v0, v1) : (ptr, i64, i64) -> void
+  v11 = load.i32 v2+12 align 2
+  v12 = load.i32 v2+28 align 2
+  v13 = load.i32 v2+156 align 2
+  v14 = load.i32 v2+172 align 2
+  v15 = sext.i64 v11
+  v16 = sext.i64 v12
+  v17 = sext.i64 v13
+  v18 = sext.i64 v14
+  v19 = iconst.i64 8
+  v20 = shl.i64 v16, v19
+  v21 = iconst.i64 16
+  v22 = shl.i64 v17, v21
+  v23 = iconst.i64 24
+  v24 = shl.i64 v18, v23
+  v25 = xor.i64 v15, v20
+  v26 = xor.i64 v25, v22
+  v27 = xor.i64 v26, v24
+  ret v27
+)";
+    let (b, a) = optimized_for(src, VERSION, 16, VOPS_ALL);
+    let t = text_of(&a, "st");
+    assert(!t.contains("sub.i64"), t.as_str());
+    for n in [0u64, 3, 4, 7, 8, 13, 16, 40] {
+        for len in [0u64, 3, 4, 7, 8, 12, 16, 40, 64] {
+            let args: []u64 = [n, len];
+            let panics = (n & ~3u64) > len;
+            let want = if panics {
+                0u64
+            } else {
+                run_value(&b, "drive", args)
+            };
+            same_outcome(&b, &a, "drive", args, want, panics);
+        }
+    }
+}

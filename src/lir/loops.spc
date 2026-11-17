@@ -224,6 +224,9 @@ pub(package) struct LoopOpt {
     gy: Vector<Value>,
     gsh: Vector<u8>,
     goff: Vector<u64>,
+    // Per comparison, what the guard (not `clip`, whose bound limits each value) takes off `goff`: a
+    // counter stepping by `k` reaches at most `n - k` (`step_of`).
+    gred: Vector<u64>,
     gbase: Vector<Value>,
     // `checks` of a condition the loop does not compute: the condition, and whether it holds on the edge
     // that does not fail (the guard requires that value).
@@ -645,6 +648,7 @@ extend LoopOpt {
             gx: Vector::<Value>::new(),
             gsh: Vector::<u8>::new(),
             goff: Vector::<u64>::new(),
+            gred: Vector::<u64>::new(),
             gbase: Vector::<Value>::new(),
             ginv: Vector::<Value>::new(),
             ginh: Vector::<bool>::new(),
@@ -11257,6 +11261,23 @@ extend LoopOpt {
         }
     }
 
+    // The constant step of header parameter `q` of loop `h` (latch `u`): `q + k` on the back edge, 0 for
+    // another.
+    const fn step_of(self: &Self, b: &Body, h: u32, u: u32, q: Value) u64 {
+        let tu = term(b, u);
+        if tu.op != O_JMP || b.edge_target(tu.a) != h {
+            return 0;
+        }
+        let x = b.edge_arg(tu.a, (q & ~VPARAM) - b.blocks[h as usize].param_start);
+        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || b.insts[x as usize].op != O_ADD || b.insts[x as usize].a != q || !is_const(
+            b,
+            b.insts[x as usize].b,
+        ) {
+            return 0;
+        }
+        return raw_const(b, b.insts[x as usize].b) & mask_of(type_bits(b.type_of(q), 8));
+    }
+
     // Whether loop `h` (preheader `p`, latch `u`) has bounds checks a guard before it proves: branches
     // into a cold block on `x <u len` (or `len >u x`) with `len` defined outside the loop, `x` the header
     // parameter `i` that the header's exit test keeps below `n` (`i <u n`, or `i <s n` with `i` starting at
@@ -11278,6 +11299,7 @@ extend LoopOpt {
         self.gy.truncate(0);
         self.gsh.truncate(0);
         self.goff.truncate(0);
+        self.gred.truncate(0);
         self.gbase.truncate(0);
         self.ginv.truncate(0);
         self.ginh.truncate(0);
@@ -11328,6 +11350,7 @@ extend LoopOpt {
             self.gy.push(VNONE);
             self.gsh.push(0);
             self.goff.push(step);
+            self.gred.push(0);
             self.gbase.push(VNONE);
             self.gsub.push(0);
             self.gsubv.push(VNONE);
@@ -11598,6 +11621,16 @@ extend LoopOpt {
                     0u64
                 };
             }
+            // A counter stepping by a power of 2 `k` from a multiple of `k` up to a bound that is one: its
+            // last value `n - k`, so `q + c <u len` holds wherever `n <= len - (c - (k - 1))` does (`gred`).
+            let mut red: u64 = 0;
+            if sh == 0 && base == VNONE && ksub == 0 && vsub == VNONE && wmul == VNONE && goff != 0 && gn != VNONE && !self.grev {
+                let k = self.step_of(b, h, u, q);
+                let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - b.blocks[h as usize].param_start);
+                if k > 1 && (k & k - 1) == 0 && mult_of(b, init, k, MULT_DEPTH) && mult_of(b, gn, k, MULT_DEPTH) {
+                    red = goff.min(k - 1);
+                }
+            }
             // One comparison per bound, length and shift: the largest offset's, which implies the others.
             // The least subtraction's, which implies the others of its length.
             let mut at = self.gx.len();
@@ -11645,6 +11678,7 @@ extend LoopOpt {
                 self.gy.push(b.edge_arg(term(b, p).a, qi));
                 self.gsh.push(0);
                 self.goff.push(0);
+                self.gred.push(0);
                 self.gbase.push(VNONE);
                 self.gsub.push(0);
                 self.gsubv.push(VNONE);
@@ -11659,12 +11693,16 @@ extend LoopOpt {
                 self.gy.push(len);
                 self.gsh.push(sh);
                 self.goff.push(goff);
+                self.gred.push(red);
                 self.gbase.push(base);
                 self.gsub.push(ksub);
                 self.gsubv.push(vsub);
                 self.gmul.push(wmul);
             } else if goff > self.goff[at] {
+                // The guard keeps the largest offset less its reduction of each.
+                let eff = (self.goff[at] - self.gred[at]).max(goff - red);
                 self.goff[at] = goff;
+                self.gred[at] = goff - eff;
             } else if ksub != 0 && ksub < self.gsub[at] && base == VNONE {
                 self.gsub[at] = ksub;
             }
@@ -12798,8 +12836,8 @@ extend LoopOpt {
                     let ov = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: y, b: lim, c: 0 }, l0);
                     let s1 = vpush(b, bin(O_ADD, ty, y, kv), l0);
                     y = vpush(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: ov, b: all, c: s1 }, l0);
-                } else if self.gsh[k] != 0 || self.goff[k] != 0 || self.gbase[k] != VNONE {
-                    // bound(len) = len > c ? ((len - c - 1) >> s) + 1 : 0 (`checks`).
+                } else if self.gsh[k] != 0 || self.goff[k] != self.gred[k] || self.gbase[k] != VNONE {
+                    // bound(len) = len > c ? ((len - c - 1) >> s) + 1 : 0 (`checks`), `c` less `gred`.
                     let ty = b.type_of(y);
                     let c0 = if self.gbase[k] != VNONE && self.gsub[k] != 0 {
                         let kv = vpush(b, iconst_of(ty, self.gsub[k]), l0);
@@ -12807,7 +12845,7 @@ extend LoopOpt {
                     } else if self.gbase[k] != VNONE {
                         self.gbase[k]
                     } else {
-                        vpush(b, iconst_of(ty, self.goff[k]), l0)
+                        vpush(b, iconst_of(ty, self.goff[k] - self.gred[k]), l0)
                     };
                     let zero = vpush(b, iconst_of(ty, 0), l0);
                     let gt = vpush(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGT, a: y, b: c0, c: 0 }, l0);
@@ -13948,6 +13986,54 @@ const fn slot_holds(b: &Body, t: Inst) bool {
     let off = (t.c as i32) as i64 + (a.c as i32) as i64;
     let size = type_bytes(ast::pick(t.op == O_LOAD, t.ty, T_NONE), 8) as i64;
     return k != 0 && off >= 0 && size != 0 && (k - 1) * scale_of(a) as i64 + off + size <= b.slots[b.insts[a.a as usize].a as usize].size as i64;
+}
+
+// `mult_of` looks through at most MULT_DEPTH operations.
+const MULT_DEPTH: u32 = 4;
+
+// Whether integer `v` is a multiple of power of 2 `k`: a constant one, `x & m` or `x << s` or `x * c` that
+// clears its low bits, `x - (x & (j - 1))` or `x - x % j` with `j` a multiple of `k`, a sum or difference of
+// two, `depth` operations deep.
+const fn mult_of(b: &Body, v: Value, k: u64, depth: u32) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    if is_const(b, v) {
+        return (raw_const(b, v) & k - 1) == 0;
+    }
+    if depth == 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_AND && (is_const(b, t.b) && (raw_const(b, t.b) & k - 1) == 0 || is_const(b, t.a) && (raw_const(b, t.a) & k - 1) == 0) {
+        return true;
+    }
+    if t.op == O_SHL && is_const(b, t.b) && raw_const(b, t.b) < 64 && (1u64 << raw_const(b, t.b)) % k == 0 {
+        return true;
+    }
+    if t.op == O_MUL && (is_const(b, t.b) && (raw_const(b, t.b) & k - 1) == 0 || mult_of(b, t.a, k, depth - 1) || mult_of(
+        b,
+        t.b,
+        k,
+        depth - 1,
+    )) {
+        return true;
+    }
+    if t.op == O_SUB && (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE {
+        // `x - x % j` or `x - (x & (j - 1))`, `j` a multiple of `k`.
+        let r = b.insts[t.b as usize];
+        let j = if r.op == O_UREM && r.a == t.a && is_const(b, r.b) {
+            raw_const(b, r.b)
+        } else if r.op == O_AND && r.a == t.a && is_const(b, r.b) && (raw_const(b, r.b) & raw_const(b, r.b) + 1) == 0 {
+            raw_const(b, r.b) + 1
+        } else {
+            0u64
+        };
+        if j != 0 && j % k == 0 {
+            return true;
+        }
+    }
+    return (t.op == O_ADD || t.op == O_SUB) && mult_of(b, t.a, k, depth - 1) && mult_of(b, t.b, k, depth - 1);
 }
 
 // Whether slot address `s` reaches no access but through addresses that offset it: every reader of it or of

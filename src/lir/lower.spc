@@ -4822,7 +4822,8 @@ extend Lower {
     // path's chunk form (`CEmit::compress_store_planned`): after the bounds check, when at least a chunk's
     // lanes follow the packed ones, each chunk's active lanes move to the front by one byte shuffle (the
     // `u8` `swizzle_zero` entry; its indices a row of a read-only table by the chunk's mask bits) and the
-    // whole chunk is stored at the running offset, which grows by the row's lane count; the lanes that
+    // whole chunk is stored at the running offset, which grows by the row's lane count (a second table,
+    // whose address an index reaches without an offset); the lanes that
     // follow the packed ones are saved first and written back last. Else the lane loop (`vop` `code`).
     // VNONE when no entry swizzles the chunk's bytes or the lanes do not chunk.
     fn compress_chunks(self: &mut Self, c: &mut cbe::CEmit, args: []Value, code: u16, rt: u8) Value {
@@ -4842,10 +4843,11 @@ extend Lower {
         if swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0 {
             return VNONE;
         }
-        // Row r of the table: the bytes of the lanes of mask r in order, then the others; then each row's
-        // lane count.
+        // Row r of the table: the bytes of the lanes of mask r in order, then the others. Byte r of the
+        // second: row r's lane count.
         let rows = 1u32 << cl;
-        let mut tb = String::with_capacity((rows * (cb + 1)) as usize);
+        let mut tb = String::with_capacity((rows * cb) as usize);
+        let mut tc = String::with_capacity(rows as usize);
         for r in 0..rows {
             for pass in 0..2u32 {
                 for i in 0..cl {
@@ -4858,7 +4860,7 @@ extend Lower {
             }
         }
         for r in 0..rows {
-            tb.push_byte(r.count_ones() as u8);
+            tc.push_byte(r.count_ones() as u8);
         }
         let it = int_type(self.pkg.ptr_bytes);
         let bt = vec_type(T_I8, cb);
@@ -4879,6 +4881,8 @@ extend Lower {
         let wide = self.icmp(C_UGE, after, self.iconst(it, cl));
         let fb = self.block();
         let sb = self.block();
+        // The lane loop runs only where the output ends within a chunk of the packed lanes.
+        self.b.blocks.index_mut(sb as usize).flags = BLOCK_UNLIKELY;
         let join = self.block();
         let ef = self.edge(fb, NONE, NONE);
         let es = self.edge(sb, NONE, NONE);
@@ -4895,6 +4899,9 @@ extend Lower {
         let s = self.rodata(&mut tb);
         let ks = self.sym_of(s);
         let tbl = self.inst(O_SYMADDR, T_PTR, 0, ks, 0, VNONE);
+        let sc = self.rodata(&mut tc);
+        let kc = self.sym_of(sc);
+        let tcnt = self.inst(O_SYMADDR, T_PTR, 0, kc, 0, VNONE);
         let mut parts = Vector::<Value>::with_capacity((n / cl) as usize);
         self.halves(args[3], n / cl, &mut parts);
         let sty: [u32; 2] = [bt as u32, bt as u32];
@@ -4907,7 +4914,7 @@ extend Lower {
             let sargs: [Value; 2] = [x, ix];
             let r = self.call_sym(&swz, sargs[0..2], sty[0..2], sig_code(bt, false));
             self.store(r, self.ptradd(p, k, lb, 0), 0, true);
-            let rc = self.load(T_I8, self.ptradd(tbl, row, 1, rows * cb), 0, true);
+            let rc = self.load(T_I8, self.ptradd(tcnt, row, 1, 0), 0, true);
             k = self.arith(O_ADD, k, self.int_to(rc, it, false));
         }
         self.store(saved, end, 0, true);

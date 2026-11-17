@@ -20143,3 +20143,85 @@ int main(void) {
 )";
     assert_eq(run_native(lir, drv), 0);
 }
+
+// A cast between two vectors of one size is a view of its operand (`lv::FOLD_VIEW`): its readers read
+// the operand's register, also where the operand lives on, so arm64 copies no vector register. Sizes of
+// one register and of several (x86-64 with and without AVX2) give the C results.
+@test
+fn a_vector_cast_reads_its_operands_register() {
+    let lir = M"(lir ptr 8
+sym @cast fn global
+sym @cast4 fn global
+fn @cast
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = bitcast.v16i8 v2
+  v4 = add.v16i8 v3, v3
+  store v4, v1 align 0
+  v5 = fadd.v4f32 v2, v2
+  v6 = bitcast.v4i32 v5
+  v7 = bitcast.v2i64 v6
+  v8 = add.v2i64 v7, v7
+  store v8, v1+16 align 0
+  store v5, v1+32 align 0
+  ret
+fn @cast4
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f64 v0 align 0
+  v3 = bitcast.v16i32 v2
+  v4 = add.v16i32 v3, v3
+  store v4, v1 align 0
+  v5 = fadd.v8f64 v2, v2
+  store v5, v1+64 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // Vector register copies (`mov vd.16b, vn.16b`: ORR of a register with itself).
+    let mut copies: u32 = 0;
+    for r in 0..32u32 {
+        copies += elf_text_count(&obj, 0xFFFFFFE0, 0x4EA01C00 | r << 16 | r << 5);
+    }
+    assert_eq(copies, 0);
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void cast(const void *, void *);
+void cast4(const void *, void *);
+int main(void) {
+  float f[4] = {1.5f, -2.25f, 1e30f, 0.0f};
+  uint8_t fb[16], o[48], w[48];
+  memcpy(fb, f, 16);
+  cast(f, o);
+  for (int k = 0; k < 16; k++) w[k] = (uint8_t)(fb[k] + fb[k]);
+  float g[4];
+  for (int k = 0; k < 4; k++) g[k] = f[k] + f[k];
+  uint64_t q[2];
+  memcpy(q, g, 16);
+  for (int k = 0; k < 2; k++) q[k] += q[k];
+  memcpy(w + 16, q, 16);
+  memcpy(w + 32, g, 16);
+  if (memcmp(o, w, 48) != 0) return 1;
+  double d[8];
+  for (int k = 0; k < 8; k++) d[k] = (double)(k - 3) * 1.25;
+  uint32_t di[16], wi[16];
+  memcpy(di, d, 64);
+  uint8_t o4[128], w4[128];
+  cast4(d, o4);
+  for (int k = 0; k < 16; k++) wi[k] = di[k] + di[k];
+  memcpy(w4, wi, 64);
+  double e[8];
+  for (int k = 0; k < 8; k++) e[k] = d[k] + d[k];
+  memcpy(w4 + 64, e, 64);
+  if (memcmp(o4, w4, 128) != 0) return 2;
+  return 0;
+}
+)";
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}

@@ -509,8 +509,8 @@ fn dyn_fields_and_void_instances_have_c_definitions() {
         eprintln("{}", b.diag.as_str());
     }
     assert(b.built, "the C emits");
-    if !cli::has_cc() {
-        return; // the C build needs a C compiler
+    if !cli::has_cc() || h::target_lane() {
+        return; // the C build needs a C compiler, and the program a thread (WASI has none)
     }
     let c = h::compile_and_run_c(DYN_AND_VOID);
     assert(c.built, "the program builds through C");

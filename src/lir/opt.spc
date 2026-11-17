@@ -12912,6 +12912,13 @@ extend Opt {
         if !is_int(nt) || narrow < 8 || narrow >= wide || nt == T_I128 {
             return false;
         }
+        // A count of an extension something else reads: the narrow count extends its operand again.
+        if t.op == O_POPCNT {
+            self.readers(b);
+            if t.a as usize < self.icount.len() && self.icount[t.a as usize] > 1 {
+                return false;
+            }
+        }
         let n = self.before(b, k, i, Inst { op: t.op, ty: nt, aux: aux, a: x.a, b: VNONE, c: VNONE });
         let z = self.before(b, k, i, Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: n, b: VNONE, c: VNONE });
         if t.op != O_CLZ {

@@ -319,7 +319,7 @@ extend<T> Option<T> {
     /// An iterator over the payload: one `&T` for `Some`, nothing for `None`.
     pub const fn iter(self: &Option<T>) OptionIter<T> {
         return switch self {
-            Some(v) => OptionIter::<T> { item: Option::<&T>::Some(v) },
+            Some(v) => OptionIter::<T> { item: Option::<&T>::some(v) },
             None => OptionIter::<T> { item: Option::<&T>::None },
         };
     }

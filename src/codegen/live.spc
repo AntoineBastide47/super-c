@@ -183,7 +183,8 @@ pub(package) const FOLD_ADDSUB: u64 = 1125899906842624;
 pub(package) const FOLD_XUSE: u64 = 9007199254740992;
 pub(package) const FOLD_ADDSUB_WIDE: u64 = 2251799813685248;
 /// `FOLD_VIEW`: an instruction that keeps its operand's bits (a truncation, a cast between a pointer and
-/// an integer no wider, a pointer's copy: `ptradd` of nothing) makes no value of its own: it is a view of
+/// an integer no wider, a pointer's copy: `ptradd` of nothing, a cast between two vectors of one size)
+/// makes no value of its own: it is a view of
 /// its operand (`Live::view`), which every read of it reads, at its own type (a target whose registers hold
 /// both). The operand lives to the view's last read, in one register for both. So is a zero extension of
 /// a load or of a zero extension: the generator keeps the bits above such a value zero in its register
@@ -2057,7 +2058,12 @@ extend Live {
                 continue;
             }
             let (fb, tb) = (word_bits(b.type_of(t.a)), word_bits(t.ty));
-            if fb == 0 || tb == 0 || tb > fb != zx {
+            // A cast between two vectors of one size: the lanes' bits as they are, in the same home.
+            let vcast = t.op == O_BITCAST && is_vec(t.ty) && is_vec(b.type_of(t.a)) && type_bytes(t.ty, 8) == type_bytes(
+                b.type_of(t.a),
+                8,
+            );
+            if !vcast && (fb == 0 || tb == 0 || tb > fb != zx) {
                 continue;
             }
             // A zero extension: of an instruction whose register holds zeros above its bits, a load or
@@ -2074,7 +2080,7 @@ extend Live {
             let r = self.seen(t.a);
             if is_inst(r) {
                 let o = b.insts[r as usize].op;
-                if self.pfold[r as usize] || o == O_ICONST || o == O_FCONST || o == O_SLOTADDR || o == O_SYMADDR {
+                if self.pfold[r as usize] || o == O_ICONST || o == O_FCONST || o == O_SLOTADDR || o == O_SYMADDR || o == O_WCONST {
                     continue;
                 }
             }
