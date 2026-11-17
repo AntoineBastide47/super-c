@@ -12626,6 +12626,116 @@ b0(v0: ptr, v1: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// The reductions of 32-byte vectors: with AVX2 the upper half combines onto the lower one in a ymm
+// register's halves (`reduce_wide`: VEXTRACTF128), then the 16 bytes reduce as an xmm register's; a float
+// sum by halves adds lane k + 4 (k + 2 of doubles) onto lane k first. A minimum or maximum of 8-byte lanes
+// reduces lane by lane. Each gives the C result.
+@test
+fn reductions_of_32_byte_vectors_run() {
+    let lir = M"(lir ptr 8
+sym @wr fn global
+fn @wr
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i32 v0 align 0
+  v3 = vop.reduce_add.i32 (v2)
+  v4 = vop.reduce_max.s.i32 (v2)
+  v5 = vop.reduce_min.i32 (v2)
+  v6 = vop.reduce_and.i32 (v2)
+  v7 = load.v32i8 v0 align 0
+  v8 = vop.reduce_add.i8 (v7)
+  v9 = vop.reduce_max.i8 (v7)
+  v10 = vop.reduce_min.s.i8 (v7)
+  v11 = vop.reduce_or.i8 (v7)
+  v12 = load.v16i16 v0 align 0
+  v13 = vop.reduce_add.i16 (v12)
+  v14 = vop.reduce_min.s.i16 (v12)
+  v15 = vop.reduce_max.i16 (v12)
+  v16 = vop.reduce_xor.i16 (v12)
+  v17 = load.v4i64 v0 align 0
+  v18 = vop.reduce_add.i64 (v17)
+  v19 = vop.reduce_xor.i64 (v17)
+  v20 = vop.reduce_min.s.i64 (v17)
+  v21 = vop.reduce_max.i64 (v17)
+  v22 = load.v8f32 v0+32 align 0
+  v23 = vop.reduce_add_tree.f32 (v22)
+  v24 = load.v4f64 v0+64 align 0
+  v25 = vop.reduce_add_tree.f64 (v24)
+  store v3, v1 align 2
+  store v4, v1+4 align 2
+  store v5, v1+8 align 2
+  store v6, v1+12 align 2
+  store v8, v1+16 align 0
+  store v9, v1+17 align 0
+  store v10, v1+18 align 0
+  store v11, v1+19 align 0
+  store v13, v1+20 align 1
+  store v14, v1+22 align 1
+  store v15, v1+24 align 1
+  store v16, v1+26 align 1
+  store v18, v1+32 align 3
+  store v19, v1+40 align 3
+  store v20, v1+48 align 3
+  store v21, v1+56 align 3
+  store v23, v1+64 align 2
+  store v25, v1+72 align 3
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the AVX2 object",
+    );
+    assert(holds_vex3(&obj, 0x19, 1), "vextractf128");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void wr(const void *, void *);
+#define RED(T, n, op, at) { T x[n], r; memcpy(x, in, 32); r = x[0]; for (int k = 1; k < n; k++) r = op; if (memcmp(o + at, &r, sizeof r) != 0) return at + 1; }
+int main(void) {
+  unsigned char in[96], o[80];
+  for (int k = 0; k < 32; k++) in[k] = (unsigned char)(k * 73 + 41);
+  float f[8];
+  double d[4];
+  for (int k = 0; k < 8; k++) f[k] = 0.1f * (float)(k * 5 % 7) - 0.37f;
+  for (int k = 0; k < 4; k++) d[k] = 0.1 * (double)(k * 3 % 5) - 0.23;
+  memcpy(in + 32, f, 32);
+  memcpy(in + 64, d, 32);
+  memset(o, 0, sizeof o);
+  wr(in, o);
+  RED(uint32_t, 8, r + x[k], 0)
+  RED(int32_t, 8, x[k] > r ? x[k] : r, 4)
+  RED(uint32_t, 8, x[k] < r ? x[k] : r, 8)
+  RED(uint32_t, 8, r & x[k], 12)
+  RED(uint8_t, 32, (uint8_t)(r + x[k]), 16)
+  RED(uint8_t, 32, x[k] > r ? x[k] : r, 17)
+  RED(int8_t, 32, x[k] < r ? x[k] : r, 18)
+  RED(uint8_t, 32, r | x[k], 19)
+  RED(uint16_t, 16, (uint16_t)(r + x[k]), 20)
+  RED(int16_t, 16, x[k] < r ? x[k] : r, 22)
+  RED(uint16_t, 16, x[k] > r ? x[k] : r, 24)
+  RED(uint16_t, 16, r ^ x[k], 26)
+  RED(uint64_t, 4, r + x[k], 32)
+  RED(uint64_t, 4, r ^ x[k], 40)
+  RED(int64_t, 4, x[k] < r ? x[k] : r, 48)
+  RED(uint64_t, 4, x[k] > r ? x[k] : r, 56)
+  for (int h = 4; h != 0; h /= 2)
+    for (int j = 0; j < h; j++) f[j] = f[j] + f[j + h];
+  for (int h = 2; h != 0; h /= 2)
+    for (int j = 0; j < h; j++) d[j] = d[j] + d[j + h];
+  if (memcmp(o + 64, &f[0], 4) != 0) return 65;
+  if (memcmp(o + 72, &d[0], 8) != 0) return 73;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+    assert_eq(run_zmm(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+}
+
 // The minimum and maximum of a vector's integer lanes and the lanes' minimum and maximum of two vectors,
 // signed and unsigned, of every lane width (x86-64: `pminsw`, `pmaxub`, SSE4.1's and AVX2's `pmin`/`pmax`
 // (`pmaxud` in the SSE4.1 object), else a `pcmpgt` mask; 64-bit lanes by one `cmov`), in xmm and in ymm
@@ -20437,6 +20547,91 @@ int main(void) {
         assert_eq(run_native(a64, drv), 0);
     }
     assert_eq(run_x64_feature(x64, drv, "avx2", 0), 0);
+}
+
+// Under Microsoft x64, an intrinsic's result that lives on takes a register its template does not name:
+// when that is one of the callee-saved xmm6..xmm13, the prologue saves it (MOVDQU to the stack).
+@test
+fn a_template_result_in_a_callee_saved_register_is_saved() {
+    let lir = M"(lir ptr 8
+sym @_mm_add_ps fn global
+sym @_mm_mul_ps fn global
+sym @_mm_sub_ps fn global
+sym @_mm_min_ps fn global
+sym @_mm_max_ps fn global
+sym @k fn global
+fn @k
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = load.v4f32 v0+16 align 0
+  v4 = call.v4f32 @_mm_add_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v5 = call.v4f32 @_mm_mul_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v6 = call.v4f32 @_mm_sub_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v7 = call.v4f32 @_mm_min_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v8 = call.v4f32 @_mm_max_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v9 = call.v4f32 @_mm_add_ps(v4, v5) : (v4f32, v4f32) -> v4f32
+  v10 = call.v4f32 @_mm_add_ps(v6, v7) : (v4f32, v4f32) -> v4f32
+  v11 = call.v4f32 @_mm_add_ps(v8, v9) : (v4f32, v4f32) -> v4f32
+  v12 = call.v4f32 @_mm_add_ps(v10, v11) : (v4f32, v4f32) -> v4f32
+  store v12, v1 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the object",
+    );
+    // Each of xmm6..xmm13 a ModRM names as a register operand (mod 3) of a packed-single operation
+    // (0F 28 MOVAPS, 0F 58 ADDPS, 0F 59 MULPS, 0F 5C SUBPS, 0F 5D MINPS, 0F 5F MAXPS; REX for xmm8 and up)
+    // has its MOVDQU to the stack (F3 [REX] 0F 7F, ModRM of the register with a SIB byte of rsp).
+    let mut used: u32 = 0;
+    let mut saved: u32 = 0;
+    for i in 1..obj.len() - 5 {
+        let op = obj[i + 1];
+        if obj[i] == 0x0F && (op == 0x28 || op == 0x58 || op == 0x59 || op == 0x5C || op == 0x5D || op == 0x5F) && obj[i + 2] >= 0xC0 {
+            let rex = if (obj[i - 1] & 0xF0) == 0x40 {
+                obj[i - 1]
+            } else {
+                0u8
+            };
+            let r = (obj[i + 2] >> 3 & 7) as u32 + (rex >> 2 & 1) as u32 * 8;
+            let m = (obj[i + 2] & 7) as u32 + (rex & 1) as u32 * 8;
+            used |= 1u32 << r | 1u32 << m;
+        }
+        if obj[i] == 0x0F && op == 0x7F && (obj[i + 2] & 7) == 4 && obj[i + 2] < 0xC0 && obj[i + 3] == 0x24 {
+            let rex = if (obj[i - 1] & 0xF0) == 0x40 {
+                obj[i - 1]
+            } else {
+                0u8
+            };
+            let f3 = obj[i - 1] == 0xF3 || rex != 0 && i >= 2 && obj[i - 2] == 0xF3;
+            if f3 {
+                saved |= 1u32 << (obj[i + 2] >> 3 & 7) as u32 + (rex >> 2 & 1) as u32 * 8;
+            }
+        }
+    }
+    assert((used & 0x3FC0) != 0, "a callee-saved register holds a result");
+    assert_eq(used & 0x3FC0 & ~saved, 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <string.h>
+void k(const float *, float *);
+int main(void) {
+  float x[8], o[4], w[4];
+  for (int i = 0; i < 8; i++) x[i] = (float)((i * 5) % 7) - 2.5f;
+  k(x, o);
+  for (int i = 0; i < 4; i++) {
+    float a = x[i], b = x[4 + i];
+    w[i] = ((a - b) + (a < b ? a : b)) + ((a > b ? a : b) + ((a + b) + (a * b)));
+  }
+  return memcmp(o, w, sizeof o) != 0;
+}
+)";
+    if tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        assert_eq(run_native(lir, drv), 0);
+    }
 }
 
 // A cast between two vectors of one size is a view of its operand (`lv::FOLD_VIEW`): its readers read

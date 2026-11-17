@@ -8488,7 +8488,8 @@ extend Gen {
                 }
                 if f == NOREG {
                     let high = ast::pick(self.win, 0u64, free & ~(0xFFu64 << V0 as u64));
-                    f = ast::pick(high != 0, high, free).trailing_zeros() as u8;
+                    // Under Microsoft x64 one of xmm6..xmm13, which the prologue then saves.
+                    f = self.taken(ast::pick(high != 0, high, free).trailing_zeros() as u8);
                 }
                 let pr = self.cr.lay.parts[rl.p0 as usize].reg as u32;
                 rmov = pr;
