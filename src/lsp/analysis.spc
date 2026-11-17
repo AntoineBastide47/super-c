@@ -22,6 +22,7 @@ import ir::core as core;
 import ir::recursion as recur;
 import ir::interp as iri;
 import ir::cpu_features as cf;
+import prove::prove as prv;
 import utils::errors as diag;
 import driver::emit as emit;
 import driver::tuc as tuc;
@@ -38,6 +39,7 @@ pub(package) const PH_ANALYSIS: u8 = 0; // parse, resolve, typecheck, feature ch
 pub(package) const PH_BORROW: u8 = 1; // the borrow check (`borrowck_pending`)
 pub(package) const PH_UNUSED: u8 = 2; // the package-wide unused-item lint (`lsp_unused_items`)
 pub(package) const PH_RECUR: u8 = 3; // the package-wide unbounded-recursion check (`recur_check`)
+pub(package) const PH_PROVE: u8 = 4; // the proofs of a module's contracts (`prove_module`)
 
 /// One harvested diagnostic: the cross-pass record the server publishes and codeAction later reads
 /// (the fix fields carry the machine-applicable quick fix, if any).
@@ -208,6 +210,7 @@ struct BuildSettings {
     pub(package) ce_steps: u32,
     pub(package) ce_mem: u64,
     pub(package) std_internals: bool,
+    pub(package) cg: u64, // the debug profile's code-generation flags (`bsys::profile_codegen`)
 }
 
 // The nearest `build.toml` at or above `dir` (the manifest discovery of a manifest command) gives
@@ -238,6 +241,7 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
                     ce_steps: mm.ce_steps,
                     ce_mem: mm.ce_mem,
                     std_internals: mm.std_internals,
+                    cg: bsys::profile_codegen(&mm, "debug").1,
                 };
             }
             break;
@@ -270,6 +274,7 @@ fn lsp_apply_settings(p: &mut loader::Package, mut bs: BuildSettings) {
     p.ce_steps = bs.ce_steps;
     p.ce_mem = bs.ce_mem;
     p.std_internals = bs.std_internals;
+    p.cg = bs.cg;
 }
 
 // A constant engine with the budgets of the build the analysis stands for. A round's engine
@@ -1055,6 +1060,8 @@ pub(package) fn recompile(
         release_closed(p, &ovk);
         return true;
     }
+    // The analysis renews the types that stopped proofs name.
+    p.prove_resume = loader::ProveResume {};
     // Per changed module: the edit lay strictly inside one plain function's body and the reparse
     // kept the module-arena shape (`body_fn` names that function), or the reparse kept the shape
     // (`shaped`, with the edit window in the new source's bytes).
@@ -1320,6 +1327,14 @@ pub(package) fn recompile(
     reach_settle(p, root_file, lint_dir, st);
     if loader::poll_stop() {
         return false;
+    }
+    // The modules analyzed or checked again lower again.
+    {
+        let mut gone = Vector::<bool>::with_capacity(n);
+        for q in 0..n {
+            gone.push(aff[q] || rebc[q]);
+        }
+        prove_cache_drop(p, &gone);
     }
     // 6) merge: keep unaffected modules' records, replace the affected ones' (the set now holds
     // every module the passes analyzed).
@@ -1733,6 +1748,15 @@ pub(package) fn ensure_bodies(p: &mut loader::Package, i: usize) {
     if !p.modules[i].has_ast || !p.modules[i].ast.get_ref().b.released {
         return;
     }
+    // The check below renews the types that stopped proofs reading the module and its cached lowerings
+    // name.
+    if resume_reads(p, i) {
+        p.prove_resume = loader::ProveResume {};
+    }
+    let mut gone = Vector::<bool>::new();
+    gone.resize_default(p.modules.len());
+    gone.set(i, true);
+    prove_cache_drop(p, &gone);
     reparse_bodies(p, i);
     // The records are discarded: the retained ones came from the same source and imports.
     let typed = p.modules[i].ast.get_ref().types.len() != 0;
@@ -1951,8 +1975,10 @@ fn parse_back_demanded(p: &mut loader::Package, cirv: &iri::Interp) bool {
 /// import closure typed without an error (`bc_ready`) and waits until then; its records (`PH_BORROW`)
 /// replace its previous ones in `diags`, its function summaries (`Package.recur`) replace its
 /// previous ones, and a closed module (`ov_files` names the open documents) releases its bodies
-/// after its check. A round that is not stopped ends with the recursion check (`recur_check`) when a
-/// summary changed since it last ran. `stop(sctx, between)` ends the round when true, polled
+/// after its check. An open module that passes its check proves its contracts (`prove_module`,
+/// records `PH_PROVE`): a request stops the proofs too, which the next round resumes, and a closed
+/// module owes them until it opens (`Package.prove_owed`). A round that is not stopped ends with the
+/// recursion check (`recur_check`) when a summary changed since it last ran. `stop(sctx, between)` ends the round when true, polled
 /// with `between` false before every item (the module in progress keeps its pending mark and its
 /// previous records) and with `between` true before every module after the round's first finished
 /// check: a stop there waits for the module in progress, and every round that no item poll stops
@@ -1969,18 +1995,43 @@ pub(package) fn borrowck_pending(
 ) BcRound {
     let mut out = BcRound { canceled: false, changed: false, checked: false };
     let n = p.modules.len();
-    let mut any = p.recur.stale;
-    for m in 0..p.bc_pending.len().min(n) {
+    let ovk = overlay_slots(p, ov_files);
+    // An open module that owes its proofs runs them: from where a request stopped them, else with a new
+    // check. Stopped proofs whose document closed or whose module owes a new check end.
+    while p.prove_owed.len() < n {
+        p.prove_owed.push(false);
+    }
+    while p.bc_pending.len() < n {
+        p.bc_pending.push(false);
+    }
+    let ro = p.prove_resume.owner as usize;
+    if ro != 0 && (ro > n || ovk[ro - 1] < 0 || p.bc_pending[ro - 1]) {
+        p.prove_resume = loader::ProveResume {};
+    }
+    for m in 0..n {
+        if p.prove_owed[m] && ovk[m] >= 0 && p.prove_resume.owner as usize != m + 1 {
+            p.bc_pending.set(m, true);
+        }
+    }
+    let mut any = p.recur.stale || p.prove_resume.owner != 0;
+    for m in 0..n {
         any = any || p.bc_pending[m];
     }
     if !any {
         return out;
     }
     let err = analysis_errors(p, diags);
-    let ovk = overlay_slots(p, ov_files);
     let pkg = p as *mut loader::Package;
     let mut ow = bfx::Owner::new(pkg);
     let mut ctx = bfi::BorrowCtx::new();
+    // Each module with an editor buffer that passes its borrow check proves its contracts, as a build
+    // that does not skip the proofs (`-fno-prove`) does; another module owes them until it opens
+    // (`Package.prove_owed`). A proof costs far more than a borrow check, and the closed modules would
+    // make each round prove the workspace.
+    let proves = (p.cg & bman::CG_NO_PROVE) == 0 && prv::any_contracts(p);
+    if p.prove_resume.owner != 0 && !resume_proofs(p, diags, &err, stop, sctx, &mut out) {
+        return out;
+    }
     // The summaries of the module in progress; the reported mask stays as it is during the round.
     let mut sz = recur::Summarizer::new(&p.recur.reported);
     ctx.recur = &mut sz;
@@ -1997,7 +2048,9 @@ pub(package) fn borrowck_pending(
             // The module's own analysis failed: no borrow check is owed until it is analyzed
             // again, which owes a new one.
             let _ = drop_phase(diags, m, PH_BORROW);
+            let _ = drop_phase(diags, m, PH_PROVE);
             p.bc_pending.set(m, false);
+            p.prove_owed.set(m, false);
             p.recur.mods.set(m, recur::Sums::new());
             p.recur.stale = true;
             if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.get_ref().b.released {
@@ -2008,38 +2061,82 @@ pub(package) fn borrowck_pending(
         if !bc_ready(p, m, &err) {
             continue;
         }
+        let proving = proves && ovk[m] >= 0;
         reach_for(p, m);
         // An engine demand for a released body parses it back and checks the module again; each
-        // retry brings back at least one module.
+        // retry brings back at least one module. A module parsed back is checked again, and its type
+        // pool starts again: the retry's borrow state is new, since the memos name the old pool's types.
         let mut res = Option::<diag::Errors>::None;
-        for _ in 0..n + 1 {
+        let mut proofs = Option::<diag::Errors>::None;
+        let mut yielded = false;
+        for t in 0..n + 1 {
+            if t != 0 {
+                ow = bfx::Owner::new(pkg);
+                ctx = bfi::BorrowCtx::new();
+                ctx.recur = &mut sz;
+            }
             let mut cirv = lsp_engine(p);
             cirv.all_typed = true;
             p.cir = &mut cirv;
             let _ = sz.take();
+            // The proofs read the bodies as the build keeps them: the borrow check lowers into the keep.
+            let mut keep = irl::Keep::new();
+            if proving {
+                ctx.keep = &mut keep;
+            }
             let r = bc_module(p, m, &mut ow, &mut ctx, stop, sctx);
+            ctx.keep = null;
             p.cir = null;
             if r.is_none() {
                 out.canceled = true;
                 reach_off(p);
                 return out;
             }
-            if !parse_back_demanded(p, &cirv) {
+            let mut back = parse_back_demanded(p, &cirv);
+            if !back && proving && r.is_some_and(|e: &diag::Errors| !e.has_errors()) {
+                p.cir = &mut cirv;
+                proofs = prove_module(p, m, &mut keep, &err, &mut ow, &mut ctx, stop, sctx, &mut back);
+                p.cir = null;
+                // A stopped proof leaves the check finished and the proofs owed.
+                yielded = proofs.is_none();
+                back = parse_back_demanded(p, &cirv) || back;
+                if back {
+                    p.prove_resume = loader::ProveResume {};
+                }
+            }
+            if !back || yielded {
                 res = r;
                 break;
             }
+            proofs = None;
+            reach_for(p, m);
         }
         assert(res.is_some(), "a borrow check ends once no released body is demanded");
         let errs = res.unwrap();
         let had = drop_phase(diags, m, PH_BORROW);
         out.changed = out.changed || had || errs.has_errors() || errs.has_warnings();
         drain_errors(&errs, m as u32, PH_BORROW, diags);
+        // A closed module and one whose borrow check failed have no proofs (a build stops before them);
+        // stopped proofs keep the records of the last ones until they run.
+        if !yielded {
+            out.changed = drop_phase(diags, m, PH_PROVE) || out.changed;
+        }
+        if let Some(pe) = proofs {
+            out.changed = out.changed || pe.has_errors() || pe.has_warnings();
+            drain_errors(&pe, m as u32, PH_PROVE, diags);
+        }
         p.bc_pending.set(m, false);
+        p.prove_owed.set(m, proves && (!proving || yielded));
         p.recur.mods.set(m, sz.take());
         p.recur.stale = true;
         out.checked = true;
         if ovk[m] < 0 && !kept(p, m) && !p.modules[m].ast.get_ref().b.released {
             p.modules[m].ast.get_mut().release_bodies();
+        }
+        if yielded {
+            out.canceled = true;
+            reach_off(p);
+            return out;
         }
     }
     reach_off(p);
@@ -2047,6 +2144,343 @@ pub(package) fn borrowck_pending(
         out.changed = recur_check(p, diags) || out.changed;
     }
     return out;
+}
+
+// The proofs of module `m` (`prv::check_module`), whose borrow check lowered its bodies into `keep`:
+// the reports, None when `stop` asked to stop. A request stops the proofs of the bodies too, and
+// `Package.prove_resume` keeps the rest. They read the modules `m` can name: itself, its import closure
+// and the prelude, which its borrow check found typed without an error (`bc_ready`). The keep
+// first gets every body the proofs read (`prove_reach`), and a module of them with a contract of a
+// function without a body has its syntax back (`Prover::lower_shells` lowers those contracts); the
+// direct-call components are those of the modules a build reports or that state a contract
+// (`driver::emit::check_recursion`). A module parsed back meanwhile sets `back` and gives no proofs:
+// the module is checked again with it held, as after an engine demand.
+fn prove_module(
+    p: &mut loader::Package,
+    m: usize,
+    keep: &mut irl::Keep,
+    err: &Vector<bool>,
+    ow: &mut bfx::Owner,
+    ctx: &mut bfi::BorrowCtx,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+    back: &mut bool,
+) Option<diag::Errors> {
+    let n = p.modules.len();
+    let mut mods = Vector::<bool>::with_capacity(n);
+    for q in 0..n {
+        mods.push(q == m || p.modules[q].prelude);
+    }
+    {
+        let clo = unsafe &*p.module_closure(m as ModuleId);
+        for j in 0..clo.len() {
+            mods.set(clo[j] as usize, true);
+        }
+    }
+    for q in 0..n {
+        if mods[q] && p.modules[q].has_ast && p.modules[q].ast.get_ref().b.released && shell_owner(p, q) {
+            ensure_bodies(p, q);
+            hold_bodies(p, q);
+            *back = true;
+        }
+    }
+    if !prove_reach(p, keep, &mods, err, ow, ctx, stop, sctx, back) {
+        return None;
+    }
+    if *back {
+        return Some(diag::Errors::new());
+    }
+    let mut graph = Vector::<bool>::with_capacity(n);
+    for q in 0..n {
+        graph.push(
+            q < p.recur.reported.len() && p.recur.reported[q] || p.modules[q].has_ast && p.modules[q].ast.get_ref().contracts.len() != 0,
+        );
+    }
+    let comp = recur::kept_components(p, keep, &graph);
+    let mut next: usize = 0;
+    let mut errs = diag::Errors::new();
+    if !prv::check_module(p, keep, &comp, m, &mods, &mut next, &mut errs, stop, sctx) {
+        p.prove_resume = loader::ProveResume {
+            owner: m as u32 + 1,
+            keep: replace(keep, irl::Keep::new()),
+            comp: comp,
+            mods: mods,
+            next: next,
+            errs: errs,
+        };
+        return None;
+    }
+    errs.finalize(&p.modules[m].source, &p.modules[m].file);
+    return Some(errs);
+}
+
+// Whether module `q` states a contract of a function without a body (an interface's method, an extern
+// function): `Prover::lower_shells` lowers it. A loop's or a block's record (a body node) is none.
+fn shell_owner(p: &loader::Package, q: usize) bool {
+    let a = p.modules.at(q).ast.get_ref();
+    for c in 0..a.contracts.len() {
+        let o = a.contracts.at(c).owner;
+        if (o & NODE_BODY) == 0 && a.at_const(o).kind == NodeKind::NODE_FUNCTION && a.ext(o).function.body == NODE_NONE {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Whether the stopped proofs (`Package.prove_resume`) read module `q`: it is the proved module, they lower
+// its contracts of functions without a body, or they hold a body of it.
+const fn resume_reads(p: &loader::Package, q: usize) bool {
+    let r = &p.prove_resume;
+    if r.owner == 0 {
+        return false;
+    }
+    if r.owner as usize == q + 1 || q < r.mods.len() && r.mods[q] {
+        return true;
+    }
+    for i in 0..r.keep.kept.len() {
+        if r.keep.kept.at(i).body.module as usize == q {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Continue the proofs a request stopped (`Package.prove_resume`), within round `out`: their records
+// (`PH_PROVE`) replace the module's when they end. False when the round ends: `stop` asked to stop again
+// (the rest stays). A module whose analysis failed (`err`) runs none; an engine demand during them owes
+// the module a new check.
+fn resume_proofs(
+    p: &mut loader::Package,
+    diags: &mut Vector<DiagRec>,
+    err: &Vector<bool>,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+    out: &mut BcRound,
+) bool {
+    let mut r = replace(&mut p.prove_resume, loader::ProveResume {});
+    let m = (r.owner - 1) as usize;
+    if err[m] {
+        p.prove_owed.set(m, false);
+        return true;
+    }
+    let mut cirv = lsp_engine(p);
+    cirv.all_typed = true;
+    p.cir = &mut cirv;
+    let done = prv::check_module(p, &r.keep, &r.comp, m, &r.mods, &mut r.next, &mut r.errs, stop, sctx);
+    p.cir = null;
+    out.checked = true;
+    if parse_back_demanded(p, &cirv) {
+        p.bc_pending.set(m, true);
+        return true;
+    }
+    if !done {
+        p.prove_resume = r;
+        out.canceled = true;
+        return false;
+    }
+    r.errs.finalize(&p.modules[m].source, &p.modules[m].file);
+    out.changed = drop_phase(diags, m, PH_PROVE) || r.errs.has_errors() || r.errs.has_warnings() || out.changed;
+    drain_errors(&r.errs, m as u32, PH_PROVE, diags);
+    p.prove_owed.set(m, false);
+    return true;
+}
+
+// Lower into `keep` every body the proofs of its bodies read, as the borrow pass lowers it: every
+// function or method a kept body calls or names as a value, through the bodies those lower, and every
+// `invariant` method and `@counter` guard of a struct of the modules `mods` marks, which the proofs
+// unfold where a value of the type is. A module whose analysis failed (`err`) or that is not typed gives
+// none. The bodies lowered here stay in `Package.prove_cache`, which gives them to the next proofs. A
+// released module is parsed back and held across rounds (`hold_bodies`), as an engine demand holds it,
+// and sets `back`. False when `stop(sctx, false)`, polled before each lowering, asked to stop: the cache
+// makes the lowerings few, and a request waits for them.
+fn prove_reach(
+    p: &mut loader::Package,
+    keep: &mut irl::Keep,
+    mods: &Vector<bool>,
+    err: &Vector<bool>,
+    ow: &mut bfx::Owner,
+    ctx: &mut bfi::BorrowCtx,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+    back: &mut bool,
+) bool {
+    let n = p.modules.len();
+    let nitems = p.idx().items.len();
+    let mut queued = Vector::<bool>::new();
+    queued.resize_default(nitems);
+    let mut round = Vector::<u32>::new();
+    for q in 0..n {
+        if !p.modules[q].has_ast || !mods[q] {
+            continue;
+        }
+        let a = p.modules[q].ast.get_ref();
+        for c in 0..a.contracts.len() {
+            let r = *a.contracts.at(c);
+            if r.kind == CT_TYPE_INVARIANT && r.binder != NODE_NONE {
+                prove_queue(p, keep, &mut queued, &mut round, q as ModuleId, r.binder);
+            }
+        }
+        for k in 0..a.attrs.len() {
+            let at = a.attrs.at(k);
+            if at.kind == AttrKind::ATTR_COUNTER as u8 {
+                let sp = at.str_span;
+                let g = p.lookup_own(
+                    q as ModuleId,
+                    p.modules[q].source.as_str().slice(sp.start as usize, sp.end as usize),
+                    false,
+                );
+                prove_queue(p, keep, &mut queued, &mut round, q as ModuleId, g);
+            }
+        }
+    }
+    let saved = ctx.recur;
+    ctx.recur = null;
+    ctx.keep = keep;
+    let mut bodies = Vector::<irl::Lowerer>::new();
+    let mut scanned: usize = 0;
+    let mut done = true;
+    // Each round lowers at least one item, each once.
+    for _ in 0..nitems + 1 {
+        for i in scanned..keep.kept.len() {
+            let b = &keep.kept.at(i).body;
+            for k in 0..b.blocks.len() {
+                let t = &b.blocks.at(k).term;
+                if t.kind == core::TM_CALL && t.callee.module as usize < n {
+                    prove_queue(p, keep, &mut queued, &mut round, t.callee.module, t.callee.node);
+                }
+            }
+            for k in 0..b.constants.len() {
+                let c = b.constants.at(k);
+                if c.kind == core::CK_ITEM && c.item.module as usize < n {
+                    prove_queue(p, keep, &mut queued, &mut round, c.item.module, c.item.node);
+                }
+            }
+        }
+        scanned = keep.kept.len();
+        if round.len() == 0 {
+            break;
+        }
+        // A module's items are contiguous in the index: the sort groups them, one checker each.
+        round.sort();
+        let mut i: usize = 0;
+        while i < round.len() {
+            let q = p.idx().items.at(round[i] as usize).module as usize;
+            let mut j = i;
+            while j < round.len() && p.idx().items.at(round[j] as usize).module as usize == q {
+                j += 1;
+            }
+            if err[q] || p.modules[q].ast.get_ref().types.len() == 0 {
+                i = j;
+                continue;
+            }
+            // The cache gives the bodies it holds; the others lower, and the cache takes them.
+            let mut low = Vector::<NodeId>::new();
+            for x in i..j {
+                let node = p.idx().items.at(round[x] as usize).node;
+                if !prove_cached(p, keep, q as ModuleId, node) {
+                    low.push(node);
+                }
+            }
+            i = j;
+            if low.len() == 0 {
+                continue;
+            }
+            if p.modules[q].ast.get_ref().b.released {
+                ensure_bodies(p, q);
+                hold_bodies(p, q);
+                *back = true;
+            }
+            reach_for(p, q);
+            let pkg = p as *mut loader::Package;
+            let mm = &mut p.modules[q];
+            let src = mm.source.as_str().ptr() as *const char;
+            let len = mm.source.len();
+            let mut t = tc::TypeChecker::new(mm.ast.get_mut(), unsafe str::from_raw(src as *const u8, len), pkg);
+            for x in 0..low.len() {
+                if stop(sctx, false) {
+                    done = false;
+                    break;
+                }
+                let k0 = keep.kept.len();
+                t.bc_item(low[x], ow, ctx, &mut bodies);
+                for s2 in k0..keep.kept.len() {
+                    let kb = keep.kept.at(s2);
+                    unsafe (*pkg).prove_cache.insert(irl::KeptBody::copy(&kb.body, &kb.closures));
+                }
+            }
+            if !done {
+                break;
+            }
+        }
+        round.truncate(0);
+        if !done {
+            break;
+        }
+    }
+    reach_off(p);
+    ctx.keep = null;
+    ctx.recur = saved;
+    return done;
+}
+
+// Copy the cached lowering of function `node` of module `q` (`Package.prove_cache`) and those of its
+// closures into `keep`: false when the cache holds none.
+fn prove_cached(p: &loader::Package, keep: &mut irl::Keep, q: ModuleId, node: NodeId) bool {
+    let c = &p.prove_cache;
+    let mut work = Vector::<u64>::new();
+    switch c.ix.get(&skey_mix(0, q as u64 << 32 | node as u64)) {
+        Some(v) => work.push(*v),
+        None => {
+            return false;
+        },
+    }
+    // Each step copies one body: the closures are at most every body the cache holds.
+    for _ in 0..c.kept.len() + 1 {
+        if work.len() == 0 {
+            break;
+        }
+        let kb = c.kept.at(work.pop().unwrap() as usize);
+        keep.insert(irl::KeptBody::copy(&kb.body, &kb.closures));
+        for k in 0..kb.closures.len() {
+            if let Some(v) = c.ix.get(&skey_mix(0, q as u64 << 32 | kb.closures[k] as u64)) {
+                work.push(*v);
+            }
+        }
+    }
+    return true;
+}
+
+// Drop the cached proof lowerings (`Package.prove_cache`) of the modules `gone` marks: their analysis
+// changes.
+fn prove_cache_drop(p: &mut loader::Package, gone: &Vector<bool>) {
+    let mut old = replace(&mut p.prove_cache, irl::Keep::new());
+    for i in 0..old.kept.len() {
+        let q = old.kept.at(i).body.module as usize;
+        if q >= gone.len() || !gone[q] {
+            p.prove_cache.insert(replace(old.kept.index_mut(i), irl::KeptBody::empty(0, NODE_NONE)));
+        }
+    }
+}
+
+// Queue function `node` of module `m` for `prove_reach`, once: a function or a method item whose body
+// the keep does not hold.
+fn prove_queue(
+    p: &loader::Package,
+    keep: &irl::Keep,
+    queued: &mut Vector<bool>,
+    round: &mut Vector<u32>,
+    m: ModuleId,
+    node: NodeId,
+) {
+    if node == NODE_NONE || (node & NODE_BODY) != 0 || keep.ix.contains_key(&skey_mix(0, m as u64 << 32 | node as u64)) {
+        return;
+    }
+    let it = p.item_of(m, node);
+    if it == loader::ITEM_NONE || queued[it as usize] || !emit::bc_body_item(p, p.idx().items.at(it as usize)) {
+        return;
+    }
+    queued.set(it as usize, true);
+    round.push(it);
 }
 
 // Does module `m` declare a `@tail_recurse` function while the coroutine runtime is loaded? Its borrow
@@ -2104,8 +2538,12 @@ fn reach_settle(p: &mut loader::Package, root_file: str, lint_dir: str, st: &mut
     while p.bc_pending.len() < n {
         p.bc_pending.push(false);
     }
+    let mut gone = Vector::<bool>::new();
+    gone.resize_default(n);
     for i in 0..readers.len() {
         let m = readers[i];
+        // Its lowering reads the reachability.
+        gone.set(m, true);
         if p.bc_pending[m] {
             continue;
         }
@@ -2115,6 +2553,7 @@ fn reach_settle(p: &mut loader::Package, root_file: str, lint_dir: str, st: &mut
         }
         p.bc_pending.set(m, true);
     }
+    prove_cache_drop(p, &gone);
 }
 
 // Lower without the reachability: no cancellation check, a preemption tick in every loop (an
@@ -2167,14 +2606,22 @@ fn recur_check(p: &mut loader::Package, diags: &mut Vector<DiagRec>) bool {
     return had || reps.len() != 0;
 }
 
-/// True when the borrow round has a runnable check left: a borrow check, or the recursion check.
-pub(package) fn borrowck_runnable(p: &mut loader::Package, diags: &Vector<DiagRec>) bool {
+/// True when the borrow round has a runnable check left: a borrow check, the check of an open module
+/// that owes its proofs (`ov_files` names the open documents), or the recursion check.
+pub(package) fn borrowck_runnable(p: &mut loader::Package, diags: &Vector<DiagRec>, ov_files: &Vector<str>) bool {
     if p.recur.stale {
         return true;
     }
     let err = analysis_errors(p, diags);
-    for m in 0..p.bc_pending.len().min(p.modules.len()) {
-        if p.bc_pending[m] && (err[m] || bc_ready(p, m, &err)) {
+    let n = p.modules.len();
+    let mut ovk = Vector::<i64>::new();
+    for m in 0..n {
+        let pending = m < p.bc_pending.len() && p.bc_pending[m];
+        if !pending && m < p.prove_owed.len() && p.prove_owed[m] && ovk.len() == 0 {
+            ovk = overlay_slots(p, ov_files);
+        }
+        let owed = !pending && ovk.len() != 0 && p.prove_owed[m] && ovk[m] >= 0;
+        if (pending || owed) && (err[m] || bc_ready(p, m, &err)) {
             return true;
         }
     }

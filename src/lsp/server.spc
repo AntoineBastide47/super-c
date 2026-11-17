@@ -347,7 +347,7 @@ pub(package) fn capabilities_with(pull: bool, delta: bool, resolve: bool) String
         s.push_str(",\"diagnosticProvider\":{\"interFileDependencies\":true,\"workspaceDiagnostics\":false}");
     }
     s.push_str(
-        ",\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"enum\",\"enumMember\",\"interface\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"function\",\"method\"],\"tokenModifiers\":[\"declaration\",\"readonly\"]},\"range\":true,\"full\":",
+        ",\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":[\"namespace\",\"type\",\"enum\",\"enumMember\",\"interface\",\"typeParameter\",\"parameter\",\"variable\",\"property\",\"function\",\"method\",\"keyword\"],\"tokenModifiers\":[\"declaration\",\"readonly\"]},\"range\":true,\"full\":",
     );
     if delta {
         s.push_str("{\"delta\":true}");
@@ -1433,7 +1433,11 @@ extend Server {
         for r in 0..self.roots.len() {
             if !todo && self.roots.at(r).built && self.roots.at(r).pkg.modules.len() != 0 {
                 let diags = replace(&mut self.roots[r].diags, Vector::<analysis::DiagRec>::new());
-                todo = analysis::borrowck_runnable(&mut self.roots[r].pkg, &diags);
+                let mut ovf = Vector::<str>::new();
+                for i in 0..self.docs.len() {
+                    ovf.push(&self.docs.at(i).path);
+                }
+                todo = analysis::borrowck_runnable(&mut self.roots[r].pkg, &diags, &ovf);
                 self.roots[r].diags = diags;
             }
         }

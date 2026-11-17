@@ -354,6 +354,37 @@ pub(package) fn check_kept(
     graph: &Vector<bool>,
     comp: &mut Vector<u32>,
 ) bool {
+    let g = kept_graph(p, keep, graph, comp);
+    let mut s = Summarizer::new(reported);
+    let mut sums = Vector::<Sums>::with_capacity(p.modules.len());
+    let mut f: usize = 0;
+    for m in 0..p.modules.len() {
+        while f < g.members.len() && g.members[f].module == m as u32 {
+            if g.members[f].cyclic && reported[m] {
+                s.add(p, &keep.kept.at(g.members[f].fi as usize).body);
+            }
+            f += 1;
+        }
+        sums.push(s.take());
+    }
+    let reps = check(p, &sums, reported);
+    for i in 0..reps.len() {
+        reps.at(i).errs.log();
+    }
+    return reps.len() == 0;
+}
+
+/// Each kept body's component of the direct-call graph of the modules `graph` marks (`kept_graph`).
+pub(package) fn kept_components(p: &loader::Package, keep: &irl::Keep, graph: &Vector<bool>) Vector<u32> {
+    let mut comp = Vector::<u32>::new();
+    let _ = kept_graph(p, keep, graph, &mut comp);
+    return comp;
+}
+
+// The direct-call graph of the kept bodies of the modules `graph` marks, its components computed;
+// `comp` gets each kept body's component, NONE for a body outside the graph, what the prover's
+// `decreases` reads.
+fn kept_graph(p: &loader::Package, keep: &irl::Keep, graph: &Vector<bool>, comp: &mut Vector<u32>) Recur {
     let mut g = Recur::new();
     for m in 0..p.modules.len() {
         if !graph[m] || !p.modules.at(m).has_ast {
@@ -381,23 +412,7 @@ pub(package) fn check_kept(
     for f in 0..g.members.len() {
         comp.set(g.members[f].fi as usize, g.members[f].comp);
     }
-    let mut s = Summarizer::new(reported);
-    let mut sums = Vector::<Sums>::with_capacity(p.modules.len());
-    let mut f: usize = 0;
-    for m in 0..p.modules.len() {
-        while f < g.members.len() && g.members[f].module == m as u32 {
-            if g.members[f].cyclic && reported[m] {
-                s.add(p, &keep.kept.at(g.members[f].fi as usize).body);
-            }
-            f += 1;
-        }
-        sums.push(s.take());
-    }
-    let reps = check(p, &sums, reported);
-    for i in 0..reps.len() {
-        reps.at(i).errs.log();
-    }
-    return reps.len() == 0;
+    return g;
 }
 
 const fn def_key(module: ModuleId, node: NodeId) u64 {

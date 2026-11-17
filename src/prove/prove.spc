@@ -3861,9 +3861,9 @@ extend<const B: usize> Prover<B> {
         };
     }
 
-    const fn spend(self: &mut Self) bool {
+    fn spend(self: &mut Self) bool {
         self.steps += 1;
-        return self.steps + self.sv.steps <= STEP_BUDGET && self.steps <= self.walk_cap;
+        return !(self.sv.polling && self.sv.tick(1)) && self.steps + self.sv.steps <= STEP_BUDGET && self.steps <= self.walk_cap;
     }
 
     // ---- reports ----------------------------------------------------------------------------------
@@ -6145,6 +6145,9 @@ extend<const B: usize> Prover<B> {
         }
         self.sv.stop_on_ovf = false;
         self.sv.gave_up = false;
+        if self.sv.halted {
+            return;
+        }
         if ok {
             if !self.proved.contains_key(&goal) {
                 self.proved.insert(goal, Vector::<Vector<u32>>::new());
@@ -16047,16 +16050,17 @@ extend<const B: usize> Prover<B> {
     }
 
     // Lower the contracts of every interface method that has contracts and no body.
-    fn lower_shells(self: &mut Self, sh: &mut Shared) {
+    fn lower_shells(self: &mut Self, sh: &mut Shared, mods: &Vector<bool>) {
         let p = unsafe &*self.p;
         for m in 0..p.modules.len() {
-            if !p.modules.at(m).has_ast {
+            if !p.modules.at(m).has_ast || !mods[m] {
                 continue;
             }
             let a = unsafe &*p.module_ast_const(m as ModuleId);
             for j in 0..a.contracts.len() {
+                // A loop's or a block's record (a body node, which a language server may have released).
                 let o = a.contracts.at(j).owner;
-                if a.at_const(o).kind != NodeKind::NODE_FUNCTION || a.ext(o).function.body != NODE_NONE {
+                if (o & NODE_BODY) != 0 || a.at_const(o).kind != NodeKind::NODE_FUNCTION || a.ext(o).function.body != NODE_NONE {
                     continue;
                 }
                 let key = skey_mix(0, m as u64 << 32 | o as u64);
@@ -20529,6 +20533,78 @@ fn prove_exhaustive(pv: &mut Prover<NUM_NARROW>, p: &loader::Package, keep: &irl
     }
 }
 
+// Prove kept body `k` with the narrow numbers (`prove_fits`), else, or when `wide`, with the wide ones
+// (`pw`): its reports go to `pv.errs`, its facts to `pv.facts`.
+fn prove_one(pv: &mut Prover<NUM_NARROW>, pw: &mut Prover<NUM_WIDE>, k: usize, wide: bool) {
+    if !wide && pv.prove_fits(k) {
+        return;
+    }
+    pw.prove_kept(k);
+    let m = (unsafe (&*pv.keep).kept.at(k).body.module) as usize;
+    pv.errs.index_mut(m).append(pw.errs.index_mut(m));
+    pv.facts.extend_copy(&pw.facts);
+    pw.facts.clear();
+}
+
+/// The language server's proofs of the kept bodies of module `m` (`check_kept`, serial) from kept slot
+/// `*next` on, their reports appended to `errs`: true when they ended, false when `stop(sctx, true)`,
+/// polled before each body and inside it (`Solver::set_poll`), asked to stop (a request stops them too),
+/// `*next` then the slot to resume at: a body that a stop cut gives no reports and runs again. `keep`
+/// holds every body the proofs read, and `mods` marks the modules whose contracts of functions without a
+/// body they read (the modules `m` can name); `comp` is as for `check_kept`. Each body's proof depends on no other's, so a resumed run reports what one run does.
+pub(package) fn check_module(
+    p: &loader::Package,
+    keep: &irl::Keep,
+    comp: &Vector<u32>,
+    m: usize,
+    mods: &Vector<bool>,
+    next: &mut usize,
+    errs: &mut diag::Errors,
+    stop: fn(*mut void, bool) bool,
+    sctx: *mut void,
+) bool {
+    let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
+    let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
+    pv.lower_shells(&mut sh, mods);
+    if *next != 0 {
+        // The first run reported the shells.
+        let _ = replace(pv.errs.index_mut(m), diag::Errors::new());
+    }
+    pv.sh = &sh;
+    let mut pw = Prover::<NUM_WIDE>::new(p, keep, pv.slice);
+    pw.sh = &sh;
+    pv.sv.set_poll(stop, sctx);
+    pw.sv.set_poll(stop, sctx);
+    while *next < keep.kept.len() {
+        let k = *next;
+        let kb = keep.kept.at(k);
+        if kb.body.blocks.len() != 0 && kb.body.module as usize == m {
+            if stop(sctx, true) {
+                errs.append(pv.errs.index_mut(m));
+                return false;
+            }
+            let held = replace(pv.errs.index_mut(m), diag::Errors::new());
+            let wide = pv.needs_wide(k);
+            prove_one(&mut pv, &mut pw, k, wide);
+            // A stop in the body: its answer is none, and it runs again when the proofs resume.
+            let mut e = replace(pv.errs.index_mut(m), held);
+            if pv.sv.halted || pw.sv.halted {
+                errs.append(pv.errs.index_mut(m));
+                return false;
+            }
+            pv.errs.index_mut(m).append(&mut e);
+        }
+        *next = k + 1;
+    }
+    let mut skip = Vector::<bool>::with_capacity(p.modules.len());
+    for i in 0..p.modules.len() {
+        skip.push(i != m);
+    }
+    prove_exhaustive(&mut pv, p, keep, &skip);
+    errs.append(pv.errs.index_mut(m));
+    return true;
+}
+
 /// Prove the contracts of every kept body of `keep` outside the modules `skip` marks, and print the
 /// failures; `comp` holds each kept body's component of the direct calls (`ir::recursion::check_kept`).
 /// `held[m]`: no obligation of module `m` failed. True when every obligation holds.
@@ -20542,7 +20618,11 @@ pub(package) fn check_kept(
 ) bool {
     let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
     let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
-    pv.lower_shells(&mut sh);
+    let mut all = Vector::<bool>::with_capacity(p.modules.len());
+    for _m in 0..p.modules.len() {
+        all.push(true);
+    }
+    pv.lower_shells(&mut sh, &all);
     pv.sh = &sh;
     let n = keep.kept.len();
     // A body with an integer wider than the narrow numbers hold proves with the wide ones.
@@ -20556,17 +20636,9 @@ pub(package) fn check_kept(
         pw.sh = &sh;
         for k in 0..n {
             let kb = keep.kept.at(k);
-            if kb.body.blocks.len() == 0 || skip[kb.body.module as usize] {
-                continue;
+            if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] {
+                prove_one(&mut pv, &mut pw, k, wide[k]);
             }
-            if !wide[k] && pv.prove_fits(k) {
-                continue;
-            }
-            pw.prove_kept(k);
-            let m = kb.body.module as usize;
-            pv.errs.index_mut(m).append(pw.errs.index_mut(m));
-            pv.facts.extend_copy(&pw.facts);
-            pw.facts.clear();
         }
     } else {
         // One prover per chunk of bodies, each body's reports in a container of its own; a walk

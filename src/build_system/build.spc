@@ -585,7 +585,7 @@ fn stamp_push_dir(out: &mut String, dir: str, h: u64) bool {
 
 // The `opt-level` and the code-generation flags (`mf::cg_effective`) of profile `name` of `m`, the
 // command line's over them, as `apply_profile` sets them: OPT_NONE and 0 for an unknown name.
-const fn profile_codegen(m: &mf::Manifest, name: str) (i32, u64) {
+pub(package) const fn profile_codegen(m: &mf::Manifest, name: str) (i32, u64) {
     let pi = m.profile_index(name);
     if pi < 0 {
         return (mf::OPT_NONE, 0u64);

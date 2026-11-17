@@ -27,6 +27,13 @@ import prove::sat as *;
 
 // The blocks, chain blocks and solver steps one body may spend.
 pub(package) const STEP_BUDGET: u32 = 4000000;
+// The steps between two stop polls (`Solver::tick`): a poll reads the language server's input queue.
+const POLL_STEPS: u32 = 4096;
+
+// The stop poll of a solver without one (`Solver::set_poll`).
+const fn no_poll(_ctx: *mut void, _between: bool) bool {
+    return false;
+}
 // The SAT models of one refutation.
 const SPLITS_MAX: u32 = 256;
 // The levels of `and`, `or` and `not` that `refuted` reads.
@@ -880,6 +887,13 @@ pub(package) struct Solver<const B: usize> {
     // the wide prover proves the body again (`Prover::oblige`). `gave_up` once it did.
     pub(package) stop_on_ovf: bool,
     pub(package) gave_up: bool,
+    // The language server's stop poll (`set_poll`), about every POLL_STEPS steps: once it asks to stop
+    // (`halted`) every check gives up, and the caller drops the body's answer.
+    poll: fn(*mut void, bool) bool,
+    pctx: *mut void,
+    pub(package) polling: bool,
+    poll_left: u32,
+    pub(package) halted: bool,
     // The integer model of the last branch no solver refuted: atom << 32 | its index in `mval`.
     pub(package) model: Vector<u32>,
     pub(package) mval: Vector<Num<B>>,
@@ -960,6 +974,11 @@ extend<const B: usize> Solver<B> {
             limit: STEP_BUDGET,
             stop_on_ovf: false,
             gave_up: false,
+            poll: no_poll,
+            pctx: null,
+            polling: false,
+            poll_left: 0,
+            halted: false,
             model: Vector::<u32>::new(),
             mval: Vector::<Num<B>>::new(),
             lin: Vector::<LinTerm<B>>::new(),
@@ -1013,9 +1032,34 @@ extend<const B: usize> Solver<B> {
         };
     }
 
-    const fn spend(self: &mut Self, n: u32) bool {
+    fn spend(self: &mut Self, n: u32) bool {
         self.steps = self.steps.saturating_add(n);
+        if self.polling && self.tick(n) {
+            self.gave_up = true;
+        }
         return self.steps <= self.limit && !self.gave_up;
+    }
+
+    /// Poll `poll(pctx, true)` about every POLL_STEPS steps from now on (`tick`).
+    pub(package) const fn set_poll(self: &mut Self, poll: fn(*mut void, bool) bool, pctx: *mut void) {
+        self.poll = poll;
+        self.pctx = pctx;
+        self.polling = true;
+        self.poll_left = POLL_STEPS;
+    }
+
+    /// Count `n` steps toward the next poll of a solver that polls (`set_poll`): true once a poll asked
+    /// to stop.
+    pub(package) fn tick(self: &mut Self, n: u32) bool {
+        if !self.halted {
+            if n >= self.poll_left {
+                self.poll_left = POLL_STEPS;
+                self.halted = self.poll(self.pctx, true);
+            } else {
+                self.poll_left -= n;
+            }
+        }
+        return self.halted;
     }
 
     // Whether a simplex ran out of the numbers' bits since `clear_overflow`: wider numbers may prove what

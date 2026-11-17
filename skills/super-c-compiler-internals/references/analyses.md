@@ -20,7 +20,7 @@ file is authoritative for where to look first.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
+| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::kept_graph` (from `check_kept`; `kept_components` for the language server; reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
 | Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
 | The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is neither frozen nor a container, a slice view, a closure or a call's implicit borrow may reach (`is_mem`; not a `&mut` lent to one call); the temporaries lent to one call | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, `scoped`, per body | the next body |
 | The `&mut` parameters' slots past the locals, their types | `Prover::prove_body` | `slot_ty`, `slot_of`, `nlocals`, per body | the next body |
@@ -83,10 +83,19 @@ file is authoritative for where to look first.
 | A branch's proof: facts, trees, cuts, multipliers | the solvers | `Solver.pf` (`kernel::Proof`), checked by `Kernel::check` | the next branch |
 | The last unrefuted branch's integer model | `Solver::keep_model`, or the bits' model (`sat_model`) | `Solver.model`, `mval` | the next `implies` |
 | The parameters a callee may change | `Prover::param_writes` | `Prover.pwrites`, per callee | end of `check_kept` |
-| The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept` |
+| The contract sites of the interface methods without a body (the language server: of the modules the proved one can name) | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept`, `check_module` |
 | Whether a kept body has an integer type wider than the narrow numbers read | `Prover::needs_wide` (`wide_bits`) | `wide` per kept slot, in `check_kept` | end of `check_kept` |
 | The facts derived for a division or shift by a constant (quotient bounds, remainder, product) | `Prover::derive` (`divided`, `quotient`, `shifted`) | `Prover.derived` | end of `check_kept` |
 | Each module's proof key: its source, its import and reference closure (`import_closure`, `mod_refs`), the prelude, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
+
+## language server proofs (`lsp::analysis::borrowck_pending`, after an open module's borrow check)
+
+| Fact | Producer | Stored in | Valid until |
+|------|----------|-----------|-------------|
+| The bodies the proofs of an open module read: its own (its borrow check lowers into the keep), the call targets and function values of every kept body, through the bodies they lower, and the `invariant` methods and `@counter` guards of the modules it can name | `prove_reach` (each kept body scanned once) | a per-check `irl::Keep` | the module's next check |
+| The lowerings `prove_reach` made of other functions than the proved module's | `prove_reach` | `Package.prove_cache` | the next analysis or parse-back of their module (`recompile`'s affected and re-checked sets, `ensure_bodies`), a reachability change for a module that reads it (`reach_settle`) |
+| The proofs a request stopped: the keep, the components, the next kept slot, the reports so far | `prove_module`, `prv::check_module` | `Package.prove_resume` | an analysis round with work, a parse-back of a module they read (`resume_reads`), the document's close, the module's next check |
+| The modules whose last check did not finish their proofs: the module was closed, or a request stopped them | `borrowck_pending` | `Package.prove_owed` | the module's next check with its proofs, or a failed analysis |
 
 ## lower (`cemit_package`, `B_PLAN` to `S_LOWERED`)
 

@@ -9,6 +9,7 @@
     { "include": "#chars" },
     { "include": "#numbers" },
     { "include": "#keywords" },
+    { "include": "#verification" },
     { "include": "#types" },
     { "include": "#declarations" },
     { "include": "#functions" }
@@ -138,11 +139,59 @@
         }
       ]
     },
+    "verification": {
+      "comment": "The verification words are identifiers outside their positions: each pattern names its position, and the language server's keyword tokens correct the rest.",
+      "patterns": [
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\b(requires|ensures|decreases|invariant)\\b"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bpanics(?=\\s+if\\b)"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bspec(?=\\s+fn\\b)"
+        },
+        {
+          "match": "\\b(lemma)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.other.verification.super-c" },
+            "2": { "name": "entity.name.function.super-c" }
+          }
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\b(forall|exists)(?=\\s+[A-Za-z_][A-Za-z0-9_]*\\s+in\\b)"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bold(?=\\s*\\()"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bghost(?=\\s+[A-Za-z_])"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bassert(?=\\s+[^(\\s])"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bby(?=\\s*\\{)"
+        },
+        {
+          "name": "keyword.other.verification.super-c",
+          "match": "\\bis(?=\\s+(-|[0-9]|'|\\.\\.|[A-Z]))"
+        }
+      ]
+    },
     "types": {
       "patterns": [
         {
           "name": "storage.type.builtin.super-c",
-          "match": "\\b(bool|char|i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|c32|c64|va_list|void|never|str)\\b"
+          "match": "\\b(bool|char|i8|i16|i32|i64|isize|u8|u16|u32|u64|usize|f32|f64|c32|c64|va_list|void|never|str|int|nat)\\b"
         },
         {
           "name": "entity.name.type.super-c",

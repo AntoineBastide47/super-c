@@ -379,14 +379,19 @@ extend Keep {
     }
 
     pub(package) fn put(self: &mut Self, src: &Lowerer) {
+        self.insert(KeptBody::copy(&src.body, &src.closures));
+    }
+
+    /// Move kept body `kb` in, unless the keep holds one of its owner (first wins, as `put`).
+    pub(package) fn insert(self: &mut Self, kb: KeptBody) {
         assert(self.viewers == 0 || self.kept.len() < self.kept.capacity(), "a viewed keep never reallocates");
-        let d = src.body.owner;
+        let d = kb.body.owner;
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
         if self.ix.contains_key(&key) {
             return;
         }
         self.ix.insert(key, self.kept.len() as u64);
-        self.kept.push(KeptBody::copy(&src.body, &src.closures));
+        self.kept.push(kb);
     }
 }
 
