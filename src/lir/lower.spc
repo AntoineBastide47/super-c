@@ -33,6 +33,9 @@ import std::parallel::sync as psync;
 /// The byte that holds the level of `simd_levels` the native copies run at: 0 (the build's features) until
 /// the registry's constructor sets it (`driver::emit::native_registry`).
 const SIMD_LV: str = "__sc_simd_lv";
+// The prefix of a body's counter symbol under `counts`, before the body's own name: no symbol a source
+// names holds the dot.
+const COUNTER_PREFIX: str = "__sc_bc.";
 
 // Value classes of a type.
 const VC_ZST: u8 = 0; // no storage: unit, void, never, zero-sized
@@ -187,12 +190,15 @@ pub(package) struct Lower {
     pub(package) wrap: bool,
     /// Accesses of typed places carry their type tags (`MEM_TBAA`, `-fstrict-aliasing`).
     pub(package) strict: bool,
+    /// Each body counts the executions of its Core IR blocks (`-fblock-counts`): `ctr`, `count_block`.
+    pub(package) counts: bool,
     /// Bodies lowered and refused.
     pub(package) nbodies: u64,
     err: str<'static>,
     dump: String, // `SC_LIR_DUMP`: the body (or refusal reason) whose refusal prints its Core IR
     dbg: bool, // lowering the body `dump` names: report where it fails
     // ---- per body ----
+    ctr: u32, // the body's counter symbol under `counts`, else NONE
     m: ModuleId,
     file: u32,
     fids: Vector<u32>, // per module, its source's file id (`file_of`; NONE: not yet)
@@ -277,6 +283,8 @@ extend Lower {
             ctfe: Vector::<CtfeRes>::new(),
             wrap: wrap,
             strict: false,
+            counts: false,
+            ctr: NONE,
             nbodies: 0,
             err: "",
             dump: stdlib::get_env("SC_LIR_DUMP").unwrap_or(String::new()),
@@ -2353,6 +2361,12 @@ extend Lower {
         };
         let _ = self.pkg.define(s, &self.b);
         self.pend.push(s);
+        if self.ctr != NONE && self.pkg.syms[self.ctr as usize].def == NONE {
+            let nb: []u8 = [];
+            let nr: []Reloc = [];
+            let _ = self.pkg.add_data(self.ctr, 8, 3, false, nb, nr);
+            self.pend.push(self.ctr);
+        }
         if cnode == NODE_NONE {
             self.item_attrs(c, s, b.owner.module, b.owner.node);
         }
@@ -2369,6 +2383,7 @@ extend Lower {
 
     fn reset(self: &mut Self, m: ModuleId) {
         self.m = m;
+        self.ctr = NONE;
         self.b.clear();
         self.li.truncate(0);
         self.var_ty.truncate(0);
@@ -2420,6 +2435,9 @@ extend Lower {
         );
         // `@constant_time` on the function (its closures' bodies too): `lir::ct` checks the body.
         self.b.ct = b.owner.node != NODE_NONE && oa.attr_of(b.owner.node, AttrKind::ATTR_CONSTANT_TIME) != null;
+        // A function with more features than the build's (`@target_feature`, a run-time copy): its own
+        // registers and instructions.
+        self.b.cpu = c.body_cpu();
         // Captures: the trailing argument locals of a closure body, read through its env.
         let mut ncaps: u32 = 0;
         let mut nparams = b.args;
@@ -2503,6 +2521,11 @@ extend Lower {
         if !self.entry(c, b, ncaps, nparams, cap_base, cnode == NODE_NONE && self.variadic(c, b)) {
             return false;
         }
+        self.ctr = if self.counts {
+            self.pkg.symbol(format("{}{}", COUNTER_PREFIX, name).as_str(), SK_DATA)
+        } else {
+            NONE
+        };
         let mut e0: usize = 0;
         for k in 0..self.order.len() {
             let blk = self.order[k];
@@ -2519,11 +2542,23 @@ extend Lower {
             if !joined {
                 self.b.begin(self.lblk[blk as usize]);
             }
+            if self.ctr != NONE {
+                self.count_block();
+            }
             if !self.lower_block(c, b, blk) {
                 return false;
             }
         }
         return self.finish(name);
+    }
+
+    // One more execution of the Core IR block that begins here, in the body's counter (`counts`).
+    fn count_block(self: &mut Self) {
+        let k = self.sym_of(self.ctr);
+        let a = self.inst(O_SYMADDR, T_PTR, 0, k, 0, VNONE);
+        let v = self.load(T_I64, a, 0, false);
+        let w = self.arith(O_ADD, v, self.iconst(T_I64, 1));
+        self.store(w, a, 0, false);
     }
 
     // Drop the `jmp` that ends the LIR block lowered last when it is the one edge (of those made since
@@ -4930,6 +4965,35 @@ extend Lower {
         return self.int_to(cnt, rt, false);
     }
 
+    // The IEEE 754-2019 minimumNumber or maximumNumber (`code`: SIMD_MIN, SIMD_MAX) of float vectors `x` and
+    // `y` of type `vt`, as the operations the target computes in registers (`Package.vminnum`); VNONE: none.
+    // A NaN gives the other operand, two give `x` quieted (VOP_FIRST). The optimizer drops the quieting of
+    // an operand it knows quiet and puts a number operand first (`lir::opt` `float_known`).
+    fn min_num(self: &mut Self, code: u16, vt: u8, x: Value, y: Value) Value {
+        let m = self.pkg.vminnum;
+        if m == VMIN_EXACT {
+            return self.vop(code, vt, [x, y], VNONE);
+        }
+        let c = code | VOP_NUM | VOP_FIRST;
+        if m == VMIN_QUIET {
+            // arm64: `fminnm` of the operands quieted (each one's `fmaxnm` with itself): a signaling NaN
+            // would give a NaN.
+            let mx = (irc::OP_SIMD + irc::SIMD_MAX as u32) as u16 | VOP_NUM;
+            let qx = self.vop(mx, vt, [x, x], VNONE);
+            let qy = self.vop(mx, vt, [y, y], VNONE);
+            return self.vop(c, vt, [qx, qy], VNONE);
+        }
+        if m == VMIN_NUM {
+            // x86-64: C's of `x` quieted (`x + -0.0`) and `y`, which gives the other operand for a NaN of
+            // either kind.
+            let (w, nw) = splat_words(&mut self.b, vt, 1u64 << (type_bits(lane_type(vt), 8) - 1) as u64);
+            let zs = self.inst(O_WCONST, vt, 0, w, nw, VNONE);
+            let qx = self.inst(O_FADD, vt, 0, x, zs, VNONE);
+            return self.vop(c, vt, [qx, y], VNONE);
+        }
+        return VNONE;
+    }
+
     // Lane-wise vector operation `ename` (an entry of `chunks` times fewer lanes, `chunks` a power of two)
     // over vector arguments `args`, of result type `rt`: each argument halved (`low_half`, `high_half`)
     // down to the entry's lanes, one call per chunk, and the results joined (`concat`) in lane order. The
@@ -6004,6 +6068,15 @@ extend Lower {
         let mut ename = String::new();
         let mut chunks: u64 = 1;
         if ti.cls == VC_SCALAR && !mem_arg && c.lir_simd_entry(b, &rv, &mut ename, &mut chunks) {
+            // A float minimumNumber or maximumNumber: operations the optimizer reads, in place of an entry
+            // of several instructions.
+            let fl = is_vec(ti.mty) && is_float(lane_type(ti.mty));
+            if (rv.c == irc::SIMD_MIN || rv.c == irc::SIMD_MAX) && fl && args.len() == 2 && !c.minmax_exact() {
+                let r = self.min_num((irc::OP_SIMD + rv.c as u32) as u16, ti.mty, args[0], args[1]);
+                if r != VNONE {
+                    return r;
+                }
+            }
             // A narrow result of a signed type comes back sign-extended, as the entry's own signature says.
             let ret = ret_code(c, b.module, rv.target, ti.mty);
             if chunks > 1 {
@@ -8086,7 +8159,7 @@ extend Lower {
         ) == ti.mty {
             // The C library's square root, correctly rounded as the instruction is.
             r = self.inst(O_FSQRT, ti.mty, 0, args[0], VNONE, VNONE);
-        } else if fv == VNONE && ext && self.pkg.fma && ti.cls == VC_SCALAR && args.len() == 3 && (nm == "fma" && ti.mty == T_F64 || nm == "fmaf" && ti.mty == T_F32) && self.vty(
+        } else if fv == VNONE && ext && self.pkg.cpu_of(&self.b).fma && ti.cls == VC_SCALAR && args.len() == 3 && (nm == "fma" && ti.mty == T_F64 || nm == "fmaf" && ti.mty == T_F32) && self.vty(
             args[0],
         ) == ti.mty && self.vty(args[1]) == ti.mty && self.vty(args[2]) == ti.mty {
             // The C library's fused multiply-add on a processor that has the instruction: one rounding too.
@@ -8348,7 +8421,7 @@ extend Lower {
             }
             if name == "sc_has_f16" {
                 // The processor converts binary16 values (`Package.half`): `std::float`'s f16 computes in f32.
-                *out = self.iconst(T_I32, ast::pick(self.pkg.half != HALF_NONE, 1u64, 0u64));
+                *out = self.iconst(T_I32, ast::pick(self.pkg.cpu_of(&self.b).half != HALF_NONE, 1u64, 0u64));
                 return true;
             }
             return false;
@@ -8445,7 +8518,7 @@ extend Lower {
         }
         if n == 1 && (name == "sc_f16_to_f32" || name == "sc_f32_to_f16") {
             let to_f = name == "sc_f16_to_f32";
-            if self.pkg.half == HALF_NONE {
+            if self.pkg.cpu_of(&self.b).half == HALF_NONE {
                 // Unreachable behind `sc_has_f16` (0): an abort, as the C stubs, then a zero of the result's
                 // type for the code after it.
                 let sg = self.b.signature([T_PTR as u32][0..0], 0, false, T_NONE);
@@ -12044,6 +12117,88 @@ extend Lower {
         return self.synth_end(c, cd, ro, "main", ok);
     }
 
+    /// The registry of a `-fblock-counts` build's counters (`counts`), in the object of unit `unit` (the
+    /// writer `std::rt::counts`, whose source is `file`): one entry per counter, sorted by its function's
+    /// name, of the name's address and length and the counter's address (`__sc_bcr.entries`, the names in
+    /// `__sc_bcr.names`), and the functions `__sc_bc_table` and `__sc_bc_len` that give them. Called once
+    /// every body of the build is lowered.
+    pub(package) fn count_registry(self: &mut Self, unit: u32, file: str) {
+        let mut ctrs = Vector::<(String, u32)>::new();
+        for s in 0..self.pkg.syms.len() {
+            let y = self.pkg.syms[s];
+            let nm = self.pkg.spell(y.name);
+            if y.kind == SK_DATA && y.def != NONE && nm.starts_with(COUNTER_PREFIX) {
+                ctrs.push((String::from_str(nm.slice(COUNTER_PREFIX.len(), nm.len())), s as u32));
+            }
+        }
+        ctrs.sort_by(|a: &(String, u32), b: &(String, u32)| a.0.cmp(&b.0));
+        let pb = self.pkg.ptr_bytes;
+        let mut names = Vector::<u8>::new();
+        let mut init = Vector::<u8>::new();
+        let mut relocs = Vector::<Reloc>::new();
+        init.resize_default(ctrs.len() * 3 * pb as usize);
+        let ns = self.pkg.symbol("__sc_bcr.names", SK_DATA);
+        for k in 0..ctrs.len() {
+            let e = k as u32 * 3 * pb;
+            let n = ctrs[k].0.as_str();
+            relocs.push(Reloc { offset: e, sym: ns, addend: names.len() as i64 });
+            relocs.push(Reloc { offset: e + 2 * pb, sym: ctrs[k].1, addend: 0 });
+            for j in 0..pb {
+                init.set((e + pb + j) as usize, (n.len() as u64 >> (8 * j) as u64) as u8);
+            }
+            for j in 0..n.len() {
+                names.push(n.byte_at(j));
+            }
+        }
+        // A section holds at least one byte.
+        let nr: []Reloc = [];
+        let _ = self.pkg.add_data(ns, (names.len() as u32).max(1), 0, true, names[0..names.len()], nr);
+        let ts = self.pkg.symbol("__sc_bcr.entries", SK_DATA);
+        let _ = self.pkg.add_data(
+            ts,
+            (init.len() as u32).max(pb),
+            log2(pb) as u8,
+            false,
+            init[0..init.len()],
+            relocs[0..relocs.len()],
+        );
+        for s in [ns, ts] {
+            self.pkg.syms.index_mut(s as usize).unit = unit;
+            self.pkg.syms.index_mut(s as usize).own = true;
+        }
+        let fid = self.pkg.add_file(file);
+        self.reg_fn(unit, fid, "__sc_bc_table", true, 0);
+        self.reg_fn(unit, fid, "__sc_bc_len", false, ctrs.len() as u64);
+    }
+
+    // A function of `count_registry` in unit `unit`: `name()` returns the entries' address (`addr`) or `n`.
+    fn reg_fn(self: &mut Self, unit: u32, fid: u32, name: str, addr: bool, n: u64) {
+        self.nbodies += 1;
+        self.err = "";
+        self.reset(unit as ModuleId);
+        self.bm = unit as ModuleId;
+        self.noret = false;
+        self.file = fid;
+        let pi = self.ptr_int();
+        let none: []u32 = [];
+        self.b.sig = self.b.signature(none, 0, false, ast::pick(addr, T_PTR, pi));
+        let pb0: []u8 = [];
+        let b0 = self.b.add_block(pb0);
+        self.b.begin(b0);
+        let v = if addr {
+            self.symaddr("__sc_bcr.entries", SK_DATA)
+        } else {
+            self.iconst(pi, n)
+        };
+        let _ = self.inst(O_RET, T_NONE, 0, v, VNONE, VNONE);
+        let _ = self.finish(name);
+        self.tidy();
+        let s = self.pkg.symbol(name, SK_FUNC);
+        let _ = self.pkg.define(s, &self.b);
+        self.pkg.syms.index_mut(s as usize).unit = unit;
+        self.pkg.syms.index_mut(s as usize).own = true;
+    }
+
     // The user main `__sc_user_main` returns an i32 and, when `wants`, takes the arguments as a
     // `Vector<str>`: pointer, length and capacity.
     fn main_i(self: &mut Self, c: &mut cbe::CEmit, wants: bool) bool {
@@ -12057,6 +12212,13 @@ extend Lower {
         self.b.begin(b0);
         let argc = self.b.param(b0, 0);
         let argv = self.b.param(b0, 1);
+        // A `-fblock-counts` program writes its counts at exit (`std::rt::counts`).
+        if self.counts {
+            let f = self.symaddr("__sc_bc_dump", SK_FUNC);
+            let fa: []Value = [f];
+            let ft: []u32 = [T_PTR as u32];
+            let _ = self.call_sym("atexit", fa, ft, T_I32);
+        }
         let mut args = Vector::<Value>::new();
         let mut atys = Vector::<u32>::new();
         if wants {

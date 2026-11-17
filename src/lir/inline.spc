@@ -333,9 +333,125 @@ struct Site {
 
 extend Site as Copy {}
 
+/// The run-time copies that body `b` of `p` chooses before its own code (`lir::lower`'s CPU-level check:
+/// the level byte `__sc_simd_lv` read in the entry block, then per copy, the highest first, `level >= k`
+/// to a block that only calls the copy and returns its result; with `exact`, a call of the body's own
+/// signature that passes the entry's parameters in order, which a stub can jump to): per copy, `k << 32 |
+/// its body symbol` into `out`; the level byte's body symbol. `out` empty: no such check.
+pub(package) fn dispatch_of(p: &Package, b: &Body, exact: bool, out: &mut Vector<u64>) u32 {
+    out.truncate(0);
+    let k0 = ast::pick(exact, 0u32, check_block(b));
+    let b0 = b.blocks[k0 as usize];
+    let mut lvl = VNONE;
+    let mut sym: u32 = 0;
+    for i in b0.start..b0.start + b0.len {
+        let t = b.insts[i as usize];
+        if t.op == O_ALOAD && t.ty == T_I8 && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SYMADDR && b.insts[t.a as usize].b == 0 {
+            let a = b.insts[t.a as usize].a;
+            if p.spell(p.syms[b.syms[a as usize] as usize].name) == "__sc_simd_lv" {
+                lvl = i;
+                sym = a;
+            }
+        }
+    }
+    if lvl == VNONE {
+        return 0;
+    }
+    let np = b0.param_len as u32;
+    let mut k = k0;
+    // One check per step.
+    for _ in 0..b.blocks.len() {
+        let bk = b.blocks[k as usize];
+        let tm = b.insts[(bk.start + bk.len - 1) as usize];
+        if tm.op != O_BR || (tm.a & (VPARAM | VFLAG)) != 0 || b.edge_nargs(tm.b) != 0 || b.edge_nargs(tm.c) != 0 {
+            break;
+        }
+        let c = b.insts[tm.a as usize];
+        let lev = int_bits(b, c.b).unwrap_or(0);
+        if c.op != O_ICMP || c.aux != C_UGE || c.a != lvl || lev == 0 || lev > 255 {
+            break;
+        }
+        let tb = b.blocks[b.edge_target(tm.b) as usize];
+        if tb.len < 2 || exact && tb.len != 2 {
+            break;
+        }
+        // Constants alone before the call (the arguments of a copy for constant arguments, `exact` aside).
+        let ci = tb.start + tb.len - 2;
+        let mut consts = true;
+        for i in tb.start..ci {
+            let o = b.insts[i as usize].op;
+            consts = consts && (o == O_ICONST || o == O_FCONST || o == O_WCONST);
+        }
+        let call = b.insts[ci as usize];
+        let r = b.insts[(ci + 1) as usize];
+        if !consts || call.op != O_CALL || r.op != O_RET || !(r.a == ci && call.ty != T_NONE || r.a == VNONE && call.ty == T_NONE) {
+            break;
+        }
+        // The body's own signature and parameters, in order (the result's address with them).
+        let mut same = b.pool[call.b as usize] + 3 == b.pool[b.sig as usize] + 3;
+        for q in 0..b.pool[b.sig as usize] + 3 {
+            same = same && b.pool[(call.b + q) as usize] == b.pool[(b.sig + q) as usize];
+        }
+        let nops = b.pool[call.b as usize] + ((b.pool[call.b as usize + 2] & AGG) != 0) as u32;
+        same = same && nops == np;
+        for q in 0..np {
+            same = same && b.pool[(call.c + q) as usize] == (VPARAM | b0.param_start + q);
+        }
+        if exact && !same {
+            break;
+        }
+        out.push(lev << 32 | call.a as u64);
+        k = b.edge_target(tm.c);
+    }
+    return sym;
+}
+
+/// The block a CPU-level check of body `b` starts in (`dispatch_of` without `exact`): the entry, or the
+/// block the entry jumps to when it holds constants alone (a copy for constant arguments enters through
+/// them, `lir::opt` `drop_params`).
+pub(package) const fn check_block(b: &Body) u32 {
+    let e = b.blocks[0];
+    let tj = b.insts[(e.start + e.len - 1) as usize];
+    if tj.op != O_JMP {
+        return 0;
+    }
+    for i in e.start..e.start + e.len - 1 {
+        let o = b.insts[i as usize].op;
+        if o != O_ICONST && o != O_FCONST && o != O_WCONST {
+            return 0;
+        }
+    }
+    return b.edge_target(tj.a);
+}
+
+/// Body `b` without the first `n` steps of a CPU-level check (`dispatch_of`) that starts in block `k`:
+/// each one's branch jumps to its other side, the level byte's read and the comparisons dead constants.
+/// The block the last step leaves to. The check of the body itself (the native backend compiles it as a
+/// stub before the body), or of a callee's copy in a caller that passed its own (`Inliner::run`).
+pub(package) const fn strip_checks(b: &mut Body, k0: u32, n: usize) u32 {
+    let mut k = k0;
+    for _ in 0..n {
+        let bk = b.blocks[k as usize];
+        let at = bk.start + bk.len - 1;
+        let tm = b.insts[at as usize];
+        if tm.op != O_BR || (tm.a & (VPARAM | VFLAG)) != 0 || b.insts[tm.a as usize].op != O_ICMP {
+            break;
+        }
+        let c = b.insts[tm.a as usize];
+        if (c.a & (VPARAM | VFLAG)) == 0 && b.insts[c.a as usize].op == O_ALOAD {
+            b.insts[c.a as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: 0 };
+        }
+        b.insts[tm.a as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: 0 };
+        b.insts[at as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: tm.c, b: 0, c: 0 };
+        k = b.edge_target(tm.c);
+    }
+    return k;
+}
+
 /// The inliner's scratch, reused from body to body.
 pub(package) struct Inliner {
     sites: Vector<Site>,
+    disp: Vector<u64>, // `dispatch_of`'s copies
     cmap: Vector<u32>, // per caller instruction, its value in the new body
     cbmap: Vector<u32>, // per caller block, the new block that starts it
     done: Vector<bool>, // per pool word of the new body, whether it is rewritten
@@ -372,6 +488,7 @@ extend Inliner {
     pub(package) fn new() Inliner {
         return Inliner {
             sites: Vector::<Site>::new(),
+            disp: Vector::<u64>::new(),
             cmap: Vector::<u32>::new(),
             cbmap: Vector::<u32>::new(),
             done: Vector::<bool>::new(),
@@ -416,6 +533,15 @@ extend Inliner {
         // are reused, not freed and grown again.
         let mut o = replace(&mut self.spare, Body::empty());
         self.build(bodies, c, &mut o);
+        // A caller that chooses its run-time copies before its own code runs that code for the build's
+        // features: so does the copy of a callee with such a choice, without it.
+        let _ = dispatch_of(pk, c, false, &mut self.disp);
+        for q in 0..ast::pick(self.disp.len() != 0, self.sites.len(), 0) {
+            let s = self.sites[q];
+            let e = unsafe &*(bodies + s.callee as usize);
+            let _ = dispatch_of(pk, e, false, &mut self.disp);
+            let _ = strip_checks(&mut o, s.bbase + check_block(e), self.disp.len());
+        }
         self.spare = replace(c, o);
         return true;
     }
@@ -480,8 +606,11 @@ extend Inliner {
                 };
                 // A float rewrite the caller allows and the callee does not would apply to the copy (of a
                 // callee that computes with floats). A constant-time callee's copy runs unchecked in a caller
-                // that is not.
-                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || e.ct && !c.ct || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
+                // that is not. A callee compiled for processor features the caller's lack keeps its own
+                // registers and instructions.
+                if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || e.ct && !c.ct || !pk.cpu_of(e).within(
+                    pk.cpu_of(c),
+                ) || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
                     e,
                     c,
                     t,
@@ -548,6 +677,7 @@ extend Inliner {
         o.ranges.extend_copy(&c.ranges);
         o.fmath = c.fmath;
         o.ct = c.ct;
+        o.cpu = c.cpu;
         for x in 0..c.scopes.len() {
             let sc = c.scopes[x];
             o.scopes.push(Scope { site: sc.site, group: sc.group, root: self.cval(sc.root) });

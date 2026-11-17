@@ -1,4 +1,5 @@
-"""The delta of a CI job's super-c cache base (~/.super-c/cache) against the cache it restored.
+"""The delta of a CI job's super-c cache base ($SC_CACHE_DIR, else ~/.super-c/cache) against the cache
+it restored.
 
 snapshot LIST          record every file's size and mtime after the restore
 pack LIST TAR          write the files added or changed since, and the list of the files deleted since
@@ -13,7 +14,7 @@ import os
 import sys
 import tarfile
 
-BASE = os.path.join(os.path.expanduser("~"), ".super-c", "cache")
+BASE = os.environ.get("SC_CACHE_DIR") or os.path.join(os.path.expanduser("~"), ".super-c", "cache")
 DELETED = ".deleted"
 
 

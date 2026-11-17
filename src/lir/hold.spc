@@ -58,6 +58,8 @@ extend Loc as Persist {
 // A slot has padding after its alignment: field by field.
 extend Slot as Persist {}
 
+extend Cpu as Persist {}
+
 extend Scope as Persist {
     fn plain() bool {
         return true;
@@ -93,6 +95,7 @@ extend Body as Persist {
         self.fmath.save(w);
         self.scopes.save(w);
         self.ct.save(w);
+        self.cpu.save(w);
         self.naked.save(w);
     }
 
@@ -116,6 +119,7 @@ extend Body as Persist {
         self.fmath.load(r);
         self.scopes.load(r);
         self.ct.load(r);
+        self.cpu.load(r);
         self.naked.load(r);
     }
 }

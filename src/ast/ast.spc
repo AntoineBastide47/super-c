@@ -125,6 +125,13 @@ pub(package) enum AttrKind {
     // `@constant_time` on a function with a body: no branch, memory address or variable-time operation
     // of its final LIR depends on a secret (`lir::ct`).
     ATTR_CONSTANT_TIME,
+    // `@counter("guard")` on an integer field: the field counts the units (`rc_share`) of its block's
+    // counter, its index among the struct's counter fields; spec function `guard` of the block pointer
+    // states what the live counter holds (`str_span`: the name). The prover takes and gives units at
+    // its steps (`prove::count_step`).
+    ATTR_COUNTER,
+    // `@counter_lock` on a counter field: its all-ones value locks the counter, which counts 1 then.
+    ATTR_COUNTER_LOCK,
 }
 
 /// `@unsafe` claims (`Attr.arg` bits): `safe` makes an extern function callable without `unsafe`;

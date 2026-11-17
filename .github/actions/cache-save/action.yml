@@ -1,7 +1,7 @@
 name: Save object cache
 description: >
   The last step of a release job that keeps its object cache, on main only: the files the job added to or
-  changed in the cache base (`~/.super-c/cache`) since the toolchain action restored its platform's
+  changed in the cache base (`SC_CACHE_DIR`, else `~/.super-c/cache`) since the toolchain action restored its platform's
   cache, and the list of the files it deleted (`delta.py`, against the toolchain action's snapshot). A
   job of the platform cache (`part`: compile, the test shards, package) uploads them as the
   `objcache-part-<target>-<part>` artifact, which the release's `caches` job merges into the platform's

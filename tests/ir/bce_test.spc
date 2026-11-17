@@ -1104,14 +1104,47 @@ fn vector_access_group_checks() {
     );
     // A function that returns a view of its parameter's length (`ir::capture`): its call's result has
     // the argument's length, as the literal has; a function that returns another length keeps the check.
-    let VIEW_CALL: str = "import std::simd;\nfn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
-    vp.add("a call that returns a view of its argument's length", VIEW_CALL, false, "");
+    let VIEW_GENERIC: str = "import std::simd;\nfn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add("a call that returns a view of its argument's length", VIEW_GENERIC, false, "");
     let VIEW_CALL_SHORT: str = "import std::simd;\nfn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n - 3 };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
     vp.add(
         "a call that returns a view of another length keeps the check",
         VIEW_CALL_SHORT,
         true,
         "4 lanes from 4 but the length is 7",
+    );
+    // A view a call returns has the length of the argument its callee builds the view from, through a
+    // chain of such calls, called or inlined (the inlined result moves through the callee's result
+    // slots); a callee that changes that parameter first gives no length.
+    let VIEW_CALL: str = "import std::simd;\n@noinline\nfn view<'a>(p: *const i32, n: usize) []'a i32 {\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add("a call's view has its argument's length", VIEW_CALL, false, "");
+    let VIEW_CHAIN: str = "import std::simd;\nfn view<'a>(p: *const i32, n: usize) []'a i32 {\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\nfn outer<'a>(p: *const i32, k: usize) []'a i32 {\n    let s = view(p, k);\n    return s;\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = outer(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add("a chain of inlined calls keeps the view's length", VIEW_CHAIN, false, "");
+    let VIEW_CHAIN_CALLS: str = "import std::simd;\n@noinline\nfn view<'a>(p: *const i32, n: usize) []'a i32 {\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\n@noinline\nfn outer<'a>(p: *const i32, k: usize) []'a i32 {\n    let s = view(p, k);\n    return s;\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = outer(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add("a chain of calls keeps the view's length", VIEW_CHAIN_CALLS, false, "");
+    let VIEW_CUT: str = "import std::simd;\n@noinline\nfn view<'a>(p: *const i32, mut n: usize) []'a i32 {\n    n = n - 3;\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add(
+        "a callee that changes the length parameter keeps the check: the second load traps",
+        VIEW_CUT,
+        true,
+        "4 lanes from 4 but the length is 7",
+    );
+    // A callee that writes the caller's length variable (through a reference argument; through a pointer
+    // in a static, behind a chain of calls) gives no length: the view has the argument's value from
+    // before the call, the variable another one after it.
+    let VIEW_WRITES_ARG: str = "import std::simd;\n@noinline\nfn view<'a>(p: *const i32, n: usize, q: &mut usize) []'a i32 {\n    *q = 4000;\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n0: usize) i32 {\n    let mut n = n0;\n    let s = view(p, n, &mut n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\n\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, 8) - 12;\n}\n";
+    vp.add(
+        "a callee that writes the length variable through a reference keeps the check",
+        VIEW_WRITES_ARG,
+        true,
+        "4 lanes from 8 but the length is 8",
+    );
+    let VIEW_WRITES_STATIC: str = "import std::simd;\nstatic mut G: *mut usize = null;\n@noinline\nfn view<'a>(p: *const i32, n: usize) []'a i32 {\n    unsafe {\n        *G = 4000;\n    }\n    return unsafe Slice::<i32> { ptr: p, len: n };\n}\n@noinline\nfn outer<'a>(p: *const i32, k: usize) []'a i32 {\n    return view(p, k);\n}\nfn sum(p: *const i32, n0: usize) i32 {\n    let mut n = n0;\n    unsafe {\n        G = &mut n as *mut usize;\n    }\n    let s = outer(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\n\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, 8) - 12;\n}\n";
+    vp.add(
+        "a chain whose callee writes the length variable through a static's pointer keeps the check",
+        VIEW_WRITES_STATIC,
+        true,
+        "4 lanes from 8 but the length is 8",
     );
     // An early-return guard bounds the loop's limit by the other slice's length: both accesses are
     // proven (`i < m <= n <= y.len()`).

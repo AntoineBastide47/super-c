@@ -173,23 +173,23 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     let mut p = q.unwrap();
     p.tail = (opts & TAIL) != 0;
     p.omit_fp = (opts & OMIT_FP) != 0;
-    p.popcnt = (opts & POPCNT) != 0;
-    p.lzcnt = (opts & LZCNT) != 0;
+    p.cpu.popcnt = (opts & POPCNT) != 0;
+    p.cpu.lzcnt = (opts & LZCNT) != 0;
     p.align_loops = (opts & LINES) != 0;
     p.fit_lines = p.align_loops;
     // The lanes the target counts and swaps in registers, as a build sets them (`CEmit`): with AVX-512 also
     // the leading zeros of 4- and 8-byte lanes (CD and VL).
-    p.vec_bits = tgt::isa(isa).vector_bits;
+    p.cpu.vec_bits = tgt::isa(isa).vector_bits;
     if (opts & Z512) != 0 && isa == tgt::axis_index("x86_64", true) {
-        p.vec_bits |= 0x0C;
+        p.cpu.vec_bits |= 0x0C;
     }
-    p.sse41 = (opts & SSE41) != 0;
+    p.cpu.sse41 = (opts & SSE41) != 0;
     // SSE4.1 implies SSSE3's byte lookups and SSE3's alternating sums.
-    p.vtbl = p.sse41 && isa == tgt::axis_index("x86_64", true);
-    p.addsub = p.vtbl;
-    p.lse = (opts & LSE) != 0;
-    p.rcpc = (opts & RCPC) != 0;
-    p.fma = (opts & FMA) != 0;
+    p.cpu.vtbl = p.cpu.sse41 && isa == tgt::axis_index("x86_64", true);
+    p.cpu.addsub = p.cpu.vtbl;
+    p.cpu.lse = (opts & LSE) != 0;
+    p.cpu.rcpc = (opts & RCPC) != 0;
+    p.cpu.fma = (opts & FMA) != 0;
     p.bitrev = isa == tgt::axis_index("aarch64", true);
     // The aggregates the backend copies, as a build sets them (`CEmit`).
     p.arg_copy = if tgt::callconv_of(os, isa).arg_copy != 0 {
@@ -198,13 +198,13 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
         tgt::isa(isa).arg_copy
     };
     if (opts & WIDE) != 0 {
-        p.vector = 32;
+        p.cpu.vector = 32;
     }
     if (opts & Z512) != 0 {
-        p.vector = 64;
+        p.cpu.vector = 64;
     }
     if (opts & HALF) != 0 {
-        p.half = if isa == tgt::axis_index("aarch64", true) && os == tgt::axis_index("macos", false) {
+        p.cpu.half = if isa == tgt::axis_index("aarch64", true) && os == tgt::axis_index("macos", false) {
             HALF_ARITH
         } else {
             HALF_CVT
@@ -20405,4 +20405,255 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
+}
+
+// The functions of `min_forms` for forms `forms` and vector types `tys` (their bytes `nbs`, the words of
+// their -0.0 lanes `zs`): each loads vectors at its first two operands and stores their minimum, then their
+// maximum, at the third.
+fn min_forms(forms: []str, tys: []str, nbs: []u32, zs: []str) String {
+    let mut t = String::from_str("lir ptr 8\n");
+    for f in 0..forms.len() {
+        for q in 0..tys.len() {
+            let (p, ty) = (forms[f], tys[q]);
+            t.format_into(
+                "sym @{}_{} fn global\nfn @{}_{}\n  sig (ptr, ptr, ptr) -> void\nb0(v0: ptr, v1: ptr, v2: ptr):\n  v3 = load.{} v0 align 0\n  v4 = load.{} v1 align 0\n",
+                p,
+                ty,
+                p,
+                ty,
+                ty,
+                ty,
+            );
+            if p == "q" {
+                // arm64: of both operands quieted.
+                t.format_into(
+                    "  v5 = vop.max.num.{} (v3, v3)\n  v6 = vop.max.num.{} (v4, v4)\n  v7 = vop.min.num.first.{} (v5, v6)\n  v8 = vop.max.num.first.{} (v5, v6)\n",
+                    ty,
+                    ty,
+                    ty,
+                    ty,
+                );
+            } else if p == "f" {
+                // x86-64: of the first quieted.
+                t.format_into(
+                    "  v5 = wconst.{} {}\n  v6 = fadd.{} v3, v5\n  v7 = vop.min.num.first.{} (v6, v4)\n  v8 = vop.max.num.first.{} (v6, v4)\n",
+                    ty,
+                    zs[q],
+                    ty,
+                    ty,
+                    ty,
+                );
+            } else if p == "nq" {
+                // arm64: of a number and the second quieted.
+                t.format_into(
+                    "  v5 = vop.max.num.{} (v4, v4)\n  v6 = iconst.i64 0\n  v7 = vop.min.num.number.first.{} (v3, v5)\n  v8 = vop.max.num.number.first.{} (v3, v5)\n",
+                    ty,
+                    ty,
+                    ty,
+                );
+            } else {
+                // `e`: the minimumNumber's own (wasm32); `n` (x86-64) and `en` (wasm32): of a number.
+                let op = if p == "e" {
+                    ""
+                } else if p == "n" {
+                    ".num.number"
+                } else {
+                    ".number"
+                };
+                t.format_into(
+                    "  v5 = iconst.i64 0\n  v6 = iconst.i64 0\n  v7 = vop.min{}.{} (v3, v4)\n  v8 = vop.max{}.{} (v3, v4)\n",
+                    op,
+                    ty,
+                    op,
+                    ty,
+                );
+            }
+            t.format_into("  store v7, v2 align 0\n  store v8, v2+{} align 0\n  ret\n", nbs[q]);
+        }
+    }
+    return t;
+}
+
+// A float minimumNumber and maximumNumber as the lowering and the optimizer make them (`lir::lower`
+// `min_num`, `lir::opt` `float_known`) give the operation's bits on every target, over both zeros,
+// infinities, a subnormal and quiet and signaling NaNs in either operand: arm64's of quieted operands,
+// x86-64's of a quieted first operand (two NaNs give it: `.first`), wasm32's own; and of a first operand
+// that holds numbers alone (`.number`), where x86-64 and wasm32 blend no lane for it.
+@test
+fn a_minimum_number_gives_its_bits_on_every_target() {
+    let forms: [str; 6] = ["q", "f", "e", "nq", "n", "en"];
+    let tys: [str; 3] = ["v4f32", "v2f64", "v8f32"];
+    let nbs: [u32; 3] = [16, 16, 32];
+    let z4 = "0x8000000080000000, 0x8000000080000000";
+    let zs: [str; 3] = [
+        z4,
+        "0x8000000000000000, 0x8000000000000000",
+        "0x8000000080000000, 0x8000000080000000, 0x8000000080000000, 0x8000000080000000",
+    ];
+    let lir = min_forms(forms[0..6], tys[0..3], nbs[0..3], zs[0..3]);
+    // x86-64 with SSE2: a number first operand takes no unordered comparison (CMPPS 3); the minimumNumber
+    // of any operands takes one, and with SSE4.1 a BLENDVPS.
+    let x64 = tgt::axis_index("x86_64", true);
+    let linux = tgt::axis_index("linux", false);
+    for k in 0..3u32 {
+        let one: [str; 1] = [
+            if k == 0 {
+                "n"
+            } else {
+                "f"
+            },
+        ];
+        let opts: u32 = if k == 2 {
+            SSE41
+        } else {
+            0
+        };
+        let text = min_forms(one[0..1], tys[0..1], nbs[0..1], zs[0..1]);
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(&text, linux, x64, opts, &mut obj), "the x86-64 object");
+        let mut unord = false;
+        for x in 0..obj.len() - 4 {
+            unord = unord || obj[x] == 0x0F && obj[x + 1] == 0xC2 && obj[x + 3] == 0x03;
+        }
+        assert_eq(unord, k != 0);
+        let bps: [u8; 3] = [0x0F, 0x38, 0x14];
+        assert_eq(holds(&obj, bps[0..3]), k == 2);
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <string.h>
+#include <stdint.h>
+typedef void (*fn3)(const void *, const void *, void *);
+#define D(p) void p##_v4f32(const void *, const void *, void *); void p##_v2f64(const void *, const void *, void *); void p##_v8f32(const void *, const void *, void *);
+D(q) D(f) D(e) D(nq) D(n) D(en)
+#if defined(__aarch64__)
+#define G(t) q_##t
+#define N(t) nq_##t
+#elif defined(__x86_64__)
+#define G(t) f_##t
+#define N(t) n_##t
+#else
+#define G(t) e_##t
+#define N(t) en_##t
+#endif
+/* The minimumNumber (the maximumNumber when max) of encodings a and b: a NaN gives the other operand, two
+   give a quieted, -0 is below +0. */
+static uint64_t ref(uint64_t a, uint64_t b, int max, int dbl) {
+  uint64_t mag = dbl ? 0x7fffffffffffffffull : 0x7fffffffull, inf = dbl ? 0x7ff0000000000000ull : 0x7f800000ull;
+  int an = (a & mag) > inf, bn = (b & mag) > inf;
+  if (an && bn) return a | (dbl ? 1ull << 51 : 1ull << 22);
+  if (an) return b;
+  if (bn) return a;
+  double x, y;
+  if (dbl) { memcpy(&x, &a, 8); memcpy(&y, &b, 8); }
+  else { float fx, fy; uint32_t a4 = (uint32_t)a, b4 = (uint32_t)b; memcpy(&fx, &a4, 4); memcpy(&fy, &b4, 4); x = fx; y = fy; }
+  if (x == y) return max ? a & b : a | b;
+  return (max ? x > y : x < y) ? a : b;
+}
+static const uint32_t S4[12] = {0x3f800000, 0xbf800000, 0, 0x80000000, 0x7f800000, 0xff800000, 0x40600000, 0x00000001, 0x7fc00000, 0x7f800001, 0xffc01234, 0x7fa00023};
+static const uint64_t S8[12] = {0x3ff0000000000000ull, 0xbff0000000000000ull, 0, 0x8000000000000000ull, 0x7ff0000000000000ull, 0xfff0000000000000ull, 0x400c000000000000ull, 1, 0x7ff8000000000000ull, 0x7ff0000000000001ull, 0xfff8000000001234ull, 0x7ff4000000000023ull};
+/* f over every pair of the values (the first operand's among the eight numbers when numbers). */
+static int check(fn3 f, int lanes, int dbl, int numbers) {
+  int es = dbl ? 8 : 4;
+  for (int i = 0; i < 12; i++) for (int j = 0; j < 12; j++) {
+    uint64_t a[8], b[8];
+    unsigned char A[32], B[32], O[64];
+    for (int k = 0; k < lanes; k++) {
+      int ia = (i + k) % (numbers ? 8 : 12), ib = (j + 5 * k) % 12;
+      a[k] = dbl ? S8[ia] : S4[ia];
+      b[k] = dbl ? S8[ib] : S4[ib];
+      memcpy(A + k * es, &a[k], es);
+      memcpy(B + k * es, &b[k], es);
+    }
+    f(A, B, O);
+    for (int k = 0; k < lanes; k++) {
+      uint64_t lo = ref(a[k], b[k], 0, dbl), hi = ref(a[k], b[k], 1, dbl);
+      if (memcmp(O + k * es, &lo, es) != 0 || memcmp(O + (lanes + k) * es, &hi, es) != 0) return 1;
+    }
+  }
+  return 0;
+}
+int main(void) {
+  if (check(G(v4f32), 4, 0, 0)) return 1;
+  if (check(G(v2f64), 2, 1, 0)) return 2;
+  if (check(G(v8f32), 8, 0, 0)) return 3;
+  if (check(N(v4f32), 4, 0, 1)) return 4;
+  if (check(N(v2f64), 2, 1, 1)) return 5;
+  if (check(N(v8f32), 8, 0, 1)) return 6;
+  return 0;
+}
+)";
+    assert_eq(run_native(&lir, drv), 0);
+    assert_eq(run_sse41(&lir, drv), 0);
+    assert_eq(run_wide(&lir, drv), 0);
+    assert_eq(run_wasm(&lir, drv), 0);
+}
+
+// A body compiled for more processor features than the build's (`Body.cpu`, the text's `cpu` line: a
+// run-time copy of vector code, a `@target_feature` function) computes with its own registers and
+// instructions: x86-64 holds its 32-byte vectors in ymm registers (VADDPS, VZEROUPPER before it returns)
+// beside a body of the build's features, which adds 16-byte parts (ADDPS).
+@test
+fn a_body_for_more_features_computes_in_its_own_registers() {
+    let lir = M"(lir ptr 8
+sym @wide fn global
+sym @base fn global
+fn @wide
+  sig (ptr, ptr) -> void
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 0
+  v3 = load.v8f32 v1 align 0
+  v4 = fadd.v8f32 v2, v3
+  v5 = fmul.v8f32 v4, v2
+  store v5, v1 align 0
+  ret
+fn @base
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = load.v4f32 v1 align 0
+  v4 = fadd.v4f32 v2, v3
+  v5 = fmul.v4f32 v4, v2
+  store v5, v1 align 0
+  v6 = load.v4f32 v0+16 align 0
+  v7 = load.v4f32 v1+16 align 0
+  v8 = fadd.v4f32 v6, v7
+  v9 = fmul.v4f32 v8, v6
+  store v9, v1+16 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // VEX's two-byte form with the 256-bit length (bit 2 of its second byte) and opcode 58; the legacy
+    // ADDPS (0F 58) not after a VEX prefix.
+    let mut wide: u32 = 0;
+    let mut parts: u32 = 0;
+    for x in 2..obj.len() - 2 {
+        wide += (obj[x] == 0xC5 && (obj[x + 1] & 4) != 0 && obj[x + 2] == 0x58) as u32;
+        parts += (obj[x] == 0x0F && obj[x + 1] == 0x58 && obj[x - 1] != 0xC5 && obj[x - 2] != 0xC5 && obj[x - 2] != 0xC4) as u32;
+    }
+    assert_eq(wide, 1);
+    assert_eq(parts, 2);
+    let zu: [u8; 3] = [0xC5, 0xF8, 0x77];
+    assert(holds(&obj, zu[0..3]), "vzeroupper");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <string.h>
+void wide(const float *, float *);
+void base(const float *, float *);
+int main(void) {
+  float x[8], y[8], z[8];
+  for (int k = 0; k < 8; k++) {
+    x[k] = (float)(k * 5 % 7) - 3.0f;
+    y[k] = z[k] = (float)(k * 3 % 5) - 2.0f;
+  }
+  wide(x, y);
+  base(x, z);
+  return memcmp(y, z, 32) != 0;
+}
+)";
+    assert_eq(run_x64_feature(lir, drv, "avx2", 0), 0);
 }

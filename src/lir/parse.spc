@@ -644,6 +644,21 @@ extend<'a> Parser<'a> {
                 self.body.ct = true;
                 return self.line_end_loc(&mut loc);
             }
+            if w == "cpu" {
+                // `cpu <register bytes> <vec_bits> <vec_perm3> <vec_mulw> <flags> <half>`: the processor facts
+                // of a body compiled for more features than the build (`Body.cpu`, `Cpu::of_words`).
+                let mut k: [u32; 6] = [0; 6];
+                for q in 0..6usize {
+                    if !self.uint(&mut k[q]) {
+                        return self.fail("expected 'cpu' and six numbers");
+                    }
+                }
+                if k[2] > 255 || k[3] > 65535 || k[5] > HALF_ARITH as u32 {
+                    return self.fail("a 'cpu' fact out of range");
+                }
+                self.body.cpu = Cpu::of_words(k[0], k[1], k[2], k[3], k[4], k[5]);
+                return self.line_end_loc(&mut loc);
+            }
             if w == "scope" {
                 // `scope @<site> g<group> v<root>`: an inlined call's exclusive parameter.
                 let mut l = Loc { file: 0, line: 0, col: 0 };
@@ -1185,6 +1200,14 @@ extend<'a> Parser<'a> {
             }
             if pi < self.parts.len() && self.parts[pi] == "num" {
                 t.aux |= VOP_NUM;
+                pi += 1;
+            }
+            if pi < self.parts.len() && self.parts[pi] == "number" {
+                t.aux |= VOP_NUMBER;
+                pi += 1;
+            }
+            if pi < self.parts.len() && self.parts[pi] == "first" {
+                t.aux |= VOP_FIRST;
                 pi += 1;
             }
         }

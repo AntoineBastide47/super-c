@@ -216,6 +216,9 @@ pub(package) struct Package {
     /// The test runner a `--test` build links (`std::rt::test`, loaded with the runtime); -1 in any
     /// other build.
     pub(package) rt_test: i32,
+    /// The block counts' writer a `-fblock-counts` build links (`std::rt::counts`, loaded with the
+    /// runtime); -1 in any other build.
+    pub(package) rt_counts: i32,
     /// The C library of a wasm build (`std::rt::libc` and `std::rt::libm`, loaded with the runtime): wasm
     /// has no system C library, and these call WASI directly; -1 for any other target.
     pub(package) rt_libc: i32,
@@ -2724,11 +2727,13 @@ const fn ltf_vary(f: u8, v: u32) u8 {
 }
 
 extend Package {
-    /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, or
-    /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
+    /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, a
+    /// `-fblock-counts` build's counts writer, or wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
     /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
     pub(package) const fn is_rt(self: &Self, m: i32) bool {
-        return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
+        return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_counts || m == self.rt_builtins || self.is_libc(
+            m,
+        ));
     }
 
     /// Whether module `m` is a std module that only prelude modules import, directly or through other
@@ -4101,6 +4106,7 @@ extend Package {
             build_module: -1,
             rt_module: -1,
             rt_test: -1,
+            rt_counts: -1,
             rt_libc: -1,
             rt_builtins: -1,
             rt_libm: -1,
@@ -7622,6 +7628,30 @@ extend Package {
         return self.lookup_sym(from, mid, s, want_type);
     }
 
+    /// A top-level declaration named `name` that module `mid` declares, exported or not: a type when
+    /// `want_type`, otherwise a value; NODE_NONE when it declares none.
+    pub(package) fn lookup_own(self: &Self, mid: ModuleId, name: str, want_type: bool) NodeId {
+        if !self.modules[mid as usize].has_ast {
+            return NODE_NONE;
+        }
+        self.ensure_index();
+        let s = self.idx().syms.find(name);
+        if s == SYM_NONE {
+            return NODE_NONE;
+        }
+        let key = s as u64 * 4u64 + if want_type {
+            2u64
+        } else {
+            0u64
+        };
+        for e in 0..2u64 {
+            if let Some(it) = self.idx().name_maps[mid as usize].get(&(key + e)) {
+                return self.idx().items.at((*it) as usize).node;
+            }
+        }
+        return NODE_NONE;
+    }
+
     /// `lookup` by the name's interned symbol `s`, for a caller that probes many modules with one
     /// name. The index must cover `mid` (`ensure_index`); a module without an Ast has no entry.
     @always_inline
@@ -8225,6 +8255,11 @@ extend Package {
         let tf = join2(std_dir, "rt/test.spc");
         if self.test_build && self.rt_test < 0 && dutil::file_mtime(&tf) != 0 {
             self.rt_test = self.load_module("std::rt::test", &tf, self.bootstrap, target);
+        }
+        // The writer of a `-fblock-counts` build's counts, which its `main` hands to `atexit`.
+        let kf = join2(std_dir, "rt/counts.spc");
+        if (self.cg_on & bman::CG_BLOCK_COUNTS) != 0 && self.rt_counts < 0 && dutil::file_mtime(&kf) != 0 {
+            self.rt_counts = self.load_module("std::rt::counts", &kf, self.bootstrap, target);
         }
         // The 128-bit routines the native code calls, where only the C toolchain's archives hold them.
         let bf0 = join2(std_dir, "rt/builtins.spc");

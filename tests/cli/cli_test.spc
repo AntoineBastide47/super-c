@@ -3709,6 +3709,218 @@ fn main() i32 {
     assert_eq(p.run_bin(), 0);
 }
 
+// Vector kernels of a release build give their lanes' values: a minimumNumber and maximumNumber of loaded
+// operands and of accumulators (8 and 16 f32 lanes, 4 f64 lanes) over both zeros, infinities and quiet and
+// signaling NaNs, against the operation on the encodings, and a product and sum of 8 lanes. On x86-64 the
+// run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then the
+// build's own bodies (`SC_SIMD_LEVEL=0`).
+@test
+fn vector_kernels_run_as_their_lanes_at_every_level() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+import std::float as fl;
+
+const fn view<'a, T>(p: *const T, n: usize) []'a T {
+    return unsafe Slice::<T> { ptr: p, len: n };
+}
+
+const fn view_mut<'a, T>(p: *mut T, n: usize) []'a mut T {
+    return unsafe SliceMut::<T> { ptr: p, len: n };
+}
+
+// The minimumNumber (the maximumNumber when `max`) of encodings `a` and `b`.
+fn num32(a: u32, b: u32, max: bool) u32 {
+    let an = (a & 0x7FFFFFFF) > 0x7F800000;
+    let bn = (b & 0x7FFFFFFF) > 0x7F800000;
+    if an && bn {
+        return a | 0x00400000;
+    }
+    if an || bn {
+        return if an {
+            b
+        } else {
+            a
+        };
+    }
+    let x = fl::f32_from_bits(a);
+    let y = fl::f32_from_bits(b);
+    if x == y {
+        return if max {
+            a & b
+        } else {
+            a | b
+        };
+    }
+    return if max == (x > y) {
+        a
+    } else {
+        b
+    };
+}
+
+fn num64(a: u64, b: u64, max: bool) u64 {
+    let an = (a & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000;
+    let bn = (b & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000;
+    if an && bn {
+        return a | 0x0008000000000000;
+    }
+    if an || bn {
+        return if an {
+            b
+        } else {
+            a
+        };
+    }
+    let x = fl::f64_from_bits(a);
+    let y = fl::f64_from_bits(b);
+    if x == y {
+        return if max {
+            a & b
+        } else {
+            a | b
+        };
+    }
+    return if max == (x > y) {
+        a
+    } else {
+        b
+    };
+}
+
+@noinline
+fn lanes(ap: *const f32, bp: *const f32, n: usize, op: *mut f32) {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let o = view_mut(op, 2 * n);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        let x = simd::load::<f32, 8>(a, i);
+        let y = simd::load::<f32, 8>(b, i);
+        simd::store(o, i, x.min_num(y));
+        simd::store(o, n + i, x.max_num(y));
+        i += 8;
+    }
+}
+
+@noinline
+fn lanes64(ap: *const f64, bp: *const f64, n: usize, op: *mut f64) {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let o = view_mut(op, 2 * n);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        let x = simd::load::<f64, 4>(a, i);
+        let y = simd::load::<f64, 4>(b, i);
+        simd::store(o, i, x.min_num(y));
+        simd::store(o, n + i, x.max_num(y));
+        i += 4;
+    }
+}
+
+@noinline
+fn extremes(xp: *const f32, n: usize, op: *mut f32) {
+    let x = view(xp, n);
+    let o = view_mut(op, 32);
+    let mut lo = Simd::<f32, 16>::splat(1.0 / 0.0);
+    let mut hi = Simd::<f32, 16>::splat(-1.0 / 0.0);
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        let v = simd::load::<f32, 16>(x, i);
+        lo = lo.min_num(v);
+        hi = hi.max_num(v);
+        i += 16;
+    }
+    simd::store(o, 0, lo);
+    simd::store(o, 16, hi);
+}
+
+@noinline
+fn scaled(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
+    let x = view(xp, n);
+    let y = view_mut(yp, n);
+    let av = Simd::<f32, 8>::splat(a);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        simd::store(y, i, av * simd::load::<f32, 8>(x, i) + simd::load::<f32, 8>(y, i));
+        i += 8;
+    }
+}
+
+fn main() i32 {
+    let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
+    let n: usize = 144;
+    let mut a = Vector::<f32>::new();
+    let mut b = Vector::<f32>::new();
+    let mut a8 = Vector::<f64>::new();
+    let mut b8 = Vector::<f64>::new();
+    for k in 0..n {
+        let x = unsafe vals[k % 12];
+        let y = unsafe vals[k / 12];
+        a.push(fl::f32_from_bits(x));
+        b.push(fl::f32_from_bits(y));
+        // The same values as f64 encodings: the sign, the exponent's ends and the payload's low bits.
+        a8.push(fl::f64_from_bits((x as u64 & 0xFFF00000) << 32 | (x as u64 & 0xFFFFF)));
+        b8.push(fl::f64_from_bits((y as u64 & 0xFFF00000) << 32 | (y as u64 & 0xFFFFF)));
+    }
+    let mut o = Vector::<f32>::new();
+    let mut o8 = Vector::<f64>::new();
+    for _ in 0..2 * n {
+        o.push(0.0);
+        o8.push(0.0);
+    }
+    lanes(a.as_ptr(), b.as_ptr(), n, o.as_mut_ptr());
+    lanes64(a8.as_ptr(), b8.as_ptr(), n, o8.as_mut_ptr());
+    for k in 0..n {
+        let (x, y) = (fl::f32_bits(a[k]), fl::f32_bits(b[k]));
+        if fl::f32_bits(o[k]) != num32(x, y, false) || fl::f32_bits(o[n + k]) != num32(x, y, true) {
+            return 1;
+        }
+        let (x8, y8) = (fl::f64_bits(a8[k]), fl::f64_bits(b8[k]));
+        if fl::f64_bits(o8[k]) != num64(x8, y8, false) || fl::f64_bits(o8[n + k]) != num64(x8, y8, true) {
+            return 2;
+        }
+    }
+    // Accumulators over each length: lane `k` over the elements `k` modulo 16.
+    let mut e: [f32; 32] = [0.0; 32];
+    for m in [0usize, 16, 32, 96, 144] {
+        extremes(b.as_ptr(), m, &mut e[0]);
+        for k in 0..16usize {
+            let mut lo: u32 = 0x7F800000;
+            let mut hi: u32 = 0xFF800000;
+            let mut i = k;
+            while i < m {
+                lo = num32(lo, fl::f32_bits(b[i]), false);
+                hi = num32(hi, fl::f32_bits(b[i]), true);
+                i += 16;
+            }
+            if fl::f32_bits(e[k]) != lo || fl::f32_bits(e[16 + k]) != hi {
+                return 3;
+            }
+        }
+    }
+    let mut x = Vector::<f32>::new();
+    let mut y = Vector::<f32>::new();
+    for k in 0..64usize {
+        x.push((k % 13) as f32 - 6.5);
+        y.push((k % 5) as f32 * 0.25);
+    }
+    scaled(1.5, x.as_ptr(), y.as_mut_ptr(), 64);
+    for k in 0..64usize {
+        if y[k] != 1.5 * ((k % 13) as f32 - 6.5) + (k % 5) as f32 * 0.25 {
+            return 4;
+        }
+    }
+    return 0;
+}
+)",
+    );
+    assert(cli::superc_in(p.dir(), "build --profile=release main.spc -o bin").ok(), "the build");
+    assert_eq(p.run_bin(), 0);
+    assert_eq(p.run_bin_env("SC_SIMD_LEVEL=0 ").exit, 0);
+}
+
 // A build that replays a module's cached emission restores the module's LIR: the optimizer inlines its
 // functions (`free` into `Box<a::S>`'s drop, `freed` into main) as a clean build does, so both write the same
 // objects.
@@ -3759,6 +3971,32 @@ fn data_the_optimizer_defines_outlive_the_held_data() {
     }
     assert(r.ok(), "the build after an edit of main");
     assert_eq(p.run_bin(), 0);
+}
+
+// A function the seed pass does not predict (`late`, which only the instance `G<i32>`'s `free` names) is
+// added by the build's demand, not one of its module's own items: a build that replays the module's cached
+// emission and no longer demands it links with no reference to the constant it reads.
+@test
+fn a_replayed_module_holds_no_function_only_an_earlier_build_demanded() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "a.spc",
+        "const K: i32 = 7;\n\nstatic mut FREED: i32 = 0;\n\npub struct G<T> {\n    pub v: T,\n}\n\n@noinline\nfn late() i32 {\n    return K;\n}\n\nextend<T> G<T> as Free {\n    pub fn free(self: &mut Self) {\n        unsafe FREED = unsafe FREED + late();\n    }\n}\n\npub fn freed() i32 {\n    return unsafe FREED;\n}\n",
+    );
+    p.mkfile(
+        "main.spc",
+        "import a;\n\nfn main() i32 {\n    {\n        let _g = a::G::<i32> { v: 3 };\n    }\n    return a::freed() - 7;\n}\n",
+    );
+    let args = "build main.spc -o bin";
+    assert(cli::superc_in(p.dir(), args).ok(), "the first build");
+    assert_eq(p.run_bin(), 0);
+    p.mkfile("main.spc", "import a;\n\nfn main() i32 {\n    return a::freed() + 5;\n}\n");
+    let r = cli::superc_in(p.dir(), args);
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the build that no longer demands `late`");
+    assert_eq(p.run_bin(), 5);
 }
 
 // A wasm build that replays a module's cached emission keeps its object, and compiles the module's statics
@@ -12372,4 +12610,90 @@ fn exit_cases_01() {
     interior_mutability_via_unsafe_cell(&mut b);
     build_constants_of_no_platform(&mut b);
     b.run();
+}
+
+// The sum of the counts of function `name` in block counts `text` (`name<TAB>count` lines), and its lines.
+const fn block_count(text: str, name: str) (u64, u32) {
+    let mut sum: u64 = 0;
+    let mut n: u32 = 0;
+    for line in text.lines() {
+        let tab = line.find("\t");
+        if tab > 0 && line.slice(0, tab as usize) == name {
+            sum += line.slice(tab as usize + 1, line.len()).parse_i64().unwrap() as u64;
+            n += 1;
+        }
+    }
+    return (sum, n);
+}
+
+// A `-fblock-counts` program appends each function's Core IR block executions at exit to the file
+// $SC_BLOCK_COUNTS names, `%p` in it the process id: a function called n times counts n times its blocks,
+// a loop of n turns grows its function's count by the same amount per turn, and a second run appends.
+@test
+fn block_counts_count_each_functions_blocks() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::platform::env;
+
+@noinline
+fn step(x: u64) u64 {
+    return x ^ 0x5A;
+}
+
+@noinline
+fn spin(n: u64) u64 {
+    let mut s: u64 = 0;
+    for i in 0..n {
+        s ^= step(i);
+    }
+    return s;
+}
+
+fn main() i32 {
+    let n = env::get("TURNS").unwrap().unwrap().as_str().parse_i64().unwrap() as u64;
+    return (spin(n) == 12345) as i32;
+}
+)",
+    );
+    let r = p.native_build("-fblock-counts", "main.spc");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the counted program builds");
+    let root = p.dir();
+    let mut texts = Vector::<String>::new();
+    for n in [0, 10, 20] {
+        let path = format("{}/c{}.txt", root, n);
+        let run = p.run_bin_env(format("TURNS={} SC_BLOCK_COUNTS={} ", n, path.as_str()).as_str());
+        assert_eq(run.exit, 0);
+        texts.push(cli::read_text(&path));
+    }
+    let (s0, _) = block_count(&texts[0], "main__step");
+    let (s10, _) = block_count(&texts[1], "main__step");
+    let (s20, _) = block_count(&texts[2], "main__step");
+    assert(s0 == 0 && s10 > 0 && s20 == 2 * s10, "a function called n times counts its blocks n times");
+    let (l0, _) = block_count(&texts[0], "main__spin");
+    let (l10, _) = block_count(&texts[1], "main__spin");
+    let (l20, _) = block_count(&texts[2], "main__spin");
+    assert(l0 > 0 && l10 > l0 && l20 - l10 == l10 - l0, "each turn of a loop counts its blocks once more");
+    // A second run appends to the file.
+    let again = format("{}/c10.txt", root);
+    assert_eq(p.run_bin_env(format("TURNS=10 SC_BLOCK_COUNTS={} ", again.as_str()).as_str()).exit, 0);
+    let at = cli::read_text(&again);
+    let (twice, lines) = block_count(&at, "main__step");
+    assert(twice == 2 * s10 && lines == 2, "a second run appends its counts");
+    // `%p` is the process id.
+    assert_eq(p.run_bin_env(format("TURNS=1 SC_BLOCK_COUNTS={}/p%p.txt ", root).as_str()).exit, 0);
+    let mut named = false;
+    let mut d = fs::read_dir(root).unwrap();
+    while let Some(Ok(e)) = d.next() {
+        let nm = e.name;
+        if nm.starts_with("p") && nm.ends_with(".txt") {
+            let digits = nm.slice(1, nm.len() - 4);
+            named = digits.len() != 0 && digits.parse_i64().is_some();
+        }
+    }
+    assert(named, "the file is named by the process id");
+    p.free();
 }

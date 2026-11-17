@@ -709,6 +709,24 @@ fn type_path_call_marks_a_private_associated_function_used() {
     assert(r.ok(), "a private associated function called through a type path is used");
 }
 
+// A spec function an `@counter("name")` attribute names is the counter's guard, which the prover reads:
+// the unused-item lint counts it as used.
+@test
+fn a_counter_guard_is_used() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "ctr.spc",
+        "struct Blk {\n    @counter(\"blk_guard\")\n    n: usize,\n}\n\nspec fn blk_guard(p: *mut Blk) bool {\n    return Global::owns(p, sizeof(Blk), alignof(Blk));\n}\n\nfn main() i32 {\n    let b = Blk { n: 1 };\n    return b.n as i32 - 1;\n}\n",
+    );
+    // An absolute path: the wasm lane's guest has no working directory.
+    let r = cli::superc_in(p.dir(), format("lint {}/ctr.spc", p.dir()).as_str());
+    if !r.ok() {
+        r.show();
+    }
+    assert(!r.out_has("unused function 'blk_guard'"), "the guard is used");
+    assert(r.ok(), "no other warning");
+}
+
 // A reference that is the first node of a module's first releasable body (a leading turbofish
 // callee) sits at body-arena id 0, a real node: the item edges must keep it, or the unused-item
 // lint reports the generic function unused.

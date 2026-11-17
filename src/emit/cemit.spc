@@ -110,10 +110,60 @@ pub(package) const BK_C: u8 = 1;
 pub(package) const BK_LIR: u8 = 2;
 pub(package) const BK_CT: u8 = 4;
 
-// Whether `pk`'s target has CPU feature `name`.
-const fn feature(pk: &loader::Package, name: str) bool {
+// Whether feature set `fs` of `pk`'s instruction set holds CPU feature `name`.
+const fn feature(pk: &loader::Package, fs: cf::CpuFeatureSet, name: str) bool {
     let k = cf::find(name, pk.arch);
-    return k >= 0 && cf::has(pk.features, k as usize);
+    return k >= 0 && cf::has(fs, k as usize);
+}
+
+/// What the processor features `fs` (closed) give `pk`'s native backend (`lir::ir::Cpu`): the build's set
+/// makes the package's facts, a function's wider set its bodies' own.
+pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir_ir::Cpu {
+    let isa = tgt::isa(pk.arch);
+    // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it; x86-64
+    // converts it with F16C.
+    let half = if feature(pk, fs, "fp16") {
+        lir_ir::HALF_ARITH
+    } else if isa.half_cvt || feature(pk, fs, "f16c") {
+        lir_ir::HALF_CVT
+    } else {
+        lir_ir::HALF_NONE
+    };
+    return lir_ir::Cpu {
+        own: false,
+        // x86-64 with AVX2 (`x86-64-v3`) holds 32-byte vectors in its ymm registers; with AVX-512 F, BW, DQ
+        // and VL (`x86-64-v4`), 64-byte ones in its zmm registers.
+        vector: if feature(pk, fs, "avx512f") && feature(pk, fs, "avx512bw") && feature(pk, fs, "avx512dq") && feature(
+            pk,
+            fs,
+            "avx512vl",
+        ) {
+            64u32
+        } else if feature(pk, fs, "avx2") {
+            32u32
+        } else {
+            isa.vector_bytes
+        },
+        // AVX-512 CD with VL counts the leading zeros of 4- and 8-byte lanes (VPLZCNTD, VPLZCNTQ).
+        vec_bits: isa.vector_bits | pick(feature(pk, fs, "avx512cd") && feature(pk, fs, "avx512vl"), 0x0Cu32, 0u32),
+        // x86-64 permutes bytes with SSSE3's PSHUFB: per vector a copy, PSHUFB of a mask in memory and POR.
+        vec_perm3: if isa.vector_perm3 == 0 && feature(pk, fs, "ssse3") {
+            9
+        } else {
+            isa.vector_perm3
+        },
+        vec_mulw: isa.vector_mulw | pick(feature(pk, fs, "sse4.1"), 0x400u16, 0u16),
+        vround: isa.vector_round || feature(pk, fs, "sse4.1"),
+        popcnt: isa.popcount || feature(pk, fs, "popcnt"),
+        sse41: feature(pk, fs, "sse4.1"),
+        vtbl: feature(pk, fs, "ssse3"),
+        addsub: feature(pk, fs, "sse3"),
+        lzcnt: feature(pk, fs, "lzcnt"),
+        lse: feature(pk, fs, "lse"),
+        rcpc: feature(pk, fs, "rcpc"),
+        half: half,
+        fma: isa.scalar_fma || feature(pk, fs, "fma"),
+    };
 }
 
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
@@ -685,6 +735,7 @@ extend CEmit {
             l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
             l.pkg.tail = (pk.cg & bman::CG_SIBLING_CALLS) != 0;
             l.strict = (pk.cg & bman::CG_STRICT_ALIASING) != 0;
+            l.counts = (pk.cg & bman::CG_BLOCK_COUNTS) != 0;
             l.pkg.fmath = pick((pk.cg & bman::CG_ASSOC_MATH) != 0, lir_ir::FM_ASSOC, 0u8) | pick(
                 (pk.cg & bman::CG_RECIP_MATH) != 0,
                 lir_ir::FM_RECIP,
@@ -694,20 +745,7 @@ extend CEmit {
                 lir_ir::FM_NSZ,
                 0u8,
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
-            let fi = cf::find("fma", pk.arch);
-            l.pkg.fma = tgt::isa(pk.arch).scalar_fma || fi >= 0 && cf::has(pk.features, fi as usize);
-            // x86-64 with AVX2 (`x86-64-v3`) holds 32-byte vectors in its ymm registers; with AVX-512 F, BW,
-            // DQ and VL (`x86-64-v4`), 64-byte ones in its zmm registers.
-            l.pkg.vector = if feature(pk, "avx512f") && feature(pk, "avx512bw") && feature(pk, "avx512dq") && feature(
-                pk,
-                "avx512vl",
-            ) {
-                64u32
-            } else if feature(pk, "avx2") {
-                32u32
-            } else {
-                tgt::isa(pk.arch).vector_bytes
-            };
+            l.pkg.cpu = cpu_facts(pk, pk.features);
             l.pkg.mul_high = tgt::isa(pk.arch).mul_high;
             l.pkg.bswap = tgt::isa(pk.arch).bswap;
             l.pkg.bitrev = tgt::isa(pk.arch).bitrev;
@@ -729,48 +767,16 @@ extend CEmit {
             l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;
             l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
-            // AVX-512 CD with VL counts the leading zeros of 4- and 8-byte lanes (VPLZCNTD, VPLZCNTQ).
-            l.pkg.vec_bits = tgt::isa(pk.arch).vector_bits | pick(
-                feature(pk, "avx512cd") && feature(pk, "avx512vl"),
-                0x0Cu32,
-                0u32,
-            );
-            // x86-64 permutes bytes with SSSE3's PSHUFB: per vector a copy, PSHUFB of a mask in memory and POR.
-            l.pkg.vec_perm3 = if tgt::isa(pk.arch).vector_perm3 == 0 && feature(pk, "ssse3") {
-                9
-            } else {
-                tgt::isa(pk.arch).vector_perm3
-            };
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
-            l.pkg.vec_mulw = tgt::isa(pk.arch).vector_mulw | pick(feature(pk, "sse4.1"), 0x400u16, 0u16);
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
-            l.pkg.vround = l.pkg.vfloat && (tgt::isa(pk.arch).vector_round || feature(pk, "sse4.1"));
             l.pkg.vround_away = l.pkg.vfloat && tgt::isa(pk.arch).vector_round_away;
-            // binary16: every arm64 processor converts it (FCVT) and one with FEAT_FP16 computes with it;
-            // x86-64 converts it with F16C.
-            let h16 = cf::find("fp16", pk.arch);
-            let hc = cf::find("f16c", pk.arch);
-            l.pkg.half = if h16 >= 0 && cf::has(pk.features, h16 as usize) {
-                lir_ir::HALF_ARITH
-            } else if tgt::isa(pk.arch).half_cvt || hc >= 0 && cf::has(pk.features, hc as usize) {
-                lir_ir::HALF_CVT
-            } else {
-                lir_ir::HALF_NONE
-            };
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
             l.pkg.align_loops = pk.opt > 0 && pk.opt != bman::OPT_S && pk.opt != bman::OPT_Z;
             l.pkg.fit_lines = l.pkg.align_loops && nat::obj_kind(pk.build_target) != nat::OBJ_MACHO;
-            l.pkg.popcnt = tgt::isa(pk.arch).popcount || feature(pk, "popcnt");
-            l.pkg.sse41 = feature(pk, "sse4.1");
-            l.pkg.vtbl = feature(pk, "ssse3");
             l.pkg.mask_bits = tgt::isa(pk.arch).mask_bits;
             l.pkg.lane_insert = tgt::isa(pk.arch).lane_insert;
             l.pkg.vminnum = tgt::isa(pk.arch).vminnum;
             l.pkg.isa = tgt::isa(pk.arch).name;
-            l.pkg.addsub = feature(pk, "sse3");
-            l.pkg.lzcnt = feature(pk, "lzcnt");
-            l.pkg.lse = feature(pk, "lse");
-            l.pkg.rcpc = feature(pk, "rcpc");
             l.pkg.switch_tree = tgt::isa(pk.arch).switch_tree;
             l.pkg.switch_tables = tgt::isa(pk.arch).switch_tables;
             l.pkg.split = pick((pk.cg & bman::CG_FUNCTION_SECTIONS) != 0, cob::SPLIT_FUNCS, 0u8) | pick(
@@ -10445,6 +10451,24 @@ extend CEmit {
             return false;
         }
         return self.lir_entry_sym(pl.entry, out);
+    }
+
+    /// The processor facts of the body the native lowering makes now (`lir::ir::Body.cpu`): its own when
+    /// the current features hold one the build's do not.
+    pub(package) const fn body_cpu(self: &Self) lir_ir::Cpu {
+        if cf::contains(self.p().features, self.fs) {
+            return lir_ir::Cpu::none();
+        }
+        let mut k = cpu_facts(self.p(), self.fs);
+        k.own = true;
+        return k;
+    }
+
+    /// Whether the current features compute a float minimumNumber in one instruction (x86-64 AVX10.2
+    /// `vminmaxps`): the native lowering calls the backend entry.
+    pub(package) const fn minmax_exact(self: &Self) bool {
+        let k = cf::find("avx10.2", self.p().arch);
+        return k >= 0 && cf::has(self.fs, k as usize);
     }
 
     /// The symbol of the `@simd_impl` entry that computes vector operation `c` over `n` lanes of `t` whole,

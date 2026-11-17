@@ -1506,7 +1506,7 @@ extend Gen {
         let ni = b.insts.len();
         self.hform.truncate(0);
         self.hform.resize_default(ni);
-        if unsafe (*self.pkg).half != HALF_ARITH {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).half != HALF_ARITH {
             return;
         }
         // Each value's uses: `Live::folds`' counts.
@@ -6729,7 +6729,7 @@ extend Gen {
         };
         if op == O_ALOAD {
             let rd = self.def_step(i) as u32;
-            if ord == MO_ACQUIRE && unsafe (*self.pkg).rcpc {
+            if ord == MO_ACQUIRE && unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc {
                 self.emit(a::ldapr(size, rd, rp));
             } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
@@ -6752,7 +6752,7 @@ extend Gen {
             let rv = self.reg(t.b) as u32;
             // One instruction with LSE, which reads its operands before it writes: a dying one's register.
             let rd = self.def_step(i) as u32;
-            if !unsafe (*self.pkg).lse {
+            if !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
                 self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
                 return true;
             }
@@ -6794,7 +6794,7 @@ extend Gen {
         } else {
             self.def(i) as u32
         };
-        if unsafe (*self.pkg).lse {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
             self.cmp_old(size, re);

@@ -60,7 +60,9 @@ own language.
 A compiler that over-rejects valid source cannot rebuild itself, and reverting the source does
 not help. Download the release binary as `check.sh` does
 (`gh release download --pattern super-c-macos-arm64.tar.gz`), build the source with it as
-`check.sh` does (`build --bootstrap-tags`), then continue with the rebuilt compiler.
+`check.sh` does (`build --bootstrap-tags -fno-prove`), then continue with the rebuilt compiler. The
+same build with the current binary recovers from a pull whose std proofs the current binary cannot
+prove.
 
 ## Single Compilation Path
 

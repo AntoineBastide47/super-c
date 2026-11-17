@@ -95,6 +95,10 @@ pub(package) const CG_CONTRACT_CHECKS: u64 = 1048576;
 /// No proof of the contracts (`-fno-prove`, its bit set by the `no` form): a build for fast iteration,
 /// whose contracts are neither proved nor, without `-fcontract-checks`, checked.
 pub(package) const CG_NO_PROVE: u64 = 2097152;
+/// Each function counts the executions of its Core IR blocks, and the program writes the counts at its
+/// exit (`-fblock-counts`, a native build's measurement of its own work): a 64-bit counter per function
+/// (`lir::lower`), the registry of all of them (`Lower::count_registry`) and the writer `std::rt::counts`.
+pub(package) const CG_BLOCK_COUNTS: u64 = 4194304;
 // Whether flag `b` (`CG_NAMES`) is set by its `no` form.
 const fn negated(b: u64) bool {
     return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT || b == CG_NO_PROVE;
@@ -102,7 +106,7 @@ const fn negated(b: u64) bool {
 
 // The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
 // `signed-zeros` and `plt` (`negated`).
-const CG_NAMES: [(str<'static>, u64); 23] = [
+const CG_NAMES: [(str<'static>, u64); 24] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -126,6 +130,7 @@ const CG_NAMES: [(str<'static>, u64); 23] = [
     ("optimize-sibling-calls", CG_SIBLING_CALLS),
     ("contract-checks", CG_CONTRACT_CHECKS),
     ("prove", CG_NO_PROVE),
+    ("block-counts", CG_BLOCK_COUNTS),
 ];
 
 // The bits flag `name` names: 0 for none.

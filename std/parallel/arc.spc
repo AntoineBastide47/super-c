@@ -24,9 +24,22 @@ const WEAK_LOCKED: usize = ~(0 as usize);
 // counts the `Weak` handles plus one for all strong handles together.
 @no_const
 struct ArcInner<T> {
+    @counter("arc_value_guard")
     pub strong: usize,
+    @counter("arc_block_guard")
+    @counter_lock
     pub weak: usize,
     pub value: T,
+}
+
+// What the live strong count of block `p` holds: the strong handles' weak unit (and the value).
+spec fn arc_value_guard<T>(p: *mut ArcInner<T>) bool {
+    return rc_share(p, 1, 1);
+}
+
+// What the live weak count of block `p` holds: the block.
+spec fn arc_block_guard<T>(p: *mut ArcInner<T>) bool {
+    return Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));
 }
 
 /// A shared, atomically reference-counted handle to a `T`. Cloning is cheap and hands back another owner;
@@ -47,49 +60,12 @@ pub struct Weak<T>
     ptr: *mut ArcInner<T>, // null for `Weak::new`
 }
 
-// The counts as units (`rc_share`): counter 0 counts the strong handles and guards the value and the
-// strong handles' one weak reference; counter 1 counts that reference and the `Weak` handles, and guards
-// the block. Each lemma states the step of the count operation it is called after; no proof checks it.
-
-// A new block, counts 1 and 1: one strong unit.
-@trusted
-lemma arc_new<T>(p: *mut ArcInner<T>)
-    requires Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>))
-    ensures rc_share(p, 0, 1);
-
-// An increment of the strong count by the holder of a strong unit, or of a weak unit whose count it saw
-// above zero (`upgrade`). A null handle has no count: it gives nothing.
-@trusted
-lemma arc_strong_inc<T>(p: *mut ArcInner<T>)
-    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
-    ensures p == null || rc_share(p, 0, 1);
-
-// An increment of the weak count by the holder of a strong or a weak unit.
-@trusted
-lemma arc_weak_inc<T>(p: *mut ArcInner<T>)
-    requires p == null || rc_units(p, 0) >= 1 || rc_units(p, 1) >= 1
-    ensures p == null || rc_share(p, 1, 1);
-
-// A decrement of the strong count from `prev`: the last unit (`prev == 1`) gives the strong handles' weak
-// unit, and the value is the holder's.
-@trusted
-lemma arc_strong_dec<T>(p: *mut ArcInner<T>, prev: usize)
-    requires p == null || rc_share(p, 0, 1)
-    ensures p == null || prev == 1 ==> rc_units(p, 0) == 0 && rc_share(p, 1, 1);
-
-// A decrement of the weak count from `prev`: the last unit gives the block.
-@trusted
-lemma arc_weak_dec<T>(p: *mut ArcInner<T>, prev: usize)
-    requires p == null || rc_share(p, 1, 1)
-    ensures p == null || prev == 1 ==> rc_units(p, 1) == 0 && Global::owns(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));
-
 extend<T> Arc<T> {
     /// Allocate `value` on the heap with a strong count of one.
     pub fn new(value: T) Arc<T> {
         let mut g = Global {};
         let p = (unsafe g.alloc(sizeof(ArcInner<T>), alignof(ArcInner<T>))) as *mut ArcInner<T>;
-        unsafe p[0] = ArcInner::<T> { strong: 1, weak: 1, value: value };
-        arc_new(p);
+        unsafe *p = ArcInner::<T> { strong: 1, weak: 1, value: value };
         return Arc::<T> { ptr: p };
     }
     /// Another owning handle to the same value (atomic increment of the strong count). Panics: the count
@@ -97,11 +73,10 @@ extend<T> Arc<T> {
     pub fn clone(self: &Arc<T>) Arc<T> {
         // Relaxed: a new handle only requires the count be atomic, not ordered against other memory. The
         // caller's handle keeps the count above zero, so no drop can race to the teardown.
-        let old = unsafe atomic::add_usize(self.strong_ptr(), 1, atomics::MemoryOrder::Relaxed as i32);
+        let old = unsafe atomic::add_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::Relaxed as i32);
         if old > MAX_REFCOUNT {
             panic("Arc: reference count overflow");
         }
-        arc_strong_inc(self.ptr);
         return Arc::<T> { ptr: self.ptr };
     }
     /// Borrow the shared value. Valid while this handle is alive.
@@ -110,11 +85,11 @@ extend<T> Arc<T> {
     }
     /// The current strong count (a snapshot; other threads may change it immediately).
     pub fn strong_count(self: &Arc<T>) usize {
-        return unsafe atomic::load_usize(self.strong_ptr(), atomics::MemoryOrder::Relaxed as i32);
+        return unsafe atomic::load_usize(&(*self.ptr).strong, atomics::MemoryOrder::Relaxed as i32);
     }
     /// The current number of `Weak` handles (a snapshot; other threads may change it immediately).
     pub fn weak_count(self: &Arc<T>) usize {
-        let n = unsafe atomic::load_usize(self.weak_ptr(), atomics::MemoryOrder::Relaxed as i32);
+        let n = unsafe atomic::load_usize(&(*self.ptr).weak, atomics::MemoryOrder::Relaxed as i32);
         // Locked by a `get_mut` check, which locks it only at 1: no `Weak` exists.
         if n == WEAK_LOCKED {
             return 0;
@@ -123,7 +98,7 @@ extend<T> Arc<T> {
     }
     /// A new `Weak` handle to this block. Panics: the weak count passes `isize::MAX`.
     pub fn downgrade(self: &Arc<T>) Weak<T> {
-        let w = self.weak_ptr();
+        let w = (unsafe &mut (*self.ptr).weak) as *mut usize;
         let mut n = unsafe atomic::load_usize(w, atomics::MemoryOrder::Relaxed as i32);
         // Lock-free: a failed exchange means another thread changed the count, and a `get_mut` check
         // holds the lock for two atomic operations only.
@@ -142,7 +117,6 @@ extend<T> Arc<T> {
                     atomics::MemoryOrder::Acquire as i32,
                     atomics::MemoryOrder::Relaxed as i32,
                 ) {
-                    arc_weak_inc(self.ptr);
                     return Weak::<T>::from_block(self.ptr);
                 }
             }
@@ -163,7 +137,7 @@ extend<T> Arc<T> {
         // TSan's model): every other handle's last use of the value, published by the Release half of its
         // AcqRel decrement, happens before the value moves out.
         if !unsafe atomic::cas_usize(
-            self.strong_ptr(),
+            &mut (*self.ptr).strong,
             1,
             0,
             false,
@@ -174,7 +148,6 @@ extend<T> Arc<T> {
         }
         let p = self.ptr;
         forget(self);
-        arc_strong_dec(p, 1);
         let value = unsafe (*p).value;
         // Releases the strong handles' weak reference: frees the block when no `Weak` remains.
         let _collective = Weak::<T>::from_block(p);
@@ -189,7 +162,7 @@ extend<T> Arc<T> {
     // can run between the two reads: a `Weak` made and its strong source dropped in that window would
     // otherwise read as unique.
     fn is_unique(self: &mut Arc<T>) bool {
-        let w = self.weak_ptr();
+        let w = (unsafe &mut (*self.ptr).weak) as *mut usize;
         // Acquire pairs with the Release half of a `Weak`'s last decrement (`Weak::free`), so its uses of
         // the block happen before this handle takes the value as its own.
         if !unsafe atomic::cas_usize(
@@ -204,7 +177,7 @@ extend<T> Arc<T> {
         }
         // Acquire pairs with the Release half of the strong decrements, so every other strong handle's
         // last use of the value happens before the caller writes it.
-        let unique = unsafe atomic::load_usize(self.strong_ptr(), atomics::MemoryOrder::Acquire as i32) == 1;
+        let unique = unsafe atomic::load_usize(&(*self.ptr).strong, atomics::MemoryOrder::Acquire as i32) == 1;
         // Release: the read above happens before any `downgrade` that sees the unlocked count.
         unsafe atomic::store_usize(w, 1, atomics::MemoryOrder::Release as i32);
         return unique;
@@ -215,16 +188,6 @@ extend<T> Arc<T> {
         requires p == null || rc_share(p, 0, 1)
     {
         return Arc::<T> { ptr: p };
-    }
-
-    // The counts as raw pointers for the atomic calls: other threads change them, so no reference to them
-    // is held.
-    fn strong_ptr(self: &Arc<T>) *mut usize {
-        return unsafe &mut (*self.ptr).strong;
-    }
-
-    fn weak_ptr(self: &Arc<T>) *mut usize {
-        return unsafe &mut (*self.ptr).weak;
     }
 }
 
@@ -259,7 +222,6 @@ extend<T> Weak<T> {
                 atomics::MemoryOrder::Acquire as i32,
                 atomics::MemoryOrder::Relaxed as i32,
             ) {
-                arc_strong_inc(self.ptr);
                 return Some(Arc::<T>::from_block(self.ptr));
             }
             n = unsafe atomic::load_usize(s, atomics::MemoryOrder::Relaxed as i32);
@@ -282,7 +244,6 @@ extend<T> Weak<T> {
             if old > MAX_REFCOUNT {
                 panic("Arc: reference count overflow");
             }
-            arc_weak_inc(self.ptr);
         }
         return Weak::<T> { ptr: self.ptr };
     }
@@ -315,8 +276,7 @@ extend<T> Arc<T> as Free {
         // handle's LAST payload access before the teardown (a `WaitGroup` doner is still inside the gate
         // after publishing zero, and only this drop orders that use before a free), and a standalone fence
         // is outside TSan's memory model, so the race gate could never check the fence form.
-        let prev = unsafe atomic::sub_usize(self.strong_ptr(), 1, atomics::MemoryOrder::AcqRel as i32);
-        arc_strong_dec(self.ptr, prev);
+        let prev = unsafe atomic::sub_usize(&mut (*self.ptr).strong, 1, atomics::MemoryOrder::AcqRel as i32);
         if prev == 1 {
             // Free the value THROUGH a raw pointer (no-op if T isn't Free), like Box::free; freeing the
             // place directly would be a conditional move out of a dereference.
@@ -339,7 +299,6 @@ extend<T> Weak<T> as Free {
         }
         self.ptr = null;
         let prev = unsafe atomic::sub_usize(&mut (*p).weak, 1, atomics::MemoryOrder::AcqRel as i32);
-        arc_weak_dec(p, prev);
         if prev == 1 {
             let mut g = Global {};
             unsafe g.dealloc(p, sizeof(ArcInner<T>), alignof(ArcInner<T>));

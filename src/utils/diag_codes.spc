@@ -566,9 +566,11 @@ pub(package) const INVARIANT_READS_SELF: u16 = 559;
 pub(package) const UNION_INVARIANT: u16 = 560;
 pub(package) const INVARIANT_FIELD: u16 = 561;
 pub(package) const GHOST_PANICS: u16 = 562;
+pub(package) const ATTRIBUTE_COUNTER_TAKES_ONE_STRING_ARGUMENT: u16 = 563;
+pub(package) const COUNTER_STEP: u16 = 564;
 
 /// The number of codes, `NONE` included.
-pub(package) const COUNT: u16 = 563;
+pub(package) const COUNT: u16 = 565;
 
 /// The stable name of `code` (`mismatched_types_expected_found`), empty for `NONE` or an unknown code.
 pub(package) const fn name(code: u16) str<'static> {
@@ -1134,6 +1136,8 @@ pub(package) const fn name(code: u16) str<'static> {
         560 => "union_invariant",
         561 => "invariant_field",
         562 => "ghost_panics",
+        563 => "attribute_counter_takes_one_string_argument",
+        564 => "counter_step",
         _ => "",
     };
 }

@@ -19,6 +19,7 @@
 import lir::ir as *;
 import codegen::live as lv;
 import lir::switches as sws;
+import lir::inline as inl;
 import codegen::place;
 import codegen::place as *;
 import lir::verify as lver;
@@ -257,7 +258,8 @@ pub(package) struct Gen {
     vregs: u32, // the package's `vec_regs`
     win: bool, // Microsoft x64 and COFF, else System V and ELF
     sc_self: bool, // the body takes Super-C's own convention (`sc_conv`)
-    avx: bool, // AVX2: 32-byte vectors in ymm registers (`Package.vector`)
+    cpu: Cpu, // the processor facts of the body compiling (`Package::cpu_of`)
+    avx: bool, // AVX2: 32-byte vectors in ymm registers (`Cpu.vector`)
     z512: bool, // AVX-512 (F, BW, DQ, VL): 64-byte vectors in zmm registers too
     ymm: bool, // the body holds a 32-byte vector in a register: `vzeroupper` before each call and return
     yblk: Vector<bool>, // per block, whether it defines or reads a 32-byte vector (`ymm`)
@@ -439,8 +441,9 @@ extend Gen {
             vregs: pkg.vec_regs,
             win: win,
             sc_self: false,
-            avx: pkg.vector >= 32,
-            z512: pkg.vector == 64,
+            cpu: pkg.cpu,
+            avx: pkg.cpu.vector >= 32,
+            z512: pkg.cpu.vector == 64,
             ymm: false,
             yblk: Vector::<bool>::new(),
             yvals: Vector::<u32>::new(),
@@ -3537,86 +3540,10 @@ const fn lea_factor(c: i64) bool {
 
 // ---- Functions ----
 
-// The run-time copies that body `b` of `p` chooses before its own code (`lir::lower`'s CPU-level check:
-// the level byte `__sc_simd_lv` read in the entry block, then per copy, the highest first, `level >= k`
-// to a block that only calls the copy with the entry's parameters and returns its result): per copy, `k <<
-// 32 | its body symbol` into `out`; the level byte's body symbol. `out` empty: no such check.
-fn dispatch_of(p: &Package, b: &Body, out: &mut Vector<u64>) u32 {
-    out.truncate(0);
-    let b0 = b.blocks[0];
-    let mut lvl = VNONE;
-    let mut sym: u32 = 0;
-    for i in b0.start..b0.start + b0.len {
-        let t = b.insts[i as usize];
-        if t.op == O_ALOAD && t.ty == T_I8 && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_SYMADDR && b.insts[t.a as usize].b == 0 {
-            let a = b.insts[t.a as usize].a;
-            if p.spell(p.syms[b.syms[a as usize] as usize].name) == "__sc_simd_lv" {
-                lvl = i;
-                sym = a;
-            }
-        }
-    }
-    if lvl == VNONE {
-        return 0;
-    }
-    let np = b0.param_len as u32;
-    let mut k: u32 = 0;
-    // One check per step.
-    for _ in 0..b.blocks.len() {
-        let bk = b.blocks[k as usize];
-        let tm = b.insts[(bk.start + bk.len - 1) as usize];
-        if tm.op != O_BR || (tm.a & (VPARAM | VFLAG)) != 0 || b.edge_nargs(tm.b) != 0 || b.edge_nargs(tm.c) != 0 {
-            break;
-        }
-        let c = b.insts[tm.a as usize];
-        let mut lev: u64 = 0;
-        if c.op != O_ICMP || c.aux != C_UGE || c.a != lvl || !lv::const_of(b, c.b, &mut lev) || lev == 0 || lev > 255 {
-            break;
-        }
-        let tb = b.blocks[b.edge_target(tm.b) as usize];
-        let call = b.insts[tb.start as usize];
-        let r = b.insts[(tb.start + 1) as usize];
-        if tb.len != 2 || call.op != O_CALL || r.op != O_RET || !(r.a == tb.start && call.ty != T_NONE || r.a == VNONE && call.ty == T_NONE) {
-            break;
-        }
-        // The body's own signature and parameters, in order (the result's address with them).
-        let mut same = b.pool[call.b as usize] + 3 == b.pool[b.sig as usize] + 3;
-        for q in 0..b.pool[b.sig as usize] + 3 {
-            same = same && b.pool[(call.b + q) as usize] == b.pool[(b.sig + q) as usize];
-        }
-        let nops = b.pool[call.b as usize] + ((b.pool[call.b as usize + 2] & AGG) != 0) as u32;
-        same = same && nops == np;
-        for q in 0..np {
-            same = same && b.pool[(call.c + q) as usize] == (VPARAM | b0.param_start + q);
-        }
-        if !same {
-            break;
-        }
-        out.push(lev << 32 | call.a as u64);
-        k = b.edge_target(tm.c);
-    }
-    return sym;
-}
-
-// Body `b` without the first `n` steps of its CPU-level check (`dispatch_of`): each one's branch jumps to
-// its other side, the level byte's read and the comparisons dead constants.
+// Body `b` without the first `n` steps of its CPU-level check (`lir::inline::dispatch_of`,
+// `strip_checks`).
 fn strip_dispatch(b: &mut Body, n: usize) {
-    let mut k: u32 = 0;
-    for _ in 0..n {
-        let bk = b.blocks[k as usize];
-        let at = bk.start + bk.len - 1;
-        let tm = b.insts[at as usize];
-        if tm.op != O_BR || (tm.a & (VPARAM | VFLAG)) != 0 || b.insts[tm.a as usize].op != O_ICMP {
-            break;
-        }
-        let c = b.insts[tm.a as usize];
-        if (c.a & (VPARAM | VFLAG)) == 0 && b.insts[c.a as usize].op == O_ALOAD {
-            b.insts[c.a as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: 0 };
-        }
-        b.insts[tm.a as usize] = Inst { op: O_ICONST, ty: T_I8, aux: 0, a: 0, b: 0, c: 0 };
-        b.insts[at as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: tm.c, b: 0, c: 0 };
-        k = b.edge_target(tm.c);
-    }
+    let k = inl::strip_checks(b, 0, n);
     // The body's first block, which the entry's jump alone enters and which follows it in the instructions:
     // one block with the entry (the jump a dead constant), so the parameters live in one block in the
     // registers they arrive in; its own place holds a new `unreachable`.
@@ -3660,7 +3587,7 @@ extend Gen {
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         let p = unsafe &*self.pkg;
         let b = &p.bodies[p.syms[s as usize].def as usize];
-        self.disp_lv = dispatch_of(p, b, &mut self.disp);
+        self.disp_lv = inl::dispatch_of(p, b, true, &mut self.disp);
         if self.disp.len() == 0 {
             return self.func_body(s, local);
         }
@@ -3744,6 +3671,9 @@ extend Gen {
             &p.bodies[ps.def as usize]
         };
         let b = self.cr.b();
+        self.cpu = p.cpu_of(b);
+        self.avx = self.cpu.vector >= 32;
+        self.z512 = self.cpu.vector == 64;
         self.cr.lv.fold_max = 8;
         // The parameters' places, which the folds read (`lv::Live::mem_params`).
         classify(self.win, self.sc_self, b, b.sig, self.cr.ptr, self.vregs, &mut self.cr.self_lay);
@@ -3764,11 +3694,11 @@ extend Gen {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
             0
-        } | if unsafe (*self.pkg).sse41 {
+        } | if self.cpu.sse41 {
             lv::FOLD_ANY_BITS | lv::FOLD_VMUL
         } else {
             0
-        } | if unsafe (*self.pkg).addsub {
+        } | if self.cpu.addsub {
             lv::FOLD_ADDSUB | ast::pick(self.avx, lv::FOLD_ADDSUB_WIDE, 0u64)
         } else {
             0
@@ -3781,7 +3711,7 @@ extend Gen {
             self.cr.lv.relayout(b);
         } else {
             intrin::of_symbols(unsafe &*self.pkg, b, "x86_64", &mut self.itpl);
-            if unsafe (*self.pkg).sse41 {
+            if self.cpu.sse41 {
                 intrin::x64_sse41(unsafe &*self.pkg, b, &mut self.itpl);
             }
             fill(&mut self.lay_at, 2 * b.pool.len(), NONE);
@@ -5791,7 +5721,7 @@ extend Gen {
         };
         // The count, at most the width, is `clean`.
         self.cr.va.index_mut(i as usize).clean = true;
-        if t.op == O_POPCNT && unsafe (*self.pkg).popcnt {
+        if t.op == O_POPCNT && self.cpu.popcnt {
             self.c.rr(0xF3, 0x0FB8, sz == 8, rd, r, false);
             return;
         }
@@ -5830,7 +5760,7 @@ extend Gen {
         }
         // `lzcnt` (F3 0F BD) where the processor has it (`Package.lzcnt`): of a narrow operand zero-extended
         // to 32 bits, less the bits above its width.
-        if t.op == O_CLZ && unsafe (*self.pkg).lzcnt {
+        if t.op == O_CLZ && self.cpu.lzcnt {
             self.c.rr(0xF3, 0x0FBD, sz == 8, rd, r, false);
             if bits < 32 {
                 self.c.alu_ri(x::SUB, 4, rd, (32 - bits) as i32);
@@ -12630,7 +12560,7 @@ extend Gen {
         // SSE: `pshufd` (66 0F 70) [1, 1, 3, 3] moves the odd lanes down, `pmuldq` (66 0F 38 28) or `pmuludq`
         // (66 0F F4) multiplies, `pblendw` (66 0F 3A 0E) or `pshufd` [1, 3, 2, 3] and `punpckldq` (66 0F 62)
         // merge.
-        let sse41 = unsafe (*self.pkg).sse41;
+        let sse41 = self.cpu.sse41;
         let smul = sg && sse41;
         let mo = ast::pick(smul, 0x0F3828u32, 0x0FF4);
         self.c.sse_rr(0x66, 0x0F70, ao, rx);
@@ -12720,7 +12650,7 @@ extend Gen {
             self.c.vex_rr(0x66, 2, 0x40, false, false, rd, rx, ry);
             return;
         }
-        if unsafe (*self.pkg).sse41 {
+        if self.cpu.sse41 {
             // `pmulld` (66 0F 38 40), over `t.a` when it dies here.
             let rd = self.def_over(i, t.a, rx + V0) - V0;
             self.c.vmov(rd, rx);
@@ -12890,7 +12820,7 @@ extend Gen {
             // A mask's lanes are all ones or 0: each lane beside itself (`punpckl`).
             self.c.vmov(rd, rx);
             self.c.sse_rr(0x66, 0x0F60 + lg, rd, rd);
-        } else if (op == O_SEXT || op == O_ZEXT) && unsafe (*self.pkg).sse41 {
+        } else if (op == O_SEXT || op == O_ZEXT) && self.cpu.sse41 {
             // SSE4.1 `pmovsx`, `pmovzx` (66 0F38 20 bw, 21 bd, 22 bq, 23 wd, 24 wq, 25 dq; + 0x10 for zeros).
             let base: u32 = if fb == 1 {
                 0x20 + tb.trailing_zeros() as u32 - 1
@@ -13207,9 +13137,7 @@ extend Gen {
             let rx = self.vec_use(ops[0], self.vs0) - V0;
             let ry = self.vec_use(ops[1], self.vs1) - V0;
             let zx = self.zero_vec(ops[0]);
-            if nb == 16 && sg && (lb == 8 || lb == 32) && !self.avx && !unsafe (*self.pkg).sse41 && (zx || self.zero_vec(
-                ops[1],
-            )) {
+            if nb == 16 && sg && (lb == 8 || lb == 32) && !self.avx && !self.cpu.sse41 && (zx || self.zero_vec(ops[1])) {
                 // Signed, against zero (no `pmaxsd` or `pmaxsb` before SSE4.1): the other operand's lanes
                 // under the mask of those that win, `x > 0` for the maximum, `0 > x` for the minimum.
                 let (z, x, xv) = if zx {
@@ -14383,9 +14311,10 @@ extend Gen {
         if counts_zeros(t) {
             // VPLZCNTD, VPLZCNTQ where the build has AVX-512 CD and VL (`Package.vec_bits`).
             let eb = type_bytes(lane_type(t.ty), 8);
-            return (unsafe (*self.pkg).vec_bits & eb) != 0 && (in_vreg(t.ty) && type_bytes(t.ty, 8) == 16 || self.in_reg(
+            return (self.cpu.vec_bits & eb) != 0 && (in_vreg(t.ty) && type_bytes(t.ty, 8) == 16 || self.in_reg(t.ty) && type_bytes(
                 t.ty,
-            ) && type_bytes(t.ty, 8) > 16);
+                8,
+            ) > 16);
         }
         let code = (t.aux & VOP_CODE) as u32;
         if t.op != O_VOP || t.b != 2 || !is_vec(t.ty) || code < core::OP_SIMD || code >= core::OP_CMP_LANES {
@@ -14411,10 +14340,9 @@ extend Gen {
         }
         let c = (code - core::OP_SIMD) as u8;
         let nb = type_bytes(t.ty, 8);
-        let p = unsafe &*self.pkg;
         let round = c == core::SIMD_FLOOR || c == core::SIMD_CEIL || c == core::SIMD_TRUNC;
         let num = (c == core::SIMD_MIN || c == core::SIMD_MAX) && (t.aux & VOP_NUM) != 0;
-        if !(c == core::SIMD_ABS || round && (p.sse41 || nb > 16) || c == core::SIMD_FMA && p.fma || num) || !(in_vreg(
+        if !(c == core::SIMD_ABS || round && (self.cpu.sse41 || nb > 16) || c == core::SIMD_FMA && self.cpu.fma || num) || !(in_vreg(
             t.ty,
         ) || nb > 16 && self.in_reg(t.ty)) {
             return false;
@@ -14437,9 +14365,9 @@ extend Gen {
         let pfx = dd as u32 * 0x66;
         // SSE4.1's `blendvps` of C's `fmin` and `fmax` takes its mask in xmm0, which no operand holds then.
         let mm = c == core::SIMD_MIN || c == core::SIMD_MAX;
-        let xmm0 = mm && nb == 16 && !self.avx && unsafe (*self.pkg).sse41 && !self.ordinary_lanes(ops[1]) && !self.ordinary_lanes(
-            ops[0],
-        );
+        let xmm0 = mm && (t.aux & VOP_NUMBER) == 0 && nb == 16 && !self.avx && self.cpu.sse41 && !self.ordinary_lanes(
+            ops[1],
+        ) && !self.ordinary_lanes(ops[0]);
         if xmm0 {
             self.vacate(V0);
         }
@@ -14523,9 +14451,30 @@ extend Gen {
         // -0. Then y where x is a NaN.
         let a = self.tmp(true) - V0;
         let b = self.tmp(true) - V0;
-        self.fop_cmp(nb, dd, ast::pick(lo, 0u32, 4u32), a, ry, rx);
-        self.fop(nb, dd, ast::pick(lo, 0x54u32, 0x56u32), a, a, ry);
-        self.fop(nb, dd, ast::pick(lo, 0x5Du32, 0x5Fu32), b, ry, rx);
+        if (t.aux & VOP_NUMBER) != 0 {
+            // A number x: min(y, x) or max(y, x) gives it for a NaN y. The comparison (either order) is
+            // made in the result's register, over an x that ends here.
+            let rd = self.def_over(i, ops[0], rx + V0) - V0;
+            let m = ast::pick(rd == ry, a, rd);
+            self.fop(nb, dd, ast::pick(lo, 0x5Du32, 0x5Fu32), b, ry, rx);
+            self.fop_cmp(nb, dd, ast::pick(lo, 0u32, 4u32), m, rx, ry);
+            self.fop(nb, dd, ast::pick(lo, 0x54u32, 0x56u32), m, m, ry);
+            self.fop(nb, dd, ast::pick(lo, 0x56u32, 0x54u32), m, m, b);
+            if m != rd {
+                self.fop(nb, dd, 0x28, rd, 0, m);
+            }
+            return;
+        }
+        // The operand a NaN lane of the other gives, `q`, takes the role of y: the second one, or the first
+        // for two NaNs to give it (VOP_FIRST).
+        let (rp, rq) = if (t.aux & VOP_FIRST) != 0 {
+            (ry, rx)
+        } else {
+            (rx, ry)
+        };
+        self.fop_cmp(nb, dd, ast::pick(lo, 0u32, 4u32), a, rq, rp);
+        self.fop(nb, dd, ast::pick(lo, 0x54u32, 0x56u32), a, a, rq);
+        self.fop(nb, dd, ast::pick(lo, 0x5Du32, 0x5Fu32), b, rq, rp);
         self.fop(nb, dd, ast::pick(lo, 0x56u32, 0x54u32), b, b, a);
         // The NaN lanes' mask, then y under it: `vblendvps` (AVX: VEX.66.0F3A 4A, 4B for doubles, the mask's
         // register in the immediate's high bits), `blendvps` (SSE4.1: 66 0F 38 14, 15, the mask in xmm0), else
@@ -14533,23 +14482,23 @@ extend Gen {
         // an x that ends here: a loop's accumulator keeps its register) unless that one holds y.
         if !xmm0 && (nb > 32 || !self.avx) {
             let rd = self.def_over(i, ops[0], rx + V0) - V0;
-            let m = ast::pick(rd == ry, a, rd);
-            self.fop_cmp(nb, dd, 3, m, rx, rx);
-            self.fop(nb, dd, 0x57, b, b, ry);
+            let m = ast::pick(rd == rq, a, rd);
+            self.fop_cmp(nb, dd, 3, m, rp, rp);
+            self.fop(nb, dd, 0x57, b, b, rq);
             self.fop(nb, dd, 0x55, m, m, b);
-            self.fop(nb, dd, 0x57, m, m, ry);
+            self.fop(nb, dd, 0x57, m, m, rq);
             if m != rd {
                 self.fop(nb, dd, 0x28, rd, 0, m);
             }
             return;
         }
         let r = if xmm0 {
-            self.fop_cmp(nb, dd, 3, 0, rx, rx);
-            self.c.sse_rr(0x66, 0x0F3814 + dd as u32, b, ry);
+            self.fop_cmp(nb, dd, 3, 0, rp, rp);
+            self.c.sse_rr(0x66, 0x0F3814 + dd as u32, b, rq);
             b
         } else {
-            self.fop_cmp(nb, dd, 3, a, rx, rx);
-            self.c.vex_rr(0x66, 3, 0x4A + dd as u32, false, nb == 32, a, b, ry);
+            self.fop_cmp(nb, dd, 3, a, rp, rp);
+            self.c.vex_rr(0x66, 3, 0x4A + dd as u32, false, nb == 32, a, b, rq);
             self.c.byte(a << 4);
             a
         };
@@ -14668,7 +14617,7 @@ extend Gen {
             return;
         }
         self.c.vmov(ta, ry);
-        if nb == 16 && unsafe (*self.pkg).sse41 {
+        if nb == 16 && self.cpu.sse41 {
             self.c.sse_rr(0x66, 0x0F3A0F, ta, rx);
             self.c.byte(sb as u8);
         } else {
@@ -14718,7 +14667,7 @@ extend Gen {
     // Whether `vop` `t` is a `shuffle` of two or three vectors of its own type of 8 or 16 bytes by a constant
     // index list that SSSE3's PSHUFB computes (`pshufb_lanes`; `Package.vec_perm3`, set with SSSE3 alone).
     const fn pshufb_shuffle(self: &Self, t: Inst) bool {
-        if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b < 2 || t.b > 3 || t.c == VNONE || unsafe (*self.pkg).vec_perm3 == 0 || !in_vreg(
+        if t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b < 2 || t.b > 3 || t.c == VNONE || self.cpu.vec_perm3 == 0 || !in_vreg(
             t.ty,
         ) {
             return false;
@@ -14835,7 +14784,7 @@ extend Gen {
             self.op3(1, 0xEB, false, nb, rd, ta, tb);
             return;
         }
-        if wb == 1 || nb > 16 || unsafe (*self.pkg).sse41 {
+        if wb == 1 || nb > 16 || self.cpu.sse41 {
             if wb == 1 {
                 self.op3(1, 0xEE, false, nb, ta, rx, ry);
                 self.op3(1, 0xEA, false, nb, tb, rx, ry);
@@ -14900,7 +14849,7 @@ extend Gen {
         let nb = type_bytes(t.ty, 8);
         let tb = b.pool[t.a as usize];
         let ix = b.pool[(t.a + 1) as usize];
-        if !unsafe (*self.pkg).vtbl || self.cr.vt(tb) != t.ty || self.cr.vt(ix) != t.ty {
+        if !self.cpu.vtbl || self.cr.vt(tb) != t.ty || self.cr.vt(ix) != t.ty {
             return false;
         }
         if nb == 16 {
@@ -14977,10 +14926,7 @@ extend Gen {
         let sg = (t.aux & MULW_SIGNED) != 0;
         let hi = (t.aux & MULW_HIGH) != 0;
         if self.mulw_reg(t) {
-            assert(
-                !sg || unsafe (*self.pkg).sse41,
-                "x64gen: a signed widening product without SSE4.1 (Package.vec_mulw)",
-            );
+            assert(!sg || self.cpu.sse41, "x64gen: a signed widening product without SSE4.1 (Package.vec_mulw)");
             // The second operand's lanes first: in an xmm register the result's register, which may hold the
             // second operand, takes the first's lanes (PSHUFD), and the product is computed over them.
             let rx = self.vec_use(t.a, self.vs0) - V0;
@@ -15216,7 +15162,7 @@ extend Gen {
             self.c.vex_rr(0x66, mm, base + ast::pick(lo, 0u32, 4), false, y, dst, a, src);
             return;
         }
-        if unsafe (*self.pkg).sse41 && lb <= 32 && !(lb == 16 && sg || lb == 8 && !sg) {
+        if self.cpu.sse41 && lb <= 32 && !(lb == 16 && sg || lb == 8 && !sg) {
             // SSE4.1: pminsb, pminsd, pminuw, pminud (66 0F38 38..3B); the maximum 4 above.
             let base: u32 = if lb == 8 {
                 0x38

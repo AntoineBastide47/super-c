@@ -65,7 +65,7 @@ fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budget
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.fmath = fm;
-    after.fma = fma;
+    after.cpu.fma = fma;
     after.pairs = pairs;
     after.switch_tree = switches;
     let none = Vector::<bool>::new();
@@ -3492,7 +3492,7 @@ b0(v0: i64):
     }
     let mut err = String::new();
     let mut c = lparse::parse(src, &mut err).unwrap();
-    c.popcnt = true;
+    c.cpu.popcnt = true;
     let none = Vector::<bool>::new();
     lopt::optimize(
         &mut c,
@@ -17389,7 +17389,7 @@ fn optimized_target(text: str, vector: u32, ccmp: bool) (Package, Package) {
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
-    after.vector = vector;
+    after.cpu.vector = vector;
     after.ccmp = ccmp;
     after.apairs = false;
     let none = Vector::<bool>::new();
@@ -17614,7 +17614,7 @@ b0(v0: i64, v1: ptr):
     assert(count_of(&m, "add.v2i64") == 4 && count_of(&m, "store") == 4, m.as_str());
     let mut err = String::new();
     let mut p = lparse::parse(text, &mut err).unwrap();
-    p.vector = 16;
+    p.cpu.vector = 16;
     p.apairs = true;
     let none = Vector::<bool>::new();
     lopt::optimize(
@@ -18473,7 +18473,7 @@ b7:
 )";
     let mut err = String::new();
     let mut p = lparse::parse(text, &mut err).unwrap();
-    p.vector = 16;
+    p.cpu.vector = 16;
     p.apairs = false;
     let none = Vector::<bool>::new();
     lopt::optimize(

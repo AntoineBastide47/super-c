@@ -136,7 +136,8 @@ extend<T> ChannelState<T> as Free {
 // drops the count to zero; freeing the mutex frees the state, and with it the buffered payloads.
 @no_const
 pub struct ChannelInner<T> {
-    pub strong: usize, // atomic: live handles, the `Channel` value included
+    @counter("chan_guard")
+    pub strong: usize, // atomic: live handles, the `Channel` value included, one unit each
     pub state: sync::Mutex<ChannelState<T>>,
     pub not_full: sync::Condvar,
     pub not_empty: sync::Condvar,
@@ -201,26 +202,10 @@ const fn block_align<T>() usize
     return alignof(ChannelInner<T>);
 }
 
-// The count as units (`rc_share`): counter 0 counts the handles and guards the block, of the size its
-// `bytes` field records. Each lemma states the step of the count operation it follows; no proof checks it.
-
-// A new block, count 1: one unit.
-@trusted
-lemma chan_new<T>(p: *mut ChannelInner<T>)
-    requires Global::owns(p, unsafe (*p).bytes, block_align::<T>())
-    ensures rc_share(p, 0, 1);
-
-// An increment of the count by the holder of a unit.
-@trusted
-lemma chan_inc<T>(p: *mut ChannelInner<T>)
-    requires rc_units(p, 0) >= 1
-    ensures rc_share(p, 0, 1);
-
-// A decrement of the count from `prev`: the last unit gives the block.
-@trusted
-lemma chan_dec<T>(p: *mut ChannelInner<T>, prev: usize)
-    requires rc_share(p, 0, 1)
-    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, unsafe (*p).bytes, block_align::<T>());
+// What the live count of block `p` holds: the block, of the size its `bytes` field records.
+spec fn chan_guard<T>(p: *mut ChannelInner<T>) bool {
+    return Global::owns(p, unsafe (*p).bytes, block_align::<T>());
+}
 
 /// Allocate and initialise a block with a `cap`-slot inline ring and a count of one. `pub` for linkage.
 pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T>
@@ -248,24 +233,27 @@ pub fn new_block<T>(cap: usize, unbounded: bool) *mut ChannelInner<T>
         unbounded: unbounded,
         heap_ring: false,
     };
-    unsafe p[0] = ChannelInner::<T> {
+    unsafe *p = ChannelInner::<T> {
         strong: 1,
         state: sync::Mutex::<ChannelState<T>>::new(st),
         not_full: sync::Condvar::new(),
         not_empty: sync::Condvar::new(),
         bytes: bytes,
     };
-    chan_new(p);
     return p;
 }
 
-/// Another handle to the block: one relaxed increment, as for an `Arc`. `pub` for linkage.
+/// Another handle to the block: one relaxed increment, as for an `Arc`. Panics where the count would
+/// wrap. `pub` for linkage.
 pub unsafe fn retain<T>(p: *mut ChannelInner<T>) *mut ChannelInner<T>
     requires rc_units(p, 0) >= 1
     ensures |r| r == p && rc_share(p, 0, 1)
+    panics if true
 {
-    let _ = unsafe atomic::add_usize(&mut (*p).strong, 1, atomics::MemoryOrder::Relaxed as i32);
-    chan_inc(p);
+    let prev = unsafe atomic::add_usize(&mut (*p).strong, 1, atomics::MemoryOrder::Relaxed as i32);
+    if prev == ~(0 as usize) {
+        panic("channel: handle count overflow");
+    }
     return p;
 }
 
@@ -276,7 +264,6 @@ pub unsafe fn release<T>(p: *mut ChannelInner<T>)
     requires rc_share(p, 0, 1)
 {
     let prev = unsafe atomic::sub_usize(&mut (*p).strong, 1, atomics::MemoryOrder::AcqRel as i32);
-    chan_dec(p, prev);
     if prev != 1 {
         return;
     }

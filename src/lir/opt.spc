@@ -1364,7 +1364,7 @@ extend Opt {
         if self.lbs.len() != 0 {
             return false;
         }
-        if pk.vector < 16 || pk.ccmp {
+        if pk.cpu_of(b).vector < 16 || pk.ccmp {
             return true;
         }
         for i in 0..b.insts.len() {
@@ -1380,7 +1380,7 @@ extend Opt {
     /// count weighted by loop depth drops; then optimize it again. The body before the packing when it
     /// kept one, else None.
     pub(package) fn slp(self: &mut Self, pk: &Package, b: &mut Body) Option<Body> {
-        if b.naked || pk.vector < 16 {
+        if b.naked || pk.cpu_of(b).vector < 16 {
             return None;
         }
         let before = self.weigh(pk, b);
@@ -1400,7 +1400,7 @@ extend Opt {
         let mut ok = self.slp.plan(
             b,
             pk.ptr_bytes,
-            pk.vector.min(64),
+            pk.cpu_of(b).vector.min(64),
             ((pk.fmath | b.fmath) & FM_ASSOC) != 0,
             pk.hfa_regs,
             &self.wgt,
@@ -1417,7 +1417,7 @@ extend Opt {
             ok = self.slp.plan(
                 b,
                 pk.ptr_bytes,
-                pk.vector.min(64),
+                pk.cpu_of(b).vector.min(64),
                 ((pk.fmath | b.fmath) & FM_ASSOC) != 0,
                 pk.hfa_regs,
                 &self.wgt,
@@ -1671,14 +1671,15 @@ extend Opt {
         self.unr.vminnum = pk.vminnum;
         self.unr.vsat = pk.vec_sat;
         self.unr.vabsd = pk.vec_absd;
-        self.unr.vbits = pk.vec_bits;
-        self.unr.vpopcnt = pk.popcnt;
-        self.unr.vtbl = pk.vtbl;
+        let cpu = pk.cpu_of(b);
+        self.unr.vbits = cpu.vec_bits;
+        self.unr.vpopcnt = cpu.popcnt;
+        self.unr.vtbl = cpu.vtbl;
         self.unr.vmsk = pk.mask_bits;
-        self.unr.vperm3 = pk.vec_perm3;
+        self.unr.vperm3 = cpu.vec_perm3;
         self.unr.vsumw = pk.vec_sumw;
-        self.unr.vmulw = pk.vec_mulw;
-        self.unr.vfma = pk.vfloat && pk.fma;
+        self.unr.vmulw = cpu.vec_mulw;
+        self.unr.vfma = pk.vfloat && cpu.fma;
         self.unr.vfloat = pk.vfloat;
         self.unr.vrnda = pk.vround_away;
         self.unr.vfn.truncate(0);
@@ -1690,7 +1691,7 @@ extend Opt {
                 0u8
             };
             let round = f == core::SIMD_FLOOR || f == core::SIMD_CEIL || f == core::SIMD_TRUNC || f == lu::ROUND_AWAY;
-            self.unr.vfn.push(ast::pick(round && !pk.vround || f == core::SIMD_FMA && !pk.fma, 0u8, f));
+            self.unr.vfn.push(ast::pick(round && !cpu.vround || f == core::SIMD_FMA && !cpu.fma, 0u8, f));
         }
         let none_u8: []u8 = [];
         let none_u32: []u32 = [];
@@ -1710,7 +1711,7 @@ extend Opt {
             b,
             pk.ptr_bytes,
             pk.fmath | b.fmath,
-            pk.vector,
+            cpu.vector,
             bu,
             &self.inner,
             &self.lparent,
@@ -2041,14 +2042,15 @@ extend Opt {
     /// Split each vector of body `b` wider than the native backend's registers into register-wide parts
     /// (`lir::wide`). Whether `b` had one.
     pub(package) fn split_wide(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if pk.vector == 0 || b.naked || !wd::has_wide(b, pk.vector) {
+        let vector = pk.cpu_of(b).vector;
+        if vector == 0 || b.naked || !wd::has_wide(b, vector) {
             return false;
         }
         // The rewrite reads the reverse postorder alone (`cfg`), and every table goes after it.
         if self.kept < K_GRAPH {
             self.cfg(b);
         }
-        self.wide.run(b, pk.vector, pk.vec_accs, &self.order, &self.rpo, &mut self.pbody);
+        self.wide.run(b, vector, pk.vec_accs, &self.order, &self.rpo, &mut self.pbody);
         let nb = replace(&mut self.pbody, Body::empty());
         self.pbody = replace(b, nb);
         self.kept = K_NONE;
@@ -8394,6 +8396,177 @@ extend Opt {
         return s.min(type_bits(b.type_of(a), 8));
     }
 
+    // What float `v` (a scalar, or every lane of a vector) is known to hold, `depth` operations deep: FC_QUIET
+    // (no signaling NaN) or FC_NUMBER (no NaN). Parameter `p` counts `assume`; another parameter counts its
+    // own (`param_fclass`) while `depth` lasts. A constant by its bits; the result of an arithmetic operation
+    // or a conversion is quiet, and a sum with a zero is a number when the other operand is; a minimum or
+    // maximum (`SIMD_MIN`, `SIMD_MAX`) is a number when an operand is, and quiet when both are. C's
+    // (`VOP_NUM`) by the target's instruction (`Package.vminnum`): arm64's `fminnm` gives a quiet result,
+    // and a NaN for a signaling operand, so its number needs the other operand quiet.
+    fn fclass(self: &Self, pk: &Package, b: &Body, v: Value, p: Value, assume: u8, depth: u32) u8 {
+        if v == p {
+            return assume;
+        }
+        if v == VNONE || (v & VFLAG) != 0 {
+            return 0;
+        }
+        if (v & VPARAM) != 0 {
+            return if depth == 0 {
+                0
+            } else {
+                self.param_fclass(pk, b, v, p, assume, depth - 1)
+            };
+        }
+        let t = b.insts[v as usize];
+        let lt = ast::pick(is_vec(t.ty), lane_type(t.ty), t.ty);
+        if lt != T_F32 && lt != T_F64 {
+            return 0;
+        }
+        if t.op == O_FCONST {
+            return bits_fclass(lt, t.b as u64 << 32 | t.a as u64);
+        }
+        if t.op == O_WCONST {
+            let lb = type_bits(lt, 8) as u64;
+            let mut c = FC_NUMBER;
+            for q in 0..lanes(t.ty) as u64 {
+                let x = b.words[t.a as usize + (q * lb / 64) as usize] >> q * lb % 64;
+                c &= bits_fclass(lt, ast::pick(lb == 64, x, x & 0xFFFFFFFF));
+            }
+            return c;
+        }
+        if t.op == O_SPLAT {
+            return self.fclass(pk, b, self.val_known(t.a), p, assume, depth);
+        }
+        if depth == 0 {
+            return 0;
+        }
+        if t.op == O_SITOFP || t.op == O_UITOFP {
+            return FC_NUMBER;
+        }
+        if t.op == O_FADD {
+            let (x, y) = (self.val_known(t.a), self.val_known(t.b));
+            let zx = float_splat(b, x);
+            let zy = float_splat(b, y);
+            let sign = 1u64 << (type_bits(lt, 8) - 1) as u64;
+            if zy.is_some() && (zy.unwrap() & ~sign) == 0 {
+                return FC_QUIET | self.fclass(pk, b, x, p, assume, depth - 1);
+            }
+            if zx.is_some() && (zx.unwrap() & ~sign) == 0 {
+                return FC_QUIET | self.fclass(pk, b, y, p, assume, depth - 1);
+            }
+        }
+        if t.op >= O_FADD && t.op <= O_FDIV || t.op == O_FMA || t.op == O_FSQRT || t.op >= O_FPEXT && t.op <= O_FPTRUNC {
+            return FC_QUIET;
+        }
+        if !minmax_vop(t) {
+            return 0;
+        }
+        let ca = if (t.aux & VOP_NUMBER) != 0 {
+            FC_NUMBER
+        } else {
+            self.fclass(pk, b, self.val_known(b.pool[t.a as usize]), p, assume, depth - 1)
+        };
+        let cb = self.fclass(pk, b, self.val_known(b.pool[t.a as usize + 1]), p, assume, depth - 1);
+        let both = ca & cb & FC_QUIET;
+        if (t.aux & VOP_NUM) != 0 && pk.vminnum != VMIN_NUM && pk.vminnum != VMIN_EXACT {
+            let num = (ca == FC_NUMBER || cb == FC_NUMBER) && both != 0;
+            return ast::pick(num, FC_NUMBER, ast::pick(pk.vminnum == VMIN_QUIET, FC_QUIET, both));
+        }
+        return ast::pick(ca == FC_NUMBER || cb == FC_NUMBER, FC_NUMBER, both);
+    }
+
+    // What float block parameter `a` is known to hold (`fclass`): the least of the values the edges into its
+    // block pass, by induction over the iterations (the values computed from `a` itself, its own class
+    // assumed, keep that class). Within another parameter's induction (`p`), under that one's assumption.
+    fn param_fclass(self: &Self, pk: &Package, b: &Body, a: Value, p: Value, assume: u8, depth: u32) u8 {
+        let k = if (a & ~VPARAM) as usize < self.pblock.len() {
+            self.def_blk(a)
+        } else {
+            NONE
+        };
+        if k == NONE || k == 0 || k as usize >= self.rpo.len() || k as usize + 1 >= self.pred_at.len() || self.rpo[k as usize] == NONE {
+            return 0;
+        }
+        let np = self.pred_at[k as usize + 1] - self.pred_at[k as usize];
+        if np == 0 || np > IMPLY_FAN {
+            return 0;
+        }
+        let q = (a & ~VPARAM) - b.blocks[k as usize].param_start;
+        let mut s = FC_NUMBER;
+        for pass in 0..2u32 {
+            let mut m = FC_NUMBER;
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                let st = term(b, self.preds[x as usize]);
+                for e in 0..edge_count(st) {
+                    let ed = edge_of(b, st, e);
+                    if b.edge_target(ed) == k {
+                        let v = self.val_known(b.edge_arg(ed, q));
+                        m &= if p == VNONE {
+                            self.fclass(pk, b, v, a, s, depth)
+                        } else {
+                            self.fclass(pk, b, v, p, assume, depth)
+                        };
+                    }
+                }
+            }
+            if p != VNONE || m == 0 {
+                return m;
+            }
+            if pass == 1 && m != s {
+                return 0;
+            }
+            s = m;
+        }
+        return s;
+    }
+
+    // Float sum or float minimum or maximum `t` (instruction `i`) by what its operands hold (`fclass`). A
+    // sum with -0.0, or a minimum or maximum of a value and itself, quiets its operand: it is a quiet
+    // operand itself. A minimum or maximum with a number operand takes it first (`VOP_NUMBER`): a NaN of
+    // the other gives it in either order, and the target blends no lane for a NaN of its own.
+    fn float_known(self: &mut Self, pk: &Package, b: &mut Body, i: u32, t: &mut Inst) bool {
+        let lt = ast::pick(is_vec(t.ty), lane_type(t.ty), t.ty);
+        if lt != T_F32 && lt != T_F64 {
+            return false;
+        }
+        if t.op == O_FADD {
+            let neg0 = 1u64 << (type_bits(lt, 8) - 1) as u64;
+            let x = if float_splat(b, t.b) == Some(neg0) {
+                t.a
+            } else if float_splat(b, t.a) == Some(neg0) {
+                t.b
+            } else {
+                VNONE
+            };
+            if x == VNONE || (self.fclass(pk, b, x, VNONE, 0, UB_DEPTH) & FC_QUIET) == 0 {
+                return false;
+            }
+            self.repl[i as usize] = x;
+            return true;
+        }
+        if !minmax_vop(*t) {
+            return false;
+        }
+        let (x, y) = (b.pool[t.a as usize], b.pool[t.a as usize + 1]);
+        let cx = self.fclass(pk, b, x, VNONE, 0, UB_DEPTH);
+        if x == y && (cx & FC_QUIET) != 0 {
+            self.repl[i as usize] = x;
+            return true;
+        }
+        if (t.aux & VOP_NUMBER) != 0 {
+            return false;
+        }
+        if cx != FC_NUMBER {
+            if self.fclass(pk, b, y, VNONE, 0, UB_DEPTH) != FC_NUMBER {
+                return false;
+            }
+            b.pool[t.a as usize] = y;
+            b.pool[t.a as usize + 1] = x;
+        }
+        t.aux |= VOP_NUMBER;
+        return true;
+    }
+
     // The value of condition `c` the order facts in scope decide (`order_facts`), if any: `x <u y` itself,
     // or `x <u a + 1` false where `a <u x` holds (`a + 1` does not wrap: an inclusive range's second test,
     // `i + 1 <=u last` after `i <u last`).
@@ -11048,9 +11221,23 @@ extend Opt {
             k,
             i,
             &mut t,
-        ) {
+        ) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(pk, b, i, &mut t) {
             b.insts[i as usize] = t;
             return true;
+        }
+        // A float minimum or maximum of the operands of one in scope is that one (a lane quieted for a
+        // minimum and for a maximum).
+        if minmax_vop(t) {
+            let h = value_hash(b, t);
+            let found = switch self.pure.get(&h) {
+                Some(v) => *v,
+                None => NONE,
+            };
+            if found != NONE && same_value(b, b.insts[found as usize], t) {
+                self.repl[i as usize] = found;
+                return true;
+            }
+            self.enter(LOG_PURE, h, i);
         }
         // A reference is never null (`nonnull`).
         if t.op == O_ICMP && (t.aux == C_EQ || t.aux == C_NE) && (int_bits(b, t.b) == Some(0u64) && nonnull(
@@ -12814,7 +13001,7 @@ extend Opt {
             };
             let x = zero_test(b, p, neg);
             let d = low_clear(b, pk.ptr_bytes, z, neg, x);
-            if x != VNONE && d != VNONE && pk.popcnt && b.type_of(x) != T_I128 {
+            if x != VNONE && d != VNONE && pk.cpu_of(b).popcnt && b.type_of(x) != T_I128 {
                 let ty = b.type_of(x);
                 let c = self.before(b, k, i, Inst { op: O_POPCNT, ty: ty, aux: 0, a: x, b: VNONE, c: VNONE });
                 let one = self.constant(b, ty, 1);
@@ -13988,7 +14175,7 @@ extend Opt {
             b.insts[i as usize] = iconst(T_I32, 0);
             return true;
         }
-        if eq && c > 16 && pk.vector >= 16 && !pk.ccmp {
+        if eq && c > 16 && pk.cpu_of(b).vector >= 16 && !pk.ccmp {
             // The `or` of the 16-byte pairs' differences, the last pair overlapping the one before; whether
             // a lane of it is not 0.
             let vt = vec_type(T_I8, 16);
@@ -14765,7 +14952,7 @@ extend Opt {
         // (`-c`, `-a`). Not when `c` is a loop's accumulator, a parameter of the header of a loop holding the
         // sum: the chain through it waits on the fused operation's latency, longer than an addition's, where
         // the product computes beside it (GCC's FMA deferring, PR 81616).
-        if (op == O_FADD || op == O_FSUB) && (fm & FM_CONTRACT) != 0 && pk.fma {
+        if (op == O_FADD || op == O_FSUB) && (fm & FM_CONTRACT) != 0 && pk.cpu_of(b).fma {
             let sign = if t.ty == T_F64 {
                 1u64 << 63
             } else {
@@ -16954,12 +17141,13 @@ extend Run {
         let placed = sc.o.promote_places(p, b);
         // Where the backend computes them in registers: arm64 every vector; x86-64 up to 32 bytes (one
         // `pmax` where it has one, else a `pcmpgt` mask, as the select).
-        let minmax = p.vector != 0 && p.vops != 0 && vec_minmaxes(
+        let vector = p.cpu_of(b).vector;
+        let minmax = vector != 0 && p.vops != 0 && vec_minmaxes(
             b,
             if p.vops == VOPS_ALL {
-                p.vector
+                vector
             } else {
-                p.vector.min(32)
+                vector.min(32)
             },
             p.vec_absd,
         );
@@ -17042,7 +17230,7 @@ extend Run {
         sc.o.pslots = pslots;
         sc.o.unit = self.bunit[j as usize];
         // Scalar quotients by a constant stay for the loop vectorizer until the loop transforms ran.
-        sc.o.defer_div = self.cf.loops.vector != 0 && p.vector != 0;
+        sc.o.defer_div = self.cf.loops.vector != 0 && p.cpu.vector != 0;
         sc.o.deferred = deferred;
     }
 
@@ -18906,7 +19094,9 @@ const fn droppable(t: Inst) bool {
     let code = (t.aux & VOP_CODE) as u32;
     let cmp = code >= core::OP_SIMD + core::SIMD_CMP_EQ as u32 && code <= core::OP_SIMD + core::SIMD_CMP_GE as u32;
     let sum = code == core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 && is_int(t.ty);
-    return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_VOP && (cmp || sum);
+    return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_VOP && (cmp || sum || minmax_vop(
+        t,
+    ));
 }
 
 // The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
@@ -19458,6 +19648,50 @@ const fn quiet(b: &Body, v: Value) bool {
 
 // The inserts `lane_fold` looks through.
 const LANE_WALK: u32 = 64;
+
+// What `fclass` knows of a float value: no signaling NaN; no NaN at all (which holds FC_QUIET).
+const FC_QUIET: u8 = 1;
+const FC_NUMBER: u8 = 3;
+
+// Whether `t` is a minimum or maximum (`SIMD_MIN`, `SIMD_MAX`: the minimumNumber's, or C's with VOP_NUM)
+// of two float vectors.
+const fn minmax_vop(t: Inst) bool {
+    let code = (t.aux & VOP_CODE) as u32;
+    return t.op == O_VOP && t.b == 2 && t.c == VNONE && is_vec(t.ty) && is_float(lane_type(t.ty)) && (code == core::OP_SIMD + core::SIMD_MIN as u32 || code == core::OP_SIMD + core::SIMD_MAX as u32);
+}
+
+// The class (`fclass`) of the float of type `lt` with encoding `x`.
+const fn bits_fclass(lt: u8, x: u64) u8 {
+    let (eb, mb) = ast::pick(lt == T_F64, (11u64, 52u64), (8u64, 23u64));
+    if (x >> mb & (1u64 << eb) - 1) != (1u64 << eb) - 1 || (x & (1u64 << mb) - 1) == 0 {
+        return FC_NUMBER;
+    }
+    return ast::pick((x >> mb - 1 & 1) != 0, FC_QUIET, 0u8);
+}
+
+// The encoding float constant `v` holds, in every lane for a vector (a splat of a constant, a wide constant
+// of equal lanes).
+const fn float_splat(b: &Body, v: Value) Option<u64> {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return None;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_SPLAT {
+        return float_const(b, t.a);
+    }
+    if t.op != O_WCONST || !is_float(lane_type(t.ty)) {
+        return float_const(b, v);
+    }
+    let lb = type_bits(lane_type(t.ty), 8) as u64;
+    let lm = ast::pick(lb == 64, ~0u64, (1u64 << lb % 64) - 1);
+    let x = b.words[t.a as usize] & lm;
+    for q in 1..lanes(t.ty) as u64 {
+        if (b.words[t.a as usize + (q * lb / 64) as usize] >> q * lb % 64 & lm) != x {
+            return None;
+        }
+    }
+    return Some(x);
+}
 
 const fn float_const(b: &Body, v: Value) Option<u64> {
     if (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_FCONST {
@@ -20241,6 +20475,15 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[i as usize] = Inst { op: O_ZEXT, ty: t.ty, aux: 0, a: w.a, b: VNONE, c: VNONE };
             return VNONE;
         }
+    }
+    // A constant integer as a float is that float (one rounding to nearest, as the instruction's).
+    if (t.op == O_SITOFP || t.op == O_UITOFP) && (t.ty == T_F32 || t.ty == T_F64) && b.type_of(t.a) != T_I128 {
+        let x = int_bits(b, t.a);
+        let mut r: u64 = 0;
+        if x.is_some() && le::scalar_convert(t.op, t.aux, b.type_of(t.a), t.ty, ptr, x.unwrap(), &mut r) {
+            b.insts[i as usize] = Inst { op: O_FCONST, ty: t.ty, aux: 0, a: r as u32, b: (r >> 32) as u32, c: VNONE };
+        }
+        return VNONE;
     }
     if t.op == O_SEXT || t.op == O_ZEXT || t.op == O_TRUNC || t.op == O_INTTOPTR || t.op == O_PTRTOINT {
         let x = int_bits(b, t.a);
@@ -21293,7 +21536,7 @@ fn fold_ptr(pk: &Package, b: &mut Body, i: u32, unit: u32) bool {
 // Whether instruction `i` folded.
 fn fold_data(pk: &Package, b: &mut Body, i: u32) bool {
     let t = b.insts[i as usize];
-    let vec = is_vec(t.ty) && type_bytes(t.ty, 8) == 16 && pk.vector >= 16;
+    let vec = is_vec(t.ty) && type_bytes(t.ty, 8) == 16 && pk.cpu_of(b).vector >= 16;
     if (t.a & (VPARAM | VFLAG)) != 0 || is_vec(t.ty) && !vec || t.ty == T_PTR || t.ty == T_I128 || b.insts[t.a as usize].op != O_SYMADDR {
         return false;
     }
@@ -21817,6 +22060,14 @@ const fn value_hash(b: &Body, t: Inst) u64 {
         // Of the address alone: one a reference takes (`PTR_NONNULL`) is the same value.
         return hash(Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c });
     }
+    if t.op == O_VOP {
+        // Of its operands (`minmax_vop`: the one vector operation the walk numbers).
+        let mut h = mix(O_VOP as u64 | t.ty as u64 << 8 | t.aux as u64 << 16, t.b);
+        for q in 0..t.b {
+            h = mix(h, b.pool[(t.a + q) as usize]);
+        }
+        return h;
+    }
     if t.op != O_WCONST {
         return hash(t);
     }
@@ -22037,6 +22288,13 @@ const fn same_value(b: &Body, t: Inst, u: Inst) bool {
             Inst { op: t.op, ty: t.ty, aux: t.aux & PTR_SCALE, a: t.a, b: t.b, c: t.c },
             Inst { op: u.op, ty: u.ty, aux: u.aux & PTR_SCALE, a: u.a, b: u.b, c: u.c },
         );
+    }
+    if t.op == O_VOP && u.op == O_VOP {
+        let mut eq = t.ty == u.ty && t.aux == u.aux && t.b == u.b && t.c == u.c;
+        for q in 0..ast::pick(eq, t.b, 0u32) {
+            eq = eq && b.pool[(t.a + q) as usize] == b.pool[(u.a + q) as usize];
+        }
+        return eq;
     }
     if t.op != O_WCONST || u.op != O_WCONST {
         return same(t, u);

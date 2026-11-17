@@ -39,7 +39,7 @@ the `main` that passes it to `sc_test_main`. Run directly, the runner takes `--f
 and exits 2 on any other argument. A runner started without an inherited `SC_JOBSERVER` makes its own
 of `--jobs` slots, as `super-c test` does, so its tests and the compilers they start share one budget. Every compiler the CLI harnesses
 (`tests/cli_harness.spc`, `tests/harness.spc`) run shares one cache base: `super-c test` exports
-`SC_TEST_CACHE_DIR` (kept across runs; CI sets `~/.super-c/cache/.tests`, inside the cache it saves),
+`SC_TEST_CACHE_DIR` (kept across runs; CI sets `<cache base>/.tests`, inside the cache it saves),
 else `<out-dir>/test/cache`, as `SC_CACHE_DIR`, so a unit an earlier build compiled is not compiled
 again; the second it deletes when the run ends (and at its start, what an interrupted run left). The
 runner itself builds in the project's own cache root. A fixture project takes a fixed name (`app`,
@@ -88,7 +88,9 @@ the correctness gate (`ci/gate.sh --core`), the x86-64 levels and the `compare` 
 the tests that compile C, the C environment tables, the strict C warnings) run beside the shards, and the release binary is
 built after all of them pass. Only the release workflow on main saves caches (the toolchain action's
 `save: true`), so no other workflow or branch evicts its entries. Each platform keeps one object
-cache, `objcache-<target>-<sha>` (the cache base `~/.super-c/cache`, the tests' `.tests` included):
+cache, `objcache-<target>-<sha>` (the cache base, the tests' `.tests` included: `~/.super-c/cache`,
+on Windows `SC_CACHE_DIR` in the runner's temporary directory on the work drive D:, which writes files
+several times faster than the system drive C: of the home directory; the mingw-w64 cache is there too):
 the compile, test and package jobs upload the files they added or changed and the list of those they
 deleted (`.github/actions/cache-save/delta.py`), and the `caches` job merges them over the platform's
 newest cache at the end of the run. Gate, counts, compare and the wasm checks save only their

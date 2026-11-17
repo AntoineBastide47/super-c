@@ -1613,7 +1613,8 @@ extend Parser {
         let pin = self.in_extern && fattrs.len() == 1 && fattrs[0].kind == AttrKind::ATTR_IMPORT as u8;
         let mut known = true;
         for i in 0..fattrs.len() {
-            known = known && (fattrs[i].kind == AttrKind::ATTR_ORDERED as u8 || fattrs[i].kind == AttrKind::ATTR_OWNED as u8);
+            let fk = fattrs[i].kind;
+            known = known && (fk == AttrKind::ATTR_ORDERED as u8 || fk == AttrKind::ATTR_OWNED as u8 || fk == AttrKind::ATTR_COUNTER as u8 || fk == AttrKind::ATTR_COUNTER_LOCK as u8);
         }
         if pin {
             self.ast.has_member_pins = true;
@@ -1623,7 +1624,7 @@ extend Parser {
                 dc::ONLY_REFLECT_APPLIES_FIELD_DECLARATION_IMPORT,
                 sp0,
                 format(
-                    "only '@reflect', '@ordered' and '@owned' apply to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
+                    "only '@reflect', '@ordered', '@owned', '@counter' and '@counter_lock' apply to a field declaration, and '@import' to a field of an 'extern \"C\"' struct or union",
                 ),
             );
         }
@@ -5135,6 +5136,8 @@ extend Parser {
             AttrKind::ATTR_TRUSTED as i32
         } else if self.text_is(ns, "constant_time") {
             AttrKind::ATTR_CONSTANT_TIME as i32
+        } else if self.text_is(ns, "counter_lock") {
+            AttrKind::ATTR_COUNTER_LOCK as i32
         } else {
             -1
         };
@@ -5145,6 +5148,21 @@ extend Parser {
                     dc::ATTRIBUTE_TAKES_NO_ARGUMENTS,
                     ns.span(),
                     format("attribute '@{}' takes no arguments", diag::span_str(self.source, ns.start(), ns.end())),
+                );
+            }
+            return true;
+        }
+        if syntax.parts == 1 && self.text_is(ns, "counter") {
+            // `@counter("guard")`: the field counts its block's units; `guard` names what the counter holds.
+            *out = Attr { kind: AttrKind::ATTR_COUNTER as u8, str_span: Span::empty() };
+            if argc == 1 && self.attr_arg(&syntax, 0).kind() == TokenType::StringLiteral {
+                let arg = self.attr_arg(&syntax, 0);
+                out.str_span = Span::new(arg.start() + 1, arg.end() - 1);
+            } else {
+                self.errors.emit_span(
+                    dc::ATTRIBUTE_COUNTER_TAKES_ONE_STRING_ARGUMENT,
+                    ns.span(),
+                    format("attribute '@counter' takes one string argument: the guard's spec function"),
                 );
             }
             return true;
@@ -5715,7 +5733,7 @@ extend Parser {
                     "",
                     "may only be applied to a struct or a field",
                 )
-            } else if attr.kind == AttrKind::ATTR_OWNED as u8 {
+            } else if attr.kind == AttrKind::ATTR_OWNED as u8 || attr.kind == AttrKind::ATTR_COUNTER as u8 || attr.kind == AttrKind::ATTR_COUNTER_LOCK as u8 {
                 pick(
                     owner != NODE_NONE && self.ast.at_const(owner).kind == NodeKind::NODE_FIELD,
                     "",
@@ -6108,6 +6126,14 @@ fn known_attr_name(kind: u8, out: &mut String) {
     }
     if kind == AttrKind::ATTR_CONSTANT_TIME as u8 {
         out.push_str("constant_time");
+        return;
+    }
+    if kind == AttrKind::ATTR_COUNTER as u8 {
+        out.push_str("counter");
+        return;
+    }
+    if kind == AttrKind::ATTR_COUNTER_LOCK as u8 {
+        out.push_str("counter_lock");
         return;
     }
     if kind == AttrKind::ATTR_LAYOUT as u8 {
