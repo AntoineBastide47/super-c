@@ -1030,6 +1030,11 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
+    /// Drop the lemmas: the terms they name are gone.
+    pub(package) fn forget(self: &mut Self) {
+        self.kn.forget();
+    }
+
     // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts. With `bits`, a
     // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
     // when they hold a bit operation; then the theory solvers.
@@ -1039,6 +1044,10 @@ extend<const B: usize> Solver<B> {
 
     // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
     fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
+        // A lemma refutes literals that hold all of its own.
+        if self.kn.subsumed(lits) {
+            return true;
+        }
         // The theories first: where they decide, they cost a fraction of a SAT search.
         if let Some(built) = self.kn.state(tm, lits) {
             if self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf) {

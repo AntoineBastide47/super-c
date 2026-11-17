@@ -63,7 +63,8 @@ file is authoritative for where to look first.
 | The literals that share unknowns with the goal's | `Solver::cone` (`unknowns`, `find`) | `Solver.uf`, `ufirst`, per branch | the next branch |
 | The bits of a branch's cone: each term's bit vector, the gates, the clauses | `Kernel::blast` (`Blaster`, `src/prove/blast.spc`) | `Kernel.bl` (`vk`, `vecs`, `gates`, `cnf`) | the next blast |
 | A SAT search: trail, watches, learned clauses, the LRAT proof | `Sat::solve` (`src/prove/sat.spc`) | `Solver.sat`, checked by `Lrat::check` | the next solve |
-| The lemmas of one refutation, then the skeleton of its formulas with their clauses | `Kernel::lemma`, `blast_lemma`, `seal` | `Kernel.lems`, `lend`, `sk` | the next `implies` |
+| The lemmas of a walk: each one the literals a checked proof read (`Kernel::core`, from `Built.ends` and the entries `check` marks), sorted, found by their least literal; a branch that holds one closes without the theories (`subsumed`) | `Kernel::lemma`, `blast_lemma` | `Kernel.lems`, `lend`, `lwatch`; `used`, per check | `Prover::clear_terms` (`Solver::forget`), or past `LEMMAS_KEPT` at `begin` |
+| The skeleton of one refutation's formulas with the clauses of its lemmas and of the earlier lemmas it used | `Kernel::seal` | `sk`, `call0`, `lused` | the next `implies` |
 | A branch's congruence classes, their signatures and the forest of merges | `Solver::cc_build`, `cc_run` | `Solver.rep`, `sig`, `edges`, per branch | the next branch |
 | A branch's simplex: tableau, bounds and their rows, assignment | `Lp::load`, `check`, `Solver::bb` | `Solver.lp`, per query | the next query |
 | The product operands branch and bound set to a value, and their rows | `Solver::fix`, `fix_rows` (`Lp::add_row`) | `Solver.fixes`, the tableau's added rows | the next `bb` |

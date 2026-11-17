@@ -618,6 +618,14 @@ const STAGE_STEPS: u32 = 200000;
 // The solver steps of a check's fact (`note_check`): in the compiler build each one that holds takes at
 // most 3.4k, and the 21 that fail took 25M, half of the build's solver steps.
 const FACT_STEPS: u32 = 50000;
+// The fact sets of the paths that proved one goal (`oblige`) that a later path's facts are checked
+// against: each check scans them all, so a body of many paths (a merge after the exact walk's cap) would
+// scan a list as long as its paths.
+const PROVED_SETS: usize = 8;
+// The solver steps of the check that an operation of a body without contracts cannot panic, which spares
+// its unwind the invariants (`statement_in`): in the compiler build each one that holds takes at most 25k,
+// and the 36 that fail at STAGE_STEPS took 6M, a quarter of the build's solver steps.
+const PANIC_STEPS: u32 = 50000;
 // The solver steps of an equality of sequences from its terms' definitions alone (`holds_at`): one that
 // holds takes at most 47k in the compiler build and 3k in ML-KEM, where the ones that fail took 53M.
 const SEQ_DEFS_STEPS: u32 = 50000;
@@ -4859,6 +4867,16 @@ extend<const B: usize> Prover<B> {
                     return true;
                 }
             }
+            // The facts that share an unknown with the goal, with the instances at its terms, first: the
+            // others only add case splits.
+            let mut inst0 = Vector::<u32>::new();
+            inst0.extend_copy(pc0);
+            self.add_defs(goal, &mut inst0);
+            let _ = self.instantiate(goal, &mut inst0, QI_TRIG);
+            let c0 = self.cone(goal, &inst0);
+            if c0.len() < inst0.len() && self.sv.implies(&self.tm, &c0, goal, false) {
+                return true;
+            }
             if self.sv.implies(&self.tm, pc, goal, false) {
                 return true;
             }
@@ -4872,8 +4890,9 @@ extend<const B: usize> Prover<B> {
                     inst.extend_copy(pc0);
                     self.add_defs(goal, &mut inst);
                     let more = self.instantiate(goal, &mut inst, pick(wide == 1, QI_WIDE, QI_TRIG));
-                    // The facts that share an unknown with the goal first: fewer case splits.
-                    if more || wide == 0 {
+                    // The facts that share an unknown with the goal first: fewer case splits (the first
+                    // set's were tried before).
+                    if (more || wide == 0) && (bits == 1 || wide == 1) {
                         let c = self.cone(goal, &inst);
                         if c.len() < inst.len() && self.sv.implies(&self.tm, &c, goal, bits == 1) {
                             return true;
@@ -6042,7 +6061,10 @@ extend<const B: usize> Prover<B> {
             if !self.proved.contains_key(&goal) {
                 self.proved.insert(goal, Vector::<Vector<u32>>::new());
             }
-            self.proved.get_mut(&goal).unwrap().push(sorted);
+            let ps = self.proved.get_mut(&goal).unwrap();
+            if ps.len() < PROVED_SETS {
+                ps.push(sorted);
+            }
             return;
         }
         if self.steps + self.sv.steps > STEP_BUDGET {
@@ -10945,7 +10967,7 @@ extend<const B: usize> Prover<B> {
                     NONE,
                 );
                 Self::inv_proved(pc, &fs);
-            } else if !self.tm.is_false(pcond) && !self.holds_within(pc, self.tm.not(pcond), STAGE_STEPS) {
+            } else if !self.tm.is_false(pcond) && !self.holds_within(pc, self.tm.not(pcond), PANIC_STEPS) {
                 let mut pc2 = pc.clone();
                 pc2.push(pcond);
                 let _ = self.inv_unwind(
@@ -14854,6 +14876,7 @@ extend<const B: usize> Prover<B> {
     // A new term table, and no fact over the old one's terms.
     fn clear_terms(self: &mut Self) {
         self.tm.clear();
+        self.sv.forget();
         self.proved.clear();
         self.held_alt.clear();
         self.derived.clear();
