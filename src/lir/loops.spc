@@ -14618,42 +14618,65 @@ fn grow_poly(v: &mut Vector<Poly>, n: usize) {
 
 // `pointer_ivs` takes at most this many pointers per loop.
 const PIV_MAX: usize = 8;
+// `pointer_ivs`: several blocks of a loop jump back to its first.
+const PIV_MANY: u32 = NONE - 1;
 
-/// LLVM's loop strength reduction where accesses step their address (`Package.postinc`): a loop of one
-/// block whose counter steps by a constant carries, per base from before the loop that the counter
-/// indexes with one scale for two or more accesses, a pointer: the base, plus the counter times the
-/// scale, plus the offset of the last access or pair through it. The accesses read it at their offsets
-/// less that one, so the last reads it at 0, and it steps right before the back edge (the code generator
-/// steps it in that access: arm64's post-indexed `ldr`, `ldp`, `str`, `stp`), where each iteration added
-/// the scaled counter to the base. A counter that only steps, indexes them and meets its bound gives
-/// its exit test to the first pointer and goes. Whether it changed a loop; the caller's rebuild then
-/// drops what it left unused and renumbers the body (`opt::Opt::pointer_ivs`). `map` is scratch.
-pub(package) fn pointer_ivs(b: &mut Body, map: &mut Vector<Value>) bool {
-    let nb = b.blocks.len();
-    // A loop of one block branches to itself: without one, nothing to do.
-    let mut self_loop = false;
-    for k in 0..nb {
-        let t = term(b, k as u32);
-        self_loop = self_loop || t.op == O_BR && (b.edge_target(t.b) == k as u32 || b.edge_target(t.c) == k as u32);
-    }
-    if !self_loop {
+// Whether block `x` lies in the loop block `h` heads (`inner`: per block its innermost loop's first block,
+// `lparent`: per first block the one of the loop around it; a block made since has none).
+const fn piv_within(inner: []u32, lparent: []u32, h: u32, x: u32) bool {
+    if x as usize >= inner.len() {
         return false;
     }
-    // Per block, the edges into it and the last block an edge from another block enters from.
+    let mut l = inner[x as usize];
+    // Each step leaves one loop.
+    while l != NONE {
+        if l == h {
+            return true;
+        }
+        l = lparent[l as usize];
+    }
+    return false;
+}
+
+/// LLVM's loop strength reduction where accesses step their address (`Package.postinc`): a loop whose
+/// counter steps by a constant carries, per base from before the loop that the counter indexes in the
+/// loop's first block with one scale for two or more accesses, a pointer: the base, plus the counter
+/// times the scale, plus the offset of the last access or pair through it. The accesses read it at their
+/// offsets less that one, so the last reads it at 0, and it steps after them in that block (in a loop of
+/// one block right before the back edge, where the code generator steps it in that access: arm64's
+/// post-indexed `ldr`, `ldp`, `str`, `stp`), where each iteration added the scaled counter to the base. In
+/// a loop of one block, a counter that only steps, indexes them and meets its bound gives its exit test
+/// to the first pointer and goes. A loop of several blocks has one block that jumps back (`inner`,
+/// `lparent`: the loop nesting of `opt::Opt`), which passes the stepped pointers. Whether it changed a
+/// loop; the caller's rebuild then drops what it left unused and renumbers the body
+/// (`opt::Opt::pointer_ivs`). `map` is scratch.
+pub(package) fn pointer_ivs(b: &mut Body, inner: []u32, lparent: []u32, map: &mut Vector<Value>) bool {
+    let nb = b.blocks.len();
+    // Per block, the edges into it, the sum of the blocks they leave, and the block of the loop it heads
+    // that jumps back to it (itself for a loop of one block; NONE: none, PIV_MANY: several edges back).
     let mut into = Vector::<u32>::new();
-    let mut from = Vector::<u32>::new();
+    let mut psum = Vector::<u32>::new();
+    let mut latch = Vector::<u32>::new();
     into.resize_default(nb);
-    from.resize_default(nb);
+    psum.resize_default(nb);
+    fill(&mut latch, nb, NONE);
     let mut es = Vector::<u32>::new();
+    let mut loops = false;
     for k in 0..nb {
         b.succ_edges(term(b, k as u32), &mut es);
         for e in 0..es.len() {
             let tg = b.edge_target(es[e]) as usize;
             into[tg] += 1;
-            if tg != k {
-                from[tg] = k as u32;
+            psum[tg] = psum[tg].wrapping_add(k as u32);
+            if tg == k || piv_within(inner, lparent, tg as u32, k as u32) {
+                latch[tg] = ast::pick(latch[tg] == NONE, k as u32, PIV_MANY);
+                loops = true;
             }
         }
+    }
+    // Without a loop, nothing to do.
+    if !loops {
+        return false;
     }
     // Per value of the body as it was (instructions, then parameters), its new value once a loop
     // changes (NONE: the same), and how many instructions and edges read it, kept per changed block. The
@@ -14668,7 +14691,18 @@ pub(package) fn pointer_ivs(b: &mut Body, map: &mut Vector<Value>) bool {
     }
     let mut any = false;
     for h in 0..nb as u32 {
-        if into[h as usize] == 2 && piv_loop(b, h, from[h as usize], map, ni, npar, &mut cnt) {
+        let u = latch[h as usize];
+        // The other edge into the loop comes from the block before it.
+        if into[h as usize] == 2 && u != NONE && u != PIV_MANY && piv_loop(
+            b,
+            h,
+            psum[h as usize].wrapping_sub(u),
+            u,
+            map,
+            ni,
+            npar,
+            &mut cnt,
+        ) {
             any = true;
         }
     }
@@ -14724,18 +14758,41 @@ struct Piv {
     n: u32, // its accesses
 }
 
-// `pointer_ivs` of loop `h`, whose one other predecessor is `e`: whether it changed it. `map` takes the new
-// values of the loop's, of the `ni` instructions and `npar` parameters before the first change; `cnt` holds
-// their reads (`piv_count`), kept as the loop changes.
-fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, npar: usize, cnt: &mut Vector<u32>) bool {
+// `pointer_ivs` of the loop block `h` heads, which `e` enters from outside and whose block `u` jumps back
+// (`h` itself for a loop of one block): whether it changed it. `map` takes the new values of the loop's, of
+// the `ni` instructions and `npar` parameters before the first change; `cnt` holds their reads
+// (`piv_count`), kept as the loop changes.
+fn piv_loop(
+    b: &mut Body,
+    h: u32,
+    e: u32,
+    u: u32,
+    map: &mut Vector<Value>,
+    ni: usize,
+    npar: usize,
+    cnt: &mut Vector<u32>,
+) bool {
     let th = term(b, h);
     let te = term(b, e);
-    if th.op != O_BR || te.op != O_JMP && te.op != O_BR {
+    let tu = term(b, u);
+    let single = u == h;
+    if te.op != O_JMP && te.op != O_BR || tu.op != O_BR && (single || tu.op != O_JMP) {
         return false;
     }
-    let back = ast::pick(b.edge_target(th.b) == h, th.b, th.c);
-    let out = ast::pick(back == th.b, th.c, th.b);
-    if b.edge_target(back) != h || b.edge_target(out) == h {
+    let back = if tu.op == O_JMP || b.edge_target(tu.b) == h {
+        ast::pick(tu.op == O_JMP, tu.a, tu.b)
+    } else {
+        tu.c
+    };
+    // The edge that leaves a loop of one block.
+    let out = if tu.op == O_JMP {
+        NONE
+    } else if back == tu.b {
+        tu.c
+    } else {
+        tu.b
+    };
+    if b.edge_target(back) != h || out != NONE && b.edge_target(out) == h {
         return false;
     }
     let hb = b.blocks[h as usize];
@@ -14751,7 +14808,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, np
             continue;
         }
         let q = (t.b & ~VPARAM) - hb.param_start;
-        let k = counter_step(b, h, back, q);
+        let k = counter_step(b, h, back, q, single);
         if k == 0 {
             continue;
         }
@@ -14812,7 +14869,7 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, np
     let mut test = VNONE;
     let mut bound = VNONE;
     let mut tq = NONE;
-    if first != NONE {
+    if first != NONE && single {
         let f = ps[first as usize];
         let c = VPARAM | hb.param_start + f.q;
         let n = b.edge_arg(back, f.q);
@@ -14880,6 +14937,9 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, np
     // The reads of the blocks it changes go, and come back once changed.
     piv_count(b, h, cnt, ni, npar, false, &mut es);
     piv_count(b, e, cnt, ni, npar, false, &mut es);
+    if !single {
+        piv_count(b, u, cnt, ni, npar, false, &mut es);
+    }
     let last = hb.start + hb.len - 1;
     // The new preheader: each pointer's initial value from the entry edge's counter, then the loop with
     // the entry edge's arguments and those.
@@ -14986,6 +15046,25 @@ fn piv_loop(b: &mut Body, h: u32, e: u32, map: &mut Vector<Value>, ni: usize, np
     }
     args.extend_from_slice(&steps);
     let nback = b.edge(h, &args);
+    if !single {
+        // The first block ends as it did; the block that jumps back passes the stepped pointers.
+        let tt = piv_mapped(b, th, map, ni, npar, &mut es);
+        let _ = piv_put(b, tt, last);
+        let uk = b.blocks[u as usize];
+        let ui = (uk.start + uk.len - 1) as usize;
+        if tu.op == O_JMP {
+            b.insts.index_mut(ui).a = nback;
+        } else if back == tu.b {
+            b.insts.index_mut(ui).b = nback;
+        } else {
+            b.insts.index_mut(ui).c = nback;
+        }
+        piv_count(b, h, cnt, ni, npar, true, &mut es);
+        piv_count(b, e, cnt, ni, npar, true, &mut es);
+        piv_count(b, u, cnt, ni, npar, true, &mut es);
+        piv_count(b, pre, cnt, ni, npar, true, &mut es);
+        return true;
+    }
     args.truncate(0);
     for q in 0..b.edge_nargs(out) {
         args.push(piv_map(b.edge_arg(out, q), map, ni, npar));
@@ -15500,12 +15579,16 @@ const fn pc_step(b: &Body, ub: Block, lb: Block, r: Value, v: Value) i64 {
 }
 
 // The step of counter parameter `q` of loop `h` (back edge `back`): the constant its next value in the
-// loop adds, between -0xFFFF and 0xFFFF; 0 for none.
-fn counter_step(b: &Body, h: u32, back: u32, q: u32) i64 {
+// loop adds, between -0xFFFF and 0xFFFF; 0 for none. The next value is an instruction of `h` in a loop
+// of one block (`single`), of any block else.
+fn counter_step(b: &Body, h: u32, back: u32, q: u32, single: bool) i64 {
     let hb = b.blocks[h as usize];
     let c = VPARAM | hb.param_start + q;
     let n = b.edge_arg(back, q);
-    if b.params[(hb.param_start + q) as usize] != T_I64 || !piv_inst(hb, n) {
+    if b.params[(hb.param_start + q) as usize] != T_I64 || n == VNONE || (n & (VPARAM | VFLAG)) != 0 || single && !piv_inst(
+        hb,
+        n,
+    ) {
         return 0;
     }
     let t = b.insts[n as usize];

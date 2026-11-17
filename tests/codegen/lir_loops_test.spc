@@ -4445,6 +4445,80 @@ b2:
     same_outcome(&b, &a, "slotpair", five, 40, false);
 }
 
+// A loop of several blocks whose counter indexes a base in its first block for two accesses carries a
+// pointer too: the first block's accesses read it and step it, and the block that jumps back passes the
+// stepped pointer; the counter keeps the exit test. Each count returns as before.
+@test
+fn a_loop_of_several_blocks_steps_its_first_blocks_pointer() {
+    let src = M"(lir ptr 8
+sym @sum2 fn global noinline
+sym @drive fn global
+fn @sum2
+  sig (ptr, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  v5 = iconst.i64 1
+  v6 = icmp.ult v3, v1
+  br v6, b1(v3, v3), b4(v3)
+b1(v7: i64, v8: i64):
+  v9 = ptradd v0, v7 * 8
+  v10 = load.i64 v9 align 3
+  v11 = load.i64 v9+8 align 3
+  v12 = add.i64 v10, v11
+  v13 = add.i64 v8, v12
+  v14 = and.i64 v12, v5
+  v15 = icmp.ne v14, v3
+  br v15, b2, b3
+b2:
+  store v13, v2 align 3
+  jmp b3
+b3:
+  v16 = add.i64 v7, v4
+  v17 = icmp.ult v16, v1
+  br v17, b1(v16, v13), b4(v13)
+b4(v18: i64):
+  ret v18
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 128 align 3
+  slot s1 size 8 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 16
+  v6 = iconst.i64 3
+  store v3, v2 align 3
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = mul.i64 v7, v6
+  v10 = add.i64 v9, v4
+  v11 = ptradd v1, v7 * 8
+  store v10, v11 align 3
+  v12 = add.i64 v7, v4
+  jmp b1(v12)
+b3:
+  v13 = call.i64 @sum2(v1, v0, v2) : (ptr, i64, ptr) -> i64
+  v14 = load.i64 v2 align 3
+  v15 = iconst.i64 20
+  v16 = shl.i64 v14, v15
+  v17 = xor.i64 v13, v16
+  ret v17
+)";
+    let (b, a) = optimized_stepping(src, NO_LOOPS);
+    let t = text_of(&a, "sum2");
+    assert(t.contains(": ptr)") && !t.contains("* 8"), t.as_str());
+    for n in [0u64, 1, 2, 3, 8, 15, 16] {
+        let args: []u64 = [n];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
 // A loop of one block whose counter indexes a base with one scale for two or more accesses carries a
 // pointer to the last access or pair instead, stepped before the back edge: `pairs` (a pair of loads, a
 // counter that only meets its bound, which the pointer's exit test then takes, and goes), `spread` (two

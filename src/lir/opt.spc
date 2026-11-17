@@ -1106,11 +1106,24 @@ extend Opt {
         return any;
     }
 
-    /// `lu::pointer_ivs` on body `b` of package `pk`, then the rebuild, which drops what it left unused (the
-    /// addresses its accesses no longer read, a counter whose exit test went) and renumbers the body.
-    /// Whether it changed it.
+    /// `lu::pointer_ivs` on body `b` of package `pk` (only one with an address a block parameter indexes:
+    /// it reads the loop nesting), then the rebuild, which drops what it left unused (the addresses its
+    /// accesses no longer read, a counter whose exit test went) and renumbers the body. Whether it changed
+    /// it.
     pub(package) fn pointer_ivs(self: &mut Self, pk: &Package, b: &mut Body) bool {
-        if !lu::pointer_ivs(b, &mut self.mark) {
+        let mut indexed = false;
+        for k in 0..b.blocks.len() {
+            let bk = b.blocks[k];
+            for i in bk.start..bk.start + bk.len {
+                let t = b.insts[i as usize];
+                indexed = indexed || t.op == O_PTRADD && t.b != VNONE && (t.b & VPARAM) != 0;
+            }
+        }
+        if !indexed {
+            return false;
+        }
+        self.tables(pk, b, K_NEST);
+        if !lu::pointer_ivs(b, &self.inner, &self.lparent, &mut self.mark) {
             return false;
         }
         self.renumber(pk, b);

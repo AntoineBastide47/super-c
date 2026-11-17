@@ -4908,7 +4908,9 @@ extend Lower {
         let mut k = self.iconst(it, 0);
         for j in 0..n / cl {
             let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, j * cl), VNONE);
-            let row = self.arith(O_AND, sh, self.iconst(T_I64, rows - 1));
+            let bits = self.arith(O_AND, sh, self.iconst(T_I64, rows - 1));
+            // An index has a pointer's width.
+            let row = self.int_to(bits, it, false);
             let ix = self.load(bt, self.ptradd(tbl, row, cb, 0), 0, true);
             let x = self.inst(O_BITCAST, bt, 0, parts[j as usize], VNONE, VNONE);
             let sargs: [Value; 2] = [x, ix];
