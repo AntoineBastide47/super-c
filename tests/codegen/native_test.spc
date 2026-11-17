@@ -12626,6 +12626,63 @@ b0(v0: ptr, v1: ptr):
     assert_eq(run_wasm(lir, drv), 0);
 }
 
+// A body compiled for AVX2 takes the VEX form of every SSE operation (`x::Code.vex`): beside a 32-byte
+// vector in a ymm register the legacy encoding costs a state transition, or a false dependency, on each
+// instruction. The scalar sum, the 16-byte sum and their loads have no legacy encoding there; the
+// baseline object has them.
+@test
+fn sse_operations_of_an_avx_body_take_vex_forms() {
+    let lir = M"(lir ptr 8
+sym @mixed fn global
+fn @mixed
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 0
+  v3 = load.v4f32 v0+32 align 0
+  v4 = load.f32 v0+48 align 2
+  v5 = load.f32 v0+52 align 2
+  v6 = fadd.v8f32 v2, v2
+  v7 = fadd.v4f32 v3, v3
+  v8 = fadd.f32 v4, v5
+  store v6, v1 align 0
+  store v7, v1+32 align 0
+  store v8, v1+48 align 2
+  ret
+)";
+    // `addss` (F3 0F 58) and `movss` (F3 0F 10, 11), a REX prefix before the escape for xmm8..xmm15.
+    for wide in 0..2u32 {
+        let mut obj = Vector::<u8>::new();
+        assert(
+            object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), wide * WIDE, &mut obj),
+            "the object",
+        );
+        let mut legacy: u32 = 0;
+        let mut vex: u32 = 0;
+        for i in 0..obj.len() - 4 {
+            let e = i + 1 + ((obj[i + 1] & 0xF0) == 0x40) as usize;
+            legacy += (obj[i] == 0xF3 && obj[e] == 0x0F && (obj[e + 1] == 0x58 || obj[e + 1] == 0x10 || obj[e + 1] == 0x11)) as u32;
+            // `add` after a VEX prefix of map 0F: `vaddps` of 32 and of 16 bytes, `vaddss`.
+            vex += (obj[i] == 0xC5 && obj[i + 2] == 0x58 || obj[i] == 0xC4 && (obj[i + 1] & 0x1F) == 1 && obj[i + 3] == 0x58) as u32;
+        }
+        assert_eq(legacy != 0, wide == 0);
+        assert_eq(vex, wide * 3);
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(void mixed(const float *, float *);
+int main(void) {
+  float in[14], o[14];
+  for (int k = 0; k < 14; k++) in[k] = k + 1;
+  mixed(in, o);
+  for (int k = 0; k < 12; k++) if (o[k] != 2 * in[k]) return k + 1;
+  return o[12] != in[12] + in[13];
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}
+
 // The reductions of 32-byte vectors: with AVX2 the upper half combines onto the lower one in a ymm
 // register's halves (`reduce_wide`: VEXTRACTF128), then the 16 bytes reduce as an xmm register's; a float
 // sum by halves adds lane k + 4 (k + 2 of doubles) onto lane k first. A minimum or maximum of 8-byte lanes

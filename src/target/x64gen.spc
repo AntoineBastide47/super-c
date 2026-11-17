@@ -262,8 +262,6 @@ pub(package) struct Gen {
     avx: bool, // AVX2: 32-byte vectors in ymm registers (`Cpu.vector`)
     z512: bool, // AVX-512 (F, BW, DQ, VL): 64-byte vectors in zmm registers too
     ymm: bool, // the body holds a 32-byte vector in a register: `vzeroupper` before each call and return
-    yblk: Vector<bool>, // per block, whether it defines or reads a 32-byte vector (`ymm`)
-    yvals: Vector<u32>, // the 32-byte vector values (indices)
     xalloc: u64,
     xfix: u64,
     valloc: u64,
@@ -445,8 +443,6 @@ extend Gen {
             avx: pkg.cpu.vector >= 32,
             z512: pkg.cpu.vector == 64,
             ymm: false,
-            yblk: Vector::<bool>::new(),
-            yvals: Vector::<u32>::new(),
             xalloc: ast::pick(win, XALLOC_WIN, XALLOC_SYSV),
             xfix: ast::pick(win, XFIX_WIN, XFIX_SYSV),
             valloc: ast::pick(win, VALLOC_WIN, VALLOC_SYSV),
@@ -3371,34 +3367,9 @@ extend Gen {
         self.rels.push(CRel { at: at, kind: kind, sym: sym, addend: addend - (end - at) as i64 });
     }
 
-    // Whether block `k` (layout position `q`) starts with `vzeroupper`: it holds no 32-byte vector, a block
-    // that does enters it, and no 32-byte vector's range (from its block's position to its last one)
-    // covers it, so the upper halves hold nothing: the code of the legacy SSE encoding after a vector
-    // loop runs without their state.
-    const fn upper_entry(self: &mut Self, q: u32, k: u32) bool {
-        if !self.ymm || self.yblk[k as usize] {
-            return false;
-        }
-        let mut from = false;
-        for j in self.cr.lv.pat[k as usize]..self.cr.lv.pat[k as usize + 1] {
-            let pj = self.cr.lv.preds[j as usize] as usize;
-            from = from || self.yblk[pj] && self.cr.lv.pos[pj] != NONE;
-        }
-        if !from {
-            return false;
-        }
-        for y in 0..self.yvals.len() {
-            let x = self.yvals[y];
-            let d = self.cr.lv.def_blk[x as usize];
-            if d != NONE && self.cr.lv.pos[d as usize] != NONE && self.cr.lv.pos[d as usize] < q && self.cr.lv.end[x as usize] >= q {
-                return false;
-            }
-        }
-        return true;
-    }
-
     // `vzeroupper` when the body holds a 32-byte vector in a register (`ymm`): before a call or a return,
-    // so code of the legacy SSE encoding runs without the upper halves' state.
+    // so code of the legacy SSE encoding runs without the upper halves' state. The body's own SSE
+    // operations take their VEX forms (`Code.vex`).
     fn upper_clear(self: &mut Self) {
         if self.ymm {
             self.c.vzeroupper();
@@ -3680,6 +3651,10 @@ extend Gen {
         let b = self.cr.b();
         self.cpu = p.cpu_of(b);
         self.avx = self.cpu.vector >= 32;
+        // A body compiled for AVX takes the VEX form of every SSE operation.
+        self.c.vex = self.avx;
+        self.ec.vex = self.avx;
+        self.pro.vex = self.avx;
         self.z512 = self.cpu.vector == 64;
         self.cr.lv.fold_max = 8;
         // The parameters' places, which the folds read (`lv::Live::mem_params`).
@@ -3791,37 +3766,16 @@ extend Gen {
             0
         };
         self.ymm = false;
-        self.yvals.truncate(0);
-        self.yblk.truncate(0);
         if self.avx {
-            self.yblk.resize_default(b.blocks.len());
             for k in 0..b.blocks.len() {
                 let bk = b.blocks[k];
                 for i in bk.start..bk.start + bk.len {
-                    if is_vec(b.insts[i as usize].ty) && type_bytes(b.insts[i as usize].ty, 8) >= 32 {
-                        self.yvals.push(i);
-                        self.yblk[k] = true;
-                    }
+                    self.ymm = self.ymm || is_vec(b.insts[i as usize].ty) && type_bytes(b.insts[i as usize].ty, 8) >= 32;
                 }
                 for q in bk.param_start..bk.param_start + bk.param_len as u32 {
-                    if is_vec(b.params[q as usize]) && type_bytes(b.params[q as usize], 8) >= 32 {
-                        self.yvals.push(b.insts.len() as u32 + q);
-                        self.yblk[k] = true;
-                    }
+                    self.ymm = self.ymm || is_vec(b.params[q as usize]) && type_bytes(b.params[q as usize], 8) >= 32;
                 }
             }
-            // A block that reads one in a register defines none, as a store or a reduction.
-            for k in 0..b.blocks.len() {
-                let bk = b.blocks[k];
-                for i in bk.start..bk.start + bk.len {
-                    lv::each_use(b, b.insts[i as usize], &mut self.cr.uses);
-                    for u in 0..self.cr.uses.len() {
-                        let v = self.cr.uses[u];
-                        self.yblk[k] = self.yblk[k] || v != VNONE && is_vec(b.type_of(v)) && type_bytes(b.type_of(v), 8) >= 32;
-                    }
-                }
-            }
-            self.ymm = self.yvals.len() != 0;
         }
         self.cr.dying.truncate(0);
         self.cr.lock = 0;
@@ -4439,9 +4393,6 @@ extend Gen {
                 self.arr_at = self.c.len();
                 self.arr_blk = k;
             }
-        }
-        if self.upper_entry(q, k) {
-            self.c.vzeroupper();
         }
         let dbg = unsafe (*self.pkg).debug;
         for i in bk.start..bk.start + bk.len {
@@ -8949,7 +8900,7 @@ extend Gen {
             // An intrinsic: its instructions in place of the call, over the same registers.
             let mut rels = Vector::<asmr::InlRel>::new();
             let mut e = String::new();
-            if !asmr::Asm::inline_x64(&text, &mut self.c.b, &mut rels, &mut e) {
+            if !asmr::Asm::inline_x64(&text, self.avx, &mut self.c.b, &mut rels, &mut e) {
                 self.cr.err.format_into("intrinsic: {}", e.as_str());
                 return false;
             }
@@ -15707,7 +15658,7 @@ extend Gen {
     fn asm_text(self: &mut Self, text: str) bool {
         let mut rels = Vector::<asmr::InlRel>::new();
         let mut e = String::new();
-        if !asmr::Asm::inline_x64(text, &mut self.c.b, &mut rels, &mut e) {
+        if !asmr::Asm::inline_x64(text, false, &mut self.c.b, &mut rels, &mut e) {
             self.cr.err.format_into("inline assembly: {}", e.as_str());
             return false;
         }

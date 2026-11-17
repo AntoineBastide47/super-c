@@ -1291,6 +1291,75 @@ fn x64_word_immediates_to_memory_round_trip() {
     assert_eq(insts, 3);
 }
 
+// A body compiled for AVX takes the VEX form of every SSE operation (`Code.vex`): each legacy row of the
+// table that names an xmm register, encoded over low and high registers and memory, decodes to a row of
+// its `v` mnemonic and assembles back to its bytes (the rows are LLVM's: `x64_rows_round_trip`).
+@test
+fn x64_sse_operations_take_vex_forms() {
+    let rows: []xt::Row = xt::ROWS;
+    let regs: [(u8, u8); 4] = [(1, 2), (1, 9), (9, 1), (9, 10)];
+    let mut insts: u32 = 0;
+    for ri in 0..rows.len() {
+        let r = rows[ri];
+        let k0 = xt::kind_at(r.ops, 0);
+        let k1 = xt::kind_at(r.ops, 1);
+        let k2 = xt::kind_at(r.ops, 2);
+        let x0 = k0 == xt::K::X || k0 == xt::K::XM || k0 == xt::K::XR;
+        if r.vx != 0 || !x0 && k1 != xt::K::X && k1 != xt::K::XM && k1 != xt::K::XR {
+            continue;
+        }
+        // The operand in ModRM.rm.
+        let km = if xt::in_rm(k0) {
+            k0
+        } else {
+            k1
+        };
+        for w in 0..2u32 {
+            // REX.W where the row takes a 64-bit general operand.
+            if w == 1 && (r.sz & xt::SQ) == 0 || w == 0 && r.sz == xt::SQ {
+                continue;
+            }
+            for f in 0..5usize {
+                let mem = f == 4;
+                // A move to an xmm register or memory goes to memory: the load form moves registers. A
+                // 64-bit `movq` between an xmm register and memory is the xmm one (F3 0F 7E, 66 0F D6).
+                if mem && (xt::reg_only(km) || k2 == xt::K::X0 || r.sz == xt::SQ) || !mem && (xt::mem_only(km) || k0 == xt::K::XM) {
+                    continue;
+                }
+                let mut c = x::Code::new();
+                c.vex = true;
+                let reg = if r.dig < 8 {
+                    r.dig
+                } else if mem {
+                    9u8
+                } else {
+                    regs[f].0
+                };
+                if mem {
+                    c.rm(r.pfx, r.op, w == 1, reg, x::at(x::RAX, 16), false);
+                } else {
+                    c.rr(r.pfx, r.op, w == 1, reg, regs[f].1, false);
+                }
+                if k1 == xt::K::I8 || k2 == xt::K::I8 {
+                    c.byte(1);
+                }
+                let mut s = String::new();
+                let n = xa::disassemble(&c.b, 0, &mut s);
+                assert(n as usize == c.b.len() && s.as_str().starts_with("v"), r.mn);
+                let mut b1 = Vector::<u8>::new();
+                let mut fx = xa::Fix::new();
+                let mut err = String::new();
+                assert(
+                    xa::assemble(&s, xa::NOTGT, &mut b1, &mut fx, &mut err) && b1.as_slice() == c.b.as_slice(),
+                    s.as_str(),
+                );
+                insts += 1;
+            }
+        }
+    }
+    assert(insts > 600, "the SSE rows");
+}
+
 // SSE and AVX operations on xmm16..xmm31 take their EVEX forms: W per lane width, the legacy two-operand
 // forms' destination as the first source (shifts by an immediate: as V'vvvv), 8-bit displacements in units
 // of the operand's bytes. The bytes are LLVM's (`llvm-mc -show-encoding`).
@@ -2199,6 +2268,9 @@ fn x64_intrinsics_match_the_c_compiler() {
     let mut bytes = Vector::<u8>::new();
     let mut ends = Vector::<u32>::new();
     let mut bad: u32 = 0;
+    let mut vtext = String::new();
+    let mut vbytes = Vector::<u8>::new();
+    let mut vends = Vector::<u32>::new();
     let all: [](str, str) = x64i::ROWS;
     let sse41: [](str, str) = x64i::SSE41_ROWS;
     for i in 0..all.len() + sse41.len() {
@@ -2220,7 +2292,7 @@ fn x64_intrinsics_match_the_c_compiler() {
             let mut rels = Vector::<asmr::InlRel>::new();
             let mut e = String::new();
             let n0 = bytes.len();
-            if !asmr::Asm::inline_x64(line, &mut bytes, &mut rels, &mut e) {
+            if !asmr::Asm::inline_x64(line, false, &mut bytes, &mut rels, &mut e) {
                 eprint("{}: '{}': {}\n", row.0, line, e.as_str());
                 bad += 1;
                 bytes.truncate(n0);
@@ -2229,10 +2301,31 @@ fn x64_intrinsics_match_the_c_compiler() {
             text.push_str(line);
             text.push_str("\n");
             ends.push(bytes.len() as u32);
+            // In a body compiled for AVX a legacy SSE statement takes its VEX form.
+            if line.starts_with("v") || line.find("%xmm") < 0 {
+                continue;
+            }
+            let v0 = vbytes.len();
+            let mut d = String::new();
+            if !asmr::Asm::inline_x64(line, true, &mut vbytes, &mut rels, &mut e) || vbytes[v0] != 0xC4 && vbytes[v0] != 0xC5 || xa::disassemble(
+                &vbytes,
+                v0,
+                &mut d,
+            ) as usize != vbytes.len() - v0 {
+                eprint("{}: '{}': no VEX form\n", row.0, line);
+                bad += 1;
+                vbytes.truncate(v0);
+                continue;
+            }
+            vtext.push_string(&d);
+            vtext.push_str("\n");
+            vends.push(vbytes.len() as u32);
         }
     }
     assert_eq(bad, 0);
     x64_oracle(&text, &bytes, &ends);
+    assert(vends.len() > 100, "the legacy SSE statements");
+    x64_oracle(&vtext, &vbytes, &vends);
 }
 
 // A row's constant arguments by index, of one digit or more, and their multiples (`intrin::expand`).

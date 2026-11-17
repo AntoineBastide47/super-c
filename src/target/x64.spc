@@ -132,6 +132,9 @@ pub(package) struct Code {
     pub(package) dead: Vector<u32>,
     pub(package) in_at: Vector<u32>,
     pub(package) stack_at: u32,
+    /// The SSE operations take their VEX forms: a body compiled for AVX, whose ymm registers' upper halves
+    /// hold values (the legacy encoding beside them costs a state transition or a false dependency).
+    pub(package) vex: bool,
     rs: Relax,
 }
 
@@ -194,6 +197,7 @@ extend Code {
             dead: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
             stack_at: 0xFFFFFFFF,
+            vex: false,
             rs: Relax::new(),
         };
     }
@@ -589,6 +593,10 @@ extend Code {
             self.sse_evex(pfx, op, w, reg, rm, rip(), false);
             return;
         }
+        if self.vex && sse_op(op) {
+            self.sse_vex(pfx, op, w, reg, rm, rip(), false);
+            return;
+        }
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -601,6 +609,10 @@ extend Code {
     pub(package) fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
         if reg >= 16 {
             self.sse_evex(pfx, op, w, reg, 0, m, true);
+            return;
+        }
+        if self.vex && sse_op(op) {
+            self.sse_vex(pfx, op, w, reg, 0, m, true);
             return;
         }
         if op == 0xFF && reg == 2 {
@@ -1216,6 +1228,63 @@ extend Code {
 
     // `rr` (`rm` when `mem`, at `m`) of an SSE operation with a register of xmm16..xmm31: its EVEX.128 form
     // (`evex_form`), the destination its first source too where the legacy form reads it.
+    // Legacy SSE operation `op` on xmm0..xmm15 in its VEX form (`vex`): the two-operand forms' destination
+    // as the first source too (`vex_shape`). The choices are LLVM's: a register move whose source alone
+    // needs VEX.B takes the store form, and a commutative packed operation swaps its sources then (the
+    // 2-byte prefix); `blendv`'s implied xmm0 is the fourth operand of another opcode.
+    fn sse_vex(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, m: Mem, mem: bool) {
+        let o = op & 0xFF;
+        let esc = op >> 8;
+        let map = if esc == 0x0F {
+            1u32
+        } else if esc == 0x0F38 {
+            2u32
+        } else {
+            3u32
+        };
+        if map == 2 && (o == 0x10 || o == 0x14 || o == 0x15) {
+            assert(!mem, "x64: a blend by xmm0 of a memory operand");
+            let vo = if o == 0x10 {
+                0x4Cu32
+            } else {
+                0x4Au32 + (o & 1)
+            };
+            self.vex_rr(0x66, 3, vo, false, false, reg, reg, rm);
+            self.byte(0);
+            return;
+        }
+        // `gf2p8affineqb` and its inverse take W1.
+        let vw = w || map == 3 && (o == 0xCE || o == 0xCF);
+        let sh = vex_shape(pfx, op, mem);
+        let v = if sh == EV_NDS {
+            reg
+        } else if sh == EV_NDD || sh == EV_NDM {
+            rm
+        } else {
+            0
+        };
+        if mem {
+            self.vex_rm(pfx, map, o, vw, false, reg, v, m);
+            return;
+        }
+        if map == 1 && rm >= 8 && reg < 8 {
+            let scalar = pfx == 0xF3 || pfx == 0xF2;
+            if o == 0x10 || o == 0x28 || o == 0x6F {
+                // The store form: the source in ModRM.reg (a scalar move's first source stays in vvvv).
+                self.vex_rr(pfx, 1, ast::pick(o == 0x6F, 0x7Fu32, o + 1), false, false, rm, v, reg);
+                return;
+            }
+            if o == 0x7E && pfx == 0xF3 {
+                self.vex_rr(0x66, 1, 0xD6, false, false, rm, 0, reg);
+                return;
+            }
+            if !scalar && !vw && commutes(o) {
+                self.vex_rr(pfx, 1, o, false, false, reg, rm, v);
+                return;
+            }
+        }
+        self.vex_rr(pfx, map, o, vw, false, reg, v, rm);
+    }
     fn sse_evex(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, m: Mem, mem: bool) {
         let f = evex_form(pfx, op, reg, w, mem);
         assert(f != EV_NONE, "x64: an SSE operation without an EVEX form on xmm16..xmm31");
@@ -1367,6 +1436,73 @@ const EV_N4: u32 = 96;
 const EV_N8: u32 = 112;
 const EV_N16: u32 = 128;
 const EV_NW: u32 = 144;
+
+// Whether `op` (escapes included) is an SSE operation: one with a VEX form.
+const fn sse_op(op: u32) bool {
+    let o = op & 0xFF;
+    let esc = op >> 8;
+    return if esc == 0x0F {
+        o >= 0x10 && o <= 0x17 || o >= 0x28 && o <= 0x2F || o >= 0x50 && o <= 0x7F || o == 0xC2 || o >= 0xC4 && o <= 0xC6 || o >= 0xD0
+    } else if esc == 0x0F38 {
+        o < 0xF0
+    } else {
+        esc == 0x0F3A
+    };
+}
+
+// The operand shape of the VEX form of legacy SSE operation `op` (`sse_op`; `mem`: on memory): `EV_MOV`,
+// `EV_NDS`, `EV_NDD` or `EV_NDM`.
+const fn vex_shape(pfx: u32, op: u32, mem: bool) u32 {
+    let o = op & 0xFF;
+    let esc = op >> 8;
+    let scalar = pfx == 0xF3 || pfx == 0xF2;
+    if esc == 0x0F {
+        // The moves: a scalar one between registers keeps the destination's other lanes.
+        if o == 0x10 || o == 0x11 {
+            return if !scalar || mem {
+                EV_MOV
+            } else if o == 0x10 {
+                EV_NDS
+            } else {
+                EV_NDM
+            };
+        }
+        // `movlps`, `movhps`, `movhlps`, `movlhps`; `movddup`, `movsldup`, `movshdup` (F2, F3).
+        if o == 0x12 || o == 0x16 {
+            return ast::pick(scalar, EV_MOV, EV_NDS);
+        }
+        // Square roots, reciprocals and float conversions: the scalar ones keep the other lanes.
+        if o >= 0x51 && o <= 0x53 || o == 0x5A {
+            return ast::pick(scalar, EV_NDS, EV_MOV);
+        }
+        if o == 0x2A {
+            return EV_NDS;
+        }
+        if o >= 0x71 && o <= 0x73 {
+            return EV_NDD;
+        }
+        let mov = o == 0x13 || o == 0x17 || o >= 0x28 && o <= 0x2F || o == 0x50 || o == 0x5B || o >= 0x6E && o <= 0x70 || o == 0x7E || o == 0x7F || o == 0xC5 || o == 0xD6 || o == 0xD7 || o == 0xE6 || o == 0xE7 || o == 0xF0 || o == 0xF7;
+        return ast::pick(mov, EV_MOV, EV_NDS);
+    }
+    if esc == 0x0F38 {
+        // `ptest`, `pabs`, `pmovsx`, `pmovzx`, `movntdqa`, `phminposuw`, `aesimc`.
+        let mov = o == 0x17 || o >= 0x1C && o <= 0x1E || o >= 0x20 && o <= 0x25 || o == 0x2A || o >= 0x30 && o <= 0x35 || o == 0x41 || o == 0xDB;
+        return ast::pick(mov, EV_MOV, EV_NDS);
+    }
+    // 0F 3A: the packed `round`, the lane extracts, the string compares, `aeskeygenassist`.
+    let mov = o == 0x08 || o == 0x09 || o >= 0x14 && o <= 0x17 || o >= 0x60 && o <= 0x63 || o == 0xDF;
+    return ast::pick(mov, EV_MOV, EV_NDS);
+}
+
+// The packed operations 0F `o` that commute, a bit each: the float `and`, `or`, `xor`, `add` and `mul`,
+// the integer `and`, `or`, `xor`, `add`, saturating `add`, `pcmpeq`, `pavg`, `pmin` and `pmax` (sw, ub),
+// `pmull`, `pmulh`, `pmuludq`, `pmaddwd` and `psadbw`.
+const COMMUTES: [u64; 4] = [0, 0x0070000003D00000, 0, 0x7070FC397C300000];
+
+// Whether packed operation 0F `o` commutes (LLVM swaps its sources for the 2-byte VEX prefix).
+const fn commutes(o: u32) bool {
+    return (COMMUTES[(o >> 6) as usize] >> (o & 63) as u64 & 1) != 0;
+}
 
 // The opcode `op` of VEX map `mm` (1: 0F, 2: 0F 38, 3: 0F 3A) as `evex_form` takes it.
 const fn map_op(mm: u32, op: u32) u32 {
