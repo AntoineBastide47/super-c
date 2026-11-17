@@ -183,7 +183,8 @@ jobs:
 
       - name: Show TEMP
         if: runner.os == 'Windows'
-        run: echo "TMP=$TMP TEMP=$TEMP"
+        shell: pwsh
+        run: echo "TMP=$env:TMP TEMP=$env:TEMP GetTempPath=$([IO.Path]::GetTempPath())"
 
       - uses: actions/download-artifact@v8
         with:
