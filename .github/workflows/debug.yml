@@ -3,16 +3,95 @@
 # the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
 # Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
 # the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# And wasm, as the release runs it: the compiler built for wasm32, its vector tests and self-host
+# fixpoint under wasmtime, the suite with wasm32 programs, and the suite against the wasm compiler.
 name: Debug
 on:
   workflow_dispatch
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: debug-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  # The Windows caches moved from C: to D:: restore main's caches at their C: paths (the C: timings),
+  # merge the last release's Windows deltas on C:, move everything to D:, save it at the D: paths for
+  # this branch (the D: save timing), and merge the same deltas again on D:.
+  seed:
+    name: seed the D caches (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Restore object cache on C
+        uses: actions/cache/restore@v6
+        with:
+          path: ~/.super-c/cache
+          key: objcache-windows-${{ github.sha }}
+          restore-keys: objcache-windows-
+
+      - name: Restore mingw-w64 on C
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            C:\ProgramData\chocolatey\lib\mingw
+            C:\ProgramData\mingw64
+            C:\tools\mingw64
+          key: mingw-w64-Windows-choco-v3
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: objcache-part-windows-*
+          path: parts
+          run-id: 44092035206
+          github-token: ${{ github.token }}
+
+      - name: Merge the deltas on C
+        run: |
+          set -eu
+          for d in $(ls -d parts/*/ | sort); do
+            python -I .github/actions/cache-save/delta.py apply "${d}sc-cache-delta.tar"
+          done
+
+      - name: Move the caches to D
+        run: |
+          set -eu
+          d=$(cygpath -u "$RUNNER_TEMP")
+          du -sm ~/.super-c/cache
+          find ~/.super-c/cache -type f | wc -l
+          time mv ~/.super-c/cache "$d/sc-cache"
+          bin=$(find /c/ProgramData/mingw64 /c/ProgramData/chocolatey/lib/mingw /c/tools -path '*/mingw64/bin' -type d 2>/dev/null | head -1)
+          test -x "$bin/gcc.exe"
+          find "$(dirname "$bin")" -type f | wc -l
+          time cp -R "$(dirname "$bin")" "$d/mingw64"
+
+      - name: Save object cache on D
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/sc-cache
+          key: objcache-windows-${{ github.sha }}
+
+      - name: Save mingw-w64 on D
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/mingw64
+          key: mingw-w64-Windows-choco-v4
+
+      - name: Merge the deltas on D
+        env:
+          SC_CACHE_DIR: ${{ runner.temp }}/sc-cache
+        run: |
+          set -eu
+          for d in $(ls -d parts/*/ | sort); do
+            python -I .github/actions/cache-save/delta.py apply "${d}sc-cache-delta.tar"
+          done
+
   compile:
+    needs: seed
     name: compile (${{ matrix.target }})
     strategy:
       fail-fast: false
@@ -142,3 +221,131 @@ jobs:
           chmod +x "./$bin"
           { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
           "./$bin" bench --filter=self_compile
+
+  # The compiler cross-built to wasm32-wasip1, with the native compiler that built it.
+  wasm-compile:
+    name: wasm compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+
+      - name: Build the wasm compiler
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  # The vector tests on wasm32 with simd128, and the self-host fixpoint under wasmtime.
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      - name: Self-host fixpoint under wasmtime
+        run: |
+          set -eu
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
+
+  # The native compiler runs the suite, and every program a test builds is a wasm32 module run under
+  # wasmtime.
+  wasm-target:
+    needs: wasm-compile
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  # The suite against the wasm compiler: every transpile-class invocation runs inside wasmtime.
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: |
+          chmod +x ./super-c
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"

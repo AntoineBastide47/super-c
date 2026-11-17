@@ -896,12 +896,14 @@ jobs:
         if: steps.parts.outputs.any == 'true'
         uses: actions/cache/restore@v6
         with:
-          path: ~/.super-c/cache
+          path: ${{ runner.os == 'Windows' && format('{0}/sc-cache', runner.temp) || '~/.super-c/cache' }}
           key: objcache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
           restore-keys: objcache-${{ matrix.target }}-
 
       - name: Merge the deltas
         if: steps.parts.outputs.any == 'true'
+        env:
+          SC_CACHE_DIR: ${{ runner.os == 'Windows' && format('{0}/sc-cache', runner.temp) || '' }}
         run: |
           set -eu
           py=$(command -v python3 || command -v python)
@@ -913,7 +915,7 @@ jobs:
         if: steps.parts.outputs.any == 'true'
         uses: actions/cache/save@v6
         with:
-          path: ~/.super-c/cache
+          path: ${{ runner.os == 'Windows' && format('{0}/sc-cache', runner.temp) || '~/.super-c/cache' }}
           key: objcache-${{ matrix.target }}-${{ needs.resolve.outputs.sha }}
 
   # The wasm compiler ships only after both shards and its checks passed with it, and the native
