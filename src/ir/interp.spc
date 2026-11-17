@@ -6182,7 +6182,7 @@ extend Interp {
                 return self.fail();
             }
             let id = cur.i as u32;
-            let op = self.obj_ptr(id);
+            let mut op = self.obj_ptr(id);
             if op == null {
                 return self.fail();
             }
@@ -6207,22 +6207,25 @@ extend Interp {
                 // Storage that holds no value yet (`Uninit`: a scalar placeholder written, the member
                 // asked for never): the member becomes the active one, zero-filled as C's storage, and
                 // its parts are written through it. A Box has no zero: the evaluation stops.
-                let z = self.zero_field(
-                    unsafe (*op).dm,
-                    unsafe (*op).dn,
-                    unsafe (*op).nargs,
-                    &unsafe (*op).am[0],
-                    &unsafe (*op).at[0],
-                    base_slot as u32,
-                );
+                // `zero_field` makes objects, which may move every object: it takes copies of the
+                // instance arguments, and the object is found again after it.
+                let mut zam: [ModuleId; OBJ_ARGS] = [[0] = 0];
+                let mut zat: [TypeId; OBJ_ARGS] = [[0] = TYPE_NONE];
+                let zn = unsafe (*op).nargs;
+                for gi in 0..zn {
+                    unsafe zam[gi as usize] = unsafe (*op).am[gi as usize];
+                    unsafe zat[gi as usize] = unsafe (*op).at[gi as usize];
+                }
+                let (zdm, zdn) = (unsafe (*op).dm, unsafe (*op).dn);
+                let z = self.zero_field(zdm, zdn, zn, &zam[0], &zat[0], base_slot as u32);
                 self.failed = false;
                 if z.kind == IV_NONE {
                     return self.fail();
                 }
-                let op2 = self.obj_ptr(id);
-                unsafe (*op2).slots.set(base_slot as usize, z);
-                unsafe (*op2).slots.set((unsafe (*op2).uactive) as usize, none());
-                unsafe (*op2).uactive = base_slot as i32;
+                op = self.obj_ptr(id);
+                unsafe (*op).slots.set(base_slot as usize, z);
+                unsafe (*op).slots.set((unsafe (*op).uactive) as usize, none());
+                unsafe (*op).uactive = base_slot as i32;
             }
             if is_union && unsafe (*op).uactive >= 0 && unsafe (*op).uactive != base_slot as i32 {
                 let av = unsafe (*op).slots[(unsafe (*op).uactive) as usize];

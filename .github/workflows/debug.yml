@@ -3,6 +3,8 @@
 # the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
 # Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
 # the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# And wasm, as the release runs it: the compiler built for wasm32, its vector tests and self-host
+# fixpoint under wasmtime, the suite with wasm32 programs, and the suite against the wasm compiler.
 name: Debug
 on:
   workflow_dispatch
@@ -142,3 +144,131 @@ jobs:
           chmod +x "./$bin"
           { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
           "./$bin" bench --filter=self_compile
+
+  # The compiler cross-built to wasm32-wasip1, with the native compiler that built it.
+  wasm-compile:
+    name: wasm compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+
+      - name: Build the wasm compiler
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  # The vector tests on wasm32 with simd128, and the self-host fixpoint under wasmtime.
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      - name: Self-host fixpoint under wasmtime
+        run: |
+          set -eu
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
+
+  # The native compiler runs the suite, and every program a test builds is a wasm32 module run under
+  # wasmtime.
+  wasm-target:
+    needs: wasm-compile
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  # The suite against the wasm compiler: every transpile-class invocation runs inside wasmtime.
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: |
+          chmod +x ./super-c
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"

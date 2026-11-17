@@ -243,6 +243,12 @@ spells each pointer, scalar and mask once before any call, and copies the result
 after the last: a pointer may alias an operand or the result. The C compiler keeps the chunks
 in registers.
 
+The native lowering takes the same chunk forms in LIR: an entry of fewer lanes splits its operands
+by halves (`lir::lower` `split_entry`), and `compress_store` moves each chunk's active lanes to the
+front by the `u8` `swizzle_zero` entry through a table row of the chunk's mask bits, the rows' lane
+counts in a second table, the lane loop a rare block that runs only where the output ends within a
+chunk of the packed lanes (`compress_chunks`).
+
 ## New instruction sets
 
 A fixed-width backend for another architecture is added only when all three hold:

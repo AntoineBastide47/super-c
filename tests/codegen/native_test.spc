@@ -20144,6 +20144,78 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
+// A copy of 100 bytes whose regions may overlap (`memcpy.overlap`: an aggregate assignment) is inline on
+// arm64 and x86-64: every chunk loaded before the first store, so it is right for a source before the
+// destination, after it, and the same; one of 200 bytes calls `memmove`. Copies of 128 bytes to and from
+// a slot at frame offset 928 pass the reach of arm64's pair forms (1008) at their fourth pair: its
+// chunks go one by one (`far` reads and writes those 32 bytes through a pointer too, so a wrong offset
+// shows). The functions give the C results on the host.
+@test
+fn an_overlapping_copy_of_100_bytes_is_inline() {
+    let head = "lir ptr 8\nsym @assign fn global\nsym @far fn global\n";
+    let far = M"(fn @far
+  sig (ptr, ptr) -> void
+  slot s0 size 928 align 4
+  slot s1 size 128 align 4
+b0(v0: ptr, v1: ptr):
+  v2 = iconst.i64 128
+  v3 = slotaddr s1
+  memcpy.overlap v3, v1, v2
+  v4 = slotaddr s1
+  v5 = ptradd v4+96
+  v6 = iconst.i64 32
+  memcpy.overlap v0, v5, v6
+  memcpy.overlap v5, v1, v6
+  v7 = slotaddr s1
+  v8 = ptradd v0+32
+  memcpy.overlap v8, v7, v2
+  ret
+)";
+    let assign = "fn @assign\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n  v2 = iconst.i64 100\n  memcpy.overlap v0, v1, v2\n  ret\n";
+    let long = "fn @assign\n  sig (ptr, ptr) -> void\nb0(v0: ptr, v1: ptr):\n  v2 = iconst.i64 200\n  memcpy.overlap v0, v1, v2\n  ret\n";
+    let linux = tgt::axis_index("linux", false);
+    let name: [u8; 7] = [b'm', b'e', b'm', b'm', b'o', b'v', b'e'];
+    for isa in [tgt::axis_index("aarch64", true), tgt::axis_index("x86_64", true)] {
+        let mut o = Vector::<u8>::new();
+        assert(object_of(format("{}{}{}", head, assign, far).as_str(), linux, isa, 0, &mut o), "the object of the copy");
+        assert(!holds(&o, name[0..7]), "the copy calls no routine");
+        let mut g = Vector::<u8>::new();
+        assert(
+            object_of(format("{}{}{}", head, long, far).as_str(), linux, isa, 0, &mut g),
+            "the object of the long copy",
+        );
+        assert(holds(&g, name[0..7]), "the long copy calls memmove");
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void assign(void *, void *);
+void far(void *, void *);
+int main(void) {
+  unsigned char a[228], b[100], c[228];
+  unsigned char f[128], g[160];
+  for (int i = 0; i < 128; i++) f[i] = (unsigned char)(i * 11 + 5);
+  far(g, f);
+  if (memcmp(g, f + 96, 32) != 0) return 5;
+  if (memcmp(g + 32, f, 96) != 0 || memcmp(g + 128, f, 32) != 0) return 6;
+  for (int i = 0; i < 228; i++) a[i] = c[i] = (unsigned char)(i * 7 + 3);
+  assign(a + 64, a + 64);
+  if (memcmp(a, c, 228) != 0) return 1;
+  assign(b, a + 5);
+  if (memcmp(b, c + 5, 100) != 0) return 2;
+  assign(a + 20, a);
+  if (memcmp(a + 20, c, 100) != 0 || memcmp(a, c, 20) != 0 || memcmp(a + 120, c + 120, 108) != 0) return 3;
+  memcpy(a, c, 228);
+  assign(a, a + 9);
+  if (memcmp(a, c + 9, 100) != 0 || memcmp(a + 100, c + 100, 128) != 0) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(format("{}{}{}", head, assign, far).as_str(), drv), 0);
+}
+
 // A cast between two vectors of one size is a view of its operand (`lv::FOLD_VIEW`): its readers read
 // the operand's register, also where the operand lives on, so arm64 copies no vector register. Sizes of
 // one register and of several (x86-64 with and without AVX2) give the C results.

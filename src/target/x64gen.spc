@@ -2215,12 +2215,17 @@ extend Gen {
     // The xmm registers instruction `i` holds at once besides the homes (`end_inst` checks it): 6 for a
     // vector result, a vector operation and a float select (a high product's two operands, three
     // temporaries and result; a folded comparison's four operands, result and temporary); 4 for an FMA
-    // and a `memcpy` (an overlapping copy of 64 bytes, in four registers); 3 for the others (two
-    // operands and a separate result).
+    // and a `memcpy` (an overlapping copy of 64 bytes, in four registers; one of a constant size up to
+    // MEM_INLINE, a register per 16 bytes: up to 8); 3 for the others (two operands and a separate
+    // result).
     const fn vneed(self: &Self, i: u32) u32 {
         let t = self.cr.b().insts[i as usize];
         if is_vec(t.ty) || t.op == O_VOP || t.op == O_SELECT && is_v(t.ty) {
             return 6;
+        }
+        let mut n: u64 = 0;
+        if t.op == O_MEMCPY && t.aux == MEM_OVERLAP && self.cr.const_of(t.c, &mut n) && n > 64 && n <= MEM_INLINE {
+            return ((n + 15) / 16) as u32;
         }
         return ast::pick(t.op == O_FMA || t.op == O_MEMCPY, 4, 3);
     }
@@ -7396,17 +7401,16 @@ extend Gen {
         return true;
     }
 
-    // `memcpy` and `memset`: inline for a constant size up to 128 bytes (an overlapping copy loads every
-    // chunk before storing one, up to 64 bytes), else a call of the C library's routine.
+    // `memcpy` and `memset`: inline for a constant size up to MEM_INLINE bytes (an overlapping copy loads
+    // every chunk before storing one), else a call of the C library's routine.
     fn mem_block(self: &mut Self, i: u32, t: Inst) bool {
         let mut n: u64 = 0;
         let known = self.cr.const_of(t.c, &mut n);
         let overlap = t.op == O_MEMCPY && t.aux == MEM_OVERLAP;
-        let lim: u64 = ast::pick(overlap, 64, 128);
         if known && n == 0 {
             return true; // no byte to write
         }
-        if known && n <= lim {
+        if known && n <= MEM_INLINE {
             let (db, doff) = self.addr(t.a, 0);
             if t.op == O_MEMSET {
                 let mut k: u64 = 0;

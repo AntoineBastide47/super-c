@@ -14902,14 +14902,24 @@ fn narrow_counts_of_8_byte_vectors_take_no_byte_lookups() {
     assert(t.contains(".v4i16") && !t.contains("swizzle_or_zero.v8i8"), t.as_str());
 }
 
-// A counter stepping by 4 from 0 below a multiple of 4 (`n & -4`), its check `i + 3 <u len`: its last
-// value is `n - 4`, so the check holds wherever `n <= len` does (`checks`, `step_of`, `mult_of`), and the
-// guard compares `n` with `len` itself, no `len - 3`. Each count and length stores or panics as before.
+// A counter stepping by 4 from 0 under a test against a multiple of 4 (`n & -4`) reaches fewer values
+// than the test alone allows, and the guard of the copy without checks counts that (`checks`, `step_of`,
+// `mult_of`, `gred`). Under `i <u n` its last value is `n - 4`: a check `i + 3 <u len` holds wherever
+// `n <= len` does (`st`). Under `i + 1 <u n` the same (`near`: the test's bound is `n - 1`, which the
+// guard compares with `len - 1`, no `len - 3`). Under `i + 3 <u n` and `i + 4 <=u n` the last value is
+// `n - 4` too, and a check `i + 7 <u len` needs `n <= len - 4` (`far`, `ahead`): the guard keeps the whole
+// offset. Each count and length stores or panics as before.
 @test
 fn a_stepped_counters_check_holds_to_its_last_value() {
     let src = M"(lir ptr 8
 sym @st fn global noinline
-sym @drive fn global
+sym @near fn global noinline
+sym @far fn global noinline
+sym @ahead fn global noinline
+sym @drive_st fn global
+sym @drive_near fn global
+sym @drive_far fn global
+sym @drive_ahead fn global
 fn @st
   sig (ptr, i64, i64) -> void
 b0(v0: ptr, v1: i64, v2: i64):
@@ -14936,7 +14946,91 @@ b4: cold
   panic "index out of bounds"
 b5:
   ret
-fn @drive
+fn @near
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = iconst.i64 3
+  v6 = iconst.i64 -4
+  v7 = and.i64 v1, v6
+  v8 = iconst.i64 1
+  jmp b1(v3)
+b1(v9: i64):
+  v10 = add.i64 v9, v8
+  v11 = icmp.ult v10, v7
+  br v11, b2, b5
+b2:
+  v12 = add.i64 v9, v5
+  v13 = icmp.ult v12, v2
+  br v13, b3, b4
+b3:
+  v14 = ptradd v0, v12 * 4
+  v15 = trunc.i32 v9
+  store v15, v14 align 2
+  v16 = add.i64 v9, v4
+  jmp b1(v16)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret
+fn @far
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = iconst.i64 7
+  v6 = iconst.i64 -4
+  v7 = and.i64 v1, v6
+  v8 = iconst.i64 3
+  jmp b1(v3)
+b1(v9: i64):
+  v10 = add.i64 v9, v8
+  v11 = icmp.ult v10, v7
+  br v11, b2, b5
+b2:
+  v12 = add.i64 v9, v5
+  v13 = icmp.ult v12, v2
+  br v13, b3, b4
+b3:
+  v14 = ptradd v0, v12 * 4
+  v15 = trunc.i32 v9
+  store v15, v14 align 2
+  v16 = add.i64 v9, v4
+  jmp b1(v16)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret
+fn @ahead
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = iconst.i64 7
+  v6 = iconst.i64 -4
+  v7 = and.i64 v1, v6
+  v8 = iconst.i64 4
+  jmp b1(v3)
+b1(v9: i64):
+  v10 = add.i64 v9, v8
+  v11 = icmp.ule v10, v7
+  br v11, b2, b5
+b2:
+  v12 = add.i64 v9, v5
+  v13 = icmp.ult v12, v2
+  br v13, b3, b4
+b3:
+  v14 = ptradd v0, v12 * 4
+  v15 = trunc.i32 v9
+  store v15, v14 align 2
+  v16 = add.i64 v9, v4
+  jmp b1(v16)
+b4: cold
+  panic "index out of bounds"
+b5:
+  ret
+fn @drive_st
   sig (i64, i64) -> i64
   slot s0 size 256 align 3
 b0(v0: i64, v1: i64):
@@ -14958,7 +15052,121 @@ b3:
   call @st(v2, v0, v1) : (ptr, i64, i64) -> void
   v11 = load.i32 v2+12 align 2
   v12 = load.i32 v2+28 align 2
-  v13 = load.i32 v2+156 align 2
+  v13 = load.i32 v2+44 align 2
+  v14 = load.i32 v2+172 align 2
+  v15 = sext.i64 v11
+  v16 = sext.i64 v12
+  v17 = sext.i64 v13
+  v18 = sext.i64 v14
+  v19 = iconst.i64 8
+  v20 = shl.i64 v16, v19
+  v21 = iconst.i64 16
+  v22 = shl.i64 v17, v21
+  v23 = iconst.i64 24
+  v24 = shl.i64 v18, v23
+  v25 = xor.i64 v15, v20
+  v26 = xor.i64 v25, v22
+  v27 = xor.i64 v26, v24
+  ret v27
+fn @drive_near
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v5
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = ptradd v2, v6 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v6, v4
+  jmp b1(v10)
+b3:
+  call @near(v2, v0, v1) : (ptr, i64, i64) -> void
+  v11 = load.i32 v2+12 align 2
+  v12 = load.i32 v2+28 align 2
+  v13 = load.i32 v2+44 align 2
+  v14 = load.i32 v2+172 align 2
+  v15 = sext.i64 v11
+  v16 = sext.i64 v12
+  v17 = sext.i64 v13
+  v18 = sext.i64 v14
+  v19 = iconst.i64 8
+  v20 = shl.i64 v16, v19
+  v21 = iconst.i64 16
+  v22 = shl.i64 v17, v21
+  v23 = iconst.i64 24
+  v24 = shl.i64 v18, v23
+  v25 = xor.i64 v15, v20
+  v26 = xor.i64 v25, v22
+  v27 = xor.i64 v26, v24
+  ret v27
+fn @drive_far
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v5
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = ptradd v2, v6 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v6, v4
+  jmp b1(v10)
+b3:
+  call @far(v2, v0, v1) : (ptr, i64, i64) -> void
+  v11 = load.i32 v2+12 align 2
+  v12 = load.i32 v2+28 align 2
+  v13 = load.i32 v2+44 align 2
+  v14 = load.i32 v2+172 align 2
+  v15 = sext.i64 v11
+  v16 = sext.i64 v12
+  v17 = sext.i64 v13
+  v18 = sext.i64 v14
+  v19 = iconst.i64 8
+  v20 = shl.i64 v16, v19
+  v21 = iconst.i64 16
+  v22 = shl.i64 v17, v21
+  v23 = iconst.i64 24
+  v24 = shl.i64 v18, v23
+  v25 = xor.i64 v15, v20
+  v26 = xor.i64 v25, v22
+  v27 = xor.i64 v26, v24
+  ret v27
+fn @drive_ahead
+  sig (i64, i64) -> i64
+  slot s0 size 256 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 64
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v5
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v6
+  v9 = ptradd v2, v6 * 4
+  store v8, v9 align 2
+  v10 = add.i64 v6, v4
+  jmp b1(v10)
+b3:
+  call @ahead(v2, v0, v1) : (ptr, i64, i64) -> void
+  v11 = load.i32 v2+12 align 2
+  v12 = load.i32 v2+28 align 2
+  v13 = load.i32 v2+44 align 2
   v14 = load.i32 v2+172 align 2
   v15 = sext.i64 v11
   v16 = sext.i64 v12
@@ -14976,18 +15184,32 @@ b3:
   ret v27
 )";
     let (b, a) = optimized_for(src, VERSION, 16, VOPS_ALL);
-    let t = text_of(&a, "st");
-    assert(!t.contains("sub.i64"), t.as_str());
-    for n in [0u64, 3, 4, 7, 8, 13, 16, 40] {
-        for len in [0u64, 3, 4, 7, 8, 12, 16, 40, 64] {
-            let args: []u64 = [n, len];
-            let panics = (n & ~3u64) > len;
-            let want = if panics {
-                0u64
-            } else {
-                run_value(&b, "drive", args)
-            };
-            same_outcome(&b, &a, "drive", args, want, panics);
+    let names: [str; 4] = ["st", "near", "far", "ahead"];
+    let drives: [str; 4] = ["drive_st", "drive_near", "drive_far", "drive_ahead"];
+    for k in 0..4usize {
+        // What the guard takes off `len` (`v2`): nothing (`st`), the test's offset (`near`: not the
+        // check's, `v5`), the check's offset (`far`), the check's less the test's (`ahead`: 4, `v4`).
+        let t = text_of(&a, names[k]);
+        assert(t.contains("sub.i64 v2, v5") == (k == 2), t.as_str());
+        assert(t.contains("sub.i64 v2, v4") == (k == 3), t.as_str());
+        for n in [0u64, 3, 4, 7, 8, 13, 16, 40] {
+            for len in [0u64, 3, 4, 7, 8, 11, 12, 16, 40, 43, 44, 64] {
+                let args: []u64 = [n, len];
+                // The greatest index a run stores at: the last counter value plus the check's offset.
+                let m = n & ~3u64;
+                let off: u64 = if k >= 2 {
+                    7
+                } else {
+                    3
+                };
+                let panics = m >= 4 && m - 4 + off >= len;
+                let want = if panics {
+                    0u64
+                } else {
+                    run_value(&b, drives[k], args)
+                };
+                same_outcome(&b, &a, drives[k], args, want, panics);
+            }
         }
     }
 }

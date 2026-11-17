@@ -11261,23 +11261,6 @@ extend LoopOpt {
         }
     }
 
-    // The constant step of header parameter `q` of loop `h` (latch `u`): `q + k` on the back edge, 0 for
-    // another.
-    const fn step_of(self: &Self, b: &Body, h: u32, u: u32, q: Value) u64 {
-        let tu = term(b, u);
-        if tu.op != O_JMP || b.edge_target(tu.a) != h {
-            return 0;
-        }
-        let x = b.edge_arg(tu.a, (q & ~VPARAM) - b.blocks[h as usize].param_start);
-        if x == VNONE || (x & (VPARAM | VFLAG)) != 0 || b.insts[x as usize].op != O_ADD || b.insts[x as usize].a != q || !is_const(
-            b,
-            b.insts[x as usize].b,
-        ) {
-            return 0;
-        }
-        return raw_const(b, b.insts[x as usize].b) & mask_of(type_bits(b.type_of(q), 8));
-    }
-
     // Whether loop `h` (preheader `p`, latch `u`) has bounds checks a guard before it proves: branches
     // into a cold block on `x <u len` (or `len >u x`) with `len` defined outside the loop, `x` the header
     // parameter `i` that the header's exit test keeps below `n` (`i <u n`, or `i <s n` with `i` starting at
@@ -11621,14 +11604,28 @@ extend LoopOpt {
                     0u64
                 };
             }
-            // A counter stepping by a power of 2 `k` from a multiple of `k` up to a bound that is one: its
-            // last value `n - k`, so `q + c <u len` holds wherever `n <= len - (c - (k - 1))` does (`gred`).
+            // A counter stepping by a power of 2 `k` from a multiple of `k`, its test `q + hoff <u n` against
+            // a bound that is one (`hoff` from `offset_head`, or from the bound `opt`'s `offset_test` made:
+            // `offset_bound`; else 0): `q + hoff` is at most `n - 1 - s`, `s` the distance from `hoff + 1` up
+            // to a multiple of `k` (`k - 1` for `q <u n`: the last value is `n - k`). So `q + c <u len` holds
+            // wherever the guard's bound is at most `len - (c - s)`, `c` the offset it checks (`gred`).
             let mut red: u64 = 0;
             if sh == 0 && base == VNONE && ksub == 0 && vsub == VNONE && wmul == VNONE && goff != 0 && gn != VNONE && !self.grev {
-                let k = self.step_of(b, h, u, q);
-                let init = b.edge_arg(term(b, p).a, (q & ~VPARAM) - b.blocks[h as usize].param_start);
-                if k > 1 && (k & k - 1) == 0 && mult_of(b, init, k, MULT_DEPTH) && mult_of(b, gn, k, MULT_DEPTH) {
-                    red = goff.min(k - 1);
+                let qi = (q & ~VPARAM) - b.blocks[h as usize].param_start;
+                // `offset_head` gave the step of its counter.
+                let k = if step != 0 {
+                    step
+                } else {
+                    self.step_of(b, h, u, q, qi)
+                };
+                let (nb, hoff) = if self.hn.len() != 0 {
+                    (gn, self.hoff)
+                } else {
+                    offset_bound(b, gn)
+                };
+                let init = b.edge_arg(term(b, p).a, qi);
+                if k > 1 && (k & k - 1) == 0 && mult_of(b, init, k, MULT_DEPTH) && mult_of(b, nb, k, MULT_DEPTH) {
+                    red = goff.min((k - (hoff % k + 1) % k) % k);
                 }
             }
             // One comparison per bound, length and shift: the largest offset's, which implies the others.
@@ -12284,8 +12281,9 @@ extend LoopOpt {
         return true;
     }
 
-    // Whether the back edge from latch `u` to `h` passes header parameter `q` (its `qi`-th) plus 1.
-    fn steps_by_one(self: &mut Self, b: &Body, h: u32, u: u32, q: Value, qi: u32) bool {
+    // The constant the back edge from latch `u` to `h` adds to header parameter `q` (its `qi`-th), in the
+    // parameter's width; 0 for another value.
+    fn step_of(self: &mut Self, b: &Body, h: u32, u: u32, q: Value, qi: u32) u64 {
         b.succ_edges(term(b, u), &mut self.edges);
         for j in 0..self.edges.len() {
             let e = self.edges[j];
@@ -12294,12 +12292,20 @@ extend LoopOpt {
             }
             let nv = b.edge_arg(e, qi);
             if (nv & (VPARAM | VFLAG)) != 0 || nv == VNONE {
-                return false;
+                return 0;
             }
             let si = b.insts[nv as usize];
-            return (si.op == O_ADD || si.op == O_ADDO) && si.a == q && is_const(b, si.b) && b.insts[si.b as usize].a == 1 && b.insts[si.b as usize].b == 0;
+            if si.op != O_ADD && si.op != O_ADDO || si.a != q || !is_const(b, si.b) {
+                return 0;
+            }
+            return raw_const(b, si.b) & mask_of(type_bits(b.type_of(q), 8));
         }
-        return false;
+        return 0;
+    }
+
+    // Whether the back edge from latch `u` to `h` passes header parameter `q` (its `qi`-th) plus 1.
+    fn steps_by_one(self: &mut Self, b: &Body, h: u32, u: u32, q: Value, qi: u32) bool {
+        return self.step_of(b, h, u, q, qi) == 1;
     }
 
     // Whether header `h` (latch `u`, not `novec`) is `x = zext q; c = x <u n; br c` into the loop, `q` a
@@ -13986,6 +13992,33 @@ const fn slot_holds(b: &Body, t: Inst) bool {
     let off = (t.c as i32) as i64 + (a.c as i32) as i64;
     let size = type_bytes(ast::pick(t.op == O_LOAD, t.ty, T_NONE), 8) as i64;
     return k != 0 && off >= 0 && size != 0 && (k - 1) * scale_of(a) as i64 + off + size <= b.slots[b.insts[a.a as usize].a as usize].size as i64;
+}
+
+// The bound and offset a loop bound `v` stands for: `select(n >=u c, n - k, 0)` with constants `k <= c`
+// (the bound `opt`'s `offset_test` makes of a test `q + k <u n`) reads as (`n`, `k`), since a counter below
+// it has `q + k <u n` without a wrap; any other value as (`v`, 0).
+const fn offset_bound(b: &Body, v: Value) (Value, u64) {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_SELECT {
+        return (v, 0u64);
+    }
+    let t = b.insts[v as usize];
+    if t.a == VNONE || (t.a & (VPARAM | VFLAG)) != 0 || t.b == VNONE || (t.b & (VPARAM | VFLAG)) != 0 || !is_const(
+        b,
+        t.c,
+    ) || raw_const(b, t.c) != 0 {
+        return (v, 0u64);
+    }
+    let (ge, d) = (b.insts[t.a as usize], b.insts[t.b as usize]);
+    if ge.op != O_ICMP || ge.aux != C_UGE || d.op != O_SUB || d.a != ge.a || !is_const(b, ge.b) || !is_const(b, d.b) {
+        return (v, 0u64);
+    }
+    let top = mask_of(type_bits(t.ty, 8));
+    let (c, k) = (raw_const(b, ge.b) & top, raw_const(b, d.b) & top);
+    return if k <= c {
+        (ge.a, k)
+    } else {
+        (v, 0u64)
+    };
 }
 
 // `mult_of` looks through at most MULT_DEPTH operations.

@@ -274,6 +274,56 @@ pub(package) const fn align_up(v: u64, a: u64) u64 {
     return v + a - 1 & ~(a - 1);
 }
 
+/// The version an Apple SDK's `SDKSettings.json` (`b`) names, as a Mach-O version word (major << 16 |
+/// minor << 8 | patch): the string of its first `"Version"` key; 0 when it has none.
+pub(package) const fn sdk_settings_version(b: []u8) u32 {
+    let key = "\"Version\"";
+    let n = b.len();
+    let k = key.len();
+    for at in 0..n {
+        if at + k > n {
+            break;
+        }
+        let mut same = true;
+        for q in 0..k {
+            same = same && b[at + q] == key.byte_at(q);
+        }
+        if !same {
+            continue;
+        }
+        // The colon and the string's quote.
+        let mut i = at + k;
+        while i < n && (b[i] == b' ' || b[i] == b':') {
+            i += 1;
+        }
+        if i >= n || b[i] != b'"' {
+            return 0;
+        }
+        i += 1;
+        let mut v: u32 = 0;
+        // Up to three numbers between dots.
+        for part in 0..3u32 {
+            let mut x: u32 = 0;
+            while i < n && b[i] >= b'0' && b[i] <= b'9' && x < 6553 {
+                x = x * 10 + (b[i] - b'0') as u32;
+                i += 1;
+            }
+            let mask: u32 = if part == 0 {
+                0xFFFF
+            } else {
+                0xFF
+            };
+            v |= (x & mask) << 16 - 8 * part;
+            if i >= n || b[i] != b'.' {
+                break;
+            }
+            i += 1;
+        }
+        return v;
+    }
+    return 0;
+}
+
 /// arm64 code stays off a boundary of this many bytes (`keep_pad`): a processor runs code that holds one
 /// a cycle late each time it passes it (Apple M-series: a function of 5 instructions or a loop of 7 that
 /// holds one takes 4 cycles in place of 3; boundaries of 64 to 2048 bytes cost nothing).
