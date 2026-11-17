@@ -3709,6 +3709,356 @@ fn main() i32 {
     assert_eq(p.run_bin(), 0);
 }
 
+// Vector kernels of a release build give their lanes' values: a minimumNumber and maximumNumber of loaded
+// operands and of accumulators (8 and 16 f32 lanes, 4 f64 lanes) over both zeros, infinities and quiet and
+// signaling NaNs, against the operation on the encodings, a product and sum of 8 lanes, and the operations a
+// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones. On
+// x86-64 the run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then
+// the build's own bodies (`SC_SIMD_LEVEL=0`).
+@test
+fn vector_kernels_run_as_their_lanes_at_every_level() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+import std::float as fl;
+
+const fn view<'a, T>(p: *const T, n: usize) []'a T {
+    return unsafe Slice::<T> { ptr: p, len: n };
+}
+
+const fn view_mut<'a, T>(p: *mut T, n: usize) []'a mut T {
+    return unsafe SliceMut::<T> { ptr: p, len: n };
+}
+
+// The minimumNumber (the maximumNumber when `max`) of encodings `a` and `b`.
+fn num32(a: u32, b: u32, max: bool) u32 {
+    let an = (a & 0x7FFFFFFF) > 0x7F800000;
+    let bn = (b & 0x7FFFFFFF) > 0x7F800000;
+    if an && bn {
+        return a | 0x00400000;
+    }
+    if an || bn {
+        return if an {
+            b
+        } else {
+            a
+        };
+    }
+    let x = fl::f32_from_bits(a);
+    let y = fl::f32_from_bits(b);
+    if x == y {
+        return if max {
+            a & b
+        } else {
+            a | b
+        };
+    }
+    return if max == (x > y) {
+        a
+    } else {
+        b
+    };
+}
+
+fn num64(a: u64, b: u64, max: bool) u64 {
+    let an = (a & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000;
+    let bn = (b & 0x7FFFFFFFFFFFFFFF) > 0x7FF0000000000000;
+    if an && bn {
+        return a | 0x0008000000000000;
+    }
+    if an || bn {
+        return if an {
+            b
+        } else {
+            a
+        };
+    }
+    let x = fl::f64_from_bits(a);
+    let y = fl::f64_from_bits(b);
+    if x == y {
+        return if max {
+            a & b
+        } else {
+            a | b
+        };
+    }
+    return if max == (x > y) {
+        a
+    } else {
+        b
+    };
+}
+
+@noinline
+fn lanes(ap: *const f32, bp: *const f32, n: usize, op: *mut f32) {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let o = view_mut(op, 2 * n);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        let x = simd::load::<f32, 8>(a, i);
+        let y = simd::load::<f32, 8>(b, i);
+        simd::store(o, i, x.min_num(y));
+        simd::store(o, n + i, x.max_num(y));
+        i += 8;
+    }
+}
+
+@noinline
+fn lanes64(ap: *const f64, bp: *const f64, n: usize, op: *mut f64) {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let o = view_mut(op, 2 * n);
+    let mut i: usize = 0;
+    while i + 4 <= n {
+        let x = simd::load::<f64, 4>(a, i);
+        let y = simd::load::<f64, 4>(b, i);
+        simd::store(o, i, x.min_num(y));
+        simd::store(o, n + i, x.max_num(y));
+        i += 4;
+    }
+}
+
+@noinline
+fn extremes(xp: *const f32, n: usize, op: *mut f32) {
+    let x = view(xp, n);
+    let o = view_mut(op, 32);
+    let mut lo = Simd::<f32, 16>::splat(1.0 / 0.0);
+    let mut hi = Simd::<f32, 16>::splat(-1.0 / 0.0);
+    let mut i: usize = 0;
+    while i + 16 <= n {
+        let v = simd::load::<f32, 16>(x, i);
+        lo = lo.min_num(v);
+        hi = hi.max_num(v);
+        i += 16;
+    }
+    simd::store(o, 0, lo);
+    simd::store(o, 16, hi);
+}
+
+@noinline
+fn scaled(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
+    let x = view(xp, n);
+    let y = view_mut(yp, n);
+    let av = Simd::<f32, 8>::splat(a);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        simd::store(y, i, av * simd::load::<f32, 8>(x, i) + simd::load::<f32, 8>(y, i));
+        i += 8;
+    }
+}
+
+// Operations a level may compute with its own entries (the absolute value, the square root, the floor, the
+// minimum, the fused product and sum), a selection of them, and a sum by halves of the 8 accumulators.
+@noinline
+fn rooted(xp: *const f32, n: usize, op: *mut f32) f32 {
+    let x = view(xp, n);
+    let o = view_mut(op, n);
+    let one = Simd::<f32, 8>::splat(1.0);
+    let mut acc = Simd::<f32, 8>::splat(0.0);
+    let mut i: usize = 0;
+    while i + 8 <= n {
+        let v = simd::load::<f32, 8>(x, i);
+        let r = v.abs().sqrt().floor();
+        acc = acc + one.less_than(v).choose(r, v.minimum(r));
+        simd::store(o, i, r.fma(v, acc));
+        i += 8;
+    }
+    return simd::reduce_add_tree(acc);
+}
+
+fn rooted_ref(xp: *const f32, n: usize, op: *mut f32) f32 {
+    let x = view(xp, n);
+    let o = view_mut(op, n);
+    let mut acc: [f32; 8] = [0.0; 8];
+    for i in 0..n - n % 8 {
+        let v = x[i];
+        let r = v.abs().sqrt().floor();
+        acc[i % 8] = acc[i % 8] + if 1.0 < v {
+            r
+        } else {
+            v.minimum(r)
+        };
+        o[i] = r.mul_add(v, acc[i % 8]);
+    }
+    let mut h: usize = 4;
+    while h != 0 {
+        for j in 0..h {
+            acc[j] = acc[j] + acc[j + h];
+        }
+        h /= 2;
+    }
+    return acc[0];
+}
+
+// Byte lanes over 32 bytes (a saturating sum or the larger byte, by a comparison) and a sum of 8 lanes of
+// 4 bytes.
+@noinline
+fn bytes(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8) u32 {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let w = view(wp, n / 4);
+    let o = view_mut(op, n);
+    let mut acc = Simd::<u32, 8>::splat(0);
+    let mut i: usize = 0;
+    while i + 32 <= n {
+        let x = simd::load::<u8, 32>(a, i);
+        let y = simd::load::<u8, 32>(b, i);
+        simd::store(o, i, x.less_than(y).choose(x.saturating_add(y), x.max(y)));
+        acc = acc + simd::load::<u32, 8>(w, i / 4);
+        i += 32;
+    }
+    return simd::reduce_add(acc);
+}
+
+fn bytes_ref(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8) u32 {
+    let a = view(ap, n);
+    let b = view(bp, n);
+    let w = view(wp, n / 4);
+    let o = view_mut(op, n);
+    let mut s: u32 = 0;
+    for i in 0..n - n % 32 {
+        o[i] = if a[i] < b[i] {
+            a[i].saturating_add(b[i])
+        } else {
+            a[i].max(b[i])
+        };
+        if i % 4 == 0 {
+            s = s.wrapping_add(w[i / 4]);
+        }
+    }
+    return s;
+}
+
+fn main() i32 {
+    let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
+    let n: usize = 144;
+    let mut a = Vector::<f32>::new();
+    let mut b = Vector::<f32>::new();
+    let mut a8 = Vector::<f64>::new();
+    let mut b8 = Vector::<f64>::new();
+    for k in 0..n {
+        let x = unsafe vals[k % 12];
+        let y = unsafe vals[k / 12];
+        a.push(fl::f32_from_bits(x));
+        b.push(fl::f32_from_bits(y));
+        // The same values as f64 encodings: the sign, the exponent's ends and the payload's low bits.
+        a8.push(fl::f64_from_bits((x as u64 & 0xFFF00000) << 32 | (x as u64 & 0xFFFFF)));
+        b8.push(fl::f64_from_bits((y as u64 & 0xFFF00000) << 32 | (y as u64 & 0xFFFFF)));
+    }
+    let mut o = Vector::<f32>::new();
+    let mut o8 = Vector::<f64>::new();
+    for _ in 0..2 * n {
+        o.push(0.0);
+        o8.push(0.0);
+    }
+    lanes(a.as_ptr(), b.as_ptr(), n, o.as_mut_ptr());
+    lanes64(a8.as_ptr(), b8.as_ptr(), n, o8.as_mut_ptr());
+    for k in 0..n {
+        let (x, y) = (fl::f32_bits(a[k]), fl::f32_bits(b[k]));
+        if fl::f32_bits(o[k]) != num32(x, y, false) || fl::f32_bits(o[n + k]) != num32(x, y, true) {
+            return 1;
+        }
+        let (x8, y8) = (fl::f64_bits(a8[k]), fl::f64_bits(b8[k]));
+        if fl::f64_bits(o8[k]) != num64(x8, y8, false) || fl::f64_bits(o8[n + k]) != num64(x8, y8, true) {
+            return 2;
+        }
+    }
+    // Accumulators over each length: lane `k` over the elements `k` modulo 16.
+    let mut e: [f32; 32] = [0.0; 32];
+    for m in [0usize, 16, 32, 96, 144] {
+        extremes(b.as_ptr(), m, &mut e[0]);
+        for k in 0..16usize {
+            let mut lo: u32 = 0x7F800000;
+            let mut hi: u32 = 0xFF800000;
+            let mut i = k;
+            while i < m {
+                lo = num32(lo, fl::f32_bits(b[i]), false);
+                hi = num32(hi, fl::f32_bits(b[i]), true);
+                i += 16;
+            }
+            if fl::f32_bits(e[k]) != lo || fl::f32_bits(e[16 + k]) != hi {
+                return 3;
+            }
+        }
+    }
+    let mut x = Vector::<f32>::new();
+    let mut y = Vector::<f32>::new();
+    for k in 0..64usize {
+        x.push((k % 13) as f32 - 6.5);
+        y.push((k % 5) as f32 * 0.25);
+    }
+    scaled(1.5, x.as_ptr(), y.as_mut_ptr(), 64);
+    for k in 0..64usize {
+        if y[k] != 1.5 * ((k % 13) as f32 - 6.5) + (k % 5) as f32 * 0.25 {
+            return 4;
+        }
+    }
+    // Both zeros, fractions below and above 1, negative values.
+    let mut r = Vector::<f32>::new();
+    let mut ro = Vector::<f32>::new();
+    let mut rr = Vector::<f32>::new();
+    let mut ba = Vector::<u8>::new();
+    let mut bb = Vector::<u8>::new();
+    let mut bo = Vector::<u8>::new();
+    let mut br = Vector::<u8>::new();
+    let mut bw = Vector::<u32>::new();
+    for k in 0..136usize {
+        r.push(
+            if k % 17 == 0 {
+                -0.0
+            } else if k % 19 == 0 {
+                0.0
+            } else {
+                ((k * 37 % 101) as f32 - 40.0) * 1.37
+            },
+        );
+        ro.push(0.0);
+        rr.push(0.0);
+        ba.push((k * 91 % 256) as u8);
+        bb.push((k * 57 % 256) as u8);
+        bo.push(0);
+        br.push(0);
+        bw.push((k as u32).wrapping_mul(0x9E3779B9));
+    }
+    for m in [0usize, 8, 24, 136] {
+        let a = rooted(r.as_ptr(), m, ro.as_mut_ptr());
+        let b = rooted_ref(r.as_ptr(), m, rr.as_mut_ptr());
+        if fl::f32_bits(a) != fl::f32_bits(b) {
+            return 5;
+        }
+        for k in 0..m {
+            if fl::f32_bits(ro[k]) != fl::f32_bits(rr[k]) {
+                return 6;
+            }
+        }
+    }
+    for m in [0usize, 32, 96, 136] {
+        if bytes(ba.as_ptr(), bb.as_ptr(), bw.as_ptr(), m, bo.as_mut_ptr()) != bytes_ref(
+            ba.as_ptr(),
+            bb.as_ptr(),
+            bw.as_ptr(),
+            m,
+            br.as_mut_ptr(),
+        ) {
+            return 7;
+        }
+        for k in 0..m - m % 32 {
+            if bo[k] != br[k] {
+                return 8;
+            }
+        }
+    }
+    return 0;
+}
+)",
+    );
+    assert(cli::superc_in(p.dir(), "build --profile=release main.spc -o bin").ok(), "the build");
+    assert_eq(p.run_bin(), 0);
+    assert_eq(p.run_bin_env("SC_SIMD_LEVEL=0 ").exit, 0);
+}
+
 // A build that replays a module's cached emission restores the module's LIR: the optimizer inlines its
 // functions (`free` into `Box<a::S>`'s drop, `freed` into main) as a clean build does, so both write the same
 // objects.

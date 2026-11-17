@@ -90,6 +90,7 @@ extend Wide {
         out.ranges.extend_copy(&b.ranges);
         out.fmath = b.fmath;
         out.ct = b.ct;
+        out.cpu = b.cpu;
         out.naked = b.naked;
         // The blocks, a wide parameter of a block but the entry as its parts.
         for k in 0..b.blocks.len() {

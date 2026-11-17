@@ -422,7 +422,11 @@ extend Gen {
         }
         // In a loop, a callee-saved vector register before v0 to v7, which each intrinsic's template and call
         // may write (`loop_csv`).
-        let cv = ast::pick(vreg, self.loop_csv(0), NOREG);
+        let cv = if vreg {
+            self.loop_csv(0)
+        } else {
+            NOREG
+        };
         if cv != NOREG {
             return cv;
         }
@@ -1506,7 +1510,7 @@ extend Gen {
         let ni = b.insts.len();
         self.hform.truncate(0);
         self.hform.resize_default(ni);
-        if unsafe (*self.pkg).half != HALF_ARITH {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).half != HALF_ARITH {
             return;
         }
         // Each value's uses: `Live::folds`' counts.
@@ -6729,7 +6733,7 @@ extend Gen {
         };
         if op == O_ALOAD {
             let rd = self.def_step(i) as u32;
-            if ord == MO_ACQUIRE && unsafe (*self.pkg).rcpc {
+            if ord == MO_ACQUIRE && unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc {
                 self.emit(a::ldapr(size, rd, rp));
             } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
@@ -6752,7 +6756,7 @@ extend Gen {
             let rv = self.reg(t.b) as u32;
             // One instruction with LSE, which reads its operands before it writes: a dying one's register.
             let rd = self.def_step(i) as u32;
-            if !unsafe (*self.pkg).lse {
+            if !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
                 self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
                 return true;
             }
@@ -6794,7 +6798,7 @@ extend Gen {
         } else {
             self.def(i) as u32
         };
-        if unsafe (*self.pkg).lse {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
             self.cmp_old(size, re);
@@ -7054,10 +7058,15 @@ extend Gen {
         if tpl.len() != 0 {
             // An intrinsic writes the registers it names and its arguments' and result's: the others
             // keep their values.
+            // An integer argument whose register the template does not name is an immediate of its
+            // instructions (`@k`): its register keeps its value (`imm_arg`).
             self.clob = 0;
+            let na = self.cr.lay.nargs();
             for q in 0..self.cr.lay.parts.len() {
                 let pa = self.cr.lay.parts[q];
-                self.clob |= 1u64 << preg(pa) as u64;
+                if pa.v || q >= na {
+                    self.clob |= 1u64 << preg(pa) as u64;
+                }
             }
             let mut j: usize = 0;
             while j < tx.len() {
@@ -7405,6 +7414,12 @@ extend Gen {
                 loc,
                 vty,
             )) && src.kind != LC_VAL;
+            if tpl.len() != 0 && self.cr.lay.imm_arg(loc, self.clob) {
+                // An immediate of the template's instructions is in no register.
+                self.cmoved.push(true);
+                self.cclean.push(true);
+                continue;
+            }
             if self.crefmv[k as usize] && self.arrived_in(x, self.cr.lay.parts[loc.p0 as usize].reg) {
                 // The address is still in the register it arrived in.
                 self.cmoved.push(true);

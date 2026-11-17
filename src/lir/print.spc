@@ -197,6 +197,18 @@ extend Printer {
         if b.ct {
             out.push_str("  ct\n");
         }
+        if b.cpu.own {
+            let k = b.cpu;
+            out.format_into(
+                "  cpu {} {} {} {} {} {}\n",
+                k.vector,
+                k.vec_bits,
+                k.vec_perm3,
+                k.vec_mulw,
+                k.flags(),
+                k.half,
+            );
+        }
         for x in 0..b.scopes.len() {
             let sc = b.scopes[x];
             out.push_str("  scope @");
@@ -427,6 +439,12 @@ extend Printer {
             }
             if (t.aux & VOP_NUM) != 0 {
                 out.push_str(".num");
+            }
+            if (t.aux & VOP_NUMBER) != 0 {
+                out.push_str(".number");
+            }
+            if (t.aux & VOP_FIRST) != 0 {
+                out.push_str(".first");
             }
         }
         if t.ty != T_NONE && (f != F_CMP || t.op == O_VCMP) && t.op != O_ACAS && t.op != O_SLOTADDR && t.op != O_SYMADDR && t.op != O_RETADDR && t.op != O_PTRADD {

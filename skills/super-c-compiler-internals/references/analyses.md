@@ -108,6 +108,8 @@ file is authoritative for where to look first.
 | Package constants of an emitter (backends, `names_vectors`, the mangler's prelude lookups, niche declarations and C library names) | `CEmit::new`, `Mangler::new`; a shard copies the master's (`CEmit::new_like`, `Mangler::new_like`) | each emitter; the C library names one `Arc` | whole build |
 | Uses of each instruction during slot forwarding | `forward_slots` (`lir::verify::uses_edges`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
 | Package part of the native cache key | `nat_base` | a local per loop (a module's key: its emission key xor it) | per loop |
+| The processor facts of a body compiled for more features than the build's (`lir::ir::Cpu`: register bytes, instruction flags) | `CEmit::body_cpu` (`cpu_facts` of `CEmit.fs`), at `Lower::body_i` | `lir::ir::Body.cpu` (carried by `copy_into`, `compact`, `pairs`, `promote`, `wide`, the inliner and the held records; read through `Package::cpu_of`) | the body's end |
+| The widest vector register any body of the program compiles for | `cemit` at the lowering context's setup (`cpu_facts` of the build's features, `Package.fn_union` and each `simd_levels` entry); the text parser from the `cpu` lines | `lir::ir::Package.vec_max` (read by `Run::job` to keep a body's form before `split_wide` for its callers) | never (a changed feature set changes the TU cache header) |
 
 ## optimize (`lir::opt` `Run`, `S_LOWERED` to the end of the `lir_opt` block)
 
@@ -175,6 +177,8 @@ After the optimizer, `lir::ct` computes the secret values of each `@constant_tim
 (`Check::violations`, a fixpoint over the block parameters) into `Check.taint`, valid for that body
 alone, and the replacement of each mark (`Check::strip`) into `Check.rep`; nothing after reads
 either.
+| What a float value holds: no signaling NaN (`FC_QUIET`) or no NaN (`FC_NUMBER`); a block parameter's by induction over its edges | `Opt::fclass`, `param_fclass` (the walk's predecessors and replacement maps; `UB_DEPTH` operations deep) | not stored (`float_known` writes `VOP_NUMBER` on the minimum or maximum) | per call |
+| The CPU-level check a body opens with: its run-time copies, the block it starts in | `lir::inline` `dispatch_of`, `check_block` (`exact` for the x86-64 generator's stub, `Gen::func`; without it for `Inliner::run`, which strips a callee's copied check) | `Gen.disp`, `Inliner.disp` | per body |
 
 ## codegen (`native_plan` to `S_GENERATED`)
 

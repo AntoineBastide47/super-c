@@ -241,8 +241,9 @@ pub(package) const fn vlisted(text: str, r: u32) bool {
 
 /// Whether template `text` may write vector register `r`. Per instruction: an arm64 one its first operand
 /// (all of a register list), a load, swap or compare-and-swap (`ld*`, `swp*`, `cas*`) every operand; an
-/// x86-64 one its last operand, an exchange or a gather (`xchg`, `xadd`, `gather`) every operand. A store
-/// or a compare counts as a write: the answer errs on the side of a write.
+/// x86-64 one its last operand, an exchange or a gather (`xchg`, `xadd`, `gather`) every operand. An arm64
+/// store (`st*`) writes no vector register. A compare counts as a write: the answer errs on the side of a
+/// write.
 pub(package) const fn vwrites(a64: bool, text: str, r: u32) bool {
     let mut at: usize = 0;
     // Each step takes one instruction (a line or a `;`-separated part).
@@ -262,6 +263,9 @@ pub(package) const fn vwrites(a64: bool, text: str, r: u32) bool {
             m += 1;
         }
         let mn = ins.slice(ms, m);
+        if a64 && mn.starts_with("st") {
+            continue;
+        }
         let all = if a64 {
             mn.starts_with("ld") || mn.starts_with("swp") || mn.starts_with("cas")
         } else {

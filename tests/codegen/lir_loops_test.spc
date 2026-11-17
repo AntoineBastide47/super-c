@@ -27,7 +27,7 @@ fn optimized_fm(text: str, bu: lu::Budgets, fma: bool, fm: u8) (Package, Package
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
-    after.fma = fma;
+    after.cpu.fma = fma;
     after.fmath = fm;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
@@ -3174,7 +3174,7 @@ b3:
     let mut err = String::new();
     let b = lparse::parse(src, &mut err).unwrap();
     let mut a = lparse::parse(src, &mut err).unwrap();
-    a.vector = 32;
+    a.cpu.vector = 32;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
     let mut v = verify::Verifier::new();
@@ -4688,7 +4688,7 @@ fn optimized_min(text: str, bu: lu::Budgets, vector: u32, vops: u8, accs: u32, n
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
-    after.vector = vector;
+    after.cpu.vector = vector;
     after.vops = vops;
     after.vec_accs = accs;
     after.vminnum = vminnum;
@@ -5686,15 +5686,20 @@ data @x size 256 align 4 bytes 000030c10000a0c00000803f0000008000000000000080c00
     let (_, an) = optimized_min(src, VECTOR, 16, VOPS_ALL, 4, false, 0);
     let (_, ac) = optimized_min(src, VECTOR, 16, VOPS_ALL, 4, false, VMIN_NUM);
     for f in ["mm", "mc"] {
+        // The accumulators hold no NaN (`.number`: a target blends no lane for one).
         let t = text_of(&a, f);
-        assert(t.contains("vop.min.v4f32") && t.contains("vop.max.v4f32") && !t.contains(".num"), t.as_str());
+        assert(
+            t.contains("vop.min.number.v4f32") && t.contains("vop.max.number.v4f32") && !t.contains(".num."),
+            t.as_str(),
+        );
         let tq = text_of(&aq, f);
-        assert(tq.contains("vop.min.num.v4f32") && count(&tq, "vop.max.num.v4f32") >= 2, tq.as_str());
+        assert(tq.contains("vop.min.num.number.v4f32") && count(&tq, "vop.max.num.v4f32") >= 2, tq.as_str());
         let tn = text_of(&an, f);
         assert(!tn.contains("v4f32"), tn.as_str());
         // No lane quieted: fewer C operations than VMIN_QUIET's.
         let tc = text_of(&ac, f);
-        assert(tc.contains("vop.min.num.v4f32") && count(&tc, ".num.v4f32") < count(&tq, ".num.v4f32"), tc.as_str());
+        assert(tc.contains("vop.min.num.number.v4f32") && count(&tc, ".num.") < count(&tq, ".num."), tc.as_str());
+        assert(!tc.contains(".num.v4f32"), tc.as_str());
     }
     // (n, offset): lengths around the vectors' and the copies' lanes, at offsets that move the zeros and NaNs.
     let cases: [(u64, u64); 12] = [
@@ -5977,7 +5982,7 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
     let before = lparse::parse(src, &mut err).unwrap();
     for ins in [true, false] {
         let mut after = lparse::parse(src, &mut err).unwrap();
-        after.vector = 16;
+        after.cpu.vector = 16;
         after.vops = VOPS_ALL;
         after.lane_insert = ins;
         let none = Vector::<bool>::new();
@@ -6301,7 +6306,7 @@ b0(v0: i64):
     // signed comparisons).
     for (vops, absd) in [(VOPS_ALL, 7u8), (1u8, 3u8)] {
         let mut after = lparse::parse(src, &mut err).unwrap();
-        after.vector = 16;
+        after.cpu.vector = 16;
         after.vops = vops;
         after.vec_absd = absd;
         // x86-64 compares lanes signed only: the unsigned comparison's operands have their sign bits flipped.
@@ -9603,7 +9608,7 @@ fn optimized_idioms(text: str, bu: lu::Budgets, sat: u8, absd: u8, sumw: u16) (P
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
-    after.vector = 16;
+    after.cpu.vector = 16;
     after.vops = VOPS_SOME;
     after.vec_sat = sat;
     after.vec_absd = absd;
@@ -10004,33 +10009,33 @@ fn bit_counts_and_byte_swaps_vectorize_where_the_target_has_them() {
     let mut err = String::new();
     let b = lparse::parse(BITS, &mut err).unwrap();
     let mut a = lparse::parse(BITS, &mut err).unwrap();
-    a.vector = 16;
+    a.cpu.vector = 16;
     a.vops = VOPS_ALL;
-    a.vec_bits = 0x0E0F07;
+    a.cpu.vec_bits = 0x0E0F07;
     let mut a0 = lparse::parse(BITS, &mut err).unwrap();
-    a0.vector = 16;
+    a0.cpu.vector = 16;
     a0.vops = VOPS_ALL;
-    a0.vec_bits = 0;
+    a0.cpu.vec_bits = 0;
     // A target with a scalar count in one instruction (x86-64-v2's `popcnt`, wasm32's): a 4-byte count stays.
     let mut a1 = lparse::parse(BITS, &mut err).unwrap();
-    a1.vector = 16;
+    a1.cpu.vector = 16;
     a1.vops = VOPS_ALL;
-    a1.vec_bits = 0;
-    a1.popcnt = true;
+    a1.cpu.vec_bits = 0;
+    a1.cpu.popcnt = true;
     // One that looks up bytes by indices (x86-64's SSSE3 `pshufb`): the counts by a table of nibbles,
     // also of 4-byte lanes beside the scalar count, where the cost model finds them cheaper.
     let mut a2 = lparse::parse(BITS, &mut err).unwrap();
-    a2.vector = 16;
+    a2.cpu.vector = 16;
     a2.vops = VOPS_ALL;
-    a2.vec_bits = 0;
-    a2.popcnt = true;
-    a2.vtbl = true;
+    a2.cpu.vec_bits = 0;
+    a2.cpu.popcnt = true;
+    a2.cpu.vtbl = true;
     // One that counts set bits but no leading zeros in registers (wasm32): 16-bit leading zeros by the bits
     // below the top one set, then their count.
     let mut a3 = lparse::parse(BITS, &mut err).unwrap();
-    a3.vector = 16;
+    a3.cpu.vector = 16;
     a3.vops = VOPS_ALL;
-    a3.vec_bits = 0x000700;
+    a3.cpu.vec_bits = 0x000700;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: four });
     lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: four });
@@ -10271,13 +10276,13 @@ fn widening_products_vectorize_as_the_narrow_lanes_products() {
     let mut err = String::new();
     let b = lparse::parse(WIDENED, &mut err).unwrap();
     let mut a = lparse::parse(WIDENED, &mut err).unwrap();
-    a.vector = 16;
+    a.cpu.vector = 16;
     a.vops = VOPS_ALL;
-    a.vec_mulw = 0x707;
+    a.cpu.vec_mulw = 0x707;
     let mut a0 = lparse::parse(WIDENED, &mut err).unwrap();
-    a0.vector = 16;
+    a0.cpu.vector = 16;
     a0.vops = VOPS_ALL;
-    a0.vec_mulw = 0;
+    a0.cpu.vec_mulw = 0;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: two });
     lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: two });
@@ -10746,7 +10751,7 @@ b3:
 fn selected_and_called_reductions_vectorize() {
     let (b, a) = optimized_fm(SELECTED, VECTOR, false, FM_FINITE | FM_NSZ | FM_ASSOC);
     let m = text_of(&a, "mx");
-    assert(m.contains("max.num.v4f32") && !m.contains("wconst.v4f32 0x0, 0x0"), m.as_str());
+    assert(m.contains("max.num.number.v4f32") && !m.contains("wconst.v4f32 0x0, 0x0"), m.as_str());
     let s = text_of(&a, "smin");
     assert(s.contains("vsel.v4f32") && s.contains("reduce_min"), s.as_str());
     let c = text_of(&a, "csum");
@@ -15164,10 +15169,10 @@ fn narrow_counts_of_8_byte_vectors_take_no_byte_lookups() {
     let mut err = String::new();
     let b = lparse::parse(NARROW_POP, &mut err).unwrap();
     let mut a = lparse::parse(NARROW_POP, &mut err).unwrap();
-    a.vector = 16;
+    a.cpu.vector = 16;
     a.vops = VOPS_ALL;
-    a.vec_bits = 0;
-    a.vtbl = true;
+    a.cpu.vec_bits = 0;
+    a.cpu.vtbl = true;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
     for n in 0..100u64 {
@@ -15488,4 +15493,438 @@ b3:
             }
         }
     }
+}
+
+// A float minimumNumber and maximumNumber as the lowering makes them for each target (`lir::lower`
+// `min_num`): arm64's of the operands quieted (each one's `vop.max.num` with itself), x86-64's of the first
+// quieted (its sum with -0.0), wasm32's own. An accumulator that starts as a number stays one in every
+// iteration (`lir::opt` `fclass`): its quieting goes, a lane's quieting is one for both operations, and
+// the operation takes the number first (`.number`). One that starts as a loaded value keeps the
+// operations. The evaluator's values stay, over NaNs of both kinds and both zeros.
+const MIN_NUMS: str = M"(lir ptr 8
+sym @x data global
+sym @quiet fn global
+sym @quiet_any fn global
+sym @first fn global
+sym @first_any fn global
+sym @exact fn global
+sym @exact_any fn global
+fn @quiet
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = fconst.f32 0x7f800000
+  v3 = splat.v4f32 v2
+  v4 = fconst.f32 0xff800000
+  v5 = splat.v4f32 v4
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = vop.max.num.v4f32 (v11, v11)
+  v16 = vop.max.num.v4f32 (v14, v14)
+  v17 = vop.min.num.first.v4f32 (v15, v16)
+  v18 = vop.max.num.v4f32 (v12, v12)
+  v19 = vop.max.num.v4f32 (v14, v14)
+  v20 = vop.max.num.first.v4f32 (v18, v19)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+fn @quiet_any
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = iconst.i64 0
+  v3 = load.v4f32 v1+48 align 0
+  v4 = iconst.i64 0
+  v5 = load.v4f32 v1+32 align 0
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = vop.max.num.v4f32 (v11, v11)
+  v16 = vop.max.num.v4f32 (v14, v14)
+  v17 = vop.min.num.first.v4f32 (v15, v16)
+  v18 = vop.max.num.v4f32 (v12, v12)
+  v19 = vop.max.num.v4f32 (v14, v14)
+  v20 = vop.max.num.first.v4f32 (v18, v19)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+fn @first
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = fconst.f32 0x7f800000
+  v3 = splat.v4f32 v2
+  v4 = fconst.f32 0xff800000
+  v5 = splat.v4f32 v4
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = fadd.v4f32 v11, v8
+  v16 = iconst.i64 0
+  v17 = vop.min.num.first.v4f32 (v15, v14)
+  v18 = fadd.v4f32 v12, v8
+  v19 = iconst.i64 0
+  v20 = vop.max.num.first.v4f32 (v18, v14)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+fn @first_any
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = iconst.i64 0
+  v3 = load.v4f32 v1+48 align 0
+  v4 = iconst.i64 0
+  v5 = load.v4f32 v1+32 align 0
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = fadd.v4f32 v11, v8
+  v16 = iconst.i64 0
+  v17 = vop.min.num.first.v4f32 (v15, v14)
+  v18 = fadd.v4f32 v12, v8
+  v19 = iconst.i64 0
+  v20 = vop.max.num.first.v4f32 (v18, v14)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+fn @exact
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = fconst.f32 0x7f800000
+  v3 = splat.v4f32 v2
+  v4 = fconst.f32 0xff800000
+  v5 = splat.v4f32 v4
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = iconst.i64 0
+  v16 = iconst.i64 0
+  v17 = vop.min.v4f32 (v11, v14)
+  v18 = iconst.i64 0
+  v19 = iconst.i64 0
+  v20 = vop.max.v4f32 (v14, v12)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+fn @exact_any
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @x
+  v2 = iconst.i64 0
+  v3 = load.v4f32 v1+48 align 0
+  v4 = iconst.i64 0
+  v5 = load.v4f32 v1+32 align 0
+  v6 = iconst.i64 0
+  v7 = iconst.i64 4
+  v8 = wconst.v4f32 0x8000000080000000, 0x8000000080000000
+  v9 = icmp.eq v0, v6
+  br v9, b2(v3, v5), b1(v6, v3, v5)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = ptradd v1, v10 * 4
+  v14 = load.v4f32 v13 align 0
+  v15 = iconst.i64 0
+  v16 = iconst.i64 0
+  v17 = vop.min.v4f32 (v11, v14)
+  v18 = iconst.i64 0
+  v19 = iconst.i64 0
+  v20 = vop.max.v4f32 (v14, v12)
+  v21 = add.i64 v10, v7
+  v22 = icmp.ult v21, v0
+  br v22, b1(v21, v17, v20), b2(v17, v20)
+b2(v23: v4f32, v24: v4f32):
+  v25 = bitcast.v2i64 v23
+  v26 = bitcast.v2i64 v24
+  v27 = vextract.0.i64 v25
+  v28 = vextract.1.i64 v25
+  v29 = vextract.0.i64 v26
+  v30 = vextract.1.i64 v26
+  v31 = iconst.i64 31
+  v32 = mul.i64 v27, v31
+  v33 = add.i64 v32, v28
+  v34 = mul.i64 v33, v31
+  v35 = add.i64 v34, v29
+  v36 = mul.i64 v35, v31
+  v37 = add.i64 v36, v30
+  ret v37
+data @x size 64 align 4 bytes 0000803f00000080000000000000c07f0100807f000080c00000004000000041000010c1000040400000807f000080ff0000a040000080bf2300a07f5604c07f
+)";
+
+@test
+fn a_minimum_number_of_a_number_keeps_no_quieting() {
+    let (b, aq) = optimized_min(MIN_NUMS, NO_LOOPS, 16, VOPS_ALL, 8, false, VMIN_QUIET);
+    let (_, an) = optimized_min(MIN_NUMS, NO_LOOPS, 16, VOPS_ALL, 8, false, VMIN_NUM);
+    let (_, ae) = optimized_min(MIN_NUMS, NO_LOOPS, 16, VOPS_ALL, 8, false, VMIN_EXACT);
+    let q = text_of(&aq, "quiet");
+    assert_eq(count(&q, "vop.max.num.v4f32"), 1);
+    assert(q.contains("vop.min.num.number.first.v4f32") && q.contains("vop.max.num.number.first.v4f32"), q.as_str());
+    let qa = text_of(&aq, "quiet_any");
+    assert(count(&qa, "vop.max.num.v4f32") == 3 && !qa.contains(".number"), qa.as_str());
+    let f = text_of(&an, "first");
+    assert(!f.contains("fadd") && count(&f, ".num.number.first.v4f32") == 2, f.as_str());
+    let fa = text_of(&an, "first_any");
+    assert(count(&fa, "fadd.v4f32") == 2 && !fa.contains(".number"), fa.as_str());
+    // The number operand goes first, also from the second place.
+    let e = text_of(&ae, "exact");
+    assert(count(&e, ".number.v4f32") == 2, e.as_str());
+    let ea = text_of(&ae, "exact_any");
+    assert(!ea.contains(".number"), ea.as_str());
+    for name in ["quiet", "quiet_any", "first", "first_any", "exact", "exact_any"] {
+        for n in [0u64, 4, 8, 12, 16] {
+            let args: []u64 = [n];
+            let want = run_value(&b, name, args);
+            same_outcome(&b, &aq, name, args, want, false);
+            same_outcome(&b, &an, name, args, want, false);
+            same_outcome(&b, &ae, name, args, want, false);
+        }
+    }
+    // Each form gives the minimumNumber's bits.
+    for n in [0u64, 4, 8, 12, 16] {
+        let args: []u64 = [n];
+        assert_eq(run_value(&b, "quiet", args), run_value(&b, "exact", args));
+        assert_eq(run_value(&b, "first", args), run_value(&b, "exact", args));
+    }
+}
+
+// A body compiled for more processor features than the build's holds its own facts (`Body.cpu`, the
+// text's `cpu` line): its 32-byte vectors stay whole where the build's bodies split theirs into 16-byte
+// parts, and only a caller with those facts inlines a copy of it. A function that chooses its run-time
+// copies before its own code (`lir::inline::dispatch_of`) runs that code for the build's features: the
+// copy of a callee with such a choice takes the callee's own code alone (`strip_checks`), where a plain
+// caller keeps the choice. A body that reads the level and branches on another value (`odd`: a call's
+// result) holds no choice. A body of the build's features with a wider vector gives its callers its form
+// before the split into parts.
+const LEVELS: str = M"(lir ptr 8
+sym @__sc_simd_lv data global
+sym @flag fn global
+sym @odd fn global
+sym @whole fn global
+sym @halves fn global
+sym @leaf__fs fn global
+sym @top__fs fn global
+sym @leaf fn global
+sym @top fn global
+sym @plain fn global
+sym @wide fn global
+sym @same fn global
+sym @base fn global
+sym @parts fn global
+fn @leaf
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @__sc_simd_lv
+  v2 = aload.i8 v1 relaxed
+  v3 = iconst.i8 1
+  v4 = icmp.uge v2, v3
+  br v4, b1, b2
+b1:
+  v5 = call.i64 @leaf__fs(v0) : (i64) -> i64
+  ret v5
+b2:
+  v6 = iconst.i64 3
+  v7 = add.i64 v0, v6
+  ret v7
+fn @top
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @__sc_simd_lv
+  v2 = aload.i8 v1 relaxed
+  v3 = iconst.i8 1
+  v4 = icmp.uge v2, v3
+  br v4, b1, b2
+b1:
+  v5 = call.i64 @top__fs(v0) : (i64) -> i64
+  ret v5
+b2:
+  v6 = call.i64 @leaf(v0) : (i64) -> i64
+  v7 = mul.i64 v6, v6
+  ret v7
+fn @plain
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @leaf(v0) : (i64) -> i64
+  v2 = mul.i64 v1, v1
+  ret v2
+fn @wide
+  sig (ptr, ptr) -> void
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 0
+  v3 = load.v8f32 v1 align 0
+  v4 = fadd.v8f32 v2, v3
+  store v4, v1 align 0
+  ret
+fn @same
+  sig (ptr, ptr) -> void
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: ptr):
+  call @wide(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @base
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  call @wide(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @parts
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8f32 v0 align 0
+  v3 = load.v8f32 v1 align 0
+  v4 = fadd.v8f32 v2, v3
+  store v4, v1 align 0
+  ret
+fn @whole
+  sig (ptr, ptr) -> void
+  cpu 32 921351 9 1799 319 1
+b0(v0: ptr, v1: ptr):
+  call @parts(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @halves
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  call @parts(v0, v1) : (ptr, ptr) -> void
+  ret
+fn @odd
+  sig (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: i64, v5: i64, v6: i64, v7: i64, v8: i64, v9: i64, v10: i64, v11: i64):
+  v12 = symaddr @__sc_simd_lv
+  v13 = aload.i8 v12 relaxed
+  v14 = call.i8 @flag(v0, v1) : (i64, i64) -> i8
+  br v14, b1, b2
+b1:
+  v15 = call.i64 @leaf(v0) : (i64) -> i64
+  ret v15
+b2:
+  v16 = zext.i64 v13
+  ret v16
+data @__sc_simd_lv size 1 align 0
+)";
+
+@test
+fn a_body_for_more_features_keeps_its_registers_and_its_callers() {
+    let (_, a) = optimized(LEVELS, NO_LOOPS);
+    let w = text_of(&a, "wide");
+    assert(w.contains("cpu 32 917504 9 1028 319 1") && w.contains("fadd.v8f32") && !w.contains("v4f32"), w.as_str());
+    let s = text_of(&a, "same");
+    assert(s.contains("cpu 32") && s.contains("fadd.v8f32") && !s.contains("call"), s.as_str());
+    let b = text_of(&a, "base");
+    assert(b.contains("call @wide") && !b.contains("cpu") && !b.contains("fadd"), b.as_str());
+    let p = text_of(&a, "parts");
+    assert(!p.contains("v8f32") && p.contains("fadd.v4f32") && !p.contains("cpu"), p.as_str());
+    // Its callers inline its form before the split (`Package.vec_max`): whole in 32-byte registers (of
+    // facts that hold the build's, `Cpu::within`), in parts in the build's.
+    let h = text_of(&a, "whole");
+    assert(h.contains("fadd.v8f32") && !h.contains("v4f32") && !h.contains("call"), h.as_str());
+    let l = text_of(&a, "halves");
+    assert(!l.contains("v8f32") && l.contains("fadd.v4f32") && !l.contains("call"), l.as_str());
+    // The choice of the caller alone; the callee's own code after it.
+    let t = text_of(&a, "top");
+    assert(t.contains("@top__fs") && !t.contains("@leaf") && t.contains("mul.i64"), t.as_str());
+    assert_eq(count(&t, "aload"), 1);
+    let q = text_of(&a, "plain");
+    assert(q.contains("aload") && q.contains("@leaf__fs"), q.as_str());
+    let o = text_of(&a, "odd");
+    assert(o.contains("aload") && o.contains("call.i8 @flag"), o.as_str());
 }

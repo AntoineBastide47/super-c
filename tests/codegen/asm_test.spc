@@ -1073,7 +1073,7 @@ fn x64_zmm_code_round_trips() {
     let q = lparse::parse(&lir, &mut err);
     assert(q.is_some(), err.as_str());
     let mut pk = q.unwrap();
-    pk.vector = 64;
+    pk.cpu.vector = 64;
     let mut fs_ = Vector::<u32>::new();
     let ds = Vector::<u32>::new();
     for i in 0..pk.syms.len() {

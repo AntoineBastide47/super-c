@@ -26,7 +26,8 @@ baseline by default); `bsys::features_for` computes it from build.toml and `--ta
 `Package::new`). `Package.simd_width` (256 or 512) is the planner's preferred width on AVX-512.
 A function's effective set is `Package::fn_set(m, f)`: the build's and its `@target_feature`'s
 (`fn_features`), closed (on wasm32 the build's alone); `Package.fn_union` joins every function's
-set, so the entries any function may call render. Both, and every backend entry's key, features and
+set, so the entries any function may call render, and with the levels it gives the widest register a
+body compiles for (`lir::ir::Package.vec_max`). Both, and every backend entry's key, features and
 name, mix into the TU cache header hash (`driver::tuc`), so a changed set or table never replays a cached unit.
 
 ## Attributes
@@ -85,7 +86,12 @@ each copy's call forwards the function's parameters and returns its result) over
 one per program in the registry object (`native_registry`, `simd_level_init`): 0, the build's features,
 until the registry's constructor `__sc_simd_init` sets it before `main` from `sc_cpu_words` and
 `SC_SIMD_LEVEL`; code that runs before it takes the original. The levels join the emit stamp's `opt` line and the TU cache
-header. The interpreter traps on a call of such a function ("`f` has no compile-time
+header. A native copy's bodies, and a `@target_feature` function's, lower with the processor facts of
+their set (`CEmit::body_cpu`, `cpu_facts`; `lir::ir::Body.cpu`): the optimizer and the code generator
+give them the registers and instructions of that set, and the LIR inliner copies one only into a body
+whose facts hold them. The copy of a callee with a level choice loses the choice in a caller that passed
+its own (`lir::inline` `strip_checks`): that code runs for the build's features. The interpreter traps
+on a call of such a function ("`f` has no compile-time
 value"). `ir::facts::call_access` reads the memory annotations (`MA_READ`, `MA_WRITE`, `MA_LANES`);
 `term_effect` gives an annotated read `EF_NONE` and a write `EF_PTR` through its argument.
 
@@ -244,7 +250,10 @@ after the last: a pointer may alias an operand or the result. The C compiler kee
 in registers.
 
 The native lowering takes the same chunk forms in LIR: an entry of fewer lanes splits its operands
-by halves (`lir::lower` `split_entry`), and `compress_store` moves each chunk's active lanes to the
+by halves (`lir::lower` `split_entry`), a float `min_num` or `max_num` with an entry is LIR operations
+of the whole vectors instead (`lir::lower` `min_num`: the optimizer drops the NaN handling of an operand
+that holds numbers, and x86-64 keeps an accumulator loop's vectors in registers; the entry stays the C
+path's, and the native one's under AVX10.2), and `compress_store` moves each chunk's active lanes to the
 front by the `u8` `swizzle_zero` entry through a table row of the chunk's mask bits, the rows' lane
 counts in a second table, the lane loop a rare block that runs only where the output ends within a
 chunk of the packed lanes (`compress_chunks`).

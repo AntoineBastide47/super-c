@@ -1129,6 +1129,13 @@ pub(package) const VOP_UNCHECKED: u16 = 1024;
 /// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`). A
 /// SIMD_ROUND_EVEN that computes C's `round`: halfway away from zero (arm64 `frinta`, `Package.vround_away`).
 pub(package) const VOP_NUM: u16 = 2048;
+/// A float SIMD_MIN or SIMD_MAX whose operand 0 has no NaN lane: a NaN lane of operand 1 gives operand 0's
+/// (x86-64 and wasm32 blend no lane for a NaN operand 0).
+pub(package) const VOP_NUMBER: u16 = 4096;
+/// A VOP_NUM SIMD_MIN or SIMD_MAX that gives operand 0 for two NaN lanes, as the minimumNumber does of
+/// its quieted first operand (`lir::lower` `min_num`): without it the target's choice (x86-64's packed
+/// form gives operand 1, as its scalar one).
+pub(package) const VOP_FIRST: u16 = 8192;
 /// `Package.vminnum`: a minimumNumber of float vectors by SIMD_MIN and SIMD_MAX, by VOP_NUM ones of a
 /// quieted operand, or by VOP_NUM ones as they are.
 pub(package) const VMIN_EXACT: u8 = 1;
@@ -1503,6 +1510,9 @@ pub(package) struct Body {
     pub(package) scopes: Vector<Scope>,
     /// A `@constant_time` function's body (`lir::ct` checks it): only a constant-time caller inlines a copy.
     pub(package) ct: bool,
+    /// The processor facts of a body compiled for more features than the build (`Cpu.own`): only a caller
+    /// whose facts hold them inlines a copy.
+    pub(package) cpu: Cpu,
     /// A naked function (`@unsafe(naked)`): its machine code is its `O_ASM` templates alone, in order,
     /// without a prologue or an epilogue.
     pub(package) naked: bool,
@@ -1591,6 +1601,7 @@ extend Body {
             fmath: 0,
             scopes: Vector::<Scope>::new(),
             ct: false,
+            cpu: Cpu::none(),
             naked: false,
             cur: 0,
         };
@@ -1619,6 +1630,7 @@ extend Body {
         self.fmath = 0;
         self.scopes.truncate(0);
         self.ct = false;
+        self.cpu = Cpu::none();
         self.naked = false;
         self.cur = 0;
     }
@@ -1644,6 +1656,7 @@ extend Body {
         o.fmath = self.fmath;
         assign(&mut o.scopes, &self.scopes);
         o.ct = self.ct;
+        o.cpu = self.cpu;
         o.naked = self.naked;
         o.cur = 0;
     }
@@ -1670,6 +1683,7 @@ extend Body {
             fmath: self.fmath,
             scopes: exact(&self.scopes),
             ct: self.ct,
+            cpu: self.cpu,
             naked: self.naked,
             cur: 0,
         };
@@ -1696,6 +1710,7 @@ extend Body {
             fmath: self.fmath,
             scopes: settle(&mut self.scopes),
             ct: self.ct,
+            cpu: self.cpu,
             naked: self.naked,
             cur: 0,
         };
@@ -2057,6 +2072,133 @@ extend Body {
 /// What bodies share: the spellings, the files, the symbols, the panic messages, the data and the
 /// bodies themselves. A tool adds to it with the calls the lowering uses, so a function with no source
 /// is the same as a lowered one.
+/// The flags of `Cpu` in the text form's word (`Cpu::flags`).
+pub(package) const CPU_VROUND: u32 = 1;
+pub(package) const CPU_POPCNT: u32 = 2;
+pub(package) const CPU_SSE41: u32 = 4;
+pub(package) const CPU_VTBL: u32 = 8;
+pub(package) const CPU_ADDSUB: u32 = 16;
+pub(package) const CPU_LZCNT: u32 = 32;
+pub(package) const CPU_LSE: u32 = 64;
+pub(package) const CPU_RCPC: u32 = 128;
+pub(package) const CPU_FMA: u32 = 256;
+
+/// What a processor's features give the native backend (`emit::cemit` computes them from a feature set):
+/// the build's (`Package.cpu`), or those of one body compiled for more features (`Body.cpu`: a
+/// `@target_feature` function, a run-time copy of vector code), which the optimizer and the code generator
+/// then read for that body (`Package::cpu_of`).
+pub(package) struct Cpu {
+    /// A body's own facts; false: the body compiles for the build's.
+    pub(package) own: bool,
+    /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
+    /// none: the loop vectorizer's vectors (`lir::loops`).
+    pub(package) vector: u32,
+    /// The lane sizes whose `clz`, `popcnt` and `bswap` the native backend computes in registers
+    /// (`target::table::Isa`), a bit per size in bytes in bits 0 to 7, 8 to 15 and 16 to 23: the loop
+    /// vectorizer widens them (`SIMD_CLZ`, `SIMD_POPCNT`, `SIMD_BSWAP`).
+    pub(package) vec_bits: u32,
+    /// The instructions the native backend takes to permute the lanes of up to three vectors in registers
+    /// (`target::table::Isa`, a `shuffle` of three operands), 0 for none: the loop vectorizer loads and
+    /// stores groups of every third element through them, at that cost.
+    pub(package) vec_perm3: u8,
+    /// The widening products (`O_VMULW`) the native backend computes in registers (`target::table::Isa`), a
+    /// bit per operand lane size in bytes (1, 2, 4), unsigned in bits 0 to 7 and signed in bits 8 to 15: the
+    /// loop vectorizer multiplies two extended values' narrow lanes.
+    pub(package) vec_mulw: u16,
+    /// Whether the native backend rounds float vectors to an integer in registers (`target::table::Isa`;
+    /// x86-64 with SSE4.1), with `Package.vfloat`: the loop vectorizer then widens the calls of C's `floor`,
+    /// `ceil` and `trunc`.
+    pub(package) vround: bool,
+    /// The processor counts set bits in one instruction: wasm32's every one, x86-64's where that is optional
+    /// (`popcnt`, from x86-64-v2 or `-mpopcnt`).
+    pub(package) popcnt: bool,
+    /// The processor has SSE4.1 (x86-64 `roundsd`, from x86-64-v2 or `-msse4.1`): the C library's exact
+    /// roundings are instructions (`target::x64intrin::SSE41_ROWS`).
+    pub(package) sse41: bool,
+    /// The native backend looks up the bytes of a 16-byte table by a vector of byte indices in one
+    /// instruction (`SIMD_SWIZZLE_ZERO` of bytes; x86-64's SSSE3 `pshufb`, also on 32 and 64 bytes for a
+    /// table of one 16-byte pattern and indices below 16): the loop vectorizer counts set bits by a table
+    /// of the nibbles' counts (`lir::loops::nibble_count`).
+    pub(package) vtbl: bool,
+    /// The processor subtracts the even lanes and adds the odd ones of float vectors in one instruction
+    /// (x86-64's SSE3 `addsubps`, `addsubpd`; from x86-64-v2 or `-msse3`): `codegen::live::FOLD_ADDSUB`.
+    pub(package) addsub: bool,
+    /// The processor counts leading zeros in one instruction, the width for 0 (x86-64's `lzcnt`, from
+    /// x86-64-v3 or `-mlzcnt`).
+    pub(package) lzcnt: bool,
+    /// The processor has the Large System Extensions (arm64 `ldadd`, `cas`; Armv8.1-A): else an atomic
+    /// read-modify-write or compare-and-swap is a loop of exclusive loads and stores.
+    pub(package) lse: bool,
+    /// The processor has FEAT_LRCPC (arm64 `ldapr`): an acquire load waits for no earlier release store.
+    pub(package) rcpc: bool,
+    /// What the processor does with IEEE binary16 values (`HALF_*`): `std::float`'s f16 computes in f32
+    /// through `O_HTOF` and `O_FTOH` where it converts them.
+    pub(package) half: u8,
+    /// The processor has a scalar fused multiply-add (`O_FMA` for contraction).
+    pub(package) fma: bool,
+}
+
+extend Cpu as Copy {}
+
+extend Cpu {
+    /// The facts of a body that compiles for the build's features.
+    pub(package) const fn none() Cpu {
+        return Cpu {
+            own: false,
+            vector: 0,
+            vec_bits: 0,
+            vec_perm3: 0,
+            vec_mulw: 0,
+            vround: false,
+            popcnt: false,
+            sse41: false,
+            vtbl: false,
+            addsub: false,
+            lzcnt: false,
+            lse: false,
+            rcpc: false,
+            half: HALF_NONE,
+            fma: false,
+        };
+    }
+
+    /// The facts with a flag each as one word (`CPU_*`), for the text form.
+    pub(package) const fn flags(self: &Self) u32 {
+        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA;
+    }
+
+    /// A body's own facts from the words of the text form: the register bytes, `vec_bits`, `vec_perm3`,
+    /// `vec_mulw`, the flags (`flags`) and `half`.
+    pub(package) const fn of_words(vector: u32, bits: u32, perm3: u32, mulw: u32, f: u32, half: u32) Cpu {
+        return Cpu {
+            own: true,
+            vector: vector,
+            vec_bits: bits,
+            vec_perm3: perm3 as u8,
+            vec_mulw: mulw as u16,
+            vround: (f & CPU_VROUND) != 0,
+            popcnt: (f & CPU_POPCNT) != 0,
+            sse41: (f & CPU_SSE41) != 0,
+            vtbl: (f & CPU_VTBL) != 0,
+            addsub: (f & CPU_ADDSUB) != 0,
+            lzcnt: (f & CPU_LZCNT) != 0,
+            lse: (f & CPU_LSE) != 0,
+            rcpc: (f & CPU_RCPC) != 0,
+            half: half as u8,
+            fma: (f & CPU_FMA) != 0,
+        };
+    }
+
+    /// Whether code made for these facts runs on a processor with `o`'s: no register is wider and no
+    /// instruction is missing there. The inliner copies a body only into such a caller.
+    pub(package) const fn within(self: &Self, o: Cpu) bool {
+        let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0;
+        let perm = self.vec_perm3 == 0 || self.vec_perm3 == o.vec_perm3;
+        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma);
+        return self.vector <= o.vector && bits && perm && flags && self.half <= o.half;
+    }
+}
+
 pub(package) struct Package {
     pub(package) ptr_bytes: u32, // the data model's pointer size
     /// The widest vector the C side passes in one vector register (16, 32 or 64), or 0 when C holds a
@@ -2080,9 +2222,6 @@ pub(package) struct Package {
     pub(package) tail: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub(package) protect: u8,
-    /// The bytes of a vector the native backend computes in one register (`target::table::Isa`), 0 for
-    /// none: the loop vectorizer's vectors (`lir::loops`).
-    pub(package) vector: u32,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
     /// lane, VOPS_SOME or VOPS_ALL in registers. With either the loop vectorizer mixes lane widths up to a
     /// factor of two and shifts; its cost model counts the lane by lane forms of VOPS_SOME. With either the
@@ -2105,29 +2244,14 @@ pub(package) struct Package {
     /// (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop vectorizer computes the idiom at
     /// the narrow lanes.
     pub(package) vec_absd: u8,
-    /// The lane sizes whose `clz`, `popcnt` and `bswap` the native backend computes in registers
-    /// (`target::table::Isa`), a bit per size in bytes in bits 0 to 7, 8 to 15 and 16 to 23: the loop
-    /// vectorizer widens them (`SIMD_CLZ`, `SIMD_POPCNT`, `SIMD_BSWAP`).
-    pub(package) vec_bits: u32,
-    /// The instructions the native backend takes to permute the lanes of up to three vectors in registers
-    /// (`target::table::Isa`, a `shuffle` of three operands), 0 for none: the loop vectorizer loads and
-    /// stores groups of every third element through them, at that cost.
-    pub(package) vec_perm3: u8,
     /// The widening sums (`O_VSUMW`) the native backend computes in registers (`target::table::Isa`), a bit
     /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
     /// into accumulators of such lanes.
     pub(package) vec_sumw: u16,
-    /// The widening products (`O_VMULW`) the native backend computes in registers (`target::table::Isa`), a
-    /// bit per operand lane size in bytes (1, 2, 4), unsigned in bits 0 to 7 and signed in bits 8 to 15: the
-    /// loop vectorizer multiplies two extended values' narrow lanes.
-    pub(package) vec_mulw: u16,
     /// Whether the native backend computes the absolute value, C's `fmin` and `fmax`, and the fused
     /// multiply-add (with `fma`) of float vectors in registers (`target::table::Isa`): the loop vectorizer
     /// then widens the calls of C's `fabs`, `fmin`, `fmax` and `fma` (`lir::loops::lane_fn`).
     pub(package) vfloat: bool,
-    /// Whether it also rounds float vectors to an integer in registers (`target::table::Isa`; x86-64 with
-    /// SSE4.1): the loop vectorizer then widens the calls of C's `floor`, `ceil` and `trunc`.
-    pub(package) vround: bool,
     /// Whether the backend rounds float vectors halfway away from zero in one instruction (arm64's FRINTA,
     /// `target::table::Isa::vector_round_away`): C's `round` widens to SIMD_ROUND_EVEN with VOP_NUM.
     pub(package) vround_away: bool,
@@ -2184,17 +2308,6 @@ pub(package) struct Package {
     /// gives every part of a section the section's alignment, and no processor that runs its images
     /// showed the cost.
     pub(package) fit_lines: bool,
-    /// The processor counts set bits in one instruction: wasm32's every one, x86-64's where that is optional
-    /// (`popcnt`, from x86-64-v2 or `-mpopcnt`).
-    pub(package) popcnt: bool,
-    /// The processor has SSE4.1 (x86-64 `roundsd`, from x86-64-v2 or `-msse4.1`): the C library's exact
-    /// roundings are instructions (`target::x64intrin::SSE41_ROWS`).
-    pub(package) sse41: bool,
-    /// The native backend looks up the bytes of a 16-byte table by a vector of byte indices in one
-    /// instruction (`SIMD_SWIZZLE_ZERO` of bytes; x86-64's SSSE3 `pshufb`, also on 32 and 64 bytes for a
-    /// table of one 16-byte pattern and indices below 16): the loop vectorizer counts set bits by a table
-    /// of the nibbles' counts (`lir::loops::nibble_count`).
-    pub(package) vtbl: bool,
     /// The native backend makes the bits of a 16-byte lane mask of bytes in one instruction
     /// (`target::table::Isa`, x86-64's PMOVMSKB): an unbounded scan finds the lane that leaves by them
     /// (`lir::loops::scan_bits`), else by a nibble a byte (`lir::loops::nibbles`).
@@ -2211,17 +2324,6 @@ pub(package) struct Package {
     /// empty for none: `lir::opt::Run::new` takes a call of one that computes from its arguments alone
     /// (`intrin::pure`) for a call that touches no memory.
     pub(package) isa: str<'static>,
-    /// The processor subtracts the even lanes and adds the odd ones of float vectors in one instruction
-    /// (x86-64's SSE3 `addsubps`, `addsubpd`; from x86-64-v2 or `-msse3`): `codegen::live::FOLD_ADDSUB`.
-    pub(package) addsub: bool,
-    /// The processor counts leading zeros in one instruction, the width for 0 (x86-64's `lzcnt`, from
-    /// x86-64-v3 or `-mlzcnt`).
-    pub(package) lzcnt: bool,
-    /// The processor has the Large System Extensions (arm64 `ldadd`, `cas`; Armv8.1-A): else an atomic
-    /// read-modify-write or compare-and-swap is a loop of exclusive loads and stores.
-    pub(package) lse: bool,
-    /// The processor has FEAT_LRCPC (arm64 `ldapr`): an acquire load waits for no earlier release store.
-    pub(package) rcpc: bool,
     /// The optimizer lowers each `switch` with a range or many values to compares and branches
     /// (`lir::switches`): the native backends test a `switch`'s values one by one.
     pub(package) switch_tree: bool,
@@ -2229,13 +2331,15 @@ pub(package) struct Package {
     /// arguments (`target::table::Isa::switch_tables`); else a dense switch stays only when its cases pass
     /// none (`lir::switches::lower`).
     pub(package) switch_tables: bool,
-    /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts), and whether the
-    /// processor has a scalar fused multiply-add (`O_FMA` for contraction).
+    /// The float rewrites the build allows (`FM_*`, `-ffast-math` and its parts).
     pub(package) fmath: u8,
-    pub(package) fma: bool,
-    /// What the processor does with IEEE binary16 values (`HALF_*`): `std::float`'s f16 computes in f32
-    /// through `O_HTOF` and `O_FTOH` where it converts them.
-    pub(package) half: u8,
+    /// What the build's processor features give the backend; a body compiled for more holds its own
+    /// (`cpu_of`).
+    pub(package) cpu: Cpu,
+    /// The bytes of the widest vector register any body of the program compiles for (`Cpu.vector` of the
+    /// build's features, of its run-time copies' levels and of its functions' own sets): a body of
+    /// narrower registers that callers may inline keeps its wide vectors whole for them (`lir::opt`).
+    pub(package) vec_max: u32,
     /// The object sections split at their symbols, so the link can drop what nothing reaches
     /// (`codegen::obj::SPLIT_*`, `-ffunction-sections` and `-fdata-sections`); Mach-O splits at the link
     /// instead.
@@ -2344,23 +2448,23 @@ extend Package {
         return owner;
     }
 
+    /// The processor facts body `b` compiles for: its own, else the build's.
+    pub(package) const fn cpu_of(self: &Self, b: &Body) Cpu {
+        return ast::pick(b.cpu.own, b.cpu, self.cpu);
+    }
+
     /// An empty package for a data model with `ptr_bytes`-byte pointers.
     pub(package) fn new(ptr_bytes: u32) Package {
         return Package {
             ptr_bytes: ptr_bytes,
             vec_regs: 16,
-            vector: 16,
             vops: 0,
             vec_mulh: 7,
             vec_accs: 0,
             vec_sat: 7,
             vec_absd: 7,
-            vec_bits: 0x0E0F07,
-            vec_perm3: 9,
             vec_sumw: 0x8CE,
-            vec_mulw: 0x0707,
             vfloat: true,
-            vround: true,
             vround_away: false,
             mul_high: true,
             bswap: true,
@@ -2377,17 +2481,10 @@ extend Package {
             pairs: false,
             align_loops: false,
             fit_lines: false,
-            popcnt: false,
-            sse41: false,
-            vtbl: false,
             mask_bits: false,
             lane_insert: true,
             vminnum: VMIN_EXACT,
             isa: "",
-            addsub: false,
-            lzcnt: false,
-            lse: false,
-            rcpc: false,
             switch_tree: false,
             switch_tables: true,
             pic: false,
@@ -2398,8 +2495,24 @@ extend Package {
             tail: false,
             protect: PROTECT_NONE,
             fmath: 0,
-            fma: false,
-            half: HALF_NONE,
+            vec_max: 16,
+            cpu: Cpu {
+                own: false,
+                vector: 16,
+                vec_bits: 0x0E0F07,
+                vec_perm3: 9,
+                vec_mulw: 0x0707,
+                vround: true,
+                popcnt: false,
+                sse41: false,
+                vtbl: false,
+                addsub: false,
+                lzcnt: false,
+                lse: false,
+                rcpc: false,
+                half: HALF_NONE,
+                fma: false,
+            },
             // Small: a parallel lowering makes a package per shard, and the tables grow geometrically.
             names: nm::Names::with_capacity(1 << 8, 1 << 4),
             files: Vector::<u32>::new(),

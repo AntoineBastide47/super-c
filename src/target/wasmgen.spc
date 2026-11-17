@@ -103,7 +103,7 @@ pub(package) struct Gen {
     nwp: u32, // the wasm parameters
     locals: Vector<u8>, // the types of the locals past the parameters
     local_of: Vector<u32>, // per value index, its local (NONE: rematerialized, in memory, or unused)
-    simd: bool, // vectors of up to 16 bytes compute in v128 values (`Package.vector`: simd128)
+    simd: bool, // vectors of up to 16 bytes compute in v128 values (`Cpu.vector`: simd128)
     vreg: Vector<bool>, // per value index, a vector in a v128 local (`vec_homes`)
     home: Vector<u32>, // per value index, the frame offset of a memory value (NONE: none)
     remat: Vector<bool>, // per instruction
@@ -233,7 +233,7 @@ extend Gen {
             nwp: 0,
             locals: Vector::<u8>::new(),
             local_of: Vector::<u32>::new(),
-            simd: pkg.vector >= 16,
+            simd: pkg.cpu.vector >= 16,
             vreg: Vector::<bool>::new(),
             home: Vector::<u32>::new(),
             remat: Vector::<bool>::new(),
@@ -8174,19 +8174,19 @@ extend Gen {
             } else {
                 VNONE
             };
-            self.vec_rule(c, a, y, lt, sg);
+            self.vec_rule(c, a, y, lt, sg, (t.aux & VOP_NUMBER) != 0);
         }
         self.vpost(i);
         return true;
     }
 
     // Push the lane rule `c` (`core::SR_VEC`) of 16-byte vectors `a` and `y` (VNONE for one operand), lanes
-    // of `lt` (signed `sg`).
-    fn vec_rule(self: &mut Self, c: u8, a: Value, y: Value, lt: u8, sg: bool) {
+    // of `lt` (signed `sg`); `number`: a float minimum's or maximum's `a` holds no NaN (VOP_NUMBER).
+    fn vec_rule(self: &mut Self, c: u8, a: Value, y: Value, lt: u8, sg: bool, number: bool) {
         let k = size_log(lt) as usize;
         let f = ast::pick(lt == T_F64, 1u32, 0);
         if is_float(lt) && (c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_MINIMUM || c == core::SIMD_MAXIMUM) {
-            self.float_minmax(c, a, y, lt == T_F64);
+            self.float_minmax(c, a, y, lt == T_F64, number);
             return;
         }
         if c == core::SIMD_MIN || c == core::SIMD_MAX || c == core::SIMD_ABS_DIFF {
@@ -8270,12 +8270,24 @@ extend Gen {
     // Push the float lane rule `c` (SIMD_MIN, SIMD_MAX, SIMD_MINIMUM, SIMD_MAXIMUM) of 16-byte vectors `a`
     // and `y` (f64 lanes when `dd`) by the lane loops' `fminmax`: SIMD128's `min` or `max`, which orders -0
     // below +0, past the NaNs. SIMD_MIN and SIMD_MAX take the other operand of a NaN, and of two NaNs `a`
-    // with its quiet bit set; SIMD_MINIMUM and SIMD_MAXIMUM take a NaN operand, `a` first.
-    fn float_minmax(self: &mut Self, c: u8, a: Value, y: Value, dd: bool) {
+    // with its quiet bit set; SIMD_MINIMUM and SIMD_MAXIMUM take a NaN operand, `a` first. An `a` without a
+    // NaN (`number`) is the result where `y` holds one.
+    fn float_minmax(self: &mut Self, c: u8, a: Value, y: Value, dd: bool, number: bool) {
         let x = self.vlocal(a);
         let z = self.vlocal(y);
         let ne = ast::pick(dd, 0x48u32, 0x42);
         let num = c == core::SIMD_MIN || c == core::SIMD_MAX;
+        if num && number {
+            self.c.local(w::LOCAL_GET, x);
+            self.c.local(w::LOCAL_GET, x);
+            self.c.local(w::LOCAL_GET, z);
+            self.sop(ast::pick(dd, 0xF4u32, 0xE8) + ast::pick(c == core::SIMD_MIN, 0u32, 1));
+            self.c.local(w::LOCAL_GET, z);
+            self.c.local(w::LOCAL_GET, z);
+            self.sop(ne);
+            self.sop(0x52);
+            return;
+        }
         let an = self.tmp(w::V128);
         self.c.local(w::LOCAL_GET, x);
         self.c.local(w::LOCAL_GET, x);

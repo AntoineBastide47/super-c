@@ -134,6 +134,10 @@ fn header_hash(p: &loader::Package, target: i32) u64 {
     for i in 0..p.simd_levels.len() {
         h = fnv_mix(fnv_mix(h, p.simd_levels[i].w[0]), p.simd_levels[i].w[1]);
     }
+    // The features of the program's functions with their own (`fn_union`): with the levels they give the
+    // widest vector register a body compiles for, which decides the form of a body its callers inline
+    // (`lir::ir::Package.vec_max`).
+    h = fnv_mix(fnv_mix(h, p.fn_union.w[0]), p.fn_union.w[1]);
     for i in 0..p.simd_table.len() {
         let e = *p.simd_table.at(i);
         let a = unsafe &*p.module_ast_const(e.module);

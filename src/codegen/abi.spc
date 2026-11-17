@@ -46,6 +46,9 @@ pub(package) struct CallLayout {
     pub(package) named_vr: u8, // SysV, AAPCS64: the vector registers the fixed parameters take
     pub(package) vr_used: u8, // SysV: the vector registers every argument takes (`al` at a variadic call)
     pub(package) unknown: bool, // a parameter or the result is an aggregate whose class its layout does not give
+    /// The bytes of the widest vector one register takes whole (`whole_vreg`): 16, or for an x86-64
+    /// intrinsic's layout the register bytes of the body that calls it (32 with AVX2, 64 with AVX-512).
+    pub(package) wide: u32,
 }
 
 extend CallLayout {
@@ -62,15 +65,30 @@ extend CallLayout {
         self.named_vr = o.named_vr;
         self.vr_used = o.vr_used;
         self.unknown = o.unknown;
+        self.wide = o.wide;
     }
 
-    /// Whether location `loc` takes a vector of type `t`, of 8 or 16 bytes, whole in one vector register.
+    /// Whether location `loc` takes a vector of type `t`, of 8 or 16 bytes or of a wider register's
+    /// (`wide`), whole in one vector register.
     pub(package) const fn whole_vreg(self: &Self, loc: ALoc, t: u8) bool {
-        if loc.kind != L_REG || loc.n != 1 || !is_vec(t) || type_bytes(t, 8) != 8 && type_bytes(t, 8) != 16 {
+        let n = type_bytes(t, 8);
+        if loc.kind != L_REG || loc.n != 1 || !is_vec(t) || n != 8 && n != 16 && !(n > 16 && n <= self.wide) {
             return false;
         }
         let pa = self.parts[loc.p0 as usize];
         return pa.v && pa.size as u32 == type_bytes(t, 8);
+    }
+
+    /// The count of the parts the arguments take: the result's follow them (`intrinsic_layout`).
+    pub(package) const fn nargs(self: &Self) usize {
+        return ast::pick(self.ret.kind == L_REG, self.ret.p0 as usize, self.parts.len());
+    }
+
+    /// Whether location `loc` of an intrinsic's layout is an integer argument in a register outside
+    /// `clob`, the registers the intrinsic's instructions write: they read the argument as an immediate, no
+    /// register takes it.
+    pub(package) const fn imm_arg(self: &Self, loc: ALoc, clob: u64) bool {
+        return loc.kind == L_REG && loc.n == 1 && !self.parts[loc.p0 as usize].v && (clob >> self.parts[loc.p0 as usize].reg as u64 & 1) == 0;
     }
 
     pub(package) fn new() CallLayout {
@@ -84,6 +102,7 @@ extend CallLayout {
             named_vr: 0,
             vr_used: 0,
             unknown: false,
+            wide: 16,
         };
     }
 }
@@ -111,6 +130,7 @@ pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp:
     out.parts.truncate(0);
     out.unknown = false;
     out.stack_bytes = 0;
+    out.wide = 16;
     let np = b.pool[sig as usize];
     let mut ng: u32 = 0;
     let mut nv: u32 = 0;
