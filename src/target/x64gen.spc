@@ -13985,6 +13985,15 @@ extend Gen {
         let act = self.tmp(false);
         let xr = self.tmp(false);
         let r0 = self.reg(ops[0]);
+        let mut km: u64 = 0;
+        if (c == core::SIMD_LOAD_MASKED_PTR || c == core::SIMD_STORE_MASKED_PTR) && n * eb <= 32 && lv::const_of(
+            self.cr.b(),
+            unsafe ops[ar - 2],
+            &mut km,
+        ) {
+            self.mask_const(i, store, r0, trunc_bits(km, n), vv, vt);
+            return;
+        }
         if sl {
             self.c.load(8, false, p, x::at(r0, 0));
             self.c.load(8, false, len, x::at(r0, 8));
@@ -14109,6 +14118,88 @@ extend Gen {
             let rd = self.def(i);
             self.c.mov_rr(8, rd, ix);
             self.c.alu_rr(x::SUB, 8, rd, st);
+        }
+    }
+
+    // The first `m` bytes (4, 8, 12 or 16) at `base + off` into xmm register `dst`, zeros past them; `tmp`
+    // is a second register.
+    fn lead_load(self: &mut Self, dst: u8, tmp: u8, base: u8, off: i32, m: u32) {
+        self.c.vload(ast::pick(m == 12, 8u32, m), dst, x::at(base, off));
+        if m == 12 {
+            self.c.vload(4, tmp, x::at(base, off + 8));
+            self.c.sse_rr(0x66, 0x0F6C, dst, tmp);
+        }
+    }
+
+    // `vmem_masked` of an access of at most 32 bytes through pointer `r0` under constant mask `km`: no
+    // lane is tested. A store copies the bytes of each run of active lanes from the value's home. A load
+    // whose active lanes are the first ones, 4 bytes or a multiple, builds the vector in a scratch
+    // register (its parts of 16, 8 and 4 bytes, then the fallback's lanes past them: VBLENDPS, or `movss`,
+    // `movsd` and `shufps`) and stores it whole, so the reads of the result forward; any other load copies
+    // the runs onto the fallback's copy.
+    fn mask_const(self: &mut Self, i: u32, store: bool, r0: u8, km: u64, vv: Value, vt: u8) {
+        let eb = type_bytes(lane_type(vt), 8);
+        let n = lanes(vt);
+        let nb = n * eb;
+        let (bv, ov) = self.mloc(vv);
+        let lead = (~km).trailing_zeros() as u32;
+        let pb = lead * eb;
+        if !store && lead != 0 && lead < n && km >> lead as u64 == 0 && pb % 4 == 0 {
+            let d = self.cr.mdef(i);
+            let mut v = self.vs0 - V0;
+            let t = self.vs1 - V0;
+            if pb > 16 {
+                self.lead_load(t, v, r0, 16, pb - 16);
+                self.c.vload(16, v, x::at(r0, 0));
+                // vinsertf128 $1 (VEX.256.66.0F3A.W0 18).
+                self.c.vex_rr(0x66, 3, 0x18, false, true, v, v, t);
+                self.c.byte(1);
+            } else {
+                self.lead_load(v, t, r0, 0, pb);
+            }
+            if self.avx {
+                // vblendps (VEX.66.0F3A 0C): a bit per 4 bytes takes the fallback's.
+                self.c.vex_rm(0x66, 3, 0x0C, false, nb == 32, v, v, x::at(bv, ov as i32));
+                self.c.byte((1u32 << nb / 4) - (1u32 << pb / 4));
+            } else {
+                self.c.vload(16, t, x::at(bv, ov as i32));
+                if pb == 12 {
+                    // t = [f3, f3, v2, v2], then v = [v0, v1, v2, f3].
+                    self.c.sse_rr(0, 0x0FC6, t, v);
+                    self.c.byte(0xAF);
+                    self.c.sse_rr(0, 0x0FC6, v, t);
+                    self.c.byte(0x24);
+                } else {
+                    // The fallback's copy takes the first 4 or 8 bytes: `movss`, `movsd`.
+                    self.c.sse_rr(ast::pick(pb == 4, 0xF3u32, 0xF2u32), 0x0F10, t, v);
+                    v = t;
+                }
+            }
+            self.c.vstore(nb, v, x::at(x::RSP, d as i32));
+            return;
+        }
+        let mut d: i64 = 0;
+        if !store {
+            d = self.cr.mdef(i);
+            self.copy_mem(x::RSP, d, bv, ov, nb);
+        }
+        // Each step takes one lane or one run: at most `n` steps.
+        let mut k: u32 = 0;
+        while k < n {
+            if (km >> k as u64 & 1) == 0 {
+                k += 1;
+                continue;
+            }
+            let k0 = k;
+            while k < n && (km >> k as u64 & 1) != 0 {
+                k += 1;
+            }
+            let at = (k0 * eb) as i64;
+            if store {
+                self.copy_mem(r0, at, bv, ov + at, (k - k0) * eb);
+            } else {
+                self.copy_mem(x::RSP, d + at, r0, at, (k - k0) * eb);
+            }
         }
     }
 

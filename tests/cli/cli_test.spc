@@ -3953,6 +3953,31 @@ fn gaps(xp: *const u8, yp: *mut u8, zp: *mut u8) {
     unsafe simd::store_masked_ptr(yp, m, v + Simd::<u8, 16>::splat(1));
 }
 
+// The first lanes of a vector through a pointer, the fallback's past them: 9 to 15 of 16 f32 lanes, then
+// 1 to 3 and 5 to 7 of 8 f64 lanes (every part size of a 16-byte and of a 32-byte register).
+@noinline
+fn leads(xp: *const f32, zp: *mut f32) {
+    let fb = Simd::<f32, 16>::splat(-2.0);
+    simd::store(view_mut(unsafe (zp + 0), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x1FF), fb));
+    simd::store(view_mut(unsafe (zp + 16), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x3FF), fb));
+    simd::store(view_mut(unsafe (zp + 32), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x7FF), fb));
+    simd::store(view_mut(unsafe (zp + 48), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0xFFF), fb));
+    simd::store(view_mut(unsafe (zp + 64), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x1FFF), fb));
+    simd::store(view_mut(unsafe (zp + 80), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x3FFF), fb));
+    simd::store(view_mut(unsafe (zp + 96), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x7FFF), fb));
+}
+
+@noinline
+fn leads8(xp: *const f64, zp: *mut f64) {
+    let fb = Simd::<f64, 8>::splat(-2.0);
+    simd::store(view_mut(unsafe (zp + 0), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x1), fb));
+    simd::store(view_mut(unsafe (zp + 8), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x3), fb));
+    simd::store(view_mut(unsafe (zp + 16), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x7), fb));
+    simd::store(view_mut(unsafe (zp + 24), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x1F), fb));
+    simd::store(view_mut(unsafe (zp + 32), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x3F), fb));
+    simd::store(view_mut(unsafe (zp + 40), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x7F), fb));
+}
+
 fn main() i32 {
     let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
     let n: usize = 144;
@@ -4107,6 +4132,37 @@ fn main() i32 {
             200
         } {
             return 11;
+        }
+    }
+    let mut lx = Vector::<f32>::new();
+    let mut lx8 = Vector::<f64>::new();
+    let mut lz = Vector::<f32>::new();
+    let mut lz8 = Vector::<f64>::new();
+    for k in 0..112usize {
+        lx.push(k as f32 + 1.0);
+        lx8.push(k as f64 + 1.0);
+        lz.push(0.0);
+        lz8.push(0.0);
+    }
+    leads(lx.as_ptr(), lz.as_mut_ptr());
+    leads8(lx8.as_ptr(), lz8.as_mut_ptr());
+    for k in 0..112usize {
+        if lz[k] != if k % 16 < 9 + k / 16 {
+            lx[k % 16]
+        } else {
+            -2.0
+        } {
+            return 12;
+        }
+    }
+    let counts: [usize; 6] = [1, 2, 3, 5, 6, 7];
+    for k in 0..48usize {
+        if lz8[k] != if k % 8 < counts[k / 8] {
+            lx8[k % 8]
+        } else {
+            -2.0
+        } {
+            return 13;
         }
     }
     return 0;

@@ -326,6 +326,10 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   (`FOLD_LDOP`). Preserve operand order and reject intervening memory writes.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
   for directives, labels and sections; the instruction set's assembler for instructions).
+- x86-64: a body compiled for AVX2 emits the VEX form of every SSE operation (`x::Code.vex`), also
+  of an intrinsic template's legacy statements. A legacy SSE operation the generator or a template
+  uses needs its VEX.128 row (`v` and the mnemonic) in `x64tab` and its shape in `x::vex_shape`;
+  `x64_sse_operations_take_vex_forms` checks every legacy row.
 
 ## Calling convention
 
