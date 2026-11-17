@@ -326,8 +326,17 @@ extend<const B: usize> Lp<B> {
         };
     }
 
-    // Set up the rows `rows` (terms in `pool`). False when the tableau is over its bound.
-    fn load(self: &mut Self, tm: &Terms<B>, rows: &Vector<LRow<B>>, pool: &Vector<LinTerm<B>>) bool {
+    // Set up the rows `rows` (terms in `pool`), each atom as near 0 as its bounds allow, or with
+    // `from_warm` at its value in `warm` within them (an earlier integer model: the rows it held hold
+    // again, and only the others take pivots). False when the tableau is over its bound.
+    fn load(
+        self: &mut Self,
+        tm: &Terms<B>,
+        rows: &Vector<LRow<B>>,
+        pool: &Vector<LinTerm<B>>,
+        warm: &Map<u32, Num<B>>,
+        from_warm: bool,
+    ) bool {
         self.atom.clear();
         self.ix.clear();
         for j in 0..pool.len() {
@@ -365,13 +374,18 @@ extend<const B: usize> Lp<B> {
             self.hi.push(h);
             self.has_lo.push(lo.is_some());
             self.has_hi.push(hi.is_some());
-            // A start inside the bounds, as near 0 as they allow.
-            let v = if lo.is_some() && Num::<B>::zero() < l {
+            let mut w = Num::<B>::zero();
+            if from_warm {
+                if let Some(x) = warm.get(&t) {
+                    w = *x;
+                }
+            }
+            let v = if lo.is_some() && w < l {
                 l
-            } else if hi.is_some() && h.is_negative() {
+            } else if hi.is_some() && h < w {
                 h
             } else {
-                Num::<B>::zero()
+                w
             };
             self.val.push(q_int(v));
             self.lo_r.push(RowRef { i: t, kind: RW_LO });
@@ -783,6 +797,53 @@ struct Edge {
 
 const NONE_LIT: u64 = 0xFFFFFFFFFFFFFFFF;
 
+// A union-find over 64-bit keys (`Solver::suggest`): `node` names a key's node, `join` merges two
+// components, `find` names a node's component.
+struct KeyFind {
+    ix: Map<u64, u32>,
+    up: Vector<u32>,
+}
+
+extend KeyFind {
+    fn new() KeyFind {
+        return KeyFind { ix: Map::<u64, u32>::new(), up: Vector::<u32>::new() };
+    }
+
+    fn node(self: &mut Self, key: u64) u32 {
+        if let Some(n) = self.ix.get(&key) {
+            return *n;
+        }
+        let n = self.up.len() as u32;
+        self.ix.insert(key, n);
+        self.up.push(n);
+        return n;
+    }
+
+    // Path halving: each step points a node at its grandparent. A path has fewer steps than nodes.
+    const fn find(self: &mut Self, n0: u32) u32 {
+        let mut n = n0;
+        for _s in 0..self.up.len() {
+            if self.up[n as usize] == n {
+                break;
+            }
+            let g = self.up[self.up[n as usize] as usize];
+            self.up.set(n as usize, g);
+            n = g;
+        }
+        return n;
+    }
+
+    const fn join(self: &mut Self, a: u32, b: u32) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.up.set(ra.max(rb) as usize, ra.min(rb));
+        }
+    }
+}
+
+// The failed literal sets one walk keeps (`Solver::fails`).
+const FAILS_KEPT: usize = 16384;
+
 // A hash of the set of theory literals `lits` (its order does not count).
 fn lits_hash(lits: &Vector<u64>) u64 {
     let mut s = lits.clone();
@@ -799,6 +860,19 @@ const fn pair(a: u32, b: u32) u64 {
 }
 
 pub(package) struct Solver<const B: usize> {
+    // The roots of the last closure's terms (`cc_build`), and whether its term table holds them.
+    cc_roots: Vector<u32>,
+    cc_valid: bool,
+    // The literal sets the walk's solvers did not refute (`lemma_with`): each one's model, the atoms
+    // `fatom` and values `fval` in [fstart[e], fstart[e + 1]); `sat_cut` when the steps left stopped the
+    // last SAT run.
+    fails: Map<u64, u32>,
+    fatom: Vector<u32>,
+    fval: Vector<Num<B>>,
+    fstart: Vector<u32>,
+    sat_cut: bool,
+    // The value of each atom in the last integer model of the walk's simplex (`implied`).
+    warm: Map<u32, Num<B>>,
     pub(package) steps: u32, // the steps spent, against `STEP_BUDGET` with the walk's
     // The steps a check may reach: STEP_BUDGET, or fewer for a stage that rarely proves (`Prover::holds_in`).
     pub(package) limit: u32,
@@ -871,7 +945,17 @@ pub(package) struct Solver<const B: usize> {
 
 extend<const B: usize> Solver<B> {
     pub(package) fn new() Solver<B> {
+        let mut fstart = Vector::<u32>::new();
+        fstart.push(0);
         return Solver::<B> {
+            cc_roots: Vector::<u32>::new(),
+            cc_valid: false,
+            fails: Map::<u64, u32>::new(),
+            fatom: Vector::<u32>::new(),
+            fval: Vector::<Num<B>>::new(),
+            fstart: fstart,
+            sat_cut: false,
+            warm: Map::<u32, Num<B>>::new(),
             steps: 0,
             limit: STEP_BUDGET,
             stop_on_ovf: false,
@@ -975,9 +1059,6 @@ extend<const B: usize> Solver<B> {
         let mut lits = Vector::<u64>::new();
         let mut cuts = Vector::<u32>::new();
         let mut part = Vector::<u64>::new();
-        // The literal sets the theories did not refute (a hash of each, sorted): a later model that
-        // reaches one again does not try it again.
-        let mut failed = Map::<u64, bool>::new();
         for _r in 0..SPLITS_MAX + 1 {
             if !self.kn.seal(tm, hyps, goal) {
                 return false;
@@ -1015,15 +1096,10 @@ extend<const B: usize> Solver<B> {
                 for i in 0..n {
                     part.push(lits[i]);
                 }
-                let h = lits_hash(&part);
-                if failed.contains_key(&h) {
-                    continue;
-                }
                 if self.lemma_with(tm, &part, root, bits, false) {
                     done = true;
                     break;
                 }
-                failed.insert(h, true);
             }
             if !done && !self.lemma_with(tm, &lits, root, bits, true) {
                 return false;
@@ -1210,6 +1286,12 @@ extend<const B: usize> Solver<B> {
 
     /// Drop the lemmas: the terms they name are gone.
     pub(package) fn forget(self: &mut Self) {
+        self.cc_valid = false;
+        self.fails.clear();
+        self.fatom.clear();
+        self.fval.clear();
+        self.fstart.truncate(1);
+        self.warm.clear();
         self.kn.forget();
     }
 
@@ -1222,6 +1304,43 @@ extend<const B: usize> Solver<B> {
         if self.kn.subsumed(lits) {
             return true;
         }
+        // Literals the solvers did not refute earlier in the walk, with the same switches, are not tried
+        // again (the prover's stages and the search's models reach many such sets again): their model
+        // comes back. A hash that collides only loses a proof.
+        let mut key = lits_hash(lits) ^ root.wrapping_mul(0x9E3779B97F4A7C15);
+        key = key ^ bits as u64 << 1 ^ guess as u64 << 2 ^ self.nla_allowed as u64 << 3 ^ self.stop_on_ovf as u64 << 4;
+        if let Some(e) = self.fails.get(&key) {
+            let (start, end) = (self.fstart[(*e) as usize] as usize, self.fstart[(*e) as usize + 1] as usize);
+            self.model.clear();
+            self.mval.clear();
+            for q in start..end {
+                self.model.push(self.fatom[q]);
+                self.mval.push(self.fval[q]);
+            }
+            return false;
+        }
+        self.sat_cut = false;
+        if self.lemma_found(tm, lits, root, bits, guess) {
+            return true;
+        }
+        // A failure for want of steps is not one of the literals.
+        if self.steps <= self.limit && !self.gave_up && !self.sat_cut {
+            if self.fails.len() >= FAILS_KEPT {
+                self.fails.clear();
+                self.fatom.clear();
+                self.fval.clear();
+                self.fstart.truncate(1);
+            }
+            self.fails.insert(key, (self.fstart.len() - 1) as u32);
+            self.fatom.extend_copy(&self.model);
+            self.fval.extend_copy(&self.mval);
+            self.fstart.push(self.fatom.len() as u32);
+        }
+        return false;
+    }
+
+    // `lemma_with`, past the lemmas and the failures it keeps.
+    fn lemma_found(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
         // The theories first: where they decide, they cost a fraction of a SAT search.
         if let Some(built) = self.kn.state(tm, lits) {
             if self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf) {
@@ -1249,7 +1368,9 @@ extend<const B: usize> Solver<B> {
         if sub.len() != 0 && Solver::<B>::has_bits(tm, &sub) && self.kn.blast(tm, &sub) {
             // An attempt before a split (no `guess`) has a smaller SAT search: its literals often have a
             // model the split then removes, and a search for that model can take all the steps.
-            let r = self.sat.solve(&self.kn.bits().cnf, self.sat_budget(pick(guess, SAT_STEPS, SAT_EARLY_STEPS)));
+            let cap = pick(guess, SAT_STEPS, SAT_EARLY_STEPS);
+            let budget = self.sat_budget(cap);
+            let r = self.sat.solve(&self.kn.bits().cnf, budget);
             let _ = self.spend(self.sat.steps / SAT_STEP_COST);
             if r == SAT_REFUTED {
                 return self.kn.blast_lemma(&self.sat.proof);
@@ -1258,6 +1379,8 @@ extend<const B: usize> Solver<B> {
                 // The goal's literals have a model; the others share none of its unknowns.
                 self.sat_model();
             }
+            // A search its own cap stopped stops there again; one the steps left stopped may not.
+            self.sat_cut = r == SAT_ABORT && budget < cap;
         }
         return false;
     }
@@ -1590,13 +1713,13 @@ extend<const B: usize> Solver<B> {
             }
             self.rows_of(tm, st, NONE, NONE);
             let upto = self.pf.facts.len() as u32;
-            let (mut r, mut root) = self.bb(tm);
+            let (mut r, mut root) = self.bb(tm, false);
             // A number past B bits stops the simplex: the rows of small numbers alone may conflict still
             // (`x <= 1`, `1 <= x`, `x <= 0` beside a row of 2^200), first those below the size whose
             // products fit B bits, then those below a quarter of B bits.
             for shift in [B / 2 - 8, B / 4] {
                 if r == L_ABORT && self.lp.ovf && self.keep_small_rows(shift) {
-                    let again = self.bb(tm);
+                    let again = self.bb(tm, false);
                     r = again.0;
                     root = again.1;
                 }
@@ -1755,7 +1878,7 @@ extend<const B: usize> Solver<B> {
                 }
             }
             let upto = self.pf.facts.len() as u32;
-            let (res, root) = self.bb(tm);
+            let (res, root) = self.bb(tm, false);
             if res == L_CONFLICT {
                 self.pf.trees.push(Tree { root: root, ha: NONE, hb: NONE, upto: upto });
                 self.pf.end = X_LA;
@@ -1770,7 +1893,9 @@ extend<const B: usize> Solver<B> {
     fn implied(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, a: u32, b: u32) u32 {
         self.rows_of(tm, st, a, b);
         let upto = self.pf.facts.len() as u32;
-        let (r, root) = self.bb(tm);
+        // From the rows' model (`refute`): only the hypothesis's row is new. The model of a refutation's
+        // own rows starts as near 0 as it can: the equalities it suggests (`suggest`) come from it.
+        let (r, root) = self.bb(tm, true);
         if r != L_CONFLICT {
             return NONE;
         }
@@ -2175,7 +2300,7 @@ extend<const B: usize> Solver<B> {
         self.nla_on = true;
         self.rows_of(tm, st, NONE, NONE);
         let upto = self.pf.facts.len() as u32;
-        let (r, root) = self.bb(tm);
+        let (r, root) = self.bb(tm, false);
         self.nla_on = false;
         if r != L_CONFLICT {
             return false;
@@ -2493,8 +2618,6 @@ extend<const B: usize> Solver<B> {
         self.lrows.push(LRow::<B> { k: k, start: start, len: n as u32, r: r });
     }
 
-    // Branch and bound over the simplex rows (`lrows`): L_CONFLICT with the root of a tree that
-    // refutes them, L_FEAS with an integer model in `lp.val`, or L_ABORT past a bound.
     // Drop the simplex rows that hold a number of at least 2^`shift` in magnitude; whether some rows go
     // and some stay.
     fn keep_small_rows(self: &mut Self, shift: usize) bool {
@@ -2518,8 +2641,11 @@ extend<const B: usize> Solver<B> {
         return dropped && w != 0;
     }
 
-    fn bb(self: &mut Self, tm: &Terms<B>) (u8, u32) {
-        if !self.lp.load(tm, &self.lrows, &self.lpool) {
+    // Branch and bound over the simplex rows (`lrows`), from the last integer model with `from_warm`
+    // (`Lp::load`): L_CONFLICT with the root of a tree that refutes them, L_FEAS with an integer model
+    // in `lp.val` (kept in `warm`), or L_ABORT past a bound.
+    fn bb(self: &mut Self, tm: &Terms<B>, from_warm: bool) (u8, u32) {
+        if !self.lp.load(tm, &self.lrows, &self.lpool, &self.warm, from_warm) {
             return L_ABORT, NONE;
         }
         self.frames.clear();
@@ -2605,6 +2731,9 @@ extend<const B: usize> Solver<B> {
             if j == NONE {
                 let (fx, fj, fv) = self.fix(tm, cur);
                 if fx == FX_NONE {
+                    for a in 0..self.lp.na {
+                        self.warm.insert(self.lp.atom[a], self.lp.val[a].n);
+                    }
                     return L_FEAS, NONE;
                 }
                 if fx == FX_ROWS {
@@ -3143,66 +3272,118 @@ extend<const B: usize> Solver<B> {
 
     // ---- the closure ---------------------------------------------------------------------------
 
-    // The closure over the terms of `st` and their operands, each term its own class. False past
-    // CC_MAX terms.
+    // The closure over the terms of `st` and their operands, each term its own class. The terms take
+    // their indices literal by literal (`Stated.ends`): a literal's terms, then their operands not
+    // seen before, each term once. A set of literals keeps its terms' indices in a set that extends
+    // it, so a build over such a set registers only the new terms (`cc_roots`). False past CC_MAX
+    // terms.
     fn cc_build(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) bool {
         self.cc_on = true;
-        self.cc_term.clear();
-        self.cc_ix.clear();
+        // The roots, literal by literal, and where each literal's end (`lend`).
         self.queue.clear();
-        for j in 0..st.eqs.len() {
-            self.queue.push((st.eqs[j] >> 32) as u32);
-            self.queue.push(st.eqs[j] as u32);
-        }
-        for j in 0..st.neqs.len() {
-            self.queue.push((st.neqs[j] >> 32) as u32);
-            self.queue.push(st.neqs[j] as u32);
-        }
-        for j in 0..st.lits.len() {
-            self.queue.push((st.lits[j] >> 1) as u32);
-        }
-        for j in 0..st.pool.len() {
-            self.queue.push(st.pool[j].atom);
-        }
-        // Each term, then its operands, in first-seen order: a term takes its index when first queued,
-        // so one shared by many others is queued once.
-        let roots = self.queue.len();
-        let mut q: usize = 0;
-        for j in 0..roots {
-            let t = self.queue[j];
-            if !self.cc_ix.contains_key(&t) {
-                self.cc_ix.insert(t, self.cc_term.len() as u32);
-                self.cc_term.push(t);
+        let mut lend = Vector::<u32>::with_capacity(st.ends.len() / 4);
+        let (mut r0, mut e0, mut d0, mut l0) = (0usize, 0usize, 0usize, 0usize);
+        for k in 0..st.ends.len() / 4 {
+            let (r1, e1, d1, l1) = (
+                st.ends[4 * k] as usize,
+                st.ends[4 * k + 1] as usize,
+                st.ends[4 * k + 2] as usize,
+                st.ends[4 * k + 3] as usize
+            );
+            for j in e0..e1 {
+                self.queue.push((st.eqs[j] >> 32) as u32);
+                self.queue.push(st.eqs[j] as u32);
             }
-        }
-        for _s in 0..CC_MAX + 1 {
-            if q == self.cc_term.len() || self.cc_term.len() > CC_MAX {
-                break;
+            for j in d0..d1 {
+                self.queue.push((st.neqs[j] >> 32) as u32);
+                self.queue.push(st.neqs[j] as u32);
             }
-            let t = self.cc_term[q];
-            q += 1;
-            tm.operands(t, &mut self.ops);
-            for j in 0..self.ops.len() {
-                let o = self.ops[j];
-                if !self.cc_ix.contains_key(&o) {
-                    self.cc_ix.insert(o, self.cc_term.len() as u32);
-                    self.cc_term.push(o);
+            for j in l0..l1 {
+                self.queue.push((st.lits[j] >> 1) as u32);
+            }
+            for r in r0..r1 {
+                let x = st.rows[r];
+                for j in x.start..x.start + x.len {
+                    self.queue.push(st.pool[j as usize].atom);
                 }
             }
+            lend.push(self.queue.len() as u32);
+            r0 = r1;
+            e0 = e1;
+            d0 = d1;
+            l0 = l1;
         }
-        if q != self.cc_term.len() || self.cc_term.len() > CC_MAX {
-            return false;
+        // The last build's roots, ending at a literal of these, start these: its terms stay.
+        let old = self.cc_roots.len();
+        let mut keep = self.cc_valid && old <= self.queue.len() && (old == 0 || lend.contains(&(old as u32)));
+        for j in 0..old {
+            keep = keep && self.queue[j] == self.cc_roots[j];
         }
+        if !keep {
+            self.cc_term.clear();
+            self.cc_ix.clear();
+            self.ostart.clear();
+            self.ostart.push(0);
+            self.olist.clear();
+            self.cc_roots.clear();
+        }
+        let n0 = self.cc_term.len();
+        let mut q = n0;
+        for k in 0..lend.len() {
+            let mut from = self.cc_roots.len();
+            if k > 0 {
+                from = from.max(lend[k - 1] as usize);
+            }
+            for j in from..lend[k] as usize {
+                let t = self.queue[j];
+                if !self.cc_ix.contains_key(&t) {
+                    self.cc_ix.insert(t, self.cc_term.len() as u32);
+                    self.cc_term.push(t);
+                }
+            }
+            // Their operands, each term once: at most CC_MAX + 1 terms in all.
+            for _s in 0..CC_MAX + 1 {
+                if q == self.cc_term.len() || self.cc_term.len() > CC_MAX {
+                    break;
+                }
+                let t = self.cc_term[q];
+                q += 1;
+                tm.operands(t, &mut self.ops);
+                for j in 0..self.ops.len() {
+                    let o = self.ops[j];
+                    if !self.cc_ix.contains_key(&o) {
+                        self.cc_ix.insert(o, self.cc_term.len() as u32);
+                        self.cc_term.push(o);
+                    }
+                }
+            }
+            if q != self.cc_term.len() || self.cc_term.len() > CC_MAX {
+                self.cc_valid = false;
+                return false;
+            }
+        }
+        // The new terms' operands.
         let n = self.cc_term.len();
-        if !self.spend(n as u32) {
+        let _ = self.ostart.pop();
+        for i in n0..n {
+            self.ostart.push(self.olist.len() as u32);
+            tm.operands(self.cc_term[i], &mut self.ops);
+            for j in 0..self.ops.len() {
+                self.olist.push(*self.cc_ix.get(&self.ops[j]).unwrap());
+            }
+        }
+        self.ostart.push(self.olist.len() as u32);
+        self.cc_roots.clear();
+        self.cc_roots.extend_copy(&self.queue);
+        self.cc_valid = true;
+        // Half a step per term for the classes below, half per new term for its registration.
+        if !self.spend(((n + n - n0) / 2) as u32) {
             return false;
         }
         self.rep.clear();
         self.next.clear();
         self.size.clear();
         self.ehead.clear();
-        self.ostart.clear();
-        self.olist.clear();
         self.seen.clear();
         self.sedge.clear();
         for i in 0..n {
@@ -3212,13 +3393,7 @@ extend<const B: usize> Solver<B> {
             self.ehead.push(NONE);
             self.seen.push(0);
             self.sedge.push(NONE);
-            self.ostart.push(self.olist.len() as u32);
-            tm.operands(self.cc_term[i], &mut self.ops);
-            for j in 0..self.ops.len() {
-                self.olist.push(*self.cc_ix.get(&self.ops[j]).unwrap());
-            }
         }
-        self.ostart.push(self.olist.len() as u32);
         // The users of each term: counted, then placed.
         self.ustart.clear();
         self.ulist.clear();
@@ -3695,7 +3870,8 @@ extend<const B: usize> Solver<B> {
     // The equalities to test: for two applications of one operation in different classes, each pair
     // of operands in different classes (`pairs_equal`), not tested before, into `out`, and into
     // `outsure` whether the pair has one linear form. Only pairs of applications where every
-    // differing operand is such a pair. False past a bound.
+    // differing operand is such a pair. False past a bound. The pairs come from buckets of one key
+    // (`app_key`), in the order of the applications.
     fn suggest(self: &mut Self, tm: &Terms<B>, out: &mut Vector<u64>, outsure: &mut Vector<bool>) bool {
         let mut apps = Vector::<u32>::new();
         for i in 0..self.cc_term.len() {
@@ -3706,42 +3882,137 @@ extend<const B: usize> Solver<B> {
         if apps.len() > APPS_MAX {
             return true;
         }
+        let mut uf = KeyFind::new();
+        for x in 0..apps.len() {
+            let u = apps[x] as usize;
+            for q in self.ostart[u]..self.ostart[u + 1] {
+                let a = self.olist[q as usize];
+                self.operand_nodes(tm, a, &mut uf);
+            }
+        }
+        // Each application's key (its high half) and its index in `apps`, sorted: one key's
+        // applications are adjacent, in their order. Keys that collide only add pairs to test.
+        let mut keyed = Vector::<u64>::with_capacity(apps.len());
+        for x in 0..apps.len() {
+            keyed.push(self.app_key(tm, apps[x], &mut uf) & 0xFFFFFFFF00000000 | x as u64);
+        }
+        keyed.sort();
+        // The pairs of each bucket [g, e), as `apps` indices `x << 32 | y`, x before y.
+        let mut pairs = Vector::<u64>::new();
+        let mut g: usize = 0;
+        for e in 1..keyed.len() + 1 {
+            if e < keyed.len() && keyed[e] >> 32 == keyed[g] >> 32 {
+                continue;
+            }
+            for x in g..e {
+                for y in x + 1..e {
+                    pairs.push(keyed[x] << 32 | keyed[y] & 0xFFFFFFFF);
+                }
+            }
+            g = e;
+        }
+        pairs.sort();
         let mut cand = Vector::<u64>::new();
         let mut sure = Vector::<bool>::new();
-        for x in 0..apps.len() {
-            let u = apps[x];
+        for p in 0..pairs.len() {
+            let u = apps[(pairs[p] >> 32) as usize];
+            let v = apps[(pairs[p] & 0xFFFFFFFF) as usize];
+            if self.rep[u as usize] == self.rep[v as usize] {
+                continue;
+            }
             let tu = tm.at(self.cc_term[u as usize]);
-            for y in x + 1..apps.len() {
-                let v = apps[y];
-                if self.rep[u as usize] == self.rep[v as usize] {
-                    continue;
-                }
-                let tv = tm.at(self.cc_term[v as usize]);
-                let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
-                if !same_op(&tu, &tv) || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
-                    continue;
-                }
-                if !self.spend(1) {
-                    return false;
-                }
-                if !self.pairs_equal(tm, u, v, false, &mut cand, &mut sure) && !(n == 2 && commutes(tu.op) && self.pairs_equal(
-                    tm,
-                    u,
-                    v,
-                    true,
-                    &mut cand,
-                    &mut sure,
-                )) {
-                    continue;
-                }
-                for j in 0..cand.len() {
-                    if !self.tested.contains_key(&cand[j]) {
-                        out.push(cand[j]);
-                        outsure.push(sure[j]);
-                    }
+            let tv = tm.at(self.cc_term[v as usize]);
+            let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
+            if !same_op(&tu, &tv) || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
+                continue;
+            }
+            if !self.spend(1) {
+                return false;
+            }
+            if !self.pairs_equal(tm, u, v, false, &mut cand, &mut sure) && !(n == 2 && commutes(tu.op) && self.pairs_equal(
+                tm,
+                u,
+                v,
+                true,
+                &mut cand,
+                &mut sure,
+            )) {
+                continue;
+            }
+            for j in 0..cand.len() {
+                if !self.tested.contains_key(&cand[j]) {
+                    out.push(cand[j]);
+                    outsure.push(sure[j]);
                 }
             }
         }
         return true;
+    }
+
+    // The bucket key of application `u` (`suggest`): its operation (`same_op`), its operand count, and
+    // each operand's component in `uf` (`operand_nodes`), the two unordered for an operation that
+    // commutes. Two applications `pairs_equal` accepts have one key.
+    fn app_key(self: &Self, tm: &Terms<B>, u: u32, uf: &mut KeyFind) u64 {
+        let x = tm.at(self.cc_term[u as usize]);
+        let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
+        let mut h = hmix(0x9E3779B97F4A7C15, x.op as u64 << 32 | n as u64);
+        for i in 0..B / 64 {
+            h = hmix(h, x.k.limb(i));
+        }
+        if !exact_op(x.op) && x.op != T_INT {
+            h = hmix(h, x.w as u64 << 1 ^ x.sg as u64);
+        }
+        let mut ks = Vector::<u64>::with_capacity(n as usize);
+        for j in 0..n {
+            let a = self.olist[(self.ostart[u as usize] + j) as usize];
+            let r = uf.node(1u64 << 62 | self.rep[a as usize] as u64);
+            ks.push(uf.find(r));
+        }
+        if n == 2 && commutes(x.op) && ks[1] < ks[0] {
+            ks.swap(0, 1);
+        }
+        for j in 0..ks.len() {
+            h = hmix(h, ks[j]);
+        }
+        return h;
+    }
+
+    // Operand `a`'s class in `uf`, joined for an integer with its value in the simplex's model and
+    // with its linear form: operands of one class, of one value or of one form (the cases of
+    // `pairs_equal`) are in one component.
+    fn operand_nodes(self: &mut Self, tm: &Terms<B>, a: u32, uf: &mut KeyFind) {
+        let r = uf.node(1u64 << 62 | self.rep[a as usize] as u64);
+        let t = self.cc_term[a as usize];
+        if !tm.is_int(t) {
+            return;
+        }
+        if let Some(v) = self.model_value(tm, t) {
+            let mut h: u64 = 0;
+            for i in 0..B / 64 {
+                h = hmix(h, v.limb(i));
+            }
+            let f = uf.node(2u64 << 62 | h >> 2);
+            uf.join(r, f);
+        }
+        self.lin.clear();
+        let mut k = Num::<B>::zero();
+        if !lin_form(tm, t, Num::<B>::one(), &mut k, &mut self.lin, &mut self.stack) {
+            return;
+        }
+        let n = self.lin.len();
+        if let Some(m) = merge_terms(&mut self.lin, 0, n) {
+            let mut h: u64 = 0;
+            for i in 0..B / 64 {
+                h = hmix(h, k.limb(i));
+            }
+            for j in 0..m {
+                h = hmix(h, self.lin[j].atom);
+                for i in 0..B / 64 {
+                    h = hmix(h, self.lin[j].c.limb(i));
+                }
+            }
+            let f = uf.node(3u64 << 62 | h >> 2);
+            uf.join(r, f);
+        }
     }
 }

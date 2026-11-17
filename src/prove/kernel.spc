@@ -171,13 +171,15 @@ extend<const B: usize> Proof<B> {
 }
 
 // What a branch states: its rows (terms in `pool`), its equalities and disequalities (`a << 32 | b`),
-// and its literals (`term << 1 | polarity`).
+// and its literals (`term << 1 | polarity`); per theory literal, the counts of rows, equalities,
+// disequalities and literals after it (`ends`).
 pub(package) struct Stated<const B: usize> {
     pub(package) rows: Vector<Row<B>>,
     pub(package) pool: Vector<LinTerm<B>>,
     pub(package) eqs: Vector<u64>,
     pub(package) neqs: Vector<u64>,
     pub(package) lits: Vector<u64>,
+    pub(package) ends: Vector<u32>,
 }
 
 extend<const B: usize> Stated<B> {
@@ -188,6 +190,7 @@ extend<const B: usize> Stated<B> {
             eqs: Vector::<u64>::new(),
             neqs: Vector::<u64>::new(),
             lits: Vector::<u64>::new(),
+            ends: Vector::<u32>::new(),
         };
     }
 }
@@ -283,8 +286,6 @@ pub(package) fn state_lit<const B: usize>(
 pub(package) struct Built<const B: usize> {
     st: Stated<B>,
     lits: Vector<u64>,
-    // Per literal, the counts of rows, equalities, disequalities and literals of `st` after it.
-    ends: Vector<u32>,
 }
 
 extend<const B: usize> Built<B> {
@@ -562,7 +563,7 @@ extend<const B: usize> Kernel<B> {
             let mut hit = false;
             let mut base: usize = 0;
             for q in 0..4usize {
-                let e = b.ends[4 * j + q] as usize;
+                let e = b.st.ends[4 * j + q] as usize;
                 for i in from[q]..e {
                     hit = hit || mark[base + i];
                 }
@@ -641,17 +642,17 @@ extend<const B: usize> Kernel<B> {
     // What the theory literals `lits` state (`state_lit`), None when a row does not fit.
     pub(package) fn state(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>) Option<Built<B>> {
         let mut st = Stated::<B>::new();
-        let mut ends = Vector::<u32>::with_capacity(4 * lits.len());
+        st.ends.reserve(4 * lits.len());
         for j in 0..lits.len() {
             if !state_lit(tm, &mut st, lits[j], &mut self.row, &mut self.stack) {
                 return None;
             }
-            ends.push(st.rows.len() as u32);
-            ends.push(st.eqs.len() as u32);
-            ends.push(st.neqs.len() as u32);
-            ends.push(st.lits.len() as u32);
+            st.ends.push(st.rows.len() as u32);
+            st.ends.push(st.eqs.len() as u32);
+            st.ends.push(st.neqs.len() as u32);
+            st.ends.push(st.lits.len() as u32);
         }
-        return Some(Built::<B> { st: st, lits: lits.clone(), ends: ends });
+        return Some(Built::<B> { st: st, lits: lits.clone() });
     }
 
     // Whether `pf` refutes what `b` states; then its literals are a lemma.

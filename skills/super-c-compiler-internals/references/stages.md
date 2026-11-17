@@ -243,10 +243,12 @@ modular return-lifetime check) run alongside.
   each SAT model of the formulas' boolean skeleton and the lemmas gives a branch (`model_lits`: the
   theory literals the model needs, `blast::tlit`; a choice the SAT search fixed at decision level 0
   first, then the others, the goal's first), its literals before a choice tried first, and each
-  refutation's core is a lemma the next skeleton excludes; per branch a congruence closure over every
+  refutation's core is a lemma the next skeleton excludes, and a set the solvers fail on is not tried
+  again in the walk (`fails`); per branch a congruence closure over every
   term operation and a simplex over exact rationals with branch and bound over the integers, which
   exchange equalities (the closure's integer classes become rows; equalities the rows imply between
-  operands of one operation merge in the closure); integer equality elimination adds
+  operands of one operation merge in the closure, each test's simplex started at the rows' integer
+  model, `warm`); integer equality elimination adds
   Chvatal-Gomory cuts, and the root of branch and bound adds Gomory cuts of a fractional point
   from its tableau rows (`gomory`: a slab of rational points with no integer one, which splits of
   one atom never end); at an integer model that breaks a product, branch and bound splits an
