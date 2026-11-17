@@ -18,6 +18,7 @@ import std::platform::fs;
 import ir::interp as iri;
 import ast::ast as *;
 import build_system::objcache as ocache;
+import build_system::manifest as bman;
 import driver::util as *;
 import utils::persist as *;
 
@@ -42,6 +43,7 @@ pub(package) fn key(p: &loader::Package, std_dir: str, target: i32) u64 {
     h = mix_str(h, &p.simd_dispatch);
     h = skey_mix(h, p.build_cfg);
     h = skey_mix(h, p.test_build as u64);
+    h = skey_mix(h, p.cg_on & bman::CG_BLOCK_COUNTS);
     h = skey_mix(h, p.bootstrap as u64);
     h = mix_str(h, &p.profile);
     h = skey_mix(h, p.profiles.len() as u64);

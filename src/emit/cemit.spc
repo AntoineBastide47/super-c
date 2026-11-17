@@ -685,6 +685,7 @@ extend CEmit {
             l.pkg.omit_fp = (pk.cg & bman::CG_OMIT_FRAME_POINTER) != 0;
             l.pkg.tail = (pk.cg & bman::CG_SIBLING_CALLS) != 0;
             l.strict = (pk.cg & bman::CG_STRICT_ALIASING) != 0;
+            l.counts = (pk.cg & bman::CG_BLOCK_COUNTS) != 0;
             l.pkg.fmath = pick((pk.cg & bman::CG_ASSOC_MATH) != 0, lir_ir::FM_ASSOC, 0u8) | pick(
                 (pk.cg & bman::CG_RECIP_MATH) != 0,
                 lir_ir::FM_RECIP,

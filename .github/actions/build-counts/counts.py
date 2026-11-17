@@ -1,16 +1,17 @@
 """The build work counts of one platform: this commit's compiler against the last release's, and the
 threshold check of their change.
 
-summarize TEXT OUT LABEL CC WORKLOAD: reads the `llvm-profdata merge --text` profile TEXT of one workload
-run and writes OUT, a TSV of `label` (the compiler measured), `cc`, `workload`, `source` (`measured`),
-`total` (every counter summed: llvm-profdata's "Total count"), `functions`, then one
+summarize DIR OUT LABEL COUNTER WORKLOAD: reads the files a `-fblock-counts` compiler wrote into DIR in one
+workload run (each `name<TAB>count` line a function's Core IR block executions, std/rt/counts.spc; one file
+per process) and writes OUT, a TSV of `label` (the compiler measured), `counter` (how it was counted),
+`workload`, `source` (`measured`), `total` (every counter summed), `functions`, then one
 `module<TAB>name<TAB>count` line per module, the largest first. A module is the mangled prefix before the
-first `__` (`typechecker__check_expr` is `typechecker`); a function without one (`__sc_add_usize`, a
-runtime helper) is its own module.
+first `__` (`typechecker__check_expr` is `typechecker`); a function without one (`__sc_user_main`) is its
+own module.
 
-saved PREV OUT SHA CC WORKLOAD LABEL: when PREV (a saved `<target>.tsv`) counts commit SHA (its label
-`(SHA)`) with clang CC and workload WORKLOAD, writes it to OUT with label LABEL and `source` `saved`, and
-exits 0; else exits 1.
+saved PREV OUT SHA COUNTER WORKLOAD LABEL: when PREV (a saved `<target>.tsv`) counts commit SHA (its label
+`(SHA)`) with counter COUNTER and workload WORKLOAD, writes it to OUT with label LABEL and `source`
+`saved`, and exits 0; else exits 1.
 
 check TARGET BASE HEAD MD WARN LIMIT VERDICT: writes the Markdown table of HEAD's total against BASE's
 (and the modules that moved most) to MD, prints a warning annotation for a growth of WARN percent or more
@@ -29,26 +30,20 @@ import sys
 TOP = 8  # modules listed per platform, the largest changes first
 
 
-def summarize(text, out, label, cc, workload):
-    lines = open(text).read().split("\n")
+def summarize(folder, out, label, counter, workload):
+    counts = {}
+    for name in sorted(os.listdir(folder)):
+        for line in open(os.path.join(folder, name)).read().splitlines():
+            fn, n = line.split("\t")
+            counts[fn] = counts.get(fn, 0) + int(n)
     modules = {}
-    functions = 0
-    i = 0
-    while i < len(lines):
-        # A record: the name, "# Func Hash:", the hash, "# Num Counters:", n, "# Counter Values:", n values.
-        if lines[i].startswith("# Func Hash:"):
-            name = lines[i - 1].split(":")[-1]
-            n = int(lines[i + 3])
-            m = re.match(r"([A-Za-z0-9]+?)__", name)
-            key = m.group(1) if m else name
-            modules[key] = modules.get(key, 0) + sum(int(v) for v in lines[i + 5 : i + 5 + n])
-            functions += 1
-            i += 5 + n
-            continue
-        i += 1
+    for fn, n in counts.items():
+        m = re.match(r"(.+?)__", fn)
+        key = m.group(1) if m else fn
+        modules[key] = modules.get(key, 0) + n
     with open(out, "w") as f:
-        f.write(f"label\t{label}\ncc\t{cc}\nworkload\t{workload}\nsource\tmeasured\n")
-        f.write(f"total\t{sum(modules.values())}\nfunctions\t{functions}\n")
+        f.write(f"label\t{label}\ncounter\t{counter}\nworkload\t{workload}\nsource\tmeasured\n")
+        f.write(f"total\t{sum(modules.values())}\nfunctions\t{len(counts)}\n")
         for k, v in sorted(modules.items(), key=lambda kv: -kv[1]):
             f.write(f"module\t{k}\t{v}\n")
 
@@ -64,9 +59,9 @@ def load(path):
     return meta, modules
 
 
-def saved(prev, out, sha, cc, workload, label):
+def saved(prev, out, sha, counter, workload, label):
     meta, _ = load(prev)
-    if meta.get("label") != f"({sha})" or meta.get("cc") != cc or meta.get("workload") != workload:
+    if meta.get("label") != f"({sha})" or meta.get("counter") != counter or meta.get("workload") != workload:
         sys.exit(1)
     lines = open(prev).read().splitlines()
     with open(out, "w") as f:
@@ -106,10 +101,10 @@ def check(target, base, head, md, warn, limit, verdict):
         f"### {target}: build work\n",
         alert,
         (
-            f"This commit's {hm['workload']} against the saved count of the last release's ({hm['cc']}).\n"
+            f"This commit's {hm['workload']} against the saved count of the last release's ({hm['counter']}).\n"
             if bm.get("source") == "saved"
             else f"Both compilers on this commit's sources, no saved count of the last release to compare: a "
-            f"{hm['workload']} ({hm['cc']}).\n"
+            f"{hm['workload']} ({hm['counter']}).\n"
         ),
         "| compiler | total count | functions |\n|---|---|---|",
         f"| last release {bm['label']} | {old:,} | {bm['functions']} |",

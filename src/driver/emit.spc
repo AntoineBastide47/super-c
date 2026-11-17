@@ -6495,6 +6495,19 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
             nks.push(tuc.keys[m] ^ base);
         }
     }
+    // A `-fblock-counts` build's registry of its counters, once every body is lowered. Its writer runs
+    // in the native code alone.
+    if (p.cg & bman::CG_BLOCK_COUNTS) != 0 && p.ok {
+        if !p.native || p.rt_counts < 0 || o.lir.is_none() {
+            eprintln("error: -fblock-counts needs a native build with std's `rt/counts.spc`");
+            p.ok = false;
+        } else {
+            let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();
+            let km = p.rt_counts as usize;
+            l.deref_mut().count_registry(km as u32, &p.modules.at(km).file);
+            o.lir = Some(l);
+        }
+    }
     // An optimizing build optimizes the finished LIR: every constant's data is defined by now.
     if p.lir_opt && p.ok && o.lir.is_some() {
         let mut l = replace(&mut o.lir, Option::<Box<lw::Lower>>::None).unwrap();

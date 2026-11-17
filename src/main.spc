@@ -1623,7 +1623,9 @@ OPTIONS:
                            version-loops-for-bounds, stack-protector, stack-protector-strong,
                            stack-protector-all, fast-math, associative-math, reciprocal-math,
                            finite-math-only, signed-zeros, fp-contract=fast (-ffp-contract=off),
-                           function-sections, data-sections, vectorize, strict-aliasing, plt (-fno-plt)
+                           function-sections, data-sections, vectorize, strict-aliasing, plt (-fno-plt),
+                           block-counts (native: write each function's block executions at exit to
+                           $SC_BLOCK_COUNTS, `%p` the process id)
     --const-eval-steps=N   compile-time evaluation step budget
     --const-eval-memory=B  compile-time evaluation memory budget (B, or NK/NM/NG)
     --no-lint              disable the on-by-default lints during a build

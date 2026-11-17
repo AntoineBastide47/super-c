@@ -86,24 +86,28 @@ cycles and raised the lane's peak.
 
 Hosted runners are VMs without hardware counters (Linux `perf stat` reports `<not supported>`,
 macOS prints no instructions retired, Windows lists only the `Timer` source), so CI counts work
-in the compiler itself. The Release workflow's `counts` jobs (`.github/actions/build-counts`)
-build this commit's compiler with clang from its release profile's C (`--emit-c`, `ci/cc_tree.sh`,
-with `-DNDEBUG -fprofile-instr-generate`; llvm-mingw's clang on Windows, whose mingw profile runtime
-the preinstalled LLVM lacks). It runs a cold native `build --profile=debug --jobs=1 --bootstrap-tags`
-of its own sources, prover on, and `llvm-profdata` totals the counters. The base is the count the
-last release's run saved: the `release` job stores every platform's `.tsv` as the repository's one
-`build-counts` artifact once the release is published (a platform whose job measured nothing keeps
-its last counts). That count serves only when it is of the release's commit with the same clang and
-workload (`counts.py saved`). Else the last release's compiler is built from its tag by its own
-binary, and both compilers build this commit's sources with `-fno-prove` (the last release's prover
-may not prove this commit's lemmas); this commit's count with the prover is taken too, as the next
-base. The saved base measures the last release's sources, so a change to the sources moves the
-count too (0.1 to 1% across releases). A total repeats within 0.0001% on every runner and does not
-move with the optimization level or the CPU. It counts only the compiler's own code: libc, the
-kernel and the linker are outside it, and so is a change that makes the code slower without
-changing which code runs. One worker is required: the counters are not atomic, and a multi-threaded
-run loses increments (1.2% spread). The totals differ by platform (different platform code), so
-compare a platform only with itself.
+in the compiler itself, with no C compiler. The Release workflow's `counts` jobs
+(`.github/actions/build-counts`) build this commit's compiler natively at the release profile with
+`-fno-prove -fblock-counts`: each function counts the executions of its Core IR blocks in a counter
+of its own, and the program writes the nonzero ones at exit (`name<TAB>count` lines, to
+`$SC_BLOCK_COUNTS` with `%p` the process id; `std/rt/counts.spc`). The counted compiler runs a cold
+native `build --profile=debug --jobs=1 --bootstrap-tags` of its own sources, prover on, and
+`counts.py summarize` totals the counters. The base is the count the last release's run saved: the
+`release` job stores every platform's `.tsv` as the repository's one `build-counts` artifact once the
+release is published (a platform whose job measured nothing keeps its last counts). That count serves
+only when it is of the release's commit with the same counter and workload (`counts.py saved`). Else
+this commit's compiler also builds the last release's tagged sources with the counters (one
+instrumenter for both; a release older than the writer takes this commit's `std/rt/counts.spc`), and
+both counted compilers build this commit's sources with `-fno-prove` (the last release's prover may
+not prove this commit's lemmas); this commit's count with the prover is taken too, as the next base.
+The saved base measures the last release's sources, so a change to the sources moves the count too.
+A count is of Core IR blocks, so the LIR optimizer and the CPU do not move it; the Core IR the
+counting compiler makes does (its inlining moves counts between functions, not the total). A total
+repeats within 0.0001% (two macOS runs of the workload: 127,384,595,814 and 127,384,612,968). It counts
+only the compiler's own code: libc, the kernel and the linker are outside it, and so is a change that
+makes the code slower without changing which code runs. One worker is required: the counters are not
+atomic, and a multi-threaded run loses increments. The totals differ by platform (different platform
+code), so compare a platform only with itself.
 
 A growth of 0.1% or more is a warning annotation. 1% or more, or a count that failed, is an
 error annotation and a caution box in the summary: the release is still packaged, and its

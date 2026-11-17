@@ -216,6 +216,9 @@ pub(package) struct Package {
     /// The test runner a `--test` build links (`std::rt::test`, loaded with the runtime); -1 in any
     /// other build.
     pub(package) rt_test: i32,
+    /// The block counts' writer a `-fblock-counts` build links (`std::rt::counts`, loaded with the
+    /// runtime); -1 in any other build.
+    pub(package) rt_counts: i32,
     /// The C library of a wasm build (`std::rt::libc` and `std::rt::libm`, loaded with the runtime): wasm
     /// has no system C library, and these call WASI directly; -1 for any other target.
     pub(package) rt_libc: i32,
@@ -2724,11 +2727,13 @@ const fn ltf_vary(f: u8, v: u32) u8 {
 }
 
 extend Package {
-    /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, or
-    /// wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
+    /// Whether module `m` is a runtime module: the runtime every program links, a test build's runner, a
+    /// `-fblock-counts` build's counts writer, or wasm's C library. None is a program module: its symbols always take their module prefix, it shadows
     /// no name, its allocations are not tracked, and its extern headers stay out of the forward header.
     pub(package) const fn is_rt(self: &Self, m: i32) bool {
-        return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_builtins || self.is_libc(m));
+        return m >= 0 && (m == self.rt_module || m == self.rt_test || m == self.rt_counts || m == self.rt_builtins || self.is_libc(
+            m,
+        ));
     }
 
     /// Whether module `m` is a std module that only prelude modules import, directly or through other
@@ -4101,6 +4106,7 @@ extend Package {
             build_module: -1,
             rt_module: -1,
             rt_test: -1,
+            rt_counts: -1,
             rt_libc: -1,
             rt_builtins: -1,
             rt_libm: -1,
@@ -8225,6 +8231,11 @@ extend Package {
         let tf = join2(std_dir, "rt/test.spc");
         if self.test_build && self.rt_test < 0 && dutil::file_mtime(&tf) != 0 {
             self.rt_test = self.load_module("std::rt::test", &tf, self.bootstrap, target);
+        }
+        // The writer of a `-fblock-counts` build's counts, which its `main` hands to `atexit`.
+        let kf = join2(std_dir, "rt/counts.spc");
+        if (self.cg_on & bman::CG_BLOCK_COUNTS) != 0 && self.rt_counts < 0 && dutil::file_mtime(&kf) != 0 {
+            self.rt_counts = self.load_module("std::rt::counts", &kf, self.bootstrap, target);
         }
         // The 128-bit routines the native code calls, where only the C toolchain's archives hold them.
         let bf0 = join2(std_dir, "rt/builtins.spc");

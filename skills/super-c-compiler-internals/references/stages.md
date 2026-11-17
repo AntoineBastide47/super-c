@@ -488,7 +488,9 @@ the global-env hooks, and a `main` that passes them to `sc_test_main`. The runne
 keep their module prefix and the program's own mangling does not change. A `--target=wasm` build
 loads wasm's C library the same way: `std::rt::libc` and `std::rt::libm` (`Package::rt_libc`,
 `rt_libm`, `Package::is_libc`), runtime modules whose `@export` functions are the C library's
-functions. It selects the tests
+functions; and a `-fblock-counts` build loads `std::rt::counts` (`Package::rt_counts`), the writer
+its `main` hands to `atexit`, which reads the counters' registry (`Lower::count_registry`, built in
+`lir_stage` once every body is lowered; such a build runs without the per-TU cache). It selects the tests
 (filter, shards balanced by recorded durations), runs each in its own process (POSIX: a fork
 pool; Windows: the binary again with `--run-one`), enforces the timeouts, and reports.
 

@@ -12373,3 +12373,89 @@ fn exit_cases_01() {
     build_constants_of_no_platform(&mut b);
     b.run();
 }
+
+// The sum of the counts of function `name` in block counts `text` (`name<TAB>count` lines), and its lines.
+const fn block_count(text: str, name: str) (u64, u32) {
+    let mut sum: u64 = 0;
+    let mut n: u32 = 0;
+    for line in text.lines() {
+        let tab = line.find("\t");
+        if tab > 0 && line.slice(0, tab as usize) == name {
+            sum += line.slice(tab as usize + 1, line.len()).parse_i64().unwrap() as u64;
+            n += 1;
+        }
+    }
+    return (sum, n);
+}
+
+// A `-fblock-counts` program appends each function's Core IR block executions at exit to the file
+// $SC_BLOCK_COUNTS names, `%p` in it the process id: a function called n times counts n times its blocks,
+// a loop of n turns grows its function's count by the same amount per turn, and a second run appends.
+@test
+fn block_counts_count_each_functions_blocks() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::platform::env;
+
+@noinline
+fn step(x: u64) u64 {
+    return x ^ 0x5A;
+}
+
+@noinline
+fn spin(n: u64) u64 {
+    let mut s: u64 = 0;
+    for i in 0..n {
+        s ^= step(i);
+    }
+    return s;
+}
+
+fn main() i32 {
+    let n = env::get("TURNS").unwrap().unwrap().as_str().parse_i64().unwrap() as u64;
+    return (spin(n) == 12345) as i32;
+}
+)",
+    );
+    let r = p.native_build("-fblock-counts", "main.spc");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the counted program builds");
+    let root = p.dir();
+    let mut texts = Vector::<String>::new();
+    for n in [0, 10, 20] {
+        let path = format("{}/c{}.txt", root, n);
+        let run = p.run_bin_env(format("TURNS={} SC_BLOCK_COUNTS={} ", n, path.as_str()).as_str());
+        assert_eq(run.exit, 0);
+        texts.push(cli::read_text(&path));
+    }
+    let (s0, _) = block_count(&texts[0], "main__step");
+    let (s10, _) = block_count(&texts[1], "main__step");
+    let (s20, _) = block_count(&texts[2], "main__step");
+    assert(s0 == 0 && s10 > 0 && s20 == 2 * s10, "a function called n times counts its blocks n times");
+    let (l0, _) = block_count(&texts[0], "main__spin");
+    let (l10, _) = block_count(&texts[1], "main__spin");
+    let (l20, _) = block_count(&texts[2], "main__spin");
+    assert(l0 > 0 && l10 > l0 && l20 - l10 == l10 - l0, "each turn of a loop counts its blocks once more");
+    // A second run appends to the file.
+    let again = format("{}/c10.txt", root);
+    assert_eq(p.run_bin_env(format("TURNS=10 SC_BLOCK_COUNTS={} ", again.as_str()).as_str()).exit, 0);
+    let at = cli::read_text(&again);
+    let (twice, lines) = block_count(&at, "main__step");
+    assert(twice == 2 * s10 && lines == 2, "a second run appends its counts");
+    // `%p` is the process id.
+    assert_eq(p.run_bin_env(format("TURNS=1 SC_BLOCK_COUNTS={}/p%p.txt ", root).as_str()).exit, 0);
+    let mut named = false;
+    let mut d = fs::read_dir(root).unwrap();
+    while let Some(Ok(e)) = d.next() {
+        let nm = e.name;
+        if nm.starts_with("p") && nm.ends_with(".txt") {
+            let digits = nm.slice(1, nm.len() - 4);
+            named = digits.len() != 0 && digits.parse_i64().is_some();
+        }
+    }
+    assert(named, "the file is named by the process id");
+    p.free();
+}

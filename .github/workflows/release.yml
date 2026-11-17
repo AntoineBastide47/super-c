@@ -77,8 +77,8 @@ jobs:
   # object cache, `objcache-<target>-<sha>`, which `caches` merges at the end of the run from the deltas
   # its compile, test and package jobs upload; gate, counts and the wasm checks keep only
   # their own deltas (`objdelta-<target>-<role>-<sha>`). The installation caches (Homebrew, mingw-w64,
-  # llvm-mingw, wasi) are restored every run, so the least recently used entries GitHub evicts past its
-  # limit are the superseded caches of older commits.
+  # wasi) are restored every run, so the least recently used entries GitHub evicts past its limit are the
+  # superseded caches of older commits.
   #
   # Jobs share no files: `compile` uploads the compiler it built, and every later job downloads it (an
   # artifact keeps no file modes, hence the chmod).
@@ -461,7 +461,7 @@ jobs:
           sha: ${{ needs.resolve.outputs.sha }}
 
   # The build work count beside the shards (.github/actions/build-counts): this commit's compiler, built
-  # by clang with counters (llvm-mingw's on Windows), builds its sources natively, against the count the
+  # natively with block counters (`-fblock-counts`), builds its sources natively, against the count the
   # last release's run saved. A growth of 1% or more is an error annotation, and the release waits for an
   # approval.
   # No Linux arm64 row: no earlier release has a Linux arm64 compiler to count against.
@@ -494,13 +494,12 @@ jobs:
           role: counts
           save: true
           sha: ${{ needs.resolve.outputs.sha }}
-          llvm-mingw: ${{ matrix.target == 'windows' }}
 
       - uses: actions/download-artifact@v8
         with:
           name: compiler-${{ matrix.target }}
 
-      # The last release's compiler, which builds its own sources for the comparison.
+      # The last release's tag, whose sources the comparison counts when no saved count matches.
       - uses: ./.github/actions/bootstrap
         id: boot
         with:

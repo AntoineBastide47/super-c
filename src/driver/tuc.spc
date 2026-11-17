@@ -12,6 +12,7 @@
 // TU, layout asserts and TU liveness are recomputed every build, so a replayed module's bytes land
 // in a fully fresh assembly.
 import ast::ast as *;
+import build_system::manifest as bman;
 import emit::mangle as mbe;
 import ir::inline as inl;
 import module::loader as loader;
@@ -412,10 +413,11 @@ pub(package) fn tuc_setup(
     t.hnat.resize_default(n);
     // The evaluator check runs every test's body as the emitter lowers it, and a build that asks for the
     // LIR text (`lir_out`) or whose hooks read the LIR (`ext::reads_ir`) needs every body: a replayed body is
-    // not rendered. So does `--emit-c` of constant-time code: their object holds every one (`ct_object`).
+    // not rendered. So does `--emit-c` of constant-time code: their object holds every one (`ct_object`);
+    // and a `-fblock-counts` build, whose registry names every body's counter (`Lower::count_registry`).
     if gen_root.len() == 0 || n == 0 || p.lir_out != null || ext::reads_ir() || stdlib::getenv("SC_LIR_EVAL") != null || !p.native && lct::loaded(
         p,
-    ) {
+    ) || (p.cg & bman::CG_BLOCK_COUNTS) != 0 {
         return t;
     }
     if stdlib::getenv("SC_NO_TU_CACHE") != null {

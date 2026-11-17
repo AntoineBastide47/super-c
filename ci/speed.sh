@@ -4,9 +4,8 @@
 # tree with `--emit-c` and builds it with $CC through ci/cc_tree.sh), the speed of the compiler each side
 # produces (one serial C emission of the compiler's sources, the same work for both), and the work count
 # of each side's build as .github/actions/build-counts takes it (the compiler's own code only).
-# Each time is the fastest of RUNS runs, every cache off. The count needs CC_COUNTS (a clang with profile
-# counters) and PROFDATA (its llvm-profdata); without them it is left out. Prints a Markdown table, also
-# into GITHUB_STEP_SUMMARY when set.
+# Each time is the fastest of RUNS runs, every cache off; the count is the native `-fblock-counts` one.
+# Prints a Markdown table, also into GITHUB_STEP_SUMMARY when set.
 set -eu
 x=${BINEXT:-}
 runs=${RUNS:-3}
@@ -91,36 +90,31 @@ size_of() {
 }
 row "compiler binary bytes" "$(size_of "build/speed-native/sc$x")" "$(size_of "build/speed-c/sc$x")" "-" >> "$out"
 
-# The work count of each side's build, by a counted build of the compiler under test: the native
-# build (objects and link) and the C emission.
-if [ -n "${CC_COUNTS:-}" ] && [ -n "${PROFDATA:-}" ]; then
-  py=$(command -v python3 || command -v python)
-  # The counters are the C compiler's: the counted compiler is the release profile's C tree.
-  { "./super-c$x" build --profile=release --emit-c --out-dir="$w/counts-tree" &&
-    CC="$CC_COUNTS" sh ci/cc_tree.sh "$w/counts-tree/release/raw" "build/counts/super-c-counts$x" -DNDEBUG -fprofile-instr-generate; } > "$w/counts-build.txt" 2>&1 || {
-    cat "$w/counts-build.txt"
-    echo "::error::the counted compiler did not build"
+# The work count of each side's build, by a counted build of the compiler under test as
+# .github/actions/build-counts makes it: the native build (objects and link) and the C emission.
+py=$(command -v python3 || command -v python)
+mkdir -p build/counts
+"./super-c$x" build --profile=release -fno-prove -fblock-counts -o "build/counts/super-c-counts$x" > "$w/counts-build.txt" 2>&1 || {
+  cat "$w/counts-build.txt"
+  echo "::error::the counted compiler did not build"
+  exit 1
+}
+count() {
+  local raw="$w/raw-$1"
+  rm -rf "$raw" "$w/ctree"
+  mkdir -p "$raw"
+  # To stderr: the caller captures stdout.
+  env SC_BLOCK_COUNTS="$raw/%p.txt" "./build/counts/super-c-counts$x" build --profile=debug --jobs=1 --bootstrap-tags --out-dir="$w/ctree" $2 > "$w/count-$1.txt" 2>&1 || {
+    cat "$w/count-$1.txt" >&2
+    echo "::error::the counted build ($1) failed" >&2
     exit 1
   }
-  count() {
-    local raw="$w/raw-$1"
-    rm -rf "$raw" "$w/ctree"
-    mkdir -p "$raw"
-    # To stderr: the caller captures stdout.
-    env LLVM_PROFILE_FILE="$raw/%p.profraw" "./build/counts/super-c-counts$x" build --profile=debug --jobs=1 --bootstrap-tags --out-dir="$w/ctree" $2 > "$w/count-$1.txt" 2>&1 || {
-      cat "$w/count-$1.txt" >&2
-      echo "::error::the counted build ($1) failed" >&2
-      exit 1
-    }
-    "$PROFDATA" merge -o "$w/$1.profdata" "$raw"/*.profraw
-    "$PROFDATA" merge --text -o "$w/$1.txt" "$w/$1.profdata"
-    "$py" -I .github/actions/build-counts/counts.py summarize "$w/$1.txt" "$w/$1.tsv" "$1" "$CC_COUNTS" "$1 build"
-    awk -F'\t' '$1 == "total" { print $2 }' "$w/$1.tsv"
-  }
-  kn=$(count native "-o $w/ctree/bin$x")
-  kc=$(count c --emit-c)
-  row "work count (compiler code only)" "$kn" "$kc" "$(ratio "$kn" "$kc")" >> "$out"
-fi
+  "$py" -I .github/actions/build-counts/counts.py summarize "$raw" "$w/$1.tsv" "$1" "-fblock-counts" "$1 build"
+  awk -F'\t' '$1 == "total" { print $2 }' "$w/$1.tsv"
+}
+kn=$(count native "-o $w/ctree/bin$x")
+kc=$(count c --emit-c)
+row "work count (compiler code only)" "$kn" "$kc" "$(ratio "$kn" "$kc")" >> "$out"
 cat "$out"
 if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   cat "$out" >> "$GITHUB_STEP_SUMMARY"
