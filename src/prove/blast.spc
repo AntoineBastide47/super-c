@@ -7,8 +7,8 @@
 // - the skeleton: the boolean structure of formulas (`!`, `&&`, `||`, `==` of booleans), each other
 //   formula a variable (an atom). An integer equality `a == b` has two more variables, `a < b`
 //   (SEL_LT) and `b < a` (SEL_GT), and the clause that one of the three holds. A branch the theory
-//   solvers refute adds the negation of its literals as a clause; the case split holds when these
-//   clauses and the skeleton have no model;
+//   solvers refute adds the negation of its literals as a clause; the hypotheses imply the goal when
+//   these clauses and the skeleton have no model;
 // - bits: every integer term as the bits of its exact value in two's complement, wide enough to
 //   hold every value it can take (`nat_of`), each operation as its circuit, each comparison of
 //   integers as a comparator. An operation whose value is not defined (a zero divisor, a count past
@@ -96,6 +96,14 @@ extend<const B: usize> Blaster<B> {
             work: Vector::<u64>::new(),
             dep: Vector::<u64>::new(),
             nstack: Vector::<u32>::new(),
+        };
+    }
+
+    // The variable of atom `t` (selector `sel`), NONE when the encoding has none.
+    pub(package) fn atom_var(self: &Self, t: u32, sel: u64) u32 {
+        return switch self.atoms.get(&(t as u64 << 2 | sel)) {
+            Some(v) => *v,
+            None => NONE,
         };
     }
 

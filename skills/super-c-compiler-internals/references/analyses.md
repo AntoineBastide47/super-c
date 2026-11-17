@@ -63,7 +63,8 @@ file is authoritative for where to look first.
 | The bounds checks that held on every path that reached them (facts for the build) | `Prover::note_check` | `chk_ok`, `chk_dead` per body, then `Prover.facts`; applied as PROVEN twins in `irl::Keep` and in the proof record (`p` lines) | the build |
 | The range of each integer parameter a proved `requires` states | `irc::skip_contracts` (`note_requires`) | `CoreBody.entry_ranges`; the LIR's `Body.ranges` (`Lower::param_range`) | the body |
 | Whether a term holds an operation the bits define and the arithmetic reads as an atom | `Terms::make` | `Terms.bitty` | the next body |
-| A branch's theory literals | `Solver::close` | `Branch.lits`, per branch | the branch's refutation |
+| A branch's theory literals: those a SAT model of the skeleton needs, the count before each choice, and the decision level that fixes each formula | `Solver::model_lits` (`model_val`, `model_level`, `forced`) | `lits`, `cuts` of `Solver::implies`; `memo`, `lv`, per model | the next model |
+| The literal sets of one refutation the theories did not refute | `Solver::implies` (`lits_hash`) | `failed`, per call | the call's end |
 | What a branch's literals state: its rows, equalities, disequalities and literals | `Kernel::state` (`state_lit`) | `kernel::Built` (`Stated`), per branch | the branch's refutation |
 | The literals that share unknowns with the goal's | `Solver::cone` (`unknowns`, `find`) | `Solver.uf`, `ufirst`, per branch | the next branch |
 | The bits of a branch's cone: each term's bit vector, the gates, the clauses | `Kernel::blast` (`Blaster`, `src/prove/blast.spc`) | `Kernel.bl` (`vk`, `vecs`, `gates`, `cnf`) | the next blast |

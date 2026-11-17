@@ -729,6 +729,11 @@ extend<const B: usize> Kernel<B> {
         return &self.sk.cnf;
     }
 
+    // The encoder of the skeleton (`seal`): its atoms' variables.
+    pub(package) const fn skel(self: &Self) &Blaster<B> {
+        return &self.sk;
+    }
+
     pub(package) const fn bits(self: &Self) &Blaster<B> {
         return &self.bl;
     }

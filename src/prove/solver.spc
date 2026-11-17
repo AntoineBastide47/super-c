@@ -1,5 +1,6 @@
-// The solvers of the contract prover. `implies` splits the hypotheses and the negated goal into
-// branches (`close`); each branch is refuted by two theory solvers that exchange equalities:
+// The solvers of the contract prover. `implies` is a conflict-driven search (lazy DPLL(T)): the SAT
+// solver finds a model of the boolean skeleton of the hypotheses and the negated goal, and the theory
+// literals the model needs (a branch) are refuted by two theory solvers that exchange equalities:
 //
 // - congruence closure merges the terms the branch states equal, and every two applications of one
 //   operation over equal operands (each operation is an uninterpreted function to it);
@@ -15,9 +16,9 @@
 // then by the theories.
 //
 // The solvers are not trusted: each refutation writes a proof (`kernel::Proof`, or LRAT for SAT), a
-// branch counts as refuted only when the kernel accepts it, and the split into branches counts only
-// when the kernel accepts an LRAT proof that the branches cover every case. Every search has a fixed
-// bound; past one, the answer is "not proved".
+// branch counts as refuted (a lemma) only when the kernel accepts it, and the search counts only when
+// the kernel accepts an LRAT proof that the skeleton and the lemmas have no model. Every search has a
+// fixed bound; past one, the answer is "not proved".
 import ast::ast as *;
 import prove::terms as *;
 import prove::kernel as *;
@@ -26,7 +27,7 @@ import prove::sat as *;
 
 // The blocks, chain blocks and solver steps one body may spend.
 pub(package) const STEP_BUDGET: u32 = 4000000;
-// The branches of one refutation.
+// The SAT models of one refutation.
 const SPLITS_MAX: u32 = 256;
 // The levels of `and`, `or` and `not` that `refuted` reads.
 const REFUTE_DEPTH: u32 = 8;
@@ -780,42 +781,17 @@ struct Edge {
     kind: u8,
 }
 
-// ---- the branches ----------------------------------------------------------------------------------
-
-// One branch of a refutation: the formulas still to split (`term << 1 | polarity`) and the theory
-// literals it states (`blast::tlit`).
-struct Branch {
-    todo: Vector<u64>,
-    lits: Vector<u64>,
-    // The formulas that split the branch, put off until the theories fail without them (`close`), and
-    // the literal count of the last such attempt.
-    split: Vector<u64>,
-    tried: usize,
-    // The goal's first literal, or NONE_LIT: the bits of the literals that share its unknowns decide the
-    // branch (`Solver::cone`).
-    root: u64,
-}
-
 const NONE_LIT: u64 = 0xFFFFFFFFFFFFFFFF;
 
-extend Branch {
-    fn copy(self: &Self) Branch {
-        return Branch {
-            todo: self.todo.clone(),
-            lits: self.lits.clone(),
-            split: self.split.clone(),
-            tried: self.tried,
-            root: self.root,
-        };
+// A hash of the set of theory literals `lits` (its order does not count).
+fn lits_hash(lits: &Vector<u64>) u64 {
+    let mut s = lits.clone();
+    s.sort();
+    let mut h: u64 = 0xCBF29CE484222325;
+    for j in 0..s.len() {
+        h = (h ^ s[j]).wrapping_mul(0x100000001B3);
     }
-
-    // Adds literal `l`, the goal's (`from_goal`) first as the root.
-    fn push_lit(self: &mut Self, l: u64, from_goal: bool) {
-        if from_goal && self.root == NONE_LIT {
-            self.root = l;
-        }
-        self.lits.push(l);
-    }
+    return h;
 }
 
 const fn pair(a: u32, b: u32) u64 {
@@ -958,12 +934,6 @@ extend<const B: usize> Solver<B> {
         return self.steps <= self.limit && !self.gave_up;
     }
 
-    // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
-    // model. Each formula splits into branches; each branch closes on a contradiction of its boolean
-    // literals, or its theory literals are a lemma: the theory solvers refute them (`refute`), or, with
-    // `bits`, a SAT refutation of their bits does when they hold a bit operation. Then the skeleton of
-    // the formulas and the lemmas' clauses must have no model: the kernel checks that the split covers
-    // every case.
     // Whether a simplex ran out of the numbers' bits since `clear_overflow`: wider numbers may prove what
     // these did not.
     pub(package) const fn overflowed(self: &Self) bool {
@@ -980,6 +950,13 @@ extend<const B: usize> Solver<B> {
         self.lp.ovf = false;
     }
 
+    // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
+    // model. The SAT solver finds a model of the skeleton of the hypotheses, the negated goal and the
+    // lemmas' negations; the theory literals the model needs (`model_lits`) go to the theories
+    // (`lemma_with`): the theory solvers refute them (`refute`), or, with `bits`, a SAT refutation of
+    // their bits does when they hold a bit operation. The refutation gives a lemma, its literals the
+    // core of the proof, which the next skeleton excludes. No model: the kernel checks that the skeleton
+    // and the lemmas have none (LRAT, `Kernel::covered`).
     pub(package) fn implies(self: &mut Self, tm: &Terms<B>, hyps: &Vector<u32>, goal: u32, bits: bool) bool {
         self.model.clear();
         self.mval.clear();
@@ -991,40 +968,241 @@ extend<const B: usize> Solver<B> {
                 return true;
             }
         }
-        // Past the limit (a capped check's): no setup charged again.
         if self.steps > self.limit {
             return false;
         }
         self.kn.begin();
-        let mut b0 = Branch {
-            todo: Vector::<u64>::new(),
-            lits: Vector::<u64>::new(),
-            split: Vector::<u64>::new(),
-            tried: 0,
-            root: NONE_LIT,
-        };
-        // Each formula to do: its term, whether the goal's (2), its polarity (1).
-        for j in 0..hyps.len() {
-            b0.todo.push(hyps[j] as u64 << 2 | 1);
-        }
-        b0.todo.push(goal as u64 << 2 | 2);
-        let mut open = Vector::<Branch>::new();
-        open.push(b0);
-        let mut splits: u32 = 0;
-        for _b in 0..SPLITS_MAX + 1 {
-            if open.len() == 0 {
-                return self.kn.seal(tm, hyps, goal) && self.covered();
+        let mut lits = Vector::<u64>::new();
+        let mut cuts = Vector::<u32>::new();
+        let mut part = Vector::<u64>::new();
+        // The literal sets the theories did not refute (a hash of each, sorted): a later model that
+        // reaches one again does not try it again.
+        let mut failed = Map::<u64, bool>::new();
+        for _r in 0..SPLITS_MAX + 1 {
+            if !self.kn.seal(tm, hyps, goal) {
+                return false;
             }
-            let mut br = open.pop().unwrap();
-            switch self.close(tm, &mut br, &mut open, &mut splits, bits) {
-                Some(closed) => {
-                    if !closed && !self.lemma(tm, &br.lits, br.root, bits) {
-                        return false;
+            let r = self.sat.solve(self.kn.skeleton(), self.sat_budget(SAT_STEPS));
+            if !self.spend(self.sat.steps / SAT_STEP_COST) {
+                return false;
+            }
+            if r == SAT_REFUTED {
+                return self.kn.covered(&self.sat.proof);
+            }
+            if r != SAT_MODEL {
+                return false;
+            }
+            let mut root = NONE_LIT;
+            lits.clear();
+            cuts.clear();
+            if !self.model_lits(tm, hyps, goal, &mut lits, &mut cuts, &mut root) {
+                return false;
+            }
+            // The literals before a choice (`model_lits`), at the first, second, fourth.. choice: fewer
+            // literals give the theories fewer rows, and a lemma of fewer choices excludes more models.
+            // Then all of them, with the model's guesses.
+            let mut done = false;
+            let mut prev: usize = 0;
+            let mut q: usize = 0;
+            while q < cuts.len() {
+                let n = cuts[q] as usize;
+                q = pick(q == 0, 1usize, q * 2);
+                if n == 0 || n == prev || n >= lits.len() {
+                    continue;
+                }
+                prev = n;
+                part.clear();
+                for i in 0..n {
+                    part.push(lits[i]);
+                }
+                let h = lits_hash(&part);
+                if failed.contains_key(&h) {
+                    continue;
+                }
+                if self.lemma_with(tm, &part, root, bits, false) {
+                    done = true;
+                    break;
+                }
+                failed.insert(h, true);
+            }
+            if !done && !self.lemma_with(tm, &lits, root, bits, true) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // Whether the SAT model fixes the case of split formula `t` at decision level 0: the order of an
+    // integer disequality, the side of a disjunction that holds (of a conjunction that fails), both
+    // sides of an equality of booleans (`model_lits`).
+    fn forced(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>, lv: &mut Map<u32, u32>) bool {
+        let x = tm.at(t);
+        if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) {
+            let a = self.kn.skel().atom_var(t, SEL_LT);
+            return a != NONE && self.sat.level_of(a) == 0;
+        }
+        return self.model_level(tm, t, memo, lv) == 0;
+    }
+
+    // The decision level at which the SAT model fixes the value of formula `t` (NONE for an atom the
+    // skeleton does not hold): of a conjunction that fails (a disjunction that holds), its least part
+    // with that value; else its greatest part.
+    fn model_level(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>, lv: &mut Map<u32, u32>) u32 {
+        if let Some(v) = lv.get(&t) {
+            return *v;
+        }
+        let x = tm.at(t);
+        let l = if x.op == T_BOOL {
+            0
+        } else if x.op == T_NOT {
+            self.model_level(tm, x.a, memo, lv)
+        } else if x.op == T_AND || x.op == T_OR {
+            let v = self.model_val(tm, t, memo);
+            let (la, lb) = (self.model_level(tm, x.a, memo, lv), self.model_level(tm, x.b, memo, lv));
+            if x.op == T_OR == v {
+                let ma = pick(self.model_val(tm, x.a, memo) == v, la, NONE);
+                let mb = pick(self.model_val(tm, x.b, memo) == v, lb, NONE);
+                ma.min(mb)
+            } else {
+                la.max(lb)
+            }
+        } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+            self.model_level(tm, x.a, memo, lv).max(self.model_level(tm, x.b, memo, lv))
+        } else {
+            let a = self.kn.skel().atom_var(t, SEL_ATOM);
+            pick(a == NONE, NONE, self.sat.level_of(a))
+        };
+        lv.insert(t, l);
+        return l;
+    }
+
+    // The truth of formula `t` in the SAT model of the skeleton: its boolean structure over the atoms'
+    // values (`memo`); false for a formula the skeleton has no atom of.
+    fn model_val(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>) bool {
+        if let Some(v) = memo.get(&t) {
+            return *v;
+        }
+        let x = tm.at(t);
+        let v = if x.op == T_BOOL {
+            !x.k.is_zero()
+        } else if x.op == T_NOT {
+            !self.model_val(tm, x.a, memo)
+        } else if x.op == T_AND {
+            self.model_val(tm, x.a, memo) && self.model_val(tm, x.b, memo)
+        } else if x.op == T_OR {
+            self.model_val(tm, x.a, memo) || self.model_val(tm, x.b, memo)
+        } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+            self.model_val(tm, x.a, memo) == self.model_val(tm, x.b, memo) == (x.op == T_EQ)
+        } else {
+            let a = self.kn.skel().atom_var(t, SEL_ATOM);
+            a != NONE && self.sat.holds(a)
+        };
+        memo.insert(t, v);
+        return v;
+    }
+
+    // The theory literals the SAT model of the skeleton needs to satisfy the hypotheses and the negated
+    // goal (a branch), into `out`: the formulas taken apart from the goal's back to the first
+    // hypothesis; a disjunction that holds, a conjunction that fails, an integer disequality and an
+    // equality of booleans are choices, which wait until the rest is taken apart, the goal's first (its
+    // literals are the ones the hypotheses' cases conflict with), and then take the side the model takes;
+    // a choice the SAT search fixed with no decision (`forced`) is taken at once. `cuts` gets the literal
+    // count before each choice. `root` is the goal's first literal. False past a bound. The theories
+    // stop at bounds, so the order of the literals counts.
+    fn model_lits(
+        self: &mut Self,
+        tm: &Terms<B>,
+        hyps: &Vector<u32>,
+        goal: u32,
+        out: &mut Vector<u64>,
+        cuts: &mut Vector<u32>,
+        root: &mut u64,
+    ) bool {
+        let mut memo = Map::<u32, bool>::new();
+        let mut lv = Map::<u32, u32>::new();
+        // Entries: term << 2 | 2 for the goal's | 1 for positive.
+        let mut todo = Vector::<u64>::new();
+        let mut split = Vector::<u64>::new();
+        for j in 0..hyps.len() {
+            todo.push(hyps[j] as u64 << 2 | 1);
+        }
+        todo.push(goal as u64 << 2 | 2);
+        for _s in 0..FACTS_MAX * 4 {
+            let mut deferred = false;
+            if todo.len() == 0 {
+                if split.len() == 0 {
+                    return true;
+                }
+                cuts.push(out.len() as u32);
+                let mut at = split.len() - 1;
+                for j in 0..split.len() {
+                    if (split[j] & 2) != 0 {
+                        at = j;
                     }
-                },
-                None => {
-                    return false;
-                },
+                }
+                todo.push(split.remove(at).unwrap());
+                deferred = true;
+            }
+            let e = todo.pop().unwrap();
+            let t = (e >> 2) as u32;
+            let g = e & 2;
+            let pos = (e & 1) != 0;
+            let x = tm.at(t);
+            let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
+                x.a,
+            ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
+            // A case the SAT search fixed with no decision (level 0) is no choice: taken at once, the
+            // literals before each choice hold all those the formula forces (unit propagation).
+            if splitting && !deferred && !self.forced(tm, t, &mut memo, &mut lv) {
+                split.push(e);
+                continue;
+            }
+            let mut lit = NONE_LIT;
+            if x.op == T_BOOL {
+                continue;
+            } else if x.op == T_NOT {
+                todo.push(x.a as u64 << 2 | g | (!pos) as u64);
+            } else if x.op == T_AND && pos || x.op == T_OR && !pos {
+                todo.push(x.a as u64 << 2 | g | pos as u64);
+                todo.push(x.b as u64 << 2 | g | pos as u64);
+            } else if x.op == T_AND || x.op == T_OR {
+                // A side the literals already make true satisfies it; one they make false leaves the other.
+                if self.refuted(tm, out, x.a, !pos, REFUTE_DEPTH) || self.refuted(tm, out, x.b, !pos, REFUTE_DEPTH) {
+                    continue;
+                }
+                let side = if self.refuted(tm, out, x.a, pos, REFUTE_DEPTH) {
+                    x.b
+                } else if self.refuted(tm, out, x.b, pos, REFUTE_DEPTH) || self.model_val(tm, x.a, &mut memo) == pos {
+                    x.a
+                } else {
+                    x.b
+                };
+                todo.push(side as u64 << 2 | g | pos as u64);
+            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) && x.op == T_EQ != pos {
+                // A disequality of integers: the order the model takes.
+                let lt = self.kn.skel().atom_var(t, SEL_LT);
+                lit = if lt != NONE && self.sat.holds(lt) {
+                    tlit(t, SEL_LT, true)
+                } else {
+                    tlit(t, SEL_GT, true)
+                };
+            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+                // Equal booleans: the closure merges them, so that `f(a)` and `f(b)` are one value.
+                let va = self.model_val(tm, x.a, &mut memo);
+                let vb = self.model_val(tm, x.b, &mut memo);
+                if va == vb {
+                    lit = tlit(t, SEL_ATOM, x.op == T_EQ);
+                }
+                todo.push(x.a as u64 << 2 | g | va as u64);
+                todo.push(x.b as u64 << 2 | g | vb as u64);
+            } else {
+                lit = tlit(t, SEL_ATOM, pos);
+            }
+            if lit != NONE_LIT {
+                if g != 0 && *root == NONE_LIT {
+                    *root = lit;
+                }
+                out.push(lit);
             }
         }
         return false;
@@ -1035,14 +1213,10 @@ extend<const B: usize> Solver<B> {
         self.kn.forget();
     }
 
-    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts. With `bits`, a
-    // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
-    // when they hold a bit operation; then the theory solvers.
-    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool) bool {
-        return self.lemma_with(tm, lits, root, bits, true);
-    }
-
-    // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
+    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts: the theory
+    // solvers, then with `bits` a SAT refutation of the bits of the literals that share unknowns with the
+    // goal's (`cone`), when they hold a bit operation. Without `guess` the theories test only the
+    // equalities of one linear form (`refute`).
     fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
         // A lemma refutes literals that hold all of its own.
         if self.kn.subsumed(lits) {
@@ -1118,8 +1292,10 @@ extend<const B: usize> Solver<B> {
                 return self.refuted(tm, lits, v, pos == same, depth - 1);
             }
         }
+        // An equality of booleans, or a disequality of integers (its literals are its orders): false
+        // only where the literals state its negation.
         if (x.op == T_EQ || x.op == T_NE) && (tm.is_bool(x.a) || tm.is_int(x.a) && x.op == T_EQ != pos) {
-            return false;
+            return lits.contains(&tlit(t, SEL_ATOM, !pos));
         }
         // `v == k` is false where the literals state `v == k2` for another constant `k2`.
         if (x.op == T_EQ || x.op == T_NE) && x.op == T_EQ == pos && tm.is_int(x.a) {
@@ -1174,19 +1350,12 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
-    // Whether the skeleton and the lemmas have no model, by a proof the kernel accepts.
-    fn covered(self: &mut Self) bool {
-        let r = self.sat.solve(self.kn.skeleton(), self.sat_budget(SAT_STEPS));
-        let _ = self.spend(self.sat.steps / SAT_STEP_COST);
-        return r == SAT_REFUTED && self.kn.covered(&self.sat.proof);
-    }
-
     // The SAT steps one run may take: SAT_STEPS, and no more than the steps left.
     const fn sat_budget(self: &Self, cap: u32) u32 {
         return cap.min((self.limit + 1 - self.steps.min(self.limit)).saturating_mul(SAT_STEP_COST));
     }
 
-    // The literals of `lits` that share an unknown with `root` (the goal's first, `Branch.root`; the
+    // The literals of `lits` that share an unknown with `root` (the goal's first, `model_lits`; the
     // first literal when the goal has none), directly or through other literals: the rest hold none of
     // their unknowns, so they cannot help refute it. A union of the unknowns of each literal.
     fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, out: &mut Vector<u64>) {
@@ -1340,129 +1509,6 @@ extend<const B: usize> Solver<B> {
     // Whether literal `l` holds in the SAT model.
     const fn bit_of(self: &Self, l: u32) bool {
         return l == L_TRUE || l != L_FALSE && self.sat.holds(l >> 1) == ((l & 1) == 0);
-    }
-
-    // Split the formulas of `br` until none is left: Some(true) when a contradiction of its boolean
-    // literals closed it, Some(false) when its theory literals remain to refute, None past the split
-    // bound.
-    fn close(self: &mut Self, tm: &Terms<B>, br: &mut Branch, open: &mut Vector<Branch>, splits: &mut u32, bits: bool) Option<
-        bool
-    > {
-        for _s in 0..LIN_MAX {
-            let mut deferred = false;
-            if br.todo.len() == 0 {
-                if br.split.len() == 0 {
-                    return Some(false);
-                }
-                // The literals so far may conflict already: then no split is needed. The model's guesses
-                // wait for the leaves.
-                if br.lits.len() > br.tried {
-                    br.tried = br.lits.len();
-                    if self.lemma_with(tm, &br.lits, br.root, bits, false) {
-                        return Some(true);
-                    }
-                }
-                // The goal's own cases first: its literals are what the hypotheses' cases close against.
-                let mut at = br.split.len() - 1;
-                for j in 0..br.split.len() {
-                    if (br.split[j] & 2) != 0 {
-                        at = j;
-                    }
-                }
-                br.todo.push(br.split.remove(at).unwrap());
-                deferred = true;
-            }
-            let e = br.todo.pop().unwrap();
-            let t = (e >> 2) as u32;
-            let g = e & 2;
-            let pos = (e & 1) != 0;
-            let x = tm.at(t);
-            let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
-                x.a,
-            ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
-            // Every split waits for the literals: a side they already refute needs none (`refuted`).
-            if splitting && !deferred {
-                br.split.push(e);
-                continue;
-            }
-            if x.op == T_BOOL {
-                if x.k == wide::<B>(1) != pos {
-                    return Some(true);
-                }
-            } else if x.op == T_NOT {
-                br.todo.push(x.a as u64 << 2 | g | (!pos) as u64);
-            } else if x.op == T_AND && pos || x.op == T_OR && !pos {
-                br.todo.push(x.a as u64 << 2 | g | pos as u64);
-                br.todo.push(x.b as u64 << 2 | g | pos as u64);
-            } else if x.op == T_AND || x.op == T_OR {
-                // A side the branch's literals already make true satisfies the formula, which then states
-                // nothing the branch does not: no split.
-                if self.refuted(tm, &br.lits, x.a, !pos, REFUTE_DEPTH) || self.refuted(
-                    tm,
-                    &br.lits,
-                    x.b,
-                    !pos,
-                    REFUTE_DEPTH,
-                ) {
-                    continue;
-                }
-                // A side the branch's literals already make false leaves the other alone: no split.
-                if self.refuted(tm, &br.lits, x.a, pos, REFUTE_DEPTH) {
-                    br.todo.push(x.b as u64 << 2 | g | pos as u64);
-                    continue;
-                }
-                if self.refuted(tm, &br.lits, x.b, pos, REFUTE_DEPTH) {
-                    br.todo.push(x.a as u64 << 2 | g | pos as u64);
-                    continue;
-                }
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let mut other = br.copy();
-                other.todo.push(x.b as u64 << 2 | g | pos as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 2 | g | pos as u64);
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) && x.op == T_EQ != pos {
-                // A disequality of integers: one of its orders.
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let mut other = br.copy();
-                other.push_lit(tlit(t, SEL_GT, true), g != 0);
-                open.push(other);
-                br.push_lit(tlit(t, SEL_LT, true), g != 0);
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
-                // Equal booleans: both hold or neither does.
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let same = x.op == T_EQ == pos;
-                // The equality stays a literal of both sides: the closure merges the two booleans, so
-                // that `f(a)` and `f(b)` are one value (the skeleton spells it by its operands).
-                if same {
-                    br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
-                }
-                let mut other = br.copy();
-                other.todo.push(x.a as u64 << 2 | g);
-                other.todo.push(x.b as u64 << 2 | g | (!same) as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 2 | g | 1);
-                br.todo.push(x.b as u64 << 2 | g | same as u64);
-            } else {
-                // An atom: closes against its own negation.
-                let want = tlit(t, SEL_ATOM, !pos);
-                for j in 0..br.lits.len() {
-                    if br.lits[j] == want {
-                        return Some(true);
-                    }
-                }
-                br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
-            }
-        }
-        return None;
     }
 
     // Whether the theory solvers refute what branch `st` states; the proof is in `pf`, for the kernel.

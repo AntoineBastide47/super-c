@@ -257,7 +257,7 @@ fn unproved_contracts_are_errors() {
     b.add(
         "a bit operation's counterexample from the bits' model",
         "fn f(x: u32, y: u32) u32 ensures |r| r == x { return x ^ y; }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
-        "for example: x = 0, y = 1",
+        "for example: x = 1, y = 4294967295",
     );
     b.add(
         "a wrapping sum past the maximum",

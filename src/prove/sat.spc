@@ -100,6 +100,11 @@ extend Sat {
         return self.val[(v << 1) as usize] == V_TRUE;
     }
 
+    // The decision level at which `solve` assigned variable `v`.
+    pub(package) const fn level_of(self: &Self, v: u32) u32 {
+        return self.level[v as usize];
+    }
+
     // Decide `cnf` within `budget` steps: SAT_MODEL (a model, `holds`), SAT_REFUTED (`proof` derives the
     // empty clause) or SAT_ABORT.
     pub(package) fn solve(self: &mut Self, cnf: &Cnf, budget: u32) u8 {
