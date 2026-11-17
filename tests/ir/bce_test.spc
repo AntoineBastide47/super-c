@@ -1102,6 +1102,17 @@ fn vector_access_group_checks() {
         true,
         "4 lanes from 4 but the length is 7",
     );
+    // A function that returns a view of its parameter's length (`ir::capture`): its call's result has
+    // the argument's length, as the literal has; a function that returns another length keeps the check.
+    let VIEW_CALL: str = "import std::simd;\nfn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add("a call that returns a view of its argument's length", VIEW_CALL, false, "");
+    let VIEW_CALL_SHORT: str = "import std::simd;\nfn view<'a, T>(p: *const T, n: usize) []'a T {\n    return unsafe Slice::<T> { ptr: p, len: n - 3 };\n}\nfn sum(p: *const i32, n: usize) i32 {\n    let s = view(p, n);\n    let m = n - n % 4;\n    let mut acc = Simd::<i32, 4>::splat(0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc.wrapping_add(simd::load::<i32, 4>(s, i));\n        i += 4;\n    }\n    return acc[0];\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<i32>::new();\n    for k in 0..argv.len() + 9 {\n        v.push(k as i32);\n    }\n    let s = v[0..v.len()];\n    return sum(s.ptr, s.len) - 4;\n}\n";
+    vp.add(
+        "a call that returns a view of another length keeps the check",
+        VIEW_CALL_SHORT,
+        true,
+        "4 lanes from 4 but the length is 7",
+    );
     // An early-return guard bounds the loop's limit by the other slice's length: both accesses are
     // proven (`i < m <= n <= y.len()`).
     let GUARD: str = "import std::simd;\nfn sum(x: []f32, y: []f32) f32 {\n    let n = x.len();\n    if y.len() < n {\n        return 0.0;\n    }\n    let m = n - n % 4;\n    let mut acc = Simd::<f32, 4>::splat(0.0);\n    let mut i: usize = 0;\n    while i < m {\n        acc = acc + simd::load::<f32, 4>(x, i) * simd::load::<f32, 4>(y, i);\n        i += 4;\n    }\n    let mut s = acc[0] + acc[1] + acc[2] + acc[3];\n    for k in m..n {\n        s = s + x[k] * y[k];\n    }\n    return s;\n}\nfn main(argv: Vector<str>) i32 {\n    let mut v = Vector::<f32>::new();\n    for k in 0..argv.len() + 8 {\n        v.push(k as f32);\n    }\n    return sum(v[0..v.len()], v[0..v.len()]) as i32 - 204;\n}\n";

@@ -28,6 +28,8 @@
 // zero-sized T never calls the allocator. Thread safety: no internal synchronization; both types are Send and
 // Sync when T (and A) are, so a shared reference allows concurrent reads and a mutation needs exclusive access.
 
+import std::spec::seq as *;
+
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
     fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
@@ -39,7 +41,12 @@ const ZST_CAP: usize = 1 as usize << USIZE_BITS - 1; // the largest power of two
 
 /// A growable double-ended queue: a ring buffer in one block from allocator A. The capacity is 0 or a power
 /// of two; push and pop at both ends are amortized O(1).
-pub struct Deque<T, A = Global> {
+pub struct Deque<T, A: Allocator = Global>
+    invariant self.len <= self.cap && block(self.ptr).len() >= self.cap as int && self.head < self.cap.max(1)
+    invariant self.cap <= Deque::<T, A>::max_cap() && (sizeof(T) != 0 || self.cap == ZST_CAP)
+    invariant self.cap == 0 || sizeof(T) == 0 || A::owns(self.ptr, Deque::<T, A>::bytes(self.cap), alignof(T))
+{
+    @owned
     ptr: *mut T, // the block; `dangling` while cap == 0 or for a zero-sized T, so a view's pointer is never null
     head: usize, // slot of the front element; 0 while cap == 0
     len: usize, // elements in use
@@ -49,9 +56,9 @@ pub struct Deque<T, A = Global> {
 
 // A Deque owns its elements, so it is Send / Sync when its elements and allocator are (the block pointer
 // makes it structurally neither).
-unsafe extend<T: Send, A: Send> Deque<T, A> as Send {}
+unsafe extend<T: Send, A: Allocator + Send> Deque<T, A> as Send {}
 
-unsafe extend<T: Sync, A: Sync> Deque<T, A> as Sync {}
+unsafe extend<T: Sync, A: Allocator + Sync> Deque<T, A> as Sync {}
 
 /// A fixed-capacity double-ended queue: a ring of N inline slots, no allocation. N must be a power of two
 /// (a build error otherwise). Send and Sync when T is.
@@ -92,8 +99,11 @@ pub struct DequeDrain<'a, T> {
     rem: usize,
 }
 
-// The smallest power of two at least `n`, for n <= ZST_CAP.
-const fn next_pow2(n: usize) usize {
+// The smallest power of two at least `n`, for `n` at most the power of two `limit`.
+const fn next_pow2(n: usize, limit: usize) usize
+    requires limit >= 1 && (limit & limit - 1) == 0 && n <= limit
+    ensures |r| r >= n && r >= 1 && (r & r - 1) == 0 && r <= limit
+{
     if n <= 1 {
         return 1;
     }
@@ -198,29 +208,11 @@ fn ring_fmt<T: Format>(it: RingIter<T>) String {
 }
 
 extend<T, A: Allocator> Deque<T, A> {
-    /// An empty deque that allocates through `alloc`; no allocation until the first push.
-    pub const fn new_in(alloc: A) Deque<T, A> {
-        return Deque::<T, A>::with_capacity_in(alloc, 0);
-    }
-
-    /// An empty deque with room for `cap` elements, rounded up to a power of two, allocated through `alloc`
-    /// (no allocation when `cap` is 0). Panics when the byte size overflows a usize.
-    pub const fn with_capacity_in(alloc: A, cap: usize) Deque<T, A> {
-        let mut d = Deque::<T, A> { ptr: dangling::<T>(), head: 0, len: 0, cap: 0, alloc: alloc };
-        if sizeof(T) == 0 {
-            d.cap = ZST_CAP;
-        } else if cap > 0 {
-            if cap > Deque::<T, A>::max_cap() {
-                panic("Deque: capacity overflow");
-            }
-            d.cap = next_pow2(cap);
-            d.ptr = (unsafe d.alloc.alloc(array_bytes::<T>(d.cap), alignof(T))) as *mut T;
-        }
-        return d;
-    }
-
     // The largest power of two whose byte size fits a block (at most `isize::MAX` bytes).
-    const fn max_cap() usize {
+    const fn max_cap() usize
+        ensures |r| r >= 1 && r <= ZST_CAP && (r & r - 1) == 0
+        ensures |r| sizeof(T) == 0 && r == ZST_CAP || sizeof(T) != 0 && r as int <= isize::MAX as int / sizeof(T) as int
+    {
         if sizeof(T) == 0 {
             return ZST_CAP;
         }
@@ -228,8 +220,45 @@ extend<T, A: Allocator> Deque<T, A> {
         return 1 as usize << USIZE_BITS - 1 - m.leading_zeros();
     }
 
+    // The byte size of `n` elements, for `n` at most `max_cap`.
+    const fn bytes(n: usize) usize
+        requires n <= Deque::<T, A>::max_cap()
+        ensures |r| r as int == n as int * sizeof(T) as int && r as int <= isize::MAX as int
+    {
+        return n * sizeof(T);
+    }
+}
+
+extend<T, A: Allocator> Deque<T, A> {
+    /// An empty deque that allocates through `alloc`; no allocation until the first push.
+    pub const fn new_in(alloc: A) Deque<T, A> {
+        return Deque::<T, A>::with_capacity_in(alloc, 0);
+    }
+
+    /// An empty deque with room for `cap` elements, rounded up to a power of two, allocated through `alloc`
+    /// (no allocation when `cap` is 0). Panics when the byte size overflows a usize.
+    pub const fn with_capacity_in(mut alloc: A, cap: usize) Deque<T, A>
+        panics if sizeof(T) != 0 && cap > Deque::<T, A>::max_cap()
+        ensures |r| r.len() == 0 && (sizeof(T) == 0 || r.capacity() >= cap)
+    {
+        if sizeof(T) == 0 {
+            return Deque::<T, A> { ptr: dangling::<T>(), head: 0, len: 0, cap: ZST_CAP, alloc: alloc };
+        }
+        if cap == 0 {
+            return Deque::<T, A> { ptr: dangling::<T>(), head: 0, len: 0, cap: 0, alloc: alloc };
+        }
+        if cap > Deque::<T, A>::max_cap() {
+            panic("Deque: capacity overflow");
+        }
+        let c = next_pow2(cap, Deque::<T, A>::max_cap());
+        let p = (unsafe alloc.alloc(c * sizeof(T), alignof(T))) as *mut T;
+        return Deque::<T, A> { ptr: p, head: 0, len: 0, cap: c, alloc: alloc };
+    }
+
     /// Number of elements.
-    pub const fn len(self: &Deque<T, A>) usize {
+    pub const fn len(self: &Deque<T, A>) usize
+        ensures |r| r == self.len
+    {
         return self.len;
     }
 
@@ -239,18 +268,34 @@ extend<T, A: Allocator> Deque<T, A> {
     }
 
     /// Elements the block holds without growing: 0 or a power of two.
-    pub const fn capacity(self: &Deque<T, A>) usize {
+    pub const fn capacity(self: &Deque<T, A>) usize
+        ensures |r| r == self.cap
+    {
         return self.cap;
     }
 
-    // The slot of logical index `i`; needs cap > 0.
-    const fn slot(self: &Deque<T, A>, i: usize) usize {
-        return self.head + i & self.cap - 1;
+    // The slot of logical index `i`.
+    const fn slot(self: &Deque<T, A>, i: usize) usize
+        requires self.cap > 0 && i <= self.cap
+        ensures |r| r < self.cap
+    {
+        return self.wrap(self.head + i);
+    }
+
+    // `x` as a slot: its bits below the capacity, a power of two.
+    const fn wrap(self: &Deque<T, A>, x: usize) usize
+        requires self.cap > 0
+        ensures |r| r < self.cap
+    {
+        return x & self.cap - 1;
     }
 
     /// Makes room for at least `additional` more elements. A growth sets the capacity to the smallest power of
     /// two that holds `len + additional` elements, and to at least 8. Panics when the byte size overflows a usize.
-    pub fn reserve(self: &mut Deque<T, A>, additional: usize) {
+    pub fn reserve(self: &mut Deque<T, A>, additional: usize)
+        panics if self.len as int + additional as int > Deque::<T, A>::max_cap() as int
+        ensures self.len == old(self.len) && self.len as int + additional as int <= self.cap as int
+    {
         if additional > self.cap - self.len {
             self.grow_for(additional);
         }
@@ -258,12 +303,16 @@ extend<T, A: Allocator> Deque<T, A> {
 
     // The growth path of `reserve` and the pushes, out of line so their check stays small.
     @noinline
-    fn grow_for(self: &mut Deque<T, A>, additional: usize) {
+    fn grow_for(self: &mut Deque<T, A>, additional: usize)
+        requires additional > self.cap - self.len
+        panics if self.len as int + additional as int > Deque::<T, A>::max_cap() as int
+        ensures self.len == old(self.len) && self.len as int + additional as int <= self.cap as int
+    {
         let max_cap = Deque::<T, A>::max_cap();
         if additional > max_cap - self.len {
             panic("Deque: capacity overflow");
         }
-        let mut new_cap = next_pow2(self.len + additional);
+        let mut new_cap = next_pow2(self.len + additional, max_cap);
         if new_cap < MIN_CAP && MIN_CAP <= max_cap {
             new_cap = MIN_CAP;
         }
@@ -272,68 +321,89 @@ extend<T, A: Allocator> Deque<T, A> {
 
     /// Makes room for at least `additional` more elements with the smallest power-of-two capacity that holds
     /// them (no minimum of 8). Panics when the byte size overflows a usize.
-    pub fn reserve_exact(self: &mut Deque<T, A>, additional: usize) {
+    pub fn reserve_exact(self: &mut Deque<T, A>, additional: usize)
+        panics if additional > self.cap - self.len && self.len as int + additional as int > Deque::<T, A>::max_cap() as int
+        ensures self.len == old(self.len) && self.len as int + additional as int <= self.cap as int
+    {
         if additional <= self.cap - self.len {
             return;
         }
         if additional > Deque::<T, A>::max_cap() - self.len {
             panic("Deque: capacity overflow");
         }
-        self.grow_to(next_pow2(self.len + additional));
+        self.grow_to(next_pow2(self.len + additional, Deque::<T, A>::max_cap()));
     }
 
     // Reallocate to `new_cap` slots (a power of two above `cap`, T not zero-sized) and restore the ring: the
     // block keeps its slots, so a wrapped deque moves the shorter of its two parts into the new space. The
     // new capacity is at least twice the old, so the moved part lands clear of both parts.
-    fn grow_to(self: &mut Deque<T, A>, new_cap: usize) {
+    fn grow_to(self: &mut Deque<T, A>, new_cap: usize)
+        requires sizeof(T) != 0 && new_cap > self.cap && new_cap <= Deque::<T, A>::max_cap()
+        ensures self.len == old(self.len) && self.cap == new_cap
+    {
         let old_cap = self.cap;
-        if old_cap == 0 {
-            self.ptr = (unsafe self.alloc.alloc(array_bytes::<T>(new_cap), alignof(T))) as *mut T;
-        } else {
-            self.ptr = (unsafe self.alloc.realloc(self.ptr, old_cap * sizeof(T), array_bytes::<T>(new_cap), alignof(T))) as *mut T;
-        }
-        self.cap = new_cap;
+        self.resize_block(new_cap);
         if self.head + self.len > old_cap {
             let head_len = old_cap - self.head;
             let tail_len = self.len - head_len;
             if tail_len < head_len {
-                unsafe memcpy(self.ptr + old_cap, self.ptr, tail_len * sizeof(T));
+                unsafe memcpy(self.ptr + old_cap, self.ptr, Deque::<T, A>::bytes(tail_len));
             } else {
                 let new_head = new_cap - head_len;
-                unsafe memcpy(self.ptr + new_head, self.ptr + self.head, head_len * sizeof(T));
+                unsafe memcpy(self.ptr + new_head, self.ptr + self.head, Deque::<T, A>::bytes(head_len));
                 self.head = new_head;
             }
         }
     }
 
     /// Reallocates to the smallest power of two that holds the elements (frees the block when empty).
-    pub fn shrink_to_fit(self: &mut Deque<T, A>) {
+    pub fn shrink_to_fit(self: &mut Deque<T, A>)
+        ensures self.len == old(self.len) && self.len <= self.cap
+    {
         if sizeof(T) == 0 || self.cap == 0 {
             return;
         }
         if self.len == 0 {
-            unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
+            unsafe self.alloc.dealloc(self.ptr, Deque::<T, A>::bytes(self.cap), alignof(T));
             self.ptr = dangling::<T>();
             self.cap = 0;
             self.head = 0;
             return;
         }
-        let target = next_pow2(self.len);
-        if target == self.cap {
+        let target = next_pow2(self.len, Deque::<T, A>::max_cap());
+        if target >= self.cap {
             return;
         }
         // Move the elements into slots 0..target first. A wrapped front part starts at or above `target`
         // (cap >= 2 * target), so it moves to the end of the new range without overlap.
         if self.head + self.len > self.cap {
             let head_len = self.cap - self.head;
-            unsafe memcpy(self.ptr + (target - head_len), self.ptr + self.head, head_len * sizeof(T));
+            unsafe memcpy(self.ptr + (target - head_len), self.ptr + self.head, Deque::<T, A>::bytes(head_len));
             self.head = target - head_len;
         } else if self.head + self.len > target {
-            unsafe memmove(self.ptr, self.ptr + self.head, self.len * sizeof(T));
+            unsafe memmove(self.ptr, self.ptr + self.head, Deque::<T, A>::bytes(self.len));
             self.head = 0;
         }
-        self.ptr = (unsafe self.alloc.realloc(self.ptr, self.cap * sizeof(T), array_bytes::<T>(target), alignof(T))) as *mut T;
-        self.cap = target;
+        self.resize_block(target);
+    }
+
+    // Reallocate the block to `new_cap` slots (`T` not zero-sized; a first block when `cap` is 0). The slots
+    // below both capacities keep their elements: the ring moves after a growth and before a shrink.
+    fn resize_block(self: &mut Deque<T, A>, new_cap: usize)
+        requires sizeof(T) != 0 && new_cap > 0 && new_cap <= Deque::<T, A>::max_cap() && self.head < new_cap && self.len <= new_cap
+        ensures self.head == old(self.head) && self.len == old(self.len) && self.cap == new_cap
+    {
+        if self.cap == 0 {
+            self.ptr = (unsafe self.alloc.alloc(Deque::<T, A>::bytes(new_cap), alignof(T))) as *mut T;
+        } else {
+            self.ptr = (unsafe self.alloc.realloc(
+                self.ptr,
+                Deque::<T, A>::bytes(self.cap),
+                Deque::<T, A>::bytes(new_cap),
+                alignof(T),
+            )) as *mut T;
+        }
+        self.cap = new_cap;
     }
 
     /// Appends `value` at the back; amortized O(1).
@@ -350,7 +420,7 @@ extend<T, A: Allocator> Deque<T, A> {
         if self.len == self.cap {
             self.grow_for(1);
         }
-        self.head = self.head.wrapping_sub(1) & self.cap - 1;
+        self.head = self.wrap(self.head.wrapping_sub(1));
         unsafe self.ptr[self.head] = value;
         self.len += 1;
     }
@@ -370,7 +440,7 @@ extend<T, A: Allocator> Deque<T, A> {
             return None;
         }
         let v = unsafe self.ptr[self.head];
-        self.head = self.head + 1 & self.cap - 1;
+        self.head = self.wrap(self.head + 1);
         self.len -= 1;
         return Some(v);
     }
@@ -441,7 +511,10 @@ extend<T, A: Allocator> Deque<T, A> {
     // from `src` forward to `dst`, the runs may overlap when `min(d, cap - d) + n <= cap`: a run whose
     // destination is ahead (d < n) copies from its back end, any other from its front end, so no element
     // is overwritten before it is read. Each step ends where `src` or `dst` wraps, so at most 3 steps run.
-    const fn copy_ring(self: &mut Deque<T, A>, src: usize, dst: usize, n: usize) {
+    const fn copy_ring(self: &mut Deque<T, A>, src: usize, dst: usize, n: usize)
+        requires n == 0 || self.cap > 0 && src < self.cap && dst < self.cap && n <= self.cap
+        ensures self.head == old(self.head) && self.len == old(self.len) && self.cap == old(self.cap)
+    {
         if sizeof(T) == 0 || n == 0 || src == dst {
             return;
         }
@@ -451,31 +524,26 @@ extend<T, A: Allocator> Deque<T, A> {
         if (dst.wrapping_sub(src) & mask) >= n {
             let mut s = src;
             let mut t = dst;
-            while left > 0 {
-                let c = left.min(cap - s).min(cap - t);
-                unsafe memmove(self.ptr + t, self.ptr + s, c * sizeof(T));
+            while left > 0
+                invariant s < cap && t < cap && cap <= Deque::<T, A>::max_cap()
+            {
+                let c = left.min(cap - s.max(t));
+                unsafe memmove(self.ptr + t, self.ptr + s, Deque::<T, A>::bytes(c));
                 s = s + c & mask;
                 t = t + c & mask;
                 left -= c;
             }
         } else {
-            let mut s = src + n & mask;
-            let mut t = dst + n & mask;
-            while left > 0 {
-                let se = if s == 0 {
-                    cap
-                } else {
-                    s
-                };
-                let te = if t == 0 {
-                    cap
-                } else {
-                    t
-                };
-                let c = left.min(se).min(te);
-                unsafe memmove(self.ptr + (te - c), self.ptr + (se - c), c * sizeof(T));
-                s = se - c;
-                t = te - c;
+            // The ends of the runs, exclusive, in 1..=cap: a run ending at slot 0 ends at `cap`.
+            let mut s = self.wrap(src + n - 1) + 1;
+            let mut t = self.wrap(dst + n - 1) + 1;
+            while left > 0
+                invariant 0 < s && s <= cap && 0 < t && t <= cap && cap <= Deque::<T, A>::max_cap()
+            {
+                let c = left.min(s).min(t);
+                unsafe memmove(self.ptr + (t - c), self.ptr + (s - c), Deque::<T, A>::bytes(c));
+                s = self.wrap((s - c).wrapping_sub(1)) + 1;
+                t = self.wrap((t - c).wrapping_sub(1)) + 1;
                 left -= c;
             }
         }
@@ -490,13 +558,12 @@ extend<T, A: Allocator> Deque<T, A> {
         if self.len == self.cap {
             self.grow_for(1);
         }
-        let mask = self.cap - 1;
         if i < self.len - i {
-            self.head = self.head.wrapping_sub(1) & mask;
-            self.copy_ring(self.head + 1 & mask, self.head, i);
+            self.head = self.wrap(self.head.wrapping_sub(1));
+            self.copy_ring(self.wrap(self.head + 1), self.head, i);
         } else {
             let at = self.slot(i);
-            self.copy_ring(at, at + 1 & mask, self.len - i);
+            self.copy_ring(at, self.wrap(at + 1), self.len - i);
         }
         unsafe self.ptr[self.slot(i)] = value;
         self.len += 1;
@@ -508,15 +575,14 @@ extend<T, A: Allocator> Deque<T, A> {
         if i >= self.len {
             return None;
         }
-        let mask = self.cap - 1;
         let at = self.slot(i);
         let v = unsafe self.ptr[at];
         let after = self.len - 1 - i;
         if i < after {
-            self.copy_ring(self.head, self.head + 1 & mask, i);
-            self.head = self.head + 1 & mask;
+            self.copy_ring(self.head, self.wrap(self.head + 1), i);
+            self.head = self.wrap(self.head + 1);
         } else {
-            self.copy_ring(at + 1 & mask, at, after);
+            self.copy_ring(self.wrap(at + 1), at, after);
         }
         self.len -= 1;
         return Some(v);
@@ -548,15 +614,19 @@ extend<T, A: Allocator> Deque<T, A> {
         if i != 0 {
             unsafe self.ptr[at] = unsafe self.ptr[self.head];
         }
-        self.head = self.head + 1 & self.cap - 1;
+        self.head = self.wrap(self.head + 1);
         self.len -= 1;
         return Some(v);
     }
 
     /// Keeps the first `n` elements and frees the others (no change when `n >= len`). Keeps the block.
-    pub const fn truncate(self: &mut Deque<T, A>, n: usize) {
+    pub const fn truncate(self: &mut Deque<T, A>, n: usize)
+        ensures self.len == old(self.len).min(n) && self.cap == old(self.cap) && self.head == old(self.head)
+    {
         let mut i = n;
-        while i < self.len {
+        while i < self.len
+            invariant self.invariant() && self.len == old(self.len) && self.cap == old(self.cap) && self.head == old(self.head)
+        {
             unsafe self.ptr[self.slot(i)].free();
             i += 1;
         }
@@ -566,7 +636,9 @@ extend<T, A: Allocator> Deque<T, A> {
     }
 
     /// Frees every element and keeps the block.
-    pub const fn clear(self: &mut Deque<T, A>) {
+    pub const fn clear(self: &mut Deque<T, A>)
+        ensures self.len == 0 && self.cap == old(self.cap)
+    {
         self.truncate(0);
         self.head = 0;
     }
@@ -575,7 +647,10 @@ extend<T, A: Allocator> Deque<T, A> {
     /// each element once, front to back.
     pub fn retain<F: fn(&T) bool>(self: &mut Deque<T, A>, pred: F) {
         let mut w: usize = 0;
-        for r in 0..self.len {
+        let n = self.len;
+        for r in 0..n
+            invariant self.invariant() && self.len == n && w <= r
+        {
             let at = self.slot(r);
             if pred(&unsafe self.ptr[at]) {
                 if w != r {
@@ -622,8 +697,10 @@ extend<T, A: Allocator> Deque<T, A> {
     }
 
     // Move the last `k` elements (0 < k < len) in front of the first.
-    const fn rotate_back(self: &mut Deque<T, A>, k: usize) {
-        self.head = self.head.wrapping_sub(k) & self.cap - 1;
+    const fn rotate_back(self: &mut Deque<T, A>, k: usize)
+        requires 0 < k && k < self.len
+    {
+        self.head = self.wrap(self.head.wrapping_sub(k));
         self.copy_ring(self.slot(self.len), self.head, k);
     }
 
@@ -635,23 +712,27 @@ extend<T, A: Allocator> Deque<T, A> {
             return;
         }
         self.reserve(n);
-        let (a, b) = other.as_slices();
-        self.copy_in(self.len, a);
-        self.copy_in(self.len + a.len, b);
+        // The two runs of `other`: from its head to the end of its block, then from the block's start.
+        let first = n.min(other.cap - other.head);
+        self.copy_in(self.len, unsafe (other.ptr + other.head), first);
+        self.copy_in(self.len + first, other.ptr, n - first);
         self.len += n;
         other.len = 0;
         other.head = 0;
     }
 
-    // Copy the elements of `src` bitwise to logical indexes `at..` (free slots, inside the capacity).
-    const fn copy_in(self: &mut Deque<T, A>, at: usize, src: []T) {
-        if sizeof(T) == 0 || src.len == 0 {
+    // Copy the `n` elements at `src` bitwise to logical indexes `at..` (free slots, inside the capacity).
+    const fn copy_in(self: &mut Deque<T, A>, at: usize, src: *const T, n: usize)
+        requires n == 0 || self.cap > 0 && at <= self.cap && n <= self.cap
+        ensures self.head == old(self.head) && self.len == old(self.len) && self.cap == old(self.cap)
+    {
+        if sizeof(T) == 0 || n == 0 {
             return;
         }
         let start = self.slot(at);
-        let first = src.len.min(self.cap - start);
-        unsafe memcpy(self.ptr + start, src.ptr, first * sizeof(T));
-        unsafe memcpy(self.ptr, src.ptr + first, (src.len - first) * sizeof(T));
+        let first = n.min(self.cap - start);
+        unsafe memcpy(self.ptr + start, src, Deque::<T, A>::bytes(first));
+        unsafe memcpy(self.ptr, src + first, Deque::<T, A>::bytes(n - first));
     }
 
     /// The elements as two contiguous parts, front to back: the second is empty when the deque does not wrap.
@@ -674,22 +755,22 @@ extend<T, A: Allocator> Deque<T, A> {
             let free = self.cap - self.len;
             if free >= head_len {
                 // DEF..ABC -> ABCDEF..
-                unsafe memmove(p + head_len, p, tail_len * sizeof(T));
-                unsafe memcpy(p, p + self.head, head_len * sizeof(T));
+                unsafe memmove(p + head_len, p, Deque::<T, A>::bytes(tail_len));
+                unsafe memcpy(p, p + self.head, Deque::<T, A>::bytes(head_len));
                 self.head = 0;
             } else if free >= tail_len {
                 // EF..ABCD -> ..ABCDEF
-                unsafe memmove(p + tail_len, p + self.head, head_len * sizeof(T));
-                unsafe memcpy(p + self.len, p, tail_len * sizeof(T));
+                unsafe memmove(p + tail_len, p + self.head, Deque::<T, A>::bytes(head_len));
+                unsafe memcpy(p + self.len, p, Deque::<T, A>::bytes(tail_len));
                 self.head = tail_len;
             } else if head_len > tail_len {
                 // FG.ABCDE -> .FGABCDE, then rotate the run left by the tail.
-                unsafe memmove(p + free, p, tail_len * sizeof(T));
+                unsafe memmove(p + free, p, Deque::<T, A>::bytes(tail_len));
                 rotate_raw(unsafe (p + free), self.len, tail_len);
                 self.head = free;
             } else {
                 // DEFG.ABC -> DEFGABC., then rotate the run right by the head part.
-                unsafe memmove(p + tail_len, p + self.head, head_len * sizeof(T));
+                unsafe memmove(p + tail_len, p + self.head, Deque::<T, A>::bytes(head_len));
                 rotate_raw(p, self.len, tail_len);
                 self.head = 0;
             }
@@ -748,7 +829,9 @@ extend<T: Ord, A: Allocator> Deque<T, A> {
     pub fn binary_search(self: &Deque<T, A>, x: &T) Result<usize, usize> {
         let mut lo: usize = 0;
         let mut hi = self.len;
-        while lo < hi {
+        while lo < hi
+            invariant hi <= self.len
+        {
             let mid = lo + (hi - lo) / 2;
             let c = (&unsafe self.ptr[self.slot(mid)]).cmp(x);
             if c == 0 {
@@ -1008,7 +1091,7 @@ extend<T, A: Allocator> Deque<T, A> as Free {
     pub fn free(self: &mut Deque<T, A>) {
         self.clear();
         if sizeof(T) != 0 && self.cap > 0 {
-            unsafe self.alloc.dealloc(self.ptr, self.cap * sizeof(T), alignof(T));
+            unsafe self.alloc.dealloc(self.ptr, Deque::<T, A>::bytes(self.cap), alignof(T));
         }
         self.ptr = dangling::<T>();
         self.cap = 0;
@@ -1025,7 +1108,9 @@ extend<T, A: Allocator + Default> Deque<T, A> as Default {
 extend<T: Clone, A: Allocator + Default> Deque<T, A> as From<[]T> {
     pub fn from(value: []T) Deque<T, A> {
         let mut out = Deque::<T, A>::with_capacity(value.len);
-        for i in 0..value.len {
+        for i in 0..value.len
+            invariant out.invariant()
+        {
             out.push_back(value.at(i).clone());
         }
         return out;
@@ -1036,8 +1121,10 @@ extend<T: Clone, A: Allocator> Deque<T, A> as Clone {
     /// A deep copy on a copy of the allocator handle: the elements are cloned in order into one run.
     pub fn clone(self: &Deque<T, A>) Deque<T, A> {
         let mut out = Deque::<T, A>::with_capacity_in(self.alloc, self.len);
-        for e in self.iter() {
-            out.push_back(e.clone());
+        for i in 0..self.len
+            invariant out.invariant()
+        {
+            out.push_back(self.at(i).clone());
         }
         return out;
     }

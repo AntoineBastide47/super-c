@@ -361,6 +361,10 @@ struct Counting {
 }
 
 extend Counting as Allocator {
+    spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return Global::owns(ptr, size, align);
+    }
+
     pub unsafe fn alloc(self: &mut Counting, size: usize, align: usize) *mut void {
         unsafe (*self.c).live += 1;
         unsafe (*self.c).calls += 1;

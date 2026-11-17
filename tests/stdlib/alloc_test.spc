@@ -4,7 +4,6 @@
 // alloc, realloc and free sequence that checks block overlap and contents.
 import std::alloc;
 import std::math::random;
-import std::mem::ptr;
 
 // What a `Counting` upstream saw. Every block it hands out comes from `Global`.
 struct Counts {
@@ -21,6 +20,10 @@ struct Counting {
 }
 
 extend Counting as Allocator {
+    spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return Global::owns(ptr, size, align);
+    }
+
     pub unsafe fn alloc(self: &mut Counting, size: usize, align: usize) *mut void {
         unsafe (*self.c).allocs += 1;
         unsafe (*self.c).live_bytes += size;
@@ -28,8 +31,13 @@ extend Counting as Allocator {
         return unsafe g.alloc(size, align);
     }
 
+    // A `realloc` of null allocates.
     pub unsafe fn realloc(self: &mut Counting, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void {
-        unsafe (*self.c).reallocs += 1;
+        if ptr == null {
+            unsafe (*self.c).allocs += 1;
+        } else {
+            unsafe (*self.c).reallocs += 1;
+        }
         unsafe (*self.c).live_bytes = (*self.c).live_bytes - old_size + new_size;
         let mut g = Global {};
         return unsafe g.realloc(ptr, old_size, new_size, align);
@@ -47,29 +55,53 @@ const fn counting(c: &mut Counts) Counting {
     return Counting { c: c };
 }
 
-// A block handed out by the allocator under test, with the byte pattern written into it.
-struct Live {
-    pub addr: usize,
-    pub size: usize,
-    pub align: usize,
-    pub tag: u8,
+// A block that allocator `H` handed out, with the tag of the byte pattern written into it.
+struct Block<H: Allocator>
+    invariant self.align != 0 && (self.align & self.align - 1) == 0 && H::owns(self.ptr, self.size, self.align)
+{
+    ptr: *mut void,
+    size: usize,
+    align: usize,
+    tag: u8,
+}
+
+fn take<H: Allocator>(h: &mut H, size: usize, align: usize, tag: u8) Block<H>
+    requires size as int <= isize::MAX as int && align != 0 && (align & align - 1) == 0
+    ensures |r| r.size == size && r.align == align && r.tag == tag
+{
+    let p = unsafe h.alloc(size, align);
+    return Block::<H> { ptr: p, size: size, align: align, tag: tag };
+}
+
+fn give<H: Allocator>(h: &mut H, b: Block<H>) {
+    unsafe h.dealloc(b.ptr, b.size, b.align);
+}
+
+// Block `b` resized to `size` bytes, tagged `tag`.
+fn resize<H: Allocator>(h: &mut H, b: Block<H>, size: usize, tag: u8) Block<H>
+    requires size as int <= isize::MAX as int
+    ensures |r| r.size == size && r.align == old(b.align) && r.tag == tag
+{
+    let p = unsafe h.realloc(b.ptr, b.size, size, b.align);
+    return Block::<H> { ptr: p, size: size, align: b.align, tag: tag };
 }
 
 const fn pattern(tag: u8, j: usize) u8 {
     return tag ^ j as u8 ^ (j >> 8) as u8;
 }
 
-const fn fill(b: &Live) {
-    let p = ptr::from_addr_mut::<u8>(b.addr);
+const fn fill<H: Allocator>(b: &Block<H>) {
+    let p = b.ptr as *mut u8;
     for j in 0..b.size {
         unsafe p[j] = pattern(b.tag, j);
     }
 }
 
-const fn intact(b: &Live, n: usize) bool {
-    let p = b.addr as *const u8;
+// Whether the first `n` bytes at `p` hold the pattern of `tag`.
+const fn intact(p: *const void, n: usize, tag: u8) bool {
+    let q = p as *const u8;
     for j in 0..n {
-        if unsafe p[j] != pattern(b.tag, j) {
+        if unsafe q[j] != pattern(tag, j) {
             return false;
         }
     }
@@ -77,9 +109,11 @@ const fn intact(b: &Live, n: usize) bool {
 }
 
 // True when `b` shares no byte with any block of `live`. Zero-size blocks share none.
-const fn disjoint(live: &Vector<Live>, b: &Live) bool {
+const fn disjoint<H: Allocator>(live: &Vector<Block<H>>, b: &Block<H>) bool {
+    let (ba, bs) = (b.ptr as usize, b.size);
     for o in live.iter() {
-        if b.size != 0 && o.size != 0 && b.addr < o.addr + o.size && o.addr < b.addr + b.size {
+        let (oa, os) = (o.ptr as usize, o.size);
+        if bs != 0 && os != 0 && ba < oa + os && oa < ba + bs {
             return false;
         }
     }
@@ -87,7 +121,9 @@ const fn disjoint(live: &Vector<Live>, b: &Live) bool {
 }
 
 // A random power of two from 1 to 4096, mostly small.
-const fn random_align(rng: &mut random::Pcg32) usize {
+const fn random_align(rng: &mut random::Pcg32) usize
+    ensures |r| r != 0 && (r & r - 1) == 0
+{
     let r = rng.next_u32();
     if r % 8 == 0 {
         return 1usize << ((r >> 3) % 13) as usize;
@@ -113,31 +149,30 @@ const fn random_size(rng: &mut random::Pcg32) usize
 // alignment, overlap with every live block, and intact contents before it is reallocated or freed.
 fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
     let mut rng = random::Pcg32::new(seed, 7);
-    let mut live = Vector::<Live>::new();
+    let mut live = Vector::<Block<H>>::new();
     let mut tag: u8 = 1;
     for _step in 0..3000 {
         let r = rng.next_u32() % 8;
         if live.len() > 0 && (r < 2 || live.len() > 150) {
             let i = rng.next_u32() as usize % live.len();
             let b = live.swap_remove(i).unwrap();
-            assert(intact(&b, b.size), "a block keeps its bytes until it is freed");
-            unsafe h.dealloc(ptr::from_addr_mut::<void>(b.addr), b.size, b.align);
+            assert(intact(b.ptr, b.size, b.tag), "a block keeps its bytes until it is freed");
+            give(&mut h, b);
         } else if live.len() > 0 && r < 4 {
             let i = rng.next_u32() as usize % live.len();
             let old = live.swap_remove(i).unwrap();
-            assert(intact(&old, old.size), "a block keeps its bytes until it is reallocated");
+            assert(intact(old.ptr, old.size, old.tag), "a block keeps its bytes until it is reallocated");
+            let (old_size, old_tag) = (old.size, old.tag);
             let size = random_size(&mut rng);
-            let p = unsafe h.realloc(ptr::from_addr_mut::<void>(old.addr), old.size, size, old.align);
-            let b = Live { addr: p as usize, size: size, align: old.align, tag: tag };
-            let kept = if size < old.size {
+            let b = resize(&mut h, old, size, tag);
+            let kept = if size < old_size {
                 size
             } else {
-                old.size
+                old_size
             };
-            let moved = Live { addr: b.addr, size: kept, align: old.align, tag: old.tag };
-            assert(intact(&moved, kept), "realloc keeps the common prefix");
-            assert(p != null, "realloc never returns null");
-            assert_eq(p as usize % old.align, 0);
+            assert(intact(b.ptr, kept, old_tag), "realloc keeps the common prefix");
+            assert(b.ptr != null, "realloc never returns null");
+            assert_eq(b.ptr as usize % b.align, 0);
             assert(disjoint(&live, &b), "a reallocated block overlaps no live block");
             fill(&b);
             live.push(b);
@@ -145,10 +180,9 @@ fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
         } else {
             let size = random_size(&mut rng);
             let align = random_align(&mut rng);
-            let p = unsafe h.alloc(size, align);
-            let b = Live { addr: p as usize, size: size, align: align, tag: tag };
-            assert(p != null, "alloc never returns null");
-            assert_eq(p as usize % align, 0);
+            let b = take(&mut h, size, align, tag);
+            assert(b.ptr != null, "alloc never returns null");
+            assert_eq(b.ptr as usize % align, 0);
             assert(disjoint(&live, &b), "a new block overlaps no live block");
             fill(&b);
             live.push(b);
@@ -156,8 +190,8 @@ fn random_sequence<H: Allocator>(mut h: H, seed: u64) {
         }
     }
     while let Some(b) = live.pop() {
-        assert(intact(&b, b.size), "a block keeps its bytes until it is freed");
-        unsafe h.dealloc(ptr::from_addr_mut::<void>(b.addr), b.size, b.align);
+        assert(intact(b.ptr, b.size, b.tag), "a block keeps its bytes until it is freed");
+        give(&mut h, b);
     }
 }
 
@@ -261,24 +295,40 @@ fn pool_aligns_every_request() {
     }
 }
 
+// Two freed blocks of 64 bytes come back last freed first, and a freed block of 48 bytes serves a request
+// of 60, its class.
+fn reuses_freed_blocks<H: Allocator>(h: &mut H) {
+    let mut held = Vector::<Block<H>>::new();
+    held.push(take(h, 64, 8, 0));
+    held.push(take(h, 64, 8, 0));
+    let (pa, pb) = (held.at(0).ptr, held.at(1).ptr);
+    // Frees b, then a.
+    while let Some(b) = held.pop() {
+        give(h, b);
+    }
+    held.push(take(h, 64, 8, 0));
+    assert(held.at(0).ptr == pa, "the last freed block comes back first");
+    held.push(take(h, 64, 8, 0));
+    assert(held.at(1).ptr == pb, "then the one freed before it");
+    let c = take(h, 48, 16, 0);
+    let pc = c.ptr;
+    give(h, c);
+    held.push(take(h, 60, 4, 0));
+    assert(held.at(2).ptr == pc, "a request of the same class takes the block");
+    while let Some(b) = held.pop() {
+        give(h, b);
+    }
+}
+
 @test
 fn pool_reuses_freed_blocks() {
     let p = alloc::Pool::<Global>::new();
     let mut h = p.allocator();
-    let a = unsafe h.alloc(64, 8);
-    let b = unsafe h.alloc(64, 8);
-    let c = unsafe h.alloc(48, 16);
-    unsafe h.dealloc(a, 64, 8);
-    unsafe h.dealloc(b, 64, 8);
-    assert(unsafe h.alloc(64, 8) == b, "the last freed block comes back first");
-    assert(unsafe h.alloc(64, 8) == a, "then the one freed before it");
-    // 48 bytes share the 64-byte class.
-    unsafe h.dealloc(c, 48, 16);
-    assert(unsafe h.alloc(60, 4) == c, "a request of the same class takes the block");
+    reuses_freed_blocks(&mut h);
     let reserved = p.bytes_reserved();
     for _i in 0..1000 {
-        let x = unsafe h.alloc(200, 8);
-        unsafe h.dealloc(x, 200, 8);
+        let x = take(&mut h, 200, 8, 0);
+        give(&mut h, x);
     }
     assert_eq(p.bytes_reserved(), reserved + 1024);
 }
@@ -287,23 +337,28 @@ fn pool_reuses_freed_blocks() {
 fn arena_rolls_back_the_most_recent_block() {
     let a = alloc::Arena::<Global>::new();
     let mut h = a.allocator();
-    let x = unsafe h.alloc(100, 8);
+    let x = take(&mut h, 100, 8, 0);
+    let px = x.ptr;
     let used = a.bytes_used();
     // No padding between the blocks: 100 and 150 are multiples of their successors' alignment.
-    let y = unsafe h.alloc(50, 4);
-    let z = unsafe h.alloc(30, 2);
-    // Freeing a block that is not the most recent frees nothing.
-    unsafe h.dealloc(y, 50, 4);
-    assert((unsafe h.alloc(1, 1)) as usize == z as usize + 30, "y stays used");
-    unsafe h.dealloc(ptr::from_addr_mut::<void>(z as usize + 30), 1, 1);
-    unsafe h.dealloc(z, 30, 2);
-    assert(unsafe h.alloc(30, 2) == z, "the cursor moved back to z");
-    unsafe h.dealloc(z, 30, 2);
-    unsafe h.dealloc(y, 50, 4);
+    let y = take(&mut h, 50, 4, 0);
+    let z = take(&mut h, 30, 2, 0);
+    let pz = z.ptr;
+    give(&mut h, z);
+    let z2 = take(&mut h, 30, 2, 0);
+    assert(z2.ptr == pz, "the cursor moved back to z");
+    give(&mut h, z2);
+    give(&mut h, y);
     assert_eq(a.bytes_used(), used);
-    unsafe h.dealloc(x, 100, 8);
+    give(&mut h, x);
     assert_eq(a.bytes_used(), 0);
-    assert(unsafe h.alloc(100, 8) == x, "every block freed in reverse order is reclaimed");
+    let x2 = take(&mut h, 100, 8, 0);
+    assert(x2.ptr == px, "every block freed in reverse order is reclaimed");
+    // Freeing a block that is not the most recent frees nothing.
+    let y2 = take(&mut h, 50, 4, 0);
+    let z3 = take(&mut h, 30, 2, 0);
+    give(&mut h, y2);
+    assert(take(&mut h, 1, 1, 0).ptr as usize == z3.ptr as usize + 30, "y stays used");
 }
 
 @test
@@ -320,7 +375,7 @@ fn arena_reallocs_in_place() {
     let r = (unsafe h.realloc(q, 400, 40, 8)) as *mut u8;
     assert(r == p, "and shrinks in place");
     assert_eq(a.bytes_used(), 40);
-    let other = unsafe h.alloc(8, 8);
+    let other = take(&mut h, 8, 8, 0);
     let s = (unsafe h.realloc(r, 40, 20, 8)) as *mut u8;
     assert(s == p, "a block that is not the most recent shrinks in place");
     let t = (unsafe h.realloc(s, 20, 64, 8)) as *mut u8;
@@ -333,7 +388,7 @@ fn arena_reallocs_in_place() {
     for i in 0..16 {
         assert_eq(unsafe u[i], i as u8);
     }
-    unsafe h.dealloc(other, 8, 8);
+    give(&mut h, other);
 }
 
 @test
@@ -382,11 +437,12 @@ fn arena_buffer_comes_first() {
         assert_eq(counts.allocs, 0);
         let big = unsafe h.alloc(200, 8);
         assert(big as usize >= lo + 3000 || big as usize + 200 <= lo, "outside the buffer");
-        assert_eq(counts.allocs, 1);
+        // A chunk, and the arena's list of chunks its first buffer.
+        assert_eq(counts.allocs, 2);
         // The first chunk is twice the buffer.
         assert_eq(a.bytes_reserved(), 3000 + 6000);
     }
-    assert_eq(counts.deallocs, 1);
+    assert_eq(counts.deallocs, 2);
     assert_eq(counts.live_bytes, 0);
 }
 
@@ -422,8 +478,9 @@ fn arena_reset_keeps_the_largest_chunk() {
                 let _ = unsafe h.alloc(1000, 8);
             }
         }
-        // Chunks of 4, 8, 16, 32 and 64 KiB hold 4, 8, 16, 32 and 65 blocks after their headers.
-        assert_eq(counts.allocs, 5);
+        // Chunks of 4, 8, 16, 32 and 64 KiB hold 4, 8, 16, 32 and 65 blocks; the arena's list of chunks
+        // takes a buffer.
+        assert_eq(counts.allocs, 6);
         assert_eq(a.bytes_reserved(), 4096 + 8192 + 16384 + 32768 + 65536);
         a.reset();
         assert_eq(counts.deallocs, 4);
@@ -435,12 +492,12 @@ fn arena_reset_keeps_the_largest_chunk() {
                 let _ = unsafe h.alloc(1000, 8);
             }
         }
-        assert_eq(counts.allocs, 5);
+        assert_eq(counts.allocs, 6);
         assert_eq(a.bytes_used(), 65000);
         a.reset();
         assert_eq(counts.deallocs, 4);
     }
-    assert_eq(counts.deallocs, 5);
+    assert_eq(counts.deallocs, 6);
     assert_eq(counts.live_bytes, 0);
 }
 
@@ -474,7 +531,7 @@ fn pool_release_returns_every_chunk() {
             }
         }
         assert(p.bytes_reserved() > 0, "the classes hold chunks");
-        assert_eq(counts.live_bytes, p.bytes_reserved());
+        assert(counts.live_bytes > p.bytes_reserved(), "the chunks and the list of them are live");
         p.release();
         assert_eq(p.bytes_reserved(), 0);
         assert_eq(counts.live_bytes, 0);
@@ -519,24 +576,26 @@ fn pool_sends_large_requests_upstream() {
     let mut counts = Counts {};
     let p = alloc::Pool::<Counting>::new_in(counting(&mut counts));
     let mut h = p.allocator();
-    let x = unsafe h.alloc(4097, 8);
+    let x = take(&mut h, 4097, 8, 0);
     assert_eq(counts.allocs, 1);
     assert_eq(counts.live_bytes, 4097);
     assert_eq(p.bytes_unpooled(), 4097);
     assert_eq(p.bytes_reserved(), 0);
-    let y = unsafe h.alloc(64, 8192);
-    assert_eq(y as usize % 8192, 0);
+    give(&mut h, x);
+    assert_eq(counts.deallocs, 1);
+    assert_eq(p.bytes_unpooled(), 0);
+    let y = take(&mut h, 64, 8192, 0);
+    assert_eq(y.ptr as usize % 8192, 0);
     assert_eq(counts.allocs, 2);
-    assert_eq(p.bytes_unpooled(), 4097 + 64);
-    // The 4096 class takes a chunk, and class 16 a chunk for the chunk's descriptor.
-    let z = unsafe h.alloc(4096, 4096);
-    assert_eq(counts.allocs, 4);
-    assert_eq(p.bytes_reserved(), 4096 + 1024);
-    unsafe h.dealloc(x, 4097, 8);
-    unsafe h.dealloc(y, 64, 8192);
+    assert_eq(p.bytes_unpooled(), 64);
+    give(&mut h, y);
     assert_eq(counts.deallocs, 2);
     assert_eq(p.bytes_unpooled(), 0);
-    unsafe h.dealloc(z, 4096, 4096);
+    // The 4096 class takes a chunk, and the pool's list of chunks its first buffer.
+    let z = take(&mut h, 4096, 4096, 0);
+    assert_eq(counts.allocs, 4);
+    assert_eq(p.bytes_reserved(), 4096);
+    give(&mut h, z);
     assert_eq(counts.deallocs, 2);
 }
 

@@ -1511,15 +1511,12 @@ extend<const BITS: usize> UInt<BITS> {
         return out;
     }
 
-    // Append the digits in `radix` (2..=36, `a`-`z` past 9) to `out` with one reservation: a value has at
-    // most BITS / floor(log2 radix) + 1 digits. They are written least significant first into the spare
-    // capacity, then reversed in place. Each division is by the largest power of the radix one limb holds
-    // (10^19 for decimal), so one pass over the limbs yields that many digits, in u64 arithmetic.
+    // Append the digits in `radix` (2..=36, `a`-`z` past 9) to `out`: written from the end of a buffer of
+    // BITS + 1 bytes (a BITS-bit value has at most BITS digits in a radix of 2 or more, zero one), so they
+    // come out most significant first, then appended with one exact reservation. Each division is by the
+    // largest power of the radix one limb holds (10^19 for decimal), so one pass over the limbs yields
+    // that many digits, in u64 arithmetic.
     fn push_digits(self: &UInt<BITS>, out: &mut String, radix: u32) {
-        let mut lg: usize = 1;
-        while 2u32 << lg as u32 <= radix {
-            lg = lg + 1;
-        }
         let r = radix as u64;
         let mut big = r;
         let mut k: usize = 1;
@@ -1529,43 +1526,45 @@ extend<const BITS: usize> UInt<BITS> {
         }
         let s = big.leading_zeros() as u64;
         let v = reciprocal(big << s);
-        let p = out.spare_mut(BITS / lg + 1);
-        let mut n: usize = 0;
+        // Every byte the copy reads is written first.
+        let mut buf = Uninit::<[u8; BITS + 1]> { none: 0 };
+        let p = (&mut unsafe buf.value[0]) as *mut u8;
         let mut cur = self.bits;
-        loop {
-            let mut q = IntBits::<BITS>::zero();
-            let mut c = cur.divmod_limb(s, big << s, v, &mut q);
-            let last = q.is_zero();
-            // A chunk below the top one is k digits, its leading zeros included; the top one stops at
-            // its top nonzero digit.
-            for m in 0..k {
-                if last && c == 0 && m > 0 {
+        // The current chunk's remainder, its digits written (k: none started), and whether it is the top.
+        let mut c: u64 = 0;
+        let mut m = k;
+        let mut last = false;
+        let mut n: usize = 0;
+        for i in 0..BITS + 1 {
+            if m == k {
+                if last {
                     break;
                 }
-                let d = c % r;
-                c = c / r;
-                if d < 10 {
-                    unsafe p[n] = b'0' + d as u8;
-                } else {
-                    unsafe p[n] = b'a' + (d - 10) as u8;
-                }
-                n = n + 1;
+                let mut q = IntBits::<BITS>::zero();
+                c = cur.divmod_limb(s, big << s, v, &mut q);
+                last = q.is_zero();
+                cur = q;
+                m = 0;
             }
-            cur = q;
-            if last {
+            // A chunk below the top one is k digits, its leading zeros included; the top one stops at
+            // its top nonzero digit.
+            if last && c == 0 && m > 0 {
                 break;
             }
+            let d = c % r;
+            c = c / r;
+            if d < 10 {
+                unsafe p[BITS - i] = b'0' + d as u8;
+            } else {
+                unsafe p[BITS - i] = b'a' + (d - 10) as u8;
+            }
+            n = i + 1;
+            m = m + 1;
         }
-        let mut i: usize = 0;
-        let mut j = n - 1;
-        while i < j {
-            let t = unsafe p[i];
-            unsafe p[i] = unsafe p[j];
-            unsafe p[j] = t;
-            i = i + 1;
-            j = j - 1;
+        if !(last && (c == 0 || m == k)) {
+            panic("UInt: more digits than the buffer holds");
         }
-        out.advance_len(n);
+        out.push_bytes(unsafe Slice::<u8> { ptr: unsafe (p + (BITS + 1 - n)), len: n });
     }
 
     /// Parse decimal digits. `None` on an empty string, a non-digit, or a value too wide to represent.

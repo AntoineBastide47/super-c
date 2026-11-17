@@ -35,7 +35,7 @@ const SAT_STEPS: u32 = 4000000;
 // The SAT steps of an attempt before a split (`lemma_with`).
 const SAT_EARLY_STEPS: u32 = 250000;
 const SAT_STEP_COST: u32 = 64;
-// The cells of one simplex tableau, and the nodes of one branch-and-bound tree.
+// The full size (rows times variables) of one simplex tableau, and the nodes of one branch-and-bound tree.
 const LP_CELLS_MAX: usize = 65536;
 // The product rows (`RW_PROD`) of one set of simplex rows (`nla_rows`).
 const NLA_ROWS: u32 = 24;
@@ -56,7 +56,7 @@ const APPS_MAX: usize = 512;
 // The products one branch and bound may make linear (`fix`).
 const FIXES_MAX: usize = 4;
 // The rounds of Gomory cuts at the root of one branch and bound, and the cuts of one round (`gomory`).
-// The tableau cells a simplex pivot updates for one step of the budget.
+// The cells of a tableau's full size that one step of the budget pays for in a pivot.
 const PIVOT_CELLS: usize = 16;
 const GOMORY_ROUNDS: u32 = 8;
 const GOMORY_CUTS: u32 = 4;
@@ -82,9 +82,51 @@ const fn q_int<const B: usize>(v: Num<B>) Q<B> {
     return Q::<B> { n: v, d: Num::<B>::one() };
 }
 
+// Whether `x` is an `i64`: each limb past the first is the first's sign. The rational operations take
+// the machine's arithmetic for such operands, whose results are the same.
+const fn fits64<const B: usize>(x: &Num<B>) bool {
+    let fill = (x.limb(0) as i64 >> 63) as u64;
+    for i in 1..(B + 63) / 64 {
+        if x.limb(i) != fill {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `n / d` reduced, `d > 0`, for `i64` operands; None where a step leaves `i64`.
+const fn q_make64<const B: usize>(n: i64, d: i64) Option<Q<B>> {
+    if n == i64::MIN || d == i64::MIN {
+        return None;
+    }
+    let (mut a, mut b) = (pick(n < 0, 0 - n, n), pick(d < 0, 0 - d, d));
+    // Euclid takes at most 92 steps on 64-bit operands.
+    for _s in 0..100 {
+        if b == 0 {
+            break;
+        }
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    if b != 0 || a == 0 {
+        return None;
+    }
+    let (nn, dd) = (n / a, d / a);
+    if dd < 0 {
+        return Some(Q::<B> { n: wide::<B>(0 - nn), d: wide::<B>(0 - dd) });
+    }
+    return Some(Q::<B> { n: wide::<B>(nn), d: wide::<B>(dd) });
+}
+
 fn q_make<const B: usize>(n: Num<B>, d: Num<B>, ovf: &mut bool) Q<B> {
     if d == Num::<B>::one() {
         return q_int(n);
+    }
+    if fits64(&n) && fits64(&d) {
+        if let Some(q) = q_make64::<B>(n.to_i64(), d.to_i64()) {
+            return q;
+        }
     }
     let (an, ad) = (mag(n), mag(d));
     if an.is_none() || ad.is_none() {
@@ -108,6 +150,11 @@ fn q_make<const B: usize>(n: Num<B>, d: Num<B>, ovf: &mut bool) Q<B> {
 }
 
 fn q_mul_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
+    if fits64(&a) && fits64(&b) {
+        if let Some(v) = a.to_i64().checked_mul(b.to_i64()) {
+            return wide::<B>(v);
+        }
+    }
     switch ck(a.checked_mul(&b)) {
         Some(v) => {
             return v;
@@ -120,6 +167,11 @@ fn q_mul_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
 }
 
 fn q_add_i<const B: usize>(a: Num<B>, b: Num<B>, ovf: &mut bool) Num<B> {
+    if fits64(&a) && fits64(&b) {
+        if let Some(v) = a.to_i64().checked_add(b.to_i64()) {
+            return wide::<B>(v);
+        }
+    }
     switch ck(a.checked_add(&b)) {
         Some(v) => {
             return v;
@@ -231,7 +283,8 @@ struct Lp<const B: usize> {
     val: Vector<Q<B>>,
     row_of: Vector<u32>, // a variable's tableau row, NONE when it is nonbasic
     var_of: Vector<u32>, // a tableau row's basic variable
-    tab: Vector<Q<B>>, // nr x nv
+    rows: Vector<Vector<Cell<B>>>, // each tableau row's nonzero cells, by variable; [nr, len) spare
+    scratch: Vector<Cell<B>>, // the row a pivot builds
     expl: Vector<QMult<B>>, // the last conflict
     ovf: bool,
     ovf_seen: bool, // a load since `Solver::clear_overflow` ran out of bits
@@ -239,6 +292,12 @@ struct Lp<const B: usize> {
 }
 
 const NO_ROW: RowRef = RowRef { i: NONE, kind: RW_IN };
+
+// A nonzero cell of a tableau row: its variable and coefficient.
+struct Cell<const B: usize> {
+    j: u32,
+    q: Q<B>,
+}
 
 extend<const B: usize> Lp<B> {
     fn new() Lp<B> {
@@ -257,7 +316,8 @@ extend<const B: usize> Lp<B> {
             val: Vector::<Q<B>>::new(),
             row_of: Vector::<u32>::new(),
             var_of: Vector::<u32>::new(),
-            tab: Vector::<Q<B>>::new(),
+            rows: Vector::<Vector<Cell<B>>>::new(),
+            scratch: Vector::<Cell<B>>::new(),
             expl: Vector::<QMult<B>>::new(),
             ovf: false,
             ovf_seen: false,
@@ -294,7 +354,6 @@ extend<const B: usize> Lp<B> {
         self.val.clear();
         self.row_of.clear();
         self.var_of.clear();
-        self.tab.clear();
         for j in 0..self.na {
             let t = self.atom[j];
             let lo = tm.low(t);
@@ -318,6 +377,7 @@ extend<const B: usize> Lp<B> {
             self.hi_r.push(RowRef { i: t, kind: RW_HI });
             self.row_of.push(NONE);
         }
+        let zq = q_int(Num::<B>::zero());
         for r in 0..self.nr {
             let x = rows[r];
             self.lo.push(Num::<B>::zero());
@@ -328,14 +388,12 @@ extend<const B: usize> Lp<B> {
             self.hi_r.push(x.r);
             self.row_of.push(r as u32);
             self.var_of.push((self.na + r) as u32);
-            for _j in 0..self.nv {
-                self.tab.push(q_int(Num::<B>::zero()));
-            }
-            let mut s = q_int(Num::<B>::zero());
+            self.spare_row(r);
+            let mut s = zq;
             for j in x.start..x.start + x.len {
                 let e = pool[j as usize];
                 let v = (*self.ix.get(&e.atom).unwrap()) as usize;
-                self.tab.set(r * self.nv + v, q_int(e.c));
+                self.put(r, v, q_int(e.c));
                 s = q_add(s, q_mul(q_int(e.c), self.val[v], &mut self.ovf), &mut self.ovf);
             }
             self.val.push(s);
@@ -343,8 +401,52 @@ extend<const B: usize> Lp<B> {
         return !self.ovf;
     }
 
+    // Row `r` empty, from the spare rows when one is left.
+    fn spare_row(self: &mut Self, r: usize) {
+        if r < self.rows.len() {
+            self.rows.index_mut(r).clear();
+        } else {
+            self.rows.push(Vector::<Cell<B>>::new());
+        }
+    }
+
+    // Set the coefficient of variable `j` in row `r` to nonzero `q`.
+    fn put(self: &mut Self, r: usize, j: usize, q: Q<B>) {
+        let row = self.rows.index_mut(r);
+        let mut k = row.len();
+        while k > 0 && row.at(k - 1).j as usize >= j {
+            k -= 1;
+        }
+        if k < row.len() && row.at(k).j as usize == j {
+            row.set(k, Cell::<B> { j: j as u32, q: q });
+            return;
+        }
+        row.push(Cell::<B> { j: j as u32, q: q });
+        let mut m = row.len() - 1;
+        while m > k {
+            let c = *row.at(m - 1);
+            row.set(m, c);
+            m -= 1;
+        }
+        row.set(k, Cell::<B> { j: j as u32, q: q });
+    }
+
+    // The coefficient of variable `j` in row `r`: 0 where the row has no cell for it.
     const fn at(self: &Self, r: usize, j: usize) Q<B> {
-        return self.tab[r * self.nv + j];
+        let row = self.rows.at(r);
+        let (mut lo, mut hi) = (0usize, row.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let c = row.at(mid);
+            if c.j as usize < j {
+                lo = mid + 1;
+            } else if c.j as usize > j {
+                hi = mid;
+            } else {
+                return c.q;
+            }
+        }
+        return q_int(Num::<B>::zero());
     }
 
     fn below(self: &mut Self, j: usize) bool {
@@ -382,12 +484,10 @@ extend<const B: usize> Lp<B> {
             }
             let r = self.row_of[b as usize] as usize;
             let mut enter = NONE;
-            for j in 0..self.nv {
-                if self.row_of[j] != NONE {
-                    continue;
-                }
-                let a = self.at(r, j);
-                if a.n.is_zero() {
+            for k in 0..self.rows.at(r).len() {
+                let cell = *self.rows.at(r).at(k);
+                let (j, a) = (cell.j as usize, cell.q);
+                if self.row_of[j] != NONE || a.n.is_zero() {
                     continue;
                 }
                 let up = a.n.is_negative() != low;
@@ -434,12 +534,10 @@ extend<const B: usize> Lp<B> {
                 },
             },
         );
-        for j in 0..self.nv {
-            if self.row_of[j] != NONE {
-                continue;
-            }
-            let a = self.at(r, j);
-            if a.n.is_zero() {
+        for k in 0..self.rows.at(r).len() {
+            let cell = *self.rows.at(r).at(k);
+            let (j, a) = (cell.j as usize, cell.q);
+            if self.row_of[j] != NONE || a.n.is_zero() {
                 continue;
             }
             let pos = !a.n.is_negative();
@@ -481,32 +579,73 @@ extend<const B: usize> Lp<B> {
         }
         // b = a * x_j + sum c_k x_k, so x_j = b / a - sum (c_k / a) x_k.
         let inv = q_div(q_int(Num::<B>::one()), a, &mut self.ovf);
-        let nv = self.nv;
-        for k in 0..nv {
-            let c = self.tab[r * nv + k];
-            if k == j || c.n.is_zero() {
-                self.tab.set(r * nv + k, q_int(Num::<B>::zero()));
+        let mut old = replace(self.rows.index_mut(r), Vector::<Cell<B>>::new());
+        self.scratch.clear();
+        let mut put_b = false;
+        for k in 0..old.len() {
+            let c = old[k];
+            if c.j as usize == j || c.q.n.is_zero() {
                 continue;
             }
-            self.tab.set(r * nv + k, q_neg(q_mul(c, inv, &mut self.ovf), &mut self.ovf));
+            if !put_b && c.j as usize > b {
+                self.scratch.push(Cell::<B> { j: b as u32, q: inv });
+                put_b = true;
+            }
+            self.scratch.push(Cell::<B> { j: c.j, q: q_neg(q_mul(c.q, inv, &mut self.ovf), &mut self.ovf) });
         }
-        self.tab.set(r * nv + b, inv);
+        if !put_b {
+            self.scratch.push(Cell::<B> { j: b as u32, q: inv });
+        }
+        old.clear();
+        let pr = replace(&mut self.scratch, old);
+        // Each other row with a cell for `j`: that cell's multiple of the new row in its place.
+        let z = q_int(Num::<B>::zero());
         for r2 in 0..self.nr {
             if r2 == r {
                 continue;
             }
-            let c = self.tab[r2 * nv + j];
+            let c = self.at(r2, j);
             if c.n.is_zero() {
                 continue;
             }
-            self.tab.set(r2 * nv + j, q_int(Num::<B>::zero()));
-            for k in 0..nv {
-                let e = self.tab[r * nv + k];
-                if !e.n.is_zero() {
-                    self.tab.set(r2 * nv + k, q_add(self.tab[r2 * nv + k], q_mul(c, e, &mut self.ovf), &mut self.ovf));
+            let mut cur = replace(self.rows.index_mut(r2), Vector::<Cell<B>>::new());
+            self.scratch.clear();
+            let (mut p, mut q) = (0usize, 0usize);
+            while p < cur.len() || q < pr.len() {
+                let cj = if p < cur.len() {
+                    cur[p].j
+                } else {
+                    NONE
+                };
+                let pj = if q < pr.len() {
+                    pr[q].j
+                } else {
+                    NONE
+                };
+                if cj == j as u32 {
+                    p += 1;
+                    continue;
+                }
+                let (k, v) = if cj < pj {
+                    p += 1;
+                    (cj, cur[p - 1].q)
+                } else if pj < cj {
+                    q += 1;
+                    (pj, q_add(z, q_mul(c, pr[q - 1].q, &mut self.ovf), &mut self.ovf))
+                } else {
+                    p += 1;
+                    q += 1;
+                    (cj, q_add(cur[p - 1].q, q_mul(c, pr[q - 1].q, &mut self.ovf), &mut self.ovf))
+                };
+                if !v.n.is_zero() {
+                    self.scratch.push(Cell::<B> { j: k, q: v });
                 }
             }
+            cur.clear();
+            let built = replace(&mut self.scratch, cur);
+            let _ = replace(self.rows.index_mut(r2), built);
         }
+        let _ = replace(self.rows.index_mut(r), pr);
         self.var_of.set(r, j as u32);
         self.row_of.set(j, r as u32);
         self.row_of.set(b, NONE);
@@ -554,19 +693,13 @@ extend<const B: usize> Lp<B> {
                 return NONE;
             }
         }
-        let mut tab = Vector::<Q<B>>::with_capacity((self.nr + 1) * (nv0 + 1));
-        for r in 0..self.nr {
-            for k in 0..nv0 {
-                tab.push(self.tab[r * nv0 + k]);
-            }
-            tab.push(q_int(Num::<B>::zero()));
-        }
-        let base = tab.len();
-        for _k in 0..nv0 + 1 {
-            tab.push(q_int(Num::<B>::zero()));
+        let z = q_int(Num::<B>::zero());
+        let mut acc = Vector::<Q<B>>::with_capacity(nv0);
+        for _k in 0..nv0 {
+            acc.push(z);
         }
         // Over the nonbasic variables: a basic atom contributes its tableau row.
-        let mut s = q_int(Num::<B>::zero());
+        let mut s = z;
         for j in 0..n {
             let e = terms[j];
             let v = (*self.ix.get(&e.atom).unwrap()) as usize;
@@ -574,17 +707,23 @@ extend<const B: usize> Lp<B> {
             s = q_add(s, q_mul(c, self.val[v], &mut self.ovf), &mut self.ovf);
             let rv = self.row_of[v];
             if rv == NONE {
-                tab.set(base + v, q_add(tab[base + v], c, &mut self.ovf));
+                acc.set(v, q_add(acc[v], c, &mut self.ovf));
                 continue;
             }
-            for k in 0..nv0 {
-                let x = self.tab[rv as usize * nv0 + k];
-                if !x.n.is_zero() {
-                    tab.set(base + k, q_add(tab[base + k], q_mul(c, x, &mut self.ovf), &mut self.ovf));
+            for k in 0..self.rows.at(rv as usize).len() {
+                let x = *self.rows.at(rv as usize).at(k);
+                if !x.q.n.is_zero() {
+                    acc.set(x.j as usize, q_add(acc[x.j as usize], q_mul(c, x.q, &mut self.ovf), &mut self.ovf));
                 }
             }
         }
-        self.tab = tab;
+        let nr0 = self.nr;
+        self.spare_row(nr0);
+        for k in 0..nv0 {
+            if !acc[k].n.is_zero() {
+                self.rows.index_mut(nr0).push(Cell::<B> { j: k as u32, q: acc[k] });
+            }
+        }
         self.nv = nv0 + 1;
         self.nr += 1;
         self.lo.push(Num::<B>::zero());
@@ -852,6 +991,10 @@ extend<const B: usize> Solver<B> {
                 return true;
             }
         }
+        // Past the limit (a capped check's): no setup charged again.
+        if self.steps > self.limit {
+            return false;
+        }
         self.kn.begin();
         let mut b0 = Branch {
             todo: Vector::<u64>::new(),
@@ -905,6 +1048,20 @@ extend<const B: usize> Solver<B> {
         let mut sub = Vector::<u64>::new();
         if bits && Solver::<B>::has_bits(tm, lits) {
             self.cone(tm, lits, root, &mut sub);
+            // No bits hold an exact integer (`Blaster::run`): such a literal stays out, and the others
+            // refute alone; with the goal's own literal out, no SAT search.
+            let mut q: usize = 0;
+            while q < sub.len() {
+                if self.names_exact(tm, (sub[q] >> 3) as u32) {
+                    if sub[q] == root {
+                        sub.clear();
+                        break;
+                    }
+                    let _ = sub.swap_remove(q);
+                } else {
+                    q += 1;
+                }
+            }
         }
         if sub.len() != 0 && Solver::<B>::has_bits(tm, &sub) && self.kn.blast(tm, &sub) {
             // An attempt before a split (no `guess`) has a smaller SAT search: its literals often have a
@@ -1110,6 +1267,36 @@ extend<const B: usize> Solver<B> {
 
     // Whether a literal of `lits` holds an operation the bits define and the arithmetic does not
     // (`Terms.bitty`).
+    // Whether formula `t` names an integer term of an exact type (`int`, `nat`).
+    fn names_exact(self: &mut Self, tm: &Terms<B>, t: u32) bool {
+        self.bvisit.clear();
+        self.queue.clear();
+        self.queue.push(t);
+        let mut ops = Vector::<u32>::new();
+        for _s in 0..LIN_MAX * 16 {
+            if self.queue.len() == 0 {
+                return false;
+            }
+            let u = self.queue.pop().unwrap();
+            if self.bvisit.contains_key(&u) {
+                continue;
+            }
+            self.bvisit.insert(u, true);
+            let x = tm.at(u);
+            if tm.is_int(u) && exact_w(x.w) {
+                return true;
+            }
+            if x.op == T_CALL || x.op == T_VAR {
+                continue;
+            }
+            tm.operands(u, &mut ops);
+            for j in 0..ops.len() {
+                self.queue.push(ops[j]);
+            }
+        }
+        return true;
+    }
+
     const fn has_bits(tm: &Terms<B>, lits: &Vector<u64>) bool {
         for j in 0..lits.len() {
             if tm.bitty[(lits[j] >> 3) as usize] {
@@ -2291,7 +2478,8 @@ extend<const B: usize> Solver<B> {
             if !self.spend(1) {
                 return L_ABORT, NONE;
             }
-            // A pivot updates every cell of the tableau: it costs a step per PIVOT_CELLS cells.
+            // A pivot costs a step per PIVOT_CELLS cells of the tableau's full size, zeros included (the
+            // rows hold only their nonzero cells): the step caps of the proofs' stages assume this charge.
             let cost = 1 + (self.lp.nr * self.lp.nv / PIVOT_CELLS) as u32;
             let room = (self.limit + 1 - self.steps.min(self.limit)) / cost + 1;
             let p0 = self.lp.pivots;

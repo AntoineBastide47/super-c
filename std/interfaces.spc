@@ -256,14 +256,17 @@ pub interface Hash {
 }
 
 // The C library's promises, which no proof checks: `malloc` and `realloc` give null or a block of
-// `size` bytes (C17 7.22.3), aligned for any fundamental type; a size of 0 may give null.
+// `size` bytes (C17 7.22.3), aligned for any fundamental type (at least `MALLOC_ALIGN`); a size of 0 may
+// give null.
 extern "C" {
     @trusted
     fn malloc(size: usize) *mut void
-        requires size != 0;
+        requires size != 0
+        ensures |r| r == null || (r as usize & MALLOC_ALIGN - 1) == 0;
     @trusted
     fn realloc(ptr: *mut void, size: usize) *mut void
-        requires size != 0;
+        requires size != 0
+        ensures |r| r == null || (r as usize & MALLOC_ALIGN - 1) == 0;
     fn free(ptr: *mut void) void;
     @noreturn
     fn abort() void;
@@ -283,16 +286,58 @@ extern "C" {
 /// block's `size` and `align`, and an allocator that trusts them (a bump or arena one must) corrupts its
 /// own free list when they are wrong. Nothing checks that the numbers describe the block `ptr` came from, or
 /// that `ptr` came from this allocator at all, so the caller says so.
-/// No block is larger than `isize::MAX` bytes (`requires`), and a result is never null (`ensures`): an
-/// allocator that cannot serve a request aborts or panics.
+/// No block is larger than `isize::MAX` bytes, and `align` is a power of two (`requires`); a result is
+/// never null and is a multiple of `align` (`ensures`): an allocator that cannot serve a request aborts or
+/// panics. `owns` states what the allocator knows of a block it gave for a size and an alignment (a
+/// pool: its size class's alignment); `alloc` and `realloc` ensure it of their result, `realloc` and
+/// `dealloc` require it of the block they take back (or null with size 0: no block), so a container keeps
+/// it of each block it holds.
 pub interface Allocator: Copy {
+    spec fn owns(ptr: *mut void, size: usize, align: usize) bool;
     unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void
-        requires size as int <= isize::MAX as int
-        ensures |r| r != null;
+        requires size as int <= isize::MAX as int && align != 0 && (align & align - 1) == 0
+        ensures |r| r != null && (r as usize & align - 1) == 0 && Self::owns(r, size, align);
     unsafe fn realloc(self: &mut Self, ptr: *mut void, old_size: usize, new_size: usize, align: usize) *mut void
-        requires new_size as int <= isize::MAX as int
-        ensures |r| r != null;
-    unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void;
+        requires new_size as int <= isize::MAX as int && align != 0 && (align & align - 1) == 0 && (ptr == null && old_size == 0 || Self::owns(
+            ptr,
+            old_size,
+            align,
+        ))
+        ensures |r| r != null && (r as usize & align - 1) == 0 && Self::owns(r, new_size, align);
+    unsafe fn dealloc(self: &mut Self, ptr: *mut void, size: usize, align: usize) void
+        requires ptr == null && size == 0 || Self::owns(ptr, size, align);
+}
+
+/// Whether entry `f`'s `requires` hold of argument `x`: a function that stores an entry and its argument
+/// for a later call (a thread's start, a task's) states it of them, so that its caller proves it where it
+/// hands them over, and the entry assumes it. The blocks the clauses name are the callee's from there.
+@trusted
+pub spec fn pre_of<R>(f: fn(*mut void) R, x: *mut void) bool;
+
+/// Whether entry `f`'s `requires` hold of every argument: for an entry called with storage of the
+/// callee's own (`pre_of` where the caller cannot name the argument).
+@trusted
+pub spec fn pre_any<R>(f: fn(*mut void) R) bool;
+
+/// `n` units of reference counter `k` of block `p`: a counter counts the units that exist, so the holder
+/// of the last one holds what the counter guards. A unit is linear, as a block is: a call takes the units
+/// its clauses name and gives those its `ensures` name. A counted type's file states each step of its
+/// counters in trusted lemmas, called next to the count operation they describe (std/parallel/arc.spc).
+@trusted
+pub spec fn rc_share(p: *mut void, k: usize, n: usize) bool;
+
+/// The units of reference counter `k` of block `p` the code holds now (`rc_share`).
+@trusted
+pub spec fn rc_units(p: *mut void, k: usize) int;
+
+/// Whether `p` is an array of `n` values of `T` that `A` gave, or none (null, 0 values); any pointer for
+/// zero-sized values. A container states it of each array it holds, so that it may give the array back.
+pub spec fn owns_array<T, A: Allocator>(p: *mut T, n: usize) bool {
+    return sizeof(T) == 0 || p == null && n == 0 || n as int <= isize::MAX as int / sizeof(T) as int && A::owns(
+        p,
+        array_bytes::<T>(n),
+        alignof(T),
+    );
 }
 
 /// The bytes of `n` values of `T`, `n * sizeof(T)`. Panics when they are more than `isize::MAX`, the
@@ -323,7 +368,8 @@ pub const fn alloc_size(n: usize) usize
 extern "C" {
     @trusted
     fn sc_lk_aligned_alloc(size: usize, align: usize) *mut void
-        requires size != 0;
+        requires size != 0 && align >= sizeof(usize) && (align & align - 1) == 0
+        ensures |r| r == null || (r as usize & align - 1) == 0;
     fn sc_lk_aligned_free(ptr: *mut void) void;
 }
 
@@ -344,6 +390,11 @@ pub struct Global {}
 // Each method inlines into its caller, so the leak tracker records the allocation at the container code
 // that asked for the block, in every profile.
 extend Global as Allocator {
+    // A block of the C heap: not null, aligned as asked.
+    pub spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return ptr != null && align != 0 && (ptr as usize & align - 1) == 0;
+    }
+
     // A request of 0 bytes takes 1: the C library's `malloc(0)` may give null.
     @always_inline
     pub unsafe const fn alloc(self: &mut Global, size: usize, align: usize) *mut void {

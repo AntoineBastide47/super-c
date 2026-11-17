@@ -13,6 +13,10 @@
 // A call of an interface member reaches every kept body of its name that a conformance or the
 // interface declares (the borrow pass keeps each conformance method of a member a kept body calls).
 // Linear in the bodies' statements and call edges.
+//
+// The same entries hold the parameter whose value is the length of the prelude view a body returns
+// (`view_len_param`): a call of such a body gives its result that argument's length, as a literal of the
+// view does (`ir::facts`).
 import ast::ast as *;
 import ir::core as ir;
 import ir::lower as irl;
@@ -20,6 +24,9 @@ import module::loader as loader;
 
 // The rounds a body's scan runs before it gives up (every parameter escapes).
 const SCAN_ROUNDS: u32 = 8;
+
+// The statements and locals of a body `view_len_param` reads: a view's constructor is a few of each.
+const VIEW_LOCALS: usize = 16;
 
 // The scans per entry the results' summaries (`CaptureStore.ret`) may take before every result points
 // into every parameter.
@@ -51,6 +58,7 @@ pub(package) struct CaptureStore {
     src: Vector<u32>, // per entry of `esc`, the index of its body in the keep, or IR_NONE for a group
     blk: Vector<u32>, // per entry of `esc`, the start of its body's blocks in `tgt`
     tgt: Vector<u32>, // per block of each body, the entry its call runs, or IR_NONE (no call, none known)
+    vlen: Vector<u32>, // per entry of `esc`, the parameter the length of its result view holds, or IR_NONE
 }
 
 // What one scan of a body found: the parameters that escape, and those the result may point into.
@@ -70,6 +78,7 @@ extend CaptureStore {
             src: Vector::<u32>::new(),
             blk: Vector::<u32>::new(),
             tgt: Vector::<u32>::new(),
+            vlen: Vector::<u32>::new(),
         };
     }
 
@@ -103,6 +112,16 @@ extend CaptureStore {
         return x != ir::IR_NONE && i < 64 && (self.ret[x as usize] >> i as u64 & 1) == 0;
     }
 
+    /// The argument of call `t` whose value is the length of the view the call returns, or IR_NONE: the
+    /// one kept body it runs returns a prelude view of that parameter's length.
+    pub(package) fn view_len_arg(self: &Self, pkg: *const loader::Package, t: &ir::Terminator) u32 {
+        let x = self.entry(target(pkg, t));
+        if x == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        return self.vlen[x as usize];
+    }
+
     /// The parameters of every kept function body of `keep` that may escape.
     pub(package) fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
         for i in 0..keep.kept.len() {
@@ -117,6 +136,7 @@ extend CaptureStore {
             let at = self.esc.len() as u32;
             self.ix.insert(k, at);
             self.push_entry(i as u32);
+            self.vlen.set(at as usize, view_len_param(pkg, b));
             let g = group_of(pkg, b.owner);
             if g != 0 {
                 if !self.gix.contains_key(&g) {
@@ -272,6 +292,7 @@ extend CaptureStore {
         self.ret.push(0);
         self.grp.push(ir::IR_NONE);
         self.src.push(src);
+        self.vlen.push(ir::IR_NONE);
     }
 
     // Parameter `bit` of entry `x` escapes; newly, it joins the worklist.
@@ -327,6 +348,133 @@ fn name_key(p: &loader::Package, d: DefId) u64 {
 // What call `t` runs: the key of its callee's body; GROUP | the callee's name for an interface member
 // (any conformance's method of that name, or the default); 0 when unknown (a function value, a
 // variadic or verified intrinsic call, an inherited default dispatched by `iface` on no member).
+/// Is `sub` the field named `name` of the prelude view `view_ty` (a type of module `m`)?
+pub(package) const fn prelude_field(pkg: *const loader::Package, m: ModuleId, view_ty: TypeId, sub: NodeId, name: str) bool {
+    if view_ty == TYPE_NONE || sub == NODE_NONE {
+        return false;
+    }
+    let pk = unsafe &*pkg;
+    let da = unsafe &*pk.module_ast_const(m);
+    let y = *da.type_at(view_ty);
+    let mut m9: ModuleId = 0;
+    if y.kind == TypeKind::TYPE_STRUCT {
+        m9 = y.module;
+    } else if y.kind == TypeKind::TYPE_INSTANCE {
+        m9 = da.instance(y.as_data.inst).module;
+    } else {
+        return false;
+    }
+    if m9 as usize >= pk.modules.len() || !pk.modules.at(m9 as usize).prelude {
+        return false;
+    }
+    let fa = unsafe &*pk.module_ast_const(m9);
+    let fnode = fa.at_const(sub);
+    if fnode.kind != NodeKind::NODE_FIELD {
+        return false;
+    }
+    let ns = fa.at_const(fnode.as_data.field.name).as_data.name.text;
+    let src = pk.modules.at(m9 as usize).source.as_str();
+    return src.slice(ns.start as usize, ns.end as usize) == name;
+}
+
+/// The `len` operand of `rv`, a literal of a prelude view in a body of module `m`, else IR_NONE.
+pub(package) fn view_len_operand(pkg: *const loader::Package, b: &ir::CoreBody, rv: &ir::Rvalue) u32 {
+    let pk = unsafe &*pkg;
+    if rv.kind != ir::RV_AGGREGATE || rv.c != ir::AGG_STRUCT || rv.item.node == NODE_NONE || !pk.modules.at(
+        rv.item.module as usize,
+    ).prelude {
+        return ir::IR_NONE;
+    }
+    let da = unsafe &*pk.module_ast_const(rv.item.module);
+    let members = da.ext(rv.item.node).aggregate.members;
+    for j in 0..members.len {
+        let opid = b.oper_pool[(rv.a + j) as usize];
+        if opid != ir::IR_NONE && prelude_field(pkg, b.module, rv.target, unsafe da.list(members)[j as usize], "len") {
+            return opid;
+        }
+    }
+    return ir::IR_NONE;
+}
+
+// The parameter whose value is the `len` of the prelude view `b` returns, or IR_NONE. The body calls
+// nothing and borrows no local; its result's one write is a literal of the view, through copies of
+// locals written once, and the literal's `len` copies the parameter, which nothing writes.
+fn view_len_param(pkg: *const loader::Package, b: &ir::CoreBody) u32 {
+    let nl = b.locals.len();
+    if b.returns != 1 || b.args == 0 || nl > VIEW_LOCALS {
+        return ir::IR_NONE;
+    }
+    let mut writes: [u8; VIEW_LOCALS] = [[0] = 0u8]; // 2: more than one, or not of the whole local
+    let mut def: [u32; VIEW_LOCALS] = [[0] = ir::IR_NONE]; // the rvalue of the one write
+    for bi in 0..b.blocks.len() {
+        let blk = *b.blocks.at(bi);
+        if blk.term.kind != ir::TM_GOTO && blk.term.kind != ir::TM_RETURN {
+            return ir::IR_NONE;
+        }
+        for si in 0..blk.stmt_len {
+            let s = *b.statements.at((blk.stmt_start + si) as usize);
+            if s.kind != ir::ST_ASSIGN {
+                continue;
+            }
+            let rv = *b.rvalues.at(s.rvalue as usize);
+            if rv.kind == ir::RV_REF || rv.kind == ir::RV_ADDR || rv.kind == ir::RV_SLICE || rv.kind == ir::RV_USE && rv.b != 0 {
+                return ir::IR_NONE;
+            }
+            let p = *b.places.at(s.place as usize);
+            let l = p.base as usize;
+            unsafe {
+                writes[l] = pick(p.proj_len == 0 && writes[l] == 0, 1u8, 2u8);
+                def[l] = s.rvalue;
+            }
+        }
+    }
+    // A local's value through copies: the local whose one write is not a copy of a whole local.
+    let mut r: u32 = 0;
+    for _ in 0..VIEW_LOCALS {
+        if unsafe writes[r as usize] != 1 || b.rvalues.at((unsafe def[r as usize]) as usize).kind != ir::RV_USE {
+            break;
+        }
+        let rv = unsafe *b.rvalues.at(def[r as usize] as usize);
+        let x = copied_local(b, rv.a);
+        if x == ir::IR_NONE {
+            return ir::IR_NONE;
+        }
+        r = x;
+    }
+    if unsafe writes[r as usize] != 1 {
+        return ir::IR_NONE;
+    }
+    let opid = view_len_operand(pkg, b, b.rvalues.at((unsafe def[r as usize]) as usize));
+    let mut l = copied_local(b, opid);
+    for _ in 0..VIEW_LOCALS {
+        if l == ir::IR_NONE || unsafe writes[l as usize] == 0 {
+            break;
+        }
+        let rv = unsafe *b.rvalues.at(def[l as usize] as usize);
+        if unsafe writes[l as usize] != 1 || rv.kind != ir::RV_USE {
+            return ir::IR_NONE;
+        }
+        l = copied_local(b, rv.a);
+    }
+    if l == ir::IR_NONE || l < b.returns || l >= b.returns + b.args || unsafe writes[l as usize] != 0 {
+        return ir::IR_NONE;
+    }
+    return l - b.returns;
+}
+
+// The local operand `opid` copies or moves whole, else IR_NONE.
+const fn copied_local(b: &ir::CoreBody, opid: u32) u32 {
+    if opid == ir::IR_NONE {
+        return ir::IR_NONE;
+    }
+    let op = *b.operands.at(opid as usize);
+    if op.kind != ir::OP_COPY && op.kind != ir::OP_MOVE {
+        return ir::IR_NONE;
+    }
+    let p = *b.places.at(op.data as usize);
+    return pick(p.proj_len == 0, p.base, ir::IR_NONE);
+}
+
 fn target(pkg: *const loader::Package, t: &ir::Terminator) u64 {
     if t.callee.node == NODE_NONE || t.is_variadic || t.intr != ir::CI_NONE {
         return 0;

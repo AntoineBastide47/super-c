@@ -21,7 +21,8 @@
 //
 // Bytes are UTF-8, length is tracked explicitly (no NUL terminator, embedded zeros are fine), appends are
 // amortised O(1), and bulk work goes through libc memcpy/memmove/memcmp. Every method reads the bytes
-// through `as_ptr()`/`data_ptr()` and the length through `len()`, so the small/large split is invisible.
+// of the active representation (the heap block, or the inline array, which a pointer to it reaches
+// alone) and the length through `len()`; callers see no small/large split.
 //
 // Caveat: for a SMALL string `as_ptr()` points INTO the String value itself, so it is invalidated when the
 // String is moved/copied as well as when a mutation grows it onto the heap.
@@ -32,9 +33,12 @@
 // Borrowed raw access is available through `as_ptr` / `as_str`; higher-level borrowed iterators remain
 // out of scope until the prelude can express them without header cycles.
 
+import std::spec::seq as *;
+
 extern "C" {
     fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
     fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
+    fn memset(dst: *mut void, c: i32, n: usize) *mut void;
     fn memcmp(a: *const void, b: *const void, n: usize) i32;
     fn strlen(s: *const char) usize;
     fn putchar(c: i32) i32;
@@ -96,6 +100,7 @@ fn std_err() *mut FILE {
 
 // Heap representation. `cap`'s top bit is the "is large" discriminant; its real value is the rest.
 struct StringLarge {
+    @owned
     pub ptr: *mut u8,
     pub len: usize,
     pub cap: usize,
@@ -126,40 +131,76 @@ union StringRepr {
 
 /// A growable, heap-owning byte string with a small inline buffer; not NUL-terminated (see `cstr`). A
 /// is the allocator of the large representation.
-pub struct String<A = Global> {
+pub struct String<A: Allocator = Global>
+    invariant self.repr.small.len < 0x80 ==> self.repr.small.len as usize <= SSO_CAP
+    invariant self.repr.small.len >= 0x80 ==> self.repr.large.cap >= LARGE_BIT && self.repr.large.len <= self.repr.large.cap - LARGE_BIT && A::owns(
+        self.repr.large.ptr,
+        self.repr.large.cap - LARGE_BIT,
+        1,
+    )
+    invariant self.repr.small.len >= 0x80 ==> block(self.repr.large.ptr).len() == (self.repr.large.cap - LARGE_BIT) as int
+{
     repr: StringRepr,
     alloc: A, // the allocator the heap buffer (if any) was obtained through (private; zero-sized for Global)
 }
 
 // A String owns its bytes, so it is safe to send to / share with another thread when its allocator is
 // (the raw buffer pointer would otherwise make it structurally neither).
-unsafe extend<A> String<A> as Zeroable {}
-unsafe extend<A: Send> String<A> as Send {}
+unsafe extend<A: Allocator> String<A> as Zeroable {}
+unsafe extend<A: Allocator + Send> String<A> as Send {}
 
-unsafe extend<A: Sync> String<A> as Sync {}
+unsafe extend<A: Allocator + Sync> String<A> as Sync {}
+
+// The bytes of an inline buffer in order.
+spec fn inline_view(data: []u8) Seq<u8> {
+    return data.view();
+}
 
 extend<A: Allocator> String<A> {
+    /// Its bytes in order: `s.len()` is its length, `s[i]` its byte `i`.
+    pub spec fn view(self: &String<A>) Seq<u8> {
+        return self.storage().take(self.length());
+    }
+
+    // The bytes of the active representation: the heap block, or the inline buffer.
+    spec fn storage(self: &String<A>) Seq<u8> {
+        return if self.repr.small.len >= 0x80 {
+            block(self.repr.large.ptr)
+        } else {
+            inline_view(self.repr.small.data)
+        };
+    }
+
+    // The length of the active representation.
+    spec fn length(self: &String<A>) int {
+        return if self.repr.small.len >= 0x80 {
+            self.repr.large.len as int
+        } else {
+            self.repr.small.len as int
+        };
+    }
+
     // --- representation helpers (private) ------------------------------------------------------.
 
     // The high bit of the union's last byte: set for the heap layout, clear for the inline one.
-    const fn is_large(self: &String<A>) bool {
-        return (self.repr.small.len & 0x80) != 0;
-    }
-
-    // A mutable pointer to the bytes, inline or heap. Re-read after any growth (it may move).
-    const fn data_ptr(self: &mut String<A>) *mut u8 {
-        if self.is_large() {
-            return self.repr.large.ptr;
-        }
-        return &mut self.repr.small.data[0];
+    const fn is_large(self: &String<A>) bool
+        ensures |r| r == self.repr.small.len >= 0x80
+    {
+        return self.repr.small.len >= 0x80;
     }
 
     // Set the byte length in whichever representation is active (caller keeps a small length <= SSO_CAP).
-    const fn set_len(self: &mut String<A>, n: usize) {
+    const fn set_len(self: &mut String<A>, n: usize)
+        requires n <= self.capacity()
+        ensures self.len() == n && self.capacity() == old(self.capacity()) && self.is_large() == old(self.is_large())
+        ensures self.view() == old(self.storage()).take(n as int) && self.repr.small.len >= 0x80 == old(self.repr.small.len >= 0x80)
+    {
         if self.is_large() {
             self.repr.large.len = n;
+            assert self.repr.small.len >= 0x80 by {};
         } else {
             self.repr.small.len = n as u8;
+            assert self.repr.small.len < 0x80 by {};
         }
     }
 
@@ -167,12 +208,16 @@ extend<A: Allocator> String<A> {
     // (copying the inline bytes out first). `new_cap` must exceed the inline budget. Allocates through the
     // STORED allocator (a String buffer is a byte array, so the alignment is always 1).
     fn grow_to(self: &mut String<A>, new_cap: usize)
-        requires new_cap < LARGE_BIT
+        requires new_cap < LARGE_BIT && new_cap > self.capacity()
+        ensures self.is_large() && self.capacity() == new_cap && self.len() == old(self.len()) && self.view() == old(self.view())
     {
         if self.is_large() {
-            let p = (unsafe self.alloc.realloc(self.repr.large.ptr, self.capacity(), new_cap, 1)) as *mut u8;
+            let cap = self.repr.large.cap - LARGE_BIT;
+            let p = (unsafe self.alloc.realloc(self.repr.large.ptr, cap, new_cap, 1)) as *mut u8;
             self.repr.large.ptr = p;
-            self.repr.large.cap = new_cap | LARGE_BIT;
+            self.repr.large.cap = new_cap + LARGE_BIT;
+            // The capacity's top bit is the inline length's high bit.
+            assert self.repr.small.len >= 0x80 by {};
             return;
         }
         let cur = self.repr.small.len as usize;
@@ -182,19 +227,25 @@ extend<A: Allocator> String<A> {
         }
         self.repr.large.ptr = p;
         self.repr.large.len = cur;
-        self.repr.large.cap = new_cap | LARGE_BIT;
+        self.repr.large.cap = new_cap + LARGE_BIT;
+        assert self.repr.small.len >= 0x80 by {};
     }
 
     // --- construction --------------------------------------------------------------------------.
 
     /// An empty string backed by an explicit allocator value (a stateful arena/pool handle, or a zero-sized
     /// tag): inline, owns no heap yet. `small.len = 0` also clears the discriminant bit.
-    pub const fn new_in(alloc: A) String<A> {
+    pub const fn new_in(alloc: A) String<A>
+        ensures |r| r.view() == Seq::<u8>::empty()
+    {
         return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
     }
 
     /// Pre-size for `cap` bytes through an explicit allocator. Up to SSO_CAP stay inline (no allocation).
-    pub fn with_capacity_in(mut alloc: A, cap: usize) String<A> {
+    pub fn with_capacity_in(mut alloc: A, cap: usize) String<A>
+        panics if cap > SSO_CAP && cap >= LARGE_BIT
+        ensures |r| r.len() == 0 && r.capacity() >= cap && r.view() == Seq::<u8>::empty()
+    {
         if cap <= SSO_CAP {
             return String::<A> { repr: StringRepr { small: StringSmall { len: 0 } }, alloc: alloc };
         }
@@ -203,10 +254,13 @@ extend<A: Allocator> String<A> {
             panic("String: capacity overflow");
         }
         let p = (unsafe alloc.alloc(cap, 1)) as *mut u8;
-        return String::<A> {
-            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap | LARGE_BIT } },
+        let r = String::<A> {
+            repr: StringRepr { large: StringLarge { ptr: p, len: 0, cap: cap + LARGE_BIT } },
             alloc: alloc,
         };
+        // The capacity's top bit is the inline length's high bit.
+        assert r.repr.small.len >= 0x80 by {};
+        return r;
     }
 
     /// A new string through an explicit allocator, holding a copy of `text`'s bytes.
@@ -220,7 +274,10 @@ extend<A: Allocator> String<A> {
 
     /// Bytes currently stored. `s.len()` (this method) is the public accessor; the small/large split is
     /// internal. (A bare `s.len` would be a private member: a compile error outside this module.)
-    pub const fn len(self: &String<A>) usize {
+    pub const fn len(self: &String<A>) usize
+        ensures |r| self.repr.small.len >= 0x80 && r == self.repr.large.len || self.repr.small.len < 0x80 && r == self.repr.small.len as usize
+        ensures |r| r as int == self.view().len()
+    {
         if self.is_large() {
             return self.repr.large.len;
         }
@@ -228,22 +285,30 @@ extend<A: Allocator> String<A> {
     }
 
     /// Total bytes available before the next growth: the real heap capacity, or the inline budget.
-    pub const fn capacity(self: &String<A>) usize {
+    pub const fn capacity(self: &String<A>) usize
+        ensures |r| self.repr.small.len >= 0x80 && r == self.repr.large.cap - LARGE_BIT || self.repr.small.len < 0x80 && r == SSO_CAP
+    {
         if self.is_large() {
             // Drop the discriminant bit.
-            return self.repr.large.cap << 1 >> 1;
+            return self.repr.large.cap - LARGE_BIT;
         }
         return SSO_CAP;
     }
 
     /// True when the length is 0.
-    pub const fn is_empty(self: &String<A>) bool {
+    pub const fn is_empty(self: &String<A>) bool
+        ensures |r| r == (self.view().len() == 0)
+    {
         return self.len() == 0;
     }
 
     /// Guarantee room for `additional` more bytes, growing by doubling (amortised O(1) append). Stays
     /// inline while the total fits in the inline budget.
-    pub fn reserve(self: &mut String<A>, additional: usize) {
+    pub fn reserve(self: &mut String<A>, additional: usize)
+        panics if additional as int > self.capacity() as int - self.len() as int && additional as int + self.len() as int >= LARGE_BIT as int
+        ensures self.len() == old(self.len()) && self.len() as int + additional as int <= self.capacity() as int
+        ensures self.view() == old(self.view())
+    {
         // `capacity - len` cannot wrap, where `len + additional` could.
         if additional <= self.capacity() - self.len() {
             return;
@@ -254,7 +319,12 @@ extend<A: Allocator> String<A> {
     // The growth path of `reserve`, out of line so the check above stays small enough to inline into
     // every append.
     @noinline
-    fn grow_for(self: &mut String<A>, additional: usize) {
+    fn grow_for(self: &mut String<A>, additional: usize)
+        requires additional as int > self.capacity() as int - self.len() as int
+        panics if additional as int + self.len() as int >= LARGE_BIT as int
+        ensures self.len() == old(self.len()) && self.len() as int + additional as int <= self.capacity() as int
+        ensures self.view() == old(self.view())
+    {
         let needed = self.checked_needed(additional);
         // A capacity stays below LARGE_BIT, so doubling it cannot wrap.
         let mut new_cap = self.capacity() * 2;
@@ -268,7 +338,11 @@ extend<A: Allocator> String<A> {
     }
 
     /// Like `reserve`, but allocate exactly enough (no doubling slack).
-    pub fn reserve_exact(self: &mut String<A>, additional: usize) {
+    pub fn reserve_exact(self: &mut String<A>, additional: usize)
+        panics if additional as int > self.capacity() as int - self.len() as int && additional as int + self.len() as int >= LARGE_BIT as int
+        ensures self.len() == old(self.len()) && self.len() as int + additional as int <= self.capacity() as int
+        ensures self.view() == old(self.view())
+    {
         if additional > self.capacity() - self.len() {
             self.grow_to(self.checked_needed(additional));
         }
@@ -278,7 +352,7 @@ extend<A: Allocator> String<A> {
     // Panics otherwise.
     const fn checked_needed(self: &String<A>, additional: usize) usize
         panics if additional as int + self.len() as int >= LARGE_BIT as int
-        ensures |r| r < LARGE_BIT
+        ensures |r| r < LARGE_BIT && r as int == self.len() as int + additional as int
     {
         if additional >= LARGE_BIT - self.len() {
             panic("String: capacity overflow");
@@ -293,7 +367,11 @@ extend<A: Allocator> String<A> {
     pub fn pad_nul(self: &mut String<A>, n: usize) {
         self.reserve_exact(n);
         let l = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let mut i: usize = 0;
         while i < n {
             unsafe p[l + i] = 0;
@@ -306,23 +384,39 @@ extend<A: Allocator> String<A> {
     /// Reserve room for `additional` more bytes and return a writable pointer at the current end (into the
     /// spare capacity, `capacity() - len()` bytes of it). Write up to that many bytes there, then commit them
     /// with `advance_len`. The returned pointer is invalidated by any later growth: re-fetch after one.
-    pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8 {
+    pub fn spare_mut(self: &mut String<A>, additional: usize) *mut u8
+        panics if additional as int > self.capacity() as int - self.len() as int && additional as int + self.len() as int >= LARGE_BIT as int
+        ensures self.len() == old(self.len()) && self.len() as int + additional as int <= self.capacity() as int
+        ensures self.view() == old(self.view())
+        ensures |r| self.repr.small.len >= 0x80 ==> r == unsafe (self.repr.large.ptr + self.len())
+        ensures |r| self.repr.small.len < 0x80 ==> r as *const u8 == unsafe ((&self.repr.small.data[0]) as *const u8 + self.len())
+    {
         self.reserve(additional);
-        return unsafe (self.data_ptr() + self.len());
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        return unsafe (p + self.len());
     }
 
     /// Grow the length by `n` bytes written into the spare region via `spare_mut`. Caller guarantees
     /// `len() + n <= capacity()` and that those `n` bytes were initialised.
-    pub const fn advance_len(self: &mut String<A>, n: usize) {
+    pub const fn advance_len(self: &mut String<A>, n: usize)
+        requires self.len() as int + n as int <= self.capacity() as int
+    {
         self.set_len(self.len() + n);
     }
 
     /// Free unused capacity. A heap string short enough to fit inline moves back onto the stack and frees
     /// its buffer; otherwise it reallocs down to its length. Inline strings are already minimal.
-    pub fn shrink_to_fit(self: &mut String<A>) {
+    pub fn shrink_to_fit(self: &mut String<A>)
+        ensures self.view() == old(self.view())
+    {
         if !self.is_large() {
             return;
         }
+        ghost let v0 = self.view();
         let n = self.repr.large.len;
         let p = self.repr.large.ptr;
         let cap = self.capacity(); // read BEFORE any memcpy: the inline move overwrites the union's cap field
@@ -331,87 +425,157 @@ extend<A: Allocator> String<A> {
             if n > 0 {
                 unsafe memcpy(&mut self.repr.small.data[0], p, n);
             }
-            unsafe self.alloc.dealloc(p, cap, 1);
-            // Clears the discriminant (n <= SSO_CAP).
+            // Clears the discriminant (n <= SSO_CAP): the string is whole again before the free, which
+            // may panic.
             self.repr.small.len = n as u8;
+            assert self.repr.small.len < 0x80 && self.view() == v0 by {};
+            unsafe self.alloc.dealloc(p, cap, 1);
             return;
         }
-        if self.capacity() != n {
-            let np = (unsafe self.alloc.realloc(p, self.capacity(), n, 1)) as *mut u8;
+        if cap != n {
+            let nc = n + LARGE_BIT;
+            let np = (unsafe self.alloc.realloc(p, cap, n, 1)) as *mut u8;
             self.repr.large.ptr = np;
-            self.repr.large.cap = n | LARGE_BIT;
+            self.repr.large.cap = nc;
+            assert self.repr.small.len >= 0x80 && self.view() == v0 by {};
         }
     }
 
     /// Free the contents but keep any heap allocation for reuse.
-    pub const fn clear(self: &mut String<A>) {
+    pub const fn clear(self: &mut String<A>)
+        ensures self.view() == Seq::<u8>::empty()
+    {
         self.set_len(0);
     }
 
     /// Shorten to at most `new_len` bytes (no-op if already shorter). Caller keeps UTF-8 boundaries.
-    pub const fn truncate(self: &mut String<A>, new_len: usize) {
+    pub const fn truncate(self: &mut String<A>, new_len: usize)
+        ensures new_len as int >= old(self.view()).len() ==> self.view() == old(self.view())
+        ensures new_len as int < old(self.view()).len() ==> self.view() == old(self.view()).take(new_len as int)
+    {
         if new_len < self.len() {
+            take_take(self.storage(), self.length(), new_len as int);
             self.set_len(new_len);
         }
     }
 
     // --- append --------------------------------------------------------------------------------.
 
-    /// Append the bytes of `src`.
-    pub fn push_bytes(self: &mut String<A>, src: Slice<u8>) {
-        self.push_raw(src.ptr, src.len);
-    }
-
-    // Append `n` raw bytes from `src` (the bulk primitive the other appenders build on).
-    fn push_raw(self: &mut String<A>, src: *const u8, n: usize) {
+    /// Append the bytes of `src` (the bulk primitive the other appenders build on).
+    pub fn push_bytes(self: &mut String<A>, src: Slice<u8>)
+        panics if self.view().len() + src.view().len() >= LARGE_BIT as int
+        ensures self.view() == old(self.view()).concat(src.view())
+    {
+        let n = src.len;
         if n == 0 {
             return;
         }
         self.reserve(n);
+        if self.is_large() {
+            self.append_large(src);
+        } else {
+            self.append_small(src);
+        }
+    }
+
+    // `push_bytes` past the growth, on the heap representation: each representation proves alone.
+    fn append_large(self: &mut String<A>, src: Slice<u8>)
+        requires self.repr.small.len >= 0x80 && self.len() as int + src.len as int <= self.capacity() as int
+        ensures self.view() == old(self.view()).concat(src.view())
+    {
         let len = self.len();
-        let p = self.data_ptr();
-        unsafe memcpy(unsafe (p + len), src, n);
+        let n = src.len;
+        ghost let v1 = self.view();
+        let p = self.repr.large.ptr;
+        unsafe memcpy(unsafe (p + len), src.ptr, n);
+        // The block: the first `len` bytes, then the copied ones.
+        assert block(self.repr.large.ptr).take(len as int + n as int) == v1.concat(src.view()) by {};
+        assert self.storage().take(len as int + n as int) == v1.concat(src.view()) by {};
+        self.set_len(len + n);
+    }
+
+    // `push_bytes` past the growth, on the inline representation.
+    fn append_small(self: &mut String<A>, src: Slice<u8>)
+        requires self.repr.small.len < 0x80 && self.len() as int + src.len as int <= self.capacity() as int
+        ensures self.view() == old(self.view()).concat(src.view())
+    {
+        let len = self.len();
+        let n = src.len;
+        ghost let v1 = self.view();
+        let p = (&mut self.repr.small.data[0]) as *mut u8;
+        unsafe memcpy(unsafe (p + len), src.ptr, n);
+        assert self.storage().take(len as int + n as int) == v1.concat(src.view()) by {};
         self.set_len(len + n);
     }
 
     /// Append one raw byte.
-    pub fn push_byte(self: &mut String<A>, b: u8) {
+    pub fn push_byte(self: &mut String<A>, b: u8)
+        panics if self.view().len() + 1 >= LARGE_BIT as int
+        ensures self.view() == old(self.view()).push(b)
+        ensures self.view().len() == old(self.view()).len() + 1
+    {
         // The growth keeps the length: read before it.
         let len = self.len();
         self.reserve(1);
-        let p = self.data_ptr();
+        ghost let s1 = self.storage();
+        push_view(self.view(), s1, len as int, len as int + 1, b);
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         unsafe p[len] = b;
+        assert self.storage() == s1.update(len as int, b) by {};
         self.set_len(len + 1);
     }
 
     /// Append one Unicode scalar value, UTF-8 encoded into 1-4 bytes.
-    pub fn push(self: &mut String<A>, ch: u32) {
+    pub fn push(self: &mut String<A>, ch: u32)
+        panics if self.view().len() + 4 >= LARGE_BIT as int
+        ensures self.view() == old(self.view()).concat(utf8(ch))
+    {
         if ch < 0x80 {
+            concat_one(self.view(), ch as u8);
             self.push_byte(ch as u8);
-        } else if ch < 0x800 {
-            self.push_byte((0xC0 | ch >> 6) as u8);
-            self.push_byte((0x80 | ch & 0x3F) as u8);
-        } else if ch < 0x10000 {
-            self.push_byte((0xE0 | ch >> 12) as u8);
-            self.push_byte((0x80 | ch >> 6 & 0x3F) as u8);
-            self.push_byte((0x80 | ch & 0x3F) as u8);
-        } else {
-            self.push_byte((0xF0 | ch >> 18) as u8);
-            self.push_byte((0x80 | ch >> 12 & 0x3F) as u8);
-            self.push_byte((0x80 | ch >> 6 & 0x3F) as u8);
-            self.push_byte((0x80 | ch & 0x3F) as u8);
+            return;
         }
+        // The encoding, then one append.
+        let mut b: [u8; 4] = [0; 4];
+        let mut n: usize = 4;
+        if ch < 0x800 {
+            b[0] = (0xC0 | ch >> 6) as u8;
+            b[1] = (0x80 | ch & 0x3F) as u8;
+            n = 2;
+        } else if ch < 0x10000 {
+            b[0] = (0xE0 | ch >> 12) as u8;
+            b[1] = (0x80 | ch >> 6 & 0x3F) as u8;
+            b[2] = (0x80 | ch & 0x3F) as u8;
+            n = 3;
+        } else {
+            b[0] = (0xF0 | ch >> 18) as u8;
+            b[1] = (0x80 | ch >> 12 & 0x3F) as u8;
+            b[2] = (0x80 | ch >> 6 & 0x3F) as u8;
+            b[3] = (0x80 | ch & 0x3F) as u8;
+        }
+        let e = b[0..n];
+        assert e.view() == utf8(ch) by {};
+        self.push_bytes(e);
     }
 
     /// Append the bytes of a `str` (e.g. a string literal).
     @always_inline
-    pub fn push_str(self: &mut String<A>, text: str) {
-        self.push_raw(text.ptr(), text.len());
+    pub fn push_str(self: &mut String<A>, text: str)
+        panics if self.view().len() + text.view().len() >= LARGE_BIT as int
+        ensures self.view() == old(self.view()).concat(text.view())
+    {
+        let b = unsafe Slice::<u8> { ptr: text.ptr(), len: text.len() };
+        assert b.view() == text.view() by {};
+        self.push_bytes(b);
     }
 
     /// Append another String's bytes.
     pub fn push_string(self: &mut String<A>, other: &String<A>) {
-        self.push_raw(other.as_ptr(), other.len());
+        self.push_str(other.as_str());
     }
 
     /// Append the base-10 digits of an unsigned integer: the space for all of them is reserved once, then
@@ -426,7 +590,11 @@ extend<A: Allocator> String<A> {
         }
         self.reserve(n);
         let len = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let mut x = value;
         for k in 0..n {
             unsafe p[len + n - 1 - k] = (48 + x % 10) as u8;
@@ -492,15 +660,25 @@ extend<A: Allocator> String<A> {
         }
         // Straight into the spare capacity. snprintf reports the full length, so a result that did not fit
         // (with its NUL) is formatted again into a reservation of exactly that size.
-        let p = self.spare_mut(0);
-        let room = self.capacity() - self.len();
-        let n = unsafe snprintf(p as *mut char, room, "%.*f", prec as i32, value);
+        let len = self.len();
+        let room = self.capacity() - len;
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        let n = unsafe snprintf((unsafe (p + len)) as *mut char, room, "%.*f", prec as i32, value);
         if n <= 0 {
             return;
         }
         if n as usize >= room {
-            let q = self.spare_mut(n as usize + 1);
-            let _ = unsafe snprintf(q as *mut char, n as usize + 1, "%.*f", prec as i32, value);
+            self.reserve(n as usize + 1);
+            let q = if self.is_large() {
+                self.repr.large.ptr
+            } else {
+                (&mut self.repr.small.data[0]) as *mut u8
+            };
+            let _ = unsafe snprintf((unsafe (q + len)) as *mut char, n as usize + 1, "%.*f", prec as i32, value);
         }
         self.advance_len(n as usize);
     }
@@ -543,7 +721,7 @@ extend<A: Allocator> String<A> {
 
     /// Pad, in place, the field appended since `from` (a prior `len()`) to `width` bytes: the
     /// no-temporary twin of `push_padded` for values formatted directly into this string: one
-    /// reserve, one memmove of the field, then fill. Same rules: `align` 0 = left, 1 = right,
+    /// reserve, one memmove of the field, then two fills. Same rules: `align` 0 = left, 1 = right,
     /// 2 = center; a right-aligned zero fill keeps a leading '-' in front of the zeros.
     pub fn pad_at(self: &mut String<A>, from: usize, width: usize, fill: u8, align: u8) {
         if from > self.len() {
@@ -555,7 +733,6 @@ extend<A: Allocator> String<A> {
         }
         let pad = width - n;
         self.reserve(pad);
-        let p = unsafe (self.data_ptr() + from);
         let mut lead: usize = 0;
         if align == 1 {
             lead = pad;
@@ -563,50 +740,125 @@ extend<A: Allocator> String<A> {
             lead = pad / 2;
         }
         let mut sign: usize = 0;
-        if align == 1 && fill == 48 && n > 0 && unsafe p[0] == 45 {
+        if align == 1 && fill == 48 && n > 0 && self.byte(from) == 45 {
             sign = 1;
         }
-        if lead > 0 {
-            unsafe memmove(unsafe (p + sign + lead), unsafe (p + sign), n - sign);
-        }
-        let mut i = sign;
-        while i < sign + lead {
-            unsafe p[i] = fill;
-            i += 1;
-        }
-        i = lead + n;
-        while i < width {
-            unsafe p[i] = fill;
-            i += 1;
-        }
+        self.pad_field(from, n, width, lead, sign, fill);
         self.set_len(from + width);
     }
 
+    // `pad_at`'s writes: the field of `n` bytes at `from` moves `lead` bytes right after its first `sign`
+    // bytes, and `fill` takes the `lead` bytes it leaves and the bytes after it up to `from + width`.
+    const fn pad_field(self: &mut String<A>, from: usize, n: usize, width: usize, lead: usize, sign: usize, fill: u8)
+        requires sign <= n && n as int + lead as int <= width as int && from as int + n as int == self.len() as int
+        requires from as int + width as int <= self.capacity() as int
+        ensures self.len() == old(self.len()) && self.capacity() == old(self.capacity())
+    {
+        let p0 = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        let p = unsafe (p0 + from);
+        if lead > 0 {
+            unsafe memmove(unsafe (p + sign + lead), unsafe (p + sign), n - sign);
+        }
+        unsafe memset(unsafe (p + sign), fill, lead);
+        unsafe memset(unsafe (p + lead + n), fill, width - lead - n);
+    }
+
     /// Append a floating-point value formatted by C's "%g" (compact, round-trip-ish), written straight
-    /// into the spare capacity: "%g" needs at most 13 bytes plus the NUL.
+    /// into the spare capacity: "%g" needs at most 13 bytes plus the NUL, so the second format never runs.
     pub fn push_f64(self: &mut String<A>, value: f64) {
         // A NaN's sign is the machine's (IEEE 754 leaves it open): every NaN prints as `nan`.
         if value != value {
             self.push_str("nan");
             return;
         }
-        let n = unsafe snprintf(self.spare_mut(16) as *mut char, 16, "%g", value);
-        if n > 0 {
-            self.advance_len(n as usize);
+        // A result that did not fit (with its NUL) is formatted again into a reservation of that size.
+        self.reserve(16);
+        let len = self.len();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        let n = unsafe snprintf((unsafe (p + len)) as *mut char, 16, "%g", value);
+        if n <= 0 {
+            return;
         }
+        if n as usize >= 16 {
+            self.reserve(n as usize + 1);
+            let q = if self.is_large() {
+                self.repr.large.ptr
+            } else {
+                (&mut self.repr.small.data[0]) as *mut u8
+            };
+            let _ = unsafe snprintf((unsafe (q + len)) as *mut char, n as usize + 1, "%g", value);
+        }
+        self.advance_len(n as usize);
     }
 
     /// Insert one byte at index `i`, shifting the tail right. Panics when `i > len`.
-    pub fn insert_byte(self: &mut String<A>, i: usize, b: u8) {
+    pub fn insert_byte(self: &mut String<A>, i: usize, b: u8)
+        panics if i as int > self.view().len() || self.view().len() + 1 >= LARGE_BIT as int
+        ensures self.view() == old(self.view()).take(i as int).push(b).concat(old(self.view()).skip(i as int))
+    {
         if i > self.len() {
             panic("String::insert_byte: index out of bounds");
         }
         self.reserve(1);
         let len = self.len();
-        let p = self.data_ptr();
-        unsafe memmove(unsafe (p + i) + 1, unsafe (p + i), len - i);
+        ghost let v1 = self.view();
+        self.shift_right(i, len);
+        ghost let s2 = self.storage();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         unsafe p[i] = b;
+        assert self.storage() == s2.update(i as int, b) && len < self.capacity() by {};
+        upd_take_out(s2, i as int, i as int, b);
+        upd_sub_out(s2, i as int, i as int + 1, len as int + 1, b);
+        take_split(self.storage(), i as int, len as int);
+        assert self.storage().take(len as int + 1) == v1.take(i as int).push(b).concat(v1.skip(i as int)) by {};
         self.set_len(len + 1);
+    }
+
+    // Move bytes `i` to `len` one place right (`insert_byte`'s room): the bytes before `i` stay. One function
+    // per representation, each proved alone.
+    const fn shift_right(self: &mut String<A>, i: usize, len: usize)
+        requires i <= len && len == self.len() && len < self.capacity()
+        ensures self.len() == len && self.capacity() == old(self.capacity()) && len as int < self.storage().len()
+        ensures self.storage().take(i as int) == old(self.view()).take(i as int)
+        ensures self.storage().subrange(i as int + 1, len as int + 1) == old(self.view()).skip(i as int)
+    {
+        if self.is_large() {
+            self.shift_right_large(i, len);
+        } else {
+            self.shift_right_small(i, len);
+        }
+    }
+
+    const fn shift_right_large(self: &mut String<A>, i: usize, len: usize)
+        requires i <= len && len == self.len() && len < self.capacity() && self.repr.small.len >= 0x80
+        ensures self.storage().subrange(i as int + 1, len as int + 1) == old(self.view()).skip(i as int)
+        ensures self.storage().take(i as int) == old(self.view()).take(i as int)
+        ensures self.len() == len && self.capacity() == old(self.capacity()) && len as int < self.storage().len()
+    {
+        let p = self.repr.large.ptr;
+        unsafe memmove(unsafe (p + i) + 1, unsafe (p + i), len - i);
+    }
+
+    const fn shift_right_small(self: &mut String<A>, i: usize, len: usize)
+        requires i <= len && len == self.len() && len < self.capacity() && self.repr.small.len < 0x80
+        ensures self.len() == len && self.capacity() == old(self.capacity()) && len as int < self.storage().len()
+        ensures self.storage().take(i as int) == old(self.view()).take(i as int)
+        ensures self.storage().subrange(i as int + 1, len as int + 1) == old(self.view()).skip(i as int)
+    {
+        let p = (&mut self.repr.small.data[0]) as *mut u8;
+        unsafe memmove(unsafe (p + i) + 1, unsafe (p + i), len - i);
     }
 
     /// Insert a `str` at byte index `i`, shifting the tail right. Panics when `i > len`.
@@ -619,7 +871,11 @@ extend<A: Allocator> String<A> {
         }
         self.reserve(text.len());
         let len = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         unsafe memmove(unsafe (p + i) + text.len(), unsafe (p + i), len - i);
         unsafe memcpy(unsafe (p + i), text.ptr(), text.len());
         self.set_len(len + text.len());
@@ -628,14 +884,26 @@ extend<A: Allocator> String<A> {
     // --- remove --------------------------------------------------------------------------------.
 
     /// Remove and return the last byte, or 0 if the string is empty.
-    pub const fn pop_byte(self: &mut String<A>) u8 {
+    pub const fn pop_byte(self: &mut String<A>) u8
+        ensures |r| old(self.view()).len() == 0 ==> r == 0 && self.view() == old(self.view())
+        ensures |r| old(self.view()).len() > 0 ==> r == old(self.view())[old(self.view()).len() - 1] && self.view() == old(self.view()).take(
+            old(self.view()).len() - 1,
+        )
+    {
         let len = self.len();
         if len == 0 {
             return 0;
         }
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        let b = unsafe p[len - 1];
+        take_take(self.storage(), len as int, len as int - 1);
+        take_at(self.storage(), len as int, len as int - 1);
         self.set_len(len - 1);
-        return unsafe p[len - 1];
+        return b;
     }
 
     /// Remove and return the last UTF-8 scalar value (walking back over continuation bytes), or 0 if
@@ -645,9 +913,15 @@ extend<A: Allocator> String<A> {
         if len == 0 {
             return 0;
         }
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let mut start = len - 1;
-        while start > 0 && (unsafe p[start] & 0xC0) == 0x80 {
+        while start > 0 && (unsafe p[start] & 0xC0) == 0x80
+            invariant start < len && len == self.len() && len <= self.capacity()
+        {
             // Skip 0b10xxxxxx continuation bytes.
             start = start - 1;
         }
@@ -666,16 +940,47 @@ extend<A: Allocator> String<A> {
     }
 
     /// Remove and return the byte at index `i`, shifting the tail left. Panics when `i >= len`.
-    pub const fn remove_byte(self: &mut String<A>, i: usize) u8 {
+    pub const fn remove_byte(self: &mut String<A>, i: usize) u8
+        panics if i as int >= self.view().len()
+        ensures |r| r == old(self.view())[i as int]
+        ensures self.view() == old(self.view()).take(i as int).concat(old(self.view()).skip(i as int + 1))
+    {
         let len = self.len();
         if i >= len {
             panic("String::remove_byte: index out of bounds");
         }
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let b = unsafe p[i];
-        unsafe memmove(unsafe (p + i), unsafe (p + i) + 1, len - i - 1);
+        assert b == self.view()[i as int] by {};
+        self.shift_left(i, len);
+        take_cat(self.storage(), i as int, len as int - 1);
         self.set_len(len - 1);
         return b;
+    }
+
+    // Move bytes `i + 1` to `len` one place left (`remove_byte`'s gap): the bytes before `i` stay.
+    const fn shift_left(self: &mut String<A>, i: usize, len: usize)
+        requires i < len && len == self.len()
+        ensures self.len() == len && self.capacity() == old(self.capacity()) && len as int <= self.storage().len()
+        ensures self.storage().take(i as int) == old(self.view()).take(i as int)
+        ensures self.storage().subrange(i as int, len as int - 1) == old(self.view()).skip(i as int + 1)
+    {
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
+        ghost let s0 = self.storage();
+        assert self.view() == s0.take(len as int) by {};
+        unsafe memmove(unsafe (p + i), unsafe (p + i) + 1, len - i - 1);
+        assert self.storage().take(i as int) == s0.take(i as int) by {};
+        assert self.storage().subrange(i as int, len as int - 1) == s0.subrange(i as int + 1, len as int) by {};
+        take_sub(s0, len as int, i as int + 1, len as int);
+        take_take(s0, len as int, i as int);
     }
 
     // --- access --------------------------------------------------------------------------------.
@@ -689,11 +994,18 @@ extend<A: Allocator> String<A> {
     }
 
     /// Overwrite the byte at `i`. Panics when `i >= len`.
-    pub const fn set_byte(self: &mut String<A>, i: usize, b: u8) {
+    pub const fn set_byte(self: &mut String<A>, i: usize, b: u8)
+        panics if i as int >= self.view().len()
+        ensures self.view() == old(self.view()).update(i as int, b)
+    {
         if i >= self.len() {
             panic("String::set_byte: index out of bounds");
         }
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         unsafe p[i] = b;
     }
 
@@ -707,7 +1019,12 @@ extend<A: Allocator> String<A> {
 
     /// Raw mutable pointer to the bytes, from the exclusive borrow (`as_ptr`'s never writes); a write keeps
     /// them UTF-8. Invalidated by any reallocating mutation.
-    pub const fn as_mut_ptr(self: &mut String<A>) *mut u8 {
+    pub const fn as_mut_ptr(self: &mut String<A>) *mut u8
+        ensures self.view() == old(self.view()) && self.len() == old(self.len()) && self.capacity() == old(self.capacity())
+        ensures self.repr.small.len >= 0x80 == old(self.repr.small.len >= 0x80)
+        ensures |r| self.repr.small.len >= 0x80 ==> r == self.repr.large.ptr
+        ensures |r| self.repr.small.len < 0x80 ==> r == (&mut self.repr.small.data[0]) as *mut u8
+    {
         if self.is_large() {
             return self.repr.large.ptr;
         }
@@ -738,17 +1055,34 @@ extend<A: Allocator> String<A> {
     /// A NUL-terminated `*const char` view of the bytes, for passing to C APIs (the FFI `.cstr()` bridge).
     /// Writes a trailing 0 right past `len` without changing the length, growing by one byte if needed. The
     /// pointer is valid until the next mutation; embedded NULs make C see a truncated string.
-    pub fn cstr(self: &mut String<A>) *const char {
+    pub fn cstr(self: &mut String<A>) *const char
+        panics if self.view().len() + 1 >= LARGE_BIT as int
+        ensures self.view() == old(self.view()) && self.len() == old(self.len()) && self.len() < self.capacity()
+        ensures |r| self.repr.small.len >= 0x80 ==> r as *const u8 == self.repr.large.ptr as *const u8
+        ensures |r| self.repr.small.len < 0x80 ==> r as *const u8 == (&self.repr.small.data[0]) as *const u8
+    {
         self.reserve(1);
         let len = self.len();
-        let p = self.data_ptr();
+        ghost let s1 = self.storage();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         unsafe p[len] = 0;
-        return self.as_ptr() as *const char;
+        assert self.storage() == s1.update(len as int, 0) by {};
+        upd_take_out(s1, len as int, len as int, 0);
+        return p as *const char;
     }
 
     /// `cstr` to write in place (a C routine that fills a template, `mkstemp`'s `XXXXXX`); a write keeps the
     /// bytes UTF-8.
-    pub fn cstr_mut(self: &mut String<A>) *mut char {
+    pub fn cstr_mut(self: &mut String<A>) *mut char
+        panics if self.view().len() + 1 >= LARGE_BIT as int
+        ensures self.view() == old(self.view()) && self.len() == old(self.len()) && self.len() < self.capacity()
+        ensures |r| self.repr.small.len >= 0x80 ==> r as *mut u8 == self.repr.large.ptr
+        ensures |r| self.repr.small.len < 0x80 ==> r as *mut u8 == (&mut self.repr.small.data[0]) as *mut u8
+    {
         let _ = self.cstr();
         return self.as_mut_ptr() as *mut char;
     }
@@ -775,7 +1109,12 @@ extend<A: Allocator> String<A> {
         let n = end - start;
         let mut s = String::<A>::with_capacity_in(self.alloc, n);
         if n > 0 {
-            unsafe memcpy(s.data_ptr(), unsafe (self.as_ptr() + start), n);
+            let p = if s.is_large() {
+                s.repr.large.ptr
+            } else {
+                (&mut s.repr.small.data[0]) as *mut u8
+            };
+            unsafe memcpy(p, unsafe (self.as_ptr() + start), n);
             s.set_len(n);
         }
         return s;
@@ -788,13 +1127,11 @@ extend<A: Allocator> String<A> {
         if n != 0 && len > (LARGE_BIT - 1) / n {
             panic("String::repeat: capacity overflow");
         }
+        // One reservation: each append then fits.
         let mut out = String::<A>::with_capacity_in(self.alloc, len * n);
         if len > 0 {
-            for k in 0..n {
-                let at = out.len();
-                let dst = out.data_ptr();
-                unsafe memcpy(unsafe (dst + at), src, len);
-                out.set_len(at + len);
+            for _k in 0..n {
+                out.push_bytes(unsafe Slice::<u8> { ptr: src, len: len });
             }
         }
         return out;
@@ -980,7 +1317,11 @@ extend<A: Allocator> String<A> {
     /// Uppercase every ASCII letter in place; other bytes untouched.
     pub const fn to_ascii_upper(self: &mut String<A>) {
         let n = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         for i in 0..n {
             let b = unsafe p[i];
             if b >= 97 && b <= 122 {
@@ -993,7 +1334,11 @@ extend<A: Allocator> String<A> {
     /// Lowercase every ASCII letter in place; other bytes untouched.
     pub const fn to_ascii_lower(self: &mut String<A>) {
         let n = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         for i in 0..n {
             let b = unsafe p[i];
             if b >= 65 && b <= 90 {
@@ -1006,7 +1351,11 @@ extend<A: Allocator> String<A> {
     /// Replace every byte equal to `from` with `to`, in place.
     pub const fn replace_byte(self: &mut String<A>, from: u8, to: u8) {
         let n = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         for i in 0..n {
             if unsafe p[i] == from {
                 unsafe p[i] = to;
@@ -1028,7 +1377,7 @@ extend<A: Allocator> String<A> {
         let mut run: usize = 0; // start of the pending unmatched run
         while i <= last {
             if unsafe memcmp(unsafe (p + i), from.ptr(), from.len()) == 0 {
-                out.push_raw(unsafe (p + run), i - run);
+                out.push_bytes(unsafe Slice::<u8> { ptr: unsafe (p + run), len: i - run });
                 out.push_str(to);
                 i = i + from.len();
                 run = i;
@@ -1037,16 +1386,22 @@ extend<A: Allocator> String<A> {
             }
         }
         // Trailing run.
-        out.push_raw(unsafe (p + run), n - run);
+        out.push_bytes(unsafe Slice::<u8> { ptr: unsafe (p + run), len: n - run });
         return out;
     }
 
     /// Free leading ASCII whitespace (space, tab, newline, carriage return), shifting bytes left.
     pub const fn trim_start(self: &mut String<A>) {
         let len = self.len();
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let mut start: usize = 0;
-        while start < len {
+        while start < len
+            invariant start <= len && len == self.len() && len <= self.capacity()
+        {
             let b = unsafe p[start];
             if b != 32 && b != 9 && b != 10 && b != 13 {
                 break;
@@ -1061,9 +1416,15 @@ extend<A: Allocator> String<A> {
 
     /// Free trailing ASCII whitespace.
     pub const fn trim_end(self: &mut String<A>) {
-        let p = self.data_ptr();
+        let p = if self.is_large() {
+            self.repr.large.ptr
+        } else {
+            (&mut self.repr.small.data[0]) as *mut u8
+        };
         let mut len = self.len();
-        while len > 0 {
+        while len > 0
+            invariant len <= self.len() && self.len() <= self.capacity()
+        {
             let b = unsafe p[len - 1];
             if b != 32 && b != 9 && b != 10 && b != 13 {
                 break;
@@ -1106,12 +1467,17 @@ extend<A: Allocator> String<A> {
 
 extend<A: Allocator + Default> String<A> {
     /// An empty string (default-constructed allocator: `Global`, or any zero-sized/reconstructible tag).
-    pub fn new() String<A> {
+    pub fn new() String<A>
+        ensures |r| r.view() == Seq::<u8>::empty()
+    {
         return String::<A>::new_in(A::default());
     }
 
     /// Pre-size for `cap` bytes (default allocator). Up to SSO_CAP stay inline (no allocation); more allocates.
-    pub fn with_capacity(cap: usize) String<A> {
+    pub fn with_capacity(cap: usize) String<A>
+        panics if cap > SSO_CAP && cap >= LARGE_BIT
+        ensures |r| r.len() == 0 && r.capacity() >= cap && r.view() == Seq::<u8>::empty()
+    {
         return String::<A>::with_capacity_in(A::default(), cap);
     }
 
@@ -1126,7 +1492,7 @@ extend<A: Allocator + Default> String<A> {
     pub unsafe fn from_cstr(s: *const char) String<A> {
         let n = strlen(s);
         let mut out = String::<A>::with_capacity(n);
-        out.push_raw(s as *const u8, n);
+        out.push_bytes(unsafe Slice::<u8> { ptr: s as *const u8, len: n });
         return out;
     }
 
@@ -1227,7 +1593,12 @@ extend<A: Allocator> String<A> as Clone {
         let n = self.len();
         let mut s = String::<A>::with_capacity_in(self.alloc, n);
         if n > 0 {
-            unsafe memcpy(s.data_ptr(), self.as_ptr(), n);
+            let p = if s.is_large() {
+                s.repr.large.ptr
+            } else {
+                (&mut s.repr.small.data[0]) as *mut u8
+            };
+            unsafe memcpy(p, self.as_ptr(), n);
             s.set_len(n);
         }
         return s;
@@ -1260,7 +1631,12 @@ extend<A: Allocator> String<A> as Index<u8, str> {
         if i >= self.len() {
             panic_parts(type_info::<Self>().qualified_name, "[i]: index out of bounds");
         }
-        return &unsafe self.as_str().ptr()[i];
+        let p = if self.is_large() {
+            self.repr.large.ptr as *const u8
+        } else {
+            (&self.repr.small.data[0]) as *const u8
+        };
+        return &unsafe p[i];
     }
     pub fn index_range(self: &String<A>, r: Range<usize>) str {
         if r.inclusive && r.end >= self.len() {

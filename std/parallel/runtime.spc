@@ -156,7 +156,6 @@ pub const RK_JOB: u32 = 1;
 pub struct Coroutine {
     @ordered
     pub run: Runnable, // first, so a `*mut Coroutine` is a `*mut Runnable`
-    pub base: *mut void, // the allocation this line-aligned record lives in: see `co_alloc`
     pub ctx: *mut void, // sc_rt saved context: `&ctx_mem`, or a heap block on the fallback platforms
     pub stack: *mut void, // guard-paged stack, usable low end
     pub stack_size: usize, // its usable size: every reuse and release goes by this, never by the default
@@ -227,9 +226,12 @@ pub struct TaskInfo {
 
 // One registry slot. `gen` bumps once per task assigned to the slot and once per retirement, so a key
 // captured for one task can never name another. `spin` orders a key-based cancel against block reuse.
+// The slot holds its block from the block's creation to its release (`reg_assign`, `reg_take`).
 @no_const
-struct TaskSlot {
-    pub co: *mut Coroutine,
+struct TaskSlot
+    invariant self.co == null || Global::owns(self.co, co_bytes(), CO_ALIGN)
+{
+    co: *mut Coroutine,
     pub gen: u32,
     pub spin: i32,
     pub next_free: i64, // retired-slot freelist link; -1 = none
@@ -243,14 +245,18 @@ static_assert(REG_SEG_SIZE * REG_MAX_SEGS >= 1000000, "the registry must hold a 
 
 @no_const
 struct Registry {
-    pub segs: *mut *mut TaskSlot, // REG_MAX_SEGS pointers, allocated with the registry
-    pub nsegs: usize,
+    pub segs: Vector<Vector<TaskSlot>>, // REG_MAX_SEGS segments reserved with the registry: neither moves
     pub len: usize, // slots handed out so far (monotonic bump; retired slots recycle via free_head)
     pub free_head: i64,
     pub spin: i32, // guards slot allocation, retirement, and scans
 }
 
-static mut G_REG: *mut Registry = null;
+// The registry's holder: written by `reg_init` before the pool is published and by `reg_free` after the
+// workers stopped; every spawn and task reads it after acquiring the started state.
+static mut G_REG: *mut Registry = null
+    invariant G_REG == null || Global::owns(G_REG, sizeof(Registry), alignof(Registry));
+// Its address for a reader not ordered after the pool's start (`reg_load`): atomic.
+static mut G_REG_PUB: usize = 0;
 
 const DEQUE_CAP: usize = 256; // power of two; an overflowing push spills to the injection queue
 const BATCH_MAX: usize = 16; // injected tasks moved to a deque per lock: see `take_injection`
@@ -393,7 +399,7 @@ pub struct Worker {
     // a line of their own was measured and was 12% WORSE on spawn_to_completion: a push then touches two
     // lines, and the thieves' reads of `tail` cost the owner nothing extra while it stays clean of the
     // per-task counters, which is why those sit on the lines after.
-    pub buf: *mut *mut Runnable, // DEQUE_CAP slots, indexed modulo the capacity
+    pub buf: Vector<*mut Runnable>, // storage of DEQUE_CAP slots, indexed modulo the capacity
     pub head: usize, // atomic: next slot to run; CAS'd by the owner and by thieves alike
     pub tail: usize, // atomic: one past the last slot pushed (only the owner writes it)
     pub rng: u64, // xorshift state for victim selection
@@ -411,7 +417,7 @@ pub struct Worker {
     pub yhead: *mut Runnable, // yielded here, oldest first: taken only once the ring is empty
     pub ytail: *mut Runnable,
     pub ylen: i32, // beyond Y_MAX a yield spills to the injection queue: see `yq_push`
-    pub pad: Array<u64, 4>, // the end of the first line
+    pub pad: Array<u64, 2>, // the end of the first line
     // Completion and spawn accounting, per worker so a task's end never touches a shared line, and on
     // the second line so it never dirties the ring's line either: the owner adds (atomic stores, so the
     // sums are defined), readers sum. The sums are exact once the pool is quiescent, which is when
@@ -459,60 +465,112 @@ const PROMOTE_BATCH: i32 = 1024; // due timers made runnable per lock hold (abou
 // A task record sits on its own cache lines: the fields a waker writes (park state, cancel state,
 // hand-off) and the fields the owner rewrites on every switch (context, closure) must never share a line
 // with a NEIGHBOURING record, which back-to-back allocations of a record-sized block would give them
-// (measured: +5% to +40% on spawn_to_completion depending on where the boundary fell). The allocator
-// only promises malloc alignment, so the record is placed inside an over-sized block and `base` keeps
-// what to free.
+// (measured: +5% to +40% on spawn_to_completion depending on where the boundary fell). The block is
+// line-aligned and a whole number of lines.
 const CO_ALIGN: usize = 128; // the largest line any supported core has (Apple M-series L2)
 const fn co_bytes() usize {
-    return (sizeof(Coroutine) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
+    return (sizeof(Coroutine) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN;
 }
 
-fn co_alloc() *mut Coroutine {
+fn co_alloc() *mut Coroutine
+    ensures |r| Global::owns(r, co_bytes(), CO_ALIGN)
+{
     let mut g = Global {};
-    let base = unsafe g.alloc(alloc_size(co_bytes()), 16);
-    let co = (unsafe (base as *mut u8 + (CO_ALIGN - base as usize % CO_ALIGN) % CO_ALIGN)) as *mut Coroutine;
-    unsafe (*co).base = base;
-    return co;
+    return (unsafe g.alloc(co_bytes(), CO_ALIGN)) as *mut Coroutine;
+}
+
+fn co_free(co: *mut Coroutine)
+    requires Global::owns(co, co_bytes(), CO_ALIGN)
+{
+    let mut g = Global {};
+    unsafe g.dealloc(co, co_bytes(), CO_ALIGN);
 }
 
 // The scheduler record too: its hot atomics (injection lock and count, spinning flag, pool count, timer
 // count) fall on fixed lines only when the record's own address is line-aligned; a malloc-placed record
 // moved them across line boundaries from build to build, with a 40% swing on the spawn lane.
-fn sched_alloc() *mut Scheduler {
-    let mut g = Global {};
-    let bytes = (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
-    let base = unsafe g.alloc(bytes, 16);
-    let s = (unsafe (base as *mut u8 + (CO_ALIGN - base as usize % CO_ALIGN) % CO_ALIGN)) as *mut Scheduler;
-    unsafe (*s).base = base;
-    return s;
+const fn sched_bytes() usize {
+    return (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN;
 }
 
-fn sched_free(s: *mut Scheduler) {
+fn sched_alloc() *mut Scheduler
+    ensures |r| Global::owns(r, sched_bytes(), CO_ALIGN)
+{
     let mut g = Global {};
-    let bytes = (sizeof(Scheduler) + CO_ALIGN - 1) / CO_ALIGN * CO_ALIGN + CO_ALIGN;
-    unsafe g.dealloc(unsafe (*s).base, bytes, 16);
+    return (unsafe g.alloc(sched_bytes(), CO_ALIGN)) as *mut Scheduler;
 }
 
-fn co_free(co: *mut Coroutine) {
-    let mut g = Global {};
-    unsafe g.dealloc(unsafe (*co).base, co_bytes(), 16);
+// Free the record; nothing for null.
+fn sched_free(s: *mut Scheduler)
+    requires s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+{
+    if s != null {
+        let mut g = Global {};
+        unsafe g.dealloc(s, sched_bytes(), CO_ALIGN);
+    }
 }
 
-/// The shared pool. Fields are `pub` only for the caller-monomorphized `launch` / task-aware primitives.
+// An array of `n` values of `T` from `Global`, its storage only: null and 0 when empty. Pointer and count,
+// as a raw array's fields are, so a record keeps its layout; freed by `free`.
+struct RawBuf<T: Copy>
+    invariant self.n as int * sizeof(T) as int <= isize::MAX as int && (self.p == null || Global::owns(
+        self.p,
+        self.n * sizeof(T),
+        alignof(T),
+    ))
+{
+    p: *mut T,
+    n: usize,
+}
+
+extend<T: Copy> RawBuf<T> {
+    const fn empty() RawBuf<T> {
+        return RawBuf::<T> { p: null, n: 0 };
+    }
+
+    // Storage for `n` values, uninitialized.
+    fn uninit(n: usize) RawBuf<T>
+        panics if sizeof(T) != 0 && n as int > isize::MAX as int / sizeof(T) as int
+    {
+        let mut g = Global {};
+        let p = (unsafe g.alloc(array_bytes::<T>(n), alignof(T))) as *mut T;
+        return RawBuf::<T> { p: p, n: n };
+    }
+}
+
+extend<T: Copy> RawBuf<T> as Free {
+    fn free(self: &mut RawBuf<T>) {
+        if self.p != null {
+            let mut g = Global {};
+            unsafe g.dealloc(self.p, self.n * sizeof(T), alignof(T));
+        }
+        self.p = null;
+        self.n = 0;
+    }
+}
+
+/// The shared pool. Fields are `pub` only for the caller-monomorphized `launch` / task-aware primitives;
+/// the arrays the record holds are private.
 @no_const
-pub struct Scheduler {
-    pub base: *mut void, // the allocation this line-aligned record lives in: see `sched_alloc`
-    pub deques: *mut Worker, // one per worker thread, line-aligned inside `deques_base`
-    pub deques_base: *mut void, // the allocation the workers live in
-    pub nw: usize,
+pub struct Scheduler
+    invariant self.nw as int <= isize::MAX as int / sizeof(Worker) as int
+    invariant self.nw as int <= isize::MAX as int / sizeof(Parker) as int
+    invariant self.deques == null || Global::owns(self.deques, array_bytes::<Worker>(self.nw), LINE)
+    invariant self.parkers == null || Global::owns(self.parkers, array_bytes::<Parker>(self.nw), LINE)
+{
+    // Where the record's base and the workers' base were: the fields below keep the lines they were
+    // measured on (the spawn lanes move by several percent with them).
+    pub pad: Array<u64, 2>,
+    deques: *mut Worker, // one per worker thread, line-aligned
+    nw: usize,
     pub inj_head: *mut Runnable, // injection queue: submissions from off-pool threads, and deque spill
     pub inj_tail: *mut Runnable,
     pub inj_len: i32, // atomic: injected-and-not-yet-taken, so a safepoint can ask "is anyone waiting?"
     pub inj_lock: i32, // spinlock over the three fields above: see the queue section
     pub timer_len: i32, // atomic, so a worker with no timers armed never takes `lock` to find that out
     pub lock: *mut void, // guards the timer heap and shutting_down
-    pub parkers: *mut Parker, // one per worker: where it sleeps, and how it is woken
-    pub idle: *mut u64, // atomic bitmask, one bit per worker: set = parked and waiting to be woken
+    parkers: *mut Parker, // one per worker: where it sleeps, and how it is woken
+    pub idle: Vector<u64>, // atomic bitmask, one bit per worker: set = parked and waiting to be woken
     pub idle_words: usize, // (nw + 63) / 64, so the mask is not capped at 64 workers
     pub spinning: i32, // atomic: a worker is looking for work right now; see `dequeue_runnable`
     pub spin_budget: i32, // atomic: the spinner's current look-again budget, SPIN_MIN..SPIN_MAX
@@ -526,15 +584,16 @@ pub struct Scheduler {
     pub stash_max: i32, // most blocks one worker's stash holds (0: no stash): see `stash_cap`
     pub free_spin: i32, // its own spinlock: recycling must not serialise against the run queue
     // The timer heap, last so the hot fields above keep their offsets: cold except when timers are armed.
-    pub timers: *mut TimerEntry, // armed timed parks, earliest deadline at index 0
-    pub timer_cap: usize, // entries the heap storage holds; grows by doubling up to TIMER_MAX
+    // Armed timed parks, earliest deadline at index 0; the storage grows by doubling up to TIMER_MAX.
+    timers: RawBuf<TimerEntry>,
     pub timer_seq: u64, // arm sequence: the tie-breaker among equal deadlines (first armed, first due)
     pub timer_waiter: i32, // atomic: the ONE idle worker whose park is timed to the earliest deadline, or -1
 }
 
 // The single global pool, guarded by a 0=uninit / 1=building / 2=ready init state machine.
 static mut G_STATE: i32 = 0;
-static mut G_SCHED: *mut Scheduler = null;
+static mut G_SCHED: *mut Scheduler = null
+    invariant G_SCHED == null || Global::owns(G_SCHED, sched_bytes(), CO_ALIGN);
 static mut G_NWORKERS: usize = 0; // 0 = one worker per CPU
 static mut G_NEXT_ID: u64 = 0; // atomic: task-id source; ids are handed out in per-worker blocks
 static mut G_SPAWNED_EXT: u64 = 0; // atomic: tasks created off the pool (a plain thread's launch)
@@ -636,28 +695,40 @@ fn claim(co: *mut Coroutine, token: u32, reason: u32) bool {
 fn reg_init() {
     let mut g = Global {};
     let r = (unsafe g.alloc(sizeof(Registry), alignof(Registry))) as *mut Registry;
-    let segs = (unsafe g.alloc(REG_MAX_SEGS * sizeof(*mut TaskSlot), alignof(*mut TaskSlot))) as *mut *mut TaskSlot;
-    for i in 0..REG_MAX_SEGS {
-        unsafe segs[i] = null;
-    }
-    unsafe r[0] = Registry { segs: segs, nsegs: 0, len: 0, free_head: -1, spin: 0 };
-    unsafe atomic::store_ptr(((&mut unsafe G_REG) as *mut *mut Registry) as *mut usize, r as usize, 2);
+    unsafe r[0] = Registry {
+        segs: Vector::<Vector<TaskSlot>>::with_capacity(REG_MAX_SEGS),
+        len: 0,
+        free_head: -1,
+        spin: 0,
+    };
+    unsafe G_REG = r;
+    unsafe atomic::store_ptr(&mut unsafe G_REG_PUB, r as usize, 2);
 }
 
 // The registry, or null while no pool exists, for a reader not ordered after the pool's start.
 fn reg_load() *mut Registry {
-    return ptr::from_addr_mut::<Registry>(
-        unsafe atomic::load_ptr(((&mut unsafe G_REG) as *const *mut Registry) as *const usize, 1),
-    );
+    return ptr::from_addr_mut::<Registry>(unsafe atomic::load_ptr(&unsafe G_REG_PUB, 1));
 }
 
 fn reg_slot(r: *mut Registry, idx: usize) *mut TaskSlot {
-    let seg = unsafe (*r).segs[idx / REG_SEG_SIZE];
+    let seg = unsafe (*((*r).segs.as_mut_ptr() + idx / REG_SEG_SIZE)).as_mut_ptr();
     return unsafe (seg + idx % REG_SEG_SIZE);
 }
 
-// Give a freshly-built block its slot. Called once per block, before the task is published to any queue.
-fn reg_assign(co: *mut Coroutine) {
+// One more segment of empty slots.
+fn reg_grow(r: *mut Registry) {
+    let mut seg = Vector::<TaskSlot>::with_capacity(REG_SEG_SIZE);
+    for _i in 0..REG_SEG_SIZE {
+        seg.push(TaskSlot { co: null, gen: 0, spin: 0, next_free: -1 });
+    }
+    unsafe (*r).segs.push(seg);
+}
+
+// Give a freshly-built block its slot, which holds the block from here on; false when the registry is
+// full. Called once per block, before the task is published to any queue.
+fn reg_assign(co: *mut Coroutine) bool
+    requires Global::owns(co, co_bytes(), CO_ALIGN)
+{
     let r = unsafe G_REG;
     unsafe sc_runtime::sc_rt_spin_lock(&mut (*r).spin);
     let mut idx: usize = 0;
@@ -668,28 +739,22 @@ fn reg_assign(co: *mut Coroutine) {
     } else {
         idx = unsafe (*r).len;
         if idx >= REG_SEG_SIZE * REG_MAX_SEGS {
-            // Registry exhausted: the task runs unregistered (it cannot be cancelled by key). Bounded by
-            // design; a program holding a million live tasks has larger problems than this.
+            // Registry exhausted: one slot per live block, a million of them.
             unsafe sc_runtime::sc_rt_spin_unlock(&mut (*r).spin);
-            unsafe (*co).slot = SLOT_NONE;
-            return;
+            return false;
         }
-        if unsafe (*r).segs[idx / REG_SEG_SIZE] == null {
-            let mut g = Global {};
-            let seg = (unsafe g.alloc(REG_SEG_SIZE * sizeof(TaskSlot), alignof(TaskSlot))) as *mut TaskSlot;
-            for i in 0..REG_SEG_SIZE {
-                unsafe seg[i] = TaskSlot { co: null, gen: 0, spin: 0, next_free: -1 };
-            }
-            unsafe (*r).segs[idx / REG_SEG_SIZE] = seg;
-            unsafe (*r).nsegs = unsafe (*r).nsegs + 1;
+        // Slots are handed out in order, so a new segment is the next one.
+        if idx / REG_SEG_SIZE >= unsafe (*r).segs.len() {
+            reg_grow(r);
         }
         unsafe atomic::store_usize(&mut unsafe (*r).len, idx + 1, 2); // atomic: key validation reads it unlocked
     }
     let sl = reg_slot(r, idx);
     unsafe (*sl).co = co;
-    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen + 1, 2);
+    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen.wrapping_add(1), 2);
     unsafe (*co).slot = idx as u32;
     unsafe sc_runtime::sc_rt_spin_unlock(&mut (*r).spin);
+    return true;
 }
 
 // A recycled block keeps its slot; a new task in it is a new generation. The bump happens under the slot's
@@ -702,26 +767,31 @@ fn reg_reuse_lock(co: *mut Coroutine) *mut TaskSlot {
     let r = unsafe G_REG;
     let sl = reg_slot(r, (unsafe (*co).slot) as usize);
     unsafe sc_runtime::sc_rt_spin_lock(&mut (*sl).spin);
-    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen + 1, 2);
+    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen.wrapping_add(1), 2);
     return sl;
 }
 
-// Retire a released block's slot. After this no key can reach the block, so its memory may be freed.
-fn reg_retire(co: *mut Coroutine) {
+// Retire a released block's slot and take the block back from it: after this no key can reach the block,
+// so its memory may be freed. Null for a block without a slot.
+fn reg_take(co: *mut Coroutine) *mut Coroutine
+    ensures |b| b == null || Global::owns(b, co_bytes(), CO_ALIGN)
+{
     if unsafe (*co).slot == SLOT_NONE || unsafe G_REG == null {
-        return;
+        return null;
     }
     let r = unsafe G_REG;
     unsafe sc_runtime::sc_rt_spin_lock(&mut (*r).spin);
     let sl = reg_slot(r, (unsafe (*co).slot) as usize);
     unsafe sc_runtime::sc_rt_spin_lock(&mut (*sl).spin);
+    let b = unsafe (*sl).co;
     unsafe (*sl).co = null;
-    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen + 1, 2);
+    unsafe atomic::store_u32(&mut unsafe (*sl).gen, unsafe (*sl).gen.wrapping_add(1), 2);
     unsafe sc_runtime::sc_rt_spin_unlock(&mut (*sl).spin);
     unsafe (*sl).next_free = unsafe (*r).free_head;
     unsafe (*r).free_head = unsafe (*co).slot;
     unsafe (*co).slot = SLOT_NONE;
     unsafe sc_runtime::sc_rt_spin_unlock(&mut (*r).spin);
+    return b;
 }
 
 // Free the registry itself. Only shutdown calls it, after every block is released.
@@ -730,13 +800,12 @@ fn reg_free() {
     if r == null {
         return;
     }
+    // Unpublished before it is freed.
+    unsafe G_REG = null;
+    unsafe atomic::store_ptr(&mut unsafe G_REG_PUB, 0, 2);
     let mut g = Global {};
-    for i in 0..unsafe (*r).nsegs {
-        unsafe g.dealloc(unsafe (*r).segs[i], REG_SEG_SIZE * sizeof(TaskSlot), alignof(TaskSlot));
-    }
-    unsafe g.dealloc(unsafe (*r).segs, REG_MAX_SEGS * sizeof(*mut TaskSlot), alignof(*mut TaskSlot));
+    unsafe (*r).segs.free();
     unsafe g.dealloc(r, sizeof(Registry), alignof(Registry));
-    unsafe atomic::store_ptr(((&mut unsafe G_REG) as *mut *mut Registry) as *mut usize, 0, 2);
 }
 
 // Read one live slot into a TaskInfo row. Caller holds the registry spinlock. The slot lock pins the
@@ -897,12 +966,12 @@ fn dq_tail(w: *mut Worker) *mut usize {
 // undefined pair: see the memory-order argument above.
 fn slot_load(w: *mut Worker, i: usize) *mut Runnable {
     return ptr::from_addr_mut::<Runnable>(
-        unsafe atomic::load_ptr((unsafe ((*w).buf + i % DEQUE_CAP)) as *const usize, 0),
+        unsafe atomic::load_ptr((unsafe ((*w).buf.as_ptr() + i % DEQUE_CAP)) as *const usize, 0),
     );
 }
 
 fn slot_store(w: *mut Worker, i: usize, co: *mut Runnable) {
-    unsafe atomic::store_ptr((unsafe ((*w).buf + i % DEQUE_CAP)) as *mut usize, co as usize, 0);
+    unsafe atomic::store_ptr((unsafe ((*w).buf.as_mut_ptr() + i % DEQUE_CAP)) as *mut usize, co as usize, 0);
 }
 
 // Owner: append. False when the ring is full (the caller spills to the injection queue).
@@ -1176,7 +1245,7 @@ fn push_chain(s: *mut Scheduler, head: *mut Runnable, tail: *mut Runnable, n: i3
 
 // Take one specific worker's idle bit: true if it was parked (and is now ours to wake).
 fn claim_worker(s: *mut Scheduler, idx: usize) bool {
-    let word = unsafe ((*s).idle + idx / 64);
+    let word = unsafe ((*s).idle.as_mut_ptr() + idx / 64);
     let bit = 1u64 << (idx % 64) as u64;
     return (unsafe atomic::and_u64(word, ~bit, 4) & bit) != 0;
 }
@@ -1186,7 +1255,7 @@ fn claim_worker(s: *mut Scheduler, idx: usize) bool {
 // the next submitter looks past it to a worker that is still asleep.
 fn claim_idle(s: *mut Scheduler) i64 {
     for wi in 0..unsafe (*s).idle_words {
-        let word = unsafe ((*s).idle + wi);
+        let word = unsafe ((*s).idle.as_mut_ptr() + wi);
         loop {
             let cur = unsafe atomic::load_u64(word, 1);
             if cur == 0 {
@@ -1280,19 +1349,19 @@ fn timer_less(a: *const TimerEntry, b: *const TimerEntry) bool {
 
 // Store `e` at `i` and tell its task where it went.
 fn timer_place(s: *mut Scheduler, i: usize, e: TimerEntry) {
-    unsafe (*s).timers[i] = e;
+    unsafe (*s).timers.p[i] = e;
     unsafe (*e.co).theap = i as i32;
 }
 
 fn timer_sift_up(s: *mut Scheduler, from: usize) {
     let mut i = from;
-    let e = unsafe (*s).timers[i];
+    let e = unsafe (*s).timers.p[i];
     while i > 0 {
         let parent = (i - 1) / 2;
-        if !timer_less(&e, unsafe ((*s).timers + parent)) {
+        if !timer_less(&e, unsafe ((*s).timers.p + parent)) {
             break;
         }
-        timer_place(s, i, unsafe (*s).timers[parent]);
+        timer_place(s, i, unsafe (*s).timers.p[parent]);
         i = parent;
     }
     timer_place(s, i, e);
@@ -1300,19 +1369,19 @@ fn timer_sift_up(s: *mut Scheduler, from: usize) {
 
 fn timer_sift_down(s: *mut Scheduler, from: usize, len: usize) {
     let mut i = from;
-    let e = unsafe (*s).timers[i];
+    let e = unsafe (*s).timers.p[i];
     loop {
         let mut child = 2 * i + 1;
         if child >= len {
             break;
         }
-        if child + 1 < len && timer_less(unsafe ((*s).timers + child + 1), unsafe ((*s).timers + child)) {
+        if child + 1 < len && timer_less(unsafe ((*s).timers.p + child + 1), unsafe ((*s).timers.p + child)) {
             child = child + 1;
         }
-        if !timer_less(unsafe ((*s).timers + child), &e) {
+        if !timer_less(unsafe ((*s).timers.p + child), &e) {
             break;
         }
-        timer_place(s, i, unsafe (*s).timers[child]);
+        timer_place(s, i, unsafe (*s).timers.p[child]);
         i = child;
     }
     timer_place(s, i, e);
@@ -1322,16 +1391,16 @@ fn timer_sift_down(s: *mut Scheduler, from: usize, len: usize) {
 // entry per registrable task, which is the most that can ever be armed at once. Both failures are fatal:
 // a timed wait with nowhere to record its deadline would hang.
 fn timer_reserve(s: *mut Scheduler, len: usize) {
-    if len < unsafe (*s).timer_cap {
+    if len < unsafe (*s).timers.n {
         return;
     }
     if len >= TIMER_MAX {
         panic("scheduler: the timer heap is full (one armed timer per registrable task)");
     }
-    let mut ncap = if unsafe (*s).timer_cap == 0 {
+    let mut ncap = if unsafe (*s).timers.n == 0 {
         TIMER_INIT_CAP
     } else {
-        unsafe (*s).timer_cap * 2
+        unsafe (*s).timers.n * 2
     };
     if ncap > TIMER_MAX {
         ncap = TIMER_MAX;
@@ -1342,24 +1411,22 @@ fn timer_reserve(s: *mut Scheduler, len: usize) {
 // Storage cut back once the live count falls below a quarter of it, so what a burst grew is given back
 // as it drains; the floor keeps a steady trickle of timers from bouncing between sizes.
 fn timer_shrink(s: *mut Scheduler, len: usize) {
-    let cap = unsafe (*s).timer_cap;
+    let cap = unsafe (*s).timers.n;
     if cap > TIMER_INIT_CAP && len < cap / 4 {
         timer_resize(s, cap / 2, len);
     }
 }
 
 fn timer_resize(s: *mut Scheduler, ncap: usize, len: usize) {
-    let mut g = Global {};
     // `Global` aborts with a message when the allocation fails: nothing to test here.
-    let nt = (unsafe g.alloc(array_bytes::<TimerEntry>(ncap), alignof(TimerEntry))) as *mut TimerEntry;
+    let nt = RawBuf::<TimerEntry>::uninit(ncap);
+    let to = nt.p;
+    let from = unsafe (*s).timers.p;
     for i in 0..len {
-        unsafe nt[i] = unsafe (*s).timers[i];
+        unsafe to[i] = unsafe from[i];
     }
-    if unsafe (*s).timers != null {
-        unsafe g.dealloc(unsafe (*s).timers, unsafe (*s).timer_cap * sizeof(TimerEntry), alignof(TimerEntry));
-    }
-    unsafe (*s).timers = nt;
-    unsafe (*s).timer_cap = ncap;
+    // The old storage is freed here.
+    let _old = replace(&mut unsafe (*s).timers, nt);
 }
 
 // The earliest armed deadline, or 0 when nothing is armed.
@@ -1367,7 +1434,7 @@ fn timer_top(s: *mut Scheduler) u64 {
     if unsafe atomic::load_i32(&mut unsafe (*s).timer_len, 1) == 0 {
         return 0;
     }
-    return unsafe (*s).timers[0].deadline;
+    return unsafe (*s).timers.p[0].deadline;
 }
 
 // Arm `co` for the deadline it read before this coroutine became visible to any waker (`co.deadline` is
@@ -1401,10 +1468,10 @@ fn arm_timer(s: *mut Scheduler, co: *mut Coroutine, dl: u64) {
 fn timer_remove_at(s: *mut Scheduler, i: usize) {
     let len = (unsafe (*s).timer_len) as usize - 1;
     unsafe atomic::store_i32(&mut unsafe (*s).timer_len, len as i32, 2);
-    unsafe (*(*s).timers[i].co).theap = TH_NONE;
+    unsafe (*(*s).timers.p[i].co).theap = TH_NONE;
     if i != len {
-        timer_place(s, i, unsafe (*s).timers[len]);
-        if i > 0 && timer_less(unsafe ((*s).timers + i), unsafe ((*s).timers + (i - 1) / 2)) {
+        timer_place(s, i, unsafe (*s).timers.p[len]);
+        if i > 0 && timer_less(unsafe ((*s).timers.p + i), unsafe ((*s).timers.p + (i - 1) / 2)) {
             timer_sift_up(s, i);
         } else {
             timer_sift_down(s, i, len);
@@ -1440,7 +1507,7 @@ fn promote_expired(s: *mut Scheduler, woken: &mut i32) bool {
     let mut head: *mut Runnable = null;
     let mut tail: *mut Runnable = null;
     let now = platform::now_ns();
-    while unsafe atomic::load_i32(&mut unsafe (*s).timer_len, 0) != 0 && unsafe (*s).timers[0].deadline <= now {
+    while unsafe atomic::load_i32(&mut unsafe (*s).timer_len, 0) != 0 && unsafe (*s).timers.p[0].deadline <= now {
         if n == PROMOTE_BATCH {
             let idx = claim_idle(s);
             if idx >= 0 {
@@ -1449,8 +1516,8 @@ fn promote_expired(s: *mut Scheduler, woken: &mut i32) bool {
             break;
         }
         n = n + 1;
-        let co = unsafe (*s).timers[0].co;
-        let token = unsafe (*s).timers[0].token;
+        let co = unsafe (*s).timers.p[0].co;
+        let token = unsafe (*s).timers.p[0].token;
         timer_remove_at(s, 0);
         any = true;
         if claim(co, token, WR_TIMEOUT) {
@@ -1712,7 +1779,7 @@ fn dequeue_runnable(s: *mut Scheduler, me: usize) *mut Runnable {
         // A LOOK, not a scan: the only push this races with is one from off the pool, which lands on the
         // injection queue (a worker's own push goes to its own deque, and that worker is awake by
         // definition). Stealing, batching and timers all happen back at the top of the loop, holding nothing.
-        let word = unsafe ((*s).idle + me / 64);
+        let word = unsafe ((*s).idle.as_mut_ptr() + me / 64);
         let bit = 1u64 << (me % 64) as u64;
         let _ = unsafe atomic::or_u64(word, bit, 4);
         atomic::fence(4);
@@ -1955,15 +2022,22 @@ fn pool_trim(s: *mut Scheduler) {
 }
 
 fn release_block(co: *mut Coroutine) {
-    // After this no key or scan can reach the block.
-    reg_retire(co);
+    // After this no key or scan can reach the block; the slot gives it back.
+    let b = reg_take(co);
+    release_parts(co);
+    if b != null {
+        co_free(b);
+    }
+}
+
+// A block's stack and context.
+fn release_parts(co: *mut Coroutine) {
     unsafe sc_runtime::sc_rt_stack_free((*co).stack, (*co).stack_size);
     if unsafe (*co).ctx == ((&mut unsafe (*co).ctx_mem[0]) as *mut u64) as *mut void {
         unsafe sc_runtime::sc_rt_ctx_drop((*co).ctx);
     } else {
         unsafe sc_runtime::sc_rt_ctx_free((*co).ctx);
     }
-    co_free(co);
 }
 
 // Everything the pool is holding. Called from `shutdown`, after the workers have been joined.
@@ -2279,28 +2353,39 @@ fn worker_main(arg: *mut void) *mut void {
 
 // Release a scheduler whose workers have NOT started (construction failed): every lock, condvar, deque
 // buffer and array in reverse order of construction. `built` is how many parkers hold a lock and condvar.
-fn release_unstarted(s: *mut Scheduler, built: usize) {
-    let mut g = Global {};
-    let nw = unsafe (*s).nw;
-    if unsafe (*s).deques != null {
-        for i in 0..nw {
-            let buf = unsafe (*((*s).deques + i)).buf;
-            if buf != null {
-                unsafe g.dealloc(buf, DEQUE_CAP * sizeof(*mut Runnable), alignof(*mut Runnable));
-            }
-        }
+fn release_unstarted(s: *mut Scheduler, built: usize)
+    requires Global::owns(s, sched_bytes(), CO_ALIGN)
+{
+    for i in 0..unsafe (*s).nw {
+        unsafe (*((*s).deques + i)).buf.free();
     }
     for i in 0..built {
         let pk = unsafe ((*s).parkers + i);
         unsafe sc_runtime::sc_rt_cond_free((*pk).cv);
         unsafe sc_runtime::sc_rt_mutex_free((*pk).mtx);
     }
-    unsafe g.dealloc(unsafe (*s).idle, unsafe (*s).idle_words * sizeof(u64), alignof(u64));
-    unsafe g.dealloc(unsafe (*s).parkers, nw * sizeof(Parker), LINE);
-    unsafe g.dealloc(unsafe (*s).deques_base, nw * sizeof(Worker) + LINE, 16);
+    release_arrays(s);
     unsafe sc_runtime::sc_rt_mutex_free((*s).lock);
     unsafe (*s).workers.free();
     sched_free(s);
+}
+
+// The record's arrays: the timer storage, the idle mask, the parkers and the workers.
+fn release_arrays(s: *mut Scheduler) {
+    unsafe (*s).timers.free();
+    unsafe (*s).idle.free();
+    let mut g = Global {};
+    let nw = unsafe (*s).nw;
+    let pk = unsafe (*s).parkers;
+    let dq = unsafe (*s).deques;
+    unsafe (*s).parkers = null;
+    unsafe (*s).deques = null;
+    if pk != null {
+        unsafe g.dealloc(pk, array_bytes::<Parker>(nw), LINE);
+    }
+    if dq != null {
+        unsafe g.dealloc(dq, array_bytes::<Worker>(nw), LINE);
+    }
 }
 
 // The most blocks one worker's stash holds: STASH_MAX, or an equal share of the budget with the shared
@@ -2326,7 +2411,10 @@ fn pool_cap(nw: usize, stash: i32) i32 {
     return n as i32;
 }
 
-fn build_scheduler() *mut Scheduler {
+fn build_scheduler() *mut Scheduler
+    panics if true
+    ensures |r| Global::owns(r, sched_bytes(), CO_ALIGN)
+{
     let mut g = Global {};
     let lk = unsafe sc_runtime::sc_rt_mutex_new();
     if lk == null {
@@ -2345,23 +2433,21 @@ fn build_scheduler() *mut Scheduler {
     } else {
         platform::ncpu()
     };
-    // Line-aligned for real: the allocator only promises malloc alignment, so the array sits inside an
-    // over-sized block (`deques_base` is what gets freed); see Worker.pad for why the alignment matters.
-    let deques_base = unsafe g.alloc(alloc_size(nw * sizeof(Worker) + LINE), 16);
-    let deques = (unsafe (deques_base as *mut u8 + (LINE - deques_base as usize % LINE) % LINE)) as *mut Worker;
+    // Line-aligned: see Worker.pad for why the alignment matters.
+    let deques = (unsafe g.alloc(array_bytes::<Worker>(nw), LINE)) as *mut Worker;
     let parkers = (unsafe g.alloc(array_bytes::<Parker>(nw), LINE)) as *mut Parker;
     let words = (nw + 63) / 64;
-    let idle = (unsafe g.alloc(array_bytes::<u64>(words), alignof(u64))) as *mut u64;
-    for i in 0..words {
-        unsafe idle[i] = 0;
+    let mut idle = Vector::<u64>::with_capacity(words);
+    for _i in 0..words {
+        idle.push(0);
     }
-    // Every deque buffer is null until built, so a failure below releases only what exists.
+    // Every deque buffer is empty until built, so a failure below releases only what exists.
     for i in 0..nw {
-        unsafe (*(deques + i)).buf = null;
+        unsafe (*(deques + i)).buf = Vector::<*mut Runnable>::new();
     }
     unsafe s[0] = Scheduler {
+        pad: Array::<u64, 2>::new(),
         deques: deques,
-        deques_base: deques_base,
         nw: nw,
         inj_head: null,
         inj_tail: null,
@@ -2383,13 +2469,13 @@ fn build_scheduler() *mut Scheduler {
         free_cap: pool_cap(nw, stash_cap(nw)),
         stash_max: stash_cap(nw),
         free_spin: 0,
-        timers: null,
-        timer_cap: 0,
+        timers: RawBuf::<TimerEntry>::empty(),
         timer_seq: 0,
         timer_waiter: -1,
-        base: unsafe (*s).base,
     };
-    for i in 0..nw {
+    for i in 0..nw
+        invariant Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         let mtx = unsafe sc_runtime::sc_rt_mutex_new();
         let cv = if mtx != null {
             unsafe sc_runtime::sc_rt_cond_new()
@@ -2405,8 +2491,10 @@ fn build_scheduler() *mut Scheduler {
         }
         unsafe parkers[i] = Parker { mtx: mtx, cv: cv, notified: 0, pad: Array::<u64, 13>::new() };
     }
-    for i in 0..nw {
-        let buf = (unsafe g.alloc(DEQUE_CAP * sizeof(*mut Runnable), alignof(*mut Runnable))) as *mut *mut Runnable;
+    for i in 0..nw
+        invariant Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
+        let buf = Vector::<*mut Runnable>::with_capacity(DEQUE_CAP);
         // Seed each victim-choice generator differently and never with zero, or xorshift stays at zero.
         let seed = 0x9e3779b97f4a7c15u64.wrapping_add((i as u64 + 1).wrapping_mul(0x632be59bd9b4e019));
         unsafe deques[i] = Worker {
@@ -2422,7 +2510,7 @@ fn build_scheduler() *mut Scheduler {
             yhead: null,
             ytail: null,
             ylen: 0,
-            pad: Array::<u64, 4>::new(),
+            pad: Array::<u64, 2>::new(),
             done: 0,
             cancelled: 0,
             spawned: 0,
@@ -2441,7 +2529,9 @@ fn build_scheduler() *mut Scheduler {
     // all could never run a task, so that is fatal after releasing the whole construction.
     let mut started: usize = 0;
     let mut rc: i32 = 0;
-    for i in 0..nw {
+    for i in 0..nw
+        invariant Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         let mut h: *mut void = null;
         rc = unsafe sc_runtime::sc_rt_thread_create(&mut h, worker_main, unsafe (deques + i));
         if rc != 0 {
@@ -2497,7 +2587,9 @@ pub fn ensure_started() *mut Scheduler {
 }
 
 /// The per-`F` trampoline: move the closure out of its heap box, free the box, and run it. `pub` for linkage.
-pub unsafe fn job_entry<F: fn move()>(env: *mut void) {
+pub unsafe fn job_entry<F: fn move()>(env: *mut void)
+    requires Global::owns(env, sizeof(F), alignof(F))
+{
     let pp = env as *mut F;
     let f = unsafe {
         pp[0]
@@ -2519,7 +2611,10 @@ pub unsafe fn job_entry_inline<F: fn move()>(env: *mut void) {
 
 /// Spawn a coroutine running `entry(env)` on a fresh guard-paged stack. Non-generic so it (and the runtime
 /// internals it touches) live in this TU; `pub` for linkage from the caller-monomorphized `submit`.
-pub unsafe fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
+pub unsafe fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void)
+    requires pre_of(entry, env)
+    panics if true
+{
     spawn_coroutine_env(entry, env, null, 0);
 }
 
@@ -2527,7 +2622,10 @@ pub unsafe fn spawn_coroutine(entry: fn(*mut void) void, env: *mut void) {
 /// `ENV_INLINE`, 8-aligned) are copied into the block's own storage and `entry` receives their address, so
 /// a reused block allocates nothing. The caller has given the bytes up (`submit` forgets its closure).
 /// `pub` for linkage.
-pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src: *const void, inline_len: usize) {
+pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inline_src: *const void, inline_len: usize)
+    requires inline_len == 0 && pre_of(entry, env) || inline_len != 0 && pre_any(entry)
+    panics if true
+{
     let s = ensure_started();
     // A recycled block brings its stack and context with it; only a cold spawn pays for an mmap. Its park
     // generation comes with it too, and deliberately does not restart: a token left over from the block's
@@ -2624,7 +2722,12 @@ pub unsafe fn spawn_coroutine_env(entry: fn(*mut void) void, env: *mut void, inl
     unsafe (*co).memb.head = null;
     unsafe (*co).stk = null;
     if fresh {
-        reg_assign(co);
+        if !reg_assign(co) {
+            // Nothing is published yet: release the block, then stop.
+            release_parts(co);
+            co_free(co);
+            panic("scheduler: the task registry is full (one slot per live task)");
+        }
     } else if reuse_slot != null {
         unsafe sc_runtime::sc_rt_spin_unlock(&mut (*reuse_slot).spin);
     }
@@ -3607,17 +3710,28 @@ fn report_unresponsive(tasks: &mut Vector<TaskInfo>) {
 
 // Tear the pool down: drain the workers, join them, and free every scheduler structure. Callable only
 // once every task has completed: nothing may still refer to a task stack or the scheduler.
-fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
+fn destroy_pool(sp: *mut i32)
+    panics if true
+{
+    // The pointer is gone before the state says a new pool may be built, and both are before submissions
+    // reopen. A submitter that sees the runtime open then either starts a fresh pool or waits for one, and
+    // a pool built meanwhile is never overwritten by this null.
+    let s = unsafe G_SCHED;
+    unsafe G_SCHED = null;
     unsafe sc_runtime::sc_rt_mutex_lock((*s).lock);
     unsafe atomic::store_i32(&mut unsafe (*s).shutting_down, 1, 2); // atomic: a parking worker reads it lock-free
     unsafe sc_runtime::sc_rt_mutex_unlock((*s).lock);
     // Every worker has its own condvar now, so shutting down means waking each in turn rather than one
     // broadcast. Unconditional: a worker not parked will see `shutting_down` on its next look anyway.
-    for i in 0..unsafe (*s).nw {
+    for i in 0..unsafe (*s).nw
+        invariant s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         wake_parked(s, i);
     }
     let nw = unsafe (*s).workers.len();
-    for i in 0..nw {
+    for i in 0..nw
+        invariant s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         let h = unsafe (*s).workers[i];
         if unsafe sc_runtime::sc_rt_thread_join(h) != 0 {
             // A worker that cannot be joined may still touch the scheduler: it cannot be freed.
@@ -3626,7 +3740,9 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     }
     unsafe (*s).workers.free();
     // The workers are gone: their counters carry over into the process-lifetime totals.
-    for i in 0..unsafe (*s).nw {
+    for i in 0..unsafe (*s).nw
+        invariant s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         let w = unsafe ((*s).deques + i);
         let _ = unsafe atomic::add_u64(
             &mut unsafe G_SPAWNED_BASE,
@@ -3647,27 +3763,21 @@ fn destroy_pool(sp: *mut i32, s: *mut Scheduler) {
     pool_drain(s);
     // After pool_drain: releasing a block retires its registry slot.
     reg_free();
-    let mut g = Global {};
-    for i in 0..unsafe (*s).nw {
-        unsafe g.dealloc(unsafe (*((*s).deques + i)).buf, DEQUE_CAP * sizeof(*mut Runnable), alignof(*mut Runnable));
+    for i in 0..unsafe (*s).nw
+        invariant s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
+        unsafe (*((*s).deques + i)).buf.free();
     }
-    unsafe g.dealloc(unsafe (*s).deques_base, unsafe (*s).nw * sizeof(Worker) + LINE, 16);
-    for i in 0..unsafe (*s).nw {
+    for i in 0..unsafe (*s).nw
+        invariant s == null || Global::owns(s, sched_bytes(), CO_ALIGN)
+    {
         let pk = unsafe ((*s).parkers + i);
         unsafe sc_runtime::sc_rt_mutex_free((*pk).mtx);
         unsafe sc_runtime::sc_rt_cond_free((*pk).cv);
     }
-    unsafe g.dealloc(unsafe (*s).parkers, unsafe (*s).nw * sizeof(Parker), LINE);
-    unsafe g.dealloc(unsafe (*s).idle, unsafe (*s).idle_words * sizeof(u64), alignof(u64));
-    if unsafe (*s).timers != null {
-        unsafe g.dealloc(unsafe (*s).timers, unsafe (*s).timer_cap * sizeof(TimerEntry), alignof(TimerEntry));
-    }
+    release_arrays(s);
     unsafe sc_runtime::sc_rt_mutex_free((*s).lock);
     sched_free(s);
-    // Published in this order: the pointer is gone before the state says a new pool may be built, and
-    // both are before submissions reopen. A submitter that sees the runtime open then either starts a
-    // fresh pool or waits for one, and a pool built meanwhile is never overwritten by this null.
-    unsafe G_SCHED = null;
     unsafe atomic::store_i32(sp, 0, 2);
     unsafe atomic::store_i32(&mut unsafe G_CLOSED, 0, 2);
 }
@@ -3692,7 +3802,6 @@ pub fn try_shutdown(opts: ShutdownOptions) ShutdownResult {
     if current() != null {
         panic("try_shutdown must be called from outside the pool");
     }
-    let s = unsafe G_SCHED;
     // 1. Stop accepting new tasks before anything is cancelled or counted.
     unsafe atomic::store_i32(&mut unsafe G_CLOSED, 1, 4);
     // 2. A stable snapshot of every live registered task.
@@ -3717,7 +3826,7 @@ pub fn try_shutdown(opts: ShutdownOptions) ShutdownResult {
     }
     if left == 0 {
         // 10-12. Nothing can refer to a task stack any more: destroy workers, registry and scheduler.
-        destroy_pool(sp, s);
+        destroy_pool(sp);
         return res;
     }
     res.unresponsive = left;

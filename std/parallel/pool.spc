@@ -11,7 +11,7 @@ import std::parallel::sync;
 /// A size-class allocator shared by every thread and task, behind a task-aware lock. Owns its chunks and
 /// returns them upstream when freed. Containers allocate through `allocator()`.
 @no_const
-pub struct SyncPool<A = Global> {
+pub struct SyncPool<A: Allocator = Global> {
     pool: sync::Mutex<apool::Pool<A>>,
 }
 
@@ -19,7 +19,7 @@ pub struct SyncPool<A = Global> {
 /// `'a`.
 @no_const
 @derive(Copy)
-pub struct SyncPoolAlloc<'a, A = Global> {
+pub struct SyncPoolAlloc<'a, A: Allocator = Global> {
     pool: &'a sync::Mutex<apool::Pool<A>>,
 }
 
@@ -62,6 +62,11 @@ extend<A: Allocator + Default> SyncPool<A> {
 }
 
 extend<'a, A: Allocator> SyncPoolAlloc<'a, A> as Allocator {
+    // A block of the shared pool: its allocator's, which the calls below take and give.
+    pub spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return apool::PoolAlloc::<A>::owns(ptr, size, align);
+    }
+
     pub unsafe fn alloc(self: &mut Self, size: usize, align: usize) *mut void {
         let g = self.pool.lock();
         let mut h = g.get().allocator();

@@ -8,7 +8,9 @@
 @platform(!windows)
 extern "C" "unistd.h" {
     /// read(2): bytes read, 0 at EOF, -1 and errno.
-    pub fn read(fd: i32, buf: *mut void, count: usize) isize;
+    @trusted
+    pub fn read(fd: i32, buf: *mut void, count: usize) isize
+        ensures |r| r < 0 || r as usize <= count;
     /// write(2): bytes written (may be short), -1 and errno.
     pub fn write(fd: i32, buf: *const void, count: usize) isize;
     /// Working directory into `buf`; `buf`, or null when `size` is too small.

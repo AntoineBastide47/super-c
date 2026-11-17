@@ -389,6 +389,16 @@ fn unproved_contracts_are_errors() {
         "fn f(p: *mut u32, q: *mut u32) ensures true {\n    unsafe {\n        p[0] = 1;\n        q[0] = 2;\n        assert(p[0] == 1);\n    }\n}\nfn main() i32 { return 0; }\n",
         "cannot prove that this check holds",
     );
+    b.add(
+        "a union member read by the index of another member's layout",
+        "struct A2 {\n    x: u64,\n    y: u64,\n}\nstruct B2 {\n    p: u32,\n    q: u32,\n    r: u64,\n}\nunion U {\n    a: A2,\n    b: B2,\n}\nfn f() u32 ensures |r| r == 9 {\n    let mut u = U { b: B2 { p: 1, q: 2, r: 3 } };\n    unsafe u.a = A2 { x: 5, y: 9 };\n    return unsafe u.b.q;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn over constants that panics there",
+        "const fn bad(x: u32) u32 {\n    if x == 0 {\n        panic(\"zero\");\n    }\n    return 1;\n}\nfn g() u32 requires bad(0) == 2 ensures |r| r == 0 {\n    return 1;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
     h::expect_build_errs(b);
 }
 
@@ -442,7 +452,7 @@ fn unproved_ghost_code_is_an_error() {
     b.add(
         "a static whose first value breaks its invariant",
         "static mut H: u32 = 3\n    invariant H > 1, H > 5;\n",
-        "cannot prove this 'ensures' clause",
+        "cannot prove the invariant of this static's first value",
     );
     b.add(
         "the ensures of a callee that may not end",
@@ -545,6 +555,302 @@ fn spec_syntax_is_checked() {
         "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
         "'@trusted' marks a spec function or a lemma without a body",
     );
+}
+
+// Heap ownership the proofs do not give: a free with a unit that may not be the last, a second claim of a
+// lent unit, a handoff or a free of a block the body does not hold, a fresh block's bytes read as a block, a
+// free of a record still on its chain, and a static whose invariant is referenced or broken.
+@test
+fn unproved_heap_ownership_is_an_error() {
+    let mut b = cli::Batch::new("", "fn main() i32 {\n    return 0;\n}\n");
+    b.add_at(
+        "a free with a unit that may not be the last",
+        M"(struct C
+    invariant self.p == null || rc_share(self.p, 0, 1)
+{
+    p: *mut void,
+    pad: u64,
+}
+
+@trusted
+lemma c_clone(p: *mut void)
+    requires rc_units(p, 0) >= 1
+    ensures rc_share(p, 0, 1);
+
+@trusted
+lemma c_drop(p: *mut void, prev: usize)
+    requires rc_share(p, 0, 1)
+    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, 8, 8);
+
+fn bad(c: C, prev: usize) {
+    let p = c.p;
+    forget(c);
+    if p == null {
+        return;
+    }
+    c_drop(p, prev);
+    let mut g = Global {};
+    unsafe g.dealloc(p, 8, 8);
+}
+)",
+        "cannot prove the 'requires' of 'dealloc' at this call",
+        "26:12",
+    );
+    b.add_at(
+        "a second claim of a lent unit",
+        M"(struct C
+    invariant self.p == null || rc_share(self.p, 0, 1)
+{
+    p: *mut void,
+    pad: u64,
+}
+
+@trusted
+lemma c_clone(p: *mut void)
+    requires rc_units(p, 0) >= 1
+    ensures rc_share(p, 0, 1);
+
+@trusted
+lemma c_drop(p: *mut void, prev: usize)
+    requires rc_share(p, 0, 1)
+    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, 8, 8);
+
+fn bad(c: &C) C {
+    return C { p: c.p, pad: 0 };
+}
+)",
+        "cannot prove that the blocks this return gives are distinct",
+        "19:5",
+    );
+    b.add_at(
+        "taking the unit a shared parameter lends",
+        M"(struct C
+    invariant self.p == null || rc_share(self.p, 0, 1)
+{
+    p: *mut void,
+    pad: u64,
+}
+
+@trusted
+lemma c_clone(p: *mut void)
+    requires rc_units(p, 0) >= 1
+    ensures rc_share(p, 0, 1);
+
+@trusted
+lemma c_drop(p: *mut void, prev: usize)
+    requires rc_share(p, 0, 1)
+    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, 8, 8);
+
+fn bad(c: &C, prev: usize) {
+    if c.p != null {
+        c_drop(c.p, prev);
+    }
+}
+)",
+        "cannot prove that this takes no block a shared parameter lends",
+        "20:9",
+    );
+    b.add_at(
+        "a handoff of a block the body does not hold",
+        M"(fn hand(entry: fn(*mut void) void, env: *mut void)
+    requires pre_of(entry, env)
+{
+}
+
+fn job(env: *mut void)
+    requires Global::owns(env, 16, 8)
+{
+    let mut g = Global {};
+    unsafe g.dealloc(env, 16, 8);
+}
+
+fn bad(p: *mut void) {
+    hand(job, p);
+}
+)",
+        "cannot prove the 'requires' of 'hand' at this call",
+        "14:5",
+    );
+    b.add_at(
+        "a free of a block handed over",
+        M"(fn hand(entry: fn(*mut void) void, env: *mut void)
+    requires pre_of(entry, env)
+{
+}
+
+fn job(env: *mut void)
+    requires Global::owns(env, 16, 8)
+{
+    let mut g = Global {};
+    unsafe g.dealloc(env, 16, 8);
+}
+
+fn bad() {
+    let mut g = Global {};
+    let p = unsafe g.alloc(16, 8);
+    hand(job, p);
+    unsafe g.dealloc(p, 16, 8);
+}
+)",
+        "cannot prove the 'requires' of 'dealloc' at this call",
+        "17:12",
+    );
+    b.add_at(
+        "a fresh block's bytes hold no block",
+        M"(struct Node
+    invariant self.next == null || Global::owns(self.next, sizeof(Node), alignof(Node))
+{
+    next: *mut Node,
+    val: u64,
+}
+
+fn bad() {
+    let mut g = Global {};
+    let m = (unsafe g.alloc(sizeof(Node), alignof(Node))) as *mut Node;
+    let n = unsafe (*m).next;
+    unsafe (*m).val = 5;
+    if n != null {
+        unsafe g.dealloc(n, sizeof(Node), alignof(Node));
+    }
+    unsafe (*m).next = null;
+}
+)",
+        "cannot prove the 'requires' of 'dealloc' at this call",
+        "14:16",
+    );
+    b.add_at(
+        "a free of a record still on its chain",
+        M"(struct Node
+    invariant self.next == null || Global::owns(self.next, sizeof(Node), alignof(Node))
+{
+    next: *mut Node,
+    val: u64,
+}
+
+fn bad(first: *mut Node) {
+    let m = unsafe (*first).next;
+    if m != null {
+        let mut g = Global {};
+        unsafe g.dealloc(m, sizeof(Node), alignof(Node));
+    }
+}
+)",
+        "cannot prove the 'requires' of 'dealloc' at this call",
+        "12:16",
+    );
+    b.add_at(
+        "a reference to a static with an invariant",
+        M"(static mut G: u32 = 2
+    invariant G > 1;
+
+fn bad() {
+    let p = (&mut unsafe G) as *mut u32;
+    unsafe *p = 0;
+}
+)",
+        "a static with an invariant, or of a type with one, is read and written by name",
+        "5:13",
+    );
+    b.add_at(
+        "a static's invariant broken by a write",
+        M"(static mut G: u32 = 2
+    invariant G > 1;
+
+fn bad(x: u32) {
+    unsafe G = x;
+    let _ = x;
+}
+)",
+        "cannot prove the invariant of static 'G' here",
+        "4:1",
+    );
+    b.add_at(
+        "a value a call wrote through a struct's borrow",
+        M"(struct M {
+    x: u32,
+}
+
+struct E<'x> {
+    m: &'x mut M,
+}
+
+extend<'x> E<'x> {
+    fn set(self: E<'x>) {
+        self.m.x = 5;
+    }
+}
+
+fn bad() u32
+    ensures |r| r == 1
+{
+    let mut m = M { x: 1 };
+    E { m: &mut m }.set();
+    return m.x;
+}
+)",
+        "cannot prove this 'ensures' clause",
+        "16:17",
+    );
+    b.add_at(
+        "a const generic argument outside its clause",
+        M"(fn small<const K: usize>() usize
+    requires K < 2
+    ensures |r| r == K
+{
+    return K;
+}
+
+fn bad() usize {
+    return small::<1>() + small::<3>();
+}
+)",
+        "cannot prove the 'requires' of 'small' at this call",
+        "9:27",
+    );
+    // The freed node's link is the caller's once: a second free of it ends the loop's ownership of it.
+    b.add_at(
+        "a list node's link freed twice",
+        M"(struct N
+    invariant self.next == null || Global::owns(self.next, sizeof(N), alignof(N))
+{
+    next: *mut N,
+    v: u32,
+}
+
+fn push(head: *mut N, v: u32) *mut N
+    requires head == null || Global::owns(head, sizeof(N), alignof(N))
+    ensures |r| r != null && Global::owns(r, sizeof(N), alignof(N))
+{
+    let mut g = Global {};
+    let p = (unsafe g.alloc(sizeof(N), alignof(N))) as *mut N;
+    unsafe *p = N { next: head, v: v };
+    return p;
+}
+
+fn run() i32 {
+    let mut g = Global {};
+    let mut h: *mut N = null;
+    for i in 0u32..3
+        invariant h == null || Global::owns(h, sizeof(N), alignof(N))
+    {
+        h = push(h, i);
+    }
+    while h != null
+        invariant h == null || Global::owns(h, sizeof(N), alignof(N))
+    {
+        let nx = unsafe (*h).next;
+        unsafe g.dealloc(h, sizeof(N), alignof(N));
+        if nx != null {
+            unsafe g.dealloc(nx, sizeof(N), alignof(N));
+        }
+        h = nx;
+    }
+    return 0;
+})",
+        "cannot prove that this 'invariant' holds after an iteration",
+        "27:19",
+    );
+    h::expect_build_errs(b);
 }
 
 // What the quantifiers, `old`, ghost variables, `Seq` and `view()` do not give is an error.
@@ -1472,7 +1778,728 @@ fn exit_cases_00() {
 fn exit_cases_02() {
     let mut b = h::ExitBatch::new();
     invariant_proofs(&mut b);
+    allocator_proofs(&mut b);
+    heap_proofs(&mut b);
     b.run();
+}
+
+// The facts the allocator contracts and their containers need: a `&self` call of a generic struct keeps
+// its members, a bit count's facts at the last attempt, union members as one set of bytes, a slice
+// literal's length, a clause's `const fn` over constants, an invariant of two disjunctive clauses kept
+// by a member update, a byte size from a helper's `ensures`, a loop that calls a clause's `const fn`.
+fn allocator_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "a shared call of a generic struct and a power of two from the leading zeros",
+        M"(import std::spec::seq as *;
+
+struct S<T>
+    invariant block(self.p).len() == self.a as int && self.n <= self.a
+{
+    a: usize,
+    n: usize,
+    @owned
+    p: *mut T,
+}
+
+extend<T> S<T> {
+    fn get(self: &S<T>, k: usize) usize
+        requires self.a > 0 && k <= self.a
+        ensures |r| r < self.a
+    {
+        return k % self.a;
+    }
+
+    fn two(self: &mut S<T>, i: usize, j: usize) usize {
+        if i >= self.n || j >= self.n {
+            panic("out");
+        }
+        let x = self.get(i);
+        let y = self.get(j);
+        return x + y;
+    }
+}
+
+const fn next_pow2(n: usize, limit: usize) usize
+    requires limit >= 1 && (limit & (limit - 1)) == 0 && n <= limit
+    ensures |r| r >= n && r >= 1 && (r & (r - 1)) == 0 && r <= limit
+{
+    if n <= 1 {
+        return 1;
+    }
+    return 1 as usize << sizeof(usize) * 8 - (n - 1).leading_zeros();
+}
+
+fn main() i32 {
+    let mut s = S::<u32> { a: 0, n: 0, p: null };
+    let _ = s;
+    return next_pow2(5, 8) as i32 - 8;
+}
+)",
+        0,
+    );
+    b.add(
+        "union members that share bytes and a slice literal's length",
+        M"(struct L {
+    ptr: *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+struct M {
+    data: [u8; sizeof(L) - 1],
+    len: u8,
+}
+
+union R {
+    large: L,
+    small: M,
+}
+
+const BIG: usize = 1 << sizeof(usize) * 8 - 1;
+
+fn large_after_cap(c: usize) bool
+    requires c < BIG
+    ensures |r| r
+{
+    let mut u = R { small: M { len: 0 } };
+    unsafe u.large.ptr = null;
+    unsafe u.large.len = 0;
+    unsafe u.large.cap = c | BIG;
+    return (unsafe u.small.len & 0x80) != 0;
+}
+
+fn small_cap(n: u8) usize
+    requires n < 24
+    ensures |r| r < BIG
+{
+    let u = R { small: M { len: n } };
+    return unsafe u.large.cap;
+}
+
+union U {
+    a: u32,
+    b: u32,
+}
+
+fn same_bytes(x: u32) u32
+    ensures |r| r == x
+{
+    let mut u = U { b: 7 };
+    unsafe u.a = x;
+    return unsafe u.b;
+}
+
+fn take(s: []u32) usize
+    requires s.len <= 4
+    ensures |r| r == s.len
+{
+    return s.len;
+}
+
+fn literal_len(p: *const u32, n: usize) usize
+    requires n <= 4
+    ensures |r| r == n
+{
+    return take(unsafe Slice::<u32> { ptr: p, len: n });
+}
+
+fn main() i32 {
+    let a: [u32; 2] = [1, 2];
+    // The small form's length is the top byte of the large form's capacity, at every pointer width.
+    let top = small_cap(2) >> sizeof(usize) * 8 - 8;
+    return large_after_cap(3) as i32 + top as i32 + same_bytes(1) as i32 - 4 + literal_len(&a[0], 2) as i32 - 2;
+}
+)",
+        0,
+    );
+    b.add(
+        "a ring buffer over an allocator: byte sizes, a moved head, a copy loop",
+        M"(import std::spec::seq as *;
+
+extern "C" {
+    fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
+}
+
+struct S<T, A: Allocator = Global>
+    invariant self.len <= self.cap && block(self.p).len() >= self.cap as int && self.head < self.cap.max(1)
+    invariant self.cap <= S::<T, A>::max_cap() && (sizeof(T) != 0 || self.cap == 1)
+    invariant sizeof(T) == 0 || self.cap == 0 || A::owns(self.p, S::<T, A>::bytes(self.cap), alignof(T))
+{
+    @owned
+    p: *mut T,
+    head: usize,
+    len: usize,
+    cap: usize,
+    alloc: A,
+}
+
+extend<T, A: Allocator> S<T, A> {
+    const fn max_cap() usize
+        ensures |r| r >= 1 && (r & (r - 1)) == 0
+        ensures |r| sizeof(T) == 0 && r == 1 || sizeof(T) != 0 && r as int <= isize::MAX as int / sizeof(T) as int
+    {
+        if sizeof(T) == 0 {
+            return 1;
+        }
+        let m = isize::MAX as usize / sizeof(T);
+        return 1 as usize << sizeof(usize) * 8 - 1 - m.leading_zeros();
+    }
+
+    const fn bytes(n: usize) usize
+        requires n <= S::<T, A>::max_cap()
+        ensures |r| r as int == n as int * sizeof(T) as int && r as int <= isize::MAX as int
+    {
+        return n * sizeof(T);
+    }
+}
+
+extend<T, A: Allocator> S<T, A> {
+    fn with_cap(mut alloc: A, cap: usize) S<T, A>
+        panics if sizeof(T) != 0 && cap > S::<T, A>::max_cap()
+        ensures |r| r.len == 0 && (sizeof(T) == 0 || r.cap >= cap)
+    {
+        if sizeof(T) == 0 {
+            return S::<T, A> { p: dangling::<T>(), head: 0, len: 0, cap: 1, alloc: alloc };
+        }
+        if cap == 0 {
+            return S::<T, A> { p: dangling::<T>(), head: 0, len: 0, cap: 0, alloc: alloc };
+        }
+        if cap > S::<T, A>::max_cap() {
+            panic("capacity");
+        }
+        let p = (unsafe alloc.alloc(S::<T, A>::bytes(cap), alignof(T))) as *mut T;
+        return S::<T, A> { p: p, head: 0, len: 0, cap: cap, alloc: alloc };
+    }
+
+    fn push_front(self: &mut S<T, A>, v: T)
+        requires self.len < self.cap
+        ensures self.cap == old(self.cap)
+    {
+        self.head = if self.head == 0 {
+            self.cap - 1
+        } else {
+            self.head - 1
+        };
+        unsafe self.p[self.head] = v;
+        self.len += 1;
+    }
+
+    fn shift(self: &mut S<T, A>, src: usize, dst: usize, n: usize)
+        requires src < self.cap && dst < self.cap && n <= self.cap
+    {
+        let cap = self.cap;
+        let mut left = n;
+        let mut s = src;
+        let mut t = dst;
+        while left > 0
+            invariant s < cap && t < cap && cap <= S::<T, A>::max_cap()
+        {
+            let c = left.min(cap - s.max(t));
+            unsafe memmove(self.p + t, self.p + s, S::<T, A>::bytes(c));
+            s = (s + c) % cap;
+            t = (t + c) % cap;
+            left -= c;
+        }
+    }
+}
+
+extend<T, A: Allocator> S<T, A> as Free {
+    fn free(self: &mut S<T, A>) {
+        if sizeof(T) != 0 && self.cap != 0 {
+            unsafe self.alloc.dealloc(self.p, S::<T, A>::bytes(self.cap), alignof(T));
+        }
+    }
+}
+
+struct Q
+    invariant self.cap <= Q::mc()
+{
+    cap: usize,
+}
+
+extend Q {
+    const fn mc() usize {
+        return isize::MAX as usize / sizeof(u64);
+    }
+}
+
+fn main() i32 {
+    let mut s = S::<u32, Global>::with_cap(Global {}, 4);
+    s.push_front(7);
+    s.shift(0, 1, 1);
+    let q = Q { cap: 4 };
+    return s.len as i32 + q.cap as i32 - 5;
+}
+)",
+        0,
+    );
+}
+
+// Heap ownership the proofs give: counted units (`rc_share`), a handoff (`pre_of`), a chain of records
+// each holding the next, two arrays of one record from two allocations, writes through a pointer that
+// later reads see, and a static's invariant holding its block. Each run's leak check frees every block once.
+fn heap_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "counted units: a new value, a copy, the last release frees",
+        M"(struct C
+    invariant self.p == null || rc_share(self.p, 0, 1)
+{
+    p: *mut void,
+    pad: u64,
+}
+
+@trusted
+lemma c_new(p: *mut void)
+    requires Global::owns(p, 8, 8)
+    ensures rc_share(p, 0, 1);
+
+@trusted
+lemma c_clone(p: *mut void)
+    requires rc_units(p, 0) >= 1
+    ensures rc_share(p, 0, 1);
+
+@trusted
+lemma c_drop(p: *mut void, prev: usize)
+    requires rc_share(p, 0, 1)
+    ensures prev == 1 ==> rc_units(p, 0) == 0 && Global::owns(p, 8, 8);
+
+fn make() C {
+    let mut g = Global {};
+    let p = unsafe g.alloc(8, 8);
+    c_new(p);
+    return C { p: p, pad: 0 };
+}
+
+fn dup(c: &C) C {
+    if c.p == null {
+        return C { p: null, pad: 0 };
+    }
+    c_clone(c.p);
+    return C { p: c.p, pad: 0 };
+}
+
+fn release(c: C, prev: usize) {
+    let p = c.p;
+    forget(c);
+    if p == null {
+        return;
+    }
+    c_drop(p, prev);
+    if prev == 1 {
+        let mut g = Global {};
+        unsafe g.dealloc(p, 8, 8);
+    }
+}
+
+fn main() i32 {
+    let c = make();
+    let d = dup(&c);
+    release(d, 2);
+    release(c, 1);
+    return 3;
+}
+)",
+        3,
+    );
+    b.add(
+        "a handoff gives the block to the entry",
+        M"(struct Job {
+    entry: fn(*mut void) void,
+    env: *mut void,
+}
+
+fn hand(entry: fn(*mut void) void, env: *mut void) Job
+    requires pre_of(entry, env)
+{
+    return Job { entry: entry, env: env };
+}
+
+fn job(env: *mut void)
+    requires Global::owns(env, 16, 8)
+{
+    let mut g = Global {};
+    unsafe g.dealloc(env, 16, 8);
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let p = unsafe g.alloc(16, 8);
+    let j = hand(job, p);
+    let f = j.entry;
+    f(j.env);
+    return 4;
+}
+)",
+        4,
+    );
+    b.add(
+        "a chain of records: each holds the next",
+        M"(struct Node
+    invariant self.next == null || Global::owns(self.next, sizeof(Node), alignof(Node))
+{
+    next: *mut Node,
+    val: u64,
+}
+
+fn push(first: *mut Node, v: u64) {
+    let mut g = Global {};
+    let m = (unsafe g.alloc(sizeof(Node), alignof(Node))) as *mut Node;
+    let old = unsafe (*first).next;
+    unsafe (*first).next = m;
+    unsafe m[0] = Node { next: old, val: v };
+}
+
+fn release(first: *mut Node) {
+    let mut m = unsafe (*first).next;
+    unsafe (*first).next = null;
+    let mut g = Global {};
+    while m != null
+        invariant m == null || Global::owns(m, sizeof(Node), alignof(Node))
+    {
+        let nx = unsafe (*m).next;
+        unsafe (*m).next = null;
+        unsafe g.dealloc(m, sizeof(Node), alignof(Node));
+        m = nx;
+    }
+}
+
+fn main() i32 {
+    let mut first = Node { next: null, val: 0 };
+    let p = (&mut first) as *mut Node;
+    push(p, 1);
+    push(p, 2);
+    let n = unsafe (*(*p).next).val;
+    release(p);
+    return n as i32;
+}
+)",
+        2,
+    );
+    b.add(
+        "two arrays of one record, freed after their fields are cleared",
+        M"(struct R
+    invariant self.n as int <= isize::MAX as int / 384
+    invariant self.a == null || Global::owns(self.a, array_bytes::<u64>(self.n), 128)
+    invariant self.b == null || Global::owns(self.b, array_bytes::<u32>(self.n), 128)
+{
+    a: *mut u64,
+    n: usize,
+    b: *mut u32,
+}
+
+fn release(s: *mut R) {
+    let mut g = Global {};
+    let n = unsafe (*s).n;
+    let pa = unsafe (*s).a;
+    let pb = unsafe (*s).b;
+    unsafe (*s).a = null;
+    unsafe (*s).b = null;
+    if pa != null {
+        unsafe g.dealloc(pa, array_bytes::<u64>(n), 128);
+    }
+    if pb != null {
+        unsafe g.dealloc(pb, array_bytes::<u32>(n), 128);
+    }
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let a = (unsafe g.alloc(array_bytes::<u64>(4), 128)) as *mut u64;
+    let b = (unsafe g.alloc(array_bytes::<u32>(4), 128)) as *mut u32;
+    let mut r = R { a: a, n: 4, b: b };
+    release((&mut r) as *mut R);
+    return 5;
+}
+)",
+        5,
+    );
+    b.add(
+        "writes through a pointer reach later reads",
+        M"(struct P<F> {
+    body: F,
+    cell: *mut void,
+}
+
+struct C {
+    a: u64,
+    m: Array<u64, 2>,
+}
+
+fn need(c: *mut C)
+    requires Global::owns(c, sizeof(C), alignof(C))
+{
+    let mut g = Global {};
+    unsafe g.dealloc(c, sizeof(C), alignof(C));
+}
+
+fn put<F>(f: F, c: *mut void) bool
+    requires c != null
+{
+    let mut g = Global {};
+    let env = (unsafe g.alloc(sizeof(P<F>), alignof(P<F>))) as *mut P<F>;
+    unsafe env[0] = P::<F> { body: f, cell: c };
+    let mut h: *mut void = null;
+    assert(unsafe (*env).cell != null);
+    h = c;
+    let ok = unsafe (*env).cell == h;
+    unsafe g.dealloc(env, sizeof(P<F>), alignof(P<F>));
+    return ok;
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let co = (unsafe g.alloc(sizeof(C), alignof(C))) as *mut C;
+    unsafe co[0] = C { a: 1, m: Array::<u64, 2>::new() };
+    let x = &mut unsafe (*co).m[0];
+    *x = 7;
+    let v = unsafe (*co).m[0];
+    need(co);
+    let mut y: u64 = 3;
+    let ok = put::<u64>(1, ((&mut y) as *mut u64) as *mut void);
+    if !ok {
+        return 1;
+    }
+    return v as i32 - 1;
+}
+)",
+        6,
+    );
+    b.add(
+        "a static's invariant holds the block it points to",
+        M"(static mut H: *mut u64 = null
+    invariant H == null || Global::owns(H, 8, 8);
+
+fn set(v: u64) {
+    if unsafe H == null {
+        let mut g = Global {};
+        let p = (unsafe g.alloc(8, 8)) as *mut u64;
+        unsafe p[0] = v;
+        unsafe H = p;
+    }
+}
+
+fn clear() {
+    let p = unsafe H;
+    if p != null {
+        unsafe H = null;
+        let mut g = Global {};
+        unsafe g.dealloc(p, 8, 8);
+    }
+}
+
+fn main() i32 {
+    set(9);
+    let v = unsafe *H;
+    clear();
+    return v as i32 - 2;
+}
+)",
+        7,
+    );
+    // A struct value that holds a `&mut` of a local lends it to the call it is given to, for that call.
+    b.add(
+        "a struct's borrow lent to one call",
+        M"(struct M
+    invariant Global::owns(self.a, 8, 1) && Global::owns(self.b, 8, 1)
+{
+    a: *mut u8,
+    b: *mut u8,
+}
+
+extend M {
+    fn touch(self: &mut M) {
+        unsafe *self.a = 1;
+    }
+}
+
+struct E<'x> {
+    m: &'x mut M,
+}
+
+extend<'x> E<'x> {
+    fn run(self: E<'x>) {
+        self.m.touch();
+    }
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let a = unsafe g.alloc(8, 1) as *mut u8;
+    let b = unsafe g.alloc(8, 1) as *mut u8;
+    unsafe *a = 0;
+    unsafe *b = 0;
+    let mut m = M { a: a, b: b };
+    E { m: &mut m }.run();
+    let (pa, pb) = (m.a, m.b);
+    let v = unsafe *pa;
+    forget(m);
+    unsafe g.dealloc(pa as *mut void, 8, 1);
+    unsafe g.dealloc(pb as *mut void, 8, 1);
+    return v as i32 - 1;
+}
+)",
+        0,
+    );
+    // In a struct's own file, a value a call's result holds (`Some(b)` of `pop()`) satisfies its invariant,
+    // and a value whose storage ended needs none.
+    b.add(
+        "a record a vector gives back, freed in a loop",
+        M"(struct Held
+    invariant Global::owns(self.ptr, 8, 8)
+{
+    ptr: *mut void,
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let mut held = Vector::<Held>::new();
+    for _i in 0..3 {
+        let p = unsafe g.alloc(8, 8);
+        held.push(Held { ptr: p });
+    }
+    while let Some(b) = held.pop() {
+        unsafe g.dealloc(b.ptr, 8, 8);
+    }
+    return 0;
+}
+)",
+        0,
+    );
+    // A `dealloc` of a struct with an invariant gives the caller the blocks the struct owned: a list frees
+    // its nodes without clearing their links.
+    b.add(
+        "a list node freed with its link, which the caller then frees",
+        M"(struct N
+    invariant self.next == null || Global::owns(self.next, sizeof(N), alignof(N))
+{
+    next: *mut N,
+    v: u32,
+}
+
+fn push(head: *mut N, v: u32) *mut N
+    requires head == null || Global::owns(head, sizeof(N), alignof(N))
+    ensures |r| r != null && Global::owns(r, sizeof(N), alignof(N))
+{
+    let mut g = Global {};
+    let p = (unsafe g.alloc(sizeof(N), alignof(N))) as *mut N;
+    unsafe *p = N { next: head, v: v };
+    return p;
+}
+
+fn main() i32 {
+    let mut g = Global {};
+    let mut h: *mut N = null;
+    for i in 0u32..3
+        invariant h == null || Global::owns(h, sizeof(N), alignof(N))
+    {
+        h = push(h, i);
+    }
+    while h != null
+        invariant h == null || Global::owns(h, sizeof(N), alignof(N))
+    {
+        let nx = unsafe (*h).next;
+        unsafe g.dealloc(h, sizeof(N), alignof(N));
+        h = nx;
+    }
+    return 0;
+})",
+        0,
+    );
+    // A generic spec function's call is one term in every module: `pre_of` of a `*mut void` result here and
+    // in std's `spawn`.
+    b.add(
+        "an entry's precondition handed on to another module",
+        M"(import std::platform::thread;
+
+fn work(_a: *mut void) *mut void {
+    return null;
+}
+
+fn start(entry: fn(*mut void) *mut void, arg: *mut void) bool
+    requires pre_of(entry, arg)
+    panics if true
+{
+    let t = unsafe thread::spawn(entry, arg);
+    if t.is_err() {
+        return false;
+    }
+    return t.unwrap().join().is_ok();
+}
+
+fn main() i32 {
+    let _ = start(work, null);
+    return 0;
+}
+)",
+        0,
+    );
+    // A spec function's `switch` over a value of an enum that is not generic reads the variant of a literal.
+    b.add(
+        "a spec function over the variants of an enum that is not generic",
+        M"(enum R {
+    Ok(usize),
+    Err(u8),
+}
+
+spec fn ok_of(r: R) bool {
+    return switch r {
+        Ok(_) => true,
+        Err(_) => false,
+    };
+}
+
+fn get(x: usize) R
+    ensures |r| ok_of(r) == (x <= 5)
+{
+    if x > 5 {
+        return R::Err(1);
+    }
+    return R::Ok(x);
+}
+
+fn main() i32 {
+    let _r = get(3);
+    return 0;
+}
+)",
+        0,
+    );
+    // A const generic parameter is one value in a body and its clauses, a call's argument at the call, and
+    // the extend's parameter in the invariant of `Self`.
+    b.add(
+        "a const generic parameter in clauses, a body and an invariant",
+        M"(struct Al<const K: usize>
+    invariant K < 9 && (self.p & (16usize << K) - 1) == 0
+{
+    p: usize,
+}
+
+extend<const K: usize> Al<K> {
+    fn next(self: &mut Self) usize
+        requires self.p as int + (16usize << K) as int <= usize::MAX as int
+        ensures |r| (r & (16usize << K) - 1) == 0
+    {
+        let r = self.p;
+        self.p = self.p + (16usize << K);
+        return r;
+    }
+}
+
+fn width<const K: usize>() usize
+    requires K < 9
+    ensures |r| r == 16usize << K
+{
+    return 16usize << K;
+}
+
+fn main() i32 {
+    let mut a = Al::<2> { p: 64 };
+    let x = a.next();
+    return (x + width::<1>()) as i32 - 96;
+}
+)",
+        0,
+    );
 }
 
 // A struct's invariant, which its own file's code keeps, and the blocks of `@owned` fields: an allocation,
@@ -1490,7 +2517,7 @@ fn invariant_proofs(b: &mut h::ExitBatch) {
     );
     b.add(
         "a box with an invariant over its block: zero-sized values, a destructor, shared parameters",
-        "import std::spec::seq as *;\n\nstruct Bx<T, A = Global>\n    invariant sizeof(T) == 0 || block(self.ptr).len() == 1\n{\n    @owned\n    ptr: *mut T,\n    alloc: A,\n}\n\nextend<T, A: Allocator> Bx<T, A> {\n    fn new_in(alloc: A, value: T) Bx<T, A> {\n        let mut a = alloc;\n        let p = if sizeof(T) == 0 {\n            dangling::<T>()\n        } else {\n            (unsafe a.alloc(sizeof(T), alignof(T))) as *mut T\n        };\n        unsafe p[0] = value;\n        return Bx::<T, A> { ptr: p, alloc: a };\n    }\n\n    fn get(self: &Bx<T, A>) &T {\n        return unsafe &self.ptr[0];\n    }\n\n    fn set(self: &mut Bx<T, A>, value: T) {\n        unsafe self.ptr[0].free();\n        unsafe self.ptr[0] = value;\n    }\n}\n\nextend<T, A: Allocator> Bx<T, A> as Free {\n    fn free(self: &mut Bx<T, A>) {\n        self.ptr.free();\n        if sizeof(T) != 0 {\n            unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));\n        }\n    }\n}\n\nextend<T: Eq, A: Allocator> Bx<T, A> as Eq {\n    fn eq(self: &Bx<T, A>, other: &Bx<T, A>) bool {\n        let a = self.get();\n        let b = other.get();\n        return *a == *b;\n    }\n}\n\nstruct E {}\n\nfn main() i32 {\n    let mut b = Bx::<u32, Global>::new_in(Global {}, 3);\n    b.set(4);\n    let c = Bx::<u32, Global>::new_in(Global {}, 4);\n    let _z = Bx::<E, Global>::new_in(Global {}, E {});\n    if !(b == c) {\n        return 1;\n    }\n    return *b.get() as i32 - 4;\n}\n",
+        "import std::spec::seq as *;\n\nstruct Bx<T, A: Allocator = Global>\n    invariant sizeof(T) == 0 || block(self.ptr).len() == 1 && A::owns(self.ptr, sizeof(T), alignof(T))\n{\n    @owned\n    ptr: *mut T,\n    alloc: A,\n}\n\nextend<T, A: Allocator> Bx<T, A> {\n    fn new_in(alloc: A, value: T) Bx<T, A> {\n        let mut a = alloc;\n        let p = if sizeof(T) == 0 {\n            dangling::<T>()\n        } else {\n            (unsafe a.alloc(sizeof(T), alignof(T))) as *mut T\n        };\n        unsafe p[0] = value;\n        return Bx::<T, A> { ptr: p, alloc: a };\n    }\n\n    fn get(self: &Bx<T, A>) &T {\n        return unsafe &self.ptr[0];\n    }\n\n    fn set(self: &mut Bx<T, A>, value: T) {\n        unsafe self.ptr[0].free();\n        unsafe self.ptr[0] = value;\n    }\n}\n\nextend<T, A: Allocator> Bx<T, A> as Free {\n    fn free(self: &mut Bx<T, A>) {\n        self.ptr.free();\n        if sizeof(T) != 0 {\n            unsafe self.alloc.dealloc(self.ptr, sizeof(T), alignof(T));\n        }\n    }\n}\n\nextend<T: Eq, A: Allocator> Bx<T, A> as Eq {\n    fn eq(self: &Bx<T, A>, other: &Bx<T, A>) bool {\n        let a = self.get();\n        let b = other.get();\n        return *a == *b;\n    }\n}\n\nstruct E {}\n\nfn main() i32 {\n    let mut b = Bx::<u32, Global>::new_in(Global {}, 3);\n    b.set(4);\n    let c = Bx::<u32, Global>::new_in(Global {}, 4);\n    let _z = Bx::<E, Global>::new_in(Global {}, E {});\n    if !(b == c) {\n        return 1;\n    }\n    return *b.get() as i32 - 4;\n}\n",
         0,
     );
     b.add(
@@ -1557,7 +2584,8 @@ pub struct Buf {
 extend Buf {
     pub fn make(n: usize) Buf
         requires n > 0 && n < 1000
-        ensures |r| block(r.p).len() == n as nat && r.cap == n
+        ensures |r| block(r.p).len() == n as nat && r.cap == n && (r.p as usize & 3) == 0
+        ensures |r| Global::owns(r.p, n * 4, 4)
     {
         let mut g = Global {};
         let p = unsafe g.alloc(n * 4, 4) as *mut u32;
@@ -1565,9 +2593,11 @@ extend Buf {
     }
 
     pub fn grow(self: &mut Buf, x: u32)
-        requires block(self.p).len() == self.cap as nat && self.cap > 0 && self.cap < 1000
+        requires block(self.p).len() == self.cap as nat && self.cap > 0 && self.cap < 1000 && (self.p as usize & 3) == 0
+        requires Global::owns(self.p, self.cap * 4, 4)
         ensures block(self.p).len() == old(self.cap) as nat * 2 && self.cap == old(self.cap) * 2
-        ensures block(self.p)[0] == x
+        ensures block(self.p)[0] == x && (self.p as usize & 3) == 0
+        ensures Global::owns(self.p, self.cap * 4, 4)
     {
         unsafe self.p[0] = x;
         let mut g = Global {};
@@ -1584,14 +2614,15 @@ extend Buf {
     }
 
     pub fn set0(self: &mut Buf, x: u32)
-        requires block(self.p).len() >= 1
+        requires block(self.p).len() >= 1 && self.cap < 1000 && Global::owns(self.p, self.cap * 4, 4)
+        ensures Global::owns(self.p, self.cap * 4, 4)
         ensures block(self.p)[0] == x && block(self.p).len() == old(block(self.p).len()) && self.cap == old(self.cap)
     {
         unsafe self.p[0] = x;
     }
 
     pub fn release(self: &mut Buf)
-        requires self.cap < 1000
+        requires self.cap < 1000 && Global::owns(self.p, self.cap * 4, 4)
         ensures block(self.p).len() == 0
     {
         let mut g = Global {};
@@ -1611,6 +2642,7 @@ extend<T> Many<T> {
     pub fn make(n: usize) Many<T>
         requires n > 0 && n < 1000 && sizeof(T) < 1000
         ensures |r| block(r.p).len() == n as nat && r.cap == n
+        ensures |r| Global::owns(r.p, n * sizeof(T), alignof(T))
     {
         let mut g = Global {};
         let p = unsafe g.alloc(n * sizeof(T), alignof(T)) as *mut T;
@@ -1618,7 +2650,7 @@ extend<T> Many<T> {
     }
 
     pub fn release(self: &mut Many<T>)
-        requires self.cap < 1000 && sizeof(T) < 1000
+        requires self.cap < 1000 && sizeof(T) < 1000 && Global::owns(self.p, self.cap * sizeof(T), alignof(T))
     {
         let mut g = Global {};
         unsafe g.dealloc(self.p, self.cap * sizeof(T), alignof(T));
@@ -2339,11 +3371,13 @@ fn main() i32 {
         "the views of strings and mutable slices, ghost sequences and spec functions",
         M"(import std::spec::seq as *;
 fn greet(s: &mut String)
+    requires s.view().len() < 1000
     ensures s.view() == old(s.view()).concat("hi".view())
 {
     s.push_str("hi");
 }
 fn put(s: &mut String)
+    requires s.view().len() < 1000
     ensures s.view().len() == old(s.view()).len() + 3
 {
     s.push('A');

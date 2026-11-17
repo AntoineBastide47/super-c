@@ -71,6 +71,13 @@ struct Block<T> {
     free_head: u16, // the first slot of the first skipblock, or NONE
 }
 
+// A reserved block that `trim_capacity` frees as it unlinks it: the block of `size` bytes the hive's
+// allocator gave for it, which the hive holds once. No invariant states the blocks of the hive's lists: a
+// block's size follows from its own `cap`, which an invariant of the block that links it cannot read.
+@trusted
+lemma hive_block<T, A: Allocator>(b: *mut Block<T>, size: usize, align: usize)
+    ensures A::owns(b, size, align);
+
 /// A container whose elements keep their address until removed, in blocks from allocator A. An insert
 /// reuses the slot of a removed element first; iteration skips removed slots in O(1) per step.
 pub struct Hive<T, A = Global> {
@@ -275,7 +282,10 @@ extend<T, A: Allocator> Hive<T, A> {
             self.reserved = unsafe (*b).next;
             let c = b.cap();
             self.cap -= c;
-            unsafe self.alloc.dealloc(b, Block::<T>::bytes(c), Block::<T>::align());
+            let size = Block::<T>::bytes(c);
+            let align = Block::<T>::align();
+            hive_block::<T, A>(b, size, align);
+            unsafe self.alloc.dealloc(b, size, align);
         }
     }
 
@@ -510,7 +520,9 @@ extend<T> Block<T> {
         return sizeof(Block<T>) + alignof(Slot<T>) - 1 & ~(alignof(Slot<T>) - 1);
     }
 
-    const fn align() usize {
+    const fn align() usize
+        ensures |r| r != 0 && (r & r - 1) == 0
+    {
         return alignof(Block<T>).max(alignof(Slot<T>));
     }
 

@@ -904,7 +904,7 @@ pub fn exe_path() Result<String, IoError> {
         let mut out = String::with_capacity(size as usize);
         let mut sz = size;
         if unsafe _NSGetExecutablePath(out.spare_mut(size as usize) as *mut char, &mut sz) == 0 {
-            out.advance_len(unsafe cstring::strlen(out.as_ptr() as *const char));
+            out.advance_len(unsafe cstring::strnlen(out.as_ptr() as *const char, size as usize));
             return Ok(out);
         }
         size = sz;
@@ -954,7 +954,7 @@ pub fn current_dir() Result<String, IoError> {
     while cap <= 1 << 20 {
         let mut out = String::with_capacity(cap);
         if unsafe unistd::getcwd(out.spare_mut(cap) as *mut char, cap) != null {
-            out.advance_len(unsafe cstring::strlen(out.as_ptr() as *const char));
+            out.advance_len(unsafe cstring::strnlen(out.as_ptr() as *const char, cap));
             return Ok(out);
         }
         if errno::errno() != ERANGE {

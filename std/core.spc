@@ -5808,7 +5808,9 @@ extend usize {
         return (unsafe sc_popcount64(self as u64)) as usize;
     }
     /// True for exactly one set bit (0 is not a power of two).
-    pub const fn is_power_of_two(self: usize) bool {
+    pub const fn is_power_of_two(self: usize) bool
+        ensures |r| r == (self != 0 && (self & self - 1) == 0)
+    {
         return self != 0 && (self & self - 1) == 0;
     }
     /// The smaller of the two.
@@ -5825,7 +5827,13 @@ extend usize {
         return other;
     }
     /// The larger of the two.
-    pub const fn max(self: usize, other: usize) usize {
+    pub const fn max(self: usize, other: usize) usize
+        ensures |r| r == if self > other {
+            self
+        } else {
+            other
+        }
+    {
         if self > other {
             return self;
         }

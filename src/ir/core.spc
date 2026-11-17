@@ -1416,12 +1416,13 @@ pub(package) const fn is_ghost_site(k: u32) bool {
 }
 
 /// The block a jump of `b` to `blk` reaches: past a site that starts there, which the evaluator does not
-/// run (a body it runs before the proofs still holds the site): a ghost site, and with `all` a contract
-/// check too (no `-fcontract-checks`, no proof run: a clause may call a spec function).
+/// run (a body it runs before the proofs still holds the site): a ghost site, a `panics if` (where the
+/// function may panic, no check), and with `all` a contract check too (no `-fcontract-checks`, no proof
+/// run: a clause may call a spec function).
 pub(package) const fn past_site(b: &CoreBody, blk: BlockId, all: bool) BlockId {
     for i in 0..b.contracts.len() {
         let s = b.contracts[i];
-        if s.chain == blk && (all || is_ghost_site(s.kind)) {
+        if s.chain == blk && (all || is_ghost_site(s.kind) || s.kind == CT_PANICS) {
             return s.cont;
         }
     }

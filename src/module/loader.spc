@@ -1416,11 +1416,16 @@ pub(package) fn read_file_mt(path: str, mt: &mut i64) Option<String> {
     // sentinel the lexer relies on to over-read safely (see lexer::SOURCE_PAD).
     let sz = m.size as usize;
     let mut out = String::with_capacity(sz + lexer::SOURCE_PAD);
-    let n = f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(sz), len: sz });
-    if n.is_err() || f.close().is_err() {
+    let n = switch f.read_full(unsafe SliceMut::<u8> { ptr: out.spare_mut(sz), len: sz }) {
+        Ok(k) => k,
+        Err(_) => {
+            return None;
+        },
+    };
+    if f.close().is_err() {
         return None;
     }
-    out.advance_len(n.unwrap());
+    out.advance_len(n);
     out.pad_nul(lexer::SOURCE_PAD);
     return Some(out);
 }

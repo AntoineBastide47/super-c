@@ -78,6 +78,7 @@ Read only the file the task needs. Section names are kept, so a pointer such as
 
 - [basics.md](references/basics.md): bindings and mutability, functions, contracts, ghost code and specifications (`forall`, `old`, `Seq`), constant-time code (`Secret`, `@constant_time`), structs and methods, enums and pattern matching.
 - [ownership.md](references/ownership.md): ownership and RAII, references and borrowing, unsafe.
+- [heap-proofs.md](references/heap-proofs.md): proved heap ownership: allocator blocks and their holders, memory invariants, counted shares (`rc_share`), handoffs (`pre_of`), static invariants.
 - [generics.md](references/generics.md): generics, closures, interfaces and @derive.
 - [modules.md](references/modules.md): import forms, module paths, visibility.
 - [slices-and-arrays.md](references/slices-and-arrays.md): []T views and [T; N] arrays.

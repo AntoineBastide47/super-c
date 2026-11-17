@@ -8,32 +8,41 @@ import std::testing::bench;
 
 const BLOCKS: usize = 4096;
 
+// A block that `h` gave for `size` bytes, aligned to 8.
+struct Held<H: Allocator>
+    invariant H::owns(self.ptr, self.size, 8)
+{
+    ptr: *mut void,
+    size: usize,
+}
+
 // One round through `h`: BLOCKS allocations of `size` bytes, then their deallocations, newest first.
-fn churn<H: Allocator>(mut h: H, slots: &mut Vector<*mut u8>, size: usize) i64 {
+fn churn<H: Allocator>(mut h: H, held: &mut Vector<Held<H>>, size: usize) i64
+    requires size as int <= isize::MAX as int
+    panics if true
+{
     for i in 0..BLOCKS {
-        let p = (unsafe h.alloc(size, 8)) as *mut u8;
-        unsafe *p = i as u8;
-        slots.set(i, p);
+        let p = unsafe h.alloc(size, 8);
+        unsafe *(p as *mut u8) = i as u8;
+        held.push(Held::<H> { ptr: p, size: size });
     }
     let mut ok: i64 = 0;
-    for j in 0..BLOCKS {
-        let i = BLOCKS - 1 - j;
-        let p = *slots.at(i);
-        ok += (unsafe *p == i as u8) as i64;
-        unsafe h.dealloc(p, size, 8);
+    while let Some(b) = held.pop() {
+        ok += (unsafe *(b.ptr as *mut u8) == held.len() as u8) as i64;
+        unsafe h.dealloc(b.ptr, b.size, 8);
     }
     return ok;
 }
 
-fn churn_lane<H: Allocator>(b: &mut bench::Bencher, h: H, size: usize) {
-    let mut slots = Vector::<*mut u8>::new();
-    for _i in 0..BLOCKS {
-        slots.push(null);
-    }
+fn churn_lane<H: Allocator>(b: &mut bench::Bencher, h: H, size: usize)
+    requires size as int <= isize::MAX as int
+    panics if true
+{
+    let mut held = Vector::<Held<H>>::with_capacity(BLOCKS);
     b.each(2 * BLOCKS as i64);
     b.unit("op");
     while b.running() {
-        let ok = churn(h, &mut slots, size);
+        let ok = churn(h, &mut held, size);
         b.tally(BLOCKS as i64, ok);
     }
 }

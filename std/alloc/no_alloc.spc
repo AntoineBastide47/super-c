@@ -8,6 +8,11 @@
 pub struct NoAlloc {}
 
 extend NoAlloc as Allocator {
+    // No block comes from it.
+    pub spec fn owns(ptr: *mut void, size: usize, align: usize) bool {
+        return false;
+    }
+
     pub unsafe fn alloc(self: &mut NoAlloc, size: usize, align: usize) *mut void {
         panic("NoAlloc: allocation");
     }
