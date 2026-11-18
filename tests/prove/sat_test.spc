@@ -1287,3 +1287,108 @@ fn literals_apart_from_the_goal_refute_a_side() {
     let mut sv2 = sv0::Solver::<B>::new();
     assert(!sv2.implies(&tm, &hy, small, true), "r may be 100 or more");
 }
+
+// The value of encoding `c` of the format with 3 exponent and 2 fraction bits, in 256ths; NONE64 for an
+// infinity or NaN.
+const fn small_val(c: u64) i64 {
+    let mag = c & 0x1F;
+    let e = mag >> 2;
+    if e == 7 {
+        return i64::MAX;
+    }
+    let f = (mag & 3) as i64;
+    // Subnormal: f * 2^-4; normal: (4 + f) * 2^(e - 5).
+    let v = if e == 0 {
+        f * 16
+    } else {
+        4 + f << (e + 3) as i64
+    };
+    return pick(c >> 5 != 0, -v, v);
+}
+
+// `v` (in 256ths) rounded to nearest, ties to even, in the format of `small_val`: its encoding.
+const fn small_round(v: i64) u64 {
+    let neg = v < 0;
+    let a = pick(neg, -v, v);
+    // The largest finite value is 14 (3584); from 15 (half its gap past it) on, infinity.
+    if a >= 3840 {
+        return pick(neg, 0x3Cu64, 0x1Cu64);
+    }
+    let mut best: u64 = 0;
+    let mut bd = i64::MAX;
+    for c in 0..28u64 {
+        let d = a - small_val(c);
+        let ad = pick(d < 0, -d, d);
+        if ad < bd || ad == bd && (c & 1) == 0 {
+            bd = ad;
+            best = c;
+        }
+    }
+    return best | pick(neg, 0x20u64, 0);
+}
+
+// T_FMID is the least (greatest) rounded sum `p' + o` over the reals `p'` that round to `p`, for every
+// finite `p` and `o` of a 6-bit format, against every real in 256ths: odd `p` (whose bounds round away)
+// and ties included.
+@test
+fn midpoint_sums_bound_every_rounding() {
+    let w: u16 = 6;
+    let fd: u64 = 2;
+    let mut lo = Vector::<i64>::new();
+    let mut hi = Vector::<i64>::new();
+    for _k in 0..64 * 64 {
+        lo.push(i64::MAX);
+        hi.push(i64::MIN);
+    }
+    for o in 0..64u64 {
+        if small_val(o) == i64::MAX {
+            continue;
+        }
+        for q in -3839..3840i64 {
+            let p = small_round(q);
+            let r = small_val(small_round(q + small_val(o)));
+            let r2 = pick(r == i64::MAX, pick(q + small_val(o) < 0, i64::MIN + 1, i64::MAX - 1), r);
+            let k = (p * 64 + o) as usize;
+            if r2 < lo[k] {
+                lo.set(k, r2);
+            }
+            if r2 > hi[k] {
+                hi.set(k, r2);
+            }
+        }
+    }
+    let mut tm = Terms::<B>::new();
+    for p in 0..64u64 {
+        if small_val(p) == i64::MAX {
+            continue;
+        }
+        for o in 0..64u64 {
+            if small_val(o) == i64::MAX || (o & 0x1F) % 3 != 0 && (p & 0x1F) % 2 == 0 {
+                continue;
+            }
+            let k = (p * 64 + o) as usize;
+            let kp = tm.int(u64_val::<B>(p), w, false);
+            let ko = tm.int(u64_val::<B>(o), w, false);
+            for up in [false, true] {
+                let t = tm.make(
+                    Term::<B> { k: u64_val::<B>(fd | up as u64 << 32), a: kp, b: ko, op: T_FMID, w: w, sg: false },
+                );
+                let want = pick(up, hi[k], lo[k]);
+                // The rounded value: an infinity past the largest finite value.
+                let wc = if want == i64::MAX - 1 {
+                    0x1Cu64
+                } else if want == i64::MIN + 1 {
+                    0x3Cu64
+                } else {
+                    small_round(want)
+                };
+                let wk = tm.int(u64_val::<B>(wc), w, false);
+                let eq = tm.fcmp(T_FEQ, t, wk, fd);
+                let mut ls = Vector::<u64>::new();
+                ls.push(tlit(eq, SEL_ATOM, false));
+                let msg = format("p {} o {} up {}: {}", p, o, up, wc);
+                assert(bits_answer(&tm, &ls) == 1, msg.as_str());
+            }
+        }
+    }
+}

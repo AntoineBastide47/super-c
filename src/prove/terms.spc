@@ -97,6 +97,9 @@ pub(package) const T_FREM: u8 = 47;
 // The total order key of float `a`, an unsigned integer of its width: a positive encoding with its sign
 // bit set, a negative one complemented; the keys' order is std's `Float` order (`Ord`), NaNs at the ends.
 pub(package) const T_FKEY: u8 = 48;
+// `b` plus the greatest (`k >> 32` is 1) or least real that rounds to float `a`, rounded once; where that
+// bound does not round to `a` (an odd `a`'s), a tie rounds toward `a` (`Terms::fmid`).
+pub(package) const T_FMID: u8 = 49;
 pub(package) const FR_ROUND: u16 = 0;
 pub(package) const FR_FLOOR: u16 = 1;
 pub(package) const FR_CEIL: u16 = 2;
@@ -109,7 +112,7 @@ pub(package) const FD64: u64 = 52;
 
 // Whether operation `op` is a float operation or comparison.
 pub(package) const fn float_op(op: u8) bool {
-    return op >= T_FADD && op <= T_FKEY;
+    return op >= T_FADD && op <= T_FMID;
 }
 
 // Whether operation `op` takes one operand.
@@ -304,6 +307,8 @@ pub(package) struct Terms<const B: usize> {
     big: Num<B>,
     // Each integer `choose` made, by its term: its condition and its two values.
     choices: Map<u32, (u32, u32, u32)>,
+    // Each value a float rewrite's model made of an IEEE operation, by its term: that operation's term.
+    shapes: Map<u32, u32>,
 }
 
 pub(package) const fn hmix(h: u64, v: u64) u64 {
@@ -332,6 +337,7 @@ extend<const B: usize> Terms<B> {
             big_seen: false,
             big: Num::<B>::one().shl(B / 2 - 8),
             choices: Map::<u32, (u32, u32, u32)>::new(),
+            shapes: Map::<u32, u32>::new(),
         };
     }
 
@@ -342,6 +348,7 @@ extend<const B: usize> Terms<B> {
         self.nvars = 0;
         self.bitty.clear();
         self.choices.clear();
+        self.shapes.clear();
     }
 
     pub(package) const fn at(self: &Self, t: u32) Term<B> {
@@ -812,6 +819,12 @@ extend<const B: usize> Terms<B> {
         return self.make(Term::<B> { k: u64_val::<B>(fd | md as u64 << 32), a: a, b: 0, op: T_FRINT, w: w, sg: false });
     }
 
+    // `b` plus the greatest (`up`) or least real that rounds to float `a` of width `w` and format `fd`,
+    // rounded once (T_FMID): the bounds of `p + b` for every real `p` that rounds to `a`.
+    pub(package) fn fmid(self: &mut Self, a: u32, b: u32, up: bool, w: u16, fd: u64) u32 {
+        return self.make(Term::<B> { k: u64_val::<B>(fd | up as u64 << 32), a: a, b: b, op: T_FMID, w: w, sg: false });
+    }
+
     // The total order key (T_FKEY) of float `a` of width `w` and format `fd`.
     pub(package) fn fkey(self: &mut Self, a: u32, w: u16, fd: u64) u32 {
         let x = self.ts[a as usize];
@@ -886,6 +899,21 @@ extend<const B: usize> Terms<B> {
         let r = self.arith(T_BOR, x, y, w, false);
         self.choices.insert(r, (c, a, b));
         return r;
+    }
+
+    // Record `r` as the value of IEEE operation `e` that a float rewrite's model made (`shape`).
+    pub(package) fn set_shape(self: &mut Self, r: u32, e: u32) {
+        if r != e {
+            self.shapes.insert(r, e);
+        }
+    }
+
+    // The IEEE operation whose model made `t` (`set_shape`), else `t`.
+    pub(package) fn shape(self: &Self, t: u32) u32 {
+        return switch self.shapes.get(&t) {
+            Some(e) => *e,
+            None => t,
+        };
     }
 
     // Whether `t` is a `choose` result.

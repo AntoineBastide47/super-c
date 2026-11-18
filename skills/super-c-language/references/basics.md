@@ -192,15 +192,19 @@ results at the corners of their intervals): `x * x * x + 2.0 * x * x + x <= 4.0`
 [0, 1]; a value whose operands share an unknown keeps the intervals' looseness (`(x + y) * (x - y)`).
 `x.to_int_unchecked::<I>()` is an obligation: `x` is not NaN and its truncation fits `I`. The fast-math
 build flags give each operation every value the optimizer may compute in its place:
-`-fassociative-math` (and `@associative_math` in its function) makes sums and products unknown;
+`-fassociative-math` (and `@associative_math` in its function) makes a sum or product whose operand may
+be a partial result (a parameter, a load, a loop's running value, a sum of a sum) either the IEEE value
+or a value that keeps only the order every association keeps: `x + y` against that operand by the sign
+of the other, `x * y` against it by the magnitude of the other, with the product's sign (an upper bound
+such as `x + 1.0 <= 2.0` for `x` in [0, 1] is false: `x` may be `a + c` with a large `c` that cancels);
 `-freciprocal-math` makes `x / y` either the quotient or `x` times the rounded `1 / y`;
 `-ffp-contract=fast` makes a sum with a product operand either the sum or the fused `fma` (an operand
-that is no operation here, such as a parameter, may hold a product after inlining: the sum lies between
-the sums with that operand's neighbors); `-fno-signed-zeros` makes the zero of a sum (and, with
-`-ffinite-math-only`, of a product) either zero; `-ffinite-math-only` makes an ordered comparison of a
-NaN unknown, and with `-fno-signed-zeros` the product of a zero and a value that is not finite and the
-sum of two values that are not finite. So bounds keep proving under every flag but reassociation; under
-`-ffinite-math-only` a `requires` states `x.is_finite()` to exclude a NaN, since `x >= 0.0` no longer
+that is no operation here may hold a product after inlining: the sum then lies between the sums with
+the least and the greatest reals that round to it, each rounded once); `-fno-signed-zeros` makes the
+zero of a sum (and, with `-ffinite-math-only`, of a product) either zero; `-ffinite-math-only` makes an
+ordered comparison of a NaN unknown, and with `-fno-signed-zeros` the product of a zero and a value that
+is not finite and the sum of two values that are not finite. Under `-ffinite-math-only` a `requires` or
+an `invariant` states `!x.is_nan()` or `x.is_finite()` to exclude a NaN, since `x >= 0.0` no longer
 does.
 They also model struct fields, arrays of a constant length and
 their views (an element read by an index the path proves in bounds), and references; a call that

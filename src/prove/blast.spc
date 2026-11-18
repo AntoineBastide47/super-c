@@ -80,6 +80,9 @@ pub(package) struct Blaster<const B: usize> {
     dep: Vector<u64>,
     nstack: Vector<u32>,
     fx: u32, // the width of a float operation's signed exponents (`fx_of`)
+    // Where `round_pack` breaks a tie by `tie_up` (round the magnitude up) rather than to even (`fmid`).
+    tie_on: u32,
+    tie_up: u32,
     fterms: Vector<u32>, // the float operations built, in order (`float_lemmas`)
     nan_c: u32, // where the float operation being built is NaN (`nan_if`)
     nan_of: Map<u32, u32>, // per float operation built, `nan_c`
@@ -106,6 +109,8 @@ extend<const B: usize> Blaster<B> {
             dep: Vector::<u64>::new(),
             nstack: Vector::<u32>::new(),
             fx: 16,
+            tie_on: L_FALSE,
+            tie_up: L_FALSE,
             fterms: Vector::<u32>::new(),
             nan_c: L_FALSE,
             nan_of: Map::<u32, u32>::new(),
@@ -1326,7 +1331,12 @@ extend<const B: usize> Blaster<B> {
         let top = (n - m - 1) as usize;
         let g = y[top - 1];
         let st = self.any(&y, 0, top - 1);
-        let up0 = self.or2(st, y[top]);
+        let tie = if self.tie_on == L_FALSE {
+            y[top]
+        } else {
+            self.mux(self.tie_on, self.tie_up, y[top])
+        };
+        let up0 = self.or2(st, tie);
         let up = self.and2(g, up0);
         // The encoding without its sign: (exponent - 1) << M plus the significand, whose top bit then adds
         // the 1 back; a carry of the rounding moves into the exponent.
@@ -1542,6 +1552,8 @@ extend<const B: usize> Blaster<B> {
             self.frint(tm, x, &mut v);
         } else if x.op == T_FFMA {
             self.ffma(tm, x, &mut v);
+        } else if x.op == T_FMID {
+            self.fmid(tm, x, hi != 0, &mut v);
         } else if x.op == T_FREM {
             self.frem(tm, x, &mut v);
         } else if x.op == T_FKEY {
@@ -1675,6 +1687,95 @@ extend<const B: usize> Blaster<B> {
             let nan = self.or2(n0, n1);
             self.nan_if(nan, w, fd, v);
         }
+    }
+
+    // T_FMID: `b` plus the bound of the reals that round to `a` (`up`: the greatest), rounded once. The
+    // reals that round to `a` lie within half the gaps to its neighbors: as integers of a quarter unit of
+    // `a`, `4 sig + 2` away from zero and `4 sig - 2` toward it (`4 sig - 1` below a normal power of two,
+    // whose lower gap is half; 0 for a zero, whose sign they keep). A bound is one of them when `a` is
+    // even, the ties' choice; else a tie of the sum rounds toward `a`. Infinities and NaN as `a + b`.
+    fn fmid(self: &mut Self, tm: &Terms<B>, x: &Term<B>, up: bool, v: &mut Vector<u32>) {
+        let w = x.w as u32;
+        let fd = x.k.limb(0) & 0xFFFFFFFF;
+        let mut a = Vector::<u32>::new();
+        let mut b = Vector::<u32>::new();
+        self.get(tm, x.a, w, &mut a);
+        self.get(tm, x.b, w, &mut b);
+        let fa = self.unpack(&a, w, fd);
+        let fb = self.unpack(&b, w, fd);
+        let (_e, m, _fo) = Blaster::<B>::fmt(w, fd);
+        let bias = (1i64 << (_e - 1) as i64) - 1;
+        let mut sm1 = Vector::<u32>::new();
+        self.sub_k(&fa.sig, 1, &mut sm1);
+        let mut outer = Vector::<u32>::new();
+        let mut inner = Vector::<u32>::new();
+        let mut quarter = Vector::<u32>::new();
+        outer.push(L_FALSE);
+        outer.push(L_TRUE);
+        outer.extend_copy(&fa.sig);
+        inner.push(L_FALSE);
+        inner.push(L_TRUE);
+        inner.extend_copy(&sm1);
+        quarter.push(L_TRUE);
+        quarter.push(L_TRUE);
+        quarter.extend_copy(&sm1);
+        let mut k1 = Vector::<u32>::new();
+        Blaster::<B>::kbits(1, self.fx, &mut k1);
+        let low = self.any(&fa.sig, 0, m as usize);
+        let p2 = self.and2(fa.sig[m as usize], low ^ 1);
+        let e1 = self.eqv(&fa.ee, &k1);
+        let pow2 = self.and2(p2, e1 ^ 1);
+        let mut in2 = Vector::<u32>::new();
+        self.mux_vec(pow2, &quarter, &inner, &mut in2);
+        let mut zeros = Vector::<u32>::new();
+        for _i in 0..m + 3 {
+            zeros.push(L_FALSE);
+        }
+        let mut in3 = Vector::<u32>::new();
+        self.mux_vec(fa.zero, &zeros, &in2, &mut in3);
+        // Away from zero for the upper bound of a positive `a` and the lower of a negative one.
+        let away = pick(up, fa.s ^ 1, fa.s);
+        let mut sa = Vector::<u32>::new();
+        self.mux_vec(away, &outer, &in3, &mut sa);
+        let mut sb = Vector::<u32>::new();
+        sb.push(L_FALSE);
+        sb.push(L_FALSE);
+        sb.extend_copy(&fb.sig);
+        // The operand of greater magnitude first: its exponent is the greater too.
+        let mut ka = sa.clone();
+        ka.extend_copy(&fa.ee);
+        let mut kb = sb.clone();
+        kb.extend_copy(&fb.ee);
+        let swap = self.ult(&ka, &kb);
+        let sbig = self.mux(swap, fb.s, fa.s);
+        let mut eb = Vector::<u32>::new();
+        let mut es = Vector::<u32>::new();
+        let mut gb = Vector::<u32>::new();
+        let mut gs = Vector::<u32>::new();
+        self.mux_vec(swap, &fb.ee, &fa.ee, &mut eb);
+        self.mux_vec(swap, &fa.ee, &fb.ee, &mut es);
+        self.mux_vec(swap, &sb, &sa, &mut gb);
+        self.mux_vec(swap, &sa, &sb, &mut gs);
+        let s = self.xor2(fa.s, fb.s);
+        let mut xv = Vector::<u32>::new();
+        let mut z = Vector::<u32>::new();
+        self.fsum(&gb, &eb, &gs, &es, s, &mut xv, &mut z);
+        let mut z2 = Vector::<u32>::new();
+        self.sub_k(&z, bias + m as i64 + 2, &mut z2);
+        let zs = self.and2(s ^ 1, fa.s);
+        // An odd `a`'s bound rounds away from `a`: the reals past it give the sum plus a little toward `a`,
+        // so a tie rounds toward `a`: down for the upper bound, up for the lower, in value.
+        self.tie_on = fa.sig[0];
+        self.tie_up = pick(up, sbig, sbig ^ 1);
+        self.round_pack(sbig, &xv, &z2, zs, w, fd, true, v);
+        self.tie_on = L_FALSE;
+        self.take_if(fb.inf, &b, v);
+        self.take_if(fa.inf, &a, v);
+        let both = self.and2(fa.inf, fb.inf);
+        let opp = self.and2(both, s);
+        let n0 = self.or2(fa.nan, fb.nan);
+        let nan = self.or2(n0, opp);
+        self.nan_if(nan, w, fd, v);
     }
 
     // `a % b` (`T_FREM`, C's `fmod`) into `v`: NaN for a NaN operand, an infinite `a` or a zero `b`; `a`
@@ -2259,6 +2360,30 @@ extend<const B: usize> Blaster<B> {
             c.push(fr.nan);
             self.imply(&c, nc);
         }
+        if x.op == T_FMID {
+            // Either bound of `p + o` is at least `p` where `o >= 0` and at most where `o <= 0`, and at least
+            // `o` where `p`'s sign is clear (the reals that round to it are not negative), at most where set.
+            self.fx = Blaster::<B>::fx_of(w, fd);
+            let r = self.fbits(tm, t, w);
+            let p = self.fbits(tm, x.a, w);
+            let o = self.fbits(tm, x.b, w);
+            let zero = Blaster::<B>::fconst(w, fd, false);
+            let o0 = self.fcmp_bits(T_FLE, &zero, &o, w, fd);
+            let o1 = self.fcmp_bits(T_FLE, &o, &zero, w, fd);
+            let rp = self.fcmp_bits(T_FLE, &p, &r, w, fd);
+            let pr = self.fcmp_bits(T_FLE, &r, &p, w, fd);
+            let ro = self.fcmp_bits(T_FLE, &o, &r, w, fd);
+            let or0 = self.fcmp_bits(T_FLE, &r, &o, w, fd);
+            let ps = p[(w - 1) as usize];
+            for (cond, l) in [(o0, rp), (o1, pr), (ps ^ 1, ro), (ps, or0)] {
+                c.clear();
+                c.push(nc ^ 1);
+                c.push(cond);
+                self.imply(&c, l);
+            }
+            self.box_lemmas(tm, t, x, nc);
+            return;
+        }
         if x.op == T_FFMA {
             // `fma(a, b, c)` is at least `c` where `a * b >= 0`, at most where `a * b <= 0`: the exact sum
             // moves `c` that way, and rounding keeps the order.
@@ -2754,7 +2879,7 @@ extend<const B: usize> Blaster<B> {
         let fd = x.k.limb(0) & 0xFFFFFFFF;
         let unary = x.op == T_FSQRT || x.op == T_FRINT || x.op == T_FCVT;
         let fma = x.op == T_FFMA;
-        if !(x.op == T_FADD || x.op == T_FMUL || x.op == T_FDIV || unary || fma) || host_fw(w, fd) == 0 {
+        if !(x.op == T_FADD || x.op == T_FMUL || x.op == T_FDIV || x.op == T_FMID || unary || fma) || host_fw(w, fd) == 0 {
             return;
         }
         // The operands: a fused multiply-add's three lie in the argument pool.
@@ -2987,6 +3112,19 @@ const fn host_unary<const B: usize>(x: &Term<B>, v: u64) u64 {
     return pick(w == 32, (r as f32).to_bits(), r.to_bits());
 }
 
+// The host float of width `w` next to encoding `v` toward +inf (`up`) or -inf: an infinity and a NaN stay.
+const fn host_next(v: u64, up: bool, w: u16) u64 {
+    let sb = fsign(w);
+    let mag = v & sb - 1;
+    if mag >= pick(w == 32, 0x7F800000u64, 0x7FF0000000000000u64) {
+        return v;
+    }
+    if mag == 0 {
+        return pick(up, 1u64, sb | 1);
+    }
+    return pick((v & sb) == 0 == up, v + 1, v - 1);
+}
+
 // `a * b + c` with one rounding, of host floats of width `w` (encodings); NONE64 for a NaN.
 const fn host_fma(a: u64, b: u64, c: u64, w: u16) u64 {
     let r = if w == 32 {
@@ -3041,8 +3179,23 @@ fn match_hull<const B: usize>(tm: &Terms<B>, x: &Term<B>, la: u64, ha: u64, lb: 
                 }
             }
         }
+        // A bound of `p + o` lies between the sums with `p` and with its neighbor on the bound's side.
+        if x.op == T_FMID {
+            let up = x.k.limb(0) >> 32 != 0;
+            let fd = x.k.limb(0) & 0xFFFFFFFF;
+            for (p, q) in [(la, lb), (la, hb), (ha, lb), (ha, hb)] {
+                for v in [p, host_next(p, up, w)] {
+                    cs.push(
+                        switch fold_float(T_FADD, w, false, fd, w, u64_val::<B>(v), u64_val::<B>(q)) {
+                            Some(r) => r.limb(0),
+                            None => NONE64,
+                        },
+                    );
+                }
+            }
+        }
         for (p, q) in [(la, lb), (la, hb), (ha, lb), (ha, hb)] {
-            if x.op == T_FFMA {
+            if x.op == T_FFMA || x.op == T_FMID {
                 break;
             }
             cs.push(

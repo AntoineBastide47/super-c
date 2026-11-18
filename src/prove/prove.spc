@@ -137,7 +137,7 @@ extend<const B: usize> Eval<B> {
         if x.op >= T_LT && x.op <= T_NE {
             return !(tm.is_int(x.a) && tm.is_int(x.b) || tm.is_bool(x.a) && tm.is_bool(x.b));
         }
-        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG && x.op != T_ORD && (!float_op(x.op) || x.op == T_FFMA || !Eval::<
+        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG && x.op != T_ORD && (!float_op(x.op) || x.op == T_FFMA || x.op == T_FMID || !Eval::<
             B
         >::host_op(tm, &x)) || x.op == T_REF;
     }
@@ -11398,9 +11398,6 @@ extend<const B: usize> Prover<B> {
     // arithmetic (`a - b` is `a + -b`), C's `fmod` for `%`, and comparisons, with every value the build's
     // float rewrites allow (`fmath`); a sum or product the build may reassociate is an unknown value.
     fn float_binary(self: &mut Self, cb: &ir::CoreBody, op: u8, x: u32, y: u32, fw: u16, w: u16, sg: bool) u32 {
-        if !self.float_sums_exact(cb) && (op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 || op == tt::TokenType::Star as u8) {
-            return self.tm.var(w, sg);
-        }
         let fd = host_fd(fw);
         if op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 {
             let y2 = if op == tt::TokenType::Minus as u8 {
@@ -11408,19 +11405,29 @@ extend<const B: usize> Prover<B> {
             } else {
                 y
             };
-            return self.fsum(x, y2, fw, fd);
+            let r0 = self.fsum(x, y2, fw, fd);
+            let r = self.reassoc(cb, T_FADD, r0, x, y2, fw, fd);
+            let e = self.tm.farith(T_FADD, x, y2, fw, fd);
+            self.tm.set_shape(r, e);
+            return r;
         }
         if op == tt::TokenType::Star as u8 {
             let e = self.tm.farith(T_FMUL, x, y, fw, fd);
             let v = self.finite_only(e, x, y, true, fw, fd);
-            return if (self.fmath() & bman::CG_FINITE_MATH) != 0 {
+            let r0 = if (self.fmath() & bman::CG_FINITE_MATH) != 0 {
                 self.zero_sign(v, fw, fd)
             } else {
                 v
             };
+            let r = self.reassoc(cb, T_FMUL, r0, x, y, fw, fd);
+            self.tm.set_shape(r, e);
+            return r;
         }
         if op == tt::TokenType::Slash as u8 {
-            return self.fquot(x, y, fw, fd);
+            let r = self.fquot(x, y, fw, fd);
+            let e = self.tm.farith(T_FDIV, x, y, fw, fd);
+            self.tm.set_shape(r, e);
+            return r;
         }
         if op == tt::TokenType::Percent as u8 {
             return self.tm.farith(T_FREM, x, y, fw, fd);
@@ -11554,9 +11561,130 @@ extend<const B: usize> Prover<B> {
         return self.zero_sign(v, fw, fd);
     }
 
+    // Sum or product (`op`) `r` of floats `x` and `y` where the build reassociates (`float_sums_exact`): the
+    // optimizer folds `(a op c1) op c2` into `a op (c1 op c2)` for constants (which inlining can make of any
+    // value) and computes a loop's running sum or product in another order. Where an operand may be such
+    // a partial result (`may_chain`), the result is `r` or a value with the order every association keeps:
+    // `x + y` against `x` by the sign of `y`; `x * y` against `x` by the magnitude of `y`, with the sign of
+    // their product. A loop's value takes the steps one by one, so these steps reach every order too.
+    fn reassoc(self: &mut Self, cb: &ir::CoreBody, op: u8, r: u32, x: u32, y: u32, fw: u16, fd: u64) u32 {
+        if self.float_sums_exact(cb) {
+            return r;
+        }
+        let mut alt = NONE;
+        for side in 0..2 {
+            let (p, o) = pick(side == 0, (x, y), (y, x));
+            if self.may_chain(op, p) {
+                let f = self.chained(op, p, o, fw, fd);
+                alt = if alt == NONE {
+                    f
+                } else {
+                    let b = self.tm.var(W_BOOL, false);
+                    self.tm.choose(b, alt, f, fw)
+                };
+            }
+        }
+        if alt == NONE {
+            return r;
+        }
+        let b = self.tm.var(W_BOOL, false);
+        return self.tm.choose(b, r, alt, fw);
+    }
+
+    // Whether float `p` may be a partial result of operation `op` the optimizer reassociates: an operation
+    // `op`, its negation, or no operation here (a parameter, a call's result, a load, a choice). A model's
+    // value is its IEEE operation's (`Terms::shape`).
+    fn may_chain(self: &Self, op: u8, p0: u32) bool {
+        let p = self.tm.shape(p0);
+        let t = self.tm.at(p);
+        if t.op == T_BXOR {
+            return self.may_chain(op, t.a) || self.may_chain(op, t.b);
+        }
+        return t.op == op || self.tm.is_choice(p) || t.op != T_INT && !float_op(t.op) && t.op != T_BAND && t.op != T_BOR;
+    }
+
+    // `p op o` with `p` a partial result `a op c` whose operation the optimizer reassociates into
+    // `a op (c op o)`: a value with the order facts of `reassoc`, else (a NaN `p`, an infinite `p` against an
+    // `o` of the other sign, where `c op o` may overflow into the opposite infinity; for a product, a zero or
+    // infinite `p` or `o`) an unknown value. A value that breaks them is taken as the IEEE result, which
+    // keeps them; a NaN `o` constrains nothing.
+    fn chained(self: &mut Self, op: u8, p: u32, o: u32, fw: u16, fd: u64) u32 {
+        let e = self.tm.farith(op, p, o, fw, fd);
+        let zero = self.tm.int(Num::<B>::zero(), fw, false);
+        let u = self.tm.var(fw, false);
+        let mut ok = if op == T_FADD {
+            self.sum_kept(p, o, fw, fd)
+        } else {
+            let fp = self.float_class(FC_FINITE, p, fw, fd);
+            let fo = self.float_class(FC_FINITE, o, fw, fd);
+            self.tm.and(fp, fo)
+        };
+        let keeps = if op == T_FADD {
+            // o >= 0: u >= p; o <= 0: u <= p.
+            let up = self.tm.fcmp(T_FLE, zero, o, fd);
+            let dn = self.tm.fcmp(T_FLE, o, zero, fd);
+            let ge = self.tm.fcmp(T_FLE, p, u, fd);
+            let le = self.tm.fcmp(T_FLE, u, p, fd);
+            let nup = self.tm.not(up);
+            let ndn = self.tm.not(dn);
+            let c1 = self.tm.or(nup, ge);
+            let c2 = self.tm.or(ndn, le);
+            self.tm.and(c1, c2)
+        } else {
+            // |o| >= 1: |u| >= |p|; |o| <= 1: |u| <= |p|; the sign of u that of p times o.
+            let pz = self.float_class(FC_ZERO, p, fw, fd);
+            let npz = self.tm.not(pz);
+            ok = self.tm.and(ok, npz);
+            let one = self.tm.int(u64_val::<B>(pick(fw == 32, 1.0f32.to_bits(), 1.0f64.to_bits())), fw, false);
+            let ma = self.tm.fabs(o, fw);
+            let mp = self.tm.fabs(p, fw);
+            let mu = self.tm.fabs(u, fw);
+            let big = self.tm.fcmp(T_FLE, one, ma, fd);
+            let small = self.tm.fcmp(T_FLE, ma, one, fd);
+            let ge = self.tm.fcmp(T_FLE, mp, mu, fd);
+            let le = self.tm.fcmp(T_FLE, mu, mp, fd);
+            let nbig = self.tm.not(big);
+            let nsmall = self.tm.not(small);
+            let c1 = self.tm.or(nbig, ge);
+            let c2 = self.tm.or(nsmall, le);
+            let sp = self.float_class(FC_NEG, p, fw, fd);
+            let so = self.float_class(FC_NEG, o, fw, fd);
+            let su = self.float_class(FC_NEG, u, fw, fd);
+            let sx = self.tm.cmp(T_NE, sp, so);
+            let sign = self.tm.cmp(T_EQ, su, sx);
+            let c12 = self.tm.and(c1, c2);
+            self.tm.and(c12, sign)
+        };
+        let nok = self.tm.not(ok);
+        let take = self.tm.or(nok, keeps);
+        return self.tm.choose(take, u, e, fw);
+    }
+
+    // Where a sum `p + o` whose `p` stands for a real it rounds (a product, or a partial sum) keeps the order
+    // of `p` and `o`: `p` is no NaN, and no infinity against an `o` of the other sign, where that real
+    // plus `o` may be anything.
+    fn sum_kept(self: &mut Self, p: u32, o: u32, fw: u16, fd: u64) u32 {
+        let zero = self.tm.int(Num::<B>::zero(), fw, false);
+        let inf = pick(fw == 32, 0x7F800000u64, 0x7FF0000000000000u64);
+        let pinf = self.tm.int(u64_val::<B>(inf), fw, false);
+        let ninf = self.tm.int(u64_val::<B>(inf | fsign(fw)), fw, false);
+        let ip = self.tm.cmp(T_EQ, p, pinf);
+        let in0 = self.tm.cmp(T_EQ, p, ninf);
+        let olt = self.tm.fcmp(T_FLT, o, zero, fd);
+        let ogt = self.tm.fcmp(T_FLT, zero, o, fd);
+        let b1 = self.tm.and(ip, olt);
+        let b2 = self.tm.and(in0, ogt);
+        let bad = self.tm.or(b1, b2);
+        let np = self.float_class(FC_NAN, p, fw, fd);
+        let bad2 = self.tm.or(bad, np);
+        return self.tm.not(bad2);
+    }
+
     // Whether float `p` may be a product the optimizer fuses into a sum: not a constant, and no operation
-    // other than a product, a product's negation or a choice (a value the build's rewrites leave open).
-    fn may_fuse(self: &Self, p: u32) bool {
+    // other than a product, a product's negation or a choice (a value the build's rewrites leave open). A
+    // model's value is its IEEE operation's (`Terms::shape`).
+    fn may_fuse(self: &Self, p0: u32) bool {
+        let p = self.tm.shape(p0);
         let t = self.tm.at(p);
         if t.op == T_BXOR {
             return self.may_fuse(t.a) || self.may_fuse(t.b);
@@ -11565,16 +11693,21 @@ extend<const B: usize> Prover<B> {
     }
 
     // `p + o` with `p`'s product fused: `fma(a, b, o)` of a product term `a * b` (or of its negation,
-    // `-a * b`), else a value between the sums of `o` with `p`'s neighbors where those and the operands are
-    // finite, and an unknown value where not.
+    // `-a * b`), else, where `sum_kept` and `o` is no NaN, a value between the sums of `o` with the least and
+    // the greatest reals that round to `p` (T_FMID), each rounded once, and an unknown value where not.
     fn fused(self: &mut Self, p: u32, o: u32, fw: u16, fd: u64) u32 {
-        let t = self.tm.at(p);
+        let t = self.tm.at(self.tm.shape(p));
         let mut xs = Vector::<u32>::with_capacity(3);
+        let (ta, tb) = if t.op == T_BXOR {
+            (self.tm.shape(t.a), self.tm.shape(t.b))
+        } else {
+            (NONE, NONE)
+        };
         if t.op == T_FMUL {
             xs.push(t.a);
             xs.push(t.b);
-        } else if t.op == T_BXOR && (self.tm.at(t.a).op == T_FMUL || self.tm.at(t.b).op == T_FMUL) {
-            let m = self.tm.at(pick(self.tm.at(t.a).op == T_FMUL, t.a, t.b));
+        } else if t.op == T_BXOR && (self.tm.at(ta).op == T_FMUL || self.tm.at(tb).op == T_FMUL) {
+            let m = self.tm.at(pick(self.tm.at(ta).op == T_FMUL, ta, tb));
             xs.push(self.tm.fneg(m.a, fw));
             xs.push(m.b);
         }
@@ -11582,15 +11715,12 @@ extend<const B: usize> Prover<B> {
             xs.push(o);
             return self.tm.ffma(&xs, fw, fd);
         }
-        let dn = self.fneighbor(p, false, fw, fd);
-        let up = self.fneighbor(p, true, fw, fd);
-        let lo = self.tm.farith(T_FADD, dn, o, fw, fd);
-        let hi = self.tm.farith(T_FADD, up, o, fw, fd);
-        let mut ok = self.float_class(FC_FINITE, p, fw, fd);
-        for z in [o, lo, hi] {
-            let fz = self.float_class(FC_FINITE, z, fw, fd);
-            ok = self.tm.and(ok, fz);
-        }
+        let lo = self.tm.fmid(p, o, false, fw, fd);
+        let hi = self.tm.fmid(p, o, true, fw, fd);
+        let no = self.float_class(FC_NAN, o, fw, fd);
+        let nno = self.tm.not(no);
+        let kept = self.sum_kept(p, o, fw, fd);
+        let ok = self.tm.and(kept, nno);
         let u = self.tm.var(fw, false);
         let l = self.tm.fcmp(T_FLE, lo, u, fd);
         let h = self.tm.fcmp(T_FLE, u, hi, fd);
@@ -11598,23 +11728,6 @@ extend<const B: usize> Prover<B> {
         let nok = self.tm.not(ok);
         let take = self.tm.or(nok, inside);
         return self.tm.choose(take, u, lo, fw);
-    }
-
-    // The float next to finite `x` toward +inf (`up`) or -inf, as an encoding: one unit of its magnitude
-    // away from or toward zero, from a zero the least subnormal of that sign.
-    fn fneighbor(self: &mut Self, x: u32, up: bool, fw: u16, fd: u64) u32 {
-        let (sb, _mg) = Terms::<B>::fsign_num(fw);
-        let zero = self.tm.int(Num::<B>::zero(), fw, false);
-        let one = self.tm.int(Num::<B>::one(), fw, false);
-        let least = self.tm.int(pick(up, Num::<B>::one(), sb | Num::<B>::one()), fw, false);
-        let zx = self.tm.fcmp(T_FEQ, x, zero, fd);
-        let neg = self.tm.fcmp(T_FLT, x, zero, fd);
-        // `choose` keeps the low bits: the sum of a NaN's all-ones encoding wraps, and is not chosen.
-        let inc = self.tm.arith(T_ADD, x, one, fw, false);
-        let dec = self.tm.arith(T_SUB, x, one, fw, false);
-        let (on_neg, on_pos) = pick(up, (dec, inc), (inc, dec));
-        let step = self.tm.choose(neg, on_neg, on_pos, fw);
-        return self.tm.choose(zx, least, step, fw);
     }
 
     // Conversion `rv` of `x` into or out of a float, into type (`w`, `sg`): between floats, from an integer
@@ -13470,15 +13583,18 @@ extend<const B: usize> Prover<B> {
             self.tm.fcopysign(xs[0], xs[1], fw)
         } else if name == "recip" {
             let one = self.tm.int(u64_val::<B>(pick(fw == 32, 1.0f32.to_bits(), 1.0f64.to_bits())), fw, false);
-            self.fquot(one, xs[0], fw, fd)
+            let r = self.fquot(one, xs[0], fw, fd);
+            let e = self.tm.farith(T_FDIV, one, xs[0], fw, fd);
+            self.tm.set_shape(r, e);
+            r
         } else if name == "fract" {
-            if self.float_sums_exact(cb) {
-                let tr = self.tm.frint(xs[0], FR_TRUNC, fw, fd);
-                let nt = self.tm.fneg(tr, fw);
-                self.fsum(xs[0], nt, fw, fd)
-            } else {
-                self.tm.var(fw, false)
-            }
+            let tr = self.tm.frint(xs[0], FR_TRUNC, fw, fd);
+            let nt = self.tm.fneg(tr, fw);
+            let r0 = self.fsum(xs[0], nt, fw, fd);
+            let r = self.reassoc(cb, T_FADD, r0, xs[0], nt, fw, fd);
+            let e = self.tm.farith(T_FADD, xs[0], nt, fw, fd);
+            self.tm.set_shape(r, e);
+            r
         } else if name == "fma" {
             self.tm.ffma(&xs, fw, fd)
         } else {

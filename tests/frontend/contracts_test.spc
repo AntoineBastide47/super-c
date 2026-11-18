@@ -4317,8 +4317,9 @@ fn unproved_float_claims_are_errors() {
 }
 
 // Each float rewrite a build allows leaves unproved exactly the IEEE claims it can break (the lines of
-// the cases' `ensures`), and the bounds that all the values it allows meet stay proved; `-ffast-math`
-// also reassociates the sums and products, whose results are then unknown.
+// the cases' `ensures`), and the claims that all the values it allows meet stay proved: bounds under
+// every rewrite but reassociation, which keeps only the order against an operand that may stand for a
+// partial result.
 @test
 fn float_rewrites_break_only_their_claims() {
     let p = cli::proj_new();
@@ -4392,6 +4393,40 @@ pub fn fma_in(a: f32, b: f32, c: f32) f32
     return a * b + c;
 }
 
+// Order claims every rewrite keeps: against the operand that may stand for a partial result or a
+// product, and through a loop that reassociation reorders.
+pub fn grows(x: f32, y: f32) f32
+    requires x.is_finite() && y.is_finite()
+    ensures |r| r >= x
+{
+    return x + y.abs();
+}
+pub fn scales(x: f32, y: f32) f32
+    requires x.is_finite() && y.is_finite() && x > 0.0
+    ensures |r| r >= x
+{
+    return x * (y.abs() + 1.0);
+}
+pub fn total(a: []f32) f32
+    requires forall i in 0..a.len() { a[i].is_finite() && a[i] >= 0.0 }
+    ensures |r| !r.is_nan() && r >= 0.0
+{
+    let mut s: f32 = 0.0;
+    for i in 0..a.len() invariant !s.is_nan() && s >= 0.0 {
+        s = s + a[i];
+    }
+    return s;
+}
+
+// No slack: a sum with a fused product stays at least 0; a reassociated one may not (`a` may be a -0
+// whose partial product is negative).
+pub fn fused_ge(a: f32, b: f32, c: f32) f32
+    requires a.is_finite() && b.is_finite() && c.is_finite() && a >= 0.0 && b >= 0.0 && c >= 0.0
+    ensures |r| r >= 0.0
+{
+    return a * b + c;
+}
+
 // std's packing holds its own conversions under every rewrite.
 pub fn packed(x: f32, y: f32) u32 {
     return packing::pack_unorm2x16(vec::Vec::<f32, 2> { e: [x, y] });
@@ -4408,7 +4443,8 @@ fn main() i32 {
         ("-ffinite-math-only", "31"),
         ("-ffinite-math-only -fno-signed-zeros", "13 19 25 31"),
         ("-ffp-contract=fast", "13 19 37 43"),
-        ("-ffast-math", "7 13 19 25 31 37 43 51 64"),
+        ("-fassociative-math", "13 19 25 37 43 51 64 98"),
+        ("-ffast-math", "7 13 19 25 31 37 43 51 64 98"),
     ];
     for k in 0..cases.len() {
         let (flags, want) = cases[k];
