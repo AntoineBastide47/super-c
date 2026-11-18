@@ -16416,16 +16416,6 @@ const fn looks_up_bytes(t: Inst) bool {
     ) && lane_type(t.ty) == T_I8;
 }
 
-// Whether every byte of vector `v` of `b` is below 16: an `and` with a constant whose bytes are.
-const fn small_bytes(b: &Body, v: Value) bool {
-    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_AND {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    let k = splat_of(b, t.b).or(splat_of(b, t.a));
-    return k.is_some() && k.unwrap() < 16;
-}
-
 // Whether `t` counts the leading zeros of the integer lanes of one vector (`SIMD_CLZ`).
 const fn counts_zeros(t: Inst) bool {
     return t.op == O_VOP && t.b == 1 && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_CLZ as u32 && is_vec(

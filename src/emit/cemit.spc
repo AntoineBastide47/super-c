@@ -169,6 +169,7 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
         bmi1: feature(pk, fs, "bmi1"),
         bmi2: feature(pk, fs, "bmi2"),
         movbe: feature(pk, fs, "movbe"),
+        relaxed: feature(pk, fs, "relaxed-simd"),
     };
 }
 

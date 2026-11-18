@@ -7408,6 +7408,10 @@ const V_EQ: [u32; 4] = [0x23, 0x2D, 0x37, 0xD6];
 const V_EXTMUL: [u32; 3] = [0x9C, 0xBC, 0xDC];
 // `i32x4.dot_i16x8_s`.
 const V_DOT_I16: u32 = 0xBA;
+// Relaxed SIMD's `i8x16.relaxed_swizzle`, and `i8x16.relaxed_laneselect` (then the 2-, 4- and 8-byte
+// lanes').
+const V_RELAXED_SWIZZLE: u32 = 0x100;
+const V_LANESELECT: u32 = 0x109;
 const V_EXTEND: [u32; 3] = [0x87, 0xA7, 0xC7];
 // Per integer condition (C_EQ .. C_UGE), its comparison's offset from the lanes' `eq`: 1, 2 and 4-byte lanes
 // (eq, ne, lt_s, lt_u, gt_s, gt_u, le_s, le_u, ge_s, ge_u), 8-byte lanes (eq, ne, lt_s, gt_s, le_s, ge_s).
@@ -7719,7 +7723,14 @@ extend Gen {
             self.vget(t.b);
             self.vget(t.c);
             self.vget(t.a);
-            self.sop(0x52);
+            // Of a lane mask (each lane all ones or 0) relaxed SIMD's lane select takes either bit of a
+            // lane: the bit select's result.
+            let mt = self.vt(t.a);
+            if self.p().cpu_of(self.b()).relaxed && is_int(lane_type(mt)) && lane_mask(self.b(), t.a, lv::MASK_DEPTH) {
+                self.sop(V_LANESELECT + type_bytes(lane_type(mt), 4).trailing_zeros() as u32);
+            } else {
+                self.sop(0x52);
+            }
         } else if op == O_VZIPLO || op == O_VZIPHI || op == O_VUNZIP {
             // Lane j of a zip is lane j / 2 (plus half the lanes for the high halves) of `a` (j even) or `b`;
             // of an unzip lane 2j + aux of `a ++ b`. `b`'s lanes start at byte 16.
@@ -8194,9 +8205,13 @@ extend Gen {
         }
         self.vpre(i);
         if c == core::SIMD_SWIZZLE_ZERO && t.c == VNONE {
+            // Indices below 16: relaxed SIMD's swizzle gives the exact one's lanes.
+            let ix = b.pool[t.a as usize + 1];
             self.vget(a);
-            self.vget(b.pool[t.a as usize + 1]);
-            self.sop(w::I8X16_SWIZZLE);
+            self.vget(ix);
+            self.sop(
+                ast::pick(self.p().cpu_of(self.b()).relaxed && small_bytes(b, ix), V_RELAXED_SWIZZLE, w::I8X16_SWIZZLE),
+            );
             self.vpost(i);
             return true;
         }

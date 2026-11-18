@@ -30,7 +30,7 @@ X86_FEAT = {
     'Fma': 'fma', 'Avx512f': 'avx512f', 'Avx512vl': 'avx512vl', 'Avx512bw': 'avx512bw', 'Avx512dq': 'avx512dq',
     'Avx512cd': 'avx512cd', 'Avx512vbmi': 'avx512vbmi', 'Avx512vbmi2': 'avx512vbmi2', 'Avx512vnni': 'avx512vnni',
     'Avx512bitalg': 'avx512bitalg', 'Avx512vpopcntdq': 'avx512vpopcntdq', 'Vaes': 'vaes', 'Gfni': 'gfni',
-    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2', 'Bmi1': 'bmi', 'Bmi2': 'bmi2', 'Sha': 'sha',
+    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2', 'Bmi1': 'bmi', 'Bmi2': 'bmi2', 'Sha': 'sha', 'Vpclmulqdq': 'vpclmulqdq',
 }
 
 def parse_bindings():

@@ -168,7 +168,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1151] = [
+pub(package) const ROWS: [Row; 1154] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -515,6 +515,9 @@ pub(package) const ROWS: [Row; 1151] = [
     r("pshufd", 0xF70, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     // The AVX-512 forms the code generator's 64-byte vectors take beyond the intrinsics' rows below.
     v("vpandd", 0xFDB, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, VEX, k4(K::X, K::XV, K::XM, K::I8)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, VEX | L1, k4(K::Y, K::YV, K::YM, K::I8)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, EVEX | L2, k4(K::Z, K::ZV, K::ZM, K::I8)),
     v("vpxord", 0xFEF, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
     v("vpternlogq", 0xF3A25, 0x66, D, EVEX | W1 | L2 | MK | MZ, k4(K::Z, K::ZV, K::ZM, K::I8)),
     v("vxorps", 0xF57, 0, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),

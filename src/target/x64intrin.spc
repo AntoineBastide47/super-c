@@ -8,7 +8,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 736] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 738] = [
     ("_andn_u32", "andnl %esi, %edi, %eax"),
     ("_andn_u64", "andnq %rsi, %rdi, %rax"),
     ("_bextr_u32", "movzbl %sil, %eax\nshll $8, %edx\norl %eax, %edx\nbextrl %edx, %edi, %eax"),
@@ -53,6 +53,7 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 736] = [
     ("_mm256_castsi256_pd", ""),
     ("_mm256_castsi256_ps", ""),
     ("_mm256_castsi256_si128", ""),
+    ("_mm256_clmulepi64_epi128", "vpclmulqdq $@2, %ymm1, %ymm0, %ymm0"),
     ("_mm256_cmp_epi16_mask", "vpcmpw $@2, %ymm1, %ymm0, %k0\nkmovd %k0, %eax"),
     ("_mm256_cmp_epi32_mask", "vpcmpd $@2, %ymm1, %ymm0, %k0\nkmovw %k0, %eax"),
     ("_mm256_cmp_epi64_mask", "vpcmpq $@2, %ymm1, %ymm0, %k0\nkmovw %k0, %eax"),
@@ -286,6 +287,7 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 736] = [
     ("_mm512_castsi512_pd", ""),
     ("_mm512_castsi512_ps", ""),
     ("_mm512_castsi512_si256", ""),
+    ("_mm512_clmulepi64_epi128", "vpclmulqdq $@2, %zmm1, %zmm0, %zmm0"),
     ("_mm512_cmp_epi16_mask", "vpcmpw $@2, %zmm1, %zmm0, %k0\nkmovd %k0, %eax"),
     ("_mm512_cmp_epi32_mask", "vpcmpd $@2, %zmm1, %zmm0, %k0\nkmovw %k0, %eax"),
     ("_mm512_cmp_epi64_mask", "vpcmpq $@2, %zmm1, %zmm0, %k0\nkmovw %k0, %eax"),

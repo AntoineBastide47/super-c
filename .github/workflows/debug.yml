@@ -224,6 +224,45 @@ jobs:
           ../super-c.exe build main.spc -o prog.exe; echo "build=$?"
           ./prog.exe; echo "run=$?"
 
+  # x86-64-v3's scalar forms (BMI1, BMI2, MOVBE) on a real x86-64 runner: a release compiler built for the
+  # baseline and one for x86-64-v3, each timed building the compiler, alternating, three rounds.
+  bench-v3:
+    needs: compile
+    name: bench (linux, x86-64-v3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Time the baseline and x86-64-v3 compilers
+        run: |
+          set -eu
+          chmod +x ./super-c
+          grep -o -w -E 'bmi1|bmi2|movbe|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          ./super-c build --profile=release -fno-prove --out-dir=b1 -o sc-v1
+          ./super-c build --profile=release -fno-prove --target-cpu=x86-64-v3 --out-dir=b3 -o sc-v3
+          objdump -d sc-v3 | grep -c -E '\b(andn|blsr|blsi|blsmsk|shlx|shrx|sarx|rorx|mulx|movbe)\b' || true
+          for r in 1 2 3; do
+            for v in v1 v3; do
+              rm -rf "t-$v"
+              s=$(date +%s.%N)
+              "./sc-$v" build -fno-prove --out-dir="t-$v" -o "o-$v" > /dev/null
+              e=$(date +%s.%N)
+              echo "round $r $v: $(echo "$e - $s" | bc) s"
+            done
+          done
+
   wasm-compile:
     name: wasm compile
     runs-on: ubuntu-latest

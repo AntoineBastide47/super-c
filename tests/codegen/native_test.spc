@@ -42,6 +42,7 @@ const LINES: u32 = 4096;
 const CSSC: u32 = 8192;
 const BMI: u32 = 16384;
 const DOT: u32 = 32768;
+const RELAXED: u32 = 65536;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -186,6 +187,25 @@ fn run_wasm(text: str, driver: str) i32 {
     return run_lir(&t, driver, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), &cc, "wasmtime run ", 0);
 }
 
+// `run_wasm` with relaxed SIMD (`Cpu.relaxed`); 0 without WASI_SDK_PATH.
+fn run_wasm_relaxed(text: str, driver: str) i32 {
+    let sdk = stdlib::get_env("WASI_SDK_PATH").unwrap_or(String::new());
+    if sdk.len() == 0 {
+        return 0;
+    }
+    let t = format("lir ptr 4\n{}", text.slice(10, text.len()));
+    let cc = format("\"{}/bin/clang\" --target=wasm32-wasip1", sdk.as_str());
+    return run_lir(
+        &t,
+        driver,
+        tgt::axis_index("wasm", false),
+        tgt::axis_index("wasm32", true),
+        &cc,
+        "wasmtime run ",
+        RELAXED,
+    );
+}
+
 // Compile LIR `text` for `(os, isa)` into object `obj`, with package options `opts` (TAIL, WIDE, HALF, Z512, POPCNT);
 // whether it did (the failure on stderr).
 fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool {
@@ -219,6 +239,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.bmi1 = (opts & BMI) != 0;
     p.cpu.bmi2 = p.cpu.bmi1;
     p.cpu.movbe = p.cpu.bmi1;
+    p.cpu.relaxed = (opts & RELAXED) != 0;
     p.cpu.vec_dot = if (opts & DOT) != 0 {
         0x301
     } else {
@@ -1932,6 +1953,86 @@ int main(void) {
     if tgt::host_isa() == tgt::axis_index("aarch64", true) && detect::has(cpu::Feature::Dotprod) {
         assert_eq(run_native_with(lir, drv, DOT), 0);
     }
+}
+
+// wasm's relaxed SIMD where its result is the exact form's: a select of a lane mask is
+// `relaxed_laneselect` of the mask's lanes, a byte lookup of indices below 16 (`and` 15) is
+// `relaxed_swizzle`. They give the C results, without relaxed SIMD too.
+@test
+fn relaxed_simd_takes_the_determined_forms() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+sym @look fn global
+fn @pick
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8i16 v1 align 0
+  v4 = load.v8i16 v2 align 0
+  v5 = vcmp.slt.v8i16 v3, v4
+  v6 = vsel.v8i16 v5, v4, v3
+  store v6, v0 align 0
+  v7 = load.v4i32 v1 align 0
+  v8 = load.v4i32 v2 align 0
+  v9 = vcmp.ult.v4i32 v7, v8
+  v10 = vsel.v4i32 v9, v7, v8
+  store v10, v0+16 align 0
+  ret
+fn @look
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v1 align 0
+  v4 = load.v16i8 v2 align 0
+  v5 = iconst.i8 15
+  v6 = splat.v16i8 v5
+  v7 = and.v16i8 v4, v6
+  v8 = vop.swizzle_or_zero.v16i8 (v3, v7)
+  store v8, v0 align 0
+  ret
+)";
+    let mut wo = Vector::<u8>::new();
+    let t = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&t, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), RELAXED, &mut wo),
+        "the module",
+    );
+    // 0xFD then the LEB128 opcodes 0x10A, 0x10B (lane selects of 2- and 4-byte lanes), 0x100 (swizzle).
+    let sel16: [u8; 3] = [0xFD, 0x8A, 0x02];
+    let sel32: [u8; 3] = [0xFD, 0x8B, 0x02];
+    let swz: [u8; 3] = [0xFD, 0x80, 0x02];
+    assert(holds(&wo, sel16[0..3]) && holds(&wo, sel32[0..3]) && holds(&wo, swz[0..3]), "the relaxed forms");
+    let mut wp = Vector::<u8>::new();
+    assert(object_of(&t, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut wp), "the module");
+    assert(!holds(&wp, sel16[0..3]) && !holds(&wp, swz[0..3]), "no relaxed form without relaxed SIMD");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+void pick(void *, const void *, const void *);
+void look(uint8_t *, const uint8_t *, const uint8_t *);
+int main(void) {
+  for (int r = 0; r < 64; r++) {
+    int16_t a[8], b[8]; uint32_t c[4], d[4];
+    union { int16_t h[8]; uint32_t w[4]; } x, y;
+    uint8_t out[32];
+    for (int i = 0; i < 8; i++) { x.h[i] = (int16_t)(r * 131 + i * 7919); y.h[i] = (int16_t)(r * 17 - i * 3001); }
+    for (int i = 0; i < 8; i++) { a[i] = x.h[i]; b[i] = y.h[i]; }
+    pick(out, x.h, y.h);
+    const int16_t *m = (const int16_t *)out;
+    for (int i = 0; i < 8; i++) if (m[i] != (a[i] < b[i] ? b[i] : a[i])) return 1;
+    for (int i = 0; i < 4; i++) { c[i] = x.w[i]; d[i] = y.w[i]; }
+    const uint32_t *u = (const uint32_t *)(out + 16);
+    for (int i = 0; i < 4; i++) if (u[i] != (c[i] < d[i] ? c[i] : d[i])) return 2;
+    uint8_t t[16], ix[16], o[16];
+    for (int i = 0; i < 16; i++) { t[i] = (uint8_t)(i * 29 + r); ix[i] = (uint8_t)(i * 37 + r * 5); }
+    look(o, t, ix);
+    for (int i = 0; i < 16; i++) if (o[i] != t[ix[i] & 15]) return 3;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    assert_eq(run_wasm_relaxed(lir, drv), 0);
 }
 
 // Atomic read-modify-writes whose old value nothing reads (x86-64 `lock or`, `lock and`, `lock add`,
@@ -16478,7 +16579,9 @@ int main(void) {
 // An aggregate parameter whose one use is an argument the call takes in registers of the same parts goes
 // on in the registers it arrived in: `down` and `step` pass it on to each other in sibling calls (through
 // a pointer too), their argument registers swapped, ten million deep in a constant stack (C enters through
-// `run`: Microsoft x64 passes C's 16-byte aggregate by reference, Super-C's own convention in registers); `shifty` holds
+// `run`: Microsoft x64 passes C's 16-byte aggregate by reference, Super-C's own convention in registers;
+// a call through a pointer takes C's convention there, its aggregate a copy in the caller's frame, so the
+// Windows driver goes a thousand deep); `shifty` holds
 // its registers over a shift and a division (rcx and rdx on System V), `fswap` its float registers. An
 // 8-byte aggregate passed on by its address (`by_addr`) keeps its memory, which the frame holds: no
 // sibling call (`peek` writes its own stack before it reads it).
@@ -16573,9 +16676,14 @@ int64_t peek(const struct Q *q) {
 }
 int64_t eat(struct P p, int64_t v) { return p.a * 3 + p.b * 5 + v; }
 double fsum(struct F f, double x) { return f.x * 2 + f.y * 3 + x; }
+#ifdef _WIN32
+#define DEPTH 1000
+#else
+#define DEPTH 10000000
+#endif
 int main(void) {
   struct P p = {7, 100};
-  if (run(p, 10000000) != -94 || run(p, 0) != -94) return 1;
+  if (run(p, DEPTH) != -94 || run(p, 0) != -94) return 1;
   if (shifty(13, 3, p) != 629) return 2;
   struct F f = {1.5, 2.25};
   if (fswap(0.5, f) != 10.25) return 3;

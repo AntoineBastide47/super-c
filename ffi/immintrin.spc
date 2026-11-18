@@ -225,6 +225,9 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm256_castsi256_si128(a: __m256i) __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Vpclmulqdq, cpu::Feature::Avx])
+    pub fn _mm256_clmulepi64_epi128(a: __m256i, b: __m256i, imm8: i32) __m256i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Avx512vl, cpu::Feature::Avx512bw])
     pub fn _mm256_cmp_epi16_mask(a: __m256i, b: __m256i, c: i32) u16;
     @arch(x86_64)
@@ -1149,6 +1152,9 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Avx512f])
     @unsafe(safe)
     pub fn _mm512_castsi512_si256(a: __m512i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Vpclmulqdq, cpu::Feature::Avx512f])
+    pub fn _mm512_clmulepi64_epi128(a: __m512i, b: __m512i, imm8: i32) __m512i;
     @arch(x86_64)
     @target_feature([cpu::Feature::Avx512bw])
     pub fn _mm512_cmp_epi16_mask(a: __m512i, b: __m512i, c: i32) u32;
