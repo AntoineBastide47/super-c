@@ -636,41 +636,37 @@ fn clamp_f<T: Float>(x: T, lo: T, hi: T) T {
     return m;
 }
 
-// `round(clamp(x, 0, 1) * scale)` as an integer. The lower bound is tested first, so a NaN takes it:
-// every result fits, and NaN gives 0 as a saturating `as` does.
+// `round(clamp(x, 0, 1) * scale)` as an integer; NaN gives 0 as a saturating `as` does. The bounds are
+// tested on the rounded product, so every result fits whatever the build's float rewrites make of it.
 const fn unorm(x: f32, scale: f32) u32
-    requires scale >= 0.0 && scale < 2147483648.0
+    requires scale.is_finite() && scale >= 0.0 && scale < 2147483648.0
 {
-    let lo = if 0.0 < x {
-        x
+    let top = scale.round();
+    let r = (x * scale).round();
+    return if r.is_nan() || !(r > 0.0) {
+        0
+    } else if r >= top {
+        unsafe top.to_int_unchecked::<u32>()
     } else {
-        0.0
+        unsafe r.to_int_unchecked::<u32>()
     };
-    let c = if 1.0 < lo {
-        1.0
-    } else {
-        lo
-    };
-    return unsafe (c * scale).round().to_int_unchecked::<u32>();
 }
 
 // `round(clamp(x, -1, 1) * scale)` as an integer, as `unorm` (NaN gives 0).
 const fn snorm(x: f32, scale: f32) i32
-    requires scale >= 0.0 && scale < 2147483648.0
+    requires scale.is_finite() && scale >= 0.0 && scale < 2147483648.0
 {
-    let lo = if -1.0 < x {
-        x
-    } else if x == x {
-        -1.0
+    let top = scale.round();
+    let r = (x * scale).round();
+    return if r.is_nan() {
+        0
+    } else if r >= top {
+        unsafe top.to_int_unchecked::<i32>()
+    } else if r <= -top {
+        unsafe (-top).to_int_unchecked::<i32>()
     } else {
-        0.0
+        unsafe r.to_int_unchecked::<i32>()
     };
-    let c = if 1.0 < lo {
-        1.0
-    } else {
-        lo
-    };
-    return unsafe (c * scale).round().to_int_unchecked::<i32>();
 }
 
 // Bit fields 10, 10, 10, 2 from the lowest bit; each value keeps its low bits.

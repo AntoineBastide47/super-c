@@ -1319,7 +1319,8 @@ extend<const B: usize> Solver<B> {
                 lit = tlit(t, SEL_ATOM, pos);
             }
             if lit != NONE_LIT {
-                if g != 0 && *root == NONE_LIT {
+                // A boolean unknown shares no unknown with a theory's literal: it roots no cone.
+                if g != 0 && *root == NONE_LIT && x.op != T_VAR {
                     *root = lit;
                 }
                 out.push(lit);
@@ -1425,6 +1426,24 @@ extend<const B: usize> Solver<B> {
             }
             // A search its own cap stopped stops there again; one the steps left stopped may not.
             self.sat_cut = r == SAT_ABORT && budget < cap;
+            if r != SAT_MODEL || !guess {
+                return false;
+            }
+            // The others can still contradict each other: the skeleton takes a side of a hypothesis's
+            // disjunction (a comparison of a NaN) that the theories refute apart from the goal.
+            let mut rest = Vector::<u64>::new();
+            for j in 0..lits.len() {
+                if !sub.contains(&lits[j]) && !self.names_exact(tm, (lits[j] >> 3) as u32) {
+                    rest.push(lits[j]);
+                }
+            }
+            if Solver::<B>::has_bits(tm, &rest) && self.kn.blast(tm, &rest) {
+                let r2 = self.sat.solve(&self.kn.bits().cnf, self.sat_budget(cap));
+                let _ = self.spend(self.sat.steps / SAT_STEP_COST);
+                if r2 == SAT_REFUTED {
+                    return self.kn.blast_lemma(&self.sat.proof);
+                }
+            }
         }
         return false;
     }

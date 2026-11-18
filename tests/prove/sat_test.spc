@@ -7,6 +7,7 @@ import prove::terms as *;
 import prove::blast as *;
 import prove::sat as *;
 import prove::kernel as *;
+import prove::solver as sv0;
 
 const B: usize = NUM_NARROW;
 
@@ -1191,4 +1192,98 @@ fn float_bounds_keep_the_true_values() {
             }
         }
     }
+}
+
+// `c` where `ok` holds, else an unknown boolean: `(ok && c) || (!ok && u)`.
+fn known_if(tm: &mut Terms<B>, ok: u32, c: u32) u32 {
+    let u = tm.var(W_BOOL, false);
+    let k = tm.and(ok, c);
+    let nok = tm.not(ok);
+    let o = tm.and(nok, u);
+    return tm.or(k, o);
+}
+
+// An `f32` comparison `op` of `a` and `b` that is unknown where one is NaN.
+fn ordered(tm: &mut Terms<B>, op: u8, a: u32, b: u32) u32 {
+    let fd = hfd(32);
+    let c = tm.fcmp(op, a, b, fd);
+    let na = tm.fcmp(T_FEQ, a, a, fd);
+    let nb = tm.fcmp(T_FEQ, b, b, fd);
+    let ok = tm.and(na, nb);
+    return known_if(tm, ok, c);
+}
+
+// A comparison of a choice splits into comparisons of its values, under an unknown boolean that roots no
+// cone: `x / 2` or `x * 0.5` for `x` in [0, 1] is at most 0.5 and not NaN. A boolean cast to an integer
+// is 1 where it holds.
+@test
+fn choices_compare_by_their_values() {
+    let mut tm = Terms::<B>::new();
+    let fd = hfd(32);
+    let x = tm.var(32, false);
+    let zero = tm.int(u64_val::<B>(0), 32, false);
+    let one = tm.int(u64_val::<B>(0x3F800000), 32, false);
+    let half = tm.int(u64_val::<B>(0x3F000000), 32, false);
+    let two = tm.int(u64_val::<B>(0x40000000), 32, false);
+    let mut hy = Vector::<u32>::new();
+    hy.push(tm.fcmp(T_FLE, zero, x, fd));
+    hy.push(tm.fcmp(T_FLE, x, one, fd));
+    let b = tm.var(W_BOOL, false);
+    let e = tm.farith(T_FDIV, x, two, 32, fd);
+    let alt = tm.farith(T_FMUL, x, half, 32, fd);
+    let r = tm.choose(b, e, alt, 32);
+    let le = tm.fcmp(T_FLE, r, half, fd);
+    let num = tm.fcmp(T_FEQ, r, r, fd);
+    let more = tm.fcmp(T_FLT, half, r, fd);
+    for (g, holds) in [(le, true), (num, true), (more, false)] {
+        let mut sv = sv0::Solver::<B>::new();
+        assert(sv.implies(&tm, &hy, g, true) == holds, "a comparison of a choice");
+    }
+    let lt = tm.fcmp(T_FLT, x, half, fd);
+    let c1 = tm.unary(T_CAST, lt, 32, false);
+    let k1 = tm.int(u64_val::<B>(1), 32, false);
+    let is1 = tm.cmp(T_EQ, c1, k1);
+    let mut ls = Vector::<u64>::new();
+    ls.push(tlit(lt, SEL_ATOM, true));
+    ls.push(tlit(is1, SEL_ATOM, false));
+    assert(bits_answer(&tm, &ls) == 1, "a true boolean as an integer is 1");
+    ls.set(0, tlit(lt, SEL_ATOM, false));
+    ls.set(1, tlit(is1, SEL_ATOM, true));
+    assert(bits_answer(&tm, &ls) == 1, "a false boolean as an integer is 0");
+}
+
+// The skeleton may take the side of a hypothesis that the theories refute apart from the goal ("`top` is
+// NaN" against `top.is_finite()`): the literals outside the goal's cone refute it, and `r` in (0, top)
+// with `top` below 1000 then fits a `u32`.
+@test
+fn literals_apart_from_the_goal_refute_a_side() {
+    let mut tm = Terms::<B>::new();
+    let fd = hfd(32);
+    let r = tm.var(32, false);
+    let top = tm.var(32, false);
+    let zero = tm.int(u64_val::<B>(0), 32, false);
+    let k1000 = tm.int(u64_val::<B>(0x447A0000), 32, false);
+    let inf = tm.int(u64_val::<B>(0x7F800000), 32, false);
+    let p32 = tm.int(u64_val::<B>(0x4F800000), 32, false);
+    let m1 = tm.int(u64_val::<B>(0xBF800000), 32, false);
+    let mut hy = Vector::<u32>::new();
+    let mag = tm.fabs(top, 32);
+    hy.push(tm.fcmp(T_FLT, mag, inf, fd));
+    hy.push(ordered(&mut tm, T_FLE, zero, top));
+    hy.push(ordered(&mut tm, T_FLT, top, k1000));
+    hy.push(tm.fcmp(T_FEQ, r, r, fd));
+    let ge = ordered(&mut tm, T_FLE, top, r);
+    hy.push(tm.not(ge));
+    hy.push(ordered(&mut tm, T_FLT, zero, r));
+    let nn = tm.fcmp(T_FEQ, r, r, fd);
+    let below = tm.fcmp(T_FLT, r, p32, fd);
+    let above = tm.fcmp(T_FLT, m1, r, fd);
+    let g0 = tm.and(nn, below);
+    let g = tm.and(g0, above);
+    let mut sv = sv0::Solver::<B>::new();
+    assert(sv.implies(&tm, &hy, g, true), "r fits");
+    let k100 = tm.int(u64_val::<B>(0x42C80000), 32, false);
+    let small = tm.fcmp(T_FLT, r, k100, fd);
+    let mut sv2 = sv0::Solver::<B>::new();
+    assert(!sv2.implies(&tm, &hy, small, true), "r may be 100 or more");
 }

@@ -4315,3 +4315,124 @@ fn unproved_float_claims_are_errors() {
     );
     h::expect_build_errs(b);
 }
+
+// Each float rewrite a build allows leaves unproved exactly the IEEE claims it can break (the lines of
+// the cases' `ensures`), and the bounds that all the values it allows meet stay proved; `-ffast-math`
+// also reassociates the sums and products, whose results are then unknown.
+@test
+fn float_rewrites_break_only_their_claims() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::math::packing;
+import std::math::vec;
+
+// IEEE claims each float rewrite can break.
+pub fn recip(x: f32) f32
+    requires x == 10.0
+    ensures |r| r.to_bits() == 0x40555555
+{
+    return x / 3.0;
+}
+pub fn plus_zero(x: f32) f32
+    requires x == 0.0
+    ensures |r| r.is_sign_positive()
+{
+    return x + 0.0;
+}
+pub fn over_zero(x: f32) f32
+    requires x == 0.0
+    ensures |r| r > 0.0
+{
+    return 1.0 / (x + 0.0);
+}
+pub fn times_zero(x: f32) f32
+    requires x.is_infinite()
+    ensures |r| r.is_nan()
+{
+    return x * 0.0;
+}
+pub fn below_nan(x: f32) bool
+    requires x.is_nan()
+    ensures |r| !r
+{
+    return x < 1.0;
+}
+pub fn fused(a: f32, c: f32) f32
+    requires a == 1.000244140625 && c == -1.0
+    ensures |r| r == 0.00048828125
+{
+    return a * a + c;
+}
+pub fn inlined(m: f32, c: f32) f32
+    requires m == 1.00048828125 && c == -1.0
+    ensures |r| r == 0.00048828125
+{
+    return m + c;
+}
+
+// Bounds every rewrite but reassociation keeps.
+pub fn sum_in(x: f32) f32
+    requires x.is_finite() && x >= 0.0 && x <= 1.0
+    ensures |r| r <= 2.0
+{
+    return x + 1.0;
+}
+pub fn quot_in(x: f32) f32
+    requires x.is_finite() && x >= 0.0 && x <= 1.0
+    ensures |r| r <= 0.5
+{
+    return x / 2.0;
+}
+pub fn fma_in(a: f32, b: f32, c: f32) f32
+    requires a.is_finite() && b.is_finite() && c.is_finite()
+    requires a >= 0.0 && a <= 1.0 && b >= 0.0 && b <= 1.0 && c >= 0.0 && c <= 1.0
+    ensures |r| r >= -1.0 && r <= 3.0
+{
+    return a * b + c;
+}
+
+// std's packing holds its own conversions under every rewrite.
+pub fn packed(x: f32, y: f32) u32 {
+    return packing::pack_unorm2x16(vec::Vec::<f32, 2> { e: [x, y] });
+}
+
+fn main() i32 {
+    return 0;
+})",
+    );
+    let cases: [](str, str) = [
+        ("", ""),
+        ("-freciprocal-math", "7"),
+        ("-fno-signed-zeros", "13 19"),
+        ("-ffinite-math-only", "31"),
+        ("-ffinite-math-only -fno-signed-zeros", "13 19 25 31"),
+        ("-ffp-contract=fast", "13 19 37 43"),
+        ("-ffast-math", "7 13 19 25 31 37 43 51 64"),
+    ];
+    for k in 0..cases.len() {
+        let (flags, want) = cases[k];
+        let r = p.compile_flags(flags, "main.spc");
+        let mut got = String::new();
+        let mut err = false;
+        for line in r.text().lines() {
+            if line.starts_with("error") {
+                err = true;
+            } else if err && line.starts_with("--> ") {
+                err = false;
+                let at = line.find("main.spc:");
+                assert(at >= 0, line);
+                let rest = line.slice(at as usize + 9, line.len());
+                let n = rest.slice(0, rest.find(":") as usize);
+                if got.len() != 0 {
+                    got.push_str(" ");
+                }
+                got.push_str(n);
+            }
+        }
+        if got.as_str() != want {
+            eprintln("{}: errors at lines '{}', expected '{}':\n{}", flags, got, want, r.text());
+        }
+        assert(got.as_str() == want, flags);
+    }
+}

@@ -1879,17 +1879,17 @@ extend<const B: usize> Prover<B> {
         return pick(bt == BuiltinType::BT_F32, 32u16, pick(bt == BuiltinType::BT_F64, 64u16, 0u16));
     }
 
-    // Whether float operations keep their IEEE 754 meaning: no build flag lets the optimizer rewrite them
-    // (else each result is an unknown).
-    const fn floats_exact(self: &Self) bool {
-        return (self.pkg().cg & bman::CG_FAST_MATH) == 0;
+    // The float rewrites the build lets the optimizer make (`bman::CG_FAST_MATH`'s flags). `float_binary`
+    // and `float_call` give each operation every value they allow.
+    const fn fmath(self: &Self) u64 {
+        return self.pkg().cg & bman::CG_FAST_MATH;
     }
 
-    // Whether the float sums and products of body `cb` keep their meaning: `@associative_math` lets them
-    // reassociate.
+    // Whether the float sums and products of body `cb` keep their meaning: `-fassociative-math` and
+    // `@associative_math` let them reassociate.
     fn float_sums_exact(self: &Self, cb: &ir::CoreBody) bool {
         let o = cb.owner;
-        return self.floats_exact() && (o.node == NODE_NONE || self.ast_of(o.module).attr_of(
+        return (self.fmath() & bman::CG_ASSOC_MATH) == 0 && (o.node == NODE_NONE || self.ast_of(o.module).attr_of(
             o.node,
             AttrKind::ATTR_ASSOCIATIVE_MATH,
         ) == null);
@@ -11395,40 +11395,226 @@ extend<const B: usize> Prover<B> {
     }
 
     // Binary operator `op` over floats `x` and `y` of width `fw`, its result of type (`w`, `sg`): IEEE 754
-    // arithmetic (`a - b` is `a + -b`), C's `fmod` for `%`, and comparisons; an operation the build may
-    // rewrite is an unknown value.
+    // arithmetic (`a - b` is `a + -b`), C's `fmod` for `%`, and comparisons, with every value the build's
+    // float rewrites allow (`fmath`); a sum or product the build may reassociate is an unknown value.
     fn float_binary(self: &mut Self, cb: &ir::CoreBody, op: u8, x: u32, y: u32, fw: u16, w: u16, sg: bool) u32 {
-        if !self.floats_exact() || !self.float_sums_exact(cb) && (op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 || op == tt::TokenType::Star as u8) {
+        if !self.float_sums_exact(cb) && (op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 || op == tt::TokenType::Star as u8) {
             return self.tm.var(w, sg);
         }
         let fd = host_fd(fw);
-        if op == tt::TokenType::Plus as u8 || op == tt::TokenType::Star as u8 || op == tt::TokenType::Slash as u8 || op == tt::TokenType::Percent as u8 {
-            let fo = if op == tt::TokenType::Plus as u8 {
-                T_FADD
-            } else if op == tt::TokenType::Star as u8 {
-                T_FMUL
-            } else if op == tt::TokenType::Slash as u8 {
-                T_FDIV
+        if op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 {
+            let y2 = if op == tt::TokenType::Minus as u8 {
+                self.tm.fneg(y, fw)
             } else {
-                T_FREM
+                y
             };
-            return self.tm.farith(fo, x, y, fw, fd);
+            return self.fsum(x, y2, fw, fd);
         }
-        if op == tt::TokenType::Minus as u8 {
-            let ny = self.tm.fneg(y, fw);
-            return self.tm.farith(T_FADD, x, ny, fw, fd);
+        if op == tt::TokenType::Star as u8 {
+            let e = self.tm.farith(T_FMUL, x, y, fw, fd);
+            let v = self.finite_only(e, x, y, true, fw, fd);
+            return if (self.fmath() & bman::CG_FINITE_MATH) != 0 {
+                self.zero_sign(v, fw, fd)
+            } else {
+                v
+            };
         }
-        if op == tt::TokenType::LessThan as u8 || op == tt::TokenType::LessThanEqual as u8 {
-            return self.tm.fcmp(pick(op == tt::TokenType::LessThan as u8, T_FLT, T_FLE), x, y, fd);
+        if op == tt::TokenType::Slash as u8 {
+            return self.fquot(x, y, fw, fd);
         }
-        if op == tt::TokenType::GreaterThan as u8 || op == tt::TokenType::GreaterThanEqual as u8 {
-            return self.tm.fcmp(pick(op == tt::TokenType::GreaterThan as u8, T_FLT, T_FLE), y, x, fd);
+        if op == tt::TokenType::Percent as u8 {
+            return self.tm.farith(T_FREM, x, y, fw, fd);
+        }
+        if op == tt::TokenType::LessThan as u8 || op == tt::TokenType::LessThanEqual as u8 || op == tt::TokenType::GreaterThan as u8 || op == tt::TokenType::GreaterThanEqual as u8 {
+            let less = op == tt::TokenType::LessThan as u8 || op == tt::TokenType::LessThanEqual as u8;
+            let strict = op == tt::TokenType::LessThan as u8 || op == tt::TokenType::GreaterThan as u8;
+            let (a, b) = pick(less, (x, y), (y, x));
+            let c = self.tm.fcmp(pick(strict, T_FLT, T_FLE), a, b, fd);
+            if (self.fmath() & bman::CG_FINITE_MATH) == 0 {
+                return c;
+            }
+            // `-ffinite-math-only` lets a min or max loop take `!(a < b)` for `a >= b`: an ordered comparison
+            // of a NaN is unknown.
+            let na = self.float_class(FC_NAN, a, fw, fd);
+            let nb = self.float_class(FC_NAN, b, fw, fd);
+            let nn = self.tm.or(na, nb);
+            let ok = self.tm.not(nn);
+            return self.known_if(ok, c);
         }
         if op == tt::TokenType::EqualEqual as u8 || op == tt::TokenType::BangEqual as u8 {
             let e = self.tm.fcmp(T_FEQ, x, y, fd);
             return pick(op == tt::TokenType::EqualEqual as u8, e, self.tm.not(e));
         }
         return self.tm.var(w, sg);
+    }
+
+    // Value `e` where `c` holds, else an unknown value of its type.
+    fn known_if(self: &mut Self, c: u32, e: u32) u32 {
+        if self.tm.is_true(c) {
+            return e;
+        }
+        let x = self.tm.at(e);
+        let u = self.tm.var(x.w, x.sg);
+        if x.w == W_BOOL {
+            let k = self.tm.and(c, e);
+            let nc = self.tm.not(c);
+            let o = self.tm.and(nc, u);
+            return self.tm.or(k, o);
+        }
+        return self.tm.choose(c, e, u, x.w);
+    }
+
+    // Result `e` of the product (`mul`) or sum of floats `x` and `y`. With `-ffinite-math-only` and
+    // `-fno-signed-zeros` the optimizer makes `x * 0` and `x - x` zero for any `x` (`x * 1` and `x / 1` are
+    // `x` either way): unknown for the product of a zero and a value that is not finite, and for the sum of
+    // two values that are not finite.
+    fn finite_only(self: &mut Self, e: u32, x: u32, y: u32, mul: bool, fw: u16, fd: u64) u32 {
+        let both = bman::CG_FINITE_MATH | bman::CG_NO_SIGNED_ZEROS;
+        if (self.fmath() & both) != both {
+            return e;
+        }
+        let fx = self.float_class(FC_FINITE, x, fw, fd);
+        let fy = self.float_class(FC_FINITE, y, fw, fd);
+        let ok = if mul {
+            let zx = self.float_class(FC_ZERO, x, fw, fd);
+            let zy = self.float_class(FC_ZERO, y, fw, fd);
+            let nzy = self.tm.not(zy);
+            let nzx = self.tm.not(zx);
+            let ox = self.tm.or(fx, nzy);
+            let oy = self.tm.or(fy, nzx);
+            self.tm.and(ox, oy)
+        } else {
+            self.tm.or(fx, fy)
+        };
+        return self.known_if(ok, e);
+    }
+
+    // Result `x` of an operation `-fno-signed-zeros` lets the optimizer rewrite into a zero of the other
+    // sign (`x + 0` is `x`, and with `-ffinite-math-only` `x * 0` is +0): a zero of either sign where it is
+    // one. The min or max loops it reorders end in values a loop's invariants define, which say nothing
+    // of a zero's sign (each reading of the sign here is of such a result, or of a value no rewrite makes).
+    fn zero_sign(self: &mut Self, x: u32, fw: u16, fd: u64) u32 {
+        if (self.fmath() & bman::CG_NO_SIGNED_ZEROS) == 0 {
+            return x;
+        }
+        let zero = self.tm.int(Num::<B>::zero(), fw, false);
+        let zx = self.tm.fcmp(T_FEQ, x, zero, fd);
+        if self.tm.is_false(zx) {
+            return x;
+        }
+        let (sb, _mg) = Terms::<B>::fsign_num(fw);
+        let u = self.tm.var(fw, false);
+        let m = self.tm.int(sb, fw, false);
+        let z = self.tm.arith(T_BAND, u, m, fw, false);
+        return self.tm.choose(zx, z, x, fw);
+    }
+
+    // `x / y`: `-freciprocal-math` lets it be `x` times the rounded reciprocal of `y` (the optimizer does it
+    // for a constant divisor, which inlining can make of any).
+    fn fquot(self: &mut Self, x: u32, y: u32, fw: u16, fd: u64) u32 {
+        let e = self.tm.farith(T_FDIV, x, y, fw, fd);
+        let mut r = e;
+        if (self.fmath() & bman::CG_RECIP_MATH) != 0 {
+            let one = self.tm.int(u64_val::<B>(pick(fw == 32, 1.0f32.to_bits(), 1.0f64.to_bits())), fw, false);
+            let rc = self.tm.farith(T_FDIV, one, y, fw, fd);
+            let alt = self.tm.farith(T_FMUL, x, rc, fw, fd);
+            let b = self.tm.var(W_BOOL, false);
+            r = self.tm.choose(b, e, alt, fw);
+        }
+        return r;
+    }
+
+    // `x + y`. `-ffp-contract=fast` lets an operand that is a product `a * b` fuse: the sum is then
+    // `fma(a, b, other)`. A product term fuses as such; a value that is no operation here (a parameter, a
+    // call's result, a load) may hold one after inlining or forwarding, and its sum lies between the sums
+    // with its two neighbors (`fneighbor`), which hold its exact product.
+    fn fsum(self: &mut Self, x: u32, y: u32, fw: u16, fd: u64) u32 {
+        let e = self.tm.farith(T_FADD, x, y, fw, fd);
+        let mut r = e;
+        if (self.fmath() & bman::CG_FP_CONTRACT) != 0 {
+            let mut alt = NONE;
+            for side in 0..2 {
+                let (p, o) = pick(side == 0, (x, y), (y, x));
+                if self.may_fuse(p) {
+                    let f = self.fused(p, o, fw, fd);
+                    alt = if alt == NONE {
+                        f
+                    } else {
+                        let b = self.tm.var(W_BOOL, false);
+                        self.tm.choose(b, alt, f, fw)
+                    };
+                }
+            }
+            if alt != NONE {
+                let b = self.tm.var(W_BOOL, false);
+                r = self.tm.choose(b, e, alt, fw);
+            }
+        }
+        let v = self.finite_only(r, x, y, false, fw, fd);
+        return self.zero_sign(v, fw, fd);
+    }
+
+    // Whether float `p` may be a product the optimizer fuses into a sum: not a constant, and no operation
+    // other than a product, a product's negation or a choice (a value the build's rewrites leave open).
+    fn may_fuse(self: &Self, p: u32) bool {
+        let t = self.tm.at(p);
+        if t.op == T_BXOR {
+            return self.may_fuse(t.a) || self.may_fuse(t.b);
+        }
+        return t.op == T_FMUL || self.tm.is_choice(p) || t.op != T_INT && !float_op(t.op) && t.op != T_BAND && t.op != T_BOR;
+    }
+
+    // `p + o` with `p`'s product fused: `fma(a, b, o)` of a product term `a * b` (or of its negation,
+    // `-a * b`), else a value between the sums of `o` with `p`'s neighbors where those and the operands are
+    // finite, and an unknown value where not.
+    fn fused(self: &mut Self, p: u32, o: u32, fw: u16, fd: u64) u32 {
+        let t = self.tm.at(p);
+        let mut xs = Vector::<u32>::with_capacity(3);
+        if t.op == T_FMUL {
+            xs.push(t.a);
+            xs.push(t.b);
+        } else if t.op == T_BXOR && (self.tm.at(t.a).op == T_FMUL || self.tm.at(t.b).op == T_FMUL) {
+            let m = self.tm.at(pick(self.tm.at(t.a).op == T_FMUL, t.a, t.b));
+            xs.push(self.tm.fneg(m.a, fw));
+            xs.push(m.b);
+        }
+        if xs.len() == 2 {
+            xs.push(o);
+            return self.tm.ffma(&xs, fw, fd);
+        }
+        let dn = self.fneighbor(p, false, fw, fd);
+        let up = self.fneighbor(p, true, fw, fd);
+        let lo = self.tm.farith(T_FADD, dn, o, fw, fd);
+        let hi = self.tm.farith(T_FADD, up, o, fw, fd);
+        let mut ok = self.float_class(FC_FINITE, p, fw, fd);
+        for z in [o, lo, hi] {
+            let fz = self.float_class(FC_FINITE, z, fw, fd);
+            ok = self.tm.and(ok, fz);
+        }
+        let u = self.tm.var(fw, false);
+        let l = self.tm.fcmp(T_FLE, lo, u, fd);
+        let h = self.tm.fcmp(T_FLE, u, hi, fd);
+        let inside = self.tm.and(l, h);
+        let nok = self.tm.not(ok);
+        let take = self.tm.or(nok, inside);
+        return self.tm.choose(take, u, lo, fw);
+    }
+
+    // The float next to finite `x` toward +inf (`up`) or -inf, as an encoding: one unit of its magnitude
+    // away from or toward zero, from a zero the least subnormal of that sign.
+    fn fneighbor(self: &mut Self, x: u32, up: bool, fw: u16, fd: u64) u32 {
+        let (sb, _mg) = Terms::<B>::fsign_num(fw);
+        let zero = self.tm.int(Num::<B>::zero(), fw, false);
+        let one = self.tm.int(Num::<B>::one(), fw, false);
+        let least = self.tm.int(pick(up, Num::<B>::one(), sb | Num::<B>::one()), fw, false);
+        let zx = self.tm.fcmp(T_FEQ, x, zero, fd);
+        let neg = self.tm.fcmp(T_FLT, x, zero, fd);
+        // `choose` keeps the low bits: the sum of a NaN's all-ones encoding wraps, and is not chosen.
+        let inc = self.tm.arith(T_ADD, x, one, fw, false);
+        let dec = self.tm.arith(T_SUB, x, one, fw, false);
+        let (on_neg, on_pos) = pick(up, (dec, inc), (inc, dec));
+        let step = self.tm.choose(neg, on_neg, on_pos, fw);
+        return self.tm.choose(zx, least, step, fw);
     }
 
     // Conversion `rv` of `x` into or out of a float, into type (`w`, `sg`): between floats, from an integer
@@ -11451,9 +11637,6 @@ extend<const B: usize> Prover<B> {
         let sf = self.float_w(cm, cb.operands.at(rv.a as usize).ty);
         let tf = self.float_w(cm, rv.target);
         let xs = self.tm.at(x);
-        if !self.floats_exact() {
-            return self.tm.var(w, sg);
-        }
         if sf != 0 && tf != 0 {
             return self.tm.fconv(T_FCVT, x, tf, false, host_fd(tf) | host_fd(sf) << 32);
         }
@@ -11817,7 +12000,7 @@ extend<const B: usize> Prover<B> {
             let op = rv.b as u8;
             let fw = self.float_w(cm, cb.operands.at(rv.a as usize).ty);
             if fw != 0 {
-                return if op == tt::TokenType::Minus as u8 && self.floats_exact() {
+                return if op == tt::TokenType::Minus as u8 {
                     self.tm.fneg(x, fw)
                 } else {
                     self.tm.var(w, sg)
@@ -13230,7 +13413,7 @@ extend<const B: usize> Prover<B> {
             return self.operand(cb, cm, state, oid, all);
         }
         let fw = self.float_w(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty);
-        if fw == 0 || !self.floats_exact() {
+        if fw == 0 {
             return NONE;
         }
         // The `f32` name is the `f64` one with an `f`; a method's is the operation's.
@@ -13287,11 +13470,15 @@ extend<const B: usize> Prover<B> {
             self.tm.fcopysign(xs[0], xs[1], fw)
         } else if name == "recip" {
             let one = self.tm.int(u64_val::<B>(pick(fw == 32, 1.0f32.to_bits(), 1.0f64.to_bits())), fw, false);
-            self.tm.farith(T_FDIV, one, xs[0], fw, fd)
+            self.fquot(one, xs[0], fw, fd)
         } else if name == "fract" {
-            let tr = self.tm.frint(xs[0], FR_TRUNC, fw, fd);
-            let nt = self.tm.fneg(tr, fw);
-            self.tm.farith(T_FADD, xs[0], nt, fw, fd)
+            if self.float_sums_exact(cb) {
+                let tr = self.tm.frint(xs[0], FR_TRUNC, fw, fd);
+                let nt = self.tm.fneg(tr, fw);
+                self.fsum(xs[0], nt, fw, fd)
+            } else {
+                self.tm.var(fw, false)
+            }
         } else if name == "fma" {
             self.tm.ffma(&xs, fw, fd)
         } else {
@@ -13396,8 +13583,8 @@ extend<const B: usize> Prover<B> {
             return self.soft_const(k, &xs, rw, rfd);
         }
         // Operations that round: in software, but f16, the 8-bit formats and binary128 may compute in
-        // hardware floats.
-        if !self.floats_exact() {
+        // hardware floats, which the build's float rewrites change.
+        if self.fmath() != 0 {
             return NONE;
         }
         if k == SK_IEQ || k == SK_ILT || k == SK_ILE {

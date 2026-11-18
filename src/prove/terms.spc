@@ -302,6 +302,8 @@ pub(package) struct Terms<const B: usize> {
     // or a sum of such constants can leave B bits, which drops a fact (`prove_fits`).
     pub(package) big_seen: bool,
     big: Num<B>,
+    // Each integer `choose` made, by its term: its condition and its two values.
+    choices: Map<u32, (u32, u32, u32)>,
 }
 
 pub(package) const fn hmix(h: u64, v: u64) u64 {
@@ -329,6 +331,7 @@ extend<const B: usize> Terms<B> {
             bitty: Vector::<bool>::new(),
             big_seen: false,
             big: Num::<B>::one().shl(B / 2 - 8),
+            choices: Map::<u32, (u32, u32, u32)>::new(),
         };
     }
 
@@ -338,6 +341,7 @@ extend<const B: usize> Terms<B> {
         self.args.clear();
         self.nvars = 0;
         self.bitty.clear();
+        self.choices.clear();
     }
 
     pub(package) const fn at(self: &Self, t: u32) Term<B> {
@@ -836,6 +840,23 @@ extend<const B: usize> Terms<B> {
 
     // The IEEE comparison `op` (T_FLT, T_FLE, T_FEQ) of floats `a` and `b` of format `fd`.
     pub(package) fn fcmp(self: &mut Self, op: u8, a: u32, b: u32, fd: u64) u32 {
+        // A comparison of a choice is the choice of the comparisons of its values: the facts of each
+        // operation (`Blaster::box_lemmas`) meet the constants it is compared with.
+        for side in 0..2 {
+            let t = pick(side == 0, a, b);
+            if let Some(ch) = self.choices.get(&t) {
+                let (c, p, q) = *ch;
+                let (l, r) = if side == 0 {
+                    (self.fcmp(op, p, b, fd), self.fcmp(op, q, b, fd))
+                } else {
+                    (self.fcmp(op, a, p, fd), self.fcmp(op, a, q, fd))
+                };
+                let cl = self.and(c, l);
+                let nc = self.not(c);
+                let cr = self.and(nc, r);
+                return self.or(cl, cr);
+            }
+        }
         let x = self.ts[a as usize];
         let y = self.ts[b as usize];
         if x.op == T_INT && y.op == T_INT && x.w <= 64 {
@@ -847,6 +868,29 @@ extend<const B: usize> Terms<B> {
             return self.make(Term::<B> { k: u64_val::<B>(fd), a: b, b: a, op: op, w: W_BOOL, sg: false });
         }
         return self.make(Term::<B> { k: u64_val::<B>(fd), a: a, b: b, op: op, w: W_BOOL, sg: false });
+    }
+
+    // `a` where boolean `c` holds, else `b`, for integers of width `w`: `c` widened to a mask of ones.
+    pub(package) fn choose(self: &mut Self, c: u32, a: u32, b: u32, w: u16) u32 {
+        if self.is_true(c) || a == b {
+            return a;
+        }
+        if self.is_false(c) {
+            return b;
+        }
+        let c1 = self.unary(T_CAST, c, w, false);
+        let m = self.unary(T_NEG, c1, w, false);
+        let nm = self.unary(T_BNOT, m, w, false);
+        let x = self.arith(T_BAND, a, m, w, false);
+        let y = self.arith(T_BAND, b, nm, w, false);
+        let r = self.arith(T_BOR, x, y, w, false);
+        self.choices.insert(r, (c, a, b));
+        return r;
+    }
+
+    // Whether `t` is a `choose` result.
+    pub(package) fn is_choice(self: &Self, t: u32) bool {
+        return self.choices.contains_key(&t);
     }
 
     // A comparison of two integers, or (`T_EQ`, `T_NE`) of two booleans or two other values.

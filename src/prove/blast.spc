@@ -340,6 +340,8 @@ extend<const B: usize> Blaster<B> {
         } else if x.op == T_BAND || x.op == T_BOR || x.op == T_BXOR {
             self.need(x.a, w);
             self.need(x.b, w);
+        } else if x.op == T_CAST && tm.is_bool(x.a) {
+            self.need(x.a, KB);
         } else if x.op == T_BNOT || x.op == T_CAST {
             self.need(x.a, w);
         } else if x.op == T_SHL || x.op == T_SHR {
@@ -521,6 +523,13 @@ extend<const B: usize> Blaster<B> {
                         self.xor2(p[i], q[i])
                     },
                 );
+            }
+            sign_of(&mut r, x.sg);
+        } else if x.op == T_CAST && tm.is_bool(x.a) {
+            // A boolean as an integer: 1 where it holds, else 0.
+            r.push(*self.fm.get(&x.a).unwrap());
+            for _i in 1..w {
+                r.push(L_FALSE);
             }
             sign_of(&mut r, x.sg);
         } else if x.op == T_BNOT || x.op == T_CAST {
@@ -2251,6 +2260,33 @@ extend<const B: usize> Blaster<B> {
             self.imply(&c, nc);
         }
         if x.op == T_FFMA {
+            // `fma(a, b, c)` is at least `c` where `a * b >= 0`, at most where `a * b <= 0`: the exact sum
+            // moves `c` that way, and rounding keeps the order.
+            self.fx = Blaster::<B>::fx_of(w, fd);
+            let r = self.fbits(tm, t, w);
+            let a = self.fbits(tm, tm.args[x.a as usize], w);
+            let b = self.fbits(tm, tm.args[x.a as usize + 1], w);
+            let cc = self.fbits(tm, tm.args[x.a as usize + 2], w);
+            let zero = Blaster::<B>::fconst(w, fd, false);
+            let a0 = self.fcmp_bits(T_FLE, &zero, &a, w, fd);
+            let a1 = self.fcmp_bits(T_FLE, &a, &zero, w, fd);
+            let b0 = self.fcmp_bits(T_FLE, &zero, &b, w, fd);
+            let b1 = self.fcmp_bits(T_FLE, &b, &zero, w, fd);
+            let pp = self.and2(a0, b0);
+            let nn = self.and2(a1, b1);
+            let pn = self.and2(a0, b1);
+            let np = self.and2(a1, b0);
+            let up = self.or2(pp, nn);
+            let dn = self.or2(pn, np);
+            let rc = self.fcmp_bits(T_FLE, &cc, &r, w, fd);
+            let cr = self.fcmp_bits(T_FLE, &r, &cc, w, fd);
+            for (cond, l) in [(up, rc), (dn, cr)] {
+                c.clear();
+                c.push(nc ^ 1);
+                c.push(cond);
+                self.imply(&c, l);
+            }
+            self.box_lemmas(tm, t, x, nc);
             return;
         }
         if x.op == T_ITOF || x.op == T_FTOI || x.op == T_FKEY || x.op == T_FCVT {
@@ -2717,43 +2753,64 @@ extend<const B: usize> Blaster<B> {
         let w = x.w;
         let fd = x.k.limb(0) & 0xFFFFFFFF;
         let unary = x.op == T_FSQRT || x.op == T_FRINT || x.op == T_FCVT;
-        if !(x.op == T_FADD || x.op == T_FMUL || x.op == T_FDIV || unary) || host_fw(w, fd) == 0 {
+        let fma = x.op == T_FFMA;
+        if !(x.op == T_FADD || x.op == T_FMUL || x.op == T_FDIV || unary || fma) || host_fw(w, fd) == 0 {
             return;
         }
-        let sw = tm.at(x.a).w;
+        // The operands: a fused multiply-add's three lie in the argument pool.
+        let (oa, ob, oc) = if fma {
+            (tm.args[x.a as usize], tm.args[x.a as usize + 1], tm.args[x.a as usize + 2])
+        } else {
+            (x.a, x.b, x.b)
+        };
+        let sw = tm.at(oa).w;
         let sfd = pick(x.op == T_FCVT, x.k.limb(0) >> 32, fd);
         if host_fw(sw, sfd) == 0 {
             return;
         }
-        let ba = self.bounds_of(tm, x.a, sw);
+        let mut none = Vector::<u64>::new();
+        none.push(0);
+        none.push(0);
+        let ba = self.bounds_of(tm, oa, sw);
         let bb = if unary {
-            let mut one = Vector::<u64>::new();
-            one.push(0);
-            one.push(0);
-            one
+            none.clone()
         } else {
-            self.bounds_of(tm, x.b, w)
+            self.bounds_of(tm, ob, w)
         };
-        if ba.len() == 0 || bb.len() == 0 {
+        let bc = if fma {
+            self.bounds_of(tm, oc, w)
+        } else {
+            none
+        };
+        if ba.len() == 0 || bb.len() == 0 || bc.len() == 0 {
             return;
         }
         let r = self.fbits(tm, t, w);
-        let a = self.fbits(tm, x.a, sw);
+        let a = self.fbits(tm, oa, sw);
         let b = if unary {
             Vector::<u32>::new()
         } else {
-            self.fbits(tm, x.b, w)
+            self.fbits(tm, ob, w)
+        };
+        let cv = if fma {
+            self.fbits(tm, oc, w)
+        } else {
+            Vector::<u32>::new()
         };
         let cs = self.cands_of(tm, t);
         let mut hulls = Vector::<u64>::new();
         let mut c = Vector::<u32>::new();
-        for i in 0..ba.len() / 2 {
-            for j in 0..bb.len() / 2 {
+        for ijl in 0..ba.len() / 2 * (bb.len() / 2) * (bc.len() / 2) {
+            let i = ijl % (ba.len() / 2);
+            let j = ijl / (ba.len() / 2) % (bb.len() / 2);
+            let l = ijl / (ba.len() / 2) / (bb.len() / 2);
+            {
                 if hulls.len() >= 2 * BOX_MAX {
                     break;
                 }
                 let (la, ha, lb, hb) = (ba[2 * i], ba[2 * i + 1], bb[2 * j], bb[2 * j + 1]);
-                let (lo, hi) = match_hull(tm, x, la, ha, lb, hb, sw);
+                let (lc, hc) = (bc[2 * l], bc[2 * l + 1]);
+                let (lo, hi) = match_hull(tm, x, la, ha, lb, hb, lc, hc, sw);
                 if lo == NONE64 {
                     continue;
                 }
@@ -2764,6 +2821,10 @@ extend<const B: usize> Blaster<B> {
                 if !unary {
                     c.push(self.kcmp(&b, lb, w, fd, true));
                     c.push(self.kcmp(&b, hb, w, fd, false));
+                }
+                if fma {
+                    c.push(self.kcmp(&cv, lc, w, fd, true));
+                    c.push(self.kcmp(&cv, hc, w, fd, false));
                 }
                 let rl = self.kcmp(&r, lo, w, fd, true);
                 let rh = self.kcmp(&r, hi, w, fd, false);
@@ -2926,11 +2987,26 @@ const fn host_unary<const B: usize>(x: &Term<B>, v: u64) u64 {
     return pick(w == 32, (r as f32).to_bits(), r.to_bits());
 }
 
-// The hull (lo, hi) of the results of float operation `x` over the operand boxes [la, ha] and [lb, hb]
-// (encodings; the first operand of width `sw`): the least and greatest of the host's results at the
-// corners; (NONE64, NONE64) where a NaN may lie inside (a corner's, an infinity against a zero factor or
+// `a * b + c` with one rounding, of host floats of width `w` (encodings); NONE64 for a NaN.
+const fn host_fma(a: u64, b: u64, c: u64, w: u16) u64 {
+    let r = if w == 32 {
+        f32::from_bits(a as u32).mul_add(f32::from_bits(b as u32), f32::from_bits(c as u32)).to_bits() as u64
+    } else {
+        f64::from_bits(a).mul_add(f64::from_bits(b), f64::from_bits(c)).to_bits()
+    };
+    let mag = r & fsign(w) - 1;
+    return pick(mag > pick(w == 32, 0x7F800000u64, 0x7FF0000000000000u64), NONE64, r);
+}
+
+// The hull (lo, hi) of the results of float operation `x` over the operand boxes [la, ha], [lb, hb] and,
+// for a fused multiply-add, [lc, hc] (encodings; the first operand of width `sw`): the least and greatest
+// of the host's results at the corners (`a * b + c` is linear in each operand, and rounding keeps the
+// order); (NONE64, NONE64) where a NaN may lie inside (a corner's, an infinity against a zero factor or
 // another infinity, a divisor's zero).
-fn match_hull<const B: usize>(tm: &Terms<B>, x: &Term<B>, la: u64, ha: u64, lb: u64, hb: u64, sw: u16) (u64, u64) {
+fn match_hull<const B: usize>(tm: &Terms<B>, x: &Term<B>, la: u64, ha: u64, lb: u64, hb: u64, lc: u64, hc: u64, sw: u16) (
+    u64,
+    u64
+) {
     let _ = tm;
     let w = x.w;
     let none = (NONE64, NONE64);
@@ -2955,10 +3031,20 @@ fn match_hull<const B: usize>(tm: &Terms<B>, x: &Term<B>, la: u64, ha: u64, lb: 
         let b_inf = host_inf(lb, w) || host_inf(hb, w);
         let a_zero = !host_lt(0, la, w) && !host_lt(ha, 0, w);
         let b_zero = !host_lt(0, lb, w) && !host_lt(hb, 0, w);
-        if x.op == T_FMUL && (a_zero && b_inf || b_zero && a_inf) || x.op == T_FDIV && (b_zero || a_inf && b_inf) {
+        if (x.op == T_FMUL || x.op == T_FFMA) && (a_zero && b_inf || b_zero && a_inf) || x.op == T_FDIV && (b_zero || a_inf && b_inf) {
             return none;
         }
+        if x.op == T_FFMA {
+            for (p, q) in [(la, lb), (la, hb), (ha, lb), (ha, hb)] {
+                for v in [lc, hc] {
+                    cs.push(host_fma(p, q, v, w));
+                }
+            }
+        }
         for (p, q) in [(la, lb), (la, hb), (ha, lb), (ha, hb)] {
+            if x.op == T_FFMA {
+                break;
+            }
             cs.push(
                 switch fold_float(x.op, w, false, x.k.limb(0), w, u64_val::<B>(p), u64_val::<B>(q)) {
                     Some(r) => r.limb(0),
