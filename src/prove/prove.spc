@@ -685,20 +685,44 @@ const PROOF_WALK: u32 = 262144;
 const MERGED_PER_BLOCK: u32 = 4;
 // The most steps a stage of `holds_in` that most goals pass at once takes (`capped`).
 const STAGE_STEPS: u32 = 200000;
+// The steps of the early attempt with the facts of a goal's own bit splits and products (`late_first`), and
+// the mark of a hard goal, which the facts may prove false: in the compiler build 313 of those attempts
+// fail, within 600 steps on average, and 4 spend them all.
+const LATE_STEPS: u32 = 20000;
+// The steps of the check that a goal's facts prove it false, and of the check of their contradiction then
+// (`late_first`): a false claim over a 64 by 64 bit product's halves takes 2.8k.
+const REFUTE_STEPS: u32 = 10000;
+// The rounds of `multiple_facts`: a value through eight nested wrapping operations.
+const MULTIPLE_ROUNDS: u32 = 8;
+// The steps of each attempt with a few facts chosen for the goal before the stages (`holds_in`,
+// `stated_congruence`).
+const OWN_STEPS: u32 = 8000;
 // The solver steps of a check's fact (`note_check`): in the compiler build each one that holds takes at
-// most 3.4k, and the 21 that fail took 25M, half of the build's solver steps.
+// most 37k.
 const FACT_STEPS: u32 = 50000;
 // The fact sets of the paths that proved one goal (`oblige`) that a later path's facts are checked
 // against: each check scans them all, so a body of many paths (a merge after the exact walk's cap) would
 // scan a list as long as its paths.
 const PROVED_SETS: usize = 8;
 // The solver steps of the check that an operation of a body without contracts cannot panic, which spares
-// its unwind the invariants (`statement_in`): in the compiler build each one that holds takes at most 25k,
-// and the 36 that fail at STAGE_STEPS took 6M, a quarter of the build's solver steps.
-const PANIC_STEPS: u32 = 50000;
+// its unwind the invariants (`statement_in`): in the compiler build each one that holds takes at most 9k,
+// and the 28 that fail past 30k took 1.4M at 50k.
+const PANIC_STEPS: u32 = 25000;
 // The solver steps of an equality of sequences from its terms' definitions alone (`holds_at`): one that
 // holds takes at most 47k in the compiler build and 3k in ML-KEM, where the ones that fail took 53M.
 const SEQ_DEFS_STEPS: u32 = 50000;
+// The steps of an equality of sequences from the path's bounds on its unknowns (`holds_at`): one that holds
+// takes at most 15k in the compiler build, where the ones that fail at STAGE_STEPS took 670k.
+const SEQ_NEAR_STEPS: u32 = 30000;
+// The steps of an equality of sequences without the path's struct invariants (`holds_at`): one that holds
+// takes at most 15k in the compiler build, where the ones that fail at STAGE_STEPS took 350k.
+const NOINV_STEPS: u32 = 30000;
+// The steps of a struct's invariant without the path's equalities of sequences (`holds_at`): one that holds
+// takes at most 58k in the compiler build.
+const NOSEQ_STEPS: u32 = 100000;
+// The steps of the attempt of an equality of sequences with the path's equalities of sequences alone
+// (`Prover::holds_at`): congruence decides it within a few, or they do not.
+const SEQ_CONG_STEPS: u32 = 2000;
 // The steps of the last attempt at a goal over sequences (`holds`).
 const SEQ_STEPS: u32 = 50000;
 // The most steps a set of operation facts takes (`ops_imply`): the casts and remainders it states need
@@ -992,6 +1016,11 @@ const UNION_LEAVES: usize = 64;
 // The terms `call_congruence` visits, and the pairs of applications it tries.
 const CONG_NODES: u32 = 4096;
 const CONG_PAIRS: u32 = 8;
+// The steps of each equality of operands of a predicate the goal names and one the path states
+// (`Prover::stated_congruence`).
+const STATED_CONG_STEPS: u32 = 20000;
+// The steps of the check that the path's facts exclude a case of an invariant of cases (`Prover::holds_in`).
+const CASE_STEPS: u32 = 2000;
 // The pointer offsets (`p + n`) and the aggregates down a pointer's target is found through (`ptr_target`).
 const PTR_DEPTH: u32 = 8;
 // The depth `decide` rewrites a goal to, and the equalities of booleans `bool_stated` follows.
@@ -1142,6 +1171,16 @@ struct Prover<const B: usize> {
     // The facts the walk derives for a division or a shift by a constant (`quotient`, `shifted`),
     // which `holds` adds to a goal's facts only when it fails without them.
     derived: Map<u32, bool>,
+    // Per unsigned term `x` split at bit `c` (`split_of`): `c`, `x >> c`, `x & (2^c - 1)`, at `3 * i`.
+    splits: Map<u32, u32>,
+    split_parts: Vector<u32>,
+    // The derived facts of bit splits and products (`derive_late`): `holds` adds them after the others.
+    late: Map<u32, bool>,
+    late_on: bool,
+    // Whether the facts of the obligation under proof proved its goal false (`late_first`).
+    refuted_goal: bool,
+    // The product terms by their factors (`a << 32 | b`): one product at every width is one value.
+    prods: Map<u64, Vector<u32>>,
     fx: fx::Facts,
     pw: u16, // the width of `usize`, which lengths have
     // The sizes of element types (`len_cap`).
@@ -1412,6 +1451,9 @@ struct Prover<const B: usize> {
     walk_cap: u32, // the walk steps of a walk for facts or a merged walk (`spend`): FACTS_WALK, or MERGED_PER_BLOCK per block
     ev: Eval<B>,
     vname: Map<u32, u32>, // a parameter's unknown -> the parameter's local, for counterexamples
+    // Whether the memory event under way is a write through a parameter's value at the entry, which no local
+    // of the body (made after it) is reached by (`write_at`, `mem_event_keep`).
+    spare_frame: bool,
     pvars: Map<u64, u32>, // a const generic parameter (module << 32 | node) -> its unknown
     // The facts for the build (`check_kept`): the bounds checks of the body under proof that held on
     // each path the walk reached them (`chk_ok`) and those that did not on one (`chk_dead`), by rvalue;
@@ -1520,6 +1562,12 @@ extend<const B: usize> Prover<B> {
             tm: Terms::<B>::new(),
             sv: Solver::<B>::new(),
             derived: Map::<u32, bool>::new(),
+            splits: Map::<u32, u32>::new(),
+            split_parts: Vector::<u32>::new(),
+            late: Map::<u32, bool>::new(),
+            late_on: false,
+            refuted_goal: false,
+            prods: Map::<u64, Vector<u32>>::new(),
             fx: fx::Facts::new(false),
             pw: lay::target_for(p.arch).ptr as u16 * 8,
             lsv: lay::Svc::new(p),
@@ -1715,6 +1763,7 @@ extend<const B: usize> Prover<B> {
             walk_cap: FACTS_WALK,
             ev: Eval::<B>::new(),
             vname: Map::<u32, u32>::new(),
+            spare_frame: false,
             refining: false,
             refine_all: false,
             refine: null,
@@ -4929,14 +4978,33 @@ extend<const B: usize> Prover<B> {
                     }
                 }
             }
-            if dropped && self.holds_staged(&few, goal) {
+            if dropped && self.holds_in_at(&few, goal, NOSEQ_STEPS) {
                 return true;
             }
             self.parts = 0;
         }
+        // An equality of sequences the path's equalities of sequences give by congruence (`s == t ++ e`,
+        // `e == u` give `s == t ++ u`): with those alone, within SEQ_CONG_STEPS, before the stages that
+        // read the elements.
+        if self.names_seq_eq(goal, 0) && pc0.len() != 0 {
+            let mut eqs = Vector::<u32>::new();
+            let mut parts = Vector::<u32>::new();
+            for j in 0..pc0.len() {
+                parts.clear();
+                self.conjuncts(pc0[j], &mut parts, 0);
+                for q in 0..parts.len() {
+                    if self.tm.at(parts[q]).op == T_EQ && self.names_seq_eq(parts[q], 0) && !eqs.contains(&parts[q]) {
+                        eqs.push(parts[q]);
+                    }
+                }
+            }
+            if eqs.len() != 0 && self.capped_at(&eqs, goal, SEQ_CONG_STEPS) {
+                return true;
+            }
+        }
         // An equality of sequences its terms' definitions decide (their elements): first without the
         // path's facts, whose arithmetic only adds cases to it, within SEQ_DEFS_STEPS, then with its
-        // bounds alone, within STAGE_STEPS.
+        // bounds alone, within SEQ_NEAR_STEPS.
         if self.names_seq_eq(goal, 0) && pc0.len() != 0 {
             let none = Vector::<u32>::new();
             let lim = self.sv.limit;
@@ -4947,7 +5015,7 @@ extend<const B: usize> Prover<B> {
                 self.parts = 0;
                 let near = self.near_atoms(goal, pc0);
                 if near.len() != 0 && !within(pc0, &near) {
-                    self.sv.limit = lim.min(self.sv.steps.saturating_add(STAGE_STEPS));
+                    self.sv.limit = lim.min(self.sv.steps.saturating_add(SEQ_NEAR_STEPS));
                     ok = self.holds_in(&near, goal);
                 }
             }
@@ -4974,10 +5042,28 @@ extend<const B: usize> Prover<B> {
                     }
                 }
             }
-            if dropped && self.holds_staged(&few, goal) {
+            if dropped && self.holds_in_at(&few, goal, NOINV_STEPS) {
                 return true;
             }
             self.parts = 0;
+        }
+        // A goal of several parts that name a predicate the path states of other operands
+        // (`owns(p, n, 8)` beside `owns(p, m * 72, 8)`): the equality of the two, proved once, for every
+        // part (each would prove it again).
+        let g0 = self.tm.at(goal).op;
+        if (g0 == T_OR || g0 == T_AND) && !self.in_cong && self.steps + self.sv.steps <= STEP_BUDGET {
+            self.in_cong = true;
+            let eqs = self.stated_congruence(pc0, goal);
+            self.in_cong = false;
+            if eqs.len() != 0 {
+                let mut pc1 = pc0.clone();
+                pc1.extend_copy(&eqs);
+                self.parts = 0;
+                if self.holds_in(&pc1, goal) {
+                    return true;
+                }
+                self.parts = 0;
+            }
         }
         if self.holds_in(pc0, goal) {
             return true;
@@ -5093,6 +5179,109 @@ extend<const B: usize> Prover<B> {
         return out;
     }
 
+    // The equalities of a predicate's application `goal` names, which the path `pc` does not state, with one
+    // of the same predicate it states, of the same operands but one that `pc` proves equal within
+    // STATED_CONG_STEPS: at most CONG_PAIRS pairs.
+    fn stated_congruence(self: &mut Self, pc: &Vector<u32>, goal: u32) Vector<u32> {
+        let mut out = Vector::<u32>::new();
+        let mut stated = Vector::<u32>::new();
+        let mut all_parts = Vector::<u32>::new();
+        let mut parts = Vector::<u32>::new();
+        for j in 0..pc.len() {
+            parts.clear();
+            self.conjuncts(pc[j], &mut parts, 0);
+            for q in 0..parts.len() {
+                let x = self.tm.at(parts[q]);
+                if x.op == T_CALL && x.w == W_BOOL && !stated.contains(&parts[q]) {
+                    stated.push(parts[q]);
+                }
+            }
+            all_parts.extend_copy(&parts);
+        }
+        if stated.len() == 0 {
+            return out;
+        }
+        let mut calls = Vector::<u32>::new();
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(goal);
+        for _k in 0..OP_TERMS * 4 {
+            if stack.len() == 0 {
+                break;
+            }
+            let t = stack.pop().unwrap();
+            if seen.contains_key(&t) {
+                continue;
+            }
+            seen.insert(t, true);
+            let x = self.tm.at(t);
+            if x.op == T_CALL && x.w == W_BOOL {
+                calls.push(t);
+            } else {
+                self.tm.operands(t, &mut ops);
+                stack.extend_copy(&ops);
+            }
+        }
+        // Each equality of operands once: two calls of one pair of operands share it.
+        let mut proved = Map::<u32, bool>::new();
+        let mut tried: u32 = 0;
+        let mut xa = Vector::<u32>::new();
+        let mut xb = Vector::<u32>::new();
+        for i in 0..calls.len() {
+            if stated.contains(&calls[i]) {
+                continue;
+            }
+            for j in 0..stated.len() {
+                let (a, b) = (self.tm.at(calls[i]), self.tm.at(stated[j]));
+                if a.k != b.k || tried >= CONG_PAIRS {
+                    continue;
+                }
+                self.tm.operands(calls[i], &mut xa);
+                self.tm.operands(stated[j], &mut xb);
+                if xa.len() != xb.len() {
+                    continue;
+                }
+                // One operand apart: the others are the same terms.
+                let mut diff = NONE;
+                let mut ndiff: u32 = 0;
+                for q in 0..xa.len() {
+                    if xa[q] != xb[q] {
+                        diff = q as u32;
+                        ndiff += 1;
+                    }
+                }
+                if ndiff != 1 {
+                    continue;
+                }
+                tried += 1;
+                let e = self.tm.cmp(T_EQ, xa[diff as usize], xb[diff as usize]);
+                if !proved.contains_key(&e) {
+                    // First the facts that name either operand: the path's others only add cases.
+                    let mut sel = Vector::<u32>::new();
+                    for q in 0..all_parts.len() {
+                        if self.mentions(all_parts[q], xa[diff as usize]) || self.mentions(
+                            all_parts[q],
+                            xb[diff as usize],
+                        ) {
+                            sel.push(all_parts[q]);
+                        }
+                    }
+                    let ok = sel.len() != 0 && sel.len() < all_parts.len() && self.capped_at(&sel, e, OWN_STEPS) || self.capped_at(
+                        pc,
+                        e,
+                        STATED_CONG_STEPS,
+                    );
+                    proved.insert(e, ok);
+                }
+                if *proved.get(&e).unwrap() {
+                    out.push(self.tm.cmp(T_EQ, calls[i], stated[j]));
+                }
+            }
+        }
+        return out;
+    }
+
     // The witness of each equality of sequences goal `goal` names joins the equality's definition
     // (`seq_ext`): only an equality to prove needs one.
     fn goal_witnesses(self: &mut Self, goal: u32) {
@@ -5123,8 +5312,13 @@ extend<const B: usize> Prover<B> {
 
     // `holds_in` within STAGE_STEPS: a stage with some of the facts, which the whole facts follow.
     fn holds_staged(self: &mut Self, pc0: &Vector<u32>, goal: u32) bool {
+        return self.holds_in_at(pc0, goal, STAGE_STEPS);
+    }
+
+    // `holds_in` within `steps`.
+    fn holds_in_at(self: &mut Self, pc0: &Vector<u32>, goal: u32, steps: u32) bool {
         let lim = self.sv.limit;
-        self.sv.limit = lim.min(self.sv.steps.saturating_add(STAGE_STEPS));
+        self.sv.limit = lim.min(self.sv.steps.saturating_add(steps));
         let ok = self.holds_in(pc0, goal);
         self.sv.limit = lim;
         return ok;
@@ -5164,6 +5358,38 @@ extend<const B: usize> Prover<B> {
         // A goal that holds by itself (`0 <= b as int`): no case of the path's facts to split.
         if self.tm.is_true(goal) {
             return true;
+        }
+        // The facts of the last tier of the goal's own operations (`late_facts`), each set within OWN_STEPS:
+        // first the path's equalities that give its terms other values, with the products they make
+        // (`core`); then all of them alone (a chain of wrapping additions, a multiple of `2^64` needs no
+        // fact of the path, whose products and sequences only add cases); then the path's facts that share
+        // a product with the goal (an equality multiplied by a factor, an invariant of products), alone and
+        // with them.
+        let mut own = Vector::<u32>::new();
+        let mut core = Vector::<u32>::new();
+        self.late_facts(goal, pc0, &mut own, &mut core);
+        if core.len() != 0 && core.len() < own.len() && self.capped_at(&core, goal, OWN_STEPS) {
+            return true;
+        }
+        if own.len() != 0 && self.capped_at(&own, goal, OWN_STEPS) {
+            return true;
+        }
+        if own.len() != 0 {
+            let mut near = self.sharing(goal, pc0);
+            let n0 = near.len();
+            if n0 != 0 && n0 < pc0.len() {
+                if self.capped_at(&near, goal, OWN_STEPS) {
+                    return true;
+                }
+                for j in 0..own.len() {
+                    if !near.contains(&own[j]) {
+                        near.push(own[j]);
+                    }
+                }
+                if self.capped_at(&near, goal, OWN_STEPS) {
+                    return true;
+                }
+            }
         }
         // A call goal with the predicates the path states on its arguments and the definitions of both:
         // `carried(x)` proves `loose(x)`.
@@ -5206,10 +5432,27 @@ extend<const B: usize> Prover<B> {
                 if parts.len() == 1 && self.tm.at(parts[0]).op == T_OR {
                     let mut cases = Vector::<u32>::new();
                     self.disjuncts(parts[0], &mut cases, 0);
+                    let mut left = cases.len();
                     for j in 0..cases.len() {
                         let mut hy = pc0.clone();
                         self.add_defs_of(cases[j], &mut hy, DEFS_ALL);
-                        if self.capped(&hy, cases[j]) {
+                        // A case the path's facts exclude within CASE_STEPS (another representation's tag)
+                        // is not tried; the last one left needs no such check.
+                        if left > 1 {
+                            let nc = self.tm.not(cases[j]);
+                            if self.capped_at(&hy, nc, CASE_STEPS) {
+                                left -= 1;
+                                continue;
+                            }
+                        }
+                        // Each part of the case alone: the others' facts only add cases to it.
+                        let mut cps = Vector::<u32>::new();
+                        self.conjuncts(cases[j], &mut cps, 0);
+                        let mut ok = true;
+                        for q in 0..cps.len() {
+                            ok = ok && self.capped(&hy, cps[q]);
+                        }
+                        if ok {
                             return true;
                         }
                     }
@@ -5370,26 +5613,245 @@ extend<const B: usize> Prover<B> {
         // A goal of bit operations: their bits decide it, where their facts add only cases. The theories
         // still try each branch first (`Solver::lemma_with`).
         let bitty = self.names_bit_op(goal);
+        // A goal of bit operations whose operations' facts make it linear (`x & m <= x`, a sum that does
+        // not wrap): with them, without the bits, within OWN_STEPS, before the bits.
+        if bitty {
+            let mut lin = Vector::<u32>::with_capacity(pc.len() + own.len());
+            for j in 0..pc.len() {
+                if !self.derived.contains_key(&pc[j]) {
+                    lin.push(pc[j]);
+                }
+            }
+            lin.extend_copy(&own);
+            self.op_facts(goal, &mut lin, true, false);
+            if self.capped_at(&lin, goal, OWN_STEPS) {
+                return true;
+            }
+        }
         if n == 0 {
-            return self.sv.implies(&self.tm, pc, goal, bitty) || self.ops_imply(pc, pc, goal) || !bitty && self.sv.implies(
+            if self.sv.implies(&self.tm, pc, goal, bitty) {
+                return true;
+            }
+            let mut full = Vector::<u32>::new();
+            if let Some(r) = self.late_first(goal, &own, pc, pc, &mut full) {
+                return r;
+            }
+            return self.ops_imply(pc, pc, goal) || !bitty && self.sv.implies(&self.tm, pc, goal, true) || full.len() > pc.len() && self.sv.implies(
                 &self.tm,
-                pc,
+                &full,
                 goal,
-                true,
+                false,
             );
         }
         let mut base = Vector::<u32>::with_capacity(pc.len() - n);
+        let mut mid = Vector::<u32>::with_capacity(pc.len());
         for j in 0..pc.len() {
             if !self.derived.contains_key(&pc[j]) {
                 base.push(pc[j]);
             }
+            if !self.late.contains_key(&pc[j]) {
+                mid.push(pc[j]);
+            }
         }
         // Last, the bits of every fact: a derived one's (a bit count's) can decide a goal of no bit operation.
-        return self.sv.implies(&self.tm, &base, goal, bitty) || self.sv.implies(&self.tm, pc, goal, false) || self.ops_imply(
-            &base,
-            pc,
+        // The facts of bit splits and products after all the others (`late`), but first those of the goal's
+        // own operations, with the path's own facts, within LATE_STEPS: where they decide, the stages between
+        // cost more than they do.
+        if self.sv.implies(&self.tm, &base, goal, bitty) {
+            return true;
+        }
+        let mut full = Vector::<u32>::new();
+        if let Some(r) = self.late_first(goal, &own, &base, pc, &mut full) {
+            return r;
+        }
+        let late = full.len() > mid.len();
+        return self.sv.implies(&self.tm, &mid, goal, false) || self.ops_imply(&base, &mid, goal) || self.sv.implies(
+            &self.tm,
+            &mid,
             goal,
-        ) || self.sv.implies(&self.tm, pc, goal, true);
+            true,
+        ) || late && self.sv.implies(&self.tm, &full, goal, false);
+    }
+
+    // `own`, the facts of the last tier of the bit operations, products, casts and quotients `goal` names
+    // (`late_facts`), where it names any: whether `base` with them proves the goal within LATE_STEPS (the
+    // stages between would cost more). Where that attempt spends them all, the goal is hard: whether
+    // `full` proves it false within REFUTE_STEPS, which leaves it only their contradiction (the stages
+    // between would spend the budget on the search for a proof that is not there, and the attempt with
+    // products of rows does not follow: `refuted_goal`). The result where one settles the goal; `full`:
+    // `pc` with `own`, for the last stage.
+    fn late_first(
+        self: &mut Self,
+        goal: u32,
+        own: &Vector<u32>,
+        base: &Vector<u32>,
+        pc: &Vector<u32>,
+        full: &mut Vector<u32>,
+    ) Option<bool> {
+        full.extend_copy(pc);
+        if own.len() == 0 {
+            return None;
+        }
+        let mut early = base.clone();
+        for j in 0..own.len() {
+            if !full.contains(&own[j]) {
+                full.push(own[j]);
+            }
+            if !early.contains(&own[j]) {
+                early.push(own[j]);
+            }
+        }
+        let e0 = self.sv.steps;
+        if self.capped_at(&early, goal, LATE_STEPS) {
+            return Some(true);
+        }
+        if self.sv.steps - e0 >= LATE_STEPS {
+            let ng = self.tm.not(goal);
+            if self.capped_at(full, ng, REFUTE_STEPS) {
+                self.refuted_goal = true;
+                return Some(self.capped_at(full, self.tm.boolean(false), REFUTE_STEPS));
+            }
+        }
+        return None;
+    }
+
+    // The facts of `pc` that name a product of two terms that are not constants that `goal` names (at most
+    // OP_TERMS * 4 terms of each).
+    fn sharing(self: &Self, goal: u32, pc: &Vector<u32>) Vector<u32> {
+        let mut gs = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(goal);
+        for _k in 0..OP_TERMS * 4 {
+            if stack.len() == 0 {
+                break;
+            }
+            let u = stack.pop().unwrap();
+            if gs.contains_key(&u) {
+                continue;
+            }
+            gs.insert(u, true);
+            self.tm.operands(u, &mut ops);
+            stack.extend_copy(&ops);
+        }
+        let mut out = Vector::<u32>::new();
+        let mut seen = Map::<u32, bool>::new();
+        for j in 0..pc.len() {
+            stack.clear();
+            seen.clear();
+            stack.push(pc[j]);
+            for _k in 0..OP_TERMS * 4 {
+                if stack.len() == 0 {
+                    break;
+                }
+                let u = stack.pop().unwrap();
+                if seen.contains_key(&u) {
+                    continue;
+                }
+                seen.insert(u, true);
+                let x = self.tm.at(u);
+                if gs.contains_key(&u) && x.op == T_MUL && self.tm.at(x.a).op != T_INT && self.tm.at(x.b).op != T_INT {
+                    out.push(pc[j]);
+                    break;
+                }
+                self.tm.operands(u, &mut ops);
+                stack.extend_copy(&ops);
+            }
+        }
+        return out;
+    }
+
+    // The facts of the last tier (`late`) of the bit operations, products and casts `goal` names (`bit_facts`,
+    // `shifted`, `product_facts`, `wrap_facts`), those of its quotients and remainders (`divided`,
+    // `multiple_facts`), the equalities of `pc` that give one of its terms another value, and its products
+    // with a factor such an equality gives, into `full`; those equalities and products also into `core`.
+    fn late_facts(self: &mut Self, goal: u32, pc: &Vector<u32>, full: &mut Vector<u32>, core: &mut Vector<u32>) {
+        let cd = replace(&mut self.chain_depth, 0);
+        let lo = replace(&mut self.late_on, true);
+        // The path's equalities of an integer term with another value (`q == e`, a conjunct of a fact that
+        // is not derived: a claim the code states), and the conjunct of each.
+        let mut eqs = Map::<u32, u32>::new();
+        let mut eq_fact = Map::<u32, u32>::new();
+        let mut cs = Vector::<u32>::new();
+        for j in 0..pc.len() {
+            if self.derived.contains_key(&pc[j]) {
+                continue;
+            }
+            cs.clear();
+            self.conjuncts(pc[j], &mut cs, 0);
+            for i in 0..cs.len() {
+                let x = self.tm.at(cs[i]);
+                if x.op == T_EQ && self.tm.is_int(x.a) && self.tm.is_int(x.b) && eqs.len() < OP_TERMS {
+                    for side in 0..2u32 {
+                        let (u, e) = pick(side == 0, (x.a, x.b), (x.b, x.a));
+                        let ut = self.tm.at(u).op;
+                        if ut != T_INT && ut != T_ADD && ut != T_SUB && ut != T_MUL && !eqs.contains_key(&u) {
+                            eqs.insert(u, e);
+                            eq_fact.insert(u, cs[i]);
+                        }
+                    }
+                }
+            }
+        }
+        let mut seen = Map::<u32, bool>::new();
+        let mut stack = Vector::<u32>::new();
+        let mut ops = Vector::<u32>::new();
+        stack.push(goal);
+        for _k in 0..OP_TERMS * 4 {
+            if stack.len() == 0 {
+                break;
+            }
+            let u = stack.pop().unwrap();
+            if seen.contains_key(&u) {
+                continue;
+            }
+            seen.insert(u, true);
+            let op = self.tm.at(u).op;
+            // An equality of the path that gives this term of the goal another value.
+            if let Some(f) = eq_fact.get(&u) {
+                if !full.contains(f) {
+                    full.push(*f);
+                }
+                if !core.contains(f) {
+                    core.push(*f);
+                }
+            }
+            if op == T_MUL {
+                self.product_facts(full, u);
+                // A factor the path makes equal to another value: the product is that value times the other
+                // factor (`q == h + 1` gives `q * d == h * d + d`).
+                let x = self.tm.at(u);
+                if self.tm.at(x.a).op != T_INT && self.tm.at(x.b).op != T_INT {
+                    for side in 0..2u32 {
+                        let (f, g) = pick(side == 0, (x.a, x.b), (x.b, x.a));
+                        if let Some(e) = eqs.get(&f) {
+                            let p = self.tm.arith(T_MUL, *e, g, W_INT, true);
+                            let eq = self.tm.cmp(T_EQ, u, p);
+                            self.derive(full, eq, u);
+                            if !core.contains(&eq) {
+                                core.push(eq);
+                            }
+                        }
+                    }
+                }
+            } else if op == T_CAST {
+                let _ = self.wrap_facts(full, u);
+            } else if op == T_DIV || op == T_REM {
+                let x = self.tm.at(u);
+                let _ = self.divided(full, op == T_DIV, x.a, x.b, x.w, x.sg);
+                if op == T_REM {
+                    self.multiple_facts(full, u);
+                }
+            } else if op == T_SHL || op == T_SHR {
+                self.shifted(full, u);
+            } else if op == T_BAND || op == T_BOR || op == T_BXOR {
+                self.bit_facts(full, u);
+            }
+            self.tm.operands(u, &mut ops);
+            stack.extend_copy(&ops);
+        }
+        self.late_on = lo;
+        self.chain_depth = cd;
     }
 
     // Whether term `t` names a bit operation (`&`, `|`, `^`, `!`, a shift) among its first OP_TERMS terms.
@@ -6507,9 +6969,13 @@ extend<const B: usize> Prover<B> {
         }
         self.sv.stop_on_ovf = B == NUM_NARROW && self.tm.big_seen;
         self.sv.gave_up = false;
+        self.refuted_goal = false;
         let mut ok = self.holds(pc, goal);
         // A goal over products of unknowns: once more with the products of rows (`Solver::nla_attempt`).
-        if !ok && !self.sv.gave_up && self.steps + self.sv.steps <= STEP_BUDGET && self.has_product(goal, pc) {
+        if !ok && !self.sv.gave_up && !self.refuted_goal && self.steps + self.sv.steps <= STEP_BUDGET && self.has_product(
+            goal,
+            pc,
+        ) {
             self.sv.nla_allowed = true;
             ok = self.holds(pc, goal);
             self.sv.nla_allowed = false;
@@ -7482,6 +7948,9 @@ extend<const B: usize> Prover<B> {
         let ep = state[n];
         for j in 0..self.esc.len() {
             let l = self.esc[j];
+            if self.spare_frame && l as usize < cb.locals.len() {
+                continue;
+            }
             let mut q0 = NONE;
             for q in 0..self.views.len() {
                 if (self.views[q] >> 32) as u32 == l {
@@ -7547,6 +8016,9 @@ extend<const B: usize> Prover<B> {
         if locals {
             for j in 0..self.aesc.len() {
                 let r = self.aesc[j];
+                if self.spare_frame && self.ref_target(r) as usize < cb.locals.len() {
+                    continue;
+                }
                 if !self.esc.contains(&self.ref_target(r)) {
                     let (am, aty) = self.ref_ty(cb, r);
                     let f = self.fresh_in(am, aty, self.pref_union(r));
@@ -7575,6 +8047,9 @@ extend<const B: usize> Prover<B> {
         }
         for j in 0..self.esc.len() {
             let l = self.esc[j];
+            if self.spare_frame && l as usize < cb.locals.len() {
+                continue;
+            }
             // A vector lent only as `[]mut` views keeps their length, and its elements are theirs in the
             // new epoch (`relink`).
             let mut q0 = NONE;
@@ -7845,6 +8320,7 @@ extend<const B: usize> Prover<B> {
         let sv = self.st_save(state, all);
         if self.write_at(cb, cm, state, pl, v, all) {
             self.mem_event(cb, cm, state);
+            self.spare_frame = false;
             self.st_carry(cm, state, &sv);
             if self.mi_next.len() == 4 {
                 self.mi_forward(state);
@@ -10273,6 +10749,8 @@ extend<const B: usize> Prover<B> {
                         self.mi_next.push(cm);
                         self.mi_next.push(pty);
                     }
+                    // A parameter's pointer points into the caller's memory: no local of this body.
+                    self.spare_frame = self.vname.contains_key(&r);
                 }
                 return true;
             }
@@ -11243,6 +11721,7 @@ extend<const B: usize> Prover<B> {
         self.havoc_idx = true;
         let m = self.write_at(b, b.module, state, pl, NONE, false);
         self.havoc_idx = false;
+        self.spare_frame = false;
         return m;
     }
 
@@ -12240,6 +12719,9 @@ extend<const B: usize> Prover<B> {
                         T_MUL
                     };
                     let e = self.tm.arith(to, x, y, w, sg);
+                    if to == T_MUL {
+                        self.product_facts(pc, e);
+                    }
                     return self.checked(e, pc, ovf, key, sp);
                 }
                 if op == tt::TokenType::Slash as u8 || op == tt::TokenType::Percent as u8 {
@@ -12280,6 +12762,8 @@ extend<const B: usize> Prover<B> {
                     let r = self.tm.arith(bo, x, y, w, sg);
                     if bo == T_SHL || bo == T_SHR {
                         self.shifted(pc, r);
+                    } else {
+                        self.bit_facts(pc, r);
                     }
                     return r;
                 }
@@ -12376,6 +12860,19 @@ extend<const B: usize> Prover<B> {
         if rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC as u32 {
             let x = self.operand(cb, cm, state, rv.a, all);
             let xs = self.tm.at(x);
+            // A boolean as an integer: 1 where it holds, else 0.
+            if self.tm.is_bool(x) && w > W_BOOL && w != W_OTHER {
+                let c = self.tm.unary(T_CAST, x, w, sg);
+                let one = self.tm.int(Num::<B>::one(), w, sg);
+                let zero = self.tm.int(Num::<B>::zero(), w, sg);
+                let e1 = self.tm.cmp(T_EQ, c, one);
+                let e0 = self.tm.cmp(T_EQ, c, zero);
+                let a1 = self.tm.and(x, e1);
+                let nx = self.tm.not(x);
+                let a0 = self.tm.and(nx, e0);
+                pc.push(self.tm.or(a1, a0));
+                return c;
+            }
             if xs.w > W_BOOL && w > W_BOOL {
                 // A cast that keeps every value of the source keeps the value: into `int` each one,
                 // into `nat` one at least 0 (proved, as an overflow).
@@ -13490,7 +13987,12 @@ extend<const B: usize> Prover<B> {
             } else {
                 self.tm.arith(pick(k == WK_WADD, T_ADD, pick(k == WK_WSUB, T_SUB, T_MUL)), a, b, w, sg)
             };
-            return self.tm.unary(T_CAST, e, w, sg);
+            if k == WK_WMUL {
+                self.product_facts(pc, e);
+            }
+            let r = self.tm.unary(T_CAST, e, w, sg);
+            let _ = self.wrap_facts(pc, r);
+            return r;
         }
         if k == WK_ROTL || k == WK_ROTR {
             return self.rotated(k == WK_ROTL, a, b, w, sg);
@@ -14266,6 +14768,17 @@ extend<const B: usize> Prover<B> {
     // it first): on the path `pc`, or in a clause's or a definition's walk a fact of every obligation
     // that names `anchor` (`add_defs`): a clause's condition is no place for it.
     fn derive(self: &mut Self, pc: &mut Vector<u32>, f: u32, anchor: u32) {
+        // A fact of the last tier is no definition: the last stage of `holds` states the goal's own
+        // (`late_facts`).
+        if self.late_on && self.chain_depth != 0 {
+            return;
+        }
+        // A fact derived in both tiers is of the first.
+        if !self.late_on {
+            let _ = self.late.remove(&f);
+        } else if !self.derived.contains_key(&f) {
+            self.late.insert(f, true);
+        }
         self.derived.insert(f, true);
         if self.chain_depth == 0 {
             // A path states a fact once: each copy of a disjunction would split the branches again.
@@ -14275,6 +14788,13 @@ extend<const B: usize> Prover<B> {
             return;
         }
         self.anchor(anchor, f);
+    }
+
+    // `derive`, for a fact of the last tier (`late`): a bit split's or a product's.
+    fn derive_late(self: &mut Self, pc: &mut Vector<u32>, f: u32, anchor: u32) {
+        let o = replace(&mut self.late_on, true);
+        self.derive(pc, f, anchor);
+        self.late_on = o;
     }
 
     // Fact `f` of every obligation that names term `r` (`add_defs`). A definition made of derived facts alone
@@ -14835,6 +15355,323 @@ extend<const B: usize> Prover<B> {
         let eq = self.tm.cmp(T_EQ, r, m);
         let f = self.tm.or(big, eq);
         self.derive(pc, f, r);
+        // The bits that stay: `x`'s low `w - c` times `2^c`.
+        if c != 0 && !exact_w(t.w) && self.tm.at(t.a).op != T_INT {
+            let lo = self.split_of(pc, t.a, t.w as usize - c, t.w);
+            if lo != NONE {
+                let pi = self.tm.int(p, W_INT, true);
+                let lp = self.tm.arith(T_MUL, lo, pi, W_INT, true);
+                let e = self.tm.cmp(T_EQ, r, lp);
+                self.derive_late(pc, e, r);
+            }
+        }
+    }
+
+    // Split unsigned `x` (width `w`, not a constant) at bit `c` (0 < c < w): `x >> c` and `x & (2^c - 1)`,
+    // with `x` their sum `(x >> c) * 2^c + (x & (2^c - 1))` (`shifted` gives the quotient's facts). The low
+    // part's term, NONE for no split; kept in `splits` for the products of `x` (`product_facts`).
+    fn split_of(self: &mut Self, pc: &mut Vector<u32>, x: u32, c: usize, w: u16) u32 {
+        let xt = self.tm.at(x);
+        if c == 0 || c >= w as usize || xt.sg || exact_w(xt.w) || xt.op == T_INT || !self.tm.is_int(x) {
+            return NONE;
+        }
+        let p = Num::<B>::one().shl(c);
+        let cv = self.tm.int(wide::<B>(c as i64), 64, false);
+        let hi = self.tm.arith(T_SHR, x, cv, xt.w, false);
+        let mv = self.tm.int(p - Num::<B>::one(), xt.w, false);
+        let lo = self.tm.arith(T_BAND, x, mv, xt.w, false);
+        let o = replace(&mut self.late_on, true);
+        self.shifted(pc, hi);
+        self.late_on = o;
+        let pi = self.tm.int(p, W_INT, true);
+        let hp = self.tm.arith(T_MUL, hi, pi, W_INT, true);
+        let sum = self.tm.arith(T_ADD, hp, lo, W_INT, true);
+        let e = self.tm.cmp(T_EQ, x, sum);
+        self.derive_late(pc, e, lo);
+        if !self.splits.contains_key(&x) {
+            self.splits.insert(x, self.split_parts.len() as u32);
+            self.split_parts.push(c as u32);
+            self.split_parts.push(hi);
+            self.split_parts.push(lo);
+        }
+        return lo;
+    }
+
+    // The facts of bit operation `r` of an unsigned type: `x & (2^c - 1)` splits `x` (`split_of`); `x | y`
+    // and `x ^ y` where `y` is a left shift by a constant `d` and `x` is below `2^d` have no common bit:
+    // their sum.
+    fn bit_facts(self: &mut Self, pc: &mut Vector<u32>, r: u32) {
+        let t = self.tm.at(r);
+        if t.sg || exact_w(t.w) || !self.tm.is_int(r) {
+            return;
+        }
+        if t.op == T_BAND {
+            for side in 0..2u32 {
+                let (m, x) = pick(side == 0, (t.b, t.a), (t.a, t.b));
+                let mt = self.tm.at(m);
+                if mt.op == T_INT && self.tm.at(x).op != T_INT {
+                    let c = mask_bits(mt.k);
+                    if c > 0 && c < t.w as i64 {
+                        let _ = self.split_of(pc, x, c as usize, t.w);
+                    }
+                    return;
+                }
+            }
+            return;
+        }
+        if t.op != T_BOR && t.op != T_BXOR {
+            return;
+        }
+        for side in 0..2u32 {
+            let (q, x) = pick(side == 0, (t.b, t.a), (t.a, t.b));
+            let qt = self.tm.at(q);
+            if qt.op != T_SHL || self.tm.at(qt.b).op != T_INT {
+                continue;
+            }
+            let d = self.tm.at(qt.b).k;
+            if d.is_negative() || !(d < wide::<B>(t.w)) {
+                continue;
+            }
+            if let Some(u) = self.sup(x, 0) {
+                if u < Num::<B>::one().shl(d.to_i64() as usize) {
+                    let sum = self.tm.arith(T_ADD, x, q, W_INT, true);
+                    let e = self.tm.cmp(T_EQ, r, sum);
+                    self.derive_late(pc, e, r);
+                    return;
+                }
+            }
+        }
+    }
+
+    // A constant upper bound of integer `t` at least 0 by its form, None for none: a constant, a mask, a
+    // shift right by a constant, a sum or product of such terms, a cast of one, or its unsigned type's
+    // greatest value.
+    fn sup(self: &Self, t: u32, depth: u32) Option<Num<B>> {
+        let x = self.tm.at(t);
+        if x.op == T_INT {
+            return pick(x.k.is_negative(), Option::<Num<B>>::None, Some(x.k));
+        }
+        if !self.tm.is_int(t) || x.sg && x.op != T_CAST || depth > 6 {
+            return None;
+        }
+        let ty = if exact_w(x.w) || x.sg {
+            Option::<Num<B>>::None
+        } else {
+            Some(Terms::<B>::range(x.w, false).1)
+        };
+        let own = if x.op == T_BAND {
+            let a = self.sup(x.a, depth + 1);
+            let b = self.sup(x.b, depth + 1);
+            switch (a, b) {
+                (Some(u), Some(v)) => Some(pick(u < v, u, v)),
+                (Some(u), None) => Some(u),
+                (None, Some(v)) => Some(v),
+                _ => Option::<Num<B>>::None,
+            }
+        } else if x.op == T_SHR && self.tm.at(x.b).op == T_INT && !self.tm.at(x.b).k.is_negative() && !x.sg {
+            switch self.sup(x.a, depth + 1) {
+                Some(u) => Some(u.shr(self.tm.at(x.b).k.to_i64() as usize)),
+                None => Option::<Num<B>>::None,
+            }
+        } else if x.op == T_ADD || x.op == T_MUL {
+            switch (self.sup(x.a, depth + 1), self.sup(x.b, depth + 1)) {
+                (Some(u), Some(v)) => ck(pick(x.op == T_ADD, u.checked_add(&v), u.checked_mul(&v))),
+                _ => Option::<Num<B>>::None,
+            }
+        } else if x.op == T_CAST && !self.tm.at(x.a).sg {
+            self.sup(x.a, depth + 1)
+        } else {
+            Option::<Num<B>>::None
+        };
+        return switch (own, ty) {
+            (Some(u), Some(v)) => Some(pick(u < v, u, v)),
+            (Some(u), None) => Some(u),
+            (None, Some(v)) => Some(v),
+            _ => None,
+        };
+    }
+
+    // The facts of product `r` of two terms that are not constants: at most the product of the factors'
+    // constant upper bounds (`sup`); where a factor is split (`split_of`, through a widening cast), the
+    // sum of the products of the parts; and equal to a product of the same factors of another type.
+    fn product_facts(self: &mut Self, pc: &mut Vector<u32>, r: u32) {
+        let t = self.tm.at(r);
+        if t.op != T_MUL || self.tm.at(t.a).op == T_INT || self.tm.at(t.b).op == T_INT {
+            return;
+        }
+        let na = self.at_least(t.a, 0);
+        let nb = self.at_least(t.b, 0);
+        if self.tm.is_true(na) && self.tm.is_true(nb) {
+            if let (Some(ua), Some(ub)) = (self.sup(t.a, 0), self.sup(t.b, 0)) {
+                if let Some(p) = ck(ua.checked_mul(&ub)) {
+                    let k = self.tm.int(p, W_INT, true);
+                    let le = self.tm.cmp(T_LE, r, k);
+                    self.derive_late(pc, le, r);
+                }
+            }
+        }
+        let key = t.a as u64 << 32 | t.b as u64;
+        let mut list = switch self.prods.get(&key) {
+            Some(v) => v.clone(),
+            None => Vector::<u32>::new(),
+        };
+        for j in 0..list.len() {
+            if list[j] != r {
+                let e = self.tm.cmp(T_EQ, r, list[j]);
+                self.derive_late(pc, e, r);
+            }
+        }
+        if !list.contains(&r) {
+            list.push(r);
+            self.prods.insert(key, list);
+        }
+        let xa = self.split_view(pc, t.a);
+        let xb = self.split_view(pc, t.b);
+        if xa == t.a && xb == t.b {
+            return;
+        }
+        let e = self.tm.arith(T_MUL, xa, xb, W_INT, true);
+        let eq = self.tm.cmp(T_EQ, r, e);
+        self.derive_late(pc, eq, r);
+        // The products of the parts are values of the products the walk made of them.
+        let mut lin = Vector::<LinTerm<B>>::new();
+        let mut st = Vector::<LinTerm<B>>::new();
+        let mut k0 = Num::<B>::zero();
+        if !lin_form(&self.tm, e, Num::<B>::one(), &mut k0, &mut lin, &mut st) {
+            return;
+        }
+        for j in 0..lin.len() {
+            let m = lin[j].atom;
+            let mt = self.tm.at(m);
+            if mt.op == T_MUL && self.tm.at(mt.a).op != T_INT && self.tm.at(mt.b).op != T_INT {
+                self.product_facts(pc, m);
+            }
+        }
+    }
+
+    // The facts of cast `r` of an integer `e` to a fixed type of `w` bits (a wrapping operation's, a narrowing
+    // cast's): `e` less the multiple of `2^w` that brings it into the type, `q` the quotient `floor((e + o) / 2^w)` (`o`: 0, or
+    // `2^(w - 1)` for a signed type) with its facts (`quotient`). `q`, NONE for no such cast.
+    fn wrap_facts(self: &mut Self, pc: &mut Vector<u32>, r: u32) u32 {
+        let t = self.tm.at(r);
+        if t.op != T_CAST || !self.tm.is_int(t.a) || exact_w(t.w) || t.w > 64 || t.w <= W_BOOL {
+            return NONE;
+        }
+        let e = t.a;
+        if self.tm.at(e).op == T_INT {
+            return NONE;
+        }
+        let o = self.late_on;
+        self.late_on = true;
+        let p = Num::<B>::one().shl(t.w as usize);
+        let num = if t.sg {
+            let h = self.tm.int(Num::<B>::one().shl(t.w as usize - 1), W_INT, true);
+            self.tm.arith(T_ADD, e, h, W_INT, true)
+        } else {
+            e
+        };
+        let pv = self.tm.int(p, W_INT, true);
+        let q = self.tm.arith(T_DIV, num, pv, W_INT, true);
+        self.quotient(pc, num, q, p, W_INT, true, true);
+        let qp = self.tm.arith(T_MUL, q, pv, W_INT, true);
+        let d = self.tm.arith(T_SUB, e, qp, W_INT, true);
+        let eq = self.tm.cmp(T_EQ, r, d);
+        self.derive(pc, eq, r);
+        self.late_on = o;
+        return q;
+    }
+
+    // The fact of remainder `r` of `x` by a constant `c` above 0 where `x` is a multiple of `c` by its form:
+    // `x` with each atom that is a wrapping cast or a split value as its parts, and each product as the
+    // product of its factors' parts (`split_view`, at most MULTIPLE_ROUNDS rounds: one per nested wrapping
+    // operation) has every coefficient and its constant a multiple of `c`; then `r` is 0 (`x - c * q` with
+    // `q` an integer, whatever the sign).
+    fn multiple_facts(self: &mut Self, pc: &mut Vector<u32>, r: u32) {
+        let t = self.tm.at(r);
+        let ct = self.tm.at(t.b);
+        if t.op != T_REM || ct.op != T_INT || !(Num::<B>::zero() < ct.k) || !self.tm.is_int(t.a) {
+            return;
+        }
+        let c = ct.k;
+        let mut e = t.a;
+        let mut lin = Vector::<LinTerm<B>>::new();
+        let mut st = Vector::<LinTerm<B>>::new();
+        for _round in 0..MULTIPLE_ROUNDS {
+            lin.clear();
+            let mut k = Num::<B>::zero();
+            if !lin_form(&self.tm, e, Num::<B>::one(), &mut k, &mut lin, &mut st) {
+                return;
+            }
+            let n = switch merge_terms(&mut lin, 0, lin.len()) {
+                Some(v) => v,
+                None => {
+                    return;
+                },
+            };
+            lin.truncate(n);
+            let mut all = !(k.rem_euclid(&c) != Num::<B>::zero());
+            let mut changed = false;
+            let mut next = self.tm.int(k, W_INT, true);
+            for j in 0..lin.len() {
+                let a = lin[j].atom;
+                let at = self.tm.at(a);
+                let v = if at.op == T_MUL && self.tm.at(at.a).op != T_INT && self.tm.at(at.b).op != T_INT {
+                    let va = self.split_view(pc, at.a);
+                    let vb = self.split_view(pc, at.b);
+                    pick(va == at.a && vb == at.b, a, self.tm.arith(T_MUL, va, vb, W_INT, true))
+                } else {
+                    self.split_view(pc, a)
+                };
+                changed = changed || v != a;
+                all = all && lin[j].c.rem_euclid(&c) == Num::<B>::zero();
+                let cv = self.tm.int(lin[j].c, W_INT, true);
+                let term = self.tm.arith(T_MUL, cv, v, W_INT, true);
+                next = self.tm.arith(T_ADD, next, term, W_INT, true);
+            }
+            if all {
+                let z = self.tm.int(Num::<B>::zero(), t.w, t.sg);
+                let f = self.tm.cmp(T_EQ, r, z);
+                self.derive_late(pc, f, r);
+                return;
+            }
+            if !changed {
+                return;
+            }
+            e = next;
+        }
+    }
+
+    // `x` (through widening casts of unsigned values) as the sum of its parts where it is split
+    // (`split_of`): `(x >> c) * 2^c + (x & (2^c - 1))`; a wrapping cast as its value less the multiple of
+    // `2^w` (`wrap_facts`); else `x`.
+    fn split_view(self: &mut Self, pc: &mut Vector<u32>, x0: u32) u32 {
+        let mut x = x0;
+        for _k in 0..4 {
+            let t = self.tm.at(x);
+            if t.op != T_CAST || self.tm.at(t.a).sg || !self.tm.is_int(t.a) || !(exact_w(t.w) || t.w > self.tm.at(t.a).w) {
+                break;
+            }
+            x = t.a;
+        }
+        let xt = self.tm.at(x);
+        if xt.op == T_CAST && self.tm.is_int(xt.a) && !exact_w(xt.w) && xt.w <= 64 && self.tm.at(xt.a).op != T_INT {
+            let q = self.wrap_facts(pc, x);
+            if q != NONE {
+                let pv = self.tm.int(Num::<B>::one().shl(xt.w as usize), W_INT, true);
+                let qp = self.tm.arith(T_MUL, q, pv, W_INT, true);
+                return self.tm.arith(T_SUB, xt.a, qp, W_INT, true);
+            }
+        }
+        let i = switch self.splits.get(&x) {
+            Some(v) => (*v) as usize,
+            None => {
+                return x0;
+            },
+        };
+        let c = self.split_parts[i] as usize;
+        let pi = self.tm.int(Num::<B>::one().shl(c), W_INT, true);
+        let hp = self.tm.arith(T_MUL, self.split_parts[i + 1], pi, W_INT, true);
+        return self.tm.arith(T_ADD, hp, self.split_parts[i + 2], W_INT, true);
     }
 
     // Integer `x` as a value of type (`w`, `sg`) through `from`: itself when the type holds every value
@@ -17031,6 +17868,10 @@ extend<const B: usize> Prover<B> {
         self.proved.clear();
         self.held_alt.clear();
         self.derived.clear();
+        self.splits.clear();
+        self.split_parts.clear();
+        self.late.clear();
+        self.prods.clear();
         self.defs.clear();
         self.def_of.clear();
         self.res_of.clear();
@@ -22062,6 +22903,25 @@ pub(package) fn check_kept(
         }
     }
     return ok;
+}
+
+// The `j` of a low mask `c = 2^j - 1`, -1 for another constant.
+const fn mask_bits<const B: usize>(c: Num<B>) i64 {
+    if c.is_negative() {
+        return -1;
+    }
+    let n = c + Num::<B>::one();
+    let mut p = Num::<B>::one();
+    for j in 0..B {
+        if p == n {
+            return j as i64;
+        }
+        if n < p {
+            return -1;
+        }
+        p = p.shl(1);
+    }
+    return -1;
 }
 
 // Whether `c` (at least 0) is `2^j - 1` for some `j`: `c + 1` a power of two.

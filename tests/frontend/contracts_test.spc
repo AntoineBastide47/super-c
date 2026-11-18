@@ -420,6 +420,90 @@ fn unproved_contracts_are_errors() {
         "cannot prove the 'requires' of 'put' at this call",
     );
     b.add(
+        "a carry claimed of a borrow",
+        "fn add_carry(a: u64, b: u64, c: *mut u64) u64\n    requires c != null\n    ensures |r| (unsafe *c) as int * 18446744073709551616 + r as int == a as int + b as int\n{\n    let s = a.wrapping_add(b);\n    unsafe *c = (a < b) as u64;\n    return s;\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    // A false claim of the portable 64 by 64 bit product: its facts prove it false within a few steps, not
+    // the step budget.
+    b.add(
+        "a false claim of a product of halves",
+        M"(fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int + 1
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+fn main() i32 {
+    let mut h: u64 = 0;
+    return mul_wide(3, 5, &mut h) as i32;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a sequence the path makes of another element",
+        M"(import std::spec::seq as *;
+
+fn app(v: &mut Vector<u8>, x: u8, y: u8)
+    requires v.view().len() < 1000
+    ensures v.view() == old(v.view()).push(x)
+{
+    v.push(y);
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a predicate of another operand",
+        M"(fn need(p: *mut u8, n: usize) bool
+    requires p == null || Global::owns(p, n, 1)
+{
+    return true;
+}
+
+fn f(p: *mut u8, n: usize, m: usize) bool
+    requires Global::owns(p, m, 1) && n as int == m as int + 1
+{
+    return need(p, n);
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove the 'requires' of 'need' at this call",
+    );
+    b.add(
+        "a mask's bound of one operand",
+        M"(fn f(x: u64, y: u64, ux: u64, uy: u64) u64
+    requires x <= ux && y <= uy && ux <= 0xFF && uy <= 0xFF
+    ensures |r| r <= ux
+{
+    return x.wrapping_add(y) & 0xFF;
+}
+
+fn main() i32 {
+    return 0;
+}
+)",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a byte past a memset",
         "import std::spec::seq as *;\nimport string;\nstruct B {\n    @owned\n    p: *mut u8,\n    cap: usize,\n}\nfn bad(b: &mut B) requires block(b.p).len() >= 8 ensures block(b.p)[4] == 9 {\n    unsafe string::memset(b.p, 9, 4);\n}\nfn main() i32 { return 0; }\n",
         "cannot prove this 'ensures' clause",
@@ -2427,8 +2511,300 @@ fn main() i32 {
 )",
         4,
     );
-    // `pre_any`: the entry's `requires` hold of every argument, so the callee may call it with storage of
-    // its own.
+    // Bit splits, products of split values, wrapping arithmetic and boolean casts: the portable 64 by 64 bit
+    // product, an addition with its carry, a subtraction with its borrow, a wrapping product's low half.
+    b.add(
+        "a wide product from its halves, and carries",
+        M"(fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+
+fn add_carry(a: u64, b: u64, c: *mut u64) u64
+    requires c != null
+    ensures |r| (unsafe *c) as int * 18446744073709551616 + r as int == a as int + b as int
+{
+    let s = a.wrapping_add(b);
+    unsafe *c = (s < a) as u64;
+    return s;
+}
+
+fn sub_borrow(a: u64, b: u64, c: *mut u64) u64
+    requires c != null
+    ensures |r| r as int - (unsafe *c) as int * 18446744073709551616 == a as int - b as int
+{
+    let s = a.wrapping_sub(b);
+    unsafe *c = (a < b) as u64;
+    return s;
+}
+
+fn low(a: u64, b: u64) u64
+    ensures |r| r as int == a as int * b as int % 18446744073709551616
+{
+    return a.wrapping_mul(b);
+}
+
+fn join(x: u64, y: u64) u64
+    requires y < 0x100000000
+    ensures |r| r as int == (x >> 32) as int + y as int * 4294967296
+{
+    return x >> 32 ^ y << 32;
+}
+
+fn main() i32 {
+    let mut h: u64 = 0;
+    let l = mul_wide(0xFFFFFFFFFFFFFFFF, 3, &mut h);
+    let mut c: u64 = 0;
+    let s = add_carry(0xFFFFFFFFFFFFFFFF, 2, &mut c);
+    let mut d: u64 = 0;
+    let t = sub_borrow(1, 2, &mut d);
+    let ok = h == 2 && l == 0xFFFFFFFFFFFFFFFD && c == 1 && s == 1 && d == 1 && t == 0xFFFFFFFFFFFFFFFF;
+    let ok2 = low(0x100000001, 0x100000001) == 0x200000001 && join(0x500000000, 2) == 0x200000005;
+    return if ok && ok2 {
+        6
+    } else {
+        1
+    };
+}
+)",
+        6,
+    );
+    // Moller and Granlund's 2-by-1 division by the divisor's reciprocal: the estimate's remainder bounds,
+    // the remainder word modulo 2^64, and the two corrections, each step a lemma of few facts.
+    b.add(
+        "a 128 by 64 bit division by a reciprocal",
+        M"(spec fn bb() int {
+    return 18446744073709551616;
+}
+
+lemma mul_eq(x: int, y: int, z: int)
+    requires x == y
+    ensures x * z == y * z
+{}
+
+lemma mul_le(a: int, b: int, c: int, e: int)
+    requires 0 <= a && a <= c && 0 <= b && b <= e
+    ensures a * b <= c * e
+{}
+
+// The estimate's remainder `rt = u1 * 2^64 + u0 - (qq + 1) * d` times 2^64, by the reciprocal's defect
+// `k = 2^128 - (2^64 + v) * d`, where `qq * 2^64 + s0 == (2^64 + v) * u1 + u0`.
+lemma identity(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures bb() * (u1 * bb() + u0 - (qq + 1) * d) == u1 * (bb() * bb() - (bb() + v) * d) + u0 * (bb() - d) + s0 * d - bb() * d
+{
+    mul_eq(qq * bb() + s0, (bb() + v) * u1 + u0, d);
+}
+
+// The estimate fits a word.
+lemma est_q(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb() && 0 <= v
+    requires (bb() + v) * d <= bb() * bb() - 1
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures qq < bb()
+{
+    mul_le(u1, bb() + v, d - 1, bb() + v);
+}
+
+// The estimate's remainder is above `s0 - 2^64` and at least `-d`.
+lemma est_lo(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires bb() / 2 <= d && d < bb() && 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb()
+    requires (bb() + v) * d <= bb() * bb() - 1
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures u1 * bb() + u0 - (qq + 1) * d > s0 - bb() && u1 * bb() + u0 - (qq + 1) * d >= 0 - d
+{
+    identity(u1, u0, d, v, qq, s0);
+    mul_le(0, 0, u1, bb() * bb() - (bb() + v) * d);
+    mul_le(0, 0, u0, bb() - d);
+    mul_le(1, 1, bb() - s0, bb() - d);
+}
+
+// The estimate's remainder is below `s0` or below `2^64 - d`.
+lemma est_hi(u1: int, u0: int, d: int, v: int, qq: int, s0: int)
+    requires bb() / 2 <= d && d < bb() && 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb() && 0 <= s0 && s0 < bb()
+    requires (bb() + v) * d <= bb() * bb() - 1 && bb() * bb() - 1 < (bb() + v + 1) * d
+    requires qq * bb() + s0 == (bb() + v) * u1 + u0
+    ensures u1 * bb() + u0 - (qq + 1) * d < s0 || u1 * bb() + u0 - (qq + 1) * d < bb() - d
+{
+    identity(u1, u0, d, v, qq, s0);
+    mul_le(u1, bb() * bb() - (bb() + v) * d, d - 1, d);
+    mul_le(u0, bb() - d, bb() - 1, bb() - d);
+    if s0 >= bb() - d {
+        mul_le(bb() - d, bb() - d, bb() - d, s0);
+    } else {
+        mul_le(s0, d, bb() - d, d);
+    }
+}
+
+// An estimate of 2^64 leaves a negative remainder: the dividend is below `d * 2^64`.
+lemma top(u1: int, u0: int, d: int, qq: int)
+    requires 0 <= u1 && u1 < d && 0 <= u0 && u0 < bb()
+    ensures qq + 1 == bb() ==> u1 * bb() + u0 - (qq + 1) * d < 0
+{}
+
+// The first correction taken (the remainder word above `s0`): the estimate less one, its remainder plus d.
+lemma taken(rt: int, r0: int, rn: int, qn: int, qq: int, s0: int, d: int)
+    requires 0 <= r0 && r0 < bb() && 0 <= rn && rn < bb() && 0 <= qn && qn < bb() && 0 <= qq && qq < bb()
+    requires bb() / 2 <= d && d < bb() && 0 <= s0 && s0 < bb() && r0 > s0
+    requires rt > s0 - bb() && rt >= 0 - d && (rt < s0 || rt < bb() - d)
+    requires (r0 - rt) % bb() == 0 && (rn - rt - d) % bb() == 0 && (qn - qq) % bb() == 0
+    ensures qn == qq && rn == rt + d && rn < 2 * d
+{}
+
+// The first correction not taken: the estimate and its remainder.
+lemma kept(rt: int, r0: int, q0: int, qq: int, s0: int, d: int)
+    requires 0 <= r0 && r0 < bb() && 0 <= q0 && q0 < bb() && 0 <= qq && qq < bb()
+    requires bb() / 2 <= d && d < bb() && 0 <= s0 && s0 < bb() && r0 <= s0
+    requires rt > s0 - bb() && (rt < s0 || rt < bb() - d) && (qq + 1 == bb() ==> rt < 0)
+    requires (r0 - rt) % bb() == 0 && (q0 - qq - 1) % bb() == 0
+    ensures q0 == qq + 1 && r0 == rt && r0 < 2 * d
+{}
+
+// A quotient whose remainder is at least the divisor is below the most a word holds, less one.
+lemma no_carry(q: int, r: int, d: int, n: int)
+    requires q * d + r == n && n < d * bb() && r >= d && 0 <= q && 0 < d
+    ensures q + 1 < bb()
+{
+    if q + 1 >= bb() {
+        mul_le(bb(), d, q + 1, d);
+    }
+}
+
+fn mul_wide(a: u64, b: u64, hi: *mut u64) u64
+    requires hi != null
+    ensures |r| (unsafe *hi) as int * 18446744073709551616 + r as int == a as int * b as int
+{
+    let a0 = a & 0xFFFFFFFFu64;
+    let a1 = a >> 32;
+    let b0 = b & 0xFFFFFFFFu64;
+    let b1 = b >> 32;
+    let p00 = a0 * b0;
+    let p01 = a0 * b1;
+    let p10 = a1 * b0;
+    let p11 = a1 * b1;
+    let mid = (p00 >> 32) + (p01 & 0xFFFFFFFFu64) + (p10 & 0xFFFFFFFFu64);
+    unsafe *hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return p00 & 0xFFFFFFFFu64 | mid << 32;
+}
+
+fn div2by1_pre(u1: u64, u0: u64, d: u64, v: u64, r: *mut u64) u64
+    requires r != null && d >= 0x8000000000000000 && u1 < d
+    requires (18446744073709551616 + v as int) * d as int <= 340282366920938463463374607431768211455
+    requires 340282366920938463463374607431768211455 < (18446744073709551617 + v as int) * d as int
+    ensures |q| q as int * d as int + (unsafe *r) as int == u1 as int * 18446744073709551616 + u0 as int
+    ensures (unsafe *r) < d
+{
+    let mut q1: u64 = 0;
+    let q0 = mul_wide(v, u1, &mut q1);
+    ghost let h = q1 as int;
+    let s0 = q0.wrapping_add(u0);
+    let c1 = (s0 < q0) as u64;
+    q1 = q1.wrapping_add(u1).wrapping_add(c1).wrapping_add(1);
+    ghost let qq = h + u1 as int + c1 as int;
+    ghost let rt = u1 as int * bb() + u0 as int - (qq + 1) * d as int;
+    est_q(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    est_lo(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    est_hi(u1 as int, u0 as int, d as int, v as int, qq, s0 as int);
+    top(u1 as int, u0 as int, d as int, qq);
+    let mut rem = u0.wrapping_sub(q1.wrapping_mul(d));
+    ghost let r0 = rem as int;
+    assert (r0 - rt) % bb() == 0 by {};
+    assert (q1 as int - qq - 1) % bb() == 0 by {};
+    if rem > s0 {
+        q1 = q1.wrapping_sub(1);
+        rem = rem.wrapping_add(d);
+        assert (rem as int - rt - d as int) % bb() == 0 && (q1 as int - qq) % bb() == 0 by {};
+        taken(rt, r0, rem as int, q1 as int, qq, s0 as int, d as int);
+    } else {
+        kept(rt, r0, q1 as int, qq, s0 as int, d as int);
+    }
+    if rem >= d {
+        no_carry(q1 as int, rem as int, d as int, u1 as int * bb() + u0 as int);
+        q1 = q1 + 1;
+        rem = rem - d;
+    }
+    unsafe *r = rem;
+    return q1;
+}
+
+fn main() i32 {
+    let mut r1: u64 = 0;
+    let q1 = div2by1_pre(5, 7, 0x8000000000000000, 0xFFFFFFFFFFFFFFFF, &mut r1);
+    let mut r2: u64 = 0;
+    let q2 = div2by1_pre(3, 5, 0xFFFFFFFFFFFFFFFF, 1, &mut r2);
+    return (q1 + r1 + q2 + r2) as i32;
+}
+)",
+        28,
+    );
+    b.add(
+        "wrapping chains modulo 2^64",
+        M"(fn w3(h: u64, u: u64, c: u64) u64
+    ensures |r| r as int == (h as int + u as int + c as int + 1) % 18446744073709551616
+{
+    return h.wrapping_add(u).wrapping_add(c).wrapping_add(1);
+}
+
+fn rem_word(u0: u64, h: u64, u1: u64, d: u64) u64
+    ensures |r| (r as int - (u0 as int - (h as int + u1 as int + 1) * d as int)) % 18446744073709551616 == 0
+{
+    let q1 = h.wrapping_add(u1).wrapping_add(1);
+    return u0.wrapping_sub(q1.wrapping_mul(d));
+}
+
+fn main() i32 {
+    let a = w3(0xFFFFFFFFFFFFFFFF, 2, 3);
+    let b = rem_word(100, 1, 2, 5);
+    return (a + b) as i32;
+}
+)",
+        85,
+    );
+    // A write through a pointer parameter reaches no local of the body, whose address a call took.
+    b.add(
+        "a local past a write through a parameter",
+        M"(fn put(a: u64, hi: *mut u64) u64
+    requires hi != null
+{
+    unsafe *hi = a;
+    return a;
+}
+
+fn kept(r: *mut u64, c: bool) u64
+    requires r != null
+    ensures |q| q == 6
+{
+    let mut q1: u64 = 0;
+    let _ = put(1, &mut q1);
+    q1 = 5;
+    if c {
+        q1 = q1 + 1;
+    } else {
+        q1 = 6;
+    }
+    unsafe *r = 1;
+    return q1;
+}
+
+fn main() i32 {
+    let mut x: u64 = 0;
+    return (kept(&mut x, true) + x) as i32;
+}
+)",
+        7,
+    );
     // A `memset` sets its bytes to its value's low byte, in a block a field takes after it and in a
     // field's block, and keeps the others.
     b.add(
@@ -2472,6 +2848,8 @@ fn main() i32 {
 )",
         5,
     );
+    // `pre_any`: the entry's `requires` hold of every argument, so the callee may call it with storage of
+    // its own.
     b.add(
         "an entry for any argument",
         M"(fn hand(entry: fn(*mut void) void) bool
