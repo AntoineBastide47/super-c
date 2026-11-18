@@ -7004,6 +7004,7 @@ extend Lowerer {
             }
         }
         if kind == ir::SI_BINARY || kind == ir::SI_UNARY || kind == ir::SI_CAST {
+            self.body.has_unchecked = self.body.has_unchecked || kind == ir::SI_CAST && c == ir::CAST_UNCHECKED as u32;
             let rv = if kind == ir::SI_BINARY {
                 ir::rv(ir::RV_BINARY, ops[0], ops[1], c, ty)
             } else {

@@ -37,6 +37,7 @@ import ir::facts as fx;
 import ir::layout as lay;
 import ir::tailcall as tcl;
 import module::loader as loader;
+import build_system::manifest as bman;
 import utils::errors as diag;
 import utils::diag_codes as dc;
 import prove::terms as *;
@@ -136,7 +137,25 @@ extend<const B: usize> Eval<B> {
         if x.op >= T_LT && x.op <= T_NE {
             return !(tm.is_int(x.a) && tm.is_int(x.b) || tm.is_bool(x.a) && tm.is_bool(x.b));
         }
-        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG && x.op != T_ORD || x.op == T_REF;
+        return x.op == T_VAR || x.op == T_CALL || x.op >= T_AGG && x.op != T_ORD && (!float_op(x.op) || x.op == T_FFMA || !Eval::<
+            B
+        >::host_op(tm, &x)) || x.op == T_REF;
+    }
+
+    // Whether float operation `x` reads and makes only `f32` and `f64` values, which the host computes.
+    const fn host_op(tm: &Terms<B>, x: &Term<B>) bool {
+        let fd = x.k.limb(0) & 0xFFFFFFFF;
+        if x.op == T_FKEY {
+            return true;
+        }
+        let sw = tm.at(x.a).w;
+        return if x.op == T_FLT || x.op == T_FLE || x.op == T_FEQ || x.op == T_FTOI {
+            host_fw(sw, fd) != 0
+        } else if x.op == T_FCVT {
+            host_fw(x.w, fd) != 0 && host_fw(sw, x.k.limb(0) >> 32) != 0
+        } else {
+            host_fw(x.w, fd) != 0
+        };
     }
 
     // The leaves under `roots`, in first-seen order, with their domains.
@@ -184,7 +203,7 @@ extend<const B: usize> Eval<B> {
                 continue;
             }
             self.stack.push(x.a);
-            if x.op != T_NEG && x.op != T_NOT && x.op != T_BNOT && x.op != T_CAST {
+            if !unary_op(x.op) {
                 self.stack.push(x.b);
             }
         }
@@ -211,7 +230,7 @@ extend<const B: usize> Eval<B> {
                 let _ = self.stack.pop();
                 continue;
             }
-            let unary = x.op == T_NEG || x.op == T_NOT || x.op == T_BNOT || x.op == T_CAST;
+            let unary = unary_op(x.op);
             let need_a = self.stamp[x.a as usize] != self.now;
             let need_b = !unary && self.stamp[x.b as usize] != self.now;
             if need_a || need_b {
@@ -247,6 +266,56 @@ extend<const B: usize> Eval<B> {
     fn apply(self: &Self, x: &Term<B>) Option<Num<B>> {
         let a = self.val[x.a as usize];
         let b = self.val[x.b as usize];
+        // A float operation by the host's arithmetic; a NaN result has no one value.
+        // (`leaf` keeps the other formats' operations.)
+        let fd = x.k.limb(0) & 0xFFFFFFFF;
+        if x.op == T_FKEY {
+            return Some(Terms::<B>::key_of(a, x.w));
+        }
+        if x.op == T_FLT || x.op == T_FLE || x.op == T_FEQ {
+            return switch fold_fcmp(x.op, pick(fd == FD32, 32u16, 64u16), fd, a.limb(0), b.limb(0)) {
+                Some(v) => Some(wide::<B>(v as i64)),
+                None => None,
+            };
+        }
+        if x.op == T_FSQRT {
+            let r = if x.w == 32 {
+                f32::from_bits(a.limb(0) as u32).sqrt() as f64
+            } else {
+                f64::from_bits(a.limb(0)).sqrt()
+            };
+            return pick(
+                r.is_nan(),
+                Option::<Num<B>>::None,
+                Some(u64_val::<B>(pick(x.w == 32, (r as f32).to_bits(), r.to_bits()))),
+            );
+        }
+        if x.op == T_FRINT {
+            let md = (x.k.limb(0) >> 32) as u16;
+            let f = pick(x.w == 32, f32::from_bits(a.limb(0) as u32), f64::from_bits(a.limb(0)));
+            let r = if md == FR_ROUND {
+                f.round()
+            } else if md == FR_FLOOR {
+                f.floor()
+            } else if md == FR_CEIL {
+                f.ceil()
+            } else if md == FR_TRUNC {
+                f.trunc()
+            } else if (f - f.trunc()).abs() == 0.5 {
+                2.0 * (f / 2.0).round()
+            } else {
+                f.round()
+            };
+            return pick(
+                r.is_nan(),
+                Option::<Num<B>>::None,
+                Some(u64_val::<B>(pick(x.w == 32, (r as f32).to_bits(), r.to_bits()))),
+            );
+        }
+        if float_op(x.op) {
+            let sf = pick(x.op == T_FCVT, x.k.limb(0) >> 32, fd);
+            return fold_float(x.op, x.w, x.sg, x.k.limb(0), pick(sf == FD32, 32u16, 64u16), a, b);
+        }
         let one = Num::<B>::one();
         let z = Num::<B>::zero();
         if x.op == T_ADD {
@@ -709,6 +778,163 @@ const WK_WNEG: u8 = 18;
 const WK_ROTL: u8 = 19;
 const WK_ROTR: u8 = 20;
 const WK_CLZ: u8 = 21;
+// A float's classifications (`Prover::float_class`).
+const FC_NAN: u8 = 1;
+const FC_INF: u8 = 2;
+const FC_FINITE: u8 = 3;
+const FC_ZERO: u8 = 4;
+const FC_NORMAL: u8 = 5;
+const FC_SUB: u8 = 6;
+const FC_NEG: u8 = 7;
+const FC_POS: u8 = 8;
+
+// The methods of `Float<E, F, FAMILY>` the walk reads as operations (`Prover::soft_kind`); a
+// classification is SK_CLASS plus its FC_* code.
+const SK_ADD: u8 = 1;
+const SK_SUB: u8 = 2;
+const SK_MUL: u8 = 3;
+const SK_DIV: u8 = 4;
+const SK_REM: u8 = 5;
+const SK_SQRT: u8 = 6;
+const SK_FMA: u8 = 7;
+const SK_NEG: u8 = 8;
+const SK_ABS: u8 = 9;
+const SK_COPYSIGN: u8 = 10;
+const SK_TRUNC: u8 = 11;
+const SK_FLOOR: u8 = 12;
+const SK_CEIL: u8 = 13;
+const SK_ROUND: u8 = 14;
+const SK_EVEN: u8 = 15;
+const SK_EQ: u8 = 16;
+const SK_CMP: u8 = 17;
+const SK_IEQ: u8 = 18;
+const SK_ILT: u8 = 19;
+const SK_ILE: u8 = 20;
+const SK_TO_RAW: u8 = 21;
+const SK_FROM_RAW: u8 = 22;
+const SK_FROM_F32: u8 = 23;
+const SK_FROM_F64: u8 = 24;
+const SK_TO_F32: u8 = 25;
+const SK_TO_F64: u8 = 26;
+const SK_CONVERT: u8 = 27;
+const SK_FROM_UINT: u8 = 28;
+const SK_FROM_INT: u8 = 29;
+const SK_ZERO: u8 = 30;
+const SK_NEG_ZERO: u8 = 31;
+const SK_ONE: u8 = 32;
+const SK_INF: u8 = 33;
+const SK_NAN: u8 = 34;
+const SK_MAX: u8 = 35;
+const SK_MIN_POS: u8 = 36;
+const SK_CLASS: u8 = 64;
+
+// The SK_* operation of `Float`'s method named `n`, 0 for another name.
+const fn soft_of(n: str) u8 {
+    let names: [str; 36] = [
+        "add",
+        "sub",
+        "mul",
+        "div",
+        "rem",
+        "sqrt",
+        "fma",
+        "neg",
+        "abs",
+        "copysign",
+        "trunc",
+        "floor",
+        "ceil",
+        "round",
+        "round_ties_even",
+        "eq",
+        "cmp",
+        "ieee_eq",
+        "ieee_lt",
+        "ieee_le",
+        "to_raw",
+        "from_raw",
+        "from_f32",
+        "from_f64",
+        "to_f32",
+        "to_f64",
+        "convert",
+        "from_uint",
+        "from_int",
+        "zero",
+        "neg_zero",
+        "one",
+        "infinity",
+        "nan",
+        "max_finite",
+        "min_positive",
+    ];
+    for i in 0..36 {
+        if names[i] == n {
+            return (i + 1) as u8;
+        }
+    }
+    let c = class_of(n);
+    return pick(c != 0 && c != FC_NORMAL && c != FC_SUB && c != FC_POS, SK_CLASS + c, 0u8);
+}
+
+// The classification a float method named `n` asks (FC_*), 0 for another name.
+const fn class_of(n: str) u8 {
+    return if n == "is_nan" {
+        FC_NAN
+    } else if n == "is_infinite" {
+        FC_INF
+    } else if n == "is_finite" {
+        FC_FINITE
+    } else if n == "is_zero" {
+        FC_ZERO
+    } else if n == "is_normal" {
+        FC_NORMAL
+    } else if n == "is_subnormal" {
+        FC_SUB
+    } else if n == "is_sign_negative" || n == "is_negative" {
+        FC_NEG
+    } else if n == "is_sign_positive" {
+        FC_POS
+    } else {
+        0
+    };
+}
+
+// The value of encoding `bits` of a float of width `w` (at most 64) and format `fd` with at most 52
+// fraction bits and 11 exponent bits, as an `f64`, which holds it exactly.
+const fn soft_value(bits: u64, w: u16, fd: u64) f64 {
+    let m = fd & 0xFFFF;
+    let e = w as u64 - 1 - m;
+    let bias = (1i64 << (e - 1) as i64) - 1;
+    let ex = (bits >> m & (1u64 << e) - 1) as i64;
+    let fr = bits & (1u64 << m) - 1;
+    let neg = (bits >> (w - 1) as u64 & 1) != 0;
+    let fo = (fd & FD_FINITE) != 0;
+    let top = ex == (1i64 << e as i64) - 1;
+    let mut v = if fo && top && fr == (1u64 << m) - 1 || !fo && top && fr != 0 {
+        f64::NAN
+    } else if !fo && top {
+        f64::INFINITY
+    } else {
+        // (hidden bit + fraction) * 2^(exponent - bias - m), the subnormals' exponent being 1.
+        let sig = pick(ex == 0, fr, fr | 1u64 << m) as f64;
+        let k = ex.max(1) - bias - m as i64;
+        let mut p = sig;
+        for _i in 0..k.abs() {
+            p = pick(k < 0, p * 0.5, p * 2.0);
+        }
+        p
+    };
+    if neg {
+        v = -v;
+    }
+    return v;
+}
+
+// The format code (`Terms`) of the built-in float of width `fw`.
+const fn host_fd(fw: u16) u64 {
+    return pick(fw == 32, FD32, FD64);
+}
 // Whether the blocks of body `cb` reachable from its entry hold a cycle (a loop): a depth-first walk
 // meets a block still on its stack. Block numbers follow no order.
 fn has_cycle(cb: &ir::CoreBody) bool {
@@ -879,6 +1105,7 @@ struct Prover<const B: usize> {
     wuint: loader::LookupHit, // the prelude's `UInt` and `Int` (`ty_of`, `wide_kind`)
     wint: loader::LookupHit,
     wcore: loader::LookupHit, // an item of the prelude's `core` module, which extends the built-in integers
+    wflt: loader::LookupHit, // the prelude's `Float` (`soft_fmt`, `soft_kind`)
     walloc: loader::LookupHit, // the prelude's `Allocator` interface (`is_owns`)
     wshare: loader::LookupHit, // the prelude's `rc_share` and `rc_units` (`share_atom`, `nsh`)
     wunits: loader::LookupHit,
@@ -1261,6 +1488,7 @@ extend<const B: usize> Prover<B> {
             wuint: p.prelude_lookup("UInt", true),
             wint: p.prelude_lookup("Int", true),
             wcore: p.prelude_lookup("UnsafeCell", true),
+            wflt: p.prelude_lookup("Float", true),
             walloc: p.prelude_lookup("Allocator", true),
             wshare: p.prelude_lookup("rc_share", false),
             wunits: p.prelude_lookup("rc_units", false),
@@ -1574,6 +1802,11 @@ extend<const B: usize> Prover<B> {
             if n > 0 && n <= int_limit(B) {
                 return n as u16, sg;
             }
+            // `Float<E, F, FAMILY>` is the integer of its encoding, as a built-in float.
+            let (fw, _fd) = self.soft_fmt(m, ty);
+            if fw != 0 {
+                return fw, false;
+            }
             return W_OTHER, false;
         }
         if y.kind != TypeKind::TYPE_BUILTIN {
@@ -1593,11 +1826,73 @@ extend<const B: usize> Prover<B> {
             BT_I32 | BT_U32 => 32,
             BT_I64 | BT_U64 => 64,
             BT_ISIZE | BT_USIZE => self.pw,
-            // A character is its code point.
-            BT_CHAR => 32,
+            // A character is its code point; a float the integer of its encoding (`T_FADD`).
+            BT_CHAR | BT_F32 => 32,
+            BT_F64 => 64,
             _ => 0,
         };
         return w as u16, sg;
+    }
+
+    // The (width, format code) of `Float<E, F, FAMILY>` type `ty` of module `m` (`Terms`: F, FD_FINITE for the
+    // FINITE_ONLY family); a width of 0 for another type, or one past `int_limit` bits.
+    fn soft_fmt(self: &Self, m0: ModuleId, ty0: TypeId) (u16, u64) {
+        if ty0 == TYPE_NONE || self.wflt.node == NODE_NONE {
+            return 0, 0;
+        }
+        let (m, ty) = self.resolve(m0, ty0);
+        let a = self.ast_of(m);
+        let y = a.type_at(ty);
+        if y.kind != TypeKind::TYPE_INSTANCE {
+            return 0, 0;
+        }
+        let inst = a.instance(y.as_data.inst);
+        if inst.module != self.wflt.mid || inst.decl != self.wflt.node || inst.n < 2 || inst.n > 3 {
+            return 0, 0;
+        }
+        let mut v: [i64; 3] = [0, 0, 0];
+        for j in 0..inst.n {
+            let c = a.type_at(inst.args[j as usize]);
+            if c.kind != TypeKind::TYPE_CONST {
+                return 0, 0;
+            }
+            v[j as usize] = c.as_data.value;
+        }
+        let w = 1 + v[0] + v[1];
+        if v[0] < 2 || v[0] > 30 || v[1] < 1 || w > int_limit(B) {
+            return 0, 0;
+        }
+        return w as u16, v[1] as u64 | pick(v[2] != 0, FD_FINITE, 0u64);
+    }
+
+    // The width of float type `ty` of module `m`: 32 or 64, 0 for another type.
+    fn float_w(self: &Self, m0: ModuleId, ty0: TypeId) u16 {
+        if ty0 == TYPE_NONE {
+            return 0;
+        }
+        let (m, ty) = self.resolve(m0, ty0);
+        let y = self.ast_of(m).type_at(ty);
+        if y.kind != TypeKind::TYPE_BUILTIN {
+            return 0;
+        }
+        let bt = unsafe y.as_data.builtin;
+        return pick(bt == BuiltinType::BT_F32, 32u16, pick(bt == BuiltinType::BT_F64, 64u16, 0u16));
+    }
+
+    // Whether float operations keep their IEEE 754 meaning: no build flag lets the optimizer rewrite them
+    // (else each result is an unknown).
+    const fn floats_exact(self: &Self) bool {
+        return (self.pkg().cg & bman::CG_FAST_MATH) == 0;
+    }
+
+    // Whether the float sums and products of body `cb` keep their meaning: `@associative_math` lets them
+    // reassociate.
+    fn float_sums_exact(self: &Self, cb: &ir::CoreBody) bool {
+        let o = cb.owner;
+        return self.floats_exact() && (o.node == NODE_NONE || self.ast_of(o.module).attr_of(
+            o.node,
+            AttrKind::ATTR_ASSOCIATIVE_MATH,
+        ) == null);
     }
 
     // Type `ty` of module `m` with the type arguments of the unfolding under way (`subst`) in place of
@@ -2798,6 +3093,10 @@ extend<const B: usize> Prover<B> {
         let op = rv.c;
         let xty = cb.operands.at(rv.a as usize).ty;
         if xty != TYPE_NONE && self.raw_ptr_ty(cm, xty) {
+            return self.tm.boolean(false);
+        }
+        // A float operation never panics.
+        if self.float_w(cm, xty) != 0 {
             return self.tm.boolean(false);
         }
         let x = self.operand(cb, cm, state, rv.a, false);
@@ -4040,7 +4339,18 @@ extend<const B: usize> Prover<B> {
             out.push_str(self.text(self.m, b.locals.at(l as usize).name()));
             out.push_str(" = ");
             let v = self.ev.val[t as usize];
-            if self.tm.at(t).w == W_BOOL {
+            let fw = self.float_w(self.m, b.locals.at(l as usize).ty);
+            let (sw, sfd) = self.soft_fmt(self.m, b.locals.at(l as usize).ty);
+            if fw != 0 {
+                let bits = v.limb(0);
+                if fw == 32 {
+                    out.format_into("{}", f32::from_bits(bits as u32));
+                } else {
+                    out.format_into("{}", f64::from_bits(bits));
+                }
+            } else if sw != 0 && sw <= 64 && (sfd & 0xFFFF) <= 52 {
+                out.format_into("{}", soft_value(v.limb(0), sw, sfd));
+            } else if self.tm.at(t).w == W_BOOL {
                 out.push_str(
                     if v.is_zero() {
                         "false"
@@ -7317,6 +7627,29 @@ extend<const B: usize> Prover<B> {
     }
 
     // The value of constant `cid` of body `cb`, read as type `ty`.
+    // Float constant `c` of width `fw`: its encoding as the build makes it (`lir::lower`'s `constant`): a
+    // literal rounded once from its text, a folded call's bits, an integer literal through `f64`.
+    fn float_const(self: &mut Self, cb: &ir::CoreBody, c: &ir::Constant, fw: u16) u32 {
+        let sm = pick(c.item.node != NODE_NONE, c.item.module, cb.module);
+        let src = self.pkg().modules.at(sm as usize).source.as_str();
+        let mut v: i64 = c.val;
+        let f = if c.kind == ir::CK_FLOAT {
+            float_literal_value(src, c.raw, fw == 32)
+        } else if c.kind == ir::CK_INT && c.int_value(src, &mut v) {
+            Some(v as f64)
+        } else {
+            Option::<f64>::None
+        };
+        let bits: u64 = if c.kind == ir::CK_FBITS {
+            pick(fw == 32, c.val as u64 & 0xFFFFFFFF, c.val as u64)
+        } else if let Some(x) = f {
+            pick(fw == 32, (x as f32).to_bits(), x.to_bits())
+        } else {
+            return self.tm.var(fw, false);
+        };
+        return self.tm.int(u64_val::<B>(bits), fw, false);
+    }
+
     fn constant(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, cid: u32, ty: TypeId) u32 {
         let c = *cb.constants.at(cid as usize);
         if c.kind == ir::CK_ITEM {
@@ -7328,6 +7661,10 @@ extend<const B: usize> Prover<B> {
         let (w, sg) = self.ty_of(cm, ty);
         if c.kind == ir::CK_BOOL {
             return self.tm.boolean(c.val != 0);
+        }
+        let fw = self.float_w(cm, ty);
+        if fw != 0 {
+            return self.float_const(cb, &c, fw);
         }
         // A null pointer: one value (`null_ptr`).
         if c.kind == ir::CK_INT && c.val == 0 && self.null_const(cb, cm, &c, ty) {
@@ -11057,6 +11394,124 @@ extend<const B: usize> Prover<B> {
         }
     }
 
+    // Binary operator `op` over floats `x` and `y` of width `fw`, its result of type (`w`, `sg`): IEEE 754
+    // arithmetic (`a - b` is `a + -b`), C's `fmod` for `%`, and comparisons; an operation the build may
+    // rewrite is an unknown value.
+    fn float_binary(self: &mut Self, cb: &ir::CoreBody, op: u8, x: u32, y: u32, fw: u16, w: u16, sg: bool) u32 {
+        if !self.floats_exact() || !self.float_sums_exact(cb) && (op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8 || op == tt::TokenType::Star as u8) {
+            return self.tm.var(w, sg);
+        }
+        let fd = host_fd(fw);
+        if op == tt::TokenType::Plus as u8 || op == tt::TokenType::Star as u8 || op == tt::TokenType::Slash as u8 || op == tt::TokenType::Percent as u8 {
+            let fo = if op == tt::TokenType::Plus as u8 {
+                T_FADD
+            } else if op == tt::TokenType::Star as u8 {
+                T_FMUL
+            } else if op == tt::TokenType::Slash as u8 {
+                T_FDIV
+            } else {
+                T_FREM
+            };
+            return self.tm.farith(fo, x, y, fw, fd);
+        }
+        if op == tt::TokenType::Minus as u8 {
+            let ny = self.tm.fneg(y, fw);
+            return self.tm.farith(T_FADD, x, ny, fw, fd);
+        }
+        if op == tt::TokenType::LessThan as u8 || op == tt::TokenType::LessThanEqual as u8 {
+            return self.tm.fcmp(pick(op == tt::TokenType::LessThan as u8, T_FLT, T_FLE), x, y, fd);
+        }
+        if op == tt::TokenType::GreaterThan as u8 || op == tt::TokenType::GreaterThanEqual as u8 {
+            return self.tm.fcmp(pick(op == tt::TokenType::GreaterThan as u8, T_FLT, T_FLE), y, x, fd);
+        }
+        if op == tt::TokenType::EqualEqual as u8 || op == tt::TokenType::BangEqual as u8 {
+            let e = self.tm.fcmp(T_FEQ, x, y, fd);
+            return pick(op == tt::TokenType::EqualEqual as u8, e, self.tm.not(e));
+        }
+        return self.tm.var(w, sg);
+    }
+
+    // Conversion `rv` of `x` into or out of a float, into type (`w`, `sg`): between floats, from an integer
+    // of up to 64 bits (rounded), into one (`as`: truncated and saturated, NaN 0; `to_int_unchecked`: the
+    // same where the value is not NaN and its truncation fits, which is an obligation). Another is an
+    // unknown value.
+    fn float_cast(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        pc: &mut Vector<u32>,
+        rv: &ir::Rvalue,
+        x: u32,
+        w: u16,
+        sg: bool,
+        ovf: u8,
+        key: u64,
+        sp: tok::Span,
+    ) u32 {
+        let sf = self.float_w(cm, cb.operands.at(rv.a as usize).ty);
+        let tf = self.float_w(cm, rv.target);
+        let xs = self.tm.at(x);
+        if !self.floats_exact() {
+            return self.tm.var(w, sg);
+        }
+        if sf != 0 && tf != 0 {
+            return self.tm.fconv(T_FCVT, x, tf, false, host_fd(tf) | host_fd(sf) << 32);
+        }
+        if tf != 0 {
+            return if xs.w > W_BOOL && xs.w <= 64 {
+                self.tm.fconv(T_ITOF, x, tf, false, host_fd(tf))
+            } else {
+                self.tm.var(w, sg)
+            };
+        }
+        if w <= W_BOOL || w > 64 {
+            return self.tm.var(w, sg);
+        }
+        let sfd = host_fd(sf);
+        let v = self.tm.fconv(T_FTOI, x, w, sg, sfd);
+        if rv.b == ir::CAST_UNCHECKED as u32 {
+            // Not NaN, and lo <= trunc(x) <= hi: x below hi + 1, a power of two, and above lo - 1 (-1, or
+            // -(2^(w-1) + 1)); at least lo where lo - 1 is no float, since then no float lies between them.
+            let nn = self.tm.fcmp(T_FEQ, x, x, sfd);
+            let top = self.float_pow2(w as i64 - sg as i64, false, false, sf);
+            let below = self.tm.fcmp(T_FLT, x, top, sfd);
+            let k = pick(sg, w as i64 - 1, 0i64);
+            let above = if sg && k > pick(sf == 32, 23i64, 52i64) {
+                let lo = self.float_pow2(k, false, true, sf);
+                self.tm.fcmp(T_FLE, lo, x, sfd)
+            } else {
+                let lo1 = self.float_pow2(k, sg, true, sf);
+                self.tm.fcmp(T_FLT, lo1, x, sfd)
+            };
+            let r0 = self.tm.and(nn, below);
+            let fits = self.tm.and(r0, above);
+            if ovf != OVF_EXACT {
+                self.oblige(
+                    pc,
+                    fits,
+                    key,
+                    sp,
+                    format("cannot prove that this value is not NaN and that its truncation fits the integer type"),
+                    String::from_str("'to_int_unchecked' of NaN or of a value outside the type is undefined"),
+                );
+            }
+            pc.push(fits);
+        }
+        return v;
+    }
+
+    // The float `2^k`, plus 1 when `one` (k at most the fraction width), negated when `neg`, of width `fw`.
+    fn float_pow2(self: &mut Self, k: i64, one: bool, neg: bool, fw: u16) u32 {
+        let (bias, m) = pick(fw == 32, (127i64, 23i64), (1023i64, 52i64));
+        let frac = if one {
+            1u64 << (m - k) as u64
+        } else {
+            0u64
+        };
+        let bits = (k + bias) as u64 << m as u64 | frac | pick(neg, fsign(fw), 0u64);
+        return self.tm.int(u64_val::<B>(bits), fw, false);
+    }
+
     // A checked operation's value `exact` (of a type that fits it only if it does not overflow): with
     // OVF_PROVE the proof that it fits, under `pc`, then the exact value; with OVF_KEEP a fresh value
     // that equals the exact one where it fits.
@@ -11360,6 +11815,14 @@ extend<const B: usize> Prover<B> {
         if rv.kind == ir::RV_UNARY {
             let x = self.operand(cb, cm, state, rv.a, all);
             let op = rv.b as u8;
+            let fw = self.float_w(cm, cb.operands.at(rv.a as usize).ty);
+            if fw != 0 {
+                return if op == tt::TokenType::Minus as u8 && self.floats_exact() {
+                    self.tm.fneg(x, fw)
+                } else {
+                    self.tm.var(w, sg)
+                };
+            }
             if op == tt::TokenType::Bang as u8 && self.tm.is_bool(x) {
                 return self.tm.not(x);
             }
@@ -11377,6 +11840,10 @@ extend<const B: usize> Prover<B> {
             let y = self.operand(cb, cm, state, rv.b, all);
             let op = rv.c;
             let xty = cb.operands.at(rv.a as usize).ty;
+            let fw = self.float_w(cm, xty);
+            if fw != 0 {
+                return self.float_binary(cb, op, x, y, fw, w, sg);
+            }
             if (op == tt::TokenType::Plus as u8 || op == tt::TokenType::Minus as u8) && xty != TYPE_NONE && self.ast_of(
                 cm,
             ).type_at(xty).kind == TypeKind::TYPE_POINTER && self.tm.is_int(y) {
@@ -11512,6 +11979,14 @@ extend<const B: usize> Prover<B> {
                 }
                 return x;
             }
+        }
+        // A conversion into or out of a float.
+        if rv.kind == ir::RV_CAST && (rv.b == ir::CAST_NUMERIC as u32 || rv.b == ir::CAST_UNCHECKED as u32) && (self.float_w(
+            cm,
+            rv.target,
+        ) != 0 || self.float_w(cm, cb.operands.at(rv.a as usize).ty) != 0) {
+            let x = self.operand(cb, cm, state, rv.a, all);
+            return self.float_cast(cb, cm, pc, &rv, x, w, sg, ovf, key, sp);
         }
         // A pointer's address (`p as usize`).
         if rv.kind == ir::RV_CAST && rv.b == ir::CAST_NUMERIC as u32 && w == self.pw && !sg && cb.operands.at(
@@ -11978,7 +12453,12 @@ extend<const B: usize> Prover<B> {
         out: &mut Vector<u64>,
     ) {
         let d = self.operand(cb, cm, state, t.a, all);
-        let dx = self.tm.at(d);
+        // A float's patterns are not its encodings: its edges are unknown.
+        let dx = if self.float_w(cm, cb.operands.at(t.a as usize).ty) != 0 {
+            Term::<B> { k: Num::<B>::zero(), a: 0, b: 0, op: T_VAR, w: W_OTHER, sg: false }
+        } else {
+            self.tm.at(d)
+        };
         let mut other = self.tm.boolean(true);
         for j in t.sw_start..t.sw_start + t.sw_len {
             let pr = cb.switch_pool[j as usize];
@@ -12402,6 +12882,12 @@ extend<const B: usize> Prover<B> {
         if r == NONE && t.dests_len == 1 {
             r = self.secret_op(cb, cm, state, pc, t, all);
         }
+        if r == NONE && t.dests_len == 1 {
+            r = self.float_call(cb, cm, state, t, all);
+        }
+        if r == NONE && t.dests_len == 1 {
+            r = self.soft_op(cb, cm, state, t, all);
+        }
         if r == NONE {
             r = self.call_value(cb, cm, state, t, all);
             self.chain_ensures(cb, cm, state, t, r, all, sp);
@@ -12688,10 +13174,380 @@ extend<const B: usize> Prover<B> {
             return W_OTHER, false;
         }
         let inst = self.ast_of(m1).instance(y.as_data.inst);
-        if inst.module != self.secm as ModuleId || inst.decl != self.secd || inst.n != 1 {
+        if inst.module != self.secm as ModuleId || inst.decl != self.secd || inst.n != 1 || self.float_w(
+            m1,
+            inst.args[0],
+        ) != 0 {
             return W_OTHER, false;
         }
         return self.ty_of(m1, inst.args[0]);
+    }
+
+    // The value of call `t` of a C library function an IEEE 754 operation defines: `sqrt`, `fabs`,
+    // `copysign`, `fma`, `round`, `floor`, `ceil` and `trunc`, of `f32` (an `f` suffix) or `f64`, or of the
+    // `f32` and `f64` method that calls it (`abs` for `fabs`, `mul_add` for `fma`, the others by name);
+    // and the methods `to_bits` and `from_bits`, which keep the encoding. NONE for another call, or in a
+    // build that may rewrite float operations.
+    fn float_call(
+        self: &mut Self,
+        cb: &ir::CoreBody,
+        cm: ModuleId,
+        state: &mut Vector<u32>,
+        t: &ir::Terminator,
+        all: bool,
+    ) u32 {
+        let d = t.callee;
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || t.args_len == 0 || t.args_len > 3 {
+            return NONE;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return NONE;
+        }
+        // An extern function, or a method of `f32` or `f64` in std's core, which calls it.
+        let ext = a.ext(d.node).function.is_extern();
+        let c = a.container_of(d.node);
+        let method = self.wcore.node != NODE_NONE && d.module == self.wcore.mid && c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_EXTEND;
+        if !ext && !method {
+            return NONE;
+        }
+        let owned = String::from_str(self.text(d.module, a.at_const(a.ext_name(d.node)).span));
+        let full = owned.as_str();
+        // `to_bits` and `from_bits` keep the encoding, the value both sides hold.
+        if method && t.args_len == 1 && (full == "to_bits" || full == "from_bits") {
+            let oid = cb.oper_pool[t.args_start as usize];
+            let rty = cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty;
+            let (fty, ity) = pick(
+                full == "to_bits",
+                (cb.operands.at(oid as usize).ty, rty),
+                (rty, cb.operands.at(oid as usize).ty),
+            );
+            let fw = self.float_w(cm, fty);
+            let (iw, isg) = self.ty_of(cm, ity);
+            if fw == 0 || iw != fw || isg {
+                return NONE;
+            }
+            return self.operand(cb, cm, state, oid, all);
+        }
+        let fw = self.float_w(cm, cb.operands.at(cb.oper_pool[t.args_start as usize] as usize).ty);
+        if fw == 0 || !self.floats_exact() {
+            return NONE;
+        }
+        // The `f32` name is the `f64` one with an `f`; a method's is the operation's.
+        let name = if method {
+            if full == "abs" {
+                "fabs"
+            } else if full == "mul_add" {
+                "fma"
+            } else {
+                full
+            }
+        } else if fw == 32 && full.ends_with("f") {
+            full.slice(0, full.len() - 1)
+        } else if fw == 32 {
+            return NONE;
+        } else {
+            full
+        };
+        let n = t.args_len;
+        let one_arg = name == "sqrt" || name == "fabs" || name == "round" || name == "floor" || name == "ceil" || name == "trunc";
+        let want: u32 = if one_arg || method && (name == "recip" || name == "fract" || class_of(name) != 0) {
+            1
+        } else if name == "copysign" {
+            2
+        } else if name == "fma" {
+            3
+        } else {
+            0
+        };
+        if want == 0 || n != want {
+            return NONE;
+        }
+        let mut xs = Vector::<u32>::with_capacity(3);
+        for j in 0..n {
+            let oid = cb.oper_pool[(t.args_start + j) as usize];
+            if self.float_w(cm, cb.operands.at(oid as usize).ty) != fw {
+                return NONE;
+            }
+            xs.push(self.operand(cb, cm, state, oid, all));
+        }
+        let fd = host_fd(fw);
+        return if name == "sqrt" {
+            self.tm.fconv(T_FSQRT, xs[0], fw, false, fd)
+        } else if name == "round" || name == "floor" || name == "ceil" || name == "trunc" {
+            let md = pick(
+                name == "round",
+                FR_ROUND,
+                pick(name == "floor", FR_FLOOR, pick(name == "ceil", FR_CEIL, FR_TRUNC)),
+            );
+            self.tm.frint(xs[0], md, fw, fd)
+        } else if name == "fabs" {
+            self.tm.fabs(xs[0], fw)
+        } else if name == "copysign" {
+            self.tm.fcopysign(xs[0], xs[1], fw)
+        } else if name == "recip" {
+            let one = self.tm.int(u64_val::<B>(pick(fw == 32, 1.0f32.to_bits(), 1.0f64.to_bits())), fw, false);
+            self.tm.farith(T_FDIV, one, xs[0], fw, fd)
+        } else if name == "fract" {
+            let tr = self.tm.frint(xs[0], FR_TRUNC, fw, fd);
+            let nt = self.tm.fneg(tr, fw);
+            self.tm.farith(T_FADD, xs[0], nt, fw, fd)
+        } else if name == "fma" {
+            self.tm.ffma(&xs, fw, fd)
+        } else {
+            self.float_class(class_of(name), xs[0], fw, fd)
+        };
+    }
+
+    // Callee `d` as an operation of `Float<E, F, FAMILY>` (std's `float` module, whose methods keep these
+    // meanings: `soft_op`), SK_*; 0 for another callee.
+    fn soft_kind(self: &Self, d: DefId) u8 {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || self.wflt.node == NODE_NONE || d.module != self.wflt.mid || !self.pkg().modules.at(
+            d.module as usize,
+        ).has_ast {
+            return 0;
+        }
+        let a = self.ast_of(d.module);
+        if a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+            return 0;
+        }
+        let c = a.container_of(d.node);
+        if c == NODE_NONE || a.at_const(c).kind != NodeKind::NODE_EXTEND {
+            return 0;
+        }
+        let ty = a.type_at(a.type_of(a.ext(c).extend_def.target_type));
+        if ty.kind != TypeKind::TYPE_INSTANCE || a.instance(ty.as_data.inst).decl != self.wflt.node {
+            return 0;
+        }
+        return soft_of(self.text(d.module, a.at_const(a.ext_name(d.node)).span));
+    }
+
+    // The value of call `t` when it is an operation of `Float<E, F, FAMILY>` (`soft_kind`), a float of its
+    // encoding's width and format: the arithmetic, square root and fused multiply-add rounded as IEEE 754
+    // rounds (the FINITE_ONLY family saturates); `rem` C's `fmod`; `eq` the encodings' equality and `cmp`
+    // their total order (std's `Eq` and `Ord`); `ieee_eq`, `ieee_lt`, `ieee_le` the IEEE comparisons; the
+    // classifications; the conversions; the constants. NONE otherwise, and for an operation that computes
+    // in hardware floats where the build may rewrite them: the caller models the call as any other.
+    fn soft_op(self: &mut Self, cb: &ir::CoreBody, cm: ModuleId, state: &mut Vector<u32>, t: &ir::Terminator, all: bool) u32 {
+        let k = self.soft_kind(t.callee);
+        if k == 0 || t.dests_len != 1 || t.args_len > 3 {
+            return NONE;
+        }
+        let rty = cb.places.at(cb.dest_pool[t.dests_start as usize] as usize).ty;
+        let (rw, rfd) = self.soft_fmt(cm, rty);
+        let mut xs = Vector::<u32>::with_capacity(3);
+        let mut fw: [u16; 3] = [0, 0, 0];
+        let mut fds: [u64; 3] = [0, 0, 0];
+        for j in 0..t.args_len {
+            let oid = cb.oper_pool[(t.args_start + j) as usize];
+            let mut x = self.operand(cb, cm, state, oid, all);
+            let mut oty = cb.operands.at(oid as usize).ty;
+            let oy = *self.ast_of(cm).type_at(oty);
+            if !self.autoref(cb, cm, t, j) && oy.kind == TypeKind::TYPE_REFERENCE {
+                x = self.deref(state, x, cm, oy.as_data.elem);
+                oty = oy.as_data.elem;
+            } else if oy.kind == TypeKind::TYPE_REFERENCE {
+                oty = oy.as_data.elem;
+            }
+            let (w0, f0) = self.soft_fmt(cm, oty);
+            fw[j as usize] = w0;
+            fds[j as usize] = f0;
+            if !self.tm.is_int(x) && !self.tm.is_bool(x) {
+                return NONE;
+            }
+            xs.push(x);
+        }
+        let n = t.args_len as usize;
+        // Bit operations on the encoding.
+        if k >= SK_CLASS {
+            return pick(n == 1 && fw[0] != 0, self.float_class(k - SK_CLASS, xs[0], fw[0], fds[0]), NONE);
+        }
+        if k == SK_NEG || k == SK_ABS || k == SK_COPYSIGN {
+            if rw == 0 || fw[0] != rw || n != pick(k == SK_COPYSIGN, 2usize, 1) {
+                return NONE;
+            }
+            return if k == SK_NEG {
+                self.tm.fneg(xs[0], rw)
+            } else if k == SK_ABS {
+                self.tm.fabs(xs[0], rw)
+            } else {
+                self.tm.fcopysign(xs[0], xs[1], rw)
+            };
+        }
+        if k == SK_EQ || k == SK_CMP {
+            if n != 2 || fw[0] == 0 || fw[1] != fw[0] {
+                return NONE;
+            }
+            if k == SK_EQ {
+                return self.tm.cmp(T_EQ, xs[0], xs[1]);
+            }
+            let (w, sg) = self.ty_of(cm, rty);
+            // std's `Float::total_key`.
+            let ka = self.tm.fkey(xs[0], fw[0], fds[0]);
+            let kb = self.tm.fkey(xs[1], fw[0], fds[0]);
+            return pick(w > W_BOOL, self.tm.ord(ka, kb, w, sg), NONE);
+        }
+        if k == SK_TO_RAW || k == SK_FROM_RAW {
+            let (w, sg) = self.ty_of(cm, rty);
+            let xw = self.tm.at(xs[0]).w;
+            return pick(n == 1 && w == xw && !sg && !self.tm.at(xs[0]).sg, xs[0], NONE);
+        }
+        if k >= SK_ZERO {
+            return self.soft_const(k, &xs, rw, rfd);
+        }
+        // Operations that round: in software, but f16, the 8-bit formats and binary128 may compute in
+        // hardware floats.
+        if !self.floats_exact() {
+            return NONE;
+        }
+        if k == SK_IEQ || k == SK_ILT || k == SK_ILE {
+            if n != 2 || fw[0] == 0 || fw[1] != fw[0] {
+                return NONE;
+            }
+            let op = pick(k == SK_IEQ, T_FEQ, pick(k == SK_ILT, T_FLT, T_FLE));
+            return self.tm.fcmp(op, xs[0], xs[1], fds[0]);
+        }
+        if k == SK_TO_F32 || k == SK_TO_F64 {
+            let hw = pick(k == SK_TO_F32, 32u16, 64u16);
+            return pick(n == 1 && fw[0] != 0, self.tm.fconv(T_FCVT, xs[0], hw, false, host_fd(hw) | fds[0] << 32), NONE);
+        }
+        if rw == 0 {
+            return NONE;
+        }
+        if k == SK_FROM_F32 || k == SK_FROM_F64 {
+            let hw = pick(k == SK_FROM_F32, 32u16, 64u16);
+            return pick(
+                n == 1 && self.tm.at(xs[0]).w == hw,
+                self.tm.fconv(T_FCVT, xs[0], rw, false, rfd | host_fd(hw) << 32),
+                NONE,
+            );
+        }
+        if k == SK_CONVERT {
+            return pick(n == 1 && fw[0] != 0, self.tm.fconv(T_FCVT, xs[0], rw, false, rfd | fds[0] << 32), NONE);
+        }
+        if k == SK_FROM_UINT || k == SK_FROM_INT {
+            let xw = self.tm.at(xs[0]).w;
+            return pick(n == 1 && xw > W_BOOL && !exact_w(xw), self.tm.fconv(T_ITOF, xs[0], rw, false, rfd), NONE);
+        }
+        for j in 0..n {
+            if fw[j] != rw || fds[j] != rfd {
+                return NONE;
+            }
+        }
+        return if k >= SK_ADD && k <= SK_REM && n == 2 {
+            if k == SK_SUB {
+                let nb = self.tm.fneg(xs[1], rw);
+                self.tm.farith(T_FADD, xs[0], nb, rw, rfd)
+            } else {
+                let op = if k == SK_ADD {
+                    T_FADD
+                } else if k == SK_MUL {
+                    T_FMUL
+                } else if k == SK_DIV {
+                    T_FDIV
+                } else {
+                    T_FREM
+                };
+                self.tm.farith(op, xs[0], xs[1], rw, rfd)
+            }
+        } else if k == SK_SQRT && n == 1 {
+            self.tm.fconv(T_FSQRT, xs[0], rw, false, rfd)
+        } else if k == SK_FMA && n == 3 {
+            self.tm.ffma(&xs, rw, rfd)
+        } else if k >= SK_TRUNC && k <= SK_EVEN && n == 1 {
+            let md = if k == SK_TRUNC {
+                FR_TRUNC
+            } else if k == SK_FLOOR {
+                FR_FLOOR
+            } else if k == SK_CEIL {
+                FR_CEIL
+            } else if k == SK_ROUND {
+                FR_ROUND
+            } else {
+                FR_EVEN
+            };
+            self.tm.frint(xs[0], md, rw, rfd)
+        } else {
+            NONE
+        };
+    }
+
+    // The constant `k` (SK_ZERO ..) of format (`w`, `fd`), its argument `xs` (a sign); NONE where the
+    // argument is not a constant, and for the infinity of a format without one (std panics).
+    fn soft_const(self: &mut Self, k: u8, xs: &Vector<u32>, w: u16, fd: u64) u32 {
+        if w == 0 {
+            return NONE;
+        }
+        let m = (fd & 0xFFFF) as usize;
+        let e = w as usize - 1 - m;
+        let fo = (fd & FD_FINITE) != 0;
+        let (sb, mg) = Terms::<B>::fsign_num(w);
+        let one = Num::<B>::one();
+        let ef = (one << e) - one << m;
+        let mut neg = false;
+        if k == SK_INF || k == SK_MAX {
+            if xs.len() != 1 || self.tm.at(xs[0]).op != T_BOOL {
+                return NONE;
+            }
+            neg = !self.tm.at(xs[0]).k.is_zero();
+        } else if xs.len() != 0 {
+            return NONE;
+        }
+        let v = if k == SK_ZERO {
+            Num::<B>::zero()
+        } else if k == SK_NEG_ZERO {
+            sb
+        } else if k == SK_ONE {
+            (one << e - 1) - one << m
+        } else if k == SK_INF {
+            if fo {
+                return NONE;
+            }
+            ef
+        } else if k == SK_NAN {
+            pick(fo, mg, ef | one << m - 1)
+        } else if k == SK_MAX {
+            pick(fo, mg - one, ef - one)
+        } else {
+            one
+        };
+        return self.tm.int(pick(neg, v | sb, v), w, false);
+    }
+
+    // Classification `c` (`class_of`) of float `x` of width `w` and format `fd`: the sign bit of the
+    // encoding, or a float comparison of its magnitude (whose bits the operations' circuits read too).
+    fn float_class(self: &mut Self, c: u8, x: u32, w: u16, fd: u64) u32 {
+        let m = (fd & 0xFFFF) as usize;
+        let e = w as usize - 1 - m;
+        let fo = (fd & FD_FINITE) != 0;
+        let (sb, _mg) = Terms::<B>::fsign_num(w);
+        if c == FC_NEG || c == FC_POS {
+            let s = self.tm.int(sb, w, false);
+            return pick(c == FC_NEG, self.tm.cmp(T_LE, s, x), self.tm.cmp(T_LT, x, s));
+        }
+        let one = Num::<B>::one();
+        let mag = self.tm.fabs(x, w);
+        let zero = self.tm.int(Num::<B>::zero(), w, false);
+        let inf = self.tm.int((one << e) - one << m, w, false);
+        let norm = self.tm.int(one << m, w, false);
+        let num = self.tm.fcmp(T_FEQ, x, x, fd);
+        return if c == FC_NAN {
+            self.tm.not(num)
+        } else if c == FC_INF {
+            pick(fo, self.tm.boolean(false), self.tm.fcmp(T_FEQ, mag, inf, fd))
+        } else if c == FC_FINITE {
+            pick(fo, num, self.tm.fcmp(T_FLT, mag, inf, fd))
+        } else if c == FC_ZERO {
+            self.tm.fcmp(T_FEQ, mag, zero, fd)
+        } else if c == FC_NORMAL {
+            let lo = self.tm.fcmp(T_FLE, norm, mag, fd);
+            let hi = pick(fo, num, self.tm.fcmp(T_FLT, mag, inf, fd));
+            self.tm.and(lo, hi)
+        } else {
+            let lo = self.tm.fcmp(T_FLT, zero, mag, fd);
+            let hi = self.tm.fcmp(T_FLT, mag, norm, fd);
+            self.tm.and(lo, hi)
+        };
     }
 
     // The value of call `t` of a method of `std::crypto::secret`'s `Secret<T>`, as its body computes it
@@ -13968,7 +14824,7 @@ extend<const B: usize> Prover<B> {
             }
             if t.kind == ir::TM_CALL && !self.is_const_fn(t.callee) && !self.panics(t.callee) && !self.is_ghost(
                 t.callee,
-            ) && self.wide_kind(t.callee) == 0 {
+            ) && self.wide_kind(t.callee) == 0 && self.soft_kind(t.callee) == 0 {
                 return false;
             }
             if t.kind == ir::TM_GOTO || t.kind == ir::TM_ASSERT || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP {
@@ -15310,6 +16166,8 @@ extend<const B: usize> Prover<B> {
                 need = true;
             }
         }
+        // A float's unchecked conversion: its precondition, as a call's `requires`.
+        need = need || b.has_unchecked;
         for oi in 0..b.operands.len() {
             let op = *b.operands.at(oi);
             if op.kind == ir::OP_CONST {
@@ -15879,11 +16737,11 @@ extend<const B: usize> Prover<B> {
     }
 
     // Whether every call of function `d` ends: its kept body has no loop and calls no function that may
-    // not end (itself included, `depth` calls deep); a call that panics ends, as does a built-in integer
-    // method the walk models (`wide_kind`). Ghost code assumes the `ensures` of such a callee (`v.len()` in
-    // an `invariant`).
+    // not end (itself included, `depth` calls deep); a call that panics ends, as does an integer or float
+    // method the walk models (`wide_kind`, `soft_kind`). Ghost code assumes the `ensures` of such a callee
+    // (`v.len()` in an `invariant`).
     fn ends(self: &mut Self, d: DefId, depth: u32) bool {
-        if self.total(d) || self.panics(d) || self.wide_kind(d) != 0 {
+        if self.total(d) || self.panics(d) || self.wide_kind(d) != 0 || self.soft_kind(d) != 0 {
             return true;
         }
         if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || depth > 8 {
@@ -17800,6 +18658,14 @@ extend<const B: usize> Prover<B> {
                 return;
             }
         }
+        // So does an operation of `Float<E, F, FAMILY>`.
+        if self.soft_kind(t.callee) != 0 {
+            let r = self.soft_op(b, b.module, &mut path.state, t, false);
+            if r != NONE {
+                self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
+                return;
+            }
+        }
         self.ov_take.clear();
         self.ov_take_sh.clear();
         self.tk_atoms.clear();
@@ -17903,7 +18769,10 @@ extend<const B: usize> Prover<B> {
         }
         // A method of `Secret`: its value (`secret_op`), as for an operation on its integer.
         if t.dests_len == 1 {
-            let r = self.secret_op(b, b.module, &mut path.state, &mut path.pc, t, false);
+            let mut r = self.secret_op(b, b.module, &mut path.state, &mut path.pc, t, false);
+            if r == NONE {
+                r = self.float_call(b, b.module, &mut path.state, t, false);
+            }
             if r != NONE {
                 self.write_place(b, b.module, &mut path.state, b.dest_pool[t.dests_start as usize], r, false);
                 return;

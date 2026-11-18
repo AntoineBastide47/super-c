@@ -1573,6 +1573,20 @@ extend<const B: usize> Solver<B> {
                 }
                 continue;
             }
+            // A float operation is defined by its operands' bits, as an integer operation is.
+            if float_op(x.op) {
+                if x.op == T_FFMA {
+                    for j in x.a..x.a + x.b {
+                        self.queue.push(tm.args[j as usize]);
+                    }
+                } else {
+                    self.queue.push(x.a);
+                    if !unary_op(x.op) {
+                        self.queue.push(x.b);
+                    }
+                }
+                continue;
+            }
             if first == NONE {
                 first = u;
             } else {

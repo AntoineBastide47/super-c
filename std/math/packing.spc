@@ -636,9 +636,11 @@ fn clamp_f<T: Float>(x: T, lo: T, hi: T) T {
     return m;
 }
 
-// `round(clamp(x, 0, 1) * scale)` as an integer, for a `scale` below 2^31. The lower bound is
-// tested first, so a NaN takes it: every result fits, and NaN gives 0 as a saturating `as` does.
-const fn unorm(x: f32, scale: f32) u32 {
+// `round(clamp(x, 0, 1) * scale)` as an integer. The lower bound is tested first, so a NaN takes it:
+// every result fits, and NaN gives 0 as a saturating `as` does.
+const fn unorm(x: f32, scale: f32) u32
+    requires scale >= 0.0 && scale < 2147483648.0
+{
     let lo = if 0.0 < x {
         x
     } else {
@@ -653,7 +655,9 @@ const fn unorm(x: f32, scale: f32) u32 {
 }
 
 // `round(clamp(x, -1, 1) * scale)` as an integer, as `unorm` (NaN gives 0).
-const fn snorm(x: f32, scale: f32) i32 {
+const fn snorm(x: f32, scale: f32) i32
+    requires scale >= 0.0 && scale < 2147483648.0
+{
     let lo = if -1.0 < x {
         x
     } else if x == x {

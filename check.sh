@@ -24,8 +24,8 @@ for target in macos linux windows wasm; do
 done
 
 # 2b) Every function the const lint proves evaluable is a `const fn` (its suggestions are the same on every
-# target). The check applies the fix; a commit hook runs after git built the commit, so a change fails
-# the check: stage the files and commit again.
+# target). The check applies the fix and goes on. Under a commit hook (git sets GIT_INDEX_FILE) git built
+# the commit already, so a change fails the check there: stage the files and commit again.
 printf 'check: const fn (lint --const --fix)\n'
 before=$(git diff | git hash-object --stdin)
 if ! SC_LEAK_CHECK=fatal ./super-c lint --const --fix >/dev/null; then
@@ -33,9 +33,12 @@ if ! SC_LEAK_CHECK=fatal ./super-c lint --const --fix >/dev/null; then
     exit 1
 fi
 if [ "$(git diff | git hash-object --stdin)" != "$before" ]; then
-    printf 'check: FAILED -- lint --const --fix declared functions const; stage the fixes and commit again (modified files):\n' >&2
-    git diff --name-only | sed 's/^/  /' >&2
-    exit 1
+    if [ -n "${GIT_INDEX_FILE:-}" ]; then
+        printf 'check: FAILED -- lint --const --fix declared functions const; stage the fixes and commit again (modified files):\n' >&2
+        git diff --name-only | sed 's/^/  /' >&2
+        exit 1
+    fi
+    printf 'check: lint --const --fix declared functions const in the working tree\n'
 fi
 
 # 3) Full test suite with the current compiler (built first if stale), leak-gated: every process in

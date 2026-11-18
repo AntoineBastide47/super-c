@@ -4104,3 +4104,214 @@ fn main() i32 {
     assert(one.out_has(", 1 workers\n") && many.out_has(", 4 workers\n"), "the builds prove on one worker and on four");
     assert(many.exit != 0 && diags(one.text()) == diags(many.text()), "the parallel build reports the same text");
 }
+
+// Float proofs: IEEE 754 operations, conversions and the C library's exact functions, each a circuit of
+// the value's bits.
+fn float_proofs(b: &mut h::ExitBatch) {
+    b.add(
+        "a product's bounds and a saturating conversion",
+        M"(fn scale(x: f32) i32
+    requires x >= 0.0 && x <= 1.0
+    ensures |r| r >= 0 && r <= 100
+{
+    return (x * 100.0) as i32;
+}
+fn main() i32 {
+    return scale(0.42);
+}
+)",
+        42,
+    );
+    b.add(
+        "a square root's unchecked conversion",
+        M"(fn root(n: u32) u32
+    ensures |r| r <= 65536
+{
+    return unsafe (n as f64).sqrt().to_int_unchecked::<u32>();
+}
+fn main() i32 {
+    return root(1764) as i32;
+}
+)",
+        42,
+    );
+    b.add(
+        "a NaN takes the branch whose comparison fails",
+        M"(fn clamp01(x: f64) f64
+    ensures |r| r >= 0.0 && r <= 1.0
+{
+    if !(x >= 0.0) {
+        return 0.0;
+    }
+    if x > 1.0 {
+        return 1.0;
+    }
+    return x;
+}
+fn main() i32 {
+    return (clamp01(0.42) * 100.0 + 0.5) as i32;
+}
+)",
+        42,
+    );
+    b.add(
+        "a fused multiply-add, a rounding, a widening and back, a negation",
+        M"(fn f(x: f64) f64
+    requires x == 2.0
+    ensures |r| r == 42.0
+{
+    return x.mul_add(20.0, 1.5).round();
+}
+fn wide(x: f32) f32
+    ensures |r| r == x || x != x
+{
+    return (x as f64) as f32;
+}
+fn neg(x: f32) f32
+    ensures |r| r.abs() == x.abs() || x != x
+{
+    return -x;
+}
+fn main() i32 {
+    return f(2.0) as i32 + wide(0.0) as i32 + neg(0.0) as i32;
+}
+)",
+        42,
+    );
+}
+
+// Claims a SAT search over the circuits alone does not reach: the facts of rounded operations relate a
+// result to its operands, to its kind's other results and to its operands' bounds; `Float<E, F, FAMILY>`
+// (std's total order, the FINITE_ONLY family's saturation) proves as the built-in floats do.
+fn float_relations(b: &mut h::ExitBatch) {
+    b.add(
+        "a sum grows with a nonnegative addend and keeps its operands' order",
+        M"(fn grow(x: f32, y: f32) f32
+    requires y >= 0.0 && x.is_finite() && y.is_finite()
+    ensures |r| r >= x
+{
+    return x + y;
+}
+fn keep(x: f64, y: f64, z: f64) bool
+    requires x <= y && x.is_finite() && y.is_finite() && !z.is_nan()
+    ensures |r| r
+{
+    return x + z <= y + z;
+}
+fn main() i32 {
+    return grow(40.0, 2.0) as i32 + keep(1.0, 2.0, 3.0) as i32 - 1;
+}
+)",
+        42,
+    );
+    b.add(
+        "a product by at least one, and a remainder below its divisor",
+        M"(fn times(x: f64, y: f64) f64
+    requires x >= 0.0 && y >= 1.0 && x.is_finite() && y.is_finite()
+    ensures |r| r >= x
+{
+    return x * y;
+}
+fn rem(x: f32, y: f32) f32
+    requires x.is_finite() && y.is_finite() && y != 0.0
+    ensures |r| r.abs() < y.abs() && r.abs() <= x.abs()
+{
+    return x % y;
+}
+fn main() i32 {
+    return times(20.0, 2.0) as i32 + rem(-7.5, 2.0) as i32 + 3;
+}
+)",
+        42,
+    );
+    b.add(
+        "a polynomial's bounds from its operands' intervals",
+        M"(fn cubic(x: f64) f64
+    requires x >= 0.0 && x <= 1.0
+    ensures |r| r >= 0.0 && r <= 4.0
+{
+    return x * x * x + 2.0 * x * x + x;
+}
+fn main() i32 {
+    return (cubic(1.0) * 10.0) as i32 + 2;
+}
+)",
+        42,
+    );
+    b.add(
+        "f16 in std's total order, and f8e4m3fn's saturating product",
+        M"(fn lower(x: f16, y: f16) f16
+    requires y <= f16::zero() && x.is_finite() && y.is_finite()
+    ensures |r| r <= x || r.is_zero()
+{
+    return x + y;
+}
+fn square(x: f8e4m3fn) f8e4m3fn
+    requires x.is_finite()
+    ensures |r| r.is_finite()
+{
+    return x * x;
+}
+fn main() i32 {
+    let a = lower(f16::from_f32(44.0), f16::from_f32(-2.0)).to_f32();
+    let s = square(f8e4m3fn::from_f32(448.0)).to_f32();
+    return a as i32 + (s - 448.0) as i32;
+}
+)",
+        42,
+    );
+}
+
+@test
+fn exit_cases_03() {
+    let mut b = h::ExitBatch::new();
+    float_proofs(&mut b);
+    float_relations(&mut b);
+    b.run();
+}
+
+// Float claims that do not hold, each with the value that breaks it: a NaN is not equal to itself, half
+// the least subnormal is 0, `x + 0.0` of -0.0 is +0.0, an unchecked conversion of an unbounded value,
+// a sum `@associative_math` may reassociate, a zero addend, and -0 below +0 in std's total order.
+@test
+fn unproved_float_claims_are_errors() {
+    let mut b = cli::Batch::new("", "fn main() i32 {\n    return 0;\n}\n");
+    b.add(
+        "a float equal to itself",
+        "fn f(x: f32) bool\n    ensures |r| r\n{\n    return x == x;\n}\n",
+        "for example: x = nan",
+    );
+    b.add(
+        "a half of a positive value",
+        "fn f(x: f32) f32\n    requires x > 0.0\n    ensures |r| r > 0.0\n{\n    return x / 2.0;\n}\n",
+        "for example: x = 1.4013e-45",
+    );
+    b.add(
+        "a sum with zero keeps the bits",
+        "fn f(x: f64) u64\n    requires x == x\n    ensures |r| r == x.to_bits()\n{\n    return (x + 0.0).to_bits();\n}\n",
+        "for example: x = -0",
+    );
+    b.add_at(
+        "an unchecked conversion of an unbounded value",
+        "fn f(x: f32) u32 {\n    return unsafe x.to_int_unchecked::<u32>();\n}\n",
+        "cannot prove that this value is not NaN and that its truncation fits the integer type",
+        "2:19",
+    );
+    b.add_at(
+        "a sum that may reassociate",
+        "@associative_math\nfn f(x: f32) f32\n    requires x == 1.0\n    ensures |r| r == 3.0\n{\n    return x + 2.0;\n}\n",
+        "cannot prove this 'ensures' clause",
+        "4:17",
+    );
+    b.add(
+        "a sum with a zero addend does not grow",
+        "fn f(x: f32, y: f32) f32\n    requires y >= 0.0 && x.is_finite() && y.is_finite()\n    ensures |r| r > x\n{\n    return x + y;\n}\n",
+        "for example: x = 0, y = 0",
+    );
+    b.add(
+        "std's float order puts -0 below +0",
+        "fn f(x: f16, y: f16) f16\n    requires y <= f16::zero() && x.is_finite() && y.is_finite()\n    ensures |r| r <= x\n{\n    return x + y;\n}\n",
+        "for example: x = -0, y = 0",
+    );
+    h::expect_build_errs(b);
+}

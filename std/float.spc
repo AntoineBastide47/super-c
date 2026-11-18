@@ -774,7 +774,13 @@ extend<const E: usize, const F: usize, const FAMILY: FloatFamily> Float<E, F, FA
         if ps == cs {
             sum = prod.wrapping_add(&wc);
         } else if !(prod < wc) {
+            // A jammed addend lost a part below the grid: the difference lies strictly between this one
+            // less a unit and this one, which the jam below then stands for.
             sum = prod.wrapping_sub(&wc);
+            if jam {
+                let one = UInt::<{4 * F + 40}>::one();
+                sum = sum.wrapping_sub(&one);
+            }
         } else {
             sum = wc.wrapping_sub(&prod);
             neg = cs;
