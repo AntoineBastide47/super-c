@@ -38,6 +38,9 @@ pub(package) const SF_TLS: u8 = 4; // a thread-local variable: its section holds
 pub(package) const SF_USED: u8 = 8; // the linker keeps it though nothing refers to it
 pub(package) const SF_HIDDEN: u8 = 16; // a global symbol the linked image does not export
 pub(package) const SF_WEAK: u8 = 32; // a global definition the link keeps one of among the objects'
+// A symbol inside the code or data before it: a linker that splits a section at its symbols starts no part
+// here (Mach-O `N_ALT_ENTRY`, `.alt_entry`).
+pub(package) const SF_ALT: u8 = 64;
 
 /// The flags of an object's copy of data no unit owns (a string literal), which each object that names
 /// it defines: with the data split (`SPLIT_DATA`), a hidden weak global, so the link keeps one copy and

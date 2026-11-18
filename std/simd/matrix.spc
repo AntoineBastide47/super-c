@@ -19,6 +19,16 @@ pub fn mul_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     mul_f32_on(c, a, b, m, k, n);
 }
 
+/// `c += a * b` for row-major `f32` matrices (a rank-k update), shaped as `mul_f32`: element (i, j) of
+/// `c` becomes `fma(a[i][k-1], b[k-1][j], .. fma(a[i][0], b[0][j], c[i][j]))`, one rounding per step, the
+/// same bits on every machine and kernel. Panics as `mul_f32`.
+pub fn mul_add_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    if !fits(c.len(), m, n) || !fits(a.len(), m, k) || !fits(b.len(), k, n) {
+        panic("matrix::mul_add_f32: a slice's length is not its matrix's element count");
+    }
+    mul_add_f32_on(c, a, b, m, k, n);
+}
+
 /// `c = a * b` for row-major `i8` matrices into `i32`: element (i, j) of `c` is the sum over p of
 /// `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel (SME outer
 /// products where the CPU has them). Panics as `mul_f32`.
@@ -82,6 +92,7 @@ const fn fits(len: usize, r: usize, s: usize) bool {
 }
 
 static mut MUL_F32: detect::Dispatch = detect::Dispatch::new();
+static mut MUL_ADD_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F64: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_I8: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_U8I8: detect::Dispatch = detect::Dispatch::new();
@@ -102,6 +113,21 @@ fn mul_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
 @arch(!aarch64)
 fn mul_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     mul_f32_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut f32, []f32, []f32, usize, usize, usize), 1>(
+        &mut unsafe MUL_ADD_F32,
+        [(cpu::Feature::Sme2, mul_add_f32_sme)],
+        mul_add_f32_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(!aarch64)
+fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    mul_add_f32_lanes(c, a, b, m, k, n);
 }
 
 @arch(aarch64)
@@ -204,6 +230,14 @@ fn mul_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
 }
 
 @arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn mul_add_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_add_f32(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_add_f32_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
 @target_feature([cpu::Feature::SmeF64f64])
 fn mul_f64_sme(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_f64(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
@@ -295,11 +329,22 @@ fn mul_widened<const E: usize, const F: usize>(
 // The portable kernel: each row of `c` from +0.0, then for each p the row of `b` times `a[i][p]` added
 // with one rounding, 16 lanes at a time, `mul_add` past them.
 const fn mul_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    fma_rows_f32(c, a, b, m, k, n, true);
+}
+
+const fn mul_add_f32_lanes(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
+    fma_rows_f32(c, a, b, m, k, n, false);
+}
+
+// Per row of `c` (first set to +0.0 when `zero`), the chains of fused multiply-adds over p in order.
+const fn fma_rows_f32(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize, zero: bool) {
     let nv = n - n % 16;
     for i in 0..m {
         let row = i * n;
-        for j in 0..n {
-            c[row + j] = 0.0;
+        if zero {
+            for j in 0..n {
+                c[row + j] = 0.0;
+            }
         }
         for p in 0..k {
             let x = a[i * k + p];

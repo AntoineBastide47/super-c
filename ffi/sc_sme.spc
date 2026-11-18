@@ -35,6 +35,23 @@ pub unsafe fn sc_sme_mul_f32(c: *mut f32, a: *const f32, b: *const f32, m: usize
     return 0;
 }
 
+/// `c` (m x n) += `a` (m x k) * `b` (k x n), row-major `f32`: each element's chain of fused
+/// multiply-adds starts from its value in `c`. Returns as `sc_sme_mul_f32`.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_add_f32(c: *mut f32, a: *const f32, b: *const f32, m: usize, k: usize, n: usize) i32 {
+    let l = (sc_sme_svl() / 4) as usize;
+    let panels = m / l + (m % l != 0) as usize;
+    let pa = panel(k, panels * l + 4 * l, 4) as *mut f32;
+    if pa == null {
+        return -1;
+    }
+    sc_sme_f32_acc_za(c, a, b, m, k, n, pa, pa + panels * l * k);
+    stdlib::free(pa);
+    return 0;
+}
+
 /// The same for `f64`.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
@@ -216,6 +233,13 @@ pub unsafe fn sc_sme_mul_i8(_c: *mut i32, _a: *const i8, _b: *const i8, _m: usiz
 @platform(windows)
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_add_f32(_c: *mut f32, _a: *const f32, _b: *const f32, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_transpose32(_dst: *mut u32, _src: *const u32, _m: usize, _n: usize) i32 {
     return -1;
 }
@@ -310,7 +334,9 @@ fn sc_sme_svl() u64 {
 // buffer, then TPIDR2_EL0 is cleared); then enter streaming mode with ZA on. Exit: leave streaming mode
 // with ZA off, restore, return. The slice index of a ZA access is w12.
 
-// c = a * b (f32), arguments in x0 to x7: c, a, b, m, k, n, pa, pb. L = SVL / 32. The whole of `a` is
+// c = a * b (f32), arguments in x0 to x7: c, a, b, m, k, n, pa, pb; from the entry `sc_sme_f32_acc_za`,
+// c += a * b: each block's tiles start from its rows of `c`, not zero (the flag at [sp, #144]).
+// L = SVL / 32. The whole of `a` is
 // packed first into panels of L rows, column-major (`pa`, ceil(m / L) * L * k floats, zero rows past m),
 // through tile 0 (rows in horizontally, columns out vertically). Then each block of 4L columns of `b`
 // is read in place when whole and a row is at most 1 KiB (the copy costs more than the strided reads
@@ -327,9 +353,15 @@ asm(M"(.text
 .arch_extension sme2
 .arch_extension sme-f64f64
 .p2align 4
+_sc_sme_f32_acc_za:
+sc_sme_f32_acc_za:
+mov x11, #1
+b 30f
 _sc_sme_f32_za:
 sc_sme_f32_za:
-stp d8, d9, [sp, #-144]!
+mov x11, #0
+30:
+stp d8, d9, [sp, #-160]!
 stp d10, d11, [sp, #16]
 stp d12, d13, [sp, #32]
 stp d14, d15, [sp, #48]
@@ -338,6 +370,7 @@ stp x21, x22, [sp, #80]
 stp x23, x24, [sp, #96]
 stp x25, x26, [sp, #112]
 stp x27, x28, [sp, #128]
+str x11, [sp, #144]
 mrs x8, TPIDR2_EL0
 cbz x8, 23f
 ldrh w9, [x8, #10]
@@ -459,6 +492,20 @@ sub x13, x3, x11
 cmp x13, x8
 csel x13, x13, x8, lo
 zero {za}
+ldr x14, [sp, #144]
+cbz x14, 17f
+mov w12, #0
+mov x15, x1
+18:
+ld1w {za0h.s[w12, 0]}, p4/z, [x15]
+ld1w {za1h.s[w12, 0]}, p5/z, [x15, x8, lsl #2]
+ld1w {za2h.s[w12, 0]}, p6/z, [x15, x27, lsl #2]
+ld1w {za3h.s[w12, 0]}, p7/z, [x15, x28, lsl #2]
+add x15, x15, x24
+add w12, w12, #1
+cmp x12, x13
+b.lo 18b
+17:
 cbz x4, 15f
 mov x14, x4
 mov x15, x22
@@ -504,7 +551,7 @@ ldp x19, x20, [sp, #64]
 ldp d14, d15, [sp, #48]
 ldp d12, d13, [sp, #32]
 ldp d10, d11, [sp, #16]
-ldp d8, d9, [sp], #144
+ldp d8, d9, [sp], #160
 ret)");
 
 // c = a * b (f64), arguments as the f32 kernel's. L = SVL / 64. As the f32 kernel, with blocks of
@@ -970,6 +1017,8 @@ asm(M"(.globl _sc_sme_f32_za
 .private_extern _sc_sme_i8_za
 .globl _sc_sme_t32_za
 .private_extern _sc_sme_t32_za
+.globl _sc_sme_f32_acc_za
+.private_extern _sc_sme_f32_acc_za
 )");
 
 @platform(linux | android)
@@ -986,6 +1035,9 @@ asm(M"(.globl sc_sme_f32_za
 .globl sc_sme_t32_za
 .hidden sc_sme_t32_za
 .type sc_sme_t32_za, %function
+.globl sc_sme_f32_acc_za
+.hidden sc_sme_f32_acc_za
+.type sc_sme_f32_acc_za, %function
 )");
 
 @platform(macos | ios | linux | android)
@@ -1013,4 +1065,14 @@ extern "C" {
     );
     fn sc_sme_i8_za(c: *mut i32, pa: *const i8, pb: *const i8, m: usize, g: usize, n: usize);
     fn sc_sme_t32_za(dst: *mut u32, src: *const u32, m: usize, n: usize);
+    fn sc_sme_f32_acc_za(
+        c: *mut f32,
+        a: *const f32,
+        b: *const f32,
+        m: usize,
+        k: usize,
+        n: usize,
+        pa: *mut f32,
+        pb: *mut f32,
+    );
 }
