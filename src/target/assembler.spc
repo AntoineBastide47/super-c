@@ -395,7 +395,7 @@ extend Asm {
                 let y = o.syms.index_mut(s as usize);
                 y.sec = l.sec;
                 y.off = l.off;
-                y.flags = ast::pick(self.fmt == FMT_MACHO, ob::SF_ALT, 0u8);
+                y.flags = ob::SF_ALT;
                 s
             } else {
                 o.sym(self.c_name(&r.name))
@@ -405,14 +405,12 @@ extend Asm {
         return true;
     }
 
-    // A Mach-O linker splits a section at its symbols (`MH_SUBSECTIONS_VIA_SYMBOLS`) and keeps, drops and
-    // places each part on its own: a reference resolved in place from offset `a` of section `sec` to `b`
-    // has no relocation that ties two parts, so no symbol after the lower offset up to the higher one
-    // starts a part (`ob::SF_ALT`).
+    // A writer that gives each function its own section (`ob::parts_of`) and a Mach-O linker
+    // (`MH_SUBSECTIONS_VIA_SYMBOLS`) split a section at its symbols, then keep, drop and place each part on
+    // its own: a reference resolved in place from offset `a` of section `sec` to `b` has no relocation
+    // that ties two parts, so no symbol after the lower offset up to the higher one starts a part
+    // (`ob::SF_ALT`).
     fn one_part(self: &Self, o: &mut ob::Obj, sec: u8, a: u64, b: u64) {
-        if self.fmt != FMT_MACHO {
-            return;
-        }
         let (lo, hi) = (a.min(b), a.max(b));
         for k in 0..o.syms.len() {
             let y = o.syms[k];

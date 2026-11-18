@@ -125,10 +125,10 @@ fn main() i32 {
 }
 )";
 
-// A Mach-O linker splits a section at its symbols: a branch the assembler resolves in place from one
-// symbol's code into the next's keeps them one part (the later symbol an alternate entry, as
-// `.alt_entry` makes one), so a dead-stripping build that names only the first keeps the code it branches
-// to; an ELF object needs no mark.
+// A release build splits code at its symbols (each function its own section; on Mach-O the linker): a
+// branch the assembler resolves in place from one symbol's code into the next's keeps them one part (the
+// later symbol an alternate entry, as `.alt_entry` makes one), so a dead-stripping build that names only
+// the first keeps the code it branches to, on every object format.
 @test
 fn a_branch_between_entries_keeps_them_together() {
     let text = ".text\n.globl _p\n.globl _q\n.globl _r\n.alt_entry _r\n_p:\n    b 1f\n_q:\n    nop\n1:\n    ret\n_r:\n    ret\n";
@@ -143,11 +143,13 @@ fn a_branch_between_entries_keeps_them_together() {
     let mut e = ob::Obj::new();
     let mut b = asmr::Asm::new(asmr::ISA_A64, asmr::FMT_ELF);
     assert(b.module(&mut e, ".text\n.globl p\n.globl q\np:\n    b 1f\nq:\n    nop\n1:\n    ret\n"), b.err.as_str());
-    for k in 0..e.syms.len() {
-        assert((e.syms[k].flags & ob::SF_ALT) == 0, "no mark in ELF");
-    }
-    if cli::on_wasm() {
-        return;
+    let mut parts = Vector::<ob::Part>::new();
+    let mut first = Vector::<u32>::new();
+    ob::parts_of(&e, ob::SPLIT_FUNCS, &mut parts, &mut first);
+    let t = ob::S_TEXT as usize;
+    assert_eq(first[t + 1] - first[t], 1);
+    if cli::on_wasm() || h::target_lane() {
+        return; // no wasm variant of the block
     }
     h::expect_same_output("two entries", TWO, ["--profile=debug"], ["--profile=release"]);
 }
