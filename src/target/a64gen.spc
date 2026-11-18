@@ -7091,8 +7091,12 @@ extend Gen {
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be. A written one is renamed only when it is the result's and the argument
-        // dies here: the result is then in the argument's register (`rres`).
-        self.cren.truncate(0);
+        // dies here: the result is then in the argument's register (`rres`). An argument in the register
+        // another argument's name stands for waits for the others (`wait`): one of them that stays in its
+        // own register frees that name, and the argument then stays too.
+        fill(&mut self.cren, np as usize, false);
+        let mut wait = Vector::<bool>::new();
+        fill(&mut wait, np as usize, false);
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
@@ -7102,49 +7106,59 @@ extend Gen {
         // An argument a one-instruction template reads and overwrites, which lives on: its sources read it in
         // its register, the destination stays (`intrin::vsplit_dest`).
         let mut src: (u32, u32) = (99, 99);
-        for k in 0..np {
-            let loc = self.cr.lay.locs[k as usize];
-            let v = b.pool[(t.c + k) as usize];
-            let x = self.cr.vx(v);
-            let vr = self.cr.va[x as usize].reg;
-            // Free of the template, or already in its own argument register.
-            let mut ok = tpl.len() != 0 && self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && vr != NOREG && vr >= V0;
-            ok = ok && ((self.clob & bit(vr)) == 0 || vr == V0 + self.cr.lay.parts[loc.p0 as usize].reg);
-            for j in 0..to.len() {
-                ok = ok && to[j] != (vr - V0) as u32;
-            }
-            let pr = if ok {
-                self.cr.lay.parts[loc.p0 as usize].reg as u32
-            } else {
-                0u32
-            };
-            ok = ok && !intrin::vlisted(tx, pr);
-            let mut split = false;
-            if ok && intrin::vwrites(true, tx, pr) {
-                let rl = self.cr.lay.ret;
-                let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                let px = if whole && rreg == pr && !self.cr.dies(x) {
-                    self.step_param(i)
-                } else {
-                    NONE
-                };
-                if whole && rreg == pr && (self.cr.dies(x) || px == x) {
-                    rres = vr;
-                    if px == x {
-                        stepped = px;
-                    }
-                } else {
-                    split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
-                    ok = split;
+        for round in 0..2u32 {
+            for k in 0..np {
+                let loc = self.cr.lay.locs[k as usize];
+                let v = b.pool[(t.c + k) as usize];
+                let x = self.cr.vx(v);
+                let vr = self.cr.va[x as usize].reg;
+                let mut ok = tpl.len() != 0 && self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && vr != NOREG && vr >= V0;
+                // Free of the template, or already in its own argument register.
+                let named = ok && (self.clob & bit(vr)) != 0 && vr != V0 + self.cr.lay.parts[loc.p0 as usize].reg;
+                if round == 0 && named {
+                    wait[k as usize] = true;
+                    continue;
                 }
-            }
-            self.cren.push(ok);
-            if split {
-                src = (pr, (vr - V0) as u32);
-            } else if ok {
-                from.push(pr);
-                to.push(vr - V0);
-                self.clob &= ~bit(V0 + pr as u8);
+                if round == 1 && !wait[k as usize] {
+                    continue;
+                }
+                ok = ok && !named;
+                for j in 0..to.len() {
+                    ok = ok && to[j] != (vr - V0) as u32;
+                }
+                let pr = if ok {
+                    self.cr.lay.parts[loc.p0 as usize].reg as u32
+                } else {
+                    0u32
+                };
+                ok = ok && !intrin::vlisted(tx, pr);
+                let mut split = false;
+                if ok && intrin::vwrites(true, tx, pr) {
+                    let rl = self.cr.lay.ret;
+                    let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
+                    let px = if whole && rreg == pr && !self.cr.dies(x) {
+                        self.step_param(i)
+                    } else {
+                        NONE
+                    };
+                    if whole && rreg == pr && (self.cr.dies(x) || px == x) {
+                        rres = vr;
+                        if px == x {
+                            stepped = px;
+                        }
+                    } else {
+                        split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
+                        ok = split;
+                    }
+                }
+                self.cren[k as usize] = ok;
+                if split {
+                    src = (pr, (vr - V0) as u32);
+                } else if ok {
+                    from.push(pr);
+                    to.push(vr - V0);
+                    self.clob &= ~bit(V0 + pr as u8);
+                }
             }
         }
         // A result that lives on gets a register no later template names, when none is renamed yet: the
@@ -10222,9 +10236,32 @@ extend Gen {
         }
     }
 
+    // Whether vector `v` holds zeros in every lane: a wide constant of zero words, or the splat of a
+    // constant of zero bits.
+    const fn zero_lanes(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+            return false;
+        }
+        let b = self.cr.b();
+        let t = b.insts[v as usize];
+        if t.op == O_SPLAT && (t.a & (VPARAM | VFLAG)) == 0 {
+            let x = b.insts[t.a as usize];
+            return (x.op == O_ICONST || x.op == O_FCONST) && x.a == 0 && x.b == 0;
+        }
+        if t.op != O_WCONST {
+            return false;
+        }
+        for q in 0..t.b {
+            if b.words[(t.a + q) as usize] != 0 {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Lane access `t` (`O_VEXTRACT`, `O_VINSERT`, lane `t.aux`) into `i`: DUP (a float) or UMOV (an
     // integer) of the lane, or INS of the scalar into the vector's register when it dies here, else into a
-    // copy; a vector outside a v register
+    // copy (FMOV of the scalar alone for lane 0 of a vector of zeros); a vector outside a v register
     // loads the lane, or copies its bytes and stores the lane.
     fn vlane(self: &mut Self, i: u32, t: Inst) {
         let k = t.aux as u32;
@@ -10260,6 +10297,18 @@ extend Gen {
             let d = self.cr.mdef(i);
             self.copy_mem(a::SP, d, sb, so, nb);
             self.st_lane(rs, d, k, lt, false);
+            return;
+        }
+        if k == 0 && eb >= 4 && self.zero_lanes(t.a) {
+            // Into a vector of zeros: FMOV of the scalar (from its v or general register) clears the
+            // lanes above it.
+            let rs = self.reg(t.b) as u32;
+            let rd = self.vec_def(i) as u32 - V0 as u32;
+            if is_float(lt) {
+                self.emit(ast::pick(eb == 8, 0x1E604000u32, 0x1E204000) | rs - V0 as u32 << 5 | rd);
+            } else {
+                self.emit(ast::pick(eb == 8, 0x9E670000u32, 0x1E270000) | rs << 5 | rd);
+            }
             return;
         }
         let mut rs = self.reg(t.b) as u32;
@@ -11900,7 +11949,7 @@ extend Gen {
 
     // Masked load (into vector `i`, from the fallback's copy) or `store` through a pointer (`masked_reg`):
     // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
-    // general register and INS or UMOV.
+    // general register and INS or UMOV; lane 0 by LD1 or ST1 of one lane at the pointer.
     fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
         let vt = tys[2];
         let lt = lane_type(vt);
@@ -11935,7 +11984,14 @@ extend Gen {
                 self.emit(a::tbz(false, act, k, 0));
             }
             let im = (k << 1 | 1) << eb.trailing_zeros() as u32;
-            if store {
+            if k == 0 {
+                // Lane 0 is at the pointer itself: LD1 or ST1 of the one lane (0D40 or 0D00, the lane's size
+                // in its opcode and size fields), no general register between.
+                let sz: [u32; 4] = [0x0000, 0x4000, 0x8000, 0x8400];
+                self.emit(
+                    0x0D000000 | a::on(!store, 1u32 << 22) | unsafe sz[eb.trailing_zeros()] | p as u32 << 5 | (rd - V0) as u32,
+                );
+            } else if store {
                 // UMOV x, rd.T[k]; its bytes at p + k * eb.
                 self.emit(0x0E003C00 | a::on(eb == 8, 1u32 << 30) | im << 16 | (rd - V0) as u32 << 5 | x as u32);
                 self.mem(lane_st(lt, true), false, x, p, k * eb);
@@ -12149,7 +12205,10 @@ extend Gen {
             self.here(w0);
         }
         if cs && t.ty != T_NONE {
-            // The active lane count.
+            // The active lane count. The length's temporary is free again (the bounds check read it last):
+            // with it the five temporaries, the three operands and the count would be nine registers, one
+            // more than an instruction takes (`need`).
+            self.cr.tmps &= ~bit(len);
             let rd = self.def(i);
             self.emit(a::addsub_reg(true, 1, false, rd, ix, st, 0, 0));
         }

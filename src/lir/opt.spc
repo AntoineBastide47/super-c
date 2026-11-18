@@ -495,7 +495,8 @@ pub(package) struct Config {
 extend Config as Copy {}
 
 // A write into private memory whose address does not escape: bytes `off` to `end` of `slot` (`Opt.sbase`),
-// by store `inst` in block `blk` (NONE: a copy or a fill), or by copy `copy` (NONE: a store or a fill).
+// by store `inst` in block `blk` (NONE: a copy or a fill), by copy `copy` (NONE: a store or a fill), or by
+// fill `fill` (NONE: a store or a copy).
 struct SlotWrite {
     pub(package) slot: u32,
     pub(package) off: i64,
@@ -503,6 +504,7 @@ struct SlotWrite {
     pub(package) inst: u32,
     pub(package) blk: u32,
     pub(package) copy: u32,
+    pub(package) fill: u32,
 }
 
 extend SlotWrite as Copy {}
@@ -5320,6 +5322,9 @@ extend Opt {
                 changed = self.offset_params(b, k as u32) || changed;
                 changed = self.offset_test(pk, b, k as u32) || changed;
                 self.param_bounds(pk, b, k as u32);
+            }
+            if k != 0 {
+                changed = self.address_params(pk, b, k as u32) || changed;
             }
             self.pend.truncate(0);
             let mut called = false;
@@ -10451,14 +10456,144 @@ extend Opt {
                 if d == 0 {
                     continue;
                 }
-                let dc = self.before(b, k, kb.start, iconst(ty, d));
-                let v = self.before(b, k, kb.start, Inst { op: O_ADD, ty: ty, aux: 0, a: vp, b: dc, c: 0 });
+                let dc = self.at_start(b, k, iconst(ty, d));
+                let v = self.at_start(b, k, Inst { op: O_ADD, ty: ty, aux: 0, a: vp, b: dc, c: 0 });
                 self.prepl[(kb.param_start + q) as usize] = v;
                 any = true;
                 break;
             }
         }
         return any;
+    }
+
+    // The pointer parameters of block `k` (at most SAME_MAX parameters) that are one address of a
+    // pointer-wide integer parameter of its own: every edge into `k` passes the pointer `base + x * s + c`
+    // for the integer `x` it passes (a rotated loop, whose header made the address of its counter for the
+    // body: the edge from before the loop passes the base beside 0, the back edge the address of the
+    // stepped counter). The pointer is that address, made at the block's start (`prepl`), so the loop
+    // carries the counter alone and its accesses index it. Whether any is.
+    fn address_params(self: &mut Self, pk: &Package, b: &mut Body, k: u32) bool {
+        let kb = b.blocks[k as usize];
+        let np = kb.param_len as u32;
+        if np < 2 || np > SAME_MAX || self.rpo[k as usize] == NONE || kb.len == 0 {
+            return false;
+        }
+        let mut any = false;
+        for q in 0..np {
+            if b.params[(kb.param_start + q) as usize] != T_PTR || self.prepl[(kb.param_start + q) as usize] != VNONE {
+                continue;
+            }
+            for p0 in 0..np {
+                let ty = b.params[(kb.param_start + p0) as usize];
+                if !is_int(ty) || type_bits(ty, pk.ptr_bytes) != pk.ptr_bytes * 8 || self.prepl[(kb.param_start + p0) as usize] != VNONE {
+                    continue;
+                }
+                let (base, scale, off) = self.args_address(b, k, p0, q);
+                if base == VNONE {
+                    continue;
+                }
+                let vp = VPARAM | kb.param_start + p0;
+                let v = self.at_start(
+                    b,
+                    k,
+                    Inst { op: O_PTRADD, ty: T_PTR, aux: scale as u16, a: base, b: vp, c: off as u32 },
+                );
+                self.prepl[(kb.param_start + q) as usize] = v;
+                any = true;
+                break;
+            }
+        }
+        return any;
+    }
+
+    // `address_params` of block `k`'s parameters `p` (the integer) and `q` (the pointer): the base, scale
+    // and byte offset of the address every edge passes as `q` for what it passes as `p`; a base of VNONE
+    // when the edges pass no one such address. The first edge whose pointer has an index that is no
+    // constant gives the three; then every edge agrees. An index that is the integer plus or minus a
+    // constant moves that constant, scaled, into the offset (modulo the pointer's width, as the address).
+    fn args_address(self: &mut Self, b: &Body, k: u32, p: u32, q: u32) (Value, u32, i32) {
+        let none = (VNONE, 0u32, 0i32);
+        let mut base = VNONE;
+        let mut scale: u32 = 0;
+        let mut off: i128 = 0;
+        for round in 0..2u32 {
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                let src = self.preds[x as usize];
+                if x > self.pred_at[k as usize] && self.preds[x as usize - 1] == src {
+                    continue;
+                }
+                b.succ_edges(term(b, src), &mut self.edges);
+                for e in 0..self.edges.len() {
+                    let ed = self.edges[e];
+                    if b.edge_target(ed) != k {
+                        continue;
+                    }
+                    let a = self.one_arg(b, self.val(b.edge_arg(ed, p)));
+                    let c = self.one_arg(b, self.val(b.edge_arg(ed, q)));
+                    if a == VNONE || c == VNONE || (a & VFLAG) != 0 || (c & VFLAG) != 0 {
+                        return none;
+                    }
+                    // The pointer as base, index, scale and offset; a constant index joins the offset.
+                    let mut cb = c;
+                    let mut cx = VNONE;
+                    let mut cs: u32 = 0;
+                    let mut co: i128 = 0;
+                    if (c & VPARAM) == 0 && b.insts[c as usize].op == O_PTRADD {
+                        let t = b.insts[c as usize];
+                        cb = self.val(t.a);
+                        co = t.c as i32;
+                        if t.b != VNONE {
+                            cx = self.val(t.b);
+                            cs = scale_of(t);
+                            // An index as wide as the integer: a narrower one is no sum with it.
+                            if type_bits(b.type_of(cx), 8) != type_bits(b.type_of(a), 8) {
+                                return none;
+                            }
+                            if let Some(kx) = int_bits(b, cx) {
+                                co += sign_extend(kx, type_bits(b.type_of(cx), 8)) as i128 * cs;
+                                cx = VNONE;
+                            }
+                        }
+                    }
+                    // The integer as that index plus a constant.
+                    let mut d: i128 = 0;
+                    let mut ax = a;
+                    if cx != VNONE && a != cx && (a & VPARAM) == 0 {
+                        let t = b.insts[a as usize];
+                        let kc = int_bits(b, t.b);
+                        if (t.op == O_ADD || t.op == O_SUB) && kc.is_some() && self.val(t.a) == cx {
+                            let kv = sign_extend(kc.unwrap(), type_bits(t.ty, 8)) as i128;
+                            d = ast::pick(t.op == O_ADD, kv, 0i128 - kv);
+                            ax = cx;
+                        }
+                    }
+                    if round == 0 {
+                        if base == VNONE && cx != VNONE && ax == cx {
+                            base = cb;
+                            scale = cs;
+                            off = co - d * cs;
+                        }
+                        continue;
+                    }
+                    if cb != base {
+                        return none;
+                    }
+                    if cx == VNONE {
+                        // No index: the integer is a constant, whose address this is.
+                        let ka = int_bits(b, a);
+                        if ka.is_none() || off + sign_extend(ka.unwrap(), type_bits(b.type_of(a), 8)) as i128 * scale != co {
+                            return none;
+                        }
+                    } else if ax != cx || cs != scale || co - d * cs != off {
+                        return none;
+                    }
+                }
+            }
+            if base == VNONE || off < -0x80000000 || off > 0x7FFFFFFF {
+                return none;
+            }
+        }
+        return (base, scale, off as i32);
     }
 
     // `offset_params` of block `k`'s parameters `p` and `q` (values `vp`, `vq`, of type `ty`): the
@@ -10934,7 +11069,7 @@ extend Opt {
     // The integer constant of type `ty` and bits `v` (truncated to it) the dominating blocks hold or the walk
     // made (`constant`); NONE when none: a fact needs no new instruction, which only a changed body places.
     fn known_const(self: &Self, b: &Body, ty: u8, v: u64) Value {
-        let t = iconst(ty, v);
+        let t = iconst(ty, v & mask_of(type_bits(ty, 8)));
         let h = hash(t);
         for m in 0..2u32 {
             let found = switch ast::pick(m == 0, &self.pure, &self.made).get(&h) {
@@ -10951,7 +11086,7 @@ extend Opt {
     // An integer constant of type `ty` and bits `v` (truncated to it): one the dominating blocks hold, else
     // a new one at the start of the entry block.
     fn constant(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
-        let t = iconst(ty, v);
+        let t = iconst(ty, v & mask_of(type_bits(ty, 8)));
         let h = hash(t);
         let mut found = switch self.pure.get(&h) {
             Some(x) => *x,
@@ -11216,12 +11351,18 @@ extend Opt {
             k,
             i,
             &mut t,
-        ) || self.mask_sum(pk, b, k, i, &mut t) || self.gather_lanes(pk, b, k, i, &mut t)) || t.op == O_POPCNT && self.mask_count(
+        ) || self.mask_sum(pk, b, k, i, &mut t) || self.gather_lanes(pk, b, k, i, &mut t) || self.lane0_access(
+            pk,
             b,
             k,
             i,
             &mut t,
-        ) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(pk, b, i, &mut t) {
+        )) || t.op == O_POPCNT && self.mask_count(b, k, i, &mut t) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(
+            pk,
+            b,
+            i,
+            &mut t,
+        ) {
             b.insts[i as usize] = t;
             return true;
         }
@@ -11577,7 +11718,7 @@ extend Opt {
             return true;
         } else if t.op == O_CALL && named_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
-        } else if t.op == O_CALL && self.copysign_bits(pk, b, k, i) {
+        } else if t.op == O_CALL && (self.copysign_bits(pk, b, k, i) || self.lane_call(pk, b, k, i)) {
             return true;
         } else if t.op == O_CALL && t.ty != T_NONE && (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) == 0 {
             // A call of a function that writes no memory gives what an earlier one with the same
@@ -12020,12 +12161,41 @@ extend Opt {
         return true;
     }
 
+    // Masked access `t` through a pointer (instruction `i` of block `k`; `SIMD_LOAD_MASKED_PTR`,
+    // `SIMD_STORE_MASKED_PTR`) of a 16-byte vector under a constant mask of lane 0 alone, where the target
+    // moves no single lane at an address in one instruction (`Package.lane_mem`): the lane's scalar load
+    // inserted into the fallback, or the store of the vector's lane 0, whose address then takes the
+    // pointer's constant offset as every load and store does. Whether it did.
+    fn lane0_access(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        let ld = code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32;
+        if !ld && code != core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 || t.b != 3 || t.c != VNONE || pk.lane_mem {
+            return false;
+        }
+        let p = b.pool[t.a as usize];
+        let mb = int_bits(b, b.pool[(t.a + 1) as usize]);
+        let v = b.pool[(t.a + 2) as usize];
+        let vt = b.type_of(v);
+        if mb.is_none() || !is_vec(vt) || type_bytes(vt, pk.ptr_bytes) != 16 || (mb.unwrap() & ~0u64 >> (64 - lanes(vt)) as u64) != 1 {
+            return false;
+        }
+        let lt = lane_type(vt);
+        if ld {
+            let x = self.before(b, k, i, Inst { op: O_LOAD, ty: lt, aux: 0, a: p, b: VNONE, c: 0 });
+            *t = Inst { op: O_VINSERT, ty: vt, aux: 0, a: v, b: x, c: VNONE };
+        } else {
+            let x = self.before(b, k, i, Inst { op: O_VEXTRACT, ty: lt, aux: 0, a: v, b: VNONE, c: VNONE });
+            *t = Inst { op: O_STORE, ty: T_NONE, aux: 0, a: p, b: x, c: 0 };
+        }
+        return true;
+    }
+
     // Unchecked gather `t` (instruction `i` of block `k`; `SIMD_GATHER_UNCHECKED` of a slice's address, an
     // index vector, a constant mask and a fallback vector): each active lane a load of its element, at the
     // slice's pointer plus its index zero-extended (the caller keeps it in bounds), inserted into the
-    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); every backend
+    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); a backend
     // loads a gather's lanes one by one, and the slice's pointer, the index lanes and the addresses are then
-    // the optimizer's values. Whether it did.
+    // the optimizer's values. Not where the generator gathers every lane in one instruction. Whether it did.
     fn gather_lanes(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if code != core::OP_SIMD + core::SIMD_GATHER_UNCHECKED as u32 || t.b != 4 || t.c != VNONE || !is_vec(t.ty) {
@@ -12044,6 +12214,16 @@ extend Opt {
         }
         let m = mb.unwrap() & ~0u64 >> (64 - n) as u64;
         if m == 0 {
+            return false;
+        }
+        // The generator gathers every lane of a register in one instruction (`Package.gather_bytes`): 4- or
+        // 8-byte lanes, the indexes of their width, in whole registers of at least 16 bytes.
+        let vb = pk.cpu_of(b).vector;
+        let nb = n * lb;
+        if vb != 0 && vb == pk.gather_bytes && m == ~0u64 >> (64 - n) as u64 && (lb == 4 || lb == 8) && type_bytes(
+            it,
+            pk.ptr_bytes,
+        ) == lb && nb >= 16 && nb % vb.min(nb) == 0 {
             return false;
         }
         let pi = int_type(pk.ptr_bytes);
@@ -14093,6 +14273,58 @@ extend Opt {
         return self.made(pk, b, k, i, Inst { op: O_SELECT, ty: t.ty, aux: 0, a: sel.a, b: p, c: q });
     }
 
+    // Call `i` of block `k` of an intrinsic of the target that is one lane-wise operation on whole vectors
+    // (`intrin::arith_form`), which one register of the body's processor holds: that operation on the lanes
+    // the name gives. The generators place it as they place a loop's own (in place, a load as its memory
+    // operand), and the walk numbers and hoists it as any other.
+    fn lane_call(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let s = pk.syms[b.syms[t.a as usize] as usize];
+        if !is_vec(t.ty) || s.kind != SK_FUNC || s.def != NONE || pk.isa.len() == 0 {
+            return false;
+        }
+        let n = pk.spell(s.name);
+        let (op, lb, fl) = intrin::arith_form(n);
+        let nb = type_bytes(t.ty, 8);
+        let unary = op == O_FSQRT;
+        if op == 0 || !intrin::has(pk.isa, n) || nb > pk.cpu_of(b).vector.max(16) || t.aux as u32 != ast::pick(
+            unary,
+            1u32,
+            2u32,
+        ) {
+            return false;
+        }
+        let x = self.val(b.pool[t.c as usize]);
+        let y = if unary {
+            VNONE
+        } else {
+            self.val(b.pool[t.c as usize + 1])
+        };
+        if b.type_of(x) != t.ty || !unary && b.type_of(y) != t.ty {
+            return false;
+        }
+        let lt = if fl {
+            ast::pick(lb == 4, T_F32, T_F64)
+        } else {
+            int_type(lb)
+        };
+        let vt = vec_type(lt, nb / lb);
+        if vt == t.ty {
+            b.insts[i as usize] = Inst { op: op, ty: vt, aux: 0, a: x, b: y, c: VNONE };
+        } else {
+            let xb = self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: vt, aux: 0, a: x, b: VNONE, c: VNONE });
+            let yb = if unary {
+                VNONE
+            } else {
+                self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: vt, aux: 0, a: y, b: VNONE, c: VNONE })
+            };
+            let o = self.made(pk, b, k, i, Inst { op: op, ty: vt, aux: 0, a: xb, b: yb, c: VNONE });
+            b.insts[i as usize] = Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: o, b: VNONE, c: VNONE };
+        }
+        self.refold = true;
+        return true;
+    }
+
     // Call `i` of block `k` of C's `copysign` or `copysignf`: the magnitude's bits and the sign's bit, in
     // integer operations every target computes in registers and the vectorizer widens.
     fn copysign_bits(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
@@ -14421,6 +14653,16 @@ extend Opt {
             self.hoisted.push(k as u64 << 32 | v as u64);
         }
         return v;
+    }
+
+    // Instruction `t` at the start of block `k`: before its first instruction, or, in a block of its
+    // terminator alone, before that one (`placed`: the rebuild places nothing before a terminator).
+    fn at_start(self: &mut Self, b: &mut Body, k: u32, t: Inst) Value {
+        let kb = b.blocks[k as usize];
+        if kb.len == 1 {
+            return self.placed(b, k, kb.start, t, false);
+        }
+        return self.before(b, k, kb.start, t);
     }
 
     fn before(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst) Value {
@@ -15058,9 +15300,23 @@ extend Opt {
                     self.sbase[i as usize] = t.a;
                     continue;
                 }
-                if t.op == O_PTRADD && t.b == VNONE && self.base(b, t.a) != NONE {
+                // A constant index too: a slot's address keeps its index (`simplify`).
+                let ix = if t.op == O_PTRADD && t.b != VNONE {
+                    int_bits(b, t.b)
+                } else {
+                    Option::<u64>::None
+                };
+                let at = if ix.is_some() {
+                    sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), pk.ptr_bytes)) as i128 * scale_of(t)
+                } else {
+                    0i128
+                };
+                if t.op == O_PTRADD && (t.b == VNONE || ix.is_some() && at >= -0x80000000 && at <= 0x7FFFFFFF) && self.base(
+                    b,
+                    t.a,
+                ) != NONE {
                     self.sbase[i as usize] = self.base(b, t.a);
-                    self.soff[i as usize] = self.base_off(t.a) + (t.c as i32) as i64;
+                    self.soff[i as usize] = self.base_off(t.a) + (t.c as i32) as i64 + at as i64;
                     continue;
                 }
                 let u0 = self.ops_at[i as usize];
@@ -15097,11 +15353,15 @@ extend Opt {
                                 inst: i,
                                 blk: k,
                                 copy: NONE,
+                                fill: NONE,
                             },
                         );
                     } else if t.op == O_MEMCPY && t.a == v && t.b != v || t.op == O_MEMSET && t.a == v {
                         let copy = ast::pick(t.op == O_MEMCPY, i, NONE);
-                        self.wr.push(SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k, copy: copy });
+                        let fill = ast::pick(t.op == O_MEMSET, i, NONE);
+                        self.wr.push(
+                            SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k, copy: copy, fill: fill },
+                        );
                     } else {
                         self.sesc[s as usize] = true;
                     }
@@ -15317,7 +15577,7 @@ extend Opt {
 
     // The value a vector load `t` (instruction `i` of block `k`) of a private slot splats: one store alone
     // writes each of its lanes, each of the same value, and each runs before the load (`[x; N]` as a
-    // vector); VNONE otherwise.
+    // vector), or one fill alone writes its byte lanes (`[x; N]` of bytes); VNONE otherwise.
     const fn private_splat(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
         if !is_vec(t.ty) || lanes(t.ty) > 64 {
             return VNONE;
@@ -15335,6 +15595,19 @@ extend Opt {
         for q in self.wat[s]..self.wat[s + 1] {
             let w = self.wl[q as usize];
             if w.off >= end || off >= w.end {
+                continue;
+            }
+            if w.fill != NONE {
+                // One fill of the lanes with a byte, before the load: byte lanes of that value.
+                let f = b.insts[w.fill as usize];
+                if eb != 1 || seen != 0 || w.off > off || w.end < end || b.type_of(f.b) != lt || w.blk == k && w.fill >= i || w.blk != k && !self.dominates(
+                    w.blk,
+                    k,
+                ) {
+                    return VNONE;
+                }
+                seen = ~0u64 >> (64 - lanes(t.ty)) as u64;
+                v = self.val(f.b);
                 continue;
             }
             if w.inst == NONE || w.off < off || w.end - w.off != eb || (w.off - off) % eb != 0 {
@@ -20012,6 +20285,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return simplify_wide(b, i);
     }
     if is_vec(t.ty) {
+        // A vector's bits read as another type and back are the vector.
+        if t.op == O_BITCAST && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_BITCAST && b.type_of(
+            b.insts[t.a as usize].a,
+        ) == t.ty {
+            return b.insts[t.a as usize].a;
+        }
         // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
         if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
             if splat_of(b, t.b) == Some(0) {
@@ -20213,7 +20492,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // A slot's address keeps its index: a constant offset past the slot in a path that never runs
         // would fail the verifier's check of slot accesses.
         let ix = int_bits(b, t.b);
-        if ix.is_some() && !slot_based(b, t.a) {
+        if ix == Some(0) {
+            // An index of 0 adds nothing, on a slot's address too.
+            t.b = VNONE;
+        } else if ix.is_some() && !slot_based(b, t.a) {
             // In 128 bits: a constant index times the scale may not fit 64.
             let off = (t.c as i32) as i128 + sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) as i128 * scale_of(
                 t,

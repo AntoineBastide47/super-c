@@ -5879,6 +5879,10 @@ extend Interp {
         slot: &mut u32,
         out: &mut IVal,
     ) bool {
+        // No pointer value (a parameter the probe has no value of): no trap is provable.
+        if p.kind != IV_PTR {
+            return self.fail();
+        }
         let tid = pv_obj(p);
         if tid == 0 {
             if pv_off(p) != 0 {

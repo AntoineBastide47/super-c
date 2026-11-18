@@ -436,8 +436,9 @@ pub(package) const OPS: [OpInfo; 92] = [
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
-/// or `xor` of masks, a mask's sign extension or truncation, or a mask's low or high lanes interleaved with
-/// themselves (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
+/// or `xor` of masks, a mask's sign extension or truncation, a mask read as narrower lanes (a cast), the
+/// even or odd lanes of two masks (`vunzip`), or a mask's low or high lanes interleaved with themselves
+/// (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
 pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return false;
@@ -451,6 +452,19 @@ pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     }
     if (t.op == O_SEXT || t.op == O_TRUNC) && is_vec(t.ty) {
         return lane_mask(b, t.a, depth - 1);
+    }
+    if t.op == O_VUNZIP && is_vec(t.ty) {
+        return lane_mask(b, t.a, depth - 1) && lane_mask(b, t.b, depth - 1);
+    }
+    if t.op == O_BITCAST && is_vec(t.ty) && is_int(lane_type(t.ty)) {
+        let st = b.type_of(t.a);
+        if is_vec(st) && is_int(lane_type(st)) && type_bytes(lane_type(st), 8) % type_bytes(lane_type(t.ty), 8) == 0 && lane_mask(
+            b,
+            t.a,
+            depth - 1,
+        ) {
+            return true;
+        }
     }
     if t.op == O_BITCAST && is_vec(t.ty) && (t.a & (VPARAM | VFLAG)) == 0 && t.a != VNONE {
         let z = b.insts[t.a as usize];
@@ -2315,6 +2329,14 @@ pub(package) struct Package {
     /// The native backend inserts a scalar into any lane of a vector in a register (`target::table::Isa`):
     /// else an unchecked gather builds its vector by interleaves of splats (`lir::opt` `gather_lanes`).
     pub(package) lane_insert: bool,
+    /// The vector register bytes (`Cpu.vector`) of the bodies where the native backend gathers every lane
+    /// of a vector in one instruction (`target::table::Isa`; 0: none): `lir::opt` `gather_lanes` leaves
+    /// such a gather whole.
+    pub(package) gather_bytes: u32,
+    /// The native backend reads or writes one lane of a vector at an address in one instruction
+    /// (`target::table::Isa`): else `lir::opt` `lane0_access` makes a masked access of lane 0 alone the
+    /// lane's scalar load or store.
+    pub(package) lane_mem: bool,
     /// How the native backend computes a minimumNumber of float vectors in registers
     /// (`target::table::Isa`): 0 lane by lane, VMIN_EXACT by SIMD_MIN and SIMD_MAX, VMIN_QUIET by VOP_NUM
     /// ones of a number and an operand quieted by a VOP_NUM SIMD_MAX of itself, VMIN_NUM by VOP_NUM ones of
@@ -2483,6 +2505,8 @@ extend Package {
             fit_lines: false,
             mask_bits: false,
             lane_insert: true,
+            gather_bytes: 0,
+            lane_mem: false,
             vminnum: VMIN_EXACT,
             isa: "",
             switch_tree: false,

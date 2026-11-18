@@ -1372,12 +1372,47 @@ extend Asm {
     }
 }
 
+// The VEX form of legacy SSE statement `body` into `out`: its mnemonic with `v`, and where that form
+// takes one operand more, the destination as the first source too (`addps %xmm1, %xmm0`:
+// `vaddps %xmm1, %xmm0, %xmm0`). False when it has none: no SSE statement, or one in its VEX form.
+fn vex_text(body: str, out: &mut String) bool {
+    if body.len() == 0 || body.byte_at(0) == b'v' || body.find("%xmm") < 0 {
+        return false;
+    }
+    let mut code = Vector::<u8>::new();
+    let mut fx = xa::Fix::new();
+    let mut e = String::new();
+    out.push_str("v");
+    out.push_str(body);
+    if xa::assemble(out.as_str(), xa::NOTGT, &mut code, &mut fx, &mut e) {
+        return true;
+    }
+    // The destination: the text past the last comma outside parentheses.
+    let mut depth: u32 = 0;
+    let mut at: usize = 0;
+    for i in 0..body.len() {
+        let c = body.byte_at(i);
+        if c == b'(' {
+            depth += 1;
+        } else if c == b')' {
+            depth -= 1;
+        } else if c == b',' && depth == 0 {
+            at = i + 1;
+        }
+    }
+    out.push_str(",");
+    out.push_str(body.slice(at, body.len()));
+    code.truncate(0);
+    return xa::assemble(out.as_str(), xa::NOTGT, &mut code, &mut fx, &mut e);
+}
+
 extend Asm {
     /// Assemble the x86-64 inline template `text` (operands substituted) onto `code`; each symbol it
     /// names into `rels` (`at`: its field's position in `code`). A label of the template resolves in
-    /// place: a branch to one behind takes the shortest form, one to a label ahead 32 bits. False with
-    /// `err` set when a statement does not assemble.
-    pub(package) fn inline_x64(text: str, code: &mut Vector<u8>, rels: &mut Vector<InlRel>, err: &mut String) bool {
+    /// place: a branch to one behind takes the shortest form, one to a label ahead 32 bits. With `vex`
+    /// (an intrinsic in a body compiled for AVX) a legacy SSE statement takes its VEX form (`vex_text`).
+    /// False with `err` set when a statement does not assemble.
+    pub(package) fn inline_x64(text: str, vex: bool, code: &mut Vector<u8>, rels: &mut Vector<InlRel>, err: &mut String) bool {
         let mut sts = Vector::<Stmt>::new();
         statements(text, true, &mut sts);
         let mut a0 = Asm::new(ISA_X64, FMT_ELF);
@@ -1388,7 +1423,12 @@ extend Asm {
             for j in 0..sts[k].labels.len() {
                 a0.labels.push(Label { name: sts[k].labels[j].clone(), sec: 0, off: here, stmt: k as u32 });
             }
-            let body = sts[k].body.as_str();
+            let mut vb = String::new();
+            let body = if vex && vex_text(&sts[k].body, &mut vb) {
+                vb.as_str()
+            } else {
+                sts[k].body.as_str()
+            };
             if body.len() == 0 {
                 continue;
             }

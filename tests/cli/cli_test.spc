@@ -3712,7 +3712,8 @@ fn main() i32 {
 // Vector kernels of a release build give their lanes' values: a minimumNumber and maximumNumber of loaded
 // operands and of accumulators (8 and 16 f32 lanes, 4 f64 lanes) over both zeros, infinities and quiet and
 // signaling NaNs, against the operation on the encodings, a product and sum of 8 lanes, and the operations a
-// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones. On
+// level computes with its own entries (float and byte lanes, sums of 8 lanes), against the scalar ones, and
+// the lanes a constant mask selects through pointers. On
 // x86-64 the run-time copies for the processor's level run (their own registers, `lir::ir::Body.cpu`), then
 // the build's own bodies (`SC_SIMD_LEVEL=0`).
 @test
@@ -3931,6 +3932,52 @@ fn bytes_ref(ap: *const u8, bp: *const u8, wp: *const u32, n: usize, op: *mut u8
     return s;
 }
 
+// The lanes a constant mask selects, through pointers: each row's first 13 of 16 lanes scaled into rows 16
+// apart (the other elements keep their values), and the bytes of a mask with gaps (the lanes it leaves out
+// load the fallback and store nothing).
+@noinline
+fn rows(a: f32, xp: *const f32, yp: *mut f32, n: usize) {
+    let av = Simd::<f32, 16>::splat(a);
+    let fb = Simd::<f32, 16>::splat(-1.0);
+    let row = Mask::<16>::from_bits_truncate(0x1FFF);
+    for r in 0..n {
+        unsafe simd::store_masked_ptr(yp + r * 16, row, av * simd::load_masked_ptr(xp + r * 13, row, fb));
+    }
+}
+
+@noinline
+fn gaps(xp: *const u8, yp: *mut u8, zp: *mut u8) {
+    let m = Mask::<16>::from_bits_truncate(0xB0F6);
+    let v = unsafe simd::load_masked_ptr(xp, m, Simd::<u8, 16>::splat(7));
+    simd::store(view_mut(zp, 16), 0, v);
+    unsafe simd::store_masked_ptr(yp, m, v + Simd::<u8, 16>::splat(1));
+}
+
+// The first lanes of a vector through a pointer, the fallback's past them: 9 to 15 of 16 f32 lanes, then
+// 1 to 3 and 5 to 7 of 8 f64 lanes (every part size of a 16-byte and of a 32-byte register).
+@noinline
+fn leads(xp: *const f32, zp: *mut f32) {
+    let fb = Simd::<f32, 16>::splat(-2.0);
+    simd::store(view_mut(unsafe (zp + 0), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x1FF), fb));
+    simd::store(view_mut(unsafe (zp + 16), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x3FF), fb));
+    simd::store(view_mut(unsafe (zp + 32), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x7FF), fb));
+    simd::store(view_mut(unsafe (zp + 48), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0xFFF), fb));
+    simd::store(view_mut(unsafe (zp + 64), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x1FFF), fb));
+    simd::store(view_mut(unsafe (zp + 80), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x3FFF), fb));
+    simd::store(view_mut(unsafe (zp + 96), 16), 0, unsafe simd::load_masked_ptr(xp, Mask::<16>::from_bits_truncate(0x7FFF), fb));
+}
+
+@noinline
+fn leads8(xp: *const f64, zp: *mut f64) {
+    let fb = Simd::<f64, 8>::splat(-2.0);
+    simd::store(view_mut(unsafe (zp + 0), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x1), fb));
+    simd::store(view_mut(unsafe (zp + 8), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x3), fb));
+    simd::store(view_mut(unsafe (zp + 16), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x7), fb));
+    simd::store(view_mut(unsafe (zp + 24), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x1F), fb));
+    simd::store(view_mut(unsafe (zp + 32), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x3F), fb));
+    simd::store(view_mut(unsafe (zp + 40), 8), 0, unsafe simd::load_masked_ptr(xp, Mask::<8>::from_bits_truncate(0x7F), fb));
+}
+
 fn main() i32 {
     let vals: [u32; 12] = [0x3F800000, 0xBF800000, 0, 0x80000000, 0x7F800000, 0xFF800000, 0x40600000, 1, 0x7FC00000, 0x7F800001, 0xFFC01234, 0x7FA00023];
     let n: usize = 144;
@@ -4048,6 +4095,74 @@ fn main() i32 {
             if bo[k] != br[k] {
                 return 8;
             }
+        }
+    }
+    let mut rx = Vector::<f32>::new();
+    let mut ry = Vector::<f32>::new();
+    for k in 0..64usize {
+        rx.push((k * 7 % 23) as f32 - 9.5);
+        ry.push(-5.0);
+    }
+    rows(1.5, rx.as_ptr(), ry.as_mut_ptr(), 4);
+    for k in 0..64usize {
+        let want = if k % 16 < 13 {
+            1.5 * rx[k / 16 * 13 + k % 16]
+        } else {
+            -5.0
+        };
+        if ry[k] != want {
+            return 9;
+        }
+    }
+    let mut gy: [u8; 16] = [200; 16];
+    let mut gz: [u8; 16] = [0; 16];
+    gaps(ba.as_ptr(), &mut gy[0], &mut gz[0]);
+    for k in 0..16usize {
+        let on = (0xB0F6u32 >> k as u32 & 1) != 0;
+        if gz[k] != if on {
+            ba[k]
+        } else {
+            7
+        } {
+            return 10;
+        }
+        if gy[k] != if on {
+            ba[k].wrapping_add(1)
+        } else {
+            200
+        } {
+            return 11;
+        }
+    }
+    let mut lx = Vector::<f32>::new();
+    let mut lx8 = Vector::<f64>::new();
+    let mut lz = Vector::<f32>::new();
+    let mut lz8 = Vector::<f64>::new();
+    for k in 0..112usize {
+        lx.push(k as f32 + 1.0);
+        lx8.push(k as f64 + 1.0);
+        lz.push(0.0);
+        lz8.push(0.0);
+    }
+    leads(lx.as_ptr(), lz.as_mut_ptr());
+    leads8(lx8.as_ptr(), lz8.as_mut_ptr());
+    for k in 0..112usize {
+        if lz[k] != if k % 16 < 9 + k / 16 {
+            lx[k % 16]
+        } else {
+            -2.0
+        } {
+            return 12;
+        }
+    }
+    let counts: [usize; 6] = [1, 2, 3, 5, 6, 7];
+    for k in 0..48usize {
+        if lz8[k] != if k % 8 < counts[k / 8] {
+            lx8[k % 8]
+        } else {
+            -2.0
+        } {
+            return 13;
         }
     }
     return 0;
@@ -5821,6 +5936,32 @@ fn main() i32 {
         return;
     }
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
+}
+
+// A wasm C tree carries its C library (`std::rt::libc`, `std::rt::libm`), whose functions define the C
+// functions a C compiler may make of a loop or of another call: `__units_nobuiltin` lists its units, which
+// compile with `-fno-builtin`, and `__units` the others. A host's tree has no such list.
+@test
+fn wasm_c_library_units_are_a_list_of_their_own() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"{}\", 3);\n    return 0;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --target=wasm --emit-c").ok());
+    let raw = format("{}/build/debug/raw", root);
+    let lib = cli::read_text(format("{}/__units_nobuiltin", raw).as_str());
+    let units = cli::read_text(format("{}/__units", raw).as_str());
+    for f in ["std/rt/libc.c\n", "std/rt/libm.c\n"] {
+        assert(lib.as_str().contains(f) && !units.as_str().contains(f), f);
+    }
+    for u in lib.as_str().lines() {
+        assert(u.starts_with("std/rt/libc") || u.starts_with("std/rt/libm"), u);
+        assert(cli::read_text(format("{}/{}", raw, u).as_str()).len() != 0, u);
+    }
+    assert(units.len() != 0 && !units.as_str().contains("std/rt/lib"), units.as_str());
+    assert(cli::superc_in(root, "build --emit-c --out-dir=host").ok());
+    assert(cli::read_text(format("{}/host/debug/raw/__units", root).as_str()).len() != 0, "the host's units");
+    assert(cli::read_text(format("{}/host/debug/raw/__units_nobuiltin", root).as_str()).len() == 0, "the host's list");
 }
 
 // A small program's C tree compiles its module, instance and registry units as one unit: `__sc_unity.c`

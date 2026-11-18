@@ -6570,6 +6570,45 @@ extend Gen {
         let ix = self.tmp(w::I64);
         let st = self.tmp(w::I64);
         let a = self.tmp(w::I32);
+        // A constant mask through a pointer (a vector `vmask_reg` does not take): the bytes of each run of
+        // active lanes copy whole, a load's onto the fallback lanes in the result's home; no lane is
+        // tested.
+        let mut km: u64 = 0;
+        if (c == core::SIMD_LOAD_MASKED_PTR || c == core::SIMD_STORE_MASKED_PTR) && self.const_of(
+            unsafe ops[ar - 2],
+            &mut km,
+        ) {
+            km = trunc_to(km, n);
+            self.get(ops[0]);
+            self.c.local(w::LOCAL_SET, p);
+            let every = km == trunc_to(~0u64, n);
+            let mut d: u32 = 0;
+            if !store {
+                d = self.vdef(i);
+            }
+            let hv = self.mhome(vv);
+            if !store && !every {
+                self.copy_mem(self.fp, d, self.fp, hv, type_bytes(vt, 4));
+            }
+            let mut k: u32 = 0;
+            // Each step takes one lane or one run: at most `n` steps.
+            while k < n {
+                if (km >> k as u64 & 1) == 0 {
+                    k += 1;
+                    continue;
+                }
+                let k0 = k;
+                while k < n && (km >> k as u64 & 1) != 0 {
+                    k += 1;
+                }
+                if store {
+                    self.copy_mem(p, k0 * eb, self.fp, hv + k0 * eb, (k - k0) * eb);
+                } else {
+                    self.copy_mem(self.fp, d + k0 * eb, p, k0 * eb, (k - k0) * eb);
+                }
+            }
+            return;
+        }
         if sl {
             self.slice_parts(ops[0], p, len);
         } else {
@@ -8029,6 +8068,9 @@ extend Gen {
         }
         let c = (code - core::OP_SIMD) as u8;
         let rule = core::simd_op(c).rule;
+        if c == core::SIMD_LOAD_MASKED_PTR || c == core::SIMD_STORE_MASKED_PTR {
+            return self.mask_v128(t);
+        }
         if c == core::SIMD_SWIZZLE_ZERO && t.c == VNONE {
             // Bytes by run-time byte indices: `i8x16.swizzle` (an index past 15 gives 0).
             return t.b == 2 && t.ty == t0 && lane_type(t0) == T_I8 && type_bytes(t0, 4) == 16 && self.vt(
@@ -8076,6 +8118,78 @@ extend Gen {
     }
 
     // `vop` `t` (`vop_form`) into instruction `i`.
+    // Whether masked pointer access `t` (`load_masked_ptr`, `store_masked_ptr`: pointer, mask, vector) is
+    // of a 16-byte vector under a constant mask of all or at most 4 active lanes: v128 instructions
+    // compute it (`vmask_reg`).
+    const fn mask_v128(self: &Self, t: Inst) bool {
+        let b = self.b();
+        let mut km: u64 = 0;
+        if t.b != 3 || t.c != VNONE || !self.const_of(b.pool[t.a as usize + 1], &mut km) {
+            return false;
+        }
+        let vt = self.vt(b.pool[t.a as usize + 2]);
+        if !vfit(vt) || type_bytes(vt, 4) != 16 {
+            return false;
+        }
+        km = trunc_to(km, lanes(vt));
+        return km == trunc_to(~0u64, lanes(vt)) || km.count_ones() <= 4;
+    }
+
+    // Masked pointer access `t` of `mask_v128` into instruction `i`, no lane tested: every lane by
+    // `v128.load` or `v128.store`; else per active lane `v128.load<bits>_lane` onto the fallback vector,
+    // or `v128.store<bits>_lane`.
+    fn vmask_reg(self: &mut Self, i: u32, t: Inst) {
+        let b = self.b();
+        let store = (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32;
+        let vv = b.pool[t.a as usize + 2];
+        let vt = self.vt(vv);
+        let n = lanes(vt);
+        let eb = type_bytes(lane_type(vt), 4);
+        let lane = log2u(eb);
+        let mut km: u64 = 0;
+        let _ = self.const_of(b.pool[t.a as usize + 1], &mut km);
+        km = trunc_to(km, n);
+        let every = km == trunc_to(~0u64, n);
+        let p = self.tmp(w::I32);
+        self.get(b.pool[t.a as usize]);
+        self.c.local(w::LOCAL_SET, p);
+        if store {
+            let l = self.vlocal(vv);
+            for k in 0..n {
+                if (km >> k as u64 & 1) == 0 || every && k != 0 {
+                    continue;
+                }
+                self.c.local(w::LOCAL_GET, p);
+                self.c.local(w::LOCAL_GET, l);
+                self.sop(ast::pick(every, w::V128_STORE, 0x58 + lane));
+                self.c.memarg(0, k * eb);
+                if !every {
+                    self.c.op(k as u8);
+                }
+            }
+            return;
+        }
+        self.vpre(i);
+        if every {
+            self.c.local(w::LOCAL_GET, p);
+            self.sop(w::V128_LOAD);
+            self.c.memarg(0, 0);
+        } else {
+            for _ in 0..km.count_ones() {
+                self.c.local(w::LOCAL_GET, p);
+            }
+            self.vget(vv);
+            for k in 0..n {
+                if (km >> k as u64 & 1) != 0 {
+                    self.sop(0x54 + lane);
+                    self.c.memarg(0, k * eb);
+                    self.c.op(k as u8);
+                }
+            }
+        }
+        self.vpost(i);
+    }
+
     fn vop_reg(self: &mut Self, i: u32, t: Inst) bool {
         let b = self.b();
         let code = (t.aux & VOP_CODE) as u32;
@@ -8083,6 +8197,10 @@ extend Gen {
         let a = b.pool[t.a as usize];
         if code == core::OP_CAST {
             self.vconv(i, self.cast_inst(t));
+            return true;
+        }
+        if code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32 || code == core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 {
+            self.vmask_reg(i, t);
             return true;
         }
         let lt = lane_type(self.vt(a));

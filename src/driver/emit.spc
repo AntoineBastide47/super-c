@@ -1845,7 +1845,7 @@ pub(package) struct CemitOut {
     pub(package) inst_incs: Vector<String>,
     /// Per module: its TU, or its instance unit, includes a scoped extern header, directly or through
     /// a definition header (`cemit_extern_includes`), or belongs to wasm's C library
-    /// (`loader::libc_unit`): the unit compiles alone (`pack_plan`).
+    /// (`loader::Package::is_libc`): the unit compiles alone (`pack_plan`).
     pub(package) tu_x: Vector<bool>,
     pub(package) inst_x: Vector<bool>,
     /// The registry TU includes a scoped extern header: it compiles alone too (`pack_plan`).
@@ -9647,7 +9647,7 @@ fn cemit_assemble(
     }
     let xr = x_reach(nx, &ddeps);
     for t in 0..n {
-        // wasm's C library compiles with its own flags (`loader::libc_unit`).
+        // wasm's C library compiles with its own flags (`c_build_files`).
         let lc = p.is_libc(t as i32);
         o.tu_x.set(t, lc || x_any(&xr, &tu_dv[t]));
         o.inst_x.set(t, lc || x_any(&xr, &inst_dv[t]));
@@ -11467,20 +11467,45 @@ const LIBM_AS_WRITTEN: str<'static> = " -fno-builtin-sin -fno-builtin-cos -fno-b
 /// of the constant-time functions (`CT_OBJ`), which the compile passes to the link, `__cflags`, the
 /// flags of every compile (the dialect and the target's defines, the target and its CPU features, the
 /// profile's optimization, debug information and overflow wrapping), and the target's link flags after
-/// the `@link` flags in `__ldflags`, one per line. The written paths join `keep`; false when a write
-/// fails.
+/// the `@link` flags in `__ldflags`, one per line. The units of wasm's C library
+/// (`loader::Package::is_libc`) are a list of their own, `__units_nobuiltin`, which compiles with
+/// `-fno-builtin` after those flags: the C compiler must not turn a loop of a function into a call of
+/// the C function it defines (a fill loop in `memset`), nor a call into another's. The written paths
+/// join `keep`; false when a write fails.
 fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep: &mut Vector<String>, target: i32) bool {
     let mut ms = Set::<String>::new();
     for i in 0..members.len() {
         ms.insert(members.at(i).clone());
     }
+    // The paths of the C library's units begin with a module's, then `.c` or the `__` of an instance
+    // or shard unit.
+    let mut stems = Vector::<String>::new();
+    for m in [p.rt_libc, p.rt_libm] {
+        if m >= 0 {
+            stems.push(build_out_path(root, &p.modules.at(m as usize).path, ""));
+        }
+    }
     let mut units = String::new();
+    let mut lib = String::new();
     for i in 0..keep.len() {
         let f = keep.at(i).as_str();
         // A unit is a C file that no pack holds, or the object of the constant-time functions (`ct_object`).
         if f.ends_with(".c") && !ms.contains(keep.at(i)) || f.ends_with(CT_OBJ) {
-            units.push_str(f.slice(root.len() + 1, f.len()));
-            units.push_byte(b'\n');
+            let mut own = false;
+            for k in 0..stems.len() {
+                let s = stems.at(k).as_str();
+                own = own || f.starts_with(s) && (f.slice(s.len(), f.len()).starts_with(".c") || f.slice(
+                    s.len(),
+                    f.len(),
+                ).starts_with("__"));
+            }
+            if own {
+                lib.push_str(f.slice(root.len() + 1, f.len()));
+                lib.push_byte(b'\n');
+            } else {
+                units.push_str(f.slice(root.len() + 1, f.len()));
+                units.push_byte(b'\n');
+            }
         }
     }
     let mut fl = String::new();
@@ -11520,12 +11545,19 @@ fn c_build_files(p: &loader::Package, root: str, members: &Vector<String>, keep:
     }
     let up = build_out_path(root, "__units", "");
     let fp = build_out_path(root, "__cflags", "");
-    if !write_file_atomic(&up, &units) || !write_file_atomic(&fp, &fl) || ld.len() != 0 && !write_file_atomic(&lp, &ld) {
+    let bp = build_out_path(root, "__units_nobuiltin", "");
+    if !write_file_atomic(&up, &units) || !write_file_atomic(&fp, &fl) || ld.len() != 0 && !write_file_atomic(&lp, &ld) || lib.len() != 0 && !write_file_atomic(
+        &bp,
+        &lib,
+    ) {
         eprintln("super-c: cannot write the C build files under '{}'", root);
         return false;
     }
     keep.push(up);
     keep.push(fp);
+    if lib.len() != 0 {
+        keep.push(bp);
+    }
     return true;
 }
 

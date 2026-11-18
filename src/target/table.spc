@@ -107,6 +107,14 @@ pub(package) struct Isa {
     /// The native backend inserts a scalar into any lane of a vector in a register (arm64 INS, wasm32
     /// `replace_lane`): `lir::ir::Package::lane_insert`. x86-64's SSE2 inserts 2-byte lanes and lane 0 only.
     pub(package) lane_insert: bool,
+    /// The vector register bytes of the bodies where the native backend gathers every lane of a vector in
+    /// one instruction (x86-64 VGATHER in an AVX2 body: 32); 0: in none.
+    /// `lir::ir::Package::gather_bytes`.
+    pub(package) gather_bytes: u32,
+    /// The native backend reads or writes one lane of a vector in a register at an address in one
+    /// instruction (wasm32 `v128.load32_lane`, `v128.store32_lane`): `lir::ir::Package::lane_mem`. Else a
+    /// masked access of lane 0 alone is the lane's scalar load or store (`lir::opt` `lane0_access`).
+    pub(package) lane_mem: bool,
     /// How the native backend computes an IEEE 754-2019 minimumNumber or maximumNumber of float vectors in
     /// registers (`lir::ir::Package::vminnum`): 0 lane by lane; VMIN_EXACT by its SIMD_MIN and SIMD_MAX
     /// (wasm32); VMIN_QUIET by the C `fmin` and `fmax` of a number and a quieted operand (arm64 `fminnm`,
@@ -302,6 +310,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bits: 0x0E0000,
         mask_bits: true,
         lane_insert: false,
+        gather_bytes: 32,
+        lane_mem: false,
         vminnum: 3,
         vector_perm3: 0,
         vector_sumw: 0x8,
@@ -350,6 +360,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bits: 0x0E0F07,
         mask_bits: false,
         lane_insert: true,
+        gather_bytes: 0,
+        lane_mem: false,
         vminnum: 2,
         vector_perm3: 9,
         vector_sumw: 0x8CE,
@@ -398,6 +410,8 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_bits: 0x0E0700,
         mask_bits: false,
         lane_insert: true,
+        gather_bytes: 0,
+        lane_mem: true,
         vminnum: 1,
         vector_perm3: 2,
         vector_sumw: 0x8CE,
@@ -753,6 +767,8 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_bits: 0,
     mask_bits: false,
     lane_insert: false,
+    gather_bytes: 0,
+    lane_mem: false,
     vminnum: 0,
     vector_perm3: 0,
     vector_sumw: 0,

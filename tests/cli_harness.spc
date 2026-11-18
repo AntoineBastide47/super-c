@@ -175,7 +175,9 @@ pub fn has_cc() bool {
 
 /// Compile the C tree `--emit-c` wrote at `raw` (its `__units` with its `__cflags`) and link `bin` with its
 /// `__ldflags`, by one run of the C compiler (`cc_name`); `extra` adds flags and inputs (its `-l`, `-L` and
-/// `-Wl,` words join the link). The compiler's output goes to `log` and to stderr. Its exit code.
+/// `-Wl,` words join the link). A unit of `__units_nobuiltin` (wasm32's C library) compiles before that run,
+/// with `-fno-builtin` and the flags of `extra` too, into an object next to `bin`. The compiler's output goes
+/// to `log` and to stderr. Its exit code.
 pub fn cc_tree_link(raw: str, bin: str, extra: str, log: str) i32 {
     let mut cmd = format(
         "\"{}\" {}",
@@ -185,13 +187,28 @@ pub fn cc_tree_link(raw: str, bin: str, extra: str, log: str) i32 {
     let mut ex = Vector::<String>::new();
     dutil::split_args(&mut ex, extra);
     let mut link = String::new();
+    let mut lib = cmd.clone();
     for i in 0..ex.len() {
         let w = ex.at(i).as_str();
         if w.starts_with("-l") || w.starts_with("-L") || w.starts_with("-Wl,") {
             link.format_into(" {}", w);
         } else {
             cmd.format_into(" {}", w);
+            if w.starts_with("-") {
+                lib.format_into(" {}", w);
+            }
         }
+    }
+    let mut lp = String::from_str(log);
+    let mut k: u32 = 0;
+    for u in read_text(format("{}/__units_nobuiltin", raw).as_str()).as_str().lines() {
+        let mut one = format("{} -fno-builtin -c \"{}/{}\" -o \"{}.b{}.o\"", lib.as_str(), raw, u, bin, k);
+        if exec(one.cstr(), lp.cstr()).exit != 0 {
+            eprintln("{}", read_text(log).as_str());
+            return 1;
+        }
+        cmd.format_into(" \"{}.b{}.o\"", bin, k);
+        k += 1;
     }
     for u in read_text(format("{}/__units", raw).as_str()).as_str().lines() {
         cmd.format_into(" \"{}/{}\"", raw, u);
@@ -201,7 +218,6 @@ pub fn cc_tree_link(raw: str, bin: str, extra: str, log: str) i32 {
         cmd.format_into(" {}", f);
     }
     cmd.format_into(" -o \"{}\"", bin);
-    let mut lp = String::from_str(log);
     let r = exec(cmd.cstr(), lp.cstr());
     if r.exit != 0 {
         eprintln("{}", read_text(log).as_str());

@@ -5935,8 +5935,10 @@ data @x size 256 align 4 bytes 0000000000001442000094420000204100003c420000a8420
 
 // An unchecked gather of constant lanes loads each active lane's element itself (`opt` `gather_lanes`):
 // inserted lane by lane where the target inserts lanes in registers, else interleaved from splats a chunk
-// of 16 bytes at a time (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Each target form
-// gives the evaluator's values.
+// of 16 bytes at a time (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Where the generator
+// gathers every lane of a register in one instruction (`Package.gather_bytes`: x86-64 in an AVX2 body), the
+// gather of all 8 lanes stays whole and the gather of some lanes still loads each. Each target form gives
+// the evaluator's values.
 @test
 fn unchecked_gathers_of_constant_lanes_load_each_lane() {
     let src = M"(lir ptr 8
@@ -6005,6 +6007,130 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
             let args: []u64 = [n];
             same_outcome(&before, &after, "g", args, run_value(&before, "g", args), false);
         }
+    }
+    let mut whole = lparse::parse(src, &mut err).unwrap();
+    whole.cpu.vector = 32;
+    whole.vops = VOPS_ALL;
+    whole.lane_insert = false;
+    whole.gather_bytes = 32;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut whole, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+    let t = text_of(&whole, "g");
+    assert(t.contains("gather_unchecked.v8i32") && !t.contains("gather_unchecked.v4i32"), t.as_str());
+    for n in [0u64, 5, 1000] {
+        let args: []u64 = [n];
+        same_outcome(&before, &whole, "g", args, run_value(&before, "g", args), false);
+    }
+}
+
+// A masked access through a pointer under a constant mask of lane 0 alone is the lane's scalar load into
+// the fallback or the store of the vector's lane 0 (`opt` `lane0_access`), which here is the loaded scalar
+// itself; where the target moves one lane at an address in one instruction (`Package.lane_mem`) both stay.
+@test
+fn a_masked_access_of_lane_0_is_a_scalar_access() {
+    let src = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v4f32 v2 align 0
+  v4 = iconst.i8 1
+  v5 = vop.load_masked_ptr.v4f32 (v0, v4, v3)
+  vop.store_masked_ptr (v1, v4, v5)
+  ret
+)";
+    let mut err = String::new();
+    for mem in [false, true] {
+        let mut after = lparse::parse(src, &mut err).unwrap();
+        after.cpu.vector = 16;
+        after.vops = VOPS_ALL;
+        after.lane_mem = mem;
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+        let mut v = verify::Verifier::new();
+        let fb = after.syms[after.find_symbol("f") as usize].def;
+        assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+        let t = text_of(&after, "f");
+        assert_eq(t.contains("load_masked_ptr") && t.contains("store_masked_ptr"), mem);
+        assert_eq(t.contains("load.f32") && !t.contains("vop."), !mem);
+    }
+}
+
+// `[x; N]` of bytes as a vector: the fill of a private slot through its address plus an index of 0, then
+// loads of its 16-byte parts. The index of 0 folds on a slot's address too, each load is the splat of the
+// fill's byte, and the fill and the slot go.
+@test
+fn a_byte_fill_read_as_a_vector_is_a_splat() {
+    let src = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, i8) -> void
+  slot s0 size 32 align 0
+b0(v0: ptr, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 32
+  v4 = slotaddr s0
+  v5 = ptradd v4, v2 * 1
+  memset v5, v1, v3
+  v6 = load.v16i8 v4 align 0
+  v7 = load.v16i8 v4+16 align 0
+  store v6, v0 align 0
+  store v7, v0+16 align 0
+  ret
+)";
+    let mut err = String::new();
+    let mut after = lparse::parse(src, &mut err).unwrap();
+    after.cpu.vector = 16;
+    after.vops = VOPS_ALL;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+    let mut v = verify::Verifier::new();
+    let fb = after.syms[after.find_symbol("f") as usize].def;
+    assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+    let t = text_of(&after, "f");
+    assert(t.contains("splat.v16i8") && !t.contains("memset") && !t.contains("slotaddr"), t.as_str());
+}
+
+// A call of an intrinsic that is one lane-wise operation on whole vectors (`intrin::arith_form`: x86's
+// `_mm_add_ps`, `_mm_add_epi32`) becomes that operation, on the lanes its name gives (casts around it when
+// the vector type has other lanes), so the optimizer and the generator's operand forms see it; another
+// intrinsic stays a call, and so does each without the target's instruction set.
+@test
+fn lane_wise_intrinsic_calls_become_vector_operations() {
+    let src = M"(lir ptr 8
+sym @_mm_add_ps fn global
+sym @_mm_add_epi32 fn global
+sym @_mm_min_ps fn global
+sym @f fn global
+fn @f
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = load.v4f32 v1 align 0
+  v4 = call.v4f32 @_mm_add_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v5 = call.v4f32 @_mm_min_ps(v4, v3) : (v4f32, v4f32) -> v4f32
+  store v5, v0 align 0
+  v6 = load.v2i64 v0+16 align 0
+  v7 = load.v2i64 v1+16 align 0
+  v8 = call.v2i64 @_mm_add_epi32(v6, v7) : (v2i64, v2i64) -> v2i64
+  store v8, v0+16 align 0
+  ret
+)";
+    let mut err = String::new();
+    for isa in ["x86_64", ""] {
+        let mut after = lparse::parse(src, &mut err).unwrap();
+        after.isa = isa;
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+        let mut v = verify::Verifier::new();
+        let fb = after.syms[after.find_symbol("f") as usize].def;
+        assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+        let t = text_of(&after, "f");
+        let ops = t.contains("fadd.v4f32") && t.contains("add.v4i32") && !t.contains("@_mm_add_ps(") && !t.contains(
+            "@_mm_add_epi32(",
+        );
+        assert_eq(ops, isa.len() != 0);
+        assert(t.contains("@_mm_min_ps("), t.as_str());
     }
 }
 

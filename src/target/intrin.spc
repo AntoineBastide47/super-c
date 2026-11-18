@@ -695,6 +695,77 @@ pub(package) const fn splat_form(name: str) (u32, bool) {
     return (0u32, !lanes);
 }
 
+/// The lane-wise operation x86 intrinsic `name` is, one instruction on whole vectors (`_mm_add_ps`,
+/// `_mm256_sub_epi16`, `_mm_and_si128`, `_mm_sqrt_pd`): the LIR operation (`O_ADD`, ...), its lanes' bytes
+/// and whether they hold floats; (0, 0, false) for another name. A bitwise operation takes integer lanes
+/// (those of a float vector: of the floats' size). The optimizer makes it that operation
+/// (`lir::opt`'s `lane_call`), which the generators place as they place a loop's own: in place, a load
+/// as its memory operand.
+pub(package) const fn arith_form(name: str) (u8, u32, bool) {
+    let pre: []str = ["_mm_", "_mm256_", "_mm512_"];
+    for p in 0..pre.len() {
+        if !name.starts_with(pre[p]) {
+            continue;
+        }
+        let rest = name.slice(pre[p].len(), name.len());
+        let at = rest.find("_");
+        if at < 0 {
+            return (0u8, 0u32, false);
+        }
+        let op = rest.slice(0, at as usize);
+        let ty = rest.slice(at as usize + 1, rest.len());
+        let fb: u32 = if ty == "ps" {
+            4
+        } else if ty == "pd" {
+            8
+        } else {
+            0
+        };
+        let ib: u32 = switch ty {
+            "epi8" => 1,
+            "epi16" => 2,
+            "epi32" => 4,
+            "epi64" => 8,
+            _ => 0,
+        };
+        // The integer type of a bitwise operation names the width: si128 with `_mm`, and so on.
+        let si: []str = ["si128", "si256", "si512"];
+        let bits = op == "and" || op == "or" || op == "xor";
+        if bits && (fb != 0 || ty == si[p]) {
+            return (
+                if op == "and" {
+                    O_AND
+                } else if op == "or" {
+                    O_OR
+                } else {
+                    O_XOR
+                },
+                ast::pick(fb != 0, fb, 8u32),
+                false
+            );
+        }
+        if fb != 0 {
+            let o = switch op {
+                "add" => O_FADD,
+                "sub" => O_FSUB,
+                "mul" => O_FMUL,
+                "div" => O_FDIV,
+                "sqrt" => O_FSQRT,
+                _ => 0u8,
+            };
+            return (o, ast::pick(o != 0, fb, 0u32), o != 0);
+        }
+        if ib != 0 && (op == "add" || op == "sub") {
+            return (ast::pick(op == "add", O_ADD, O_SUB), ib, false);
+        }
+        if op == "mullo" && ib == 2 {
+            return (O_MUL, 2u32, false);
+        }
+        return (0u8, 0u32, false);
+    }
+    return (0u8, 0u32, false);
+}
+
 /// Whether intrinsic `name` reads one lane of a vector at an index its second argument gives
 /// (`vget_lane_f32`, `vgetq_lane_s64`): the lowering makes it a lane read (`vextract`) for a constant index.
 pub(package) const fn lane_read(name: str) bool {

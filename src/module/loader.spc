@@ -2784,7 +2784,7 @@ extend Package {
     }
 
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
-    /// alone, with `-fno-builtin` (`libc_unit`).
+    /// alone, with `-fno-builtin` (the C tree's `__units_nobuiltin`, `driver::emit` `c_build_files`).
     pub(package) const fn is_libc(self: &Self, m: i32) bool {
         return m >= 0 && (m == self.rt_libc || m == self.rt_libm);
     }

@@ -15763,10 +15763,84 @@ data @y size 12 align 2 bytes 010000000500000003000000
     same_result(&b, &a, "differ", none, 0);
 }
 
+// A block's pointer parameter that every edge passes as one address of the integer it passes beside it
+// (`opt::address_params`; a rotated loop's header address, the base beside 0 from before the loop and the
+// stepped counter's address on the back edge) is that address of the integer: `@sum`'s loop carries the
+// counter and the sum alone, and the block after it takes no pointer. `@apart`'s pointer starts one
+// element past the counter's address and stays. The results stay.
+@test
+fn a_pointer_parameter_that_is_an_address_of_a_counter_goes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @sum fn global noinline
+sym @apart fn global noinline
+sym @run fn global
+sym @arr data global
+fn @sum
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = icmp.ne v1, v2
+  br v3, b1(v2, v0, v2), b2(v2, v0, v2)
+b1(v4: i64, v5: ptr, v6: i64):
+  v7 = load.i64 v5 align 3
+  v8 = add.i64 v6, v7
+  v9 = iconst.i64 1
+  v10 = add.i64 v4, v9
+  v11 = ptradd v0, v4 * 8+8
+  v12 = icmp.ult v10, v1
+  br v12, b1(v10, v11, v8), b2(v10, v11, v8)
+b2(v13: i64, v14: ptr, v15: i64):
+  v16 = load.i64 v14 align 3
+  v17 = add.i64 v15, v16
+  v18 = add.i64 v17, v13
+  ret v18
+fn @apart
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = ptradd v0+8
+  jmp b1(v2, v3, v2)
+b1(v4: i64, v5: ptr, v6: i64):
+  v7 = load.i64 v5 align 3
+  v8 = add.i64 v6, v7
+  v9 = iconst.i64 1
+  v10 = add.i64 v4, v9
+  v11 = ptradd v0, v4 * 8+8
+  v12 = icmp.ult v10, v1
+  br v12, b1(v10, v11, v8), b2
+b2:
+  ret v8
+fn @run
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = symaddr @arr
+  v2 = call.i64 @sum(v1, v0) : (ptr, i64) -> i64
+  v3 = call.i64 @apart(v1, v0) : (ptr, i64) -> i64
+  v4 = iconst.i64 1000
+  v5 = mul.i64 v2, v4
+  v6 = add.i64 v5, v3
+  ret v6
+data @arr size 40 align 3 bytes 01000000000000000200000000000000030000000000000004000000000000000500000000000000
+)",
+    );
+    let t = text_of(&a, "sum");
+    assert_eq(count_of(&t, ": ptr"), 1);
+    assert(t.contains("ptradd v0, v"), t.as_str());
+    let u = text_of(&a, "apart");
+    assert_eq(count_of(&u, ": ptr"), 2);
+    for n in [0u64, 1, 3, 4] {
+        let args: []u64 = [n];
+        let mut e = leval::Eval::new(&b);
+        same_result(&b, &a, "run", args, e.run(b.find_symbol("run"), args).value);
+    }
+}
+
 // Outside loops, an operation of truncations from one wider type (or constants) is the truncation of the
 // wide operation: `@sum2`'s `add.i32` of two truncated `i64`s an `add.i64`, `@pick`'s `select.i32` of one and
-// a constant a `select.i64`. `@narrow`'s `select.i8` and the `add.i32` in `@loop`'s loop stay. The results
-// stay.
+// a constant a `select.i64`, `@flip`'s `sub.i16` from -1 an operation of the `i32`, whose constant has the
+// `i32`'s bits and no more (the package verifies). `@narrow`'s `select.i8` and the `add.i32` in `@loop`'s
+// loop stay. The results stay.
 @test
 fn operations_of_truncations_outside_loops_are_wide() {
     let (b, a) = optimized(
@@ -15775,8 +15849,16 @@ sym @sum2 fn global noinline
 sym @pick fn global noinline
 sym @narrow fn global noinline
 sym @loop fn global noinline
+sym @flip fn global noinline
 sym @run fn global
 sym @arr data global
+fn @flip
+  sig (i32) -> i16
+b0(v0: i32):
+  v1 = trunc.i16 v0
+  v2 = iconst.i16 -1
+  v3 = sub.i16 v2, v1
+  ret v3
 fn @sum2
   sig (i64, i64) -> i64
 b0(v0: i64, v1: i64):
@@ -15857,8 +15939,11 @@ data @arr size 32 align 3 bytes 010000000000000002000000000000000300000000000000
     assert(p.contains("select.i64"), p.as_str());
     assert(n.contains("select.i8"), n.as_str());
     assert(l.find("add.i32") != l.rfind("add.i32"), l.as_str());
+    let f = text_of(&a, "flip");
+    assert(f.contains("sub.i32") && !f.contains("sub.i16"), f.as_str());
     let none: []u64 = [];
     same_result(&b, &a, "run", none, 8589934874);
+    same_result(&b, &a, "flip", [0x12345u64], 0xDCBA);
 }
 
 // A count read only where its operand is not 0 is `.nz`: `@guard`'s `clz`, the arm for `x != 0` of a

@@ -1820,6 +1820,62 @@ fn wasm_libc_io_time_locale_and_signals_match_wasi_libc() {
     let _ = compare(PROGRAM2, REFERENCE2, cflags, wt, "5 6\nword\n", 40000);
 }
 
+// A program of the C library's fill, copy and length functions at lengths the C compiler cannot know.
+const TREE_PROGRAM: str = M"(
+extern "C" "string.h" {
+    fn memset(dst: *mut void, c: i32, n: usize) *mut void;
+    fn memcpy(dst: *mut void, src: *const void, n: usize) *mut void;
+    fn memmove(dst: *mut void, src: *const void, n: usize) *mut void;
+    fn strlen(s: *const char) usize;
+}
+
+fn main(args: Vector<str>) i32 {
+    let n = 300 + args.len();
+    let mut a = [0u8; 512];
+    let mut b = [0u8; 512];
+    unsafe {
+        memset(&mut a[0], 7, n);
+        memcpy(&mut b[0], &a[0], n - 100);
+        memmove(&mut b[5], &b[0], n);
+    }
+    let mut sa: u64 = 0;
+    let mut sb: u64 = 0;
+    for i in 0..512 {
+        sa += a[i];
+        sb += b[i] as u64 * (i as u64 + 1);
+    }
+    println("{} {} {} {}", n, sa, sb, unsafe strlen(&a[0] as *const u8 as *const char));
+    return 0;
+}
+)";
+
+// The library's C tree (`--emit-c`), built by the wasi-sdk's clang at the release profile's optimization
+// as the tree says (`ci/cc_tree.sh`: the units of `__units_nobuiltin` with `-fno-builtin`), runs: a C
+// compiler that turns the fill loop of `memset` into a call of `memset` gives a program that never
+// returns from it. The lengths are run-time values, so no call folds.
+@platform(macos | linux)
+@test(timeout = 600)
+fn wasm_libc_c_tree_runs_optimized() {
+    if !have_oracle() {
+        return;
+    }
+    let sdk = env::get("WASI_SDK_PATH").unwrap().unwrap_or(String::new());
+    let s = ph::scratch();
+    ph::write_text(s.at("main.spc").as_str(), TREE_PROGRAM);
+    ph::write_text(s.at("build.toml").as_str(), "bin = \"prog\"\nroot = \"main.spc\"\n");
+    let named = env::get("SUPERC").unwrap().unwrap_or(String::from_str("./super-c"));
+    let superc = fs::realpath(&named).unwrap();
+    let emit: [str; 5] = [superc.as_str(), "build", "--target=wasm", "--profile=release", "--emit-c"];
+    assert(run(emit, &s.dir, s.at("build.log").as_str(), ""), "the tree emits");
+    let cc = format("CC={}/bin/clang", sdk.as_str());
+    let script = fs::realpath("ci/cc_tree.sh").unwrap();
+    let tree: [str; 6] = ["env", cc.as_str(), "sh", script.as_str(), "build/release/raw", "tree.wasm"];
+    assert(run(tree, &s.dir, s.at("cc.log").as_str(), ""), "the tree builds");
+    let wt: [str; 2] = ["wasmtime", "tree.wasm"];
+    assert(run(wt, &s.dir, s.at("tree.out").as_str(), ""), "the program runs");
+    assert_eq(ph::read_text(s.at("tree.out").as_str()).as_str(), "301 2107 149247 301\n");
+}
+
 // The C symbols a wasm build may bind that neither `std::rt::libc` nor `std::rt::libm` defines, besides the
 // runtime's own (`sc_*`, `__sc_*`: `std::rt::base` and `super_rt.h` define them), the sanitizer hooks
 // (`__tsan_*`: wasm has no sanitizer) and the SIMD128 intrinsics (`wasm_*`, inline in `wasm_simd128.h`):
