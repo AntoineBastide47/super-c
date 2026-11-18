@@ -17073,6 +17073,88 @@ fn a_slot_accessed_often_promotes() {
     same_result(&b, &a, "often", x[0..1], r.value);
 }
 
+// A vector of 8-byte lanes over a slot read and written as 4-byte words (x86-64's `__m128i` over a `[u32;
+// 4]`) becomes a vector of 4-byte lanes: the slot promotes, its words read as lanes and written as inserts.
+@test
+fn a_vector_slot_of_narrower_words_promotes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @words fn global
+fn @words
+  sig (i64, i32) -> i32
+  slot s0 size 16 align 3
+b0(v0: i64, v1: i32):
+  v2 = slotaddr s0
+  v3 = splat.v2i64 v0
+  v4 = iconst.i64 8070450533590106112
+  v5 = vinsert.1.v2i64 v3, v4
+  store v5, v2 align 3
+  store v1, v2+4 align 2
+  v6 = load.v2i64 v2 align 3
+  v7 = add.v2i64 v6, v5
+  store v7, v2 align 3
+  v8 = load.i32 v2 align 2
+  v9 = load.i32 v2+4 align 2
+  v10 = load.i32 v2+12 align 2
+  v11 = add.i32 v8, v9
+  v12 = xor.i32 v11, v10
+  ret v12
+)",
+    );
+    let c = text_of(&a, "words");
+    assert(!c.contains("slot"), c.as_str());
+    let args: [u64; 2] = [0x0000000380000001, 9];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("words"), args[0..2]);
+    same_result(&b, &a, "words", args[0..2], r.value);
+}
+
+// A slot only copies touch (copied twice: no merge), between one written as 8-byte words and two read
+// as 4-byte words: the fields each copy shares span the other side's narrower ones, so every slot ends
+// with the 4-byte fields and promotes.
+@test
+fn a_copy_between_word_sizes_promotes() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @chain fn global
+fn @chain
+  sig (i64) -> i64
+  slot s0 size 16 align 3
+  slot s1 size 16 align 3
+  slot s2 size 16 align 3
+  slot s3 size 16 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = slotaddr s2
+  v4 = slotaddr s3
+  v5 = iconst.i64 16
+  v6 = mul.i64 v0, v0
+  v7 = add.i64 v0, v6
+  store v6, v1 align 3
+  store v7, v1+8 align 3
+  memcpy v2, v1, v5
+  memcpy v3, v2, v5
+  memcpy v4, v2, v5
+  v8 = load.i32 v3 align 2
+  v9 = load.i32 v3+4 align 2
+  v10 = load.i32 v4+8 align 2
+  v11 = load.i32 v4+12 align 2
+  v12 = add.i32 v8, v9
+  v13 = xor.i32 v10, v11
+  v14 = sub.i32 v12, v13
+  v15 = zext.i64 v14
+  ret v15
+)",
+    );
+    let c = text_of(&a, "chain");
+    assert(!c.contains("slot"), c.as_str());
+    let x: [u64; 1] = [0x123456789];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("chain"), x[0..1]);
+    same_result(&b, &a, "chain", x[0..1], r.value);
+}
+
 // Inserts of every lane of one vector (a sum: lanes of a load read as loads), each into its own lane, are
 // that vector, also through the secret marks the constant-time check reads (the vector takes one mark);
 // inserts that move a lane are not.

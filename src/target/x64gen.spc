@@ -12148,19 +12148,22 @@ extend Gen {
     }
 
     // Whether lane access `t` (`O_VEXTRACT`, `O_VINSERT`) has an SSE2 register form (`vlane`): a lane out
-    // of an xmm register but a byte; an f32 into lane 0, an f64 into either lane, a 16-bit lane.
+    // of an xmm register but a byte; an f32 into lane 0, an f64 into either lane, a 16-bit lane; with SSE4.1
+    // a 4- or 8-byte integer lane (PINSRD, PINSRQ).
     const fn lane_reg(self: &Self, t: Inst) bool {
         if t.op == O_VEXTRACT {
             return in_vreg(self.cr.vt(t.a)) && type_bytes(t.ty, 8) >= 2;
         }
         let lt = lane_type(t.ty);
-        return in_vreg(t.ty) && (lt == T_F32 && t.aux == 0 || lt == T_F64 || type_bytes(lt, 8) == 2);
+        let wide_int = self.cpu.sse41 && is_int(lt) && type_bytes(lt, 8) >= 4 && type_bytes(t.ty, 8) == 16;
+        return in_vreg(t.ty) && (lt == T_F32 && t.aux == 0 || lt == T_F64 || type_bytes(lt, 8) == 2 || wide_int);
     }
 
     // Lane access `t` (lane `t.aux`) into `i`. Out of an xmm register (`lane_reg`): the lane moved to lane 0
     // by `pshufd`, then a float as it is, an integer by `movd`, `movq` or `pextrw`. Into one: the vector's
-    // copy (none when it dies here), then `movss` or `movsd` (lane 0), `unpcklpd` (lane 1 of two), `pinsrw`. Else through memory:
-    // the lane's load, or the vector's bytes copied and the lane stored.
+    // copy (none when it dies here), then `movss` or `movsd` (lane 0), `unpcklpd` (lane 1 of two), `pinsrw`,
+    // `pinsrd` or `pinsrq` (SSE4.1). Else through memory: the lane's load, or the vector's bytes copied and
+    // the lane stored.
     fn vlane(self: &mut Self, i: u32, t: Inst) {
         let k = t.aux as u32;
         let reg = self.lane_reg(t);
@@ -12230,6 +12233,10 @@ extend Gen {
         }
         if eb == 2 {
             self.c.sse_rr(0x66, 0x0FC4, rd, rs);
+            self.c.byte(k);
+        } else if is_int(lt) {
+            // PINSRD (66 0F 3A 22 /r ib), PINSRQ with REX.W.
+            self.c.rr(0x66, 0x0F3A22, eb == 8, rd, rs, false);
             self.c.byte(k);
         } else if lt == T_F32 {
             self.c.sse_rr(0xF3, 0x0F10, rd, rs - V0);

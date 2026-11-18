@@ -317,6 +317,14 @@ detector's answer, read once per TU of the C tree; in a native build a byte a co
 features enters vector code; a build at a level above the list makes none. The level list is part
 of the emit stamp. `SC_SIMD_LEVEL=<k>` (a test switch) sets the level the checks read.
 
+The same levels give the native code's scalar copies: on x86_64 a function where the level's scalar
+instructions (POPCNT, LZCNT, BMI1, FMA) save one instruction in eight of a loop, or of a small body, gets
+a copy per level, chosen by the same byte; on Linux arm64 the target's own levels apply whatever the
+list names (LSE and RCPC, then CSSC too, read from HWCAP at start-up) for atomics, bit counts and
+trailing zeros. `--simd-dispatch=off` and opt-level 0 or 1 make none. On Windows arm64 (a C tree) the
+atomics go through compiler-rt's helpers (`-moutline-atomics` in `__cflags`), which pick LSE by the CPU,
+unless the build has `+lse`.
+
 `std::cpu::detect` reads the features of the machine a program runs on (`ffi/sc_cpu.spc`), with
 the build's set included: a program can choose code at run time, never a result.
 
@@ -340,7 +348,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
 | `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
-| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`; replaces build.toml's `simd-dispatch` |
+| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code and of the scalar copies (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`, which also turns off Linux arm64's LSE, RCPC and CSSC copies; replaces build.toml's `simd-dispatch` |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; accept unknown attributes, and a std `@intrinsic` this compiler does not know (its declaration and the std bodies that call it go unchecked; emitting such a body fails); a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |

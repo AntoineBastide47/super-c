@@ -1046,11 +1046,15 @@ extend Promoter {
     }
 
     // Add to slot `d`'s accesses the fields of slot `s` in bytes `so` to `so + n`, at `do`.
+    // An integer field spans the narrower fields of `d` there as a load and a store of another integer
+    // do (`spans`): the copy moves their bytes in their places, and the next round gives `s` those fields,
+    // so both sides end with the narrower ones (an array of 4-byte words one side copies as 8-byte words).
     fn share(self: &mut Self, s: u32, so: i64, d: u32, dof: i64, n: i64) {
         for f in self.fat[s as usize]..self.fat[s as usize + 1] {
             let fl = self.flds[f as usize];
             if fl.off >= so && fl.off + size_of(fl.ty, self.ptr) <= so + n {
-                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty, kind: 0 });
+                let kind = ast::pick(wide_kind(fl.ty) != 0, W_LOAD | W_VSTORE, 0u8);
+                self.accs.push(Acc { slot: d, off: fl.off - so + dof, size: 0, ty: fl.ty, kind: kind });
             }
         }
     }
@@ -1152,6 +1156,8 @@ extend Promoter {
     // The fields of the accesses `tmp[lo .. hi]` (one slot's, sorted) but those marked W_SPANS, pushed from
     // `flds[start]`: equal accesses merge. False at two that overlap otherwise.
     fn merge(self: &mut Self, lo: usize, hi: usize, start: usize) bool {
+        // Whether an access took a lane of the last field's own lane type.
+        let mut own_lane = false;
         for j in lo..hi {
             let mut f = self.tmp[j];
             if (f.w & W_SPANS) != 0 {
@@ -1165,16 +1171,32 @@ extend Promoter {
             }
             // A lane of a vector field is part of it; a vector over lane 0 takes its place.
             if n > start && is_lane(self.flds[n - 1], f) {
+                own_lane = true;
                 continue;
             }
             if n > start && self.flds[n - 1].off == f.off && is_lane(f, self.flds[n - 1]) {
                 self.flds[n - 1] = f;
+                own_lane = true;
+                continue;
+            }
+            // A vector whose bytes narrower integers take (x86-64's `__m128i` of 8-byte lanes over 4-byte
+            // words): the vector of those lanes, which the vector's accesses convert to (`conv_op`), when
+            // no access took one of its own lanes.
+            if n > start && !own_lane && retyped(self.flds[n - 1], f) != T_NONE {
+                self.flds.index_mut(n - 1).ty = retyped(self.flds[n - 1], f);
+                own_lane = true;
+                continue;
+            }
+            if n > start && self.flds[n - 1].off == f.off && retyped(f, self.flds[n - 1]) != T_NONE {
+                self.flds[n - 1] = Fld { off: f.off, ty: retyped(f, self.flds[n - 1]), w: 0 };
+                own_lane = true;
                 continue;
             }
             if n > start && self.flds[n - 1].off + size_of(self.flds[n - 1].ty, self.ptr) > f.off {
                 return false;
             }
             self.flds.push(f);
+            own_lane = false;
         }
         return true;
     }
@@ -2366,6 +2388,22 @@ const fn bits_const(ty: u8, x: u64) Inst {
 
 // `v[lo .. hi]` by offset (insertion sort: a slot has few accesses).
 // Whether access `x` is a lane of vector field `v`: of its lane type, at a lane's offset within it.
+// The vector of `x`'s type over vector field `v`'s bytes, when `x` is an integer of another size than
+// `v`'s lanes at a multiple of its size inside it; T_NONE else.
+const fn retyped(v: Fld, x: Fld) u8 {
+    if !is_vec(v.ty) || is_vec(x.ty) || !is_int(x.ty) || x.ty == T_PTR || x.ty == T_I128 || !is_int(lane_type(v.ty)) || x.ty == lane_type(
+        v.ty,
+    ) {
+        return T_NONE;
+    }
+    let eb = type_bytes(x.ty, 8) as i64;
+    let vb = type_bytes(v.ty, 8) as i64;
+    if x.off < v.off || x.off >= v.off + vb || (x.off - v.off) % eb != 0 || vb % eb != 0 {
+        return T_NONE;
+    }
+    return vec_type(x.ty, (vb / eb) as u32);
+}
+
 const fn is_lane(v: Fld, x: Fld) bool {
     if !is_vec(v.ty) || is_vec(x.ty) || x.ty != lane_type(v.ty) {
         return false;

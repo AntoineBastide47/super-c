@@ -881,7 +881,7 @@ lemma intel_sched(m: [Secret<u32>; 16], t: u32)
 @always_inline
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 fn rounds_x64(h: [Secret<u32>; 8], m: [Secret<u32>; 16], t: u32, s: [Secret<u32>; 8], w: [Secret<u32>; 4]) [Secret<u32>; 8]
     requires t <= 60
     requires state_values(s) == abef_cdgh(rounds(state_values(h), m, t))
@@ -914,7 +914,7 @@ fn rounds_x64(h: [Secret<u32>; 8], m: [Secret<u32>; 16], t: u32, s: [Secret<u32>
 @always_inline
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 fn sched_x64(
     m: [Secret<u32>; 16],
     t: u32,
@@ -936,7 +936,7 @@ fn sched_x64(
 // Block `m` on state `h` with x86-64's SHA-256 instructions.
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 fn compress_x64(h: [Secret<u32>; 8], m: [Secret<u32>; 16]) [Secret<u32>; 8]
     ensures |r| state_values(r) == compress(state_values(h), m)
 {
@@ -1018,7 +1018,7 @@ fn hw_ok() bool {
 
 @arch(x86_64)
 fn hw_ok() bool {
-    return detect::has(cpu::Feature::Sha);
+    return detect::has(cpu::Feature::Sha) && detect::has(cpu::Feature::Sse41);
 }
 
 @arch(wasm32)
@@ -1027,7 +1027,7 @@ const fn hw_ok() bool {
 }
 
 /// The SHA-256 digest of `msg` (FIPS 180-4), with the processor's SHA-256 instructions where the
-/// machine has them (arm64 FEAT_SHA256, x86-64 SHA-NI).
+/// machine has them (arm64 FEAT_SHA256, x86-64 SHA-NI with SSE4.1).
 @constant_time
 pub fn sha256(msg: []Secret<u8>) [Secret<u8>; 32]
     ensures |d| byte_values(d) == digest(msg)

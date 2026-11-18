@@ -5,7 +5,7 @@
 
 | Part | Table | Holds |
 |---|---|---|
-| `Isa` | `ISAS` | `@arch` name, pointer size, feature model (`fn_features`, `levels`, `ext_flags`), `vector_bytes` (0: the LIR vectorizer stays off), `vector_ops` (how vectors convert and shift by vector amounts: 0 lane by lane, 1 in registers but some, 2 each; `lir::ir::Package.vops`), `mul_high`, the vector register facts the loop vectorizer reads (`vector_sat`, `vector_absd`, `vector_bits`: the lane sizes of `clz`, `popcnt` and `bswap` in registers; `mask_bits`: a byte lane mask to bits in one instruction; `vector_perm3`: the instructions of a permutation of up to three vectors, 0 for none; `vminnum`: how a minimumNumber or maximumNumber of float vectors computes in registers (a reduction's lanes, and the `min_num` and `max_num` the native lowering makes, `lir::lower` `min_num`), 0 none, `VMIN_EXACT` the IEEE 754-2019 operation (wasm32), `VMIN_QUIET` C's `fmin` of a lane its own maximum quieted first (arm64 `fminnm` drops the accumulated lane at a signaling NaN), `VMIN_NUM` C's `fmin` as it is (x86-64: its packed form gives the other lane for any NaN); each copied to a `lir::ir::Package` field), `simd_backend`, the C intrinsic headers |
+| `Isa` | `ISAS` | `@arch` name, pointer size, feature model (`fn_features`, `levels`, `ext_flags`), `vector_bytes` (0: the LIR vectorizer stays off), `vector_ops` (how vectors convert and shift by vector amounts: 0 lane by lane, 1 in registers but some, 2 each; `lir::ir::Package.vops`), `mul_high`, the vector register facts the loop vectorizer reads (`vector_sat`, `vector_absd`, `vector_bits`: the lane sizes of `clz`, `popcnt` and `bswap` in registers; `mask_bits`: a byte lane mask to bits in one instruction; `vector_perm3`: the instructions of a permutation of up to three vectors, 0 for none; `vminnum`: how a minimumNumber or maximumNumber of float vectors computes in registers (a reduction's lanes, and the `min_num` and `max_num` the native lowering makes, `lir::lower` `min_num`), 0 none, `VMIN_EXACT` the IEEE 754-2019 operation (wasm32), `VMIN_QUIET` C's `fmin` of a lane its own maximum quieted first (arm64 `fminnm` drops the accumulated lane at a signaling NaN), `VMIN_NUM` C's `fmin` as it is (x86-64: its packed form gives the other lane for any NaN); each copied to a `lir::ir::Package` field), `vector_ld3` (the instructions a group-of-3 load's field takes: arm64 LD3), `vector_dot` (the dot products in registers), `const_time` (the mnemonics the vendor documents as data-independent in time, Arm's DIT list and Intel's DOIT list, which `lir::ct` lets take secrets in an intrinsic), `simd_backend`, the C intrinsic headers |
 | `CallConv` | `CALLCONVS` | the convention's name and C `va_list` size |
 | `ObjFormat` | `OBJFORMATS` | section-name rule (`SEC_*`), symbol visibility, `-fPIC`, the soname flag |
 | `Os` | `OSES` | `@platform` name, default instruction set, SDK kind (`SDK_*`), sysroot layout (`SYSROOT_*`), whether std provides its C library (`own_libc`), file name affixes, link flags |
@@ -13,7 +13,13 @@
 
 The `Target` row adds the C data model (`long_bytes`, `long_double_bits`, `big_endian`), the red zone,
 the page size, the baseline and impossible CPU features, the C compiler's `-target` triple and `cenv`,
-the index of its C environment row.
+the index of its C environment row, and the run-time facts: `run_time`, the feature levels the native
+code copies functions for, separated by `;` (Linux arm64: `+lse,+rcpc;+lse,+rcpc,+cssc`), with
+`run_time_hwcap`, the HWCAP and HWCAP2 bits each level needs (the start-up's test); `dit`, how
+constant-time code sets PSTATE.DIT (`DIT_NONE`, `DIT_ALWAYS` on macOS arm64, `DIT_HWCAP` on Linux arm64
+with `DIT_HWCAP_BIT`); `outline_atomics`, the C tree's atomics through compiler-rt's helpers
+(`-moutline-atomics`, which pick LSE by the CPU) where the build lacks LSE (Windows arm64, whose only
+build is its C tree).
 
 ## Adding a row
 

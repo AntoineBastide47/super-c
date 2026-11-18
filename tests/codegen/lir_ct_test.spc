@@ -170,7 +170,7 @@ sym @vaeseq_u8 fn global
 sym @vsha1h_u32 fn global
 sym @_mm_aesenc_si128 fn global
 sym @_mm_sha256rnds2_epu32 fn global
-sym @_mm_sha256msg1_epu32 fn global
+sym @_mm_mullo_epi32 fn global
 fn @k
   sig (ptr, i64) -> i64
   ct
@@ -189,7 +189,7 @@ b0(v0: ptr, v1: i64):
   v13 = call.i32 @vsha1h_u32(v11) : (i32) -> i32
   v14 = call.v4i32 @_mm_aesenc_si128(v10, v2) : (v4i32, v4i32) -> v4i32
   v15 = call.v4i32 @_mm_sha256rnds2_epu32(v10, v2, v2) : (v4i32, v4i32, v4i32) -> v4i32
-  v16 = call.v4i32 @_mm_sha256msg1_epu32(v10, v2) : (v4i32, v4i32) -> v4i32
+  v16 = call.v4i32 @_mm_mullo_epi32(v10, v2) : (v4i32, v4i32) -> v4i32
   v17 = call.i64 @help(v4) : (i64) -> i64
   v18 = public.i64 v17
   ret v18
@@ -240,7 +240,7 @@ fn hw_rules(isa: str<'static>) String {
 // A secret goes to a wrapping add, a bitwise operation, a shift by a public count and a fixed swizzle, not
 // to a shift by a secret count, a minimum or a reduction; to an intrinsic whose instructions the
 // target lists (arm64's AESE; x86-64's AESENC, and SHA256RNDS2 with its register copies), not to another
-// (SHA1H's FMOV, SHA256MSG1) or to another target's; and to a body, which is then checked with that
+// (SHA1H's FMOV, PMULLD) or to another target's; and to a body, which is then checked with that
 // parameter secret, as are the bodies it passes it to: `@help` branches on it but returns it, and `@deep`
 // divides by it (the division of its public parameter alone passes).
 @test

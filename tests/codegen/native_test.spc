@@ -3822,6 +3822,49 @@ fn bit_counts_with_and_without_popcnt_run() {
     assert_eq(run_popcnt(lir, drv), 0);
 }
 
+// The PINSRD and PINSRQ (66, a REX with W, 0F 3A 22) in x86-64 code `obj`.
+const fn pinsr_counts(obj: &Vector<u8>) (u32, u32) {
+    let mut d: u32 = 0;
+    let mut q: u32 = 0;
+    for k in 2..obj.len() - 2 {
+        if obj[k] != 0x0F || obj[k + 1] != 0x3A || obj[k + 2] != 0x22 {
+            continue;
+        }
+        let rex = (obj[k - 1] & 0xF0) == 0x40;
+        let w = rex && (obj[k - 1] & 0x08) != 0;
+        let p = if rex {
+            obj[k - 2]
+        } else {
+            obj[k - 1]
+        };
+        d += (p == 0x66 && !w) as u32;
+        q += (p == 0x66 && w) as u32;
+    }
+    return (d, q);
+}
+
+// x86-64 inserts a 4- or 8-byte integer lane into an xmm register with SSE4.1 (PINSRD, PINSRQ: 66 [REX]
+// 0F 3A 22), not through memory; without SSE4.1 through memory (no 0F 3A 22). Both run the same.
+@test
+fn x86_inserts_integer_lanes_with_sse41() {
+    let lir = "lir ptr 8\nsym @ins4 fn global\nsym @ins2 fn global\nfn @ins4\n  sig (ptr, ptr, i32, i32) -> void\nb0(v0: ptr, v1: ptr, v2: i32, v3: i32):\n  v4 = load.v4i32 v0 align 0\n  v5 = vinsert.1.v4i32 v4, v2\n  v6 = vinsert.3.v4i32 v5, v3\n  v7 = add.v4i32 v6, v4\n  store v7, v1 align 0\n  ret\nfn @ins2\n  sig (ptr, ptr, i64) -> void\nb0(v0: ptr, v1: ptr, v2: i64):\n  v3 = load.v2i64 v0 align 0\n  v4 = vinsert.1.v2i64 v3, v2\n  v5 = add.v2i64 v4, v3\n  store v5, v1 align 0\n  ret\n";
+    let drv = "#include <stdint.h>\nvoid ins4(const uint32_t *, uint32_t *, uint32_t, uint32_t);\nvoid ins2(const uint64_t *, uint64_t *, uint64_t);\nint main(void) {\n  uint32_t a[4] = {1, 2, 3, 0x80000004u}, r[4];\n  ins4(a, r, 10, 0x7FFFFFFFu);\n  if (r[0] != 2 || r[1] != 12 || r[2] != 6 || r[3] != 0x00000003u) return 1;\n  uint64_t b[2] = {5, 0x8000000000000006u}, q[2];\n  ins2(b, q, 0x7FFFFFFFFFFFFFFFu);\n  if (q[0] != 10 || q[1] != 0x0000000000000005u) return 2;\n  return 0;\n}\n";
+    let x64 = tgt::axis_index("x86_64", true);
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, SSE41, &mut obj), "the SSE4.1 object");
+    let (dw, qw) = pinsr_counts(&obj);
+    assert(dw == 2 && qw == 1, format("PINSRD, PINSRQ: {} {}", dw, qw).as_str());
+    let mut base = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), x64, 0, &mut base), "the SSE2 object");
+    let (bd, bq) = pinsr_counts(&base);
+    assert(bd + bq == 0, "no PINSR without SSE4.1");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_sse41(lir, drv), 0);
+}
+
 // The C library's exact rounding, absolute value, minimum and maximum of f64 and f32, which arm64 expands
 // in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`) and x86-64 too
 // (SSE2's `andpd`, `minsd`, `maxsd`; SSE4.1's `roundsd`, `blendvpd`), equal the library's on signed zeros, halves, the

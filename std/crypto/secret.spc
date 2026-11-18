@@ -577,7 +577,7 @@ pub fn sha256su1(tw0_3: [Secret<u32>; 4], w8_11: [Secret<u32>; 4], w12_15: [Secr
 @trusted
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 pub fn sha256rnds2(cdgh: [Secret<u32>; 4], abef: [Secret<u32>; 4], wk: [Secret<u32>; 4]) [Secret<u32>; 4]
     ensures |r| words4(r) == intel_sha256_rnds2(words4(cdgh), words4(abef), words4(wk))
 {
@@ -600,7 +600,7 @@ pub fn sha256rnds2(cdgh: [Secret<u32>; 4], abef: [Secret<u32>; 4], wk: [Secret<u
 @trusted
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 pub fn sha256msg1(x: [Secret<u32>; 4], y: [Secret<u32>; 4]) [Secret<u32>; 4]
     ensures |r| words4(r) == intel_sha256_msg1(words4(x), words4(y))
 {
@@ -621,7 +621,7 @@ pub fn sha256msg1(x: [Secret<u32>; 4], y: [Secret<u32>; 4]) [Secret<u32>; 4]
 @trusted
 @constant_time
 @arch(x86_64)
-@target_feature([cpu::Feature::Sha])
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
 pub fn sha256msg2(x: [Secret<u32>; 4], y: [Secret<u32>; 4]) [Secret<u32>; 4]
     ensures |r| words4(r) == intel_sha256_msg2(words4(x), words4(y))
 {

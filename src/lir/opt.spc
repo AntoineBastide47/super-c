@@ -12931,7 +12931,12 @@ extend Opt {
                 quiet = quiet && (droppable(b.insts[j as usize]) || self.repl[j as usize] != VNONE);
             }
             let c2 = b.insts[ts.a as usize];
-            let outside = |v: Value| (v & (VPARAM | VFLAG)) != 0 && v != VNONE && self.pblock[(v & ~VPARAM) as usize] != s || (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.blk_of[v as usize] != s;
+            // A parameter's block, else its instruction's (an overflow flag's too).
+            let outside = |v: Value| v != VNONE && if (v & VPARAM) != 0 {
+                self.pblock[(v & ~VPARAM) as usize] != s
+            } else {
+                self.blk_of[(v & ~VFLAG) as usize] != s
+            };
             if !quiet || !outside(c2.a) || !outside(c2.b) {
                 continue;
             }

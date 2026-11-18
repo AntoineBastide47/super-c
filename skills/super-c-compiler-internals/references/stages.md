@@ -282,7 +282,8 @@ modular return-lifetime check) run alongside.
   widths `W_INT` and `W_NAT` (no upper bound; never bit-blasted). Each spec call term gets its
   definition once (`define`: the spec body walked without obligations, one disjunction over its
   paths to a return, guarded by its `requires`), anchored on the call and added to an obligation
-  whose terms reach it (`add_defs`); a bodiless `@trusted` one is defined by its `ensures`, a generic one
+  whose terms reach it (`add_defs`); a bodiless `@trusted` one is defined by its `ensures` (a
+  `@trusted` function with a body poses no `ensures` obligation: its callers assume them), a generic one
 unfolds with the call's type arguments (`subst`), and a sequence result's elements are those of
 the sequences its body returns (`alias`). Specifications (language skill, basics.md,
 Specifications): a quantifier is a bool atom with a closure and a skolem fact (`quantifier`, never
