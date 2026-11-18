@@ -1,5 +1,5 @@
 # The permanent probe lane, for one investigation: on Windows x86-64 at the baseline level, the portable
-# abs_diff_u8 kernel against the hand-written SSE2 one at 4096 bytes. Each job builds six variants of the
+# abs_diff_u8 kernel against the hand-written SSE2 one at 4096 bytes. Each job builds variants of the
 # bench and runs them in turn on one runner; five jobs give several runner processors.
 name: Debug
 on:
@@ -79,6 +79,12 @@ jobs:
           set -eu
           v=$1
           f=$2
+          # Every variant prints, per size, the offsets in their pages of the two inputs and of the output.
+          awk '
+          { print }
+          /^        let mut input = Input::new\(bytes, 0\);$/ {
+              print "        println(\"addr\\t{}\\t{}\\t{}\\t{}\", bytes, (input.bytes_p.as_ptr() as usize) % 4096, (input.bytes_q.as_ptr() as usize) % 4096, (input.out_u8.as_ptr() as usize) % 4096);"
+          }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
           notail() {
               awk '
           /^const fn abs_diff_u8_v\(/ { infn = 1 }
@@ -110,30 +116,53 @@ jobs:
               print "}"
           }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
           }
-          w32() {
+          # grow <n>: n more opaque calls in the function placed before the kernel, which move the kernel's code.
+          grow() {
+              awk -v N="$1" '
+          { print }
+          /^        v\.reset\(\);$/ { for (k = 1; k <= N; k++) print "        bench::black_box(" k "u64);" }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          }
+          # The output starts half a page past the first input, modulo a page: no load of an input shares its low
+          # 12 address bits with a store of the same or the previous iteration.
+          apart() {
               awk '
-          /^const fn abs_diff_u8_v\(/ { infn = 1 }
-          infn { gsub(/n % 64/, "n % 32"); gsub(/<u8, 64>/, "<u8, 32>"); gsub(/i \+= 64/, "i += 32") }
-          infn && /^}$/ { infn = 0 }
+          /^        for _ in 0\.\.self\.bytes_p\.len\(\) \+ GUARD \{$/ { print "        for _ in 0..self.bytes_p.len() + GUARD + 4096 {"; next }
+          /^        let out_u8 = self\.out_u8\.as_mut_ptr\(\);$/ {
+              print "        let out_u8 = unsafe (self.out_u8.as_mut_ptr() + ((self.bytes_p.as_ptr() as usize) + 8192 + 2048 - (self.out_u8.as_ptr() as usize)) % 4096);"
+              next
+          }
           { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
           }
           case $v in
           base) ;;
-          sizes-a) sed -i.bak 's/\[4096, 65536, 4194304\]/[1024, 16384, 4194304]/' "$f" && rm -f "$f.bak" ;;
-          sizes-b) sed -i.bak 's/\[4096, 65536, 4194304\]/[2048, 8192, 4194304]/' "$f" && rm -f "$f.bak" ;;
+          grow2) grow 2 ;;
+          grow5) grow 5 ;;
           notail) notail ;;
-          w32) w32 ;;
-          w32nt) w32 && notail ;;
+          apart) apart ;;
+          apartnt) apart && notail ;;
           *) echo "variant.sh: no variant $v" >&2; exit 1 ;;
           esac
           EOF
           sh bench/simd_baseline/kernels.sh
-          vs="base sizes-a sizes-b notail w32 w32nt"
+          vs="base grow2 grow5 notail apart apartnt"
+          od=$(command -v llvm-objdump || true)
+          [ -n "$od" ] || od=$(ls "/c/Program Files/LLVM/bin/llvm-objdump.exe" 2>/dev/null || true)
+          echo "objdump: ${od:-none}"
           for v in $vs; do
             cp kernels.orig "$f"
             bash variant.sh "$v" "$f"
             "./super-c$x" bench --no-run --filter=simd_baseline || { echo "::error::variant $v does not build"; exit 1; }
             cp "build/bench-bin$x" "build/bench-$v$x"
+            # Where the kernel's code lies: its symbols, and the backward conditional jumps in it (a loop's
+            # last instruction and its first).
+            if [ -n "$od" ]; then
+              "$od" --syms "build/bench-$v$x" 2>/dev/null | grep -i 'abs_diff_u8' | head -n 8 | sed "s/^/code\t$v\tsym\t/" > "timing/$v-code.txt" || true
+              "$od" -d --no-show-raw-insn "build/bench-$v$x" 2>/dev/null | awk -v V="$v" '
+          /abs_diff_u8_v[^>]*>:$/ { print "code\t" V "\tfn\t" $0; on = 1; next }
+          />:$/ { on = 0 }
+          on && /\tj[a-z]+\t/ { print "code\t" V "\tjump\t" $1 "\t" $2 "\t" $3 }' | head -n 60 >> "timing/$v-code.txt" || true
+              cat "timing/$v-code.txt"
+            fi
           done
           for k in 1 2 3 4 5 6 7; do
             for v in $vs; do
@@ -141,6 +170,7 @@ jobs:
             done
           done
           grep -c '^simd' timing/*-r1.txt
+          grep -h '^addr' timing/*-r1.txt | sort | uniq -c
           # Per variant and size: the medians of the seven runs (ns per element), the portable kernel over
           # the hand-written one, and their difference per call (ns).
           for v in $vs; do
