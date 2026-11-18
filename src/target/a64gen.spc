@@ -9155,7 +9155,7 @@ extend Gen {
     }
 
     // The branch of `dit_supported` at word `at` (NONE: none) to the code's end.
-    fn dit_patch(self: &mut Self, at: u32) {
+    const fn dit_patch(self: &mut Self, at: u32) {
         if at != NONE {
             self.code[at as usize] = a::cbz(false, false, a::IP0, 4 * (self.code.len() as u32 - at) as i32);
         }

@@ -16818,7 +16818,7 @@ extend CEmit {
     // symbol. The clone is the same body compiled with the caller's features (the planner's entries,
     // the C target attribute): every `Simd` operation gives the same bits in either.
     // Whether set `fs` holds a backend entry the build's features do not.
-    fn plans_beyond_build(self: &Self, fs: cf::CpuFeatureSet) bool {
+    const fn plans_beyond_build(self: &Self, fs: cf::CpuFeatureSet) bool {
         let p = self.p();
         for i in 0..p.simd_table.len() {
             let efs = p.simd_table.at(i).fs;

@@ -383,7 +383,7 @@ fn c_reached(text: str, driver: str) String {
 }
 
 // Whether C text `c` holds identifier `name` as a whole word.
-fn names(c: str, name: str) bool {
+const fn names(c: str, name: str) bool {
     let mut from: usize = 0;
     while from + name.len() <= c.len() {
         let at = c.slice(from, c.len()).find(name);

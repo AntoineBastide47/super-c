@@ -34,7 +34,7 @@ const fn table() [u32; 256] {
 }
 
 // The register's value `c` (inverted) after the bytes of `data`, one table step per byte.
-fn crc32c_table(c0: u32, data: []u8) u32 {
+const fn crc32c_table(c0: u32, data: []u8) u32 {
     let mut c = c0;
     for i in 0..data.len() {
         c = TABLE[((c ^ data[i] as u32) & 0xFF) as usize] ^ c >> 8;

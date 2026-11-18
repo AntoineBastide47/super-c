@@ -4,7 +4,7 @@
 import std::hash::crc as crc;
 
 // The bitwise definition: reflected polynomial 0x82F63B78, one bit per step.
-fn bitwise(data: []u8) u32 {
+const fn bitwise(data: []u8) u32 {
     let mut c: u32 = 0xFFFFFFFF;
     for i in 0..data.len() {
         c ^= data[i];
