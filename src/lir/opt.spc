@@ -11357,7 +11357,7 @@ extend Opt {
             k,
             i,
             &mut t,
-        )) || t.op == O_POPCNT && self.mask_count(b, k, i, &mut t) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(
+        )) || t.op == O_POPCNT && self.mask_count(pk, b, k, i, &mut t) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(
             pk,
             b,
             i,
@@ -11981,11 +11981,27 @@ extend Opt {
     // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`lane_mask_of`), extended or
     // not: the negated sum of the lane mask, each lane -1 or 0, in the count's type. A mask has at most 64
     // lanes, so the sum fits the lanes' width. Not of the bits of a mask of several registers another
-    // instruction reads (`bits_kept`): their count takes fewer instructions than a second sum. Whether it
-    // did.
-    fn mask_count(self: &mut Self, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+    // instruction reads (`bits_kept`): their count takes fewer instructions than a second sum. Nor of a
+    // mask of at most two registers where the processor makes a register's mask bits and counts bits in
+    // one instruction each (`Package.mask_bits`, `Cpu.popcnt`): the count takes fewer than the sum.
+    // Whether it did.
+    fn mask_count(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
         if !is_int(t.ty) || self.bits_kept(b, t.a, i) {
             return false;
+        }
+        let cpu = pk.cpu_of(b);
+        if pk.mask_bits && cpu.popcnt && cpu.vector != 0 {
+            // The bits' source through extensions and truncations: at most 6, as `lane_mask_of`.
+            let mut x = t.a;
+            for _ in 0..6 {
+                if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
+                    x = b.insts[x as usize].a;
+                }
+            }
+            let nb = bits_bytes(b, x);
+            if nb != 0 && nb <= 2 * cpu.vector {
+                return false;
+            }
         }
         let mk = self.lane_mask_of(b, k, i, t.a, 0);
         if mk == VNONE {
@@ -12030,16 +12046,7 @@ extend Opt {
             return false;
         }
         // The mask's bytes: a sum over one register's lanes takes fewer instructions than a count.
-        let bm = bits_mask(b, x);
-        let mc = mask_cmp(b, x);
-        let nb = if bm != VNONE {
-            type_bytes(b.type_of(bm), 8)
-        } else if mc.is_some() {
-            type_bytes(b.type_of(mc.unwrap().1), 8)
-        } else {
-            0u32
-        };
-        if nb <= 16 {
+        if bits_bytes(b, x) <= 16 {
             return false;
         }
         chain[n] = x;
@@ -19393,6 +19400,23 @@ const fn droppable(t: Inst) bool {
     return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_VOP && (cmp || sum || minmax_vop(
         t,
     ));
+}
+
+// The bytes of the lane mask whose bits `x` are (`mask_cmp`, or their sum: `bits_mask`); 0 when `x` is
+// neither.
+const fn bits_bytes(b: &Body, x: Value) u32 {
+    if x == VNONE || (x & (VPARAM | VFLAG)) != 0 {
+        return 0;
+    }
+    let bm = bits_mask(b, x);
+    if bm != VNONE {
+        return type_bytes(b.type_of(bm), 8);
+    }
+    let mc = mask_cmp(b, x);
+    if mc.is_some() {
+        return type_bytes(b.type_of(mc.unwrap().1), 8);
+    }
+    return 0;
 }
 
 // The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane

@@ -21603,6 +21603,64 @@ fn an_avx2_compress_store_packs_eight_lanes_a_chunk() {
     assert(!r.out_has("@_mm_shuffle_epi8("), "no byte shuffle of 4 lanes");
 }
 
+// x86-64: the bits of a comparison's mask (`pmovmskb`, `vpmovmskb`) are a 32-bit register's, zero above
+// the lanes: their extension to 64 bits is no instruction (no `movzx`, no move of a register to itself)
+// at the baseline and in an AVX2 body. Both give the C results.
+@test
+fn x64_mask_bits_extend_without_an_instruction() {
+    let lir = M"(lir ptr 8
+sym @bits fn global
+sym @wide fn global
+fn @bits
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = load.v16i8 v1 align 0
+  v4 = vop.eq.i16 (v2, v3)
+  v5 = zext.i64 v4
+  ret v5
+fn @wide
+  sig (ptr, ptr) -> i64
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: ptr):
+  v2 = load.v32i8 v0 align 0
+  v3 = load.v32i8 v1 align 0
+  v4 = vop.eq.i32 (v2, v3)
+  v5 = zext.i64 v4
+  ret v5
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    let mut extends: u32 = 0;
+    for i in 0..obj.len() - 2 {
+        // movzx (0F B6, 0F B7), or a 32-bit move of a register to itself (89 or 8B, both fields the same).
+        let m = obj[i + 1];
+        extends += (obj[i] == 0x0F && (m == 0xB6 || m == 0xB7)) as u32;
+        extends += ((obj[i] == 0x89 || obj[i] == 0x8B) && m >= 0xC0 && (m >> 3 & 7) == (m & 7)) as u32;
+    }
+    assert_eq(extends, 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t bits(const uint8_t *, const uint8_t *);
+int64_t wide(const uint8_t *, const uint8_t *);
+int main(void) {
+  uint8_t a[32], b[32];
+  int64_t want = 0;
+  for (int k = 0; k < 32; k++) {
+    a[k] = (uint8_t)(k * 7 + 3);
+    b[k] = (k % 3 == 0 || k == 31) ? a[k] : (uint8_t)(a[k] + 1);
+    if (a[k] == b[k]) want |= (int64_t)1 << k;
+  }
+  if (bits(a, b) != (want & 0xFFFF)) return 1;
+  if (wide(a, b) != want) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_x64_feature(lir, drv, "avx2", 0), 0);
+}
+
 // x86-64: a vector sum that commutes writes over the loop's accumulator whichever operand it is: `@acc`'s
 // sums take the load first and the accumulator second, and its loop holds no move between vector
 // registers (`movaps`, `movdqa`, `movdqu`, or their VEX forms). It gives the C result.

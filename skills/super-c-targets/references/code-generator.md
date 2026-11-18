@@ -239,7 +239,8 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   merged by a mask, `vpblendd` with AVX2, `vpandq`/`vporq` with AVX-512). Any other form computes lane by
   lane through memory. x86-64 notes: a select (`vsel`) is `c ^ ((b ^ c) & mask)`, and with AVX under a
   lane mask (`lir::ir::lane_mask`) one blend (`vblendvps`, `vblendvpd`, `vpblendvb`); a float's splat and
-  a 16-byte interleave write over an operand that dies there (`def_over`).
+  a 16-byte interleave write over an operand that dies there (`def_over`); a mask's bits (`mask_reg`,
+  `ymm_mask`) are zero above the lanes (`Va.clean`), so their extension is no instruction.
 - Vector constants: x86-64 loads one from the body's read-only constants (`const_sym`, aligned to its
   size); a 16-byte one that lane operations of its block alone read, each as its second operand, is their
   memory operand (`lv::FOLD_VCMEM`: `pxor x, [rip + k]`). arm64 builds one of a repeating byte or
