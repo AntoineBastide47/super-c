@@ -21408,3 +21408,54 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
 }
+
+// A `compress_store` whose slice, start and mask live past it in registers of their own: the lane loop's
+// temporaries, those three and the count fit the registers an instruction may take (arm64: the length's
+// temporary is free again before the count is defined). It gives the C result for each mask.
+@test
+fn compress_store_with_live_operands_fits_its_registers() {
+    let lir = M"(lir ptr 8
+sym @cs fn global
+fn @cs
+  sig (ptr, i64, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: i64, v3: ptr):
+  v4 = load.v2f32 v3 align 0
+  v5 = iconst.i64 1
+  v6 = add.i64 v1, v5
+  v7 = trunc.i8 v2
+  v8 = load.ptr v0 align 3
+  v9 = vop.compress_store.i64 (v8, v6, v7, v4)
+  v10 = add.i64 v9, v6
+  v11 = zext.i64 v7
+  v12 = add.i64 v10, v11
+  v13 = load.i64 v8+8 align 3
+  v14 = add.i64 v12, v13
+  ret v14
+)";
+    for isa in ["aarch64", "x86_64"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut obj), isa);
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct sl { float *p; uint64_t n; };
+long long cs(struct sl **, long long, long long, const float *);
+// The runtime's trap of a store past the slice: no call here reaches it.
+void __sc_vec_bounds(uint64_t w, uint64_t i, uint64_t n) { __builtin_trap(); }
+int main(void) {
+  float v[2] = {5, 7};
+  for (long long m = 0; m < 4; m++) {
+    float out[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    struct sl s = {out, 8}, *ps = &s;
+    long long n = (m & 1) + (m >> 1);
+    if (cs(&ps, 2, m, v) != n + 3 + m + 8) return 1 + (int)m;
+    float a = m & 1 ? 5 : m & 2 ? 7 : 0, b = m == 3 ? 7 : 0;
+    if (out[3] != a || out[4] != b || out[2] != 0 || out[5] != 0) return 10 + (int)m;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}

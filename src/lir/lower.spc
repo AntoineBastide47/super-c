@@ -4860,8 +4860,8 @@ extend Lower {
     // whole chunk is stored at the running offset, which grows by the row's lane count (a second table,
     // whose address an index reaches without an offset); the lanes that
     // follow the packed ones are saved first and written back last. Else the lane loop (`vop` `code`).
-    // Where no entry swizzles a chunk's bytes (x86-64 before SSSE3), the lanes of 2 bytes or more of a vector
-    // of at least 16 bytes go one by one on the same condition: each lane stored at the running offset, which moves past an active one, the
+    // Where no entry swizzles a chunk's bytes (x86-64 before SSSE3; a vector below 8 bytes), lanes of 2 bytes
+    // or more go one by one on the same condition: each lane stored at the running offset, which moves past an active one, the
     // lane that follows the packed ones saved and written back. VNONE when the lanes do not chunk.
     fn compress_chunks(self: &mut Self, c: &mut cbe::CEmit, args: []Value, code: u16, rt: u8) Value {
         let vt = self.vty(args[3]);
@@ -4877,7 +4877,7 @@ extend Lower {
         }
         // No entry: the lanes go one by one (below), a chunk of one lane.
         let cl = ast::pick(byt, cb / lb, 1u32);
-        if byt && (swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0) || !byt && (lb < 2 || n * lb < 16) {
+        if byt && (swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0) || !byt && lb < 2 {
             return VNONE;
         }
         // Row r of the table: the bytes of the lanes of mask r in order, then the others. Byte r of the

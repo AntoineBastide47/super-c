@@ -12156,7 +12156,10 @@ extend Gen {
             self.here(w0);
         }
         if cs && t.ty != T_NONE {
-            // The active lane count.
+            // The active lane count. The length's temporary is free again (the bounds check read it last):
+            // with it the five temporaries, the three operands and the count would be nine registers, one
+            // more than an instruction takes (`need`).
+            self.cr.tmps &= ~bit(len);
             let rd = self.def(i);
             self.emit(a::addsub_reg(true, 1, false, rd, ix, st, 0, 0));
         }
