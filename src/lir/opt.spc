@@ -5323,6 +5323,9 @@ extend Opt {
                 changed = self.offset_test(pk, b, k as u32) || changed;
                 self.param_bounds(pk, b, k as u32);
             }
+            if k != 0 {
+                changed = self.address_params(pk, b, k as u32) || changed;
+            }
             self.pend.truncate(0);
             let mut called = false;
             for i in bk.start..bk.start + bk.len {
@@ -10453,14 +10456,144 @@ extend Opt {
                 if d == 0 {
                     continue;
                 }
-                let dc = self.before(b, k, kb.start, iconst(ty, d));
-                let v = self.before(b, k, kb.start, Inst { op: O_ADD, ty: ty, aux: 0, a: vp, b: dc, c: 0 });
+                let dc = self.at_start(b, k, iconst(ty, d));
+                let v = self.at_start(b, k, Inst { op: O_ADD, ty: ty, aux: 0, a: vp, b: dc, c: 0 });
                 self.prepl[(kb.param_start + q) as usize] = v;
                 any = true;
                 break;
             }
         }
         return any;
+    }
+
+    // The pointer parameters of block `k` (at most SAME_MAX parameters) that are one address of a
+    // pointer-wide integer parameter of its own: every edge into `k` passes the pointer `base + x * s + c`
+    // for the integer `x` it passes (a rotated loop, whose header made the address of its counter for the
+    // body: the edge from before the loop passes the base beside 0, the back edge the address of the
+    // stepped counter). The pointer is that address, made at the block's start (`prepl`), so the loop
+    // carries the counter alone and its accesses index it. Whether any is.
+    fn address_params(self: &mut Self, pk: &Package, b: &mut Body, k: u32) bool {
+        let kb = b.blocks[k as usize];
+        let np = kb.param_len as u32;
+        if np < 2 || np > SAME_MAX || self.rpo[k as usize] == NONE || kb.len == 0 {
+            return false;
+        }
+        let mut any = false;
+        for q in 0..np {
+            if b.params[(kb.param_start + q) as usize] != T_PTR || self.prepl[(kb.param_start + q) as usize] != VNONE {
+                continue;
+            }
+            for p0 in 0..np {
+                let ty = b.params[(kb.param_start + p0) as usize];
+                if !is_int(ty) || type_bits(ty, pk.ptr_bytes) != pk.ptr_bytes * 8 || self.prepl[(kb.param_start + p0) as usize] != VNONE {
+                    continue;
+                }
+                let (base, scale, off) = self.args_address(b, k, p0, q);
+                if base == VNONE {
+                    continue;
+                }
+                let vp = VPARAM | kb.param_start + p0;
+                let v = self.at_start(
+                    b,
+                    k,
+                    Inst { op: O_PTRADD, ty: T_PTR, aux: scale as u16, a: base, b: vp, c: off as u32 },
+                );
+                self.prepl[(kb.param_start + q) as usize] = v;
+                any = true;
+                break;
+            }
+        }
+        return any;
+    }
+
+    // `address_params` of block `k`'s parameters `p` (the integer) and `q` (the pointer): the base, scale
+    // and byte offset of the address every edge passes as `q` for what it passes as `p`; a base of VNONE
+    // when the edges pass no one such address. The first edge whose pointer has an index that is no
+    // constant gives the three; then every edge agrees. An index that is the integer plus or minus a
+    // constant moves that constant, scaled, into the offset (modulo the pointer's width, as the address).
+    fn args_address(self: &mut Self, b: &Body, k: u32, p: u32, q: u32) (Value, u32, i32) {
+        let none = (VNONE, 0u32, 0i32);
+        let mut base = VNONE;
+        let mut scale: u32 = 0;
+        let mut off: i128 = 0;
+        for round in 0..2u32 {
+            for x in self.pred_at[k as usize]..self.pred_at[k as usize + 1] {
+                let src = self.preds[x as usize];
+                if x > self.pred_at[k as usize] && self.preds[x as usize - 1] == src {
+                    continue;
+                }
+                b.succ_edges(term(b, src), &mut self.edges);
+                for e in 0..self.edges.len() {
+                    let ed = self.edges[e];
+                    if b.edge_target(ed) != k {
+                        continue;
+                    }
+                    let a = self.one_arg(b, self.val(b.edge_arg(ed, p)));
+                    let c = self.one_arg(b, self.val(b.edge_arg(ed, q)));
+                    if a == VNONE || c == VNONE || (a & VFLAG) != 0 || (c & VFLAG) != 0 {
+                        return none;
+                    }
+                    // The pointer as base, index, scale and offset; a constant index joins the offset.
+                    let mut cb = c;
+                    let mut cx = VNONE;
+                    let mut cs: u32 = 0;
+                    let mut co: i128 = 0;
+                    if (c & VPARAM) == 0 && b.insts[c as usize].op == O_PTRADD {
+                        let t = b.insts[c as usize];
+                        cb = self.val(t.a);
+                        co = t.c as i32;
+                        if t.b != VNONE {
+                            cx = self.val(t.b);
+                            cs = scale_of(t);
+                            // An index as wide as the integer: a narrower one is no sum with it.
+                            if type_bits(b.type_of(cx), 8) != type_bits(b.type_of(a), 8) {
+                                return none;
+                            }
+                            if let Some(kx) = int_bits(b, cx) {
+                                co += sign_extend(kx, type_bits(b.type_of(cx), 8)) as i128 * cs;
+                                cx = VNONE;
+                            }
+                        }
+                    }
+                    // The integer as that index plus a constant.
+                    let mut d: i128 = 0;
+                    let mut ax = a;
+                    if cx != VNONE && a != cx && (a & VPARAM) == 0 {
+                        let t = b.insts[a as usize];
+                        let kc = int_bits(b, t.b);
+                        if (t.op == O_ADD || t.op == O_SUB) && kc.is_some() && self.val(t.a) == cx {
+                            let kv = sign_extend(kc.unwrap(), type_bits(t.ty, 8)) as i128;
+                            d = ast::pick(t.op == O_ADD, kv, 0i128 - kv);
+                            ax = cx;
+                        }
+                    }
+                    if round == 0 {
+                        if base == VNONE && cx != VNONE && ax == cx {
+                            base = cb;
+                            scale = cs;
+                            off = co - d * cs;
+                        }
+                        continue;
+                    }
+                    if cb != base {
+                        return none;
+                    }
+                    if cx == VNONE {
+                        // No index: the integer is a constant, whose address this is.
+                        let ka = int_bits(b, a);
+                        if ka.is_none() || off + sign_extend(ka.unwrap(), type_bits(b.type_of(a), 8)) as i128 * scale != co {
+                            return none;
+                        }
+                    } else if ax != cx || cs != scale || co - d * cs != off {
+                        return none;
+                    }
+                }
+            }
+            if base == VNONE || off < -0x80000000 || off > 0x7FFFFFFF {
+                return none;
+            }
+        }
+        return (base, scale, off as i32);
     }
 
     // `offset_params` of block `k`'s parameters `p` and `q` (values `vp`, `vq`, of type `ty`): the
@@ -10936,7 +11069,7 @@ extend Opt {
     // The integer constant of type `ty` and bits `v` (truncated to it) the dominating blocks hold or the walk
     // made (`constant`); NONE when none: a fact needs no new instruction, which only a changed body places.
     fn known_const(self: &Self, b: &Body, ty: u8, v: u64) Value {
-        let t = iconst(ty, v);
+        let t = iconst(ty, v & mask_of(type_bits(ty, 8)));
         let h = hash(t);
         for m in 0..2u32 {
             let found = switch ast::pick(m == 0, &self.pure, &self.made).get(&h) {
@@ -10953,7 +11086,7 @@ extend Opt {
     // An integer constant of type `ty` and bits `v` (truncated to it): one the dominating blocks hold, else
     // a new one at the start of the entry block.
     fn constant(self: &mut Self, b: &mut Body, ty: u8, v: u64) Value {
-        let t = iconst(ty, v);
+        let t = iconst(ty, v & mask_of(type_bits(ty, 8)));
         let h = hash(t);
         let mut found = switch self.pure.get(&h) {
             Some(x) => *x,
@@ -14520,6 +14653,16 @@ extend Opt {
             self.hoisted.push(k as u64 << 32 | v as u64);
         }
         return v;
+    }
+
+    // Instruction `t` at the start of block `k`: before its first instruction, or, in a block of its
+    // terminator alone, before that one (`placed`: the rebuild places nothing before a terminator).
+    fn at_start(self: &mut Self, b: &mut Body, k: u32, t: Inst) Value {
+        let kb = b.blocks[k as usize];
+        if kb.len == 1 {
+            return self.placed(b, k, kb.start, t, false);
+        }
+        return self.before(b, k, kb.start, t);
     }
 
     fn before(self: &mut Self, b: &mut Body, k: u32, at: u32, t: Inst) Value {

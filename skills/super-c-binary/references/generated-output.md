@@ -28,6 +28,7 @@ build/
     __sc_ct.o         # --emit-c with std::crypto::secret: the @constant_time functions, checked and
                       # compiled by the native backend; a unit the link takes as it is
     __units __cflags  # --emit-c: the units to compile and the flags of every compile
+    __units_nobuiltin # --emit-c on wasm32: the C library's units, which compile with -fno-builtin too
     __sc_t/           # --emit-c: one definition header per type (app__Point.h: typedef, definition, layout check)
     __std/            # demanded prelude modules only
 ```
@@ -76,8 +77,11 @@ The C tree of `--emit-c` builds with any C compiler and no `-I` flag: compile ea
 lists with the flags of `__cflags`, then link the objects, and an object unit (`__sc_ct.o`) as it is,
 with the flags of `__ldflags`, one per line (`ci/cc_tree.sh` does it: `sh ci/cc_tree.sh build/debug/raw
 app`). `__sc_unity.c` and `__sc_pack<k>.c` include other units, and `__units` names them in place of
-their members. On wasm32 `__ldflags` holds `-nostdlib`: the tree's `std::rt::libc` units are the C
-library. `__cflags`
+their members. On wasm32 `__ldflags` holds `-nostdlib`: the tree's `std::rt::libc` and `std::rt::libm`
+units are the C library. `__units_nobuiltin` lists them, not `__units`: compile each with the flags of
+`__cflags` and `-fno-builtin`, so that the C compiler does not turn a loop of a function into a call of the
+C function it defines (a fill loop in `memset`); the `no_builtin` attribute does not replace the flag, for
+clang drops it from a function that the unit calls before it defines it. `__cflags`
 holds the dialect and the feature macros of `push_c_env` (without them Darwin's
 `struct stat` lacks the fields std binds), `-funsigned-char` (the language's `char` is unsigned, and
 `super_rt.h` fails to compile without it), `-ffp-contract=off` (only an explicit `fma` fuses, so float

@@ -5939,21 +5939,29 @@ fn main() i32 {
 }
 
 // A wasm C tree carries its C library (`std::rt::libc`, `std::rt::libm`), whose functions define the C
-// functions a C compiler may make of a loop or of another call: each has the `no_builtin` attribute, so the
-// tree builds with its `__cflags` alone; the program's own unit has none.
+// functions a C compiler may make of a loop or of another call: `__units_nobuiltin` lists its units, which
+// compile with `-fno-builtin`, and `__units` the others. A host's tree has no such list.
 @test
-fn wasm_c_library_functions_take_no_builtin() {
+fn wasm_c_library_units_are_a_list_of_their_own() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"{}\", 3);\n    return 0;\n}\n");
     let root = p.dir();
     assert(cli::superc_in(root, "build --target=wasm --emit-c").ok());
-    for f in ["std/rt/libc.c", "std/rt/libm.c"] {
-        let c = cli::read_text(format("{}/build/debug/raw/{}", root, f).as_str());
-        assert(c.contains("no_builtin))"), f);
+    let raw = format("{}/build/debug/raw", root);
+    let lib = cli::read_text(format("{}/__units_nobuiltin", raw).as_str());
+    let units = cli::read_text(format("{}/__units", raw).as_str());
+    for f in ["std/rt/libc.c\n", "std/rt/libm.c\n"] {
+        assert(lib.as_str().contains(f) && !units.as_str().contains(f), f);
     }
-    let own = cli::read_text(format("{}/build/debug/raw/main.c", root).as_str());
-    assert(own.len() != 0 && !own.contains("no_builtin"), "the program's unit");
+    for u in lib.as_str().lines() {
+        assert(u.starts_with("std/rt/libc") || u.starts_with("std/rt/libm"), u);
+        assert(cli::read_text(format("{}/{}", raw, u).as_str()).len() != 0, u);
+    }
+    assert(units.len() != 0 && !units.as_str().contains("std/rt/lib"), units.as_str());
+    assert(cli::superc_in(root, "build --emit-c --out-dir=host").ok());
+    assert(cli::read_text(format("{}/host/debug/raw/__units", root).as_str()).len() != 0, "the host's units");
+    assert(cli::read_text(format("{}/host/debug/raw/__units_nobuiltin", root).as_str()).len() == 0, "the host's list");
 }
 
 // A small program's C tree compiles its module, instance and registry units as one unit: `__sc_unity.c`

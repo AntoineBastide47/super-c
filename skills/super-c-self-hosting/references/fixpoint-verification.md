@@ -41,7 +41,8 @@ cmp "$fix_dir/gen1-bin" "$fix_dir/build/test/super-c"
 The binaries must be identical. For the additional worker-count checks of C trees,
 native objects, type tables, item indexes and diagnostics, run `sh ci/gate.sh --core`.
 To compile a C tree, use `ci/cc_tree.sh`, never a command over every `.c` file: a pack
-or unity file includes its members, so compiling every file defines those members twice.
+or unity file includes its members, so compiling every file defines those members twice, and
+wasm32's C library units (`__units_nobuiltin`) need `-fno-builtin`.
 
 ## Absolute Paths in the Emitted Tree
 
