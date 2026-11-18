@@ -22179,6 +22179,83 @@ int main(void) {
     assert_eq(run_native_with(lir, drv, LSE_RT), 0);
 }
 
+// In a body that holds a 32-byte vector, every SSE operation is VEX-encoded (`x64::Code.vex_sse`): a
+// legacy one would wait on the dirty upper halves (Intel's SSE-AVX transition). Here the scalar product
+// and sum, the integer compare (`vpcmpeqd`, no EVEX form of its shape) and the 16-byte moves of `mix`; the
+// body without one keeps the legacy forms (`flat`'s `mulsd`).
+@test
+fn bodies_with_256_bit_values_encode_sse_as_vex() {
+    let lir = M"(lir ptr 8
+sym @mix fn global
+sym @flat fn global
+fn @mix
+  sig (ptr, f64, f64) -> f64
+b0(v0: ptr, v1: f64, v2: f64):
+  v3 = load.v8f32 v0 align 0
+  v4 = fadd.v8f32 v3, v3
+  store v4, v0 align 0
+  v5 = load.v4i32 v0+32 align 0
+  v6 = load.v4i32 v0+48 align 0
+  v7 = vcmp.eq.v4i32 v5, v6
+  store v7, v0+32 align 0
+  v8 = fmul.f64 v1, v2
+  v9 = fadd.f64 v8, v1
+  ret v9
+fn @flat
+  sig (f64, f64) -> f64
+b0(v0: f64, v1: f64):
+  v2 = fmul.f64 v0, v1
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the object",
+    );
+    // vmulsd (C5 xB 59), vaddsd (C5 xB 58), vpcmpeqd (C5 x9 76); legacy mulsd (F2 0F 59) once, flat's.
+    let legacy_mulsd: [u8; 3] = [0xF2, 0x0F, 0x59];
+    let mut n: u32 = 0;
+    for i in 0..obj.len() - 2 {
+        n += (obj[i] == 0xF2 && obj[i + 1] == 0x0F && obj[i + 2] == 0x59) as u32;
+    }
+    assert_eq(n, 1);
+    assert(holds(&obj, legacy_mulsd[0..3]), "flat keeps mulsd");
+    // A 2-byte VEX prefix (C5, then R vvvv L pp) or a 3-byte one of map 0F (C4, then RXB m-mmmm, W vvvv L pp),
+    // 128 bits: vmulsd and vaddsd (F2: pp 3), vpcmpeqd (66: pp 1).
+    let mut vex: u32 = 0;
+    for i in 0..obj.len() - 3 {
+        let (pp, op) = if obj[i] == 0xC5 {
+            (obj[i + 1] & 7, obj[i + 2])
+        } else if obj[i] == 0xC4 && (obj[i + 1] & 0x1F) == 1 {
+            (obj[i + 2] & 7, obj[i + 3])
+        } else {
+            (0xFFu8, 0u8)
+        };
+        vex += (pp == 3 && (op == 0x58 || op == 0x59) || pp == 1 && op == 0x76) as u32;
+    }
+    assert(vex >= 3, "vmulsd, vaddsd and vpcmpeqd");
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return; // the driver runs on x86-64
+    }
+    let drv = M"(#include <string.h>
+double mix(void *, double, double);
+double flat(double, double);
+int main(void) {
+  float f[8]; int w[8];
+  unsigned char buf[64];
+  for (int i = 0; i < 8; i++) f[i] = (float)i + 0.5f;
+  for (int i = 0; i < 4; i++) { w[i] = i; w[4 + i] = i == 2 ? 2 : 7; }
+  memcpy(buf, f, 32); memcpy(buf + 32, w, 32);
+  if (mix(buf, 3.0, 4.0) != 15.0) return 1;
+  memcpy(f, buf, 32); memcpy(w, buf + 32, 16);
+  for (int i = 0; i < 8; i++) if (f[i] != 2.0f * ((float)i + 0.5f)) return 2;
+  for (int i = 0; i < 4; i++) if (w[i] != (i == 2 ? -1 : 0)) return 3;
+  return flat(2.0, 3.0) == 6.0 ? 0 : 4;
+}
+)";
+    assert_eq(run_native_with(lir, drv, WIDE), 0);
+}
+
 // A legacy SSE instruction that reads xmm0 as a fixed operand (`blendvps`, `sha256rnds2`) in a template
 // whose first argument, a loop's accumulator, dies at the call while its result lives on: the template's
 // xmm0 keeps its name (`intrin::vfixed`), the accumulator moves into it.

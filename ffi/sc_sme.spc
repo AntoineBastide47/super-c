@@ -56,6 +56,44 @@ pub unsafe fn sc_sme_mul_f64(c: *mut f64, a: *const f64, b: *const f64, m: usize
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_i8(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usize, n: usize) i32 {
+    return mul_i8_flip(c, a, b, m, k, n, 0);
+}
+
+/// `c` (m x n, i32) = `a` (m x k, u8) * `b` (k x n, i8), each element modulo 2^32: the i8 product of
+/// `a - 128` (each byte's top bit flipped), plus 128 times the sum of each column of `b`.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_u8i8(c: *mut i32, a: *const u8, b: *const i8, m: usize, k: usize, n: usize) i32 {
+    if mul_i8_flip(c, a as *const i8, b, m, k, n, 0x80) != 0 {
+        return -1;
+    }
+    let s = stdlib::malloc(n * 4 + 4) as *mut i32;
+    if s == null {
+        return -1;
+    }
+    for j in 0..n {
+        s[j] = 0;
+    }
+    for p in 0..k {
+        for j in 0..n {
+            s[j] = s[j].wrapping_add(b[p * n + j]);
+        }
+    }
+    for i in 0..m {
+        for j in 0..n {
+            c[i * n + j] = c[i * n + j].wrapping_add(s[j].wrapping_mul(128));
+        }
+    }
+    stdlib::free(s);
+    return 0;
+}
+
+// The i8 product of `a` with each byte xored with `flip` (0x80: a u8 matrix less 128), `b` as it is.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+unsafe fn mul_i8_flip(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usize, n: usize, flip: u8) i32 {
     let l = (sc_sme_svl() / 4) as usize;
     let g = k / 4 + (k % 4 != 0) as usize;
     let pm = (m / l + (m % l != 0) as usize) * l;
@@ -77,6 +115,17 @@ pub unsafe fn sc_sme_mul_i8(c: *mut i32, a: *const i8, b: *const i8, m: usize, k
         }
         for p in 4 * whole..k {
             dst[whole * 4 * l + p - 4 * whole] = src[p];
+        }
+        // The row's bytes flipped, the padding past k kept 0.
+        if flip != 0 {
+            for q in 0..whole {
+                for t in 0..4usize {
+                    dst[q * 4 * l + t] = (dst[q * 4 * l + t] as u8 ^ flip) as i8;
+                }
+            }
+            for p in 4 * whole..k {
+                dst[whole * 4 * l + p - 4 * whole] = (src[p] as u8 ^ flip) as i8;
+            }
         }
     }
     // pb: per group, the four rows interleaved byte by byte over each panel's 4L columns (zeros past n
@@ -152,6 +201,13 @@ pub unsafe fn sc_sme_mul_f64(_c: *mut f64, _a: *const f64, _b: *const f64, _m: u
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_i8(_c: *mut i32, _a: *const i8, _b: *const i8, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_u8i8(_c: *mut i32, _a: *const u8, _b: *const i8, _m: usize, _k: usize, _n: usize) i32 {
     return -1;
 }
 

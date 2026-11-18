@@ -3851,6 +3851,7 @@ extend Gen {
             }
             self.ymm = self.yvals.len() != 0;
         }
+        self.c.vex_sse = self.ymm;
         self.cr.dying.truncate(0);
         self.cr.lock = 0;
         self.cr.tmps = 0;

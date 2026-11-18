@@ -136,6 +136,9 @@ pub(package) struct Code {
     pub(package) dead: Vector<u32>,
     pub(package) in_at: Vector<u32>,
     pub(package) stack_at: u32,
+    /// Legacy SSE operations encode as VEX.128 (`sse_vex`): a body that holds 32-byte vectors, whose upper
+    /// halves a legacy SSE instruction would wait on (Intel's SSE-AVX transition).
+    pub(package) vex_sse: bool,
     rs: Relax,
 }
 
@@ -198,6 +201,7 @@ extend Code {
             dead: Vector::<u32>::new(),
             in_at: Vector::<u32>::new(),
             stack_at: 0xFFFFFFFF,
+            vex_sse: false,
             rs: Relax::new(),
         };
     }
@@ -593,6 +597,10 @@ extend Code {
             self.sse_evex(pfx, op, w, reg, rm, rip(), false);
             return;
         }
+        if self.vex_sse && !byte && sse_op(pfx, op) {
+            self.sse_vex(pfx, op, w, reg, rm, rip(), false);
+            return;
+        }
         if pfx != 0 {
             self.byte(pfx);
         }
@@ -605,6 +613,10 @@ extend Code {
     pub(package) fn rm(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, m: Mem, byte: bool) {
         if reg >= 16 {
             self.sse_evex(pfx, op, w, reg, 0, m, true);
+            return;
+        }
+        if self.vex_sse && !byte && sse_op(pfx, op) {
+            self.sse_vex(pfx, op, w, reg, 0, m, true);
             return;
         }
         if op == 0xFF && reg == 2 {
@@ -1268,6 +1280,38 @@ extend Code {
 
     // `rr` (`rm` when `mem`, at `m`) of an SSE operation with a register of xmm16..xmm31: its EVEX.128 form
     // (`evex_form`), the destination its first source too where the legacy form reads it.
+    // Legacy SSE operation `op` (prefix `pfx`, REX.W `w`) as its VEX.128 form: the register roles of its
+    // EVEX form (`evex_form`), VEX.W the legacy REX.W (the 64-bit `movq`, `cvtsi2sd` and kin; ignored
+    // elsewhere).
+    fn sse_vex(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, m: Mem, mem: bool) {
+        let vo = vex_only(pfx, op);
+        let sh = if vo != EV_NONE {
+            vo
+        } else {
+            evex_form(pfx, op, reg, w, mem) & EV_SHAPE
+        };
+        let v = if sh == EV_NDS {
+            reg
+        } else if sh == EV_NDD || sh == EV_NDM {
+            rm
+        } else {
+            0
+        };
+        let mm = op >> 8 & 0xFF;
+        let map = if mm == 0x0F {
+            1u32
+        } else if mm == 0x38 {
+            2u32
+        } else {
+            3u32
+        };
+        if mem {
+            self.vex_rm(pfx, map, op & 0xFF, w, false, reg, v, m);
+        } else {
+            self.vex_rr(pfx, map, op & 0xFF, w, false, reg, v, rm);
+        }
+    }
+
     fn sse_evex(self: &mut Self, pfx: u32, op: u32, w: bool, reg: u8, rm: u8, m: Mem, mem: bool) {
         let f = evex_form(pfx, op, reg, w, mem);
         assert(f != EV_NONE, "x64: an SSE operation without an EVEX form on xmm16..xmm31");
@@ -1454,6 +1498,46 @@ const fn ev_n(f: u32, vl: u32, w: bool) i32 {
 // ModRM.reg `dg` (an opcode digit), REX.W or VEX.W `w`, on a memory operand when `mem` (`EV_*`). EV_NONE for
 // an operation without one of the same result: comparisons into vectors (EVEX's write mask registers),
 // blends on vector masks, mask extractions, `ptest`, horizontal sums, `vperm2i128`.
+// Whether `op` of prefix `pfx` is an SSE operation on xmm registers with a VEX.128 form of the same
+// operands (`sse_vex`): one `evex_form` knows, not one of the general-register operations of the 0F maps
+// that share their prefixes and opcodes (`popcnt`, `tzcnt`, `lzcnt`, `bsf`, `bsr`, `crc32`, `movbe`, `adcx`,
+// `adox`).
+const fn sse_op(pfx: u32, op: u32) bool {
+    let map = op >> 8;
+    if map != 0x0F && map != 0x0F38 && map != 0x0F3A {
+        return false;
+    }
+    let o = op & 0xFF;
+    if map == 0x0F && (o == 0xB8 || o == 0xBC || o == 0xBD) || map == 0x0F38 && (o == 0xF0 || o == 0xF1 || o == 0xF6) {
+        return false;
+    }
+    return vex_only(pfx, op) != EV_NONE || evex_form(pfx, op, 0, false, false) != EV_NONE || evex_form(
+        pfx,
+        op,
+        0,
+        false,
+        true,
+    ) != EV_NONE;
+}
+
+// The register roles (`EV_NDS`, `EV_MOV`) of an SSE operation with a VEX form of the same operands and no
+// such EVEX form (AVX-512's compares write mask registers): the integer compares, `cmpps`, `cmppd`,
+// `cmpss` and `cmpsd`, the sign masks and `ptest`; EV_NONE for another.
+const fn vex_only(pfx: u32, op: u32) u32 {
+    let o = op & 0xFF;
+    let map = op >> 8;
+    if pfx == 0x66 && (map == 0x0F && (o >= 0x64 && o <= 0x66 || o >= 0x74 && o <= 0x76) || map == 0x0F38 && (o == 0x29 || o == 0x37)) {
+        return EV_NDS;
+    }
+    if map == 0x0F && o == 0xC2 {
+        return EV_NDS;
+    }
+    if map == 0x0F && (o == 0x50 && (pfx == 0 || pfx == 0x66) || o == 0xD7 && pfx == 0x66) || map == 0x0F38 && o == 0x17 && pfx == 0x66 {
+        return EV_MOV;
+    }
+    return EV_NONE;
+}
+
 const fn evex_form(pfx: u32, op: u32, dg: u8, w: bool, mem: bool) u32 {
     let o = op & 0xFF;
     let map = op >> 8;

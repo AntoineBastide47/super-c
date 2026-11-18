@@ -290,7 +290,7 @@ jobs:
         run: |
           set -eu
           chmod +x ./super-c
-          grep -m1 -o -w -E 'atomics|lrcpc' /proc/cpuinfo | sort -u | tr '\n' ' '; nproc; lscpu | grep -i -E 'model name|vendor' || true
+          grep -m1 -o -w -E 'atomics|lrcpc|sve|sve2|sme' /proc/cpuinfo | sort -u | tr '\n' ' '; nproc; lscpu | grep -i -E 'model name|vendor' || true
           ./super-c bench --no-run --filter=mutex_ --out-dir=b0 > /dev/null
           ./super-c bench --no-run --filter=mutex_ --target-feature=+lse,+rcpc --out-dir=b1 > /dev/null
           for r in 1 2; do
