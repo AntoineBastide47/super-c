@@ -5,7 +5,8 @@
 // runtime as mingw-w64's start code does, runs the `.CRT$XC*` initializers and calls `main`; a DLL's
 // entry runs the initializers on attach and its `atexit` handlers on detach, from a table of its own,
 // and its export directory names every global its objects define. Thread-locals use the image's TLS
-// directory. The image carries base relocations (it loads at any address), the exception
+// directory, which `_tls_used` names, its callbacks the `.CRT$XL*` pointers (as mingw-w64's `tlssup`
+// lists them: winpthreads' thread-exit callback). The image carries base relocations (it loads at any address), the exception
 // table, and the debug sections unless stripped.
 //
 // mingw-w64's import libraries also carry a few C functions the C runtime DLLs do not export: the ones
@@ -210,6 +211,10 @@ struct L {
     pub(package) tls_index_at: u64, // in `.data`
     pub(package) xc_lo: u64, // the `.CRT$XC*` initializers' range in `.rdata`
     pub(package) xc_hi: u64,
+    pub(package) xl_lo: u64, // the `.CRT$XL*` TLS callbacks' range in `.rdata`, a null pointer after it
+    pub(package) xl_hi: u64,
+    pub(package) tls_used: bool, // an object names `_tls_used`
+    pub(package) tlsdir: bool, // the image has a TLS directory
     pub(package) entry_pdata_at: u64, // in `.pdata`
     pub(package) shared: bool, // a DLL
     pub(package) base: u64, // the preferred image address
@@ -251,6 +256,10 @@ pub(package) fn link(o: &Opts, err: &mut String) bool {
         tls_index_at: 0,
         xc_lo: 0,
         xc_hi: 0,
+        xl_lo: 0,
+        xl_hi: 0,
+        tls_used: false,
+        tlsdir: false,
         entry_pdata_at: 0,
         shared: o.shared,
         base: ast::pick(o.shared, DLL_BASE, EXE_BASE),
@@ -1011,8 +1020,9 @@ fn finish_symbols(l: &mut L, main: u32) bool {
         let gy = l.gs[g];
         if gy.kind == G_UNDEF && gy.alias == NONE {
             let s = l.names.spell(gy.name);
-            if s == "_tls_index" || s == "__ImageBase" || s == "__sc_dll_atexit" && l.shared {
+            if s == "_tls_index" || s == "_tls_used" || s == "__ImageBase" || s == "__sc_dll_atexit" && l.shared {
                 l.gs.index_mut(g).kind = G_SYNTH;
+                l.tls_used = l.tls_used || s == "_tls_used";
             }
         }
     }
@@ -1152,6 +1162,7 @@ fn layout(l: &mut L, o: &Opts) {
     }
     keyed.sort();
     let mut xc_first = true;
+    let mut xl_first = true;
     // The last input's output section: the next input of the same output name joins it.
     let mut prev_o = NONE;
     let mut prev = "";
@@ -1160,6 +1171,10 @@ fn layout(l: &mut L, o: &Opts) {
         let sc = l.secs[s as usize];
         let n = keyed[i].0.as_str();
         let on = out_name(n, sc.flags);
+        // The callbacks' null terminator after the last of them.
+        if !xl_first && l.xl_hi == l.osecs[l.o_rdata as usize].size && !n.starts_with(".CRT$XL") {
+            let _ = grow(l, l.o_rdata, 8, 8);
+        }
         if prev_o == NONE || on != prev {
             let mut fl = out_flags(on);
             if on != ".text" && on != ".rdata" && on != ".data" && on != ".bss" && on != ".tls" && on != ".pdata" && !on.starts_with(
@@ -1182,6 +1197,16 @@ fn layout(l: &mut L, o: &Opts) {
             }
             l.xc_hi = at + sc.size;
         }
+        if n.starts_with(".CRT$XL") {
+            if xl_first {
+                l.xl_lo = at;
+                xl_first = false;
+            }
+            l.xl_hi = at + sc.size;
+        }
+    }
+    if !xl_first && l.xl_hi == l.osecs[l.o_rdata as usize].size {
+        let _ = grow(l, l.o_rdata, 8, 8);
     }
     // Tentative definitions in `.bss`.
     for g in 0..l.gs.len() {
@@ -1208,7 +1233,8 @@ fn layout(l: &mut L, o: &Opts) {
     l.thunks_at = grow(l, l.o_text, 8 * nimp, 8);
     l.xdata_at = grow(l, l.o_rdata, 12, 4);
     l.entry_pdata_at = grow(l, l.o_pdata, 12, 4);
-    if l.osecs[l.o_tls as usize].size != 0 {
+    l.tlsdir = l.osecs[l.o_tls as usize].size != 0 || l.xl_hi != l.xl_lo || l.tls_used;
+    if l.tlsdir {
         l.tlsdir_at = grow(l, l.o_rdata, 48, 8);
     }
     l.tls_index_at = grow(l, l.o_data, 4, 4);
@@ -1395,6 +1421,9 @@ fn g_rva(l: &L, g0: u32) u64 {
     }
     if l.names.spell(gy.name) == "_tls_index" {
         return l.osecs[l.o_data as usize].rva + l.tls_index_at;
+    }
+    if l.names.spell(gy.name) == "_tls_used" {
+        return l.osecs[l.o_rdata as usize].rva + l.tlsdir_at;
     }
     if l.names.spell(gy.name) == "__sc_dll_atexit" {
         return l.osecs[l.o_text as usize].rva + l.entry_at + DLL_ATEXIT;
@@ -1961,18 +1990,24 @@ fn write_tables(l: &mut L, img: &mut Vector<u8>) {
         img[t + 6] = 0xCC;
         img[t + 7] = 0xCC;
     }
-    // The TLS directory: the template's start and end, the index's address, the empty callback list
-    // (the directory's last 8 bytes), no zero fill, the template's alignment.
-    if l.o_tls != NONE {
-        let tl = l.osecs[l.o_tls as usize];
+    // The TLS directory: the template's start and end (empty without one), the index's address, the
+    // callbacks (the `.CRT$XL*` pointers and the null after them, else the empty list in the directory's
+    // last 8 bytes), no zero fill, the template's alignment.
+    if l.tlsdir {
         let d = (rd.off + l.tlsdir_at) as usize;
         let dr = rd.rva + l.tlsdir_at;
-        lu::p64(img, d, l.base + tl.rva);
-        lu::p64(img, d + 8, l.base + tl.rva + tl.size);
+        let (t0, t1, ta) = if l.o_tls != NONE {
+            let tl = l.osecs[l.o_tls as usize];
+            (tl.rva, tl.rva + tl.size, tl.align)
+        } else {
+            (dr, dr, 1u64)
+        };
+        lu::p64(img, d, l.base + t0);
+        lu::p64(img, d + 8, l.base + t1);
         lu::p64(img, d + 16, l.base + l.osecs[l.o_data as usize].rva + l.tls_index_at);
-        lu::p64(img, d + 24, l.base + dr + 40);
+        lu::p64(img, d + 24, l.base + ast::pick(l.xl_hi != l.xl_lo, rd.rva + l.xl_lo, dr + 40));
         lu::p32(img, d + 32, 0);
-        lu::p32(img, d + 36, tl.align.trailing_zeros() as u32 + 1 << 20);
+        lu::p32(img, d + 36, ta.trailing_zeros() as u32 + 1 << 20);
         for q in 0..4u64 {
             l.relocs.push((dr + 8 * q) as u32);
         }
@@ -2222,7 +2257,7 @@ fn finish(l: &mut L, o: &Opts, img: &mut Vector<u8>) {
             (pd.rva, pd.size)
         } else if d == 5 && nrel_sec != 0 {
             (rel_rva, rb.len() as u64)
-        } else if d == 9 && l.o_tls != NONE {
+        } else if d == 9 && l.tlsdir {
             (l.osecs[l.o_rdata as usize].rva + l.tlsdir_at, 40u64)
         } else if d == 12 {
             (iat, 8 * (l.imports.len() as u64 + nlib))

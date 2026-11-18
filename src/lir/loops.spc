@@ -454,6 +454,8 @@ pub(package) struct LoopOpt {
     pub(package) vsumw: u16,
     /// The widening products the target computes in registers (`Package.vec_mulw`).
     pub(package) vmulw: u16,
+    /// The dot products the target computes in registers (`Package.vec_dot`).
+    pub(package) vdot: u16,
     // Per instruction of the body, the idiom it is the root of (ID_*, 0: none) and its narrow operands
     // (`vida`, `vidb`; VNONE for the constant `vidk`).
     vid: Vector<u8>,
@@ -467,6 +469,11 @@ pub(package) struct LoopOpt {
     vwa: Vector<u32>,
     vrn: Vector<Value>,
     vwn: Vector<u32>,
+    // Per reduction, for a dot product (a widening sum of a widening product, `O_VDOT`), its product's
+    // instruction index in the body plus 1 (`vid`, `vida`, `vidb`, `vidk`); 0: none. `vdot_at`: the last
+    // `widening` call's.
+    vdr: Vector<u32>,
+    vdot_at: u32,
     vmodk: u32, // the greatest common divisor of the modulo addresses' `K` and the counter's start (`VK_MIDX`; 0: none)
     // Per extreme with its first index (`arg_pair`): the value's and the index's parameters, the strict
     // relation `x REL value` that takes `x`; per pair at the exit, the two results (`arg_exit`).
@@ -774,6 +781,7 @@ extend LoopOpt {
             vperm3: 0,
             vsumw: 0,
             vmulw: 0,
+            vdot: 0,
             vid: Vector::<u8>::new(),
             vida: Vector::<Value>::new(),
             vidb: Vector::<Value>::new(),
@@ -783,6 +791,8 @@ extend LoopOpt {
             vwa: Vector::<u32>::new(),
             vrn: Vector::<Value>::new(),
             vwn: Vector::<u32>::new(),
+            vdr: Vector::<u32>::new(),
+            vdot_at: 0,
             vmodk: 0,
             vam: Vector::<Value>::new(),
             vak: Vector::<Value>::new(),
@@ -2937,6 +2947,7 @@ extend LoopOpt {
         self.vwa.truncate(0);
         self.vrn.truncate(0);
         self.vwn.truncate(0);
+        self.vdr.truncate(0);
         self.vam.truncate(0);
         self.vak.truncate(0);
         self.vapr.truncate(0);
@@ -3028,6 +3039,7 @@ extend LoopOpt {
                 self.vwa.push(0);
                 self.vrn.push(VNONE);
                 self.vwn.push(0);
+                self.vdr.push(0);
                 continue;
             }
             // std's `f32::maximum` or `minimum` (`ieee_red`), a minimumNumber or maximumNumber of its own
@@ -3076,6 +3088,7 @@ extend LoopOpt {
                     self.vwa.push(0);
                     self.vrn.push(VNONE);
                     self.vwn.push(0);
+                    self.vdr.push(0);
                     continue;
                 }
                 if rel == NONE16 && rz == NONE16 && w == VNONE {
@@ -3094,6 +3107,7 @@ extend LoopOpt {
                 self.vwa.push(0);
                 self.vrn.push(VNONE);
                 self.vwn.push(0);
+                self.vdr.push(0);
                 continue;
             }
             let fr = if fi != 0 {
@@ -3114,6 +3128,7 @@ extend LoopOpt {
                 self.vwa.push(0);
                 self.vrn.push(VNONE);
                 self.vwn.push(0);
+                self.vdr.push(0);
                 continue;
             }
             // An integer product of lanes below 8 bytes (a vector multiply), an integer difference from the
@@ -3159,6 +3174,7 @@ extend LoopOpt {
             self.vwa.push(wa);
             self.vrn.push(wn);
             self.vwn.push(wb);
+            self.vdr.push(ast::pick(wa != 0, self.vdot_at, 0u32));
         }
         // The rest: addresses, loads, arithmetic, stores.
         self.vacc.truncate(0);
@@ -3213,6 +3229,16 @@ extend LoopOpt {
                 } else {
                     t.a
                 };
+                // A dot product's second narrow operand: a lane value, invariant, or a constant (`vidk`).
+                let dx = self.vdr[self.red_of(i) as usize];
+                if dx != 0 {
+                    let o2 = self.vidb[dx as usize - 1];
+                    if o2 != VNONE && self.kind(b, u, o2) != VK_LANE && self.kind(b, u, o2) != VK_INV && self.defined_in(
+                        o2,
+                    ) {
+                        return self.no("a reduction takes no lane value", t.op);
+                    }
+                }
                 // A widening sum also takes a comparison's flag (its mask, negated: `O_VSUMW`).
                 let mk = wn != VNONE && self.kind(b, u, o) == VK_MASK;
                 if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV && !mk && !((one || cw != VNONE) && !self.defined_in(
@@ -4469,7 +4495,10 @@ extend LoopOpt {
             }
         }
         let n = type_bytes(nt, 8);
-        if op == 0 || !is_int(nt) || 2 * n > m || (self.vmulw >> ast::pick(op == O_SEXT, 8u32, 0u32) & n as u16) == 0 {
+        // A product the target computes only as part of a dot product is one when a sum takes it (`widening`,
+        // `idiom_class`).
+        let sh = ast::pick(op == O_SEXT, 8u32, 0u32);
+        if op == 0 || !is_int(nt) || 2 * n > m || ((self.vmulw | self.vdot) >> sh & n as u16) == 0 {
             return false;
         }
         // A constant operand second, its narrow bits: they extend to it.
@@ -4528,11 +4557,13 @@ extend LoopOpt {
         let nt = b.type_of(ops[0]);
         let id = self.vid[x as usize];
         if id == ID_MULW || id == ID_MULWS {
-            // The narrow lanes, their products' and the root's.
+            // The narrow lanes, their products' and the root's; a product the target computes only in a dot
+            // product, which a sum does not take, not at all.
             let rt = b.insts[(b.blocks[u as usize].start + x) as usize].ty;
             let pt = int_type(2 * type_bytes(nt, 8));
+            let mulw = (self.vmulw >> ast::pick(id == ID_MULWS, 8u32, 0u32) & type_bytes(nt, 8) as u16) != 0;
             return ast::pick(
-                lane && self.lane_size(nt, ptr) && self.lane_size(pt, ptr) && self.lane_size(rt, ptr),
+                mulw && lane && self.lane_size(nt, ptr) && self.lane_size(pt, ptr) && self.lane_size(rt, ptr),
                 VK_LANE,
                 0u8,
             );
@@ -4560,11 +4591,23 @@ extend LoopOpt {
     // registers: (the accumulators' lane bytes, the narrow value, its lane bytes); (0,
     // VNONE, 0) when not.
     fn widening(self: &mut Self, b: &Body, u: u32, at: Inst, pv: Value, ty: u8) (u32, Value, u32) {
+        self.vdot_at = 0;
         let o = ast::pick(at.a == pv, at.b, at.a);
         if !self.in_body(b, u, o) {
             return (0u32, VNONE, 0u32);
         }
         let x = (o - b.blocks[u as usize].start) as usize;
+        // A product of two extended narrow values only the sum reads, into 4-byte lanes: a dot product
+        // (`O_VDOT`) where the target sums the narrow lanes' products so.
+        if (self.vid[x] == ID_MULW || self.vid[x] == ID_MULWS) && self.reads(b, u, o) == 1 && type_bytes(ty, 8) == 4 {
+            let n = type_bytes(b.type_of(self.vida[x]), 8);
+            if n < 4 && (self.vdot >> ast::pick(self.vid[x] == ID_MULWS, 8u32, 0u32) & n as u16) != 0 {
+                self.vk[x] = VK_IDI;
+                self.vtried = true;
+                self.vdot_at = x as u32 + 1;
+                return (4u32, self.vida[x], n);
+            }
+        }
         let ot = b.insts[o as usize];
         // A comparison's flag as an integer: extended, or chosen as 1 or 0.
         let flag = ot.op == O_ZEXT || ot.op == O_SELECT && int_bits(b, ot.b) == Some(1u64) && int_bits(b, ot.c) == Some(
@@ -6617,6 +6660,30 @@ extend LoopOpt {
                     self.vmap[at] = self.vidiom(b, u, c, x, b.locs[i as usize]);
                 } else if k == VK_TLANE {
                     self.vmap[at] = self.vval(b, u, c, t.a);
+                } else if k == VK_RED && self.vdr[self.red_of(i) as usize] != 0 {
+                    // A dot product: the accumulator plus the narrow lanes' products, summed by runs.
+                    let r = self.red_of(i);
+                    let acc = VPARAM | vps + 1 + r * nv + c;
+                    let dx = self.vdr[r as usize] - 1;
+                    let nt = vec_type(b.type_of(self.vida[dx as usize]), self.vlanes);
+                    let xv = self.vval(b, u, c, self.vida[dx as usize]);
+                    let yv = if self.vidb[dx as usize] == VNONE {
+                        self.vsplat_const(b, nt, self.vidk[dx as usize], b.locs[i as usize])
+                    } else {
+                        self.vval(b, u, c, self.vidb[dx as usize])
+                    };
+                    self.vmap[at] = self.vi(
+                        b,
+                        Inst {
+                            op: O_VDOT,
+                            ty: self.acc_ty(b, r),
+                            aux: ast::pick(self.vid[dx as usize] == ID_MULWS, DOT_SIGNED, 0u16),
+                            a: acc,
+                            b: xv,
+                            c: yv,
+                        },
+                        b.locs[i as usize],
+                    );
                 } else if k == VK_RED && self.vwa[self.red_of(i) as usize] != 0 {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;

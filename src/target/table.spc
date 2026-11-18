@@ -126,6 +126,11 @@ pub(package) struct Isa {
     /// wasm32 multiply any lanes up to 4 bytes (SMULL, UMULL; `extmul`); x86-64 4-byte ones unsigned
     /// (PMULUDQ), signed with SSE4.1 (PMULDQ, `lir::ir::Package::vec_mulw` from the build's features).
     pub(package) vector_mulw: u16,
+    /// The dot products of lanes the native backend computes in registers (`O_VDOT`), a bit per operand
+    /// lane size in bytes, unsigned in bits 0 to 7 and signed in 8 to 15: `lir::ir::Package::vec_dot`.
+    /// x86-64 and wasm32 sum pairs of signed 2-byte products into 4-byte lanes (PMADDWD,
+    /// `i32x4.dot_i16x8_s`); arm64 sums fours of 1-byte ones with FEAT_DotProd (SDOT, UDOT; `emit::cemit`).
+    pub(package) vector_dot: u16,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -306,6 +311,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_perm3: 0,
         vector_sumw: 0x8,
         vector_mulw: 0x4,
+        vector_dot: 0x200,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 0,
@@ -354,6 +360,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_perm3: 9,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
+        vector_dot: 0,
         access_pairs: true,
         sum_trees: true,
         vector_reduce: 0,
@@ -402,6 +409,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vector_perm3: 2,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
+        vector_dot: 0x200,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 4,
@@ -757,6 +765,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vector_perm3: 0,
     vector_sumw: 0,
     vector_mulw: 0,
+    vector_dot: 0,
     access_pairs: false,
     sum_trees: false,
     vector_reduce: 0,

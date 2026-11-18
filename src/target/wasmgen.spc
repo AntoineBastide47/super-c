@@ -5400,6 +5400,28 @@ extend Gen {
             }
             return true;
         }
+        if op == O_VDOT {
+            // Lane k of `a` plus the products of lanes `k * g` to `k * g + g - 1` of `b` and `c`.
+            let lt = lane_type(t.ty);
+            let nl = lane_type(self.vt(t.b));
+            let sg = (t.aux & DOT_SIGNED) != 0;
+            let n = lanes(t.ty);
+            let g = lanes(self.vt(t.b)) / n;
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n {
+                self.ld_lane(t.a, k, lt, false, false);
+                for j in 0..g {
+                    self.ld_lane(t.b, k * g + j, nl, sg, false);
+                    self.ld_lane(t.c, k * g + j, nl, sg, false);
+                    self.c.op(w::I64_MUL);
+                    self.c.op(w::I64_ADD);
+                }
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, false);
+            }
+            return true;
+        }
         if op == O_VSUMW {
             // Lane k of `a` plus lanes `k * g` to `k * g + g - 1` of `b` zero-extended.
             let lt = lane_type(t.ty);
@@ -7384,6 +7406,8 @@ const V_EQ: [u32; 4] = [0x23, 0x2D, 0x37, 0xD6];
 // (+1: the high lanes; +2: unsigned); the low lanes extended to twice their size, signed (+1: the high
 // lanes; +2: unsigned).
 const V_EXTMUL: [u32; 3] = [0x9C, 0xBC, 0xDC];
+// `i32x4.dot_i16x8_s`.
+const V_DOT_I16: u32 = 0xBA;
 const V_EXTEND: [u32; 3] = [0x87, 0xA7, 0xC7];
 // Per integer condition (C_EQ .. C_UGE), its comparison's offset from the lanes' `eq`: 1, 2 and 4-byte lanes
 // (eq, ne, lt_s, lt_u, gt_s, gt_u, le_s, le_u, ge_s, ge_u), 8-byte lanes (eq, ne, lt_s, gt_s, le_s, ge_s).
@@ -7613,6 +7637,13 @@ extend Gen {
         if op == O_VMULW {
             return vfit(self.vt(t.a));
         }
+        if op == O_VDOT {
+            // `i32x4.dot_i16x8_s`.
+            return (t.aux & DOT_SIGNED) != 0 && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
+                lane_type(self.vt(t.b)),
+                8,
+            ) == 2;
+        }
         if op == O_SHL || op == O_LSHR || op == O_ASHR {
             return self.uniform(t.b);
         }
@@ -7714,6 +7745,13 @@ extend Gen {
         } else if op == O_VSUMW {
             self.vget(t.a);
             self.vsum_pairs(t.b, lane_type(self.vt(t.b)), lt);
+            self.sop(V_ADD[k]);
+        } else if op == O_VDOT {
+            // `i32x4.dot_i16x8_s` of the operands, plus the accumulator.
+            self.vget(t.a);
+            self.vget(t.b);
+            self.vget(t.c);
+            self.sop(V_DOT_I16);
             self.sop(V_ADD[k]);
         } else if op == O_VMULW {
             // `extmul` of the operands' low or high lanes, unsigned 2 past the signed form.

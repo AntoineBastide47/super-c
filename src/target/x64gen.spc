@@ -1967,7 +1967,8 @@ extend Gen {
                 let past = self.cr.lv.end[x] > self.cr.lv.pos[d as usize] || x >= ni && x < nv && d != 0;
                 let cross = x < nv && self.crosses_call(x as u32, is_v(t));
                 if is_v(t) {
-                    if x < nv && past && (self.win || !cross) {
+                    // Microsoft x64 keeps only an xmm register's low 16 bytes across a call.
+                    if x < nv && past && (self.win && type_bytes(t, 8) <= 16 || !cross) {
                         w = vw;
                     }
                 } else if x >= nv && self.cr.lv.end[x] > self.cr.lv.pos[d as usize] || (past || cross) && x < nv && late[x] {
@@ -2383,13 +2384,15 @@ extend Gen {
                 lane_type(t.ty),
             ) != NONE || t.op == O_BITCAST && self.in_reg(t.ty) && self.in_reg(self.cr.vt(t.a)) || self.reduce_reg(t) || self.ext_reg(
                 t,
-            ) || t.op == O_VOP && (self.cr.lv.pfold[i] || self.idiom_reg(t) || self.float_reg(t)) || self.sumw_reg(t) || self.mulw_reg(
+            ) || t.op == O_VOP && (self.cr.lv.pfold[i] || self.idiom_reg(t) || self.float_reg(t)) || self.sumw_reg(t) || self.dot_reg(
                 t,
-            ) || t.op == O_MUL && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(t.ty, 8) == 16 && in_vreg(
+            ) || self.mulw_reg(t) || t.op == O_MUL && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
                 t.ty,
-            ) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && self.in_reg(
-                t.ty,
-            );
+                8,
+            ) == 16 && in_vreg(t.ty) || (t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && type_bytes(
+                lane_type(t.ty),
+                8,
+            ) == 4 && self.in_reg(t.ty);
             // An intrinsic's template reads its arguments and writes its result in xmm registers when the call
             // passes them whole there (`call` renames them in place).
             let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
@@ -2513,7 +2516,8 @@ extend Gen {
     }
 
     // Before instruction `i` of a rare block that calls and returns: each scratch home whose value lives
-    // past it into a slot of its own (`csave`). Not a value its range alone keeps (`Live::dead_past`).
+    // past it into a slot of its own (`csave`), and each callee-saved xmm home of a value wider than 16 bytes
+    // (Microsoft x64). Not a value its range alone keeps (`Live::dead_past`).
     // Before another call that writes the caller-saved homes (`cpre`): the homes the plan holds across
     // calls (`Live::seg_past`) whose values live past it. The count saved.
     fn save_scratch(self: &mut Self, i: u32) usize {
@@ -2522,6 +2526,16 @@ extend Gen {
             return 0;
         }
         let mut m = self.cr.held & self.cr.fixed_busy & ~self.xfix & ~self.vsave();
+        // Microsoft x64 keeps only the low 16 bytes of a callee-saved xmm register: a wider value in one is
+        // saved too. Each step clears one register's bit: at most 64 steps.
+        let mut cs = self.cr.held & self.cr.fixed_busy & self.vsave();
+        while cs != 0 {
+            let r = cs.trailing_zeros() as u8;
+            cs &= cs - 1;
+            if type_bytes(self.cr.xty(self.cr.owner[r as usize]), self.cr.ptr) > 16 {
+                m |= bit(r);
+            }
+        }
         // Each step clears one register's bit: at most 48 steps.
         while m != 0 {
             let r = m.trailing_zeros() as u8;
@@ -3105,7 +3119,7 @@ extend Gen {
         let any = t.op == O_ICMP && (t.a & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[t.a as usize] && self.cr.b().insts[t.a as usize].op == O_VOP;
         let reg_form = any || t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VSUMW || t.op == O_VMULW) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VSUMW || t.op == O_VDOT || t.op == O_VMULW) || t.op == O_VEXTRACT || t.op == O_VINSERT || self.conv_reg(
             t,
         ) || t.op == O_BITCAST && self.in_reg(self.cr.vt(t.a)) && (self.in_reg(t.ty) || in_vreg(self.cr.vt(t.a)) && is_int(
             t.ty,
@@ -5182,6 +5196,10 @@ extend Gen {
         }
         if op == O_VSUMW {
             self.vsumw(i, t);
+            return true;
+        }
+        if op == O_VDOT {
+            self.vdot(i, t);
             return true;
         }
         if op == O_VMULW {
@@ -15020,6 +15038,56 @@ extend Gen {
         return type_bytes(lane_type(t.ty), 8) == 8 && type_bytes(lane_type(self.cr.vt(t.b)), 8) == 1 && (nb == 16 && in_vreg(
             t.ty,
         ) || nb > 16 && self.in_reg(t.ty));
+    }
+
+    // Whether `O_VDOT` `t` sums pairs of signed 2-byte products into 4-byte lanes of a vector in registers (16
+    // bytes; 32 with AVX2), which `vdot` computes there (PMADDWD).
+    const fn dot_reg(self: &Self, t: Inst) bool {
+        if t.op != O_VDOT || (t.aux & DOT_SIGNED) == 0 {
+            return false;
+        }
+        let nb = type_bytes(t.ty, 8);
+        return type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(lane_type(self.cr.vt(t.b)), 8) == 2 && (nb == 16 && in_vreg(
+            t.ty,
+        ) || nb == 32 && self.in_reg(t.ty));
+    }
+
+    // Dot product `t` (`O_VDOT`) into vector `i`: in registers (`dot_reg`) PMADDWD of the operands, then PADDD
+    // over the accumulator; else each lane's products, extended by their signedness.
+    fn vdot(self: &mut Self, i: u32, t: Inst) {
+        let nb = type_bytes(t.ty, 8);
+        if self.dot_reg(t) {
+            let s = self.tmp(true) - V0;
+            let rb = self.vec_use(t.b, self.vs1) - V0;
+            let rc = self.vec_use(t.c, self.vs0) - V0;
+            self.op3(1, 0xF5, false, nb, s, rb, rc);
+            let ra = self.vec_use(t.a, self.vs0);
+            let rd = self.def_over(i, t.a, ra) - V0;
+            self.op3(1, 0xFE, false, nb, rd, ra - V0, s);
+            return;
+        }
+        let nt = self.cr.vt(t.b);
+        let sg = (t.aux & DOT_SIGNED) != 0;
+        self.sync(t.a);
+        self.sync(t.b);
+        self.sync(t.c);
+        let d = self.cr.mdef(i);
+        let lt = lane_type(t.ty);
+        let n = lanes(t.ty);
+        let g = lanes(nt) / n;
+        let xr = self.tmp(false);
+        let yr = self.tmp(false);
+        let zr = self.tmp(false);
+        for k in 0..n {
+            self.ld_lane(xr, t.a, k, lt, false, false);
+            for j in 0..g {
+                self.ld_lane(yr, t.b, k * g + j, lane_type(nt), sg, false);
+                self.ld_lane(zr, t.c, k * g + j, lane_type(nt), sg, false);
+                self.c.imul_rr(8, yr, zr);
+                self.c.alu_rr(x::ADD, 8, xr, yr);
+            }
+            self.st_lane(xr, d, k, lt, false);
+        }
     }
 
     // Whether byte lookup `t` (`looks_up_bytes`) runs in registers (`Package.vtbl`, SSSE3): of 16 bytes;

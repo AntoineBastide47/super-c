@@ -322,7 +322,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 689] = [
+pub(package) const ROWS: [Row; 691] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -982,6 +982,8 @@ pub(package) const ROWS: [Row; 689] = [
     r("xar", 0xCE800000, Q::NONE, 0, k4(K::V2DD, K::V2DN, K::V2DM, K::IMM6X)),
     r("sdot", 0x4E809400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("udot", 0x6E809400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
+    r("sdot", 0x0E809400, Q::NONE, 0, k3(K::V2SD, K::V8BN, K::V8BM)),
+    r("udot", 0x2E809400, Q::NONE, 0, k3(K::V2SD, K::V8BN, K::V8BM)),
     r("smmla", 0x4E80A400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("ummla", 0x6E80A400, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),
     r("usmmla", 0x4E80AC00, Q::NONE, 0, k3(K::V4SD, K::V16BN, K::V16BM)),

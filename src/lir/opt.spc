@@ -1679,6 +1679,7 @@ extend Opt {
         self.unr.vperm3 = cpu.vec_perm3;
         self.unr.vsumw = pk.vec_sumw;
         self.unr.vmulw = cpu.vec_mulw;
+        self.unr.vdot = cpu.vec_dot;
         self.unr.vfma = pk.vfloat && cpu.fma;
         self.unr.vfloat = pk.vfloat;
         self.unr.vrnda = pk.vround_away;
@@ -21917,7 +21918,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_SECRET || op == O_PUBLIC;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_VDOT || op == O_SECRET || op == O_PUBLIC;
         }
     }
     return t;

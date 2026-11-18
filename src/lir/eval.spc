@@ -536,6 +536,30 @@ extend Eval {
             }
             return true;
         }
+        if op == O_VDOT {
+            let lb = type_bits(lane_type(t.ty), ptr);
+            let nb = type_bits(lane_type(b.type_of(t.b)), ptr);
+            let n = lanes(t.ty);
+            let g = lanes(b.type_of(t.b)) / n;
+            let wa = self.word(&f, b, t.a);
+            let wb = self.word(&f, b, t.b);
+            let wc = self.word(&f, b, t.c);
+            for k in 0..n {
+                let mut x = get_lane(&self.vals, wa, k, lb);
+                for j in 0..g {
+                    let y = get_lane(&self.vals, wb, k * g + j, nb);
+                    let z = get_lane(&self.vals, wc, k * g + j, nb);
+                    let p = if (t.aux & DOT_SIGNED) != 0 {
+                        sign_extend(y, nb).wrapping_mul(sign_extend(z, nb)) as u64
+                    } else {
+                        y.wrapping_mul(z)
+                    };
+                    x = x.wrapping_add(p);
+                }
+                set_lane(&mut self.vals, dst, k, lb, x);
+            }
+            return true;
+        }
         if op == O_VMULW {
             let lb = type_bits(lane_type(t.ty), ptr);
             let nb = lb / 2;

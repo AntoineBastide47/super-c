@@ -6924,12 +6924,12 @@ pub(package) const fn over_op(t: Inst) bool {
     return step_op(t) || !is_vec(t.ty) && (t.op == O_ADDO || t.op == O_SUBO);
 }
 
-/// `over_op`, a pointer plus a constant (a pointer's step), a widening sum over its accumulator (`O_VSUMW`,
-/// which reads its other operand into a temporary first), or a conversion between integers or pointers of
+/// `over_op`, a pointer plus a constant (a pointer's step), a widening sum or dot product over its accumulator
+/// (`O_VSUMW`, `O_VDOT`, which read their other operands into temporaries first), or a conversion between integers or pointers of
 /// at most 64 bits (an extension, a truncation, a cast), which the generators make from their operand's
 /// register in one instruction or none.
 pub(package) const fn over_inst(b: &Body, t: Inst) bool {
-    if over_op(t) || t.op == O_PTRADD && t.b == VNONE || t.op == O_VSUMW {
+    if over_op(t) || t.op == O_PTRADD && t.b == VNONE || t.op == O_VSUMW || t.op == O_VDOT {
         return true;
     }
     if t.op != O_ZEXT && t.op != O_SEXT && t.op != O_TRUNC && t.op != O_PTRTOINT && t.op != O_INTTOPTR || t.a == VNONE {
@@ -6942,12 +6942,12 @@ pub(package) const fn over_inst(b: &Body, t: Inst) bool {
 /// Whether a generator that reads every operand before it writes (`Live::three`) emits instruction `t` so:
 /// an integer or float operation, a comparison, a conversion, a pointer sum, a load, a select,
 /// a lanewise vector operation, comparison or select, a splat, a bit count or reversal, a high product, a
-/// fused product and sum, a square root, a widening sum.
+/// fused product and sum, a square root, a widening sum, a dot product.
 pub(package) const fn three_op(t: Inst) bool {
     let o = t.op;
     let scalar = o >= O_ADD && o <= O_FNEG || o >= O_SEXT && o <= O_INTTOPTR || o == O_PTRADD || o == O_LOAD || o == O_SELECT;
     let bits = o >= O_CLZ && o <= O_POPCNT || o == O_BSWAP || o == O_BITREV || o == O_MULHU || o == O_MULHS;
-    return scalar || bits || o == O_VOP || o == O_FMA || o == O_FSQRT || o == O_SPLAT || o == O_VCMP || o == O_VSEL || o == O_VSUMW;
+    return scalar || bits || o == O_VOP || o == O_FMA || o == O_FSQRT || o == O_SPLAT || o == O_VCMP || o == O_VSEL || o == O_VSUMW || o == O_VDOT;
 }
 
 /// For select `t` whose condition is a comparison or a flag (0 or 1, which a sum may add), the side that is

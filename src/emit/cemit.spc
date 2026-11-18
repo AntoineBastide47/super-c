@@ -153,6 +153,8 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
             isa.vector_perm3
         },
         vec_mulw: isa.vector_mulw | pick(feature(pk, fs, "sse4.1"), 0x400u16, 0u16),
+        // FEAT_DotProd: SDOT and UDOT of bytes.
+        vec_dot: isa.vector_dot | pick(feature(pk, fs, "dotprod"), 0x101u16, 0u16),
         vround: isa.vector_round || feature(pk, fs, "sse4.1"),
         popcnt: isa.popcount || feature(pk, fs, "popcnt"),
         sse41: feature(pk, fs, "sse4.1"),

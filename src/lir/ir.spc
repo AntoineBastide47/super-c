@@ -332,7 +332,13 @@ pub(package) const O_SECRET: u8 = 90;
 /// Value `a` unchanged, a secret `declassify` made public: the constant-time check does not count it as
 /// secret. No rewrite looks through it; the check replaces it by `a`.
 pub(package) const O_PUBLIC: u8 = 91;
-pub(package) const OP_COUNT: u8 = 92;
+/// Integer vector `a` plus, per lane, the sum of the products of `g` adjacent lanes of integer vectors `b`
+/// and `c` (one type, of `a`'s bytes, narrower lanes), each lane extended first (`DOT_SIGNED`:
+/// sign-extended, else zero-extended): lane k adds the products of lanes `k * g` to `k * g + g - 1`, `g`
+/// the ratio of the lane counts, modulo the lane's width (a loop's dot product, `lir::loops`; arm64's
+/// SDOT and UDOT, x86-64's PMADDWD, wasm's `i32x4.dot_i16x8_s`).
+pub(package) const O_VDOT: u8 = 92;
+pub(package) const OP_COUNT: u8 = 93;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -340,7 +346,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 92] = [
+pub(package) const OPS: [OpInfo; 93] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -433,6 +439,7 @@ pub(package) const OPS: [OpInfo; 92] = [
     OpInfo { name: "vmulw", form: F_BIN },
     OpInfo { name: "secret", form: F_UN },
     OpInfo { name: "public", form: F_UN },
+    OpInfo { name: "vdot", form: F_TRI },
 ];
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
@@ -997,6 +1004,8 @@ pub(package) const CNT_NONZERO: u16 = 1;
 pub(package) const MULW_SIGNED: u16 = 1;
 /// `O_VMULW`: the products of the operands' high half of lanes (the text's `.hi`).
 pub(package) const MULW_HIGH: u16 = 2;
+/// `O_VDOT`: the lanes are signed (the text's `.s`).
+pub(package) const DOT_SIGNED: u16 = 1;
 
 /// Atomic memory orders (`aux` bits 0 to 2 of the atomic opcodes; `O_ACAS`: the failure order in bits
 /// 3 to 5, then ACAS_WEAK; `O_ARMW`: the operation in bits 4 to 7).
@@ -2109,6 +2118,10 @@ pub(package) struct Cpu {
     /// bit per operand lane size in bytes (1, 2, 4), unsigned in bits 0 to 7 and signed in bits 8 to 15: the
     /// loop vectorizer multiplies two extended values' narrow lanes.
     pub(package) vec_mulw: u16,
+    /// The dot products (`O_VDOT`) the native backend computes in registers (`target::table::Isa`, arm64's
+    /// with FEAT_DotProd), a bit per operand lane size in bytes, unsigned in bits 0 to 7 and signed in bits
+    /// 8 to 15: the loop vectorizer sums the products of two extended values' narrow lanes so.
+    pub(package) vec_dot: u16,
     /// Whether the native backend rounds float vectors to an integer in registers (`target::table::Isa`;
     /// x86-64 with SSE4.1), with `Package.vfloat`: the loop vectorizer then widens the calls of C's `floor`,
     /// `ceil` and `trunc`.
@@ -2165,6 +2178,7 @@ extend Cpu {
             vec_bits: 0,
             vec_perm3: 0,
             vec_mulw: 0,
+            vec_dot: 0,
             vround: false,
             popcnt: false,
             sse41: false,
@@ -2188,14 +2202,15 @@ extend Cpu {
     }
 
     /// A body's own facts from the words of the text form: the register bytes, `vec_bits`, `vec_perm3`,
-    /// `vec_mulw`, the flags (`flags`) and `half`.
-    pub(package) const fn of_words(vector: u32, bits: u32, perm3: u32, mulw: u32, f: u32, half: u32) Cpu {
+    /// `vec_mulw`, `vec_dot`, the flags (`flags`) and `half`.
+    pub(package) const fn of_words(vector: u32, bits: u32, perm3: u32, mulw: u32, dot: u32, f: u32, half: u32) Cpu {
         return Cpu {
             own: true,
             vector: vector,
             vec_bits: bits,
             vec_perm3: perm3 as u8,
             vec_mulw: mulw as u16,
+            vec_dot: dot as u16,
             vround: (f & CPU_VROUND) != 0,
             popcnt: (f & CPU_POPCNT) != 0,
             sse41: (f & CPU_SSE41) != 0,
@@ -2216,9 +2231,9 @@ extend Cpu {
     /// Whether code made for these facts runs on a processor with `o`'s: no register is wider and no
     /// instruction is missing there. The inliner copies a body only into such a caller.
     pub(package) const fn within(self: &Self, o: Cpu) bool {
-        let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0;
+        let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0 && (self.vec_dot & ~o.vec_dot) == 0;
         let perm = self.vec_perm3 == 0 || self.vec_perm3 == o.vec_perm3;
-        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma);
+        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma) && (!self.cssc || o.cssc) && (!self.bmi1 || o.bmi1) && (!self.bmi2 || o.bmi2) && (!self.movbe || o.movbe);
         return self.vector <= o.vector && bits && perm && flags && self.half <= o.half;
     }
 }
@@ -2526,6 +2541,7 @@ extend Package {
                 vec_bits: 0x0E0F07,
                 vec_perm3: 9,
                 vec_mulw: 0x0707,
+                vec_dot: 0,
                 vround: true,
                 popcnt: false,
                 sse41: false,

@@ -10309,6 +10309,199 @@ fn widening_products_vectorize_as_the_narrow_lanes_products() {
     }
 }
 
+// Sums into 4-byte lanes of products of two sign- or zero-extended bytes, of two sign-extended 2-byte values
+// and of extended bytes and a constant vectorize as dot products (`vdot`) where the target computes them
+// (`Package.vec_dot`, here without widening products); without them, no `vdot`. Each count runs as before.
+const DOTS: str = M"(lir ptr 8
+sym @dot8s fn global noinline
+sym @dot8u fn global noinline
+sym @dot16 fn global noinline
+sym @dotk fn global noinline
+sym @drive fn global
+fn @dot8s
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = sext.i32 v10
+  v12 = ptradd v1, v6 * 1
+  v13 = load.i8 v12 align 0
+  v14 = sext.i32 v13
+  v15 = mul.i32 v11, v14
+  v16 = add.i32 v7, v15
+  v17 = add.i64 v6, v4
+  jmp b1(v17, v16)
+b3:
+  ret v7
+fn @dot8u
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = zext.i32 v10
+  v12 = ptradd v1, v6 * 1
+  v13 = load.i8 v12 align 0
+  v14 = zext.i32 v13
+  v15 = mul.i32 v11, v14
+  v16 = add.i32 v7, v15
+  v17 = add.i64 v6, v4
+  jmp b1(v17, v16)
+b3:
+  ret v7
+fn @dot16
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  jmp b1(v3, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v2
+  br v8, b2, b3
+b2:
+  v9 = ptradd v0, v6 * 2
+  v10 = load.i16 v9 align 0
+  v11 = sext.i32 v10
+  v12 = ptradd v1, v6 * 2
+  v13 = load.i16 v12 align 0
+  v14 = sext.i32 v13
+  v15 = mul.i32 v11, v14
+  v16 = add.i32 v7, v15
+  v17 = add.i64 v6, v4
+  jmp b1(v17, v16)
+b3:
+  ret v7
+fn @dotk
+  sig (ptr, ptr, i64) -> i32
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 0
+  v6 = iconst.i32 -3
+  jmp b1(v3, v5)
+b1(v7: i64, v8: i32):
+  v9 = icmp.ult v7, v2
+  br v9, b2, b3
+b2:
+  v10 = ptradd v0, v7 * 1
+  v11 = load.i8 v10 align 0
+  v12 = sext.i32 v11
+  v13 = mul.i32 v12, v6
+  v14 = add.i32 v13, v8
+  v15 = add.i64 v7, v4
+  jmp b1(v15, v14)
+b3:
+  ret v8
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 512 align 8
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i64 64
+  v5 = iconst.i64 -7046029254386353131
+  v6 = iconst.i64 23
+  jmp b1(v2, v0)
+b1(v7: i64, v8: i64):
+  v9 = icmp.ult v7, v4
+  br v9, b2, b3
+b2:
+  v10 = mul.i64 v8, v5
+  v11 = add.i64 v10, v7
+  v12 = lshr.i64 v11, v6
+  v13 = xor.i64 v11, v12
+  v14 = ptradd v1, v7 * 8
+  store v13, v14 align 3
+  v15 = add.i64 v7, v3
+  jmp b1(v15, v11)
+b3:
+  v16 = ptradd v1+256
+  v17 = call.i32 @dot8s(v1, v16, v0) : (ptr, ptr, i64) -> i32
+  v18 = call.i32 @dot8u(v1, v16, v0) : (ptr, ptr, i64) -> i32
+  v19 = call.i32 @dot16(v1, v16, v0) : (ptr, ptr, i64) -> i32
+  v20 = call.i32 @dotk(v16, v1, v0) : (ptr, ptr, i64) -> i32
+  v21 = zext.i64 v17
+  v22 = zext.i64 v18
+  v23 = iconst.i64 32
+  v24 = shl.i64 v22, v23
+  v25 = xor.i64 v21, v24
+  v26 = zext.i64 v19
+  v27 = iconst.i64 17
+  v28 = shl.i64 v26, v27
+  v29 = xor.i64 v25, v28
+  v30 = zext.i64 v20
+  v31 = iconst.i64 7
+  v32 = shl.i64 v30, v31
+  v33 = add.i64 v29, v32
+  ret v33
+)";
+
+@test
+fn dot_product_sums_vectorize_as_vdot() {
+    let two = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 2,
+        interleave: 2,
+        fin: 0,
+    };
+    let mut err = String::new();
+    let q = lparse::parse(DOTS, &mut err);
+    assert(q.is_some(), err.as_str());
+    let b = q.unwrap();
+    let mut a = lparse::parse(DOTS, &mut err).unwrap();
+    a.cpu.vector = 16;
+    a.vops = VOPS_ALL;
+    a.cpu.vec_dot = 0x301;
+    let mut a0 = lparse::parse(DOTS, &mut err).unwrap();
+    a0.cpu.vector = 16;
+    a0.vops = VOPS_ALL;
+    a0.cpu.vec_mulw = 0x707;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: two });
+    lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: two });
+    let wants: [(str, str); 4] = [
+        ("dot8s", "vdot.s.v4i32"),
+        ("dot8u", "vdot.v4i32"),
+        ("dot16", "vdot.s.v4i32"),
+        ("dotk", "vdot.s.v4i32"),
+    ];
+    for k in 0..4usize {
+        let (f, want) = unsafe wants[k];
+        let t = text_of(&a, f);
+        assert(t.contains(want) && !t.contains("vmulw"), t.as_str());
+        let t0 = text_of(&a0, f);
+        assert(!t0.contains("vdot"), t0.as_str());
+    }
+    for n in 0..65u64 {
+        let args: []u64 = [n];
+        let want = run_value(&b, "drive", args);
+        same_outcome(&b, &a, "drive", args, want, false);
+        same_outcome(&b, &a0, "drive", args, want, false);
+    }
+}
+
 // Scans: a last-index search counting down from a slice's length with an early exit reads every element
 // below the counter (`counted_down`), not one from another slice's length; a scan with no bound (a NUL-terminated string through an index, a
 // 32-bit one through a stepping pointer) enters a vector loop of aligned block loads (`aligned_scan`,
@@ -15849,7 +16042,7 @@ b0(v0: i64):
   ret v2
 fn @wide
   sig (ptr, ptr) -> void
-  cpu 32 917504 9 1028 319 1
+  cpu 32 917504 9 1028 0 319 1
 b0(v0: ptr, v1: ptr):
   v2 = load.v8f32 v0 align 0
   v3 = load.v8f32 v1 align 0
@@ -15858,7 +16051,7 @@ b0(v0: ptr, v1: ptr):
   ret
 fn @same
   sig (ptr, ptr) -> void
-  cpu 32 917504 9 1028 319 1
+  cpu 32 917504 9 1028 0 319 1
 b0(v0: ptr, v1: ptr):
   call @wide(v0, v1) : (ptr, ptr) -> void
   ret
@@ -15877,7 +16070,7 @@ b0(v0: ptr, v1: ptr):
   ret
 fn @whole
   sig (ptr, ptr) -> void
-  cpu 32 921351 9 1799 319 1
+  cpu 32 921351 9 1799 0 319 1
 b0(v0: ptr, v1: ptr):
   call @parts(v0, v1) : (ptr, ptr) -> void
   ret
@@ -15906,7 +16099,7 @@ data @__sc_simd_lv size 1 align 0
 fn a_body_for_more_features_keeps_its_registers_and_its_callers() {
     let (_, a) = optimized(LEVELS, NO_LOOPS);
     let w = text_of(&a, "wide");
-    assert(w.contains("cpu 32 917504 9 1028 319 1") && w.contains("fadd.v8f32") && !w.contains("v4f32"), w.as_str());
+    assert(w.contains("cpu 32 917504 9 1028 0 319 1") && w.contains("fadd.v8f32") && !w.contains("v4f32"), w.as_str());
     let s = text_of(&a, "same");
     assert(s.contains("cpu 32") && s.contains("fadd.v8f32") && !s.contains("call"), s.as_str());
     let b = text_of(&a, "base");

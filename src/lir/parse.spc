@@ -645,18 +645,19 @@ extend<'a> Parser<'a> {
                 return self.line_end_loc(&mut loc);
             }
             if w == "cpu" {
-                // `cpu <register bytes> <vec_bits> <vec_perm3> <vec_mulw> <flags> <half>`: the processor facts
-                // of a body compiled for more features than the build (`Body.cpu`, `Cpu::of_words`).
-                let mut k: [u32; 6] = [0; 6];
-                for q in 0..6usize {
+                // `cpu <register bytes> <vec_bits> <vec_perm3> <vec_mulw> <vec_dot> <flags> <half>`: the
+                // processor facts of a body compiled for more features than the build (`Body.cpu`,
+                // `Cpu::of_words`).
+                let mut k: [u32; 7] = [0; 7];
+                for q in 0..7usize {
                     if !self.uint(&mut k[q]) {
-                        return self.fail("expected 'cpu' and six numbers");
+                        return self.fail("expected 'cpu' and seven numbers");
                     }
                 }
-                if k[2] > 255 || k[3] > 65535 || k[5] > HALF_ARITH as u32 {
+                if k[2] > 255 || k[3] > 65535 || k[4] > 65535 || k[6] > HALF_ARITH as u32 {
                     return self.fail("a 'cpu' fact out of range");
                 }
-                self.body.cpu = Cpu::of_words(k[0], k[1], k[2], k[3], k[4], k[5]);
+                self.body.cpu = Cpu::of_words(k[0], k[1], k[2], k[3], k[4], k[5], k[6]);
                 self.pkg.vec_max = self.pkg.vec_max.max(k[0]);
                 return self.line_end_loc(&mut loc);
             }
@@ -1120,6 +1121,9 @@ extend<'a> Parser<'a> {
             pi += 1;
         } else if op == O_VUNZIP && pi < self.parts.len() && self.parts[pi] == "odd" {
             t.aux = 1;
+            pi += 1;
+        } else if op == O_VDOT && pi < self.parts.len() && self.parts[pi] == "s" {
+            t.aux = DOT_SIGNED;
             pi += 1;
         } else if op == O_VMULW {
             if pi < self.parts.len() && self.parts[pi] == "s" {

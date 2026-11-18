@@ -1245,11 +1245,11 @@ extend Gen {
                 &mut un,
             ) != NONE || (t.op == O_SPLAT || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_WCONST || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) && in_vreg(
                 t.ty,
-            ) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.cr.vt(t.a)) || t.op == O_VOP && self.vop_reg(t) || self.conv_reg(
+            ) || self.dot_reg(t) || (t.op == O_VCMP || t.op == O_VEXTRACT) && in_vreg(self.cr.vt(t.a)) || t.op == O_VOP && self.vop_reg(
                 t,
-            ) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(t.ty) && in_vreg(
+            ) || self.conv_reg(t) || (t.op == O_LSHR || t.op == O_ASHR || t.op == O_MULHS || t.op == O_MULHU) && is_vec(
                 t.ty,
-            ) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a));
+            ) && in_vreg(t.ty) || t.op == O_BITCAST && in_vreg(t.ty) && in_vreg(self.cr.vt(t.a));
             // An intrinsic's template reads its arguments and writes its result in v registers when the call
             // passes them whole there (`call` renames them in place).
             let intr = t.op == O_CALL && self.intrinsic(t.a).len() != 0;
@@ -2050,11 +2050,11 @@ extend Gen {
         // memory goes through `mloc`).
         let reg_form = t.op == O_STORE || t.op == O_SPLAT || t.op == O_VOP || t.op == O_CALL || t.op == O_CALLIND || is_vec(
             t.ty,
-        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) || t.op == O_VEXTRACT || self.conv_reg(
+        ) && (t.op >= O_ADD && t.op <= O_NOT || t.op >= O_FADD && t.op <= O_FNEG || t.op == O_FSQRT || t.op == O_MULHS || t.op == O_MULHU || t.op == O_VCMP || t.op == O_VSEL || t.op == O_VUNZIP || t.op == O_VZIPLO || t.op == O_VZIPHI || t.op == O_VINSERT || t.op == O_VSUMW || t.op == O_VMULW) || self.dot_reg(
             t,
-        ) || t.op == O_BITCAST && in_vreg(self.cr.vt(t.a)) && (in_vreg(t.ty) || is_int(t.ty) && type_bytes(t.ty, 8) == 8) || self.lane_pair(
-            t,
-        ) || lv::lane0_op(self.cr.b(), &self.cr.lv.pfold, t);
+        ) || t.op == O_VEXTRACT || self.conv_reg(t) || t.op == O_BITCAST && in_vreg(self.cr.vt(t.a)) && (in_vreg(t.ty) || is_int(
+            t.ty,
+        ) && type_bytes(t.ty, 8) == 8) || self.lane_pair(t) || lv::lane0_op(self.cr.b(), &self.cr.lv.pfold, t);
         if !reg_form && !is_terminator(t.op) {
             for k in 0..self.cr.uses.len() {
                 self.sync(self.cr.uses[k]);
@@ -3980,6 +3980,10 @@ extend Gen {
         }
         if op == O_VSUMW {
             self.vsumw(i, t);
+            return true;
+        }
+        if op == O_VDOT {
+            self.vdot(i, t);
             return true;
         }
         if op == O_VMULW {
@@ -10309,6 +10313,49 @@ extend Gen {
             for j in 0..g {
                 self.ld_lane(y, t.b, k * g + j, lane_type(nt), false, false);
                 self.emit(a::addsub_reg(true, 0, false, x, x, y, 0, 0));
+            }
+            self.st_lane(x, d, k, lt, true);
+        }
+    }
+
+    // Whether `O_VDOT` `t` sums bytes' products into 4-byte lanes of a vector in a v register where the
+    // processor has FEAT_DotProd (`Cpu.vec_dot`), which `vdot` computes there.
+    const fn dot_reg(self: &Self, t: Inst) bool {
+        let sh = ast::pick((t.aux & DOT_SIGNED) != 0, 8u32, 0u32);
+        return t.op == O_VDOT && in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
+            lane_type(self.cr.vt(t.b)),
+            8,
+        ) == 1 && (unsafe (*self.pkg).cpu_of(self.cr.b()).vec_dot >> sh & 1) != 0;
+    }
+
+    // Dot product `t` (`O_VDOT`) into vector `i`: SDOT or UDOT over the accumulator (`dot_reg`); else each
+    // lane's products, extended by their signedness.
+    fn vdot(self: &mut Self, i: u32, t: Inst) {
+        let nt = self.cr.vt(t.b);
+        let sg = (t.aux & DOT_SIGNED) != 0;
+        if self.dot_reg(t) {
+            let q = a::on(type_bytes(t.ty, 8) == 16, 1u32 << 30);
+            let rn = self.vec_use(t.b, V0 + 30);
+            let rm = self.vec_use(t.c, V0 + 31);
+            self.accumulate(0x0E809400u32 | q | a::on(!sg, 1u32 << 29), i, t.a, rn, rm);
+            return;
+        }
+        self.sync(t.a);
+        self.sync(t.b);
+        self.sync(t.c);
+        let d = self.cr.mdef(i);
+        let lt = lane_type(t.ty);
+        let n = lanes(t.ty);
+        let g = lanes(nt) / n;
+        let x = self.tmp(false);
+        let y = self.tmp(false);
+        let z = self.tmp(false);
+        for k in 0..n {
+            self.ld_lane(x, t.a, k, lt, false, true);
+            for j in 0..g {
+                self.ld_lane(y, t.b, k * g + j, lane_type(nt), sg, false);
+                self.ld_lane(z, t.c, k * g + j, lane_type(nt), sg, false);
+                self.emit(a::madd(true, false, x, y, z, x));
             }
             self.st_lane(x, d, k, lt, true);
         }
