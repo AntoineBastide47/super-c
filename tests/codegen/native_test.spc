@@ -21338,6 +21338,52 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
+// arm64, the same rule: `@mm`'s vectors arrive in v0, v1 and v2. The minimum reads its first argument in
+// v1, the template's name of its second, which stays in v2, and writes over it; the maximum then reads v0
+// and v1 as they are. The body copies no vector register. It gives the C result.
+@test
+fn an_arm64_intrinsic_argument_stays_in_another_arguments_name() {
+    let lir = M"(lir ptr 8
+sym @vminq_f32 fn global
+sym @vmaxq_f32 fn global
+sym @mm fn global
+fn @mm
+  sig (v4f32, v4f32, v4f32) -> v4f32
+b0(v0: v4f32, v1: v4f32, v2: v4f32):
+  v3 = call.v4f32 @vminq_f32(v1, v2) : (v4f32, v4f32) -> v4f32
+  v4 = call.v4f32 @vmaxq_f32(v0, v3) : (v4f32, v4f32) -> v4f32
+  ret v4
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // Vector register copies (`mov vd.16b, vn.16b`: ORR of a register with itself).
+    let mut copies: u32 = 0;
+    for r in 0..32u32 {
+        copies += elf_text_count(&obj, 0xFFFFFFE0, 0x4EA01C00 | r << 16 | r << 5);
+    }
+    assert_eq(copies, 0);
+    // `fmin v1, v1, v2` (4EA2F421), then `fmax v0, v0, v1` (4E21F400).
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x4EA2F421), 1);
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x4E21F400), 1);
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return; // a C driver links it, on a host that runs it
+    }
+    let drv = M"(#include <arm_neon.h>
+float32x4_t mm(float32x4_t, float32x4_t, float32x4_t);
+int main(void) {
+  float a[4] = {1.0f, -2.0f, 7.5f, 0.25f}, b[4] = {3.0f, -9.0f, 8.0f, 0.5f}, c[4] = {2.0f, -1.0f, 9.0f, 0.125f};
+  float o[4];
+  vst1q_f32(o, mm(vld1q_f32(a), vld1q_f32(b), vld1q_f32(c)));
+  for (int k = 0; k < 4; k++) {
+    float m = b[k] < c[k] ? b[k] : c[k];
+    if (o[k] != (a[k] > m ? a[k] : m)) return 1 + k;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // x86-64: a vector sum that commutes writes over the loop's accumulator whichever operand it is: `@acc`'s
 // sums take the load first and the accumulator second, and its loop holds no move between vector
 // registers (`movaps`, `movdqa`, `movdqu`, or their VEX forms). It gives the C result.
