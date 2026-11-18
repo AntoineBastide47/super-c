@@ -385,6 +385,13 @@ jobs:
         with:
           name: compiler-wasm
 
+      - name: The C library's C tree runs when the wasi-sdk's clang optimizes it
+        run: |
+          set -u
+          chmod +x ./super-c
+          "$WASI_SDK_PATH/bin/clang" --version | head -n 1
+          SC_TEST_CC="$WASI_SDK_PATH/bin/clang" SC_LEAK_CHECK=fatal ./super-c test --filter=wasm_libc_c_tree_runs_optimized
+
       - name: Time the kernels under wasmtime
         run: |
           set -u
@@ -403,7 +410,7 @@ jobs:
           cp build/bench-bin build/bench-nat.wasm
           ./super-c build build/bench_root.spc --profile=bench --emit-c --target=wasm --out-dir=build/ctree
           raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
-          # The tree's `__cflags` build it whole (its C library's functions carry `no_builtin`).
+          # The tree's C library units (`__units_nobuiltin`) compile with `-fno-builtin` (`ci/cc_tree.sh`).
           CC="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1" sh ci/cc_tree.sh "$raw" build/bench-clang.wasm -O3
           for k in 1 2 3 4 5; do
             wasmtime build/bench-nat.wasm > "timing/nat-r$k.txt" 2>&1 || true
