@@ -2057,8 +2057,8 @@ extend Parser {
                 let ta = self.parse_type_alias(true);
                 self.ast.push(ta);
             } else if self.at_ghost_fn() && self.text_is(self.raw_peek(), "spec") {
-                // A spec function each conformance defines (no default body): the interface's clauses state
-                // facts with it (`Allocator::owns`).
+                // A spec function the interface's clauses state facts with (`Allocator::owns`): each
+                // conformance defines it, or takes its default body.
                 let sstart = self.raw_peek().start();
                 self.advance();
                 self.ghost_next = true;
@@ -2067,13 +2067,6 @@ extend Parser {
                 self.spec -= 1;
                 self.ast.ext_mut(f).function.set(FN_SPEC, true);
                 self.ast.at(f).span.start = sstart;
-                if self.ast.ext(f).function.body != NODE_NONE {
-                    self.errors.emit_span(
-                        dc::SYNTAX_ERROR,
-                        Span::new(sstart, sstart),
-                        format("an interface's spec function has no body: each conformance defines it"),
-                    );
-                }
                 self.ast.push(f);
             } else {
                 self.error_here("expected interface item");

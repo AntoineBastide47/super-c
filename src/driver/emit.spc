@@ -14321,7 +14321,10 @@ fn bc_job(ctx: *mut void, j: u32) {
             *unsafe &mut *(st.outs + it) = take_errs(&mut tck.errors);
             continue;
         }
-        if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 {
+        if kd != loader::ItemKind::IK_FUNCTION as u8 && kd != loader::ItemKind::IK_METHOD as u8 && kd != loader::ItemKind::IK_STRUCT as u8 && kd != loader::ItemKind::IK_ENUM as u8 && !bc_iface_item(
+            p,
+            &meta,
+        ) {
             continue;
         }
         tck.bc_item(meta.node, &mut slot.ow, &mut slot.ctx, &mut bodies);
@@ -14389,7 +14392,9 @@ fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
             if reach_root(p, a, m as ModuleId, it.node, testing, false) {
                 bc_queue(&mut queued, &mut round, k);
             }
-            if it.owner != loader::ITEM_NONE && a.ext(p.idx().items.at(it.owner as usize).node).extend_def.interface_type != NODE_NONE {
+            if it.owner != loader::ITEM_NONE && p.idx().items.at(it.owner as usize).kind == loader::ItemKind::IK_EXTEND as u8 && a.ext(
+                p.idx().items.at(it.owner as usize).node,
+            ).extend_def.interface_type != NODE_NONE {
                 let key = fn_name_key(p, m as ModuleId, it.node);
                 if !conf_ix.contains_key(&key) {
                     conf_ix.insert(key, confs.len() as u64);
@@ -14446,6 +14451,19 @@ fn bc_std_closure(p: &mut loader::Package, st: &BcStage, testing: bool) {
                         bc_queue(&mut queued, &mut round, it);
                     }
                 } else if (unsafe &*p.module_ast_const(t.callee.module)).at_const(t.callee.node).kind == NodeKind::NODE_FUNCTION {
+                    // An interface's spec function: its default body.
+                    let ic = (unsafe &*p.module_ast_const(t.callee.module)).container_of(t.callee.node);
+                    let ii = if ic == NODE_NONE {
+                        loader::ITEM_NONE
+                    } else {
+                        p.item_of(t.callee.module, ic)
+                    };
+                    if ii != loader::ITEM_NONE && p.bc_lazy(t.callee.module as usize) && bc_iface_item(
+                        p,
+                        p.idx().items.at(ii as usize),
+                    ) {
+                        bc_queue(&mut queued, &mut round, ii);
+                    }
                     if let Some(x) = conf_ix.get(&fn_name_key(p, t.callee.module, t.callee.node)) {
                         let v = confs.at((*x) as usize);
                         for j in 0..v.len() {
@@ -14516,6 +14534,23 @@ pub(package) const fn bc_body_item(p: &loader::Package, it: &loader::ItemMeta) b
         return false;
     }
     return it.owner == loader::ITEM_NONE || p.idx().items.at(it.owner as usize).kind == loader::ItemKind::IK_EXTEND as u8;
+}
+
+// Whether item `it` is an interface with a spec function's default body: the borrow pass lowers those
+// bodies (`bc_item`), which the proofs read at each conformance that takes the default.
+const fn bc_iface_item(p: &loader::Package, it: &loader::ItemMeta) bool {
+    if it.kind != loader::ItemKind::IK_INTERFACE as u8 {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(it.module);
+    let ms = a.ext(it.node).interface_def.items;
+    for j in 0..ms.len {
+        let f = unsafe a.list(ms)[j as usize];
+        if a.at_const(f).kind == NodeKind::NODE_FUNCTION && a.ext(f).function.is_spec() && a.ext(f).function.body != NODE_NONE {
+            return true;
+        }
+    }
+    return false;
 }
 
 /// The borrow stage's prologue: per module, its row of the reference table the borrow jobs query

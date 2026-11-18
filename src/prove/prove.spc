@@ -639,6 +639,7 @@ const SQ_STRV: u64 = 17; // a string literal's value: a function of its bytes (t
 const SQ_BLOCK: u64 = 18; // `block(p)`: the block of an `@owned` field (`sq_kind`)
 const SQ_TAKE: u64 = 19; // `s.take(n)`: `s.subrange(0, n)` (SQ_SUB)
 const SQ_SKIP: u64 = 20; // `s.skip(n)`: `s.subrange(n, s.len())` (SQ_SUB)
+const SQ_FILL: u64 = 21; // `n` bytes of value `c` (a `memset`'s): (c, n)
 const VK_LEN: u64 = 32;
 const VK_INDEX: u64 = 34;
 const VK_INDEX_MUT: u64 = 40;
@@ -10546,6 +10547,12 @@ extend<const B: usize> Prover<B> {
         if found.node == NODE_NONE {
             return none;
         }
+        // The interface's default body: its `Self` is the type.
+        if found.module == d.module && found.node == d.node {
+            binds.push(d.module as u64 << 32 | ic as u64);
+            binds.push(m as u64 << 32 | t as u64);
+            return found;
+        }
         // The extend's parameters from the type: `extend<A> P<A> as I` at `P<Global>`.
         let fa = self.ast_of(found.module);
         let e = fa.container_of(found.node);
@@ -10566,8 +10573,10 @@ extend<const B: usize> Prover<B> {
     }
 
     // The function named as interface member `d` (of interface `ic`) in an `extend` of declaration
-    // `(dm, dn)` as that interface, in any module.
+    // `(dm, dn)` as that interface, in any module; `d` itself, its default body, where such an `extend`
+    // names no such function.
     fn find_conf(self: &Self, d: DefId, ic: NodeId, dm: ModuleId, dn: NodeId) DefId {
+        let mut conforms = false;
         let ia = self.ast_of(d.module);
         let name = self.text(d.module, ia.at_const(ia.ext_name(d.node)).span);
         let p = self.pkg();
@@ -10595,10 +10604,14 @@ extend<const B: usize> Prover<B> {
                 if tdef.module != dm || tdef.node != dn {
                     continue;
                 }
+                conforms = true;
                 if self.text(mi as ModuleId, a.at_const(a.ext_name(it.node)).span) == name {
                     return DefId { module: mi as ModuleId, node: it.node };
                 }
             }
+        }
+        if conforms && ia.ext(d.node).function.body != NODE_NONE {
+            return d;
         }
         return DefId { module: 0, node: NODE_NONE };
     }
@@ -15451,6 +15464,13 @@ extend<const B: usize> Prover<B> {
             let a2 = self.tm.and(nleft, e2);
             let b = self.tm.or(a1, a2);
             self.implied(g, b)
+        } else if op == SQ_FILL && w == 8 {
+            // A byte of a `memset`: its value's low byte.
+            let ci1 = self.tm.cmp(T_LT, i, self.tm.args[(sx.a + 1) as usize]);
+            let g = self.tm.and(c0, ci1);
+            let c = self.tm.unary(T_CAST, self.tm.args[sx.a as usize], 8, sg);
+            let e = self.tm.cmp(T_EQ, r, c);
+            self.implied(g, e)
         } else if op == SQ_VIEWA {
             // An element of an array read whole (`eta`): of the term it was read from, one read at the
             // index, not a case per member.
@@ -15598,7 +15618,7 @@ extend<const B: usize> Prover<B> {
             let n1 = self.seq_len(xs[1]);
             let m = self.tm.arith(T_ADD, n0, n1, W_NAT, false);
             self.tm.cmp(T_EQ, n, m)
-        } else if op == SQ_VIEWA {
+        } else if op == SQ_VIEWA || op == SQ_FILL {
             self.tm.cmp(T_EQ, n, xs[1])
         } else if op == SQ_VIEWS {
             let l = self.sq1(SQ_SLEN, xs[0], self.pw, false);
@@ -20412,8 +20432,8 @@ extend<const B: usize> Prover<B> {
 
     // Call `t` of `memcpy`, `memmove` or `memset` (`Terminator.intr`) whose destination points into a
     // block or an inline array (`ptr_target`): its `n` bytes there become the source's (`src_bytes`;
-    // unknown ones for another source and for `memset`) and the others stay, with no memory event; the
-    // ranges are checked inside their sequences. False for another destination.
+    // unknown ones for another source), or the value's for `memset` (SQ_FILL), and the others stay, with no
+    // memory event; the ranges are checked inside their sequences. False for another destination.
     fn mem_copy(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator) bool {
         if t.args_len != 3 || t.intr != ir::CI_MEMCPY && t.intr != ir::CI_MEMMOVE && t.intr != ir::CI_MEMSET {
             return false;
@@ -20481,6 +20501,12 @@ extend<const B: usize> Prover<B> {
             String::from_str("its destination and its source must hold the bytes it names"),
         );
         path.pc.push(g);
+        if t.intr == ir::CI_MEMSET {
+            let mut xs = Vector::<u32>::new();
+            xs.push(self.operand(b, cm, &mut path.state, b.oper_pool[(t.args_start + 1) as usize], false));
+            xs.push(wn);
+            part = self.seq_make(SQ_FILL, &xs);
+        }
         if part == NONE {
             part = self.tm.var(W_OTHER, false);
             let pn = self.seq_len(part);

@@ -400,6 +400,21 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a call past an interface spec function's default body",
+        "interface Sized {\n    spec fn cap() u32;\n    spec fn fits(x: u32) bool {\n        return x < Self::cap();\n    }\n    fn put(self: &Self, x: u32) u32\n        requires Self::fits(x);\n}\nstruct Small {}\nextend Small as Sized {\n    spec fn cap() u32 {\n        return 4;\n    }\n    fn put(self: &Small, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nstruct Wide {}\nextend Wide as Sized {\n    spec fn cap() u32 {\n        return 100;\n    }\n    spec fn fits(x: u32) bool {\n        return x <= Self::cap();\n    }\n    fn put(self: &Wide, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nfn main() i32 {\n    return Small {}.put(4) as i32;\n}\n",
+        "cannot prove the 'requires' of 'put' at this call",
+    );
+    b.add(
+        "a call past an interface spec function's override",
+        "interface Sized {\n    spec fn cap() u32;\n    spec fn fits(x: u32) bool {\n        return x < Self::cap();\n    }\n    fn put(self: &Self, x: u32) u32\n        requires Self::fits(x);\n}\nstruct Small {}\nextend Small as Sized {\n    spec fn cap() u32 {\n        return 4;\n    }\n    fn put(self: &Small, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nstruct Wide {}\nextend Wide as Sized {\n    spec fn cap() u32 {\n        return 100;\n    }\n    spec fn fits(x: u32) bool {\n        return x <= Self::cap();\n    }\n    fn put(self: &Wide, x: u32) u32\n        requires Self::fits(x)\n    {\n        return x;\n    }\n}\nfn main() i32 {\n    return Wide {}.put(101) as i32;\n}\n",
+        "cannot prove the 'requires' of 'put' at this call",
+    );
+    b.add(
+        "a byte past a memset",
+        "import std::spec::seq as *;\nimport string;\nstruct B {\n    @owned\n    p: *mut u8,\n    cap: usize,\n}\nfn bad(b: &mut B) requires block(b.p).len() >= 8 ensures block(b.p)[4] == 9 {\n    unsafe string::memset(b.p, 9, 4);\n}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a const fn over constants that panics there",
         "const fn bad(x: u32) u32 {\n    if x == 0 {\n        panic(\"zero\");\n    }\n    return 1;\n}\nfn g() u32 requires bad(0) == 2 ensures |r| r == 0 {\n    return 1;\n}\nfn main() i32 { return 0; }\n",
         "cannot prove this 'ensures' clause",
@@ -764,6 +779,46 @@ fn bad(p: *mut void) {
         "14:5",
     );
     b.add_at(
+        "an entry for any argument whose requires names its argument",
+        M"(fn hand(entry: fn(*mut void) void)
+    requires pre_any(entry)
+{
+}
+
+fn job(env: *mut void)
+    requires env != null
+{
+    unsafe *(env as *mut u64) = 1;
+}
+
+fn bad() {
+    hand(job);
+}
+)",
+        "cannot prove the 'requires' of 'hand' at this call",
+        "13:5",
+    );
+    b.add_at(
+        "a write through another pointer while a struct's invariant is broken",
+        M"(struct S
+    invariant self.lo <= self.hi
+{
+    lo: u32,
+    hi: u32,
+}
+
+fn bad(p: *mut S, q: *mut u32)
+    requires p != null
+{
+    unsafe (*p).lo = 30;
+    unsafe *q = 1;
+    unsafe (*p).hi = 40;
+}
+)",
+        "cannot prove the invariant of 'S' after the writes through a pointer",
+        "12:5",
+    );
+    b.add_at(
         "a free of a block handed over",
         M"(fn hand(entry: fn(*mut void) void, env: *mut void)
     requires pre_of(entry, env)
@@ -1025,6 +1080,54 @@ fn unproved_spec_syntax_is_an_error() {
 }
 
 fn proved_contracts(b: &mut h::ExitBatch) {
+    // An interface's spec function with a default body: a conformance that defines none takes it, with
+    // its `Self` the conformance's type; one that defines it overrides it.
+    b.add(
+        "an interface spec function's default body and an override",
+        M"(interface Sized {
+    spec fn cap() u32;
+    spec fn fits(x: u32) bool {
+        return x < Self::cap();
+    }
+    fn put(self: &Self, x: u32) u32
+        requires Self::fits(x);
+}
+struct Small {}
+extend Small as Sized {
+    spec fn cap() u32 {
+        return 4;
+    }
+    fn put(self: &Small, x: u32) u32
+        requires Self::fits(x)
+    {
+        return x;
+    }
+}
+struct Wide {}
+extend Wide as Sized {
+    spec fn cap() u32 {
+        return 100;
+    }
+    spec fn fits(x: u32) bool {
+        return x <= Self::cap();
+    }
+    fn put(self: &Wide, x: u32) u32
+        requires Self::fits(x)
+    {
+        return x;
+    }
+}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as u32;
+    let mut r = Small {}.put(3) + Wide {}.put(100);
+    if k < 4 {
+        r += Small {}.put(k);
+    }
+    return r as i32;
+}
+)",
+        104,
+    );
     // Twenty branches in a row make 2^20 paths: the walk that merges them at each join proves the call's
     // `requires` past the exact walk's budget.
     b.add(
@@ -2299,6 +2402,113 @@ fn main() i32 {
 }
 )",
         4,
+    );
+    // `pre_any`: the entry's `requires` hold of every argument, so the callee may call it with storage of
+    // its own.
+    // A `memset` sets its bytes to its value's low byte, in a block a field takes after it and in a
+    // field's block, and keeps the others.
+    b.add(
+        "the bytes a memset sets",
+        M"(import std::spec::seq as *;
+import string;
+
+struct B {
+    @owned
+    p: *mut u8,
+    cap: usize,
+}
+
+fn zero(n: usize) B
+    requires n > 3 && n < 1000
+    ensures |r| block(r.p).len() == n as nat && block(r.p)[2] == 0 && block(r.p)[n as int - 1] == 0
+    ensures |r| Global::owns(r.p, n, 1)
+{
+    let mut g = Global {};
+    let p = (unsafe g.alloc(n, 1)) as *mut u8;
+    unsafe string::memset(p, 0, n);
+    return B { p: p, cap: n };
+}
+
+fn part(b: &mut B, x: i32)
+    requires block(b.p).len() >= 8 && Global::owns(b.p, 8, 1)
+    ensures Global::owns(b.p, 8, 1)
+    ensures block(b.p).len() == old(block(b.p)).len() && block(b.p)[1] == x as u8 && block(b.p)[4] == old(block(b.p))[4]
+{
+    unsafe string::memset(b.p, x, 4);
+}
+
+fn main() i32 {
+    let mut b = zero(8);
+    part(&mut b, 0x1205);
+    let r = unsafe b.p[1] + unsafe b.p[4];
+    let mut g = Global {};
+    unsafe g.dealloc(b.p, 8, 1);
+    return r as i32;
+}
+)",
+        5,
+    );
+    b.add(
+        "an entry for any argument",
+        M"(fn hand(entry: fn(*mut void) void) bool
+    requires pre_any(entry)
+{
+    let mut x: u64 = 7;
+    entry(((&mut x) as *mut u64) as *mut void);
+    return x == 1;
+}
+
+fn any_job(env: *mut void)
+    requires env == null || env != null
+{
+    if env != null {
+        unsafe *(env as *mut u64) = 1;
+    }
+}
+
+fn plain_job(env: *mut void) {
+    let _ = env;
+}
+
+fn main() i32 {
+    let a = hand(any_job);
+    let b = hand(plain_job);
+    return if a && !b {
+        3
+    } else {
+        1
+    };
+}
+)",
+        3,
+    );
+    // A struct whose invariant a write through its pointer breaks: restored before a write through
+    // another pointer, which may reach it.
+    b.add(
+        "an invariant restored before a write through another pointer",
+        M"(struct S
+    invariant self.lo <= self.hi
+{
+    lo: u32,
+    hi: u32,
+}
+
+fn widen(p: *mut S, q: *mut u32)
+    requires p != null
+{
+    unsafe (*p).hi = 20;
+    unsafe (*p).lo = 10;
+    unsafe *q = 1;
+}
+
+fn main() i32 {
+    let mut s = S { lo: 0, hi: 1 };
+    let mut x: u32 = 0;
+    widen((&mut s) as *mut S, (&mut x) as *mut u32);
+    return (s.hi - s.lo + x) as i32;
+}
+)",
+        11,
     );
     b.add(
         "a chain of records: each holds the next",

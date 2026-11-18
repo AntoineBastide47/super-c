@@ -5689,6 +5689,39 @@ fn main() i32 {
     let traced = p.run_bin_env("SC_TASK_TRACE=1 ");
     assert(traced.out_has("spawn coroutine"), "SC_TASK_TRACE reports spawns");
     assert(traced.out_has("complete"), "SC_TASK_TRACE reports completions");
+
+    // A spawn past the registry's slots (one per live task) panics; `SC_TASK_LIMIT` lowers the limit.
+    q.mkfile(
+        "main.spc",
+        M"(import std::parallel::runtime as rt;
+import std::parallel::sync as sync;
+
+fn main() i32 {
+    let gate = sync::WaitGroup::new();
+    gate.add(1);
+    let wg = sync::WaitGroup::new();
+    for _i in 0..40 {
+        wg.add(1);
+        let g = gate.clone();
+        let w = wg.clone();
+        launch fn() {
+            g.wait();
+            w.done();
+        };
+    }
+    gate.done();
+    wg.wait();
+    rt::shutdown();
+    return 7;
+}
+)",
+    );
+    assert(q.native_build("", "main.spc").ok());
+    assert(q.run_bin_env("").exit == 7, "40 live tasks fit the registry");
+    assert(q.run_bin_env("SC_TASK_LIMIT=100 ").exit == 7, "40 live tasks fit a limit of 100");
+    let full = q.run_bin_env("SC_TASK_LIMIT=16 ");
+    assert(full.exit != 0 && full.exit != 7, "a spawn past 16 live tasks stops the program");
+    assert(full.out_has("the task registry is full"), "the spawn past the limit names the full registry");
 }
 
 // UDP and typed failures. Every operation that can fail returns `Result<T, IoError>`, so the caller can

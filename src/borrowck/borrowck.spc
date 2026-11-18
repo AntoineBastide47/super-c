@@ -129,6 +129,16 @@ extend tc::TypeChecker {
                     self.bc_item(unsafe (*a).list(ms)[j as usize], ow, ctx, bodies);
                 }
             },
+            // A spec function's default body: the proofs read it at each conformance that takes it.
+            NODE_INTERFACE => {
+                let ms = unsafe (*a).ext(id).interface_def.items;
+                for j in 0..ms.len {
+                    let f = unsafe (*a).list(ms)[j as usize];
+                    if unsafe (*a).at_const(f).kind == NodeKind::NODE_FUNCTION && unsafe (*a).ext(f).function.is_spec() {
+                        self.bc_fn(f, ow, ctx, bodies);
+                    }
+                }
+            },
             _ => {},
         }
     }
