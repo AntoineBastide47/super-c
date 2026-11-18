@@ -41,6 +41,41 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  size:
+    name: compiler code size (${{ matrix.tree }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { tree: new, ref: "" }
+          - { tree: old, ref: 46a377cfea223a423deaf442aacbb4665f93b723 }
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ matrix.ref || github.sha }}
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the compiler twice and print its code size
+        run: |
+          set -eu
+          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+          ./super-c build -fno-prove --out-dir=build/second
+          bin=$(find build/second -maxdepth 2 -name super-c -type f | head -n 1)
+          size -A "$bin" | awk -v T="${{ matrix.tree }}" '$1 == ".text" { print "size	" T "	" $2 }'
+          grep -m1 'model name' /proc/cpuinfo
+
   variants:
     needs: compile
     name: abs_diff_u8 variants (${{ matrix.run }})
@@ -149,7 +184,7 @@ jobs:
           esac
           EOF
           sh bench/simd_baseline/kernels.sh
-          vs="base grow1 grow2 grow3 grow4 grow6 grow7"
+          vs="base grow1 grow2 grow3 grow4 grow6 grow7 notail"
           od=$(command -v llvm-objdump || true)
           [ -n "$od" ] || od=$(ls "/c/Program Files/LLVM/bin/llvm-objdump.exe" 2>/dev/null || true)
           echo "objdump: ${od:-none}"

@@ -20170,8 +20170,8 @@ const fn elf_text_align(o: &Vector<u8>) usize {
 }
 
 // The text of `n` functions `f0`, `f1`, ...: function k multiplies `first + k` times, then runs a loop
-// that calls `leaf` (`call`) or only adds.
-fn loops_text(n: u32, first: u32, call: bool) String {
+// that calls `leaf` (`call`) or mixes a product with its high bits `mixes` times, and adds.
+fn loops_text(n: u32, first: u32, call: bool, mixes: u32) String {
     let mut text = String::from("lir ptr 8\nsym @leaf fn global ext\n");
     for k in 0..n {
         text.format_into("sym @f{} fn global\n", k);
@@ -20188,16 +20188,20 @@ fn loops_text(n: u32, first: u32, call: bool) String {
         text.format_into("  v{} = iconst.i64 0\n  v{} = icmp.eq v1, v{}\n", z, z + 1, z);
         text.format_into("  br v{}, b2(v{}), b1(v{}, v{})\n", z + 1, a, a, z);
         text.format_into("b1(v{}: i64, v{}: i64):\n", z + 2, z + 3);
-        // The loop's value: `leaf`'s result, or a product mixed with its high bits (3 more instructions).
+        // The loop's value: `leaf`'s result, or the last of the mixes (4 instructions each: a product of
+        // the value before, mixed with its high bits).
         let d = if call {
             text.format_into("  v{} = call.i64 @leaf(v{}) : (i64) -> i64\n", z + 4, z + 2);
             0u32
         } else {
-            text.format_into("  v{} = mul.i64 v{}, v1\n", z + 4, z + 2);
-            text.format_into("  v{} = iconst.i64 7\n", z + 5);
-            text.format_into("  v{} = lshr.i64 v{}, v{}\n", z + 6, z + 4, z + 5);
-            text.format_into("  v{} = xor.i64 v{}, v{}\n", z + 7, z + 6, z + 4);
-            3u32
+            for r in 0..mixes {
+                let b = z + 4 + 4 * r;
+                text.format_into("  v{} = mul.i64 v{}, v1\n", b, b - 1 - (r == 0) as u32);
+                text.format_into("  v{} = iconst.i64 7\n", b + 1);
+                text.format_into("  v{} = lshr.i64 v{}, v{}\n", b + 2, b, b + 1);
+                text.format_into("  v{} = xor.i64 v{}, v{}\n", b + 3, b + 2, b);
+            }
+            4 * mixes - 1
         };
         let y = z + d;
         text.format_into("  v{} = add.i64 v{}, v{}\n", y + 5, y + 4, z + 3);
@@ -20219,7 +20223,7 @@ fn loops_text(n: u32, first: u32, call: bool) String {
 // keep 16 bytes.
 @test
 fn x86_64_loops_with_a_call_that_fit_a_line_stay_inside_one() {
-    let text = loops_text(6, 0, true);
+    let text = loops_text(6, 0, true, 0);
     let mut o = Vector::<u8>::new();
     assert(
         object_of(&text, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut o),
@@ -20248,7 +20252,7 @@ fn x86_64_loops_with_a_call_that_fit_a_line_stay_inside_one() {
         assert_eq(loops, 1);
     }
     assert(moved != 0, "a function starts off a line's first byte");
-    let plain = loops_text(4, 16, false);
+    let plain = loops_text(4, 16, false, 1);
     let mut p = Vector::<u8>::new();
     assert(
         object_of(&plain, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut p),
@@ -20273,6 +20277,41 @@ fn x86_64_loops_with_a_call_that_fit_a_line_stay_inside_one() {
     }
     assert_eq(elf_text_align(&p), 16);
     assert(cut != 0, "a loop without a call holds a line boundary");
+}
+
+// An innermost x86-64 loop without a call of more than 64 bytes lies in no more 64-byte lines than its
+// bytes need (`Package.fit_lines`): one line more costs AMD Zen 3 a cycle each pass. Six functions with one
+// such loop each, after 0 to 5 multiplications: every loop begins at a 16-byte boundary and lies in two
+// lines, and a function asks for more than 16 bytes of alignment.
+@test
+fn x86_64_long_loops_without_a_call_lie_in_the_fewest_lines() {
+    let text = loops_text(6, 0, false, 6);
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(&text, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), LINES, &mut o),
+        "the x86-64 object",
+    );
+    let (t, _) = elf_text(&o);
+    let fs_ = elf_funcs(&o);
+    assert_eq(fs_.len(), 6);
+    for k in 0..6usize {
+        let (at, size) = fs_[k];
+        assert_eq(at % 16, 0);
+        // The loop's branch: the one short conditional jump back to a 16-byte boundary.
+        let mut loops: u32 = 0;
+        for j in at..at + size - 1 {
+            let d = o[t + j + 1] as usize;
+            if (o[t + j] & 0xF0) != 0x70 || d < 0x80 || j + 2 + d < 256 + at || (j + 2 + d - 256) % 16 != 0 {
+                continue;
+            }
+            let head = j + 2 + d - 256;
+            loops += 1;
+            assert(j + 2 - head > 96, "the loop fits two lines at two of their four 16-byte boundaries");
+            assert(head % 64 + (j + 2 - head) <= 128, "the loop is inside two lines");
+        }
+        assert_eq(loops, 1);
+    }
+    assert(elf_text_align(&o) > 16, "a function is placed for its loop");
 }
 
 // A call that takes an aggregate from the stores into its slot reads each stored value, also one that
