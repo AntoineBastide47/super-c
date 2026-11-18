@@ -240,7 +240,8 @@ pub(package) fn state_lit<const B: usize>(
     let sel = l >> 1 & 3;
     let pos = (l & 1) != 0;
     let x = tm.at(t);
-    let ints = tm.is_int(x.a) && tm.is_int(x.b);
+    // Only a comparison's operands are terms (an unknown's `a` is its number).
+    let ints = (x.op == T_LT || x.op == T_LE || x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b);
     if sel != SEL_ATOM {
         if !(x.op == T_EQ || x.op == T_NE) || !ints || sel > SEL_GT {
             return false;

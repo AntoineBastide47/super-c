@@ -1252,6 +1252,34 @@ fn choices_compare_by_their_values() {
     assert(bits_answer(&tm, &ls) == 1, "a false boolean as an integer is 0");
 }
 
+// A boolean call (a spec function's) is an atom of its own: its `a` indexes the argument pool, which may
+// be longer than the term table.
+@test
+fn boolean_calls_are_atoms_to_the_theories() {
+    let mut tm = Terms::<B>::new();
+    let x = tm.var(32, false);
+    let k = tm.int(u64_val::<B>(7), 32, false);
+    let lt = tm.cmp(T_LT, x, k);
+    let mut xs = Vector::<u32>::new();
+    for _i in 0..256 {
+        xs.push(x);
+    }
+    let _wide = tm.call(1, &xs, 32, false);
+    xs.clear();
+    xs.push(x);
+    let c = tm.call(2, &xs, W_BOOL, false);
+    assert(tm.at(c).a as usize >= tm.ts.len(), "the call's arguments lie past the terms");
+    let g = tm.or(c, lt);
+    let mut hy = Vector::<u32>::new();
+    hy.push(tm.not(c));
+    let mut sv = sv0::Solver::<B>::new();
+    assert(!sv.implies(&tm, &hy, g, true), "x < 7 does not follow");
+    let k3 = tm.int(u64_val::<B>(3), 32, false);
+    hy.push(tm.cmp(T_LT, x, k3));
+    let mut sv2 = sv0::Solver::<B>::new();
+    assert(sv2.implies(&tm, &hy, g, true), "x < 3 gives x < 7");
+}
+
 // The skeleton may take the side of a hypothesis that the theories refute apart from the goal ("`top` is
 // NaN" against `top.is_finite()`): the literals outside the goal's cone refute it, and `r` in (0, top)
 // with `top` below 1000 then fits a `u32`.

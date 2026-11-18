@@ -2661,12 +2661,22 @@ fn the_runner_ends_the_processes_its_tests_leave() {
     let pidf = loader::read_file(format("{}/pid", root).as_str()).unwrap();
     let pid = pidf.as_str().trim();
     // `ps` prints the state of a listed process: Z for a zombie, which its new parent may not have reaped
-    // yet.
+    // yet (on Linux the runner reaps it). The killed process may still be ending when the runner returns:
+    // up to 10 s, far below its 60.
     let mut ps = format("ps -p {} -o stat=", pid);
     let mut out = format("{}/ps", root);
-    let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
-    let st = loader::read_file(&out).unwrap();
-    assert(st.as_str().trim().is_empty() || st.as_str().trim().starts_with("Z"), "the left process is killed");
+    let mut gone = false;
+    for _ in 0..200 {
+        let _ = cli::run_io(ps.cstr(), null, out.cstr(), null);
+        let st = loader::read_file(&out).unwrap();
+        let s = st.as_str().trim();
+        gone = s.is_empty() || s.starts_with("Z") && PLATFORM != Platform::Linux;
+        if gone {
+            break;
+        }
+        ptime::sleep(ptime::Duration::from_millis(50));
+    }
+    assert(gone, "the left process is killed");
     if PLATFORM == Platform::Linux {
         assert(loader::read_file(format("/proc/{}/stat", pid).as_str()).is_none(), "and reaped");
     }
@@ -8716,12 +8726,13 @@ fn native_objects_are_reused_by_their_input() {
     assert(r.ok() && r.out_shows("native: a native") && r.out_shows(" of them reused"), "a compiles again");
     assert(!r.out_has(", 0 of them reused"), "the instances' objects are reused");
     assert_eq(p.run_bin(), 2);
-    let warm = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let exe = format("{}/bin{}", root, unsafe str::from_cstr(cli::binext()));
+    let warm = loader::read_file(&exe).unwrap_or(String::new());
     assert(
         cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build -o bin").ok(),
         "the build without caches",
     );
-    let cold = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&exe).unwrap_or(String::new());
     assert(warm.len() != 0 && warm.equals(&cold), "the program is the uncached build's");
     // Another writer's object at an instance object's path: a build of another edit compiles it again.
     assert(cli::superc_in(root, "build -o bin").ok(), "the build that records the keys");
