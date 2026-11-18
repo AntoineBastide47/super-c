@@ -11900,7 +11900,7 @@ extend Gen {
 
     // Masked load (into vector `i`, from the fallback's copy) or `store` through a pointer (`masked_reg`):
     // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
-    // general register and INS or UMOV.
+    // general register and INS or UMOV; lane 0 by LD1 or ST1 of one lane at the pointer.
     fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
         let vt = tys[2];
         let lt = lane_type(vt);
@@ -11935,7 +11935,14 @@ extend Gen {
                 self.emit(a::tbz(false, act, k, 0));
             }
             let im = (k << 1 | 1) << eb.trailing_zeros() as u32;
-            if store {
+            if k == 0 {
+                // Lane 0 is at the pointer itself: LD1 or ST1 of the one lane (0D40 or 0D00, the lane's size
+                // in its opcode and size fields), no general register between.
+                let sz: [u32; 4] = [0x0000, 0x4000, 0x8000, 0x8400];
+                self.emit(
+                    0x0D000000 | a::on(!store, 1u32 << 22) | unsafe sz[eb.trailing_zeros()] | p as u32 << 5 | (rd - V0) as u32,
+                );
+            } else if store {
                 // UMOV x, rd.T[k]; its bytes at p + k * eb.
                 self.emit(0x0E003C00 | a::on(eb == 8, 1u32 << 30) | im << 16 | (rd - V0) as u32 << 5 | x as u32);
                 self.mem(lane_st(lt, true), false, x, p, k * eb);

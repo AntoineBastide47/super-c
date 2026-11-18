@@ -142,8 +142,8 @@ the header of the type it collides with.
   that names an alias is a unit declaration (`split_protos`), without its `extern`, which
   `decl_name` reads as an object's. A unit that includes a `__scx` file, directly or through a
   definition header (`x_reach`), compiles outside the packs (`tu_x`, `inst_x`), and so does every
-  unit of wasm's C library (`Package::is_libc`), which compiles with `-fno-builtin`
-  (`loader::libc_unit`). A declaration of
+  unit of wasm's C library (`Package::is_libc`), whose functions have the `no_builtin` attribute
+  (`cemit_fn_attrs`): the tree's `__cflags` build it. A declaration of
   `__sc_fwd.h` that names an alias (a trait-object table whose method names a header type, an
   `@emit_macro` template) makes the forward header include the `__scx` file: every file then sees
   that header. A header `super_rt.h` includes stays in `__sc_fwd.h`, by C

@@ -23,7 +23,8 @@ set first: it states the value, register and frame model.
    operands (`Live::uses_of`, the folded use lists `Live::ranges` records once). The warm code's values
    take the registers first; a call in a rare block
    saves around it the scratch registers whose values live past it (`save_scratch`; a vector register
-   at its value's width, a 256- or 512-bit one whole), so it is no call
+   at its value's width, a 256- or 512-bit one whole; on Microsoft x64 also a value wider than 16 bytes
+   in a vector register the ABI saves, which keeps its low 16 bytes only), so it is no call
    for the homes; another call saves the homes the plan holds across calls (`Live.seg_past`). A value's range runs through the rare blocks before its last read, so the save
    leaves out an instruction's value that no path from the call reads (`Live::dead_past`, a liveness
    over the laid-out blocks made on first use), and arm64 saves two registers per `stp`. The restore
@@ -95,7 +96,9 @@ set first: it states the value, register and frame model.
      the ones to give out first), the counts each block may hold (`Caps`, `Live.jcap`, `scap`), per
      signature parameter the registers it arrives in (`arr`), and the call tables: fill `Live.cfirst`
      and `clast` before `assign` (per block, the first and last call that writes the caller-saved
-     registers; `wfirst` and `wlast` for the argument registers). A caller-saved register holds a
+     registers; `wfirst` and `wlast` for the argument registers; `vfirst` and `vlast` for the vector
+     file's homes where fewer calls write them: x86-64, not an intrinsic's template nor a vector
+     operation computed lane by lane). A caller-saved register holds a
      value only in the blocks where no such call runs while it lives (`Live::calm`), so a value that
      lives across a call may ask for both classes.
    - A value no register holds in all of its blocks takes the one that gains most over a part of them

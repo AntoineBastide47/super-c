@@ -495,7 +495,8 @@ pub(package) struct Config {
 extend Config as Copy {}
 
 // A write into private memory whose address does not escape: bytes `off` to `end` of `slot` (`Opt.sbase`),
-// by store `inst` in block `blk` (NONE: a copy or a fill), or by copy `copy` (NONE: a store or a fill).
+// by store `inst` in block `blk` (NONE: a copy or a fill), by copy `copy` (NONE: a store or a fill), or by
+// fill `fill` (NONE: a store or a copy).
 struct SlotWrite {
     pub(package) slot: u32,
     pub(package) off: i64,
@@ -503,6 +504,7 @@ struct SlotWrite {
     pub(package) inst: u32,
     pub(package) blk: u32,
     pub(package) copy: u32,
+    pub(package) fill: u32,
 }
 
 extend SlotWrite as Copy {}
@@ -15120,9 +15122,23 @@ extend Opt {
                     self.sbase[i as usize] = t.a;
                     continue;
                 }
-                if t.op == O_PTRADD && t.b == VNONE && self.base(b, t.a) != NONE {
+                // A constant index too: a slot's address keeps its index (`simplify`).
+                let ix = if t.op == O_PTRADD && t.b != VNONE {
+                    int_bits(b, t.b)
+                } else {
+                    Option::<u64>::None
+                };
+                let at = if ix.is_some() {
+                    sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), pk.ptr_bytes)) as i128 * scale_of(t)
+                } else {
+                    0i128
+                };
+                if t.op == O_PTRADD && (t.b == VNONE || ix.is_some() && at >= -0x80000000 && at <= 0x7FFFFFFF) && self.base(
+                    b,
+                    t.a,
+                ) != NONE {
                     self.sbase[i as usize] = self.base(b, t.a);
-                    self.soff[i as usize] = self.base_off(t.a) + (t.c as i32) as i64;
+                    self.soff[i as usize] = self.base_off(t.a) + (t.c as i32) as i64 + at as i64;
                     continue;
                 }
                 let u0 = self.ops_at[i as usize];
@@ -15159,11 +15175,15 @@ extend Opt {
                                 inst: i,
                                 blk: k,
                                 copy: NONE,
+                                fill: NONE,
                             },
                         );
                     } else if t.op == O_MEMCPY && t.a == v && t.b != v || t.op == O_MEMSET && t.a == v {
                         let copy = ast::pick(t.op == O_MEMCPY, i, NONE);
-                        self.wr.push(SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k, copy: copy });
+                        let fill = ast::pick(t.op == O_MEMSET, i, NONE);
+                        self.wr.push(
+                            SlotWrite { slot: s, off: o, end: end, inst: NONE, blk: k, copy: copy, fill: fill },
+                        );
                     } else {
                         self.sesc[s as usize] = true;
                     }
@@ -15379,7 +15399,7 @@ extend Opt {
 
     // The value a vector load `t` (instruction `i` of block `k`) of a private slot splats: one store alone
     // writes each of its lanes, each of the same value, and each runs before the load (`[x; N]` as a
-    // vector); VNONE otherwise.
+    // vector), or one fill alone writes its byte lanes (`[x; N]` of bytes); VNONE otherwise.
     const fn private_splat(self: &Self, pk: &Package, b: &Body, k: u32, i: u32, t: Inst) Value {
         if !is_vec(t.ty) || lanes(t.ty) > 64 {
             return VNONE;
@@ -15397,6 +15417,19 @@ extend Opt {
         for q in self.wat[s]..self.wat[s + 1] {
             let w = self.wl[q as usize];
             if w.off >= end || off >= w.end {
+                continue;
+            }
+            if w.fill != NONE {
+                // One fill of the lanes with a byte, before the load: byte lanes of that value.
+                let f = b.insts[w.fill as usize];
+                if eb != 1 || seen != 0 || w.off > off || w.end < end || b.type_of(f.b) != lt || w.blk == k && w.fill >= i || w.blk != k && !self.dominates(
+                    w.blk,
+                    k,
+                ) {
+                    return VNONE;
+                }
+                seen = ~0u64 >> (64 - lanes(t.ty)) as u64;
+                v = self.val(f.b);
                 continue;
             }
             if w.inst == NONE || w.off < off || w.end - w.off != eb || (w.off - off) % eb != 0 {
@@ -20281,7 +20314,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         // A slot's address keeps its index: a constant offset past the slot in a path that never runs
         // would fail the verifier's check of slot accesses.
         let ix = int_bits(b, t.b);
-        if ix.is_some() && !slot_based(b, t.a) {
+        if ix == Some(0) {
+            // An index of 0 adds nothing, on a slot's address too.
+            t.b = VNONE;
+        } else if ix.is_some() && !slot_based(b, t.a) {
             // In 128 bits: a constant index times the scale may not fit 64.
             let off = (t.c as i32) as i128 + sign_extend(ix.unwrap(), type_bits(b.type_of(t.b), ptr)) as i128 * scale_of(
                 t,

@@ -97,7 +97,7 @@ their target's profile directory (`<out-dir>/<profile>/raw`). Module paths map t
   super_rt.h               # C backend header (src/emit/rt_h.spc): libc includes, arithmetic helpers, runtime prototypes
   std/
     rt/base.c              # the runtime module (traps, leak tracker, overflow report), as every module
-    rt/libc.c  rt/libm.c   # wasm only: the C library (std/rt/libc.spc, std/rt/libm.spc), with -fno-builtin
+    rt/libc.c  rt/libm.c   # wasm only: the C library (std/rt/libc.spc, std/rt/libm.spc), each function no_builtin
   __sc_fwd.h               # runtime and extern-block includes, dyn/extern declarations, shared by every TU
   __sc_t/app__Point.h      # one definition header per type: its typedef, definition and layout check
   app.h  app.c             # per module: .h holds its prototypes and `_ret` typedefs, .c the TU body

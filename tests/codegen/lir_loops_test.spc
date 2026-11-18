@@ -6023,6 +6023,41 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
     }
 }
 
+// `[x; N]` of bytes as a vector: the fill of a private slot through its address plus an index of 0, then
+// loads of its 16-byte parts. The index of 0 folds on a slot's address too, each load is the splat of the
+// fill's byte, and the fill and the slot go.
+@test
+fn a_byte_fill_read_as_a_vector_is_a_splat() {
+    let src = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, i8) -> void
+  slot s0 size 32 align 0
+b0(v0: ptr, v1: i8):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 32
+  v4 = slotaddr s0
+  v5 = ptradd v4, v2 * 1
+  memset v5, v1, v3
+  v6 = load.v16i8 v4 align 0
+  v7 = load.v16i8 v4+16 align 0
+  store v6, v0 align 0
+  store v7, v0+16 align 0
+  ret
+)";
+    let mut err = String::new();
+    let mut after = lparse::parse(src, &mut err).unwrap();
+    after.cpu.vector = 16;
+    after.vops = VOPS_ALL;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+    let mut v = verify::Verifier::new();
+    let fb = after.syms[after.find_symbol("f") as usize].def;
+    assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+    let t = text_of(&after, "f");
+    assert(t.contains("splat.v16i8") && !t.contains("memset") && !t.contains("slotaddr"), t.as_str());
+}
+
 // A call of an intrinsic that is one lane-wise operation on whole vectors (`intrin::arith_form`: x86's
 // `_mm_add_ps`, `_mm_add_epi32`) becomes that operation, on the lanes its name gives (casts around it when
 // the vector type has other lanes), so the optimizer and the generator's operand forms see it; another

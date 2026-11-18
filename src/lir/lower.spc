@@ -4860,22 +4860,24 @@ extend Lower {
     // whole chunk is stored at the running offset, which grows by the row's lane count (a second table,
     // whose address an index reaches without an offset); the lanes that
     // follow the packed ones are saved first and written back last. Else the lane loop (`vop` `code`).
-    // VNONE when no entry swizzles the chunk's bytes or the lanes do not chunk.
+    // Where no entry swizzles a chunk's bytes (x86-64 before SSSE3), the lanes of 2 bytes or more of a vector
+    // of at least 16 bytes go one by one on the same condition: each lane stored at the running offset, which moves past an active one, the
+    // lane that follows the packed ones saved and written back. VNONE when the lanes do not chunk.
     fn compress_chunks(self: &mut Self, c: &mut cbe::CEmit, args: []Value, code: u16, rt: u8) Value {
         let vt = self.vty(args[3]);
         let lb = type_bytes(lane_type(vt), self.pkg.ptr_bytes);
         let n = lanes(vt);
         let mut cb: u32 = ast::pick(n * lb >= 16, 16u32, 8u32);
         let mut swz = String::new();
-        if !c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, cb, &mut swz) && cb == 16 {
+        let mut byt = c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, cb, &mut swz);
+        if !byt && cb == 16 {
             cb = 8;
             swz.clear();
-            if !c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, 8, &mut swz) {
-                return VNONE;
-            }
+            byt = c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, 8, &mut swz);
         }
-        let cl = cb / lb;
-        if swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0 {
+        // No entry: the lanes go one by one (below), a chunk of one lane.
+        let cl = ast::pick(byt, cb / lb, 1u32);
+        if byt && (swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0) || !byt && (lb < 2 || n * lb < 16) {
             return VNONE;
         }
         // Row r of the table: the bytes of the lanes of mask r in order, then the others. Byte r of the
@@ -4898,7 +4900,7 @@ extend Lower {
             tc.push_byte(r.count_ones() as u8);
         }
         let it = int_type(self.pkg.ptr_bytes);
-        let bt = vec_type(T_I8, cb);
+        let bt = ast::pick(byt, vec_type(T_I8, cb), lane_type(vt));
         let m = self.int_to(args[2], T_I64, false);
         let cnt = self.inst(O_POPCNT, T_I64, 0, m, VNONE, VNONE);
         let st = self.int_to(args[1], it, false);
@@ -4931,6 +4933,27 @@ extend Lower {
         let p = self.ptradd(ptr, st, lb, 0);
         let end = self.ptradd(p, cw, lb, 0);
         let saved = self.load(bt, end, 0, true);
+        if !byt {
+            // Every lane is stored at the running offset, which moves past an active one: no test of a
+            // lane, and the last store reaches at most the lane saved above.
+            let mut k = self.iconst(it, 0);
+            for j in 0..n {
+                let e = self.inst(O_VEXTRACT, bt, j as u16, args[3], VNONE, VNONE);
+                self.store(e, self.ptradd(p, k, lb, 0), 0, true);
+                let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, j), VNONE);
+                let bit = self.arith(O_AND, sh, self.iconst(T_I64, 1));
+                k = self.arith(O_ADD, k, self.int_to(bit, it, false));
+            }
+            self.store(saved, end, 0, true);
+            let ej = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, ej, VNONE, VNONE);
+            self.b.begin(sb);
+            let _ = self.vop(code, rt, args, VNONE);
+            let ej2 = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, ej2, VNONE, VNONE);
+            self.b.begin(join);
+            return self.int_to(cnt, rt, false);
+        }
         let s = self.rodata(&mut tb);
         let ks = self.sym_of(s);
         let tbl = self.inst(O_SYMADDR, T_PTR, 0, ks, 0, VNONE);

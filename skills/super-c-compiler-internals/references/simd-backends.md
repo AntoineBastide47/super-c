@@ -256,7 +256,9 @@ that holds numbers, and x86-64 keeps an accumulator loop's vectors in registers;
 path's, and the native one's under AVX10.2), and `compress_store` moves each chunk's active lanes to the
 front by the `u8` `swizzle_zero` entry through a table row of the chunk's mask bits, the rows' lane
 counts in a second table, the lane loop a rare block that runs only where the output ends within a
-chunk of the packed lanes (`compress_chunks`).
+chunk of the packed lanes (`compress_chunks`); where no entry swizzles bytes (x86-64 before SSSE3) the
+lanes of 2 bytes or more of a vector of at least 16 bytes go one by one without a test, each stored at the running offset, which moves
+past an active one.
 
 ## New instruction sets
 

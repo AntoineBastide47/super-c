@@ -21097,7 +21097,8 @@ int main(void) {
 // (VEXTRACTF128, VINSERTF128), an access through a pointer under a constant mask of the first lanes
 // (VBLENDPS with the fallback; the store from the register's parts), an unchecked gather of every lane
 // (VGATHERDPS, VPGATHERQQ: three in the object, none in the baseline one) and a sum of bytes (PSADBW).
-// Every target gives the C results.
+// arm64 reads and writes lane 0 of a masked access by LD1 and ST1 of the one lane. Every target gives the
+// C results.
 @test
 fn vector_masks_halves_and_masked_accesses_run() {
     let lir = M"(lir ptr 8
@@ -21213,6 +21214,15 @@ b0(v0: ptr, v1: ptr):
     }
     assert_eq(gathers[0], 0);
     assert_eq(gathers[1], 3);
+    // arm64: lane 0 of a masked access loads and stores at the pointer itself (LD1 and ST1 of one 4-byte
+    // lane), with no general register between.
+    let mut a64 = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64),
+        "the arm64 object",
+    );
+    assert(elf_text_count(&a64, 0xFFFFFC00, 0x0D408000) != 0, "LD1 of lane 0");
+    assert(elf_text_count(&a64, 0xFFFFFC00, 0x0D008000) != 0, "ST1 of lane 0");
     if !cli::has_cc() {
         return; // a C driver links it
     }

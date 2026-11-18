@@ -342,6 +342,9 @@ jobs:
             fi
             git fetch --depth 1 origin refs/tags/v0.17.26:refs/tags/v0.17.26
             git archive v0.17.26 | tar -x -C oldw
+            # The released compiler loads the std and ffi packed beside it: the tree's own would be a
+            # second copy of the same modules.
+            rm -rf oldw/std oldw/ffi
             if (cd oldw && awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f" && sh bench/simd_baseline/kernels.sh && "$od/super-c$x" bench --no-run --filter=simd_baseline); then
               cp "oldw/build/bench-bin$x" "build/bench-old$x"
             fi
@@ -400,23 +403,8 @@ jobs:
           cp build/bench-bin build/bench-nat.wasm
           ./super-c build build/bench_root.spc --profile=bench --emit-c --target=wasm --out-dir=build/ctree
           raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
-          # The tree's own C library (std/rt/libc, libm) compiles with -fno-builtin: at -O3 the C compiler
-          # must not turn a loop of `memset`'s helper into a call of `memset`.
-          ccw="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1"
-          fl="$(cat "$raw/__cflags") -O3"
-          top=$PWD
-          mkdir -p build/co
-          i=0
-          while IFS= read -r u; do
-            i=$((i + 1))
-            nb=
-            case $u in std/rt/libc*|std/rt/libm*) nb=-fno-builtin ;; esac
-            case $u in
-            *.o) cp "$raw/$u" "build/co/$i.o" ;;
-            *) (cd "$raw" && $ccw $fl $nb -c "$u" -o "$top/build/co/$i.o") ;;
-            esac
-          done < "$raw/__units"
-          $ccw $fl build/co/*.o $(cat "$raw/__ldflags") -o build/bench-clang.wasm
+          # The tree's `__cflags` build it whole (its C library's functions carry `no_builtin`).
+          CC="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1" sh ci/cc_tree.sh "$raw" build/bench-clang.wasm -O3
           for k in 1 2 3 4 5; do
             wasmtime build/bench-nat.wasm > "timing/nat-r$k.txt" 2>&1 || true
             wasmtime build/bench-clang.wasm > "timing/clang-r$k.txt" 2>&1 || true
