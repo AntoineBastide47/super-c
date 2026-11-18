@@ -157,8 +157,9 @@ pub(package) const FOLD_LANE0: u64 = 17592186044416;
 /// shift and an extension of its low bits extract (x86-64 `shr`, `movsx`/`movzx`).
 pub(package) const FOLD_XBFX_EXT: u64 = 35184372088832;
 /// `FOLD_VLDOP`: `FOLD_LDOP` for a load of a 16- or 32-byte vector, the second operand of a lane `fadd`,
-/// `fsub`, `fmul`, `fdiv`, `add`, `sub`, `and`, `or` or `xor` of its type (x86-64's VEX forms, which read
-/// memory of any alignment: `vaddps x, x, [m]`).
+/// `fsub`, `fmul`, `fdiv`, `add`, `sub`, `and`, `or` or `xor` of its type, or the first one of an integer
+/// `add`, `and`, `or` or `xor` (x86-64's VEX forms, which read memory of any alignment:
+/// `vaddps x, x, [m]`).
 pub(package) const FOLD_VLDOP: u64 = 70368744177664;
 /// `FOLD_ANY_BITS`: with `FOLD_ANY`, the `or` of the lanes of any integer vector (not only a lane mask) that
 /// equalities with 0 alone read folds into each: they test all its bits (x86-64's SSE4.1 `ptest`).
@@ -504,6 +505,10 @@ pub(package) struct Live {
     /// block that write the caller-saved homes (a call that returns), NONE for none.
     pub(package) cfirst: Vector<u32>,
     pub(package) clast: Vector<u32>,
+    /// As `cfirst` and `clast` for the instructions that write the vector file's caller-saved homes
+    /// (x86-64: not a portable vector operation computed lane by lane); empty: `cfirst` and `clast`.
+    pub(package) vfirst: Vector<u32>,
+    pub(package) vlast: Vector<u32>,
     /// Per instruction index and past the last (the generator's; empty: none), the instructions before it
     /// that write the caller-saved homes (`cfirst`): the calls a value lives across are counted from it.
     /// `wcount`: the same for the instructions that write the argument registers (`wfirst`).
@@ -599,6 +604,8 @@ extend Live {
             seg_mem: Vector::<bool>::new(),
             seg_past: Vector::<bool>::new(),
             cfirst: Vector::<u32>::new(),
+            vfirst: Vector::<u32>::new(),
+            vlast: Vector::<u32>::new(),
             clast: Vector::<u32>::new(),
             ccount: Vector::<u32>::new(),
             wcount: Vector::<u32>::new(),
@@ -2335,8 +2342,18 @@ extend Live {
         // At most LDOP_REACH steps.
         while u < end && u <= i + LDOP_REACH {
             let x = b.insts[u as usize];
+            // A cast nothing reads (the optimizer replaced it) is no use.
+            if x.op == O_BITCAST && self.count[u as usize] == 0 {
+                u += 1;
+                continue;
+            }
             if x.a == i || x.b == i || x.c == i {
-                return self.vop_mem(x, t.ty) && x.b == i && x.a != i && !self.pfold[u as usize] && !(is_inst(x.a) && self.pfold[x.a as usize]);
+                // The second operand; the first one too of an integer operation that commutes.
+                let comm = (x.op == O_ADD || x.op == O_AND || x.op == O_OR || x.op == O_XOR) && !is_float(
+                    lane_type(t.ty),
+                );
+                let o = ast::pick(x.b == i, x.a, x.b);
+                return self.vop_mem(x, t.ty) && (x.b == i || comm) && o != i && !self.pfold[u as usize] && !(is_inst(o) && self.pfold[o as usize]);
             }
             if writes_mem(x) {
                 return false;
@@ -5427,10 +5444,11 @@ extend Live {
 
     // Whether nothing writes the caller-saved registers (`wide`: the argument registers) while a value
     // lives over the positions `lo..=hi` (`ends`) of the block at layout position `q`: the block has no such
-    // instruction (`cfirst`, `clast`; `wfirst`, `wlast`); or the value is defined at or after its last one;
+    // instruction (`cfirst`, `clast`; `wfirst`, `wlast`; `vec`, a vector file's value: `vfirst`, `vlast`
+    // when the generator gives them); or the value is defined at or after its last one;
     // or its last read is before its first one, or is that one (which reads it in a caller-saved register,
     // but not in one that passes an argument).
-    const fn calm(self: &Self, b: &Body, q: u32, lo: u32, hi: u32, wide: bool) bool {
+    const fn calm(self: &Self, b: &Body, q: u32, lo: u32, hi: u32, wide: bool, vec: bool) bool {
         let np = self.order.len();
         if wide && self.wfirst.len() != np {
             return false;
@@ -5440,6 +5458,8 @@ extend Live {
         }
         let (cf, cl) = if wide {
             (self.wfirst[q as usize], self.wlast[q as usize])
+        } else if vec && self.vfirst.len() == np {
+            (self.vfirst[q as usize], self.vlast[q as usize])
         } else {
             (self.cfirst[q as usize], self.clast[q as usize])
         };
@@ -5604,10 +5624,10 @@ extend Live {
             m |= c;
         }
         if (w & WANT_SCRATCH) != 0 {
-            if past || self.calm(b, q, lo, hi, false) {
+            if past || self.calm(b, q, lo, hi, false, vf) {
                 m |= s;
             }
-            if wd != 0 && (self.calm(b, q, lo, hi, true) || past && self.calls_alone(b, q, lo, hi)) {
+            if wd != 0 && (self.calm(b, q, lo, hi, true, false) || past && self.calls_alone(b, q, lo, hi)) {
                 m |= wd;
             }
         }

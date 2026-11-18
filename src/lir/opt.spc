@@ -11577,7 +11577,7 @@ extend Opt {
             return true;
         } else if t.op == O_CALL && named_alloc(pk, b, t) == ALLOC_MEMCMP && self.memcmp_eq(pk, b, k, i) {
             return true;
-        } else if t.op == O_CALL && self.copysign_bits(pk, b, k, i) {
+        } else if t.op == O_CALL && (self.copysign_bits(pk, b, k, i) || self.lane_call(pk, b, k, i)) {
             return true;
         } else if t.op == O_CALL && t.ty != T_NONE && (pk.syms[b.syms[t.a as usize] as usize].fx & (FX_WRITE | FX_ARG)) == 0 {
             // A call of a function that writes no memory gives what an earlier one with the same
@@ -14091,6 +14091,58 @@ extend Opt {
         let p = self.cmp_into(pk, b, k, i, t, left, sel.b);
         let q = self.cmp_into(pk, b, k, i, t, left, sel.c);
         return self.made(pk, b, k, i, Inst { op: O_SELECT, ty: t.ty, aux: 0, a: sel.a, b: p, c: q });
+    }
+
+    // Call `i` of block `k` of an intrinsic of the target that is one lane-wise operation on whole vectors
+    // (`intrin::arith_form`), which one register of the body's processor holds: that operation on the lanes
+    // the name gives. The generators place it as they place a loop's own (in place, a load as its memory
+    // operand), and the walk numbers and hoists it as any other.
+    fn lane_call(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32) bool {
+        let t = b.insts[i as usize];
+        let s = pk.syms[b.syms[t.a as usize] as usize];
+        if !is_vec(t.ty) || s.kind != SK_FUNC || s.def != NONE || pk.isa.len() == 0 {
+            return false;
+        }
+        let n = pk.spell(s.name);
+        let (op, lb, fl) = intrin::arith_form(n);
+        let nb = type_bytes(t.ty, 8);
+        let unary = op == O_FSQRT;
+        if op == 0 || !intrin::has(pk.isa, n) || nb > pk.cpu_of(b).vector.max(16) || t.aux as u32 != ast::pick(
+            unary,
+            1u32,
+            2u32,
+        ) {
+            return false;
+        }
+        let x = self.val(b.pool[t.c as usize]);
+        let y = if unary {
+            VNONE
+        } else {
+            self.val(b.pool[t.c as usize + 1])
+        };
+        if b.type_of(x) != t.ty || !unary && b.type_of(y) != t.ty {
+            return false;
+        }
+        let lt = if fl {
+            ast::pick(lb == 4, T_F32, T_F64)
+        } else {
+            int_type(lb)
+        };
+        let vt = vec_type(lt, nb / lb);
+        if vt == t.ty {
+            b.insts[i as usize] = Inst { op: op, ty: vt, aux: 0, a: x, b: y, c: VNONE };
+        } else {
+            let xb = self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: vt, aux: 0, a: x, b: VNONE, c: VNONE });
+            let yb = if unary {
+                VNONE
+            } else {
+                self.made(pk, b, k, i, Inst { op: O_BITCAST, ty: vt, aux: 0, a: y, b: VNONE, c: VNONE })
+            };
+            let o = self.made(pk, b, k, i, Inst { op: op, ty: vt, aux: 0, a: xb, b: yb, c: VNONE });
+            b.insts[i as usize] = Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: o, b: VNONE, c: VNONE };
+        }
+        self.refold = true;
+        return true;
     }
 
     // Call `i` of block `k` of C's `copysign` or `copysignf`: the magnitude's bits and the sign's bit, in
@@ -20012,6 +20064,12 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return simplify_wide(b, i);
     }
     if is_vec(t.ty) {
+        // A vector's bits read as another type and back are the vector.
+        if t.op == O_BITCAST && (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_BITCAST && b.type_of(
+            b.insts[t.a as usize].a,
+        ) == t.ty {
+            return b.insts[t.a as usize].a;
+        }
         // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
         if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
             if splat_of(b, t.b) == Some(0) {

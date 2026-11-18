@@ -1186,6 +1186,10 @@ extend Gen {
             if self.calls(t) {
                 return false;
             }
+            // A cast that is `cur` itself: no instruction, its reads are `cur`'s.
+            if self.cr.lv.seen(u) == cur {
+                continue;
+            }
             lv::each_use(b, t, &mut us);
             let mut n: u32 = 0;
             for q in 0..us.len() {
@@ -1840,6 +1844,17 @@ extend Gen {
         return r != NOREG && self.plan_reg(i) == r && self.cr.owner[r as usize] == self.cr.vx(v);
     }
 
+    // Whether the result `i` goes over its operand `v` in register `r`: the plan holds `i` there
+    // (`planned`), or `v` is the loop header parameter the chain `i` starts ends in (`step_chain`), which
+    // `def_over` then gives `i`. An emitter of an operation that commutes writes over that operand.
+    fn over_first(self: &mut Self, i: u32, v: Value, r: u8) bool {
+        if r == NOREG || v == VNONE {
+            return false;
+        }
+        let x = self.cr.vx(v);
+        return self.planned(i, v, r) || self.cr.owner[r as usize] == x && self.step_chain(i, x, r);
+    }
+
     // The register the plan holds value index `x` in in the current block; NOREG for none.
     const fn plan_reg(self: &Self, x: u32) u8 {
         if !self.cr.lv.seg_val(x) {
@@ -1909,9 +1924,15 @@ extend Gen {
         // xmm0..xmm3 and its arguments' registers, the bare xmm homes).
         let mut leaf = true;
         let mut bare = true;
+        // `quiet`: no call that returns writes the vector homes (`vclob`): its intrinsics' registers are
+        // `iclob`'s, and a vector operation computed lane by lane writes none.
+        let mut quiet = true;
         for x in 0..ni {
             let t = b.insts[x];
             leaf = leaf && !(self.cret[x] && !self.rarec[x]) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !self.tls_call(
+                t,
+            );
+            quiet = quiet && !(self.cret[x] && self.vclob(t)) && t.op != O_SYS && t.op != O_VASTART && t.op != O_VAARG && !self.tls_call(
                 t,
             );
             bare = bare && !self.cret[x] && !(t.op == O_CALL && self.intrinsic(t.a).len() != 0);
@@ -1927,13 +1948,14 @@ extend Gen {
             }
         }
         // An xmm home: Microsoft x64's callee-saved ones, but in a body that calls nothing that returns
-        // its caller-saved xmm0..xmm3 first (`vscr`); System V's caller-saved ones, xmm4..xmm7 too in such a
-        // body. None that an intrinsic writes.
+        // its caller-saved xmm0..xmm3 first (`vscr`); System V's caller-saved ones, xmm4..xmm7 too in a
+        // body where no call that returns writes the vector homes (`quiet`). None that an intrinsic
+        // writes.
         self.vscr = if self.win && bare {
             VSCR_WIN_BARE
         } else if self.win {
             0
-        } else if bare {
+        } else if quiet {
             VSCR_SYSV_BARE
         } else {
             VSCR_SYSV
@@ -2084,6 +2106,8 @@ extend Gen {
         self.cr.lv.jcap.truncate(0);
         self.cr.lv.cfirst.truncate(0);
         self.cr.lv.clast.truncate(0);
+        self.cr.lv.vfirst.truncate(0);
+        self.cr.lv.vlast.truncate(0);
         for p in 0..self.cr.lv.order.len() {
             let k = self.cr.lv.order[p] as usize;
             let bk = b.blocks[k];
@@ -2091,6 +2115,8 @@ extend Gen {
             let mut calls = false;
             let mut cf = NONE;
             let mut cl = NONE;
+            let mut vf = NONE;
+            let mut vl = NONE;
             for i in bk.start..bk.start + bk.len {
                 let ni = self.need(i);
                 bn = bn.max(ni + ast::pick(k == 0 && !calls, pins, 0));
@@ -2099,7 +2125,13 @@ extend Gen {
                     cf = ast::pick(cf == NONE, i, cf);
                     cl = i;
                 }
+                if self.vpre[i as usize + 1] != self.vpre[i as usize] {
+                    vf = ast::pick(vf == NONE, i, vf);
+                    vl = i;
+                }
             }
+            self.cr.lv.vfirst.push(vf);
+            self.cr.lv.vlast.push(vl);
             self.cr.lv.jcap.push(self.xfix.count_ones() as u32 + self.xalloc.count_ones() as u32 - bn);
             self.cr.lv.cfirst.push(cf);
             self.cr.lv.clast.push(cl);
@@ -2577,8 +2609,7 @@ extend Gen {
 
     // `cpre` and `cpos`: the calls that return to a use (`clobbers`, not `dead_end`)
     // before each instruction index, and the blocks holding one before each layout position; `vpre` and
-    // `vpos` the same without the intrinsics, whose templates write xmm0 to xmm3 and their arguments'
-    // registers, no vector scratch home.
+    // `vpos` the same for the ones that write the vector homes (`vclob`).
     fn call_tables(self: &mut Self) {
         let b = self.cr.b();
         let ni = b.insts.len();
@@ -2589,17 +2620,22 @@ extend Gen {
         fill(&mut self.cret, ni, false);
         for i in 0..ni {
             let t = b.insts[i];
-            // A sibling call does not come back: the body around it may be a leaf.
-            let c = self.calls(t) && !lv::dead_end(unsafe &*self.pkg, b, &self.cr.lv, i, &mut self.cr.uses) && !(t.op == O_CALL && self.sib_shape(
-                i as u32,
-                t,
-            )) && !self.cr.mem_tail(i as u32, t);
+            // A sibling call does not come back: the body around it may be a leaf. A block out of the layout
+            // (the run-time copies' dispatch, which `dispatch` emits) has no code here.
+            let d = self.cr.lv.def_blk[i];
+            let c = self.cr.lv.pos[d as usize] != NONE && self.calls(t) && !lv::dead_end(
+                unsafe &*self.pkg,
+                b,
+                &self.cr.lv,
+                i,
+                &mut self.cr.uses,
+            ) && !(t.op == O_CALL && self.sib_shape(i as u32, t)) && !self.cr.mem_tail(i as u32, t);
             self.cret[i] = c;
             if c && self.rare(i as u32) {
                 self.rarec[i] = true;
             } else if c {
                 self.cpre[i + 1] = 1;
-                self.vpre[i + 1] = (!(t.op == O_CALL && self.intrinsic(t.a).len() != 0)) as u32;
+                self.vpre[i + 1] = self.vclob(t) as u32;
             }
         }
         let nq = self.cr.lv.order.len();
@@ -2620,6 +2656,18 @@ extend Gen {
             self.cpre[i + 1] += self.cpre[i];
             self.vpre[i + 1] += self.vpre[i];
         }
+    }
+
+    // Whether call `t` (`calls`) writes the vector homes: not an intrinsic, whose template writes xmm0 to
+    // xmm3 and its arguments' registers, and not a portable vector operation the body computes lane by
+    // lane, which writes the vector scratch registers and temporaries alone, but one that calls a C
+    // function (`vec_call2`: `fmod`, `fma`).
+    const fn vclob(self: &Self, t: Inst) bool {
+        if t.op == O_VOP {
+            let code = (t.aux & VOP_CODE) as u32;
+            return code == core::OP_REM || code == core::OP_SIMD + core::SIMD_FMA as u32;
+        }
+        return !(t.op == O_CALL && self.intrinsic(t.a).len() != 0);
     }
 
     // `clobbers` of `t` but a vector operation the body computes in registers (`ext_reg`, `idiom_reg`,
@@ -8366,11 +8414,13 @@ extend Gen {
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be. A written one is renamed only when it is the result's and the argument
-        // dies here: the result is then in the argument's register (`rres`).
+        // dies here, or is a loop header parameter the result's chain ends in (`step_chain`: the back
+        // edge alone writes it on): the result is then in the argument's register (`rres`).
         self.cren.truncate(0);
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
+        let mut stepped = false;
         // An argument a one-instruction three-operand template reads and overwrites, which lives on: its
         // sources read it in its register, the destination stays (`intrin::vsplit_dest`).
         let mut src: (u32, u32) = (99, 99);
@@ -8394,8 +8444,12 @@ extend Gen {
             if ok && intrin::vwrites(false, tx, pr) {
                 let rl = self.cr.lay.ret;
                 let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                if whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr && self.cr.dies(x) {
+                let over = whole && self.cr.lay.parts[rl.p0 as usize].reg as u32 == pr;
+                if over && self.cr.dies(x) {
                     rres = vr;
+                } else if over && self.cr.owner[vr as usize] == x && self.step_chain(i, x, vr) {
+                    rres = vr;
+                    stepped = true;
                 } else {
                     split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(false, tx, pr);
                     ok = split;
@@ -8952,6 +9006,18 @@ extend Gen {
                 let pa = self.cr.lay.parts[(rl.p0 + q) as usize];
                 self.store_part(pa, S1, pa.off);
             }
+            return true;
+        }
+        if stepped {
+            // The result holds the parameter's register from here (`def_over`): the edge's move vanishes.
+            self.chain_x = i;
+            self.chain_r = rres;
+            self.cr.lock |= bit(rres);
+            self.cr.set_owner(rres, i);
+            let w = self.cr.va.index_mut(i as usize);
+            w.reg = rres;
+            w.dirty = true;
+            w.clean = false;
             return true;
         }
         if chained {
@@ -11130,7 +11196,13 @@ extend Gen {
     // memory when it is a folded load (`lv::FOLD_VLDOP`). A loop's accumulator takes the back edge's parameter
     // register (three operands: it may be either source's), else the result goes over an operand's register
     // that dies here.
-    fn vex_op(self: &mut Self, pfx: u32, mm: u32, opc: u32, l: bool, i: u32, xv: Value, yv: Value) {
+    fn vex_op(self: &mut Self, pfx: u32, mm: u32, opc: u32, l: bool, i: u32, xv0: Value, yv0: Value) {
+        // The first operand of an integer operation that commutes may be the folded load.
+        let (xv, yv) = if self.ld_folded(xv0) {
+            (yv0, xv0)
+        } else {
+            (xv0, yv0)
+        };
         let rx = self.vec_use(xv, self.vs0);
         if self.vc_folded(yv) {
             let mut r = self.def_shared(i, xv);
@@ -11161,7 +11233,10 @@ extend Gen {
             r = self.def_shared(i, yv);
         }
         if r == NOREG {
-            r = if self.planned(i, yv, ry) || self.dies_here(yv) && !self.dies_here(xv) {
+            // Over the operand the result goes over (`over_first`), else over one that dies here.
+            r = if self.over_first(i, yv, ry) || !self.over_first(i, xv, rx) && self.dies_here(yv) && !self.dies_here(
+                xv,
+            ) {
                 self.def_over(i, yv, ry)
             } else {
                 self.def_over(i, xv, rx)
@@ -11327,11 +11402,15 @@ extend Gen {
             NOREG
         };
         // The result over the register the first operand shares with it (`def_shared`) or frees
-        // (`def_over`); of a commutative integer operation, over the second's when it alone dies here.
+        // (`def_over`); of a commutative integer operation, over the second's when the result goes there
+        // (`over_first`: the plan's register, a loop's accumulator), or when it alone dies here and the
+        // result does not go over the first's.
         let comm = op == O_ADD || op == O_MUL || op == O_AND || op == O_OR || op == O_XOR;
         let mut rd = self.def_shared(i, xv);
         if rd == NOREG {
-            rd = if comm && yv != VNONE && !self.dies_here(xv) && self.dies_here(yv) {
+            rd = if comm && yv != VNONE && (self.over_first(i, yv, ry) || !self.over_first(i, xv, rx) && !self.dies_here(
+                xv,
+            ) && self.dies_here(yv)) {
                 self.def_over(i, yv, ry)
             } else {
                 self.def_over(i, xv, rx)
@@ -13145,7 +13224,9 @@ extend Gen {
                     r = self.def_shared(i, ops[1]);
                 }
                 if r == NOREG {
-                    r = if self.planned(i, ops[1], ry + V0) || self.dies_here(ops[1]) && !self.dies_here(ops[0]) {
+                    r = if self.over_first(i, ops[1], ry + V0) || !self.over_first(i, ops[0], rx + V0) && self.dies_here(
+                        ops[1],
+                    ) && !self.dies_here(ops[0]) {
                         self.def_over(i, ops[1], ry + V0)
                     } else {
                         self.def_over(i, ops[0], rx + V0)

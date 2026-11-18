@@ -304,6 +304,8 @@ jobs:
           name: compiler-${{ matrix.target }}
 
       - name: Time the kernels
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -u
           x=${BINEXT:-}
@@ -324,11 +326,25 @@ jobs:
           "./super-c$x" build build/bench_root.spc --profile=bench --emit-c --out-dir=build/ctree
           raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
           sh ci/cc_tree.sh "$raw" "build/bench-clang$x" -O3
+          # The released compiler (v0.17.26: run-time copies that mix the legacy SSE encoding with ymm
+          # registers) builds the same bench, for a comparison on this runner.
+          if [ "${{ matrix.target }}" = linux ]; then
+            mkdir -p old
+            gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-linux-x86_64.tar.gz -D old
+            tar xzf old/super-c-linux-x86_64.tar.gz -C old
+            od=$PWD/old/super-c-linux-x86_64
+            if SC_STD_DIR="$od/std" "$od/super-c" bench --no-run --filter=simd_baseline; then
+              cp build/bench-bin build/bench-old
+            fi
+          fi
           for k in 1 2 3 4 5; do
             "build/bench-nat$x" > "timing/nat-r$k.txt" 2>&1 || true
             "build/bench-clang$x" > "timing/clang-r$k.txt" 2>&1 || true
             if [ "${{ matrix.target }}" != linux_arm64 ]; then
               SC_SIMD_LEVEL=0 "build/bench-nat$x" > "timing/base-r$k.txt" 2>&1 || true
+            fi
+            if [ -x build/bench-old ]; then
+              build/bench-old > "timing/old-r$k.txt" 2>&1 || true
             fi
           done
           grep -c '^simd' timing/*.txt

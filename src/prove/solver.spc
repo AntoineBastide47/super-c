@@ -1,5 +1,6 @@
-// The solvers of the contract prover. `implies` splits the hypotheses and the negated goal into
-// branches (`close`); each branch is refuted by two theory solvers that exchange equalities:
+// The solvers of the contract prover. `implies` is a conflict-driven search (lazy DPLL(T)): the SAT
+// solver finds a model of the boolean skeleton of the hypotheses and the negated goal, and the theory
+// literals the model needs (a branch) are refuted by two theory solvers that exchange equalities:
 //
 // - congruence closure merges the terms the branch states equal, and every two applications of one
 //   operation over equal operands (each operation is an uninterpreted function to it);
@@ -15,9 +16,9 @@
 // then by the theories.
 //
 // The solvers are not trusted: each refutation writes a proof (`kernel::Proof`, or LRAT for SAT), a
-// branch counts as refuted only when the kernel accepts it, and the split into branches counts only
-// when the kernel accepts an LRAT proof that the branches cover every case. Every search has a fixed
-// bound; past one, the answer is "not proved".
+// branch counts as refuted (a lemma) only when the kernel accepts it, and the search counts only when
+// the kernel accepts an LRAT proof that the skeleton and the lemmas have no model. Every search has a
+// fixed bound; past one, the answer is "not proved".
 import ast::ast as *;
 import prove::terms as *;
 import prove::kernel as *;
@@ -26,7 +27,7 @@ import prove::sat as *;
 
 // The blocks, chain blocks and solver steps one body may spend.
 pub(package) const STEP_BUDGET: u32 = 4000000;
-// The branches of one refutation.
+// The SAT models of one refutation.
 const SPLITS_MAX: u32 = 256;
 // The levels of `and`, `or` and `not` that `refuted` reads.
 const REFUTE_DEPTH: u32 = 8;
@@ -325,8 +326,17 @@ extend<const B: usize> Lp<B> {
         };
     }
 
-    // Set up the rows `rows` (terms in `pool`). False when the tableau is over its bound.
-    fn load(self: &mut Self, tm: &Terms<B>, rows: &Vector<LRow<B>>, pool: &Vector<LinTerm<B>>) bool {
+    // Set up the rows `rows` (terms in `pool`), each atom as near 0 as its bounds allow, or with
+    // `from_warm` at its value in `warm` within them (an earlier integer model: the rows it held hold
+    // again, and only the others take pivots). False when the tableau is over its bound.
+    fn load(
+        self: &mut Self,
+        tm: &Terms<B>,
+        rows: &Vector<LRow<B>>,
+        pool: &Vector<LinTerm<B>>,
+        warm: &Map<u32, Num<B>>,
+        from_warm: bool,
+    ) bool {
         self.atom.clear();
         self.ix.clear();
         for j in 0..pool.len() {
@@ -364,13 +374,18 @@ extend<const B: usize> Lp<B> {
             self.hi.push(h);
             self.has_lo.push(lo.is_some());
             self.has_hi.push(hi.is_some());
-            // A start inside the bounds, as near 0 as they allow.
-            let v = if lo.is_some() && Num::<B>::zero() < l {
+            let mut w = Num::<B>::zero();
+            if from_warm {
+                if let Some(x) = warm.get(&t) {
+                    w = *x;
+                }
+            }
+            let v = if lo.is_some() && w < l {
                 l
-            } else if hi.is_some() && h.is_negative() {
+            } else if hi.is_some() && h < w {
                 h
             } else {
-                Num::<B>::zero()
+                w
             };
             self.val.push(q_int(v));
             self.lo_r.push(RowRef { i: t, kind: RW_LO });
@@ -780,42 +795,64 @@ struct Edge {
     kind: u8,
 }
 
-// ---- the branches ----------------------------------------------------------------------------------
-
-// One branch of a refutation: the formulas still to split (`term << 1 | polarity`) and the theory
-// literals it states (`blast::tlit`).
-struct Branch {
-    todo: Vector<u64>,
-    lits: Vector<u64>,
-    // The formulas that split the branch, put off until the theories fail without them (`close`), and
-    // the literal count of the last such attempt.
-    split: Vector<u64>,
-    tried: usize,
-    // The goal's first literal, or NONE_LIT: the bits of the literals that share its unknowns decide the
-    // branch (`Solver::cone`).
-    root: u64,
-}
-
 const NONE_LIT: u64 = 0xFFFFFFFFFFFFFFFF;
 
-extend Branch {
-    fn copy(self: &Self) Branch {
-        return Branch {
-            todo: self.todo.clone(),
-            lits: self.lits.clone(),
-            split: self.split.clone(),
-            tried: self.tried,
-            root: self.root,
-        };
+// A union-find over 64-bit keys (`Solver::suggest`): `node` names a key's node, `join` merges two
+// components, `find` names a node's component.
+struct KeyFind {
+    ix: Map<u64, u32>,
+    up: Vector<u32>,
+}
+
+extend KeyFind {
+    fn new() KeyFind {
+        return KeyFind { ix: Map::<u64, u32>::new(), up: Vector::<u32>::new() };
     }
 
-    // Adds literal `l`, the goal's (`from_goal`) first as the root.
-    fn push_lit(self: &mut Self, l: u64, from_goal: bool) {
-        if from_goal && self.root == NONE_LIT {
-            self.root = l;
+    fn node(self: &mut Self, key: u64) u32 {
+        if let Some(n) = self.ix.get(&key) {
+            return *n;
         }
-        self.lits.push(l);
+        let n = self.up.len() as u32;
+        self.ix.insert(key, n);
+        self.up.push(n);
+        return n;
     }
+
+    // Path halving: each step points a node at its grandparent. A path has fewer steps than nodes.
+    const fn find(self: &mut Self, n0: u32) u32 {
+        let mut n = n0;
+        for _s in 0..self.up.len() {
+            if self.up[n as usize] == n {
+                break;
+            }
+            let g = self.up[self.up[n as usize] as usize];
+            self.up.set(n as usize, g);
+            n = g;
+        }
+        return n;
+    }
+
+    const fn join(self: &mut Self, a: u32, b: u32) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        if ra != rb {
+            self.up.set(ra.max(rb) as usize, ra.min(rb));
+        }
+    }
+}
+
+// The failed literal sets one walk keeps (`Solver::fails`).
+const FAILS_KEPT: usize = 16384;
+
+// A hash of the set of theory literals `lits` (its order does not count).
+fn lits_hash(lits: &Vector<u64>) u64 {
+    let mut s = lits.clone();
+    s.sort();
+    let mut h: u64 = 0xCBF29CE484222325;
+    for j in 0..s.len() {
+        h = (h ^ s[j]).wrapping_mul(0x100000001B3);
+    }
+    return h;
 }
 
 const fn pair(a: u32, b: u32) u64 {
@@ -823,6 +860,19 @@ const fn pair(a: u32, b: u32) u64 {
 }
 
 pub(package) struct Solver<const B: usize> {
+    // The roots of the last closure's terms (`cc_build`), and whether its term table holds them.
+    cc_roots: Vector<u32>,
+    cc_valid: bool,
+    // The literal sets the walk's solvers did not refute (`lemma_with`): each one's model, the atoms
+    // `fatom` and values `fval` in [fstart[e], fstart[e + 1]); `sat_cut` when the steps left stopped the
+    // last SAT run.
+    fails: Map<u64, u32>,
+    fatom: Vector<u32>,
+    fval: Vector<Num<B>>,
+    fstart: Vector<u32>,
+    sat_cut: bool,
+    // The value of each atom in the last integer model of the walk's simplex (`implied`).
+    warm: Map<u32, Num<B>>,
     pub(package) steps: u32, // the steps spent, against `STEP_BUDGET` with the walk's
     // The steps a check may reach: STEP_BUDGET, or fewer for a stage that rarely proves (`Prover::holds_in`).
     pub(package) limit: u32,
@@ -895,7 +945,17 @@ pub(package) struct Solver<const B: usize> {
 
 extend<const B: usize> Solver<B> {
     pub(package) fn new() Solver<B> {
+        let mut fstart = Vector::<u32>::new();
+        fstart.push(0);
         return Solver::<B> {
+            cc_roots: Vector::<u32>::new(),
+            cc_valid: false,
+            fails: Map::<u64, u32>::new(),
+            fatom: Vector::<u32>::new(),
+            fval: Vector::<Num<B>>::new(),
+            fstart: fstart,
+            sat_cut: false,
+            warm: Map::<u32, Num<B>>::new(),
             steps: 0,
             limit: STEP_BUDGET,
             stop_on_ovf: false,
@@ -958,12 +1018,6 @@ extend<const B: usize> Solver<B> {
         return self.steps <= self.limit && !self.gave_up;
     }
 
-    // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
-    // model. Each formula splits into branches; each branch closes on a contradiction of its boolean
-    // literals, or its theory literals are a lemma: the theory solvers refute them (`refute`), or, with
-    // `bits`, a SAT refutation of their bits does when they hold a bit operation. Then the skeleton of
-    // the formulas and the lemmas' clauses must have no model: the kernel checks that the split covers
-    // every case.
     // Whether a simplex ran out of the numbers' bits since `clear_overflow`: wider numbers may prove what
     // these did not.
     pub(package) const fn overflowed(self: &Self) bool {
@@ -980,6 +1034,13 @@ extend<const B: usize> Solver<B> {
         self.lp.ovf = false;
     }
 
+    // Whether the hypotheses `hyps` imply `goal`: the hypotheses and the negated goal have no integer
+    // model. The SAT solver finds a model of the skeleton of the hypotheses, the negated goal and the
+    // lemmas' negations; the theory literals the model needs (`model_lits`) go to the theories
+    // (`lemma_with`): the theory solvers refute them (`refute`), or, with `bits`, a SAT refutation of
+    // their bits does when they hold a bit operation. The refutation gives a lemma, its literals the
+    // core of the proof, which the next skeleton excludes. No model: the kernel checks that the skeleton
+    // and the lemmas have none (LRAT, `Kernel::covered`).
     pub(package) fn implies(self: &mut Self, tm: &Terms<B>, hyps: &Vector<u32>, goal: u32, bits: bool) bool {
         self.model.clear();
         self.mval.clear();
@@ -991,40 +1052,233 @@ extend<const B: usize> Solver<B> {
                 return true;
             }
         }
-        // Past the limit (a capped check's): no setup charged again.
         if self.steps > self.limit {
             return false;
         }
         self.kn.begin();
-        let mut b0 = Branch {
-            todo: Vector::<u64>::new(),
-            lits: Vector::<u64>::new(),
-            split: Vector::<u64>::new(),
-            tried: 0,
-            root: NONE_LIT,
-        };
-        // Each formula to do: its term, whether the goal's (2), its polarity (1).
-        for j in 0..hyps.len() {
-            b0.todo.push(hyps[j] as u64 << 2 | 1);
-        }
-        b0.todo.push(goal as u64 << 2 | 2);
-        let mut open = Vector::<Branch>::new();
-        open.push(b0);
-        let mut splits: u32 = 0;
-        for _b in 0..SPLITS_MAX + 1 {
-            if open.len() == 0 {
-                return self.kn.seal(tm, hyps, goal) && self.covered();
+        let mut lits = Vector::<u64>::new();
+        let mut cuts = Vector::<u32>::new();
+        let mut part = Vector::<u64>::new();
+        for _r in 0..SPLITS_MAX + 1 {
+            if !self.kn.seal(tm, hyps, goal) {
+                return false;
             }
-            let mut br = open.pop().unwrap();
-            switch self.close(tm, &mut br, &mut open, &mut splits, bits) {
-                Some(closed) => {
-                    if !closed && !self.lemma(tm, &br.lits, br.root, bits) {
-                        return false;
+            let r = self.sat.solve(self.kn.skeleton(), self.sat_budget(SAT_STEPS));
+            if !self.spend(self.sat.steps / SAT_STEP_COST) {
+                return false;
+            }
+            if r == SAT_REFUTED {
+                return self.kn.covered(&self.sat.proof);
+            }
+            if r != SAT_MODEL {
+                return false;
+            }
+            let mut root = NONE_LIT;
+            lits.clear();
+            cuts.clear();
+            if !self.model_lits(tm, hyps, goal, &mut lits, &mut cuts, &mut root) {
+                return false;
+            }
+            // The literals before a choice (`model_lits`), at the first, second, fourth.. choice: fewer
+            // literals give the theories fewer rows, and a lemma of fewer choices excludes more models.
+            // Then all of them, with the model's guesses.
+            let mut done = false;
+            let mut prev: usize = 0;
+            let mut q: usize = 0;
+            while q < cuts.len() {
+                let n = cuts[q] as usize;
+                q = pick(q == 0, 1usize, q * 2);
+                if n == 0 || n == prev || n >= lits.len() {
+                    continue;
+                }
+                prev = n;
+                part.clear();
+                for i in 0..n {
+                    part.push(lits[i]);
+                }
+                if self.lemma_with(tm, &part, root, bits, false) {
+                    done = true;
+                    break;
+                }
+            }
+            if !done && !self.lemma_with(tm, &lits, root, bits, true) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    // Whether the SAT model fixes the case of split formula `t` at decision level 0: the order of an
+    // integer disequality, the side of a disjunction that holds (of a conjunction that fails), both
+    // sides of an equality of booleans (`model_lits`).
+    fn forced(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>, lv: &mut Map<u32, u32>) bool {
+        let x = tm.at(t);
+        if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) {
+            let a = self.kn.skel().atom_var(t, SEL_LT);
+            return a != NONE && self.sat.level_of(a) == 0;
+        }
+        return self.model_level(tm, t, memo, lv) == 0;
+    }
+
+    // The decision level at which the SAT model fixes the value of formula `t` (NONE for an atom the
+    // skeleton does not hold): of a conjunction that fails (a disjunction that holds), its least part
+    // with that value; else its greatest part.
+    fn model_level(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>, lv: &mut Map<u32, u32>) u32 {
+        if let Some(v) = lv.get(&t) {
+            return *v;
+        }
+        let x = tm.at(t);
+        let l = if x.op == T_BOOL {
+            0
+        } else if x.op == T_NOT {
+            self.model_level(tm, x.a, memo, lv)
+        } else if x.op == T_AND || x.op == T_OR {
+            let v = self.model_val(tm, t, memo);
+            let (la, lb) = (self.model_level(tm, x.a, memo, lv), self.model_level(tm, x.b, memo, lv));
+            if x.op == T_OR == v {
+                let ma = pick(self.model_val(tm, x.a, memo) == v, la, NONE);
+                let mb = pick(self.model_val(tm, x.b, memo) == v, lb, NONE);
+                ma.min(mb)
+            } else {
+                la.max(lb)
+            }
+        } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+            self.model_level(tm, x.a, memo, lv).max(self.model_level(tm, x.b, memo, lv))
+        } else {
+            let a = self.kn.skel().atom_var(t, SEL_ATOM);
+            pick(a == NONE, NONE, self.sat.level_of(a))
+        };
+        lv.insert(t, l);
+        return l;
+    }
+
+    // The truth of formula `t` in the SAT model of the skeleton: its boolean structure over the atoms'
+    // values (`memo`); false for a formula the skeleton has no atom of.
+    fn model_val(self: &Self, tm: &Terms<B>, t: u32, memo: &mut Map<u32, bool>) bool {
+        if let Some(v) = memo.get(&t) {
+            return *v;
+        }
+        let x = tm.at(t);
+        let v = if x.op == T_BOOL {
+            !x.k.is_zero()
+        } else if x.op == T_NOT {
+            !self.model_val(tm, x.a, memo)
+        } else if x.op == T_AND {
+            self.model_val(tm, x.a, memo) && self.model_val(tm, x.b, memo)
+        } else if x.op == T_OR {
+            self.model_val(tm, x.a, memo) || self.model_val(tm, x.b, memo)
+        } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+            self.model_val(tm, x.a, memo) == self.model_val(tm, x.b, memo) == (x.op == T_EQ)
+        } else {
+            let a = self.kn.skel().atom_var(t, SEL_ATOM);
+            a != NONE && self.sat.holds(a)
+        };
+        memo.insert(t, v);
+        return v;
+    }
+
+    // The theory literals the SAT model of the skeleton needs to satisfy the hypotheses and the negated
+    // goal (a branch), into `out`: the formulas taken apart from the goal's back to the first
+    // hypothesis; a disjunction that holds, a conjunction that fails, an integer disequality and an
+    // equality of booleans are choices, which wait until the rest is taken apart, the goal's first (its
+    // literals are the ones the hypotheses' cases conflict with), and then take the side the model takes;
+    // a choice the SAT search fixed with no decision (`forced`) is taken at once. `cuts` gets the literal
+    // count before each choice. `root` is the goal's first literal. False past a bound. The theories
+    // stop at bounds, so the order of the literals counts.
+    fn model_lits(
+        self: &mut Self,
+        tm: &Terms<B>,
+        hyps: &Vector<u32>,
+        goal: u32,
+        out: &mut Vector<u64>,
+        cuts: &mut Vector<u32>,
+        root: &mut u64,
+    ) bool {
+        let mut memo = Map::<u32, bool>::new();
+        let mut lv = Map::<u32, u32>::new();
+        // Entries: term << 2 | 2 for the goal's | 1 for positive.
+        let mut todo = Vector::<u64>::new();
+        let mut split = Vector::<u64>::new();
+        for j in 0..hyps.len() {
+            todo.push(hyps[j] as u64 << 2 | 1);
+        }
+        todo.push(goal as u64 << 2 | 2);
+        for _s in 0..FACTS_MAX * 4 {
+            let mut deferred = false;
+            if todo.len() == 0 {
+                if split.len() == 0 {
+                    return true;
+                }
+                cuts.push(out.len() as u32);
+                let mut at = split.len() - 1;
+                for j in 0..split.len() {
+                    if (split[j] & 2) != 0 {
+                        at = j;
                     }
-                },
-                None => {
-                    return false;
-                },
+                }
+                todo.push(split.remove(at).unwrap());
+                deferred = true;
+            }
+            let e = todo.pop().unwrap();
+            let t = (e >> 2) as u32;
+            let g = e & 2;
+            let pos = (e & 1) != 0;
+            let x = tm.at(t);
+            let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
+                x.a,
+            ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
+            // A case the SAT search fixed with no decision (level 0) is no choice: taken at once, the
+            // literals before each choice hold all those the formula forces (unit propagation).
+            if splitting && !deferred && !self.forced(tm, t, &mut memo, &mut lv) {
+                split.push(e);
+                continue;
+            }
+            let mut lit = NONE_LIT;
+            if x.op == T_BOOL {
+                continue;
+            } else if x.op == T_NOT {
+                todo.push(x.a as u64 << 2 | g | (!pos) as u64);
+            } else if x.op == T_AND && pos || x.op == T_OR && !pos {
+                todo.push(x.a as u64 << 2 | g | pos as u64);
+                todo.push(x.b as u64 << 2 | g | pos as u64);
+            } else if x.op == T_AND || x.op == T_OR {
+                // A side the literals already make true satisfies it; one they make false leaves the other.
+                if self.refuted(tm, out, x.a, !pos, REFUTE_DEPTH) || self.refuted(tm, out, x.b, !pos, REFUTE_DEPTH) {
+                    continue;
+                }
+                let side = if self.refuted(tm, out, x.a, pos, REFUTE_DEPTH) {
+                    x.b
+                } else if self.refuted(tm, out, x.b, pos, REFUTE_DEPTH) || self.model_val(tm, x.a, &mut memo) == pos {
+                    x.a
+                } else {
+                    x.b
+                };
+                todo.push(side as u64 << 2 | g | pos as u64);
+            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) && x.op == T_EQ != pos {
+                // A disequality of integers: the order the model takes.
+                let lt = self.kn.skel().atom_var(t, SEL_LT);
+                lit = if lt != NONE && self.sat.holds(lt) {
+                    tlit(t, SEL_LT, true)
+                } else {
+                    tlit(t, SEL_GT, true)
+                };
+            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
+                // Equal booleans: the closure merges them, so that `f(a)` and `f(b)` are one value.
+                let va = self.model_val(tm, x.a, &mut memo);
+                let vb = self.model_val(tm, x.b, &mut memo);
+                if va == vb {
+                    lit = tlit(t, SEL_ATOM, x.op == T_EQ);
+                }
+                todo.push(x.a as u64 << 2 | g | va as u64);
+                todo.push(x.b as u64 << 2 | g | vb as u64);
+            } else {
+                lit = tlit(t, SEL_ATOM, pos);
+            }
+            if lit != NONE_LIT {
+                if g != 0 && *root == NONE_LIT {
+                    *root = lit;
+                }
+                out.push(lit);
             }
         }
         return false;
@@ -1032,22 +1286,61 @@ extend<const B: usize> Solver<B> {
 
     /// Drop the lemmas: the terms they name are gone.
     pub(package) fn forget(self: &mut Self) {
+        self.cc_valid = false;
+        self.fails.clear();
+        self.fatom.clear();
+        self.fval.clear();
+        self.fstart.truncate(1);
+        self.warm.clear();
         self.kn.forget();
     }
 
-    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts. With `bits`, a
-    // SAT refutation of the bits of the literals that share unknowns with the goal's (`cone`) first,
-    // when they hold a bit operation; then the theory solvers.
-    fn lemma(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool) bool {
-        return self.lemma_with(tm, lits, root, bits, true);
-    }
-
-    // `lemma`; without `guess` the theories test only the equalities of one linear form (`refute`).
+    // Whether the theory literals `lits` cannot all hold, by a proof the kernel accepts: the theory
+    // solvers, then with `bits` a SAT refutation of the bits of the literals that share unknowns with the
+    // goal's (`cone`), when they hold a bit operation. Without `guess` the theories test only the
+    // equalities of one linear form (`refute`).
     fn lemma_with(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
         // A lemma refutes literals that hold all of its own.
         if self.kn.subsumed(lits) {
             return true;
         }
+        // Literals the solvers did not refute earlier in the walk, with the same switches, are not tried
+        // again (the prover's stages and the search's models reach many such sets again): their model
+        // comes back. A hash that collides only loses a proof.
+        let mut key = lits_hash(lits) ^ root.wrapping_mul(0x9E3779B97F4A7C15);
+        key = key ^ bits as u64 << 1 ^ guess as u64 << 2 ^ self.nla_allowed as u64 << 3 ^ self.stop_on_ovf as u64 << 4;
+        if let Some(e) = self.fails.get(&key) {
+            let (start, end) = (self.fstart[(*e) as usize] as usize, self.fstart[(*e) as usize + 1] as usize);
+            self.model.clear();
+            self.mval.clear();
+            for q in start..end {
+                self.model.push(self.fatom[q]);
+                self.mval.push(self.fval[q]);
+            }
+            return false;
+        }
+        self.sat_cut = false;
+        if self.lemma_found(tm, lits, root, bits, guess) {
+            return true;
+        }
+        // A failure for want of steps is not one of the literals.
+        if self.steps <= self.limit && !self.gave_up && !self.sat_cut {
+            if self.fails.len() >= FAILS_KEPT {
+                self.fails.clear();
+                self.fatom.clear();
+                self.fval.clear();
+                self.fstart.truncate(1);
+            }
+            self.fails.insert(key, (self.fstart.len() - 1) as u32);
+            self.fatom.extend_copy(&self.model);
+            self.fval.extend_copy(&self.mval);
+            self.fstart.push(self.fatom.len() as u32);
+        }
+        return false;
+    }
+
+    // `lemma_with`, past the lemmas and the failures it keeps.
+    fn lemma_found(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, bits: bool, guess: bool) bool {
         // The theories first: where they decide, they cost a fraction of a SAT search.
         if let Some(built) = self.kn.state(tm, lits) {
             if self.refute(tm, built.get(), guess) && self.kn.lemma(tm, built, &self.pf) {
@@ -1075,7 +1368,9 @@ extend<const B: usize> Solver<B> {
         if sub.len() != 0 && Solver::<B>::has_bits(tm, &sub) && self.kn.blast(tm, &sub) {
             // An attempt before a split (no `guess`) has a smaller SAT search: its literals often have a
             // model the split then removes, and a search for that model can take all the steps.
-            let r = self.sat.solve(&self.kn.bits().cnf, self.sat_budget(pick(guess, SAT_STEPS, SAT_EARLY_STEPS)));
+            let cap = pick(guess, SAT_STEPS, SAT_EARLY_STEPS);
+            let budget = self.sat_budget(cap);
+            let r = self.sat.solve(&self.kn.bits().cnf, budget);
             let _ = self.spend(self.sat.steps / SAT_STEP_COST);
             if r == SAT_REFUTED {
                 return self.kn.blast_lemma(&self.sat.proof);
@@ -1084,6 +1379,8 @@ extend<const B: usize> Solver<B> {
                 // The goal's literals have a model; the others share none of its unknowns.
                 self.sat_model();
             }
+            // A search its own cap stopped stops there again; one the steps left stopped may not.
+            self.sat_cut = r == SAT_ABORT && budget < cap;
         }
         return false;
     }
@@ -1118,8 +1415,10 @@ extend<const B: usize> Solver<B> {
                 return self.refuted(tm, lits, v, pos == same, depth - 1);
             }
         }
+        // An equality of booleans, or a disequality of integers (its literals are its orders): false
+        // only where the literals state its negation.
         if (x.op == T_EQ || x.op == T_NE) && (tm.is_bool(x.a) || tm.is_int(x.a) && x.op == T_EQ != pos) {
-            return false;
+            return lits.contains(&tlit(t, SEL_ATOM, !pos));
         }
         // `v == k` is false where the literals state `v == k2` for another constant `k2`.
         if (x.op == T_EQ || x.op == T_NE) && x.op == T_EQ == pos && tm.is_int(x.a) {
@@ -1174,19 +1473,12 @@ extend<const B: usize> Solver<B> {
         return false;
     }
 
-    // Whether the skeleton and the lemmas have no model, by a proof the kernel accepts.
-    fn covered(self: &mut Self) bool {
-        let r = self.sat.solve(self.kn.skeleton(), self.sat_budget(SAT_STEPS));
-        let _ = self.spend(self.sat.steps / SAT_STEP_COST);
-        return r == SAT_REFUTED && self.kn.covered(&self.sat.proof);
-    }
-
     // The SAT steps one run may take: SAT_STEPS, and no more than the steps left.
     const fn sat_budget(self: &Self, cap: u32) u32 {
         return cap.min((self.limit + 1 - self.steps.min(self.limit)).saturating_mul(SAT_STEP_COST));
     }
 
-    // The literals of `lits` that share an unknown with `root` (the goal's first, `Branch.root`; the
+    // The literals of `lits` that share an unknown with `root` (the goal's first, `model_lits`; the
     // first literal when the goal has none), directly or through other literals: the rest hold none of
     // their unknowns, so they cannot help refute it. A union of the unknowns of each literal.
     fn cone(self: &mut Self, tm: &Terms<B>, lits: &Vector<u64>, root: u64, out: &mut Vector<u64>) {
@@ -1342,129 +1634,6 @@ extend<const B: usize> Solver<B> {
         return l == L_TRUE || l != L_FALSE && self.sat.holds(l >> 1) == ((l & 1) == 0);
     }
 
-    // Split the formulas of `br` until none is left: Some(true) when a contradiction of its boolean
-    // literals closed it, Some(false) when its theory literals remain to refute, None past the split
-    // bound.
-    fn close(self: &mut Self, tm: &Terms<B>, br: &mut Branch, open: &mut Vector<Branch>, splits: &mut u32, bits: bool) Option<
-        bool
-    > {
-        for _s in 0..LIN_MAX {
-            let mut deferred = false;
-            if br.todo.len() == 0 {
-                if br.split.len() == 0 {
-                    return Some(false);
-                }
-                // The literals so far may conflict already: then no split is needed. The model's guesses
-                // wait for the leaves.
-                if br.lits.len() > br.tried {
-                    br.tried = br.lits.len();
-                    if self.lemma_with(tm, &br.lits, br.root, bits, false) {
-                        return Some(true);
-                    }
-                }
-                // The goal's own cases first: its literals are what the hypotheses' cases close against.
-                let mut at = br.split.len() - 1;
-                for j in 0..br.split.len() {
-                    if (br.split[j] & 2) != 0 {
-                        at = j;
-                    }
-                }
-                br.todo.push(br.split.remove(at).unwrap());
-                deferred = true;
-            }
-            let e = br.todo.pop().unwrap();
-            let t = (e >> 2) as u32;
-            let g = e & 2;
-            let pos = (e & 1) != 0;
-            let x = tm.at(t);
-            let splitting = (x.op == T_AND || x.op == T_OR) && !(x.op == T_AND && pos || x.op == T_OR && !pos) || (x.op == T_EQ || x.op == T_NE) && (tm.is_int(
-                x.a,
-            ) && tm.is_int(x.b) && x.op == T_EQ != pos || tm.is_bool(x.a) && tm.is_bool(x.b));
-            // Every split waits for the literals: a side they already refute needs none (`refuted`).
-            if splitting && !deferred {
-                br.split.push(e);
-                continue;
-            }
-            if x.op == T_BOOL {
-                if x.k == wide::<B>(1) != pos {
-                    return Some(true);
-                }
-            } else if x.op == T_NOT {
-                br.todo.push(x.a as u64 << 2 | g | (!pos) as u64);
-            } else if x.op == T_AND && pos || x.op == T_OR && !pos {
-                br.todo.push(x.a as u64 << 2 | g | pos as u64);
-                br.todo.push(x.b as u64 << 2 | g | pos as u64);
-            } else if x.op == T_AND || x.op == T_OR {
-                // A side the branch's literals already make true satisfies the formula, which then states
-                // nothing the branch does not: no split.
-                if self.refuted(tm, &br.lits, x.a, !pos, REFUTE_DEPTH) || self.refuted(
-                    tm,
-                    &br.lits,
-                    x.b,
-                    !pos,
-                    REFUTE_DEPTH,
-                ) {
-                    continue;
-                }
-                // A side the branch's literals already make false leaves the other alone: no split.
-                if self.refuted(tm, &br.lits, x.a, pos, REFUTE_DEPTH) {
-                    br.todo.push(x.b as u64 << 2 | g | pos as u64);
-                    continue;
-                }
-                if self.refuted(tm, &br.lits, x.b, pos, REFUTE_DEPTH) {
-                    br.todo.push(x.a as u64 << 2 | g | pos as u64);
-                    continue;
-                }
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let mut other = br.copy();
-                other.todo.push(x.b as u64 << 2 | g | pos as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 2 | g | pos as u64);
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_int(x.a) && tm.is_int(x.b) && x.op == T_EQ != pos {
-                // A disequality of integers: one of its orders.
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let mut other = br.copy();
-                other.push_lit(tlit(t, SEL_GT, true), g != 0);
-                open.push(other);
-                br.push_lit(tlit(t, SEL_LT, true), g != 0);
-            } else if (x.op == T_EQ || x.op == T_NE) && tm.is_bool(x.a) && tm.is_bool(x.b) {
-                // Equal booleans: both hold or neither does.
-                *splits += 1;
-                if *splits > SPLITS_MAX || open.len() >= SPLITS_MAX as usize {
-                    return None;
-                }
-                let same = x.op == T_EQ == pos;
-                // The equality stays a literal of both sides: the closure merges the two booleans, so
-                // that `f(a)` and `f(b)` are one value (the skeleton spells it by its operands).
-                if same {
-                    br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
-                }
-                let mut other = br.copy();
-                other.todo.push(x.a as u64 << 2 | g);
-                other.todo.push(x.b as u64 << 2 | g | (!same) as u64);
-                open.push(other);
-                br.todo.push(x.a as u64 << 2 | g | 1);
-                br.todo.push(x.b as u64 << 2 | g | same as u64);
-            } else {
-                // An atom: closes against its own negation.
-                let want = tlit(t, SEL_ATOM, !pos);
-                for j in 0..br.lits.len() {
-                    if br.lits[j] == want {
-                        return Some(true);
-                    }
-                }
-                br.push_lit(tlit(t, SEL_ATOM, pos), g != 0);
-            }
-        }
-        return None;
-    }
-
     // Whether the theory solvers refute what branch `st` states; the proof is in `pf`, for the kernel.
     // When they do not, an integer model they found is kept (`model`).
     fn refute(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, guess: bool) bool {
@@ -1544,13 +1713,13 @@ extend<const B: usize> Solver<B> {
             }
             self.rows_of(tm, st, NONE, NONE);
             let upto = self.pf.facts.len() as u32;
-            let (mut r, mut root) = self.bb(tm);
+            let (mut r, mut root) = self.bb(tm, false);
             // A number past B bits stops the simplex: the rows of small numbers alone may conflict still
             // (`x <= 1`, `1 <= x`, `x <= 0` beside a row of 2^200), first those below the size whose
             // products fit B bits, then those below a quarter of B bits.
             for shift in [B / 2 - 8, B / 4] {
                 if r == L_ABORT && self.lp.ovf && self.keep_small_rows(shift) {
-                    let again = self.bb(tm);
+                    let again = self.bb(tm, false);
                     r = again.0;
                     root = again.1;
                 }
@@ -1709,7 +1878,7 @@ extend<const B: usize> Solver<B> {
                 }
             }
             let upto = self.pf.facts.len() as u32;
-            let (res, root) = self.bb(tm);
+            let (res, root) = self.bb(tm, false);
             if res == L_CONFLICT {
                 self.pf.trees.push(Tree { root: root, ha: NONE, hb: NONE, upto: upto });
                 self.pf.end = X_LA;
@@ -1724,7 +1893,9 @@ extend<const B: usize> Solver<B> {
     fn implied(self: &mut Self, tm: &Terms<B>, st: &Stated<B>, a: u32, b: u32) u32 {
         self.rows_of(tm, st, a, b);
         let upto = self.pf.facts.len() as u32;
-        let (r, root) = self.bb(tm);
+        // From the rows' model (`refute`): only the hypothesis's row is new. The model of a refutation's
+        // own rows starts as near 0 as it can: the equalities it suggests (`suggest`) come from it.
+        let (r, root) = self.bb(tm, true);
         if r != L_CONFLICT {
             return NONE;
         }
@@ -2129,7 +2300,7 @@ extend<const B: usize> Solver<B> {
         self.nla_on = true;
         self.rows_of(tm, st, NONE, NONE);
         let upto = self.pf.facts.len() as u32;
-        let (r, root) = self.bb(tm);
+        let (r, root) = self.bb(tm, false);
         self.nla_on = false;
         if r != L_CONFLICT {
             return false;
@@ -2447,8 +2618,6 @@ extend<const B: usize> Solver<B> {
         self.lrows.push(LRow::<B> { k: k, start: start, len: n as u32, r: r });
     }
 
-    // Branch and bound over the simplex rows (`lrows`): L_CONFLICT with the root of a tree that
-    // refutes them, L_FEAS with an integer model in `lp.val`, or L_ABORT past a bound.
     // Drop the simplex rows that hold a number of at least 2^`shift` in magnitude; whether some rows go
     // and some stay.
     fn keep_small_rows(self: &mut Self, shift: usize) bool {
@@ -2472,8 +2641,11 @@ extend<const B: usize> Solver<B> {
         return dropped && w != 0;
     }
 
-    fn bb(self: &mut Self, tm: &Terms<B>) (u8, u32) {
-        if !self.lp.load(tm, &self.lrows, &self.lpool) {
+    // Branch and bound over the simplex rows (`lrows`), from the last integer model with `from_warm`
+    // (`Lp::load`): L_CONFLICT with the root of a tree that refutes them, L_FEAS with an integer model
+    // in `lp.val` (kept in `warm`), or L_ABORT past a bound.
+    fn bb(self: &mut Self, tm: &Terms<B>, from_warm: bool) (u8, u32) {
+        if !self.lp.load(tm, &self.lrows, &self.lpool, &self.warm, from_warm) {
             return L_ABORT, NONE;
         }
         self.frames.clear();
@@ -2559,6 +2731,9 @@ extend<const B: usize> Solver<B> {
             if j == NONE {
                 let (fx, fj, fv) = self.fix(tm, cur);
                 if fx == FX_NONE {
+                    for a in 0..self.lp.na {
+                        self.warm.insert(self.lp.atom[a], self.lp.val[a].n);
+                    }
                     return L_FEAS, NONE;
                 }
                 if fx == FX_ROWS {
@@ -3097,66 +3272,118 @@ extend<const B: usize> Solver<B> {
 
     // ---- the closure ---------------------------------------------------------------------------
 
-    // The closure over the terms of `st` and their operands, each term its own class. False past
-    // CC_MAX terms.
+    // The closure over the terms of `st` and their operands, each term its own class. The terms take
+    // their indices literal by literal (`Stated.ends`): a literal's terms, then their operands not
+    // seen before, each term once. A set of literals keeps its terms' indices in a set that extends
+    // it, so a build over such a set registers only the new terms (`cc_roots`). False past CC_MAX
+    // terms.
     fn cc_build(self: &mut Self, tm: &Terms<B>, st: &Stated<B>) bool {
         self.cc_on = true;
-        self.cc_term.clear();
-        self.cc_ix.clear();
+        // The roots, literal by literal, and where each literal's end (`lend`).
         self.queue.clear();
-        for j in 0..st.eqs.len() {
-            self.queue.push((st.eqs[j] >> 32) as u32);
-            self.queue.push(st.eqs[j] as u32);
-        }
-        for j in 0..st.neqs.len() {
-            self.queue.push((st.neqs[j] >> 32) as u32);
-            self.queue.push(st.neqs[j] as u32);
-        }
-        for j in 0..st.lits.len() {
-            self.queue.push((st.lits[j] >> 1) as u32);
-        }
-        for j in 0..st.pool.len() {
-            self.queue.push(st.pool[j].atom);
-        }
-        // Each term, then its operands, in first-seen order: a term takes its index when first queued,
-        // so one shared by many others is queued once.
-        let roots = self.queue.len();
-        let mut q: usize = 0;
-        for j in 0..roots {
-            let t = self.queue[j];
-            if !self.cc_ix.contains_key(&t) {
-                self.cc_ix.insert(t, self.cc_term.len() as u32);
-                self.cc_term.push(t);
+        let mut lend = Vector::<u32>::with_capacity(st.ends.len() / 4);
+        let (mut r0, mut e0, mut d0, mut l0) = (0usize, 0usize, 0usize, 0usize);
+        for k in 0..st.ends.len() / 4 {
+            let (r1, e1, d1, l1) = (
+                st.ends[4 * k] as usize,
+                st.ends[4 * k + 1] as usize,
+                st.ends[4 * k + 2] as usize,
+                st.ends[4 * k + 3] as usize
+            );
+            for j in e0..e1 {
+                self.queue.push((st.eqs[j] >> 32) as u32);
+                self.queue.push(st.eqs[j] as u32);
             }
-        }
-        for _s in 0..CC_MAX + 1 {
-            if q == self.cc_term.len() || self.cc_term.len() > CC_MAX {
-                break;
+            for j in d0..d1 {
+                self.queue.push((st.neqs[j] >> 32) as u32);
+                self.queue.push(st.neqs[j] as u32);
             }
-            let t = self.cc_term[q];
-            q += 1;
-            tm.operands(t, &mut self.ops);
-            for j in 0..self.ops.len() {
-                let o = self.ops[j];
-                if !self.cc_ix.contains_key(&o) {
-                    self.cc_ix.insert(o, self.cc_term.len() as u32);
-                    self.cc_term.push(o);
+            for j in l0..l1 {
+                self.queue.push((st.lits[j] >> 1) as u32);
+            }
+            for r in r0..r1 {
+                let x = st.rows[r];
+                for j in x.start..x.start + x.len {
+                    self.queue.push(st.pool[j as usize].atom);
                 }
             }
+            lend.push(self.queue.len() as u32);
+            r0 = r1;
+            e0 = e1;
+            d0 = d1;
+            l0 = l1;
         }
-        if q != self.cc_term.len() || self.cc_term.len() > CC_MAX {
-            return false;
+        // The last build's roots, ending at a literal of these, start these: its terms stay.
+        let old = self.cc_roots.len();
+        let mut keep = self.cc_valid && old <= self.queue.len() && (old == 0 || lend.contains(&(old as u32)));
+        for j in 0..old {
+            keep = keep && self.queue[j] == self.cc_roots[j];
         }
+        if !keep {
+            self.cc_term.clear();
+            self.cc_ix.clear();
+            self.ostart.clear();
+            self.ostart.push(0);
+            self.olist.clear();
+            self.cc_roots.clear();
+        }
+        let n0 = self.cc_term.len();
+        let mut q = n0;
+        for k in 0..lend.len() {
+            let mut from = self.cc_roots.len();
+            if k > 0 {
+                from = from.max(lend[k - 1] as usize);
+            }
+            for j in from..lend[k] as usize {
+                let t = self.queue[j];
+                if !self.cc_ix.contains_key(&t) {
+                    self.cc_ix.insert(t, self.cc_term.len() as u32);
+                    self.cc_term.push(t);
+                }
+            }
+            // Their operands, each term once: at most CC_MAX + 1 terms in all.
+            for _s in 0..CC_MAX + 1 {
+                if q == self.cc_term.len() || self.cc_term.len() > CC_MAX {
+                    break;
+                }
+                let t = self.cc_term[q];
+                q += 1;
+                tm.operands(t, &mut self.ops);
+                for j in 0..self.ops.len() {
+                    let o = self.ops[j];
+                    if !self.cc_ix.contains_key(&o) {
+                        self.cc_ix.insert(o, self.cc_term.len() as u32);
+                        self.cc_term.push(o);
+                    }
+                }
+            }
+            if q != self.cc_term.len() || self.cc_term.len() > CC_MAX {
+                self.cc_valid = false;
+                return false;
+            }
+        }
+        // The new terms' operands.
         let n = self.cc_term.len();
-        if !self.spend(n as u32) {
+        let _ = self.ostart.pop();
+        for i in n0..n {
+            self.ostart.push(self.olist.len() as u32);
+            tm.operands(self.cc_term[i], &mut self.ops);
+            for j in 0..self.ops.len() {
+                self.olist.push(*self.cc_ix.get(&self.ops[j]).unwrap());
+            }
+        }
+        self.ostart.push(self.olist.len() as u32);
+        self.cc_roots.clear();
+        self.cc_roots.extend_copy(&self.queue);
+        self.cc_valid = true;
+        // Half a step per term for the classes below, half per new term for its registration.
+        if !self.spend(((n + n - n0) / 2) as u32) {
             return false;
         }
         self.rep.clear();
         self.next.clear();
         self.size.clear();
         self.ehead.clear();
-        self.ostart.clear();
-        self.olist.clear();
         self.seen.clear();
         self.sedge.clear();
         for i in 0..n {
@@ -3166,13 +3393,7 @@ extend<const B: usize> Solver<B> {
             self.ehead.push(NONE);
             self.seen.push(0);
             self.sedge.push(NONE);
-            self.ostart.push(self.olist.len() as u32);
-            tm.operands(self.cc_term[i], &mut self.ops);
-            for j in 0..self.ops.len() {
-                self.olist.push(*self.cc_ix.get(&self.ops[j]).unwrap());
-            }
         }
-        self.ostart.push(self.olist.len() as u32);
         // The users of each term: counted, then placed.
         self.ustart.clear();
         self.ulist.clear();
@@ -3649,7 +3870,8 @@ extend<const B: usize> Solver<B> {
     // The equalities to test: for two applications of one operation in different classes, each pair
     // of operands in different classes (`pairs_equal`), not tested before, into `out`, and into
     // `outsure` whether the pair has one linear form. Only pairs of applications where every
-    // differing operand is such a pair. False past a bound.
+    // differing operand is such a pair. False past a bound. The pairs come from buckets of one key
+    // (`app_key`), in the order of the applications.
     fn suggest(self: &mut Self, tm: &Terms<B>, out: &mut Vector<u64>, outsure: &mut Vector<bool>) bool {
         let mut apps = Vector::<u32>::new();
         for i in 0..self.cc_term.len() {
@@ -3660,42 +3882,137 @@ extend<const B: usize> Solver<B> {
         if apps.len() > APPS_MAX {
             return true;
         }
+        let mut uf = KeyFind::new();
+        for x in 0..apps.len() {
+            let u = apps[x] as usize;
+            for q in self.ostart[u]..self.ostart[u + 1] {
+                let a = self.olist[q as usize];
+                self.operand_nodes(tm, a, &mut uf);
+            }
+        }
+        // Each application's key (its high half) and its index in `apps`, sorted: one key's
+        // applications are adjacent, in their order. Keys that collide only add pairs to test.
+        let mut keyed = Vector::<u64>::with_capacity(apps.len());
+        for x in 0..apps.len() {
+            keyed.push(self.app_key(tm, apps[x], &mut uf) & 0xFFFFFFFF00000000 | x as u64);
+        }
+        keyed.sort();
+        // The pairs of each bucket [g, e), as `apps` indices `x << 32 | y`, x before y.
+        let mut pairs = Vector::<u64>::new();
+        let mut g: usize = 0;
+        for e in 1..keyed.len() + 1 {
+            if e < keyed.len() && keyed[e] >> 32 == keyed[g] >> 32 {
+                continue;
+            }
+            for x in g..e {
+                for y in x + 1..e {
+                    pairs.push(keyed[x] << 32 | keyed[y] & 0xFFFFFFFF);
+                }
+            }
+            g = e;
+        }
+        pairs.sort();
         let mut cand = Vector::<u64>::new();
         let mut sure = Vector::<bool>::new();
-        for x in 0..apps.len() {
-            let u = apps[x];
+        for p in 0..pairs.len() {
+            let u = apps[(pairs[p] >> 32) as usize];
+            let v = apps[(pairs[p] & 0xFFFFFFFF) as usize];
+            if self.rep[u as usize] == self.rep[v as usize] {
+                continue;
+            }
             let tu = tm.at(self.cc_term[u as usize]);
-            for y in x + 1..apps.len() {
-                let v = apps[y];
-                if self.rep[u as usize] == self.rep[v as usize] {
-                    continue;
-                }
-                let tv = tm.at(self.cc_term[v as usize]);
-                let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
-                if !same_op(&tu, &tv) || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
-                    continue;
-                }
-                if !self.spend(1) {
-                    return false;
-                }
-                if !self.pairs_equal(tm, u, v, false, &mut cand, &mut sure) && !(n == 2 && commutes(tu.op) && self.pairs_equal(
-                    tm,
-                    u,
-                    v,
-                    true,
-                    &mut cand,
-                    &mut sure,
-                )) {
-                    continue;
-                }
-                for j in 0..cand.len() {
-                    if !self.tested.contains_key(&cand[j]) {
-                        out.push(cand[j]);
-                        outsure.push(sure[j]);
-                    }
+            let tv = tm.at(self.cc_term[v as usize]);
+            let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
+            if !same_op(&tu, &tv) || n != self.ostart[v as usize + 1] - self.ostart[v as usize] {
+                continue;
+            }
+            if !self.spend(1) {
+                return false;
+            }
+            if !self.pairs_equal(tm, u, v, false, &mut cand, &mut sure) && !(n == 2 && commutes(tu.op) && self.pairs_equal(
+                tm,
+                u,
+                v,
+                true,
+                &mut cand,
+                &mut sure,
+            )) {
+                continue;
+            }
+            for j in 0..cand.len() {
+                if !self.tested.contains_key(&cand[j]) {
+                    out.push(cand[j]);
+                    outsure.push(sure[j]);
                 }
             }
         }
         return true;
+    }
+
+    // The bucket key of application `u` (`suggest`): its operation (`same_op`), its operand count, and
+    // each operand's component in `uf` (`operand_nodes`), the two unordered for an operation that
+    // commutes. Two applications `pairs_equal` accepts have one key.
+    fn app_key(self: &Self, tm: &Terms<B>, u: u32, uf: &mut KeyFind) u64 {
+        let x = tm.at(self.cc_term[u as usize]);
+        let n = self.ostart[u as usize + 1] - self.ostart[u as usize];
+        let mut h = hmix(0x9E3779B97F4A7C15, x.op as u64 << 32 | n as u64);
+        for i in 0..B / 64 {
+            h = hmix(h, x.k.limb(i));
+        }
+        if !exact_op(x.op) && x.op != T_INT {
+            h = hmix(h, x.w as u64 << 1 ^ x.sg as u64);
+        }
+        let mut ks = Vector::<u64>::with_capacity(n as usize);
+        for j in 0..n {
+            let a = self.olist[(self.ostart[u as usize] + j) as usize];
+            let r = uf.node(1u64 << 62 | self.rep[a as usize] as u64);
+            ks.push(uf.find(r));
+        }
+        if n == 2 && commutes(x.op) && ks[1] < ks[0] {
+            ks.swap(0, 1);
+        }
+        for j in 0..ks.len() {
+            h = hmix(h, ks[j]);
+        }
+        return h;
+    }
+
+    // Operand `a`'s class in `uf`, joined for an integer with its value in the simplex's model and
+    // with its linear form: operands of one class, of one value or of one form (the cases of
+    // `pairs_equal`) are in one component.
+    fn operand_nodes(self: &mut Self, tm: &Terms<B>, a: u32, uf: &mut KeyFind) {
+        let r = uf.node(1u64 << 62 | self.rep[a as usize] as u64);
+        let t = self.cc_term[a as usize];
+        if !tm.is_int(t) {
+            return;
+        }
+        if let Some(v) = self.model_value(tm, t) {
+            let mut h: u64 = 0;
+            for i in 0..B / 64 {
+                h = hmix(h, v.limb(i));
+            }
+            let f = uf.node(2u64 << 62 | h >> 2);
+            uf.join(r, f);
+        }
+        self.lin.clear();
+        let mut k = Num::<B>::zero();
+        if !lin_form(tm, t, Num::<B>::one(), &mut k, &mut self.lin, &mut self.stack) {
+            return;
+        }
+        let n = self.lin.len();
+        if let Some(m) = merge_terms(&mut self.lin, 0, n) {
+            let mut h: u64 = 0;
+            for i in 0..B / 64 {
+                h = hmix(h, k.limb(i));
+            }
+            for j in 0..m {
+                h = hmix(h, self.lin[j].atom);
+                for i in 0..B / 64 {
+                    h = hmix(h, self.lin[j].c.limb(i));
+                }
+            }
+            let f = uf.node(3u64 << 62 | h >> 2);
+            uf.join(r, f);
+        }
     }
 }
