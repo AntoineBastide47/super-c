@@ -265,13 +265,19 @@ pub(package) struct Target {
     pub(package) features: cf::CpuFeatureSet,
     /// The features no machine of the target has.
     pub(package) never: cf::CpuFeatureSet,
-    /// The features an optimized build chooses at run time beyond `features` (`--target-feature` form):
-    /// one level of `simd_levels`, whose copies the native code generator makes (arm64 Linux: LSE and
-    /// RCPC, the copies of the functions whose atomics they change). Empty for none.
+    /// The levels an optimized build chooses at run time beyond `features`, `;` between levels, each a
+    /// `--target-feature` list holding the one before: the `simd_levels`, whose copies the native code
+    /// generators make (arm64 Linux: LSE and RCPC, then CSSC too, the copies of the functions those
+    /// change). Empty for none.
     pub(package) run_time: str<'static>,
-    /// The `getauxval(AT_HWCAP)` bits that report `run_time`'s features: the native registry's start-up
-    /// reads them (no CPU detector module joins the program).
-    pub(package) run_time_hwcap: u64,
+    /// Per level of `run_time`, the `getauxval(AT_HWCAP)` and `getauxval(AT_HWCAP2)` bits that report its
+    /// features (two words a level, up to two levels): the native registry's start-up reads them (no CPU
+    /// detector module joins the program). Zeros for none.
+    pub(package) run_time_hwcap: [u64; 4],
+    /// The C compiler's atomics go through compiler-rt's helpers (`-moutline-atomics`), which choose LSE or
+    /// exclusive loads and stores by the CPU once at start-up, where the build's features lack LSE: an
+    /// arm64 target whose C tree is its only build (Windows arm64, no native backend) takes LSE so.
+    pub(package) outline_atomics: bool,
     /// How an arm64 `@constant_time` body turns on PSTATE.DIT (data-independent timing) while it runs:
     /// `DIT_NONE`, `DIT_ALWAYS` (every CPU of the target has FEAT_DIT), or `DIT_HWCAP` (where the
     /// kernel's HWCAP bit `DIT_HWCAP_BIT` reports it: the start-up stores it in the byte `__sc_dit`).
@@ -641,7 +647,8 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         features: NO_FEATURES,
         never: NO_FEATURES,
         run_time: "",
-        run_time_hwcap: 0,
+        run_time_hwcap: [0, 0, 0, 0],
+        outline_atomics: false,
         dit: DIT_NONE,
         mcpu: "",
         apple_sdk: "",
@@ -703,9 +710,9 @@ const fn targets() [Target; 11] {
         "iPhoneOS",
     );
     let mut linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
-    linux_a64.run_time = "+lse,+rcpc";
-    // The kernel's HWCAP_ATOMICS and HWCAP_LRCPC (arch/arm64/include/uapi/asm/hwcap.h).
-    linux_a64.run_time_hwcap = 1u64 << 8 | 1u64 << 15;
+    linux_a64.run_time = "+lse,+rcpc;+lse,+rcpc,+cssc";
+    // The kernel's HWCAP_ATOMICS, HWCAP_LRCPC and HWCAP2_CSSC (arch/arm64/include/uapi/asm/hwcap.h).
+    linux_a64.run_time_hwcap = [1u64 << 8 | 1u64 << 15, 0, 1u64 << 8 | 1u64 << 15, 1u64 << 34];
     linux_a64.dit = DIT_HWCAP;
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
@@ -719,6 +726,7 @@ const fn targets() [Target; 11] {
     let mut win_a64 = a64(row(ISA_A64, CC_WIN_A64, OBJ_COFF, OS_WINDOWS, "aarch64-w64-mingw32", 9), "neon");
     win_a64.long_bytes = 4;
     win_a64.long_double_bits = 64;
+    win_a64.outline_atomics = true;
     let mut wasm = row(ISA_WASM, CC_WASM, OBJ_WASM, OS_WASI, "wasm32-wasip1", 10);
     wasm.features = feats("simd128", ISA_WASM);
     wasm.long_bytes = 4;

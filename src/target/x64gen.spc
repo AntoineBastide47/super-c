@@ -349,6 +349,9 @@ pub(package) struct Gen {
     disp_lv: u32, // the check's body symbol of the level byte
     disp_body: Body, // the body without the check (`func`)
     base: bool, // `func_body` compiles `disp_body`, under the local name `<name>.base`
+    copy_k: u32, // `func_body` compiles the copy of run-time level `copy_k` (`Package.copy_flags`), `<name>.l<k>`
+    copies: Vector<u32>, // the levels of the body compiling's scalar copies (`place::copy_levels`)
+    disp_os: Vector<u64>, // the stub's branches: level << 32 | object symbol, the highest level first
     prot: bool, // the body has a stack canary (`lver::protected`)
     opf: u8, // the body's `lv::op_flags`
     rarec: Vector<bool>, // per instruction, a call that returns in a rare block (`call_tables`)
@@ -513,6 +516,9 @@ extend Gen {
             disp: Vector::<u64>::new(),
             disp_lv: 0,
             disp_body: Body::new(),
+            copy_k: 0,
+            copies: Vector::<u32>::new(),
+            disp_os: Vector::<u64>::new(),
             base: false,
             prot: false,
             opf: 0,
@@ -3610,49 +3616,123 @@ fn strip_dispatch(b: &mut Body, n: usize) {
     b.blocks.index_mut(k as usize).len = 1;
 }
 
+// Whether the scalar flags `f` (`CPU_SCALAR`) change instruction `t` of body `b` where that pays
+// (`place::copy_levels`): POPCNT a count of set bits, LZCNT one of leading zeros, BMI1 one of trailing
+// zeros, `x & (x - 1)`, `x ^ (x - 1)`, `x & -x` (BLSR, BLSMSK, BLSI) or `!a & b` (ANDN), FMA a fused
+// multiply-add of scalars. BMI2's shifts and MOVBE change code too, but measured no faster (a bit-field
+// reader, big-endian reads): no copy for them alone.
+const fn copy_differs(b: &Body, t: Inst, f: u32) bool {
+    if is_vec(t.ty) {
+        return false;
+    }
+    if (f & CPU_POPCNT) != 0 && t.op == O_POPCNT || (f & CPU_LZCNT) != 0 && t.op == O_CLZ || (f & CPU_FMA) != 0 && t.op == O_FMA {
+        return true;
+    }
+    if (f & CPU_BMI1) == 0 {
+        return false;
+    }
+    if t.op == O_CTZ {
+        return true;
+    }
+    if t.op != O_AND && t.op != O_XOR {
+        return false;
+    }
+    let (kind, _s, _x) = lv::bls_parts(b, t);
+    if kind != 0 {
+        return true;
+    }
+    for q in 0..2u32 {
+        let v = ast::pick(q == 0, t.a, t.b);
+        if t.op == O_AND && v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_NOT {
+            return true;
+        }
+    }
+    return false;
+}
+
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the
     /// body uses what the generator does not compile. A body that opens with its run-time copies'
     /// CPU-level check (`dispatch_of`) compiles without it under the local name `<name>.base`, and its
     /// symbol is the check that jumps to each copy with the arguments as they arrived (`dispatcher`).
+    /// Another body whose code a run-time level's scalar flags change (`place::copy_levels`,
+    /// `copy_differs`) compiles once per such level, a local copy `<name>.l<k>` with the level's flags,
+    /// then without them as `<name>.base`, under the same check.
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         let p = unsafe &*self.pkg;
         let b = &p.bodies[p.syms[s as usize].def as usize];
         self.disp_lv = inl::dispatch_of(p, b, true, &mut self.disp);
-        if self.disp.len() == 0 {
+        self.disp_os.truncate(0);
+        if self.disp.len() != 0 {
+            self.disp_body = b.compact();
+            strip_dispatch(&mut self.disp_body, self.disp.len());
+            self.base = true;
+            let ok = self.func_body(s, local);
+            self.base = false;
+            for q in 0..self.disp.len() {
+                let d = self.disp[q];
+                let os = self.osym_of(d as u32);
+                self.disp_os.push(d >> 32 << 32 | os as u64);
+            }
+            let ly = p.syms[self.cr.b().syms[self.disp_lv as usize] as usize];
+            let lo = self.osym_of(self.disp_lv);
+            return ok && self.dispatcher(s, local, lo, !ly.ext && !(p.pic && ly.linkage == SL_GLOBAL));
+        }
+        let mut lv = replace(&mut self.copies, Vector::<u32>::new());
+        place::copy_levels(p, b, copy_differs, &mut lv);
+        if lv.len() == 0 {
+            self.copies = lv;
             return self.func_body(s, local);
         }
+        let mut ok = true;
+        for q in 0..lv.len() {
+            self.copy_k = lv[q];
+            ok = ok && self.func_body(s, local);
+        }
+        self.copy_k = 0;
         self.disp_body = b.compact();
-        strip_dispatch(&mut self.disp_body, self.disp.len());
         self.base = true;
-        let ok = self.func_body(s, local);
+        ok = ok && self.func_body(s, local);
         self.base = false;
-        return ok && self.dispatcher(s, local);
+        let nm = p.spell(p.syms[s as usize].name);
+        let mut q = lv.len();
+        while q > 0 {
+            q -= 1;
+            let os = self.cr.obj().sym(format("{}.l{}", nm, lv[q]).as_str());
+            self.disp_os.push(lv[q] as u64 << 32 | os as u64);
+        }
+        self.copies = lv;
+        let lo = self.cr.obj().sym("__sc_simd_lv");
+        return ok && self.dispatcher(s, local, lo, false);
     }
 
-    // `cmp byte ptr [level], k; jae copy` per run-time copy, the highest first (`disp`), then `jmp` the body
-    // without the check (`<name>.base`), as function symbol `s`: no frame, no argument moved; on Microsoft
-    // x64 a leaf, which needs no unwind information.
-    fn dispatcher(self: &mut Self, s: u32, local: bool) bool {
+    // `cmp byte ptr [level], k; jae copy` per run-time copy, the highest first (`disp_os`), then `jmp` the
+    // body without the check (`<name>.base`), as function symbol `s`: no frame, no argument moved; on
+    // Microsoft x64 a leaf, which needs no unwind information. The level byte is object symbol `lo`, read
+    // RIP-relative where `direct`, else through its address slot into r11.
+    fn dispatcher(self: &mut Self, s: u32, local: bool, lo: u32, direct: bool) bool {
         self.c.clear();
         self.rels.truncate(0);
         let p = unsafe &*self.pkg;
-        let ly = p.syms[self.cr.b().syms[self.disp_lv as usize] as usize];
-        // The byte's own address (`sym_addr`'s direct case): read RIP-relative; else through r11.
-        let direct = !ly.ext && !(p.pic && ly.linkage == SL_GLOBAL);
         if !direct {
-            self.sym_addr(S1, self.disp_lv, 0);
+            if self.win {
+                let rp = self.refptr(lo);
+                self.c.rm(0, 0x8B, true, S1, x::rip(), false);
+                self.reloc_rip(x::R_PC32, rp, 0);
+            } else {
+                self.c.rm(0, 0x8B, true, S1, x::rip(), false);
+                self.reloc_rip(x::R_REX_GOTPCRELX, lo, 0);
+            }
         }
-        for q in 0..self.disp.len() {
+        for q in 0..self.disp_os.len() {
             // cmp byte ptr [rip + level] or [r11], k; jae rel32
-            let d = self.disp[q];
+            let d = self.disp_os[q];
             if direct {
                 self.c.byte(0x80);
                 self.c.byte(0x3D);
                 let at = self.c.len();
                 self.c.d32(0);
-                let os = self.osym_of(self.disp_lv);
-                self.rels.push(CRel { at: at, kind: x::R_PC32, sym: os, addend: -5 });
+                self.rels.push(CRel { at: at, kind: x::R_PC32, sym: lo, addend: -5 });
             } else {
                 self.c.byte(0x41);
                 self.c.byte(0x80);
@@ -3663,8 +3743,7 @@ extend Gen {
             self.c.byte(0x83);
             let at = self.c.len();
             self.c.d32(0);
-            let os = self.osym_of(d as u32);
-            self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: os, addend: -4 });
+            self.rels.push(CRel { at: at, kind: x::R_PLT32, sym: d as u32, addend: -4 });
         }
         let ps = p.syms[s as usize];
         let base = format("{}.base", p.spell(ps.name));
@@ -3703,6 +3782,9 @@ extend Gen {
         };
         let b = self.cr.b();
         self.cpu = p.cpu_of(b);
+        if self.copy_k != 0 {
+            self.cpu = self.cpu.with_flags(p.copy_flags[self.copy_k as usize - 1]);
+        }
         self.avx = self.cpu.vector >= 32;
         self.z512 = self.cpu.vector == 64;
         self.cr.lv.fold_max = 8;
@@ -10875,11 +10957,13 @@ extend Gen {
         let o = self.cr.obj();
         let bn = if self.base {
             format("{}.base", p.spell(ps.name))
+        } else if self.copy_k != 0 {
+            format("{}.l{}", p.spell(ps.name), self.copy_k)
         } else {
             String::new()
         };
         let k2 = o.sym(
-            if self.base {
+            if self.base || self.copy_k != 0 {
                 bn.as_str()
             } else {
                 p.spell(ps.name)
@@ -10890,7 +10974,8 @@ extend Gen {
         if sec == ob::NOSEC {
             return self.cr.refuse("too many sections");
         }
-        let fl = place::func_flags(ps, !self.local && !self.base, !self.base);
+        let inner = self.base || self.copy_k != 0;
+        let fl = place::func_flags(ps, !self.local && !inner, !inner);
         // The loops with a call that fit a line.
         let mut loops = Vector::<u64>::new();
         for q in 0..nlp {

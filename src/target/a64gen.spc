@@ -265,10 +265,11 @@ pub(package) struct Gen {
     nlay: usize,
     mv: Vector<Mv>,
     local: bool, // the function compiling is a local copy
-    // The function compiling is the copy with LSE and RCPC (`Package.lse_level`), or the body under the
-    // stub that chooses it.
-    lse_copy: bool,
-    lse_stub: bool,
+    // The function compiling is the copy of run-time level `copy_k` (`Package.copy_flags`; 0 for none), or
+    // the body under the stub (`stub`) that picks a copy of `stub_levels`.
+    copy_k: u32,
+    stub: bool,
+    stub_levels: Vector<u32>,
     cs: ob::CStrs, // the object's C strings
 }
 
@@ -381,8 +382,9 @@ extend Gen {
             nlay: 0,
             mv: Vector::<Mv>::new(),
             local: false,
-            lse_copy: false,
-            lse_stub: false,
+            copy_k: 0,
+            stub: false,
+            stub_levels: Vector::<u32>::new(),
             cs: ob::CStrs::new(),
         };
     }
@@ -1525,7 +1527,7 @@ extend Gen {
         let ni = b.insts.len();
         self.hform.truncate(0);
         self.hform.resize_default(ni);
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).half != HALF_ARITH {
+        if self.cpu().half != HALF_ARITH {
             return;
         }
         // Each value's uses: `Live::folds`' counts.
@@ -2642,42 +2644,59 @@ const fn mkind(t: u8, load: bool) u32 {
     return ast::pick(t == T_I32, a::M_W, a::M_X);
 }
 
-// Whether LSE or RCPC change the code of body `b`: a read-modify-write, a compare-and-swap or an acquire
-// load.
-const fn lse_differs(b: &Body) bool {
-    for i in 0..b.insts.len() {
-        let t = b.insts[i];
-        if t.op == O_ARMW || t.op == O_ACAS || t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE {
-            return true;
-        }
+// Whether the flags `f` (`CPU_SCALAR`) change instruction `t` of body `b` where that pays
+// (`place::copy_levels`): LSE or RCPC a read-modify-write, a compare-and-swap or an acquire load; CSSC a
+// scalar count of trailing zeros or set bits (CTZ, CNT: no RBIT or vector round trip). Its minimum,
+// maximum and absolute value (`min_max`, `abs_select`) save one comparison each: no copy for them alone.
+const fn copy_differs(_b: &Body, t: Inst, f: u32) bool {
+    if (f & (CPU_LSE | CPU_RCPC)) != 0 && (t.op == O_ARMW || t.op == O_ACAS || t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE) {
+        return true;
     }
-    return false;
+    return (f & CPU_CSSC) != 0 && (t.op == O_CTZ || t.op == O_POPCNT) && !is_vec(t.ty);
 }
 
 // ---- Functions ----
 
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the
-    /// body uses what the generator does not compile. A body whose atomics LSE or RCPC change, in a package
-    /// that chooses them at run time (`Package.lse_level`), compiles twice: a local copy `<name>.lse` with
-    /// them, then the body without them as `<name>.base`; a stub under the function's own name branches to
-    /// one of them (`lse_entry`), the arguments as the caller left them.
+    /// body uses what the generator does not compile. A body whose code a run-time level's flags change
+    /// (`place::copy_levels`, `copy_differs`: LSE and RCPC, CSSC) compiles once per such level, a local
+    /// copy `<name>.l<k>` with the level's flags, then without them as `<name>.base`; a stub under the
+    /// function's own name branches to the copy of the highest level the CPU has (`level_entry`), the
+    /// arguments as the caller left them.
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
         let p = unsafe &*self.pkg;
         let b = &p.bodies[p.syms[s as usize].def as usize];
-        if p.lse_level == 0 || b.naked || p.cpu_of(b).lse || !lse_differs(b) {
+        let mut lv = replace(&mut self.stub_levels, Vector::<u32>::new());
+        place::copy_levels(p, b, copy_differs, &mut lv);
+        if lv.len() == 0 {
+            self.stub_levels = lv;
             return self.func_once(s, local);
         }
-        self.lse_copy = true;
-        let ok = self.func_once(s, local);
-        self.lse_copy = false;
+        let mut ok = true;
+        for q in 0..lv.len() {
+            self.copy_k = lv[q];
+            ok = ok && self.func_once(s, local);
+        }
+        self.copy_k = 0;
+        self.stub_levels = lv;
         if !ok {
             return false;
         }
-        self.lse_stub = true;
+        self.stub = true;
         let ok2 = self.func_once(s, local);
-        self.lse_stub = false;
+        self.stub = false;
         return ok2;
+    }
+
+    // The processor facts of the body compiling: its own, with a run-time copy's level flags.
+    const fn cpu(self: &Self) Cpu {
+        let p = unsafe &*self.pkg;
+        let c = p.cpu_of(self.cr.b());
+        if self.copy_k == 0 {
+            return c;
+        }
+        return c.with_flags(p.copy_flags[self.copy_k as usize - 1]);
     }
 
     fn func_once(self: &mut Self, s: u32, local: bool) bool {
@@ -4818,7 +4837,7 @@ extend Gen {
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         let bits = type_bits(t.ty, self.cr.ptr);
         let sf = bits == 64;
-        let cssc = unsafe (*self.pkg).cpu_of(self.cr.b()).cssc;
+        let cssc = self.cpu().cssc;
         let mut r = if bits < 32 && t.op != O_CTZ {
             self.ext(t.a, false, bits) as u32
         } else {
@@ -4854,7 +4873,7 @@ extend Gen {
 
     // The trailing zeros of 64-bit register `rn` into `rd`: CTZ with FEAT_CSSC, else RBIT then CLZ.
     fn ctz64(self: &mut Self, rd: u32, rn: u32) {
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+        if self.cpu().cssc {
             self.emit(a::dp1(true, a::DP1_CTZ, rd, rn));
             return;
         }
@@ -4865,7 +4884,7 @@ extend Gen {
     // The set bits of 64-bit register `rn` into `rd`: CNT with FEAT_CSSC, else CNT of its bytes in v30
     // summed by ADDV.
     fn popcnt64(self: &mut Self, rd: u32, rn: u32) {
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+        if self.cpu().cssc {
             self.emit(a::dp1(true, a::DP1_CNT, rd, rn));
             return;
         }
@@ -6523,7 +6542,7 @@ extend Gen {
     // bits is the immediate form's. Whether it did.
     fn min_max(self: &mut Self, i: u32, t: Inst) bool {
         let bits = type_bits(t.ty, self.cr.ptr);
-        if !unsafe (*self.pkg).cpu_of(self.cr.b()).cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+        if !self.cpu().cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
             return false;
         }
         let c = self.cr.b().insts[t.a as usize];
@@ -6574,7 +6593,7 @@ extend Gen {
     // type sign-extends `x` and takes the 32-bit form. Whether it did.
     fn abs_select(self: &mut Self, i: u32, t: Inst) bool {
         let bits = type_bits(t.ty, self.cr.ptr);
-        if !unsafe (*self.pkg).cpu_of(self.cr.b()).cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+        if !self.cpu().cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
             return false;
         }
         let c = self.cr.b().insts[t.a as usize];
@@ -6926,7 +6945,7 @@ extend Gen {
         };
         if op == O_ALOAD {
             let rd = self.def_step(i) as u32;
-            if ord == MO_ACQUIRE && (self.lse_copy || unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc) {
+            if ord == MO_ACQUIRE && self.cpu().rcpc {
                 self.emit(a::ldapr(size, rd, rp));
             } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
@@ -6949,7 +6968,7 @@ extend Gen {
             let rv = self.reg(t.b) as u32;
             // One instruction with LSE, which reads its operands before it writes: a dying one's register.
             let rd = self.def_step(i) as u32;
-            if !self.lse_copy && !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+            if !self.cpu().lse {
                 self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
                 return true;
             }
@@ -6991,7 +7010,7 @@ extend Gen {
         } else {
             self.def(i) as u32
         };
-        if self.lse_copy || unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+        if self.cpu().lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
             self.cmp_old(size, re);
@@ -9213,14 +9232,14 @@ extend Gen {
     // ---- Prologue, epilogue and output ----
 
     // Frame the body's code and define function symbol `s` with it.
-    // The stub under function name `nm` (flags `fl`) in section `sec`: a branch to the copy with LSE
-    // (`<nm>.lse`) from level `Package.lse_level` of the byte `__sc_simd_lv` (in x16, free at a call), else
-    // to the body without it (`<nm>.base`, object symbol `base`; the writer may give each function its own
-    // section, so a branch and not the next bytes).
-    fn lse_entry(self: &mut Self, o: &mut ob::Obj, sec: u8, nm: str, fl: u8, base: u32) {
+    // The stub under function name `nm` (flags `fl`) in section `sec`: from the highest level of
+    // `stub_levels` down, a branch to that level's copy (`<nm>.l<k>`) when the byte `__sc_simd_lv` (in
+    // x16, free at a call) is at least the level, else to the body without them (`<nm>.base`, object
+    // symbol `base`; the writer may give each function its own section, so branches and not the next
+    // bytes).
+    fn level_entry(self: &mut Self, o: &mut ob::Obj, sec: u8, nm: str, fl: u8, base: u32) {
         let p = unsafe &*self.pkg;
         let lv = o.sym("__sc_simd_lv");
-        let cp = o.sym(format("{}.lse", nm).as_str());
         let mut w = Vector::<u32>::new();
         let mut rl = Vector::<CRel>::new();
         // Through its GOT slot where another object may interpose it (`got_global`).
@@ -9236,16 +9255,22 @@ extend Gen {
             w.push(a::add_imm(true, a::IP0, a::IP0, 0));
         }
         w.push(a::ldst_uimm(a::M_B, true, a::IP0, a::IP0, 0));
-        w.push(a::cmp_imm(false, a::IP0, p.lse_level));
-        w.push(a::bcond(a::LO, 8));
-        rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: cp, addend: 0 });
-        w.push(a::b(0));
+        let mut q = self.stub_levels.len();
+        while q > 0 {
+            q -= 1;
+            let k = self.stub_levels[q];
+            let cp = o.sym(format("{}.l{}", nm, k).as_str());
+            w.push(a::cmp_imm(false, a::IP0, k));
+            w.push(a::bcond(a::LO, 8));
+            rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: cp, addend: 0 });
+            w.push(a::b(0));
+        }
         rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: base, addend: 0 });
         w.push(a::b(0));
         let at = o.define(o.sym(nm), sec, 2, w.len() as u64 * 4, fl);
         o.put_words(sec, &w);
-        for q in 0..rl.len() {
-            o.reloc(sec, rl[q].kind, at as u32 + rl[q].at * 4, rl[q].sym, rl[q].addend);
+        for r in 0..rl.len() {
+            o.reloc(sec, rl[r].kind, at as u32 + rl[r].at * 4, rl[r].sym, rl[r].addend);
         }
     }
 
@@ -9570,9 +9595,9 @@ extend Gen {
         let ps = p.syms[s as usize];
         let o = self.cr.obj();
         let nm = p.spell(ps.name);
-        let k2 = if self.lse_copy {
-            o.sym(format("{}.lse", nm).as_str())
-        } else if self.lse_stub {
+        let k2 = if self.copy_k != 0 {
+            o.sym(format("{}.l{}", nm, self.copy_k).as_str())
+        } else if self.stub {
             o.sym(format("{}.base", nm).as_str())
         } else {
             o.sym(nm)
@@ -9582,9 +9607,9 @@ extend Gen {
         if sec == ob::NOSEC {
             return self.cr.refuse("too many sections");
         }
-        let fl = place::func_flags(ps, !self.local && !self.lse_copy && !self.lse_stub, true);
-        if self.lse_stub {
-            self.lse_entry(o, sec, nm, place::func_flags(ps, !self.local, true), k2);
+        let fl = place::func_flags(ps, !self.local && self.copy_k == 0 && !self.stub, true);
+        if self.stub {
+            self.level_entry(o, sec, nm, place::func_flags(ps, !self.local, true), k2);
         }
         let at = o.define(k2, sec, 2, size, fl);
         if !sw {
@@ -10538,7 +10563,7 @@ extend Gen {
         return t.op == O_VDOT && in_vreg(t.ty) && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
             lane_type(self.cr.vt(t.b)),
             8,
-        ) == 1 && (unsafe (*self.pkg).cpu_of(self.cr.b()).vec_dot >> sh & 1) != 0;
+        ) == 1 && (self.cpu().vec_dot >> sh & 1) != 0;
     }
 
     // Dot product `t` (`O_VDOT`) into vector `i`: SDOT or UDOT over the accumulator (`dot_reg`); else each
@@ -11796,7 +11821,7 @@ extend Gen {
     // result lane (of `rlt`, signed `rsg`) in `x`; a lane that traps sets `fr`.
     fn int_rule(self: &mut Self, c: u8, lb: u32, sg: bool, rlt: u8, rsg: bool, x: u8, y: u8, z: u8, wr: u8, fr: u8) {
         let lt_c = ast::pick(sg, a::LT, a::LO);
-        let cssc = unsafe (*self.pkg).cpu_of(self.cr.b()).cssc;
+        let cssc = self.cpu().cssc;
         if c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_MUL {
             let op = if c == core::SIMD_WRAP_ADD {
                 O_ADD
@@ -12628,7 +12653,7 @@ extend Gen {
                 self.emit(a::addsub_reg(true, 0, false, acc, acc, x, 0, 0));
             } else if mul {
                 self.emit(a::mul(true, acc, acc, x));
-            } else if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+            } else if self.cpu().cssc {
                 // FEAT_CSSC: the lanes are extended to 64 bits by their signedness.
                 let op = ast::pick(c == core::SIMD_REDUCE_MIN, a::DP2_SMIN, a::DP2_SMAX) + ast::pick(sg, 0u32, 1u32);
                 self.emit(a::dp2(true, op, acc, acc, x));

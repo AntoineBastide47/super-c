@@ -2106,6 +2106,9 @@ pub(package) const CPU_BMI1: u32 = 1024;
 pub(package) const CPU_BMI2: u32 = 2048;
 pub(package) const CPU_MOVBE: u32 = 4096;
 pub(package) const CPU_RELAXED: u32 = 8192;
+/// The flags a function's run-time copy may add (`Package.copy_flags`): scalar instructions, which change
+/// no vector width or layout.
+pub(package) const CPU_SCALAR: u32 = CPU_POPCNT | CPU_LZCNT | CPU_LSE | CPU_RCPC | CPU_FMA | CPU_CSSC | CPU_BMI1 | CPU_BMI2 | CPU_MOVBE;
 
 /// What a processor's features give the native backend (`emit::cemit` computes them from a feature set):
 /// the build's (`Package.cpu`), or those of one body compiled for more features (`Body.cpu`: a
@@ -2245,6 +2248,21 @@ extend Cpu {
         };
     }
 
+    /// These facts with the flags `f` (`CPU_SCALAR`) added: a run-time copy's (`Package.copy_flags`).
+    pub(package) const fn with_flags(self: &Self, f: u32) Cpu {
+        let mut c = *self;
+        c.popcnt = c.popcnt || (f & CPU_POPCNT) != 0;
+        c.lzcnt = c.lzcnt || (f & CPU_LZCNT) != 0;
+        c.lse = c.lse || (f & CPU_LSE) != 0;
+        c.rcpc = c.rcpc || (f & CPU_RCPC) != 0;
+        c.fma = c.fma || (f & CPU_FMA) != 0;
+        c.cssc = c.cssc || (f & CPU_CSSC) != 0;
+        c.bmi1 = c.bmi1 || (f & CPU_BMI1) != 0;
+        c.bmi2 = c.bmi2 || (f & CPU_BMI2) != 0;
+        c.movbe = c.movbe || (f & CPU_MOVBE) != 0;
+        return c;
+    }
+
     /// Whether code made for these facts runs on a processor with `o`'s: no register is wider and no
     /// instruction is missing there. The inliner copies a body only into such a caller.
     pub(package) const fn within(self: &Self, o: Cpu) bool {
@@ -2276,10 +2294,10 @@ pub(package) struct Package {
     /// of the body's own function, into its start (`lir::opt`); another, to the callee after the caller's
     /// epilogue (the native backends).
     pub(package) tail: bool,
-    /// The level of the byte `__sc_simd_lv` from which the processor has LSE and RCPC that `cpu` lacks
-    /// (arm64 Linux): a body whose atomics they change gets a copy with them, which its entry
-    /// takes from that level (the arm64 code generator's `lse_copy`). 0 for none.
-    pub(package) lse_level: u8,
+    /// Per level of the byte `__sc_simd_lv` (index k - 1 for level k), the `CPU_SCALAR` flags its
+    /// processors have: a body whose code a level's flags change gets a copy for that level, which a stub
+    /// under its name picks at run time (`codegen::place::copy_levels`). Empty for none.
+    pub(package) copy_flags: Vector<u32>,
     /// `target::table::Target.dit` of the target: how the arm64 generator turns PSTATE.DIT on in a
     /// constant-time body (`Body.ct`).
     pub(package) dit: u8,
@@ -2560,7 +2578,7 @@ extend Package {
             comp_dir: String::new(),
             omit_fp: false,
             tail: false,
-            lse_level: 0,
+            copy_flags: Vector::<u32>::new(),
             dit: 0,
             protect: PROTECT_NONE,
             fmath: 0,

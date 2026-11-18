@@ -45,6 +45,8 @@ const DOT: u32 = 32768;
 const RELAXED: u32 = 65536;
 const LSE_RT: u32 = 131072;
 const DIT: u32 = 262144;
+const CSSC_RT: u32 = 524288;
+const V3_RT: u32 = 1048576;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -144,6 +146,24 @@ fn run_bmi(text: str, driver: str) i32 {
     return run_native_with(text, &d, BMI);
 }
 
+// `run_native_with` of `text` and `driver` on an x86-64 host with x86-64-v3's scalar instructions (BMI1,
+// BMI2, MOVBE, POPCNT, LZCNT, FMA with the OS's AVX state), at the run-time level (`V3_RT`); 0 elsewhere.
+fn run_v3(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "#include <cpuid.h>\n{}{}  {{ unsigned a, b, c, e; if (!__get_cpuid_count(7, 0, &a, &b, &c, &e) || (b >> 3 & 1) == 0 || (b >> 8 & 1) == 0) return 0; if (!__get_cpuid(1, &a, &b, &c, &e) || (c >> 22 & 1) == 0 || (c >> 23 & 1) == 0 || (c >> 12 & 1) == 0 || (c >> 27 & 1) == 0) return 0; if (!__get_cpuid(0x80000001, &a, &b, &c, &e) || (c >> 5 & 1) == 0) return 0; unsigned lo, hi; __asm__ volatile(\"xgetbv\" : \"=a\"(lo), \"=d\"(hi) : \"c\"(0)); if ((lo & 6) != 6) return 0; }}\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, V3_RT);
+}
+
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
 // SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
 // AVX-512 BW. 0 on another host.
@@ -235,7 +255,17 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.vtbl = p.cpu.sse41 && isa == tgt::axis_index("x86_64", true);
     p.cpu.addsub = p.cpu.vtbl;
     p.cpu.lse = (opts & LSE) != 0;
-    p.lse_level = ((opts & LSE_RT) != 0) as u8;
+    // The run-time levels' flags (`Package.copy_flags`), as a build of the target sets them (`CEmit`):
+    // arm64 Linux's LSE and RCPC, then CSSC too; x86-64-v3's scalar instructions.
+    if (opts & (LSE_RT | CSSC_RT)) != 0 {
+        p.copy_flags.push(CPU_LSE | CPU_RCPC);
+    }
+    if (opts & CSSC_RT) != 0 {
+        p.copy_flags.push(CPU_LSE | CPU_RCPC | CPU_CSSC);
+    }
+    if (opts & V3_RT) != 0 {
+        p.copy_flags.push(CPU_POPCNT | CPU_LZCNT | CPU_BMI1 | CPU_BMI2 | CPU_MOVBE | CPU_FMA);
+    }
     // A build's DIT mode, the target's (`CEmit`).
     p.dit = (switch tgt::target_of(os, isa) {
         Some(r) if (opts & DIT) != 0 => r.dit,
@@ -22168,10 +22198,10 @@ fn holds_name(o: &Vector<u8>, nm: str) bool {
     return holds(o, z[0..z.len()]);
 }
 
-// arm64 with LSE and RCPC chosen at run time (`Package.lse_level`): a body whose read-modify-writes,
-// compare-and-swaps or acquire loads they change compiles twice, `<name>.lse` with them and `<name>.base`
-// without, and a stub that reads the level byte `__sc_simd_lv` branches to one; a body without such atomics
-// compiles once. Both copies give the same results, the byte at 0 and at 1.
+// arm64 with LSE and RCPC chosen at run time (`Package.copy_flags`, level 1): a body whose
+// read-modify-writes, compare-and-swaps or acquire loads they change compiles twice, `<name>.l1` with them
+// and `<name>.base` without, and a stub that reads the level byte `__sc_simd_lv` branches to one; a body
+// without such atomics compiles once. Both copies give the same results, the byte at 0 and at 1.
 @test
 fn lse_atomics_choose_their_copy_at_run_time() {
     let lir = M"(lir ptr 8
@@ -22207,10 +22237,10 @@ b0(v0: ptr):
         object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), LSE_RT, &mut obj),
         "the object",
     );
-    for nm in ["bump.lse", "bump.base", "swap_in.lse", "swap_in.base", "peek.lse", "peek.base"] {
+    for nm in ["bump.l1", "bump.base", "swap_in.l1", "swap_in.base", "peek.l1", "peek.base"] {
         assert(holds_name(&obj, nm), nm);
     }
-    assert(!holds_name(&obj, "plain.lse") && !holds_name(&obj, "plain.base"), "no copy of plain");
+    assert(!holds_name(&obj, "plain.l1") && !holds_name(&obj, "plain.base"), "no copy of plain");
     // LDADD, LDSET (any order), CAS, LDAPR in the copies; LDAXR, LDAR in the bodies without LSE.
     assert_eq(elf_text_count(&obj, 0x3F20FC00, 0x38200000), 1);
     assert_eq(elf_text_count(&obj, 0x3F20FC00, 0x38203000), 1);
@@ -22224,7 +22254,7 @@ b0(v0: ptr):
         object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut plain),
         "the object",
     );
-    assert(!holds_name(&plain, "bump.lse"), "no copy without the level");
+    assert(!holds_name(&plain, "bump.l1"), "no copy without the level");
     if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
         return; // the driver runs on arm64
     }
@@ -22247,6 +22277,213 @@ int main(void) {
 }
 )";
     assert_eq(run_native_with(lir, drv, LSE_RT), 0);
+}
+
+// arm64 Linux's second run-time level adds CSSC (`Package.copy_flags`): a body copies at each level
+// whose flags change its code beyond the copy below. A count of set bits gets a CSSC copy alone
+// (`cnt.l2`, CNT), atomics an LSE one alone (`bump.l1`), a body with both one per level (`both.l1` with
+// LSE, `both.l2` with CSSC's CTZ too), a body with neither none. The stub picks the highest copy the
+// level byte reaches: the results agree at levels 0 to 2 where the CPU has the level's features.
+@test
+fn cssc_copies_take_the_second_level() {
+    let lir = M"(lir ptr 8
+sym @cnt fn global
+sym @bump fn global
+sym @both fn global
+sym @plain fn global
+fn @cnt
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = popcnt.i64 v0
+  ret v1
+fn @bump
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = armw.add.i64 v1, v0 seq_cst
+  ret v2
+fn @both
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = armw.add.i64 v1, v0 seq_cst
+  v3 = ctz.i64 v2
+  ret v3
+fn @plain
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = add.i64 v0, v0
+  ret v1
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), CSSC_RT, &mut obj),
+        "the object",
+    );
+    for nm in ["cnt.l2", "cnt.base", "bump.l1", "bump.base", "both.l1", "both.l2", "both.base"] {
+        assert(holds_name(&obj, nm), nm);
+    }
+    for nm in ["cnt.l1", "bump.l2", "plain.l1", "plain.l2", "plain.base"] {
+        assert(!holds_name(&obj, nm), nm);
+    }
+    // CNT and CTZ of a general register (FEAT_CSSC), in the level 2 copies alone.
+    assert_eq(elf_text_count(&obj, 0xFFFFFC00, 0xDAC01C00), 1);
+    assert_eq(elf_text_count(&obj, 0xFFFFFC00, 0xDAC01800), 1);
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return; // the driver runs on arm64
+    }
+    let drv = M"(#include <stdint.h>
+#ifdef __linux__
+#include <sys/auxv.h>
+#else
+#include <sys/sysctl.h>
+#endif
+unsigned char __sc_simd_lv;
+int64_t cnt(int64_t);
+int64_t bump(int64_t *, int64_t);
+int64_t both(int64_t *, int64_t);
+int64_t plain(int64_t);
+int main(void) {
+  int top = 2;
+#ifdef __linux__
+  unsigned long h = getauxval(AT_HWCAP), h2 = getauxval(AT_HWCAP2);
+  if ((h & (1UL << 8)) == 0 || (h & (1UL << 15)) == 0) top = 0;
+  else if ((h2 & (1UL << 34)) == 0) top = 1;
+#else
+  int v = 0;
+  size_t n = sizeof v;
+  if (sysctlbyname("hw.optional.arm.FEAT_CSSC", &v, &n, 0, 0) != 0 || v == 0) top = 1;
+#endif
+  for (int lv = 0; lv <= top; lv++) {
+    __sc_simd_lv = (unsigned char)lv;
+    int64_t x = 8;
+    if (cnt(0x1234567890ABCDEF) != 32 || cnt(0) != 0) return 1 + 10 * lv;
+    if (bump(&x, 5) != 8 || x != 13) return 2 + 10 * lv;
+    if (both(&x, 3) != 0 || x != 16) return 3 + 10 * lv;
+    if (both(&x, 0) != 4 || plain(21) != 42) return 4 + 10 * lv;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, CSSC_RT), 0);
+}
+
+// x86-64-v3's scalar instructions at run time (`Package.copy_flags`): a body whose count of set bits
+// (POPCNT), leading or trailing zeros (LZCNT, TZCNT), lowest set bit cleared (BLSR) or fused product
+// (VFMADD) they change gets a copy `<name>.l1` and a `<name>.base`, picked by the level byte; a body they
+// do not change (a sum, a variable shift BMI2 alone would change) none, nor a large one they change only
+// outside its loop. Both give the same results.
+@test
+fn x86_scalar_copies_take_the_v3_level() {
+    let lir = M"(lir ptr 8
+sym @pc fn global
+sym @lz fn global
+sym @clr fn global
+sym @fm fn global
+sym @sh fn global
+fn @pc
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = popcnt.i64 v0
+  ret v1
+fn @lz
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = clz.i64 v0
+  ret v1
+fn @clr
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = sub.i64 v0, v1
+  v3 = and.i64 v0, v2
+  ret v3
+fn @fm
+  sig (f64, f64, f64) -> f64
+b0(v0: f64, v1: f64, v2: f64):
+  v3 = fma.f64 v0, v1, v2
+  ret v3
+fn @sh
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = shl.i64 v0, v1
+  ret v2
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), V3_RT, &mut obj),
+        "the object",
+    );
+    for nm in ["pc.l1", "pc.base", "lz.l1", "lz.base", "clr.l1", "clr.base", "fm.l1", "fm.base"] {
+        assert(holds_name(&obj, nm), nm);
+    }
+    assert(!holds_name(&obj, "sh.l1") && !holds_name(&obj, "sh.base"), "no copy of a shift");
+    // A body of more than `place::COPY_SMALL` instructions: a count outside its loop pays no copy of the
+    // whole; two in its loop (one count per 64 of its instructions) do.
+    let mut big = String::from_str("lir ptr 8\nsym @flat fn global\nsym @hot fn global\n");
+    for nm in ["flat", "hot"] {
+        big.format_into("fn @{}\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  jmp b1(v0, v1)\n", nm);
+        big.push_str("b1(v2: i64, v3: i64):\n");
+        let mut v: u32 = 4;
+        if nm == "hot" {
+            big.push_str("  v4 = popcnt.i64 v2\n  v5 = popcnt.i64 v4\n");
+            v = 6;
+        } else {
+            big.push_str("  v4 = add.i64 v2, v2\n  v5 = add.i64 v4, v2\n");
+            v = 6;
+        }
+        // Seventy sums, then the loop's step and test.
+        for _ in 0..70 {
+            big.format_into("  v{} = add.i64 v{}, v2\n", v, v - 1);
+            v += 1;
+        }
+        big.format_into("  v{} = iconst.i64 1\n  v{} = add.i64 v3, v{}\n  v{} = iconst.i64 9\n", v, v + 1, v, v + 2);
+        big.format_into(
+            "  v{} = icmp.ult v{}, v{}\n  br v{}, b1(v{}, v{}), b2(v{})\n",
+            v + 3,
+            v + 1,
+            v + 2,
+            v + 3,
+            v - 1,
+            v + 1,
+            v - 1,
+        );
+        if nm == "flat" {
+            big.format_into("b2(v{}: i64):\n  v{} = popcnt.i64 v{}\n  ret v{}\n", v + 4, v + 5, v + 4, v + 5);
+        } else {
+            big.format_into("b2(v{}: i64):\n  ret v{}\n", v + 4, v + 4);
+        }
+    }
+    let mut bo = Vector::<u8>::new();
+    assert(
+        object_of(&big, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), V3_RT, &mut bo),
+        big.as_str(),
+    );
+    assert(!holds_name(&bo, "flat.l1"), "no copy for a count outside the loop");
+    assert(holds_name(&bo, "hot.l1"), "a copy for a count in the loop");
+    let mut none = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut none), "the object");
+    assert(!holds_name(&none, "pc.l1"), "no copy without the level");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+unsigned char __sc_simd_lv;
+int64_t pc(int64_t);
+int64_t lz(int64_t);
+int64_t clr(int64_t);
+double fm(double, double, double);
+int64_t sh(int64_t, int64_t);
+int main(void) {
+  for (int lv = 0; lv < 2; lv++) {
+    __sc_simd_lv = (unsigned char)lv;
+    if (pc(0x1234567890ABCDEF) != 32 || pc(0) != 0) return 1 + 10 * lv;
+    if (lz(1) != 63 || lz(-1) != 0) return 2 + 10 * lv;
+    if (clr(12) != 8 || clr(0) != 0) return 3 + 10 * lv;
+    if (fm(0.1, 10.0, -1.0) != 5.551115123125783e-17 || sh(3, 4) != 48) return 4 + 10 * lv;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_v3(lir, drv), 0);
 }
 
 // In a body that holds a 32-byte vector, every SSE operation is VEX-encoded (`x64::Code.vex_sse`): a

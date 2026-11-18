@@ -754,7 +754,9 @@ extend CEmit {
                 0u8,
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             l.pkg.cpu = cpu_facts(pk, pk.features);
-            l.pkg.lse_level = pk.lse_level() as u8;
+            for k in 0..pk.simd_levels.len() {
+                l.pkg.copy_flags.push(cpu_facts(pk, pk.simd_levels[k]).flags() & lir_ir::CPU_SCALAR);
+            }
             l.pkg.dit = (switch tgt::target_of(pk.build_target, pk.arch) {
                 Some(r) => r.dit,
                 None => tgt::DIT_NONE,

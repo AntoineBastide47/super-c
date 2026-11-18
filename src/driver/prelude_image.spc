@@ -226,6 +226,7 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.mod_index.save(w);
     q.mod_chain.save(w);
     q.simd_levels.save(w);
+    q.simd_hwcap.save(w);
     q.build_module.save(w);
     q.build_target.save(w);
     q.core_module.save(w);
@@ -256,6 +257,7 @@ pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) boo
     p.mod_index.load(&mut r);
     p.mod_chain.load(&mut r);
     p.simd_levels.load(&mut r);
+    p.simd_hwcap.load(&mut r);
     p.build_module.load(&mut r);
     p.build_target.load(&mut r);
     p.core_module.load(&mut r);

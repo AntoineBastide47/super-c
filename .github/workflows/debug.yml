@@ -224,6 +224,66 @@ jobs:
           ../super-c.exe build main.spc -o prog.exe; echo "build=$?"
           ./prog.exe; echo "run=$?"
 
+  # Windows arm64 builds through its C tree: its atomics go through compiler-rt's helpers
+  # (`-moutline-atomics`), which pick LSE by the CPU once. The program built with llvm-mingw runs, its
+  # atomics give the right values, and it calls the helpers.
+  lse-windows-arm64:
+    needs: compile
+    name: lse (windows arm64)
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-windows
+
+      - name: Set up llvm-mingw
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          url=$(gh api repos/mstorsjo/llvm-mingw/releases/latest --jq '.assets[] | select(.name | endswith("ucrt-aarch64.zip")) | .browser_download_url')
+          echo "$url"
+          curl -sSL -o lm.zip "$url"
+          pwsh -NoProfile -Command "Expand-Archive -Path lm.zip -DestinationPath '$RUNNER_TEMP\lm'"
+          bin=$(ls -d "$(cygpath -u "$RUNNER_TEMP")"/lm/*/bin | head -1)
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/aarch64-w64-mingw32-clang" --version | head -1
+
+      - name: Build and run the atomics
+        run: |
+          set -eu
+          chmod +x ./super-c.exe
+          mkdir -p lsew && cd lsew
+          cat > main.spc <<'SPC'
+          import std::parallel::atomics as atom;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let a = atom::Atomic::<u64>::new(0);
+              let t0 = clock::monotonic_ns();
+              for i in 0..10000000u64 {
+                  let _ = a.fetch_add(i & 3, atom::MemoryOrder::SeqCst);
+              }
+              let dt = clock::monotonic_ns() - t0;
+              let s = a.swap(7, atom::MemoryOrder::AcqRel);
+              println("sum {} after {} time {} ms", s, a.load(atom::MemoryOrder::Acquire), dt / 1000000);
+              return (s != 15000000 || a.load(atom::MemoryOrder::Acquire) != 7) as i32;
+          }
+          SPC
+          ../super-c.exe build --emit-c main.spc --profile=release --target=windows --arch=aarch64
+          grep -c -- -moutline-atomics build/release/raw/__cflags
+          JOBS=4 CC=aarch64-w64-mingw32-clang sh ../ci/cc_tree.sh build/release/raw prog.exe
+          ./prog.exe; echo "run=$?"
+          llvm-objdump -d prog.exe > dis.txt
+          echo "helper calls: $(grep -c -E 'bl.*__aarch64_(ldadd|swp|cas)' dis.txt)"
+          echo "LSE instructions: $(grep -c -E '\s(ldaddal|swpal|casal)\s' dis.txt)"
+          pwsh -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"
+
   # x86-64-v3 on a real x86-64 runner: release compilers for the baseline, x86-64-v3, the baseline with
   # v3's scalar features, and the baseline with AVX2 and FMA, each timed building the compiler,
   # alternating, three rounds.
@@ -374,12 +434,13 @@ jobs:
           }
           PROGRAM
           f=--target-feature=+bmi1,+bmi2,+lzcnt,+popcnt,+movbe
-          ./super-c build bmi/main.spc --profile=release -o bmi/v1
+          ./super-c build bmi/main.spc --profile=release --simd-dispatch=off -o bmi/v1
+          ./super-c build bmi/main.spc --profile=release -o bmi/rt
           ./super-c build bmi/main.spc --profile=release $f -o bmi/sc
           ./super-c bench --no-run --filter=bits_bench --out-dir=bb1 > /dev/null
           ./super-c bench --no-run --filter=bits_bench $f --out-dir=bbs > /dev/null
           for r in 1 2 3; do
-            for v in v1 sc; do echo "== kernels $v round $r"; "./bmi/$v"; done
+            for v in v1 rt sc; do echo "== kernels $v round $r"; "./bmi/$v"; done
             for v in bb1 bbs; do echo "== bits $v round $r"; "./$v/bench-bin" | grep -E '^bits_bench::|time \(ms\)'; done
           done
 

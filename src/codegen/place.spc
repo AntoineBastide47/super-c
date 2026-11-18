@@ -1771,3 +1771,145 @@ extend Core {
         return self.sv_off[x as usize];
     }
 }
+
+/// A body gets a run-time copy for a level when its flags change at least one instruction per this many
+/// of its instructions, counting in a larger body only those in a loop (`copy_levels`): the copy's size
+/// against the time it saves.
+pub(package) const COPY_SMALL: usize = 64;
+
+/// The levels (1-based, `Package.copy_flags`) body `b` of `p` gets a run-time copy for, lowest first, into
+/// `out`: each level whose flags beyond the last copy's (the body's own at first) change instructions
+/// (`differs` of the instruction and those flags) where it pays: one per COPY_SMALL instructions of the
+/// body, anywhere in a body of at most COPY_SMALL, else in its loops (a copy of a large body for a change
+/// outside its loops, or in one loop of many, costs its size for little time). None for a naked body, or one that reads the level byte `__sc_simd_lv` itself (a
+/// function with copies of its vector code picks one in its prologue).
+pub(package) fn copy_levels(p: &Package, b: &Body, differs: fn(&Body, Inst, u32) bool, out: &mut Vector<u32>) {
+    out.truncate(0);
+    if p.copy_flags.len() == 0 || b.naked {
+        return;
+    }
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        if t.op == O_SYMADDR && p.spell(p.syms[b.syms[t.a as usize] as usize].name) == "__sc_simd_lv" {
+            return;
+        }
+    }
+    let small = b.insts.len() <= COPY_SMALL;
+    let mut cyc = Vector::<bool>::new();
+    if !small {
+        cyclic_blocks(b, &mut cyc);
+    }
+    let mut have = p.cpu_of(b).flags();
+    for k in 0..p.copy_flags.len() {
+        let add = p.copy_flags[k] & ~have;
+        if add == 0 {
+            continue;
+        }
+        let mut hits: usize = 0;
+        for q in 0..b.blocks.len() {
+            if !small && !cyc[q] {
+                continue;
+            }
+            let bk = b.blocks[q];
+            for i in bk.start..bk.start + bk.len {
+                hits += differs(b, b.insts[i as usize], add) as usize;
+            }
+        }
+        if hits != 0 && b.insts.len() <= COPY_SMALL * hits {
+            out.push(k as u32 + 1);
+            have |= p.copy_flags[k];
+        }
+    }
+}
+
+/// Per block of `b`, into `out`, whether it lies on a cycle of the control flow (a loop): its strongly
+/// connected component holds another block or an edge to itself (Tarjan's algorithm, without recursion:
+/// each block enters the stack once and each edge is taken once).
+pub(package) fn cyclic_blocks(b: &Body, out: &mut Vector<bool>) {
+    let n = b.blocks.len();
+    fill(out, n, false);
+    let mut index = Vector::<u32>::new();
+    let mut low = Vector::<u32>::new();
+    let mut on = Vector::<bool>::new();
+    fill(&mut index, n, NONE);
+    fill(&mut low, n, 0);
+    fill(&mut on, n, false);
+    let mut stack = Vector::<u32>::new();
+    let mut comp = Vector::<u32>::new();
+    // The walk: per entered block, its successors and the next one to take.
+    let mut walk = Vector::<u32>::new();
+    let mut succ = Vector::<Vector<u32>>::new();
+    let mut next = Vector::<u32>::new();
+    for _ in 0..n {
+        succ.push(Vector::<u32>::new());
+    }
+    let mut eds = Vector::<u32>::new();
+    for k in 0..n {
+        let bk = b.blocks[k];
+        if bk.len == 0 {
+            continue;
+        }
+        b.succ_edges(b.insts[(bk.start + bk.len - 1) as usize], &mut eds);
+        for e in 0..eds.len() {
+            succ[k].push(b.edge_target(eds[e]));
+        }
+    }
+    fill(&mut next, n, 0);
+    let mut counter: u32 = 0;
+    for r in 0..n {
+        if index[r] != NONE {
+            continue;
+        }
+        walk.push(r as u32);
+        index[r] = counter;
+        low[r] = counter;
+        counter += 1;
+        stack.push(r as u32);
+        on[r] = true;
+        while walk.len() != 0 {
+            let v = walk[walk.len() - 1] as usize;
+            if next[v] as usize < succ[v].len() {
+                let w = succ[v][next[v] as usize] as usize;
+                next[v] += 1;
+                if w == v {
+                    out[v] = true;
+                }
+                if index[w] == NONE {
+                    index[w] = counter;
+                    low[w] = counter;
+                    counter += 1;
+                    stack.push(w as u32);
+                    on[w] = true;
+                    walk.push(w as u32);
+                } else if on[w] && index[w] < low[v] {
+                    low[v] = index[w];
+                }
+                continue;
+            }
+            let _ = walk.pop();
+            if walk.len() != 0 {
+                let u = walk[walk.len() - 1] as usize;
+                if low[v] < low[u] {
+                    low[u] = low[v];
+                }
+            }
+            if low[v] == index[v] {
+                // A component, the stack's blocks down to `v`: more than one block is a cycle.
+                comp.truncate(0);
+                loop {
+                    let x = stack.pop().unwrap();
+                    on[x as usize] = false;
+                    comp.push(x);
+                    if x as usize == v {
+                        break;
+                    }
+                }
+                if comp.len() > 1 {
+                    for q in 0..comp.len() {
+                        out[comp[q] as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+}
