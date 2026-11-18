@@ -99,6 +99,9 @@ pub(package) const CG_NO_PROVE: u64 = 2097152;
 /// exit (`-fblock-counts`, a native build's measurement of its own work): a 64-bit counter per function
 /// (`lir::lower`), the registry of all of them (`Lower::count_registry`) and the writer `std::rt::counts`.
 pub(package) const CG_BLOCK_COUNTS: u64 = 4194304;
+/// The link keeps one copy of identical functions whose address nothing takes (`-ffold-functions`, `link_fold`:
+/// LLD's `--icf=safe`), with the sections that make functions its parts.
+pub(package) const CG_FOLD_FUNCTIONS: u64 = 8388608;
 // Whether flag `b` (`CG_NAMES`) is set by its `no` form.
 const fn negated(b: u64) bool {
     return b == CG_NO_SIGNED_ZEROS || b == CG_NO_PLT || b == CG_NO_PROVE;
@@ -106,7 +109,7 @@ const fn negated(b: u64) bool {
 
 // The flags by name: `-f<name>` sets the bits, `-fno-<name>` clears them; the reverse for
 // `signed-zeros` and `plt` (`negated`).
-const CG_NAMES: [(str<'static>, u64); 24] = [
+const CG_NAMES: [(str<'static>, u64); 25] = [
     ("omit-frame-pointer", CG_OMIT_FRAME_POINTER),
     ("inline", CG_INLINE),
     ("inline-functions", CG_INLINE_FUNCTIONS),
@@ -131,6 +134,7 @@ const CG_NAMES: [(str<'static>, u64); 24] = [
     ("contract-checks", CG_CONTRACT_CHECKS),
     ("prove", CG_NO_PROVE),
     ("block-counts", CG_BLOCK_COUNTS),
+    ("fold-functions", CG_FOLD_FUNCTIONS),
 ];
 
 // The bits flag `name` names: 0 for none.
@@ -249,14 +253,14 @@ pub(package) fn cg_spell(opt: i32, on: u64, off: u64, out: &mut String) {
 /// The flags a build at `opt-level` `opt` runs with: the level's defaults, then `on` set and `off`
 /// cleared. At every level but 0 the frame pointer goes (on arm64 from leaf functions only, as Apple's
 /// ABI allows), calls inline, and functions and variables take sections of their own, which the link
-/// drops when nothing reaches them (`link_gc`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
+/// drops when nothing reaches them (`link_gc`), and identical functions fold (`link_fold`); past the ones that shrink the code at 2, 3 and "s"; loops unroll at 2
 /// and 3, vectorize at 2, 3 and "s" (as LLVM's), unswitch at 3 and version on their bounds checks at 2 and 3;
 /// aliasing is strict and calls whose result is returned at once become jumps from 2 on, "s" and "z"
 /// included (as GCC's).
 pub(package) const fn cg_effective(opt: i32, on: u64, off: u64) u64 {
     let mut f: u64 = 0;
     if opt > 0 {
-        f |= CG_OMIT_FRAME_POINTER | CG_INLINE | CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS;
+        f |= CG_OMIT_FRAME_POINTER | CG_INLINE | CG_FUNCTION_SECTIONS | CG_DATA_SECTIONS | CG_FOLD_FUNCTIONS;
     }
     if opt >= 2 && opt != OPT_Z {
         f |= CG_INLINE_FUNCTIONS;
@@ -290,6 +294,16 @@ pub(package) const fn link_gc(cg: u64, macho: bool) str<'static> {
     } else {
         "-Wl,--gc-sections"
     };
+}
+
+/// The link flag that folds identical functions whose address nothing takes, when the effective flags `cg`
+/// fold them and the link drops what nothing reaches (`link_gc`), which splits the code at its functions;
+/// empty otherwise.
+pub(package) const fn link_fold(cg: u64) str<'static> {
+    if (cg & CG_FOLD_FUNCTIONS) == 0 || link_gc(cg, false).len() == 0 {
+        return "";
+    }
+    return "-Wl,--icf=safe";
 }
 
 /// One extra binary target: `[bin.NAME] root = "..."` (the top-level `bin`/`root` pair is the

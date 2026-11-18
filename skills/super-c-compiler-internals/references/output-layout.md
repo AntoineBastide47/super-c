@@ -30,7 +30,7 @@ and every tree comparison compares within one profile.
 
 The C files below are the tree of a build that writes C (`--emit-c`). A linking (native) build
 writes no C: its tree holds the objects (`<mod>.o`, `<mod>__inst.o`, `__sc_registry_n.o`), the native
-record `__sc_native`, `__sc_hfacts`, `__ldflags`, `.tu_cache`, and a `__sc_manifest` of its `cfg`
+record `__sc_native`, the objects' content keys `__sc_native_keys`, `__sc_hfacts`, `__ldflags`, `.tu_cache`, and a `__sc_manifest` of its `cfg`
 line only, which marks the tree (`build_system::build::root_trees`) and its last build.
 
 | File | Content | Included by |
@@ -349,10 +349,26 @@ is rewritten).
   type-need row (`RK_TNEED`: its sorted distinct keys as word pairs), array wrapper
   requests (`RK_WRAP`) and result carrier requests (`RK_PACK`); after the sections, per
   module its held record (`lir::hold`: what its own object gives the LIR optimization of
-  the other units), under its key and native key; format version 14.
+  the other units), under its key and native key; format version 17. Before them the image lists the
+  functions the build's evaluations ran (`Package.ce_reads`: the type check's, the prover's named
+  constants and the emission's constants pass; not the always-panics probes, whose results are errors
+  only), each with its text's hash (`tuc::body_hash`): a changed one misses every module. A module's
+  key hashes its own source, the shapes of the other modules of its import closure (`tuc::Shapes`:
+  their text outside the blocks of the bodies only calls read, as tokens, and the kinds of their
+  module-arena nodes; their sources in a build whose LIR optimizer runs) and the bounds checks the
+  prover proved in its functions (`Package.prove_fd`). Each section starts with the
+  functions its bodies call and what it read of each (`tuc::dep_hash`: a body the Core IR inliner
+  may copy, the capture facts, the coroutine and cancellation marks, the proved checks); a changed
+  one makes the section miss. The image's header holds each module's text and token hashes, so an unchanged
+  module's text is not lexed again.
   A replayed tree must match a `SC_NO_TU_CACHE=1` tree byte for byte after an edit
   (`tests/cli/cli_test.spc`, `build_staleness_gates` covers the header-change and
-  layout-change cases).
+  layout-change cases; `tu_cache_follows_the_callee_bodies_a_module_reads` and
+  `tu_cache_follows_the_reachability_of_an_inlined_callee` the section dependencies,
+  `tu_cache_follows_the_functions_a_constant_runs` the evaluations' list,
+  `tu_cache_follows_the_bounds_checks_the_prover_removed` the proved checks,
+  `proof_record_follows_the_callee_bodies_a_proof_reads` the proof record's `@d` lines and
+  `native_objects_are_reused_by_their_input` the objects' content keys).
 - `tests/cli/cli_test.spc`: `build_type_edit_stays_local` (a type edit leaves units without
   the module's types untouched), `build_new_type_recompiles_no_user` (a new type in a
   module every unit uses recompiles no unit; removing it prunes its header and its

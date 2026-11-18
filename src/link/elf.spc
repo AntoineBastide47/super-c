@@ -39,6 +39,7 @@ pub(package) struct Opts {
     pub(package) strip: bool,
     pub(package) soname: String,
     pub(package) gc: bool, // drop the sections nothing reaches (`--gc-sections`, `collect`)
+    pub(package) fold: bool, // one copy of identical functions whose address nothing takes (`--icf=safe`, with `gc`)
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
@@ -170,7 +171,8 @@ struct IFile {
 // An input section: name (`sn` id), type, flags, alignment, size, its bytes in the blob, the index of the
 // relocation section that applies to it (NONE: none), its linked section (`sh_link`, in its file), and
 // where it lands. Garbage collection leaves a section nothing reaches not `live`, and gives a `.eh_frame`
-// its records `L.eh[eh .. eh + neh]` (`eh` NONE: copied whole), `size` then their kept bytes.
+// its records `L.eh[eh .. eh + neh]` (`eh` NONE: copied whole), `size` then their kept bytes. A section
+// identical code folding left out (`fold_code`) is not `live` and lands where section `fold` does.
 struct ISec {
     pub(package) file: u32,
     pub(package) name: u32,
@@ -186,6 +188,7 @@ struct ISec {
     pub(package) live: bool,
     pub(package) eh: u32,
     pub(package) neh: u32,
+    pub(package) fold: u32,
 }
 
 // A record of an input `.eh_frame`: bytes `old .. old + len` (its length field included), at `new` in the
@@ -412,7 +415,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     let b = blob.as_slice();
     if o.gc {
-        collect(l, b, main);
+        collect(l, b, main, o.fold, o.jobs);
     }
     mark_used(l, b);
     if !load_libraries(l, &sos) || !finish_symbols(l) || !l.shared && !check_glibc(l, lsm) {
@@ -508,6 +511,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                 live: true,
                 eh: NONE,
                 neh: 0,
+                fold: NONE,
             },
         );
         if ty == SHT_SYMTAB {
@@ -1046,9 +1050,14 @@ const fn kept(l: &L, s: ISec) bool {
 // and the sections marked to stay (`SHF_GNU_RETAIN`). A section linked to another (`SHF_LINK_ORDER`)
 // stays with it. `.eh_frame` is no root: a frame entry stays when its function does, and keeps what it
 // names (its language data), its common entry with it (`eh_records`). Each round marks a new section or
-// ends the loop.
-fn collect(l: &mut L, b: []u8, main: u32) {
+// ends the loop. With `fold`, the identical functions whose address nothing takes fold (`fold_code`) before
+// the frame entries are kept: the roots and the relocations but a call's mark the taken ones.
+fn collect(l: &mut L, b: []u8, main: u32, fold: bool, jobs: u32) {
     let mut work = Vector::<u32>::new();
+    let mut taken = Vector::<bool>::new();
+    if fold {
+        taken.resize_default(l.secs.len());
+    }
     let mut ehs = Vector::<u32>::new();
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
@@ -1073,6 +1082,7 @@ fn collect(l: &mut L, b: []u8, main: u32) {
         let gy = l.gs[main as usize];
         if gy.kind == G_DEF {
             reach_sym(l, gy.sym, &mut work);
+            take(l, gy.sym, &mut taken);
         }
     }
     if l.shared {
@@ -1080,6 +1090,7 @@ fn collect(l: &mut L, b: []u8, main: u32) {
             let gy = l.gs[g];
             if gy.kind == G_DEF && (l.syms[gy.sym as usize].other & 3) == STV_DEFAULT {
                 reach_sym(l, gy.sym, &mut work);
+                take(l, gy.sym, &mut taken);
             }
         }
     }
@@ -1090,7 +1101,7 @@ fn collect(l: &mut L, b: []u8, main: u32) {
     }
     loop {
         while let Some(s) = work.pop() {
-            reach_relocs(l, b, s, &mut work, 0, 0xFFFFFFFFFFFFFFFFu64);
+            reach_relocs(l, b, s, &mut work, &mut taken);
         }
         // Sections linked to a kept one, then the frame entries of the kept functions.
         for s in 0..l.secs.len() {
@@ -1109,6 +1120,9 @@ fn collect(l: &mut L, b: []u8, main: u32) {
         if work.len() == 0 {
             break;
         }
+    }
+    if fold {
+        fold_code(l, b, &ehs, &ix, &taken, jobs);
     }
     for i in 0..ehs.len() {
         eh_records(l, b, ehs[i], &ix[i]);
@@ -1164,8 +1178,9 @@ fn reach_range(l: &mut L, b: []u8, s: u32, ix: []u64, work: &mut Vector<u32>, lo
     }
 }
 
-// Mark live what the relocations of section `s` at offsets `lo .. hi` refer to.
-fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, lo: u64, hi: u64) {
+// Mark live what the relocations of section `s` refer to; with `taken` as long as the sections (folding),
+// mark taken what a relocation other than a call refers to.
+fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, taken: &mut Vector<bool>) {
     let sc = l.secs[s as usize];
     if sc.rela == NONE {
         return;
@@ -1175,8 +1190,185 @@ fn reach_relocs(l: &mut L, b: []u8, s: u32, work: &mut Vector<u32>, lo: u64, hi:
     let n = (rs.size / 24) as usize;
     for i in 0..n {
         let r = rel_at(b, rs, i);
-        if r.off >= lo && r.off < hi {
-            reach_sym(l, f.sym0 + r.sym, work);
+        reach_sym(l, f.sym0 + r.sym, work);
+        if !call_rel(l, r.ty) {
+            take(l, f.sym0 + r.sym, taken);
+        }
+    }
+}
+
+// Whether relocation type `ty` is a call's or a jump's, which takes no address.
+const fn call_rel(l: &L, ty: u32) bool {
+    return ast::pick(l.a64, ty == R_AARCH64_CALL26 || ty == R_AARCH64_JUMP26, ty == R_X86_64_PLT32);
+}
+
+// Mark the section that defines symbol `k` taken, when `taken` is in use.
+const fn take(l: &L, k: u32, taken: &mut Vector<bool>) {
+    if taken.len() != 0 {
+        let s = def_section(l, k);
+        if s != NONE32 {
+            taken[s as usize] = true;
+        }
+    }
+}
+
+// ---- identical code folding -----------------------------------------------------------------------------
+
+// Fold each live code section into the first identical one (`lu::fold`), as LLD's `--icf=safe` does: the
+// sections whose address nothing takes (`taken`), so no two functions a program can tell apart by address
+// share one. A section's key holds its output section, flags and alignment. One whose frame entry names
+// language data, whose common entry names a personality routine, or that a section follows
+// (`SHF_LINK_ORDER`) stays: its unwinding or its metadata is its own. A folded section's frame entry goes
+// (`eh_records`): its copy's describes the same code. `.eh_frame` sections `ehs`, their relocation indexes
+// `ix`.
+fn fold_code(l: &mut L, b: []u8, ehs: &Vector<u32>, ix: &Vector<Vector<u64>>, taken: &Vector<bool>, jobs: u32) {
+    let ns = l.secs.len();
+    let mut cand = Vector::<bool>::new();
+    cand.resize_default(ns);
+    let mut nc: u32 = 0;
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if !taken[s] && sc.live && alloc(sc) && (sc.flags & SHF_EXECINSTR) != 0 && sc.ty == SHT_PROGBITS && sc.size != 0 {
+            cand[s] = true;
+            nc += 1;
+        }
+    }
+    if nc < 2 {
+        return;
+    }
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if alloc(sc) && (sc.flags & SHF_LINK_ORDER) != 0 && sc.link != 0 {
+            cand[(l.files[sc.file as usize].sec0 + sc.link) as usize] = false;
+        }
+    }
+    for i in 0..ehs.len() {
+        let sc = l.secs[ehs[i] as usize];
+        let x = ix[i].as_slice();
+        let mut p: usize = 0;
+        let end = sc.size as usize;
+        // Each step reads one record.
+        while p + 8 <= end {
+            let len = lu::r32(b, sc.off + p) as usize;
+            if len == 0 || len == 0xFFFFFFFF {
+                break;
+            }
+            let id = lu::r32(b, sc.off + p + 4) as usize;
+            if id != 0 && id <= p + 4 {
+                let fs = reloc_section(l, b, ehs[i], x, (p + 8) as u64);
+                let cie = p + 4 - id;
+                let cend = cie + 4 + lu::r32(b, sc.off + cie) as usize;
+                // Past the function's start: the language data; in the common entry: the personality.
+                let own = first_at(x, (p + 9) as u64) < first_at(x, (p + 4 + len) as u64);
+                let personality = first_at(x, cie as u64) < first_at(x, cend as u64);
+                if fs != NONE32 && (own || personality) {
+                    cand[fs as usize] = false;
+                }
+            }
+            p += 4 + len;
+        }
+    }
+    // The candidates' keys and bytes hashed; only those that share a hash with another stay candidates.
+    let mut all = Vector::<lu::FoldPart>::new();
+    for s in 0..ns {
+        if !cand[s] {
+            continue;
+        }
+        let sc = l.secs[s];
+        let mut rank: u32 = 0;
+        let name = out_name(l, sc, &mut rank);
+        let mut key = (sc.flags ^ sc.align << 40 ^ rank as u64 << 20).wrapping_mul(0x9E3779B97F4A7C15);
+        for c in name.bytes() {
+            key = (key ^ c as u64).wrapping_mul(0x100000001B3);
+        }
+        all.push(lu::FoldPart { at: sc.off, len: sc.size as usize, key: key, hash: 0, r0: s as u32, rn: 0 });
+    }
+    lu::fold_hashes(&mut all, b, jobs);
+    let mut hs = Vector::<u128>::with_capacity(all.len());
+    for i in 0..all.len() {
+        hs.push(all[i].hash as u128 << 32 | i as u64);
+    }
+    hs.sort();
+    let mut shared = Vector::<bool>::new();
+    shared.resize_default(all.len());
+    for k in 0..hs.len() {
+        if k > 0 && hs[k] >> 32 == hs[k - 1] >> 32 || k + 1 < hs.len() && hs[k] >> 32 == hs[k + 1] >> 32 {
+            shared[(hs[k] & 0xFFFFFFFF) as usize] = true;
+        }
+    }
+    // Per input section, its index among the candidates plus 1 (0: none).
+    let mut ci = Vector::<u32>::new();
+    ci.resize_default(ns);
+    let mut ps = Vector::<lu::FoldPart>::new();
+    for i in 0..all.len() {
+        if shared[i] {
+            ci[all[i].r0 as usize] = ps.len() as u32 + 1;
+            ps.push(all[i]);
+        }
+    }
+    // The candidates' relocations, their targets as candidates, globals (a library's may be another's at run
+    // time) or places.
+    let mut rs = Vector::<lu::FoldRel>::new();
+    for i in 0..ps.len() {
+        let s = ps[i].r0 as usize;
+        let sc = l.secs[s];
+        let f = l.files[sc.file as usize];
+        let r0 = rs.len() as u32;
+        if sc.rela != NONE {
+            let ra = l.secs[sc.rela as usize];
+            for j in 0..(ra.size / 24) as usize {
+                let r = rel_at(b, ra, j);
+                let k = f.sym0 + r.sym;
+                let mut fr = lu::FoldRel {
+                    off: r.off as u32,
+                    kind: r.ty,
+                    part: lu::FOLD_NONE,
+                    tgt: 0,
+                    val: r.addend as u64,
+                };
+                let g = gof(l, k);
+                let y = l.syms[k as usize];
+                let d = def_section(l, k);
+                if d != NONE32 && ci[d as usize] != 0 {
+                    // A candidate's global is no library's export (each one is taken): its definition counts.
+                    let dk = if g != NONE {
+                        l.gs[g as usize].sym
+                    } else {
+                        k
+                    };
+                    fr.part = ci[d as usize] - 1;
+                    fr.val = l.syms[dk as usize].value.wrapping_add(r.addend as u64);
+                } else if g != NONE {
+                    fr.tgt = lu::FOLD_GLOBAL | g as u64;
+                } else if y.shndx == SHN_ABS {
+                    fr.tgt = lu::FOLD_ABS;
+                    fr.val = y.value.wrapping_add(r.addend as u64);
+                } else if d != NONE32 {
+                    fr.tgt = lu::FOLD_SECTION | d as u64;
+                    fr.val = y.value.wrapping_add(r.addend as u64);
+                } else {
+                    // A local symbol in no section of the image: itself.
+                    fr.tgt = lu::FOLD_SECTION | 1u64 << 31 | k as u64;
+                }
+                rs.push(fr);
+            }
+        }
+        let pi = ps.index_mut(i);
+        pi.r0 = r0;
+        pi.rn = rs.len() as u32 - r0;
+    }
+    let into = lu::fold(&ps, &rs, b);
+    let mut idx = Vector::<u32>::with_capacity(ps.len());
+    for s in 0..ns {
+        if ci[s] != 0 {
+            idx.push(s as u32);
+        }
+    }
+    for i in 0..into.len() {
+        if into[i] != lu::FOLD_NONE {
+            let ms = l.secs.index_mut(idx[i] as usize);
+            ms.live = false;
+            ms.fold = idx[into[i] as usize];
         }
     }
 }
@@ -1832,6 +2024,16 @@ fn layout(l: &mut L, o: &Opts, b: []u8) {
             l.tls_align = l.tls_align.max(os.align);
         }
     }
+    // A folded section lands where its copy does (`fold_code`).
+    for s in 0..l.secs.len() {
+        let d = l.secs[s].fold;
+        if d != NONE {
+            let c = l.secs[d as usize];
+            let ms = l.secs.index_mut(s);
+            ms.out = c.out;
+            ms.at = c.at;
+        }
+    }
 }
 
 // The input sections of output section `q`, whose address is `addr`, placed again in their order, each
@@ -2192,7 +2394,7 @@ fn rel_chunk(ctx: *mut void, c: usize) {
 // `drels`, in order. False, with the reason in `err`, when a relocation cannot be applied.
 fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, drels: &mut Vector<DRel>, err: &mut String) bool {
     let sc = l.secs[s];
-    if sc.out == NONE || seg_of(l.osecs[sc.out as usize].rank) == 4 {
+    if sc.out == NONE || sc.fold != NONE || seg_of(l.osecs[sc.out as usize].rank) == 4 {
         return true;
     }
     if sc.ty != SHT_NOBITS {
@@ -2546,9 +2748,9 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
             let y = l.syms[k as usize];
             let p = (dbg_off[sc.out as usize] + sc.at + r.off) as usize;
             let mut v = target(l, k).wrapping_add(r.addend as u64);
-            if dropped_target(l, k) {
+            let dn = l.sn.spell(sc.name);
+            if dropped_target(l, k, dn == ".debug_line") {
                 // A dropped function's address: lld's tombstones, 1 where 0 would end a list.
-                let dn = l.sn.spell(sc.name);
                 v = (dn == ".debug_ranges" || dn == ".debug_loc") as u64;
             }
             // A section symbol of a debug section: the offset within the merged section.
@@ -2567,14 +2769,16 @@ const fn apply_debug(l: &L, b: []u8, img: &mut Vector<u8>, dbg_off: &Vector<u64>
     }
 }
 
-// Whether symbol `k` (a global: its definition) lies in a loaded section garbage collection dropped.
-const fn dropped_target(l: &L, k: u32) bool {
+// Whether symbol `k` (a global: its definition) lies in a loaded section garbage collection dropped, or
+// identical code folding did and the reference is no line table's (`line`): as LLD's, a folded function's
+// debug information describes no code, while its lines stay on its copy, for breakpoints.
+const fn dropped_target(l: &L, k: u32, line: bool) bool {
     let x = def_section(l, k);
     if x == NONE32 {
         return false;
     }
     let s = l.secs[x as usize];
-    return alloc(s) && !s.live;
+    return alloc(s) && !s.live && (s.fold == NONE || !line);
 }
 
 // Copy the kept records of packed `.eh_frame` section `sc` to `img` at `at`, each frame entry's pointer to

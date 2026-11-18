@@ -205,6 +205,18 @@ pub(package) struct Lower {
     b: Body,
     li: Vector<LInfo>,
     cc: LCaches,
+    // The classes of the types that name a parameter, per set of bindings (`env_of`: the bindings and the
+    // macro mode, by content, as an id into `tg_envs`): an instance body asks for each of its types many
+    // times, under a few sets (`ty`). `tg_gen` and `tg_mg` name the mangler state `tg_env` was found for.
+    tg: Vector<Map<u64, TyI>>,
+    tg_ids: Map<u64, Vector<u32>>,
+    tg_envs: Vector<Vector<mbe::MSub>>,
+    tg_mac: Vector<bool>,
+    tg_gen: u64,
+    tg_mg: usize,
+    tg_env: u32,
+    // The function symbols whose item's attributes a reference stated (`ref_attrs`).
+    attr_seen: Set<u32>,
     fenum: EnumL, // the shape the last `decl_fields` of an enum placed
     // Per local of the body, whether a `TM_DROP` drops it (`share_plan`): its drop runs after its
     // `ST_STORAGE_DEAD`, which drop elaboration puts before the drop.
@@ -295,6 +307,14 @@ extend Lower {
             b: Body::new(),
             li: Vector::<LInfo>::new(),
             cc: LCaches::new(),
+            tg: Vector::<Map<u64, TyI>>::new(),
+            tg_ids: Map::<u64, Vector<u32>>::new(),
+            tg_envs: Vector::<Vector<mbe::MSub>>::new(),
+            tg_mac: Vector::<bool>::new(),
+            tg_gen: 0,
+            tg_mg: 0,
+            tg_env: NONE,
+            attr_seen: Set::<u32>::new(),
             fenum: EnumL { ok: false },
             dropped: Vector::<bool>::new(),
             lms: Vector::<lay::MemberAt>::new(),
@@ -412,14 +432,77 @@ extend Lower {
             },
             None => {},
         }
+        // A type naming a parameter means what the bindings in place make it (`tg`).
+        let env = self.env_of(c);
+        switch self.tg[env as usize].get(&key) {
+            Some(v) => {
+                *out = *v;
+                return true;
+            },
+            None => {},
+        }
         if !self.ty_raw(c, m, t, out) {
             return false;
         }
-        // A type naming a parameter means what the bindings in place make it.
         if Lower::same_in_every_body(c, m, t) {
             self.cc.tcache.insert(key, *out);
+        } else if self.env_of(c) == env {
+            self.tg.index_mut(env as usize).insert(key, *out);
         }
         return true;
+    }
+
+    // The id of the bindings in place and the macro mode (`tg_envs`), by content: found again only when the
+    // mangler's bindings changed (`Mangler::subs_gen`).
+    fn env_of(self: &mut Self, c: &cbe::CEmit) u32 {
+        let mg = ((&c.mg) as *const mbe::Mangler) as usize;
+        let gen = c.mg.subs_gen();
+        if gen == self.tg_gen && mg == self.tg_mg && self.tg_env != NONE {
+            return self.tg_env;
+        }
+        let subs = &c.mg.subs;
+        let mac = c.mg.macro_on;
+        let mut h = 0xCBF29CE484222325u64 ^ mac as u64;
+        for i in 0..subs.len() {
+            let s = subs[i];
+            h = (h ^ s.pm as u64 << 48 ^ s.pnode as u64 << 16 ^ s.lim as u64).wrapping_mul(0x100000001B3);
+            h = (h ^ s.am as u64 << 32 ^ s.at as u64).wrapping_mul(0x100000001B3);
+        }
+        let mut id = NONE;
+        if let Some(ids) = self.tg_ids.get(&h) {
+            for j in 0..ids.len() {
+                let e = &self.tg_envs[ids[j] as usize];
+                let mut same = self.tg_mac[ids[j] as usize] == mac && e.len() == subs.len();
+                for i in 0..subs.len() {
+                    if !same {
+                        break;
+                    }
+                    let (x, y) = (e[i], subs[i]);
+                    same = x.pm == y.pm && x.pnode == y.pnode && x.am == y.am && x.at == y.at && x.lim == y.lim;
+                }
+                if same {
+                    id = ids[j];
+                    break;
+                }
+            }
+        }
+        if id == NONE {
+            id = self.tg_envs.len() as u32;
+            self.tg_envs.push(mbe::subs_copy(subs));
+            self.tg_mac.push(mac);
+            self.tg.push(Map::<u64, TyI>::new());
+            if let Some(ids) = self.tg_ids.get_mut(&h) {
+                ids.push(id);
+            } else {
+                let mut v = Vector::<u32>::new();
+                v.push(id);
+                self.tg_ids.insert(h, v);
+            }
+        }
+        self.tg_gen = gen;
+        self.tg_mg = mg;
+        self.tg_env = id;
+        return id;
     }
 
     // Whether type `(m, t)` means one thing in every body: a concrete type other than a closure with
@@ -762,6 +845,7 @@ extend Lower {
     // (`Package::decls`): a backend that types a function's address (wasm) reads it when the package
     // holds no body of the function, as when the per-TU cache replays the unit that defines it.
     fn ref_sig(self: &mut Self, c: &mut cbe::CEmit, k: u32, m: ModuleId, f: NodeId) bool {
+        self.ref_attrs(c, k, m, f);
         if self.pkg.syms[k as usize].sig != NONE {
             return true;
         }
@@ -8041,6 +8125,10 @@ extend Lower {
             if ext && c.mg.takes_secret(pcallee.module, pcallee.node) {
                 self.mark_sec(name.as_str());
             }
+            if fd.kind == NodeKind::NODE_FUNCTION && !ext {
+                let s = self.pkg.symbol(name.as_str(), SK_FUNC);
+                self.ref_attrs(c, s, pcallee.module, pcallee.node);
+            }
         }
         // A generic callee's parameter types read the bindings of its instance (`arg_mode`); the
         // arguments read the caller's.
@@ -9081,6 +9169,17 @@ extend Lower {
         if s != NONE {
             self.item_attrs(c, s, m, n);
         }
+    }
+
+    // A reference to function `(m, n)`, symbol `s`, states the item's attributes (`item_attrs`) once: a build
+    // that replays the function's unit has no definition to take them from, and `Sym.used` decides the
+    // convention a call or a function's address takes on Windows (`win64`).
+    fn ref_attrs(self: &mut Self, c: &mut cbe::CEmit, s: u32, m: ModuleId, n: NodeId) {
+        if self.attr_seen.contains(&s) {
+            return;
+        }
+        self.attr_seen.insert(s);
+        self.item_attrs(c, s, m, n);
     }
 
     // Item `(m, n)`'s `@used` and `@unsafe(link_section)` onto symbol `s`; an `@export` function is kept as

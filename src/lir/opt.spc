@@ -16957,6 +16957,8 @@ pub(package) struct Run {
     unit: Vector<u32>,
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
+    // Per body, the body of its class it copies (`duplicates`), NONE for the one that runs the passes.
+    dup: Vector<u32>,
     // Per body, whether a caller may inline it: written by the body's job, read by its callers' jobs.
     ok: UnsafeCell<Vector<u8>>, // per body, its inliner facts (`il::facts`; 0: callers may not inline it)
     // Per body whose loop transforms or packing made vectors, or whose wide vectors split while a caller
@@ -17171,6 +17173,14 @@ extend Run {
         let ne = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, false);
         edges.reserve_exact(ne);
         let _ = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, true);
+        // Each copy waits for its class's first body: an edge forward in `order`, which keeps the bodies
+        // of a level by index.
+        let dup = duplicates(p, &bodies, held, &owner, &shape, &always, &bunit, &unit, &level);
+        for k in 0..held as usize {
+            if dup[k] != NONE {
+                edges.push(dup[k] as u64 << 32 | k as u64);
+            }
+        }
         let mut fin = Vector::<bool>::with_capacity(n);
         for k in 0..n {
             fin.push(k as u32 >= held);
@@ -17194,6 +17204,7 @@ extend Run {
             always: always,
             bunit: bunit,
             level: level,
+            dup: dup,
             ok: UnsafeCell::<Vector<u8>>::new(ok),
             fin: psync::Mutex::<Vector<bool>>::new(fin),
             fin_cv: psync::Condvar::new(),
@@ -17211,9 +17222,10 @@ extend Run {
         };
     }
 
-    /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none).
+    /// The estimated work of body `j`'s job: its instruction count (0 for a held body, which has none,
+    /// and for a copy).
     pub(package) const fn cost(self: &Self, j: u32) u64 {
-        if j >= self.held {
+        if j >= self.held || self.dup[j as usize] != NONE {
             return 0;
         }
         return (unsafe (*self.bodies.get())[j as usize].insts.len()) as u64;
@@ -17224,6 +17236,10 @@ extend Run {
     pub(package) fn job(self: &Self, j: u32) {
         let r = self;
         if j >= r.held {
+            return;
+        }
+        if r.dup[j as usize] != NONE {
+            r.copy_of(j);
             return;
         }
         let p = unsafe &*r.pk;
@@ -17613,6 +17629,26 @@ extend Run {
         pool_give(&self.free_lock, &self.free, sc);
     }
 
+    // Body `j` as its class's first body `d` left it (`duplicates`; `d`'s job is done: an edge makes `j`
+    // wait for it): the passes give an identical body the same result. The writes go through references,
+    // which drop the values they replace.
+    fn copy_of(self: &Self, j: u32) {
+        let d = self.dup[j as usize] as usize;
+        let base = unsafe (*self.bodies.get()).as_mut_ptr();
+        let bj = unsafe &mut *(base + j as usize);
+        *bj = (unsafe &*(base + d)).compact();
+        let ok = unsafe (*self.ok.get()).as_mut_ptr();
+        unsafe *(ok + j as usize) = unsafe *(ok + d);
+        let fp = unsafe (*self.finals.get()).as_mut_ptr();
+        if let Some(f) = unsafe &*(fp + d) {
+            let fj = unsafe &mut *(fp + j as usize);
+            *fj = Some(Box::new(f.compact()));
+        }
+        let mut g = self.fin.lock();
+        g.get_mut()[j as usize] = true;
+        self.fin_cv.notify_all();
+    }
+
     /// Give the bodies back to `pk`, the package `new` took them from, in their final forms, their constant
     /// slots in read-only data (`const_slots`).
     pub(package) fn finish(self: &mut Self, pk: &mut Package) {
@@ -17647,6 +17683,15 @@ extend Run {
         let b = replace(pk.bodies.index_mut(k as usize), Body::empty());
         assert(b.lines.len() != 0, "hold: a body taken twice");
         return (b, true);
+    }
+
+    /// The bodies that take their class's result rather than run the passes (`duplicates`).
+    pub(package) const fn copies(self: &Self) usize {
+        let mut n: usize = 0;
+        for k in 0..self.dup.len() {
+            n += (self.dup[k] != NONE) as usize;
+        }
+        return n;
     }
 
     /// Whether body `k` passed the inliner's shape test, and whether its callers may inline it (after its
@@ -23471,6 +23516,75 @@ const fn args_among(b: &Body, e: u32, o: u32) bool {
         }
     }
     return true;
+}
+
+// Per body, the body of its class it copies, NONE for the first of a class and for every other body. A
+// class holds the identical bodies (`Body::same`) of instances (not `Sym.own`: every build lowers them, so a
+// cached unit never reads the classes) at one level, with the same inliner shape, unit and function
+// attributes: the passes read nothing else of a body (`Run::job`), so each gives them the same result.
+fn duplicates(
+    p: &Package,
+    bodies: &Vector<Body>,
+    held: u32,
+    owner: &Vector<u32>,
+    shape: &Vector<bool>,
+    always: &Vector<bool>,
+    bunit: &Vector<u32>,
+    unit: &Vector<u32>,
+    level: &Vector<u32>,
+) Vector<u32> {
+    let mut dup = Vector::<u32>::new();
+    fill(&mut dup, bodies.len(), NONE);
+    let mut keys = Vector::<u128>::new();
+    for k in 0..held as usize {
+        if owner[k] == NONE {
+            continue;
+        }
+        let y = p.syms[owner[k] as usize];
+        let b = &bodies[k];
+        if y.own || b.naked || b.insts.len() == 0 {
+            continue;
+        }
+        let mut h = mix(mix(b.insts.len() as u64, b.blocks.len() as u64), b.sig);
+        for i in 0..b.insts.len() {
+            let t = b.insts[i];
+            h = mix(
+                mix(h, t.op as u64 | t.ty as u64 << 8 | t.aux as u64 << 16 | t.a as u64 << 32),
+                t.b as u64 | t.c as u64 << 32,
+            );
+        }
+        for i in 0..b.syms.len() {
+            h = mix(h, b.syms[i]);
+        }
+        keys.push(h as u128 << 32 | k as u64);
+    }
+    keys.sort();
+    // The first bodies of the classes of one hash, by index.
+    let mut firsts = Vector::<u32>::new();
+    for i in 0..keys.len() {
+        if i == 0 || keys[i] >> 32 != keys[i - 1] >> 32 {
+            firsts.truncate(0);
+        }
+        let k = (keys[i] & 0xFFFFFFFF) as usize;
+        let a = p.syms[owner[k] as usize];
+        let mut d = NONE;
+        for f in firsts.iter() {
+            let c = (*f) as usize;
+            let o = p.syms[owner[c] as usize];
+            if level[c] == level[k] && shape[c] == shape[k] && always[c] == always[k] && bunit[c] == bunit[k] && unit[c] == unit[k] && o.linkage == a.linkage && o.sect == a.sect && o.used == a.used && o.noinline == a.noinline && o.cold == a.cold && o.sec == a.sec && o.internal == a.internal && o.ext == a.ext && bodies[c].same(
+                &bodies[k],
+            ) {
+                d = c as u32;
+                break;
+            }
+        }
+        if d == NONE {
+            firsts.push(k as u32);
+        } else {
+            dup[k] = d;
+        }
+    }
+    return dup;
 }
 
 // The edges of the bodies' job graph (`Run::edges`), pushed onto `edges` when `list`; their count. A caller

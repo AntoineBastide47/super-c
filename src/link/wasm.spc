@@ -24,6 +24,7 @@ pub(package) struct Opts {
     pub(package) stack_first: bool,
     pub(package) strip: bool,
     pub(package) gc: bool, // drop the bodies and data segments nothing reaches (`--gc-sections`, `collect`)
+    pub(package) fold: bool, // one copy of identical functions whose address nothing takes (`--icf=safe`, with `gc`)
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
 }
 
@@ -64,7 +65,8 @@ struct IImp {
 }
 
 // A function body of an input: its type, its entry (size field first) in the blob, where it lands; not
-// `live` when garbage collection drops it.
+// `live` when garbage collection drops it, or identical code folding does (`fold_code`): then its index
+// is body `fold`'s.
 struct IFunc {
     pub(package) ty: u32,
     pub(package) at: usize,
@@ -72,6 +74,7 @@ struct IFunc {
     pub(package) index: u32, // the output function index
     pub(package) out: u64, // the entry's offset in the output code section's payload
     pub(package) live: bool,
+    pub(package) fold: u32,
 }
 
 // A data segment of an input: name, alignment, bytes in the blob, its address once placed (NONE: a
@@ -213,7 +216,7 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
     }
     let b = blob.as_slice();
     if o.gc {
-        collect(l, b);
+        collect(l, b, o.fold);
     }
     if !assign_functions(l, b) {
         return false;
@@ -388,7 +391,15 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
             for _ in 0..n {
                 let ty = lu::read_uleb(b, &mut q) as u32;
                 l.funcs.push(
-                    IFunc { ty: l.ftypes[(f.type0 + ty) as usize], at: 0, len: 0, index: NONE, out: 0, live: true },
+                    IFunc {
+                        ty: l.ftypes[(f.type0 + ty) as usize],
+                        at: 0,
+                        len: 0,
+                        index: NONE,
+                        out: 0,
+                        live: true,
+                        fold: NONE,
+                    },
                 );
             }
         } else if id == 10 {
@@ -611,6 +622,12 @@ fn assign_functions(l: &mut L, b: []u8) bool {
             nx += 1;
         }
     }
+    for i in 0..l.funcs.len() {
+        let d = l.funcs[i].fold;
+        if d != NONE {
+            l.funcs.index_mut(i).index = l.funcs[d as usize].index;
+        }
+    }
     l.ctor_fn = nx;
     let empty: [u8; 2] = [0, 0];
     l.ctor_ty = type_index(l, empty);
@@ -724,12 +741,19 @@ const fn target_type(l: &L, k: u32) u32 {
 // Keep only the bodies and data segments a root reaches through relocations (`--gc-sections`, as wasm-ld
 // does): `_start`, the symbols marked to stay (`F_NO_STRIP`), the init functions and the constructor
 // tables. Items: the bodies, then the segments. A dropped body gets no index nor place in the code, a
-// dropped segment no address.
-fn collect(l: &mut L, b: []u8) {
+// dropped segment no address. With `fold`, the identical functions whose address nothing takes fold
+// (`fold_code`): the roots and the relocations but a call's mark the taken ones.
+fn collect(l: &mut L, b: []u8, fold: bool) {
     let nf = l.funcs.len() as u32;
     let n = nf as usize + l.segs.len();
     // Each relocation of a body or segment as an edge (its item << 32 | its target's), by source.
     let mut edges = Vector::<u64>::new();
+    let mut taken = Vector::<bool>::new();
+    // With `fold`, the relocations of the bodies, in blob order.
+    let mut crel = Vector::<WRel>::new();
+    if fold {
+        taken.resize_default(nf as usize);
+    }
     for fi in 0..l.files.len() {
         let f = l.files[fi];
         for s in f.sec0..f.sec0 + f.nsec {
@@ -748,14 +772,22 @@ fn collect(l: &mut L, b: []u8) {
                 q += 1;
                 let src = ts.at + lu::read_uleb(b, &mut q) as usize;
                 let k = lu::read_uleb(b, &mut q) as u32;
-                if w::has_addend(ty) {
-                    let _ = sleb(b, &mut q);
-                }
+                let addend = if w::has_addend(ty) {
+                    sleb(b, &mut q)
+                } else {
+                    0i64
+                };
                 let to = if ty == w::R_TYPE_INDEX_LEB {
                     NONE
                 } else {
                     item_of(l, f.sym0 + k)
                 };
+                if fold && ts.id == 10 {
+                    crel.push(WRel { src: src, file: fi as u32, k: k, ty: ty, addend: addend });
+                }
+                if fold && to < nf && ty != w::R_FUNCTION_INDEX_LEB {
+                    taken[to as usize] = true;
+                }
                 if to == NONE {
                     continue;
                 }
@@ -785,15 +817,18 @@ fn collect(l: &mut L, b: []u8) {
         let g = l.glob[sid as usize] - 1;
         if l.gs[g as usize].kind == G_DEF {
             mark(item_of(l, l.gs[g as usize].sym), &mut live, &mut work);
+            take(item_of(l, l.gs[g as usize].sym), &mut taken);
         }
     }
     for k in 0..l.syms.len() {
         if (l.syms[k].flags & (F_NO_STRIP | F_UNDEFINED)) == F_NO_STRIP {
             mark(item_of(l, k as u32), &mut live, &mut work);
+            take(item_of(l, k as u32), &mut taken);
         }
     }
     for i in 0..l.inits.len() {
         mark(item_of(l, l.inits[i].1), &mut live, &mut work);
+        take(item_of(l, l.inits[i].1), &mut taken);
     }
     for i in 0..l.segs.len() {
         if l.names.spell(l.segs[i].name).starts_with(".init_array") {
@@ -813,6 +848,179 @@ fn collect(l: &mut L, b: []u8) {
             let sg = l.segs.index_mut(i);
             sg.live = false;
             sg.addr = NONE;
+        }
+    }
+    if fold {
+        fold_code(l, b, &taken, &crel);
+    }
+}
+
+// A relocation of a body: its place in the blob, its file, symbol (file-relative; a type index for
+// `R_TYPE_INDEX_LEB`), type and addend.
+struct WRel {
+    src: usize,
+    file: u32,
+    k: u32,
+    ty: u8,
+    addend: i64,
+}
+
+extend WRel as Copy {}
+
+// Mark item `x` (`item_of`) taken, when `taken` is in use and `x` is a body.
+const fn take(x: u32, taken: &mut Vector<bool>) {
+    if x as usize < taken.len() {
+        taken[x as usize] = true;
+    }
+}
+
+// ---- identical code folding -----------------------------------------------------------------------------
+
+// Fold each live body into the first identical one (`lu::fold`), as LLD's `--icf=safe` does with the
+// sections of other formats: the bodies whose address (table slot) nothing takes (`taken`), so no two
+// functions a program can tell apart by address share one. A body's key is its type. The bodies compare
+// with their relocation fields cleared (`relocs`, in blob order): a field holds its object's own index of
+// the target, which the relocation names. A folded body's debug information gets the tombstones of a
+// dropped one.
+fn fold_code(l: &mut L, b: []u8, taken: &Vector<bool>, relocs: &Vector<WRel>) {
+    let nf = l.funcs.len();
+    // Per body, its place in `nb` plus 1 (0: no candidate); `nb` the candidates' bytes.
+    let mut at = Vector::<usize>::new();
+    at.resize_default(nf);
+    let mut nb = Vector::<u8>::new();
+    let mut nc: u32 = 0;
+    for i in 0..nf {
+        let fx = l.funcs[i];
+        if fx.live && !taken[i] && fx.len != 0 {
+            at[i] = nb.len() + 1;
+            nb.extend_from_slice(b[fx.at..fx.at + fx.len]);
+            nc += 1;
+        }
+    }
+    if nc < 2 {
+        return;
+    }
+    for r in relocs.iter() {
+        let i = func_at(l, r.src);
+        if at[i] != 0 {
+            let p = at[i] - 1 + (r.src - l.funcs[i].at);
+            let width: usize = ast::pick(
+                r.ty == w::R_TABLE_INDEX_I32 || r.ty == w::R_MEMORY_ADDR_I32 || r.ty == w::R_GLOBAL_INDEX_I32,
+                4,
+                5,
+            );
+            for q in p..p + width {
+                nb[q] = 0;
+            }
+        }
+    }
+    // The candidates' types and bytes hashed; only those that share a hash with another stay candidates.
+    let mut all = Vector::<lu::FoldPart>::new();
+    for i in 0..nf {
+        if at[i] != 0 {
+            let fx = l.funcs[i];
+            all.push(lu::FoldPart { at: at[i] - 1, len: fx.len, key: fx.ty, hash: 0, r0: i as u32, rn: 0 });
+        }
+    }
+    lu::fold_hashes(&mut all, &nb, 1);
+    let mut hs = Vector::<u128>::with_capacity(all.len());
+    for i in 0..all.len() {
+        hs.push(all[i].hash as u128 << 32 | i as u64);
+    }
+    hs.sort();
+    let mut shared = Vector::<bool>::new();
+    shared.resize_default(all.len());
+    for k in 0..hs.len() {
+        if k > 0 && hs[k] >> 32 == hs[k - 1] >> 32 || k + 1 < hs.len() && hs[k] >> 32 == hs[k + 1] >> 32 {
+            shared[(hs[k] & 0xFFFFFFFF) as usize] = true;
+        }
+    }
+    // Per body, its index among the candidates plus 1 (0: none), and its relocations' count.
+    let mut ci = Vector::<u32>::new();
+    ci.resize_default(nf);
+    let mut ps = Vector::<lu::FoldPart>::new();
+    for i in 0..all.len() {
+        if shared[i] {
+            ci[all[i].r0 as usize] = ps.len() as u32 + 1;
+            ps.push(all[i]);
+        }
+    }
+    let mut cnt = Vector::<u32>::new();
+    cnt.resize_default(ps.len() + 1);
+    for r in relocs.iter() {
+        let i = func_at(l, r.src);
+        if ci[i] != 0 {
+            cnt[ci[i] as usize] += 1;
+        }
+    }
+    for c in 0..ps.len() {
+        cnt[c + 1] += cnt[c];
+        let pi = ps.index_mut(c);
+        pi.r0 = cnt[c];
+        pi.rn = cnt[c + 1] - cnt[c];
+    }
+    // The relocations by candidate, in place order; their targets as candidates, items, globals or values.
+    let mut rs = Vector::<lu::FoldRel>::with_capacity(cnt[ps.len()] as usize);
+    for _ in 0..cnt[ps.len()] {
+        rs.push(lu::FoldRel { off: 0, kind: 0, part: lu::FOLD_NONE, tgt: 0, val: 0 });
+    }
+    for r in relocs.iter() {
+        let i = func_at(l, r.src);
+        if ci[i] == 0 {
+            continue;
+        }
+        let c = ci[i] as usize - 1;
+        let f = l.files[r.file as usize];
+        let mut fr = lu::FoldRel {
+            off: (r.src - l.funcs[i].at) as u32,
+            kind: r.ty,
+            part: lu::FOLD_NONE,
+            tgt: lu::FOLD_ABS,
+            val: r.addend as u64,
+        };
+        if r.ty == w::R_TYPE_INDEX_LEB {
+            fr.val = l.ftypes[(f.type0 + r.k) as usize];
+        } else if r.ty == w::R_GLOBAL_INDEX_LEB || r.ty == w::R_GLOBAL_INDEX_I32 || r.ty == w::R_TABLE_NUMBER_LEB {
+            fr.val = l.syms[(f.sym0 + r.k) as usize].name;
+        } else {
+            let k = f.sym0 + r.k;
+            let x = item_of(l, k);
+            let g = gof(l, k);
+            if x != NONE && x as usize < nf && ci[x as usize] != 0 {
+                fr.part = ci[x as usize] - 1;
+            } else if x != NONE {
+                let d = if g != NONE {
+                    l.gs[g as usize].sym
+                } else {
+                    k
+                };
+                fr.tgt = lu::FOLD_SECTION | x as u64;
+                fr.val = (l.syms[d as usize].off as i64 + r.addend) as u64;
+            } else if g != NONE {
+                fr.tgt = lu::FOLD_GLOBAL | g as u64;
+            } else {
+                // A local symbol that names no body nor segment: itself.
+                fr.tgt = lu::FOLD_SECTION | 1u64 << 31 | k as u64;
+            }
+        }
+        rs[ps[c].r0 as usize] = fr;
+        ps.index_mut(c).r0 += 1;
+    }
+    for c in 0..ps.len() {
+        ps.index_mut(c).r0 -= ps[c].rn;
+    }
+    let into = lu::fold(&ps, &rs, &nb);
+    let mut idx = Vector::<u32>::with_capacity(ps.len());
+    for i in 0..nf {
+        if ci[i] != 0 {
+            idx.push(i as u32);
+        }
+    }
+    for c in 0..into.len() {
+        if into[c] != lu::FOLD_NONE {
+            let fx = l.funcs.index_mut(idx[c] as usize);
+            fx.live = false;
+            fx.fold = idx[into[c] as usize];
         }
     }
 }

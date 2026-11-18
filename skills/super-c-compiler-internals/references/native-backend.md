@@ -32,7 +32,7 @@ A native build compiles each module's LIR to a machine object in place of its C 
 | `src/target/wasmobj.spc` | The relocatable wasm object `wasm-ld` links (Linking.md): types, imports, functions, data segments, the `linking` symbol table, relocations; with debug information `.debug_*` custom sections whose addresses are offsets from a body's entry (`R_WASM_FUNCTION_OFFSET_I32`, section symbols for `R_WASM_SECTION_OFFSET_I32`), as clang writes them |
 | `src/target/wasmgen.spc` | One LIR body into one wasm function: scalars in locals shared by live range (a result may take a local its operands free), i128 and vectors in frame homes (a result's home is never one its operands free at it: a lane loop may write result lanes before it reads every operand lane), the frame below `__stack_pointer`, Ramsey's structured control flow from an explicit task stack, dense switches as `br_table`, vector operations lane by lane as the evaluator defines them; with SIMD128 a float minimumNumber of 16-byte vectors is `min` past the NaNs' selects (`float_minmax`), one select when its first operand holds no NaN (`VOP_NUMBER`); a masked access through a pointer under a constant mask tests no lane: a 16-byte vector of all or at most 4 active lanes is `v128.load`/`v128.store` or `v128.load<bits>_lane`/`v128.store<bits>_lane` (`mask_v128`, `vmask_reg`), any other copies each run of active lanes whole (`vmem_masked`). A C `main` with two parameters is `__main_argc_argv`, as wasi-libc's start calls it |
 | `src/target/native.spc` | The entry: `supported` (macOS arm64, Linux x86-64, Linux arm64, Windows x86-64, wasm32-wasip1), `object`, `own_linker` (the own linker's format for a target), `obj_kind` |
-| `src/link/link.spc` | The own linker's entry: `link_args` reads a link command in the C compiler driver's spelling (objects, `-l`, `-L`, `-o`, `-shared`, `--sysroot=`, the known `-Wl,` options; `-dead_strip` and `--gc-sections` turn GC on) and routes it to a format's linker, or answers NOT_SERVED with the reason (a flag or input it does not know), which fails the build; `archive` |
+| `src/link/link.spc` | The own linker's entry: `link_args` reads a link command in the C compiler driver's spelling (objects, `-l`, `-L`, `-o`, `-shared`, `--sysroot=`, the known `-Wl,` options; `-dead_strip` and `--gc-sections` turn GC on, `--icf=safe` identical code folding with it) and routes it to a format's linker, or answers NOT_SERVED with the reason (a flag or input it does not know), which fails the build; `archive` |
 | `src/link/macho.spc` | Mach-O arm64 executables and dylibs: `.tbd` stubs (`tbd.spc`) and dylibs, chained fixups, `__unwind_info`, the exports trie, the debug map, an ad-hoc signature (`sha256.spc`, pages hashed in parallel; the UUID is the hash of the page hashes) |
 | `src/link/elf.spc` | ELF executables and shared libraries for x86-64 and arm64 (`--gc-sections`: kept from the entry, the init and fini arrays, the notes and the retained sections; dead frame entries leave `.eh_frame`, debug relocations into dropped sections tombstone; an x86-64 `call *x@GOTPCREL` to a function the output defines becomes `addr32 call x`): glibc's `.so` and GNU ld scripts (every file a `GROUP` names: `libc.so.6`, `libc_nonshared.a`, the loader) read for symbols and versions, PLT and GOT (BIND_NOW), TLS relaxed to local-exec (executable) or initial-exec (shared library), arm64 initial-exec and local-exec relocations of C objects, `.eh_frame_hdr`, a `_start` that calls `__libc_start_main@GLIBC_2.34` |
 | `src/link/pe.spc` | PE executables and DLLs for x86-64 (with GC, the COMDAT sections nothing reaches go; a `NODUPLICATES` duplicate is an error): DLL exports read from `-L` directories or the system directory, the UCRT with mingw-w64's renames and old POSIX names (`getcwd` binds `_getcwd`), static libraries (`lib<name>.a`, `<name>.lib`; an import library stands for its DLL), COMDAT sections folded with their associative ones, weak externals, GCC's `.ctors` run with `.CRT$XC*` by priority (`.dtors` is an error), an entry that configures the C runtime, the TLS directory, base relocations, `.pdata`, an export directory for a DLL |
@@ -92,7 +92,25 @@ under (its emission cache key xor `nat_base`, which mixes in the build configura
 features, the LIR optimizer's switches, the header facts and, with debug information, the compile
 directory), its low bit `NAT_OBJ`
 when that part has an object; `nat_trust` turns an emission cache hit into a miss when the record does
-not hold the module under the current key.
+not hold the module under the current key. An edit inside a body that only calls read (not generic, not
+a `const fn`, not an interface member) misses only its own module and the modules whose sections read what changed of the function
+(output-layout.md, Validation).
+
+Every other object (an instance part, or the own part of a module the emission cache missed) is reused
+when its input is the input of the object at its path: `nat_piece_key` hashes, in 128 bits, the
+build configuration (`nat_base`), the compiler, the module-level assembly, the object's functions and
+data with every table of their bodies and definitions, the definitions it copies (a symbol no unit
+claims, `ob::copy_flags`) and what those name in turn, and of each symbol named what the generators
+read of a reference (`nat_sym_ref`: spelling, kind, linkage, C-library and kept marks, section; whether
+a function has a definition only where its spelling may name a C function), a named data symbol's
+definition, files and messages by spelling (`lines[0]`, "no location", aside: no row names it), and on
+wasm the package's files and each named function's signature body (no key when a function has none:
+the generator then reads any call of it). The record `__sc_native_keys` holds each object's key with its
+file's identity (`nat_file_id`: device, inode, size, modification time): an object another writer
+replaced is compiled again. A build removes the record before it writes objects and writes it after.
+`SC_NATIVE_STATS` reports the reused count. A record field the generators read that the key does not
+hash is a stale object: the `static_assert`s on the record sizes beside `nat_piece_key` fail when a
+record gains a field.
 
 Debug information follows the profile's `debug` key (`loader::Package.debug_info`), which sets
 `lir::ir::Package.debug` and its `comp_dir` (the compiler's working directory). Each

@@ -328,6 +328,13 @@ pub(package) struct Package {
     /// The emission's capture summary (`ir::capture::CaptureStore`): which `&mut` parameters a call may let
     /// outlive it, set for the emission's lifetime by `cemit_package`; null outside it.
     pub(package) cap_store: *const void,
+    /// The functions with a body in the body arena that an evaluation whose result reaches the code ran
+    /// (the type check's and the emission's constants: `ir::interp::Interp.reads`), as `module << 32 |
+    /// node`, each once: the per-TU cache and the proof record keep them with their text.
+    pub(package) ce_reads: UnsafeCell<Vector<u64>>,
+    /// The hash of the bounds checks the prover proved in each kept body, by its function's `module << 32
+    /// | node` (`prove_cached`): they shape the function's code and its inlined copies'.
+    pub(package) prove_fd: Map<u64, u64>,
     /// The items of the extern blocks whose header is scoped, as `module << 32 | node`
     /// (`scope_extern_items`); empty outside an emission.
     pub(package) xscoped: Set<u64>,

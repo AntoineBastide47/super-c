@@ -116,6 +116,25 @@ extend CaptureStore {
         };
     }
 
+    /// The facts a direct call of function `d` reads (`keeps_none`, `returns_none`, `returns_len`) as one
+    /// hash; 0 when no kept body answers for it.
+    pub(package) fn summary(self: &Self, p: &loader::Package, d: DefId) u64 {
+        let a = unsafe &*p.module_ast_const(d.module);
+        let c = a.container_of(d.node);
+        let x = self.entry(
+            if c != NODE_NONE && a.at_const(c).kind == NodeKind::NODE_INTERFACE {
+                GROUP | name_key(p, d)
+            } else {
+                key_of(d)
+            },
+        );
+        if x == ir::IR_NONE {
+            return 0;
+        }
+        let h = (self.esc[x as usize] ^ 0x9E3779B97F4A7C15u64).wrapping_mul(0x100000001B3u64) ^ self.ret[x as usize];
+        return h.wrapping_mul(0x100000001B3u64) ^ self.rlen[x as usize] as u64 | 1;
+    }
+
     /// The parameters of every kept function body of `keep` that may escape.
     pub(package) fn build(self: &mut Self, pkg: *const loader::Package, keep: &irl::Keep) {
         for i in 0..keep.kept.len() {

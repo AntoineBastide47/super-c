@@ -250,6 +250,10 @@ pub(package) struct InlineStore {
 /// scratch. Decisions depend only on body and AST content, never on cache state.
 pub(package) struct InlineCtx {
     pub(package) off: bool,
+    /// Record each callee a run looks at into `deps`, as `module << 32 | node` (the per-TU cache's
+    /// dependencies of a module's section, `driver::tuc::dep_hash`).
+    pub(package) deps_on: bool,
+    pub(package) deps: Vector<u64>,
     /// Splice only the callees whose result the caller's instance fixes (`fixed_result`): a bound
     /// variant of scalar code (`driver::emit::bind_calls`).
     pub(package) only_fixed: bool,
@@ -650,6 +654,8 @@ extend InlineCtx {
         let off = stdlib::env_is("SC_INLINE", "0");
         return InlineCtx {
             off: off,
+            deps_on: false,
+            deps: Vector::<u64>::new(),
             only_fixed: false,
             stats_on: stdlib::getenv("SC_INLINE_STATS") != null,
             store: store,
@@ -1578,6 +1584,9 @@ pub(package) fn run(lw: &mut irl::Lowerer, cx: &mut InlineCtx, st: &mut InlineSt
             continue;
         }
         st.considered += 1;
+        if cx.deps_on {
+            cx.deps.push(t.callee.module as u64 << 32 | t.callee.node as u64);
+        }
         if cx.only_fixed && !cx.fixed_result(pkg, t.callee) && !always_native(pkg, t.callee) {
             st.reasons[IJ_SHAPE as usize] = st.reasons[IJ_SHAPE as usize] + 1;
             continue;

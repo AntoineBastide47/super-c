@@ -74,6 +74,82 @@ fn optimized_split(text: str, fm: u8, fma: bool, inl: il::Budget, bu: lu::Budget
     return (before, after);
 }
 
+// Identical instance bodies at one level form a class whose first body alone runs the passes; the others
+// take its result (`Run::copies`). A unit's own function (`Sym.own`: a cached unit holds its object) and a
+// body that differs stay out, and the copy is the body the passes give: the own function's, which ran them.
+@test
+fn identical_instance_bodies_optimize_once() {
+    let text = M"(lir ptr 8
+sym @a fn global
+sym @b fn global
+sym @c fn global
+sym @d fn global
+fn @a
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = add.i64 v3, v1
+  ret v4
+fn @b
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = add.i64 v3, v1
+  ret v4
+fn @c
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 3
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = add.i64 v3, v1
+  ret v4
+fn @d
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 4
+  v2 = mul.i64 v0, v1
+  v3 = add.i64 v2, v1
+  v4 = add.i64 v3, v1
+  ret v4
+)";
+    let mut err = String::new();
+    let mut pk = lparse::parse(text, &mut err).unwrap();
+    let c = pk.find_symbol("c");
+    pk.syms.index_mut(c as usize).own = true;
+    let none = Vector::<bool>::new();
+    let bu = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 0,
+        interleave: 0,
+        fin: 0,
+    };
+    let mut r = lopt::Run::new(&mut pk, &none, lopt::Config { inline: il::SPEED, loops: bu, jobs: 1 });
+    assert_eq(r.copies(), 1);
+    for k in 0..r.order.len() {
+        r.job(r.order[k]);
+    }
+    r.finish(&mut pk);
+    verified(&pk);
+    assert(body_of(&pk, "b").same(body_of(&pk, "c")), "the copy is the body the passes give");
+    assert(body_of(&pk, "a").same(body_of(&pk, "b")), "the copy is its class's first body");
+    assert(!body_of(&pk, "d").same(body_of(&pk, "a")), "a body that differs runs its own passes");
+}
+
+// The body of function `name` of `pk`.
+const fn body_of<'a>(pk: &'a Package, name: str) &'a Body {
+    return &pk.bodies[pk.syms[pk.find_symbol(name) as usize].def as usize];
+}
+
 // Each function of `p` verifies.
 fn verified(p: &Package) {
     let mut v = verify::Verifier::new();

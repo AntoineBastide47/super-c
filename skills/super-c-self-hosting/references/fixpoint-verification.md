@@ -7,7 +7,8 @@ table, item index digest and diagnostics) as part of the correctness gate; the s
 below are the manual form.
 
 The gate keeps the per-TU cache on and excludes the files in `CONTRACT_NONDET_FILES`
-(`.tu_cache`) from every tree comparison (`same_tree` in `ci/gate.sh`). It excludes nothing
+(`.tu_cache`, and `__sc_native_keys`: each object's file identity) from every tree comparison
+(`same_tree` in `ci/gate.sh`). It excludes nothing
 else and normalizes nothing: both generations build in one checkout, so the
 files with absolute paths are identical. The manual form
 below disables every cache and compares the two binaries.

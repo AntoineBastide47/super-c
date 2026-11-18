@@ -294,7 +294,7 @@ fn code_generation_flags_follow_the_level_then_the_profile_then_the_command_line
     let vers = manifest::CG_UNSWITCH | manifest::CG_VERSION_LOOPS;
     let vec = manifest::CG_VECTORIZE;
     let sa = manifest::CG_STRICT_ALIASING | manifest::CG_SIBLING_CALLS;
-    let sec = manifest::CG_FUNCTION_SECTIONS | manifest::CG_DATA_SECTIONS;
+    let sec = manifest::CG_FUNCTION_SECTIONS | manifest::CG_DATA_SECTIONS | manifest::CG_FOLD_FUNCTIONS;
     assert_eq(manifest::cg_effective(0, 0, 0), 0u64);
     assert_eq(manifest::cg_effective(1, 0, 0), fp | inl | sec);
     assert_eq(manifest::cg_effective(2, 0, 0), fp | inl | sec | fun | unr | manifest::CG_VERSION_LOOPS | vec | sa);

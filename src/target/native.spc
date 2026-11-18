@@ -42,7 +42,7 @@ const fn linux_arm64(os: i32, isa: i32) bool {
     return tgt::os(os).name == "linux" && tgt::callconv_of(os, isa).name == "aapcs64" && tgt::obj_of(os).name == "elf";
 }
 
-const fn wasm32(os: i32, isa: i32) bool {
+pub(package) const fn wasm32(os: i32, isa: i32) bool {
     return tgt::obj_of(os).name == "wasm" && tgt::isa(isa).name == "wasm32";
 }
 

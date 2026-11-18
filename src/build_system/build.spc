@@ -1897,6 +1897,10 @@ pub(package) fn link_head(a: &mut Vector<String>, out: str, objs: &Vector<String
     if gc.len() != 0 {
         push_arg(a, gc);
     }
+    let fold = mf::link_fold(cg);
+    if fold.len() != 0 {
+        push_arg(a, fold);
+    }
 }
 
 fn engine_build_i(

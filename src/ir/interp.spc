@@ -1105,6 +1105,19 @@ pub(package) struct Interp {
     /// The master engine records dynamic item edges into the package index (`note_dyn_edge`);
     /// a per-task engine leaves it off.
     pub(package) dyn_rec: bool,
+    /// The list each function with a body in the body arena whose body this engine runs goes to, once
+    /// (`note_read`; `Package.ce_reads`): an engine whose results reach the code; null for the others (the
+    /// always-panics probes, whose results are errors).
+    pub(package) reads: *mut Vector<u64>,
+    reads_seen: Set<u64>,
+    reads_last: u64, // the last key `note_read` saw: a loop's calls of one function look it up once
+    reads_ba: Map<u64, bool>, // per function key, whether its body lives in the body arena
+    // While a memoized value computes (`rd_enter`, `rd_leave`), the functions its run reads (`rd_log`
+    // from the computation's mark on); `rdeps` keeps each memo key's, which a hit reads again
+    // (`note_deps`): the value's functions count wherever the memo answers.
+    rd_log: Vector<u64>,
+    rd_cap: u32,
+    rdeps: Map<u64, Vector<u64>>,
     /// Set when a lowering this engine needed stopped at a node the checker rejected: the
     /// failure is that error's, already reported. The checker clears it before an evaluation.
     pub(package) err_refused: bool,
@@ -1262,6 +1275,13 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         body_missing: Vector::<bool>::new(),
         body_miss_n: 0,
         dyn_rec: false,
+        reads: null,
+        reads_seen: Set::<u64>::new(),
+        reads_last: u64::MAX,
+        reads_ba: Map::<u64, bool>::new(),
+        rd_log: Vector::<u64>::new(),
+        rd_cap: 0,
+        rdeps: Map::<u64, Vector<u64>>::new(),
         err_refused: false,
         ticks: 0,
         unsup_ticks: 0,
@@ -1287,6 +1307,7 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
 pub(package) fn interp_master(pkg: *const loader::Package, steps: u32, mem: u64) Interp {
     let mut e = interp_new(pkg);
     e.dyn_rec = true;
+    e.reads = unsafe (*pkg).ce_reads.get();
     e.build_steps = steps;
     e.build_mem = mem;
     return e;
@@ -3162,6 +3183,7 @@ extend Interp {
     // reflection binders and sizeof folds expand for real), cached for the interpreter's lifetime;
     // -1 = does not lower.
     fn body_of(self: &mut Self, m: ModuleId, fnode: NodeId, binds: &Vector<ISub>, closure: bool) i64 {
+        self.note_read(m, fnode);
         let mut bkey = plain_key(m, fnode);
         for i in 0..binds.len() {
             let sb = binds.at(i);
@@ -3323,6 +3345,92 @@ extend Interp {
     }
 
     // `note_dyn_edge` to the item of function `fnode` of module `m`: itself or its extend or interface.
+    // Function `(m, fnode)`'s body runs: into `reads` when it lives in the body arena (another module reads
+    // it through a call alone, `driver::tuc::Shapes`); a closure counts as its whole module (NODE_NONE).
+    fn note_read(self: &mut Self, m: ModuleId, fnode: NodeId) {
+        if self.reads == null && self.rd_cap == 0 {
+            return;
+        }
+        let key = m as u64 << 32 | if (fnode & NODE_BODY) != 0 {
+            NODE_NONE
+        } else {
+            fnode
+        };
+        if key == self.reads_last {
+            return;
+        }
+        self.reads_last = key;
+        let ba = switch self.reads_ba.get(&key) {
+            Some(b) => *b,
+            None => {
+                let mut b = true;
+                if (fnode & NODE_BODY) == 0 {
+                    let a = unsafe &*self.p().module_ast_const(m);
+                    b = a.valid(fnode) && a.at_const(fnode).kind == NodeKind::NODE_FUNCTION && a.ext(fnode).function.body != NODE_NONE && Ast::in_body(
+                        a.ext(fnode).function.body,
+                    );
+                }
+                self.reads_ba.insert(key, b);
+                b
+            },
+        };
+        if ba {
+            self.note_key(key);
+        }
+    }
+
+    // Function `key` (`note_read`) into the capture of the values computing and into `reads`, once.
+    fn note_key(self: &mut Self, key: u64) {
+        if self.rd_cap != 0 {
+            self.rd_log.push(key);
+        }
+        if self.reads != null && !self.reads_seen.contains(&key) {
+            self.reads_seen.insert(key);
+            unsafe (*self.reads).push(key);
+        }
+    }
+
+    // The functions memo `key`'s value read when it computed (`rdeps`), read again: a hit of the memo.
+    fn note_deps(self: &mut Self, key: u64) {
+        if self.reads == null && self.rd_cap == 0 {
+            return;
+        }
+        let ds = switch self.rdeps.get(&key) {
+            Some(v) => v.clone(),
+            None => {
+                return;
+            },
+        };
+        for i in 0..ds.len() {
+            self.note_key(ds[i]);
+        }
+    }
+
+    // A memoized value starts computing: the capture's mark (`rd_leave`).
+    const fn rd_enter(self: &mut Self) usize {
+        self.rd_cap += 1;
+        self.reads_last = u64::MAX;
+        return self.rd_log.len();
+    }
+
+    // Memo `key`'s value computed from mark `mk` (`rd_enter`): its functions into `rdeps`.
+    fn rd_leave(self: &mut Self, key: u64, mk: usize) {
+        let mut ds = Vector::<u64>::new();
+        for i in mk..self.rd_log.len() {
+            ds.push(self.rd_log[i]);
+        }
+        ds.sort();
+        ds.dedup();
+        if ds.len() != 0 {
+            self.rdeps.insert(key, ds);
+        }
+        self.rd_cap -= 1;
+        self.reads_last = u64::MAX;
+        if self.rd_cap == 0 {
+            self.rd_log.truncate(0);
+        }
+    }
+
     fn note_body_edge(self: &mut Self, m: ModuleId, fnode: NodeId) {
         if !self.dyn_rec || self.cur_item == loader::ITEM_NONE {
             return;
@@ -4935,6 +5043,7 @@ extend Interp {
     // references (`item_speculate`), so no copy of an aggregate is made for the caller.
     fn item_value_in(self: &mut Self, m: ModuleId, cnode: NodeId, spec: bool) IVal {
         let key = m as u64 << 32 | cnode as u64;
+        self.note_deps(key);
         switch self.item_memo.get(&key) {
             Some(v) => {
                 return *v;
@@ -5162,8 +5271,15 @@ extend Interp {
         return true;
     }
 
-    // The isolated evaluation of constant `(m, cnode)` (`item_value_in`).
+    // The isolated evaluation of constant `(m, cnode)` (`item_value_in`), its functions captured.
     fn item_eval(self: &mut Self, m: ModuleId, cnode: NodeId, key: u64, spec: bool) IVal {
+        let mk = self.rd_enter();
+        let r = self.item_eval_run(m, cnode, key, spec);
+        self.rd_leave(key, mk);
+        return r;
+    }
+
+    fn item_eval_run(self: &mut Self, m: ModuleId, cnode: NodeId, key: u64, spec: bool) IVal {
         if self.item_active.len() == IT_ITEM_NEST {
             self.prefetch_items(m, cnode);
         }
@@ -11293,6 +11409,7 @@ extend Interp {
             return none();
         }
         let key = m as u64 << 32 | id as u64;
+        self.note_deps(key);
         let mut memo_kind: u8 = IV_NONE;
         let mut memo_hit = false;
         let mut memo_v = none();
@@ -11351,8 +11468,15 @@ extend Interp {
         return v;
     }
 
-    // `eval_g` past its memo: the fold itself, isolated unless `top`.
+    // `eval_g` past its memo: the fold itself, isolated unless `top`, its functions captured.
     fn eval_g_run(self: &mut Self, m: ModuleId, id: NodeId, key: u64, top: bool) IVal {
+        let mk = self.rd_enter();
+        let v = self.eval_g_fold(m, id, key, top);
+        self.rd_leave(key, mk);
+        return v;
+    }
+
+    fn eval_g_fold(self: &mut Self, m: ModuleId, id: NodeId, key: u64, top: bool) IVal {
         let failed0 = self.failed;
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         // a fold a lowering asks for inside a run evaluates as it does alone (`iso_enter`)
@@ -11918,6 +12042,7 @@ extend Interp {
             return bad;
         }
         let key = m as u64 << 32 | id as u64;
+        self.note_deps(key);
         switch self.sref.get(&key) {
             Some(v) => {
                 if *v < 0 {
@@ -11938,7 +12063,9 @@ extend Interp {
         self.eval_reset(m);
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
+        let mk = self.rd_enter();
         let mut v = self.run_root(m, id);
+        self.rd_leave(key, mk);
         self.ev_depth -= 1;
         if !self.failed && v.kind != IV_NONE && self.keep_view == null {
             self.whole.insert(key);

@@ -92,7 +92,8 @@ file is authoritative for where to look first.
 | The contract sites of the interface methods without a body (the language server: of the modules the proved one can name) | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept`, `check_module` |
 | Whether a kept body has an integer type wider than the narrow numbers read | `Prover::needs_wide` (`wide_bits`) | `wide` per kept slot, in `check_kept` | end of `check_kept` |
 | The facts derived for a division or shift by a constant (quotient bounds, remainder, product) | `Prover::derive` (`divided`, `quotient`, `shifted`) | `Prover.derived` | end of `check_kept` |
-| Each module's proof key: its source, its import and reference closure (`import_closure`, `mod_refs`), the prelude, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
+| Each module's proof key: its source, the shapes of its import and reference closure (`import_closure`, `mod_refs`, `tuc::shapes_early`), the prelude's sources, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
+| The functions of other modules whose bodies a module's proofs read (`kept`, `param_writes`, `mutual`; the memos `ends`, `mentions_owns` replay theirs) | `Prover::note_read` (`Prover.rd`, `take_reads`, `memo_reads`), per module in `check_kept` | `@d` lines of `__sc_prove` and the shared records | an edit of a listed body |
 
 ## language server proofs (`lsp::analysis::borrowck_pending`, after an open module's borrow check)
 
@@ -127,6 +128,12 @@ file is authoritative for where to look first.
 | Package constants of an emitter (backends, `names_vectors`, the mangler's prelude lookups, niche declarations and C library names) | `CEmit::new`, `Mangler::new`; a shard copies the master's (`CEmit::new_like`, `Mangler::new_like`) | each emitter; the C library names one `Arc` | whole build |
 | Uses of each instruction during slot forwarding | `forward_slots` (`lir::verify::uses_edges`) | `Tidy.uat`, `Tidy.ul` | the forwarding; `drop_unused_slots` reads its slot use counts (`snuse`) when nothing forwarded |
 | Package part of the native cache key | `nat_base` | a local per loop (a module's key: its emission key xor it) | per loop |
+| What other modules read of each module (per-TU cache key): the kinds of its module-arena nodes, the tokens of its text outside the blocks of its body-arena functions, and those blocks' spans | `tuc::shapes` (before `release_bodies`), `shapes_finish` (in `tuc_setup`: a module's token hash is the previous image's when its text outside the blocks is the same) | `Tuc.sh` (`Shapes`); the image keeps each module's text and token hashes | end of `cemit_package` |
+| The functions whose evaluations' results reach the build (a constant's value, in a type too): each body the evaluator runs, a closure as its whole module; a memoized value replays the functions it ran (`rd_enter`, `rd_leave`, `note_deps`) | `Interp::note_read` (`body_of`), on the master engine and the emission's constants pass; paused for the always-panics probes | `Package.ce_reads`; the per-TU image's list before the held records | the image |
+| The bounds checks the prover proved, per function (a hash) | `prove_cached` (from its facts) | `Package.prove_fd`, in the module keys and `tuc::dep_hash` | per build |
+| The class of a type that names a parameter, per set of bindings | `Lower::ty` (`env_of`: the bindings and the macro mode by content, found again when `Mangler::subs_gen` changes) | `Lower.tg`, one map per binding set (`tg_envs`) | whole build |
+| The content key of each native object | `nat_piece_key` (`nat_sym_hash`, `nat_sym_ref`, `nat_body_hash`, `nat_data_hash`), in each object's task | `NatObj.key`; the tree's `__sc_native_keys` | a change of its input |
+| The functions a module's seed bodies call, before and after the Core IR inliner (the dependencies of its section) | `DropCtx::apply_drops_i` and `ir::inline::run` while `deps_on` | `DropCtx.deps`, then `SeedShard.deps`; the section holds each one's `tuc::dep_hash` | the section's record |
 | The processor facts of a body compiled for more features than the build's (`lir::ir::Cpu`: register bytes, instruction flags) | `CEmit::body_cpu` (`cpu_facts` of `CEmit.fs`), at `Lower::body_i` | `lir::ir::Body.cpu` (carried by `copy_into`, `compact`, `pairs`, `promote`, `wide`, the inliner and the held records; read through `Package::cpu_of`) | the body's end |
 | The widest vector register any body of the program compiles for | `cemit` at the lowering context's setup (`cpu_facts` of the build's features, `Package.fn_union` and each `simd_levels` entry); the text parser from the `cpu` lines | `lir::ir::Package.vec_max` (read by `Run::job` to keep a body's form before `split_wide` for its callers) | never (a changed feature set changes the TU cache header) |
 
@@ -139,6 +146,7 @@ then appended in body order, so the facts do not depend on the workers; `effects
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
 | Calls of each body: callee, argument roots; the functions whose address it takes and the functions of the read-only tables it names, which `effects` does not count | `calls_of` | `Calls` | `Run::new` |
+| Classes of identical instance bodies: the same instructions (`Body::same`), level, shape, unit and function attributes | `duplicates` | `Run.dup` | end of the run |
 | Memory effects, written and escaping parameters | `effects` (over `Calls`; a worklist over the callers of each body, `rc`, and the bodies that pass to its parameters, `rp`), `own_effects`, `own_escapes`, `stalls` (counts over `rc`) | `Sym.fx`, `Sym.esc`, `Run.wargs` | end of the build |
 | Call-graph levels and job edges; the bodies whose job finished | `levels`; each job's end | `Run.level`, `Run.edges`, `Run.order`; `Run.fin` (`await_marked` waits on it) | end of the build |
 | Inliner shape test; a finished body's inliner facts (inlinable, `small` within `SHRINK` and the run's budget, `forwarder`, computes with floats) | `Run::new`; `il::facts` after the job (a held body's in `Run::new`) | `Run.shape`; `Run.ok` (`IL_*`) | end of the build |
@@ -240,6 +248,8 @@ either.
 | Part of a symbol | `part` (binary search) | not stored | per call (COFF writer: once per symbol) |
 | Relocations of each section | Mach-O writer, one pass | `rat`, `rix` (writer locals) | the object write |
 | Live relocations, their resolved globals | `mark_live`, `scan_relocations`, `apply_relocations` | linker state | end of the link |
+| Parts whose address the input takes (`--icf=safe`) | the GC walk: `mark_live` (Mach-O), `collect` (ELF, PE, wasm) | `taken` (the walk's local) | the folding |
+| Classes of identical code parts | `fold_code` (each linker) over `lu::fold_hashes`, `lu::fold` | `ISec.fold`, `IFunc.fold` | end of the link |
 
 ## Known recomputations
 
@@ -269,4 +279,6 @@ not copy their pattern into new code.
 - publish, sync, link: the linker parses again the objects the build had in memory, and reads the
   replayed ones from their files; the four linkers repeat `global` and `out_section`; the Mach-O, ELF and
   COFF linkers copy and relocate the input sections by chunks on worker threads (`lu::Img`,
-  `utils::par::chunks`), then add the fixups, dynamic and base relocations they found in section order.
+  `utils::par::chunks`), then add the fixups, dynamic and base relocations they found in section order;
+  `fold_code` resolves the relocation targets of the parts that share a hash again (the GC walk stores
+  none: a stored target for each of the image's relocations costs more than the about 10% it reads).

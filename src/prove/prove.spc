@@ -1150,6 +1150,12 @@ struct Prover<const B: usize> {
     proved: Map<u32, Vector<Vector<u32>>>, // per goal, the facts (sorted) of each path that proved it
     held_alt: Map<u32, Vector<u32>>, // an allocator's held atom: the inner allocators' atoms it falls back from
     pwrites: Map<u64, u64>, // callee -> `param_writes`
+    // The functions whose kept bodies the current job read (`kept`, `param_writes`, `mutual`), as `module
+    // << 32 | node`, in order (`take_reads`); `rd_memo` keeps the ones an answer of `ends` or
+    // `mentions_owns` read, which a later job's memo hit reads again.
+    rd: UnsafeCell<Vector<u64>>,
+    rd_on: bool, // whether `note_read` records: `check_kept`'s jobs, whose reads it takes
+    rd_memo: Map<u64, Vector<u64>>,
     b: *const ir::CoreBody,
     m: ModuleId,
     // The place each `&mut T` parameter of the body under proof refers to: a local of its own past the
@@ -1521,6 +1527,9 @@ extend<const B: usize> Prover<B> {
             proved: Map::<u32, Vector<Vector<u32>>>::new(),
             held_alt: Map::<u32, Vector<u32>>::new(),
             pwrites: Map::<u64, u64>::new(),
+            rd: UnsafeCell::<Vector<u64>>::new(Vector::<u64>::new()),
+            rd_on: false,
+            rd_memo: Map::<u64, Vector<u64>>::new(),
             b: null,
             m: 0,
             slot_ty: Vector::<TypeId>::new(),
@@ -1720,8 +1729,9 @@ extend<const B: usize> Prover<B> {
         return unsafe &*(&*self.p).module_ast_const(m);
     }
 
-    // The kept body of function `d`, null when none is kept.
+    // The kept body of function `d`, null when none is kept; a read of the job (`rd`).
     fn kept(self: &Self, d: DefId) *const ir::CoreBody {
+        self.note_read(d);
         let k = unsafe &*self.keep;
         return switch k.ix.get(&skey_mix(0, d.module as u64 << 32 | d.node as u64)) {
             Some(v) => &k.kept.at((*v) as usize).body,
@@ -1744,6 +1754,43 @@ extend<const B: usize> Prover<B> {
             }
         }
         return false;
+    }
+
+    // The current job read function `d`'s body (`rd`); a closure's counts as its whole module's (NODE_NONE).
+    fn note_read(self: &Self, d: DefId) {
+        if !self.rd_on {
+            return;
+        }
+        let node = pick((d.node & NODE_BODY) != 0, NODE_NONE, d.node);
+        unsafe (*self.rd.get()).push(d.module as u64 << 32 | node as u64);
+    }
+
+    /// The functions whose bodies the jobs since the last call read (`rd`), each once, sorted.
+    pub(package) fn take_reads(self: &mut Self) Vector<u64> {
+        let mut v = replace(self.rd.get_mut(), Vector::<u64>::new());
+        v.sort();
+        v.dedup();
+        return v;
+    }
+
+    // Memo `tag` (`rd_memo`) answered: what its answer read, read again; else, when the call computed
+    // it (`computed`), what the reads since mark `mk` hold.
+    fn memo_reads(self: &mut Self, tag: u64, mk: usize, computed: bool) {
+        if !computed {
+            if let Some(v) = self.rd_memo.get(&tag) {
+                let ds = v.clone();
+                self.rd.get_mut().extend_copy(&ds);
+            }
+            return;
+        }
+        let r = self.rd.get_mut();
+        let mut ds = Vector::<u64>::with_capacity(r.len() - mk);
+        for i in mk..r.len() {
+            ds.push(r[i]);
+        }
+        ds.sort();
+        ds.dedup();
+        self.rd_memo.insert(tag, ds);
     }
 
     // Whether `d` is a `const fn`: its result depends on its arguments alone.
@@ -9601,6 +9648,15 @@ extend<const B: usize> Prover<B> {
     // Whether spec function or invariant method `d` reaches an `owns` atom through its body's calls: its
     // value depends on the ownership version (a call of it is keyed on the version).
     fn mentions_owns(self: &mut Self, d: DefId) bool {
+        let key = d.module as u64 << 32 | d.node as u64;
+        let pre = self.owns_m.contains_key(&key);
+        let mk = self.rd.get_mut().len();
+        let r = self.mentions_owns_run(d);
+        self.memo_reads(1u64 << 62 | key, mk, !pre && self.owns_m.contains_key(&key));
+        return r;
+    }
+
+    fn mentions_owns_run(self: &mut Self, d: DefId) bool {
         if d.node == NODE_NONE {
             return false;
         }
@@ -17044,6 +17100,15 @@ extend<const B: usize> Prover<B> {
     // method the walk models (`wide_kind`, `soft_kind`). Ghost code assumes the `ensures` of such a callee
     // (`v.len()` in an `invariant`).
     fn ends(self: &mut Self, d: DefId, depth: u32) bool {
+        let key = d.module as u64 << 32 | d.node as u64;
+        let pre = self.ends_memo.contains_key(&key);
+        let mk = self.rd.get_mut().len();
+        let r = self.ends_run(d, depth);
+        self.memo_reads(1u64 << 63 | key, mk, !pre && self.ends_memo.contains_key(&key));
+        return r;
+    }
+
+    fn ends_run(self: &mut Self, d: DefId, depth: u32) bool {
         if self.total(d) || self.panics(d) || self.wide_kind(d) != 0 || self.soft_kind(d) != 0 {
             return true;
         }
@@ -18898,6 +18963,7 @@ extend<const B: usize> Prover<B> {
     // the arguments, is at least 0 and below the caller's at its start.
     fn mutual(self: &mut Self, b: &ir::CoreBody, path: &mut Path, t: &ir::Terminator, ci: u32) {
         let cb = unsafe &(&*self.keep).kept.at(ci as usize).body;
+        self.note_read(cb.owner);
         let cm = cb.module;
         let a = self.ast_of(cm);
         let name = String::from_str(self.text(cm, a.at_const(a.ext_name(cb.owner.node)).span));
@@ -21276,6 +21342,7 @@ extend<const B: usize> Prover<B> {
     // The parameters callee `d` (body `cb`) may change, one bit each (the first 64): a write, a call's
     // result, or a borrow or address of the parameter's storage. Scanned once per callee.
     fn param_writes(self: &mut Self, d: DefId, cb: &ir::CoreBody) u64 {
+        self.note_read(d);
         let key = skey_mix(0, d.module as u64 << 32 | d.node as u64);
         if let Some(m) = self.pwrites.get(&key) {
             return *m;
@@ -21787,15 +21854,22 @@ pub(package) fn check_kept(
     skip: &Vector<bool>,
     held: &mut Vector<bool>,
     facts: &mut Vector<u64>,
+    reads: &mut Vector<Vector<u64>>,
 ) bool {
     let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
     let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
+    pv.rd_on = true;
     let mut all = Vector::<bool>::with_capacity(p.modules.len());
     for _m in 0..p.modules.len() {
         all.push(true);
     }
     pv.lower_shells(&mut sh, &all);
     pv.sh = &sh;
+    let _ = pv.take_reads();
+    reads.clear();
+    for _m in 0..p.modules.len() {
+        reads.push(Vector::<u64>::new());
+    }
     let n = keep.kept.len();
     // A body with an integer wider than the narrow numbers hold proves with the wide ones.
     let mut wide = Vector::<bool>::with_capacity(n);
@@ -21805,11 +21879,17 @@ pub(package) fn check_kept(
     }
     if p.jobs == 1 || n < 2 {
         let mut pw = Prover::<NUM_WIDE>::new(p, keep, pv.slice);
+        pw.rd_on = true;
         pw.sh = &sh;
         for k in 0..n {
             let kb = keep.kept.at(k);
             if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] {
                 prove_one(&mut pv, &mut pw, k, wide[k]);
+                let m = kb.body.module as usize;
+                let r1 = pv.take_reads();
+                let r2 = pw.take_reads();
+                reads.index_mut(m).extend_copy(&r1);
+                reads.index_mut(m).extend_copy(&r2);
             }
         }
     } else {
@@ -21818,9 +21898,11 @@ pub(package) fn check_kept(
         // then by position, as one prover orders them (`Errors::emit_ordered`).
         let mut outs = Vector::<diag::Errors>::with_capacity(n);
         let mut fouts = Vector::<Vector<u64>>::with_capacity(n);
+        let mut routs = Vector::<Vector<u64>>::with_capacity(n);
         for _k in 0..n {
             outs.push(diag::Errors::new());
             fouts.push(Vector::<u64>::new());
+            routs.push(Vector::<u64>::new());
         }
         let chunks = if n < p.jobs as usize * 4 {
             n
@@ -21843,6 +21925,7 @@ pub(package) fn check_kept(
         let wa = ((&wide) as *const Vector<bool>) as usize;
         let oa = outs.as_mut_ptr() as usize;
         let fa = fouts.as_mut_ptr() as usize;
+        let ra = routs.as_mut_ptr() as usize;
         let slice = pv.slice;
         // Each worker claims one chunk at a time.
         dpar::range_with(
@@ -21854,9 +21937,13 @@ pub(package) fn check_kept(
                 let sk = unsafe &*ptr::from_addr_mut::<Vector<bool>>(sa);
                 let wd = unsafe &*ptr::from_addr_mut::<Vector<bool>>(wa);
                 let mut w = Prover::<NUM_NARROW>::new(pk, kp, slice);
+                w.rd_on = true;
                 w.sh = ptr::from_addr_mut::<Shared>(ha);
                 let mut w2 = Prover::<NUM_WIDE>::new(pk, kp, slice);
+                w2.rd_on = true;
                 w2.sh = ptr::from_addr_mut::<Shared>(ha);
+                let _ = w.take_reads();
+                let _ = w2.take_reads();
                 let od = unsafe &*ptr::from_addr_mut::<Vector<u64>>(da);
                 for i in 0..(n - c + chunks - 1) / chunks {
                     let k = (od[c + i * chunks] & 0xFFFFFFFFu64) as usize;
@@ -21876,6 +21963,10 @@ pub(package) fn check_kept(
                     };
                     unsafe *(ptr::from_addr_mut::<diag::Errors>(oa) + k) = e;
                     unsafe *(ptr::from_addr_mut::<Vector<u64>>(fa) + k) = f;
+                    let mut rk = w.take_reads();
+                    let r2 = w2.take_reads();
+                    rk.extend_copy(&r2);
+                    unsafe *(ptr::from_addr_mut::<Vector<u64>>(ra) + k) = rk;
                 }
             },
         );
@@ -21885,6 +21976,7 @@ pub(package) fn check_kept(
                 pv.errs.index_mut(m).append(outs.index_mut(k));
             }
             pv.facts.extend_copy(fouts.at(k));
+            reads.index_mut(m).extend_copy(routs.at(k));
         }
         for m in 0..p.modules.len() {
             if pv.errs.at(m).errors.len() > 1 {
@@ -21903,6 +21995,20 @@ pub(package) fn check_kept(
         }
     }
     prove_exhaustive(&mut pv, p, keep, skip);
+    // A `@prove_exhaustive` function's runs go through the evaluator, which reads what it calls: its module
+    // reads every module (NODE_NONE: a whole module).
+    for k in 0..n {
+        let kb = keep.kept.at(k);
+        if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] && pv.exhaustive(kb.body.owner) {
+            for y in 0..p.modules.len() {
+                reads.index_mut(kb.body.module as usize).push(y as u64 << 32 | NODE_NONE as u64);
+            }
+        }
+    }
+    for m in 0..p.modules.len() {
+        reads.index_mut(m).sort();
+        reads.index_mut(m).dedup();
+    }
     // The facts of a module whose proofs failed are no facts: the build stops.
     *facts = replace(&mut pv.facts, Vector::<u64>::new());
     let mut ok = true;

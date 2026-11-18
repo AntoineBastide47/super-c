@@ -1161,6 +1161,7 @@ pub(package) const VOP_CODE: u16 = 255;
 // ---- Records ------------------------------------------------------------------------------------------
 
 /// One instruction: 16 bytes.
+@derive(Eq)
 pub(package) struct Inst {
     pub(package) op: u8,
     pub(package) ty: u8, // the result type, T_NONE without a result
@@ -1173,6 +1174,7 @@ static_assert(sizeof(Inst) == 16, "an instruction is 16 bytes");
 
 /// Block `i` is `insts[start .. start + len]`; its last instruction is its terminator. Its parameters
 /// are values `VPARAM | param_start + k`, their types `params[param_start + k]`.
+@derive(Eq)
 pub(package) struct Block {
     pub(package) start: u32,
     pub(package) len: u32,
@@ -1199,12 +1201,14 @@ pub(package) const BLOCK_RARE: u16 = BLOCK_COLD | BLOCK_UNLIKELY;
 pub(package) const BLOCK_EPI: u16 = 8;
 
 /// A stack slot: `size` bytes aligned to `1 << align_log2`.
+@derive(Eq)
 pub(package) struct Slot {
     pub(package) size: u32,
     pub(package) align_log2: u8,
 }
 
 /// A source location: a package file and a 1-based line and column.
+@derive(Eq)
 pub(package) struct Loc {
     pub(package) file: u32,
     pub(package) line: u32,
@@ -1539,6 +1543,7 @@ pub(package) struct Body {
 /// the copy through any other pointer touch different bytes, as the language makes the parameter the
 /// only path to its referent during the call. The roots of one site and group are one pointer (a view's
 /// element pointer, loaded more than once).
+@derive(Eq)
 pub(package) struct Scope {
     pub(package) site: u32,
     pub(package) group: u32,
@@ -1647,6 +1652,11 @@ extend Body {
         self.cpu = Cpu::none();
         self.naked = false;
         self.cur = 0;
+    }
+
+    /// Whether `o` is the same body: every table and fact equal (the emission cursor aside).
+    pub(package) const fn same(self: &Self, o: &Body) bool {
+        return self.insts == o.insts && self.blocks == o.blocks && self.params == o.params && self.pool == o.pool && self.words == o.words && self.slots == o.slots && self.syms == o.syms && self.msgs == o.msgs && self.locs == o.locs && self.lines == o.lines && self.inl == o.inl && self.sig == o.sig && self.refs == o.refs && self.owned == o.owned && self.bools == o.bools && self.ranges == o.ranges && self.fmath == o.fmath && self.scopes == o.scopes && self.ct == o.ct && self.cpu == o.cpu && self.naked == o.naked;
     }
 
     /// This body's copy into `o`, whose buffers it reuses.
@@ -2101,6 +2111,7 @@ pub(package) const CPU_FMA: u32 = 256;
 /// the build's (`Package.cpu`), or those of one body compiled for more features (`Body.cpu`: a
 /// `@target_feature` function, a run-time copy of vector code), which the optimizer and the code generator
 /// then read for that body (`Package::cpu_of`).
+@derive(Eq, Hash)
 pub(package) struct Cpu {
     /// A body's own facts; false: the body compiles for the build's.
     pub(package) own: bool,

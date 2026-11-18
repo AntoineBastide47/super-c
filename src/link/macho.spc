@@ -93,7 +93,8 @@ pub(package) const K_DYLIB: u8 = 1;
 /// A link: the objects, the libraries (`-l` names searched in `dirs`, then the SDK's `usr/lib`;
 /// frameworks searched in `fdirs`, then the SDK's), the SDK root, the output and its kind (a dylib's
 /// install name `install`), whether to leave out the local symbols and the debug map (`strip`), and whether
-/// to drop the parts of the input no root reaches (`dead_strip`, `split_sections`).
+/// to drop the parts of the input no root reaches (`dead_strip`, `split_sections`), and whether to fold
+/// identical functions whose address nothing takes (`fold`, `fold_code`; with `dead_strip`).
 pub(package) struct Opts {
     pub(package) out: String,
     pub(package) kind: u8,
@@ -107,6 +108,7 @@ pub(package) struct Opts {
     pub(package) strip: bool,
     pub(package) jobs: u32, // 1: the signature's page hashes in this thread, else on the task pool
     pub(package) dead_strip: bool, // keep only what the entry, the exports and the kept symbols reach
+    pub(package) fold: bool, // one copy of identical functions whose address nothing takes (`--icf=safe`)
     /// A shared library's exports: None, every default-visibility global; else the globals named.
     pub(package) exports: Option<Set<String>>,
     pub(package) mem: *mut lu::Mem, // the objects held in memory (`lu::take_held`)
@@ -128,7 +130,8 @@ struct IFile {
 // An input section: names (`sn` ids), flags, alignment, the object's address and size, its bytes and
 // relocations in the blob, and where it lands: output section `out` at offset `at`. A section dead
 // stripping split holds its parts `p0 .. p0 + pn` (input sections of their own) and is not `live`; a part
-// no root reaches is not `live` either.
+// no root reaches is not `live` either. A part identical code folding left out (`fold_code`) is not `live`
+// and lands where part `fold` does, which the image holds in its place.
 struct ISec {
     pub(package) file: u32,
     pub(package) seg: u32,
@@ -145,6 +148,7 @@ struct ISec {
     pub(package) p0: u32,
     pub(package) pn: u32,
     pub(package) live: bool,
+    pub(package) fold: u32,
 }
 
 // An input symbol: its name (`names` id), nlist type, section (1-based in its file, 0 none), desc and value.
@@ -360,7 +364,16 @@ fn run(l: &mut L, o: &Opts, blob: &mut Vector<u8>) bool {
         return false;
     }
     if o.dead_strip {
-        mark_live(l, b);
+        // The parts whose address the input takes, for the folding (`fold_code`): marked as the relocations
+        // turn them live.
+        let mut taken = Vector::<u8>::new();
+        if o.fold {
+            taken.resize_default(l.secs.len());
+        }
+        mark_live(l, b, &mut taken);
+        if o.fold {
+            fold_code(l, b, o.jobs, &taken);
+        }
     }
     if !scan_relocations(l, b) {
         return false;
@@ -463,6 +476,7 @@ fn parse_object(l: &mut L, path: str, at: usize, blob: &Vector<u8>) bool {
                         p0: NONE,
                         pn: 0,
                         live: true,
+                        fold: NONE,
                     },
                 );
                 f.nsec += 1;
@@ -1193,7 +1207,11 @@ fn split_sections(l: &mut L, blob: &mut Vector<u8>) {
 // the functions it describes). A tentative definition and the image's header are always kept. Every
 // other input section (a part, or a section not split) that no relocation of a kept one names is left
 // out (not `live`).
-fn mark_live(l: &mut L, b: []u8) {
+// With `taken` as long as the input sections (folding, `fold_code`), each part whose address a relocation
+// other than a call takes, or a root symbol is, gets TAKEN, and each part with a relocation against a
+// section SECTION_REF.
+fn mark_live(l: &mut L, b: []u8, taken: &mut Vector<u8>) {
+    let fold = taken.len() != 0;
     let mut work = Vector::<u32>::new();
     for s in 0..l.secs.len() {
         let sc = l.secs[s];
@@ -1214,7 +1232,11 @@ fn mark_live(l: &mut L, b: []u8) {
         }
         let exported = l.kind != K_EXE && (y.ty & N_EXT) != 0 && (y.ty & N_PEXT) == 0;
         if exported || (y.desc & N_NO_DEAD_STRIP) != 0 {
-            reach(l, part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value), &mut work);
+            let t = part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value);
+            reach(l, t, &mut work);
+            if fold {
+                taken[t as usize] |= TAKEN;
+            }
         }
     }
     if l.kind == K_EXE {
@@ -1223,6 +1245,9 @@ fn mark_live(l: &mut L, b: []u8) {
             let gy = l.gs[(l.glob[main as usize] - 1) as usize];
             if gy.kind == G_DEF {
                 reach_sym(l, gy.sym, &mut work);
+                if fold {
+                    take_sym(l, gy.sym, taken);
+                }
             }
         }
     }
@@ -1240,6 +1265,9 @@ fn mark_live(l: &mut L, b: []u8) {
             let num = w1 & 0xFFFFFF;
             if (w1 >> 27 & 1) != 0 {
                 reach_sym(l, f.sym0 + num, &mut work);
+                if fold && ty != R_BRANCH26 {
+                    take_sym(l, f.sym0 + num, taken);
+                }
             } else if num != 0 && num <= f.nsec {
                 // Against a section: the object address the field holds names the part.
                 let c = f.sec0 + num - 1;
@@ -1249,10 +1277,204 @@ fn mark_live(l: &mut L, b: []u8) {
                 } else {
                     lu::r32(b, at) as u64
                 };
-                reach(l, part(l, c, v), &mut work);
+                let t = part(l, c, v);
+                reach(l, t, &mut work);
+                if fold {
+                    taken[t as usize] |= TAKEN;
+                    taken[s as usize] |= SECTION_REF;
+                }
             }
         }
     }
+}
+
+// `mark_live`'s marks: a part whose address the input takes, and one with a relocation against a section.
+const TAKEN: u8 = 1;
+const SECTION_REF: u8 = 2;
+
+// Mark the part that defines symbol `k` (or its global's definition) TAKEN.
+const fn take_sym(l: &L, k: u32, taken: &mut Vector<u8>) {
+    let d = defining(l, k);
+    if d != NONE && (l.syms[d as usize].ty & N_TYPE) == N_SECT {
+        let y = l.syms[d as usize];
+        taken[part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) as usize] |= TAKEN;
+    }
+}
+
+// ---- identical code folding -----------------------------------------------------------------------------
+
+// Fold each live code part into the first identical one (`lu::fold`), as LLD's `--icf=safe` does: the parts
+// whose address nothing takes (`taken`, `mark_live`), so no two functions a program can tell apart by address
+// share one (a call, `R_BRANCH26`, takes none; any other relocation, an export, an entry or a kept symbol
+// does). A part's key holds its section, flags, alignment and compact unwind entries (place, length and
+// encoding); a part with a relocation against a section (the target in its bytes) stays.
+fn fold_code(l: &mut L, b: []u8, jobs: u32, taken: &Vector<u8>) {
+    let ns = l.secs.len();
+    // Per input section, whether it is a candidate (1).
+    let mut cand = Vector::<u32>::new();
+    cand.resize_default(ns);
+    let mut nc: u32 = 0;
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if taken[s] == 0 && sc.live && sc.pn == 0 && !dropped(l, sc) && code(sc) && (sc.flags & S_TYPE) == S_REGULAR && sc.size != 0 {
+            nc += 1;
+            cand[s] = nc;
+        }
+    }
+    if nc < 2 {
+        return;
+    }
+    // Per input symbol, the part (plus 1, 0: not resolved yet; NONE: no object's) and the object address of its
+    // definition: relocations name few symbols many times.
+    let mut rp = Vector::<u32>::new();
+    rp.resize_default(l.syms.len());
+    let mut rv = Vector::<u64>::new();
+    rv.resize_default(l.syms.len());
+    // The compact unwind entries of each candidate: a sum of their places, lengths and encodings.
+    let mut unw = Vector::<u64>::new();
+    unw.resize_default(ns);
+    let ld = l.sn.find("__LD");
+    let cu = l.sn.find("__compact_unwind");
+    for s in 0..ns {
+        let sc = l.secs[s];
+        if sc.seg as i64 != ld || sc.sect as i64 != cu {
+            continue;
+        }
+        let f = l.files[sc.file as usize];
+        for r in 0..sc.nreloc as usize {
+            let w0 = lu::r32(b, sc.reloff + 8 * r);
+            let w1 = lu::r32(b, sc.reloff + 8 * r + 4);
+            if w0 % 32 != 0 {
+                continue;
+            }
+            let e = sc.off + w0 as usize;
+            let t = fold_target(l, f, w1, lu::r64(b, e), &mut rp, &mut rv);
+            if t.0 == NONE || cand[t.0 as usize] == 0 {
+                continue;
+            }
+            let at = t.1 - l.secs[t.0 as usize].addr;
+            let x = (at << 32 | lu::r32(b, e + 8) as u64) ^ (lu::r32(b, e + 12) as u64).wrapping_mul(0x9E3779B97F4A7C15);
+            unw[t.0 as usize] = unw[t.0 as usize].wrapping_add(x.wrapping_mul(0xBF58476D1CE4E5B9) ^ x >> 29);
+        }
+    }
+    // The candidates' keys and bytes hashed; only those that share a hash with another stay candidates.
+    let mut all = Vector::<lu::FoldPart>::new();
+    for s in 0..ns {
+        if cand[s] == 0 {
+            continue;
+        }
+        let sc = l.secs[s];
+        let k1 = sc.seg as u64 << 40 ^ sc.sect as u64 << 20 ^ sc.flags as u64 ^ sc.align as u64 << 58;
+        all.push(
+            lu::FoldPart {
+                at: sc.off,
+                len: sc.size as usize,
+                key: k1 ^ unw[s].wrapping_mul(0x9E3779B97F4A7C15),
+                hash: 0,
+                r0: s as u32,
+                rn: 0,
+            },
+        );
+    }
+    lu::fold_hashes(&mut all, b, jobs);
+    let mut hs = Vector::<u128>::with_capacity(all.len());
+    for i in 0..all.len() {
+        hs.push(all[i].hash as u128 << 32 | i as u64);
+    }
+    hs.sort();
+    let mut shared = Vector::<bool>::new();
+    shared.resize_default(all.len());
+    for k in 0..hs.len() {
+        if k > 0 && hs[k] >> 32 == hs[k - 1] >> 32 || k + 1 < hs.len() && hs[k] >> 32 == hs[k + 1] >> 32 {
+            shared[(hs[k] & 0xFFFFFFFF) as usize] = true;
+        }
+    }
+    // The candidates in section order, their relocations' targets as candidates or as places.
+    let mut ps = Vector::<lu::FoldPart>::new();
+    let mut idx = Vector::<u32>::new();
+    for s in 0..ns {
+        cand[s] = 0;
+    }
+    for i in 0..all.len() {
+        if shared[i] {
+            idx.push(all[i].r0);
+            cand[all[i].r0 as usize] = ps.len() as u32 + 1;
+            ps.push(all[i]);
+        }
+    }
+    let mut rs = Vector::<lu::FoldRel>::new();
+    for i in 0..idx.len() {
+        let sc = l.secs[idx[i] as usize];
+        let f = l.files[sc.file as usize];
+        let r0 = rs.len() as u32;
+        for r in 0..sc.nreloc as usize {
+            let w0 = lu::r32(b, sc.reloff + 8 * r);
+            let w1 = lu::r32(b, sc.reloff + 8 * r + 4);
+            let mut fr = lu::FoldRel { off: w0, kind: w1 & 0xFF000000, part: lu::FOLD_NONE, tgt: 0, val: 0 };
+            if w1 >> 28 == R_ADDEND {
+                fr.kind = w1;
+            } else {
+                let t = fold_target(l, f, w1, 0, &mut rp, &mut rv);
+                if t.0 == NONE {
+                    // A library's symbol, an absolute one, or one nothing defines: its global or its value.
+                    let y = l.syms[(f.sym0 + (w1 & 0xFFFFFF)) as usize];
+                    let g = gof(l, y);
+                    if g != NONE {
+                        fr.tgt = lu::FOLD_GLOBAL | g as u64;
+                    } else {
+                        fr.tgt = lu::FOLD_ABS;
+                        fr.val = y.value;
+                    }
+                } else if cand[t.0 as usize] != 0 {
+                    fr.part = cand[t.0 as usize] - 1;
+                    fr.val = t.1 - l.secs[t.0 as usize].addr;
+                } else {
+                    fr.tgt = lu::FOLD_SECTION | t.0 as u64;
+                    fr.val = t.1 - l.secs[t.0 as usize].addr;
+                }
+            }
+            rs.push(fr);
+        }
+        let pi = ps.index_mut(i);
+        pi.r0 = r0;
+        pi.rn = rs.len() as u32 - r0;
+    }
+    let into = lu::fold(&ps, &rs, b);
+    for i in 0..into.len() {
+        if into[i] != lu::FOLD_NONE {
+            let s = idx[i] as usize;
+            l.secs.index_mut(s).live = false;
+            l.secs.index_mut(s).fold = idx[into[i] as usize];
+        }
+    }
+}
+
+// The input section (a part when split) and object address relocation word `w1` of file `f` names: its
+// symbol's definition, resolved once per symbol into `rp` and `rv` (NONE when no object defines it, or an
+// absolute symbol), or the place `v` of its section.
+const fn fold_target(l: &L, f: IFile, w1: u32, v: u64, rp: &mut Vector<u32>, rv: &mut Vector<u64>) (u32, u64) {
+    let num = w1 & 0xFFFFFF;
+    if (w1 >> 27 & 1) == 0 {
+        if num == 0 || num > f.nsec {
+            return NONE, 0;
+        }
+        return part(l, f.sec0 + num - 1, v), v;
+    }
+    let k = (f.sym0 + num) as usize;
+    if rp[k] == 0 {
+        let d = defining(l, k as u32);
+        if d == NONE || (l.syms[d as usize].ty & N_TYPE) != N_SECT {
+            rp[k] = NONE;
+        } else {
+            let y = l.syms[d as usize];
+            rp[k] = part(l, l.files[y.file as usize].sec0 + y.sect as u32 - 1, y.value) + 1;
+            rv[k] = y.value;
+        }
+    }
+    if rp[k] == NONE {
+        return NONE, 0;
+    }
+    return rp[k] - 1, rv[k] + v;
 }
 
 // Mark the input section that defines symbol `k` (or its global's definition) live.
@@ -1562,6 +1784,16 @@ fn layout(l: &mut L, b: []u8) bool {
             l.tlv = true;
         }
     }
+    // A folded part lands where its copy does (`fold_code`).
+    for s in 0..l.secs.len() {
+        let d = l.secs[s].fold;
+        if d != NONE {
+            let c = l.secs[d as usize];
+            let ms = l.secs.index_mut(s);
+            ms.out = c.out;
+            ms.at = c.at;
+        }
+    }
     return true;
 }
 
@@ -1760,7 +1992,7 @@ fn rel_chunk(ctx: *mut void, c: usize) {
 // False, with the reason in `err`, when a relocation cannot be applied.
 fn relocate(l: &L, b: []u8, img: lu::Img, s: usize, ptrs: &mut Vector<Ptr>, err: &mut String) bool {
     let sc = l.secs[s];
-    if sc.out == NONE {
+    if sc.out == NONE || sc.fold != NONE {
         return true;
     }
     if !zerofill(sc.flags) {
@@ -3004,7 +3236,8 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
     locs.push(OSym { name: ob::put_str(st, &d), ty: N_SO, sect: 0, desc: 0, value: 0 });
     locs.push(OSym { name: ob::put_str(st, name), ty: N_SO, sect: 0, desc: 0, value: 0 });
     locs.push(OSym { name: ob::put_str(st, &l.paths[f.path as usize]), ty: N_OSO, sect: 0, desc: 1, value: 0 });
-    // The functions sorted by address; each one's size reaches the next one or its section's end.
+    // The functions sorted by address; each one's size reaches the next one or its section's end. A folded
+    // function has none: its copy's debug information describes the code (as LLD's default).
     let mut fk = Vector::<u64>::new();
     for k in f.sym0..f.sym0 + f.nsym {
         let y = l.syms[k as usize];
@@ -3012,7 +3245,7 @@ fn debug_map(l: &L, b: []u8, f: IFile, st: &mut Vector<u8>, locs: &mut Vector<OS
             continue;
         }
         let sc = l.secs[part(l, f.sec0 + y.sect as u32 - 1, y.value) as usize];
-        if code(sc) {
+        if code(sc) && sc.fold == NONE {
             fk.push(sym_addr(l, k) << 24 | (k - f.sym0) as u64);
         }
     }

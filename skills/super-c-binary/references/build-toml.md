@@ -102,6 +102,7 @@ native object's key.
 | `fast-math` | | `associative-math`, `reciprocal-math`, `finite-math-only`, `-fno-signed-zeros` and `fp-contract=fast` (`-ffp-contract=off` clears it), each its own flag too. The prover gives each float operation every value they let the optimizer compute (`super-c-language`, basics: floats): a reassociated sum or product keeps only its order against an operand that may be a partial result, a quotient may be a product by the reciprocal, a sum with a product may be fused, a zero may take either sign, an ordered comparison of a NaN is unknown |
 | `stack-protector`, `-strong`, `-all` | | A canary between a function's stack memory and its saved registers, checked before it returns: functions with a slot of 8 bytes or more, with any slot, or all; one at a time (`-fno-stack-protector` clears them). The native build counts a slot only when a block that may return reads its address: a slot only failure paths use (a panic's message) adds no canary (`lir::verify::protected`) |
 | `function-sections`, `data-sections` | 1, 2, 3, s, z | A section per function or variable, and the link drops what nothing reaches from the entry, the exports and the kept symbols (the build adds `-Wl,-dead_strip` on Mach-O, `-Wl,--gc-sections` elsewhere) |
+| `fold-functions` | 1, 2, 3, s, z | With the link's GC, the link keeps one copy of identical functions whose address nothing takes (the build adds `-Wl,--icf=safe`, LLD's `--icf=safe`): a call or jump takes no address; any other reference, an export, the entry or a kept symbol does, so functions a program compares by address stay apart. A folded function's symbol names its copy's address |
 | `plt` | 0 to z | `-fno-plt`, ELF: a call of an extern declaration's function loads its address from its GOT slot; the x86-64 link turns one whose target the output defines into a direct call |
 | `prove` | 0 to z | The prover checks every contract (`requires`, `ensures`, `decreases`, loop `invariant`) and every `@prove_exhaustive` function, and every conversion into a pattern type the checker cannot decide, and fails the build on one it cannot prove (error 538); a bounds check it proves is removed, and a proved `requires` that compares a parameter with a constant gives the optimizer the parameter's range. `-fno-prove` skips the proofs: no check is removed, no `requires` gives a range, and each such conversion is checked at run time |
 | `contract-checks` | | The contract checks of the program's modules also run (a std module's clauses are proved only: they may name spec functions): a false clause traps with "assertion failed: `<clause>`", a conversion into a pattern type with "assertion failed: `<value>`". Off, a build emits no check and its output is byte-identical to the same program without contracts |
@@ -111,13 +112,19 @@ At 1, 2 and 3 a loop whose header test has at most 8 instructions also rotates (
 end); `loop_budgets` in `src/driver/emit.spc` holds the budgets. `-march=C` is `--target-cpu=C`.
 
 A build tree records the proofs that held (`__sc_prove`, `prove_cached` in `src/driver/emit.spc`): one
-key per module whose obligations all held, over the module's source, the sources of every module it
-imports or names (transitively) and of the prelude, the compiler identity, the target, the
-architecture, the level and the flags. A later build skips the proofs of each module whose key the
-record holds; a failed obligation is never recorded. A module the tree's record misses reads the
-shared record of its key in the cache base (`<base>/.prove/<key>`, `shared_record`), which every tree
-of any project shares, and writes it once its proofs held: a second tree of the same sources proves
-nothing again. `SC_CEMIT_STATS=1` prints
+key per module whose obligations all held, over the module's source, the shapes (`tuc::Shapes`: the
+text outside the function bodies) of every module it imports or names (transitively), the prelude's
+sources, the bodies the build keeps of the module and their recursion components, the compiler
+identity, the target, the architecture, the level and the flags. Each key's `@d` lines list the
+functions of other modules whose bodies its proofs read (`prv::check_kept`: a callee's parameter
+writes, `ensures` chains, ownership), each with its text's hash (`tuc::body_hash`); `@c` lines list the
+functions the build's evaluations ran (`Package.ce_reads`: a constant's value). A later build skips
+the proofs of each module whose key the record holds while each of its `@d` lines and every `@c` line
+still hold; a failed obligation is never recorded. A `@prove_exhaustive` function's module reads every
+module. A module the tree's record misses reads the shared record of its key in the cache base
+(`<base>/.prove/<key>`, `shared_record`, its `@d` and `@c` lines by file), which every tree of any
+project shares, and writes it once its proofs held: a second tree of the same sources proves nothing
+again. `SC_CEMIT_STATS=1` prints
 `prove: <n> to prove, <k> from the proof record, <w> workers` (`<w>`: the workers the proofs run on).
 
 ### Build cache

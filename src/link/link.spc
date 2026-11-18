@@ -43,6 +43,7 @@ struct Cmd {
     pub(package) wasm_stack: u64, // wasm: the stack's size (`-z stack-size=`), 0: the default
     pub(package) stack_first: bool, // wasm: the stack before the data
     pub(package) gc: bool, // drop what no root reaches (`-dead_strip`, `--gc-sections`)
+    pub(package) fold: bool, // one copy of identical functions whose address nothing takes (`--icf=safe`)
     /// A shared library's export list (`-Wl,-exported_symbols_list,`, `-Wl,--version-script=`, a `.def`
     /// input): the globals it exports, as the image spells them; None: every default-visibility global.
     pub(package) exports: Option<Set<String>>,
@@ -85,6 +86,7 @@ pub(package) fn link_args(
         wasm_stack: 0,
         stack_first: false,
         gc: false,
+        fold: false,
         exports: None,
         mem: mem,
     };
@@ -198,6 +200,8 @@ fn parse(args: &Vector<String>, c: &mut Cmd, why: &mut String) i32 {
             c.strip = true;
         } else if a == "-Wl,-dead_strip" || a == "-Wl,--gc-sections" {
             c.gc = true;
+        } else if a == "-Wl,--icf=safe" {
+            c.fold = true;
         } else if a.starts_with("-Wl,-O") && a.len() == 7 && a.byte_at(6) >= b'0' && a.byte_at(6) <= b'9' {
             // lld's string tail merging: an output size level only.
         } else {
@@ -276,6 +280,7 @@ fn macho(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         strip: c.strip,
         jobs: c.jobs,
         dead_strip: c.gc,
+        fold: c.fold,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
     };
@@ -314,6 +319,7 @@ fn elf(os: i32, isa: i32, c: &mut Cmd, a64: bool, why: &mut String) i32 {
         a64: a64,
         strip: c.strip,
         gc: c.gc,
+        fold: c.fold,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
         jobs: c.jobs,
@@ -363,6 +369,7 @@ fn wasm(c: &mut Cmd, why: &mut String) i32 {
         stack_first: c.stack_first,
         strip: c.strip,
         gc: c.gc,
+        fold: c.fold,
         mem: c.mem,
     };
     return ast::pick(!lw::link(&o, why), FAILED, LINKED);
@@ -381,6 +388,7 @@ fn coff(os: i32, isa: i32, c: &mut Cmd, why: &mut String) i32 {
         strip: c.strip,
         stack: c.stack,
         gc: c.gc,
+        fold: c.fold,
         exports: replace(&mut c.exports, Option::<Set<String>>::None),
         mem: c.mem,
         jobs: c.jobs,
