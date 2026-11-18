@@ -39,6 +39,15 @@ pub fn mul_u8i8(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
     mul_u8i8_on(c, a, b, m, k, n);
 }
 
+/// `dst = src^T` for row-major `f32` matrices: `src` is `m x n`, `dst` is `n x m`, each element moved as
+/// its bits (on the SME tiles where the CPU has them). Panics as `mul_f32`.
+pub fn transpose_f32(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    if !fits(dst.len(), n, m) || !fits(src.len(), m, n) {
+        panic("matrix::transpose_f32: a slice's length is not its matrix's element count");
+    }
+    transpose_f32_on(dst, src, m, n);
+}
+
 /// `c = a * b` for row-major `f16` matrices into `f32`: each element of `a` and `b` widened to `f32`
 /// (exact), then `mul_f32`: the same bits on every machine and kernel. Panics as `mul_f32`.
 pub fn mul_f16(c: []mut f32, a: []f16, b: []f16, m: usize, k: usize, n: usize) {
@@ -76,6 +85,7 @@ static mut MUL_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F64: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_I8: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_U8I8: detect::Dispatch = detect::Dispatch::new();
+static mut TRANSPOSE_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F16: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_BF16: detect::Dispatch = detect::Dispatch::new();
 
@@ -122,6 +132,21 @@ fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
 @arch(!aarch64)
 fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     mul_i8_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn transpose_f32_on(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut f32, []f32, usize, usize), 1>(
+        &mut unsafe TRANSPOSE_F32,
+        [(cpu::Feature::Sme2, transpose_f32_sme)],
+        transpose_f32_blocks,
+    );
+    f(dst, src, m, n);
+}
+
+@arch(!aarch64)
+fn transpose_f32_on(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    transpose_f32_blocks(dst, src, m, n);
 }
 
 @arch(aarch64)
@@ -191,6 +216,19 @@ fn mul_f64_sme(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: usize) {
 fn mul_i8_sme(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_i8(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
         mul_i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn transpose_f32_sme(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_transpose32(
+        dst.as_mut_ptr() as *mut u32,
+        src.as_ptr() as *const u32,
+        m,
+        n,
+    ) != 0 {
+        transpose_f32_blocks(dst, src, m, n);
     }
 }
 
@@ -353,5 +391,24 @@ const fn mul_u8i8_lanes(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: u
                 j += 1;
             }
         }
+    }
+}
+
+// The portable transpose: blocks of 16 x 16, so a block's source rows and destination rows stay in cache.
+const fn transpose_f32_blocks(dst: []mut f32, src: []f32, m: usize, n: usize) {
+    let mut i0: usize = 0;
+    while i0 < m {
+        let ie = (i0 + 16).min(m);
+        let mut j0: usize = 0;
+        while j0 < n {
+            let je = (j0 + 16).min(n);
+            for i in i0..ie {
+                for j in j0..je {
+                    dst[j * m + i] = src[i * n + j];
+                }
+            }
+            j0 = je;
+        }
+        i0 = ie;
     }
 }

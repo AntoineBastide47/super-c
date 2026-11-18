@@ -165,6 +165,15 @@ unsafe fn mul_i8_flip(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usiz
     return 0;
 }
 
+/// `dst` (n x m) = the transpose of `src` (m x n), 32-bit elements (moved as bits) on the ZA tile.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_transpose32(dst: *mut u32, src: *const u32, m: usize, n: usize) i32 {
+    sc_sme_t32_za(dst, src, m, n);
+    return 0;
+}
+
 /// `c` (m x n, f32) = `a` (m x k) * `b` (k x n), `f16` encodings (`a.as_ptr() as *const u64`: a
 /// `Float<5, 10>` holds its encoding in the low 16 bits of one u64), widened exactly: as `sc_sme_mul_f32`.
 @platform(macos | ios | linux | android)
@@ -201,6 +210,13 @@ pub unsafe fn sc_sme_mul_f64(_c: *mut f64, _a: *const f64, _b: *const f64, _m: u
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_i8(_c: *mut i32, _a: *const i8, _b: *const i8, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_transpose32(_dst: *mut u32, _src: *const u32, _m: usize, _n: usize) i32 {
     return -1;
 }
 
@@ -844,6 +860,104 @@ ldp d10, d11, [sp, #16]
 ldp d8, d9, [sp], #144
 ret)");
 
+// dst (n x m) = the transpose of src (m x n), 32-bit elements, arguments in x0 to x3: dst, src, m, n.
+// L = SVL / 32. Per L x L block, the source rows go into tile 0 horizontally (lanes past n not loaded:
+// p0) and its columns out vertically (lanes past m not stored: p1), each a whole row of the result.
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+asm(M"(.text
+.arch_extension sme2
+.arch_extension sme-f64f64
+.p2align 4
+_sc_sme_t32_za:
+sc_sme_t32_za:
+stp d8, d9, [sp, #-144]!
+stp d10, d11, [sp, #16]
+stp d12, d13, [sp, #32]
+stp d14, d15, [sp, #48]
+stp x19, x20, [sp, #64]
+stp x21, x22, [sp, #80]
+stp x23, x24, [sp, #96]
+stp x25, x26, [sp, #112]
+stp x27, x28, [sp, #128]
+mrs x8, TPIDR2_EL0
+cbz x8, 23f
+ldrh w9, [x8, #10]
+ldr w10, [x8, #12]
+orr w9, w9, w10
+cbz w9, 20f
+udf #0
+20:
+ldr x9, [x8]
+cbz x9, 22f
+rdsvl x10, #1
+mov w12, #0
+21:
+str za[w12, 0], [x9]
+addsvl x9, x9, #1
+add w12, w12, #1
+cmp x12, x10
+b.lo 21b
+22:
+msr TPIDR2_EL0, xzr
+23:
+smstart
+cntw x8
+cbz x2, 9f
+cbz x3, 9f
+lsl x24, x3, #2
+lsl x25, x2, #2
+mov x10, #0
+1:
+whilelo p1.s, x10, x2
+sub x13, x2, x10
+cmp x13, x8
+csel x13, x13, x8, lo
+mov x11, #0
+2:
+whilelo p0.s, x11, x3
+sub x14, x3, x11
+cmp x14, x8
+csel x14, x14, x8, lo
+mul x15, x10, x3
+add x15, x15, x11
+add x15, x1, x15, lsl #2
+mov w12, #0
+3:
+ld1w {za0h.s[w12, 0]}, p0/z, [x15]
+add x15, x15, x24
+add w12, w12, #1
+cmp x12, x13
+b.lo 3b
+mul x16, x11, x2
+add x16, x16, x10
+add x16, x0, x16, lsl #2
+mov w12, #0
+4:
+st1w {za0v.s[w12, 0]}, p1, [x16]
+add x16, x16, x25
+add w12, w12, #1
+cmp x12, x14
+b.lo 4b
+add x11, x11, x8
+cmp x11, x3
+b.lo 2b
+add x10, x10, x8
+cmp x10, x2
+b.lo 1b
+9:
+smstop
+ldp x27, x28, [sp, #128]
+ldp x25, x26, [sp, #112]
+ldp x23, x24, [sp, #96]
+ldp x21, x22, [sp, #80]
+ldp x19, x20, [sp, #64]
+ldp d14, d15, [sp, #48]
+ldp d12, d13, [sp, #32]
+ldp d10, d11, [sp, #16]
+ldp d8, d9, [sp], #144
+ret)");
+
 // The kernels' symbols: Mach-O spells a C name with a leading `_`, ELF without, so each kernel above
 // carries both labels and the object format's directives below make its own one global and hidden.
 @platform(macos | ios)
@@ -854,6 +968,8 @@ asm(M"(.globl _sc_sme_f32_za
 .private_extern _sc_sme_f64_za
 .globl _sc_sme_i8_za
 .private_extern _sc_sme_i8_za
+.globl _sc_sme_t32_za
+.private_extern _sc_sme_t32_za
 )");
 
 @platform(linux | android)
@@ -867,6 +983,9 @@ asm(M"(.globl sc_sme_f32_za
 .globl sc_sme_i8_za
 .hidden sc_sme_i8_za
 .type sc_sme_i8_za, %function
+.globl sc_sme_t32_za
+.hidden sc_sme_t32_za
+.type sc_sme_t32_za, %function
 )");
 
 @platform(macos | ios | linux | android)
@@ -893,4 +1012,5 @@ extern "C" {
         pb: *mut f64,
     );
     fn sc_sme_i8_za(c: *mut i32, pa: *const i8, pb: *const i8, m: usize, g: usize, n: usize);
+    fn sc_sme_t32_za(dst: *mut u32, src: *const u32, m: usize, n: usize);
 }
