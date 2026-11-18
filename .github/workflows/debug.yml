@@ -444,6 +444,41 @@ jobs:
             for v in bb1 bbs; do echo "== bits $v round $r"; "./$v/bench-bin" | grep -E '^bits_bench::|time \(ms\)'; done
           done
 
+      - name: Time SHA-256 with and without the processor's instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha_ni|sha2' /proc/cpuinfo || true
+          mkdir -p shat && cd shat
+          cat > main.spc <<'SPC'
+          import std::crypto::sha256 as sha;
+          import std::crypto::secret as *;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha::sha256(&msg);
+                  let t1 = clock::monotonic_ns();
+                  let e = sha::sha256_portable(&msg);
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..32usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha256 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o sha
+          ./sha
+
   # LSE and RCPC on a Linux arm64 server core: the mutex benchmarks built without them (the Linux
   # baseline) and with them, alternating, two rounds.
   bench-lse:
@@ -478,6 +513,165 @@ jobs:
               "./$v/bench-bin" | grep -E '^mutex_bench::|time \(ms\)'
             done
           done
+
+      - name: Time SHA-256 with and without the processor's instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha_ni|sha2' /proc/cpuinfo || true
+          mkdir -p shat && cd shat
+          cat > main.spc <<'SPC'
+          import std::crypto::sha256 as sha;
+          import std::crypto::secret as *;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha::sha256(&msg);
+                  let t1 = clock::monotonic_ns();
+                  let e = sha::sha256_portable(&msg);
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..32usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha256 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o sha
+          ./sha
+
+      - name: Time Keccak-f with and without the SHA3 instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha3' /proc/cpuinfo || true
+          mkdir -p k3 && cd k3
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha3;
+          import std::simd::aarch64 as a64;
+          import std::cpu;
+          import std::platform::clock;
+
+          const RC: [u64; 24] = [0x1, 0x8082, 0x800000000000808a, 0x8000000080008000, 0x808b, 0x80000001, 0x8000000080008081, 0x8000000000008009, 0x8a, 0x88, 0x80008009, 0x8000000a, 0x8000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003, 0x8000000000008002, 0x8000000000000080, 0x800a, 0x800000008000000a, 0x8000000080008081, 0x8000000000008080, 0x80000001, 0x8000000080008008];
+
+          fn kscalar(a: &mut [u64; 25]) {
+              for r in 0..24usize {
+                  let mut c: [u64; 5] = [0; 5];
+                  for x in 0..5usize { c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20]; }
+                  let mut b: [u64; 25] = [0; 25];
+                  let d0 = c[4] ^ c[1].rotate_left(1);
+                  let d1 = c[0] ^ c[2].rotate_left(1);
+                  let d2 = c[1] ^ c[3].rotate_left(1);
+                  let d3 = c[2] ^ c[4].rotate_left(1);
+                  let d4 = c[3] ^ c[0].rotate_left(1);
+                  b[0] = (a[0] ^ d0).rotate_left(0);
+                  b[16] = (a[5] ^ d0).rotate_left(36);
+                  b[7] = (a[10] ^ d0).rotate_left(3);
+                  b[23] = (a[15] ^ d0).rotate_left(41);
+                  b[14] = (a[20] ^ d0).rotate_left(18);
+                  b[10] = (a[1] ^ d1).rotate_left(1);
+                  b[1] = (a[6] ^ d1).rotate_left(44);
+                  b[17] = (a[11] ^ d1).rotate_left(10);
+                  b[8] = (a[16] ^ d1).rotate_left(45);
+                  b[24] = (a[21] ^ d1).rotate_left(2);
+                  b[20] = (a[2] ^ d2).rotate_left(62);
+                  b[11] = (a[7] ^ d2).rotate_left(6);
+                  b[2] = (a[12] ^ d2).rotate_left(43);
+                  b[18] = (a[17] ^ d2).rotate_left(15);
+                  b[9] = (a[22] ^ d2).rotate_left(61);
+                  b[5] = (a[3] ^ d3).rotate_left(28);
+                  b[21] = (a[8] ^ d3).rotate_left(55);
+                  b[12] = (a[13] ^ d3).rotate_left(25);
+                  b[3] = (a[18] ^ d3).rotate_left(21);
+                  b[19] = (a[23] ^ d3).rotate_left(56);
+                  b[15] = (a[4] ^ d4).rotate_left(27);
+                  b[6] = (a[9] ^ d4).rotate_left(20);
+                  b[22] = (a[14] ^ d4).rotate_left(39);
+                  b[13] = (a[19] ^ d4).rotate_left(8);
+                  b[4] = (a[24] ^ d4).rotate_left(14);
+                  for y in 0..5usize { for x in 0..5usize { a[x + 5 * y] = b[x + 5 * y] ^ ~b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]; } }
+                  a[0] ^= RC[r];
+              }
+          }
+
+          @arch(aarch64)
+          @target_feature([cpu::Feature::Sha3])
+          fn kvec(s: &mut [u64; 25]) {
+              let mut a: [u64x2; 25] = [u64x2::splat(0); 25];
+              for i in 0..25usize { a[i] = u64x2::splat(s[i]); }
+              for r in 0..24usize {
+                  let c0 = a64::eor3(a64::eor3(a[0].bitcast::<u8, 16>(), a[5].bitcast::<u8, 16>(), a[10].bitcast::<u8, 16>()), a[15].bitcast::<u8, 16>(), a[20].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c1 = a64::eor3(a64::eor3(a[1].bitcast::<u8, 16>(), a[6].bitcast::<u8, 16>(), a[11].bitcast::<u8, 16>()), a[16].bitcast::<u8, 16>(), a[21].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c2 = a64::eor3(a64::eor3(a[2].bitcast::<u8, 16>(), a[7].bitcast::<u8, 16>(), a[12].bitcast::<u8, 16>()), a[17].bitcast::<u8, 16>(), a[22].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c3 = a64::eor3(a64::eor3(a[3].bitcast::<u8, 16>(), a[8].bitcast::<u8, 16>(), a[13].bitcast::<u8, 16>()), a[18].bitcast::<u8, 16>(), a[23].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c4 = a64::eor3(a64::eor3(a[4].bitcast::<u8, 16>(), a[9].bitcast::<u8, 16>(), a[14].bitcast::<u8, 16>()), a[19].bitcast::<u8, 16>(), a[24].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let d0 = a64::rax1(c4, c1);
+                  let d1 = a64::rax1(c0, c2);
+                  let d2 = a64::rax1(c1, c3);
+                  let d3 = a64::rax1(c2, c4);
+                  let d4 = a64::rax1(c3, c0);
+                  let mut b: [u64x2; 25] = [u64x2::splat(0); 25];
+                  b[0] = a64::xar::<0>(a[0], d0);
+                  b[16] = a64::xar::<28>(a[5], d0);
+                  b[7] = a64::xar::<61>(a[10], d0);
+                  b[23] = a64::xar::<23>(a[15], d0);
+                  b[14] = a64::xar::<46>(a[20], d0);
+                  b[10] = a64::xar::<63>(a[1], d1);
+                  b[1] = a64::xar::<20>(a[6], d1);
+                  b[17] = a64::xar::<54>(a[11], d1);
+                  b[8] = a64::xar::<19>(a[16], d1);
+                  b[24] = a64::xar::<62>(a[21], d1);
+                  b[20] = a64::xar::<2>(a[2], d2);
+                  b[11] = a64::xar::<58>(a[7], d2);
+                  b[2] = a64::xar::<21>(a[12], d2);
+                  b[18] = a64::xar::<49>(a[17], d2);
+                  b[9] = a64::xar::<3>(a[22], d2);
+                  b[5] = a64::xar::<36>(a[3], d3);
+                  b[21] = a64::xar::<9>(a[8], d3);
+                  b[12] = a64::xar::<39>(a[13], d3);
+                  b[3] = a64::xar::<43>(a[18], d3);
+                  b[19] = a64::xar::<8>(a[23], d3);
+                  b[15] = a64::xar::<37>(a[4], d4);
+                  b[6] = a64::xar::<44>(a[9], d4);
+                  b[22] = a64::xar::<25>(a[14], d4);
+                  b[13] = a64::xar::<56>(a[19], d4);
+                  b[4] = a64::xar::<50>(a[24], d4);
+                  for y in 0..5usize { for x in 0..5usize { a[x + 5 * y] = a64::bcax(b[x + 5 * y].bitcast::<u8, 16>(), b[(x + 2) % 5 + 5 * y].bitcast::<u8, 16>(), b[(x + 1) % 5 + 5 * y].bitcast::<u8, 16>()).bitcast::<u64, 2>(); } }
+                  a[0] = a[0] ^ u64x2::splat(RC[r]);
+              }
+              for i in 0..25usize { s[i] = a[i][0]; }
+          }
+
+          fn main() i32 {
+              let n: usize = 1 << 20;
+              let mut m = Vector::<Secret<u8>>::new();
+              for i in 0..n { m.push(Secret::new((i * 7 + 1) as u8)); }
+              let t0 = clock::monotonic_ns();
+              let d = sha3::sha3_256(&m);
+              let t1 = clock::monotonic_ns();
+              let mut s1: [u64; 25] = [0; 25];
+              let mut s2: [u64; 25] = [0; 25];
+              let blocks = n / 136;
+              for b in 0..blocks { s1[0] ^= b as u64; kscalar(&mut s1); }
+              let t2 = clock::monotonic_ns();
+              for b in 0..blocks { s2[0] ^= b as u64; unsafe kvec(&mut s2); }
+              let t3 = clock::monotonic_ns();
+              println("1 MiB: sha3_256 {} us (d0 {}), raw scalar permutations {} us, SHA3 instructions {} us, same {}", (t1 - t0) / 1000, d[0].declassify(), (t2 - t1) / 1000, (t3 - t2) / 1000, s1[0] == s2[0] && s1[24] == s2[24]);
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o k3
+          ./k3; ./k3
 
   wasm-compile:
     name: wasm compile

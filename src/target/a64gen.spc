@@ -2644,15 +2644,23 @@ const fn mkind(t: u8, load: bool) u32 {
     return ast::pick(t == T_I32, a::M_W, a::M_X);
 }
 
-// Whether the flags `f` (`CPU_SCALAR`) change instruction `t` of body `b` where that pays
-// (`place::copy_levels`): LSE or RCPC a read-modify-write, a compare-and-swap or an acquire load; CSSC a
-// scalar count of trailing zeros or set bits (CTZ, CNT: no RBIT or vector round trip). Its minimum,
-// maximum and absolute value (`min_max`, `abs_select`) save one comparison each: no copy for them alone.
-const fn copy_differs(_b: &Body, t: Inst, f: u32) bool {
-    if (f & (CPU_LSE | CPU_RCPC)) != 0 && (t.op == O_ARMW || t.op == O_ACAS || t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE) {
-        return true;
+// The instructions the flags `f` (`CPU_SCALAR`) save on instruction `t` of body `b`
+// (`place::copy_levels`): LSE 3 on a read-modify-write or a compare-and-swap (one instruction for an
+// exclusive load, the operation, an exclusive store and its retry branch), RCPC 1 on an acquire load (no
+// instruction, a weaker order); CSSC 3 on a scalar count of set bits (CNT for a vector round trip of
+// four), 1 on one of trailing zeros (CTZ for RBIT and CLZ). Its minimum, maximum and absolute value
+// (`min_max`, `abs_select`) save one comparison each: none counted.
+const fn copy_differs(_b: &Body, t: Inst, f: u32) u32 {
+    if (f & CPU_LSE) != 0 && (t.op == O_ARMW || t.op == O_ACAS) {
+        return 3;
     }
-    return (f & CPU_CSSC) != 0 && (t.op == O_CTZ || t.op == O_POPCNT) && !is_vec(t.ty);
+    if (f & CPU_RCPC) != 0 && t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE {
+        return 1;
+    }
+    if (f & CPU_CSSC) == 0 || is_vec(t.ty) {
+        return 0;
+    }
+    return ast::pick(t.op == O_POPCNT, 3u32, (t.op == O_CTZ) as u32);
 }
 
 // ---- Functions ----

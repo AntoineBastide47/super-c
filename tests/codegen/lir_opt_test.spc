@@ -17049,6 +17049,103 @@ b0(v0: i32):
     same_result(&b, &a, "three", x[0..1], 22);
 }
 
+// A slot of two fields promotes however many accesses repeat them: the limit counts distinct accesses (an
+// offset, a type and a kind), whose sort is quadratic. 200 stores and 200 loads of two words.
+@test
+fn a_slot_accessed_often_promotes() {
+    let mut t = String::from_str(
+        "lir ptr 8\nsym @often fn global\nfn @often\n  sig (i32) -> i32\n  slot s0 size 8 align 2\nb0(v0: i32):\n  v1 = slotaddr s0\n  store v0, v1 align 2\n  store v0, v1+4 align 2\n",
+    );
+    let mut v: u32 = 2;
+    for _ in 0..100 {
+        t.format_into("  v{} = load.i32 v1 align 2\n  v{} = load.i32 v1+4 align 2\n", v, v + 1);
+        t.format_into("  v{} = add.i32 v{}, v{}\n  v{} = xor.i32 v{}, v{}\n", v + 2, v, v + 1, v + 3, v, v + 1);
+        t.format_into("  store v{}, v1 align 2\n  store v{}, v1+4 align 2\n", v + 2, v + 3);
+        v += 4;
+    }
+    t.format_into("  v{} = load.i32 v1 align 2\n  ret v{}\n", v, v);
+    let (b, a) = optimized(&t);
+    let o = text_of(&a, "often");
+    assert(!o.contains("slot"), o.as_str());
+    let x: [u64; 1] = [3];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("often"), x[0..1]);
+    same_result(&b, &a, "often", x[0..1], r.value);
+}
+
+// Inserts of every lane of one vector (a sum: lanes of a load read as loads), each into its own lane, are
+// that vector, also through the secret marks the constant-time check reads (the vector takes one mark);
+// inserts that move a lane are not.
+@test
+fn inserts_of_a_vectors_own_lanes_are_the_vector() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @plain fn global
+sym @marked fn global
+sym @moved fn global
+fn @plain
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = add.v4i32 v1, v1
+  v3 = vextract.0.i32 v2
+  v4 = vextract.1.i32 v2
+  v5 = vextract.2.i32 v2
+  v6 = vextract.3.i32 v2
+  v7 = wconst.v4i32 0x0, 0x0
+  v8 = vinsert.0.v4i32 v7, v3
+  v9 = vinsert.1.v4i32 v8, v4
+  v10 = vinsert.2.v4i32 v9, v5
+  v11 = vinsert.3.v4i32 v10, v6
+  v12 = vop.reduce_add.i32 (v11)
+  ret v12
+fn @marked
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = add.v4i32 v1, v1
+  v3 = vextract.0.i32 v2
+  v4 = vextract.1.i32 v2
+  v5 = vextract.2.i32 v2
+  v6 = vextract.3.i32 v2
+  v7 = secret.i32 v3
+  v8 = secret.i32 v4
+  v9 = secret.i32 v5
+  v10 = secret.i32 v6
+  v11 = wconst.v4i32 0x0, 0x0
+  v12 = vinsert.0.v4i32 v11, v7
+  v13 = vinsert.1.v4i32 v12, v8
+  v14 = vinsert.2.v4i32 v13, v9
+  v15 = vinsert.3.v4i32 v14, v10
+  v16 = vop.reduce_add.i32 (v15)
+  ret v16
+fn @moved
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.v4i32 v0 align 2
+  v2 = add.v4i32 v1, v1
+  v3 = vextract.0.i32 v2
+  v4 = vextract.1.i32 v2
+  v5 = vextract.2.i32 v2
+  v6 = vextract.3.i32 v2
+  v7 = wconst.v4i32 0x0, 0x0
+  v8 = vinsert.0.v4i32 v7, v4
+  v9 = vinsert.1.v4i32 v8, v3
+  v10 = vinsert.2.v4i32 v9, v5
+  v11 = vinsert.3.v4i32 v10, v6
+  v12 = vop.reduce_add.i32 (v11)
+  ret v12
+)",
+    );
+    let p = text_of(&a, "plain");
+    assert(!p.contains("vinsert") && !p.contains("vextract"), p.as_str());
+    let m = text_of(&a, "marked");
+    assert(!m.contains("vinsert") && m.contains("secret.v4i32"), m.as_str());
+    let v = text_of(&a, "moved");
+    assert(v.contains("vinsert"), v.as_str());
+    let _ = b;
+}
+
 // A sum of four adjacent loads packs into a vector and its lane sum (`reduce_add`) where a halving step of
 // the lane sum costs nothing past the addition it replaces (`Package.vec_reduce` 0), not where it costs 4
 // (wasm32's shuffle through a local). The result stays.

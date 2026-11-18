@@ -57,6 +57,21 @@ fn uses_beyond_the_callers_features_need_unsafe() {
     // A build whose features hold the function's needs no `unsafe`.
     let b = x86(&p, "fn main() i32 {\n    return wide(0) - 1;\n}\n", "--target-cpu=x86-64-v3");
     assert(b.ok(), "the build's features");
+    // macOS arm64's baseline holds SHA-256, Linux arm64's does not: code both build keeps its `unsafe`,
+    // unless the caller's own features give it.
+    let sha = "import std::cpu;\n@arch(aarch64)\n@target_feature([cpu::Feature::Sha2])\nfn h(a: i32) i32 {\n    return a + 1;\n}\n";
+    p.mkfile("main.spc", format("{}fn main() i32 {{\n    return unsafe h(0) - 1;\n}}\n", sha).as_str());
+    let mac = p.run_raw(format("lint --arch=aarch64 --target=macos \"{}/main.spc\"", p.dir()).as_str());
+    assert(!mac.out_has("unnecessary 'unsafe'"), "another platform of the instruction set needs it");
+    p.mkfile(
+        "main.spc",
+        format(
+            "{}@arch(aarch64)\n@target_feature([cpu::Feature::Sha2])\nfn g(a: i32) i32 {{\n    return unsafe h(a);\n}}\nfn main() i32 {{\n    return 0;\n}}\n",
+            sha,
+        ).as_str(),
+    );
+    let own = p.run_raw(format("lint --arch=aarch64 --target=macos \"{}/main.spc\"", p.dir()).as_str());
+    assert(own.out_has("unnecessary 'unsafe'"), "the caller's features give it");
 }
 
 // Such a function is no value of a closure bound: the bound's caller runs it without the check. A

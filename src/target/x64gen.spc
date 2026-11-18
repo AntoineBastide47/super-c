@@ -3616,38 +3616,46 @@ fn strip_dispatch(b: &mut Body, n: usize) {
     b.blocks.index_mut(k as usize).len = 1;
 }
 
-// Whether the scalar flags `f` (`CPU_SCALAR`) change instruction `t` of body `b` where that pays
-// (`place::copy_levels`): POPCNT a count of set bits, LZCNT one of leading zeros, BMI1 one of trailing
-// zeros, `x & (x - 1)`, `x ^ (x - 1)`, `x & -x` (BLSR, BLSMSK, BLSI) or `!a & b` (ANDN), FMA a fused
-// multiply-add of scalars. BMI2's shifts and MOVBE change code too, but measured no faster (a bit-field
-// reader, big-endian reads): no copy for them alone.
-const fn copy_differs(b: &Body, t: Inst, f: u32) bool {
+// The instructions the scalar flags `f` (`CPU_SCALAR`) save on instruction `t` of body `b`
+// (`place::copy_levels`): POPCNT 13 on a count of set bits (the shifts, masks and multiply of the
+// count without it), FMA 20 on a fused multiply-add of scalars (the exact sum without it), LZCNT 3 on a
+// count of leading zeros and BMI1 2 on one of trailing zeros (BSR or BSF, a move for zero and a flip),
+// BMI1 1 on `x & (x - 1)`, `x ^ (x - 1)`, `x & -x` (BLSR, BLSMSK, BLSI) or `!a & b` (ANDN). BMI2's shifts
+// and MOVBE change code too, but measured no faster (a bit-field reader, big-endian reads): none
+// counted.
+const fn copy_differs(b: &Body, t: Inst, f: u32) u32 {
     if is_vec(t.ty) {
-        return false;
+        return 0;
     }
-    if (f & CPU_POPCNT) != 0 && t.op == O_POPCNT || (f & CPU_LZCNT) != 0 && t.op == O_CLZ || (f & CPU_FMA) != 0 && t.op == O_FMA {
-        return true;
+    if (f & CPU_POPCNT) != 0 && t.op == O_POPCNT {
+        return 13;
+    }
+    if (f & CPU_FMA) != 0 && t.op == O_FMA {
+        return 20;
+    }
+    if (f & CPU_LZCNT) != 0 && t.op == O_CLZ {
+        return 3;
     }
     if (f & CPU_BMI1) == 0 {
-        return false;
+        return 0;
     }
     if t.op == O_CTZ {
-        return true;
+        return 2;
     }
     if t.op != O_AND && t.op != O_XOR {
-        return false;
+        return 0;
     }
     let (kind, _s, _x) = lv::bls_parts(b, t);
     if kind != 0 {
-        return true;
+        return 1;
     }
     for q in 0..2u32 {
         let v = ast::pick(q == 0, t.a, t.b);
         if t.op == O_AND && v != VNONE && (v & (VPARAM | VFLAG)) == 0 && b.insts[v as usize].op == O_NOT {
-            return true;
+            return 1;
         }
     }
-    return false;
+    return 0;
 }
 
 extend Gen {
@@ -5929,7 +5937,9 @@ extend Gen {
 
     // `rd` = the set bits of `r` (its low `sz` bytes, the upper zero for 4), through r10 and r11.
     fn popcount(self: &mut Self, rd: u8, r: u8, sz: u32) {
-        self.c.mov_rr(sz, rd, r);
+        if rd != r || sz < 8 {
+            self.c.mov_rr(sz, rd, r);
+        }
         self.c.mov_rr(8, S0, rd);
         self.c.shift_ri(x::SHR, 8, S0, 1);
         self.c.mov_ri(S1, 0x5555555555555555);

@@ -336,3 +336,39 @@ fn the_c_tree_takes_the_checked_code() {
     assert(p.cc_build("").ok(), "the C tree builds");
     assert(p.run_bin_env("").ok(), "the program computes what the native one does");
 }
+
+// The C tree's object takes the hash instructions' wrappers too (their vector register types read from the
+// intrinsics headers): SHA-256 with the processor's instructions, where the host has them, gives the
+// portable digest.
+@test
+fn the_c_tree_hashes_with_the_processor_instructions() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::crypto::secret as *;
+import std::crypto::sha256 as *;
+
+fn main() i32 {
+    let mut m = Vector::<Secret<u8>>::new();
+    for i in 0..200usize {
+        m.push(Secret::new((i * 7 + 1) as u8));
+    }
+    let a = sha256(&m);
+    let b = sha256_portable(&m);
+    for i in 0..32usize {
+        if a[i].declassify() != b[i].declassify() {
+            return 1;
+        }
+    }
+    return (a[0].declassify() != 0x39) as i32;
+}
+)",
+    );
+    let r = p.compile("main.spc");
+    assert(r.ok(), "the C tree is written");
+    if !cli::has_cc() {
+        return; // the C compiler builds it
+    }
+    assert(p.cc_build("").ok(), "the C tree builds");
+    assert(p.run_bin_env("").ok(), "the digests agree");
+}

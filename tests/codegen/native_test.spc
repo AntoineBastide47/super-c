@@ -22418,7 +22418,7 @@ b0(v0: i64, v1: i64):
     assert(!holds_name(&obj, "sh.l1") && !holds_name(&obj, "sh.base"), "no copy of a shift");
     // A body of more than `place::COPY_SMALL` instructions: a count outside its loop pays no copy of the
     // whole; two in its loop (one count per 64 of its instructions) do.
-    let mut big = String::from_str("lir ptr 8\nsym @flat fn global\nsym @hot fn global\n");
+    let mut big = String::from_str("lir ptr 8\nsym @flat fn global\nsym @hot fn global\nsym @nest fn global\n");
     for nm in ["flat", "hot"] {
         big.format_into("fn @{}\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  jmp b1(v0, v1)\n", nm);
         big.push_str("b1(v2: i64, v3: i64):\n");
@@ -22452,6 +22452,22 @@ b0(v0: i64, v1: i64):
             big.format_into("b2(v{}: i64):\n  ret v{}\n", v + 4, v + 4);
         }
     }
+    // A loop of 120 sums around a loop of one count: the inner loop alone pays (the outer one, with it,
+    // saves less than one instruction in `place::COPY_GAIN`).
+    big.push_str("fn @nest\n  sig (i64) -> i64\nb0(v0: i64):\n  v1 = iconst.i64 0\n  jmp b1(v0, v1)\n");
+    big.push_str("b1(v2: i64, v3: i64):\n  v4 = add.i64 v2, v2\n");
+    let mut v: u32 = 5;
+    for _ in 0..120 {
+        big.format_into("  v{} = add.i64 v{}, v2\n", v, v - 1);
+        v += 1;
+    }
+    big.format_into("  v{} = iconst.i64 0\n  jmp b2(v{}, v{})\n", v, v - 1, v);
+    big.format_into("b2(v{}: i64, v{}: i64):\n  v{} = popcnt.i64 v{}\n", v + 1, v + 2, v + 3, v + 1);
+    big.format_into("  v{} = iconst.i64 1\n  v{} = add.i64 v{}, v{}\n", v + 4, v + 5, v + 2, v + 4);
+    big.format_into("  v{} = add.i64 v{}, v{}\n  v{} = iconst.i64 9\n", v + 6, v + 1, v + 3, v + 7);
+    big.format_into("  v{} = icmp.ult v{}, v{}\n  br v{}, b2(v{}, v{}), b3\n", v + 8, v + 5, v + 7, v + 8, v + 6, v + 5);
+    big.format_into("b3:\n  v{} = add.i64 v3, v{}\n  v{} = icmp.ult v{}, v{}\n", v + 9, v + 4, v + 10, v + 9, v + 7);
+    big.format_into("  br v{}, b1(v{}, v{}), b4\nb4:\n  ret v{}\n", v + 10, v - 1, v + 9, v - 1);
     let mut bo = Vector::<u8>::new();
     assert(
         object_of(&big, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), V3_RT, &mut bo),
@@ -22459,6 +22475,7 @@ b0(v0: i64, v1: i64):
     );
     assert(!holds_name(&bo, "flat.l1"), "no copy for a count outside the loop");
     assert(holds_name(&bo, "hot.l1"), "a copy for a count in the loop");
+    assert(holds_name(&bo, "nest.l1"), "a copy for a count in the inner loop");
     let mut none = Vector::<u8>::new();
     assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut none), "the object");
     assert(!holds_name(&none, "pc.l1"), "no copy without the level");

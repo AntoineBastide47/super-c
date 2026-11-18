@@ -36354,21 +36354,23 @@ extend TypeChecker {
                 self.icx.current_fn = id;
                 let g = fnd.is_ghost() as u32;
                 // `@trusted`: the axioms of a spec function or a lemma without a body, and the contracts of an
-                // extern function.
+                // extern function or of a function whose body no proof can follow (a hardware instruction's
+                // meaning), which its callers assume.
                 let trusted = unsafe (*self.cur_ast()).attr_of(id, AttrKind::ATTR_TRUSTED) != null;
                 let (tcs, tce) = unsafe (*self.cur_ast()).contracts_of(id);
                 let ext = fnd.is_extern() && tce > tcs;
+                let held = trusted && !fnd.is_ghost() && fnd.body != NODE_NONE && tce > tcs;
                 // An interface's spec function: each conformance defines it.
                 let ic = unsafe (*self.cur_ast()).container_of(id);
                 let in_iface = ic != NODE_NONE && unsafe (*self.cur_ast()).at_const(ic).kind == NodeKind::NODE_INTERFACE;
-                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE && !in_iface || ext) {
+                if trusted != (fnd.is_ghost() && fnd.body == NODE_NONE && !in_iface || ext || held) {
                     self.errors.emit_span(
                         dc::TRUSTED_PLACE,
                         unsafe (*self.cur_ast()).at_const(fnd.name).span,
                         format(
                             "{}",
                             if trusted {
-                                "'@trusted' marks a spec function or a lemma without a body, or an extern function with contracts"
+                                "'@trusted' marks a spec function or a lemma without a body, or a function or an extern function with contracts"
                             } else if ext {
                                 "an extern function with contracts must be '@trusted': no proof checks them"
                             } else {

@@ -19605,13 +19605,23 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
 
 // Lane access `i` of `b` (`O_VEXTRACT`, `O_VINSERT`) through the lanes it reads: a lane of a splat is its
 // scalar; a lane of an insert is the inserted scalar, or the same lane of the vector inserted into; an
-// insert of a vector's own lane is the vector; an insert into an insert of the same lane replaces it. The
-// value it equals, else VNONE (and maybe `i` rewritten in place).
+// insert of a vector's own lane is the vector; inserts of every lane of one vector, each into its own
+// lane, are that vector (`rebuilt`); an insert into an insert of the same lane replaces it. The value it
+// equals, else VNONE (and maybe `i` rewritten in place).
 const fn lane_fold(b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VINSERT {
         if (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_VEXTRACT && b.insts[t.b as usize].a == t.a && b.insts[t.b as usize].aux == t.aux {
             return t.a;
+        }
+        let (w, mark) = rebuilt(b, i);
+        if w != VNONE && !mark {
+            return w;
+        }
+        if w != VNONE {
+            // A secret mark on a lane marks the vector: the constant-time check derives the same secrets.
+            b.insts[i as usize] = Inst { op: O_SECRET, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+            return VNONE;
         }
         if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_VINSERT && b.insts[t.a as usize].aux == t.aux {
             t.a = b.insts[t.a as usize].a;
@@ -19660,6 +19670,56 @@ const fn lane_fold(b: &mut Body, i: u32) Value {
         b.insts[i as usize] = t;
     }
     return VNONE;
+}
+
+// The vector `w` whose every lane insert `i` of `b` and the inserts under it put back into the same lane
+// (`O_VEXTRACT` of `w`, under a secret mark or not, the outermost insert of each lane counting), and
+// whether a mark was among them; VNONE when another value fills a lane or one is left.
+const fn rebuilt(b: &Body, i: u32) (Value, bool) {
+    let t = b.insts[i as usize];
+    let n = lanes(t.ty);
+    if n > LANE_WALK {
+        return VNONE, false;
+    }
+    let all = if n == 64 {
+        ~0u64
+    } else {
+        (1u64 << n as u64) - 1
+    };
+    let mut set: u64 = 0;
+    let mut w = VNONE;
+    let mut mark = false;
+    let mut v = i;
+    // Each step leaves one insert: at most LANE_WALK.
+    for _ in 0..LANE_WALK {
+        if set == all || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_VINSERT {
+            break;
+        }
+        let s = b.insts[v as usize];
+        v = s.a;
+        let bit = 1u64 << s.aux as u64;
+        if (set & bit) != 0 {
+            continue;
+        }
+        set |= bit;
+        let mut x = s.b;
+        if (x & (VPARAM | VFLAG)) != 0 {
+            return VNONE, false;
+        }
+        if b.insts[x as usize].op == O_SECRET {
+            mark = true;
+            x = b.insts[x as usize].a;
+            if (x & (VPARAM | VFLAG)) != 0 {
+                return VNONE, false;
+            }
+        }
+        let e = b.insts[x as usize];
+        if e.op != O_VEXTRACT || e.aux != s.aux || b.type_of(e.a) != t.ty || w != VNONE && e.a != w {
+            return VNONE, false;
+        }
+        w = e.a;
+    }
+    return ast::pick(set == all, w, VNONE), mark;
 }
 
 // Whether float `v` of `b` is the result of an arithmetic operation or a conversion, so no signaling NaN.

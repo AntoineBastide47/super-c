@@ -18208,9 +18208,11 @@ extend<const B: usize> Prover<B> {
             } else {
                 String::new()
             };
+            // A `@trusted` function's `ensures` are its callers' facts, which no proof checks.
+            let trusted = self.ast_of(b.owner.module).attr_of(b.owner.node, AttrKind::ATTR_TRUSTED) != null;
             self.oblige(
                 &path.pc,
-                f,
+                pick(trusted, self.tm.boolean(true), f),
                 OB_ENSURES << 56 | si as u64,
                 sp,
                 if first {

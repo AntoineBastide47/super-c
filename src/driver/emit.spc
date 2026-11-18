@@ -1331,6 +1331,24 @@ pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::E
 // `unsafe` (the program checks the features at run time); 2 it is an error even there: features are
 // per build on wasm32, and an extern binding or an `@always_inline` function inlines into its C
 // caller, which then lacks them.
+// Whether call `fc` of module `m` needs `unsafe` on another platform of the build's instruction set: it
+// needs a feature this platform's baseline gives and another's lacks, which neither the build's own
+// features nor its caller's add. A module that platform's builds share keeps the marker.
+fn needed_elsewhere(p: &loader::Package, m: usize, fc: &FeatureCall) bool {
+    let base = tgt::baseline(p.build_target, p.arch);
+    let mut own = p.features;
+    own.w[0] &= ~base.w[0];
+    own.w[1] &= ~base.w[1];
+    let have = cf::close(cf::join(own, p.fn_features(m as ModuleId, fc.caller)));
+    let need = p.fn_features(fc.callee.module, fc.callee.node);
+    for b in 0..cf::FEATURE_COUNT {
+        if cf::has(need, b) && !cf::has(have, b) && !tgt::baseline_everywhere(b, p.arch) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
     // On wasm32 too a function's own features cover its calls: it is emitted only where the build
     // has them.
@@ -1357,7 +1375,8 @@ fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 
 /// The lints of module `m`'s uses of functions that need CPU features, into `errs`: a dispatch row
 /// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
-/// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
+/// where no such call needs it, on this platform or another of its instruction set (`feature_use`,
+/// `needed_elsewhere`: "unnecessary 'unsafe'", with the prefix form's removal).
 pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
     let a = p.modules[m].ast.get_ref();
     // A dispatch row runs its function where the machine has the row's feature: that feature, with the
@@ -1390,7 +1409,7 @@ pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Er
     let mut need = Set::<u32>::new();
     for k in 0..a.feature_calls.len() {
         let fc = *a.feature_calls.at(k);
-        if fc.marker != 0 && feature_use(p, m, &fc) != 0 {
+        if fc.marker != 0 && (feature_use(p, m, &fc) != 0 || needed_elsewhere(p, m, &fc)) {
             need.insert(fc.marker - 1);
         }
     }
@@ -16948,7 +16967,8 @@ pub(package) fn run_package(
         }
     }
     stage_ms(tstat, &mut tp0, "phase mid");
-    if p.native {
+    // The C tree's constant-time functions compile natively too (`ct_object`): their C types need the facts.
+    if p.native || lct::loaded(p) {
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }

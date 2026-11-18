@@ -556,9 +556,19 @@ fn spec_syntax_is_checked() {
         "an extern function with contracts must be '@trusted': no proof checks them",
     );
     h::expect_err_msg(
-        "@trusted on a function with a body",
+        "@trusted on a function with a body and no contract",
         "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
-        "'@trusted' marks a spec function or a lemma without a body",
+        "'@trusted' marks a spec function or a lemma without a body, or a function or an extern function with contracts",
+    );
+    // A function whose body no proof follows (a processor instruction's meaning) states it as `@trusted`
+    // contracts: callers assume its `ensures`, which no proof checks; without `@trusted` the proof fails.
+    let body = "fn three(a: u32) u32\n    ensures |r| r == 3\n{\n    return a;\n}\n";
+    let main = "fn main() i32 {\n    let x = three(3);\n    assert x == 3 by {};\n    return x as i32;\n}\n";
+    h::expect_exit("a trusted function's ensures", format("@trusted\n{}{}", body, main).as_str(), 3);
+    h::expect_build_err(
+        "the same ensures unproved",
+        format("{}{}", body, main).as_str(),
+        "cannot prove this 'ensures' clause",
     );
 }
 

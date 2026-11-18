@@ -37,6 +37,9 @@ import ast::ast as ast;
 // A slot with more fields than this, or a body whose fields times blocks pass PROMOTE_WORK_MAX, keeps
 // its memory: the placement is linear in the blocks per field.
 const FIELDS_MAX: u32 = 64;
+// A slot with more distinct accesses (offset, type and kind) than this keeps its memory: their sort is
+// quadratic.
+const ACCS_MAX: usize = 256;
 // `bound_after` looks at most this many instructions past a copy.
 const AFTER_MAX: u32 = 16;
 // `stored_before` looks at most this many instructions before a call.
@@ -1097,10 +1100,21 @@ extend Promoter {
         for _ in 0..self.accs.len() {
             self.tmp.push(Fld { off: 0, ty: T_NONE, w: 0 });
         }
+        // Each slot's distinct accesses: one equal to another adds no field. The scan for an equal one stops
+        // past ACCS_MAX of them, where the slot stays in memory anyway.
         for a in 0..self.accs.len() {
             let ac = self.accs[a];
-            self.tmp[self.mark[ac.slot as usize] as usize] = Fld { off: ac.off, ty: ac.ty, w: ac.kind };
-            self.mark[ac.slot as usize] += 1;
+            let sl = ac.slot as usize;
+            let f = Fld { off: ac.off, ty: ac.ty, w: ac.kind };
+            let lo = self.fat[sl] as usize;
+            let mut q = lo;
+            while q < self.mark[sl] as usize && q - lo <= ACCS_MAX && !(self.tmp[q].off == f.off && self.tmp[q].ty == f.ty && self.tmp[q].w == f.w) {
+                q += 1;
+            }
+            if q == self.mark[sl] as usize || q - lo > ACCS_MAX {
+                self.tmp[self.mark[sl] as usize] = f;
+                self.mark[sl] += 1;
+            }
         }
         self.flds.truncate(0);
         let mut at = replace(&mut self.fat_spare, Vector::<u32>::new());
@@ -1108,10 +1122,10 @@ extend Promoter {
         at.push(0);
         for s in 0..ns {
             let lo = self.fat[s] as usize;
-            let hi = self.fat[s + 1] as usize;
+            let hi = self.mark[s] as usize;
             let start = self.flds.len();
             if self.cand[s] {
-                if hi - lo > FIELDS_MAX as usize * 4 {
+                if hi - lo > ACCS_MAX {
                     self.cand[s] = false;
                 } else {
                     sort_fields(&mut self.tmp, lo, hi);
