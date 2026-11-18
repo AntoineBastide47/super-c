@@ -29,6 +29,13 @@ import ir::core as core;
 import std::float as fl;
 import target::assembler as asmr;
 import target::intrin as intrin;
+import target::table as tgt;
+
+// MRS x16, DIT; MSR DIT, #1; MSR DIT, #0; ISB (Arm ARM: DIT, ISB).
+const MRS_DIT_IP0: u32 = 0xD53B42B0;
+const MSR_DIT_1: u32 = 0xD503415F;
+const MSR_DIT_0: u32 = 0xD503405F;
+const ISB: u32 = 0xD5033FDF;
 import ast::ast as ast;
 
 // `Gen::zero_quads` counts at most this many runs of four stores of 0.
@@ -189,6 +196,7 @@ pub(package) struct Gen {
     arr_blk: u32,
     left: Vector<(u32, u8, u32)>,
     canary: i64, // the stack canary's slot above the LIR slots, -1 when none
+    dit: i64, // the slot of PSTATE.DIT's value at the entry of a constant-time body (`dit_on`), -1 when none
     // The register save area of a variadic body under the standard convention (x0..x7 at its start,
     // then q0..q7), NONE when none.
     va_save: u32,
@@ -330,6 +338,7 @@ extend Gen {
             arr_blk: 0,
             left: Vector::<(u32, u8, u32)>::new(),
             canary: -1,
+            dit: -1,
             va_save: NONE,
             late_va: Vector::<(u32, Va)>::new(),
             stubs_out: false,
@@ -2706,7 +2715,7 @@ extend Gen {
             // the address of a slot or of an aggregate parameter that arrives in registers that may outlive
             // it. `shrinkable` reads it: a call that stays one needs the frame.
             place::held_params(b, &self.cr.self_lay, &mut self.cr.pheld);
-            self.cr.tail_ok = unsafe (*self.pkg).tail && !self.prot && (self.opf & lv::OP_VASTART) == 0 && place::tail_candidate(
+            self.cr.tail_ok = unsafe (*self.pkg).tail && !self.prot && !self.dit_on() && (self.opf & lv::OP_VASTART) == 0 && place::tail_candidate(
                 b,
             ) && !lver::frame_escapes(b, &self.cr.pheld);
         }
@@ -2894,7 +2903,7 @@ extend Gen {
     // between rare blocks, set the frame up: `Live::after`, which the layout puts after the others.
     fn shrinkable(self: &mut Self) bool {
         let b = self.cr.b();
-        if self.prot || self.opf != 0 {
+        if self.prot || self.opf != 0 || self.dit_on() {
             return false;
         }
         for k in 0..b.slots.len() {
@@ -3088,6 +3097,12 @@ extend Gen {
             self.canary = at;
             at += 8;
         }
+        self.dit = -1;
+        if self.dit_on() {
+            at = at + 7 & ~7u32;
+            self.dit = at;
+            at += 8;
+        }
         self.cr.spill_base = at + 15 & ~15u32;
         self.cr.spill_top = 0;
     }
@@ -3098,6 +3113,17 @@ extend Gen {
         if self.canary >= 0 {
             self.guard(a::IP0 as u8);
             self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.canary);
+        }
+        if self.dit >= 0 {
+            // DIT's value into its slot; set unless it is (bit 24), then a barrier, so that no later
+            // instruction runs before it holds (Arm: DIT, data-independent timing).
+            let skip = self.dit_supported();
+            self.emit(MRS_DIT_IP0);
+            self.mem(a::M_X, false, a::IP0 as u8, a::SP, self.dit);
+            self.emit(a::tbz(true, a::IP0, 24, 12));
+            self.emit(MSR_DIT_1);
+            self.emit(ISB);
+            self.dit_patch(skip);
         }
         self.ret_stores();
         if self.va_save != NONE {
@@ -9105,6 +9131,36 @@ extend Gen {
         return self.cs.sym(self.cr.obj(), text);
     }
 
+    // Whether the body turns PSTATE.DIT on while it runs: a constant-time body (`Body.ct`, not naked) on a
+    // target whose CPUs may have FEAT_DIT (`Package.dit`).
+    const fn dit_on(self: &Self) bool {
+        let b = self.cr.b();
+        return unsafe (*self.pkg).dit != tgt::DIT_NONE && b.ct && !b.naked;
+    }
+
+    // Where only some CPUs have FEAT_DIT (`tgt::DIT_HWCAP`), the start-up's byte `__sc_dit` into IP0 and a
+    // branch past the DIT code when it is 0, whose word `dit_patch` sets; NONE elsewhere.
+    fn dit_supported(self: &mut Self) u32 {
+        if unsafe (*self.pkg).dit != tgt::DIT_HWCAP {
+            return NONE;
+        }
+        let os = self.cr.obj().sym("__sc_dit");
+        self.reloc(a::R_GOT_PAGE21, os, 0);
+        self.emit(a::adr(true, a::IP0, 0));
+        self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+        self.emit(a::ldst_uimm(a::M_X, true, a::IP0, a::IP0, 0));
+        self.emit(a::ldst_uimm(a::M_B, true, a::IP0, a::IP0, 0));
+        self.emit(0);
+        return self.code.len() as u32 - 1;
+    }
+
+    // The branch of `dit_supported` at word `at` (NONE: none) to the code's end.
+    fn dit_patch(self: &mut Self, at: u32) {
+        if at != NONE {
+            self.code[at as usize] = a::cbz(false, false, a::IP0, 4 * (self.code.len() as u32 - at) as i32);
+        }
+    }
+
     // The stack guard's value into `r`: `__stack_chk_guard`, through its address slot.
     fn guard(self: &mut Self, r: u8) {
         let os = self.cr.obj().sym("__stack_chk_guard");
@@ -9290,6 +9346,14 @@ extend Gen {
             pro.len() as u32
         };
         let body_n = self.code.len() as u32;
+        // DIT back to its value at the entry: off unless it was on.
+        if self.dit >= 0 {
+            let skip = self.dit_supported();
+            self.mem(a::M_X, true, a::IP0 as u8, a::SP, self.dit);
+            self.emit(a::tbz(true, a::IP0, 24, 8));
+            self.emit(MSR_DIT_0);
+            self.dit_patch(skip);
+        }
         // The canary's check: on a mismatch `__stack_chk_fail`, which does not return.
         if self.canary >= 0 {
             self.mem(a::M_X, true, a::IP0 as u8, a::SP, self.canary);

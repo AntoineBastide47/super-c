@@ -120,6 +120,13 @@ pub(package) struct Isa {
     /// The instructions a group-of-3 load's field takes, 0 for a permutation (`vector_perm3`) after the
     /// loads: `lir::ir::Package::vec_ld3`. arm64 3 (the address, LD3, the field's move).
     pub(package) vector_ld3: u8,
+    /// The instructions whose timing the vendor documents as independent of their data (Arm's DIT list,
+    /// the architecture's DIT register, with the aliases of listed ones; Intel's Data Operand Independent
+    /// Timing list, and `movaps`, the register copy the generator emits between any two instructions): an
+    /// intrinsic whose template uses these alone is an operation on secrets (`lir::ct`,
+    /// `intrin::constant_time`). Space-separated, lowercase; an x86-64 VEX form is its legacy mnemonic
+    /// with `v` before it.
+    pub(package) const_time: str<'static>,
     /// The widening sums of lanes into wider lanes the native backend computes in registers, a bit per pair
     /// of sizes (`lir::loops::sumw_bit`): `lir::ir::Package::vec_sumw`. arm64 widens any lanes (UADDLP,
     /// UADALP); x86-64 bytes into 8-byte lanes (PSADBW).
@@ -234,6 +241,13 @@ pub(package) struct Debug {
 
 /// One target: its parts (indexes into `ISAS`, `CALLCONVS`, `OBJFORMATS`, `OSES`, `DEBUGS`), its C data
 /// model and its build facts.
+/// `Target.dit`: no DIT, DIT on every CPU of the target, DIT where HWCAP reports it.
+pub(package) const DIT_NONE: u8 = 0;
+pub(package) const DIT_ALWAYS: u8 = 1;
+pub(package) const DIT_HWCAP: u8 = 2;
+/// The kernel's HWCAP_DIT (arch/arm64/include/uapi/asm/hwcap.h).
+pub(package) const DIT_HWCAP_BIT: u64 = 1u64 << 24;
+
 pub(package) struct Target {
     pub(package) isa: u8,
     pub(package) cc: u8,
@@ -258,6 +272,10 @@ pub(package) struct Target {
     /// The `getauxval(AT_HWCAP)` bits that report `run_time`'s features: the native registry's start-up
     /// reads them (no CPU detector module joins the program).
     pub(package) run_time_hwcap: u64,
+    /// How an arm64 `@constant_time` body turns on PSTATE.DIT (data-independent timing) while it runs:
+    /// `DIT_NONE`, `DIT_ALWAYS` (every CPU of the target has FEAT_DIT), or `DIT_HWCAP` (where the
+    /// kernel's HWCAP bit `DIT_HWCAP_BIT` reports it: the start-up stores it in the byte `__sc_dit`).
+    pub(package) dit: u8,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub(package) mcpu: str<'static>,
     pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
@@ -320,6 +338,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vminnum: 3,
         vector_perm3: 0,
         vector_ld3: 0,
+        const_time: "aesdec aesdeclast aesenc aesenclast aesimc aeskeygenassist pclmulqdq sha256rnds2 movaps",
         vector_sumw: 0x8,
         vector_mulw: 0x4,
         vector_dot: 0x200,
@@ -370,6 +389,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vminnum: 2,
         vector_perm3: 9,
         vector_ld3: 3,
+        const_time: "abs adc adcs add addhn addhn2 addp adds addv aesd aese aesimc aesmc and ands asrv bcax bfm bic bics bif bit bsl ccmn ccmp cfinv cls clz cmeq cmge cmgt cmhi cmhs cmle cmlt cmtst cnt crc32b crc32cb crc32ch crc32cw crc32cx crc32h crc32w crc32x csel csinc csinv csneg ctz dup eon eor eor3 ext extr fcsel ins ld1 ld1r ld2 ld2r ld3 ld3r ld4 ld4r ldnp ldp ldpsw ldr ldrb ldrh ldrsb ldrsh ldrsw ldur ldurb ldurh ldursb ldursh ldursw lslv lsrv luti2 luti4 madd mla mls movk msub mul neg not orn orr pmul pmull pmull2 raddhn raddhn2 rax1 rbit rev rev16 rev32 rev64 rmif rorv rshrn rshrn2 rsubhn rsubhn2 saba sabal sabal2 sabd sabdl sabdl2 sadalp saddl saddl2 saddlp saddlv saddw saddw2 sbc sbcs sbfm sdot setf16 setf8 sha1c sha1h sha1m sha1p sha1su0 sha1su1 sha256h sha256h2 sha256su0 sha256su1 sha512h sha512h2 sha512su0 sha512su1 shadd shl shll shll2 shrn shrn2 shsub sli sm3partw1 sm3partw2 sm3ss1 sm3tt1a sm3tt1b sm3tt2a sm3tt2b sm4e sm4ekey smaddl smax smaxp smaxv smin sminp sminv smlal smlal2 smlsl smlsl2 smmla smov smsubl smulh smull smull2 sqdmulh sqrdmlah sqrdmulh sri srshr srsra sshl sshll sshll2 sshr ssra ssubl ssubl2 ssubw ssubw2 st1 st2 st3 st4 stnp stp str strb strh stur sturb sturh sub subhn subhn2 subs sudot tbl tbx trn1 trn2 uaba uabal uabal2 uabd uabdl uabdl2 uadalp uaddl uaddl2 uaddlp uaddlv uaddw uaddw2 ubfm udot uhadd uhsub umaddl umax umaxp umaxv umin uminp uminv umlal umlal2 umlsl umlsl2 ummla umov umsubl umulh umull umull2 urshr ursra usdot ushl ushll ushll2 ushr usmmla usra usubl usubl2 usubw usubw2 uzp1 uzp2 xar xtn xtn2 zip1 zip2 mov mvn cmp cmn tst lsl lsr asr ror sxtb sxth sxtw uxtb uxth cset csetm cinc cinv cneg",
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
         vector_dot: 0,
@@ -420,6 +440,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vminnum: 1,
         vector_perm3: 2,
         vector_ld3: 0,
+        const_time: "",
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
         vector_dot: 0x200,
@@ -621,6 +642,7 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         never: NO_FEATURES,
         run_time: "",
         run_time_hwcap: 0,
+        dit: DIT_NONE,
         mcpu: "",
         apple_sdk: "",
         cenv: cenv,
@@ -668,6 +690,7 @@ const fn targets() [Target; 11] {
         "MacOSX",
     );
     mac_a64.mcpu = "apple-m1";
+    mac_a64.dit = DIT_ALWAYS;
     let ios_x86 = apple(
         x86(
             row(ISA_X86, CC_SYSV, OBJ_MACHO, OS_IOS, "x86_64-apple-ios13.0-simulator", 2),
@@ -683,6 +706,7 @@ const fn targets() [Target; 11] {
     linux_a64.run_time = "+lse,+rcpc";
     // The kernel's HWCAP_ATOMICS and HWCAP_LRCPC (arch/arm64/include/uapi/asm/hwcap.h).
     linux_a64.run_time_hwcap = 1u64 << 8 | 1u64 << 15;
+    linux_a64.dit = DIT_HWCAP;
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",
@@ -782,6 +806,7 @@ const UNKNOWN_ISA: Isa = Isa {
     vminnum: 0,
     vector_perm3: 0,
     vector_ld3: 0,
+    const_time: "",
     vector_sumw: 0,
     vector_mulw: 0,
     vector_dot: 0,

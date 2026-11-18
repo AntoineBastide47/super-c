@@ -158,3 +158,105 @@ fn marks_and_flags_read_back() {
     let f = q.syms[q.find_symbol("f") as usize];
     assert(q.bodies[f.def as usize].ct, "the body's flag");
 }
+
+// Secrets into hardware instructions, vector operations and bodies: `@k` reads a secret vector and word;
+// each instruction's rule depends on the target's list of data-independent instructions
+// (`target::table::Isa::const_time`) and on the operation.
+const HW: str = M"(lir ptr 8
+sym @k fn global
+sym @help fn global
+sym @deep fn global
+sym @vaeseq_u8 fn global
+sym @vsha1h_u32 fn global
+sym @_mm_aesenc_si128 fn global
+sym @_mm_sha256rnds2_epu32 fn global
+sym @_mm_sha256msg1_epu32 fn global
+fn @k
+  sig (ptr, i64) -> i64
+  ct
+b0(v0: ptr, v1: i64):
+  v2 = load.v4i32 v0 align 4
+  v3 = secret.v4i32 v2
+  v4 = secret.i64 v1
+  v5 = vop.wrapping_add.v4i32 (v3, v2)
+  v6 = xor.v4i32 v5, v3
+  v7 = vop.wrapping_shl.v4i32 (v6, v2)
+  v8 = vop.wrapping_shl.v4i32 (v6, v3)
+  v9 = vop.min.v4i32 (v6, v2)
+  v10 = vop.swizzle.v4i32 (v7) lanes [3, 2, 1, 0]
+  v11 = vop.reduce_add.i32 (v10)
+  v12 = call.v4i32 @vaeseq_u8(v10, v2) : (v4i32, v4i32) -> v4i32
+  v13 = call.i32 @vsha1h_u32(v11) : (i32) -> i32
+  v14 = call.v4i32 @_mm_aesenc_si128(v10, v2) : (v4i32, v4i32) -> v4i32
+  v15 = call.v4i32 @_mm_sha256rnds2_epu32(v10, v2, v2) : (v4i32, v4i32, v4i32) -> v4i32
+  v16 = call.v4i32 @_mm_sha256msg1_epu32(v10, v2) : (v4i32, v4i32) -> v4i32
+  v17 = call.i64 @help(v4) : (i64) -> i64
+  v18 = public.i64 v17
+  ret v18
+fn @help
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = call.i64 @deep(v0, v1) : (i64, i64) -> i64
+  v3 = icmp.eq v0, v1
+  br v3, b1, b2
+b1:
+  ret v0
+b2:
+  ret v2
+fn @deep
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = udiv.i64 v1, v0
+  v3 = udiv.i64 v0, v0
+  ret v2
+)";
+
+// The rules each body of `HW` breaks with the instruction set `isa`: `op:rule ` per violation.
+fn hw_rules(isa: str<'static>) String {
+    let mut p = parsed(HW);
+    p.isa = isa;
+    let mut c = lct::Check::new();
+    c.masks(&p);
+    let mut got = String::new();
+    let names: [str; 3] = ["k", "help", "deep"];
+    for nm in names {
+        let k = p.syms[p.find_symbol(nm) as usize].def;
+        let mut found = Vector::<u64>::new();
+        c.violations(&p, k, &mut found);
+        got.format_into("{}:", nm);
+        for q in 0..found.len() {
+            got.format_into(
+                " {}:{}",
+                OPS[p.bodies[k as usize].insts[(found[q] >> 8) as usize].op as usize].name,
+                found[q] & 0xFF,
+            );
+        }
+        got.push_str("\n");
+    }
+    return got;
+}
+
+// A secret goes to a wrapping add, a bitwise operation, a shift by a public count and a fixed swizzle, not
+// to a shift by a secret count, a minimum or a reduction; to an intrinsic whose instructions the
+// target lists (arm64's AESE; x86-64's AESENC, and SHA256RNDS2 with its register copies), not to another
+// (SHA1H's FMOV, SHA256MSG1) or to another target's; and to a body, which is then checked with that
+// parameter secret, as are the bodies it passes it to: `@help` branches on it but returns it, and `@deep`
+// divides by it (the division of its public parameter alone passes).
+@test
+fn secrets_reach_listed_instructions_plain_vector_operations_and_bodies() {
+    let tail = format("help: br:{}\ndeep: udiv:{} udiv:{}\n", lct::R_BRANCH, lct::R_DIV, lct::R_DIV);
+    let vops = format("k: vop:{} vop:{} vop:{}", lct::R_VOP, lct::R_VOP, lct::R_VOP);
+    let a64 = format(
+        "{} call:{} call:{} call:{} call:{}\n{}",
+        vops,
+        lct::R_CALL,
+        lct::R_CALL,
+        lct::R_CALL,
+        lct::R_CALL,
+        tail,
+    );
+    assert_eq(hw_rules("aarch64").as_str(), a64.as_str());
+    let x64 = format("{} call:{} call:{} call:{}\n{}", vops, lct::R_CALL, lct::R_CALL, lct::R_CALL, tail);
+    assert_eq(hw_rules("x86_64").as_str(), x64.as_str());
+}

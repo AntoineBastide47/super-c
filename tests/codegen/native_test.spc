@@ -44,6 +44,7 @@ const BMI: u32 = 16384;
 const DOT: u32 = 32768;
 const RELAXED: u32 = 65536;
 const LSE_RT: u32 = 131072;
+const DIT: u32 = 262144;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -235,6 +236,11 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.addsub = p.cpu.vtbl;
     p.cpu.lse = (opts & LSE) != 0;
     p.lse_level = ((opts & LSE_RT) != 0) as u8;
+    // A build's DIT mode, the target's (`CEmit`).
+    p.dit = (switch tgt::target_of(os, isa) {
+        Some(r) if (opts & DIT) != 0 => r.dit,
+        _ => tgt::DIT_NONE,
+    });
     p.cpu.rcpc = (opts & RCPC) != 0;
     p.cpu.fma = (opts & FMA) != 0;
     p.cpu.cssc = (opts & CSSC) != 0;
@@ -22856,4 +22862,96 @@ int main(void) {
 }
 )";
     assert_eq(run_x64_feature(lir, drv, "avx2", 0), 0);
+}
+
+// The 32-bit words of object `o` at 4-byte offsets that equal `w`.
+const fn word_count(o: &Vector<u8>, w: u32) u32 {
+    let mut n: u32 = 0;
+    for k in 0..o.len() / 4 {
+        n += (le_at(o, 4 * k, 4) as u32 == w) as u32;
+    }
+    return n;
+}
+
+// A constant-time body runs with PSTATE.DIT on: at its entry it saves DIT, sets it unless it is set and
+// waits for it (ISB); at its return it clears it unless it was set. On Linux the start-up's byte
+// `__sc_dit` (HWCAP_DIT) guards both, a CBZ past each; macOS sets it on every CPU. The plain body and an
+// x86-64 object have none of it. On an arm64 host the body reads DIT on, its caller off before and after,
+// and on Linux nothing changes when the byte is 0.
+@test
+fn a_constant_time_body_runs_with_dit_on() {
+    let lir = M"(lir ptr 8
+sym @ct fn global
+sym @plain fn global
+sym @probe fn global
+fn @ct
+  sig (i64) -> i64
+  ct
+b0(v0: i64):
+  v1 = call.i64 @probe() : () -> i64
+  v2 = add.i64 v1, v0
+  ret v2
+fn @plain
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = call.i64 @probe() : () -> i64
+  v2 = add.i64 v1, v0
+  ret v2
+)";
+    let mrs: u32 = 0xD53B42B0;
+    let set: u32 = 0xD503415F;
+    let clear: u32 = 0xD503405F;
+    let isb: u32 = 0xD5033FDF;
+    let a64 = tgt::axis_index("aarch64", true);
+    let mut lin = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, DIT, &mut lin), "the Linux object");
+    for w in [mrs, set, clear, isb] {
+        assert_eq(word_count(&lin, w), 1);
+    }
+    // CBZ w16 past MRS, STR, TBNZ, MSR and ISB; past LDR, TBNZ and MSR. TBNZ x16 #24 past MSR and ISB; past MSR.
+    assert_eq(word_count(&lin, 0x340000D0), 1);
+    assert_eq(word_count(&lin, 0x34000090), 1);
+    assert_eq(word_count(&lin, 0x37C00070), 1);
+    assert_eq(word_count(&lin, 0x37C00050), 1);
+    let mut mac = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("macos", false), a64, DIT, &mut mac), "the macOS object");
+    for w in [mrs, set, clear, isb] {
+        assert_eq(word_count(&mac, w), 1);
+    }
+    assert_eq(word_count(&mac, 0x340000D0) + word_count(&mac, 0x34000090), 0);
+    let mut off = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), a64, 0, &mut off), "the object without DIT");
+    assert_eq(word_count(&off, mrs) + word_count(&off, set), 0);
+    if !cli::has_cc() || tgt::host_isa() != a64 {
+        return; // the driver runs on arm64
+    }
+    let drv = M"(#include <stdint.h>
+#ifdef __linux__
+#include <sys/auxv.h>
+unsigned char __sc_dit;
+#endif
+int64_t ct(int64_t);
+int64_t plain(int64_t);
+int64_t probe(void) {
+  uint64_t v;
+  __asm__ volatile("mrs %0, S3_3_C4_C2_5" : "=r"(v));
+  return (int64_t)(v >> 24 & 1);
+}
+int main(void) {
+  int64_t want = 1;
+#ifdef __linux__
+  want = (getauxval(AT_HWCAP) >> 24) & 1;
+  __sc_dit = (unsigned char)want;
+#endif
+  if (probe() != 0 || plain(0) != 0) return 1;
+  if (ct(0) != want) return 2;
+  if (probe() != 0) return 3;
+#ifdef __linux__
+  __sc_dit = 0;
+  if (ct(0) != 0 || probe() != 0) return 4;
+#endif
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, DIT), 0);
 }

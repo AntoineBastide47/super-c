@@ -2280,6 +2280,9 @@ pub(package) struct Package {
     /// (arm64 Linux): a body whose atomics they change gets a copy with them, which its entry
     /// takes from that level (the arm64 code generator's `lse_copy`). 0 for none.
     pub(package) lse_level: u8,
+    /// `target::table::Target.dit` of the target: how the arm64 generator turns PSTATE.DIT on in a
+    /// constant-time body (`Body.ct`).
+    pub(package) dit: u8,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub(package) protect: u8,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
@@ -2558,6 +2561,7 @@ extend Package {
             omit_fp: false,
             tail: false,
             lse_level: 0,
+            dit: 0,
             protect: PROTECT_NONE,
             fmath: 0,
             vec_max: 16,

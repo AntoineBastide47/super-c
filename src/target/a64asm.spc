@@ -66,10 +66,11 @@ const fn sr(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) u32 {
     return op0 - 2 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2;
 }
 
-const SYSREGS: [SysReg; 13] = [
+const SYSREGS: [SysReg; 14] = [
     SysReg { name: "nzcv", enc: sr(3, 3, 4, 2, 0) },
     SysReg { name: "daif", enc: sr(3, 3, 4, 2, 1) },
     SysReg { name: "svcr", enc: sr(3, 3, 4, 2, 2) },
+    SysReg { name: "dit", enc: sr(3, 3, 4, 2, 5) },
     SysReg { name: "fpcr", enc: sr(3, 3, 4, 4, 0) },
     SysReg { name: "fpsr", enc: sr(3, 3, 4, 4, 1) },
     SysReg { name: "tpidr_el0", enc: sr(3, 3, 13, 0, 2) },

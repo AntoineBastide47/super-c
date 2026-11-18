@@ -2734,10 +2734,6 @@ fn cemit_relower_census(
     }
 }
 
-// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
-// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
-// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
-// `closure` selects a closure body (`nid` is the closure node) over a function body.
 // `__sc_simd_lvl()`, which the dispatch prologues read (`CEmit::dispatch_prologue`): the highest level
 // k (1-based) of `simd_levels` whose features the CPU detector reports (`sc_cpu_words`, which
 // `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code and a level that
@@ -2781,6 +2777,10 @@ fn demand_set(p: &loader::Package, d: &cbe::Demand) cf::CpuFeatureSet {
     return p.fn_set(d.def.module, d.def.node);
 }
 
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
+// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
+// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// `closure` selects a closure body (`nid` is the closure node) over a function body.
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
@@ -9714,6 +9714,12 @@ fn cemit_assemble(
             rg.push_str(
                 " };\n__attribute__((constructor)) static void __sc_reflect_init(void) { __sc_reflect_register(__sc_reflect_roots, sizeof(__sc_reflect_roots) / sizeof(__sc_reflect_roots[0])); }\n",
             );
+        }
+        if dit_byte(p) {
+            rg.push_str(
+                "unsigned long getauxval(unsigned long);\nunsigned char __sc_dit;\n__attribute__((constructor)) static void __sc_dit_init(void) { __sc_dit = (getauxval(16) & ",
+            );
+            rg.format_into("{}UL) != 0; }}\n", tgt::DIT_HWCAP_BIT);
         }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
@@ -17670,8 +17676,33 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
     }
-    if p.simd_levels.len() != 0 && (p.names_vectors() || p.lse_level() != 0) {
+    let levels = p.simd_levels.len() != 0 && (p.names_vectors() || p.lse_level() != 0);
+    if levels {
         simd_level_init(p, int, &mut t);
+    }
+    if dit_byte(p) {
+        // The byte the constant-time bodies read (`Target.dit`): HWCAP_DIT of AT_HWCAP (16).
+        let sec = ctor_section(p);
+        let hw = switch tgt::target_of(p.build_target, p.arch) {
+            Some(r) => r.run_time_hwcap,
+            None => 0,
+        };
+        if !(levels && hw != 0) {
+            t.push_str("sym @getauxval fn global ext\n");
+        }
+        t.format_into(
+            "sym @__sc_dit data global\nsym @__sc_dit_init fn local\nsym @__sc_dit_ctor data local used section \"{}\"\n",
+            sec,
+        );
+        t.push_str(
+            "fn @__sc_dit_init\n  sig () -> void\nb0:\n  v0 = iconst.i64 16\n  v1 = call.i64 @getauxval(v0) : (i64) -> i64\n",
+        );
+        t.format_into(
+            "  v2 = iconst.i64 {}\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 0\n  v5 = icmp.ne v3, v4\n  v6 = zext.i8 v5\n",
+            tgt::DIT_HWCAP_BIT as i64,
+        );
+        t.push_str("  v7 = symaddr @__sc_dit\n  store v6, v7 align 0\n  ret\ndata @__sc_dit size 1 align 0\n");
+        t.format_into("data @__sc_dit_ctor size {} align {} reloc 0 @__sc_dit_init\n", ptr, al);
     }
     let mut err = String::new();
     let mut ok = false;
@@ -17699,6 +17730,16 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         eprintln("super-c: the registry does not compile natively: {}", err.as_str());
     }
     return ok;
+}
+
+// Whether the program's start-up sets `__sc_dit`, the byte its arm64 constant-time bodies read: on a
+// target whose kernel reports FEAT_DIT (`Target.dit`), for a program that may have such bodies (`lct::loaded`).
+fn dit_byte(p: &loader::Package) bool {
+    let d = switch tgt::target_of(p.build_target, p.arch) {
+        Some(r) => r.dit,
+        None => tgt::DIT_NONE,
+    };
+    return d == tgt::DIT_HWCAP && lct::loaded(p);
 }
 
 // The level the native copies of a program with run-time copies run at (`simd_levels`; the C tree's

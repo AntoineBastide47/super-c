@@ -3,6 +3,7 @@
 // memory address or variable-time operation depends on a secret, and no C function receives one.
 import tests::harness as h;
 import tests::cli_harness as cli;
+import target::table as tgt;
 
 const SECRET: str = "import std::crypto::secret as *;\n";
 
@@ -325,6 +326,10 @@ fn the_c_tree_takes_the_checked_code() {
     let decl = "void main__quarter(secret__Secret__u32__a4 *restrict s)";
     assert(p.gen_has("main.c", format("{};", decl).as_str()), "the C declares the function");
     assert(!p.gen_has("main.c", format("{} {{", decl).as_str()), "the C does not define it");
+    // Linux arm64 sets DIT in the constant-time code where HWCAP reports it: the registry's start-up
+    // stores the bit.
+    let lin = tgt::host_os() == tgt::axis_index("linux", false) && tgt::host_isa() == tgt::axis_index("aarch64", true);
+    assert_eq(p.gen_has("__sc_registry.c", "unsigned char __sc_dit;"), lin);
     if !cli::has_cc() {
         return; // the C compiler builds it
     }

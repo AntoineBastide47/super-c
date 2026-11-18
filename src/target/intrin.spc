@@ -14,6 +14,50 @@ pub(package) const fn find(isa: str, name: str) str<'static> {
     return t;
 }
 
+/// Whether intrinsic `name` of `isa` is an operation on secrets: a row whose instructions are all in
+/// `ops` (`target::table::Isa::const_time`: an x86-64 VEX form as its legacy mnemonic), or an empty row
+/// (no instruction). False for no row.
+pub(package) const fn constant_time(isa: str, ops: str, name: str) bool {
+    let (k, text) = row(isa, name);
+    if !k {
+        return false;
+    }
+    let x86 = isa == "x86_64";
+    let mut at: usize = 0;
+    while at < text.len() {
+        let mut end = at;
+        while end < text.len() && text.byte_at(end) != b'\n' && text.byte_at(end) != b';' {
+            end += 1;
+        }
+        let ins = text.slice(at, end).trim();
+        at = end + 1;
+        let mut m: usize = 0;
+        while m < ins.len() && ins.byte_at(m) != b' ' && ins.byte_at(m) != b'\t' {
+            m += 1;
+        }
+        let mn = ins.slice(0, m);
+        if mn.len() != 0 && !listed(ops, mn) && !(x86 && mn.starts_with("v") && listed(ops, mn.slice(1, mn.len()))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Whether `w` is a word of the space-separated list `ops`.
+const fn listed(ops: str, w: str) bool {
+    let mut a: usize = 0;
+    for i in 0..ops.len() + 1 {
+        if i < ops.len() && ops.byte_at(i) != b' ' {
+            continue;
+        }
+        if i - a == w.len() && ops.slice(a, i) == w {
+            return true;
+        }
+        a = i + 1;
+    }
+    return false;
+}
+
 /// Whether `isa` has intrinsic `name`: an empty row (`_mm_castps_si128`, `vget_low_f32`) reinterprets its
 /// argument's bytes, which the lowering does without a call.
 pub(package) const fn has(isa: str, name: str) bool {
