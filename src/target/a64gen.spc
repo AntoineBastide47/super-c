@@ -7091,8 +7091,12 @@ extend Gen {
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be. A written one is renamed only when it is the result's and the argument
-        // dies here: the result is then in the argument's register (`rres`).
-        self.cren.truncate(0);
+        // dies here: the result is then in the argument's register (`rres`). An argument in the register
+        // another argument's name stands for waits for the others (`wait`): one of them that stays in its
+        // own register frees that name, and the argument then stays too.
+        fill(&mut self.cren, np as usize, false);
+        let mut wait = Vector::<bool>::new();
+        fill(&mut wait, np as usize, false);
         let mut from = Vector::<u32>::new();
         let mut to = Vector::<u32>::new();
         let mut rres = NOREG;
@@ -7102,49 +7106,59 @@ extend Gen {
         // An argument a one-instruction template reads and overwrites, which lives on: its sources read it in
         // its register, the destination stays (`intrin::vsplit_dest`).
         let mut src: (u32, u32) = (99, 99);
-        for k in 0..np {
-            let loc = self.cr.lay.locs[k as usize];
-            let v = b.pool[(t.c + k) as usize];
-            let x = self.cr.vx(v);
-            let vr = self.cr.va[x as usize].reg;
-            // Free of the template, or already in its own argument register.
-            let mut ok = tpl.len() != 0 && self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && vr != NOREG && vr >= V0;
-            ok = ok && ((self.clob & bit(vr)) == 0 || vr == V0 + self.cr.lay.parts[loc.p0 as usize].reg);
-            for j in 0..to.len() {
-                ok = ok && to[j] != (vr - V0) as u32;
-            }
-            let pr = if ok {
-                self.cr.lay.parts[loc.p0 as usize].reg as u32
-            } else {
-                0u32
-            };
-            ok = ok && !intrin::vlisted(tx, pr);
-            let mut split = false;
-            if ok && intrin::vwrites(true, tx, pr) {
-                let rl = self.cr.lay.ret;
-                let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
-                let px = if whole && rreg == pr && !self.cr.dies(x) {
-                    self.step_param(i)
-                } else {
-                    NONE
-                };
-                if whole && rreg == pr && (self.cr.dies(x) || px == x) {
-                    rres = vr;
-                    if px == x {
-                        stepped = px;
-                    }
-                } else {
-                    split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
-                    ok = split;
+        for round in 0..2u32 {
+            for k in 0..np {
+                let loc = self.cr.lay.locs[k as usize];
+                let v = b.pool[(t.c + k) as usize];
+                let x = self.cr.vx(v);
+                let vr = self.cr.va[x as usize].reg;
+                let mut ok = tpl.len() != 0 && self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && vr != NOREG && vr >= V0;
+                // Free of the template, or already in its own argument register.
+                let named = ok && (self.clob & bit(vr)) != 0 && vr != V0 + self.cr.lay.parts[loc.p0 as usize].reg;
+                if round == 0 && named {
+                    wait[k as usize] = true;
+                    continue;
                 }
-            }
-            self.cren.push(ok);
-            if split {
-                src = (pr, (vr - V0) as u32);
-            } else if ok {
-                from.push(pr);
-                to.push(vr - V0);
-                self.clob &= ~bit(V0 + pr as u8);
+                if round == 1 && !wait[k as usize] {
+                    continue;
+                }
+                ok = ok && !named;
+                for j in 0..to.len() {
+                    ok = ok && to[j] != (vr - V0) as u32;
+                }
+                let pr = if ok {
+                    self.cr.lay.parts[loc.p0 as usize].reg as u32
+                } else {
+                    0u32
+                };
+                ok = ok && !intrin::vlisted(tx, pr);
+                let mut split = false;
+                if ok && intrin::vwrites(true, tx, pr) {
+                    let rl = self.cr.lay.ret;
+                    let whole = rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty);
+                    let px = if whole && rreg == pr && !self.cr.dies(x) {
+                        self.step_param(i)
+                    } else {
+                        NONE
+                    };
+                    if whole && rreg == pr && (self.cr.dies(x) || px == x) {
+                        rres = vr;
+                        if px == x {
+                            stepped = px;
+                        }
+                    } else {
+                        split = src.0 == 99 && vr != V0 + pr as u8 && intrin::vsplit_dest(true, tx, pr);
+                        ok = split;
+                    }
+                }
+                self.cren[k as usize] = ok;
+                if split {
+                    src = (pr, (vr - V0) as u32);
+                } else if ok {
+                    from.push(pr);
+                    to.push(vr - V0);
+                    self.clob &= ~bit(V0 + pr as u8);
+                }
             }
         }
         // A result that lives on gets a register no later template names, when none is renamed yet: the

@@ -21289,6 +21289,55 @@ int main(void) {
     assert_eq(run_wide(lir, drv), 0);
 }
 
+// x86-64: an intrinsic's argument that a register holds stays there when that register is the name of
+// another argument which itself stays in its own register. Under Microsoft x64 `@mm`'s loads take xmm0,
+// xmm1 and xmm2: the minimum reads its first argument in xmm1, the template's name of its second, and
+// writes over it, so the body holds no move between vector registers. It gives the C result.
+@test
+fn an_intrinsic_argument_stays_in_another_arguments_name() {
+    let lir = M"(lir ptr 8
+sym @_mm_min_epu8 fn global
+sym @_mm_max_epu8 fn global
+sym @mm fn global
+fn @mm
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i64 v0 align 0
+  v3 = load.v2i64 v0+16 align 0
+  v4 = load.v2i64 v0+32 align 0
+  v5 = call.v2i64 @_mm_min_epu8(v3, v4) : (v2i64, v2i64) -> v2i64
+  v6 = call.v2i64 @_mm_max_epu8(v2, v5) : (v2i64, v2i64) -> v2i64
+  store v6, v1 align 0
+  ret
+)";
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(os, false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+        let mut moves: u32 = 0;
+        for i in 0..obj.len() - 2 {
+            moves += (obj[i] == 0x0F && (obj[i + 1] == 0x28 || obj[i + 1] == 0x6F) && obj[i + 2] >= 0xC0) as u32;
+        }
+        assert_eq(moves, 0);
+    }
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return; // a C driver links it, on a host that runs it
+    }
+    let drv = M"(#include <stdint.h>
+void mm(const uint8_t *, uint8_t *);
+int main(void) {
+  uint8_t in[48], out[16];
+  for (int k = 0; k < 48; k++) in[k] = (uint8_t)(k * 37 + 11);
+  mm(in, out);
+  for (int k = 0; k < 16; k++) {
+    uint8_t m = in[16 + k] < in[32 + k] ? in[16 + k] : in[32 + k];
+    if (out[k] != (in[k] > m ? in[k] : m)) return 1 + k;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // x86-64: a vector sum that commutes writes over the loop's accumulator whichever operand it is: `@acc`'s
 // sums take the load first and the accumulator second, and its loop holds no move between vector
 // registers (`movaps`, `movdqa`, `movdqu`, or their VEX forms). It gives the C result.
