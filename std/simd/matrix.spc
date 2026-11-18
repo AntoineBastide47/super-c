@@ -39,6 +39,16 @@ pub fn mul_i8(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     mul_i8_on(c, a, b, m, k, n);
 }
 
+/// `c = a * b` for row-major `i16` matrices into `i32`: element (i, j) of `c` is the sum over p of
+/// `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel (SME outer
+/// products where the CPU has them). Panics as `mul_f32`.
+pub fn mul_i16(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    if !fits(c.len(), m, n) || !fits(a.len(), m, k) || !fits(b.len(), k, n) {
+        panic("matrix::mul_i16: a slice's length is not its matrix's element count");
+    }
+    mul_i16_on(c, a, b, m, k, n);
+}
+
 /// `c = a * b` for row-major `u8` (`a`) and `i8` (`b`) matrices into `i32`: element (i, j) of `c` is the
 /// sum over p of `(a[i][p] as i32) * (b[p][j] as i32)` modulo 2^32, the same on every machine and kernel
 /// (the SME kernel of `mul_i8` where the CPU has it). Panics as `mul_f32`.
@@ -92,6 +102,7 @@ const fn fits(len: usize, r: usize, s: usize) bool {
 }
 
 static mut MUL_F32: detect::Dispatch = detect::Dispatch::new();
+static mut MUL_I16: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_ADD_F32: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_F64: detect::Dispatch = detect::Dispatch::new();
 static mut MUL_I8: detect::Dispatch = detect::Dispatch::new();
@@ -128,6 +139,21 @@ fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize
 @arch(!aarch64)
 fn mul_add_f32_on(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     mul_add_f32_lanes(c, a, b, m, k, n);
+}
+
+@arch(aarch64)
+fn mul_i16_on(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []i16, []i16, usize, usize, usize), 1>(
+        &mut unsafe MUL_I16,
+        [(cpu::Feature::Sme2, mul_i16_sme)],
+        mul_i16_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(!aarch64)
+fn mul_i16_on(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    mul_i16_lanes(c, a, b, m, k, n);
 }
 
 @arch(aarch64)
@@ -234,6 +260,14 @@ fn mul_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
 fn mul_add_f32_sme(c: []mut f32, a: []f32, b: []f32, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_add_f32(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
         mul_add_f32_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+fn mul_i16_sme(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_i16(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_i16_lanes(c, a, b, m, k, n);
     }
 }
 
@@ -388,6 +422,31 @@ const fn mul_f64_lanes(c: []mut f64, a: []f64, b: []f64, m: usize, k: usize, n: 
 }
 
 // Each row of `c` from 0, then for each p the row of `b` widened to i32 times `a[i][p]`, added modulo 2^32.
+const fn mul_i16_lanes(c: []mut i32, a: []i16, b: []i16, m: usize, k: usize, n: usize) {
+    let nv = n - n % 16;
+    for i in 0..m {
+        let row = i * n;
+        for j in 0..n {
+            c[row + j] = 0;
+        }
+        for p in 0..k {
+            let x = a[i * k + p] as i32;
+            let xv = Simd::<i32, 16>::splat(x);
+            let brow = p * n;
+            let mut j: usize = 0;
+            while j < nv {
+                let bv = simd::load::<i16, 16>(b, brow + j).widen::<i32>();
+                simd::store(c, row + j, xv.wrapping_mul(bv).wrapping_add(simd::load::<i32, 16>(c, row + j)));
+                j += 16;
+            }
+            while j < n {
+                c[row + j] = c[row + j].wrapping_add(x.wrapping_mul(b[brow + j]));
+                j += 1;
+            }
+        }
+    }
+}
+
 const fn mul_i8_lanes(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     let nv = n - n % 16;
     for i in 0..m {

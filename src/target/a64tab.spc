@@ -108,10 +108,11 @@ extend C {
     pub(package) const V4S: u8 = 21;
     pub(package) const V1D: u8 = 22;
     pub(package) const V2D: u8 = 23;
+    pub(package) const ZH: u8 = 24; // an SVE register of halfwords, whatever the variant
 }
 
-/// Operand kinds: the register kinds 1 to 64 and 161 to 192 (the fixed arrangements), then the special
-/// ones (the comment gives the values each consumes).
+/// Operand kinds: the register kinds 1 to 64, 161 to 192 (the fixed arrangements) and 205 to 208 (`C::ZH`),
+/// then the special ones (the comment gives the values each consumes).
 pub(package) struct K {}
 
 extend K {
@@ -275,7 +276,10 @@ extend K {
     pub(package) const SIMM8: u8 = 198; // at 10, signed
     pub(package) const UIMM8: u8 = 199; // at 10, unsigned
     pub(package) const V1QD: u8 = 200; // Vd.1q at 0 (`pmull`'s 128-bit product)
-    pub(package) const COUNT: u8 = 201;
+    pub(package) const ZHD: u8 = 205;
+    pub(package) const ZHN: u8 = 206;
+    pub(package) const ZHM: u8 = 208;
+    pub(package) const COUNT: u8 = 209;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -322,7 +326,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 697] = [
+pub(package) const ROWS: [Row; 701] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -1055,6 +1059,11 @@ pub(package) const ROWS: [Row; 697] = [
     r("fmops", 0x80C00010, Q::ZE, 8, k5(K::ZAT, K::PGM, K::PMM, K::ZN, K::ZM)),
     r("smopa", 0xA0800000, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZBN, K::ZBM)),
     r("umopa", 0xA1A00000, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZBN, K::ZBM)),
+    // SME2: two 16-bit products per 32-bit element.
+    r("smopa", 0xA0800008, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("smops", 0xA0800018, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("umopa", 0xA1800008, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
+    r("umops", 0xA1800018, Q::ZE, 4, k5(K::ZAT, K::PGM, K::PMM, K::ZHN, K::ZHM)),
 ];
 
 // ---- Variants ----
@@ -1165,13 +1174,16 @@ pub(package) const fn fsize(qk: u8, q: u32) u32 {
 
 // ---- Operand kinds ----
 
-/// Whether `k` is a register kind (1 to 64, 161 to 192).
+/// Whether `k` is a register kind (1 to 64, 161 to 192, 205 to 208).
 pub(package) const fn is_reg(k: u8) bool {
-    return k >= 1 && k <= 64 || k >= 161 && k <= 192;
+    return k >= 1 && k <= 64 || k >= 161 && k <= 192 || k >= 205 && k <= 208;
 }
 
 /// The class of register kind `k` (`C_*`).
 pub(package) const fn reg_class(k: u8) u8 {
+    if k >= 205 {
+        return C::ZH;
+    }
     if k > 64 {
         return C::V8B + (k - 161) / 4;
     }

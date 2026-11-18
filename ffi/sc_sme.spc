@@ -182,6 +182,50 @@ unsafe fn mul_i8_flip(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usiz
     return 0;
 }
 
+/// `c` (m x n, i32) = `a` (m x k) * `b` (k x n), i16: each element the sum of the products modulo 2^32.
+/// `a` and `b` go in groups of two halfwords, one 32-bit word per row or column and group, laid out as
+/// the i8 kernel's groups of four bytes (`mul_i8_flip`).
+@platform(macos | ios | linux | android)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_i16(c: *mut i32, a: *const i16, b: *const i16, m: usize, k: usize, n: usize) i32 {
+    let l = (sc_sme_svl() / 4) as usize;
+    let g = k / 2 + (k % 2 != 0) as usize;
+    let pm = (m / l + (m % l != 0) as usize) * l;
+    let pn = (n / (4 * l) + (n % (4 * l) != 0) as usize) * 4 * l;
+    // pa: pm rows of 2g halfwords; pb: pn columns of 2g halfwords; zeros past m, n and k.
+    let pa = panel(g, 2 * (pm + pn), 2) as *mut i16;
+    if pa == null {
+        return -1;
+    }
+    let pb = pa + pm * 2 * g;
+    cstring::memset(pa as *mut i8, 0, (pm + pn) * 4 * g);
+    for i in 0..m {
+        let dst = pa + i / l * 2 * l * g + i % l * 2;
+        for p in 0..k {
+            dst[p / 2 * 2 * l + p % 2] = a[i * k + p];
+        }
+    }
+    let mut j: usize = 0;
+    while j < n {
+        for q in 0..g {
+            let dst = pb + j * 2 * g + q * 8 * l;
+            let mut col: usize = 0;
+            while col < 4 * l && j + col < n {
+                dst[col * 2] = b[2 * q * n + j + col];
+                if 2 * q + 1 < k {
+                    dst[col * 2 + 1] = b[(2 * q + 1) * n + j + col];
+                }
+                col += 1;
+            }
+        }
+        j += 4 * l;
+    }
+    sc_sme_i16_za(c, pa, pb, m, g, n);
+    stdlib::free(pa);
+    return 0;
+}
+
 /// `dst` (n x m) = the transpose of `src` (m x n), 32-bit elements (moved as bits) on the ZA tile.
 @platform(macos | ios | linux | android)
 @arch(aarch64)
@@ -234,6 +278,13 @@ pub unsafe fn sc_sme_mul_i8(_c: *mut i32, _a: *const i8, _b: *const i8, _m: usiz
 @arch(aarch64)
 @target_feature([cpu::Feature::Sme2])
 pub unsafe fn sc_sme_mul_add_f32(_c: *mut f32, _a: *const f32, _b: *const f32, _m: usize, _k: usize, _n: usize) i32 {
+    return -1;
+}
+
+@platform(windows)
+@arch(aarch64)
+@target_feature([cpu::Feature::Sme2])
+pub unsafe fn sc_sme_mul_i16(_c: *mut i32, _a: *const i16, _b: *const i16, _m: usize, _k: usize, _n: usize) i32 {
     return -1;
 }
 
@@ -786,15 +837,23 @@ ret)");
 // four (`sc_sme_mul_i8`): pa holds, per panel of L rows and per group, each row's four bytes; pb, per
 // panel of 4L columns and per group, each column's four bytes. Zeros pad the rows, columns and the last
 // group. Each L x 4L block takes one A vector and one four-vector load of B per group, one SMOPA per
-// tile. Integer sums wrap modulo 2^32 in any order: the portable kernel's results.
+// tile. Integer sums wrap modulo 2^32 in any order: the portable kernel's results. From the entry
+// `sc_sme_i16_za` (x6 = 1), the same for i16: a group is two halfwords per row or column, the same 32-bit
+// word, and each SMOPA adds two products (`sc_sme_mul_i16`).
 @platform(macos | ios | linux | android)
 @arch(aarch64)
 asm(M"(.text
 .arch_extension sme2
 .arch_extension sme-f64f64
 .p2align 4
+_sc_sme_i16_za:
+sc_sme_i16_za:
+mov x6, #1
+b 30f
 _sc_sme_i8_za:
 sc_sme_i8_za:
+mov x6, #0
+30:
 stp d8, d9, [sp, #-144]!
 stp d10, d11, [sp, #16]
 stp d12, d13, [sp, #32]
@@ -862,6 +921,7 @@ cbz x4, 15f
 mov x14, x4
 mov x15, x21
 mov x16, x20
+cbnz x6, 24f
 14:
 ld1b {z0.b}, p0/z, [x15]
 ld1b {z4.b-z7.b}, pn8/z, [x16]
@@ -873,6 +933,18 @@ add x15, x15, x9
 add x16, x16, x25
 subs x14, x14, #1
 b.ne 14b
+b 15f
+24:
+ld1b {z0.b}, p0/z, [x15]
+ld1b {z4.b-z7.b}, pn8/z, [x16]
+smopa za0.s, p0/m, p0/m, z0.h, z4.h
+smopa za1.s, p0/m, p0/m, z0.h, z5.h
+smopa za2.s, p0/m, p0/m, z0.h, z6.h
+smopa za3.s, p0/m, p0/m, z0.h, z7.h
+add x15, x15, x9
+add x16, x16, x25
+subs x14, x14, #1
+b.ne 24b
 15:
 mov w12, #0
 mov x15, x19
@@ -1017,6 +1089,8 @@ asm(M"(.globl _sc_sme_f32_za
 .private_extern _sc_sme_i8_za
 .globl _sc_sme_t32_za
 .private_extern _sc_sme_t32_za
+.globl _sc_sme_i16_za
+.private_extern _sc_sme_i16_za
 .globl _sc_sme_f32_acc_za
 .private_extern _sc_sme_f32_acc_za
 )");
@@ -1035,6 +1109,9 @@ asm(M"(.globl sc_sme_f32_za
 .globl sc_sme_t32_za
 .hidden sc_sme_t32_za
 .type sc_sme_t32_za, %function
+.globl sc_sme_i16_za
+.hidden sc_sme_i16_za
+.type sc_sme_i16_za, %function
 .globl sc_sme_f32_acc_za
 .hidden sc_sme_f32_acc_za
 .type sc_sme_f32_acc_za, %function
@@ -1065,6 +1142,7 @@ extern "C" {
     );
     fn sc_sme_i8_za(c: *mut i32, pa: *const i8, pb: *const i8, m: usize, g: usize, n: usize);
     fn sc_sme_t32_za(dst: *mut u32, src: *const u32, m: usize, n: usize);
+    fn sc_sme_i16_za(c: *mut i32, pa: *const i16, pb: *const i16, m: usize, g: usize, n: usize);
     fn sc_sme_f32_acc_za(
         c: *mut f32,
         a: *const f32,

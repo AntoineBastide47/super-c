@@ -428,6 +428,7 @@ const fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) boo
         t::C::V => r.l == b'v' && r.arr >= 0 && r.arr < 8 && agree(&mut f.arr, r.arr),
         t::C::Z => r.l == b'z' && r.arr >= 10 && r.arr <= 13 && agree(&mut f.ze, r.arr - 10),
         t::C::ZB => r.l == b'z' && r.arr == 10,
+        t::C::ZH => r.l == b'z' && r.arr == 11,
         t::C::ZS => r.l == b'z' && r.arr == 12,
         t::C::ZD => r.l == b'z' && r.arr == 13,
         _ => c >= t::C::V8B && c <= t::C::V2D && r.l == b'v' && r.arr == (c - t::C::V8B) as i32,
@@ -1664,6 +1665,7 @@ fn reg_text(o: &mut String, c: u8, n: i64, r: t::Row, q: u32) {
         _ => {
             let e = switch c {
                 t::C::ZB => 0u32,
+                t::C::ZH => 1u32,
                 t::C::ZS => 2u32,
                 t::C::ZD => 3u32,
                 _ => t::fixed_q(r, q),
