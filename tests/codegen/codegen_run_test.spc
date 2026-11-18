@@ -2056,6 +2056,30 @@ fn main() i32 {
     );
 }
 
+// An array of references owns nothing: an early return from a `for` over it frees no vector it names.
+fn for_over_reference_array_frees_nothing(b: &mut h::ExitBatch) {
+    b.add(
+        "for over [&Vector<u32>; 2] with an early return",
+        M"(fn first(a: &Vector<u32>, b: &Vector<u32>) usize {
+    for v in [a, b] {
+        if v.len() > 0 {
+            return v.len();
+        }
+    }
+    return 0;
+}
+fn main() i32 {
+    let mut a = Vector::<u32>::new();
+    a.push(1);
+    let mut b = Vector::<u32>::new();
+    b.push(2);
+    b.push(3);
+    return first(&a, &b) as i32 + b.len() as i32 + 39;
+})",
+        42,
+    );
+}
+
 // An array of Free elements frees each element: as a local, a struct field and an enum payload.
 fn array_of_free_elements_drops_each(b: &mut h::ExitBatch) {
     b.add(
@@ -3748,9 +3772,9 @@ fn float_to_int_unchecked_cases(b: &mut h::ExitBatch) {
     b.add(
         "in-range values at run time and in constants",
         M"(@noinline
-fn id(x: f32) f32 { return x; }
+fn id(x: f32) f32 ensures |r| r.to_bits() == x.to_bits() { return x; }
 @noinline
-fn idd(x: f64) f64 { return x; }
+fn idd(x: f64) f64 ensures |r| r.to_bits() == x.to_bits() { return x; }
 const C: u8 = unsafe 200.9f32.to_int_unchecked::<u8>();
 const D: i64 = unsafe (-3.7f64).to_int_unchecked::<i64>();
 static_assert(C == 200 && D == -3);
@@ -5568,6 +5592,7 @@ fn exit_cases_02() {
 fn exit_cases_03() {
     let mut b = h::ExitBatch::new();
     for_over_generic_array_consumes_owning_elements(&mut b);
+    for_over_reference_array_frees_nothing(&mut b);
     array_of_free_elements_drops_each(&mut b);
     closures_mutate_and_borrow_captures_through_bounds(&mut b);
     nested_array_literals_store_by_slot(&mut b);

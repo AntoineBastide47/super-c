@@ -13994,7 +13994,7 @@ fn bc_queue(queued: &mut Vector<bool>, round: &mut Vector<u32>, it: u32) {
 
 // Whether item `it` has a body the borrow pass checks: a function or a method of an extend (an
 // interface's members have none of their own).
-const fn bc_body_item(p: &loader::Package, it: &loader::ItemMeta) bool {
+pub(package) const fn bc_body_item(p: &loader::Package, it: &loader::ItemMeta) bool {
     if it.kind != loader::ItemKind::IK_FUNCTION as u8 && it.kind != loader::ItemKind::IK_METHOD as u8 {
         return false;
     }

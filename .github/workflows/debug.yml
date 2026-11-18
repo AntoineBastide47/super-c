@@ -1,6 +1,10 @@
-# The permanent probe lane, for one investigation: on Windows x86-64 at the baseline level, the portable
-# abs_diff_u8 kernel against the hand-written SSE2 one at 4096 bytes. Each job builds variants of the
-# bench and runs them in turn on one runner; five jobs give several runner processors.
+# The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
+# content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
+# the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
+# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
+# the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# And wasm, as the release runs it: the compiler built for wasm32, its vector tests and self-host
+# fixpoint under wasmtime, the suite with wasm32 programs, and the suite against the wasm compiler.
 name: Debug
 on:
   workflow_dispatch
@@ -11,8 +15,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   compile:
-    name: compile (windows)
-    runs-on: windows-latest
+    name: compile (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: macos }
+          - { os: ubuntu-latest, target: linux }
+          # No release ships a Linux arm64 compiler: the x86-64 runner cross-builds it against the arm64
+          # C library. Both runners run Ubuntu 26.04: the arm64 runner's glibc.
+          - { os: ubuntu-26.04, target: linux_arm64, platform: linux }
+          - { os: windows-latest, target: windows }
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -21,12 +35,12 @@ jobs:
 
       - uses: ./.github/actions/toolchain
         with:
-          target: windows
+          target: ${{ matrix.target }}
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
         with:
-          target: windows
+          target: ${{ matrix.platform || matrix.target }}
 
       - name: Build the compiler
         run: |
@@ -34,56 +48,246 @@ jobs:
           SC_LEAK_CHECK=fatal "./super-c-boot${BINEXT:-}" build --bootstrap-tags -fno-prove
           test -x "./super-c${BINEXT:-}"
 
+      - name: Cross-build the arm64 compiler
+        if: matrix.target == 'linux_arm64'
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y libc6-dev-arm64-cross
+          SC_LEAK_CHECK=fatal ./super-c build --target=linux --arch=aarch64 --sysroot=/usr/aarch64-linux-gnu --out-dir=build-a64 -o super-c-a64
+          mv super-c-a64 super-c
+
       - uses: actions/upload-artifact@v7
         with:
-          name: compiler-windows
+          name: compiler-${{ matrix.target }}
           path: super-c${{ env.BINEXT }}
           if-no-files-found: error
           retention-days: 1
 
-  size:
-    name: compiler code size (${{ matrix.tree }})
+  # The suite with the compiler `compile` built. Leak-gated: a process that leaks or double-frees exits
+  # nonzero. The first shard of each target also checks the builds with LIR (SC_LIR).
+  test:
+    needs: compile
+    name: test (${{ matrix.target }} ${{ matrix.shard }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { tree: new, ref: "" }
-          - { tree: old, ref: 46a377cfea223a423deaf442aacbb4665f93b723 }
-    runs-on: ubuntu-latest
+          - { os: macos-latest, target: macos, shard: "1/2" }
+          - { os: macos-latest, target: macos, shard: "2/2" }
+          - { os: ubuntu-latest, target: linux, shard: "1/2" }
+          - { os: ubuntu-latest, target: linux, shard: "2/2" }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "1/2" }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, shard: "2/2" }
+          - { os: windows-latest, target: windows, shard: "1/3" }
+          - { os: windows-latest, target: windows, shard: "2/3" }
+          - { os: windows-latest, target: windows, shard: "3/3" }
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v7
-        with:
-          ref: ${{ matrix.ref || github.sha }}
 
       - uses: ./.github/actions/toolchain
         with:
-          target: linux
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Run the test suite
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
+
+  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
+  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
+  # agree on it within the targets' differences; time and cycles follow each runner's machine.
+  bench:
+    needs: compile
+    name: self-compile bench (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-latest, target: macos }
+          - { os: ubuntu-latest, target: linux }
+          - { os: ubuntu-26.04-arm, target: linux_arm64 }
+          - { os: windows-latest, target: windows }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: ${{ matrix.target }}
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-${{ matrix.target }}
+
+      - name: Self-compile benchmark
+        run: |
+          set -eu
+          bin="super-c${BINEXT:-}"
+          chmod +x "./$bin"
+          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
+          "./$bin" bench --filter=self_compile
+
+  # The compiler cross-built to wasm32-wasip1, with the native compiler that built it.
+  wasm-compile:
+    name: wasm compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
           sha: ${{ github.sha }}
 
       - uses: ./.github/actions/bootstrap
         with:
           target: linux
 
-      - name: Build the compiler twice and print its code size
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+
+      - name: Build the wasm compiler
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  # The vector tests on wasm32 with simd128, and the self-host fixpoint under wasmtime.
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      - name: Self-host fixpoint under wasmtime
         run: |
           set -eu
-          SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
-          ./super-c build -fno-prove --out-dir=build/second
-          bin=$(find build/second -maxdepth 2 -name super-c -type f | head -n 1)
-          size -A "$bin" | awk -v T="${{ matrix.tree }}" '$1 == ".text" { print "size	" T "	" $2 }'
-          grep -m1 'model name' /proc/cpuinfo
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
 
-  variants:
-    needs: compile
-    name: abs_diff_u8 variants (${{ matrix.run }})
+  # The native compiler runs the suite, and every program a test builds is a wasm32 module run under
+  # wasmtime.
+  wasm-target:
+    needs: wasm-compile
+    name: wasm target (${{ matrix.test_shard }})
     strategy:
       fail-fast: false
       matrix:
-        run: [1, 2, 3, 4, 5]
-    runs-on: windows-latest
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  # The suite against the wasm compiler: every transpile-class invocation runs inside wasmtime.
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: |
+          chmod +x ./super-c
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"
+
+  # The SIMD kernels of bench/simd_baseline: the hand-written C kernels, and the scalar and portable
+  # kernels built by the native backend and through the C tree with the C compiler at -O3 (clang where
+  # the runner has it). Five interleaved runs of each; the benchmark's own checks do not stop a run.
+  simd-timing:
+    needs: compile
+    if: ${{ always() }}
+    name: simd timing (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: linux }
+          - { os: ubuntu-26.04-arm, target: linux_arm64 }
+          - { os: windows-latest, target: windows }
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
@@ -92,138 +296,132 @@ jobs:
 
       - uses: ./.github/actions/toolchain
         with:
-          target: windows
+          target: ${{ matrix.target }}
           sha: ${{ github.sha }}
 
       - uses: actions/download-artifact@v8
         with:
-          name: compiler-windows
+          name: compiler-${{ matrix.target }}
 
-      - name: Build and time the variants
+      - name: Time the kernels
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -u
           x=${BINEXT:-}
           chmod +x "./super-c$x"
           mkdir -p timing
-          { grep -m1 'model name' /proc/cpuinfo || true; uname -sm; } > timing/machine.txt 2>&1
+          if [ "${{ matrix.target }}" != windows ] && command -v clang >/dev/null 2>&1; then export CC=clang; fi
+          {
+            grep -m1 'model name' /proc/cpuinfo || true
+            uname -sm
+            ${CC:-cc} --version | head -n 1
+          } > timing/machine.txt 2>&1
           cat timing/machine.txt
           f=bench/simd_baseline/kernels.spc
           awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          cp "$f" kernels.orig
-          cat > variant.sh <<'EOF'
-          set -eu
-          v=$1
-          f=$2
-          # Every variant prints, per size, the offsets in their pages of the two inputs and of the output.
-          awk '
-          { print }
-          /^        let mut input = Input::new\(bytes, 0\);$/ {
-              print "        println(\"addr\\t{}\\t{}\\t{}\\t{}\", bytes, (input.bytes_p.as_ptr() as usize) % 4096, (input.bytes_q.as_ptr() as usize) % 4096, (input.out_u8.as_ptr() as usize) % 4096);"
-          }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          notail() {
-              awk '
-          /^const fn abs_diff_u8_v\(/ { infn = 1 }
-          infn && /^    while i < n \{$/ {
-              print "    if i < n {"
-              print "        abs_tail(ap, bp, outp, i, n);"
-              print "    }"
-              skip = 1
-              next
-          }
-          skip { if ($0 ~ /^    }$/) { skip = 0; infn = 0 } next }
-          { print }
-          END {
-              print ""
-              print "@noinline"
-              print "const fn abs_tail(ap: *const u8, bp: *const u8, outp: *mut u8, from: usize, n: usize) {"
-              print "    let a = view(ap, n);"
-              print "    let b = view(bp, n);"
-              print "    let out = view_mut(outp, n);"
-              print "    let mut i = from;"
-              print "    while i < n {"
-              print "        out[i] = if a[i] > b[i] {"
-              print "            a[i] - b[i]"
-              print "        } else {"
-              print "            b[i] - a[i]"
-              print "        };"
-              print "        i += 1;"
-              print "    }"
-              print "}"
-          }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          }
-          # grow <n>: n more opaque calls in the function placed before the kernel, which move the kernel's code.
-          grow() {
-              awk -v N="$1" '
-          { print }
-          /^        v\.reset\(\);$/ { for (k = 1; k <= N; k++) print "        bench::black_box(" k "u64);" }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          }
-          # The output starts half a page past the first input, modulo a page: no load of an input shares its low
-          # 12 address bits with a store of the same or the previous iteration.
-          apart() {
-              awk '
-          /^        for _ in 0\.\.self\.bytes_p\.len\(\) \+ GUARD \{$/ { print "        for _ in 0..self.bytes_p.len() + GUARD + 4096 {"; next }
-          /^        let out_u8 = self\.out_u8\.as_mut_ptr\(\);$/ {
-              print "        let out_u8 = unsafe (self.out_u8.as_mut_ptr() + ((self.bytes_p.as_ptr() as usize) + 8192 + 2048 - (self.out_u8.as_ptr() as usize)) % 4096);"
-              next
-          }
-          { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
-          }
-          case $v in
-          base) ;;
-          grow1) grow 1 ;;
-          grow2) grow 2 ;;
-          grow3) grow 3 ;;
-          grow4) grow 4 ;;
-          grow5) grow 5 ;;
-          grow6) grow 6 ;;
-          grow7) grow 7 ;;
-          notail) notail ;;
-          apart) apart ;;
-          apartnt) apart && notail ;;
-          *) echo "variant.sh: no variant $v" >&2; exit 1 ;;
-          esac
-          EOF
           sh bench/simd_baseline/kernels.sh
-          vs="base grow1 grow2 grow3 grow4 grow6 grow7 notail"
-          od=$(command -v llvm-objdump || true)
-          [ -n "$od" ] || od=$(ls "/c/Program Files/LLVM/bin/llvm-objdump.exe" 2>/dev/null || true)
-          echo "objdump: ${od:-none}"
-          for v in $vs; do
-            cp kernels.orig "$f"
-            bash variant.sh "$v" "$f"
-            "./super-c$x" bench --no-run --filter=simd_baseline || { echo "::error::variant $v does not build"; exit 1; }
-            cp "build/bench-bin$x" "build/bench-$v$x"
-            # Where the kernel's code lies: its symbols, and the backward conditional jumps in it (a loop's
-            # last instruction and its first).
-            if [ -n "$od" ]; then
-              "$od" --syms "build/bench-$v$x" 2>/dev/null | grep -i 'abs_diff_u8' | head -n 8 | sed "s/^/code\t$v\tsym\t/" > "timing/$v-code.txt" || true
-              "$od" -d --no-show-raw-insn "build/bench-$v$x" 2>/dev/null | awk -v V="$v" '
-          /abs_diff_u8_v[^>]*>:$/ { print "code\t" V "\tfn\t" $0; on = 1; next }
-          />:$/ { on = 0 }
-          on && /\tj[a-z]+\t/ { print "code\t" V "\tjump\t" $1 "\t" $2 "\t" $3 }' | head -n 60 >> "timing/$v-code.txt" || true
-              cat "timing/$v-code.txt"
+          "./super-c$x" bench --no-run --filter=simd_baseline
+          cp "build/bench-bin$x" "build/bench-nat$x"
+          "./super-c$x" build build/bench_root.spc --profile=bench --emit-c --out-dir=build/ctree
+          raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
+          sh ci/cc_tree.sh "$raw" "build/bench-clang$x" -O3
+          # The released compiler (v0.17.26: run-time copies that mix the legacy SSE encoding with ymm
+          # registers) builds that release's bench from that release's tree, for a comparison on this
+          # runner.
+          if [ "${{ matrix.target }}" = linux ] || [ "${{ matrix.target }}" = windows ]; then
+            mkdir -p old oldw
+            if [ "${{ matrix.target }}" = linux ]; then
+              gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-linux-x86_64.tar.gz -D old
+              tar xzf old/super-c-linux-x86_64.tar.gz -C old
+              od=$PWD/old/super-c-linux-x86_64
+            else
+              gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-windows-x86_64.zip -D old
+              unzip -q old/super-c-windows-x86_64.zip -d old
+              od=$PWD/old/super-c-windows-x86_64
+            fi
+            git fetch --depth 1 origin refs/tags/v0.17.26:refs/tags/v0.17.26
+            git archive v0.17.26 | tar -x -C oldw
+            # The released compiler loads the std and ffi packed beside it: the tree's own would be a
+            # second copy of the same modules.
+            rm -rf oldw/std oldw/ffi
+            if (cd oldw && awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f" && sh bench/simd_baseline/kernels.sh && "$od/super-c$x" bench --no-run --filter=simd_baseline); then
+              cp "oldw/build/bench-bin$x" "build/bench-old$x"
+            fi
+          fi
+          for k in 1 2 3 4 5; do
+            "build/bench-nat$x" > "timing/nat-r$k.txt" 2>&1 || true
+            "build/bench-clang$x" > "timing/clang-r$k.txt" 2>&1 || true
+            if [ "${{ matrix.target }}" != linux_arm64 ]; then
+              SC_SIMD_LEVEL=0 "build/bench-nat$x" > "timing/base-r$k.txt" 2>&1 || true
+            fi
+            if [ -x "build/bench-old$x" ]; then
+              "build/bench-old$x" > "timing/old-r$k.txt" 2>&1 || true
             fi
           done
-          for k in 1 2 3 4 5 6 7; do
-            for v in $vs; do
-              SC_SIMD_LEVEL=0 "build/bench-$v$x" > "timing/$v-r$k.txt" 2>&1 || true
-            done
-          done
-          grep -c '^simd' timing/*-r1.txt
-          grep -h '^addr' timing/*-r1.txt | sort | uniq -c
-          # Per variant and size: the medians of the seven runs (ns per element), the portable kernel over
-          # the hand-written one, and their difference per call (ns).
-          for v in $vs; do
-            cat timing/$v-r*.txt | awk -F'\t' -v V="$v" '
-          $1 == "simd" && $2 == "abs_diff_u8" { k = $3 SUBSEP $4; n[k]++; x[k, n[k]] = $5 + 0; sz[$4] = 1 }
-          function med(k,   i, j, t, a, c) { c = n[k]; if (c == 0) return 0; for (i = 1; i <= c; i++) a[i] = x[k, i]; for (i = 1; i <= c; i++) for (j = i + 1; j <= c; j++) if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t } return a[int((c + 1) / 2)] }
-          END { for (s in sz) { p = med("portable" SUBSEP s); h = med("sse2" SUBSEP s); c = med("scalar" SUBSEP s); printf "probe\t%s\t%d\tscalar %.4f\tportable %.4f\tsse2 %.4f\tp/sse2 %.3f\tper call %+.1f ns\n", V, s, c, p, h, (h > 0 ? p / h : 0), (p - h) * s } }' | sort -t"$(printf '\t')" -k3 -n
-          done
+          grep -c '^simd' timing/*.txt
 
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
-          name: abs-diff-variants-${{ matrix.run }}
+          name: simd-timing-${{ matrix.target }}
+          path: timing/*.txt
+          if-no-files-found: error
+          retention-days: 3
+
+  simd-timing-wasm:
+    needs: wasm-compile
+    name: simd timing (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: The C library's C tree runs when the wasi-sdk's clang optimizes it
+        run: |
+          set -u
+          chmod +x ./super-c
+          "$WASI_SDK_PATH/bin/clang" --version | head -n 1
+          SC_TEST_CC="$WASI_SDK_PATH/bin/clang" SC_LEAK_CHECK=fatal ./super-c test --filter=wasm_libc_c_tree_runs_optimized
+
+      - name: Time the kernels under wasmtime
+        run: |
+          set -u
+          chmod +x ./super-c
+          mkdir -p timing
+          {
+            grep -m1 'model name' /proc/cpuinfo || true
+            wasmtime --version
+            "${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang" --version | head -n 1
+          } > timing/machine.txt 2>&1
+          cat timing/machine.txt
+          f=bench/simd_baseline/kernels.spc
+          awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+          sh bench/simd_baseline/kernels.sh --target=wasm
+          ./super-c bench --no-run --filter=simd_baseline --target=wasm
+          cp build/bench-bin build/bench-nat.wasm
+          ./super-c build build/bench_root.spc --profile=bench --emit-c --target=wasm --out-dir=build/ctree
+          raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
+          # The tree's C library units (`__units_nobuiltin`) compile with `-fno-builtin` (`ci/cc_tree.sh`).
+          CC="${WASI_SDK_PATH:+$WASI_SDK_PATH/bin/}clang --target=wasm32-wasip1" sh ci/cc_tree.sh "$raw" build/bench-clang.wasm -O3
+          for k in 1 2 3 4 5; do
+            wasmtime build/bench-nat.wasm > "timing/nat-r$k.txt" 2>&1 || true
+            wasmtime build/bench-clang.wasm > "timing/clang-r$k.txt" 2>&1 || true
+          done
+          grep -c '^simd' timing/*.txt
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ always() }}
+        with:
+          name: simd-timing-wasm
           path: timing/*.txt
           if-no-files-found: error
           retention-days: 3

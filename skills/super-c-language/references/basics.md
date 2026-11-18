@@ -175,8 +175,38 @@ bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A goal over bit 
 casts, divisions or products that the arithmetic cannot decide is decided on the bits of its values
 (a SAT refutation): `x ^ y ^ y == x`, `x & (x - 1) < x` for `x > 0`, and the built-in integers'
 `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `wrapping_neg`, `rotate_left` and `rotate_right`
-(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer and a float are
-values the proofs do not take apart. They also model struct fields, arrays of a constant length and
+(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer is a
+value the proofs do not take apart. A float is the bits of its encoding: `f32`, `f64`, and std's
+`Float<E, F, FAMILY>` (`f16`, `bf16`, `f128`, `f8e4m3fn` ..) of up to 512 bits. `+ - * /`, `%` (C's
+`fmod`), `sqrt`, `mul_add`/`fma` (and the C library's `sqrt`, `fabs`, `copysign`, `fma`, `round`,
+`floor`, `ceil`, `trunc`, with their `f` forms), `abs`, `copysign`, `round`, `floor`, `ceil`, `trunc`,
+`round_ties_even`, `recip`, `fract`, comparisons, negation, conversions, `to_bits`/`from_bits`
+(`to_raw`/`from_raw`) and the classifications (`is_nan`, `is_finite`, `is_infinite`, `is_zero`,
+`is_normal`, `is_subnormal`, `is_sign_negative`) are their circuits, rounded to nearest even (the
+FINITE_ONLY family saturates); a NaN result is any NaN (`x == x` does not prove). `Float`'s `==` and
+`<` are std's: the encodings' equality and total order (-0 below +0); `ieee_lt` and its kin are IEEE's.
+The facts of rounding (a sum grows with a nonnegative addend, a product and a quotient move by their
+factor, results keep their operands' order) relate two unknowns: `x + y >= x` proves for finite `x`
+and `y >= 0`. An `f32` or `f64` result also gets the bounds its operands' bounds give it (the host's
+results at the corners of their intervals): `x * x * x + 2.0 * x * x + x <= 4.0` proves for `x` in
+[0, 1]; a value whose operands share an unknown keeps the intervals' looseness (`(x + y) * (x - y)`).
+`x.to_int_unchecked::<I>()` is an obligation: `x` is not NaN and its truncation fits `I`. The fast-math
+build flags give each operation every value the optimizer may compute in its place:
+`-fassociative-math` (and `@associative_math` in its function) makes a sum or product whose operand may
+be a partial result (a parameter, a load, a loop's running value, a sum of a sum) either the IEEE value
+or a value that keeps only the order every association keeps: `x + y` against that operand by the sign
+of the other, `x * y` against it by the magnitude of the other, with the product's sign (an upper bound
+such as `x + 1.0 <= 2.0` for `x` in [0, 1] is false: `x` may be `a + c` with a large `c` that cancels);
+`-freciprocal-math` makes `x / y` either the quotient or `x` times the rounded `1 / y`;
+`-ffp-contract=fast` makes a sum with a product operand either the sum or the fused `fma` (an operand
+that is no operation here may hold a product after inlining: the sum then lies between the sums with
+the least and the greatest reals that round to it, each rounded once); `-fno-signed-zeros` makes the
+zero of a sum (and, with `-ffinite-math-only`, of a product) either zero; `-ffinite-math-only` makes an
+ordered comparison of a NaN unknown, and with `-fno-signed-zeros` the product of a zero and a value that
+is not finite and the sum of two values that are not finite. Under `-ffinite-math-only` a `requires` or
+an `invariant` states `!x.is_nan()` or `x.is_finite()` to exclude a NaN, since `x >= 0.0` no longer
+does.
+They also model struct fields, arrays of a constant length and
 their views (an element read by an index the path proves in bounds), and references; a call that
 may write memory, a drop and a write through a pointer forget the values a reference reaches. A
 pointer is `null` or an address: `p as usize` is 0 exactly for `null`, `p + n` of a pointer that is

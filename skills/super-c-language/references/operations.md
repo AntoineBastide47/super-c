@@ -97,7 +97,7 @@ Floats: `to_bits`/`from_bits`, `classify` (`FpClass`), `next_up`/`next_down`, `m
 |------------|--------|
 | integer to integer `as` | wraps to the target width (sign-extends a signed source, zero-extends an unsigned one, then truncates) |
 | float to integer `as` | defined: truncates toward zero and saturates; a value past either end is that end; NaN is 0 (`1e20 as i32` is 2147483647) |
-| `x.to_int_unchecked::<I>()` (`f32`, `f64`; `I` an `i8` to `i64` or `u8` to `u64`; `unsafe`) | truncates toward zero in one C cast, without the saturation of `as`; NaN or a truncation outside `I` is undefined, and an error in a constant |
+| `x.to_int_unchecked::<I>()` (`f32`, `f64`; `I` an `i8` to `i64` or `u8` to `u64`; `unsafe`) | truncates toward zero in one C cast, without the saturation of `as`; NaN or a truncation outside `I` is undefined, an error in a constant, and a proof obligation in a body the prover checks |
 | integer to float `as` | defined: round to nearest, ties to even |
 | float to float `as` | defined: round to nearest, ties to even |
 | `char` | 1 byte, unsigned (0 to 255) on every target |

@@ -20,7 +20,7 @@ file is authoritative for where to look first.
 
 | Fact | Producer | Stored in | Valid until |
 |------|----------|-----------|-------------|
-| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::check_kept` (reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
+| The components of the direct calls among the kept bodies of the reported modules and of the modules that state a contract | `ir::recursion::kept_graph` (from `check_kept`; `kept_components` for the language server; reused: `Recur::components`, the graph widened by `graph`) | `comp` per kept slot, copied to `Shared.scc` | end of `check_kept` |
 | Core CFG, RPO, loop headers, a loop's blocks | `ir::facts` `Facts::begin`, `is_header`, `loop_scan` (reused) | the prover's `Facts`, per body | the next body |
 | The locals the walk models (all but a static's reference), and those a pointer, a reference to a value that is neither frozen nor a container, a slice view, a closure or a call's implicit borrow may reach (`is_mem`; not a `&mut` lent to one call); the temporaries lent to one call | `Prover::scan_tracked`, `autoref` | `Prover.tracked`, `is_mem`, `mem_list`, `scoped`, per body | the next body |
 | The `&mut` parameters' slots past the locals, their types | `Prover::prove_body` | `slot_ty`, `slot_of`, `nlocals`, per body | the next body |
@@ -51,6 +51,7 @@ file is authoritative for where to look first.
 | `free`'s receiver value before the walked call or drop, whose invariant holds of its value after it | `Prover::recv_val` (in `call` and the drop) | `recv_pre` | the call's or drop's end |
 | The `&mut` parameters' targets a call reborrows whose results can hold no borrow (`holds_no_borrow`: frozen, a type parameter of the body counting as frozen): they do not escape, and the call's event gives them new values | `Prover::param_reborrow`, `holds_no_borrow`, `forget_all` | `prb`, per call | the call's end |
 | Counter fields (`@counter`): a struct's counters, cached per type for `needs_proof`; the members their guards read (the guard's kept body); the temporaries that hold a counter's address (copies and casts followed), each reaching only an atomic operation's first argument; each step's units and guard | `Prover::counters_of`, `counted`, `guard_fields`, `ctr_scan`, `count_step`, `count_start` | `ctr_ty` (per prover, for the build), `ctr_tmp` (per body) | `ctr_ty` never: the types do not change while the proofs run; `ctr_tmp` the next body |
+| Whether a body holds a float's unchecked conversion (`CAST_UNCHECKED`, `to_int_unchecked`), whose precondition makes it need a proof as a call's `requires` does | `Lower::lower_intrinsic` | `CoreBody.has_unchecked` (kept by `compact_from`) | never: the body's lowering sets it |
 | Counted shares: share atoms of `rc_share(p, k, n)`, the units count per counter and version (one unknown per entry), the units a call takes and a version gives | `Prover::share_atom`, `nsh`, `nsh_def`, `sh_give`, `sh_fit` (the sum checks) | `sh_p`, `sh_kn`, `sh_tk`, `sh_gv`, `sh_seen`, per body | the next body |
 | The structs with an invariant the path wrote through a pointer and must prove again; their values in the write's epoch; the blocks of allocators' results not yet written whole | `Prover::mi_open`, `mi_forward`, `mi_close`, `mi_close_at` (at an assignment's read or write through another pointer, `wpc`), `mi_alloc_open`, `alloc_event` (kept across `Global` calls, `global_alloc`), `unfresh` | `mi_dirty` (`Path.mi`), `mi_fwd`, `mi_lds`, `mi_seen`, `mi_fresh` (`Path.fresh`), `mi_wrote` (`Path.wrote`: the pointers the path wrote such a struct through; a `dealloc` of a typed `*mut S` opens the struct unless the path wrote it, and ends its `mi_dirty` entry) | the path's end (`mi_fwd`: the body) |
 | The statics with an invariant: address terms, types, writes from another file, references | `Prover::static_val`, `st_open`, `st_save`, `st_carry`, `st_report`, `static_ref` | `st_inv`, `st_list`, `st_err`, `st_decl`, per body | the next body |
@@ -62,7 +63,12 @@ file is authoritative for where to look first.
 | The facts of the pattern types of a body's values (a range, a variant's `T_TAG`), anchored on the value's term; one unknown per const parameter | `Prover::pat_fact`, `param_var` | `Prover.defs`/`def_of` (as definitions), `pvars`, per body | the next body |
 | The bounds checks that held on every path that reached them (facts for the build) | `Prover::note_check` | `chk_ok`, `chk_dead` per body, then `Prover.facts`; applied as PROVEN twins in `irl::Keep` and in the proof record (`p` lines) | the build |
 | The range of each integer parameter a proved `requires` states | `irc::skip_contracts` (`note_requires`) | `CoreBody.entry_ranges`; the LIR's `Body.ranges` (`Lower::param_range`) | the body |
-| Whether a term holds an operation the bits define and the arithmetic reads as an atom | `Terms::make` | `Terms.bitty` | the next body |
+| Whether a term holds an operation the bits define and the arithmetic reads as an atom (a float operation or comparison too: a float is the integer of its encoding, `T_FADD` ..) | `Terms::make` | `Terms.bitty` | the next body |
+| The format of a float type (width, fraction bits, FINITE_ONLY) of `Float<E, F, FAMILY>`, and the std `Float` method a call names | `Prover::soft_fmt`, `soft_kind` | not stored | per query |
+| Each value made as a choice of two by a boolean (a float rewrite's alternatives): its condition and values, which a float comparison of it splits into and `may_fuse` reads | `Terms::choose` | `Terms.choices` | `Terms::clear` |
+| Each value a float rewrite's model made, by the IEEE operation it stands for, which `may_fuse`, `may_chain` and `fused` read | `Terms::set_shape` (in `Prover::float_binary`, `float_call`) | `Terms.shapes` | `Terms::clear` |
+| Each float operation of a bits encoding with the literal where it is NaN, and the facts of rounded operations against its operands and its kind's earlier operations | `Blaster::float_lemmas`, `pair_lemmas` (`nan_if`) | `Blaster.fterms`, `nan_of`, per encoding | `Blaster::reset` |
+| The constants an encoding's terms compare each float term with, and the bounds (boxes) of each `f32`/`f64` operation built | `Blaster::cands_of` (one scan of the term table), `bounds_of`, `box_lemmas` | `Blaster.cands`, `boxes`, per encoding | `Blaster::reset` |
 | A branch's theory literals: those a SAT model of the skeleton needs, the count before each choice, and the decision level that fixes each formula | `Solver::model_lits` (`model_val`, `model_level`, `forced`) | `lits`, `cuts` of `Solver::implies`; `memo`, `lv`, per model | the next model |
 | The literal sets the walk's solvers did not refute (not for want of steps), each with its model; one comes back without the solvers | `Solver::lemma_with` (`lits_hash`) | `Solver.fails`, `fatom`, `fval`, `fstart` | `Solver::forget`, or past `FAILS_KEPT` |
 | The value of each atom in the walk's last integer model, the start of an `implied` test's simplex | `Solver::bb` (an integer model) | `Solver.warm`, read by `Lp::load` | `Solver::forget` |
@@ -83,10 +89,19 @@ file is authoritative for where to look first.
 | A branch's proof: facts, trees, cuts, multipliers | the solvers | `Solver.pf` (`kernel::Proof`), checked by `Kernel::check` | the next branch |
 | The last unrefuted branch's integer model | `Solver::keep_model`, or the bits' model (`sat_model`) | `Solver.model`, `mval` | the next `implies` |
 | The parameters a callee may change | `Prover::param_writes` | `Prover.pwrites`, per callee | end of `check_kept` |
-| The contract sites of the interface methods without a body | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept` |
+| The contract sites of the interface methods without a body (the language server: of the modules the proved one can name) | `Prover::lower_shells` (`Lowerer::lower_fn`) | `Shared.shells`, `shell_ix` | end of `check_kept`, `check_module` |
 | Whether a kept body has an integer type wider than the narrow numbers read | `Prover::needs_wide` (`wide_bits`) | `wide` per kept slot, in `check_kept` | end of `check_kept` |
 | The facts derived for a division or shift by a constant (quotient bounds, remainder, product) | `Prover::derive` (`divided`, `quotient`, `shifted`) | `Prover.derived` | end of `check_kept` |
 | Each module's proof key: its source, its import and reference closure (`import_closure`, `mod_refs`), the prelude, the compiler and the settings | `prove_keys` (`src/driver/emit.spc`) | the build tree's `__sc_prove` record, of the modules whose proofs held | a change of any input |
+
+## language server proofs (`lsp::analysis::borrowck_pending`, after an open module's borrow check)
+
+| Fact | Producer | Stored in | Valid until |
+|------|----------|-----------|-------------|
+| The bodies the proofs of an open module read: its own (its borrow check lowers into the keep), the call targets and function values of every kept body, through the bodies they lower, and the `invariant` methods and `@counter` guards of the modules it can name | `prove_reach` (each kept body scanned once) | a per-check `irl::Keep` | the module's next check |
+| The lowerings `prove_reach` made of other functions than the proved module's | `prove_reach` | `Package.prove_cache` | the next analysis or parse-back of their module (`recompile`'s affected and re-checked sets, `ensure_bodies`), a reachability change for a module that reads it (`reach_settle`) |
+| The proofs a request stopped: the keep, the components, the next kept slot, the reports so far | `prove_module`, `prv::check_module` | `Package.prove_resume` | an analysis round with work, a parse-back of a module they read (`resume_reads`), the document's close, the module's next check |
+| The modules whose last check did not finish their proofs: the module was closed, or a request stopped them | `borrowck_pending` | `Package.prove_owed` | the module's next check with its proofs, or a failed analysis |
 
 ## lower (`cemit_package`, `B_PLAN` to `S_LOWERED`)
 

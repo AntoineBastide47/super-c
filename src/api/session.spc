@@ -524,7 +524,7 @@ extend Session {
         }
         // Each round finishes at least one owed check unless stopped.
         for _ in 0..self.pkg.modules.len() + 1 {
-            if loader::poll_stop() || !an::borrowck_runnable(&mut self.pkg, &self.diags) {
+            if loader::poll_stop() || !an::borrowck_runnable(&mut self.pkg, &self.diags, &ovf) {
                 return;
             }
             let r = an::borrowck_pending(&mut self.pkg, &mut self.diags, &ovf, bc_poll, null);

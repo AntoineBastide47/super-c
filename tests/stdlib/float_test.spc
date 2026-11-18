@@ -451,6 +451,11 @@ fn sqrt_fma_convert_match_libm() {
         assert_eq(f64_bits(Float::<11, 52>::convert(&wide).to_f64()), f64_bits(a));
         assert_eq(f16::convert(&src).to_raw().to_u64(), f16::from_f64(a).to_raw().to_u64());
     }
+    // A product on a tie (3 + 1.5 units) less an addend far below it rounds down, not to the even side.
+    let tb = Float::<11, 52>::from_f64(1.0000000000000002);
+    let tc = Float::<11, 52>::from_f64(-1.0e-60);
+    let tie = Float::<11, 52>::from_f64(3.0).fma(&tb, &tc);
+    assert(same64(tie.to_f64(), math::fma(3.0, 1.0000000000000002, -1.0e-60)));
     // Sqrt specials.
     assert(f16::from_f64(0.0 - 4.0).sqrt().is_nan());
     assert(f16::neg_zero().sqrt().is_negative());

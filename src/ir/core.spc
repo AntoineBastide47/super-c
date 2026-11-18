@@ -1509,6 +1509,9 @@ pub(package) struct CoreBody {
     /// `simd_aux` record): instances re-lower with the demand env as for `has_reflect`, and the
     /// inliner re-lowers the callee under each call's bindings.
     pub(package) has_lists: bool,
+    /// The body holds a float's unchecked conversion (CAST_UNCHECKED), whose precondition the prover
+    /// proves as a call's `requires`.
+    pub(package) has_unchecked: bool,
     /// The body contains an unfolded `sizeof(T) <op> <const>` branch: instances re-lower with the
     /// demand env so the untaken side (a ZST container path or its material twin) never emits.
     pub(package) has_zst_cond: bool,
@@ -1657,6 +1660,7 @@ extend CoreBody {
             is_generic: false,
             has_reflect: false,
             has_lists: false,
+            has_unchecked: false,
             has_zst_cond: false,
             inst_ticks: false,
             count_blocks: 0,
@@ -1704,6 +1708,7 @@ extend CoreBody {
         self.is_generic = false;
         self.has_reflect = false;
         self.has_lists = false;
+        self.has_unchecked = false;
         self.has_zst_cond = false;
         self.inst_ticks = false;
         self.count_blocks = 0;
@@ -1763,6 +1768,7 @@ extend CoreBody {
         out.is_generic = src.is_generic;
         out.has_reflect = src.has_reflect;
         out.has_lists = src.has_lists;
+        out.has_unchecked = src.has_unchecked;
         out.has_zst_cond = src.has_zst_cond;
         out.inst_ticks = src.inst_ticks;
         out.count_blocks = src.count_blocks;

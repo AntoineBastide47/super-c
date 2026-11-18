@@ -1988,3 +1988,190 @@ fn hover_shows_layouts() {
     let hg = feat::hover(&p, m, off);
     assert(hg.is_some() && !hg.unwrap().as_str().contains("size:"), "a generic declaration has no layout");
 }
+
+// The verification words, which the lexer reads as identifiers, are keyword tokens where the parser
+// gives them their meaning, and their hover documents them; a quantifier's and a loop's binding are
+// variables. The proofs publish what a build reports, at the clause, and an edit that makes the clause
+// hold clears the record, as a fresh analysis of the same buffer does.
+@test
+fn verification_words_and_proofs() {
+    let a0: str = M"(struct C {
+    n: u32,
+}
+
+fn bump(c: &mut C)
+    requires c.n < 100
+    ensures c.n == old(c.n) + 1
+{
+    c.n = c.n + 1;
+}
+
+fn same(x: u32) u32
+    ensures |r| r > x
+{
+    return x;
+}
+
+lemma below(n: u32)
+    requires forall k in 0u32..n { k < n }
+{}
+
+fn main() i32 {
+    let mut c = C { n: 0 };
+    ghost let g: int = 3;
+    let mut s: u32 = 0;
+    for i in 0u32..3 {
+        s = i;
+    }
+    bump(&mut c);
+    return same(s) as i32;
+}
+)";
+    let ws = ws_of(a0, "", "", "");
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let m = mod_of(&p, "/a.spc");
+    let mut proofs: usize = 0;
+    for i in 0..diags.len() {
+        let d = diags.at(i);
+        if d.phase == an::PH_PROVE {
+            proofs += 1;
+            assert(d.start == a0.find("r > x") as u32 && d.severity == 1, "the record sits at the clause's condition");
+            assert(d.msg.as_str().starts_with("cannot prove this 'ensures' clause"), d.msg.as_str());
+        }
+    }
+    assert(proofs == 1, "one proof fails: the 'ensures' of `same`");
+    let toks = feat::semantic_tokens(&p, m);
+    // (text, offset, token type, modifiers): `variable` 7, `keyword` 11; 1 = declaration.
+    let want = [
+        ("requires", a0.find("requires c.n") as u32, 11, 0u32),
+        ("ensures", a0.find("ensures c.n") as u32, 11, 0u32),
+        ("old", a0.find("old(") as u32, 11, 0u32),
+        ("lemma", a0.find("lemma") as u32, 11, 0u32),
+        ("forall", a0.find("forall") as u32, 11, 0u32),
+        ("k", a0.find("k in") as u32, 7, 1u32),
+        ("k", a0.find("k < n") as u32, 7, 0u32),
+        ("ghost", a0.find("ghost") as u32, 11, 0u32),
+        ("i", a0.find("i in") as u32, 7, 1u32),
+        ("i", a0.find("i;") as u32, 7, 0u32),
+    ];
+    for w in want {
+        let mut hit = false;
+        for t in toks.iter() {
+            hit = hit || t.start == w.1 && t.end == w.1 + w.0.len() as u32 && t.ty == w.2 && t.mods == w.3;
+        }
+        assert(hit, w.0);
+    }
+    for t in toks.iter() {
+        assert(t.ty != 11 || a0.slice(t.start as usize, t.end as usize) != "same", "a function name is no keyword");
+    }
+    let h = feat::hover(&p, m, a0.find("requires c.n") as u32 + 3);
+    assert(h.is_some() && h.unwrap().as_str().contains("A precondition"), "the word's hover documents it");
+    ovt.set(0, edited(a0, "r > x", "r >= x"));
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "the clause holds");
+    for i in 0..diags.len() {
+        assert(diags.at(i).phase != an::PH_PROVE, "no proof fails");
+    }
+}
+
+// Stops at the first `*ctx` polls a request stops (`between`), then never.
+const fn stop_requests(ctx: *mut void, between: bool) bool {
+    let left = ctx as *mut u32;
+    if !between || unsafe *left == 0 {
+        return false;
+    }
+    unsafe *left -= 1;
+    return true;
+}
+
+// The proof records of `diags` as (module, start, message).
+fn proof_records(diags: &Vector<an::DiagRec>) Vector<(u32, u32, String)> {
+    let mut out = Vector::<(u32, u32, String)>::new();
+    for i in 0..diags.len() {
+        let d = diags.at(i);
+        if d.phase == an::PH_PROVE {
+            out.push((d.module, d.start, d.msg.clone()));
+        }
+    }
+    return out;
+}
+
+// A closed module owes its proofs and runs them once its document opens, as a fresh analysis of the
+// open documents does. Proofs a request stops resume where they stopped and report what a run nothing
+// stops reports.
+@test
+fn proofs_follow_open_documents_and_resume() {
+    let a0: str = M"(import b;
+
+fn main() i32 {
+    let _ = b::same(1);
+    return b::twice(2) as i32;
+}
+)";
+    let b0: str = M"(pub fn same(x: u32) u32
+    ensures |r| r > x
+{
+    return x;
+}
+
+pub fn twice(x: u32) u32
+    requires x < 1000
+    ensures |r| r == x + x
+{
+    return x + x;
+}
+)";
+    let ws = ws_of(a0, b0, "", "");
+    let mut ovf = Vector::<String>::new();
+    let mut ovt = Vector::<String>::new();
+    ov(&ws, "a.spc", a0, &mut ovf, &mut ovt);
+    let mut diags = Vector::<an::DiagRec>::new();
+    let mut p = fresh(&ws, &ovf, &ovt, &mut diags);
+    let mb = mod_of(&p, "/b.spc");
+    assert(proof_records(&diags).len() == 0, "a closed module runs no proofs");
+    assert(p.prove_owed[mb], "the closed module owes its proofs");
+    ov(&ws, "b.spc", b0, &mut ovf, &mut ovt);
+    round_state(&ws, &mut p, &mut diags, &ovf, &ovt, "b opens");
+    let want = proof_records(&diags);
+    assert(
+        want.len() == 1 && want.at(0).0 as usize == mb && want.at(0).1 == b0.find("r > x") as u32,
+        "the open module's proof fails",
+    );
+    // The same documents analyzed afresh, the borrow round stopped at its first two request polls.
+    let mut f2 = Vector::<String>::new();
+    let mut t2 = Vector::<String>::new();
+    for i in 0..ovf.len() {
+        f2.push(ovf.at(i).clone());
+        t2.push(ovt.at(i).clone());
+    }
+    let mut d2 = Vector::<an::DiagRec>::new();
+    let mut q = an::compile(&ws.root, &ws.dir, "", "std", unsafe shim::sc_host_platform(), f2, t2, "", &mut d2);
+    let mut fv = Vector::<str>::new();
+    for i in 0..ovf.len() {
+        fv.push(ovf.at(i).as_str());
+    }
+    let mut left: u32 = 2;
+    let mut resumed = false;
+    let mut ended = false;
+    for _ in 0..10 {
+        let r = an::borrowck_pending(&mut q, &mut d2, &fv, stop_requests, (&mut left) as *mut u32);
+        resumed = resumed || q.prove_resume.owner != 0;
+        if !r.canceled {
+            ended = true;
+            break;
+        }
+    }
+    assert(ended && left == 0, "the round stopped twice, then ended");
+    assert(resumed, "a stopped proof kept its place");
+    let got = proof_records(&d2);
+    assert(got.len() == want.len(), "the resumed proofs report as many records");
+    for i in 0..got.len() {
+        assert(
+            got.at(i).0 == want.at(i).0 && got.at(i).1 == want.at(i).1 && got.at(i).2 == want.at(i).2,
+            "the same record",
+        );
+    }
+}

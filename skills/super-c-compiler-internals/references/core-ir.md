@@ -17,6 +17,8 @@ pub struct CoreBody {
     pub returns: u32,
     pub is_generic: bool,      // may carry symbolic types
     pub has_reflect: bool,     // unexpanded reflection binder: instances must RE-LOWER
+    pub has_lists: bool,       // a vector index list names a generic parameter: instances re-lower
+    pub has_unchecked: bool,   // a float's `to_int_unchecked`: the prover proves its precondition
     pub has_zst_cond: bool,    // unfolded sizeof-vs-const branch: instances re-lower
     pub has_uninit_decl: bool, // some `let x: T;` had no value: init dataflow needed
     pub locals: Vector<LocalDecl>,

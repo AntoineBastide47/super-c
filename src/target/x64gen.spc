@@ -38,20 +38,17 @@ import ast::ast as ast;
 
 const V0: u8 = 16; // register number of xmm0: general registers are 0..15, xmm0..xmm31 16..47
 
-// Where a function of `size` bytes goes, whose loops to place are `loops` (start << 32 | end, offsets in
-// it: those of at most LINE bytes that hold a call, and the innermost ones of more that hold none): the
-// log2 of its alignment (16, 32 or 64 bytes) and the fill bytes between that boundary and its first byte
-// (a multiple of 16), the least alignment that leaves the fewest of those loops in more lines than their
-// bytes need (a loop of at most LINE bytes: a line boundary inside it) and, when the function has at
-// most LINE bytes, no boundary inside it.
+// Where a function of `size` bytes goes, whose loops of at most LINE bytes that hold a call are `loops`
+// (start << 32 | end, offsets in it): the log2 of its alignment (16, 32 or 64 bytes) and the fill
+// bytes between that boundary and its first byte (a multiple of 16), the least alignment that leaves the
+// fewest line boundaries inside those loops and, when it has at most LINE bytes, inside it.
 const fn line_fit(size: u32, loops: &Vector<u64>) (u8, u8) {
     let mut bad: [u32; 4] = [0, 0, 0, 0];
     for r in 0..4u32 {
         bad[r as usize] = (size <= LINE && 16 * r + size > LINE) as u32;
         for q in 0..loops.len() {
             let s = (loops[q] >> 32) as u32;
-            let n = loops[q] as u32 - s;
-            bad[r as usize] += ((16 * r + s) % LINE + n > LINE * ((n + LINE - 1) / LINE)) as u32;
+            bad[r as usize] += ((16 * r + s) % LINE + (loops[q] as u32 - s) > LINE) as u32;
         }
     }
     let m = bad[0].min(bad[1]).min(bad[2]).min(bad[3]);
@@ -84,8 +81,8 @@ const FF_NONE: u8 = 0;
 const FF_ABS: u8 = 1;
 const FF_ROUND: u8 = 2;
 // A line of the instruction cache and of the processor's fetch, in bytes: a boundary between two lines
-// inside a function, or a loop with a call, that fits one line costs up to a third of its time, and a
-// longer loop without a call in one line more than its bytes need up to a seventh (`line_fit`).
+// inside a function, or a loop with a call, that fits one line costs up to a third of its time
+// (`line_fit`).
 const LINE: u32 = 64;
 // Scratch registers; the vector ones are the ABI's (`Gen.vs0`, `Gen.vs1`).
 const S0: u8 = 10; // r10
@@ -10739,10 +10736,9 @@ extend Gen {
             ats.push(ast_min((self.rows[q] >> 32) as u32, body_n));
         }
         ats.extend_from_slice(&jto);
-        // Each loop that holds a call, in a block that is not rare, and each innermost loop that holds none
-        // (`lcall`: which): its first byte and the end of its last such block of the body, for `line_fit`.
+        // Each loop that holds a call, in a block that is not rare: its first byte and the end of its last
+        // such block of the body, for `line_fit`.
         let lp0 = ats.len();
-        let mut lcall = Vector::<bool>::new();
         if unsafe (*self.pkg).fit_lines {
             let lv = &self.cr.lv;
             let mut starts = Vector::<u32>::with_capacity(self.blk_at.len());
@@ -10790,22 +10786,11 @@ extend Gen {
                     h = lv.parent[h as usize];
                 }
             }
-            // The loops that hold another.
-            let mut outer = Vector::<bool>::new();
-            outer.resize_default(lv.inner.len());
             for q in 1..lv.order.len() {
                 let k = lv.order[q] as usize;
-                if lv.inner[k] == k as u32 && lv.parent[k] != NONE {
-                    *outer.index_mut(lv.parent[k] as usize) = true;
-                }
-            }
-            for q in 1..lv.order.len() {
-                let k = lv.order[q] as usize;
-                let placed = !lv.rare[k] && self.blk_at[k] != NONE && self.blk_at[k] < body_n;
-                if lv.inner[k] == k as u32 && (calls[k] || !outer[k] && placed) {
+                if lv.inner[k] == k as u32 && calls[k] {
                     ats.push(self.blk_at[k]);
                     ats.push(lend[k]);
-                    lcall.push(calls[k]);
                 }
             }
         }
@@ -10872,12 +10857,12 @@ extend Gen {
             return self.cr.refuse("too many sections");
         }
         let fl = place::func_flags(ps, !self.local && !self.base, !self.base);
-        // The loops with a call that fit a line, and the innermost ones without a call that do not.
+        // The loops with a call that fit a line.
         let mut loops = Vector::<u64>::new();
         for q in 0..nlp {
             let ls = lead + ats[lp0 + 2 * q];
             let le = lead + ats[lp0 + 2 * q + 1];
-            if le > ls && lcall[q] == (le - ls <= LINE) {
+            if le > ls && le - ls <= LINE {
                 loops.push(ls as u64 << 32 | le as u64);
             }
         }

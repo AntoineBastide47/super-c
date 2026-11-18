@@ -67,6 +67,175 @@ pub(package) const T_TAG: u8 = 33; // the discriminant of enum value `a`, an int
 // A reference to a member of a local or a slot of the body under proof: entry `a` of the prover's
 // table (`Prover::pref_tg`), which holds the local and the members' keys. No operand.
 pub(package) const T_PREF: u8 = 34;
+// Floats. A float value is the integer of its encoding, unsigned, of its width w: one sign bit, E exponent
+// bits and F fraction bits (w = 1 + E + F). Its format is a code `fd` in the term's `k`: F, and FD_FINITE
+// for the family without infinities (an all-ones exponent holds ordinary values but for the one NaN, an
+// all-ones fraction; overflow saturates at the largest finite value; x / 0 is NaN). The arithmetic reads a
+// float as that integer, and only these operations read it as a float. Each rounds to nearest, ties to
+// even; a NaN result is any NaN (its sign and payload are not specified). The bits define them
+// (`Blaster::float_value`); to the arithmetic they are atoms. `k` holds `fd`, and above bit 32 the
+// operation's other code (a mode, a source format).
+pub(package) const T_FADD: u8 = 35; // `a + b` (`a - b` is `a + -b`)
+pub(package) const T_FMUL: u8 = 36;
+pub(package) const T_FDIV: u8 = 37;
+pub(package) const T_FSQRT: u8 = 38; // the square root of `a`
+pub(package) const T_FFMA: u8 = 39; // `x * y + z` rounded once: x, y, z in [a, a + 3) of `Terms.args`
+pub(package) const T_ITOF: u8 = 40; // the integer `a` rounded to a float
+// `a` (a float of format `k`) as integer type (w, sg): `as`, which truncates and saturates, NaN 0.
+pub(package) const T_FTOI: u8 = 41;
+pub(package) const T_FCVT: u8 = 42; // `a` (a float of format `k >> 32`) rounded to format `k`
+// Float comparisons, formulas over two floats of format `k`: IEEE, so no NaN is ordered or equal, and -0
+// equals +0.
+pub(package) const T_FLT: u8 = 43;
+pub(package) const T_FLE: u8 = 44;
+pub(package) const T_FEQ: u8 = 45;
+// `a` rounded to an integral value, by mode `k >> 32`: FR_ROUND (halves away from zero), FR_FLOOR,
+// FR_CEIL, FR_TRUNC, FR_EVEN (halves to even).
+pub(package) const T_FRINT: u8 = 46;
+// C's `fmod`: `a - n * b` for `n` the quotient truncated, exact; it has the sign of `a`.
+pub(package) const T_FREM: u8 = 47;
+// The total order key of float `a`, an unsigned integer of its width: a positive encoding with its sign
+// bit set, a negative one complemented; the keys' order is std's `Float` order (`Ord`), NaNs at the ends.
+pub(package) const T_FKEY: u8 = 48;
+// `b` plus the greatest (`k >> 32` is 1) or least real that rounds to float `a`, rounded once; where that
+// bound does not round to `a` (an odd `a`'s), a tie rounds toward `a` (`Terms::fmid`).
+pub(package) const T_FMID: u8 = 49;
+pub(package) const FR_ROUND: u16 = 0;
+pub(package) const FR_FLOOR: u16 = 1;
+pub(package) const FR_CEIL: u16 = 2;
+pub(package) const FR_TRUNC: u16 = 3;
+pub(package) const FR_EVEN: u16 = 4;
+pub(package) const FD_FINITE: u64 = 0x10000;
+// The format codes of `f32` and `f64`.
+pub(package) const FD32: u64 = 23;
+pub(package) const FD64: u64 = 52;
+
+// Whether operation `op` is a float operation or comparison.
+pub(package) const fn float_op(op: u8) bool {
+    return op >= T_FADD && op <= T_FMID;
+}
+
+// Whether operation `op` takes one operand.
+pub(package) const fn unary_op(op: u8) bool {
+    return op == T_NEG || op == T_BNOT || op == T_CAST || op == T_REF || op == T_NOT || op == T_VIEW || op == T_DOWN || op == T_TAG || op == T_FSQRT || op == T_ITOF || op == T_FTOI || op == T_FCVT || op == T_FRINT || op == T_FKEY;
+}
+
+// The sign bit of a float of width `w`.
+pub(package) const fn fsign(w: u16) u64 {
+    return 1u64 << (w - 1) as u64;
+}
+
+// The host's type of format `fd` of width `w`: 32 for `f32`, 64 for `f64`, else 0.
+pub(package) const fn host_fw(w: u16, fd: u64) u16 {
+    return if w == 32 && fd == FD32 {
+        32
+    } else if w == 64 && fd == FD64 {
+        64
+    } else {
+        0
+    };
+}
+
+// Float operation `op` of format `k` (T_FTOI: into the integer type (`w`, `sg`)) over encodings `a` and `b`,
+// the source of a conversion of width `sw`, by the host's IEEE 754 arithmetic: its encoding, or its value
+// for T_FTOI; None for a format the host has not, for a NaN result (any NaN, which no constant stands for)
+// and for the operations a library computes (square root, fused multiply-add, rounding).
+pub(package) const fn fold_float<const B: usize>(op: u8, w: u16, sg: bool, k: u64, sw: u16, a: Num<B>, b: Num<B>) Option<
+    Num<B>
+> {
+    let fd = k & 0xFFFFFFFF;
+    let xa = a.limb(0);
+    let xb = b.limb(0);
+    let hw = host_fw(w, fd);
+    if op == T_ITOF {
+        if hw == 0 || a.is_negative() && !(wide::<B>(i64::MIN) <= a) || !a.is_negative() && !(a <= u64_val::<B>(
+            u64::MAX,
+        )) {
+            return None;
+        }
+        let neg = a.is_negative();
+        return Some(
+            if hw == 32 {
+                u64_val::<B>(pick(neg, (xa as i64) as f32, xa as f32).to_bits())
+            } else {
+                u64_val::<B>(pick(neg, (xa as i64) as f64, xa as f64).to_bits())
+            },
+        );
+    }
+    let sf = pick(op == T_FTOI, fd, pick(op == T_FCVT, k >> 32, fd));
+    let shw = host_fw(pick(op == T_FTOI || op == T_FCVT, sw, w), sf);
+    if shw == 0 {
+        return None;
+    }
+    let fa = pick(shw == 32, f32::from_bits(xa as u32), f64::from_bits(xa));
+    if op == T_FTOI {
+        let (lo, hi) = Terms::<B>::range(w, sg);
+        let v = if sg {
+            wide::<B>(fa as i64)
+        } else {
+            u64_val::<B>(fa as u64)
+        };
+        return Some(pick(v < lo, lo, pick(hi < v, hi, v)));
+    }
+    if op == T_FCVT {
+        if fa.is_nan() || hw == 0 {
+            return None;
+        }
+        return Some(u64_val::<B>(pick(hw == 32, (fa as f32).to_bits(), fa.to_bits())));
+    }
+    if op != T_FADD && op != T_FMUL && op != T_FDIV && op != T_FREM {
+        return None;
+    }
+    if hw == 32 {
+        let x = f32::from_bits(xa as u32);
+        let y = f32::from_bits(xb as u32);
+        let r = if op == T_FADD {
+            x + y
+        } else if op == T_FMUL {
+            x * y
+        } else if op == T_FDIV {
+            x / y
+        } else {
+            x % y
+        };
+        return pick(r.is_nan(), Option::<Num<B>>::None, Some(u64_val::<B>(r.to_bits())));
+    }
+    let x = f64::from_bits(xa);
+    let y = f64::from_bits(xb);
+    let r = if op == T_FADD {
+        x + y
+    } else if op == T_FMUL {
+        x * y
+    } else if op == T_FDIV {
+        x / y
+    } else {
+        x % y
+    };
+    return pick(r.is_nan(), Option::<Num<B>>::None, Some(u64_val::<B>(r.to_bits())));
+}
+
+// The IEEE comparison `op` (T_FLT, T_FLE, T_FEQ) of encodings `a` and `b` of width `w` and format `fd`;
+// None for a format the host has not.
+pub(package) const fn fold_fcmp(op: u8, w: u16, fd: u64, a: u64, b: u64) Option<bool> {
+    let hw = host_fw(w, fd);
+    if hw == 0 {
+        return None;
+    }
+    let (x, y) = if hw == 32 {
+        (f32::from_bits(a as u32) as f64, f32::from_bits(b as u32) as f64)
+    } else {
+        (f64::from_bits(a), f64::from_bits(b))
+    };
+    return Some(
+        if op == T_FLT {
+            x < y
+        } else if op == T_FLE {
+            x <= y
+        } else {
+            x == y
+        },
+    );
+}
 
 // Whether an operand of operation `op` takes a product apart (`Terms::product`): a sum, a difference,
 // a negation or a product.
@@ -97,7 +266,7 @@ pub(package) const fn commutes(op: u8) bool {
 
 // Whether operation `op` keeps its operands in `Terms.args`.
 pub(package) const fn pooled(op: u8) bool {
-    return op == T_CALL || op == T_AGG || op == T_UPD;
+    return op == T_CALL || op == T_AGG || op == T_UPD || op == T_FFMA;
 }
 
 // `Term.w`: an integer's bit width; W_BOOL for a boolean; W_OTHER for any other value.
@@ -136,6 +305,10 @@ pub(package) struct Terms<const B: usize> {
     // or a sum of such constants can leave B bits, which drops a fact (`prove_fits`).
     pub(package) big_seen: bool,
     big: Num<B>,
+    // Each integer `choose` made, by its term: its condition and its two values.
+    choices: Map<u32, (u32, u32, u32)>,
+    // Each value a float rewrite's model made of an IEEE operation, by its term: that operation's term.
+    shapes: Map<u32, u32>,
 }
 
 pub(package) const fn hmix(h: u64, v: u64) u64 {
@@ -163,6 +336,8 @@ extend<const B: usize> Terms<B> {
             bitty: Vector::<bool>::new(),
             big_seen: false,
             big: Num::<B>::one().shl(B / 2 - 8),
+            choices: Map::<u32, (u32, u32, u32)>::new(),
+            shapes: Map::<u32, u32>::new(),
         };
     }
 
@@ -172,6 +347,8 @@ extend<const B: usize> Terms<B> {
         self.args.clear();
         self.nvars = 0;
         self.bitty.clear();
+        self.choices.clear();
+        self.shapes.clear();
     }
 
     pub(package) const fn at(self: &Self, t: u32) Term<B> {
@@ -228,7 +405,7 @@ extend<const B: usize> Terms<B> {
             return hit;
         }
         let n = self.ts.len() as u32;
-        let own = t.op >= T_DIV && t.op <= T_CAST || t.op == T_ORD || t.op == T_MUL && self.ts[t.a as usize].op != T_INT && self.ts[t.b as usize].op != T_INT;
+        let own = t.op >= T_DIV && t.op <= T_CAST || t.op == T_ORD || float_op(t.op) || t.op == T_MUL && self.ts[t.a as usize].op != T_INT && self.ts[t.b as usize].op != T_INT;
         let under = t.op >= T_ADD && t.op <= T_NEG || t.op >= T_LT && t.op <= T_OR;
         let unary = t.op == T_NEG || t.op == T_NOT;
         self.bitty.push(own || under && (self.bitty[t.a as usize] || !unary && self.bitty[t.b as usize]));
@@ -561,6 +738,187 @@ extend<const B: usize> Terms<B> {
             return self.int(r, w, sg);
         }
         return self.make(Term::<B> { k: Num::<B>::zero(), a: a, b: 0, op: op, w: w, sg: sg });
+    }
+
+    // Float operation `op` (T_FADD, T_FMUL, T_FDIV, T_FREM) of width `w` and format `fd` over floats `a` and
+    // `b`; constants fold.
+    pub(package) fn farith(self: &mut Self, op: u8, a: u32, b: u32, w: u16, fd: u64) u32 {
+        let x = self.ts[a as usize];
+        let y = self.ts[b as usize];
+        if x.op == T_INT && y.op == T_INT {
+            if let Some(v) = fold_float(op, w, false, fd, w, x.k, y.k) {
+                return self.int(v, w, false);
+            }
+        }
+        if (op == T_FADD || op == T_FMUL) && a > b {
+            return self.make(Term::<B> { k: u64_val::<B>(fd), a: b, b: a, op: op, w: w, sg: false });
+        }
+        return self.make(Term::<B> { k: u64_val::<B>(fd), a: a, b: b, op: op, w: w, sg: false });
+    }
+
+    // The sign bit of a float of width `w`, and the mask of the bits below it.
+    pub(package) const fn fsign_num(w: u16) (Num<B>, Num<B>) {
+        let s = Num::<B>::one() << (w - 1) as usize;
+        return s, s - Num::<B>::one();
+    }
+
+    // `-a` of float `a` of width `w`: its sign bit flipped (a NaN's too).
+    pub(package) fn fneg(self: &mut Self, a: u32, w: u16) u32 {
+        let x = self.ts[a as usize];
+        let (sb, _mg) = Terms::<B>::fsign_num(w);
+        if x.op == T_INT {
+            return self.int(x.k ^ sb, w, false);
+        }
+        let m = self.int(sb, w, false);
+        return self.arith(T_BXOR, a, m, w, false);
+    }
+
+    // `|a|` of float `a` of width `w`: its sign bit cleared.
+    pub(package) fn fabs(self: &mut Self, a: u32, w: u16) u32 {
+        let x = self.ts[a as usize];
+        let (_sb, mg) = Terms::<B>::fsign_num(w);
+        if x.op == T_INT {
+            return self.int(x.k & mg, w, false);
+        }
+        let m = self.int(mg, w, false);
+        return self.arith(T_BAND, a, m, w, false);
+    }
+
+    // `a` with the sign of `b`, floats of width `w`.
+    pub(package) fn fcopysign(self: &mut Self, a: u32, b: u32, w: u16) u32 {
+        let x = self.ts[a as usize];
+        let y = self.ts[b as usize];
+        let (sb, mg) = Terms::<B>::fsign_num(w);
+        if x.op == T_INT && y.op == T_INT {
+            return self.int(x.k & mg | y.k & sb, w, false);
+        }
+        let ma = self.fabs(a, w);
+        let sm = self.int(sb, w, false);
+        let bs = self.arith(T_BAND, b, sm, w, false);
+        return self.arith(T_BOR, ma, bs, w, false);
+    }
+
+    // A float conversion `op` (T_ITOF, T_FTOI, T_FCVT, T_FSQRT) of `a` into type (`w`, `sg`), its `k` the
+    // formats (T_FSQRT, T_ITOF: the result's; T_FTOI: the source's; T_FCVT: the result's, the source's above
+    // bit 32); a constant folds (not a square root).
+    pub(package) fn fconv(self: &mut Self, op: u8, a: u32, w: u16, sg: bool, k: u64) u32 {
+        let x = self.ts[a as usize];
+        if x.op == T_INT && (op != T_ITOF || x.w <= 64) {
+            if let Some(v) = fold_float(op, w, sg, k, x.w, x.k, Num::<B>::zero()) {
+                return self.int(v, w, sg);
+            }
+        }
+        if op == T_FCVT && x.w == w && k >> 32 == (k & 0xFFFFFFFF) {
+            return a;
+        }
+        return self.make(Term::<B> { k: u64_val::<B>(k), a: a, b: 0, op: op, w: w, sg: sg });
+    }
+
+    // Float `a` of width `w` and format `fd` rounded to an integral value by mode `md` (FR_ROUND ..).
+    pub(package) fn frint(self: &mut Self, a: u32, md: u16, w: u16, fd: u64) u32 {
+        return self.make(Term::<B> { k: u64_val::<B>(fd | md as u64 << 32), a: a, b: 0, op: T_FRINT, w: w, sg: false });
+    }
+
+    // `b` plus the greatest (`up`) or least real that rounds to float `a` of width `w` and format `fd`,
+    // rounded once (T_FMID): the bounds of `p + b` for every real `p` that rounds to `a`.
+    pub(package) fn fmid(self: &mut Self, a: u32, b: u32, up: bool, w: u16, fd: u64) u32 {
+        return self.make(Term::<B> { k: u64_val::<B>(fd | up as u64 << 32), a: a, b: b, op: T_FMID, w: w, sg: false });
+    }
+
+    // The total order key (T_FKEY) of float `a` of width `w` and format `fd`.
+    pub(package) fn fkey(self: &mut Self, a: u32, w: u16, fd: u64) u32 {
+        let x = self.ts[a as usize];
+        if x.op == T_INT {
+            return self.int(Terms::<B>::key_of(x.k, w), w, false);
+        }
+        return self.make(Term::<B> { k: u64_val::<B>(fd), a: a, b: 0, op: T_FKEY, w: w, sg: false });
+    }
+
+    // The total order key of encoding `v` of width `w`.
+    pub(package) const fn key_of(v: Num<B>, w: u16) Num<B> {
+        let (sb, mg) = Terms::<B>::fsign_num(w);
+        return if (v & sb).is_zero() {
+            v | sb
+        } else {
+            (v ^ mg) & mg
+        };
+    }
+
+    // `x * y + z` of floats of width `w` and format `fd`, rounded once.
+    pub(package) fn ffma(self: &mut Self, xs: &Vector<u32>, w: u16, fd: u64) u32 {
+        let a = self.args.len() as u32;
+        self.args.extend_copy(xs);
+        return self.make(Term::<B> { k: u64_val::<B>(fd), a: a, b: xs.len() as u32, op: T_FFMA, w: w, sg: false });
+    }
+
+    // The IEEE comparison `op` (T_FLT, T_FLE, T_FEQ) of floats `a` and `b` of format `fd`.
+    pub(package) fn fcmp(self: &mut Self, op: u8, a: u32, b: u32, fd: u64) u32 {
+        // A comparison of a choice is the choice of the comparisons of its values: the facts of each
+        // operation (`Blaster::box_lemmas`) meet the constants it is compared with.
+        for side in 0..2 {
+            let t = pick(side == 0, a, b);
+            if let Some(ch) = self.choices.get(&t) {
+                let (c, p, q) = *ch;
+                let (l, r) = if side == 0 {
+                    (self.fcmp(op, p, b, fd), self.fcmp(op, q, b, fd))
+                } else {
+                    (self.fcmp(op, a, p, fd), self.fcmp(op, a, q, fd))
+                };
+                let cl = self.and(c, l);
+                let nc = self.not(c);
+                let cr = self.and(nc, r);
+                return self.or(cl, cr);
+            }
+        }
+        let x = self.ts[a as usize];
+        let y = self.ts[b as usize];
+        if x.op == T_INT && y.op == T_INT && x.w <= 64 {
+            if let Some(v) = fold_fcmp(op, x.w, fd, x.k.limb(0), y.k.limb(0)) {
+                return self.boolean(v);
+            }
+        }
+        if op == T_FEQ && a > b {
+            return self.make(Term::<B> { k: u64_val::<B>(fd), a: b, b: a, op: op, w: W_BOOL, sg: false });
+        }
+        return self.make(Term::<B> { k: u64_val::<B>(fd), a: a, b: b, op: op, w: W_BOOL, sg: false });
+    }
+
+    // `a` where boolean `c` holds, else `b`, for integers of width `w`: `c` widened to a mask of ones.
+    pub(package) fn choose(self: &mut Self, c: u32, a: u32, b: u32, w: u16) u32 {
+        if self.is_true(c) || a == b {
+            return a;
+        }
+        if self.is_false(c) {
+            return b;
+        }
+        let c1 = self.unary(T_CAST, c, w, false);
+        let m = self.unary(T_NEG, c1, w, false);
+        let nm = self.unary(T_BNOT, m, w, false);
+        let x = self.arith(T_BAND, a, m, w, false);
+        let y = self.arith(T_BAND, b, nm, w, false);
+        let r = self.arith(T_BOR, x, y, w, false);
+        self.choices.insert(r, (c, a, b));
+        return r;
+    }
+
+    // Record `r` as the value of IEEE operation `e` that a float rewrite's model made (`shape`).
+    pub(package) fn set_shape(self: &mut Self, r: u32, e: u32) {
+        if r != e {
+            self.shapes.insert(r, e);
+        }
+    }
+
+    // The IEEE operation whose model made `t` (`set_shape`), else `t`.
+    pub(package) fn shape(self: &Self, t: u32) u32 {
+        return switch self.shapes.get(&t) {
+            Some(e) => *e,
+            None => t,
+        };
+    }
+
+    // Whether `t` is a `choose` result.
+    pub(package) fn is_choice(self: &Self, t: u32) bool {
+        return self.choices.contains_key(&t);
     }
 
     // A comparison of two integers, or (`T_EQ`, `T_NE`) of two booleans or two other values.
@@ -979,7 +1337,7 @@ extend<const B: usize> Terms<B> {
             return;
         }
         out.push(x.a);
-        if !(x.op == T_NEG || x.op == T_BNOT || x.op == T_CAST || x.op == T_REF || x.op == T_NOT || x.op == T_VIEW || x.op == T_DOWN || x.op == T_TAG) {
+        if !unary_op(x.op) {
             out.push(x.b);
         }
     }

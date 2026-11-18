@@ -352,6 +352,80 @@ struct AttrDoc {
     pub(package) doc: str<'static>,
 }
 
+// The verification words the lexer reads as identifiers, for hover (`spec_word_hover`).
+const SPEC_WORD_DOCS: [AttrDoc; 14] = [
+    AttrDoc {
+        name: "requires",
+        sig: "requires E",
+        doc: "A precondition: each caller proves `E` at the call, and the body assumes it.",
+    },
+    AttrDoc {
+        name: "ensures",
+        sig: "ensures E\nensures |r| E",
+        doc: "A postcondition: the body proves `E` at each normal return, and each caller assumes it. `r` names the result.",
+    },
+    AttrDoc {
+        name: "decreases",
+        sig: "decreases E",
+        doc: "A measure: `E` is at least 0 and decreases at each recursive call or loop iteration, so the function or the loop ends.",
+    },
+    AttrDoc {
+        name: "invariant",
+        sig: "invariant E",
+        doc: "On a loop: `E` holds before the loop and after each iteration. On a struct or a static: every value holds `E`.",
+    },
+    AttrDoc {
+        name: "panics",
+        sig: "panics if E",
+        doc: "The function can panic only where `E` holds at its entry; its other clauses state its normal returns. A caller with contracts proves `!E`.",
+    },
+    AttrDoc {
+        name: "spec",
+        sig: "spec fn f(..) T",
+        doc: "A specification function: only ghost code calls it, and no build emits it.",
+    },
+    AttrDoc {
+        name: "lemma",
+        sig: "lemma l(..) requires P ensures Q { .. }",
+        doc: "A proof: its body proves `Q` from `P`, and a call gives `Q` where `P` holds. No build emits it.",
+    },
+    AttrDoc {
+        name: "forall",
+        sig: "forall i in a..b { E }",
+        doc: "True when `E` holds for every `i` of the range. Only ghost code uses it.",
+    },
+    AttrDoc {
+        name: "exists",
+        sig: "exists i in a..b { E }",
+        doc: "True when `E` holds for some `i` of the range. Only ghost code uses it.",
+    },
+    AttrDoc {
+        name: "old",
+        sig: "old(e)",
+        doc: "The value of `e` at the function's entry. Only contracts and ghost code use it.",
+    },
+    AttrDoc {
+        name: "assert",
+        sig: "assert P by { .. };",
+        doc: "The block proves `P`, and the code after it assumes `P`. Ghost code: no build runs it.",
+    },
+    AttrDoc {
+        name: "by",
+        sig: "assert P by { .. };",
+        doc: "The block proves `P`, and the code after it assumes `P`. Ghost code: no build runs it.",
+    },
+    AttrDoc {
+        name: "ghost",
+        sig: "ghost let x = e;\nghost x = e;",
+        doc: "Ghost state: only the proofs read it, and no build runs the statement.",
+    },
+    AttrDoc {
+        name: "is",
+        sig: "T is P",
+        doc: "A pattern type: the values of `T` that match `P`. The build proves each conversion into it.",
+    },
+];
+
 const ATTR_DOCS: [AttrDoc; 42] = [
     AttrDoc {
         name: "emit_macro",
@@ -732,12 +806,48 @@ pub(package) fn attribute_hover(src: str, off: u32) Option<String> {
     return None;
 }
 
-/// Markdown hover for the position: the attribute's documentation, else the expression's rendered
-/// type, then the resolved declaration's head. None when the position carries none of them.
+/// Markdown hover for the verification word at `off` (`spec_clause_words`, `spec_node_word`), None
+/// when `off` is on none.
+fn spec_word_hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
+    let a = mod_ast(p, mi);
+    let src = p.modules.at(mi).source.as_str();
+    let mut ws = Vector::<Tok>::new();
+    spec_clause_words(a, src, &mut ws);
+    let id = node_at_or_before(a, off);
+    if id != NODE_NONE {
+        spec_node_word(a, src, id, &mut ws);
+    }
+    for i in 0..ws.len() {
+        let w = ws.at(i);
+        if w.start <= off && off < w.end {
+            let name = src.slice(w.start as usize, w.end as usize);
+            let docs: []AttrDoc = SPEC_WORD_DOCS;
+            for k in 0..docs.len() {
+                let d = docs.at(k);
+                if d.name == name {
+                    let mut out = String::from_str("```super-c\n");
+                    out.push_str(d.sig);
+                    out.push_str("\n```\n\n");
+                    out.push_str(d.doc);
+                    return Some(out);
+                }
+            }
+        }
+    }
+    return None;
+}
+
+/// Markdown hover for the position: the attribute's or the verification word's documentation, else the
+/// expression's rendered type, then the resolved declaration's head. None when the position carries none
+/// of them.
 pub(package) fn hover(p: &loader::Package, mi: usize, off: u32) Option<String> {
     let ah = attribute_hover(&p.modules.at(mi).source, off);
     if ah.is_some() {
         return ah;
+    }
+    let sh = spec_word_hover(p, mi, off);
+    if sh.is_some() {
+        return sh;
     }
     let a = mod_ast(p, mi);
     let id = node_at_or_before(a, off);
@@ -987,7 +1097,7 @@ pub(package) struct Tok {
     pub(package) start: u32,
     pub(package) end: u32,
     pub(package) ty: i32, // legend: 0 namespace, 1 type, 2 enum, 3 enumMember, 4 interface, 5 typeParameter,
-    // 6 parameter, 7 variable, 8 property, 9 function, 10 method.
+    // 6 parameter, 7 variable, 8 property, 9 function, 10 method, 11 keyword.
     pub(package) mods: u32, // bit 0 declaration, bit 1 readonly
 }
 
@@ -1070,7 +1180,8 @@ fn token_type_of(p: &loader::Package, d: DefId, mc: &mut MethodCache) i32 {
     if n.kind == NodeKind::NODE_PARAMETER {
         return 6;
     }
-    if n.kind == NodeKind::NODE_LET || n.kind == NodeKind::NODE_PATTERN_NAME {
+    // A `for` loop's binding resolves to the loop, a quantifier's to the binding's name.
+    if n.kind == NodeKind::NODE_LET || n.kind == NodeKind::NODE_PATTERN_NAME || n.kind == NodeKind::NODE_FOR || n.kind == NodeKind::NODE_INLINE_FOR || n.kind == NodeKind::NODE_IDENTIFIER {
         return 7;
     }
     if n.kind == NodeKind::NODE_FIELD {
@@ -1152,6 +1263,84 @@ fn import_binds(p: &loader::Package, a: *const Ast, mi: usize, name: str) bool {
     return false;
 }
 
+// The legend index of `keyword` (`server::capabilities_with`).
+const TOK_KEYWORD: i32 = 11;
+
+// A keyword token for word `w` at offset `at` of `src` when the text there spells the whole word: a
+// record the parser built itself (an expanded invariant's) spells another text, and gives none.
+fn word_tok(src: str, at: u32, w: str, out: &mut Vector<Tok>) {
+    let s = at as usize;
+    let e = s + w.len();
+    if e > src.len() || src.slice(s, e) != w || s > 0 && ltext::ident_byte(src[s - 1]) || e < src.len() && ltext::ident_byte(
+        src[e],
+    ) {
+        return;
+    }
+    tok_push(out, at, e as u32, TOK_KEYWORD, 0);
+}
+
+// The keywords of the contract records of module `a` (source `src`), which the lexer reads as identifiers:
+// each clause's word, `assert` and the `by` before its block, and `ghost`.
+fn spec_clause_words(a: *const Ast, src: str, out: &mut Vector<Tok>) {
+    let cs = unsafe &(*a).contracts;
+    for c in 0..cs.len() {
+        let r = *cs.at(c);
+        if r.kind == CT_GHOST {
+            word_tok(src, r.at, "ghost", out);
+        } else if r.kind == CT_PANICS {
+            word_tok(src, r.at, "panics", out);
+        } else if r.kind <= CT_ASSERT || r.kind == CT_TYPE_INVARIANT {
+            word_tok(src, r.at, contract_word(r.kind), out);
+        }
+        if r.kind == CT_ASSERT && r.owner != NODE_NONE && unsafe (*a).valid(r.owner) {
+            // `by` is the word before the block.
+            let mut k = (unsafe (*a).at_const(r.owner).span.start) as usize;
+            while k > r.at as usize && (src[k - 1] == b' ' || src[k - 1] == b'\t' || is_eol(src[k - 1])) {
+                k -= 1;
+            }
+            if k >= 2 {
+                word_tok(src, (k - 2) as u32, "by", out);
+            }
+        }
+    }
+}
+
+// The keyword node `i` of module `a` starts with, which the lexer reads as an identifier: `spec` or
+// `lemma` of a ghost function, a quantifier's `forall` or `exists`, `old`, and the `is` of a pattern type.
+fn spec_node_word(a: *const Ast, src: str, i: NodeId, out: &mut Vector<Tok>) {
+    let n = unsafe (*a).at_const(i);
+    if n.kind == NodeKind::NODE_FUNCTION {
+        let f = unsafe (*a).ext(i).function;
+        if f.is_spec() {
+            word_tok(src, n.span.start, "spec", out);
+        } else if f.is_lemma() {
+            word_tok(src, n.span.start, "lemma", out);
+        }
+    } else if n.kind == NodeKind::NODE_FORALL {
+        word_tok(src, n.span.start, "forall", out);
+    } else if n.kind == NodeKind::NODE_EXISTS {
+        word_tok(src, n.span.start, "exists", out);
+    } else if n.kind == NodeKind::NODE_OLD {
+        word_tok(src, n.span.start, "old", out);
+    } else if n.kind == NodeKind::NODE_PATTERN_TYPE {
+        let mut k = (unsafe (*a).at_const(n.as_data.pattern_type.base).span.end) as usize;
+        while k < src.len() && (src[k] == b' ' || src[k] == b'\t' || is_eol(src[k])) {
+            k += 1;
+        }
+        word_tok(src, k as u32, "is", out);
+    }
+}
+
+// Whether token `t` of `src` spans one word: identifier bytes, or bytes of a UTF-8 sequence.
+const fn one_word(src: str, t: &Tok) bool {
+    for k in t.start as usize..t.end as usize {
+        if !ltext::ident_byte(src[k]) && src[k] < 0x80 {
+            return false;
+        }
+    }
+    return true;
+}
+
 fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
     if ty < 0 || start >= end {
         return;
@@ -1160,11 +1349,22 @@ fn tok_push(out: &mut Vector<Tok>, start: u32, end: u32, ty: i32, mods: u32) {
     out.push(Tok { start: start, end: end, ty: ty, mods: mods });
 }
 
+// By span; on one span the keyword first, then the declaration, so the duplicates' removal keeps them
+// over the tokens of the items the parser builds on the same words (an invariant's `spec fn`).
 const fn tok_cmp(a: &Tok, b: &Tok) i32 {
     if a.start != b.start {
         return a.start.cmp(&b.start);
     }
-    return a.end.cmp(&b.end);
+    if a.end != b.end {
+        return a.end.cmp(&b.end);
+    }
+    if a.ty == TOK_KEYWORD != (b.ty == TOK_KEYWORD) {
+        return pick(a.ty == TOK_KEYWORD, -1, 1);
+    }
+    if a.mods != b.mods {
+        return b.mods.cmp(&a.mods);
+    }
+    return a.ty.cmp(&b.ty);
 }
 
 /// Every classifiable token in module `mi`: resolved references (through their name spans) plus each
@@ -1191,8 +1391,19 @@ pub(package) fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
         qualifier_tokens(p, a, mi, i, &mut out);
     }
     let n = unsafe (*a).nnodes();
+    let src = p.modules.at(mi).source.as_str();
+    spec_clause_words(a, src, &mut out);
     for i0 in 1..n {
         let i = unsafe (*a).nth_id(i0);
+        spec_node_word(a, src, i, &mut out);
+        let k = unsafe (*a).at_const(i).kind;
+        if k == NodeKind::NODE_FOR || k == NodeKind::NODE_INLINE_FOR || k == NodeKind::NODE_FORALL || k == NodeKind::NODE_EXISTS {
+            let b = unsafe (*a).ext(i).for_stmt.binding;
+            if unsafe (*a).at_const(b).kind == NodeKind::NODE_IDENTIFIER {
+                let bs = unsafe (*a).at_const(b).span;
+                tok_push(&mut out, bs.start, bs.end, 7, 1);
+            }
+        }
         let bn = binding_name(a, i);
         if bn != NODE_NONE {
             let bs = unsafe (*a).at_const(bn).span;
@@ -1211,10 +1422,14 @@ pub(package) fn semantic_tokens(p: &loader::Package, mi: usize) Vector<Tok> {
         tok_push(&mut out, sp.start, sp.end, token_type_of(p, DefId { module: mi as ModuleId, node: i }, &mut mc), mods);
     }
     out.sort_by(tok_cmp);
-    // One pass over the sorted list removes the duplicate spans: O(n log n) total, never quadratic.
+    // One pass over the sorted list removes the duplicate spans: O(n log n) total, never quadratic. A
+    // span of more than one word (the name of an item the parser builds on a clause) is no token.
     let mut w: usize = 0;
     for i in 0..out.len() {
-        if w != 0 && out.at(w - 1).start == out.at(i).start && out.at(w - 1).end == out.at(i).end {
+        if w != 0 && out.at(w - 1).start == out.at(i).start && out.at(w - 1).end == out.at(i).end || !one_word(
+            src,
+            out.at(i),
+        ) {
             continue;
         }
         let t = *out.at(i);
@@ -1524,7 +1739,7 @@ pub(package) fn complete_member(p: &loader::Package, mi: usize, off: u32) Vector
 /// fallback when no build (not even a probe build) parses the buffer.
 pub(package) fn complete_keywords() Vector<CompItem> {
     let mut out = Vector::<CompItem>::new();
-    let kws = "as do fn if in dyn for let mut new pub case else enum loop move null self Self true type break const defer false union where while extend extern import launch return select static struct switch sizeof unsafe alignof continue interface static_assert";
+    let kws = "as by do fn if in is dyn for let mut new old pub case else enum loop move null self Self spec true type break const defer false ghost lemma union where while exists extend extern forall import launch panics return select static struct switch sizeof unsafe alignof ensures continue requires decreases interface invariant static_assert";
     let mut it = kws.split(" ");
     loop {
         let w = it.next();

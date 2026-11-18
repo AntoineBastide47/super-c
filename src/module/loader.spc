@@ -20,6 +20,7 @@ import graph::items as gitems;
 import ir::layout as lay;
 import ir::cpu_features as cf;
 import ir::recursion as recur;
+import ir::lower as irl;
 import target::table as tgt;
 import utils::persist as *;
 import driver::util as dutil;
@@ -156,6 +157,19 @@ extend ItemSched {
 
 /// The whole compilation: the root module plus every module reachable through `import`. Modules are kept as
 /// separate Asts; cross-module references are DefId{module, node} into this array.
+/// LSP: proofs a request stopped between two bodies (`lsp::analysis::prove_module`): the bodies they
+/// read, the direct-call components, the modules whose contracts of functions without a body they lower,
+/// the kept slot to resume at and the reports so far. An analysis or a parse-back ends them: the bodies
+/// name the types of their modules as those were checked.
+pub(package) struct ProveResume {
+    pub(package) owner: u32, // the module plus one; 0 for none
+    pub(package) keep: irl::Keep,
+    pub(package) comp: Vector<u32>,
+    pub(package) mods: Vector<bool>,
+    pub(package) next: usize,
+    pub(package) errs: errs::Errors,
+}
+
 pub(package) struct Package {
     pub(package) modules: Vector<Module>,
     /// The module path index `find` reads: FNV hash of a module path -> the newest module with that
@@ -462,6 +476,15 @@ pub(package) struct Package {
     /// LSP: per module, the borrow check an analysis still owes it (the module was analyzed again
     /// and its borrow records are not current). Its body syntax stays live until the check ran.
     pub(package) bc_pending: Vector<bool>,
+    /// LSP: per module, the proofs its last borrow check did not finish: the module had no editor
+    /// buffer, or a request stopped them. An open module's run again: from `prove_resume` when it holds
+    /// them, else with a new borrow check.
+    pub(package) prove_owed: Vector<bool>,
+    /// LSP: the proofs of an open module that a request stopped between two bodies.
+    pub(package) prove_resume: ProveResume,
+    /// LSP: the bodies the proofs of the open modules read besides their own, as their lowering left them
+    /// (`lsp::analysis::prove_reach`); a module's go once it is analyzed again.
+    pub(package) prove_cache: irl::Keep,
     /// LSP: the unbounded-recursion summaries of the borrow-checked modules, per module from its last
     /// borrow round (`ir::recursion::Summaries`).
     pub(package) recur: recur::Summaries,

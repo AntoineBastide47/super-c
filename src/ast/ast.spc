@@ -4292,6 +4292,13 @@ extend Ast {
         self.used_inst.clear();
         self.used_bits.clear();
         self.used_spec.clear();
+        // The records a check appends name types of the pool it cleared: a check of a module checked
+        // before (a body parsed back) records them again.
+        self.proj_obs.clear();
+        self.ob_seen.clear();
+        self.dmd_uses.clear();
+        self.method_refs.clear();
+        self.wide_lits.clear();
         if self.gt.p == null {
             // Module-local identity: seeds go to the pool (the package table carries them otherwise).
             self.pool.seed();

@@ -35260,7 +35260,17 @@ extend TypeChecker {
             let mut selem: TypeId = TYPE_NONE;
             if ity.kind == TypeKind::TYPE_ARRAY {
                 elem = ity.as_data.elem;
-                let owns = self.tc_type_is_free(elem);
+                // The loop consumes elements that own by value: a reference or a pointer (also inside
+                // nested arrays) owns nothing, though `tc_type_is_free` sees through it.
+                let mut inner = elem;
+                for _d in 0..64 {
+                    if self.type_at(inner).kind != TypeKind::TYPE_ARRAY {
+                        break;
+                    }
+                    inner = self.type_at(inner).as_data.elem;
+                }
+                let ik = self.type_at(inner).kind;
+                let owns = ik != TypeKind::TYPE_REFERENCE && ik != TypeKind::TYPE_POINTER && self.tc_type_is_free(elem);
                 unsafe (*self.cur_ast()).ext_mut(id).for_stmt.consumes = owns;
             } else if self.slice_kind(it, &mut selem) != 0 {
                 elem = selem;
