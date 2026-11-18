@@ -13,6 +13,8 @@ import std::platform::process;
 import stdio;
 import stdlib;
 import module::loader;
+import std::cpu;
+import std::cpu::detect;
 
 // The package options a test may set (`object_of`): sibling calls (`Package.tail`), 32-byte vectors
 // (`Package.vector`: x86-64's ymm registers with AVX2), binary16 instructions (`Package.half`: arithmetic
@@ -20,8 +22,9 @@ import module::loader;
 // registers with AVX-512), `popcnt`, SSE4.1's roundings (`Package.sse41`), arm64's LSE atomics and RCpc
 // acquire loads (`Package.lse`, `Package.rcpc`); equal edges of a body sharing one record, as the
 // optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
-// multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); and loops at 16-byte
-// boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`).
+// multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); loops at 16-byte
+// boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`); arm64's
+// FEAT_CSSC (`Cpu.cssc`); and x86-64's BMI1, BMI2 and MOVBE together (`Cpu.bmi1`, `Cpu.bmi2`, `Cpu.movbe`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -35,6 +38,8 @@ const OMIT_FP: u32 = 512;
 const FMA: u32 = 1024;
 const LZCNT: u32 = 2048;
 const LINES: u32 = 4096;
+const CSSC: u32 = 8192;
+const BMI: u32 = 16384;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -116,6 +121,24 @@ fn run_fma(text: str, driver: str) i32 {
     return run_native_with(text, &d, WIDE | SSE41 | FMA);
 }
 
+// `run_native` with BMI1, BMI2 and MOVBE on an x86-64 host: the driver's `main` returns 0 first on a
+// processor without one of them (CPUID leaf 7 EBX bits 3 and 8, leaf 1 ECX bit 22). 0 on another host.
+fn run_bmi(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "#include <cpuid.h>\n{}{}  {{ unsigned a, b, c, e; if (!__get_cpuid_count(7, 0, &a, &b, &c, &e) || (b >> 3 & 1) == 0 || (b >> 8 & 1) == 0) return 0; if (!__get_cpuid(1, &a, &b, &c, &e) || (c >> 22 & 1) == 0) return 0; }}\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, BMI);
+}
+
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
 // SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
 // AVX-512 BW. 0 on another host.
@@ -190,6 +213,10 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.lse = (opts & LSE) != 0;
     p.cpu.rcpc = (opts & RCPC) != 0;
     p.cpu.fma = (opts & FMA) != 0;
+    p.cpu.cssc = (opts & CSSC) != 0;
+    p.cpu.bmi1 = (opts & BMI) != 0;
+    p.cpu.bmi2 = p.cpu.bmi1;
+    p.cpu.movbe = p.cpu.bmi1;
     p.bitrev = isa == tgt::axis_index("aarch64", true);
     // The aggregates the backend copies, as a build sets them (`CEmit`).
     p.arg_copy = if tgt::callconv_of(os, isa).arg_copy != 0 {
@@ -680,6 +707,1066 @@ b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr, v4: ptr):
     let drv = "#include <stdint.h>\n#include <string.h>\nvoid at(void *, void *, void *, void *, unsigned char *);\n#define CHECK(T, at0, x) { T v = (T)(x); T w; uint64_t o = at0; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 1; v = (T)(v + 0x35); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 2; v = (T)(v - 0x11); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 3; v = (T)(v & 0x5A); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 4; v = (T)(v | 0x81); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 5; v = (T)(v ^ 0x7E); o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != v) return 6; o += 8; \\\n  if (r[o] != 1) return 7; o += 8; \\\n  if (r[o] != 0) return 8; o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != 0x47) return 9; o += 8; \\\n  memcpy(&w, r + o, sizeof(T)); if (w != 0x47) return 10; }\nint main(void) {\n  uint8_t a = 0xF3; uint16_t b = 0x8123; uint32_t c = 0x80001234u; uint64_t d = 0x8000000012345678ull;\n  unsigned char r[320];\n  memset(r, 0xEE, sizeof r);\n  at(&a, &b, &c, &d, r);\n  CHECK(uint8_t, 0, 0xF3) CHECK(uint16_t, 80, 0x8123) CHECK(uint32_t, 160, 0x80001234u)\n  CHECK(uint64_t, 240, 0x8000000012345678ull)\n  return 0;\n}\n";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_native_with(lir, drv, LSE | RCPC), 0);
+}
+
+// Trailing zeros and set bits of 8 to 64 bits; the minimum and maximum of two values, signed and unsigned,
+// by every comparison and both sides of its select, and of a value and a constant within and past an 8-bit
+// immediate; and the lane-by-lane forms (minimum, maximum and their reductions of 8-byte lanes, the absolute
+// value, minimum, maximum, trailing zeros and set bits of a 4-byte vector's lanes): arm64 with FEAT_CSSC
+// (`ctz`, `cnt`, `smin`, `umax`, `abs` of general registers, on a host that has it) and without.
+@test
+fn counts_minimums_and_maximums_of_every_width_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @absl8 fn global
+sym @absg8 fn global
+sym @absl16 fn global
+sym @absg16 fn global
+sym @absl32 fn global
+sym @absg32 fn global
+sym @absl64 fn global
+sym @absg64 fn global
+sym @ctz8 fn global
+sym @popcnt8 fn global
+sym @smin8 fn global
+sym @smax8 fn global
+sym @umax8 fn global
+sym @umax28 fn global
+sym @smax28 fn global
+sym @umin8 fn global
+sym @smaxk8 fn global
+sym @umink8 fn global
+sym @smink8 fn global
+sym @umaxk8 fn global
+sym @ctz16 fn global
+sym @popcnt16 fn global
+sym @smin16 fn global
+sym @smax16 fn global
+sym @umax16 fn global
+sym @umax216 fn global
+sym @smax216 fn global
+sym @umin16 fn global
+sym @smaxk16 fn global
+sym @umink16 fn global
+sym @smink16 fn global
+sym @umaxk16 fn global
+sym @sminb16 fn global
+sym @ctz32 fn global
+sym @popcnt32 fn global
+sym @smin32 fn global
+sym @smax32 fn global
+sym @umax32 fn global
+sym @umax232 fn global
+sym @smax232 fn global
+sym @umin32 fn global
+sym @smaxk32 fn global
+sym @umink32 fn global
+sym @smink32 fn global
+sym @umaxk32 fn global
+sym @sminb32 fn global
+sym @ctz64 fn global
+sym @popcnt64 fn global
+sym @smin64 fn global
+sym @smax64 fn global
+sym @umax64 fn global
+sym @umax264 fn global
+sym @smax264 fn global
+sym @umin64 fn global
+sym @smaxk64 fn global
+sym @umink64 fn global
+sym @smink64 fn global
+sym @umaxk64 fn global
+sym @sminb64 fn global
+sym @vminmax fn global
+fn @ctz8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = ctz.i8 v0
+  ret v1
+fn @popcnt8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = popcnt.i8 v0
+  ret v1
+fn @smin8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.slt v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @smax8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.sgt v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @umax8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.ult v0, v1
+  v3 = select.i8 v2, v1, v0
+  ret v3
+fn @umax28
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.uge v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @smax28
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.sle v0, v1
+  v3 = select.i8 v2, v1, v0
+  ret v3
+fn @umin8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = icmp.ugt v0, v1
+  v3 = select.i8 v2, v1, v0
+  ret v3
+fn @smaxk8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 -100
+  v2 = icmp.sgt v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @umink8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 200
+  v2 = icmp.ult v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @smink8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 -128
+  v2 = icmp.slt v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @umaxk8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 255
+  v2 = icmp.ugt v0, v1
+  v3 = select.i8 v2, v0, v1
+  ret v3
+fn @ctz16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = ctz.i16 v0
+  ret v1
+fn @popcnt16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = popcnt.i16 v0
+  ret v1
+fn @smin16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.slt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @smax16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.sgt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @umax16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.ult v0, v1
+  v3 = select.i16 v2, v1, v0
+  ret v3
+fn @umax216
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.uge v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @smax216
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.sle v0, v1
+  v3 = select.i16 v2, v1, v0
+  ret v3
+fn @umin16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = icmp.ugt v0, v1
+  v3 = select.i16 v2, v1, v0
+  ret v3
+fn @smaxk16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 -100
+  v2 = icmp.sgt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @umink16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 200
+  v2 = icmp.ult v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @smink16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 -128
+  v2 = icmp.slt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @umaxk16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 255
+  v2 = icmp.ugt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @sminb16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 1000
+  v2 = icmp.slt v0, v1
+  v3 = select.i16 v2, v0, v1
+  ret v3
+fn @ctz32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = ctz.i32 v0
+  ret v1
+fn @popcnt32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = popcnt.i32 v0
+  ret v1
+fn @smin32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.slt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @smax32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.sgt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @umax32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.ult v0, v1
+  v3 = select.i32 v2, v1, v0
+  ret v3
+fn @umax232
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.uge v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @smax232
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.sle v0, v1
+  v3 = select.i32 v2, v1, v0
+  ret v3
+fn @umin32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = icmp.ugt v0, v1
+  v3 = select.i32 v2, v1, v0
+  ret v3
+fn @smaxk32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 -100
+  v2 = icmp.sgt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @umink32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 200
+  v2 = icmp.ult v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @smink32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 -128
+  v2 = icmp.slt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @umaxk32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 255
+  v2 = icmp.ugt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @sminb32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1000
+  v2 = icmp.slt v0, v1
+  v3 = select.i32 v2, v0, v1
+  ret v3
+fn @ctz64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = ctz.i64 v0
+  ret v1
+fn @popcnt64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = popcnt.i64 v0
+  ret v1
+fn @smin64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.slt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @smax64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.sgt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @umax64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.ult v0, v1
+  v3 = select.i64 v2, v1, v0
+  ret v3
+fn @umax264
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.uge v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @smax264
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.sle v0, v1
+  v3 = select.i64 v2, v1, v0
+  ret v3
+fn @umin64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = icmp.ugt v0, v1
+  v3 = select.i64 v2, v1, v0
+  ret v3
+fn @smaxk64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -100
+  v2 = icmp.sgt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @umink64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 200
+  v2 = icmp.ult v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @smink64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -128
+  v2 = icmp.slt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @umaxk64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 255
+  v2 = icmp.ugt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @sminb64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1000
+  v2 = icmp.slt v0, v1
+  v3 = select.i64 v2, v0, v1
+  ret v3
+fn @vminmax
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i64 v0 align 0
+  v3 = load.v2i64 v0+16 align 0
+  v4 = vop.min.s.v2i64 (v2, v3)
+  store v4, v1 align 0
+  v5 = vop.max.v2i64 (v2, v3)
+  store v5, v1+16 align 0
+  v6 = vop.reduce_min.i64 (v2)
+  store v6, v1+32 align 0
+  v7 = vop.reduce_max.s.i64 (v3)
+  store v7, v1+40 align 0
+  v8 = load.v4i8 v0+32 align 0
+  v9 = load.v4i8 v0+36 align 0
+  v10 = vop.wrapping_abs.s.v4i8 (v8)
+  store v10, v1+48 align 0
+  v11 = vop.min.v4i8 (v8, v9)
+  store v11, v1+52 align 0
+  v12 = vop.max.s.v4i8 (v8, v9)
+  store v12, v1+56 align 0
+  v13 = vop.trailing_zeros.v4i8 (v8)
+  store v13, v1+60 align 0
+  v14 = vop.count_ones.v4i8 (v9)
+  store v14, v1+64 align 0
+  ret
+fn @absl8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 0
+  v2 = icmp.slt v0, v1
+  v3 = neg.i8 v0
+  v4 = select.i8 v2, v3, v0
+  ret v4
+fn @absg8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 0
+  v2 = icmp.sge v0, v1
+  v3 = sub.i8 v1, v0
+  v4 = select.i8 v2, v0, v3
+  ret v4
+fn @absl16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 0
+  v2 = icmp.slt v0, v1
+  v3 = neg.i16 v0
+  v4 = select.i16 v2, v3, v0
+  ret v4
+fn @absg16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 0
+  v2 = icmp.sge v0, v1
+  v3 = sub.i16 v1, v0
+  v4 = select.i16 v2, v0, v3
+  ret v4
+fn @absl32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.slt v0, v1
+  v3 = neg.i32 v0
+  v4 = select.i32 v2, v3, v0
+  ret v4
+fn @absg32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = icmp.sge v0, v1
+  v3 = sub.i32 v1, v0
+  v4 = select.i32 v2, v0, v3
+  ret v4
+fn @absl64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.slt v0, v1
+  v3 = neg.i64 v0
+  v4 = select.i64 v2, v3, v0
+  ret v4
+fn @absg64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.sge v0, v1
+  v3 = sub.i64 v1, v0
+  v4 = select.i64 v2, v0, v3
+  ret v4
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+uint8_t ctz8(uint8_t); uint8_t popcnt8(uint8_t);
+uint8_t smin8(int8_t, int8_t);
+uint8_t smax8(int8_t, int8_t);
+uint8_t smax28(int8_t, int8_t);
+uint8_t umax8(uint8_t, uint8_t);
+uint8_t umax28(uint8_t, uint8_t);
+uint8_t umin8(uint8_t, uint8_t);
+uint8_t smaxk8(int8_t); uint8_t smink8(int8_t);
+uint16_t ctz16(uint16_t); uint16_t popcnt16(uint16_t);
+uint16_t smin16(int16_t, int16_t);
+uint16_t smax16(int16_t, int16_t);
+uint16_t smax216(int16_t, int16_t);
+uint16_t umax16(uint16_t, uint16_t);
+uint16_t umax216(uint16_t, uint16_t);
+uint16_t umin16(uint16_t, uint16_t);
+uint16_t smaxk16(int16_t); uint16_t smink16(int16_t);
+uint16_t umink16(uint16_t); uint16_t umaxk16(uint16_t); uint16_t sminb16(int16_t);
+uint32_t ctz32(uint32_t); uint32_t popcnt32(uint32_t);
+uint32_t smin32(int32_t, int32_t);
+uint32_t smax32(int32_t, int32_t);
+uint32_t smax232(int32_t, int32_t);
+uint32_t umax32(uint32_t, uint32_t);
+uint32_t umax232(uint32_t, uint32_t);
+uint32_t umin32(uint32_t, uint32_t);
+uint32_t smaxk32(int32_t); uint32_t smink32(int32_t);
+uint32_t umink32(uint32_t); uint32_t umaxk32(uint32_t); uint32_t sminb32(int32_t);
+uint64_t ctz64(uint64_t); uint64_t popcnt64(uint64_t);
+uint64_t smin64(int64_t, int64_t);
+uint64_t smax64(int64_t, int64_t);
+uint64_t smax264(int64_t, int64_t);
+uint64_t umax64(uint64_t, uint64_t);
+uint64_t umax264(uint64_t, uint64_t);
+uint64_t umin64(uint64_t, uint64_t);
+uint64_t smaxk64(int64_t); uint64_t smink64(int64_t);
+uint64_t umink64(uint64_t); uint64_t umaxk64(uint64_t); uint64_t sminb64(int64_t);
+uint8_t absl8(int8_t); uint8_t absg8(int8_t);
+uint16_t absl16(int16_t); uint16_t absg16(int16_t);
+uint32_t absl32(int32_t); uint32_t absg32(int32_t);
+uint64_t absl64(int64_t); uint64_t absg64(int64_t);
+void vminmax(const unsigned char *, unsigned char *);
+static const uint64_t v[] = {0, 1, 2, 3, 0x7F, 0x80, 0x81, 0xFF, 0x100, 0x7FFF, 0x8000, 0xFFFF, 0x12345678, 0x7FFFFFFF,
+  0x80000000, 0xFFFFFFFF, 0x100000000ull, 0x7FFFFFFFFFFFFFFFull, 0x8000000000000000ull, 0xFFFFFFFFFFFFFFFFull,
+  0xFFFFFFFFFFFFFF9Cull, 0xFFFFFFFFFFFFFF80ull, 0xC8, 0x3E8, 0xFFFFFFFFFFFFFC18ull};
+#define N (int)(sizeof v / sizeof v[0])
+int main(void) {
+  for (int i = 0; i < N; i++) {
+    uint8_t x = (uint8_t)v[i];
+    int8_t sx = (int8_t)x;
+    if (ctz8(x) != (x ? (uint8_t)__builtin_ctzll(x) : 8)) return 801;
+    if (popcnt8(x) != (uint8_t)__builtin_popcountll(x)) return 802;
+    if ((sx < -100 ? -100 : sx) != (int8_t)smaxk8(sx)) return 805;
+    if ((sx < -128 ? sx : -128) != (int8_t)smink8(sx)) return 806;
+    for (int j = 0; j < N; j++) {
+      uint8_t y = (uint8_t)v[j];
+      int8_t sy = (int8_t)y;
+      if ((int8_t)smin8(sx, sy) != (sx < sy ? sx : sy)) return 810;
+      if ((int8_t)smax8(sx, sy) != (sx > sy ? sx : sy)) return 811;
+      if ((int8_t)smax28(sx, sy) != (sx <= sy ? sy : sx)) return 812;
+      if (umax8(x, y) != (x < y ? y : x)) return 813;
+      if (umax28(x, y) != (x >= y ? x : y)) return 814;
+      if (umin8(x, y) != (x > y ? y : x)) return 815;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint16_t x = (uint16_t)v[i];
+    int16_t sx = (int16_t)x;
+    if (ctz16(x) != (x ? (uint16_t)__builtin_ctzll(x) : 16)) return 1601;
+    if (popcnt16(x) != (uint16_t)__builtin_popcountll(x)) return 1602;
+    if ((sx < -100 ? -100 : sx) != (int16_t)smaxk16(sx)) return 1605;
+    if ((sx < -128 ? sx : -128) != (int16_t)smink16(sx)) return 1606;
+    if ((x < 200 ? x : 200) != umink16(x)) return 1607;
+    if ((x > 255 ? x : 255) != umaxk16(x)) return 1608;
+    if ((sx < 1000 ? sx : 1000) != (int16_t)sminb16(sx)) return 1609;
+    for (int j = 0; j < N; j++) {
+      uint16_t y = (uint16_t)v[j];
+      int16_t sy = (int16_t)y;
+      if ((int16_t)smin16(sx, sy) != (sx < sy ? sx : sy)) return 1610;
+      if ((int16_t)smax16(sx, sy) != (sx > sy ? sx : sy)) return 1611;
+      if ((int16_t)smax216(sx, sy) != (sx <= sy ? sy : sx)) return 1612;
+      if (umax16(x, y) != (x < y ? y : x)) return 1613;
+      if (umax216(x, y) != (x >= y ? x : y)) return 1614;
+      if (umin16(x, y) != (x > y ? y : x)) return 1615;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint32_t x = (uint32_t)v[i];
+    int32_t sx = (int32_t)x;
+    if (ctz32(x) != (x ? (uint32_t)__builtin_ctzll(x) : 32)) return 3201;
+    if (popcnt32(x) != (uint32_t)__builtin_popcountll(x)) return 3202;
+    if ((sx < -100 ? -100 : sx) != (int32_t)smaxk32(sx)) return 3205;
+    if ((sx < -128 ? sx : -128) != (int32_t)smink32(sx)) return 3206;
+    if ((x < 200 ? x : 200) != umink32(x)) return 3207;
+    if ((x > 255 ? x : 255) != umaxk32(x)) return 3208;
+    if ((sx < 1000 ? sx : 1000) != (int32_t)sminb32(sx)) return 3209;
+    for (int j = 0; j < N; j++) {
+      uint32_t y = (uint32_t)v[j];
+      int32_t sy = (int32_t)y;
+      if ((int32_t)smin32(sx, sy) != (sx < sy ? sx : sy)) return 3210;
+      if ((int32_t)smax32(sx, sy) != (sx > sy ? sx : sy)) return 3211;
+      if ((int32_t)smax232(sx, sy) != (sx <= sy ? sy : sx)) return 3212;
+      if (umax32(x, y) != (x < y ? y : x)) return 3213;
+      if (umax232(x, y) != (x >= y ? x : y)) return 3214;
+      if (umin32(x, y) != (x > y ? y : x)) return 3215;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint64_t x = (uint64_t)v[i];
+    int64_t sx = (int64_t)x;
+    if (ctz64(x) != (x ? (uint64_t)__builtin_ctzll(x) : 64)) return 6401;
+    if (popcnt64(x) != (uint64_t)__builtin_popcountll(x)) return 6402;
+    if ((sx < -100 ? -100 : sx) != (int64_t)smaxk64(sx)) return 6405;
+    if ((sx < -128 ? sx : -128) != (int64_t)smink64(sx)) return 6406;
+    if ((x < 200 ? x : 200) != umink64(x)) return 6407;
+    if ((x > 255 ? x : 255) != umaxk64(x)) return 6408;
+    if ((sx < 1000 ? sx : 1000) != (int64_t)sminb64(sx)) return 6409;
+    for (int j = 0; j < N; j++) {
+      uint64_t y = (uint64_t)v[j];
+      int64_t sy = (int64_t)y;
+      if ((int64_t)smin64(sx, sy) != (sx < sy ? sx : sy)) return 6410;
+      if ((int64_t)smax64(sx, sy) != (sx > sy ? sx : sy)) return 6411;
+      if ((int64_t)smax264(sx, sy) != (sx <= sy ? sy : sx)) return 6412;
+      if (umax64(x, y) != (x < y ? y : x)) return 6413;
+      if (umax264(x, y) != (x >= y ? x : y)) return 6414;
+      if (umin64(x, y) != (x > y ? y : x)) return 6415;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    int8_t sx = (int8_t)v[i];
+    uint8_t m = sx < 0 ? (uint8_t)(0 - (uint8_t)sx) : (uint8_t)sx;
+    if (absl8(sx) != m || absg8(sx) != m) return 816;
+  }
+  for (int i = 0; i < N; i++) {
+    int16_t sx = (int16_t)v[i];
+    uint16_t m = sx < 0 ? (uint16_t)(0 - (uint16_t)sx) : (uint16_t)sx;
+    if (absl16(sx) != m || absg16(sx) != m) return 1616;
+  }
+  for (int i = 0; i < N; i++) {
+    int32_t sx = (int32_t)v[i];
+    uint32_t m = sx < 0 ? (uint32_t)(0 - (uint32_t)sx) : (uint32_t)sx;
+    if (absl32(sx) != m || absg32(sx) != m) return 3216;
+  }
+  for (int i = 0; i < N; i++) {
+    int64_t sx = (int64_t)v[i];
+    uint64_t m = sx < 0 ? (uint64_t)(0 - (uint64_t)sx) : (uint64_t)sx;
+    if (absl64(sx) != m || absg64(sx) != m) return 6416;
+  }
+  int64_t a[2] = {-5, 0x7000000000000000ll}, b[2] = {3, -0x7000000000000000ll};
+  int8_t c[4] = {-128, -3, 0, 100}, d[4] = {5, -4, -1, 127};
+  unsigned char in[40], out[68];
+  memcpy(in, a, 16); memcpy(in + 16, b, 16); memcpy(in + 32, c, 4); memcpy(in + 36, d, 4);
+  vminmax(in, out);
+  int64_t r[6]; memcpy(r, out, 48);
+  if (r[0] != (a[0] < b[0] ? a[0] : b[0]) || r[1] != (a[1] < b[1] ? a[1] : b[1])) return 1;
+  if ((uint64_t)r[2] != ((uint64_t)a[0] > (uint64_t)b[0] ? (uint64_t)a[0] : (uint64_t)b[0])) return 2;
+  if ((uint64_t)r[3] != ((uint64_t)a[1] > (uint64_t)b[1] ? (uint64_t)a[1] : (uint64_t)b[1])) return 3;
+  if ((uint64_t)r[4] != ((uint64_t)a[0] < (uint64_t)a[1] ? (uint64_t)a[0] : (uint64_t)a[1])) return 4;
+  if (r[5] != (b[0] > b[1] ? b[0] : b[1])) return 5;
+  for (int i = 0; i < 4; i++) {
+    int8_t x = c[i], y = d[i];
+    if ((int8_t)out[48 + i] != (int8_t)(x < 0 ? -x : x)) return 6;
+    if (out[52 + i] != ((uint8_t)x < (uint8_t)y ? (uint8_t)x : (uint8_t)y)) return 7;
+    if ((int8_t)out[56 + i] != (x > y ? x : y)) return 8;
+    if (out[60 + i] != (x ? __builtin_ctz((uint8_t)x) : 8)) return 9;
+    if (out[64 + i] != __builtin_popcount((uint8_t)y)) return 10;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    if tgt::host_isa() == tgt::axis_index("aarch64", true) && detect::has(cpu::Feature::Cssc) {
+        assert_eq(run_native_with(lir, drv, CSSC), 0);
+    }
+}
+
+// BMI1's `andn`, `blsr`, `blsi` and `blsmsk` (one `x - 1` that a test and a `xor` share), BMI2's shifts
+// by a register of 8 to 64 bits, `rorx` and `mulx` (of a register and of a load), and `movbe` loads and
+// stores of 16 to 64 bits: x86-64 with the three features on a processor that has them, and every
+// target without them.
+@test
+fn bmi_and_byte_reversed_forms_run() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @andn8 fn global
+sym @blsr8 fn global
+sym @blsi8 fn global
+sym @blsmsk8 fn global
+sym @shl8 fn global
+sym @lshr8 fn global
+sym @ashr8 fn global
+sym @andn16 fn global
+sym @blsr16 fn global
+sym @blsi16 fn global
+sym @blsmsk16 fn global
+sym @shl16 fn global
+sym @lshr16 fn global
+sym @ashr16 fn global
+sym @andn32 fn global
+sym @blsr32 fn global
+sym @blsi32 fn global
+sym @blsmsk32 fn global
+sym @shl32 fn global
+sym @lshr32 fn global
+sym @ashr32 fn global
+sym @andn64 fn global
+sym @blsr64 fn global
+sym @blsi64 fn global
+sym @blsmsk64 fn global
+sym @shl64 fn global
+sym @lshr64 fn global
+sym @ashr64 fn global
+sym @pow32 fn global
+sym @rotl32 fn global
+sym @ldbe32 fn global
+sym @pow64 fn global
+sym @rotl64 fn global
+sym @ldbe64 fn global
+sym @stbe16 fn global
+sym @stbe32 fn global
+sym @stbe64 fn global
+sym @mulhi fn global
+sym @mulhim fn global
+fn @andn8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = not.i8 v0
+  v3 = and.i8 v2, v1
+  ret v3
+fn @blsr8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 -1
+  v2 = add.i8 v0, v1
+  v3 = and.i8 v0, v2
+  ret v3
+fn @blsi8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = neg.i8 v0
+  v2 = and.i8 v1, v0
+  ret v2
+fn @blsmsk8
+  sig (i8) -> i8
+b0(v0: i8):
+  v1 = iconst.i8 1
+  v2 = sub.i8 v0, v1
+  v3 = xor.i8 v2, v0
+  ret v3
+fn @shl8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = shl.i8 v0, v1
+  ret v2
+fn @lshr8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = lshr.i8 v0, v1
+  ret v2
+fn @ashr8
+  sig (i8, i8) -> i8
+b0(v0: i8, v1: i8):
+  v2 = ashr.i8 v0, v1
+  ret v2
+fn @andn16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = not.i16 v0
+  v3 = and.i16 v2, v1
+  ret v3
+fn @blsr16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 -1
+  v2 = add.i16 v0, v1
+  v3 = and.i16 v0, v2
+  ret v3
+fn @blsi16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = neg.i16 v0
+  v2 = and.i16 v1, v0
+  ret v2
+fn @blsmsk16
+  sig (i16) -> i16
+b0(v0: i16):
+  v1 = iconst.i16 1
+  v2 = sub.i16 v0, v1
+  v3 = xor.i16 v2, v0
+  ret v3
+fn @shl16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = shl.i16 v0, v1
+  ret v2
+fn @lshr16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = lshr.i16 v0, v1
+  ret v2
+fn @ashr16
+  sig (i16, i16) -> i16
+b0(v0: i16, v1: i16):
+  v2 = ashr.i16 v0, v1
+  ret v2
+fn @andn32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = not.i32 v0
+  v3 = and.i32 v2, v1
+  ret v3
+fn @blsr32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 -1
+  v2 = add.i32 v0, v1
+  v3 = and.i32 v0, v2
+  ret v3
+fn @blsi32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = neg.i32 v0
+  v2 = and.i32 v1, v0
+  ret v2
+fn @blsmsk32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 1
+  v2 = sub.i32 v0, v1
+  v3 = xor.i32 v2, v0
+  ret v3
+fn @shl32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = shl.i32 v0, v1
+  ret v2
+fn @lshr32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = lshr.i32 v0, v1
+  ret v2
+fn @ashr32
+  sig (i32, i32) -> i32
+b0(v0: i32, v1: i32):
+  v2 = ashr.i32 v0, v1
+  ret v2
+fn @andn64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = not.i64 v0
+  v3 = and.i64 v2, v1
+  ret v3
+fn @blsr64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 -1
+  v2 = add.i64 v0, v1
+  v3 = and.i64 v0, v2
+  ret v3
+fn @blsi64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = neg.i64 v0
+  v2 = and.i64 v1, v0
+  ret v2
+fn @blsmsk64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 1
+  v2 = sub.i64 v0, v1
+  v3 = xor.i64 v2, v0
+  ret v3
+fn @shl64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = shl.i64 v0, v1
+  ret v2
+fn @lshr64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = lshr.i64 v0, v1
+  ret v2
+fn @ashr64
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = ashr.i64 v0, v1
+  ret v2
+fn @pow32
+  sig (i32) -> i8
+b0(v0: i32):
+  v1 = iconst.i32 -1
+  v2 = add.i32 v0, v1
+  v3 = and.i32 v0, v2
+  v4 = iconst.i32 0
+  v5 = icmp.eq v3, v4
+  v6 = iconst.i8 1
+  v7 = iconst.i8 0
+  v8 = select.i8 v5, v6, v7
+  ret v8
+fn @rotl32
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 5
+  v2 = shl.i32 v0, v1
+  v3 = iconst.i32 27
+  v4 = lshr.i32 v0, v3
+  v5 = or.i32 v2, v4
+  ret v5
+fn @ldbe32
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i32 v0 align 0
+  v2 = bswap.i32 v1
+  ret v2
+fn @pow64
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = iconst.i64 -1
+  v2 = add.i64 v0, v1
+  v3 = and.i64 v0, v2
+  v4 = iconst.i64 0
+  v5 = icmp.eq v3, v4
+  v6 = iconst.i8 1
+  v7 = iconst.i8 0
+  v8 = select.i8 v5, v6, v7
+  ret v8
+fn @rotl64
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 13
+  v2 = shl.i64 v0, v1
+  v3 = iconst.i64 51
+  v4 = lshr.i64 v0, v3
+  v5 = or.i64 v2, v4
+  ret v5
+fn @ldbe64
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0 align 0
+  v2 = bswap.i64 v1
+  ret v2
+fn @stbe16
+  sig (ptr, i16) -> void
+b0(v0: ptr, v1: i16):
+  v2 = bswap.i16 v1
+  store v2, v0 align 0
+  ret
+fn @stbe32
+  sig (ptr, i32) -> void
+b0(v0: ptr, v1: i32):
+  v2 = bswap.i32 v1
+  store v2, v0 align 0
+  ret
+fn @stbe64
+  sig (ptr, i64) -> void
+b0(v0: ptr, v1: i64):
+  v2 = bswap.i64 v1
+  store v2, v0 align 0
+  ret
+fn @mulhi
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = mulhu.i64 v0, v1
+  ret v2
+fn @mulhim
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = load.i64 v0 align 0
+  v3 = mulhu.i64 v2, v1
+  ret v3
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+uint8_t andn8(uint8_t, uint8_t); uint8_t blsr8(uint8_t); uint8_t blsi8(uint8_t); uint8_t blsmsk8(uint8_t); uint8_t shl8(uint8_t, uint8_t); uint8_t lshr8(uint8_t, uint8_t); uint8_t ashr8(uint8_t, uint8_t);
+uint16_t andn16(uint16_t, uint16_t); uint16_t blsr16(uint16_t); uint16_t blsi16(uint16_t); uint16_t blsmsk16(uint16_t); uint16_t shl16(uint16_t, uint16_t); uint16_t lshr16(uint16_t, uint16_t); uint16_t ashr16(uint16_t, uint16_t);
+uint32_t andn32(uint32_t, uint32_t); uint32_t blsr32(uint32_t); uint32_t blsi32(uint32_t); uint32_t blsmsk32(uint32_t); uint32_t shl32(uint32_t, uint32_t); uint32_t lshr32(uint32_t, uint32_t); uint32_t ashr32(uint32_t, uint32_t);
+uint64_t andn64(uint64_t, uint64_t); uint64_t blsr64(uint64_t); uint64_t blsi64(uint64_t); uint64_t blsmsk64(uint64_t); uint64_t shl64(uint64_t, uint64_t); uint64_t lshr64(uint64_t, uint64_t); uint64_t ashr64(uint64_t, uint64_t);
+uint8_t pow32(uint32_t); uint32_t rotl32(uint32_t); uint32_t ldbe32(const void *);
+uint8_t pow64(uint64_t); uint64_t rotl64(uint64_t); uint64_t ldbe64(const void *);
+void stbe16(void *, uint16_t);
+void stbe32(void *, uint32_t);
+void stbe64(void *, uint64_t);
+uint64_t mulhi(uint64_t, uint64_t); uint64_t mulhim(const uint64_t *, uint64_t);
+static const uint64_t v[] = {0, 1, 2, 3, 0x40, 0x7F, 0x80, 0xFF, 0x100, 0x8000, 0xFFFF, 0x12345678, 0x80000000, 0xFFFFFFFF,
+  0x100000000ull, 0x8000000000000000ull, 0xFFFFFFFFFFFFFFFFull, 0x123456789ABCDEF0ull, 0xF0F0F0F0F0F0F0F0ull};
+#define N (int)(sizeof v / sizeof v[0])
+int main(void) {
+  for (int i = 0; i < N; i++) {
+    uint8_t x = (uint8_t)v[i], y = (uint8_t)v[(i + 5) % N];
+    if (andn8(x, y) != (uint8_t)(~x & y)) return 801;
+    if (blsr8(x) != (uint8_t)(x & (x - 1))) return 802;
+    if (blsi8(x) != (uint8_t)(x & (0 - x))) return 803;
+    if (blsmsk8(x) != (uint8_t)(x ^ (x - 1))) return 804;
+    for (unsigned n = 0; n < 8; n += 3) {
+      if (shl8(x, (uint8_t)n) != (uint8_t)(x << n)) return 805;
+      if (lshr8(x, (uint8_t)n) != (uint8_t)(x >> n)) return 806;
+      if (ashr8(x, (uint8_t)n) != (uint8_t)((int8_t)x >> n)) return 807;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint16_t x = (uint16_t)v[i], y = (uint16_t)v[(i + 5) % N];
+    if (andn16(x, y) != (uint16_t)(~x & y)) return 1601;
+    if (blsr16(x) != (uint16_t)(x & (x - 1))) return 1602;
+    if (blsi16(x) != (uint16_t)(x & (0 - x))) return 1603;
+    if (blsmsk16(x) != (uint16_t)(x ^ (x - 1))) return 1604;
+    for (unsigned n = 0; n < 16; n += 3) {
+      if (shl16(x, (uint16_t)n) != (uint16_t)(x << n)) return 1605;
+      if (lshr16(x, (uint16_t)n) != (uint16_t)(x >> n)) return 1606;
+      if (ashr16(x, (uint16_t)n) != (uint16_t)((int16_t)x >> n)) return 1607;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint32_t x = (uint32_t)v[i], y = (uint32_t)v[(i + 5) % N];
+    if (andn32(x, y) != (uint32_t)(~x & y)) return 3201;
+    if (blsr32(x) != (uint32_t)(x & (x - 1))) return 3202;
+    if (blsi32(x) != (uint32_t)(x & (0 - x))) return 3203;
+    if (blsmsk32(x) != (uint32_t)(x ^ (x - 1))) return 3204;
+    for (unsigned n = 0; n < 32; n += 3) {
+      if (shl32(x, (uint32_t)n) != (uint32_t)(x << n)) return 3205;
+      if (lshr32(x, (uint32_t)n) != (uint32_t)(x >> n)) return 3206;
+      if (ashr32(x, (uint32_t)n) != (uint32_t)((int32_t)x >> n)) return 3207;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint64_t x = (uint64_t)v[i], y = (uint64_t)v[(i + 5) % N];
+    if (andn64(x, y) != (uint64_t)(~x & y)) return 6401;
+    if (blsr64(x) != (uint64_t)(x & (x - 1))) return 6402;
+    if (blsi64(x) != (uint64_t)(x & (0 - x))) return 6403;
+    if (blsmsk64(x) != (uint64_t)(x ^ (x - 1))) return 6404;
+    for (unsigned n = 0; n < 64; n += 3) {
+      if (shl64(x, (uint64_t)n) != (uint64_t)(x << n)) return 6405;
+      if (lshr64(x, (uint64_t)n) != (uint64_t)(x >> n)) return 6406;
+      if (ashr64(x, (uint64_t)n) != (uint64_t)((int64_t)x >> n)) return 6407;
+    }
+  }
+  for (int i = 0; i < N; i++) {
+    uint32_t x = (uint32_t)v[i];
+    if (pow32(x) != ((x & (x - 1)) == 0)) return 3208;
+    if (rotl32(x) != (uint32_t)(x << 5 | x >> 27)) return 3209;
+    unsigned char b[8]; memcpy(b, &v[i], 8);
+    uint32_t be = 0; for (int k = 0; k < 4; k++) be = (uint32_t)(be << 8 | b[k]);
+    if (ldbe32(b) != be) return 3210;
+  }
+  for (int i = 0; i < N; i++) {
+    uint64_t x = (uint64_t)v[i];
+    if (pow64(x) != ((x & (x - 1)) == 0)) return 6408;
+    if (rotl64(x) != (uint64_t)(x << 13 | x >> 51)) return 6409;
+    unsigned char b[8]; memcpy(b, &v[i], 8);
+    uint64_t be = 0; for (int k = 0; k < 8; k++) be = (uint64_t)(be << 8 | b[k]);
+    if (ldbe64(b) != be) return 6410;
+  }
+  for (int i = 0; i < N; i++) {
+    unsigned char o[8] = {0}; uint16_t x = (uint16_t)v[i];
+    stbe16(o, x);
+    for (int k = 0; k < 2; k++) if (o[k] != (unsigned char)(x >> (16 - 8 - 8 * k))) return 1611;
+  }
+  for (int i = 0; i < N; i++) {
+    unsigned char o[8] = {0}; uint32_t x = (uint32_t)v[i];
+    stbe32(o, x);
+    for (int k = 0; k < 4; k++) if (o[k] != (unsigned char)(x >> (32 - 8 - 8 * k))) return 3211;
+  }
+  for (int i = 0; i < N; i++) {
+    unsigned char o[8] = {0}; uint64_t x = (uint64_t)v[i];
+    stbe64(o, x);
+    for (int k = 0; k < 8; k++) if (o[k] != (unsigned char)(x >> (64 - 8 - 8 * k))) return 6411;
+  }
+  for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) {
+    uint64_t h = (uint64_t)(((unsigned __int128)v[i] * v[j]) >> 64);
+    if (mulhi(v[i], v[j]) != h || mulhim(&v[i], v[j]) != h) return 12;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
+    assert_eq(run_bmi(lir, drv), 0);
 }
 
 // Atomic read-modify-writes whose old value nothing reads (x86-64 `lock or`, `lock and`, `lock add`,
@@ -8629,6 +9716,118 @@ b0(v0: ptr, v1: ptr):
         shuf == 4 && shift == 6 && !scalar,
         format("PSHUFLW, PSHUFHW, word shifts: {} {} {}", shuf, shift, scalar).as_str(),
     );
+}
+
+// A sign or zero extension of a narrow load that its reader computes in place is one extending load on
+// wasm32 (`i32.load8_s`, `i32.load16_s`, `i64.load8_s` to `i64.load32_u`), for each width and both
+// signednesses, with values whose top bit is set and clear.
+@test
+fn wasm_extends_narrow_loads_in_the_load() {
+    let lir = M"(lir ptr 8
+sym @l8s fn global
+sym @l16s fn global
+sym @l32s fn global
+sym @l8z fn global
+sym @l16z fn global
+sym @l32z fn global
+sym @l8s16 fn global
+sym @l16s32 fn global
+fn @l8s
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = sext.i32 v1
+  ret v2
+fn @l16s
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i16 v0 align 0
+  v2 = sext.i64 v1
+  ret v2
+fn @l32s
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i32 v0 align 0
+  v2 = sext.i64 v1
+  ret v2
+fn @l8z
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = zext.i64 v1
+  ret v2
+fn @l16z
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i16 v0 align 0
+  v2 = zext.i64 v1
+  ret v2
+fn @l32z
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i32 v0 align 0
+  v2 = zext.i64 v1
+  ret v2
+fn @l8s16
+  sig (ptr) -> i16
+b0(v0: ptr):
+  v1 = load.i8 v0 align 0
+  v2 = sext.i16 v1
+  ret v2
+fn @l16s32
+  sig (ptr) -> i32
+b0(v0: ptr):
+  v1 = load.i16 v0 align 0
+  v2 = sext.i32 v1
+  ret v2
+)";
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+uint32_t l8s(const void *);
+uint64_t l16s(const void *);
+uint64_t l32s(const void *);
+uint64_t l8z(const void *);
+uint64_t l16z(const void *);
+uint64_t l32z(const void *);
+uint16_t l8s16(const void *);
+uint32_t l16s32(const void *);
+int main(void) {
+  static const unsigned char v[][4] = {{0x80, 0x81, 0x82, 0x83}, {0x7F, 0xFF, 0xFF, 0x7F}, {0xFF, 0x00, 0x00, 0x80}, {0x01, 0x80, 0x00, 0x00}};
+  for (int i = 0; i < 4; i++) {
+    const unsigned char *b = v[i];
+    { int8_t x; memcpy(&x, b, sizeof x); if (l8s(b) != (uint32_t)(int32_t)x) return 1; }
+    { int16_t x; memcpy(&x, b, sizeof x); if (l16s(b) != (uint64_t)(int64_t)x) return 2; }
+    { int32_t x; memcpy(&x, b, sizeof x); if (l32s(b) != (uint64_t)(int64_t)x) return 3; }
+    { uint8_t x; memcpy(&x, b, sizeof x); if (l8z(b) != (uint64_t)(int64_t)x) return 4; }
+    { uint16_t x; memcpy(&x, b, sizeof x); if (l16z(b) != (uint64_t)(int64_t)x) return 5; }
+    { uint32_t x; memcpy(&x, b, sizeof x); if (l32z(b) != (uint64_t)(int64_t)x) return 6; }
+    { int8_t x; memcpy(&x, b, sizeof x); if (l8s16(b) != (uint16_t)(int16_t)x) return 7; }
+    { int16_t x; memcpy(&x, b, sizeof x); if (l16s32(b) != (uint32_t)(int32_t)x) return 8; }
+  }
+  return 0;
+}
+)";
+    let mut obj = Vector::<u8>::new();
+    let wt = format("lir ptr 4\n{}", lir.slice(10, lir.len()));
+    assert(
+        object_of(&wt, tgt::axis_index("wasm", false), tgt::axis_index("wasm32", true), 0, &mut obj),
+        "the wasm object",
+    );
+    // Each body: `local.get 0` and the extending load, and no `i32.extend8_s` (0xC0) or `i32.extend16_s`
+    // (0xC1) after a load.
+    let ops: [u8; 7] = [0x2C, 0x2E, 0x32, 0x34, 0x31, 0x33, 0x35];
+    for op in ops {
+        let mut seen = false;
+        for k in 0..obj.len() - 2 {
+            seen = seen || obj[k] == 0x20 && obj[k + 1] == 0 && obj[k + 2] == op;
+        }
+        assert(seen, format("extending load {}", op).as_str());
+    }
+    if !cli::has_cc() {
+        return;
+    }
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wasm(lir, drv), 0);
 }
 
 // The set bits of 1-, 2- and 4-byte lanes and the swapped bytes of 2-, 4- and 8-byte lanes in wasm32's

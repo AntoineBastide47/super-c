@@ -233,7 +233,7 @@ fn os_zmm() i32 {
 // absent.
 @platform(macos | ios)
 @arch(aarch64)
-const APPLE_ROWS: [(str<'static>, cpu::Feature); 14] = [
+const APPLE_ROWS: [(str<'static>, cpu::Feature); 15] = [
     ("hw.optional.arm.FEAT_FP16", cpu::Feature::Fp16),
     ("hw.optional.arm.FEAT_DotProd", cpu::Feature::Dotprod),
     ("hw.optional.arm.FEAT_RDM", cpu::Feature::Rdm),
@@ -248,6 +248,7 @@ const APPLE_ROWS: [(str<'static>, cpu::Feature); 14] = [
     ("hw.optional.arm.FEAT_SME2", cpu::Feature::Sme2),
     ("hw.optional.arm.FEAT_SME_F64F64", cpu::Feature::SmeF64f64),
     ("hw.optional.arm.FEAT_LRCPC", cpu::Feature::Rcpc),
+    ("hw.optional.arm.FEAT_CSSC", cpu::Feature::Cssc),
 ];
 
 @platform(macos | ios)
@@ -280,7 +281,7 @@ fn sysctl_flag(key: str<'static>) bool {
 }
 
 // The PF_ARM_* values of the IsProcessorFeaturePresent documentation (older MinGW headers lack some
-// names). A V8 crypto bit covers AES and SHA-2; no constant exists for RDM.
+// names). A V8 crypto bit covers AES and SHA-2; no constant exists for RDM or CSSC.
 @platform(windows)
 @arch(aarch64)
 const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
@@ -327,7 +328,7 @@ fn query() u64 {
 // libc headers lack some names. fp16 needs both its scalar and its vector bit (HWCAP bits 9 and 10).
 @platform(linux | android)
 @arch(aarch64)
-const HWCAP_ROWS: [(u8, u8, cpu::Feature); 16] = [
+const HWCAP_ROWS: [(u8, u8, cpu::Feature); 17] = [
     (0, 1, cpu::Feature::Neon),
     (0, 20, cpu::Feature::Dotprod),
     (0, 12, cpu::Feature::Rdm),
@@ -344,6 +345,7 @@ const HWCAP_ROWS: [(u8, u8, cpu::Feature); 16] = [
     (1, 37, cpu::Feature::Sme2),
     (1, 25, cpu::Feature::SmeF64f64),
     (0, 15, cpu::Feature::Rcpc),
+    (1, 34, cpu::Feature::Cssc),
 ];
 
 // getauxval gives 0 for an entry the kernel does not supply.

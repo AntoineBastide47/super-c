@@ -4743,12 +4743,13 @@ extend Gen {
     }
 
     // clz: CLZ; ctz: RBIT then CLZ; popcnt: CNT over the bytes in v30 (of 4 bytes but at 64 bits), summed
-    // by ADDV. An operand under
+    // by ADDV. With FEAT_CSSC ctz and popcnt are CTZ and CNT of the general register. An operand under
     // 32 bits is zero-extended, but for ctz, whose bit set at the width (making 0 count the width) hides
     // the bits above it. The count, at most the width, is `clean`.
     fn bit_count(self: &mut Self, i: u32, t: Inst) {
         let bits = type_bits(t.ty, self.cr.ptr);
         let sf = bits == 64;
+        let cssc = unsafe (*self.pkg).cpu_of(self.cr.b()).cssc;
         let mut r = if bits < 32 && t.op != O_CTZ {
             self.ext(t.a, false, bits) as u32
         } else {
@@ -4760,6 +4761,10 @@ extend Gen {
         }
         let rd = self.def_step(i) as u32;
         self.cr.va.index_mut(i as usize).clean = true;
+        if cssc && t.op != O_CLZ {
+            self.emit(a::dp1(sf, ast::pick(t.op == O_CTZ, a::DP1_CTZ, a::DP1_CNT), rd, r));
+            return;
+        }
         if t.op == O_POPCNT {
             // A 32-bit move for a narrower count: the register's bits above 32 are no part of the value.
             self.emit(a::fmov_gv(sf, true, 30, r));
@@ -4776,6 +4781,29 @@ extend Gen {
         if t.op == O_CLZ && bits < 32 {
             self.emit(a::addsub_imm(false, 1, false, rd, rd, 32 - bits, false));
         }
+    }
+
+    // The trailing zeros of 64-bit register `rn` into `rd`: CTZ with FEAT_CSSC, else RBIT then CLZ.
+    fn ctz64(self: &mut Self, rd: u32, rn: u32) {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+            self.emit(a::dp1(true, a::DP1_CTZ, rd, rn));
+            return;
+        }
+        self.emit(a::dp1(true, a::DP1_RBIT, rd, rn));
+        self.emit(a::dp1(true, a::DP1_CLZ, rd, rd));
+    }
+
+    // The set bits of 64-bit register `rn` into `rd`: CNT with FEAT_CSSC, else CNT of its bytes in v30
+    // summed by ADDV.
+    fn popcnt64(self: &mut Self, rd: u32, rn: u32) {
+        if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+            self.emit(a::dp1(true, a::DP1_CNT, rd, rn));
+            return;
+        }
+        self.emit(a::fmov_gv(true, true, 30, rn));
+        self.emit(a::cnt8b(30, 30));
+        self.emit(a::addv8b(30, 30));
+        self.emit(a::fmov_gv(false, false, rd, 30));
     }
 
     // Whether value `v` is an instruction that folds into its use (`lv::FOLD_*`).
@@ -6416,6 +6444,96 @@ extend Gen {
         return ast::pick(y == c.a || self.same_sign(y, c.a), y, VNONE);
     }
 
+    // FEAT_CSSC: integer select `t` (instruction `i`) of the two operands of an ordering comparison it
+    // tests, `x < y ? x : y` or `x < y ? y : x` and the other orders, as their minimum or maximum (SMIN,
+    // SMAX, UMIN, UMAX of the comparison's signedness): no comparison, no flags. A narrower type extends
+    // both operands by that signedness first and takes the 32-bit form; a constant operand that fits 8
+    // bits is the immediate form's. Whether it did.
+    fn min_max(self: &mut Self, i: u32, t: Inst) bool {
+        let bits = type_bits(t.ty, self.cr.ptr);
+        if !unsafe (*self.pkg).cpu_of(self.cr.b()).cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+            return false;
+        }
+        let c = self.cr.b().insts[t.a as usize];
+        if c.op != O_ICMP || c.aux < C_SLT || c.aux > C_UGE || self.cr.vt(c.a) != t.ty {
+            return false;
+        }
+        let direct = t.b == c.a && t.c == c.b;
+        if !direct && !(t.b == c.b && t.c == c.a) {
+            return false;
+        }
+        // `x < y ? x : y` is the minimum; a greater-than test or the swapped sides make the maximum.
+        let less = c.aux == C_SLT || c.aux == C_SLE || c.aux == C_ULT || c.aux == C_ULE;
+        let signed = signed_cond(c.aux);
+        let opc = ast::pick(less == direct, 2u32, 0u32) | ast::pick(signed, 0u32, 1u32);
+        let sf = bits == 64;
+        let rn = if bits < 32 {
+            self.ext(c.a, signed, bits)
+        } else {
+            self.reg(c.a)
+        } as u32;
+        let mut k: u64 = 0;
+        let kv: i64 = if !self.cr.const_of(c.b, &mut k) {
+            256
+        } else if signed {
+            sign_extend(k, bits)
+        } else {
+            k as i64
+        };
+        if a::minmax_imm_fits(opc, kv) {
+            let rd = self.def_step(i) as u32;
+            self.emit(a::minmax_imm(sf, opc, rd, rn, kv));
+        } else {
+            let rm = if bits < 32 {
+                self.ext(c.b, signed, bits)
+            } else {
+                self.reg(c.b)
+            } as u32;
+            let rd = self.def_step(i) as u32;
+            self.emit(a::dp2(sf, a::DP2_SMAX + opc, rd, rn, rm));
+        }
+        // A 32-bit operation clears the bits above; a narrower result is clean when zero-extended.
+        self.cr.va.index_mut(i as usize).clean = bits == 32 || bits < 32 && !signed;
+        return true;
+    }
+
+    // FEAT_CSSC: integer select `t` (instruction `i`) of `x` and its negation by the sign of `x`, `x < 0 ?
+    // -x : x` (or `<= 0`, or `x > 0 ? x : -x`, `>= 0`), as ABS of `x`: no comparison, no flags. A narrower
+    // type sign-extends `x` and takes the 32-bit form. Whether it did.
+    fn abs_select(self: &mut Self, i: u32, t: Inst) bool {
+        let bits = type_bits(t.ty, self.cr.ptr);
+        if !unsafe (*self.pkg).cpu_of(self.cr.b()).cssc || !is_int(t.ty) || bits > 64 || (t.a & (VPARAM | VFLAG)) != 0 || self.cr.lv.conj[t.a as usize] != 0 {
+            return false;
+        }
+        let c = self.cr.b().insts[t.a as usize];
+        let mut z: u64 = 1;
+        if c.op != O_ICMP || !self.cr.const_of(c.b, &mut z) || z != 0 || self.cr.vt(c.a) != t.ty {
+            return false;
+        }
+        let below = c.aux == C_SLT || c.aux == C_SLE;
+        if !below && c.aux != C_SGT && c.aux != C_SGE {
+            return false;
+        }
+        let (neg, x) = if below {
+            (t.b, t.c)
+        } else {
+            (t.c, t.b)
+        };
+        let (kind, base) = lv::cs_base(self.cr.b(), neg);
+        if x != c.a || kind != lv::CS_NEG || base != x {
+            return false;
+        }
+        let rn = if bits < 32 {
+            self.ext(x, true, bits)
+        } else {
+            self.reg(x)
+        } as u32;
+        let rd = self.def_step(i) as u32;
+        self.emit(a::dp1(bits == 64, a::DP1_ABS, rd, rn));
+        self.cr.va.index_mut(i as usize).clean = bits == 32;
+        return true;
+    }
+
     // Whether value `y` is negative exactly when `x` is, `x` where so: `y` a select of `x` and a constant
     // at least 0 that it takes only where `x > k` (`k` at least -1) or `x >= k` (`k` at least 0), as a
     // clamp's upper bound.
@@ -6472,6 +6590,9 @@ extend Gen {
             let rx = self.reg(mz) as u32;
             let rd = self.def_step(i) as u32;
             self.emit(a::logic_reg(bits == 64, 0, true, rd, rx, rx, 2, bits - 1));
+            return true;
+        }
+        if self.min_max(i, t) || self.abs_select(i, t) {
             return true;
         }
         let cx = self.cr.vx(t.a);
@@ -8861,8 +8982,7 @@ extend Gen {
             } else {
                 // The lowest set lane of the mask: its trailing zeros.
                 let r = self.reg(t.b) as u32;
-                self.emit(a::dp1(true, a::DP1_RBIT, 0, r));
-                self.emit(a::dp1(true, a::DP1_CLZ, 0, 0));
+                self.ctz64(0, r);
                 self.lane_panic_call(m);
             }
             return true;
@@ -11412,6 +11532,7 @@ extend Gen {
     // result lane (of `rlt`, signed `rsg`) in `x`; a lane that traps sets `fr`.
     fn int_rule(self: &mut Self, c: u8, lb: u32, sg: bool, rlt: u8, rsg: bool, x: u8, y: u8, z: u8, wr: u8, fr: u8) {
         let lt_c = ast::pick(sg, a::LT, a::LO);
+        let cssc = unsafe (*self.pkg).cpu_of(self.cr.b()).cssc;
         if c == core::SIMD_WRAP_ADD || c == core::SIMD_WRAP_SUB || c == core::SIMD_WRAP_MUL {
             let op = if c == core::SIMD_WRAP_ADD {
                 O_ADD
@@ -11458,6 +11579,10 @@ extend Gen {
             }
             self.emit(a::cmp_imm(true, wr, 0));
             self.emit(a::csel(true, 0, 0, x, z, x, a::NE));
+        } else if (c == core::SIMD_MIN || c == core::SIMD_MAX) && cssc {
+            // The lanes are extended to 64 bits by their signedness.
+            let op = ast::pick(c == core::SIMD_MIN, a::DP2_SMIN, a::DP2_SMAX) + ast::pick(sg, 0u32, 1u32);
+            self.emit(a::dp2(true, op, x, x, y));
         } else if c == core::SIMD_MIN {
             self.emit(a::addsub_reg(true, 1, true, a::ZR, x, y, 0, 0));
             self.emit(a::csel(true, 0, 0, x, x, y, lt_c));
@@ -11471,8 +11596,12 @@ extend Gen {
                 self.emit(a::addsub_reg(true, 1, true, a::ZR, x, z, 0, 0));
                 self.emit(a::csel(true, 0, 1, fr, fr, fr, a::NE));
             }
-            self.emit(a::cmp_imm(true, x, 0));
-            self.emit(a::csel(true, 1, 1, x, x, x, a::GE));
+            if cssc {
+                self.emit(a::dp1(true, a::DP1_ABS, x, x));
+            } else {
+                self.emit(a::cmp_imm(true, x, 0));
+                self.emit(a::csel(true, 1, 1, x, x, x, a::GE));
+            }
         } else if c == core::SIMD_ABS_DIFF {
             self.emit(a::addsub_reg(true, 1, false, z, x, y, 0, 0));
             self.emit(a::addsub_reg(true, 1, false, wr, y, x, 0, 0));
@@ -11487,13 +11616,9 @@ extend Gen {
             if lb < 64 {
                 self.emit(a::logic_imm(true, 1, x, x, a::logical_imm(1u64 << lb as u64, true)));
             }
-            self.emit(a::dp1(true, a::DP1_RBIT, x, x));
-            self.emit(a::dp1(true, a::DP1_CLZ, x, x));
+            self.ctz64(x, x);
         } else if c == core::SIMD_POPCNT {
-            self.emit(a::fmov_gv(true, true, 30, x));
-            self.emit(a::cnt8b(30, 30));
-            self.emit(a::addv8b(30, 30));
-            self.emit(a::fmov_gv(false, false, x, 30));
+            self.popcnt64(x, x);
         } else if c == core::SIMD_ROTL || c == core::SIMD_ROTR {
             // (u << k | u >> (lb - k) % lb), or the reverse: the store keeps the lane's bits.
             self.emit(a::logic_imm(true, 0, y, y, a::logical_imm(lb - 1, true)));
@@ -12048,10 +12173,7 @@ extend Gen {
         }
         if cs {
             // The packed lanes must fit from start.
-            self.emit(a::fmov_gv(true, true, 30, act));
-            self.emit(a::cnt8b(30, 30));
-            self.emit(a::addv8b(30, 30));
-            self.emit(a::fmov_gv(false, false, x, 30));
+            self.popcnt64(x, act);
             let w0 = self.code.len() as u32;
             self.emit(a::addsub_reg(true, 1, true, ix, len, st, 0, 0));
             self.emit(a::bcond(a::LO, 0));
@@ -12242,6 +12364,10 @@ extend Gen {
                 self.emit(a::addsub_reg(true, 0, false, acc, acc, x, 0, 0));
             } else if mul {
                 self.emit(a::mul(true, acc, acc, x));
+            } else if unsafe (*self.pkg).cpu_of(self.cr.b()).cssc {
+                // FEAT_CSSC: the lanes are extended to 64 bits by their signedness.
+                let op = ast::pick(c == core::SIMD_REDUCE_MIN, a::DP2_SMIN, a::DP2_SMAX) + ast::pick(sg, 0u32, 1u32);
+                self.emit(a::dp2(true, op, acc, acc, x));
             } else {
                 // min takes a lane below the accumulator, max one not below: both stay extended.
                 self.emit(a::addsub_reg(true, 1, true, a::ZR, x, acc, 0, 0));

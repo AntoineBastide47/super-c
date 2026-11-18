@@ -89,6 +89,10 @@ pub(package) const ROR: u32 = 1;
 pub(package) const SHL: u32 = 4;
 pub(package) const SHR: u32 = 5;
 pub(package) const SAR: u32 = 7;
+/// The BMI1 `bls` kinds (the ModRM.reg digit).
+pub(package) const BLSR: u8 = 1;
+pub(package) const BLSMSK: u8 = 2;
+pub(package) const BLSI: u8 = 3;
 
 /// A memory operand: `base` + `index` << `scale` + `disp`; `base` RIP for a RIP-relative one.
 pub(package) struct Mem {
@@ -937,6 +941,54 @@ extend Code {
         self.rex_rr(sz == 8, 0, r, false, false);
         self.byte(0x0F);
         self.byte(0xC8 + (r as u32 & 7));
+    }
+
+    /// MOVBE: `r` = the `sz` bytes at `m` reversed (`store`: the bytes of `r` reversed to `m`); 2, 4 or 8
+    /// bytes.
+    pub(package) fn movbe(self: &mut Self, store: bool, sz: u32, r: u8, m: Mem) {
+        self.osize(sz);
+        self.rm(0, ast::pick(store, 0x0F38F1u32, 0x0F38F0u32), sz == 8, r, m, false);
+    }
+
+    /// BMI1 ANDN: `dst` = !`a` & `b` (4 or 8 bytes).
+    pub(package) fn andn(self: &mut Self, sz: u32, dst: u8, a: u8, b: u8) {
+        self.vex_rr(0, 2, 0xF2, sz == 8, false, dst, a, b);
+    }
+
+    /// BMI1 BLSR (`BLSR`: `src & (src - 1)`), BLSMSK (`src ^ (src - 1)`) or BLSI (`src & -src`) into `dst`
+    /// (4 or 8 bytes).
+    pub(package) fn bls(self: &mut Self, kind: u8, sz: u32, dst: u8, src: u8) {
+        self.vex_rr(0, 2, 0xF3, sz == 8, false, kind, dst, src);
+    }
+
+    /// BMI2 SHLX, SHRX or SARX (`op`: `SHL`, `SHR`, `SAR`): `dst` = `src` shifted by `cnt` modulo the width,
+    /// no flags (4 or 8 bytes).
+    pub(package) fn shiftx(self: &mut Self, op: u32, sz: u32, dst: u8, src: u8, cnt: u8) {
+        let pfx = if op == SHL {
+            0x66u32
+        } else if op == SAR {
+            0xF3u32
+        } else {
+            0xF2u32
+        };
+        self.vex_rr(pfx, 2, 0xF7, sz == 8, false, dst, cnt, src);
+    }
+
+    /// BMI2 RORX: `dst` = `src` rotated right by `k`, no flags (4 or 8 bytes).
+    pub(package) fn rorx(self: &mut Self, sz: u32, dst: u8, src: u8, k: u32) {
+        self.vex_rr(0xF2, 3, 0xF0, sz == 8, false, dst, 0, src);
+        self.byte(k);
+    }
+
+    /// BMI2 MULX: `hi`:`lo` = rdx * `src` (64 bits, unsigned), no flags; `hi` the high half when both
+    /// name one register.
+    pub(package) fn mulx(self: &mut Self, hi: u8, lo: u8, src: u8) {
+        self.vex_rr(0xF2, 2, 0xF6, true, false, hi, lo, src);
+    }
+
+    /// `mulx` of the 8 bytes at `m`.
+    pub(package) fn mulx_m(self: &mut Self, hi: u8, lo: u8, m: Mem) {
+        self.vex_rm(0xF2, 2, 0xF6, true, false, hi, lo, m);
     }
 
     /// xchg `r`, `[m]` (locked).

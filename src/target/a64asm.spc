@@ -801,7 +801,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             v[at + 1] = amt / 16;
             return true;
         },
-        t::K::MOVZV | t::K::MOVNV | t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::IMM16 | t::K::UDF16 | t::K::TBIT | t::K::SIMM6 => {
+        t::K::MOVZV | t::K::MOVNV | t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::IMM16 | t::K::UDF16 | t::K::TBIT | t::K::SIMM6 | t::K::SIMM8 | t::K::UIMM8 => {
             return number(s, i, &mut v[at]);
         },
         t::K::BFX | t::K::BFIZ => {
@@ -1785,7 +1785,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             }
         },
         t::K::MOVZV | t::K::MOVNV => imm_text(o, a),
-        t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::TBIT | t::K::SIMM6 => {
+        t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::TBIT | t::K::SIMM6 | t::K::SIMM8 | t::K::UIMM8 => {
             o.format_into("#{}", a);
         },
         t::K::IMM16 | t::K::UDF16 => {

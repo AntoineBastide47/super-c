@@ -607,7 +607,7 @@ const fn fits(k: u8, o: &Opd, sz: &mut u8) bool {
     let anymem = mem || absmem;
     let vreg = o.p == P::REG && !o.star;
     return switch k {
-        t::K::R | t::K::O => gp && sized(o.size, sz),
+        t::K::R | t::K::O | t::K::RV => gp && sized(o.size, sz),
         t::K::ACC => gp && o.r == 0 && sized(o.size, sz),
         t::K::RM => anymem || gp && sized(o.size, sz),
         t::K::M => anymem,

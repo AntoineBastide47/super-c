@@ -70,6 +70,12 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         at::K::SHL | at::K::SHR | at::K::SIMM6 => {
             v[i] = 3;
         },
+        at::K::SIMM8 => {
+            v[i] = -100;
+        },
+        at::K::UIMM8 => {
+            v[i] = 200;
+        },
         at::K::BFX | at::K::BFIZ => {
             v[i] = 2;
             v[i + 1] = 5;
@@ -504,6 +510,15 @@ fn apply<F: fn(i64) i64>(f: F, v: i64) i64 {
     return f(v);
 }
 
+fn bits(a: u64, b: u64, n: u32, p: &[u8; 8]) u64 {
+    let t: u64 = if (a & a.wrapping_sub(1)) == 0 {
+        1
+    } else {
+        0
+    };
+    return (a & ~b) ^ (b & b.wrapping_neg()) ^ (a ^ a.wrapping_sub(1)) ^ (a << (n & 63)) ^ (b >> (n & 63)) ^ a.rotate_left(13) ^ a / 7 ^ u64::from_be_bytes(*p) ^ t;
+}
+
 fn main() i32 {
     let mut v = Vector::<P>::new();
     for i in 0..20i64 {
@@ -519,7 +534,9 @@ fn main() i32 {
     let f = floats(2.0, 3.5);
     let l = lanes(simd::Simd::<i32, 4>::splat(2), simd::Simd::<i32, 4>::splat(3));
     let (o, ov) = 100i64.overflowing_add(s);
-    println("{} {} {} {} {} {} {}", m.len(), s, (w >> 64) as u64, f, l, o, ov);
+    let bp: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let bt = bits(w as u64, s as u64, 7, &bp);
+    println("{} {} {} {} {} {} {} {}", m.len(), s, (w >> 64) as u64, f, l, o, ov, bt);
     return 0;
 }
 )";
@@ -685,7 +702,7 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                     },
                 );
             },
-            xt::K::XV | xt::K::YV | xt::K::ZV => {
+            xt::K::XV | xt::K::YV | xt::K::ZV | xt::K::RV => {
                 n.set_reg(i, 5);
             },
             xt::K::XI4 | xt::K::YI4 => {
@@ -914,14 +931,14 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
     assert_eq(at, got.len());
 }
 
-// The code the x86-64 generator emits for `CORPUS` and std on `os`: every instruction decodes to a
-// table row, and its disassembly assembles back to it.
-fn x64_generated(os: str) {
+// The code the x86-64 generator emits for `CORPUS` and std on `os` with build flags `flags`: every
+// instruction decodes to a table row, and its disassembly assembles back to it.
+fn x64_generated(os: str, flags: str) {
     let p = cli::proj_new();
     p.mkfile("main.spc", CORPUS);
     // The link needs the target's C library; the objects come first. The header facts need its headers: a
     // runner without them has no objects to check.
-    let r = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    let r = p.run_raw(format("build --target={} --arch=x86_64{} \"{}/main.spc\"", os, flags, p.dir()).as_str());
     if r.out_has("no sysroot found") {
         return;
     }
@@ -1179,8 +1196,10 @@ fn x64_generated_code_round_trips() {
     if cli::on_wasm() {
         return;
     }
-    x64_generated("linux");
-    x64_generated("windows");
+    x64_generated("linux", "");
+    x64_generated("windows", "");
+    // x86-64-v3: BMI1, BMI2, MOVBE, AVX2 and FMA forms.
+    x64_generated("linux", " --target-cpu=x86-64-v3");
 }
 
 // `relax` drops a jump nothing reaches (`dead`), and then the jump before it, whose target follows it; the

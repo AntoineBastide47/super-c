@@ -118,10 +118,16 @@ extend K {
     pub(package) const VSX: u8 = 41; // memory with an xmm index (VSIB)
     pub(package) const VSY: u8 = 42;
     pub(package) const VSZ: u8 = 43;
+    pub(package) const RV: u8 = 44; // a general register of the operand size in VEX.vvvv
 }
 
 const fn r(mn: str<'static>, op: u32, pfx: u8, dig: u8, sz: u8, fl: u8, ops: u32) Row {
     return Row { mn: mn, op: op, pfx: pfx, dig: dig, sz: sz, fl: fl, vx: 0, ops: ops };
+}
+
+// A VEX row on general registers (BMI1, BMI2): 32 or 64 bits by VEX.W, a size suffix.
+const fn vg(mn: str<'static>, op: u32, pfx: u8, dig: u8, ops: u32) Row {
+    return Row { mn: mn, op: op, pfx: pfx, dig: dig, sz: SLQ, fl: 0, vx: VEX, ops: ops };
 }
 
 // A VEX or EVEX row.
@@ -162,7 +168,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1049] = [
+pub(package) const ROWS: [Row; 1076] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -348,6 +354,27 @@ pub(package) const ROWS: [Row; 1049] = [
     r("tzcnt", 0xFBC, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
     r("lzcnt", 0xFBD, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
     r("popcnt", 0xFB8, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
+    // MOVBE: a load or store with its bytes reversed.
+    r("movbe", 0xF38F0, 0, D, SWLQ, 0, k2(K::R, K::M)),
+    r("movbe", 0xF38F1, 0, D, SWLQ, 0, k2(K::M, K::R)),
+    // SSE4.2 CRC32C of 1 to 8 bytes into a 32-bit (64-bit for 8 bytes) accumulator.
+    r("crc32", 0xF38F0, 0xF2, D, SB, 0, k2(K::R32, K::RM8)),
+    r("crc32", 0xF38F1, 0xF2, D, SW | SL, 0, k2(K::R32, K::RM)),
+    r("crc32", 0xF38F1, 0xF2, D, SQ, 0, k2(K::R64, K::RM)),
+    // BMI1 and BMI2.
+    vg("andn", 0xF38F2, 0, D, k3(K::R, K::RV, K::RM)),
+    vg("bextr", 0xF38F7, 0, D, k3(K::R, K::RM, K::RV)),
+    vg("blsr", 0xF38F3, 0, 1, k2(K::RV, K::RM)),
+    vg("blsmsk", 0xF38F3, 0, 2, k2(K::RV, K::RM)),
+    vg("blsi", 0xF38F3, 0, 3, k2(K::RV, K::RM)),
+    vg("bzhi", 0xF38F5, 0, D, k3(K::R, K::RM, K::RV)),
+    vg("pdep", 0xF38F5, 0xF2, D, k3(K::R, K::RV, K::RM)),
+    vg("pext", 0xF38F5, 0xF3, D, k3(K::R, K::RV, K::RM)),
+    vg("mulx", 0xF38F6, 0xF2, D, k3(K::R, K::RV, K::RM)),
+    vg("shlx", 0xF38F7, 0x66, D, k3(K::R, K::RM, K::RV)),
+    vg("sarx", 0xF38F7, 0xF3, D, k3(K::R, K::RM, K::RV)),
+    vg("shrx", 0xF38F7, 0xF2, D, k3(K::R, K::RM, K::RV)),
+    vg("rorx", 0xF3AF0, 0xF2, D, k3(K::R, K::RM, K::I8)),
     r("bsf", 0xFBC, 0, D, SWLQ, 0, k2(K::R, K::RM)),
     r("bsr", 0xFBD, 0, D, SWLQ, 0, k2(K::R, K::RM)),
     r("bt", 0xFA3, 0, D, SWLQ, 0, k2(K::RM, K::R)),
@@ -515,6 +542,16 @@ pub(package) const ROWS: [Row; 1049] = [
     r("aesdeclast", 0xF38DF, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("aesenc", 0xF38DC, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("aesenclast", 0xF38DD, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("aesimc", 0xF38DB, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("aeskeygenassist", 0xF3ADF, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
+    // The SHA extensions (SHA-1 and SHA-256 rounds and message schedules).
+    r("sha1rnds4", 0xF3ACC, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
+    r("sha1nexte", 0xF38C8, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha1msg1", 0xF38C9, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha1msg2", 0xF38CA, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha256rnds2", 0xF38CB, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
+    r("sha256msg1", 0xF38CC, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha256msg2", 0xF38CD, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("blendvpd", 0xF3815, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("blendvps", 0xF3814, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("cmppd", 0xFC2, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
@@ -1298,7 +1335,7 @@ extend Enc {
 /// a kind that names none.
 pub(package) const fn gp_size(k: u8, sz: u8) u8 {
     return switch k {
-        K::R | K::RM | K::O | K::ACC => sz,
+        K::R | K::RM | K::O | K::ACC | K::RV => sz,
         K::RM8 | K::CL => 1u8,
         K::RM16 => 2u8,
         K::RM32 | K::R32 | K::RR32 => 4u8,
@@ -1332,7 +1369,7 @@ pub(package) const fn reg_only(k: u8) bool {
 
 /// Whether kind `k` is in VEX.vvvv.
 pub(package) const fn in_vvvv(k: u8) bool {
-    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV;
+    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV || k == K::RV;
 }
 
 /// Whether kind `k` names a mask register.
@@ -1598,7 +1635,8 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
     if ve != 0 {
         let pp = x::pp_of(r.pfx);
         let mp = map_of(r.op);
-        let w = r.vx as u32 >> 2 & 1;
+        // A row on general registers takes 64 bits by W.
+        let w = r.vx as u32 >> 2 & 1 | (r.sz != 0 && n.sz == 8) as u32;
         let l = r.vx as u32 >> 10 & 3;
         let rr = ~rex >> 2 & 1;
         let xx = ~rex >> 1 & 1;
@@ -1881,7 +1919,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         }
         let mut x66 = c66;
         if vex != 0 {
-            if x::pp_of(r.pfx) != vpp || (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
+            if x::pp_of(r.pfx) != vpp || r.sz == 0 && (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
                 continue;
             }
             if vk != 0 && (r.vx & MK) == 0 || vk == 0 && (r.vx & MR) != 0 || vz && ((r.vx & MZ) == 0 || vk == 0) {
@@ -1895,7 +1933,8 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         } else if r.pfx != rep {
             continue;
         }
-        let w = (rex & 8) != 0;
+        // A VEX row on general registers takes its size from W.
+        let w = (rex & 8) != 0 || vex != 0 && r.sz != 0 && vw == 1;
         let mut sz: u8 = 0;
         let mut rexw = w;
         if r.sz == SB {

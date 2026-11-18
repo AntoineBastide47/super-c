@@ -1,8 +1,9 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
 # the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
-# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
-# the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, with
+# the tests that link a C driver (SC_TEST_CC); the vector tests at x86-64-v3; the native tests under
+# Intel SDE (AVX-512); and the wasm lanes.
 name: Debug
 on:
   workflow_dispatch
@@ -103,21 +104,18 @@ jobs:
           chmod +x "./$bin"
           dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
           case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
+          case "${{ matrix.target }}" in windows) export SC_TEST_CC=gcc ;; *) export SC_TEST_CC=cc ;; esac
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
 
-  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
-  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
-  # agree on it within the targets' differences; time and cycles follow each runner's machine.
-  bench:
+  # The vector tests at x86-64-v3 (BMI1, BMI2, MOVBE, AVX2, FMA) on the x86-64 runners.
+  levels:
     needs: compile
-    name: self-compile bench (${{ matrix.target }})
+    name: levels (${{ matrix.target }}, x86-64-v3)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
           - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
@@ -135,10 +133,169 @@ jobs:
         with:
           name: compiler-${{ matrix.target }}
 
-      - name: Self-compile benchmark
+      - name: Vector tests at x86-64-v3
+        env:
+          SC_SIMD_FEATURES: x86-64-v3
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
-          "./$bin" bench --filter=self_compile
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
+
+  # The native tests under Intel SDE (an emulated Sapphire Rapids: AVX-512, BMI, MOVBE).
+  avx512:
+    needs: compile
+    name: avx512 (linux, sde)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Install Intel SDE
+        run: |
+          set -eu
+          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
+          mkdir sde
+          tar -xJf "$f" -C sde --strip-components=1
+
+      - name: Native tests with 64-byte vectors under SDE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
+
+  wasm-compile:
+    name: wasm compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+
+      - name: Build the wasm compiler
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      - name: Self-host fixpoint under wasmtime
+        run: |
+          set -eu
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
+
+  wasm-target:
+    needs: wasm-compile
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: |
+          chmod +x ./super-c
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"

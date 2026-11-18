@@ -2082,6 +2082,10 @@ pub(package) const CPU_LZCNT: u32 = 32;
 pub(package) const CPU_LSE: u32 = 64;
 pub(package) const CPU_RCPC: u32 = 128;
 pub(package) const CPU_FMA: u32 = 256;
+pub(package) const CPU_CSSC: u32 = 512;
+pub(package) const CPU_BMI1: u32 = 1024;
+pub(package) const CPU_BMI2: u32 = 2048;
+pub(package) const CPU_MOVBE: u32 = 4096;
 
 /// What a processor's features give the native backend (`emit::cemit` computes them from a feature set):
 /// the build's (`Package.cpu`), or those of one body compiled for more features (`Body.cpu`: a
@@ -2136,6 +2140,18 @@ pub(package) struct Cpu {
     pub(package) half: u8,
     /// The processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub(package) fma: bool,
+    /// The processor has FEAT_CSSC (arm64 Armv8.9): one instruction each counts trailing zeros (CTZ) and
+    /// set bits (CNT) of a general register, takes its absolute value (ABS), and the minimum or maximum
+    /// of two registers or a register and an 8-bit immediate (SMIN, SMAX, UMIN, UMAX).
+    pub(package) cssc: bool,
+    /// The processor has BMI1 (x86-64 `andn`, `blsr`, `blsi`, `blsmsk`; from x86-64-v3 or `-mbmi`).
+    pub(package) bmi1: bool,
+    /// The processor has BMI2 (x86-64 `shlx`, `shrx`, `sarx`, `rorx`, `mulx`: no flags, no fixed register;
+    /// from x86-64-v3 or `-mbmi2`).
+    pub(package) bmi2: bool,
+    /// The processor has MOVBE (x86-64 loads and stores with the bytes reversed; from x86-64-v3 or
+    /// `-mmovbe`).
+    pub(package) movbe: bool,
 }
 
 extend Cpu as Copy {}
@@ -2159,12 +2175,16 @@ extend Cpu {
             rcpc: false,
             half: HALF_NONE,
             fma: false,
+            cssc: false,
+            bmi1: false,
+            bmi2: false,
+            movbe: false,
         };
     }
 
     /// The facts with a flag each as one word (`CPU_*`), for the text form.
     pub(package) const fn flags(self: &Self) u32 {
-        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA;
+        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA | self.cssc as u32 * CPU_CSSC | self.bmi1 as u32 * CPU_BMI1 | self.bmi2 as u32 * CPU_BMI2 | self.movbe as u32 * CPU_MOVBE;
     }
 
     /// A body's own facts from the words of the text form: the register bytes, `vec_bits`, `vec_perm3`,
@@ -2186,6 +2206,10 @@ extend Cpu {
             rcpc: (f & CPU_RCPC) != 0,
             half: half as u8,
             fma: (f & CPU_FMA) != 0,
+            cssc: (f & CPU_CSSC) != 0,
+            bmi1: (f & CPU_BMI1) != 0,
+            bmi2: (f & CPU_BMI2) != 0,
+            movbe: (f & CPU_MOVBE) != 0,
         };
     }
 
@@ -2512,6 +2536,10 @@ extend Package {
                 rcpc: false,
                 half: HALF_NONE,
                 fma: false,
+                cssc: false,
+                bmi1: false,
+                bmi2: false,
+                movbe: false,
             },
             // Small: a parallel lowering makes a package per shard, and the tables grow geometrically.
             names: nm::Names::with_capacity(1 << 8, 1 << 4),

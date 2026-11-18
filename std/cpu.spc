@@ -113,6 +113,9 @@ pub enum Feature {
     SmeF64f64,
     /// The acquire load that waits for no earlier release store, `ldapr` (aarch64; `rcpc`).
     Rcpc,
+    /// Trailing zeros, set bits, absolute value, minimum and maximum of general registers in one
+    /// instruction each (aarch64; `cssc`).
+    Cssc,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

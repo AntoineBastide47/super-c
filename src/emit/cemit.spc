@@ -163,6 +163,10 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
         rcpc: feature(pk, fs, "rcpc"),
         half: half,
         fma: isa.scalar_fma || feature(pk, fs, "fma"),
+        cssc: feature(pk, fs, "cssc"),
+        bmi1: feature(pk, fs, "bmi1"),
+        bmi2: feature(pk, fs, "bmi2"),
+        movbe: feature(pk, fs, "movbe"),
     };
 }
 

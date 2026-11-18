@@ -1911,7 +1911,8 @@ extend Gen {
                 } else {
                     self.int_push(t);
                 }
-            } else {
+            } else if t.ty != T_I64 || t.op != O_ZEXT && t.op != O_SEXT || !self.ext_load_push(t) {
+                // An extension of a moved narrow load is one extending load (`ext_load_push`).
                 self.get(t.a);
                 if t.ty == T_I64 && (t.op == O_ZEXT || t.op == O_SEXT) {
                     self.c.op(ast::pick(t.op == O_ZEXT, w::I64_EXTEND_I32_U, w::I64_EXTEND_I32_S));
@@ -3100,6 +3101,13 @@ extend Gen {
         if from == T_I128 || to == T_I128 {
             return self.convert128(i, t);
         }
+        if (op == O_SEXT || op == O_ZEXT) && self.ext_load_push(t) {
+            if to != T_I64 {
+                self.canon(to);
+            }
+            self.put(i);
+            return true;
+        }
         if op == O_SEXT || op == O_ZEXT || op == O_TRUNC || op == O_PTRTOINT || op == O_INTTOPTR {
             self.get(t.a);
             let fw = from == T_I64;
@@ -3630,6 +3638,48 @@ extend Gen {
             self.c.op(w::I32_ADD);
         }
         self.load_al(t.ty, ast::pick(off < 0, 0, off as u32), al);
+    }
+
+    // Extension `t` (`sext` or `zext`) of a narrow integer load its reader computes in place
+    // (`lv::FOLD_SINK`) as one extending load: `i32.load8_s` and `i32.load16_s` for a signed extension to
+    // 32 bits or fewer (a zero one is the load as it is), `i64.load8_s` to `i64.load32_u` to 64 bits. Whether
+    // it pushed the value; a narrower result than 32 bits is the caller's to canonicalize.
+    fn ext_load_push(self: &mut Self, t: Inst) bool {
+        let v = t.a;
+        if (v & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[v as usize] || !self.lv.sunk[v as usize] {
+            return false;
+        }
+        let x = self.b().insts[v as usize];
+        if x.op != O_LOAD || x.ty != T_I8 && x.ty != T_I16 && x.ty != T_I32 {
+            return false;
+        }
+        let sg = t.op == O_SEXT;
+        let op = if t.ty == T_I64 {
+            if x.ty == T_I8 {
+                ast::pick(sg, w::I64_LOAD8_S, w::I64_LOAD8_U)
+            } else if x.ty == T_I16 {
+                ast::pick(sg, w::I64_LOAD16_S, w::I64_LOAD16_U)
+            } else {
+                ast::pick(sg, w::I64_LOAD32_S, w::I64_LOAD32_U)
+            }
+        } else if sg && x.ty == T_I8 {
+            w::I32_LOAD8_S
+        } else if sg && x.ty == T_I16 {
+            w::I32_LOAD16_S
+        } else {
+            return false;
+        };
+        let off = x.c as i32;
+        let al = (x.aux & 15) as u32;
+        self.get(x.a);
+        if off < 0 {
+            self.c.i32_const(off);
+            self.c.op(w::I32_ADD);
+        }
+        let nat = log2u(type_bytes(x.ty, 4));
+        self.c.op(op);
+        self.c.memarg(ast::pick(al < nat, al, nat), ast::pick(off < 0, 0, off as u32));
+        return true;
     }
 
     // Local `a` = the address in `v` plus `off`.

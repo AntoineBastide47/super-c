@@ -2911,9 +2911,16 @@ extend Gen {
             ) == NONE {
                 return 0;
             }
-            if op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op == O_MULO && type_bits(t.ty, 8) == 64 {
+            if op == O_MULHU && type_bits(t.ty, 8) == 64 && self.cpu.bmi2 && self.twin_product(i as u32, t, false) == NONE {
+                // MULX (`mulx_high`).
+                free &= ~bit(x::RDX);
+            } else if op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op == O_MULO && type_bits(
+                t.ty,
+                8,
+            ) == 64 {
                 free &= ~(bit(x::RAX) | bit(x::RDX));
-            } else if shift && !is_vec(t.ty) && !self.cr.const_of(t.b, &mut k) {
+            } else if shift && !is_vec(t.ty) && !self.cr.const_of(t.b, &mut k) && (!self.cpu.bmi2 || self.cr.lv.pfold[i] || t.ty == T_I128) {
+                // BMI2's shifts take the count anywhere (a folded shift's rotation still takes cl).
                 free &= ~bit(x::RCX);
             }
         }
@@ -3709,7 +3716,11 @@ extend Gen {
             lv::FOLD_ADDSUB | ast::pick(self.avx, lv::FOLD_ADDSUB_WIDE, 0u64)
         } else {
             0
-        };
+        } | ast::pick(self.cpu.bmi1, lv::FOLD_ANDN | lv::FOLD_BLS, 0u64) | ast::pick(
+            self.cpu.movbe,
+            lv::FOLD_MOVBE,
+            0u64,
+        );
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
         if self.again {
@@ -4988,6 +4999,21 @@ extend Gen {
             // 16 bits: the 32-bit reversal moves them to the top half.
             let bits = type_bits(t.ty, self.cr.ptr);
             let sz = wsz(bits.max(32));
+            // A store reverses it (`lv::FOLD_MOVBE`).
+            if self.cr.lv.pfold[i as usize] {
+                return true;
+            }
+            // A load that folds in (`lv::FOLD_MOVBE`): MOVBE reads the memory.
+            if self.ld_folded(t.a) {
+                let lt = self.cr.b().insts[t.a as usize];
+                let mut rs: u32 = NONE;
+                let mut radd: i64 = 0;
+                let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+                let rd = self.def(i);
+                self.c.movbe(false, sz, rd, m);
+                self.mem_rel(rs, radd);
+                return true;
+            }
             let r = self.reg(t.a);
             let rd = self.def_over(i, t.a, r);
             if rd != r {
@@ -5026,6 +5052,10 @@ extend Gen {
             } else {
                 (t.a, t.b)
             };
+            if bits == 64 && !sgn && self.cpu.bmi2 && self.twin_product(i, t, false) == NONE {
+                self.mulx_high(i, va, vb);
+                return true;
+            }
             if bits == 64 {
                 self.wide_mul(i, t, va, vb, NONE);
                 let m = self.twin_product(i, t, false);
@@ -5474,6 +5504,17 @@ extend Gen {
         }
         if (t.a & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[t.a as usize] && self.cr.b().insts[t.a as usize].op == O_AND {
             let n = self.cr.b().insts[t.a as usize];
+            // `x & (x - 1)` or `x & -x` with the inner value folded (`lv::FOLD_BLS`): BLSR or BLSI into a
+            // scratch register, whose zero flag the equality reads.
+            let (kind, s, xv) = lv::bls_parts(self.cr.b(), n);
+            if kind != 0 && self.folded(s) {
+                let rx = self.reg(xv);
+                self.zero_for(zi, rx, NOREG);
+                let s0 = self.c.len();
+                self.c.bls(kind, sz, S0, rx);
+                self.reflag(s0);
+                return icond(t.aux);
+            }
             let ra = self.reg(n.a);
             let tz = ast::pick(bits < 32, 4u32, sz);
             let mut k: i32 = 0;
@@ -5879,6 +5920,27 @@ extend Gen {
             }
             return true;
         }
+        // BMI1: `x & (x - 1)` BLSR, `x ^ (x - 1)` BLSMSK, `x & -x` BLSI with the inner value folded
+        // (`lv::FOLD_BLS`); `!a & b` ANDN with the inversion folded (`lv::FOLD_ANDN`). The 32-bit forms for
+        // narrower types: the bits above are no part of the value.
+        if self.cpu.bmi1 && (op == O_AND || op == O_XOR) {
+            let (kind, s, xv) = lv::bls_parts(self.cr.b(), t);
+            if kind != 0 && self.folded(s) {
+                let rx = self.reg(xv);
+                let rd = self.def(i);
+                self.c.bls(kind, sz.max(4), rd, rx);
+                return true;
+            }
+            let nv = lv::not_side(self.cr.b(), &self.cr.lv.pfold, t);
+            if op == O_AND && nv != VNONE {
+                let other = ast::pick(t.a == nv, t.b, t.a);
+                let rn = self.reg(lv::inversion(self.cr.b(), nv));
+                let ro = self.reg(other);
+                let rd = self.def(i);
+                self.c.andn(sz.max(4), rd, rn, ro);
+                return true;
+            }
+        }
         // A rotation whose shifts fold into it (`lv::FOLD_ROT`): ROL or ROR by an immediate or by cl, at the
         // type's own width (a narrow rotation reads the low bits alone).
         let rot = if self.folds_both(t) {
@@ -5903,6 +5965,13 @@ extend Gen {
                     ry
                 };
                 self.c.shld_ri(bits / 8, rd, src, kr);
+                return true;
+            }
+            if amt == VNONE && self.cpu.bmi2 && bits >= 32 {
+                // BMI2 RORX: any destination, no flags; a left rotation by k is a right one by the rest.
+                let ra = self.reg(xv);
+                let rd = self.def(i);
+                self.c.rorx(bits / 8, rd, ra, (bits - kr) % bits);
                 return true;
             }
             if amt == VNONE {
@@ -6194,8 +6263,23 @@ extend Gen {
                 self.c.shift_ri(sop, sz, rd, kk as u32);
                 return true;
             }
-            // A count in rcx already stays there.
             let amt = lv::shift_amount(self.cr.b(), &self.cr.lv.pfold, t.b);
+            // BMI2: SHLX, SHRX, SARX take the count in any register and write no flags; a narrow value
+            // extends first, as for cl.
+            if self.cpu.bmi2 {
+                let ra = self.reg(t.a);
+                let rb = self.reg(amt);
+                let rd = self.def(i);
+                let src = if small && op != O_SHL {
+                    self.c.ext(bits / 8, 4, op == O_ASHR, S0, ra);
+                    S0
+                } else {
+                    ra
+                };
+                self.c.shiftx(sop, sz.max(4), rd, src, rb);
+                return true;
+            }
+            // A count in rcx already stays there.
             if self.cr.owner[x::RCX as usize] == self.cr.vx(amt) {
                 self.cr.lock |= bit(x::RCX);
             } else {
@@ -6317,6 +6401,39 @@ extend Gen {
             self.cr.set_owner(x::RAX, NONE);
         }
         self.result_in(i, x::RDX);
+    }
+
+    // BMI2 MULX: the high half of 64-bit unsigned product `i` of `va0` and `vb0` without its low half: rdx
+    // takes one operand (one rdx holds already), the other is a register or a load that folds in
+    // (`lv::Live::wide_load`); the result in any register, no flags, rax untouched.
+    fn mulx_high(self: &mut Self, i: u32, va0: Value, vb0: Value) {
+        let (vm, vd) = if self.ld_folded(va0) {
+            (va0, vb0)
+        } else if self.ld_folded(vb0) || self.cr.va[self.cr.vx(vb0) as usize].reg == x::RDX {
+            (vb0, va0)
+        } else {
+            (va0, vb0)
+        };
+        if self.cr.va[self.cr.vx(vd) as usize].reg == x::RDX {
+            self.cr.lock |= bit(x::RDX);
+        } else {
+            self.vacate(x::RDX);
+            self.materialize(vd, x::RDX);
+            self.cr.lock |= bit(x::RDX);
+        }
+        if self.ld_folded(vm) {
+            let lt = self.cr.b().insts[vm as usize];
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(lt.a, lt.c as i32, &mut rs, &mut radd);
+            let rd = self.def(i);
+            self.c.mulx_m(rd, rd, m);
+            self.mem_rel(rs, radd);
+            return;
+        }
+        let rm = self.reg(vm);
+        let rd = self.def(i);
+        self.c.mulx(rd, rd, rm);
     }
 
     // The other half of 64-bit product `i` (`t`) later in its block, within DIV_REACH instructions: its high
@@ -7357,6 +7474,14 @@ extend Gen {
             } else {
                 self.c.alu_mr(alu_of(o.op), n, m, r);
             }
+            self.mem_rel(rs, radd);
+            return true;
+        }
+        // A byte reversal that folds in (`lv::FOLD_MOVBE`): MOVBE writes the reversed bytes.
+        if (t.b & (VPARAM | VFLAG)) == 0 && t.b != VNONE && self.cr.lv.pfold[t.b as usize] && self.cr.b().insts[t.b as usize].op == O_BSWAP {
+            let r = self.reg(self.cr.b().insts[t.b as usize].a);
+            let m = self.mem_at(t.a, t.c as i32, &mut rs, &mut radd);
+            self.c.movbe(true, n, r, m);
             self.mem_rel(rs, radd);
             return true;
         }

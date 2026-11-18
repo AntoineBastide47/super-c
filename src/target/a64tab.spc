@@ -270,7 +270,9 @@ extend K {
     pub(package) const SHL32: u8 = 195;
     pub(package) const IMM6X: u8 = 196; // at 10
     pub(package) const BMASK: u8 = 197; // a 64-bit value of 0 or 0xFF bytes, a bit per byte: abc at 16, defgh at 5
-    pub(package) const COUNT: u8 = 198;
+    pub(package) const SIMM8: u8 = 198; // at 10, signed
+    pub(package) const UIMM8: u8 = 199; // at 10, unsigned
+    pub(package) const COUNT: u8 = 200;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -317,7 +319,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 664] = [
+pub(package) const ROWS: [Row; 675] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -421,6 +423,15 @@ pub(package) const ROWS: [Row; 664] = [
     r("lsrv", 0x1AC02400, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("asrv", 0x1AC02800, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("rorv", 0x1AC02C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    // FEAT_CSSC: the minimum and maximum of two registers, and of a register and an 8-bit immediate.
+    r("smax", 0x1AC06000, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("umax", 0x1AC06400, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("smin", 0x1AC06800, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("umin", 0x1AC06C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
+    r("smax", 0x11C00000, Q::SF, QWX, k3(K::RD, K::RN, K::SIMM8)),
+    r("umax", 0x11C40000, Q::SF, QWX, k3(K::RD, K::RN, K::UIMM8)),
+    r("smin", 0x11C80000, Q::SF, QWX, k3(K::RD, K::RN, K::SIMM8)),
+    r("umin", 0x11CC0000, Q::SF, QWX, k3(K::RD, K::RN, K::UIMM8)),
     // Data processing, one source.
     r("rbit", 0x5AC00000, Q::SF, QWX, k2(K::RD, K::RN)),
     r("rev16", 0x5AC00400, Q::SF, QWX, k2(K::RD, K::RN)),
@@ -429,6 +440,10 @@ pub(package) const ROWS: [Row; 664] = [
     r("rev", 0xDAC00C00, Q::NONE, 0, k2(K::XD, K::XN)),
     r("clz", 0x5AC01000, Q::SF, QWX, k2(K::RD, K::RN)),
     r("cls", 0x5AC01400, Q::SF, QWX, k2(K::RD, K::RN)),
+    // FEAT_CSSC.
+    r("ctz", 0x5AC01800, Q::SF, QWX, k2(K::RD, K::RN)),
+    r("cnt", 0x5AC01C00, Q::SF, QWX, k2(K::RD, K::RN)),
+    r("abs", 0x5AC02000, Q::SF, QWX, k2(K::RD, K::RN)),
     // Data processing, three sources.
     r("mul", 0x1B007C00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
     r("mneg", 0x1B00FC00, Q::SF, QWX, k3(K::RD, K::RN, K::RM)),
@@ -1221,6 +1236,7 @@ const fn kmask(k: u8, q: u32) u32 {
         K::PAT => 31u32 << 5,
         K::MULVL => 15u32 << 16,
         K::SIMM6 => 0x3Fu32 << 5,
+        K::SIMM8 | K::UIMM8 => 0xFFu32 << 10,
         K::MSV => 31u32 << 5 | 15u32 << 16,
         K::MSVR => 31u32 << 5 | 31u32 << 16,
         K::VLX => 1u32 << 13,
@@ -1626,6 +1642,14 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
                 w |= (a as u32 & 0x3F) << 5;
                 ok = within(a, -32, 31);
             },
+            K::SIMM8 => {
+                w |= (a as u32 & 0xFF) << 10;
+                ok = within(a, -128, 127);
+            },
+            K::UIMM8 => {
+                w |= (a as u32 & 0xFF) << 10;
+                ok = within(a, 0, 255);
+            },
             K::MSV => {
                 let g = group(r);
                 w |= (a as u32 & 31) << 5 | ((b / g) as u32 & 15) << 16;
@@ -1921,6 +1945,12 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             },
             K::SIMM6 => {
                 v[at] = sext(w >> 5 & 0x3F, 6);
+            },
+            K::SIMM8 => {
+                v[at] = sext(w >> 10 & 0xFF, 8);
+            },
+            K::UIMM8 => {
+                v[at] = w >> 10 & 0xFF;
             },
             K::MSV => {
                 v[at] = w >> 5 & 31;
