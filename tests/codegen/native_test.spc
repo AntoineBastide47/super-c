@@ -1454,7 +1454,8 @@ int main(void) {
 // BMI1's `andn`, `blsr`, `blsi` and `blsmsk` (one `x - 1` that a test and a `xor` share), BMI2's shifts
 // by a register of 8 to 64 bits, `rorx` and `mulx` (of a register and of a load), and `movbe` loads and
 // stores of 16 to 64 bits: x86-64 with the three features on a processor that has them, and every
-// target without them.
+// target without them. A product whose high half follows it (`mulpair`, a 2-by-1 division step) is one
+// `mul`: rax and rdx no homes there, the x86-64 object built with the features on every host.
 @test
 fn bmi_and_byte_reversed_forms_run() {
     if !cli::has_cc() {
@@ -1498,6 +1499,7 @@ sym @ldbe64 fn global
 sym @stbe16 fn global
 sym @stbe32 fn global
 sym @stbe64 fn global
+sym @mulpair fn global
 sym @mulhi fn global
 sym @mulhim fn global
 fn @andn8
@@ -1736,6 +1738,32 @@ b0(v0: ptr, v1: i64):
   v2 = bswap.i64 v1
   store v2, v0 align 0
   ret
+fn @mulpair
+  sig (i64, i64, i64, i64, ptr) -> i64
+b0(v0: i64, v1: i64, v2: i64, v3: i64, v4: ptr):
+  v5 = iconst.i64 1
+  v6 = mul.i64 v3, v0
+  v7 = mulhu.i64 v3, v0
+  v8, v9 = addo.u.i64 v6, v1
+  v10 = add.i64 v7, v0
+  v11 = zext.i64 v9
+  v12 = add.i64 v10, v11
+  v13 = add.i64 v12, v5
+  v14 = mul.i64 v13, v2
+  v15 = sub.i64 v1, v14
+  v16 = add.i64 v15, v2
+  v17 = icmp.ugt v15, v8
+  v18 = select.i64 v17, v16, v15
+  v19 = select.i64 v17, v12, v13
+  v20 = icmp.uge v18, v2
+  br v20, b1, b2(v18, v19)
+b1: unlikely
+  v21 = add.i64 v19, v5
+  v22 = sub.i64 v18, v2
+  jmp b2(v22, v21)
+b2(v23: i64, v24: i64):
+  store v23, v4 align 3
+  ret v24
 fn @mulhi
   sig (i64, i64) -> i64
 b0(v0: i64, v1: i64):
@@ -1760,6 +1788,7 @@ void stbe16(void *, uint16_t);
 void stbe32(void *, uint32_t);
 void stbe64(void *, uint64_t);
 uint64_t mulhi(uint64_t, uint64_t); uint64_t mulhim(const uint64_t *, uint64_t);
+uint64_t mulpair(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t *);
 static const uint64_t v[] = {0, 1, 2, 3, 0x40, 0x7F, 0x80, 0xFF, 0x100, 0x8000, 0xFFFF, 0x12345678, 0x80000000, 0xFFFFFFFF,
   0x100000000ull, 0x8000000000000000ull, 0xFFFFFFFFFFFFFFFFull, 0x123456789ABCDEF0ull, 0xF0F0F0F0F0F0F0F0ull};
 #define N (int)(sizeof v / sizeof v[0])
@@ -1846,6 +1875,12 @@ int main(void) {
   for (int i = 0; i < N; i++) for (int j = 0; j < N; j++) {
     uint64_t h = (uint64_t)(((unsigned __int128)v[i] * v[j]) >> 64);
     if (mulhi(v[i], v[j]) != h || mulhim(&v[i], v[j]) != h) return 12;
+    uint64_t a = v[i], u0 = v[j], d = v[(i + j) % N] | 1, u1 = v[(i + 3) % N], r = 0, q;
+    unsigned __int128 p = (unsigned __int128)u1 * a, s = p + u0;
+    uint64_t q0 = (uint64_t)s, q1 = (uint64_t)(s >> 64) + a + 1, rr = u0 - q1 * d;
+    if (rr > q0) { q1--; rr += d; }
+    if (rr >= d) { q1++; rr -= d; }
+    if (mulpair(a, u0, d, u1, &r) != q1 || r != rr) return 13;
   }
   return 0;
 }
@@ -1853,6 +1888,11 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wasm(lir, drv), 0);
     assert_eq(run_bmi(lir, drv), 0);
+    let mut o = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), BMI, &mut o),
+        "the x86-64 object",
+    );
 }
 
 // Dot products (`vdot`) of signed and unsigned bytes into 4-byte lanes, of signed 2-byte lanes into 4-byte
@@ -21941,6 +21981,76 @@ int main(void) {
     if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
         assert_eq(run_native(x64, drv), 0);
     }
+}
+
+// A legacy SSE instruction that reads xmm0 as a fixed operand (`blendvps`, `sha256rnds2`) in a template
+// whose first argument, a loop's accumulator, dies at the call while its result lives on: the template's
+// xmm0 keeps its name (`intrin::vfixed`), the accumulator moves into it.
+@test
+fn a_fixed_xmm0_operand_keeps_its_register() {
+    let lir = M"(lir ptr 8
+sym @_mm_blendv_ps fn global
+sym @_mm_sha256rnds2_epu32 fn global
+sym @pick fn global
+sym @rounds fn global
+fn @pick
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 4
+  v5 = load.v4f32 v2 align 0
+  v6 = load.v4f32 v2+16 align 0
+  jmp b1(v3, v5)
+b1(v7: i64, v8: v4f32):
+  v9 = ptradd v0, v7 * 4
+  v10 = load.v4f32 v9 align 0
+  v11 = call.v4f32 @_mm_blendv_ps(v8, v10, v6) : (v4f32, v4f32, v4f32) -> v4f32
+  v12 = add.i64 v7, v4
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v11), b2(v11)
+b2(v14: v4f32):
+  store v14, v2 align 0
+  ret
+fn @rounds
+  sig (ptr, i64, ptr) -> void
+b0(v0: ptr, v1: i64, v2: ptr):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 2
+  v5 = load.v2i64 v2 align 0
+  v6 = load.v2i64 v2+16 align 0
+  jmp b1(v3, v5)
+b1(v7: i64, v8: v2i64):
+  v9 = ptradd v0, v7 * 8
+  v10 = load.v2i64 v9 align 0
+  v11 = call.v2i64 @_mm_sha256rnds2_epu32(v8, v10, v6) : (v2i64, v2i64, v2i64) -> v2i64
+  v12 = add.i64 v7, v4
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v11), b2(v11)
+b2(v14: v2i64):
+  store v14, v2 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), SSE41, &mut obj),
+        "the object",
+    );
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return; // the driver runs `pick` on x86-64
+    }
+    let drv = M"(#include <string.h>
+void pick(const float *, long, float *);
+void rounds(const void *, long, void *);
+int main(void) {
+  float x[16], acc[8], want[4];
+  for (int k = 0; k < 16; k++) x[k] = (float)(k * 3 - 20);
+  for (int k = 0; k < 4; k++) { acc[k] = want[k] = 100.0f + k; acc[4 + k] = (k & 1) ? -1.0f : 1.0f; }
+  pick(x, 16, acc);
+  for (int k = 0; k < 16; k++) if (k % 4 & 1) want[k % 4] = x[k];
+  return memcmp(acc, want, 16) != 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
 }
 
 // An intrinsic's template reads a constant argument as an immediate of its instructions: no general

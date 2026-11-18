@@ -2926,8 +2926,11 @@ extend Gen {
                 return 0;
             }
             if op == O_MULHU && type_bits(t.ty, 8) == 64 && self.cpu.bmi2 && self.twin_product(i as u32, t, false) == NONE {
-                // MULX (`mulx_high`).
+                // MULX (`mulx_high`), but for the high half of an earlier product's `mul` (below).
                 free &= ~bit(x::RDX);
+            } else if op == O_MUL && t.ty == T_I64 && !self.cr.lv.pfold[i] && self.twin_product(i as u32, t, true) != NONE {
+                // A product whose high half comes later: one `mul` gives both (`int_op`).
+                free &= ~(bit(x::RAX) | bit(x::RDX));
             } else if op == O_MULHU || op == O_MULHS || op >= O_SDIV && op <= O_UREM || op == O_MULO && type_bits(
                 t.ty,
                 8,
@@ -8554,7 +8557,7 @@ extend Gen {
         }
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
-        // or other name may be. A written one is renamed only when it is the result's and the argument
+        // or other name may be, nor an instruction as its fixed operand (`intrin::vfixed`). A written one is renamed only when it is the result's and the argument
         // dies here: the result is then in the argument's register (`rres`).
         self.cren.truncate(0);
         let mut from = Vector::<u32>::new();
@@ -8570,7 +8573,10 @@ extend Gen {
             let vr = self.cr.va[x as usize].reg;
             // Free of the template, or already in its own argument register.
             let mut ok = tpl.len() != 0 && self.cr.lay.whole_vreg(loc, self.cr.vt(v)) && vr != NOREG && vr >= V0;
-            ok = ok && ((self.clob & bit(vr)) == 0 || vr == V0 + self.cr.lay.parts[loc.p0 as usize].reg);
+            ok = ok && ((self.clob & bit(vr)) == 0 || vr == V0 + self.cr.lay.parts[loc.p0 as usize].reg) && !intrin::vfixed(
+                tx,
+                self.cr.lay.parts[loc.p0 as usize].reg,
+            );
             for j in 0..to.len() {
                 ok = ok && to[j] != (vr - V0) as u32;
             }
@@ -8606,7 +8612,10 @@ extend Gen {
         // The result in the register of the header parameter its chain ends in (`chain_home`).
         let mut chained = false;
         let rl = self.cr.lay.ret;
-        if tpl.len() != 0 && rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty) && self.cr.live_on(self.cr.vx(i)) {
+        if tpl.len() != 0 && rres == NOREG && self.cr.lay.whole_vreg(rl, t.ty) && self.cr.live_on(self.cr.vx(i)) && !intrin::vfixed(
+            tx,
+            self.cr.lay.parts[rl.p0 as usize].reg,
+        ) {
             let mut taken = self.clob | self.cr.lock | self.cr.tmps;
             for j in 0..to.len() {
                 taken |= bit(V0 + to[j] as u8);

@@ -619,11 +619,17 @@ fn check_sha_ni() {
             assert_eq(m1[q], n1[q]);
             assert_eq(m2[q], n2[q]);
         }
+        // The function selector is an immediate.
+        let r4: [[u32; 4]; 4] = [
+            lanes_of(unsafe immintrin::_mm_sha1rnds4_epu32(xmm(a), xmm(b), 0)),
+            lanes_of(unsafe immintrin::_mm_sha1rnds4_epu32(xmm(a), xmm(b), 1)),
+            lanes_of(unsafe immintrin::_mm_sha1rnds4_epu32(xmm(a), xmm(b), 2)),
+            lanes_of(unsafe immintrin::_mm_sha1rnds4_epu32(xmm(a), xmm(b), 3)),
+        ];
         for f in 0..4u32 {
-            let r4 = lanes_of(unsafe immintrin::_mm_sha1rnds4_epu32(xmm(a), xmm(b), f as i32));
             let e4 = sha1rnds4_model(a, b, f);
             for q in 0..4usize {
-                assert_eq(r4[q], e4[q]);
+                assert_eq(r4[f as usize][q], e4[q]);
             }
         }
         // SHA1NEXTE: lane 3 is the first operand's lane 3 rotated left 30 plus the second's; lanes 0 to 2
@@ -636,11 +642,11 @@ fn check_sha_ni() {
         let w1: [u32; 4] = [a[0] ^ b[2], a[1] ^ b[3], a[2] ^ a[0], a[3] ^ a[1]];
         // SHA1MSG2: W13..W15 the second operand's lanes 2 to 0; W16..W19 from the first's lanes 3 to 0.
         let g2 = lanes_of(immintrin::_mm_sha1msg2_epu32(xmm(a), xmm(b)));
-        let w16 = (a[3] ^ b[2]).rotate_left(1);
-        let w17 = (a[2] ^ b[1]).rotate_left(1);
-        let w18 = (a[1] ^ b[0]).rotate_left(1);
-        let w19 = (a[0] ^ w16).rotate_left(1);
-        let w2: [u32; 4] = [w19, w18, w17, w16];
+        let x16 = (a[3] ^ b[2]).rotate_left(1);
+        let x17 = (a[2] ^ b[1]).rotate_left(1);
+        let x18 = (a[1] ^ b[0]).rotate_left(1);
+        let x19 = (a[0] ^ x16).rotate_left(1);
+        let w2: [u32; 4] = [x19, x18, x17, x16];
         for q in 0..4usize {
             assert_eq(ne[q], wn[q]);
             assert_eq(g1[q], w1[q]);

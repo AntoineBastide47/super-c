@@ -212,6 +212,38 @@ pub(package) const fn vnames(a64: bool, text: str, r: u32) bool {
     return false;
 }
 
+/// Whether x86-64 template `text` reads `%xmm0` as a fixed operand, which no other register can take: a
+/// legacy (not VEX) instruction of three operands whose first is `%xmm0` (`blendvps`, `blendvpd`,
+/// `pblendvb`, `sha256rnds2`). `r` is 0 for that.
+pub(package) const fn vfixed(text: str, r: u32) bool {
+    if r != 0 {
+        return false;
+    }
+    let mut at: usize = 0;
+    while at < text.len() {
+        let mut end = at;
+        while end < text.len() && text.byte_at(end) != b'\n' && text.byte_at(end) != b';' {
+            end += 1;
+        }
+        let ins = text.slice(at, end).trim();
+        at = end + 1;
+        let sp = ins.find(" ");
+        if ins.starts_with("v") || sp < 0 {
+            continue;
+        }
+        let ops = ins.slice(sp as usize, ins.len()).trim();
+        let mut commas: u32 = 0;
+        for j in 0..ops.len() {
+            commas += (ops.byte_at(j) == b',') as u32;
+        }
+        let (k, l) = vreg_at(false, ops, 0);
+        if k == 0 && l == 5 && commas == 2 {
+            return true;
+        }
+    }
+    return false;
+}
+
 /// Whether arm64 template `text` names vector register `r` in a register list of two or more
 /// (`{ v0.16b, v1.16b }`), whose registers must be consecutive: the generators keep it.
 pub(package) const fn vlisted(text: str, r: u32) bool {
