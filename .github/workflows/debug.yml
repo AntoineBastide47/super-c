@@ -135,8 +135,13 @@ jobs:
           }
           case $v in
           base) ;;
+          grow1) grow 1 ;;
           grow2) grow 2 ;;
+          grow3) grow 3 ;;
+          grow4) grow 4 ;;
           grow5) grow 5 ;;
+          grow6) grow 6 ;;
+          grow7) grow 7 ;;
           notail) notail ;;
           apart) apart ;;
           apartnt) apart && notail ;;
@@ -144,7 +149,7 @@ jobs:
           esac
           EOF
           sh bench/simd_baseline/kernels.sh
-          vs="base grow2 grow5 notail apart apartnt"
+          vs="base grow1 grow2 grow3 grow4 grow6 grow7"
           od=$(command -v llvm-objdump || true)
           [ -n "$od" ] || od=$(ls "/c/Program Files/LLVM/bin/llvm-objdump.exe" 2>/dev/null || true)
           echo "objdump: ${od:-none}"
