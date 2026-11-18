@@ -265,6 +265,124 @@ jobs:
             done
           done
 
+      - name: Time BMI-heavy code with and without the scalar x86-64-v3 features
+        run: |
+          set -eu
+          mkdir -p bmi
+          cat > bmi/main.spc <<'PROGRAM'
+          import std::platform::clock;
+
+          // Set-bit walk: per word, each set bit's index (tzcnt, blsr).
+          @noinline
+          fn walk(ws: []u64) u64 {
+              let mut s: u64 = 0;
+              for i in 0..ws.len() {
+                  let mut w = ws[i];
+                  while w != 0 {
+                      s += w.trailing_zeros() as u64 + i as u64;
+                      w &= w - 1;
+                  }
+              }
+              return s;
+          }
+
+          // A bit reader: fields of 1 to 24 bits at running positions (variable shifts and masks).
+          @noinline
+          fn fields(ws: []u64, lens: []u8) u64 {
+              let mut pos: u64 = 0;
+              let mut s: u64 = 0;
+              let nbits = (ws.len() as u64 - 1) * 64;
+              for i in 0..lens.len() {
+                  let l = lens[i] as u64;
+                  if pos + l > nbits {
+                      pos = 0;
+                  }
+                  let w = ws[(pos >> 6) as usize] >> (pos & 63) | (ws[(pos >> 6) as usize + 1] << 1) << (63 - (pos & 63));
+                  s = s.wrapping_add(w & ((1u64 << l) - 1));
+                  pos += l;
+              }
+              return s;
+          }
+
+          // 64 x 64 -> 128 mixing (wyhash-like): high halves and rotations.
+          @noinline
+          fn mix(ws: []u64) u64 {
+              let mut h: u64 = 0x9E3779B97F4A7C15;
+              for i in 0..ws.len() {
+                  let p = (h ^ ws[i]) as u128 * 0xA0761D6478BD642F;
+                  h = ((p >> 64) as u64 ^ p as u64).rotate_left(23);
+              }
+              return h;
+          }
+
+          // Big-endian 32-bit fields.
+          @noinline
+          fn be(bs: []u8) u64 {
+              let mut s: u64 = 0;
+              let mut i: usize = 0;
+              while i + 4 <= bs.len() {
+                  s += (bs[i] as u64) << 24 | (bs[i + 1] as u64) << 16 | (bs[i + 2] as u64) << 8 | bs[i + 3] as u64;
+                  i += 4;
+              }
+              return s;
+          }
+
+          // Log2 buckets.
+          @noinline
+          fn buckets(ws: []u64, counts: []mut u64) {
+              for i in 0..ws.len() {
+                  counts[63 - (ws[i] | 1).leading_zeros()] += 1;
+              }
+          }
+
+          fn main() i32 {
+              let n: usize = 1 << 16;
+              let mut ws = Vector::<u64>::new();
+              let mut lens = Vector::<u8>::new();
+              let mut bs = Vector::<u8>::new();
+              let mut x: u64 = 0x243F6A8885A308D3;
+              for _ in 0..n {
+                  x ^= x << 13;
+                  x ^= x >> 7;
+                  x ^= x << 17;
+                  ws.push(x & x >> 3);
+                  lens.push((x % 24 + 1) as u8);
+                  bs.push(x as u8);
+              }
+              let mut counts: [u64; 64] = [0; 64];
+              let names: [str; 5] = ["walk", "fields", "mix", "be", "buckets"];
+              for k in 0..5usize {
+                  let t0 = clock::monotonic_ns();
+                  let mut acc: u64 = 0;
+                  let reps: [usize; 5] = [400, 4000, 4000, 40000, 4000];
+                  for r in 0..reps[k] {
+                      ws[r % n] = ws[r % n] ^ r as u64;
+                      acc = acc.wrapping_add(switch k {
+                          0 => walk(ws[0..n]),
+                          1 => fields(ws[0..n], lens[0..n]),
+                          2 => mix(ws[0..n]),
+                          3 => be(bs[0..n]),
+                          _ => {
+                              buckets(ws[0..n], counts[0..64]);
+                              counts[r % 64]
+                          },
+                      });
+                  }
+                  println("{} {} ms ({})", names[k], (clock::monotonic_ns() - t0) / 1000000, acc);
+              }
+              return 0;
+          }
+          PROGRAM
+          f=--target-feature=+bmi1,+bmi2,+lzcnt,+popcnt,+movbe
+          ./super-c build bmi/main.spc --profile=release -o bmi/v1
+          ./super-c build bmi/main.spc --profile=release $f -o bmi/sc
+          ./super-c bench --no-run --filter=bits_bench --out-dir=bb1 > /dev/null
+          ./super-c bench --no-run --filter=bits_bench $f --out-dir=bbs > /dev/null
+          for r in 1 2 3; do
+            for v in v1 sc; do echo "== kernels $v round $r"; "./bmi/$v"; done
+            for v in bb1 bbs; do echo "== bits $v round $r"; "./$v/bench-bin" | grep -E '^bits_bench::|time \(ms\)'; done
+          done
+
   # LSE and RCPC on a Linux arm64 server core: the mutex benchmarks built without them (the Linux
   # baseline) and with them, alternating, two rounds.
   bench-lse:
