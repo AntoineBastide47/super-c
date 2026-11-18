@@ -452,6 +452,8 @@ pub(package) struct LoopOpt {
     pub(package) vperm3: u8,
     /// The widening sums the target computes in registers (`Package.vec_sumw`, `sumw_bit`).
     pub(package) vsumw: u16,
+    /// The cost of a group-of-3 load's field, 0 for `vperm3` after the loads (`Package.vec_ld3`).
+    pub(package) vld3: u8,
     /// The widening products the target computes in registers (`Package.vec_mulw`).
     pub(package) vmulw: u16,
     /// The dot products the target computes in registers (`Package.vec_dot`).
@@ -780,6 +782,7 @@ extend LoopOpt {
             vmsk: false,
             vperm3: 0,
             vsumw: 0,
+            vld3: 0,
             vmulw: 0,
             vdot: 0,
             vid: Vector::<u8>::new(),
@@ -3591,8 +3594,13 @@ extend LoopOpt {
                     let o = b.insts[y as usize];
                     first = first && !(o.op == O_LOAD && o.a == t.a && o.ty == t.ty);
                 }
-                // Of a group of 3, one permutation of the three (`vperm3`).
-                v += ast::pick(first, n, 0) + ast::pick(n == 3, self.vperm3, n - 1);
+                // Of a group of 3, one permutation of the three (`vperm3`), or a load of the group per field
+                // (`vld3`), the group's loads folded.
+                v += if n == 3 && self.vld3 != 0 {
+                    self.vld3
+                } else {
+                    ast::pick(first, n, 0) + ast::pick(n == 3, self.vperm3, n - 1)
+                };
             } else if t.op == O_STORE && self.stride(b, t.a) != type_bytes(ty, ptr) {
                 // A group of 3: per store one of the three permutations that interleave the parts.
                 let n = self.stride(b, t.a) / type_bytes(ty, ptr);

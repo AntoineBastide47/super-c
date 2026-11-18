@@ -83,6 +83,9 @@ pub(package) const FOLD_BLS: u64 = 144115188075855872;
 /// the reversal; a byte reversal of 16, 32 or 64 bits that a store alone reads, of no folded load, folds
 /// into the store (x86-64's `movbe`).
 pub(package) const FOLD_MOVBE: u64 = 288230376151711744;
+/// A load that de-interleaving shuffles of a group of three alone read (`Live::ld3_field`): each shuffle
+/// loads the group itself (arm64's `ld3`).
+pub(package) const FOLD_LD3: u64 = 576460752303423488;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
@@ -216,6 +219,8 @@ pub(package) const CARRY_ADC: u8 = 3;
 pub(package) const MASK_DEPTH: u32 = 8;
 // `Live::ldop_user` looks this many instructions past a load for its use.
 const LDOP_REACH: u32 = 16;
+// The instructions from a group's first load to a shuffle of it (`Live::ld3_field`).
+const LD3_REACH: u32 = 64;
 /// The most calls outside rare blocks whose live values a generator reads (`lives_across` reads every
 /// value per call) when it chooses where a body sets its frame up. A body with more sets it up late only
 /// when it has at most WARM_SIZE instructions (a try that fails compiles the body again) and the frame's
@@ -2148,6 +2153,93 @@ extend Live {
         if (self.fold_ops & FOLD_VIEW) != 0 {
             self.views(b);
         }
+        // `FOLD_LD3` last: a shuffle another fold took loads nothing.
+        if (self.fold_ops & FOLD_LD3) != 0 {
+            self.block_ops(b, O_VOP);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                if self.pfold[i as usize] || self.ld3_field(b, i) == NONE {
+                    continue;
+                }
+                let t = b.insts[i as usize];
+                for o in 0..3u32 {
+                    let v = b.pool[(t.a + o) as usize];
+                    if self.pfold[v as usize] {
+                        continue;
+                    }
+                    // Every read of the load is such a shuffle.
+                    let mut k: u32 = 0;
+                    let end = (b.blocks[self.iblk[v as usize] as usize].start + b.blocks[self.iblk[v as usize] as usize].len).min(
+                        v + 1 + LD3_REACH,
+                    );
+                    for j in v + 1..end {
+                        let u = b.insts[j as usize];
+                        if u.op == O_VOP && !self.pfold[j as usize] && self.ld3_field(b, j) != NONE {
+                            for w in 0..3u32 {
+                                k += (b.pool[(u.a + w) as usize] == v) as u32;
+                            }
+                        }
+                    }
+                    if k == self.count[v as usize] {
+                        self.pfold[v as usize] = true;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The field (0 to 2) that `vop` shuffle `i` of `b` takes from a group of three, or NONE: its operands
+    /// three loads of its type (8 or 16 bytes, lanes below 8 bytes in 8) from one address at offsets `c`,
+    /// `c + n`, `c + 2n` (`n` its bytes), its lanes `r`, `r + 3`, `r + 6`, ..; within LD3_REACH of the first
+    /// load in its block, no write of memory between (arm64's `ld3` reads the memory at the shuffle).
+    pub(package) const fn ld3_field(self: &Self, b: &Body, i: u32) u32 {
+        let t = b.insts[i as usize];
+        // The block table (`block_ops`) is the analysis's under `FOLD_LD3` alone.
+        if !self.iblk_ok || t.op != O_VOP || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_SHUFFLE as u32 || t.b != 3 || t.c == VNONE || !is_vec(
+            t.ty,
+        ) {
+            return NONE;
+        }
+        let nb = type_bytes(t.ty, 8);
+        let n = lanes(t.ty);
+        if nb != 8 && nb != 16 || nb == 8 && n == 1 || b.pool[t.c as usize] != n {
+            return NONE;
+        }
+        let r = b.pool[(t.c + 1) as usize];
+        if r > 2 {
+            return NONE;
+        }
+        for m in 0..n {
+            if b.pool[(t.c + 1 + m) as usize] != r + 3 * m {
+                return NONE;
+            }
+        }
+        let v0 = b.pool[t.a as usize];
+        if !is_inst(v0) {
+            return NONE;
+        }
+        let l0 = b.insts[v0 as usize];
+        let mut first = v0;
+        for o in 0..3u32 {
+            let v = b.pool[(t.a + o) as usize];
+            if !is_inst(v) || self.iblk[v as usize] != self.iblk[i as usize] {
+                return NONE;
+            }
+            let l = b.insts[v as usize];
+            if l.op != O_LOAD || l.ty != t.ty || (l.aux & MEM_VOLATILE) != 0 || l.a != l0.a || l.c as i32 != l0.c as i32 + (o * nb) as i32 {
+                return NONE;
+            }
+            first = first.min(v);
+        }
+        if i - first > LD3_REACH {
+            return NONE;
+        }
+        for j in first + 1..i {
+            if writes_mem(b.insts[j as usize]) {
+                return NONE;
+            }
+        }
+        return r;
     }
 
     // `FOLD_VIEW`, after every other fold: `view` per instruction no fold takes, whose operand is no folded

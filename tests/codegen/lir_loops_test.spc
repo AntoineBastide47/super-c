@@ -14922,6 +14922,85 @@ b6:
     }
 }
 
+// Triples of floats: a field of a group of three costs a permutation of three vectors after the loads
+// (arm64's TBL chains), more than the scalar loop, unless the target loads the group per field
+// (`Package.vec_ld3`: arm64's LD3, the address and the field's move): then the loop vectorizes.
+@test
+fn groups_of_three_vectorize_where_the_target_loads_them_by_field() {
+    let src = M"(lir ptr 8
+sym @pair fn global noinline
+sym @drive fn global
+fn @pair
+  sig (ptr, ptr, i64) -> void
+  ref p0 0 noalias
+  ref p1 0 readonly
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v3)
+b1(v5: i64):
+  v6 = icmp.ult v5, v2
+  br v6, b2, b3
+b2:
+  v7 = ptradd v1, v5 * 12
+  v8 = load.f32 v7 align 0
+  v9 = load.f32 v7+4 align 0
+  v10 = fadd.f32 v8, v9
+  v11 = ptradd v0, v5 * 4
+  store v10, v11 align 0
+  v12 = add.i64 v5, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 1200 align 3
+  slot s1 size 400 align 3
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 300
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v5
+  br v7, b2, b3
+b2:
+  v8 = sitofp.f32 v6
+  v9 = ptradd v1, v6 * 4
+  store v8, v9 align 0
+  v10 = add.i64 v6, v4
+  jmp b1(v10)
+b3:
+  call @pair(v2, v1, v0) : (ptr, ptr, i64) -> void
+  v11 = load.i64 v2 align 0
+  v12 = load.i64 v2+8 align 0
+  v13 = xor.i64 v11, v12
+  ret v13
+)";
+    let mut err = String::new();
+    let before = lparse::parse(src, &mut err).unwrap();
+    let mut texts = Vector::<String>::new();
+    for k in 0..2u8 {
+        let mut a = lparse::parse(src, &mut err).unwrap();
+        a.cpu.vector = 16;
+        a.cpu.vec_perm3 = 9;
+        a.vops = VOPS_ALL;
+        a.vec_ld3 = 3 * k;
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: VECTOR });
+        texts.push(text_of(&a, "pair"));
+        let lens: [u64; 5] = [0, 1, 7, 33, 100];
+        for q in 0..5usize {
+            let args: []u64 = [unsafe lens[q]];
+            same_outcome(&before, &a, "drive", args, run_value(&before, "drive", args), false);
+        }
+    }
+    assert(!texts[0].contains("vop.shuffle"), texts[0].as_str());
+    assert(texts[1].contains("vop.shuffle.v4f32 (") && texts[1].contains("lanes [0, 3, 6, 9]"), texts[1].as_str());
+}
+
 // Triples of bytes (RGB pixels): the loads of each third byte take every third lane of three vectors and
 // the stores of a whole triple interleave three vectors, both as shuffles of three vectors (`vperm3`): a
 // gray value of each pixel and the pixels with two channels swapped and one changed.

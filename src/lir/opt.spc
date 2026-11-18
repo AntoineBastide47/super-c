@@ -1677,6 +1677,7 @@ extend Opt {
         self.unr.vtbl = cpu.vtbl;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
+        self.unr.vld3 = pk.vec_ld3;
         self.unr.vsumw = pk.vec_sumw;
         self.unr.vmulw = cpu.vec_mulw;
         self.unr.vdot = cpu.vec_dot;

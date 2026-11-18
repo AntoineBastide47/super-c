@@ -8359,13 +8359,17 @@ extend Package {
                     self.modules[id as usize].backend = true;
                 }
             }
-        }
-        // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`): vector code's, and the
-        // arm64 atomics' (`lse_level`).
-        if self.simd_levels.len() != 0 && (vectors && bn.len() != 0 || self.lse_level() != 0) {
-            let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
-            if dutil::file_mtime(&cf9) != 0 {
-                let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);
+            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`); a target's own
+            // run-time level the kernel's HWCAP bits (`Target.run_time_hwcap`).
+            let hwcap = switch tgt::target_of(target, self.arch) {
+                Some(r) => r.run_time_hwcap != 0,
+                None => false,
+            };
+            if self.simd_levels.len() != 0 && !hwcap {
+                let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
+                if dutil::file_mtime(&cf9) != 0 {
+                    let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);
+                }
             }
         }
     }

@@ -21985,6 +21985,109 @@ int main(void) {
     }
 }
 
+// A shuffle of a group of three loads that takes one field (lanes `r`, `r + 3`, ..; `lv::FOLD_LD3`): arm64
+// loads the group with LD3 and moves the field out, the loads folded (bytes, 2- and 4-byte lanes, 16 and 8
+// bytes). With a store between the loads and the shuffles (`gw`, over the group), the loads stay and TBL
+// picks the lanes.
+@test
+fn groups_of_three_load_with_ld3() {
+    let lir = M"(lir ptr 8
+sym @g8 fn global
+sym @g16 fn global
+sym @g32 fn global
+sym @gw fn global
+fn @g8
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v1 align 0
+  v3 = load.v16i8 v1+16 align 0
+  v4 = load.v16i8 v1+32 align 0
+  v5 = vop.shuffle.v16i8 (v2, v3, v4) lanes [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45]
+  v6 = vop.shuffle.v16i8 (v2, v3, v4) lanes [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46]
+  v7 = vop.shuffle.v16i8 (v2, v3, v4) lanes [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47]
+  store v5, v0+0 align 0
+  store v6, v0+16 align 0
+  store v7, v0+32 align 0
+  ret
+fn @g16
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i16 v1 align 0
+  v3 = load.v8i16 v1+16 align 0
+  v4 = load.v8i16 v1+32 align 0
+  v5 = vop.shuffle.v8i16 (v2, v3, v4) lanes [0, 3, 6, 9, 12, 15, 18, 21]
+  v6 = vop.shuffle.v8i16 (v2, v3, v4) lanes [1, 4, 7, 10, 13, 16, 19, 22]
+  v7 = vop.shuffle.v8i16 (v2, v3, v4) lanes [2, 5, 8, 11, 14, 17, 20, 23]
+  store v5, v0+0 align 0
+  store v6, v0+16 align 0
+  store v7, v0+32 align 0
+  ret
+fn @g32
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i32 v1 align 0
+  v3 = load.v2i32 v1+8 align 0
+  v4 = load.v2i32 v1+16 align 0
+  v5 = vop.shuffle.v2i32 (v2, v3, v4) lanes [0, 3]
+  v6 = vop.shuffle.v2i32 (v2, v3, v4) lanes [1, 4]
+  v7 = vop.shuffle.v2i32 (v2, v3, v4) lanes [2, 5]
+  store v5, v0+0 align 0
+  store v6, v0+8 align 0
+  store v7, v0+16 align 0
+  ret
+fn @gw
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v1 align 0
+  v3 = load.v16i8 v1+16 align 0
+  v4 = load.v16i8 v1+32 align 0
+  store v3, v1 align 0
+  v5 = vop.shuffle.v16i8 (v2, v3, v4) lanes [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45]
+  v6 = vop.shuffle.v16i8 (v2, v3, v4) lanes [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31, 34, 37, 40, 43, 46]
+  v7 = vop.shuffle.v16i8 (v2, v3, v4) lanes [2, 5, 8, 11, 14, 17, 20, 23, 26, 29, 32, 35, 38, 41, 44, 47]
+  store v5, v0+0 align 0
+  store v6, v0+16 align 0
+  store v7, v0+32 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    // LD3 (multiple structures, no offset): three per group in g8, g16, g32; TBL or TBX in gw alone.
+    assert_eq(elf_text_count(&obj, 0xBFFFF000, 0x0C404000), 9);
+    assert(elf_text_count(&obj, 0xBFE08C00, 0x0E000000) >= 3, "gw's table lookups");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void g8(void *, const void *);
+void g16(void *, const void *);
+void g32(void *, const void *);
+void gw(void *, void *);
+int main(void) {
+  uint8_t in[48], out[64];
+  for (int i = 0; i < 48; i++) in[i] = (uint8_t)(i * 37 + 5);
+  g8(out, in);
+  for (int r = 0; r < 3; r++) for (int m = 0; m < 16; m++) if (out[16 * r + m] != in[3 * m + r]) return 1;
+  uint16_t h[24], ho[24];
+  memcpy(h, in, 48);
+  g16(ho, h);
+  for (int r = 0; r < 3; r++) for (int m = 0; m < 8; m++) if (ho[8 * r + m] != h[3 * m + r]) return 2;
+  uint32_t w[6], wo[6];
+  memcpy(w, in, 24);
+  g32(wo, w);
+  for (int r = 0; r < 3; r++) for (int m = 0; m < 2; m++) if (wo[2 * r + m] != w[3 * m + r]) return 3;
+  // gw writes its second vector over its first before the shuffles, which take the values loaded before.
+  uint8_t g[48];
+  memcpy(g, in, 48);
+  gw(out, g);
+  for (int r = 0; r < 3; r++) for (int m = 0; m < 16; m++) if (out[16 * r + m] != in[3 * m + r]) return 4;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // Whether object `o` holds the NUL-terminated name `nm` (its string table).
 fn holds_name(o: &Vector<u8>, nm: str) bool {
     let mut z = Vector::<u8>::new();

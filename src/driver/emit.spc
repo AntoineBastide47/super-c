@@ -17704,13 +17704,19 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
 // The level the native copies of a program with run-time copies run at (`simd_levels`; the C tree's
 // `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function reads, 0 (the
 // build's features) until the constructor `__sc_simd_init` sets it before `main` to the highest level k
-// (1-based) whose features the CPU detector reports (`sc_cpu_words`). `SC_SIMD_LEVEL=<k>` (a test switch)
-// sets it, up to the highest. `int` is the pointer-sized integer type.
+// (1-based) whose features the CPU detector reports (`sc_cpu_words`), or, for a target's run-time level
+// (`Target.run_time_hwcap`: its only level), the kernel's HWCAP bits (`getauxval`). `SC_SIMD_LEVEL=<k>` (a
+// test switch) sets it, up to the highest. `int` is the pointer-sized integer type.
 fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     let n = p.simd_levels.len();
     let sec = ctor_section(p);
     let ptr = lay::target_for(p.arch).ptr as u32;
-    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\nsym @sc_cpu_words fn global\n");
+    let hwcap = switch tgt::target_of(p.build_target, p.arch) {
+        Some(r) => r.run_time_hwcap,
+        None => 0,
+    };
+    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\n");
+    t.push_str(pick(hwcap != 0, "sym @getauxval fn global ext\n", "sym @sc_cpu_words fn global\n"));
     t.format_into(
         "sym @__sc_simd_env data local\nsym @__sc_simd_init fn local\nsym @__sc_simd_ctor data local used section \"{}\"\n",
         sec,
@@ -17729,11 +17735,24 @@ fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     t.push_str("  v15 = trunc.i8 v14\n  astore v15, v0 relaxed\n  ret\n");
     // The detector's two words against each level's, the highest first: block b(4 + 2i) tests level
     // n - i, b(5 + 2i) sets it.
-    t.push_str("b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n");
-    t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
+    if hwcap != 0 {
+        // AT_HWCAP is 16; the second word is 0.
+        t.push_str(
+            "b3:\n  v16 = iconst.i64 16\n  v17 = call.i64 @getauxval(v16) : (i64) -> i64\n  v18 = iconst.i64 0\n  jmp b4\n",
+        );
+    } else {
+        t.push_str(
+            "b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n",
+        );
+        t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
+    }
     let mut v: usize = 19;
     for i in 0..n {
-        let w = p.simd_levels[n - 1 - i].w;
+        let w = if hwcap != 0 {
+            [hwcap, 0u64]
+        } else {
+            p.simd_levels[n - 1 - i].w
+        };
         t.format_into(
             "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v17, v{}\n  v{} = icmp.eq v{}, v{}\n",
             4 + 2 * i,

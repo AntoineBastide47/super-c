@@ -322,7 +322,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 691] = [
+pub(package) const ROWS: [Row; 697] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -946,6 +946,12 @@ pub(package) const ROWS: [Row; 691] = [
     r("st1", 0x4C00A000, Q::NONE, 0, k2(K::L2B, K::M0)),
     r("st1", 0x4C006000, Q::NONE, 0, k2(K::L3B, K::M0)),
     r("st1", 0x4C002000, Q::NONE, 0, k2(K::L4B, K::M0)),
+    r("ld2", 0x4C408000, Q::NONE, 0, k2(K::L2B, K::M0)),
+    r("ld3", 0x4C404000, Q::NONE, 0, k2(K::L3B, K::M0)),
+    r("ld4", 0x4C400000, Q::NONE, 0, k2(K::L4B, K::M0)),
+    r("st2", 0x4C008000, Q::NONE, 0, k2(K::L2B, K::M0)),
+    r("st3", 0x4C004000, Q::NONE, 0, k2(K::L3B, K::M0)),
+    r("st4", 0x4C000000, Q::NONE, 0, k2(K::L4B, K::M0)),
     r("ld1", 0x0D400000, Q::NONE, 0, k2(K::LNB, K::M0)),
     r("ld1", 0x0D404000, Q::NONE, 0, k2(K::LNH, K::M0)),
     r("ld1", 0x0D408000, Q::NONE, 0, k2(K::LNS, K::M0)),

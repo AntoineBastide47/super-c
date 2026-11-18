@@ -117,6 +117,9 @@ pub(package) struct Isa {
     /// `lir::ir::Package::vec_perm3`. arm64 9 (per vector an index table's ADRP and LDR, and TBL or TBX),
     /// wasm32 2 (two `i8x16.shuffle`); x86-64 0, 9 with SSSE3 (`emit::cemit`, PSHUFB).
     pub(package) vector_perm3: u8,
+    /// The instructions a group-of-3 load's field takes, 0 for a permutation (`vector_perm3`) after the
+    /// loads: `lir::ir::Package::vec_ld3`. arm64 3 (the address, LD3, the field's move).
+    pub(package) vector_ld3: u8,
     /// The widening sums of lanes into wider lanes the native backend computes in registers, a bit per pair
     /// of sizes (`lir::loops::sumw_bit`): `lir::ir::Package::vec_sumw`. arm64 widens any lanes (UADDLP,
     /// UADALP); x86-64 bytes into 8-byte lanes (PSADBW).
@@ -252,6 +255,9 @@ pub(package) struct Target {
     /// one level of `simd_levels`, whose copies the native code generator makes (arm64 Linux: LSE and
     /// RCPC, the copies of the functions whose atomics they change). Empty for none.
     pub(package) run_time: str<'static>,
+    /// The `getauxval(AT_HWCAP)` bits that report `run_time`'s features: the native registry's start-up
+    /// reads them (no CPU detector module joins the program).
+    pub(package) run_time_hwcap: u64,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub(package) mcpu: str<'static>,
     pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
@@ -313,6 +319,7 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_insert: false,
         vminnum: 3,
         vector_perm3: 0,
+        vector_ld3: 0,
         vector_sumw: 0x8,
         vector_mulw: 0x4,
         vector_dot: 0x200,
@@ -362,6 +369,7 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_insert: true,
         vminnum: 2,
         vector_perm3: 9,
+        vector_ld3: 3,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
         vector_dot: 0,
@@ -411,6 +419,7 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_insert: true,
         vminnum: 1,
         vector_perm3: 2,
+        vector_ld3: 0,
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
         vector_dot: 0x200,
@@ -611,6 +620,7 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         features: NO_FEATURES,
         never: NO_FEATURES,
         run_time: "",
+        run_time_hwcap: 0,
         mcpu: "",
         apple_sdk: "",
         cenv: cenv,
@@ -671,6 +681,8 @@ const fn targets() [Target; 11] {
     );
     let mut linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
     linux_a64.run_time = "+lse,+rcpc";
+    // The kernel's HWCAP_ATOMICS and HWCAP_LRCPC (arch/arm64/include/uapi/asm/hwcap.h).
+    linux_a64.run_time_hwcap = 1u64 << 8 | 1u64 << 15;
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",
@@ -769,6 +781,7 @@ const UNKNOWN_ISA: Isa = Isa {
     lane_insert: false,
     vminnum: 0,
     vector_perm3: 0,
+    vector_ld3: 0,
     vector_sumw: 0,
     vector_mulw: 0,
     vector_dot: 0,

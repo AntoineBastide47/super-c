@@ -2680,7 +2680,7 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -5764,7 +5764,7 @@ extend Gen {
         let bk = b.blocks[self.cr.lv.def_blk[i as usize] as usize];
         let t = b.insts[i as usize];
         let load = t.op == O_LOAD;
-        if !load && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[i as usize] {
+        if !load && t.op != O_STORE || (t.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[i as usize] || self.cr.lv.pfold[i as usize] {
             return NONE;
         }
         let ty = if load {
@@ -5791,7 +5791,7 @@ extend Gen {
                     self.cr.vt(u.b)
                 };
                 let delta = (u.c as i32) as i64 - (t.c as i32) as i64;
-                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[j as usize] || load && self.stepped.contains(
+                if u.a != t.a || mkind(uy, load) != m || delta != size && delta != -size || (u.aux & MEM_VOLATILE) != 0 || self.cr.lv.fold[j as usize] || self.cr.lv.pfold[j as usize] || load && self.stepped.contains(
                     &j,
                 ) {
                     if load && (u.aux & MEM_VOLATILE) == 0 {
@@ -6019,6 +6019,9 @@ extend Gen {
     }
 
     fn load(self: &mut Self, i: u32, t: Inst) bool {
+        if self.cr.lv.pfold[i as usize] {
+            return true; // its shuffles load the group (`lv::FOLD_LD3`)
+        }
         let ty = t.ty;
         // A part of a register-passed aggregate: its register already.
         for q in 0..self.taken.len() {
@@ -10264,6 +10267,67 @@ extend Gen {
         ) == t.ty;
     }
 
+    // Vector `v` in a register: a load folded into its reader (`lv::FOLD_LD3`) loads into `scratch`.
+    fn operand_in(self: &mut Self, v: Value, scratch: u8) u8 {
+        if (v & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[v as usize] && self.cr.b().insts[v as usize].op == O_LOAD {
+            let l = self.cr.b().insts[v as usize];
+            let (base, off) = self.addr(l.a, l.c as i32);
+            self.mem(mkind(l.ty, true), true, scratch, base, off);
+            return scratch;
+        }
+        return self.vec_use(v, scratch);
+    }
+
+    // Whether vector register `r` may take a part of `ld3`'s group: scratch v30 and v31, or an allocatable
+    // one the instruction does not use whose value, if any, may move to its home.
+    const fn ld3_free(self: &Self, r: u8) bool {
+        if r == V0 + 30 || r == V0 + 31 {
+            return true;
+        }
+        let x = self.cr.owner[r as usize];
+        return (valloc() & ~(self.cr.lock | self.cr.tmps | self.cr.fixed_busy) & bit(r)) != 0 && (x == NONE || self.cr.va[x as usize].home != H_FIXED);
+    }
+
+    // Shuffle `i` (`t`) of a group of three (`lv::Live::ld3_field`): LD3 of the group into v29 to v31, or
+    // v30, v31, v0 (a list wraps past v31), then its field into the result; with neither free, `tbl_lanes`
+    // (its folded loads loaded one at a time). The shuffle reads the memory: no write since the loads.
+    fn ld3(self: &mut Self, i: u32, t: Inst) {
+        let f = self.cr.lv.ld3_field(self.cr.b(), i);
+        let lo = if self.ld3_free(V0 + 29) {
+            29u32
+        } else if self.ld3_free(V0) {
+            30u32
+        } else {
+            NONE
+        };
+        let b = self.cr.b();
+        if lo == NONE {
+            let ops: [Value; 4] = [b.pool[t.a as usize], b.pool[(t.a + 1) as usize], b.pool[(t.a + 2) as usize], VNONE];
+            self.tbl_lanes(i, t, &ops);
+            return;
+        }
+        let other = ast::pick(lo == 29, V0 + 29, V0);
+        self.evict(other);
+        self.cr.tmps |= bit(other);
+        let l0 = b.insts[b.pool[t.a as usize] as usize];
+        let (base, off) = self.addr(l0.a, l0.c as i32);
+        let rp = if base == a::SP || base == a::FP || off != 0 {
+            self.add_off(a::IP1 as u8, base, off);
+            a::IP1
+        } else {
+            base
+        };
+        let nb = type_bytes(t.ty, 8);
+        let q = nb == 16;
+        let size = (nb / lanes(t.ty)).trailing_zeros() as u32;
+        self.emit(0x0C404000 | a::on(q, 1u32 << 30) | size << 10 | rp << 5 | lo);
+        let rd = (self.def_step(i) - V0) as u32;
+        let rf = (lo + f) % 32;
+        if rd != rf {
+            self.emit(0x0EA01C00 | a::on(q, 1u32 << 30) | rf << 16 | rf << 5 | rd);
+        }
+    }
+
     // Shuffle `t` of vectors `ops` into vector `i` (`tbl_shuffle`): per operand a table of the bytes it gives,
     // 0xFF where another gives them, into v30; TBL of the first, TBX of each other into a temporary (no
     // operand's register), which then moves into the result.
@@ -10287,7 +10351,7 @@ extend Gen {
                     w[(at / 8) as usize] = w[(at / 8) as usize] | byte << (at % 8 * 8) as u64;
                 }
             }
-            let ro = self.vec_use(ops[o as usize], V0 + 31) - V0;
+            let ro = self.operand_in(ops[o as usize], V0 + 31) - V0;
             if q {
                 let k = self.const_sym(w[0], w[1]);
                 self.reloc(a::R_PAGE21, k, 0);
@@ -11216,6 +11280,10 @@ extend Gen {
             self.emit(
                 0x2E000000 | a::on(nb == 16, 1u32 << 30) | (ry - V0) as u32 << 16 | slide << 11 | (rx - V0) as u32 << 5 | (rd - V0) as u32,
             );
+            return true;
+        }
+        if self.cr.lv.ld3_field(self.cr.b(), i) != NONE {
+            self.ld3(i, t);
             return true;
         }
         if self.tbl_shuffle(t) {

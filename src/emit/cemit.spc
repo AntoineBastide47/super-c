@@ -784,6 +784,7 @@ extend CEmit {
             l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
+            l.pkg.vec_ld3 = tgt::isa(pk.arch).vector_ld3;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             l.pkg.vround_away = l.pkg.vfloat && tgt::isa(pk.arch).vector_round_away;
             l.pkg.pairs = tgt::isa(pk.arch).pairs;

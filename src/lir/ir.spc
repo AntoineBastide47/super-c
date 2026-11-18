@@ -2308,6 +2308,9 @@ pub(package) struct Package {
     /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
     /// into accumulators of such lanes.
     pub(package) vec_sumw: u16,
+    /// The instructions a group-of-3 load's field takes, 0 for a permutation (`Cpu.vec_perm3`) after the
+    /// loads (`target::table::Isa::vector_ld3`).
+    pub(package) vec_ld3: u8,
     /// Whether the native backend computes the absolute value, C's `fmin` and `fmax`, and the fused
     /// multiply-add (with `fma`) of float vectors in registers (`target::table::Isa`): the loop vectorizer
     /// then widens the calls of C's `fabs`, `fmin`, `fmax` and `fma` (`lir::loops::lane_fn`).
@@ -2524,6 +2527,7 @@ extend Package {
             vec_sat: 7,
             vec_absd: 7,
             vec_sumw: 0x8CE,
+            vec_ld3: 0,
             vfloat: true,
             vround_away: false,
             mul_high: true,
