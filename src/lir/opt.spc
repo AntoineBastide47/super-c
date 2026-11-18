@@ -11218,12 +11218,18 @@ extend Opt {
             k,
             i,
             &mut t,
-        ) || self.mask_sum(pk, b, k, i, &mut t) || self.gather_lanes(pk, b, k, i, &mut t)) || t.op == O_POPCNT && self.mask_count(
+        ) || self.mask_sum(pk, b, k, i, &mut t) || self.gather_lanes(pk, b, k, i, &mut t) || self.lane0_access(
+            pk,
             b,
             k,
             i,
             &mut t,
-        ) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(pk, b, i, &mut t) {
+        )) || t.op == O_POPCNT && self.mask_count(b, k, i, &mut t) || (t.op == O_VOP || t.op == O_FADD) && self.float_known(
+            pk,
+            b,
+            i,
+            &mut t,
+        ) {
             b.insts[i as usize] = t;
             return true;
         }
@@ -12019,6 +12025,35 @@ extend Opt {
         } else {
             ld
         };
+        return true;
+    }
+
+    // Masked access `t` through a pointer (instruction `i` of block `k`; `SIMD_LOAD_MASKED_PTR`,
+    // `SIMD_STORE_MASKED_PTR`) of a 16-byte vector under a constant mask of lane 0 alone, where the target
+    // moves no single lane at an address in one instruction (`Package.lane_mem`): the lane's scalar load
+    // inserted into the fallback, or the store of the vector's lane 0, whose address then takes the
+    // pointer's constant offset as every load and store does. Whether it did.
+    fn lane0_access(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        let ld = code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32;
+        if !ld && code != core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 || t.b != 3 || t.c != VNONE || pk.lane_mem {
+            return false;
+        }
+        let p = b.pool[t.a as usize];
+        let mb = int_bits(b, b.pool[(t.a + 1) as usize]);
+        let v = b.pool[(t.a + 2) as usize];
+        let vt = b.type_of(v);
+        if mb.is_none() || !is_vec(vt) || type_bytes(vt, pk.ptr_bytes) != 16 || (mb.unwrap() & ~0u64 >> (64 - lanes(vt)) as u64) != 1 {
+            return false;
+        }
+        let lt = lane_type(vt);
+        if ld {
+            let x = self.before(b, k, i, Inst { op: O_LOAD, ty: lt, aux: 0, a: p, b: VNONE, c: 0 });
+            *t = Inst { op: O_VINSERT, ty: vt, aux: 0, a: v, b: x, c: VNONE };
+        } else {
+            let x = self.before(b, k, i, Inst { op: O_VEXTRACT, ty: lt, aux: 0, a: v, b: VNONE, c: VNONE });
+            *t = Inst { op: O_STORE, ty: T_NONE, aux: 0, a: p, b: x, c: 0 };
+        }
         return true;
     }
 

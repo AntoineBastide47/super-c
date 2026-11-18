@@ -10222,9 +10222,32 @@ extend Gen {
         }
     }
 
+    // Whether vector `v` holds zeros in every lane: a wide constant of zero words, or the splat of a
+    // constant of zero bits.
+    const fn zero_lanes(self: &Self, v: Value) bool {
+        if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+            return false;
+        }
+        let b = self.cr.b();
+        let t = b.insts[v as usize];
+        if t.op == O_SPLAT && (t.a & (VPARAM | VFLAG)) == 0 {
+            let x = b.insts[t.a as usize];
+            return (x.op == O_ICONST || x.op == O_FCONST) && x.a == 0 && x.b == 0;
+        }
+        if t.op != O_WCONST {
+            return false;
+        }
+        for q in 0..t.b {
+            if b.words[(t.a + q) as usize] != 0 {
+                return false;
+            }
+        }
+        return true;
+    }
+
     // Lane access `t` (`O_VEXTRACT`, `O_VINSERT`, lane `t.aux`) into `i`: DUP (a float) or UMOV (an
     // integer) of the lane, or INS of the scalar into the vector's register when it dies here, else into a
-    // copy; a vector outside a v register
+    // copy (FMOV of the scalar alone for lane 0 of a vector of zeros); a vector outside a v register
     // loads the lane, or copies its bytes and stores the lane.
     fn vlane(self: &mut Self, i: u32, t: Inst) {
         let k = t.aux as u32;
@@ -10260,6 +10283,18 @@ extend Gen {
             let d = self.cr.mdef(i);
             self.copy_mem(a::SP, d, sb, so, nb);
             self.st_lane(rs, d, k, lt, false);
+            return;
+        }
+        if k == 0 && eb >= 4 && self.zero_lanes(t.a) {
+            // Into a vector of zeros: FMOV of the scalar (from its v or general register) clears the
+            // lanes above it.
+            let rs = self.reg(t.b) as u32;
+            let rd = self.vec_def(i) as u32 - V0 as u32;
+            if is_float(lt) {
+                self.emit(ast::pick(eb == 8, 0x1E604000u32, 0x1E204000) | rs - V0 as u32 << 5 | rd);
+            } else {
+                self.emit(ast::pick(eb == 8, 0x9E670000u32, 0x1E270000) | rs << 5 | rd);
+            }
             return;
         }
         let mut rs = self.reg(t.b) as u32;

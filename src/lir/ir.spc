@@ -2333,6 +2333,10 @@ pub(package) struct Package {
     /// of a vector in one instruction (`target::table::Isa`; 0: none): `lir::opt` `gather_lanes` leaves
     /// such a gather whole.
     pub(package) gather_bytes: u32,
+    /// The native backend reads or writes one lane of a vector at an address in one instruction
+    /// (`target::table::Isa`): else `lir::opt` `lane0_access` makes a masked access of lane 0 alone the
+    /// lane's scalar load or store.
+    pub(package) lane_mem: bool,
     /// How the native backend computes a minimumNumber of float vectors in registers
     /// (`target::table::Isa`): 0 lane by lane, VMIN_EXACT by SIMD_MIN and SIMD_MAX, VMIN_QUIET by VOP_NUM
     /// ones of a number and an operand quieted by a VOP_NUM SIMD_MAX of itself, VMIN_NUM by VOP_NUM ones of
@@ -2502,6 +2506,7 @@ extend Package {
             mask_bits: false,
             lane_insert: true,
             gather_bytes: 0,
+            lane_mem: false,
             vminnum: VMIN_EXACT,
             isa: "",
             switch_tree: false,

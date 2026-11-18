@@ -111,6 +111,10 @@ pub(package) struct Isa {
     /// one instruction (x86-64 VGATHER in an AVX2 body: 32); 0: in none.
     /// `lir::ir::Package::gather_bytes`.
     pub(package) gather_bytes: u32,
+    /// The native backend reads or writes one lane of a vector in a register at an address in one
+    /// instruction (wasm32 `v128.load32_lane`, `v128.store32_lane`): `lir::ir::Package::lane_mem`. Else a
+    /// masked access of lane 0 alone is the lane's scalar load or store (`lir::opt` `lane0_access`).
+    pub(package) lane_mem: bool,
     /// How the native backend computes an IEEE 754-2019 minimumNumber or maximumNumber of float vectors in
     /// registers (`lir::ir::Package::vminnum`): 0 lane by lane; VMIN_EXACT by its SIMD_MIN and SIMD_MAX
     /// (wasm32); VMIN_QUIET by the C `fmin` and `fmax` of a number and a quieted operand (arm64 `fminnm`,
@@ -307,6 +311,7 @@ pub(package) const ISAS: [Isa; 3] = [
         mask_bits: true,
         lane_insert: false,
         gather_bytes: 32,
+        lane_mem: false,
         vminnum: 3,
         vector_perm3: 0,
         vector_sumw: 0x8,
@@ -356,6 +361,7 @@ pub(package) const ISAS: [Isa; 3] = [
         mask_bits: false,
         lane_insert: true,
         gather_bytes: 0,
+        lane_mem: false,
         vminnum: 2,
         vector_perm3: 9,
         vector_sumw: 0x8CE,
@@ -405,6 +411,7 @@ pub(package) const ISAS: [Isa; 3] = [
         mask_bits: false,
         lane_insert: true,
         gather_bytes: 0,
+        lane_mem: true,
         vminnum: 1,
         vector_perm3: 2,
         vector_sumw: 0x8CE,
@@ -761,6 +768,7 @@ const UNKNOWN_ISA: Isa = Isa {
     mask_bits: false,
     lane_insert: false,
     gather_bytes: 0,
+    lane_mem: false,
     vminnum: 0,
     vector_perm3: 0,
     vector_sumw: 0,

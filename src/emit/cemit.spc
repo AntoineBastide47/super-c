@@ -783,6 +783,7 @@ extend CEmit {
             l.pkg.mask_bits = tgt::isa(pk.arch).mask_bits;
             l.pkg.lane_insert = tgt::isa(pk.arch).lane_insert;
             l.pkg.gather_bytes = tgt::isa(pk.arch).gather_bytes;
+            l.pkg.lane_mem = tgt::isa(pk.arch).lane_mem;
             l.pkg.vminnum = tgt::isa(pk.arch).vminnum;
             l.pkg.isa = tgt::isa(pk.arch).name;
             l.pkg.switch_tree = tgt::isa(pk.arch).switch_tree;

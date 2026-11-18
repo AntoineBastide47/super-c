@@ -6023,6 +6023,39 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
     }
 }
 
+// A masked access through a pointer under a constant mask of lane 0 alone is the lane's scalar load into
+// the fallback or the store of the vector's lane 0 (`opt` `lane0_access`), which here is the loaded scalar
+// itself; where the target moves one lane at an address in one instruction (`Package.lane_mem`) both stay.
+@test
+fn a_masked_access_of_lane_0_is_a_scalar_access() {
+    let src = M"(lir ptr 8
+sym @f fn global
+fn @f
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v4f32 v2 align 0
+  v4 = iconst.i8 1
+  v5 = vop.load_masked_ptr.v4f32 (v0, v4, v3)
+  vop.store_masked_ptr (v1, v4, v5)
+  ret
+)";
+    let mut err = String::new();
+    for mem in [false, true] {
+        let mut after = lparse::parse(src, &mut err).unwrap();
+        after.cpu.vector = 16;
+        after.vops = VOPS_ALL;
+        after.lane_mem = mem;
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+        let mut v = verify::Verifier::new();
+        let fb = after.syms[after.find_symbol("f") as usize].def;
+        assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+        let t = text_of(&after, "f");
+        assert_eq(t.contains("load_masked_ptr") && t.contains("store_masked_ptr"), mem);
+        assert_eq(t.contains("load.f32") && !t.contains("vop."), !mem);
+    }
+}
+
 // `[x; N]` of bytes as a vector: the fill of a private slot through its address plus an index of 0, then
 // loads of its 16-byte parts. The index of 0 folds on a slot's address too, each load is the splat of the
 // fill's byte, and the fill and the slot go.

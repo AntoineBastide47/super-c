@@ -12056,7 +12056,8 @@ extend Gen {
                 k
             };
             if is_float(lt) {
-                let rd = self.def(i) - V0;
+                // Over the vector's register when it dies here: lane 0 is then its scalar view.
+                let rd = self.def_over(i, t.a, rv + V0) - V0;
                 if k == 0 {
                     self.c.vmov(rd, rv);
                 } else {

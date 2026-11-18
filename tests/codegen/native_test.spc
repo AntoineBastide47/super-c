@@ -21459,3 +21459,50 @@ int main(void) {
 )";
     assert_eq(run_native(lir, drv), 0);
 }
+
+// A scalar into lane 0 of a vector of zeros: arm64 moves it with one FMOV, from a v register (`fmov s, s`)
+// or a general one (`fmov s, w`), which clears the lanes above. Every target gives the C result.
+@test
+fn a_scalar_into_lane_0_of_zeros_is_one_move() {
+    let lir = M"(lir ptr 8
+sym @z fn global
+fn @z
+  sig (ptr, ptr, i32) -> void
+b0(v0: ptr, v1: ptr, v2: i32):
+  v3 = fconst.f32 0x0
+  v4 = splat.v4f32 v3
+  v5 = load.f32 v0 align 2
+  v6 = vinsert.0.v4f32 v4, v5
+  store v6, v1 align 0
+  v7 = iconst.i32 0
+  v8 = splat.v4i32 v7
+  v9 = vinsert.0.v4i32 v8, v2
+  store v9, v1+16 align 0
+  ret
+)";
+    let mut a64 = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut a64),
+        "the arm64 object",
+    );
+    assert_eq(elf_text_count(&a64, 0xFFFFFC00, 0x1E204000), 1);
+    // No INS of a lane, from a v register (6E000400) or a general one (4E001C00).
+    assert_eq(elf_text_count(&a64, 0xFFE08400, 0x6E000400), 0);
+    assert_eq(elf_text_count(&a64, 0xFFE0FC00, 0x4E001C00), 0);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void z(const float *, void *, int32_t);
+int main(void) {
+  float in = 2.5f;
+  struct { float f[4]; int32_t i[4]; } o;
+  memset(&o, 0xff, sizeof o);
+  z(&in, &o, 7);
+  for (int k = 0; k < 4; k++) if (o.f[k] != (k ? 0 : 2.5f) || o.i[k] != (k ? 0 : 7)) return 1 + k;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
