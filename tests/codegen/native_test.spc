@@ -21384,6 +21384,225 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
+// x86-64 with AVX: a lane select under a lane mask (a comparison's) is one blend, `vblendvps` of float
+// lanes and `vpblendvb` of integer ones (VEX.66.0F3A 4A and 4C); under any other mask it selects bits
+// (`vpand`). The body gives the C results.
+@test
+fn an_avx_select_under_a_lane_mask_is_one_blend() {
+    let lir = M"(lir ptr 8
+sym @pick fn global
+fn @pick
+  sig (ptr, ptr, ptr) -> void
+  cpu 32 917504 9 1028 319 1
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8f32 v0 align 0
+  v4 = load.v8f32 v1 align 0
+  v5 = vcmp.ogt.v8i32 v3, v4
+  v6 = vsel.v8f32 v5, v3, v4
+  store v6, v2 align 0
+  v7 = load.v16i8 v0+32 align 0
+  v8 = load.v16i8 v1+32 align 0
+  v9 = vcmp.eq.v16i8 v7, v8
+  v10 = load.v16i8 v0+48 align 0
+  v11 = vsel.v16i8 v9, v10, v8
+  store v11, v2+32 align 0
+  v12 = vsel.v16i8 v10, v7, v8
+  store v12, v2+48 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // VEX's three-byte form of map 0F3A (the low 5 bits of its second byte: 3), then the opcode.
+    let mut floats: u32 = 0;
+    let mut bytes: u32 = 0;
+    for x in 0..obj.len() - 3 {
+        let map3 = obj[x] == 0xC4 && (obj[x + 1] & 0x1F) == 3;
+        floats += (map3 && obj[x + 3] == 0x4A) as u32;
+        bytes += (map3 && obj[x + 3] == 0x4C) as u32;
+    }
+    assert_eq(floats, 1);
+    assert_eq(bytes, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void pick(const void *, const void *, void *);
+int main(void) {
+  float a[16], b[16], o[16];
+  uint8_t *x = (uint8_t *)a, *y = (uint8_t *)b, *z = (uint8_t *)o;
+  for (int k = 0; k < 8; k++) {
+    a[k] = (float)(k * 5 % 7) - 3.0f;
+    b[k] = (float)(k * 3 % 5) - 2.0f;
+  }
+  for (int k = 32; k < 64; k++) {
+    x[k] = (uint8_t)(k * 37 + 11);
+    y[k] = (k % 3) ? (uint8_t)(k * 29 + 5) : x[k];
+  }
+  pick(a, b, o);
+  for (int k = 0; k < 8; k++)
+    if (o[k] != (a[k] > b[k] ? a[k] : b[k])) return 1 + k;
+  for (int k = 32; k < 48; k++)
+    if (z[k] != (x[k] == y[k] ? x[k + 16] : y[k])) return 1 + k;
+  for (int k = 48; k < 64; k++)
+    if (z[k] != (uint8_t)((x[k - 16] & x[k]) | (y[k - 16] & ~x[k]))) return 1 + k;
+  return 0;
+}
+)";
+    assert_eq(run_x64_feature(lir, drv, "avx2", 0), 0);
+}
+
+// x86-64: a float's splat and an interleave write over an operand that dies there: the four elements of
+// `@four`, each loaded, spread and interleaved in pairs, then the pairs, take no move between vector
+// registers (`movaps`, `movdqa`). It gives the C result.
+@test
+fn x64_splats_and_interleaves_write_over_a_dying_operand() {
+    let lir = M"(lir ptr 8
+sym @four fn global
+fn @four
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.f32 v0 align 2
+  v3 = splat.v4f32 v2
+  v4 = load.f32 v0+12 align 2
+  v5 = splat.v4f32 v4
+  v6 = bitcast.v4i32 v3
+  v7 = bitcast.v4i32 v5
+  v8 = vziplo.v4i32 v6, v7
+  v9 = load.f32 v0+4 align 2
+  v10 = splat.v4f32 v9
+  v11 = load.f32 v0+8 align 2
+  v12 = splat.v4f32 v11
+  v13 = bitcast.v4i32 v10
+  v14 = bitcast.v4i32 v12
+  v15 = vziplo.v4i32 v13, v14
+  v16 = bitcast.v2i64 v8
+  v17 = bitcast.v2i64 v15
+  v18 = vziplo.v2i64 v16, v17
+  store v18, v1 align 0
+  ret
+)";
+    for os in ["windows", "linux"] {
+        let mut obj = Vector::<u8>::new();
+        assert(object_of(lir, tgt::axis_index(os, false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+        let mut moves: u32 = 0;
+        for i in 0..obj.len() - 2 {
+            moves += (obj[i] == 0x0F && (obj[i + 1] == 0x28 || obj[i + 1] == 0x6F) && obj[i + 2] >= 0xC0) as u32;
+        }
+        assert_eq(moves, 0);
+    }
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return; // a C driver links it, on a host that runs it
+    }
+    let drv = M"(void four(const float *, float *);
+int main(void) {
+  float in[4] = {1.5f, -2.0f, 3.25f, 7.0f}, out[4];
+  four(in, out);
+  return !(out[0] == 1.5f && out[1] == 7.0f && out[2] == -2.0f && out[3] == 3.25f);
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// x86-64: outside a loop, a temporary takes a callee-saved register the body saves already and that holds
+// nothing, before a value moves to its slot. `@g`'s loop holds one of its sums in rbx (the arguments and
+// the other loop values hold the caller-saved registers); after the loop the third address goes there,
+// and one value alone moves to the stack and back (the sum, for a comparison's byte register). It gives
+// the C results.
+@test
+fn x64_temporaries_after_a_loop_take_its_saved_registers() {
+    let lir = M"(lir ptr 8
+sym @g fn global
+fn @g
+  sig (ptr, ptr, ptr, i64) -> i64
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4, v4, v4, v4)
+b1(v6: i64, v7: i64, v8: i64, v9: i64):
+  v10 = ptradd v0, v6 * 8
+  v11 = load.i64 v10 align 3
+  v12 = add.i64 v7, v11
+  v13 = ptradd v1, v6 * 8
+  v14 = load.i64 v13 align 3
+  v15 = add.i64 v8, v14
+  v16 = ptradd v2, v6 * 8
+  v17 = load.i64 v16 align 3
+  v18 = add.i64 v9, v17
+  v19 = add.i64 v6, v5
+  v20 = icmp.ult v19, v3
+  br v20, b1(v19, v12, v15, v18), b2(v12, v15, v18)
+b2(v21: i64, v22: i64, v23: i64):
+  v24 = add.i64 v21, v22
+  v25 = add.i64 v24, v23
+  v26 = ptradd v0, v3 * 1
+  v27 = ptradd v1, v3 * 1
+  v28 = ptradd v2, v3 * 1
+  v29 = icmp.ule v26, v27
+  v30 = icmp.ule v27, v28
+  v31 = icmp.ule v28, v26
+  v32 = or.i8 v29, v30
+  v33 = and.i8 v32, v31
+  v34 = zext.i64 v33
+  v35 = add.i64 v25, v34
+  v36 = load.i64 v0 align 3
+  v37 = add.i64 v35, v36
+  v38 = load.i64 v1 align 3
+  v39 = add.i64 v37, v38
+  v40 = load.i64 v2 align 3
+  v41 = add.i64 v39, v40
+  v42 = add.i64 v41, v3
+  ret v42
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // `mov` between a general register and a slot (89 or 8B, the operand at rsp: a SIB byte 24).
+    let mut slots: u32 = 0;
+    for i in 0..obj.len() - 2 {
+        slots += ((obj[i] == 0x89 || obj[i] == 0x8B) && obj[i + 1] < 0xC0 && (obj[i + 1] & 7) == 4 && obj[i + 2] == 0x24) as u32;
+    }
+    assert(slots <= 2, "one value moves to its slot and back");
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) {
+        return; // a C driver links it, on a host that runs it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t g(const int64_t *, const int64_t *, const int64_t *, int64_t);
+int main(void) {
+  int64_t x[12];
+  for (int k = 0; k < 12; k++) x[k] = k + 1;
+  if (g(x, x + 4, x + 8, 4) != 78 + 0 + 1 + 5 + 9 + 4) return 1;
+  if (g(x + 4, x + 8, x, 4) != 78 + 1 + 5 + 9 + 1 + 4) return 2;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// `compress_store` of 4-byte lanes in an x86-64 body with AVX2 packs 8 lanes a chunk: one permute of the
+// chunk's words by a table row of their indices (`lir::lower` `compress_chunks`; `vpermps`, the `u32`
+// `swizzle_or_zero` entry of 8 lanes), not four byte shuffles of 4 lanes.
+@test
+fn an_avx2_compress_store_packs_eight_lanes_a_chunk() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\nimport std::cpu;\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\n@noinline\n@used\nfn pack16(x: []f32, t: f32, out: []mut f32) usize {\n    let v = simd::load::<f32, 16>(x, 0);\n    return simd::compress_store(out, 0, v.greater_than(Simd::<f32, 16>::splat(t)), v);\n}\nfn main(args: Vector<str>) i32 {\n    return 0;\n}\n",
+    );
+    // The optimized body, printed; the link needs the target's C toolchain.
+    let r = cli::superc_env_in(
+        p.dir(),
+        "SC_LIR_PRINT",
+        "pack16",
+        "build --target=linux --arch=x86_64 --profile=release main.spc -o bin",
+    );
+    assert(r.out_has("pack16"), "the body is printed");
+    assert(r.out_has("@_mm256_permutevar8x32_epi32("), "a permute of 8 words");
+    assert(!r.out_has("@_mm_shuffle_epi8("), "no byte shuffle of 4 lanes");
+}
+
 // x86-64: a vector sum that commutes writes over the loop's accumulator whichever operand it is: `@acc`'s
 // sums take the load first and the accumulator second, and its loop holds no move between vector
 // registers (`movaps`, `movdqa`, `movdqu`, or their VEX forms). It gives the C result.

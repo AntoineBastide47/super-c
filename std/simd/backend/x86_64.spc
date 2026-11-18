@@ -9812,6 +9812,14 @@ fn swizzle_or_zero_u8x16(a: u8x16, idx: u8x16) u8x16 {
 }
 
 @arch(x86_64)
+@simd_impl(simd::Op::SwizzleOrZero, [cpu::Feature::Avx2])
+fn swizzle_or_zero_u32x8(a: u32x8, idx: u32x8) u32x8 {
+    let i = yi(idx);
+    let below = _mm256_cmpeq_epi32(_mm256_min_epu32(i, _mm256_set1_epi32(7)), i);
+    return yiv::<u32, 8>(_mm256_and_si256(_mm256_permutevar8x32_epi32(yi(a), i), below));
+}
+
+@arch(x86_64)
 @simd_impl(simd::Op::LoadMasked, [cpu::Feature::Avx512f, cpu::Feature::Avx512vl, cpu::Feature::Avx512bw])
 fn load_masked_i8x16(p: *const i8, m: mask16, fb: i8x16) i8x16 {
     return xiv::<i8, 16>(unsafe _mm_mask_loadu_epi8(xi(fb), (m as u64) as u16, p));

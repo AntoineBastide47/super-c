@@ -143,6 +143,10 @@ set first: it states the value, register and frame model.
    - A value that takes a parameter's register at its definition without a register of the plan (a
      step the back edge passes) owns the register as a temporary (`set_owner`), so a value the plan
      puts there later evicts it.
+   - x86-64: a temporary outside a loop takes a free caller-saved register, then a callee-saved one the
+     body saves already (`Gen.csr`) that holds nothing, then evicts a value (`alloc`); in a loop it
+     takes any free callee-saved register before an eviction. Shrink-wrapped code without the frame
+     takes no callee-saved register.
    - A value's zero-extended state (`Va.clean`) holds wherever the plan moves it (`Core::seg_in` keeps
      it for a value made before): reload a narrow value zero-extended, and extend one in place only
      where every later reader comes through (its defining block, or the block where it ends).
@@ -233,7 +237,9 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   and high lanes and UZP2, SHRN for 8 bytes; x86-64 `pmulhw`/`pmulhuw` for 16-bit lanes, `mulh_lanes32`
   for 32-bit ones: the even and odd lanes' `pmuludq` (signed `pmuldq` with SSE4.1, else a correction)
   merged by a mask, `vpblendd` with AVX2, `vpandq`/`vporq` with AVX-512). Any other form computes lane by
-  lane through memory.
+  lane through memory. x86-64 notes: a select (`vsel`) is `c ^ ((b ^ c) & mask)`, and with AVX under a
+  lane mask (`lir::ir::lane_mask`) one blend (`vblendvps`, `vblendvpd`, `vpblendvb`); a float's splat and
+  a 16-byte interleave write over an operand that dies there (`def_over`).
 - Vector constants: x86-64 loads one from the body's read-only constants (`const_sym`, aligned to its
   size); a 16-byte one that lane operations of its block alone read, each as its second operand, is their
   memory operand (`lv::FOLD_VCMEM`: `pxor x, [rip + k]`). arm64 builds one of a repeating byte or
