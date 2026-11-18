@@ -2740,10 +2740,10 @@ fn cemit_relower_census(
 // `closure` selects a closure body (`nid` is the closure node) over a function body.
 // `__sc_simd_lvl()`, which the dispatch prologues read (`CEmit::dispatch_prologue`): the highest level
 // k (1-based) of `simd_levels` whose features the CPU detector reports (`sc_cpu_words`, which
-// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code: the loader
-// links the detector for it.
+// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code and a level that
+// plans it differently: the loader links the detector for it.
 fn simd_level_fn(p: &loader::Package, out: &mut String) {
-    if p.simd_levels.len() == 0 || !p.names_vectors() {
+    if p.simd_levels.len() == 0 || !p.names_vectors() || !p.levels_plan_vectors() {
         return;
     }
     out.push_str("void sc_cpu_words(uint64_t __out[2]);\n");
@@ -17670,7 +17670,7 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
     }
-    if p.simd_levels.len() != 0 && p.names_vectors() {
+    if p.simd_levels.len() != 0 && (p.names_vectors() || p.lse_level() != 0) {
         simd_level_init(p, int, &mut t);
     }
     let mut err = String::new();

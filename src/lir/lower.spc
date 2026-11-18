@@ -3205,7 +3205,7 @@ extend Lower {
             let lvl = self.inst(O_ALOAD, T_I8, MO_RELAXED, la, VNONE, 0);
             for i in 0..copies.len() {
                 let t = self.block();
-                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, (copies.len() - i) as u64));
+                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, c.disp_k[i]));
                 self.split(at, t, true);
                 takes.push(t);
             }

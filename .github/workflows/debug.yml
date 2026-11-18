@@ -224,8 +224,9 @@ jobs:
           ../super-c.exe build main.spc -o prog.exe; echo "build=$?"
           ./prog.exe; echo "run=$?"
 
-  # x86-64-v3's scalar forms (BMI1, BMI2, MOVBE) on a real x86-64 runner: a release compiler built for the
-  # baseline and one for x86-64-v3, each timed building the compiler, alternating, three rounds.
+  # x86-64-v3 on a real x86-64 runner: release compilers for the baseline, x86-64-v3, the baseline with
+  # v3's scalar features, and the baseline with AVX2 and FMA, each timed building the compiler,
+  # alternating, three rounds.
   bench-v3:
     needs: compile
     name: bench (linux, x86-64-v3)
@@ -245,21 +246,57 @@ jobs:
         with:
           name: compiler-linux
 
-      - name: Time the baseline and x86-64-v3 compilers
+      - name: Time the compilers by feature group
         run: |
           set -eu
           chmod +x ./super-c
-          grep -o -w -E 'bmi1|bmi2|movbe|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '; echo
+          grep -m1 -o -w -E 'bmi1|bmi2|movbe|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '; lscpu | grep -i 'model name' || true
           ./super-c build --profile=release -fno-prove --out-dir=b1 -o sc-v1
           ./super-c build --profile=release -fno-prove --target-cpu=x86-64-v3 --out-dir=b3 -o sc-v3
-          objdump -d sc-v3 | grep -c -E '\b(andn|blsr|blsi|blsmsk|shlx|shrx|sarx|rorx|mulx|movbe)\b' || true
+          ./super-c build --profile=release -fno-prove --target-feature=+bmi1,+bmi2,+movbe,+lzcnt,+popcnt --out-dir=bs -o sc-sc
+          ./super-c build --profile=release -fno-prove --target-feature=+avx2,+fma --out-dir=bv -o sc-vec
           for r in 1 2 3; do
-            for v in v1 v3; do
+            for v in v1 v3 sc vec; do
               rm -rf "t-$v"
               s=$(date +%s.%N)
               "./sc-$v" build -fno-prove --out-dir="t-$v" -o "o-$v" > /dev/null
               e=$(date +%s.%N)
               echo "round $r $v: $(echo "$e - $s" | bc) s"
+            done
+          done
+
+  # LSE and RCPC on a Linux arm64 server core: the mutex benchmarks built without them (the Linux
+  # baseline) and with them, alternating, two rounds.
+  bench-lse:
+    needs: compile
+    name: bench (linux_arm64, lse)
+    runs-on: ubuntu-26.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux_arm64
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux_arm64
+
+      - name: Time the mutex benchmarks with and without LSE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          grep -m1 -o -w -E 'atomics|lrcpc' /proc/cpuinfo | sort -u | tr '\n' ' '; nproc; lscpu | grep -i -E 'model name|vendor' || true
+          ./super-c bench --no-run --filter=mutex_ --out-dir=b0 > /dev/null
+          ./super-c bench --no-run --filter=mutex_ --target-feature=+lse,+rcpc --out-dir=b1 > /dev/null
+          for r in 1 2; do
+            for v in b0 b1; do
+              echo "== $v round $r"
+              "./$v/bench-bin" | grep -E '^mutex_bench::|time \(ms\)'
             done
           done
 

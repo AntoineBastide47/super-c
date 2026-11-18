@@ -248,6 +248,10 @@ pub(package) struct Target {
     pub(package) features: cf::CpuFeatureSet,
     /// The features no machine of the target has.
     pub(package) never: cf::CpuFeatureSet,
+    /// The features an optimized build chooses at run time beyond `features` (`--target-feature` form):
+    /// one level of `simd_levels`, whose copies the native code generator makes (arm64 Linux: LSE and
+    /// RCPC, the copies of the functions whose atomics they change). Empty for none.
+    pub(package) run_time: str<'static>,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub(package) mcpu: str<'static>,
     pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
@@ -606,6 +610,7 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         page_bytes: 4096,
         features: NO_FEATURES,
         never: NO_FEATURES,
+        run_time: "",
         mcpu: "",
         apple_sdk: "",
         cenv: cenv,
@@ -664,7 +669,8 @@ const fn targets() [Target; 11] {
         a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes pmull sha2"),
         "iPhoneOS",
     );
-    let linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
+    let mut linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
+    linux_a64.run_time = "+lse,+rcpc";
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",

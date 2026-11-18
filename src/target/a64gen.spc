@@ -257,6 +257,10 @@ pub(package) struct Gen {
     nlay: usize,
     mv: Vector<Mv>,
     local: bool, // the function compiling is a local copy
+    // The function compiling is the copy with LSE and RCPC (`Package.lse_level`), or the body under the
+    // stub that chooses it.
+    lse_copy: bool,
+    lse_stub: bool,
     cs: ob::CStrs, // the object's C strings
 }
 
@@ -368,6 +372,8 @@ extend Gen {
             nlay: 0,
             mv: Vector::<Mv>::new(),
             local: false,
+            lse_copy: false,
+            lse_stub: false,
             cs: ob::CStrs::new(),
         };
     }
@@ -2627,12 +2633,45 @@ const fn mkind(t: u8, load: bool) u32 {
     return ast::pick(t == T_I32, a::M_W, a::M_X);
 }
 
+// Whether LSE or RCPC change the code of body `b`: a read-modify-write, a compare-and-swap or an acquire
+// load.
+const fn lse_differs(b: &Body) bool {
+    for i in 0..b.insts.len() {
+        let t = b.insts[i];
+        if t.op == O_ARMW || t.op == O_ACAS || t.op == O_ALOAD && (t.aux & 7) == MO_ACQUIRE {
+            return true;
+        }
+    }
+    return false;
+}
+
 // ---- Functions ----
 
 extend Gen {
     /// Compile the body of package function symbol `s` into the object. False (with `err`) when the
-    /// body uses what the generator does not compile.
+    /// body uses what the generator does not compile. A body whose atomics LSE or RCPC change, in a package
+    /// that chooses them at run time (`Package.lse_level`), compiles twice: a local copy `<name>.lse` with
+    /// them, then the body without them as `<name>.base`; a stub under the function's own name branches to
+    /// one of them (`lse_entry`), the arguments as the caller left them.
     pub(package) fn func(self: &mut Self, s: u32, local: bool) bool {
+        let p = unsafe &*self.pkg;
+        let b = &p.bodies[p.syms[s as usize].def as usize];
+        if p.lse_level == 0 || b.naked || p.cpu_of(b).lse || !lse_differs(b) {
+            return self.func_once(s, local);
+        }
+        self.lse_copy = true;
+        let ok = self.func_once(s, local);
+        self.lse_copy = false;
+        if !ok {
+            return false;
+        }
+        self.lse_stub = true;
+        let ok2 = self.func_once(s, local);
+        self.lse_stub = false;
+        return ok2;
+    }
+
+    fn func_once(self: &mut Self, s: u32, local: bool) bool {
         self.local = local;
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
@@ -2797,7 +2836,7 @@ extend Gen {
         // A conditional branch out of range: once more, every one of them over a `B`.
         self.far = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.far = false;
         return ok;
     }
@@ -2822,7 +2861,7 @@ extend Gen {
     fn fp_args(self: &mut Self, s: u32, local: bool) bool {
         self.no_sp_args = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.no_sp_args = false;
         return ok;
     }
@@ -2837,7 +2876,7 @@ extend Gen {
     fn unshrunk(self: &mut Self, s: u32, local: bool) bool {
         self.no_shrink = true;
         self.again = true;
-        let ok = self.func(s, local);
+        let ok = self.func_once(s, local);
         self.no_shrink = false;
         return ok;
     }
@@ -6858,7 +6897,7 @@ extend Gen {
         };
         if op == O_ALOAD {
             let rd = self.def_step(i) as u32;
-            if ord == MO_ACQUIRE && unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc {
+            if ord == MO_ACQUIRE && (self.lse_copy || unsafe (*self.pkg).cpu_of(self.cr.b()).rcpc) {
                 self.emit(a::ldapr(size, rd, rp));
             } else if acq {
                 self.emit(a::ldar(size, true, rd, rp));
@@ -6881,7 +6920,7 @@ extend Gen {
             let rv = self.reg(t.b) as u32;
             // One instruction with LSE, which reads its operands before it writes: a dying one's register.
             let rd = self.def_step(i) as u32;
-            if !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+            if !self.lse_copy && !unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
                 self.llsc_rmw(size, r, acq, rel, rv, rd, rp);
                 return true;
             }
@@ -6923,7 +6962,7 @@ extend Gen {
         } else {
             self.def(i) as u32
         };
-        if unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
+        if self.lse_copy || unsafe (*self.pkg).cpu_of(self.cr.b()).lse {
             self.emit(a::mov_reg(true, a::IP0, re));
             self.emit(a::cas(size, acq2, rel2, a::IP0, rn, rp));
             self.cmp_old(size, re);
@@ -9115,6 +9154,42 @@ extend Gen {
     // ---- Prologue, epilogue and output ----
 
     // Frame the body's code and define function symbol `s` with it.
+    // The stub under function name `nm` (flags `fl`) in section `sec`: a branch to the copy with LSE
+    // (`<nm>.lse`) from level `Package.lse_level` of the byte `__sc_simd_lv` (in x16, free at a call), else
+    // to the body without it (`<nm>.base`, object symbol `base`; the writer may give each function its own
+    // section, so a branch and not the next bytes).
+    fn lse_entry(self: &mut Self, o: &mut ob::Obj, sec: u8, nm: str, fl: u8, base: u32) {
+        let p = unsafe &*self.pkg;
+        let lv = o.sym("__sc_simd_lv");
+        let cp = o.sym(format("{}.lse", nm).as_str());
+        let mut w = Vector::<u32>::new();
+        let mut rl = Vector::<CRel>::new();
+        // Through its GOT slot where another object may interpose it (`got_global`).
+        if self.elf && p.pic {
+            rl.push(CRel { at: 0, kind: a::R_GOT_PAGE21, sym: lv, addend: 0 });
+            w.push(a::adr(true, a::IP0, 0));
+            rl.push(CRel { at: 1, kind: a::R_GOT_PAGEOFF12, sym: lv, addend: 0 });
+            w.push(a::ldst_uimm(a::M_X, true, a::IP0, a::IP0, 0));
+        } else {
+            rl.push(CRel { at: 0, kind: a::R_PAGE21, sym: lv, addend: 0 });
+            w.push(a::adr(true, a::IP0, 0));
+            rl.push(CRel { at: 1, kind: a::R_PAGEOFF12, sym: lv, addend: 0 });
+            w.push(a::add_imm(true, a::IP0, a::IP0, 0));
+        }
+        w.push(a::ldst_uimm(a::M_B, true, a::IP0, a::IP0, 0));
+        w.push(a::cmp_imm(false, a::IP0, p.lse_level));
+        w.push(a::bcond(a::LO, 8));
+        rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: cp, addend: 0 });
+        w.push(a::b(0));
+        rl.push(CRel { at: w.len() as u32, kind: a::R_BRANCH26, sym: base, addend: 0 });
+        w.push(a::b(0));
+        let at = o.define(o.sym(nm), sec, 2, w.len() as u64 * 4, fl);
+        o.put_words(sec, &w);
+        for q in 0..rl.len() {
+            o.reloc(sec, rl[q].kind, at as u32 + rl[q].at * 4, rl[q].sym, rl[q].addend);
+        }
+    }
+
     fn finish(self: &mut Self, s: u32) bool {
         // A last branch to the epilogue falls through instead, and so does the one before it when the
         // block between held only that branch: one step per branch.
@@ -9427,13 +9502,23 @@ extend Gen {
         let p = unsafe &*self.pkg;
         let ps = p.syms[s as usize];
         let o = self.cr.obj();
-        let k2 = o.sym(p.spell(ps.name));
+        let nm = p.spell(ps.name);
+        let k2 = if self.lse_copy {
+            o.sym(format("{}.lse", nm).as_str())
+        } else if self.lse_stub {
+            o.sym(format("{}.base", nm).as_str())
+        } else {
+            o.sym(nm)
+        };
         let size = (pl + self.code.len() as u32 + elen + stubs.len() as u32) * 4;
         let sec = place::text_section(o, p, ps, self.cold_text());
         if sec == ob::NOSEC {
             return self.cr.refuse("too many sections");
         }
-        let fl = place::func_flags(ps, !self.local, true);
+        let fl = place::func_flags(ps, !self.local && !self.lse_copy && !self.lse_stub, true);
+        if self.lse_stub {
+            self.lse_entry(o, sec, nm, place::func_flags(ps, !self.local, true), k2);
+        }
         let at = o.define(k2, sec, 2, size, fl);
         if !sw {
             o.put_words(sec, &pro);

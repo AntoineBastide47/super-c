@@ -2276,6 +2276,10 @@ pub(package) struct Package {
     /// of the body's own function, into its start (`lir::opt`); another, to the callee after the caller's
     /// epilogue (the native backends).
     pub(package) tail: bool,
+    /// The level of the byte `__sc_simd_lv` from which the processor has LSE and RCPC that `cpu` lacks
+    /// (arm64 Linux): a body whose atomics they change gets a copy with them, which its entry
+    /// takes from that level (the arm64 code generator's `lse_copy`). 0 for none.
+    pub(package) lse_level: u8,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub(package) protect: u8,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
@@ -2549,6 +2553,7 @@ extend Package {
             comp_dir: String::new(),
             omit_fp: false,
             tail: false,
+            lse_level: 0,
             protect: PROTECT_NONE,
             fmath: 0,
             vec_max: 16,

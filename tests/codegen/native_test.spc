@@ -43,6 +43,7 @@ const CSSC: u32 = 8192;
 const BMI: u32 = 16384;
 const DOT: u32 = 32768;
 const RELAXED: u32 = 65536;
+const LSE_RT: u32 = 131072;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -233,6 +234,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.vtbl = p.cpu.sse41 && isa == tgt::axis_index("x86_64", true);
     p.cpu.addsub = p.cpu.vtbl;
     p.cpu.lse = (opts & LSE) != 0;
+    p.lse_level = ((opts & LSE_RT) != 0) as u8;
     p.cpu.rcpc = (opts & RCPC) != 0;
     p.cpu.fma = (opts & FMA) != 0;
     p.cpu.cssc = (opts & CSSC) != 0;
@@ -21981,6 +21983,97 @@ int main(void) {
     if cli::has_cc() && tgt::host_isa() == tgt::axis_index("x86_64", true) {
         assert_eq(run_native(x64, drv), 0);
     }
+}
+
+// Whether object `o` holds the NUL-terminated name `nm` (its string table).
+fn holds_name(o: &Vector<u8>, nm: str) bool {
+    let mut z = Vector::<u8>::new();
+    for i in 0..nm.len() {
+        z.push(nm.byte_at(i));
+    }
+    z.push(0);
+    return holds(o, z[0..z.len()]);
+}
+
+// arm64 with LSE and RCPC chosen at run time (`Package.lse_level`): a body whose read-modify-writes,
+// compare-and-swaps or acquire loads they change compiles twice, `<name>.lse` with them and `<name>.base`
+// without, and a stub that reads the level byte `__sc_simd_lv` branches to one; a body without such atomics
+// compiles once. Both copies give the same results, the byte at 0 and at 1.
+@test
+fn lse_atomics_choose_their_copy_at_run_time() {
+    let lir = M"(lir ptr 8
+sym @bump fn global
+sym @swap_in fn global
+sym @peek fn global
+sym @plain fn global
+fn @bump
+  sig (ptr, i64) -> i64
+b0(v0: ptr, v1: i64):
+  v2 = armw.add.i64 v1, v0 seq_cst
+  v3 = armw.or.i64 v1, v0 acq_rel
+  v4 = add.i64 v2, v3
+  ret v4
+fn @swap_in
+  sig (ptr, i64, i64) -> i8
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = acas v0, v1, v2 seq_cst seq_cst
+  ret v3
+fn @peek
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = aload.i64 v0 acquire
+  ret v1
+fn @plain
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = aload.i64 v0 relaxed
+  ret v1
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), LSE_RT, &mut obj),
+        "the object",
+    );
+    for nm in ["bump.lse", "bump.base", "swap_in.lse", "swap_in.base", "peek.lse", "peek.base"] {
+        assert(holds_name(&obj, nm), nm);
+    }
+    assert(!holds_name(&obj, "plain.lse") && !holds_name(&obj, "plain.base"), "no copy of plain");
+    // LDADD, LDSET (any order), CAS, LDAPR in the copies; LDAXR, LDAR in the bodies without LSE.
+    assert_eq(elf_text_count(&obj, 0x3F20FC00, 0x38200000), 1);
+    assert_eq(elf_text_count(&obj, 0x3F20FC00, 0x38203000), 1);
+    assert_eq(elf_text_count(&obj, 0x3FA07C00, 0x08A07C00), 1);
+    assert_eq(elf_text_count(&obj, 0x3FFFFC00, 0x38BFC000), 1);
+    assert(elf_text_count(&obj, 0x3FFFFC00, 0x085FFC00) >= 3, "the exclusive loads");
+    // Each stub branches to both bodies (`B` with its relocation): each function has its own section.
+    assert_eq(elf_text_count(&obj, 0xFFFFFFFF, 0x14000000), 6);
+    let mut plain = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut plain),
+        "the object",
+    );
+    assert(!holds_name(&plain, "bump.lse"), "no copy without the level");
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return; // the driver runs on arm64
+    }
+    let drv = M"(#include <stdint.h>
+unsigned char __sc_simd_lv;
+int64_t bump(int64_t *, int64_t);
+_Bool swap_in(int64_t *, int64_t, int64_t);
+int64_t peek(int64_t *);
+int64_t plain(int64_t *);
+int main(void) {
+  for (int lv = 0; lv < 2; lv++) {
+    __sc_simd_lv = (unsigned char)lv;
+    int64_t x = 5;
+    if (bump(&x, 6) != 5 + 11 || x != (11 | 6)) return 1 + 10 * lv;
+    if (!swap_in(&x, 15, 40) || x != 40) return 2 + 10 * lv;
+    if (swap_in(&x, 15, 41) || x != 40) return 3 + 10 * lv;
+    if (peek(&x) != 40 || plain(&x) != 40) return 4 + 10 * lv;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native_with(lir, drv, LSE_RT), 0);
 }
 
 // A legacy SSE instruction that reads xmm0 as a fixed operand (`blendvps`, `sha256rnds2`) in a template

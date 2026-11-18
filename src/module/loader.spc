@@ -190,7 +190,7 @@ pub(package) struct Package {
     /// sets `off` for a profile at opt-level 0 or 1).
     pub(package) simd_dispatch: String,
     /// The copies' feature sets: `simd_dispatch`'s levels beyond the build's, closed, by size (the
-    /// load computes them). Empty off x86_64 and with `off`.
+    /// load computes them); on arm64 Linux the build's with LSE and RCPC. Empty elsewhere and with `off`.
     pub(package) simd_levels: Vector<cf::CpuFeatureSet>,
     /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
     /// some function of the program may plan with beyond `features`.
@@ -3136,7 +3136,7 @@ extend Package {
         if self.std_missing(std_dir) {
             return;
         }
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.load_prelude_files(std_dir, target) {
             self.add_build_module(target);
         }
@@ -8104,9 +8104,55 @@ extend Package {
     }
 
     // The copies' feature sets (`simd_levels`) of `simd_dispatch` over the build's features.
-    fn simd_levels_compute(self: &mut Self) {
+    /// Whether a level of `simd_levels` holds a vector backend entry the build's features do not: the
+    /// vector code's copies (`CEmit::dispatch_prologue`).
+    pub(package) const fn levels_plan_vectors(self: &Self) bool {
+        let build = cf::close(self.features);
+        for k in 0..self.simd_levels.len() {
+            for i in 0..self.simd_table.len() {
+                let efs = self.simd_table.at(i).fs;
+                if cf::contains(self.simd_levels[k], efs) && !cf::contains(build, efs) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// The level (1-based, `simd_levels`) from which every level has LSE that the build's features lack:
+    /// the arm64 code generator's copies with LSE and RCPC run from it. 0 for none.
+    pub(package) const fn lse_level(self: &Self) u32 {
+        let mut k = self.simd_levels.len();
+        let lse = cf::find("lse", self.arch);
+        if lse < 0 || cf::row(lse as usize).arch != self.arch || cf::has(cf::close(self.features), lse as usize) {
+            return 0;
+        }
+        while k > 0 && cf::has(self.simd_levels[k - 1], lse as usize) {
+            k -= 1;
+        }
+        return pick(k < self.simd_levels.len(), k as u32 + 1, 0u32);
+    }
+
+    fn simd_levels_compute(self: &mut Self, target: i32) {
         self.simd_levels.clear();
-        if !tgt::isa(self.arch).levels || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+        if cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+            return;
+        }
+        // The target's run-time level (`Target.run_time`: arm64 Linux's LSE and RCPC).
+        if let Some(r) = tgt::target_of(target, self.arch) {
+            if r.run_time.len() != 0 {
+                let mut s = self.features;
+                let mut err = String::new();
+                if cf::apply(r.run_time, target, self.arch, false, &mut s, &mut err) && !cf::contains(
+                    cf::close(self.features),
+                    s,
+                ) {
+                    self.simd_levels.push(cf::close(s));
+                }
+                return;
+            }
+        }
+        if !tgt::isa(self.arch).levels {
             return;
         }
         let spec = if self.simd_dispatch.len() == 0 {
@@ -8160,7 +8206,7 @@ extend Package {
     }
 
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.std_missing(std_dir) || !self.load_prelude_files(std_dir, target) {
             return;
         }
@@ -8313,12 +8359,13 @@ extend Package {
                     self.modules[id as usize].backend = true;
                 }
             }
-            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
-            if self.simd_levels.len() != 0 {
-                let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
-                if dutil::file_mtime(&cf9) != 0 {
-                    let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);
-                }
+        }
+        // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`): vector code's, and the
+        // arm64 atomics' (`lse_level`).
+        if self.simd_levels.len() != 0 && (vectors && bn.len() != 0 || self.lse_level() != 0) {
+            let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
+            if dutil::file_mtime(&cf9) != 0 {
+                let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);
             }
         }
     }
