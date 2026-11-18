@@ -3,7 +3,7 @@
 # the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
 # Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, with
 # the tests that link a C driver (SC_TEST_CC); the vector tests at x86-64-v3; the native tests under
-# Intel SDE (AVX-512); and the wasm lanes.
+# Intel SDE (AVX-512); the wasm lanes; and a thread-local program built on Windows, its output shown.
 name: Debug
 on:
   workflow_dispatch
@@ -176,6 +176,53 @@ jobs:
           set -eu
           chmod +x ./super-c
           SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
+
+  # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
+  tls-windows:
+    needs: compile
+    name: thread-local (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: windows
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-windows
+
+      - name: Build and run the program
+        run: |
+          set -u
+          chmod +x ./super-c.exe
+          mkdir -p tls && cd tls
+          cat > main.spc <<'SPC'
+          import pthread;
+
+          @thread_local
+          static mut COUNT: u64 = 7;
+
+          fn worker(arg: *mut void) *mut void {
+              unsafe COUNT += 1;
+              return arg;
+          }
+
+          fn main() i32 {
+              let mut t = unsafe zeroed::<pthread::pthread_t>();
+              unsafe pthread::pthread_create(&mut t, null, worker, null);
+              unsafe pthread::pthread_join(t, null);
+              return (unsafe COUNT != 7) as i32;
+          }
+          SPC
+          which gcc; gcc --version | head -1
+          ../super-c.exe build main.spc -o prog.exe; echo "build=$?"
+          ./prog.exe; echo "run=$?"
 
   wasm-compile:
     name: wasm compile

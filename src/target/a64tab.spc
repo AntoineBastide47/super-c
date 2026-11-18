@@ -262,6 +262,8 @@ extend K {
     pub(package) const V4SD: u8 = 181;
     pub(package) const V4SN: u8 = 182;
     pub(package) const V4SM: u8 = 184;
+    pub(package) const V1DN: u8 = 186;
+    pub(package) const V1DM: u8 = 188;
     pub(package) const V2DD: u8 = 189;
     pub(package) const V2DN: u8 = 190;
     pub(package) const V2DM: u8 = 192;
@@ -272,7 +274,8 @@ extend K {
     pub(package) const BMASK: u8 = 197; // a 64-bit value of 0 or 0xFF bytes, a bit per byte: abc at 16, defgh at 5
     pub(package) const SIMM8: u8 = 198; // at 10, signed
     pub(package) const UIMM8: u8 = 199; // at 10, unsigned
-    pub(package) const COUNT: u8 = 200;
+    pub(package) const V1QD: u8 = 200; // Vd.1q at 0 (`pmull`'s 128-bit product)
+    pub(package) const COUNT: u8 = 201;
 }
 
 // Register kinds 1 to 64: a class (`(k - 1) / 4`) and a field (`(k - 1) % 4`: bits 0, 5, 10, 16).
@@ -319,7 +322,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 675] = [
+pub(package) const ROWS: [Row; 689] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -959,6 +962,20 @@ pub(package) const ROWS: [Row; 675] = [
     r("sha256h2", 0x5E005000, Q::NONE, 0, k3(K::QD, K::QN, K::V4SM)),
     r("sha256su0", 0x5E282800, Q::NONE, 0, k2(K::V4SD, K::V4SN)),
     r("sha256su1", 0x5E006000, Q::NONE, 0, k3(K::V4SD, K::V4SN, K::V4SM)),
+    r("sha1c", 0x5E000000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1p", 0x5E001000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1m", 0x5E002000, Q::NONE, 0, k3(K::QD, K::SN, K::V4SM)),
+    r("sha1h", 0x5E280800, Q::NONE, 0, k2(K::SD, K::SN)),
+    r("sha1su0", 0x5E003000, Q::NONE, 0, k3(K::V4SD, K::V4SN, K::V4SM)),
+    r("sha1su1", 0x5E281800, Q::NONE, 0, k2(K::V4SD, K::V4SN)),
+    r("sha512h", 0xCE608000, Q::NONE, 0, k3(K::QD, K::QN, K::V2DM)),
+    r("sha512h2", 0xCE608400, Q::NONE, 0, k3(K::QD, K::QN, K::V2DM)),
+    r("sha512su0", 0xCEC08000, Q::NONE, 0, k2(K::V2DD, K::V2DN)),
+    r("sha512su1", 0xCE608800, Q::NONE, 0, k3(K::V2DD, K::V2DN, K::V2DM)),
+    r("pmull", 0x0EE0E000, Q::NONE, 0, k3(K::V1QD, K::V1DN, K::V1DM)),
+    r("pmull2", 0x4EE0E000, Q::NONE, 0, k3(K::V1QD, K::V2DN, K::V2DM)),
+    r("pmull", 0x0E20E000, Q::NONE, 0, k3(K::V8HD, K::V8BN, K::V8BM)),
+    r("pmull2", 0x4E20E000, Q::NONE, 0, k3(K::V8HD, K::V16BN, K::V16BM)),
     r("eor3", 0xCE000000, Q::NONE, 0, k4(K::V16BD, K::V16BN, K::V16BM, K::V16BA)),
     r("bcax", 0xCE200000, Q::NONE, 0, k4(K::V16BD, K::V16BN, K::V16BM, K::V16BA)),
     r("rax1", 0xCE608C00, Q::NONE, 0, k3(K::V2DD, K::V2DN, K::V2DM)),
@@ -1237,6 +1254,7 @@ const fn kmask(k: u8, q: u32) u32 {
         K::MULVL => 15u32 << 16,
         K::SIMM6 => 0x3Fu32 << 5,
         K::SIMM8 | K::UIMM8 => 0xFFu32 << 10,
+        K::V1QD => 31u32,
         K::MSV => 31u32 << 5 | 15u32 << 16,
         K::MSVR => 31u32 << 5 | 31u32 << 16,
         K::VLX => 1u32 << 13,
@@ -1650,6 +1668,10 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
                 w |= (a as u32 & 0xFF) << 10;
                 ok = within(a, 0, 255);
             },
+            K::V1QD => {
+                w |= a as u32 & 31;
+                ok = within(a, 0, 31);
+            },
             K::MSV => {
                 let g = group(r);
                 w |= (a as u32 & 31) << 5 | ((b / g) as u32 & 15) << 16;
@@ -1951,6 +1973,9 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             },
             K::UIMM8 => {
                 v[at] = w >> 10 & 0xFF;
+            },
+            K::V1QD => {
+                v[at] = w & 31;
             },
             K::MSV => {
                 v[at] = w >> 5 & 31;

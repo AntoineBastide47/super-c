@@ -1066,6 +1066,25 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
         t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X | t::K::BMASK => {
             return number(s, i, &mut v[at]);
         },
+        t::K::V1QD => {
+            // `v<n>.1q`: no arrangement of the others' list.
+            ws(s, i);
+            let mut j = *i;
+            let w = word(s, &mut j);
+            if w.len() < 5 || !eq_nocase(w.slice(w.len() - 3, w.len()), ".1q") {
+                return false;
+            }
+            let mut l: u8 = 0;
+            let mut n: i64 = 0;
+            let mut sp = false;
+            reg_name(w.slice(0, w.len() - 3), &mut l, &mut n, &mut sp);
+            if l != b'v' {
+                return false;
+            }
+            v[at] = n;
+            *i = j;
+            return true;
+        },
         t::K::FELEM => {
             let mut r0 = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
             if !reg(s, i, &mut r0) || r0.arr >= 0 || fs_of(r0.l) < 0 {
@@ -1911,6 +1930,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             let el: []str<'static> = ELEM;
             o.format_into("{}{}", el[(q >> 1) as usize], a);
         },
+        t::K::V1QD => o.format_into("v{}.1q", a),
         t::K::PG => o.format_into("p{}", a),
         t::K::PGZ => o.format_into("p{}/z", a),
         t::K::PGM | t::K::PMM => o.format_into("p{}/m", a),

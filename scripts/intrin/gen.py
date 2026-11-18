@@ -30,7 +30,7 @@ X86_FEAT = {
     'Fma': 'fma', 'Avx512f': 'avx512f', 'Avx512vl': 'avx512vl', 'Avx512bw': 'avx512bw', 'Avx512dq': 'avx512dq',
     'Avx512cd': 'avx512cd', 'Avx512vbmi': 'avx512vbmi', 'Avx512vbmi2': 'avx512vbmi2', 'Avx512vnni': 'avx512vnni',
     'Avx512bitalg': 'avx512bitalg', 'Avx512vpopcntdq': 'avx512vpopcntdq', 'Vaes': 'vaes', 'Gfni': 'gfni',
-    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2',
+    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2', 'Bmi1': 'bmi', 'Bmi2': 'bmi2', 'Sha': 'sha',
 }
 
 def parse_bindings():
@@ -62,7 +62,7 @@ def parse_bindings():
 
 SCALAR = {'i8': 'int8_t', 'i16': 'int16_t', 'i32': 'int32_t', 'i64': 'int64_t', 'u8': 'uint8_t', 'u16': 'uint16_t',
           'u32': 'uint32_t', 'u64': 'uint64_t', 'f32': 'float', 'f64': 'double', 'bool': '_Bool', 'usize': 'size_t',
-          'isize': 'ptrdiff_t', 'void': 'void', 'char': 'char'}
+          'isize': 'ptrdiff_t', 'void': 'void', 'char': 'char', 'i128': '__int128', 'u128': 'unsigned __int128'}
 INTS = {'i8', 'i16', 'i32', 'i64', 'u8', 'u16', 'u32', 'u64', 'usize', 'isize'}
 
 def ctype(t):
@@ -78,7 +78,10 @@ def wrapper(b, consts):
     args = []
     for k, (pn, pt) in enumerate(b['params']):
         ps.append('%s p%d' % (ctype(pt), k))
-        args.append(str(consts[k]) if k in consts else 'p%d' % k)
+        # A pointer through `void *`: the header's element type may be another spelling of the binding's
+        # (`unsigned long long *` for `uint64_t *`).
+        cast = '(const void *)' if pt.strip().startswith('*const ') else '(void *)' if pt.strip().startswith('*mut ') else ''
+        args.append(str(consts[k]) if k in consts else '%sp%d' % (cast, k))
     ret = ctype(b['ret']) if b['ret'] else 'void'
     attr = ''
     if ISA == 'x64':

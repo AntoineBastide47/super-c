@@ -640,7 +640,7 @@ const fn targets() [Target; 11] {
     let mut mac_a64 = apple(
         a64(
             row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_MACOS, "arm64-apple-macos11.0", 1),
-            "neon fp16 dotprod rdm aes sha2 sha3 crc lse rcpc",
+            "neon fp16 dotprod rdm aes pmull sha2 sha3 sha512 crc lse rcpc",
         ),
         "MacOSX",
     );
@@ -653,7 +653,7 @@ const fn targets() [Target; 11] {
         "iPhoneSimulator",
     );
     let ios_a64 = apple(
-        a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes sha2"),
+        a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes pmull sha2"),
         "iPhoneOS",
     );
     let linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");

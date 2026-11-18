@@ -8262,8 +8262,9 @@ extend Gen {
     // does not name is an immediate of the instructions (`@k`): its register keeps its value (`imm_arg`).
     fn intrin_clob(self: &Self, t: Inst, tx: str) u64 {
         let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
+        let ret: [u8; 2] = [x::RAX, x::RDX];
         let mut lay = ab::CallLayout::new();
-        ab::intrinsic_layout(self.cr.b(), t.b, self.cr.ptr, gp[0..8], x::RAX, &mut lay);
+        ab::intrinsic_layout(self.cr.b(), t.b, self.cr.ptr, gp[0..8], ret[0..2], &mut lay);
         let na = lay.nargs();
         let mut m: u64 = 0;
         for q in 0..lay.parts.len() {
@@ -8299,7 +8300,8 @@ extend Gen {
         let b = self.cr.b();
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
             let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
-            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], x::RAX, &mut self.cr.lay);
+            let ret: [u8; 2] = [x::RAX, x::RDX];
+            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], ret[0..2], &mut self.cr.lay);
             // A template names registers of the body's width: a vector that wide stays in its register.
             self.cr.lay.wide = self.cpu.vector.max(16);
             return;

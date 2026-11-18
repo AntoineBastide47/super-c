@@ -123,9 +123,10 @@ pub(package) const fn none() ALoc {
 
 /// The layout of a call of an intrinsic of signature `sig` (`target::intrin`): its rows' instructions take
 /// the arguments in order, a vector or float in the next vector register (a struct of vectors in as many),
-/// an integer or pointer in the next of `gp`, and give a vector or float result in vector register 0,
-/// an integer one in `ret_gp`, whatever the platform's convention.
-pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp: u8, out: &mut CallLayout) {
+/// an integer or pointer in the next of `gp` (a 16-byte integer, or a struct's integer lane, 8 bytes per
+/// register), and give a result the same way from vector register 0 and the first of `ret_gp`, whatever
+/// the platform's convention.
+pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp: []u8, out: &mut CallLayout) {
     out.locs.truncate(0);
     out.parts.truncate(0);
     out.unknown = false;
@@ -135,68 +136,60 @@ pub(package) fn intrinsic_layout(b: &Body, sig: u32, ptr: u32, gp: []u8, ret_gp:
     let mut ng: u32 = 0;
     let mut nv: u32 = 0;
     for k in 0..np {
-        let pt = b.pool[(sig + 3 + k) as usize];
         let mut loc = none();
-        loc.kind = L_REG;
-        loc.p0 = out.parts.len() as u32;
-        if (pt & AGG) != 0 {
-            let l = (pt & ~AGG) as usize;
-            let nl = b.pool[l + 2];
-            for q in 0..nl {
-                let lt = b.pool[l + 4 + 2 * q as usize] as u8;
-                out.parts.push(
-                    Part {
-                        reg: nv as u8,
-                        v: true,
-                        size: type_bytes(lt, ptr) as u8,
-                        off: b.pool[l + 3 + 2 * q as usize],
-                    },
-                );
-                nv += 1;
-            }
-            out.unknown = out.unknown || nl == 0;
-            loc.n = nl as u8;
-        } else {
-            let t = pt as u8;
-            let v = is_vec(t) || is_float(t);
-            let r = if v {
-                nv as u8
-            } else {
-                gp[ng as usize]
-            };
-            out.parts.push(Part { reg: r, v: v, size: type_bytes(t, ptr) as u8, off: 0 });
-            if v {
-                nv += 1;
-            } else {
-                ng += 1;
-            }
-            loc.n = 1;
-        }
+        intrinsic_place(b, b.pool[(sig + 3 + k) as usize], ptr, gp, &mut ng, &mut nv, &mut loc, out);
         out.locs.push(loc);
     }
     let rt = b.pool[sig as usize + 2];
     out.ret = none();
-    if (rt & AGG) != 0 {
-        // A struct of vectors: vector registers 0 and on.
-        let l = (rt & ~AGG) as usize;
+    if rt != T_NONE as u32 {
+        let mut loc = none();
+        let (mut rg, mut rv): (u32, u32) = (0, 0);
+        intrinsic_place(b, rt, ptr, ret_gp, &mut rg, &mut rv, &mut loc, out);
+        out.ret = loc;
+    }
+}
+
+// Signature entry `pt` of an intrinsic in registers: each vector or float lane in the next vector register
+// (`*nv`), each integer 8 bytes at a time in the next of `gp` (`*ng`); its parts onto `out.parts`.
+fn intrinsic_place(
+    b: &Body,
+    pt: u32,
+    ptr: u32,
+    gp: []u8,
+    ng: &mut u32,
+    nv: &mut u32,
+    loc: &mut ALoc,
+    out: &mut CallLayout,
+) {
+    loc.kind = L_REG;
+    loc.p0 = out.parts.len() as u32;
+    if (pt & AGG) != 0 {
+        let l = (pt & ~AGG) as usize;
         let nl = b.pool[l + 2];
-        out.ret.kind = L_REG;
-        out.ret.n = nl as u8;
-        out.ret.p0 = out.parts.len() as u32;
         for q in 0..nl {
-            let lt = b.pool[l + 4 + 2 * q as usize] as u8;
-            out.parts.push(
-                Part { reg: q as u8, v: true, size: type_bytes(lt, ptr) as u8, off: b.pool[l + 3 + 2 * q as usize] },
-            );
+            intrinsic_part(b.pool[l + 4 + 2 * q as usize] as u8, b.pool[l + 3 + 2 * q as usize], ptr, gp, ng, nv, out);
         }
         out.unknown = out.unknown || nl == 0;
-    } else if rt != T_NONE as u32 {
-        let t = rt as u8;
-        let v = is_vec(t) || is_float(t);
-        out.ret.kind = L_REG;
-        out.ret.n = 1;
-        out.ret.p0 = out.parts.len() as u32;
-        out.parts.push(Part { reg: ast::pick(v, 0, ret_gp), v: v, size: type_bytes(t, ptr) as u8, off: 0 });
+    } else {
+        intrinsic_part(pt as u8, 0, ptr, gp, ng, nv, out);
+    }
+    loc.n = (out.parts.len() as u32 - loc.p0) as u8;
+}
+
+// A value of type `t` at offset `off`: one vector register, or general registers of 8 bytes each.
+fn intrinsic_part(t: u8, off: u32, ptr: u32, gp: []u8, ng: &mut u32, nv: &mut u32, out: &mut CallLayout) {
+    let size = type_bytes(t, ptr);
+    if is_vec(t) || is_float(t) {
+        out.parts.push(Part { reg: (*nv) as u8, v: true, size: size as u8, off: off });
+        *nv += 1;
+        return;
+    }
+    let mut k: u32 = 0;
+    while k < size {
+        out.parts.push(Part { reg: gp[(*ng) as usize], v: false, size: (size - k).min(8) as u8, off: off + k });
+        *ng += 1;
+        k += 8;
     }
 }
 

@@ -73,6 +73,9 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         at::K::SIMM8 => {
             v[i] = -100;
         },
+        at::K::V1QD => {
+            v[i] = 7;
+        },
         at::K::UIMM8 => {
             v[i] = 200;
         },

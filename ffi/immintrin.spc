@@ -6,6 +6,54 @@
 import std::cpu;
 
 extern "C" "immintrin.h" {
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _andn_u32(a: u32, b: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _andn_u64(a: u64, b: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _bextr_u32(a: u32, start: u32, len: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _bextr_u64(a: u64, start: u32, len: u32) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsi_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsi_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsmsk_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsmsk_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsr_u32(a: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi1])
+    @unsafe(safe)
+    pub fn _blsr_u64(a: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _bzhi_u32(a: u32, index: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _bzhi_u64(a: u64, index: u32) u64;
     /// A 128-bit register of integer lanes.
     @arch(x86_64)
     @value(16, 16)
@@ -1934,6 +1982,13 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm_aesenclast_si128(a: __m128i, b: __m128i) __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Aesni])
+    @unsafe(safe)
+    pub fn _mm_aesimc_si128(a: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Aesni])
+    pub fn _mm_aeskeygenassist_si128(a: __m128i, imm8: i32) __m128i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_and_pd(a: __m128d, b: __m128d) __m128d;
@@ -2098,6 +2153,22 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_cmpunord_ps(a: __m128, b: __m128) __m128;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u16(crc: u32, v: u16) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u32(crc: u32, v: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u64(crc: u64, v: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sse42])
+    @unsafe(safe)
+    pub fn _mm_crc32_u8(crc: u32, v: u8) u32;
     @arch(x86_64)
     @target_feature([cpu::Feature::Sse41])
     @unsafe(safe)
@@ -2671,6 +2742,33 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm_setzero_si128() __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1msg1_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1msg2_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha1nexte_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    pub fn _mm_sha1rnds4_epu32(a: __m128i, b: __m128i, func: i32) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256msg1_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256msg2_epu32(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha])
+    @unsafe(safe)
+    pub fn _mm_sha256rnds2_epu32(a: __m128i, b: __m128i, k: __m128i) __m128i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_shuffle_epi32(a: __m128i, b: i32) __m128i;
@@ -2874,4 +2972,24 @@ extern "C" "immintrin.h" {
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_xor_si128(a: __m128i, b: __m128i) __m128i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @writes(hi, 8)
+    pub fn _mulx_u64(a: u64, b: u64, hi: *mut u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pdep_u32(a: u32, mask: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pdep_u64(a: u64, mask: u64) u64;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pext_u32(a: u32, mask: u32) u32;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Bmi2])
+    @unsafe(safe)
+    pub fn _pext_u64(a: u64, mask: u64) u64;
 }

@@ -311,12 +311,70 @@ fn shared_edge(b: &Body, seen: &mut Vector<u32>, e: u32) u32 {
     return e;
 }
 
+// `text` with each function symbol of the package that `driver` names marked `used`: C reaches it by name,
+// so it takes the C convention (Microsoft x64 passes an aggregate of 9 to 16 bytes by reference, where
+// Super-C's own convention takes two registers: `x64gen::sc_conv`).
+fn c_reached(text: str, driver: str) String {
+    let mut out = String::new();
+    let mut lines = text.split("\n");
+    let mut first = true;
+    loop {
+        let line = switch lines.next() {
+            Some(l) => l,
+            None => {
+                break;
+            },
+        };
+        if !first {
+            out.push_str("\n");
+        }
+        first = false;
+        // `used` is the first keyword after the linkage (`lir::parse`).
+        let sp = line.find(" fn global");
+        if line.starts_with("sym @") && sp >= 0 && !names(line, "ext") && !names(line, "used") && names(
+            driver,
+            line.slice(5, sp as usize),
+        ) {
+            let at = sp as usize + 10;
+            out.push_str(line.slice(0, at));
+            out.push_str(" used");
+            out.push_str(line.slice(at, line.len()));
+        } else {
+            out.push_str(line);
+        }
+    }
+    return out;
+}
+
+// Whether C text `c` holds identifier `name` as a whole word.
+fn names(c: str, name: str) bool {
+    let mut from: usize = 0;
+    while from + name.len() <= c.len() {
+        let at = c.slice(from, c.len()).find(name);
+        if at < 0 {
+            return false;
+        }
+        let i = from + at as usize;
+        let e = i + name.len();
+        if (i == 0 || !ident_byte(c.byte_at(i - 1))) && (e == c.len() || !ident_byte(c.byte_at(e))) {
+            return true;
+        }
+        from = i + 1;
+    }
+    return false;
+}
+
+const fn ident_byte(c: u8) bool {
+    return c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9' || c == b'_';
+}
+
 // Compile LIR `text` for `(os, isa)` (with package options `opts`), link it with C `driver` by C compiler
 // command `cc` and run the program through command prefix `runner`; the exit code, or -1 when a step
 // failed (the failure on stderr).
 fn run_lir(text: str, driver: str, os: i32, isa: i32, cc: str, runner: str, opts: u32) i32 {
     let mut obj = Vector::<u8>::new();
-    if !object_of(text, os, isa, opts, &mut obj) {
+    let lir = c_reached(text, driver);
+    if !object_of(&lir, os, isa, opts, &mut obj) {
         return -1;
     }
     let dir = format("{}/native_{}", cli::tmp_dir().as_str(), process::pid().unwrap_or(1));

@@ -127,7 +127,7 @@ fn detect() u64 {
 
 // The CPUID bit of each x86 feature: register `r[reg]`, bit `bit`, the feature, and `state` 1 when it
 // needs the AVX register state, 2 when the AVX-512 state too.
-const X86_ROWS: [(u8, u8, cpu::Feature, u8); 31] = [
+const X86_ROWS: [(u8, u8, cpu::Feature, u8); 32] = [
     (0, 0, cpu::Feature::Sse3, 0),
     (0, 9, cpu::Feature::Ssse3, 0),
     (0, 19, cpu::Feature::Sse41, 0),
@@ -159,6 +159,7 @@ const X86_ROWS: [(u8, u8, cpu::Feature, u8); 31] = [
     (2, 10, cpu::Feature::Vpclmulqdq, 1),
     (0, 25, cpu::Feature::Aesni, 0),
     (0, 1, cpu::Feature::Pclmulqdq, 0),
+    (1, 29, cpu::Feature::Sha, 0),
 ];
 
 // x86_64: CPUID leaves 1, (7,0), (7,1) when (7,0) reports it, 80000001h and 24h, a leaf past the maximum
@@ -233,7 +234,7 @@ fn os_zmm() i32 {
 // absent.
 @platform(macos | ios)
 @arch(aarch64)
-const APPLE_ROWS: [(str<'static>, cpu::Feature); 15] = [
+const APPLE_ROWS: [(str<'static>, cpu::Feature); 17] = [
     ("hw.optional.arm.FEAT_FP16", cpu::Feature::Fp16),
     ("hw.optional.arm.FEAT_DotProd", cpu::Feature::Dotprod),
     ("hw.optional.arm.FEAT_RDM", cpu::Feature::Rdm),
@@ -249,6 +250,8 @@ const APPLE_ROWS: [(str<'static>, cpu::Feature); 15] = [
     ("hw.optional.arm.FEAT_SME_F64F64", cpu::Feature::SmeF64f64),
     ("hw.optional.arm.FEAT_LRCPC", cpu::Feature::Rcpc),
     ("hw.optional.arm.FEAT_CSSC", cpu::Feature::Cssc),
+    ("hw.optional.arm.FEAT_SHA512", cpu::Feature::Sha512),
+    ("hw.optional.arm.FEAT_PMULL", cpu::Feature::Pmull),
 ];
 
 @platform(macos | ios)
@@ -281,10 +284,10 @@ fn sysctl_flag(key: str<'static>) bool {
 }
 
 // The PF_ARM_* values of the IsProcessorFeaturePresent documentation (older MinGW headers lack some
-// names). A V8 crypto bit covers AES and SHA-2; no constant exists for RDM or CSSC.
+// names). A V8 crypto bit covers AES, PMULL and SHA-2; no constant exists for RDM or CSSC.
 @platform(windows)
 @arch(aarch64)
-const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
+const WINDOWS_ROWS: [(u32, cpu::Feature); 17] = [
     (67, cpu::Feature::Fp16),
     (43, cpu::Feature::Dotprod),
     (66, cpu::Feature::I8mm),
@@ -300,6 +303,8 @@ const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
     (71, cpu::Feature::Sme2),
     (85, cpu::Feature::SmeF64f64),
     (45, cpu::Feature::Rcpc),
+    (65, cpu::Feature::Sha512),
+    (30, cpu::Feature::Pmull),
 ];
 
 // kernel32's `BOOL IsProcessorFeaturePresent(DWORD)`. Its header declares it: a prototype of
@@ -328,7 +333,7 @@ fn query() u64 {
 // libc headers lack some names. fp16 needs both its scalar and its vector bit (HWCAP bits 9 and 10).
 @platform(linux | android)
 @arch(aarch64)
-const HWCAP_ROWS: [(u8, u8, cpu::Feature); 17] = [
+const HWCAP_ROWS: [(u8, u8, cpu::Feature); 19] = [
     (0, 1, cpu::Feature::Neon),
     (0, 20, cpu::Feature::Dotprod),
     (0, 12, cpu::Feature::Rdm),
@@ -346,6 +351,8 @@ const HWCAP_ROWS: [(u8, u8, cpu::Feature); 17] = [
     (1, 25, cpu::Feature::SmeF64f64),
     (0, 15, cpu::Feature::Rcpc),
     (1, 34, cpu::Feature::Cssc),
+    (0, 21, cpu::Feature::Sha512),
+    (0, 4, cpu::Feature::Pmull),
 ];
 
 // getauxval gives 0 for an entry the kernel does not supply.

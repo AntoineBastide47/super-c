@@ -116,6 +116,12 @@ pub enum Feature {
     /// Trailing zeros, set bits, absolute value, minimum and maximum of general registers in one
     /// instruction each (aarch64; `cssc`).
     Cssc,
+    /// The SHA-1 and SHA-256 rounds and message schedules, SHA-NI (x86_64; `sha`).
+    Sha,
+    /// The SHA-512 rounds and message schedules (aarch64; `sha512`; implies `sha2`).
+    Sha512,
+    /// The 64-bit carry-less product into 128 bits, `pmull` (aarch64; `pmull`; implies `aes`).
+    Pmull,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

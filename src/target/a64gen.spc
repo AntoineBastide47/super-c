@@ -7910,7 +7910,7 @@ extend Gen {
         let b = self.cr.b();
         if t.op == O_CALL && self.intrinsic(t.a).len() != 0 {
             let gp: [u8; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
-            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], 0, &mut self.cr.lay);
+            ab::intrinsic_layout(b, t.b, self.cr.ptr, gp[0..8], gp[0..2], &mut self.cr.lay);
             return;
         }
         let q = self.lay_index(t);
