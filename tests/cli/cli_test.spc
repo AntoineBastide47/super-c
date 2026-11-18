@@ -5938,6 +5938,24 @@ fn main() i32 {
     assert(p.run_bin_env("SC_LEAK_CHECK=fatal ").ok());
 }
 
+// A wasm C tree carries its C library (`std::rt::libc`, `std::rt::libm`), whose functions define the C
+// functions a C compiler may make of a loop or of another call: each has the `no_builtin` attribute, so the
+// tree builds with its `__cflags` alone; the program's own unit has none.
+@test
+fn wasm_c_library_functions_take_no_builtin() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    p.mkfile("src/main.spc", "fn main() i32 {\n    println(\"{}\", 3);\n    return 0;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --target=wasm --emit-c").ok());
+    for f in ["std/rt/libc.c", "std/rt/libm.c"] {
+        let c = cli::read_text(format("{}/build/debug/raw/{}", root, f).as_str());
+        assert(c.contains("no_builtin))"), f);
+    }
+    let own = cli::read_text(format("{}/build/debug/raw/main.c", root).as_str());
+    assert(own.len() != 0 && !own.contains("no_builtin"), "the program's unit");
+}
+
 // A small program's C tree compiles its module, instance and registry units as one unit: `__sc_unity.c`
 // includes them, and `__units` names it alone (no member of it).
 @test

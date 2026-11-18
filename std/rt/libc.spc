@@ -16,9 +16,9 @@
 // Every definition has the C type its wasi-libc header declares: the emitted C includes those headers. The
 // standard streams are objects the headers declare `const`, which a Super-C definition cannot be: the
 // runtime header (`src/emit/rt_h.spc`) turns the names `stdin`, `stdout` and `stderr` into calls of
-// `sc_stdio_stream`, and `CLOCK_REALTIME` and `CLOCK_MONOTONIC` into tags `clock_gettime` reads. The C units of this module and of
-// `std::rt::libm` compile with `-fno-builtin` (`loader::libc_unit`): the C compiler must not turn a copy
-// loop in `memcpy` into a call of `memcpy`. The module imports no module, for the same reason as the
+// `sc_stdio_stream`, and `CLOCK_REALTIME` and `CLOCK_MONOTONIC` into tags `clock_gettime` reads. The C functions of this module and of
+// `std::rt::libm` have the `no_builtin` attribute in the emitted C: the C compiler must not turn a copy
+// loop in `memmove` into a call of `memmove`. The module imports no module, for the same reason as the
 // runtime's.
 
 // ---- WASI ------------------------------------------------------------------------------------------------

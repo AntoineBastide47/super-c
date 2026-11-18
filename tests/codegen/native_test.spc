@@ -21091,3 +21091,310 @@ int main(void) {
 )";
     assert_eq(run_x64_feature(lir, drv, "avx2", 0), 0);
 }
+
+// x86-64 with AVX2 computes these in registers: a comparison of 32-byte vectors into a bitmask (the lane
+// masks, then VMOVMSKPS, VMOVMSKPD or VPMOVMSKB), the halves of a 32-byte vector and two halves joined
+// (VEXTRACTF128, VINSERTF128), an access through a pointer under a constant mask of the first lanes
+// (VBLENDPS with the fallback; the store from the register's parts), an unchecked gather of every lane
+// (VGATHERDPS, VPGATHERQQ: three in the object, none in the baseline one) and a sum of bytes (PSADBW).
+// Every target gives the C results.
+@test
+fn vector_masks_halves_and_masked_accesses_run() {
+    let lir = M"(lir ptr 8
+sym @bits fn global
+sym @halves fn global
+sym @front fn global
+sym @gath fn global
+sym @bsum fn global
+fn @bits
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8f32 v0 align 0
+  v4 = load.v8f32 v1 align 0
+  v5 = vop.gt.i8 (v3, v4)
+  v6 = zext.i32 v5
+  store v6, v2 align 2
+  v7 = load.v32i8 v0 align 0
+  v8 = load.v32i8 v1 align 0
+  v9 = vop.eq.i32 (v7, v8)
+  store v9, v2+4 align 2
+  v10 = load.v16i16 v0 align 0
+  v11 = load.v16i16 v1 align 0
+  v12 = vop.lt.s.i16 (v10, v11)
+  v13 = zext.i32 v12
+  store v13, v2+8 align 2
+  v14 = load.v4i64 v0 align 0
+  v15 = load.v4i64 v1 align 0
+  v16 = vop.ge.i8 (v14, v15)
+  v17 = zext.i32 v16
+  store v17, v2+12 align 2
+  ret
+fn @halves
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i32 v0 align 0
+  v3 = vop.low_half.v4i32 (v2)
+  v4 = vop.high_half.v4i32 (v2)
+  v5 = vop.concat.v8i32 (v4, v3)
+  store v5, v1 align 0
+  v6 = add.v4i32 v3, v4
+  store v6, v1+32 align 0
+  ret
+fn @front
+  sig (ptr, ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr, v4: ptr):
+  v5 = load.v8f32 v2 align 0
+  v6 = iconst.i8 31
+  v7 = vop.load_masked_ptr.v8f32 (v0, v6, v5)
+  v8 = fadd.v8f32 v7, v7
+  store v8, v1 align 0
+  v9 = iconst.i8 127
+  vop.store_masked_ptr (v3, v9, v8)
+  v10 = load.v4f32 v2 align 0
+  v11 = iconst.i8 7
+  v12 = vop.load_masked_ptr.v4f32 (v0, v11, v10)
+  store v12, v1+32 align 0
+  v13 = iconst.i8 1
+  v14 = vop.load_masked_ptr.v4f32 (v0, v13, v10)
+  store v14, v1+48 align 0
+  v15 = iconst.i8 3
+  v16 = vop.load_masked_ptr.v4f32 (v0, v15, v10)
+  store v16, v1+64 align 0
+  vop.store_masked_ptr (v4, v11, v16)
+  ret
+fn @gath
+  sig (ptr, ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr, v3: ptr):
+  v4 = load.v8i32 v1 align 0
+  v5 = iconst.i8 -1
+  v6 = load.v8f32 v2 align 0
+  v7 = vop.gather_unchecked.v8f32 (v0, v4, v5, v6)
+  store v7, v2 align 0
+  v8 = load.v4i32 v1+32 align 0
+  v9 = iconst.i8 15
+  v10 = load.v4f32 v2+32 align 0
+  v11 = vop.gather_unchecked.v4f32 (v0, v8, v9, v10)
+  store v11, v2+32 align 0
+  v12 = load.v4i64 v1+48 align 0
+  v13 = load.v4i64 v2+48 align 0
+  v14 = vop.gather_unchecked.v4i64 (v3, v12, v9, v13)
+  store v14, v2+48 align 0
+  ret
+fn @bsum
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = vop.reduce_add.i8 (v2)
+  v4 = zext.i32 v3
+  store v4, v1 align 2
+  v5 = load.v32i8 v0 align 0
+  v6 = vop.reduce_add.i8 (v5)
+  v7 = zext.i32 v6
+  store v7, v1+4 align 2
+  ret
+)";
+    let mut gathers: [u32; 2] = [0; 2];
+    for wide in 0..2usize {
+        let mut obj = Vector::<u8>::new();
+        assert(
+            object_of(
+                lir,
+                tgt::axis_index("linux", false),
+                tgt::axis_index("x86_64", true),
+                wide as u32 * WIDE,
+                &mut obj,
+            ),
+            "the object",
+        );
+        // VEX map 0F38, opcodes 90 to 93: the gathers.
+        for i in 0..obj.len() - 4 {
+            gathers[wide] += (obj[i] == 0xC4 && (obj[i + 1] & 0x1F) == 2 && obj[i + 3] >= 0x90 && obj[i + 3] <= 0x93) as u32;
+        }
+    }
+    assert_eq(gathers[0], 0);
+    assert_eq(gathers[1], 3);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void bits(const void *, const void *, uint32_t *);
+void halves(const int32_t *, int32_t *);
+void front(const float *, float *, const float *, float *, float *);
+void gath(const void *, const void *, void *, const void *);
+void bsum(const uint8_t *, uint32_t *);
+struct slice { const void *p; uint64_t n; };
+int main(void) {
+  uint8_t a[32], b[32];
+  for (int k = 0; k < 32; k++) { a[k] = (uint8_t)(k * 37 + 11); b[k] = k % 3 ? (uint8_t)(k * 29 + 5) : a[k]; }
+  for (int k = 28; k < 32; k++) b[k] = a[k];
+  b[31] ^= 0x80;
+  uint32_t m[4], w[4] = {0, 0, 0, 0};
+  bits(a, b, m);
+  float fa[8], fb[8];
+  int16_t sa[16], sb[16];
+  uint64_t qa[4], qb[4];
+  memcpy(fa, a, 32); memcpy(fb, b, 32);
+  memcpy(sa, a, 32); memcpy(sb, b, 32);
+  memcpy(qa, a, 32); memcpy(qb, b, 32);
+  for (int k = 0; k < 8; k++) w[0] |= (uint32_t)(fa[k] > fb[k]) << k;
+  for (int k = 0; k < 32; k++) w[1] |= (uint32_t)(a[k] == b[k]) << k;
+  for (int k = 0; k < 16; k++) w[2] |= (uint32_t)(sa[k] < sb[k]) << k;
+  for (int k = 0; k < 4; k++) w[3] |= (uint32_t)(qa[k] >= qb[k]) << k;
+  for (int k = 0; k < 4; k++) if (m[k] != w[k]) return 1 + k;
+  int32_t h[8], ho[12];
+  for (int k = 0; k < 8; k++) h[k] = 100 + 7 * k;
+  halves(h, ho);
+  for (int k = 0; k < 4; k++) if (ho[k] != h[4 + k] || ho[4 + k] != h[k] || ho[8 + k] != h[k] + h[4 + k]) return 10 + k;
+  float in[16], fall[8], o[20], o2[8], o3[4];
+  for (int k = 0; k < 16; k++) in[k] = k + 1;
+  for (int k = 0; k < 8; k++) { fall[k] = -(k + 1); o2[k] = 100 + k; }
+  for (int k = 0; k < 4; k++) o3[k] = 200 + k;
+  front(in, o, fall, o2, o3);
+  for (int k = 0; k < 8; k++) if (o[k] != 2 * (k < 5 ? in[k] : fall[k])) return 20 + k;
+  for (int k = 0; k < 8; k++) if (o2[k] != (k < 7 ? o[k] : 107)) return 30 + k;
+  for (int k = 0; k < 4; k++) {
+    if (o[8 + k] != (k < 3 ? in[k] : fall[k]) || o[12 + k] != (k < 1 ? in[k] : fall[k])) return 40 + k;
+    if (o[16 + k] != (k < 2 ? in[k] : fall[k]) || o3[k] != (k < 3 ? o[16 + k] : 203)) return 50 + k;
+  }
+  float tab[64];
+  int64_t tab8[64];
+  for (int k = 0; k < 64; k++) { tab[k] = 3 * k + 0.5f; tab8[k] = 1000 - 9 * k; }
+  struct slice st = {tab, 64}, s8 = {tab8, 64};
+  struct { uint32_t i[12]; uint64_t q[4]; } ix;
+  for (int k = 0; k < 12; k++) ix.i[k] = (uint32_t)(k * 23 + 5) % 64;
+  for (int k = 0; k < 4; k++) ix.q[k] = (uint64_t)(61 - 17 * k);
+  struct { float f[12]; int64_t q[4]; } go;
+  memset(&go, 0, sizeof go);
+  gath(&st, &ix, &go, &s8);
+  for (int k = 0; k < 12; k++) if (go.f[k] != tab[ix.i[k]]) return 60 + k;
+  for (int k = 0; k < 4; k++) if (go.q[k] != tab8[ix.q[k]]) return 80 + k;
+  uint32_t bs[2], s16 = 0, s32 = 0;
+  bsum(a, bs);
+  for (int k = 0; k < 32; k++) { s32 += a[k]; if (k < 16) s16 += a[k]; }
+  return bs[0] != (s16 & 255) || bs[1] != (s32 & 255) ? 90 : 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}
+
+// x86-64: a vector sum that commutes writes over the loop's accumulator whichever operand it is: `@acc`'s
+// sums take the load first and the accumulator second, and its loop holds no move between vector
+// registers (`movaps`, `movdqa`, `movdqu`, or their VEX forms). It gives the C result.
+@test
+fn x64_vector_accumulators_take_either_operand() {
+    let lir = M"(lir ptr 8
+sym @acc fn global
+fn @acc
+  sig (ptr, i64) -> i32
+b0(v0: ptr, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 8
+  v4 = load.v4i32 v0 align 2
+  v5 = load.v4i32 v0+16 align 2
+  jmp b1(v2, v4, v5)
+b1(v6: i64, v7: v4i32, v8: v4i32):
+  v9 = ptradd v0, v6 * 4
+  v10 = load.v4i32 v9 align 2
+  v11 = add.v4i32 v10, v7
+  v12 = load.v4i32 v9+16 align 2
+  v13 = add.v4i32 v12, v8
+  v14 = add.i64 v6, v3
+  v15 = icmp.ult v14, v1
+  br v15, b1(v14, v11, v13), b2
+b2:
+  v16 = add.v4i32 v13, v11
+  v17 = vop.reduce_add.i32 (v16)
+  ret v17
+)";
+    for wide in 0..2u32 {
+        let mut obj = Vector::<u8>::new();
+        assert(
+            object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), wide * WIDE, &mut obj),
+            "the object",
+        );
+        let mut moves: u32 = 0;
+        for i in 0..obj.len() - 3 {
+            let reg = obj[i + 2] >= 0xC0;
+            moves += (obj[i] == 0x0F && (obj[i + 1] == 0x28 || obj[i + 1] == 0x6F) && reg) as u32;
+            moves += (obj[i] == 0xC5 && (obj[i + 2] == 0x28 || obj[i + 2] == 0x6F) && obj[i + 3] >= 0xC0) as u32;
+        }
+        assert_eq(moves, 0);
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int32_t acc(const int32_t *, int64_t);
+int main(void) {
+  static int32_t a[40];
+  int32_t want = 0;
+  for (int i = 0; i < 40; i++) a[i] = (i * 37) % 23 - 11;
+  for (int i = 0; i < 8; i++) want += a[i];
+  for (int i = 0; i < 40; i++) want += a[i];
+  return acc(a, 40) != want;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}
+
+// Microsoft x64: a callee keeps the low 16 bytes of xmm6..xmm15 only, and an AVX body zeroes the upper
+// halves before each call (VZEROUPPER). A 32-byte value that lives across a rare block's call in one of
+// those registers is stored whole before the call and loaded after it (VMOVDQU of a ymm register at the
+// stack pointer). `@keep` gives the C result on the path with the call and on the path without it.
+@test
+fn wide_vectors_survive_a_rare_blocks_call() {
+    let lir = M"(lir ptr 8
+sym @ext fn global
+sym @keep fn global
+fn @keep
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = load.v8f32 v0 align 0
+  v4 = fadd.v8f32 v3, v3
+  v5 = iconst.i64 0
+  v6 = icmp.ne v2, v5
+  br v6, b1, b2
+b1: unlikely
+  v7 = call.i64 @ext(v2) : (i64) -> i64
+  jmp b2
+b2:
+  v8 = fadd.v8f32 v4, v3
+  store v8, v1 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("windows", false), tgt::axis_index("x86_64", true), WIDE, &mut obj),
+        "the Microsoft x64 object",
+    );
+    // VEX.256.F3.0F 7F (a store) and 6F (a load) with a base of rsp.
+    let mut saves: u32 = 0;
+    let mut loads: u32 = 0;
+    for i in 0..obj.len() - 5 {
+        let ymm_sp = obj[i] == 0xC5 && (obj[i + 1] & 0x7F) == 0x7E && (obj[i + 3] & 0x07) == 4 && obj[i + 4] == 0x24;
+        saves += (ymm_sp && obj[i + 2] == 0x7F) as u32;
+        loads += (ymm_sp && obj[i + 2] == 0x6F) as u32;
+    }
+    assert(saves != 0 && loads != 0, "a ymm register saved around the call");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(long long ext(long long x) { return x + 1; }
+void keep(const float *, float *, long long);
+int main(void) {
+  float in[8], o[8];
+  for (int k = 0; k < 8; k++) in[k] = k + 1;
+  for (int call = 0; call < 2; call++) {
+    for (int k = 0; k < 8; k++) o[k] = 0;
+    keep(in, o, call);
+    for (int k = 0; k < 8; k++) if (o[k] != 3 * in[k]) return 1 + 8 * call + k;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}

@@ -5935,8 +5935,10 @@ data @x size 256 align 4 bytes 0000000000001442000094420000204100003c420000a8420
 
 // An unchecked gather of constant lanes loads each active lane's element itself (`opt` `gather_lanes`):
 // inserted lane by lane where the target inserts lanes in registers, else interleaved from splats a chunk
-// of 16 bytes at a time (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Each target form
-// gives the evaluator's values.
+// of 16 bytes at a time (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Where the generator
+// gathers every lane of a register in one instruction (`Package.gather_bytes`: x86-64 in an AVX2 body), the
+// gather of all 8 lanes stays whole and the gather of some lanes still loads each. Each target form gives
+// the evaluator's values.
 @test
 fn unchecked_gathers_of_constant_lanes_load_each_lane() {
     let src = M"(lir ptr 8
@@ -6005,6 +6007,62 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
             let args: []u64 = [n];
             same_outcome(&before, &after, "g", args, run_value(&before, "g", args), false);
         }
+    }
+    let mut whole = lparse::parse(src, &mut err).unwrap();
+    whole.cpu.vector = 32;
+    whole.vops = VOPS_ALL;
+    whole.lane_insert = false;
+    whole.gather_bytes = 32;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut whole, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+    let t = text_of(&whole, "g");
+    assert(t.contains("gather_unchecked.v8i32") && !t.contains("gather_unchecked.v4i32"), t.as_str());
+    for n in [0u64, 5, 1000] {
+        let args: []u64 = [n];
+        same_outcome(&before, &whole, "g", args, run_value(&before, "g", args), false);
+    }
+}
+
+// A call of an intrinsic that is one lane-wise operation on whole vectors (`intrin::arith_form`: x86's
+// `_mm_add_ps`, `_mm_add_epi32`) becomes that operation, on the lanes its name gives (casts around it when
+// the vector type has other lanes), so the optimizer and the generator's operand forms see it; another
+// intrinsic stays a call, and so does each without the target's instruction set.
+@test
+fn lane_wise_intrinsic_calls_become_vector_operations() {
+    let src = M"(lir ptr 8
+sym @_mm_add_ps fn global
+sym @_mm_add_epi32 fn global
+sym @_mm_min_ps fn global
+sym @f fn global
+fn @f
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v0 align 0
+  v3 = load.v4f32 v1 align 0
+  v4 = call.v4f32 @_mm_add_ps(v2, v3) : (v4f32, v4f32) -> v4f32
+  v5 = call.v4f32 @_mm_min_ps(v4, v3) : (v4f32, v4f32) -> v4f32
+  store v5, v0 align 0
+  v6 = load.v2i64 v0+16 align 0
+  v7 = load.v2i64 v1+16 align 0
+  v8 = call.v2i64 @_mm_add_epi32(v6, v7) : (v2i64, v2i64) -> v2i64
+  store v8, v0+16 align 0
+  ret
+)";
+    let mut err = String::new();
+    for isa in ["x86_64", ""] {
+        let mut after = lparse::parse(src, &mut err).unwrap();
+        after.isa = isa;
+        let none = Vector::<bool>::new();
+        lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+        let mut v = verify::Verifier::new();
+        let fb = after.syms[after.find_symbol("f") as usize].def;
+        assert(v.check(&after, "f", &after.bodies[fb as usize]), v.err.as_str());
+        let t = text_of(&after, "f");
+        let ops = t.contains("fadd.v4f32") && t.contains("add.v4i32") && !t.contains("@_mm_add_ps(") && !t.contains(
+            "@_mm_add_epi32(",
+        );
+        assert_eq(ops, isa.len() != 0);
+        assert(t.contains("@_mm_min_ps("), t.as_str());
     }
 }
 

@@ -1845,7 +1845,7 @@ pub(package) struct CemitOut {
     pub(package) inst_incs: Vector<String>,
     /// Per module: its TU, or its instance unit, includes a scoped extern header, directly or through
     /// a definition header (`cemit_extern_includes`), or belongs to wasm's C library
-    /// (`loader::libc_unit`): the unit compiles alone (`pack_plan`).
+    /// (`loader::Package::is_libc`): the unit compiles alone (`pack_plan`).
     pub(package) tu_x: Vector<bool>,
     pub(package) inst_x: Vector<bool>,
     /// The registry TU includes a scoped extern header: it compiles alone too (`pack_plan`).
@@ -1957,7 +1957,7 @@ extend CemitOut {
 
 // The C attribute prefix of fn `nid` (`inline __attribute__((always_inline)) ` etc.), mirroring
 // the established emitter: naked (+noinline), inline/always_inline/noinline, cold (+noinline unless
-// spelled), used/unused, section("name").
+// spelled), used/unused, section("name"), and `no_builtin` for a function of wasm's C library.
 fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, fs: cf::CpuFeatureSet, out: &mut String) {
     let a = unsafe &*p.module_ast_const(m);
     let naked = (a.unsafe_claims(nid) & UNSAFE_NAKED) != 0;
@@ -2045,6 +2045,14 @@ fn cemit_fn_attrs(p: &loader::Package, m: ModuleId, nid: NodeId, fs: cf::CpuFeat
             g.push_str(", ");
         }
         g.push_string(&ta);
+    }
+    // wasm's C library: the C compiler must not turn a loop of a function into a call of the C function
+    // it defines (a copy loop in `memmove`), nor a call into another's.
+    if p.is_libc(m) {
+        if g.len() != 0 {
+            g.push_str(", ");
+        }
+        g.push_str("no_builtin");
     }
     if g.len() != 0 {
         out.push_str("__attribute__((");
@@ -9647,7 +9655,7 @@ fn cemit_assemble(
     }
     let xr = x_reach(nx, &ddeps);
     for t in 0..n {
-        // wasm's C library compiles with its own flags (`loader::libc_unit`).
+        // wasm's C library is a unit of its own (`loader::Package::is_libc`).
         let lc = p.is_libc(t as i32);
         o.tu_x.set(t, lc || x_any(&xr, &tu_dv[t]));
         o.inst_x.set(t, lc || x_any(&xr, &inst_dv[t]));

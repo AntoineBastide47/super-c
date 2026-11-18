@@ -327,14 +327,23 @@ jobs:
           raw=$(dirname "$(find build/ctree -name __units | head -n 1)")
           sh ci/cc_tree.sh "$raw" "build/bench-clang$x" -O3
           # The released compiler (v0.17.26: run-time copies that mix the legacy SSE encoding with ymm
-          # registers) builds the same bench, for a comparison on this runner.
-          if [ "${{ matrix.target }}" = linux ]; then
-            mkdir -p old
-            gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-linux-x86_64.tar.gz -D old
-            tar xzf old/super-c-linux-x86_64.tar.gz -C old
-            od=$PWD/old/super-c-linux-x86_64
-            if SC_STD_DIR="$od/std" "$od/super-c" bench --no-run --filter=simd_baseline; then
-              cp build/bench-bin build/bench-old
+          # registers) builds that release's bench from that release's tree, for a comparison on this
+          # runner.
+          if [ "${{ matrix.target }}" = linux ] || [ "${{ matrix.target }}" = windows ]; then
+            mkdir -p old oldw
+            if [ "${{ matrix.target }}" = linux ]; then
+              gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-linux-x86_64.tar.gz -D old
+              tar xzf old/super-c-linux-x86_64.tar.gz -C old
+              od=$PWD/old/super-c-linux-x86_64
+            else
+              gh release download v0.17.26 -R "${{ github.repository }}" -p super-c-windows-x86_64.zip -D old
+              unzip -q old/super-c-windows-x86_64.zip -d old
+              od=$PWD/old/super-c-windows-x86_64
+            fi
+            git fetch --depth 1 origin refs/tags/v0.17.26:refs/tags/v0.17.26
+            git archive v0.17.26 | tar -x -C oldw
+            if (cd oldw && awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f" && sh bench/simd_baseline/kernels.sh && "$od/super-c$x" bench --no-run --filter=simd_baseline); then
+              cp "oldw/build/bench-bin$x" "build/bench-old$x"
             fi
           fi
           for k in 1 2 3 4 5; do
@@ -343,8 +352,8 @@ jobs:
             if [ "${{ matrix.target }}" != linux_arm64 ]; then
               SC_SIMD_LEVEL=0 "build/bench-nat$x" > "timing/base-r$k.txt" 2>&1 || true
             fi
-            if [ -x build/bench-old ]; then
-              build/bench-old > "timing/old-r$k.txt" 2>&1 || true
+            if [ -x "build/bench-old$x" ]; then
+              "build/bench-old$x" > "timing/old-r$k.txt" 2>&1 || true
             fi
           done
           grep -c '^simd' timing/*.txt

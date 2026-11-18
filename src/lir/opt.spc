@@ -12023,9 +12023,9 @@ extend Opt {
     // Unchecked gather `t` (instruction `i` of block `k`; `SIMD_GATHER_UNCHECKED` of a slice's address, an
     // index vector, a constant mask and a fallback vector): each active lane a load of its element, at the
     // slice's pointer plus its index zero-extended (the caller keeps it in bounds), inserted into the
-    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); every backend
+    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); a backend
     // loads a gather's lanes one by one, and the slice's pointer, the index lanes and the addresses are then
-    // the optimizer's values. Whether it did.
+    // the optimizer's values. Not where the generator gathers every lane in one instruction. Whether it did.
     fn gather_lanes(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if code != core::OP_SIMD + core::SIMD_GATHER_UNCHECKED as u32 || t.b != 4 || t.c != VNONE || !is_vec(t.ty) {
@@ -12044,6 +12044,16 @@ extend Opt {
         }
         let m = mb.unwrap() & ~0u64 >> (64 - n) as u64;
         if m == 0 {
+            return false;
+        }
+        // The generator gathers every lane of a register in one instruction (`Package.gather_bytes`): 4- or
+        // 8-byte lanes, the indexes of their width, in whole registers of at least 16 bytes.
+        let vb = pk.cpu_of(b).vector;
+        let nb = n * lb;
+        if vb != 0 && vb == pk.gather_bytes && m == ~0u64 >> (64 - n) as u64 && (lb == 4 || lb == 8) && type_bytes(
+            it,
+            pk.ptr_bytes,
+        ) == lb && nb >= 16 && nb % vb.min(nb) == 0 {
             return false;
         }
         let pi = int_type(pk.ptr_bytes);

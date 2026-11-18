@@ -2761,7 +2761,7 @@ extend Package {
     }
 
     /// Whether module `m` is wasm's C library (`std::rt::libc` or `std::rt::libm`): its units compile
-    /// alone, with `-fno-builtin` (`libc_unit`).
+    /// alone, and each of its C functions has the `no_builtin` attribute (`cemit_fn_attrs`).
     pub(package) const fn is_libc(self: &Self, m: i32) bool {
         return m >= 0 && (m == self.rt_libc || m == self.rt_libm);
     }
