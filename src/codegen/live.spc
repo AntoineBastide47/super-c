@@ -5531,6 +5531,14 @@ extend Live {
         if t.op == O_CALL && l as usize < self.cover.len() && self.cover[l as usize] != NONE {
             return n == 1 && self.seen(b.pool[(t.c + self.cover[l as usize]) as usize]) == v;
         }
+        // BLSR, BLSMSK or BLSI (`FOLD_BLS`) reads its one source, `v` and the folded `v - 1` or `-v`, before
+        // it writes its result.
+        if self.three && (t.op == O_AND || t.op == O_XOR) {
+            let (kind, s, xv) = bls_parts(b, t);
+            if kind != 0 && self.pfold[s as usize] && self.seen(xv) == v {
+                return true;
+            }
+        }
         return n == 1 && self.seen(t.a) == v && over_inst(b, t) || self.three && three_op(t) && (!self.two || n == 1 && self.two_op(
             b,
             l,

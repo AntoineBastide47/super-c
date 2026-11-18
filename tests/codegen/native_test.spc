@@ -1903,6 +1903,70 @@ int main(void) {
     );
 }
 
+// A loop that clears the lowest set bit (`w & (w - 1)`, BLSR) keeps the value in the register the loop
+// carries it in and branches on BLSR's zero flag: one BLSR whose source is its destination, and the one
+// `test` of the entry's check, no other. The counts it computes are the bits set.
+@test
+fn a_cleared_lowest_bit_stays_in_its_register() {
+    let lir = M"(lir ptr 8
+sym @ones fn global
+fn @ones
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = icmp.eq v0, v1
+  br v2, b2(v1), b1(v0, v1)
+b1(v3: i64, v4: i64):
+  v5 = iconst.i64 1
+  v6 = add.i64 v4, v5
+  v7 = sub.i64 v3, v5
+  v8 = and.i64 v3, v7
+  v9 = iconst.i64 0
+  v10 = icmp.ne v8, v9
+  br v10, b1(v8, v6), b2(v6)
+b2(v11: i64):
+  ret v11
+)";
+    let mut o = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), BMI, &mut o), "the object");
+    let (at, size) = elf_text(&o);
+    let mut blsr: u32 = 0;
+    let mut same: u32 = 0;
+    let mut tests: u32 = 0;
+    for k in at..at + size {
+        // BLSR r64: VEX C4, map 0F38, W1 with the destination in vvvv, F3 /1.
+        if k + 4 < at + size && o[k] == 0xC4 && (o[k + 1] & 0x1F) == 2 && (o[k + 2] & 0x83) == 0x80 && o[k + 3] == 0xF3 && (o[k + 4] & 0xF8) == 0xC8 {
+            blsr += 1;
+            let dst = 15 - (o[k + 2] >> 3 & 15);
+            let src = o[k + 4] & 7 | (o[k + 1] >> 5 & 1 ^ 1) << 3;
+            same += (dst == src) as u32;
+        }
+        // TEST r64, r64 of one register: REX.W (and .R, .B alike), 85, mod 11 with reg = rm.
+        if k + 2 < at + size && (o[k] & 0xFA) == 0x48 && (o[k] >> 2 & 1) == (o[k] & 1) && o[k + 1] == 0x85 && o[k + 2] >> 6 == 3 && (o[k + 2] >> 3 & 7) == (o[k + 2] & 7) {
+            tests += 1;
+        }
+    }
+    assert_eq(blsr, 1);
+    assert_eq(same, 1);
+    assert_eq(tests, 1);
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+int64_t ones(int64_t);
+int main(void) {
+  int64_t xs[5] = {0, 1, 0x50, -1, 0x123456789ABCDEF0};
+  int64_t want[5] = {0, 1, 2, 64, 32};
+  for (int i = 0; i < 5; i++) {
+    if (ones(xs[i]) != want[i]) return 1 + i;
+  }
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_bmi(lir, drv), 0);
+}
+
 // Dot products (`vdot`) of signed and unsigned bytes into 4-byte lanes, of signed 2-byte lanes into 4-byte
 // ones and of unsigned 2-byte lanes into 8-byte ones, their products summed in runs over the accumulator:
 // arm64's SDOT and UDOT with FEAT_DotProd, x86-64's PMADDWD, wasm's `i32x4.dot_i16x8_s`, each lane's

@@ -5945,12 +5945,17 @@ extend Gen {
         // BMI1: `x & (x - 1)` BLSR, `x ^ (x - 1)` BLSMSK, `x & -x` BLSI with the inner value folded
         // (`lv::FOLD_BLS`); `!a & b` ANDN with the inversion folded (`lv::FOLD_ANDN`). The 32-bit forms for
         // narrower types: the bits above are no part of the value.
+        // The result takes the source's register where a two-operand form would (`def_over`: the source's
+        // last read, a loop's step), with no copy; ZF and SF follow the result, as after `and`.
         if self.cpu.bmi1 && (op == O_AND || op == O_XOR) {
             let (kind, s, xv) = lv::bls_parts(self.cr.b(), t);
             if kind != 0 && self.folded(s) {
                 let rx = self.reg(xv);
-                let rd = self.def(i);
+                let rd = self.def_over(i, xv, rx);
                 self.c.bls(kind, sz.max(4), rd, rx);
+                if sz >= 4 {
+                    self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.cr.pos };
+                }
                 return true;
             }
             let nv = lv::not_side(self.cr.b(), &self.cr.lv.pfold, t);
@@ -5958,8 +5963,11 @@ extend Gen {
                 let other = ast::pick(t.a == nv, t.b, t.a);
                 let rn = self.reg(lv::inversion(self.cr.b(), nv));
                 let ro = self.reg(other);
-                let rd = self.def(i);
+                let rd = self.def_over(i, other, ro);
                 self.c.andn(sz.max(4), rd, rn, ro);
+                if sz >= 4 {
+                    self.zf = Zf { reg: rd, sz: sz, at: self.c.len(), pos: self.cr.pos };
+                }
                 return true;
             }
         }
