@@ -1673,7 +1673,13 @@ extend Opt {
         self.unr.vabsd = pk.vec_absd;
         let cpu = pk.cpu_of(b);
         self.unr.vbits = cpu.vec_bits;
-        self.unr.vpopcnt = cpu.popcnt;
+        // A run-time copy level that counts bits in one instruction (`Package.copy_flags`) runs on the
+        // machines that have it (every x86-64 processor since 2008): a count it gets stays scalar there.
+        let mut copy_pop = false;
+        for k in 0..pk.copy_flags.len() {
+            copy_pop = copy_pop || (pk.copy_flags[k] & CPU_POPCNT) != 0;
+        }
+        self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;

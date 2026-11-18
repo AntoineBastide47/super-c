@@ -3865,6 +3865,96 @@ fn x86_inserts_integer_lanes_with_sse41() {
     assert_eq(run_sse41(lir, drv), 0);
 }
 
+// A branch on two comparisons (`branch_conj`) whose edge passes more values than x86-64 has registers,
+// in a loop: the first comparison's operand takes a register of an edge argument (stored first, as a
+// plain branch's would), not none of the locked ones.
+@test
+fn a_branch_on_two_comparisons_passing_many_values_compiles_on_x86() {
+    let lir = M"(lir ptr 8
+sym @wide fn global
+fn @wide
+  sig (ptr, i64, i64) -> i64
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = iconst.i64 32
+  v4 = iconst.i64 8
+  v5 = iconst.i64 77
+  v6 = iconst.i64 1
+  jmp b1(v1)
+b1(v7: i64):
+  v8 = load.i64 v0+0 align 0
+  v9 = load.i64 v0+8 align 0
+  v10 = load.i64 v0+16 align 0
+  v11 = load.i64 v0+24 align 0
+  v12 = load.i64 v0+32 align 0
+  v13 = load.i64 v0+40 align 0
+  v14 = load.i64 v0+48 align 0
+  v15 = load.i64 v0+56 align 0
+  v16 = load.i64 v0+64 align 0
+  v17 = trunc.i32 v16
+  v18 = lshr.i64 v16, v3
+  v19 = trunc.i32 v18
+  v20 = trunc.i8 v8
+  v21 = lshr.i64 v8, v4
+  v22 = trunc.i16 v21
+  v23 = trunc.i32 v14
+  v24 = trunc.i32 v15
+  v25 = zext.i64 v17
+  v26 = zext.i64 v19
+  v27 = shl.i64 v26, v3
+  v28 = or.i64 v25, v27
+  v29 = icmp.eq v7, v2
+  v30 = icmp.eq v28, v5
+  v31 = and.i8 v29, v30
+  br v31, b2, b3(v8, v9, v10, v11, v12, v13, v14, v15, v17, v19, v20, v22, v23, v24, v9, v10, v11, v12, v13, v17, v19, v19)
+b2:
+  v32 = add.i64 v7, v6
+  v33 = icmp.ult v32, v5
+  br v33, b1(v32), b3(v8, v9, v10, v11, v12, v13, v14, v15, v17, v19, v20, v22, v23, v24, v9, v10, v11, v12, v13, v17, v19, v19)
+b3(v34: i64, v35: i64, v36: i64, v37: i64, v38: i64, v39: i64, v40: i64, v41: i64, v42: i32, v43: i32, v44: i8, v45: i16, v46: i32, v47: i32, v48: i64, v49: i64, v50: i64, v51: i64, v52: i64, v53: i32, v54: i32, v55: i32):
+  v56 = add.i64 v34, v35
+  v57 = add.i64 v56, v36
+  v58 = add.i64 v57, v37
+  v59 = add.i64 v58, v38
+  v60 = add.i64 v59, v39
+  v61 = add.i64 v60, v40
+  v62 = add.i64 v61, v41
+  v63 = zext.i64 v42
+  v64 = add.i64 v62, v63
+  v65 = zext.i64 v43
+  v66 = add.i64 v64, v65
+  v67 = zext.i64 v44
+  v68 = add.i64 v66, v67
+  v69 = zext.i64 v45
+  v70 = add.i64 v68, v69
+  v71 = zext.i64 v46
+  v72 = add.i64 v70, v71
+  v73 = zext.i64 v47
+  v74 = add.i64 v72, v73
+  v75 = add.i64 v74, v48
+  v76 = add.i64 v75, v49
+  v77 = add.i64 v76, v50
+  v78 = add.i64 v77, v51
+  v79 = add.i64 v78, v52
+  v80 = zext.i64 v53
+  v81 = add.i64 v79, v80
+  v82 = zext.i64 v54
+  v83 = add.i64 v81, v82
+  v84 = zext.i64 v55
+  v85 = add.i64 v83, v84
+  ret v85
+)";
+    let drv = "#include <stdint.h>\nint64_t wide(const uint64_t *, int64_t, int64_t);\nstatic uint64_t want(const uint64_t *m) {\n  uint64_t lo = (uint32_t)m[8], hi = (uint32_t)(m[8] >> 32), s = 0;\n  for (int q = 0; q < 8; q++) s += m[q];\n  for (int q = 1; q < 6; q++) s += m[q];\n  return s + 2 * lo + 3 * hi + (uint8_t)m[0] + (uint16_t)(m[0] >> 8) + (uint32_t)m[6] + (uint32_t)m[7];\n}\nint main(void) {\n  uint64_t m[9] = {0x8123456789ABCDEFu, 2, 3, 0xFFFFFFFFFFFFFFF0u, 5, 6, 0x1FFFFFFFFu, 8, 77};\n  if ((uint64_t)wide(m, 3, 3) != want(m)) return 1;\n  if ((uint64_t)wide(m, 3, 4) != want(m)) return 2;\n  m[8] = 0x500000004Du;\n  if ((uint64_t)wide(m, 9, 9) != want(m)) return 3;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj),
+        "the x86-64 object",
+    );
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // The C library's exact rounding, absolute value, minimum and maximum of f64 and f32, which arm64 expands
 // in place of the call (`frintm`, `frintp`, `frinta`, `frintz`, `fabs`, `fminnm`, `fmaxnm`) and x86-64 too
 // (SSE2's `andpd`, `minsd`, `maxsd`; SSE4.1's `roundsd`, `blendvpd`), equal the library's on signed zeros, halves, the

@@ -90,6 +90,8 @@ instruction in `COPY_GAIN` (8) of a loop, `place::loops_of` giving nested loops 
 most `COPY_SMALL` (64) instructions), as local `<name>.l<k>` with the level's flags (`Cpu::with_flags`)
 and `<name>.base`; `<name>` is a stub that compares the level byte `__sc_simd_lv` and branches to the
 highest copy it reaches. A naked body and one that reads the level byte (vector copies) get none. The
+loop vectorizer plans for a copy level's POPCNT: a bit count of lanes past one byte stays scalar, for
+the copy (x86-64 `bitvec_count_ones` as fast as with the feature built in). The
 registry's start-up (`simd_level_init`) sets the byte: from the detector where it is loaded, from
 `getauxval(AT_HWCAP)` and `(AT_HWCAP2)` on arm64 Linux, else from CPUID and XGETBV inline on x86-64.
 On the compiler: x86-64 37 copies, 1.50% of its code; arm64 132, 2.17%.

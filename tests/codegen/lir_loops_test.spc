@@ -10036,12 +10036,20 @@ fn bit_counts_and_byte_swaps_vectorize_where_the_target_has_them() {
     a3.cpu.vector = 16;
     a3.vops = VOPS_ALL;
     a3.cpu.vec_bits = 0x000700;
+    // One without the scalar count whose run-time copy level has it (`Package.copy_flags`): as `a1`, for
+    // the copy.
+    let mut a4 = lparse::parse(BITS, &mut err).unwrap();
+    a4.cpu.vector = 16;
+    a4.vops = VOPS_ALL;
+    a4.cpu.vec_bits = 0;
+    a4.copy_flags.push(CPU_POPCNT | CPU_LZCNT);
     let none = Vector::<bool>::new();
     lopt::optimize(&mut a, &none, lopt::Config { inline: il::SPEED, loops: four });
     lopt::optimize(&mut a0, &none, lopt::Config { inline: il::SPEED, loops: four });
     lopt::optimize(&mut a1, &none, lopt::Config { inline: il::SPEED, loops: four });
     lopt::optimize(&mut a2, &none, lopt::Config { inline: il::SPEED, loops: four });
     lopt::optimize(&mut a3, &none, lopt::Config { inline: il::SPEED, loops: four });
+    lopt::optimize(&mut a4, &none, lopt::Config { inline: il::SPEED, loops: four });
     let tl3 = text_of(&a3, "lz");
     assert(
         tl3.contains("vop.count_ones.v8i16") && tl3.contains("or.v8i16") && !tl3.contains("leading_zeros"),
@@ -10054,6 +10062,8 @@ fn bit_counts_and_byte_swaps_vectorize_where_the_target_has_them() {
     assert(tp.contains("lshr.v2i64") && tp.contains("lshr.v4i32") && !tp.contains("popcnt.v"), tp.as_str());
     let tp1 = text_of(&a1, "pop");
     assert(!tp1.contains("vop.") && tp1.contains("popcnt"), tp1.as_str());
+    let tp4 = text_of(&a4, "pop");
+    assert(!tp4.contains("vop.") && tp4.contains("popcnt"), tp4.as_str());
     let wants: [(str, str); 3] = [
         ("pop", "vop.count_ones.v4i32"),
         ("lz", "vop.leading_zeros.v8i16"),
@@ -10074,6 +10084,7 @@ fn bit_counts_and_byte_swaps_vectorize_where_the_target_has_them() {
         same_outcome(&b, &a1, "drive", args, want, false);
         same_outcome(&b, &a2, "drive", args, want, false);
         same_outcome(&b, &a3, "drive", args, want, false);
+        same_outcome(&b, &a4, "drive", args, want, false);
     }
 }
 

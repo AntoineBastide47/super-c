@@ -9896,6 +9896,21 @@ extend Gen {
         self.keep_flags = kf;
     }
 
+    // Whether branch `t`'s conditions read `v`: the branch's uses hold it more times than its edges pass it.
+    const fn cond_reads(self: &Self, v: Value, t: Inst) bool {
+        let b = self.cr.b();
+        let mut n: u32 = 0;
+        for k in 0..self.cr.uses.len() {
+            n += (self.cr.uses[k] == v) as u32;
+        }
+        for e in [t.b, t.c] {
+            for q in 0..b.edge_nargs(e) {
+                n -= (b.edge_arg(e, q) == v && n > 0) as u32;
+            }
+        }
+        return n > 0;
+    }
+
     // Branch `t` on an `and` or `or` of two comparisons (`lv::FOLD_BRCONJ`): the first compared, then a jump
     // to the edge it settles (the false one of an `and`, the true one of an `or`), then the second and
     // `branch2`. When that edge moves values or is late: both conditions set in bytes and combined, then
@@ -9907,10 +9922,13 @@ extend Gen {
         let and = c.op == O_AND;
         let e = ast::pick(and, t.c, t.b);
         // The second comparison's operands stay in their registers while the first one compares: their
-        // uses are counted at the branch already, so nothing else keeps them.
+        // uses are counted at the branch already, so nothing else keeps them. Not the edges' arguments
+        // (a value the uses hold no more times than the edges pass it), which the first comparison may
+        // evict as a plain branch's does: the eviction stores what the branch reads.
         for k in 0..self.cr.uses.len() {
-            let r = self.cr.va[self.cr.vx(self.cr.uses[k]) as usize].reg;
-            if r != NOREG {
+            let v = self.cr.uses[k];
+            let r = self.cr.va[self.cr.vx(v) as usize].reg;
+            if r != NOREG && self.cond_reads(v, t) {
                 self.cr.lock |= bit(r);
             }
         }

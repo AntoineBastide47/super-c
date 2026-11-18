@@ -438,8 +438,9 @@ pub(package) struct LoopOpt {
     pub(package) vabsd: u8,
     /// The lane sizes whose `clz`, `popcnt` and `bswap` the target computes in registers (`Package.vec_bits`).
     pub(package) vbits: u32,
-    /// The target counts a scalar's set bits in one instruction (`Package.popcnt`): a count of lanes past one
-    /// byte the vector registers do not compute stays scalar (`swar_count`).
+    /// The target, or a run-time copy level (`Package.copy_flags`), counts a scalar's set bits in one
+    /// instruction: a count of lanes past one byte the vector registers do not compute stays scalar
+    /// (`swar_count`).
     pub(package) vpopcnt: bool,
     /// The target looks up bytes by a vector of indices in registers (`Package.vtbl`): a count of lanes the
     /// vector registers do not compute is by a table of nibbles (`nibble_count`), where cheaper.
