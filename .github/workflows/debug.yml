@@ -228,7 +228,8 @@ jobs:
               for i in 0..m * k { a.push((i * 7 + 3) as i8); }
               for i in 0..k * n { b.push((i * 5 + 1) as i8); }
               for _ in 0..m * n { c.push(0); }
-              if stdlib::get_env("SKIP").is_none() {
+              let reps = stdlib::get_env("REPS").unwrap_or(String::from_str("1"));
+              for _ in 0..(reps.as_str().byte_at(0) - b'0') as usize {
                   matrix::mul_i8(&mut c, &a, &b, m, k, n);
               }
               println("{}x{}x{} c[1] {}", m, k, n, c[1]);
@@ -238,10 +239,13 @@ jobs:
           SPC
           ../super-c build main.spc --profile=release -o b
           for sh in 0 1 2; do
-            echo "== shape $sh: setup only, AMX, lanes"
-            SHAPE=$sh SKIP=1 ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
-            SHAPE=$sh ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
-            SHAPE=$sh SC_CPU_OFF=0x0800000000000000 ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+            echo "== shape $sh: setup only, one AMX call, two AMX calls"
+            for r in 0 1 2; do
+              SHAPE=$sh REPS=$r ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+            done
+            echo "== shape $sh: hottest blocks of two calls"
+            SHAPE=$sh REPS=2 ../sde/sde64 -spr -mix -top_blocks 60 -omix mix$sh.txt -- ./b > /dev/null 2>&1
+            awk '/BLOCK/{f=1} f' mix$sh.txt | grep -v -E '^\s*$' | head -1500 | sed "s/^/mix$sh /" || true
           done
 
   # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
