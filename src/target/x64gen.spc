@@ -3963,6 +3963,11 @@ extend Gen {
         } else {
             0
         };
+        // Microsoft x64 unwinds an over-aligned frame through a callee-saved register the body leaves alone
+        // (the prologue's frame register): r15 stays out of the allocation for it.
+        if self.win && self.max_align > 16 {
+            self.xfix &= ~bit(15);
+        }
         if self.cr.self_lay.unknown {
             return self.cr.refuse("the signature passes an aggregate whose C class is unknown");
         }

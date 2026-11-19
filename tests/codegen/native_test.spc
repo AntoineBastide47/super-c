@@ -164,6 +164,17 @@ fn run_v3(text: str, driver: str) i32 {
     return run_native_with(text, &d, V3_RT);
 }
 
+// A Microsoft x64 frame aligned past 16 bytes (a 64-byte slot) whose values across a call take more
+// registers than the callee-saved ones keeps one for the unwind information's frame register: r15 stays
+// out of the allocation (`x64gen`).
+@test
+fn an_over_aligned_windows_frame_keeps_a_frame_register() {
+    let lir = "lir ptr 8\nsym @f fn global\nsym @g fn global\nfn @f\n  sig (i64, ptr) -> i64\n  slot s0 size 64 align 6\nb0(v0: i64, v1: ptr):\n  v2 = slotaddr s0\n  store v0, v2 align 6\n  v3 = load.i64 v1+0 align 3\n  v4 = load.i64 v1+8 align 3\n  v5 = load.i64 v1+16 align 3\n  v6 = load.i64 v1+24 align 3\n  v7 = load.i64 v1+32 align 3\n  v8 = load.i64 v1+40 align 3\n  v9 = load.i64 v1+48 align 3\n  v10 = load.i64 v1+56 align 3\n  v11 = load.i64 v1+64 align 3\n  v12 = load.i64 v1+72 align 3\n  v13 = call.i64 @g(v2) : (ptr) -> i64\n  v14 = mul.i64 v13, v3\n  v15 = mul.i64 v14, v4\n  v16 = mul.i64 v15, v5\n  v17 = mul.i64 v16, v6\n  v18 = mul.i64 v17, v7\n  v19 = mul.i64 v18, v8\n  v20 = mul.i64 v19, v9\n  v21 = mul.i64 v20, v10\n  v22 = mul.i64 v21, v11\n  v23 = mul.i64 v22, v12\n  v24 = load.i64 v2 align 6\n  v25 = add.i64 v23, v24\n  ret v25\n";
+    let mut obj = Vector::<u8>::new();
+    let x64 = tgt::axis_index("x86_64", true);
+    assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
+}
+
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
 // SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
 // AVX-512 BW. 0 on another host.
