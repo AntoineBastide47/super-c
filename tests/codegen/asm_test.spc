@@ -2284,6 +2284,28 @@ fn x64_intrinsics_match_the_c_compiler() {
     x64_oracle(&text, &bytes, &ends);
 }
 
+// An intrinsic that computes from its arguments alone is pure; one that touches the tile registers or
+// their configuration (AMX) is not, so the optimizer neither removes nor reorders it (`intrin::pure`).
+@test
+fn tile_intrinsics_are_not_pure() {
+    assert(intrin::pure("x86_64", "_mm_add_epi32"), "_mm_add_epi32");
+    let tiles: []str = [
+        "_tile_loadconfig",
+        "_tile_storeconfig",
+        "_tile_release",
+        "_tile_loadd",
+        "_tile_stored",
+        "_tile_zero",
+        "_tile_dpbssd",
+        "_tile_dpbsud",
+        "_tile_dpbusd",
+        "_tile_dpbuud",
+    ];
+    for i in 0..tiles.len() {
+        assert(intrin::has("x86_64", tiles[i]) && !intrin::pure("x86_64", tiles[i]), tiles[i]);
+    }
+}
+
 // A row's constant arguments by index, of one digit or more, and their multiples (`intrin::expand`).
 @test
 fn row_immediates_expand_by_index() {

@@ -375,6 +375,52 @@ fn the_lowered_lir_names_its_facts() {
     );
 }
 
+// `simd::interleave_low` and `interleave_high` lower to the zips each backend has as one instruction
+// (`vziplo`, `vziphi`), and a `bitcast` between vectors of one size to the plain `bitcast`; a shuffle of
+// another index list stays a `shuffle`.
+@test(timeout = 300)
+fn interleaves_and_vector_bitcasts_lower_to_their_instructions() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+
+@noinline
+fn zips(a: simd::Simd<u8, 16>, b: simd::Simd<u8, 16>) simd::Simd<u32, 4> {
+    let lo = simd::interleave_low(a, b).bitcast::<u16, 8>();
+    let hi = simd::interleave_high(a, b).bitcast::<u16, 8>();
+    return simd::interleave_high(lo, hi).bitcast::<u32, 4>();
+}
+
+@noinline
+fn other(a: simd::Simd<u32, 4>, b: simd::Simd<u32, 4>) simd::Simd<u32, 4> {
+    return simd::shuffle(a, b, [1, 4, 2, 7]);
+}
+
+fn main() i32 {
+    let r = zips(simd::Simd::<u8, 16>::splat(1), simd::Simd::<u8, 16>::splat(2));
+    let s = other(simd::Simd::<u32, 4>::splat(3), simd::Simd::<u32, 4>::splat(4));
+    return (r[0] != 0x02010201 || s[1] != 4) as i32;
+}
+)",
+    );
+    let env = format("SC_LIR=1 SC_LIR_OPT=0 SC_LIR_TEXT={}/pkg.lir", p.dir());
+    let r = p.compile_flags_env("", "main.spc", &env);
+    assert(r.ok(), "the program builds");
+    let text = cli::read_text(format("{}/pkg.lir", p.dir()).as_str());
+    let z = body_of(&text, "main__zips");
+    assert(
+        z.contains("vziplo.v16i8") && z.contains("vziphi.v16i8") && z.contains("vziphi.v8i16") && z.contains(
+            "bitcast.v4i32",
+        ) && !z.contains("vop."),
+        z.as_str(),
+    );
+    assert(body_of(&text, "main__other").contains("vop.shuffle.v4i32"), text.as_str());
+}
+
 // The blocks of function `name` in LIR text `text` that have the `unlikely` mark.
 fn rare_blocks(text: &String, name: str) u32 {
     let body = body_of(text, name);

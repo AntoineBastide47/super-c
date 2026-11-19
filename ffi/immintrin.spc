@@ -2787,6 +2787,36 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm256_sha512rnds2_epi64(a: __m256i, b: __m256i, c: __m128i) __m256i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_loadconfig(config: *const void);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_storeconfig(config: *mut void);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_release();
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_loadd(dst: i32, base: *const void, stride: usize);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_stored(dst: i32, base: *mut void, stride: usize);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxTile])
+    pub fn _tile_zero(tile: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbssd(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbsud(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbusd(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
+    @target_feature([cpu::Feature::AmxInt8])
+    pub fn _tile_dpbuud(dst: i32, src0: i32, src1: i32);
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_shuffle_epi32(a: __m128i, b: i32) __m128i;

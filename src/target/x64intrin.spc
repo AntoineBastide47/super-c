@@ -8,7 +8,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 741] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 751] = [
     ("_andn_u32", "andnl %esi, %edi, %eax"),
     ("_andn_u64", "andnq %rsi, %rdi, %rax"),
     ("_bextr_u32", "movzbl %sil, %eax\nshll $8, %edx\norl %eax, %edx\nbextrl %edx, %edi, %eax"),
@@ -768,6 +768,16 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 741] = [
     ("_pdep_u64", "pdepq %rsi, %rdi, %rax"),
     ("_pext_u32", "pextl %esi, %edi, %eax"),
     ("_pext_u64", "pextq %rsi, %rdi, %rax"),
+    ("_tile_dpbssd", "tdpbssd %tmm@2, %tmm@1, %tmm@0"),
+    ("_tile_dpbsud", "tdpbsud %tmm@2, %tmm@1, %tmm@0"),
+    ("_tile_dpbusd", "tdpbusd %tmm@2, %tmm@1, %tmm@0"),
+    ("_tile_dpbuud", "tdpbuud %tmm@2, %tmm@1, %tmm@0"),
+    ("_tile_loadconfig", "ldtilecfg (%rdi)"),
+    ("_tile_loadd", "tileloadd (%rsi,%rdx), %tmm@0"),
+    ("_tile_release", "tilerelease"),
+    ("_tile_storeconfig", "sttilecfg (%rdi)"),
+    ("_tile_stored", "tilestored %tmm@0, (%rsi,%rdx)"),
+    ("_tile_zero", "tilezero %tmm@0"),
     ("fabs", "pcmpeqd %xmm1, %xmm1\npsrlq $1, %xmm1\nandpd %xmm1, %xmm0"),
     ("fabsf", "pcmpeqd %xmm1, %xmm1\npsrld $1, %xmm1\nandps %xmm1, %xmm0"),
     (

@@ -30,7 +30,7 @@ X86_FEAT = {
     'Fma': 'fma', 'Avx512f': 'avx512f', 'Avx512vl': 'avx512vl', 'Avx512bw': 'avx512bw', 'Avx512dq': 'avx512dq',
     'Avx512cd': 'avx512cd', 'Avx512vbmi': 'avx512vbmi', 'Avx512vbmi2': 'avx512vbmi2', 'Avx512vnni': 'avx512vnni',
     'Avx512bitalg': 'avx512bitalg', 'Avx512vpopcntdq': 'avx512vpopcntdq', 'Vaes': 'vaes', 'Gfni': 'gfni',
-    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2', 'Bmi1': 'bmi', 'Bmi2': 'bmi2', 'Sha': 'sha', 'Vpclmulqdq': 'vpclmulqdq', 'Sha512ni': 'sha512',
+    'Aesni': 'aes', 'Pclmulqdq': 'pclmul', 'Avx102': 'avx10.2', 'Bmi1': 'bmi', 'Bmi2': 'bmi2', 'Sha': 'sha', 'Vpclmulqdq': 'vpclmulqdq', 'Sha512ni': 'sha512', 'AmxTile': 'amx-tile', 'AmxInt8': 'amx-int8',
 }
 
 def parse_bindings():
@@ -246,7 +246,8 @@ def derive(b):
         found = False
         for r in range(1, len(ints) + 1):
             for combo in itertools.combinations(ints, r):
-                for vals in ([1] * r, [0] * r, [2] * r):
+                # Equal values, or distinct ones where the operands must differ (AMX's tiles).
+                for vals in ([1] * r, [0] * r, [2] * r, list(range(5, 5 + r))):
                     a2, e2 = compile_(wrapper(b, dict(zip(combo, vals))))
                     if a2 is not None:
                         imms = list(combo)
@@ -261,9 +262,15 @@ def derive(b):
     if not imms:
         lines, data = body_lines(asm)
         return {'name': b['name'], 'asm': lines, 'data': data, 'imms': []}
-    # One immediate at a time: the others at a fixed valid value.
+    # One immediate at a time: the others at a fixed valid value, all 1, or where the operands must differ
+    # (AMX's tiles) each its own (5, 6, ..), which the values tried for the one varied do not reach first.
     fixed = {}
+    distinct = {j: 5 + i for i, j in enumerate(imms)}
+    if len(imms) > 1 and compile_(wrapper(b, {j: 1 for j in imms}))[0] is None and compile_(wrapper(b, distinct))[0] is not None:
+        fixed = distinct
     for k in imms:
+        if fixed is distinct:
+            break
         for v in (1, 0, 2):
             cs = {j: 1 for j in imms}
             cs[k] = v

@@ -637,8 +637,9 @@ pub(package) fn lane_form(isa: str, name: str) u32 {
 
 // The mnemonics, or for x86-64 their prefixes, of instructions that access no memory operand but change or
 // read machine state beyond their operands: time stamps, random numbers, fences, system registers, hints,
-// traps, the stack, the implicit memory of `maskmovdqu`, the x87 and MMX state, cache maintenance.
-const IMPURE_X64: [str; 32] = [
+// traps, the stack, the implicit memory of `maskmovdqu`, the x87 and MMX state, cache maintenance, the
+// tile registers and their configuration (AMX).
+const IMPURE_X64: [str; 36] = [
     "rdtsc",
     "rdrand",
     "rdseed",
@@ -671,6 +672,10 @@ const IMPURE_X64: [str; 32] = [
     "mwait",
     "umonitor",
     "tpause",
+    "tile",
+    "ldtilecfg",
+    "sttilecfg",
+    "tdp",
 ];
 const IMPURE_A64: [str; 21] = [
     "mrs",
@@ -727,7 +732,7 @@ pub(package) const fn pure(isa: str, name0: str) bool {
         }
         let mn = t.slice(ms, i);
         if x64 {
-            for k in 0..32usize {
+            for k in 0..36usize {
                 if mn.starts_with(unsafe IMPURE_X64[k]) {
                     return false;
                 }

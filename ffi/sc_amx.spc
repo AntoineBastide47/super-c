@@ -1,11 +1,13 @@
 // AMX matrix kernels for std::simd::matrix: byte products into 32-bit sums on the tile registers
-// (AMX-INT8), a 32 x 32 block of the result per step of 64 of the inner dimension. The kernel is
-// module-level assembly; the Super-C entry points pack the operands and copy the result out. The caller
+// (AMX-INT8), a 32 x 32 block of the result per step of 64 of the inner dimension. The entry point packs
+// the operands, runs the kernel and copies the result out. The caller
 // has the tile state (`std::cpu::detect::request`). A kernel runs only where the CPU has AMX-INT8 (`cpu::Feature::AmxInt8`). Every
 // result equals the portable kernel's: element (i, j) is the sum over p of the products modulo 2^32
 // (`tdpbssd` and `tdpbusd` wrap). Prefer `std::simd::matrix`, which checks the shapes and chooses a
 // kernel by the CPU.
 import std::cpu;
+import std::simd;
+import immintrin;
 import stdlib;
 import string as cstring;
 
@@ -23,7 +25,7 @@ pub const fn sc_amx_built() i32 {
 /// the tile state (`std::cpu::detect::request(cpu::Feature::AmxInt8)`).
 @platform(linux)
 @arch(x86_64)
-@target_feature([cpu::Feature::AmxInt8])
+@target_feature([cpu::Feature::AmxTile, cpu::Feature::AmxInt8])
 pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k: usize, n: usize, ua: bool) i32 {
     // The extents padded: rows to the block's 32, columns to 32, the inner dimension to a tile row's 64.
     let mp = m + 31 & ~31usize;
@@ -78,10 +80,10 @@ pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k
         }
     }
     // Group g: rows 4g to 4g + 3 of `b` (0 past row k - 1), column j's four bytes in word g * np + j;
-    // the full groups' columns in sixteens by `sc_amx_pack_b`, the rest here.
+    // the full groups' columns in sixteens by `pack_b`, the rest here.
     let full = k / 4;
     let n16 = n & ~15usize;
-    sc_amx_pack_b(pb, b, full, n, np);
+    pack_b(pb, b, full, n, np);
     for g in 0..(k + 3) / 4 {
         let r = 4 * g;
         let b0 = b + r * n;
@@ -104,15 +106,15 @@ pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k
             pb[g * np + j] = w;
         }
     }
-    let mut job = Job { c: pc, a: pa, b: buf, mp: mp, np: np, kp: kp, ua: ua as usize, cfg: [0; 64] };
     // Palette 1; tiles 0 to 7 of 16 rows of 64 bytes (bytes 16 to 31: each tile's row bytes, two each;
     // bytes 48 to 55: its rows).
-    job.cfg[0] = 1;
+    let mut cfg: [u8; 64] = [0; 64];
+    cfg[0] = 1;
     for t in 0..8usize {
-        job.cfg[16 + 2 * t] = 64;
-        job.cfg[48 + t] = 16;
+        cfg[16 + 2 * t] = 64;
+        cfg[48 + t] = 16;
     }
-    sc_amx_i8_tiles(&mut job);
+    tiles(pc, pa, pb, mp, np, kp, ua, &cfg);
     if !c_in {
         for i in 0..m {
             cstring::memcpy(c + i * n, pc + i * np, n * 4);
@@ -129,184 +131,84 @@ pub unsafe fn sc_amx_mul_i8(_c: *mut i32, _a: *const u8, _b: *const u8, _m: usiz
     return -1;
 }
 
-// The kernel's operands (`sc_amx_i8_tiles`): the padded result, the packed operands, the padded extents,
-// 1 for unsigned bytes of `a`, and the tile configuration `ldtilecfg` reads.
+// Groups 0 to `groups - 1` of `b` (four rows of n bytes each), columns 0 to a multiple of 16, into words
+// g * np + j: per 16 columns, the four rows' bytes interleaved by pairs, then the pairs by twos.
 @platform(linux)
 @arch(x86_64)
-struct Job {
-    c: *mut i32,
-    a: *const u8,
-    b: *const u8,
-    mp: usize,
-    np: usize,
-    kp: usize,
-    ua: usize,
-    cfg: [u8; 64],
+unsafe fn pack_b(dst: *mut u32, b: *const u8, groups: usize, n: usize, np: usize) {
+    let n16 = n & ~15usize;
+    for g in 0..groups {
+        let r0 = b + 4 * g * n;
+        let o = dst + g * np;
+        let mut j: usize = 0;
+        while j < n16 {
+            let x0 = simd::load_unaligned::<u8, 16>(r0 + j);
+            let x1 = simd::load_unaligned::<u8, 16>(r0 + n + j);
+            let x2 = simd::load_unaligned::<u8, 16>(r0 + 2 * n + j);
+            let x3 = simd::load_unaligned::<u8, 16>(r0 + 3 * n + j);
+            let lo01 = simd::interleave_low(x0, x1).bitcast::<u16, 8>();
+            let hi01 = simd::interleave_high(x0, x1).bitcast::<u16, 8>();
+            let lo23 = simd::interleave_low(x2, x3).bitcast::<u16, 8>();
+            let hi23 = simd::interleave_high(x2, x3).bitcast::<u16, 8>();
+            simd::store_unaligned(o + j, simd::interleave_low(lo01, lo23).bitcast::<u32, 4>());
+            simd::store_unaligned(o + j + 4, simd::interleave_high(lo01, lo23).bitcast::<u32, 4>());
+            simd::store_unaligned(o + j + 8, simd::interleave_low(hi01, hi23).bitcast::<u32, 4>());
+            simd::store_unaligned(o + j + 12, simd::interleave_high(hi01, hi23).bitcast::<u32, 4>());
+            j += 16;
+        }
+    }
 }
 
-// `sc_amx_i8_tiles(job)`: for each 32 x 32 block of the padded result (rows i0 in rbx, columns j0 in
-// rcx), tiles 0 to 3 hold its four 16 x 16 quarters, zeroed; each step of 64 bytes of the inner
-// dimension loads rows i0 and i0 + 16 of `a` (tiles 4, 5: 64 bytes of each of 16 rows, kp apart) and
-// the groups of `b` (tiles 6, 7: 16 groups of four rows, columns j0 and j0 + 16), and adds the four
-// products, `tdpbssd` or for unsigned bytes of `a` `tdpbusd`. Registers: r8 the result, r9 `a`, r10 `b`,
-// r11 mp, r12 np, r13 kp, r14 the kind, r15 np * 4 (a row of the result and a group of `b`, in bytes),
-// rsi and rbp the two rows of `a`, rdi the groups of `b`, rax the bytes of the inner dimension left.
-// `sc_amx_pack_b(dst, b, groups, n, np)`: groups 0 to `groups - 1` of `b` (four rows of n bytes each),
-// columns 0 to a multiple of 16, into words g * np + j: per 16 columns, the four rows' bytes interleaved
-// by pairs (`punpcklbw`, `punpckhbw`) and the pairs by twos (`punpcklwd`, `punpckhwd`), 64 bytes out.
+// For each 32 x 32 block of the padded result `c` (mp x np, i32): tiles 0 to 3 hold its four 16 x 16
+// quarters, zeroed; each step of 64 bytes of the inner dimension loads rows i0 and i0 + 16 of `a` (tiles 4
+// and 5: 64 bytes of each of 16 rows, kp apart) and the groups of `b` (tiles 6 and 7: 16 groups of four
+// rows, columns j0 and j0 + 16, np words apart), and adds the four products, signed bytes of `a` or for
+// `ua` unsigned. The tile configuration `cfg` (64 bytes) gives every tile 16 rows of 64 bytes.
 @platform(linux)
 @arch(x86_64)
-asm(M"(.text
-.p2align 4
-sc_amx_i8_tiles:
-push %rbx
-push %rbp
-push %r12
-push %r13
-push %r14
-push %r15
-ldtilecfg 56(%rdi)
-mov (%rdi), %r8
-mov 8(%rdi), %r9
-mov 16(%rdi), %r10
-mov 24(%rdi), %r11
-mov 32(%rdi), %r12
-mov 40(%rdi), %r13
-mov 48(%rdi), %r14
-lea (,%r12,4), %r15
-xor %ebx, %ebx
-.Lamx_rows:
-xor %ecx, %ecx
-.Lamx_cols:
-tilezero %tmm0
-tilezero %tmm1
-tilezero %tmm2
-tilezero %tmm3
-mov %rbx, %rax
-imul %r13, %rax
-lea (%r9,%rax), %rsi
-mov %r13, %rdx
-shl $4, %rdx
-lea (%rsi,%rdx), %rbp
-lea (%r10,%rcx,4), %rdi
-mov %r13, %rax
-.Lamx_inner:
-tileloadd (%rsi,%r13,1), %tmm4
-tileloadd (%rbp,%r13,1), %tmm5
-tileloadd (%rdi,%r15,1), %tmm6
-tileloadd 64(%rdi,%r15,1), %tmm7
-test %r14, %r14
-jnz .Lamx_unsigned
-tdpbssd %tmm6, %tmm4, %tmm0
-tdpbssd %tmm7, %tmm4, %tmm1
-tdpbssd %tmm6, %tmm5, %tmm2
-tdpbssd %tmm7, %tmm5, %tmm3
-jmp .Lamx_next
-.Lamx_unsigned:
-tdpbusd %tmm6, %tmm4, %tmm0
-tdpbusd %tmm7, %tmm4, %tmm1
-tdpbusd %tmm6, %tmm5, %tmm2
-tdpbusd %tmm7, %tmm5, %tmm3
-.Lamx_next:
-add $64, %rsi
-add $64, %rbp
-mov %r15, %rdx
-shl $4, %rdx
-add %rdx, %rdi
-sub $64, %rax
-jnz .Lamx_inner
-mov %rbx, %rax
-imul %r12, %rax
-add %rcx, %rax
-lea (%r8,%rax,4), %rdx
-tilestored %tmm0, (%rdx,%r15,1)
-tilestored %tmm1, 64(%rdx,%r15,1)
-mov %r15, %rax
-shl $4, %rax
-add %rax, %rdx
-tilestored %tmm2, (%rdx,%r15,1)
-tilestored %tmm3, 64(%rdx,%r15,1)
-add $32, %rcx
-cmp %r12, %rcx
-jb .Lamx_cols
-add $32, %rbx
-cmp %r11, %rbx
-jb .Lamx_rows
-tilerelease
-pop %r15
-pop %r14
-pop %r13
-pop %r12
-pop %rbp
-pop %rbx
-ret
-.p2align 4
-sc_amx_pack_b:
-push %rbx
-push %r12
-push %r13
-push %r14
-mov %rcx, %r9
-and $-16, %r9
-test %rdx, %rdx
-jz .Lamx_pack_done
-test %r9, %r9
-jz .Lamx_pack_done
-lea (%rsi,%rcx), %r10
-lea (%r10,%rcx), %r11
-lea (%r11,%rcx), %r12
-lea (,%rcx,4), %r13
-lea (,%r8,4), %r14
-.Lamx_pack_group:
-xor %eax, %eax
-.Lamx_pack_cols:
-movdqu (%rsi,%rax), %xmm0
-movdqu (%r10,%rax), %xmm1
-movdqu (%r11,%rax), %xmm2
-movdqu (%r12,%rax), %xmm3
-movdqa %xmm0, %xmm4
-punpcklbw %xmm1, %xmm4
-punpckhbw %xmm1, %xmm0
-movdqa %xmm2, %xmm5
-punpcklbw %xmm3, %xmm5
-punpckhbw %xmm3, %xmm2
-movdqa %xmm4, %xmm6
-punpcklwd %xmm5, %xmm6
-punpckhwd %xmm5, %xmm4
-movdqa %xmm0, %xmm7
-punpcklwd %xmm2, %xmm7
-punpckhwd %xmm2, %xmm0
-movdqu %xmm6, (%rdi,%rax,4)
-movdqu %xmm4, 16(%rdi,%rax,4)
-movdqu %xmm7, 32(%rdi,%rax,4)
-movdqu %xmm0, 48(%rdi,%rax,4)
-add $16, %rax
-cmp %r9, %rax
-jb .Lamx_pack_cols
-add %r13, %rsi
-add %r13, %r10
-add %r13, %r11
-add %r13, %r12
-add %r14, %rdi
-dec %rdx
-jnz .Lamx_pack_group
-.Lamx_pack_done:
-pop %r14
-pop %r13
-pop %r12
-pop %rbx
-ret
-.globl sc_amx_i8_tiles
-.hidden sc_amx_i8_tiles
-.type sc_amx_i8_tiles, @function
-.globl sc_amx_pack_b
-.hidden sc_amx_pack_b
-.type sc_amx_pack_b, @function
-)");
-
-@platform(linux)
-@arch(x86_64)
-extern "C" {
-    fn sc_amx_i8_tiles(job: *mut Job);
-    fn sc_amx_pack_b(dst: *mut u32, b: *const u8, groups: usize, n: usize, np: usize);
+@target_feature([cpu::Feature::AmxTile, cpu::Feature::AmxInt8])
+unsafe fn tiles(c: *mut i32, a: *const u8, b: *const u32, mp: usize, np: usize, kp: usize, ua: bool, cfg: &[u8; 64]) {
+    immintrin::_tile_loadconfig(cfg as *const [u8; 64]);
+    let row = np * 4;
+    let mut i0: usize = 0;
+    while i0 < mp {
+        let mut j0: usize = 0;
+        while j0 < np {
+            immintrin::_tile_zero(0);
+            immintrin::_tile_zero(1);
+            immintrin::_tile_zero(2);
+            immintrin::_tile_zero(3);
+            let a0 = a + i0 * kp;
+            let a1 = a0 + 16 * kp;
+            let mut p: usize = 0;
+            while p < kp {
+                let bg = b + p / 4 * np + j0;
+                immintrin::_tile_loadd(4, a0 + p, kp);
+                immintrin::_tile_loadd(5, a1 + p, kp);
+                immintrin::_tile_loadd(6, bg, row);
+                immintrin::_tile_loadd(7, bg + 16, row);
+                if ua {
+                    immintrin::_tile_dpbusd(0, 4, 6);
+                    immintrin::_tile_dpbusd(1, 4, 7);
+                    immintrin::_tile_dpbusd(2, 5, 6);
+                    immintrin::_tile_dpbusd(3, 5, 7);
+                } else {
+                    immintrin::_tile_dpbssd(0, 4, 6);
+                    immintrin::_tile_dpbssd(1, 4, 7);
+                    immintrin::_tile_dpbssd(2, 5, 6);
+                    immintrin::_tile_dpbssd(3, 5, 7);
+                }
+                p += 64;
+            }
+            let c0 = c + i0 * np + j0;
+            let c1 = c0 + 16 * np;
+            immintrin::_tile_stored(0, c0, row);
+            immintrin::_tile_stored(1, c0 + 16, row);
+            immintrin::_tile_stored(2, c1, row);
+            immintrin::_tile_stored(3, c1 + 16, row);
+            j0 += 32;
+        }
+        i0 += 32;
+    }
+    immintrin::_tile_release();
 }
