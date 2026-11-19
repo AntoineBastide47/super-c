@@ -175,6 +175,29 @@ pub(package) struct ProveResume {
     pub(package) errs: errs::Errors,
 }
 
+/// What `lint --proofs` measured: the solver steps of the obligations (`lint --proofs --fix` keeps a
+/// change that lowers them), and the rewrites of costly proofs it proposes, by module and position. The
+/// lint shows a rewrite only when the file proves with fewer steps after it (`proof_hints` in main).
+pub(package) struct ProofLint {
+    pub(package) spent: u64,
+    pub(package) hints: Vector<ProofHint>,
+}
+
+/// A rewrite of the `assert` at [`start`, `end`) of module `module` (`prove::cost_warnings`): the lemma
+/// `lemma` (its text) before the item of the function at `item`, and its call `call` in place of the
+/// statement. `code` and `msg` are the warning's; `steps`, the solver steps of the function's proof.
+pub(package) struct ProofHint {
+    pub(package) module: u32,
+    pub(package) steps: u64,
+    pub(package) code: u16,
+    pub(package) start: u32,
+    pub(package) end: u32,
+    pub(package) item: u32,
+    pub(package) msg: String,
+    pub(package) lemma: String,
+    pub(package) call: String,
+}
+
 pub(package) struct Package {
     pub(package) modules: Vector<Module>,
     /// The module path index `find` reads: FNV hash of a module path -> the newest module with that
@@ -450,6 +473,18 @@ pub(package) struct Package {
     /// functions join the unused-item candidates instead of rooting the reachability graph. Set only
     /// for whole-program lints of manifests without a [lib] target (and for script builds).
     pub(package) lint_pub: bool,
+    /// `lint --proofs`: the lint runs the prover over its modules and reports the proofs that cost the
+    /// most and their causes (`prove::check_kept`).
+    pub(package) lint_proofs: bool,
+    /// What the proofs `lint --proofs` ran measured (`prove::check_kept`).
+    pub(package) proof_lint: ProofLint,
+    /// A probe of the rewrites of one function by `lint --proofs` (`proof_hints` in main), when not
+    /// empty: the prover proves only the function that holds offset `proof_only[0]` (a call the rewrites
+    /// put) and the functions at the other offsets (the lemmas they add); the rest of the file is as it
+    /// was.
+    pub(package) proof_only: Vector<u32>,
+    /// Such a probe's solver steps, when not 0, past which a prover stops: the rewrite cannot win.
+    pub(package) proof_cap: u64,
     /// A compile asked for its program's LIR (an API client's): emission lowers every body to LIR, as under
     /// `SC_LIR=1`, and leaves the checked package's text form here. Null otherwise.
     pub(package) lir_out: *mut String,

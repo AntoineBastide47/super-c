@@ -2,7 +2,7 @@
 // build.toml, skips the out-dir, and hands every top-level directory and .spc file to the formatter or
 // linter. Also covers `lint <dir>` recursion, `build <dir>`, `--bin` with `-o`, the strip of a
 // cross-linked release, a macOS build for the other instruction set, the probe record's key, and the std
-// tree `SC_STD_DIR` names. Driven from inside a scratch project.
+// tree `SC_STD_DIR` names, and `lint --proofs` (with `--fix`). Driven from inside a scratch project.
 import stdlib;
 import tests::cli_harness as cli;
 import module::loader as loader;
@@ -22,6 +22,91 @@ fn project(clean: bool) cli::Proj {
         p.mkfile("lib/a.spc", UGLY);
     }
     return p;
+}
+
+// Two asserts whose conditions split the paths: the claims after them are proved on each path. The
+// second's lemma would need `t == b + c`, a fact of the path its `requires` does not state.
+const SPLITS: str = M"(fn area(a: u64, b: u64, c: u64) u64
+    requires a < 1000 && b < 1000 && c < 1000
+{
+    let t = b + c;
+    assert a < 500 || b < 500 || a + b >= 1000 by {};
+    assert b < 500 || c < 500 || t >= 1000 by {};
+    assert (a as int) * (c as int) + (b as int) * (c as int) < 2000000 by {};
+    return a * b + t;
+}
+
+fn main() i32 {
+    return area(3, 4, 5) as i32;
+}
+)";
+
+// A lemma call no proof needs, beside asserts of the body's own.
+const UNNEEDED: str = M"(lemma le_mul(a: int, b: int, c: int)
+    requires 0 <= a && a <= b && 0 <= c
+    ensures a * c <= b * c
+{}
+
+fn area(a: u64, b: u64, c: u64) u64
+    requires a < 1000 && b < 1000 && c < 1000
+{
+    assert a < 500 || b < 500 || a + b >= 1000 by {};
+    le_mul(0, 1, 2);
+    assert (a as int) * (c as int) + (b as int) * (c as int) < 2000000 by {};
+    return a * b + c;
+}
+
+fn main() i32 {
+    return area(3, 4, 5) as i32;
+}
+)";
+
+@test
+fn lint_proofs_names_the_asserts_that_split_the_paths() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("split.spc", SPLITS);
+    let root = p.dir();
+    let r = cli::superc_in(root, "lint --proofs split.spc");
+    assert(r.exit != 0 && r.out_shows("this 'assert' splits the paths after it"), "a splitting assert is reported");
+    assert(r.out_shows("split.spc:5:5"), "with the rewrite that lowers the steps");
+    assert(!r.out_has("split.spc:6:5"), "not the one whose lemma does not prove");
+    assert(!r.out_has("split.spc:7:5"), "nor the assert that splits nothing");
+    // The help states the lemma: its parameters, the function's clauses over them, the claim, the call,
+    // and the steps the file then takes.
+    assert(r.out_shows("lemma area_5(a: u64, b: u64)"), "the help names the lemma and its parameters");
+    assert(r.out_shows("requires a < 1000 && b < 1000"), "with the function's clauses over them");
+    assert(
+        r.out_shows("ensures a < 500 || b < 500 || a + b >= 1000") && r.out_shows("area_5(a, b);"),
+        "the claim and the call",
+    );
+    assert(r.out_shows("the function and its lemmas then prove in "), "and the measured steps");
+    let plain = cli::superc_in(root, "lint split.spc");
+    assert(plain.ok() && !plain.out_has("splits the paths"), "only '--proofs' proves");
+}
+
+@test
+fn lint_proofs_fix_removes_the_proof_steps_no_proof_needs() {
+    // The wasm guest has no stable cwd or subprocesses; this drives a working-directory-
+    // dependent guest command, so it runs on native and Windows only.
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("fix.spc", UNNEEDED);
+    let root = p.dir();
+    let r = cli::superc_in(root, "lint --proofs --fix fix.spc");
+    let mut path = String::from_str(root);
+    path.push_str("/fix.spc");
+    let after = cli::read_text(&path);
+    assert(!after.contains("le_mul(0, 1, 2);"), "the lemma call no proof needs is removed");
+    assert(after.contains("lemma le_mul") && after.contains("assert a < 500"), "the lemma and the body's asserts stay");
+    assert(r.out_shows("fix.spc:9: no proof needs this 'assert'"), "an assert of the body no proof needs is reported");
+    assert(r.out_shows("removed the proof steps its proofs do not need (1)"), "the removal is reported");
 }
 
 @test

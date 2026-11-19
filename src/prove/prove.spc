@@ -42,6 +42,7 @@ import utils::errors as diag;
 import utils::diag_codes as dc;
 import prove::terms as *;
 import prove::solver as *;
+import typechecker::render as rnd;
 
 // The paths waiting in one body's walk.
 const PATHS_MAX: usize = 4096;
@@ -1019,6 +1020,11 @@ const CONG_PAIRS: u32 = 8;
 // The steps of each equality of operands of a predicate the goal names and one the path states
 // (`Prover::stated_congruence`).
 const STATED_CONG_STEPS: u32 = 20000;
+// `lint --proofs` (`Prover::cost_warnings`): a site proved on this many paths or more, in this many solver
+// steps or more in all, after an assert that splits the paths; or one obligation of COST_STEPS or more.
+const PATHS_MIN: u32 = 4;
+const PATHS_STEPS: u32 = 50000;
+const COST_STEPS: u32 = 200000;
 // The steps of the check that the path's facts exclude a case of an invariant of cases (`Prover::holds_in`).
 const CASE_STEPS: u32 = 2000;
 // The pointer offsets (`p + n`) and the aggregates down a pointer's target is found through (`ptr_target`).
@@ -1451,6 +1457,14 @@ struct Prover<const B: usize> {
     walk_cap: u32, // the walk steps of a walk for facts or a merged walk (`spend`): FACTS_WALK, or MERGED_PER_BLOCK per block
     ev: Eval<B>,
     vname: Map<u32, u32>, // a parameter's unknown -> the parameter's local, for counterexamples
+    // `lint --proofs` (`Package.lint_proofs`): the obligations of the body under proof, three entries each
+    // (its span's start and end, the solver steps its proof took), for `cost_warnings`.
+    cost_on: bool,
+    costs: Vector<u32>,
+    spent: u64, // the solver steps of every obligation `costs` held
+    hints: Vector<loader::ProofHint>, // `lint --proofs`: the rewrites `cost_warnings` proposes
+    cap: u64, // `Package.proof_cap`: past these solver steps of `costs`, the proof stops
+    live: u64, // the solver steps of every obligation `costs` held, the current body's too
     // Whether the memory event under way is a write through a parameter's value at the entry, which no local
     // of the body (made after it) is reached by (`write_at`, `mem_event_keep`).
     spare_frame: bool,
@@ -1763,6 +1777,12 @@ extend<const B: usize> Prover<B> {
             walk_cap: FACTS_WALK,
             ev: Eval::<B>::new(),
             vname: Map::<u32, u32>::new(),
+            cost_on: p.lint_proofs,
+            costs: Vector::<u32>::new(),
+            spent: 0,
+            hints: Vector::<loader::ProofHint>::new(),
+            cap: p.proof_cap,
+            live: 0,
             spare_frame: false,
             refining: false,
             refine_all: false,
@@ -6970,6 +6990,7 @@ extend<const B: usize> Prover<B> {
         self.sv.stop_on_ovf = B == NUM_NARROW && self.tm.big_seen;
         self.sv.gave_up = false;
         self.refuted_goal = false;
+        let s0 = self.sv.steps;
         let mut ok = self.holds(pc, goal);
         // A goal over products of unknowns: once more with the products of rows (`Solver::nla_attempt`).
         if !ok && !self.sv.gave_up && !self.refuted_goal && self.steps + self.sv.steps <= STEP_BUDGET && self.has_product(
@@ -6979,6 +7000,15 @@ extend<const B: usize> Prover<B> {
             self.sv.nla_allowed = true;
             ok = self.holds(pc, goal);
             self.sv.nla_allowed = false;
+        }
+        if self.cost_on {
+            self.costs.push(sp.start);
+            self.costs.push(sp.end);
+            self.costs.push(self.sv.steps - s0);
+            self.live += self.sv.steps - s0;
+            if self.cap != 0 && self.live > self.cap {
+                self.budget_spent();
+            }
         }
         self.sv.stop_on_ovf = false;
         self.sv.gave_up = false;
@@ -18209,6 +18239,8 @@ extend<const B: usize> Prover<B> {
         let m = (unsafe (&*self.keep).kept.at(k).body.module) as usize;
         let held = replace(self.errs.index_mut(m), diag::Errors::new());
         let nf = self.facts.len();
+        // A walk the wide numbers redo leaves no `lint --proofs` record.
+        let (ns, nl, nh) = (self.spent, self.live, self.hints.len());
         self.sv.clear_overflow();
         self.tm.big_seen = false;
         self.prove_kept(k);
@@ -18218,6 +18250,9 @@ extend<const B: usize> Prover<B> {
             self.errs.index_mut(m).append(&mut e);
         } else {
             self.facts.truncate(nf);
+            self.spent = ns;
+            self.live = nl;
+            self.hints.truncate(nh);
         }
         return fits;
     }
@@ -18225,6 +18260,7 @@ extend<const B: usize> Prover<B> {
     fn prove_kept(self: &mut Self, k: usize) {
         let kb = unsafe (&*self.keep).kept.at(k);
         self.me = k as u32;
+        self.costs.clear();
         // A conformance's method runs where a call through the interface proved only the
         // interface's contracts. One with no contract of its own has the interface's (a direct call
         // proves them too, `call`): its one walk starts from them and has every obligation.
@@ -18261,6 +18297,243 @@ extend<const B: usize> Prover<B> {
             self.refine_all = false;
             self.refine = null;
         }
+        if self.cost_on {
+            self.cost_warnings(&kb.body);
+            let mut j: usize = 2;
+            while j < self.costs.len() {
+                self.spent += self.costs[j];
+                j += 3;
+            }
+        }
+    }
+
+    // The lemma that states claim `cond` (the text of an expression of body `b`, at offset `at`) with proof
+    // `body` (a block's text, empty for `{}`), and the call of it in its place: its parameters the locals
+    // the claim names, of their types; its `requires` the parts of the function's that name only them.
+    fn lemma_text(self: &Self, b: &ir::CoreBody, cond: str, at: u32, body: str) (String, String) {
+        let m = b.module;
+        let a = self.ast_of(m);
+        let fname = self.text(m, a.at_const(a.ext_name(b.owner.node)).span);
+        let src = self.pkg().modules.at(m as usize).source.as_str();
+        let mut line: u32 = 1;
+        for i in 0..(at as usize).min(src.len()) {
+            line += (src.byte_at(i) == b'\n') as u32;
+        }
+        let name = format("{}_{}", fname, line);
+        // The locals the claim names, each name once, in the body's order.
+        let mut names = Vector::<str>::new();
+        let mut params = String::new();
+        for l in 0..b.locals.len() {
+            let nm = self.text(m, b.locals.at(l).name());
+            if nm.len() == 0 || names.contains(&nm) || !names_word(cond, nm) {
+                continue;
+            }
+            if names.len() != 0 {
+                params.push_str(", ");
+            }
+            names.push(nm);
+            params.push_str(nm);
+            params.push_str(": ");
+            let ty = rnd::type_str_of(self.p, a, src, b.locals.at(l).ty);
+            params.push_string(&ty);
+        }
+        let mut lemma = format("lemma {}({})\n", name.as_str(), params.as_str());
+        // The parts (`&&`) of the function's `requires` that name no other local: the call proves them.
+        let mut reqs = String::new();
+        for j in 0..b.contracts.len() {
+            let s = b.contracts[j];
+            if s.kind != CT_REQUIRES {
+                continue;
+            }
+            let parts = top_conjuncts(self.text(m, self.site_span(m, s)));
+            for q in 0..parts.len() {
+                let rt = parts[q];
+                let mut other = false;
+                for l in 0..b.locals.len() {
+                    let nm = self.text(m, b.locals.at(l).name());
+                    other = other || nm.len() != 0 && names_word(rt, nm) && !names.contains(&nm);
+                }
+                if !other {
+                    if reqs.len() != 0 {
+                        reqs.push_str(" && ");
+                    }
+                    reqs.push_str(rt);
+                }
+            }
+        }
+        if reqs.len() != 0 {
+            lemma.push_str("    requires ");
+            lemma.push_string(&reqs);
+            lemma.push_byte(b'\n');
+        }
+        lemma.push_str("    ensures ");
+        lemma.push_str(cond);
+        lemma.push_byte(b'\n');
+        // The block's later lines lose the indentation of the statement's line.
+        let mut ls = at as usize;
+        while ls > 0 && src.byte_at(ls - 1) != b'\n' {
+            ls -= 1;
+        }
+        let indent = at as usize - ls;
+        let blk = pick(body.len() == 0, "{}", body);
+        let mut first = true;
+        for ln in blk.split("\n") {
+            if !first {
+                lemma.push_byte(b'\n');
+                let mut k: usize = 0;
+                while k < indent && k < ln.len() && ln.byte_at(k) == b' ' {
+                    k += 1;
+                }
+                lemma.push_str(ln.slice(k, ln.len()));
+            } else {
+                lemma.push_str(ln);
+            }
+            first = false;
+        }
+        let mut call = format("{}(", name.as_str());
+        for j in 0..names.len() {
+            if j != 0 {
+                call.push_str(", ");
+            }
+            call.push_str(names[j]);
+        }
+        call.push_str(");");
+        return (lemma, call);
+    }
+
+    // `lint --proofs`: the warnings of body `b`'s costly proofs (`costs`). An `assert` whose condition or
+    // block splits the paths (an `||`, an `==>`, an `if`), after which (or at the body's end: an `ensures`)
+    // sites are proved on PATHS_MIN paths or more, PATHS_STEPS steps in all: its claim as a lemma's `ensures` is one fact on one path. An
+    // obligation of COST_STEPS steps or more that no such site is: a lemma of only the facts it needs.
+    fn cost_warnings(self: &mut Self, b: &ir::CoreBody) {
+        let m = b.module;
+        // The asserts that split, and the `ensures` clauses, which every path proves at its end.
+        let mut splits = Vector::<tok::Span>::new();
+        let mut ens = Vector::<u32>::new();
+        for j in 0..b.contracts.len() {
+            let s = b.contracts[j];
+            if s.kind == CT_ENSURES {
+                ens.push(self.site_span(m, s).start);
+            }
+            if s.kind != CT_ASSERT {
+                continue;
+            }
+            let ext = self.site_extent(b, s);
+            let t = self.text(m, ext);
+            if t.contains("||") || t.contains("==>") || t.contains(" if ") || t.contains("{if ") {
+                splits.push(ext);
+            }
+        }
+        // The obligations by site: its count of proofs, their steps, and the largest.
+        let mut keys = Vector::<u64>::new();
+        let mut by = Map::<u64, u64>::new();
+        let mut most = Map::<u64, u32>::new();
+        let mut j: usize = 0;
+        while j < self.costs.len() {
+            let key = self.costs[j] as u64 << 32 | self.costs[j + 1] as u64;
+            let st = self.costs[j + 2];
+            if !by.contains_key(&key) {
+                keys.push(key);
+                by.insert(key, 0);
+                most.insert(key, 0);
+            }
+            let v = *by.get(&key).unwrap();
+            by.insert(key, v + (1u64 << 40) + st as u64);
+            if st > *most.get(&key).unwrap() {
+                most.insert(key, st);
+            }
+            j += 3;
+        }
+        keys.sort();
+        // Per split: the sites after it proved on many paths, the most paths, and their steps.
+        let mut sites = Vector::<u32>::new();
+        let mut widest = Vector::<u32>::new();
+        let mut steps = Vector::<u64>::new();
+        sites.resize_default(splits.len());
+        widest.resize_default(splits.len());
+        steps.resize_default(splits.len());
+        for q in 0..keys.len() {
+            let v = *by.get(&keys[q]).unwrap();
+            let n = (v >> 40) as u32;
+            let total = v & 0xFFFFFFFFFFu64;
+            let start = (keys[q] >> 32) as u32;
+            let mut split = false;
+            if n >= PATHS_MIN && total >= PATHS_STEPS as u64 {
+                for k in 0..splits.len() {
+                    if splits[k].end <= start || ens.contains(&start) {
+                        split = true;
+                        sites.set(k, sites[k] + 1);
+                        widest.set(k, widest[k].max(n));
+                        steps.set(k, steps[k] + total);
+                    }
+                }
+            }
+            if !split && *most.get(&keys[q]).unwrap() >= COST_STEPS {
+                // An `assert`'s claim: its lemma, over the statement's extent (its `by` block too).
+                for j in 0..b.contracts.len() {
+                    let s = b.contracts[j];
+                    let ext = self.site_extent(b, s);
+                    if s.kind == CT_ASSERT && ext.start == start {
+                        let msg = format("proving this 'assert' takes {} solver steps", *most.get(&keys[q]).unwrap());
+                        self.hint(b, dc::PROOF_COST, ext, msg);
+                        break;
+                    }
+                }
+            }
+        }
+        for k in 0..splits.len() {
+            if sites[k] != 0 {
+                let msg = format(
+                    "this 'assert' splits the paths after it: {} obligations after it are proved on up to {} paths each, {} solver steps in all",
+                    sites[k],
+                    widest[k],
+                    steps[k],
+                );
+                self.hint(b, dc::PROOF_PATHS, splits[k], msg);
+            }
+        }
+    }
+
+    // `lint --proofs`: the rewrite of the `assert` of body `b` at `sp` (its extent) as a lemma, its
+    // condition the `ensures`, its block the body (`hints`).
+    fn hint(self: &mut Self, b: &ir::CoreBody, code: u16, sp: tok::Span, msg: String) {
+        if (b.owner.node & NODE_BODY) != 0 {
+            return;
+        }
+        let m = b.module;
+        let t = self.text(m, sp);
+        let by = t.find(" by ");
+        let cond = if by > 7 {
+            t.slice(7, by as usize)
+        } else {
+            t.slice(7, t.len())
+        };
+        let body = if by > 0 {
+            t.slice(by as usize + 4, t.len())
+        } else {
+            "{}"
+        };
+        let (lemma, call) = self.lemma_text(b, cond, sp.start, body);
+        let item = self.ast_of(m).at_const(b.owner.node).span.start;
+        let mut steps: u64 = 0;
+        let mut j: usize = 2;
+        while j < self.costs.len() {
+            steps += self.costs[j];
+            j += 3;
+        }
+        self.hints.push(
+            loader::ProofHint {
+                module: m,
+                steps: steps,
+                code: code,
+                start: sp.start,
+                end: sp.end,
+                item: item,
+                msg: msg,
+                lemma: lemma,
+                call: call,
+            },
+        );
     }
 
     // Whether function `d` is marked `@prove_exhaustive`.
@@ -22726,9 +22999,18 @@ pub(package) fn check_module(
     return true;
 }
 
+// Move the rewrites of `src` to `dst` (in the reverse order: `check_kept` sorts them).
+fn move_hints(dst: &mut Vector<loader::ProofHint>, src: &mut Vector<loader::ProofHint>) {
+    while let Some(h) = src.pop() {
+        dst.push(h);
+    }
+}
+
 /// Prove the contracts of every kept body of `keep` outside the modules `skip` marks, and print the
 /// failures; `comp` holds each kept body's component of the direct calls (`ir::recursion::check_kept`).
-/// `held[m]`: no obligation of module `m` failed. True when every obligation holds.
+/// `held[m]`: no obligation of module `m` failed. True when every obligation holds. The count of the
+/// warnings printed is added to `warned`; under `lint --proofs`, the solver steps of the obligations
+/// and the rewrites of the costly proofs go to `lint`.
 pub(package) fn check_kept(
     p: &loader::Package,
     keep: &irl::Keep,
@@ -22737,6 +23019,8 @@ pub(package) fn check_kept(
     held: &mut Vector<bool>,
     facts: &mut Vector<u64>,
     reads: &mut Vector<Vector<u64>>,
+    warned: &mut u32,
+    lint: &mut loader::ProofLint,
 ) bool {
     let mut sh = Shared { shells: Vector::<ir::CoreBody>::new(), shell_ix: Map::<u64, u32>::new(), scc: comp.clone() };
     let mut pv = Prover::<NUM_NARROW>::new(p, keep, p.prelude_lookup("Slice", true));
@@ -22753,27 +23037,46 @@ pub(package) fn check_kept(
         reads.push(Vector::<u64>::new());
     }
     let n = keep.kept.len();
+    // The bodies to prove: of the modules `skip` leaves, those `proof_only` names when it is set.
+    let mut out = Vector::<bool>::with_capacity(n);
+    for k in 0..n {
+        let kb = keep.kept.at(k);
+        let mut o = kb.body.blocks.len() == 0 || skip[kb.body.module as usize];
+        if !o && p.proof_only.len() != 0 {
+            let d = kb.body.owner;
+            o = true;
+            if (d.node & NODE_BODY) == 0 {
+                let sp = unsafe (*p.module_ast_const(d.module)).at_const(d.node).span;
+                let call = p.proof_only[0];
+                o = !(sp.start <= call && call < sp.end);
+                for j in 1..p.proof_only.len() {
+                    o = o && sp.start != p.proof_only[j];
+                }
+            }
+        }
+        out.push(o);
+    }
     // A body with an integer wider than the narrow numbers hold proves with the wide ones.
     let mut wide = Vector::<bool>::with_capacity(n);
     for k in 0..n {
-        let kb = keep.kept.at(k);
-        wide.push(kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] && pv.needs_wide(k));
+        wide.push(!out[k] && pv.needs_wide(k));
     }
     if p.jobs == 1 || n < 2 {
         let mut pw = Prover::<NUM_WIDE>::new(p, keep, pv.slice);
         pw.rd_on = true;
         pw.sh = &sh;
         for k in 0..n {
-            let kb = keep.kept.at(k);
-            if kb.body.blocks.len() != 0 && !skip[kb.body.module as usize] {
+            if !out[k] {
                 prove_one(&mut pv, &mut pw, k, wide[k]);
-                let m = kb.body.module as usize;
+                let m = keep.kept.at(k).body.module as usize;
                 let r1 = pv.take_reads();
                 let r2 = pw.take_reads();
                 reads.index_mut(m).extend_copy(&r1);
                 reads.index_mut(m).extend_copy(&r2);
             }
         }
+        lint.spent += pw.spent;
+        move_hints(&mut lint.hints, &mut pw.hints);
     } else {
         // One prover per chunk of bodies, each body's reports in a container of its own; a walk
         // reads only the package, the keep and the shared state. The reports merge in body order and
@@ -22781,6 +23084,8 @@ pub(package) fn check_kept(
         let mut outs = Vector::<diag::Errors>::with_capacity(n);
         let mut fouts = Vector::<Vector<u64>>::with_capacity(n);
         let mut routs = Vector::<Vector<u64>>::with_capacity(n);
+        let mut souts = Vector::<u64>::new();
+        let mut houts = Vector::<Vector<loader::ProofHint>>::new();
         for _k in 0..n {
             outs.push(diag::Errors::new());
             fouts.push(Vector::<u64>::new());
@@ -22791,6 +23096,8 @@ pub(package) fn check_kept(
         } else {
             p.jobs as usize * 4
         };
+        souts.resize_default(chunks);
+        houts.resize_default(chunks);
         // The bodies by size, largest first (ties by index): chunk `c` takes every `chunks`-th from the
         // `c`-th, so the large bodies spread over the chunks and start first.
         let mut order = Vector::<u64>::with_capacity(n);
@@ -22803,11 +23110,13 @@ pub(package) fn check_kept(
         let pa = (p as *const loader::Package) as usize;
         let ka = (keep as *const irl::Keep) as usize;
         let ha = ((&sh) as *const Shared) as usize;
-        let sa = (skip as *const Vector<bool>) as usize;
+        let sa = ((&out) as *const Vector<bool>) as usize;
         let wa = ((&wide) as *const Vector<bool>) as usize;
         let oa = outs.as_mut_ptr() as usize;
         let fa = fouts.as_mut_ptr() as usize;
         let ra = routs.as_mut_ptr() as usize;
+        let ca = souts.as_mut_ptr() as usize;
+        let ga = houts.as_mut_ptr() as usize;
         let slice = pv.slice;
         // Each worker claims one chunk at a time.
         dpar::range_with(
@@ -22830,7 +23139,7 @@ pub(package) fn check_kept(
                 for i in 0..(n - c + chunks - 1) / chunks {
                     let k = (od[c + i * chunks] & 0xFFFFFFFFu64) as usize;
                     let kb = kp.kept.at(k);
-                    if kb.body.blocks.len() == 0 || sk[kb.body.module as usize] {
+                    if sk[k] {
                         continue;
                     }
                     let m = kb.body.module as usize;
@@ -22850,6 +23159,12 @@ pub(package) fn check_kept(
                     rk.extend_copy(&r2);
                     unsafe *(ptr::from_addr_mut::<Vector<u64>>(ra) + k) = rk;
                 }
+                unsafe *(ptr::from_addr_mut::<u64>(ca) + c) = w.spent + w2.spent;
+                move_hints(&mut w.hints, &mut w2.hints);
+                unsafe *(ptr::from_addr_mut::<Vector<loader::ProofHint>>(ga) + c) = replace(
+                    &mut w.hints,
+                    Vector::<loader::ProofHint>::new(),
+                );
             },
         );
         for k in 0..n {
@@ -22860,9 +23175,26 @@ pub(package) fn check_kept(
             pv.facts.extend_copy(fouts.at(k));
             reads.index_mut(m).extend_copy(routs.at(k));
         }
+        for c in 0..chunks {
+            lint.spent += souts[c];
+            move_hints(&mut lint.hints, houts.index_mut(c));
+        }
         for m in 0..p.modules.len() {
             if pv.errs.at(m).errors.len() > 1 {
                 pv.errs.index_mut(m).errors.sort_stable_in_place_by(
+                    |x: &diag::Diagnostic, y: &diag::Diagnostic| {
+                        return if x.start < y.start {
+                            -1
+                        } else if x.start > y.start {
+                            1
+                        } else {
+                            0
+                        };
+                    },
+                );
+            }
+            if pv.errs.at(m).warns.len() > 1 {
+                pv.errs.index_mut(m).warns.sort_stable_in_place_by(
                     |x: &diag::Diagnostic, y: &diag::Diagnostic| {
                         return if x.start < y.start {
                             -1
@@ -22891,18 +23223,84 @@ pub(package) fn check_kept(
         reads.index_mut(m).sort();
         reads.index_mut(m).dedup();
     }
+    lint.spent += pv.spent;
+    move_hints(&mut lint.hints, &mut pv.hints);
+    // By module and position; of two at one `assert`, the split's first (`PROOF_PATHS`).
+    lint.hints.sort_stable_in_place_by(
+        |x: &loader::ProofHint, y: &loader::ProofHint| {
+            let a = x.module as u64 << 48 | x.start as u64 << 16 | x.code as u64;
+            let c = y.module as u64 << 48 | y.start as u64 << 16 | y.code as u64;
+            return if a < c {
+                -1
+            } else if a > c {
+                1
+            } else {
+                0
+            };
+        },
+    );
     // The facts of a module whose proofs failed are no facts: the build stops.
     *facts = replace(&mut pv.facts, Vector::<u64>::new());
     let mut ok = true;
     for m in 0..p.modules.len() {
         held.set(m, pv.errs.at(m).errors.len() == 0);
-        if pv.errs.at(m).errors.len() != 0 {
-            ok = false;
+        ok = ok && pv.errs.at(m).errors.len() == 0;
+        *warned += pv.errs.at(m).warns.len() as u32;
+        if pv.errs.at(m).errors.len() != 0 || pv.errs.at(m).warns.len() != 0 {
             pv.errs.index_mut(m).finalize(&p.modules.at(m).source, &p.modules.at(m).file);
             pv.errs.at(m).log();
         }
     }
     return ok;
+}
+
+// The parts of `text` the `&&` outside every bracket joins, without their outer blanks.
+fn top_conjuncts(text: str) Vector<str> {
+    let mut out = Vector::<str>::new();
+    let mut depth: i32 = 0;
+    let mut from: usize = 0;
+    let mut i: usize = 0;
+    while i < text.len() {
+        let c = text.byte_at(i);
+        if c == b'(' || c == b'[' || c == b'{' {
+            depth += 1;
+        } else if c == b')' || c == b']' || c == b'}' {
+            depth -= 1;
+        } else if depth == 0 && c == b'&' && i + 1 < text.len() && text.byte_at(i + 1) == b'&' {
+            out.push(text.slice(from, i).trim());
+            from = i + 2;
+            i += 1;
+        }
+        i += 1;
+    }
+    out.push(text.slice(from, text.len()).trim());
+    return out;
+}
+
+// Whether `text` names `w` as a word: not inside another name, not as a member (`.w`) or a path's part.
+const fn names_word(text: str, w: str) bool {
+    let n = w.len();
+    let mut i: usize = 0;
+    while i + n <= text.len() {
+        if text.slice(i, i + n) == w {
+            let before = if i == 0 {
+                b' '
+            } else {
+                text.byte_at(i - 1)
+            };
+            let after = if i + n == text.len() {
+                b' '
+            } else {
+                text.byte_at(i + n)
+            };
+            let word = |c: u8| c == b'_' || c >= b'a' && c <= b'z' || c >= b'A' && c <= b'Z' || c >= b'0' && c <= b'9';
+            if !word(before) && before != b'.' && before != b':' && !word(after) && after != b':' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    return false;
 }
 
 // The `j` of a low mask `c = 2^j - 1`, -1 for another constant.

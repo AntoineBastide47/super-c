@@ -16504,7 +16504,9 @@ fn prove_cached(
     }
     let mut fresh = Vector::<u64>::new();
     let mut walked = Vector::<Vector<u64>>::new();
-    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut fresh, &mut walked);
+    let mut warned: u32 = 0;
+    let mut pl = loader::ProofLint { spent: 0, hints: Vector::<loader::ProofHint>::new() };
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut fresh, &mut walked, &mut warned, &mut pl);
     if locks {
         set_stage_locks(p, false);
     }
@@ -16895,6 +16897,45 @@ pub(package) fn check_package(p: &mut loader::Package, target: i32) bool {
     return p.ok;
 }
 
+// `lint --proofs`: the prover over the kept bodies of the reported modules, its failures errors and its
+// costly proofs warnings (`prv::check_kept`).
+fn lint_proofs(p: &mut loader::Package, keep: &irl::Keep, comp: &Vector<u32>, only_mod: i32) {
+    if !prv::any_contracts(p) {
+        return;
+    }
+    let n = p.modules.len();
+    let mut skip = Vector::<bool>::with_capacity(n);
+    for m in 0..n {
+        skip.push(!p.modules[m].has_ast || !lint_reported(p, m, only_mod));
+    }
+    let mut held = Vector::<bool>::with_capacity(n);
+    held.resize_default(n);
+    // As in a build (`prove_cached`): the types the proofs touch are no use by the program, and several
+    // workers use the evaluator under the stage locks.
+    let locks = p.jobs != 1;
+    let mut marks = Vector::<u64>::with_capacity(n);
+    for m in 0..n {
+        marks.push(p.modules[m].ast.get_ref().used_mark());
+    }
+    if locks {
+        set_stage_locks(p, true);
+    }
+    let mut facts = Vector::<u64>::new();
+    let mut walked = Vector::<Vector<u64>>::new();
+    let mut warned: u32 = 0;
+    let mut pl = loader::ProofLint { spent: 0, hints: Vector::<loader::ProofHint>::new() };
+    let ok = prv::check_kept(p, keep, comp, &skip, &mut held, &mut facts, &mut walked, &mut warned, &mut pl);
+    if locks {
+        set_stage_locks(p, false);
+    }
+    for m in 0..n {
+        p.modules[m].ast.get_mut().used_rollback(marks[m]);
+    }
+    p.ok = ok && p.ok;
+    p.lint_warnings = p.lint_warnings + warned;
+    p.proof_lint = pl;
+}
+
 pub(package) fn lint_package(
     p: &mut loader::Package,
     target: i32,
@@ -16969,6 +17010,9 @@ pub(package) fn lint_package(
         p.ok = check_recursion(p, &lkeep, lint_mod as i32, &mut comp) && p.ok;
         lint_discarded_results(p, lint_mod as i32);
         lint_unused_members(p, lint_mod as i32);
+        if p.lint_proofs && p.ok {
+            lint_proofs(p, &lkeep, &comp, lint_mod as i32);
+        }
     }
     lint_unused_imports(p, lint_mod as i32, fixes);
     lint_feature_unsafe(p, lint_mod as i32, fixes);
