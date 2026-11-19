@@ -4854,8 +4854,7 @@ extend Lower {
     }
 
     // `compress_store(s, start, m, v)` (`args`, `s` by its address) by chunks of 16 or 8 bytes, as the C
-    // path's chunk form (`CEmit::compress_store_planned`), or of 32 bytes (lanes of 4 or 8 bytes, where a
-    // `u32` `swizzle_zero` entry moves 8 words): after the bounds check, when at least a chunk's
+    // path's chunk form (`CEmit::compress_store_planned`): after the bounds check, when at least a chunk's
     // lanes follow the packed ones, each chunk's active lanes move to the front by one byte shuffle (the
     // `u8` `swizzle_zero` entry; its indices a row of a read-only table by the chunk's mask bits) and the
     // whole chunk is stored at the running offset, which grows by the row's lane count (a second table,
@@ -4870,22 +4869,7 @@ extend Lower {
         let n = lanes(vt);
         let mut cb: u32 = ast::pick(n * lb >= 16, 16u32, 8u32);
         let mut swz = String::new();
-        // Lanes of 4 or 8 bytes in chunks of 32 where an entry moves 4-byte words by a vector of their
-        // indices (x86-64 AVX2 `vpermd`): a row holds the words' indices.
-        let words = (lb == 4 || lb == 8) && n * lb % 32 == 0 && c.lir_entry(
-            irc::SIMD_SWIZZLE_ZERO,
-            BuiltinType::BT_U32,
-            BuiltinType::BT_U32,
-            8,
-            &mut swz,
-        );
-        let mut byt = words;
-        if words {
-            cb = 32;
-        } else {
-            swz.clear();
-            byt = c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, cb, &mut swz);
-        }
+        let mut byt = c.lir_entry(irc::SIMD_SWIZZLE_ZERO, BuiltinType::BT_U8, BuiltinType::BT_U8, cb, &mut swz);
         if !byt && cb == 16 {
             cb = 8;
             swz.clear();
@@ -4896,8 +4880,8 @@ extend Lower {
         if byt && (swz.len() == 0 || cl < 2 || cl > 8 || n % cl != 0) || !byt && lb < 2 {
             return VNONE;
         }
-        // Row r of the table: the bytes of the lanes of mask r in order, then the others (`words`: their
-        // words, each index 4 bytes). Byte r of the second: row r's lane count.
+        // Row r of the table: the bytes of the lanes of mask r in order, then the others. Byte r of the
+        // second: row r's lane count.
         let rows = 1u32 << cl;
         let mut tb = String::with_capacity((rows * cb) as usize);
         let mut tc = String::with_capacity(rows as usize);
@@ -4906,14 +4890,7 @@ extend Lower {
                 for i in 0..cl {
                     if (r >> i & 1) == 1 - pass {
                         for j in 0..lb {
-                            let x = if !words {
-                                i * lb + j
-                            } else if j % 4 == 0 {
-                                i * (lb / 4) + j / 4
-                            } else {
-                                0
-                            };
-                            tb.push_byte(x as u8);
+                            tb.push_byte((i * lb + j) as u8);
                         }
                     }
                 }
@@ -4923,13 +4900,7 @@ extend Lower {
             tc.push_byte(r.count_ones() as u8);
         }
         let it = int_type(self.pkg.ptr_bytes);
-        let bt = if words {
-            vec_type(T_I32, 8)
-        } else if byt {
-            vec_type(T_I8, cb)
-        } else {
-            lane_type(vt)
-        };
+        let bt = ast::pick(byt, vec_type(T_I8, cb), lane_type(vt));
         let m = self.int_to(args[2], T_I64, false);
         let cnt = self.inst(O_POPCNT, T_I64, 0, m, VNONE, VNONE);
         let st = self.int_to(args[1], it, false);

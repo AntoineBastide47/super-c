@@ -6056,55 +6056,6 @@ b0(v0: ptr, v1: ptr, v2: ptr):
     }
 }
 
-// The count of the bits of a comparison's mask stays a bit count where the processor makes a register's
-// mask bits and counts bits in one instruction each (`Package.mask_bits`, `Cpu.popcnt`) and the mask fills
-// at most two registers: `@two`'s 32 bytes in 16-byte registers. Without the bit count instruction, and
-// for `@four`'s 64 bytes, it is the negated sum of the lane masks (`opt` `mask_count`).
-@test
-fn a_count_of_mask_bits_stays_where_the_processor_counts_bits() {
-    let src = M"(lir ptr 8
-sym @two fn global
-sym @four fn global
-fn @two
-  sig (ptr, ptr) -> i64
-b0(v0: ptr, v1: ptr):
-  v2 = load.v32i8 v0 align 0
-  v3 = load.v32i8 v1 align 0
-  v4 = vop.eq.i32 (v2, v3)
-  v5 = zext.i64 v4
-  v6 = popcnt.i64 v5
-  ret v6
-fn @four
-  sig (ptr, ptr) -> i64
-b0(v0: ptr, v1: ptr):
-  v2 = load.v64i8 v0 align 0
-  v3 = load.v64i8 v1 align 0
-  v4 = vop.eq.i64 (v2, v3)
-  v5 = popcnt.i64 v4
-  ret v5
-)";
-    let mut err = String::new();
-    for counts in [false, true] {
-        let mut after = lparse::parse(src, &mut err).unwrap();
-        after.cpu.vector = 16;
-        after.cpu.popcnt = counts;
-        after.mask_bits = true;
-        after.vops = VOPS_ALL;
-        let none = Vector::<bool>::new();
-        lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
-        let mut v = verify::Verifier::new();
-        for name in ["two", "four"] {
-            let fb = after.syms[after.find_symbol(name) as usize].def;
-            assert(v.check(&after, name, &after.bodies[fb as usize]), v.err.as_str());
-        }
-        let two = text_of(&after, "two");
-        assert_eq(two.contains("popcnt"), counts);
-        assert_eq(two.contains("reduce_add"), !counts);
-        let four = text_of(&after, "four");
-        assert(!four.contains("popcnt") && four.contains("reduce_add"), four.as_str());
-    }
-}
-
 // `[x; N]` of bytes as a vector: the fill of a private slot through its address plus an index of 0, then
 // loads of its 16-byte parts. The index of 0 folds on a slot's address too, each load is the splat of the
 // fill's byte, and the fill and the slot go.

@@ -21578,31 +21578,6 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
-// `compress_store` of 4-byte lanes in an x86-64 body with AVX2 packs 8 lanes a chunk: one permute of the
-// chunk's words by a table row of their indices (`lir::lower` `compress_chunks`; `vpermps`, the `u32`
-// `swizzle_or_zero` entry of 8 lanes), not four byte shuffles of 4 lanes.
-@test
-fn an_avx2_compress_store_packs_eight_lanes_a_chunk() {
-    if cli::on_wasm() {
-        return;
-    }
-    let p = cli::proj_new();
-    p.mkfile(
-        "main.spc",
-        "import std::simd;\nimport std::cpu;\n@arch(x86_64)\n@target_feature(cpu::X86_64_V3)\n@noinline\n@used\nfn pack16(x: []f32, t: f32, out: []mut f32) usize {\n    let v = simd::load::<f32, 16>(x, 0);\n    return simd::compress_store(out, 0, v.greater_than(Simd::<f32, 16>::splat(t)), v);\n}\nfn main(args: Vector<str>) i32 {\n    return 0;\n}\n",
-    );
-    // The optimized body, printed; the link needs the target's C toolchain.
-    let r = cli::superc_env_in(
-        p.dir(),
-        "SC_LIR_PRINT",
-        "pack16",
-        "build --target=linux --arch=x86_64 --profile=release main.spc -o bin",
-    );
-    assert(r.out_has("pack16"), "the body is printed");
-    assert(r.out_has("@_mm256_permutevar8x32_epi32("), "a permute of 8 words");
-    assert(!r.out_has("@_mm_shuffle_epi8("), "no byte shuffle of 4 lanes");
-}
-
 // x86-64: the bits of a comparison's mask (`pmovmskb`, `vpmovmskb`) are a 32-bit register's, zero above
 // the lanes: their extension to 64 bits is no instruction (no `movzx`, no move of a register to itself)
 // at the baseline and in an AVX2 body. The bits of 8 lanes of 2 bytes, packed to bytes, repeat in bits 8
