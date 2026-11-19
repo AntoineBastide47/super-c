@@ -9228,16 +9228,40 @@ data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000
     }
 }
 
-// Where the target predicates vector loads and stores (`Cpu.vpred`), what the vectors leave runs as one
-// masked vector iteration instead of the scalar loop: the interleaved loop's rest vectorizes once more
-// (`BLOCK_EPI`) with a masked last iteration, whose loads read the elements left alone (the evaluator checks
-// each lane it reads) and whose sum keeps its other lanes.
+// Where the target predicates vector loads and stores (`Cpu.vpred`), what vectors of at least TAIL_LANES lanes
+// leave runs as one masked vector iteration instead of the scalar loop: the interleaved loop's rest
+// vectorizes once more (`BLOCK_EPI`) with a masked last iteration, whose load reads the elements left alone
+// (the evaluator checks each lane it reads) through the lane comparison itself (`Opt::pred_reads`), and whose
+// sum takes 0 in the other lanes (`zero_lanes`). A sum of 4 lanes keeps its scalar rest.
 @test
 fn remainders_run_as_one_masked_iteration() {
     let src = M"(lir ptr 8
+sym @h data global
 sym @w data global
-sym @sum fn global
-fn @sum
+sym @sum16 fn global
+sym @sum32 fn global
+data @h size 80 align 2 bytes 0100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f00200021002200230024002500260027002800
+data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
+fn @sum16
+  sig (i64) -> i16
+b0(v0: i64):
+  v1 = symaddr @h
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i16):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 2
+  v9 = load.i16 v8 align 1
+  v10 = add.i16 v6, v9
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+fn @sum32
   sig (i64) -> i32
 b0(v0: i64):
   v1 = symaddr @w
@@ -9256,70 +9280,74 @@ b2:
   jmp b1(v11, v10)
 b3:
   ret v6
-data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
 )";
     let (b, a) = optimized_cpu(src, VECTOR, false, 0, true);
-    let s = text_of(&a, "sum");
-    // The lane comparison stays for the load, which makes it its predicate (`Opt::pred_reads`).
-    assert(count(&s, "load_masked_ptr") == 1 && s.contains("vop.lt."), s.as_str());
-    for n in 0..26u64 {
+    let s = text_of(&a, "sum16");
+    assert(count(&s, "load_masked_ptr") == 1 && s.contains("vop.lt.") && !s.contains("vsel"), s.as_str());
+    let s32 = text_of(&a, "sum32");
+    assert(!s32.contains("masked"), s32.as_str());
+    for n in 0..41u64 {
         let x: []u64 = [n];
-        same_outcome(&b, &a, "sum", x, n * (n + 1) / 2, false);
+        same_outcome(&b, &a, "sum16", x, n * (n + 1) / 2, false);
+        if n < 26 {
+            same_outcome(&b, &a, "sum32", x, n * (n + 1) / 2, false);
+        }
     }
 }
 
-// The masked last iteration's other forms: a map in place (a store through the base it loads, so no
-// overlapping iteration), an unsigned minimum (a select's reduction), a sum of float products in order (its
-// lanes taken one by one, each while below the count left) and an update in place on one side of a branch
-// (its lanes both masks pick; vectors of one copy, since the rest of interleaved ones, `BLOCK_EPI`,
-// vectorizes only a body of one block). Each runs every count from 0 to 16 as the scalar loop does.
+// The masked last iteration's other forms: a map of bytes in place (a store through the base it loads, so no
+// overlapping iteration), an unsigned minimum (a select's reduction) and an `or` of values not 0 past the count
+// (each keeps its other lanes by a lane select), and an update in place on one side of a branch (its lanes
+// both masks pick; vectors of one copy, since the rest of interleaved ones, `BLOCK_EPI`, vectorizes only a
+// body of one block).
+// Each runs every count from 0 to 40 as the scalar loop does.
 @test
-fn masked_last_iterations_map_select_order_and_pick() {
+fn masked_last_iterations_map_select_or_and_pick() {
     let src = M"(lir ptr 8
-sym @a data global
-sym @b data global
-sym @h data global
-sym @fa data global
-sym @fb data global
+sym @a8 data global
+sym @b8 data global
+sym @hu data global
+sym @x16 data global
+sym @y16 data global
 sym @map fn global
 sym @minu fn global
-sym @dot fn global
+sym @ors fn global
 sym @pick fn global
-data @a size 64 align 3 bytes d4fefffff9feffff1effffff43ffffff68ffffff8dffffffb2ffffffd7fffffffcffffff21000000460000006b00000090000000b5000000da000000ff000000
-data @b size 64 align 3 bytes d8fffffffefffffff7fffffff9ffffffe9ffffffe2ffffff1a000000d4ffffffcdffffff3b000000bfffffffb8ffffff5c000000aaffffffa3ffffff7d000000
-data @h size 64 align 3 bytes 03007b07f30e6b166c06e40d5c155d05d50c4d144e04c60b3e133f03b70a2f123002a809201121019908111012008a07020f7a167b06f30d6b156c05e40c5c14
-data @fa size 64 align 3 bytes 000020c0000008c00000e0bf0000b0bf000080bf000020bf000080be0000003e0000003f0000603f0000a03f0000d03f00000040000018400000304000004840
-data @fb size 64 align 3 bytes 0000c03f0000a03f0000803f0000403f0000003f0000803e00000000000080be000000bf000040bf000080bf0000a0bf0000c0bf0000e0bf000000c0000010c0
+data @a8 size 40 align 3 bytes 0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489ae
+data @b8 size 40 align 3 bytes 05121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f300
+data @hu size 80 align 3 bytes 03007b07f30e6b166c06e40d5c155d05d50c4d144e04c60b3e133f03b70a2f123002a809201121019908111012008a07020f7a167b06f30d6b156c05e40c5c145d04d50b4d134e03c60a3e123f02b709
+data @x16 size 80 align 3 bytes d4fef9fe1eff43ff68ff8dffb2ffd7fffcff210046006b009000b500da00ff00240149016e019301b801dd01020227024c0271029602bb02e00205032a034f0374039903be03e30308042d0452047704
+data @y16 size 80 align 3 bytes d8fffefff7fff9ffe9ffe2ff1a00d4ffcdff3b00bfffb8ff5c00aaffa3ff7d0095ff8eff9e0080ff79ffbf006bff64ffe00056ff4fff010141ff3aff22012cff25ff430117ff10ff640102fffbfe8501
 fn @map
-  sig (i64, i64) -> i32
+  sig (i64, i64) -> i8
 b0(v0: i64, v1: i64):
-  v2 = symaddr @a
-  v3 = symaddr @b
+  v2 = symaddr @a8
+  v3 = symaddr @b8
   v4 = iconst.i64 0
   v5 = iconst.i64 1
-  v6 = iconst.i32 3
+  v6 = iconst.i8 3
   jmp b1(v4)
 b1(v7: i64):
   v8 = icmp.ult v7, v0
   br v8, b2, b3
 b2:
-  v9 = ptradd v2, v7 * 4
-  v10 = load.i32 v9 align 2
-  v11 = mul.i32 v10, v6
-  v12 = ptradd v3, v7 * 4
-  v13 = load.i32 v12 align 2
-  v14 = add.i32 v11, v13
-  store v14, v9 align 2
+  v9 = ptradd v2, v7 * 1
+  v10 = load.i8 v9 align 0
+  v11 = mul.i8 v10, v6
+  v12 = ptradd v3, v7 * 1
+  v13 = load.i8 v12 align 0
+  v14 = add.i8 v11, v13
+  store v14, v9 align 0
   v15 = add.i64 v7, v5
   jmp b1(v15)
 b3:
-  v16 = ptradd v2, v1 * 4
-  v17 = load.i32 v16 align 2
+  v16 = ptradd v2, v1 * 1
+  v17 = load.i8 v16 align 0
   ret v17
 fn @minu
   sig (i64) -> i16
 b0(v0: i64):
-  v1 = symaddr @h
+  v1 = symaddr @hu
   v2 = iconst.i64 0
   v3 = iconst.i64 1
   v4 = iconst.i16 -1
@@ -9336,67 +9364,65 @@ b2:
   jmp b1(v12, v11)
 b3:
   ret v6
-fn @dot
-  sig (i64) -> i32
+fn @ors
+  sig (i64) -> i8
 b0(v0: i64):
-  v1 = symaddr @fa
-  v2 = symaddr @fb
-  v3 = iconst.i64 0
-  v4 = iconst.i64 1
-  v5 = fconst.f32 0x0
-  jmp b1(v3, v5)
-b1(v6: i64, v7: f32):
+  v1 = symaddr @a8
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 0
+  v5 = iconst.i8 1
+  jmp b1(v2, v4)
+b1(v6: i64, v7: i8):
   v8 = icmp.ult v6, v0
   br v8, b2, b3
 b2:
-  v9 = ptradd v1, v6 * 4
-  v10 = load.f32 v9 align 2
-  v11 = ptradd v2, v6 * 4
-  v12 = load.f32 v11 align 2
-  v13 = fmul.f32 v10, v12
-  v14 = fadd.f32 v7, v13
-  v15 = add.i64 v6, v4
-  jmp b1(v15, v14)
+  v9 = ptradd v1, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = add.i8 v10, v5
+  v12 = or.i8 v7, v11
+  v13 = add.i64 v6, v3
+  jmp b1(v13, v12)
 b3:
-  v16 = bitcast.i32 v7
-  ret v16
+  ret v7
 fn @pick
-  sig (i64, i64) -> i32
+  sig (i64, i64) -> i16
 b0(v0: i64, v1: i64):
-  v2 = symaddr @a
-  v3 = symaddr @b
+  v2 = symaddr @x16
+  v3 = symaddr @y16
   v4 = iconst.i64 0
   v5 = iconst.i64 1
-  v6 = iconst.i32 0
+  v6 = iconst.i16 0
   jmp b1(v4)
 b1(v7: i64):
   v8 = icmp.ult v7, v0
   br v8, b2, b5
 b2:
-  v9 = ptradd v3, v7 * 4
-  v10 = load.i32 v9 align 2
+  v9 = ptradd v3, v7 * 2
+  v10 = load.i16 v9 align 1
   v11 = icmp.sgt v10, v6
-  v12 = ptradd v2, v7 * 4
-  v13 = load.i32 v12 align 2
+  v12 = ptradd v2, v7 * 2
+  v13 = load.i16 v12 align 1
   br v11, b3, b4
 b3:
-  v14 = add.i32 v13, v10
-  store v14, v12 align 2
+  v14 = add.i16 v13, v10
+  store v14, v12 align 1
   jmp b4
 b4:
   v15 = add.i64 v7, v5
   jmp b1(v15)
 b5:
-  v16 = ptradd v2, v1 * 4
-  v17 = load.i32 v16 align 2
+  v16 = ptradd v2, v1 * 2
+  v17 = load.i16 v16 align 1
   ret v17
 )";
     let (b, a) = optimized_cpu(src, VECTOR, false, 0, true);
-    for name in ["map", "minu", "dot"] {
+    for name in ["map", "minu", "ors"] {
         let s = text_of(&a, name);
         assert(s.contains("load_masked_ptr"), s.as_str());
     }
     assert(text_of(&a, "map").contains("store_masked_ptr"), text_of(&a, "map").as_str());
+    assert(text_of(&a, "minu").contains("vsel") && text_of(&a, "ors").contains("vsel"), text_of(&a, "ors").as_str());
     let one = lu::Budgets {
         peel: 0,
         partial: 0,
@@ -9411,8 +9437,8 @@ b5:
     let (_, a1) = optimized_cpu(src, one, false, 0, true);
     let sp = text_of(&a1, "pick");
     assert(count(&sp, "load_masked_ptr") == 2 && count(&sp, "store_masked_ptr") == 2, sp.as_str());
-    for n in 0..17u64 {
-        for j in 0..16u64 {
+    for n in 0..41u64 {
+        for j in [0u64, 7, 8, 15, 16, 23, 31, 39] {
             let x: []u64 = [n, j];
             let mut e = leval::Eval::new(&b);
             let o = e.run(b.find_symbol("map"), x);
@@ -9426,8 +9452,8 @@ b5:
         let o3 = e3.run(b.find_symbol("minu"), y);
         same_outcome(&b, &a, "minu", y, o3.value, false);
         let mut e4 = leval::Eval::new(&b);
-        let o4 = e4.run(b.find_symbol("dot"), y);
-        same_outcome(&b, &a, "dot", y, o4.value, false);
+        let o4 = e4.run(b.find_symbol("ors"), y);
+        same_outcome(&b, &a, "ors", y, o4.value, false);
     }
 }
 
