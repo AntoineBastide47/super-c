@@ -98,8 +98,11 @@ const VBYTES: u32 = 16;
 // The blocks of a chain unroll and jam takes before or after the inner loop (`jam_chain`).
 const JAM_CHAIN: u32 = 4;
 // The fewest lanes an iteration of an interleaved vector loop covers (lanes times copies) for one vector at a
-// time to run what it leaves, as LLVM's vectorizer chooses: past fewer, at most a few scalar iterations are left.
+// time to run what it leaves, as LLVM's vectorizer chooses: past fewer, at most a few scalar iterations are left
+// (but where one masked iteration runs the rest, `masked_tail`).
 const EPI_LANES: u32 = 16;
+// `zero_lanes` follows at most ZERO_DEPTH operations.
+const ZERO_DEPTH: u32 = 4;
 // The most instructions of a loop's body the vectorizer interleaves as scalars.
 const ILV_SIZE: u32 = 12;
 // `LoopOpt::guard_le` reads at most GUARD_UP blocks before a preheader, GUARD_AND conditions of each.
@@ -6848,7 +6851,7 @@ extend LoopOpt {
         // once without interleaving what interleaved vectors of EPI_LANES lanes or more leave (`BLOCK_EPI`).
         let pe = term(b, p).a;
         b.pool[pe as usize] = g;
-        let epi = nv > 1 && self.vlanes > 1 && (nv * self.vlanes >= EPI_LANES || self.vpred) && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
+        let epi = nv > 1 && self.vlanes > 1 && (nv * self.vlanes >= EPI_LANES || self.masked_tail(b, u, 1)) && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
         b.blocks.index_mut(h as usize).flags = hf | ast::pick(epi, BLOCK_EPI, BLOCK_NOVEC);
     }
 
@@ -7629,8 +7632,11 @@ extend LoopOpt {
         for r in 0..self.vred.len() {
             let nw = self.vmap[(self.vrup[r] - ub.start) as usize];
             let acc = VPARAM | mps + 1 + r as u32;
-            if self.vord[r] {
-                // Its lanes past the count kept it already.
+            // An ordered one's lanes past the count kept it already; an integer sum, `or` or `xor` of lanes
+            // the masked loads made 0 there (`zero_lanes`) keeps it too.
+            let t = b.insts[nw as usize];
+            let id0 = is_int(b.type_of(acc)) && (t.op == O_ADD || t.op == O_OR || t.op == O_XOR) && t.a == acc;
+            if self.vord[r] || id0 && zero_lanes(b, t.b, ZERO_DEPTH) {
                 self.args.push(nw);
                 continue;
             }
@@ -13966,6 +13972,30 @@ const fn down_by_one(b: &Body, t: Inst, q: Value) bool {
 
 // The `vop` lane comparison (a `SIMD_CMP_*` code and VOP_SIGNED) of comparison `t` (`icmp`, `fcmp`),
 // NONE16 when none matches it: an equality, an order of integers, an ordered order of floats, `une`.
+// Whether vector `v` of `b` is 0 in each lane a masked load of the masked last iteration leaves 0 (`masked_access`,
+// its fallback 0), `depth` operations deep: such a load; a product or AND with such a value; a sum, difference,
+// OR or XOR of two; an extension, truncation or shift of one.
+const fn zero_lanes(b: &Body, v: Value, depth: u32) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_VOP {
+        let c = (t.aux & VOP_CODE) as u32;
+        return t.b == 3 && c == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32 && zero_vec(b, b.pool[(t.a + 2) as usize]);
+    }
+    if depth == 0 || !is_vec(t.ty) {
+        return false;
+    }
+    if t.op == O_MUL || t.op == O_AND {
+        return zero_lanes(b, t.a, depth - 1) || zero_lanes(b, t.b, depth - 1);
+    }
+    if t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR {
+        return zero_lanes(b, t.a, depth - 1) && zero_lanes(b, t.b, depth - 1);
+    }
+    return (t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && zero_lanes(b, t.a, depth - 1);
+}
+
 const fn cmp_code(t: Inst) u16 {
     if t.op != O_ICMP && t.op != O_FCMP {
         return NONE16;

@@ -803,10 +803,111 @@ jobs:
           ../super-c build tails.spc --profile=release --target-feature=+sve -o t1
           echo "tails: $(./t0) $(./t1)"
           test "$(./t0)" = "$(./t1)"
+          cat > bench2.spc <<'SPC'
+          import std::platform::clock;
+
+          @noinline
+          fn sum_i32(a: []i32) i32 {
+              let mut s: i32 = 0;
+              for i in 0..a.len() {
+                  s = s.wrapping_add(a[i]);
+              }
+              return s;
+          }
+
+          @noinline
+          fn scale_in_place(a: []mut i32, b: []i32) {
+              for i in 0..a.len() {
+                  a[i] = a[i].wrapping_mul(3).wrapping_add(b[i]);
+              }
+          }
+
+          @noinline
+          fn min_u16(a: []u16) u16 {
+              let mut m: u16 = 65535;
+              for i in 0..a.len() {
+                  if a[i] < m {
+                      m = a[i];
+                  }
+              }
+              return m;
+          }
+
+          @noinline
+          fn add_u8(a: []mut u8, b: []u8) {
+              for i in 0..a.len() {
+                  a[i] = a[i].wrapping_add(b[i]);
+              }
+          }
+
+          @noinline
+          fn max_u8(a: []u8) u8 {
+              let mut m: u8 = 0;
+              for i in 0..a.len() {
+                  if a[i] > m {
+                      m = a[i];
+                  }
+              }
+              return m;
+          }
+
+          fn main() i32 {
+              let mut ai = Vector::<i32>::new();
+              let mut bi = Vector::<i32>::new();
+              let mut au = Vector::<u16>::new();
+              let mut a8 = Vector::<u8>::new();
+              let mut b8 = Vector::<u8>::new();
+              for k in 0..1024usize {
+                  ai.push((k * 37) as i32 - 900);
+                  bi.push(5 - (k * 11) as i32);
+                  au.push(((k * 7919) % 6007) as u16 + 3);
+                  a8.push((k * 29 % 251) as u8);
+                  b8.push((k * 13 % 241) as u8);
+              }
+              let mut h: u64 = 0;
+              // Lengths below `top`, from a linear congruential sequence: the remainders' branches mispredict.
+              for top in [8usize, 32, 128] {
+                  let mut lens = Vector::<usize>::new();
+                  let mut x: u64 = 12345;
+                  for _ in 0..4096 {
+                      x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                      lens.push((x >> 33) as usize % top);
+                  }
+                  let reps: usize = 2000000 / (top + 8);
+                  let mut t = [0u64; 6];
+                  for f in 0..5usize {
+                      let t0 = clock::monotonic_ns();
+                      for r in 0..reps {
+                          let n = lens[r & 4095];
+                          if f == 0 {
+                              h = h.wrapping_add(sum_i32(ai.as_slice()[0..n]) as u64);
+                          } else if f == 1 {
+                              scale_in_place(ai.as_mut_slice()[0..n], bi.as_slice()[0..n]);
+                          } else if f == 2 {
+                              h = h.wrapping_add(min_u16(au.as_slice()[0..n]) as u64);
+                          } else if f == 3 {
+                              add_u8(a8.as_mut_slice()[0..n], b8.as_slice()[0..n]);
+                          } else {
+                              h = h.wrapping_add(max_u8(a8.as_slice()[0..n]) as u64);
+                          }
+                      }
+                      t[f] = (clock::monotonic_ns() - t0) * 1000 / reps as u64;
+                  }
+                  println("random n < {}: sum {} scale {} min16 {} add8 {} max8 {} (ps/call)", top, t[0], t[1], t[2], t[3], t[4]);
+              }
+              for k in 0..1024usize {
+                  h = h.wrapping_add(ai[k] as u64).wrapping_add(a8[k] as u64);
+              }
+              println("check {}", h);
+              return 0;
+          }
+          SPC
           ../super-c build bench.spc --profile=release -o b0
           ../super-c build bench.spc --profile=release --target-feature=+sve -o b1
+          ../super-c build bench2.spc --profile=release -o c0
+          ../super-c build bench2.spc --profile=release --target-feature=+sve -o c1
           for r in 1 2; do
-            for v in b0 b1; do
+            for v in b0 b1 c0 c1; do
               echo "== $v round $r"
               "./$v"
             done
