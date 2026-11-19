@@ -21605,12 +21605,22 @@ fn an_avx2_compress_store_packs_eight_lanes_a_chunk() {
 
 // x86-64: the bits of a comparison's mask (`pmovmskb`, `vpmovmskb`) are a 32-bit register's, zero above
 // the lanes: their extension to 64 bits is no instruction (no `movzx`, no move of a register to itself)
-// at the baseline and in an AVX2 body. Both give the C results.
+// at the baseline and in an AVX2 body. The bits of 8 lanes of 2 bytes, packed to bytes, repeat in bits 8
+// to 15: `@halves` extends them (one `movzx`). All give the C results.
 @test
 fn x64_mask_bits_extend_without_an_instruction() {
     let lir = M"(lir ptr 8
 sym @bits fn global
 sym @wide fn global
+sym @halves fn global
+fn @halves
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v8i16 v0 align 0
+  v3 = load.v8i16 v1 align 0
+  v4 = vop.eq.i8 (v2, v3)
+  v5 = zext.i64 v4
+  ret v5
 fn @bits
   sig (ptr, ptr) -> i64
 b0(v0: ptr, v1: ptr):
@@ -21638,13 +21648,15 @@ b0(v0: ptr, v1: ptr):
         extends += (obj[i] == 0x0F && (m == 0xB6 || m == 0xB7)) as u32;
         extends += ((obj[i] == 0x89 || obj[i] == 0x8B) && m >= 0xC0 && (m >> 3 & 7) == (m & 7)) as u32;
     }
-    assert_eq(extends, 0);
+    assert_eq(extends, 1);
     if !cli::has_cc() {
         return; // a C driver links it
     }
     let drv = M"(#include <stdint.h>
+#include <string.h>
 int64_t bits(const uint8_t *, const uint8_t *);
 int64_t wide(const uint8_t *, const uint8_t *);
+int64_t halves(const uint8_t *, const uint8_t *);
 int main(void) {
   uint8_t a[32], b[32];
   int64_t want = 0;
@@ -21655,6 +21667,10 @@ int main(void) {
   }
   if (bits(a, b) != (want & 0xFFFF)) return 1;
   if (wide(a, b) != want) return 2;
+  if (halves(a, a) != 0xFF) return 3;
+  memcpy(b, a, 16);
+  b[5] ^= 1;
+  if (halves(a, b) != 0xFB) return 4;
   return 0;
 }
 )";

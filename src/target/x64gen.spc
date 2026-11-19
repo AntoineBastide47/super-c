@@ -11916,8 +11916,11 @@ extend Gen {
         if n < all {
             self.c.alu_ri(x::AND, 4, rd, ((1u32 << n) - 1) as i32);
         }
-        // The move wrote the 32-bit register: no bit above the lanes' is set.
-        self.cr.va.index_mut(i as usize).clean = true;
+        // The move wrote the 32-bit register: no bit above the lanes' is set, but after 8 packed 2-byte
+        // lanes, whose bits bits 8 to 15 repeat.
+        if eb != 2 || n < all {
+            self.cr.va.index_mut(i as usize).clean = true;
+        }
     }
 
     // Lane choice `ops[1]` where bitmask `ops[0]` has the lane's bit, else `ops[2]` (vectors in xmm
