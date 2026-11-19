@@ -195,8 +195,12 @@ pub(package) struct Package {
     /// sets `off` for a profile at opt-level 0 or 1).
     pub(package) simd_dispatch: String,
     /// The copies' feature sets: `simd_dispatch`'s levels beyond the build's, closed, by size (the
-    /// load computes them). Empty off x86_64 and with `off`.
+    /// load computes them); on arm64 Linux the target's run-time levels (`Target.run_time`: LSE and RCPC,
+    /// then CSSC too) beyond the build's. Empty elsewhere and with `off`.
     pub(package) simd_levels: Vector<cf::CpuFeatureSet>,
+    /// Per level of `simd_levels` from `Target.run_time`, the HWCAP and HWCAP2 bits that report it (two
+    /// words a level, `Target.run_time_hwcap`); empty for levels the CPU detector reports.
+    pub(package) simd_hwcap: Vector<u64>,
     /// The effective features of the `@target_feature` functions, joined (`check_feature_calls`): what
     /// some function of the program may plan with beyond `features`.
     pub(package) fn_union: cf::CpuFeatureSet,
@@ -3153,7 +3157,7 @@ extend Package {
         if self.std_missing(std_dir) {
             return;
         }
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.load_prelude_files(std_dir, target) {
             self.add_build_module(target);
         }
@@ -8121,9 +8125,68 @@ extend Package {
     }
 
     // The copies' feature sets (`simd_levels`) of `simd_dispatch` over the build's features.
-    fn simd_levels_compute(self: &mut Self) {
+    /// Whether a level of `simd_levels` holds a vector backend entry the build's features do not: the
+    /// vector code's copies (`CEmit::dispatch_prologue`).
+    pub(package) const fn levels_plan_vectors(self: &Self) bool {
+        let build = cf::close(self.features);
+        for k in 0..self.simd_levels.len() {
+            for i in 0..self.simd_table.len() {
+                let efs = self.simd_table.at(i).fs;
+                if cf::contains(self.simd_levels[k], efs) && !cf::contains(build, efs) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Whether a level of `simd_levels` has a scalar feature the build's features lack, which a function's
+    /// run-time copy may take (`lir::ir::CPU_SCALAR`, the code generators' copies).
+    pub(package) const fn levels_add_scalar(self: &Self) bool {
+        let build = cf::close(self.features);
+        let names: [str; 9] = ["popcnt", "lzcnt", "bmi1", "bmi2", "movbe", "fma", "lse", "rcpc", "cssc"];
+        for k in 0..self.simd_levels.len() {
+            for nm in names {
+                let f = cf::find(nm, self.arch);
+                if f >= 0 && cf::row(f as usize).arch == self.arch && cf::has(self.simd_levels[k], f as usize) && !cf::has(
+                    build,
+                    f as usize,
+                ) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    fn simd_levels_compute(self: &mut Self, target: i32) {
         self.simd_levels.clear();
-        if !tgt::isa(self.arch).levels || cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+        self.simd_hwcap.clear();
+        if cf::is_empty(self.features) || self.simd_dispatch.as_str() == "off" {
+            return;
+        }
+        // The target's run-time levels (`Target.run_time`: arm64 Linux's LSE and RCPC, then CSSC), each
+        // the build's features beyond: one the build has already is no level.
+        if let Some(r) = tgt::target_of(target, self.arch) {
+            if r.run_time.len() != 0 {
+                let mut q: usize = 0;
+                for lv in r.run_time.split(";") {
+                    let mut s = self.features;
+                    let mut err = String::new();
+                    if cf::apply(lv, target, self.arch, false, &mut s, &mut err) && !cf::contains(
+                        cf::close(self.features),
+                        s,
+                    ) {
+                        self.simd_levels.push(cf::close(s));
+                        self.simd_hwcap.push(r.run_time_hwcap[2 * q]);
+                        self.simd_hwcap.push(r.run_time_hwcap[2 * q + 1]);
+                    }
+                    q += 1;
+                }
+                return;
+            }
+        }
+        if !tgt::isa(self.arch).levels {
             return;
         }
         let spec = if self.simd_dispatch.len() == 0 {
@@ -8177,7 +8240,7 @@ extend Package {
     }
 
     fn load_prelude(self: &mut Self, std_dir: str, target: i32, user_vectors: bool) {
-        self.simd_levels_compute();
+        self.simd_levels_compute(target);
         if self.std_missing(std_dir) || !self.load_prelude_files(std_dir, target) {
             return;
         }
@@ -8330,8 +8393,13 @@ extend Package {
                     self.modules[id as usize].backend = true;
                 }
             }
-            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`).
-            if self.simd_levels.len() != 0 {
+            // The run-time choice of the copies reads the CPU detector (`sc_cpu_words`); a target's own
+            // run-time level the kernel's HWCAP bits (`Target.run_time_hwcap`).
+            let hwcap = switch tgt::target_of(target, self.arch) {
+                Some(r) => r.run_time_hwcap[0] != 0,
+                None => false,
+            };
+            if self.simd_levels.len() != 0 && !hwcap {
                 let cf9 = join2(dirname_of(std_dir), "ffi/sc_cpu.spc");
                 if dutil::file_mtime(&cf9) != 0 {
                     let _ = self.load_module("sc_cpu", &cf9, self.bootstrap, target);

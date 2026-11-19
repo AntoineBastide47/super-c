@@ -205,7 +205,8 @@ pub(package) const fn cset(sf: bool, rd: u32, cond: u32) u32 {
     return csel(sf, 0, 1, rd, ZR, ZR, invert(cond));
 }
 
-/// Two-source operations: `opc` 2 UDIV, 3 SDIV, 8 LSLV, 9 LSRV, 10 ASRV, 11 RORV.
+/// Two-source operations: `opc` 2 UDIV, 3 SDIV, 8 LSLV, 9 LSRV, 10 ASRV, 11 RORV, and FEAT_CSSC's 24
+/// SMAX, 25 UMAX, 26 SMIN, 27 UMIN.
 pub(package) const fn dp2(sf: bool, opc: u32, rd: u32, rn: u32, rm: u32) u32 {
     return sfb(sf) | 0x1AC00000 | rm << 16 | opc << 10 | rn << 5 | rd;
 }
@@ -216,8 +217,28 @@ pub(package) const DP2_LSLV: u32 = 8;
 pub(package) const DP2_LSRV: u32 = 9;
 pub(package) const DP2_ASRV: u32 = 10;
 pub(package) const DP2_RORV: u32 = 11;
+pub(package) const DP2_SMAX: u32 = 24;
+pub(package) const DP2_UMAX: u32 = 25;
+pub(package) const DP2_SMIN: u32 = 26;
+pub(package) const DP2_UMIN: u32 = 27;
 
-/// One-source operations: `opc` 0 RBIT, 1 REV16, 2 REV (32) or REV32 (64), 3 REV (64), 4 CLZ, 5 CLS.
+/// FEAT_CSSC's minimum or maximum of a register and an 8-bit immediate: `opc` 0 SMAX, 1 UMAX, 2 SMIN,
+/// 3 UMIN; `imm` signed for SMAX and SMIN, unsigned for the others (`minmax_imm_fits`).
+pub(package) const fn minmax_imm(sf: bool, opc: u32, rd: u32, rn: u32, imm: i64) u32 {
+    return sfb(sf) | 0x11C00000 | opc << 18 | (imm as u32 & 0xFF) << 10 | rn << 5 | rd;
+}
+
+/// Whether `imm` fits the immediate of `minmax_imm`'s `opc`.
+pub(package) const fn minmax_imm_fits(opc: u32, imm: i64) bool {
+    return if (opc & 1) == 0 {
+        imm >= -128 && imm <= 127
+    } else {
+        imm >= 0 && imm <= 255
+    };
+}
+
+/// One-source operations: `opc` 0 RBIT, 1 REV16, 2 REV (32) or REV32 (64), 3 REV (64), 4 CLZ, 5 CLS,
+/// and FEAT_CSSC's 6 CTZ, 7 CNT, 8 ABS.
 pub(package) const fn dp1(sf: bool, opc: u32, rd: u32, rn: u32) u32 {
     return sfb(sf) | 0x5AC00000 | opc << 10 | rn << 5 | rd;
 }
@@ -227,6 +248,9 @@ pub(package) const DP1_REV16: u32 = 1;
 pub(package) const DP1_REV32: u32 = 2;
 pub(package) const DP1_REV64: u32 = 3;
 pub(package) const DP1_CLZ: u32 = 4;
+pub(package) const DP1_CTZ: u32 = 6;
+pub(package) const DP1_CNT: u32 = 7;
+pub(package) const DP1_ABS: u32 = 8;
 
 /// MADD (`sub` false) or MSUB: `rd` = ra +- rn * rm.
 pub(package) const fn madd(sf: bool, sub: bool, rd: u32, rn: u32, rm: u32, ra: u32) u32 {

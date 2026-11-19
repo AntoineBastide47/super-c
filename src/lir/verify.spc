@@ -369,6 +369,19 @@ extend Verifier {
                 "an integer vector of the result's type and one of its bytes in narrower lanes",
             );
         }
+        if op == O_VDOT {
+            let tc = b.type_of(t.c);
+            return self.need(
+                name,
+                b,
+                i,
+                is_vec(t.ty) && is_int(lane_type(t.ty)) && ta == t.ty && is_vec(tb) && is_int(lane_type(tb)) && tc == tb && type_bytes(
+                    tb,
+                    8,
+                ) == type_bytes(t.ty, 8) && lanes(tb) > lanes(t.ty) && (t.aux & ~DOT_SIGNED) == 0,
+                "an integer vector of the result's type and two of its bytes in narrower lanes",
+            );
+        }
         if op == O_VMULW {
             let h = (t.aux & MULW_HIGH) != 0;
             return self.need(

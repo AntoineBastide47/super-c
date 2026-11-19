@@ -224,7 +224,7 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   barriers, cycle counter, floating-point control state, the context switch); `O_ASM`; terminators.
 - Vectors of a register's size may live in vector registers (`vec_homes`: a vector some instruction
   reads or defines in memory stays there). Register forms: lane-wise arithmetic, comparisons, selects,
-  splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`), the `O_VOP`s
+  splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`; x86-64 4- and 8-byte integer inserts by PINSRD/PINSRQ with SSE4.1, else through memory), the `O_VOP`s
   with a form (`vop_reg`, arm64: NEON lane rules, masks, choices, bitcasts, shifts by a scalar,
   unchecked gathers, masked loads and stores, absolute differences), conversions (`conv_reg`: arm64
   each `Isa.vector_ops` allows; x86-64 SSE2 for integers to twice or half their width, i32 and f32, f32
@@ -328,11 +328,22 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
 - x86-64 folds single-use f32/f64 loads into the right memory operand of scalar arithmetic
   (`FOLD_LDOP`). Preserve operand order and reject intervening memory writes.
 - `O_ASM` and module-level assembly assemble through the instruction table (`src/target/assembler.spc`
-  for directives, labels and sections; the instruction set's assembler for instructions).
+  for directives, labels and sections; the instruction set's assembler for instructions). A second
+  entry into a function's code (`.alt_entry name`, Apple's spelling, on every format) gets `SF_ALT`:
+  Mach-O writes `N_ALT_ENTRY` (with `MH_SUBSECTIONS_VIA_SYMBOLS` the linker keeps it with the code
+  before it), and `place::parts_of` splits no function section at it; a branch between the entries
+  keeps its relocation (`one_part`). The arm64 tables hold SME's ZA tile operands, the 16-bit half
+  tiles (`C::ZH`) of SME2's two-way SMOPA, SMOPS, UMOPA and UMOPS among them.
 - x86-64: a body compiled for AVX2 emits the VEX form of every SSE operation (`x::Code.vex`), also
   of an intrinsic template's legacy statements. A legacy SSE operation the generator or a template
-  uses needs its VEX.128 row (`v` and the mnemonic) in `x64tab` and its shape in `x::vex_shape`;
+  uses needs its VEX.128 row (`v` and the mnemonic) in `x64tab` and its shape in `x::vex_shape`
+  (`x::sse_op`: not SHA's legacy-only operations);
   `x64_sse_operations_take_vex_forms` checks every legacy row.
+- arm64 constant-time bodies with `lir::Package.dit` save PSTATE.DIT in a frame slot at entry, set it
+  with an ISB unless set (`dit_on`; on Linux only where the registry's byte `__sc_dit` says HWCAP has
+  it), and restore it at each return: no tail call or shrink-wrapping in such a body.
+- Scalar copy levels (`place::copy_levels`, `copy_differs`): see super-c-compiler-internals
+  `simd-backends.md`.
 
 ## Calling convention
 

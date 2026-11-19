@@ -4,6 +4,8 @@
 // branch or an index. No operation panics. Import with `import std::crypto::sha3;`.
 
 import std::crypto::secret as *;
+import std::cpu;
+import std::cpu::detect as detect;
 import std::spec::arith;
 import std::spec::seq as *;
 
@@ -173,8 +175,8 @@ spec fn rounds(a: [u64; 25], n: int) [u64; 25]
     };
 }
 
-// The values of the lanes of `s`.
-pub(package) spec fn values(s: [Secret<u64>; 25]) [u64; 25] {
+/// The values of the lanes of `s`.
+pub spec fn values(s: [Secret<u64>; 25]) [u64; 25] {
     return [
         s[0].value(),
         s[1].value(),
@@ -397,6 +399,318 @@ pub(package) fn keccak_ct(s: [Secret<u64>; 25]) [Secret<u64>; 25]
     return x;
 }
 
+// Chi, then iota of round `i` (3.2.4, 3.2.5).
+@arch(aarch64)
+spec fn chi_iota(b: [u64; 25], i: usize) [u64; 25]
+    requires i < 24
+{
+    let c = chi(b);
+    return [
+        c[0] ^ RC[i],
+        c[1],
+        c[2],
+        c[3],
+        c[4],
+        c[5],
+        c[6],
+        c[7],
+        c[8],
+        c[9],
+        c[10],
+        c[11],
+        c[12],
+        c[13],
+        c[14],
+        c[15],
+        c[16],
+        c[17],
+        c[18],
+        c[19],
+        c[20],
+        c[21],
+        c[22],
+        c[23],
+        c[24],
+    ];
+}
+
+// ---- The processor's SHA-3 instructions ----
+//
+// arm64's EOR3, RAX1, XAR and BCAX (FEAT_SHA3) compute theta's column sums and their rotated differences,
+// theta and rho in one step per lane, and chi. Their meaning is Arm's pseudocode (`std::crypto::secret`);
+// the permutation below holds each lane in lane 0 of a pair (lane 1 a copy) for all 24 rounds and is
+// proved to compute `rounds`.
+
+// The values of lane 0 of each pair of `p`.
+@arch(aarch64)
+spec fn lo(p: [[Secret<u64>; 2]; 25]) [u64; 25] {
+    return [
+        p[0][0].value(),
+        p[1][0].value(),
+        p[2][0].value(),
+        p[3][0].value(),
+        p[4][0].value(),
+        p[5][0].value(),
+        p[6][0].value(),
+        p[7][0].value(),
+        p[8][0].value(),
+        p[9][0].value(),
+        p[10][0].value(),
+        p[11][0].value(),
+        p[12][0].value(),
+        p[13][0].value(),
+        p[14][0].value(),
+        p[15][0].value(),
+        p[16][0].value(),
+        p[17][0].value(),
+        p[18][0].value(),
+        p[19][0].value(),
+        p[20][0].value(),
+        p[21][0].value(),
+        p[22][0].value(),
+        p[23][0].value(),
+        p[24][0].value(),
+    ];
+}
+
+// Theta and rho-pi of `a` with EOR3, RAX1 and XAR.
+@always_inline
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+fn theta_rho_pi_a64(a: [[Secret<u64>; 2]; 25]) [[Secret<u64>; 2]; 25]
+    ensures |r| lo(r) == rho_pi(theta(lo(a)))
+{
+    let c0 = eor3(eor3(a[0], a[5], a[10]), a[15], a[20]);
+    let c1 = eor3(eor3(a[1], a[6], a[11]), a[16], a[21]);
+    let c2 = eor3(eor3(a[2], a[7], a[12]), a[17], a[22]);
+    let c3 = eor3(eor3(a[3], a[8], a[13]), a[18], a[23]);
+    let c4 = eor3(eor3(a[4], a[9], a[14]), a[19], a[24]);
+    let d0 = rax1(c4, c1);
+    let d1 = rax1(c0, c2);
+    let d2 = rax1(c1, c3);
+    let d3 = rax1(c2, c4);
+    let d4 = rax1(c3, c0);
+    return [
+        xar::<0>(a[0], d0),
+        xar::<20>(a[6], d1),
+        xar::<21>(a[12], d2),
+        xar::<43>(a[18], d3),
+        xar::<50>(a[24], d4),
+        xar::<36>(a[3], d3),
+        xar::<44>(a[9], d4),
+        xar::<61>(a[10], d0),
+        xar::<19>(a[16], d1),
+        xar::<3>(a[22], d2),
+        xar::<63>(a[1], d1),
+        xar::<58>(a[7], d2),
+        xar::<39>(a[13], d3),
+        xar::<56>(a[19], d4),
+        xar::<46>(a[20], d0),
+        xar::<37>(a[4], d4),
+        xar::<28>(a[5], d0),
+        xar::<54>(a[11], d1),
+        xar::<49>(a[17], d2),
+        xar::<8>(a[23], d3),
+        xar::<2>(a[2], d2),
+        xar::<9>(a[8], d3),
+        xar::<25>(a[14], d4),
+        xar::<23>(a[15], d0),
+        xar::<62>(a[21], d1),
+    ];
+}
+
+// Chi and iota of round `i` on `b` with BCAX and EOR3.
+@always_inline
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+fn chi_iota_a64(b: [[Secret<u64>; 2]; 25], i: usize) [[Secret<u64>; 2]; 25]
+    requires i < 24
+    ensures |r| lo(r) == chi_iota(lo(b), i)
+{
+    let rc: [Secret<u64>; 2] = [Secret::new(RC[i]), Secret::new(RC[i])];
+    let z: [Secret<u64>; 2] = [Secret::new(0u64), Secret::new(0u64)];
+    return [
+        eor3(bcax(b[0], b[2], b[1]), rc, z),
+        bcax(b[1], b[3], b[2]),
+        bcax(b[2], b[4], b[3]),
+        bcax(b[3], b[0], b[4]),
+        bcax(b[4], b[1], b[0]),
+        bcax(b[5], b[7], b[6]),
+        bcax(b[6], b[8], b[7]),
+        bcax(b[7], b[9], b[8]),
+        bcax(b[8], b[5], b[9]),
+        bcax(b[9], b[6], b[5]),
+        bcax(b[10], b[12], b[11]),
+        bcax(b[11], b[13], b[12]),
+        bcax(b[12], b[14], b[13]),
+        bcax(b[13], b[10], b[14]),
+        bcax(b[14], b[11], b[10]),
+        bcax(b[15], b[17], b[16]),
+        bcax(b[16], b[18], b[17]),
+        bcax(b[17], b[19], b[18]),
+        bcax(b[18], b[15], b[19]),
+        bcax(b[19], b[16], b[15]),
+        bcax(b[20], b[22], b[21]),
+        bcax(b[21], b[23], b[22]),
+        bcax(b[22], b[24], b[23]),
+        bcax(b[23], b[20], b[24]),
+        bcax(b[24], b[21], b[20]),
+    ];
+}
+
+// Round `i` of `a` (FIPS 202, 3.3) with arm64's SHA-3 instructions.
+@always_inline
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+fn round_a64(a: [[Secret<u64>; 2]; 25], i: usize) [[Secret<u64>; 2]; 25]
+    requires i < 24
+    ensures |r| lo(r) == round(lo(a), i)
+{
+    assert round(lo(a), i) == chi_iota(rho_pi(theta(lo(a))), i) by {};
+    return chi_iota_a64(theta_rho_pi_a64(a), i);
+}
+
+// Keccak-f[1600] (3.3) with arm64's SHA-3 instructions: 24 rounds on pairs.
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+fn keccak_a64(s: [Secret<u64>; 25]) [Secret<u64>; 25]
+    ensures |r| values(r) == rounds(values(s), 24)
+{
+    let mut p: [[Secret<u64>; 2]; 25] = [
+        [s[0], s[0]],
+        [s[1], s[1]],
+        [s[2], s[2]],
+        [s[3], s[3]],
+        [s[4], s[4]],
+        [s[5], s[5]],
+        [s[6], s[6]],
+        [s[7], s[7]],
+        [s[8], s[8]],
+        [s[9], s[9]],
+        [s[10], s[10]],
+        [s[11], s[11]],
+        [s[12], s[12]],
+        [s[13], s[13]],
+        [s[14], s[14]],
+        [s[15], s[15]],
+        [s[16], s[16]],
+        [s[17], s[17]],
+        [s[18], s[18]],
+        [s[19], s[19]],
+        [s[20], s[20]],
+        [s[21], s[21]],
+        [s[22], s[22]],
+        [s[23], s[23]],
+        [s[24], s[24]],
+    ];
+    let mut i: usize = 0;
+    while i < 24
+        invariant i <= 24
+        invariant lo(p) == rounds(values(s), i as int)
+    {
+        round_next(values(s), lo(p), i as int);
+        p = round_a64(p, i);
+        i += 1;
+    }
+    return [
+        p[0][0],
+        p[1][0],
+        p[2][0],
+        p[3][0],
+        p[4][0],
+        p[5][0],
+        p[6][0],
+        p[7][0],
+        p[8][0],
+        p[9][0],
+        p[10][0],
+        p[11][0],
+        p[12][0],
+        p[13][0],
+        p[14][0],
+        p[15][0],
+        p[16][0],
+        p[17][0],
+        p[18][0],
+        p[19][0],
+        p[20][0],
+        p[21][0],
+        p[22][0],
+        p[23][0],
+        p[24][0],
+    ];
+}
+
+// Keccak-f[1600] on `s`, with the processor's SHA-3 instructions when `hw` (the machine has them, `hw_ok`).
+@constant_time
+@arch(aarch64)
+fn keccak_on(s: [Secret<u64>; 25], hw: bool) [Secret<u64>; 25]
+    ensures |r| values(r) == rounds(values(s), 24)
+{
+    if hw {
+        return unsafe keccak_a64(s);
+    }
+    return keccak_ct(s);
+}
+
+@constant_time
+@arch(x86_64)
+fn keccak_on(s: [Secret<u64>; 25], _hw: bool) [Secret<u64>; 25]
+    ensures |r| values(r) == rounds(values(s), 24)
+{
+    return keccak_ct(s);
+}
+
+@constant_time
+@arch(wasm32)
+fn keccak_on(s: [Secret<u64>; 25], _hw: bool) [Secret<u64>; 25]
+    ensures |r| values(r) == rounds(values(s), 24)
+{
+    return keccak_ct(s);
+}
+
+// Whether this machine has the SHA-3 instructions `keccak_on` uses.
+@arch(aarch64)
+fn hw_ok() bool {
+    return detect::has(cpu::Feature::Sha3);
+}
+
+@arch(x86_64)
+const fn hw_ok() bool {
+    return false;
+}
+
+@arch(wasm32)
+const fn hw_ok() bool {
+    return false;
+}
+
+/// Keccak-f[1600] (FIPS 202, 3.3), the specification `keccak_f1600` meets.
+pub spec fn keccak_f(a: [u64; 25]) [u64; 25] {
+    return rounds(a, 24);
+}
+
+/// Keccak-f[1600] of state `s` (FIPS 202, 3.3; lane `x + 5y` at index `x + 5 * y`), with the processor's
+/// SHA-3 instructions where the machine has them (arm64 FEAT_SHA3).
+@constant_time
+pub fn keccak_f1600(s: [Secret<u64>; 25]) [Secret<u64>; 25]
+    ensures |r| values(r) == keccak_f(values(s))
+{
+    return keccak_on(s, hw_ok());
+}
+
+/// Keccak-f[1600] of state `s` without the processor's SHA-3 instructions: the same state as `keccak_f1600`.
+@constant_time
+pub fn keccak_f1600_portable(s: [Secret<u64>; 25]) [Secret<u64>; 25]
+    ensures |r| values(r) == keccak_f(values(s))
+{
+    return keccak_ct(s);
+}
+
 // Byte `p` of `m` padded for a rate of `rate` bytes with domain byte `ds` (5.1, B.2): the message, `ds`,
 // zeros, and 0x80 in the last byte of the last block; 0 outside it.
 pub(package) spec fn padded(m: Seq<Secret<u8>>, rate: int, ds: u8, p: int) u8 {
@@ -553,13 +867,35 @@ const fn pad_byte(m: []Secret<u8>, rate: usize, ds: u8, p: usize) Secret<u8>
     return Secret::new(0u8);
 }
 
-// The little-endian lane at byte `p` of the padded message.
+// Byte `p` of the padded message, inside the message: its byte, the padding past it.
+@constant_time
+const fn msg_byte(m: []Secret<u8>, rate: usize, ds: u8, p: usize) Secret<u8>
+    requires rate == 72 || rate == 136 || rate == 168
+    requires p < m.len()
+    ensures |r| r.value() == padded(m.view(), rate as int, ds, p as int)
+{
+    return m[p];
+}
+
+// The little-endian lane at byte `p` of the padded message: of the message's bytes alone where it lies
+// inside the message (a full block's), with no padding position computed.
 @constant_time
 fn lane_ct(m: []Secret<u8>, rate: usize, ds: u8, p: usize) Secret<u64>
     requires rate == 72 || rate == 136 || rate == 168
     requires p as int + 8 <= m.len() as int + 200
     ensures |r| r.value() == lane(m.view(), rate as int, ds, p as int)
 {
+    if p + 8 <= m.len() {
+        let c0 = msg_byte(m, rate, ds, p).cast::<u64>();
+        let c1 = msg_byte(m, rate, ds, p + 1).cast::<u64>();
+        let c2 = msg_byte(m, rate, ds, p + 2).cast::<u64>();
+        let c3 = msg_byte(m, rate, ds, p + 3).cast::<u64>();
+        let c4 = msg_byte(m, rate, ds, p + 4).cast::<u64>();
+        let c5 = msg_byte(m, rate, ds, p + 5).cast::<u64>();
+        let c6 = msg_byte(m, rate, ds, p + 6).cast::<u64>();
+        let c7 = msg_byte(m, rate, ds, p + 7).cast::<u64>();
+        return c0 | c1 << 8 | c2 << 16 | c3 << 24 | c4 << 32 | c5 << 40 | c6 << 48 | c7 << 56;
+    }
     let b0 = pad_byte(m, rate, ds, p).cast::<u64>();
     let b1 = pad_byte(m, rate, ds, p + 1).cast::<u64>();
     let b2 = pad_byte(m, rate, ds, p + 2).cast::<u64>();
@@ -679,6 +1015,7 @@ fn absorb(m: []Secret<u8>, rate: usize, ds: u8) [Secret<u64>; 25]
     requires rate == 72 || rate == 136 || rate == 168
     ensures |s| values(s) == squeezed(m.view(), rate as int, ds, 0)
 {
+    let hw = hw_ok();
     let nb = m.len() / rate + 1;
     assert nb as int == blocks(m.view().len(), rate as int) by {};
     let z = Secret::new(0u64);
@@ -693,7 +1030,7 @@ fn absorb(m: []Secret<u8>, rate: usize, ds: u8) [Secret<u64>; 25]
         arith::mul_le(b as int, m.len() as int / rate as int, rate as int);
         let x = mix_ct(s, m, rate, ds, b, p);
         absorbed_next(m.view(), rate as int, ds, b as int, values(s), values(x));
-        s = keccak_ct(x);
+        s = keccak_on(x, hw);
         p += rate;
         b += 1;
     }
@@ -718,6 +1055,7 @@ fn squeeze(m: []Secret<u8>, rate: usize, ds: u8, out: []mut Secret<u8>)
     ensures out.len() == old(out.len())
     ensures forall j in 0..out.len() { out.view()[j as int].value() == output(m.view(), rate as int, ds, j as int) }
 {
+    let hw = hw_ok();
     let mut s = absorb(m, rate, ds);
     let mut q: usize = 0;
     let mut o: usize = 0;
@@ -734,7 +1072,7 @@ fn squeeze(m: []Secret<u8>, rate: usize, ds: u8, out: []mut Secret<u8>)
         if o == rate {
             arith::mul_le(1, rate as int, q as int + 1);
             squeezed_next(m.view(), rate as int, ds, q as int, values(s));
-            s = keccak_ct(s);
+            s = keccak_on(s, hw);
             o = 0;
             q += 1;
         }

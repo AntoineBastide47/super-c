@@ -265,6 +265,16 @@ fn unproved_contracts_are_errors() {
         "for example: x = 4294967295",
     );
     b.add(
+        "wrapping sums of other terms",
+        "lemma l(a: u64, b: u64, c: u64) ensures a.wrapping_add(b).wrapping_add(c) == a.wrapping_add(b.wrapping_add(b)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "wrapping sums of other constants",
+        "lemma l(a: u64, b: u64) ensures a.wrapping_add(3).wrapping_add(b) == b.wrapping_add(a.wrapping_add(4)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a rotation the other rotation does not undo",
         "fn f(x: u32, n: u32) u32 ensures |r| r == x { return x.rotate_left(n).rotate_left(n); }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
         "cannot prove this 'ensures' clause",
@@ -571,9 +581,19 @@ fn spec_syntax_is_checked() {
         "an extern function with contracts must be '@trusted': no proof checks them",
     );
     h::expect_err_msg(
-        "@trusted on a function with a body",
+        "@trusted on a function with a body and no contract",
         "@trusted\nfn t(a: u32) u32 { return a; }\nfn main() i32 { return 0; }\n",
-        "'@trusted' marks a spec function or a lemma without a body",
+        "'@trusted' marks a spec function or a lemma without a body, or a function or an extern function with contracts",
+    );
+    // A function whose body no proof follows (a processor instruction's meaning) states it as `@trusted`
+    // contracts: callers assume its `ensures`, which no proof checks; without `@trusted` the proof fails.
+    let body = "fn three(a: u32) u32\n    ensures |r| r == 3\n{\n    return a;\n}\n";
+    let main = "fn main() i32 {\n    let x = three(3);\n    assert x == 3 by {};\n    return x as i32;\n}\n";
+    h::expect_exit("a trusted function's ensures", format("@trusted\n{}{}", body, main).as_str(), 3);
+    h::expect_build_err(
+        "the same ensures unproved",
+        format("{}{}", body, main).as_str(),
+        "cannot prove this 'ensures' clause",
     );
 }
 
@@ -1949,6 +1969,10 @@ fn negated(x: i64) i64
 {
     return x.wrapping_neg();
 }
+lemma regrouped(a: u64, b: u64, c: u64, d: u64)
+    ensures a.wrapping_add(b).wrapping_add(c).wrapping_add(d) == d.wrapping_add(c.wrapping_add(b).wrapping_add(a))
+    ensures a.wrapping_add(3).wrapping_add(b).wrapping_add(4) == b.wrapping_add(a.wrapping_add(7))
+{}
 fn main() i32 {
     let q = quarter(1, 2, 3);
     return (wrap_back(7, 4294967295) + rot_back(2, 33) + odd_times(5) % 2 + (q >> 16 ^ 3)) as i32 + signed_rot(-2) + negated(5) as i32 + 5;

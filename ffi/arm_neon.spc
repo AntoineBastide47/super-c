@@ -1611,6 +1611,10 @@ extern "C" "arm_neon.h" {
     @unsafe(safe)
     pub fn vmull_high_u8(a: uint8x16_t, b: uint8x16_t) uint16x8_t;
     @arch(aarch64)
+    @target_feature([cpu::Feature::Pmull])
+    @unsafe(safe)
+    pub fn vmull_p64(a: u64, b: u64) u128;
+    @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
     @unsafe(safe)
     pub fn vmull_s16(a: int16x4_t, b: int16x4_t) int32x4_t;
@@ -2297,6 +2301,30 @@ extern "C" "arm_neon.h" {
     @arch(aarch64)
     @target_feature([cpu::Feature::Sha2])
     @unsafe(safe)
+    pub fn vsha1cq_u32(hash_abcd: uint32x4_t, hash_e: u32, wk: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
+    pub fn vsha1h_u32(hash_e: u32) u32;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
+    pub fn vsha1mq_u32(hash_abcd: uint32x4_t, hash_e: u32, wk: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
+    pub fn vsha1pq_u32(hash_abcd: uint32x4_t, hash_e: u32, wk: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
+    pub fn vsha1su0q_u32(w0_3: uint32x4_t, w4_7: uint32x4_t, w8_11: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
+    pub fn vsha1su1q_u32(tw0_3: uint32x4_t, w12_15: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha2])
+    @unsafe(safe)
     pub fn vsha256h2q_u32(hash_efgh: uint32x4_t, hash_abcd: uint32x4_t, wk: uint32x4_t) uint32x4_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Sha2])
@@ -2310,6 +2338,22 @@ extern "C" "arm_neon.h" {
     @target_feature([cpu::Feature::Sha2])
     @unsafe(safe)
     pub fn vsha256su1q_u32(tw0_3: uint32x4_t, w8_11: uint32x4_t, w12_15: uint32x4_t) uint32x4_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha512])
+    @unsafe(safe)
+    pub fn vsha512h2q_u64(sum_ab: uint64x2_t, hash_c_: uint64x2_t, hash_ab: uint64x2_t) uint64x2_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha512])
+    @unsafe(safe)
+    pub fn vsha512hq_u64(hash_ed: uint64x2_t, hash_gf: uint64x2_t, kwh_kwh2: uint64x2_t) uint64x2_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha512])
+    @unsafe(safe)
+    pub fn vsha512su0q_u64(w0_1: uint64x2_t, w2_: uint64x2_t) uint64x2_t;
+    @arch(aarch64)
+    @target_feature([cpu::Feature::Sha512])
+    @unsafe(safe)
+    pub fn vsha512su1q_u64(s01_s02: uint64x2_t, w14_15: uint64x2_t, w9_10: uint64x2_t) uint64x2_t;
     @arch(aarch64)
     @target_feature([cpu::Feature::Neon])
     @unsafe(safe)

@@ -153,6 +153,8 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
             isa.vector_perm3
         },
         vec_mulw: isa.vector_mulw | pick(feature(pk, fs, "sse4.1"), 0x400u16, 0u16),
+        // FEAT_DotProd: SDOT and UDOT of bytes.
+        vec_dot: isa.vector_dot | pick(feature(pk, fs, "dotprod"), 0x101u16, 0u16),
         vround: isa.vector_round || feature(pk, fs, "sse4.1"),
         popcnt: isa.popcount || feature(pk, fs, "popcnt"),
         sse41: feature(pk, fs, "sse4.1"),
@@ -163,6 +165,11 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
         rcpc: feature(pk, fs, "rcpc"),
         half: half,
         fma: isa.scalar_fma || feature(pk, fs, "fma"),
+        cssc: feature(pk, fs, "cssc"),
+        bmi1: feature(pk, fs, "bmi1"),
+        bmi2: feature(pk, fs, "bmi2"),
+        movbe: feature(pk, fs, "movbe"),
+        relaxed: feature(pk, fs, "relaxed-simd"),
     };
 }
 
@@ -347,8 +354,9 @@ pub(package) struct CEmit {
     /// backend entry's header).
     pub(package) render_all: bool,
     /// The run-time copies of the body being emitted without C (`dispatch_prologue`), the highest level
-    /// first: its LIR opens with the choice among them.
+    /// first, and each one's level (1-based, `simd_levels`): its LIR opens with the choice among them.
     pub(package) disp: Vector<String>,
+    pub(package) disp_k: Vector<u32>,
     /// Forwarded call texts spelled so far: a call argument whose spelling grew it repeats a call
     /// when spelled twice.
     fwd_spelled: u64,
@@ -746,6 +754,13 @@ extend CEmit {
                 0u8,
             ) | pick((pk.cg & bman::CG_FP_CONTRACT) != 0, lir_ir::FM_CONTRACT, 0u8);
             l.pkg.cpu = cpu_facts(pk, pk.features);
+            for k in 0..pk.simd_levels.len() {
+                l.pkg.copy_flags.push(cpu_facts(pk, pk.simd_levels[k]).flags() & lir_ir::CPU_SCALAR);
+            }
+            l.pkg.dit = (switch tgt::target_of(pk.build_target, pk.arch) {
+                Some(r) => r.dit,
+                None => tgt::DIT_NONE,
+            });
             // The widest registers a body may get: a function's own features, a run-time copy's level.
             l.pkg.vec_max = l.pkg.cpu.vector.max(cpu_facts(pk, cf::close(cf::join(pk.features, pk.fn_union))).vector);
             for i in 0..pk.simd_levels.len() {
@@ -775,6 +790,7 @@ extend CEmit {
             l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;
+            l.pkg.vec_ld3 = tgt::isa(pk.arch).vector_ld3;
             l.pkg.vfloat = tgt::isa(pk.arch).vector_float;
             l.pkg.vround_away = l.pkg.vfloat && tgt::isa(pk.arch).vector_round_away;
             l.pkg.pairs = tgt::isa(pk.arch).pairs;
@@ -822,6 +838,7 @@ extend CEmit {
             no_split: pk.native,
             render_all: false,
             disp: Vector::<String>::new(),
+            disp_k: Vector::<u32>::new(),
             fwd_spelled: 0,
             simd_trace: stdlib::env_is("SC_SIMD_TRACE", "1"),
             fs: pk.features,
@@ -2000,6 +2017,7 @@ extend CEmit {
         if !self.spells(b.module) {
             // No C: the LIR alone, which chooses among the feature copies at run time (`disp`).
             self.disp.clear();
+            self.disp_k.clear();
             self.dispatch_prologue(b, name, false, false, "", false);
             let nr = self.noret;
             self.noret = false;
@@ -2007,6 +2025,7 @@ extend CEmit {
                 self.lir_body(b, name, 0, NODE_NONE, nr);
             }
             self.disp.clear();
+            self.disp_k.clear();
             self.pr.count(prb::C_BODIES, 1);
             return true;
         }
@@ -16802,11 +16821,22 @@ extend CEmit {
     // that states no features itself (`inl::InlineStore::vec_body`); else empty, the callee's own
     // symbol. The clone is the same body compiled with the caller's features (the planner's entries,
     // the C target attribute): every `Simd` operation gives the same bits in either.
+    // Whether set `fs` holds a backend entry the build's features do not.
+    const fn plans_beyond_build(self: &Self, fs: cf::CpuFeatureSet) bool {
+        let p = self.p();
+        for i in 0..p.simd_table.len() {
+            let efs = p.simd_table.at(i).fs;
+            if cf::contains(fs, efs) && !cf::contains(self.build_fs, efs) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     fn clone_set(self: &Self, callee: DefId) cf::CpuFeatureSet {
         let none = cf::CpuFeatureSet { w: [0, 0] };
         let p = self.p();
-        let build = self.build_fs;
-        if callee.node == NODE_NONE || p.inl_store == null || cf::contains(build, self.fs) {
+        if callee.node == NODE_NONE || p.inl_store == null || cf::contains(self.build_fs, self.fs) {
             return none;
         }
         if !cf::is_empty(p.fn_features(callee.module, callee.node)) || unsafe (*(p.inl_store as *const inl::InlineStore)).vec_body(
@@ -16814,13 +16844,7 @@ extend CEmit {
         ) == null {
             return none;
         }
-        for i in 0..p.simd_table.len() {
-            let efs = p.simd_table.at(i).fs;
-            if cf::contains(self.fs, efs) && !cf::contains(build, efs) {
-                return self.fs;
-            }
-        }
-        return none;
+        return ast::pick(self.plans_beyond_build(self.fs), self.fs, none);
     }
 
     // The run-time choice of body `b` (symbol `name`, `__r` when `split`): a function with vector code
@@ -16859,6 +16883,10 @@ extend CEmit {
         while k > 0 {
             k -= 1;
             let fs = p.simd_levels[k];
+            // A level that plans no vector operation differently (arm64's LSE level) copies no vector code.
+            if !self.plans_beyond_build(fs) {
+                continue;
+            }
             let mut sfx = String::new();
             clone_sfx_of(fs, cf::close(p.features), &mut sfx);
             let mut sym = String::from_str(name);
@@ -16888,6 +16916,7 @@ extend CEmit {
             }
             if !text {
                 self.disp.push(sym);
+                self.disp_k.push(k as u32 + 1);
                 continue;
             }
             if split {

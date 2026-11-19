@@ -1,18 +1,23 @@
 // The constant-time check: in each `@constant_time` body (`Body.ct`) of the LIR the code generators
 // receive, no branch, memory address or variable-time operation depends on a secret. A value is secret
-// when it is an `O_SECRET` (a read from inside a `std::crypto::secret::Secret`), or an operand, argument
-// or edge argument of it is, except an `O_PUBLIC` (`declassify`). Only a constant-time body reads a
-// secret, and a secret leaves a body only inside a `Secret` (in memory: no secret argument, no secret
-// result), so the check of each body is complete by itself, and a body that reads no secret computes on
-// none. No body calls a C function that takes a `Secret` or takes its address. Then every `O_SECRET` and
-// `O_PUBLIC` of every body is replaced by its operand, so the generators see the code the program has
-// without them.
+// when it is an `O_SECRET` (a read from inside a `std::crypto::secret::Secret`), a parameter some caller
+// passes a secret, or an operand, argument or edge argument of it is, except an `O_PUBLIC` (`declassify`).
+// Only a constant-time body reads a secret. A secret passes to a function with a body, which is then
+// checked under the same rules with that parameter secret (`Check::masks`, a fixpoint over the calls), or
+// to an intrinsic whose instructions the vendor lists as data-independent (`intrin::constant_time`); a
+// body returns only the secrets of its parameters, so a secret the program read leaves a constant-time
+// body only inside a `Secret`. No body calls a C function
+// that takes a `Secret` or takes its address. Then every `O_SECRET` and `O_PUBLIC` of every body is
+// replaced by its operand, so the generators see the code the program has without them.
 import lir::ir as *;
 import lir::verify as lv;
 import module::loader as loader;
 import utils::errors as diag;
 import utils::diag_codes as dc;
 import ast::ast as ast;
+import ir::core as core;
+import target::intrin as intrin;
+import target::table as tgt;
 
 /// The rules a secret breaks (`Check::violations`), one message each.
 pub(package) const R_BRANCH: u8 = 0;
@@ -36,11 +41,11 @@ const MESSAGES: [str<'static>; 13] = [
     "a division or remainder of a secret value: its time depends on the operands",
     "a float operation on a secret value: its time may depend on the operands",
     "an atomic operation on a secret value",
-    "a vector operation on a secret value: its code may branch on the lanes",
+    "a vector operation on a secret value other than an integer cast, a wrapping add, subtract or multiply, a shift by a public count or a fixed lane move: its code may branch on the lanes",
     "a system call with a secret value",
     "a select on a secret condition of a value that is not an integer of at most 64 bits or a pointer: its code may branch",
     "an indirect call with a secret target or argument",
-    "a call passes a secret value: a secret leaves a function only inside a 'Secret'",
+    "a call passes a secret value to a C function that is not an intrinsic of data-independent instructions",
     "a call or the address of a C function that takes a 'Secret'",
     "a function returns a secret value: a secret leaves a function only inside a 'Secret'",
     "a secret is read outside a '@constant_time' function",
@@ -59,6 +64,7 @@ pub(package) fn run(p: &mut loader::Package, pk: &mut Package) bool {
         return true;
     }
     let mut c = Check::new();
+    c.masks(pk);
     let mut ok = true;
     for s in 0..pk.syms.len() {
         let sy = pk.syms[s];
@@ -117,6 +123,8 @@ pub(package) fn loaded(p: &loader::Package) bool {
 /// The check's tables, reused from body to body.
 pub(package) struct Check {
     taint: Vector<bool>, // per instruction, then per block parameter: the value is secret
+    own: Vector<bool>, // the same for the secrets the body reads itself (`O_SECRET`), not its parameters'
+    sp: Vector<u64>, // per body, the parameters (below 64) some caller passes a secret (`masks`)
     us: Vector<Value>,
     rep: Vector<Value>, // `strip`: per instruction, the value that replaces it
     fmod: Map<u32, u32>, // file id to module
@@ -130,6 +138,8 @@ extend Check {
     pub(package) fn new() Check {
         return Check {
             taint: Vector::<bool>::new(),
+            own: Vector::<bool>::new(),
+            sp: Vector::<u64>::new(),
             us: Vector::<Value>::new(),
             rep: Vector::<Value>::new(),
             fmod: Map::<u32, u32>::new(),
@@ -150,6 +160,16 @@ extend Check {
         return self.taint[(v & ~VFLAG) as usize];
     }
 
+    const fn owned(self: &Self, n: usize, v: Value) bool {
+        if v == VNONE {
+            return false;
+        }
+        if (v & VPARAM) != 0 {
+            return self.own[n + (v & ~VPARAM) as usize];
+        }
+        return self.own[(v & ~VFLAG) as usize];
+    }
+
     // Whether a value instruction `t` of `b` uses (its edges' arguments aside) is secret.
     fn any_secret(self: &mut Self, b: &Body, n: usize, t: Inst) bool {
         lv::uses(b, t, &mut self.us);
@@ -161,21 +181,79 @@ extend Check {
         return false;
     }
 
-    /// The rules body `k` of `pk` breaks, appended to `out` in instruction order: `i << 8 | rule` for
-    /// instruction `i`. A body that is not constant-time breaks R_OUTSIDE and R_CALL_SEC alone (`outside`).
-    pub(package) fn violations(self: &mut Self, pk: &Package, k: u32, out: &mut Vector<u64>) {
-        let b = &pk.bodies[k as usize];
-        if !b.ct {
-            outside(pk, b, out);
-            return;
+    // Whether a value instruction `t` of `b` uses is a secret the body read itself.
+    fn any_owned(self: &mut Self, b: &Body, n: usize, t: Inst) bool {
+        lv::uses(b, t, &mut self.us);
+        for q in 0..self.us.len() {
+            if self.owned(n, self.us[q]) {
+                return true;
+            }
         }
+        return false;
+    }
+
+    // The body a call `t` of `b` calls, NONE for a C function or another instruction.
+    const fn callee(pk: &Package, b: &Body, t: Inst) u32 {
+        if t.op != O_CALL {
+            return NONE;
+        }
+        return pk.syms[b.syms[t.a as usize] as usize].def;
+    }
+
+    /// Per body of `pk` (`sp`), the parameters (the first 64) some checked caller passes a secret: each
+    /// call of a body with a secret argument marks that parameter, and the callee is then checked with it
+    /// secret; repeated until no mark changes (each sweep that changes one marks one more bit).
+    pub(package) fn masks(self: &mut Self, pk: &Package) {
+        fill(&mut self.sp, pk.bodies.len(), 0);
+        let mut changed = true;
+        let mut sweeps: usize = 0;
+        while changed {
+            assert(sweeps <= 64 * pk.bodies.len() + 1, "ct: the secret parameters do not settle");
+            sweeps += 1;
+            changed = false;
+            for k in 0..pk.bodies.len() {
+                let b = &pk.bodies[k];
+                if !b.ct && self.sp[k] == 0 {
+                    continue;
+                }
+                self.settle(b, self.sp[k]);
+                let n = b.insts.len();
+                for i in 0..n {
+                    let t = b.insts[i];
+                    let d = Check::callee(pk, b, t);
+                    if d == NONE {
+                        continue;
+                    }
+                    let mut m = self.sp[d as usize];
+                    for q in 0..(t.aux as u32).min(64) {
+                        if self.secret(n, b.pool[(t.c + q) as usize]) {
+                            m |= 1u64 << q as u64;
+                        }
+                    }
+                    if m != self.sp[d as usize] {
+                        self.sp.set(d as usize, m);
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // The secret values of constant-time body `b` (`taint`, `own`), its entry's parameters of `mask`
+    // secret.
+    fn settle(self: &mut Self, b: &Body, mask: u64) {
         let n = b.insts.len();
         fill(&mut self.taint, n + b.params.len(), false);
+        fill(&mut self.own, n + b.params.len(), false);
+        let e = b.blocks[0];
+        for q in 0..(e.param_len as u32).min(64) {
+            self.taint[n + (e.param_start + q) as usize] = (mask >> q as u64 & 1) != 0;
+        }
         // Each sweep that changes marks one more value, so at most one sweep per value and a last one.
         let mut changed = true;
         let mut sweeps: usize = 0;
         while changed {
-            assert(sweeps <= n + b.params.len(), "ct: the secret values do not settle");
+            assert(sweeps <= 2 * (n + b.params.len()) + 1, "ct: the secret values do not settle");
             sweeps += 1;
             changed = false;
             for i in 0..n {
@@ -193,18 +271,45 @@ extend Check {
                         changed = true;
                     }
                 }
-                for e in 0..edge_count(t) {
-                    let ed = edge_of(b, t, e);
+                if !self.own[i] && t.op != O_PUBLIC && (t.op == O_SECRET || self.any_owned(b, n, t)) {
+                    self.own[i] = true;
+                    changed = true;
+                }
+                for e2 in 0..edge_count(t) {
+                    let ed = edge_of(b, t, e2);
                     let to = b.blocks[b.edge_target(ed) as usize].param_start as usize;
                     for x in 0..b.edge_nargs(ed) {
-                        if !self.taint[n + to + x as usize] && self.secret(n, b.edge_arg(ed, x)) {
+                        let a = b.edge_arg(ed, x);
+                        if !self.taint[n + to + x as usize] && self.secret(n, a) {
                             self.taint[n + to + x as usize] = true;
+                            changed = true;
+                        }
+                        if !self.own[n + to + x as usize] && self.owned(n, a) {
+                            self.own[n + to + x as usize] = true;
                             changed = true;
                         }
                     }
                 }
             }
         }
+    }
+
+    /// The rules body `k` of `pk` breaks, appended to `out` in instruction order: `i << 8 | rule` for
+    /// instruction `i`. A body that is not constant-time and receives no secret breaks R_OUTSIDE and
+    /// R_CALL_SEC alone (`outside`).
+    pub(package) fn violations(self: &mut Self, pk: &Package, k: u32, out: &mut Vector<u64>) {
+        let b = &pk.bodies[k as usize];
+        let mask = if k as usize < self.sp.len() {
+            self.sp[k as usize]
+        } else {
+            0
+        };
+        if !b.ct && mask == 0 {
+            outside(pk, b, out);
+            return;
+        }
+        let n = b.insts.len();
+        self.settle(b, mask);
         for i in 0..n {
             let r = self.rule(pk, b, n, b.insts[i]);
             if r != NONE {
@@ -232,7 +337,16 @@ extend Check {
             let narrow = is_int(t.ty) && t.ty != T_I128 || t.ty == T_PTR;
             return ast::pick(self.secret(n, t.a) && !narrow, R_SELECT, NONE);
         }
-        if op == O_CALL && self.any_secret(b, n, t) {
+        if op == O_SECRET && !b.ct {
+            return R_OUTSIDE;
+        }
+        // A secret argument goes to a body (checked with that parameter secret; past the 64th, untracked)
+        // or to an intrinsic of data-independent instructions, whose result is secret.
+        if op == O_CALL && self.any_secret(b, n, t) && !self.tracked(pk, b, n, t) && !intrin::constant_time(
+            pk.isa,
+            tgt::isa(tgt::axis_index(pk.isa, true)).const_time,
+            pk.spell(pk.syms[b.syms[t.a as usize] as usize].name),
+        ) {
             return R_CALL;
         }
         if takes_secret(pk, b, t) {
@@ -241,8 +355,10 @@ extend Check {
         if op == O_CALL {
             return NONE;
         }
+        // A secret of a parameter returns to the caller, which passed it; one the body read itself would
+        // leave it outside a `Secret`.
         if op == O_RET {
-            return ast::pick(self.secret(n, t.a), R_RET, NONE);
+            return ast::pick(self.owned(n, t.a), R_RET, NONE);
         }
         let r = if op >= O_SDIV && op <= O_UREM {
             R_DIV
@@ -250,7 +366,7 @@ extend Check {
             R_FLOAT
         } else if op >= O_ALOAD && op <= O_ACAS {
             R_ATOMIC
-        } else if op == O_VOP {
+        } else if op == O_VOP && !self.plain_vop(b, n, t) {
             R_VOP
         } else if op == O_SYS {
             R_SYS
@@ -260,6 +376,49 @@ extend Check {
             return NONE;
         };
         return ast::pick(self.any_secret(b, n, t), r, NONE);
+    }
+
+    // Whether call `t` of `b` calls a body and passes a secret in none of its arguments past the 64th.
+    const fn tracked(self: &Self, pk: &Package, b: &Body, n: usize, t: Inst) bool {
+        if Check::callee(pk, b, t) == NONE {
+            return false;
+        }
+        for q in 64..t.aux as u32 {
+            if self.secret(n, b.pool[(t.c + q) as usize]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether `vop` `t` of `b` is constant-time on every target: a cast between integer lanes or a bitcast,
+    // a wrapping integer add, subtract, multiply or negation, a shift by a public count, or a fixed lane
+    // move (a half, a concatenation, a shuffle or swizzle by its constant index list). The plain vector
+    // operations are instructions of their own, which the rules take as they take scalars.
+    const fn plain_vop(self: &Self, b: &Body, n: usize, t: Inst) bool {
+        let code = (t.aux & VOP_CODE) as u32;
+        let ints = is_vec(t.ty) && is_int(lane_type(t.ty));
+        if code == core::OP_CAST {
+            let s = b.type_of(b.pool[t.a as usize]);
+            return ints && is_vec(s) && is_int(lane_type(s));
+        }
+        if code == core::OP_SHL_SCALAR || code == core::OP_SHR_SCALAR {
+            return ints && !self.secret(n, b.pool[(t.a + 1) as usize]);
+        }
+        if code < core::OP_SIMD {
+            return false;
+        }
+        let c = code - core::OP_SIMD;
+        if c == core::SIMD_WRAP_ADD as u32 || c == core::SIMD_WRAP_SUB as u32 || c == core::SIMD_WRAP_MUL as u32 || c == core::SIMD_WRAP_NEG as u32 {
+            return ints;
+        }
+        if c == core::SIMD_WRAP_SHL as u32 || c == core::SIMD_WRAP_SHR as u32 {
+            return ints && !self.secret(n, b.pool[(t.a + 1) as usize]);
+        }
+        if c == core::SIMD_BITCAST as u32 || c == core::SIMD_LOW_HALF as u32 || c == core::SIMD_HIGH_HALF as u32 || c == core::SIMD_CONCAT as u32 {
+            return true;
+        }
+        return c == core::SIMD_SHUFFLE as u32 || c == core::SIMD_SWIZZLE as u32;
     }
 
     // Each file of `pk` that is a module's source, to that module (`offset`).

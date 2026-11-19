@@ -77,8 +77,11 @@ call for the general homes and counts as a register operation, `Gen.vreg`). A ve
 result one register holds stays in it (`CallLayout::whole_vreg`: 8 or 16 bytes, and on x86-64 the
 register bytes of the body, `CallLayout.wide`, so a body of 32- or 64-byte registers computes its
 `_mm256_`/`_mm512_` templates in ymm/zmm registers). An arm64 store template (`st*`) reads its vector
-where it is (`intrin::vwrites`). Any other expansion clobbers what a
-call does; on Windows the values in rdi and rsi that the template names, which Microsoft x64 saves, go to slots around it.
+where it is (`intrin::vwrites`). An x86-64 template that names its general registers only as 64-bit
+addresses (`intrin::gp_addresses`: inside parentheses, and no mnemonic that writes a register it does
+not name) reads each such argument from the register that holds it, else from a temporary
+(`intrin::grename`, `Gen::gp_renamed`); it writes no general register, so it is no call for the
+general homes either. Any other expansion clobbers what a call does; on Windows the values in rdi and rsi that the template names, which Microsoft x64 saves, go to slots around it.
 `native_header_facts` reads the headers under the target's sysroot (`Package.sysroot`, from
 `--sysroot=`, else discovered by `bindgen::ctarget`).
 

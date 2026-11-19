@@ -7,6 +7,8 @@
 // `import std::crypto::sha256;`.
 
 import std::crypto::secret as *;
+import std::cpu;
+import std::cpu::detect as detect;
 
 // The functions of FIPS 180-4, 4.1.2.
 spec fn ch(x: u32, y: u32, z: u32) u32 {
@@ -434,6 +436,44 @@ fn word_at(msg: []Secret<u8>, p: usize) Secret<u32>
     return a << 24 | b << 16 | c << 8 | d;
 }
 
+// The big-endian word at byte `p` of the message, inside it.
+@constant_time
+fn msg_word_at(msg: []Secret<u8>, p: usize) Secret<u32>
+    requires p as int + 4 <= msg.len() as int
+    ensures |r| r.value() == word(msg, p as int)
+{
+    return msg[p].cast::<u32>() << 24 | msg[p + 1].cast::<u32>() << 16 | msg[p + 2].cast::<u32>() << 8 | msg[p + 3].cast::<
+        u32
+    >();
+}
+
+// Block `b` of the message, inside it: no padding byte.
+@constant_time
+fn load_full_block(msg: []Secret<u8>, b: usize) [Secret<u32>; 16]
+    requires (b as int + 1) * 64 <= msg.len() as int
+    ensures |m| m == block(msg, b as int)
+{
+    let p = b * 64;
+    return [
+        msg_word_at(msg, p),
+        msg_word_at(msg, p + 4),
+        msg_word_at(msg, p + 8),
+        msg_word_at(msg, p + 12),
+        msg_word_at(msg, p + 16),
+        msg_word_at(msg, p + 20),
+        msg_word_at(msg, p + 24),
+        msg_word_at(msg, p + 28),
+        msg_word_at(msg, p + 32),
+        msg_word_at(msg, p + 36),
+        msg_word_at(msg, p + 40),
+        msg_word_at(msg, p + 44),
+        msg_word_at(msg, p + 48),
+        msg_word_at(msg, p + 52),
+        msg_word_at(msg, p + 56),
+        msg_word_at(msg, p + 60),
+    ];
+}
+
 // Block `b` of the padded message.
 @constant_time
 fn load_block(msg: []Secret<u8>, b: usize) [Secret<u32>; 16]
@@ -441,6 +481,9 @@ fn load_block(msg: []Secret<u8>, b: usize) [Secret<u32>; 16]
     ensures |m| m == block(msg, b as int)
 {
     let p = b * 64;
+    if p + 64 <= msg.len() {
+        return load_full_block(msg, b);
+    }
     return [
         word_at(msg, p),
         word_at(msg, p + 4),
@@ -503,12 +546,12 @@ fn to_bytes(h: [Secret<u32>; 8]) [Secret<u8>; 32]
 
 // Block `b` on state `h`.
 @constant_time
-fn absorb_block(msg: []Secret<u8>, b: usize, h: [Secret<u32>; 8]) [Secret<u32>; 8]
+fn absorb_block(msg: []Secret<u8>, b: usize, h: [Secret<u32>; 8], hw: bool) [Secret<u32>; 8]
     requires (b as int + 1) * 64 <= padded_len(msg.len() as int)
     ensures |r| state_values(r) == compress(state_values(h), block(msg, b as int))
 {
     let m = load_block(msg, b);
-    return compress_ct(h, m);
+    return compress_on(h, m, hw);
 }
 
 lemma hashes_step(msg: []Secret<u8>, b: int)
@@ -518,18 +561,491 @@ lemma hashes_step(msg: []Secret<u8>, b: int)
 
 // Block `b` on the state after blocks `0..b`.
 @constant_time
-fn absorb(msg: []Secret<u8>, b: usize, h: [Secret<u32>; 8]) [Secret<u32>; 8]
+fn absorb(msg: []Secret<u8>, b: usize, h: [Secret<u32>; 8], hw: bool) [Secret<u32>; 8]
     requires (b as int + 1) * 64 <= padded_len(msg.len() as int)
     requires state_values(h) == hashes(msg, b as int)
     ensures |r| state_values(r) == hashes(msg, b as int + 1)
 {
     hashes_step(msg, b as int);
-    return absorb_block(msg, b, h);
+    return absorb_block(msg, b, h, hw);
 }
 
-/// The SHA-256 digest of `msg` (FIPS 180-4).
+// ---- The processor's SHA-256 instructions ----
+//
+// arm64's SHA256H, SHA256H2, SHA256SU0, SHA256SU1 (FEAT_SHA256) and x86-64's SHA256RNDS2, SHA256MSG1,
+// SHA256MSG2 (SHA-NI) compute four or two rounds, or four schedule words, per instruction. Their meaning is
+// the vendor's pseudocode (`std::crypto::secret`); the lemmas below prove the paths that use them compute
+// `compress`. Each orders its sums differently from FIPS 180-4's text: wrapping addition is associative
+// and commutative, one step at a time.
+
+lemma add_comm(a: u32, b: u32)
+    ensures a.wrapping_add(b) == b.wrapping_add(a)
+{}
+
+lemma add_assoc(a: u32, b: u32, c: u32)
+    ensures a.wrapping_add(b).wrapping_add(c) == a.wrapping_add(b.wrapping_add(c))
+{}
+
+// The first four words of `s`, and the last four.
+spec fn lo4(s: [u32; 8]) [u32; 4] {
+    return [s[0], s[1], s[2], s[3]];
+}
+
+spec fn hi4(s: [u32; 8]) [u32; 4] {
+    return [s[4], s[5], s[6], s[7]];
+}
+
+// Schedule words `t..t + 4` of block `m`.
+spec fn sched4(m: [Secret<u32>; 16], t: u32) [u32; 4]
+    requires t <= 76
+{
+    return [sched(m, t), sched(m, t + 1), sched(m, t + 2), sched(m, t + 3)];
+}
+
+// Round constants `t..t + 4`.
+spec fn k4(t: u32) [u32; 4]
+    requires t <= 60
+{
+    return [K[t], K[t + 1], K[t + 2], K[t + 3]];
+}
+
+// The lanes' sums `w + k`.
+spec fn add4(w: [u32; 4], k: [u32; 4]) [u32; 4] {
+    return [w[0].wrapping_add(k[0]), w[1].wrapping_add(k[1]), w[2].wrapping_add(k[2]), w[3].wrapping_add(k[3])];
+}
+
+// Four rounds from `s` with words `w` and constants `k`.
+spec fn round4(s: [u32; 8], w: [u32; 4], k: [u32; 4]) [u32; 8] {
+    return round(round(round(round(s, w[0], k[0]), w[1], k[1]), w[2], k[2]), w[3], k[3]);
+}
+
+// Rounds `t..t + 4`, one at a time.
+lemma rounds_four(h: [u32; 8], m: [Secret<u32>; 16], t: u32)
+    requires t <= 60
+    ensures rounds(h, m, t + 4) == round4(rounds(h, m, t), sched4(m, t), k4(t))
+{
+    assert rounds(h, m, t + 1) == round(rounds(h, m, t), sched(m, t), K[t]) by {};
+    assert rounds(h, m, t + 2) == round(rounds(h, m, t + 1), sched(m, t + 1), K[t + 1]) by {};
+    assert rounds(h, m, t + 3) == round(rounds(h, m, t + 2), sched(m, t + 2), K[t + 2]) by {};
+    assert rounds(h, m, t + 4) == round(rounds(h, m, t + 3), sched(m, t + 3), K[t + 3]) by {};
+}
+
+// The sum `h + sigma1(e) + ch(e, f, g) + k + w` of a round, with `w + k` added at once.
+lemma t1_order(x: u32, k: u32, w: u32)
+    ensures x.wrapping_add(k).wrapping_add(w) == x.wrapping_add(w.wrapping_add(k))
+{
+    add_assoc(x, k, w);
+    add_comm(k, w);
+}
+
+// One iteration of Arm's SHA256hash is one round.
+lemma arm_step_is_round(s: [u32; 8], w: u32, k: u32)
+    ensures arm_sha256_step(s, w.wrapping_add(k)) == round(s, w, k)
+{
+    let x = s[7].wrapping_add(big_sigma1(s[4])).wrapping_add(ch(s[4], s[5], s[6]));
+    assert ((s[5] ^ s[6]) & s[4] ^ s[6]) == ch(s[4], s[5], s[6]) by {};
+    assert (s[0] & s[1] | (s[0] | s[1]) & s[2]) == maj(s[0], s[1], s[2]) by {};
+    t1_order(x, k, w);
+    let t1 = x.wrapping_add(k).wrapping_add(w);
+    add_assoc(t1, big_sigma0(s[0]), maj(s[0], s[1], s[2]));
+    add_comm(t1, s[3]);
+}
+
+// Arm's SHA256H and SHA256H2 on the halves of `s` are its next four rounds.
+lemma arm_hash_is_round4(s: [u32; 8], w: [u32; 4], k: [u32; 4])
+    ensures arm_sha256_hash(lo4(s), hi4(s), add4(w, k), true) == lo4(round4(s, w, k))
+    ensures arm_sha256_hash(lo4(s), hi4(s), add4(w, k), false) == hi4(round4(s, w, k))
+{
+    let s1 = round(s, w[0], k[0]);
+    let s2 = round(s1, w[1], k[1]);
+    let s3 = round(s2, w[2], k[2]);
+    assert [s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]] == s by {};
+    arm_step_is_round(s, w[0], k[0]);
+    arm_step_is_round(s1, w[1], k[1]);
+    arm_step_is_round(s2, w[2], k[2]);
+    arm_step_is_round(s3, w[3], k[3]);
+}
+
+// Schedule word `t + 16` from words `t`, `t + 1`, `t + 9` and `t + 14` as SHA256SU0 and SHA256SU1 (or
+// SHA256MSG1, an addition and SHA256MSG2) sum them.
+lemma sched_order(w0: u32, s0: u32, w9: u32, s1: u32)
+    ensures s1.wrapping_add(w9).wrapping_add(s0).wrapping_add(w0) == s1.wrapping_add(s0.wrapping_add(w0)).wrapping_add(
+        w9,
+    )
+    ensures s1.wrapping_add(w9).wrapping_add(s0).wrapping_add(w0) == w0.wrapping_add(s0).wrapping_add(w9).wrapping_add(
+        s1,
+    )
+{
+    // s1 + w9 + s0 + w0 == s1 + (w9 + (s0 + w0)) == s1 + ((s0 + w0) + w9) == (s1 + (s0 + w0)) + w9.
+    add_assoc(s1, w9, s0);
+    add_assoc(s1, w9.wrapping_add(s0), w0);
+    add_assoc(w9, s0, w0);
+    add_comm(w9, s0.wrapping_add(w0));
+    add_assoc(s1, s0.wrapping_add(w0), w9);
+    // (w0 + s0 + w9) + s1 == s1 + ((s0 + w0) + w9).
+    add_comm(w0, s0);
+    add_comm(s0.wrapping_add(w0).wrapping_add(w9), s1);
+    add_assoc(s0, w0, w9);
+}
+
+// Schedule words `t + 16..t + 20`: SHA256SU1 of SHA256SU0's first halves.
+lemma arm_sched(m: [Secret<u32>; 16], t: u32)
+    requires t <= 60
+    ensures arm_sha256_su1(arm_sha256_su0(sched4(m, t), sched4(m, t + 4)), sched4(m, t + 8), sched4(m, t + 12)) == sched4(
+        m,
+        t + 16,
+    )
+{
+    sched_order(sched(m, t), small_sigma0(sched(m, t + 1)), sched(m, t + 9), small_sigma1(sched(m, t + 14)));
+    sched_order(sched(m, t + 1), small_sigma0(sched(m, t + 2)), sched(m, t + 10), small_sigma1(sched(m, t + 15)));
+    sched_order(sched(m, t + 2), small_sigma0(sched(m, t + 3)), sched(m, t + 11), small_sigma1(sched(m, t + 16)));
+    sched_order(sched(m, t + 3), small_sigma0(sched(m, t + 4)), sched(m, t + 12), small_sigma1(sched(m, t + 17)));
+}
+
+// Rounds `t..t + 4` on the working variables after rounds `0..t`, with arm64's SHA256H and SHA256H2.
+@always_inline
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha2])
+fn rounds_a64(h: [Secret<u32>; 8], m: [Secret<u32>; 16], t: u32, s: [Secret<u32>; 8], w: [Secret<u32>; 4]) [Secret<u32>; 8]
+    requires t <= 60
+    requires state_values(s) == rounds(state_values(h), m, t)
+    requires words4(w) == sched4(m, t)
+    ensures |r| state_values(r) == rounds(state_values(h), m, t + 4)
+{
+    let x: [Secret<u32>; 4] = [s[0], s[1], s[2], s[3]];
+    let y: [Secret<u32>; 4] = [s[4], s[5], s[6], s[7]];
+    let wk: [Secret<u32>; 4] = [
+        w[0] + Secret::new(K[t]),
+        w[1] + Secret::new(K[t + 1]),
+        w[2] + Secret::new(K[t + 2]),
+        w[3] + Secret::new(K[t + 3]),
+    ];
+    let nx = sha256h(x, y, wk);
+    let ny = sha256h2(y, x, wk);
+    assert words4(wk) == add4(sched4(m, t), k4(t)) by {};
+    assert words4(x) == lo4(state_values(s)) && words4(y) == hi4(state_values(s)) by {};
+    assert words4(nx) == lo4(round4(state_values(s), sched4(m, t), k4(t))) by {
+        arm_hash_is_round4(state_values(s), sched4(m, t), k4(t));
+    };
+    assert words4(ny) == hi4(round4(state_values(s), sched4(m, t), k4(t))) by {
+        arm_hash_is_round4(state_values(s), sched4(m, t), k4(t));
+    };
+    rounds_four(state_values(h), m, t);
+    return [nx[0], nx[1], nx[2], nx[3], ny[0], ny[1], ny[2], ny[3]];
+}
+
+// Schedule words `t + 16..t + 20` with arm64's SHA256SU0 and SHA256SU1.
+@always_inline
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha2])
+fn sched_a64(
+    m: [Secret<u32>; 16],
+    t: u32,
+    w0: [Secret<u32>; 4],
+    w1: [Secret<u32>; 4],
+    w2: [Secret<u32>; 4],
+    w3: [Secret<u32>; 4],
+) [Secret<u32>; 4]
+    requires t <= 60
+    requires words4(w0) == sched4(m, t) && words4(w1) == sched4(m, t + 4)
+    requires words4(w2) == sched4(m, t + 8) && words4(w3) == sched4(m, t + 12)
+    ensures |r| words4(r) == sched4(m, t + 16)
+{
+    arm_sched(m, t);
+    return sha256su1(sha256su0(w0, w1), w2, w3);
+}
+
+// Block `m` on state `h` with arm64's SHA-256 instructions. The window `w0..w3` holds schedule words
+// `t..t + 16`.
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha2])
+fn compress_a64(h: [Secret<u32>; 8], m: [Secret<u32>; 16]) [Secret<u32>; 8]
+    ensures |r| state_values(r) == compress(state_values(h), m)
+{
+    let mut s = h;
+    let mut w0: [Secret<u32>; 4] = [m[0], m[1], m[2], m[3]];
+    let mut w1: [Secret<u32>; 4] = [m[4], m[5], m[6], m[7]];
+    let mut w2: [Secret<u32>; 4] = [m[8], m[9], m[10], m[11]];
+    let mut w3: [Secret<u32>; 4] = [m[12], m[13], m[14], m[15]];
+    // The 64 rounds in order, four at a time, each window taking its next words in place once read.
+    s = rounds_a64(h, m, 0, s, w0);
+    w0 = sched_a64(m, 0, w0, w1, w2, w3);
+    s = rounds_a64(h, m, 4, s, w1);
+    w1 = sched_a64(m, 4, w1, w2, w3, w0);
+    s = rounds_a64(h, m, 8, s, w2);
+    w2 = sched_a64(m, 8, w2, w3, w0, w1);
+    s = rounds_a64(h, m, 12, s, w3);
+    w3 = sched_a64(m, 12, w3, w0, w1, w2);
+    s = rounds_a64(h, m, 16, s, w0);
+    w0 = sched_a64(m, 16, w0, w1, w2, w3);
+    s = rounds_a64(h, m, 20, s, w1);
+    w1 = sched_a64(m, 20, w1, w2, w3, w0);
+    s = rounds_a64(h, m, 24, s, w2);
+    w2 = sched_a64(m, 24, w2, w3, w0, w1);
+    s = rounds_a64(h, m, 28, s, w3);
+    w3 = sched_a64(m, 28, w3, w0, w1, w2);
+    s = rounds_a64(h, m, 32, s, w0);
+    w0 = sched_a64(m, 32, w0, w1, w2, w3);
+    s = rounds_a64(h, m, 36, s, w1);
+    w1 = sched_a64(m, 36, w1, w2, w3, w0);
+    s = rounds_a64(h, m, 40, s, w2);
+    w2 = sched_a64(m, 40, w2, w3, w0, w1);
+    s = rounds_a64(h, m, 44, s, w3);
+    w3 = sched_a64(m, 44, w3, w0, w1, w2);
+    s = rounds_a64(h, m, 48, s, w0);
+    s = rounds_a64(h, m, 52, s, w1);
+    s = rounds_a64(h, m, 56, s, w2);
+    s = rounds_a64(h, m, 60, s, w3);
+    return [h[0] + s[0], h[1] + s[1], h[2] + s[2], h[3] + s[3], h[4] + s[4], h[5] + s[5], h[6] + s[6], h[7] + s[7]];
+}
+
+// One round of Intel's SHA256RNDS2 is one round.
+lemma intel_round_is_round(s: [u32; 8], w: u32, k: u32)
+    ensures intel_sha256_round(s, w.wrapping_add(k)) == round(s, w, k)
+{
+    let c = ch(s[4], s[5], s[6]);
+    let e1 = big_sigma1(s[4]);
+    let x = w.wrapping_add(k);
+    let p = s[7].wrapping_add(e1).wrapping_add(c);
+    t1_order(p, k, w);
+    // ((c + e1) + x) + h == ((h + e1) + c) + x.
+    add_assoc(c.wrapping_add(e1), x, s[7]);
+    add_comm(x, s[7]);
+    add_assoc(c.wrapping_add(e1), s[7], x);
+    add_comm(c.wrapping_add(e1), s[7]);
+    add_comm(c, e1);
+    add_assoc(s[7], e1, c);
+    let t = p.wrapping_add(x);
+    let mj = maj(s[0], s[1], s[2]);
+    add_assoc(t, mj, big_sigma0(s[0]));
+    add_comm(mj, big_sigma0(s[0]));
+    add_comm(t, s[3]);
+}
+
+// The words of `s` as SHA256RNDS2 holds them: A, B, E, F in lanes 3 to 0 of the first four, C, D, G, H
+// of the last four.
+spec fn abef_cdgh(s: [u32; 8]) [u32; 8] {
+    return [s[5], s[4], s[1], s[0], s[7], s[6], s[3], s[2]];
+}
+
+// The first four words of `x`, and the last four.
+spec fn first4(x: [u32; 8]) [u32; 4] {
+    return [x[0], x[1], x[2], x[3]];
+}
+
+spec fn last4(x: [u32; 8]) [u32; 4] {
+    return [x[4], x[5], x[6], x[7]];
+}
+
+// Two SHA256RNDS2 are four rounds: the first gives A, B, E, F after two, which are C, D, G, H after four.
+lemma intel_rnds2_is_round4(s: [u32; 8], w: [u32; 4], k: [u32; 4])
+    ensures intel_sha256_rnds2(last4(abef_cdgh(s)), first4(abef_cdgh(s)), add4(w, k)) == last4(
+        abef_cdgh(round4(s, w, k)),
+    )
+    ensures intel_sha256_rnds2(
+        first4(abef_cdgh(s)),
+        last4(abef_cdgh(round4(s, w, k))),
+        [w[2].wrapping_add(k[2]), w[3].wrapping_add(k[3]), w[2].wrapping_add(k[2]), w[3].wrapping_add(k[3])],
+    ) == first4(abef_cdgh(round4(s, w, k)))
+{
+    let s1 = round(s, w[0], k[0]);
+    let s2 = round(s1, w[1], k[1]);
+    let s3 = round(s2, w[2], k[2]);
+    intel_round_is_round(s, w[0], k[0]);
+    intel_round_is_round(s1, w[1], k[1]);
+    intel_round_is_round(s2, w[2], k[2]);
+    intel_round_is_round(s3, w[3], k[3]);
+}
+
+// Schedule words `t + 16..t + 20`: SHA256MSG2 of SHA256MSG1's first halves plus words `t + 9..t + 13`.
+lemma intel_sched(m: [Secret<u32>; 16], t: u32)
+    requires t <= 60
+    ensures intel_sha256_msg2(
+        add4(
+            intel_sha256_msg1(sched4(m, t), sched4(m, t + 4)),
+            [sched(m, t + 9), sched(m, t + 10), sched(m, t + 11), sched(m, t + 12)],
+        ),
+        sched4(m, t + 12),
+    ) == sched4(m, t + 16)
+{
+    sched_order(sched(m, t), small_sigma0(sched(m, t + 1)), sched(m, t + 9), small_sigma1(sched(m, t + 14)));
+    sched_order(sched(m, t + 1), small_sigma0(sched(m, t + 2)), sched(m, t + 10), small_sigma1(sched(m, t + 15)));
+    sched_order(sched(m, t + 2), small_sigma0(sched(m, t + 3)), sched(m, t + 11), small_sigma1(sched(m, t + 16)));
+    sched_order(sched(m, t + 3), small_sigma0(sched(m, t + 4)), sched(m, t + 12), small_sigma1(sched(m, t + 17)));
+}
+
+// Rounds `t..t + 4` with x86-64's SHA256RNDS2, the working variables as it holds them (`abef_cdgh`).
+@always_inline
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
+fn rounds_x64(h: [Secret<u32>; 8], m: [Secret<u32>; 16], t: u32, s: [Secret<u32>; 8], w: [Secret<u32>; 4]) [Secret<u32>; 8]
+    requires t <= 60
+    requires state_values(s) == abef_cdgh(rounds(state_values(h), m, t))
+    requires words4(w) == sched4(m, t)
+    ensures |r| state_values(r) == abef_cdgh(rounds(state_values(h), m, t + 4))
+{
+    let abef: [Secret<u32>; 4] = [s[0], s[1], s[2], s[3]];
+    let cdgh: [Secret<u32>; 4] = [s[4], s[5], s[6], s[7]];
+    let wk: [Secret<u32>; 4] = [
+        w[0] + Secret::new(K[t]),
+        w[1] + Secret::new(K[t + 1]),
+        w[2] + Secret::new(K[t + 2]),
+        w[3] + Secret::new(K[t + 3]),
+    ];
+    let half = sha256rnds2(cdgh, abef, wk);
+    let full = sha256rnds2(abef, half, [wk[2], wk[3], wk[2], wk[3]]);
+    assert words4(wk) == add4(sched4(m, t), k4(t)) by {};
+    assert words4(abef) == first4(state_values(s)) && words4(cdgh) == last4(state_values(s)) by {};
+    assert words4(half) == last4(abef_cdgh(round4(rounds(state_values(h), m, t), sched4(m, t), k4(t)))) by {
+        intel_rnds2_is_round4(rounds(state_values(h), m, t), sched4(m, t), k4(t));
+    };
+    assert words4(full) == first4(abef_cdgh(round4(rounds(state_values(h), m, t), sched4(m, t), k4(t)))) by {
+        intel_rnds2_is_round4(rounds(state_values(h), m, t), sched4(m, t), k4(t));
+    };
+    rounds_four(state_values(h), m, t);
+    return [full[0], full[1], full[2], full[3], half[0], half[1], half[2], half[3]];
+}
+
+// Schedule words `t + 16..t + 20` with x86-64's SHA256MSG1 and SHA256MSG2.
+@always_inline
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
+fn sched_x64(
+    m: [Secret<u32>; 16],
+    t: u32,
+    w0: [Secret<u32>; 4],
+    w1: [Secret<u32>; 4],
+    w2: [Secret<u32>; 4],
+    w3: [Secret<u32>; 4],
+) [Secret<u32>; 4]
+    requires t <= 60
+    requires words4(w0) == sched4(m, t) && words4(w1) == sched4(m, t + 4)
+    requires words4(w2) == sched4(m, t + 8) && words4(w3) == sched4(m, t + 12)
+    ensures |r| words4(r) == sched4(m, t + 16)
+{
+    intel_sched(m, t);
+    let h = sha256msg1(w0, w1);
+    return sha256msg2([h[0] + w2[1], h[1] + w2[2], h[2] + w2[3], h[3] + w3[0]], w3);
+}
+
+// Block `m` on state `h` with x86-64's SHA-256 instructions.
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha, cpu::Feature::Sse41])
+fn compress_x64(h: [Secret<u32>; 8], m: [Secret<u32>; 16]) [Secret<u32>; 8]
+    ensures |r| state_values(r) == compress(state_values(h), m)
+{
+    let mut s: [Secret<u32>; 8] = [h[5], h[4], h[1], h[0], h[7], h[6], h[3], h[2]];
+    let mut w0: [Secret<u32>; 4] = [m[0], m[1], m[2], m[3]];
+    let mut w1: [Secret<u32>; 4] = [m[4], m[5], m[6], m[7]];
+    let mut w2: [Secret<u32>; 4] = [m[8], m[9], m[10], m[11]];
+    let mut w3: [Secret<u32>; 4] = [m[12], m[13], m[14], m[15]];
+    assert rounds(state_values(h), m, 0) == state_values(h) by {};
+    // The 64 rounds in order, four at a time, each window taking its next words in place once read.
+    s = rounds_x64(h, m, 0, s, w0);
+    w0 = sched_x64(m, 0, w0, w1, w2, w3);
+    s = rounds_x64(h, m, 4, s, w1);
+    w1 = sched_x64(m, 4, w1, w2, w3, w0);
+    s = rounds_x64(h, m, 8, s, w2);
+    w2 = sched_x64(m, 8, w2, w3, w0, w1);
+    s = rounds_x64(h, m, 12, s, w3);
+    w3 = sched_x64(m, 12, w3, w0, w1, w2);
+    s = rounds_x64(h, m, 16, s, w0);
+    w0 = sched_x64(m, 16, w0, w1, w2, w3);
+    s = rounds_x64(h, m, 20, s, w1);
+    w1 = sched_x64(m, 20, w1, w2, w3, w0);
+    s = rounds_x64(h, m, 24, s, w2);
+    w2 = sched_x64(m, 24, w2, w3, w0, w1);
+    s = rounds_x64(h, m, 28, s, w3);
+    w3 = sched_x64(m, 28, w3, w0, w1, w2);
+    s = rounds_x64(h, m, 32, s, w0);
+    w0 = sched_x64(m, 32, w0, w1, w2, w3);
+    s = rounds_x64(h, m, 36, s, w1);
+    w1 = sched_x64(m, 36, w1, w2, w3, w0);
+    s = rounds_x64(h, m, 40, s, w2);
+    w2 = sched_x64(m, 40, w2, w3, w0, w1);
+    s = rounds_x64(h, m, 44, s, w3);
+    w3 = sched_x64(m, 44, w3, w0, w1, w2);
+    s = rounds_x64(h, m, 48, s, w0);
+    s = rounds_x64(h, m, 52, s, w1);
+    s = rounds_x64(h, m, 56, s, w2);
+    s = rounds_x64(h, m, 60, s, w3);
+    return [h[0] + s[3], h[1] + s[2], h[2] + s[7], h[3] + s[6], h[4] + s[1], h[5] + s[0], h[6] + s[5], h[7] + s[4]];
+}
+
+// Block `m` on state `h`, with the processor's SHA-256 instructions when `hw` (the machine has them,
+// `hw_ok`).
+@constant_time
+@arch(aarch64)
+fn compress_on(h: [Secret<u32>; 8], m: [Secret<u32>; 16], hw: bool) [Secret<u32>; 8]
+    ensures |r| state_values(r) == compress(state_values(h), m)
+{
+    if hw {
+        return unsafe compress_a64(h, m);
+    }
+    return compress_ct(h, m);
+}
+
+@constant_time
+@arch(x86_64)
+fn compress_on(h: [Secret<u32>; 8], m: [Secret<u32>; 16], hw: bool) [Secret<u32>; 8]
+    ensures |r| state_values(r) == compress(state_values(h), m)
+{
+    if hw {
+        return unsafe compress_x64(h, m);
+    }
+    return compress_ct(h, m);
+}
+
+@constant_time
+@arch(wasm32)
+fn compress_on(h: [Secret<u32>; 8], m: [Secret<u32>; 16], _hw: bool) [Secret<u32>; 8]
+    ensures |r| state_values(r) == compress(state_values(h), m)
+{
+    return compress_ct(h, m);
+}
+
+// Whether this machine has the SHA-256 instructions `compress_on` uses.
+@arch(aarch64)
+fn hw_ok() bool {
+    return detect::has(cpu::Feature::Sha2);
+}
+
+@arch(x86_64)
+fn hw_ok() bool {
+    return detect::has(cpu::Feature::Sha) && detect::has(cpu::Feature::Sse41);
+}
+
+@arch(wasm32)
+const fn hw_ok() bool {
+    return false;
+}
+
+/// The SHA-256 digest of `msg` (FIPS 180-4), with the processor's SHA-256 instructions where the
+/// machine has them (arm64 FEAT_SHA256, x86-64 SHA-NI with SSE4.1).
 @constant_time
 pub fn sha256(msg: []Secret<u8>) [Secret<u8>; 32]
+    ensures |d| byte_values(d) == digest(msg)
+{
+    return digest_with(msg, hw_ok());
+}
+
+/// The SHA-256 digest of `msg` without the processor's SHA-256 instructions: the same digest as `sha256`.
+@constant_time
+pub fn sha256_portable(msg: []Secret<u8>) [Secret<u8>; 32]
+    ensures |d| byte_values(d) == digest(msg)
+{
+    return digest_with(msg, false);
+}
+
+// The digest of `msg`, with the processor's instructions when `hw`.
+@constant_time
+fn digest_with(msg: []Secret<u8>, hw: bool) [Secret<u8>; 32]
     ensures |d| byte_values(d) == digest(msg)
 {
     let nb = (msg.len() + 8) / 64 + 1;
@@ -548,7 +1064,7 @@ pub fn sha256(msg: []Secret<u8>) [Secret<u8>; 32]
         invariant b <= nb
         invariant state_values(h) == hashes(msg, b as int)
     {
-        h = absorb(msg, b, h);
+        h = absorb(msg, b, h, hw);
         b += 1;
     }
     assert b as int == (msg.len() as int + 8) / 64 + 1 by {};

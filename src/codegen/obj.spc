@@ -38,6 +38,9 @@ pub(package) const SF_TLS: u8 = 4; // a thread-local variable: its section holds
 pub(package) const SF_USED: u8 = 8; // the linker keeps it though nothing refers to it
 pub(package) const SF_HIDDEN: u8 = 16; // a global symbol the linked image does not export
 pub(package) const SF_WEAK: u8 = 32; // a global definition the link keeps one of among the objects'
+// A symbol inside the code or data before it: no part of a section split at its symbols starts here
+// (`parts_of`; Mach-O `N_ALT_ENTRY`, `.alt_entry`, for the linker).
+pub(package) const SF_ALT: u8 = 64;
 
 /// The flags of an object's copy of data no unit owns (a string literal), which each object that names
 /// it defines: with the data split (`SPLIT_DATA`), a hidden weak global, so the link keeps one copy and
@@ -403,7 +406,7 @@ pub(package) fn parts_of(o: &Obj, split: u8, parts: &mut Vector<Part>, first: &m
         if splits(k as u8, split) {
             for y in 0..o.syms.len() {
                 let sy = o.syms[y];
-                if sy.sec as usize == k && sy.off < size {
+                if sy.sec as usize == k && sy.off < size && (sy.flags & SF_ALT) == 0 {
                     starts.push(sy.off - ast::pick(code, sy.lead, 0) as u64 << 32 | y as u64);
                 }
             }

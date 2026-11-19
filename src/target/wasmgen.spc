@@ -1911,7 +1911,8 @@ extend Gen {
                 } else {
                     self.int_push(t);
                 }
-            } else {
+            } else if t.ty != T_I64 || t.op != O_ZEXT && t.op != O_SEXT || !self.ext_load_push(t) {
+                // An extension of a moved narrow load is one extending load (`ext_load_push`).
                 self.get(t.a);
                 if t.ty == T_I64 && (t.op == O_ZEXT || t.op == O_SEXT) {
                     self.c.op(ast::pick(t.op == O_ZEXT, w::I64_EXTEND_I32_U, w::I64_EXTEND_I32_S));
@@ -3100,6 +3101,13 @@ extend Gen {
         if from == T_I128 || to == T_I128 {
             return self.convert128(i, t);
         }
+        if (op == O_SEXT || op == O_ZEXT) && self.ext_load_push(t) {
+            if to != T_I64 {
+                self.canon(to);
+            }
+            self.put(i);
+            return true;
+        }
         if op == O_SEXT || op == O_ZEXT || op == O_TRUNC || op == O_PTRTOINT || op == O_INTTOPTR {
             self.get(t.a);
             let fw = from == T_I64;
@@ -3630,6 +3638,48 @@ extend Gen {
             self.c.op(w::I32_ADD);
         }
         self.load_al(t.ty, ast::pick(off < 0, 0, off as u32), al);
+    }
+
+    // Extension `t` (`sext` or `zext`) of a narrow integer load its reader computes in place
+    // (`lv::FOLD_SINK`) as one extending load: `i32.load8_s` and `i32.load16_s` for a signed extension to
+    // 32 bits or fewer (a zero one is the load as it is), `i64.load8_s` to `i64.load32_u` to 64 bits. Whether
+    // it pushed the value; a narrower result than 32 bits is the caller's to canonicalize.
+    fn ext_load_push(self: &mut Self, t: Inst) bool {
+        let v = t.a;
+        if (v & (VPARAM | VFLAG)) != 0 || !self.lv.pfold[v as usize] || !self.lv.sunk[v as usize] {
+            return false;
+        }
+        let x = self.b().insts[v as usize];
+        if x.op != O_LOAD || x.ty != T_I8 && x.ty != T_I16 && x.ty != T_I32 {
+            return false;
+        }
+        let sg = t.op == O_SEXT;
+        let op = if t.ty == T_I64 {
+            if x.ty == T_I8 {
+                ast::pick(sg, w::I64_LOAD8_S, w::I64_LOAD8_U)
+            } else if x.ty == T_I16 {
+                ast::pick(sg, w::I64_LOAD16_S, w::I64_LOAD16_U)
+            } else {
+                ast::pick(sg, w::I64_LOAD32_S, w::I64_LOAD32_U)
+            }
+        } else if sg && x.ty == T_I8 {
+            w::I32_LOAD8_S
+        } else if sg && x.ty == T_I16 {
+            w::I32_LOAD16_S
+        } else {
+            return false;
+        };
+        let off = x.c as i32;
+        let al = (x.aux & 15) as u32;
+        self.get(x.a);
+        if off < 0 {
+            self.c.i32_const(off);
+            self.c.op(w::I32_ADD);
+        }
+        let nat = log2u(type_bytes(x.ty, 4));
+        self.c.op(op);
+        self.c.memarg(ast::pick(al < nat, al, nat), ast::pick(off < 0, 0, off as u32));
+        return true;
     }
 
     // Local `a` = the address in `v` plus `off`.
@@ -5345,6 +5395,28 @@ extend Gen {
                 self.ld_lane(t.a, h + k, nl, sg, false);
                 self.ld_lane(t.b, h + k, nl, sg, false);
                 self.c.op(w::I64_MUL);
+                self.c.local(w::LOCAL_SET, x);
+                self.st_lane(x, d, k, lt, false);
+            }
+            return true;
+        }
+        if op == O_VDOT {
+            // Lane k of `a` plus the products of lanes `k * g` to `k * g + g - 1` of `b` and `c`.
+            let lt = lane_type(t.ty);
+            let nl = lane_type(self.vt(t.b));
+            let sg = (t.aux & DOT_SIGNED) != 0;
+            let n = lanes(t.ty);
+            let g = lanes(self.vt(t.b)) / n;
+            let d = self.vdef(i);
+            let x = self.tmp(w::I64);
+            for k in 0..n {
+                self.ld_lane(t.a, k, lt, false, false);
+                for j in 0..g {
+                    self.ld_lane(t.b, k * g + j, nl, sg, false);
+                    self.ld_lane(t.c, k * g + j, nl, sg, false);
+                    self.c.op(w::I64_MUL);
+                    self.c.op(w::I64_ADD);
+                }
                 self.c.local(w::LOCAL_SET, x);
                 self.st_lane(x, d, k, lt, false);
             }
@@ -7373,6 +7445,12 @@ const V_EQ: [u32; 4] = [0x23, 0x2D, 0x37, 0xD6];
 // (+1: the high lanes; +2: unsigned); the low lanes extended to twice their size, signed (+1: the high
 // lanes; +2: unsigned).
 const V_EXTMUL: [u32; 3] = [0x9C, 0xBC, 0xDC];
+// `i32x4.dot_i16x8_s`.
+const V_DOT_I16: u32 = 0xBA;
+// Relaxed SIMD's `i8x16.relaxed_swizzle`, and `i8x16.relaxed_laneselect` (then the 2-, 4- and 8-byte
+// lanes').
+const V_RELAXED_SWIZZLE: u32 = 0x100;
+const V_LANESELECT: u32 = 0x109;
 const V_EXTEND: [u32; 3] = [0x87, 0xA7, 0xC7];
 // Per integer condition (C_EQ .. C_UGE), its comparison's offset from the lanes' `eq`: 1, 2 and 4-byte lanes
 // (eq, ne, lt_s, lt_u, gt_s, gt_u, le_s, le_u, ge_s, ge_u), 8-byte lanes (eq, ne, lt_s, gt_s, le_s, ge_s).
@@ -7602,6 +7680,13 @@ extend Gen {
         if op == O_VMULW {
             return vfit(self.vt(t.a));
         }
+        if op == O_VDOT {
+            // `i32x4.dot_i16x8_s`.
+            return (t.aux & DOT_SIGNED) != 0 && type_bytes(lane_type(t.ty), 8) == 4 && type_bytes(
+                lane_type(self.vt(t.b)),
+                8,
+            ) == 2;
+        }
         if op == O_SHL || op == O_LSHR || op == O_ASHR {
             return self.uniform(t.b);
         }
@@ -7677,7 +7762,14 @@ extend Gen {
             self.vget(t.b);
             self.vget(t.c);
             self.vget(t.a);
-            self.sop(0x52);
+            // Of a lane mask (each lane all ones or 0) relaxed SIMD's lane select takes either bit of a
+            // lane: the bit select's result.
+            let mt = self.vt(t.a);
+            if self.p().cpu_of(self.b()).relaxed && is_int(lane_type(mt)) && lane_mask(self.b(), t.a, lv::MASK_DEPTH) {
+                self.sop(V_LANESELECT + type_bytes(lane_type(mt), 4).trailing_zeros() as u32);
+            } else {
+                self.sop(0x52);
+            }
         } else if op == O_VZIPLO || op == O_VZIPHI || op == O_VUNZIP {
             // Lane j of a zip is lane j / 2 (plus half the lanes for the high halves) of `a` (j even) or `b`;
             // of an unzip lane 2j + aux of `a ++ b`. `b`'s lanes start at byte 16.
@@ -7703,6 +7795,13 @@ extend Gen {
         } else if op == O_VSUMW {
             self.vget(t.a);
             self.vsum_pairs(t.b, lane_type(self.vt(t.b)), lt);
+            self.sop(V_ADD[k]);
+        } else if op == O_VDOT {
+            // `i32x4.dot_i16x8_s` of the operands, plus the accumulator.
+            self.vget(t.a);
+            self.vget(t.b);
+            self.vget(t.c);
+            self.sop(V_DOT_I16);
             self.sop(V_ADD[k]);
         } else if op == O_VMULW {
             // `extmul` of the operands' low or high lanes, unsigned 2 past the signed form.
@@ -8224,9 +8323,13 @@ extend Gen {
         }
         self.vpre(i);
         if c == core::SIMD_SWIZZLE_ZERO && t.c == VNONE {
+            // Indices below 16: relaxed SIMD's swizzle gives the exact one's lanes.
+            let ix = b.pool[t.a as usize + 1];
             self.vget(a);
-            self.vget(b.pool[t.a as usize + 1]);
-            self.sop(w::I8X16_SWIZZLE);
+            self.vget(ix);
+            self.sop(
+                ast::pick(self.p().cpu_of(self.b()).relaxed && small_bytes(b, ix), V_RELAXED_SWIZZLE, w::I8X16_SWIZZLE),
+            );
             self.vpost(i);
             return true;
         }

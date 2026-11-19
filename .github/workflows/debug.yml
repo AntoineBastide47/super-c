@@ -1,8 +1,9 @@
 # The permanent probe lane: whatever currently needs proving on a real runner lives here as the job
 # content, run on demand from the Actions tab. Edit the jobs for the next investigation; do not remove
 # the file. Current probe: this tree's compiler on every platform with a native backend (macOS arm64,
-# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, and
-# the self-compile benchmark, whose per-phase heap (MiB) must agree across the platforms.
+# Linux x86-64, Linux arm64, Windows x86-64): the test suite, leak-gated, in the release's shards, with
+# the tests that link a C driver (SC_TEST_CC); the vector tests at x86-64-v3; the native tests under
+# Intel SDE (AVX-512); the wasm lanes; and a thread-local program built on Windows, its output shown.
 name: Debug
 on:
   workflow_dispatch
@@ -103,21 +104,18 @@ jobs:
           chmod +x "./$bin"
           dur=tests/durations/${{ matrix.target }}.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
           case "${{ matrix.shard }}" in 1/*) export SC_LIR=1 ;; esac
+          case "${{ matrix.target }}" in windows) export SC_TEST_CC=gcc ;; *) export SC_TEST_CC=cc ;; esac
           SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-shard=${{ matrix.shard }} --test-durations="$dur"
 
-  # The whole cold native self-build, rounds at one job and at one job per core, timed and counted per
-  # phase. The heap per phase (MiB) is a property of the sources and the target's code, so the platforms
-  # agree on it within the targets' differences; time and cycles follow each runner's machine.
-  bench:
+  # The vector tests at x86-64-v3 (BMI1, BMI2, MOVBE, AVX2, FMA) on the x86-64 runners.
+  levels:
     needs: compile
-    name: self-compile bench (${{ matrix.target }})
+    name: levels (${{ matrix.target }}, x86-64-v3)
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
           - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
           - { os: windows-latest, target: windows }
     runs-on: ${{ matrix.os }}
     defaults:
@@ -135,10 +133,814 @@ jobs:
         with:
           name: compiler-${{ matrix.target }}
 
-      - name: Self-compile benchmark
+      - name: Vector tests at x86-64-v3
+        env:
+          SC_SIMD_FEATURES: x86-64-v3
         run: |
           set -eu
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
-          { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
-          "./$bin" bench --filter=self_compile
+          SC_LEAK_CHECK=fatal "./$bin" test --quiet --test-timeout=900 --filter=simd_
+
+  # The native tests under Intel SDE (an emulated Sapphire Rapids: AVX-512, BMI, MOVBE).
+  avx512:
+    needs: compile
+    name: avx512 (linux, sde)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Install Intel SDE
+        run: |
+          set -eu
+          f=sde-external-10.13.1-2026-07-28-lin.tar.xz
+          curl -fsSL --retry 3 -o "$f" "https://github.com/petarpetrovt/setup-sde/releases/download/binaries/$f"
+          echo "94e97d623fec54385686e1e7ba65ebc9941748c05ee451423948334892bf2b50  $f" | sha256sum -c -
+          mkdir sde
+          tar -xJf "$f" -C sde --strip-components=1
+
+      - name: Native tests with 64-byte vectors under SDE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
+
+      - name: SHA-512 with the SHA512 instructions under SDE (Arrow Lake)
+        run: |
+          set -eu
+          mkdir -p x5 && cd x5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::cpu;
+          import std::cpu::detect as detect;
+
+          fn main() i32 {
+              let hw = detect::has(cpu::Feature::Sha512ni);
+              let abc: [Secret<u8>; 3] = [Secret::new(0x61), Secret::new(0x62), Secret::new(0x63)];
+              let d = sha512::sha512(abc[0..3]);
+              let ok = d[0].declassify() == 0xdd && d[1].declassify() == 0xaf && d[63].declassify() == 0x9f;
+              let mut msg = Vector::<Secret<u8>>::new();
+              let mut same = true;
+              for n in 0..600usize {
+                  let a = sha512::sha512(msg.as_slice());
+                  let b = sha512::sha512_portable(msg.as_slice());
+                  for i in 0..64usize {
+                      same = same && a[i].declassify() == b[i].declassify();
+                  }
+                  msg.push(Secret::new((n * 7 + 3) as u8));
+              }
+              println("sha512 instructions {}, abc {}, 600 lengths agree {}", hw, ok, same);
+              return (!(hw && ok && same)) as i32;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o x5
+          ../sde/sde64 -arl -- ./x5
+
+      - name: AMX byte products under SDE (Sapphire Rapids), instruction counts
+        run: |
+          set -eu
+          mkdir -p amxb && cd amxb
+          cat > main.spc <<'SPC'
+          import std::simd::matrix;
+          import stdlib;
+
+          fn main() i32 {
+              let shapes: [(usize, usize, usize); 3] = [(256, 256, 256), (255, 255, 255), (64, 1024, 64)];
+              let sel = stdlib::get_env("SHAPE").unwrap_or(String::from_str("0"));
+              let (m, k, n) = shapes[(sel.as_str().byte_at(0) - b'0') as usize];
+              let mut a = Vector::<i8>::new();
+              let mut b = Vector::<i8>::new();
+              let mut c = Vector::<i32>::new();
+              for i in 0..m * k { a.push((i * 7 + 3) as i8); }
+              for i in 0..k * n { b.push((i * 5 + 1) as i8); }
+              for _ in 0..m * n { c.push(0); }
+              let reps = stdlib::get_env("REPS").unwrap_or(String::from_str("1"));
+              for _ in 0..(reps.as_str().byte_at(0) - b'0') as usize {
+                  matrix::mul_i8(&mut c, &a, &b, m, k, n);
+              }
+              println("{}x{}x{} c[1] {}", m, k, n, c[1]);
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o b
+          for sh in 0 1 2; do
+            echo "== shape $sh: setup only, one AMX call, two AMX calls"
+            for r in 0 1 2; do
+              SHAPE=$sh REPS=$r ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+            done
+            echo "== shape $sh: hottest blocks of two calls"
+            SHAPE=$sh REPS=2 ../sde/sde64 -spr -mix -top_blocks 60 -omix mix$sh.txt -- ./b > /dev/null 2>&1
+            awk '/BLOCK/{f=1} f' mix$sh.txt | grep -v -E '^\s*$' | head -1500 | sed "s/^/mix$sh /" || true
+          done
+
+  # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
+  tls-windows:
+    needs: compile
+    name: thread-local (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: windows
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-windows
+
+      - name: Build and run the program
+        run: |
+          set -u
+          chmod +x ./super-c.exe
+          mkdir -p tls && cd tls
+          cat > main.spc <<'SPC'
+          import pthread;
+
+          @thread_local
+          static mut COUNT: u64 = 7;
+
+          fn worker(arg: *mut void) *mut void {
+              unsafe COUNT += 1;
+              return arg;
+          }
+
+          fn main() i32 {
+              let mut t = unsafe zeroed::<pthread::pthread_t>();
+              unsafe pthread::pthread_create(&mut t, null, worker, null);
+              unsafe pthread::pthread_join(t, null);
+              return (unsafe COUNT != 7) as i32;
+          }
+          SPC
+          which gcc; gcc --version | head -1
+          ../super-c.exe build main.spc -o prog.exe; echo "build=$?"
+          ./prog.exe; echo "run=$?"
+
+  # Windows arm64 builds through its C tree: its atomics go through compiler-rt's helpers
+  # (`-moutline-atomics`), which pick LSE by the CPU once. The program built with llvm-mingw runs, its
+  # atomics give the right values, and it calls the helpers.
+  lse-windows-arm64:
+    needs: compile
+    name: lse (windows arm64)
+    runs-on: windows-11-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-windows
+
+      - name: Set up llvm-mingw
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          url=$(gh api repos/mstorsjo/llvm-mingw/releases/latest --jq '.assets[] | select(.name | endswith("ucrt-aarch64.zip")) | .browser_download_url')
+          echo "$url"
+          curl -sSL -o lm.zip "$url"
+          pwsh -NoProfile -Command "Expand-Archive -Path lm.zip -DestinationPath '$RUNNER_TEMP\lm'"
+          bin=$(ls -d "$(cygpath -u "$RUNNER_TEMP")"/lm/*/bin | head -1)
+          echo "$bin" >> "$GITHUB_PATH"
+          "$bin/aarch64-w64-mingw32-clang" --version | head -1
+
+      - name: Build and run the atomics
+        run: |
+          set -eu
+          chmod +x ./super-c.exe
+          mkdir -p lsew && cd lsew
+          cat > main.spc <<'SPC'
+          import std::parallel::atomics as atom;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let a = atom::Atomic::<u64>::new(0);
+              let t0 = clock::monotonic_ns();
+              for i in 0..10000000u64 {
+                  let _ = a.fetch_add(i & 3, atom::MemoryOrder::SeqCst);
+              }
+              let dt = clock::monotonic_ns() - t0;
+              let s = a.swap(7, atom::MemoryOrder::AcqRel);
+              println("sum {} after {} time {} ms", s, a.load(atom::MemoryOrder::Acquire), dt / 1000000);
+              return (s != 15000000 || a.load(atom::MemoryOrder::Acquire) != 7) as i32;
+          }
+          SPC
+          ../super-c.exe build --emit-c main.spc --profile=release --target=windows --arch=aarch64
+          grep -c -- -moutline-atomics build/release/raw/__cflags
+          JOBS=4 CC=aarch64-w64-mingw32-clang sh ../ci/cc_tree.sh build/release/raw prog.exe
+          ./prog.exe; echo "run=$?"
+          llvm-objdump -d prog.exe > dis.txt
+          echo "helper calls: $(grep -c -E 'bl.*__aarch64_(ldadd|swp|cas)' dis.txt)"
+          echo "LSE instructions: $(grep -c -E '\s(ldaddal|swpal|casal)\s' dis.txt)"
+          pwsh -NoProfile -Command "(Get-CimInstance Win32_Processor).Name"
+
+  # x86-64-v3 on a real x86-64 runner: release compilers for the baseline, x86-64-v3, the baseline with
+  # v3's scalar features, and the baseline with AVX2 and FMA, each timed building the compiler,
+  # alternating, three rounds.
+  bench-v3:
+    needs: compile
+    name: bench (linux, x86-64-v3)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux
+
+      - name: Time the compilers by feature group
+        run: |
+          set -eu
+          chmod +x ./super-c
+          grep -m1 -o -w -E 'bmi1|bmi2|movbe|avx2' /proc/cpuinfo | sort -u | tr '\n' ' '; lscpu | grep -i 'model name' || true
+          ./super-c build --profile=release -fno-prove --out-dir=b1 -o sc-v1
+          ./super-c build --profile=release -fno-prove --target-cpu=x86-64-v3 --out-dir=b3 -o sc-v3
+          ./super-c build --profile=release -fno-prove --target-feature=+bmi1,+bmi2,+movbe,+lzcnt,+popcnt --out-dir=bs -o sc-sc
+          ./super-c build --profile=release -fno-prove --target-feature=+avx2,+fma --out-dir=bv -o sc-vec
+          for r in 1 2 3; do
+            for v in v1 v3 sc vec; do
+              rm -rf "t-$v"
+              s=$(date +%s.%N)
+              "./sc-$v" build -fno-prove --out-dir="t-$v" -o "o-$v" > /dev/null
+              e=$(date +%s.%N)
+              echo "round $r $v: $(echo "$e - $s" | bc) s"
+            done
+          done
+
+      - name: Time BMI-heavy code with and without the scalar x86-64-v3 features
+        run: |
+          set -eu
+          mkdir -p bmi
+          cat > bmi/main.spc <<'PROGRAM'
+          import std::platform::clock;
+
+          // Set-bit walk: per word, each set bit's index (tzcnt, blsr).
+          @noinline
+          fn walk(ws: []u64) u64 {
+              let mut s: u64 = 0;
+              for i in 0..ws.len() {
+                  let mut w = ws[i];
+                  while w != 0 {
+                      s += w.trailing_zeros() as u64 + i as u64;
+                      w &= w - 1;
+                  }
+              }
+              return s;
+          }
+
+          // A bit reader: fields of 1 to 24 bits at running positions (variable shifts and masks).
+          @noinline
+          fn fields(ws: []u64, lens: []u8) u64 {
+              let mut pos: u64 = 0;
+              let mut s: u64 = 0;
+              let nbits = (ws.len() as u64 - 1) * 64;
+              for i in 0..lens.len() {
+                  let l = lens[i] as u64;
+                  if pos + l > nbits {
+                      pos = 0;
+                  }
+                  let w = ws[(pos >> 6) as usize] >> (pos & 63) | (ws[(pos >> 6) as usize + 1] << 1) << (63 - (pos & 63));
+                  s = s.wrapping_add(w & ((1u64 << l) - 1));
+                  pos += l;
+              }
+              return s;
+          }
+
+          // 64 x 64 -> 128 mixing (wyhash-like): high halves and rotations.
+          @noinline
+          fn mix(ws: []u64) u64 {
+              let mut h: u64 = 0x9E3779B97F4A7C15;
+              for i in 0..ws.len() {
+                  let p = (h ^ ws[i]) as u128 * 0xA0761D6478BD642F;
+                  h = ((p >> 64) as u64 ^ p as u64).rotate_left(23);
+              }
+              return h;
+          }
+
+          // Big-endian 32-bit fields.
+          @noinline
+          fn be(bs: []u8) u64 {
+              let mut s: u64 = 0;
+              let mut i: usize = 0;
+              while i + 4 <= bs.len() {
+                  s += (bs[i] as u64) << 24 | (bs[i + 1] as u64) << 16 | (bs[i + 2] as u64) << 8 | bs[i + 3] as u64;
+                  i += 4;
+              }
+              return s;
+          }
+
+          // Log2 buckets.
+          @noinline
+          fn buckets(ws: []u64, counts: []mut u64) {
+              for i in 0..ws.len() {
+                  counts[63 - (ws[i] | 1).leading_zeros()] += 1;
+              }
+          }
+
+          fn main() i32 {
+              let n: usize = 1 << 16;
+              let mut ws = Vector::<u64>::new();
+              let mut lens = Vector::<u8>::new();
+              let mut bs = Vector::<u8>::new();
+              let mut x: u64 = 0x243F6A8885A308D3;
+              for _ in 0..n {
+                  x ^= x << 13;
+                  x ^= x >> 7;
+                  x ^= x << 17;
+                  ws.push(x & x >> 3);
+                  lens.push((x % 24 + 1) as u8);
+                  bs.push(x as u8);
+              }
+              let mut counts: [u64; 64] = [0; 64];
+              let names: [str; 5] = ["walk", "fields", "mix", "be", "buckets"];
+              for k in 0..5usize {
+                  let t0 = clock::monotonic_ns();
+                  let mut acc: u64 = 0;
+                  let reps: [usize; 5] = [400, 4000, 4000, 40000, 4000];
+                  for r in 0..reps[k] {
+                      ws[r % n] = ws[r % n] ^ r as u64;
+                      acc = acc.wrapping_add(switch k {
+                          0 => walk(ws[0..n]),
+                          1 => fields(ws[0..n], lens[0..n]),
+                          2 => mix(ws[0..n]),
+                          3 => be(bs[0..n]),
+                          _ => {
+                              buckets(ws[0..n], counts[0..64]);
+                              counts[r % 64]
+                          },
+                      });
+                  }
+                  println("{} {} ms ({})", names[k], (clock::monotonic_ns() - t0) / 1000000, acc);
+              }
+              return 0;
+          }
+          PROGRAM
+          f=--target-feature=+bmi1,+bmi2,+lzcnt,+popcnt,+movbe
+          ./super-c build bmi/main.spc --profile=release --simd-dispatch=off -o bmi/v1
+          ./super-c build bmi/main.spc --profile=release -o bmi/rt
+          ./super-c build bmi/main.spc --profile=release $f -o bmi/sc
+          ./super-c bench --no-run --filter=bits_bench --out-dir=bb1 > /dev/null
+          ./super-c bench --no-run --filter=bits_bench $f --out-dir=bbs > /dev/null
+          for r in 1 2 3; do
+            for v in v1 rt sc; do echo "== kernels $v round $r"; "./bmi/$v"; done
+            for v in bb1 bbs; do echo "== bits $v round $r"; "./$v/bench-bin" | grep -E '^bits_bench::|time \(ms\)'; done
+          done
+
+      - name: Time SHA-256 with and without the processor's instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha_ni|sha2' /proc/cpuinfo || true
+          mkdir -p shat && cd shat
+          cat > main.spc <<'SPC'
+          import std::crypto::sha256 as sha;
+          import std::crypto::secret as *;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha::sha256(&msg);
+                  let t1 = clock::monotonic_ns();
+                  let e = sha::sha256_portable(&msg);
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..32usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha256 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o sha
+          ./sha
+
+      - name: Time SHA-512 with the dispatch and the portable path
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha512|avx2' /proc/cpuinfo || true
+          mkdir -p s5 && cd s5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha512::sha512(msg.as_slice());
+                  let t1 = clock::monotonic_ns();
+                  let e = sha512::sha512_portable(msg.as_slice());
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..64usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha512 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o s5
+          ./s5
+
+  # LSE and RCPC on a Linux arm64 server core: the mutex benchmarks built without them (the Linux
+  # baseline) and with them, alternating, two rounds.
+  bench-lse:
+    needs: compile
+    name: bench (linux_arm64, lse)
+    runs-on: ubuntu-26.04-arm
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: linux_arm64
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-linux_arm64
+
+      - name: Time the mutex benchmarks with and without LSE
+        run: |
+          set -eu
+          chmod +x ./super-c
+          grep -m1 -o -w -E 'atomics|lrcpc|sve|sve2|sme' /proc/cpuinfo | sort -u | tr '\n' ' '; nproc; lscpu | grep -i -E 'model name|vendor' || true
+          ./super-c bench --no-run --filter=mutex_ --out-dir=b0 > /dev/null
+          ./super-c bench --no-run --filter=mutex_ --target-feature=+lse,+rcpc --out-dir=b1 > /dev/null
+          for r in 1 2; do
+            for v in b0 b1; do
+              echo "== $v round $r"
+              "./$v/bench-bin" | grep -E '^mutex_bench::|time \(ms\)'
+            done
+          done
+
+      - name: Time SHA-256 with and without the processor's instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha_ni|sha2' /proc/cpuinfo || true
+          mkdir -p shat && cd shat
+          cat > main.spc <<'SPC'
+          import std::crypto::sha256 as sha;
+          import std::crypto::secret as *;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha::sha256(&msg);
+                  let t1 = clock::monotonic_ns();
+                  let e = sha::sha256_portable(&msg);
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..32usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha256 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o sha
+          ./sha
+
+      - name: Time SHA-512 with and without the SHA512 instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha512' /proc/cpuinfo || true
+          mkdir -p s5 && cd s5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha512::sha512(msg.as_slice());
+                  let t1 = clock::monotonic_ns();
+                  let e = sha512::sha512_portable(msg.as_slice());
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..64usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha512 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o s5
+          ./s5
+
+      - name: Time Keccak-f with and without the SHA3 instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha3' /proc/cpuinfo || true
+          mkdir -p k3 && cd k3
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha3;
+          import std::simd::aarch64 as a64;
+          import std::cpu;
+          import std::platform::clock;
+
+          const RC: [u64; 24] = [0x1, 0x8082, 0x800000000000808a, 0x8000000080008000, 0x808b, 0x80000001, 0x8000000080008081, 0x8000000000008009, 0x8a, 0x88, 0x80008009, 0x8000000a, 0x8000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003, 0x8000000000008002, 0x8000000000000080, 0x800a, 0x800000008000000a, 0x8000000080008081, 0x8000000000008080, 0x80000001, 0x8000000080008008];
+
+          fn kscalar(a: &mut [u64; 25]) {
+              for r in 0..24usize {
+                  let mut c: [u64; 5] = [0; 5];
+                  for x in 0..5usize { c[x] = a[x] ^ a[x + 5] ^ a[x + 10] ^ a[x + 15] ^ a[x + 20]; }
+                  let mut b: [u64; 25] = [0; 25];
+                  let d0 = c[4] ^ c[1].rotate_left(1);
+                  let d1 = c[0] ^ c[2].rotate_left(1);
+                  let d2 = c[1] ^ c[3].rotate_left(1);
+                  let d3 = c[2] ^ c[4].rotate_left(1);
+                  let d4 = c[3] ^ c[0].rotate_left(1);
+                  b[0] = (a[0] ^ d0).rotate_left(0);
+                  b[16] = (a[5] ^ d0).rotate_left(36);
+                  b[7] = (a[10] ^ d0).rotate_left(3);
+                  b[23] = (a[15] ^ d0).rotate_left(41);
+                  b[14] = (a[20] ^ d0).rotate_left(18);
+                  b[10] = (a[1] ^ d1).rotate_left(1);
+                  b[1] = (a[6] ^ d1).rotate_left(44);
+                  b[17] = (a[11] ^ d1).rotate_left(10);
+                  b[8] = (a[16] ^ d1).rotate_left(45);
+                  b[24] = (a[21] ^ d1).rotate_left(2);
+                  b[20] = (a[2] ^ d2).rotate_left(62);
+                  b[11] = (a[7] ^ d2).rotate_left(6);
+                  b[2] = (a[12] ^ d2).rotate_left(43);
+                  b[18] = (a[17] ^ d2).rotate_left(15);
+                  b[9] = (a[22] ^ d2).rotate_left(61);
+                  b[5] = (a[3] ^ d3).rotate_left(28);
+                  b[21] = (a[8] ^ d3).rotate_left(55);
+                  b[12] = (a[13] ^ d3).rotate_left(25);
+                  b[3] = (a[18] ^ d3).rotate_left(21);
+                  b[19] = (a[23] ^ d3).rotate_left(56);
+                  b[15] = (a[4] ^ d4).rotate_left(27);
+                  b[6] = (a[9] ^ d4).rotate_left(20);
+                  b[22] = (a[14] ^ d4).rotate_left(39);
+                  b[13] = (a[19] ^ d4).rotate_left(8);
+                  b[4] = (a[24] ^ d4).rotate_left(14);
+                  for y in 0..5usize { for x in 0..5usize { a[x + 5 * y] = b[x + 5 * y] ^ ~b[(x + 1) % 5 + 5 * y] & b[(x + 2) % 5 + 5 * y]; } }
+                  a[0] ^= RC[r];
+              }
+          }
+
+          @arch(aarch64)
+          @target_feature([cpu::Feature::Sha3])
+          fn kvec(s: &mut [u64; 25]) {
+              let mut a: [u64x2; 25] = [u64x2::splat(0); 25];
+              for i in 0..25usize { a[i] = u64x2::splat(s[i]); }
+              for r in 0..24usize {
+                  let c0 = a64::eor3(a64::eor3(a[0].bitcast::<u8, 16>(), a[5].bitcast::<u8, 16>(), a[10].bitcast::<u8, 16>()), a[15].bitcast::<u8, 16>(), a[20].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c1 = a64::eor3(a64::eor3(a[1].bitcast::<u8, 16>(), a[6].bitcast::<u8, 16>(), a[11].bitcast::<u8, 16>()), a[16].bitcast::<u8, 16>(), a[21].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c2 = a64::eor3(a64::eor3(a[2].bitcast::<u8, 16>(), a[7].bitcast::<u8, 16>(), a[12].bitcast::<u8, 16>()), a[17].bitcast::<u8, 16>(), a[22].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c3 = a64::eor3(a64::eor3(a[3].bitcast::<u8, 16>(), a[8].bitcast::<u8, 16>(), a[13].bitcast::<u8, 16>()), a[18].bitcast::<u8, 16>(), a[23].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let c4 = a64::eor3(a64::eor3(a[4].bitcast::<u8, 16>(), a[9].bitcast::<u8, 16>(), a[14].bitcast::<u8, 16>()), a[19].bitcast::<u8, 16>(), a[24].bitcast::<u8, 16>()).bitcast::<u64, 2>();
+                  let d0 = a64::rax1(c4, c1);
+                  let d1 = a64::rax1(c0, c2);
+                  let d2 = a64::rax1(c1, c3);
+                  let d3 = a64::rax1(c2, c4);
+                  let d4 = a64::rax1(c3, c0);
+                  let mut b: [u64x2; 25] = [u64x2::splat(0); 25];
+                  b[0] = a64::xar::<0>(a[0], d0);
+                  b[16] = a64::xar::<28>(a[5], d0);
+                  b[7] = a64::xar::<61>(a[10], d0);
+                  b[23] = a64::xar::<23>(a[15], d0);
+                  b[14] = a64::xar::<46>(a[20], d0);
+                  b[10] = a64::xar::<63>(a[1], d1);
+                  b[1] = a64::xar::<20>(a[6], d1);
+                  b[17] = a64::xar::<54>(a[11], d1);
+                  b[8] = a64::xar::<19>(a[16], d1);
+                  b[24] = a64::xar::<62>(a[21], d1);
+                  b[20] = a64::xar::<2>(a[2], d2);
+                  b[11] = a64::xar::<58>(a[7], d2);
+                  b[2] = a64::xar::<21>(a[12], d2);
+                  b[18] = a64::xar::<49>(a[17], d2);
+                  b[9] = a64::xar::<3>(a[22], d2);
+                  b[5] = a64::xar::<36>(a[3], d3);
+                  b[21] = a64::xar::<9>(a[8], d3);
+                  b[12] = a64::xar::<39>(a[13], d3);
+                  b[3] = a64::xar::<43>(a[18], d3);
+                  b[19] = a64::xar::<8>(a[23], d3);
+                  b[15] = a64::xar::<37>(a[4], d4);
+                  b[6] = a64::xar::<44>(a[9], d4);
+                  b[22] = a64::xar::<25>(a[14], d4);
+                  b[13] = a64::xar::<56>(a[19], d4);
+                  b[4] = a64::xar::<50>(a[24], d4);
+                  for y in 0..5usize { for x in 0..5usize { a[x + 5 * y] = a64::bcax(b[x + 5 * y].bitcast::<u8, 16>(), b[(x + 2) % 5 + 5 * y].bitcast::<u8, 16>(), b[(x + 1) % 5 + 5 * y].bitcast::<u8, 16>()).bitcast::<u64, 2>(); } }
+                  a[0] = a[0] ^ u64x2::splat(RC[r]);
+              }
+              for i in 0..25usize { s[i] = a[i][0]; }
+          }
+
+          fn main() i32 {
+              let n: usize = 1 << 20;
+              let mut m = Vector::<Secret<u8>>::new();
+              for i in 0..n { m.push(Secret::new((i * 7 + 1) as u8)); }
+              let t0 = clock::monotonic_ns();
+              let d = sha3::sha3_256(&m);
+              let t1 = clock::monotonic_ns();
+              let mut s1: [u64; 25] = [0; 25];
+              let mut s2: [u64; 25] = [0; 25];
+              let blocks = n / 136;
+              for b in 0..blocks { s1[0] ^= b as u64; kscalar(&mut s1); }
+              let t2 = clock::monotonic_ns();
+              for b in 0..blocks { s2[0] ^= b as u64; unsafe kvec(&mut s2); }
+              let t3 = clock::monotonic_ns();
+              println("1 MiB: sha3_256 {} us (d0 {}), raw scalar permutations {} us, SHA3 instructions {} us, same {}", (t1 - t0) / 1000, d[0].declassify(), (t2 - t1) / 1000, (t3 - t2) / 1000, s1[0] == s2[0] && s1[24] == s2[24]);
+              let mut p1: [Secret<u64>; 25] = [Secret::new(0); 25];
+              let mut p2: [Secret<u64>; 25] = [Secret::new(0); 25];
+              let t4 = clock::monotonic_ns();
+              for b in 0..blocks { p1[0] = p1[0] ^ Secret::new(b as u64); p1 = sha3::keccak_f1600(p1); }
+              let t5 = clock::monotonic_ns();
+              for b in 0..blocks { p2[0] = p2[0] ^ Secret::new(b as u64); p2 = sha3::keccak_f1600_portable(p2); }
+              let t6 = clock::monotonic_ns();
+              println("std permutations: dispatch {} us, portable {} us, same {}", (t5 - t4) / 1000, (t6 - t5) / 1000, p1[0].declassify() == p2[0].declassify() && p1[24].declassify() == s1[24]);
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o k3
+          ./k3; ./k3
+
+  wasm-compile:
+    name: wasm compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: ./.github/actions/bootstrap
+        with:
+          target: linux
+
+      - name: Build the native compiler
+        run: SC_LEAK_CHECK=fatal ./super-c-boot build --bootstrap-tags -fno-prove
+
+      - name: Build the wasm compiler
+        run: ./super-c build --target=wasm --profile=release -o super-c.wasm
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: compiler-wasm
+          path: |
+            super-c
+            super-c.wasm
+          if-no-files-found: error
+          retention-days: 1
+
+  wasm-checks:
+    needs: wasm-compile
+    name: wasm checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          role: checks
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Make the native compiler executable
+        run: chmod +x ./super-c
+
+      - name: Vector tests on wasm32 with simd128
+        run: |
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=simd_
+          SC_SIMD_LANE=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --filter=gen_vector_seeds
+
+      - name: Self-host fixpoint under wasmtime
+        run: |
+          set -eu
+          w=/tmp/wwasm
+          mkdir -p "$w"
+          cp -R src std ffi build.toml "$w/" && rm -rf "$w/src/build"
+          cp super-c.wasm "$w/gen1.wasm"
+          cd "$w"
+          gen() {
+            "$GITHUB_WORKSPACE/super-c" build --target=wasm --profile=release \
+              --transpiler="wasmtime run --dir=/ --env WASI_SDK_PATH=$WASI_SDK_PATH --argv0 $w/$1 -- $w/$1" -o "$2"
+          }
+          gen gen1.wasm gen2.wasm
+          cp -R build/release/raw /tmp/wasm-gen1
+          gen gen2.wasm gen3.wasm
+          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
+
+  wasm-target:
+    needs: wasm-compile
+    name: wasm target (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite with wasm32 programs
+        run: |
+          chmod +x ./super-c
+          SC_TEST_TARGET=wasm SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=900 --test-shard=${{ matrix.test_shard }}
+
+  wasm-test:
+    needs: wasm-compile
+    name: wasm test (${{ matrix.test_shard }})
+    strategy:
+      fail-fast: false
+      matrix:
+        test_shard: ["1/2", "2/2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: ./.github/actions/toolchain
+        with:
+          target: wasm
+          sha: ${{ github.sha }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: compiler-wasm
+
+      - name: Run the test suite against the wasm compiler
+        run: |
+          chmod +x ./super-c
+          dur=tests/durations/wasm.tsv; [ -f "$dur" ] || dur=tests/durations.tsv
+          SC_TEST_SUPERC="$GITHUB_WORKSPACE/ci/wasm-superc.sh" SC_LEAK_CHECK=fatal ./super-c test --quiet --test-shard=${{ matrix.test_shard }} --test-durations="$dur"

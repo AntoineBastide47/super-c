@@ -2,6 +2,7 @@
 // sdk/libsuperc.h uses it through its functions and its version 1 table: sessions, generation checks,
 // diagnostics with stable codes, symbols, references, formatting, and balanced result ownership.
 import tests::cli_harness as cli;
+import driver::util as dutil;
 import stdlib;
 import api::c_abi as abi;
 import api::errors as apierr;
@@ -109,6 +110,18 @@ fn exports_only_the_c_abi(libdir: str) {
 @platform(windows | wasm)
 fn exports_only_the_c_abi(libdir: str) {}
 
+// Windows loads a DLL from the program's directory (no run path): the client's `superc.dll` beside it.
+@platform(windows)
+fn beside_the_client(dir: str, libdir: str) {
+    assert(
+        dutil::copy_file(format("{}/superc.dll", libdir).as_str(), format("{}/superc.dll", dir).as_str()),
+        "the DLL copies",
+    );
+}
+
+@platform(!windows)
+fn beside_the_client(_dir: str, _libdir: str) {}
+
 @test(timeout = 900)
 fn a_c_client_uses_libsuperc() {
     let proj = cli::proj_new();
@@ -144,6 +157,7 @@ fn a_c_client_uses_libsuperc() {
         cc.show();
     }
     assert(cc.ok(), "the C client compiles against the header");
+    beside_the_client(proj.dir(), &libdir);
     let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();
     let mut run = format("{}/client {}/app/main.spc", proj.dir(), proj.dir());
     let mut rp = format("{}/.runout", proj.dir());

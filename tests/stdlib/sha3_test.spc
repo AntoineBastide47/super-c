@@ -113,3 +113,35 @@ fn shake_outputs() {
         assert_eq(hex(&out).as_str(), s256.slice(0, 2 * n));
     }
 }
+
+// Keccak-f[1600] of the zero state (FIPS 202's known answer: lanes 0 and 24) and of a state of distinct
+// lanes (a reference implementation's), by `keccak_f1600` with the processor's SHA-3 instructions where the
+// host has them (arm64 FEAT_SHA3) and by `keccak_f1600_portable`; both agree on 8 more states, each the
+// last one permuted again.
+@test
+fn the_permutation_by_both_paths() {
+    let z = Secret::new(0u64);
+    let zero: [Secret<u64>; 25] = [z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z];
+    let a = sha3::keccak_f1600(zero);
+    let b = sha3::keccak_f1600_portable(zero);
+    assert_eq(a[0].declassify(), 0xf1258f7940e1dde7);
+    assert_eq(a[24].declassify(), 0xeaf1ff7b5ceca249);
+    assert_eq(b[0].declassify(), 0xf1258f7940e1dde7);
+    let mut s = zero;
+    for i in 0usize..25 {
+        s[i] = Secret::new((i as u64).wrapping_mul(0x9E3779B97F4A7C15).wrapping_add(7));
+    }
+    let h = sha3::keccak_f1600(s);
+    assert_eq(h[0].declassify(), 0xb487bc72314483f0);
+    assert_eq(h[7].declassify(), 0x9207f7fafdae1c11);
+    assert_eq(h[24].declassify(), 0x7ae7466ff416bbb8);
+    let mut x = h;
+    for _ in 0..8 {
+        let p = sha3::keccak_f1600(x);
+        let q = sha3::keccak_f1600_portable(x);
+        for i in 0usize..25 {
+            assert_eq(p[i].declassify(), q[i].declassify());
+        }
+        x = p;
+    }
+}

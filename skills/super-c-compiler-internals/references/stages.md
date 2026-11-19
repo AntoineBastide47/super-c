@@ -282,7 +282,8 @@ modular return-lifetime check) run alongside.
   widths `W_INT` and `W_NAT` (no upper bound; never bit-blasted). Each spec call term gets its
   definition once (`define`: the spec body walked without obligations, one disjunction over its
   paths to a return, guarded by its `requires`), anchored on the call and added to an obligation
-  whose terms reach it (`add_defs`); a bodiless `@trusted` one is defined by its `ensures`, a generic one
+  whose terms reach it (`add_defs`); a bodiless `@trusted` one is defined by its `ensures` (a
+  `@trusted` function with a body poses no `ensures` obligation: its callers assume them), a generic one
 unfolds with the call's type arguments (`subst`), and a sequence result's elements are those of
 the sequences its body returns (`alias`). Specifications (language skill, basics.md,
 Specifications): a quantifier is a bool atom with a closure and a skolem fact (`quantifier`, never
@@ -333,6 +334,10 @@ reads it (SQ_BLOCK). `null` and `sizeof(T)` are one term each (`null_ptr`, `size
   integers through their std conformances, read as the integer operations (`wide_kind`, `wide_op`),
   and the built-in integers' `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are
   the casts of the exact results, `rotate_left` and `rotate_right` their shifts (`rotated`).
+  An obligation equating two such casts of sums of one width and sign, of the same terms in any order
+  or grouping and constants of the same wrapped sum, holds before the solver (`Terms::sums_equal`, in
+  `oblige`): bit-blasting a regrouped 64-bit sum passes the SAT budget, and leaving the terms as atoms
+  keeps the lemma facts that name them.
   With more than one job, the bodies run on workers one at a time (`dpar`
   Dynamic schedule, grain 1; a narrow and a wide `Prover` each, the shells and components read from
   `Shared`),

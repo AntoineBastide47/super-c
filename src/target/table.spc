@@ -125,6 +125,16 @@ pub(package) struct Isa {
     /// `lir::ir::Package::vec_perm3`. arm64 9 (per vector an index table's ADRP and LDR, and TBL or TBX),
     /// wasm32 2 (two `i8x16.shuffle`); x86-64 0, 9 with SSSE3 (`emit::cemit`, PSHUFB).
     pub(package) vector_perm3: u8,
+    /// The instructions a group-of-3 load's field takes, 0 for a permutation (`vector_perm3`) after the
+    /// loads: `lir::ir::Package::vec_ld3`. arm64 3 (the address, LD3, the field's move).
+    pub(package) vector_ld3: u8,
+    /// The instructions whose timing the vendor documents as independent of their data (Arm's DIT list,
+    /// the architecture's DIT register, with the aliases of listed ones; Intel's Data Operand Independent
+    /// Timing list, and `movaps`, the register copy the generator emits between any two instructions): an
+    /// intrinsic whose template uses these alone is an operation on secrets (`lir::ct`,
+    /// `intrin::constant_time`). Space-separated, lowercase; an x86-64 VEX form is its legacy mnemonic
+    /// with `v` before it.
+    pub(package) const_time: str<'static>,
     /// The widening sums of lanes into wider lanes the native backend computes in registers, a bit per pair
     /// of sizes (`lir::loops::sumw_bit`): `lir::ir::Package::vec_sumw`. arm64 widens any lanes (UADDLP,
     /// UADALP); x86-64 bytes into 8-byte lanes (PSADBW).
@@ -134,6 +144,11 @@ pub(package) struct Isa {
     /// wasm32 multiply any lanes up to 4 bytes (SMULL, UMULL; `extmul`); x86-64 4-byte ones unsigned
     /// (PMULUDQ), signed with SSE4.1 (PMULDQ, `lir::ir::Package::vec_mulw` from the build's features).
     pub(package) vector_mulw: u16,
+    /// The dot products of lanes the native backend computes in registers (`O_VDOT`), a bit per operand
+    /// lane size in bytes, unsigned in bits 0 to 7 and signed in 8 to 15: `lir::ir::Package::vec_dot`.
+    /// x86-64 and wasm32 sum pairs of signed 2-byte products into 4-byte lanes (PMADDWD,
+    /// `i32x4.dot_i16x8_s`); arm64 sums fours of 1-byte ones with FEAT_DotProd (SDOT, UDOT; `emit::cemit`).
+    pub(package) vector_dot: u16,
     /// Two accesses of adjacent bytes through one address are one instruction (arm64's `ldp`, `stp`):
     /// `lir::ir::Package::apairs`.
     pub(package) access_pairs: bool,
@@ -234,6 +249,13 @@ pub(package) struct Debug {
 
 /// One target: its parts (indexes into `ISAS`, `CALLCONVS`, `OBJFORMATS`, `OSES`, `DEBUGS`), its C data
 /// model and its build facts.
+/// `Target.dit`: no DIT, DIT on every CPU of the target, DIT where HWCAP reports it.
+pub(package) const DIT_NONE: u8 = 0;
+pub(package) const DIT_ALWAYS: u8 = 1;
+pub(package) const DIT_HWCAP: u8 = 2;
+/// The kernel's HWCAP_DIT (arch/arm64/include/uapi/asm/hwcap.h).
+pub(package) const DIT_HWCAP_BIT: u64 = 1u64 << 24;
+
 pub(package) struct Target {
     pub(package) isa: u8,
     pub(package) cc: u8,
@@ -251,6 +273,23 @@ pub(package) struct Target {
     pub(package) features: cf::CpuFeatureSet,
     /// The features no machine of the target has.
     pub(package) never: cf::CpuFeatureSet,
+    /// The levels an optimized build chooses at run time beyond `features`, `;` between levels, each a
+    /// `--target-feature` list holding the one before: the `simd_levels`, whose copies the native code
+    /// generators make (arm64 Linux: LSE and RCPC, then CSSC too, the copies of the functions those
+    /// change). Empty for none.
+    pub(package) run_time: str<'static>,
+    /// Per level of `run_time`, the `getauxval(AT_HWCAP)` and `getauxval(AT_HWCAP2)` bits that report its
+    /// features (two words a level, up to two levels): the native registry's start-up reads them (no CPU
+    /// detector module joins the program). Zeros for none.
+    pub(package) run_time_hwcap: [u64; 4],
+    /// The C compiler's atomics go through compiler-rt's helpers (`-moutline-atomics`), which choose LSE or
+    /// exclusive loads and stores by the CPU once at start-up, where the build's features lack LSE: an
+    /// arm64 target whose C tree is its only build (Windows arm64, no native backend) takes LSE so.
+    pub(package) outline_atomics: bool,
+    /// How an arm64 `@constant_time` body turns on PSTATE.DIT (data-independent timing) while it runs:
+    /// `DIT_NONE`, `DIT_ALWAYS` (every CPU of the target has FEAT_DIT), or `DIT_HWCAP` (where the
+    /// kernel's HWCAP bit `DIT_HWCAP_BIT` reports it: the start-up stores it in the byte `__sc_dit`).
+    pub(package) dit: u8,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub(package) mcpu: str<'static>,
     pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
@@ -314,8 +353,11 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_mem: false,
         vminnum: 3,
         vector_perm3: 0,
+        vector_ld3: 0,
+        const_time: "aesdec aesdeclast aesenc aesenclast aesimc aeskeygenassist pclmulqdq sha1msg1 sha1msg2 sha1nexte sha1rnds4 sha256msg1 sha256msg2 sha256rnds2 vsha512msg1 vsha512msg2 vsha512rnds2 movdqu palignr movaps",
         vector_sumw: 0x8,
         vector_mulw: 0x4,
+        vector_dot: 0x200,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 0,
@@ -364,8 +406,11 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_mem: false,
         vminnum: 2,
         vector_perm3: 9,
+        vector_ld3: 3,
+        const_time: "abs adc adcs add addhn addhn2 addp adds addv aesd aese aesimc aesmc and ands asrv bcax bfm bic bics bif bit bsl ccmn ccmp cfinv cls clz cmeq cmge cmgt cmhi cmhs cmle cmlt cmtst cnt crc32b crc32cb crc32ch crc32cw crc32cx crc32h crc32w crc32x csel csinc csinv csneg ctz dup eon eor eor3 ext extr fcsel ins ld1 ld1r ld2 ld2r ld3 ld3r ld4 ld4r ldnp ldp ldpsw ldr ldrb ldrh ldrsb ldrsh ldrsw ldur ldurb ldurh ldursb ldursh ldursw lslv lsrv luti2 luti4 madd mla mls movk msub mul neg not orn orr pmul pmull pmull2 raddhn raddhn2 rax1 rbit rev rev16 rev32 rev64 rmif rorv rshrn rshrn2 rsubhn rsubhn2 saba sabal sabal2 sabd sabdl sabdl2 sadalp saddl saddl2 saddlp saddlv saddw saddw2 sbc sbcs sbfm sdot setf16 setf8 sha1c sha1h sha1m sha1p sha1su0 sha1su1 sha256h sha256h2 sha256su0 sha256su1 sha512h sha512h2 sha512su0 sha512su1 shadd shl shll shll2 shrn shrn2 shsub sli sm3partw1 sm3partw2 sm3ss1 sm3tt1a sm3tt1b sm3tt2a sm3tt2b sm4e sm4ekey smaddl smax smaxp smaxv smin sminp sminv smlal smlal2 smlsl smlsl2 smmla smov smsubl smulh smull smull2 sqdmulh sqrdmlah sqrdmulh sri srshr srsra sshl sshll sshll2 sshr ssra ssubl ssubl2 ssubw ssubw2 st1 st2 st3 st4 stnp stp str strb strh stur sturb sturh sub subhn subhn2 subs sudot tbl tbx trn1 trn2 uaba uabal uabal2 uabd uabdl uabdl2 uadalp uaddl uaddl2 uaddlp uaddlv uaddw uaddw2 ubfm udot uhadd uhsub umaddl umax umaxp umaxv umin uminp uminv umlal umlal2 umlsl umlsl2 ummla umov umsubl umulh umull umull2 urshr ursra usdot ushl ushll ushll2 ushr usmmla usra usubl usubl2 usubw usubw2 uzp1 uzp2 xar xtn xtn2 zip1 zip2 mov mvn cmp cmn tst lsl lsr asr ror sxtb sxth sxtw uxtb uxth cset csetm cinc cinv cneg",
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
+        vector_dot: 0,
         access_pairs: true,
         sum_trees: true,
         vector_reduce: 0,
@@ -414,8 +459,11 @@ pub(package) const ISAS: [Isa; 3] = [
         lane_mem: true,
         vminnum: 1,
         vector_perm3: 2,
+        vector_ld3: 0,
+        const_time: "",
         vector_sumw: 0x8CE,
         vector_mulw: 0x707,
+        vector_dot: 0x200,
         access_pairs: false,
         sum_trees: false,
         vector_reduce: 4,
@@ -612,6 +660,10 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         page_bytes: 4096,
         features: NO_FEATURES,
         never: NO_FEATURES,
+        run_time: "",
+        run_time_hwcap: [0, 0, 0, 0],
+        outline_atomics: false,
+        dit: DIT_NONE,
         mcpu: "",
         apple_sdk: "",
         cenv: cenv,
@@ -654,11 +706,12 @@ const fn targets() [Target; 11] {
     let mut mac_a64 = apple(
         a64(
             row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_MACOS, "arm64-apple-macos11.0", 1),
-            "neon fp16 dotprod rdm aes sha2 sha3 crc lse rcpc",
+            "neon fp16 dotprod rdm aes pmull sha2 sha3 sha512 crc lse rcpc",
         ),
         "MacOSX",
     );
     mac_a64.mcpu = "apple-m1";
+    mac_a64.dit = DIT_ALWAYS;
     let ios_x86 = apple(
         x86(
             row(ISA_X86, CC_SYSV, OBJ_MACHO, OS_IOS, "x86_64-apple-ios13.0-simulator", 2),
@@ -667,10 +720,14 @@ const fn targets() [Target; 11] {
         "iPhoneSimulator",
     );
     let ios_a64 = apple(
-        a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes sha2"),
+        a64(row(ISA_A64, CC_APPLE, OBJ_MACHO, OS_IOS, "arm64-apple-ios13.0", 3), "neon aes pmull sha2"),
         "iPhoneOS",
     );
-    let linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
+    let mut linux_a64 = a64(row(ISA_A64, CC_AAPCS, OBJ_ELF, OS_LINUX, "aarch64-unknown-linux-gnu", 5), "neon");
+    linux_a64.run_time = "+lse,+rcpc;+lse,+rcpc,+cssc";
+    // The kernel's HWCAP_ATOMICS, HWCAP_LRCPC and HWCAP2_CSSC (arch/arm64/include/uapi/asm/hwcap.h).
+    linux_a64.run_time_hwcap = [1u64 << 8 | 1u64 << 15, 0, 1u64 << 8 | 1u64 << 15, 1u64 << 34];
+    linux_a64.dit = DIT_HWCAP;
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",
@@ -683,6 +740,7 @@ const fn targets() [Target; 11] {
     let mut win_a64 = a64(row(ISA_A64, CC_WIN_A64, OBJ_COFF, OS_WINDOWS, "aarch64-w64-mingw32", 9), "neon");
     win_a64.long_bytes = 4;
     win_a64.long_double_bits = 64;
+    win_a64.outline_atomics = true;
     let mut wasm = row(ISA_WASM, CC_WASM, OBJ_WASM, OS_WASI, "wasm32-wasip1", 10);
     wasm.features = feats("simd128", ISA_WASM);
     wasm.long_bytes = 4;
@@ -771,8 +829,11 @@ const UNKNOWN_ISA: Isa = Isa {
     lane_mem: false,
     vminnum: 0,
     vector_perm3: 0,
+    vector_ld3: 0,
+    const_time: "",
     vector_sumw: 0,
     vector_mulw: 0,
+    vector_dot: 0,
     access_pairs: false,
     sum_trees: false,
     vector_reduce: 0,

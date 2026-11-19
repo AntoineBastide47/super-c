@@ -36,7 +36,7 @@
 
 [ffi]
 # The ffi/ modules that do not reach the operating system.
-modules = ["atomic", "ctype", "math", "string", "immintrin", "arm_neon", "wasm_simd128", "sc_sme"]
+modules = ["atomic", "ctype", "math", "string", "immintrin", "arm_neon", "wasm_simd128", "sc_sme", "sc_amx"]
 # The C library functions that are not operating-system calls: memory, string, allocation, `abort` and
 # <math.h>.
 functions = [
@@ -83,7 +83,7 @@ accelerations = [
     "SIMD128 and relaxed SIMD (wasm32)",
     "run-time dispatch through std::cpu::detect",
 ]
-allocator = "No allocation, except the scratch the SME kernels of `std::simd::matrix` take from the C heap; when it cannot be allocated, the portable kernels run."
+allocator = "No allocation, except the scratch the SME and AMX kernels of `std::simd::matrix` take from the C heap; when it cannot be allocated, the portable kernels run."
 thread_safety = "Pure functions; `std::simd::matrix` publishes its dispatch choices atomically."
 blocking = "Never blocks."
 errors = "`std::simd::matrix` panics on a slice whose length is not its matrix's element count; the math functions give IEEE results and never fail."
@@ -143,6 +143,7 @@ capabilities = [
     "`sysctlbyname` (macOS, iOS)",
     "`getauxval` (Linux, Android)",
     "`IsProcessorFeaturePresent` (Windows on aarch64)",
+    "`arch_prctl(ARCH_REQ_XCOMP_PERM)` (Linux x86_64, on `request` of an AMX feature)",
 ]
 accelerations = []
 allocator = "Never allocates."

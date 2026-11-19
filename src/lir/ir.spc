@@ -332,7 +332,13 @@ pub(package) const O_SECRET: u8 = 90;
 /// Value `a` unchanged, a secret `declassify` made public: the constant-time check does not count it as
 /// secret. No rewrite looks through it; the check replaces it by `a`.
 pub(package) const O_PUBLIC: u8 = 91;
-pub(package) const OP_COUNT: u8 = 92;
+/// Integer vector `a` plus, per lane, the sum of the products of `g` adjacent lanes of integer vectors `b`
+/// and `c` (one type, of `a`'s bytes, narrower lanes), each lane extended first (`DOT_SIGNED`:
+/// sign-extended, else zero-extended): lane k adds the products of lanes `k * g` to `k * g + g - 1`, `g`
+/// the ratio of the lane counts, modulo the lane's width (a loop's dot product, `lir::loops`; arm64's
+/// SDOT and UDOT, x86-64's PMADDWD, wasm's `i32x4.dot_i16x8_s`).
+pub(package) const O_VDOT: u8 = 92;
+pub(package) const OP_COUNT: u8 = 93;
 
 /// One opcode: its text name and its operand form.
 pub(package) struct OpInfo {
@@ -340,7 +346,7 @@ pub(package) struct OpInfo {
     pub(package) form: u8,
 }
 
-pub(package) const OPS: [OpInfo; 92] = [
+pub(package) const OPS: [OpInfo; 93] = [
     OpInfo { name: "", form: F_NONE },
     OpInfo { name: "iconst", form: F_IMM },
     OpInfo { name: "fconst", form: F_IMM },
@@ -433,7 +439,18 @@ pub(package) const OPS: [OpInfo; 92] = [
     OpInfo { name: "vmulw", form: F_BIN },
     OpInfo { name: "secret", form: F_UN },
     OpInfo { name: "public", form: F_UN },
+    OpInfo { name: "vdot", form: F_TRI },
 ];
+
+/// Whether every byte of vector `v` of `b` is below 16: an `and` with a constant whose bytes are.
+pub(package) const fn small_bytes(b: &Body, v: Value) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE || b.insts[v as usize].op != O_AND {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    let k = splat_of(b, t.b).or(splat_of(b, t.a));
+    return k.is_some() && k.unwrap() < 16;
+}
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
 /// or `xor` of masks, a mask's sign extension or truncation, a mask read as narrower lanes (a cast), the
@@ -1011,6 +1028,8 @@ pub(package) const CNT_NONZERO: u16 = 1;
 pub(package) const MULW_SIGNED: u16 = 1;
 /// `O_VMULW`: the products of the operands' high half of lanes (the text's `.hi`).
 pub(package) const MULW_HIGH: u16 = 2;
+/// `O_VDOT`: the lanes are signed (the text's `.s`).
+pub(package) const DOT_SIGNED: u16 = 1;
 
 /// Atomic memory orders (`aux` bits 0 to 2 of the atomic opcodes; `O_ACAS`: the failure order in bits
 /// 3 to 5, then ACAS_WEAK; `O_ARMW`: the operation in bits 4 to 7).
@@ -2106,6 +2125,14 @@ pub(package) const CPU_LZCNT: u32 = 32;
 pub(package) const CPU_LSE: u32 = 64;
 pub(package) const CPU_RCPC: u32 = 128;
 pub(package) const CPU_FMA: u32 = 256;
+pub(package) const CPU_CSSC: u32 = 512;
+pub(package) const CPU_BMI1: u32 = 1024;
+pub(package) const CPU_BMI2: u32 = 2048;
+pub(package) const CPU_MOVBE: u32 = 4096;
+pub(package) const CPU_RELAXED: u32 = 8192;
+/// The flags a function's run-time copy may add (`Package.copy_flags`): scalar instructions, which change
+/// no vector width or layout.
+pub(package) const CPU_SCALAR: u32 = CPU_POPCNT | CPU_LZCNT | CPU_LSE | CPU_RCPC | CPU_FMA | CPU_CSSC | CPU_BMI1 | CPU_BMI2 | CPU_MOVBE;
 
 /// What a processor's features give the native backend (`emit::cemit` computes them from a feature set):
 /// the build's (`Package.cpu`), or those of one body compiled for more features (`Body.cpu`: a
@@ -2130,6 +2157,10 @@ pub(package) struct Cpu {
     /// bit per operand lane size in bytes (1, 2, 4), unsigned in bits 0 to 7 and signed in bits 8 to 15: the
     /// loop vectorizer multiplies two extended values' narrow lanes.
     pub(package) vec_mulw: u16,
+    /// The dot products (`O_VDOT`) the native backend computes in registers (`target::table::Isa`, arm64's
+    /// with FEAT_DotProd), a bit per operand lane size in bytes, unsigned in bits 0 to 7 and signed in bits
+    /// 8 to 15: the loop vectorizer sums the products of two extended values' narrow lanes so.
+    pub(package) vec_dot: u16,
     /// Whether the native backend rounds float vectors to an integer in registers (`target::table::Isa`;
     /// x86-64 with SSE4.1), with `Package.vfloat`: the loop vectorizer then widens the calls of C's `floor`,
     /// `ceil` and `trunc`.
@@ -2161,6 +2192,22 @@ pub(package) struct Cpu {
     pub(package) half: u8,
     /// The processor has a scalar fused multiply-add (`O_FMA` for contraction).
     pub(package) fma: bool,
+    /// The processor has FEAT_CSSC (arm64 Armv8.9): one instruction each counts trailing zeros (CTZ) and
+    /// set bits (CNT) of a general register, takes its absolute value (ABS), and the minimum or maximum
+    /// of two registers or a register and an 8-bit immediate (SMIN, SMAX, UMIN, UMAX).
+    pub(package) cssc: bool,
+    /// The processor has BMI1 (x86-64 `andn`, `blsr`, `blsi`, `blsmsk`; from x86-64-v3 or `-mbmi`).
+    pub(package) bmi1: bool,
+    /// The processor has BMI2 (x86-64 `shlx`, `shrx`, `sarx`, `rorx`, `mulx`: no flags, no fixed register;
+    /// from x86-64-v3 or `-mbmi2`).
+    pub(package) bmi2: bool,
+    /// The processor has MOVBE (x86-64 loads and stores with the bytes reversed; from x86-64-v3 or
+    /// `-mmovbe`).
+    pub(package) movbe: bool,
+    /// The engine runs WebAssembly relaxed SIMD (`+relaxed-simd`): the generator takes its forms whose
+    /// results are fully determined where it uses them (`relaxed_laneselect` of a lane mask,
+    /// `relaxed_swizzle` of indices below 16).
+    pub(package) relaxed: bool,
 }
 
 extend Cpu as Copy {}
@@ -2174,6 +2221,7 @@ extend Cpu {
             vec_bits: 0,
             vec_perm3: 0,
             vec_mulw: 0,
+            vec_dot: 0,
             vround: false,
             popcnt: false,
             sse41: false,
@@ -2184,23 +2232,29 @@ extend Cpu {
             rcpc: false,
             half: HALF_NONE,
             fma: false,
+            cssc: false,
+            bmi1: false,
+            bmi2: false,
+            movbe: false,
+            relaxed: false,
         };
     }
 
     /// The facts with a flag each as one word (`CPU_*`), for the text form.
     pub(package) const fn flags(self: &Self) u32 {
-        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA;
+        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA | self.cssc as u32 * CPU_CSSC | self.bmi1 as u32 * CPU_BMI1 | self.bmi2 as u32 * CPU_BMI2 | self.movbe as u32 * CPU_MOVBE | self.relaxed as u32 * CPU_RELAXED;
     }
 
     /// A body's own facts from the words of the text form: the register bytes, `vec_bits`, `vec_perm3`,
-    /// `vec_mulw`, the flags (`flags`) and `half`.
-    pub(package) const fn of_words(vector: u32, bits: u32, perm3: u32, mulw: u32, f: u32, half: u32) Cpu {
+    /// `vec_mulw`, `vec_dot`, the flags (`flags`) and `half`.
+    pub(package) const fn of_words(vector: u32, bits: u32, perm3: u32, mulw: u32, dot: u32, f: u32, half: u32) Cpu {
         return Cpu {
             own: true,
             vector: vector,
             vec_bits: bits,
             vec_perm3: perm3 as u8,
             vec_mulw: mulw as u16,
+            vec_dot: dot as u16,
             vround: (f & CPU_VROUND) != 0,
             popcnt: (f & CPU_POPCNT) != 0,
             sse41: (f & CPU_SSE41) != 0,
@@ -2211,15 +2265,35 @@ extend Cpu {
             rcpc: (f & CPU_RCPC) != 0,
             half: half as u8,
             fma: (f & CPU_FMA) != 0,
+            cssc: (f & CPU_CSSC) != 0,
+            bmi1: (f & CPU_BMI1) != 0,
+            bmi2: (f & CPU_BMI2) != 0,
+            movbe: (f & CPU_MOVBE) != 0,
+            relaxed: (f & CPU_RELAXED) != 0,
         };
+    }
+
+    /// These facts with the flags `f` (`CPU_SCALAR`) added: a run-time copy's (`Package.copy_flags`).
+    pub(package) const fn with_flags(self: &Self, f: u32) Cpu {
+        let mut c = *self;
+        c.popcnt = c.popcnt || (f & CPU_POPCNT) != 0;
+        c.lzcnt = c.lzcnt || (f & CPU_LZCNT) != 0;
+        c.lse = c.lse || (f & CPU_LSE) != 0;
+        c.rcpc = c.rcpc || (f & CPU_RCPC) != 0;
+        c.fma = c.fma || (f & CPU_FMA) != 0;
+        c.cssc = c.cssc || (f & CPU_CSSC) != 0;
+        c.bmi1 = c.bmi1 || (f & CPU_BMI1) != 0;
+        c.bmi2 = c.bmi2 || (f & CPU_BMI2) != 0;
+        c.movbe = c.movbe || (f & CPU_MOVBE) != 0;
+        return c;
     }
 
     /// Whether code made for these facts runs on a processor with `o`'s: no register is wider and no
     /// instruction is missing there. The inliner copies a body only into such a caller.
     pub(package) const fn within(self: &Self, o: Cpu) bool {
-        let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0;
+        let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0 && (self.vec_dot & ~o.vec_dot) == 0;
         let perm = self.vec_perm3 == 0 || self.vec_perm3 == o.vec_perm3;
-        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma);
+        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma) && (!self.cssc || o.cssc) && (!self.bmi1 || o.bmi1) && (!self.bmi2 || o.bmi2) && (!self.movbe || o.movbe) && (!self.relaxed || o.relaxed);
         return self.vector <= o.vector && bits && perm && flags && self.half <= o.half;
     }
 }
@@ -2245,6 +2319,13 @@ pub(package) struct Package {
     /// of the body's own function, into its start (`lir::opt`); another, to the callee after the caller's
     /// epilogue (the native backends).
     pub(package) tail: bool,
+    /// Per level of the byte `__sc_simd_lv` (index k - 1 for level k), the `CPU_SCALAR` flags its
+    /// processors have: a body whose code a level's flags change gets a copy for that level, which a stub
+    /// under its name picks at run time (`codegen::place::copy_levels`). Empty for none.
+    pub(package) copy_flags: Vector<u32>,
+    /// `target::table::Target.dit` of the target: how the arm64 generator turns PSTATE.DIT on in a
+    /// constant-time body (`Body.ct`).
+    pub(package) dit: u8,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub(package) protect: u8,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
@@ -2273,6 +2354,9 @@ pub(package) struct Package {
     /// per pair of lane sizes (`lir::loops::sumw_bit`): the loop vectorizer sums a narrower value's lanes
     /// into accumulators of such lanes.
     pub(package) vec_sumw: u16,
+    /// The instructions a group-of-3 load's field takes, 0 for a permutation (`Cpu.vec_perm3`) after the
+    /// loads (`target::table::Isa::vector_ld3`).
+    pub(package) vec_ld3: u8,
     /// Whether the native backend computes the absolute value, C's `fmin` and `fmax`, and the fused
     /// multiply-add (with `fma`) of float vectors in registers (`target::table::Isa`): the loop vectorizer
     /// then widens the calls of C's `fabs`, `fmin`, `fmax` and `fma` (`lir::loops::lane_fn`).
@@ -2497,6 +2581,7 @@ extend Package {
             vec_sat: 7,
             vec_absd: 7,
             vec_sumw: 0x8CE,
+            vec_ld3: 0,
             vfloat: true,
             vround_away: false,
             mul_high: true,
@@ -2528,6 +2613,8 @@ extend Package {
             comp_dir: String::new(),
             omit_fp: false,
             tail: false,
+            copy_flags: Vector::<u32>::new(),
+            dit: 0,
             protect: PROTECT_NONE,
             fmath: 0,
             vec_max: 16,
@@ -2537,6 +2624,7 @@ extend Package {
                 vec_bits: 0x0E0F07,
                 vec_perm3: 9,
                 vec_mulw: 0x0707,
+                vec_dot: 0,
                 vround: true,
                 popcnt: false,
                 sse41: false,
@@ -2547,6 +2635,11 @@ extend Package {
                 rcpc: false,
                 half: HALF_NONE,
                 fma: false,
+                cssc: false,
+                bmi1: false,
+                bmi2: false,
+                movbe: false,
+                relaxed: false,
             },
             // Small: a parallel lowering makes a package per shard, and the tables grow geometrically.
             names: nm::Names::with_capacity(1 << 8, 1 << 4),

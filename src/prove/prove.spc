@@ -6501,6 +6501,10 @@ extend<const B: usize> Prover<B> {
                 }
             }
         }
+        // Equal wrapping sums of the same terms in another order or grouping.
+        if self.tm.sums_equal(goal) {
+            return;
+        }
         self.sv.stop_on_ovf = B == NUM_NARROW && self.tm.big_seen;
         self.sv.gave_up = false;
         let mut ok = self.holds(pc, goal);
@@ -18302,9 +18306,11 @@ extend<const B: usize> Prover<B> {
             } else {
                 String::new()
             };
+            // A `@trusted` function's `ensures` are its callers' facts, which no proof checks.
+            let trusted = self.ast_of(b.owner.module).attr_of(b.owner.node, AttrKind::ATTR_TRUSTED) != null;
             self.oblige(
                 &path.pc,
-                f,
+                pick(trusted, self.tm.boolean(true), f),
                 OB_ENSURES << 56 | si as u64,
                 sp,
                 if first {

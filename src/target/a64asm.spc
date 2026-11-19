@@ -66,10 +66,11 @@ const fn sr(op0: u32, op1: u32, crn: u32, crm: u32, op2: u32) u32 {
     return op0 - 2 << 14 | op1 << 11 | crn << 7 | crm << 3 | op2;
 }
 
-const SYSREGS: [SysReg; 13] = [
+const SYSREGS: [SysReg; 14] = [
     SysReg { name: "nzcv", enc: sr(3, 3, 4, 2, 0) },
     SysReg { name: "daif", enc: sr(3, 3, 4, 2, 1) },
     SysReg { name: "svcr", enc: sr(3, 3, 4, 2, 2) },
+    SysReg { name: "dit", enc: sr(3, 3, 4, 2, 5) },
     SysReg { name: "fpcr", enc: sr(3, 3, 4, 4, 0) },
     SysReg { name: "fpsr", enc: sr(3, 3, 4, 4, 1) },
     SysReg { name: "tpidr_el0", enc: sr(3, 3, 13, 0, 2) },
@@ -427,6 +428,7 @@ const fn parse_reg(s: str, i: &mut usize, c: u8, v: &mut i64, f: &mut Facts) boo
         t::C::V => r.l == b'v' && r.arr >= 0 && r.arr < 8 && agree(&mut f.arr, r.arr),
         t::C::Z => r.l == b'z' && r.arr >= 10 && r.arr <= 13 && agree(&mut f.ze, r.arr - 10),
         t::C::ZB => r.l == b'z' && r.arr == 10,
+        t::C::ZH => r.l == b'z' && r.arr == 11,
         t::C::ZS => r.l == b'z' && r.arr == 12,
         t::C::ZD => r.l == b'z' && r.arr == 13,
         _ => c >= t::C::V8B && c <= t::C::V2D && r.l == b'v' && r.arr == (c - t::C::V8B) as i32,
@@ -801,7 +803,7 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
             v[at + 1] = amt / 16;
             return true;
         },
-        t::K::MOVZV | t::K::MOVNV | t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::IMM16 | t::K::UDF16 | t::K::TBIT | t::K::SIMM6 => {
+        t::K::MOVZV | t::K::MOVNV | t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::IMM16 | t::K::UDF16 | t::K::TBIT | t::K::SIMM6 | t::K::SIMM8 | t::K::UIMM8 => {
             return number(s, i, &mut v[at]);
         },
         t::K::BFX | t::K::BFIZ => {
@@ -1065,6 +1067,25 @@ fn parse_kind(r: t::Row, k: u8, s: str, i: &mut usize, v: &mut t::Vals, at: usiz
         },
         t::K::IMM4X | t::K::SHL8 | t::K::SHL16 | t::K::SHL32 | t::K::IMM6X | t::K::BMASK => {
             return number(s, i, &mut v[at]);
+        },
+        t::K::V1QD => {
+            // `v<n>.1q`: no arrangement of the others' list.
+            ws(s, i);
+            let mut j = *i;
+            let w = word(s, &mut j);
+            if w.len() < 5 || !eq_nocase(w.slice(w.len() - 3, w.len()), ".1q") {
+                return false;
+            }
+            let mut l: u8 = 0;
+            let mut n: i64 = 0;
+            let mut sp = false;
+            reg_name(w.slice(0, w.len() - 3), &mut l, &mut n, &mut sp);
+            if l != b'v' {
+                return false;
+            }
+            v[at] = n;
+            *i = j;
+            return true;
         },
         t::K::FELEM => {
             let mut r0 = Reg { l: 0, n: 0, sp: false, arr: -1, pq: 0 };
@@ -1644,6 +1665,7 @@ fn reg_text(o: &mut String, c: u8, n: i64, r: t::Row, q: u32) {
         _ => {
             let e = switch c {
                 t::C::ZB => 0u32,
+                t::C::ZH => 1u32,
                 t::C::ZS => 2u32,
                 t::C::ZD => 3u32,
                 _ => t::fixed_q(r, q),
@@ -1785,7 +1807,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             }
         },
         t::K::MOVZV | t::K::MOVNV => imm_text(o, a),
-        t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::TBIT | t::K::SIMM6 => {
+        t::K::IMMR | t::K::IMMS | t::K::SHL | t::K::SHR | t::K::NZCV | t::K::IMM5 | t::K::TBIT | t::K::SIMM6 | t::K::SIMM8 | t::K::UIMM8 => {
             o.format_into("#{}", a);
         },
         t::K::IMM16 | t::K::UDF16 => {
@@ -1911,6 +1933,7 @@ fn print_kind(r: t::Row, q: u32, x: bool, k: u8, v: &t::Vals, at: usize, has_sp:
             let el: []str<'static> = ELEM;
             o.format_into("{}{}", el[(q >> 1) as usize], a);
         },
+        t::K::V1QD => o.format_into("v{}.1q", a),
         t::K::PG => o.format_into("p{}", a),
         t::K::PGZ => o.format_into("p{}/z", a),
         t::K::PGM | t::K::PMM => o.format_into("p{}/m", a),

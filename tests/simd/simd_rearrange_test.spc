@@ -2,7 +2,7 @@
 // compositions written over them, the run-time `swizzle_or_zero` and `swizzle_checked`, and `compress`
 // and `expand`. Each runs against a scalar lane loop in one program, as a constant against its run
 // time, and the index list's rules are diagnosed at compile time or, over a generic parameter, per
-// instance.
+// instance; `interleave_rows4` against its byte rule.
 import tests::harness as h;
 
 const REARRANGEMENTS: str = M"(import std::simd;
@@ -144,6 +144,38 @@ fn main_2(args: Vector<str>) i32 {
         Simd::<i32, 8>::splat(-k),
     );
 }
+// `interleave_rows4` against its byte rule: one to four rows, under, at and past a step of 16 columns and
+// with an overlapping last step; the word past the columns keeps its value.
+fn main_3(args: Vector<str>) i32 {
+    let k = args.len();
+    let mut src = Vector::<u8>::new();
+    for q in 0..4 * 52usize {
+        src.push((q * 37 + k * 11 + 5) as u8);
+    }
+    for rows in 1..5usize {
+        for cols in [1usize, 15, 16, 17, 31, 32, 47] {
+            let stride = cols + 5;
+            let mut dst = Vector::<u32>::new();
+            for _ in 0..cols + 1 {
+                dst.push(0xDEADBEEF);
+            }
+            unsafe simd::interleave_rows4(dst.as_mut_ptr(), src.as_ptr(), stride, rows, cols);
+            for j in 0..cols {
+                let mut w: u32 = 0;
+                for r in 0..rows {
+                    w |= (src[r * stride + j] as u32) << (8 * r) as u32;
+                }
+                if dst[j] != w {
+                    return (rows * 100 + cols) as i32 % 250 + 1;
+                }
+            }
+            if dst[cols] != 0xDEADBEEF {
+                return 251;
+            }
+        }
+    }
+    return 0;
+}
 // The case is the last argument; the case's own arguments come before it.
 fn main(args: Vector<str>) i32 {
     let mut a = args;
@@ -157,6 +189,9 @@ fn main(args: Vector<str>) i32 {
     if k == 2 {
         return main_2(a);
     }
+    if k == 3 {
+        return main_3(a);
+    }
     return 255;
 }
 )";
@@ -164,7 +199,7 @@ fn main(args: Vector<str>) i32 {
 // The programs above, each a case of one build: its last argument selects it.
 @test
 fn run_cases() {
-    h::expect_runs("rearrangements", REARRANGEMENTS, ["0", "1", "2"], ["", "", ""]);
+    h::expect_runs("rearrangements", REARRANGEMENTS, ["0", "1", "2", "3"], ["", "", "", ""]);
 }
 
 // A list must be a constant, its indexes below the operands' lanes, and its length a valid lane

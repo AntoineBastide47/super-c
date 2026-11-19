@@ -1333,6 +1333,24 @@ pub(package) fn feature_errors(p: &loader::Package, i: usize, errs: &mut diag::E
 // `unsafe` (the program checks the features at run time); 2 it is an error even there: features are
 // per build on wasm32, and an extern binding or an `@always_inline` function inlines into its C
 // caller, which then lacks them.
+// Whether call `fc` of module `m` needs `unsafe` on another platform of the build's instruction set: it
+// needs a feature this platform's baseline gives and another's lacks, which neither the build's own
+// features nor its caller's add. A module that platform's builds share keeps the marker.
+fn needed_elsewhere(p: &loader::Package, m: usize, fc: &FeatureCall) bool {
+    let base = tgt::baseline(p.build_target, p.arch);
+    let mut own = p.features;
+    own.w[0] &= ~base.w[0];
+    own.w[1] &= ~base.w[1];
+    let have = cf::close(cf::join(own, p.fn_features(m as ModuleId, fc.caller)));
+    let need = p.fn_features(fc.callee.module, fc.callee.node);
+    for b in 0..cf::FEATURE_COUNT {
+        if cf::has(need, b) && !cf::has(have, b) && !tgt::baseline_everywhere(b, p.arch) {
+            return true;
+        }
+    }
+    return false;
+}
+
 fn feature_use(p: &loader::Package, m: usize, fc: &FeatureCall) u8 {
     // On wasm32 too a function's own features cover its calls: it is emitted only where the build
     // has them.
@@ -1359,7 +1377,8 @@ fn lint_feature_unsafe(p: &mut loader::Package, only_mod: i32, fixes: *mut Vecto
 
 /// The lints of module `m`'s uses of functions that need CPU features, into `errs`: a dispatch row
 /// whose feature does not imply its function's, and an `unsafe` marker whose only reason is such a call
-/// where no such call needs it (`feature_use`: "unnecessary 'unsafe'", with the prefix form's removal).
+/// where no such call needs it, on this platform or another of its instruction set (`feature_use`,
+/// `needed_elsewhere`: "unnecessary 'unsafe'", with the prefix form's removal).
 pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Errors) {
     let a = p.modules[m].ast.get_ref();
     // A dispatch row runs its function where the machine has the row's feature: that feature, with the
@@ -1392,7 +1411,7 @@ pub(package) fn feature_lints(p: &loader::Package, m: usize, errs: &mut diag::Er
     let mut need = Set::<u32>::new();
     for k in 0..a.feature_calls.len() {
         let fc = *a.feature_calls.at(k);
-        if fc.marker != 0 && feature_use(p, m, &fc) != 0 {
+        if fc.marker != 0 && (feature_use(p, m, &fc) != 0 || needed_elsewhere(p, m, &fc)) {
             need.insert(fc.marker - 1);
         }
     }
@@ -2736,16 +2755,12 @@ fn cemit_relower_census(
     }
 }
 
-// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
-// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
-// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
-// `closure` selects a closure body (`nid` is the closure node) over a function body.
 // `__sc_simd_lvl()`, which the dispatch prologues read (`CEmit::dispatch_prologue`): the highest level
 // k (1-based) of `simd_levels` whose features the CPU detector reports (`sc_cpu_words`, which
-// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code: the loader
-// links the detector for it.
+// `SC_CPU_OFF` masks), else 0, read once per TU. Only for a program with vector code and a level that
+// plans it differently: the loader links the detector for it.
 fn simd_level_fn(p: &loader::Package, out: &mut String) {
-    if p.simd_levels.len() == 0 || !p.names_vectors() {
+    if p.simd_levels.len() == 0 || !p.names_vectors() || !p.levels_plan_vectors() {
         return;
     }
     out.push_str("void sc_cpu_words(uint64_t __out[2]);\n");
@@ -2783,6 +2798,10 @@ fn demand_set(p: &loader::Package, d: &cbe::Demand) cf::CpuFeatureSet {
     return p.fn_set(d.def.module, d.def.node);
 }
 
+// Take the graph's cached lowering of `(m, nid)` into `lw_out` (the graph lowered every body it
+// walked exactly once), lowering in place only when the cache has no live entry. A taken slot is
+// removed, so a second taker (a generic body the seed loop lowered and skipped) re-lowers.
+// `closure` selects a closure body (`nid` is the closure node) over a function body.
 fn cemit_take_body(
     g: &mut ig::InstGraph,
     p: *const loader::Package,
@@ -9771,6 +9790,12 @@ fn cemit_assemble(
                 " };\n__attribute__((constructor)) static void __sc_reflect_init(void) { __sc_reflect_register(__sc_reflect_roots, sizeof(__sc_reflect_roots) / sizeof(__sc_reflect_roots[0])); }\n",
             );
         }
+        if dit_byte(p) {
+            rg.push_str(
+                "unsigned long getauxval(unsigned long);\nunsigned char __sc_dit;\n__attribute__((constructor)) static void __sc_dit_init(void) { __sc_dit = (getauxval(16) & ",
+            );
+            rg.format_into("{}UL) != 0; }}\n", tgt::DIT_HWCAP_BIT);
+        }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
         rc.push_str("SC_RT_EXTERNS\nSC_RT_X(__sc_wrap)\n");
@@ -13149,7 +13174,7 @@ extend NatHash as Hasher {
 // `nat_piece_key` hashes every field of these records: a field added to one is added there. A body's size
 // is a 64-bit host's (its tables hold pointers).
 static_assert(sizeof(lir_ir::Sym) == 56, "nat_sym_hash hashes every field of a symbol");
-static_assert(sizeof(usize) != 8 || sizeof(lir_ir::Body) == 408, "nat_body_hash hashes every field of a body");
+static_assert(sizeof(usize) != 8 || sizeof(lir_ir::Body) == 416, "nat_body_hash hashes every field of a body");
 static_assert(sizeof(lir_ir::DataDef) == 24, "nat_data_hash hashes every field of a data definition");
 static_assert(sizeof(lir_ir::Reloc) == 16, "nat_data_hash hashes every field of a relocation");
 static_assert(sizeof(lir_ir::Slot) == 8, "nat_body_hash hashes every field of a slot");
@@ -13761,11 +13786,17 @@ const fn loop_budgets(p: &loader::Package, opt: i32, cg: u64) lu::Budgets {
 
 // The package part of a module's native key, which is its emission cache key (which covers the bodies
 // the LIR inliner can copy: its imports') xor this: what the native code reads beyond the C text: the
-// build configuration, the CPU features, the LIR optimizer's switches, the C headers' constants, the
-// functions only C defines, and with debug information the directory its file names are relative to.
+// build configuration, the CPU features and run-time copy levels, the LIR optimizer's switches, the C
+// headers' constants, the functions only C defines, and with debug information the directory its file
+// names are relative to.
 fn nat_base(p: &loader::Package) u64 {
     let mut h = p.build_cfg as u64 << 40 ^ p.features.w[0].wrapping_mul(0x9E3779B97F4A7C15) ^ p.features.w[1];
     h = h ^ p.build_target as u64 << 8 ^ p.arch as u64 ^ p.pic as u64 << 7;
+    // The run-time copy levels: the copies of a body the code generator adds (`lir::ir::Package.copy_flags`).
+    for k in 0..p.simd_levels.len() {
+        let l = p.simd_levels[k];
+        h = h ^ (l.w[0] ^ l.w[1].rotate_left(29) ^ k as u64 + 1).wrapping_mul(0xD1B54A32D192ED03);
+    }
     if p.debug_info {
         h = h ^ (fnv(process::current_dir().unwrap_or(String::new()).as_str()) | 1).wrapping_mul(0xC4CEB9FE1A85EC53);
     }
@@ -17696,7 +17727,8 @@ pub(package) fn run_package(
         }
     }
     stage_ms(tstat, &mut tp0, "phase mid");
-    if p.native {
+    // The C tree's constant-time functions compile natively too (`ct_object`): their C types need the facts.
+    if p.native || lct::loaded(p) {
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }
@@ -18467,8 +18499,29 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         }
         t.format_into("data @__sc_zst_{} size 1 align {}\n", zst[i], lg);
     }
-    if p.simd_levels.len() != 0 && p.names_vectors() {
+    let levels = p.simd_levels.len() != 0 && (p.names_vectors() || p.levels_add_scalar());
+    if levels {
         simd_level_init(p, int, &mut t);
+    }
+    if dit_byte(p) {
+        // The byte the constant-time bodies read (`Target.dit`): HWCAP_DIT of AT_HWCAP (16).
+        let sec = ctor_section(p);
+        if !(levels && p.simd_hwcap.len() != 0 && p.find("sc_cpu") < 0) {
+            t.push_str("sym @getauxval fn global ext\n");
+        }
+        t.format_into(
+            "sym @__sc_dit data global\nsym @__sc_dit_init fn local\nsym @__sc_dit_ctor data local used section \"{}\"\n",
+            sec,
+        );
+        t.push_str(
+            "fn @__sc_dit_init\n  sig () -> void\nb0:\n  v0 = iconst.i64 16\n  v1 = call.i64 @getauxval(v0) : (i64) -> i64\n",
+        );
+        t.format_into(
+            "  v2 = iconst.i64 {}\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 0\n  v5 = icmp.ne v3, v4\n  v6 = zext.i8 v5\n",
+            tgt::DIT_HWCAP_BIT as i64,
+        );
+        t.push_str("  v7 = symaddr @__sc_dit\n  store v6, v7 align 0\n  ret\ndata @__sc_dit size 1 align 0\n");
+        t.format_into("data @__sc_dit_ctor size {} align {} reloc 0 @__sc_dit_init\n", ptr, al);
     }
     let mut err = String::new();
     let mut ok = false;
@@ -18498,16 +18551,36 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     return ok;
 }
 
+// Whether the program's start-up sets `__sc_dit`, the byte its arm64 constant-time bodies read: on a
+// target whose kernel reports FEAT_DIT (`Target.dit`), for a program that may have such bodies (`lct::loaded`).
+fn dit_byte(p: &loader::Package) bool {
+    let d = switch tgt::target_of(p.build_target, p.arch) {
+        Some(r) => r.dit,
+        None => tgt::DIT_NONE,
+    };
+    return d == tgt::DIT_HWCAP && lct::loaded(p);
+}
+
 // The level the native copies of a program with run-time copies run at (`simd_levels`; the C tree's
-// `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function reads, 0 (the
-// build's features) until the constructor `__sc_simd_init` sets it before `main` to the highest level k
-// (1-based) whose features the CPU detector reports (`sc_cpu_words`). `SC_SIMD_LEVEL=<k>` (a test switch)
-// sets it, up to the highest. `int` is the pointer-sized integer type.
+// `simd_level_fn`), as LIR into `t`: the byte `__sc_simd_lv` every dispatching function and copy stub
+// reads, 0 (the build's features) until the constructor `__sc_simd_init` sets it before `main` to the
+// highest level k (1-based) whose features the CPU has: by the CPU detector (`sc_cpu_words`) where the
+// program loads it (vector code), by the kernel's HWCAP and HWCAP2 bits for a target's run-time levels
+// (`Target.run_time_hwcap`, `getauxval`), else (x86-64 code without vectors, whose copies take scalar
+// instructions alone: `lir::ir::CPU_SCALAR`) by CPUID and XGETBV for the scalar features of each level.
+// `SC_SIMD_LEVEL=<k>` (a test switch) sets it, up to the highest. `int` is the pointer-sized integer type.
 fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     let n = p.simd_levels.len();
     let sec = ctor_section(p);
     let ptr = lay::target_for(p.arch).ptr as u32;
-    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\nsym @sc_cpu_words fn global\n");
+    let det = p.find("sc_cpu") >= 0;
+    let hwcap = !det && p.simd_hwcap.len() != 0;
+    t.push_str("sym @__sc_simd_lv data global\nsym @getenv fn global ext\n");
+    if det {
+        t.push_str("sym @sc_cpu_words fn global\n");
+    } else if hwcap {
+        t.push_str("sym @getauxval fn global ext\n");
+    }
     t.format_into(
         "sym @__sc_simd_env data local\nsym @__sc_simd_init fn local\nsym @__sc_simd_ctor data local used section \"{}\"\n",
         sec,
@@ -18524,42 +18597,122 @@ fn simd_level_init(p: &loader::Package, int: str, t: &mut String) {
     t.push_str("  v10 = iconst.i32 10\n  v11 = icmp.ult v9, v10\n  br v11, b2, b3\n");
     t.format_into("b2:\n  v12 = iconst.i32 {}\n  v13 = icmp.ult v9, v12\n  v14 = select.i32 v13, v9, v12\n", n);
     t.push_str("  v15 = trunc.i8 v14\n  astore v15, v0 relaxed\n  ret\n");
-    // The detector's two words against each level's, the highest first: block b(4 + 2i) tests level
-    // n - i, b(5 + 2i) sets it.
-    t.push_str("b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n");
-    t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
-    let mut v: usize = 19;
+    // The two words each level is tested against, `wa` and `wb`, then the next value's number.
+    let (wa, wb, mut v) = if det {
+        t.push_str(
+            "b3:\n  v16 = slotaddr s0\n  call @sc_cpu_words(v16) : (ptr) -> void\n  v17 = load.i64 v16 align 3\n",
+        );
+        t.push_str("  v18 = load.i64 v16+8 align 3\n  jmp b4\n");
+        (17usize, 18usize, 19usize)
+    } else if hwcap {
+        // AT_HWCAP is 16, AT_HWCAP2 26.
+        t.push_str(
+            "b3:\n  v16 = iconst.i64 16\n  v17 = call.i64 @getauxval(v16) : (i64) -> i64\n  v18 = iconst.i64 26\n",
+        );
+        t.push_str("  v19 = call.i64 @getauxval(v18) : (i64) -> i64\n  jmp b4\n");
+        (17usize, 19usize, 20usize)
+    } else {
+        // One word of the scalar features (`X_*` bits), each read where its CPUID leaf exists: leaf 1 ECX
+        // (POPCNT 23, MOVBE 22, FMA 12 with the OS's AVX state: OSXSAVE 27 and XCR0 bits 1 and 2), leaf 7
+        // EBX (BMI1 3, BMI2 8), leaf 0x80000001 ECX (LZCNT 5).
+        t.push_str(
+            "b3:\n  v16 = slotaddr s0\n  v17 = iconst.i32 0\n  sys.cpuid v16, v17, v17\n  v18 = load.i32 v16 align 2\n",
+        );
+        t.push_str("  v19 = iconst.i32 1\n  sys.cpuid v16, v19, v17\n  v20 = load.i32 v16+8 align 2\n");
+        t.push_str(
+            "  v21 = iconst.i32 7\n  sys.cpuid v16, v21, v17\n  v22 = load.i32 v16+4 align 2\n  v23 = icmp.uge v18, v21\n",
+        );
+        t.push_str("  v24 = select.i32 v23, v22, v17\n  v25 = iconst.i32 -2147483648\n  sys.cpuid v16, v25, v17\n");
+        t.push_str("  v26 = load.i32 v16 align 2\n  v27 = iconst.i32 -2147483647\n  sys.cpuid v16, v27, v17\n");
+        t.push_str("  v28 = load.i32 v16+8 align 2\n  v29 = icmp.uge v26, v27\n  v30 = select.i32 v29, v28, v17\n");
+        t.push_str(
+            "  v31 = iconst.i32 134217728\n  v32 = and.i32 v20, v31\n  v33 = icmp.ne v32, v17\n  br v33, b4, b5(v17)\n",
+        );
+        t.push_str(
+            "b4:\n  v34 = sys.xgetbv.i64 v17\n  v35 = trunc.i32 v34\n  v36 = iconst.i32 6\n  v37 = and.i32 v35, v36\n",
+        );
+        t.push_str("  v38 = icmp.eq v37, v36\n  v39 = zext.i32 v38\n  jmp b5(v39)\nb5(v40: i32):\n");
+        // The word: POPCNT 1, MOVBE 2, FMA 4, LZCNT 8, BMI1 16, BMI2 32.
+        let bits: [(usize, u32, u32); 6] = [(20, 23, 1), (20, 22, 2), (20, 12, 4), (30, 5, 8), (24, 3, 16), (24, 8, 32)];
+        let mut w: usize = 41;
+        t.push_str("  v41 = iconst.i32 0\n");
+        for q in 0..6usize {
+            let (src, bit, out) = bits[q];
+            t.format_into("  v{} = iconst.i32 {}\n  v{} = lshr.i32 v{}, v{}\n", w + 1, bit, w + 2, src, w + 1);
+            t.format_into("  v{} = iconst.i32 1\n  v{} = and.i32 v{}, v{}\n", w + 3, w + 4, w + 2, w + 3);
+            if out == 4 {
+                // FMA only with the OS's AVX state.
+                t.format_into("  v{} = and.i32 v{}, v40\n", w + 5, w + 4);
+            } else {
+                t.format_into("  v{} = or.i32 v{}, v{}\n", w + 5, w + 4, w + 4);
+            }
+            t.format_into("  v{} = iconst.i32 {}\n  v{} = mul.i32 v{}, v{}\n", w + 6, out, w + 7, w + 5, w + 6);
+            t.format_into("  v{} = or.i32 v{}, v{}\n", w + 8, w, w + 7);
+            w += 8;
+        }
+        t.format_into("  v{} = zext.i64 v{}\n  v{} = iconst.i64 0\n  jmp b6\n", w + 1, w, w + 2);
+        (w + 1, w + 2, w + 3)
+    };
+    // Each level's two words against the CPU's, the highest first: block b(first + 2i) tests level n - i,
+    // b(first + 2i + 1) sets it; past them the byte stays 0.
+    let first: usize = ast::pick(det || hwcap, 4usize, 6usize);
     for i in 0..n {
-        let w = p.simd_levels[n - 1 - i].w;
+        let k = n - 1 - i;
+        let m = if det {
+            p.simd_levels[k].w
+        } else if hwcap {
+            [p.simd_hwcap[2 * k], p.simd_hwcap[2 * k + 1]]
+        } else {
+            [scalar_word(p, p.simd_levels[k]), 0u64]
+        };
+        let tb = first + 2 * i;
+        let sb = first + 2 * i + 1;
+        let nb = ast::pick(i + 1 == n, first + 2 * n, first + 2 * i + 2);
         t.format_into(
-            "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v17, v{}\n  v{} = icmp.eq v{}, v{}\n",
-            4 + 2 * i,
+            "b{}:\n  v{} = iconst.i64 {}\n  v{} = and.i64 v{}, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            tb,
             v,
-            w[0] as i64,
+            m[0] as i64,
             v + 1,
+            wa,
             v,
             v + 2,
             v + 1,
             v,
         );
         t.format_into(
-            "  v{} = iconst.i64 {}\n  v{} = and.i64 v18, v{}\n  v{} = icmp.eq v{}, v{}\n",
+            "  v{} = iconst.i64 {}\n  v{} = and.i64 v{}, v{}\n  v{} = icmp.eq v{}, v{}\n",
             v + 3,
-            w[1] as i64,
+            m[1] as i64,
             v + 4,
+            wb,
             v + 3,
             v + 5,
             v + 4,
             v + 3,
         );
-        t.format_into("  v{} = and.i8 v{}, v{}\n  br v{}, b{}, b{}\n", v + 6, v + 2, v + 5, v + 6, 5 + 2 * i, 6 + 2 * i);
-        t.format_into("b{}:\n  v{} = iconst.i8 {}\n  astore v{}, v0 relaxed\n  ret\n", 5 + 2 * i, v + 7, n - i, v + 7);
+        t.format_into("  v{} = and.i8 v{}, v{}\n  br v{}, b{}, b{}\n", v + 6, v + 2, v + 5, v + 6, sb, nb);
+        t.format_into("b{}:\n  v{} = iconst.i8 {}\n  astore v{}, v0 relaxed\n  ret\n", sb, v + 7, k + 1, v + 7);
         v += 8;
     }
-    t.format_into("b{}:\n  ret\n", 4 + 2 * n);
+    t.format_into("b{}:\n  ret\n", first + 2 * n);
     t.push_str("data @__sc_simd_lv size 1 align 0\n");
     t.push_str("data @__sc_simd_env size 14 align 0 ro bytes 53435f53494d445f4c4556454c00\n");
     t.format_into("data @__sc_simd_ctor size {} align {} reloc 0 @__sc_simd_init\n", ptr, pick(ptr == 4, 2u32, 3u32));
+}
+
+// The word of feature set `s`'s x86-64 scalar features the CPUID path of `simd_level_init` tests: POPCNT 1,
+// MOVBE 2, FMA 4, LZCNT 8, BMI1 16, BMI2 32.
+const fn scalar_word(p: &loader::Package, s: cf::CpuFeatureSet) u64 {
+    let names: [str; 6] = ["popcnt", "movbe", "fma", "lzcnt", "bmi1", "bmi2"];
+    let mut w: u64 = 0;
+    for q in 0..6usize {
+        let f = cf::find(names[q], p.arch);
+        if f >= 0 && cf::has(s, f as usize) {
+            w |= 1u64 << q as u64;
+        }
+    }
+    return w;
 }
 
 /// The measured cost of one runtime task (launch, run, join; 0.7 to 1.0 us over 20k empty tasks

@@ -104,7 +104,10 @@ a `loop` and a `for` over a range written in place (`for i in a..n`) take `invar
 keywords. A clause only computes its condition: it calls only `const fn`s, drops nothing and writes
 nothing (error 537). An intrinsic function has no clause. An extern function may state `requires` and
 `ensures` when it is `@trusted` (error 557 otherwise): the C library's promises, which no proof checks;
-each call proves its `requires` and assumes its `ensures`. A `@noreturn` extern function (`abort`,
+each call proves its `requires` and assumes its `ensures`. So does a `@trusted` function with a body and
+contracts: no proof checks its `ensures` (a processor instruction's meaning, which the prover cannot
+follow through the intrinsic; `std::crypto::secret`'s hash instruction wrappers state the vendor's
+pseudocode so); its body's other obligations stay. A `@noreturn` extern function (`abort`,
 `exit`) ends the process: a call to it ends the path, with no panic obligation.
 
 The compiler proves every clause in every build; one it cannot prove fails the build (error 538,
@@ -175,7 +178,10 @@ bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A goal over bit 
 casts, divisions or products that the arithmetic cannot decide is decided on the bits of its values
 (a SAT refutation): `x ^ y ^ y == x`, `x & (x - 1) < x` for `x > 0`, and the built-in integers'
 `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `wrapping_neg`, `rotate_left` and `rotate_right`
-(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer is a
+(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. An equality
+of two `wrapping_add` sums of one type, of the same terms in another order or grouping and constants
+of the same wrapped sum, holds without the bits (`(a + b) + c == (c + a) + b`, also of `u64`, where the bits of a
+regrouped sum pass the solver's budget). A wider integer is a
 value the proofs do not take apart. A float is the bits of its encoding: `f32`, `f64`, and std's
 `Float<E, F, FAMILY>` (`f16`, `bf16`, `f128`, `f8e4m3fn` ..) of up to 512 bits. `+ - * /`, `%` (C's
 `fmod`), `sqrt`, `mul_add`/`fma` (and the C library's `sqrt`, `fabs`, `copysign`, `fma`, `round`,
@@ -275,7 +281,8 @@ its definition, one unfolding per call (a call over constants unfolds further); 
 
 - A spec function or a lemma without a body ends its clauses with `;` and must be `@trusted`
   (error 557): an axiom, which no proof checks. Its `ensures` define its calls. `@trusted` marks only
-  these and an extern function with clauses.
+  these, an extern function with clauses, and a function with a body and clauses (its `ensures`
+  unchecked, see above).
 - An interface may declare a `spec fn` without a body, which each conformance
   defines; one with a body is an error. The interface's clauses state facts with it.
 - In ghost code `==` and `!=` compare any two values of one type without an `eq` method (a `Seq`, an
@@ -425,15 +432,29 @@ count below the width, `rotate_left`, `rotate_right`, `eq`, `ne`, `lt`, `le`, `g
 `Secret<bool>`), `Secret::pick(c, a, b)` (`a` where `c`, else `b`) and `cast::<U>()`. So the type
 checker rejects a branch on a secret, an index by one, a division, `==` and `<` (its `eq` gives no
 `bool`), a cast and a read of the field. A buffer of secret bytes is `[]Secret<u8>`: its length
-and its indexes are public.
+and its indexes are public. The module also wraps the processor's hash instructions over groups of
+secret words, a vector register's lanes: SHA-256 over four `u32`s (`[Secret<u32>; 4]`, `words4`),
+arm64 `sha256h`, `sha256h2`, `sha256su0`, `sha256su1` (`Sha2`), x86-64 `sha256rnds2`, `sha256msg1`,
+`sha256msg2` (`Sha`, `Sse41`); SHA-512 over pairs (`[Secret<u64>; 2]`, `words2`), arm64 `sha512h`,
+`sha512h2`, `sha512su0`, `sha512su1` (`Sha512`), and over four `u64`s (`qwords4`, the xmm operand a
+pair), x86-64 `sha512rnds2`, `sha512msg1`, `sha512msg2` (`Sha512ni`); SHA-3 over pairs, arm64 `eor3`,
+`rax1`, `xar::<N>`, `bcax` (`Sha3`). Each is `@trusted` with the vendor's pseudocode as its `ensures`
+(`arm_sha256_hash`, `intel_sha256_rnds2`, `arm_sha512h`, `intel_sha512_rnds2`, ...), which
+`std::crypto::sha256`, `sha512` and `sha3` prove their hardware paths against.
 
 `@constant_time` on a function with a body (error 56 elsewhere) makes the build check the code it
 generates for it, after the optimizer (error 558), also when nothing calls it: no branch, memory
-address or size, division or remainder, float operation, atomic or vector operation, system call,
-indirect call or select of a float or a vector depends on a secret, and no secret passes to a call or
-returns other than inside a `Secret` in memory. Only such a function reads a secret (std's `Secret`
-methods are `@constant_time`), so a helper that only passes a `Secret` on, a generic function such as
-`Vector<Secret<u8>>::push`, a closure and a `dyn` call need no attribute. No function may call a C
+address or size, division or remainder, float operation, atomic, system call, indirect call or select
+of a float or a vector depends on a secret; a vector operation on one only when it is a plain one
+(integer casts, wrapping `+ - *` and negation, shifts by a public count, bit casts, halves, joins,
+lane moves by constant lanes) or an intrinsic whose every instruction the vendor lists as
+data-independent in time (Arm's DIT list, Intel's DOIT list: `Isa.const_time`); a secret passes to a
+direct call only where the callee, checked with those parameters secret, keeps the rules, and returns
+only inside a `Secret`. Only such a function reads a secret (std's `Secret` methods are
+`@constant_time`), so a helper that only passes a `Secret` on, a generic function such as
+`Vector<Secret<u8>>::push`, a closure and a `dyn` call need no attribute. On arm64 the code runs with
+PSTATE.DIT set (macOS always; Linux where HWCAP reports it, the start-up registry reading the bit): each
+such function sets it at entry unless set and restores it at return. No function may call a C
 function that takes a `Secret` (through a reference, a slice or a field too) or take its address. A
 value `declassify` gives is public from there. A `@constant_time` function is inlined only into another
 one, so the code the check sees is the code that runs; loops over secrets vectorize. `--emit-c` puts the

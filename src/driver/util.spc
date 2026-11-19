@@ -795,6 +795,12 @@ pub(package) fn push_sdk_flags(cmd: &mut String, target: i32, arch: i32, feature
         }
     }
     cf::push_c_flags(features, target, arch, cmd);
+    if let Some(t) = tgt::target_of(target, arch) {
+        let lse = cf::find("lse", arch);
+        if t.outline_atomics && lse >= 0 && !cf::has(cf::close(features), lse as usize) {
+            cmd.push_str(" -moutline-atomics");
+        }
+    }
 }
 
 /// The flags that decide what the C headers declare, as every compile of the generated tree has them and

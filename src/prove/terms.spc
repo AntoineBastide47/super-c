@@ -282,6 +282,9 @@ pub(package) const fn exact_w(w: u16) bool {
     return w >= W_NAT;
 }
 
+// The most terms a wrapping sum's equality compares (`Terms::sum_terms`).
+const SUM_TERMS: usize = 64;
+
 pub(package) struct Term<const B: usize> {
     pub(package) k: Num<B>,
     pub(package) a: u32,
@@ -922,6 +925,65 @@ extend<const B: usize> Terms<B> {
     }
 
     // A comparison of two integers, or (`T_EQ`, `T_NE`) of two booleans or two other values.
+    // The terms of wrapping sum `a` (a sum converted to width `w` and signedness `sg`) into `out`, an inner
+    // sum's conversion to the same type dropped (it keeps the residue the outer one takes), and the sum of
+    // its constants in that type; None for another term, or past SUM_TERMS terms.
+    fn sum_terms(self: &Self, a: u32, w: u16, sg: bool, out: &mut Vector<u32>) Option<Num<B>> {
+        let x = self.ts[a as usize];
+        if x.op != T_CAST || self.ts[x.a as usize].op != T_ADD {
+            return None;
+        }
+        let mut work = Vector::<u32>::new();
+        let mut c = Num::<B>::zero();
+        work.push(x.a);
+        while let Some(t) = work.pop() {
+            let y = self.ts[t as usize];
+            if y.op == T_ADD && y.w == w && y.sg == sg {
+                work.push(y.b);
+                work.push(y.a);
+            } else if y.op == T_CAST && y.w == w && y.sg == sg && self.ts[y.a as usize].op == T_ADD {
+                work.push(y.a);
+            } else if y.op == T_INT {
+                c = c + y.k;
+            } else {
+                out.push(t);
+            }
+            if out.len() + work.len() > SUM_TERMS {
+                return None;
+            }
+        }
+        return Some(Terms::<B>::wrap(c, w, sg));
+    }
+
+    /// Whether goal `g` holds by the terms of wrapping sums alone: an equality of two sums of one type with
+    /// the same terms, each as often, and the same constant, in any order and grouping
+    /// (`a.wrapping_add(b).wrapping_add(c) == a.wrapping_add(b.wrapping_add(c))`), or a conjunction of such
+    /// goals. The solver decides an equality's bits; two adders that group the terms differently are past
+    /// its budget at 64 bits. As a fact, the equality stays an atom that links the two sums.
+    pub(package) fn sums_equal(self: &Self, g: u32) bool {
+        let t = self.ts[g as usize];
+        if t.op == T_AND {
+            return self.sums_equal(t.a) && self.sums_equal(t.b);
+        }
+        let x = self.ts[t.a as usize];
+        let y = self.ts[t.b as usize];
+        if t.op != T_EQ || x.op != T_CAST || y.op != T_CAST || x.w != y.w || x.sg != y.sg || x.w <= W_BOOL || exact_w(
+            x.w,
+        ) {
+            return false;
+        }
+        let mut lx = Vector::<u32>::new();
+        let mut ly = Vector::<u32>::new();
+        let cx = self.sum_terms(t.a, x.w, x.sg, &mut lx);
+        let cy = self.sum_terms(t.b, x.w, x.sg, &mut ly);
+        if cx.is_none() || cy.is_none() || cx.unwrap() != cy.unwrap() || lx.len() != ly.len() {
+            return false;
+        }
+        lx.sort();
+        ly.sort();
+        return lx.as_slice() == ly.as_slice();
+    }
+
     pub(package) fn cmp(self: &mut Self, op: u8, a: u32, b: u32) u32 {
         let x = self.ts[a as usize];
         let y = self.ts[b as usize];

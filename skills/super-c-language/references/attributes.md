@@ -118,4 +118,5 @@ matchertext literal (`asm(M"(...)");`), in the module's unit ("a module-level 'a
 template: no operands or clobbers"). Gate it with `@platform` and `@arch`. It defines symbols that
 only an `extern "C"` declaration names, so a module that holds one is always emitted, also when no
 Super-C item of it is used. Spell each symbol as the target's object format does (a leading `_`
-on Apple targets).
+on Apple targets). `.alt_entry name` declares a second entry into the code before it (one function of
+the object, a branch between them allowed, on every format).

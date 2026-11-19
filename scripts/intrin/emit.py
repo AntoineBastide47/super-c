@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-# Emit the intrinsic table of one ISA as Super-C from gen.py's json.
+# Emit the intrinsic table of one ISA as Super-C from gen.py's json: into an existing table file, merge (a
+# generated row replaces or adds its name's row; the rows written by hand and the rest of the file stay).
 import json, sys, re
 ISA, JS, OUT = sys.argv[1], sys.argv[2], sys.argv[3]
 rows = json.load(open(JS))
@@ -39,14 +40,64 @@ HEAD = {
 ''',
 }[ISA]
 
-o = [HEAD, '\n', '/// The rows, by name: the intrinsic and its instructions.\n', 'pub const ROWS: [(str<\'static>, str<\'static>); %d] = [\n' % len(rows)]
+def block(text, name):
+    # The span of `pub(package) const NAME: [...; n] = [` .. its closing `];` in `text`.
+    m = re.search(r"pub(?:\(package\))? const %s: \[[^\]]*; \d+\] = \[\n" % name, text)
+    if not m:
+        return None
+    end = text.index('\n];\n', m.end()) + 4
+    return m.start(), m.end(), end
+
+def entries(text):
+    # The (name, text) pairs of a ROWS block, as written (escapes kept), one line or formatted over several.
+    return re.findall(r'\(\s*"([^"]+)",\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)', text)
+
+gen = {r['name']: '\\n'.join(esc(conv(l)) for l in r['asm']) for r in rows}
+gsig = {r['name']: r['sig'] for r in rows} if ISA == 'wasm' else {}
+try:
+    old = open(OUT).read()
+except FileNotFoundError:
+    old = None
+if old is not None and block(old, 'ROWS') is not None:
+    # Merge: a generated row replaces the file's row of its name or adds one; a row the generator does not
+    # derive (written by hand: the C library's roundings) stays, and so does the rest of the file.
+    a, b, e = block(old, 'ROWS')
+    have = dict(entries(old[b:e]))
+    sigs = {}
+    if ISA == 'wasm':
+        sa, sb, se = block(old, 'SIGS')
+        sl = re.findall(r'"((?:[^"\\]|\\.)*)"', old[sb:se])
+        names = [n for n, _ in entries(old[b:e])]
+        sigs = dict(zip(names, sl))
+    have.update(gen)
+    sigs.update(gsig)
+    names = sorted(have)
+    vis = old[a:old.index('const ROWS', a)]
+    o = [old[:a], vis, "const ROWS: [(str<'static>, str<'static>); %d] = [\n" % len(names)]
+    for n in names:
+        o.append('    ("%s", "%s"),\n' % (n, have[n]))
+    o.append('];\n')
+    rest = old[e:]
+    if ISA == 'wasm':
+        sa, sb, se = block(rest, 'SIGS')
+        sv = rest[sa:rest.index('const SIGS', sa)]
+        s2 = [sv, "const SIGS: [str<'static>; %d] = [\n" % len(names)]
+        for n in names:
+            s2.append('    "%s",\n' % sigs[n])
+        s2.append('];\n')
+        rest = rest[:sa] + ''.join(s2) + rest[se:]
+    open(OUT, 'w').write(''.join(o) + rest)
+    print(len(names))
+    sys.exit(0)
+
+o = [HEAD, '\n', '/// The rows, by name: the intrinsic and its instructions.\n', 'pub(package) const ROWS: [(str<\'static>, str<\'static>); %d] = [\n' % len(rows)]
 for r in rows:
     body = '\\n'.join(esc(conv(l)) for l in r['asm'])
     o.append('    ("%s", "%s"),\n' % (r['name'], body))
 o.append('];\n')
 if ISA == 'wasm':
     o.append('\n/// Per row: the wasm signature of a function of the intrinsic\'s arguments and result.\n')
-    o.append('pub const SIGS: [str<\'static>; %d] = [\n' % len(rows))
+    o.append('pub(package) const SIGS: [str<\'static>; %d] = [\n' % len(rows))
     for r in rows:
         o.append('    "%s",\n' % r['sig'])
     o.append('];\n')

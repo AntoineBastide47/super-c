@@ -3289,7 +3289,7 @@ extend Lower {
             let lvl = self.inst(O_ALOAD, T_I8, MO_RELAXED, la, VNONE, 0);
             for i in 0..copies.len() {
                 let t = self.block();
-                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, (copies.len() - i) as u64));
+                let at = self.icmp(C_UGE, lvl, self.iconst(T_I8, c.disp_k[i]));
                 self.split(at, t, true);
                 takes.push(t);
             }
@@ -6204,8 +6204,43 @@ extend Lower {
         if ti.cls == VC_MEM {
             args.push(dst);
         }
+        // A `bitcast` between vectors of one size is the plain `bitcast` the optimizer and the backends read
+        // through (a register stays one).
+        if rv.c == irc::SIMD_BITCAST && args.len() == 1 && is_vec(rt) && is_vec(self.vty(args[0])) && type_bytes(
+            self.vty(args[0]),
+            8,
+        ) == type_bytes(rt, 8) {
+            return self.inst(O_BITCAST, rt, 0, args[0], VNONE, VNONE);
+        }
+        // A shuffle of two vectors of its own type that interleaves their low or their high halves is that
+        // interleave (`vziplo`, `vziphi`), which each backend has as one instruction (x86-64's PUNPCKL and
+        // PUNPCKH, arm64's ZIP1 and ZIP2).
+        if rv.c == irc::SIMD_SHUFFLE && args.len() == 2 && is_vec(rt) && self.vty(args[0]) == rt && self.vty(args[1]) == rt {
+            let z = zip_of(&self.b.pool, lanes, type_bytes(rt, 8) / type_bytes(lane_type(rt), 8));
+            if z != 0 {
+                return self.inst(z, rt, 0, args[0], args[1], VNONE);
+            }
+        }
         return self.vop(code, rt, args[0..args.len()], lanes);
     }
+}
+
+// `O_VZIPLO` when the index list at `pool[at]` (its length, then the indices) over two vectors of `n` lanes
+// interleaves their low halves (lane 2k: k, lane 2k + 1: n + k), `O_VZIPHI` their high halves (n/2 + k
+// and n + n/2 + k), else 0.
+const fn zip_of(pool: &Vector<u32>, at: u32, n: u32) u8 {
+    if pool[at as usize] != n || n < 2 || n % 2 != 0 {
+        return 0;
+    }
+    let mut lo = true;
+    let mut hi = true;
+    for k in 0..n / 2 {
+        let x = pool[(at + 1 + 2 * k) as usize];
+        let y = pool[(at + 2 + 2 * k) as usize];
+        lo = lo && x == k && y == n + k;
+        hi = hi && x == n / 2 + k && y == n + n / 2 + k;
+    }
+    return ast::pick(lo, O_VZIPLO, ast::pick(hi, O_VZIPHI, 0u8));
 }
 
 // The operand count of check intrinsic `k`, and of the one-operand hints.

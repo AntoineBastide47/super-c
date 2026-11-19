@@ -33,6 +33,55 @@ pub fn sc_cpu_has(feature: i32) i32 {
     return (unsafe atomic::load_u64(&WORD, 0) >> feature as u64 & 1) as i32;
 }
 
+/// 1 when feature `feature` is present and usable: on Linux x86_64 an AMX feature also needs the tile
+/// data state, which the process asks for once (`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)`);
+/// every other feature is usable when present (`sc_cpu_has`).
+pub fn sc_cpu_request(feature: i32) i32 {
+    if sc_cpu_has(feature) == 0 {
+        return 0;
+    }
+    if feature != cpu::Feature::AmxTile as i32 && feature != cpu::Feature::AmxInt8 as i32 {
+        return 1;
+    }
+    return tiles_granted() as i32;
+}
+
+// Whether the process may use the AMX tile data: granted where no system asks for it.
+@platform(!linux)
+fn tiles_granted() bool {
+    return true;
+}
+
+@platform(linux)
+@arch(!x86_64)
+fn tiles_granted() bool {
+    return true;
+}
+
+// Linux's answer, asked once: 1 granted, 2 refused, 0 not asked; two first callers ask alike.
+@platform(linux)
+@arch(x86_64)
+fn tiles_granted() bool {
+    let s = unsafe atomic::load_i32(&TILES, 1);
+    if s != 0 {
+        return s == 1;
+    }
+    // SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA.
+    let ok = unsafe syscall(158, 0x1023, 18) == 0;
+    unsafe atomic::store_i32(&mut TILES, 2 - ok as i32, 2);
+    return ok;
+}
+
+@platform(linux)
+@arch(x86_64)
+static mut TILES: i32 = 0;
+
+@platform(linux)
+@arch(x86_64)
+extern "C" "unistd.h" {
+    fn syscall(number: i64, ...) i64;
+}
+
 /// The present features, two words, into `out[0]` and `out[1]`. C callers: `void sc_cpu_words(uint64_t
 /// out[2])`.
 @export("sc_cpu_words")
@@ -54,18 +103,20 @@ pub unsafe const fn sc_cpu_static_words(out: *mut u64) {
     out[1] = TARGET_FEATURES[1];
 }
 
-/// The x86 features (one word) of CPUID registers `r[0..7]` (leaf 1 ECX; leaf 7.0 EBX, ECX and EDX;
-/// leaf 7.1 EDX; leaf 80000001h ECX; leaf 24h EBX), XCR0 `xcr0` and the OS's own report of the AVX-512
+/// The x86 features (one word) of CPUID registers `r[0..8]` (leaf 1 ECX; leaf 7.0 EBX, ECX and EDX;
+/// leaf 7.1 EDX; leaf 80000001h ECX; leaf 24h EBX; leaf 7.1 EAX), XCR0 `xcr0` and the OS's own report of the AVX-512
 /// state `os_zmm` (macOS): the decision of the x86 query, a pure function on every host.
 pub unsafe fn sc_cpu_x86_decide(r: *const u32, xcr0: u64, os_zmm: i32) u64 {
     // OSXSAVE and XCR0 bits 1 and 2 (SSE and AVX state); bits 5 to 7 (opmask and ZMM state), which macOS
     // enables per thread on first use, so there the OS's own answer stands for them.
     let ymm = (r[0] >> 27 & 1) != 0 && (xcr0 & 6) == 6;
     let zmm = ymm && (os_zmm != 0 || (xcr0 & 0xE0) == 0xE0);
+    // XCR0 bits 17 and 18: the tile configuration and data state.
+    let tiles = (r[0] >> 27 & 1) != 0 && (xcr0 & 0x60000) == 0x60000;
     let mut w = bit(cpu::Feature::Sse2);
     let rows: [](u8, u8, cpu::Feature, u8) = X86_ROWS;
     for row in rows {
-        let state_ok = row.3 == 0 || row.3 == 1 && ymm || row.3 == 2 && zmm;
+        let state_ok = row.3 == 0 || row.3 == 1 && ymm || row.3 == 2 && zmm || row.3 == 3 && tiles;
         if (r[row.0 as usize] >> row.1 as u32 & 1) != 0 && state_ok {
             w |= bit(row.2);
         }
@@ -126,8 +177,8 @@ fn detect() u64 {
 }
 
 // The CPUID bit of each x86 feature: register `r[reg]`, bit `bit`, the feature, and `state` 1 when it
-// needs the AVX register state, 2 when the AVX-512 state too.
-const X86_ROWS: [(u8, u8, cpu::Feature, u8); 31] = [
+// needs the AVX register state, 2 when the AVX-512 state too, 3 when the AMX tile state.
+const X86_ROWS: [(u8, u8, cpu::Feature, u8); 35] = [
     (0, 0, cpu::Feature::Sse3, 0),
     (0, 9, cpu::Feature::Ssse3, 0),
     (0, 19, cpu::Feature::Sse41, 0),
@@ -159,13 +210,17 @@ const X86_ROWS: [(u8, u8, cpu::Feature, u8); 31] = [
     (2, 10, cpu::Feature::Vpclmulqdq, 1),
     (0, 25, cpu::Feature::Aesni, 0),
     (0, 1, cpu::Feature::Pclmulqdq, 0),
+    (1, 29, cpu::Feature::Sha, 0),
+    (7, 0, cpu::Feature::Sha512ni, 1),
+    (3, 24, cpu::Feature::AmxTile, 3),
+    (3, 25, cpu::Feature::AmxInt8, 3),
 ];
 
 // x86_64: CPUID leaves 1, (7,0), (7,1) when (7,0) reports it, 80000001h and 24h, a leaf past the maximum
 // reading as zeros; XGETBV(0) when OSXSAVE is set; on macOS the OS's report of the AVX-512 state.
 @arch(x86_64)
 fn query() u64 {
-    let mut r: [u32; 7] = [0; 7];
+    let mut r: [u32; 8] = [0; 8];
     let (_, _, c1, _) = cpuid(1, 0);
     r[0] = c1;
     let (a7, b7, c7, d7) = cpuid(7, 0);
@@ -173,8 +228,9 @@ fn query() u64 {
     r[2] = c7;
     r[3] = d7;
     if a7 >= 1 {
-        let (_, _, _, d71) = cpuid(7, 1);
+        let (a71, _, _, d71) = cpuid(7, 1);
         r[4] = d71;
+        r[7] = a71;
     }
     let (_, _, ce, _) = cpuid(0x80000001, 0);
     r[5] = ce;
@@ -233,7 +289,7 @@ fn os_zmm() i32 {
 // absent.
 @platform(macos | ios)
 @arch(aarch64)
-const APPLE_ROWS: [(str<'static>, cpu::Feature); 14] = [
+const APPLE_ROWS: [(str<'static>, cpu::Feature); 17] = [
     ("hw.optional.arm.FEAT_FP16", cpu::Feature::Fp16),
     ("hw.optional.arm.FEAT_DotProd", cpu::Feature::Dotprod),
     ("hw.optional.arm.FEAT_RDM", cpu::Feature::Rdm),
@@ -248,6 +304,9 @@ const APPLE_ROWS: [(str<'static>, cpu::Feature); 14] = [
     ("hw.optional.arm.FEAT_SME2", cpu::Feature::Sme2),
     ("hw.optional.arm.FEAT_SME_F64F64", cpu::Feature::SmeF64f64),
     ("hw.optional.arm.FEAT_LRCPC", cpu::Feature::Rcpc),
+    ("hw.optional.arm.FEAT_CSSC", cpu::Feature::Cssc),
+    ("hw.optional.arm.FEAT_SHA512", cpu::Feature::Sha512),
+    ("hw.optional.arm.FEAT_PMULL", cpu::Feature::Pmull),
 ];
 
 @platform(macos | ios)
@@ -280,10 +339,10 @@ fn sysctl_flag(key: str<'static>) bool {
 }
 
 // The PF_ARM_* values of the IsProcessorFeaturePresent documentation (older MinGW headers lack some
-// names). A V8 crypto bit covers AES and SHA-2; no constant exists for RDM.
+// names). A V8 crypto bit covers AES, PMULL and SHA-2; no constant exists for RDM or CSSC.
 @platform(windows)
 @arch(aarch64)
-const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
+const WINDOWS_ROWS: [(u32, cpu::Feature); 17] = [
     (67, cpu::Feature::Fp16),
     (43, cpu::Feature::Dotprod),
     (66, cpu::Feature::I8mm),
@@ -299,6 +358,8 @@ const WINDOWS_ROWS: [(u32, cpu::Feature); 15] = [
     (71, cpu::Feature::Sme2),
     (85, cpu::Feature::SmeF64f64),
     (45, cpu::Feature::Rcpc),
+    (65, cpu::Feature::Sha512),
+    (30, cpu::Feature::Pmull),
 ];
 
 // kernel32's `BOOL IsProcessorFeaturePresent(DWORD)`. Its header declares it: a prototype of
@@ -327,7 +388,7 @@ fn query() u64 {
 // libc headers lack some names. fp16 needs both its scalar and its vector bit (HWCAP bits 9 and 10).
 @platform(linux | android)
 @arch(aarch64)
-const HWCAP_ROWS: [(u8, u8, cpu::Feature); 16] = [
+const HWCAP_ROWS: [(u8, u8, cpu::Feature); 19] = [
     (0, 1, cpu::Feature::Neon),
     (0, 20, cpu::Feature::Dotprod),
     (0, 12, cpu::Feature::Rdm),
@@ -344,6 +405,9 @@ const HWCAP_ROWS: [(u8, u8, cpu::Feature); 16] = [
     (1, 37, cpu::Feature::Sme2),
     (1, 25, cpu::Feature::SmeF64f64),
     (0, 15, cpu::Feature::Rcpc),
+    (1, 34, cpu::Feature::Cssc),
+    (0, 21, cpu::Feature::Sha512),
+    (0, 4, cpu::Feature::Pmull),
 ];
 
 // getauxval gives 0 for an entry the kernel does not supply.

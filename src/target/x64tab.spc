@@ -118,10 +118,20 @@ extend K {
     pub(package) const VSX: u8 = 41; // memory with an xmm index (VSIB)
     pub(package) const VSY: u8 = 42;
     pub(package) const VSZ: u8 = 43;
+    pub(package) const RV: u8 = 44; // a general register of the operand size in VEX.vvvv
+    pub(package) const T: u8 = 45; // a tile register (AMX) in ModRM.reg
+    pub(package) const TR: u8 = 46; // a tile register in ModRM.rm
+    pub(package) const TV: u8 = 47; // a tile register in VEX.vvvv
+    pub(package) const MS: u8 = 48; // memory with an index register (a SIB byte: AMX's base and stride)
 }
 
 const fn r(mn: str<'static>, op: u32, pfx: u8, dig: u8, sz: u8, fl: u8, ops: u32) Row {
     return Row { mn: mn, op: op, pfx: pfx, dig: dig, sz: sz, fl: fl, vx: 0, ops: ops };
+}
+
+// A VEX row on general registers (BMI1, BMI2): 32 or 64 bits by VEX.W, a size suffix.
+const fn vg(mn: str<'static>, op: u32, pfx: u8, dig: u8, ops: u32) Row {
+    return Row { mn: mn, op: op, pfx: pfx, dig: dig, sz: SLQ, fl: 0, vx: VEX, ops: ops };
 }
 
 // A VEX or EVEX row.
@@ -151,7 +161,7 @@ pub(package) const fn kind_at(ops: u32, i: u32) u8 {
 }
 
 // The fixed ModRM bytes of the `D_FIX` rows.
-const FIXED: [u8; 6] = [0xD0, 0xF9, 0xF0, 0xE8, 0xF8, 0x00];
+const FIXED: [u8; 7] = [0xD0, 0xF9, 0xF0, 0xE8, 0xF8, 0x00, 0xC0];
 
 /// The fixed ModRM byte of a `D_FIX` row.
 pub(package) const fn fixed_modrm(dig: u8) u8 {
@@ -162,7 +172,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1225] = [
+pub(package) const ROWS: [Row; 1276] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -348,6 +358,27 @@ pub(package) const ROWS: [Row; 1225] = [
     r("tzcnt", 0xFBC, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
     r("lzcnt", 0xFBD, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
     r("popcnt", 0xFB8, 0xF3, D, SWLQ, 0, k2(K::R, K::RM)),
+    // MOVBE: a load or store with its bytes reversed.
+    r("movbe", 0xF38F0, 0, D, SWLQ, 0, k2(K::R, K::M)),
+    r("movbe", 0xF38F1, 0, D, SWLQ, 0, k2(K::M, K::R)),
+    // SSE4.2 CRC32C of 1 to 8 bytes into a 32-bit (64-bit for 8 bytes) accumulator.
+    r("crc32", 0xF38F0, 0xF2, D, SB, 0, k2(K::R32, K::RM8)),
+    r("crc32", 0xF38F1, 0xF2, D, SW | SL, 0, k2(K::R32, K::RM)),
+    r("crc32", 0xF38F1, 0xF2, D, SQ, 0, k2(K::R64, K::RM)),
+    // BMI1 and BMI2.
+    vg("andn", 0xF38F2, 0, D, k3(K::R, K::RV, K::RM)),
+    vg("bextr", 0xF38F7, 0, D, k3(K::R, K::RM, K::RV)),
+    vg("blsr", 0xF38F3, 0, 1, k2(K::RV, K::RM)),
+    vg("blsmsk", 0xF38F3, 0, 2, k2(K::RV, K::RM)),
+    vg("blsi", 0xF38F3, 0, 3, k2(K::RV, K::RM)),
+    vg("bzhi", 0xF38F5, 0, D, k3(K::R, K::RM, K::RV)),
+    vg("pdep", 0xF38F5, 0xF2, D, k3(K::R, K::RV, K::RM)),
+    vg("pext", 0xF38F5, 0xF3, D, k3(K::R, K::RV, K::RM)),
+    vg("mulx", 0xF38F6, 0xF2, D, k3(K::R, K::RV, K::RM)),
+    vg("shlx", 0xF38F7, 0x66, D, k3(K::R, K::RM, K::RV)),
+    vg("sarx", 0xF38F7, 0xF3, D, k3(K::R, K::RM, K::RV)),
+    vg("shrx", 0xF38F7, 0xF2, D, k3(K::R, K::RM, K::RV)),
+    vg("rorx", 0xF3AF0, 0xF2, D, k3(K::R, K::RM, K::I8)),
     r("bsf", 0xFBC, 0, D, SWLQ, 0, k2(K::R, K::RM)),
     r("bsr", 0xFBD, 0, D, SWLQ, 0, k2(K::R, K::RM)),
     r("bt", 0xFA3, 0, D, SWLQ, 0, k2(K::RM, K::R)),
@@ -488,6 +519,9 @@ pub(package) const ROWS: [Row; 1225] = [
     r("pshufd", 0xF70, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     // The AVX-512 forms the code generator's 64-byte vectors take beyond the intrinsics' rows below.
     v("vpandd", 0xFDB, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, VEX, k4(K::X, K::XV, K::XM, K::I8)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, VEX | L1, k4(K::Y, K::YV, K::YM, K::I8)),
+    v("vpclmulqdq", 0xF3A44, 0x66, D, EVEX | L2, k4(K::Z, K::ZV, K::ZM, K::I8)),
     v("vpxord", 0xFEF, 0x66, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
     v("vpternlogq", 0xF3A25, 0x66, D, EVEX | W1 | L2 | MK | MZ, k4(K::Z, K::ZV, K::ZM, K::I8)),
     v("vxorps", 0xF57, 0, D, EVEX | L2 | MK | MZ, k3(K::Z, K::ZV, K::ZM)),
@@ -515,6 +549,32 @@ pub(package) const ROWS: [Row; 1225] = [
     r("aesdeclast", 0xF38DF, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("aesenc", 0xF38DC, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("aesenclast", 0xF38DD, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("aesimc", 0xF38DB, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("aeskeygenassist", 0xF3ADF, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
+    // The SHA extensions (SHA-1 and SHA-256 rounds and message schedules).
+    r("sha1rnds4", 0xF3ACC, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
+    r("sha1nexte", 0xF38C8, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha1msg1", 0xF38C9, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha1msg2", 0xF38CA, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha256rnds2", 0xF38CB, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
+    r("sha256msg1", 0xF38CC, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("sha256msg2", 0xF38CD, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    v("vsha512msg1", 0xF38CC, 0xF2, D, VEX | L1, k2(K::Y, K::XR)),
+    v("vsha512msg2", 0xF38CD, 0xF2, D, VEX | L1, k2(K::Y, K::YR)),
+    v("vsha512rnds2", 0xF38CB, 0xF2, D, VEX | L1, k3(K::Y, K::YV, K::XR)),
+    // AMX-TILE and AMX-INT8: the tile configuration, tile loads and stores, and the byte dot products
+    // (`tdpbssd`: signed by signed; `sud` signed by unsigned, `usd`, `uud`).
+    v("ldtilecfg", 0xF3849, 0, 0, VEX, k1(K::M)),
+    v("sttilecfg", 0xF3849, 0x66, 0, VEX, k1(K::M)),
+    v("tilerelease", 0xF3849, 0, D_FIX | 6, VEX, 0),
+    v("tilezero", 0xF3849, 0xF2, D, VEX, k1(K::T)),
+    v("tileloadd", 0xF384B, 0xF2, D, VEX, k2(K::T, K::MS)),
+    v("tileloaddt1", 0xF384B, 0x66, D, VEX, k2(K::T, K::MS)),
+    v("tilestored", 0xF384B, 0xF3, D, VEX, k2(K::MS, K::T)),
+    v("tdpbssd", 0xF385E, 0xF2, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbsud", 0xF385E, 0xF3, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbusd", 0xF385E, 0x66, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbuud", 0xF385E, 0, D, VEX, k3(K::T, K::TR, K::TV)),
     r("blendvpd", 0xF3815, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("blendvps", 0xF3814, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("cmppd", 0xFC2, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
@@ -537,6 +597,8 @@ pub(package) const ROWS: [Row; 1225] = [
     v("vaesdeclast", 0xF38DF, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vaesenc", 0xF38DC, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vaesenclast", 0xF38DD, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
+    v("vaesimc", 0xF38DB, 0x66, D, VEX, k2(K::X, K::XM)),
+    v("vaeskeygenassist", 0xF3ADF, 0x66, D, VEX, k3(K::X, K::XM, K::I8)),
     v("vandnpd", 0xF55, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vandnps", 0xF55, 0, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vandpd", 0xF54, 0x66, D, VEX | SWP, k3(K::X, K::XV, K::XM)),
@@ -621,7 +683,6 @@ pub(package) const ROWS: [Row; 1225] = [
     v("vpand", 0xFDB, 0x66, D, VEX | SWP, k3(K::X, K::XV, K::XM)),
     v("vpandn", 0xFDF, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpblendvb", 0xF3A4C, 0x66, D, VEX, k4(K::X, K::XV, K::XM, K::XI4)),
-    v("vpclmulqdq", 0xF3A44, 0x66, D, VEX, k4(K::X, K::XV, K::XM, K::I8)),
     v("vpcmpeqb", 0xF74, 0x66, D, VEX | SWP, k3(K::X, K::XV, K::XM)),
     v("vpcmpeqd", 0xF76, 0x66, D, VEX | SWP, k3(K::X, K::XV, K::XM)),
     v("vpcmpeqq", 0xF3829, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
@@ -684,7 +745,10 @@ pub(package) const ROWS: [Row; 1225] = [
     v("vpsubusb", 0xFD8, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpsubusw", 0xFD9, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpsubw", 0xFF9, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
+    v("vpunpckhbw", 0xF68, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
+    v("vpunpckhdq", 0xF6A, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpunpckhqdq", 0xF6D, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
+    v("vpunpckhwd", 0xF69, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpunpcklbw", 0xF60, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpunpckldq", 0xF62, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
     v("vpunpcklwd", 0xF61, 0x66, D, VEX, k3(K::X, K::XV, K::XM)),
@@ -782,6 +846,9 @@ pub(package) const ROWS: [Row; 1225] = [
     r("punpcklbw", 0xF60, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("punpckldq", 0xF62, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("punpcklwd", 0xF61, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhbw", 0xF68, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhwd", 0xF69, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhdq", 0xF6A, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("roundpd", 0xF3A09, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     r("roundps", 0xF3A08, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     r("shufps", 0xFC6, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
@@ -1474,7 +1541,7 @@ extend Enc {
 /// a kind that names none.
 pub(package) const fn gp_size(k: u8, sz: u8) u8 {
     return switch k {
-        K::R | K::RM | K::O | K::ACC => sz,
+        K::R | K::RM | K::O | K::ACC | K::RV => sz,
         K::RM8 | K::CL => 1u8,
         K::RM16 => 2u8,
         K::RM32 | K::R32 | K::RR32 => 4u8,
@@ -1485,35 +1552,50 @@ pub(package) const fn gp_size(k: u8, sz: u8) u8 {
 
 /// Whether kind `k` is in ModRM.reg.
 pub(package) const fn in_reg(k: u8) bool {
-    return k == K::R || k == K::R32 || k == K::R64 || k == K::X || k == K::Y || k == K::Z || k == K::KR;
+    return k == K::R || k == K::R32 || k == K::R64 || k == K::X || k == K::Y || k == K::Z || k == K::KR || k == K::T;
 }
 
 /// Whether kind `k` is in ModRM.rm.
 pub(package) const fn in_rm(k: u8) bool {
     return switch k {
-        K::RM | K::M | K::RM8 | K::RM16 | K::RM32 | K::RM64 | K::RR32 | K::RR64 | K::XM | K::XR | K::YM | K::YR | K::ZM | K::ZR | K::KRM | K::IND | K::VSX | K::VSY | K::VSZ => true,
+        K::RM | K::M | K::RM8 | K::RM16 | K::RM32 | K::RM64 | K::RR32 | K::RR64 | K::XM | K::XR | K::YM | K::YR | K::ZM | K::ZR | K::KRM | K::IND | K::VSX | K::VSY | K::VSZ | K::TR | K::MS => true,
         _ => false,
     };
 }
 
 /// Whether kind `k` is in ModRM.rm and memory only.
 pub(package) const fn mem_only(k: u8) bool {
-    return k == K::M || k == K::VSX || k == K::VSY || k == K::VSZ;
+    return k == K::M || k == K::VSX || k == K::VSY || k == K::VSZ || k == K::MS;
 }
 
 /// Whether kind `k` is in ModRM.rm and a register only.
 pub(package) const fn reg_only(k: u8) bool {
-    return k == K::XR || k == K::YR || k == K::ZR || k == K::KRM || k == K::RR32 || k == K::RR64;
+    return k == K::XR || k == K::YR || k == K::ZR || k == K::KRM || k == K::RR32 || k == K::RR64 || k == K::TR;
 }
 
 /// Whether kind `k` is in VEX.vvvv.
 pub(package) const fn in_vvvv(k: u8) bool {
-    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV;
+    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV || k == K::RV || k == K::TV;
 }
 
 /// Whether kind `k` names a mask register.
 pub(package) const fn is_kreg(k: u8) bool {
     return k == K::KR || k == K::KRM || k == K::KV;
+}
+
+// Whether operand kinds `ops` hold one in ModRM.rm.
+const fn has_rm(ops: u32) bool {
+    for i in 0..4u32 {
+        if in_rm(kind_at(ops, i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether kind `k` names a tile register.
+pub(package) const fn is_treg(k: u8) bool {
+    return k == K::T || k == K::TR || k == K::TV;
 }
 
 /// The vector register width in bytes kind `k` names (a VSIB operand's index), 0 for none.
@@ -1686,6 +1768,10 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
         if is_mem && !in_rm(k) || mem_only(k) && !is_mem || reg_only(k) && is_mem {
             return false;
         }
+        // AMX's memory: a SIB byte with an index (the stride), no RIP-relative base.
+        if k == K::MS && (n.m.index == NOREG || n.m.base == x::RIP) {
+            return false;
+        }
         if in_reg(k) {
             regf = g;
         } else if in_rm(k) {
@@ -1720,7 +1806,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
             if g >= AH {
                 no_rex = true;
             }
-        } else if is_kreg(k) && g > 7 || vec_size(k) != 0 && g > 15 || k == K::X0 && g != 0 {
+        } else if (is_kreg(k) || is_treg(k)) && g > 7 || vec_size(k) != 0 && g > 15 || k == K::X0 && g != 0 {
             return false;
         }
     }
@@ -1774,7 +1860,8 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
     if ve != 0 {
         let pp = x::pp_of(r.pfx);
         let mp = map_of(r.op);
-        let w = r.vx as u32 >> 2 & 1;
+        // A row on general registers takes 64 bits by W.
+        let w = r.vx as u32 >> 2 & 1 | (r.sz != 0 && n.sz == 8) as u32;
         let l = r.vx as u32 >> 10 & 3;
         let rr = ~rex >> 2 & 1;
         let xx = ~rex >> 1 & 1;
@@ -1843,7 +1930,13 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
                     return false;
                 }
             } else {
-                out.push((0xC0 | rg << 3 | rmr as u32 & 7) as u8);
+                // No ModRM.rm operand (`tilezero`): rm 0.
+                let rmb: u32 = if rmr == NOREG {
+                    0
+                } else {
+                    rmr as u32 & 7
+                };
+                out.push((0xC0 | rg << 3 | rmb) as u8);
             }
         }
     }
@@ -2057,7 +2150,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         }
         let mut x66 = c66;
         if vex != 0 {
-            if x::pp_of(r.pfx) != vpp || (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
+            if x::pp_of(r.pfx) != vpp || r.sz == 0 && (r.vx as u32 >> 2 & 1) != vw || (r.vx as u32 >> 10 & 3) != vl {
                 continue;
             }
             if vk != 0 && (r.vx & MK) == 0 || vk == 0 && (r.vx & MR) != 0 || vz && ((r.vx & MZ) == 0 || vk == 0) {
@@ -2071,7 +2164,8 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
         } else if r.pfx != rep {
             continue;
         }
-        let w = (rex & 8) != 0;
+        // A VEX row on general registers takes its size from W.
+        let w = (rex & 8) != 0 || vex != 0 && r.sz != 0 && vw == 1;
         let mut sz: u8 = 0;
         let mut rexw = w;
         if r.sz == SB {
@@ -2166,7 +2260,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
             }
             v.set_reg(i, g);
         }
-        if !ok || seg != 0 && v.mem_at == NOMEM || !has_vvvv && vvv != 0 {
+        if !ok || seg != 0 && v.mem_at == NOMEM || !has_vvvv && vvv != 0 || r.dig == D_REG && regform && !has_rm(r.ops) && (modrm & 7) != 0 {
             continue;
         }
         // The memory operand.
@@ -2215,6 +2309,9 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
             }
             q += dn;
             v.m = m;
+            if kind_at(r.ops, v.mem_at) == K::MS && m.index == NOREG {
+                continue;
+            }
         }
         let isz: usize = switch immk {
             K::I8 | K::IS8 => 1usize,

@@ -1675,12 +1675,20 @@ extend Opt {
         self.unr.vabsd = pk.vec_absd;
         let cpu = pk.cpu_of(b);
         self.unr.vbits = cpu.vec_bits;
-        self.unr.vpopcnt = cpu.popcnt;
+        // A run-time copy level that counts bits in one instruction (`Package.copy_flags`) runs on the
+        // machines that have it (every x86-64 processor since 2008): a count it gets stays scalar there.
+        let mut copy_pop = false;
+        for k in 0..pk.copy_flags.len() {
+            copy_pop = copy_pop || (pk.copy_flags[k] & CPU_POPCNT) != 0;
+        }
+        self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
+        self.unr.vld3 = pk.vec_ld3;
         self.unr.vsumw = pk.vec_sumw;
         self.unr.vmulw = cpu.vec_mulw;
+        self.unr.vdot = cpu.vec_dot;
         self.unr.vfma = pk.vfloat && cpu.fma;
         self.unr.vfloat = pk.vfloat;
         self.unr.vrnda = pk.vround_away;
@@ -13109,7 +13117,12 @@ extend Opt {
                 quiet = quiet && (droppable(b.insts[j as usize]) || self.repl[j as usize] != VNONE);
             }
             let c2 = b.insts[ts.a as usize];
-            let outside = |v: Value| (v & (VPARAM | VFLAG)) != 0 && v != VNONE && self.pblock[(v & ~VPARAM) as usize] != s || (v & (VPARAM | VFLAG)) == 0 && v != VNONE && self.blk_of[v as usize] != s;
+            // A parameter's block, else its instruction's (an overflow flag's too).
+            let outside = |v: Value| v != VNONE && if (v & VPARAM) != 0 {
+                self.pblock[(v & ~VPARAM) as usize] != s
+            } else {
+                self.blk_of[(v & ~VFLAG) as usize] != s
+            };
             if !quiet || !outside(c2.a) || !outside(c2.b) {
                 continue;
             }
@@ -16954,6 +16967,10 @@ pub(package) struct Run {
     wargs: Vector<u64>,
     shape: Vector<bool>,
     always: Vector<bool>, // per body, whether its function is `@always_inline` (`Sym.always`)
+    // Per body, whether its one call is the only reference the package makes to it, and only its own
+    // unit may name it (`Sym.internal` or local, not `@used`): its copy there replaces it, so it inlines
+    // whatever its size (`il::IL_SOLE`), as LLVM's bonus for the last call of a local function does.
+    sole: Vector<bool>,
     unit: Vector<u32>,
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
@@ -17096,6 +17113,22 @@ extend Run {
         let hd = &p.held;
         let call_at = replace(&mut cs.at, Vector::<u32>::new());
         let calls = replace(&mut cs.callee, Vector::<u32>::new());
+        let mut refs = Vector::<u32>::new();
+        fill(&mut refs, n, 0u32);
+        for q in 0..calls.len() {
+            refs[calls[q] as usize] += 1;
+        }
+        let mut sole = Vector::<bool>::new();
+        fill(&mut sole, n, false);
+        for k in 0..n {
+            sole[k] = refs[k] == 1;
+        }
+        for s in 0..p.syms.len() {
+            let sy = p.syms[s];
+            if sy.kind == SK_FUNC && sy.def != NONE && (!sy.internal && sy.linkage != SL_LOCAL || sy.used) {
+                sole[sy.def as usize] = false;
+            }
+        }
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
         let mut always = Vector::<bool>::with_capacity(n);
@@ -17141,7 +17174,7 @@ extend Run {
             let f = hd.flags[k - held as usize];
             shape[k] = (f & HELD_SHAPE) != 0;
             ok[k] = if (f & HELD_OK) != 0 {
-                il::facts(&bodies[k], cf.inline)
+                il::facts(&bodies[k], cf.inline) | sole[k] as u8 * il::IL_SOLE
             } else {
                 0u8
             };
@@ -17175,7 +17208,7 @@ extend Run {
         let _ = waits(n, &call_at, &calls, &level, &mut seen, &mut edges, true);
         // Each copy waits for its class's first body: an edge forward in `order`, which keeps the bodies
         // of a level by index.
-        let dup = duplicates(p, &bodies, held, &owner, &shape, &always, &bunit, &unit, &level);
+        let dup = duplicates(p, &bodies, held, &owner, &shape, &always, &sole, &bunit, &unit, &level);
         for k in 0..held as usize {
             if dup[k] != NONE {
                 edges.push(dup[k] as u64 << 32 | k as u64);
@@ -17202,6 +17235,7 @@ extend Run {
             shape: shape,
             unit: unit,
             always: always,
+            sole: sole,
             bunit: bunit,
             level: level,
             dup: dup,
@@ -17514,9 +17548,9 @@ extend Run {
             unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
             recycle(&mut sc, fin);
         }
-        // An `@always_inline` body inlines whatever its size.
-        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
-            il::facts(b, r.cf.inline)
+        // An `@always_inline` body inlines whatever its size, as does one whose call is its only reference.
+        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize] || r.sole[j as usize]) {
+            il::facts(b, r.cf.inline) | r.sole[j as usize] as u8 * il::IL_SOLE
         } else {
             0u8
         };
@@ -19921,13 +19955,23 @@ const fn ext_from(b: &Body, v: Value, ty: u8) Value {
 
 // Lane access `i` of `b` (`O_VEXTRACT`, `O_VINSERT`) through the lanes it reads: a lane of a splat is its
 // scalar; a lane of an insert is the inserted scalar, or the same lane of the vector inserted into; an
-// insert of a vector's own lane is the vector; an insert into an insert of the same lane replaces it. The
-// value it equals, else VNONE (and maybe `i` rewritten in place).
+// insert of a vector's own lane is the vector; inserts of every lane of one vector, each into its own
+// lane, are that vector (`rebuilt`); an insert into an insert of the same lane replaces it. The value it
+// equals, else VNONE (and maybe `i` rewritten in place).
 const fn lane_fold(b: &mut Body, i: u32) Value {
     let mut t = b.insts[i as usize];
     if t.op == O_VINSERT {
         if (t.b & (VPARAM | VFLAG)) == 0 && b.insts[t.b as usize].op == O_VEXTRACT && b.insts[t.b as usize].a == t.a && b.insts[t.b as usize].aux == t.aux {
             return t.a;
+        }
+        let (w, mark) = rebuilt(b, i);
+        if w != VNONE && !mark {
+            return w;
+        }
+        if w != VNONE {
+            // A secret mark on a lane marks the vector: the constant-time check derives the same secrets.
+            b.insts[i as usize] = Inst { op: O_SECRET, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
+            return VNONE;
         }
         if (t.a & (VPARAM | VFLAG)) == 0 && b.insts[t.a as usize].op == O_VINSERT && b.insts[t.a as usize].aux == t.aux {
             t.a = b.insts[t.a as usize].a;
@@ -19976,6 +20020,56 @@ const fn lane_fold(b: &mut Body, i: u32) Value {
         b.insts[i as usize] = t;
     }
     return VNONE;
+}
+
+// The vector `w` whose every lane insert `i` of `b` and the inserts under it put back into the same lane
+// (`O_VEXTRACT` of `w`, under a secret mark or not, the outermost insert of each lane counting), and
+// whether a mark was among them; VNONE when another value fills a lane or one is left.
+const fn rebuilt(b: &Body, i: u32) (Value, bool) {
+    let t = b.insts[i as usize];
+    let n = lanes(t.ty);
+    if n > LANE_WALK {
+        return VNONE, false;
+    }
+    let all = if n == 64 {
+        ~0u64
+    } else {
+        (1u64 << n as u64) - 1
+    };
+    let mut set: u64 = 0;
+    let mut w = VNONE;
+    let mut mark = false;
+    let mut v = i;
+    // Each step leaves one insert: at most LANE_WALK.
+    for _ in 0..LANE_WALK {
+        if set == all || (v & (VPARAM | VFLAG)) != 0 || b.insts[v as usize].op != O_VINSERT {
+            break;
+        }
+        let s = b.insts[v as usize];
+        v = s.a;
+        let bit = 1u64 << s.aux as u64;
+        if (set & bit) != 0 {
+            continue;
+        }
+        set |= bit;
+        let mut x = s.b;
+        if (x & (VPARAM | VFLAG)) != 0 {
+            return VNONE, false;
+        }
+        if b.insts[x as usize].op == O_SECRET {
+            mark = true;
+            x = b.insts[x as usize].a;
+            if (x & (VPARAM | VFLAG)) != 0 {
+                return VNONE, false;
+            }
+        }
+        let e = b.insts[x as usize];
+        if e.op != O_VEXTRACT || e.aux != s.aux || b.type_of(e.a) != t.ty || w != VNONE && e.a != w {
+            return VNONE, false;
+        }
+        w = e.a;
+    }
+    return ast::pick(set == all, w, VNONE), mark;
 }
 
 // Whether float `v` of `b` is the result of an arithmetic operation or a conversion, so no signaling NaN.
@@ -20335,6 +20429,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
             b.insts[t.a as usize].a,
         ) == t.ty {
             return b.insts[t.a as usize].a;
+        }
+        // A choice of vectors on a constant, or between one vector and itself: that vector.
+        if t.op == O_SELECT && (int_bits(b, t.a).is_some() || t.b == t.c) {
+            return ast::pick(t.b == t.c || int_bits(b, t.a).unwrap() != 0, t.b, t.c);
         }
         // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
         if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
@@ -22244,7 +22342,7 @@ const fn pure_ops() [bool; 256] {
     for k in 0..256u32 {
         let op = k as u8;
         unsafe {
-            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_SECRET || op == O_PUBLIC;
+            t[k as usize] = op >= O_ICONST && op <= O_INTTOPTR || op == O_PTRADD || op == O_SELECT || op == O_FMA || op == O_MULHU || op == O_MULHS || op == O_BSWAP || op == O_BITREV || op >= O_CLZ && op <= O_POPCNT || op == O_SPLAT || op == O_VCMP || op == O_VSEL || op == O_VUNZIP || op == O_HTOF || op == O_FTOH || op == O_FSQRT || op == O_VZIPLO || op == O_VZIPHI || op == O_VEXTRACT || op == O_VINSERT || op == O_VSUMW || op == O_VMULW || op == O_VDOT || op == O_SECRET || op == O_PUBLIC;
         }
     }
     return t;
@@ -23520,8 +23618,9 @@ const fn args_among(b: &Body, e: u32, o: u32) bool {
 
 // Per body, the body of its class it copies, NONE for the first of a class and for every other body. A
 // class holds the identical bodies (`Body::same`) of instances (not `Sym.own`: every build lowers them, so a
-// cached unit never reads the classes) at one level, with the same inliner shape, unit and function
-// attributes: the passes read nothing else of a body (`Run::job`), so each gives them the same result.
+// cached unit never reads the classes) at one level, with the same inliner shape, unit, function attributes
+// and whether a call is the only reference (`Run.sole`): the passes read nothing else of a body
+// (`Run::job`), so each gives them the same result and inliner facts.
 fn duplicates(
     p: &Package,
     bodies: &Vector<Body>,
@@ -23529,6 +23628,7 @@ fn duplicates(
     owner: &Vector<u32>,
     shape: &Vector<bool>,
     always: &Vector<bool>,
+    sole: &Vector<bool>,
     bunit: &Vector<u32>,
     unit: &Vector<u32>,
     level: &Vector<u32>,
@@ -23571,7 +23671,7 @@ fn duplicates(
         for f in firsts.iter() {
             let c = (*f) as usize;
             let o = p.syms[owner[c] as usize];
-            if level[c] == level[k] && shape[c] == shape[k] && always[c] == always[k] && bunit[c] == bunit[k] && unit[c] == unit[k] && o.linkage == a.linkage && o.sect == a.sect && o.used == a.used && o.noinline == a.noinline && o.cold == a.cold && o.sec == a.sec && o.internal == a.internal && o.ext == a.ext && bodies[c].same(
+            if level[c] == level[k] && shape[c] == shape[k] && always[c] == always[k] && sole[c] == sole[k] && bunit[c] == bunit[k] && unit[c] == unit[k] && o.linkage == a.linkage && o.sect == a.sect && o.used == a.used && o.noinline == a.noinline && o.cold == a.cold && o.sec == a.sec && o.internal == a.internal && o.ext == a.ext && bodies[c].same(
                 &bodies[k],
             ) {
                 d = c as u32;

@@ -70,6 +70,15 @@ const fn a64_sample(r: at::Row, q: u32, k: u8, v: &mut at::Vals, i: usize) {
         at::K::SHL | at::K::SHR | at::K::SIMM6 => {
             v[i] = 3;
         },
+        at::K::SIMM8 => {
+            v[i] = -100;
+        },
+        at::K::V1QD => {
+            v[i] = 7;
+        },
+        at::K::UIMM8 => {
+            v[i] = 200;
+        },
         at::K::BFX | at::K::BFIZ => {
             v[i] = 2;
             v[i + 1] = 5;
@@ -504,6 +513,15 @@ fn apply<F: fn(i64) i64>(f: F, v: i64) i64 {
     return f(v);
 }
 
+fn bits(a: u64, b: u64, n: u32, p: &[u8; 8]) u64 {
+    let t: u64 = if (a & a.wrapping_sub(1)) == 0 {
+        1
+    } else {
+        0
+    };
+    return (a & ~b) ^ (b & b.wrapping_neg()) ^ (a ^ a.wrapping_sub(1)) ^ (a << (n & 63)) ^ (b >> (n & 63)) ^ a.rotate_left(13) ^ a / 7 ^ u64::from_be_bytes(*p) ^ t;
+}
+
 fn main() i32 {
     let mut v = Vector::<P>::new();
     for i in 0..20i64 {
@@ -519,7 +537,9 @@ fn main() i32 {
     let f = floats(2.0, 3.5);
     let l = lanes(simd::Simd::<i32, 4>::splat(2), simd::Simd::<i32, 4>::splat(3));
     let (o, ov) = 100i64.overflowing_add(s);
-    println("{} {} {} {} {} {} {}", m.len(), s, (w >> 64) as u64, f, l, o, ov);
+    let bp: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    let bt = bits(w as u64, s as u64, 7, &bp);
+    println("{} {} {} {} {} {} {} {}", m.len(), s, (w >> 64) as u64, f, l, o, ov, bt);
     return 0;
 }
 )";
@@ -611,6 +631,19 @@ const fn x64_mem(j: u32) x::Mem {
 const X64_MEMS: u32 = 7;
 
 // VSIB operand `j` of the samples (a vector index), false past the last.
+// Memory sample `j` with an index register (AMX's base and stride, `xt::K::MS`); false past the last.
+const fn x64_sib(j: u32, m: &mut x::Mem) bool {
+    *m = (switch j {
+        0 => x::ix(x::RSI, x::RDX, 0, 0),
+        1 => x::ix(x::R12, x::R9, 0, 16),
+        2 => x::ix(x::RBP, x::R13, 0, -0x200),
+        _ => {
+            return false;
+        },
+    });
+    return true;
+}
+
 const fn x64_vsib(j: u32, m: &mut x::Mem) bool {
     *m = (switch j {
         0 => x::ix(x::RAX, 5, 2, 0),
@@ -645,6 +678,10 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
             n.mem_at = i as u8;
             if xt::is_vsib(k) {
                 if !x64_vsib(var - 1, &mut n.m) {
+                    return false;
+                }
+            } else if k == xt::K::MS {
+                if !x64_sib(var - 1, &mut n.m) {
                     return false;
                 }
             } else {
@@ -685,11 +722,21 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
                     },
                 );
             },
-            xt::K::XV | xt::K::YV | xt::K::ZV => {
+            xt::K::XV | xt::K::YV | xt::K::ZV | xt::K::RV => {
                 n.set_reg(i, 5);
             },
             xt::K::XI4 | xt::K::YI4 => {
                 n.set_reg(i, 6);
+            },
+            xt::K::T | xt::K::TR | xt::K::TV => {
+                n.set_reg(
+                    i,
+                    if alt {
+                        7u8
+                    } else {
+                        i as u8 + 1
+                    },
+                );
             },
             xt::K::KR | xt::K::KRM | xt::K::KV => {
                 n.set_reg(
@@ -914,14 +961,14 @@ fn x64_oracle(text: &String, bytes: &Vector<u8>, ends: &Vector<u32>) {
     assert_eq(at, got.len());
 }
 
-// The code the x86-64 generator emits for `CORPUS` and std on `os`: every instruction decodes to a
-// table row, and its disassembly assembles back to it.
-fn x64_generated(os: str) {
+// The code the x86-64 generator emits for `CORPUS` and std on `os` with build flags `flags`: every
+// instruction decodes to a table row, and its disassembly assembles back to it.
+fn x64_generated(os: str, flags: str) {
     let p = cli::proj_new();
     p.mkfile("main.spc", CORPUS);
     // The link needs the target's C library; the objects come first. The header facts need its headers: a
     // runner without them has no objects to check.
-    let r = p.run_raw(format("build --target={} --arch=x86_64 \"{}/main.spc\"", os, p.dir()).as_str());
+    let r = p.run_raw(format("build --target={} --arch=x86_64{} \"{}/main.spc\"", os, flags, p.dir()).as_str());
     if r.out_has("no sysroot found") {
         return;
     }
@@ -1179,8 +1226,10 @@ fn x64_generated_code_round_trips() {
     if cli::on_wasm() {
         return;
     }
-    x64_generated("linux");
-    x64_generated("windows");
+    x64_generated("linux", "");
+    x64_generated("windows", "");
+    // x86-64-v3: BMI1, BMI2, MOVBE, AVX2 and FMA forms.
+    x64_generated("linux", " --target-cpu=x86-64-v3");
 }
 
 // `relax` drops a jump nothing reaches (`dead`), and then the jump before it, whose target follows it; the
@@ -1305,7 +1354,8 @@ fn x64_sse_operations_take_vex_forms() {
         let k1 = xt::kind_at(r.ops, 1);
         let k2 = xt::kind_at(r.ops, 2);
         let x0 = k0 == xt::K::X || k0 == xt::K::XM || k0 == xt::K::XR;
-        if r.vx != 0 || !x0 && k1 != xt::K::X && k1 != xt::K::XM && k1 != xt::K::XR {
+        // SHA's operations have no VEX form (`x::sse_op`).
+        if r.vx != 0 || !x0 && k1 != xt::K::X && k1 != xt::K::XM && k1 != xt::K::XR || r.mn.starts_with("sha") {
             continue;
         }
         // The operand in ModRM.rm.
@@ -2301,8 +2351,8 @@ fn x64_intrinsics_match_the_c_compiler() {
             text.push_str(line);
             text.push_str("\n");
             ends.push(bytes.len() as u32);
-            // In a body compiled for AVX a legacy SSE statement takes its VEX form.
-            if line.starts_with("v") || line.find("%xmm") < 0 {
+            // In a body compiled for AVX a legacy SSE statement takes its VEX form, but SHA's, which have none.
+            if line.starts_with("v") || line.find("%xmm") < 0 || line.starts_with("sha") {
                 continue;
             }
             let v0 = vbytes.len();
@@ -2326,6 +2376,48 @@ fn x64_intrinsics_match_the_c_compiler() {
     x64_oracle(&text, &bytes, &ends);
     assert(vends.len() > 100, "the legacy SSE statements");
     x64_oracle(&vtext, &vbytes, &vends);
+}
+
+// An intrinsic that computes from its arguments alone is pure; one that touches the tile registers or
+// their configuration (AMX) is not, so the optimizer neither removes nor reorders it (`intrin::pure`).
+@test
+fn tile_intrinsics_are_not_pure() {
+    assert(intrin::pure("x86_64", "_mm_add_epi32"), "_mm_add_epi32");
+    let tiles: []str = [
+        "_tile_loadconfig",
+        "_tile_storeconfig",
+        "_tile_release",
+        "_tile_loadd",
+        "_tile_stored",
+        "_tile_zero",
+        "_tile_dpbssd",
+        "_tile_dpbsud",
+        "_tile_dpbusd",
+        "_tile_dpbuud",
+    ];
+    for i in 0..tiles.len() {
+        assert(intrin::has("x86_64", tiles[i]) && !intrin::pure("x86_64", tiles[i]), tiles[i]);
+    }
+}
+
+// The general registers a template reads only as addresses, and their renaming, all at once
+// (`intrin::gp_addresses`, `grename`): a register outside a memory operand, a 32-bit address, or an
+// instruction that touches a register it does not name leaves the template as it is (all bits).
+@test
+fn templates_read_their_addresses_from_any_registers() {
+    assert_eq(intrin::gp_addresses("tileloadd (%rsi,%rdx), %tmm4"), 1u64 << 6 | 1u64 << 2);
+    assert_eq(intrin::gp_addresses("vmaskmovps %xmm1, %xmm0, (%rdi) {%k1}"), 1u64 << 7);
+    assert_eq(intrin::gp_addresses("vpaddd %xmm1, %xmm0, %xmm0"), 0);
+    assert_eq(intrin::gp_addresses("movq %rdi, %xmm0"), ~0u64);
+    assert_eq(intrin::gp_addresses("movl (%edi), %eax"), ~0u64);
+    assert_eq(intrin::gp_addresses("mulq (%rdi)"), ~0u64);
+    assert_eq(intrin::gp_addresses("ldtilecfg (%rdi)\nrdtscp"), ~0u64);
+    assert_eq(intrin::gp_addresses("mulps (%rsi), %xmm0"), 1u64 << 6);
+    let from: [u8; 2] = [6, 2];
+    let to: [u8; 2] = [2, 12];
+    let mut out = String::new();
+    intrin::grename("tileloadd (%rsi,%rdx), %tmm4", from[0..2], to[0..2], &mut out);
+    assert_eq(out.as_str(), "tileloadd (%rdx,%r12), %tmm4");
 }
 
 // A row's constant arguments by index, of one digit or more, and their multiples (`intrin::expand`).

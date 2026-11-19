@@ -887,6 +887,64 @@ pub unsafe const fn store_aligned<T: SimdElement, const N: usize, const A: usize
     store_unaligned::<T, N>(p, v);
 }
 
+/// The `cols` bytes of each of `rows` rows (one to four, `stride` bytes apart from `src`) by column into
+/// the `cols` words at `dst`: word `j` holds byte `j` of row `r` in bits `8 * r` to `8 * r + 7`, zero for
+/// the rows past `rows`. The operand layout of the four-byte dot products (x86 VPDPBUSD and AMX TDPBSSD,
+/// Arm SDOT and SME SMOPA). Sixteen columns a step, the last one overlapping the step before; under 16
+/// columns, one at a time. The caller guarantees the rows' bytes and the words.
+pub unsafe const fn interleave_rows4(dst: *mut u32, src: *const u8, stride: usize, rows: usize, cols: usize) {
+    if cols < 16 {
+        for j in 0..cols {
+            let mut w = src[j] as u32;
+            for r in 1..rows {
+                w |= src[r * stride + j] as u32 << (8 * r) as u32;
+            }
+            dst[j] = w;
+        }
+        return;
+    }
+    // The rows past `rows` read as zero vectors (`z`): their pointers are never read.
+    let z = Simd::<u8, 16>::splat(0);
+    let r = [src, src + stride, src + 2 * stride, src + 3 * stride];
+    let full = cols & ~15usize;
+    let mut j: usize = 0;
+    while j < full {
+        interleave_rows4_16(dst + j, r, j, rows, z);
+        j += 16;
+    }
+    if full < cols {
+        interleave_rows4_16(dst + cols - 16, r, cols - 16, rows, z);
+    }
+}
+
+// `interleave_rows4` of the 16 columns from `at` of rows `r`, `z` for the rows past `rows`.
+unsafe const fn interleave_rows4_16(dst: *mut u32, r: [*const u8; 4], at: usize, rows: usize, z: Simd<u8, 16>) {
+    let x0 = load_unaligned::<u8, 16>(r[0] + at);
+    let x1 = if rows > 1 {
+        load_unaligned::<u8, 16>(r[1] + at)
+    } else {
+        z
+    };
+    let x2 = if rows > 2 {
+        load_unaligned::<u8, 16>(r[2] + at)
+    } else {
+        z
+    };
+    let x3 = if rows > 3 {
+        load_unaligned::<u8, 16>(r[3] + at)
+    } else {
+        z
+    };
+    let lo01 = interleave_low(x0, x1).bitcast::<u16, 8>();
+    let hi01 = interleave_high(x0, x1).bitcast::<u16, 8>();
+    let lo23 = interleave_low(x2, x3).bitcast::<u16, 8>();
+    let hi23 = interleave_high(x2, x3).bitcast::<u16, 8>();
+    store_unaligned(dst, interleave_low(lo01, lo23).bitcast::<u32, 4>());
+    store_unaligned(dst + 4, interleave_high(lo01, lo23).bitcast::<u32, 4>());
+    store_unaligned(dst + 8, interleave_low(hi01, hi23).bitcast::<u32, 4>());
+    store_unaligned(dst + 12, interleave_high(hi01, hi23).bitcast::<u32, 4>());
+}
+
 // Rearrangement (the language skill's references/simd.md). An index list is a `[usize; M]` constant
 // expression; `M` is the result's lane count, and `Simd<T, M>` must be a valid vector.
 

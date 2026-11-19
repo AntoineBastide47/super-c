@@ -113,6 +113,22 @@ pub enum Feature {
     SmeF64f64,
     /// The acquire load that waits for no earlier release store, `ldapr` (aarch64; `rcpc`).
     Rcpc,
+    /// Trailing zeros, set bits, absolute value, minimum and maximum of general registers in one
+    /// instruction each (aarch64; `cssc`).
+    Cssc,
+    /// The SHA-1 and SHA-256 rounds and message schedules, SHA-NI (x86_64; `sha`).
+    Sha,
+    /// The SHA-512 rounds and message schedules (aarch64; `sha512`; implies `sha2`).
+    Sha512,
+    /// The 64-bit carry-less product into 128 bits, `pmull` (aarch64; `pmull`; implies `aes`).
+    Pmull,
+    /// The SHA-512 rounds and message schedules, VSHA512RNDS2, VSHA512MSG1 and VSHA512MSG2 (x86_64;
+    /// `sha512`; implies `avx2`).
+    Sha512ni,
+    /// The eight AMX tile registers, their configuration, loads and stores (x86_64; `amx-tile`).
+    AmxTile,
+    /// The AMX byte dot products of tiles into 32-bit sums (x86_64; `amx-int8`; implies `amx-tile`).
+    AmxInt8,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).
