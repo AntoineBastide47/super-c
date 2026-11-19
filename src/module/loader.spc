@@ -127,6 +127,11 @@ pub(package) struct ItemSched {
     /// carries its extend's. `body_hi` is a function's body block id (untagged), else 0.
     pub(package) top_lo: Vector<u32>,
     pub(package) body_hi: Vector<u32>,
+    /// `body_hi` over the pinned bodies past the declarations (`Ast.decl_end`): a function's body id.
+    pub(package) pin_hi: Vector<u32>,
+    /// Per item, the nodes of its pinned bodies past the declarations (an interface's: its members'
+    /// defaults), which its own module-arena range (`top_lo`) does not hold.
+    pub(package) pin_n: Vector<u32>,
     /// The member names of the builtin extends outside the prelude (`graph::items::builtin_edges`):
     /// the name's 32-bit hash << 32 | the extend item, sorted; `bmask` a bit per first byte and
     /// length class of those names, the prefilter of the scan.
@@ -151,7 +156,7 @@ pub(package) struct ItemSched {
 extend ItemSched {
     /// Approximate owned bytes.
     pub(package) const fn retained(self: &Self) usize {
-        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.get_ref().len() * 16;
+        return (self.key.capacity() + self.sig_hash.capacity()) * 8 + (self.pre_off.capacity() + self.pre_edges.capacity() + self.fin_off.capacity() + self.fin_edges.capacity() + self.comp.capacity() + self.by_node.capacity() + self.top_lo.capacity() + self.body_hi.capacity() + self.pin_hi.capacity() + self.pin_n.capacity() + self.bnames.capacity() * 2 + self.cdep_off.capacity() + self.cdep.capacity() + self.citem_off.capacity() + self.citem.capacity()) * 4 + self.state.capacity() + self.ret_attr.capacity() + self.dyn_edges.get_ref().len() * 16;
     }
 }
 
@@ -328,9 +333,11 @@ pub(package) struct Package {
     /// The emission's capture summary (`ir::capture::CaptureStore`): which `&mut` parameters a call may let
     /// outlive it, set for the emission's lifetime by `cemit_package`; null outside it.
     pub(package) cap_store: *const void,
-    /// The functions with a body in the body arena that an evaluation whose result reaches the code ran
-    /// (the type check's and the emission's constants: `ir::interp::Interp.reads`), as `module << 32 |
-    /// node`, each once: the per-TU cache and the proof record keep them with their text.
+    /// The functions with a body in the body arena or past the declarations that an evaluation whose
+    /// result reaches the code ran (the type check's and the emission's constants:
+    /// `ir::interp::Interp.reads`), as `site << 48 | module << 32 | node`, each once per site: the module
+    /// whose code or declarations the value reaches (`Interp::read_site`), `CE_SITE_NONE` when unknown.
+    /// The per-TU cache and the proof record keep them with their text, by site.
     pub(package) ce_reads: UnsafeCell<Vector<u64>>,
     /// The hash of the bounds checks the prover proved in each kept body, by its function's `module << 32
     /// | node` (`prove_cached`): they shape the function's code and its inlined copies'.
@@ -366,8 +373,8 @@ pub(package) struct Package {
     /// The C header files those facts were read from (`extern_ints`, `extern_objs`, `c_fns`, `opaque_cls`): inputs of the
     /// emission.
     pub(package) header_files: Vector<String>,
-    /// Per module, the offsets where its source's lines start, for the locations of LIR
-    /// (`driver::emit::lir_lines`); empty in a build that lowers no LIR.
+    /// Per module, the offsets where its source's lines start, for the locations of LIR and the per-TU
+    /// cache's keys (`driver::emit::lir_lines`); filled before the emission.
     pub(package) lines: Vector<Vector<u32>>,
     /// Whether the build writes native objects for its modules (a build whose link takes objects); set by
     /// `driver::emit::run_package`.
@@ -608,6 +615,9 @@ pub(package) struct LookupHit {
 /// Dense index into PkgIndex.items; assigned in module order then source order, never from hash order.
 pub(package) type ItemId = u32;
 pub(package) const ITEM_NONE: ItemId = 0xFFFFFFFF;
+/// The site of an evaluator read (`Package.ce_reads`) whose module is not known: a change of it misses
+/// every module.
+pub(package) const CE_SITE_NONE: u32 = 0xFFFF;
 
 /// Dense insertion-order id into the package symbol interner.
 pub(package) type SymbolId = u32;

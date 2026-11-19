@@ -438,14 +438,18 @@ pub(package) fn open(p: &mut loader::Package) {
     }
     // Own ranges: a top-level item's module-arena nodes are (previous top-level node, its node];
     // a member shares its extend's. `body_hi` runs over the by_node positions as the largest
-    // body block id so far (bodies follow source order), for the body-arena owner search.
+    // body block id so far (bodies follow source order), for the body-arena owner search;
+    // `pin_hi` the same over the pinned bodies past the declarations (`Ast.decl_end`).
     sch.top_lo.resize_default(n);
     sch.body_hi.resize_default(n);
+    sch.pin_hi.resize_default(n);
+    sch.pin_n.resize_default(n);
     for m in 0..nm {
         let i0 = p.idx().mod_items[m] as usize;
         let i1 = p.idx().mod_items[m + 1] as usize;
         let mut prev: u32 = 0;
         let mut bmax: u32 = 0;
+        let mut pmax: u32 = 0;
         for k in i0..i1 {
             let it = sch.by_node[k] as usize;
             let meta = *p.idx().items.at(it);
@@ -460,15 +464,38 @@ pub(package) fn open(p: &mut loader::Package) {
                 prev = meta.node;
             }
             if p.modules.at(m).has_ast {
-                let nd = p.modules.at(m).ast.get_ref().at_const(meta.node);
-                if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
-                    p.modules.at(m).ast.get_ref().ext(meta.node).function.body,
-                ) {
-                    let b = p.modules.at(m).ast.get_ref().ext(meta.node).function.body & NODE_BODY_MASK;
-                    bmax = bmax.max(b);
+                let a = p.modules.at(m).ast.get_ref();
+                let kind = a.at_const(meta.node).kind;
+                if kind == NodeKind::NODE_FUNCTION {
+                    let b = a.ext(meta.node).function.body;
+                    if Ast::in_body(b) {
+                        bmax = bmax.max(b & NODE_BODY_MASK);
+                    }
+                    pmax = pmax.max(pinned_body(a, meta.node));
+                } else if kind == NodeKind::NODE_INTERFACE {
+                    // An interface's members are no items: their default bodies are the interface's.
+                    let ms = a.ext(meta.node).interface_def.items;
+                    for j in 0..ms.len {
+                        pmax = pmax.max(pinned_body(a, unsafe a.list(ms)[j as usize]));
+                    }
                 }
             }
             sch.body_hi.set(k, bmax);
+            // The run it raised `pin_hi` by: its pinned bodies' nodes, from the first past the declarations.
+            let before = if k > i0 {
+                sch.pin_hi[k - 1]
+            } else {
+                0
+            };
+            if pmax > before {
+                let lo = if before != 0 {
+                    before + 1
+                } else {
+                    p.modules.at(m).ast.get_ref().decl_end
+                };
+                sch.pin_n.set(it, pmax + 1 - lo);
+            }
+            sch.pin_hi.set(k, pmax);
         }
     }
     sch.state.resize_default(n);
@@ -797,45 +824,77 @@ pub(package) fn visible(p: &loader::Package, reader: loader::ItemId, target: loa
     return r.has(p, ct as usize);
 }
 
+/// The `by_node` position of the function whose body holds node `node` of module `m`, a body-arena
+/// node or a pinned body's past the declarations (`Ast::past_decls`, an interface owns its members'
+/// defaults); `mod_items[m + 1]` past every body (a node a desugar appended). `body_hi` and `pin_hi` are the largest block ids so far: an
+/// item without such a body repeats the one before it, and the items before the first body repeat 0,
+/// so the owner is the first position at or past the search that owns one.
+pub(package) fn run_slot(p: &loader::Package, m: usize, node: NodeId) usize {
+    let a = p.modules.at(m).ast.get_ref();
+    let pinned = !Ast::in_body(node);
+    let his = if pinned {
+        &p.sched.pin_hi
+    } else {
+        &p.sched.body_hi
+    };
+    let b = node & NODE_BODY_MASK;
+    let mut lo = p.idx().mod_items[m] as usize;
+    let end = p.idx().mod_items[m + 1] as usize;
+    let mut hi = end;
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if his[mid] < b {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    while lo < end {
+        // A pinned body's id is past the declarations, never 0: the owner raises `pin_hi`.
+        let prev = if lo == p.idx().mod_items[m] as usize {
+            0
+        } else {
+            his[lo - 1]
+        };
+        if pinned && his[lo] > prev {
+            break;
+        }
+        let f = p.idx().items.at(p.sched.by_node[lo] as usize).node;
+        if !pinned && a.at_const(f).kind == NodeKind::NODE_FUNCTION && Ast::in_body(a.ext(f).function.body) {
+            break;
+        }
+        lo += 1;
+    }
+    return lo;
+}
+
+// The body of function `f` of tree `a` when it lies past the declarations (`Ast::past_decls`), else 0.
+fn pinned_body(a: &Ast, f: NodeId) u32 {
+    if a.at_const(f).kind != NodeKind::NODE_FUNCTION {
+        return 0;
+    }
+    let b = a.ext(f).function.body;
+    return pick(b != NODE_NONE && a.past_decls(b), b, 0);
+}
+
 /// The item whose own ranges hold node `node` of module `m`: an item node answers itself; a
 /// module-arena node the first item at or after it in node order (members precede their
-/// extend); a body-arena node the function whose body run holds it. ITEM_NONE past every
+/// extend); a body node the function whose body holds it (`run_slot`). ITEM_NONE past every
 /// range (an appended desugar node, an import path).
 pub(package) fn owner_of(p: &loader::Package, m: ModuleId, node: NodeId) loader::ItemId {
     if !p.sched.built || m as usize + 1 >= p.idx().mod_items.len() {
         return loader::ITEM_NONE;
     }
-    let mut lo = p.idx().mod_items[m as usize] as usize;
-    let mut hi = p.idx().mod_items[m as usize + 1] as usize;
-    if Ast::in_body(node) {
-        let b = node & NODE_BODY_MASK;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if p.sched.body_hi[mid] < b {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        // `body_hi` is the largest body block id so far: an item without a body repeats the
-        // one before it, and the items before the first body repeat 0, the first body's own
-        // block id when it is one node. The owner is the first position at or past the search
-        // that owns a body.
-        let a = p.modules.at(m as usize).ast.get_ref();
-        while lo < p.idx().mod_items[m as usize + 1] as usize {
-            let nd = a.at_const(p.idx().items.at(p.sched.by_node[lo] as usize).node);
-            if nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
-                a.ext(p.idx().items.at(p.sched.by_node[lo] as usize).node).function.body,
-            ) {
-                break;
-            }
-            lo += 1;
-        }
-        if lo >= p.idx().mod_items[m as usize + 1] as usize {
+    let a = p.modules.at(m as usize).ast.get_ref();
+    if Ast::in_body(node) || a.past_decls(node) {
+        let k = run_slot(p, m as usize, node);
+        if k >= p.idx().mod_items[m as usize + 1] as usize {
             return loader::ITEM_NONE;
         }
-        return p.sched.by_node[lo];
+        return p.sched.by_node[k];
     }
+    let mut lo = p.idx().mod_items[m as usize] as usize;
+    let mut hi = p.idx().mod_items[m as usize + 1] as usize;
     while lo < hi {
         let mid = (lo + hi) / 2;
         if p.idx().items.at(p.sched.by_node[mid] as usize).node < node {

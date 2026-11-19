@@ -1105,10 +1105,14 @@ pub(package) struct Interp {
     /// The master engine records dynamic item edges into the package index (`note_dyn_edge`);
     /// a per-task engine leaves it off.
     pub(package) dyn_rec: bool,
-    /// The list each function with a body in the body arena whose body this engine runs goes to, once
-    /// (`note_read`; `Package.ce_reads`): an engine whose results reach the code; null for the others (the
-    /// always-panics probes, whose results are errors).
+    /// The list each function with a body in the body arena or past the declarations whose body this
+    /// engine runs goes to, once per site (`note_read`; `Package.ce_reads`, `read_site`): an engine whose
+    /// results reach the code; null for the others (the always-panics probes, whose results are errors).
     pub(package) reads: *mut Vector<u64>,
+    // The module of the evaluation running (`eval_reset`): the site of a read outside a memoized value.
+    entry_site: u32,
+    // The module of each memoized value computing (`rd_enter`), innermost last.
+    rd_sites: Vector<u32>,
     reads_seen: Set<u64>,
     reads_last: u64, // the last key `note_read` saw: a loop's calls of one function look it up once
     reads_ba: Map<u64, bool>, // per function key, whether its body lives in the body arena
@@ -1281,6 +1285,8 @@ pub(package) fn interp_new(pkg: *const loader::Package) Interp {
         reads_ba: Map::<u64, bool>::new(),
         rd_log: Vector::<u64>::new(),
         rd_cap: 0,
+        entry_site: loader::CE_SITE_NONE,
+        rd_sites: Vector::<u32>::new(),
         rdeps: Map::<u64, Vector<u64>>::new(),
         err_refused: false,
         ticks: 0,
@@ -1386,6 +1392,15 @@ const fn ti_tuple_name<'a>(buf: *mut u8, k: u32) str<'a> {
     return unsafe str::from_raw(buf, n);
 }
 
+// Whether node `n` of module `m` is a closure in a pinned body past the declarations (`Ast::past_decls`).
+fn closure_past_decls(p: &loader::Package, m: ModuleId, n: NodeId) bool {
+    if (n & NODE_BODY) != 0 || m as usize >= p.modules.len() || !p.modules.at(m as usize).has_ast {
+        return false;
+    }
+    let a = unsafe &*p.module_ast_const(m);
+    return a.past_decls(n) && a.valid(n) && a.at_const(n).kind != NodeKind::NODE_FUNCTION;
+}
+
 extend Interp {
     /// Evaluate `cnode` through a REUSED interpreter: the per-evaluation state resets while the
     /// lowered-callee cache and the referenced-constant memos persist -- one interpreter serves a
@@ -1410,6 +1425,9 @@ extend Interp {
     /// while it totals at most IT_RETAIN_SLOTS. A build's budget applies to the program's evaluations;
     /// std's have the default: the build's bound the program's constants, not std's.
     fn eval_reset(self: &mut Self, m: ModuleId) {
+        // Each caller starts an evaluation of its own, outside any other (`ev_depth`, `in_run`).
+        self.entry_site = m;
+        self.reads_last = u64::MAX;
         if self.build_steps != 0 || self.build_mem != 0 {
             let in_std = self.p().in_std(m as usize);
             if self.build_steps != 0 {
@@ -3345,13 +3363,14 @@ extend Interp {
     }
 
     // `note_dyn_edge` to the item of function `fnode` of module `m`: itself or its extend or interface.
-    // Function `(m, fnode)`'s body runs: into `reads` when it lives in the body arena (another module reads
-    // it through a call alone, `driver::tuc::Shapes`); a closure counts as its whole module (NODE_NONE).
+    // Function `(m, fnode)`'s body runs: into `reads` when it lives in the body arena or past the
+    // declarations (another module reads it through a call alone, `driver::tuc::Shapes`); a closure there
+    // counts as its whole module (NODE_NONE).
     fn note_read(self: &mut Self, m: ModuleId, fnode: NodeId) {
         if self.reads == null && self.rd_cap == 0 {
             return;
         }
-        let key = m as u64 << 32 | if (fnode & NODE_BODY) != 0 {
+        let key = m as u64 << 32 | if (fnode & NODE_BODY) != 0 || closure_past_decls(self.p(), m, fnode) {
             NODE_NONE
         } else {
             fnode
@@ -3366,9 +3385,11 @@ extend Interp {
                 let mut b = true;
                 if (fnode & NODE_BODY) == 0 {
                     let a = unsafe &*self.p().module_ast_const(m);
-                    b = a.valid(fnode) && a.at_const(fnode).kind == NodeKind::NODE_FUNCTION && a.ext(fnode).function.body != NODE_NONE && Ast::in_body(
+                    b = key as NodeId == NODE_NONE || a.valid(fnode) && a.at_const(fnode).kind == NodeKind::NODE_FUNCTION && a.ext(
+                        fnode,
+                    ).function.body != NODE_NONE && (Ast::in_body(a.ext(fnode).function.body) || a.past_decls(
                         a.ext(fnode).function.body,
-                    );
+                    ));
                 }
                 self.reads_ba.insert(key, b);
                 b
@@ -3379,18 +3400,37 @@ extend Interp {
         }
     }
 
-    // Function `key` (`note_read`) into the capture of the values computing and into `reads`, once.
+    // Function `key` (`note_read`) into the capture of the values computing and into `reads` under the
+    // site the value counts for (`read_site`), once per site.
     fn note_key(self: &mut Self, key: u64) {
         if self.rd_cap != 0 {
             self.rd_log.push(key);
         }
-        if self.reads != null && !self.reads_seen.contains(&key) {
-            self.reads_seen.insert(key);
-            unsafe (*self.reads).push(key);
+        let e = self.read_site() as u64 << 48 | key;
+        if self.reads != null && !self.reads_seen.contains(&e) {
+            self.reads_seen.insert(e);
+            unsafe (*self.reads).push(e);
         }
     }
 
+    // The module whose code or declarations the value being computed reaches: the innermost memoized
+    // value's (a constant's, a folded expression's), else the running evaluation's (`eval_reset`), else
+    // the item under check's.
+    const fn read_site(self: &Self) u32 {
+        if self.rd_sites.len() != 0 {
+            return self.rd_sites[self.rd_sites.len() - 1];
+        }
+        if self.entry_site != loader::CE_SITE_NONE {
+            return self.entry_site;
+        }
+        if self.cur_item != loader::ITEM_NONE && self.cur_item as usize < self.p().idx().items.len() {
+            return self.p().idx().items.at(self.cur_item as usize).module;
+        }
+        return loader::CE_SITE_NONE;
+    }
+
     // The functions memo `key`'s value read when it computed (`rdeps`), read again: a hit of the memo.
+    // They count for the memo's module, the value's own site, whoever reads it (`read_site`).
     fn note_deps(self: &mut Self, key: u64) {
         if self.reads == null && self.rd_cap == 0 {
             return;
@@ -3401,14 +3441,18 @@ extend Interp {
                 return;
             },
         };
+        self.rd_sites.push((key >> 32) as u32);
         for i in 0..ds.len() {
             self.note_key(ds[i]);
         }
+        let _ = self.rd_sites.pop();
     }
 
-    // A memoized value starts computing: the capture's mark (`rd_leave`).
-    const fn rd_enter(self: &mut Self) usize {
+    // Memoized value `key` (`module << 32 | node`) starts computing: the capture's mark (`rd_leave`); its
+    // module is the site of its reads.
+    fn rd_enter(self: &mut Self, key: u64) usize {
         self.rd_cap += 1;
+        self.rd_sites.push((key >> 32) as u32);
         self.reads_last = u64::MAX;
         return self.rd_log.len();
     }
@@ -3425,6 +3469,7 @@ extend Interp {
             self.rdeps.insert(key, ds);
         }
         self.rd_cap -= 1;
+        let _ = self.rd_sites.pop();
         self.reads_last = u64::MAX;
         if self.rd_cap == 0 {
             self.rd_log.truncate(0);
@@ -3460,6 +3505,8 @@ extend Interp {
     /// check and its dependency components. ITEM_NONE sees everything.
     pub(package) const fn set_reader(self: &mut Self, item: loader::ItemId, r: *mut gitems::Reach) {
         self.cur_item = item;
+        // Another item: another site (`read_site`).
+        self.reads_last = u64::MAX;
         self.reach = r;
         self.lsvc.ev = self;
     }
@@ -5273,7 +5320,7 @@ extend Interp {
 
     // The isolated evaluation of constant `(m, cnode)` (`item_value_in`), its functions captured.
     fn item_eval(self: &mut Self, m: ModuleId, cnode: NodeId, key: u64, spec: bool) IVal {
-        let mk = self.rd_enter();
+        let mk = self.rd_enter(key);
         let r = self.item_eval_run(m, cnode, key, spec);
         self.rd_leave(key, mk);
         return r;
@@ -11470,7 +11517,7 @@ extend Interp {
 
     // `eval_g` past its memo: the fold itself, isolated unless `top`, its functions captured.
     fn eval_g_run(self: &mut Self, m: ModuleId, id: NodeId, key: u64, top: bool) IVal {
-        let mk = self.rd_enter();
+        let mk = self.rd_enter(key);
         let v = self.eval_g_fold(m, id, key, top);
         self.rd_leave(key, mk);
         return v;
@@ -12063,7 +12110,7 @@ extend Interp {
         self.eval_reset(m);
         self.ememo.insert(key, IVal { kind: EV_EVALUATING, tm: 0, ty: TYPE_NONE, i: 0, f: 0.0 });
         self.ev_depth += 1;
-        let mk = self.rd_enter();
+        let mk = self.rd_enter(key);
         let mut v = self.run_root(m, id);
         self.rd_leave(key, mk);
         self.ev_depth -= 1;

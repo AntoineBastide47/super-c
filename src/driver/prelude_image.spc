@@ -23,7 +23,7 @@ import driver::util as *;
 import utils::persist as *;
 
 /// The image format; a change to any saved type's layout bumps it.
-const IMAGE_VER: u64 = 7;
+const IMAGE_VER: u64 = 8;
 
 /// How long before the load a std file's modification time must lie for that time to vouch for its
 /// content: a file system with a coarse clock (two seconds on FAT) gives an edit made just after the load
@@ -241,6 +241,9 @@ fn save_into(q: &loader::Package, e: &iri::Interp, w: &mut Writer) {
     q.idx().save(w);
     q.lint_warnings.save(w);
     q.carry.save(w);
+    // The prelude check's evaluations, by site (`Package.ce_reads`): a build that loads the image keys its
+    // modules on them as the build that checked the prelude does.
+    (unsafe &*q.ce_reads.get()).save(w);
     e.pending.save(w);
     e.pending_consts.save(w);
     e.pending_strict.save(w);
@@ -271,6 +274,7 @@ pub(package) fn load(p: &mut loader::Package, e: &mut iri::Interp, img: str) boo
     p.idx_mut().load(&mut r);
     p.lint_warnings.load(&mut r);
     p.carry.load(&mut r);
+    (unsafe &mut *p.ce_reads.get()).load(&mut r);
     e.pending.load(&mut r);
     e.pending_consts.load(&mut r);
     e.pending_strict.load(&mut r);

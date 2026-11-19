@@ -105,9 +105,10 @@ read of a reference (`nat_sym_ref`: spelling, kind, linkage, C-library and kept 
 a function has a definition only where its spelling may name a C function), a named data symbol's
 definition, files and messages by spelling (`lines[0]`, "no location", aside: no row names it), and on
 wasm the package's files and each named function's signature body (no key when a function has none:
-the generator then reads any call of it). The record `__sc_native_keys` holds each object's key with its
-file's identity (`nat_file_id`: device, inode, size, modification time): an object another writer
-replaced is compiled again. A build removes the record before it writes objects and writes it after.
+the generator then reads any call of it). The record `__sc_native_keys` holds each object's key with the
+hash of its bytes (`nat_bytes_hash`), by path below the tree: a reused object is read and its bytes
+checked against the hash (they then go to the link from memory), so an object another writer replaced is
+compiled again. A build removes the record before it writes objects and writes it after.
 `SC_NATIVE_STATS` reports the reused count. A record field the generators read that the key does not
 hash is a stale object: the `static_assert`s on the record sizes beside `nat_piece_key` fail when a
 record gains a field.

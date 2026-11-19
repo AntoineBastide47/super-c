@@ -1756,12 +1756,21 @@ extend<const B: usize> Prover<B> {
         return false;
     }
 
-    // The current job read function `d`'s body (`rd`); a closure's counts as its whole module's (NODE_NONE).
+    // The current job read function `d`'s body (`rd`); a closure's counts as its whole module's (NODE_NONE),
+    // in the body arena or in a pinned body past the declarations.
     fn note_read(self: &Self, d: DefId) {
         if !self.rd_on {
             return;
         }
-        let node = pick((d.node & NODE_BODY) != 0, NODE_NONE, d.node);
+        let mut node = d.node;
+        if (d.node & NODE_BODY) != 0 {
+            node = NODE_NONE;
+        } else if d.module as usize < self.pkg().modules.len() && self.pkg().modules.at(d.module as usize).has_ast {
+            let a = self.ast_of(d.module);
+            if a.past_decls(d.node) && a.valid(d.node) && a.at_const(d.node).kind != NodeKind::NODE_FUNCTION {
+                node = NODE_NONE;
+            }
+        }
         unsafe (*self.rd.get()).push(d.module as u64 << 32 | node as u64);
     }
 

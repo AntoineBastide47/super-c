@@ -28,6 +28,5 @@ CONTRACT_READABLE_FORBIDDEN='^#line '
 CONTRACT_READABLE_SHARED="super_rt.h __sc_fwd.h __sc_registry.c __sc_manifest __ldflags"
 
 # ---- accepted nondeterminism ---------------------------------------------------------------------------
-# Excluded from every byte comparison of emitted trees: the per-TU cache image and the native objects' key
-# record (each object's file identity: device, inode, modification time), caches rather than output.
-CONTRACT_NONDET_FILES=".tu_cache __sc_native_keys"
+# Excluded from every byte comparison of emitted trees: the per-TU cache image, a cache rather than output.
+CONTRACT_NONDET_FILES=".tu_cache"

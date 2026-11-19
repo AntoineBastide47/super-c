@@ -10,9 +10,9 @@
 // a module), the ordered module path list (short-prefix collisions and ModuleId order rename symbols
 // in UNRELATED TUs), the package extend surface (method_by_name scans every module), the prelude-live
 // bit, and the compiler binary itself. A section lists the functions its bodies call with what it read
-// of each (`dep_hash`), which must still hold for it to replay. The image also lists the functions whose
-// bodies the evaluations run (`Package.ce_reads`, `body_hash`): a constant's value may come from any of
-// them, so one that changed misses every module. Shared headers, the instance TU, layout
+// of each (`dep_hash`), which must still hold for it to replay. A module's key also holds the functions
+// the type check's evaluations ran for the modules of its closure (`ce_sites`: a constant's value may come
+// from any of them), and the ones whose module is not known for every module. Shared headers, the instance TU, layout
 // asserts and TU liveness are recomputed every build, so a replayed module's bytes land in a fully
 // fresh assembly.
 import ast::ast as *;
@@ -29,9 +29,10 @@ import stdlib;
 import build_system::ext as ext;
 import lir::ct as lct;
 import lexer::lexer as lex;
+import graph::instances as ig;
 
 const TUC_MAGIC: u32 = 0x53435455; // "UTCS" little-endian spells SCTU on disk
-const TUC_VER: u32 = 17;
+const TUC_VER: u32 = 18;
 
 const fn fnv_mix(h: u64, v: u64) u64 {
     let mut x = h;
@@ -242,13 +243,11 @@ const fn rows_hash(p: &loader::Package, m: usize) u64 {
 /// What the other modules' emission reads of each module, computed while the body syntax is live
 /// (`shapes`). A body that is not generic, not a `const fn`, not an interface member and not a member of
 /// a generic `extend` lives in the body arena (`Ast.b`): its text and nodes reach another module only
-/// through a call of it, which the calling module's section lists (`dep_hash`). The rest is the module's
+/// through a call of it, which the calling module's section lists (`dep_hash`), and in a build whose LIR
+/// optimizer runs through what the module's functions reach (`reach_mix`). The rest is the module's
 /// shape: its source outside those bodies' blocks and the kinds of its module-arena nodes, whose ids the
 /// sections and the type tables name.
 pub(package) struct Shapes {
-    /// The other modules of a key's closure count by their shapes (`mh`); else by their sources, as a
-    /// build whose LIR optimizer runs needs: its inliner and its effect facts read every body.
-    pub(package) fine: bool,
     pub(package) mh: Vector<u64>,
     /// Per module: the kinds of its module-arena nodes, the hash of its text outside the blocks, and the
     /// hash of that text's tokens (`token_hash`), which the image keeps under it: the text of a module
@@ -256,11 +255,15 @@ pub(package) struct Shapes {
     pub(package) kh: Vector<u64>,
     pub(package) raw: Vector<u64>,
     pub(package) tok: Vector<u64>,
-    /// The functions with a body in the body arena, as `module << 32 | node` ascending, each one's block
-    /// span (`start << 32 | end`), and per module the first of its functions (`fo[m]..fo[m + 1]`).
+    /// The functions with a body in the body arena or past the declarations (`Ast::past_decls`), as
+    /// `module << 32 | node` ascending, each one's block span (`start << 32 | end`), and per module the
+    /// first of its functions (`fo[m]..fo[m + 1]`).
     pub(package) fns: Vector<u64>,
     pub(package) blk: Vector<u64>,
     pub(package) fo: Vector<u32>,
+    /// Per module, what the type check's evaluations ran for it, and the unknown site's last
+    /// (`ce_sites`); empty until `tuc_setup` fills it.
+    pub(package) ceh: Vector<u64>,
 }
 
 // Whether a build of `p` into `gen_root` may keep the cache. The evaluator check runs every test's body as
@@ -275,10 +278,9 @@ fn cacheable(p: &loader::Package, gen_root: str) bool {
 }
 
 /// The shapes of `p`'s modules (`Shapes`) for a cache in `gen_root`, none when the build keeps no cache
-/// there; `fine` when the build's LIR optimizer does not run. `shapes_finish` gives the hashes.
-pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
+/// there. `shapes_finish` gives the hashes.
+pub(package) fn shapes(p: &loader::Package, gen_root: str) Shapes {
     let mut s = Shapes {
-        fine: fine,
         mh: Vector::<u64>::new(),
         kh: Vector::<u64>::new(),
         raw: Vector::<u64>::new(),
@@ -286,6 +288,7 @@ pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
         fns: Vector::<u64>::new(),
         blk: Vector::<u64>::new(),
         fo: Vector::<u32>::new(),
+        ceh: Vector::<u64>::new(),
     };
     if !cacheable(p, gen_root) || stdlib::getenv("SC_NO_TU_CACHE") != null {
         return s;
@@ -300,7 +303,9 @@ pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
             continue;
         }
         let a = unsafe &*p.module_ast_const(m as ModuleId);
-        let nb = a.nodes.len();
+        // The declarations' nodes: the pinned bodies past them count by their callers (`dep_hash`,
+        // `reach_mix`).
+        let nb = pick(a.decl_end != 0, a.decl_end as usize, a.nodes.len());
         let mut h = fnv_mix(FNV_BASIS, nb as u64);
         for id in 0..nb {
             let nd = a.at_const(id as NodeId);
@@ -309,7 +314,7 @@ pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
                 continue;
             }
             let b = a.ext(id as NodeId).function.body;
-            if b != NODE_NONE && Ast::in_body(b) && a.valid(b) {
+            if b != NODE_NONE && (Ast::in_body(b) || a.past_decls(b)) && a.valid(b) {
                 let bs = a.at_const(b).span;
                 s.fns.push(m as u64 << 32 | id as u64);
                 s.blk.push(bs.start as u64 << 32 | bs.end as u64);
@@ -319,7 +324,7 @@ pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
     }
     s.fo.push(s.fns.len() as u32);
     for m in 0..n {
-        if fine && p.modules[m].has_ast {
+        if p.modules[m].has_ast {
             let mut rh = FNV_BASIS;
             outside(
                 &s,
@@ -340,7 +345,7 @@ pub(package) fn shapes(p: &loader::Package, gen_root: str, fine: bool) Shapes {
 /// token hash is the cache image's in `gen_root` when its text outside the blocks is the same. None (empty)
 /// when the build keeps no cache there.
 pub(package) fn shapes_early(p: &loader::Package, gen_root: str) Shapes {
-    let mut s = shapes(p, gen_root, true);
+    let mut s = shapes(p, gen_root);
     if s.kh.len() == 0 {
         return s;
     }
@@ -395,9 +400,6 @@ fn shapes_finish(p: &loader::Package, s: &mut Shapes, oraw: &Vector<u64>, otok: 
     let n = p.modules.len();
     s.mh.resize_default(n);
     s.tok.resize_default(n);
-    if !s.fine {
-        return;
-    }
     let mut sp = Vector::<u64>::new();
     let mut text = String::new();
     for m in 0..n {
@@ -456,18 +458,26 @@ pub(package) fn dep_hash(p: &loader::Package, s: &Shapes, d: DefId) u64 {
     let src = p.modules[d.module as usize].source.as_str();
     let mut h = fnv_mix(FNV_BASIS, d.module as u64 << 32 | d.node as u64);
     // The declaration's text outside its block: a callee's module may lie outside the caller's closure.
+    // A pinned body (generic, `const fn`, interface default) counts whole: no shape holds it.
     let mut bs: u64 = 0;
     let key = d.module as u64 << 32 | d.node as u64;
     if let Ok(i) = s.fns.binary_search(&key) {
-        bs = s.blk[i];
+        if Ast::in_body(a.ext(d.node).function.body) {
+            bs = s.blk[i];
+        }
     }
     let st = (bs >> 32) as usize;
     let en = (bs & 0xFFFFFFFF) as usize;
+    let ist = p.inl_store as *const inl::InlineStore;
+    let copied = ist != null && ((unsafe &*ist).keeps(d) || (unsafe &*ist).vec_body(d) != null);
+    if copied {
+        // An inlined copy spells its locations (a panic's, a check's): its line counts.
+        h = fnv_mix(h, line_at(p, d.module as usize, sp.start));
+    }
     if bs != 0 && sp.start as usize <= st && en <= sp.end as usize && sp.end as usize <= src.len() {
         h = fnv_mix(h, str_id(src.slice(sp.start as usize, st)));
         h = fnv_mix(h, str_id(src.slice(en, sp.end as usize)));
-        let ist = p.inl_store as *const inl::InlineStore;
-        if ist != null && ((unsafe &*ist).keeps(d) || (unsafe &*ist).vec_body(d) != null) {
+        if copied {
             h = fnv_mix(h, str_id(src.slice(st, en)));
         }
     } else if sp.end as usize <= src.len() {
@@ -476,6 +486,10 @@ pub(package) fn dep_hash(p: &loader::Package, s: &Shapes, d: DefId) u64 {
     let cs = p.cap_store as *const cap::CaptureStore;
     if cs != null {
         h = fnv_mix(h, (unsafe &*cs).summary(p, d));
+    }
+    // What the evaluations ran for its module: its body may hold their values.
+    if d.module as usize < s.ceh.len() {
+        h = fnv_mix(h, s.ceh[d.module as usize]);
     }
     // The bounds checks the prover proved in it: an inlined copy drops them too.
     if let Some(f) = p.prove_fd.get(&key) {
@@ -534,27 +548,23 @@ pub(package) const fn reach_fold(h0: u64, p: &loader::Package) u64 {
 }
 
 // Per-module fingerprint: the module's source and coroutine and cancellation rows, the shapes of the
-// other modules of its transitive import closure (prelude included; their sources and rows when the
-// shapes are not `fine`), the types of that closure that keep their declared order
-// (`Package::c_shaped`: a signature in a module outside the closure can mark one), the module's own
-// identity, and its prelude-live bit. Everything package-shaped lives in the header; what a module
-// reads of the bodies it calls, its section's dependencies (`dep_hash`). The closure is a bit set:
-// clearing and reading it in module order costs a word per 64 modules.
-fn keys_compute(p: &loader::Package, sh: &Shapes, live: *const bool, keys: &mut Vector<u64>) {
+// other modules of its transitive import closure (prelude included), the types of that closure that keep
+// their declared order (`Package::c_shaped`: a signature in a module outside the closure can mark one),
+// the module's own identity, and its prelude-live bit. Everything package-shaped lives in the header; what
+// a module reads of the bodies it calls, its section's dependencies (`dep_hash`). The closure is a bit
+// set: clearing and reading it in module order costs a word per 64 modules. Into `sk`, per module, the
+// shapes of its closure, its own included (`reach_mix`).
+fn keys_compute(p: &loader::Package, sh: &Shapes, live: *const bool, keys: &mut Vector<u64>, sk: &mut Vector<u64>) {
     let n = p.modules.len();
     let mut own = Vector::<u64>::new();
     let mut shp = Vector::<u64>::new();
     let mut pre = Vector::<u32>::new();
+    // A module counts with what the evaluations ran for it (`ce_sites`), its own and its closure's.
     for i in 0..n {
-        let o = fnv_mix(p.modules[i].src_id, rows_hash(p, i));
+        let c = sh.ceh[i];
+        let o = fnv_mix(fnv_mix(p.modules[i].src_id, rows_hash(p, i)), c);
         own.push(o);
-        shp.push(
-            if sh.fine {
-                sh.mh[i]
-            } else {
-                o
-            },
-        );
+        shp.push(fnv_mix(sh.mh[i], c));
         if p.modules[i].prelude {
             pre.push(i as u32);
         }
@@ -598,11 +608,13 @@ fn keys_compute(p: &loader::Package, sh: &Shapes, live: *const bool, keys: &mut 
         let mut h = FNV_BASIS;
         h = fnv_mix(h, m as u64);
         h = fnv_cont(h, &p.modules[m].path);
+        let mut s = FNV_BASIS;
         for k in 0..w {
             let mut b = inq[k];
             while b != 0 {
                 let i = k * 64 + b.trailing_zeros();
                 b &= b - 1;
+                s = fnv_mix(fnv_mix(s, i as u64), shp[i]);
                 h = fnv_mix(h, i as u64);
                 h = fnv_mix(
                     h,
@@ -624,32 +636,141 @@ fn keys_compute(p: &loader::Package, sh: &Shapes, live: *const bool, keys: &mut 
                 },
             );
         }
-        keys.push(h);
+        // What the evaluations whose site is not known ran: any module may read their values.
+        keys.push(fnv_mix(h, sh.ceh[n]));
+        sk.push(s);
     }
+}
+
+// What each module's code in a build whose LIR optimizer runs reads of the program beyond its closure's
+// shapes: that optimizer inlines bodies across modules and infers each function's effects from its
+// callees. Per module, the hashes of what its functions reach (`InstGraph::reach_hashes`), with what every
+// module's code reaches implicitly (`roots` outside the project: the runtime's functions, the methods
+// the emitter's fixed text calls). A function, a spliced call and an aggregate's declaration count by
+// their text (`body_hash`) and the shapes of their module's closure (`sk`), a record by its declaration's.
+fn reach_mix(p: &loader::Package, g: &ig::InstGraph, roots: &Vector<DefId>, sk: &Vector<u64>) Vector<u64> {
+    let n = p.modules.len();
+    let keys = g.units();
+    let mut content = Vector::<u64>::with_capacity(keys.len());
+    for u in 0..keys.len() {
+        let k = keys[u];
+        let kind = k >> 61;
+        // The declaration's id and line too: a closure or a pinned body's node past the declarations has
+        // no text of its own here, its id spells symbols (`closure_<node>`), and its line the locations
+        // an inlined copy spells.
+        let c = if kind == ig::UK_FN || kind == ig::UK_TY || kind == ig::UK_CALL {
+            let d = k & 0x1FFFFFFFFFFFFFFFu64;
+            let m = (d >> 32 & 0xFFFF) as usize;
+            fnv_mix(fnv_mix(fnv_mix(body_hash(p, d), sk[m]), kind), d ^ decl_line(p, d) << 40)
+        } else if kind == ig::UK_REC && k as usize < g.recs.len() {
+            let r = g.recs.at(k as usize);
+            let m = r.def.module as usize;
+            let d = m as u64 << 32 | r.def.node as u64;
+            fnv_mix(fnv_mix(fnv_mix(body_hash(p, d), sk[m]), r.args_len), d ^ decl_line(p, d) << 40)
+        } else {
+            kind
+        };
+        content.push(c);
+    }
+    let rh = g.reach_hashes(&content);
+    let mut implicit = Set::<u64>::new();
+    for i in 0..roots.len() {
+        let d = roots[i];
+        if d.module as usize < n && p.modules[d.module as usize].pkg != loader::PKG_PROJECT {
+            implicit.insert(ig::UK_FN << 61 | d.module as u64 << 32 | d.node as u64);
+        }
+    }
+    let mut imp = FNV_BASIS;
+    let mut ih = Vector::<u64>::new();
+    for u in 0..keys.len() {
+        if implicit.contains(&keys[u]) {
+            ih.push(rh[u]);
+        }
+    }
+    ih.sort();
+    for i in 0..ih.len() {
+        imp = fnv_mix(imp, ih[i]);
+    }
+    let mut out = Vector::<u64>::with_capacity(n);
+    for _ in 0..n {
+        out.push(imp);
+    }
+    // A module's functions in any order: the sum is order-free.
+    for u in 0..keys.len() {
+        let k = keys[u];
+        if k >> 61 == ig::UK_FN {
+            let m = (k >> 32 & 0xFFFF) as usize;
+            if m < n {
+                out.set(m, out[m].wrapping_add(fnv_mix(FNV_BASIS, rh[u])));
+            }
+        }
+    }
+    return out;
 }
 
 /// The next image's temporary file (`tmp_of` its path), opened with `out`, the image's sections, written
 /// into it; every module's held record follows in module order (`held_head` and the record, or
 /// `held_old`), then `Writer::finish`. None when it does not open.
-pub(package) fn image_begin(p: &loader::Package, t: &mut Tuc) Option<Writer> {
+pub(package) fn image_begin(t: &mut Tuc) Option<Writer> {
     let tmp = tmp_of(&t.path);
     let f = stdio::fopen(&tmp, "wb");
     if f == null {
         return None;
     }
-    // The evaluations' functions (`Package.ce_reads`), each with its text's hash, sorted.
-    let mut ce = (unsafe &*p.ce_reads.get()).clone();
-    ce.sort();
-    w32(&mut t.out, ce.len() as u32);
-    for i in 0..ce.len() {
-        w32(&mut t.out, (ce[i] >> 32) as u32);
-        w32(&mut t.out, (ce[i] & 0xFFFFFFFF) as u32);
-        w64(&mut t.out, body_hash(p, ce[i]));
-    }
     let mut w = Writer::to_file(f);
     w.bytes(t.out.as_str().ptr(), t.out.len());
     t.out = String::new();
     return Some(w);
+}
+
+// The 0-based line of byte `off` of module `m` (`Package.lines`, which every emitting build fills).
+fn line_at(p: &loader::Package, m: usize, off: u32) u64 {
+    if m >= p.lines.len() {
+        return 0;
+    }
+    let ls = &p.lines[m];
+    return switch ls.binary_search(&off) {
+        Ok(i) => i as u64,
+        Err(i) => i as u64 - pick(i > 0, 1, 0),
+    };
+}
+
+// The line declaration `d` (`module << 32 | node`) starts on, 0 for a body-arena node or none.
+fn decl_line(p: &loader::Package, d: u64) u64 {
+    let m = (d >> 32) as usize;
+    let node = (d & 0xFFFFFFFF) as NodeId;
+    if m >= p.modules.len() || !p.modules[m].has_ast || Ast::in_body(node) {
+        return 0;
+    }
+    let a = unsafe &*p.module_ast_const(m as ModuleId);
+    if !a.valid(node) {
+        return 0;
+    }
+    return line_at(p, m, a.at_const(node).span.start);
+}
+
+/// Per module, the hash of the functions the evaluations so far ran for it (`Package.ce_reads` by site),
+/// each with its text (`body_hash`); and in the last slot the hash of those whose site is not known. The
+/// type check's evaluations are complete before the proofs and the emission read them; a value one of
+/// them computed for a module reaches only that module's code and declarations, which the modules of its
+/// importers' closures read (the values the emission's constants pass computes go to the instance data,
+/// which every build renders again).
+pub(package) fn ce_sites(p: &loader::Package) Vector<u64> {
+    let n = p.modules.len();
+    let mut ce = (unsafe &*p.ce_reads.get()).clone();
+    ce.sort();
+    ce.dedup();
+    let mut out = Vector::<u64>::with_capacity(n + 1);
+    for _ in 0..n + 1 {
+        out.push(0);
+    }
+    for i in 0..ce.len() {
+        let site = (ce[i] >> 48) as usize;
+        let key = ce[i] & 0xFFFFFFFFFFFFu64;
+        let s = pick(site < n, site, n);
+        out.set(s, fnv_mix(fnv_mix(pick(out[s] == 0, FNV_BASIS, out[s]), key), body_hash(p, key)));
+    }
+    return out;
 }
 
 /// The hash of function `key`'s (`module << 32 | node`) whole text with its module's path, or of the whole
@@ -724,6 +845,8 @@ pub(package) fn tuc_setup(
     target: i32,
     gen_root: str,
     est: usize,
+    g: &ig::InstGraph,
+    roots: &Vector<DefId>,
 ) Tuc {
     let mut t = Tuc {
         on: false,
@@ -786,7 +909,15 @@ pub(package) fn tuc_setup(
         }
     }
     shapes_finish(p, &mut t.sh, &oraw, &otok);
-    keys_compute(p, &t.sh, live, &mut t.keys);
+    let mut sk = Vector::<u64>::with_capacity(n);
+    t.sh.ceh = ce_sites(p);
+    keys_compute(p, &t.sh, live, &mut t.keys, &mut sk);
+    if p.native && p.lir_opt {
+        let rx = reach_mix(p, g, roots, &sk);
+        for m in 0..n {
+            t.keys.set(m, fnv_mix(t.keys[m], rx[m]));
+        }
+    }
     // The functions the seed pass emits per module (`salt`): a section holds the chunks of its own set;
     // and the bounds checks the prover proved in its bodies (`Package.prove_fd`), which their code drops.
     let mut fd = Vector::<u64>::new();
@@ -846,23 +977,6 @@ pub(package) fn tuc_setup(
         t.slen.set(m, (end - r.at) as u64);
         t.hit.set(m, same);
         r.at = end;
-    }
-    // The evaluations' functions: one whose text changed misses every module.
-    let nce = r.r32() as usize;
-    let mut ce_same = r.ok && nce as u64 * 16 <= (r.end - r.at) as u64;
-    for _ in 0..nce {
-        if !ce_same {
-            break;
-        }
-        let km = r.r32() as u64;
-        let kn = r.r32() as u64;
-        ce_same = body_hash(p, km << 32 | kn) == r.r64();
-    }
-    if !ce_same {
-        for m in 0..n {
-            t.hit.set(m, false);
-        }
-        return t;
     }
     // The held records (`held_put`): a module's counts under its section's key. They move to `hraw` from a
     // multiple of 16 bytes on, so each stays 16-byte aligned.

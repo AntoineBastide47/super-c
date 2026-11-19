@@ -84,6 +84,37 @@ fn prelude_image_matches_a_checked_prelude_and_follows_std_edits() {
     assert(!r2.ok() && r2.out_has("the root file 'zz_bind.spc' names module 'zz_bind'"), "a root file clashes");
 }
 
+// A std type whose layout a `const fn` of std computes: the prelude check runs it, and the image keeps that
+// read (`Package.ce_reads`), so an edit of the function rebuilds a project module that reads the layout,
+// though the project's own check runs nothing of it (the per-TU cache, `tuc::ce_sites`).
+@test
+fn prelude_image_keeps_the_functions_its_check_ran() {
+    let p = cli::proj_new();
+    let root = p.dir();
+    cli::copy_std(root);
+    let k0 = String::from_str(
+        "pub const fn zz_k_of(x: u64) u64 {\n    return x * 3;\n}\n\npub struct ZzBuf {\n    pub d: [u8; zz_k_of(4) as usize],\n}\n",
+    );
+    p.mkfile("sc/std/zz_k.spc", &k0);
+    p.mkfile("a.spc", "@noinline\npub fn f() i32 {\n    return sizeof(ZzBuf) as i32;\n}\n");
+    p.mkfile("main.spc", "import a;\n\nfn main() i32 {\n    return a::f() - 12;\n}\n");
+    let mut env = String::new();
+    env.format_into("{}/cache SC_STD_DIR={}/sc/std", root, root);
+    let mut exe = String::new();
+    exe.format_into("{}/o/app{}", root, unsafe str::from_cstr(cli::binext()));
+    // Twice: the prelude checked, then loaded from its image.
+    for _ in 0..2 {
+        assert(cli::superc_env_in(root, "SC_CACHE_DIR", &env, "build main.spc -o o/app --out-dir=o").ok(), "the build");
+    }
+    assert(cli::exe_env_in(&exe, root, "SC_NONE", "1", "").exit == 0, "the std layout");
+    p.mkfile("sc/std/zz_k.spc", k0.replace("x * 3", "x * 5").as_str());
+    assert(
+        cli::superc_env_in(root, "SC_CACHE_DIR", &env, "build main.spc -o o/app --out-dir=o").ok(),
+        "the build after the edit",
+    );
+    assert(cli::exe_env_in(&exe, root, "SC_NONE", "1", "").exit == 8, "the edited layout");
+}
+
 // Copy std and ffi below `root`; the std copy's path.
 fn copy_std_ffi(root: str) String {
     let std_dir = stdlib::get_env("SC_STD_DIR").unwrap();

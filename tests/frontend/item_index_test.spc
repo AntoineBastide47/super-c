@@ -528,14 +528,18 @@ fn main() i32 {
     for e in 0..p0.sched.pre_edges.len() {
         assert(p0.sched.pre_edges[e] == p1.sched.pre_edges[e], "same precheck edges");
     }
-    // `sum`'s body lives in the body arena, but a generic's body stays in the module arena: the edit
-    // of `generic_id` gives `main`, declared after it, a new node id. The keys above held across it.
+    // `sum`'s body lives in the body arena and a generic's past the module's declarations
+    // (`Ast.decl_end`): the edit of `generic_id` keeps the id of `main`, declared after it, and moves
+    // only the pinned bodies' nodes.
     let am = mod_of(&p0, "/a.spc");
     let main0 = item_named(&p0, am, "main");
     assert(
-        p0.idx().items.at(main0 as usize).node != p1.idx().items.at(main0 as usize).node,
-        "the edited body renumbers later nodes",
+        p0.idx().items.at(main0 as usize).node == p1.idx().items.at(main0 as usize).node,
+        "the edited generic body keeps the later declarations' ids",
     );
+    let t0 = p0.modules[am].ast.get_ref();
+    let t1 = p1.modules[am].ast.get_ref();
+    assert(t0.decl_end == t1.decl_end && t1.nodes.len() > t0.nodes.len(), "the new nodes are past the declarations");
 }
 
 @test

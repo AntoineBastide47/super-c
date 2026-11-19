@@ -915,7 +915,8 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
         eprint("item-stats typecheck serial order: {} module checkers open at once at the peak\n", peak);
     }
     let mut g = sch::Jobs::from_edges(nc + 1, &edges, order);
-    // The memory gate's estimate and the work's: the component's module-arena nodes.
+    // The memory gate's estimate and the work's: the component's module-arena nodes, its pinned bodies'
+    // past the declarations included.
     for c in 0..nc {
         let mut nodes: u64 = 0;
         for k in s.citem_off[c] as usize..s.citem_off[c + 1] as usize {
@@ -923,6 +924,7 @@ fn tc_jobs(p: &loader::Package) sch::Jobs {
             if p.idx().items.at(it).owner == loader::ITEM_NONE {
                 nodes += p.idx().items.at(it).node - s.top_lo[it];
             }
+            nodes += s.pin_n[it];
         }
         g.est.set(c, nodes * 96);
         g.cost.set(c, nodes);
@@ -4912,8 +4914,8 @@ pub(package) fn cemit_package(
     // The concrete functions the seed pass emits: what the walks reach from the roots. A function only
     // the emitted text names is emitted late, so the set predicts the seeds and never decides output.
     let mut pred = Set::<u64>::new();
+    let mut rf = Vector::<DefId>::new();
     {
-        let mut rf = Vector::<DefId>::new();
         reach_roots(p, &g, live, testing, &mut rf);
         // A call of an inline candidate splices its body: with the inliner on, the call alone does
         // not make the callee emitted (`InstGraph::reach`).
@@ -4932,7 +4934,7 @@ pub(package) fn cemit_package(
     } else {
         p.gen_root.clone()
     };
-    let shp = tuc::shapes(p, &tuc_root, !(p.native && p.lir_opt));
+    let shp = tuc::shapes(p, &tuc_root);
     // Every body is lowered and kept, every constant and static_assert is evaluated, and the live
     // set and the emit order have read their last reference: the body syntax has no reader left.
     p.release_bodies();
@@ -5060,6 +5062,8 @@ pub(package) fn cemit_package(
         } else {
             2 * src_total
         },
+        &g,
+        &rf,
     );
     let mut held = Vector::<Option<lhold::Rec>>::new();
     nat_trust(p, &mut tuc, &mut held, &mut o.nat_rec);
@@ -6572,7 +6576,7 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         // then into the image in module order: no more records wait in memory for the publication.
         if tuc.on {
             img_done = true;
-            if let Some(mut w) = tuc::image_begin(p, &mut tuc) {
+            if let Some(mut w) = tuc::image_begin(&mut tuc) {
                 let n = p.modules.len();
                 let mut want = Vector::<bool>::with_capacity(n);
                 for m in 0..n {
@@ -6618,7 +6622,7 @@ fn lir_stage(p: &mut loader::Package, o: &mut CemitOut) {
         o.lir = Some(l);
     }
     if tuc.on && !img_done {
-        if let Some(mut w) = tuc::image_begin(p, &mut tuc) {
+        if let Some(mut w) = tuc::image_begin(&mut tuc) {
             for m in 0..p.modules.len() {
                 tuc::held_old(&tuc, &mut w, m, nks[m]);
             }
@@ -13039,6 +13043,7 @@ struct NatObj {
     pub(package) bytes: Vector<u8>,
     pub(package) old: bool,
     pub(package) key: u128, // its content key (`nat_piece_key`), 0 for none
+    pub(package) chash: u64, // the hash of its bytes (`nat_bytes_hash`) with a key
 }
 
 // The instructions of one object of a part, about (`nat_pieces`): a larger part compiles as several
@@ -13505,11 +13510,16 @@ struct NatTask {
     pub(package) why: *mut String,
     pub(package) ok: *mut bool,
     pub(package) syms: *const NatSyms,
-    // The object's content key (`nat_piece_key`) and the key of the object of its path an earlier build
-    // left (0: none): the same keys reuse that object (`reuse`) instead of compiling.
+    // The object's content key (`nat_piece_key`) and the key and content hash of the object an earlier
+    // build left at its path `path` (`want` 0: none): the same key, with that object's bytes still of that
+    // hash, reuses the object (`reuse`, its bytes into `bytes`) instead of compiling. `chash` takes the
+    // hash of the bytes either way.
     pub(package) base: u64,
     pub(package) key: *mut u128,
     pub(package) want: u128,
+    pub(package) want_h: u64,
+    pub(package) path: *const String,
+    pub(package) chash: *mut u64,
     pub(package) reuse: *mut bool,
 }
 
@@ -13531,9 +13541,15 @@ fn nat_task(t: NatTask) {
     let key = nat_piece_key(unsafe &*t.pk, t.os, t.isa, fs, ds, unsafe (*t.text).as_str(), t.base);
     unsafe *t.key = key;
     if key != 0 && key == t.want {
-        unsafe *t.reuse = true;
-        unsafe *t.ok = true;
-        return;
+        if let Some(b) = lku::read(unsafe (*t.path).as_str()) {
+            if nat_bytes_hash(&b) == t.want_h {
+                unsafe *t.bytes = b;
+                unsafe *t.chash = t.want_h;
+                unsafe *t.reuse = true;
+                unsafe *t.ok = true;
+                return;
+            }
+        }
     }
     // A task preempted while it holds a table would make its worker's next task take another.
     prt::preempt_mask_enter();
@@ -13554,7 +13570,16 @@ fn nat_task(t: NatTask) {
     unsafe sc_runtime::sc_rt_spin_lock(ns.lock.get());
     unsafe (*ns.free.get()).push(tab);
     unsafe sc_runtime::sc_rt_spin_unlock(ns.lock.get());
+    unsafe *t.chash = nat_bytes_hash(unsafe &*t.bytes);
     prt::preempt_mask_exit();
+}
+
+// The content hash of object bytes `b` (`NAT_KEYS`).
+const fn nat_bytes_hash(b: &Vector<u8>) u64 {
+    let mut h = NatHash { a: 0x2545F4914F6CDD1Du64, b: b.len() as u64 };
+    h.bytes(b.as_ptr(), b.len());
+    let k = h.key();
+    return (k >> 64) as u64 ^ k as u64;
 }
 
 // The native objects' record (`__sc_native` in the tree): per module, the key its own part was compiled
@@ -13563,38 +13588,32 @@ fn nat_task(t: NatTask) {
 // emission of a module counts only under its record's key.
 const NAT_RECORD: str = "__sc_native";
 
-// The content keys of the tree's native objects (`nat_piece_key`): `<key> <file> <object path>` lines, the
-// key as 32 hex digits, the file as 16 (`nat_file_id`). A build removes it before it writes objects and
-// writes it after; an object another writer (another compiler) replaced since is another file.
+// The content keys of the tree's native objects (`nat_piece_key`): `<key> <hash> <object path>` lines, the
+// key as 32 hex digits, the hash of the object's bytes as 16 (`nat_bytes_hash`), the path below the tree
+// root. A build removes it before it writes objects and writes it after; an object another writer (another
+// compiler) replaced since has other bytes.
 const NAT_KEYS: str = "__sc_native_keys";
 
-// The identity of the file at `path` (its device, inode, size and modification time), 0 for none.
-fn nat_file_id(path: str) u64 {
-    switch fs::stat(path) {
-        Ok(md) => {
-            let h = splitmix(md.dev ^ splitmix(md.ino ^ splitmix(md.size ^ splitmix(md.modified_ns as u64))));
-            return h | 1;
-        },
-        Err(_) => {
-            return 0;
-        },
-    }
+// An object's entry in `NAT_KEYS`: its content key and the hash of its bytes.
+struct NatKey {
+    pub(package) key: u128,
+    pub(package) hash: u64,
 }
 
-// The keys of record `NAT_KEYS` at `path`, by object path, of the objects that are still the files it names.
-fn nat_keys(path: str) Map<String, u128> {
-    let mut keys = Map::<String, u128>::new();
+// The entries of record `NAT_KEYS` at `path` of the tree at `root`, by object path.
+fn nat_keys(path: str, root: str) Map<String, NatKey> {
+    let mut keys = Map::<String, NatKey>::new();
     let rt = loader::read_file(path).unwrap_or(String::new());
     for line in rt.as_str().split("\n") {
         if line.len() < 51 || line.byte_at(32) != b' ' || line.byte_at(49) != b' ' {
             continue;
         }
-        let op = line.slice(50, line.len());
         switch (parse_hex64(line.slice(0, 16)), parse_hex64(line.slice(16, 32)), parse_hex64(line.slice(33, 49))) {
             (Some(a), Some(b), Some(f)) => {
-                if f != 0 && f == nat_file_id(op) {
-                    keys.insert(String::from_str(op), a as u128 << 64 | b);
-                }
+                keys.insert(
+                    format("{}/{}", root, line.slice(50, line.len())),
+                    NatKey { key: a as u128 << 64 | b, hash: f },
+                );
             },
             _ => {},
         }
@@ -13828,7 +13847,7 @@ fn native_plan(
     root: str,
     hit: &Vector<bool>,
     rec: &Map<String, u64>,
-    keys: &Map<String, u128>,
+    keys: &Map<String, NatKey>,
     asm_text: &mut Vector<String>,
     isnat: &mut Vector<bool>,
     objs: &mut Vector<NatObj>,
@@ -13967,12 +13986,26 @@ fn native_plan(
     pkeys.resize_default(np);
     let mut reuse = Vector::<bool>::new();
     reuse.resize_default(np);
-    // Per piece, the key of the object at its path (`NAT_KEYS`), when that object is there.
+    // Per piece, its path and the entry of the object there (`NAT_KEYS`).
     let mut want = Vector::<u128>::with_capacity(np);
+    let mut want_h = Vector::<u64>::with_capacity(np);
+    let mut paths = Vector::<String>::with_capacity(np);
+    let mut chash = Vector::<u64>::new();
+    chash.resize_default(np);
     for q in 0..np {
         let part = ppart[q] as usize;
         let op = nat_obj_path(root, &p.modules[part / 2].path, part % 2 == 0, pnum[q]);
-        want.push(keys.get(&op).map(|x: &u128| *x).unwrap_or(0));
+        switch keys.get(&op) {
+            Some(e) => {
+                want.push(e.key);
+                want_h.push(e.hash);
+            },
+            None => {
+                want.push(0);
+                want_h.push(0);
+            },
+        }
+        paths.push(op);
     }
     let base = nat_base(p);
     let none = String::new();
@@ -14010,6 +14043,9 @@ fn native_plan(
             base: base,
             key: pkeys.index_mut(q),
             want: want[q],
+            want_h: want_h[q],
+            path: paths.at(q),
+            chash: chash.index_mut(q),
             reuse: reuse.index_mut(q),
         };
         if p.jobs == 1 || todo.len() == 1 {
@@ -14058,7 +14094,15 @@ fn native_plan(
             nn += 1;
             for k in 0..olds[m] {
                 objs.push(
-                    NatObj { m: m as ModuleId, own: true, piece: k, bytes: Vector::<u8>::new(), old: true, key: 0 },
+                    NatObj {
+                        m: m as ModuleId,
+                        own: true,
+                        piece: k,
+                        bytes: Vector::<u8>::new(),
+                        old: true,
+                        key: 0,
+                        chash: 0,
+                    },
                 );
             }
             for part in 2 * m..2 * m + 2 {
@@ -14069,14 +14113,16 @@ fn native_plan(
                 while q < np && ppart[q] as usize == part {
                     if reuse[q] {
                         nr += 1;
+                        let b = replace(bytes.index_mut(q), Vector::<u8>::new());
                         objs.push(
                             NatObj {
                                 m: m as ModuleId,
                                 own: part == 2 * m,
                                 piece: pnum[q],
-                                bytes: Vector::<u8>::new(),
+                                bytes: b,
                                 old: true,
                                 key: pkeys[q],
+                                chash: chash[q],
                             },
                         );
                     } else if bytes.at(q).len() != 0 {
@@ -14089,6 +14135,7 @@ fn native_plan(
                                 bytes: b,
                                 old: false,
                                 key: pkeys[q],
+                                chash: chash[q],
                             },
                         );
                     }
@@ -16052,9 +16099,9 @@ fn ap_job(ctx: *mut void, j: u32) {
 // The proof record of a build tree: the key (`prove_keys`) of each module whose proofs all held, one
 // per line as two hex words; `p` lines, the facts its proofs gave; `@d <key> <module> <node> <hash>` lines,
 // the functions of other modules whose bodies its proofs read (`prv::check_kept`), with their text's hash
-// (`tuc::body_hash`); and `@c <module> <node> <hash>` lines, the functions the build's evaluations ran
-// (`Package.ce_reads`: a constant's value). A module's proofs replay when its key is there and every one of
-// its `@d` lines and every `@c` line still holds.
+// (`tuc::body_hash`). A module's proofs replay when its key is there and every one of its `@d` lines still
+// holds. The key holds what the type check's evaluations ran for the module and its closure
+// (`tuc::ce_sites`: a constant's value).
 const PROVE_RECORD: str<'static> = "__sc_prove";
 
 // The proof key of each module: what its proofs read, the module's own source, what the modules it
@@ -16070,7 +16117,11 @@ fn prove_keys(p: &loader::Package, target: i32, sh: &tuc::Shapes) Vector<u64> {
     for j in 0..5 {
         cfg = (cfg ^ parts[j]).wrapping_mul(0x100000001b3u64);
     }
-    // Each module's source, in both lanes, by its file and content; and what an importer reads of it.
+    // Each module's source, in both lanes, by its file and content; and what an importer reads of it. Each
+    // with what the type check's evaluations ran for it (`tuc::ce_sites`), and every key with those whose
+    // site is not known.
+    let ceh = tuc::ce_sites(p);
+    cfg = splitmix(cfg ^ ceh[n]);
     let shaped = sh.mh.len() == n;
     let mut h1 = Vector::<u64>::with_capacity(n);
     let mut h2 = Vector::<u64>::with_capacity(n);
@@ -16078,7 +16129,7 @@ fn prove_keys(p: &loader::Package, target: i32, sh: &tuc::Shapes) Vector<u64> {
     let mut s2 = Vector::<u64>::with_capacity(n);
     for m in 0..n {
         let md = p.modules.at(m);
-        let f = fnv_cont(FNV_BASIS, &md.file);
+        let f = fnv_cont(FNV_BASIS, &md.file) ^ ceh[m].rotate_left(7);
         h1.push(splitmix(f ^ md.src_id));
         h2.push(splitmix(f.wrapping_add(md.src_id).rotate_left(29) ^ 0xD6E8FEB86659FD93u64));
         if shaped && md.has_ast {
@@ -16236,7 +16287,6 @@ fn prove_cached(
         // Per key, whether its reads still hold, and the reads.
         let mut bad = Set::<u64>::new();
         let mut kreads = Map::<u64, Vector<u64>>::new();
-        let mut ce_ok = true;
         for line in old.as_str().split("\n") {
             if line.starts_with("p ") {
                 continue;
@@ -16259,11 +16309,6 @@ fn prove_cached(
                 }
                 continue;
             }
-            if line.starts_with("@c ") {
-                let w = hex_words(line.slice(3, line.len()));
-                ce_ok = ce_ok && w.len() == 3 && read_holds(p, w[0] << 32 | w[1], w[2]);
-                continue;
-            }
             let f = line.find(" ");
             if f < 0 {
                 continue;
@@ -16278,7 +16323,7 @@ fn prove_cached(
         }
         for m in 0..n {
             switch have.get(&keys[2 * m]) {
-                Some(b) => skip.set(m, ce_ok && *b == keys[2 * m + 1] && !bad.contains(&keys[2 * m])),
+                Some(b) => skip.set(m, *b == keys[2 * m + 1] && !bad.contains(&keys[2 * m])),
                 None => {},
             }
             if skip[m] {
@@ -16372,9 +16417,6 @@ fn prove_cached(
         }
         eprint("prove: {} to prove, {} from the proof record, {} workers\n", n - nh as usize, nh, p.jobs);
     }
-    // The build's evaluations so far (the type check's): their functions, with their text.
-    let mut ce = (unsafe &*p.ce_reads.get()).clone();
-    ce.sort();
     if cache {
         let mut out = String::new();
         for m in 0..n {
@@ -16387,11 +16429,6 @@ fn prove_cached(
                     );
                 }
             }
-        }
-        for j in 0..ce.len() {
-            out.push_str(
-                format("@c {:x} {:x} {:x}\n", ce[j] >> 32, ce[j] & 0xFFFFFFFF, tuc::body_hash(p, ce[j])).as_str(),
-            );
         }
         // By each fact's identity, its owner's module and node, then its rvalue: the record's bytes do not
         // depend on the kept order (the workers'), nor on which facts the old record gave.
@@ -16452,16 +16489,11 @@ fn prove_cached(
             if held[m] && !skip[m] {
                 lines.index_mut(m).sort();
                 let mut body = String::new();
-                for j in 0..reads[m].len() + ce.len() {
-                    let (tag, r) = if j < reads[m].len() {
-                        ("@d", reads[m][j])
-                    } else {
-                        ("@c", ce[j - reads[m].len()])
-                    };
+                for j in 0..reads[m].len() {
+                    let r = reads[m][j];
                     body.push_str(
                         format(
-                            "{} {:x} {:x} {}\n",
-                            tag,
+                            "@d {:x} {:x} {}\n",
                             r & 0xFFFFFFFF,
                             tuc::body_hash(p, r),
                             p.modules.at((r >> 32) as usize).file.as_str(),
@@ -16485,12 +16517,11 @@ fn prove_cached(
     return ok;
 }
 
-// Whether every `@d` and `@c` line (`<tag> <node> <hash> <file>`) of shared proof record `text` still
-// holds in `p`, its functions into `out`.
+// Whether every `@d` line (`@d <node> <hash> <file>`) of shared proof record `text` still holds in `p`,
+// its functions into `out`.
 fn shared_reads(p: &loader::Package, by_file: &Map<u64, usize>, text: str, out: &mut Vector<u64>) bool {
     for line in text.split("\n") {
-        let d = line.starts_with("@d ");
-        if !d && !line.starts_with("@c ") {
+        if !line.starts_with("@d ") {
             continue;
         }
         let rest = line.slice(3, line.len());
@@ -16519,9 +16550,7 @@ fn shared_reads(p: &loader::Package, by_file: &Map<u64, usize>, text: str, out: 
                 if !read_holds(p, key, h) {
                     return false;
                 }
-                if d {
-                    out.push(key);
-                }
+                out.push(key);
             },
             _ => {
                 return false;
@@ -17636,9 +17665,9 @@ pub(package) fn run_package(
         native_header_facts(p);
         stage_ms(tstat, &mut tp0, "phase native facts");
     }
-    if p.native || cbe::lir_requested(p) {
-        lir_lines(p);
-    }
+    // Every emitting build: the LIR's locations, and the per-TU cache's keys, which hash the lines of
+    // the functions a module's code copies (`tuc::dep_hash`).
+    lir_lines(p);
     // The installed hooks' stage before the emission (`build_system::ext`): an error leaves the tree as it is.
     if !ext::run_stage(ext::STAGE_BEFORE_EMISSION, p, null) {
         return 1;
@@ -17778,9 +17807,9 @@ pub(package) fn run_package(
         }
         if let Some(l) = &co.lir {
             let nk = if co.tuc_path.len() != 0 {
-                nat_keys(&nat_kp)
+                nat_keys(&nat_kp, root)
             } else {
-                Map::<String, u128>::new()
+                Map::<String, NatKey>::new()
             };
             if !native_plan(
                 p,
@@ -18104,6 +18133,10 @@ pub(package) fn run_package(
             if ob.old {
                 sink_notify(osink, &mut co.pr, &op, "", 3, false);
                 nat_paths.push(op.clone());
+                // A reused object's bytes, read to check them, go to the link from memory.
+                if ob.bytes.len() != 0 {
+                    unsafe (*memp).objs.insert(op.clone(), replace(&mut ob.bytes, Vector::<u8>::new()));
+                }
                 keep.push(op);
                 continue;
             }
@@ -18168,7 +18201,7 @@ pub(package) fn run_package(
         } else {
             let _ = fs::unlink(&nat_rp);
         }
-        // The objects' keys, each with its file as this build leaves it.
+        // The objects' keys and the hashes of their bytes, by path below the root.
         if !err && co.tuc_path.len() != 0 {
             for k in 0..nat_objs.len() {
                 let ob = nat_objs.at(k);
@@ -18178,8 +18211,8 @@ pub(package) fn run_package(
                         "{:016x}{:016x} {:016x} {}\n",
                         (ob.key >> 64) as u64,
                         ob.key as u64,
-                        nat_file_id(&op),
-                        op.as_str(),
+                        ob.chash,
+                        op.as_str().slice(root.len() + 1, op.len()),
                     );
                 }
             }

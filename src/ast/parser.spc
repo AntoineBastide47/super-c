@@ -98,7 +98,26 @@ pub(package) struct Parser<'a> {
     // end`, 0 when none). The node keeps its own span, which the formatter prints verbatim; a node built around it
     // covers the parentheses (`outer`).
     pub(package) parens: Vector<u64>,
+    // While the items parse (`build_ast`): a pinned body (`parse_function`) is skipped and parses after the
+    // last item (`parse_deferred`), so the module arena's declarations keep their ids when such a body
+    // changes. `defers` holds the skipped bodies in source order, `dcons` their functions' clauses.
+    defer_on: bool,
+    defers: Vector<Deferred>,
+    dcons: Vector<Contract>,
 }
+
+// A pinned body `parse_function` skipped: its function, the token of its `{`, the pin scope it parsed in,
+// and its function's clauses (`dcons[clo..chi]`).
+struct Deferred {
+    func: NodeId,
+    tok: u32,
+    pin: bool,
+    clo: u32,
+    chi: u32,
+}
+
+// The body field of a function whose pinned body parses after the items (`parse_deferred`).
+const BODY_DEFERRED: NodeId = NODE_BODY_MASK;
 
 extend Parser {
     pub(package) fn new<'a>(tokens: Vector<Token>, source: str<'a>, file: str<'a>) Parser<'a> {
@@ -1489,6 +1508,7 @@ extend Parser {
             self.nrets.push(unsafe self.ast.list(named)[i as usize]);
         }
         let mut body = NODE_NONE;
+        let mut defer_tok = u32::MAX;
         let outer_sink = self.ast.sink_body;
         self.ast.sink_body = !(pinned || self.pin_scope || generics.len != 0);
         // The clauses are body syntax: checked and lowered with the body, in its parameter scope.
@@ -1509,7 +1529,20 @@ extend Parser {
                 NodeAs { block: BlockData { statements: NodeList { start: 0, len: 0 } } },
             );
         } else if self.check(TokenType::LeftBrace) {
-            body = self.parse_block();
+            let end = if self.defer_on && !self.ast.sink_body && self.spec == 0 && !ghost {
+                self.block_end()
+            } else {
+                0
+            };
+            if end != 0 {
+                defer_tok = self.current as u32;
+                self.current = end;
+                body = BODY_DEFERRED;
+            } else {
+                let outer_defer = replace(&mut self.defer_on, false);
+                body = self.parse_block();
+                self.defer_on = outer_defer;
+            }
         } else if require_body {
             self.error_here("expected function body");
         }
@@ -1518,7 +1551,7 @@ extend Parser {
         if contracts.len() != 0 && intrinsic {
             self.error_here("an intrinsic function cannot have a contract");
         }
-        if self.nrets.len() != 0 && body != NODE_NONE {
+        if self.nrets.len() != 0 && body != NODE_NONE && body != BODY_DEFERRED {
             self.bind_named_returns(body);
         }
         // Each `old(e)` of the function, in its clauses or its body, is a CT_OLD record of it.
@@ -1535,7 +1568,7 @@ extend Parser {
             NodeKind::NODE_FUNCTION,
             Span::new(
                 start,
-                if body != NODE_NONE {
+                if body != NODE_NONE && body != BODY_DEFERRED {
                     self.node_span(body).end
                 } else {
                     self.previous_end()
@@ -1555,7 +1588,17 @@ extend Parser {
             },
         );
         self.ast.set_lifetimes(__decl, lifetimes);
-        self.ast.set_contracts(__decl, &contracts);
+        if body == BODY_DEFERRED {
+            let clo = self.dcons.len() as u32;
+            for i in 0..contracts.len() {
+                self.dcons.push(contracts[i]);
+            }
+            self.defers.push(
+                Deferred { func: __decl, tok: defer_tok, pin: self.pin_scope, clo: clo, chi: self.dcons.len() as u32 },
+            );
+        } else {
+            self.ast.set_contracts(__decl, &contracts);
+        }
         for w in 0..where_clause.len {
             self.ast.where_bounds.push(
                 WhereBound { func: __decl, pred: unsafe self.ast.list(where_clause)[w as usize] },
@@ -1574,16 +1617,30 @@ extend Parser {
     // let/name spans are the SIGNATURE spans (before the block starts): downstream stages treat them
     // as ordinary uninitialized bindings, and the formatter skips pre-block statements when printing.
     fn bind_named_returns(self: &mut Self, body: NodeId) {
-        let stmts = self.ast.at_const(body).as_data.block.statements;
-        let mark = self.ast.mark();
+        let mut lets = Vector::<NodeId>::new();
+        self.named_lets(&mut lets);
+        self.prepend_stmts(body, &lets);
+    }
+
+    // Into `out`, one `let mut <name>: <ty>;` per named return.
+    fn named_lets(self: &mut Self, out: &mut Vector<NodeId>) {
         for i in 0..self.nrets.len() {
             let r = *self.nrets.at(i);
             let nm = self.nret_name(r);
             let ty = self.ast.at_const(r).as_data.parameter.ty;
             let rspan = self.ast.at_const(r).span;
-            self.ast.push(
+            out.push(
                 self.mk(NodeKind::NODE_LET, rspan, NodeAs { let_stmt: LetData { name: nm, ty: ty, is_mutable: true } }),
             );
+        }
+    }
+
+    // Put statements `lets` before block `body`'s.
+    fn prepend_stmts(self: &mut Self, body: NodeId, lets: &Vector<NodeId>) {
+        let stmts = self.ast.at_const(body).as_data.block.statements;
+        let mark = self.ast.mark();
+        for i in 0..lets.len() {
+            self.ast.push(lets[i]);
         }
         for i in 0..stmts.len {
             self.ast.push(unsafe self.ast.list(stmts)[i as usize]);
@@ -6042,6 +6099,99 @@ extend Parser {
     }
 
     pub(package) fn build_ast(self: &mut Self) {
+        self.defer_on = true;
+        self.build_items();
+        if self.defers.len() != 0 && (self.errors.has_errors() || self.errors.has_warnings() || self.errors.fixes.len() != 0) {
+            // A diagnostic: the module parses again in source order, so the diagnostics keep their order
+            // and their recovery.
+            self.current = 0;
+            self.depth = 0;
+            self.ast = Ast::new(self.tokens.len());
+            self.errors = diag::Errors::new();
+            self.parens.clear();
+            self.nrets.clear();
+            self.olds.clear();
+            self.bind_buf.clear();
+            self.derive_ifaces.clear();
+            self.pending_metas.clear();
+            self.pin_scope = false;
+            self.in_extern = false;
+            self.spec = 0;
+            self.intrinsic_next = false;
+            self.lemma_next = false;
+            self.ghost_next = false;
+            self.defers.clear();
+            self.dcons.clear();
+            self.defer_on = false;
+            self.build_items();
+        }
+    }
+
+    // The token past the `}` that closes the block whose `{` is the current token, 0 when the module ends
+    // first (the block parses in place).
+    const fn block_end(self: &Self) usize {
+        let mut depth = 0u32;
+        for i in self.current..self.tokens.len() {
+            let k = self.tokens[i].kind();
+            if k == TokenType::LeftBrace {
+                depth += 1;
+            } else if k == TokenType::RightBrace {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            } else if k == TokenType::Eof {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
+    // The bodies `parse_function` skipped, in source order, into the module arena past the root
+    // (`Ast.decl_end`), with their named returns and their `old` clauses. A body's block is the last
+    // node of its run (its named returns' bindings parse first): `ItemSched.pin_hi` finds the owner.
+    fn parse_deferred(self: &mut Self) {
+        self.ast.decl_end = self.ast.nodes.len() as u32;
+        self.defer_on = false;
+        let at = self.current;
+        let outer_pin = self.pin_scope;
+        let mut contracts = Vector::<Contract>::new();
+        let mut lets = Vector::<NodeId>::new();
+        for k in 0..self.defers.len() {
+            let d = self.defers[k];
+            self.current = d.tok as usize;
+            self.pin_scope = d.pin;
+            let named = self.ast.ext(d.func).function.named_returns;
+            for i in 0..named.len {
+                self.nrets.push(unsafe self.ast.list(named)[i as usize]);
+            }
+            lets.clear();
+            self.named_lets(&mut lets);
+            let omark = self.olds.len();
+            let body = self.parse_block();
+            if lets.len() != 0 {
+                self.prepend_stmts(body, &lets);
+            }
+            self.nrets.clear();
+            contracts.clear();
+            for i in d.clo..d.chi {
+                contracts.push(self.dcons[i as usize]);
+            }
+            for i in omark..self.olds.len() {
+                let o = self.olds[i];
+                contracts.push(
+                    Contract { owner: NODE_NONE, binder: NODE_NONE, expr: o, kind: CT_OLD, at: self.node_span(o).start },
+                );
+            }
+            self.olds.truncate(omark);
+            self.ast.set_contracts(d.func, &contracts);
+            self.ast.ext_mut(d.func).function.body = body;
+        }
+        self.pin_scope = outer_pin;
+        self.current = at;
+    }
+
+    fn build_items(self: &mut Self) {
         let mark = self.ast.mark();
         while !self.at_end() {
             let before = self.current;
@@ -6060,6 +6210,7 @@ extend Parser {
             Span::new(0, self.source.len() as u32),
             NodeAs { program: ProgramData { items: items } },
         );
+        self.parse_deferred();
         self.errors.finalize(self.source, self.file);
     }
 

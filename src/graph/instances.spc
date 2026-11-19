@@ -257,12 +257,18 @@ pub(package) struct InstGraph {
 // (`exts` row << 32 | interface method node), the roots' own unit, and a direct call of a concrete
 // function (`reach`).
 const U_REC: u64 = 0;
-const U_FN: u64 = 1u64 << 61;
-const U_TY: u64 = 2u64 << 61;
+/// The kinds of reachability unit keys (`units`, the top 3 bits): a record (the low bits its id), a
+/// concrete function, an aggregate's declaration, a spliced call (the low bits `module << 32 | node`).
+pub(package) const UK_REC: u64 = 0;
+pub(package) const UK_FN: u64 = 1;
+pub(package) const UK_TY: u64 = 2;
+pub(package) const UK_CALL: u64 = 6;
+const U_FN: u64 = UK_FN << 61;
+const U_TY: u64 = UK_TY << 61;
 const U_TN: u64 = 3u64 << 61;
 const U_DEF: u64 = 4u64 << 61;
 const U_ROOT: u64 = 5u64 << 61;
-const U_CALL: u64 = 6u64 << 61;
+const U_CALL: u64 = UK_CALL << 61;
 const U_KIND: u64 = 7u64 << 61;
 const UNIT_DEAD: u32 = 0; // records no reference
 const UNIT_ROOT: u32 = 1;
@@ -3600,6 +3606,165 @@ extend InstGraph {
                 }
             }
         }
+    }
+
+    /// Per reachability unit (`unit_key` order), a hash of what it reaches: its own `content` (by unit,
+    /// the caller's: a function's text, say) with the hashes of the units it references (`edge`, a
+    /// type's destruction and conformance targets, `ty_targets`, a spliced call's callee), over strongly
+    /// connected components, so units that reach the same contents through the same references hash
+    /// alike in any build (`units` gives the keys).
+    pub(package) fn reach_hashes(self: &Self, content: &Vector<u64>) Vector<u64> {
+        let n = self.unit_key.len();
+        // The references by unit (a counting sort), and the implicit ones.
+        let mut src = self.esrc.clone();
+        let mut dst = self.edst.clone();
+        let mut tmp = Vector::<u64>::new();
+        for u in 0..n {
+            let k = self.unit_key[u];
+            tmp.truncate(0);
+            if (k & U_KIND) == U_TY {
+                self.ty_targets(DefId { module: (k >> 32 & 0xFFFF) as ModuleId, node: k as NodeId }, &mut tmp);
+            } else if (k & U_KIND) == U_CALL {
+                tmp.push(U_FN | k & ~U_KIND);
+            }
+            for j in 0..tmp.len() {
+                if let Some(v) = self.unit_ix.get(&tmp[j]) {
+                    src.push(u as u32);
+                    dst.push(*v);
+                }
+            }
+        }
+        let mut off = Vector::<u32>::new();
+        off.resize_default(n + 1);
+        for i in 0..src.len() {
+            off.set(src[i] as usize + 1, off[src[i] as usize + 1] + 1);
+        }
+        for i in 0..n {
+            off.set(i + 1, off[i + 1] + off[i]);
+        }
+        let mut adj = Vector::<u32>::new();
+        adj.resize_default(dst.len());
+        let mut fill = off.clone();
+        for i in 0..src.len() {
+            let s = src[i] as usize;
+            adj.set(fill[s] as usize, dst[i]);
+            fill.set(s, fill[s] + 1);
+        }
+        // Tarjan's components, iteratively: each finishes after the ones it reaches.
+        let none = 0xFFFFFFFFu32;
+        let mut index = Vector::<u32>::new();
+        let mut low = Vector::<u32>::new();
+        let mut comp = Vector::<u32>::new();
+        let mut on = Vector::<bool>::new();
+        for _ in 0..n {
+            index.push(none);
+            low.push(0);
+            comp.push(none);
+            on.push(false);
+        }
+        let mut stack = Vector::<u32>::new();
+        let mut call = Vector::<u64>::new(); // unit << 32 | next edge
+        let mut next: u32 = 0;
+        let mut nc: u32 = 0;
+        let mut chash = Vector::<u64>::new();
+        let mut members = Vector::<u64>::new();
+        let mut kids = Vector::<u64>::new();
+        for r in 0..n {
+            if index[r] != none {
+                continue;
+            }
+            call.push(r as u64 << 32 | off[r] as u64);
+            index.set(r, next);
+            low.set(r, next);
+            next += 1;
+            stack.push(r as u32);
+            on.set(r, true);
+            // Each step enters a unit, takes one edge or leaves a unit: bounded by the units and the edges.
+            for _ in 0..2 * (n + adj.len()) + 1 {
+                let top = switch call.last() {
+                    Some(t) => *t,
+                    None => {
+                        break;
+                    },
+                };
+                let v = (top >> 32) as usize;
+                let e = (top & 0xFFFFFFFF) as u32;
+                if e < off[v + 1] {
+                    let ci = call.len() - 1;
+                    call.set(ci, top + 1);
+                    let w = adj[e as usize] as usize;
+                    if index[w] == none {
+                        index.set(w, next);
+                        low.set(w, next);
+                        next += 1;
+                        stack.push(w as u32);
+                        on.set(w, true);
+                        call.push(w as u64 << 32 | off[w] as u64);
+                    } else if on[w] {
+                        low.set(v, low[v].min(index[w]));
+                    }
+                    continue;
+                }
+                let _ = call.pop();
+                if let Some(pt) = call.last() {
+                    let pv = (*pt >> 32) as usize;
+                    low.set(pv, low[pv].min(low[v]));
+                }
+                if low[v] != index[v] {
+                    continue;
+                }
+                // A component: its members' contents and the components they reach, each sorted.
+                members.truncate(0);
+                let c = nc;
+                nc += 1;
+                for _ in 0..n {
+                    let w = stack.pop().unwrap() as usize;
+                    on.set(w, false);
+                    comp.set(w, c);
+                    members.push(w as u64);
+                    if w == v {
+                        break;
+                    }
+                }
+                kids.truncate(0);
+                for q in 0..members.len() {
+                    let w = members[q] as usize;
+                    for e2 in off[w]..off[w + 1] {
+                        let x = adj[e2 as usize] as usize;
+                        if comp[x] != c {
+                            kids.push(chash[comp[x] as usize]);
+                        }
+                    }
+                }
+                for q in 0..members.len() {
+                    members.set(q, content[members[q] as usize]);
+                }
+                members.sort();
+                kids.sort();
+                kids.dedup();
+                let mut h: u64 = 0x9E3779B97F4A7C15u64 ^ members.len() as u64;
+                for q in 0..members.len() {
+                    h = (h ^ members[q]).wrapping_mul(0xFF51AFD7ED558CCDu64).rotate_left(29);
+                }
+                h = h ^ 0xC4CEB9FE1A85EC53u64;
+                for q in 0..kids.len() {
+                    h = (h ^ kids[q]).wrapping_mul(0x94D049BB133111EBu64).rotate_left(31);
+                }
+                chash.push(h);
+            }
+            assert(call.len() == 0, "every unit a walk enters finishes");
+        }
+        let mut out = Vector::<u64>::with_capacity(n);
+        for u in 0..n {
+            out.push(chash[comp[u] as usize]);
+        }
+        return out;
+    }
+
+    /// The reachability units' keys (`reach_hashes` order), the kind in the top 3 bits (`UK_*`, and a
+    /// walked type, an inherited default and the roots).
+    pub(package) const fn units(self: &Self) &Vector<u64> {
+        return &self.unit_key;
     }
 
     /// Close the references the walks recorded from the program's roots: the functions and constants

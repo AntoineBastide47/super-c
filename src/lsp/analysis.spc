@@ -537,38 +537,16 @@ fn same_shape(a: &Ast, b: &Ast) bool {
 
 const SLOT_NONE: u32 = 0xFFFFFFFF;
 
-// True when the item at `by_node` position `k` is a function with a body in the body arena.
-const fn slot_has_body(p: &loader::Package, m: usize, k: usize) bool {
-    let nd = p.modules[m].ast.get_ref().at_const(slot_node(p, k as u32));
-    return nd.kind == NodeKind::NODE_FUNCTION && Ast::in_body(
-        p.modules[m].ast.get_ref().ext(slot_node(p, k as u32)).function.body,
-    );
-}
-
 // The `by_node` position of the item whose own ranges hold `node` of module `m` (the owner
-// search of `graph::items`: a module-arena node belongs to the first item at or after it in
-// node order, a body node to the function whose body run holds it), or SLOT_NONE past every
-// range (a desugar appended later).
+// search of `graph::items`: a declaration node belongs to the first item at or after it in
+// node order, a body node to the function whose body holds it, `run_slot`), or SLOT_NONE past
+// every range (a desugar appended later).
 fn slot_of(p: &loader::Package, m: usize, node: NodeId) u32 {
     let mut lo = p.idx().mod_items[m] as usize;
     let end = p.idx().mod_items[m + 1] as usize;
     let mut hi = end;
-    if Ast::in_body(node) {
-        let b = node & NODE_BODY_MASK;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if p.sched.body_hi[mid] < b {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-        // `body_hi` is the largest body block id so far: an item without a body repeats the
-        // one before it (and the first items repeat 0, the first body's own block id), so the
-        // owner is the first position at or past the search that owns a body.
-        while lo < end && !slot_has_body(p, m, lo) {
-            lo += 1;
-        }
+    if Ast::in_body(node) || p.modules[m].ast.get_ref().past_decls(node) {
+        lo = gitems::run_slot(p, m, node);
     } else {
         while lo < hi {
             let mid = (lo + hi) / 2;
@@ -623,7 +601,8 @@ fn record_refs(p: &mut loader::Package, i: usize) {
         let mut cur: u32 = SLOT_NONE;
         let mut cur_lo: u32 = 0;
         let mut cur_hi: u32 = 0;
-        let mut cur_body = false;
+        // 0: a declaration node, 1: a body-arena node, 2: a pinned body's (`Ast::past_decls`).
+        let mut cur_cls = 0u8;
         let mut last_key: u64 = 0;
         let mut last_owner: u32 = 0;
         for k in 0..nn {
@@ -633,19 +612,31 @@ fn record_refs(p: &mut loader::Package, i: usize) {
                 continue;
             }
             let body = Ast::in_body(n);
+            let cls = if body {
+                1u8
+            } else if a.past_decls(n) {
+                2u8
+            } else {
+                0u8
+            };
             let nv = n & NODE_BODY_MASK;
-            if cur == SLOT_NONE || body != cur_body || nv <= cur_lo || nv > cur_hi {
+            if cur == SLOT_NONE || cls != cur_cls || nv <= cur_lo || nv > cur_hi {
                 cur = slot_of(p, i, n);
-                cur_body = body;
+                cur_cls = cls;
                 if cur != SLOT_NONE {
                     let first = cur as usize == p.idx().mod_items[i] as usize;
-                    if body {
+                    if cls != 0 {
+                        let his = if body {
+                            &p.sched.body_hi
+                        } else {
+                            &p.sched.pin_hi
+                        };
                         cur_lo = if first {
                             0u32
                         } else {
-                            p.sched.body_hi[cur as usize - 1]
+                            his[cur as usize - 1]
                         };
-                        cur_hi = p.sched.body_hi[cur as usize];
+                        cur_hi = his[cur as usize];
                     } else {
                         cur_lo = if first {
                             0u32

@@ -3787,6 +3787,9 @@ pub(package) struct Ast {
     /// the module (the borrow jobs share it; a checker without it builds its own).
     pub(package) last_use: Vector<NodeId>,
     pub(package) root: NodeId,
+    /// The module arena's first node past the declarations: the pinned bodies parse after the root
+    /// (`Parser::parse_deferred`), so an edit inside one keeps every declaration's id.
+    pub(package) decl_end: u32,
     pub(package) module: ModuleId,
     /// The sugar-keyword marker kinds the parser built (`SUGAR_*` bits). The loader pulls in each
     /// kind's runtime module from it; zero lets the HIR lowering skip its whole-arena marker scan.
@@ -4000,6 +4003,12 @@ extend Ast {
         return (id & NODE_BODY) != 0;
     }
 
+    /// True when module-arena node `id` lies past the declarations (`decl_end`): in a pinned body, or
+    /// appended later.
+    pub(package) const fn past_decls(self: &Self, id: NodeId) bool {
+        return self.decl_end != 0 && !Ast::in_body(id) && id >= self.decl_end;
+    }
+
     /// Node count over both arenas; `nth_id` enumerates them (module arena first).
     @always_inline
     pub(package) const fn nnodes(self: &Self) usize {
@@ -4118,6 +4127,7 @@ extend Ast {
         self.b.released = true;
         self.module = old.module;
         self.root = old.root;
+        self.decl_end = old.decl_end;
         self.names_vectors = old.names_vectors;
         self.sink_body = old.sink_body;
         self.has_c_value = old.has_c_value;

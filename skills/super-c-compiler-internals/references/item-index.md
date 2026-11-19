@@ -73,7 +73,7 @@ typecheck: the deferred-constant flush and the always-panics probe are where bod
 | `fin_off`, `fin_edges` | the final ranges, filled by `finalize` |
 | `comp`, `ncomp` | the strongly connected component of each item in the schedule graph, numbered dependency-first (a callee's component before its caller's; an import or recursion cycle is one component; an extend and its members are one) |
 | `cdep_off`, `cdep`; `citem_off`, `citem` | the component graph: per component the components it depends on and its items ascending (CSR each) |
-| `top_lo`, `body_hi` | the own ranges: per item the node of the top-level item before it in node order (the exclusive start of its module-arena range; a member carries its extend's), and per by_node position the largest function body block id so far (the body-arena owner search) |
+| `top_lo`, `body_hi`, `pin_hi`, `pin_n` | the own ranges: per item the node of the top-level item before it in node order (the exclusive start of its module-arena range; a member carries its extend's), and per by_node position the largest function body block id so far, in the body arena (`body_hi`) and past the declarations (`pin_hi`: pinned bodies, an interface's members' counting as the interface's); `run_slot` searches both; `pin_n`, per item, the nodes of its pinned bodies, which the type check's job estimates add to its range |
 | `state` | the readiness state |
 | `dyn_edges` | the dynamic item edges the master engine recorded during this build (`caller << 32 \| callee`), consumed by `finalize` |
 | `by_node` | each module's items ordered by declaration node, for `Package::item_of(module, node)` |
@@ -115,9 +115,10 @@ set Checked and resets the set's modules to Resolved before each pass (`typechec
 The schedule graph holds three edge kinds. `module_edges` reads one module's resolution
 tables (both arenas, the contiguous prefix through raw pointers) and attributes each
 resolved reference to its owner item by id range: a
-parse-time item's nodes are contiguous in each arena and end at the item's node (post-order),
+parse-time item's declaration nodes are contiguous and end at the item's node (post-order),
 an extend's header (generics, target, interface) precedes its first member, and a function's
-body is the run ending at its block node. A node past every range (a desugar appended later)
+body is the run ending at its block node, in the body arena or past the declarations
+(`Ast.decl_end`, `graph::items::run_slot`). A node past every range (a desugar appended later)
 falls back to the declaration spans (`Spans`, built once per module). An item's
 constant-expression attribute arguments parse before it, inside its range. A reference to a
 declaration inside the owner's own ranges (a local, a parameter, a generic) is no edge and

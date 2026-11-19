@@ -8602,23 +8602,34 @@ fn qual_fails(b: &mut cli::Batch, body: str, want: str, at: str) {
     b.add_at(body, &src, format("error: {}\n--> ", want).as_str(), at);
 }
 // A constant's value may come from a function of another module that the type check runs: the per-TU
-// cache keeps the functions the evaluations ran (`Package.ce_reads`), and an edit of one rebuilds the
-// module whose types hold the value.
+// cache keys each module on the functions the evaluations ran for the modules of its closure
+// (`tuc::ce_sites`, `Package.ce_reads` by site). An edit of one rebuilds the module whose types hold the
+// value and replays a module outside its importers' closures; so does an edit of another function.
 @test
 fn tu_cache_follows_the_functions_a_constant_runs() {
     let p = cli::proj_new();
     p.mkfile("build.toml", "bin = \"bin\"\nroot = \"src/main.spc\"\n");
     p.mkfile("src/b.spc", "pub fn helper(x: u64) u64 {\n    return x * 3;\n}\n");
+    p.mkfile("src/c.spc", "@noinline\npub fn g() i32 {\n    return 1;\n}\n");
+    p.mkfile("src/d.spc", "@noinline\npub fn k() i32 {\n    return 1;\n}\n");
     p.mkfile(
         "src/main.spc",
-        "import b;\n\nconst K: u64 = b::helper(4);\n\nfn main() i32 {\n    return sizeof([u8; K as usize]) as i32 - 12;\n}\n",
+        "import b;\nimport c;\nimport d;\n\nconst K: u64 = b::helper(4);\n\nfn main() i32 {\n    return sizeof([u8; K as usize]) as i32 - 14 + c::g() + d::k();\n}\n",
     );
     let root = p.dir();
     assert(cli::superc_in(root, "build -o bin").ok(), "the first build");
     assert_eq(p.run_bin(), 0);
     p.mkfile("src/b.spc", "pub fn helper(x: u64) u64 {\n    return x * 5;\n}\n");
-    assert(cli::superc_in(root, "build -o bin").ok(), "the build after the edit");
+    let r0 = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build -o bin");
+    assert(
+        r0.ok() && r0.out_shows("native: main native") && r0.out_shows("native: d replayed"),
+        "main compiles, d replays",
+    );
     assert_eq(p.run_bin(), 8);
+    p.mkfile("src/c.spc", "@noinline\npub fn g() i32 {\n    return 2;\n}\n");
+    let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build -o bin");
+    assert(r.ok() && r.out_shows("native: d replayed"), "d replays after an edit of c");
+    assert_eq(p.run_bin(), 9);
     assert(obj_as_uncached(root, "main"), "main's object is the uncached build's");
 }
 
@@ -8683,6 +8694,102 @@ fn proof_record_follows_the_callee_bodies_a_proof_reads() {
     assert(!r.ok() && r.out_shows("cannot prove the 'requires' of 'need' at this call"), "the caller is proved again");
 }
 
+// An inlined callee spells its locations: an edit that moves `small` down a line, two modules away from
+// its caller's code, compiles the caller again in a build whose LIR optimizer runs (`tuc::reach_mix` hashes
+// each function's line), so its failed assertion names the line a build without caches names.
+@test
+fn tu_cache_follows_the_line_of_an_inlined_callee() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"src/main.spc\"\n");
+    let b0 = String::from_str(
+        "@noinline\npub fn first(x: i32) i32 {\n    return x;\n}\n\npub fn small(v: &[i32; 4], i: usize) i32 {\n    assert(i < 4, \"in range\");\n    return v[i];\n}\n",
+    );
+    p.mkfile("src/b.spc", &b0);
+    p.mkfile(
+        "src/a.spc",
+        "import b;\n\n@noinline\npub fn f(i: usize) i32 {\n    let v: [i32; 4] = [1, 2, 3, 4];\n    return b::small(&v, i);\n}\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "import a;\nimport b;\n\nfn main(args: Vector<str>) i32 {\n    return a::f(args.len() + 8) + b::first(0);\n}\n",
+    );
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build");
+    assert(p.run_bin_env("").out_shows("b.spc:7"), "the assertion's line");
+    p.mkfile("src/b.spc", b0.replace("    return x;\n", "    let y = x;\n    return y;\n").as_str());
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the build after the edit");
+    assert(p.run_bin_env("").out_shows("b.spc:8"), "the moved assertion's line");
+}
+
+// A generic body parses after its module's declarations (`Parser::parse_deferred`) and is no part of the
+// module's shape: an edit that adds nodes to it compiles the module that calls it and replays the one that
+// calls only a declaration after it, whose id the edit keeps (and which no inliner copies: its line moves);
+// the program is the uncached build's.
+@test
+fn tu_cache_replays_an_importer_across_a_generic_body_edit() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/c.spc",
+        "pub fn pick<T>(a: T, b: T) T {\n    return b;\n}\n\n@noinline\npub fn other() u64 {\n    return 4;\n}\n",
+    );
+    p.mkfile("src/b.spc", "import c;\n\n@noinline\npub fn g(x: u64) u64 {\n    return c::pick(x, 7);\n}\n");
+    p.mkfile("src/d.spc", "import c;\n\n@noinline\npub fn k() u64 {\n    return c::other();\n}\n");
+    p.mkfile("src/main.spc", "import b;\nimport d;\n\nfn main() i32 {\n    return (b::g(5) + d::k()) as i32;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build -o bin").ok(), "the first build");
+    assert_eq(p.run_bin(), 11);
+    p.mkfile(
+        "src/c.spc",
+        "pub fn pick<T>(a: T, b: T) T {\n    let _ = b;\n    return a;\n}\n\n@noinline\npub fn other() u64 {\n    return 4;\n}\n",
+    );
+    let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build -o bin");
+    assert(r.ok() && r.out_shows("native: b native") && r.out_shows("native: d replayed"), "b compiles, d replays");
+    assert_eq(p.run_bin(), 9);
+    let warm = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    assert(
+        cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build -o bin").ok(),
+        "the build without caches",
+    );
+    let cold = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    assert(warm.len() != 0 && warm.equals(&cold), "the program is the uncached build's");
+}
+
+// A build whose LIR optimizer runs keys a module on the shapes of its imports and on what its functions
+// reach (`tuc::reach_mix`): an edit of a body the optimizer inlines two modules away compiles the module
+// that inlines it, which does not import the edited one, and replays a module that imports it without
+// calling the edited function; the program is the one a build without caches gives.
+@test
+fn tu_cache_follows_what_an_optimized_module_reaches() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/c.spc",
+        "pub fn h(x: u64) u64 {\n    return x * 2 + 1;\n}\n\npub fn other() u64 {\n    return 4;\n}\n",
+    );
+    p.mkfile("src/b.spc", "import c;\n\npub fn g(x: u64) u64 {\n    return c::h(x) + 1;\n}\n");
+    p.mkfile("src/a.spc", "import b;\n\npub fn f(x: u64) u64 {\n    return b::g(x) + 1;\n}\n");
+    p.mkfile("src/d.spc", "import c;\n\npub fn k() u64 {\n    return c::other();\n}\n");
+    p.mkfile("src/main.spc", "import a;\nimport d;\n\nfn main() i32 {\n    return (a::f(5) + d::k()) as i32;\n}\n");
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the first build");
+    assert_eq(p.run_bin(), 17);
+    p.mkfile(
+        "src/c.spc",
+        "pub fn h(x: u64) u64 {\n    return x * 3 + 1;\n}\n\npub fn other() u64 {\n    return 4;\n}\n",
+    );
+    let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build --profile=release -o bin");
+    assert(r.ok() && r.out_shows("native: a native") && r.out_shows("native: d replayed"), "a compiles, d replays");
+    assert_eq(p.run_bin(), 22);
+    let warm = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    assert(
+        cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin").ok(),
+        "the build without caches",
+    );
+    let cold = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    assert(warm.len() != 0 && warm.equals(&cold), "the program is the uncached build's");
+}
+
 // A call of an `@export` function states the function's attributes (`Lower::ref_attrs`): on Windows a
 // function C reaches by name takes C's convention, which passes a `str` in memory, and a build that
 // replays the callee's module from the per-TU cache, with no definition of it, calls it so too.
@@ -8740,7 +8847,7 @@ fn native_objects_are_reused_by_their_input() {
     let mut inst = String::new();
     for line in keys.as_str().split("\n") {
         if line.ends_with("__inst.o") && inst.len() == 0 {
-            inst = format("{}/{}", root, line.slice(50, line.len()));
+            inst = format("{}/build/debug/raw/{}", root, line.slice(50, line.len()));
         }
     }
     assert(inst.len() != 0, "an instance object has a key");

@@ -37261,16 +37261,19 @@ extend TypeChecker {
         self.cur_lo = 0;
     }
 
-    /// Is declaration `decl` of the current module inside the item under check: a body-arena
-    /// node (only the item's own bodies hold those), a module-arena node in the item's own range,
-    /// or a node appended after parsing (a desugar or a rewrite inside the body it extends)?
+    /// Is declaration `decl` of the current module inside the item under check: a body node, in
+    /// the body arena or a pinned body past the declarations (only the item's own bodies hold those),
+    /// a module-arena node in the item's own range, or a node appended after parsing (a desugar or a
+    /// rewrite inside the body it extends)?
     /// Outside `check_one` (the borrow pass, the obligation passes) nothing is own: those
     /// readers lower privately and write no slot.
     const fn decl_is_own(self: &Self, decl: NodeId) bool {
         if self.cur_top == NODE_NONE {
             return false;
         }
-        return Ast::in_body(decl) || decl > self.cur_lo && decl <= self.cur_top || decl >= unsafe (*self.cur_ast()).hir_base;
+        return Ast::in_body(decl) || decl > self.cur_lo && decl <= self.cur_top || unsafe (*self.cur_ast()).past_decls(
+            decl,
+        ) || decl >= unsafe (*self.cur_ast()).hir_base;
     }
 
     /// Is the checked state of node `n` of module `m` visible to the item under check

@@ -23,8 +23,7 @@ The gate's form (`ci/gate.sh`, `ci/contract.sh`):
    at the same output path with the same options.
 4. Compare the two native binaries with `cmp`. Generation two then runs the worker-count
    identity checks for C emission and native objects. Tree comparisons exclude only
-   `CONTRACT_NONDET_FILES` (`.tu_cache`, and `__sc_native_keys`, whose lines hold each object's file
-   identity).
+   `CONTRACT_NONDET_FILES` (`.tu_cache`).
 
 The per-TU cache header hashes the running compiler's content (`header_hash` in
 `src/driver/tuc.spc`, `compiler_id` in `src/driver/util.spc`), so `.tu_cache` differs

@@ -113,16 +113,15 @@ end); `loop_budgets` in `src/driver/emit.spc` holds the budgets. `-march=C` is `
 
 A build tree records the proofs that held (`__sc_prove`, `prove_cached` in `src/driver/emit.spc`): one
 key per module whose obligations all held, over the module's source, the shapes (`tuc::Shapes`: the
-text outside the function bodies) of every module it imports or names (transitively), the prelude's
-sources, the bodies the build keeps of the module and their recursion components, the compiler
-identity, the target, the architecture, the level and the flags. Each key's `@d` lines list the
-functions of other modules whose bodies its proofs read (`prv::check_kept`: a callee's parameter
-writes, `ensures` chains, ownership), each with its text's hash (`tuc::body_hash`); `@c` lines list the
-functions the build's evaluations ran (`Package.ce_reads`: a constant's value). A later build skips
-the proofs of each module whose key the record holds while each of its `@d` lines and every `@c` line
-still hold; a failed obligation is never recorded. A `@prove_exhaustive` function's module reads every
+text outside the function bodies) of every module it imports or names (transitively), the functions
+the type check's evaluations ran for each of those modules (`tuc::ce_sites`: a constant's value), the
+prelude's sources, the bodies the build keeps of the module and their recursion components, the
+compiler identity, the target, the architecture, the level and the flags. Each key's `@d` lines list
+the functions of other modules whose bodies its proofs read (`prv::check_kept`: a callee's parameter
+writes, `ensures` chains, ownership), each with its text's hash (`tuc::body_hash`). A later build skips
+the proofs of each module whose key the record holds while each of its `@d` lines still holds; a failed obligation is never recorded. A `@prove_exhaustive` function's module reads every
 module. A module the tree's record misses reads the shared record of its key in the cache base
-(`<base>/.prove/<key>`, `shared_record`, its `@d` and `@c` lines by file), which every tree of any
+(`<base>/.prove/<key>`, `shared_record`, its `@d` lines by file), which every tree of any
 project shares, and writes it once its proofs held: a second tree of the same sources proves nothing
 again. `SC_CEMIT_STATS=1` prints
 `prove: <n> to prove, <k> from the proof record, <w> workers` (`<w>`: the workers the proofs run on).
