@@ -401,7 +401,13 @@ row of `b` (16 f32, 8 f64 or 16 i8 lanes, `fma`; a lane `fma` without a vector e
 per lane: x86_64 below FMA, wasm32); on x86_64 the run-time copies (`--simd-dispatch`) run it with
 256-bit vectors and FMA where the CPU has them, whatever the build's level; on
 aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.spc` where the CPU has
-`sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64), on macOS, iOS, Linux and Android (`sc_sme_built()`); the kernels are
+`sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64), on macOS, iOS, Linux and Android (`sc_sme_built()`); on x86_64
+Linux, `mul_i8` and `mul_u8i8` run the AMX kernel of `ffi/sc_amx.spc` where the CPU has `amx-int8` and Linux
+grants the tile state (`detect::request(cpu::Feature::AmxInt8)`; refused, the lanes kernel runs): a 32 x 32 block of `c` on four tiles per step of 64 bytes of the inner dimension
+(`tdpbssd`, `tdpbusd`), `b` packed in groups of four rows (SSE2 interleaves), `a` and `c` in place
+when no extent pads. Under Intel SDE (Sapphire Rapids) it equals the sums and takes about 100 thousand
+instructions for 256 x 256 x 256 against 176 million for the lanes kernel; no machine here has AMX, so
+no time is measured. The SME kernels are
 module-level `asm` (Clang or GCC with binutils 2.40 or later, for the `sme2` mnemonics). The f16 and bf16 kernels widen both
 matrices to f32 first (a 16-bit `Float` holds its
 encoding in the low 16 bits of one u64), then run the f32 kernel: the widening FMOPA and BFMOPA round
@@ -556,7 +562,9 @@ discriminant `i`) with `has(f)` and `contains(other)`. `std::cpu::detect` (a sep
 a program that does not ask links no detector) reads the machine: `features()`, `has(f)`,
 `static_features()`, the set the build enables (the build constant `TARGET_FEATURES`: the
 platform's baseline, the build's features and what they imply), which `features()`
-always contains, and `detected()`, a new OS query without the build's set. Detection runs
+always contains, `detected()`, a new OS query without the build's set, and `request(f)`: `has(f)`, and
+for a feature whose register state the OS hands out on request (Linux x86_64's AMX tile data,
+`arch_prctl(ARCH_REQ_XCOMP_PERM)`, once per process) whether it was granted. Detection runs
 once, before `main` (an init-array entry) or at the first query, allocates nothing and takes no
 lock: `sysctlbyname` of `hw.optional.arm.FEAT_*` on macOS and iOS, `getauxval(AT_HWCAP)` and
 `AT_HWCAP2` on Linux and Android, `IsProcessorFeaturePresent` on Windows; a failing query means

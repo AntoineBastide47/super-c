@@ -329,11 +329,11 @@ fn mul_u8i8_sme(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
     }
 }
 
-// The AMX kernels (ffi/sc_amx.spc), the lanes kernels where Linux refuses the tile state.
+// The AMX kernels (ffi/sc_amx.spc) once the process has the tile state, else the lanes kernels.
 @arch(x86_64)
 @target_feature([cpu::Feature::AmxInt8])
 fn mul_i8_amx(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
-    if sc_amx::sc_amx_built() == 0 || unsafe sc_amx::sc_amx_mul_i8(
+    if sc_amx::sc_amx_built() == 0 || !detect::request(cpu::Feature::AmxInt8) || unsafe sc_amx::sc_amx_mul_i8(
         c.as_mut_ptr(),
         a.as_ptr() as *const u8,
         b.as_ptr() as *const u8,
@@ -349,7 +349,7 @@ fn mul_i8_amx(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
 @arch(x86_64)
 @target_feature([cpu::Feature::AmxInt8])
 fn mul_u8i8_amx(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
-    if sc_amx::sc_amx_built() == 0 || unsafe sc_amx::sc_amx_mul_i8(
+    if sc_amx::sc_amx_built() == 0 || !detect::request(cpu::Feature::AmxInt8) || unsafe sc_amx::sc_amx_mul_i8(
         c.as_mut_ptr(),
         a.as_ptr(),
         b.as_ptr() as *const u8,

@@ -36,6 +36,14 @@ pub fn has(f: cpu::Feature) bool {
     return sc_cpu::sc_cpu_has(f as i32) != 0;
 }
 
+/// Whether this machine has feature `f` and the operating system lets this process use it, asking for the
+/// register state it needs where the system wants that asked: Linux's AMX tile data
+/// (`arch_prctl(ARCH_REQ_XCOMP_PERM)`, once per process; the state then enlarges each signal frame). Any
+/// other feature: `has(f)`.
+pub fn request(f: cpu::Feature) bool {
+    return sc_cpu::sc_cpu_request(f as i32) != 0;
+}
+
 /// Whether this machine has every feature of x86-64 level `l`.
 pub fn has_level(l: cpu::Level) bool {
     let fs = l.features();

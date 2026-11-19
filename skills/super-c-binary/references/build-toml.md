@@ -225,6 +225,8 @@ by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compi
 | `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | off |
 | `sha` | x86_64 | `sse2` | `-msha` | off |
 | `sha512` | x86_64 | `avx2` | `-msha512` | off |
+| `amx-tile` | x86_64 | | `-mamx-tile` | off |
+| `amx-int8` | x86_64 | `amx-tile` | `-mamx-int8` | off |
 | `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | off |
 | `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | off |
 | `neon` | aarch64 | | | always on |

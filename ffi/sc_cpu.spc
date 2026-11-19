@@ -33,6 +33,55 @@ pub fn sc_cpu_has(feature: i32) i32 {
     return (unsafe atomic::load_u64(&WORD, 0) >> feature as u64 & 1) as i32;
 }
 
+/// 1 when feature `feature` is present and usable: on Linux x86_64 an AMX feature also needs the tile
+/// data state, which the process asks for once (`arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA)`);
+/// every other feature is usable when present (`sc_cpu_has`).
+pub fn sc_cpu_request(feature: i32) i32 {
+    if sc_cpu_has(feature) == 0 {
+        return 0;
+    }
+    if feature != cpu::Feature::AmxTile as i32 && feature != cpu::Feature::AmxInt8 as i32 {
+        return 1;
+    }
+    return tiles_granted() as i32;
+}
+
+// Whether the process may use the AMX tile data: granted where no system asks for it.
+@platform(!linux)
+fn tiles_granted() bool {
+    return true;
+}
+
+@platform(linux)
+@arch(!x86_64)
+fn tiles_granted() bool {
+    return true;
+}
+
+// Linux's answer, asked once: 1 granted, 2 refused, 0 not asked; two first callers ask alike.
+@platform(linux)
+@arch(x86_64)
+fn tiles_granted() bool {
+    let s = unsafe atomic::load_i32(&TILES, 1);
+    if s != 0 {
+        return s == 1;
+    }
+    // SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA.
+    let ok = unsafe syscall(158, 0x1023, 18) == 0;
+    unsafe atomic::store_i32(&mut TILES, 2 - ok as i32, 2);
+    return ok;
+}
+
+@platform(linux)
+@arch(x86_64)
+static mut TILES: i32 = 0;
+
+@platform(linux)
+@arch(x86_64)
+extern "C" "unistd.h" {
+    fn syscall(number: i64, ...) i64;
+}
+
 /// The present features, two words, into `out[0]` and `out[1]`. C callers: `void sc_cpu_words(uint64_t
 /// out[2])`.
 @export("sc_cpu_words")

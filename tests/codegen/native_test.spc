@@ -209,7 +209,6 @@ fn amx_byte_products_match_the_sums_under_the_emulator() {
 const AMX_CHECK: str = M"(import std::simd::matrix;
 import std::cpu;
 import std::cpu::detect as detect;
-import sc_amx;
 
 // The reference: each element the wrapping sum of the products.
 fn reference(c: []mut i32, a: []i32, b: []i32, m: usize, k: usize, n: usize) {
@@ -225,7 +224,7 @@ fn reference(c: []mut i32, a: []i32, b: []i32, m: usize, k: usize, n: usize) {
 }
 
 fn main() i32 {
-    println("amx-int8 {}, tiles granted {}", detect::has(cpu::Feature::AmxInt8), sc_amx::sc_amx_ready());
+    println("amx-int8 {}, tiles granted {}", detect::has(cpu::Feature::AmxInt8), detect::request(cpu::Feature::AmxInt8));
     let shapes: [(usize, usize, usize); 9] = [(1, 1, 1), (3, 5, 7), (16, 64, 16), (32, 64, 32), (33, 65, 31), (17, 200, 50), (64, 128, 64), (5, 1000, 3), (40, 3, 70)];
     let mut x: u64 = 0x9E3779B97F4A7C15;
     let mut bad: u32 = 0;

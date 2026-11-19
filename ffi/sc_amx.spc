@@ -1,12 +1,11 @@
 // AMX matrix kernels for std::simd::matrix: byte products into 32-bit sums on the tile registers
 // (AMX-INT8), a 32 x 32 block of the result per step of 64 of the inner dimension. The kernel is
-// module-level assembly; the Super-C entry points ask Linux for the tile state, pack the operands and
-// copy the result out. A kernel runs only where the CPU has AMX-INT8 (`cpu::Feature::AmxInt8`). Every
+// module-level assembly; the Super-C entry points pack the operands and copy the result out. The caller
+// has the tile state (`std::cpu::detect::request`). A kernel runs only where the CPU has AMX-INT8 (`cpu::Feature::AmxInt8`). Every
 // result equals the portable kernel's: element (i, j) is the sum over p of the products modulo 2^32
 // (`tdpbssd` and `tdpbusd` wrap). Prefer `std::simd::matrix`, which checks the shapes and chooses a
 // kernel by the CPU.
 import std::cpu;
-import atomic;
 import stdlib;
 import string as cstring;
 
@@ -20,15 +19,12 @@ pub const fn sc_amx_built() i32 {
 
 /// `c` (m x n, i32) = `a` (m x k) * `b` (k x n), the bytes of `a` signed, or unsigned when `ua`, those
 /// of `b` signed: each element the sum of the products modulo 2^32. 0, or -1 (`c` untouched) when the
-/// kernels are not built, Linux refuses the tile state, or the scratch cannot be allocated. The caller
-/// guarantees the three extents.
+/// kernels are not built or the scratch cannot be allocated. The caller guarantees the three extents and
+/// the tile state (`std::cpu::detect::request(cpu::Feature::AmxInt8)`).
 @platform(linux)
 @arch(x86_64)
 @target_feature([cpu::Feature::AmxInt8])
 pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k: usize, n: usize, ua: bool) i32 {
-    if !permitted() {
-        return -1;
-    }
     // The extents padded: rows to the block's 32, columns to 32, the inner dimension to a tile row's 64.
     let mp = m + 31 & ~31usize;
     let np = n + 31 & ~31usize;
@@ -148,43 +144,6 @@ struct Job {
     cfg: [u8; 64],
 }
 
-/// Whether this process may use the tiles: Linux granted the tile data state (asked on the first call).
-/// False where the kernels are not built.
-@platform(linux)
-@arch(x86_64)
-pub fn sc_amx_ready() bool {
-    return permitted();
-}
-
-@platform(!linux)
-@arch(x86_64)
-pub fn sc_amx_ready() bool {
-    return false;
-}
-
-@arch(!x86_64)
-pub fn sc_amx_ready() bool {
-    return false;
-}
-
-// Whether Linux gives this process the tile data state (`arch_prctl(ARCH_REQ_XCOMP_PERM,
-// XFEATURE_XTILEDATA)`), asked once: 1 granted, 2 refused, 0 not asked. Two first callers ask alike.
-@platform(linux)
-@arch(x86_64)
-static mut PERMIT: i32 = 0;
-
-@platform(linux)
-@arch(x86_64)
-fn permitted() bool {
-    let s = unsafe atomic::load_i32(&PERMIT, 1);
-    if s != 0 {
-        return s == 1;
-    }
-    let ok = unsafe sc_amx_permit() == 0;
-    unsafe atomic::store_i32(&mut PERMIT, 2 - ok as i32, 2);
-    return ok;
-}
-
 // `sc_amx_i8_tiles(job)`: for each 32 x 32 block of the padded result (rows i0 in rbx, columns j0 in
 // rcx), tiles 0 to 3 hold its four 16 x 16 quarters, zeroed; each step of 64 bytes of the inner
 // dimension loads rows i0 and i0 + 16 of `a` (tiles 4, 5: 64 bytes of each of 16 rows, kp apart) and
@@ -195,7 +154,6 @@ fn permitted() bool {
 // `sc_amx_pack_b(dst, b, groups, n, np)`: groups 0 to `groups - 1` of `b` (four rows of n bytes each),
 // columns 0 to a multiple of 16, into words g * np + j: per 16 columns, the four rows' bytes interleaved
 // by pairs (`punpcklbw`, `punpckhbw`) and the pairs by twos (`punpcklwd`, `punpckhwd`), 64 bytes out.
-// `sc_amx_permit()`: the system call's result, 0 when granted.
 @platform(linux)
 @arch(x86_64)
 asm(M"(.text
@@ -338,28 +296,17 @@ pop %r13
 pop %r12
 pop %rbx
 ret
-.p2align 4
-sc_amx_permit:
-mov $158, %eax
-mov $0x1023, %edi
-mov $18, %esi
-syscall
-ret
 .globl sc_amx_i8_tiles
 .hidden sc_amx_i8_tiles
 .type sc_amx_i8_tiles, @function
 .globl sc_amx_pack_b
 .hidden sc_amx_pack_b
 .type sc_amx_pack_b, @function
-.globl sc_amx_permit
-.hidden sc_amx_permit
-.type sc_amx_permit, @function
 )");
 
 @platform(linux)
 @arch(x86_64)
 extern "C" {
     fn sc_amx_i8_tiles(job: *mut Job);
-    fn sc_amx_permit() i64;
     fn sc_amx_pack_b(dst: *mut u32, b: *const u8, groups: usize, n: usize, np: usize);
 }
