@@ -49,7 +49,7 @@ pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k
         simd::interleave_rows4(pb + q * n, b + 4 * q * n, n, (k - 4 * q).min(4), n);
     }
     cstring::memset(pb + g * n, 0, bytes - g * n * 4);
-    tiles(c, a, pb, (pb as *mut u8) + bytes, m, k, n, ua);
+    tiles(c, a, pb, pb as *mut u8 + bytes, m, k, n, ua);
     stdlib::free(pb);
     return 0;
 }
@@ -80,7 +80,7 @@ unsafe fn tiles(c: *mut i32, a: *const u8, b: *const u32, last: *mut u8, m: usiz
     // The loaded configuration's quarter extents, 0 before the first.
     let mut cur: usize = 0;
     let mut spare: [i32; 16] = [0; 16];
-    let sp = &mut spare as *mut [i32; 16] as *mut i32;
+    let sp = ((&mut spare) as *mut [i32; 16]) as *mut i32;
     let mut zeroed = false;
     let mut i0: usize = 0;
     while i0 < m {
@@ -119,11 +119,20 @@ unsafe fn tiles(c: *mut i32, a: *const u8, b: *const u32, last: *mut u8, m: usiz
             if key != cur {
                 let r1t = r1.max(1);
                 let c1t = c1.max(1);
-                for (t, rows, bytes) in [(0usize, r0, 4 * c0), (1, r0, 4 * c1t), (2, r1t, 4 * c0), (3, r1t, 4 * c1t), (4, r0, 64), (5, r1t, 64), (6, 16, 4 * c0), (7, 16, 4 * c1t)] {
+                for (t, rows, bytes) in [
+                    (0usize, r0, 4 * c0),
+                    (1, r0, 4 * c1t),
+                    (2, r1t, 4 * c0),
+                    (3, r1t, 4 * c1t),
+                    (4, r0, 64),
+                    (5, r1t, 64),
+                    (6, 16, 4 * c0),
+                    (7, 16, 4 * c1t),
+                ] {
                     cfg[16 + 2 * t] = bytes as u8;
                     cfg[48 + t] = rows as u8;
                 }
-                immintrin::_tile_loadconfig(&cfg as *const [u8; 64]);
+                immintrin::_tile_loadconfig((&cfg) as *const [u8; 64]);
                 cur = key;
             }
             let d7 = if c1 != 0 {

@@ -897,7 +897,7 @@ pub unsafe const fn interleave_rows4(dst: *mut u32, src: *const u8, stride: usiz
         for j in 0..cols {
             let mut w = src[j] as u32;
             for r in 1..rows {
-                w |= (src[r * stride + j] as u32) << (8 * r) as u32;
+                w |= src[r * stride + j] as u32 << (8 * r) as u32;
             }
             dst[j] = w;
         }
