@@ -321,7 +321,7 @@ An analysis round reports what `super-c build` reports up to the borrow check: p
 and type errors, the feature errors, the always-panics check (an error, with or without lints),
 the deferred static_asserts and constants, the lints and the package-wide unused-item lint (only
 for a package without an analysis error), with the profile names, the constant engine budgets
-(`const-eval-steps`, `const-eval-memory`) and the CPU level and features (`target-cpu`,
+(`const-eval-steps`, `const-eval-memory`), the proof budget (`prove-steps`) and the CPU level and features (`target-cpu`,
 `target-features`, at the `debug` profile, as `super-c build` takes them) of the nearest
 `build.toml`; without one, the target's baseline features (`lsp_build_settings`).
 It publishes, then the borrow round (`Server::borrowck_round`) runs the borrow checks the round

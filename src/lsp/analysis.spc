@@ -210,12 +210,13 @@ struct BuildSettings {
     pub(package) ce_steps: u32,
     pub(package) ce_mem: u64,
     pub(package) std_internals: bool,
+    pub(package) prove_steps: u32,
     pub(package) cg: u64, // the debug profile's code-generation flags (`bsys::profile_codegen`)
 }
 
 // The nearest `build.toml` at or above `dir` (the manifest discovery of a manifest command) gives
 // the profile names a PROFILE comparison may name (`Package.profiles`), the constant engine budgets
-// (`Package.ce_steps`, `ce_mem`) and the CPU level and features, at the analysis's profile (`debug`,
+// (`Package.ce_steps`, `ce_mem`), the proof budget (`Package.prove_steps`) and the CPU level and features, at the analysis's profile (`debug`,
 // the profile of a package that names none), as `super-c build` takes them; without one (or one
 // that does not load), the built-in profiles, the engine defaults and the target's baseline, as a
 // script build takes them. The instruction set is the target's (`target_arch`).
@@ -241,6 +242,7 @@ fn lsp_build_settings(dir: str, target: i32) BuildSettings {
                     ce_steps: mm.ce_steps,
                     ce_mem: mm.ce_mem,
                     std_internals: mm.std_internals,
+                    prove_steps: mm.prove_steps,
                     cg: bsys::profile_codegen(&mm, "debug").1,
                 };
             }
@@ -274,6 +276,7 @@ fn lsp_apply_settings(p: &mut loader::Package, mut bs: BuildSettings) {
     p.ce_steps = bs.ce_steps;
     p.ce_mem = bs.ce_mem;
     p.std_internals = bs.std_internals;
+    p.prove_steps = bs.prove_steps;
     p.cg = bs.cg;
 }
 

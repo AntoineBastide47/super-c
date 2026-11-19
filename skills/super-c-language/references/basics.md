@@ -143,7 +143,8 @@ proves a table: `@prove_exhaustive lemma inv(x: u8) ensures g(f(x)) == x {}`. Th
 48 calls: a deeper recursion fails with "const-eval call depth exceeded"; narrow the inputs with
 `requires`.
 
-A call assumes the callee's `ensures`, never its body. An interface's method may state `requires`
+A call assumes the callee's `ensures`, never its body (except in ghost code, which reads the body of a
+`const fn` that ends: Ghost Code). An interface's method may state `requires`
 and `ensures` without a body (a `decreases` needs a body, error 539): a call through a bound or a
 `dyn` proves the interface's `requires` and assumes its `ensures`; each conformance's method proves
 its own `requires` from the interface's and the interface's `ensures` at its returns. A conformance's
@@ -274,7 +275,16 @@ its definition, one unfolding per call (a call over constants unfolds further); 
 - In ghost code every check is an obligation: an `assert`, an index, a division, a shift count, a
   panic. A spec function and a lemma must end: recursion needs `decreases`, each loop in a lemma
   needs a measure. Ghost code assumes a callee's `ensures` only when the callee ends (a spec
-  function, a lemma, a `@prove_exhaustive` function).
+  function, a lemma, a `@prove_exhaustive` function, a function without a loop that calls only
+  functions that end, itself only under its `decreases`).
+- In a spec function's or a lemma's body and clauses, an `assert .. by` block, a lemma call and a
+  `ghost` statement, a call of a `const fn` that ends is its body over any arguments, as a spec
+  function's call is: a lemma states a law over the program's own functions
+  (`lemma clamp_le(x: u32, hi: u32) ensures clamp(x, hi) <= hi {}`), and a recursion under
+  `decreases` unfolds once per call (induction). Where the function's own proof does not show that it
+  never panics (it has no clause, or a `panics if`), the body defines the call only where a path
+  returns: `double(x)` of `return x * 2;` is `2 * x` where `x < 2^31`, unknown elsewhere. A
+  function's own clauses outside these, and a `const fn` with a loop, give the callee's `ensures` only.
 - `assert P by { B };` proves P after B (a lemma call, a case split) and then assumes it.
 - Under `-fcontract-checks` a clause that calls a spec function or converts into `int` or `nat` is
   error 545: it has no run-time form.

@@ -569,6 +569,26 @@ fn unproved_ghost_code_is_an_error() {
         "cannot prove the invariant of this static's first value",
     );
     b.add(
+        "a const fn read where it overflows",
+        "const fn double(x: u32) u32 {\n    return x * 2;\n}\nlemma l(x: u32) ensures double(x) >= x {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn read where its index is out of bounds",
+        "const fn at(a: [u32; 4], i: usize) u32 {\n    return a[i];\n}\nlemma l(i: usize) ensures at([1, 2, 3, 4], i) >= 1 {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn with a loop",
+        "const fn spin(x: u32) u32 {\n    let mut y = x;\n    while y != 7 { y = y + 1; }\n    return y;\n}\nlemma l(x: u32) ensures spin(x) == 7 {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "a const fn that recurses without a measure",
+        "const fn r(x: u32) bool {\n    if x == 0 {\n        return true;\n    }\n    return !r(x);\n}\nlemma l(x: u32) ensures r(x) {}\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "the ensures of a callee that may not end",
         "const fn lie() bool ensures |r| false {\n    while true {}\n    return true;\n}\nlemma l() ensures false { let _ = lie(); }\n",
         "cannot prove this 'ensures' clause",
@@ -1231,6 +1251,52 @@ fn main(args: Vector<str>) i32 {
 }
 )",
         104,
+    );
+    // Ghost code reads a `const fn` that ends as its body: a law over the program's own functions, a
+    // recursion under `decreases` by induction, an operation where it fits; a lemma call gives real code
+    // the law.
+    b.add(
+        "lemmas over const fns read their bodies",
+        M"(const fn clamp(x: u32, hi: u32) u32 {
+    if x > hi {
+        return hi;
+    }
+    return x;
+}
+const fn double(x: u32) u32 {
+    return x * 2;
+}
+const fn sum_to(n: u32) u64
+    requires n <= 1000
+    ensures |r| r <= n as u64 * 1000
+    decreases n
+{
+    if n == 0 {
+        return 0;
+    }
+    return n as u64 + sum_to(n - 1);
+}
+lemma clamp_le(x: u32, hi: u32)
+    ensures clamp(x, hi) <= hi
+{}
+lemma double_even(x: u32)
+    requires x < 1000
+    ensures double(x) % 2 == 0
+{}
+lemma sum_ge(n: u32)
+    requires n <= 1000
+    ensures sum_to(n) >= n as u64
+{}
+fn main(args: Vector<str>) i32 {
+    let k = args.len() as u32;
+    let c = clamp(k + 40, 7);
+    clamp_le(k + 40, 7);
+    let a: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    sum_ge(4);
+    return (a[c as usize] + double(3) + sum_to(4) as u32) as i32;
+}
+)",
+        23,
     );
     // Twenty branches in a row make 2^20 paths: the walk that merges them at each join proves the call's
     // `requires` past the exact walk's budget.
@@ -4546,8 +4612,8 @@ fn main(args: Vector<str>) i32 {
 
 // The proof record of a build tree: a later build takes the proofs of each unchanged module from it,
 // an edit of a module proves it and its importers again, and a failed proof is never recorded. The
-// records every build tree shares give a new project std's proofs. A cache of its own: the suite's
-// holds other tests' records.
+// records every build tree shares give a new project std's proofs, and a budget outside the default is
+// part of the key. A cache of its own: the suite's holds other tests' records.
 @test
 fn proofs_are_recorded_per_module() {
     let p = cli::proj_new();
@@ -4583,6 +4649,15 @@ fn proofs_are_recorded_per_module() {
     );
     let again = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
     assert(again.ok() && again.out_has("prove: 1 to prove"), "the other modules take their proofs from the record");
+    // build.toml's `prove-steps` is part of the key of each module outside std: those prove again under
+    // it, std does not, and the default's records hold once it is gone.
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\nprove-steps = 20\n");
+    let starved = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
+    assert(starved.exit != 0 && starved.out_has("prove: 2 to prove"), "the two modules outside std prove again");
+    assert(starved.out_has("raise build.toml's 'prove-steps' (now 20)"), "20 steps are too few");
+    p.mkfile("build.toml", "bin = \"app\"\nroot = \"src/main.spc\"\n");
+    let back = cli::superc_env_in(root, "SC_CEMIT_STATS", "1", "build");
+    assert(back.ok() && back.out_has("prove: 0 to prove"), "the default budget's records hold");
     p.mkfile(
         "src/lib.spc",
         "pub fn inc(x: u32) u32 requires x < 100 ensures |r| r == x + 1 || x == 7 { return x + 1; }\n",

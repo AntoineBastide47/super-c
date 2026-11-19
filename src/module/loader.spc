@@ -485,6 +485,10 @@ pub(package) struct Package {
     pub(package) proof_only: Vector<u32>,
     /// Such a probe's solver steps, when not 0, past which a prover stops: the rewrite cannot win.
     pub(package) proof_cap: u64,
+    /// build.toml's `prove-steps`: the blocks, chain blocks and solver steps the proof of one body outside
+    /// std may spend; 0 = the prover's default (`prove::solver::STEP_BUDGET`). Part of the proof record's
+    /// key of each module outside std.
+    pub(package) prove_steps: u32,
     /// A compile asked for its program's LIR (an API client's): emission lowers every body to LIR, as under
     /// `SC_LIR=1`, and leaves the checked package's text form here. Null otherwise.
     pub(package) lir_out: *mut String,

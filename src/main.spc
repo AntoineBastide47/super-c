@@ -488,7 +488,7 @@ fn lint_alt() str<'static> {
 }
 
 // The settings of a lint run on `p`: `--proofs`, the profiles a PROFILE comparison may name (the
-// manifest's, else the built-ins) and `std_internals`.
+// manifest's, else the built-ins), `std_internals` and `prove-steps`.
 fn lint_settings(p: &mut loader::Package) {
     p.lint_proofs = unsafe LINT_PROOFS;
     let manf = stdio::fopen("build.toml", "rb");
@@ -499,6 +499,7 @@ fn lint_settings(p: &mut loader::Package) {
             let man = mo.unwrap();
             p.profiles = bsys::profile_names(&man);
             p.std_internals = man.std_internals;
+            p.prove_steps = man.prove_steps;
             return;
         }
     }

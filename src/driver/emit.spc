@@ -16219,9 +16219,10 @@ const PROVE_RECORD: str<'static> = "__sc_prove";
 // The proof key of each module: what its proofs read, the module's own source, what the modules it
 // imports or names (`mod_refs`), transitively, show (their shapes, `tuc::Shapes`, when `sh` holds them,
 // else their sources: the bodies the proofs read count by their `@d` lines), the prelude's sources, the
-// compiler, the target and the code-generation settings (`prove_cached` adds the bodies the build keeps
-// and their recursion components). Two independent 64-bit lanes per module (`2 * m`, `2 * m + 1`); the
-// set of modules is summed, so the module numbering of a build does not matter.
+// compiler, the target, the code-generation settings and outside std the proof budget (`prove_steps`;
+// `prove_cached` adds the bodies the build keeps and their recursion components). Two independent 64-bit
+// lanes per module (`2 * m`, `2 * m + 1`); the set of modules is summed, so the module numbering of a
+// build does not matter.
 fn prove_keys(p: &loader::Package, target: i32, sh: &tuc::Shapes) Vector<u64> {
     let n = p.modules.len();
     let mut cfg = compiler_id() ^ 0x9E3779B97F4A7C15u64;
@@ -16274,6 +16275,10 @@ fn prove_keys(p: &loader::Package, target: i32, sh: &tuc::Shapes) Vector<u64> {
         let tag = m as u32 + 1;
         let mut k1 = pre1 ^ splitmix(h1[m]);
         let mut k2 = pre2 ^ splitmix(h2[m] ^ 1);
+        if p.prove_steps != 0 && !p.in_std(m) {
+            k1 = splitmix(k1 ^ p.prove_steps as u64);
+            k2 = splitmix(k2.wrapping_add(p.prove_steps));
+        }
         work.clear();
         seen.set(m, tag);
         work.push(m as u32);

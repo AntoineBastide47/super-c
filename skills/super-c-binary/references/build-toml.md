@@ -12,6 +12,9 @@ target-cpu = "x86-64-v2"     # x86_64 level before the feature lists (skipped on
 simd-width = 256             # vector width the planner prefers on AVX-512: 256 or 512
 simd-dispatch = "x86-64-v3"  # x86_64: levels of the run-time copies of vector code, or "off"
 std_internals = true         # the project names std's unstable `pub(package)` items (std::platform); the compiler sets it
+prove-steps = 8000000        # the steps (blocks walked and solver steps) the proof of one function outside
+                             # std may spend (default 4000000; past it, error "exceeds its step budget");
+                             # lint and the language server read it too
 
 [lib]                        # library target (optional; root defaults to src/lib.spc,
 type = ["static", "shared"]  # type defaults to static; a shared library records its own file name
@@ -116,7 +119,7 @@ key per module whose obligations all held, over the module's source, the shapes 
 text outside the function bodies) of every module it imports or names (transitively), the functions
 the type check's evaluations ran for each of those modules (`tuc::ce_sites`: a constant's value), the
 prelude's sources, the bodies the build keeps of the module and their recursion components, the
-compiler identity, the target, the architecture, the level and the flags. Each key's `@d` lines list
+compiler identity, the target, the architecture, the level and the flags, and outside std `prove-steps`. Each key's `@d` lines list
 the functions of other modules whose bodies its proofs read (`prv::check_kept`: a callee's parameter
 writes, `ensures` chains, ownership), each with its text's hash (`tuc::body_hash`). A later build skips
 the proofs of each module whose key the record holds while each of its `@d` lines still holds; a failed obligation is never recorded. A `@prove_exhaustive` function's module reads every

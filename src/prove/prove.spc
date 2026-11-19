@@ -776,10 +776,13 @@ struct Sub {
 // How a checked operation's result is modeled: OVF_PROVE proves the operation does not overflow and
 // takes the exact value (a body with contracts, a contract expression); OVF_KEEP takes the exact
 // value only where it fits and a fresh one otherwise; OVF_EXACT takes it with no proof (a spec
-// function's definition, whose own proof covered each check on a path its `requires` admits).
+// function's definition, whose own proof covered each check on a path its `requires` admits); OVF_PATH
+// takes it where it fits, a condition of the path (the definition of a `const fn` whose own proof did
+// not cover its checks).
 const OVF_PROVE: u8 = 0;
 const OVF_KEEP: u8 = 1;
 const OVF_EXACT: u8 = 2;
+const OVF_PATH: u8 = 3;
 
 // The integer operations the walk reads as terms (`wide_kind`): the wide integers', then the
 // built-in integers' wrapping and rotating methods.
@@ -1260,6 +1263,9 @@ struct Prover<const B: usize> {
     ghost_fn: bool,
     gblk: Vector<bool>,
     in_ghost: bool,
+    // The block walked is ghost code (`in_ghost` at `run_block`), also while a clause's chain or a
+    // definition in it is walked: a `const fn` is its body there (`call_value`).
+    ghost_blk: bool,
     // A `define` of a `const fn` over constants (`call_value`): only the value of one returning path
     // counts, as the body may panic where a spec function may not.
     closed_def: bool,
@@ -1435,7 +1441,7 @@ struct Prover<const B: usize> {
     strl: loader::LookupHit,
     smut: loader::LookupHit,
     strv: loader::LookupHit, // the prelude's `str`
-    chain_ovf: u8, // the overflow model of a chain walk: OVF_PROVE, or OVF_EXACT in a definition
+    chain_ovf: u8, // the overflow model of a chain walk: OVF_PROVE, or OVF_EXACT or OVF_PATH in a definition
     chain_depth: u32, // the depth of chain walks (a clause, a definition): `derive` anchors their facts
     exact_body: bool, // the body under proof has a local of type `int` or `nat`
     ovf: u8,
@@ -1464,6 +1470,7 @@ struct Prover<const B: usize> {
     spent: u64, // the solver steps of every obligation `costs` held
     hints: Vector<loader::ProofHint>, // `lint --proofs`: the rewrites `cost_warnings` proposes
     cap: u64, // `Package.proof_cap`: past these solver steps of `costs`, the proof stops
+    budget: u32, // the blocks, chain blocks and solver steps the body may spend (`set_budget`)
     live: u64, // the solver steps of every obligation `costs` held, the current body's too
     // Whether the memory event under way is a write through a parameter's value at the entry, which no local
     // of the body (made after it) is reached by (`write_at`, `mem_event_keep`).
@@ -1650,6 +1657,7 @@ extend<const B: usize> Prover<B> {
             own_exp: Vector::<bool>::new(),
             gblk: Vector::<bool>::new(),
             in_ghost: false,
+            ghost_blk: false,
             closed_def: false,
             defs: Vector::<u32>::new(),
             def_of: Map::<u32, u32>::new(),
@@ -1782,6 +1790,7 @@ extend<const B: usize> Prover<B> {
             spent: 0,
             hints: Vector::<loader::ProofHint>::new(),
             cap: p.proof_cap,
+            budget: STEP_BUDGET,
             live: 0,
             spare_frame: false,
             refining: false,
@@ -4288,7 +4297,7 @@ extend<const B: usize> Prover<B> {
 
     fn spend(self: &mut Self) bool {
         self.steps += 1;
-        return !(self.sv.polling && self.sv.tick(1)) && self.steps + self.sv.steps <= STEP_BUDGET && self.steps <= self.walk_cap;
+        return !(self.sv.polling && self.sv.tick(1)) && self.steps + self.sv.steps <= self.budget && self.steps <= self.walk_cap;
     }
 
     // ---- reports ----------------------------------------------------------------------------------
@@ -5071,7 +5080,7 @@ extend<const B: usize> Prover<B> {
         // (`owns(p, n, 8)` beside `owns(p, m * 72, 8)`): the equality of the two, proved once, for every
         // part (each would prove it again).
         let g0 = self.tm.at(goal).op;
-        if (g0 == T_OR || g0 == T_AND) && !self.in_cong && self.steps + self.sv.steps <= STEP_BUDGET {
+        if (g0 == T_OR || g0 == T_AND) && !self.in_cong && self.steps + self.sv.steps <= self.budget {
             self.in_cong = true;
             let eqs = self.stated_congruence(pc0, goal);
             self.in_cong = false;
@@ -5090,7 +5099,7 @@ extend<const B: usize> Prover<B> {
         }
         // A block a removal took was held before it: the facts of the versions before, where two blocks
         // the body held apart are distinct.
-        if self.ov_had.len() != 0 && self.steps + self.sv.steps <= STEP_BUDGET && self.names_held(goal) {
+        if self.ov_had.len() != 0 && self.steps + self.sv.steps <= self.budget && self.names_held(goal) {
             let mut pc1 = pc0.clone();
             pc1.extend_copy(&self.ov_had);
             self.parts = 0;
@@ -5101,7 +5110,7 @@ extend<const B: usize> Prover<B> {
         // Two applications of one opaque predicate whose operands the path proves equal are equal: the
         // solver merges them where its arithmetic implies the operands equal, not where the bits do
         // (`A::owns(p, (n | LB) << 1 >> 1, 1)` beside `A::owns(p, n, 1)`, `n < LB`).
-        if self.steps + self.sv.steps <= STEP_BUDGET && !self.in_cong {
+        if self.steps + self.sv.steps <= self.budget && !self.in_cong {
             self.in_cong = true;
             let eqs = self.call_congruence(pc0, goal);
             self.in_cong = false;
@@ -5117,7 +5126,7 @@ extend<const B: usize> Prover<B> {
         // A goal over sequences the stages did not prove: the path's bounds on its unknowns, the
         // definitions of its terms and the elements' equalities of the equalities of sequences that share
         // an unknown with it (`instantiate`).
-        if self.seqeqs.len() != 0 && self.steps + self.sv.steps <= STEP_BUDGET && self.names_seq(goal) {
+        if self.seqeqs.len() != 0 && self.steps + self.sv.steps <= self.budget && self.names_seq(goal) {
             let mut seqf = Vector::<u32>::new();
             for j in 0..pc0.len() {
                 if self.names_seq(pc0[j]) {
@@ -6993,7 +7002,7 @@ extend<const B: usize> Prover<B> {
         let s0 = self.sv.steps;
         let mut ok = self.holds(pc, goal);
         // A goal over products of unknowns: once more with the products of rows (`Solver::nla_attempt`).
-        if !ok && !self.sv.gave_up && !self.refuted_goal && self.steps + self.sv.steps <= STEP_BUDGET && self.has_product(
+        if !ok && !self.sv.gave_up && !self.refuted_goal && self.steps + self.sv.steps <= self.budget && self.has_product(
             goal,
             pc,
         ) {
@@ -7025,7 +7034,7 @@ extend<const B: usize> Prover<B> {
             }
             return;
         }
-        if self.steps + self.sv.steps > STEP_BUDGET {
+        if self.steps + self.sv.steps > self.budget {
             self.budget_spent();
             return;
         }
@@ -7056,7 +7065,10 @@ extend<const B: usize> Prover<B> {
             dc::CANNOT_PROVE_CONTRACT,
             sp,
             format("the proof of this function exceeds its step budget"),
-            String::from_str("split the function, or state more facts as contracts"),
+            format(
+                "split the function, state more facts as contracts, or raise build.toml's 'prove-steps' (now {})",
+                self.budget,
+            ),
         );
     }
 
@@ -12372,7 +12384,7 @@ extend<const B: usize> Prover<B> {
             };
             let r0 = self.tm.and(nn, below);
             let fits = self.tm.and(r0, above);
-            if ovf != OVF_EXACT {
+            if ovf != OVF_EXACT && ovf != OVF_PATH {
                 self.oblige(
                     pc,
                     fits,
@@ -12401,10 +12413,14 @@ extend<const B: usize> Prover<B> {
 
     // A checked operation's value `exact` (of a type that fits it only if it does not overflow): with
     // OVF_PROVE the proof that it fits, under `pc`, then the exact value; with OVF_KEEP a fresh value
-    // that equals the exact one where it fits.
+    // that equals the exact one where it fits; with OVF_PATH the exact value where it fits (`pc`).
     fn checked(self: &mut Self, exact: u32, pc: &mut Vector<u32>, ovf: u8, key: u64, sp: tok::Span) u32 {
         let fits = self.tm.in_range(exact);
         if self.tm.is_true(fits) || ovf == OVF_EXACT {
+            return exact;
+        }
+        if ovf == OVF_PATH {
+            pc.push(fits);
             return exact;
         }
         if ovf == OVF_PROVE {
@@ -13459,11 +13475,18 @@ extend<const B: usize> Prover<B> {
         let mut leaves = Vector::<u64>::new();
         let none = tok::Span { start: 0, end: 0 };
         let pc0 = Vector::<u32>::new();
+        // A `const fn` whose own proof does not show that it never panics (no clause, or a `panics if`)
+        // is defined only where one of its paths returns, and an operation's value only where it fits.
+        let mut clauses = false;
+        for j in 0..cb.contracts.len() {
+            clauses = clauses || cb.contracts[j].kind != CT_PATTERN && cb.contracts[j].kind != CT_GHOST;
+        }
+        let safe = axiom || self.closed_def || self.is_ghost(d) || clauses && !self.has_clause(d, CT_PANICS);
         let om = replace(&mut self.mem, state);
         let ig = replace(&mut self.in_ghost, false);
         self.unfold += 1;
         self.chain_depth += 1;
-        let co = replace(&mut self.chain_ovf, OVF_EXACT);
+        let co = replace(&mut self.chain_ovf, pick(safe, OVF_EXACT, OVF_PATH));
         let mut pre = self.tm.boolean(true);
         for j in 0..cb.contracts.len() {
             if cb.contracts[j].kind == CT_REQUIRES {
@@ -13494,6 +13517,15 @@ extend<const B: usize> Prover<B> {
         if axiom {
             f = self.tm.or(f, post);
         }
+        if !safe {
+            let mut paths = Vector::<u32>::with_capacity(leaves.len());
+            for j in 0..leaves.len() {
+                paths.push((leaves[j] >> 32) as u32);
+            }
+            let cover = self.factor_or(&paths);
+            let out = self.tm.not(cover);
+            f = self.tm.or(f, out);
+        }
         // One path and no `requires`: the call is the value it returns. A recursive function's call stays a
         // term: its value would name every level below.
         if !axiom && !by_ref && leaves.len() == 1 && self.tm.is_true(pre) && !self.has_clause(d, CT_DECREASES) {
@@ -13511,7 +13543,7 @@ extend<const B: usize> Prover<B> {
         let st = self.alias_pool.len() as u64;
         for j in 0..leaves.len() {
             let v = (leaves[j] & 0xFFFFFFFFu64) as u32;
-            if !by_ref && v != NONE && self.sq_of(v) != 0 {
+            if safe && !by_ref && v != NONE && self.sq_of(v) != 0 {
                 self.alias_pool.push(v);
             }
         }
@@ -13613,7 +13645,7 @@ extend<const B: usize> Prover<B> {
         let mut edges = Vector::<u64>::new();
         // The path condition of the sub-path walked: `pc`, then its conditions (one buffer for the walk).
         let mut full = Vector::<u32>::with_capacity(pc.len() + 8);
-        for _k in 0..STEP_BUDGET {
+        for _k in 0..self.budget {
             if subs.len() == 0 {
                 break;
             }
@@ -15935,12 +15967,15 @@ extend<const B: usize> Prover<B> {
             closed = closed && !self.mentions_generic(m2, t2, 0);
         }
         closed = closed && self.ends(t.callee, 0);
+        // In ghost code (a spec function's or a lemma's body and clauses, a ghost block) a `const fn` that
+        // ends is its body over any arguments, as a spec function is.
+        let unf = !ghost && !closed && self.ghost_blk && self.is_const_fn(t.callee) && self.ends(t.callee, 0);
         let mut binds = Vector::<u64>::new();
         let bound = if via {
             binds = cbinds;
             true
         } else {
-            (ghost || closed) && !(iface_member && t.recv != TYPE_NONE) && self.call_binds(cb, cm, t, &mut binds)
+            (ghost || closed || unf) && !(iface_member && t.recv != TYPE_NONE) && self.call_binds(cb, cm, t, &mut binds)
         };
         // A spec function's reference result refers to a value that is a function of the arguments.
         let rt = *self.ast_of(cm).type_at(rty);
@@ -18000,9 +18035,10 @@ extend<const B: usize> Prover<B> {
     }
 
     // Whether every call of function `d` ends: its kept body has no loop and calls no function that may
-    // not end (itself included, `depth` calls deep); a call that panics ends, as does an integer or float
-    // method the walk models (`wide_kind`, `soft_kind`). Ghost code assumes the `ensures` of such a callee
-    // (`v.len()` in an `invariant`).
+    // not end (itself included, `depth` calls deep, except under its `decreases`); a call that panics
+    // ends, as does an integer or float method the walk models (`wide_kind`, `soft_kind`). Ghost code
+    // assumes the `ensures` of such a callee (`v.len()` in an `invariant`), and reads the body of such a
+    // `const fn` as its definition (`call_value`).
     fn ends(self: &mut Self, d: DefId, depth: u32) bool {
         let key = d.module as u64 << 32 | d.node as u64;
         let pre = self.ends_memo.contains_key(&key);
@@ -18023,7 +18059,8 @@ extend<const B: usize> Prover<B> {
         if let Some(v) = self.ends_memo.get(&key) {
             return *v;
         }
-        // A call back to a function being asked is a recursion: it may not end.
+        // A call back to a function being asked is a recursion: it may not end, unless it calls itself
+        // under its proved measure (`decreases`).
         self.ends_memo.insert(key, false);
         let cbp = self.kept(d);
         if cbp == null {
@@ -18033,9 +18070,13 @@ extend<const B: usize> Prover<B> {
         if has_cycle(cb) {
             return false;
         }
+        let dec = self.has_clause(d, CT_DECREASES);
         for blk in 0..cb.blocks.len() {
             let t = cb.blocks.at(blk).term;
-            if t.kind == ir::TM_CALL && !self.ends(t.callee, depth + 1) {
+            if t.kind == ir::TM_CALL && !(dec && t.callee.node == d.node && t.callee.module == d.module) && !self.ends(
+                t.callee,
+                depth + 1,
+            ) {
                 return false;
             }
         }
@@ -18560,6 +18601,7 @@ extend<const B: usize> Prover<B> {
         self.clear_terms();
         self.sv.steps = 0;
         self.steps = 0;
+        self.set_budget(b.module);
         self.over = false;
         self.failed.clear();
         let _ = self.needs_proof(b);
@@ -18939,6 +18981,18 @@ extend<const B: usize> Prover<B> {
 
     // One walk of body `bp` with a budget of `cap` walk steps (`spend`), or with 0 the exact walk's
     // first (FACTS_WALK or PROOF_WALK).
+    // The step budget of a body of module `m`: build.toml's `prove-steps` outside std
+    // (`Package.prove_steps`), else STEP_BUDGET.
+    const fn set_budget(self: &mut Self, m: ModuleId) {
+        let ps = self.pkg().prove_steps;
+        self.budget = if ps != 0 && !self.pkg().in_std(m as usize) {
+            ps
+        } else {
+            STEP_BUDGET
+        };
+        self.sv.limit = self.budget;
+    }
+
     fn walk_body(self: &mut Self, bp: *const ir::CoreBody, refining: bool, cap: u32) {
         let b = unsafe &*bp;
         self.m = b.module;
@@ -18948,6 +19002,7 @@ extend<const B: usize> Prover<B> {
         // interface's contracts (`refine_all`).
         let own = !refining || self.refine_all;
         self.ghost_fn = self.is_ghost(b.owner);
+        self.ghost_blk = self.ghost_fn;
         let facts = own && !self.ghost_fn && self.facts_wanted(b);
         let needs = self.needs_proof(b) || refining || self.ghost_fn;
         if !needs && !facts {
@@ -18975,6 +19030,7 @@ extend<const B: usize> Prover<B> {
         }
         self.sv.steps = 0;
         self.steps = 0;
+        self.set_budget(b.module);
         self.over = false;
         self.failed.clear();
         self.begin_sites(b, !own);
@@ -19087,7 +19143,7 @@ extend<const B: usize> Prover<B> {
     // Walk the queued paths of body `b` (its own walk when `own`): at the end each check that held on
     // every path that reached it is a fact.
     fn walk_paths(self: &mut Self, b: &ir::CoreBody, own: bool) {
-        for _k in 0..STEP_BUDGET {
+        for _k in 0..self.budget {
             if self.over {
                 return;
             }
@@ -19902,6 +19958,7 @@ extend<const B: usize> Prover<B> {
         self.views = replace(&mut path.views, Vector::<u64>::new());
         self.ov = path.ov;
         self.in_ghost = self.ghost_fn || self.gblk[path.blk as usize];
+        self.ghost_blk = self.in_ghost;
         let bb = *b.blocks.at(path.blk as usize);
         let ovf = self.ovf;
         self.mi_dirty = replace(&mut path.mi, Vector::<u32>::new());

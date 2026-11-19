@@ -359,6 +359,7 @@ pub(package) struct Manifest<'a> {
     pub(package) jobs: u32,
     pub(package) ce_steps: u32, // const-eval step budget; 0 = the engine default (~2M); CLI --const-eval-steps overrides
     pub(package) ce_mem: u64, // const-eval memory budget in bytes; 0 = the engine default; CLI --const-eval-memory overrides
+    pub(package) prove_steps: u32, // the proof step budget of one body; 0 = the prover's default (`Package.prove_steps`)
     pub(package) std_internals: bool, // `std_internals`: the project names std's `pub(package)` items (unstable internals)
     pub(package) default_profile: String,
     pub(package) profiles: Vector<Profile<'a>>,
@@ -733,6 +734,9 @@ pub(package) fn parse_check<'a>(src: str, file: str, bootstrap: bool) (Option<Ma
             } else if key == "const-eval-steps" {
                 // 0 = engine default; a `--const-eval-steps` CLI flag overrides this at build time.
                 set_u32(it, &mut errs, &mut m.ce_steps);
+            } else if key == "prove-steps" {
+                // 0 = the prover's default.
+                set_u32(it, &mut errs, &mut m.prove_steps);
             } else if key == "const-eval-memory" {
                 // bytes; 0 = engine default; a `--const-eval-memory` CLI flag overrides this.
                 if it.val.kind != toml::TV_INT || it.val.i < 0 {
@@ -1148,6 +1152,7 @@ extend Manifest {
             jobs: 0,
             ce_steps: 0,
             ce_mem: 0,
+            prove_steps: 0,
             default_profile: String::new(),
             profiles: Vector::<Profile>::new(),
             commands: Vector::<Command>::new(),
