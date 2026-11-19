@@ -550,6 +550,102 @@ pub(package) const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) 
     return true;
 }
 
+/// The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
+/// of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
+pub(package) const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
+    if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
+        return None;
+    }
+    let t = b.insts[m as usize];
+    let code = (t.aux & VOP_CODE) as u32;
+    if t.op != O_VOP || t.b != 2 || t.c != VNONE || code < core::OP_SIMD + core::SIMD_CMP_EQ as u32 || code > core::OP_SIMD + core::SIMD_CMP_GE as u32 {
+        return None;
+    }
+    let p = b.pool[t.a as usize];
+    let q = b.pool[(t.a + 1) as usize];
+    let tp = b.type_of(p);
+    if !is_vec(tp) || b.type_of(q) != tp || is_vec(t.ty) {
+        return None;
+    }
+    let lt = lane_type(tp);
+    let c = simd_cond((code - core::OP_SIMD) as u8, (t.aux & VOP_SIGNED) != 0, is_float(lt));
+    if !vcmp_ok(c, lt) {
+        return None;
+    }
+    return Some((c, p, q));
+}
+
+/// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
+pub(package) const fn zero_vec(b: &Body, v: Value) bool {
+    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_SPLAT {
+        return int_bits(b, t.a).unwrap_or(1) == 0;
+    }
+    if t.op != O_WCONST {
+        return false;
+    }
+    for k in t.a..t.a + t.b {
+        if b.words[k as usize] != 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// How an SVE predicate governs masked load or store `t` through a pointer (`SIMD_LOAD_MASKED_PTR`,
+/// `SIMD_STORE_MASKED_PTR`) of a vector of at most 16 bytes (`codegen::live::FOLD_PRED`, `Cpu.vpred`), its
+/// mask through extensions and truncations that keep its lanes: the bits of a comparison of two vectors of
+/// the access's lanes (`mask_cmp`; a load's fallback then zero), as (its condition, its operands); else the
+/// bits of a lane mask of those lanes (`bits_mask`, each lane all ones or 0), as (C_COUNT, the lane mask,
+/// VNONE); else (C_COUNT, VNONE, VNONE).
+pub(package) const fn pred_mask(b: &Body, t: Inst) (u16, Value, Value) {
+    let code = (t.aux & VOP_CODE) as u32;
+    let ld = code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32;
+    if t.op != O_VOP || t.b != 3 || !ld && code != core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 {
+        return (C_COUNT, VNONE, VNONE);
+    }
+    let vt = if ld {
+        t.ty
+    } else {
+        b.type_of(b.pool[(t.a + 2) as usize])
+    };
+    if !is_vec(vt) || type_bytes(vt, 8) > 16 {
+        return (C_COUNT, VNONE, VNONE);
+    }
+    let mut x = b.pool[(t.a + 1) as usize];
+    let mut kept: u32 = 64;
+    // Each step takes one extension or truncation: at most 6 (1 to 8 bytes and back).
+    for _ in 0..6 {
+        if (x & (VPARAM | VFLAG)) == 0 && x != VNONE && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
+            if b.insts[x as usize].op == O_TRUNC {
+                kept = kept.min(type_bits(b.insts[x as usize].ty, 8));
+            }
+            x = b.insts[x as usize].a;
+        }
+    }
+    if kept < lanes(vt) {
+        return (C_COUNT, VNONE, VNONE);
+    }
+    let same = |u: u8| lanes(u) == lanes(vt) && type_bytes(lane_type(u), 8) == type_bytes(lane_type(vt), 8);
+    let mc = mask_cmp(b, x);
+    if mc.is_some() {
+        let (c, p, q) = mc.unwrap();
+        let ok = c <= C_UGE || c == C_OEQ || c == C_UNE || c >= C_OLT && c <= C_OGE;
+        if ok && same(b.type_of(p)) && (!ld || zero_vec(b, b.pool[(t.a + 2) as usize])) {
+            return (c, p, q);
+        }
+        return (C_COUNT, VNONE, VNONE);
+    }
+    let v = bits_mask(b, x);
+    if v == VNONE || !same(b.type_of(v)) {
+        return (C_COUNT, VNONE, VNONE);
+    }
+    return (C_COUNT, v, VNONE);
+}
+
 /// The LIR condition of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`): of floats, else signed or not.
 pub(package) const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
     let k = (c - core::SIMD_CMP_EQ) as usize;

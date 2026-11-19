@@ -43,6 +43,30 @@ const ZERO_QUADS: u32 = 8;
 const V0: u8 = 32; // register number of v0: x registers are 0..31
 
 // The register number of part `pa`.
+// The SVE comparison into p0 governed by p7 of each LIR condition (`C_*` order; `pred_mask` takes an integer
+// one, or a float `oeq`, `une`, `olt` .. `oge`): its encoding of p0, p7 and size 0, and whether its operands
+// swap (`a < b` is `b > a`); 0 for none.
+const SVE_CMP: [(u32, bool); 18] = [
+    (0x2400A000, false), // eq: CMPEQ
+    (0x2400A010, false), // ne: CMPNE
+    (0x24008010, true), // slt: CMPGT
+    (0x24008000, true), // sle: CMPGE
+    (0x24008010, false), // sgt
+    (0x24008000, false), // sge
+    (0x24000010, true), // ult: CMPHI
+    (0x24000000, true), // ule: CMPHS
+    (0x24000010, false), // ugt
+    (0x24000000, false), // uge
+    (0x65006000, false), // oeq: FCMEQ
+    (0, false), // one
+    (0x65004010, true), // olt: FCMGT
+    (0x65004000, true), // ole: FCMGE
+    (0x65004010, false), // ogt
+    (0x65004000, false), // oge
+    (0, false), // ueq
+    (0x65006010, false), // une: FCMNE
+];
+
 const fn preg(pa: ab::Part) u8 {
     return pa.reg + ast::pick(pa.v, V0, 0);
 }
@@ -212,6 +236,11 @@ pub(package) struct Gen {
     zreg: u8,
     zwide: bool,
     zat: u32,
+    // The lane mask whose SVE predicate p0 holds at element size `psz` (`masked_pred`; VNONE: none), set at
+    // word `pat` of the current block: a later access of its block takes it while no call came between.
+    pv: Value,
+    psz: u32,
+    pat: u32,
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
@@ -348,6 +377,9 @@ extend Gen {
             zreg: NOREG,
             zwide: false,
             zat: 0,
+            pv: VNONE,
+            psz: 0,
+            pat: 0,
             fix: Vector::<u64>::new(),
             far: false,
             shrink: false,
@@ -3031,7 +3063,12 @@ extend Gen {
 
     // Whether a code word before `to` is a `BL` or a `BLR`.
     const fn calls_before(self: &Self, to: u32) bool {
-        for w in 0..to {
+        return self.calls_in(0, to);
+    }
+
+    // Whether a code word from `from` to `to` is a `BL` or a `BLR`.
+    const fn calls_in(self: &Self, from: u32, to: u32) bool {
+        for w in from..to {
             let x = self.code[w as usize];
             if (x & 0xFC000000) == 0x94000000 || (x & 0xFFFFFC1F) == 0xD63F0000 {
                 return true;
@@ -3456,6 +3493,7 @@ extend Gen {
         }
         self.cr.pos = q;
         self.btest_x = NONE;
+        self.pv = VNONE;
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -4012,7 +4050,9 @@ extend Gen {
             return true;
         }
         if (op == O_SPLAT || op == O_WCONST) && self.cr.lv.pfold[i as usize] {
-            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`)
+            // Its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`), or the masked loads it is the
+            // fallback of zero their other lanes themselves (`lv::FOLD_PRED`).
+            return true;
         }
         if op == O_VEXTRACT && self.cr.lv.pfold[i as usize] {
             return true; // its splat reads the lane (`lv::FOLD_LANE`)
@@ -4313,6 +4353,8 @@ extend Gen {
             return self.sys(i, t);
         }
         if op == O_ASM {
+            // Its clobbers may take the predicates.
+            self.pv = VNONE;
             return self.asm_inst(i, t);
         }
         if op == O_VAEND {
@@ -12382,27 +12424,42 @@ extend Gen {
         }
     }
 
-    // Masked load (into vector `i`) or `store` through a pointer whose mask is the bits of a lane mask
-    // (`lv::FOLD_PRED`, `lv::pred_lanes`), through an SVE predicate on the vector's lanes: PTRUE of them into
-    // p7, CMPNE of the lane mask's lanes into p0, then LD1 (the fallback's lanes where the mask's are 0, by
-    // BIF) or ST1.
+    // Masked load (into vector `i`) or `store` through a pointer whose mask an SVE predicate governs
+    // (`lv::FOLD_PRED`, `pred_mask`): PTRUE of the vector's lanes into p7, then into p0 the lane comparison
+    // whose bits the mask is (`SVE_CMP`), or CMPNE of the lane mask's lanes, unless p0 holds them already
+    // (`pv`); then LD1 (a lane mask's fallback lanes where it is 0, by BIF) or ST1.
     fn masked_pred(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
         let vt = tys[2];
         let nb = type_bytes(vt, 8);
         let sz = type_bytes(lane_type(vt), 8).trailing_zeros() as u32;
         let n = lanes(vt);
-        let v = lv::pred_lanes(self.cr.b(), self.cr.b().insts[i as usize]);
+        let (c, v, w) = pred_mask(self.cr.b(), self.cr.b().insts[i as usize]);
         let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        let rw = if c != C_COUNT {
+            self.vec_use(w, V0 + 31) as u32 - V0 as u32
+        } else {
+            0
+        };
         let p = self.reg(ops[0]) as u32;
-        // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
-        self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
-        self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+        if self.pv != ops[1] || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
+            self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
+            if c != C_COUNT {
+                let (base, swap) = SVE_CMP[c as usize];
+                self.emit(base | sz << 22 | ast::pick(swap, rm, rw) << 16 | 7u32 << 10 | ast::pick(swap, rw, rm) << 5);
+            } else {
+                self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+            }
+            self.pv = ops[1];
+            self.psz = sz;
+            self.pat = self.code.len() as u32;
+        }
         if store {
             let rv = self.vec_use(ops[2], V0 + 31);
             self.emit(a::sve_st1(sz, rv - V0, 0, p));
             return;
         }
-        if lv::zero_vec(self.cr.b(), ops[2]) {
+        if zero_vec(self.cr.b(), ops[2]) {
             let rd = self.vec_def(i);
             self.emit(a::sve_ld1(sz, rd - V0, 0, p));
             return;

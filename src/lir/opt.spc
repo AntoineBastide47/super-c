@@ -11926,12 +11926,33 @@ extend Opt {
         return false;
     }
 
+    // Whether masked loads and stores through a pointer alone read mask bits `i`, each as an SVE predicate of
+    // the comparison that makes them (`pred_mask`): the comparison stays, each access compares into its
+    // predicate (`Cpu.vpred`).
+    fn pred_reads(self: &mut Self, b: &Body, i: u32) bool {
+        let mut n: u32 = 0;
+        for j in 0..b.insts.len() as u32 {
+            let t = b.insts[j as usize];
+            lv::uses_edges(b, t, &mut self.uses);
+            for q in 0..self.uses.len() {
+                if self.uses[q] != i {
+                    continue;
+                }
+                if pred_mask(b, t).0 == C_COUNT || b.pool[(t.a + 1) as usize] != i {
+                    return false;
+                }
+                n += 1;
+            }
+        }
+        return n != 0;
+    }
+
     // Mask bits `t` (instruction `i` of block `k`) of a lane-wise comparison (`mask_cmp`), on a target that
     // makes no bits of a lane mask in one instruction (`Package.mask_bits`): the comparison's lane mask
     // (`O_VCMP`), widened until each lane holds its bit (`mask_width`; at most 64 bytes), ANDed with each
     // lane's bit (a wide constant, which leaves a loop) and summed (`reduce_add`). Whether it did.
     fn mask_sum(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        if pk.mask_bits || !is_int(t.ty) {
+        if pk.mask_bits || !is_int(t.ty) || pk.cpu_of(b).vpred && self.pred_reads(b, i) {
             return false;
         }
         let mc = mask_cmp(b, i);
@@ -19155,31 +19176,6 @@ const fn droppable(t: Inst) bool {
     return pure_op(t.op) || t.op == O_LOAD && (t.aux & MEM_VOLATILE) == 0 || t.op == O_VOP && (cmp || sum || minmax_vop(
         t,
     ));
-}
-
-// The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
-// of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
-const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
-    if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
-        return None;
-    }
-    let t = b.insts[m as usize];
-    let code = (t.aux & VOP_CODE) as u32;
-    if t.op != O_VOP || t.b != 2 || t.c != VNONE || code < core::OP_SIMD + core::SIMD_CMP_EQ as u32 || code > core::OP_SIMD + core::SIMD_CMP_GE as u32 {
-        return None;
-    }
-    let p = b.pool[t.a as usize];
-    let q = b.pool[(t.a + 1) as usize];
-    let tp = b.type_of(p);
-    if !is_vec(tp) || b.type_of(q) != tp || is_vec(t.ty) {
-        return None;
-    }
-    let lt = lane_type(tp);
-    let c = simd_cond((code - core::OP_SIMD) as u8, (t.aux & VOP_SIGNED) != 0, is_float(lt));
-    if !vcmp_ok(c, lt) {
-        return None;
-    }
-    return Some((c, p, q));
 }
 
 // ---- Folding ------------------------------------------------------------------------------------------

@@ -9260,7 +9260,8 @@ data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000
 )";
     let (b, a) = optimized_cpu(src, VECTOR, false, 0, true);
     let s = text_of(&a, "sum");
-    assert(count(&s, "load_masked_ptr") == 1, s.as_str());
+    // The lane comparison stays for the load, which makes it its predicate (`Opt::pred_reads`).
+    assert(count(&s, "load_masked_ptr") == 1 && s.contains("vop.lt."), s.as_str());
     for n in 0..26u64 {
         let x: []u64 = [n];
         same_outcome(&b, &a, "sum", x, n * (n + 1) / 2, false);

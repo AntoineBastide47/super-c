@@ -86,9 +86,10 @@ pub(package) const FOLD_MOVBE: u64 = 288230376151711744;
 /// A load that de-interleaving shuffles of a group of three alone read (`Live::ld3_field`): each shuffle
 /// loads the group itself (arm64's `ld3`).
 pub(package) const FOLD_LD3: u64 = 576460752303423488;
-/// The bits of a lane mask that masked loads and stores through a pointer alone read (`pred_lanes`), with
-/// the sum and the AND that make them: each access sets a predicate from the lane mask itself (arm64 SVE's
-/// CMPNE).
+/// The mask bits that masked loads and stores through a pointer alone read (`pred_mask`) and what makes
+/// them: a lane comparison, which each access makes into a predicate itself (arm64 SVE's CMPHI and the
+/// like), or the sum and the AND of a lane mask, each access's predicate the lane mask's (CMPNE). A vector
+/// of zeros those loads alone read as their fallback, which their predicated loads give.
 pub(package) const FOLD_PRED: u64 = 1152921504606846976;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
@@ -1618,11 +1619,15 @@ extend Live {
         }
         if (self.fold_ops & FOLD_PRED) != 0 {
             let mut preds = Vector::<Value>::new();
+            let mut zeros = Vector::<Value>::new();
             self.scan_ops([O_VOP]);
             for q in 0..self.scan.len() {
                 let t = b.insts[self.scan[q] as usize];
-                if pred_lanes(b, t) != VNONE {
+                if pred_mask(b, t).1 != VNONE {
                     preds.push(b.pool[(t.a + 1) as usize]);
+                    if t.ty != T_NONE && zero_vec(b, b.pool[(t.a + 2) as usize]) {
+                        zeros.push(b.pool[(t.a + 2) as usize]);
+                    }
                 }
             }
             preds.sort();
@@ -1635,6 +1640,17 @@ extend Live {
                 if (e - k) as u32 == self.count[preds[k] as usize] && self.pred_chain(b, preds[k], false) {
                     let _ = self.pred_chain(b, preds[k], true);
                 }
+                k = e;
+            }
+            // A zero fallback folds where every load that reads it folds its mask.
+            zeros.sort();
+            k = 0;
+            while k < zeros.len() {
+                let mut e = k + 1;
+                while e < zeros.len() && zeros[e] == zeros[k] {
+                    e += 1;
+                }
+                self.pfold[zeros[k] as usize] = (e - k) as u32 == self.count[zeros[k] as usize];
                 k = e;
             }
         }
@@ -3344,12 +3360,12 @@ extend Live {
         ));
     }
 
-    // Whether the instructions that make mask bits `m` from a lane mask (`pred_lanes`: extensions and
-    // truncations, the lanes' sum, the AND with their bits) have no other reader than the next of them, and
-    // with `mark`, fold them (`FOLD_PRED`), the AND's constant too when it alone reads it.
+    // Whether the instructions that make mask bits `m` (`pred_mask`: extensions and truncations, then a lane
+    // comparison, or the lanes' sum and the AND of a lane mask with their bits) have no other reader than the
+    // next of them, and with `mark`, fold them (`FOLD_PRED`), the AND's constant too when it alone reads it.
     const fn pred_chain(self: &mut Self, b: &Body, m: Value, mark: bool) bool {
         let mut x = m;
-        // At most 6 extensions and truncations (`pred_lanes`), the sum, the AND.
+        // At most 6 extensions and truncations (`pred_mask`), the comparison or the sum and the AND.
         for _ in 0..8 {
             if x != m && self.count[x as usize] != 1 {
                 return false;
@@ -3362,6 +3378,9 @@ extend Live {
                 if mark && is_inst(t.b) && self.count[t.b as usize] == 1 {
                     self.pfold[t.b as usize] = true;
                 }
+                return true;
+            }
+            if t.op == O_VOP && (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
                 return true;
             }
             x = ast::pick(t.op == O_VOP, b.pool[t.a as usize], t.a);
@@ -7628,63 +7647,6 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
             if !remat_inst(p, b, uses[u]) {
                 return false;
             }
-        }
-    }
-    return true;
-}
-
-/// The lane mask (each lane all ones or 0, `lane_mask`) whose bits are the mask of masked load or store `t`
-/// through a pointer (`SIMD_LOAD_MASKED_PTR`, `SIMD_STORE_MASKED_PTR`) of a vector of at most 16 bytes, of the
-/// vector's lanes: the mask is the lane mask's `bits_mask`, through extensions and truncations that keep its
-/// lanes. VNONE for another access or mask.
-pub(package) const fn pred_lanes(b: &Body, t: Inst) Value {
-    let code = (t.aux & VOP_CODE) as u32;
-    let ld = code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32;
-    if t.op != O_VOP || t.b != 3 || !ld && code != core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 {
-        return VNONE;
-    }
-    let vt = if ld {
-        t.ty
-    } else {
-        b.type_of(b.pool[(t.a + 2) as usize])
-    };
-    if !is_vec(vt) || type_bytes(vt, 8) > 16 {
-        return VNONE;
-    }
-    let mut x = b.pool[(t.a + 1) as usize];
-    let mut kept: u32 = 64;
-    // Each step takes one extension or truncation: at most 6 (1 to 8 bytes and back).
-    for _ in 0..6 {
-        if is_inst(x) && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
-            if b.insts[x as usize].op == O_TRUNC {
-                kept = kept.min(type_bits(b.insts[x as usize].ty, 8));
-            }
-            x = b.insts[x as usize].a;
-        }
-    }
-    let v = bits_mask(b, x);
-    if v == VNONE || kept < lanes(vt) {
-        return VNONE;
-    }
-    let mt = b.type_of(v);
-    return ast::pick(lanes(mt) == lanes(vt) && type_bytes(lane_type(mt), 8) == type_bytes(lane_type(vt), 8), v, VNONE);
-}
-
-/// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
-pub(package) const fn zero_vec(b: &Body, v: Value) bool {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op == O_SPLAT {
-        return int_const(b, t.a) == 0;
-    }
-    if t.op != O_WCONST {
-        return false;
-    }
-    for k in t.a..t.a + t.b {
-        if b.words[k as usize] != 0 {
-            return false;
         }
     }
     return true;
