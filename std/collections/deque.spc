@@ -43,7 +43,8 @@ const ZST_CAP: usize = 1 as usize << USIZE_BITS - 1; // the largest power of two
 /// of two; push and pop at both ends are amortized O(1).
 pub struct Deque<T, A: Allocator = Global>
     invariant self.len <= self.cap && block(self.ptr).len() >= self.cap as int && self.head < self.cap.max(1)
-    invariant self.cap <= Deque::<T, A>::max_cap() && (sizeof(T) != 0 || self.cap == ZST_CAP)
+    invariant self.cap == 0 || sizeof(T) == 0 || block(self.ptr).len() == self.cap as int
+    invariant self.cap <= Deque::<T, A>::max_cap() && (sizeof(T) != 0 || self.cap == ZST_CAP) && (self.cap == 0 || (self.cap & self.cap - 1) == 0)
     invariant self.cap == 0 || sizeof(T) == 0 || A::owns(self.ptr, Deque::<T, A>::bytes(self.cap), alignof(T))
 {
     @owned
@@ -108,6 +109,279 @@ const fn next_pow2(n: usize, limit: usize) usize
         return 1;
     }
     return 1 as usize << USIZE_BITS - (n - 1).leading_zeros();
+}
+
+// The `n` elements of block `b` from slot `h` on, in order: element `k` is in slot `(h + k) & m`, for `m` a
+// capacity less one. A deque's view.
+spec fn ring<T>(b: Seq<T>, h: usize, m: usize, n: usize) Seq<T>
+    requires m < ZST_CAP && h <= m && n <= m + 1 && b.len() > m as int
+    decreases n
+{
+    return if n == 0 {
+        Seq::<T>::empty()
+    } else {
+        ring(b, h, m, n - 1).push(b[(h + (n - 1) & m) as int])
+    };
+}
+
+// The ring of `n` elements: the ring of `n - 1`, then the element in slot `h + n - 1`.
+lemma ring_succ<T>(b: Seq<T>, h: usize, m: usize, n: usize)
+    requires m < ZST_CAP && h <= m && 1 <= n && n <= m + 1 && b.len() > m as int
+    ensures ring(b, h, m, n) == ring(b, h, m, n - 1).push(b[(h + (n - 1) & m) as int])
+{}
+
+lemma ring_len<T>(b: Seq<T>, h: usize, m: usize, n: usize)
+    requires m < ZST_CAP && h <= m && n <= m + 1 && b.len() > m as int
+    ensures ring(b, h, m, n).len() == n as int
+    decreases n
+{
+    if n > 0 {
+        ring_len(b, h, m, n - 1);
+    }
+}
+
+// Element `k` of the ring: the block's element in slot `h + k`.
+lemma ring_index<T>(b: Seq<T>, h: usize, m: usize, n: usize, k: usize)
+    requires m < ZST_CAP && h <= m && n <= m + 1 && b.len() > m as int && k < n
+    ensures ring(b, h, m, n)[k as int] == b[(h + k & m) as int]
+    decreases n
+{
+    ring_len(b, h, m, n - 1);
+    if k < n - 1 {
+        ring_index(b, h, m, n - 1, k);
+    }
+}
+
+// Offsets `i` and `j` up to `m`, a power of two less one, name the same slot only when they are equal.
+lemma slots_differ(h: usize, i: usize, j: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && i <= m && j <= m && i != j
+    ensures (h + i & m) != (h + j & m)
+{}
+
+// An offset `c` from a position `a` at most `m + 1` names the slot it names from `a`'s slot.
+lemma mask_add(a: usize, c: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && a <= m + 1 && c <= m
+    ensures ((a & m) + c & m) == (a + c & m)
+{}
+
+// A write to slot `h + j`, `j` from `n` to `m`, leaves the ring of `n`.
+lemma ring_upd_out<T>(b: Seq<T>, h: usize, m: usize, n: usize, j: usize, x: T)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && n <= j && j <= m && b.len() > m as int
+    ensures ring(b.update((h + j & m) as int, x), h, m, n) == ring(b, h, m, n)
+    decreases n
+{
+    if n > 0 {
+        ring_upd_out(b, h, m, n - 1, j, x);
+        slots_differ(h, n - 1, j, m);
+    }
+}
+
+// The first `k` elements of the ring of `n`: the ring of `k`.
+lemma ring_take<T>(b: Seq<T>, h: usize, m: usize, n: usize, k: usize)
+    requires m < ZST_CAP && h <= m && n <= m + 1 && b.len() > m as int && k <= n
+    ensures ring(b, h, m, n).take(k as int) == ring(b, h, m, k)
+    decreases n
+{
+    ring_len(b, h, m, n);
+    if k < n {
+        ring_len(b, h, m, n - 1);
+        ring_take(b, h, m, n - 1, k);
+    }
+}
+
+// A sequence of no element is the empty one.
+lemma empty_of<T>(s: Seq<T>)
+    requires s.len() == 0
+    ensures s == Seq::<T>::empty()
+{}
+
+// The elements after the first of a sequence with `x` pushed: those of the sequence, then `x`.
+lemma skip_push<T>(s: Seq<T>, x: T)
+    requires s.len() >= 1
+    ensures s.push(x).skip(1) == s.skip(1).push(x)
+{}
+
+// A sequence of at least one element: its first, then the others.
+lemma head_skip<T>(s: Seq<T>)
+    requires s.len() >= 1
+    ensures s == Seq::<T>::empty().push(s[0]).concat(s.skip(1))
+{}
+
+lemma ring_skip_one<T>(b: Seq<T>, h: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && b.len() > m as int
+    ensures ring(b, h, m, 1).skip(1) == ring(b, h + 1 & m, m, 0)
+{
+    ring_len(b, h, m, 1);
+    empty_of(ring(b, h, m, 1).skip(1));
+    assert ring(b, h + 1 & m, m, 0) == Seq::<T>::empty() by {};
+}
+
+lemma ring_skip_step<T>(b: Seq<T>, h: usize, m: usize, n: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && 2 <= n && n <= m + 1 && b.len() > m as int
+    requires ring(b, h, m, n - 1).skip(1) == ring(b, h + 1 & m, m, n - 2)
+    ensures ring(b, h, m, n).skip(1) == ring(b, h + 1 & m, m, n - 1)
+{
+    ring_len(b, h, m, n - 1);
+    mask_add(h + 1, n - 2, m);
+    assert (h + (n - 1) & m) <= m by {};
+    ring_succ(b, h, m, n);
+    ring_succ(b, h + 1 & m, m, n - 1);
+    skip_push(ring(b, h, m, n - 1), b[(h + (n - 1) & m) as int]);
+}
+
+// The elements after the front: the ring from the next slot.
+lemma ring_skip<T>(b: Seq<T>, h: usize, m: usize, n: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && 1 <= n && n <= m + 1 && b.len() > m as int
+    ensures ring(b, h, m, n).skip(1) == ring(b, h + 1 & m, m, n - 1)
+    decreases n
+{
+    if n == 1 {
+        ring_skip_one(b, h, m);
+    } else {
+        ring_skip(b, h, m, n - 1);
+        ring_skip_step(b, h, m, n);
+    }
+}
+
+// A position at most `m`, a power of two less one, is its own slot.
+lemma low_mask(x: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && x <= m
+    ensures (x & m) == x
+{}
+
+// A ring that does not wrap below `k`: the same over two blocks whose first `k` elements agree, under two
+// masks at least `k - 1`.
+lemma ring_same<T>(b: Seq<T>, c: Seq<T>, h: usize, m1: usize, m2: usize, n: usize, k: usize)
+    requires m1 < ZST_CAP && m2 < ZST_CAP && (m1 & m1 + 1) == 0 && (m2 & m2 + 1) == 0 && h <= m1 && h <= m2
+    requires k <= m1 + 1 && k <= m2 + 1 && h <= k && n <= k - h && b.len() > m1 as int && c.len() > m2 as int
+    requires b.take(k as int) == c.take(k as int)
+    ensures ring(b, h, m1, n) == ring(c, h, m2, n)
+    decreases n
+{
+    if n > 0 {
+        ring_same(b, c, h, m1, m2, n - 1, k);
+        ring_succ(b, h, m1, n);
+        ring_succ(c, h, m2, n);
+        low_mask(h + (n - 1), m1);
+        low_mask(h + (n - 1), m2);
+        take_at(b, k as int, (h + (n - 1)) as int);
+        take_at(c, k as int, (h + (n - 1)) as int);
+    }
+}
+
+// A position from `m + 1` to `2m + 1` wraps once.
+lemma wrap_slot(x: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && m + 1 <= x && x <= 2 * m + 1
+    ensures (x & m) == x - (m + 1)
+{}
+
+// Offset `k` from slot `nh`, `hl` slots below the end of `M + 1`, past them: it wraps to `k - hl`.
+lemma wrap_slot_end(nh: usize, k: usize, hl: usize, m: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && hl <= m + 1 && nh == m + 1 - hl && hl <= k && k - hl <= m
+    ensures (nh + k & m) == k - hl
+{}
+
+// The first `i + 1` elements: the first `i`, then element `i`.
+lemma take_succ<T>(b: Seq<T>, i: int)
+    requires 0 <= i && i < b.len()
+    ensures b.take(i + 1) == b.take(i).push(b[i])
+{}
+
+// A power of two above another is at least its double.
+lemma pow2_double(a: usize, c: usize)
+    requires 0 < a && a < c && c <= ZST_CAP && (a & a - 1) == 0 && (c & c - 1) == 0
+    ensures a <= c / 2
+{}
+
+// A ring under mask `m` reads only the first `m + 1` elements of its block.
+lemma ring_prefix<T>(b: Seq<T>, c: Seq<T>, h: usize, m: usize, n: usize)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && n <= m + 1 && b.len() > m as int && c.len() > m as int
+    requires b.take(m as int + 1) == c.take(m as int + 1)
+    ensures ring(b, h, m, n) == ring(c, h, m, n)
+    decreases n
+{
+    if n > 0 {
+        ring_prefix(b, c, h, m, n - 1);
+        ring_succ(b, h, m, n);
+        ring_succ(c, h, m, n);
+        assert (h + (n - 1) & m) <= m by {};
+        take_at(b, m as int + 1, (h + (n - 1) & m) as int);
+        take_at(c, m as int + 1, (h + (n - 1) & m) as int);
+    }
+}
+
+// A ring of mask `m` that wraps past `m + 1` by up to `t` elements, whose wrapped part block `c` holds again
+// from slot `m + 1`: the same ring from `h` under the larger mask `mm`.
+lemma ring_wrap_tail<T>(b: Seq<T>, c: Seq<T>, h: usize, m: usize, mm: usize, n: usize, t: usize)
+    requires m < ZST_CAP && mm < ZST_CAP && (m & m + 1) == 0 && (mm & mm + 1) == 0 && h <= m && t <= m
+    requires m + 1 + t <= mm + 1 && n <= m + 1 && h + n <= m + 1 + t && b.len() > m as int && c.len() > mm as int
+    requires c.take(m as int + 1) == b.take(m as int + 1)
+    requires c.subrange(m as int + 1, m as int + 1 + t as int) == b.take(t as int)
+    ensures ring(c, h, mm, n) == ring(b, h, m, n)
+    decreases n
+{
+    if h + n <= m + 1 {
+        ring_same(c, b, h, mm, m, n, m + 1);
+        return;
+    }
+    ring_wrap_tail(b, c, h, m, mm, n - 1, t);
+    ring_succ(c, h, mm, n);
+    ring_succ(b, h, m, n);
+    low_mask(h + (n - 1), mm);
+    wrap_slot(h + (n - 1), m);
+    sub_at(c, m as int + 1, m as int + 1 + t as int, (h + (n - 1) - (m + 1)) as int);
+    take_at(b, t as int, (h + (n - 1) - (m + 1)) as int);
+}
+
+// A ring of mask `m` from `h` whose first `hl = m + 1 - h` elements block `c` holds again in its last `hl`
+// slots under mask `mm`, and whose wrapped part `c` keeps in its first `t` slots: the ring from `nh`.
+lemma ring_wrap_head<T>(b: Seq<T>, c: Seq<T>, h: usize, nh: usize, m: usize, mm: usize, n: usize, t: usize)
+    requires m < ZST_CAP && mm < ZST_CAP && (m & m + 1) == 0 && (mm & mm + 1) == 0 && h <= m && m <= mm
+    requires t <= m && nh == mm + 1 - (m + 1 - h) && n <= m + 1 && n <= m + 1 - h + t && t <= nh && b.len() > m as int
+    requires c.len() > mm as int
+    requires c.subrange(nh as int, mm as int + 1) == b.subrange(h as int, m as int + 1)
+    requires c.take(t as int) == b.take(t as int)
+    ensures ring(c, nh, mm, n) == ring(b, h, m, n)
+    decreases n
+{
+    if n == 0 {
+        return;
+    }
+    ring_wrap_head(b, c, h, nh, m, mm, n - 1, t);
+    ring_succ(c, nh, mm, n);
+    ring_succ(b, h, m, n);
+    let hl = m + 1 - h;
+    if n - 1 < hl {
+        low_mask(nh + (n - 1), mm);
+        low_mask(h + (n - 1), m);
+        sub_at(c, nh as int, mm as int + 1, (n - 1) as int);
+        sub_at(b, h as int, m as int + 1, (n - 1) as int);
+    } else {
+        wrap_slot_end(nh, n - 1, hl, mm);
+        wrap_slot(h + (n - 1), m);
+        take_at(c, t as int, (n - 1 - hl) as int);
+        take_at(b, t as int, (n - 1 - hl) as int);
+    }
+}
+
+// `x` written in the slot before the front, the ring's new front: `x`, then the ring.
+lemma ring_cons<T>(b: Seq<T>, h: usize, m: usize, n: usize, x: T)
+    requires m < ZST_CAP && (m & m + 1) == 0 && h <= m && n <= m && b.len() > m as int
+    ensures ring(b.update((h + m & m) as int, x), h + m & m, m, n + 1) == Seq::<T>::empty().push(x).concat(
+        ring(b, h, m, n),
+    )
+{
+    ghost let h1 = h + m & m;
+    ghost let u = b.update(h1 as int, x);
+    ring_len(u, h1, m, n + 1);
+    ring_index(u, h1, m, n + 1, 0);
+    ring_skip(u, h1, m, n + 1);
+    assert (h1 + 1 & m) == h by {};
+    ring_upd_out(b, h, m, n, m, x);
+    head_skip(ring(u, h1, m, n + 1));
+    assert ring(u, h1, m, n + 1).skip(1) == ring(b, h, m, n) by {};
+    assert (h1 + 0 & m) == h1 by {};
+    assert ring(u, h1, m, n + 1)[0] == x by {};
 }
 
 // The end of range `r` over `len` elements, excluded. Panics when `r` does not lie in `0..len`.
@@ -230,25 +504,39 @@ extend<T, A: Allocator> Deque<T, A> {
 }
 
 extend<T, A: Allocator> Deque<T, A> {
+    /// Its elements in order, front first: element `i` lives in slot `(head + i) & (capacity - 1)` of the
+    /// block, and `d.len()` is its length.
+    pub spec fn view(self: &Deque<T, A>) Seq<T> {
+        return if self.cap == 0 {
+            Seq::<T>::empty()
+        } else {
+            ring(block(self.ptr), self.head, self.cap - 1, self.len)
+        };
+    }
+
     /// An empty deque that allocates through `alloc`; no allocation until the first push.
-    pub const fn new_in(alloc: A) Deque<T, A> {
+    pub const fn new_in(alloc: A) Deque<T, A>
+        ensures |r| r.view() == Seq::<T>::empty()
+    {
         return Deque::<T, A>::with_capacity_in(alloc, 0);
     }
 
     /// An empty deque with room for `cap` elements, rounded up to a power of two, allocated through `alloc`
-    /// (no allocation when `cap` is 0). Panics when the byte size overflows a usize.
+    /// (no allocation when `cap` is 0). Panics when `cap` is past the largest capacity (the byte size
+    /// overflows a usize, or 2^(N-1) zero-sized elements).
     pub const fn with_capacity_in(mut alloc: A, cap: usize) Deque<T, A>
-        panics if sizeof(T) != 0 && cap > Deque::<T, A>::max_cap()
-        ensures |r| r.len() == 0 && (sizeof(T) == 0 || r.capacity() >= cap)
+        panics if cap > Deque::<T, A>::max_cap()
+        ensures |r| r.len() == 0 && (sizeof(T) == 0 || r.capacity() >= cap) && cap <= Deque::<T, A>::max_cap()
+        ensures |r| r.view() == Seq::<T>::empty()
     {
+        if cap > Deque::<T, A>::max_cap() {
+            panic("Deque: capacity overflow");
+        }
         if sizeof(T) == 0 {
             return Deque::<T, A> { ptr: dangling::<T>(), head: 0, len: 0, cap: ZST_CAP, alloc: alloc };
         }
         if cap == 0 {
             return Deque::<T, A> { ptr: dangling::<T>(), head: 0, len: 0, cap: 0, alloc: alloc };
-        }
-        if cap > Deque::<T, A>::max_cap() {
-            panic("Deque: capacity overflow");
         }
         let c = next_pow2(cap, Deque::<T, A>::max_cap());
         let p = (unsafe alloc.alloc(c * sizeof(T), alignof(T))) as *mut T;
@@ -257,14 +545,21 @@ extend<T, A: Allocator> Deque<T, A> {
 
     /// Number of elements.
     pub const fn len(self: &Deque<T, A>) usize
-        ensures |r| r == self.len
+        ensures |r| r == self.len && r as int == self.view().len()
     {
+        assert self.len as int == self.view().len() by {
+            if self.cap > 0 {
+                ring_len(block(self.ptr), self.head, self.cap - 1, self.len);
+            }
+        };
         return self.len;
     }
 
     /// True when no element is stored.
-    pub const fn is_empty(self: &Deque<T, A>) bool {
-        return self.len == 0;
+    pub const fn is_empty(self: &Deque<T, A>) bool
+        ensures |r| r == (self.view().len() == 0)
+    {
+        return self.len() == 0;
     }
 
     /// Elements the block holds without growing: 0 or a power of two.
@@ -277,7 +572,7 @@ extend<T, A: Allocator> Deque<T, A> {
     // The slot of logical index `i`.
     const fn slot(self: &Deque<T, A>, i: usize) usize
         requires self.cap > 0 && i <= self.cap
-        ensures |r| r < self.cap
+        ensures |r| r < self.cap && r == (self.head + i & self.cap - 1)
     {
         return self.wrap(self.head + i);
     }
@@ -285,7 +580,7 @@ extend<T, A: Allocator> Deque<T, A> {
     // `x` as a slot: its bits below the capacity, a power of two.
     const fn wrap(self: &Deque<T, A>, x: usize) usize
         requires self.cap > 0
-        ensures |r| r < self.cap
+        ensures |r| r < self.cap && r == (x & self.cap - 1)
     {
         return x & self.cap - 1;
     }
@@ -295,6 +590,7 @@ extend<T, A: Allocator> Deque<T, A> {
     pub fn reserve(self: &mut Deque<T, A>, additional: usize)
         panics if self.len as int + additional as int > Deque::<T, A>::max_cap() as int
         ensures self.len == old(self.len) && self.len as int + additional as int <= self.cap as int
+        ensures self.view() == old(self.view())
     {
         if additional > self.cap - self.len {
             self.grow_for(additional);
@@ -307,6 +603,7 @@ extend<T, A: Allocator> Deque<T, A> {
         requires additional > self.cap - self.len
         panics if self.len as int + additional as int > Deque::<T, A>::max_cap() as int
         ensures self.len == old(self.len) && self.len as int + additional as int <= self.cap as int
+        ensures self.view() == old(self.view())
     {
         let max_cap = Deque::<T, A>::max_cap();
         if additional > max_cap - self.len {
@@ -338,22 +635,106 @@ extend<T, A: Allocator> Deque<T, A> {
     // block keeps its slots, so a wrapped deque moves the shorter of its two parts into the new space. The
     // new capacity is at least twice the old, so the moved part lands clear of both parts.
     fn grow_to(self: &mut Deque<T, A>, new_cap: usize)
-        requires sizeof(T) != 0 && new_cap > self.cap && new_cap <= Deque::<T, A>::max_cap()
+        requires sizeof(T) != 0 && new_cap > self.cap && new_cap <= Deque::<T, A>::max_cap() && (new_cap & new_cap - 1) == 0
         ensures self.len == old(self.len) && self.cap == new_cap
+        ensures self.view() == old(self.view())
     {
         let old_cap = self.cap;
-        self.resize_block(new_cap);
-        if self.head + self.len > old_cap {
-            let head_len = old_cap - self.head;
-            let tail_len = self.len - head_len;
-            if tail_len < head_len {
-                unsafe memcpy(self.ptr + old_cap, self.ptr, Deque::<T, A>::bytes(tail_len));
-            } else {
-                let new_head = new_cap - head_len;
-                unsafe memcpy(self.ptr + new_head, self.ptr + self.head, Deque::<T, A>::bytes(head_len));
-                self.head = new_head;
-            }
+        ghost let b0 = block(self.ptr);
+        self.grow_block(new_cap);
+        if old_cap == 0 {
+            return;
         }
+        if self.head + self.len <= old_cap {
+            ring_same(b0, block(self.ptr), self.head, old_cap - 1, new_cap - 1, self.len, old_cap);
+            return;
+        }
+        ring_prefix(b0, block(self.ptr), self.head, old_cap - 1, self.len);
+        pow2_double(old_cap, new_cap);
+        self.unwrap_grown(old_cap);
+    }
+
+    // After a growth from `oc` slots, a ring that wrapped past them: the shorter of its two parts moves into
+    // the new slots, so that the ring is whole under the new capacity (at least twice `oc`).
+    fn unwrap_grown(self: &mut Deque<T, A>, oc: usize)
+        requires sizeof(T) != 0 && 0 < oc && oc <= self.cap / 2 && (oc & oc - 1) == 0 && self.len <= oc
+        requires self.head < oc && self.head + self.len > oc
+        ensures self.len == old(self.len) && self.cap == old(self.cap)
+        ensures self.view() == ring(old(block(self.ptr)), old(self.head), oc - 1, self.len)
+    {
+        if self.len - (oc - self.head) < oc - self.head {
+            self.move_tail(oc);
+        } else {
+            self.move_head(oc);
+        }
+    }
+
+    // `unwrap_grown` where the wrapped part is the shorter: it moves to the slots from `oc`.
+    fn move_tail(self: &mut Deque<T, A>, oc: usize)
+        requires sizeof(T) != 0 && 0 < oc && oc <= self.cap / 2 && (oc & oc - 1) == 0 && self.len <= oc
+        requires self.head < oc && self.head + self.len > oc
+        ensures self.len == old(self.len) && self.cap == old(self.cap) && self.head == old(self.head)
+        ensures self.view() == ring(old(block(self.ptr)), old(self.head), oc - 1, self.len)
+    {
+        ghost let b1 = block(self.ptr);
+        let t = self.head + self.len - oc;
+        let mut i: usize = 0;
+        while i < t
+            invariant self.invariant() && i <= t && t < oc && oc <= self.cap / 2 && block(self.ptr).len() == b1.len()
+            invariant self.len == old(self.len) && self.cap == old(self.cap) && self.head == old(self.head)
+            invariant block(self.ptr).take(oc as int) == b1.take(oc as int)
+            invariant block(self.ptr).subrange(oc as int, oc as int + i as int) == b1.take(i as int)
+        {
+            ghost let bi = block(self.ptr);
+            unsafe self.ptr[oc + i] = unsafe self.ptr[i];
+            take_at(bi, oc as int, i as int);
+            take_at(b1, oc as int, i as int);
+            upd_take_out(bi, oc as int, (oc + i) as int, bi[i as int]);
+            upd_sub_out(bi, (oc + i) as int, oc as int, (oc + i) as int, bi[i as int]);
+            sub_tail(block(self.ptr), oc as int, (oc + i) as int);
+            take_succ(b1, i as int);
+            i += 1;
+        }
+        ring_wrap_tail(b1, block(self.ptr), self.head, oc - 1, self.cap - 1, self.len, t);
+    }
+
+    // `unwrap_grown` where the part before the wrap is the shorter: it moves to the last slots.
+    fn move_head(self: &mut Deque<T, A>, oc: usize)
+        requires sizeof(T) != 0 && 0 < oc && oc <= self.cap / 2 && (oc & oc - 1) == 0 && self.len <= oc
+        requires self.head < oc && self.head + self.len > oc
+        ensures self.len == old(self.len) && self.cap == old(self.cap)
+        ensures self.view() == ring(old(block(self.ptr)), old(self.head), oc - 1, self.len)
+    {
+        ghost let b1 = block(self.ptr);
+        let h = self.head;
+        let hl = oc - h;
+        let nh = self.cap - hl;
+        let mut j: usize = 0;
+        while j < hl
+            invariant self.invariant() && j <= hl && hl == oc - h && nh == self.cap - hl && oc <= self.cap / 2
+            invariant block(self.ptr).len() == b1.len() && self.head == h && h < oc
+            invariant self.len == old(self.len) && self.cap == old(self.cap)
+            invariant block(self.ptr).take(oc as int) == b1.take(oc as int)
+            invariant block(self.ptr).subrange(nh as int, nh as int + j as int) == b1.subrange(
+                h as int,
+                h as int + j as int,
+            )
+        {
+            ghost let bi = block(self.ptr);
+            unsafe self.ptr[nh + j] = unsafe self.ptr[h + j];
+            take_at(bi, oc as int, (h + j) as int);
+            take_at(b1, oc as int, (h + j) as int);
+            upd_take_out(bi, oc as int, (nh + j) as int, bi[(h + j) as int]);
+            upd_sub_out(bi, (nh + j) as int, nh as int, (nh + j) as int, bi[(h + j) as int]);
+            sub_tail(block(self.ptr), nh as int, (nh + j) as int);
+            sub_tail(b1, h as int, (h + j) as int);
+            j += 1;
+        }
+        let t = self.len - hl;
+        take_take(block(self.ptr), oc as int, t as int);
+        take_take(b1, oc as int, t as int);
+        self.head = nh;
+        ring_wrap_head(b1, block(self.ptr), h, nh, oc - 1, self.cap - 1, self.len, t);
     }
 
     /// Reallocates to the smallest power of two that holds the elements (frees the block when empty).
@@ -391,57 +772,118 @@ extend<T, A: Allocator> Deque<T, A> {
     // below both capacities keep their elements: the ring moves after a growth and before a shrink.
     fn resize_block(self: &mut Deque<T, A>, new_cap: usize)
         requires sizeof(T) != 0 && new_cap > 0 && new_cap <= Deque::<T, A>::max_cap() && self.head < new_cap && self.len <= new_cap
+        requires (new_cap & new_cap - 1) == 0
         ensures self.head == old(self.head) && self.len == old(self.len) && self.cap == new_cap
     {
         if self.cap == 0 {
             self.ptr = (unsafe self.alloc.alloc(Deque::<T, A>::bytes(new_cap), alignof(T))) as *mut T;
-        } else {
-            self.ptr = (unsafe self.alloc.realloc(
-                self.ptr,
-                Deque::<T, A>::bytes(self.cap),
-                Deque::<T, A>::bytes(new_cap),
-                alignof(T),
-            )) as *mut T;
+            self.cap = new_cap;
+            return;
         }
+        let p = (unsafe self.alloc.realloc(
+            self.ptr,
+            Deque::<T, A>::bytes(self.cap),
+            Deque::<T, A>::bytes(new_cap),
+            alignof(T),
+        )) as *mut T;
+        self.ptr = p;
+        self.cap = new_cap;
+    }
+
+    // `resize_block` to a larger capacity: the slots of the old block keep their elements.
+    const fn grow_block(self: &mut Deque<T, A>, new_cap: usize)
+        requires sizeof(T) != 0 && new_cap > self.cap && new_cap <= Deque::<T, A>::max_cap() && (new_cap & new_cap - 1) == 0
+        ensures self.head == old(self.head) && self.len == old(self.len) && self.cap == new_cap
+        ensures old(self.cap) > 0 ==> block(self.ptr).take(old(self.cap) as int) == old(block(self.ptr)).take(
+            old(self.cap) as int,
+        )
+    {
+        if self.cap == 0 {
+            self.ptr = (unsafe self.alloc.alloc(Deque::<T, A>::bytes(new_cap), alignof(T))) as *mut T;
+            self.cap = new_cap;
+            return;
+        }
+        let p = (unsafe self.alloc.realloc(
+            self.ptr,
+            Deque::<T, A>::bytes(self.cap),
+            Deque::<T, A>::bytes(new_cap),
+            alignof(T),
+        )) as *mut T;
+        self.ptr = p;
         self.cap = new_cap;
     }
 
     /// Appends `value` at the back; amortized O(1).
-    pub fn push_back(self: &mut Deque<T, A>, value: T) {
-        if self.len == self.cap {
+    pub fn push_back(self: &mut Deque<T, A>, value: T)
+        panics if self.len as int + 1 > Deque::<T, A>::max_cap() as int
+        ensures self.view() == old(self.view()).push(value) && self.len == old(self.len) + 1
+    {
+        if self.len() == self.cap {
             self.grow_for(1);
         }
-        unsafe self.ptr[self.slot(self.len)] = value;
-        self.len += 1;
+        let n = self.len;
+        let s = self.slot(n);
+        ghost let b = block(self.ptr);
+        ring_upd_out(b, self.head, self.cap - 1, n, n, value);
+        ring_succ(b.update(s as int, value), self.head, self.cap - 1, n + 1);
+        unsafe self.ptr[s] = value;
+        self.len = n + 1;
     }
 
     /// Prepends `value` at the front; amortized O(1).
-    pub fn push_front(self: &mut Deque<T, A>, value: T) {
-        if self.len == self.cap {
+    pub fn push_front(self: &mut Deque<T, A>, value: T)
+        panics if self.len as int + 1 > Deque::<T, A>::max_cap() as int
+        ensures self.view() == Seq::<T>::empty().push(value).concat(old(self.view())) && self.len == old(self.len) + 1
+    {
+        if self.len() == self.cap {
             self.grow_for(1);
         }
-        self.head = self.wrap(self.head.wrapping_sub(1));
+        let n = self.len;
+        let h = self.head;
+        ghost let b = block(self.ptr);
+        ring_cons(b, h, self.cap - 1, n, value);
+        assert (h.wrapping_sub(1) & self.cap - 1) == (h + (self.cap - 1) & self.cap - 1) by {};
+        self.head = self.wrap(h.wrapping_sub(1));
         unsafe self.ptr[self.head] = value;
-        self.len += 1;
+        self.len = n + 1;
     }
 
     /// Removes the back element and moves it to the caller; None when empty.
-    pub const fn pop_back(self: &mut Deque<T, A>) Option<T> {
+    pub const fn pop_back(self: &mut Deque<T, A>) Option<T>
+        ensures |r| old(self.view()).len() == 0 ==> r == Option::<T>::None && self.view() == old(self.view())
+        ensures |r| old(self.view()).len() > 0 ==> r == Some(old(self.view())[old(self.view()).len() - 1])
+        ensures old(self.view()).len() > 0 ==> self.view() == old(self.view()).take(old(self.view()).len() - 1)
+    {
         if self.len == 0 {
             return None;
         }
-        self.len -= 1;
+        let n = self.len;
+        ghost let b = block(self.ptr);
+        ring_len(b, self.head, self.cap - 1, n);
+        ring_index(b, self.head, self.cap - 1, n, n - 1);
+        ring_take(b, self.head, self.cap - 1, n, n - 1);
+        self.len = n - 1;
         return Some(unsafe self.ptr[self.slot(self.len)]);
     }
 
     /// Removes the front element and moves it to the caller; None when empty.
-    pub const fn pop_front(self: &mut Deque<T, A>) Option<T> {
+    pub const fn pop_front(self: &mut Deque<T, A>) Option<T>
+        ensures |r| old(self.view()).len() == 0 ==> r == Option::<T>::None && self.view() == old(self.view())
+        ensures |r| old(self.view()).len() > 0 ==> r == Some(old(self.view())[0])
+        ensures old(self.view()).len() > 0 ==> self.view() == old(self.view()).skip(1)
+    {
         if self.len == 0 {
             return None;
         }
+        let n = self.len;
+        ghost let b = block(self.ptr);
+        ring_len(b, self.head, self.cap - 1, n);
+        ring_index(b, self.head, self.cap - 1, n, 0);
+        ring_skip(b, self.head, self.cap - 1, n);
+        assert (self.head + 0 & self.cap - 1) == self.head by {};
         let v = unsafe self.ptr[self.head];
         self.head = self.wrap(self.head + 1);
-        self.len -= 1;
+        self.len = n - 1;
         return Some(v);
     }
 
@@ -622,22 +1064,36 @@ extend<T, A: Allocator> Deque<T, A> {
     /// Keeps the first `n` elements and frees the others (no change when `n >= len`). Keeps the block.
     pub const fn truncate(self: &mut Deque<T, A>, n: usize)
         ensures self.len == old(self.len).min(n) && self.cap == old(self.cap) && self.head == old(self.head)
+        ensures n as int >= old(self.view()).len() ==> self.view() == old(self.view())
+        ensures n as int < old(self.view()).len() ==> self.view() == old(self.view()).take(n as int)
     {
-        let mut i = n;
-        while i < self.len
-            invariant self.invariant() && self.len == old(self.len) && self.cap == old(self.cap) && self.head == old(self.head)
-        {
-            unsafe self.ptr[self.slot(i)].free();
-            i += 1;
+        let len = self.len();
+        if n >= len {
+            return;
         }
-        if n < self.len {
-            self.len = n;
+        // The deque stops owning the tail before any `free` runs: one that panics leaks the rest.
+        ghost let b0 = block(self.ptr);
+        ring_len(b0, self.head, self.cap - 1, len);
+        ring_take(b0, self.head, self.cap - 1, len, n);
+        self.len = n;
+        let mut i = n;
+        while i < len
+            invariant self.invariant() && self.len == n && n <= i && i <= len && len <= self.cap
+            invariant self.cap == old(self.cap) && self.head == old(self.head) && block(self.ptr).len() == b0.len()
+            invariant ring(block(self.ptr), self.head, self.cap - 1, n) == ring(b0, self.head, self.cap - 1, n)
+        {
+            ghost let bi = block(self.ptr);
+            let s = self.slot(i);
+            unsafe self.ptr[s].free();
+            ring_upd_out(bi, self.head, self.cap - 1, n, i, block(self.ptr)[s as int]);
+            i += 1;
         }
     }
 
     /// Frees every element and keeps the block.
     pub const fn clear(self: &mut Deque<T, A>)
         ensures self.len == 0 && self.cap == old(self.cap)
+        ensures self.view() == Seq::<T>::empty()
     {
         self.truncate(0);
         self.head = 0;
@@ -800,12 +1256,17 @@ extend<T, A: Allocator> Deque<T, A> {
 
 extend<T, A: Allocator + Default> Deque<T, A> {
     /// An empty deque on the default allocator; no allocation until the first push.
-    pub const fn new() Deque<T, A> {
+    pub const fn new() Deque<T, A>
+        ensures |r| r.view() == Seq::<T>::empty()
+    {
         return Deque::<T, A>::with_capacity_in(A::default(), 0);
     }
 
     /// An empty deque on the default allocator with room for `cap` elements, rounded up to a power of two.
-    pub const fn with_capacity(cap: usize) Deque<T, A> {
+    pub const fn with_capacity(cap: usize) Deque<T, A>
+        panics if cap > Deque::<T, A>::max_cap()
+        ensures |r| r.view() == Seq::<T>::empty() && cap <= Deque::<T, A>::max_cap()
+    {
         return Deque::<T, A>::with_capacity_in(A::default(), cap);
     }
 }
@@ -1104,13 +1565,12 @@ extend<T, A: Allocator + Default> Deque<T, A> as Default {
     }
 }
 
-// The slice borrows, so each element is cloned in.
+// The slice borrows, so each element is cloned in. Panics when the slice holds more elements than the
+// largest capacity.
 extend<T: Clone, A: Allocator + Default> Deque<T, A> as From<[]T> {
     pub fn from(value: []T) Deque<T, A> {
         let mut out = Deque::<T, A>::with_capacity(value.len);
-        for i in 0..value.len
-            invariant out.invariant()
-        {
+        for i in 0..value.len {
             out.push_back(value.at(i).clone());
         }
         return out;
@@ -1120,11 +1580,13 @@ extend<T: Clone, A: Allocator + Default> Deque<T, A> as From<[]T> {
 extend<T: Clone, A: Allocator> Deque<T, A> as Clone {
     /// A deep copy on a copy of the allocator handle: the elements are cloned in order into one run.
     pub fn clone(self: &Deque<T, A>) Deque<T, A> {
-        let mut out = Deque::<T, A>::with_capacity_in(self.alloc, self.len);
-        for i in 0..self.len
-            invariant out.invariant()
+        let n = self.len;
+        let mut out = Deque::<T, A>::with_capacity_in(self.alloc, n);
+        for i in 0..n
+            invariant out.invariant() && out.len == i && n <= Deque::<T, A>::max_cap()
         {
-            out.push_back(self.at(i).clone());
+            let e = self.at(i).clone();
+            out.push_back(e);
         }
         return out;
     }

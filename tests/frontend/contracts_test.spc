@@ -164,6 +164,16 @@ fn unproved_contracts_are_errors() {
         "cannot prove this 'ensures' clause",
     );
     b.add(
+        "a lemma over a function that writes through a `&mut` argument",
+        "const fn set7(x: &mut u32) {\n    *x = 7;\n}\nconst fn f(v: u32) u32 {\n    let mut r = v;\n    set7(&mut r);\n    return r;\n}\nlemma kept(v: u32) ensures f(v) == v {}\nfn main() i32 { return f(1) as i32; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "an ensures that compares with a wrong option",
+        "fn f(v: u64) Option<u64> ensures |r| r == Some(v) { return Some(v ^ 1); }\nfn main() i32 { return f(1).is_some() as i32; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a loop measure that grows",
         "fn f(n: u32) u32 {\n    let mut k = n;\n    while k < 100 decreases k { k += 1; }\n    return k;\n}\nfn main() i32 { return f(1) as i32; }\n",
         "cannot prove that this 'decreases' measure decreases in each iteration",
@@ -1297,6 +1307,179 @@ fn main(args: Vector<str>) i32 {
 }
 )",
         23,
+    );
+    // A literal of a generic struct with an array member is the value of its elements, and a narrowing cast
+    // inside a function without clauses keeps every value in its definition: a round trip proves both ways.
+    b.add(
+        "lemmas over generic struct values and narrowing casts",
+        M"(struct Pair<T, const N: usize> {
+    e: [T; N],
+}
+const fn pack(v: Pair<i16, 2>) i32 {
+    return ((v.e[0] as u16) as u32 | (v.e[1] as u16) as u32 << 16) as i32;
+}
+const fn unpack(p: i32) Pair<i16, 2> {
+    return Pair::<i16, 2> { e: [p as i16, (p as u32 >> 16) as i16] };
+}
+lemma round_trip(v: Pair<i16, 2>, p: i32)
+    ensures unpack(pack(v)).e == v.e
+    ensures pack(unpack(p)) == p
+{}
+fn main(args: Vector<str>) i32 {
+    let v = Pair::<i16, 2> { e: [-3, args.len() as i16 + 30] };
+    return unpack(pack(v)).e[1];
+}
+)",
+        31,
+    );
+    // A spec function's or a lemma's body never runs: a value of a type parameter is read there as often as
+    // the proof needs, as in a clause.
+    b.add(
+        "a lemma reads a value of a type parameter twice",
+        M"(import std::spec::seq as *;
+
+lemma pushed_twice<T>(s: Seq<T>, x: T)
+    ensures s.push(x).len() == s.len() + 1
+{
+    ghost let a = s.push(x);
+    ghost let b = s.push(x);
+    assert a == b by {};
+}
+fn main(args: Vector<str>) i32 {
+    return args.len() as i32 + 4;
+}
+)",
+        5,
+    );
+    // In ghost code a call through a built-in type reaches its conformance, a blanket `extend<T: Int> T` too,
+    // and the generic body's operators and `T::one()` reach the built-in's `const fn` conformances.
+    b.add(
+        "lemmas through blanket conformances of built-in types",
+        M"(import std::math::scalar as *;
+import std::math::vec as *;
+
+pub interface Dec: Elem {
+    fn dec(x: Self) Self;
+    fn three(x: Self) Vec<Self, 3>;
+}
+extend<T: Int> T as Dec {
+    pub const fn dec(x: T) T {
+        return x - T::one();
+    }
+    pub const fn three(x: T) Vec<T, 3> {
+        return Vec::<T, 3>::new(x, x, x);
+    }
+}
+lemma dec_i16(a: i16)
+    requires a > 0
+    ensures i16::dec(a) == a - 1
+{}
+lemma three_u32(a: u32)
+    ensures u32::three(a).e[2] == a
+{}
+fn main(args: Vector<str>) i32 {
+    return i32::dec(args.len() as i32 + 6);
+}
+)",
+        6,
+    );
+    // Ghost code unfolds a `const fn` with a loop by running the loop, and a call that writes through a
+    // `&mut` argument (an automatic one too) gives its referent the value the callee leaves.
+    b.add(
+        "lemmas over loops and writes through `&mut` arguments",
+        M"(const fn set_low(x: &mut u32, v: u32) {
+    if *x > 10 {
+        *x = *x - 10;
+    }
+    *x = *x & ~0xFu32 | v & 0xF;
+}
+const fn twice(v: u32) u32 {
+    let mut r = v;
+    for _i in 0..2 {
+        set_low(&mut r, 3);
+    }
+    return r;
+}
+struct C { n: u32 }
+extend C {
+    const fn bump(self: &mut C) {
+        self.n = self.n + 1;
+    }
+}
+const fn bumped(n: u32) u32 {
+    let mut c = C { n: n };
+    c.bump();
+    c.bump();
+    return c.n;
+}
+lemma twice_small(v: u32)
+    requires v <= 10
+    ensures twice(v) == (v & ~0xFu32 | 3)
+{}
+lemma bumped_adds(n: u32)
+    requires n < 100
+    ensures bumped(n) == n + 2
+{}
+fn main(args: Vector<str>) i32 {
+    return twice(args.len() as u32) as i32 + bumped(1) as i32;
+}
+)",
+        6,
+    );
+    // A clause's `==` through an `Eq` conformance is that conformance's body: `Option`'s, then the payload's.
+    b.add(
+        "clauses that compare through Eq conformances",
+        M"(struct P { a: u32, b: i16 }
+extend P as Eq {
+    pub const fn eq(self: &P, other: &P) bool {
+        return self.a == other.a && self.b == other.b;
+    }
+}
+fn pick(v: u64) Option<u64>
+    ensures |r| (r == Option::<u64>::None) == (v != 0)
+    ensures |r| v != 0 || r == Some(v)
+{
+    if v != 0 {
+        return None;
+    }
+    return Some(v);
+}
+fn point(v: u32) Option<P>
+    ensures |r| r == Some(P { a: v, b: -1 })
+{
+    return Some(P { a: v, b: -1 });
+}
+fn main(args: Vector<str>) i32 {
+    return pick(args.len() as u64 - 1).is_some() as i32 + point(3).is_some() as i32 + 5;
+}
+)",
+        7,
+    );
+    // `count_ones` is the sum of the bits, and a complement's count the width less the count; a remainder by
+    // an unknown divisor has the dividend's sign and lies strictly inside the divisor's magnitude.
+    b.add(
+        "bit counts and remainders by unknown divisors",
+        M"(fn bits(x: u64) usize
+    ensures |r| r <= 64
+{
+    return x.count_ones();
+}
+fn rem_in(x: i32, d: i32) i32
+    requires d != 0 && !(x == i32::MIN && d == -1)
+    ensures |r| d > 0 ==> r < d && r as i64 > -(d as i64)
+    ensures |r| d < 0 ==> r > d && (r as i64) < -(d as i64)
+    ensures |r| x >= 0 ==> r >= 0
+{
+    return x % d;
+}
+lemma ones_split(x: u32)
+    ensures x.count_zeros() + x.count_ones() == 32
+{}
+fn main(args: Vector<str>) i32 {
+    return bits(0xFF) as i32 + rem_in(-7, 3) + args.len() as i32 - 1;
+}
+)",
+        7,
     );
     // Twenty branches in a row make 2^20 paths: the walk that merges them at each join proves the call's
     // `requires` past the exact walk's budget.

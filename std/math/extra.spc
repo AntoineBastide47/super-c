@@ -145,19 +145,19 @@ pub interface PowSqrtMod: Copy {
 
 /// `x` multiplied `y` times. `pow_int(x, 0)` is 1, and -1 for a negative `i32` `x`. A `u32` product
 /// wraps; an `i32` overflow traps in a checked profile.
-pub fn pow_int<X: PowSqrtMod>(x: X, y: u32) X {
+pub const fn pow_int<X: PowSqrtMod>(x: X, y: u32) X {
     return x.pow_int(y);
 }
 
 /// The floor of the square root by Newton's method (Musial, Graphics Gems); `x <= 1` (a negative `i32`
 /// included) gives `x`.
-pub fn sqrt_int<X: PowSqrtMod>(x: X) X {
+pub const fn sqrt_int<X: PowSqrtMod>(x: X) X {
     return x.sqrt_int();
 }
 
 /// `((x % y) + y) % y` for `i32`, the floored modulo for `y > 0`; `x - y * (x / y)` for `u32`. A zero
 /// `y` traps; so does an `i32` overflow of `x % y + y` in a checked profile.
-pub fn mod_int<X: PowSqrtMod>(x: X, y: X) X {
+pub const fn mod_int<X: PowSqrtMod>(x: X, y: X) X {
     return x.mod_int(y);
 }
 
@@ -1199,7 +1199,7 @@ extend<T: Scalar, U: Scalar, const N: usize> Vec<T, N> as AssociatedMinMax<U> {
 // The conformances of `PowSqrtMod`.
 
 extend i32 as PowSqrtMod {
-    pub fn pow_int(self: i32, y: u32) i32 {
+    pub const fn pow_int(self: i32, y: u32) i32 {
         if y == 0 {
             return if self >= 0 {
                 1
@@ -1213,7 +1213,7 @@ extend i32 as PowSqrtMod {
         }
         return result;
     }
-    pub fn sqrt_int(self: i32) i32 {
+    pub const fn sqrt_int(self: i32) i32 {
         if self <= 1 {
             return self;
         }
@@ -1227,13 +1227,13 @@ extend i32 as PowSqrtMod {
         }
         panic("sqrt_int: Newton's method did not converge within SQRT_INT_STEPS_MAX steps");
     }
-    pub fn mod_int(self: i32, y: i32) i32 {
+    pub const fn mod_int(self: i32, y: i32) i32 {
         return (self % y + y) % y;
     }
 }
 
 extend u32 as PowSqrtMod {
-    pub fn pow_int(self: u32, y: u32) u32 {
+    pub const fn pow_int(self: u32, y: u32) u32 {
         if y == 0 {
             return 1;
         }
@@ -1243,7 +1243,7 @@ extend u32 as PowSqrtMod {
         }
         return result;
     }
-    pub fn sqrt_int(self: u32) u32 {
+    pub const fn sqrt_int(self: u32) u32 {
         if self <= 1 {
             return self;
         }
@@ -1257,7 +1257,7 @@ extend u32 as PowSqrtMod {
         }
         panic("sqrt_int: Newton's method did not converge within SQRT_INT_STEPS_MAX steps");
     }
-    pub fn mod_int(self: u32, y: u32) u32 {
+    pub const fn mod_int(self: u32, y: u32) u32 {
         return self - y * (self / y);
     }
 }

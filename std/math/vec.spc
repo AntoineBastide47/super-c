@@ -178,33 +178,33 @@ pub interface Gen<T: Scalar>: Copy {
 }
 
 extend<T: Scalar> T as Gen<T> {
-    pub fn len() usize {
+    pub const fn len() usize {
         return 1;
     }
-    pub fn at(self: &T, i: usize) T {
+    pub const fn at(self: &T, i: usize) T {
         return *self;
     }
-    pub fn put(self: &mut T, i: usize, v: T) {
+    pub const fn put(self: &mut T, i: usize, v: T) {
         *self = v;
     }
-    pub fn of(v: T) T {
+    pub const fn of(v: T) T {
         return v;
     }
 }
 
 extend<T: Scalar, const N: usize> Vec<T, N> as Gen<T> {
-    pub fn len() usize {
+    pub const fn len() usize {
         return N;
     }
-    pub fn at(self: &Vec<T, N>, i: usize) T {
+    pub const fn at(self: &Vec<T, N>, i: usize) T {
         return unsafe self.e[i];
     }
-    pub fn put(self: &mut Vec<T, N>, i: usize, v: T) {
+    pub const fn put(self: &mut Vec<T, N>, i: usize, v: T) {
         unsafe {
             self.e[i] = v;
         }
     }
-    pub fn of(v: T) Vec<T, N> {
+    pub const fn of(v: T) Vec<T, N> {
         return Vec::<T, N> { e: [v; N] };
     }
 }

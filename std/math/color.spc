@@ -230,24 +230,24 @@ pub interface YCoCgR: Scalar {
 /// The reversible YCoCg-R transform. An integer `T` uses the lifting steps (Co = r - b,
 /// t = b + (Co >> 1), Cg = g - t, Y = t + (Cg >> 1)), which `ycocg_r_to_rgb` inverts exactly; a float `T`
 /// computes (g / 2 + (r + b) / 4, r - b, g - (r + b) / 2).
-pub fn rgb_to_ycocg_r<T: YCoCgR>(rgb_color: Vec<T, 3>) Vec<T, 3> {
+pub const fn rgb_to_ycocg_r<T: YCoCgR>(rgb_color: Vec<T, 3>) Vec<T, 3> {
     return T::rgb_to_ycocg_r(rgb_color);
 }
 
 /// The inverse of `rgb_to_ycocg_r` (t = Y - (Cg >> 1), g = Cg + t, b = t - (Co >> 1),
 /// r = b + Co, with `* 0.5` for `>> 1` on a float `T`).
-pub fn ycocg_r_to_rgb<T: YCoCgR>(ycocg_color: Vec<T, 3>) Vec<T, 3> {
+pub const fn ycocg_r_to_rgb<T: YCoCgR>(ycocg_color: Vec<T, 3>) Vec<T, 3> {
     return T::ycocg_r_to_rgb(ycocg_color);
 }
 
 extend<T: Int> T as YCoCgR {
-    pub fn rgb_to_ycocg_r(rgb: Vec<T, 3>) Vec<T, 3> {
+    pub const fn rgb_to_ycocg_r(rgb: Vec<T, 3>) Vec<T, 3> {
         let co = rgb.e[0] - rgb.e[2];
         let t = rgb.e[2] + (co >> T::one());
         let cg = rgb.e[1] - t;
         return Vec::<T, 3>::new(t + (cg >> T::one()), co, cg);
     }
-    pub fn ycocg_r_to_rgb(ycocg: Vec<T, 3>) Vec<T, 3> {
+    pub const fn ycocg_r_to_rgb(ycocg: Vec<T, 3>) Vec<T, 3> {
         let t = ycocg.e[0] - (ycocg.e[2] >> T::one());
         let g = ycocg.e[2] + t;
         let b = t - (ycocg.e[1] >> T::one());

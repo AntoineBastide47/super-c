@@ -20,59 +20,59 @@ pub interface GenAs<U: Elem, O>: Copy {
 }
 
 extend<T: Scalar> T as GenAs<i32, i32> {
-    pub fn out_of(v: i32) i32 {
+    pub const fn out_of(v: i32) i32 {
         return v;
     }
-    pub fn out_put(o: &mut i32, i: usize, v: i32) {
+    pub const fn out_put(o: &mut i32, i: usize, v: i32) {
         *o = v;
     }
-    pub fn is_vec() bool {
+    pub const fn is_vec() bool {
         return false;
     }
 }
 
 extend<T: Scalar> T as GenAs<bool, bool> {
-    pub fn out_of(v: bool) bool {
+    pub const fn out_of(v: bool) bool {
         return v;
     }
-    pub fn out_put(o: &mut bool, i: usize, v: bool) {
+    pub const fn out_put(o: &mut bool, i: usize, v: bool) {
         *o = v;
     }
-    pub fn is_vec() bool {
+    pub const fn is_vec() bool {
         return false;
     }
 }
 
 extend<T: Scalar, const N: usize> Vec<T, N> as GenAs<i32, Vec<i32, N>> {
-    pub fn out_of(v: i32) Vec<i32, N> {
+    pub const fn out_of(v: i32) Vec<i32, N> {
         return Vec::<i32, N> { e: [v; N] };
     }
-    pub fn out_put(o: &mut Vec<i32, N>, i: usize, v: i32) {
+    pub const fn out_put(o: &mut Vec<i32, N>, i: usize, v: i32) {
         unsafe {
             o.e[i] = v;
         }
     }
-    pub fn is_vec() bool {
+    pub const fn is_vec() bool {
         return true;
     }
 }
 
 extend<T: Scalar, const N: usize> Vec<T, N> as GenAs<bool, Vec<bool, N>> {
-    pub fn out_of(v: bool) Vec<bool, N> {
+    pub const fn out_of(v: bool) Vec<bool, N> {
         return Vec::<bool, N> { e: [v; N] };
     }
-    pub fn out_put(o: &mut Vec<bool, N>, i: usize, v: bool) {
+    pub const fn out_put(o: &mut Vec<bool, N>, i: usize, v: bool) {
         unsafe {
             o.e[i] = v;
         }
     }
-    pub fn is_vec() bool {
+    pub const fn is_vec() bool {
         return true;
     }
 }
 
 /// `(x + y mod 2^32, carry)`, carry 1 when the sum exceeds 2^32 - 1.
-pub fn uadd_carry<G: Gen<u32>>(x: G, y: G) (G, G) {
+pub const fn uadd_carry<G: Gen<u32>>(x: G, y: G) (G, G) {
     let mut sum = x;
     let mut carry = x;
     for i in 0..G::len() {
@@ -84,7 +84,7 @@ pub fn uadd_carry<G: Gen<u32>>(x: G, y: G) (G, G) {
 }
 
 /// `(x - y mod 2^32, borrow)`, borrow 1 when `x < y`.
-pub fn usub_borrow<G: Gen<u32>>(x: G, y: G) (G, G) {
+pub const fn usub_borrow<G: Gen<u32>>(x: G, y: G) (G, G) {
     let mut diff = x;
     let mut borrow = x;
     for i in 0..G::len() {
@@ -102,7 +102,7 @@ pub fn usub_borrow<G: Gen<u32>>(x: G, y: G) (G, G) {
 }
 
 /// The 64-bit product of `x` and `y` as `(msb, lsb)`.
-pub fn umul_extended<G: Gen<u32>>(x: G, y: G) (G, G) {
+pub const fn umul_extended<G: Gen<u32>>(x: G, y: G) (G, G) {
     let mut msb = x;
     let mut lsb = x;
     for i in 0..G::len() {
@@ -114,7 +114,7 @@ pub fn umul_extended<G: Gen<u32>>(x: G, y: G) (G, G) {
 }
 
 /// The 64-bit signed product of `x` and `y` as `(msb, lsb)`.
-pub fn imul_extended<G: Gen<i32>>(x: G, y: G) (G, G) {
+pub const fn imul_extended<G: Gen<i32>>(x: G, y: G) (G, G) {
     let mut msb = x;
     let mut lsb = x;
     for i in 0..G::len() {
@@ -127,7 +127,7 @@ pub fn imul_extended<G: Gen<i32>>(x: G, y: G) (G, G) {
 
 /// `(value >> offset) & mask`, the mask built in `i32`: all ones for `bits` >= 32, so a 64-bit
 /// `value` keeps every bit above `offset`.
-pub fn bitfield_extract<T: Int, G: Gen<T>>(value: G, offset: i32, bits: i32) G {
+pub const fn bitfield_extract<T: Int, G: Gen<T>>(value: G, offset: i32, bits: i32) G {
     let mask = T::from_i64(int_mask(bits));
     let mut r = value;
     for i in 0..G::len() {
@@ -137,7 +137,7 @@ pub fn bitfield_extract<T: Int, G: Gen<T>>(value: G, offset: i32, bits: i32) G {
 }
 
 /// `base` with its `bits` bits from `offset` replaced by the low bits of `insert`.
-pub fn bitfield_insert<T: Int, G: Gen<T>>(base: G, insert: G, offset: i32, bits: i32) G {
+pub const fn bitfield_insert<T: Int, G: Gen<T>>(base: G, insert: G, offset: i32, bits: i32) G {
     let mask = type_mask(T::from_i64(bits)) << T::from_i64(offset);
     let mut r = base;
     for i in 0..G::len() {
@@ -148,7 +148,7 @@ pub fn bitfield_insert<T: Int, G: Gen<T>>(base: G, insert: G, offset: i32, bits:
 
 /// The bits of each component in reverse order, by swaps of 1, 2, 4, .. bit groups. A signed
 /// component shifts right arithmetically, so a negative one does not reverse exactly.
-pub fn bitfield_reverse<T: Int, G: Gen<T>>(v: G) G {
+pub const fn bitfield_reverse<T: Int, G: Gen<T>>(v: G) G {
     let mut r = v;
     for i in 0..G::len() {
         let mut x = v.at(i);
@@ -170,7 +170,7 @@ pub fn bitfield_reverse<T: Int, G: Gen<T>>(v: G) G {
 }
 
 /// The number of one bits of each component's two's complement pattern.
-pub fn bit_count<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
+pub const fn bit_count<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
     let mut r = G::out_of(0);
     for i in 0..G::len() {
         G::out_put(&mut r, i, v.at(i).count_ones());
@@ -179,7 +179,7 @@ pub fn bit_count<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
 }
 
 /// The index of the lowest one bit, -1 for zero.
-pub fn find_lsb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
+pub const fn find_lsb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
     let mut r = G::out_of(0);
     for i in 0..G::len() {
         G::out_put(&mut r, i, lsb(v.at(i)));
@@ -188,7 +188,7 @@ pub fn find_lsb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
 }
 
 /// The index of the highest one bit, -1 for zero; the bit width minus one for a negative component.
-pub fn find_msb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
+pub const fn find_msb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
     let mut r = G::out_of(0);
     for i in 0..G::len() {
         G::out_put(&mut r, i, msb(v.at(i)));
@@ -198,7 +198,7 @@ pub fn find_msb<T: Int, G: Gen<T> + GenAs<i32, O>, O>(v: G) O {
 
 /// Whether `abs(v)` has at most one bit set, so 0 is true. On an `i8` or `i16` minimum the scalar
 /// form is false (it tests `abs(v)` in `i64`) and the vector form true (`abs(v)` wraps to the minimum).
-pub fn is_power_of_two<T: Int, G: Gen<T> + GenAs<bool, O>, O>(v: G) O {
+pub const fn is_power_of_two<T: Int, G: Gen<T> + GenAs<bool, O>, O>(v: G) O {
     let mut r = G::out_of(false);
     for i in 0..G::len() {
         let x = v.at(i);
@@ -214,7 +214,7 @@ pub fn is_power_of_two<T: Int, G: Gen<T> + GenAs<bool, O>, O>(v: G) O {
 }
 
 /// The smallest power of two not below `abs(v)`, with the sign of `v`; 0 gives 0.
-pub fn next_power_of_two<T: Int, G: Gen<T>>(v: G) G {
+pub const fn next_power_of_two<T: Int, G: Gen<T>>(v: G) G {
     let mut r = v;
     for i in 0..G::len() {
         r.put(i, ceil_pow2(v.at(i)));
@@ -223,7 +223,7 @@ pub fn next_power_of_two<T: Int, G: Gen<T>>(v: G) G {
 }
 
 /// `v` when it is a power of two (`is_power_of_two`), else the power of two of its highest bit.
-pub fn prev_power_of_two<T: Int, G: Gen<T>>(v: G) G {
+pub const fn prev_power_of_two<T: Int, G: Gen<T>>(v: G) G {
     let mut r = v;
     for i in 0..G::len() {
         r.put(i, floor_pow2(v.at(i)));
@@ -232,7 +232,7 @@ pub fn prev_power_of_two<T: Int, G: Gen<T>>(v: G) G {
 }
 
 /// `v % multiple == 0`. A zero `multiple` traps.
-pub fn is_multiple<T: Int, G: Gen<T> + GenAs<bool, O>, O, B: Arg<G>>(v: G, multiple: B) O {
+pub const fn is_multiple<T: Int, G: Gen<T> + GenAs<bool, O>, O, B: Arg<G>>(v: G, multiple: B) O {
     let m = multiple.to_gen();
     let mut r = G::out_of(false);
     for i in 0..G::len() {
@@ -243,7 +243,7 @@ pub fn is_multiple<T: Int, G: Gen<T> + GenAs<bool, O>, O, B: Arg<G>>(v: G, multi
 
 /// The smallest multiple of `multiple` not below `source`. A signed `multiple` that is not positive
 /// panics.
-pub fn next_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
+pub const fn next_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
     let m = multiple.to_gen();
     let mut r = source;
     for i in 0..G::len() {
@@ -253,7 +253,7 @@ pub fn next_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
 }
 
 /// The largest multiple of `multiple` not above `source`.
-pub fn prev_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
+pub const fn prev_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
     let m = multiple.to_gen();
     let mut r = source;
     for i in 0..G::len() {
@@ -264,7 +264,7 @@ pub fn prev_multiple<T: Int, G: Gen<T>, B: Arg<G>>(source: G, multiple: B) G {
 
 /// The index of the `significant_bit_count`-th one bit from the lowest, -1 when the component has
 /// fewer one bits.
-pub fn find_nsb<T: Int, G: Gen<T> + GenAs<i32, O>, O: Gen<i32>>(x: G, significant_bit_count: O) O {
+pub const fn find_nsb<T: Int, G: Gen<T> + GenAs<i32, O>, O: Gen<i32>>(x: G, significant_bit_count: O) O {
     let mut r = significant_bit_count;
     for i in 0..G::len() {
         r.put(i, nsb(x.at(i), significant_bit_count.at(i)));
@@ -273,7 +273,7 @@ pub fn find_nsb<T: Int, G: Gen<T> + GenAs<i32, O>, O: Gen<i32>>(x: G, significan
 }
 
 /// The integer base-2 logarithm: `find_msb` as `T`, so 0 gives -1 (all ones when unsigned).
-pub fn log2_int<T: Int, G: Gen<T>>(v: G) G {
+pub const fn log2_int<T: Int, G: Gen<T>>(v: G) G {
     let mut r = v;
     for i in 0..G::len() {
         r.put(i, T::from_i64(msb(v.at(i))));
@@ -282,18 +282,18 @@ pub fn log2_int<T: Int, G: Gen<T>>(v: G) G {
 }
 
 /// The same as `next_power_of_two`.
-pub fn ceil_power_of_two<T: Int, G: Gen<T>>(v: G) G {
+pub const fn ceil_power_of_two<T: Int, G: Gen<T>>(v: G) G {
     return next_power_of_two(v);
 }
 
 /// The same as `prev_power_of_two`.
-pub fn floor_power_of_two<T: Int, G: Gen<T>>(v: G) G {
+pub const fn floor_power_of_two<T: Int, G: Gen<T>>(v: G) G {
     return prev_power_of_two(v);
 }
 
 /// `v` when it is a power of two, else the nearer of the powers of two around its highest bit (the
 /// lower one on a tie).
-pub fn round_power_of_two<T: Int, G: Gen<T>>(v: G) G {
+pub const fn round_power_of_two<T: Int, G: Gen<T>>(v: G) G {
     let mut r = v;
     for i in 0..G::len() {
         r.put(i, round_pow2(v.at(i)));
@@ -312,7 +312,7 @@ pub interface RoundMultiple: Scalar {
 /// The smallest multiple of `multiple` not below `source`. A signed integer `multiple` that is not
 /// positive panics. Floats use `source + (multiple - fmod(source, multiple))` for a positive `source`,
 /// else `source + fmod(-source, multiple)`.
-pub fn ceil_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
+pub const fn ceil_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
     let mut r = source;
     for i in 0..G::len() {
         r.put(i, source.at(i).ceil_multiple(multiple.at(i)));
@@ -321,7 +321,7 @@ pub fn ceil_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
 }
 
 /// The largest multiple of `multiple` not above `source`.
-pub fn floor_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
+pub const fn floor_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
     let mut r = source;
     for i in 0..G::len() {
         r.put(i, source.at(i).floor_multiple(multiple.at(i)));
@@ -330,7 +330,7 @@ pub fn floor_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
 }
 
 /// A floor, not a rounding: integers as `floor_multiple`, a negative float from `source + 1`.
-pub fn round_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
+pub const fn round_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
     let mut r = source;
     for i in 0..G::len() {
         r.put(i, source.at(i).round_multiple(multiple.at(i)));
@@ -339,43 +339,43 @@ pub fn round_multiple<T: RoundMultiple, G: Gen<T>>(source: G, multiple: G) G {
 }
 
 extend<T: Int> T as RoundMultiple {
-    pub fn ceil_multiple(self: T, multiple: T) T {
+    pub const fn ceil_multiple(self: T, multiple: T) T {
         return int_ceil_multiple(self, multiple);
     }
-    pub fn floor_multiple(self: T, multiple: T) T {
+    pub const fn floor_multiple(self: T, multiple: T) T {
         return int_floor_multiple(self, multiple);
     }
-    pub fn round_multiple(self: T, multiple: T) T {
+    pub const fn round_multiple(self: T, multiple: T) T {
         return int_floor_multiple(self, multiple);
     }
 }
 
 extend f32 as RoundMultiple {
-    pub fn ceil_multiple(self: f32, multiple: f32) f32 {
+    pub const fn ceil_multiple(self: f32, multiple: f32) f32 {
         return float_ceil_multiple(self, multiple);
     }
-    pub fn floor_multiple(self: f32, multiple: f32) f32 {
+    pub const fn floor_multiple(self: f32, multiple: f32) f32 {
         return float_floor_multiple(self, multiple);
     }
-    pub fn round_multiple(self: f32, multiple: f32) f32 {
+    pub const fn round_multiple(self: f32, multiple: f32) f32 {
         return float_round_multiple(self, multiple);
     }
 }
 
 extend f64 as RoundMultiple {
-    pub fn ceil_multiple(self: f64, multiple: f64) f64 {
+    pub const fn ceil_multiple(self: f64, multiple: f64) f64 {
         return float_ceil_multiple(self, multiple);
     }
-    pub fn floor_multiple(self: f64, multiple: f64) f64 {
+    pub const fn floor_multiple(self: f64, multiple: f64) f64 {
         return float_floor_multiple(self, multiple);
     }
-    pub fn round_multiple(self: f64, multiple: f64) f64 {
+    pub const fn round_multiple(self: f64, multiple: f64) f64 {
         return float_round_multiple(self, multiple);
     }
 }
 
 /// The low `bits` bits set; all bits for `bits` >= the bit width.
-pub fn mask<T: Int, G: Gen<T>>(bits: G) G {
+pub const fn mask<T: Int, G: Gen<T>>(bits: G) G {
     let mut r = bits;
     for i in 0..G::len() {
         r.put(i, type_mask(bits.at(i)));
@@ -384,7 +384,7 @@ pub fn mask<T: Int, G: Gen<T>>(bits: G) G {
 }
 
 /// `(v << shift) | (v >> (width - shift))`: a rotation to the left for an unsigned component.
-pub fn bitfield_rotate_right<T: Int, G: Gen<T>>(v: G, shift: i32) G {
+pub const fn bitfield_rotate_right<T: Int, G: Gen<T>>(v: G, shift: i32) G {
     let mut r = v;
     for i in 0..G::len() {
         let x = v.at(i);
@@ -394,7 +394,7 @@ pub fn bitfield_rotate_right<T: Int, G: Gen<T>>(v: G, shift: i32) G {
 }
 
 /// `(v >> shift) | (v << (width - shift))`: a rotation to the right for an unsigned component.
-pub fn bitfield_rotate_left<T: Int, G: Gen<T>>(v: G, shift: i32) G {
+pub const fn bitfield_rotate_left<T: Int, G: Gen<T>>(v: G, shift: i32) G {
     let mut r = v;
     for i in 0..G::len() {
         let x = v.at(i);
@@ -405,7 +405,7 @@ pub fn bitfield_rotate_left<T: Int, G: Gen<T>>(v: G, shift: i32) G {
 
 /// `v` with `bit_count` bits from `first_bit` set. The mask is built in `i32`, so for a 64-bit `v` it
 /// sign-extends.
-pub fn bitfield_fill_one<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i32) G {
+pub const fn bitfield_fill_one<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i32) G {
     let fill = T::from_i64(int_mask(bit_count) << first_bit);
     let mut r = v;
     for i in 0..G::len() {
@@ -415,7 +415,7 @@ pub fn bitfield_fill_one<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i32
 }
 
 /// `v` with `bit_count` bits from `first_bit` cleared (mask built as in `bitfield_fill_one`).
-pub fn bitfield_fill_zero<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i32) G {
+pub const fn bitfield_fill_zero<T: Int, G: Gen<T>>(v: G, first_bit: i32, bit_count: i32) G {
     let fill = T::from_i64(~(int_mask(bit_count) << first_bit));
     let mut r = v;
     for i in 0..G::len() {
@@ -705,34 +705,34 @@ const fn int_mask(bits: i32) i32 {
 
 // The low `bits` bits set; all ones from the bit width on. Built in u64, so the mask of all but the
 // sign bit, `(1 << (width - 1)) - 1`, does not overflow.
-fn type_mask<T: Int>(bits: T) T {
+const fn type_mask<T: Int>(bits: T) T {
     if bits.greater_equal(T::from_i64(T::bits())) {
         return ~T::zero();
     }
     return T::from_u64((1u64 << bits.to_u64()) - 1);
 }
 
-fn reverse_step<T: Int>(v: T, mask: T, shift: i64) T {
+const fn reverse_step<T: Int>(v: T, mask: T, shift: i64) T {
     let s = T::from_i64(shift);
     return (v & mask) << s | (v & ~mask) >> s;
 }
 
 // The trailing and leading zero counts give the indexes of the lowest and highest one bit for every
 // input, negative ones included, and compile to single instructions.
-fn lsb<T: Int>(x: T) i32 {
+const fn lsb<T: Int>(x: T) i32 {
     if x.equal(T::zero()) {
         return -1;
     }
     return x.trailing_zeros();
 }
 
-fn msb<T: Int>(x: T) i32 {
+const fn msb<T: Int>(x: T) i32 {
     return T::bits() - 1 - x.leading_zeros();
 }
 
 // A signed minimum stays the minimum for 8 and 16 bits (the negation wraps) and traps for 32 and 64
 // bits in a profile with overflow checks.
-fn int_abs<T: Int>(x: T) T {
+const fn int_abs<T: Int>(x: T) T {
     if x.greater_equal(T::zero()) {
         return x;
     }
@@ -740,7 +740,7 @@ fn int_abs<T: Int>(x: T) T {
 }
 
 // The scalar form of `is_power_of_two`: `abs(v) & (abs(v) - 1)` in i64 for 8- and 16-bit types.
-fn is_pow2<T: Int>(v: T) bool {
+const fn is_pow2<T: Int>(v: T) bool {
     let a = int_abs(v);
     if T::bits() < 32 {
         let w = a.to_i64();
@@ -750,7 +750,7 @@ fn is_pow2<T: Int>(v: T) bool {
 }
 
 // The bits below the highest one of `abs(v) - 1` filled, plus one, times `sign(v)` for a signed type.
-fn ceil_pow2<T: Int>(x: T) T {
+const fn ceil_pow2<T: Int>(x: T) T {
     let mut v = x;
     if T::is_signed() {
         v = int_abs(x);
@@ -775,14 +775,14 @@ fn ceil_pow2<T: Int>(x: T) T {
     return v + T::one();
 }
 
-fn floor_pow2<T: Int>(v: T) T {
+const fn floor_pow2<T: Int>(v: T) T {
     if is_pow2(v) {
         return v;
     }
     return T::one() << T::from_i64(msb(v));
 }
 
-fn round_pow2<T: Int>(v: T) T {
+const fn round_pow2<T: Int>(v: T) T {
     if is_pow2(v) {
         return v;
     }
@@ -801,7 +801,7 @@ fn round_pow2<T: Int>(v: T) T {
 
 // `-source % multiple` is computed in i64 for 8- and 16-bit types, so the negation of a minimum does
 // not wrap.
-fn int_ceil_multiple<T: Int>(source: T, multiple: T) T {
+const fn int_ceil_multiple<T: Int>(source: T, multiple: T) T {
     if T::is_signed() {
         if !multiple.greater(T::zero()) {
             panic("next_multiple, ceil_multiple: a signed multiple must be positive");
@@ -817,7 +817,7 @@ fn int_ceil_multiple<T: Int>(source: T, multiple: T) T {
     return tmp + (multiple - tmp % multiple);
 }
 
-fn int_floor_multiple<T: Int>(source: T, multiple: T) T {
+const fn int_floor_multiple<T: Int>(source: T, multiple: T) T {
     if source.greater_equal(T::zero()) {
         return source - source % multiple;
     }
@@ -825,21 +825,21 @@ fn int_floor_multiple<T: Int>(source: T, multiple: T) T {
     return tmp - tmp % multiple - multiple;
 }
 
-fn float_ceil_multiple<T: Float>(source: T, multiple: T) T {
+const fn float_ceil_multiple<T: Float>(source: T, multiple: T) T {
     if source.greater(T::zero()) {
         return source + (multiple - source.fmod(multiple));
     }
     return source + (-source).fmod(multiple);
 }
 
-fn float_floor_multiple<T: Float>(source: T, multiple: T) T {
+const fn float_floor_multiple<T: Float>(source: T, multiple: T) T {
     if source.greater_equal(T::zero()) {
         return source - source.fmod(multiple);
     }
     return source - source.fmod(multiple) - multiple;
 }
 
-fn float_round_multiple<T: Float>(source: T, multiple: T) T {
+const fn float_round_multiple<T: Float>(source: T, multiple: T) T {
     if source.greater_equal(T::zero()) {
         return source - source.fmod(multiple);
     }
@@ -848,7 +848,7 @@ fn float_round_multiple<T: Float>(source: T, multiple: T) T {
 }
 
 // The loop ends: `key` < 2^(2 * step) holds at each test and `step` halves.
-fn nsb<T: Int>(x: T, significant_bit_count: i32) i32 {
+const fn nsb<T: Int>(x: T, significant_bit_count: i32) i32 {
     if x.count_ones() < significant_bit_count {
         return -1;
     }

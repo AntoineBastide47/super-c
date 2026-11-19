@@ -1361,11 +1361,19 @@ const fn param_of(b: &CoreBody, x: OperandId) u32 {
     };
 }
 
-/// The blocks of the contract sites of `b` that no build runs, as bits: every site but a pattern type's
-/// without `checks_run`, else the ghost code and the measures (as `skip_contracts`). A read in them moves
-/// nothing and uses no value: the borrow check skips it.
-pub(package) fn ghost_blocks(b: &CoreBody, checks_run: bool) Vector<u64> {
+/// The blocks of `b` that no build runs, as bits: all of them for the body of a spec function or a lemma
+/// (`whole`); else those of the contract sites, every site but a pattern type's without `checks_run`, else
+/// the ghost code and the measures (as `skip_contracts`). A read in them moves nothing and uses no value:
+/// the borrow check skips it.
+pub(package) fn ghost_blocks(b: &CoreBody, checks_run: bool, whole: bool) Vector<u64> {
     let mut out = Vector::<u64>::new();
+    if whole {
+        out.resize_default((b.blocks.len() + 63) / 64);
+        for i in 0..b.blocks.len() {
+            out.set(i / 64, out[i / 64] | 1u64 << (i % 64) as u64);
+        }
+        return out;
+    }
     for i in 0..b.contracts.len() {
         let s = b.contracts[i];
         if s.kind == CT_PATTERN || checks_run && s.kind != CT_DECREASES && s.kind != CT_PANICS && !is_ghost_site(s.kind) {

@@ -92,13 +92,77 @@ fn half4x16_roundtrip() {
     assert(unpack_half4x16(pack_half4x16(vec4::splat(0.1))) == vec4::splat(0.0999755859375), "0.1 rounds");
 }
 
+// The integer packings, for every input: each unpacking gives back the fields its packing stores, and each
+// packing of an unpacked word gives back the word where the fields fill it. The build proves them.
+
+lemma uint2x8_round_trip(v: Vec<u8, 2>, p: u16)
+    ensures unpack_uint2x8(pack_uint2x8(v)).e == v.e
+    ensures pack_uint2x8(unpack_uint2x8(p)) == p
+{}
+
+lemma int2x8_round_trip(v: Vec<i8, 2>, p: i16)
+    ensures unpack_int2x8(pack_int2x8(v)).e == v.e
+    ensures pack_int2x8(unpack_int2x8(p)) == p
+{}
+
+lemma uint4x8_round_trip(v: Vec<u8, 4>, p: u32)
+    ensures unpack_uint4x8(pack_uint4x8(v)).e == v.e
+    ensures pack_uint4x8(unpack_uint4x8(p)) == p
+{}
+
+lemma int4x8_round_trip(v: Vec<i8, 4>, p: i32)
+    ensures unpack_int4x8(pack_int4x8(v)).e == v.e
+    ensures pack_int4x8(unpack_int4x8(p)) == p
+{}
+
+lemma uint2x16_round_trip(v: Vec<u16, 2>, p: u32)
+    ensures unpack_uint2x16(pack_uint2x16(v)).e == v.e
+    ensures pack_uint2x16(unpack_uint2x16(p)) == p
+{}
+
+lemma int2x16_round_trip(v: Vec<i16, 2>, p: i32)
+    ensures unpack_int2x16(pack_int2x16(v)).e == v.e
+    ensures pack_int2x16(unpack_int2x16(p)) == p
+{}
+
+lemma uint4x16_round_trip(v: Vec<u16, 4>, p: u64)
+    ensures unpack_uint4x16(pack_uint4x16(v)).e == v.e
+    ensures pack_uint4x16(unpack_uint4x16(p)) == p
+{}
+
+lemma int4x16_round_trip(v: Vec<i16, 4>, p: i64)
+    ensures unpack_int4x16(pack_int4x16(v)).e == v.e
+    ensures pack_int4x16(unpack_int4x16(p)) == p
+{}
+
+lemma uint2x32_round_trip(v: Vec<u32, 2>, p: u64)
+    ensures unpack_uint2x32(pack_uint2x32(v)).e == v.e
+    ensures pack_uint2x32(unpack_uint2x32(p)) == p
+{}
+
+lemma int2x32_round_trip(v: Vec<i32, 2>, p: i64)
+    ensures unpack_int2x32(pack_int2x32(v)).e == v.e
+    ensures pack_int2x32(unpack_int2x32(p)) == p
+{}
+
+/// The fields of x, y, z below 2^10 and of w below 4 come back.
+lemma u3x10_1x2_round_trip(v: Vec<u32, 4>, p: u32)
+    requires v.e[0] < 1024 && v.e[1] < 1024 && v.e[2] < 1024 && v.e[3] < 4
+    ensures unpack_u3x10_1x2(pack_u3x10_1x2(v)).e == v.e
+    ensures pack_u3x10_1x2(unpack_u3x10_1x2(p)) == p
+{}
+
+/// The fields of x, y, z in [-512, 511] and of w in [-2, 1] come back.
+lemma i3x10_1x2_round_trip(v: Vec<i32, 4>, p: u32)
+    requires -512 <= v.e[0] && v.e[0] < 512 && -512 <= v.e[1] && v.e[1] < 512 && -512 <= v.e[2] && v.e[2] < 512
+    requires -2 <= v.e[3] && v.e[3] < 2
+    ensures unpack_i3x10_1x2(pack_i3x10_1x2(v)).e == v.e
+    ensures pack_i3x10_1x2(unpack_i3x10_1x2(p)) == p
+{}
+
+// The lemmas above hold for any layout that round trips; these pin it.
 @test
-fn u3x10_1x2_roundtrip() {
-    for t in 0u32..6u32 {
-        let v0 = unpack_u3x10_1x2(pack_u3x10_1x2(uvec4::splat(t)));
-        let v1 = unpack_u3x10_1x2(pack_u3x10_1x2(v0));
-        assert(v0 == v1);
-    }
+fn integer_packing_layout() {
     assert_eq(pack_uint4x8(u8vec4::new(0xff, 0x77, 0x0, 0x33)), 0x330077ff);
     assert_eq(pack_u3x10_1x2(uvec4::new(0xff, 0x77, 0x0, 0x33)), 0xc001dcff);
 }
@@ -213,40 +277,6 @@ fn small_unorm_formats() {
         assert(near(b, unpack_unorm1x5_1x6_1x5(pack_unorm1x5_1x6_1x5(b)), 1.0 / 15.0));
         assert(near(b, unpack_unorm2x3_1x2(pack_unorm2x3_1x2(b)), 1.0 / 3.0));
     }
-}
-
-@test
-fn int_uint_packing() {
-    let p0 = pack_uint2x8(u8vec2::new(1, 2));
-    assert_ne(p0, 0);
-    assert(unpack_uint2x8(p0) == u8vec2::new(1, 2));
-    let p1 = pack_uint4x8(u8vec4::new(1, 2, 3, 4));
-    assert_ne(p1, 0);
-    assert(unpack_uint4x8(p1) == u8vec4::new(1, 2, 3, 4));
-    let p2 = pack_uint2x16(u16vec2::new(1, 2));
-    assert_ne(p2, 0);
-    assert(unpack_uint2x16(p2) == u16vec2::new(1, 2));
-    let p3 = pack_uint4x16(u16vec4::new(1, 2, 3, 4));
-    assert_ne(p3, 0);
-    assert(unpack_uint4x16(p3) == u16vec4::new(1, 2, 3, 4));
-    let p4 = pack_uint2x32(u32vec2::new(1, 2));
-    assert_ne(p4, 0);
-    assert(unpack_uint2x32(p4) == u32vec2::new(1, 2));
-    let q0 = pack_int2x8(i8vec2::new(1, 2));
-    assert_ne(q0, 0);
-    assert(unpack_int2x8(q0) == i8vec2::new(1, 2));
-    let q1 = pack_int4x8(i8vec4::new(1, 2, 3, 4));
-    assert_ne(q1, 0);
-    assert(unpack_int4x8(q1) == i8vec4::new(1, 2, 3, 4));
-    let q2 = pack_int2x16(i16vec2::new(1, 2));
-    assert_ne(q2, 0);
-    assert(unpack_int2x16(q2) == i16vec2::new(1, 2));
-    let q3 = pack_int4x16(i16vec4::new(1, 2, 3, 4));
-    assert_ne(q3, 0);
-    assert(unpack_int4x16(q3) == i16vec4::new(1, 2, 3, 4));
-    let q4 = pack_int2x32(i32vec2::new(1, 2));
-    assert_ne(q4, 0);
-    assert(unpack_int2x32(q4) == i32vec2::new(1, 2));
 }
 
 // Pointer access: `value_ptr` and the `make_*` constructors.

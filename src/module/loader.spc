@@ -2837,6 +2837,15 @@ extend Package {
         return self.lazy_std && self.modules.at(m).prelude && !self.is_rt(m as i32) && m as i32 != self.rt_lanes;
     }
 
+    /// Whether `d` is a spec function or a lemma: ghost code, whose body no build runs.
+    pub(package) const fn ghost_fn(self: &Self, d: DefId) bool {
+        if d.node == NODE_NONE || (d.node & NODE_BODY) != 0 || !self.modules.at(d.module as usize).has_ast {
+            return false;
+        }
+        let a = unsafe &*self.module_ast_const(d.module);
+        return a.at_const(d.node).kind == NodeKind::NODE_FUNCTION && a.ext(d.node).function.is_ghost();
+    }
+
     /// Whether module `m` belongs to the standard library: a prelude file, or a module of `std::`.
     pub(package) const fn in_std(self: &Self, m: usize) bool {
         let pth = self.modules.at(m).path.as_str();

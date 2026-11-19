@@ -178,39 +178,49 @@ const AGAROSE: [f64; 504] = [
 
 // Integer functions.
 
-@test
-fn integer_nlz() {
-    for i in 1u32..33 {
-        assert_eq(nlz(i), 31 - find_msb(i) as u32);
+// The build proves the integer laws for every input: leading zeros against the highest one bit, the
+// logarithm of a power of two, small powers and both modulos.
+lemma nlz_is_31_minus_msb(x: u32)
+    requires x != 0
+    ensures nlz(x) as i32 == 31 - find_msb::<u32, u32, i32>(x)
+{}
+
+lemma nlz_of_zero_only_is_32(x: u32)
+    ensures nlz(x) <= 32 && nlz(x) == 32 == (x == 0)
+{}
+
+lemma log2_of_a_power_of_two(k: u32)
+    requires k < 32
+    ensures log2_int::<u32, u32>(1u32 << k) == k
+{}
+
+lemma small_powers_u32(x: u32)
+    ensures pow_int(x, 0) == 1 && pow_int(x, 1) == x && pow_int(x, 2) == x.wrapping_mul(x)
+    ensures pow_int(x, 3) == x.wrapping_mul(x).wrapping_mul(x)
+{}
+
+lemma small_powers_i32(x: i32)
+    requires -46340 <= x && x <= 46340
+    ensures pow_int(x, 0) == if x >= 0 {
+        1
+    } else {
+        -1
+    } && pow_int(x, 1) == x && pow_int(x, 2) == x * x
+{}
+
+lemma mod_u32_is_the_remainder(x: u32, y: u32)
+    requires y != 0
+    ensures mod_int(x, y) == x % y
+{}
+
+lemma mod_i32_is_floored(x: i32, y: i32)
+    requires 0 < y && y <= 0x40000000
+    ensures mod_int(x, y) == if x % y < 0 {
+        x % y + y
+    } else {
+        x % y
     }
-}
-
-@test
-fn integer_log2() {
-    for i in 1..24 {
-        let a = log2_int(1u32 << i as u32);
-        let b = ((1u32 << i as u32) as f64).log2() as u32;
-        assert((a as f64 - b as f64).abs() <= 24.0);
-        assert_eq(a, i as u32);
-    }
-}
-
-@test
-fn integer_pow_uint() {
-    assert_eq(pow_int(2u32, 0), 1u32);
-    assert_eq(pow_int(2u32, 1), 2u32);
-    assert_eq(pow_int(2u32, 2), 4u32);
-}
-
-@test
-fn integer_pow_int() {
-    assert_eq(pow_int(2, 0), 1);
-    assert_eq(pow_int(2, 1), 2);
-    assert_eq(pow_int(2, 2), 4);
-    assert_eq(pow_int(-2, 0), -1);
-    assert_eq(pow_int(-2, 1), -2);
-    assert_eq(pow_int(-2, 2), 4);
-}
+{}
 
 // Logarithm to a base.
 
@@ -857,25 +867,15 @@ fn integer_sqrt_edges() {
 
 @test
 fn integer_mod_edges() {
-    assert_eq(mod_int(7, 3), 1);
-    assert_eq(mod_int(-7, 3), 2);
+    // A negative divisor, outside the lemma's range.
     assert_eq(mod_int(7, -3), -2);
     assert_eq(mod_int(-7, -3), -1);
-    assert_eq(mod_int(7u32, 3), 1u32);
-    assert_eq(mod_int(u32::MAX, 10), 5u32);
 }
 
 @test(should_panic)
 fn integer_mod_by_zero_traps() {
     let x = mod_int(7u32, 0);
     assert(x != 1);
-}
-
-@test
-fn integer_nlz_edges() {
-    assert_eq(nlz(0), 32u32);
-    assert_eq(nlz(1), 31u32);
-    assert_eq(nlz(u32::MAX), 0u32);
 }
 
 @test

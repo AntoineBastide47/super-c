@@ -1,7 +1,7 @@
-// Self-hosted analog of tests/vector_test.c. The C suite tests the compiler's internal VEC_DECLARE/
-// VEC_DEFINE macros; the self-hosted world instead relies on the prelude `Vector<T>`, so this exercises
-// that: push/pop LIFO + len, at/get/set bounds, first/last, insert/remove/swap/swap_remove/reverse,
-// clear/truncate, capacity growth, and a non-i32 element type.
+// The prelude `Vector<T>`: what its contracts do not state. The proofs cover the length, the results of
+// `pop`, `remove` and `swap_remove`, and the elements after `push`, `set`, `insert`, `remove`, `swap`,
+// `truncate` and `clear` for every input; the tests read the elements through `at`, `get`, `first` and
+// `last`, the capacity, and the frees of owned elements.
 
 // `resize_default` is bounded on `Default` rather than taking a value to copy: a `Free` element cannot be
 // duplicated into the new slots, so the element type has to be able to produce a fresh one.
@@ -9,12 +9,10 @@
 fn resize_default_grows_and_truncates() {
     let mut v = Vector::<u8>::new();
     v.resize_default(4);
-    assert_eq(v.len(), 4);
     assert_eq(*v.at(3), 0u8);
     v.push(9u8);
     // Shrinking frees the tail.
     v.resize_default(2);
-    assert_eq(v.len(), 2);
 }
 
 // `extend_copy` appends a `Copy` vector with one byte copy: the elements follow the existing ones,
@@ -28,30 +26,12 @@ fn extend_copy_appends() {
         src.push(i * 3);
     }
     v.extend_copy(&src);
-    assert_eq(v.len(), 101);
     assert_eq(*v.at(0), 7u64);
     assert_eq(*v.at(1), 0u64);
     assert_eq(*v.at(100), 297u64);
-    assert_eq(src.len(), 100);
     let empty = Vector::<u64>::new();
     v.extend_copy(&empty);
-    assert_eq(v.len(), 101);
-}
-
-@test
-fn push_pop_len() {
-    let mut v = Vector::<i32>::new();
-    assert(v.is_empty() && v.len() == 0, "init is empty");
-    for i in 0..20 {
-        v.push(i * i);
-    }
-    assert_eq(v.len(), 20);
-    // Stored value preserved.
-    assert_eq(*v.at(7), 49);
-    let last = v.pop();
-    assert(last.is_some() && last.unwrap() == 361 && v.len() == 19, "pop returns the last element (LIFO)");
-    let mut empty = Vector::<i32>::new();
-    assert(empty.pop().is_none(), "pop on empty returns None");
+    assert_eq(*v.at(100), 297u64);
 }
 
 @test
@@ -60,12 +40,7 @@ fn capacity_growth() {
     // Init allocates nothing.
     assert_eq(v.capacity(), 0);
     v.reserve(10);
-    assert(v.capacity() >= 10 && v.len() == 0, "reserve grows capacity, never len");
-    for i in 0..200 {
-        v.push(i);
-    }
-    assert(v.capacity() >= v.len(), "capacity always covers len after growth");
-    assert_eq(v.len(), 200);
+    assert(v.capacity() >= 10, "reserve grows the capacity");
 }
 
 @test
@@ -89,9 +64,9 @@ fn insert_remove() {
     } // [0,1,2,3]
     // [0,99,1,2,3].
     v.insert(1, 99);
-    assert(v.len() == 5 && *v.at(1) == 99 && *v.at(2) == 1, "insert shifts right");
-    let r = v.remove(1); // -> Some(99), [0,1,2,3]
-    assert(r.is_some() && r.unwrap() == 99 && v.len() == 4 && *v.at(1) == 1, "remove returns value + shifts left");
+    assert(*v.at(1) == 99 && *v.at(2) == 1, "insert shifts right");
+    let _ = v.remove(1); // [0,1,2,3]
+    assert(*v.at(1) == 1, "remove shifts left");
 }
 
 @test
@@ -104,8 +79,8 @@ fn swap_reverse() {
     assert(*v.at(0) == 30 && *v.at(2) == 10, "swap exchanges elements");
     v.reverse();
     assert(*v.at(0) == 10 && *v.at(1) == 20 && *v.at(2) == 30, "reverse restores order");
-    let sr = v.swap_remove(0); // moves last into slot 0 -> [30,20]
-    assert(sr.is_some() && sr.unwrap() == 10 && v.len() == 2 && *v.at(0) == 30, "swap_remove pulls the tail in");
+    let _ = v.swap_remove(0); // moves last into slot 0 -> [30,20]
+    assert(*v.at(0) == 30, "swap_remove pulls the tail in");
 }
 
 @test
@@ -116,9 +91,9 @@ fn first_last_clear_truncate() {
     v.push(3);
     assert(*v.first().unwrap() == 1 && *v.last().unwrap() == 3, "first/last");
     v.truncate(2);
-    assert_eq(v.len(), 2);
+    assert(*v.last().unwrap() == 2, "truncate keeps the head");
     v.clear();
-    assert(v.len() == 0 && v.is_empty(), "clear empties");
+    assert(v.first().is_none(), "clear empties");
 }
 
 // Strings longer than the 23-byte inline budget, so every element owns a heap buffer the leak gate sees.

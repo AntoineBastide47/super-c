@@ -184,8 +184,7 @@ fn char_and_bool_methods_match_at_run_time() {
     assert_eq(text_check(), 0u32);
 }
 
-// Every u8 and u16 value: roots and logarithms against direct definitions, and the bit and byte round
-// trips.
+// Every u8 and u16 value: roots, logarithms and the reversed bits against direct definitions.
 @test
 fn narrow_unsigned_methods_hold_for_every_value() {
     for i in 0..65536u32 {
@@ -210,32 +209,83 @@ fn narrow_unsigned_methods_hold_for_every_value() {
             assert_eq(x.ilog10(), digits);
             assert_eq(x.ilog(3), (i as u64).ilog(3));
         }
-        assert_eq(u16::from_le_bytes(x.to_le_bytes()), x);
-        assert_eq(u16::from_be_bytes(x.to_be_bytes()), x);
-        assert_eq(u16::from_ne_bytes(x.to_ne_bytes()), x);
-        assert_eq(u16::from_be_bytes(x.to_le_bytes()), x.swap_bytes());
-        assert_eq(x.swap_bytes().swap_bytes(), x);
-        assert_eq(x.reverse_bits().reverse_bits(), x);
         let mut rev: u16 = 0;
         for b in 0..16u32 {
             rev |= (x >> b as u16 & 1) << (15 - b) as u16;
         }
         assert_eq(x.reverse_bits(), rev);
-        for n in 0..18u32 {
-            assert_eq(x.rotate_left(n).rotate_right(n), x);
-            assert_eq(x.rotate_left(n), x.rotate_right(16 - n % 16));
-        }
-        assert_eq(x.count_zeros() + x.count_ones(), 16usize);
-        assert_eq(x.leading_ones(), (~x).leading_zeros());
         let b = x as u8;
         assert_eq(b.isqrt() as u32, (b as u32).isqrt());
-        assert_eq(b.reverse_bits().reverse_bits(), b);
-        assert_eq(b.rotate_left(i % 11).rotate_right(i % 11), b);
     }
 }
 
-// Every i8 and i16 value against i32 and i64 references: the Euclidean pair, midpoint, abs_diff and the
-// signed roots and logarithms.
+// The byte and bit round trips and the rotations of every value of each width; the build proves them.
+lemma u16_bits(x: u16, n: u32)
+    ensures u16::from_le_bytes(x.to_le_bytes()) == x
+    ensures u16::from_be_bytes(x.to_be_bytes()) == x
+    ensures u16::from_ne_bytes(x.to_ne_bytes()) == x
+    ensures u16::from_be_bytes(x.to_le_bytes()) == x.swap_bytes()
+    ensures x.swap_bytes().swap_bytes() == x
+    ensures x.reverse_bits().reverse_bits() == x
+    ensures x.rotate_left(n).rotate_right(n) == x
+    ensures x.rotate_left(n) == x.rotate_right(16 - n % 16)
+    ensures (x as u8).reverse_bits().reverse_bits() == x as u8
+    ensures (x as u8).rotate_left(n).rotate_right(n) == x as u8
+    ensures x.count_zeros() + x.count_ones() == 16
+    ensures x.leading_ones() == (~x).leading_zeros()
+{}
+
+lemma i16_bytes(x: i16)
+    ensures i16::from_le_bytes(x.to_le_bytes()) == x
+    ensures i16::from_be_bytes(x.to_be_bytes()) == x
+{}
+
+lemma u64_bits(x: u64)
+    ensures u64::from_le_bytes(x.to_le_bytes()) == x
+    ensures u64::from_be_bytes(x.to_be_bytes()) == x
+    ensures u64::from_ne_bytes(x.to_ne_bytes()) == x
+    ensures u64::from_be_bytes(x.to_le_bytes()) == x.swap_bytes()
+    ensures x.swap_bytes().swap_bytes() == x
+    ensures x.reverse_bits().reverse_bits() == x
+    ensures x.reverse_bits().swap_bytes() == x.swap_bytes().reverse_bits()
+    ensures x.to_be() == u64::from_be_bytes(x.to_ne_bytes())
+    ensures u64::from_be(x.to_be()) == x
+    ensures u64::from_le(x.to_le()) == x
+    ensures x.trailing_ones() == (~x).trailing_zeros()
+    ensures x.count_zeros() + x.count_ones() == 64
+{}
+
+lemma i64_bits(s: i64, n: u32)
+    ensures i64::from_le_bytes(s.to_le_bytes()) == s
+    ensures i64::from_be_bytes(s.to_be_bytes()) == s
+    ensures s.reverse_bits() == (s as u64).reverse_bits() as i64
+    ensures s.rotate_right(n) == (s as u64).rotate_right(n) as i64
+{}
+
+lemma u32_bits(x: u64, n: u32)
+    ensures u32::from_be_bytes((x as u32).to_be_bytes()) == x as u32
+    ensures (x as u32).swap_bytes() == (x.swap_bytes() >> 32) as u32
+    ensures (x as u32).reverse_bits() == (x.reverse_bits() >> 32) as u32
+    ensures (x as u32).rotate_left(n).rotate_right(n) == x as u32
+    ensures (x as i32).swap_bytes() == (x as u32).swap_bytes() as i32
+{}
+
+lemma usize_bits(z: usize)
+    ensures usize::from_le_bytes(z.to_le_bytes()) == z
+    ensures usize::from_be_bytes(z.to_be_bytes()) == z
+    ensures usize::from_ne_bytes(z.to_ne_bytes()) == z
+    ensures z.swap_bytes().swap_bytes() == z
+    ensures z.reverse_bits().reverse_bits() == z
+    ensures isize::from_be_bytes((z as isize).to_be_bytes()) == z as isize
+{}
+
+lemma add_signed_wraps(a: u64, s: i64)
+    ensures a.wrapping_add_signed(s) == a.wrapping_add(s as u64)
+    ensures a.overflowing_add_signed(s).0 == a.wrapping_add(s as u64)
+{}
+
+// Every i8 and i16 value against i32 and i64 references: the Euclidean pair and the signed roots and
+// logarithms.
 @test
 fn narrow_signed_methods_hold_for_every_value() {
     let divisors: [i16; 8] = [1, -1, 2, -2, 7, -7, i16::MAX, i16::MIN];
@@ -251,8 +301,6 @@ fn narrow_signed_methods_hold_for_every_value() {
                 assert(r >= 0, "rem_euclid negative");
                 assert(r < w.abs(), "rem_euclid not below |rhs|");
             }
-            assert_eq(x.abs_diff(d) as i32, (i - w).abs());
-            assert_eq(x.midpoint(d) as i32, (i + w) / 2);
         }
         if x >= 0 {
             let r = x.isqrt() as i32;
@@ -266,15 +314,18 @@ fn narrow_signed_methods_hold_for_every_value() {
             assert_eq(x.ilog10(), (i as u32).ilog10());
             assert_eq(x.ilog2(), (i as u32).ilog2());
         }
-        assert_eq(i16::from_le_bytes(x.to_le_bytes()), x);
-        assert_eq(i16::from_be_bytes(x.to_be_bytes()), x);
-        assert_eq(x.unsigned_abs() as i32, i.abs());
-        assert_eq(x.wrapping_abs().wrapping_neg().wrapping_abs(), x.wrapping_abs());
-        let b = x as i8;
-        assert_eq(b.saturating_neg() as i32, (-(b as i32)).min(127));
-        assert_eq(b.saturating_abs() as i32, (b as i32).abs().min(127));
     }
 }
+
+// The distances, midpoints and absolute values of every pair of i16 values, and of every i8 value.
+lemma i16_distances(x: i16, d: i16)
+    ensures x.abs_diff(d) as i32 == (x as i32 - d as i32).abs()
+    ensures x.midpoint(d) as i32 == (x as i32 + d as i32) / 2
+    ensures x.unsigned_abs() as i32 == (x as i32).abs()
+    ensures x.wrapping_abs().wrapping_neg().wrapping_abs() == x.wrapping_abs()
+    ensures (x as i8).saturating_neg() as i32 == (-((x as i8) as i32)).min(127)
+    ensures (x as i8).saturating_abs() as i32 == ((x as i8) as i32).abs().min(127)
+{}
 
 // The power family against a reference loop of `checked_mul` and `wrapping_mul` over random bases and
 // exponents: u64, i64, u32 and i32.
@@ -379,21 +430,14 @@ fn roots_and_logarithms_match_their_definitions() {
     }
 }
 
-// The bit and byte round trips of random u64, i64, u32, i32 and usize values, and the rotations against
-// a reference built from wrapping shifts.
+// The rotations of random u64 values against a reference built from wrapping shifts. The lemmas after
+// `narrow_unsigned_methods_hold_for_every_value` prove the byte and bit round trips and the bit counts.
 @test
-fn bit_and_byte_round_trips_hold() {
+fn u64_rotations_match_wrapping_shifts() {
     let mut rng = random::Pcg32::new(3, 17);
     for _ in 0..ROUNDS {
         let x = next_u64(&mut rng);
         let n = rng.next_u32();
-        assert_eq(u64::from_le_bytes(x.to_le_bytes()), x);
-        assert_eq(u64::from_be_bytes(x.to_be_bytes()), x);
-        assert_eq(u64::from_ne_bytes(x.to_ne_bytes()), x);
-        assert_eq(u64::from_be_bytes(x.to_le_bytes()), x.swap_bytes());
-        assert_eq(x.swap_bytes().swap_bytes(), x);
-        assert_eq(x.reverse_bits().reverse_bits(), x);
-        assert_eq(x.reverse_bits().swap_bytes(), x.swap_bytes().reverse_bits());
         assert_eq(x.rotate_left(n).rotate_right(n), x);
         let k = n % 64;
         let rot = if k == 0 {
@@ -402,30 +446,6 @@ fn bit_and_byte_round_trips_hold() {
             x.wrapping_shl(k) | x.wrapping_shr(64 - k)
         };
         assert_eq(x.rotate_left(n), rot);
-        assert_eq(x.to_be(), u64::from_be_bytes(x.to_ne_bytes()));
-        assert_eq(u64::from_be(x.to_be()), x);
-        assert_eq(u64::from_le(x.to_le()), x);
-        let s = x as i64;
-        assert_eq(i64::from_le_bytes(s.to_le_bytes()), s);
-        assert_eq(i64::from_be_bytes(s.to_be_bytes()), s);
-        assert_eq(s.rotate_right(n), x.rotate_right(n) as i64);
-        assert_eq(s.reverse_bits(), x.reverse_bits() as i64);
-        let w = x as u32;
-        assert_eq(u32::from_be_bytes(w.to_be_bytes()), w);
-        assert_eq(w.swap_bytes(), (x.swap_bytes() >> 32) as u32);
-        assert_eq(w.reverse_bits(), (x.reverse_bits() >> 32) as u32);
-        assert_eq(w.rotate_left(n).rotate_right(n), w);
-        assert_eq((w as i32).swap_bytes(), w.swap_bytes() as i32);
-        let z = x as usize;
-        assert_eq(usize::from_le_bytes(z.to_le_bytes()), z);
-        assert_eq(usize::from_be_bytes(z.to_be_bytes()), z);
-        assert_eq(usize::from_ne_bytes(z.to_ne_bytes()), z);
-        assert_eq(z.swap_bytes().swap_bytes(), z);
-        assert_eq(z.reverse_bits().reverse_bits(), z);
-        assert_eq(z.rotate_left(n).rotate_right(n), z);
-        assert_eq(isize::from_be_bytes((z as isize).to_be_bytes()), z as isize);
-        assert_eq(x.count_zeros() + x.count_ones(), 64usize);
-        assert_eq(x.trailing_ones(), (~x).trailing_zeros());
     }
 }
 
@@ -472,9 +492,7 @@ fn add_signed_matches_i128() {
         let sum = i128::cast_unsigned(&wa) + i128::from_i64(s);
         let fits = sum >= zero && sum <= top;
         assert_eq(a.checked_add_signed(s).is_some(), fits);
-        assert_eq(a.wrapping_add_signed(s), a.wrapping_add(s as u64));
-        let (r, o) = a.overflowing_add_signed(s);
-        assert_eq(r, a.wrapping_add(s as u64));
+        let (_r, o) = a.overflowing_add_signed(s);
         assert_eq(o, !fits);
         let ws = u128::from_u64(a.saturating_add_signed(s));
         let sat = i128::cast_unsigned(&ws);

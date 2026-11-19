@@ -51,23 +51,30 @@ pub interface LinearRand: Scalar {
     fn linear_rand_of<R: Rng>(rng: &mut R, lo: Self, hi: Self) Self;
 }
 
-// A built-in integer is `rand % (hi + 1 - lo) + lo` at the width of `T`, with the remainder taken unsigned.
-// A width up to 32 bits takes the low bits of one `next_u32`; 64 bits take two, as `(first << 32) | second`.
+// A built-in integer is `int_in_range` of a random word: the low bits of one `next_u32` for a width up to 32
+// bits, `(first << 32) | second` of two for 64 bits.
 fn builtin_int_rand<T: Int, R: Rng>(rng: &mut R, lo: T, hi: T) T {
+    let first = rng.next_u32() as u64;
+    let word = if T::bits() == 64 {
+        first << 32 | rng.next_u32() as u64
+    } else {
+        first
+    };
+    return int_in_range(word, lo, hi);
+}
+
+/// The value in [lo, hi] that `linear_rand` maps random `word` to: `word % (hi + 1 - lo) + lo`, computed
+/// modulo 2^bits of `T` on the low bits of `word`, so a range wider than half of `T` does not overflow.
+/// Panics when [lo, hi] is every value of `T` (the range wraps to 0).
+pub const fn int_in_range<T: Int>(word: u64, lo: T, hi: T) T {
     let bits = T::bits();
     let mask = if bits == 64 {
         u64::MAX
     } else {
         (1u64 << bits as u64) - 1
     };
-    let first = rng.next_u32() as u64;
-    let word = if bits == 64 {
-        first << 32 | rng.next_u32() as u64
-    } else {
-        first & mask
-    };
-    let range = (hi + T::one() - lo).to_u64() & mask;
-    return T::from_u64(word % range) + lo;
+    let range = hi.to_u64().wrapping_sub(lo.to_u64()).wrapping_add(1) & mask;
+    return T::from_u64(((word & mask) % range).wrapping_add(lo.to_u64()));
 }
 
 extend i8 as LinearRand {

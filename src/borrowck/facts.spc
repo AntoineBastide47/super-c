@@ -6580,7 +6580,11 @@ extend Owner {
             f: replace(dst, BodyFacts::empty()),
             assign_sites: sites,
             cur_block: 0,
-            ghost: ir::ghost_blocks(b, unsafe (&*self.pkg).contract_checks_run(b.module)),
+            ghost: ir::ghost_blocks(
+                b,
+                unsafe (&*self.pkg).contract_checks_run(b.module),
+                unsafe (&*self.pkg).ghost_fn(b.owner),
+            ),
             in_ghost: false,
             in_caps: false,
             plain_copy: false,

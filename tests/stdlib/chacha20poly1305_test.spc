@@ -1,6 +1,7 @@
 // std::crypto::chacha20, poly1305 and chacha20poly1305 against RFC 8439's test vectors (2.4.2, 2.5.2, 2.8.2
-// and the Poly1305 edge cases of appendix A.3), and against vectors at each block and padding boundary
-// (a reference implementation made them).
+// and appendix A.3), and against vectors at each padding boundary (a reference implementation made them).
+// The build proves `chacha20` and `poly1305` equal to their spec functions for every input, block
+// boundaries and limb carries included: these vectors check the specs.
 import std::crypto::secret as *;
 import std::crypto::chacha20;
 import std::crypto::poly1305;
@@ -105,15 +106,6 @@ fn chacha20_rfc() {
     );
 }
 
-@test
-fn chacha20_block_boundaries() {
-    let nonce: [u8; 12] = [0, 0, 0, 9, 0, 0, 0, 0x4a, 0, 0, 0, 0];
-    let s129 = "11f9e8f2cc1f7227694f9a51f67c12aeb6a98b41be54f3a1ad921d240618bf94336a8bb0fa9ba11b0de2f02becb741e8e44ac3b7b362353b4240147607fc8ff4cb404ca1e43354bc01ccabbeff379afcac6efcd2e761469fcccf32e18fa20c7246895724e83d0f5466c180729dc14c964deae501ab611d4212569d6929eadc415d";
-    for n in [0usize, 1, 63, 64, 65, 129] {
-        assert_eq(chacha(KEY_RAMP, nonce, 1, ramp(n, 1, 7).as_slice()).as_str(), s129.slice(0, 2 * n));
-    }
-}
-
 // The Poly1305 tag of `m` under `key` (hex), as hex.
 fn mac(key: str, m: []Secret<u8>) String {
     return hex_tag(poly1305::poly1305(key32(key), m));
@@ -135,42 +127,6 @@ fn poly1305_rfc() {
     );
     assert_eq(mac(KEY_RAMP, zeros(0).as_slice()).as_str(), "101112131415161718191a1b1c1d1e1f");
     assert_eq(mac(KEY_RAMP, ramp(17, 100, 1).as_slice()).as_str(), "daadd9e6f7bf92742a4a4a928aac9208");
-}
-
-// Appendix A.3, test vectors 5 to 9: sums near and past p and 2^130, which the reduction must carry.
-@test
-fn poly1305_reduction_edges() {
-    let r2 = "0200000000000000000000000000000000000000000000000000000000000000";
-    let r1 = "0100000000000000000000000000000000000000000000000000000000000000";
-    assert_eq(
-        mac(r2, unhex("ffffffffffffffffffffffffffffffff").as_slice()).as_str(),
-        "03000000000000000000000000000000",
-    );
-    assert_eq(
-        mac(
-            "02000000000000000000000000000000ffffffffffffffffffffffffffffffff",
-            unhex("02000000000000000000000000000000").as_slice(),
-        ).as_str(),
-        "03000000000000000000000000000000",
-    );
-    assert_eq(
-        mac(
-            r1,
-            unhex("fffffffffffffffffffffffffffffffff0ffffffffffffffffffffffffffffff11000000000000000000000000000000").as_slice(),
-        ).as_str(),
-        "05000000000000000000000000000000",
-    );
-    assert_eq(
-        mac(
-            r1,
-            unhex("fffffffffffffffffffffffffffffffffbfefefefefefefefefefefefefefefe01010101010101010101010101010101").as_slice(),
-        ).as_str(),
-        "00000000000000000000000000000000",
-    );
-    assert_eq(
-        mac(r2, unhex("fdffffffffffffffffffffffffffffff").as_slice()).as_str(),
-        "faffffffffffffffffffffffffffffff",
-    );
 }
 
 // Seals `pt` with `aad`: the ciphertext and the tag, as hex; then opens them and checks the plaintext.

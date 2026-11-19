@@ -283,8 +283,17 @@ its definition, one unfolding per call (a call over constants unfolds further); 
   (`lemma clamp_le(x: u32, hi: u32) ensures clamp(x, hi) <= hi {}`), and a recursion under
   `decreases` unfolds once per call (induction). Where the function's own proof does not show that it
   never panics (it has no clause, or a `panics if`), the body defines the call only where a path
-  returns: `double(x)` of `return x * 2;` is `2 * x` where `x < 2^31`, unknown elsewhere. A
-  function's own clauses outside these, and a `const fn` with a loop, give the callee's `ensures` only.
+  returns: `double(x)` of `return x * 2;` is `2 * x` where `x < 2^31`, unknown elsewhere. A loop runs
+  as often as its trip count, when the arguments fix it (`for i in 0..G::len()`), up to 2048 blocks;
+  a path still running past them is left out of the definition. A call that writes through a `&mut`
+  argument, an automatic one too (`r.put(i, v)`), gives the referent the value the callee leaves. A
+  call through an interface at a type that names no parameter (`i16::fwd(c)`, `x - T::one()` once
+  `T` is bound, an operator) reads that type's conformance, a blanket `extend<T: Int> T` and a
+  built-in type's too, when the conformance's method is a `const fn` that ends. A function's own
+  clauses outside these give the callee's `ensures` only, but `==` through a type's `Eq`
+  conformance (`r == Some(v)` of an `Option<u64>`) is that conformance's body there too.
+- A spec function's or a lemma's body never runs: it reads a value of a type parameter as often as the
+  proof needs, with no move.
 - `assert P by { B };` proves P after B (a lemma call, a case split) and then assumes it.
 - Under `-fcontract-checks` a clause that calls a spec function or converts into `int` or `nat` is
   error 545: it has no run-time form.

@@ -66,6 +66,33 @@ fn check_int_range<T: LinearRand + Int>(g: &mut Pcg32) {
     assert(amax == hi);
 }
 
+// The build proves that an unsigned range holds every value it maps a word to, and that each of its values
+// is the value of a word.
+lemma in_range_u8(w: u64, lo: u8, hi: u8)
+    requires lo <= hi && !(lo == 0 && hi == u8::MAX)
+    ensures lo <= int_in_range(w, lo, hi) && int_in_range(w, lo, hi) <= hi
+{}
+
+lemma in_range_u32(w: u64, lo: u32, hi: u32)
+    requires lo <= hi && !(lo == 0 && hi == u32::MAX)
+    ensures lo <= int_in_range(w, lo, hi) && int_in_range(w, lo, hi) <= hi
+{}
+
+lemma in_range_u64(w: u64, lo: u64, hi: u64)
+    requires lo <= hi && !(lo == 0 && hi == u64::MAX)
+    ensures lo <= int_in_range(w, lo, hi) && int_in_range(w, lo, hi) <= hi
+{}
+
+lemma reaches_u8(v: u8, lo: u8, hi: u8)
+    requires lo <= v && v <= hi && !(lo == 0 && hi == u8::MAX)
+    ensures int_in_range(v - lo, lo, hi) == v
+{}
+
+lemma reaches_u64(v: u64, lo: u64, hi: u64)
+    requires lo <= v && v <= hi && !(lo == 0 && hi == u64::MAX)
+    ensures int_in_range(v - lo, lo, hi) == v
+{}
+
 @test
 fn linear_rand_int() {
     let mut g = Pcg32::new(1, 1);
@@ -216,17 +243,16 @@ fn linear_rand_formulas() {
     );
 }
 
+// A signed range wider than half of its type: its width and its values do not fit the type.
 @test
-fn full_unsigned_range_minus_one() {
+fn wide_signed_ranges_stay_in_range() {
     let mut g = Pcg32::new(8, 1);
-    let mut top = false;
-    for _ in 0..4096 {
-        let v = linear_rand(&mut g, 0u8, 254u8);
-        if v == 254 {
-            top = true;
-        }
+    for _ in 0..SAMPLES {
+        let a = linear_rand(&mut g, -0x40000000i32, 0x40000000i32);
+        assert(-0x40000000 <= a && a <= 0x40000000);
+        let b = linear_rand(&mut g, i64::MIN + 1, i64::MAX);
+        assert(b > i64::MIN);
     }
-    assert(top);
 }
 
 @test(should_panic)
