@@ -1,6 +1,7 @@
 // The C compilers' intrinsics the native backends expand in place of a call: the table of each instruction
 // set, a row's lookup, the expansion of its constant arguments, and the vector registers an expansion
-// names and writes, which a backend renames to where its arguments are.
+// names and writes and the general ones it reads as addresses, which a backend renames to where its
+// arguments are.
 import lir::ir as *;
 import target::a64intrin as a64i;
 import target::x64intrin as x64i;
@@ -600,6 +601,171 @@ pub(package) const fn vsplit_dest(a64: bool, text: str, r: u32) bool {
         }
     }
     return false;
+}
+
+// The 64-bit general registers by number (x86-64's encoding: rax 0 .. r15 15).
+const GP64_X64: [str; 16] = [
+    "rax",
+    "rcx",
+    "rdx",
+    "rbx",
+    "rsp",
+    "rbp",
+    "rsi",
+    "rdi",
+    "r8",
+    "r9",
+    "r10",
+    "r11",
+    "r12",
+    "r13",
+    "r14",
+    "r15",
+];
+
+// The x86-64 instructions that read or write a general register they do not name: a mnemonic, with or
+// without a size suffix (`b`, `w`, `l`, `q`), or with `*` the prefix of mnemonics. Products and quotients of
+// one operand, exchanges, string operations, the processor's identity and counters, the stack, the
+// non-temporal masked stores (rdi), compare-exchanges, state saves, the explicit- and implicit-length
+// string compares (rax, rdx, rcx).
+const IMPLICIT_GP_X64: [str; 35] = [
+    "mul",
+    "imul",
+    "div",
+    "idiv",
+    "xadd",
+    "xchg",
+    "rep",
+    "repe",
+    "repne",
+    "movs",
+    "stos",
+    "lods",
+    "scas",
+    "cmps",
+    "xlat",
+    "cpuid",
+    "rdpid",
+    "rdmsr",
+    "wrmsr",
+    "push",
+    "pop",
+    "call",
+    "ret",
+    "enter",
+    "leave",
+    "maskmovdqu",
+    "maskmovq",
+    "cmpxchg*",
+    "xsave*",
+    "xrstor*",
+    "rdtsc*",
+    "pcmpestr*",
+    "vpcmpestr*",
+    "pcmpistr*",
+    "vpcmpistr*",
+];
+
+/// The general registers x86-64 template `text` names (bit `r` for register `r`, rax 0 .. r15 15) when it
+/// names each only as the 64-bit base or index of a memory operand, which its instruction only reads, and
+/// none of its instructions touches a general register it does not name (`IMPLICIT_GP_X64`): a generator
+/// may read those addresses from any registers (`grename`). `~0` for another template.
+pub(package) const fn gp_addresses(text: str) u64 {
+    let mut m: u64 = 0;
+    let mut at: usize = 0;
+    // Each step takes one instruction (a line or a `;`-separated part).
+    while at < text.len() {
+        let mut end = at;
+        while end < text.len() && text.byte_at(end) != b'\n' && text.byte_at(end) != b';' {
+            end += 1;
+        }
+        let ins = text.slice(at, end).trim();
+        at = end + 1;
+        let mut ms: usize = 0;
+        while ms < ins.len() && word_byte(ins.byte_at(ms)) {
+            ms += 1;
+        }
+        let mn = ins.slice(0, ms);
+        for k in 0..35usize {
+            if implicit_of(mn, unsafe IMPLICIT_GP_X64[k]) {
+                return ~0u64;
+            }
+        }
+        let mut depth: u32 = 0;
+        let mut j = ms;
+        while j < ins.len() {
+            let c = ins.byte_at(j);
+            if c == b'(' {
+                depth += 1;
+            } else if c == b')' {
+                depth -= 1;
+            }
+            if c != b'%' {
+                j += 1;
+                continue;
+            }
+            let st = j + 1;
+            j = st;
+            while j < ins.len() && word_byte(ins.byte_at(j)) {
+                j += 1;
+            }
+            let nm = ins.slice(st, j);
+            if nm.starts_with("xmm") || nm.starts_with("ymm") || nm.starts_with("zmm") || nm.starts_with("tmm") || nm == "rip" || nm.len() <= 2 && nm.starts_with(
+                "k",
+            ) {
+                continue;
+            }
+            let mut r: usize = 16;
+            for q in 0..16usize {
+                if nm == unsafe GP64_X64[q] {
+                    r = q;
+                }
+            }
+            if r == 16 || depth == 0 {
+                return ~0u64;
+            }
+            m |= 1u64 << r as u64;
+        }
+    }
+    return m;
+}
+
+// Whether mnemonic `mn` is entry `e` of `IMPLICIT_GP_X64`.
+const fn implicit_of(mn: str, e: str) bool {
+    if e.ends_with("*") {
+        return mn.starts_with(e.slice(0, e.len() - 1));
+    }
+    let l = mn.len();
+    return mn == e || l == e.len() + 1 && mn.starts_with(e) && (mn.ends_with("b") || mn.ends_with("w") || mn.ends_with(
+        "l",
+    ) || mn.ends_with("q"));
+}
+
+/// x86-64 template `text` with each 64-bit general register `from[j]` spelled as register `to[j]` (register
+/// numbers as `gp_addresses` gives them), onto `out`.
+pub(package) fn grename(text: str, from: []u8, to: []u8, out: &mut String) {
+    let mut i: usize = 0;
+    while i < text.len() {
+        if text.byte_at(i) != b'%' {
+            out.push_byte(text.byte_at(i));
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < text.len() && word_byte(text.byte_at(j)) {
+            j += 1;
+        }
+        let nm = text.slice(i + 1, j);
+        let mut r: u8 = 99;
+        for q in 0..from.len() {
+            if nm == unsafe GP64_X64[from[q] as usize] {
+                r = to[q];
+            }
+        }
+        out.push_byte(b'%');
+        out.push_str(ast::pick(r == 99, nm, unsafe GP64_X64[r as usize]));
+        i = j;
+    }
 }
 
 // Whether byte `c` continues a word: a letter, a digit or `_`.

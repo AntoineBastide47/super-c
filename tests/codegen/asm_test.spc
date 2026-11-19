@@ -2306,6 +2306,26 @@ fn tile_intrinsics_are_not_pure() {
     }
 }
 
+// The general registers a template reads only as addresses, and their renaming, all at once
+// (`intrin::gp_addresses`, `grename`): a register outside a memory operand, a 32-bit address, or an
+// instruction that touches a register it does not name leaves the template as it is (all bits).
+@test
+fn templates_read_their_addresses_from_any_registers() {
+    assert_eq(intrin::gp_addresses("tileloadd (%rsi,%rdx), %tmm4"), 1u64 << 6 | 1u64 << 2);
+    assert_eq(intrin::gp_addresses("vmaskmovps %xmm1, %xmm0, (%rdi) {%k1}"), 1u64 << 7);
+    assert_eq(intrin::gp_addresses("vpaddd %xmm1, %xmm0, %xmm0"), 0);
+    assert_eq(intrin::gp_addresses("movq %rdi, %xmm0"), ~0u64);
+    assert_eq(intrin::gp_addresses("movl (%edi), %eax"), ~0u64);
+    assert_eq(intrin::gp_addresses("mulq (%rdi)"), ~0u64);
+    assert_eq(intrin::gp_addresses("ldtilecfg (%rdi)\nrdtscp"), ~0u64);
+    assert_eq(intrin::gp_addresses("mulps (%rsi), %xmm0"), 1u64 << 6);
+    let from: [u8; 2] = [6, 2];
+    let to: [u8; 2] = [2, 12];
+    let mut out = String::new();
+    intrin::grename("tileloadd (%rsi,%rdx), %tmm4", from[0..2], to[0..2], &mut out);
+    assert_eq(out.as_str(), "tileloadd (%rdx,%r12), %tmm4");
+}
+
 // A row's constant arguments by index, of one digit or more, and their multiples (`intrin::expand`).
 @test
 fn row_immediates_expand_by_index() {

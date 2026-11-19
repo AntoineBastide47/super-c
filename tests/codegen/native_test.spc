@@ -22897,6 +22897,59 @@ int main(void) {
     assert_eq(run_native(lir, drv), 0);
 }
 
+// A template that names its general registers only as addresses (`vmaskmovps (%rdi), ..`) reads each
+// pointer where it is (`intrin::gp_addresses`, `grename`) and writes no general register: in a loop the
+// pointers, the count and the index stay in scratch registers, with no callee-saved register pushed and no
+// frame (before: each call wrote the caller-saved registers).
+@test
+fn address_templates_read_their_pointers_where_they_are() {
+    let lir = M"(lir ptr 8
+sym @_mm_maskload_ps fn global
+sym @_mm_maskstore_ps fn global
+sym @twice fn global
+fn @twice
+  sig (ptr, ptr, ptr, i64) -> void
+  cpu 32 917504 9 1028 0 319 1
+b0(v0: ptr, v1: ptr, v2: ptr, v3: i64):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 4
+  v6 = load.v2i64 v2 align 0
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = ptradd v0, v7 * 4
+  v9 = call.v4f32 @_mm_maskload_ps(v8, v6) : (ptr, v2i64) -> v4f32
+  v10 = fadd.v4f32 v9, v9
+  v11 = ptradd v1, v7 * 4
+  call @_mm_maskstore_ps(v11, v6, v10) : (ptr, v2i64, v4f32) -> void
+  v12 = add.i64 v7, v5
+  v13 = icmp.ult v12, v3
+  br v13, b1(v12), b2
+b2:
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // `push %r12`; `sub $n, %rsp`.
+    let push: [u8; 2] = [0x41, 0x54];
+    let frame: [u8; 3] = [0x48, 0x83, 0xEC];
+    assert(!holds(&obj, push[0..2]), "no callee-saved register");
+    assert(!holds(&obj, frame[0..3]), "no frame");
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) || !detect::has(cpu::Feature::Avx) {
+        return; // the driver runs `twice` on x86-64 with AVX
+    }
+    let drv = M"(void twice(const float *, float *, const int *, long);
+int main(void) {
+  float a[16], o[16];
+  int m[4] = {-1, 0, -1, 0};
+  for (int k = 0; k < 16; k++) { a[k] = (float)(k * 3 - 7); o[k] = 99.0f; }
+  twice(a, o, m, 16);
+  for (int k = 0; k < 16; k++) if (o[k] != (k % 2 == 0 ? 2.0f * a[k] : 99.0f)) return k + 1;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 // An intrinsic's template reads a constant argument as an immediate of its instructions: no general
 // register takes it, and the intrinsic writes vector registers alone. x86-64, in a body of 32-byte
 // registers (`Body.cpu`): the templates compute in ymm registers (VROUNDPS with its immediate), the sum by

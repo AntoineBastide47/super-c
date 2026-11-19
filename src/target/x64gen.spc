@@ -8384,15 +8384,41 @@ extend Gen {
         }
     }
 
+    // The argument registers intrinsic call `t`'s instructions `tx` read only as addresses, when every
+    // general register they name is one (`intrin::gp_addresses`) of an argument of 8 bytes: `call` reads
+    // each such argument where it is, or from a temporary it puts it in, under that register's name
+    // (`intrin::grename`), so the instructions write no general register. 0 for none.
+    const fn gp_renamed(self: &Self, t: Inst, tx: str, lay: &ab::CallLayout) u64 {
+        let ga = intrin::gp_addresses(tx);
+        if ga == 0 || ga == ~0u64 {
+            return 0;
+        }
+        let b = self.cr.b();
+        let mut m: u64 = 0;
+        for k in 0..b.pool[t.b as usize] {
+            let loc = lay.locs[k as usize];
+            if loc.kind != ab::L_REG || loc.n != 1 || loc.ext != 0 || lay.parts[loc.p0 as usize].v || type_bytes(
+                self.cr.vt(b.pool[(t.c + k) as usize]),
+                self.cr.ptr,
+            ) != 8 {
+                continue;
+            }
+            m |= bit(lay.parts[loc.p0 as usize].reg) & ga;
+        }
+        return ast::pick(m == ga, m, 0u64);
+    }
+
     // The registers intrinsic call `t` writes when its instructions are `tx`: its vector arguments' and
-    // its result's (`ab::intrinsic_layout`) and those `tx` names. An integer argument whose register `tx`
-    // does not name is an immediate of the instructions (`@k`): its register keeps its value (`imm_arg`).
+    // its result's (`ab::intrinsic_layout`) and those `tx` names but the addresses `call` renames
+    // (`gp_renamed`). An integer argument whose register `tx` does not name is an immediate of the
+    // instructions (`@k`): its register keeps its value (`imm_arg`).
     fn intrin_clob(self: &Self, t: Inst, tx: str) u64 {
         let gp: [u8; 8] = [x::RDI, x::RSI, x::RDX, x::RCX, x::R8, x::R9, x::R10, x::R11];
         let ret: [u8; 2] = [x::RAX, x::RDX];
         let mut lay = ab::CallLayout::new();
         ab::intrinsic_layout(self.cr.b(), t.b, self.cr.ptr, gp[0..8], ret[0..2], &mut lay);
         let na = lay.nargs();
+        let addr = self.gp_renamed(t, tx, &lay);
         let mut m: u64 = 0;
         for q in 0..lay.parts.len() {
             let pa = lay.parts[q];
@@ -8416,7 +8442,7 @@ extend Gen {
                 j += 1;
             }
             let r = x64_clobber(tx.slice(st, j));
-            if r != NOREG {
+            if r != NOREG && (addr & bit(r)) == 0 {
                 m |= bit(r);
             }
         }
@@ -8661,6 +8687,11 @@ extend Gen {
             // keep their values.
             self.clob = self.intrin_clob(t, tx);
         }
+        let addr = if tpl.len() != 0 {
+            self.gp_renamed(t, tx, &self.cr.lay)
+        } else {
+            0u64
+        };
         // A vector argument a register holds whole stays there: the template reads it under that
         // register's name in place of its argument register (`ren`), which it must not write and no part
         // or other name may be, nor an instruction as its fixed operand (`intrin::vfixed`). A written one is renamed only when it is the result's and the argument
@@ -8873,6 +8904,42 @@ extend Gen {
         // The registers the template reads in place of its argument registers hold no temporary.
         for j in 0..to.len() {
             self.cr.lock |= bit(V0 + to[j] as u8);
+        }
+        // The addresses the template reads (`gp_renamed`): each argument's register when one holds it, else a
+        // temporary it is put in after the other arguments; the template names those registers.
+        let mut gfrom = Vector::<u8>::new();
+        let mut gto = Vector::<u8>::new();
+        let mut gmat = Vector::<(Value, u8)>::new();
+        for pass in 0..2u32 {
+            for k in 0..np {
+                let loc = self.cr.lay.locs[k as usize];
+                if addr == 0 || loc.kind != ab::L_REG || loc.n != 1 || self.cr.lay.parts[loc.p0 as usize].v {
+                    continue;
+                }
+                let pr = self.cr.lay.parts[loc.p0 as usize].reg;
+                let mut done = (addr & bit(pr)) == 0;
+                for j in 0..gfrom.len() {
+                    done = done || gfrom[j] == pr;
+                }
+                let v = b.pool[(t.c + k) as usize];
+                let vr = self.cr.va[self.cr.vx(v) as usize].reg;
+                let held = vr != NOREG && vr < V0;
+                // The held ones first: no temporary takes their registers.
+                if done || held != (pass == 0) {
+                    continue;
+                }
+                let r = if held {
+                    vr
+                } else {
+                    self.tmp(false)
+                };
+                if !held {
+                    gmat.push((v, r));
+                }
+                self.cr.lock |= bit(r);
+                gfrom.push(pr);
+                gto.push(r);
+            }
         }
         // An intrinsic's arguments in rdi and rsi, which Microsoft x64 saves: the values there go to
         // slots of their own around it. The scratch registers r10 and r11 take arguments of integer
@@ -9199,6 +9266,14 @@ extend Gen {
         if (b.pool[sig as usize + 1] & SIG_VARIADIC) != 0 && !self.win {
             // al: an upper bound of the vector registers the arguments take.
             self.c.mov_ri(x::RAX, self.cr.lay.vr_used);
+        }
+        if tpl.len() != 0 && gfrom.len() != 0 {
+            for q in 0..gmat.len() {
+                self.materialize(gmat[q].0, gmat[q].1);
+            }
+            let mut renamed = String::new();
+            intrin::grename(&text, gfrom[0..gfrom.len()], gto[0..gto.len()], &mut renamed);
+            text = renamed;
         }
         if tpl.len() != 0 {
             // An intrinsic: its instructions in place of the call, over the same registers.
