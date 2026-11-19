@@ -120,7 +120,12 @@ set first: it states the value, register and frame model.
      renames an operand that ends there takes it: arm64 `takes`, x86-64 `def_over`). Then `seg_leave`,
      and bind each listed segment whose value an earlier block defines (`seg_bind`: a temporary in the
      register leaves it first, `vacate_temp`); store a parameter that keeps a stack home and load one
-     that arrived in memory or in a slot.
+     that arrived in memory or in a slot. A temporary bound to a register of the plan (a loop step
+     in its parameter's register: x86-64 `def_shared`, arm64 `step_into`) is bound as any result
+     (`Core::bind`: dirty), so `vacate_temp` stores it to a home when it is still read.
+   - An instruction the generator reports as writing no home (`calls`: x86-64 `float_reg`, `vop_reg`)
+     writes no register a value of the plan holds: an encoding with a fixed register (SSE4.1's
+     `blendvps` mask in xmm0) takes another form when such a value is there.
    - A definition takes the plan's register (`seg_take`). When an operand the instruction still
      reads holds that register, only an emitter that reads its operands before it writes its result
      may write it (arm64: `def_step` sets `stepping`; x86-64: `def_over` and `def_pass` name the

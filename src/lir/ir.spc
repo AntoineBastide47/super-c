@@ -2509,6 +2509,9 @@ pub(package) struct Held {
     pub(package) calls: Vector<u32>,
     /// Per held data definition, its symbol.
     pub(package) dsyms: Vector<u32>,
+    /// Per held data symbol, its definition's alignment (log2), which `drop_held` keeps: a reference reads
+    /// it (`Package::data_align`).
+    pub(package) dalign: Map<u32, u8>,
 }
 
 /// `Held.flags`: the inliner's shape test passed (`lir::inline::shape_ok`); its callers may inline the
@@ -2521,6 +2524,9 @@ pub(package) const HELD_COLD: u8 = 4;
 pub(package) const HELD_ALWAYS: u8 = 8;
 /// A parameter of the function holds a `Secret` (`Sym.sec`).
 pub(package) const HELD_SEC: u8 = 16;
+/// The function is kept (`Sym.used`: `@used`, `@export`, a named section), which decides the convention its
+/// callers take (`win64`): a replayed unit's functions are not lowered, which marks it.
+pub(package) const HELD_USED: u8 = 32;
 
 extend Held {
     pub(package) fn new() Held {
@@ -2542,6 +2548,7 @@ extend Held {
             at: Vector::<u32>::new(),
             calls: Vector::<u32>::new(),
             dsyms: Vector::<u32>::new(),
+            dalign: Map::<u32, u8>::new(),
         };
     }
 }
@@ -2685,6 +2692,27 @@ extend Package {
         return self.file_of[n as usize] - 1;
     }
 
+    /// Whether the program defines symbol `s`: here, or in a unit the build replayed, whose definitions the
+    /// optimizer reads held and the code generators do not see (`Sym.unit`, `drop_held`). Code that a
+    /// reference to `s` compiles to reads this, not `Sym.def`: a replayed unit changes no other unit's code.
+    pub(package) const fn defines(self: &Self, s: u32) bool {
+        let y = self.syms[s as usize];
+        return y.def != NONE || y.unit != NONE;
+    }
+
+    /// The alignment (log2) of data symbol `s` the program defines (`defines`): its definition's, else its
+    /// held definition's (`Held.dalign`); 0 when neither is known.
+    pub(package) const fn data_align(self: &Self, s: u32) u8 {
+        let y = self.syms[s as usize];
+        if y.def != NONE {
+            return self.data[y.def as usize].align_log2;
+        }
+        return switch self.held.dalign.get(&s) {
+            Some(a) => *a,
+            None => 0,
+        };
+    }
+
     /// The symbol named `name`, or NONE.
     pub(package) const fn find_symbol(self: &Self, name: str) u32 {
         let n = self.names.find(name);
@@ -2822,6 +2850,8 @@ extend Package {
             self.syms.index_mut(self.held.syms[k] as usize).def = NONE;
         }
         for k in 0..self.held.dsyms.len() {
+            let d = self.syms[self.held.dsyms[k] as usize].def;
+            self.held.dalign.insert(self.held.dsyms[k], self.data[d as usize].align_log2);
             self.syms.index_mut(self.held.dsyms[k] as usize).def = NONE;
         }
         self.bodies.truncate(self.held.body as usize);

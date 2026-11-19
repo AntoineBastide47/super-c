@@ -104,14 +104,24 @@ when its input is the input of the object at its path: `nat_piece_key` hashes, i
 build configuration (`nat_base`), the compiler, the module-level assembly, the object's functions and
 data with every table of their bodies and definitions, the definitions it copies (a symbol no unit
 claims, `ob::copy_flags`) and what those name in turn, and of each symbol named what the generators
-read of a reference (`nat_sym_ref`: spelling, kind, linkage, C-library and kept marks, section; whether
-a function has a definition only where its spelling may name a C function), a named data symbol's
-definition, files and messages by spelling (`lines[0]`, "no location", aside: no row names it), and on
-wasm the package's files and each named function's signature body (no key when a function has none:
+read of a reference (`nat_sym_ref`: spelling, kind, linkage, C-library mark, a function's kept mark
+unless it is an extern binding, section; whether the program defines it, `lir::ir::Package::defines`,
+for a function only where its spelling may name a C function), a named data symbol's alignment
+(`Package::data_align`, which `drop_held` keeps), files and messages by spelling (`lines[0]`, "no
+location", aside: no row names it), and on wasm the package's files and each named function's signature
+(`nat_sig_hash`, what `wasmabi::classify` reads; no key when a function has none:
 the generator then reads any call of it). The record `__sc_native_keys` holds each object's key with the
 hash of its bytes (`nat_bytes_hash`), by path below the tree: a reused object is read and its bytes
 checked against the hash (they then go to the link from memory), so an object another writer replaced is
-compiled again. A build removes the record before it writes objects and writes it after.
+compiled again. A build removes the record before it writes objects and writes it once the tree is
+pruned (`write_nat_keys`): its own objects' entries and the earlier record's for the objects the tree
+still holds, ordered by path, so the record describes the tree whatever the builds before compiled
+(`an_incremental_build_leaves_the_full_builds_key_record`). The code generators read whether the program
+defines a referenced symbol through `Package::defines`, not `Sym.def`: a replayed unit's symbols have
+no definition after `drop_held`, but their `unit` and their held record's marks (`HELD_USED`, the
+section) stay, so a replayed unit changes no other unit's code and no key. A non-optimizing build keeps
+no held records: there a replayed unit's symbols are undefined, and the keys of the objects that name
+them differ from a full build's.
 `SC_NATIVE_STATS` reports the reused count. A record field the generators read that the key does not
 hash is a stale object: the `static_assert`s on the record sizes beside `nat_piece_key` fail when a
 record gains a field.

@@ -17182,6 +17182,158 @@ fn inline_assembly_compiles_natively() {
     assert_eq(p.run_bin(), 0);
 }
 
+// A loop's step takes its parameter's register as a temporary (`def_shared`, `step_into`) where the plan
+// gives that register to another value later in the block (here a block counter's sum, `-fblock-counts`):
+// the step moves to its home before, and the loop's compare and edge read it there.
+const STEP_UNDER_PLAN: str<'static> = M"(const NAMES: [str; 4] = ["rax", "rcx", "rdx", "rbx"];
+
+fn rename(text: str, from: []u8, to: []u8, out: &mut String) {
+    let mut i: usize = 0;
+    while i < text.len() {
+        if text.byte_at(i) != b'%' {
+            out.push_byte(text.byte_at(i));
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        while j < text.len() && text.byte_at(j) >= b'a' && text.byte_at(j) <= b'z' {
+            j += 1;
+        }
+        let nm = text.slice(i + 1, j);
+        let mut r: u8 = 99;
+        for q in 0..from.len() {
+            if nm == unsafe NAMES[from[q] as usize] {
+                r = to[q];
+            }
+        }
+        out.push_byte(b'%');
+        out.push_str(if r == 99 { nm } else { unsafe NAMES[r as usize] });
+        i = j;
+    }
+}
+
+fn main() i32 {
+    let mut s = String::new();
+    let f: [u8; 2] = [0, 1];
+    let t: [u8; 2] = [2, 3];
+    rename("mov %rax, %rcx; add %rdx, %rax", f[0..2], t[0..2], &mut s);
+    return (s.as_str() != "mov %rdx, %rbx; add %rdx, %rdx") as i32;
+}
+)";
+
+@test
+fn a_loop_step_in_its_parameters_register_moves_before_the_plan_takes_it() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", STEP_UNDER_PLAN);
+    // The code generators run before the link, which needs the target's C toolchain.
+    for t in ["--target=linux --arch=x86_64", "--target=windows --arch=x86_64", "--target=linux --arch=aarch64"] {
+        let r = cli::superc_env_in(
+            p.dir(),
+            "SC_NATIVE_STATS",
+            "1",
+            format("build --profile=release -fblock-counts {} main.spc -o bin", t).as_str(),
+        );
+        if !r.out_has("main native") {
+            r.show();
+        }
+        assert(r.out_has("main native"), t);
+    }
+    if !nat::supported(tgt::host_os(), tgt::host_isa()) {
+        return;
+    }
+    assert(cli::superc_in(p.dir(), "build --profile=release -fblock-counts main.spc -o bin").ok(), "the program builds");
+    assert_eq(p.run_bin(), 0);
+}
+
+// Without AVX, SSE4.1's `blendvps` of a float `fmin` or `fmax` takes its mask in xmm0 (`float_lanes`), which
+// the plan may give a value across the operation (Windows' caller-saved xmm0 to xmm5, `float_reg`): the
+// operation then blends with SSE2's logic instead. A reduction of a generated vector program that reached
+// that case.
+const BLEND_UNDER_PLAN: str<'static> = M"(import string;
+import stdlib;
+
+const fn pick<T: Copy>(c: bool, a: T, b: T) T {
+    if c {
+        return a;
+    }
+    return b;
+}
+
+const fn hmix(h: u64, x: u64) u64 {
+    return (h ^ x).wrapping_mul(0x100000001B3);
+}
+
+const fn hv_u32<const N: usize>(v: Simd<u32, N>) u64 {
+    let mut h: u64 = N as u64;
+    for x in v.to_array() {
+        h = hmix(h, x as u64);
+    }
+    return h;
+}
+
+const fn hv_u64<const N: usize>(v: Simd<u64, N>) u64 {
+    let mut h: u64 = N as u64;
+    for x in v.to_array() {
+        h = hmix(h, x as u64);
+    }
+    return h;
+}
+
+const fn hc_f32<const N: usize>(v: Simd<f32, N>) u64 {
+    return hv_u32(v.is_nan().choose(Simd::<u32, N>::splat(0x7fc00000), v.to_bits()));
+}
+
+static mut SINK: usize = 0;
+
+@noinline
+fn opr<T>(x: T) T {
+    unsafe SINK += 1;
+    return x;
+}
+
+const fn vk25(a: [u32; 4], b: [u32; 4], c: [u32; 4], s0: u64) u64 {
+    let x = Simd::<f32, 4>::from_bits(Simd::<u32, 4>::from_array(a));
+    let y = Simd::<f32, 4>::from_bits(Simd::<u32, 4>::from_array(b));
+    let z = Simd::<f32, 4>::from_bits(Simd::<u32, 4>::from_array(c));
+    let m = s0;
+    let _ = m;
+    let s = s0 as u64;
+    let _ = x;
+    let _ = y;
+    let _ = z;
+    let _ = s;
+    return hc_f32(x.clamp(y, z));
+}
+
+fn main(args: Vector<str>) i32 {
+    let _ = args;
+    eprintln("V 25 {}", vk25(opr::<[u32; 4]>([0x7fa00000, 0xbfc00000, 0x427cf8c5, 0x40200000]), opr::<[u32; 4]>([0x380423ef, 0x318d7377, 0xbf800000, 0x00000000]), opr::<[u32; 4]>([0xbf800000, 0x4f000000, 0x3f000000, 0x32e4bb91]), opr::<u64>(17345766232715869312)));
+    return 0;
+}
+)";
+
+@test
+fn an_sse41_float_minimum_keeps_a_planned_value_in_xmm0() {
+    if cli::on_wasm() {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", BLEND_UNDER_PLAN);
+    let r = cli::superc_env_in(
+        p.dir(),
+        "SC_NATIVE_STATS",
+        "1",
+        "build --target=windows --arch=x86_64 --target-feature=x86-64-v2 main.spc -o bin",
+    );
+    if !r.out_has("main native") {
+        r.show();
+    }
+    assert(r.out_has("main native"), "main compiles natively at x86-64-v2");
+}
+
 // Whether the LIR optimizer runs is part of what a project's emission and a module's object are a
 // function of: a build that turns it on compiles again rather than taking the last build's tree and
 // objects, and one that turns it off again gives the first build's bytes.

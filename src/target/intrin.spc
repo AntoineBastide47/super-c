@@ -72,7 +72,7 @@ pub(package) fn of_symbols(p: &Package, b: &Body, isa: str, out: &mut Vector<str
     out.truncate(0);
     for s in 0..b.syms.len() {
         let ps = p.syms[b.syms[s] as usize];
-        if ps.def != NONE {
+        if p.defines(b.syms[s]) {
             out.push("");
             continue;
         }
@@ -95,7 +95,7 @@ pub(package) const fn x64_sse41(p: &Package, b: &Body, out: &mut Vector<str<'sta
     let rows: [](str<'static>, str<'static>) = x64i::SSE41_ROWS;
     for s in 0..b.syms.len() {
         let ps = p.syms[b.syms[s] as usize];
-        if ps.def != NONE {
+        if p.defines(b.syms[s]) {
             continue;
         }
         let nm = p.spell(ps.name);

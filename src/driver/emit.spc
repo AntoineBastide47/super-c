@@ -13184,18 +13184,18 @@ static_assert(sizeof(lir_ir::Inst) == 16, "nat_body_hash hashes an instruction a
 static_assert(sizeof(lir_ir::Block) == 16, "nat_body_hash hashes a block as four words");
 
 // Symbol `s` of `pk` as a reference shows it to the code generators: its spelling, kind, linkage, C-library
-// and kept marks and section; for a function, whether it has a definition only where its spelling may name
-// a C function (`intrin`, an `__sc_x_` alias: a C-library or kept one); for data, its definition. A build
-// that replays a unit has no definitions of its functions: the rest of the facts then differ.
+// mark, a function's kept mark where it decides the call's convention (not an extern binding's: `win64`) and
+// section; whether the program defines it (`Package::defines`, the same in a build that replays its unit):
+// for a function only where its spelling may name a C function (`intrin`, an `__sc_x_` alias: a C-library
+// or kept one), for data always.
 const fn nat_sym_ref(h: &mut NatHash, pk: &lir_ir::Package, s: u32) {
     let y = pk.syms[s as usize];
     let nm = pk.spell(y.name);
     h.s(nm);
-    let undef = y.def == lir_ir::NONE;
+    let undef = !pk.defines(s);
     let named = y.kind != lir_ir::SK_FUNC || y.ext || y.used || nm.starts_with("__sc_x_");
-    h.w(
-        y.kind as u64 | y.linkage as u64 << 8 | y.ext as u64 << 16 | y.used as u64 << 17 | (named && undef) as u64 << 18,
-    );
+    let kept = y.used && !y.ext && y.kind == lir_ir::SK_FUNC;
+    h.w(y.kind as u64 | y.linkage as u64 << 8 | y.ext as u64 << 16 | kept as u64 << 17 | (named && undef) as u64 << 18);
     if y.sect == lir_ir::NONE {
         h.w(0xFFFFFFFFFFFFFFFFu64);
     } else {
@@ -13296,10 +13296,11 @@ fn nat_data_hash(h: &mut NatHash, pk: &lir_ir::Package, d: u32, refs: &mut Vecto
 // The content key of a native object (`nat::object_with` on `os`, `isa`): the build's settings (`base`)
 // and the compiler, the module-level assembly `text`, functions `fs` and data `ds` of `pk` with their
 // definitions, the definitions the object copies (a symbol no unit claims) and what those name in turn,
-// each symbol any of them names (`nat_sym_hash`) and a named data symbol's definition, which the code
+// each symbol any of them names (`nat_sym_hash`) and a named data symbol's alignment, which the code
 // generators read. On wasm also the package's files (the debug information lists them all) and each
-// named function's signature body; 0 (no key) when a named function has none there (the code generator
-// then reads any call of it).
+// named function's signature (`nat_sig_hash`); 0 (no key) when a named function has none there (the code
+// generator then reads any call of it). Nothing of a symbol another unit defines depends on whether the
+// build lowers or replays that unit.
 fn nat_piece_key(pk: &lir_ir::Package, os: i32, isa: i32, fs: &Vector<u32>, ds: &Vector<u32>, text: str, base: u64) u128 {
     let wasm = nat::wasm32(os, isa);
     let mut h = NatHash { a: base ^ 0x2545F4914F6CDD1Du64, b: compiler_id() };
@@ -13326,7 +13327,6 @@ fn nat_piece_key(pk: &lir_ir::Package, os: i32, isa: i32, fs: &Vector<u32>, ds: 
         seen.insert(s);
     }
     let mut refs = Vector::<u32>::new();
-    let mut scratch = Vector::<u32>::new();
     // Each symbol once.
     let mut k: usize = 0;
     for _ in 0..pk.syms.len() + 1 {
@@ -13337,42 +13337,6 @@ fn nat_piece_key(pk: &lir_ir::Package, os: i32, isa: i32, fs: &Vector<u32>, ds: 
         k += 1;
         nat_sym_hash(&mut h, pk, s);
         let y = pk.syms[s as usize];
-        if stdlib::getenv("SC_NATKEY_DUMP") != null {
-            let mut h3 = NatHash { a: 0, b: 0 };
-            nat_sym_hash(&mut h3, pk, s);
-            let mut h5 = NatHash { a: 0, b: 0 };
-            let mut r5 = Vector::<u32>::new();
-            if y.def != lir_ir::NONE {
-                if y.kind == lir_ir::SK_FUNC {
-                    nat_body_hash(&mut h5, pk, &pk.bodies[y.def as usize], &mut r5);
-                } else {
-                    nat_data_hash(&mut h5, pk, y.def, &mut r5);
-                }
-            }
-            eprint("KEY {} sym {:x} def {:x} pre {:x}\n", pk.spell(y.name), h3.a, h5.a, h.a);
-            for j in 0..r5.len() {
-                let mut h6 = NatHash { a: 0, b: 0 };
-                nat_sym_hash(&mut h6, pk, r5[j]);
-                let ry = pk.syms[r5[j] as usize];
-                eprint(
-                    "KEY {} ref {} {:x} {} {} {} {} {} {} {} {} {} {:x} {:x}\n",
-                    pk.spell(y.name),
-                    pk.spell(ry.name),
-                    h6.a,
-                    ry.kind,
-                    ry.linkage,
-                    ry.used,
-                    ry.own,
-                    ry.internal,
-                    ry.ext,
-                    ry.def != lir_ir::NONE,
-                    ry.unit != lir_ir::NONE,
-                    ry.fx,
-                    ry.esc,
-                    ry.wargs,
-                );
-            }
-        }
         refs.truncate(0);
         if y.def != lir_ir::NONE {
             if y.kind == lir_ir::SK_FUNC {
@@ -13388,17 +13352,20 @@ fn nat_piece_key(pk: &lir_ir::Package, os: i32, isa: i32, fs: &Vector<u32>, ds: 
                 continue;
             }
             seen.insert(r);
+            // What the generators read of a symbol another unit defines, the same whether the build lowers
+            // or replays that unit: a data symbol's alignment (`Package::data_align`), a function's
+            // signature on wasm (`wasmabi::classify`).
             if ry.def != lir_ir::NONE && ry.unit == lir_ir::NONE {
                 full.push(r);
-            } else if ry.def != lir_ir::NONE && ry.kind != lir_ir::SK_FUNC {
-                scratch.truncate(0);
-                nat_data_hash(&mut h, pk, ry.def, &mut scratch);
-            } else if wasm && ry.kind == lir_ir::SK_FUNC {
-                scratch.truncate(0);
+            } else if ry.kind != lir_ir::SK_FUNC {
+                h.w(pk.data_align(r));
+            } else if wasm {
                 if ry.def != lir_ir::NONE {
-                    nat_body_hash(&mut h, pk, &pk.bodies[ry.def as usize], &mut scratch);
+                    let cb = &pk.bodies[ry.def as usize];
+                    nat_sig_hash(&mut h, cb, cb.sig);
                 } else if ry.sig != lir_ir::NONE {
-                    nat_body_hash(&mut h, pk, &pk.decls[ry.sig as usize], &mut scratch);
+                    let d = &pk.decls[ry.sig as usize];
+                    nat_sig_hash(&mut h, d, d.sig);
                 } else {
                     return 0;
                 }
@@ -13618,6 +13585,78 @@ const NAT_RECORD: str = "__sc_native";
 // root. A build removes it before it writes objects and writes it after; an object another writer (another
 // compiler) replaced since has other bytes.
 const NAT_KEYS: str = "__sc_native_keys";
+
+// Signature `sig` of body `b` as `wasmabi::classify` reads it: its counts and each parameter's and the
+// result's type, an aggregate's by its layout record (size, alignment and leaves).
+const fn nat_sig_hash(h: &mut NatHash, b: &lir_ir::Body, sig: u32) {
+    let np = b.pool[sig as usize];
+    h.w(np as u64 | b.pool[sig as usize + 1] as u64 << 32);
+    for k in 0..np + 1 {
+        let pt = if k == np {
+            b.pool[sig as usize + 2]
+        } else {
+            b.pool[(sig + 3 + k) as usize]
+        };
+        if (pt & lir_ir::AGG) == 0 {
+            h.w(pt);
+            continue;
+        }
+        let l = (pt & ~lir_ir::AGG) as usize;
+        let nleaf = b.pool[l + 2];
+        h.w(0xFFFFFFFF00000000u64 | nleaf as u64);
+        h.w(b.pool[l] as u64 | b.pool[l + 1] as u64 << 32);
+        for j in 0..2 * nleaf as usize {
+            h.w(b.pool[l + 3 + j]);
+        }
+    }
+}
+
+// The line of `NAT_KEYS` of the object at `rel` below the tree root, of content key `key` and bytes hash `h`.
+fn nat_key_line(key: u128, h: u64, rel: str) String {
+    return format("{:016x}{:016x} {:016x} {}\n", (key >> 64) as u64, key as u64, h, rel);
+}
+
+// Write record `NAT_KEYS` at `path` of the tree at `root`: this build's `lines` (by object path), and the
+// entries of the earlier record `prev` whose objects the tree still holds (a unit the build engine did not
+// run again keeps them), in the byte order of their paths below the root. The record describes the tree,
+// whatever the builds before compiled and however many workers compiled it.
+fn write_nat_keys(path: str, root: str, prev: &Map<String, NatKey>, lines: &mut Map<String, String>) {
+    let mut pk = prev.keys();
+    loop {
+        switch pk.next() {
+            Some(op) => {
+                if !lines.contains_key(op) && fs::stat(op.as_str()).is_ok() {
+                    let e = prev.get(op).unwrap();
+                    lines.insert(op.clone(), nat_key_line(e.key, e.hash, op.as_str().slice(root.len() + 1, op.len())));
+                }
+            },
+            None => {
+                break;
+            },
+        }
+    }
+    // Every path starts with `root`: their byte order is the order of the paths below it.
+    let mut paths = Vector::<String>::with_capacity(lines.len());
+    let mut lk = lines.keys();
+    loop {
+        switch lk.next() {
+            Some(op) => {
+                paths.push(op.clone());
+            },
+            None => {
+                break;
+            },
+        }
+    }
+    paths.sort();
+    let mut text = String::new();
+    for k in 0..paths.len() {
+        text.push_string(lines.get(&paths[k]).unwrap());
+    }
+    if text.len() != 0 {
+        let _ = write_file_atomic(path, &text);
+    }
+}
 
 // An object's entry in `NAT_KEYS`: its content key and the hash of its bytes.
 struct NatKey {
@@ -14123,7 +14162,14 @@ fn native_plan(
         if good {
             isnat.set(m, true);
             nn += 1;
+            // A recorded object keeps its entry (`NAT_KEYS`): the record describes the whole tree, whatever
+            // the build before compiled.
             for k in 0..olds[m] {
+                let op = nat_obj_path(root, &p.modules[m].path, true, k);
+                let (key, ch) = switch keys.get(&op) {
+                    Some(e) => (e.key, e.hash),
+                    None => (0u128, 0u64),
+                };
                 objs.push(
                     NatObj {
                         m: m as ModuleId,
@@ -14131,8 +14177,8 @@ fn native_plan(
                         piece: k,
                         bytes: Vector::<u8>::new(),
                         old: true,
-                        key: 0,
-                        chash: 0,
+                        key: key,
+                        chash: ch,
                     },
                 );
             }
@@ -17858,7 +17904,11 @@ pub(package) fn run_package(
     let mut nat_rec = Map::<String, u64>::new();
     let nat_rp = build_out_path(root, NAT_RECORD, "");
     let nat_kp = build_out_path(root, NAT_KEYS, "");
-    let mut nat_kt = String::new();
+    // The earlier record's entries (`NAT_KEYS`), read before this build replaces its objects, and this
+    // build's lines by object path, written once the tree is pruned (`write_nat_keys`).
+    let mut nat_prev = Map::<String, NatKey>::new();
+    let mut nat_lines = Map::<String, String>::new();
+    let mut nat_write = false;
     // Every module compiled natively: the registry is a native object too, and no C object links.
     let mut nat_all = false;
     if co.lir.is_some() && !err {
@@ -17873,11 +17923,9 @@ pub(package) fn run_package(
             }
         }
         if let Some(l) = &co.lir {
-            let nk = if co.tuc_path.len() != 0 {
-                nat_keys(&nat_kp, root)
-            } else {
-                Map::<String, NatKey>::new()
-            };
+            if co.tuc_path.len() != 0 {
+                nat_prev = nat_keys(&nat_kp, root);
+            }
             if !native_plan(
                 p,
                 l,
@@ -17886,7 +17934,7 @@ pub(package) fn run_package(
                 root,
                 &co.tuc_hit,
                 &nat_rec,
-                &nk,
+                &nat_prev,
                 &mut co.asm_text,
                 &mut nat_mod,
                 &mut nat_objs,
@@ -18270,21 +18318,14 @@ pub(package) fn run_package(
         }
         // The objects' keys and the hashes of their bytes, by path below the root.
         if !err && co.tuc_path.len() != 0 {
+            nat_write = true;
             for k in 0..nat_objs.len() {
                 let ob = nat_objs.at(k);
                 if ob.key != 0 {
                     let op = nat_obj_path(root, &p.modules[ob.m as usize].path, ob.own, ob.piece);
-                    nat_kt.format_into(
-                        "{:016x}{:016x} {:016x} {}\n",
-                        (ob.key >> 64) as u64,
-                        ob.key as u64,
-                        ob.chash,
-                        op.as_str().slice(root.len() + 1, op.len()),
-                    );
+                    let ln = nat_key_line(ob.key, ob.chash, op.as_str().slice(root.len() + 1, op.len()));
+                    nat_lines.insert(op, ln);
                 }
-            }
-            if nat_kt.len() != 0 && write_file_atomic(&nat_kp, &nat_kt) {
-                keep.push(nat_kp.clone());
             }
         }
     }
@@ -18327,6 +18368,9 @@ pub(package) fn run_package(
     // sources.
     if root.len() != 0 && !fresh_tree && wtree {
         prune_orphans(root, &keep);
+    }
+    if nat_write {
+        write_nat_keys(&nat_kp, root, &nat_prev, &mut nat_lines);
     }
     // Every file is on disk: the link and the run below read the tree. Of the output only its probe is
     // read again (the test runner's notice).

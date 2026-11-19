@@ -344,7 +344,7 @@ extend Gen {
         // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header). The C entry
         // `main` takes argc and argv (`cemit_main_wrapper`), which a wasm C compiler names
         // `__main_argc_argv`: the name the entry point of `std::rt::libc` calls.
-        let nm = if y.def == NONE && nm0.starts_with("__sc_x_") {
+        let nm = if !self.p().defines(ps) && nm0.starts_with("__sc_x_") {
             nm0.slice(7, nm0.len())
         } else if y.kind == SK_FUNC && nm0 == "main" {
             "__main_argc_argv"

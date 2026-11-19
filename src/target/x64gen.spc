@@ -1299,14 +1299,8 @@ extend Gen {
             return NOREG;
         }
         // `v` holds the register from here, as a temporary: a value the plan puts there before the edge
-        // moves it out (`vacate_temp`).
-        let x = self.cr.vx(v);
-        self.cr.lock |= bit(sr);
-        self.cr.set_owner(sr, x);
-        let w = self.cr.va.index_mut(x as usize);
-        w.reg = sr;
-        w.dirty = false;
-        w.clean = false;
+        // moves it out (`vacate_temp`), to its home when it has no other copy.
+        self.cr.bind(self.cr.vx(v), sr);
         return sr;
     }
 
@@ -5479,7 +5473,7 @@ extend Gen {
             if it.op == O_SYMADDR {
                 let p = unsafe &*self.pkg;
                 let ps = p.syms[self.cr.b().syms[it.a as usize] as usize];
-                if ps.kind == SK_DATA && !ps.ext && ps.def != NONE && !(p.pic && ps.linkage == SL_GLOBAL) {
+                if ps.kind == SK_DATA && !ps.ext && p.defines(self.cr.b().syms[it.a as usize]) && !(p.pic && ps.linkage == SL_GLOBAL) {
                     *rs = self.osym_of(it.a);
                     *radd = (it.b as i32) as i64 + off;
                     return x::rip();
@@ -15239,11 +15233,13 @@ extend Gen {
         let nb = type_bytes(t.ty, 8);
         let dd = lane_type(t.ty) == T_F64;
         let pfx = dd as u32 * 0x66;
-        // SSE4.1's `blendvps` of C's `fmin` and `fmax` takes its mask in xmm0, which no operand holds then.
+        // SSE4.1's `blendvps` of C's `fmin` and `fmax` takes its mask in xmm0, which no operand holds then;
+        // not over a value the plan keeps there (`float_reg`: the operation writes no home).
         let mm = c == core::SIMD_MIN || c == core::SIMD_MAX;
+        let o0 = self.cr.owner[V0 as usize];
         let xmm0 = mm && (t.aux & VOP_NUMBER) == 0 && nb == 16 && !self.avx && self.cpu.sse41 && !self.ordinary_lanes(
             ops[1],
-        ) && !self.ordinary_lanes(ops[0]);
+        ) && !self.ordinary_lanes(ops[0]) && (o0 == NONE || self.cr.va[o0 as usize].home != H_FIXED);
         if xmm0 {
             self.vacate(V0);
         }

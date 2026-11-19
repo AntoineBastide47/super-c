@@ -8779,12 +8779,13 @@ fn tu_cache_replays_an_importer_across_a_generic_body_edit() {
     let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build -o bin");
     assert(r.ok() && r.out_shows("native: b native") && r.out_shows("native: d replayed"), "b compiles, d replays");
     assert_eq(p.run_bin(), 9);
-    let warm = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let exe = format("{}/bin{}", root, unsafe str::from_cstr(cli::binext()));
+    let warm = loader::read_file(&exe).unwrap_or(String::new());
     assert(
         cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build -o bin").ok(),
         "the build without caches",
     );
-    let cold = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&exe).unwrap_or(String::new());
     assert(warm.len() != 0 && warm.equals(&cold), "the program is the uncached build's");
 }
 
@@ -8814,12 +8815,13 @@ fn tu_cache_follows_what_an_optimized_module_reaches() {
     let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build --profile=release -o bin");
     assert(r.ok() && r.out_shows("native: a native") && r.out_shows("native: d replayed"), "a compiles, d replays");
     assert_eq(p.run_bin(), 22);
-    let warm = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let exe = format("{}/bin{}", root, unsafe str::from_cstr(cli::binext()));
+    let warm = loader::read_file(&exe).unwrap_or(String::new());
     assert(
         cli::superc_env_in(root, "SC_NO_TU_CACHE", "1 SC_NO_EMIT_CACHE=1", "build --profile=release -o bin").ok(),
         "the build without caches",
     );
-    let cold = loader::read_file(format("{}/bin", root).as_str()).unwrap_or(String::new());
+    let cold = loader::read_file(&exe).unwrap_or(String::new());
     assert(warm.len() != 0 && warm.equals(&cold), "the program is the uncached build's");
 }
 
@@ -8891,6 +8893,40 @@ fn native_objects_are_reused_by_their_input() {
     let now = loader::read_file(&inst).unwrap_or(String::new());
     assert(now.len() != 0 && !now.equals(&other), "the replaced object is compiled again");
     assert_eq(p.run_bin(), 1);
+}
+
+// The record of the native objects' keys (`__sc_native_keys`) depends on the tree alone: an optimizing build
+// that replays every unit but one leaves the record a full build of the same code leaves. A replayed unit's
+// functions keep the facts their callers' keys read from its held record (`lir::ir::Package::defines`,
+// `HELD_USED`), and the objects the build does not touch their entries.
+@test
+fn an_incremental_build_leaves_the_full_builds_key_record() {
+    let p = cli::proj_new();
+    p.mkfile("build.toml", "bin = \"bin\"\nroot = \"src/main.spc\"\n");
+    p.mkfile(
+        "src/a.spc",
+        "pub fn f(v: &mut Vector<u32>) u32 {\n    let mut s: u32 = 0;\n    for i in 0..v.len() {\n        s += v[i];\n    }\n    return s;\n}\n",
+    );
+    p.mkfile(
+        "src/main.spc",
+        "import a;\n\nfn main() i32 {\n    let mut x = Vector::<u32>::new();\n    x.push(3);\n    return a::f(&mut x) as i32 - 3;\n}\n",
+    );
+    let root = p.dir();
+    assert(cli::superc_in(root, "build --profile=release -o bin").ok(), "the full build");
+    let rec = format("{}/build/release/raw/__sc_native_keys", root);
+    let full = loader::read_file(&rec).unwrap_or(String::new());
+    p.mkfile(
+        "src/main.spc",
+        "import a;\n\nfn main() i32 {\n    let mut x = Vector::<u32>::new();\n    x.push(3);\n    return a::f(&mut x) as i32 - 3;\n}\n// an edit\n",
+    );
+    let r = cli::superc_env_in(root, "SC_NATIVE_STATS", "1", "build --profile=release -o bin");
+    assert(
+        r.ok() && r.out_shows("native: main native") && r.out_shows("native: a replayed"),
+        "main compiles, a replays",
+    );
+    assert_eq(p.run_bin(), 0);
+    let inc = loader::read_file(&rec).unwrap_or(String::new());
+    assert(full.len() != 0 && inc.equals(&full), "the record is the full build's");
 }
 
 // A constant a module qualifies is a const argument exactly as its unqualified spelling: a public

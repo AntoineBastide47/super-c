@@ -384,7 +384,7 @@ pub(package) fn osym_of(p: &Package, b: &Body, o: &mut ob::Obj, osym: &mut Osyms
         let ps = p.syms[g];
         let nm0 = p.spell(ps.name);
         // `__sc_x_<name>` is a C library name's alias (a macro of a scoped extern header).
-        let nm = if ps.def == NONE && nm0.starts_with("__sc_x_") {
+        let nm = if !p.defines(g as u32) && nm0.starts_with("__sc_x_") {
             nm0.slice(7, nm0.len())
         } else {
             nm0

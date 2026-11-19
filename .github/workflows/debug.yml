@@ -892,7 +892,10 @@ jobs:
           gen gen1.wasm gen2.wasm
           cp -R build/release/raw /tmp/wasm-gen1
           gen gen2.wasm gen3.wasm
-          diff -r --exclude=.tu_cache --exclude=__sc_hfacts /tmp/wasm-gen1 build/release/raw
+          . "$GITHUB_WORKSPACE/ci/contract.sh"
+          ex="--exclude=__sc_hfacts"
+          for n in $CONTRACT_NONDET_FILES; do ex="$ex --exclude=$n"; done
+          diff -r $ex /tmp/wasm-gen1 build/release/raw
 
   wasm-target:
     needs: wasm-compile

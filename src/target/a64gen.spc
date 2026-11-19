@@ -889,15 +889,10 @@ extend Gen {
     }
 
     // Result `i` in the register of parameter `px` (`step_param`), as a temporary from here: a value the
-    // plan puts there before the edge moves it out (`vacate_temp`).
+    // plan puts there before the edge moves it out (`vacate_temp`), to its home when it has no other copy.
     fn step_into(self: &mut Self, i: u32, px: u32) u8 {
         let r = self.cr.va[px as usize].reg;
-        self.cr.lock |= bit(r);
-        self.cr.set_owner(r, i);
-        let w = self.cr.va.index_mut(i as usize);
-        w.reg = r;
-        w.dirty = false;
-        w.clean = false;
+        self.cr.bind(i, r);
         return r;
     }
 
@@ -2313,12 +2308,13 @@ extend Gen {
             return false;
         }
         let p = unsafe &*self.pkg;
-        let ps = p.syms[self.cr.b().syms[it.a as usize] as usize];
-        if ps.kind != SK_DATA || ps.ext || ps.def == NONE || self.got_global(ps) {
+        let sy = self.cr.b().syms[it.a as usize];
+        let ps = p.syms[sy as usize];
+        if ps.kind != SK_DATA || ps.ext || !p.defines(sy) || self.got_global(ps) {
             return false;
         }
         let k = (it.b as i32) as i64 + off;
-        if k < 0 || 1u32 << p.data[ps.def as usize].align_log2 < bytes || k % bytes as i64 != 0 {
+        if k < 0 || 1u32 << p.data_align(sy) < bytes || k % bytes as i64 != 0 {
             return false;
         }
         *s = it.a;
