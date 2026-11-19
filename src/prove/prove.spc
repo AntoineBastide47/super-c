@@ -6444,6 +6444,10 @@ extend<const B: usize> Prover<B> {
                 }
             }
         }
+        // Equal wrapping sums of the same terms in another order or grouping.
+        if self.tm.sums_equal(goal) {
+            return;
+        }
         self.sv.stop_on_ovf = B == NUM_NARROW && self.tm.big_seen;
         self.sv.gave_up = false;
         let mut ok = self.holds(pc, goal);

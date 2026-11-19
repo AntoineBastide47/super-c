@@ -265,6 +265,16 @@ fn unproved_contracts_are_errors() {
         "for example: x = 4294967295",
     );
     b.add(
+        "wrapping sums of other terms",
+        "lemma l(a: u64, b: u64, c: u64) ensures a.wrapping_add(b).wrapping_add(c) == a.wrapping_add(b.wrapping_add(b)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
+        "wrapping sums of other constants",
+        "lemma l(a: u64, b: u64) ensures a.wrapping_add(3).wrapping_add(b) == b.wrapping_add(a.wrapping_add(4)) {}\nfn main() i32 { return 0; }\n",
+        "cannot prove this 'ensures' clause",
+    );
+    b.add(
         "a rotation the other rotation does not undo",
         "fn f(x: u32, n: u32) u32 ensures |r| r == x { return x.rotate_left(n).rotate_left(n); }\nfn main() i32 { return f(1, 0) as i32 - 1; }\n",
         "cannot prove this 'ensures' clause",
@@ -1856,6 +1866,10 @@ fn negated(x: i64) i64
 {
     return x.wrapping_neg();
 }
+lemma regrouped(a: u64, b: u64, c: u64, d: u64)
+    ensures a.wrapping_add(b).wrapping_add(c).wrapping_add(d) == d.wrapping_add(c.wrapping_add(b).wrapping_add(a))
+    ensures a.wrapping_add(3).wrapping_add(b).wrapping_add(4) == b.wrapping_add(a.wrapping_add(7))
+{}
 fn main() i32 {
     let q = quarter(1, 2, 3);
     return (wrap_back(7, 4294967295) + rot_back(2, 33) + odd_times(5) % 2 + (q >> 16 ^ 3)) as i32 + signed_rot(-2) + negated(5) as i32 + 5;

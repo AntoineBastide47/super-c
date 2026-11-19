@@ -637,3 +637,354 @@ pub fn sha256msg2(x: [Secret<u32>; 4], y: [Secret<u32>; 4]) [Secret<u32>; 4]
     );
     return [Secret::<u32> { v: o[0] }, Secret::<u32> { v: o[1] }, Secret::<u32> { v: o[2] }, Secret::<u32> { v: o[3] }];
 }
+
+// ---- SHA-512 and SHA-3 instructions ----
+//
+// Arm's SHA512H, SHA512H2, SHA512SU0, SHA512SU1 (FEAT_SHA512) and EOR3, RAX1, XAR, BCAX (FEAT_SHA3) take
+// and give pairs of secret 64-bit words, a vector register's lanes from lane 0. Each `ensures` is Arm's
+// shared pseudocode of the instruction, which the processor computes and no proof checks (`@trusted`);
+// Arm lists each as data-independent in time (DIT).
+
+/// The values of two secret words.
+pub spec fn words2(x: [Secret<u64>; 2]) [u64; 2] {
+    return [x[0].v, x[1].v];
+}
+
+// Arm's `SHAmajority` and the sigmas of its SHA-512 pseudocode.
+spec fn sha_majority64(x: u64, y: u64, z: u64) u64 {
+    return x & y | (x | y) & z;
+}
+
+spec fn sha512_sigma0(x: u64) u64 {
+    return x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39);
+}
+
+spec fn sha512_sigma1(x: u64) u64 {
+    return x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41);
+}
+
+spec fn sha512_sched0(x: u64) u64 {
+    return x.rotate_right(1) ^ x.rotate_right(8) ^ x >> 7;
+}
+
+spec fn sha512_sched1(x: u64) u64 {
+    return x.rotate_right(19) ^ x.rotate_right(61) ^ x >> 6;
+}
+
+/// Arm's `SHA512H` with operands `w` (Vd), `x` (Vn) and `y` (Vm).
+pub spec fn arm_sha512h(w: [u64; 2], x: [u64; 2], y: [u64; 2]) [u64; 2] {
+    let v1 = (y[1] & x[0] ^ ~y[1] & x[1]).wrapping_add(sha512_sigma1(y[1])).wrapping_add(w[1]);
+    let tmp = v1.wrapping_add(y[0]);
+    let v0 = (tmp & y[1] ^ ~tmp & x[0]).wrapping_add(sha512_sigma1(tmp)).wrapping_add(w[0]);
+    return [v0, v1];
+}
+
+/// Arm's `SHA512H2` with operands `w` (Vd), `x` (Vn) and `y` (Vm).
+pub spec fn arm_sha512h2(w: [u64; 2], x: [u64; 2], y: [u64; 2]) [u64; 2] {
+    let v1 = sha_majority64(x[0], y[1], y[0]).wrapping_add(sha512_sigma0(y[0])).wrapping_add(w[1]);
+    let v0 = sha_majority64(v1, y[0], y[1]).wrapping_add(sha512_sigma0(v1)).wrapping_add(w[0]);
+    return [v0, v1];
+}
+
+/// Arm's `SHA512SU0` with operands `w` (Vd) and `x` (Vn).
+pub spec fn arm_sha512su0(w: [u64; 2], x: [u64; 2]) [u64; 2] {
+    return [w[0].wrapping_add(sha512_sched0(w[1])), w[1].wrapping_add(sha512_sched0(x[0]))];
+}
+
+/// Arm's `SHA512SU1` with operands `w` (Vd), `x` (Vn) and `y` (Vm).
+pub spec fn arm_sha512su1(w: [u64; 2], x: [u64; 2], y: [u64; 2]) [u64; 2] {
+    return [
+        w[0].wrapping_add(sha512_sched1(x[0])).wrapping_add(y[0]),
+        w[1].wrapping_add(sha512_sched1(x[1])).wrapping_add(y[1]),
+    ];
+}
+
+/// Two SHA-512 rounds' first parts (`SHA512H`): from `w` (Vd), `x` (Vn) and `y` (Vm).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha512])
+pub fn sha512h(w: [Secret<u64>; 2], x: [Secret<u64>; 2], y: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == arm_sha512h(words2(w), words2(x), words2(y))
+{
+    let w_w: [u64; 2] = [w[0].v, w[1].v];
+    let x_w: [u64; 2] = [x[0].v, x[1].v];
+    let y_w: [u64; 2] = [y[0].v, y[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        arm_neon::vsha512hq_u64(
+            unsafe arm_neon::vld1q_u64(&w_w[0]),
+            unsafe arm_neon::vld1q_u64(&x_w[0]),
+            unsafe arm_neon::vld1q_u64(&y_w[0]),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// Two SHA-512 rounds' second parts (`SHA512H2`): from `w` (Vd), `x` (Vn) and `y` (Vm).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha512])
+pub fn sha512h2(w: [Secret<u64>; 2], x: [Secret<u64>; 2], y: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == arm_sha512h2(words2(w), words2(x), words2(y))
+{
+    let w_w: [u64; 2] = [w[0].v, w[1].v];
+    let x_w: [u64; 2] = [x[0].v, x[1].v];
+    let y_w: [u64; 2] = [y[0].v, y[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        arm_neon::vsha512h2q_u64(
+            unsafe arm_neon::vld1q_u64(&w_w[0]),
+            unsafe arm_neon::vld1q_u64(&x_w[0]),
+            unsafe arm_neon::vld1q_u64(&y_w[0]),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// The first half of two schedule words (`SHA512SU0`): from `w` (Vd) and `x` (Vn).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha512])
+pub fn sha512su0(w: [Secret<u64>; 2], x: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == arm_sha512su0(words2(w), words2(x))
+{
+    let w_w: [u64; 2] = [w[0].v, w[1].v];
+    let x_w: [u64; 2] = [x[0].v, x[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        arm_neon::vsha512su0q_u64(unsafe arm_neon::vld1q_u64(&w_w[0]), unsafe arm_neon::vld1q_u64(&x_w[0])),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// Two schedule words (`SHA512SU1`): from `w` (Vd), `x` (Vn) and `y` (Vm).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha512])
+pub fn sha512su1(w: [Secret<u64>; 2], x: [Secret<u64>; 2], y: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == arm_sha512su1(words2(w), words2(x), words2(y))
+{
+    let w_w: [u64; 2] = [w[0].v, w[1].v];
+    let x_w: [u64; 2] = [x[0].v, x[1].v];
+    let y_w: [u64; 2] = [y[0].v, y[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        arm_neon::vsha512su1q_u64(
+            unsafe arm_neon::vld1q_u64(&w_w[0]),
+            unsafe arm_neon::vld1q_u64(&x_w[0]),
+            unsafe arm_neon::vld1q_u64(&y_w[0]),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// `a ^ b ^ c` per word (`EOR3`).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+pub fn eor3(a: [Secret<u64>; 2], b: [Secret<u64>; 2], c: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == [a[0].v ^ b[0].v ^ c[0].v, a[1].v ^ b[1].v ^ c[1].v]
+{
+    let a_w: [u64; 2] = [a[0].v, a[1].v];
+    let b_w: [u64; 2] = [b[0].v, b[1].v];
+    let c_w: [u64; 2] = [c[0].v, c[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u8(
+        ((&mut o) as *mut [u64; 2]) as *mut u8,
+        arm_neon::veor3q_u8(
+            unsafe arm_neon::vld1q_u8(((&a_w) as *const [u64; 2]) as *const u8),
+            unsafe arm_neon::vld1q_u8(((&b_w) as *const [u64; 2]) as *const u8),
+            unsafe arm_neon::vld1q_u8(((&c_w) as *const [u64; 2]) as *const u8),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// `a ^ b.rotate_left(1)` per word (`RAX1`).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+pub fn rax1(a: [Secret<u64>; 2], b: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == [a[0].v ^ b[0].v.rotate_left(1), a[1].v ^ b[1].v.rotate_left(1)]
+{
+    let a_w: [u64; 2] = [a[0].v, a[1].v];
+    let b_w: [u64; 2] = [b[0].v, b[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        arm_neon::vrax1q_u64(unsafe arm_neon::vld1q_u64(&a_w[0]), unsafe arm_neon::vld1q_u64(&b_w[0])),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// `(a ^ b).rotate_right(N)` per word, `N` below 64 (`XAR`).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+pub fn xar<const N: i32>(a: [Secret<u64>; 2], b: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == [(a[0].v ^ b[0].v).rotate_right(N as u32), (a[1].v ^ b[1].v).rotate_right(N as u32)]
+{
+    static_assert(N >= 0 && N < 64, "xar: the rotation is below 64");
+    let a_w: [u64; 2] = [a[0].v, a[1].v];
+    let b_w: [u64; 2] = [b[0].v, b[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u64(
+        &mut o[0],
+        unsafe arm_neon::vxarq_u64(unsafe arm_neon::vld1q_u64(&a_w[0]), unsafe arm_neon::vld1q_u64(&b_w[0]), N),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+/// `a ^ (b & ~c)` per word (`BCAX`).
+@trusted
+@constant_time
+@arch(aarch64)
+@target_feature([cpu::Feature::Sha3])
+pub fn bcax(a: [Secret<u64>; 2], b: [Secret<u64>; 2], c: [Secret<u64>; 2]) [Secret<u64>; 2]
+    ensures |r| words2(r) == [a[0].v ^ b[0].v & ~c[0].v, a[1].v ^ b[1].v & ~c[1].v]
+{
+    let a_w: [u64; 2] = [a[0].v, a[1].v];
+    let b_w: [u64; 2] = [b[0].v, b[1].v];
+    let c_w: [u64; 2] = [c[0].v, c[1].v];
+    let mut o: [u64; 2] = [0; 2];
+    unsafe arm_neon::vst1q_u8(
+        ((&mut o) as *mut [u64; 2]) as *mut u8,
+        arm_neon::vbcaxq_u8(
+            unsafe arm_neon::vld1q_u8(((&a_w) as *const [u64; 2]) as *const u8),
+            unsafe arm_neon::vld1q_u8(((&b_w) as *const [u64; 2]) as *const u8),
+            unsafe arm_neon::vld1q_u8(((&c_w) as *const [u64; 2]) as *const u8),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }];
+}
+
+// ---- x86-64's SHA-512 instructions ----
+//
+// VSHA512RNDS2, VSHA512MSG1 and VSHA512MSG2 (the SHA512 extension) take and give groups of four secret
+// 64-bit words, a ymm register's lanes from lane 0, and two in an xmm register. Each `ensures` is Intel's
+// pseudocode, which the processor computes and no proof checks (`@trusted`); Intel lists them as
+// data-independent in time (DOIT).
+
+/// The values of four secret 64-bit words.
+pub spec fn qwords4(x: [Secret<u64>; 4]) [u64; 4] {
+    return [x[0].v, x[1].v, x[2].v, x[3].v];
+}
+
+// Intel's `CH` and `MAJ` of its SHA-512 pseudocode.
+spec fn sha512_ch(e: u64, f: u64, g: u64) u64 {
+    return e & f ^ g & ~e;
+}
+
+spec fn sha512_maj(a: u64, b: u64, c: u64) u64 {
+    return a & b ^ a & c ^ b & c;
+}
+
+/// One round of Intel's VSHA512RNDS2 on `A..H` (`s[0]` to `s[7]`) with word plus constant `wk`.
+pub spec fn intel_sha512_round(s: [u64; 8], wk: u64) [u64; 8] {
+    let t = sha512_ch(s[4], s[5], s[6]).wrapping_add(sha512_sigma1(s[4])).wrapping_add(wk).wrapping_add(s[7]);
+    let a = t.wrapping_add(sha512_maj(s[0], s[1], s[2])).wrapping_add(sha512_sigma0(s[0]));
+    let e = t.wrapping_add(s[3]);
+    return [a, s[0], s[1], s[2], e, s[4], s[5], s[6]];
+}
+
+/// Intel's VSHA512RNDS2 with `cdgh` (the destination: C, D, G, H in lanes 3 to 0), `abef` (A, B, E, F)
+/// and `wk` (the xmm operand, lanes 0 and 1): A, B, E, F after two rounds, in lanes 3 to 0.
+pub spec fn intel_sha512_rnds2(cdgh: [u64; 4], abef: [u64; 4], wk: [u64; 2]) [u64; 4] {
+    let s0: [u64; 8] = [abef[3], abef[2], cdgh[3], cdgh[2], abef[1], abef[0], cdgh[1], cdgh[0]];
+    let s2 = intel_sha512_round(intel_sha512_round(s0, wk[0]), wk[1]);
+    return [s2[5], s2[4], s2[1], s2[0]];
+}
+
+/// Intel's VSHA512MSG1: lane `i` is `x[i] + s0(W[i + 1])`, `W` the words of `x` then `y[0]`.
+pub spec fn intel_sha512_msg1(x: [u64; 4], y: [u64; 2]) [u64; 4] {
+    return [
+        x[0].wrapping_add(sha512_sched0(x[1])),
+        x[1].wrapping_add(sha512_sched0(x[2])),
+        x[2].wrapping_add(sha512_sched0(x[3])),
+        x[3].wrapping_add(sha512_sched0(y[0])),
+    ];
+}
+
+/// Intel's VSHA512MSG2: `W16 = x[0] + s1(y[2])`, `W17 = x[1] + s1(y[3])`, `W18 = x[2] + s1(W16)`, `W19 =
+/// x[3] + s1(W17)`.
+pub spec fn intel_sha512_msg2(x: [u64; 4], y: [u64; 4]) [u64; 4] {
+    let w16 = x[0].wrapping_add(sha512_sched1(y[2]));
+    let w17 = x[1].wrapping_add(sha512_sched1(y[3]));
+    return [w16, w17, x[2].wrapping_add(sha512_sched1(w16)), x[3].wrapping_add(sha512_sched1(w17))];
+}
+
+/// Two SHA-512 rounds (VSHA512RNDS2): A, B, E, F after them from `cdgh`, `abef` and `wk`.
+@trusted
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha512ni])
+pub fn sha512rnds2(cdgh: [Secret<u64>; 4], abef: [Secret<u64>; 4], wk: [Secret<u64>; 2]) [Secret<u64>; 4]
+    ensures |r| qwords4(r) == intel_sha512_rnds2(qwords4(cdgh), qwords4(abef), words2(wk))
+{
+    let cdgh_w: [u64; 4] = [cdgh[0].v, cdgh[1].v, cdgh[2].v, cdgh[3].v];
+    let abef_w: [u64; 4] = [abef[0].v, abef[1].v, abef[2].v, abef[3].v];
+    let wk_w: [u64; 2] = [wk[0].v, wk[1].v];
+    let mut o: [u64; 4] = [0; 4];
+    unsafe immintrin::_mm256_storeu_si256(
+        ((&mut o) as *mut [u64; 4]) as *mut immintrin::__m256i_u,
+        immintrin::_mm256_sha512rnds2_epi64(
+            unsafe immintrin::_mm256_loadu_si256(((&cdgh_w) as *const [u64; 4]) as *const immintrin::__m256i_u),
+            unsafe immintrin::_mm256_loadu_si256(((&abef_w) as *const [u64; 4]) as *const immintrin::__m256i_u),
+            unsafe immintrin::_mm_loadu_si128(((&wk_w) as *const [u64; 2]) as *const immintrin::__m128i_u),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }, Secret::<u64> { v: o[2] }, Secret::<u64> { v: o[3] }];
+}
+
+/// The first half of four schedule words (VSHA512MSG1).
+@trusted
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha512ni])
+pub fn sha512msg1(x: [Secret<u64>; 4], y: [Secret<u64>; 2]) [Secret<u64>; 4]
+    ensures |r| qwords4(r) == intel_sha512_msg1(qwords4(x), words2(y))
+{
+    let x_w: [u64; 4] = [x[0].v, x[1].v, x[2].v, x[3].v];
+    let y_w: [u64; 2] = [y[0].v, y[1].v];
+    let mut o: [u64; 4] = [0; 4];
+    unsafe immintrin::_mm256_storeu_si256(
+        ((&mut o) as *mut [u64; 4]) as *mut immintrin::__m256i_u,
+        immintrin::_mm256_sha512msg1_epi64(
+            unsafe immintrin::_mm256_loadu_si256(((&x_w) as *const [u64; 4]) as *const immintrin::__m256i_u),
+            unsafe immintrin::_mm_loadu_si128(((&y_w) as *const [u64; 2]) as *const immintrin::__m128i_u),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }, Secret::<u64> { v: o[2] }, Secret::<u64> { v: o[3] }];
+}
+
+/// Four schedule words from their sums without s1 (VSHA512MSG2).
+@trusted
+@constant_time
+@arch(x86_64)
+@target_feature([cpu::Feature::Sha512ni])
+pub fn sha512msg2(x: [Secret<u64>; 4], y: [Secret<u64>; 4]) [Secret<u64>; 4]
+    ensures |r| qwords4(r) == intel_sha512_msg2(qwords4(x), qwords4(y))
+{
+    let x_w: [u64; 4] = [x[0].v, x[1].v, x[2].v, x[3].v];
+    let y_w: [u64; 4] = [y[0].v, y[1].v, y[2].v, y[3].v];
+    let mut o: [u64; 4] = [0; 4];
+    unsafe immintrin::_mm256_storeu_si256(
+        ((&mut o) as *mut [u64; 4]) as *mut immintrin::__m256i_u,
+        immintrin::_mm256_sha512msg2_epi64(
+            unsafe immintrin::_mm256_loadu_si256(((&x_w) as *const [u64; 4]) as *const immintrin::__m256i_u),
+            unsafe immintrin::_mm256_loadu_si256(((&y_w) as *const [u64; 4]) as *const immintrin::__m256i_u),
+        ),
+    );
+    return [Secret::<u64> { v: o[0] }, Secret::<u64> { v: o[1] }, Secret::<u64> { v: o[2] }, Secret::<u64> { v: o[3] }];
+}

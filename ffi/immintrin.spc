@@ -2775,6 +2775,18 @@ extern "C" "immintrin.h" {
     @unsafe(safe)
     pub fn _mm_sha256rnds2_epu32(a: __m128i, b: __m128i, k: __m128i) __m128i;
     @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512msg1_epi64(a: __m256i, b: __m128i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512msg2_epi64(a: __m256i, b: __m256i) __m256i;
+    @arch(x86_64)
+    @target_feature([cpu::Feature::Sha512ni])
+    @unsafe(safe)
+    pub fn _mm256_sha512rnds2_epi64(a: __m256i, b: __m256i, c: __m128i) __m256i;
+    @arch(x86_64)
     @target_feature([cpu::Feature::Sse2])
     @unsafe(safe)
     pub fn _mm_shuffle_epi32(a: __m128i, b: i32) __m128i;

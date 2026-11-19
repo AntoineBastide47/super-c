@@ -54,8 +54,8 @@ pub unsafe const fn sc_cpu_static_words(out: *mut u64) {
     out[1] = TARGET_FEATURES[1];
 }
 
-/// The x86 features (one word) of CPUID registers `r[0..7]` (leaf 1 ECX; leaf 7.0 EBX, ECX and EDX;
-/// leaf 7.1 EDX; leaf 80000001h ECX; leaf 24h EBX), XCR0 `xcr0` and the OS's own report of the AVX-512
+/// The x86 features (one word) of CPUID registers `r[0..8]` (leaf 1 ECX; leaf 7.0 EBX, ECX and EDX;
+/// leaf 7.1 EDX; leaf 80000001h ECX; leaf 24h EBX; leaf 7.1 EAX), XCR0 `xcr0` and the OS's own report of the AVX-512
 /// state `os_zmm` (macOS): the decision of the x86 query, a pure function on every host.
 pub unsafe fn sc_cpu_x86_decide(r: *const u32, xcr0: u64, os_zmm: i32) u64 {
     // OSXSAVE and XCR0 bits 1 and 2 (SSE and AVX state); bits 5 to 7 (opmask and ZMM state), which macOS
@@ -127,7 +127,7 @@ fn detect() u64 {
 
 // The CPUID bit of each x86 feature: register `r[reg]`, bit `bit`, the feature, and `state` 1 when it
 // needs the AVX register state, 2 when the AVX-512 state too.
-const X86_ROWS: [(u8, u8, cpu::Feature, u8); 32] = [
+const X86_ROWS: [(u8, u8, cpu::Feature, u8); 33] = [
     (0, 0, cpu::Feature::Sse3, 0),
     (0, 9, cpu::Feature::Ssse3, 0),
     (0, 19, cpu::Feature::Sse41, 0),
@@ -160,13 +160,14 @@ const X86_ROWS: [(u8, u8, cpu::Feature, u8); 32] = [
     (0, 25, cpu::Feature::Aesni, 0),
     (0, 1, cpu::Feature::Pclmulqdq, 0),
     (1, 29, cpu::Feature::Sha, 0),
+    (7, 0, cpu::Feature::Sha512ni, 1),
 ];
 
 // x86_64: CPUID leaves 1, (7,0), (7,1) when (7,0) reports it, 80000001h and 24h, a leaf past the maximum
 // reading as zeros; XGETBV(0) when OSXSAVE is set; on macOS the OS's report of the AVX-512 state.
 @arch(x86_64)
 fn query() u64 {
-    let mut r: [u32; 7] = [0; 7];
+    let mut r: [u32; 8] = [0; 8];
     let (_, _, c1, _) = cpuid(1, 0);
     r[0] = c1;
     let (a7, b7, c7, d7) = cpuid(7, 0);
@@ -174,8 +175,9 @@ fn query() u64 {
     r[2] = c7;
     r[3] = d7;
     if a7 >= 1 {
-        let (_, _, _, d71) = cpuid(7, 1);
+        let (a71, _, _, d71) = cpuid(7, 1);
         r[4] = d71;
+        r[7] = a71;
     }
     let (_, _, ce, _) = cpuid(0x80000001, 0);
     r[5] = ce;

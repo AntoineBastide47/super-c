@@ -541,20 +541,31 @@ const fn pick<T>(c: bool, a: T, b: T) T {
 }
 
 // The x86 query's decision: AVX needs OSXSAVE and the XCR0 SSE and AVX state bits; AVX-512 the opmask
-// and ZMM state bits too, or the OS's own report (macOS); AVX10 its version.
+// and ZMM state bits too, or the OS's own report (macOS); AVX10 its version; SHA512 (CPUID.(7,1):EAX bit
+// 0) the AVX state.
 @test
 fn x86_decision_needs_the_register_state() {
     let bit = fn(w: u64, f: cpu::Feature) bool {
         return (w >> f as u64 & 1) != 0;
     };
-    let mut r: [u32; 7] = [0; 7];
+    let mut r: [u32; 8] = [0; 8];
     r[0] = 1 << 28 | 1 << 27 | 1 << 20; // avx, osxsave, sse4.2
+    r[7] = 1; // sha512
     r[1] = 1 << 5 | 1 << 16; // avx2, avx512f
     let w0 = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0, 0);
-    assert(bit(w0, cpu::Feature::Sse2) && bit(w0, cpu::Feature::Sse42) && !bit(w0, cpu::Feature::Avx), "no state");
+    assert(
+        bit(w0, cpu::Feature::Sse2) && bit(w0, cpu::Feature::Sse42) && !bit(w0, cpu::Feature::Avx) && !bit(
+            w0,
+            cpu::Feature::Sha512ni,
+        ),
+        "no state",
+    );
     let w1 = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 6, 0);
     assert(
-        bit(w1, cpu::Feature::Avx) && bit(w1, cpu::Feature::Avx2) && !bit(w1, cpu::Feature::Avx512f),
+        bit(w1, cpu::Feature::Avx) && bit(w1, cpu::Feature::Avx2) && bit(w1, cpu::Feature::Sha512ni) && !bit(
+            w1,
+            cpu::Feature::Avx512f,
+        ),
         "the AVX state",
     );
     assert(bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0xE6, 0), cpu::Feature::Avx512f), "the ZMM state");

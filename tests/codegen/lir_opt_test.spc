@@ -10096,6 +10096,126 @@ b0(v0: i32):
     same_result(&b, &a, "top", x, 41);
 }
 
+// Scalars inserted into every lane of a vector pack (`lir::slp`'s insert seeds): sums of two vectors'
+// lanes, lane by lane, are their vector sum; lanes taken across two vectors are their `shuffle`; secret
+// marks on each lane are one on the vector. No insert is left.
+@test
+fn inserts_of_lane_operations_become_vector_operations() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i64 v1 align 3
+  v3 = load.v2i64 v1+16 align 3
+  v4 = add.v2i64 v2, v3
+  v5 = xor.v2i64 v2, v3
+  v6 = vextract.0.i64 v4
+  v7 = vextract.1.i64 v4
+  v8 = vextract.0.i64 v5
+  v9 = vextract.1.i64 v5
+  v10 = add.i64 v6, v8
+  v11 = add.i64 v7, v9
+  v12 = wconst.v2i64 0x0, 0x0
+  v13 = vinsert.0.v2i64 v12, v10
+  v14 = vinsert.1.v2i64 v13, v11
+  store v14, v0 align 3
+  v15 = vinsert.0.v2i64 v12, v7
+  v16 = vinsert.1.v2i64 v15, v8
+  store v16, v0+16 align 3
+  v17 = secret.i64 v6
+  v18 = secret.i64 v7
+  v19 = vinsert.0.v2i64 v12, v17
+  v20 = vinsert.1.v2i64 v19, v18
+  v21 = xor.v2i64 v20, v5
+  store v21, v0+32 align 3
+  v22 = load.i64 v0+40 align 3
+  ret v22
+fn @top
+  sig (i64) -> i64
+  slot s0 size 32 align 4
+  slot s1 size 48 align 4
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 3
+  v4 = mul.i64 v0, v3
+  v5 = add.i64 v0, v3
+  v6 = sub.i64 v4, v0
+  store v0, v1 align 3
+  store v4, v1+8 align 3
+  store v5, v1+16 align 3
+  store v6, v1+24 align 3
+  v7 = call.i64 @f(v2, v1) : (ptr, ptr) -> i64
+  v8 = load.i64 v2 align 3
+  v9 = load.i64 v2+16 align 3
+  v10 = load.i64 v2+24 align 3
+  v11 = xor.i64 v7, v8
+  v12 = add.i64 v11, v9
+  v13 = sub.i64 v12, v10
+  ret v13
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(
+        !t.contains("vinsert") && count_of(&t, "add.v2i64") == 2 && t.contains("vop.shuffle") && t.contains(
+            "secret.v2i64",
+        ),
+        t.as_str(),
+    );
+    let x: []u64 = [20];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("top"), x);
+    same_result(&b, &a, "top", x, r.value);
+}
+
+// A loop's carried scalars inserted into a vector each round, and passed back as that round's result's
+// lanes, are one vector parameter (`lir::slp`: the inserts' pack is the block's parameters, the back edge's
+// arguments the result's lanes, the entry's a gather).
+@test
+fn carried_lanes_of_a_vector_become_a_vector_parameter() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @g fn global
+fn @g
+  sig (i64, i64, i64) -> i64
+b0(v0: i64, v1: i64, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  jmp b1(v0, v1, v3)
+b1(v5: i64, v6: i64, v7: i64):
+  v8 = wconst.v2i64 0x0, 0x0
+  v9 = vinsert.0.v2i64 v8, v5
+  v10 = vinsert.1.v2i64 v9, v6
+  v11 = add.v2i64 v10, v10
+  v12 = xor.v2i64 v11, v10
+  v13 = vextract.0.i64 v12
+  v14 = vextract.1.i64 v12
+  v15 = add.i64 v7, v4
+  v16 = icmp.ult v15, v2
+  br v16, b1(v13, v14, v15), b2
+b2:
+  v17 = xor.i64 v13, v14
+  ret v17
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "g");
+    // The entry's arguments gather into the vector (two inserts there), the loop's lanes none.
+    assert(count_of(&t, "vinsert") == 2 && t.contains(": v2i64, ") && !t.contains("b1(v8: i64"), t.as_str());
+    let x: []u64 = [3, 5, 9];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("g"), x);
+    same_result(&b, &a, "g", x, r.value);
+}
+
 // The field-wise sum `o.x = a.x + b.x; o.y = a.y + b.y; ..` loads each lane between the stores: an
 // exclusive referent's stores and read-only referents' loads touch different bytes (`Slp::apart`), so
 // they pack as one vector store of a sum of two vector loads. Without the references' classes `o` may be
@@ -17107,6 +17227,236 @@ b0(v0: i64, v1: i32):
     let mut e = leval::Eval::new(&b);
     let r = e.run(b.find_symbol("words"), args[0..2]);
     same_result(&b, &a, "words", args[0..2], r.value);
+}
+
+// A local function past the inline budget whose one call is its only reference, reading an aggregate
+// through the caller's slot, inlines (`Run.sole`): `once`. Not one called twice (`twice`) or one other
+// objects may call (`open`, global).
+@test
+fn the_only_call_of_a_local_function_inlines_whatever_its_size() {
+    let (b, a) = optimized(
+        M"(lir ptr 8
+sym @once fn local
+sym @twice fn local
+sym @open fn global
+sym @use fn global
+fn @once
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0+0 align 3
+  v2 = load.i64 v0+8 align 3
+  v3 = load.i64 v0+16 align 3
+  v4 = load.i64 v0+24 align 3
+  v5 = load.i64 v0+32 align 3
+  v6 = load.i64 v0+40 align 3
+  v7 = load.i64 v0+48 align 3
+  v8 = load.i64 v0+56 align 3
+  v9 = add.i64 v1, v2
+  v10 = xor.i64 v9, v3
+  v11 = mul.i64 v10, v4
+  v12 = sub.i64 v11, v5
+  v13 = add.i64 v12, v6
+  v14 = xor.i64 v13, v7
+  v15 = mul.i64 v14, v8
+  v16 = sub.i64 v15, v1
+  v17 = add.i64 v16, v2
+  v18 = xor.i64 v17, v3
+  v19 = mul.i64 v18, v4
+  v20 = sub.i64 v19, v5
+  v21 = add.i64 v20, v6
+  v22 = xor.i64 v21, v7
+  v23 = mul.i64 v22, v8
+  v24 = sub.i64 v23, v1
+  v25 = add.i64 v24, v2
+  v26 = xor.i64 v25, v3
+  v27 = mul.i64 v26, v4
+  v28 = sub.i64 v27, v5
+  v29 = add.i64 v28, v6
+  v30 = xor.i64 v29, v7
+  v31 = mul.i64 v30, v8
+  v32 = sub.i64 v31, v1
+  v33 = add.i64 v32, v2
+  v34 = xor.i64 v33, v3
+  v35 = mul.i64 v34, v4
+  v36 = sub.i64 v35, v5
+  v37 = add.i64 v36, v6
+  v38 = xor.i64 v37, v7
+  v39 = mul.i64 v38, v8
+  v40 = sub.i64 v39, v1
+  v41 = add.i64 v40, v2
+  v42 = xor.i64 v41, v3
+  v43 = mul.i64 v42, v4
+  v44 = sub.i64 v43, v5
+  v45 = add.i64 v44, v6
+  v46 = xor.i64 v45, v7
+  v47 = mul.i64 v46, v8
+  v48 = sub.i64 v47, v1
+  v49 = add.i64 v48, v2
+  v50 = xor.i64 v49, v3
+  v51 = mul.i64 v50, v4
+  v52 = sub.i64 v51, v5
+  v53 = add.i64 v52, v6
+  v54 = xor.i64 v53, v7
+  v55 = mul.i64 v54, v8
+  v56 = sub.i64 v55, v1
+  ret v56
+fn @twice
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0+0 align 3
+  v2 = load.i64 v0+8 align 3
+  v3 = load.i64 v0+16 align 3
+  v4 = load.i64 v0+24 align 3
+  v5 = load.i64 v0+32 align 3
+  v6 = load.i64 v0+40 align 3
+  v7 = load.i64 v0+48 align 3
+  v8 = load.i64 v0+56 align 3
+  v9 = add.i64 v1, v2
+  v10 = xor.i64 v9, v3
+  v11 = mul.i64 v10, v4
+  v12 = sub.i64 v11, v5
+  v13 = add.i64 v12, v6
+  v14 = xor.i64 v13, v7
+  v15 = mul.i64 v14, v8
+  v16 = sub.i64 v15, v1
+  v17 = add.i64 v16, v2
+  v18 = xor.i64 v17, v3
+  v19 = mul.i64 v18, v4
+  v20 = sub.i64 v19, v5
+  v21 = add.i64 v20, v6
+  v22 = xor.i64 v21, v7
+  v23 = mul.i64 v22, v8
+  v24 = sub.i64 v23, v1
+  v25 = add.i64 v24, v2
+  v26 = xor.i64 v25, v3
+  v27 = mul.i64 v26, v4
+  v28 = sub.i64 v27, v5
+  v29 = add.i64 v28, v6
+  v30 = xor.i64 v29, v7
+  v31 = mul.i64 v30, v8
+  v32 = sub.i64 v31, v1
+  v33 = add.i64 v32, v2
+  v34 = xor.i64 v33, v3
+  v35 = mul.i64 v34, v4
+  v36 = sub.i64 v35, v5
+  v37 = add.i64 v36, v6
+  v38 = xor.i64 v37, v7
+  v39 = mul.i64 v38, v8
+  v40 = sub.i64 v39, v1
+  v41 = add.i64 v40, v2
+  v42 = xor.i64 v41, v3
+  v43 = mul.i64 v42, v4
+  v44 = sub.i64 v43, v5
+  v45 = add.i64 v44, v6
+  v46 = xor.i64 v45, v7
+  v47 = mul.i64 v46, v8
+  v48 = sub.i64 v47, v1
+  v49 = add.i64 v48, v2
+  v50 = xor.i64 v49, v3
+  v51 = mul.i64 v50, v4
+  v52 = sub.i64 v51, v5
+  v53 = add.i64 v52, v6
+  v54 = xor.i64 v53, v7
+  v55 = mul.i64 v54, v8
+  v56 = sub.i64 v55, v1
+  ret v56
+fn @open
+  sig (ptr) -> i64
+b0(v0: ptr):
+  v1 = load.i64 v0+0 align 3
+  v2 = load.i64 v0+8 align 3
+  v3 = load.i64 v0+16 align 3
+  v4 = load.i64 v0+24 align 3
+  v5 = load.i64 v0+32 align 3
+  v6 = load.i64 v0+40 align 3
+  v7 = load.i64 v0+48 align 3
+  v8 = load.i64 v0+56 align 3
+  v9 = add.i64 v1, v2
+  v10 = xor.i64 v9, v3
+  v11 = mul.i64 v10, v4
+  v12 = sub.i64 v11, v5
+  v13 = add.i64 v12, v6
+  v14 = xor.i64 v13, v7
+  v15 = mul.i64 v14, v8
+  v16 = sub.i64 v15, v1
+  v17 = add.i64 v16, v2
+  v18 = xor.i64 v17, v3
+  v19 = mul.i64 v18, v4
+  v20 = sub.i64 v19, v5
+  v21 = add.i64 v20, v6
+  v22 = xor.i64 v21, v7
+  v23 = mul.i64 v22, v8
+  v24 = sub.i64 v23, v1
+  v25 = add.i64 v24, v2
+  v26 = xor.i64 v25, v3
+  v27 = mul.i64 v26, v4
+  v28 = sub.i64 v27, v5
+  v29 = add.i64 v28, v6
+  v30 = xor.i64 v29, v7
+  v31 = mul.i64 v30, v8
+  v32 = sub.i64 v31, v1
+  v33 = add.i64 v32, v2
+  v34 = xor.i64 v33, v3
+  v35 = mul.i64 v34, v4
+  v36 = sub.i64 v35, v5
+  v37 = add.i64 v36, v6
+  v38 = xor.i64 v37, v7
+  v39 = mul.i64 v38, v8
+  v40 = sub.i64 v39, v1
+  v41 = add.i64 v40, v2
+  v42 = xor.i64 v41, v3
+  v43 = mul.i64 v42, v4
+  v44 = sub.i64 v43, v5
+  v45 = add.i64 v44, v6
+  v46 = xor.i64 v45, v7
+  v47 = mul.i64 v46, v8
+  v48 = sub.i64 v47, v1
+  v49 = add.i64 v48, v2
+  v50 = xor.i64 v49, v3
+  v51 = mul.i64 v50, v4
+  v52 = sub.i64 v51, v5
+  v53 = add.i64 v52, v6
+  v54 = xor.i64 v53, v7
+  v55 = mul.i64 v54, v8
+  v56 = sub.i64 v55, v1
+  ret v56
+fn @use
+  sig (i64, i64) -> i64
+  slot s0 size 64 align 3
+b0(v0: i64, v1: i64):
+  v2 = slotaddr s0
+  v3 = mul.i64 v0, v1
+  store v3, v2+0 align 3
+  v4 = add.i64 v0, v1
+  store v4, v2+8 align 3
+  v5 = mul.i64 v0, v1
+  store v5, v2+16 align 3
+  v6 = add.i64 v0, v1
+  store v6, v2+24 align 3
+  v7 = mul.i64 v0, v1
+  store v7, v2+32 align 3
+  v8 = add.i64 v0, v1
+  store v8, v2+40 align 3
+  v9 = mul.i64 v0, v1
+  store v9, v2+48 align 3
+  v10 = add.i64 v0, v1
+  store v10, v2+56 align 3
+  v11 = call.i64 @once(v2) : (ptr) -> i64
+  v12 = call.i64 @twice(v2) : (ptr) -> i64
+  v13 = call.i64 @twice(v2) : (ptr) -> i64
+  v14 = call.i64 @open(v2) : (ptr) -> i64
+  v15 = xor.i64 v11, v12
+  v16 = xor.i64 v15, v13
+  v17 = xor.i64 v16, v14
+  ret v17
+)",
+    );
+    let u = text_of(&a, "use");
+    assert(!u.contains("@once(") && u.contains("@twice(") && u.contains("@open("), u.as_str());
+    let x: [u64; 2] = [0x1234567, 0x89];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("use"), x[0..2]);
+    same_result(&b, &a, "use", x[0..2], r.value);
 }
 
 // A slot only copies touch (copied twice: no merge), between one written as 8-byte words and two read

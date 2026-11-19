@@ -168,7 +168,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1154] = [
+pub(package) const ROWS: [Row; 1157] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -555,6 +555,9 @@ pub(package) const ROWS: [Row; 1154] = [
     r("sha256rnds2", 0xF38CB, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("sha256msg1", 0xF38CC, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("sha256msg2", 0xF38CD, 0, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    v("vsha512msg1", 0xF38CC, 0xF2, D, VEX | L1, k2(K::Y, K::XR)),
+    v("vsha512msg2", 0xF38CD, 0xF2, D, VEX | L1, k2(K::Y, K::YR)),
+    v("vsha512rnds2", 0xF38CB, 0xF2, D, VEX | L1, k3(K::Y, K::YV, K::XR)),
     r("blendvpd", 0xF3815, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("blendvps", 0xF3814, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("cmppd", 0xFC2, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),

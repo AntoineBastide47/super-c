@@ -122,6 +122,9 @@ pub enum Feature {
     Sha512,
     /// The 64-bit carry-less product into 128 bits, `pmull` (aarch64; `pmull`; implies `aes`).
     Pmull,
+    /// The SHA-512 rounds and message schedules, VSHA512RNDS2, VSHA512MSG1 and VSHA512MSG2 (x86_64;
+    /// `sha512`; implies `avx2`).
+    Sha512ni,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

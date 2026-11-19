@@ -8,7 +8,7 @@
 // `tests/codegen/asm_test.spc` checks each assembles to clang's bytes.
 
 /// The rows, by name: the intrinsic and its instructions.
-pub(package) const ROWS: [(str<'static>, str<'static>); 738] = [
+pub(package) const ROWS: [(str<'static>, str<'static>); 741] = [
     ("_andn_u32", "andnl %esi, %edi, %eax"),
     ("_andn_u64", "andnq %rsi, %rdi, %rax"),
     ("_bextr_u32", "movzbl %sil, %eax\nshll $8, %edx\norl %eax, %edx\nbextrl %edx, %edi, %eax"),
@@ -215,6 +215,9 @@ pub(package) const ROWS: [(str<'static>, str<'static>); 738] = [
     ),
     ("_mm256_setzero_ps", "vxorps %xmm0, %xmm0, %xmm0"),
     ("_mm256_setzero_si256", "vxorps %xmm0, %xmm0, %xmm0"),
+    ("_mm256_sha512msg1_epi64", "vsha512msg1 %xmm1, %ymm0"),
+    ("_mm256_sha512msg2_epi64", "vsha512msg2 %ymm1, %ymm0"),
+    ("_mm256_sha512rnds2_epi64", "vsha512rnds2 %xmm2, %ymm1, %ymm0"),
     ("_mm256_shuffle_epi8", "vpshufb %ymm1, %ymm0, %ymm0"),
     ("_mm256_sign_epi8", "vpsignb %ymm1, %ymm0, %ymm0"),
     ("_mm256_sll_epi16", "vpsllw %xmm1, %ymm0, %ymm0"),

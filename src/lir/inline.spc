@@ -258,13 +258,15 @@ const fn known(e: &Body, c: &Body, t: Inst, v: Value) Option<u64> {
 
 /// The facts of an inlinable body that each call of it reads (`Run.ok`, set once the body is final):
 /// callers may inline it, it is `small` within SHRINK, `small` within the run's budget, a `forwarder`, it
-/// computes with floats (`floats`), its warm path within SHRINK but for constants (`cheap`).
+/// computes with floats (`floats`), its warm path within SHRINK but for constants (`cheap`), its one call
+/// is the package's only reference to it (`Run.sole`: any size).
 pub(package) const IL_OK: u8 = 1;
 pub(package) const IL_SHRINK: u8 = 2;
 pub(package) const IL_SMALL: u8 = 4;
 pub(package) const IL_FWD: u8 = 8;
 pub(package) const IL_FLOAT: u8 = 16;
 pub(package) const IL_CHEAP: u8 = 32;
+pub(package) const IL_SOLE: u8 = 64;
 
 /// The `IL_*` facts of inlinable body `b` under budget `bu`.
 pub(package) const fn facts(b: &Body, bu: Budget) u8 {
@@ -597,6 +599,11 @@ extend Inliner {
                 // An `@always_inline` callee passes the size, cold and rare-path gates (the Core IR's
                 // inliner, which a native build skips, did as much: `ir::inline::always_native`).
                 let always = pk.syms[c.syms[t.a as usize] as usize].always;
+                // The only reference to a callee its unit alone names (`IL_SOLE`) that reads or writes an
+                // aggregate through a slot of the caller (`slot_params`: one passed by value, a result): the
+                // copy replaces the callee and the slot's promotion removes the aggregate's copies, so it
+                // passes the size gate.
+                let sole = (f & IL_SOLE) != 0 && slot_params(e, c, t, &mut self.der, &mut self.us) != 0;
                 // A `@cold` callee stays a call unless it is no bigger than one: its callers' code stays small.
                 let cold = pk.syms[c.syms[t.a as usize] as usize].cold && (f & IL_SHRINK) == 0 && !always;
                 // A call in a rare block (`BLOCK_RARE`) takes the callees no bigger than it: a copy there grows the
@@ -613,7 +620,7 @@ extend Inliner {
                 // registers and instructions.
                 if (c.fmath & ~e.fmath) != 0 && (f & IL_FLOAT) != 0 || e.ct && !c.ct || !pk.cpu_of(e).within(
                     pk.cpu_of(c),
-                ) || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !folds_small(
+                ) || !warm && (f & IL_FWD) == 0 && !always || cold || size + e.insts.len() as u32 > CALLER_MAX && !tiny || e.blocks[0].param_len as u32 != t.aux as u32 || (f & cf) == 0 && !always && !sole && !folds_small(
                     e,
                     c,
                     t,

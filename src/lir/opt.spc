@@ -16694,6 +16694,10 @@ pub(package) struct Run {
     wargs: Vector<u64>,
     shape: Vector<bool>,
     always: Vector<bool>, // per body, whether its function is `@always_inline` (`Sym.always`)
+    // Per body, whether its one call is the only reference the package makes to it, and only its own
+    // unit may name it (`Sym.internal` or local, not `@used`): its copy there replaces it, so it inlines
+    // whatever its size (`il::IL_SOLE`), as LLVM's bonus for the last call of a local function does.
+    sole: Vector<bool>,
     unit: Vector<u32>,
     bunit: Vector<u32>, // per body, its function's `Sym.unit` (NONE: none)
     level: Vector<u32>,
@@ -16834,6 +16838,22 @@ extend Run {
         let hd = &p.held;
         let call_at = replace(&mut cs.at, Vector::<u32>::new());
         let calls = replace(&mut cs.callee, Vector::<u32>::new());
+        let mut refs = Vector::<u32>::new();
+        fill(&mut refs, n, 0u32);
+        for q in 0..calls.len() {
+            refs[calls[q] as usize] += 1;
+        }
+        let mut sole = Vector::<bool>::new();
+        fill(&mut sole, n, false);
+        for k in 0..n {
+            sole[k] = refs[k] == 1;
+        }
+        for s in 0..p.syms.len() {
+            let sy = p.syms[s];
+            if sy.kind == SK_FUNC && sy.def != NONE && (!sy.internal && sy.linkage != SL_LOCAL || sy.used) {
+                sole[sy.def as usize] = false;
+            }
+        }
         let mut shape = Vector::<bool>::with_capacity(n);
         shape.resize_default(n);
         let mut always = Vector::<bool>::with_capacity(n);
@@ -16879,7 +16899,7 @@ extend Run {
             let f = hd.flags[k - held as usize];
             shape[k] = (f & HELD_SHAPE) != 0;
             ok[k] = if (f & HELD_OK) != 0 {
-                il::facts(&bodies[k], cf.inline)
+                il::facts(&bodies[k], cf.inline) | sole[k] as u8 * il::IL_SOLE
             } else {
                 0u8
             };
@@ -16932,6 +16952,7 @@ extend Run {
             shape: shape,
             unit: unit,
             always: always,
+            sole: sole,
             bunit: bunit,
             level: level,
             ok: UnsafeCell::<Vector<u8>>::new(ok),
@@ -17238,9 +17259,9 @@ extend Run {
             unsafe *((*r.finals.get()).as_mut_ptr() + j as usize) = Some(Box::new(fin.compact()));
             recycle(&mut sc, fin);
         }
-        // An `@always_inline` body inlines whatever its size.
-        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize]) {
-            il::facts(b, r.cf.inline)
+        // An `@always_inline` body inlines whatever its size, as does one whose call is its only reference.
+        let facts = if fits && (il::bounded(b, r.cf.inline) || r.always[j as usize] || r.sole[j as usize]) {
+            il::facts(b, r.cf.inline) | r.sole[j as usize] as u8 * il::IL_SOLE
         } else {
             0u8
         };
@@ -20085,6 +20106,10 @@ fn simplify(pk: &Package, b: &mut Body, i: u32) Value {
         return simplify_wide(b, i);
     }
     if is_vec(t.ty) {
+        // A choice of vectors on a constant, or between one vector and itself: that vector.
+        if t.op == O_SELECT && (int_bits(b, t.a).is_some() || t.b == t.c) {
+            return ast::pick(t.b == t.c || int_bits(b, t.a).unwrap() != 0, t.b, t.c);
+        }
         // Integer lanes plus, minus, `or` or `xor` a vector of zeros: the other operand.
         if is_int(lane_type(t.ty)) && (t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR) {
             if splat_of(b, t.b) == Some(0) {

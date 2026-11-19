@@ -177,6 +177,39 @@ jobs:
           chmod +x ./super-c
           SC_SDE="$PWD/sde/sde64 -spr --" SC_TEST_CC=cc SC_LEAK_CHECK=fatal ./super-c test --quiet --test-timeout=1800 --filter=native_test
 
+      - name: SHA-512 with the SHA512 instructions under SDE (Arrow Lake)
+        run: |
+          set -eu
+          mkdir -p x5 && cd x5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::cpu;
+          import std::cpu::detect as detect;
+
+          fn main() i32 {
+              let hw = detect::has(cpu::Feature::Sha512ni);
+              let abc: [Secret<u8>; 3] = [Secret::new(0x61), Secret::new(0x62), Secret::new(0x63)];
+              let d = sha512::sha512(abc[0..3]);
+              let ok = d[0].declassify() == 0xdd && d[1].declassify() == 0xaf && d[63].declassify() == 0x9f;
+              let mut msg = Vector::<Secret<u8>>::new();
+              let mut same = true;
+              for n in 0..600usize {
+                  let a = sha512::sha512(msg.as_slice());
+                  let b = sha512::sha512_portable(msg.as_slice());
+                  for i in 0..64usize {
+                      same = same && a[i].declassify() == b[i].declassify();
+                  }
+                  msg.push(Secret::new((n * 7 + 3) as u8));
+              }
+              println("sha512 instructions {}, abc {}, 600 lengths agree {}", hw, ok, same);
+              return (!(hw && ok && same)) as i32;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o x5
+          ../sde/sde64 -arl -- ./x5
+
   # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
   tls-windows:
     needs: compile
@@ -479,6 +512,41 @@ jobs:
           ../super-c build main.spc --profile=release -o sha
           ./sha
 
+      - name: Time SHA-512 with the dispatch and the portable path
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha512|avx2' /proc/cpuinfo || true
+          mkdir -p s5 && cd s5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha512::sha512(msg.as_slice());
+                  let t1 = clock::monotonic_ns();
+                  let e = sha512::sha512_portable(msg.as_slice());
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..64usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha512 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o s5
+          ./s5
+
   # LSE and RCPC on a Linux arm64 server core: the mutex benchmarks built without them (the Linux
   # baseline) and with them, alternating, two rounds.
   bench-lse:
@@ -548,6 +616,41 @@ jobs:
           SPC
           ../super-c build main.spc --profile=release -o sha
           ./sha
+
+      - name: Time SHA-512 with and without the SHA512 instructions
+        run: |
+          set -eu
+          grep -m1 -o -w -E 'sha512' /proc/cpuinfo || true
+          mkdir -p s5 && cd s5
+          cat > main.spc <<'SPC'
+          import std::crypto::secret as *;
+          import std::crypto::sha512;
+          import std::platform::clock;
+
+          fn main() i32 {
+              let n: usize = 1 << 22;
+              let mut msg = Vector::<Secret<u8>>::new();
+              for i in 0..n {
+                  msg.push(Secret::new((i * 7 + 3) as u8));
+              }
+              for _ in 0..3 {
+                  let t0 = clock::monotonic_ns();
+                  let d = sha512::sha512(msg.as_slice());
+                  let t1 = clock::monotonic_ns();
+                  let e = sha512::sha512_portable(msg.as_slice());
+                  let t2 = clock::monotonic_ns();
+                  let mut same = true;
+                  for i in 0..64usize {
+                      same = same && d[i].declassify() == e[i].declassify();
+                  }
+                  println("4 MiB: sha512 {} MB/s, portable {} MB/s, same {}", 4194 * 1000000 / (t1 - t0), 4194 * 1000000 / (t2 - t1), same);
+              }
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o s5
+          ./s5
 
       - name: Time Keccak-f with and without the SHA3 instructions
         run: |
@@ -666,6 +769,14 @@ jobs:
               for b in 0..blocks { s2[0] ^= b as u64; unsafe kvec(&mut s2); }
               let t3 = clock::monotonic_ns();
               println("1 MiB: sha3_256 {} us (d0 {}), raw scalar permutations {} us, SHA3 instructions {} us, same {}", (t1 - t0) / 1000, d[0].declassify(), (t2 - t1) / 1000, (t3 - t2) / 1000, s1[0] == s2[0] && s1[24] == s2[24]);
+              let mut p1: [Secret<u64>; 25] = [Secret::new(0); 25];
+              let mut p2: [Secret<u64>; 25] = [Secret::new(0); 25];
+              let t4 = clock::monotonic_ns();
+              for b in 0..blocks { p1[0] = p1[0] ^ Secret::new(b as u64); p1 = sha3::keccak_f1600(p1); }
+              let t5 = clock::monotonic_ns();
+              for b in 0..blocks { p2[0] = p2[0] ^ Secret::new(b as u64); p2 = sha3::keccak_f1600_portable(p2); }
+              let t6 = clock::monotonic_ns();
+              println("std permutations: dispatch {} us, portable {} us, same {}", (t5 - t4) / 1000, (t6 - t5) / 1000, p1[0].declassify() == p2[0].declassify() && p1[24].declassify() == s1[24]);
               return 0;
           }
 

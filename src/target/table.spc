@@ -344,7 +344,7 @@ pub(package) const ISAS: [Isa; 3] = [
         vminnum: 3,
         vector_perm3: 0,
         vector_ld3: 0,
-        const_time: "aesdec aesdeclast aesenc aesenclast aesimc aeskeygenassist pclmulqdq sha1msg1 sha1msg2 sha1nexte sha1rnds4 sha256msg1 sha256msg2 sha256rnds2 movdqu palignr movaps",
+        const_time: "aesdec aesdeclast aesenc aesenclast aesimc aeskeygenassist pclmulqdq sha1msg1 sha1msg2 sha1nexte sha1rnds4 sha256msg1 sha256msg2 sha256rnds2 vsha512msg1 vsha512msg2 vsha512rnds2 movdqu palignr movaps",
         vector_sumw: 0x8,
         vector_mulw: 0x4,
         vector_dot: 0x200,
