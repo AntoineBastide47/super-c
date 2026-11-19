@@ -213,6 +213,9 @@ simd::interleave_low(a, b)      simd::interleave_high(a, b)    // a[N/2*h + i/2]
 simd::deinterleave_even(a, b)   simd::deinterleave_odd(a, b)   // lane i: (a ++ b)[2i] or [2i + 1]
 simd::zip(a, b)    // (interleave_low, interleave_high)
 simd::unzip(a, b)  // (deinterleave_even, deinterleave_odd)
+unsafe simd::interleave_rows4(dst: *mut u32, src: *const u8, stride, rows, cols)
+    // word j of dst: byte j of each of 1..4 rows (stride bytes apart), row r in bits 8r.., zero past rows;
+    // the 4-byte dot-product operand layout (VPDPBUSD, AMX, SDOT, SME); 16 columns a step, the last overlapping
 simd::compress(m, v, fill)    // active lanes of v at 0..count-1 in lane order, fill[i] from count
 simd::expand(m, packed, fill) // active lane i: packed[k], k the active lanes below i; inactive: fill[i]
 ```
@@ -404,10 +407,13 @@ aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.spc` where th
 `sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64), on macOS, iOS, Linux and Android (`sc_sme_built()`); on x86_64
 Linux, `mul_i8` and `mul_u8i8` run the AMX kernel of `ffi/sc_amx.spc` where the CPU has `amx-int8` and Linux
 grants the tile state (`detect::request(cpu::Feature::AmxInt8)`; refused, the lanes kernel runs): a 32 x 32 block of `c` on four tiles per step of 64 bytes of the inner dimension
-(`tdpbssd`, `tdpbusd`), `b` packed in groups of four rows (`simd::interleave_low` and `interleave_high`,
-PUNPCKL and PUNPCKH), `a` and `c` in place when no extent pads. Under Intel SDE (Sapphire Rapids) it equals the sums and takes about 110 thousand
-instructions for 256 x 256 x 256 against 176 million for the lanes kernel; no machine here has AMX, so
-no time is measured. The SME kernels are
+(`tdpbssd`, `tdpbusd`), `b` packed in groups of four rows (`simd::interleave_rows4`), `a` read and `c` written
+in place for every shape: an edge block loads a tile configuration of its own extents, and the inner
+dimension's last step reads `a` in place unless it would pass `a`'s end (then a 2 KB zero-padded copy of
+those rows' last bytes). Under Intel SDE (Sapphire Rapids) it equals the sums and takes about 35 thousand
+instructions per call for 256 x 256 x 256 (37 thousand for 255 x 255 x 255) against 176 million for the
+lanes kernel; no machine here has AMX, so no time is measured. The SME kernels pack `b` with
+`interleave_rows4` too. The SME kernels are
 module-level `asm` (Clang or GCC with binutils 2.40 or later, for the `sme2` mnemonics). The f16 and bf16 kernels widen both
 matrices to f32 first (a 16-bit `Float` holds its
 encoding in the low 16 bits of one u64), then run the f32 kernel: the widening FMOPA and BFMOPA round
