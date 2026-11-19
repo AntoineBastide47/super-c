@@ -326,9 +326,11 @@ detected only: a scalable register has a run-time length, which no `Simd<T, N>` 
 size) describes, so no fixed-width backend uses them. SME (`sme`, `sme2`, `sme-f64f64`) has no
 backend entries either: its outer products are matrix operations, which module-level assembly kernels of std run
 (`ffi/sc_sme.spc` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
-streaming mode itself. AMX (`amx-tile`, `amx-int8`) is the same: its tiles have no backend entries, and
-module-level assembly (`ffi/sc_amx.spc`, Linux x86_64) runs `matrix::mul_i8` and `mul_u8i8` on them;
-the x86-64 assembler takes `%tmm0` to `%tmm7` and AMX's memory operand (a base and an index, `MS`).
+streaming mode itself. AMX (`amx-tile`, `amx-int8`) has no backend entries either: a Super-C kernel
+(`ffi/sc_amx.spc`, Linux x86_64) runs `matrix::mul_i8` and `mul_u8i8` on the tiles through the `_tile_*`
+intrinsics of `ffi/immintrin.spc` (the tile numbers constant arguments); their templates are impure
+(`intrin::pure`), so the optimizer neither removes nor reorders them. The x86-64 assembler takes `%tmm0` to
+`%tmm7` and AMX's memory operand (a base and an index, `MS`).
 
 ## Tests
 

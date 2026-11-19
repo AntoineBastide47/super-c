@@ -404,8 +404,8 @@ aarch64, `detect::dispatch` selects the SME kernels of `ffi/sc_sme.spc` where th
 `sme2` (f32, f16, bf16, i8) or `sme-f64f64` (f64), on macOS, iOS, Linux and Android (`sc_sme_built()`); on x86_64
 Linux, `mul_i8` and `mul_u8i8` run the AMX kernel of `ffi/sc_amx.spc` where the CPU has `amx-int8` and Linux
 grants the tile state (`detect::request(cpu::Feature::AmxInt8)`; refused, the lanes kernel runs): a 32 x 32 block of `c` on four tiles per step of 64 bytes of the inner dimension
-(`tdpbssd`, `tdpbusd`), `b` packed in groups of four rows (SSE2 interleaves), `a` and `c` in place
-when no extent pads. Under Intel SDE (Sapphire Rapids) it equals the sums and takes about 100 thousand
+(`tdpbssd`, `tdpbusd`), `b` packed in groups of four rows (`simd::interleave_low` and `interleave_high`,
+PUNPCKL and PUNPCKH), `a` and `c` in place when no extent pads. Under Intel SDE (Sapphire Rapids) it equals the sums and takes about 110 thousand
 instructions for 256 x 256 x 256 against 176 million for the lanes kernel; no machine here has AMX, so
 no time is measured. The SME kernels are
 module-level `asm` (Clang or GCC with binutils 2.40 or later, for the `sme2` mnemonics). The f16 and bf16 kernels widen both
