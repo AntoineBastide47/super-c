@@ -349,7 +349,22 @@ jobs:
               cp "oldw/build/bench-bin$x" "build/bench-old$x"
             fi
           fi
+          # The compiler of the last commit's sources (commit 93bd2d00 of this branch holds them), built by
+          # this tree's compiler, builds that tree's bench: the same kernels before this tree's changes,
+          # on this runner.
+          if [ "${{ matrix.target }}" = linux ] || [ "${{ matrix.target }}" = windows ]; then
+            mkdir -p prevw
+            if git fetch --depth 1 origin 93bd2d00840fd346dea614211f795621730a40d4 && git archive FETCH_HEAD | tar -x -C prevw; then
+              if (cd prevw && SC_STD_DIR="$PWD/std" "../super-c$x" build --bootstrap-tags -fno-prove -o "super-c-prev$x" && awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f" && sh bench/simd_baseline/kernels.sh && "./super-c-prev$x" bench --no-run --filter=simd_baseline); then
+                cp "prevw/build/bench-bin$x" "build/bench-prev$x"
+              fi
+            fi
+          fi
           for k in 1 2 3 4 5; do
+            if [ -x "build/bench-prev$x" ]; then
+              "build/bench-prev$x" > "timing/prev-r$k.txt" 2>&1 || true
+              SC_SIMD_LEVEL=0 "build/bench-prev$x" > "timing/prevbase-r$k.txt" 2>&1 || true
+            fi
             "build/bench-nat$x" > "timing/nat-r$k.txt" 2>&1 || true
             "build/bench-clang$x" > "timing/clang-r$k.txt" 2>&1 || true
             if [ "${{ matrix.target }}" != linux_arm64 ]; then
