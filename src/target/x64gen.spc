@@ -12186,13 +12186,9 @@ extend Gen {
         self.c.sse_rr(0x66, 0x0FEF, rd - V0, ry - V0);
     }
 
-    // The even lanes of `t.a ++ t.b` into vector `i` (SSE2, 16 bytes): `shufps` 0x88 of 4-byte lanes,
-    // `punpcklqdq` of 8-byte ones; 2- and 1-byte lanes shifted to the low half of their pair, sign-extended,
-    // then packed (`packssdw`, `packsswb`), which never saturates. An 8-byte vector or one outside an xmm
-    // register moves each lane.
     // Lane interleave `t` (`O_VZIPLO`, `O_VZIPHI`) into vector `i`: the unpack of the lanes' width (`punpckl*`,
-    // `punpckh*`) on 16 bytes; on 32 (AVX2) the unpack within each 16-byte half after `vpermq` 0xD8 put the
-    // operands' quarters 0, 2, 1, 3; a vector outside a register moves each lane.
+    // `punpckh*`) on 16 bytes, with AVX its VEX form; on 32 (AVX2) the unpack within each 16-byte half after
+    // `vpermq` 0xD8 put the operands' quarters 0, 2, 1, 3; a vector outside a register moves each lane.
     fn vzip(self: &mut Self, i: u32, t: Inst) {
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
@@ -12207,11 +12203,12 @@ extend Gen {
             opc += ast::pick(eb == 8, 1u32, 8u32);
         }
         if nb == 32 && self.in_reg(t.ty) {
-            let rx = self.vec_use(t.a, self.vs0) - V0;
+            let ra = self.vec_use(t.a, self.vs0);
+            let rx = ra - V0;
             let ry = self.vec_use(t.b, self.vs1) - V0;
-            let rd = self.vec_def(i) - V0;
+            let rd = self.def_over(i, t.a, ra) - V0;
             let s = self.tmp(true) - V0;
-            // `b` first: the result's register may be its.
+            // `b` first: the result's register may be `a`'s.
             self.c.vex_rr(0x66, 3, 0x00, true, true, s, 0, ry);
             self.c.byte(0xD8);
             self.c.vex_rr(0x66, 3, 0x00, true, true, rd, 0, rx);
@@ -12220,9 +12217,13 @@ extend Gen {
             return;
         }
         if nb == 16 && in_vreg(t.ty) {
+            if self.avx {
+                self.vex_op(0x66, 1, opc, false, i, t.a, t.b);
+                return;
+            }
             let rx = self.vec_use(t.a, self.vs0);
             let ry = self.vec_use(t.b, self.vs1);
-            let rd = self.vec_def(i);
+            let rd = self.def_over(i, t.a, rx);
             self.c.vmov(rd - V0, rx - V0);
             self.c.sse_rr(0x66, 0x0F00 | opc, rd - V0, ry - V0);
             return;
@@ -12390,9 +12391,10 @@ extend Gen {
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
             // AVX2: the in-lane forms (`vshufps`, `vpunpcklqdq`, shifts and packs) unzip each 16-byte half;
             // `vpermq` then puts the halves' even lanes in order.
-            let rx = self.vec_use(t.a, self.vs0) - V0;
+            let ra = self.vec_use(t.a, self.vs0);
+            let rx = ra - V0;
             let ry = self.vec_use(t.b, self.vs1) - V0;
-            let rd = self.vec_def(i) - V0;
+            let rd = self.def_over(i, t.a, ra) - V0;
             if eb == 4 {
                 self.c.vex_rr(0, 1, 0xC6, false, true, rd, rx, ry);
                 self.c.byte(sel);
@@ -12401,7 +12403,8 @@ extend Gen {
             } else {
                 let s = self.tmp(true) - V0;
                 let sh: u32 = ast::pick(eb == 1, 0x71, 0x72);
-                for (r, a) in [(rd, rx), (s, ry)] {
+                // `b` first: the result's register may be `a`'s, which `b` may share.
+                for (r, a) in [(s, ry), (rd, rx)] {
                     if odd {
                         self.c.vex_rr(0x66, 1, sh, false, true, 4, r, a);
                     } else {
@@ -12419,7 +12422,7 @@ extend Gen {
         if in_vreg(t.ty) && type_bytes(t.ty, 8) == 16 {
             let rx = self.vec_use(t.a, self.vs0);
             let ry = self.vec_use(t.b, self.vs1);
-            let rd = self.vec_def(i);
+            let rd = self.def_over(i, t.a, rx);
             if eb >= 4 {
                 self.c.vmov(rd - V0, rx - V0);
                 if eb == 4 {

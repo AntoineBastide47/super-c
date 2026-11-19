@@ -178,8 +178,8 @@ fn an_over_aligned_windows_frame_keeps_a_frame_register() {
 // The byte products of `std::simd::matrix` on the AMX tiles (ffi/sc_amx.spc), under the emulator command
 // `SC_SDE` names on an x86-64 Linux host (Intel SDE as CI's AVX-512 lane runs it: a Sapphire Rapids, which
 // has AMX-INT8): the program finds AMX, Linux grants the tile state, and `mul_i8` and `mul_u8i8` equal the
-// reference sums on shapes that pad every extent and on shapes that pad none. Nothing elsewhere: no host
-// here has AMX.
+// reference sums on shapes with every kind of edge block and inner-dimension tail and on shapes with none.
+// Nothing elsewhere: no host here has AMX.
 @test(timeout = 1800)
 fn amx_byte_products_match_the_sums_under_the_emulator() {
     let sde = stdlib::get_env("SC_SDE").unwrap_or(String::new());
@@ -225,7 +225,7 @@ fn reference(c: []mut i32, a: []i32, b: []i32, m: usize, k: usize, n: usize) {
 
 fn main() i32 {
     println("amx-int8 {}, tiles granted {}", detect::has(cpu::Feature::AmxInt8), detect::request(cpu::Feature::AmxInt8));
-    let shapes: [(usize, usize, usize); 9] = [(1, 1, 1), (3, 5, 7), (16, 64, 16), (32, 64, 32), (33, 65, 31), (17, 200, 50), (64, 128, 64), (5, 1000, 3), (40, 3, 70)];
+    let shapes: [(usize, usize, usize); 11] = [(1, 1, 1), (3, 5, 7), (16, 64, 16), (32, 64, 32), (33, 65, 31), (17, 200, 50), (64, 128, 64), (5, 1000, 3), (40, 3, 70), (100, 70, 40), (48, 64, 96)];
     let mut x: u64 = 0x9E3779B97F4A7C15;
     let mut bad: u32 = 0;
     for s in shapes {
@@ -22944,6 +22944,72 @@ int main(void) {
   for (int k = 0; k < 16; k++) { a[k] = (float)(k * 3 - 7); o[k] = 99.0f; }
   twice(a, o, m, 16);
   for (int k = 0; k < 16; k++) if (o[k] != (k % 2 == 0 ? 2.0f * a[k] : 99.0f)) return k + 1;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// An x86-64 interleave or deinterleave of SSE2 writes over its first operand's register when that operand
+// dies there: of the two interleaves of `x` and `y` only the first copies `x` (one `movaps`; before: one
+// per interleave and one per deinterleave). The C driver checks the lanes on x86-64, and those of an AVX2
+// deinterleave of one vector with itself, whose shifts read the second operand before the result takes
+// the first's register.
+@test
+fn interleaves_write_over_their_dying_first_operand() {
+    let lir = M"(lir ptr 8
+sym @mix fn global
+fn @mix
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i8 v1 align 0
+  v4 = load.v16i8 v2 align 0
+  v5 = vziplo.v16i8 v3, v4
+  v6 = vziphi.v16i8 v3, v4
+  store v5, v0 align 0
+  v7 = ptradd v0+16
+  store v6, v7 align 0
+  v8 = load.v4i32 v1 align 0
+  v9 = load.v4i32 v2 align 0
+  v10 = vunzip.v4i32 v8, v9
+  v11 = ptradd v0+32
+  store v10, v11 align 0
+  ret
+sym @same fn global
+fn @same
+  sig (ptr, ptr) -> void
+  cpu 32 917504 9 1028 0 319 1
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i16 v1 align 0
+  v3 = vunzip.v16i16 v2, v2
+  store v3, v0 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // `movaps` between registers: 0F 28 and a ModRM byte of mod 3.
+    let mut copies: usize = 0;
+    for at in 0..obj.len() - 2 {
+        if obj[at] == 0x0F && obj[at + 1] == 0x28 && obj[at + 2] >= 0xC0 {
+            copies += 1;
+        }
+    }
+    assert_eq(copies, 1);
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("x86_64", true) || !detect::has(cpu::Feature::Avx2) {
+        return; // the driver runs `mix` and `same` on x86-64 with AVX2
+    }
+    let drv = M"(void mix(unsigned char *, const unsigned char *, const unsigned char *);
+void same(short *, const short *);
+int main(void) {
+  unsigned char x[16], y[16], o[48];
+  short h[16], e[16];
+  for (int k = 0; k < 16; k++) { x[k] = (unsigned char)k; y[k] = (unsigned char)(100 + k); h[k] = (short)(k * 1000 - 7000); }
+  mix(o, x, y);
+  for (int k = 0; k < 32; k++) if (o[k] != (k % 2 ? y[k / 2] : x[k / 2])) return k + 1;
+  for (int k = 0; k < 4; k++) for (int b = 0; b < 4; b++)
+    if (o[32 + 4 * k + b] != (k < 2 ? x : y)[8 * (k % 2) + b]) return 40 + k;
+  same(e, h);
+  for (int k = 0; k < 16; k++) if (e[k] != h[2 * (k % 8)]) return 50 + k;
   return 0;
 }
 )";

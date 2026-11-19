@@ -6,6 +6,7 @@
 // (i, j) is the fused multiply-add chain over p in order, from +0.0. Prefer `std::simd::matrix`, which
 // checks the shapes and chooses a kernel by the CPU.
 import std::cpu;
+import std::simd;
 import stdlib;
 import string as cstring;
 
@@ -145,35 +146,18 @@ unsafe fn mul_i8_flip(c: *mut i32, a: *const i8, b: *const i8, m: usize, k: usiz
             }
         }
     }
-    // pb: per group, the four rows interleaved byte by byte over each panel's 4L columns (zeros past n
-    // and k); a whole group of a whole panel has no condition, which the C compiler vectorizes.
+    // pb: per panel of 4L columns and group, the four rows by column in words (zeros past n and k).
     cstring::memset(pb, 0, pn * 4 * g);
     let mut j: usize = 0;
-    while j < pn {
+    while j < n {
         for q in 0..g {
-            let dst = pb + j * 4 * g + q * 16 * l;
-            if j + 4 * l <= n && 4 * q + 4 <= k {
-                let r0 = b + 4 * q * n + j;
-                let r1 = r0 + n;
-                let r2 = r1 + n;
-                let r3 = r2 + n;
-                for col in 0..4 * l {
-                    dst[col * 4] = r0[col];
-                    dst[col * 4 + 1] = r1[col];
-                    dst[col * 4 + 2] = r2[col];
-                    dst[col * 4 + 3] = r3[col];
-                }
-            } else {
-                let mut col: usize = 0;
-                while col < 4 * l && j + col < n {
-                    let mut t: usize = 0;
-                    while t < 4 && 4 * q + t < k {
-                        dst[col * 4 + t] = b[(4 * q + t) * n + j + col];
-                        t += 1;
-                    }
-                    col += 1;
-                }
-            }
+            simd::interleave_rows4(
+                (pb + j * 4 * g + q * 16 * l) as *mut u32,
+                (b + 4 * q * n + j) as *const u8,
+                n,
+                (k - 4 * q).min(4),
+                (n - j).min(4 * l),
+            );
         }
         j += 4 * l;
     }
