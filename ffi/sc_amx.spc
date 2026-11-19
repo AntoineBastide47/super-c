@@ -81,11 +81,20 @@ pub unsafe fn sc_amx_mul_i8(c: *mut i32, a: *const u8, b: *const u8, m: usize, k
             cstring::memcpy(pw + i * kp, a + i * k, k);
         }
     }
-    // Group g: rows 4g to 4g + 3 of `b` (0 past row k - 1), column j's four bytes in word g * np + j.
+    // Group g: rows 4g to 4g + 3 of `b` (0 past row k - 1), column j's four bytes in word g * np + j;
+    // the full groups' columns in sixteens by `sc_amx_pack_b`, the rest here.
+    let full = k / 4;
+    let n16 = n & ~15usize;
+    sc_amx_pack_b(pb, b, full, n, np);
     for g in 0..(k + 3) / 4 {
         let r = 4 * g;
         let b0 = b + r * n;
-        for j in 0..n {
+        let j0 = if g < full {
+            n16
+        } else {
+            0usize
+        };
+        for j in j0..n {
             let mut w = b0[j] as u32;
             if r + 1 < k {
                 w |= b0[n + j] as u32 << 8;
@@ -183,6 +192,9 @@ fn permitted() bool {
 // products, `tdpbssd` or for unsigned bytes of `a` `tdpbusd`. Registers: r8 the result, r9 `a`, r10 `b`,
 // r11 mp, r12 np, r13 kp, r14 the kind, r15 np * 4 (a row of the result and a group of `b`, in bytes),
 // rsi and rbp the two rows of `a`, rdi the groups of `b`, rax the bytes of the inner dimension left.
+// `sc_amx_pack_b(dst, b, groups, n, np)`: groups 0 to `groups - 1` of `b` (four rows of n bytes each),
+// columns 0 to a multiple of 16, into words g * np + j: per 16 columns, the four rows' bytes interleaved
+// by pairs (`punpcklbw`, `punpckhbw`) and the pairs by twos (`punpcklwd`, `punpckhwd`), 64 bytes out.
 // `sc_amx_permit()`: the system call's result, 0 when granted.
 @platform(linux)
 @arch(x86_64)
@@ -271,6 +283,62 @@ pop %rbp
 pop %rbx
 ret
 .p2align 4
+sc_amx_pack_b:
+push %rbx
+push %r12
+push %r13
+push %r14
+mov %rcx, %r9
+and $-16, %r9
+test %rdx, %rdx
+jz .Lamx_pack_done
+test %r9, %r9
+jz .Lamx_pack_done
+lea (%rsi,%rcx), %r10
+lea (%r10,%rcx), %r11
+lea (%r11,%rcx), %r12
+lea (,%rcx,4), %r13
+lea (,%r8,4), %r14
+.Lamx_pack_group:
+xor %eax, %eax
+.Lamx_pack_cols:
+movdqu (%rsi,%rax), %xmm0
+movdqu (%r10,%rax), %xmm1
+movdqu (%r11,%rax), %xmm2
+movdqu (%r12,%rax), %xmm3
+movdqa %xmm0, %xmm4
+punpcklbw %xmm1, %xmm4
+punpckhbw %xmm1, %xmm0
+movdqa %xmm2, %xmm5
+punpcklbw %xmm3, %xmm5
+punpckhbw %xmm3, %xmm2
+movdqa %xmm4, %xmm6
+punpcklwd %xmm5, %xmm6
+punpckhwd %xmm5, %xmm4
+movdqa %xmm0, %xmm7
+punpcklwd %xmm2, %xmm7
+punpckhwd %xmm2, %xmm0
+movdqu %xmm6, (%rdi,%rax,4)
+movdqu %xmm4, 16(%rdi,%rax,4)
+movdqu %xmm7, 32(%rdi,%rax,4)
+movdqu %xmm0, 48(%rdi,%rax,4)
+add $16, %rax
+cmp %r9, %rax
+jb .Lamx_pack_cols
+add %r13, %rsi
+add %r13, %r10
+add %r13, %r11
+add %r13, %r12
+add %r14, %rdi
+dec %rdx
+jnz .Lamx_pack_group
+.Lamx_pack_done:
+pop %r14
+pop %r13
+pop %r12
+pop %rbx
+ret
+.p2align 4
 sc_amx_permit:
 mov $158, %eax
 mov $0x1023, %edi
@@ -280,6 +348,9 @@ ret
 .globl sc_amx_i8_tiles
 .hidden sc_amx_i8_tiles
 .type sc_amx_i8_tiles, @function
+.globl sc_amx_pack_b
+.hidden sc_amx_pack_b
+.type sc_amx_pack_b, @function
 .globl sc_amx_permit
 .hidden sc_amx_permit
 .type sc_amx_permit, @function
@@ -290,4 +361,5 @@ ret
 extern "C" {
     fn sc_amx_i8_tiles(job: *mut Job);
     fn sc_amx_permit() i64;
+    fn sc_amx_pack_b(dst: *mut u32, b: *const u8, groups: usize, n: usize, np: usize);
 }

@@ -172,7 +172,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1168] = [
+pub(package) const ROWS: [Row; 1171] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -666,6 +666,9 @@ pub(package) const ROWS: [Row; 1168] = [
     r("punpcklbw", 0xF60, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("punpckldq", 0xF62, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("punpcklwd", 0xF61, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhbw", 0xF68, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhwd", 0xF69, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
+    r("punpckhdq", 0xF6A, 0x66, D, 0, F_NOSFX, k2(K::X, K::XM)),
     r("roundpd", 0xF3A09, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     r("roundps", 0xF3A08, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
     r("shufps", 0xFC6, 0, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),

@@ -243,8 +243,6 @@ jobs:
             SHAPE=$sh ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
             SHAPE=$sh SC_CPU_OFF=0x0800000000000000 ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
           done
-          SHAPE=1 ../sde/sde64 -spr -mix -omix mix.txt -- ./b > /dev/null 2>&1 || true
-          grep -n -E 'sc_amx|mul_i8' mix.txt | head -20 || true
 
   # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
   tls-windows:
