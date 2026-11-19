@@ -62,10 +62,12 @@ pub unsafe fn sc_cpu_x86_decide(r: *const u32, xcr0: u64, os_zmm: i32) u64 {
     // enables per thread on first use, so there the OS's own answer stands for them.
     let ymm = (r[0] >> 27 & 1) != 0 && (xcr0 & 6) == 6;
     let zmm = ymm && (os_zmm != 0 || (xcr0 & 0xE0) == 0xE0);
+    // XCR0 bits 17 and 18: the tile configuration and data state.
+    let tiles = (r[0] >> 27 & 1) != 0 && (xcr0 & 0x60000) == 0x60000;
     let mut w = bit(cpu::Feature::Sse2);
     let rows: [](u8, u8, cpu::Feature, u8) = X86_ROWS;
     for row in rows {
-        let state_ok = row.3 == 0 || row.3 == 1 && ymm || row.3 == 2 && zmm;
+        let state_ok = row.3 == 0 || row.3 == 1 && ymm || row.3 == 2 && zmm || row.3 == 3 && tiles;
         if (r[row.0 as usize] >> row.1 as u32 & 1) != 0 && state_ok {
             w |= bit(row.2);
         }
@@ -126,8 +128,8 @@ fn detect() u64 {
 }
 
 // The CPUID bit of each x86 feature: register `r[reg]`, bit `bit`, the feature, and `state` 1 when it
-// needs the AVX register state, 2 when the AVX-512 state too.
-const X86_ROWS: [(u8, u8, cpu::Feature, u8); 33] = [
+// needs the AVX register state, 2 when the AVX-512 state too, 3 when the AMX tile state.
+const X86_ROWS: [(u8, u8, cpu::Feature, u8); 35] = [
     (0, 0, cpu::Feature::Sse3, 0),
     (0, 9, cpu::Feature::Ssse3, 0),
     (0, 19, cpu::Feature::Sse41, 0),
@@ -161,6 +163,8 @@ const X86_ROWS: [(u8, u8, cpu::Feature, u8); 33] = [
     (0, 1, cpu::Feature::Pclmulqdq, 0),
     (1, 29, cpu::Feature::Sha, 0),
     (7, 0, cpu::Feature::Sha512ni, 1),
+    (3, 24, cpu::Feature::AmxTile, 3),
+    (3, 25, cpu::Feature::AmxInt8, 3),
 ];
 
 // x86_64: CPUID leaves 1, (7,0), (7,1) when (7,0) reports it, 80000001h and 24h, a leaf past the maximum

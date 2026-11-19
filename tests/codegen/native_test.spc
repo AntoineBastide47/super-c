@@ -175,6 +175,110 @@ fn an_over_aligned_windows_frame_keeps_a_frame_register() {
     assert(object_of(lir, tgt::axis_index("windows", false), x64, 0, &mut obj), "the Microsoft x64 object");
 }
 
+// The byte products of `std::simd::matrix` on the AMX tiles (ffi/sc_amx.spc), under the emulator command
+// `SC_SDE` names on an x86-64 Linux host (Intel SDE as CI's AVX-512 lane runs it: a Sapphire Rapids, which
+// has AMX-INT8): the program finds AMX, Linux grants the tile state, and `mul_i8` and `mul_u8i8` equal the
+// reference sums on shapes that pad every extent and on shapes that pad none. Nothing elsewhere: no host
+// here has AMX.
+@test(timeout = 1800)
+fn amx_byte_products_match_the_sums_under_the_emulator() {
+    let sde = stdlib::get_env("SC_SDE").unwrap_or(String::new());
+    if sde.len() == 0 || tgt::host_isa() != tgt::axis_index("x86_64", true) || tgt::host_os() != tgt::axis_index(
+        "linux",
+        false,
+    ) {
+        return;
+    }
+    let p = cli::proj_new();
+    p.mkfile("main.spc", AMX_CHECK);
+    let r = cli::superc_in(p.dir(), "build main.spc --profile=release -o amx");
+    if !r.ok() {
+        r.show();
+    }
+    assert(r.ok(), "the program builds");
+    let mut out = format("{}/out.txt", p.dir());
+    let mut cmd = format("{} \"{}/amx\"", sde.as_str(), p.dir());
+    let rc = cli::run_with(cmd.cstr(), null, out.cstr(), null, "");
+    let text = cli::read_text(&out);
+    assert(
+        rc == 0 && text.contains("amx-int8 true, tiles granted true") && text.contains("wrong elements 0"),
+        text.as_str(),
+    );
+}
+
+const AMX_CHECK: str = M"(import std::simd::matrix;
+import std::cpu;
+import std::cpu::detect as detect;
+import sc_amx;
+
+// The reference: each element the wrapping sum of the products.
+fn reference(c: []mut i32, a: []i32, b: []i32, m: usize, k: usize, n: usize) {
+    for i in 0..m {
+        for j in 0..n {
+            let mut s: i32 = 0;
+            for p in 0..k {
+                s = s.wrapping_add(a[i * k + p].wrapping_mul(b[p * n + j]));
+            }
+            c[i * n + j] = s;
+        }
+    }
+}
+
+fn main() i32 {
+    println("amx-int8 {}, tiles granted {}", detect::has(cpu::Feature::AmxInt8), sc_amx::sc_amx_ready());
+    let shapes: [(usize, usize, usize); 9] = [(1, 1, 1), (3, 5, 7), (16, 64, 16), (32, 64, 32), (33, 65, 31), (17, 200, 50), (64, 128, 64), (5, 1000, 3), (40, 3, 70)];
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    let mut bad: u32 = 0;
+    for s in shapes {
+        let (m, k, n) = s;
+        let mut a = Vector::<i8>::new();
+        let mut au = Vector::<u8>::new();
+        let mut b = Vector::<i8>::new();
+        let mut ai = Vector::<i32>::new();
+        let mut aui = Vector::<i32>::new();
+        let mut bi = Vector::<i32>::new();
+        for _ in 0..m * k {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            a.push(x as i8);
+            au.push((x >> 8) as u8);
+            ai.push(x as i8);
+            aui.push((x >> 8) as u8);
+        }
+        for _ in 0..k * n {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            b.push(x as i8);
+            bi.push(x as i8);
+        }
+        let mut c = Vector::<i32>::new();
+        let mut r = Vector::<i32>::new();
+        for _ in 0..m * n {
+            c.push(7);
+            r.push(0);
+        }
+        matrix::mul_i8(&mut c, &a, &b, m, k, n);
+        reference(&mut r, &ai, &bi, m, k, n);
+        for i in 0..m * n {
+            if c[i] != r[i] {
+                bad += 1;
+            }
+        }
+        matrix::mul_u8i8(&mut c, &au, &b, m, k, n);
+        reference(&mut r, &aui, &bi, m, k, n);
+        for i in 0..m * n {
+            if c[i] != r[i] {
+                bad += 1;
+            }
+        }
+    }
+    println("9 shapes, i8 and u8 x i8, wrong elements {}", bad);
+    return (bad != 0) as i32;
+}
+)";
+
 // `run_native` with 64-byte vectors on an x86-64 host: under the emulator command `SC_SDE` names (Intel
 // SDE, as CI's AVX-512 lane runs), else the driver's `main` returns 0 first on a processor without
 // AVX-512 BW. 0 on another host.

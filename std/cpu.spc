@@ -125,6 +125,10 @@ pub enum Feature {
     /// The SHA-512 rounds and message schedules, VSHA512RNDS2, VSHA512MSG1 and VSHA512MSG2 (x86_64;
     /// `sha512`; implies `avx2`).
     Sha512ni,
+    /// The eight AMX tile registers, their configuration, loads and stores (x86_64; `amx-tile`).
+    AmxTile,
+    /// The AMX byte dot products of tiles into 32-bit sums (x86_64; `amx-int8`; implies `amx-tile`).
+    AmxInt8,
 }
 
 /// The x86-64 psABI level `x86-64-v2` beyond the baseline (`@target_feature(cpu::X86_64_V2)`).

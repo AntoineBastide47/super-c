@@ -1,5 +1,5 @@
 // Matrix products over row-major slices: on the SME tiles where the CPU has them (ffi/sc_sme.spc, one outer
-// product per tile per step of the inner dimension), over `Simd` lanes elsewhere (on x86_64, the build's
+// product per tile per step of the inner dimension), the byte products on the AMX tiles (ffi/sc_amx.spc), over `Simd` lanes elsewhere (on x86_64, the build's
 // run-time copies of the lanes kernels: `--simd-dispatch`). Every kernel gives the
 // same bits: element (i, j) is the fused multiply-add chain over p in order from +0.0, NaN payloads
 // aside; `f16` and `bf16` inputs widen exactly to `f32` first.
@@ -7,6 +7,7 @@ import std::cpu;
 import std::cpu::detect as detect;
 import std::simd;
 import sc_sme;
+import sc_amx;
 
 /// `c = a * b` for row-major `f32` matrices: `a` is `m x k`, `b` is `k x n` and `c` is `m x n`. Element
 /// (i, j) of `c` is `fma(a[i][k-1], b[k-1][j], .. fma(a[i][0], b[0][j], +0.0))`, one rounding per step,
@@ -181,7 +182,17 @@ fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     f(c, a, b, m, k, n);
 }
 
-@arch(!aarch64)
+@arch(x86_64)
+fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []i8, []i8, usize, usize, usize), 1>(
+        &mut unsafe MUL_I8,
+        [(cpu::Feature::AmxInt8, mul_i8_amx)],
+        mul_i8_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(wasm32)
 fn mul_i8_on(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
     mul_i8_lanes(c, a, b, m, k, n);
 }
@@ -211,7 +222,17 @@ fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
     f(c, a, b, m, k, n);
 }
 
-@arch(!aarch64)
+@arch(x86_64)
+fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    let f = unsafe detect::dispatch::<fn([]mut i32, []u8, []i8, usize, usize, usize), 1>(
+        &mut unsafe MUL_U8I8,
+        [(cpu::Feature::AmxInt8, mul_u8i8_amx)],
+        mul_u8i8_lanes,
+    );
+    f(c, a, b, m, k, n);
+}
+
+@arch(wasm32)
 fn mul_u8i8_on(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
     mul_u8i8_lanes(c, a, b, m, k, n);
 }
@@ -304,6 +325,39 @@ fn transpose_f32_sme(dst: []mut f32, src: []f32, m: usize, n: usize) {
 @target_feature([cpu::Feature::Sme2])
 fn mul_u8i8_sme(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
     if sc_sme::sc_sme_built() == 0 || unsafe sc_sme::sc_sme_mul_u8i8(c.as_mut_ptr(), a.as_ptr(), b.as_ptr(), m, k, n) != 0 {
+        mul_u8i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+// The AMX kernels (ffi/sc_amx.spc), the lanes kernels where Linux refuses the tile state.
+@arch(x86_64)
+@target_feature([cpu::Feature::AmxInt8])
+fn mul_i8_amx(c: []mut i32, a: []i8, b: []i8, m: usize, k: usize, n: usize) {
+    if sc_amx::sc_amx_built() == 0 || unsafe sc_amx::sc_amx_mul_i8(
+        c.as_mut_ptr(),
+        a.as_ptr() as *const u8,
+        b.as_ptr() as *const u8,
+        m,
+        k,
+        n,
+        false,
+    ) != 0 {
+        mul_i8_lanes(c, a, b, m, k, n);
+    }
+}
+
+@arch(x86_64)
+@target_feature([cpu::Feature::AmxInt8])
+fn mul_u8i8_amx(c: []mut i32, a: []u8, b: []i8, m: usize, k: usize, n: usize) {
+    if sc_amx::sc_amx_built() == 0 || unsafe sc_amx::sc_amx_mul_i8(
+        c.as_mut_ptr(),
+        a.as_ptr(),
+        b.as_ptr() as *const u8,
+        m,
+        k,
+        n,
+        true,
+    ) != 0 {
         mul_u8i8_lanes(c, a, b, m, k, n);
     }
 }

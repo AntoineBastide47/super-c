@@ -631,6 +631,19 @@ const fn x64_mem(j: u32) x::Mem {
 const X64_MEMS: u32 = 7;
 
 // VSIB operand `j` of the samples (a vector index), false past the last.
+// Memory sample `j` with an index register (AMX's base and stride, `xt::K::MS`); false past the last.
+const fn x64_sib(j: u32, m: &mut x::Mem) bool {
+    *m = (switch j {
+        0 => x::ix(x::RSI, x::RDX, 0, 0),
+        1 => x::ix(x::R12, x::R9, 0, 16),
+        2 => x::ix(x::RBP, x::R13, 0, -0x200),
+        _ => {
+            return false;
+        },
+    });
+    return true;
+}
+
 const fn x64_vsib(j: u32, m: &mut x::Mem) bool {
     *m = (switch j {
         0 => x::ix(x::RAX, 5, 2, 0),
@@ -665,6 +678,10 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
             n.mem_at = i as u8;
             if xt::is_vsib(k) {
                 if !x64_vsib(var - 1, &mut n.m) {
+                    return false;
+                }
+            } else if k == xt::K::MS {
+                if !x64_sib(var - 1, &mut n.m) {
                     return false;
                 }
             } else {
@@ -710,6 +727,16 @@ const fn x64_sample(r: xt::Row, sz: u8, var: u32, n: &mut xt::Ins) bool {
             },
             xt::K::XI4 | xt::K::YI4 => {
                 n.set_reg(i, 6);
+            },
+            xt::K::T | xt::K::TR | xt::K::TV => {
+                n.set_reg(
+                    i,
+                    if alt {
+                        7u8
+                    } else {
+                        i as u8 + 1
+                    },
+                );
             },
             xt::K::KR | xt::K::KRM | xt::K::KV => {
                 n.set_reg(

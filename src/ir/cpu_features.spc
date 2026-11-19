@@ -38,7 +38,7 @@ pub(package) struct CpuFeature {
     pub(package) level: u8,
 }
 
-pub(package) const FEATURE_COUNT: usize = 58;
+pub(package) const FEATURE_COUNT: usize = 60;
 pub(package) const F_SIMD128: usize = 0;
 pub(package) const F_RELAXED_SIMD: usize = 1;
 pub(package) const F_SSE2: usize = 2;
@@ -305,6 +305,11 @@ pub(package) const CPU_FEATURES: [CpuFeature; FEATURE_COUNT] = [
     // The SHA512 extension (VSHA512RNDS2, VSHA512MSG1, VSHA512MSG2: VEX.256): SHA-512 rounds and message
     // schedules; GCC's and Clang's `-msha512` implies AVX2.
     CpuFeature { name: "sha512", variant: "Sha512ni", arch: 0, implies: x(1 << 24), c_flag: "-msha512", level: 0 },
+    // AMX-TILE: the eight tile registers, their configuration, loads and stores (XCR0's tile state; on
+    // Linux a process asks for it, `arch_prctl(ARCH_REQ_XCOMP_PERM)`).
+    CpuFeature { name: "amx-tile", variant: "AmxTile", arch: 0, implies: NONE, c_flag: "-mamx-tile", level: 0 },
+    // AMX-INT8: the byte dot products of tiles into 32-bit sums (`tdpbssd`, `tdpbusd` ..).
+    CpuFeature { name: "amx-int8", variant: "AmxInt8", arch: 0, implies: x(1 << 58), c_flag: "-mamx-int8", level: 0 },
 ];
 
 // Each row's implied set closed under `implies`, the row itself included (Warshall): after step `k`,

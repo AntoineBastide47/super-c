@@ -267,6 +267,7 @@ extend C {
     pub(package) const Y: u8 = 3;
     pub(package) const Z: u8 = 4;
     pub(package) const K: u8 = 5;
+    pub(package) const T: u8 = 6;
 }
 
 // A parsed operand.
@@ -329,6 +330,12 @@ const fn reg_name(w: str, o: &mut Opd) bool {
         o.p = P::REG;
         o.cls = C::K;
         o.r = w.byte_at(1) - b'0';
+        return true;
+    }
+    if w.len() == 4 && w.starts_with("tmm") && w.byte_at(3) >= b'0' && w.byte_at(3) <= b'7' {
+        o.p = P::REG;
+        o.cls = C::T;
+        o.r = w.byte_at(3) - b'0';
         return true;
     }
     let c = if w.starts_with("xmm") {
@@ -623,6 +630,8 @@ const fn fits(k: u8, o: &Opd, sz: &mut u8) bool {
         t::K::Z | t::K::ZR | t::K::ZV => vreg && o.cls == C::Z,
         t::K::ZM => anymem || vreg && o.cls == C::Z,
         t::K::KR | t::K::KRM | t::K::KV => vreg && o.cls == C::K,
+        t::K::T | t::K::TR | t::K::TV => vreg && o.cls == C::T,
+        t::K::MS => mem && o.m.index != t::NOREG && o.m.base != x::RIP,
         t::K::R64 | t::K::RR64 => gp && o.size == 8,
         t::K::RR32 => gp && o.size == 4,
         t::K::RM64 => anymem || gp && o.size == 8,
@@ -1082,6 +1091,10 @@ pub(package) fn print_ins(n: &t::Ins, o: &mut String) {
         }
         if t::is_kreg(kd) {
             o.format_into("%k{}", n.reg(k));
+            continue;
+        }
+        if t::is_treg(kd) {
+            o.format_into("%tmm{}", n.reg(k));
             continue;
         }
         if kd == t::K::ONE {

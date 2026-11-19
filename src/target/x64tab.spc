@@ -119,6 +119,10 @@ extend K {
     pub(package) const VSY: u8 = 42;
     pub(package) const VSZ: u8 = 43;
     pub(package) const RV: u8 = 44; // a general register of the operand size in VEX.vvvv
+    pub(package) const T: u8 = 45; // a tile register (AMX) in ModRM.reg
+    pub(package) const TR: u8 = 46; // a tile register in ModRM.rm
+    pub(package) const TV: u8 = 47; // a tile register in VEX.vvvv
+    pub(package) const MS: u8 = 48; // memory with an index register (a SIB byte: AMX's base and stride)
 }
 
 const fn r(mn: str<'static>, op: u32, pfx: u8, dig: u8, sz: u8, fl: u8, ops: u32) Row {
@@ -157,7 +161,7 @@ pub(package) const fn kind_at(ops: u32, i: u32) u8 {
 }
 
 // The fixed ModRM bytes of the `D_FIX` rows.
-const FIXED: [u8; 6] = [0xD0, 0xF9, 0xF0, 0xE8, 0xF8, 0x00];
+const FIXED: [u8; 7] = [0xD0, 0xF9, 0xF0, 0xE8, 0xF8, 0x00, 0xC0];
 
 /// The fixed ModRM byte of a `D_FIX` row.
 pub(package) const fn fixed_modrm(dig: u8) u8 {
@@ -168,7 +172,7 @@ pub(package) const fn fixed_modrm(dig: u8) u8 {
 const D: u8 = D_REG;
 const N: u8 = D_NONE;
 
-pub(package) const ROWS: [Row; 1157] = [
+pub(package) const ROWS: [Row; 1168] = [
     r("nop", 0x90, 0, N, 0, F_NOSFX, 0),
     r("add", 0x0, 0, D, SB, F_LOCK, k2(K::RM, K::R)),
     r("add", 0x1, 0, D, SWLQ, F_LOCK, k2(K::RM, K::R)),
@@ -558,6 +562,19 @@ pub(package) const ROWS: [Row; 1157] = [
     v("vsha512msg1", 0xF38CC, 0xF2, D, VEX | L1, k2(K::Y, K::XR)),
     v("vsha512msg2", 0xF38CD, 0xF2, D, VEX | L1, k2(K::Y, K::YR)),
     v("vsha512rnds2", 0xF38CB, 0xF2, D, VEX | L1, k3(K::Y, K::YV, K::XR)),
+    // AMX-TILE and AMX-INT8: the tile configuration, tile loads and stores, and the byte dot products
+    // (`tdpbssd`: signed by signed; `sud` signed by unsigned, `usd`, `uud`).
+    v("ldtilecfg", 0xF3849, 0, 0, VEX, k1(K::M)),
+    v("sttilecfg", 0xF3849, 0x66, 0, VEX, k1(K::M)),
+    v("tilerelease", 0xF3849, 0, D_FIX | 6, VEX, 0),
+    v("tilezero", 0xF3849, 0xF2, D, VEX, k1(K::T)),
+    v("tileloadd", 0xF384B, 0xF2, D, VEX, k2(K::T, K::MS)),
+    v("tileloaddt1", 0xF384B, 0x66, D, VEX, k2(K::T, K::MS)),
+    v("tilestored", 0xF384B, 0xF3, D, VEX, k2(K::MS, K::T)),
+    v("tdpbssd", 0xF385E, 0xF2, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbsud", 0xF385E, 0xF3, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbusd", 0xF385E, 0x66, D, VEX, k3(K::T, K::TR, K::TV)),
+    v("tdpbuud", 0xF385E, 0, D, VEX, k3(K::T, K::TR, K::TV)),
     r("blendvpd", 0xF3815, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("blendvps", 0xF3814, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::X0)),
     r("cmppd", 0xFC2, 0x66, D, 0, F_NOSFX, k3(K::X, K::XM, K::I8)),
@@ -1427,35 +1444,50 @@ pub(package) const fn gp_size(k: u8, sz: u8) u8 {
 
 /// Whether kind `k` is in ModRM.reg.
 pub(package) const fn in_reg(k: u8) bool {
-    return k == K::R || k == K::R32 || k == K::R64 || k == K::X || k == K::Y || k == K::Z || k == K::KR;
+    return k == K::R || k == K::R32 || k == K::R64 || k == K::X || k == K::Y || k == K::Z || k == K::KR || k == K::T;
 }
 
 /// Whether kind `k` is in ModRM.rm.
 pub(package) const fn in_rm(k: u8) bool {
     return switch k {
-        K::RM | K::M | K::RM8 | K::RM16 | K::RM32 | K::RM64 | K::RR32 | K::RR64 | K::XM | K::XR | K::YM | K::YR | K::ZM | K::ZR | K::KRM | K::IND | K::VSX | K::VSY | K::VSZ => true,
+        K::RM | K::M | K::RM8 | K::RM16 | K::RM32 | K::RM64 | K::RR32 | K::RR64 | K::XM | K::XR | K::YM | K::YR | K::ZM | K::ZR | K::KRM | K::IND | K::VSX | K::VSY | K::VSZ | K::TR | K::MS => true,
         _ => false,
     };
 }
 
 /// Whether kind `k` is in ModRM.rm and memory only.
 pub(package) const fn mem_only(k: u8) bool {
-    return k == K::M || k == K::VSX || k == K::VSY || k == K::VSZ;
+    return k == K::M || k == K::VSX || k == K::VSY || k == K::VSZ || k == K::MS;
 }
 
 /// Whether kind `k` is in ModRM.rm and a register only.
 pub(package) const fn reg_only(k: u8) bool {
-    return k == K::XR || k == K::YR || k == K::ZR || k == K::KRM || k == K::RR32 || k == K::RR64;
+    return k == K::XR || k == K::YR || k == K::ZR || k == K::KRM || k == K::RR32 || k == K::RR64 || k == K::TR;
 }
 
 /// Whether kind `k` is in VEX.vvvv.
 pub(package) const fn in_vvvv(k: u8) bool {
-    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV || k == K::RV;
+    return k == K::XV || k == K::YV || k == K::ZV || k == K::KV || k == K::RV || k == K::TV;
 }
 
 /// Whether kind `k` names a mask register.
 pub(package) const fn is_kreg(k: u8) bool {
     return k == K::KR || k == K::KRM || k == K::KV;
+}
+
+// Whether operand kinds `ops` hold one in ModRM.rm.
+const fn has_rm(ops: u32) bool {
+    for i in 0..4u32 {
+        if in_rm(kind_at(ops, i)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Whether kind `k` names a tile register.
+pub(package) const fn is_treg(k: u8) bool {
+    return k == K::T || k == K::TR || k == K::TV;
 }
 
 /// The vector register width in bytes kind `k` names (a VSIB operand's index), 0 for none.
@@ -1628,6 +1660,10 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
         if is_mem && !in_rm(k) || mem_only(k) && !is_mem || reg_only(k) && is_mem {
             return false;
         }
+        // AMX's memory: a SIB byte with an index (the stride), no RIP-relative base.
+        if k == K::MS && (n.m.index == NOREG || n.m.base == x::RIP) {
+            return false;
+        }
         if in_reg(k) {
             regf = g;
         } else if in_rm(k) {
@@ -1662,7 +1698,7 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
             if g >= AH {
                 no_rex = true;
             }
-        } else if is_kreg(k) && g > 7 || vec_size(k) != 0 && g > 15 || k == K::X0 && g != 0 {
+        } else if (is_kreg(k) || is_treg(k)) && g > 7 || vec_size(k) != 0 && g > 15 || k == K::X0 && g != 0 {
             return false;
         }
     }
@@ -1786,7 +1822,13 @@ pub(package) fn encode(n: &Ins, out: &mut Vector<u8>, e: &mut Enc) bool {
                     return false;
                 }
             } else {
-                out.push((0xC0 | rg << 3 | rmr as u32 & 7) as u8);
+                // No ModRM.rm operand (`tilezero`): rm 0.
+                let rmb: u32 = if rmr == NOREG {
+                    0
+                } else {
+                    rmr as u32 & 7
+                };
+                out.push((0xC0 | rg << 3 | rmb) as u8);
             }
         }
     }
@@ -2110,7 +2152,7 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
             }
             v.set_reg(i, g);
         }
-        if !ok || seg != 0 && v.mem_at == NOMEM || !has_vvvv && vvv != 0 {
+        if !ok || seg != 0 && v.mem_at == NOMEM || !has_vvvv && vvv != 0 || r.dig == D_REG && regform && !has_rm(r.ops) && (modrm & 7) != 0 {
             continue;
         }
         // The memory operand.
@@ -2159,6 +2201,9 @@ pub(package) fn decode(b: []u8, at: usize, n: &mut Ins) u32 {
             }
             q += dn;
             v.m = m;
+            if kind_at(r.ops, v.mem_at) == K::MS && m.index == NOREG {
+                continue;
+            }
         }
         let isz: usize = switch immk {
             K::I8 | K::IS8 => 1usize,

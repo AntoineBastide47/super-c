@@ -210,6 +210,42 @@ jobs:
           ../super-c build main.spc --profile=release -o x5
           ../sde/sde64 -arl -- ./x5
 
+      - name: AMX byte products under SDE (Sapphire Rapids), instruction counts
+        run: |
+          set -eu
+          mkdir -p amxb && cd amxb
+          cat > main.spc <<'SPC'
+          import std::simd::matrix;
+          import stdlib;
+
+          fn main() i32 {
+              let shapes: [(usize, usize, usize); 3] = [(256, 256, 256), (255, 255, 255), (64, 1024, 64)];
+              let sel = stdlib::get_env("SHAPE").unwrap_or(String::from_str("0"));
+              let (m, k, n) = shapes[(sel.as_str().byte_at(0) - b'0') as usize];
+              let mut a = Vector::<i8>::new();
+              let mut b = Vector::<i8>::new();
+              let mut c = Vector::<i32>::new();
+              for i in 0..m * k { a.push((i * 7 + 3) as i8); }
+              for i in 0..k * n { b.push((i * 5 + 1) as i8); }
+              for _ in 0..m * n { c.push(0); }
+              if stdlib::get_env("SKIP").is_none() {
+                  matrix::mul_i8(&mut c, &a, &b, m, k, n);
+              }
+              println("{}x{}x{} c[1] {}", m, k, n, c[1]);
+              return 0;
+          }
+
+          SPC
+          ../super-c build main.spc --profile=release -o b
+          for sh in 0 1 2; do
+            echo "== shape $sh: setup only, AMX, lanes"
+            SHAPE=$sh SKIP=1 ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+            SHAPE=$sh ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+            SHAPE=$sh SC_CPU_OFF=0x0800000000000000 ../sde/sde64 -spr -icount -- ./b 2>&1 | grep -E 'ICOUNT|c\[1\]'
+          done
+          SHAPE=1 ../sde/sde64 -spr -mix -omix mix.txt -- ./b > /dev/null 2>&1 || true
+          grep -n -E 'sc_amx|mul_i8' mix.txt | head -20 || true
+
   # The thread-local program of `thread_local_test` built and run on Windows, its build output shown.
   tls-windows:
     needs: compile

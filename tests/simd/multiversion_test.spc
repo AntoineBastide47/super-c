@@ -542,7 +542,8 @@ const fn pick<T>(c: bool, a: T, b: T) T {
 
 // The x86 query's decision: AVX needs OSXSAVE and the XCR0 SSE and AVX state bits; AVX-512 the opmask
 // and ZMM state bits too, or the OS's own report (macOS); AVX10 its version; SHA512 (CPUID.(7,1):EAX bit
-// 0) the AVX state.
+// 0) the AVX state; AMX-TILE and AMX-INT8 (CPUID.(7,0):EDX bits 24 and 25) the tile state (XCR0 bits 17
+// and 18).
 @test
 fn x86_decision_needs_the_register_state() {
     let bit = fn(w: u64, f: cpu::Feature) bool {
@@ -551,6 +552,7 @@ fn x86_decision_needs_the_register_state() {
     let mut r: [u32; 8] = [0; 8];
     r[0] = 1 << 28 | 1 << 27 | 1 << 20; // avx, osxsave, sse4.2
     r[7] = 1; // sha512
+    r[3] = 1 << 24 | 1 << 25; // amx-tile, amx-int8
     r[1] = 1 << 5 | 1 << 16; // avx2, avx512f
     let w0 = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0, 0);
     assert(
@@ -569,6 +571,10 @@ fn x86_decision_needs_the_register_state() {
         "the AVX state",
     );
     assert(bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0xE6, 0), cpu::Feature::Avx512f), "the ZMM state");
+    assert(!bit(w1, cpu::Feature::AmxTile) && !bit(w1, cpu::Feature::AmxInt8), "no tile state");
+    let wt = unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0x60006, 0);
+    assert(bit(wt, cpu::Feature::AmxTile) && bit(wt, cpu::Feature::AmxInt8), "the tile state");
+    assert(!bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0x20006, 0), cpu::Feature::AmxInt8), "half the tile state");
     assert(bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 6, 1), cpu::Feature::Avx512f), "the OS's report");
     r[0] = 1 << 28 | 1 << 20;
     assert(!bit(unsafe sc_cpu::sc_cpu_x86_decide(&r[0], 0xE6, 1), cpu::Feature::Avx), "no OSXSAVE");
