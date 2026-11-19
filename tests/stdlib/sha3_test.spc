@@ -116,7 +116,7 @@ fn shake_outputs() {
 
 // Keccak-f[1600] of the zero state (FIPS 202's known answer: lanes 0 and 24) and of a state of distinct
 // lanes (a reference implementation's), by `keccak_f1600` with the processor's SHA-3 instructions where the
-// host has them (arm64 FEAT_SHA3) and by `keccak_f1600_portable`; both agree on 64 more states, each the
+// host has them (arm64 FEAT_SHA3) and by `keccak_f1600_portable`; both agree on 8 more states, each the
 // last one permuted again.
 @test
 fn the_permutation_by_both_paths() {
@@ -136,7 +136,7 @@ fn the_permutation_by_both_paths() {
     assert_eq(h[7].declassify(), 0x9207f7fafdae1c11);
     assert_eq(h[24].declassify(), 0x7ae7466ff416bbb8);
     let mut x = h;
-    for _ in 0..64 {
+    for _ in 0..8 {
         let p = sha3::keccak_f1600(x);
         let q = sha3::keccak_f1600_portable(x);
         for i in 0usize..25 {

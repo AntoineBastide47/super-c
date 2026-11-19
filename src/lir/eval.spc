@@ -1284,7 +1284,66 @@ extend Eval {
         }
     }
 
+    // An arm64 SHA3 or SHA512 instruction's intrinsic (`IC_A64_CRYPTO`) on the argument words in `tmp`:
+    // 16-byte vectors of two words each (lane 0 first), `vxarq_u64`'s rotation last. Arm's pseudocode;
+    // the two-word result at `dst`.
+    fn a64_crypto(self: &mut Self, name0: str, dst: u32) bool {
+        let name = if name0.starts_with("__sc_x_") {
+            name0.slice(7, name0.len())
+        } else {
+            name0
+        };
+        let w = self.tmp.as_slice();
+        let mut r: [u64; 2] = [0, 0];
+        for k in 0..2usize {
+            if name == "veor3q_u8" {
+                r[k] = w[k] ^ w[2 + k] ^ w[4 + k];
+            } else if name == "vbcaxq_u8" {
+                r[k] = w[k] ^ w[2 + k] & ~w[4 + k];
+            } else if name == "vrax1q_u64" {
+                r[k] = w[k] ^ w[2 + k].rotate_left(1);
+            } else if name == "vxarq_u64" {
+                r[k] = (w[k] ^ w[2 + k]).rotate_right((w[4] & 63) as u32);
+            } else if name == "vsha512su0q_u64" {
+                let x = if k == 0 {
+                    w[1]
+                } else {
+                    w[2]
+                };
+                r[k] = w[k].wrapping_add(x.rotate_right(1) ^ x.rotate_right(8) ^ x >> 7);
+            } else if name == "vsha512su1q_u64" {
+                let x = w[2 + k];
+                r[k] = w[k].wrapping_add(x.rotate_right(19) ^ x.rotate_right(61) ^ x >> 6).wrapping_add(w[4 + k]);
+            }
+        }
+        if name == "vsha512hq_u64" {
+            let s1 = fn(x: u64) u64 {
+                return x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41);
+            };
+            r[1] = (w[5] & w[2] ^ ~w[5] & w[3]).wrapping_add(s1(w[5])).wrapping_add(w[1]);
+            let t = r[1].wrapping_add(w[4]);
+            r[0] = (t & w[5] ^ ~t & w[2]).wrapping_add(s1(t)).wrapping_add(w[0]);
+        } else if name == "vsha512h2q_u64" {
+            let s0 = fn(x: u64) u64 {
+                return x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39);
+            };
+            let maj = fn(x: u64, y: u64, z: u64) u64 {
+                return x & y | (x | y) & z;
+            };
+            r[1] = maj(w[2], w[5], w[4]).wrapping_add(s0(w[4])).wrapping_add(w[1]);
+            r[0] = maj(r[1], w[4], w[5]).wrapping_add(s0(r[1])).wrapping_add(w[0]);
+        }
+        if dst != NONE {
+            self.vals[dst as usize] = r[0];
+            self.vals[dst as usize + 1] = r[1];
+        }
+        return true;
+    }
+
     fn intercept(self: &mut Self, ic: u8, name: str, rt: u8, dst: u32) bool {
+        if ic == IC_A64_CRYPTO {
+            return self.a64_crypto(name, dst);
+        }
         // Every modeled routine takes at most four words.
         let n = self.tmp.len();
         let mut args: [u64; 4] = [0, 0, 0, 0];
@@ -2409,6 +2468,7 @@ const IC_INDEX_BOUNDS: u8 = 27; // __sc_index_bounds(i, n)
 const IC_VEC_BOUNDS: u8 = 28; // __sc_vec_bounds(w, i, n)
 const IC_LANE_BOUNDS: u8 = 29; // __sc_lane_bounds(lane, x, n, start)
 const IC_LANE_PANIC: u8 = 30; // __sc_lane_panic(lane, m)
+const IC_A64_CRYPTO: u8 = 31; // arm64's SHA3 and SHA512 instructions (`a64_crypto`)
 
 /// Whether the evaluator runs function `name` as it models it, not its body: the optimizer keeps the
 /// calls of such a function.
@@ -2502,6 +2562,14 @@ const fn icode_of(name0: str) u8 {
     }
     if name == "sc_has_i128" || name == "sc_has_f128" || name == "sc_has_f16" || name == "__sc_cancel_tick" {
         return IC_ZERO;
+    }
+    // The CPU detector's query of the OS (`ffi/sc_cpu.spc`): the evaluated machine has no feature the
+    // build does not enable, so a program's dispatch takes the path the build alone allows.
+    if name == "sc_cpu__detect" {
+        return IC_ZERO;
+    }
+    if name == "veor3q_u8" || name == "vbcaxq_u8" || name == "vrax1q_u64" || name == "vxarq_u64" || name == "vsha512hq_u64" || name == "vsha512h2q_u64" || name == "vsha512su0q_u64" || name == "vsha512su1q_u64" {
+        return IC_A64_CRYPTO;
     }
     if name == "__sc_preempt_check" {
         return IC_PREEMPT;

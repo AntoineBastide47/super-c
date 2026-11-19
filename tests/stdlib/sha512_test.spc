@@ -1,7 +1,8 @@
 // std::crypto::sha512 against the digests of FIPS 180-4's examples (NIST's "Example Algorithms") and of
 // messages at each padding boundary: 111 bytes leave room for the 16 length bytes in the last block, 112
-// do not, 128 fill a block. Each digest twice: `sha512` with the processor's SHA-512 instructions where the
-// host has them (arm64 FEAT_SHA512, x86-64 SHA512), and `sha512_portable` without.
+// do not, 128 fill a block: by `sha512`, with the processor's SHA-512 instructions where the host has them
+// (arm64 FEAT_SHA512, x86-64 SHA512); FIPS's examples also by `sha512_portable`, without, and both paths
+// agree over lengths through four blocks and beyond (the padding is theirs alike).
 import std::crypto::secret as *;
 import std::crypto::sha512 as *;
 
@@ -90,35 +91,35 @@ fn one_million_a() {
 @test
 fn padding_boundaries() {
     assert_eq(
-        hex_digest(ramp(111).as_slice()).as_str(),
+        hex_of(ramp(111).as_slice(), false).as_str(),
         "3dfde1184fd99f233f98be4250f4edb9b535157909b668334370742204d97e047f1fd6a74bb5ba447f337286f421d9af957811f7ef62a458771457da126cb65e",
     );
     assert_eq(
-        hex_digest(ramp(112).as_slice()).as_str(),
+        hex_of(ramp(112).as_slice(), false).as_str(),
         "acc96c509e6d01787330a4c6a241e2cda9dcc2529dbe4288dbbcc3812133233c4698831127cf6ed0b333632b22715a5ce53a0a1002a684367b71c98aa6d1d900",
     );
     assert_eq(
-        hex_digest(ramp(127).as_slice()).as_str(),
+        hex_of(ramp(127).as_slice(), false).as_str(),
         "a315910cb7812a8e66d87c0c49a42d93dbe97bf0240ee995792292c529256d93f40199a59b3f6266343f302651fea1589e2040a2f3756126d3fe4f421a72079d",
     );
     assert_eq(
-        hex_digest(ramp(128).as_slice()).as_str(),
+        hex_of(ramp(128).as_slice(), false).as_str(),
         "31f33a52b36dc2e70c83b604fa999a5cabf33bf70e4556fbed7bff10870c1b7b241dd3f15d1ade24599f068fc58ab51e0028b0f0c98895c23358e8dee032ce06",
     );
     assert_eq(
-        hex_digest(ramp(239).as_slice()).as_str(),
+        hex_of(ramp(239).as_slice(), false).as_str(),
         "d5e023834c68aeb6e8eef9619ed5fb6fd8b3df796b49d18dce5f6fae76f3f6cae8ddf055611c4031bf5fe6aa68708360f5de1fe69a77055eb55612c5509d5e19",
     );
     assert_eq(
-        hex_digest(ramp(240).as_slice()).as_str(),
+        hex_of(ramp(240).as_slice(), false).as_str(),
         "67b19552bd96d84b251b262b7eef6fe73b2fdeabc4a4a0e4de2c8c621ee395729b3877c85c2b0fa79e379ca718f1a00d7508d8a5c04967fe240d4608edf05c10",
     );
     assert_eq(
-        hex_digest(ramp(255).as_slice()).as_str(),
+        hex_of(ramp(255).as_slice(), false).as_str(),
         "3e09a61576e14ea6d37a82b9463a1731f1de024664c4386d6a645ae40ad8b9be8d737a166ef08a1ae36f95c0179bcbcf441c45aa0509ce04740fffac9724dc35",
     );
     assert_eq(
-        hex_digest(ramp(256).as_slice()).as_str(),
+        hex_of(ramp(256).as_slice(), false).as_str(),
         "736e6ce54295f07fa411029e1b610c4a86659552c394165c7ddc2ba622630f26f898ec8f47db21051773b1ec17b3f63ff4c5f6cf95ddfd68581daed51ff4242b",
     );
 }

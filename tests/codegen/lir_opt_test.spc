@@ -10096,6 +10096,67 @@ b0(v0: i32):
     same_result(&b, &a, "top", x, 41);
 }
 
+// A slot stored as vectors and read as the pairs across their halves (8 bytes in) is promoted: a pair
+// is one vector's lane 1 and the next one's lane 0 (`lir::promote`), one `shuffle` once packed.
+@test
+fn a_vector_load_across_two_vector_fields_is_promoted() {
+    let (b, a) = optimized_with(
+        M"(lir ptr 8
+sym @f fn global noinline
+sym @top fn global
+fn @f
+  sig (ptr, ptr) -> i64
+  slot s0 size 48 align 4
+b0(v0: ptr, v1: ptr):
+  v2 = load.v2i64 v1 align 3
+  v3 = load.v2i64 v1+16 align 3
+  v4 = slotaddr s0
+  v5 = add.v2i64 v2, v3
+  v6 = sub.v2i64 v3, v2
+  v7 = xor.v2i64 v3, v2
+  store v5, v4 align 3
+  store v6, v4+16 align 3
+  store v7, v4+32 align 3
+  v8 = load.v2i64 v4+8 align 3
+  v9 = load.v2i64 v4+24 align 3
+  v10 = xor.v2i64 v8, v2
+  v11 = add.v2i64 v9, v3
+  store v10, v0 align 3
+  store v11, v0+16 align 3
+  v12 = load.i64 v0+8 align 3
+  ret v12
+fn @top
+  sig (i64) -> i64
+  slot s0 size 32 align 4
+  slot s1 size 32 align 4
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 5
+  v4 = mul.i64 v0, v3
+  v5 = add.i64 v0, v3
+  v6 = sub.i64 v4, v0
+  store v0, v1 align 3
+  store v4, v1+8 align 3
+  store v5, v1+16 align 3
+  store v6, v1+24 align 3
+  v7 = call.i64 @f(v2, v1) : (ptr, ptr) -> i64
+  v8 = load.i64 v2 align 3
+  v9 = xor.i64 v7, v8
+  ret v9
+)",
+        0,
+        false,
+        4,
+    );
+    let t = text_of(&a, "f");
+    assert(!t.contains("slot") && !t.contains("vinsert") && t.contains("vop.shuffle"), t.as_str());
+    let x: []u64 = [20];
+    let mut e = leval::Eval::new(&b);
+    let r = e.run(b.find_symbol("top"), x);
+    same_result(&b, &a, "top", x, r.value);
+}
+
 // Scalars inserted into every lane of a vector pack (`lir::slp`'s insert seeds): sums of two vectors'
 // lanes, lane by lane, are their vector sum; lanes taken across two vectors are their `shuffle`; secret
 // marks on each lane are one on the vector. No insert is left.

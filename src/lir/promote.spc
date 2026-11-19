@@ -13,12 +13,14 @@
 // lane (of its lane type, at a lane's offset) reads it as `vextract` or sets it as `vinsert`. An integer
 // load that other accesses overlap spans their fields (LLVM SROA's rewrite of a wide access over several
 // partitions): its fields' values combined in their little-endian places, a byte no field holds reading
-// 0. An integer load inside a wider integer field reads its bits there (`part_at`). A store of an integer
+// 0. An integer load inside a wider integer field reads its bits there (`part_at`). A vector load
+// whose lanes are each a field of its lane type or a lane of a vector field of it, across fields' edges,
+// inserts them (a pair of 8-byte words over two vectors' halves). A store of an integer
 // constant over narrower fields, each inside it, writes each its bits of the constant, when its bytes no
 // field holds are 0 (a spanning load reads them as 0): an `Option`'s `None` as one word over its tag and
 // payload. A store of another integer over narrower stores, each inside it, writes each field it holds
 // its bits of the value, when no load reads its bytes no field holds: an `Option`'s `Some` written as its
-// tag extended to a word, over the `None` tag's byte store. A field across its edge keeps the slot in memory. A wide store stays one: its fields would each take a
+// tag extended to a word, over the `None` tag's byte store. Any other access across a field's edge keeps the slot in memory. A wide store stays one: its fields would each take a
 // store where a copy reads them, and the walk forwards its bytes to narrower loads.
 //
 // Before that, a copy between two slots of its size whose source no instruction reads after it and whose
@@ -744,7 +746,7 @@ extend Promoter {
                     off: self.doff[t.a as usize] + (t.c as i32) as i64,
                     size: 0,
                     ty: t.ty,
-                    kind: wide_kind(t.ty),
+                    kind: wide_kind(t.ty) | lanes_kind(t.ty),
                 },
             );
             return;
@@ -992,7 +994,11 @@ extend Promoter {
                             } else {
                                 NONE
                             };
-                            if t.op == O_LOAD && wide_kind(ty) != 0 && self.spannable(s, off, size_of(ty, self.ptr)) {
+                            if t.op == O_LOAD && wide_kind(ty) != 0 && self.spannable(s, off, size_of(ty, self.ptr)) || t.op == O_LOAD && self.lanes_held(
+                                s,
+                                off,
+                                ty,
+                            ) {
                                 self.spanned[i] = true;
                             } else if pf != NONE {
                                 self.fid[i] = pf;
@@ -1222,8 +1228,11 @@ extend Promoter {
                 // A store spans only accesses it holds whole, a narrower one keeping its field; another
                 // integer's, only integer stores (a load inside it reads part of its field instead).
                 let held = (a.w & (W_CSTORE | W_VSTORE)) == 0 || a.off <= c.off && c.off + size_of(c.ty, self.ptr) <= ae;
+                // A vector load spans only accesses across its edges: those inside it are its lanes or its
+                // retyped words (`merge`).
+                let crosses = !is_vec(a.ty) || c.off < a.off || c.off + size_of(c.ty, self.ptr) > ae;
                 let kind_ok = (a.w & W_VSTORE) == 0 || (c.w & (W_CSTORE | W_VSTORE)) != 0;
-                if q != j && !same && held && kind_ok && a.off < c.off + size_of(c.ty, self.ptr) {
+                if q != j && !same && held && crosses && kind_ok && a.off < c.off + size_of(c.ty, self.ptr) {
                     self.tmp[j].w = a.w | W_SPANS;
                     any = true;
                     break;
@@ -1315,6 +1324,23 @@ extend Promoter {
                 int_type(size_of(fl.ty, self.ptr) as u32),
                 self.ptr,
             ) == NO_CONV) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Whether each lane of a vector of type `ty` at byte `off` of slot `s` is a field of its lane type or a
+    // lane of a vector field of it.
+    const fn lanes_held(self: &Self, s: u32, off: i64, ty: u8) bool {
+        if !is_vec(ty) {
+            return false;
+        }
+        let lt = lane_type(ty);
+        let eb = size_of(lt, self.ptr);
+        for q in 0..lanes(ty) {
+            let o = off + q as i64 * eb;
+            if self.field_at(s, o, lt) == NONE && self.lane_at(s, o, lt).0 == NONE {
                 return false;
             }
         }
@@ -1568,13 +1594,18 @@ extend Promoter {
             } else {
                 size_of(t.ty, self.ptr)
             };
+            // A vector load reads the fields its lanes are in, also those across its edges.
             for f2 in self.fat[s as usize]..self.fat[s as usize + 1] {
-                if in_range(self.flds[f2 as usize], off, n, self.ptr) {
-                    if t.op == O_STORE {
-                        self.write(f2, k);
-                    } else {
-                        self.read(f2, k);
-                    }
+                let fl = self.flds[f2 as usize];
+                if t.op == O_STORE && in_range(fl, off, n, self.ptr) {
+                    self.write(f2, k);
+                } else if t.op != O_STORE && (in_range(fl, off, n, self.ptr) || is_vec(t.ty) && overlaps(
+                    fl,
+                    off,
+                    n,
+                    self.ptr,
+                )) {
+                    self.read(f2, k);
                 }
             }
             return;
@@ -1990,6 +2021,28 @@ extend Promoter {
 
     // Spanning load `t` (instruction `i`): its fields' bits, each zero-extended and shifted to its place,
     // combined.
+    // The vector of type `ty` at byte `off` of slot `s` (`lanes_held`) before instruction `i`: each lane
+    // its field or its vector field's lane, inserted in order.
+    fn lanes_value(self: &mut Self, b: &Body, i: u32, s: u32, off: i64, ty: u8) u32 {
+        let lt = lane_type(ty);
+        let eb = size_of(lt, self.ptr);
+        let mut v = self.zero(b, ty);
+        for q in 0..lanes(ty) {
+            let o = off + q as i64 * eb;
+            let f = self.field_at(s, o, lt);
+            let x = if f != NONE {
+                let fv = self.value(b, f);
+                self.convert(b, i, fv, self.flds[f as usize].ty, lt)
+            } else {
+                let (vf, k) = self.lane_at(s, o, lt);
+                let fv = self.value(b, vf);
+                self.push(b, i, Inst { op: O_VEXTRACT, ty: lt, aux: k as u16, a: fv, b: VNONE, c: VNONE })
+            };
+            v = self.push(b, i, Inst { op: O_VINSERT, ty: ty, aux: q as u16, a: v, b: x, c: VNONE });
+        }
+        return v;
+    }
+
     fn rename_span(self: &mut Self, b: &Body, i: u32, t: Inst) {
         let s = self.slot_of(t.a);
         let off = self.doff[t.a as usize] + (t.c as i32) as i64;
@@ -2000,6 +2053,9 @@ extend Promoter {
     // the bits of the fields in them, each zero-extended and shifted to its place, combined; 0 where no
     // field is.
     fn span_value(self: &mut Self, b: &Body, i: u32, s: u32, off: i64, ty: u8) u32 {
+        if is_vec(ty) {
+            return self.lanes_value(b, i, s, off, ty);
+        }
         let t = Inst { op: O_LOAD, ty: ty, aux: 0, a: VNONE, b: VNONE, c: 0 };
         let n = size_of(t.ty, self.ptr);
         let mut acc = NONE;
@@ -2308,6 +2364,17 @@ extend Promoter {
 // bytes; else 0.
 const fn wide_kind(ty: u8) u8 {
     return ast::pick(is_int(ty) && ty != T_PTR && ty != T_I128, W_LOAD, 0);
+}
+
+// W_LOAD for a load of vector type `ty`, which may take its lanes from fields across their edges
+// (`lanes_held`); else 0.
+const fn lanes_kind(ty: u8) u8 {
+    return ast::pick(is_vec(ty), W_LOAD, 0);
+}
+
+// Whether field `f` and bytes `off` to `off + n` overlap.
+const fn overlaps(f: Fld, off: i64, n: i64, ptr: u32) bool {
+    return f.off < off + n && off < f.off + size_of(f.ty, ptr);
 }
 
 // `conv_op`'s answer when no conversion exists.
