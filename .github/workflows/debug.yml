@@ -112,15 +112,19 @@ jobs:
   # agree on it within the targets' differences; time and cycles follow each runner's machine.
   bench:
     needs: compile
-    name: self-compile bench (${{ matrix.target }})
+    name: self-compile bench (${{ matrix.target }} ${{ matrix.run }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: macos }
-          - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
-          - { os: windows-latest, target: windows }
+          - { os: macos-latest, target: macos, run: 1 }
+          - { os: ubuntu-latest, target: linux, run: 1 }
+          - { os: ubuntu-latest, target: linux, run: 2 }
+          - { os: ubuntu-latest, target: linux, run: 3 }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, run: 1 }
+          - { os: windows-latest, target: windows, run: 1 }
+          - { os: windows-latest, target: windows, run: 2 }
+          - { os: windows-latest, target: windows, run: 3 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -292,14 +296,22 @@ jobs:
   simd-timing:
     needs: compile
     if: ${{ always() }}
-    name: simd timing (${{ matrix.target }})
+    name: simd timing (${{ matrix.target }} ${{ matrix.run }})
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-latest, target: linux }
-          - { os: ubuntu-26.04-arm, target: linux_arm64 }
-          - { os: windows-latest, target: windows }
+          - { os: ubuntu-latest, target: linux, run: 1 }
+          - { os: ubuntu-latest, target: linux, run: 2 }
+          - { os: ubuntu-latest, target: linux, run: 3 }
+          - { os: ubuntu-latest, target: linux, run: 4 }
+          - { os: ubuntu-latest, target: linux, run: 5 }
+          - { os: ubuntu-26.04-arm, target: linux_arm64, run: 1 }
+          - { os: windows-latest, target: windows, run: 1 }
+          - { os: windows-latest, target: windows, run: 2 }
+          - { os: windows-latest, target: windows, run: 3 }
+          - { os: windows-latest, target: windows, run: 4 }
+          - { os: windows-latest, target: windows, run: 5 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -392,7 +404,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         if: ${{ always() }}
         with:
-          name: simd-timing-${{ matrix.target }}
+          name: simd-timing-${{ matrix.target }}-${{ matrix.run }}
           path: timing/*.txt
           if-no-files-found: error
           retention-days: 3
