@@ -243,6 +243,27 @@ fn vector_functions_choose_their_copy_at_run_time() {
     assert(!man.ok() && man.out_has("simd dispatch: unknown target CPU 'x86-64-v9'"), "a bad manifest level");
 }
 
+// A function without vector values that calls a small vector function in a loop has run-time copies too:
+// inlined, the callee's level check would run at each step, where the caller's runs once at its entry.
+// Called outside a loop, the callee keeps its own check and the caller has no copy.
+@test
+fn loops_over_vector_helpers_choose_their_copy_at_run_time() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        "import std::simd;\n\nfn step(c: []mut f32, a: []f32, i: usize) {\n    simd::store(c, i, simd::load::<f32, 8>(a, i).fma(simd::load::<f32, 8>(a, i), simd::load::<f32, 8>(c, i)));\n}\n\n@noinline\nfn outer(c: []mut f32, a: []f32) {\n    let mut i: usize = 0;\n    while i + 8 <= a.len() {\n        step(c, a, i);\n        i += 8;\n    }\n}\n\n@noinline\nfn once(c: []mut f32, a: []f32) {\n    step(c, a, 0);\n}\n\nfn main(args: Vector<str>) i32 {\n    let a: [f32; 8] = [1.0; 8];\n    let mut c: [f32; 8] = [0.0; 8];\n    outer(c, a);\n    once(c, a);\n    return args.len() as i32 - 1;\n}\n",
+    );
+    let root = p.dir();
+    let _ = p.run_raw(
+        format("build \"{}/main.spc\" --emit-c --profile=release --arch=x86_64 --target=linux", root).as_str(),
+    );
+    let raw = format("{}/build/release/raw", root);
+    let mut t = cli::read_text(format("{}/main.c", raw).as_str());
+    t.push_str(cli::read_text(format("{}/main__inst.c", raw).as_str()).as_str());
+    assert(t.contains("main__outer__fs"), "the loop's caller has a copy");
+    assert(!t.contains("main__once__fs"), "a single call keeps the callee's check");
+}
+
 // A native x86_64 build makes the same choice: the function with vector code reads the level the
 // registry's constructor sets (`__sc_simd_lv`) and, at a level the CPU has, calls its copy; `off` builds
 // neither (the build's LIR, `SC_LIR_TEXT`).

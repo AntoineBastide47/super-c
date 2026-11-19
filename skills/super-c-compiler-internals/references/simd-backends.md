@@ -60,7 +60,11 @@ value of a closure bound. The Core IR inliner never splices a callee whose featu
 set lacks (`inline.spc`, reason `IJ_NOT_FN`).
 
 Feature clones: `InlineStore::build` copies every kept function body that holds a vector and no
-closure (`vec_ix`, `vec_bodies`, `vec_body`). While a body emits under a set that holds a backend
+closure (`vec_ix`, `vec_bodies`, `vec_body`), then, in up to `MAX_DEPTH` passes, every one that calls
+such a body by name, without type arguments, from a block in a cycle of its blocks (`in_cycle`) when
+the callee is within `VEC_SCALE` times the callee limits (`size_within`, `loops_into_vector`): the
+caller then checks the level once at its entry, and `lir::inline` strips the check of the callee it
+inlines, which would otherwise run at each step. While a body emits under a set that holds a backend
 entry the build's closure does not (`CEmit.fs`: a `@target_feature` function's, or a clone's; SME
 alone holds none), `CEmit::clone_set` gives a call of such a function that states no features that
 set: `callee_sym_i` spells `<symbol>__fs<32 hex

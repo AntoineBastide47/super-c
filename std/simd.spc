@@ -903,22 +903,22 @@ pub unsafe const fn interleave_rows4(dst: *mut u32, src: *const u8, stride: usiz
         }
         return;
     }
-    // The rows past `rows` read as zero vectors (`z`): their pointers are never read.
-    let z = Simd::<u8, 16>::splat(0);
+    // The rows past `rows` are never read.
     let r = [src, src + stride, src + 2 * stride, src + 3 * stride];
     let full = cols & ~15usize;
     let mut j: usize = 0;
     while j < full {
-        interleave_rows4_16(dst + j, r, j, rows, z);
+        interleave_rows4_16(dst + j, r, j, rows);
         j += 16;
     }
     if full < cols {
-        interleave_rows4_16(dst + cols - 16, r, cols - 16, rows, z);
+        interleave_rows4_16(dst + cols - 16, r, cols - 16, rows);
     }
 }
 
-// `interleave_rows4` of the 16 columns from `at` of rows `r`, `z` for the rows past `rows`.
-unsafe const fn interleave_rows4_16(dst: *mut u32, r: [*const u8; 4], at: usize, rows: usize, z: Simd<u8, 16>) {
+// `interleave_rows4` of the 16 columns from `at` of rows `r`, zero for the rows past `rows`.
+unsafe const fn interleave_rows4_16(dst: *mut u32, r: [*const u8; 4], at: usize, rows: usize) {
+    let z = Simd::<u8, 16>::splat(0);
     let x0 = load_unaligned::<u8, 16>(r[0] + at);
     let x1 = if rows > 1 {
         load_unaligned::<u8, 16>(r[1] + at)

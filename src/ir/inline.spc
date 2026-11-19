@@ -102,10 +102,15 @@ const VEC_SCALE: usize = 4;
 /// and the contract checks added (`contract_blocks`, `contract_stmts`, `contract_locals`) do not
 /// count.
 pub(package) fn callee_size_ok(b: &ir::CoreBody, pkg: *const loader::Package) bool {
+    return size_within(b, size_scale(b, pkg));
+}
+
+// Whether `b`'s statements, blocks and locals are within `k` times the callee limits, the counted-loop
+// lowering's and the contract checks' aside (`callee_size_ok`).
+const fn size_within(b: &ir::CoreBody, k: usize) bool {
     let ns = b.statements.len() - 2 * b.chunks as usize - b.contract_stmts as usize;
     let nb = b.blocks.len() - b.count_blocks as usize - b.contract_blocks as usize;
     let nl = b.locals.len() - 2 * b.chunks as usize - b.contract_locals as usize;
-    let k = size_scale(b, pkg);
     return ns <= MAX_CALLEE_STMTS * k && nb <= MAX_CALLEE_BLOCKS * k && nl <= MAX_CALLEE_LOCALS * k;
 }
 
@@ -117,6 +122,39 @@ pub(package) fn holds_vector(b: &ir::CoreBody, pkg: *const loader::Package) bool
         let t = b.locals.at(i).ty;
         if t != TYPE_NONE && a.type_at(t).kind == TypeKind::TYPE_SIMD {
             return true;
+        }
+    }
+    return false;
+}
+
+// Whether block `k` of `b` reaches itself through the successors of the blocks' terminators (switch targets
+// and the primary successor). `seen` and `work` are scratch; each block is visited at most once.
+fn in_cycle(b: &ir::CoreBody, k: u32, seen: &mut Vector<bool>, work: &mut Vector<u32>) bool {
+    seen.truncate(0);
+    seen.resize_default(b.blocks.len());
+    work.truncate(0);
+    work.push(k);
+    let mut first = true;
+    while work.len() != 0 {
+        let x = work.pop().unwrap();
+        if x == k && !first {
+            return true;
+        }
+        if !first {
+            if seen[x as usize] {
+                continue;
+            }
+            seen[x as usize] = true;
+        }
+        first = false;
+        let t = &b.blocks.at(x as usize).term;
+        if t.kind == ir::TM_SWITCH {
+            for j in 0..t.sw_len {
+                work.push((b.switch_pool[(t.sw_start + j) as usize] & 0xFFFFFFFFu64) as u32);
+            }
+        }
+        if t.kind == ir::TM_GOTO || t.kind == ir::TM_CALL || t.kind == ir::TM_DROP || t.kind == ir::TM_ASSERT || t.kind == ir::TM_SWITCH {
+            work.push(t.t0);
         }
     }
     return false;
@@ -1359,6 +1397,56 @@ extend InlineStore {
             }
             self.keep_ix.insert(key, r);
         }
+        // A body that calls, inside a loop, a vector body small enough to inline is vector code too: inlined
+        // there, the callee's check of the CPU level would run at every call, where the caller's own runs
+        // once at its entry (`lir::inline` strips the callee's) and its run-time copies run the callee's.
+        // The callers of the bodies a pass adds, at most MAX_DEPTH times.
+        if !vec_prog {
+            return;
+        }
+        let mut seen = Vector::<bool>::new();
+        let mut work = Vector::<u32>::new();
+        for _ in 0..MAX_DEPTH {
+            let mut added = false;
+            for i in 0..keep.kept.len() {
+                let lw = keep.kept.at(i);
+                let d = lw.body.owner;
+                let key = callee_key(d);
+                if Ast::in_body(d.node) || lw.closures.len() != 0 || self.vec_ix.contains_key(&key) || !self.loops_into_vector(
+                    &lw.body,
+                    &mut seen,
+                    &mut work,
+                ) {
+                    continue;
+                }
+                self.vec_ix.insert(key, self.vec_bodies.len() as u64);
+                self.vec_bodies.push(ir::CoreBody::compact_from(&lw.body));
+                added = true;
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    // Whether a block of `b` in a cycle of its blocks calls a vector body (`vec_body`) by name, without type
+    // arguments, within the size gate of vector code (`VEC_SCALE` times the callee limits, `size_within`).
+    // `seen` and `work` are scratch.
+    fn loops_into_vector(self: &Self, b: &ir::CoreBody, seen: &mut Vector<bool>, work: &mut Vector<u32>) bool {
+        for k in 0..b.blocks.len() {
+            let t = &b.blocks.at(k).term;
+            if t.kind != ir::TM_CALL || t.callee.node == NODE_NONE || t.targs_len != 0 {
+                continue;
+            }
+            let vb = self.vec_body(t.callee);
+            if vb == null || !size_within(unsafe &*vb, VEC_SCALE) {
+                continue;
+            }
+            if in_cycle(b, k as u32, seen, work) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // The body-level checks on the env-free lowering of `d` (in extend block `ext`, or NODE_NONE)
