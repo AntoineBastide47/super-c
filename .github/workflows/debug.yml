@@ -119,12 +119,8 @@ jobs:
         include:
           - { os: macos-latest, target: macos, run: 1 }
           - { os: ubuntu-latest, target: linux, run: 1 }
-          - { os: ubuntu-latest, target: linux, run: 2 }
-          - { os: ubuntu-latest, target: linux, run: 3 }
           - { os: ubuntu-26.04-arm, target: linux_arm64, run: 1 }
           - { os: windows-latest, target: windows, run: 1 }
-          - { os: windows-latest, target: windows, run: 2 }
-          - { os: windows-latest, target: windows, run: 3 }
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -147,20 +143,7 @@ jobs:
           bin="super-c${BINEXT:-}"
           chmod +x "./$bin"
           { grep -m1 'model name' /proc/cpuinfo || sysctl -n machdep.cpu.brand_string || true; } 2>/dev/null
-          echo "== after (1)"
-          SC_NO_CACHE=1 SC_NO_TU_CACHE=1 "./$bin" bench --filter=self_compile
-          if [ "${{ matrix.target }}" = linux ] || [ "${{ matrix.target }}" = windows ]; then
-            mkdir -p prevw
-            git fetch --depth 1 origin 93bd2d00840fd346dea614211f795621730a40d4
-            git archive FETCH_HEAD | tar -x -C prevw
-            (cd prevw && SC_STD_DIR="$PWD/std" "../$bin" build --bootstrap-tags -fno-prove -o "super-c-prev${BINEXT:-}")
-            for k in 1 2; do
-              echo "== before ($k)"
-              SC_NO_CACHE=1 SC_NO_TU_CACHE=1 SC_STD_DIR="$PWD/std" "prevw/super-c-prev${BINEXT:-}" bench --filter=self_compile
-              echo "== after ($((k + 1)))"
-              SC_NO_CACHE=1 SC_NO_TU_CACHE=1 "./$bin" bench --filter=self_compile
-            done
-          fi
+          "./$bin" bench --filter=self_compile
 
   # The compiler cross-built to wasm32-wasip1, with the native compiler that built it.
   wasm-compile:

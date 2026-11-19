@@ -11916,11 +11916,6 @@ extend Gen {
         if n < all {
             self.c.alu_ri(x::AND, 4, rd, ((1u32 << n) - 1) as i32);
         }
-        // The move wrote the 32-bit register: no bit above the lanes' is set, but after 8 packed 2-byte
-        // lanes, whose bits bits 8 to 15 repeat.
-        if eb != 2 || n < all {
-            self.cr.va.index_mut(i as usize).clean = true;
-        }
     }
 
     // Lane choice `ops[1]` where bitmask `ops[0]` has the lane's bit, else `ops[2]` (vectors in xmm
@@ -12449,8 +12444,6 @@ extend Gen {
         } else {
             self.c.vex_rr(ast::pick(eb == 8, 0x66u32, 0u32), 1, 0x50, false, true, rd, 0, m);
         }
-        // The move wrote the 32-bit register: no bit above the lanes' is set.
-        self.cr.va.index_mut(i as usize).clean = true;
     }
 
     // Lane select `t` into vector `i` of difference `d` (`x - y`) and the sum `x + y` in the even and the odd
