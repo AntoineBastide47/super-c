@@ -317,7 +317,8 @@ build's does not, a call of a function with vector code that states no features 
 compiled with the same set (`<symbol>__fs<hex>`,
 in the callee module's instance file), whose calls do the same.
 
-On x86_64 each function with vector code and no features of its own also gets a copy per level of
+On x86_64 each function with vector code and no features of its own (one that holds a vector value, or
+calls a small vector function inside a loop) also gets a copy per level of
 `--simd-dispatch=L` (build.toml `simd-dispatch`; a comma list of `x86-64-v2` .. `x86-64-v4`, default
 `x86-64-v3` in a profile at opt-level 2 or more, `off` at 0 or 1 (`debug`, `test`: the copies make
 the compile of vector code longer) and in a script build without `--profile`;
