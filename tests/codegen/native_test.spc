@@ -24,8 +24,9 @@ import std::cpu::detect;
 // optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
 // multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); loops at 16-byte
 // boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`); arm64's
-// FEAT_CSSC (`Cpu.cssc`); x86-64's BMI1, BMI2 and MOVBE together (`Cpu.bmi1`, `Cpu.bmi2`, `Cpu.movbe`); and
-// the dot products of bytes and of signed 2-byte lanes (`Cpu.vec_dot`).
+// FEAT_CSSC (`Cpu.cssc`); x86-64's BMI1, BMI2 and MOVBE together (`Cpu.bmi1`, `Cpu.bmi2`, `Cpu.movbe`);
+// the dot products of bytes and of signed 2-byte lanes (`Cpu.vec_dot`); and arm64's SVE predicates
+// (`Cpu.vpred`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -47,6 +48,7 @@ const LSE_RT: u32 = 131072;
 const DIT: u32 = 262144;
 const CSSC_RT: u32 = 524288;
 const V3_RT: u32 = 1048576;
+const VPRED: u32 = 2097152;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -89,6 +91,25 @@ fn run_popcnt(text: str, driver: str) i32 {
 // `run_native` with SSE4.1 on an x86-64 host, as `run_popcnt`.
 fn run_sse41(text: str, driver: str) i32 {
     return run_x64_feature(text, driver, "sse4.1", SSE41);
+}
+
+// `run_native` with SVE predicates (`Cpu.vpred`) on an arm64 Linux host: the driver's `main` returns 0 first
+// on a processor without SVE (`getauxval(AT_HWCAP)`'s HWCAP_SVE). 0 on another host, which has no SVE
+// outside streaming mode (macOS) or no runner for it.
+fn run_sve(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("aarch64", true) || tgt::host_os() != tgt::axis_index("linux", false) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "#include <sys/auxv.h>\n{}{}  if (!(getauxval(AT_HWCAP) & (1UL << 22))) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, VPRED);
 }
 
 // `run_native` with package option `opt` on an x86-64 host: the driver's `main` returns 0 first on a
@@ -392,6 +413,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.bmi2 = p.cpu.bmi1;
     p.cpu.movbe = p.cpu.bmi1;
     p.cpu.relaxed = (opts & RELAXED) != 0;
+    p.cpu.vpred = (opts & VPRED) != 0;
     p.cpu.vec_dot = if (opts & DOT) != 0 {
         0x301
     } else {
@@ -22955,6 +22977,68 @@ int main(void) {
 // per interleave and one per deinterleave). The C driver checks the lanes on x86-64, and those of an AVX2
 // deinterleave of one vector with itself, whose shifts read the second operand before the result takes
 // the first's register.
+// Masked loads and stores through a pointer whose mask is the bits of a lane comparison run through SVE
+// predicates (`lv::FOLD_PRED`): PTRUE, CMPNE of the comparison's lanes, LD1 or ST1. Each vector ends past
+// its last active lane in a page the driver protects, which an access of the whole vector would fault on;
+// the inactive lanes of a load are 0 (`head4`) or the fallback's (`keep16`, by BIF), a store leaves the
+// memory under them (`put2`).
+@test
+fn masked_accesses_run_through_sve_predicates() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @head4 fn global
+sym @keep16 fn global
+sym @put2 fn global
+fn @head4
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = trunc.i32 v2
+  v4 = splat.v4i32 v3
+  v5 = wconst.v4i32 0x100000000, 0x300000002
+  v6 = vcmp.ult.v4i32 v5, v4
+  v7 = wconst.v4i32 0x200000001, 0x800000004
+  v8 = and.v4i32 v6, v7
+  v9 = vop.reduce_add.i32 (v8)
+  v10 = trunc.i8 v9
+  v11 = wconst.v4i32 0x0, 0x0
+  v12 = vop.load_masked_ptr.v4i32 (v0, v10, v11)
+  v13 = add.v4i32 v12, v12
+  store v1, v13 align 4
+  ret
+fn @keep16
+  sig (ptr, ptr, i8) -> void
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = splat.v16i8 v2
+  v4 = wconst.v16i8 0x0706050403020100, 0x0f0e0d0c0b0a0908
+  v5 = vcmp.ult.v16i8 v4, v3
+  v6 = wconst.v16i8 0x8040201008040201, 0x8040201008040201
+  v7 = and.v16i8 v5, v6
+  v8 = vop.reduce_add.i16 (v7)
+  v9 = splat.v16i8 v2
+  v10 = vop.load_masked_ptr.v16i8 (v0, v8, v9)
+  store v1, v10 align 4
+  ret
+fn @put2
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = splat.v2i64 v1
+  v4 = wconst.v2i64 0x0, 0x1
+  v5 = vcmp.ult.v2i64 v4, v3
+  v6 = wconst.v2i64 0x1, 0x2
+  v7 = and.v2i64 v5, v6
+  v8 = vop.reduce_add.i64 (v7)
+  v9 = trunc.i8 v8
+  v10 = splat.v2i64 v2
+  vop.store_masked_ptr (v0, v9, v10)
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\n#include <sys/mman.h>\n#include <unistd.h>\nvoid head4(const int32_t *, int32_t *, int64_t);\nvoid keep16(const uint8_t *, uint8_t *, uint8_t);\nvoid put2(int64_t *, int64_t, int64_t);\nint main(void) {\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 4; r++) {\n    int32_t *a = (int32_t *)end - r, out[4];\n    for (int k = 0; k < r; k++) a[k] = 10 * k + 1;\n    head4(a, out, r);\n    for (int k = 0; k < 4; k++) if (out[k] != (k < r ? 2 * (10 * k + 1) : 0)) return 2;\n  }\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r, out[16];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(100 + k);\n    keep16(a, out, (uint8_t)r);\n    for (int k = 0; k < 16; k++) if (out[k] != (k < r ? 100 + k : r)) return 3;\n  }\n  for (int r = 0; r < 3; r++) {\n    int64_t *a = (int64_t *)end - 2;\n    a[0] = a[1] = -1;\n    put2((int64_t *)end - r, r, 77);\n    for (int k = 0; k < 2; k++) if (a[k] != (k >= 2 - r ? 77 : -1)) return 4;\n  }\n  return 0;\n}\n";
+    assert_eq(run_sve(lir, drv), 0);
+    assert_eq(run_native(lir, drv), 0);
+}
+
 @test
 fn interleaves_write_over_their_dying_first_operand() {
     let lir = M"(lir ptr 8

@@ -86,6 +86,10 @@ pub(package) const FOLD_MOVBE: u64 = 288230376151711744;
 /// A load that de-interleaving shuffles of a group of three alone read (`Live::ld3_field`): each shuffle
 /// loads the group itself (arm64's `ld3`).
 pub(package) const FOLD_LD3: u64 = 576460752303423488;
+/// The bits of a lane mask that masked loads and stores through a pointer alone read (`pred_lanes`), with
+/// the sum and the AND that make them: each access sets a predicate from the lane mask itself (arm64 SVE's
+/// CMPNE).
+pub(package) const FOLD_PRED: u64 = 1152921504606846976;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
@@ -1611,6 +1615,28 @@ extend Live {
                 self.pfold[masks[k] as usize] = true;
             }
             k = e;
+        }
+        if (self.fold_ops & FOLD_PRED) != 0 {
+            let mut preds = Vector::<Value>::new();
+            self.scan_ops([O_VOP]);
+            for q in 0..self.scan.len() {
+                let t = b.insts[self.scan[q] as usize];
+                if pred_lanes(b, t) != VNONE {
+                    preds.push(b.pool[(t.a + 1) as usize]);
+                }
+            }
+            preds.sort();
+            let mut k: usize = 0;
+            while k < preds.len() {
+                let mut e = k + 1;
+                while e < preds.len() && preds[e] == preds[k] {
+                    e += 1;
+                }
+                if (e - k) as u32 == self.count[preds[k] as usize] && self.pred_chain(b, preds[k], false) {
+                    let _ = self.pred_chain(b, preds[k], true);
+                }
+                k = e;
+            }
         }
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
@@ -3316,6 +3342,31 @@ extend Live {
         return (self.fold_ops & f) != 0 && (lane_mask(b, v, MASK_DEPTH) || (self.fold_ops & FOLD_ANY_BITS) != 0 && is_int(
             lane_type(b.type_of(v)),
         ));
+    }
+
+    // Whether the instructions that make mask bits `m` from a lane mask (`pred_lanes`: extensions and
+    // truncations, the lanes' sum, the AND with their bits) have no other reader than the next of them, and
+    // with `mark`, fold them (`FOLD_PRED`), the AND's constant too when it alone reads it.
+    const fn pred_chain(self: &mut Self, b: &Body, m: Value, mark: bool) bool {
+        let mut x = m;
+        // At most 6 extensions and truncations (`pred_lanes`), the sum, the AND.
+        for _ in 0..8 {
+            if x != m && self.count[x as usize] != 1 {
+                return false;
+            }
+            if mark {
+                self.pfold[x as usize] = true;
+            }
+            let t = b.insts[x as usize];
+            if t.op == O_AND {
+                if mark && is_inst(t.b) && self.count[t.b as usize] == 1 {
+                    self.pfold[t.b as usize] = true;
+                }
+                return true;
+            }
+            x = ast::pick(t.op == O_VOP, b.pool[t.a as usize], t.a);
+        }
+        return false;
     }
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
@@ -7582,8 +7633,45 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
     return true;
 }
 
-// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
-const fn zero_vec(b: &Body, v: Value) bool {
+/// The lane mask (each lane all ones or 0, `lane_mask`) whose bits are the mask of masked load or store `t`
+/// through a pointer (`SIMD_LOAD_MASKED_PTR`, `SIMD_STORE_MASKED_PTR`) of a vector of at most 16 bytes, of the
+/// vector's lanes: the mask is the lane mask's `bits_mask`, through extensions and truncations that keep its
+/// lanes. VNONE for another access or mask.
+pub(package) const fn pred_lanes(b: &Body, t: Inst) Value {
+    let code = (t.aux & VOP_CODE) as u32;
+    let ld = code == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32;
+    if t.op != O_VOP || t.b != 3 || !ld && code != core::OP_SIMD + core::SIMD_STORE_MASKED_PTR as u32 {
+        return VNONE;
+    }
+    let vt = if ld {
+        t.ty
+    } else {
+        b.type_of(b.pool[(t.a + 2) as usize])
+    };
+    if !is_vec(vt) || type_bytes(vt, 8) > 16 {
+        return VNONE;
+    }
+    let mut x = b.pool[(t.a + 1) as usize];
+    let mut kept: u32 = 64;
+    // Each step takes one extension or truncation: at most 6 (1 to 8 bytes and back).
+    for _ in 0..6 {
+        if is_inst(x) && (b.insts[x as usize].op == O_ZEXT || b.insts[x as usize].op == O_TRUNC) {
+            if b.insts[x as usize].op == O_TRUNC {
+                kept = kept.min(type_bits(b.insts[x as usize].ty, 8));
+            }
+            x = b.insts[x as usize].a;
+        }
+    }
+    let v = bits_mask(b, x);
+    if v == VNONE || kept < lanes(vt) {
+        return VNONE;
+    }
+    let mt = b.type_of(v);
+    return ast::pick(lanes(mt) == lanes(vt) && type_bytes(lane_type(mt), 8) == type_bytes(lane_type(vt), 8), v, VNONE);
+}
+
+/// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
+pub(package) const fn zero_vec(b: &Body, v: Value) bool {
     if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
         return false;
     }

@@ -483,6 +483,73 @@ pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     );
 }
 
+/// The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
+/// mask a `reduce_add` of its AND with the lanes' bits reads. VNONE when it is none.
+pub(package) const fn bits_mask(b: &Body, v: Value) Value {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return VNONE;
+    }
+    let t = b.insts[v as usize];
+    if t.op != O_VOP || t.b != 1 || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
+        return VNONE;
+    }
+    let a = b.pool[t.a as usize];
+    if (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_AND {
+        return VNONE;
+    }
+    let at = b.insts[a as usize];
+    let wt = at.ty;
+    let n = lanes(wt);
+    let w = type_bytes(lane_type(wt), 8);
+    let mut words: [u64; 8] = [0; 8];
+    if n * w % 8 != 0 || !vec_words(b, at.b, wt, &mut words) || !lane_mask(b, at.a, 4) {
+        return VNONE;
+    }
+    let per = 8 / w;
+    for qw in 0..n * w / 8 {
+        let mut word: u64 = 0;
+        for l in 0..per {
+            word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
+        }
+        if words[qw as usize] != word {
+            return VNONE;
+        }
+    }
+    return at.a;
+}
+
+/// The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
+/// `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
+pub(package) const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
+    if (v & (VPARAM | VFLAG)) != 0 {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    let nw = type_bytes(vt, 8) / 8;
+    if t.op == O_WCONST && t.b == nw {
+        for q in 0..nw {
+            out[q as usize] = b.words[(t.a + q) as usize];
+        }
+        return true;
+    }
+    if t.op != O_SPLAT {
+        return false;
+    }
+    let c = int_bits(b, t.a);
+    if c.is_none() {
+        return false;
+    }
+    let bits = 8 * type_bytes(lane_type(vt), 8);
+    let mut w: u64 = 0;
+    for l in 0..64 / bits {
+        w |= trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
+    }
+    for q in 0..nw {
+        out[q as usize] = w;
+    }
+    return true;
+}
+
 /// The LIR condition of SIMD comparison `c` (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`): of floats, else signed or not.
 pub(package) const fn simd_cond(c: u8, sg: bool, fl: bool) u16 {
     let k = (c - core::SIMD_CMP_EQ) as usize;
@@ -2106,6 +2173,7 @@ pub(package) const CPU_BMI1: u32 = 1024;
 pub(package) const CPU_BMI2: u32 = 2048;
 pub(package) const CPU_MOVBE: u32 = 4096;
 pub(package) const CPU_RELAXED: u32 = 8192;
+pub(package) const CPU_VPRED: u32 = 16384;
 /// The flags a function's run-time copy may add (`Package.copy_flags`): scalar instructions, which change
 /// no vector width or layout.
 pub(package) const CPU_SCALAR: u32 = CPU_POPCNT | CPU_LZCNT | CPU_LSE | CPU_RCPC | CPU_FMA | CPU_CSSC | CPU_BMI1 | CPU_BMI2 | CPU_MOVBE;
@@ -2183,6 +2251,11 @@ pub(package) struct Cpu {
     /// results are fully determined where it uses them (`relaxed_laneselect` of a lane mask,
     /// `relaxed_swizzle` of indices below 16).
     pub(package) relaxed: bool,
+    /// The processor governs vector loads and stores by a predicate a lane comparison sets (arm64 SVE:
+    /// CMP into a predicate register, then LD1 or ST1, on the low 16 bytes of its registers): the loop
+    /// vectorizer runs a vector loop's last iterations as one masked vector iteration (`lir::loops`
+    /// `masked_tail`).
+    pub(package) vpred: bool,
 }
 
 extend Cpu as Copy {}
@@ -2212,12 +2285,13 @@ extend Cpu {
             bmi2: false,
             movbe: false,
             relaxed: false,
+            vpred: false,
         };
     }
 
     /// The facts with a flag each as one word (`CPU_*`), for the text form.
     pub(package) const fn flags(self: &Self) u32 {
-        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA | self.cssc as u32 * CPU_CSSC | self.bmi1 as u32 * CPU_BMI1 | self.bmi2 as u32 * CPU_BMI2 | self.movbe as u32 * CPU_MOVBE | self.relaxed as u32 * CPU_RELAXED;
+        return self.vround as u32 * CPU_VROUND | self.popcnt as u32 * CPU_POPCNT | self.sse41 as u32 * CPU_SSE41 | self.vtbl as u32 * CPU_VTBL | self.addsub as u32 * CPU_ADDSUB | self.lzcnt as u32 * CPU_LZCNT | self.lse as u32 * CPU_LSE | self.rcpc as u32 * CPU_RCPC | self.fma as u32 * CPU_FMA | self.cssc as u32 * CPU_CSSC | self.bmi1 as u32 * CPU_BMI1 | self.bmi2 as u32 * CPU_BMI2 | self.movbe as u32 * CPU_MOVBE | self.relaxed as u32 * CPU_RELAXED | self.vpred as u32 * CPU_VPRED;
     }
 
     /// A body's own facts from the words of the text form: the register bytes, `vec_bits`, `vec_perm3`,
@@ -2245,6 +2319,7 @@ extend Cpu {
             bmi2: (f & CPU_BMI2) != 0,
             movbe: (f & CPU_MOVBE) != 0,
             relaxed: (f & CPU_RELAXED) != 0,
+            vpred: (f & CPU_VPRED) != 0,
         };
     }
 
@@ -2268,7 +2343,7 @@ extend Cpu {
     pub(package) const fn within(self: &Self, o: Cpu) bool {
         let bits = (self.vec_bits & ~o.vec_bits) == 0 && (self.vec_mulw & ~o.vec_mulw) == 0 && (self.vec_dot & ~o.vec_dot) == 0;
         let perm = self.vec_perm3 == 0 || self.vec_perm3 == o.vec_perm3;
-        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma) && (!self.cssc || o.cssc) && (!self.bmi1 || o.bmi1) && (!self.bmi2 || o.bmi2) && (!self.movbe || o.movbe) && (!self.relaxed || o.relaxed);
+        let flags = (!self.vround || o.vround) && (!self.popcnt || o.popcnt) && (!self.sse41 || o.sse41) && (!self.vtbl || o.vtbl) && (!self.addsub || o.addsub) && (!self.lzcnt || o.lzcnt) && (!self.lse || o.lse) && (!self.rcpc || o.rcpc) && (!self.fma || o.fma) && (!self.cssc || o.cssc) && (!self.bmi1 || o.bmi1) && (!self.bmi2 || o.bmi2) && (!self.movbe || o.movbe) && (!self.relaxed || o.relaxed) && (!self.vpred || o.vpred);
         return self.vector <= o.vector && bits && perm && flags && self.half <= o.half;
     }
 }
@@ -2605,6 +2680,7 @@ extend Package {
                 bmi2: false,
                 movbe: false,
                 relaxed: false,
+                vpred: false,
             },
             // Small: a parallel lowering makes a package per shard, and the tables grow geometrically.
             names: nm::Names::with_capacity(1 << 8, 1 << 4),

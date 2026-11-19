@@ -71,6 +71,7 @@ extend Q {
 pub(package) const QWX: u8 = 3;
 pub(package) const QSD: u8 = 3; // Q::FT: s and d
 pub(package) const QALL: u8 = 0x0F; // Q::Z: every element
+pub(package) const QZF: u8 = 0x0E; // Q::Z: h s d (the float elements)
 pub(package) const QV_NO1D: u8 = 0xBF; // Q::V: every arrangement but 1d
 pub(package) const QV_NOD: u8 = 0x3F; // Q::V: no 64-bit lanes
 pub(package) const QVF_ALL: u8 = 0x0B; // Q::VF: 2s 4s 2d
@@ -225,6 +226,7 @@ extend K {
     pub(package) const VLX: u8 = 139; // vlx2 or vlx4 at 13
     pub(package) const SMSM: u8 = 140; // `sm`, no bits
     pub(package) const SMZA: u8 = 141; // `za`, no bits
+    pub(package) const SIMM5: u8 = 142; // at 16, signed
     pub(package) const ELB: u8 = 143; // Vn.b[i]: Rn at 5, the index in imm5 at 16: (reg, index)
     pub(package) const ELH: u8 = 144;
     pub(package) const ELS: u8 = 145;
@@ -326,7 +328,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 701] = [
+pub(package) const ROWS: [Row; 715] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -1028,6 +1030,21 @@ pub(package) const ROWS: [Row; 701] = [
     r("st1b", 0xE4004000, Q::ZE, 1, k3(K::ZL1, K::PG, K::MSVR)),
     r("st1w", 0xE5404000, Q::ZE, 4, k3(K::ZL1, K::PG, K::MSVR)),
     r("st1d", 0xE5E04000, Q::ZE, 8, k3(K::ZL1, K::PG, K::MSVR)),
+    r("ld1h", 0xA4A0A000, Q::ZE, 2, k3(K::ZL1, K::PGZ, K::MSV)),
+    r("st1h", 0xE4A0E000, Q::ZE, 2, k3(K::ZL1, K::PG, K::MSV)),
+    // SVE comparisons into a predicate: of two vectors, of a vector and an immediate.
+    r("cmphs", 0x24000000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmphi", 0x24000010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpge", 0x24008000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpgt", 0x24008010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpeq", 0x2400A000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpne", 0x2400A010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("cmpeq", 0x25008000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
+    r("cmpne", 0x25008010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
+    r("fcmge", 0x65004000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmgt", 0x65004010, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmeq", 0x65006000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
+    r("fcmne", 0x65006010, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
     // SME2 multi-vector loads and stores (a predicate-as-counter governs).
     r("ld1b", 0xA0400000, Q::ZE, 1, k3(K::ZL2, K::PNGZ, K::MSV)),
     r("ld1b", 0xA0408000, Q::ZE, 1, k3(K::ZL4, K::PNGZ, K::MSV)),
@@ -1273,6 +1290,7 @@ const fn kmask(k: u8, q: u32) u32 {
         K::PAT => 31u32 << 5,
         K::MULVL => 15u32 << 16,
         K::SIMM6 => 0x3Fu32 << 5,
+        K::SIMM5 => 31u32 << 16,
         K::SIMM8 | K::UIMM8 => 0xFFu32 << 10,
         K::V1QD => 31u32,
         K::MSV => 31u32 << 5 | 15u32 << 16,
@@ -1680,6 +1698,10 @@ pub(package) const fn encode(r: Row, q0: u32, v: &Vals, out: &mut u32) bool {
                 w |= (a as u32 & 0x3F) << 5;
                 ok = within(a, -32, 31);
             },
+            K::SIMM5 => {
+                w |= (a as u32 & 31) << 16;
+                ok = within(a, -16, 15);
+            },
             K::SIMM8 => {
                 w |= (a as u32 & 0xFF) << 10;
                 ok = within(a, -128, 127);
@@ -1987,6 +2009,9 @@ pub(package) const fn decode_row(r: Row, w: u32, qo: &mut u32, v: &mut Vals) boo
             },
             K::SIMM6 => {
                 v[at] = sext(w >> 5 & 0x3F, 6);
+            },
+            K::SIMM5 => {
+                v[at] = sext(w >> 16 & 31, 5);
             },
             K::SIMM8 => {
                 v[at] = sext(w >> 10 & 0xFF, 8);

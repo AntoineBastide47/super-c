@@ -620,6 +620,198 @@ jobs:
             done
           done
 
+      - name: SVE masked last iterations, results and times with and without SVE
+        run: |
+          set -eu
+          mkdir -p svet && cd svet
+          cat > tails.spc <<'SPC'
+          import stdio;
+
+          @noinline
+          fn sum_i32(a: []i32) i32 {
+              let mut s: i32 = 0;
+              for i in 0..a.len() {
+                  s = s.wrapping_add(a[i]);
+              }
+              return s;
+          }
+
+          @noinline
+          fn scale_in_place(a: []mut i32, b: []i32) {
+              for i in 0..a.len() {
+                  a[i] = a[i].wrapping_mul(3).wrapping_add(b[i]);
+              }
+          }
+
+          @noinline
+          fn min_u16(a: []u16) u16 {
+              let mut m: u16 = 65535;
+              for i in 0..a.len() {
+                  if a[i] < m {
+                      m = a[i];
+                  }
+              }
+              return m;
+          }
+
+          @noinline
+          fn fsum(a: []f32) f32 {
+              let mut s: f32 = 0.0;
+              for i in 0..a.len() {
+                  s += a[i];
+              }
+              return s;
+          }
+
+          @noinline
+          fn clamp_pos(a: []mut i8, b: []i8) {
+              for i in 0..a.len() {
+                  if b[i] > 0 {
+                      a[i] = b[i];
+                  }
+              }
+          }
+
+          @noinline
+          fn widen(o: []mut i32, a: []u8) {
+              for i in 0..o.len() {
+                  o[i] = a[i] as i32 * 7 - 3;
+              }
+          }
+
+          fn main() i32 {
+              let mut h: u64 = 1469598103934665603;
+              let mut ai = [0i32; 70];
+              let mut bi = [0i32; 70];
+              let mut au = [0u16; 70];
+              let mut af = [0.0f32; 70];
+              let a8 = [0i8; 70];
+              let mut b8 = [0i8; 70];
+              let o32 = [0i32; 70];
+              let mut u8s = [0u8; 70];
+              for k in 0..70usize {
+                  ai[k] = (k as i32) * 37 - 900;
+                  bi[k] = 5 - (k as i32) * 11;
+                  au[k] = ((k * 7919) % 6007) as u16 + 3;
+                  af[k] = (k as f32) * 0.37 - 4.5;
+                  b8[k] = ((k * 13) % 23) as i8 - 11;
+                  u8s[k] = (k * 29 % 251) as u8;
+              }
+              for n in 0..70usize {
+                  h = (h ^ sum_i32(ai[0..n]) as u32 as u64).wrapping_mul(1099511628211);
+                  let mut c = ai;
+                  scale_in_place(c[0..n], bi[0..n]);
+                  for k in 0..70usize {
+                      h = (h ^ c[k] as u32 as u64).wrapping_mul(1099511628211);
+                  }
+                  h = (h ^ min_u16(au[0..n]) as u64).wrapping_mul(1099511628211);
+                  h = (h ^ fsum(af[0..n]).to_bits() as u64).wrapping_mul(1099511628211);
+                  let mut d = a8;
+                  clamp_pos(d[0..n], b8[0..n]);
+                  for k in 0..70usize {
+                      h = (h ^ d[k] as u8 as u64).wrapping_mul(1099511628211);
+                  }
+                  let mut e = o32;
+                  widen(e[0..n], u8s[0..n]);
+                  for k in 0..70usize {
+                      h = (h ^ e[k] as u32 as u64).wrapping_mul(1099511628211);
+                  }
+              }
+              unsafe stdio::printf("%llx\n".ptr() as *const char, h);
+              return 0;
+          }
+          SPC
+          cat > bench.spc <<'SPC'
+          import std::platform::clock;
+
+          @noinline
+          fn sum_i32(a: []i32) i32 {
+              let mut s: i32 = 0;
+              for i in 0..a.len() {
+                  s = s.wrapping_add(a[i]);
+              }
+              return s;
+          }
+
+          @noinline
+          fn scale_in_place(a: []mut i32, b: []i32) {
+              for i in 0..a.len() {
+                  a[i] = a[i].wrapping_mul(3).wrapping_add(b[i]);
+              }
+          }
+
+          @noinline
+          fn min_u16(a: []u16) u16 {
+              let mut m: u16 = 65535;
+              for i in 0..a.len() {
+                  if a[i] < m {
+                      m = a[i];
+                  }
+              }
+              return m;
+          }
+
+          @noinline
+          fn count_eq(a: []u8, x: u8) u32 {
+              let mut c: u32 = 0;
+              for i in 0..a.len() {
+                  c += (a[i] == x) as u32;
+              }
+              return c;
+          }
+
+          fn main() i32 {
+              let mut ai = Vector::<i32>::new();
+              let mut bi = Vector::<i32>::new();
+              let mut au = Vector::<u16>::new();
+              let mut a8 = Vector::<u8>::new();
+              for k in 0..1024usize {
+                  ai.push((k * 37) as i32 - 900);
+                  bi.push(5 - (k * 11) as i32);
+                  au.push(((k * 7919) % 6007) as u16 + 3);
+                  a8.push((k * 29 % 251) as u8);
+              }
+              let lens: [usize; 9] = [3, 5, 7, 11, 15, 19, 27, 63, 1000];
+              let mut h: u64 = 0;
+              for n in lens {
+                  let reps: u64 = 20000000 / (n as u64 + 8);
+                  let t0 = clock::monotonic_ns();
+                  for _ in 0..reps {
+                      h = h.wrapping_add(sum_i32(ai.as_slice()[0..n]) as u64);
+                  }
+                  let t1 = clock::monotonic_ns();
+                  for _ in 0..reps {
+                      scale_in_place(ai.as_mut_slice()[0..n], bi.as_slice()[0..n]);
+                  }
+                  let t2 = clock::monotonic_ns();
+                  for _ in 0..reps {
+                      h = h.wrapping_add(min_u16(au.as_slice()[0..n]) as u64);
+                  }
+                  let t3 = clock::monotonic_ns();
+                  for _ in 0..reps {
+                      h = h.wrapping_add(count_eq(a8.as_slice()[0..n], 7) as u64);
+                  }
+                  let t4 = clock::monotonic_ns();
+                  let r = reps as u64;
+                  println("n {}: sum {} scale {} min {} count {} (ps/call)", n, (t1 - t0) * 1000 / r, (t2 - t1) * 1000 / r, (t3 - t2) * 1000 / r, (t4 - t3) * 1000 / r);
+              }
+              println("check {}", h);
+              return 0;
+          }
+          SPC
+          ../super-c build tails.spc --profile=release -o t0
+          ../super-c build tails.spc --profile=release --target-feature=+sve -o t1
+          echo "tails: $(./t0) $(./t1)"
+          test "$(./t0)" = "$(./t1)"
+          ../super-c build bench.spc --profile=release -o b0
+          ../super-c build bench.spc --profile=release --target-feature=+sve -o b1
+          for r in 1 2; do
+            for v in b0 b1; do
+              echo "== $v round $r"
+              "./$v"
+            done
+          done
+
       - name: Time SHA-256 with and without the processor's instructions
         run: |
           set -eu

@@ -2716,7 +2716,11 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3 | ast::pick(
+            self.cpu().vpred,
+            lv::FOLD_PRED,
+            0u64,
+        );
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -11337,6 +11341,9 @@ extend Gen {
 
     // A portable vector operation (`O_VOP`).
     fn vop(self: &mut Self, i: u32, t: Inst) bool {
+        if self.cr.lv.pfold[i as usize] {
+            return true; // the sum of a lane mask's bits its masked accesses read (`lv::FOLD_PRED`)
+        }
         let code = (t.aux & VOP_CODE) as u32;
         let sg = (t.aux & VOP_SIGNED) != 0;
         let dsg = (t.aux & VOP_DSIGNED) != 0;
@@ -12324,6 +12331,10 @@ extend Gen {
     // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
     // general register and INS or UMOV.
     fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        if (ops[1] & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[ops[1] as usize] {
+            self.masked_pred(i, store, ops, tys);
+            return;
+        }
         let vt = tys[2];
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -12368,6 +12379,42 @@ extend Gen {
             if !known {
                 self.here(w0);
             }
+        }
+    }
+
+    // Masked load (into vector `i`) or `store` through a pointer whose mask is the bits of a lane mask
+    // (`lv::FOLD_PRED`, `lv::pred_lanes`), through an SVE predicate on the vector's lanes: PTRUE of them into
+    // p7, CMPNE of the lane mask's lanes into p0, then LD1 (the fallback's lanes where the mask's are 0, by
+    // BIF) or ST1.
+    fn masked_pred(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        let vt = tys[2];
+        let nb = type_bytes(vt, 8);
+        let sz = type_bytes(lane_type(vt), 8).trailing_zeros() as u32;
+        let n = lanes(vt);
+        let v = lv::pred_lanes(self.cr.b(), self.cr.b().insts[i as usize]);
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        let p = self.reg(ops[0]) as u32;
+        // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
+        self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
+        self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+        if store {
+            let rv = self.vec_use(ops[2], V0 + 31);
+            self.emit(a::sve_st1(sz, rv - V0, 0, p));
+            return;
+        }
+        if lv::zero_vec(self.cr.b(), ops[2]) {
+            let rd = self.vec_def(i);
+            self.emit(a::sve_ld1(sz, rd - V0, 0, p));
+            return;
+        }
+        let rf = self.vec_use(ops[2], V0 + 31);
+        let x = self.tmp(true);
+        self.emit(a::sve_ld1(sz, x - V0, 0, p));
+        // BIF x, rf, rm: rf's lanes where rm's are 0.
+        self.emit(0x2EE01C00 | a::on(nb == 16, 1u32 << 30) | rm << 16 | (rf - V0) as u32 << 5 | (x - V0) as u32);
+        let rd = self.vec_def(i);
+        if rd != x {
+            self.emit(a::vmov(nb == 16, rd - V0, x - V0));
         }
     }
 

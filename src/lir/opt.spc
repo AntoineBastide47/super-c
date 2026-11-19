@@ -1681,6 +1681,7 @@ extend Opt {
         }
         self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
+        self.unr.vpred = cpu.vpred;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
         self.unr.vld3 = pk.vec_ld3;
@@ -19156,41 +19157,6 @@ const fn droppable(t: Inst) bool {
     ));
 }
 
-// The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
-// mask a `reduce_add` of its AND with the lanes' bits reads. VNONE when it is none.
-const fn bits_mask(b: &Body, v: Value) Value {
-    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
-        return VNONE;
-    }
-    let t = b.insts[v as usize];
-    if t.op != O_VOP || t.b != 1 || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
-        return VNONE;
-    }
-    let a = b.pool[t.a as usize];
-    if (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_AND {
-        return VNONE;
-    }
-    let at = b.insts[a as usize];
-    let wt = at.ty;
-    let n = lanes(wt);
-    let w = type_bytes(lane_type(wt), 8);
-    let mut words: [u64; 8] = [0; 8];
-    if n * w % 8 != 0 || !vec_words(b, at.b, wt, &mut words) || !lane_mask(b, at.a, 4) {
-        return VNONE;
-    }
-    let per = 8 / w;
-    for qw in 0..n * w / 8 {
-        let mut word: u64 = 0;
-        for l in 0..per {
-            word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
-        }
-        if words[qw as usize] != word {
-            return VNONE;
-        }
-    }
-    return at.a;
-}
-
 // The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
 // of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
 const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
@@ -20024,38 +19990,6 @@ const fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
         if w[q as usize] != e {
             return false;
         }
-    }
-    return true;
-}
-
-// The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
-// `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
-const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
-    if (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    let nw = type_bytes(vt, 8) / 8;
-    if t.op == O_WCONST && t.b == nw {
-        for q in 0..nw {
-            out[q as usize] = b.words[(t.a + q) as usize];
-        }
-        return true;
-    }
-    if t.op != O_SPLAT {
-        return false;
-    }
-    let c = int_bits(b, t.a);
-    if c.is_none() {
-        return false;
-    }
-    let bits = 8 * type_bytes(lane_type(vt), 8);
-    let mut w: u64 = 0;
-    for l in 0..64 / bits {
-        w |= trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
-    }
-    for q in 0..nw {
-        out[q as usize] = w;
     }
     return true;
 }
