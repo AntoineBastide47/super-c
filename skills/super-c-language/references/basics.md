@@ -178,7 +178,10 @@ bounds its quotient (`requires a < 1000` proves `a / 2 < 500`). A goal over bit 
 casts, divisions or products that the arithmetic cannot decide is decided on the bits of its values
 (a SAT refutation): `x ^ y ^ y == x`, `x & (x - 1) < x` for `x > 0`, and the built-in integers'
 `wrapping_add`, `wrapping_sub`, `wrapping_mul`, `wrapping_neg`, `rotate_left` and `rotate_right`
-(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. A wider integer is a
+(`x.rotate_left(n).rotate_right(n) == x`); its counterexample comes from the bits' model. An equality
+of two `wrapping_add` sums of one type, of the same terms in another order or grouping and constants
+of the same wrapped sum, holds without the bits (`(a + b) + c == (c + a) + b`, also of `u64`, where the bits of a
+regrouped sum pass the solver's budget). A wider integer is a
 value the proofs do not take apart. A float is the bits of its encoding: `f32`, `f64`, and std's
 `Float<E, F, FAMILY>` (`f16`, `bf16`, `f128`, `f8e4m3fn` ..) of up to 512 bits. `+ - * /`, `%` (C's
 `fmod`), `sqrt`, `mul_add`/`fma` (and the C library's `sqrt`, `fabs`, `copysign`, `fma`, `round`,
@@ -429,11 +432,15 @@ count below the width, `rotate_left`, `rotate_right`, `eq`, `ne`, `lt`, `le`, `g
 `Secret<bool>`), `Secret::pick(c, a, b)` (`a` where `c`, else `b`) and `cast::<U>()`. So the type
 checker rejects a branch on a secret, an index by one, a division, `==` and `<` (its `eq` gives no
 `bool`), a cast and a read of the field. A buffer of secret bytes is `[]Secret<u8>`: its length
-and its indexes are public. The module also wraps the processor's SHA-256 instructions over groups of
-four secret words (`[Secret<u32>; 4]`, a vector register's lanes): arm64 `sha256h`, `sha256h2`,
-`sha256su0`, `sha256su1` (`Sha2`), x86-64 `sha256rnds2`, `sha256msg1`, `sha256msg2` (`Sha`, `Sse41`), each
-`@trusted` with the vendor's pseudocode as its `ensures` (`arm_sha256_hash`, `intel_sha256_rnds2`, ...,
-over `words4`), which `std::crypto::sha256` proves its hardware path against.
+and its indexes are public. The module also wraps the processor's hash instructions over groups of
+secret words, a vector register's lanes: SHA-256 over four `u32`s (`[Secret<u32>; 4]`, `words4`),
+arm64 `sha256h`, `sha256h2`, `sha256su0`, `sha256su1` (`Sha2`), x86-64 `sha256rnds2`, `sha256msg1`,
+`sha256msg2` (`Sha`, `Sse41`); SHA-512 over pairs (`[Secret<u64>; 2]`, `words2`), arm64 `sha512h`,
+`sha512h2`, `sha512su0`, `sha512su1` (`Sha512`), and over four `u64`s (`qwords4`, the xmm operand a
+pair), x86-64 `sha512rnds2`, `sha512msg1`, `sha512msg2` (`Sha512ni`); SHA-3 over pairs, arm64 `eor3`,
+`rax1`, `xar::<N>`, `bcax` (`Sha3`). Each is `@trusted` with the vendor's pseudocode as its `ensures`
+(`arm_sha256_hash`, `intel_sha256_rnds2`, `arm_sha512h`, `intel_sha512_rnds2`, ...), which
+`std::crypto::sha256`, `sha512` and `sha3` prove their hardware paths against.
 
 `@constant_time` on a function with a body (error 56 elsewhere) makes the build check the code it
 generates for it, after the optimizer (error 558), also when nothing calls it: no branch, memory

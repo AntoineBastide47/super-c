@@ -223,6 +223,8 @@ by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compi
 | `vpclmulqdq` | x86_64 | `avx`, `pclmulqdq` | `-mvpclmulqdq` | off |
 | `aes` | x86_64 | `sse2` | `-maes` | off |
 | `pclmulqdq` | x86_64 | `sse2` | `-mpclmul` | off |
+| `sha` | x86_64 | `sse2` | `-msha` | off |
+| `sha512` | x86_64 | `avx2` | `-msha512` | off |
 | `avx10.1` | x86_64 | `x86-64-v4`, `avx512vbmi` to `avx512fp16` | `-mavx10.1` | off |
 | `avx10.2` | x86_64 | `avx10.1` | `-mavx10.2` | off |
 | `neon` | aarch64 | | | always on |
@@ -232,15 +234,22 @@ by `std::cpu::Feature`; the C flag column is what the C tree of `--emit-c` compi
 | `i8mm` | aarch64 | `neon`, `rdm` | `+i8mm` | off |
 | `bf16` | aarch64 | `neon`, `rdm` | `+bf16` | off |
 | `aes` | aarch64 | `neon` | `+aes` | macOS, iOS |
+| `pmull` | aarch64 | `neon`, `aes` | `+aes` | macOS, iOS |
 | `sha2` | aarch64 | `neon` | `+sha2` | macOS, iOS |
 | `sha3` | aarch64 | `neon`, `rdm`, `sha2` | `+sha3` | macOS |
+| `sha512` | aarch64 | `neon`, `sha2` | `+sha3` | macOS |
 | `crc` | aarch64 | | `+crc` | macOS |
 | `lse` | aarch64 | | `+lse` | macOS |
+| `rcpc` | aarch64 | `neon`, `rdm` | `+rcpc` | macOS |
+| `cssc` | aarch64 | `neon`, `rdm` | `+cssc` | off |
 | `sve` | aarch64 | `fp16`, `rdm` | `+sve` | off |
 | `sve2` | aarch64 | `sve` | `+sve2` | off |
 | `sme` | aarch64 | `neon`, `rdm` | `+sme` | off |
 | `sme2` | aarch64 | `sme` | `+sme2` | off |
 | `sme-f64f64` | aarch64 | `sme` | `+sme-f64f64` | off |
+
+Two instruction sets share the name `sha512`: arm64's is `cpu::Feature::Sha512`, x86-64's
+`cpu::Feature::Sha512ni`.
 
 The x86_64 baseline is `sse2` and, by platform, what the table's last column names (macOS and
 the iOS simulator: `core2`, which every C compiler for them assumes; Android: its ABI). The x86-64 psABI levels

@@ -334,6 +334,10 @@ reads it (SQ_BLOCK). `null` and `sizeof(T)` are one term each (`null_ptr`, `size
   integers through their std conformances, read as the integer operations (`wide_kind`, `wide_op`),
   and the built-in integers' `wrapping_add`, `wrapping_sub`, `wrapping_mul` and `wrapping_neg` are
   the casts of the exact results, `rotate_left` and `rotate_right` their shifts (`rotated`).
+  An obligation equating two such casts of sums of one width and sign, of the same terms in any order
+  or grouping and constants of the same wrapped sum, holds before the solver (`Terms::sums_equal`, in
+  `oblige`): bit-blasting a regrouped 64-bit sum passes the SAT budget, and leaving the terms as atoms
+  keeps the lemma facts that name them.
   With more than one job, the bodies run on workers one at a time (`dpar`
   Dynamic schedule, grain 1; a narrow and a wide `Prover` each, the shells and components read from
   `Shared`),
