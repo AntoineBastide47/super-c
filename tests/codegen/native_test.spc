@@ -22982,7 +22982,8 @@ int main(void) {
 // then LD1 or ST1. Each vector ends past its last active lane in a page the driver protects, which an access
 // of the whole vector would fault on; the inactive lanes of a load are 0 (`head4`, `head16`) or the
 // fallback's (`keep8`, by BIF), a store leaves the memory under them (`put2`, `putpos`). A select of the
-// lanes the predicate holds is SEL by it (`minlow`: the comparison's lane mask; `pick8`: the lane mask).
+// lanes the predicate holds is SEL by it (`minlow`: the comparison's lane mask, which no NEON comparison
+// makes then; `pick8`: the lane mask).
 @test
 fn masked_accesses_run_through_sve_predicates() {
     if !cli::has_cc() {
@@ -23086,17 +23087,21 @@ b0(v0: ptr, v1: ptr, v2: i8):
   ret
 )";
     let drv = "#include <stdint.h>\n#include <string.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\nvoid head4(const int32_t *, int32_t *, int64_t);\nvoid keep8(const uint8_t *, uint8_t *, uint8_t);\nvoid head16(const uint8_t *, uint8_t *, uint8_t);\nvoid put2(int64_t *, int64_t, int64_t);\nvoid putpos(float *, const float *);\nvoid minlow(const uint16_t *, uint16_t *, uint16_t);\nvoid pick8(const uint8_t *, uint8_t *, uint8_t);\nint main(void) {\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 4; r++) {\n    int32_t *a = (int32_t *)end - r, out[4];\n    for (int k = 0; k < r; k++) a[k] = 10 * k + 1;\n    head4(a, out, r);\n    for (int k = 0; k < 4; k++) if (out[k] != (k < r ? 2 * (10 * k + 1) : 0)) return 2;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(100 + k);\n    keep8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 100 + k : r)) return 3;\n  }\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r, out[16];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(50 + k);\n    head16(a, out, (uint8_t)r);\n    for (int k = 0; k < 16; k++) if (out[k] != (k < r ? 50 + k : 0)) return 4;\n  }\n  for (int r = 0; r < 3; r++) {\n    int64_t *a = (int64_t *)end - 2;\n    a[0] = a[1] = -1;\n    put2((int64_t *)end - r, r, 77);\n    for (int k = 0; k < 2; k++) if (a[k] != (k >= 2 - r ? 77 : -1)) return 5;\n  }\n  float src[4] = {1.5f, 2.5f, -1.0f, 0.0f};\n  float *d = (float *)end - 2;\n  d[0] = d[1] = -9.0f;\n  putpos(d, src);\n  if (d[0] != 1.5f || d[1] != 2.5f) return 6;\n  for (int r = 0; r < 8; r++) {\n    uint16_t *a = (uint16_t *)end - r, acc[8];\n    for (int k = 0; k < 8; k++) acc[k] = (uint16_t)(30 + k);\n    for (int k = 0; k < r; k++) a[k] = (uint16_t)(k % 2 ? 5 : 90);\n    minlow(a, acc, (uint16_t)r);\n    for (int k = 0; k < 8; k++) if (acc[k] != (k < r && k % 2 ? 5 : 30 + k)) return 7;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(20 + k);\n    pick8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 2 * (20 + k) : r)) return 8;\n  }\n  return 0;\n}\n";
-    // SEL z.T, p0, z.T, z.T, once in each of `minlow` and `pick8`.
+    // SEL z.T, p0, z.T, z.T, once in each of `minlow` and `pick8`; no CMHI v.8H.
     let mut obj = Vector::<u8>::new();
     assert(
         object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), VPRED, &mut obj),
         "the object",
     );
     let mut sels: u32 = 0;
+    let mut cmhi: u32 = 0;
     for k in 0..obj.len() / 4 {
-        sels += ((le_at(&obj, 4 * k, 4) as u32 & 0xFF20FC00) == 0x0520C000) as u32;
+        let w = le_at(&obj, 4 * k, 4) as u32;
+        sels += ((w & 0xFF20FC00) == 0x0520C000) as u32;
+        cmhi += ((w & 0xFFE0FC00) == 0x6E603400) as u32;
     }
     assert_eq(sels, 2);
+    assert_eq(cmhi, 0);
     assert_eq(run_sve(lir, drv), 0);
     assert_eq(run_native(lir, drv), 0);
 }

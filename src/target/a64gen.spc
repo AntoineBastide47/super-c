@@ -3071,10 +3071,31 @@ extend Gen {
     }
 
     // Whether a code word from `from` to `to` is a `BL` or a `BLR`.
+    // p0 = comparison `c` of the vectors `v` and `w` of `n` lanes of 1 << `sz` bytes (`pred_mask`), or (`c`
+    // C_COUNT) lane mask `v`'s nonzero lanes, under PTRUE p7 of those lanes.
+    fn set_pred(self: &mut Self, c: u16, v: Value, w: Value, sz: u32, n: u32) {
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
+        self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
+        if c != C_COUNT {
+            let rw = self.vec_use(w, V0 + 31) as u32 - V0 as u32;
+            let (base, swap) = SVE_CMP[c as usize];
+            self.emit(base | sz << 22 | ast::pick(swap, rm, rw) << 16 | 7u32 << 10 | ast::pick(swap, rw, rm) << 5);
+        } else {
+            self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+        }
+        self.pv = VNONE;
+        self.psz = sz;
+        self.pat = self.code.len() as u32;
+        self.pc = c;
+        self.pa = v;
+        self.pb = w;
+    }
+
     // Whether p0 holds lane mask `m` at element size `sz`: the comparison or the lane mask whose predicate
     // a masked access of the block set (`pv`, `pc`), no call between.
     const fn holds_pred(self: &Self, m: Value, sz: u32) bool {
-        if self.pv == VNONE || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+        if self.pa == VNONE || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
             return false;
         }
         if self.pc == C_COUNT {
@@ -3514,6 +3535,7 @@ extend Gen {
         self.cr.pos = q;
         self.btest_x = NONE;
         self.pv = VNONE;
+        self.pa = VNONE;
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -4123,7 +4145,10 @@ extend Gen {
             return true;
         }
         if op == O_VCMP {
-            self.vcmp(i, t);
+            // Unless SVE selects read it alone (`lv::Live::pred_sels`).
+            if !self.cr.lv.pfold[i as usize] {
+                self.vcmp(i, t);
+            }
             return true;
         }
         if op == O_VSEL {
@@ -4375,6 +4400,7 @@ extend Gen {
         if op == O_ASM {
             // Its clobbers may take the predicates.
             self.pv = VNONE;
+            self.pa = VNONE;
             return self.asm_inst(i, t);
         }
         if op == O_VAEND {
@@ -10772,8 +10798,14 @@ extend Gen {
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
         let sz = type_bytes(lane_type(t.ty), 8).trailing_zeros() as u32;
-        if in_vreg(t.ty) && self.holds_pred(t.a, sz) {
-            // The lanes p0 holds since a masked access of the block (`masked_pred`): SVE's SEL.
+        let folded = self.cr.lv.pfold[t.a as usize];
+        if folded || in_vreg(t.ty) && self.holds_pred(t.a, sz) {
+            // The lanes p0 holds since a masked access of the block (`masked_pred`; for a folded lane
+            // comparison, `lv::Live::pred_sels`, made again after a call): SVE's SEL.
+            if folded && !self.holds_pred(t.a, sz) {
+                let c = self.cr.b().insts[t.a as usize];
+                self.set_pred(c.aux, c.a, c.b, sz, lanes(t.ty));
+            }
             let rn = self.vec_use(t.b, V0 + 30) as u32 - V0 as u32;
             let rm = self.vec_use(t.c, V0 + 31) as u32 - V0 as u32;
             let rd = self.def_step(i) as u32 - V0 as u32;
@@ -12464,27 +12496,10 @@ extend Gen {
         let n = lanes(vt);
         let (c, v, w) = pred_mask(self.cr.b(), self.cr.b().insts[i as usize]);
         let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
-        let rw = if c != C_COUNT {
-            self.vec_use(w, V0 + 31) as u32 - V0 as u32
-        } else {
-            0
-        };
         let p = self.reg(ops[0]) as u32;
         if self.pv != ops[1] || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
-            // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
-            self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
-            if c != C_COUNT {
-                let (base, swap) = SVE_CMP[c as usize];
-                self.emit(base | sz << 22 | ast::pick(swap, rm, rw) << 16 | 7u32 << 10 | ast::pick(swap, rw, rm) << 5);
-            } else {
-                self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
-            }
+            self.set_pred(c, v, w, sz, n);
             self.pv = ops[1];
-            self.psz = sz;
-            self.pat = self.code.len() as u32;
-            self.pc = c;
-            self.pa = v;
-            self.pb = w;
         }
         if store {
             let rv = self.vec_use(ops[2], V0 + 31);
@@ -13289,7 +13304,9 @@ extend Gen {
             } else {
                 self.reloc(a::R_PAGEOFF12, os, 0);
             }
+            // LDRB zero-extends.
             self.emit(a::ldst_uimm(a::M_B, true, rd, rd, 0));
+            self.cr.va.index_mut(i as usize).clean = true;
             return true;
         }
         if s == SYS_CYCLES || s == SYS_SVL {

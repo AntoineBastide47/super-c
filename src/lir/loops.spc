@@ -7614,9 +7614,12 @@ extend LoopOpt {
             l0,
         );
         if !self.vpred {
-            // Without SVE the scalar loop runs the rest, past the vector exit (`sys.sve` is 0 or 1).
+            // Without SVE the scalar loop runs the rest, past the vector exit: one conditional comparison
+            // more.
             let sv = self.vi(b, Inst { op: O_SYS, ty: T_I8, aux: SYS_SVE, a: VNONE, b: VNONE, c: VNONE }, l0);
-            left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: sv, c: 0 }, l0);
+            let z8 = self.vconst(b, T_I8, 0, l0);
+            let has = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: sv, b: z8, c: 0 }, l0);
+            left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: has, c: 0 }, l0);
         }
         self.args.truncate(0);
         for q in 0..np as u32 {

@@ -815,8 +815,9 @@ extend Live {
         self.rare_blocks(b);
         self.loops(b);
         self.frequencies(b);
-        self.folds(b);
+        // Before the folds, which read it (`pred_sels`).
         self.def_blocks(b, b.insts.len() + b.params.len());
+        self.folds(b);
     }
 
     // `def_blk` for the `n` value indexes of `b`: each instruction's and block parameter's block (NONE for
@@ -1644,6 +1645,28 @@ extend Live {
                 if (e - k) as u32 == self.count[preds[k] as usize] && self.pred_chain(b, preds[k], false) {
                     let _ = self.pred_chain(b, preds[k], true);
                 }
+                k = e;
+            }
+            // A lane comparison that selects alone read, each after an access of its block that takes it as its
+            // predicate, folds: the select is SVE's SEL by that predicate.
+            let mut sels = Vector::<Value>::new();
+            let mut done = NONE;
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let k = self.def_blk[i as usize];
+                if k != done && self.pred_folded(b, b.insts[i as usize]) {
+                    self.pred_sels(b, k, &mut sels);
+                    done = k;
+                }
+            }
+            sels.sort();
+            k = 0;
+            while k < sels.len() {
+                let mut e = k + 1;
+                while e < sels.len() && sels[e] == sels[k] {
+                    e += 1;
+                }
+                self.pfold[sels[k] as usize] = (e - k) as u32 == self.count[sels[k] as usize];
                 k = e;
             }
             // A zero fallback folds where every load that reads it folds its mask.
@@ -3362,6 +3385,36 @@ extend Live {
         return (self.fold_ops & f) != 0 && (lane_mask(b, v, MASK_DEPTH) || (self.fold_ops & FOLD_ANY_BITS) != 0 && is_int(
             lane_type(b.type_of(v)),
         ));
+    }
+
+    // Whether masked access `t` takes an SVE predicate (`FOLD_PRED`): its mask bits fold.
+    const fn pred_folded(self: &Self, b: &Body, t: Inst) bool {
+        if t.op != O_VOP || !self.pred_all && (t.aux & VOP_PRED) == 0 || pred_mask(b, t).1 == VNONE {
+            return false;
+        }
+        let m = b.pool[(t.a + 1) as usize];
+        return is_inst(m) && self.pfold[m as usize];
+    }
+
+    // Into `out`, the lane comparisons of block `k` that its selects read after a masked access whose folded
+    // predicate (`pred_folded`, `pred_mask`) is that comparison, with no call or other predicate between: p0
+    // holds it there.
+    const fn pred_sels(self: &Self, b: &Body, k: u32, out: &mut Vector<Value>) {
+        let bk = b.blocks[k as usize];
+        let mut key: (u16, Value, Value) = (C_COUNT, VNONE, VNONE);
+        for j in bk.start..bk.start + bk.len {
+            let t = b.insts[j as usize];
+            if t.op == O_CALL || t.op == O_CALLIND || t.op == O_ASM {
+                key = (C_COUNT, VNONE, VNONE);
+            } else if self.pred_folded(b, t) {
+                key = pred_mask(b, t);
+            } else if t.op == O_VSEL && is_inst(t.a) && key.0 != C_COUNT {
+                let c = b.insts[t.a as usize];
+                if c.op == O_VCMP && c.aux == key.0 && c.a == key.1 && c.b == key.2 {
+                    out.push(t.a);
+                }
+            }
+        }
     }
 
     // Whether the instructions that make mask bits `m` (`pred_mask`: extensions and truncations, then a lane
