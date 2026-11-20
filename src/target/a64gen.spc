@@ -10798,7 +10798,7 @@ extend Gen {
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
         let sz = type_bytes(lane_type(t.ty), 8).trailing_zeros() as u32;
-        let folded = self.cr.lv.pfold[t.a as usize];
+        let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[t.a as usize];
         if folded || in_vreg(t.ty) && self.holds_pred(t.a, sz) {
             // The lanes p0 holds since a masked access of the block (`masked_pred`; for a folded lane
             // comparison, `lv::Live::pred_sels`, made again after a call): SVE's SEL.
