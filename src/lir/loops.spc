@@ -103,10 +103,11 @@ const JAM_CHAIN: u32 = 4;
 const EPI_LANES: u32 = 16;
 // `zero_lanes` follows at most ZERO_DEPTH operations.
 const ZERO_DEPTH: u32 = 4;
-// The fewest lanes of a vector loop that runs what it leaves as one masked iteration (`masked_tail`): with
-// fewer, the at most 3 scalar iterations it replaces cost less than its lane comparison, predicated accesses
-// and selects.
+// The fewest lanes of a vector loop that runs what it leaves as one masked iteration (`masked_tail`), and the
+// fewest elements left that iteration runs (fewer run in the scalar loop): at most 3 scalar iterations cost
+// less than its lane comparison, predicated accesses and selects.
 const TAIL_LANES: u32 = 8;
+const TAIL_MIN: u64 = 4;
 // The most instructions of a loop's body the vectorizer interleaves as scalars.
 const ILV_SIZE: u32 = 12;
 // `LoopOpt::guard_le` reads at most GUARD_UP blocks before a preheader, GUARD_AND conditions of each.
@@ -6304,17 +6305,22 @@ extend LoopOpt {
             let rem = self.vi(b, Inst { op: O_UREM, ty: qt, aux: 0, a: trips, b: sv, c: 0 }, l0);
             self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: trips, b: rem, c: 0 }, l0)
         };
-        // With a masked last iteration, any iteration enters the vectors; under a run-time test of SVE
-        // (`vsve`), where the processor has it.
+        // With a masked last iteration, TAIL_MIN iterations or more enter the vectors (the scalar loop runs
+        // fewer); under a run-time test of SVE (`vsve`), where the processor has it.
         self.vsv = VNONE;
-        let mut tc = ast::pick(self.vmt, trips, cnt);
-        if self.vmt && !self.vpred {
-            let sv = self.vi(b, Inst { op: O_SYS, ty: T_I8, aux: SYS_SVE, a: VNONE, b: VNONE, c: VNONE }, l0);
-            let z8 = self.vconst(b, T_I8, 0, l0);
-            self.vsv = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: sv, b: z8, c: 0 }, l0);
-            tc = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: self.vsv, b: trips, c: cnt }, l0);
+        let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
+        if self.vmt {
+            let k = self.vconst(b, qt, TAIL_MIN, l0);
+            let big = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: trips, b: k, c: 0 }, l0);
+            ok = if self.vpred {
+                big
+            } else {
+                let sv = self.vi(b, Inst { op: O_SYS, ty: T_I8, aux: SYS_SVE, a: VNONE, b: VNONE, c: VNONE }, l0);
+                let z8 = self.vconst(b, T_I8, 0, l0);
+                self.vsv = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: sv, b: z8, c: 0 }, l0);
+                self.vi(b, Inst { op: O_SELECT, ty: T_I8, aux: 0, a: self.vsv, b: big, c: ok }, l0)
+            };
         }
-        let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: tc, b: z, c: 0 }, l0);
         for k in 0..self.vca.len() {
             let (alo, ahi) = self.vrange(b, self.vca[k], i0, l0);
             let (blo, bhi) = self.vrange(b, self.vcb[k], i0, l0);
@@ -7588,8 +7594,9 @@ extend LoopOpt {
 
     // The masked last iteration (`masked_tail`) of vector loop `vl` (its parameters from `vps`), blocks
     // `sp + 1` and `sp + 2` past the new preheader, both of `vl`'s parameters: the first leaves to the vector
-    // exit `vx` when no element is left, else enters the second, which runs the elements left (`vtr`, fewer
-    // than a vector's lanes) as one vector iteration whose loads and stores take those lanes alone
+    // exit `vx` when fewer than TAIL_MIN elements are left (the scalar loop runs them) or, under a run-time
+    // test (`vsv`), the processor lacks SVE; else it enters the second, which runs the elements left (`vtr`,
+    // fewer than a vector's lanes) as one vector iteration whose loads and stores take those lanes alone
     // (`masked_access`) and whose reductions keep their other lanes, then leaves to `vx` with the counter at
     // the bound.
     fn masked_last(
@@ -7615,11 +7622,10 @@ extend LoopOpt {
             b.params.push(b.params[(vps + q) as usize]);
         }
         let tstart = b.insts.len() as u32;
-        let mut left = self.vi(
-            b,
-            Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vsigned, C_SLT, C_ULT), a: VPARAM | tps, b: self.vn, c: 0 },
-            l0,
-        );
+        // The counter is at most the bound here: the elements left, TAIL_MIN or more.
+        let r = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: VPARAM | tps, c: 0 }, l0);
+        let k = self.vconst(b, qt, TAIL_MIN, l0);
+        let mut left = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: r, b: k, c: 0 }, l0);
         if self.vsv != VNONE {
             // Without SVE the scalar loop runs the rest, past the vector exit.
             left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: self.vsv, c: 0 }, l0);
