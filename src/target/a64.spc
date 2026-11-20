@@ -790,6 +790,11 @@ pub(package) const fn sve_ld1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
 }
 
 /// SVE ST1B, ST1H, ST1W or ST1D (`sz`) {`zt`.T}, `pg`, [`xn`]: the active elements alone.
+/// SEL zd.T, pv, zn.T, zm.T (T of 1 << `sz` bytes): zn's elements where pv is set, else zm's.
+pub(package) const fn sve_sel(sz: u32, zd: u32, pv: u32, zn: u32, zm: u32) u32 {
+    return 0x0520C000 | sz << 22 | zm << 16 | pv << 10 | zn << 5 | zd;
+}
+
 pub(package) const fn sve_st1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
     return 0xE400E000 | sz << 23 | sz << 21 | pg << 10 | xn << 5 | zt;
 }

@@ -328,7 +328,7 @@ pub(package) const fn kind_at(ops: u64, i: u32) u8 {
 
 // ---- The table ----
 
-pub(package) const ROWS: [Row; 715] = [
+pub(package) const ROWS: [Row; 716] = [
     // Add and subtract, immediate.
     rf("mov", 0x11000000, Q::SF, QWX, k2(K::RDS, K::RNS), FL_SPMOV),
     r("cmp", 0x7100001F, Q::SF, QWX, k2(K::RNS, K::AIMM)),
@@ -1041,6 +1041,7 @@ pub(package) const ROWS: [Row; 715] = [
     r("cmpne", 0x2400A010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
     r("cmpeq", 0x25008000, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
     r("cmpne", 0x25008010, Q::Z, QALL, k4(K::PD, K::PGZ, K::ZN, K::SIMM5)),
+    r("sel", 0x0520C000, Q::Z, QALL, k4(K::ZD, K::PG, K::ZN, K::ZM)),
     r("fcmge", 0x65004000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
     r("fcmgt", 0x65004010, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),
     r("fcmeq", 0x65006000, Q::Z, QZF, k4(K::PD, K::PGZ, K::ZN, K::ZM)),

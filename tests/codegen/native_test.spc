@@ -22981,7 +22981,8 @@ int main(void) {
 // through SVE predicates (`lv::FOLD_PRED`): PTRUE, the comparison (CMPHI, FCMGT) or CMPNE of the lane mask,
 // then LD1 or ST1. Each vector ends past its last active lane in a page the driver protects, which an access
 // of the whole vector would fault on; the inactive lanes of a load are 0 (`head4`, `head16`) or the
-// fallback's (`keep8`, by BIF), a store leaves the memory under them (`put2`, `putpos`).
+// fallback's (`keep8`, by BIF), a store leaves the memory under them (`put2`, `putpos`). A select of the
+// lanes the predicate holds is SEL by it (`minlow`: the comparison's lane mask; `pick8`: the lane mask).
 @test
 fn masked_accesses_run_through_sve_predicates() {
     if !cli::has_cc() {
@@ -22993,6 +22994,8 @@ sym @keep8 fn global
 sym @head16 fn global
 sym @put2 fn global
 sym @putpos fn global
+sym @minlow fn global
+sym @pick8 fn global
 fn @head4
   sig (ptr, ptr, i64) -> void
 b0(v0: ptr, v1: ptr, v2: i64):
@@ -23052,8 +23055,48 @@ b0(v0: ptr, v1: ptr):
   v4 = vop.gt.i8 (v2, v3)
   vop.store_masked_ptr (v0, v4, v2)
   ret
+fn @minlow
+  sig (ptr, ptr, i16) -> void
+b0(v0: ptr, v1: ptr, v2: i16):
+  v3 = splat.v8i16 v2
+  v4 = wconst.v8i16 0x3000200010000, 0x7000600050004
+  v5 = vop.lt.i8 (v4, v3)
+  v6 = wconst.v8i16 0x0, 0x0
+  v7 = vop.load_masked_ptr.v8i16 (v0, v5, v6)
+  v8 = load.v8i16 v1 align 4
+  v9 = vop.min.v8i16 (v7, v8)
+  v10 = vcmp.ult.v8i16 v4, v3
+  v11 = vsel.v8i16 v10, v9, v8
+  store v11, v1 align 4
+  ret
+fn @pick8
+  sig (ptr, ptr, i8) -> void
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = splat.v8i8 v2
+  v4 = wconst.v8i8 0x0706050403020100
+  v5 = vcmp.ult.v8i8 v4, v3
+  v6 = wconst.v8i8 0x8040201008040201
+  v7 = and.v8i8 v5, v6
+  v8 = vop.reduce_add.i8 (v7)
+  v9 = wconst.v8i8 0x0
+  v10 = vop.load_masked_ptr.v8i8 (v0, v8, v9)
+  v11 = add.v8i8 v10, v10
+  v12 = vsel.v8i8 v5, v11, v3
+  store v12, v1 align 3
+  ret
 )";
-    let drv = "#include <stdint.h>\n#include <string.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\nvoid head4(const int32_t *, int32_t *, int64_t);\nvoid keep8(const uint8_t *, uint8_t *, uint8_t);\nvoid head16(const uint8_t *, uint8_t *, uint8_t);\nvoid put2(int64_t *, int64_t, int64_t);\nvoid putpos(float *, const float *);\nint main(void) {\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 4; r++) {\n    int32_t *a = (int32_t *)end - r, out[4];\n    for (int k = 0; k < r; k++) a[k] = 10 * k + 1;\n    head4(a, out, r);\n    for (int k = 0; k < 4; k++) if (out[k] != (k < r ? 2 * (10 * k + 1) : 0)) return 2;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(100 + k);\n    keep8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 100 + k : r)) return 3;\n  }\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r, out[16];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(50 + k);\n    head16(a, out, (uint8_t)r);\n    for (int k = 0; k < 16; k++) if (out[k] != (k < r ? 50 + k : 0)) return 4;\n  }\n  for (int r = 0; r < 3; r++) {\n    int64_t *a = (int64_t *)end - 2;\n    a[0] = a[1] = -1;\n    put2((int64_t *)end - r, r, 77);\n    for (int k = 0; k < 2; k++) if (a[k] != (k >= 2 - r ? 77 : -1)) return 5;\n  }\n  float src[4] = {1.5f, 2.5f, -1.0f, 0.0f};\n  float *d = (float *)end - 2;\n  d[0] = d[1] = -9.0f;\n  putpos(d, src);\n  if (d[0] != 1.5f || d[1] != 2.5f) return 6;\n  return 0;\n}\n";
+    let drv = "#include <stdint.h>\n#include <string.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\nvoid head4(const int32_t *, int32_t *, int64_t);\nvoid keep8(const uint8_t *, uint8_t *, uint8_t);\nvoid head16(const uint8_t *, uint8_t *, uint8_t);\nvoid put2(int64_t *, int64_t, int64_t);\nvoid putpos(float *, const float *);\nvoid minlow(const uint16_t *, uint16_t *, uint16_t);\nvoid pick8(const uint8_t *, uint8_t *, uint8_t);\nint main(void) {\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 4; r++) {\n    int32_t *a = (int32_t *)end - r, out[4];\n    for (int k = 0; k < r; k++) a[k] = 10 * k + 1;\n    head4(a, out, r);\n    for (int k = 0; k < 4; k++) if (out[k] != (k < r ? 2 * (10 * k + 1) : 0)) return 2;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(100 + k);\n    keep8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 100 + k : r)) return 3;\n  }\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r, out[16];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(50 + k);\n    head16(a, out, (uint8_t)r);\n    for (int k = 0; k < 16; k++) if (out[k] != (k < r ? 50 + k : 0)) return 4;\n  }\n  for (int r = 0; r < 3; r++) {\n    int64_t *a = (int64_t *)end - 2;\n    a[0] = a[1] = -1;\n    put2((int64_t *)end - r, r, 77);\n    for (int k = 0; k < 2; k++) if (a[k] != (k >= 2 - r ? 77 : -1)) return 5;\n  }\n  float src[4] = {1.5f, 2.5f, -1.0f, 0.0f};\n  float *d = (float *)end - 2;\n  d[0] = d[1] = -9.0f;\n  putpos(d, src);\n  if (d[0] != 1.5f || d[1] != 2.5f) return 6;\n  for (int r = 0; r < 8; r++) {\n    uint16_t *a = (uint16_t *)end - r, acc[8];\n    for (int k = 0; k < 8; k++) acc[k] = (uint16_t)(30 + k);\n    for (int k = 0; k < r; k++) a[k] = (uint16_t)(k % 2 ? 5 : 90);\n    minlow(a, acc, (uint16_t)r);\n    for (int k = 0; k < 8; k++) if (acc[k] != (k < r && k % 2 ? 5 : 30 + k)) return 7;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(20 + k);\n    pick8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 2 * (20 + k) : r)) return 8;\n  }\n  return 0;\n}\n";
+    // SEL z.T, p0, z.T, z.T, once in each of `minlow` and `pick8`.
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), VPRED, &mut obj),
+        "the object",
+    );
+    let mut sels: u32 = 0;
+    for k in 0..obj.len() / 4 {
+        sels += ((le_at(&obj, 4 * k, 4) as u32 & 0xFF20FC00) == 0x0520C000) as u32;
+    }
+    assert_eq(sels, 2);
     assert_eq(run_sve(lir, drv), 0);
     assert_eq(run_native(lir, drv), 0);
 }

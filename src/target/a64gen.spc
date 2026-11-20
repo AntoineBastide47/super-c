@@ -241,6 +241,10 @@ pub(package) struct Gen {
     pv: Value,
     psz: u32,
     pat: u32,
+    // The comparison p0 holds (`pred_mask`: its code and operands; C_COUNT: lane mask `pa`'s nonzero lanes).
+    pc: u16,
+    pa: Value,
+    pb: Value,
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
@@ -380,6 +384,9 @@ extend Gen {
             pv: VNONE,
             psz: 0,
             pat: 0,
+            pc: C_COUNT,
+            pa: VNONE,
+            pb: VNONE,
             fix: Vector::<u64>::new(),
             far: false,
             shrink: false,
@@ -3064,6 +3071,22 @@ extend Gen {
     }
 
     // Whether a code word from `from` to `to` is a `BL` or a `BLR`.
+    // Whether p0 holds lane mask `m` at element size `sz`: the comparison or the lane mask whose predicate
+    // a masked access of the block set (`pv`, `pc`), no call between.
+    const fn holds_pred(self: &Self, m: Value, sz: u32) bool {
+        if self.pv == VNONE || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            return false;
+        }
+        if self.pc == C_COUNT {
+            return m == self.pa;
+        }
+        if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
+            return false;
+        }
+        let t = self.cr.b().insts[m as usize];
+        return t.op == O_VCMP && t.aux == self.pc && t.a == self.pa && t.b == self.pb;
+    }
+
     const fn calls_in(self: &Self, from: u32, to: u32) bool {
         for w in from..to {
             let x = self.code[w as usize];
@@ -10748,6 +10771,15 @@ extend Gen {
     // each lane's bits.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
+        let sz = type_bytes(lane_type(t.ty), 8).trailing_zeros() as u32;
+        if in_vreg(t.ty) && self.holds_pred(t.a, sz) {
+            // The lanes p0 holds since a masked access of the block (`masked_pred`): SVE's SEL.
+            let rn = self.vec_use(t.b, V0 + 30) as u32 - V0 as u32;
+            let rm = self.vec_use(t.c, V0 + 31) as u32 - V0 as u32;
+            let rd = self.def_step(i) as u32 - V0 as u32;
+            self.emit(a::sve_sel(sz, rd, 0, rn, rm));
+            return;
+        }
         if in_vreg(t.ty) {
             self.neon_reg(a::v3op(false, a::V3_EOR, 1, 0, 0, 0), i, t.b, t.c, t.a, nb);
             return;
@@ -12450,6 +12482,9 @@ extend Gen {
             self.pv = ops[1];
             self.psz = sz;
             self.pat = self.code.len() as u32;
+            self.pc = c;
+            self.pa = v;
+            self.pb = w;
         }
         if store {
             let rv = self.vec_use(ops[2], V0 + 31);
@@ -13241,13 +13276,19 @@ extend Gen {
             return true;
         }
         if s == SYS_SVE {
-            // The start-up's byte `__sc_sve`, through its address slot.
+            // The start-up's byte `__sc_sve`: through its address slot where another object may interpose
+            // it (`got_global`), else at its page offset.
             let rd = self.def(i) as u32;
             let os = self.cr.obj().sym("__sc_sve");
-            self.reloc(a::R_GOT_PAGE21, os, 0);
+            let got = self.elf && unsafe (*self.pkg).pic;
+            self.reloc(ast::pick(got, a::R_GOT_PAGE21, a::R_PAGE21), os, 0);
             self.emit(a::adr(true, rd, 0));
-            self.reloc(a::R_GOT_PAGEOFF12, os, 0);
-            self.emit(a::ldst_uimm(a::M_X, true, rd, rd, 0));
+            if got {
+                self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+                self.emit(a::ldst_uimm(a::M_X, true, rd, rd, 0));
+            } else {
+                self.reloc(a::R_PAGEOFF12, os, 0);
+            }
             self.emit(a::ldst_uimm(a::M_B, true, rd, rd, 0));
             return true;
         }
