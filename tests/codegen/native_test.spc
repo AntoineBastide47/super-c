@@ -23064,8 +23064,8 @@ b0(v0: ptr, v1: ptr):
 // and store stop at the guard page past the active lanes.
 @test
 fn predicated_accesses_run_under_the_start_up_sve_byte() {
-    if !cli::has_cc() {
-        return; // a C driver links it
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return; // a C driver links it; `sys.sve` is arm64's
     }
     let lir = M"(lir ptr 8
 sym @twice fn global
