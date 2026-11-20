@@ -73,6 +73,8 @@ pub(package) struct Eval {
     pub(package) max_steps: u64,
     pub(package) max_bytes: u64,
     pub(package) max_depth: u32,
+    /// The value of `SYS_SVE`: whether the evaluated processor has SVE (the masked last iterations run).
+    pub(package) sve: bool,
     steps: u64,
     objs: Vector<Obj>,
     stack: Vector<u8>,
@@ -103,6 +105,7 @@ extend Eval {
             max_steps: 50000000,
             max_bytes: 1u64 << 30,
             max_depth: 4096,
+            sve: true,
             steps: 0,
             objs: Vector::<Obj>::new(),
             stack: Vector::<u8>::new(),
@@ -802,6 +805,10 @@ extend Eval {
             // A spin hint and the barriers change no value; the processor's other operations the evaluator
             // does not model, as an extern call.
             if t.aux == SYS_SPIN || t.aux == SYS_BARRIER || t.aux == SYS_KEEP {
+                return true;
+            }
+            if t.aux == SYS_SVE {
+                self.vals[dst as usize] = self.sve as u64;
                 return true;
             }
             return self.stop(EV_FFI, "a system operation");

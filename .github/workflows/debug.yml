@@ -799,10 +799,11 @@ jobs:
               return 0;
           }
           SPC
-          ../super-c build tails.spc --profile=release -o t0
+          ../super-c build tails.spc --profile=release --simd-dispatch=off -o t0
+          ../super-c build tails.spc --profile=release -o td
           ../super-c build tails.spc --profile=release --target-feature=+sve -o t1
-          echo "tails: $(./t0) $(./t1)"
-          test "$(./t0)" = "$(./t1)"
+          echo "tails: $(./t0) $(./td) $(SC_SIMD_LEVEL=0 ./td) $(./t1)"
+          test "$(./t0)" = "$(./t1)" && test "$(./t0)" = "$(./td)"
           cat > bench2.spc <<'SPC'
           import std::platform::clock;
 
@@ -902,12 +903,16 @@ jobs:
               return 0;
           }
           SPC
-          ../super-c build bench.spc --profile=release -o b0
-          ../super-c build bench.spc --profile=release --target-feature=+sve -o b1
-          ../super-c build bench2.spc --profile=release -o c0
-          ../super-c build bench2.spc --profile=release --target-feature=+sve -o c1
+          # Off: no run-time copies (the scalar rest); d: the default build (the start-up's SVE test);
+          # 1: built with +sve.
+          for x in bench bench2; do
+            y=$(echo $x | sed 's/bench2/c/; s/bench/b/')
+            ../super-c build $x.spc --profile=release --simd-dispatch=off -o ${y}0
+            ../super-c build $x.spc --profile=release -o ${y}d
+            ../super-c build $x.spc --profile=release --target-feature=+sve -o ${y}1
+          done
           for r in 1 2; do
-            for v in b0 b1 c0 c1; do
+            for v in b0 bd b1 c0 cd c1; do
               echo "== $v round $r"
               "./$v"
             done

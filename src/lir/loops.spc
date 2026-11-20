@@ -330,6 +330,8 @@ pub(package) struct LoopOpt {
     // `tail_lanes`' values in the masked iteration at hand: the bits, then the lane masks, by lanes of 1, 2,
     // 4 and 8 bytes (VNONE: not made yet).
     vtl: [Value; 8],
+    // With `vsve`, the guard's test that the processor has SVE (VNONE: none).
+    vsv: Value,
     vback: u32,
     vxc: Value,
     vxs: bool,
@@ -462,6 +464,9 @@ pub(package) struct LoopOpt {
     /// The target governs vector loads and stores by a lane comparison's predicate (`Cpu.vpred`): a vector
     /// loop of one copy runs what it leaves as one masked iteration (`masked_tail`).
     pub(package) vpred: bool,
+    /// The start-up tests whether the processor has SVE (`Package.sve_byte`) and the body lacks `vpred`: a
+    /// masked last iteration runs where it does (`SYS_SVE`), the scalar loop elsewhere.
+    pub(package) vsve: bool,
     /// The target makes the bits of a 16-byte lane mask of bytes in one instruction (`Package.mask_bits`):
     /// an unbounded scan's lane masks become bits so (`scan_bits`).
     pub(package) vmsk: bool,
@@ -726,6 +731,7 @@ extend LoopOpt {
             vmt: false,
             vtr: VNONE,
             vtl: [VNONE; 8],
+            vsv: VNONE,
             vback: 0,
             vxc: VNONE,
             vxs: true,
@@ -801,6 +807,7 @@ extend LoopOpt {
             vpopcnt: false,
             vtbl: false,
             vpred: false,
+            vsve: false,
             vmsk: false,
             vperm3: 0,
             vsumw: 0,
@@ -6297,12 +6304,17 @@ extend LoopOpt {
             let rem = self.vi(b, Inst { op: O_UREM, ty: qt, aux: 0, a: trips, b: sv, c: 0 }, l0);
             self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: trips, b: rem, c: 0 }, l0)
         };
-        // With a masked last iteration, any iteration enters the vectors.
-        let mut ok = self.vi(
-            b,
-            Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: ast::pick(self.vmt, trips, cnt), b: z, c: 0 },
-            l0,
-        );
+        // With a masked last iteration, any iteration enters the vectors; under a run-time test of SVE
+        // (`vsve`), where the processor has it.
+        self.vsv = VNONE;
+        let mut tc = ast::pick(self.vmt, trips, cnt);
+        if self.vmt && !self.vpred {
+            let sv = self.vi(b, Inst { op: O_SYS, ty: T_I8, aux: SYS_SVE, a: VNONE, b: VNONE, c: VNONE }, l0);
+            let z8 = self.vconst(b, T_I8, 0, l0);
+            self.vsv = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: sv, b: z8, c: 0 }, l0);
+            tc = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: self.vsv, b: trips, c: cnt }, l0);
+        }
+        let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: tc, b: z, c: 0 }, l0);
         for k in 0..self.vca.len() {
             let (alo, ahi) = self.vrange(b, self.vca[k], i0, l0);
             let (blo, bhi) = self.vrange(b, self.vcb[k], i0, l0);
@@ -6470,8 +6482,9 @@ extend LoopOpt {
         }
         let to_vl = b.edge(vl, &self.args);
         if self.vmt {
-            // Fewer iterations than one vector's lanes: the masked one alone (`sp + 2`).
-            let to_mt = b.edge(sp + 2, &self.args);
+            // Fewer iterations than one vector's lanes: the masked one alone (`sp + 2`), past the test of
+            // SVE (`sp + 1`) under a run-time one.
+            let to_mt = b.edge(sp + ast::pick(self.vsv == VNONE, 2u32, 1u32), &self.args);
             let any = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
             let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: any, b: to_vl, c: to_mt }, l0);
         } else {
@@ -7544,7 +7557,7 @@ extend LoopOpt {
     // recurrence, and each reduction's accumulator a lane per iteration, unordered (no dot product, widening
     // sum, counter's lanes, `vak`, or float sum in order, `vord`).
     const fn masked_tail(self: &Self, b: &Body, u: u32, nv: u32) bool {
-        if !self.vpred || nv != 1 || self.vone || self.vlanes < TAIL_LANES || self.vtail || self.vexit || self.vrev || self.vqk != 1 || self.vstrided || self.vgroups || self.vgat.len() != 0 || self.vblk.len() != 0 || self.vfop.len() != 0 || self.vak.len() != 0 || self.vam.len() != 0 {
+        if !(self.vpred || self.vsve) || nv != 1 || self.vone || self.vlanes < TAIL_LANES || self.vtail || self.vexit || self.vrev || self.vqk != 1 || self.vstrided || self.vgroups || self.vgat.len() != 0 || self.vblk.len() != 0 || self.vfop.len() != 0 || self.vak.len() != 0 || self.vam.len() != 0 {
             return false;
         }
         let ub = b.blocks[u as usize];
@@ -7602,11 +7615,15 @@ extend LoopOpt {
             b.params.push(b.params[(vps + q) as usize]);
         }
         let tstart = b.insts.len() as u32;
-        let left = self.vi(
+        let mut left = self.vi(
             b,
             Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vsigned, C_SLT, C_ULT), a: VPARAM | tps, b: self.vn, c: 0 },
             l0,
         );
+        if self.vsv != VNONE {
+            // Without SVE the scalar loop runs the rest, past the vector exit.
+            left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: self.vsv, c: 0 }, l0);
+        }
         self.args.truncate(0);
         for q in 0..np as u32 {
             self.args.push(VPARAM | tps + q);
@@ -7704,7 +7721,7 @@ extend LoopOpt {
         let ops = [pa, m, v];
         let at3 = b.pool_list(ops[0..3]);
         let c = ast::pick(ld, core::SIMD_LOAD_MASKED_PTR, core::SIMD_STORE_MASKED_PTR);
-        let code = (core::OP_SIMD + c as u32) as u16;
+        let code = (core::OP_SIMD + c as u32) as u16 | VOP_PRED;
         return self.vi(b, Inst { op: O_VOP, ty: ast::pick(ld, vt, T_NONE), aux: code, a: at3, b: 3, c: VNONE }, l);
     }
 

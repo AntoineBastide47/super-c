@@ -2748,11 +2748,8 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3 | ast::pick(
-            self.cpu().vpred,
-            lv::FOLD_PRED,
-            0u64,
-        );
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3 | lv::FOLD_PRED;
+        self.cr.lv.pred_all = self.cpu().vpred;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -13241,6 +13238,17 @@ extend Gen {
         }
         if s == SYS_SPIN {
             self.emit(a::ISB);
+            return true;
+        }
+        if s == SYS_SVE {
+            // The start-up's byte `__sc_sve`, through its address slot.
+            let rd = self.def(i) as u32;
+            let os = self.cr.obj().sym("__sc_sve");
+            self.reloc(a::R_GOT_PAGE21, os, 0);
+            self.emit(a::adr(true, rd, 0));
+            self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+            self.emit(a::ldst_uimm(a::M_X, true, rd, rd, 0));
+            self.emit(a::ldst_uimm(a::M_B, true, rd, rd, 0));
             return true;
         }
         if s == SYS_CYCLES || s == SYS_SVL {

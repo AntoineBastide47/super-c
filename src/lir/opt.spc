@@ -1682,6 +1682,7 @@ extend Opt {
         self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
         self.unr.vpred = cpu.vpred;
+        self.unr.vsve = pk.sve_byte && !cpu.vpred;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
         self.unr.vld3 = pk.vec_ld3;
@@ -11927,9 +11928,9 @@ extend Opt {
     }
 
     // Whether masked loads and stores through a pointer alone read mask bits `i`, each as an SVE predicate of
-    // the comparison that makes them (`pred_mask`): the comparison stays, each access compares into its
-    // predicate (`Cpu.vpred`).
-    fn pred_reads(self: &mut Self, b: &Body, i: u32) bool {
+    // the comparison that makes them (`pred_mask`; where the body has SVE, `vpred`, or the access runs only
+    // where the processor has it, `VOP_PRED`): the comparison stays, each access compares into its predicate.
+    fn pred_reads(self: &mut Self, b: &Body, i: u32, vpred: bool) bool {
         let mut n: u32 = 0;
         for j in 0..b.insts.len() as u32 {
             let t = b.insts[j as usize];
@@ -11938,7 +11939,7 @@ extend Opt {
                 if self.uses[q] != i {
                     continue;
                 }
-                if pred_mask(b, t).0 == C_COUNT || b.pool[(t.a + 1) as usize] != i {
+                if pred_mask(b, t).0 == C_COUNT || b.pool[(t.a + 1) as usize] != i || !vpred && (t.aux & VOP_PRED) == 0 {
                     return false;
                 }
                 n += 1;
@@ -11952,7 +11953,7 @@ extend Opt {
     // (`O_VCMP`), widened until each lane holds its bit (`mask_width`; at most 64 bytes), ANDed with each
     // lane's bit (a wide constant, which leaves a loop) and summed (`reduce_add`). Whether it did.
     fn mask_sum(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        if pk.mask_bits || !is_int(t.ty) || pk.cpu_of(b).vpred && self.pred_reads(b, i) {
+        if pk.mask_bits || !is_int(t.ty) || self.pred_reads(b, i, pk.cpu_of(b).vpred) {
             return false;
         }
         let mc = mask_cmp(b, i);

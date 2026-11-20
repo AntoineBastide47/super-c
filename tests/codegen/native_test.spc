@@ -23058,6 +23058,42 @@ b0(v0: ptr, v1: ptr):
     assert_eq(run_native(lir, drv), 0);
 }
 
+// A body compiled without SVE runs masked accesses marked to run only where the processor has it (`.pred`)
+// through SVE predicates, under the start-up's byte `__sc_sve` (`sys.sve`: ADRP, LDR of its address, LDRB);
+// the driver sets the byte as the start-up does (HWCAP_SVE on Linux, 0 elsewhere), and the byte-lane load
+// and store stop at the guard page past the active lanes.
+@test
+fn predicated_accesses_run_under_the_start_up_sve_byte() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @twice fn global
+fn @twice
+  sig (ptr, i8) -> i32
+b0(v0: ptr, v1: i8):
+  v2 = sys.sve.i8
+  v3 = iconst.i8 0
+  v4 = icmp.ne v2, v3
+  br v4, b1, b2
+b1:
+  v5 = splat.v16i8 v1
+  v6 = wconst.v16i8 0x0706050403020100, 0x0f0e0d0c0b0a0908
+  v7 = vop.lt.i16 (v6, v5)
+  v8 = wconst.v16i8 0x0, 0x0
+  v9 = vop.load_masked_ptr.pred.v16i8 (v0, v7, v8)
+  v10 = add.v16i8 v9, v9
+  vop.store_masked_ptr.pred (v0, v7, v10)
+  v11 = iconst.i32 1
+  ret v11
+b2:
+  v12 = iconst.i32 0
+  ret v12
+)";
+    let drv = "#include <stdint.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\n#ifdef __linux__\n#include <sys/auxv.h>\n#endif\nunsigned char __sc_sve;\nint32_t twice(uint8_t *, uint8_t);\nint main(void) {\n#ifdef __linux__\n  __sc_sve = (getauxval(AT_HWCAP) >> 22) & 1;\n#endif\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r;\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(20 + k);\n    if (twice(a, (uint8_t)r) != __sc_sve) return 2;\n    for (int k = 0; k < r; k++) if (a[k] != (__sc_sve ? 2 * (20 + k) : 20 + k)) return 3;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 @test
 fn interleaves_write_over_their_dying_first_operand() {
     let lir = M"(lir ptr 8

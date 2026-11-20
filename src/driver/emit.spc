@@ -9740,6 +9740,12 @@ fn cemit_assemble(
             );
             rg.format_into("{}UL) != 0; }}\n", tgt::DIT_HWCAP_BIT);
         }
+        if cbe::sve_byte(p) {
+            rg.push_str(
+                "unsigned long getauxval(unsigned long);\nunsigned char __sc_sve;\n__attribute__((constructor)) static void __sc_sve_init(void) { __sc_sve = (getauxval(16) & ",
+            );
+            rg.format_into("{}UL) != 0; }}\n", tgt::SVE_HWCAP_BIT);
+        }
         let mut rc = String::from_str("#include \"__sc_fwd.h\"\n");
         rc.push_string(&xall);
         rc.push_str("SC_RT_EXTERNS\nSC_RT_X(__sc_wrap)\n");
@@ -17700,11 +17706,14 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
     if levels {
         simd_level_init(p, int, &mut t);
     }
+    // `getauxval`'s symbol, once.
+    let mut auxv = levels && p.simd_hwcap.len() != 0 && p.find("sc_cpu") < 0;
     if dit_byte(p) {
         // The byte the constant-time bodies read (`Target.dit`): HWCAP_DIT of AT_HWCAP (16).
         let sec = ctor_section(p);
-        if !(levels && p.simd_hwcap.len() != 0 && p.find("sc_cpu") < 0) {
+        if !auxv {
             t.push_str("sym @getauxval fn global ext\n");
+            auxv = true;
         }
         t.format_into(
             "sym @__sc_dit data global\nsym @__sc_dit_init fn local\nsym @__sc_dit_ctor data local used section \"{}\"\n",
@@ -17719,6 +17728,26 @@ fn native_registry(p: &loader::Package, zst: &Vector<u64>, roots: str, out: &mut
         );
         t.push_str("  v7 = symaddr @__sc_dit\n  store v6, v7 align 0\n  ret\ndata @__sc_dit size 1 align 0\n");
         t.format_into("data @__sc_dit_ctor size {} align {} reloc 0 @__sc_dit_init\n", ptr, al);
+    }
+    if cbe::sve_byte(p) {
+        // The byte the masked last iterations test (`lir::ir::SYS_SVE`): HWCAP_SVE of AT_HWCAP (16).
+        let sec = ctor_section(p);
+        if !auxv {
+            t.push_str("sym @getauxval fn global ext\n");
+        }
+        t.format_into(
+            "sym @__sc_sve data global\nsym @__sc_sve_init fn local\nsym @__sc_sve_ctor data local used section \"{}\"\n",
+            sec,
+        );
+        t.push_str(
+            "fn @__sc_sve_init\n  sig () -> void\nb0:\n  v0 = iconst.i64 16\n  v1 = call.i64 @getauxval(v0) : (i64) -> i64\n",
+        );
+        t.format_into(
+            "  v2 = iconst.i64 {}\n  v3 = and.i64 v1, v2\n  v4 = iconst.i64 0\n  v5 = icmp.ne v3, v4\n  v6 = zext.i8 v5\n",
+            tgt::SVE_HWCAP_BIT as i64,
+        );
+        t.push_str("  v7 = symaddr @__sc_sve\n  store v6, v7 align 0\n  ret\ndata @__sc_sve size 1 align 0\n");
+        t.format_into("data @__sc_sve_ctor size {} align {} reloc 0 @__sc_sve_init\n", ptr, al);
     }
     let mut err = String::new();
     let mut ok = false;

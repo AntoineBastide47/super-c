@@ -354,6 +354,9 @@ pub(package) struct Live {
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
     pub(package) fold_max: u32,
+    /// With `FOLD_PRED`: every masked access may take an SVE predicate (the body has SVE), not only those
+    /// that run where the processor has it (`VOP_PRED`).
+    pub(package) pred_all: bool,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
     /// Per instruction, a truncation to 8 or 16 bits that comparisons alone read, more than one, under
@@ -582,6 +585,7 @@ extend Live {
             flag_of: Vector::<u32>::new(),
             late: Vector::<u64>::new(),
             fold_max: 0,
+            pred_all: false,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
             xtrunc: Vector::<bool>::new(),
@@ -1623,7 +1627,7 @@ extend Live {
             self.scan_ops([O_VOP]);
             for q in 0..self.scan.len() {
                 let t = b.insts[self.scan[q] as usize];
-                if pred_mask(b, t).1 != VNONE {
+                if (self.pred_all || (t.aux & VOP_PRED) != 0) && pred_mask(b, t).1 != VNONE {
                     preds.push(b.pool[(t.a + 1) as usize]);
                     if t.ty != T_NONE && zero_vec(b, b.pool[(t.a + 2) as usize]) {
                         zeros.push(b.pool[(t.a + 2) as usize]);

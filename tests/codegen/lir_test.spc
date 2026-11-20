@@ -401,6 +401,7 @@ b0(v0: ptr, v1: i64):
   v16 = sys.xgetbv.i64 v15
   v17 = sys.svl.i64
   v18 = load.v16i8 v0 align 4 block
+  v19 = sys.sve.i8
   ret
 fn @bare
   naked

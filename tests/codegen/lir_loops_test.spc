@@ -27,6 +27,11 @@ fn optimized_fm(text: str, bu: lu::Budgets, fma: bool, fm: u8) (Package, Package
 
 // `optimized_fm` for a processor that predicates vector loads and stores when `vpred` (`Cpu.vpred`).
 fn optimized_cpu(text: str, bu: lu::Budgets, fma: bool, fm: u8, vpred: bool) (Package, Package) {
+    return optimized_sve(text, bu, fma, fm, vpred, false);
+}
+
+// `optimized_cpu` for a build whose start-up tests SVE when `rt` (`Package.sve_byte`).
+fn optimized_sve(text: str, bu: lu::Budgets, fma: bool, fm: u8, vpred: bool, rt: bool) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
@@ -34,6 +39,7 @@ fn optimized_cpu(text: str, bu: lu::Budgets, fma: bool, fm: u8, vpred: bool) (Pa
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.cpu.fma = fma;
     after.cpu.vpred = vpred;
+    after.sve_byte = rt;
     after.fmath = fm;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
@@ -9291,6 +9297,65 @@ b3:
         same_outcome(&b, &a, "sum16", x, n * (n + 1) / 2, false);
         if n < 26 {
             same_outcome(&b, &a, "sum32", x, n * (n + 1) / 2, false);
+        }
+    }
+}
+
+// Where the start-up tests SVE (`Package.sve_byte`) and the body lacks it, the masked last iteration runs
+// under that test (`sys.sve`), its accesses marked to run only there (`.pred`); elsewhere the scalar loop runs
+// the rest, as without it. Both ways end as the scalar loop does.
+@test
+fn masked_last_iterations_run_where_the_start_up_finds_sve() {
+    let src = M"(lir ptr 8
+sym @a data global
+sym @b data global
+sym @add8 fn global
+data @a size 40 align 3 bytes 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627
+data @b size 40 align 3 bytes 302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09
+fn @add8
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = symaddr @a
+  v3 = symaddr @b
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v2, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = ptradd v3, v6 * 1
+  v11 = load.i8 v10 align 0
+  v12 = add.i8 v9, v11
+  store v12, v8 align 0
+  v13 = add.i64 v6, v5
+  jmp b1(v13)
+b3:
+  v14 = ptradd v2, v1 * 1
+  v15 = load.i8 v14 align 0
+  ret v15
+)";
+    let (b, a) = optimized_sve(src, VECTOR, false, 0, false, true);
+    let s = text_of(&a, "add8");
+    assert(
+        s.contains("sys.sve") && count(&s, "load_masked_ptr.pred") == 2 && s.contains("store_masked_ptr.pred"),
+        s.as_str(),
+    );
+    let (_, n) = optimized_sve(src, VECTOR, false, 0, false, false);
+    assert(!text_of(&n, "add8").contains("masked"), text_of(&n, "add8").as_str());
+    for c in 0..41u64 {
+        for j in [0u64, 7, 15, 16, 31, 39] {
+            let x: []u64 = [c, j];
+            let mut e = leval::Eval::new(&b);
+            let o = e.run(b.find_symbol("add8"), x);
+            for sve in [true, false] {
+                let mut e2 = leval::Eval::new(&a);
+                e2.sve = sve;
+                let o2 = e2.run(a.find_symbol("add8"), x);
+                assert(o2.kind == leval::EV_OK && o2.value == o.value, o2.msg.as_str());
+            }
         }
     }
 }

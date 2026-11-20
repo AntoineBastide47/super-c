@@ -1262,9 +1262,12 @@ pub(package) const SYS_CTXSWAP: u16 = 10;
 /// The whole body of a naked function: where a forged context first resumes; it calls the body it
 /// carries with its argument (`target::ctxswitch`).
 pub(package) const SYS_CTXENTRY: u16 = 11;
-pub(package) const SYS_COUNT: u16 = 12;
+/// i8: 1 where the processor has SVE, else 0: the byte `__sc_sve` the start-up sets (`Package.sve_byte`),
+/// which the vectorizer's masked last iterations test (`lir::loops` `masked_last`).
+pub(package) const SYS_SVE: u16 = 12;
+pub(package) const SYS_COUNT: u16 = 13;
 
-const SYS_NAMES: [(str<'static>, u8); 12] = [
+const SYS_NAMES: [(str<'static>, u8); 13] = [
     ("spin", 0),
     ("barrier", 0),
     ("keep", 1),
@@ -1277,6 +1280,7 @@ const SYS_NAMES: [(str<'static>, u8); 12] = [
     ("svl", 0),
     ("ctxswap", 2),
     ("ctxentry", 0),
+    ("sve", 0),
 ];
 
 /// The text of `O_SYS` operation `s`.
@@ -1318,6 +1322,10 @@ pub(package) const VOP_NUMBER: u16 = 4096;
 /// its quieted first operand (`lir::lower` `min_num`): without it the target's choice (x86-64's packed
 /// form gives operand 1, as its scalar one).
 pub(package) const VOP_FIRST: u16 = 8192;
+/// A masked load or store through a pointer that runs only where the processor has SVE (a masked last
+/// iteration under `SYS_SVE`, `lir::loops::masked_last`): its predicate may be SVE's whatever the body's
+/// features (`pred_mask`, `codegen::live::FOLD_PRED`).
+pub(package) const VOP_PRED: u16 = 16384;
 /// `Package.vminnum`: a minimumNumber of float vectors by SIMD_MIN and SIMD_MAX, by VOP_NUM ones of a
 /// quieted operand, or by VOP_NUM ones as they are.
 pub(package) const VMIN_EXACT: u8 = 1;
@@ -2472,6 +2480,9 @@ pub(package) struct Package {
     /// `target::table::Target.dit` of the target: how the arm64 generator turns PSTATE.DIT on in a
     /// constant-time body (`Body.ct`).
     pub(package) dit: u8,
+    /// The start-up stores in the byte `__sc_sve` whether the processor has SVE (`emit::cemit::sve_byte`):
+    /// a body without `Cpu.vpred` runs its vector loops' masked last iterations where it does (`SYS_SVE`).
+    pub(package) sve_byte: bool,
     /// The bodies with a stack canary (`PROTECT_*`).
     pub(package) protect: u8,
     /// How the native backend converts vectors and shifts their lanes (`target::table::Isa`): 0 lane by
@@ -2751,6 +2762,7 @@ extend Package {
             tail: false,
             copy_flags: Vector::<u32>::new(),
             dit: 0,
+            sve_byte: false,
             protect: PROTECT_NONE,
             fmath: 0,
             vec_max: 16,
