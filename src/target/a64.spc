@@ -772,3 +772,29 @@ pub(package) const fn fp_imm8(d: bool, bits: u64) u32 {
 pub(package) const fn fmov_imm(d: bool, rd: u32, imm8: u32) u32 {
     return 0x1E201000 | ftype(d) | imm8 << 13 | rd;
 }
+
+/// SVE PTRUE `pd`.T (element size `sz`: 0 to 3 for bytes to doublewords) of pattern `pat` (`VL1` .. `VL8`
+/// are 1 to 8, `VL16` 9, all 31).
+pub(package) const fn sve_ptrue(sz: u32, pd: u32, pat: u32) u32 {
+    return 0x2518E000 | sz << 22 | pat << 5 | pd;
+}
+
+/// SVE CMPNE `pd`.T, `pg`/z, `zn`.T, #`imm` (a signed 5-bit immediate).
+pub(package) const fn sve_cmpne_imm(sz: u32, pd: u32, pg: u32, zn: u32, imm: i32) u32 {
+    return 0x25008010 | sz << 22 | (imm as u32 & 31) << 16 | pg << 10 | zn << 5 | pd;
+}
+
+/// SVE LD1B, LD1H, LD1W or LD1D (`sz`) {`zt`.T}, `pg`/z, [`xn`]: the inactive elements 0.
+pub(package) const fn sve_ld1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
+    return 0xA400A000 | sz << 23 | sz << 21 | pg << 10 | xn << 5 | zt;
+}
+
+/// SVE ST1B, ST1H, ST1W or ST1D (`sz`) {`zt`.T}, `pg`, [`xn`]: the active elements alone.
+/// SEL zd.T, pv, zn.T, zm.T (T of 1 << `sz` bytes): zn's elements where pv is set, else zm's.
+pub(package) const fn sve_sel(sz: u32, zd: u32, pv: u32, zn: u32, zm: u32) u32 {
+    return 0x0520C000 | sz << 22 | zm << 16 | pv << 10 | zn << 5 | zd;
+}
+
+pub(package) const fn sve_st1(sz: u32, zt: u32, pg: u32, xn: u32) u32 {
+    return 0xE400E000 | sz << 23 | sz << 21 | pg << 10 | xn << 5 | zt;
+}

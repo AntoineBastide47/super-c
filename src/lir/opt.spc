@@ -1683,6 +1683,8 @@ extend Opt {
         }
         self.unr.vpopcnt = cpu.popcnt || copy_pop;
         self.unr.vtbl = cpu.vtbl;
+        self.unr.vpred = cpu.vpred;
+        self.unr.vsve = pk.sve_byte && !cpu.vpred;
         self.unr.vmsk = pk.mask_bits;
         self.unr.vperm3 = cpu.vec_perm3;
         self.unr.vld3 = pk.vec_ld3;
@@ -12066,12 +12068,33 @@ extend Opt {
         return false;
     }
 
+    // Whether masked loads and stores through a pointer alone read mask bits `i`, each as an SVE predicate of
+    // the comparison that makes them (`pred_mask`; where the body has SVE, `vpred`, or the access runs only
+    // where the processor has it, `VOP_PRED`): the comparison stays, each access compares into its predicate.
+    fn pred_reads(self: &mut Self, b: &Body, i: u32, vpred: bool) bool {
+        let mut n: u32 = 0;
+        for j in 0..b.insts.len() as u32 {
+            let t = b.insts[j as usize];
+            lv::uses_edges(b, t, &mut self.uses);
+            for q in 0..self.uses.len() {
+                if self.uses[q] != i {
+                    continue;
+                }
+                if pred_mask(b, t).0 == C_COUNT || b.pool[(t.a + 1) as usize] != i || !vpred && (t.aux & VOP_PRED) == 0 {
+                    return false;
+                }
+                n += 1;
+            }
+        }
+        return n != 0;
+    }
+
     // Mask bits `t` (instruction `i` of block `k`) of a lane-wise comparison (`mask_cmp`), on a target that
     // makes no bits of a lane mask in one instruction (`Package.mask_bits`): the comparison's lane mask
     // (`O_VCMP`), widened until each lane holds its bit (`mask_width`; at most 64 bytes), ANDed with each
     // lane's bit (a wide constant, which leaves a loop) and summed (`reduce_add`). Whether it did.
     fn mask_sum(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
-        if pk.mask_bits || !is_int(t.ty) {
+        if pk.mask_bits || !is_int(t.ty) || self.pred_reads(b, i, pk.cpu_of(b).vpred) {
             return false;
         }
         let mc = mask_cmp(b, i);
@@ -19474,66 +19497,6 @@ const fn droppable(t: Inst) bool {
     ));
 }
 
-// The lane mask whose bits value `v` of `b` is the sum of each lane's bit (`Optimizer::mask_sum`): the lane
-// mask a `reduce_add` of its AND with the lanes' bits reads. VNONE when it is none.
-const fn bits_mask(b: &Body, v: Value) Value {
-    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
-        return VNONE;
-    }
-    let t = b.insts[v as usize];
-    if t.op != O_VOP || t.b != 1 || (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
-        return VNONE;
-    }
-    let a = b.pool[t.a as usize];
-    if (a & (VPARAM | VFLAG)) != 0 || b.insts[a as usize].op != O_AND {
-        return VNONE;
-    }
-    let at = b.insts[a as usize];
-    let wt = at.ty;
-    let n = lanes(wt);
-    let w = type_bytes(lane_type(wt), 8);
-    let mut words: [u64; 8] = [0; 8];
-    if n * w % 8 != 0 || !vec_words(b, at.b, wt, &mut words) || !lane_mask(b, at.a, 4) {
-        return VNONE;
-    }
-    let per = 8 / w;
-    for qw in 0..n * w / 8 {
-        let mut word: u64 = 0;
-        for l in 0..per {
-            word |= 1u64 << (qw * per + l) as u64 << (8 * w * l) as u64;
-        }
-        if words[qw as usize] != word {
-            return VNONE;
-        }
-    }
-    return at.a;
-}
-
-// The comparison whose mask bits value `m` of `b` is: a `vop` comparison (`SIMD_CMP_EQ` .. `SIMD_CMP_GE`)
-// of two vectors of one type, of a condition one `O_VCMP` takes; its condition and operands.
-const fn mask_cmp(b: &Body, m: Value) Option<(u16, Value, Value)> {
-    if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
-        return None;
-    }
-    let t = b.insts[m as usize];
-    let code = (t.aux & VOP_CODE) as u32;
-    if t.op != O_VOP || t.b != 2 || t.c != VNONE || code < core::OP_SIMD + core::SIMD_CMP_EQ as u32 || code > core::OP_SIMD + core::SIMD_CMP_GE as u32 {
-        return None;
-    }
-    let p = b.pool[t.a as usize];
-    let q = b.pool[(t.a + 1) as usize];
-    let tp = b.type_of(p);
-    if !is_vec(tp) || b.type_of(q) != tp || is_vec(t.ty) {
-        return None;
-    }
-    let lt = lane_type(tp);
-    let c = simd_cond((code - core::OP_SIMD) as u8, (t.aux & VOP_SIGNED) != 0, is_float(lt));
-    if !vcmp_ok(c, lt) {
-        return None;
-    }
-    return Some((c, p, q));
-}
-
 // ---- Folding ------------------------------------------------------------------------------------------
 
 // `umax_of` looks through at most UMAX_DEPTH instructions.
@@ -20342,38 +20305,6 @@ const fn lanes_are(b: &Body, v: Value, vt: u8, k: u64) bool {
         if w[q as usize] != e {
             return false;
         }
-    }
-    return true;
-}
-
-// The 8-byte words of vector constant `v` of `b` of type `vt` (a multiple of 8 bytes, at most 64), in
-// `out`: a wide constant's, or a splat of an integer constant's. Whether it is one.
-const fn vec_words(b: &Body, v: Value, vt: u8, out: &mut [u64; 8]) bool {
-    if (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    let nw = type_bytes(vt, 8) / 8;
-    if t.op == O_WCONST && t.b == nw {
-        for q in 0..nw {
-            out[q as usize] = b.words[(t.a + q) as usize];
-        }
-        return true;
-    }
-    if t.op != O_SPLAT {
-        return false;
-    }
-    let c = int_bits(b, t.a);
-    if c.is_none() {
-        return false;
-    }
-    let bits = 8 * type_bytes(lane_type(vt), 8);
-    let mut w: u64 = 0;
-    for l in 0..64 / bits {
-        w |= trunc_bits(c.unwrap(), bits) << (l * bits) as u64;
-    }
-    for q in 0..nw {
-        out[q as usize] = w;
     }
     return true;
 }

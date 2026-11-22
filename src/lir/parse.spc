@@ -1215,6 +1215,10 @@ extend<'a> Parser<'a> {
                 t.aux |= VOP_FIRST;
                 pi += 1;
             }
+            if pi < self.parts.len() && self.parts[pi] == "pred" {
+                t.aux |= VOP_PRED;
+                pi += 1;
+            }
         }
         if op == O_ACAS {
             t.ty = T_I8;

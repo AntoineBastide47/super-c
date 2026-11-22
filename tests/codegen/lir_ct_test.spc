@@ -190,9 +190,13 @@ b0(v0: ptr, v1: i64):
   v14 = call.v4i32 @_mm_aesenc_si128(v10, v2) : (v4i32, v4i32) -> v4i32
   v15 = call.v4i32 @_mm_sha256rnds2_epu32(v10, v2, v2) : (v4i32, v4i32, v4i32) -> v4i32
   v16 = call.v4i32 @_mm_mullo_epi32(v10, v2) : (v4i32, v4i32) -> v4i32
-  v17 = call.i64 @help(v4) : (i64) -> i64
-  v18 = public.i64 v17
-  ret v18
+  v17 = trunc.i8 v1
+  vop.store_masked_ptr (v0, v17, v3)
+  v18 = trunc.i8 v4
+  vop.store_masked_ptr (v0, v18, v3)
+  v19 = call.i64 @help(v4) : (i64) -> i64
+  v20 = public.i64 v19
+  ret v20
 fn @help
   sig (i64) -> i64
 b0(v0: i64):
@@ -237,8 +241,9 @@ fn hw_rules(isa: str<'static>) String {
     return got;
 }
 
-// A secret goes to a wrapping add, a bitwise operation, a shift by a public count and a fixed swizzle, not
-// to a shift by a secret count, a minimum or a reduction; to an intrinsic whose instructions the
+// A secret goes to a wrapping add, a bitwise operation, a shift by a public count, a fixed swizzle and a
+// masked store by a public mask, not to a shift by a secret count, a minimum, a reduction or a masked store
+// by a secret mask; to an intrinsic whose instructions the
 // target lists (arm64's AESE; x86-64's AESENC, and SHA256RNDS2 with its register copies), not to another
 // (SHA1H's FMOV, PMULLD) or to another target's; and to a body, which is then checked with that
 // parameter secret, as are the bodies it passes it to: `@help` branches on it but returns it, and `@deep`
@@ -248,15 +253,24 @@ fn secrets_reach_listed_instructions_plain_vector_operations_and_bodies() {
     let tail = format("help: br:{}\ndeep: udiv:{} udiv:{}\n", lct::R_BRANCH, lct::R_DIV, lct::R_DIV);
     let vops = format("k: vop:{} vop:{} vop:{}", lct::R_VOP, lct::R_VOP, lct::R_VOP);
     let a64 = format(
-        "{} call:{} call:{} call:{} call:{}\n{}",
+        "{} call:{} call:{} call:{} call:{} vop:{}\n{}",
         vops,
         lct::R_CALL,
         lct::R_CALL,
         lct::R_CALL,
         lct::R_CALL,
+        lct::R_VOP,
         tail,
     );
     assert_eq(hw_rules("aarch64").as_str(), a64.as_str());
-    let x64 = format("{} call:{} call:{} call:{}\n{}", vops, lct::R_CALL, lct::R_CALL, lct::R_CALL, tail);
+    let x64 = format(
+        "{} call:{} call:{} call:{} vop:{}\n{}",
+        vops,
+        lct::R_CALL,
+        lct::R_CALL,
+        lct::R_CALL,
+        lct::R_VOP,
+        tail,
+    );
     assert_eq(hw_rules("x86_64").as_str(), x64.as_str());
 }

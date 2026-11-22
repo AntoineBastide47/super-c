@@ -246,7 +246,11 @@ extend Verifier {
         if t.a != VNONE != n > 0 || t.b != VNONE != n > 1 || t.c != VNONE != n > 2 {
             return self.fail_at(name, b, i, "a system operation takes its operands and no other");
         }
-        let res = ast::pick(s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL, T_I64, T_NONE);
+        let res = if s == SYS_SVE {
+            T_I8
+        } else {
+            ast::pick(s == SYS_CYCLES || s == SYS_GSLOAD || s == SYS_XGETBV || s == SYS_SVL, T_I64, T_NONE)
+        };
         let ok = if s == SYS_FPSAVE {
             ta == T_PTR
         } else if s == SYS_GSLOAD {

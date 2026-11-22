@@ -86,6 +86,11 @@ pub(package) const FOLD_MOVBE: u64 = 288230376151711744;
 /// A load that de-interleaving shuffles of a group of three alone read (`Live::ld3_field`): each shuffle
 /// loads the group itself (arm64's `ld3`).
 pub(package) const FOLD_LD3: u64 = 576460752303423488;
+/// The mask bits that masked loads and stores through a pointer alone read (`pred_mask`) and what makes
+/// them: a lane comparison, which each access makes into a predicate itself (arm64 SVE's CMPHI and the
+/// like), or the sum and the AND of a lane mask, each access's predicate the lane mask's (CMPNE). A vector
+/// of zeros those loads alone read as their fallback, which their predicated loads give.
+pub(package) const FOLD_PRED: u64 = 1152921504606846976;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
@@ -350,6 +355,9 @@ pub(package) struct Live {
     /// load or store takes its address `ptradd`'s operands (`fold`), and whether the `ptradd` emits nothing
     /// for that (`pfold`; `uses_at`).
     pub(package) fold_max: u32,
+    /// With `FOLD_PRED`: every masked access may take an SVE predicate (the body has SVE), not only those
+    /// that run where the processor has it (`VOP_PRED`).
+    pub(package) pred_all: bool,
     pub(package) fold: Vector<bool>,
     pub(package) pfold: Vector<bool>,
     /// Per instruction, a truncation to 8 or 16 bits that comparisons alone read, more than one, under
@@ -582,6 +590,7 @@ extend Live {
             flag_of: Vector::<u32>::new(),
             late: Vector::<u64>::new(),
             fold_max: 0,
+            pred_all: false,
             fold: Vector::<bool>::new(),
             pfold: Vector::<bool>::new(),
             xtrunc: Vector::<bool>::new(),
@@ -813,8 +822,9 @@ extend Live {
         self.rare_blocks(b);
         self.loops(b);
         self.frequencies(b);
-        self.folds(b);
+        // Before the folds, which read it (`pred_sels`).
         self.def_blocks(b, b.insts.len() + b.params.len());
+        self.folds(b);
     }
 
     // `def_blk` for the `n` value indexes of `b`: each instruction's and block parameter's block (NONE for
@@ -1618,6 +1628,65 @@ extend Live {
                 self.pfold[masks[k] as usize] = true;
             }
             k = e;
+        }
+        if (self.fold_ops & FOLD_PRED) != 0 {
+            let mut preds = Vector::<Value>::new();
+            let mut zeros = Vector::<Value>::new();
+            self.scan_ops([O_VOP]);
+            for q in 0..self.scan.len() {
+                let t = b.insts[self.scan[q] as usize];
+                if (self.pred_all || (t.aux & VOP_PRED) != 0) && pred_mask(b, t).1 != VNONE {
+                    preds.push(b.pool[(t.a + 1) as usize]);
+                    if t.ty != T_NONE && zero_vec(b, b.pool[(t.a + 2) as usize]) {
+                        zeros.push(b.pool[(t.a + 2) as usize]);
+                    }
+                }
+            }
+            preds.sort();
+            let mut k: usize = 0;
+            while k < preds.len() {
+                let mut e = k + 1;
+                while e < preds.len() && preds[e] == preds[k] {
+                    e += 1;
+                }
+                if (e - k) as u32 == self.count[preds[k] as usize] && self.pred_chain(b, preds[k], false) {
+                    let _ = self.pred_chain(b, preds[k], true);
+                }
+                k = e;
+            }
+            // A lane comparison that selects alone read, each after an access of its block that takes it as its
+            // predicate, folds: the select is SVE's SEL by that predicate.
+            let mut sels = Vector::<Value>::new();
+            let mut done = NONE;
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let k = self.def_blk[i as usize];
+                if k != done && self.pred_folded(b, b.insts[i as usize]) {
+                    self.pred_sels(b, k, &mut sels);
+                    done = k;
+                }
+            }
+            sels.sort();
+            k = 0;
+            while k < sels.len() {
+                let mut e = k + 1;
+                while e < sels.len() && sels[e] == sels[k] {
+                    e += 1;
+                }
+                self.pfold[sels[k] as usize] = (e - k) as u32 == self.count[sels[k] as usize];
+                k = e;
+            }
+            // A zero fallback folds where every load that reads it folds its mask.
+            zeros.sort();
+            k = 0;
+            while k < zeros.len() {
+                let mut e = k + 1;
+                while e < zeros.len() && zeros[e] == zeros[k] {
+                    e += 1;
+                }
+                self.pfold[zeros[k] as usize] = (e - k) as u32 == self.count[zeros[k] as usize];
+                k = e;
+            }
         }
         if (self.fold_ops & FOLD_FREE_ZEXT) != 0 {
             // A truncation's uses as a select's side its condition bounds (`bounded_side`).
@@ -3333,6 +3402,64 @@ extend Live {
         return (self.fold_ops & f) != 0 && (lane_mask(b, v, MASK_DEPTH) || (self.fold_ops & FOLD_ANY_BITS) != 0 && is_int(
             lane_type(b.type_of(v)),
         ));
+    }
+
+    // Whether masked access `t` takes an SVE predicate (`FOLD_PRED`): its mask bits fold.
+    const fn pred_folded(self: &Self, b: &Body, t: Inst) bool {
+        if t.op != O_VOP || !self.pred_all && (t.aux & VOP_PRED) == 0 || pred_mask(b, t).1 == VNONE {
+            return false;
+        }
+        let m = b.pool[(t.a + 1) as usize];
+        return is_inst(m) && self.pfold[m as usize];
+    }
+
+    // Into `out`, the lane comparisons of block `k` that its selects read after a masked access whose folded
+    // predicate (`pred_folded`, `pred_mask`) is that comparison, with no call or other predicate between: p0
+    // holds it there.
+    const fn pred_sels(self: &Self, b: &Body, k: u32, out: &mut Vector<Value>) {
+        let bk = b.blocks[k as usize];
+        let mut key: (u16, Value, Value) = (C_COUNT, VNONE, VNONE);
+        for j in bk.start..bk.start + bk.len {
+            let t = b.insts[j as usize];
+            if t.op == O_CALL || t.op == O_CALLIND || t.op == O_ASM {
+                key = (C_COUNT, VNONE, VNONE);
+            } else if self.pred_folded(b, t) {
+                key = pred_mask(b, t);
+            } else if t.op == O_VSEL && is_inst(t.a) && key.0 != C_COUNT {
+                let c = b.insts[t.a as usize];
+                if c.op == O_VCMP && c.aux == key.0 && c.a == key.1 && c.b == key.2 {
+                    out.push(t.a);
+                }
+            }
+        }
+    }
+
+    // Whether the instructions that make mask bits `m` (`pred_mask`: extensions and truncations, then a lane
+    // comparison, or the lanes' sum and the AND of a lane mask with their bits) have no other reader than the
+    // next of them, and with `mark`, fold them (`FOLD_PRED`), the AND's constant too when it alone reads it.
+    const fn pred_chain(self: &mut Self, b: &Body, m: Value, mark: bool) bool {
+        let mut x = m;
+        // At most 6 extensions and truncations (`pred_mask`), the comparison or the sum and the AND.
+        for _ in 0..8 {
+            if x != m && self.count[x as usize] != 1 {
+                return false;
+            }
+            if mark {
+                self.pfold[x as usize] = true;
+            }
+            let t = b.insts[x as usize];
+            if t.op == O_AND {
+                if mark && is_inst(t.b) && self.count[t.b as usize] == 1 {
+                    self.pfold[t.b as usize] = true;
+                }
+                return true;
+            }
+            if t.op == O_VOP && (t.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 {
+                return true;
+            }
+            x = ast::pick(t.op == O_VOP, b.pool[t.a as usize], t.a);
+        }
+        return false;
     }
 
     // Whether `v` is an equality with 0 of an `and` `FOLD_TST` folds, which this use alone reads: a chain's
@@ -7597,26 +7724,6 @@ pub(package) fn dead_end(p: &Package, b: &Body, lv: &Live, i: usize, uses: &mut 
             if !remat_inst(p, b, uses[u]) {
                 return false;
             }
-        }
-    }
-    return true;
-}
-
-// Whether `v` is a vector of zeros: a splat of 0 or a wide constant of zero words.
-const fn zero_vec(b: &Body, v: Value) bool {
-    if v == VNONE || (v & (VPARAM | VFLAG)) != 0 {
-        return false;
-    }
-    let t = b.insts[v as usize];
-    if t.op == O_SPLAT {
-        return int_const(b, t.a) == 0;
-    }
-    if t.op != O_WCONST {
-        return false;
-    }
-    for k in t.a..t.a + t.b {
-        if b.words[k as usize] != 0 {
-            return false;
         }
     }
     return true;

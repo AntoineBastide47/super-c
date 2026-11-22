@@ -43,6 +43,30 @@ const ZERO_QUADS: u32 = 8;
 const V0: u8 = 32; // register number of v0: x registers are 0..31
 
 // The register number of part `pa`.
+// The SVE comparison into p0 governed by p7 of each LIR condition (`C_*` order; `pred_mask` takes an integer
+// one, or a float `oeq`, `une`, `olt` .. `oge`): its encoding of p0, p7 and size 0, and whether its operands
+// swap (`a < b` is `b > a`); 0 for none.
+const SVE_CMP: [(u32, bool); 18] = [
+    (0x2400A000, false), // eq: CMPEQ
+    (0x2400A010, false), // ne: CMPNE
+    (0x24008010, true), // slt: CMPGT
+    (0x24008000, true), // sle: CMPGE
+    (0x24008010, false), // sgt
+    (0x24008000, false), // sge
+    (0x24000010, true), // ult: CMPHI
+    (0x24000000, true), // ule: CMPHS
+    (0x24000010, false), // ugt
+    (0x24000000, false), // uge
+    (0x65006000, false), // oeq: FCMEQ
+    (0, false), // one
+    (0x65004010, true), // olt: FCMGT
+    (0x65004000, true), // ole: FCMGE
+    (0x65004010, false), // ogt
+    (0x65004000, false), // oge
+    (0, false), // ueq
+    (0x65006010, false), // une: FCMNE
+];
+
 const fn preg(pa: ab::Part) u8 {
     return pa.reg + ast::pick(pa.v, V0, 0);
 }
@@ -212,6 +236,15 @@ pub(package) struct Gen {
     zreg: u8,
     zwide: bool,
     zat: u32,
+    // The lane mask whose SVE predicate p0 holds at element size `psz` (`masked_pred`; VNONE: none), set at
+    // word `pat` of the current block: a later access of its block takes it while no call came between.
+    pv: Value,
+    psz: u32,
+    pat: u32,
+    // The comparison p0 holds (`pred_mask`: its code and operands; C_COUNT: lane mask `pa`'s nonzero lanes).
+    pc: u16,
+    pa: Value,
+    pb: Value,
     fix: Vector<u64>, // word << 32 | block: a branch to patch
     // A conditional branch to a block is an inverted one over a `B`: the function is past the 1 MiB a
     // conditional branch reaches (`func`).
@@ -348,6 +381,12 @@ extend Gen {
             zreg: NOREG,
             zwide: false,
             zat: 0,
+            pv: VNONE,
+            psz: 0,
+            pat: 0,
+            pc: C_COUNT,
+            pa: VNONE,
+            pb: VNONE,
             fix: Vector::<u64>::new(),
             far: false,
             shrink: false,
@@ -2712,7 +2751,8 @@ extend Gen {
         let b = self.cr.b();
         self.cr.lv.fold_max = 16;
         self.cr.lv.three = true;
-        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3;
+        self.cr.lv.fold_ops = lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_MADD | lv::FOLD_UBFX | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_CCMP | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_CSEL | lv::FOLD_MULL | lv::FOLD_SHOP | lv::FOLD_FCMP | lv::FOLD_NOT | lv::FOLD_XBFX | lv::FOLD_BFI | lv::FOLD_XIDX | lv::FOLD_VMLA | lv::FOLD_VWADD | lv::FOLD_VSHIMM_ALL | lv::FOLD_TRUNC | lv::FOLD_TRUNC_ONCE | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_LANE_MUL | lv::FOLD_ZSHL | lv::FOLD_LANE_PAIR | lv::FOLD_XUSE | lv::FOLD_VIEW | lv::FOLD_FJOIN | lv::FOLD_LD3 | lv::FOLD_PRED;
+        self.cr.lv.pred_all = self.cpu().vpred;
         self.cr.lv.ext_args = self.apple;
         // A compilation again (`again`: without shrink-wrapping, or with far branches) keeps the relays, the
         // canary and the analysis of the body but its layout.
@@ -3023,7 +3063,49 @@ extend Gen {
 
     // Whether a code word before `to` is a `BL` or a `BLR`.
     const fn calls_before(self: &Self, to: u32) bool {
-        for w in 0..to {
+        return self.calls_in(0, to);
+    }
+
+    // Whether a code word from `from` to `to` is a `BL` or a `BLR`.
+    // p0 = comparison `c` of the vectors `v` and `w` of `n` lanes of 1 << `sz` bytes (`pred_mask`), or (`c`
+    // C_COUNT) lane mask `v`'s nonzero lanes, under PTRUE p7 of those lanes.
+    fn set_pred(self: &mut Self, c: u16, v: Value, w: Value, sz: u32, n: u32) {
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        // PTRUE's patterns VL1 to VL8 are 1 to 8, VL16 is 9.
+        self.emit(a::sve_ptrue(sz, 7, ast::pick(n <= 8, n, 9u32)));
+        if c != C_COUNT {
+            let rw = self.vec_use(w, V0 + 31) as u32 - V0 as u32;
+            let (base, swap) = SVE_CMP[c as usize];
+            self.emit(base | sz << 22 | ast::pick(swap, rm, rw) << 16 | 7u32 << 10 | ast::pick(swap, rw, rm) << 5);
+        } else {
+            self.emit(a::sve_cmpne_imm(sz, 0, 7, rm, 0));
+        }
+        self.pv = VNONE;
+        self.psz = sz;
+        self.pat = self.code.len() as u32;
+        self.pc = c;
+        self.pa = v;
+        self.pb = w;
+    }
+
+    // Whether p0 holds lane mask `m` at element size `sz`: the comparison or the lane mask whose predicate
+    // a masked access of the block set (`pv`, `pc`), no call between.
+    const fn holds_pred(self: &Self, m: Value, sz: u32) bool {
+        if self.pa == VNONE || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            return false;
+        }
+        if self.pc == C_COUNT {
+            return m == self.pa;
+        }
+        if (m & (VPARAM | VFLAG)) != 0 || m == VNONE {
+            return false;
+        }
+        let t = self.cr.b().insts[m as usize];
+        return t.op == O_VCMP && t.aux == self.pc && t.a == self.pa && t.b == self.pb;
+    }
+
+    const fn calls_in(self: &Self, from: u32, to: u32) bool {
+        for w in from..to {
             let x = self.code[w as usize];
             if (x & 0xFC000000) == 0x94000000 || (x & 0xFFFFFC1F) == 0xD63F0000 {
                 return true;
@@ -3448,6 +3530,8 @@ extend Gen {
         }
         self.cr.pos = q;
         self.btest_x = NONE;
+        self.pv = VNONE;
+        self.pa = VNONE;
         let k = self.cr.lv.order[q as usize];
         let b = self.cr.b();
         self.blk_at[k as usize] = self.code.len() as u32;
@@ -4004,7 +4088,9 @@ extend Gen {
             return true;
         }
         if (op == O_SPLAT || op == O_WCONST) && self.cr.lv.pfold[i as usize] {
-            return true; // its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`)
+            // Its shifts take it as an immediate (`lv::FOLD_VSHIMM_ALL`), or the masked loads it is the
+            // fallback of zero their other lanes themselves (`lv::FOLD_PRED`).
+            return true;
         }
         if op == O_VEXTRACT && self.cr.lv.pfold[i as usize] {
             return true; // its splat reads the lane (`lv::FOLD_LANE`)
@@ -4055,7 +4141,10 @@ extend Gen {
             return true;
         }
         if op == O_VCMP {
-            self.vcmp(i, t);
+            // Unless SVE selects read it alone (`lv::Live::pred_sels`).
+            if !self.cr.lv.pfold[i as usize] {
+                self.vcmp(i, t);
+            }
             return true;
         }
         if op == O_VSEL {
@@ -4305,6 +4394,9 @@ extend Gen {
             return self.sys(i, t);
         }
         if op == O_ASM {
+            // Its clobbers may take the predicates.
+            self.pv = VNONE;
+            self.pa = VNONE;
             return self.asm_inst(i, t);
         }
         if op == O_VAEND {
@@ -10750,6 +10842,21 @@ extend Gen {
     // each lane's bits.
     fn vsel(self: &mut Self, i: u32, t: Inst) {
         let nb = type_bytes(t.ty, 8);
+        let sz = type_bytes(lane_type(t.ty), 8).trailing_zeros() as u32;
+        let folded = (t.a & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[t.a as usize];
+        if folded || in_vreg(t.ty) && self.holds_pred(t.a, sz) {
+            // The lanes p0 holds since a masked access of the block (`masked_pred`; for a folded lane
+            // comparison, `lv::Live::pred_sels`, made again after a call): SVE's SEL.
+            if folded && !self.holds_pred(t.a, sz) {
+                let c = self.cr.b().insts[t.a as usize];
+                self.set_pred(c.aux, c.a, c.b, sz, lanes(t.ty));
+            }
+            let rn = self.vec_use(t.b, V0 + 30) as u32 - V0 as u32;
+            let rm = self.vec_use(t.c, V0 + 31) as u32 - V0 as u32;
+            let rd = self.def_step(i) as u32 - V0 as u32;
+            self.emit(a::sve_sel(sz, rd, 0, rn, rm));
+            return;
+        }
         if in_vreg(t.ty) {
             self.neon_reg(a::v3op(false, a::V3_EOR, 1, 0, 0, 0), i, t.b, t.c, t.a, nb);
             return;
@@ -11382,6 +11489,9 @@ extend Gen {
 
     // A portable vector operation (`O_VOP`).
     fn vop(self: &mut Self, i: u32, t: Inst) bool {
+        if self.cr.lv.pfold[i as usize] {
+            return true; // the sum of a lane mask's bits its masked accesses read (`lv::FOLD_PRED`)
+        }
         let code = (t.aux & VOP_CODE) as u32;
         let sg = (t.aux & VOP_SIGNED) != 0;
         let dsg = (t.aux & VOP_DSIGNED) != 0;
@@ -12369,6 +12479,10 @@ extend Gen {
     // per lane the mask sets (each without a test for a constant mask), the lane's bytes through a
     // general register and INS or UMOV; lane 0 by LD1 or ST1 of one lane at the pointer.
     fn masked_in_reg(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        if (ops[1] & (VPARAM | VFLAG)) == 0 && self.cr.lv.pfold[ops[1] as usize] {
+            self.masked_pred(i, store, ops, tys);
+            return;
+        }
         let vt = tys[2];
         let lt = lane_type(vt);
         let eb = type_bytes(lt, 8);
@@ -12420,6 +12534,43 @@ extend Gen {
             if !known {
                 self.here(w0);
             }
+        }
+    }
+
+    // Masked load (into vector `i`) or `store` through a pointer whose mask an SVE predicate governs
+    // (`lv::FOLD_PRED`, `pred_mask`): PTRUE of the vector's lanes into p7, then into p0 the lane comparison
+    // whose bits the mask is (`SVE_CMP`), or CMPNE of the lane mask's lanes, unless p0 holds them already
+    // (`pv`); then LD1 (a lane mask's fallback lanes where it is 0, by BIF) or ST1.
+    fn masked_pred(self: &mut Self, i: u32, store: bool, ops: &[Value; 4], tys: &[u8; 4]) {
+        let vt = tys[2];
+        let nb = type_bytes(vt, 8);
+        let sz = type_bytes(lane_type(vt), 8).trailing_zeros() as u32;
+        let n = lanes(vt);
+        let (c, v, w) = pred_mask(self.cr.b(), self.cr.b().insts[i as usize]);
+        let rm = self.vec_use(v, V0 + 30) as u32 - V0 as u32;
+        let p = self.reg(ops[0]) as u32;
+        if self.pv != ops[1] || self.psz != sz || self.calls_in(self.pat, self.code.len() as u32) {
+            self.set_pred(c, v, w, sz, n);
+            self.pv = ops[1];
+        }
+        if store {
+            let rv = self.vec_use(ops[2], V0 + 31);
+            self.emit(a::sve_st1(sz, rv - V0, 0, p));
+            return;
+        }
+        if zero_vec(self.cr.b(), ops[2]) {
+            let rd = self.vec_def(i);
+            self.emit(a::sve_ld1(sz, rd - V0, 0, p));
+            return;
+        }
+        let rf = self.vec_use(ops[2], V0 + 31);
+        let x = self.tmp(true);
+        self.emit(a::sve_ld1(sz, x - V0, 0, p));
+        // BIF x, rf, rm: rf's lanes where rm's are 0.
+        self.emit(0x2EE01C00 | a::on(nb == 16, 1u32 << 30) | rm << 16 | (rf - V0) as u32 << 5 | (x - V0) as u32);
+        let rd = self.vec_def(i);
+        if rd != x {
+            self.emit(a::vmov(nb == 16, rd - V0, x - V0));
         }
     }
 
@@ -13192,6 +13343,25 @@ extend Gen {
         }
         if s == SYS_SPIN {
             self.emit(a::ISB);
+            return true;
+        }
+        if s == SYS_SVE {
+            // The start-up's byte `__sc_sve`: through its address slot where another object may interpose
+            // it (`got_global`), else at its page offset.
+            let rd = self.def(i) as u32;
+            let os = self.cr.obj().sym("__sc_sve");
+            let got = self.elf && unsafe (*self.pkg).pic;
+            self.reloc(ast::pick(got, a::R_GOT_PAGE21, a::R_PAGE21), os, 0);
+            self.emit(a::adr(true, rd, 0));
+            if got {
+                self.reloc(a::R_GOT_PAGEOFF12, os, 0);
+                self.emit(a::ldst_uimm(a::M_X, true, rd, rd, 0));
+            } else {
+                self.reloc(a::R_PAGEOFF12, os, 0);
+            }
+            // LDRB zero-extends.
+            self.emit(a::ldst_uimm(a::M_B, true, rd, rd, 0));
+            self.cr.va.index_mut(i as usize).clean = true;
             return true;
         }
         if s == SYS_CYCLES || s == SYS_SVL {

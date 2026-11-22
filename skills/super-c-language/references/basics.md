@@ -466,7 +466,8 @@ generates for it, after the optimizer (error 558), also when nothing calls it: n
 address or size, division or remainder, float operation, atomic, system call, indirect call or select
 of a float or a vector depends on a secret; a vector operation on one only when it is a plain one
 (integer casts, wrapping `+ - *` and negation, shifts by a public count, bit casts, halves, joins,
-lane moves by constant lanes) or an intrinsic whose every instruction the vendor lists as
+lane moves by constant lanes, masked loads and stores through a pointer by a public mask and
+pointer) or an intrinsic whose every instruction the vendor lists as
 data-independent in time (Arm's DIT list, Intel's DOIT list: `Isa.const_time`); a secret passes to a
 direct call only where the callee, checked with those parameters secret, keeps the rules, and returns
 only inside a `Secret`. Only such a function reads a secret (std's `Secret` methods are

@@ -255,6 +255,8 @@ pub(package) const DIT_ALWAYS: u8 = 1;
 pub(package) const DIT_HWCAP: u8 = 2;
 /// The kernel's HWCAP_DIT (arch/arm64/include/uapi/asm/hwcap.h).
 pub(package) const DIT_HWCAP_BIT: u64 = 1u64 << 24;
+/// HWCAP_SVE of AT_HWCAP (arch/arm64/include/uapi/asm/hwcap.h): `Target.sve_hwcap`.
+pub(package) const SVE_HWCAP_BIT: u64 = 1u64 << 22;
 
 pub(package) struct Target {
     pub(package) isa: u8,
@@ -290,6 +292,10 @@ pub(package) struct Target {
     /// `DIT_NONE`, `DIT_ALWAYS` (every CPU of the target has FEAT_DIT), or `DIT_HWCAP` (where the
     /// kernel's HWCAP bit `DIT_HWCAP_BIT` reports it: the start-up stores it in the byte `__sc_dit`).
     pub(package) dit: u8,
+    /// The kernel reports SVE in bit `SVE_HWCAP_BIT` of `getauxval(AT_HWCAP)`: a native build without `sve`
+    /// stores it at start-up in the byte `__sc_sve`, which its vector loops' masked last iterations test
+    /// (`lir::ir::SYS_SVE`).
+    pub(package) sve_hwcap: bool,
     /// The `-mcpu` of a build with aarch64 features beyond the baseline, empty for `-march`.
     pub(package) mcpu: str<'static>,
     pub(package) apple_sdk: str<'static>, // the Apple SDK platform name of a `SYSROOT_APPLE` system
@@ -664,6 +670,7 @@ const fn row(isa: u8, cc: u8, obj: u8, os: u8, triple: str<'static>, cenv: u8) T
         run_time_hwcap: [0, 0, 0, 0],
         outline_atomics: false,
         dit: DIT_NONE,
+        sve_hwcap: false,
         mcpu: "",
         apple_sdk: "",
         cenv: cenv,
@@ -728,6 +735,7 @@ const fn targets() [Target; 11] {
     // The kernel's HWCAP_ATOMICS, HWCAP_LRCPC and HWCAP2_CSSC (arch/arm64/include/uapi/asm/hwcap.h).
     linux_a64.run_time_hwcap = [1u64 << 8 | 1u64 << 15, 0, 1u64 << 8 | 1u64 << 15, 1u64 << 34];
     linux_a64.dit = DIT_HWCAP;
+    linux_a64.sve_hwcap = true;
     let mut android_x86 = x86(
         row(ISA_X86, CC_SYSV, OBJ_ELF, OS_ANDROID, "x86_64-linux-android24", 6),
         "sse2 sse3 ssse3 sse4.1 sse4.2 popcnt cx16",

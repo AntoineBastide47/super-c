@@ -98,8 +98,15 @@ const VBYTES: u32 = 16;
 // The blocks of a chain unroll and jam takes before or after the inner loop (`jam_chain`).
 const JAM_CHAIN: u32 = 4;
 // The fewest lanes an iteration of an interleaved vector loop covers (lanes times copies) for one vector at a
-// time to run what it leaves, as LLVM's vectorizer chooses: past fewer, at most a few scalar iterations are left.
+// time to run what it leaves, as LLVM's vectorizer chooses: past fewer, at most a few scalar iterations are left
+// (but where one masked iteration runs the rest, `masked_tail`).
 const EPI_LANES: u32 = 16;
+// `zero_lanes` follows at most ZERO_DEPTH operations.
+const ZERO_DEPTH: u32 = 4;
+// The fewest lanes of a vector loop that runs what it leaves as one masked iteration (`masked_tail`): with
+// fewer, the at most 3 scalar iterations it replaces cost less than its lane comparison, predicated accesses
+// and selects.
+const TAIL_LANES: u32 = 8;
 // The most instructions of a loop's body the vectorizer interleaves as scalars.
 const ILV_SIZE: u32 = 12;
 // `LoopOpt::guard_le` reads at most GUARD_UP blocks before a preheader, GUARD_AND conditions of each.
@@ -316,6 +323,13 @@ pub(package) struct LoopOpt {
     // its last vector iteration runs at `n - k` (the tail block past the new preheader), over iterations
     // an earlier one ran too, and leaves the loop nothing.
     vtail: bool,
+    // The loop runs what its vectors leave as one masked iteration (`masked_tail`); `vtr`, while that
+    // iteration's body is made, the count of its lanes that run (else VNONE).
+    vmt: bool,
+    vtr: Value,
+    // `tail_lanes`' values in the masked iteration at hand: the bits, then the lane masks, by lanes of 1, 2,
+    // 4 and 8 bytes (VNONE: not made yet).
+    vtl: [Value; 8],
     vback: u32,
     vxc: Value,
     vxs: bool,
@@ -445,6 +459,12 @@ pub(package) struct LoopOpt {
     /// The target looks up bytes by a vector of indices in registers (`Package.vtbl`): a count of lanes the
     /// vector registers do not compute is by a table of nibbles (`nibble_count`), where cheaper.
     pub(package) vtbl: bool,
+    /// The target governs vector loads and stores by a lane comparison's predicate (`Cpu.vpred`): a vector
+    /// loop of one copy runs what it leaves as one masked iteration (`masked_tail`).
+    pub(package) vpred: bool,
+    /// The start-up tests whether the processor has SVE (`Package.sve_byte`) and the body lacks `vpred`: a
+    /// masked last iteration runs where it does (`SYS_SVE`), the scalar loop elsewhere.
+    pub(package) vsve: bool,
     /// The target makes the bits of a 16-byte lane mask of bytes in one instruction (`Package.mask_bits`):
     /// an unbounded scan's lane masks become bits so (`scan_bits`).
     pub(package) vmsk: bool,
@@ -706,6 +726,9 @@ extend LoopOpt {
             vexit: false,
             vqk: 1,
             vtail: false,
+            vmt: false,
+            vtr: VNONE,
+            vtl: [VNONE; 8],
             vback: 0,
             vxc: VNONE,
             vxs: true,
@@ -780,6 +803,8 @@ extend LoopOpt {
             vbits: 0,
             vpopcnt: false,
             vtbl: false,
+            vpred: false,
+            vsve: false,
             vmsk: false,
             vperm3: 0,
             vsumw: 0,
@@ -6193,9 +6218,10 @@ extend LoopOpt {
         let step = self.vlanes * nv;
         let nred = self.vred.len() as u32;
         let nfo = self.vfop.len() as u32;
+        self.vmt = self.masked_tail(b, u, nv);
         // A constant count of iterations, from a constant start, that the vector iterations divide ends with
-        // them: no overlapping last one, and the loop that runs the rest runs no iteration.
-        if self.vtail {
+        // them: no overlapping or masked last one, and the loop that runs the rest runs no iteration.
+        if self.vtail || self.vmt {
             let init = b.edge_arg(term(b, p).a, (self.viv & ~VPARAM) - hb.param_start);
             let top = 1u64 << (type_bits(qt, 8) - 1) as u64;
             if is_const(b, init) && is_const(b, self.vn) {
@@ -6205,6 +6231,7 @@ extend LoopOpt {
                 );
                 if i <= n && n < top && (n - i) % step as u64 == 0 {
                     self.vtail = false;
+                    self.vmt = false;
                 }
             }
         }
@@ -6274,7 +6301,13 @@ extend LoopOpt {
             let rem = self.vi(b, Inst { op: O_UREM, ty: qt, aux: 0, a: trips, b: sv, c: 0 }, l0);
             self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: trips, b: rem, c: 0 }, l0)
         };
-        let mut ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
+        // With a masked last iteration, any iteration enters the vectors (under a run-time test of SVE,
+        // `vsve`, the test before it sends the rest to the scalar loop where the processor lacks it).
+        let mut ok = self.vi(
+            b,
+            Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: ast::pick(self.vmt, trips, cnt), b: z, c: 0 },
+            l0,
+        );
         for k in 0..self.vca.len() {
             let (alo, ahi) = self.vrange(b, self.vca[k], i0, l0);
             let (blo, bhi) = self.vrange(b, self.vcb[k], i0, l0);
@@ -6392,7 +6425,7 @@ extend LoopOpt {
         // A counter that feeds only its step and the exit test (`counter_free`) counts the steps left down
         // to 0 from their sum: the loop runs at least once, and its steps reach 0 exactly. A constant count
         // counts up to its end, which a later round peels.
-        let down = !self.vtail && !self.vexit && !self.vctr && self.vivp.len() == 0 && !is_const(b, cnt) && self.counter_free(
+        let down = !self.vtail && !self.vmt && !self.vexit && !self.vctr && self.vivp.len() == 0 && !is_const(b, cnt) && self.counter_free(
             b,
             u,
         );
@@ -6441,7 +6474,15 @@ extend LoopOpt {
             }
         }
         let to_vl = b.edge(vl, &self.args);
-        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_vl, b: 0, c: 0 }, l0);
+        if self.vmt {
+            // Fewer iterations than one vector's lanes: the masked one alone (`sp + 2`), past the test of
+            // SVE (`sp + 1`) under a run-time one.
+            let to_mt = b.edge(sp + ast::pick(self.vpred, 2u32, 1u32), &self.args);
+            let any = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: any, b: to_vl, c: to_mt }, l0);
+        } else {
+            let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_vl, b: 0, c: 0 }, l0);
+        }
         self.vblock(b, vp, pstart, b.params.len() as u32, 0, hf, g);
         // The vector loop: the counter, the accumulators; `nv` copies of the body's lanes, each instruction's
         // copies together (the copies' loads and stores next to each other pair).
@@ -6535,6 +6576,323 @@ extend LoopOpt {
             }
             ri = j;
         }
+        let mut ls = self.vbody(b, hb, ub, u, nv, vps, vi, i0, gps, qt, split, vx, lb, lstart, hf, vp, l0);
+        if self.vexit && (self.lsplit == NONE || self.lsplit == ub.len - 1) {
+            ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hf, vp, l0);
+        }
+        let sk = self.vconst(b, qt, step * self.vqk, l0);
+        let vnext = self.vi(
+            b,
+            Inst { op: ast::pick(self.vrev || down, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 },
+            l0,
+        );
+        // An overlapping last iteration: on while below `n - k`, then the tail block (`sp + 1`) runs the
+        // iteration at `n - k` once when elements are left; the counter's chain stays an add.
+        let last = if self.vtail {
+            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: sk, c: 0 }, l0)
+        } else {
+            VNONE
+        };
+        let more = if once && !self.vtail {
+            self.vconst(b, T_I8, 0, l0)
+        } else if self.vtail {
+            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0)
+        } else if down {
+            let z = self.vconst(b, qt, 0, l0);
+            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: vnext, b: z, c: 0 }, l0)
+        } else {
+            self.vi(
+                b,
+                Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vrev, C_UGT, C_ULT), a: vnext, b: iend, c: 0 },
+                l0,
+            )
+        };
+        self.args.truncate(0);
+        self.args.push(vnext);
+        for r in 0..nred {
+            for c in 0..nv {
+                let x = self.vrup[r as usize] - ub.start;
+                // An ordered one's last copy holds its accumulator: in each parameter.
+                let cc = ast::pick(self.vord[r as usize], nv - 1, c);
+                self.args.push(self.vmap[(cc * ub.len + x) as usize]);
+            }
+        }
+        for r in 0..nfo {
+            self.args.push(self.vmap[((nv - 1) * ub.len + self.vfox[r as usize] - ub.start) as usize]);
+        }
+        for q in 0..self.vcur.len() {
+            self.args.push(self.vcur[q]);
+        }
+        let back = b.edge(vl, &self.args);
+        // Out of the loop the counter is the vectors' end; past the overlapping iteration's tail block, `n`;
+        // the masked iteration's test (`sp + 1`) takes the vectors' values.
+        self.args[0] = ast::pick(self.vtail, vnext, iend);
+        let out = b.edge(ast::pick(self.vtail || self.vmt, sp + 1, vx), &self.args);
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
+        if self.vexit {
+            self.vblock(b, lb, ls, b.params.len() as u32, 0, hf, vl);
+        } else {
+            self.vblock(b, vl, lstart, vps, (1 + nred * nv + nfo + ncar * nv) as u16, hf | BLOCK_NOVEC, vp);
+        }
+        // The vector exit: the counter where the vectors stop; each reduction's accumulators combined and
+        // reduced into its start value.
+        let xq = b.params.len() as u32;
+        b.params.push(qt);
+        let xps = b.params.len() as u32;
+        for r in 0..nred {
+            let pt = self.acc_ty(b, r);
+            for _ in 0..nv {
+                b.params.push(pt);
+            }
+        }
+        for r in 0..nfo {
+            b.params.push(self.lane_ty(b.params[(self.vfop[r as usize] & ~VPARAM) as usize]));
+        }
+        let xcar = b.params.len() as u32;
+        for g in 0..ncar {
+            let (_, ty) = self.car_at(b, u, self.vcar[g as usize].0);
+            for _ in 0..nv {
+                b.params.push(self.lane_ty(ty));
+            }
+        }
+        let xstart = b.insts.len() as u32;
+        // The carried accumulators' copies back into their slot, which the loop reads on.
+        for g in 0..ncar {
+            let (ma, off, aux) = self.vcar[g as usize];
+            let (base, ty) = self.car_at(b, u, ma);
+            for c in 0..nv {
+                let o = off + c * self.vlanes * type_bytes(ty, 8);
+                let v = VPARAM | xcar + g * nv + c;
+                let _ = self.vi(b, Inst { op: O_STORE, ty: T_NONE, aux: aux, a: base, b: v, c: o }, l0);
+            }
+        }
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            let pv = VPARAM | hb.param_start + q;
+            if pv == self.viv {
+                self.args.push(VPARAM | xq);
+                continue;
+            }
+            if self.vivp.contains(&pv) {
+                let mut iv: usize = 0;
+                while self.vivp[iv] != pv {
+                    iv += 1;
+                }
+                let ty = b.params[(pv & ~VPARAM) as usize];
+                let p0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
+                let v = self.ind_at(b, qt, ty, p0, iv, VPARAM | xq, i0, l0);
+                self.args.push(v);
+                continue;
+            }
+            if self.vfop.contains(&pv) {
+                // A recurrence: the last lane of the last vector the loop made.
+                let mut r: u32 = 0;
+                while self.vfop[r as usize] != pv {
+                    r += 1;
+                }
+                let rt = b.params[(pv & ~VPARAM) as usize];
+                let e = Inst {
+                    op: O_VEXTRACT,
+                    ty: rt,
+                    aux: (self.vlanes - 1) as u16,
+                    a: VPARAM | xps + nred * nv + r,
+                    b: VNONE,
+                    c: VNONE,
+                };
+                self.args.push(self.vi(b, e, l0));
+                continue;
+            }
+            let r = self.red_param(pv);
+            if self.vam.contains(&pv) || self.vak.contains(&pv) {
+                self.args.push(self.arg_exit(b, pv, xps, nv, l0));
+                continue;
+            }
+            if self.vord[r as usize] {
+                self.args.push(VPARAM | xps + r * nv);
+                continue;
+            }
+            let rt = b.params[(pv & ~VPARAM) as usize];
+            let op = self.red_op(b, r);
+            let vt = self.acc_ty(b, r);
+            let rel = self.vrel[r as usize];
+            let fr = self.vfr[r as usize];
+            let mut acc = VPARAM | xps + r * nv;
+            for c in 1..nv {
+                acc = if fr != 0 {
+                    let ops = [acc, VPARAM | xps + r * nv + c];
+                    let at2 = b.pool_list(ops[0..2]);
+                    self.vi(b, Inst { op: O_VOP, ty: vt, aux: self.red_code(b, r), a: at2, b: 2, c: VNONE }, l0)
+                } else if rel != 0 {
+                    self.vbeat(b, rel, VPARAM | xps + r * nv + c, acc, l0)
+                } else {
+                    self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0)
+                };
+            }
+            if rel != 0 {
+                // The extreme lane; the start value is in every lane already.
+                let lo = rel == C_SLT || rel == C_ULT || rel == C_OLT;
+                let code = (core::OP_SIMD + if is_float(rt) && lo {
+                    core::SIMD_REDUCE_MIN_NUM
+                } else if is_float(rt) {
+                    core::SIMD_REDUCE_MAX_NUM
+                } else if lo {
+                    core::SIMD_REDUCE_MIN
+                } else {
+                    core::SIMD_REDUCE_MAX
+                } as u32) as u16 | ast::pick(rel == C_SLT || rel == C_SGT, VOP_SIGNED, 0);
+                let one = [acc];
+                let at = b.pool_list(one[0..1]);
+                self.args.push(self.vi(b, Inst { op: O_VOP, ty: rt, aux: code, a: at, b: 1, c: VNONE }, l0));
+                continue;
+            }
+            let r0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
+            if fr != 0 {
+                // The lanes into one by halves (each lane with the one `s` away, `s` halving: every lane
+                // then holds the extreme), lane 0 into the start value through the call.
+                let t = b.insts[self.vrup[r as usize] as usize];
+                let mut s = self.vlanes / 2;
+                while s > 0 {
+                    let w = self.vswap(b, acc, vt, s, l0);
+                    let ops = [acc, w];
+                    let at2 = b.pool_list(ops[0..2]);
+                    acc = self.vi(b, Inst { op: O_VOP, ty: vt, aux: self.red_code(b, r), a: at2, b: 2, c: VNONE }, l0);
+                    s /= 2;
+                }
+                let e = self.vi(b, Inst { op: O_VEXTRACT, ty: rt, aux: 0, a: acc, b: VNONE, c: VNONE }, l0);
+                if t.op == O_SELECT {
+                    // `ieee_red`: the lanes started at the start value, which their extreme takes again.
+                    self.args.push(e);
+                    continue;
+                }
+                let ops = [r0, e];
+                let at2 = b.pool_list(ops[0..2]);
+                self.args.push(self.vi(b, Inst { op: O_CALL, ty: rt, aux: 2, a: t.a, b: t.b, c: at2 }, l0));
+                continue;
+            }
+            if self.vone {
+                self.args.push(self.vi(b, Inst { op: op, ty: rt, aux: 0, a: r0, b: acc, c: 0 }, l0));
+                continue;
+            }
+            let code = (core::OP_SIMD + if op == O_AND {
+                core::SIMD_REDUCE_AND
+            } else if op == O_OR {
+                core::SIMD_REDUCE_OR
+            } else if op == O_XOR {
+                core::SIMD_REDUCE_XOR
+            } else if op == O_MUL || op == O_FMUL {
+                core::SIMD_REDUCE_MUL
+            } else {
+                core::SIMD_REDUCE_ADD
+            } as u32) as u16;
+            let one = [acc];
+            let at = b.pool_list(one[0..1]);
+            // A widening sum's lanes sum to a value of their width, which wraps as the sum of `rt`.
+            let lt = lane_type(vt);
+            let mut red = self.vi(b, Inst { op: O_VOP, ty: lt, aux: code, a: at, b: 1, c: VNONE }, l0);
+            if lt != rt {
+                red = self.vi(b, Inst { op: O_TRUNC, ty: rt, aux: 0, a: red, b: VNONE, c: VNONE }, l0);
+            }
+            // A flag's mask lanes (all ones or 0) reduce to the flag's 1 or 0.
+            if self.vbo[r as usize] != 0 {
+                let one = self.vconst(b, rt, 1, l0);
+                red = self.vi(b, Inst { op: O_AND, ty: rt, aux: 0, a: red, b: one, c: 0 }, l0);
+            }
+            let sum = self.vi(b, Inst { op: op, ty: rt, aux: 0, a: r0, b: red, c: 0 }, l0);
+            self.args.push(sum);
+        }
+        let to_sp2 = b.edge(sp, &self.args);
+        // A float min or max of zero: the loop again from the start (`vzr`).
+        let mut again = VNONE;
+        for q in 0..hb.param_len as u32 {
+            let pv = VPARAM | hb.param_start + q;
+            if pv == self.viv || self.vivp.contains(&pv) || self.vfop.contains(&pv) || !self.vzr[self.red_param(pv) as usize] {
+                continue;
+            }
+            let rt = b.params[(pv & ~VPARAM) as usize];
+            let z = self.vi(b, Inst { op: O_FCONST, ty: rt, aux: 0, a: 0, b: 0, c: VNONE }, l0);
+            let e = self.vi(b, Inst { op: O_FCMP, ty: T_I8, aux: C_OEQ, a: self.args[q as usize], b: z, c: 0 }, l0);
+            again = if again == VNONE {
+                e
+            } else {
+                self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0)
+            };
+        }
+        if again == VNONE {
+            let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp2, b: 0, c: 0 }, l0);
+        } else {
+            self.args.truncate(0);
+            for q in 0..hb.param_len as u32 {
+                self.args.push(VPARAM | gps + q);
+            }
+            let from0 = b.edge(sp, &self.args);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
+        }
+        self.vblock(b, vx, xstart, xq, (1 + nred * nv + nfo + ncar * nv) as u16, hf, vl);
+        // The loop's new preheader.
+        let sps = self.vblock_params(b, h);
+        let sstart = b.insts.len() as u32;
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | sps + q);
+        }
+        let to_h = b.edge(h, &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
+        self.vblock(b, sp, sstart, sps, hb.param_len, hf, g);
+        if self.vtail {
+            // The tail block: the vector loop once more at `n - k` while elements are left, else out.
+            let tq = b.params.len() as u32;
+            b.params.push(qt);
+            let tstart = b.insts.len() as u32;
+            let rem = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: VPARAM | tq, b: self.vn, c: 0 }, l0);
+            let again = [last];
+            let to_vl = b.edge(vl, again[0..1]);
+            let done = [self.vn];
+            let to_vx = b.edge(vx, done[0..1]);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: rem, b: to_vl, c: to_vx }, l0);
+            self.vblock(b, sp + 1, tstart, tq, 1, hf, vl);
+        }
+        if self.vmt {
+            self.masked_last(b, hb, ub, u, vl, vps, vx, i0, gps, qt, l0, hf, vp);
+        }
+        if self.vxbr != NONE {
+            self.first_lane(b, ub, nv, vi, vx, vl, hf, l0);
+        }
+        // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more, but
+        // once without interleaving what interleaved vectors of EPI_LANES lanes or more leave (`BLOCK_EPI`).
+        let pe = term(b, p).a;
+        b.pool[pe as usize] = g;
+        let epi = nv > 1 && self.vlanes > 1 && (nv * self.vlanes >= EPI_LANES || self.masked_tail(b, u, 1)) && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
+        b.blocks.index_mut(h as usize).flags = hf | ast::pick(epi, BLOCK_EPI, BLOCK_NOVEC);
+    }
+
+    // The vector body of block `ub` (`vectorize`): `nv` copies of each instruction, in `vic`'s order, into
+    // `vmap`, from counter `vi` and the accumulators of the block whose parameters start at `vps` (`hb`, the
+    // header; `gps`, the guard's parameters; `i0`, the counter's start); with an early exit, its test at
+    // instruction `split` (`vexit_test`): the latch block's start, else 0. With a count left `vtr`, the masked
+    // last iteration's (`masked_tail`).
+    fn vbody(
+        self: &mut Self,
+        b: &mut Body,
+        hb: Block,
+        ub: Block,
+        u: u32,
+        nv: u32,
+        vps: u32,
+        vi: Value,
+        i0: Value,
+        gps: u32,
+        qt: u8,
+        split: u32,
+        vx: u32,
+        lb: u32,
+        lstart: u32,
+        hf: u16,
+        vp: u32,
+        l0: u32,
+    ) u32 {
+        let nred = self.vred.len() as u32;
+        let nfo = self.vfop.len() as u32;
+        let step = self.vlanes * nv;
         // The counter's lanes per copy (`vctr`), before the body's.
         self.vctrv.truncate(0);
         for c in 0..nv * self.vctr as u32 {
@@ -6882,6 +7240,11 @@ extend LoopOpt {
                             let m2 = self.int_mask(b, u, c, self.lcc2[cs as usize], self.lcw2[cs as usize], l);
                             m = self.vi(b, Inst { op: O_AND, ty: mt, aux: 0, a: m, b: m2, c: 0 }, l);
                         }
+                        if self.vtr != VNONE {
+                            // The masked last iteration's lanes too.
+                            let tm = self.tail_lanes(b, 1, true, l);
+                            m = self.vi(b, Inst { op: O_AND, ty: mt, aux: 0, a: m, b: tm, c: 0 }, l);
+                        }
                         let pa = self.vi(
                             b,
                             Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: self.vval(b, u, c, t.a), b: VNONE, c: nt.c },
@@ -7017,6 +7380,10 @@ extend LoopOpt {
                             let m = self.vmask(b, nt.b, mask_type(vt), l);
                             nt.b = self.vi(b, Inst { op: O_NEG, ty: vt, aux: 0, a: m, b: VNONE, c: VNONE }, l);
                         }
+                    }
+                    if self.vtr != VNONE && (t.op == O_LOAD || t.op == O_STORE) {
+                        self.vmap[at] = self.masked_access(b, nt, b.locs[i as usize]);
+                        continue;
                     }
                     self.vmap[at] = self.vi(b, nt, b.locs[i as usize]);
                 } else if k == VK_RED && self.vord[self.red_of(i) as usize] {
@@ -7173,288 +7540,186 @@ extend LoopOpt {
                 }
             }
         }
-        if self.vexit && (self.lsplit == NONE || self.lsplit == ub.len - 1) {
-            ls = self.vexit_test(b, ub, nv, vps, vi, vx, lb, lstart, hf, vp, l0);
+        return ls;
+    }
+
+    // Whether the vector loop of `nv` copies of body `u` runs what its vectors leave as one masked iteration
+    // (`vpred`, `masked_last`): one copy (an interleaved loop's rest vectorizes once more, `BLOCK_EPI`) of at
+    // least TAIL_LANES lanes counting up by 1, each access of consecutive elements (no stride, group, gather,
+    // reversed, modulo or aligned-block access), no early exit, overlapping last iteration (`vtail`) or
+    // recurrence, and each reduction's accumulator a lane per iteration, unordered (no dot product, widening
+    // sum, counter's lanes, `vak`, or float sum in order, `vord`).
+    const fn masked_tail(self: &Self, b: &Body, u: u32, nv: u32) bool {
+        if !(self.vpred || self.vsve) || nv != 1 || self.vone || self.vlanes < TAIL_LANES || self.vtail || self.vexit || self.vrev || self.vqk != 1 || self.vstrided || self.vgroups || self.vgat.len() != 0 || self.vblk.len() != 0 || self.vfop.len() != 0 || self.vak.len() != 0 || self.vam.len() != 0 {
+            return false;
         }
-        let sk = self.vconst(b, qt, step * self.vqk, l0);
-        let vnext = self.vi(
+        let ub = b.blocks[u as usize];
+        for x in 0..ub.len - 1 {
+            let k = self.vk[x as usize];
+            if k == VK_GADDR || k == VK_RADDR || k == VK_RIDX || k == VK_MADDR || k == VK_MIDX {
+                return false;
+            }
+        }
+        for x in 0..self.vacc.len() {
+            let t = b.insts[self.vacc[x] as usize];
+            let ty = if t.op == O_STORE {
+                b.type_of(t.b)
+            } else {
+                t.ty
+            };
+            if self.kind(b, u, t.a) == VK_ADDR && self.stride(b, t.a) != type_bytes(ty, 8) {
+                return false;
+            }
+        }
+        for r in 0..self.vred.len() {
+            if self.vdr[r] != 0 || self.vwa[r] != 0 || self.vord[r] {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // The masked last iteration (`masked_tail`) of vector loop `vl` (its parameters from `vps`), blocks
+    // `sp + 1` and `sp + 2` past the new preheader, both of `vl`'s parameters: the first leaves to the vector
+    // exit `vx` when no element is left (or, under a run-time test, `vsve`, the processor lacks SVE), else
+    // enters the second, which runs the elements left (`vtr`, fewer than a vector's lanes) as one vector
+    // iteration whose loads and stores take those lanes alone (`masked_access`) and whose reductions keep
+    // their other lanes, then leaves to `vx` with the counter at the bound.
+    fn masked_last(
+        self: &mut Self,
+        b: &mut Body,
+        hb: Block,
+        ub: Block,
+        u: u32,
+        vl: u32,
+        vps: u32,
+        vx: u32,
+        i0: Value,
+        gps: u32,
+        qt: u8,
+        l0: u32,
+        hf: u16,
+        vp: u32,
+    ) {
+        let np = b.blocks[vl as usize].param_len;
+        let tb = b.blocks.len() as u32;
+        let tps = b.params.len() as u32;
+        for q in 0..np as u32 {
+            b.params.push(b.params[(vps + q) as usize]);
+        }
+        let tstart = b.insts.len() as u32;
+        let mut left = self.vi(
             b,
-            Inst { op: ast::pick(self.vrev || down, O_SUB, O_ADD), ty: qt, aux: 0, a: vi, b: sk, c: 0 },
+            Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vsigned, C_SLT, C_ULT), a: VPARAM | tps, b: self.vn, c: 0 },
             l0,
         );
-        // An overlapping last iteration: on while below `n - k`, then the tail block (`sp + 1`) runs the
-        // iteration at `n - k` once when elements are left; the counter's chain stays an add.
-        let last = if self.vtail {
-            self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: sk, c: 0 }, l0)
+        if !self.vpred {
+            // Without SVE the scalar loop runs the rest, past the vector exit: one conditional comparison
+            // more.
+            let sv = self.vi(b, Inst { op: O_SYS, ty: T_I8, aux: SYS_SVE, a: VNONE, b: VNONE, c: VNONE }, l0);
+            let z8 = self.vconst(b, T_I8, 0, l0);
+            let has = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: sv, b: z8, c: 0 }, l0);
+            left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: has, c: 0 }, l0);
+        }
+        self.args.truncate(0);
+        for q in 0..np as u32 {
+            self.args.push(VPARAM | tps + q);
+        }
+        let to_mt = b.edge(tb + 1, &self.args);
+        let to_vx = b.edge(vx, &self.args);
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: left, b: to_mt, c: to_vx }, l0);
+        self.vblock(b, tb, tstart, tps, np, hf, vp);
+        let mps = b.params.len() as u32;
+        for q in 0..np as u32 {
+            b.params.push(b.params[(vps + q) as usize]);
+        }
+        let mstart = b.insts.len() as u32;
+        let vi = VPARAM | mps;
+        self.vtr = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: vi, c: 0 }, l0);
+        self.vtl = [VNONE; 8];
+        let _ = self.vbody(b, hb, ub, u, 1, mps, vi, i0, gps, qt, NONE, vx, 0, mstart, hf, vp, l0);
+        self.args.truncate(0);
+        self.args.push(self.vn);
+        for r in 0..self.vred.len() {
+            let nw = self.vmap[(self.vrup[r] - ub.start) as usize];
+            let acc = VPARAM | mps + 1 + r as u32;
+            // An integer sum, `or` or `xor` of lanes the masked loads made 0 past the count (`zero_lanes`)
+            // keeps the accumulator's lanes there.
+            let t = b.insts[nw as usize];
+            let id0 = is_int(lane_type(b.type_of(acc))) && (t.op == O_ADD || t.op == O_OR || t.op == O_XOR) && t.a == acc;
+            if id0 && zero_lanes(b, t.b, ZERO_DEPTH) {
+                self.args.push(nw);
+                continue;
+            }
+            let at = b.type_of(acc);
+            let m = self.tail_lanes(b, type_bytes(lane_type(at), 8), false, l0);
+            self.args.push(self.vi(b, Inst { op: O_VSEL, ty: at, aux: 0, a: m, b: nw, c: acc }, l0));
+        }
+        let to_vx2 = b.edge(vx, &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_vx2, b: 0, c: 0 }, l0);
+        self.vblock(b, tb + 1, mstart, mps, np, hf, vp);
+        self.vtr = VNONE;
+    }
+
+    // The lanes the masked last iteration runs: those below the count left (`vtr`), compared at lanes of
+    // `eb` bytes; as the bits a masked load or store takes (`SIMD_CMP_LT`, which the target turns into its
+    // predicate, `Cpu.vpred`) when `bits`, else as a lane mask (`O_VCMP`).
+    fn tail_lanes(self: &mut Self, b: &mut Body, eb: u32, bits: bool, l: u32) Value {
+        let k = ast::pick(bits, 0usize, 4usize) + eb.trailing_zeros();
+        if self.vtl[k] == VNONE {
+            self.vtl[k] = self.tail_mask(b, eb, bits, l);
+        }
+        return self.vtl[k];
+    }
+
+    // `tail_lanes`' value, made.
+    fn tail_mask(self: &mut Self, b: &mut Body, eb: u32, bits: bool, l: u32) Value {
+        let it = int_type(eb);
+        let vt = vec_type(it, self.vlanes);
+        let qb = type_bits(b.type_of(self.vtr), 8);
+        let r = if qb > 8 * eb {
+            self.vi(b, Inst { op: O_TRUNC, ty: it, aux: 0, a: self.vtr, b: VNONE, c: VNONE }, l)
+        } else if qb < 8 * eb {
+            self.vi(b, Inst { op: O_ZEXT, ty: it, aux: 0, a: self.vtr, b: VNONE, c: VNONE }, l)
         } else {
-            VNONE
+            self.vtr
         };
-        let more = if once && !self.vtail {
-            self.vconst(b, T_I8, 0, l0)
-        } else if self.vtail {
-            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: vnext, b: last, c: 0 }, l0)
-        } else if down {
-            let z = self.vconst(b, qt, 0, l0);
-            self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: vnext, b: z, c: 0 }, l0)
+        let sv = self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: r, b: VNONE, c: VNONE }, l);
+        let io = self.ramp_const(b, it, 0, 1, l);
+        if !bits {
+            return self.vi(b, Inst { op: O_VCMP, ty: mask_type(vt), aux: C_ULT, a: io, b: sv, c: 0 }, l);
+        }
+        let ops = [io, sv];
+        let at2 = b.pool_list(ops[0..2]);
+        let code = (core::OP_SIMD + core::SIMD_CMP_LT as u32) as u16;
+        return self.vi(b, Inst { op: O_VOP, ty: mask_int(self.vlanes), aux: code, a: at2, b: 2, c: VNONE }, l);
+    }
+
+    // Load or store `nt` (a vector one) of the masked last iteration: through its address and offset, in the
+    // lanes below the count left (`tail_lanes`, at its lanes' width); a load's other lanes 0.
+    fn masked_access(self: &mut Self, b: &mut Body, nt: Inst, l: u32) Value {
+        let pa = if nt.c == 0 {
+            nt.a
         } else {
-            self.vi(
-                b,
-                Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vrev, C_UGT, C_ULT), a: vnext, b: iend, c: 0 },
-                l0,
-            )
+            self.vi(b, Inst { op: O_PTRADD, ty: T_PTR, aux: 0, a: nt.a, b: VNONE, c: nt.c }, l)
         };
-        self.args.truncate(0);
-        self.args.push(vnext);
-        for r in 0..nred {
-            for c in 0..nv {
-                let x = self.vrup[r as usize] - ub.start;
-                // An ordered one's last copy holds its accumulator: in each parameter.
-                let cc = ast::pick(self.vord[r as usize], nv - 1, c);
-                self.args.push(self.vmap[(cc * ub.len + x) as usize]);
-            }
-        }
-        for r in 0..nfo {
-            self.args.push(self.vmap[((nv - 1) * ub.len + self.vfox[r as usize] - ub.start) as usize]);
-        }
-        for q in 0..self.vcur.len() {
-            self.args.push(self.vcur[q]);
-        }
-        let back = b.edge(vl, &self.args);
-        // Out of the loop the counter is the vectors' end; past the overlapping iteration's tail block, `n`.
-        self.args[0] = ast::pick(self.vtail, vnext, iend);
-        let out = b.edge(ast::pick(self.vtail, sp + 1, vx), &self.args);
-        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
-        if self.vexit {
-            self.vblock(b, lb, ls, b.params.len() as u32, 0, hf, vl);
+        let ld = nt.op == O_LOAD;
+        let vt = if ld {
+            nt.ty
         } else {
-            self.vblock(b, vl, lstart, vps, (1 + nred * nv + nfo + ncar * nv) as u16, hf | BLOCK_NOVEC, vp);
-        }
-        // The vector exit: the counter where the vectors stop; each reduction's accumulators combined and
-        // reduced into its start value.
-        let xq = b.params.len() as u32;
-        b.params.push(qt);
-        let xps = b.params.len() as u32;
-        for r in 0..nred {
-            let pt = self.acc_ty(b, r);
-            for _ in 0..nv {
-                b.params.push(pt);
-            }
-        }
-        for r in 0..nfo {
-            b.params.push(self.lane_ty(b.params[(self.vfop[r as usize] & ~VPARAM) as usize]));
-        }
-        let xcar = b.params.len() as u32;
-        for g in 0..ncar {
-            let (_, ty) = self.car_at(b, u, self.vcar[g as usize].0);
-            for _ in 0..nv {
-                b.params.push(self.lane_ty(ty));
-            }
-        }
-        let xstart = b.insts.len() as u32;
-        // The carried accumulators' copies back into their slot, which the loop reads on.
-        for g in 0..ncar {
-            let (ma, off, aux) = self.vcar[g as usize];
-            let (base, ty) = self.car_at(b, u, ma);
-            for c in 0..nv {
-                let o = off + c * self.vlanes * type_bytes(ty, 8);
-                let v = VPARAM | xcar + g * nv + c;
-                let _ = self.vi(b, Inst { op: O_STORE, ty: T_NONE, aux: aux, a: base, b: v, c: o }, l0);
-            }
-        }
-        self.args.truncate(0);
-        for q in 0..hb.param_len as u32 {
-            let pv = VPARAM | hb.param_start + q;
-            if pv == self.viv {
-                self.args.push(VPARAM | xq);
-                continue;
-            }
-            if self.vivp.contains(&pv) {
-                let mut iv: usize = 0;
-                while self.vivp[iv] != pv {
-                    iv += 1;
-                }
-                let ty = b.params[(pv & ~VPARAM) as usize];
-                let p0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
-                let v = self.ind_at(b, qt, ty, p0, iv, VPARAM | xq, i0, l0);
-                self.args.push(v);
-                continue;
-            }
-            if self.vfop.contains(&pv) {
-                // A recurrence: the last lane of the last vector the loop made.
-                let mut r: u32 = 0;
-                while self.vfop[r as usize] != pv {
-                    r += 1;
-                }
-                let rt = b.params[(pv & ~VPARAM) as usize];
-                let e = Inst {
-                    op: O_VEXTRACT,
-                    ty: rt,
-                    aux: (self.vlanes - 1) as u16,
-                    a: VPARAM | xps + nred * nv + r,
-                    b: VNONE,
-                    c: VNONE,
-                };
-                self.args.push(self.vi(b, e, l0));
-                continue;
-            }
-            let r = self.red_param(pv);
-            if self.vam.contains(&pv) || self.vak.contains(&pv) {
-                self.args.push(self.arg_exit(b, pv, xps, nv, l0));
-                continue;
-            }
-            if self.vord[r as usize] {
-                self.args.push(VPARAM | xps + r * nv);
-                continue;
-            }
-            let rt = b.params[(pv & ~VPARAM) as usize];
-            let op = self.red_op(b, r);
-            let vt = self.acc_ty(b, r);
-            let rel = self.vrel[r as usize];
-            let fr = self.vfr[r as usize];
-            let mut acc = VPARAM | xps + r * nv;
-            for c in 1..nv {
-                acc = if fr != 0 {
-                    let ops = [acc, VPARAM | xps + r * nv + c];
-                    let at2 = b.pool_list(ops[0..2]);
-                    self.vi(b, Inst { op: O_VOP, ty: vt, aux: self.red_code(b, r), a: at2, b: 2, c: VNONE }, l0)
-                } else if rel != 0 {
-                    self.vbeat(b, rel, VPARAM | xps + r * nv + c, acc, l0)
-                } else {
-                    self.vi(b, Inst { op: op, ty: vt, aux: 0, a: acc, b: VPARAM | xps + r * nv + c, c: 0 }, l0)
-                };
-            }
-            if rel != 0 {
-                // The extreme lane; the start value is in every lane already.
-                let lo = rel == C_SLT || rel == C_ULT || rel == C_OLT;
-                let code = (core::OP_SIMD + if is_float(rt) && lo {
-                    core::SIMD_REDUCE_MIN_NUM
-                } else if is_float(rt) {
-                    core::SIMD_REDUCE_MAX_NUM
-                } else if lo {
-                    core::SIMD_REDUCE_MIN
-                } else {
-                    core::SIMD_REDUCE_MAX
-                } as u32) as u16 | ast::pick(rel == C_SLT || rel == C_SGT, VOP_SIGNED, 0);
-                let one = [acc];
-                let at = b.pool_list(one[0..1]);
-                self.args.push(self.vi(b, Inst { op: O_VOP, ty: rt, aux: code, a: at, b: 1, c: VNONE }, l0));
-                continue;
-            }
-            let r0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
-            if fr != 0 {
-                // The lanes into one by halves (each lane with the one `s` away, `s` halving: every lane
-                // then holds the extreme), lane 0 into the start value through the call.
-                let t = b.insts[self.vrup[r as usize] as usize];
-                let mut s = self.vlanes / 2;
-                while s > 0 {
-                    let w = self.vswap(b, acc, vt, s, l0);
-                    let ops = [acc, w];
-                    let at2 = b.pool_list(ops[0..2]);
-                    acc = self.vi(b, Inst { op: O_VOP, ty: vt, aux: self.red_code(b, r), a: at2, b: 2, c: VNONE }, l0);
-                    s /= 2;
-                }
-                let e = self.vi(b, Inst { op: O_VEXTRACT, ty: rt, aux: 0, a: acc, b: VNONE, c: VNONE }, l0);
-                if t.op == O_SELECT {
-                    // `ieee_red`: the lanes started at the start value, which their extreme takes again.
-                    self.args.push(e);
-                    continue;
-                }
-                let ops = [r0, e];
-                let at2 = b.pool_list(ops[0..2]);
-                self.args.push(self.vi(b, Inst { op: O_CALL, ty: rt, aux: 2, a: t.a, b: t.b, c: at2 }, l0));
-                continue;
-            }
-            if self.vone {
-                self.args.push(self.vi(b, Inst { op: op, ty: rt, aux: 0, a: r0, b: acc, c: 0 }, l0));
-                continue;
-            }
-            let code = (core::OP_SIMD + if op == O_AND {
-                core::SIMD_REDUCE_AND
-            } else if op == O_OR {
-                core::SIMD_REDUCE_OR
-            } else if op == O_XOR {
-                core::SIMD_REDUCE_XOR
-            } else if op == O_MUL || op == O_FMUL {
-                core::SIMD_REDUCE_MUL
-            } else {
-                core::SIMD_REDUCE_ADD
-            } as u32) as u16;
-            let one = [acc];
-            let at = b.pool_list(one[0..1]);
-            // A widening sum's lanes sum to a value of their width, which wraps as the sum of `rt`.
-            let lt = lane_type(vt);
-            let mut red = self.vi(b, Inst { op: O_VOP, ty: lt, aux: code, a: at, b: 1, c: VNONE }, l0);
-            if lt != rt {
-                red = self.vi(b, Inst { op: O_TRUNC, ty: rt, aux: 0, a: red, b: VNONE, c: VNONE }, l0);
-            }
-            // A flag's mask lanes (all ones or 0) reduce to the flag's 1 or 0.
-            if self.vbo[r as usize] != 0 {
-                let one = self.vconst(b, rt, 1, l0);
-                red = self.vi(b, Inst { op: O_AND, ty: rt, aux: 0, a: red, b: one, c: 0 }, l0);
-            }
-            let sum = self.vi(b, Inst { op: op, ty: rt, aux: 0, a: r0, b: red, c: 0 }, l0);
-            self.args.push(sum);
-        }
-        let to_sp2 = b.edge(sp, &self.args);
-        // A float min or max of zero: the loop again from the start (`vzr`).
-        let mut again = VNONE;
-        for q in 0..hb.param_len as u32 {
-            let pv = VPARAM | hb.param_start + q;
-            if pv == self.viv || self.vivp.contains(&pv) || self.vfop.contains(&pv) || !self.vzr[self.red_param(pv) as usize] {
-                continue;
-            }
-            let rt = b.params[(pv & ~VPARAM) as usize];
-            let z = self.vi(b, Inst { op: O_FCONST, ty: rt, aux: 0, a: 0, b: 0, c: VNONE }, l0);
-            let e = self.vi(b, Inst { op: O_FCMP, ty: T_I8, aux: C_OEQ, a: self.args[q as usize], b: z, c: 0 }, l0);
-            again = if again == VNONE {
-                e
-            } else {
-                self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0)
-            };
-        }
-        if again == VNONE {
-            let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp2, b: 0, c: 0 }, l0);
+            b.type_of(nt.b)
+        };
+        let m = self.tail_lanes(b, type_bytes(lane_type(vt), 8), true, l);
+        let v = if ld {
+            self.vsplat_const(b, vt, 0, l)
         } else {
-            self.args.truncate(0);
-            for q in 0..hb.param_len as u32 {
-                self.args.push(VPARAM | gps + q);
-            }
-            let from0 = b.edge(sp, &self.args);
-            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
-        }
-        self.vblock(b, vx, xstart, xq, (1 + nred * nv + nfo + ncar * nv) as u16, hf, vl);
-        // The loop's new preheader.
-        let sps = self.vblock_params(b, h);
-        let sstart = b.insts.len() as u32;
-        self.args.truncate(0);
-        for q in 0..hb.param_len as u32 {
-            self.args.push(VPARAM | sps + q);
-        }
-        let to_h = b.edge(h, &self.args);
-        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
-        self.vblock(b, sp, sstart, sps, hb.param_len, hf, g);
-        if self.vtail {
-            // The tail block: the vector loop once more at `n - k` while elements are left, else out.
-            let tq = b.params.len() as u32;
-            b.params.push(qt);
-            let tstart = b.insts.len() as u32;
-            let rem = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: VPARAM | tq, b: self.vn, c: 0 }, l0);
-            let again = [last];
-            let to_vl = b.edge(vl, again[0..1]);
-            let done = [self.vn];
-            let to_vx = b.edge(vx, done[0..1]);
-            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: rem, b: to_vl, c: to_vx }, l0);
-            self.vblock(b, sp + 1, tstart, tq, 1, hf, vl);
-        }
-        if self.vxbr != NONE {
-            self.first_lane(b, ub, nv, vi, vx, vl, hf, l0);
-        }
-        // The preheader enters the guard; the loop runs what the vectors leave and vectorizes no more, but
-        // once without interleaving what interleaved vectors of EPI_LANES lanes or more leave (`BLOCK_EPI`).
-        let pe = term(b, p).a;
-        b.pool[pe as usize] = g;
-        let epi = nv > 1 && self.vlanes > 1 && nv * self.vlanes >= EPI_LANES && (hb.flags & BLOCK_EPI) == 0 && !self.vone && !self.vtail && !self.vexit && !self.vrev;
-        b.blocks.index_mut(h as usize).flags = hf | ast::pick(epi, BLOCK_EPI, BLOCK_NOVEC);
+            nt.b
+        };
+        let ops = [pa, m, v];
+        let at3 = b.pool_list(ops[0..3]);
+        let c = ast::pick(ld, core::SIMD_LOAD_MASKED_PTR, core::SIMD_STORE_MASKED_PTR);
+        let code = (core::OP_SIMD + c as u32) as u16 | VOP_PRED;
+        return self.vi(b, Inst { op: O_VOP, ty: ast::pick(ld, vt, T_NONE), aux: code, a: at3, b: 3, c: VNONE }, l);
     }
 
     // ---- Partial unrolling ----
@@ -9586,6 +9851,14 @@ extend LoopOpt {
     fn vector_ramp(self: &mut Self, b: &mut Body, ty: u8, s: Value, c: u32, k: u64, l: u32) Value {
         let vt = vec_type(ty, self.vlanes);
         let sv = self.vi(b, Inst { op: O_SPLAT, ty: vt, aux: 0, a: s, b: VNONE, c: VNONE }, l);
+        let ks = self.ramp_const(b, ty, c, k, l);
+        return self.vi(b, Inst { op: O_ADD, ty: vt, aux: 0, a: sv, b: ks, c: VNONE }, l);
+    }
+
+    // The constant lanes of copy `c` of a ramp of `ty` by `k` (`vector_ramp`): lane `j` holds
+    // `(c * vlanes + j) * k`.
+    fn ramp_const(self: &mut Self, b: &mut Body, ty: u8, c: u32, k: u64, l: u32) Value {
+        let vt = vec_type(ty, self.vlanes);
         let lb = type_bits(ty, 8);
         let nw = (self.vlanes * lb + 63) / 64;
         let w = b.words.len() as u32;
@@ -9599,8 +9872,7 @@ extend LoopOpt {
             let at = (w as u64 + bit / 64) as usize;
             b.words[at] = b.words[at] | v << bit % 64;
         }
-        let ks = self.vi(b, Inst { op: O_WCONST, ty: vt, aux: 0, a: w, b: nw, c: VNONE }, l);
-        return self.vi(b, Inst { op: O_ADD, ty: vt, aux: 0, a: sv, b: ks, c: VNONE }, l);
+        return self.vi(b, Inst { op: O_WCONST, ty: vt, aux: 0, a: w, b: nw, c: VNONE }, l);
     }
 
     // Vector conversion `t` as steps the targets have (`vconv_ok`): an integer to 4 or 8 times its width or
@@ -13711,6 +13983,37 @@ const fn down_by_one(b: &Body, t: Inst, q: Value) bool {
 
 // The `vop` lane comparison (a `SIMD_CMP_*` code and VOP_SIGNED) of comparison `t` (`icmp`, `fcmp`),
 // NONE16 when none matches it: an equality, an order of integers, an ordered order of floats, `une`.
+// Whether vector `v` of `b` is 0 in each lane a masked load of the masked last iteration leaves 0 (`masked_access`,
+// its fallback 0), `depth` operations deep: such a load; a product or AND with such a value; a sum, difference,
+// OR or XOR of two; an extension, truncation or shift of one.
+const fn zero_lanes(b: &Body, v: Value, depth: u32) bool {
+    if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
+        return false;
+    }
+    let t = b.insts[v as usize];
+    if t.op == O_VOP {
+        let c = (t.aux & VOP_CODE) as u32;
+        return t.b == 3 && c == core::OP_SIMD + core::SIMD_LOAD_MASKED_PTR as u32 && zero_vec(
+            b,
+            b.pool[(t.a + 2) as usize],
+        );
+    }
+    if depth == 0 || !is_vec(t.ty) {
+        return false;
+    }
+    if t.op == O_MUL || t.op == O_AND {
+        return zero_lanes(b, t.a, depth - 1) || zero_lanes(b, t.b, depth - 1);
+    }
+    if t.op == O_ADD || t.op == O_SUB || t.op == O_OR || t.op == O_XOR {
+        return zero_lanes(b, t.a, depth - 1) && zero_lanes(b, t.b, depth - 1);
+    }
+    return (t.op == O_ZEXT || t.op == O_SEXT || t.op == O_TRUNC || t.op == O_SHL || t.op == O_LSHR || t.op == O_ASHR) && zero_lanes(
+        b,
+        t.a,
+        depth - 1,
+    );
+}
+
 const fn cmp_code(t: Inst) u16 {
     if t.op != O_ICMP && t.op != O_FCMP {
         return NONE16;

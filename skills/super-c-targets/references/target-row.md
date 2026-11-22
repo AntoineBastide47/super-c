@@ -17,7 +17,9 @@ the index of its C environment row, and the run-time facts: `run_time`, the feat
 code copies functions for, separated by `;` (Linux arm64: `+lse,+rcpc;+lse,+rcpc,+cssc`), with
 `run_time_hwcap`, the HWCAP and HWCAP2 bits each level needs (the start-up's test); `dit`, how
 constant-time code sets PSTATE.DIT (`DIT_NONE`, `DIT_ALWAYS` on macOS arm64, `DIT_HWCAP` on Linux arm64
-with `DIT_HWCAP_BIT`); `outline_atomics`, the C tree's atomics through compiler-rt's helpers
+with `DIT_HWCAP_BIT`); `sve_hwcap`, the kernel reports SVE in HWCAP (`SVE_HWCAP_BIT`; Linux arm64): a
+native build without `sve` stores it at start-up in the byte `__sc_sve`, which its masked last
+iterations test (`emit::cemit::sve_byte`); `outline_atomics`, the C tree's atomics through compiler-rt's helpers
 (`-moutline-atomics`, which pick LSE by the CPU) where the build lacks LSE (Windows arm64, whose only
 build is its C tree).
 

@@ -35,9 +35,10 @@ pub enum Feature {
     Crc,
     /// The Armv8.1 atomics (aarch64; `lse`; every macOS build has it).
     Lse,
-    /// The Scalable Vector Extension (aarch64; `sve`; implies `fp16`): detected only.
+    /// The Scalable Vector Extension (aarch64; `sve`; implies `fp16`): masked loads and stores through SVE
+    /// predicates on 16-byte vectors.
     Sve,
-    /// SVE2 (aarch64; `sve2`; implies `sve`): detected only.
+    /// SVE2 (aarch64; `sve2`; implies `sve`): nothing beyond `sve` uses it.
     Sve2,
     /// SSE3 (x86_64; `sse3`).
     Sse3,

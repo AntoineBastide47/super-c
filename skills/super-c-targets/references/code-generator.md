@@ -226,7 +226,9 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   float arithmetic with the overflow forms (two results: the value and a flag); comparisons and
   `select`; conversions; `ptradd`, loads, stores, `memcpy`, `memset`; atomics and fences; calls (direct,
   indirect, variadic); `O_VOP` (vector operations by `ir::core` SIMD code); `O_SYS` (system operations:
-  barriers, cycle counter, floating-point control state, the context switch); `O_ASM`; terminators.
+  barriers, cycle counter, floating-point control state, the context switch, arm64's `sys.sve`, which
+  loads the start-up's byte `__sc_sve`, through its address slot in a shared library); `O_ASM`;
+  terminators.
 - Vectors of a register's size may live in vector registers (`vec_homes`: a vector some instruction
   reads or defines in memory stays there). Register forms: lane-wise arithmetic, comparisons, selects,
   splats, wide constants, `vunzip`, `vziplo`/`vziphi`, lane extracts and inserts (`vlane`; x86-64 4- and 8-byte integer inserts by PINSRD/PINSRQ with SSE4.1, else through memory), the `O_VOP`s
@@ -257,7 +259,13 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   product with one use that a sum or difference reads accumulates into it (arm64 MLA, MLS, SMLAL, UMLAL,
   SMLSL, UMLSL), and a right shift by an immediate into a sum (USRA, SSRA); `lv::FOLD_ADDSUB`, a lane
   select by an even-lanes mask of a float difference and sum is x86-64's `addsubps` or `addsubpd` (SSE3;
-  `FOLD_ADDSUB_WIDE` of 32 bytes with AVX). An 8-byte vector moves to an integer register by FMOV (arm64)
+  `FOLD_ADDSUB_WIDE` of 32 bytes with AVX); `lv::FOLD_PRED` (arm64), a masked load or store through a
+  pointer whose mask is a lane comparison's bits or a lane mask's, where the body has SVE
+  (`Live.pred_all`, `Cpu.vpred`) or the access carries `VOP_PRED`: `ptrue p7` of the vector's lanes, the
+  SVE comparison (`SVE_CMP`) or `cmpne #0` into `p0`, reused within a block, then LD1/ST1 (a zero fallback
+  is the zeroing form; a lane mask's other fallback a BIF); a later `vsel` of the block by the same
+  comparison's or lane mask's lanes is SVE's SEL by `p0` (`holds_pred`), and a lane comparison only such
+  selects read emits nothing (`Live::pred_sels`). An 8-byte vector moves to an integer register by FMOV (arm64)
   or MOVQ (x86-64).
 - Extension folds (arm64, `lv::FOLD_XUSE`): a 64-bit zero or sign extension of a 32-bit value that only
   comparisons with a register and the indices of address sums read takes no register: each use extends

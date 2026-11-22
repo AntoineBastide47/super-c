@@ -327,9 +327,13 @@ intrinsic kernels for `A`; and the fixpoint and `check.sh` pass on the host.
 
 Decisions: no architecture beyond x86_64, aarch64 and wasm32 has been requested. RISC-V with a
 fixed `VLEN` (`zvl128b`, `zvl256b`, RVV intrinsics), POWER VSX (`<altivec.h>`), LoongArch LSX/LASX
-and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 are
-detected only: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
-size) describes, so no fixed-width backend uses them. SME (`sme`, `sme2`, `sme-f64f64`) has no
+and s390x z/Vector are not compiler targets, so each needs the architecture first. SVE and SVE2 have
+no backend entries: a scalable register has a run-time length, which no `Simd<T, N>` (a compile-time
+size) describes. The arm64 code generator uses SVE predicates on NEON's 16 bytes instead: a masked
+load or store through a pointer whose mask is a lane comparison's or a lane mask's bits sets one
+(`codegen::live::FOLD_PRED`) where the body has `sve` (`Cpu.vpred`) or the access runs only where
+the CPU has it (`VOP_PRED`, the vectorizer's masked last iterations under the start-up's SVE test;
+`references/lir.md`). SME (`sme`, `sme2`, `sme-f64f64`) has no
 backend entries either: its outer products are matrix operations, which module-level assembly kernels of std run
 (`ffi/sc_sme.spc` for `std::simd::matrix`, super-c-language `references/simd.md`), each entering
 streaming mode itself. AMX (`amx-tile`, `amx-int8`) has no backend entries either: a Super-C kernel

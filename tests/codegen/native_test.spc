@@ -24,8 +24,9 @@ import std::cpu::detect;
 // optimizer's rewrites may leave them (`SHARE`); no frame pointer kept (`Package.omit_fp`); a fused
 // multiply-add (`Package.fma`: x86-64's FMA3); x86-64's `lzcnt` (`Package.lzcnt`); loops at 16-byte
 // boundaries in functions placed by their lines (`Package.align_loops`, `Package.fit_lines`); arm64's
-// FEAT_CSSC (`Cpu.cssc`); x86-64's BMI1, BMI2 and MOVBE together (`Cpu.bmi1`, `Cpu.bmi2`, `Cpu.movbe`); and
-// the dot products of bytes and of signed 2-byte lanes (`Cpu.vec_dot`).
+// FEAT_CSSC (`Cpu.cssc`); x86-64's BMI1, BMI2 and MOVBE together (`Cpu.bmi1`, `Cpu.bmi2`, `Cpu.movbe`);
+// the dot products of bytes and of signed 2-byte lanes (`Cpu.vec_dot`); and arm64's SVE predicates
+// (`Cpu.vpred`).
 const TAIL: u32 = 1;
 const WIDE: u32 = 2;
 const HALF: u32 = 4;
@@ -47,6 +48,7 @@ const LSE_RT: u32 = 131072;
 const DIT: u32 = 262144;
 const CSSC_RT: u32 = 524288;
 const V3_RT: u32 = 1048576;
+const VPRED: u32 = 2097152;
 
 // Compile LIR `text` natively on the host, link it with C `driver` and run it; the exit code, or -1 when
 // a step failed (the failure on stderr). 0 on a host without a native backend.
@@ -89,6 +91,25 @@ fn run_popcnt(text: str, driver: str) i32 {
 // `run_native` with SSE4.1 on an x86-64 host, as `run_popcnt`.
 fn run_sse41(text: str, driver: str) i32 {
     return run_x64_feature(text, driver, "sse4.1", SSE41);
+}
+
+// `run_native` with SVE predicates (`Cpu.vpred`) on an arm64 Linux host: the driver's `main` returns 0 first
+// on a processor without SVE (`getauxval(AT_HWCAP)`'s HWCAP_SVE). 0 on another host, which has no SVE
+// outside streaming mode (macOS) or no runner for it.
+fn run_sve(text: str, driver: str) i32 {
+    if tgt::host_isa() != tgt::axis_index("aarch64", true) || tgt::host_os() != tgt::axis_index("linux", false) {
+        return 0;
+    }
+    let head = "int main(void) {\n";
+    let at = driver.find(head);
+    assert(at >= 0, "the driver's main");
+    let d = format(
+        "#include <sys/auxv.h>\n{}{}  if (!(getauxval(AT_HWCAP) & (1UL << 22))) return 0;\n{}",
+        driver.slice(0, at as usize),
+        head,
+        driver.slice(at as usize + head.len(), driver.len()),
+    );
+    return run_native_with(text, &d, VPRED);
 }
 
 // `run_native` with package option `opt` on an x86-64 host: the driver's `main` returns 0 first on a
@@ -392,6 +413,7 @@ fn object_of(text: str, os: i32, isa: i32, opts: u32, obj: &mut Vector<u8>) bool
     p.cpu.bmi2 = p.cpu.bmi1;
     p.cpu.movbe = p.cpu.bmi1;
     p.cpu.relaxed = (opts & RELAXED) != 0;
+    p.cpu.vpred = (opts & VPRED) != 0;
     p.cpu.vec_dot = if (opts & DOT) != 0 {
         0x301
     } else {
@@ -23176,6 +23198,171 @@ int main(void) {
 // per interleave and one per deinterleave). The C driver checks the lanes on x86-64, and those of an AVX2
 // deinterleave of one vector with itself, whose shifts read the second operand before the result takes
 // the first's register.
+// Masked loads and stores through a pointer whose mask is a lane comparison's bits, or a lane mask's, run
+// through SVE predicates (`lv::FOLD_PRED`): PTRUE, the comparison (CMPHI, FCMGT) or CMPNE of the lane mask,
+// then LD1 or ST1. Each vector ends past its last active lane in a page the driver protects, which an access
+// of the whole vector would fault on; the inactive lanes of a load are 0 (`head4`, `head16`) or the
+// fallback's (`keep8`, by BIF), a store leaves the memory under them (`put2`, `putpos`). A select of the
+// lanes the predicate holds is SEL by it (`minlow`: the comparison's lane mask, which no NEON comparison
+// makes then; `pick8`: the lane mask).
+@test
+fn masked_accesses_run_through_sve_predicates() {
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let lir = M"(lir ptr 8
+sym @head4 fn global
+sym @keep8 fn global
+sym @head16 fn global
+sym @put2 fn global
+sym @putpos fn global
+sym @minlow fn global
+sym @pick8 fn global
+fn @head4
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = trunc.i32 v2
+  v4 = splat.v4i32 v3
+  v5 = wconst.v4i32 0x100000000, 0x300000002
+  v6 = vcmp.ult.v4i32 v5, v4
+  v7 = wconst.v4i32 0x200000001, 0x800000004
+  v8 = and.v4i32 v6, v7
+  v9 = vop.reduce_add.i32 (v8)
+  v10 = trunc.i8 v9
+  v11 = wconst.v4i32 0x0, 0x0
+  v12 = vop.load_masked_ptr.v4i32 (v0, v10, v11)
+  v13 = add.v4i32 v12, v12
+  store v13, v1 align 4
+  ret
+fn @keep8
+  sig (ptr, ptr, i8) -> void
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = splat.v8i8 v2
+  v4 = wconst.v8i8 0x0706050403020100
+  v5 = vcmp.ult.v8i8 v4, v3
+  v6 = wconst.v8i8 0x8040201008040201
+  v7 = and.v8i8 v5, v6
+  v8 = vop.reduce_add.i8 (v7)
+  v9 = vop.load_masked_ptr.v8i8 (v0, v8, v3)
+  store v9, v1 align 3
+  ret
+fn @head16
+  sig (ptr, ptr, i8) -> void
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = splat.v16i8 v2
+  v4 = wconst.v16i8 0x0706050403020100, 0x0f0e0d0c0b0a0908
+  v5 = vop.lt.i16 (v4, v3)
+  v6 = wconst.v16i8 0x0, 0x0
+  v7 = vop.load_masked_ptr.v16i8 (v0, v5, v6)
+  store v7, v1 align 4
+  ret
+fn @put2
+  sig (ptr, i64, i64) -> void
+b0(v0: ptr, v1: i64, v2: i64):
+  v3 = splat.v2i64 v1
+  v4 = wconst.v2i64 0x0, 0x1
+  v5 = vcmp.ult.v2i64 v4, v3
+  v6 = wconst.v2i64 0x1, 0x2
+  v7 = and.v2i64 v5, v6
+  v8 = vop.reduce_add.i64 (v7)
+  v9 = trunc.i8 v8
+  v10 = splat.v2i64 v2
+  vop.store_masked_ptr (v0, v9, v10)
+  ret
+fn @putpos
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = load.v4f32 v1 align 4
+  v3 = wconst.v4f32 0x0, 0x0
+  v4 = vop.gt.i8 (v2, v3)
+  vop.store_masked_ptr (v0, v4, v2)
+  ret
+fn @minlow
+  sig (ptr, ptr, i16) -> void
+b0(v0: ptr, v1: ptr, v2: i16):
+  v3 = splat.v8i16 v2
+  v4 = wconst.v8i16 0x3000200010000, 0x7000600050004
+  v5 = vop.lt.i8 (v4, v3)
+  v6 = wconst.v8i16 0x0, 0x0
+  v7 = vop.load_masked_ptr.v8i16 (v0, v5, v6)
+  v8 = load.v8i16 v1 align 4
+  v9 = vop.min.v8i16 (v7, v8)
+  v10 = vcmp.ult.v8i16 v4, v3
+  v11 = vsel.v8i16 v10, v9, v8
+  store v11, v1 align 4
+  ret
+fn @pick8
+  sig (ptr, ptr, i8) -> void
+b0(v0: ptr, v1: ptr, v2: i8):
+  v3 = splat.v8i8 v2
+  v4 = wconst.v8i8 0x0706050403020100
+  v5 = vcmp.ult.v8i8 v4, v3
+  v6 = wconst.v8i8 0x8040201008040201
+  v7 = and.v8i8 v5, v6
+  v8 = vop.reduce_add.i8 (v7)
+  v9 = wconst.v8i8 0x0
+  v10 = vop.load_masked_ptr.v8i8 (v0, v8, v9)
+  v11 = add.v8i8 v10, v10
+  v12 = vsel.v8i8 v5, v11, v3
+  store v12, v1 align 3
+  ret
+)";
+    let drv = "#include <stdint.h>\n#include <string.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\nvoid head4(const int32_t *, int32_t *, int64_t);\nvoid keep8(const uint8_t *, uint8_t *, uint8_t);\nvoid head16(const uint8_t *, uint8_t *, uint8_t);\nvoid put2(int64_t *, int64_t, int64_t);\nvoid putpos(float *, const float *);\nvoid minlow(const uint16_t *, uint16_t *, uint16_t);\nvoid pick8(const uint8_t *, uint8_t *, uint8_t);\nint main(void) {\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 4; r++) {\n    int32_t *a = (int32_t *)end - r, out[4];\n    for (int k = 0; k < r; k++) a[k] = 10 * k + 1;\n    head4(a, out, r);\n    for (int k = 0; k < 4; k++) if (out[k] != (k < r ? 2 * (10 * k + 1) : 0)) return 2;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(100 + k);\n    keep8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 100 + k : r)) return 3;\n  }\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r, out[16];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(50 + k);\n    head16(a, out, (uint8_t)r);\n    for (int k = 0; k < 16; k++) if (out[k] != (k < r ? 50 + k : 0)) return 4;\n  }\n  for (int r = 0; r < 3; r++) {\n    int64_t *a = (int64_t *)end - 2;\n    a[0] = a[1] = -1;\n    put2((int64_t *)end - r, r, 77);\n    for (int k = 0; k < 2; k++) if (a[k] != (k >= 2 - r ? 77 : -1)) return 5;\n  }\n  float src[4] = {1.5f, 2.5f, -1.0f, 0.0f};\n  float *d = (float *)end - 2;\n  d[0] = d[1] = -9.0f;\n  putpos(d, src);\n  if (d[0] != 1.5f || d[1] != 2.5f) return 6;\n  for (int r = 0; r < 8; r++) {\n    uint16_t *a = (uint16_t *)end - r, acc[8];\n    for (int k = 0; k < 8; k++) acc[k] = (uint16_t)(30 + k);\n    for (int k = 0; k < r; k++) a[k] = (uint16_t)(k % 2 ? 5 : 90);\n    minlow(a, acc, (uint16_t)r);\n    for (int k = 0; k < 8; k++) if (acc[k] != (k < r && k % 2 ? 5 : 30 + k)) return 7;\n  }\n  for (int r = 0; r < 8; r++) {\n    uint8_t *a = end - r, out[8];\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(20 + k);\n    pick8(a, out, (uint8_t)r);\n    for (int k = 0; k < 8; k++) if (out[k] != (k < r ? 2 * (20 + k) : r)) return 8;\n  }\n  return 0;\n}\n";
+    // SEL z.T, p0, z.T, z.T, once in each of `minlow` and `pick8`; no CMHI v.8H.
+    let mut obj = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), VPRED, &mut obj),
+        "the object",
+    );
+    let mut sels: u32 = 0;
+    let mut cmhi: u32 = 0;
+    for k in 0..obj.len() / 4 {
+        let w = le_at(&obj, 4 * k, 4) as u32;
+        sels += ((w & 0xFF20FC00) == 0x0520C000) as u32;
+        cmhi += ((w & 0xFFE0FC00) == 0x6E603400) as u32;
+    }
+    assert_eq(sels, 2);
+    assert_eq(cmhi, 0);
+    assert_eq(run_sve(lir, drv), 0);
+    assert_eq(run_native(lir, drv), 0);
+}
+
+// A body compiled without SVE runs masked accesses marked to run only where the processor has it (`.pred`)
+// through SVE predicates, under the start-up's byte `__sc_sve` (`sys.sve`: ADRP, LDR of its address, LDRB);
+// the driver sets the byte as the start-up does (HWCAP_SVE on Linux, 0 elsewhere), and the byte-lane load
+// and store stop at the guard page past the active lanes.
+@test
+fn predicated_accesses_run_under_the_start_up_sve_byte() {
+    if !cli::has_cc() || tgt::host_isa() != tgt::axis_index("aarch64", true) {
+        return; // a C driver links it; `sys.sve` is arm64's
+    }
+    let lir = M"(lir ptr 8
+sym @twice fn global
+fn @twice
+  sig (ptr, i8) -> i32
+b0(v0: ptr, v1: i8):
+  v2 = sys.sve.i8
+  v3 = iconst.i8 0
+  v4 = icmp.ne v2, v3
+  br v4, b1, b2
+b1:
+  v5 = splat.v16i8 v1
+  v6 = wconst.v16i8 0x0706050403020100, 0x0f0e0d0c0b0a0908
+  v7 = vop.lt.i16 (v6, v5)
+  v8 = wconst.v16i8 0x0, 0x0
+  v9 = vop.load_masked_ptr.pred.v16i8 (v0, v7, v8)
+  v10 = add.v16i8 v9, v9
+  vop.store_masked_ptr.pred (v0, v7, v10)
+  v11 = iconst.i32 1
+  ret v11
+b2:
+  v12 = iconst.i32 0
+  ret v12
+)";
+    let drv = "#include <stdint.h>\n#ifdef _WIN32\n#include <windows.h>\n#else\n#include <sys/mman.h>\n#include <unistd.h>\n#endif\n#ifdef __linux__\n#include <sys/auxv.h>\n#endif\nunsigned char __sc_sve;\nint32_t twice(uint8_t *, uint8_t);\nint main(void) {\n#ifdef __linux__\n  __sc_sve = (getauxval(AT_HWCAP) >> 22) & 1;\n#endif\n#ifdef _WIN32\n  SYSTEM_INFO si;\n  GetSystemInfo(&si);\n  long pg = (long)si.dwPageSize;\n  DWORD was;\n  uint8_t *m = VirtualAlloc(0, 2 * pg, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);\n  if (m == 0 || !VirtualProtect(m + pg, pg, PAGE_NOACCESS, &was)) return 1;\n#else\n  long pg = sysconf(_SC_PAGESIZE);\n  uint8_t *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);\n  if (m == MAP_FAILED || mprotect(m + pg, pg, PROT_NONE) != 0) return 1;\n#endif\n  uint8_t *end = m + pg;\n  for (int r = 0; r < 16; r++) {\n    uint8_t *a = end - r;\n    for (int k = 0; k < r; k++) a[k] = (uint8_t)(20 + k);\n    if (twice(a, (uint8_t)r) != __sc_sve) return 2;\n    for (int k = 0; k < r; k++) if (a[k] != (__sc_sve ? 2 * (20 + k) : 20 + k)) return 3;\n  }\n  return 0;\n}\n";
+    assert_eq(run_native(lir, drv), 0);
+}
+
 @test
 fn interleaves_write_over_their_dying_first_operand() {
     let lir = M"(lir ptr 8

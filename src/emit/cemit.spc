@@ -170,7 +170,19 @@ pub(package) const fn cpu_facts(pk: &loader::Package, fs: cf::CpuFeatureSet) lir
         bmi2: feature(pk, fs, "bmi2"),
         movbe: feature(pk, fs, "movbe"),
         relaxed: feature(pk, fs, "relaxed-simd"),
+        vpred: feature(pk, fs, "sve"),
     };
+}
+
+/// Whether the start-up of `pk`'s program stores in the byte `__sc_sve` whether the processor has SVE
+/// (`lir::ir::SYS_SVE`): a native build with run-time copies (`simd_dispatch` not `off`) for a target whose
+/// kernel reports it (`Target.sve_hwcap`), whose features lack it.
+pub(package) const fn sve_byte(pk: &loader::Package) bool {
+    let hw = switch tgt::target_of(pk.build_target, pk.arch) {
+        Some(r) => r.sve_hwcap,
+        None => false,
+    };
+    return hw && pk.native && pk.simd_dispatch.as_str() != "off" && !feature(pk, cf::close(pk.features), "sve");
 }
 
 /// The backends of each module of `pk`: LIR for every module of a native build (`native_on`) and for the
@@ -757,6 +769,7 @@ extend CEmit {
             for k in 0..pk.simd_levels.len() {
                 l.pkg.copy_flags.push(cpu_facts(pk, pk.simd_levels[k]).flags() & lir_ir::CPU_SCALAR);
             }
+            l.pkg.sve_byte = sve_byte(pk);
             l.pkg.dit = (switch tgt::target_of(pk.build_target, pk.arch) {
                 Some(r) => r.dit,
                 None => tgt::DIT_NONE,

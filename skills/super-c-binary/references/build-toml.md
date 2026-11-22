@@ -277,8 +277,10 @@ flags are `-march=x86-64-vN` for the highest level the set holds, else `-march=x
 
 The aarch64 baseline depends on the platform: macOS has every feature of Apple clang's default
 CPU (`apple-m1`, the oldest Apple silicon Mac); iOS those of its default CPU (`apple-a7`, which
-the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` and `sve2` are
-detected only: no vector operation uses them, and no macOS or iOS build takes them (no Apple core
+the iOS 13 floor still allows); Linux, Android and Windows `neon` alone. `sve` (which `sve2`
+implies) keeps vectors at NEON's 16 bytes and runs masked loads and stores through SVE predicates:
+the vectorizer's masked last iterations and masked accesses whose mask is a lane comparison
+(super-c-compiler-internals `references/lir.md`); no macOS or iOS build takes them (no Apple core
 has them). `sme`, `sme2` and `sme-f64f64` are detected (Apple M4 and later, Armv9.2 cores) and
 select C kernels that enter streaming mode themselves; no vector operation uses them, and outside
 streaming mode an SME core may lack SVE (Apple M4 and M5), so a build that enables them must not
@@ -342,7 +344,9 @@ The same levels give the native code's scalar copies: on x86_64 a function where
 instructions (POPCNT, LZCNT, BMI1, FMA) save one instruction in eight of a loop, or of a small body, gets
 a copy per level, chosen by the same byte; on Linux arm64 the target's own levels apply whatever the
 list names (LSE and RCPC, then CSSC too, read from HWCAP at start-up) for atomics, bit counts and
-trailing zeros. `--simd-dispatch=off` and opt-level 0 or 1 make none. On Windows arm64 (a C tree) the
+trailing zeros. A native Linux arm64 build without `sve` also tests SVE at start-up (HWCAP_SVE into
+the byte `__sc_sve`): a vector loop of 8 lanes or more runs the elements its vectors leave as one
+SVE-predicated iteration where the CPU has it, the scalar loop elsewhere, with no copy of the function. `--simd-dispatch=off` and opt-level 0 or 1 make none of these. On Windows arm64 (a C tree) the
 atomics go through compiler-rt's helpers (`-moutline-atomics` in `__cflags`), which pick LSE by the CPU,
 unless the build has `+lse`.
 
@@ -369,7 +373,7 @@ the build's set included: a program can choose code at run time, never a result.
 | `--target-feature=L` | CPU features, a comma list of `+name`/`-name` applied after build.toml's `target-features` (see CPU features above) |
 | `--target-cpu=L` | x86_64 level (`x86-64`, `x86-64-v2`, `x86-64-v3`, `x86-64-v4`) applied before every feature list; replaces build.toml's `target-cpu` |
 | `--simd-width=W` | Vector width the planner prefers on AVX-512: `256` (default) or `512` |
-| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code and of the scalar copies (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`, which also turns off Linux arm64's LSE, RCPC and CSSC copies; replaces build.toml's `simd-dispatch` |
+| `--simd-dispatch=L` | x86_64: the levels of the run-time copies of vector code and of the scalar copies (comma list of `x86-64-v2` .. `x86-64-v4`, default `x86-64-v3` at opt-level 2 or more, `off` below and for a script without `--profile`), or `off`, which also turns off Linux arm64's LSE, RCPC and CSSC copies and its start-up SVE test; replaces build.toml's `simd-dispatch` |
 | `--bootstrap-tags` | Enable `@platform` bootstrap tag gating; accept unknown attributes, and a std `@intrinsic` this compiler does not know (its declaration and the std bodies that call it go unchecked; emitting such a body fails); a manifest build also skips build.toml sections and keys this compiler does not know (a previous release building newer source) |
 | `--no-lint` | Disable lint pass |
 | `--const-eval-steps=N` | Cap compile-time evaluation steps (~2M default) |

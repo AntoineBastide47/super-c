@@ -41,7 +41,7 @@ const MESSAGES: [str<'static>; 13] = [
     "a division or remainder of a secret value: its time depends on the operands",
     "a float operation on a secret value: its time may depend on the operands",
     "an atomic operation on a secret value",
-    "a vector operation on a secret value other than an integer cast, a wrapping add, subtract or multiply, a shift by a public count or a fixed lane move: its code may branch on the lanes",
+    "a vector operation on a secret value other than an integer cast, a wrapping add, subtract or multiply, a shift by a public count, a fixed lane move or a masked load or store by a public mask: its code may branch on the lanes",
     "a system call with a secret value",
     "a select on a secret condition of a value that is not an integer of at most 64 bits or a pointer: its code may branch",
     "an indirect call with a secret target or argument",
@@ -417,6 +417,11 @@ extend Check {
         }
         if c == core::SIMD_BITCAST as u32 || c == core::SIMD_LOW_HALF as u32 || c == core::SIMD_HIGH_HALF as u32 || c == core::SIMD_CONCAT as u32 {
             return true;
+        }
+        if (c == core::SIMD_LOAD_MASKED_PTR as u32 || c == core::SIMD_STORE_MASKED_PTR as u32) && t.b == 3 {
+            // Its code branches on the mask's lanes alone (or sets a predicate from them), and its address
+            // is the pointer's: a public mask and pointer keep it constant-time.
+            return !self.secret(n, b.pool[t.a as usize]) && !self.secret(n, b.pool[(t.a + 1) as usize]);
         }
         return c == core::SIMD_SHUFFLE as u32 || c == core::SIMD_SWIZZLE as u32;
     }

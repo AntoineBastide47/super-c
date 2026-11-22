@@ -22,12 +22,24 @@ fn optimized_fma(text: str, bu: lu::Budgets, fma: bool) (Package, Package) {
 
 // `optimized_fma` with the float rewrites `fm` (`FM_*`, `Package.fmath`) allowed.
 fn optimized_fm(text: str, bu: lu::Budgets, fma: bool, fm: u8) (Package, Package) {
+    return optimized_cpu(text, bu, fma, fm, false);
+}
+
+// `optimized_fm` for a processor that predicates vector loads and stores when `vpred` (`Cpu.vpred`).
+fn optimized_cpu(text: str, bu: lu::Budgets, fma: bool, fm: u8, vpred: bool) (Package, Package) {
+    return optimized_sve(text, bu, fma, fm, vpred, false);
+}
+
+// `optimized_cpu` for a build whose start-up tests SVE when `rt` (`Package.sve_byte`).
+fn optimized_sve(text: str, bu: lu::Budgets, fma: bool, fm: u8, vpred: bool, rt: bool) (Package, Package) {
     let mut err = String::new();
     let q = lparse::parse(text, &mut err);
     assert(q.is_some(), err.as_str());
     let before = q.unwrap();
     let mut after = lparse::parse(text, &mut err).unwrap();
     after.cpu.fma = fma;
+    after.cpu.vpred = vpred;
+    after.sve_byte = rt;
     after.fmath = fm;
     let none = Vector::<bool>::new();
     lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: bu });
@@ -9345,6 +9357,294 @@ data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000
         let x: []u64 = [n];
         same_outcome(&b, &a, "sum", x, n * (n + 1) / 2, false);
         same_outcome(&b, &a2, "sum", x, n * (n + 1) / 2, false);
+    }
+}
+
+// Where the target predicates vector loads and stores (`Cpu.vpred`), what vectors of at least TAIL_LANES lanes
+// leave runs as one masked vector iteration instead of the scalar loop: the interleaved loop's rest
+// vectorizes once more (`BLOCK_EPI`) with a masked last iteration, whose load reads the elements left alone
+// (the evaluator checks each lane it reads) through the lane comparison itself (`Opt::pred_reads`), and whose
+// sum takes 0 in the other lanes (`zero_lanes`). A sum of 4 lanes keeps its scalar rest.
+@test
+fn remainders_run_as_one_masked_iteration() {
+    let src = M"(lir ptr 8
+sym @h data global
+sym @w data global
+sym @sum16 fn global
+sym @sum32 fn global
+data @h size 80 align 2 bytes 0100020003000400050006000700080009000a000b000c000d000e000f0010001100120013001400150016001700180019001a001b001c001d001e001f00200021002200230024002500260027002800
+data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
+fn @sum16
+  sig (i64) -> i16
+b0(v0: i64):
+  v1 = symaddr @h
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i16):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 2
+  v9 = load.i16 v8 align 1
+  v10 = add.i16 v6, v9
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+fn @sum32
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = symaddr @w
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i32 0
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 4
+  v9 = load.i32 v8 align 2
+  v10 = add.i32 v6, v9
+  v11 = add.i64 v5, v3
+  jmp b1(v11, v10)
+b3:
+  ret v6
+)";
+    let (b, a) = optimized_cpu(src, VECTOR, false, 0, true);
+    let s = text_of(&a, "sum16");
+    assert(count(&s, "load_masked_ptr") == 1 && s.contains("vop.lt.") && !s.contains("vsel"), s.as_str());
+    let s32 = text_of(&a, "sum32");
+    assert(!s32.contains("masked"), s32.as_str());
+    for n in 0..41u64 {
+        let x: []u64 = [n];
+        same_outcome(&b, &a, "sum16", x, n * (n + 1) / 2, false);
+        if n < 26 {
+            same_outcome(&b, &a, "sum32", x, n * (n + 1) / 2, false);
+        }
+    }
+}
+
+// Where the start-up tests SVE (`Package.sve_byte`) and the body lacks it, the masked last iteration runs
+// under that test (`sys.sve`), its accesses marked to run only there (`.pred`); elsewhere the scalar loop runs
+// the rest, as without it. Both ways end as the scalar loop does.
+@test
+fn masked_last_iterations_run_where_the_start_up_finds_sve() {
+    let src = M"(lir ptr 8
+sym @a data global
+sym @b data global
+sym @add8 fn global
+data @a size 40 align 3 bytes 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f2021222324252627
+data @b size 40 align 3 bytes 302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09
+fn @add8
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = symaddr @a
+  v3 = symaddr @b
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  jmp b1(v4)
+b1(v6: i64):
+  v7 = icmp.ult v6, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v2, v6 * 1
+  v9 = load.i8 v8 align 0
+  v10 = ptradd v3, v6 * 1
+  v11 = load.i8 v10 align 0
+  v12 = add.i8 v9, v11
+  store v12, v8 align 0
+  v13 = add.i64 v6, v5
+  jmp b1(v13)
+b3:
+  v14 = ptradd v2, v1 * 1
+  v15 = load.i8 v14 align 0
+  ret v15
+)";
+    let (b, a) = optimized_sve(src, VECTOR, false, 0, false, true);
+    let s = text_of(&a, "add8");
+    assert(
+        s.contains("sys.sve") && count(&s, "load_masked_ptr.pred") == 2 && s.contains("store_masked_ptr.pred"),
+        s.as_str(),
+    );
+    let (_, n) = optimized_sve(src, VECTOR, false, 0, false, false);
+    assert(!text_of(&n, "add8").contains("masked"), text_of(&n, "add8").as_str());
+    for c in 0..41u64 {
+        for j in [0u64, 7, 15, 16, 31, 39] {
+            let x: []u64 = [c, j];
+            let mut e = leval::Eval::new(&b);
+            let o = e.run(b.find_symbol("add8"), x);
+            for sve in [true, false] {
+                let mut e2 = leval::Eval::new(&a);
+                e2.sve = sve;
+                let o2 = e2.run(a.find_symbol("add8"), x);
+                assert(o2.kind == leval::EV_OK && o2.value == o.value, o2.msg.as_str());
+            }
+        }
+    }
+}
+
+// The masked last iteration's other forms: a map of bytes in place (a store through the base it loads, so no
+// overlapping iteration), an unsigned minimum (a select's reduction) and an `or` of values not 0 past the count
+// (each keeps its other lanes by a lane select), and an update in place on one side of a branch (its lanes
+// both masks pick; vectors of one copy, since the rest of interleaved ones, `BLOCK_EPI`, vectorizes only a
+// body of one block).
+// Each runs every count from 0 to 40 as the scalar loop does.
+@test
+fn masked_last_iterations_map_select_or_and_pick() {
+    let src = M"(lir ptr 8
+sym @a8 data global
+sym @b8 data global
+sym @hu data global
+sym @x16 data global
+sym @y16 data global
+sym @map fn global
+sym @minu fn global
+sym @ors fn global
+sym @pick fn global
+data @a8 size 40 align 3 bytes 0b30557a9fc4e90e33587da2c7ec11365b80a5caef14395e83a8cdf2173c6186abd0f51a3f6489ae
+data @b8 size 40 align 3 bytes 05121f2c394653606d7a8794a1aebbc8d5e2effc091623303d4a5764717e8b98a5b2bfccd9e6f300
+data @hu size 80 align 3 bytes 03007b07f30e6b166c06e40d5c155d05d50c4d144e04c60b3e133f03b70a2f123002a809201121019908111012008a07020f7a167b06f30d6b156c05e40c5c145d04d50b4d134e03c60a3e123f02b709
+data @x16 size 80 align 3 bytes d4fef9fe1eff43ff68ff8dffb2ffd7fffcff210046006b009000b500da00ff00240149016e019301b801dd01020227024c0271029602bb02e00205032a034f0374039903be03e30308042d0452047704
+data @y16 size 80 align 3 bytes d8fffefff7fff9ffe9ffe2ff1a00d4ffcdff3b00bfffb8ff5c00aaffa3ff7d0095ff8eff9e0080ff79ffbf006bff64ffe00056ff4fff010141ff3aff22012cff25ff430117ff10ff640102fffbfe8501
+fn @map
+  sig (i64, i64) -> i8
+b0(v0: i64, v1: i64):
+  v2 = symaddr @a8
+  v3 = symaddr @b8
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i8 3
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v2, v7 * 1
+  v10 = load.i8 v9 align 0
+  v11 = mul.i8 v10, v6
+  v12 = ptradd v3, v7 * 1
+  v13 = load.i8 v12 align 0
+  v14 = add.i8 v11, v13
+  store v14, v9 align 0
+  v15 = add.i64 v7, v5
+  jmp b1(v15)
+b3:
+  v16 = ptradd v2, v1 * 1
+  v17 = load.i8 v16 align 0
+  ret v17
+fn @minu
+  sig (i64) -> i16
+b0(v0: i64):
+  v1 = symaddr @hu
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i16 -1
+  jmp b1(v2, v4)
+b1(v5: i64, v6: i16):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = ptradd v1, v5 * 2
+  v9 = load.i16 v8 align 1
+  v10 = icmp.ult v9, v6
+  v11 = select.i16 v10, v9, v6
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @ors
+  sig (i64) -> i8
+b0(v0: i64):
+  v1 = symaddr @a8
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = iconst.i8 0
+  v5 = iconst.i8 1
+  jmp b1(v2, v4)
+b1(v6: i64, v7: i8):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = ptradd v1, v6 * 1
+  v10 = load.i8 v9 align 0
+  v11 = add.i8 v10, v5
+  v12 = or.i8 v7, v11
+  v13 = add.i64 v6, v3
+  jmp b1(v13, v12)
+b3:
+  ret v7
+fn @pick
+  sig (i64, i64) -> i16
+b0(v0: i64, v1: i64):
+  v2 = symaddr @x16
+  v3 = symaddr @y16
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i16 0
+  jmp b1(v4)
+b1(v7: i64):
+  v8 = icmp.ult v7, v0
+  br v8, b2, b5
+b2:
+  v9 = ptradd v3, v7 * 2
+  v10 = load.i16 v9 align 1
+  v11 = icmp.sgt v10, v6
+  v12 = ptradd v2, v7 * 2
+  v13 = load.i16 v12 align 1
+  br v11, b3, b4
+b3:
+  v14 = add.i16 v13, v10
+  store v14, v12 align 1
+  jmp b4
+b4:
+  v15 = add.i64 v7, v5
+  jmp b1(v15)
+b5:
+  v16 = ptradd v2, v1 * 2
+  v17 = load.i16 v16 align 1
+  ret v17
+)";
+    let (b, a) = optimized_cpu(src, VECTOR, false, 0, true);
+    for name in ["map", "minu", "ors"] {
+        let s = text_of(&a, name);
+        assert(s.contains("load_masked_ptr"), s.as_str());
+    }
+    assert(text_of(&a, "map").contains("store_masked_ptr"), text_of(&a, "map").as_str());
+    assert(text_of(&a, "minu").contains("vsel") && text_of(&a, "ors").contains("vsel"), text_of(&a, "ors").as_str());
+    let one = lu::Budgets {
+        peel: 0,
+        partial: 0,
+        version: 0,
+        version_checks: u32::MAX,
+        unswitch: 0,
+        rotate: 0,
+        vector: 1,
+        interleave: 0,
+        fin: 0,
+    };
+    let (_, a1) = optimized_cpu(src, one, false, 0, true);
+    let sp = text_of(&a1, "pick");
+    assert(count(&sp, "load_masked_ptr") == 2 && count(&sp, "store_masked_ptr") == 2, sp.as_str());
+    for n in 0..41u64 {
+        for j in [0u64, 7, 8, 15, 16, 23, 31, 39] {
+            let x: []u64 = [n, j];
+            let mut e = leval::Eval::new(&b);
+            let o = e.run(b.find_symbol("map"), x);
+            same_outcome(&b, &a, "map", x, o.value, false);
+            let mut e2 = leval::Eval::new(&b);
+            let o2 = e2.run(b.find_symbol("pick"), x);
+            same_outcome(&b, &a1, "pick", x, o2.value, false);
+        }
+        let y: []u64 = [n];
+        let mut e3 = leval::Eval::new(&b);
+        let o3 = e3.run(b.find_symbol("minu"), y);
+        same_outcome(&b, &a, "minu", y, o3.value, false);
+        let mut e4 = leval::Eval::new(&b);
+        let o4 = e4.run(b.find_symbol("ors"), y);
+        same_outcome(&b, &a, "ors", y, o4.value, false);
     }
 }
 

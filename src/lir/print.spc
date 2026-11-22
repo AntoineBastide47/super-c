@@ -449,6 +449,9 @@ extend Printer {
             if (t.aux & VOP_FIRST) != 0 {
                 out.push_str(".first");
             }
+            if (t.aux & VOP_PRED) != 0 {
+                out.push_str(".pred");
+            }
         }
         if t.ty != T_NONE && (f != F_CMP || t.op == O_VCMP) && t.op != O_ACAS && t.op != O_SLOTADDR && t.op != O_SYMADDR && t.op != O_RETADDR && t.op != O_PTRADD {
             out.push_byte(b'.');
