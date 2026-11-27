@@ -675,6 +675,15 @@ extend Gen {
                 }
             }
         }
+        // Else a callee-saved register the body saves already (`csr`) that holds nothing, before an
+        // eviction, which stores and reloads; shrink-wrapped, only where the frame is set up.
+        if !vreg && (!self.shrink || self.framing || self.cr.lv.after[blk]) {
+            for r in 0..16u32 {
+                if (self.csr & bit(r as u8)) != 0 && self.fixed_free(r as u8) && (self.cr.held & bit(r as u8)) == 0 {
+                    return r as u8;
+                }
+            }
+        }
         let busy = open & self.cr.held;
         if busy != 0 {
             let r = self.cheapest(busy);
@@ -11966,9 +11975,9 @@ extend Gen {
             return;
         }
         let rs = self.reg(t.a);
-        let rd = self.vec_def(i);
-        let x = rd - V0;
         if is_float(lt) {
+            // Over the scalar's register when it dies here.
+            let x = self.def_over(i, t.a, rs) - V0;
             self.c.vmov(x, rs - V0);
             if eb == 8 {
                 self.c.sse_rr(0x66, 0x0F14, x, x);
@@ -11978,6 +11987,7 @@ extend Gen {
             }
             return;
         }
+        let x = self.vec_def(i) - V0;
         self.c.movd_to_x(ast::pick(eb == 8, 8u32, 4u32), x, rs);
         if eb == 8 {
             self.c.sse_rr(0x66, 0x0F6C, x, x);
@@ -12339,8 +12349,14 @@ extend Gen {
             let rx = self.vec_use(t.a, self.vs0);
             let ry = self.vec_use(t.b, self.vs1);
             let rd = self.def_over(i, t.a, rx);
+            let mut y = ry;
+            if rd == ry && rd != rx {
+                // The result's register holds the second operand, which the code reads after it writes it.
+                self.c.vmov(self.vs1 - V0, ry - V0);
+                y = self.vs1;
+            }
             self.c.vmov(rd - V0, rx - V0);
-            self.c.sse_rr(0x66, 0x0F00 | opc, rd - V0, ry - V0);
+            self.c.sse_rr(0x66, 0x0F00 | opc, rd - V0, y - V0);
             return;
         }
         self.sync(t.a);
@@ -12826,6 +12842,21 @@ extend Gen {
                 self.c.vmov(rd, rm);
                 self.c.sse_rr(0x66, 0x0F00 | opc, rd, ro);
             }
+            return;
+        }
+        // AVX, a lane mask (`lane_mask`): one blend, which takes `b` where the mask's top bit is set, of each
+        // lane (`vblendvps`, `vblendvpd`: VEX.66.0F3A 4A, 4B) or of each byte (`vpblendvb`: 4C).
+        let wide = type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty);
+        if (wide || self.avx && in_vreg(t.ty)) && lane_mask(self.cr.b(), t.a, lv::MASK_DEPTH) {
+            let lt = lane_type(t.ty);
+            let rm = self.vec_use(t.a, self.vs0) - V0;
+            let rx = self.vec_use(t.b, self.vs1) - V0;
+            let s = self.tmp(true);
+            let ry = self.vec_use(t.c, s) - V0;
+            let rd = self.vec_def(i) - V0;
+            let opc: u32 = ast::pick(lt == T_F32, 0x4Au32, ast::pick(lt == T_F64, 0x4Bu32, 0x4Cu32));
+            self.c.vex_rr(0x66, 3, opc, false, wide, rd, ry, rx);
+            self.c.byte((rm as u32 & 15) << 4);
             return;
         }
         if type_bytes(t.ty, 8) == 32 && self.in_reg(t.ty) {
