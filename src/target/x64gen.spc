@@ -3915,7 +3915,7 @@ extend Gen {
         }
         self.cr.lv.three = true;
         self.cr.lv.two = true;
-        self.cr.lv.fold_ops = lv::FOLD_VIEW | lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | if self.avx {
+        self.cr.lv.fold_ops = lv::FOLD_VIEW | lv::FOLD_CMP | lv::FOLD_TST | lv::FOLD_UBFX | lv::FOLD_RMW | lv::FOLD_ROT | lv::FOLD_ROT_NARROW | lv::FOLD_LEA | lv::FOLD_SHAMT | lv::FOLD_SHAMT_EXT | lv::FOLD_BLEN | lv::FOLD_CARRY | lv::FOLD_FSEL | lv::FOLD_LDOP | lv::FOLD_ANY | lv::FOLD_VSHIMM | lv::FOLD_XADDR | lv::FOLD_BRCONJ | lv::FOLD_TRUNC | lv::FOLD_ADC | lv::FOLD_LANE | lv::FOLD_LANE0 | lv::FOLD_XBFX_EXT | lv::FOLD_ZSHL | lv::FOLD_VSAD | lv::FOLD_VCMEM | lv::FOLD_ZLANE | if self.avx {
             lv::FOLD_ANY_WIDE | lv::FOLD_VSHIMM_WIDE | lv::FOLD_VLDOP
         } else {
             0
@@ -12379,14 +12379,16 @@ extend Gen {
 
     // Whether lane access `t` (`O_VEXTRACT`, `O_VINSERT`) has an SSE2 register form (`vlane`): a lane out
     // of an xmm register but a byte; an f32 into lane 0, an f64 into either lane, a 16-bit lane; with SSE4.1
-    // a 4- or 8-byte integer lane (PINSRD, PINSRQ).
+    // a 4- or 8-byte integer lane (PINSRD, PINSRQ); a load that folds into lane 0 of zeros (`lv::FOLD_ZLANE`).
     const fn lane_reg(self: &Self, t: Inst) bool {
         if t.op == O_VEXTRACT {
             return in_vreg(self.cr.vt(t.a)) && type_bytes(t.ty, 8) >= 2;
         }
         let lt = lane_type(t.ty);
         let wide_int = self.cpu.sse41 && is_int(lt) && type_bytes(lt, 8) >= 4 && type_bytes(t.ty, 8) == 16;
-        return in_vreg(t.ty) && (lt == T_F32 && t.aux == 0 || lt == T_F64 || type_bytes(lt, 8) == 2 || wide_int);
+        return in_vreg(t.ty) && (lt == T_F32 && t.aux == 0 || lt == T_F64 || type_bytes(lt, 8) == 2 || wide_int || self.ld_folded(
+            t.b,
+        ));
     }
 
     // Lane access `t` (lane `t.aux`) into `i`. Out of an xmm register (`lane_reg`): the lane moved to lane 0
@@ -12441,6 +12443,17 @@ extend Gen {
         }
         let lt = lane_type(t.ty);
         let eb = type_bytes(lt, 8);
+        if self.ld_folded(t.b) {
+            // The lane's load into zeros (`lv::FOLD_ZLANE`): MOVSS or MOVQ from memory clears the other lanes.
+            let l = self.cr.b().insts[t.b as usize];
+            let mut rs: u32 = NONE;
+            let mut radd: i64 = 0;
+            let m = self.mem_at(l.a, l.c as i32, &mut rs, &mut radd);
+            let rd = self.vec_def(i) - V0;
+            self.c.vload(eb, rd, m);
+            self.mem_rel(rs, radd);
+            return;
+        }
         if !reg {
             let (sb, so) = self.mloc(t.a);
             let rs = self.reg(t.b);
@@ -13374,7 +13387,7 @@ extend Gen {
 
     // Whether vector conversion `t` has a form in vector registers (`vconv_reg`): an integer to twice or
     // half its width, i32 to f32 and back, f32 to f64 and back; SSE2 for vectors of 8 or 16 bytes, AVX2
-    // when one is of 32.
+    // when one is of 32, which also widens 8 bytes to 32 bytes of 4-byte lanes.
     const fn conv_reg(self: &Self, t: Inst) bool {
         let op = t.op;
         if !is_vec(t.ty) || op < O_SEXT || op > O_UITOFP {
@@ -13385,14 +13398,17 @@ extend Gen {
             ft,
             8,
         ) >= 48;
-        if !(in_vreg(t.ty) && in_vreg(ft)) && !wide {
+        let quad = self.avx && type_bytes(t.ty, 8) == 32 && type_bytes(ft, 8) == 8;
+        if !(in_vreg(t.ty) && in_vreg(ft)) && !wide && !quad {
             return false;
         }
         let fl = lane_type(self.cr.vt(t.a));
         let tl = lane_type(t.ty);
         let fb = type_bytes(fl, 8);
         let tb = type_bytes(tl, 8);
-        return (op == O_SEXT || op == O_ZEXT) && is_int(fl) && tb == 2 * fb || op == O_TRUNC && is_int(fl) && fb == 2 * tb || op == O_SITOFP && fl == T_I32 && tl == T_F32 || op == O_FPTOSI && fl == T_F32 && tl == T_I32 || op == O_FPEXT && fl == T_F32 && tl == T_F64 || op == O_FPTRUNC && fl == T_F64 && tl == T_F32;
+        return (op == O_SEXT || op == O_ZEXT) && is_int(fl) && (tb == 2 * fb || quad && tb == 4 * fb) || op == O_TRUNC && is_int(
+            fl,
+        ) && fb == 2 * tb || op == O_SITOFP && fl == T_I32 && tl == T_F32 || op == O_FPTOSI && fl == T_F32 && tl == T_I32 || op == O_FPEXT && fl == T_F32 && tl == T_F64 || op == O_FPTRUNC && fl == T_F64 && tl == T_F32;
     }
 
     // Vector conversion `t` (`conv_reg`) in xmm registers. An integer widens from its low half through
@@ -13475,16 +13491,16 @@ extend Gen {
     }
 
     // `vconv_reg` with AVX2, a vector of 32 bytes in ymm register `rx` or `rd`: an integer widens through
-    // `vpmovsx` or `vpmovzx` (VEX.66.0F38 20, 23 or 25 by its bytes, + 0x10 for zeros), narrows as with
+    // `vpmovsx` or `vpmovzx` (VEX.66.0F38 20, 21, 23 or 25 by its bytes, + 0x10 for zeros), narrows as with
     // SSE2 in each 16-byte half, then `vpermq` 0x08 joins the halves' low quarters; the float forms as with
     // SSE2 on ymm registers (`vpbroadcastd` splats 2^31).
     fn vconv_ymm(self: &mut Self, t: Inst, fb: u32, tb: u32, rd: u8, rx: u8) {
         let op = t.op;
         if op == O_SEXT || op == O_ZEXT {
             let z: u32 = ast::pick(op == O_ZEXT, 0x10, 0);
-            // bw, wd, dq: 20, 23, 25.
+            // bw, bd, wd, dq: 20, 21, 23, 25.
             let w: u32 = if fb == 1 {
-                0x20
+                ast::pick(tb == 4, 0x21u32, 0x20u32)
             } else if fb == 2 {
                 0x23
             } else {
@@ -13570,6 +13586,14 @@ extend Gen {
         }
         if looks_up_bytes(t) && self.idiom_reg(t) {
             self.shuffle_bytes(i, t, ops[0], ops[1]);
+            return true;
+        }
+        if permutes_lanes(t) && self.idiom_reg(t) {
+            // VPERMD (VEX.256.66.0F38.W0 36): lane k is the table's lane at the low 3 bits of index k.
+            let rt = self.vec_use(ops[0], self.vs0) - V0;
+            let ri = self.vec_use(ops[1], self.vs1) - V0;
+            let rd = self.vec_def(i) - V0;
+            self.c.vex_rr(0x66, 2, 0x36, false, true, rd, ri, rt);
             return true;
         }
         if counts_zeros(t) && self.idiom_reg(t) {
@@ -15192,7 +15216,8 @@ extend Gen {
     // `idiom_lanes` computes there; or a move of the lanes of 2 to 8 bytes of a vector in an xmm register
     // (`lv::lane_perm`, `reverse_lanes`); or the lanes of two vectors in xmm registers, or ymm registers
     // under AVX2, in a row (`lv::lane_slide`, `slide_lanes`); or the bytes of 2- to 8-byte lanes of an xmm
-    // register swapped (`swap_lane_bytes`).
+    // register swapped (`swap_lane_bytes`); or the 4-byte lanes of a ymm register moved by a ymm register
+    // of indices below 8 (`permutes_lanes`, AVX2).
     const fn idiom_reg(self: &Self, t: Inst) bool {
         if swaps_bytes(t) {
             return in_vreg(t.ty) && type_bytes(t.ty, 8) == 16 && type_bytes(lane_type(t.ty), 8) >= 2;
@@ -15208,6 +15233,13 @@ extend Gen {
         }
         if looks_up_bytes(t) {
             return self.tbl_reg(t);
+        }
+        if permutes_lanes(t) {
+            let b = self.cr.b();
+            return self.avx && self.cr.vt(b.pool[t.a as usize]) == t.ty && self.cr.vt(b.pool[(t.a + 1) as usize]) == vec_type(
+                T_I32,
+                8,
+            );
         }
         if counts_zeros(t) {
             // VPLZCNTD, VPLZCNTQ where the build has AVX-512 CD and VL (`Package.vec_bits`).
@@ -17129,6 +17161,14 @@ const fn looks_up_bytes(t: Inst) bool {
     return t.op == O_VOP && t.b == 2 && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_SWIZZLE_ZERO as u32 && is_vec(
         t.ty,
     ) && lane_type(t.ty) == T_I8;
+}
+
+// Whether `t` moves the 4-byte lanes of a 32-byte vector by a vector of lane indices that are all below 8
+// (`SIMD_SWIZZLE_ZERO` of two operands, `VOP_UNCHECKED`).
+const fn permutes_lanes(t: Inst) bool {
+    return t.op == O_VOP && t.b == 2 && (t.aux & VOP_CODE) as u32 == core::OP_SIMD + core::SIMD_SWIZZLE_ZERO as u32 && (t.aux & VOP_UNCHECKED) != 0 && is_vec(
+        t.ty,
+    ) && type_bytes(t.ty, 8) == 32 && type_bytes(lane_type(t.ty), 8) == 4;
 }
 
 // Whether `t` counts the leading zeros of the integer lanes of one vector (`SIMD_CLZ`).

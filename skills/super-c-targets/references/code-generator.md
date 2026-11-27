@@ -253,7 +253,9 @@ section symbol (`ob::ORel.part`: no global symbol a shared object could interpos
   element (MOVI, DUP) and loads any other of 16 bytes (ADRP, LDR q of `const_sym`'s data). A comparison
   with 0 of the `or` of a vector's lanes tests the register (`lv::FOLD_ANY`: `pmovmskb` of a lane mask;
   with SSE4.1 `ptest` of any integer vector, `lv::FOLD_ANY_BITS`). With SSE4.1 a product of 32-bit lanes
-  reads such a constant or a folded load as its memory operand (`lv::FOLD_VMUL`, `pmulld x, [m]`).
+  reads such a constant or a folded load as its memory operand (`lv::FOLD_VMUL`, `pmulld x, [m]`). A
+  scalar load of 4 or 8 bytes that only a `vinsert` into lane 0 of a 16-byte vector of zeros reads is that
+  insert's load (`lv::FOLD_ZLANE`, x86-64: `movss`, `movq` from memory clear the other lanes).
 - Further vector register forms: slides of two vectors' lanes in a row (`lv::lane_slide`: arm64 EXT;
   x86-64 PALIGNR with SSSE3, else PSLLDQ, PSRLDQ and POR, 32 bytes VPERM2I128 and VPALIGNR); widening
   products (`O_VMULW`: arm64 SMULL, UMULL and their `2` forms; x86-64 PMULUDQ, PMULDQ with SSE4.1, of

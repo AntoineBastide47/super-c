@@ -139,6 +139,8 @@ const JOIN_BAD: u32 = 0xFFFFFFFE;
 const FRAME_DEPTH: u32 = 8;
 // `Opt::result_into` follows at most RESULT_HOPS copies of a call's result.
 const RESULT_HOPS: u32 = 4;
+// `Opt::counted_mask` reads operations of masks' bits at most COUNT_DEPTH deep.
+const COUNT_DEPTH: u32 = 3;
 // `Opt::preader` and `ireader` of a value several blocks read, or an edge.
 const MULTI: u32 = 0xFFFFFFFE;
 // `Opt::thread_rounds` runs at most THREAD_ROUNDS times per optimization of a body. A block an edge
@@ -11988,7 +11990,7 @@ extend Opt {
         return self.before(b, k, i, Inst { op: O_WCONST, ty: wt, aux: 0, a: at, b: nw, c: VNONE });
     }
 
-    // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`lane_mask_of`), extended or
+    // Bit count `t` (instruction `i` of block `k`) of the bits of a lane mask (`counted_mask`), extended or
     // not: the negated sum of the lane mask, each lane -1 or 0, in the count's type. A mask has at most 64
     // lanes, so the sum fits the lanes' width. Not of the bits of a mask of several registers another
     // instruction reads (`bits_kept`): their count takes fewer instructions than a second sum. Whether it
@@ -11997,7 +11999,7 @@ extend Opt {
         if !is_int(t.ty) || self.bits_kept(b, t.a, i) {
             return false;
         }
-        let mk = self.lane_mask_of(b, k, i, t.a, 0);
+        let mk = self.counted_mask(b, k, i, t.a, COUNT_DEPTH);
         if mk == VNONE {
             return false;
         }
@@ -12019,6 +12021,57 @@ extend Opt {
         };
         *t = Inst { op: O_NEG, ty: t.ty, aux: 0, a: w, b: VNONE, c: VNONE };
         return true;
+    }
+
+    // The lane mask whose set lanes are the set bits of `v`, for a count (instruction `i` of block `k`):
+    // `lane_mask_of`'s before its sign extensions (the lanes `mask_sum` widened for the bits set the same
+    // lanes), so the comparison's own lanes; or, `depth` operations deep, through extensions and
+    // truncations to no fewer bits than lanes, the `and`, `or` or `xor` of the masks of two such values, of
+    // one type, for that operation of the values, and a mask's complement for an `xor` with every lane's
+    // bit. VNONE when none.
+    fn counted_mask(self: &mut Self, b: &mut Body, k: u32, i: u32, v: Value, depth: u32) Value {
+        let mut m = self.lane_mask_of(b, k, i, v, 0);
+        // Each step halves the lanes' width: at most 3.
+        for _ in 0..3 {
+            if is_op(b, m, O_SEXT) {
+                m = b.insts[m as usize].a;
+            }
+        }
+        if m != VNONE || depth == 0 {
+            return m;
+        }
+        let mut x = v;
+        let mut kept: u32 = 64;
+        // Each step takes one extension or truncation: at most 6, as `lane_mask_of`.
+        for _ in 0..6 {
+            if is_op(b, x, O_ZEXT) || is_op(b, x, O_TRUNC) {
+                if b.insts[x as usize].op == O_TRUNC {
+                    kept = kept.min(type_bits(b.insts[x as usize].ty, 8));
+                }
+                x = b.insts[x as usize].a;
+            }
+        }
+        if !is_op(b, x, O_AND) && !is_op(b, x, O_OR) && !is_op(b, x, O_XOR) {
+            return VNONE;
+        }
+        let t = b.insts[x as usize];
+        let l = self.counted_mask(b, k, i, t.a, depth - 1);
+        if l == VNONE || kept < lanes(b.type_of(l)) {
+            return VNONE;
+        }
+        let lt = b.type_of(l);
+        let c = int_bits(b, t.b);
+        if c.is_some() {
+            if t.op != O_XOR || trunc_bits(c.unwrap(), type_bits(t.ty, 8)) != mask_of(lanes(lt)) {
+                return VNONE;
+            }
+            return self.before(b, k, i, Inst { op: O_NOT, ty: lt, aux: 0, a: l, b: VNONE, c: VNONE });
+        }
+        let r = self.counted_mask(b, k, i, t.b, depth - 1);
+        if r == VNONE || b.type_of(r) != lt {
+            return VNONE;
+        }
+        return self.before(b, k, i, Inst { op: t.op, ty: lt, aux: 0, a: l, b: r, c: VNONE });
     }
 
     // Whether bits `v` (through extensions and truncations) are the bits of a lane mask of more than 16 bytes
@@ -12222,11 +12275,15 @@ extend Opt {
     }
 
     // Unchecked gather `t` (instruction `i` of block `k`; `SIMD_GATHER_UNCHECKED` of a slice's address, an
-    // index vector, a constant mask and a fallback vector): each active lane a load of its element, at the
-    // slice's pointer plus its index zero-extended (the caller keeps it in bounds), inserted into the
-    // fallback (by interleaves where the target inserts no lane in a register, `gather_zips`); a backend
-    // loads a gather's lanes one by one, and the slice's pointer, the index lanes and the addresses are then
-    // the optimizer's values. Not where the generator gathers every lane in one instruction. Whether it did.
+    // index vector, a constant mask and a fallback vector) by chunks of at most 16 bytes: a chunk's indices,
+    // then its elements (neighbouring index reads pair, and one chunk's indices fit the registers), each
+    // active lane a load of its element at the slice's pointer plus its index zero-extended (the caller
+    // keeps it in bounds). Where the target inserts a lane in a register (`Package.lane_insert`) the loads
+    // go into the fallback's chunk, or onto the first one's splat when every lane of the chunk is active;
+    // else the chunk is interleaves of its lanes (`gather_zips`). A chunk of no active lane is the
+    // fallback's; the chunks are joined (`concat`). A backend loads a gather's lanes one by one, and the
+    // slice's pointer, the index lanes and the addresses are then the optimizer's values. Not where the
+    // generator gathers every lane in one instruction. Whether it did.
     fn gather_lanes(self: &mut Self, pk: &Package, b: &mut Body, k: u32, i: u32, t: &mut Inst) bool {
         let code = (t.aux & VOP_CODE) as u32;
         if code != core::OP_SIMD + core::SIMD_GATHER_UNCHECKED as u32 || t.b != 4 || t.c != VNONE || !is_vec(t.ty) {
@@ -12264,137 +12321,66 @@ extend Opt {
             i,
             Inst { op: O_LOAD, ty: T_PTR, aux: pk.ptr_bytes.trailing_zeros() as u16, a: s, b: VNONE, c: 0 },
         );
-        // The indices first, then the elements: neighbouring index reads pair.
-        let mut ads = Vector::<Value>::with_capacity(n as usize);
-        for q in 0..n {
-            if (m >> q as u64 & 1) == 0 {
-                ads.push(VNONE);
-                continue;
-            }
-            let e = self.before(b, k, i, Inst { op: O_VEXTRACT, ty: it, aux: q as u16, a: ix, b: VNONE, c: VNONE });
-            let z = if type_bytes(it, pk.ptr_bytes) < pk.ptr_bytes {
-                self.before(b, k, i, Inst { op: O_ZEXT, ty: pi, aux: 0, a: e, b: VNONE, c: VNONE })
-            } else {
-                e
-            };
-            ads.push(z);
-        }
-        if !pk.lane_insert {
-            *t = self.gather_zips(pk, b, k, i, *t, ptr, &ads, m, fb);
-            return true;
-        }
-        let mut acc = fb;
-        let last = (63 - m.leading_zeros()) as u32;
-        for q in 0..n {
-            if (m >> q as u64 & 1) == 0 {
-                continue;
-            }
-            let ad = self.before(
-                b,
-                k,
-                i,
-                Inst { op: O_PTRADD, ty: T_PTR, aux: lb as u16 | PTR_INBOUNDS, a: ptr, b: ads[q as usize], c: 0 },
-            );
-            let x = self.before(
-                b,
-                k,
-                i,
-                Inst { op: O_LOAD, ty: lt, aux: lb.trailing_zeros() as u16, a: ad, b: VNONE, c: 0 },
-            );
-            // Every lane loaded: the first one's splat replaces the fallback.
-            let ins = if acc == fb && m == ~0u64 >> (64 - n) as u64 {
-                Inst { op: O_SPLAT, ty: t.ty, aux: 0, a: x, b: VNONE, c: VNONE }
-            } else {
-                Inst { op: O_VINSERT, ty: t.ty, aux: q as u16, a: acc, b: x, c: VNONE }
-            };
-            if q == last {
-                *t = ins;
-            } else {
-                acc = self.before(b, k, i, ins);
-            }
-        }
-        return true;
-    }
-
-    // Gather `t`'s vector (instruction `i` of block `k`) from its lanes, where the target inserts no lane in a
-    // register (`Package.lane_insert`): per chunk of at most 16 bytes the splat of each lane's element (at
-    // `ptr` plus index `ads[q]` scaled; an inactive lane, not in `m`, the fallback `fb`'s), interleaved in
-    // pairs at the lanes' width, then at twice it, until one vector holds the chunk's lanes in order (x86-64
-    // `punpckl*`); the chunks joined (`concat`). The instruction that gives the vector, of `t`'s type.
-    fn gather_zips(
-        self: &mut Self,
-        pk: &Package,
-        b: &mut Body,
-        k: u32,
-        i: u32,
-        t: Inst,
-        ptr: Value,
-        ads: &Vector<Value>,
-        m: u64,
-        fb: Value,
-    ) Inst {
-        let lt = lane_type(t.ty);
-        let eb = type_bytes(lt, pk.ptr_bytes);
-        let nb = type_bytes(t.ty, pk.ptr_bytes);
-        let cb = nb.min(16);
-        let cl = cb / eb;
+        let cl = nb.min(16) / lb;
+        let nc = n / cl;
         let ct = vec_type(lt, cl);
-        let mut chunks = Vector::<Value>::new();
-        let mut level = Vector::<Value>::new();
+        let full = ~0u64 >> (64 - cl) as u64;
+        let mut chunks = Vector::<Value>::with_capacity(nc as usize);
         let mut next = Vector::<Value>::new();
-        // Each chunk's lanes, then at most 4 levels of interleaves (2 to 16 lanes).
-        for c in 0..nb / cb {
-            level.truncate(0);
+        let mut ads = Vector::<Value>::with_capacity(cl as usize);
+        for c in 0..nc {
+            let cm = m >> (c * cl) as u64 & full;
+            let base = if cm == full {
+                VNONE
+            } else {
+                self.chunk_of(b, k, i, fb, c, nc)
+            };
+            if cm == 0 {
+                chunks.push(base);
+                continue;
+            }
+            ads.truncate(0);
             for j in 0..cl {
-                let q = c * cl + j;
-                let x = if (m >> q as u64 & 1) != 0 {
-                    let ad = self.before(
-                        b,
-                        k,
-                        i,
-                        Inst {
-                            op: O_PTRADD,
-                            ty: T_PTR,
-                            aux: eb as u16 | PTR_INBOUNDS,
-                            a: ptr,
-                            b: ads[q as usize],
-                            c: 0,
-                        },
-                    );
-                    self.before(
-                        b,
-                        k,
-                        i,
-                        Inst { op: O_LOAD, ty: lt, aux: eb.trailing_zeros() as u16, a: ad, b: VNONE, c: 0 },
-                    )
-                } else {
-                    self.before(b, k, i, Inst { op: O_VEXTRACT, ty: lt, aux: q as u16, a: fb, b: VNONE, c: VNONE })
-                };
-                level.push(self.before(b, k, i, Inst { op: O_SPLAT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }));
-            }
-            let mut w = eb;
-            while level.len() > 1 {
-                next.truncate(0);
-                let wt = vec_type(int_type(w), cb / w);
-                for p in 0..level.len() / 2 {
-                    let mut ab = [level[2 * p], level[2 * p + 1]];
-                    for h in 0..2usize {
-                        if b.type_of(unsafe ab[h]) != wt {
-                            unsafe ab[h] = self.before(
-                                b,
-                                k,
-                                i,
-                                Inst { op: O_BITCAST, ty: wt, aux: 0, a: ab[h], b: VNONE, c: VNONE },
-                            );
-                        }
-                    }
-                    next.push(self.before(b, k, i, Inst { op: O_VZIPLO, ty: wt, aux: 0, a: ab[0], b: ab[1], c: VNONE }));
+                if (cm >> j as u64 & 1) == 0 {
+                    ads.push(VNONE);
+                    continue;
                 }
-                level.truncate(0);
-                level.extend_copy(&next);
-                w *= 2;
+                let e = self.before(
+                    b,
+                    k,
+                    i,
+                    Inst { op: O_VEXTRACT, ty: it, aux: (c * cl + j) as u16, a: ix, b: VNONE, c: VNONE },
+                );
+                let z = if type_bytes(it, pk.ptr_bytes) < pk.ptr_bytes {
+                    self.before(b, k, i, Inst { op: O_ZEXT, ty: pi, aux: 0, a: e, b: VNONE, c: VNONE })
+                } else {
+                    e
+                };
+                ads.push(z);
             }
-            chunks.push(level[0]);
+            if !pk.lane_insert {
+                chunks.push(self.gather_zips(pk, b, k, i, ct, ptr, &ads, base));
+                continue;
+            }
+            let mut acc = base;
+            for j in 0..cl {
+                if ads[j as usize] == VNONE {
+                    continue;
+                }
+                let x = self.gather_load(b, k, i, lt, lb, ptr, ads[j as usize]);
+                // Every lane loaded: the first one's splat is the vector the others go into.
+                acc = self.before(
+                    b,
+                    k,
+                    i,
+                    if acc == VNONE {
+                        Inst { op: O_SPLAT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }
+                    } else {
+                        Inst { op: O_VINSERT, ty: ct, aux: j as u16, a: acc, b: x, c: VNONE }
+                    },
+                );
+            }
+            chunks.push(acc);
         }
         let cat = (core::OP_SIMD + core::SIMD_CONCAT as u32) as u16;
         // Each round halves the chunks: at most 2 rounds (64 bytes).
@@ -12420,7 +12406,118 @@ extend Opt {
             chunks.truncate(0);
             chunks.extend_copy(&next);
         }
-        return Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: chunks[0], b: VNONE, c: VNONE };
+        *t = Inst { op: O_BITCAST, ty: t.ty, aux: 0, a: chunks[0], b: VNONE, c: VNONE };
+        return true;
+    }
+
+    // The load of a gathered lane of type `lt` (`lb` bytes) at `ptr` plus index `ad` scaled, for instruction
+    // `i` of block `k`.
+    fn gather_load(self: &mut Self, b: &mut Body, k: u32, i: u32, lt: u8, lb: u32, ptr: Value, ad: Value) Value {
+        let a = self.before(
+            b,
+            k,
+            i,
+            Inst { op: O_PTRADD, ty: T_PTR, aux: lb as u16 | PTR_INBOUNDS, a: ptr, b: ad, c: 0 },
+        );
+        return self.before(b, k, i, Inst { op: O_LOAD, ty: lt, aux: lb.trailing_zeros() as u16, a: a, b: VNONE, c: 0 });
+    }
+
+    // Chunk `c` of the `nc` chunks (a power of two) of vector `v`, for instruction `i` of block `k`: `v`, or
+    // the half of a half (`low_half`, `high_half`) that holds it.
+    fn chunk_of(self: &mut Self, b: &mut Body, k: u32, i: u32, v: Value, c: u32, nc: u32) Value {
+        let mut x = v;
+        let mut n = nc;
+        let mut at = c;
+        // Each round halves the vector: at most 2 rounds (64 bytes).
+        while n > 1 {
+            n /= 2;
+            let hi = at >= n;
+            let xt = b.type_of(x);
+            let code = (core::OP_SIMD + ast::pick(hi, core::SIMD_HIGH_HALF, core::SIMD_LOW_HALF) as u32) as u16;
+            let pl = b.pool_list([x]);
+            x = self.before(
+                b,
+                k,
+                i,
+                Inst { op: O_VOP, ty: vec_type(lane_type(xt), lanes(xt) / 2), aux: code, a: pl, b: 1, c: VNONE },
+            );
+            if hi {
+                at -= n;
+            }
+        }
+        return x;
+    }
+
+    // A gather's chunk of type `ct` (at most 16 bytes; for instruction `i` of block `k`) from its lanes, where
+    // the target inserts no lane in a register (`Package.lane_insert`): each lane a vector whose lane 0 is
+    // the lane's element (at `ptr` plus index `ads[j]` scaled), inserted into zeros when it has 4 or 8 bytes
+    // (x86-64 loads it so: `codegen::live::FOLD_ZLANE`), else its splat; an inactive lane (`ads[j]` VNONE) the
+    // splat of its lane of `base`, the fallback's chunk. The vectors are interleaved in pairs at the lanes'
+    // width, then at twice it, until one holds the chunk's lanes in order (x86-64 `punpckl*`): an interleave
+    // reads the low half of its operands, so of each lane's vector lane 0 alone. The vector, of integer lanes.
+    fn gather_zips(
+        self: &mut Self,
+        pk: &Package,
+        b: &mut Body,
+        k: u32,
+        i: u32,
+        ct: u8,
+        ptr: Value,
+        ads: &Vector<Value>,
+        base: Value,
+    ) Value {
+        let lt = lane_type(ct);
+        let eb = type_bytes(lt, pk.ptr_bytes);
+        let cb = type_bytes(ct, pk.ptr_bytes);
+        let mut level = Vector::<Value>::with_capacity(ads.len());
+        let mut next = Vector::<Value>::new();
+        let mut zero = VNONE;
+        for j in 0..ads.len() {
+            if ads[j] == VNONE {
+                let x = self.before(
+                    b,
+                    k,
+                    i,
+                    Inst { op: O_VEXTRACT, ty: lt, aux: j as u16, a: base, b: VNONE, c: VNONE },
+                );
+                level.push(self.before(b, k, i, Inst { op: O_SPLAT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }));
+                continue;
+            }
+            let x = self.gather_load(b, k, i, lt, eb, ptr, ads[j]);
+            if eb < 4 {
+                level.push(self.before(b, k, i, Inst { op: O_SPLAT, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }));
+                continue;
+            }
+            if zero == VNONE {
+                let (w, nw) = splat_words(b, ct, 0);
+                zero = self.before(b, k, i, Inst { op: O_WCONST, ty: ct, aux: 0, a: w, b: nw, c: VNONE });
+            }
+            level.push(self.before(b, k, i, Inst { op: O_VINSERT, ty: ct, aux: 0, a: zero, b: x, c: VNONE }));
+        }
+        // At most 4 levels of interleaves (2 to 16 lanes).
+        let mut w = eb;
+        while level.len() > 1 {
+            next.truncate(0);
+            let wt = vec_type(int_type(w), cb / w);
+            for p in 0..level.len() / 2 {
+                let mut ab = [level[2 * p], level[2 * p + 1]];
+                for h in 0..2usize {
+                    if b.type_of(unsafe ab[h]) != wt {
+                        unsafe ab[h] = self.before(
+                            b,
+                            k,
+                            i,
+                            Inst { op: O_BITCAST, ty: wt, aux: 0, a: ab[h], b: VNONE, c: VNONE },
+                        );
+                    }
+                }
+                next.push(self.before(b, k, i, Inst { op: O_VZIPLO, ty: wt, aux: 0, a: ab[0], b: ab[1], c: VNONE }));
+            }
+            level.truncate(0);
+            level.extend_copy(&next);
+            w *= 2;
+        }
+        return level[0];
     }
 
     // The lane mask (each lane all ones or 0) of `n` lanes (0: any) whose bits value `v` of `b` is, for
@@ -17375,12 +17472,14 @@ extend Run {
         if sc.o.split_pairs(p, b) {
             let _ = sc.o.run(p, b, true);
         }
-        // A body callers may inline keeps its form before the split of its wide vectors when a caller may
-        // compile for wider registers (`Package.vec_max`: a run-time copy that takes a backend entry made
-        // for the build's registers): that caller splits no vector its own registers hold.
+        // A body callers may inline keeps its form before the split of its wide vectors: a caller that
+        // compiles for wider registers (`Package.vec_max`: a run-time copy that takes a backend entry made
+        // for the build's registers) splits no vector its own registers hold, and a caller of the same
+        // registers takes that form when the split one is past the inliner's budget (decided below, on the
+        // final form): it splits its copy.
         let vec = p.cpu_of(b).vector;
         let mut wpre = Option::<Body>::None;
-        if vec != 0 && vec < p.vec_max && r.inline && r.shape[j as usize] && !b.naked && (il::bounded(b, r.cf.inline) || r.always[j as usize]) && wd::has_wide(
+        if vec != 0 && r.inline && r.shape[j as usize] && !b.naked && (il::bounded(b, r.cf.inline) || r.always[j as usize]) && wd::has_wide(
             b,
             vec,
         ) {
@@ -17542,6 +17641,14 @@ extend Run {
             Option::<PoolScratch>::None
         };
         b.compact_pool(&mut sc.o.cps);
+        // No caller has wider registers, and the split form fits a call: callers inline that one (a gather
+        // of 64 bytes under a mask parameter does not fit: its parts' lanes; a caller's copy of the form
+        // before the split may know the mask).
+        if wpre.is_some() && vec >= p.vec_max && il::small(b, r.cf.inline) {
+            if let Some(w) = replace(&mut wpre, Option::<Body>::None) {
+                recycle(&mut sc, w);
+            }
+        }
         let mut fits = r.inline && r.shape[j as usize];
         let keep = snap && (packed(b) || rotated);
         // The form callers inline: the one before the split of wide vectors, else the one before the loop

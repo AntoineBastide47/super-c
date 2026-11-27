@@ -11177,6 +11177,107 @@ fn main() i32 {
     assert_eq(cli::run_with(cmd.cstr(), null, null, null, ""), 0);
 }
 
+// A `compress_store` lowers to one test that the vector's lanes fit after the start, whole stores of its
+// steps and a rare lane loop, which alone checks the count (no call of the bounds trap in the function);
+// a checked gather to one comparison of its indices with the length, a failure block that traps at the
+// lowest failing active lane (`__sc_lane_bounds`), and a gather that checks no lane, whose lanes of a
+// constant mask then load. On an x86-64 host the copy for AVX2 moves 8 lanes a step by a vector of
+// indices, and the baseline one loads each gathered lane into lane 0 of zeros. The program checks the
+// packed lanes, the elements past the last vector and the gathered sums in the copy its processor runs,
+// and with an argument the trap's text: the lowest failing lane is 9, since the mask leaves lane 5 out.
+@test
+fn compress_store_and_gather_check_their_range_once() {
+    let p = cli::proj_new();
+    p.mkfile(
+        "main.spc",
+        M"(import std::simd;
+@noinline
+fn lowpack(v: Simd<f32, 16>, t: f32, out: []mut f32, k: usize) usize {
+    return simd::compress_store(out, k, v.greater_than(Simd::<f32, 16>::splat(t)), v);
+}
+@noinline
+fn lowpick(x: []f32, ix: Simd<u32, 16>) f32 {
+    return simd::reduce_add_tree(simd::gather(x, ix, Mask::<16>::splat(true), Simd::<f32, 16>::splat(0.0)));
+}
+@noinline
+fn lowpart(x: []f32, ix: Simd<u32, 16>, m: u64) f32 {
+    return simd::reduce_add_tree(simd::gather(x, ix, Mask::<16>::from_bits_truncate(m), Simd::<f32, 16>::splat(0.0)));
+}
+fn main(args: Vector<str>) i32 {
+    let mut x = [0.0f32; 64];
+    let mut ix = [0u32; 16];
+    let mut out = [-1.0f32; 96];
+    for k in 0..64usize {
+        x[k] = (k * 37 % 64) as f32;
+    }
+    for k in 0..16usize {
+        ix[k] = ((k * 5 + 3) % 64) as u32;
+    }
+    let mut n: usize = 0;
+    for c in 0..4usize {
+        n += lowpack(simd::load::<f32, 16>(x, 16 * c), 20.5, out, n);
+    }
+    let mut j: usize = 0;
+    for k in 0..64usize {
+        if x[k] > 20.5 {
+            if out[j] != x[k] {
+                return 1;
+            }
+            j += 1;
+        }
+    }
+    if n != j {
+        return 2;
+    }
+    for k in 64..96usize {
+        if out[k] != -1.0 {
+            return 3;
+        }
+    }
+    let mut want: f32 = 0.0;
+    let mut part: f32 = 0.0;
+    for k in 0..16usize {
+        want += x[ix[k] as usize];
+        if k != 5 {
+            part += x[ix[k] as usize];
+        }
+    }
+    if lowpick(x, simd::load::<u32, 16>(ix, 0)) != want {
+        return 4;
+    }
+    // Lane 5 is not active: its index is not checked.
+    ix[5] = 70;
+    if lowpart(x, simd::load::<u32, 16>(ix, 0), 0xFFDF) != part {
+        return 5;
+    }
+    if args.len() > 1 {
+        ix[9] = 64;
+        ix[12] = 99;
+        return lowpart(x, simd::load::<u32, 16>(ix, 0), 0xFFDF) as i32;
+    }
+    return 0;
+}
+)",
+    );
+    let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "lowp", "build --profile=release main.spc -o app");
+    let mut ok = r.ok() && r.out_has("vop.compress_store") && !r.out_has("__sc_vec_bounds");
+    // No checked gather is left: the trap's call, and the lanes' loads under the constant mask.
+    ok = ok && !r.out_has("vop.gather.") && r.out_has("__sc_lane_bounds") && r.out_has("load.f32");
+    if tgt::host_isa() == tgt::axis_index("x86_64", true) {
+        ok = ok && r.out_has("swizzle_or_zero.unchecked.v8i32") && r.out_has("vinsert.0.v4f32");
+    }
+    if !ok {
+        r.show();
+    }
+    assert(ok, "one range test, whole steps, a gather without lane checks");
+    let mut cmd = format("\"{}/app\"", p.dir());
+    assert_eq(cli::run_with(cmd.cstr(), null, null, null, ""), 0);
+    let mut trap = format("\"{}/app\" trap", p.dir());
+    let mut op = format("{}/.trapout", p.dir());
+    let t = cli::exec_env(trap.cstr(), op.cstr(), "");
+    assert(t.exit != 0 && t.out_shows("lane 9: index out of bounds: the index is 64 but the length is 64"), "the trap");
+}
+
 // On an arm64 host, `reduce_add_tree` of an `f32x4` (its Neon entry's `vget_low_f32` and `vget_lane_f32`)
 // lowers to a vector's low half and lane reads at constant indexes (`intrin::lane_read`), through no slot.
 @test
@@ -24198,6 +24299,166 @@ int main(void) {
   bsum(a, bs);
   for (int k = 0; k < 32; k++) { s32 += a[k]; if (k < 16) s16 += a[k]; }
   return bs[0] != (s16 & 255) || bs[1] != (s32 & 255) ? 90 : 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}
+
+// x86-64: a scalar load of 4 or 8 bytes put into lane 0 of a vector of zeros is one load into the vector
+// register, which clears the other lanes (`lv::FOLD_ZLANE`: MOVSS, F3 0F 10, or MOVQ, F3 0F 7E, with a
+// memory ModRM), so a vector of four gathered floats is 4 such loads and 3 interleaves, with no MOVSS
+// between registers. Every target gives the C results.
+@test
+fn a_lane_loaded_into_zeros_is_one_load() {
+    let lir = M"(lir ptr 8
+sym @build fn global
+sym @pair fn global
+fn @build
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = wconst.v4f32 0x0, 0x0
+  v4 = load.i32 v1 align 2
+  v5 = zext.i64 v4
+  v6 = ptradd v0, v5 * 4
+  v7 = load.f32 v6 align 2
+  v8 = vinsert.0.v4f32 v3, v7
+  v9 = load.i32 v1+4 align 2
+  v10 = zext.i64 v9
+  v11 = ptradd v0, v10 * 4
+  v12 = load.f32 v11 align 2
+  v13 = vinsert.0.v4f32 v3, v12
+  v14 = load.i32 v1+8 align 2
+  v15 = zext.i64 v14
+  v16 = ptradd v0, v15 * 4
+  v17 = load.f32 v16 align 2
+  v18 = vinsert.0.v4f32 v3, v17
+  v19 = load.i32 v1+12 align 2
+  v20 = zext.i64 v19
+  v21 = ptradd v0, v20 * 4
+  v22 = load.f32 v21 align 2
+  v23 = vinsert.0.v4f32 v3, v22
+  v24 = bitcast.v4i32 v8
+  v25 = bitcast.v4i32 v13
+  v26 = vziplo.v4i32 v24, v25
+  v27 = bitcast.v4i32 v18
+  v28 = bitcast.v4i32 v23
+  v29 = vziplo.v4i32 v27, v28
+  v30 = bitcast.v2i64 v26
+  v31 = bitcast.v2i64 v29
+  v32 = vziplo.v2i64 v30, v31
+  store v32, v2 align 0
+  ret
+fn @pair
+  sig (ptr, ptr) -> void
+b0(v0: ptr, v1: ptr):
+  v2 = wconst.v2i64 0x0, 0x0
+  v3 = load.i64 v0+8 align 3
+  v4 = vinsert.0.v2i64 v2, v3
+  v5 = load.i64 v0 align 3
+  v6 = vinsert.0.v2i64 v2, v5
+  v7 = vziplo.v2i64 v4, v6
+  store v7, v1 align 0
+  v8 = wconst.v4i32 0x0, 0x0
+  v9 = load.i32 v0+4 align 2
+  v10 = vinsert.0.v4i32 v8, v9
+  store v10, v1+16 align 0
+  v11 = wconst.v2f64 0x0, 0x0
+  v12 = load.f64 v0+16 align 3
+  v13 = vinsert.0.v2f64 v11, v12
+  store v13, v1+32 align 0
+  ret
+)";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut obj), "the object");
+    // F3, maybe a REX, 0F and the opcode: 10 (MOVSS) and 7E (MOVQ), by their ModRM's mod.
+    let mut loads = [0u32; 2];
+    let mut moves = 0u32;
+    for at in 0..obj.len() - 5 {
+        if obj[at] != 0xF3 {
+            continue;
+        }
+        let k = at + 1 + (obj[at + 1] >> 4 == 4) as usize;
+        if obj[k] != 0x0F || obj[k + 1] != 0x10 && obj[k + 1] != 0x7E {
+            continue;
+        }
+        if obj[k + 2] >> 6 == 3 {
+            moves += 1;
+        } else {
+            loads[(obj[k + 1] == 0x7E) as usize] += 1;
+        }
+    }
+    assert(loads[0] >= 5 && loads[1] >= 3 && moves == 0, "each lane 0 is one load from memory");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+#include <string.h>
+void build(const float *, const uint32_t *, float *);
+void pair(const uint64_t *, uint64_t *);
+int main(void) {
+  float x[8] = {1.5f, 2.5f, 3.5f, 4.5f, 5.5f, 6.5f, 7.5f, 8.5f}, o[4];
+  uint32_t ix[4] = {7, 0, 5, 2};
+  build(x, ix, o);
+  for (int k = 0; k < 4; k++) if (o[k] != x[ix[k]]) return 1 + k;
+  uint64_t q[3] = {0x1111111122222222ull, 0x3333333344444444ull, 0}, r[6];
+  double d = 2.25, e;
+  memcpy(&q[2], &d, 8);
+  memset(r, 0xff, sizeof r);
+  pair(q, r);
+  memcpy(&e, &r[4], 8);
+  if (r[0] != q[1] || r[1] != q[0]) return 10;
+  if (r[2] != 0x11111111ull || r[3] != 0) return 11;
+  if (e != 2.25 || r[5] != 0) return 12;
+  return 0;
+}
+)";
+    assert_eq(run_native(lir, drv), 0);
+    assert_eq(run_wide(lir, drv), 0);
+}
+
+// x86-64 with AVX2: the 4-byte lanes of a 32-byte vector move by a vector of indices below 8
+// (`swizzle_or_zero` unchecked: VPERMD, VEX map 0F38 opcode 36) that 8 bytes widen to (VPMOVZXBD, opcode
+// 31). Every target gives the C results.
+@test
+fn lanes_of_32_bytes_move_by_a_vector_of_indices() {
+    let lir = M"(lir ptr 8
+sym @perm fn global
+fn @perm
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v8i32 v0 align 0
+  v4 = load.v8i8 v1 align 0
+  v5 = zext.v8i32 v4
+  v6 = vop.swizzle_or_zero.unchecked.v8i32 (v3, v5)
+  store v6, v2 align 0
+  ret
+)";
+    let mut wide = Vector::<u8>::new();
+    assert(
+        object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), WIDE, &mut wide),
+        "the AVX2 object",
+    );
+    // VEX map 0F38 (C4, map 2), 256 bits: VPERMD (36) and VPMOVZXBD (31).
+    let mut perms = [0u32; 2];
+    for at in 0..wide.len() - 4 {
+        if wide[at] == 0xC4 && (wide[at + 1] & 0x1F) == 2 && (wide[at + 2] >> 2 & 1) == 1 {
+            perms[0] += (wide[at + 3] == 0x36) as u32;
+            perms[1] += (wide[at + 3] == 0x31) as u32;
+        }
+    }
+    assert(perms[0] == 1 && perms[1] == 1, "one VPERMD by indices one VPMOVZXBD widens");
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+void perm(const uint32_t *, const uint8_t *, uint32_t *);
+int main(void) {
+  uint32_t v[8] = {10, 11, 12, 13, 14, 15, 16, 17}, po[8];
+  uint8_t pi[8] = {7, 7, 0, 3, 5, 1, 6, 2};
+  perm(v, pi, po);
+  for (int k = 0; k < 8; k++) if (po[k] != v[pi[k]]) return 1 + k;
+  return 0;
 }
 )";
     assert_eq(run_native(lir, drv), 0);

@@ -91,6 +91,10 @@ pub(package) const FOLD_LD3: u64 = 576460752303423488;
 /// like), or the sum and the AND of a lane mask, each access's predicate the lane mask's (CMPNE). A vector
 /// of zeros those loads alone read as their fallback, which their predicated loads give.
 pub(package) const FOLD_PRED: u64 = 1152921504606846976;
+/// `FOLD_ZLANE`: a scalar load of 4 or 8 bytes with one use, a `vinsert` of it into lane 0 of a 16-byte
+/// vector of zeros, with no write of memory between: the insert loads the lane, which clears the others
+/// (x86-64's `movss`, `movq`; `Live::zlane_user`).
+pub(package) const FOLD_ZLANE: u64 = 2305843009213693952;
 pub(package) const FOLD_XBFX: u64 = 131072;
 pub(package) const FOLD_BFI: u64 = 262144;
 /// A load's or store's folded index that is the 64-bit zero or sign extension of a 32-bit value (or of an
@@ -2111,6 +2115,16 @@ extend Live {
                 }
             }
         }
+        if (self.fold_ops & FOLD_ZLANE) != 0 {
+            self.block_ops(b, O_LOAD);
+            for q in 0..self.scan.len() {
+                let i = self.scan[q];
+                let bk = b.blocks[self.iblk[i as usize] as usize];
+                if self.zlane_user(b, i, bk.start + bk.len) {
+                    self.pfold[i as usize] = true;
+                }
+            }
+        }
         // `FOLD_MOVBE`: the loads byte reversals alone read, then the reversals stores alone read.
         if (self.fold_ops & FOLD_MOVBE) != 0 {
             self.block_ops(b, O_BSWAP);
@@ -2538,6 +2552,34 @@ extend Live {
             if writes_mem(y) {
                 return false;
             }
+        }
+        return false;
+    }
+
+    /// `FOLD_ZLANE`: whether load `i` of `b` (its block ending before `end`), a scalar of 4 or 8 bytes with
+    /// one use, folds into that use: a `vinsert` into lane 0 of a 16-byte vector of zeros of its type's
+    /// lanes that folds into nothing, within LDOP_REACH instructions, with no write of memory between. Not a
+    /// load `ldop_user` leaves to the generator for its address.
+    const fn zlane_user(self: &Self, b: &Body, i: u32, end: u32) bool {
+        let t = b.insts[i as usize];
+        let n = type_bytes(t.ty, 8);
+        if t.op != O_LOAD || (t.aux & MEM_VOLATILE) != 0 || !(is_int(t.ty) || is_float(t.ty)) || n != 4 && n != 8 || self.count[i as usize] != 1 || self.pfold[i as usize] || self.reg_param(
+            b,
+            t.a,
+        ) || result_load(b, i, self.ret_regs) {
+            return false;
+        }
+        let mut u = i + 1;
+        // At most LDOP_REACH steps.
+        while u < end && u <= i + LDOP_REACH {
+            let x = b.insts[u as usize];
+            if x.op == O_VINSERT && x.b == i {
+                return x.aux == 0 && type_bytes(x.ty, 8) == 16 && lane_type(x.ty) == t.ty && zero_vec(b, x.a) && !self.pfold[u as usize];
+            }
+            if writes_mem(x) {
+                return false;
+            }
+            u += 1;
         }
         return false;
     }

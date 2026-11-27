@@ -5809,6 +5809,8 @@ extend Gen {
             }
         }
         let (base, boff) = self.addr(t.a, 0);
+        // Every form below reads the base.
+        self.frame_use(base);
         if t.b == VNONE && off + boff == 0 && base != a::SP && base != a::FP {
             // The pointer itself (a reference's copy of it, `PTR_NONNULL`): its register when it dies here.
             let _ = self.def_from(i, t.a, base as u8);
@@ -5841,7 +5843,6 @@ extend Gen {
                 } else {
                     base
                 };
-                self.frame_use(rb);
                 self.emit(a::addsub_ext(true, 0, false, rd, rb, rw, xi, scale.trailing_zeros() as u32));
                 self.add_imm_any(rd as u8, ast::pick(rb == base, boff, 0) + off);
                 return true;

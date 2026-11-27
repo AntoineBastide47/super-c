@@ -453,9 +453,9 @@ pub(package) const fn small_bytes(b: &Body, v: Value) bool {
 }
 
 /// Whether integer vector `v` of `b` is a lane mask, each lane all ones or 0: a comparison's, an `and`, `or`
-/// or `xor` of masks, a mask's sign extension or truncation, a mask read as narrower lanes (a cast), the
-/// even or odd lanes of two masks (`vunzip`), or a mask's low or high lanes interleaved with themselves
-/// (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
+/// or `xor` of masks, a mask's complement, sign extension or truncation, a mask read as narrower lanes (a
+/// cast), the even or odd lanes of two masks (`vunzip`), or a mask's low or high lanes interleaved with
+/// themselves (`vziplo`, `vziphi`) as lanes twice as wide, within `depth` of them.
 pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     if (v & (VPARAM | VFLAG)) != 0 || v == VNONE {
         return false;
@@ -467,7 +467,7 @@ pub(package) fn lane_mask(b: &Body, v: Value, depth: u32) bool {
     if depth == 0 {
         return false;
     }
-    if (t.op == O_SEXT || t.op == O_TRUNC) && is_vec(t.ty) {
+    if (t.op == O_SEXT || t.op == O_TRUNC || t.op == O_NOT) && is_vec(t.ty) {
         return lane_mask(b, t.a, depth - 1);
     }
     if t.op == O_VUNZIP && is_vec(t.ty) {
@@ -1323,7 +1323,8 @@ pub(package) const VOP_SIGNED: u16 = 256;
 /// A conversion's result lanes are signed; for a `SIMD_*` operation, the result's lanes (for
 /// `cast_changed`, its cast result operand's).
 pub(package) const VOP_DSIGNED: u16 = 512;
-/// A float to integer conversion that does not saturate: the lanes are not NaN and fit.
+/// A float to integer conversion that does not saturate: the lanes are not NaN and fit. A
+/// `SIMD_SWIZZLE_ZERO` whose every index is below the lanes (`lir::lower` `compress_chunks`).
 pub(package) const VOP_UNCHECKED: u16 = 1024;
 /// A float SIMD_MIN or SIMD_MAX that computes C's `fmin` or `fmax` per lane (the vectorized call): a lane
 /// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`). A

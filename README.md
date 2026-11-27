@@ -693,7 +693,8 @@ fn main() i32 {
   `shuffle`, `reverse`, `interleave_low`, `compress`, `expand`) and reductions (`reduce_add`,
   `reduce_add_ordered`, `reduce_min`, `arg_max`, `simd::dot`). A float reduction names its order.
 * **Memory**: `simd::load` and `store` check the slice bounds once. `load_masked`, `store_masked`,
-  `gather`, `scatter` and `compress_store` never touch an inactive lane.
+  `gather` and `scatter` never touch an inactive lane; `compress_store` writes only inside
+  `s[start..start + N]`.
 * **Vector math**: `std::simd::math` has `exp`, `log`, `pow`, `sin`, `atan2`, `erf` and more, in
   three accuracy classes: `math` (at most 1 ULP), `math::balanced` (at most 3.5 ULP) and
   `math::fast` (relative error 2^-11 for f32, 2^-22 for f64). A result has the same bits on every

@@ -1,9 +1,11 @@
 // The native lowerings of portable vector operations in the test binary itself (opt-level 1), each against
 // a scalar lane loop: an entry of fewer lanes per chunk (`min_num` of 16 lanes as four of 4), a choice, a
 // count and the bits of a comparison's mask between lane widths (`lir::opt` `mask_choose`, `mask_count`,
-// `mask_sum`), `compress_store` by chunks with and without room after the packed lanes
-// (`lir::lower` `compress_chunks`), an unchecked gather of a constant mask lane by lane (`gather_lanes`,
-// `lane_load`), and a float sum by halves in registers (`a64gen` `reduce_reg`).
+// `mask_sum`), `compress_store` by whole steps with room for the vector after the start and by the lane
+// loop without it, every element outside the vector's from the start unchanged (`lir::lower`
+// `compress_chunks`), an unchecked gather of a constant mask lane by lane (`gather_lanes`, `lane_load`), a
+// checked gather with one range test (`gather_checked`), and a float sum by halves in registers (`a64gen`
+// `reduce_reg`).
 import std::simd;
 
 // A deterministic sequence: the next value of a 64-bit linear congruential generator.
@@ -117,49 +119,59 @@ fn mask_bits_counts_and_choices_match_the_lanes() {
     assert(got == want, "mask bits and counts");
 }
 
+// The packed count and one past the last element a `compress_store` of the loop may write: the greatest
+// start plus the vector's lanes.
 @noinline
-const fn filter16(x: []f32, t: f32, out: []mut f32) usize {
+const fn filter16(x: []f32, t: f32, out: []mut f32) (usize, usize) {
     let tv = Simd::<f32, 16>::splat(t);
     let mut k: usize = 0;
+    let mut hi: usize = 0;
     let mut i: usize = 0;
     while i + 16 <= x.len() {
         let v = simd::load::<f32, 16>(x, i);
+        hi = k + 16;
         k += simd::compress_store(out, k, v.greater_than(tv), v);
         i += 16;
     }
-    return k;
+    return (k, hi);
 }
 
 @noinline
-const fn filter_u8(x: []u8, t: u8, out: []mut u8) usize {
+const fn filter_u8(x: []u8, t: u8, out: []mut u8) (usize, usize) {
     let tv = Simd::<u8, 32>::splat(t);
     let mut k: usize = 0;
+    let mut hi: usize = 0;
     let mut i: usize = 0;
     while i + 32 <= x.len() {
         let v = simd::load::<u8, 32>(x, i);
+        hi = k + 32;
         k += simd::compress_store(out, k, v.greater_than(tv), v);
         i += 32;
     }
-    return k;
+    return (k, hi);
 }
 
 @noinline
-const fn filter_i64(x: []i64, t: i64, out: []mut i64) usize {
+const fn filter_i64(x: []i64, t: i64, out: []mut i64) (usize, usize) {
     let tv = Simd::<i64, 8>::splat(t);
     let mut k: usize = 0;
+    let mut hi: usize = 0;
     let mut i: usize = 0;
     while i + 8 <= x.len() {
         let v = simd::load::<i64, 8>(x, i);
+        hi = k + 8;
         k += simd::compress_store(out, k, v.less_than(tv), v);
         i += 8;
     }
-    return k;
+    return (k, hi);
 }
 
-// `compress_store` writes the active lanes in order and nothing past them, with room after the packed
-// lanes (the chunks) and without it (the output exactly as long: the last stores run the lane loop).
+// A loop of `compress_store` writes the active lanes in order, with room for whole vectors after the
+// packed lanes (the steps) and without it (the output exactly as long: the last stores run the lane
+// loop). The elements after the packed ones may hold any value up to the last store's vector from its
+// start; those past it, and all those past the output, keep theirs.
 @test
-fn compress_store_by_chunks_writes_exactly_its_count() {
+fn compress_store_by_chunks_writes_its_count_inside_its_window() {
     let mut s: u64 = 11;
     let mut x = Vector::<f32>::new();
     let mut b = Vector::<u8>::new();
@@ -197,34 +209,115 @@ fn compress_store_by_chunks_writes_exactly_its_count() {
         } else {
             (300usize, 300usize, 300usize)
         };
-        assert(filter16(x[0..256], 50.0, o[0..nx]) == fx.len(), "the f32 count");
-        assert(filter_u8(b[0..256], 100, ob[0..nb]) == fb.len(), "the u8 count");
-        assert(filter_i64(w[0..256], 0, ow[0..nw]) == fw.len(), "the i64 count");
+        let (cx, hx) = filter16(x[0..256], 50.0, o[0..nx]);
+        let (cb, hb) = filter_u8(b[0..256], 100, ob[0..nb]);
+        let (cw, hw) = filter_i64(w[0..256], 0, ow[0..nw]);
+        assert(cx == fx.len(), "the f32 count");
+        assert(cb == fb.len(), "the u8 count");
+        assert(cw == fw.len(), "the i64 count");
         for k in 0..300usize {
-            assert(
-                o[k] == if k < fx.len() {
-                    fx[k]
-                } else {
-                    -1.0
-                },
-                "the f32 lanes and nothing past them",
-            );
-            assert(
-                ob[k] == if k < fb.len() {
-                    fb[k]
-                } else {
-                    7
-                },
-                "the u8 lanes and nothing past them",
-            );
-            assert(
-                ow[k] == if k < fw.len() {
-                    fw[k]
-                } else {
-                    9999
-                },
-                "the i64 lanes and nothing past them",
-            );
+            if k < fx.len() {
+                assert(o[k] == fx[k], "the f32 lanes in order");
+            } else if k >= hx.min(nx) {
+                assert(o[k] == -1.0, "no f32 element past the last vector or the output changes");
+            }
+            if k < fb.len() {
+                assert(ob[k] == fb[k], "the u8 lanes in order");
+            } else if k >= hb.min(nb) {
+                assert(ob[k] == 7, "no u8 element past the last vector or the output changes");
+            }
+            if k < fw.len() {
+                assert(ow[k] == fw[k], "the i64 lanes in order");
+            } else if k >= hw.min(nw) {
+                assert(ow[k] == 9999, "no i64 element past the last vector or the output changes");
+            }
+        }
+    }
+}
+
+// One `compress_store` of lanes 1 to `N` under mask bits `m` at `start` into the first `len` of 24 elements
+// that hold 50 and up: whether it returns the active lane count, the active lanes follow `start` in order,
+// and every element before `start`, from `start + N` on or from `len` on keeps its value (the others after
+// the stored ones may hold any).
+@noinline
+fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool {
+    let v = (simd::iota::<i32, N>() + Simd::<i32, N>::splat(1)).cast::<T>();
+    let mut o = [v[0]; 24];
+    for c in 0..3usize {
+        simd::store(o, 8 * c, (simd::iota::<i32, 8>() + Simd::<i32, 8>::splat(50 + 8 * c as i32)).cast::<T>());
+    }
+    let n = simd::compress_store(o[0..len], start, Mask::<N>::from_bits_truncate(m), v);
+    let mut got = [0i32; 24];
+    for c in 0..3usize {
+        let a = simd::load::<T, 8>(o, 8 * c).cast::<i32>().to_array();
+        for j in 0..8usize {
+            got[8 * c + j] = a[j];
+        }
+    }
+    let mut k: usize = 0;
+    for i in 0..N {
+        if (m >> i as u64 & 1) != 0 {
+            if got[start + k] != i as i32 + 1 {
+                return false;
+            }
+            k += 1;
+        }
+    }
+    if n != k {
+        return false;
+    }
+    for i in 0..24usize {
+        if (i < start || i >= start + N || i >= len) && got[i] != 50 + i as i32 {
+            return false;
+        }
+    }
+    return true;
+}
+
+// `stored` of `N` lanes of 1, 2 and 4 bytes at `start`, into a slice that ends at the stored lanes (the lane
+// loop stores exactly), one element before the vector's lanes from the start, at them (whole steps), and
+// after them.
+fn stored_all<const N: usize>(m: u64, start: usize) {
+    let count = (m & (1u64 << N as u64) - 1).count_ones() as usize;
+    for len in [start + count, start + N - 1, start + N, 24usize] {
+        if len < start + count {
+            continue;
+        }
+        assert(stored::<u8, N>(m, start, len), "lanes of 1 byte");
+        assert(stored::<u16, N>(m, start, len), "lanes of 2 bytes");
+        assert(stored::<i32, N>(m, start, len), "lanes of 4 bytes");
+        assert(stored::<f32, N>(m, start, len), "float lanes of 4 bytes");
+    }
+}
+
+// `stored_all` for lanes of 8 bytes, of at most 8 lanes.
+fn stored_wide<const N: usize>(m: u64, start: usize) {
+    let count = (m & (1u64 << N as u64) - 1).count_ones() as usize;
+    for len in [start + count, start + N - 1, start + N, 24usize] {
+        if len < start + count {
+            continue;
+        }
+        assert(stored::<i64, N>(m, start, len), "lanes of 8 bytes");
+        assert(stored::<f64, N>(m, start, len), "float lanes of 8 bytes");
+    }
+}
+
+// Every mask of 2, 4 and 8 lanes and 256 masks of 16, from the slice's start and inside it.
+@test
+fn compress_store_of_every_mask_changes_nothing_outside_its_window() {
+    for m in 0..256u64 {
+        for start in [0usize, 1, 5] {
+            if m < 4 {
+                stored_all::<2>(m, start);
+                stored_wide::<2>(m, start);
+            }
+            if m < 16 {
+                stored_all::<4>(m, start);
+                stored_wide::<4>(m, start);
+            }
+            stored_all::<8>(m, start);
+            stored_wide::<8>(m, start);
+            stored_all::<16>(m | (m * 73 & 255 ^ 0xA5) << 8, start);
         }
     }
 }
@@ -266,6 +359,90 @@ fn unchecked_gathers_load_each_active_lane() {
         };
     }
     assert(gather_mix(x[0..256], ix[0..256]) == want, "the gathered lanes");
+}
+
+// Whether lane `j` of `g` is element `(7j + 3) % 32` of the gathered slice (3 times its place plus 1) where
+// `m` has it, else the fallback's `100 + j`.
+fn lanes_are<T: SimdElement, const N: usize>(g: Simd<T, N>, m: u64) bool {
+    let a = g.cast::<i32>().to_array();
+    for j in 0..N {
+        let want = if (m >> j as u64 & 1) != 0 {
+            3 * (j as i32 * 7 + 3 & 31) + 1
+        } else {
+            100 + j as i32
+        };
+        if a[j] != want {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Gathers of `N` lanes of `T` from 32 elements by 4-byte indices: unchecked under the masks of every lane
+// and of some lanes (constants: the lanes load, `lir::opt` `gather_lanes`) and under the run-time mask `rt`
+// (lanes and indices of different widths split into different numbers of registers: `lir::wide` keeps
+// that gather whole), checked under the mask of every lane and under `rt` (one range test, `lir::lower`
+// `gather_checked`).
+@noinline
+fn gathered<T: SimdElement, const N: usize>(rt: u64) bool {
+    let mut x = [simd::iota::<T, 2>()[0]; 32];
+    for c in 0..4usize {
+        simd::store(
+            x,
+            8 * c,
+            (simd::iota::<i32, 8>() * Simd::<i32, 8>::splat(3) + Simd::<i32, 8>::splat(24 * c as i32 + 1)).cast::<T>(),
+        );
+    }
+    let ix = simd::iota::<u32, N>() * Simd::<u32, N>::splat(7) + Simd::<u32, N>::splat(3) & Simd::<u32, N>::splat(31);
+    let fb = (simd::iota::<i32, N>() + Simd::<i32, N>::splat(100)).cast::<T>();
+    let some: u64 = 0xA5A5A5A5A5A5A5A5 & (1u64 << N as u64) - 1;
+    let all = (1u64 << N as u64) - 1;
+    let ga = unsafe simd::gather_unchecked(x, ix, Mask::<N>::splat(true), fb);
+    let gs = unsafe simd::gather_unchecked(x, ix, Mask::<N>::from_bits_truncate(0xA5A5A5A5A5A5A5A5), fb);
+    let gc = simd::gather(x, ix, Mask::<N>::splat(true), fb);
+    let gr = simd::gather(x, ix, Mask::<N>::from_bits_truncate(rt), fb);
+    let gu = unsafe simd::gather_unchecked(x, ix, Mask::<N>::from_bits_truncate(rt), fb);
+    let consts = lanes_are(ga, all) && lanes_are(gs, some) && lanes_are(gc, all);
+    return consts && lanes_are(gr, rt & all) && lanes_are(gu, rt & all);
+}
+
+// `gathered` through 8-byte indices, of at most 8 lanes.
+@noinline
+fn gathered_wide<T: SimdElement, const N: usize>(rt: u64) bool {
+    let mut x = [simd::iota::<T, 2>()[0]; 32];
+    for c in 0..4usize {
+        simd::store(
+            x,
+            8 * c,
+            (simd::iota::<i32, 8>() * Simd::<i32, 8>::splat(3) + Simd::<i32, 8>::splat(24 * c as i32 + 1)).cast::<T>(),
+        );
+    }
+    let ix = (simd::iota::<u32, N>() * Simd::<u32, N>::splat(7) + Simd::<u32, N>::splat(3) & Simd::<u32, N>::splat(31)).cast::<
+        u64
+    >();
+    let fb = (simd::iota::<i32, N>() + Simd::<i32, N>::splat(100)).cast::<T>();
+    let all = (1u64 << N as u64) - 1;
+    let ga = unsafe simd::gather_unchecked(x, ix, Mask::<N>::splat(true), fb);
+    let gr = simd::gather(x, ix, Mask::<N>::from_bits_truncate(rt), fb);
+    return lanes_are(ga, all) && lanes_are(gr, rt & all);
+}
+
+// Every lane size, integer and float, from 2 to 16 lanes: one to four chunks of 16 bytes, and a chunk of
+// fewer.
+@test
+fn gathers_of_every_lane_size_give_their_lanes() {
+    for rt in [0u64, 0xFFFF, 0x1234, 0x8421] {
+        assert(gathered::<u8, 16>(rt) && gathered::<u8, 4>(rt), "lanes of 1 byte");
+        assert(gathered::<u16, 8>(rt) && gathered::<u16, 16>(rt) && gathered::<u16, 2>(rt), "lanes of 2 bytes");
+        assert(gathered::<i32, 4>(rt) && gathered::<i32, 16>(rt) && gathered::<i32, 2>(rt), "lanes of 4 bytes");
+        assert(gathered::<f32, 4>(rt) && gathered::<f32, 8>(rt) && gathered::<f32, 16>(rt), "float lanes of 4 bytes");
+        assert(gathered::<i64, 2>(rt) && gathered::<i64, 8>(rt), "lanes of 8 bytes");
+        assert(gathered::<f64, 2>(rt) && gathered::<f64, 4>(rt), "float lanes of 8 bytes");
+        assert(
+            gathered_wide::<f32, 4>(rt) && gathered_wide::<i64, 8>(rt) && gathered_wide::<u16, 8>(rt),
+            "8-byte indices",
+        );
+    }
 }
 
 @noinline

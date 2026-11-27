@@ -1034,7 +1034,7 @@ jobs:
           # on this runner.
           if [ "${{ matrix.target }}" = linux ] || [ "${{ matrix.target }}" = windows ]; then
             mkdir -p prevw
-            if git fetch --depth 1 origin 5ee9bd0f848d53c0b1ed0d7764acb0646a0af473 && git archive FETCH_HEAD | tar -x -C prevw; then
+            if git fetch --depth 1 origin 6fb8cdcd8a59a7006d1faa74d5372ee61643534d && git archive FETCH_HEAD | tar -x -C prevw; then
               if (cd prevw && SC_STD_DIR="$PWD/std" "../super-c$x" build --bootstrap-tags -fno-prove -o "super-c-prev$x" && awk '/bench::fail\(/ { f = 1 } f && /^ *return;$/ { f = 0; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f" && sh bench/simd_baseline/kernels.sh && "./super-c-prev$x" bench --no-run --filter=simd_baseline); then
                 cp "prevw/build/bench-bin$x" "build/bench-prev$x"
               fi

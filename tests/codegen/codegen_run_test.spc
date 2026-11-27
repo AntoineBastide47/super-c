@@ -6375,3 +6375,40 @@ fn exit_cases_12() {
     for_over_a_range_value(&mut b);
     b.run();
 }
+
+// A release build of a body that fills a local array in a loop before its first call, with a call in a
+// rare block after it: the loop's indexed address reads the stack pointer, so the frame is set up before
+// the loop (arm64 shrink-wrapping set it up at the call, and the loop wrote above the frame).
+@test
+fn a_loop_fills_a_local_array_inside_the_frame() {
+    let src = M"(const fn view<'a, T>(p: *const T, n: usize) []'a T {
+    return unsafe Slice::<T> { ptr: p, len: n };
+}
+
+@noinline
+const fn sum(xp: *const i32, n: usize) i32 {
+    let x = view(xp, n);
+    let mut s: i32 = 0;
+    let mut i: usize = 0;
+    while i < n {
+        s = s.wrapping_add(x[i]);
+        i += 1;
+    }
+    return s;
+}
+
+fn main() i32 {
+    let xs = [1i32; 100];
+    let a = sum(&xs[0], 100);
+    let mut v = Vector::<i32>::new();
+    for _ in 0..100usize {
+        v.push(1);
+    }
+    let b = sum(v.as_ptr(), 100);
+    return (a != 100) as i32 + 2 * (b != 100) as i32;
+}
+)";
+    let r = h::diff_build(src, ["--profile=release"]);
+    assert(r.built, r.diag.as_str());
+    assert_eq(h::diff_run(&r, "").exit, 0);
+}

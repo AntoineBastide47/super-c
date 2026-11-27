@@ -765,12 +765,13 @@ extend Wide {
             b.pool[(t.a + 2) as usize],
         ) == t.ty;
         let cast = rule == core::SR_BITCAST && k == 1 && self.splits(t0) && type_bytes(t0, 8) == type_bytes(t.ty, 8);
-        // An unchecked gather (place, indexes, mask, fallback) reads each lane alone.
+        // An unchecked gather (place, indexes, mask, fallback) reads each lane alone: by parts when its
+        // indexes have the lanes' width, so that a part of them is a part's indexes.
         let gather = code == core::OP_SIMD + core::SIMD_GATHER_UNCHECKED as u32 && k == 4 && !is_vec(t0) && lanes(
             b.type_of(b.pool[(t.a + 1) as usize]),
-        ) == lanes(t.ty) && self.splits(b.type_of(b.pool[(t.a + 1) as usize])) && is_int(
-            b.type_of(b.pool[(t.a + 2) as usize]),
-        ) && b.type_of(b.pool[(t.a + 3) as usize]) == t.ty;
+        ) == lanes(t.ty) && type_bytes(b.type_of(b.pool[(t.a + 1) as usize]), 8) == type_bytes(t.ty, 8) && self.splits(
+            b.type_of(b.pool[(t.a + 1) as usize]),
+        ) && is_int(b.type_of(b.pool[(t.a + 2) as usize])) && b.type_of(b.pool[(t.a + 3) as usize]) == t.ty;
         let wt = ast::pick(cmp, t0, t.ty);
         if !(shift || vec || cmp || choose || cast || gather) || !self.splits(wt) {
             return false;

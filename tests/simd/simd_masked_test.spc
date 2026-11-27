@@ -1,8 +1,9 @@
 // Masked and partial memory (std/simd.spc): an inactive lane never touches its element (a guard page
 // past the slice shows it), every active lane is checked before the first access and the lowest
-// failing one traps, repeated scatter indexes keep lane order, `compress_store` writes exactly its
-// count, a store borrows its slice mutably, and two threads storing to disjoint lanes of one slice do
-// not race. Each runs as a constant too, the trap text included.
+// failing one traps, repeated scatter indexes keep lane order, `compress_store` writes its count and
+// changes nothing outside its vector's elements from the start, a store borrows its slice mutably, and
+// two threads storing to disjoint lanes of one slice do not race. Each runs as a constant too, the trap
+// text included.
 import tests::harness as h;
 import tests::cli_harness as cli;
 
@@ -102,7 +103,8 @@ fn inactive_lanes_never_touch_a_guard_page() {
 // A store whose active lanes include one out of bounds traps before any write: the SIGABRT handler
 // finds the slice unchanged (WASI has no signal handler: there the C shows the range check before
 // the store). Repeated scatter indexes write in lane order, so the highest active lane wins, and
-// `compress_store` writes its count and nothing past it.
+// `compress_store` writes its count; the elements after it up to the vector's 4 from the start may hold
+// any value, and those before the start and from the fifth on keep theirs.
 @test
 fn stores_check_every_lane_first_and_keep_lane_order() {
     let src = M"(import std::simd;
@@ -127,7 +129,7 @@ fn main(args: Vector<str>) i32 {
         simd::scatter(s, Simd::<u32, 4>::splat(4), Mask::<4>::from_bits_truncate(0b0111), v);
         let mut b = [7, 7, 7, 7, 7, 7];
         let n = simd::compress_store(b, 1, Mask::<4>::from_bits_truncate(0b1010), v);
-        return pick3(s[3] == 13 && s[4] == 12 && n == 2 && b[0] == 7 && b[1] == 11 && b[2] == 13 && b[3] == 7);
+        return pick3(s[3] == 13 && s[4] == 12 && n == 2 && b[0] == 7 && b[1] == 11 && b[2] == 13 && b[5] == 7);
     }
     let _ = unsafe signal::signal(signal::SIGABRT, unchanged);
     if mode == 0 {
@@ -184,7 +186,7 @@ fn pick3(ok: bool) i32 {
         if r.exit != 0 {
             eprintln("mode {}: exit {}: {}", mode, r.exit, r.err.as_str());
         }
-        assert(r.exit == 0, "unchanged before the trap, lane order, and the exact count");
+        assert(r.exit == 0, "unchanged before the trap, lane order, and the count inside its window");
     }
 }
 

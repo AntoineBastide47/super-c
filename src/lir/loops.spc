@@ -46,8 +46,9 @@
 // `fadd` when the build allows reassociation) gets a copy that runs 16 bytes of lanes at a time,
 // `vector` copies of them interleaved (fewer when the reductions' lanes would take more than
 // `Package.vec_accs` registers), while at least that many iterations are left; the loop runs the rest. A
-// guard before the copy checks the count and that each stored range overlaps no other range the loop
-// reads or writes through another base (same base, same element: an update in place). A loop of up
+// guard before the copy tests the count by a branch of its own, then checks, in a block that branch
+// alone enters, that each stored range overlaps no other range the loop reads or writes through
+// another base (same base, same element: an update in place). A loop of up
 // to ILV_SIZE instructions that does not vectorize (a 64-bit product, a lane of 8 bytes on a 16-byte
 // vector's terms) runs `vector` scalar copies of its body the same way (LLVM's interleaving at a vector
 // factor of 1): each instruction's copies together, so their loads and stores pair (`ldp`, `stp`). Its
@@ -62,6 +63,11 @@
 // (`linearize`). Where the target converts vectors and shifts their lanes in registers (`Package.vops`),
 // a plan mixes lane widths up to a factor of two (narrower vectors fill half a register), converts and
 // shifts. `SC_VEC_REPORT=1` prints why each loop that stays scalar does (a debugging aid).
+//
+// Lane counts (`count_lanes`): a counted loop that adds the count of the set lanes of lane masks to an
+// integer (`c += mask.count()`, a `reduce_add` of the masks negated) adds the masks to lane accumulators
+// in an inner loop that runs at most as many iterations as a lane counts (255 for bytes); a block between
+// its runs adds the accumulators' lanes to the integer by a widening sum.
 //
 // Rotation (LLVM's LoopRotate, GCC's loop header copying): a loop whose header only tests whether to run
 // the body gets a copy of the header the latch enters instead, so each iteration ends in one conditional
@@ -122,6 +128,11 @@ const CF_DEG: u32 = 8;
 
 // No condition (`LoopOpt::minmax`).
 const NONE16: u16 = 0xFFFF;
+
+// How the copies of a partially unrolled loop keep a header parameter (`LoopOpt.ured`).
+const RED_NONE: u8 = 0; // each copy takes the value the copy before passes back
+const RED_ID: u8 = 1; // a reduction: an accumulator per copy, the others from the operation's identity
+const RED_SAME: u8 = 2; // a reduction of an idempotent operation: the others from the parameter's own start
 
 // What a vectorized loop's instruction is (`LoopOpt.vk`).
 const VK_STEP: u8 = 1; // the counter's step
@@ -587,6 +598,10 @@ pub(package) struct LoopOpt {
     jq: Vector<Value>,
     jcopy: Vector<Value>,
     jargs: Vector<Value>,
+    // Partial unrolling (`unroll`): per header parameter how the copies keep it (RED_*, `split_plan`); the
+    // unrolled loop's parameters as of the copy at hand.
+    ured: Vector<u8>,
+    ucur: Vector<Value>,
 }
 
 /// The optimizer's alias classes (`lir::opt::Opt::classes`) for the loop transforms: per instruction its
@@ -883,6 +898,8 @@ extend LoopOpt {
             jq: Vector::<Value>::new(),
             jcopy: Vector::<Value>::new(),
             jargs: Vector::<Value>::new(),
+            ured: Vector::<u8>::new(),
+            ucur: Vector::<Value>::new(),
         };
     }
 
@@ -894,8 +911,9 @@ extend LoopOpt {
     /// dominator tree); pointers are `ptr` bytes, the float rewrites `fmath` allows
     /// (`FM_*`), and `vec` the bytes of the widest vector the target holds in a register (0: none). A loop
     /// goes when its final values have a closed form, else peels when its trip count is known, else
-    /// vectorizes, else unrolls and jams the loop around it, else unrolls partially, else versions on its
-    /// bounds checks, else unswitches. Whether any changed.
+    /// counts mask lanes in lane accumulators (`count_lanes`), else vectorizes, else unrolls and jams the
+    /// loop around it, else unrolls partially, else versions on its bounds checks, else unswitches.
+    /// Whether any changed.
     pub(package) fn run(
         self: &mut Self,
         b: &mut Body,
@@ -1016,6 +1034,10 @@ extend LoopOpt {
                 }
                 continue;
             }
+            if bu.vector != 0 && vec >= VBYTES && self.count_lanes(b, ptr, h, p, u) {
+                nt += 1;
+                continue;
+            }
             if bu.vector != 0 && vec >= VBYTES && self.aligned_scan(b, h, p, u, ptr, dpre, dpost) {
                 nt += 1;
                 continue;
@@ -1133,7 +1155,7 @@ extend LoopOpt {
                 let _ = self.shape(b, lb_at, lbs, h);
             }
             if bu.partial != 0 && self.counted(b, h, u) {
-                let k = self.unroll_factor(b, h, u, bu.partial);
+                let k = self.unroll_factor(b, ptr, fmath, h, u, bu.partial);
                 if k != 0 {
                     self.keep_refusal(b, h);
                     self.unroll(b, h, p, u, k);
@@ -5621,10 +5643,13 @@ extend LoopOpt {
         let l = b.locs[tb.a as usize];
         let fl = b.blocks[p as usize].flags & ~(BLOCK_NOVEC | BLOCK_EPI | BLOCK_RARE);
         let bc = b.blocks.len() as u32;
-        let bt = bc + 1;
-        let bv = bc + 2;
+        // The checks that `out` is apart from each base: a block of their own after `bc`'s branch on the
+        // counts, as `vectorize`'s guard.
+        let checks = bases.len() != 0;
+        let bt = bc + 1 + checks as u32;
+        let bv = bt + 1;
         let none: []Value = [];
-        // `bc`: 16 bytes of lanes to read and to write, `out` apart from each base.
+        // `bc`: 16 bytes of lanes to read and to write; then `out` apart from each base.
         let sc = b.insts.len() as u32;
         let vl = self.vconst(b, it, nl, l);
         let vl2 = self.vconst(b, it, 2 * nl as u64, l);
@@ -5633,6 +5658,15 @@ extend LoopOpt {
         let ke = self.vi(b, Inst { op: O_ADD, ty: it, aux: 0, a: k0, b: vl2, c: 0 }, l);
         let okk = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: ke, b: len, c: 0 }, l);
         ok = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: ok, b: okk, c: 0 }, l);
+        let args0 = [b.edge_arg(pe, 0), b.edge_arg(pe, 1)];
+        if checks {
+            let to_h = b.edge(h, args0[0..2]);
+            let to_checks = b.edge(bc + 1, none);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_checks, c: to_h }, l);
+            self.vblock(b, bc, sc, b.params.len() as u32, 0, fl, p);
+            ok = VNONE;
+        }
+        let sk = b.insts.len() as u32;
         let oi = self.vi(b, Inst { op: O_PTRTOINT, ty: it, aux: 0, a: ad.a, b: VNONE, c: VNONE }, l);
         for q in 0..bases.len() {
             let bi = self.vi(b, Inst { op: O_PTRTOINT, ty: it, aux: 0, a: bases[q], b: VNONE, c: VNONE }, l);
@@ -5641,13 +5675,16 @@ extend LoopOpt {
             let bei = self.vi(b, Inst { op: O_PTRTOINT, ty: it, aux: 0, a: be, b: VNONE, c: VNONE }, l);
             let past = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_UGE, a: oi, b: bei, c: 0 }, l);
             let apart = self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: before, b: past, c: 0 }, l);
-            ok = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: ok, b: apart, c: 0 }, l);
+            ok = self.both(b, ok, apart, l);
         }
         let to_t = b.edge(bt, none);
-        let args0 = [b.edge_arg(pe, 0), b.edge_arg(pe, 1)];
         let to_h = b.edge(h, args0[0..2]);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_t, c: to_h }, l);
-        self.vblock(b, bc, sc, b.params.len() as u32, 0, fl, p);
+        if checks {
+            self.vblock(b, bc + 1, sk, b.params.len() as u32, 0, fl, bc);
+        } else {
+            self.vblock(b, bc, sc, b.params.len() as u32, 0, fl, p);
+        }
         // `bt`: the tables, rows of 16 bytes (0x80: a byte the shuffle makes 0). Per mask, the active lanes'
         // bytes first; per count `c`, the lanes from `c` on (`ta`), and the lanes of the next 16 bytes after
         // them (`tb`).
@@ -6200,7 +6237,8 @@ extend LoopOpt {
     }
 
     // Vectorize loop `h` (preheader `p`, body `u`) as planned, `nv` vectors interleaved. The preheader
-    // enters a guard that runs the vector loop or enters the loop through a new preheader; the vector
+    // enters a guard that runs the vector loop or enters the loop through a new preheader: a block that
+    // branches on the count, then one of the range and alignment checks, when the plan has any. The vector
     // loop's exit reduces its accumulators and enters the loop with the iterations left.
     fn vectorize(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, nv: u32) {
         self.wide = self.wide || !self.vone && self.vlanes * self.vsz > self.vmax;
@@ -6246,13 +6284,18 @@ extend LoopOpt {
                 once = i <= n && n - i >= step as u64 && n - i < 2 * step as u64;
             }
         }
-        // The block numbers: guard, vector preheader, vector loop, (with an early exit, the vector loop's
-        // latch,) vector exit, the loop's new preheader.
+        // Whether the guard checks ranges or alignments: a block of their own, after the count's branch.
+        let mut checks = self.vca.len() != 0 || self.vblk.len() != 0;
+        for k in 0..self.lcl.len() {
+            checks = checks || self.lcl[k] >= ub.start && self.lcl[k] < ub.start + ub.len;
+        }
+        // The block numbers: guard, (its checks,) vector preheader, vector loop, (with an early exit, the
+        // vector loop's latch,) vector exit, the loop's new preheader.
         let g = b.blocks.len() as u32;
-        let vp = g + 1;
-        let vl = g + 2;
-        let lb = g + 3;
-        let vx = g + 3 + self.vexit as u32;
+        let vp = g + 1 + checks as u32;
+        let vl = vp + 1;
+        let lb = vp + 2;
+        let vx = vp + 2 + self.vexit as u32;
         let sp = vx + 1;
         // The guard: the header's parameters; the count of iterations the vectors run, and the checks.
         let gps = self.vblock_params(b, h);
@@ -6308,13 +6351,28 @@ extend LoopOpt {
             Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: ast::pick(self.vmt, trips, cnt), b: z, c: 0 },
             l0,
         );
+        self.args.truncate(0);
+        for q in 0..hb.param_len as u32 {
+            self.args.push(VPARAM | gps + q);
+        }
+        let none: []Value = [];
+        // The count's own branch ends the guard block; the checks follow in a block of their own, so they
+        // and the addresses they compare run only where the vectors have iterations.
+        if checks {
+            let to_sp = b.edge(sp, &self.args);
+            let to_checks = b.edge(g + 1, none);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_checks, c: to_sp }, l0);
+            self.vblock(b, g, gstart, gps, hb.param_len, hf, p);
+            ok = VNONE;
+        }
+        let cstart = b.insts.len() as u32;
         for k in 0..self.vca.len() {
             let (alo, ahi) = self.vrange(b, self.vca[k], i0, l0);
             let (blo, bhi) = self.vrange(b, self.vcb[k], i0, l0);
             let c1 = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: ahi, b: blo, c: 0 }, l0);
             let c2 = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULE, a: bhi, b: alo, c: 0 }, l0);
             let apart = self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: c1, b: c2, c: 0 }, l0);
-            ok = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: ok, b: apart, c: 0 }, l0);
+            ok = self.both(b, ok, apart, l0);
         }
         // A side's load's first element aligned to a vector's bytes (`lcl`): each copy's block holds the
         // elements its lanes read.
@@ -6329,7 +6387,7 @@ extend LoopOpt {
             let mis = self.vi(b, Inst { op: O_AND, ty: it, aux: 0, a: ai, b: km, c: 0 }, l0);
             let z0 = self.vconst(b, it, 0, l0);
             let al = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: mis, b: z0, c: 0 }, l0);
-            ok = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: ok, b: al, c: 0 }, l0);
+            ok = self.both(b, ok, al, l0);
         }
         // An aligned-block load's first element aligned to the bytes one vector iteration reads of it: each
         // block then holds an element the loop reads.
@@ -6342,17 +6400,16 @@ extend LoopOpt {
             let mis = self.vi(b, Inst { op: O_AND, ty: it, aux: 0, a: ai, b: km, c: 0 }, l0);
             let z0 = self.vconst(b, it, 0, l0);
             let al = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: mis, b: z0, c: 0 }, l0);
-            ok = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: ok, b: al, c: 0 }, l0);
-        }
-        self.args.truncate(0);
-        for q in 0..hb.param_len as u32 {
-            self.args.push(VPARAM | gps + q);
+            ok = self.both(b, ok, al, l0);
         }
         let to_sp = b.edge(sp, &self.args);
-        let none: []Value = [];
         let to_vp = b.edge(vp, none);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_vp, c: to_sp }, l0);
-        self.vblock(b, g, gstart, gps, hb.param_len, hf, p);
+        if checks {
+            self.vblock(b, g + 1, cstart, b.params.len() as u32, 0, hf, g);
+        } else {
+            self.vblock(b, g, gstart, gps, hb.param_len, hf, p);
+        }
         // The vector preheader: the end of the vector iterations, the splats, the accumulators' start.
         let pstart = b.insts.len() as u32;
         // The counter's end: the iterations times its step.
@@ -7725,10 +7782,11 @@ extend LoopOpt {
     // ---- Partial unrolling ----
 
     // The copies of counted loop `h`'s body `u` (`counted`) an unrolled loop runs within `budget`
-    // instructions: 4 or 2, 0 when the body does not unroll (it leaves the loop itself, `vexit`, where
-    // `unroll` takes its jump back; its counter steps by other than 1; it calls, whose cost the saved tests
-    // do not change; holds inline assembly; or reads the header's test).
-    fn unroll_factor(self: &mut Self, b: &Body, h: u32, u: u32, budget: u32) u32 {
+    // instructions and the target's registers (`split_plan`, which sets `ured`): 4 or 2, 0 when the body
+    // does not unroll (it leaves the loop itself, `vexit`, where `unroll` takes its jump back; its counter
+    // does not step up by a constant, `up_step`; it calls, whose cost the saved tests do not change; holds
+    // inline assembly; or reads the header's test).
+    fn unroll_factor(self: &mut Self, b: &Body, ptr: u32, fmath: u8, h: u32, u: u32, budget: u32) u32 {
         if self.vexit {
             return 0;
         }
@@ -7739,7 +7797,7 @@ extend LoopOpt {
             k /= 2;
         }
         let hb = b.blocks[h as usize];
-        if k == 1 || !self.steps_by_one(b, h, u, self.viv, (self.viv & ~VPARAM) - hb.param_start) {
+        if k == 1 || self.up_step(b, h, u) == 0 {
             return 0;
         }
         for i in ub.start..ub.start + n {
@@ -7748,35 +7806,188 @@ extend LoopOpt {
                 return 0;
             }
         }
-        return ast::pick(self.reads(b, u, hb.start) == 0, k, 0);
+        if self.reads(b, u, hb.start) != 0 {
+            return 0;
+        }
+        return self.split_plan(b, ptr, fmath, h, u, k);
+    }
+
+    // The constant counted loop `h` (latch `u`) adds to its counter (`viv`) per iteration, 0 when it adds
+    // another value or one with the sign bit set (a counter that steps down).
+    fn up_step(self: &mut Self, b: &Body, h: u32, u: u32) u64 {
+        let c = self.step_of(b, h, u, self.viv, (self.viv & ~VPARAM) - b.blocks[h as usize].param_start);
+        return ast::pick(c >> (type_bits(b.type_of(self.viv), 8) - 1) as u64 == 0, c, 0u64);
+    }
+
+    // How copies of body `u` may each keep a value of their own for header parameter `pv`, whose back edge
+    // passes `a`: RED_NONE unless `a` is one operation of `pv` and one other value that gives the same bits
+    // in any order and grouping of the values, and the body reads `pv` and `a` nowhere else (past the loop,
+    // `pv` is what the header leaves with; no block but `u` reads `a`: `counted`). An integer `add` or
+    // `xor`, a float `fadd` or `fmul` where the function reassociates (FM_ASSOC, the vectorizer's test):
+    // RED_ID. An integer `and` or `or`, a minimum or maximum of integer lanes, a scalar one as a select
+    // (`minmax`, the vectorizer's reduction; a float one only with no signed zeros): RED_SAME. A minimum or
+    // maximum of float lanes (`SIMD_MIN`, `SIMD_MAX`) with `pv` its operand 0, which holds no NaN
+    // (VOP_NUMBER): RED_SAME, since each accumulator then starts as a number and stays one, the least or
+    // greatest number of the values it took with -0.0 below +0.0, whatever the order; C's (VOP_NUM) only
+    // where a number and any other operand give a number: on a target whose instruction gives the other
+    // operand for a NaN of either kind (VMIN_NUM, VMIN_EXACT), or, where a signaling NaN gives a NaN
+    // (VMIN_QUIET, arm64's `fminnm`), for another operand that is itself the result of C's minimum or
+    // maximum there, which is quiet. A vector accumulator fills at most a register (`vmax`).
+    fn reduction(self: &mut Self, b: &Body, ptr: u32, fmath: u8, u: u32, pv: Value, a: Value) u8 {
+        if !self.in_body(b, u, a) {
+            return RED_NONE;
+        }
+        let t = b.insts[a as usize];
+        let ty = b.type_of(pv);
+        if t.ty != ty || ty == T_I128 || is_vec(ty) && type_bytes(ty, ptr) > self.vmax {
+            return RED_NONE;
+        }
+        if t.op == O_SELECT {
+            // Each accumulator has a lane size of its own.
+            self.vsz = 0;
+            return ast::pick(self.minmax(b, ptr, fmath, u, pv, a) != NONE16, RED_SAME, RED_NONE);
+        }
+        let ext = lane_extreme(t);
+        let (x, y) = if ext {
+            (b.pool[t.a as usize], b.pool[t.a as usize + 1])
+        } else {
+            (t.a, t.b)
+        };
+        if x == pv == (y == pv) || self.reads(b, u, pv) != 1 || self.reads(b, u, a) != 1 {
+            return RED_NONE;
+        }
+        let lt = ast::pick(is_vec(ty), lane_type(ty), ty);
+        if is_int(lt) {
+            return if t.op == O_ADD || t.op == O_XOR {
+                RED_ID
+            } else if t.op == O_AND || t.op == O_OR || ext {
+                RED_SAME
+            } else {
+                RED_NONE
+            };
+        }
+        if !is_float(lt) {
+            return RED_NONE;
+        }
+        if t.op == O_FADD || t.op == O_FMUL {
+            return ast::pick((fmath & FM_ASSOC) != 0, RED_ID, RED_NONE);
+        }
+        if !ext || x != pv || (t.aux & VOP_NUMBER) == 0 {
+            return RED_NONE;
+        }
+        let quiet = (y & (VPARAM | VFLAG)) == 0 && lane_extreme(b.insts[y as usize]) && (b.insts[y as usize].aux & VOP_NUM) != 0;
+        let closed = (t.aux & VOP_NUM) == 0 || self.vminnum == VMIN_NUM || self.vminnum == VMIN_EXACT || self.vminnum == VMIN_QUIET && quiet;
+        return ast::pick(closed, RED_SAME, RED_NONE);
+    }
+
+    // The copies, at most `k`, of body `u` that an unrolled loop of header `h` holds in registers, and how
+    // they keep each of the header's parameters (`ured`). Each copy has an accumulator of its own for every
+    // reduction (`reduction`), so no copy waits for the one before; any other parameter the copies chain. An
+    // accumulator takes a register, a chained float or vector value two (a copy's value lives while the
+    // next copy makes its own), and `vaccs` registers hold them all (0: no bound). With too many
+    // accumulators for 2 copies, the copies chain every parameter (`ured` all RED_NONE); 0 when the chained
+    // float and vector values alone are too many.
+    fn split_plan(self: &mut Self, b: &Body, ptr: u32, fmath: u8, h: u32, u: u32, k: u32) u32 {
+        let hb = b.blocks[h as usize];
+        let te = term(b, u).a;
+        fill(&mut self.ured, hb.param_len as usize, RED_NONE);
+        // The reductions; the float and vector ones of them; the other float and vector parameters.
+        let mut nred: u32 = 0;
+        let mut fred: u32 = 0;
+        let mut chained: u32 = 0;
+        for q in 0..hb.param_len as u32 {
+            let pv = VPARAM | hb.param_start + q;
+            if pv == self.viv {
+                continue;
+            }
+            let r = self.reduction(b, ptr, fmath, u, pv, b.edge_arg(te, q));
+            let ty = b.type_of(pv);
+            let fv = (is_vec(ty) || is_float(ty)) as u32;
+            self.ured[q as usize] = r;
+            nred += (r != RED_NONE) as u32;
+            fred += ast::pick(r != RED_NONE, fv, 0u32);
+            chained += ast::pick(r != RED_NONE, 0u32, fv);
+        }
+        if self.vaccs == 0 {
+            return k;
+        }
+        let mut ka = k;
+        while ka > 1 && ka * nred + 2 * chained > self.vaccs {
+            ka /= 2;
+        }
+        if ka > 1 && nred != 0 {
+            return ka;
+        }
+        fill(&mut self.ured, hb.param_len as usize, RED_NONE);
+        return ast::pick(2 * (chained + fred) <= self.vaccs, k, 0u32);
+    }
+
+    // Reduction update `a` of header parameter `pv` (`reduction`) on two accumulators: its operation with
+    // `x` for `pv` and `y` for its other operand, at the end of the instructions.
+    fn combine(self: &mut Self, b: &mut Body, a: u32, pv: Value, x: Value, y: Value) Value {
+        let mut t = b.insts[a as usize];
+        if t.op == O_SELECT {
+            let mut c = b.insts[t.a as usize];
+            c.a = ast::pick(c.a == pv, x, y);
+            c.b = ast::pick(c.b == pv, x, y);
+            let cv = b.push_at(c, t.a);
+            t.b = ast::pick(t.b == pv, x, y);
+            t.c = ast::pick(t.c == pv, x, y);
+            t.a = cv;
+        } else if t.op == O_VOP {
+            t.a = b.pool_list([x, y]);
+        } else {
+            t.a = x;
+            t.b = y;
+        }
+        return b.push_at(t, a);
     }
 
     // Unroll counted loop `h` (preheader `p`, body `u`) by `k`: the preheader enters a guard that runs the
-    // iterations a multiple of `k` covers in a loop of `k` copies of the body, each copy's header values
-    // the previous one's back edge arguments, then enters the loop with the rest (fewer than `k`), which
-    // unrolls and vectorizes no more.
+    // iterations a multiple of `k` covers in a loop of `k` copies of the body, then enters the loop with
+    // the rest, which unrolls and vectorizes no more. Each copy's header values are the previous one's back
+    // edge arguments, but a reduction's (`ured`, `split_plan`): each copy has its own accumulator, which
+    // the loop carries as a parameter after the header's, and a block on the loop's exit combines them.
     fn unroll(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, k: u32) {
         let hb = b.blocks[h as usize];
         let ub = b.blocks[u as usize];
         let l0 = b.locs[hb.start as usize];
         let qx = (self.viv & ~VPARAM) - hb.param_start;
         let np = hb.param_len as u32;
-        // The block numbers: guard, unrolled loop, the loop's new preheader.
+        let split = self.ured.contains(&RED_ID) || self.ured.contains(&RED_SAME);
+        // The block numbers: guard, unrolled loop, (the block that combines the accumulators,) the loop's
+        // new preheader.
         let g = b.blocks.len() as u32;
         let ul = g + 1;
-        let sp = g + 2;
-        let iend = self.unroll_guard(b, h, p, k, ul, sp);
-        // The unrolled loop: `vmap` holds the header's values for the copy at hand, `imap` the body's.
+        let xc = g + 2;
+        let sp = g + 2 + split as u32;
+        let iend = self.unroll_guard(b, h, p, u, k, split, ul, sp);
+        // The unrolled loop: `ucur` holds its parameters' values as of the copy at hand (a reduction's
+        // accumulators for the copies after the first follow the header's parameters, from `xs` on), `vmap`
+        // the header's values for that copy, `imap` the body's.
         let lps = self.vblock_params(b, h);
-        let lstart = b.insts.len() as u32;
-        self.vmap.truncate(0);
+        self.ucur.truncate(0);
         for q in 0..np {
-            self.vmap.push(VPARAM | lps + q);
+            self.ucur.push(VPARAM | lps + q);
         }
+        for q in 0..np {
+            for _ in 1..ast::pick(self.ured[q as usize] != RED_NONE, k, 1u32) {
+                self.ucur.push(VPARAM | b.params.len() as u32);
+                b.params.push(b.params[(hb.param_start + q) as usize]);
+            }
+        }
+        let lstart = b.insts.len() as u32;
+        fill(&mut self.vmap, np as usize, VNONE);
         fill(&mut self.imap, b.insts.len(), NONE);
         self.pmap.truncate(0);
         let te = term(b, u).a;
-        for _ in 0..k {
+        for j in 0..k {
+            let mut xs = np;
+            for q in 0..np {
+                let red = self.ured[q as usize] != RED_NONE;
+                self.vmap[q as usize] = self.ucur[ast::pick(red && j != 0, xs + j - 1, q) as usize];
+                xs += ast::pick(red, k - 1, 0u32);
+            }
             for i in ub.start..ub.start + ub.len - 1 {
                 self.imap[i as usize] = self.copy_unrolled(b, i, h);
             }
@@ -7784,29 +7995,59 @@ extend LoopOpt {
             for q in 0..np {
                 self.args.push(self.um(b, h, b.edge_arg(te, q)));
             }
+            xs = np;
             for q in 0..np {
-                self.vmap[q as usize] = self.args[q as usize];
+                let red = self.ured[q as usize] != RED_NONE;
+                self.ucur[ast::pick(red && j != 0, xs + j - 1, q) as usize] = self.args[q as usize];
+                xs += ast::pick(red, k - 1, 0u32);
             }
         }
-        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
-        let back = b.edge(ul, &self.args);
-        let out = b.edge(sp, &self.args);
+        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: self.ucur[qx as usize], b: iend, c: 0 }, l0);
+        let back = b.edge(ul, &self.ucur);
+        let none: []Value = [];
+        let out = if split {
+            b.edge(xc, none)
+        } else {
+            b.edge(sp, &self.ucur)
+        };
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: back, c: out }, l0);
-        self.vblock(b, ul, lstart, lps, hb.param_len, hb.flags, g);
+        self.vblock(b, ul, lstart, lps, self.ucur.len() as u16, hb.flags, g);
+        if split {
+            // Each reduction's accumulators into one value, the header's parameter for the loop.
+            let cstart = b.insts.len() as u32;
+            self.args.truncate(0);
+            let mut xs = np;
+            for q in 0..np {
+                let mut v = self.ucur[q as usize];
+                if self.ured[q as usize] != RED_NONE {
+                    for j in 1..k {
+                        let acc = self.ucur[(xs + j - 1) as usize];
+                        v = self.combine(b, b.edge_arg(te, q), VPARAM | hb.param_start + q, v, acc);
+                    }
+                    xs += k - 1;
+                }
+                self.args.push(v);
+            }
+            let to_sp = b.edge(sp, &self.args);
+            let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp, b: 0, c: 0 }, l0);
+            self.vblock(b, xc, cstart, b.params.len() as u32, 0, hb.flags, g);
+        }
         self.unroll_exit(b, h, p, sp, g);
     }
 
-    // The guard of a loop `h` (preheader `p`, counter `viv`, bound `vn`) that unrolls by `k`, block
-    // `b.blocks.len()`, which `p` enters, of the header's parameters: it enters block `ul` with them when
-    // the loop runs `k` iterations or more, else `sp`. The end of the iterations a multiple of `k` covers.
-    fn unroll_guard(self: &mut Self, b: &mut Body, h: u32, p: u32, k: u32, ul: u32, sp: u32) Value {
+    // The guard of a loop `h` (preheader `p`, latch `u`, counter `viv` stepping up by a constant, bound
+    // `vn`) that unrolls by `k`, block `b.blocks.len()`, which `p` enters, of the header's parameters: it
+    // enters block `ul` with them when the loop runs `k` iterations or more, else `sp`; with `split`, `ul`
+    // also takes the start of each reduction's accumulators for the copies after the first (`ured`: the
+    // operation's identity, or the parameter itself). The end of the iterations a multiple of `k` covers.
+    fn unroll_guard(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, k: u32, split: bool, ul: u32, sp: u32) Value {
         let hb = b.blocks[h as usize];
         let l0 = b.locs[hb.start as usize];
         let qx = (self.viv & ~VPARAM) - hb.param_start;
         let qt = b.params[(self.viv & ~VPARAM) as usize];
         let np = hb.param_len as u32;
         let g = b.blocks.len() as u32;
-        // The iterations the unrolled loop runs, `(n - i0) & -k` when `i0 < n`, and their end.
+        let c = self.up_step(b, h, u);
         let gps = self.vblock_params(b, h);
         let gstart = b.insts.len() as u32;
         let i0 = VPARAM | gps + qx;
@@ -7815,19 +8056,57 @@ extend LoopOpt {
             Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vsigned, C_SLT, C_ULT), a: i0, b: self.vn, c: 0 },
             l0,
         );
-        let d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        // The iterations before the test first fails, from `i0 < n`: `n - i0` by 1, else, by `c`,
+        // `(n - i0 - 1) / c + 1` (unsigned). The counter does not wrap in them: its values are
+        // `i0 + j * c <= n - 1`, so each one is an iteration the loop runs, whatever it does after them.
+        let mut its = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        let pow2 = c.is_power_of_two();
+        let mut cv = VNONE;
+        if c > 1 {
+            cv = self.vconst(b, qt, ast::pick(pow2, c.trailing_zeros() as u64, c), l0);
+            let one = self.vconst(b, qt, 1, l0);
+            let d1 = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: its, b: one, c: 0 }, l0);
+            let d2 = self.vi(b, Inst { op: ast::pick(pow2, O_LSHR, O_UDIV), ty: qt, aux: 0, a: d1, b: cv, c: 0 }, l0);
+            its = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: d2, b: one, c: 0 }, l0);
+        }
         let z = self.vconst(b, qt, 0, l0);
-        let trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+        let trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: its, c: z }, l0);
+        // Those the unrolled loop runs, a multiple of `k`, and the counter's value after them, modulo its
+        // width: the unrolled loop leaves when its counter is that value, which it is after no fewer
+        // iterations, since their steps add up to less than the counter's range plus `c`.
         let mk = self.vconst(b, qt, ~((k - 1) as u64) & ~0u64 >> (64 - type_bits(qt, 8)) as u64, l0);
         let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
         let ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
-        let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: cnt, c: 0 }, l0);
+        let span = if c > 1 {
+            self.vi(b, Inst { op: ast::pick(pow2, O_SHL, O_MUL), ty: qt, aux: 0, a: cnt, b: cv, c: 0 }, l0)
+        } else {
+            cnt
+        };
+        let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: span, c: 0 }, l0);
         self.args.truncate(0);
         for q in 0..np {
             self.args.push(VPARAM | gps + q);
         }
-        let to_ul = b.edge(ul, &self.args);
         let to_sp = b.edge(sp, &self.args);
+        let te = term(b, u).a;
+        for q in 0..ast::pick(split, np, 0u32) {
+            let r = self.ured[q as usize];
+            if r == RED_NONE {
+                continue;
+            }
+            let v = if r == RED_SAME {
+                VPARAM | gps + q
+            } else {
+                let ty = b.params[(hb.param_start + q) as usize];
+                let op = b.insts[b.edge_arg(te, q) as usize].op;
+                let id = self.identity(b, op, ast::pick(is_vec(ty), lane_type(ty), ty));
+                self.vsplat_const(b, ty, id, l0)
+            };
+            for _ in 1..k {
+                self.args.push(v);
+            }
+        }
+        let to_ul = b.edge(ul, &self.args);
         let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_ul, c: to_sp }, l0);
         self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
         return iend;
@@ -8099,7 +8378,7 @@ extend LoopOpt {
         let sp = g + 5;
         fill(&mut self.imap, b.insts.len(), NONE);
         fill(&mut self.pmap, b.params.len(), NONE);
-        let iend = self.unroll_guard(b, ho, p, k, ua, sp);
+        let iend = self.unroll_guard(b, ho, p, self.jblk[nj - 1], k, false, ua, sp);
         // The first chain's copies, and the inner loop's start values.
         let lps = self.vblock_params(b, ho);
         let ustart = b.insts.len() as u32;
@@ -8300,6 +8579,349 @@ extend LoopOpt {
             t.a = at;
         }
         return t;
+    }
+
+    // ---- Lane counts ----
+
+    // The lane masks whose set lanes each iteration of loop body `u` counts into header parameter `pv` (an
+    // integer of at most 64 bits) through back edge argument `nx`, pushed to `ms`: `nx` is `pv` plus or
+    // minus a `reduce_add` of a sum of masks (each lane all ones or 0, `lane_mask`: the count negated, the
+    // form `lir::opt`'s `mask_count` gives a mask's count) through negations, sign extensions, truncations
+    // and zero extensions of a value that is not negative. The masks hold at most 127 lanes together, so
+    // the count and its negation are exact in every integer type. `pv` is read by the sum alone and each
+    // value of the sum once: the sum goes with the count. The masks are vectors of VBYTES to `vmax` bytes.
+    // (The masks' type, whether the count is taken from `pv`); type 0 when `nx` is no such sum.
+    fn lane_count(self: &mut Self, b: &Body, u: u32, pv: Value, nx: Value, ms: &mut Vector<Value>) (u8, bool) {
+        let ct = b.params[(pv & ~VPARAM) as usize];
+        if !is_int(ct) || ct == T_I128 || !self.in_body(b, u, nx) {
+            return (0u8, false);
+        }
+        let t = b.insts[nx as usize];
+        if (t.op != O_ADD || t.a != pv && t.b != pv) && (t.op != O_SUB || t.a != pv) {
+            return (0u8, false);
+        }
+        // The values from the sum's operand down to the `reduce_add`: at most 7.
+        let mut chain: [Value; 7] = [VNONE; 7];
+        let mut n: usize = 0;
+        let mut v = ast::pick(t.a == pv, t.b, t.a);
+        // The negations so far, and whether a zero extension came after an even or an odd count of them.
+        let mut negs: u32 = (t.op == O_SUB) as u32;
+        let mut zext: [bool; 2] = [false, false];
+        // Each step takes one negation, extension or truncation: at most 6 (1 to 8 bytes and back).
+        for _ in 0..6 {
+            if !self.in_body(b, u, v) {
+                break;
+            }
+            let x = b.insts[v as usize];
+            if is_vec(x.ty) || x.op != O_NEG && x.op != O_SEXT && x.op != O_ZEXT && x.op != O_TRUNC {
+                break;
+            }
+            chain[n] = v;
+            n += 1;
+            negs += (x.op == O_NEG) as u32;
+            if x.op == O_ZEXT {
+                zext[(negs & 1) as usize] = true;
+            }
+            v = x.a;
+        }
+        if !self.in_body(b, u, v) {
+            return (0u8, false);
+        }
+        let r = b.insts[v as usize];
+        // The `reduce_add` is the count negated: a zero extension reads it after an odd count of negations.
+        if r.op != O_VOP || r.b != 1 || (r.aux & VOP_CODE) as u32 != core::OP_SIMD + core::SIMD_REDUCE_ADD as u32 || zext[(negs & 1) as usize] {
+            return (0u8, false);
+        }
+        chain[n] = v;
+        n += 1;
+        let top = b.pool[r.a as usize];
+        let vt = b.type_of(top);
+        let nb = type_bytes(vt, 8);
+        if !is_int(lane_type(vt)) || nb < VBYTES || nb > self.vmax || self.reads(b, u, pv) != 1 || self.reads(b, u, nx) != 1 {
+            return (0u8, false);
+        }
+        for j in 0..n {
+            if self.reads(b, u, chain[j]) != 1 {
+                return (0u8, false);
+            }
+        }
+        let at = ms.len();
+        ms.push(top);
+        let mut j = at;
+        // Each step takes a sum of two apart or passes a mask: at most 127 masks.
+        while j < ms.len() {
+            let m = ms[j];
+            if (ms.len() - at) as u32 * lanes(vt) > 127 {
+                return (0u8, false);
+            }
+            if self.in_body(b, u, m) && b.insts[m as usize].op == O_ADD && self.reads(b, u, m) == 1 {
+                ms[j] = b.insts[m as usize].a;
+                ms.push(b.insts[m as usize].b);
+            } else if lane_mask(b, m, 4) {
+                j += 1;
+            } else {
+                return (0u8, false);
+            }
+        }
+        return (vt, (negs & 1) == 0);
+    }
+
+    // Vector `s` of 8-byte lanes plus the lanes of `v` (as many bytes, narrower lanes) zero-extended and
+    // summed in each 8 bytes, at location `l`: a widening sum (`O_VSUMW`) where the target computes it in
+    // registers (`vsumw`), else `v`'s low and high halves each interleaved with zeros (`vziplo`, `vziphi`),
+    // read as lanes twice as wide and added, until the lanes are 8 bytes.
+    fn lanes_wide(self: &mut Self, b: &mut Body, s: Value, v: Value, l: u32) Value {
+        let st = b.type_of(s);
+        let mut t = b.type_of(v);
+        if (self.vsumw & sumw_bit(type_bytes(lane_type(t), 8), 8)) != 0 {
+            return self.vi(b, Inst { op: O_VSUMW, ty: st, aux: 0, a: s, b: v, c: VNONE }, l);
+        }
+        let mut x = v;
+        // Each step doubles the lanes' width: at most 3.
+        while t != st {
+            let z = self.vsplat_const(b, t, 0, l);
+            let lo = self.vi(b, Inst { op: O_VZIPLO, ty: t, aux: 0, a: x, b: z, c: VNONE }, l);
+            let hi = self.vi(b, Inst { op: O_VZIPHI, ty: t, aux: 0, a: x, b: z, c: VNONE }, l);
+            t = vec_type(int_type(2 * type_bytes(lane_type(t), 8)), lanes(t) / 2);
+            let wl = self.vi(b, Inst { op: O_BITCAST, ty: t, aux: 0, a: lo, b: VNONE, c: VNONE }, l);
+            let wh = self.vi(b, Inst { op: O_BITCAST, ty: t, aux: 0, a: hi, b: VNONE, c: VNONE }, l);
+            x = self.vi(b, Inst { op: O_ADD, ty: t, aux: 0, a: wl, b: wh, c: 0 }, l);
+        }
+        return self.vi(b, Inst { op: O_ADD, ty: st, aux: 0, a: s, b: x, c: 0 }, l);
+    }
+
+    // Counted loop `h` (preheader `p`, body `u`) whose parameters sum the counts of lane masks' set lanes
+    // (`lane_count`), with the counts in lane accumulators: a vector that adds each iteration's mask holds
+    // per lane the count negated, exact while it adds no more masks than the lane's greatest value. The
+    // preheader enters a guard of the header's parameters. While a step of the counter or more is left
+    // (`(n - i0) & -step` when `i0 < n`: iterations the loop runs, with no counter past the bound), the guard
+    // enters an inner counted loop of a copy of the body that runs them, an accumulator per mask from zero
+    // in place of each sum; a block then adds the accumulators' lanes to the sums and enters the guard
+    // again. Lanes narrower than their sum count at most their greatest value of iterations per entry (255
+    // for bytes), and their lanes negated add as 8-byte lanes (`lanes_wide`); lanes as wide as their sum
+    // wrap as it does and add by one `reduce_add`. Where every lane counts all the iterations the counter's
+    // type holds, that block enters the loop instead. The loop runs what the guard leaves (less than a
+    // step, and all that follows a counter that wraps) and takes no transform again (`BLOCK_NOVEC`); its
+    // header jumps to its exit where nothing is left: a `<` test, the counter's start and the bound
+    // multiples of the step. Not for a body that leaves the loop or reads the header's test, a counter
+    // down, a step that is no power of 2, or more masks than `vaccs` registers. Whether it did.
+    fn count_lanes(self: &mut Self, b: &mut Body, ptr: u32, h: u32, p: u32, u: u32) bool {
+        if !self.counted(b, h, u) || self.vexit || self.vrev {
+            return false;
+        }
+        let hb = b.blocks[h as usize];
+        let ub = b.blocks[u as usize];
+        let np = hb.param_len as u32;
+        let te = term(b, u).a;
+        // The masks, and per sum (its parameter's index, its first mask, its masks' type, whether it takes
+        // the count from the parameter).
+        let mut ms = Vector::<Value>::new();
+        let mut sums = Vector::<(u32, u32, u8, bool)>::new();
+        for q in 0..np {
+            let pv = VPARAM | hb.param_start + q;
+            let at = ms.len();
+            let (vt, minus) = if pv == self.viv {
+                (0u8, false)
+            } else {
+                self.lane_count(b, u, pv, b.edge_arg(te, q), &mut ms)
+            };
+            if vt == 0 {
+                ms.truncate(at);
+            } else {
+                sums.push((q, at as u32, vt, minus));
+            }
+        }
+        if sums.len() == 0 {
+            return false;
+        }
+        let qx = (self.viv & ~VPARAM) - hb.param_start;
+        let qt = b.params[(self.viv & ~VPARAM) as usize];
+        let step = self.step_of(b, h, u, self.viv, qx);
+        if !step.is_power_of_two() || self.vaccs != 0 && ms.len() as u32 > self.vaccs || self.reads(b, u, hb.start) != 0 {
+            return false;
+        }
+        // The most iterations per entry of the inner loop, 0 for no bound: the greatest value of the
+        // narrowest lanes that are narrower than their sum. No bound either where the counter's type holds
+        // no more steps than that.
+        let mut cap: u64 = 0;
+        for r in 0..sums.len() {
+            let (q, _, vt, _) = sums[r];
+            let w = type_bits(lane_type(vt), 8);
+            if w < type_bits(b.params[(hb.param_start + q) as usize], 8) && (cap == 0 || mask_of(w) < cap) {
+                cap = mask_of(w);
+            }
+        }
+        let top = mask_of(type_bits(qt, ptr));
+        if cap >= top / step {
+            cap = 0;
+        }
+        let init = b.edge_arg(term(b, p).a, qx);
+        let whole = step == 1 || mult_of(b, init, step, MULT_DEPTH) && mult_of(b, self.vn, step, MULT_DEPTH);
+        let l0 = b.locs[hb.start as usize];
+        let cond = ast::pick(self.vsigned, C_SLT, C_ULT);
+        // The block numbers: guard, the inner loop's preheader, header and body, the sums' block, the
+        // loop's new preheader.
+        let g = b.blocks.len() as u32;
+        let ip = g + 1;
+        let ih = g + 2;
+        let ib = g + 3;
+        let fl = g + 4;
+        let sp = g + 5;
+        let gps = self.vblock_params(b, h);
+        let gstart = b.insts.len() as u32;
+        let i0 = VPARAM | gps + qx;
+        let lt = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: cond, a: i0, b: self.vn, c: 0 }, l0);
+        let d = self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0);
+        let z = self.vconst(b, qt, 0, l0);
+        let mut trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
+        if cap != 0 {
+            let most = self.vconst(b, qt, cap * step, l0);
+            let less = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: trips, b: most, c: 0 }, l0);
+            trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: less, b: trips, c: most }, l0);
+        }
+        let mk = self.vconst(b, qt, ~(step - 1) & top, l0);
+        let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
+        let ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
+        let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: cnt, c: 0 }, l0);
+        self.args.truncate(0);
+        for q in 0..np {
+            self.args.push(VPARAM | gps + q);
+        }
+        let none: []Value = [];
+        let to_ip = b.edge(ip, none);
+        let to_sp = b.edge(sp, &self.args);
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: ok, b: to_ip, c: to_sp }, l0);
+        self.vblock(b, g, gstart, gps, hb.param_len, hb.flags, p);
+        // The inner header's parameters: the header's but the sums, then an accumulator per mask.
+        // `vmap`: per header parameter its value in the inner loop, a sum's the guard's.
+        let pstart = b.insts.len() as u32;
+        let ips = b.params.len() as u32;
+        let mut nk: u32 = 0;
+        let mut si: usize = 0;
+        self.vmap.truncate(0);
+        self.args.truncate(0);
+        for q in 0..np {
+            if si < sums.len() && sums[si].0 == q {
+                self.vmap.push(VPARAM | gps + q);
+                si += 1;
+            } else {
+                self.vmap.push(VPARAM | ips + nk);
+                self.args.push(VPARAM | gps + q);
+                nk += 1;
+            }
+        }
+        for j in 0..ms.len() {
+            let vt = b.type_of(ms[j]);
+            self.args.push(self.vsplat_const(b, vt, 0, l0));
+        }
+        let to_ih = b.edge(ih, &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_ih, b: 0, c: 0 }, l0);
+        self.vblock(b, ip, pstart, ips, 0, hb.flags, g);
+        for q in 0..np {
+            if (self.vmap[q as usize] & ~VPARAM) >= ips {
+                let pt = b.params[(hb.param_start + q) as usize];
+                b.params.push(pt);
+            }
+        }
+        for j in 0..ms.len() {
+            let vt = b.type_of(ms[j]);
+            b.params.push(vt);
+        }
+        let istart = b.insts.len() as u32;
+        let more = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: cond, a: self.vmap[qx as usize], b: iend, c: 0 }, l0);
+        let to_ib = b.edge(ib, none);
+        let to_fl = b.edge(fl, none);
+        let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: more, b: to_ib, c: to_fl }, l0);
+        self.vblock(b, ih, istart, ips, (nk + ms.len() as u32) as u16, hb.flags, ip);
+        // The inner body: the body's copy, then each accumulator plus its mask.
+        let bstart = b.insts.len() as u32;
+        fill(&mut self.imap, b.insts.len(), NONE);
+        self.pmap.truncate(0);
+        for i in ub.start..ub.start + ub.len - 1 {
+            self.imap[i as usize] = self.copy_unrolled(b, i, h);
+        }
+        self.args.truncate(0);
+        for q in 0..np {
+            if (self.vmap[q as usize] & ~VPARAM) >= ips {
+                self.args.push(self.um(b, h, b.edge_arg(te, q)));
+            }
+        }
+        for j in 0..ms.len() {
+            let m = self.um(b, h, ms[j]);
+            let vt = b.type_of(m);
+            let acc = VPARAM | ips + nk + j as u32;
+            self.args.push(self.vi(b, Inst { op: O_ADD, ty: vt, aux: 0, a: acc, b: m, c: 0 }, l0));
+        }
+        let back = b.edge(ih, &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: back, b: 0, c: 0 }, l0);
+        self.vblock(b, ib, bstart, b.params.len() as u32, 0, ub.flags, ih);
+        // The sums' block.
+        let fstart = b.insts.len() as u32;
+        let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
+        self.args.truncate(0);
+        si = 0;
+        for q in 0..np {
+            if si == sums.len() || sums[si].0 != q {
+                self.args.push(self.vmap[q as usize]);
+                continue;
+            }
+            let (_, at, vt, minus) = sums[si];
+            let end = if si + 1 < sums.len() {
+                sums[si + 1].1
+            } else {
+                ms.len() as u32
+            };
+            si += 1;
+            let ct = b.params[(hb.param_start + q) as usize];
+            let lt = lane_type(vt);
+            let wide = type_bits(lt, 8) >= type_bits(ct, 8);
+            // The lanes' sum: of the accumulators as they are where the lanes wrap as the sum does (the
+            // count negated), else of their lanes negated, zero-extended to 8 bytes.
+            let st = ast::pick(wide, vt, vec_type(T_I64, type_bytes(vt, 8) / 8));
+            let mut s = VPARAM | ips + nk + at;
+            if !wide {
+                s = self.vsplat_const(b, st, 0, l0);
+            }
+            for j in at + ast::pick(wide, 1u32, 0u32)..end {
+                let acc = VPARAM | ips + nk + j;
+                if wide {
+                    s = self.vi(b, Inst { op: O_ADD, ty: st, aux: 0, a: s, b: acc, c: 0 }, l0);
+                } else {
+                    let ng = self.vi(b, Inst { op: O_NEG, ty: vt, aux: 0, a: acc, b: VNONE, c: VNONE }, l0);
+                    s = self.lanes_wide(b, s, ng, l0);
+                }
+            }
+            let one = [s];
+            let pl = b.pool_list(one[0..1]);
+            let mut x = self.vi(b, Inst { op: O_VOP, ty: lane_type(st), aux: code, a: pl, b: 1, c: VNONE }, l0);
+            if lane_type(st) != ct {
+                x = self.vi(b, Inst { op: O_TRUNC, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }, l0);
+            }
+            let op = ast::pick(wide == minus, O_ADD, O_SUB);
+            self.args.push(self.vi(b, Inst { op: op, ty: ct, aux: 0, a: VPARAM | gps + q, b: x, c: 0 }, l0));
+        }
+        let on = b.edge(ast::pick(cap != 0, g, sp), &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: on, b: 0, c: 0 }, l0);
+        self.vblock(b, fl, fstart, b.params.len() as u32, 0, hb.flags, ih);
+        // The loop's new preheader; the preheader enters the guard.
+        let sps = self.vblock_params(b, h);
+        let sstart = b.insts.len() as u32;
+        self.args.truncate(0);
+        for q in 0..np {
+            self.args.push(VPARAM | sps + q);
+        }
+        let to_h = b.edge(h, &self.args);
+        let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_h, b: 0, c: 0 }, l0);
+        self.vblock(b, sp, sstart, sps, hb.param_len, hb.flags, g);
+        let pe = term(b, p).a;
+        b.pool[pe as usize] = g;
+        b.blocks.index_mut(h as usize).flags |= BLOCK_NOVEC;
+        if whole && !self.vne {
+            let th = term(b, h);
+            let out = ast::pick(b.edge_target(th.b) == u, th.c, th.b);
+            b.insts[(hb.start + hb.len - 1) as usize] = Inst { op: O_JMP, ty: T_NONE, aux: 0, a: out, b: 0, c: 0 };
+        }
+        return true;
     }
 
     // ---- If-conversion ----
@@ -9419,6 +10041,14 @@ extend LoopOpt {
     // The integer constant `v` of type `ty`.
     fn vconst(self: &mut Self, b: &mut Body, ty: u8, v: u64, l: u32) Value {
         return self.vi(b, Inst { op: O_ICONST, ty: ty, aux: 0, a: v as u32, b: (v >> 32) as u32, c: VNONE }, l);
+    }
+
+    // Conditions `x` and `y` (i8, 0 or 1) both; `y` alone when `x` is VNONE.
+    fn both(self: &mut Self, b: &mut Body, x: Value, y: Value, l: u32) Value {
+        if x == VNONE {
+            return y;
+        }
+        return self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: x, b: y, c: 0 }, l);
     }
 
     // Block `k`: the instructions from `start` on, `np` parameters from `ps`, flags `fl`, dominated as
@@ -13963,6 +14593,12 @@ extend LoopOpt {
 // Whether operation `op` reads or writes memory as an access the vectorizer copies (`vectorize`).
 const fn mem_op(op: u8) bool {
     return op == O_LOAD || op == O_STORE;
+}
+
+// Whether `t` is the minimum or maximum of two operands lane by lane (`SIMD_MIN`, `SIMD_MAX`).
+const fn lane_extreme(t: Inst) bool {
+    let code = (t.aux & VOP_CODE) as u32;
+    return t.op == O_VOP && t.b == 2 && is_vec(t.ty) && (code == core::OP_SIMD + core::SIMD_MIN as u32 || code == core::OP_SIMD + core::SIMD_MAX as u32);
 }
 
 // The terminator of block `k`.

@@ -368,6 +368,183 @@ fn masks_read_several_times_stay_lane_masks() {
     h::expect_same_output("lane masks and the lane loop", LANE_MASKS, ["SC_SIMD_SCALAR=1"], []);
 }
 
+// Loops that add `count()` of a comparison to an integer, over lanes of 1, 2, 4 and 8 bytes, one register
+// and several, one sum and two (the second taken from its start), a sum as wide as the lanes and wider,
+// and the count of two comparisons' masks combined (`count_range`).
+// `main` runs each over slices of equal elements (every lane counts in every iteration) of the iterations
+// around one and two runs of 255 (65535 for 2-byte lanes), and over mixed elements; it returns the wrong
+// counts of equal elements.
+const MASK_COUNTS: str = M"(import std::simd;
+
+@noinline
+fn count_u8(x: []u8, v: u8) usize {
+    let m = x.len() - x.len() % 64;
+    let vv = Simd::<u8, 64>::splat(v);
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i < m {
+        c += simd::load::<u8, 64>(x, i).equal(vv).count();
+        i += 64;
+    }
+    return c;
+}
+
+@noinline
+fn count_u8x16(x: []u8, v: u8) usize {
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i + 16 <= x.len() {
+        c += simd::load::<u8, 16>(x, i).equal(Simd::<u8, 16>::splat(v)).count();
+        i += 16;
+    }
+    return c;
+}
+
+@noinline
+fn count_u16(x: []u16, v: u16) usize {
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i + 32 <= x.len() {
+        c += simd::load::<u16, 32>(x, i).less_than(Simd::<u16, 32>::splat(v)).count();
+        i += 32;
+    }
+    return c;
+}
+
+@noinline
+fn count_u32(x: []u32, v: u32) u32 {
+    let mut c: u32 = 7;
+    let mut i: usize = 0;
+    while i + 16 <= x.len() {
+        c += simd::load::<u32, 16>(x, i).equal(Simd::<u32, 16>::splat(v)).count() as u32;
+        i += 16;
+    }
+    return c;
+}
+
+@noinline
+fn count_u32_wide(x: []u32, v: u32) u64 {
+    let mut c: u64 = 0;
+    let mut i: usize = 0;
+    while i + 16 <= x.len() {
+        c += simd::load::<u32, 16>(x, i).not_equal(Simd::<u32, 16>::splat(v)).count() as u64;
+        i += 16;
+    }
+    return c;
+}
+
+@noinline
+fn count_f64(x: []f64, v: f64) usize {
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i + 8 <= x.len() {
+        c += simd::load::<f64, 8>(x, i).less_than(Simd::<f64, 8>::splat(v)).count();
+        i += 8;
+    }
+    return c;
+}
+
+@noinline
+fn count_two(x: []u8, v: u8, w: u8) u64 {
+    let mut c: usize = 0;
+    let mut d: usize = 1000000;
+    let mut i: usize = 0;
+    while i + 32 <= x.len() {
+        let a = simd::load::<u8, 32>(x, i);
+        c += a.equal(Simd::<u8, 32>::splat(v)).count();
+        d -= a.less_than(Simd::<u8, 32>::splat(w)).count();
+        i += 32;
+    }
+    return c as u64 * 2000000 + d as u64;
+}
+
+@noinline
+fn count_range(x: []u8, lo: u8, hi: u8) usize {
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i + 32 <= x.len() {
+        let a = simd::load::<u8, 32>(x, i);
+        c += (a.greater_than(Simd::<u8, 32>::splat(lo)) & !a.greater_equal(Simd::<u8, 32>::splat(hi))).count();
+        i += 32;
+    }
+    return c;
+}
+
+fn main() i32 {
+    let mut bytes = Vector::<u8>::new();
+    let mut mixed = Vector::<u8>::new();
+    for i in 0usize..65700 {
+        bytes.push(3);
+        mixed.push(((i * 7 + i / 13) % 5) as u8);
+    }
+    let runs: [usize; 8] = [0, 1, 254, 255, 256, 510, 511, 1025];
+    let mut bad = 0;
+    for p in runs {
+        let a = count_u8(bytes[0..p * 64 + 63], 3);
+        let b = count_u8x16(bytes[0..p * 16], 3);
+        let c = count_two(bytes[0..p * 32], 3, 4);
+        let d = count_range(bytes[0..p * 32], 2, 4);
+        if a != p * 64 || b != p * 16 || c != p as u64 * 32 * 2000000 + 1000000 - p as u64 * 32 || d != p * 32 {
+            bad += 1;
+        }
+        println("{} {} {} {} {}", p, a, b, c, d);
+        println(
+            "{} {} {} {}",
+            count_u8(mixed[0..p * 64], 3),
+            count_u8x16(mixed[5..5 + p * 16 + 9], 2),
+            count_two(mixed[1..1 + p * 32], 4, 2),
+            count_range(mixed[2..2 + p * 32], 0, 3),
+        );
+    }
+    let mut words = Vector::<u16>::new();
+    let mut ints = Vector::<u32>::new();
+    let mut floats = Vector::<f64>::new();
+    for i in 0usize..65537 * 32 {
+        words.push((i % 3) as u16);
+    }
+    for i in 0usize..4000 {
+        ints.push((i % 7) as u32);
+        floats.push((i % 11) as f64);
+    }
+    let long: [usize; 5] = [0, 1, 65535, 65536, 65537];
+    for p in long {
+        let a = count_u16(words[0..p * 32], 9);
+        if a != p * 32 {
+            bad += 1;
+        }
+        println("{} {} {}", p, a, count_u16(words[0..p * 32], 1));
+    }
+    println("{} {} {}", count_u32(ints[0..4000], 3), count_u32_wide(ints[0..3999], 3), count_f64(floats[0..3996], 4.0));
+    println("{} {} {}", count_u32(ints[0..15], 3), count_u32_wide(ints[0..16], 3), count_f64(floats[0..0], 4.0));
+    return bad;
+}
+)";
+
+// A release build keeps those sums in lane accumulators (`lir::loops` `count_lanes`); a debug build
+// counts each iteration. Both give the same counts, and the counts of equal elements are the elements'.
+// On x86-64 the baseline's code runs too (the run-time copies off).
+@test(timeout = 300)
+fn mask_counts_summed_in_loops_match() {
+    let d = h::diff_build(MASK_COUNTS, ["--profile=debug"]);
+    let r = h::diff_build(MASK_COUNTS, ["--profile=release"]);
+    assert(d.built && r.built, "the program builds");
+    let m = h::same_runs(&d, &r, [""]);
+    if m.len() != 0 {
+        eprintln("debug and release: {}", m.as_str());
+    }
+    assert(m.len() == 0, "a release build counts as a debug build");
+    assert(h::diff_run(&r, "").exit == 0, "the count of equal elements is their count");
+    if ARCH == Arch::X86_64 {
+        let s = h::diff_build(MASK_COUNTS, ["--profile=release", "--simd-dispatch=off"]);
+        assert(s.built, "the program builds without run-time copies");
+        let n = h::same_runs(&d, &s, [""]);
+        if n.len() != 0 {
+            eprintln("debug and the baseline: {}", n.as_str());
+        }
+        assert(n.len() == 0, "the baseline's code counts as a debug build");
+    }
+}
+
 @test
 fn operator_misuse_is_diagnosed() {
     let main = "\nfn main() i32 {\n    return 0;\n}\n";

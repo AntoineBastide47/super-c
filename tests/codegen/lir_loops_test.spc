@@ -2057,6 +2057,700 @@ b3(v14: i32):
     }
 }
 
+// Partial unrolling alone, within 64 instructions: 4 copies of a body of up to 16.
+const UNROLL: lu::Budgets = lu::Budgets {
+    peel: 0,
+    partial: 64,
+    version: 0,
+    version_checks: u32::MAX,
+    unswitch: 0,
+    rotate: 0,
+    vector: 0,
+    interleave: 0,
+    fin: 0,
+};
+
+// A counted loop whose counter steps up by a constant other than 1 unrolls partially too. The guard
+// counts the iterations before the test first fails, `(n - i0 - 1) / c + 1`: a shift for a power of 2, a
+// division otherwise, with a signed test, an unsigned one and `!=`. The loop runs the rest, also where an
+// 8-bit counter wraps past its bound and runs on (`narrow`: from 20 by 60 below 250 the unrolled loop's
+// end is 260, which is 4), and a counter that steps down under `<` stays as it is. Each trip count from
+// none to more than 2 unrolled iterations, with bounds between two steps, runs as before.
+@test
+fn a_loop_that_steps_by_a_constant_unrolls_partially() {
+    let text = M"(lir ptr 8
+sym @by3 fn global
+sym @by16 fn global
+sym @narrow fn global
+sym @ne4 fn global
+sym @down fn global
+fn @by3
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 3
+  jmp b1(v0, v0)
+b1(v3: i64, v4: i64):
+  v5 = icmp.slt v3, v1
+  br v5, b2, b3
+b2:
+  v6 = mul.i64 v4, v4
+  v7 = xor.i64 v6, v3
+  v8 = add.i64 v3, v2
+  jmp b1(v8, v7)
+b3:
+  ret v4
+fn @by16
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 16
+  jmp b1(v0, v0)
+b1(v3: i64, v4: i64):
+  v5 = icmp.ult v3, v1
+  br v5, b2, b3
+b2:
+  v6 = mul.i64 v4, v4
+  v7 = xor.i64 v6, v3
+  v8 = add.i64 v3, v2
+  jmp b1(v8, v7)
+b3:
+  ret v4
+fn @narrow
+  sig (i8, i8) -> i32
+b0(v0: i8, v1: i8):
+  v2 = iconst.i8 60
+  v3 = iconst.i32 1
+  jmp b1(v0, v3)
+b1(v4: i8, v5: i32):
+  v6 = icmp.ult v4, v1
+  br v6, b2, b3
+b2:
+  v7 = zext.i32 v4
+  v8 = mul.i32 v5, v5
+  v9 = add.i32 v8, v7
+  v10 = add.i8 v4, v2
+  jmp b1(v10, v9)
+b3:
+  ret v5
+fn @ne4
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 4
+  v3 = iconst.i32 7
+  jmp b1(v1, v3)
+b1(v4: i32, v5: i32):
+  v6 = icmp.ne v4, v0
+  br v6, b2, b3
+b2:
+  v7 = mul.i32 v5, v5
+  v8 = sub.i32 v7, v4
+  v9 = add.i32 v4, v2
+  jmp b1(v9, v8)
+b3:
+  ret v5
+fn @down
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 -2
+  jmp b1(v0, v0)
+b1(v3: i64, v4: i64):
+  v5 = icmp.slt v3, v1
+  br v5, b2, b3
+b2:
+  v6 = mul.i64 v4, v4
+  v7 = xor.i64 v6, v3
+  v8 = add.i64 v3, v2
+  jmp b1(v8, v7)
+b3:
+  ret v4
+)";
+    let (before, after) = optimized(text, UNROLL);
+    let t3 = text_of(&after, "by3");
+    // The division by 3 is a high product (`opt::divide`).
+    assert(count(&t3, "xor.i64") == 5 && count(&t3, "mulhu.i64") == 1, t3.as_str());
+    let t16 = text_of(&after, "by16");
+    assert(count(&t16, "mul.i64") == 5 && count(&t16, "lshr.i64") == 1 && !t16.contains("mulhu"), t16.as_str());
+    let tn = text_of(&after, "narrow");
+    assert_eq(count(&tn, "mul.i32"), 5);
+    let te = text_of(&after, "ne4");
+    assert_eq(count(&te, "mul.i32"), 5);
+    let td = text_of(&after, "down");
+    assert_eq(count(&td, "mul.i64"), 1);
+    let neg: u64 = 0xFFFFFFFFFFFFFFF9;
+    let starts: [u64; 3] = [0, 2, neg];
+    // From 0 by 3: 0, 1, 3, 4, 5, 8 and 9 iterations, and bounds between two steps.
+    let ends: [u64; 9] = [0, 1, 9, 10, 12, 13, 15, 24, 25];
+    for s in starts {
+        for n in ends {
+            let args: [u64; 2] = [s, n];
+            same_outcome(&before, &after, "by3", args, run_value(&before, "by3", args), false);
+        }
+    }
+    // By 16 from 0 or 5: 0, 1, 3, 4, 5 and 9 iterations.
+    let ends16: [u64; 8] = [0, 1, 16, 48, 49, 64, 80, 140];
+    for s in 0..2u64 {
+        for n in ends16 {
+            let args: [u64; 2] = [s * 5, n];
+            same_outcome(&before, &after, "by16", args, run_value(&before, "by16", args), false);
+        }
+    }
+    let narrow: [[u64; 2]; 5] = [[0, 250], [20, 250], [10, 250], [200, 250], [250, 20]];
+    for args in narrow {
+        same_outcome(&before, &after, "narrow", args, run_value(&before, "narrow", args), false);
+    }
+    let ends4: [u64; 6] = [0, 4, 12, 16, 20, 36];
+    for n in ends4 {
+        let args: [u64; 1] = [n];
+        same_outcome(&before, &after, "ne4", args, run_value(&before, "ne4", args), false);
+    }
+}
+
+// `r = r OP x` over a counter that steps by 2 from 0 below the first argument, `x` the counter times a
+// constant or-ed with `mask` (0: the product itself), `r` from the second argument.
+fn reduced(op: str, mask: i32) String {
+    return format(
+        M"(lir ptr 8
+sym @r fn global
+fn @r
+  sig (i64, i32) -> i32
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 -1640531527
+  v5 = iconst.i32 {}
+  jmp b1(v2, v1)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v6
+  v10 = mul.i32 v9, v4
+  v11 = or.i32 v10, v5
+  v12 = {}.i32 v11, v7
+  v13 = add.i64 v6, v3
+  jmp b1(v13, v12)
+b3:
+  ret v7
+)",
+        mask,
+        op,
+    );
+}
+
+// The copies of an unrolled loop each keep an accumulator of their own for a reduction, and a block on
+// the unrolled loop's exit combines them: 4 copies, 3 combinations and the loop's own. A sum and an `xor`
+// start the other accumulators at 0; an `and`, an `or`, a minimum and a maximum (a select on a comparison,
+// either way round) start them at the accumulator's own start. Every count and start gives the loop's bits.
+@test
+fn an_unrolled_reduction_keeps_an_accumulator_per_copy() {
+    let ops: [str; 4] = ["add", "xor", "and", "or"];
+    let masks: [i32; 4] = [0, 0, -987136, 0];
+    let starts: [u64; 3] = [0, 0xFFFFFFFF, 0x1234ABCD];
+    let counts: [u64; 7] = [0, 2, 6, 8, 10, 17, 40];
+    for k in 0..4usize {
+        let src = reduced(unsafe ops[k], unsafe masks[k]);
+        let (before, after) = optimized(&src, UNROLL);
+        let t = text_of(&after, "r");
+        let pat = format("= {}.i32", unsafe ops[k]);
+        assert(count(&t, pat.as_str()) == 8 && count(&t, "= mul.i32") == 5, t.as_str());
+        for s in starts {
+            for n in counts {
+                let args: [u64; 2] = [n, s];
+                same_outcome(&before, &after, "r", args, run_value(&before, "r", args), false);
+            }
+        }
+    }
+    let text = M"(lir ptr 8
+sym @lo fn global
+sym @hi fn global
+fn @lo
+  sig (i64, i32) -> i32
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 -1640531527
+  jmp b1(v2, v1)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v5
+  v9 = mul.i32 v8, v4
+  v10 = icmp.slt v9, v6
+  v11 = select.i32 v10, v9, v6
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+fn @hi
+  sig (i64, i32) -> i32
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 -1640531527
+  jmp b1(v2, v1)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v5
+  v9 = mul.i32 v8, v4
+  v10 = icmp.ule v6, v9
+  v11 = select.i32 v10, v9, v6
+  v12 = add.i64 v5, v3
+  jmp b1(v12, v11)
+b3:
+  ret v6
+)";
+    let (before, after) = optimized(text, UNROLL);
+    let names: [str; 2] = ["lo", "hi"];
+    for name in names {
+        let t = text_of(&after, name);
+        assert(count(&t, "select.i32") == 8 && count(&t, "mul.i32") == 5, t.as_str());
+        for s in starts {
+            for n in counts {
+                let args: [u64; 2] = [n, s];
+                same_outcome(&before, &after, name, args, run_value(&before, name, args), false);
+            }
+        }
+    }
+}
+
+// Vector accumulators split too, one register each: a wrapping sum, an `xor`, a signed minimum and an
+// unsigned maximum of integer lanes, 4 copies where the target has 16 registers for the accumulators, 2
+// where it has 8 (`Package.vec_accs`).
+@test
+fn unrolled_vector_reductions_split_within_the_registers() {
+    let text = M"(lir ptr 8
+sym @vi fn global
+fn @vi
+  sig (i64, i32) -> i64
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 4
+  v4 = iconst.i32 -1640531527
+  v5 = wconst.v4i32 0xfffffffb00010000, 0x0000004d7fff0003
+  v6 = splat.v4i32 v1
+  jmp b1(v2, v6, v6, v6, v6)
+b1(v7: i64, v8: v4i32, v9: v4i32, v10: v4i32, v11: v4i32):
+  v12 = icmp.ult v7, v0
+  br v12, b2, b3
+b2:
+  v13 = trunc.i32 v7
+  v14 = mul.i32 v13, v4
+  v15 = splat.v4i32 v14
+  v16 = sub.v4i32 v15, v5
+  v17 = add.v4i32 v8, v16
+  v18 = xor.v4i32 v16, v9
+  v19 = vop.min.s.v4i32 (v10, v16)
+  v20 = vop.max.v4i32 (v16, v11)
+  v21 = add.i64 v7, v3
+  jmp b1(v21, v17, v18, v19, v20)
+b3:
+  v22 = vop.reduce_add.i32 (v8)
+  v23 = vop.reduce_add.i32 (v9)
+  v24 = vop.reduce_add.i32 (v10)
+  v25 = vop.reduce_add.i32 (v11)
+  v26 = iconst.i32 31
+  v27 = mul.i32 v22, v26
+  v28 = add.i32 v27, v23
+  v29 = mul.i32 v28, v26
+  v30 = add.i32 v29, v24
+  v31 = mul.i32 v30, v26
+  v32 = add.i32 v31, v25
+  v33 = zext.i64 v32
+  ret v33
+)";
+    let accs: [u32; 2] = [16, 8];
+    for a in accs {
+        let (before, after) = optimized_min(text, UNROLL, 16, 0, a, false, VMIN_EXACT);
+        let t = text_of(&after, "vi");
+        // The copies, the combinations of their accumulators (one fewer), and the loop's own.
+        let n: u32 = if a == 16 {
+            8
+        } else {
+            4
+        };
+        assert(
+            count(&t, "= add.v4i32") == n && count(&t, "= xor.v4i32") == n && count(&t, "= vop.min.s.v4i32") == n && count(
+                &t,
+                "= vop.max.v4i32",
+            ) == n,
+            t.as_str(),
+        );
+        let starts: [u64; 3] = [0, 0x7FFFFFFF, 0x80000001];
+        let counts: [u64; 7] = [0, 4, 12, 16, 20, 33, 80];
+        for s in starts {
+            for c in counts {
+                let args: [u64; 2] = [c, s];
+                same_outcome(&before, &after, "vi", args, run_value(&before, "vi", args), false);
+            }
+        }
+    }
+}
+
+// The minimum and the maximum of float lanes over `x` from the first argument's element, 4 at a time
+// below the second argument, the accumulators from the bits of the last two; `fmin` and `fmax` the
+// operations' flags, `ops` the minimum's operands, `xv` the maximum's second one (`v15` the loaded lanes,
+// `v16` them quieted). `x` holds numbers, zeros of both signs, infinities and NaNs of both kinds, from
+// element 32 on only zeros and NaNs, from 48 on only NaNs.
+fn extremes(fmin: str, ops: str, fmax: str, xv: str) String {
+    return format(
+        M"(lir ptr 8
+sym @fm fn global noinline
+sym @drive fn global
+sym @x data global
+fn @fm
+  sig (ptr, i64, i32, i32) -> i64
+b0(v0: ptr, v1: i64, v2: i32, v3: i32):
+  v4 = iconst.i64 0
+  v5 = iconst.i64 4
+  v6 = bitcast.f32 v2
+  v7 = bitcast.f32 v3
+  v8 = splat.v4f32 v6
+  v9 = splat.v4f32 v7
+  jmp b1(v4, v8, v9)
+b1(v10: i64, v11: v4f32, v12: v4f32):
+  v13 = icmp.ult v10, v1
+  br v13, b2, b3
+b2:
+  v14 = ptradd v0, v10 * 4
+  v15 = load.v4f32 v14 align 2
+  v16 = vop.max.num.v4f32 (v15, v15)
+  v17 = vop.min{}.v4f32 ({})
+  v18 = vop.max{}.v4f32 (v12, {})
+  v19 = add.i64 v10, v5
+  jmp b1(v19, v17, v18)
+b3:
+  v20 = bitcast.v4i32 v11
+  v21 = bitcast.v4i32 v12
+  v22 = wconst.v4i32 0x0000000300000001, 0x0000000700000005
+  v23 = mul.v4i32 v20, v22
+  v24 = vop.reduce_add.i32 (v23)
+  v25 = mul.v4i32 v21, v22
+  v26 = vop.reduce_add.i32 (v25)
+  v27 = zext.i64 v24
+  v28 = zext.i64 v26
+  v29 = iconst.i64 32
+  v30 = shl.i64 v27, v29
+  v31 = or.i64 v30, v28
+  ret v31
+fn @drive
+  sig (i64, i64, i32, i32) -> i64
+b0(v0: i64, v1: i64, v2: i32, v3: i32):
+  v4 = symaddr @x
+  v5 = ptradd v4, v0 * 4
+  v6 = call.i64 @fm(v5, v1, v2, v3) : (ptr, i64, i32, i32) -> i64
+  ret v6
+data @x size 256 align 4 bytes 0000c03f000010c000000000000000800000c07f00004040000030c10000a07f0000803e00000080000000000000f0402301c0ff000000bf000010410100807f0000807f000000400100c07f000060c0000000800000000000004041000040c10000a07f00008040000080ff0000c07f0000003e000000be000000000000008000000000000000800000c07f0000000000000080000000800000a07f0000000000000000000000002301c0ff0000008000000080000000000100807f000000800000c07f0000a07f2301c0ff0100c07f0100807f0000c07f0000c07f0000a07f2301c0ff2301c0ff0100c07f0100807f0000a07f0000c07f0100c07f2301c0ff
+)",
+        fmin,
+        ops,
+        fmax,
+        xv,
+    );
+}
+
+// `extremes` optimized for a target that computes minimums as `vminnum` gives: `mins` and `maxs` of the
+// two operations are left (8: an accumulator per copy, 4 copies, 3 combinations and the loop's own; 5: the
+// copies chained), and every window of `x` gives the loop's bits from the starts `lo` and `hi`.
+fn extremes_split(fmin: str, ops: str, fmax: str, xv: str, vminnum: u8, mins: u32, maxs: u32, lo: u64, hi: u64) {
+    let src = extremes(fmin, ops, fmax, xv);
+    let (before, after) = optimized_min(&src, UNROLL, 16, 0, 8, false, vminnum);
+    let t = text_of(&after, "fm");
+    let pmin = format("= vop.min{}.v4f32", fmin);
+    let pmax = format("= vop.max{}.v4f32", fmax);
+    assert(count(&t, pmin.as_str()) == mins && count(&t, pmax.as_str()) == maxs, t.as_str());
+    let offs: [u64; 5] = [0, 3, 30, 32, 48];
+    let counts: [u64; 7] = [0, 4, 12, 16, 20, 30, 32];
+    for o in offs {
+        for n in counts {
+            if o + (n + 3) / 4 * 4 <= 64 {
+                let args: [u64; 4] = [o, n, lo, hi];
+                same_outcome(&before, &after, "drive", args, run_value(&before, "drive", args), false);
+            }
+        }
+    }
+}
+
+// A minimum or maximum of float lanes splits only where every order gives the same bits: the accumulator
+// is operand 0 and holds no NaN (`.number`), so each copy's accumulator is a number, the least or greatest
+// of what it took. C's (`.num`) on a target whose instruction gives a NaN for a signaling one
+// (VMIN_QUIET) needs the other operand quieted. Without the number flag, or with the accumulator second,
+// the copies chain. NaNs, signed zeros and infinities at every offset give the loop's bits.
+@test
+fn unrolled_float_extremes_split_where_no_order_shows() {
+    let inf: u64 = 0x7F800000;
+    let ninf: u64 = 0xFF800000;
+    let nan: u64 = 0x7FC00000;
+    let c = ".num.number.first";
+    extremes_split(c, "v11, v15", c, "v15", VMIN_NUM, 8, 8, inf, ninf);
+    extremes_split(".number", "v11, v15", ".number", "v15", VMIN_EXACT, 8, 8, inf, ninf);
+    extremes_split(c, "v11, v16", c, "v16", VMIN_QUIET, 8, 8, inf, ninf);
+    extremes_split(c, "v11, v15", c, "v15", VMIN_QUIET, 5, 5, inf, ninf);
+    // The minimum's accumulators split, the maximum's value chains.
+    extremes_split(c, "v11, v15", ".num.first", "v15", VMIN_NUM, 8, 5, inf, ninf);
+    extremes_split(".num.first", "v11, v15", ".num.first", "v15", VMIN_NUM, 5, 5, nan, nan);
+    extremes_split("", "v15, v11", "", "v15", VMIN_EXACT, 5, 5, nan, ninf);
+}
+
+// A float sum and a float product split only where the function reassociates (FM_ASSOC): the other
+// accumulators start at -0.0 and 1.0. Without the flag the copies chain. The terms are small integers,
+// so every order gives the same bits.
+@test
+fn unrolled_float_sums_split_only_where_reassociation_is_allowed() {
+    let text = M"(lir ptr 8
+sym @fs fn global
+fn @fs
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i64 4
+  v5 = iconst.i64 1
+  v6 = sitofp.f64 v1
+  jmp b1(v2, v6, v6)
+b1(v7: i64, v8: f64, v9: f64):
+  v10 = icmp.ult v7, v0
+  br v10, b2, b3
+b2:
+  v11 = sitofp.f64 v7
+  v12 = fadd.f64 v8, v11
+  v13 = and.i64 v7, v4
+  v14 = or.i64 v13, v5
+  v15 = sitofp.f64 v14
+  v16 = fmul.f64 v15, v9
+  v17 = add.i64 v7, v3
+  jmp b1(v17, v12, v16)
+b3:
+  v18 = fsub.f64 v8, v9
+  v19 = bitcast.i64 v18
+  ret v19
+)";
+    let flags: [u8; 2] = [FM_ASSOC, 0];
+    for fm in flags {
+        let (before, after) = optimized_fm(text, UNROLL, false, fm);
+        let t = text_of(&after, "fs");
+        let n: u32 = if fm != 0 {
+            8
+        } else {
+            5
+        };
+        assert(count(&t, "= fadd.f64") == n && count(&t, "= fmul.f64") == n, t.as_str());
+        let ids = t.contains("0x8000000000000000") && t.contains("0x3ff0000000000000");
+        assert(ids == (fm != 0), t.as_str());
+        let starts: [u64; 3] = [0, 3, 0xFFFFFFFFFFFFFFFE];
+        let counts: [u64; 7] = [0, 2, 6, 8, 10, 17, 40];
+        for s in starts {
+            for c in counts {
+                let args: [u64; 2] = [c, s];
+                same_outcome(&before, &after, "fs", args, run_value(&before, "fs", args), false);
+            }
+        }
+    }
+}
+
+// A parameter the body reads other than by its one update is no reduction: `both`'s sum, which the `xor`
+// reads, chains through the 4 copies (the `xor` of its values splits). A loop that leaves from its body
+// with the sum does not unroll (`out`). Float values the copies chain take two registers each: `chain`
+// unrolls where the target's registers for them hold its two, not where they hold one.
+@test
+fn an_unrolled_loop_chains_what_is_no_reduction() {
+    let text = M"(lir ptr 8
+sym @both fn global
+sym @out fn global
+sym @chain fn global
+fn @both
+  sig (i64, i32) -> i32
+b0(v0: i64, v1: i32):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 -1640531527
+  jmp b1(v2, v1, v1)
+b1(v5: i64, v6: i32, v7: i32):
+  v8 = icmp.ult v5, v0
+  br v8, b2, b3
+b2:
+  v9 = trunc.i32 v5
+  v10 = mul.i32 v9, v4
+  v11 = add.i32 v6, v10
+  v12 = xor.i32 v7, v6
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v11, v12)
+b3:
+  v14 = sub.i32 v6, v7
+  ret v14
+fn @out
+  sig (i64, i64) -> i32
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = iconst.i32 -1640531527
+  v5 = iconst.i32 0
+  jmp b1(v2, v5)
+b1(v6: i64, v7: i32):
+  v8 = icmp.ult v6, v0
+  br v8, b2, b3(v7)
+b2:
+  v9 = trunc.i32 v6
+  v10 = mul.i32 v9, v4
+  v11 = add.i32 v7, v10
+  v12 = add.i64 v6, v3
+  v13 = icmp.ult v12, v1
+  br v13, b1(v12, v11), b3(v11)
+b3(v14: i32):
+  ret v14
+fn @chain
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = sitofp.f64 v1
+  jmp b1(v2, v4, v4)
+b1(v5: i64, v6: f64, v7: f64):
+  v8 = icmp.ult v5, v0
+  br v8, b2, b3
+b2:
+  v9 = sitofp.f64 v5
+  v10 = fmul.f64 v6, v9
+  v11 = fadd.f64 v10, v7
+  v12 = fsub.f64 v7, v6
+  v13 = add.i64 v5, v3
+  jmp b1(v13, v11, v12)
+b3:
+  v14 = fadd.f64 v6, v7
+  v15 = bitcast.i64 v14
+  ret v15
+)";
+    let (before, after) = optimized(text, UNROLL);
+    let tb = text_of(&after, "both");
+    assert(count(&tb, "= add.i32") == 5 && count(&tb, "= xor.i32") == 8, tb.as_str());
+    let to = text_of(&after, "out");
+    assert_eq(count(&to, "= mul.i32"), 1);
+    let counts: [u64; 7] = [0, 2, 6, 8, 10, 17, 40];
+    for n in counts {
+        let args: [u64; 2] = [n, 7];
+        same_outcome(&before, &after, "both", args, run_value(&before, "both", args), false);
+        let lim: [u64; 2] = [n, 12];
+        same_outcome(&before, &after, "out", lim, run_value(&before, "out", lim), false);
+    }
+    let accs: [u32; 2] = [4, 2];
+    for a in accs {
+        let (b2, a2) = optimized_min(text, UNROLL, 16, 0, a, false, VMIN_EXACT);
+        let tc = text_of(&a2, "chain");
+        let n: u32 = if a == 4 {
+            5
+        } else {
+            1
+        };
+        assert_eq(count(&tc, "= fmul.f64"), n);
+        for c in counts {
+            let args: [u64; 2] = [c, 3];
+            same_outcome(&b2, &a2, "chain", args, run_value(&b2, "chain", args), false);
+        }
+    }
+}
+
+// A vectorized loop's guard tests the count of iterations by a branch of its own, and checks that the
+// stored range is apart from the loaded one in a block that branch alone enters: with too few iterations
+// no range is computed. `drive` runs `map` from `w` into `w` at an offset: ranges that overlap run the
+// loop, and every count and offset gives the loop's words.
+@test
+fn a_vector_guard_tests_the_count_before_its_range_checks() {
+    let src = M"(lir ptr 8
+sym @map fn global noinline
+sym @drive fn global
+sym @w data global
+fn @map
+  sig (ptr, ptr, i64) -> void
+b0(v0: ptr, v1: ptr, v2: i64):
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i32 3
+  jmp b1(v3)
+b1(v6: i64):
+  v7 = icmp.ult v6, v2
+  br v7, b2, b3
+b2:
+  v8 = ptradd v0, v6 * 4
+  v9 = load.i32 v8 align 2
+  v10 = mul.i32 v9, v5
+  v11 = ptradd v1, v6 * 4
+  store v10, v11 align 2
+  v12 = add.i64 v6, v4
+  jmp b1(v12)
+b3:
+  ret
+fn @drive
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = symaddr @w
+  v3 = ptradd v2, v1 * 4
+  call @map(v2, v3, v0) : (ptr, ptr, i64) -> void
+  v4 = iconst.i64 0
+  v5 = iconst.i64 1
+  v6 = iconst.i64 25
+  v7 = iconst.i64 31
+  jmp b1(v4, v4)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v6
+  br v10, b2, b3
+b2:
+  v11 = ptradd v2, v8 * 4
+  v12 = load.i32 v11 align 2
+  v13 = zext.i64 v12
+  v14 = mul.i64 v9, v7
+  v15 = add.i64 v14, v13
+  v16 = add.i64 v8, v5
+  jmp b1(v16, v15)
+b3:
+  ret v9
+data @w size 100 align 2 bytes 0100000002000000030000000400000005000000060000000700000008000000090000000a0000000b0000000c0000000d0000000e0000000f00000010000000110000001200000013000000140000001500000016000000170000001800000019000000
+)";
+    let (before, after) = optimized(src, VECTOR);
+    let b = &after.bodies[after.syms[after.find_symbol("map") as usize].def as usize];
+    // The block of the range checks, its predecessors, and the last of them.
+    let mut checks = NONE;
+    for k in 0..b.blocks.len() as u32 {
+        let bk = b.blocks[k as usize];
+        for i in bk.start..bk.start + bk.len {
+            let t = b.insts[i as usize];
+            if t.op == O_ICMP && t.aux == C_ULE && b.type_of(t.a) == T_PTR {
+                assert(checks == NONE || checks == k, "the range checks are in one block");
+                checks = k;
+            }
+        }
+    }
+    let t = text_of(&after, "map");
+    assert(checks != NONE && t.contains("mul.v4i32"), t.as_str());
+    let mut preds: u32 = 0;
+    let mut guard = NONE;
+    let mut edges = Vector::<u32>::new();
+    for k in 0..b.blocks.len() as u32 {
+        b.succ_edges(term(b, k), &mut edges);
+        for e in 0..edges.len() {
+            if b.edge_target(edges[e]) == checks {
+                preds += 1;
+                guard = k;
+            }
+        }
+    }
+    assert(preds == 1, t.as_str());
+    // That predecessor branches on the count: into the checks when the vectors have iterations.
+    let tg = term(b, guard);
+    assert(tg.op == O_BR && b.edge_target(tg.b) == checks, t.as_str());
+    let c = b.insts[tg.a as usize];
+    assert(c.op == O_ICMP && c.aux == C_NE && b.type_of(c.a) == T_I64, t.as_str());
+    let counts: [u64; 7] = [0, 1, 3, 4, 7, 8, 20];
+    let offs: [u64; 5] = [0, 1, 2, 4, 5];
+    for n in counts {
+        for o in offs {
+            let args: [u64; 2] = [n, o];
+            same_outcome(&before, &after, "drive", args, run_value(&before, "drive", args), false);
+        }
+    }
+}
+
 // A loop whose lanes pick by a comparison vectorizes: a float `max(x, 0)` map (`vcmp` of floats, `vsel`),
 // and an integer sum of the values inside a range else the bound (two masks `and`ed, a select into a
 // reduction).
@@ -3345,6 +4039,503 @@ b0(v0: i64, v1: i64):
     let (b2, a2) = optimized(src, NO_LOOPS);
     let _ = b2;
     assert(!text_of(&a2, "sum").contains("v2i64"), "no vectors without the budget");
+}
+
+// Loops that add the count of a mask's set lanes to an integer each iteration, the masks comparisons of
+// the counter's bits with constants (a lane of all ones counts every iteration, so its accumulator wraps
+// when an inner run is one iteration too long). `bytes`: byte lanes, a bound the step need not divide.
+// `quads`: four masks summed first, the bound a multiple of the step. `words`: 2-byte lanes, a step of 1.
+// `ints`: a 4-byte counter and sum, the count through 8 bytes. `fours`: lanes as wide as their sum. `two`:
+// two sums of different lanes, the second taken from its start. `signed`, `ne`: a `<s` and a `!=` test.
+// `range`: a mask and another's complement.
+const LANE_COUNTS: str = M"(lir ptr 8
+sym @range fn global
+sym @bytes fn global
+sym @quads fn global
+sym @words fn global
+sym @ints fn global
+sym @fours fn global
+sym @two fn global
+sym @signed fn global
+sym @ne fn global
+fn @bytes
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 16
+  v4 = iconst.i64 4
+  v5 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  jmp b1(v0, v2)
+b1(v6: i64, v7: i64):
+  v8 = icmp.ult v6, v1
+  br v8, b2, b3
+b2:
+  v9 = lshr.i64 v6, v4
+  v10 = trunc.i8 v9
+  v11 = splat.v16i8 v10
+  v12 = vcmp.ule.v16i8 v11, v5
+  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v6, v3
+  jmp b1(v16, v15)
+b3:
+  ret v7
+fn @quads
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 64
+  v3 = iconst.i64 -64
+  v4 = iconst.i64 6
+  v5 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  v6 = wconst.v16i8 0xff00ff00ff00ff00, 0x0102030405060708
+  v7 = and.i64 v0, v3
+  jmp b1(v1, v1)
+b1(v8: i64, v9: i64):
+  v10 = icmp.ult v8, v7
+  br v10, b2, b3
+b2:
+  v11 = lshr.i64 v8, v4
+  v12 = trunc.i8 v11
+  v13 = splat.v16i8 v12
+  v14 = vcmp.ule.v16i8 v13, v5
+  v15 = vcmp.eq.v16i8 v13, v6
+  v16 = vcmp.ugt.v16i8 v13, v6
+  v17 = vcmp.ult.v16i8 v13, v5
+  v18 = add.v16i8 v14, v16
+  v19 = add.v16i8 v15, v17
+  v20 = add.v16i8 v18, v19
+  v21 = vop.reduce_add.i8 (v20)
+  v22 = sext.i16 v21
+  v23 = neg.i16 v22
+  v24 = zext.i64 v23
+  v25 = add.i64 v9, v24
+  v26 = add.i64 v8, v2
+  jmp b1(v26, v25)
+b3:
+  ret v9
+fn @words
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = wconst.v8i16 0xffff7fff00010000, 0xffff00ff1234fffe
+  jmp b1(v1, v1)
+b1(v4: i64, v5: i64):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = trunc.i16 v4
+  v8 = splat.v8i16 v7
+  v9 = vcmp.ule.v8i16 v8, v3
+  v10 = vop.reduce_add.i16 (v9)
+  v11 = sext.i32 v10
+  v12 = neg.i32 v11
+  v13 = zext.i64 v12
+  v14 = add.i64 v5, v13
+  v15 = add.i64 v4, v2
+  jmp b1(v15, v14)
+b3:
+  ret v5
+fn @ints
+  sig (i32) -> i32
+b0(v0: i32):
+  v1 = iconst.i32 0
+  v2 = iconst.i32 2
+  v3 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  jmp b1(v1, v1)
+b1(v4: i32, v5: i32):
+  v6 = icmp.ult v4, v0
+  br v6, b2, b3
+b2:
+  v7 = trunc.i8 v4
+  v8 = splat.v16i8 v7
+  v9 = vcmp.ule.v16i8 v8, v3
+  v10 = vop.reduce_add.i8 (v9)
+  v11 = sext.i64 v10
+  v12 = neg.i64 v11
+  v13 = trunc.i32 v12
+  v14 = add.i32 v5, v13
+  v15 = add.i32 v4, v2
+  jmp b1(v15, v14)
+b3:
+  ret v5
+fn @fours
+  sig (i64) -> i32
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 4
+  v3 = iconst.i32 0
+  v4 = wconst.v4i32 0x0000000300000000, 0xffffffff00000100
+  jmp b1(v1, v3)
+b1(v5: i64, v6: i32):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = trunc.i32 v5
+  v9 = splat.v4i32 v8
+  v10 = vcmp.ule.v4i32 v9, v4
+  v11 = vop.reduce_add.i32 (v10)
+  v12 = sub.i32 v6, v11
+  v13 = add.i64 v5, v2
+  jmp b1(v13, v12)
+b3:
+  ret v6
+fn @two
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 1000000
+  v4 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  v5 = wconst.v8i16 0xffff7fff00010000, 0xffff00ff1234fffe
+  v6 = iconst.i64 20
+  jmp b1(v1, v1, v3)
+b1(v7: i64, v8: i64, v9: i64):
+  v10 = icmp.ult v7, v0
+  br v10, b2, b3
+b2:
+  v11 = trunc.i8 v7
+  v12 = splat.v16i8 v11
+  v13 = vcmp.ule.v16i8 v12, v4
+  v14 = vop.reduce_add.i8 (v13)
+  v15 = sext.i64 v14
+  v16 = sub.i64 v8, v15
+  v17 = trunc.i16 v7
+  v18 = splat.v8i16 v17
+  v19 = vcmp.ult.v8i16 v18, v5
+  v20 = vop.reduce_add.i16 (v19)
+  v21 = sext.i64 v20
+  v22 = add.i64 v9, v21
+  v23 = add.i64 v7, v2
+  jmp b1(v23, v16, v22)
+b3:
+  v24 = shl.i64 v8, v6
+  v25 = xor.i64 v24, v9
+  ret v25
+fn @signed
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 2
+  v4 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  jmp b1(v0, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.slt v5, v1
+  br v7, b2, b3
+b2:
+  v8 = trunc.i8 v5
+  v9 = splat.v16i8 v8
+  v10 = vcmp.ule.v16i8 v9, v4
+  v11 = vop.reduce_add.i8 (v10)
+  v12 = sext.i64 v11
+  v13 = sub.i64 v6, v12
+  v14 = add.i64 v5, v3
+  jmp b1(v14, v13)
+b3:
+  ret v6
+fn @ne
+  sig (i64, i64) -> i64
+b0(v0: i64, v1: i64):
+  v2 = iconst.i64 0
+  v3 = iconst.i64 1
+  v4 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  jmp b1(v0, v2)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ne v5, v1
+  br v7, b2, b3
+b2:
+  v8 = trunc.i8 v5
+  v9 = splat.v16i8 v8
+  v10 = vcmp.ule.v16i8 v9, v4
+  v11 = vop.reduce_add.i8 (v10)
+  v12 = sext.i64 v11
+  v13 = sub.i64 v6, v12
+  v14 = add.i64 v5, v3
+  jmp b1(v14, v13)
+b3:
+  ret v6
+fn @range
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  v4 = wconst.v16i8 0xff00ff00ff00ff00, 0x0102030405060708
+  jmp b1(v1, v1)
+b1(v5: i64, v6: i64):
+  v7 = icmp.ult v5, v0
+  br v7, b2, b3
+b2:
+  v8 = trunc.i8 v5
+  v9 = splat.v16i8 v8
+  v10 = vcmp.ule.v16i8 v9, v3
+  v11 = vcmp.eq.v16i8 v9, v4
+  v12 = not.v16i8 v11
+  v13 = and.v16i8 v10, v12
+  v14 = vop.reduce_add.i8 (v13)
+  v15 = sext.i64 v14
+  v16 = sub.i64 v6, v15
+  v17 = add.i64 v5, v2
+  jmp b1(v17, v16)
+b3:
+  ret v6
+)";
+
+// A sum of mask counts stays in lane accumulators (`count_lanes`): an inner loop adds each mask to a vector,
+// at most as many iterations per run as the lanes count (255 for bytes, 65535 for 2-byte lanes, the bound a
+// constant of that many steps), and a block adds the lanes to the sum by a widening sum between the runs. A
+// loop whose counter cannot pass the bound by part of a step keeps no copy of the `reduce_add` per
+// iteration; lanes as wide as their sum take no bound and no widening sum. Every trip count around a
+// run's most iterations gives the loop's sum.
+@test
+fn sums_of_mask_counts_stay_in_lane_accumulators() {
+    let (b, a) = optimized(LANE_COUNTS, VECTOR);
+    let t = text_of(&a, "bytes");
+    assert(t.contains("iconst.i64 4080") && t.contains("vsumw.v2i64") && t.contains(": v16i8"), t.as_str());
+    assert_eq(count(&t, "vop.reduce_add.i8"), 1);
+    let q = text_of(&a, "quads");
+    assert(q.contains("iconst.i64 16320") && count(&q, ": v16i8") >= 4 && !q.contains("vop.reduce_add.i8"), q.as_str());
+    let w = text_of(&a, "words");
+    assert(w.contains("iconst.i64 65535") && w.contains("vsumw.v2i64") && !w.contains("vop.reduce_add.i16"), w.as_str());
+    let i = text_of(&a, "ints");
+    assert(i.contains("iconst.i32 510") && i.contains("vsumw.v2i64") && i.contains(": v16i8"), i.as_str());
+    let f = text_of(&a, "fours");
+    assert(f.contains(": v4i32") && !f.contains("vsumw") && !f.contains("select"), f.as_str());
+    let two = text_of(&a, "two");
+    assert(two.contains("iconst.i64 255") && two.contains(": v16i8") && two.contains(": v8i16"), two.as_str());
+    assert(text_of(&a, "signed").contains("vsumw.v2i64") && text_of(&a, "ne").contains("vsumw.v2i64"), "the tests");
+    let r = text_of(&a, "range");
+    assert(r.contains("vsumw.v2i64") && count(&r, ": v16i8") >= 1 && !r.contains("vop.reduce_add.i8"), r.as_str());
+    // The iterations: none, one, and around one and two runs of 255.
+    let trips: [u64; 9] = [0, 1, 254, 255, 256, 257, 510, 511, 1000];
+    for n in trips {
+        let whole: [u64; 2] = [0, 16 * n];
+        same_outcome(&b, &a, "bytes", whole, run_value(&b, "bytes", whole), false);
+        // A start and a bound the step does not divide: the loop runs the last iteration.
+        let part: [u64; 2] = [7, 16 * n + 2];
+        same_outcome(&b, &a, "bytes", part, run_value(&b, "bytes", part), false);
+        let one: [u64; 1] = [64 * n + 63];
+        same_outcome(&b, &a, "quads", one, run_value(&b, "quads", one), false);
+        let half: [u64; 1] = [2 * n + 1];
+        same_outcome(&b, &a, "ints", half, run_value(&b, "ints", half), false);
+        let four: [u64; 1] = [4 * n + 3];
+        same_outcome(&b, &a, "fours", four, run_value(&b, "fours", four), false);
+        let each: [u64; 1] = [n];
+        same_outcome(&b, &a, "two", each, run_value(&b, "two", each), false);
+        same_outcome(&b, &a, "range", each, run_value(&b, "range", each), false);
+        let below: [u64; 2] = [0u64.wrapping_sub(2 * n), 5];
+        same_outcome(&b, &a, "signed", below, run_value(&b, "signed", below), false);
+        let from: [u64; 2] = [9, 9 + n];
+        same_outcome(&b, &a, "ne", from, run_value(&b, "ne", from), false);
+    }
+    // A start past the bound runs nothing.
+    let past: [u64; 2] = [48, 16];
+    same_outcome(&b, &a, "bytes", past, 0, false);
+    same_outcome(&b, &a, "signed", past, 0, false);
+    // 2-byte lanes: around one run of 65535.
+    let long: [u64; 3] = [65535, 65536, 65537];
+    for n in long {
+        let each: [u64; 1] = [n];
+        same_outcome(&b, &a, "words", each, run_value(&b, "words", each), false);
+    }
+    let (_, off) = optimized(LANE_COUNTS, NO_LOOPS);
+    assert(!text_of(&off, "bytes").contains("vsumw"), "no lane accumulators without the budget");
+    // With partial unrolling too, the inner loop unrolls as any counted loop (copies of the body and the
+    // loop for the rest), and its accumulators count as before.
+    let (_, un) = optimized(
+        LANE_COUNTS,
+        lu::Budgets {
+            peel: 0,
+            partial: 32,
+            version: 0,
+            version_checks: u32::MAX,
+            unswitch: 0,
+            rotate: 0,
+            vector: 2,
+            interleave: 2,
+            fin: 0,
+        },
+    );
+    let ur = text_of(&un, "range");
+    assert(ur.contains("vsumw.v2i64") && count(&ur, "not.v16i8") >= 3, ur.as_str());
+    for n in trips {
+        let each: [u64; 1] = [n];
+        same_outcome(&b, &un, "range", each, run_value(&b, "range", each), false);
+        same_outcome(&b, &un, "two", each, run_value(&b, "two", each), false);
+    }
+    // A target without widening sums: the lanes widen by halves interleaved with zeros, up to 8 bytes.
+    let (_, z) = optimized_with(LANE_COUNTS, VECTOR, 16, VOPS_ALL, 0, true);
+    let zb = text_of(&z, "bytes");
+    assert(zb.contains("vziplo.v16i8") && zb.contains("vziphi.v4i32") && !zb.contains("vsumw"), zb.as_str());
+    for n in trips {
+        let whole: [u64; 2] = [0, 16 * n];
+        same_outcome(&b, &z, "bytes", whole, run_value(&b, "bytes", whole), false);
+        let each: [u64; 1] = [n];
+        same_outcome(&b, &z, "two", each, run_value(&b, "two", each), false);
+    }
+}
+
+// Loops `count_lanes` leaves, each the loop of `takes` (which it takes) but for one fact: the sum read by
+// another value (`reads`), a zero extension of the negated count (`unsigned`: no count), an exit at the
+// body's end (`leaves`), a step that is no power of 2 (`thirds`), a `reduce_add` of other lanes than a
+// mask's (`plain`), a count two values read (`twice`), and masks of 128 lanes together, whose count's
+// negation no byte holds (`many`).
+@test
+fn other_sums_keep_their_loops() {
+    // Each function: a loop from 0 while `i <u n` of sum `v7` and a second value `v8`; its body follows
+    // the mask `v12` of the counter and defines `v13` to `v18`.
+    let open = M"(
+  sig (i64) -> i64
+b0(v0: i64):
+  v1 = iconst.i64 0
+  v2 = iconst.i64 1
+  v3 = iconst.i64 3
+  v4 = iconst.i64 900
+  v5 = wconst.v16i8 0x8040201003020100, 0x7ffeffffff55aa11
+  jmp b1(v1, v1, v1)
+b1(v6: i64, v7: i64, v8: i64):
+  v9 = icmp.ult v6, v0
+  br v9, b2, b3
+b2:
+  v10 = trunc.i8 v6
+  v11 = splat.v16i8 v10
+  v12 = vcmp.ule.v16i8 v11, v5
+)";
+    let close = M"(b3:
+  v19 = xor.i64 v7, v8
+  ret v19
+)";
+    let bodies: [(str, str); 7] = [
+        (
+            "takes",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v8, v2
+  v17 = add.i64 v6, v2
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+        (
+            "reads",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = xor.i64 v8, v7
+  v17 = add.i64 v6, v2
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+        (
+            "unsigned",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = zext.i64 v13
+  v15 = add.i64 v7, v14
+  v16 = add.i64 v8, v2
+  v17 = add.i64 v6, v2
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+        (
+            "leaves",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v8, v2
+  v17 = add.i64 v6, v2
+  v18 = icmp.ult v15, v4
+  br v18, b1(v17, v15, v16), b3
+)"
+        ),
+        (
+            "thirds",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v8, v2
+  v17 = add.i64 v6, v3
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+        (
+            "plain",
+            M"(  v13 = vop.reduce_add.i8 (v11)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v8, v2
+  v17 = add.i64 v6, v2
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+        (
+            "twice",
+            M"(  v13 = vop.reduce_add.i8 (v12)
+  v14 = sext.i64 v13
+  v15 = sub.i64 v7, v14
+  v16 = add.i64 v8, v14
+  v17 = add.i64 v6, v2
+  v18 = add.i64 v16, v2
+  jmp b1(v17, v15, v18)
+)"
+        ),
+    ];
+    let mut src = String::from_str("lir ptr 8\n");
+    for q in 0..7usize {
+        src.format_into("sym @{} fn global\n", unsafe bodies[q].0);
+    }
+    src.push_str("sym @many fn global\n");
+    for q in 0..7usize {
+        let (name, body) = unsafe bodies[q];
+        src.format_into("fn @{}{}{}{}", name, open, body, close);
+    }
+    src.format_into(
+        "fn @many{}{}",
+        open,
+        M"(  v13 = vcmp.ult.v16i8 v11, v5
+  v14 = vcmp.uge.v16i8 v11, v5
+  v15 = vcmp.ugt.v16i8 v11, v5
+  v16 = vcmp.eq.v16i8 v11, v5
+  v17 = vcmp.ne.v16i8 v11, v5
+  v18 = vcmp.slt.v16i8 v11, v5
+  v19 = vcmp.sle.v16i8 v11, v5
+  v20 = add.v16i8 v12, v13
+  v21 = add.v16i8 v14, v15
+  v22 = add.v16i8 v16, v17
+  v23 = add.v16i8 v18, v19
+  v24 = add.v16i8 v20, v21
+  v25 = add.v16i8 v22, v23
+  v26 = add.v16i8 v24, v25
+  v27 = vop.reduce_add.i8 (v26)
+  v28 = sext.i64 v27
+  v29 = sub.i64 v7, v28
+  v30 = add.i64 v8, v2
+  v31 = add.i64 v6, v2
+  jmp b1(v31, v29, v30)
+b3:
+  v32 = xor.i64 v7, v8
+  ret v32
+)",
+    );
+    let (b, a) = optimized(&src, VECTOR);
+    let names: [str; 8] = ["takes", "reads", "unsigned", "leaves", "thirds", "plain", "twice", "many"];
+    let ns: [u64; 4] = [0, 1, 300, 777];
+    for q in 0..8usize {
+        let name = unsafe names[q];
+        let t = text_of(&a, name);
+        assert_eq(t.contains("vsumw") && t.contains(": v16i8"), q == 0);
+        assert_eq(!t.contains("vsumw") && !t.contains(": v16i8"), q != 0);
+        for n in ns {
+            let args: [u64; 1] = [n];
+            same_outcome(&b, &a, name, args, run_value(&b, name, args), false);
+        }
+    }
 }
 
 // The value function `name` of `p` returns on `args`.
@@ -5322,6 +6513,109 @@ b3:
     }
 }
 
+// The count of a comparison of 16 byte lanes on a target without a movemask: the bits' sum widens the
+// lane masks to 2 bytes (`opt` `mask_sum`), and the count sums the comparison's own byte lanes
+// (`mask_count`), no widened ones (`count`). The count of an `and`, an `or` and a complement of masks' bits
+// sums those operations of the lane masks (`counted_mask`, `both`); an `xor` with the bits of half the
+// lanes is no complement, and its count stays (`half`). Each returns the count as before.
+@test
+fn a_count_of_mask_lanes_sums_the_narrow_masks() {
+    let src = M"(lir ptr 8
+sym @count fn global noinline
+sym @both fn global noinline
+sym @half fn global noinline
+sym @drive fn global
+fn @count
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = load.v16i8 v1 align 0
+  v4 = vop.eq.i16 (v2, v3)
+  v5 = zext.i64 v4
+  v6 = popcnt.i64 v5
+  ret v6
+fn @both
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = load.v16i8 v1 align 0
+  v4 = vop.ge.i16 (v2, v3)
+  v5 = vop.ne.i16 (v2, v3)
+  v6 = and.i16 v4, v5
+  v7 = iconst.i16 -1
+  v8 = xor.i16 v6, v7
+  v9 = vop.lt.i16 (v3, v2)
+  v10 = iconst.i8 1
+  v11 = splat.v16i8 v10
+  v12 = vop.eq.i16 (v2, v11)
+  v13 = or.i16 v9, v12
+  v14 = and.i16 v8, v13
+  v15 = zext.i64 v14
+  v16 = popcnt.i64 v15
+  ret v16
+fn @half
+  sig (ptr, ptr) -> i64
+b0(v0: ptr, v1: ptr):
+  v2 = load.v16i8 v0 align 0
+  v3 = load.v16i8 v1 align 0
+  v4 = vop.eq.i16 (v2, v3)
+  v5 = iconst.i16 255
+  v6 = xor.i16 v4, v5
+  v7 = zext.i64 v6
+  v8 = popcnt.i64 v7
+  ret v8
+fn @drive
+  sig (i64) -> i64
+  slot s0 size 16 align 4
+  slot s1 size 16 align 4
+b0(v0: i64):
+  v1 = slotaddr s0
+  v2 = slotaddr s1
+  v3 = iconst.i64 0
+  v4 = iconst.i64 1
+  v5 = iconst.i64 16
+  v6 = iconst.i64 3
+  jmp b1(v3)
+b1(v7: i64):
+  v8 = icmp.ult v7, v5
+  br v8, b2, b3
+b2:
+  v9 = mul.i64 v7, v0
+  v10 = and.i64 v9, v6
+  v11 = trunc.i8 v10
+  v12 = ptradd v1, v7 * 1
+  store v11, v12 align 0
+  v13 = and.i64 v7, v6
+  v14 = trunc.i8 v13
+  v15 = ptradd v2, v7 * 1
+  store v14, v15 align 0
+  v16 = add.i64 v7, v4
+  jmp b1(v16)
+b3:
+  v17 = call.i64 @count(v1, v2) : (ptr, ptr) -> i64
+  v18 = call.i64 @both(v1, v2) : (ptr, ptr) -> i64
+  v19 = call.i64 @half(v1, v2) : (ptr, ptr) -> i64
+  v20 = iconst.i64 8
+  v21 = shl.i64 v18, v20
+  v22 = iconst.i64 16
+  v23 = shl.i64 v19, v22
+  v24 = xor.i64 v17, v21
+  v25 = xor.i64 v24, v23
+  ret v25
+)";
+    let (b, a) = optimized_for(src, NO_LOOPS, 16, VOPS_ALL);
+    let c = text_of(&a, "count");
+    assert(c.contains("vop.reduce_add.i8") && !c.contains("v8i16") && !c.contains("popcnt"), c.as_str());
+    let both = text_of(&a, "both");
+    assert(both.contains("and.v16i8") && both.contains("or.v16i8") && both.contains("not.v16i8"), both.as_str());
+    assert(both.contains("vop.reduce_add.i8") && !both.contains("v8i16") && !both.contains("popcnt"), both.as_str());
+    assert(text_of(&a, "half").contains("popcnt"), "half the lanes' bits are no complement");
+    for k in 0..6u64 {
+        let args: []u64 = [k];
+        same_outcome(&b, &a, "drive", args, run_value(&b, "drive", args), false);
+    }
+}
+
 // A vector wider than a register splits into register-wide parts (`lir::wide`): its loads, its lane-wise
 // operations and its stores by parts, a splat once; loads and lane-wise operations in a row part by part
 // (`riders`) when their parts may not fit the registers (`crowded`). A choice by a comparison's mask bits
@@ -5945,9 +7239,10 @@ data @x size 256 align 4 bytes 0000000000001442000094420000204100003c420000a8420
     }
 }
 
-// An unchecked gather of constant lanes loads each active lane's element itself (`opt` `gather_lanes`):
-// inserted lane by lane where the target inserts lanes in registers, else interleaved from splats a chunk
-// of 16 bytes at a time (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Where the generator
+// An unchecked gather of constant lanes loads each active lane's element itself (`opt` `gather_lanes`), a
+// chunk of 16 bytes at a time: inserted lane by lane where the target inserts lanes in registers, else
+// each loaded into lane 0 of zeros (no splat of a loaded lane) and interleaved, 3 interleaves a chunk of 4
+// lanes (`gather_zips`, x86-64); an inactive lane keeps the fallback's. Where the generator
 // gathers every lane of a register in one instruction (`Package.gather_bytes`: x86-64 in an AVX2 body), the
 // gather of all 8 lanes stays whole and the gather of some lanes still loads each. Each target form gives
 // the evaluator's values.
@@ -6015,6 +7310,13 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
             ),
             t.as_str(),
         );
+        if !ins {
+            // 11 active lanes in 3 chunks; the one inactive lane is the fallback's constant.
+            assert(
+                count(&t, "vinsert.0.v4i32") == 11 && count(&t, "vziplo") == 9 && count(&t, "= splat.") <= 1,
+                t.as_str(),
+            );
+        }
         for n in [0u64, 5, 1000] {
             let args: []u64 = [n];
             same_outcome(&before, &after, "g", args, run_value(&before, "g", args), false);
@@ -6033,6 +7335,46 @@ data @ix size 48 align 3 bytes 0300000000000000070000000500000001000000060000000
         let args: []u64 = [n];
         same_outcome(&before, &whole, "g", args, run_value(&before, "g", args), false);
     }
+}
+
+// A body whose wide vectors split into parts past the inliner's budget (a gather of 64 bytes under a mask
+// parameter: its four parts' lanes) gives its callers of the same registers its form before the split:
+// the caller inlines it, knows the mask, and loads the lanes itself (no call, no gather left).
+@test
+fn a_body_whose_split_form_is_too_large_inlines_before_the_split() {
+    let src = M"(lir ptr 8
+sym @gat fn global
+sym @use fn global noinline
+fn @gat
+  sig (ptr, v16i32, i16, v16f32) -> v16f32
+b0(v0: ptr, v1: v16i32, v2: i16, v3: v16f32):
+  v4 = vop.gather_unchecked.v16f32 (v0, v1, v2, v3)
+  ret v4
+fn @use
+  sig (ptr, ptr, ptr) -> void
+b0(v0: ptr, v1: ptr, v2: ptr):
+  v3 = load.v16i32 v1 align 2
+  v4 = iconst.i16 -1
+  v5 = fconst.f32 0x0
+  v6 = splat.v16f32 v5
+  v7 = call.v16f32 @gat(v0, v3, v4, v6) : (ptr, v16i32, i16, v16f32) -> v16f32
+  store v7, v2 align 2
+  ret
+)";
+    let mut err = String::new();
+    let mut after = lparse::parse(src, &mut err).unwrap();
+    after.cpu.vector = 16;
+    after.vops = VOPS_ALL;
+    let none = Vector::<bool>::new();
+    lopt::optimize(&mut after, &none, lopt::Config { inline: il::SPEED, loops: NO_LOOPS });
+    let mut v = verify::Verifier::new();
+    let ub = after.syms[after.find_symbol("use") as usize].def;
+    assert(v.check(&after, "use", &after.bodies[ub as usize]), v.err.as_str());
+    let t = text_of(&after, "use");
+    assert(!t.contains("call") && !t.contains("gather") && count(&t, "load.f32") == 16, t.as_str());
+    // The body itself is in parts.
+    let g = text_of(&after, "gat");
+    assert(count(&g, "gather_unchecked.v4f32") == 4, g.as_str());
 }
 
 // A masked access through a pointer under a constant mask of lane 0 alone is the lane's scalar load into

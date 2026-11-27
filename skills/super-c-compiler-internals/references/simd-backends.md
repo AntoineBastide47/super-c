@@ -277,12 +277,26 @@ The native lowering takes the same chunk forms in LIR: an entry of fewer lanes s
 by halves (`lir::lower` `split_entry`), a float `min_num` or `max_num` with an entry is LIR operations
 of the whole vectors instead (`lir::lower` `min_num`: the optimizer drops the NaN handling of an operand
 that holds numbers, and x86-64 keeps an accumulator loop's vectors in registers; the entry stays the C
-path's, and the native one's under AVX10.2), and `compress_store` moves each chunk's active lanes to the
-front by the `u8` `swizzle_zero` entry through a table row of the chunk's mask bits, the rows' lane
-counts in a second table, the lane loop a rare block that runs only where the output ends within a
-chunk of the packed lanes (`compress_chunks`); where no entry swizzles bytes (x86-64 before SSSE3) the
-lanes of 2 bytes or more go one by one without a test, each stored at the running offset, which moves
-past an active one.
+path's, and the native one's under AVX10.2), and `compress_store` (`compress_chunks`) tests once that the
+vector's `N` elements follow `start` (`start <u max(len, N - 1) - (N - 1)`, the limit a loop's invariant),
+then stores whole steps with no read of the slice and no masked store: the elements after the packed
+lanes and before `s[start + N]` may hold any value (the std rule). A step's active lanes move to the
+front through a table row of the step's mask bits: 32 bytes as 8 lanes of 4 bytes by a row's 8 byte
+indices widened (a lane of 8 bytes two of them; `swizzle_zero` `VOP_UNCHECKED`, every index in range:
+x86-64's VPMOVZXBD and VPERMD) where the body's registers hold 32 bytes, else 16 or 8 bytes by the `u8`
+`swizzle_zero` entry. The running offset grows by the step's lane count, a bit count where the body's
+processor has the instruction (`Cpu.popcnt`, `Cpu.cssc`: the per-level copies know), else a second
+table's byte. Where no entry swizzles bytes (x86-64 before SSSE3) the lanes of 2 bytes or more go one by
+one in groups of 4: each lane stored past the group's active lanes before it, whose count is a byte of
+the group's table row (16 rows of 4 bytes), the row's last byte the group's count, so no bit is counted
+and no lane tested. Without `N` elements after `start` (the end of the slice) a rare block runs the
+lane loop, which checks the count and stores exactly. A checked gather (`gather_checked`) compares all
+its indices with the length at once (`SIMD_CMP_GE` into mask bits, the length capped at a narrower index
+lane's greatest value; under a length past that value no lane counts), traps in a failure block when an
+active lane's bit is set (`__sc_lane_bounds` with the lowest such lane, its index read from the indices
+in a slot, and the length: the checked gather's text), then gathers with no lane check
+(`SIMD_GATHER_UNCHECKED`), whose lanes of a constant mask the optimizer loads (`lir::opt`
+`gather_lanes`).
 
 ## New instruction sets
 

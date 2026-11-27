@@ -1265,8 +1265,9 @@ const fn scatter_lanes<T: SimdElement, I: SimdInt, const N: usize>(
 );
 
 /// Store the active lanes of `v` in lane order to `s[start..start + count]` and return `count`, the
-/// active lane count; nothing past them changes (at most 8 elements after them may be rewritten with
-/// their own values). Panics before any write: `start + count` past `s`.
+/// active lane count. The elements of `s` after them and before `s[start + N]` may be overwritten with
+/// unspecified values; no other element changes, and nothing outside `s` is written. Panics before any
+/// write: `start + count` past `s`.
 @intrinsic("simd.compress_store")
 pub const fn compress_store<T: SimdElement, const N: usize>(s: []mut T, start: usize, m: Mask<N>, v: Simd<T, N>) usize;
 

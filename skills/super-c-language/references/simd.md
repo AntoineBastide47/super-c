@@ -271,16 +271,20 @@ unsafe simd::load_masked_ptr(p: *const T, m, fallback)    unsafe simd::store_mas
 | `store_masked` | writes `s[start + i]` | no access | an active lane past `s`, before any write |
 | `gather` | `s[idx[i]]` | `fallback[i]`, no access | an active index past `s` |
 | `scatter` | writes `s[idx[i]]` in lane order | no access | an active index past `s`, before any write |
-| `compress_store` | writes the active lanes at `start..start + count`, returns `count` | no access | `start + count` past `s`, before any write |
+| `compress_store` | writes the active lanes at `start..start + count`, returns `count` | its value may land after the stored ones, before `s[start + N]` | `start + count` past `s`, before any write |
 
-An inactive lane never reads, writes or checks its element; every active lane is checked before the
+An inactive lane never reads, writes or checks its element (`compress_store` has its own rule,
+below); every active lane is checked before the
 first access, and the lowest failing one traps: "lane 3: index out of bounds: the index is 9 + 3
 but the length is 12" (from a start), "lane 1: index out of bounds: the index is 6 but the length
 is 6" (an index), and for `compress_store` the slice access text ("3 lanes from 10 but the length is
 12"). `start + i` never overflows: the check is `start <= len` and then `i < len - start`. Of
 active scatter lanes with one index, the highest writes last and wins (Rust's `scatter` and AVX-512
-order). `compress_store` changes exactly `count` elements; it may rewrite at most 8 elements after
-them with their own values, since the slice is borrowed alone. No masked store reads and writes
+order). `compress_store` stores the active lanes at `s[start..start + count]`; the elements of `s`
+after them and before `s[start + N]` may be overwritten with unspecified values (a whole vector is
+stored where `s` has `N` elements from `start`, since the slice is borrowed alone), no other element
+changes, and nothing outside `s` is written: a caller that needs those elements keeps them itself or
+stores the lanes with `compress` and `store_masked`. No masked store reads and writes
 back the whole vector: another thread may own an inactive element. A store borrows its slice
 mutably, a load shared; the raw forms and `gather_unchecked` (its own operation, which takes the
 `Gather` entry where one exists) are `unsafe` and check nothing: the

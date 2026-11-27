@@ -539,11 +539,13 @@ pub(package) const XOPS: [XOp; 49] = [
         "let mut bx = y.to_array(); simd::scatter(bx, Simd::<$U, $N>::from_array($X), Mask::<$N>::from_bits_truncate(m), x); return $E(Simd::<$T, $N>::from_array(bx));",
         "let l: [$U; $N] = $X; let mut r = b; for i in 0..$Nusize { if $K { $G } } for i in 0..$Nusize { if $K { r[l[i] as usize] = a[i]; } } $V",
     ),
+    // `compress_store` may leave any value in the elements after the stored ones, up to the vector's lanes
+    // from the start (here to the array's end): they take their old values back before the hash.
     xop(
         "compress_store",
         C_ALL,
         U_NONE,
-        "let mut bx = y.to_array(); let k = simd::compress_store(bx, $Xusize, Mask::<$N>::from_bits_truncate(m), x); return hmix($E(Simd::<$T, $N>::from_array(bx)), k as u64);",
+        "let ya = y.to_array(); let mut bx = ya; let k = simd::compress_store(bx, $Xusize, Mask::<$N>::from_bits_truncate(m), x); for i in $Xusize + k..$Nusize { bx[i] = ya[i]; } return hmix($E(Simd::<$T, $N>::from_array(bx)), k as u64);",
         "let st = $Xusize; let mut r = b; let mut k = 0usize; for i in 0..$Nusize { if $K { k += 1; } } if st > $Nusize || k > $Nusize - st { panic(format(\"index out of bounds: {} lanes from {} but the length is {}\", k, st, $Nusize).as_str()); } let mut j = st; for i in 0..$Nusize { if $K { r[j] = a[i]; j += 1; } } hr = hmix($E(Simd::<$T, $N>::from_array(r)), k as u64);",
     ),
     // `count` of a comparison, and its `choose` of narrower integer lanes.
