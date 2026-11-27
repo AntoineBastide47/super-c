@@ -14701,9 +14701,13 @@ extend Gen {
                 self.c.alu_rr(x::AND, 8, act, S1);
             }
         }
-        if cs {
+        if cs && (t.aux & VOP_UNCHECKED) == 0 {
             // The packed lanes must fit from start.
-            self.popcount(xr, act, 8);
+            if self.cpu.popcnt {
+                self.c.rr(0xF3, 0x0FB8, true, xr, act, false);
+            } else {
+                self.popcount(xr, act, 8);
+            }
             self.c.mov_rr(8, ix, len);
             self.c.alu_rr(x::SUB, 8, ix, st);
             let fail = self.c.jcc32(x::CC_B);

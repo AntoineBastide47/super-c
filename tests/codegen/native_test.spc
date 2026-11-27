@@ -9171,6 +9171,49 @@ b0(v0: ptr):
     }
 }
 
+// arm64: a value made in the register of an operand that dies at it (`take_dying`), before a conversion
+// that keeps its bits and whose result the plan holds in that same register (`next_reg` binds the result
+// there): the result keeps the register. The 0 or 1 of two comparisons of a byte, zero-extended into a
+// join's parameter, is made over the byte. It gives the C results.
+@test
+fn a_dying_operands_register_stays_the_next_conversions() {
+    let lir = M"(lir ptr 8
+sym @kind fn global
+fn @kind
+  sig (ptr, i32) -> i32
+b0(v0: ptr, v1: i32):
+  v2 = iconst.i8 64
+  v3 = iconst.i8 0
+  v4 = iconst.i8 6
+  v5 = iconst.i8 7
+  v6 = iconst.i32 1
+  v7 = load.i8 v0+15 align 0
+  v8 = and.i8 v7, v2
+  v9 = icmp.eq v8, v3
+  br v9, b2, b1
+b1:
+  v10 = zext.i32 v7
+  v11 = or.i32 v1, v6
+  v12 = udiv.i32 v10, v11
+  jmp b3(v12)
+b2:
+  v13 = icmp.eq v7, v4
+  v14 = icmp.eq v7, v5
+  v15 = or.i8 v13, v14
+  v16 = zext.i32 v15
+  jmp b3(v16)
+b3(v17: i32):
+  v18 = add.i32 v17, v1
+  ret v18
+)";
+    let drv = "#include <stdint.h>\nint32_t kind(uint8_t *, int32_t);\nint main(void) {\n  uint8_t p[16] = {0};\n  p[15] = 6;\n  if (kind(p, 10) != 11) return 1;\n  p[15] = 7;\n  if (kind(p, 10) != 11) return 2;\n  p[15] = 5;\n  if (kind(p, 10) != 10) return 3;\n  p[15] = 200;\n  if (kind(p, 10) != 28) return 4;\n  return 0;\n}\n";
+    let mut obj = Vector::<u8>::new();
+    assert(object_of(lir, tgt::axis_index("linux", false), tgt::axis_index("aarch64", true), 0, &mut obj), "the object");
+    if cli::has_cc() {
+        assert_eq(run_native(lir, drv), 0);
+    }
+}
+
 // x86-64: a loop's sums that one `lea` makes (`acc + s[i] * 5 + 72`, two accumulators) take their header
 // parameters' registers, so the back edge moves nothing (no register copy). It gives the C results.
 @test
@@ -11178,8 +11221,8 @@ fn main() i32 {
 }
 
 // A `compress_store` lowers to one test that the vector's lanes fit after the start, whole stores of its
-// steps and a rare lane loop, which alone checks the count (no call of the bounds trap in the function);
-// a checked gather to one comparison of its indices with the length, a failure block that traps at the
+// steps, and at the end of the slice a second test, the bounds trap and a lane loop that checks nothing
+// (`unchecked`: no checked `compress_store` is left); a checked gather to one comparison of its indices with the length, a failure block that traps at the
 // lowest failing active lane (`__sc_lane_bounds`), and a gather that checks no lane, whose lanes of a
 // constant mask then load. On an x86-64 host the copy for AVX2 moves 8 lanes a step by a vector of
 // indices, and the baseline one loads each gathered lane into lane 0 of zeros. The program checks the
@@ -11234,6 +11277,16 @@ fn main(args: Vector<str>) i32 {
             return 3;
         }
     }
+    // 12 elements for 16 lanes, 8 of them active: the whole stores run at the end of a slice too, so
+    // an element after the count holds a lane.
+    let mut near = [-1.0f32; 12];
+    let mut w = [0.0f32; 16];
+    for k in 0..8usize {
+        w[k] = 30.0 + k as f32;
+    }
+    if lowpack(simd::load::<f32, 16>(w, 0), 20.5, near, 0) != 8 || near[7] != 37.0 || near[8] == -1.0 {
+        return 6;
+    }
     let mut want: f32 = 0.0;
     let mut part: f32 = 0.0;
     for k in 0..16usize {
@@ -11260,7 +11313,8 @@ fn main(args: Vector<str>) i32 {
 )",
     );
     let r = cli::superc_env_in(p.dir(), "SC_LIR_PRINT", "lowp", "build --profile=release main.spc -o app");
-    let mut ok = r.ok() && r.out_has("vop.compress_store") && !r.out_has("__sc_vec_bounds");
+    let mut ok = r.ok() && r.out_has("vop.compress_store.s.unchecked") && !r.out_has("vop.compress_store.s.i");
+    ok = ok && r.out_has("__sc_vec_bounds");
     // No checked gather is left: the trap's call, and the lanes' loads under the constant mask.
     ok = ok && !r.out_has("vop.gather.") && r.out_has("__sc_lane_bounds") && r.out_has("load.f32");
     if tgt::host_isa() == tgt::axis_index("x86_64", true) {
@@ -24303,6 +24357,81 @@ int main(void) {
 )";
     assert_eq(run_native(lir, drv), 0);
     assert_eq(run_wide(lir, drv), 0);
+}
+
+// A `compress_store` whose count the lowering has checked (`VOP_UNCHECKED`) is its lane loop alone: no
+// count, no test and no call of the bounds trap, on x86-64 and arm64; the checked one calls the trap.
+// Both store the same lanes.
+@test
+fn an_unchecked_compress_store_checks_no_count() {
+    let head = M"(lir ptr 8
+sym @pack fn global
+fn @pack
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i64, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: i64, v3: ptr):
+  v4 = trunc.i8 v2
+  v5 = load.v8i32 v3 align 0
+)";
+    let checked = format("{}  v6 = vop.compress_store.s.i64 (v0, v1, v4, v5)\n  ret v6\n", head);
+    let unchecked = format("{}  v6 = vop.compress_store.s.unchecked.i64 (v0, v1, v4, v5)\n  ret v6\n", head);
+    for isa in ["x86_64", "aarch64"] {
+        let mut a = Vector::<u8>::new();
+        let mut b = Vector::<u8>::new();
+        assert(object_of(checked.as_str(), tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut a), isa);
+        assert(
+            object_of(unchecked.as_str(), tgt::axis_index("linux", false), tgt::axis_index(isa, true), 0, &mut b),
+            isa,
+        );
+        assert(holds_name(&a, "__sc_vec_bounds") && !holds_name(&b, "__sc_vec_bounds"), isa);
+    }
+    if !cli::has_cc() {
+        return; // a C driver links it
+    }
+    let drv = M"(#include <stdint.h>
+struct slice { int32_t *p; uint64_t n; };
+uint64_t pack(struct slice *, uint64_t, uint64_t, const int32_t *);
+int main(void) {
+  int32_t v[8] = {1, 2, 3, 4, 5, 6, 7, 8}, o[12];
+  for (int k = 0; k < 12; k++) o[k] = 90 + k;
+  struct slice s = {o, 8};
+  if (pack(&s, 3, 0xB5, v) != 5) return 1;
+  int32_t w[5] = {1, 3, 5, 6, 8};
+  for (int k = 0; k < 12; k++) if (o[k] != (k >= 3 && k < 8 ? w[k - 3] : 90 + k)) return 2 + k;
+  return 0;
+}
+)";
+    assert_eq(run_native(checked.as_str(), drv), 0);
+    assert_eq(run_native(unchecked.as_str(), drv), 0);
+}
+
+// x86-64 counts the lanes of a checked `compress_store` by POPCNT where the processor has it: no constant
+// of the bit count in registers (0x5555555555555555), which the baseline holds.
+@test
+fn x86_counts_compress_store_lanes_by_popcnt() {
+    let checked = M"(lir ptr 8
+sym @pack fn global
+fn @pack
+  layout l0 size 16 align 3 [0 ptr, 8 i64]
+  sig (l0, i64, i64, ptr) -> i64
+b0(v0: ptr, v1: i64, v2: i64, v3: ptr):
+  v4 = trunc.i8 v2
+  v5 = load.v8i32 v3 align 0
+  v6 = vop.compress_store.s.i64 (v0, v1, v4, v5)
+  ret v6
+)";
+    let bits: [u8; 8] = [0x55; 8];
+    let mut plain = Vector::<u8>::new();
+    let mut pop = Vector::<u8>::new();
+    assert(
+        object_of(checked, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), 0, &mut plain),
+        "x86-64",
+    );
+    assert(
+        object_of(checked, tgt::axis_index("linux", false), tgt::axis_index("x86_64", true), POPCNT, &mut pop),
+        "x86-64 with POPCNT",
+    );
+    assert(holds(&plain, bits[0..8]) && !holds(&pop, bits[0..8]), "the lanes counted by POPCNT");
 }
 
 // x86-64: a scalar load of 4 or 8 bytes put into lane 0 of a vector of zeros is one load into the vector

@@ -4937,20 +4937,122 @@ extend Lower {
         out.extend_copy(&level);
     }
 
-    // `compress_store(s, start, m, v)` (`args`, `s` by its address) where the vector's lane count of
-    // elements follows `start` (one test, `start <u max(len, n - 1) - (n - 1)`; no count is then past the
-    // slice): every store stays inside `s[start..start + n]`, whose elements after the packed lanes the
-    // call may leave with any value, so no store is masked and nothing reads the slice. By steps of 32, 16
-    // or 8 bytes: a step's active lanes move to the front by one shuffle through a row of a read-only
-    // table by the step's mask bits, and the whole step is stored at the running offset, which grows by
-    // the step's lane count (a bit count where the processor has the instruction, else a second table's
-    // byte). A step of 32 bytes, where the body's registers hold them, is 8 lanes of 4 bytes (a lane of 8,
-    // two) moved by a row's byte indices widened (`swizzle_zero` unchecked: x86-64's VPERMD); one of 16
-    // or 8 is bytes moved by the `u8` `swizzle_zero` entry. Where nothing shuffles a step (x86-64 before
-    // SSSE3; a vector below 8 bytes), lanes of 2 bytes or more go one by one in groups of at most 4: each
-    // lane is stored past the group's active lanes before it, whose count is a byte of the group's table
-    // row, the last byte the group's count. Else (the end of the slice) the lane loop (`vop` `code`), which
-    // checks the count and stores exactly. VNONE when the lanes do not make steps.
+    // Each step's table row (by its `cl` mask bits of `m`) and its offset in lanes from the start, for
+    // `compress_chunks`: a step's lane count is the bit count of its mask bits (`pop`), else byte r of the
+    // count table `tcnt`, else (no shuffle, `ub` 0) the last byte of its row of `tbl`. The offset past the
+    // last step, the call's count, where no shuffle is (the last step of shuffled ones is not counted).
+    fn compress_rows(
+        self: &mut Self,
+        m: Value,
+        steps: u32,
+        cl: u32,
+        ub: u32,
+        pop: bool,
+        tbl: Value,
+        tcnt: Value,
+        rws: &mut Vector<Value>,
+        offs: &mut Vector<Value>,
+    ) Value {
+        let it = int_type(self.pkg.ptr_bytes);
+        let mut k = self.iconst(it, 0);
+        for j in 0..steps {
+            let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, j * cl), VNONE);
+            let bits = self.arith(O_AND, sh, self.iconst(T_I64, (1u32 << cl) - 1));
+            // An index has a pointer's width.
+            let row = self.int_to(bits, it, false);
+            rws.push(row);
+            offs.push(k);
+            if ub != 0 && j + 1 == steps {
+                break;
+            }
+            let pc = if pop {
+                self.inst(O_POPCNT, T_I64, 0, bits, VNONE, VNONE)
+            } else if ub != 0 {
+                self.load(T_I8, self.ptradd(tcnt, row, 1, 0), 0, true)
+            } else {
+                self.load(T_I8, self.ptradd(tbl, row, cl, cl - 1), 0, true)
+            };
+            k = self.arith(O_ADD, k, self.int_to(pc, it, false));
+        }
+        return k;
+    }
+
+    // The whole stores of `compress_chunks` in the current block: step j of `v`, moved by row `rws[j]` of
+    // `tbl`, at `p` plus `offs[j]` lanes. `ub`, `cb`, `cl`: the form (the bytes an index moves, a step's
+    // bytes and lanes); `swz`: the byte shuffle's entry.
+    fn compress_stores(
+        self: &mut Self,
+        swz: str,
+        v: Value,
+        p: Value,
+        tbl: Value,
+        ub: u32,
+        cb: u32,
+        cl: u32,
+        rws: &Vector<Value>,
+        offs: &Vector<Value>,
+    ) {
+        let vt = self.vty(v);
+        let lb = type_bytes(lane_type(vt), self.pkg.ptr_bytes);
+        let it = int_type(self.pkg.ptr_bytes);
+        if ub == 0 {
+            let lt = lane_type(vt);
+            for g in 0..rws.len() {
+                let q = self.ptradd(p, offs[g], lb, 0);
+                for i in 0..cl {
+                    let e = self.inst(O_VEXTRACT, lt, (g as u32 * cl + i) as u16, v, VNONE, VNONE);
+                    if i == 0 {
+                        self.store(e, q, 0, true);
+                        continue;
+                    }
+                    let o = self.load(T_I8, self.ptradd(tbl, rws[g], cl, i - 1), 0, true);
+                    self.store(e, self.ptradd(q, self.int_to(o, it, false), lb, 0), 0, true);
+                }
+            }
+            return;
+        }
+        let rw = cb / ub;
+        let bt = vec_type(ast::pick(ub == 4, T_I32, T_I8), rw);
+        let swizzle = (irc::OP_SIMD + irc::SIMD_SWIZZLE_ZERO as u32) as u16 | VOP_UNCHECKED;
+        let mut parts = Vector::<Value>::with_capacity(rws.len());
+        self.halves(v, rws.len() as u32, &mut parts);
+        let sty: [u32; 2] = [bt as u32, bt as u32];
+        for j in 0..rws.len() {
+            let x = self.inst(O_BITCAST, bt, 0, parts[j], VNONE, VNONE);
+            let ra = self.ptradd(tbl, rws[j], rw, 0);
+            let r = if ub == 4 {
+                let ix = self.load(vec_type(T_I8, rw), ra, 0, true);
+                let wx = self.inst(O_ZEXT, bt, 0, ix, VNONE, VNONE);
+                self.vop(swizzle, bt, [x, wx], VNONE)
+            } else {
+                let ix = self.load(bt, ra, 0, true);
+                let sargs: [Value; 2] = [x, ix];
+                self.call_sym(swz, sargs[0..2], sty[0..2], sig_code(bt, false))
+            };
+            self.store(r, self.ptradd(p, offs[j], lb, 0), 0, true);
+        }
+    }
+
+    // `compress_store(s, start, m, v)` (`args`, `s` by its address) by whole stores: every store stays
+    // inside `s[start..start + n]` (`n` the vector's lanes), whose elements after the packed lanes the call
+    // may leave with any value, so no store is masked and nothing reads the slice. By steps of 32, 16 or 8
+    // bytes: a step's active lanes move to the front by one shuffle through a row of a read-only table by
+    // the step's mask bits, and the whole step is stored at the running offset, which grows by the step's
+    // lane count (a bit count where the processor has the instruction, else a second table's byte). A step
+    // of 32 bytes, where the body's registers hold them, is 8 lanes of 4 bytes (a lane of 8, two) moved by
+    // a row's byte indices widened (`swizzle_zero` unchecked: x86-64's VPERMD); one of 16 or 8 is bytes
+    // moved by the `u8` `swizzle_zero` entry. Where nothing shuffles a step (x86-64 before SSSE3; a vector
+    // below 8 bytes), lanes of 2 bytes or more go one by one in groups of at most 4: each lane is stored
+    // past the group's active lanes before it, whose count is a byte of the group's table row, the last
+    // byte the group's count.
+    // One test finds the room: `n` elements follow `start` (`start <u len - (n - 1)`, 0 for a shorter slice;
+    // no count is then past the slice). Without them (the end of the slice, a rare block) the same stores
+    // run when the lanes of a step follow the packed lanes in the slice (the count and a step's lanes are
+    // at most `len - start`; a lane where the lanes go one by one): no store then ends past the slice.
+    // There a step of 32 bytes goes as its halves, each the low 16 bytes of the step moved by the row of
+    // the half's mask bits, so that 16 bytes after the packed lanes are enough. Else the bounds trap of a
+    // count past the slice, then the lane loop (`vop` `code`), which stores exactly and checks nothing
+    // (`VOP_UNCHECKED`). VNONE when the lanes do not make steps.
     fn compress_chunks(self: &mut Self, c: &mut cbe::CEmit, args: []Value, code: u16, rt: u8) Value {
         let vt = self.vty(args[3]);
         let lb = type_bytes(lane_type(vt), self.pkg.ptr_bytes);
@@ -5017,93 +5119,122 @@ extend Lower {
             let kc = self.sym_of(sc);
             tcnt = self.inst(O_SYMADDR, T_PTR, 0, kc, 0, VNONE);
         }
-        // Each step's table row and offset, before the test: the offset past the last step is the count.
+        // The count, before the test: a bit count, else (no shuffle) the offset past the last step.
         let steps = n / cl;
         let mut rws = Vector::<Value>::with_capacity(steps as usize);
         let mut offs = Vector::<Value>::with_capacity(steps as usize);
-        let mut k = self.iconst(it, 0);
-        for j in 0..steps {
-            let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, j * cl), VNONE);
-            let bits = self.arith(O_AND, sh, self.iconst(T_I64, rows - 1));
-            // An index has a pointer's width.
-            let row = self.int_to(bits, it, false);
-            rws.push(row);
-            offs.push(k);
-            if pop && j + 1 == steps {
-                break;
-            }
-            let pc = if pop {
-                self.inst(O_POPCNT, T_I64, 0, bits, VNONE, VNONE)
-            } else if ub != 0 {
-                self.load(T_I8, self.ptradd(tcnt, row, 1, 0), 0, true)
-            } else {
-                self.load(T_I8, self.ptradd(tbl, row, cl, cl - 1), 0, true)
-            };
-            k = self.arith(O_ADD, k, self.int_to(pc, it, false));
-        }
-        let cnt = if pop {
+        let cnt = if ub != 0 {
             let all = self.inst(O_POPCNT, T_I64, 0, m, VNONE, VNONE);
             self.int_to(all, it, false)
         } else {
-            k
+            self.compress_rows(m, steps, cl, ub, pop, tbl, tcnt, &mut rws, &mut offs)
         };
         // `start + n <= len`, with no sum that could wrap.
         let n1 = self.iconst(it, n - 1);
         let big = self.icmp(C_UGT, len, n1);
-        let top = self.inst(O_SELECT, it, 0, big, len, n1);
-        let lim = self.arith(O_SUB, top, n1);
+        let lim = self.inst(O_SELECT, it, 0, big, self.arith(O_SUB, len, n1), self.iconst(it, 0));
         let fast = self.icmp(C_ULT, st, lim);
+        // The end of the slice: its test, its stores, the lane loop. The byte shuffle's stores are the
+        // fast path's block (a rare block saves registers around an entry's call); the others have their
+        // own rare block, so that the fast path's block keeps one predecessor and its values their
+        // registers.
+        let nb = self.block();
+        self.b.blocks.index_mut(nb as usize).flags = BLOCK_UNLIKELY;
         let fb = self.block();
+        let hb = if ub == 1 {
+            fb
+        } else {
+            let k = self.block();
+            self.b.blocks.index_mut(k as usize).flags = BLOCK_UNLIKELY;
+            k
+        };
         let sb = self.block();
-        // The lane loop runs only at the end of the slice.
         self.b.blocks.index_mut(sb as usize).flags = BLOCK_UNLIKELY;
         let join = self.block();
         let ef = self.edge(fb, NONE, NONE);
+        let et = self.edge(nb, NONE, NONE);
+        let _ = self.inst(O_BR, T_NONE, 0, fast, ef, et);
+        self.b.begin(nb);
+        // The elements from `start` and one (0 for a start past the slice) are more than the count and a
+        // tight step's lanes; a count at or past them is past the slice (below).
+        let tl = ast::pick(ub == 4, cl / 2, ast::pick(ub == 0, 1u32, cl));
+        let inside = self.icmp(C_UGE, len, st);
+        let after = self.arith(O_SUB, len, st);
+        let more = self.arith(O_ADD, after, self.iconst(it, 1));
+        let room = self.inst(O_SELECT, it, 0, inside, more, self.iconst(it, 0));
+        let need = self.arith(O_ADD, cnt, self.iconst(it, tl));
+        let tight = self.icmp(C_ULT, need, room);
+        let eh = self.edge(hb, NONE, NONE);
         let es = self.edge(sb, NONE, NONE);
-        let _ = self.inst(O_BR, T_NONE, 0, fast, ef, es);
+        let _ = self.inst(O_BR, T_NONE, 0, tight, eh, es);
         self.b.begin(fb);
-        let p = self.ptradd(ptr, st, lb, 0);
-        if ub == 0 {
-            let lt = lane_type(vt);
-            for g in 0..steps {
-                let q = self.ptradd(p, offs[g as usize], lb, 0);
-                for i in 0..cl {
-                    let e = self.inst(O_VEXTRACT, lt, (g * cl + i) as u16, args[3], VNONE, VNONE);
-                    if i == 0 {
-                        self.store(e, q, 0, true);
-                        continue;
-                    }
-                    let o = self.load(T_I8, self.ptradd(tbl, rws[g as usize], cl, i - 1), 0, true);
-                    self.store(e, self.ptradd(q, self.int_to(o, it, false), lb, 0), 0, true);
-                }
-            }
-        } else {
-            let bt = vec_type(ast::pick(ub == 4, T_I32, T_I8), cb / ub);
-            let swizzle = (irc::OP_SIMD + irc::SIMD_SWIZZLE_ZERO as u32) as u16 | VOP_UNCHECKED;
-            let mut parts = Vector::<Value>::with_capacity(steps as usize);
-            self.halves(args[3], steps, &mut parts);
-            let sty: [u32; 2] = [bt as u32, bt as u32];
-            for j in 0..steps as usize {
-                let x = self.inst(O_BITCAST, bt, 0, parts[j], VNONE, VNONE);
-                let ra = self.ptradd(tbl, rws[j], rw, 0);
-                let r = if ub == 4 {
-                    let ix = self.load(vec_type(T_I8, rw), ra, 0, true);
-                    let wx = self.inst(O_ZEXT, bt, 0, ix, VNONE, VNONE);
-                    self.vop(swizzle, bt, [x, wx], VNONE)
-                } else {
-                    let ix = self.load(bt, ra, 0, true);
-                    let sargs: [Value; 2] = [x, ix];
-                    self.call_sym(&swz, sargs[0..2], sty[0..2], sig_code(bt, false))
-                };
-                self.store(r, self.ptradd(p, offs[j], lb, 0), 0, true);
-            }
+        if ub != 0 {
+            let _ = self.compress_rows(m, steps, cl, ub, pop, tbl, tcnt, &mut rws, &mut offs);
         }
+        let p = self.ptradd(ptr, st, lb, 0);
+        self.compress_stores(&swz, args[3], p, tbl, ub, cb, cl, &rws, &offs);
         let ej = self.edge(join, NONE, NONE);
         let _ = self.inst(O_JMP, T_NONE, 0, ej, VNONE, VNONE);
+        if ub == 0 {
+            self.b.begin(hb);
+            let hp = self.ptradd(ptr, st, lb, 0);
+            self.compress_stores(&swz, args[3], hp, tbl, ub, cb, cl, &rws, &offs);
+            let eh2 = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, eh2, VNONE, VNONE);
+        }
+        if ub == 4 {
+            // Half h of step h / 2: the row of its mask bits at the half's place moves its active lanes
+            // to the step's front.
+            self.b.begin(hb);
+            let hp = self.ptradd(ptr, st, lb, 0);
+            let bt = vec_type(T_I32, rw);
+            let swizzle = (irc::OP_SIMD + irc::SIMD_SWIZZLE_ZERO as u32) as u16 | VOP_UNCHECKED;
+            let low = (irc::OP_SIMD + irc::SIMD_LOW_HALF as u32) as u16;
+            let mut parts = Vector::<Value>::with_capacity(steps as usize);
+            self.halves(args[3], steps, &mut parts);
+            let mut hk = self.iconst(it, 0);
+            for h in 0..2 * steps {
+                let sh = self.inst(O_LSHR, T_I64, 0, m, self.iconst(T_I64, h * tl), VNONE);
+                let bits = self.arith(O_AND, sh, self.iconst(T_I64, (1u32 << tl) - 1));
+                let place = self.arith(O_SHL, bits, self.iconst(T_I64, (h & 1) * tl));
+                let x = self.inst(O_BITCAST, bt, 0, parts[(h / 2) as usize], VNONE, VNONE);
+                let ix = self.load(vec_type(T_I8, rw), self.ptradd(tbl, self.int_to(place, it, false), rw, 0), 0, true);
+                let wx = self.inst(O_ZEXT, bt, 0, ix, VNONE, VNONE);
+                let r = self.vop(swizzle, bt, [x, wx], VNONE);
+                let half = self.vop(low, vec_type(T_I32, 4), [r], VNONE);
+                self.store(half, self.ptradd(hp, hk, lb, 0), 0, true);
+                if h + 1 == 2 * steps {
+                    break;
+                }
+                let pc = if pop {
+                    self.inst(O_POPCNT, T_I64, 0, bits, VNONE, VNONE)
+                } else {
+                    self.load(T_I8, self.ptradd(tcnt, self.int_to(bits, it, false), 1, 0), 0, true)
+                };
+                hk = self.arith(O_ADD, hk, self.int_to(pc, it, false));
+            }
+            let eh2 = self.edge(join, NONE, NONE);
+            let _ = self.inst(O_JMP, T_NONE, 0, eh2, VNONE, VNONE);
+        }
         self.b.begin(sb);
-        let _ = self.vop(code, rt, args, VNONE);
+        // `start > len` or `count > len - start`: the trap names the count, the start and the length.
+        let pb = self.cold_block();
+        let past = self.icmp(C_UGE, cnt, room);
+        self.split(past, pb, true);
+        let last = self.b.blocks.len() - 1;
+        self.b.blocks.index_mut(last).flags = BLOCK_UNLIKELY;
+        let _ = self.vop(code | VOP_UNCHECKED, rt, args, VNONE);
         let ej2 = self.edge(join, NONE, NONE);
         let _ = self.inst(O_JMP, T_NONE, 0, ej2, VNONE, VNONE);
+        self.b.begin(pb);
+        let tys: [u32; 3] = [T_I64 as u32, T_I64 as u32, T_I64 as u32];
+        let targs: [Value; 3] = [
+            self.int_to(cnt, T_I64, false),
+            self.int_to(st, T_I64, false),
+            self.int_to(len, T_I64, false),
+        ];
+        let _ = self.call_sym("__sc_vec_bounds", targs[0..3], tys[0..3], T_NONE);
+        let _ = self.inst(O_UNREACHABLE, T_NONE, 0, VNONE, VNONE, VNONE);
         self.b.begin(join);
         return self.int_to(cnt, rt, false);
     }

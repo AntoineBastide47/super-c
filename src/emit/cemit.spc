@@ -800,6 +800,9 @@ extend CEmit {
             l.pkg.vops = tgt::isa(pk.arch).vector_ops;
             l.pkg.vec_mulh = tgt::isa(pk.arch).vector_mulh;
             l.pkg.vec_accs = tgt::isa(pk.arch).vector_accs;
+            l.pkg.vec_homes = tgt::isa(pk.arch).vector_homes;
+            l.pkg.vec_homes_call = tgt::isa(pk.arch).vector_homes_calls;
+            l.pkg.vec_temps = tgt::isa(pk.arch).vector_temps;
             l.pkg.vec_sat = tgt::isa(pk.arch).vector_sat;
             l.pkg.vec_absd = tgt::isa(pk.arch).vector_absd;
             l.pkg.vec_sumw = tgt::isa(pk.arch).vector_sumw;

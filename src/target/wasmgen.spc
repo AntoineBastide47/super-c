@@ -6722,7 +6722,7 @@ extend Gen {
             }
             self.c.local(w::LOCAL_SET, act);
         }
-        if cs {
+        if cs && (t.aux & VOP_UNCHECKED) == 0 {
             // The packed lanes must fit from start: start <= len and the count <= len - start.
             self.c.local(w::LOCAL_GET, act);
             self.c.op(w::I64_POPCNT);

@@ -942,13 +942,22 @@ pub(package) const fn splat_form(name: str) (u32, bool) {
     return (0u32, !lanes);
 }
 
-/// The lane-wise operation x86 intrinsic `name` is, one instruction on whole vectors (`_mm_add_ps`,
-/// `_mm256_sub_epi16`, `_mm_and_si128`, `_mm_sqrt_pd`): the LIR operation (`O_ADD`, ...), its lanes' bytes
-/// and whether they hold floats; (0, 0, false) for another name. A bitwise operation takes integer lanes
-/// (those of a float vector: of the floats' size). The optimizer makes it that operation
-/// (`lir::opt`'s `lane_call`), which the generators place as they place a loop's own: in place, a load
-/// as its memory operand.
+/// The lane-wise operation intrinsic `name` is, one instruction on whole vectors, on x86 (`_mm_add_ps`,
+/// `_mm256_sub_epi16`, `_mm_and_si128`, `_mm_sqrt_pd`), arm64 (`vaddq_u32`, `vsub_s8`, `veorq_u8`,
+/// `vsqrtq_f64`) and wasm32 (`wasm_i32x4_add`, `wasm_v128_xor`, `wasm_f32x4_div`): the LIR operation
+/// (`O_ADD`, ...), its lanes' bytes and whether they hold floats; (0, 0, false) for another name. An
+/// integer sum, difference and product wrap (a saturating one has another name: `_mm_adds_epi8`,
+/// `vqaddq_u8`, `wasm_u8x16_add_sat`) and are the same for signed and unsigned lanes. A bitwise operation
+/// takes integer lanes (those of a float vector: of the floats' size). The optimizer makes it that
+/// operation (`lir::opt`'s `lane_call`), which the generators place as they place a loop's own: in
+/// place, a load as its memory operand.
 pub(package) const fn arith_form(name: str) (u8, u32, bool) {
+    if name.starts_with("wasm_") {
+        return wasm_form(name.slice(5, name.len()));
+    }
+    if name.starts_with("v") {
+        return neon_form(name.slice(1, name.len()));
+    }
     let pre: []str = ["_mm_", "_mm256_", "_mm512_"];
     for p in 0..pre.len() {
         if !name.starts_with(pre[p]) {
@@ -1011,6 +1020,101 @@ pub(package) const fn arith_form(name: str) (u8, u32, bool) {
         return (0u8, 0u32, false);
     }
     return (0u8, 0u32, false);
+}
+
+// `arith_form` of the arm64 intrinsic `v<rest>`: `<operation>_<lanes>` on 8 bytes, `<operation>q_<lanes>` on
+// 16, the lanes `s8` to `u64`, `f32` and `f64`.
+const fn neon_form(rest: str) (u8, u32, bool) {
+    let at = rest.find("_");
+    if at < 1 {
+        return (0u8, 0u32, false);
+    }
+    let head = rest.slice(0, at as usize);
+    let op = if head.ends_with("q") {
+        head.slice(0, head.len() - 1)
+    } else {
+        head
+    };
+    let ty = rest.slice(at as usize + 1, rest.len());
+    let lb: u32 = switch ty {
+        "s8" | "u8" => 1,
+        "s16" | "u16" => 2,
+        "s32" | "u32" | "f32" => 4,
+        "s64" | "u64" | "f64" => 8,
+        _ => 0,
+    };
+    let fl = ty == "f32" || ty == "f64";
+    let o = if lb == 0 {
+        0u8
+    } else if fl {
+        float_form(op)
+    } else {
+        switch op {
+            "and" => O_AND,
+            "orr" => O_OR,
+            "eor" => O_XOR,
+            _ => int_form(op),
+        }
+    };
+    return (o, ast::pick(o != 0, lb, 0u32), o != 0 && fl);
+}
+
+// `arith_form` of the wasm32 intrinsic `wasm_<rest>`: `<shape>_<operation>`, the shape `i8x16` to `i64x2`,
+// `f32x4`, `f64x2`, or `v128` for a bitwise operation.
+const fn wasm_form(rest: str) (u8, u32, bool) {
+    let at = rest.find("_");
+    if at < 1 {
+        return (0u8, 0u32, false);
+    }
+    let shape = rest.slice(0, at as usize);
+    let op = rest.slice(at as usize + 1, rest.len());
+    if shape == "v128" {
+        let o = switch op {
+            "and" => O_AND,
+            "or" => O_OR,
+            "xor" => O_XOR,
+            _ => 0u8,
+        };
+        return (o, ast::pick(o != 0, 8u32, 0u32), false);
+    }
+    let lb: u32 = switch shape {
+        "i8x16" => 1,
+        "i16x8" => 2,
+        "i32x4" | "f32x4" => 4,
+        "i64x2" | "f64x2" => 8,
+        _ => 0,
+    };
+    let fl = shape.starts_with("f");
+    let o = if lb == 0 {
+        0u8
+    } else if fl {
+        float_form(op)
+    } else {
+        int_form(op)
+    };
+    return (o, ast::pick(o != 0, lb, 0u32), o != 0 && fl);
+}
+
+// The LIR operation of an arm64 or wasm32 intrinsic's operation name `op` on integer lanes, 0 for none.
+const fn int_form(op: str) u8 {
+    return switch op {
+        "add" => O_ADD,
+        "sub" => O_SUB,
+        "mul" => O_MUL,
+        _ => 0u8,
+    };
+}
+
+// `int_form` on float lanes.
+const fn float_form(op: str) u8 {
+    return switch op {
+        "add" => O_FADD,
+        "sub" => O_FSUB,
+        "mul" => O_FMUL,
+        "div" => O_FDIV,
+        "sqrt" => O_FSQRT,
+        _ => 0u8,
+    };
 }
 
 /// Whether intrinsic `name` reads one lane of a vector at an index its second argument gives

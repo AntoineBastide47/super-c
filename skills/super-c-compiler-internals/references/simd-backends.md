@@ -289,8 +289,16 @@ processor has the instruction (`Cpu.popcnt`, `Cpu.cssc`: the per-level copies kn
 table's byte. Where no entry swizzles bytes (x86-64 before SSSE3) the lanes of 2 bytes or more go one by
 one in groups of 4: each lane stored past the group's active lanes before it, whose count is a byte of
 the group's table row (16 rows of 4 bytes), the row's last byte the group's count, so no bit is counted
-and no lane tested. Without `N` elements after `start` (the end of the slice) a rare block runs the
-lane loop, which checks the count and stores exactly. A checked gather (`gather_checked`) compares all
+and no lane tested. Without `N` elements after `start` (the end of the slice, a slice shorter than the
+vector) a rare block tests once more: the same whole stores run when the count and a tight step's lanes
+are at most `len - start` (a step's lanes; one lane where the lanes go one by one; 16 bytes of a
+32-byte step, which then goes as its halves, each the low 16 bytes of the step moved by the row of the
+half's mask bits), since every store then ends in the slice. The byte shuffle's stores are the fast
+path's block; the other forms have a rare block of their own, so that the fast path's block keeps one
+predecessor. Else the bounds trap of a count past the slice (`__sc_vec_bounds`), then the lane loop,
+which stores exactly and checks nothing (`VOP_UNCHECKED` on the `SIMD_COMPRESS_STORE`: the three
+generators emit no count and no test). The count is a bit count of the mask before the tests where a
+shuffle moves the steps, else the sum of the groups' table bytes. A checked gather (`gather_checked`) compares all
 its indices with the length at once (`SIMD_CMP_GE` into mask bits, the length capped at a narrower index
 lane's greatest value; under a length past that value no lane counts), traps in a failure block when an
 active lane's bit is set (`__sc_lane_bounds` with the lowest such lane, its index read from the indices

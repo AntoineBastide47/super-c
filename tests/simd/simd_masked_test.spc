@@ -280,6 +280,45 @@ fn main(args: Vector<str>) i32 {
     );
 }
 
+// `compress_store` at the end of its slice: a count that ends at the slice's end stores, one past it
+// traps with the count, the start and the length, and so does a start past the slice under no lane.
+// Lanes of 4 bytes of a 64-byte vector, and of 8 bytes into a slice shorter than the vector.
+@test
+fn compress_store_traps_on_a_count_past_its_slice() {
+    let src = M"(import std::simd;
+fn main(args: Vector<str>) i32 {
+    let mut a = [0.0f32; 12];
+    let mut d = [0i64; 3];
+    let k = args.at(1).parse_u64().unwrap() as usize;
+    let v = simd::iota::<f32, 16>();
+    let w = simd::iota::<i64, 4>() + Simd::<i64, 4>::splat(1);
+    if k >= 200 {
+        return simd::compress_store(a, k - 200, Mask::<16>::from_bits_truncate(0), v) as i32;
+    }
+    if k >= 100 {
+        let n = simd::compress_store(d, k - 100, Mask::<4>::from_bits_truncate(0b1011), w);
+        return (n - 3) as i32 + (d[0] - 1) as i32 + (d[1] - 2) as i32 + (d[2] - 4) as i32;
+    }
+    let n = simd::compress_store(a, k, Mask::<16>::from_bits_truncate(0b1000_0001_0100), v);
+    return (n - 3) as i32 + (a[8] + a[9] - 2.0 + a[10] - 4.0 + a[11] - 11.0) as i32;
+}
+)";
+    h::expect_runs(
+        "compress_store at the end of its slice",
+        src,
+        ["9", "10", "13", "100", "101", "212", "213"],
+        [
+            "",
+            "index out of bounds: 3 lanes from 10 but the length is 12",
+            "index out of bounds: 3 lanes from 13 but the length is 12",
+            "",
+            "index out of bounds: 3 lanes from 1 but the length is 3",
+            "",
+            "index out of bounds: 0 lanes from 13 but the length is 12",
+        ],
+    );
+}
+
 // A masked store needs its slice mutably borrowed: a live shared borrow conflicts, as for `store`.
 @test
 fn masked_stores_borrow_their_slice() {

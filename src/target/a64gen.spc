@@ -796,9 +796,11 @@ extend Gen {
         if r == NOREG || (free & bit(r)) == 0 {
             return NOREG;
         }
+        // `next_reg` may have bound `r` to the conversion's result that takes `i`'s bits (`seg_take`): the
+        // dying value left the register then, and that result keeps it.
         if (self.cr.tmps & bit(r)) != 0 {
             self.cr.tmps &= ~bit(r);
-        } else {
+        } else if self.cr.dies(self.cr.owner[r as usize]) {
             self.drop_reg(self.cr.owner[r as usize]);
         }
         self.cr.bind(i, r);
@@ -12672,7 +12674,7 @@ extend Gen {
                 self.emit(a::mov_reg(true, act, m));
             }
         }
-        if cs {
+        if cs && (t.aux & VOP_UNCHECKED) == 0 {
             // The packed lanes must fit from start.
             self.popcnt64(x, act);
             let w0 = self.code.len() as u32;

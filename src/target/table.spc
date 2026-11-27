@@ -89,6 +89,20 @@ pub(package) struct Isa {
     /// (`lir::ir::Package::vec_accs`): fewer copies interleave when theirs need more (a reduction of lanes
     /// several registers wide). 0 for no vectors.
     pub(package) vector_accs: u8,
+    /// The vector registers the native generator's plan gives the values that live past their block (a
+    /// loop's accumulators and the values it reads from before it), in a body that calls nothing that
+    /// returns (`lir::ir::Package::vec_homes`; 0: no bound). x86-64: 8, the 14 registers a value may take
+    /// (`x64gen` `VALLOC_SYSV`, or `VALLOC_WIN` with `vfix`) less the 6 an instruction with a vector result
+    /// holds besides (`vneed`). arm64: 20, v8..v15 and 12 of v16..v29 (`a64gen` `plan_homes`' `vc`, `vs`).
+    /// wasm32, whose generator gives every value a local: the x86-64 count, for the machines its engines
+    /// compile for.
+    pub(package) vector_homes: u8,
+    /// `vector_homes` in a body with a call that returns and writes them: x86-64's 6 under System V
+    /// (`x64gen` `VSCR_SYSV`, xmm8..xmm13).
+    pub(package) vector_homes_calls: u8,
+    /// The vector registers the generator keeps for the values a block makes and reads itself, besides the
+    /// homes (`lir::ir::Package::vec_temps`): x86-64 6 (`vneed`), arm64 10 (v0..v7 and 2 of v16..v29).
+    pub(package) vector_temps: u8,
     /// The lane sizes whose saturating sums and differences the native backend computes in registers, a bit
     /// per size in bytes (1, 2, 4): `lir::ir::Package::vec_sat`.
     pub(package) vector_sat: u8,
@@ -350,6 +364,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 0xFFFFFFFF,
         vector_copies: 4,
         vector_accs: 8,
+        vector_homes: 8,
+        vector_homes_calls: 6,
+        vector_temps: 6,
         vector_sat: 3,
         vector_absd: 3,
         vector_bits: 0x0E0000,
@@ -403,6 +420,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 16,
         vector_copies: 2,
         vector_accs: 16,
+        vector_homes: 20,
+        vector_homes_calls: 20,
+        vector_temps: 10,
         vector_sat: 7,
         vector_absd: 7,
         vector_bits: 0x0E0F07,
@@ -456,6 +476,9 @@ pub(package) const ISAS: [Isa; 3] = [
         arg_copy: 0,
         vector_copies: 2,
         vector_accs: 8,
+        vector_homes: 8,
+        vector_homes_calls: 8,
+        vector_temps: 6,
         vector_sat: 3,
         vector_absd: 7,
         vector_bits: 0x0E0700,
@@ -828,6 +851,9 @@ const UNKNOWN_ISA: Isa = Isa {
     arg_copy: 0,
     vector_copies: 4,
     vector_accs: 0,
+    vector_homes: 0,
+    vector_homes_calls: 0,
+    vector_temps: 0,
     vector_sat: 0,
     vector_absd: 0,
     vector_bits: 0,

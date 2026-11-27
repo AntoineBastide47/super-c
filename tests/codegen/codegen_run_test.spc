@@ -6412,3 +6412,38 @@ fn main() i32 {
     assert(r.built, r.diag.as_str());
     assert_eq(h::diff_run(&r, "").exit, 0);
 }
+
+// A release build of a loop that counts down and reads its stepped counter as a value: the vector loop
+// makes its lanes from the counter, so it does not count its steps down from their sum (it did, and the
+// lanes held that count: 14 for 100 passes, not 7).
+@test
+fn a_loop_that_counts_down_and_reads_its_stepped_counter_keeps_its_values() {
+    let src = M"(@noinline
+fn down_count(n: usize, k: u8) usize {
+    let mut c: usize = 0;
+    let mut i = n;
+    while i != 0 {
+        i -= 1;
+        c += ((i as u8) < k) as usize;
+    }
+    return c;
+}
+
+fn main(args: Vector<str>) i32 {
+    // No argument count reaches a million: the lengths are not constants of the build.
+    let z = args.len() >> 20;
+    let mut bad = 0;
+    for n in [0usize, 1, 31, 32, 33, 40, 100, 300] {
+        // The values of `i as u8` under 7: those under `min(n, 7)`, and 7 more past 262.
+        let want = n.min(7) + 7 * (n > 262) as usize;
+        if down_count(n + z, 7) != want {
+            bad += 1;
+        }
+    }
+    return bad;
+}
+)";
+    let r = h::diff_build(src, ["--profile=release"]);
+    assert(r.built, r.diag.as_str());
+    assert_eq(h::diff_run(&r, "").exit, 0);
+}

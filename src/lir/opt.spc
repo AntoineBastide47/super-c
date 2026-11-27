@@ -1672,6 +1672,12 @@ extend Opt {
         self.unr.apairs = pk.apairs;
         self.unr.vmulh = pk.vec_mulh;
         self.unr.vaccs = pk.vec_accs;
+        self.unr.vhomes = ast::pick(
+            pk.vec_homes_call != pk.vec_homes && bu.partial != 0 && writes_homes(pk, b),
+            pk.vec_homes_call,
+            pk.vec_homes,
+        );
+        self.unr.vtemps = pk.vec_temps;
         self.unr.vminnum = pk.vminnum;
         self.unr.vsat = pk.vec_sat;
         self.unr.vabsd = pk.vec_absd;
@@ -22405,6 +22411,42 @@ const fn speculable(pk: &Package, b: &Body, t: Inst) bool {
 // writes memory may change (a task resumes on another thread).
 const fn tls_addr(pk: &Package, b: &Body, t: Inst) bool {
     return t.op == O_SYMADDR && pk.syms[b.syms[t.a as usize] as usize].kind == SK_TLS;
+}
+
+// Whether `b` holds an instruction the native generators may run as a call that returns and writes the
+// vector registers (`x64gen` `quiet`), which leaves the values that live past their block
+// `Package.vec_homes_call` registers: a call (an intrinsic too: its template takes registers), inline
+// assembly, a copy or fill, a 128-bit division or float conversion, a vector remainder or fused
+// multiply-add, each but straight before `unreachable`; a system operation, a variadic access, a
+// thread-local's address. Not the calls of the body's run-time copies (`il::dispatch_of`), which the
+// generators compile apart from the body.
+fn writes_homes(pk: &Package, b: &Body) bool {
+    let mut copies = Vector::<u64>::new();
+    let _ = il::dispatch_of(pk, b, true, &mut copies);
+    for k in 0..b.blocks.len() {
+        let bk = b.blocks[k];
+        let end = bk.start + bk.len - 1;
+        for i in bk.start..end {
+            let t = b.insts[i as usize];
+            let op = t.op;
+            let code = (t.aux & VOP_CODE) as u32;
+            let wide = (op >= O_SDIV && op <= O_UREM || op >= O_FPTOSI && op <= O_UITOFP) && (t.ty == T_I128 || b.type_of(
+                t.a,
+            ) == T_I128);
+            let mut call = op == O_CALL || op == O_CALLIND || op == O_ASM || op == O_MEMCPY || op == O_MEMSET || wide || op == O_VOP && (code == core::OP_REM || code == core::OP_SIMD + core::SIMD_FMA as u32);
+            for q in 0..copies.len() {
+                call = call && !(op == O_CALL && bk.len == 2 && copies[q] as u32 == t.a);
+            }
+            if call && !(i + 1 == end && b.insts[end as usize].op == O_UNREACHABLE) || op == O_SYS || op == O_VASTART || op == O_VAARG || tls_addr(
+                pk,
+                b,
+                t,
+            ) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // Whether value `v` is an operand of call `t` of `b` only as by-value aggregate arguments of at most

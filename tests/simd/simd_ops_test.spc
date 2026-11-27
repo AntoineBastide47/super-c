@@ -6,6 +6,8 @@ import tests::gen::driver as gen;
 import tests::gen::vector as vec;
 import tests::harness as h;
 import tests::cli_harness as cli;
+import std::cpu;
+import std::cpu::detect as detect;
 
 // Both oracles over every case of the operations `ops` (every lane type, 2, 4 and the most lanes, and
 // for a conversion every target), in programs of at most 256 cases.
@@ -374,6 +376,13 @@ fn masks_read_several_times_stay_lane_masks() {
 // `main` runs each over slices of equal elements (every lane counts in every iteration) of the iterations
 // around one and two runs of 255 (65535 for 2-byte lanes), and over mixed elements; it returns the wrong
 // counts of equal elements.
+// Scalar loops that count flags, which the vectorizer keeps the same way: a flag added as an integer
+// (`flag_u8`, `flag_u32`; `flag_narrow` into a 1-byte sum), a step under a condition (`cond_u16`,
+// `cond_f64`; `cond_range` under two), two counts, one taken from its sum, beside a sum of the elements
+// (`flag_two`), a loop that leaves at an element (`flag_break`), counts beside wider and narrower lanes
+// (`flag_beside_u32`, `flag_f32_beside_u8`), a counter down (`flag_down`) and one that steps by 2
+// (`flag_step`). `main` runs them around a run of 255 vector iterations of 16 to 128 elements (65535 of 8
+// to 64 for 2-byte lanes).
 const MASK_COUNTS: str = M"(import std::simd;
 
 @noinline
@@ -470,12 +479,148 @@ fn count_range(x: []u8, lo: u8, hi: u8) usize {
     return c;
 }
 
+@noinline
+fn flag_u8(x: []u8, v: u8) usize {
+    let mut c: usize = 0;
+    for i in 0..x.len() {
+        c += (x[i] == v) as usize;
+    }
+    return c;
+}
+
+@noinline
+fn cond_u16(x: []u16, v: u16) u32 {
+    let mut c: u32 = 5;
+    for i in 0..x.len() {
+        if x[i] < v {
+            c += 1;
+        }
+    }
+    return c;
+}
+
+@noinline
+fn flag_u32(x: []u32, v: u32) u64 {
+    let mut c: u64 = 0;
+    for i in 0..x.len() {
+        c += (x[i] != v) as u64;
+    }
+    return c;
+}
+
+@noinline
+fn flag_narrow(x: []u32, v: u32) u8 {
+    let mut c: u8 = 0;
+    for i in 0..x.len() {
+        c = c.wrapping_add((x[i] == v) as u8);
+    }
+    return c;
+}
+
+@noinline
+fn cond_f64(x: []f64, v: f64) usize {
+    let mut c: usize = 0;
+    for i in 0..x.len() {
+        if x[i] < v {
+            c += 1;
+        }
+    }
+    return c;
+}
+
+@noinline
+fn flag_two(x: []u8, v: u8, w: u8) u64 {
+    let mut c: usize = 0;
+    let mut d: usize = 1000000;
+    let mut s: u32 = 0;
+    for i in 0..x.len() {
+        if x[i] == v {
+            c += 1;
+        }
+        d -= (x[i] < w) as usize;
+        s += x[i];
+    }
+    return c as u64 * 1000000000000 + d as u64 * 1000000 + s as u64;
+}
+
+@noinline
+fn cond_range(x: []u8, lo: u8, hi: u8) usize {
+    let mut c: usize = 0;
+    for i in 0..x.len() {
+        if x[i] > lo && x[i] < hi {
+            c += 1;
+        }
+    }
+    return c;
+}
+
+@noinline
+fn flag_break(x: []u8, v: u8, stop: u8) usize {
+    let mut c: usize = 0;
+    for i in 0..x.len() {
+        if x[i] == stop {
+            break;
+        }
+        c += (x[i] == v) as usize;
+    }
+    return c;
+}
+
+@noinline
+fn flag_beside_u32(x: []u8, y: []u32, v: u8) u64 {
+    let mut c: usize = 0;
+    let mut s: u32 = 0;
+    for i in 0..x.len() {
+        c += (x[i] == v) as usize;
+        s += y[i];
+    }
+    return c as u64 * 1000000 + (s % 1000000) as u64;
+}
+
+@noinline
+fn flag_f32_beside_u8(x: []f32, y: []u8, v: f32) u64 {
+    let mut c: usize = 0;
+    let mut s: u8 = 0;
+    for i in 0..x.len() {
+        c += (x[i] < v) as usize;
+        s = s.wrapping_add(y[i]);
+    }
+    return c as u64 * 1000 + s as u64;
+}
+
+@noinline
+fn flag_down(x: []u8, v: u8) usize {
+    let mut c: usize = 0;
+    let mut i = x.len();
+    while i > 0 {
+        i -= 1;
+        c += (x[i] == v) as usize;
+    }
+    return c;
+}
+
+@noinline
+fn flag_step(x: []u8, v: u8) usize {
+    let mut c: usize = 0;
+    let mut i: usize = 0;
+    while i < x.len() {
+        c += (x[i] == v) as usize;
+        i += 2;
+    }
+    return c;
+}
+
 fn main() i32 {
     let mut bytes = Vector::<u8>::new();
     let mut mixed = Vector::<u8>::new();
+    let mut stops = Vector::<u8>::new();
+    let mut nums = Vector::<u32>::new();
     for i in 0usize..65700 {
         bytes.push(3);
         mixed.push(((i * 7 + i / 13) % 5) as u8);
+        // One element stops `flag_break`.
+        stops.push((3 + 6 * (i == 65600) as usize) as u8);
+        nums.push((i % 7) as u32);
     }
     let runs: [usize; 8] = [0, 1, 254, 255, 256, 510, 511, 1025];
     let mut bad = 0;
@@ -516,13 +661,71 @@ fn main() i32 {
     }
     println("{} {} {}", count_u32(ints[0..4000], 3), count_u32_wide(ints[0..3999], 3), count_f64(floats[0..3996], 4.0));
     println("{} {} {}", count_u32(ints[0..15], 3), count_u32_wide(ints[0..16], 3), count_f64(floats[0..0], 4.0));
+    for base in [16usize, 32, 64, 128] {
+        for off in [0usize, 1, 2, base + 1, 255 * base + 18, 255 * base + base + 1] {
+            let n = 255 * base + off - 1;
+            let a = flag_u8(bytes[0..n], 3);
+            let b = flag_two(bytes[0..n], 3, 4);
+            let c = cond_range(bytes[0..n], 2, 4);
+            let d = flag_break(stops[65600 - n..65650], 3, 9);
+            let e = flag_beside_u32(bytes[0..n], nums[0..n], 3);
+            let f = flag_down(bytes[0..n], 3);
+            let g = flag_step(bytes[0..n], 3);
+            let two = n as u64 * 1000000000000 + (1000000 - n as u64) * 1000000 + 3 * n as u64;
+            if a != n || b != two || c != n || d != n || e / 1000000 != n as u64 || f != n || g != (n + 1) / 2 {
+                bad += 1;
+            }
+            println("{} {} {} {} {} {} {} {}", n, a, b, c, d, e, f, g);
+            println(
+                "{} {} {} {} {} {} {}",
+                flag_u8(mixed[3..3 + n], 3),
+                flag_two(mixed[1..1 + n], 4, 2),
+                cond_range(mixed[2..2 + n], 0, 3),
+                flag_break(mixed[0..n], 2, 7),
+                flag_beside_u32(mixed[0..n], nums[5..5 + n], 1),
+                flag_down(mixed[7..7 + n], 0),
+                flag_step(mixed[0..n], 4),
+            );
+        }
+    }
+    for i in 65537usize * 32..65537 * 64 {
+        words.push((i % 3) as u16);
+    }
+    for base in [8usize, 16, 32, 64] {
+        for off in [0usize, 1, 2, base + 4] {
+            let n = 65535 * base + off - 1;
+            let a = cond_u16(words[0..n], 9);
+            if a != n as u32 + 5 {
+                bad += 1;
+            }
+            println("{} {} {}", n, a, cond_u16(words[1..1 + n], 1));
+        }
+    }
+    let mut singles = Vector::<f32>::new();
+    for i in 0usize..4000 {
+        singles.push((i % 2) as f32);
+    }
+    for n in [0usize, 1, 7, 17, 4000] {
+        println(
+            "{} {} {} {} {} {} {} {}",
+            flag_u8(mixed[0..n], 3),
+            cond_u16(words[0..n], 1),
+            flag_u32(ints[0..n], 3),
+            flag_narrow(ints[0..n], 3),
+            flag_narrow(ints[0..n], 9),
+            cond_f64(floats[0..n], 4.0),
+            flag_f32_beside_u8(singles[0..n], mixed[0..n], 0.5),
+            flag_break(stops[65600 - n..65601], 3, 9),
+        );
+    }
     return bad;
 }
 )";
 
-// A release build keeps those sums in lane accumulators (`lir::loops` `count_lanes`); a debug build
-// counts each iteration. Both give the same counts, and the counts of equal elements are the elements'.
-// On x86-64 the baseline's code runs too (the run-time copies off).
+// A release build keeps those sums in lane accumulators (`lir::loops` `count_lanes`, and the vectorizer's
+// counts of flags); a debug build counts each iteration. Both give the same counts, and the counts of equal
+// elements are the elements'. On x86-64 the baseline's code runs too (the run-time copies off), and the
+// AVX2 code of the whole program where the processor has it.
 @test(timeout = 300)
 fn mask_counts_summed_in_loops_match() {
     let d = h::diff_build(MASK_COUNTS, ["--profile=debug"]);
@@ -542,6 +745,15 @@ fn mask_counts_summed_in_loops_match() {
             eprintln("debug and the baseline: {}", n.as_str());
         }
         assert(n.len() == 0, "the baseline's code counts as a debug build");
+        if detect::has_level(cpu::Level::V3) {
+            let w = h::diff_build(MASK_COUNTS, ["--profile=release", "--target-cpu=x86-64-v3"]);
+            assert(w.built, "the program builds for x86-64-v3");
+            let v = h::same_runs(&d, &w, [""]);
+            if v.len() != 0 {
+                eprintln("debug and x86-64-v3: {}", v.as_str());
+            }
+            assert(v.len() == 0, "the AVX2 code counts as a debug build");
+        }
     }
 }
 

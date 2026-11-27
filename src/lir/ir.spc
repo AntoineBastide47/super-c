@@ -1324,7 +1324,8 @@ pub(package) const VOP_SIGNED: u16 = 256;
 /// `cast_changed`, its cast result operand's).
 pub(package) const VOP_DSIGNED: u16 = 512;
 /// A float to integer conversion that does not saturate: the lanes are not NaN and fit. A
-/// `SIMD_SWIZZLE_ZERO` whose every index is below the lanes (`lir::lower` `compress_chunks`).
+/// `SIMD_SWIZZLE_ZERO` whose every index is below the lanes, and a `SIMD_COMPRESS_STORE` whose count
+/// fits the slice from its start, so that the generator checks nothing (`lir::lower` `compress_chunks`).
 pub(package) const VOP_UNCHECKED: u16 = 1024;
 /// A float SIMD_MIN or SIMD_MAX that computes C's `fmin` or `fmax` per lane (the vectorized call): a lane
 /// with a signaling NaN gives what the target's scalar instruction gives, as the call (arm64 `fminnm`). A
@@ -2525,6 +2526,13 @@ pub(package) struct Package {
     /// (`target::table::Isa`), 0 for no bound: the loop vectorizer interleaves fewer copies of reductions
     /// several registers wide.
     pub(package) vec_accs: u32,
+    /// The vector registers the native generator gives the values that live past their block
+    /// (`target::table::Isa.vector_homes`; 0: no bound), those of a body with a call that returns
+    /// (`vector_homes_calls`), and the registers it keeps beside them for a block's own values
+    /// (`vector_temps`): partial unrolling keeps its loop's values within them (`lir::loops` `split_plan`).
+    pub(package) vec_homes: u32,
+    pub(package) vec_homes_call: u32,
+    pub(package) vec_temps: u32,
     /// The lane sizes whose saturating sums and differences (`SIMD_SAT_ADD`, `SIMD_SAT_SUB`) the native
     /// backend computes in registers (`target::table::Isa`), a bit per size in bytes (1, 2, 4): the loop
     /// vectorizer computes a saturating sum's idiom at the narrow lanes (`lir::loops`).
@@ -2768,6 +2776,9 @@ extend Package {
             vops: 0,
             vec_mulh: 7,
             vec_accs: 0,
+            vec_homes: 0,
+            vec_homes_call: 0,
+            vec_temps: 0,
             vec_sat: 7,
             vec_absd: 7,
             vec_sumw: 0x8CE,

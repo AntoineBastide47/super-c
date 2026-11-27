@@ -67,7 +67,11 @@
 // Lane counts (`count_lanes`): a counted loop that adds the count of the set lanes of lane masks to an
 // integer (`c += mask.count()`, a `reduce_add` of the masks negated) adds the masks to lane accumulators
 // in an inner loop that runs at most as many iterations as a lane counts (255 for bytes); a block between
-// its runs adds the accumulators' lanes to the integer by a widening sum.
+// its runs adds the accumulators' lanes to the integer by a widening sum. The vectorizer keeps a scalar
+// loop's count of flags the same way (`c += (x == v) as T`, `if x == v { c += 1 }`: `count_bytes`,
+// `cond_count`): the accumulators are vectors of the flags' masks' lanes, the guard bounds the vector
+// iterations of one entry, and the vector loop's exit adds the lanes to the sum (`lanes_sum`) and enters
+// the guard again after a full run.
 //
 // Rotation (LLVM's LoopRotate, GCC's loop header copying): a loop whose header only tests whether to run
 // the body gets a copy of the header the latch enters instead, so each iteration ends in one conditional
@@ -109,6 +113,8 @@ const JAM_CHAIN: u32 = 4;
 const EPI_LANES: u32 = 16;
 // `zero_lanes` follows at most ZERO_DEPTH operations.
 const ZERO_DEPTH: u32 = 4;
+// `LoopOpt::flag_bytes` follows at most FLAG_DEPTH operations.
+const FLAG_DEPTH: u32 = 4;
 // The fewest lanes of a vector loop that runs what it leaves as one masked iteration (`masked_tail`): with
 // fewer, the at most 3 scalar iterations it replaces cost less than its lane comparison, predicated accesses
 // and selects.
@@ -444,6 +450,11 @@ pub(package) struct LoopOpt {
     /// The vector registers the reductions may hold over all the copies (`Package.vec_accs`, 0: no bound):
     /// `vcopies`.
     pub(package) vaccs: u32,
+    /// The vector registers the generator gives the body's values that live past their block
+    /// (`Package.vec_homes`, or `Package.vec_homes_call` of a body that calls; 0: no bound) and those it
+    /// keeps beside for a block's own values (`Package.vec_temps`): `split_plan`.
+    pub(package) vhomes: u32,
+    pub(package) vtemps: u32,
     /// How the target computes a minimumNumber of float vectors (`Package.vminnum`): `num_red`.
     pub(package) vminnum: u8,
     /// Per symbol of the body, the vector operation a call of it computes per lane (`lane_fn`), 0 for none.
@@ -499,7 +510,8 @@ pub(package) struct LoopOpt {
     vtried: bool, // the plan took an idiom or a widening sum
     vnoid: bool, // the plan takes neither (`vplan`'s second try)
     // Per reduction, for a widening sum, its accumulators' lane bytes (0: its own lanes), the narrow value it
-    // sums and that value's lane bytes.
+    // sums and that value's lane bytes; for a count of a flag (`count_red`), the flag and its mask's lane
+    // bytes as both.
     vwa: Vector<u32>,
     vrn: Vector<Value>,
     vwn: Vector<u32>,
@@ -808,6 +820,8 @@ extend LoopOpt {
             apairs: true,
             vmulh: 0,
             vaccs: 0,
+            vhomes: 0,
+            vtemps: 0,
             vminnum: 0,
             vfn: Vector::<u8>::new(),
             vfma: false,
@@ -3093,6 +3107,29 @@ extend LoopOpt {
                 self.vdr.push(0);
                 continue;
             }
+            // A sum that a select steps by 1 on a flag: a count in the lanes of the flag's mask (`cond_count`).
+            let cn = if at.op == O_SELECT && !one {
+                self.cond_count(b, u, pv, a)
+            } else {
+                0u32
+            };
+            if cn != 0 {
+                self.vk[(a - ub.start) as usize] = VK_RED;
+                self.vk[(ast::pick(at.b == pv, at.c, at.b) - ub.start) as usize] = VK_RCMP;
+                self.vred.push(pv);
+                self.vrup.push(a);
+                self.vrel.push(0);
+                self.vord.push(false);
+                self.vzr.push(false);
+                self.vfr.push(0);
+                self.vcw.push(ast::pick(at.b == pv, at.c, at.b));
+                self.vbo.push(0);
+                self.vwa.push(cn);
+                self.vrn.push(at.a);
+                self.vwn.push(cn);
+                self.vdr.push(0);
+                continue;
+            }
             // std's `f32::maximum` or `minimum` (`ieee_red`), a minimumNumber or maximumNumber of its own
             // (`num_red`).
             let fi = if at.op == O_SELECT && !one {
@@ -3192,8 +3229,9 @@ extend LoopOpt {
             let assoc = (fmath & FM_ASSOC) != 0;
             let f_op = at.op == O_FADD || at.op == O_FMUL || at.op == O_FSUB && at.a == pv && !assoc;
             let ok_op = is_int(ty) && ty != T_I128 && int_op || is_float(ty) && f_op;
-            // A sum of a narrower value zero-extended: its lanes summed into wider accumulators (`widening`).
-            let (wa, wn, wb) = if ok_op && at.op == O_ADD && is_int(ty) && !one && !self.vnoid {
+            // A sum of a narrower value zero-extended: its lanes summed into wider accumulators; a sum or
+            // difference of a flag: a count in its mask's lanes (`widening`).
+            let (wa, wn, wb) = if ok_op && (at.op == O_ADD || at.op == O_SUB) && is_int(ty) && !one {
                 self.widening(b, u, at, pv, ty)
             } else {
                 (0u32, VNONE, 0u32)
@@ -3290,11 +3328,20 @@ extend LoopOpt {
                         return self.no("a reduction takes no lane value", t.op);
                     }
                 }
-                // A widening sum also takes a comparison's flag (its mask, negated: `O_VSUMW`).
-                let mk = wn != VNONE && self.kind(b, u, o) == VK_MASK;
-                if self.kind(b, u, o) != VK_LANE && self.kind(b, u, o) != VK_INV && !mk && !((one || cw != VNONE) && !self.defined_in(
-                    o,
-                )) {
+                // A count takes its flags' masks (no comparison of another reduction, `VK_RCMP`): each step
+                // takes a link of its chain.
+                let cnt = self.count_red(self.red_of(i));
+                let ko = self.kind(b, u, o);
+                let mut lane = cnt || ko == VK_LANE || ko == VK_INV || (one || cw != VNONE) && !self.defined_in(o);
+                let mut v = ast::pick(cnt, o, VNONE);
+                for _ in 0..FLAG_DEPTH {
+                    if v != VNONE {
+                        let (f, next, _, _, _) = count_link(b, v);
+                        lane = lane && self.kind(b, u, f) == VK_MASK;
+                        v = next;
+                    }
+                }
+                if !lane {
                     return self.no("a reduction takes no lane value", t.op);
                 }
                 continue;
@@ -3546,10 +3593,11 @@ extend LoopOpt {
                 return self.no("a modulo address wraps inside a vector", O_UREM);
             }
         }
-        // A widening sum's narrow lanes fill a vector of the plan's bytes, a whole number of accumulator lanes.
+        // A widening sum's narrow lanes fill a vector of the plan's bytes, a whole number of accumulator lanes
+        // (a count's accumulator is its mask's vector).
         for r in 0..self.vwa.len() {
             let wa = self.vwa[r];
-            if wa != 0 && (self.vlanes * self.vwn[r] != self.vbytes || self.vbytes % wa != 0) {
+            if wa != self.vwn[r] && (self.vlanes * self.vwn[r] != self.vbytes || self.vbytes % wa != 0) {
                 return self.no("a widening sum's lanes do not fill a vector", O_ADD);
             }
         }
@@ -4642,17 +4690,37 @@ extend LoopOpt {
     }
 
     // Reduction update `at` (an integer `add` of header parameter `pv` of type `ty`, body `u`) as a sum of a
-    // narrower value zero-extended (`zext(x)` that only it reads, a comparison's flag extended or chosen as 1
-    // or 0, at the compared values' width, or an absolute difference, `idioms`) the target widens in
-    // registers: (the accumulators' lane bytes, the narrow value, its lane bytes); (0,
-    // VNONE, 0) when not.
+    // narrower value zero-extended (`zext(x)` that only it reads, or an absolute difference, `idioms`) the
+    // target widens in registers: (the accumulators' lane bytes, the narrow value, its lane bytes). An `add`
+    // of flags' 0 or 1 (`count_bytes`), or its difference from `pv`, is a count on every target
+    // (`count_red`): (the lane bytes of its mask, the value, those bytes). (0, VNONE, 0) when neither.
     fn widening(self: &mut Self, b: &Body, u: u32, at: Inst, pv: Value, ty: u8) (u32, Value, u32) {
         self.vdot_at = 0;
         let o = ast::pick(at.a == pv, at.b, at.a);
         if !self.in_body(b, u, o) {
             return (0u32, VNONE, 0u32);
         }
-        let x = (o - b.blocks[u as usize].start) as usize;
+        let ub = b.blocks[u as usize];
+        let x = (o - ub.start) as usize;
+        let n = self.count_bytes(b, u, o);
+        let mut v = ast::pick(n != 0, o, VNONE);
+        // The count computes the links that are no flags. Each step takes a link of the chain.
+        for _ in 0..FLAG_DEPTH {
+            if v != VNONE {
+                let (f, next, _, _, _) = count_link(b, v);
+                if f != v {
+                    self.vk[(v - ub.start) as usize] = VK_IDI;
+                }
+                v = next;
+            }
+        }
+        if n != 0 {
+            return (n, o, n);
+        }
+        if at.op != O_ADD || self.vnoid {
+            return (0u32, VNONE, 0u32);
+        }
+        let ot = b.insts[o as usize];
         // A product of two extended narrow values only the sum reads, into 4-byte lanes: a dot product
         // (`O_VDOT`) where the target sums the narrow lanes' products so.
         if (self.vid[x] == ID_MULW || self.vid[x] == ID_MULWS) && self.reads(b, u, o) == 1 && type_bytes(ty, 8) == 4 {
@@ -4664,17 +4732,8 @@ extend LoopOpt {
                 return (4u32, self.vida[x], n);
             }
         }
-        let ot = b.insts[o as usize];
-        // A comparison's flag as an integer: extended, or chosen as 1 or 0.
-        let flag = ot.op == O_ZEXT || ot.op == O_SELECT && int_bits(b, ot.b) == Some(1u64) && int_bits(b, ot.c) == Some(
-            0u64,
-        );
-        let cmp = flag && self.in_body(b, u, ot.a) && (b.insts[ot.a as usize].op == O_ICMP || b.insts[ot.a as usize].op == O_FCMP);
         let (y, nt) = if self.vid[x] == ID_ABSD || self.vid[x] == ID_ABSDS {
             (o, b.type_of(self.vida[x]))
-        } else if self.vk[x] == 0 && self.reads(b, u, o) == 1 && cmp {
-            // A comparison's flag: its 0 or 1 in lanes of the compared values' width.
-            (ot.a, int_type(type_bytes(b.type_of(b.insts[ot.a as usize].a), 8)))
         } else if ot.op == O_ZEXT && self.vk[x] == 0 && self.reads(b, u, o) == 1 {
             (ot.a, b.type_of(ot.a))
         } else {
@@ -4692,6 +4751,122 @@ extend LoopOpt {
         }
         self.vtried = true;
         return (wa, y, type_bytes(nt, 8));
+    }
+
+    // The lane bytes of the mask of `o` of body `u` as a count, a value of flags (`flag_bytes`) that is 0 or
+    // one unit, 1 or -1: its first flag's. `o` is a chain of at most FLAG_DEPTH links of one unit
+    // (`count_link`), each but a flag read by the link before it alone (the first by the sum) and no part
+    // of an idiom. 0 when `o` is no such value.
+    fn count_bytes(self: &mut Self, b: &Body, u: u32, o: Value) u32 {
+        let mut v = o;
+        let mut n: u32 = 0;
+        let mut unit: i32 = 0;
+        // Each step takes a link of the chain.
+        for _ in 0..FLAG_DEPTH {
+            if !self.in_body(b, u, v) {
+                return 0;
+            }
+            let (f, next, _, _, k) = count_link(b, v);
+            let fb = self.flag_bytes(b, u, f, FLAG_DEPTH);
+            if fb == 0 || k * unit < 0 || f != v && (self.vk[(v - b.blocks[u as usize].start) as usize] != 0 || self.reads(
+                b,
+                u,
+                v,
+            ) != 1) {
+                return 0;
+            }
+            n = ast::pick(n == 0, fb, n);
+            unit = ast::pick(k != 0, k, unit);
+            if next == VNONE {
+                return n;
+            }
+            v = next;
+        }
+        return 0;
+    }
+
+    // Copy `c` of the mask of count `o` of body `u` (`count_bytes`), of type `vt`, at location `l`: each
+    // link's flag's mask, negated where the link takes it so, combined with the mask of the links after it.
+    fn count_mask(self: &mut Self, b: &mut Body, u: u32, c: u32, o: Value, vt: u8, l: u32) Value {
+        let (f, next, inv, any, _) = count_link(b, o);
+        let fv = self.vval(b, u, c, f);
+        let mut m = self.vmask(b, fv, vt, l);
+        if inv {
+            m = self.vi(b, Inst { op: O_NOT, ty: vt, aux: 0, a: m, b: VNONE, c: VNONE }, l);
+        }
+        if next == VNONE {
+            return m;
+        }
+        let r = self.count_mask(b, u, c, next, vt, l);
+        return self.vi(b, Inst { op: ast::pick(any, O_OR, O_AND), ty: vt, aux: 0, a: m, b: r, c: 0 }, l);
+    }
+
+    // The lane bytes of the mask of the flag on which select `a`, the next value of integer header parameter
+    // `pv` of body `u`, takes `pv` plus or minus 1, else `pv`: a count (`count_red`, `count_how`), when the
+    // select alone reads that step and the two alone read `pv`. 0 when `a` is no such select.
+    fn cond_count(self: &mut Self, b: &Body, u: u32, pv: Value, a: u32) u32 {
+        let s = b.insts[a as usize];
+        let w = ast::pick(s.b == pv, s.c, s.b);
+        if s.b == pv == (s.c == pv) || !self.in_body(b, u, w) || !is_int(s.ty) || s.ty == T_I128 {
+            return 0;
+        }
+        let t = b.insts[w as usize];
+        let k = count_unit(b, t.b, type_bits(s.ty, 8));
+        if t.op != O_ADD && t.op != O_SUB || t.a != pv || k != 1 && k != -1 || self.reads(b, u, pv) != 2 || self.reads(
+            b,
+            u,
+            w,
+        ) != 1 || self.reads(b, u, a) != 1 {
+            return 0;
+        }
+        return self.flag_bytes(b, u, s.a, FLAG_DEPTH);
+    }
+
+    // How count `r` reads its mask: (negated, when its select steps the sum where the flag is 0; taken from
+    // the sum, when its update subtracts the unit 1 or adds the unit -1, `count_link`).
+    const fn count_how(self: &Self, b: &Body, r: u32) (bool, bool) {
+        let up = b.insts[self.vrup[r as usize] as usize];
+        let w = self.vcw[r as usize];
+        if w != VNONE {
+            let t = b.insts[w as usize];
+            let down = count_unit(b, t.b, type_bits(t.ty, 8)) < 0;
+            return (up.b == self.vred[r as usize], t.op == O_SUB != down);
+        }
+        let mut v = self.vrn[r as usize];
+        let mut unit: i32 = 0;
+        // Each step takes a link of the chain.
+        for _ in 0..FLAG_DEPTH {
+            if v != VNONE {
+                let (_, next, _, _, k) = count_link(b, v);
+                unit = ast::pick(k != 0, k, unit);
+                v = next;
+            }
+        }
+        let down = unit < 0;
+        return (false, up.op == O_SUB != down);
+    }
+
+    // The lane bytes of the mask of flag `v` of body `u`: a comparison's operands' bytes; of an `and` or `or`
+    // of two flags the first's, whose mask type the vector operation takes (`vbody`). 0 when `v` is no flag
+    // `depth` operations deep.
+    const fn flag_bytes(self: &Self, b: &Body, u: u32, v: Value, depth: u32) u32 {
+        if !self.in_body(b, u, v) {
+            return 0;
+        }
+        let t = b.insts[v as usize];
+        if t.op == O_ICMP || t.op == O_FCMP {
+            return type_bytes(b.type_of(t.a), 8);
+        }
+        if depth == 0 || t.op != O_AND && t.op != O_OR || self.flag_bytes(b, u, t.b, depth - 1) == 0 {
+            return 0;
+        }
+        return self.flag_bytes(b, u, t.a, depth - 1);
+    }
+
+    // Whether reduction `r` is a count (`widening`): each of its accumulators the sum of its flag's masks, in
+    // each lane the count negated, which holds no more masks than the lane's greatest value (`lane_cap`).
+    const fn count_red(self: &Self, r: u32) bool {
+        return self.vwa[r as usize] != 0 && self.vwa[r as usize] == self.vwn[r as usize];
     }
 
     // The type of reduction `r`'s accumulators: its lanes' vector (a scalar when ordered), or for a widening
@@ -4781,9 +4956,12 @@ extend LoopOpt {
         return v >= ub.start && v < ub.start + ub.len;
     }
 
-    // Whether the counter of loop body `u` feeds nothing but its step and the exit test: the vector loop may
-    // then count its steps down to 0.
+    // Whether the counter of loop body `u` feeds nothing but its step and the exit test, and its stepped
+    // value nothing but the back edge (no lanes, `vstep`): the vector loop may then count its steps down to 0.
     fn counter_free(self: &mut Self, b: &Body, u: u32) bool {
+        if self.vstep != VNONE {
+            return false;
+        }
         let ub = b.blocks[u as usize];
         let tm = b.insts[(ub.start + ub.len - 1) as usize];
         let test = ast::pick(tm.op == O_BR, tm.a, VNONE);
@@ -6239,7 +6417,9 @@ extend LoopOpt {
     // Vectorize loop `h` (preheader `p`, body `u`) as planned, `nv` vectors interleaved. The preheader
     // enters a guard that runs the vector loop or enters the loop through a new preheader: a block that
     // branches on the count, then one of the range and alignment checks, when the plan has any. The vector
-    // loop's exit reduces its accumulators and enters the loop with the iterations left.
+    // loop's exit reduces its accumulators and enters the loop with the iterations left. With a count whose
+    // lanes are narrower than its sum (`count_red`), the guard takes at most the iterations the count's
+    // accumulators hold (`lane_cap`), and the exit enters the guard again after that many.
     fn vectorize(self: &mut Self, b: &mut Body, h: u32, p: u32, u: u32, nv: u32) {
         self.wide = self.wide || !self.vone && self.vlanes * self.vsz > self.vmax;
         self.vdummy = NONE;
@@ -6256,6 +6436,23 @@ extend LoopOpt {
         let step = self.vlanes * nv;
         let nred = self.vred.len() as u32;
         let nfo = self.vfop.len() as u32;
+        let ks = self.vqk.trailing_zeros();
+        // The most iterations the vectors run per entry of the guard, 0 for no bound: as many vector
+        // iterations as each count's accumulators hold masks (`lane_cap`). No bound either where the
+        // counter's type holds no more iterations, or the loop runs no more: at most its bound's greatest
+        // value counting up (from 0 or above when signed, `vplan`), its start's counting down (`top_of`).
+        let mut cap: u64 = 0;
+        for r in 0..nred {
+            if self.count_red(r) {
+                cap = lane_cap(cap, self.acc_ty(b, r), b.params[(self.vred[r as usize] & ~VPARAM) as usize]);
+            }
+        }
+        let mut most = cap * step as u64;
+        let from = b.edge_arg(term(b, p).a, (self.viv & ~VPARAM) - hb.param_start);
+        let far = top_of(b, ast::pick(self.vrev, from, self.vn), type_bits(qt, 8), 4);
+        if most > mask_of(type_bits(qt, 8)) >> ks as u64 || far <= most {
+            most = 0;
+        }
         self.vmt = self.masked_tail(b, u, nv);
         // A constant count of iterations, from a constant start, that the vector iterations divide ends with
         // them: no overlapping or masked last one, and the loop that runs the rest runs no iteration.
@@ -6311,7 +6508,6 @@ extend LoopOpt {
         } else {
             self.vi(b, Inst { op: O_SUB, ty: qt, aux: 0, a: self.vn, b: i0, c: 0 }, l0)
         };
-        let ks = self.vqk.trailing_zeros();
         if self.vqk > 1 {
             // The iterations from `i0` by `k` below `n`: ((n - i0 - 1) >> log2 k) + 1 (`i0 < n`).
             let one = self.vconst(b, qt, 1, l0);
@@ -6329,11 +6525,14 @@ extend LoopOpt {
         }
         let z = self.vconst(b, qt, 0, l0);
         // Counting down from `i0`, the loop runs `i0` iterations.
-        let trips = if self.vrev {
+        let mut trips = if self.vrev {
             d
         } else {
             self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0)
         };
+        if most != 0 {
+            trips = self.at_most(b, trips, most, l0);
+        }
         // The trips the vector iterations take: a multiple of the step (a mask for a power of 2; else less
         // the remainder: the copies of a modulo address, `vcopies`).
         let cnt = if step.is_power_of_two() {
@@ -6420,6 +6619,13 @@ extend LoopOpt {
             cnt
         };
         let iend = self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: i0, b: cu, c: 0 }, l0);
+        // The counter after the most iterations (`most`): there the accumulators hold no mask more.
+        let lim = if most != 0 {
+            let mv = self.vconst(b, qt, most << ks as u64, l0);
+            self.vi(b, Inst { op: ast::pick(self.vrev, O_SUB, O_ADD), ty: qt, aux: 0, a: i0, b: mv, c: 0 }, l0)
+        } else {
+            VNONE
+        };
         self.vpowers(b, u, nv, l0);
         self.vinv.truncate(0);
         self.vspl.truncate(0);
@@ -6768,6 +6974,12 @@ extend LoopOpt {
                 self.args.push(VPARAM | xps + r * nv);
                 continue;
             }
+            if self.count_red(r) {
+                let r0 = VPARAM | gps + (pv & ~VPARAM) - hb.param_start;
+                let minus = self.count_how(b, r).1;
+                self.args.push(self.lanes_sum(b, r0, VPARAM | xps + r * nv, nv, minus, l0));
+                continue;
+            }
             let rt = b.params[(pv & ~VPARAM) as usize];
             let op = self.red_op(b, r);
             let vt = self.acc_ty(b, r);
@@ -6874,15 +7086,36 @@ extend LoopOpt {
                 self.vi(b, Inst { op: O_OR, ty: T_I8, aux: 0, a: again, b: e, c: 0 }, l0)
             };
         }
-        if again == VNONE {
+        if again == VNONE && lim == VNONE {
             let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: to_sp2, b: 0, c: 0 }, l0);
-        } else {
+        } else if lim == VNONE {
             self.args.truncate(0);
             for q in 0..hb.param_len as u32 {
                 self.args.push(VPARAM | gps + q);
             }
             let from0 = b.edge(sp, &self.args);
             let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: again, b: from0, c: to_sp2 }, l0);
+        } else {
+            // Bounded vector iterations (`most`) that ran in full: the guard again, which runs what is left.
+            // The counter is at `lim` after no fewer (an early exit and the masked last iteration leave it
+            // elsewhere).
+            let mut full = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_EQ, a: VPARAM | xq, b: lim, c: 0 }, l0);
+            if again != VNONE {
+                // A float min or max of zero beside the counts: the loop from this entry's start.
+                let z8 = self.vconst(b, T_I8, 0, l0);
+                full = self.vi(b, Inst { op: O_SELECT, ty: T_I8, aux: 0, a: again, b: z8, c: full }, l0);
+                for q in 0..hb.param_len as usize {
+                    let ty = b.params[hb.param_start as usize + q];
+                    self.args[q] = self.vi(
+                        b,
+                        Inst { op: O_SELECT, ty: ty, aux: 0, a: again, b: VPARAM | gps + q as u32, c: self.args[q] },
+                        l0,
+                    );
+                }
+            }
+            let to_g = b.edge(g, &self.args);
+            let to_sp3 = b.edge(sp, &self.args);
+            let _ = self.vi(b, Inst { op: O_BR, ty: T_NONE, aux: 0, a: full, b: to_g, c: to_sp3 }, l0);
         }
         self.vblock(b, vx, xstart, xq, (1 + nred * nv + nfo + ncar * nv) as u16, hf, vl);
         // The loop's new preheader.
@@ -6909,7 +7142,7 @@ extend LoopOpt {
             self.vblock(b, sp + 1, tstart, tq, 1, hf, vl);
         }
         if self.vmt {
-            self.masked_last(b, hb, ub, u, vl, vps, vx, i0, gps, qt, l0, hf, vp);
+            self.masked_last(b, hb, ub, u, vl, vps, vx, i0, gps, qt, lim, l0, hf, vp);
         }
         if self.vxbr != NONE {
             self.first_lane(b, ub, nv, vi, vx, vl, hf, l0);
@@ -7111,22 +7344,19 @@ extend LoopOpt {
                 } else if k == VK_RED && self.vwa[self.red_of(i) as usize] != 0 {
                     let r = self.red_of(i);
                     let acc = VPARAM | vps + 1 + r * nv + c;
-                    let mut xv = self.vval(b, u, c, self.vrn[r as usize]);
-                    if self.kind(b, u, self.vrn[r as usize]) == VK_MASK {
-                        // A comparison's lanes are 0 or -1: negated, its flag's 0 or 1.
-                        let nt = vec_type(int_type(self.vwn[r as usize]), self.vlanes);
-                        let m = self.vmask(b, xv, mask_type(nt), b.locs[i as usize]);
-                        xv = self.vi(
-                            b,
-                            Inst { op: O_NEG, ty: nt, aux: 0, a: m, b: VNONE, c: VNONE },
-                            b.locs[i as usize],
-                        );
-                    }
-                    self.vmap[at] = self.vi(
-                        b,
-                        Inst { op: O_VSUMW, ty: self.acc_ty(b, r), aux: 0, a: acc, b: xv, c: VNONE },
-                        b.locs[i as usize],
-                    );
+                    let l = b.locs[i as usize];
+                    let vt = self.acc_ty(b, r);
+                    self.vmap[at] = if self.count_red(r) {
+                        // A mask's lanes are 0 or -1: added, the lanes hold the count negated.
+                        let mut m = self.count_mask(b, u, c, self.vrn[r as usize], vt, l);
+                        if self.count_how(b, r).0 {
+                            m = self.vi(b, Inst { op: O_NOT, ty: vt, aux: 0, a: m, b: VNONE, c: VNONE }, l);
+                        }
+                        self.vi(b, Inst { op: O_ADD, ty: vt, aux: 0, a: acc, b: m, c: 0 }, l)
+                    } else {
+                        let xv = self.vval(b, u, c, self.vrn[r as usize]);
+                        self.vi(b, Inst { op: O_VSUMW, ty: vt, aux: 0, a: acc, b: xv, c: VNONE }, l)
+                    };
                 } else if k == VK_LANE && self.vind.contains(&i) {
                     self.vmap[at] = self.vector_ind(b, t, vi, c, b.locs[i as usize]);
                 } else if k == VK_LANE || k == VK_STORE || k == VK_MASK || k == VK_GADDR {
@@ -7604,8 +7834,8 @@ extend LoopOpt {
     // (`vpred`, `masked_last`): one copy (an interleaved loop's rest vectorizes once more, `BLOCK_EPI`) of at
     // least TAIL_LANES lanes counting up by 1, each access of consecutive elements (no stride, group, gather,
     // reversed, modulo or aligned-block access), no early exit, overlapping last iteration (`vtail`) or
-    // recurrence, and each reduction's accumulator a lane per iteration, unordered (no dot product, widening
-    // sum, counter's lanes, `vak`, or float sum in order, `vord`).
+    // recurrence, and each reduction's accumulator a lane per iteration, unordered (a count's too; no dot
+    // product, widening sum, counter's lanes, `vak`, or float sum in order, `vord`).
     const fn masked_tail(self: &Self, b: &Body, u: u32, nv: u32) bool {
         if !(self.vpred || self.vsve) || nv != 1 || self.vone || self.vlanes < TAIL_LANES || self.vtail || self.vexit || self.vrev || self.vqk != 1 || self.vstrided || self.vgroups || self.vgat.len() != 0 || self.vblk.len() != 0 || self.vfop.len() != 0 || self.vak.len() != 0 || self.vam.len() != 0 {
             return false;
@@ -7629,7 +7859,7 @@ extend LoopOpt {
             }
         }
         for r in 0..self.vred.len() {
-            if self.vdr[r] != 0 || self.vwa[r] != 0 || self.vord[r] {
+            if self.vwa[r] != self.vwn[r] || self.vord[r] {
                 return false;
             }
         }
@@ -7638,7 +7868,8 @@ extend LoopOpt {
 
     // The masked last iteration (`masked_tail`) of vector loop `vl` (its parameters from `vps`), blocks
     // `sp + 1` and `sp + 2` past the new preheader, both of `vl`'s parameters: the first leaves to the vector
-    // exit `vx` when no element is left (or, under a run-time test, `vsve`, the processor lacks SVE), else
+    // exit `vx` when no element is left (or, under a run-time test, `vsve`, the processor lacks SVE; or the
+    // counter is `lim`, not VNONE, where the counts' accumulators hold no mask more: `vectorize`), else
     // enters the second, which runs the elements left (`vtr`, fewer than a vector's lanes) as one vector
     // iteration whose loads and stores take those lanes alone (`masked_access`) and whose reductions keep
     // their other lanes, then leaves to `vx` with the counter at the bound.
@@ -7654,6 +7885,7 @@ extend LoopOpt {
         i0: Value,
         gps: u32,
         qt: u8,
+        lim: Value,
         l0: u32,
         hf: u16,
         vp: u32,
@@ -7670,6 +7902,10 @@ extend LoopOpt {
             Inst { op: O_ICMP, ty: T_I8, aux: ast::pick(self.vsigned, C_SLT, C_ULT), a: VPARAM | tps, b: self.vn, c: 0 },
             l0,
         );
+        if lim != VNONE {
+            let room = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: VPARAM | tps, b: lim, c: 0 }, l0);
+            left = self.vi(b, Inst { op: O_AND, ty: T_I8, aux: 0, a: left, b: room, c: 0 }, l0);
+        }
         if !self.vpred {
             // Without SVE the scalar loop runs the rest, past the vector exit: one conditional comparison
             // more.
@@ -7882,17 +8118,22 @@ extend LoopOpt {
 
     // The copies, at most `k`, of body `u` that an unrolled loop of header `h` holds in registers, and how
     // they keep each of the header's parameters (`ured`). Each copy has an accumulator of its own for every
-    // reduction (`reduction`), so no copy waits for the one before; any other parameter the copies chain. An
-    // accumulator takes a register, a chained float or vector value two (a copy's value lives while the
-    // next copy makes its own), and `vaccs` registers hold them all (0: no bound). With too many
-    // accumulators for 2 copies, the copies chain every parameter (`ured` all RED_NONE); 0 when the chained
-    // float and vector values alone are too many.
+    // reduction (`reduction`), so no copy waits for the one before; any other parameter the copies chain.
+    // The float and vector values that live through the unrolled loop have a register each of those the
+    // generator gives such values (`vhomes`): the accumulators of all the copies, the chained parameters,
+    // and the values from before the loop the body reads (`body_regs`). A value that only passes the loop
+    // counts none: the generator's plan keeps it in memory around the loop. The values one copy makes and
+    // reads itself, and one in flight per chained parameter, take the registers the generator keeps for a
+    // block's own values (`vtemps`), then homes too. The integer accumulators are at most `vaccs` (0: no
+    // bound). With too many accumulators for 2 copies, the copies chain every parameter (`ured` all
+    // RED_NONE); 0 when the chained float and vector values alone are too many.
     fn split_plan(self: &mut Self, b: &Body, ptr: u32, fmath: u8, h: u32, u: u32, k: u32) u32 {
         let hb = b.blocks[h as usize];
         let te = term(b, u).a;
         fill(&mut self.ured, hb.param_len as usize, RED_NONE);
-        // The reductions; the float and vector ones of them; the other float and vector parameters.
-        let mut nred: u32 = 0;
+        // The integer reductions; the registers of the float and vector ones, and of the other float and
+        // vector parameters.
+        let mut ired: u32 = 0;
         let mut fred: u32 = 0;
         let mut chained: u32 = 0;
         for q in 0..hb.param_len as u32 {
@@ -7901,25 +8142,84 @@ extend LoopOpt {
                 continue;
             }
             let r = self.reduction(b, ptr, fmath, u, pv, b.edge_arg(te, q));
-            let ty = b.type_of(pv);
-            let fv = (is_vec(ty) || is_float(ty)) as u32;
+            let w = self.vregs(b.type_of(pv), ptr);
             self.ured[q as usize] = r;
-            nred += (r != RED_NONE) as u32;
-            fred += ast::pick(r != RED_NONE, fv, 0u32);
-            chained += ast::pick(r != RED_NONE, 0u32, fv);
+            ired += (r != RED_NONE && w == 0) as u32;
+            fred += ast::pick(r != RED_NONE, w, 0u32);
+            chained += ast::pick(r != RED_NONE, 0u32, w);
         }
-        if self.vaccs == 0 {
-            return k;
-        }
+        // Without a float or vector value the loop carries, the copies need the registers one copy needs.
+        let bound = self.vhomes != 0 && fred + chained != 0;
+        let (read, made) = if bound {
+            self.body_regs(b, ptr, u)
+        } else {
+            (0u32, 0u32)
+        };
         let mut ka = k;
-        while ka > 1 && ka * nred + 2 * chained > self.vaccs {
+        if ired + fred == 0 {
+            ka = 1;
+        }
+        let over = (made + chained).saturating_sub(self.vtemps);
+        while ka > 1 && (bound && ka * fred + chained + read + over > self.vhomes || self.vaccs != 0 && ka * ired > self.vaccs) {
             ka /= 2;
         }
-        if ka > 1 && nred != 0 {
+        if ka > 1 {
             return ka;
         }
         fill(&mut self.ured, hb.param_len as usize, RED_NONE);
-        return ast::pick(2 * (chained + fred) <= self.vaccs, k, 0u32);
+        let all = chained + fred;
+        return ast::pick(!bound || all + read + (made + all).saturating_sub(self.vtemps) <= self.vhomes, k, 0u32);
+    }
+
+    // The vector registers a value of type `ty` takes: 1 for a float, a register per `vmax` bytes of a
+    // vector, 0 for an integer or a pointer.
+    const fn vregs(self: &Self, ty: u8, ptr: u32) u32 {
+        if !is_vec(ty) {
+            return is_float(ty) as u32;
+        }
+        return (type_bytes(ty, ptr) + self.vmax.max(1) - 1) / self.vmax.max(1);
+    }
+
+    // The vector registers (`vregs`) one copy of loop body `u` needs besides the header's parameters: those
+    // of the values from before the loop it reads, each once, and the most its own values take at one
+    // time, but the values its back edge passes (the parameters' next values, in the parameters'
+    // registers). A value counts from its instruction to its last read, so an instruction counts its
+    // operands and its result apart, as the generator holds them.
+    fn body_regs(self: &mut Self, b: &Body, ptr: u32, u: u32) (u32, u32) {
+        let ub = b.blocks[u as usize];
+        let n = ub.len as usize;
+        // Per instruction of the body the last one that reads it (itself for none), NONE for a value the
+        // back edge passes; `ucur`: the values from before the loop.
+        fill(&mut self.edges, n, 0);
+        self.ucur.truncate(0);
+        let mut read: u32 = 0;
+        for x in 0..n {
+            self.edges[x] = x as u32;
+            self.outside_uses(b, b.insts[ub.start as usize + x]);
+            for q in 0..self.uses.len() {
+                let v = self.uses[q];
+                if v == VNONE || (v & VFLAG) != 0 {
+                    continue;
+                }
+                if self.in_body(b, u, v) {
+                    self.edges[(v - ub.start) as usize] = ast::pick(x + 1 == n, NONE, x as u32);
+                } else if !self.defined_in(v) && self.vregs(b.type_of(v), ptr) != 0 && !self.ucur.contains(&v) {
+                    self.ucur.push(v);
+                    read += self.vregs(b.type_of(v), ptr);
+                }
+            }
+        }
+        let mut made: u32 = 0;
+        for x in 0..n {
+            let mut live: u32 = 0;
+            for d in 0..x + 1 {
+                if self.edges[d] != NONE && self.edges[d] as usize >= x {
+                    live += self.vregs(b.insts[ub.start as usize + d].ty, ptr);
+                }
+            }
+            made = made.max(live);
+        }
+        return (read, made);
     }
 
     // Reduction update `a` of header parameter `pv` (`reduction`) on two accumulators: its operation with
@@ -8690,6 +8990,65 @@ extend LoopOpt {
         return self.vi(b, Inst { op: O_ADD, ty: st, aux: 0, a: s, b: x, c: 0 }, l);
     }
 
+    // Sum `c` plus the count that the `n` accumulators from parameter `acc` hold, or less it (`minus`), at
+    // location `l`. Each lane holds its count negated. Lanes at least as wide as the sum wrap as it does:
+    // the accumulators add as they are and reduce to the count negated. Narrower lanes hold at most their
+    // greatest value (`lane_cap`): negated, they add as 8-byte lanes (`lanes_wide`) when the accumulator
+    // is a vector of VBYTES to `vmax` bytes, else as lanes zero-extended to the sum's width.
+    fn lanes_sum(self: &mut Self, b: &mut Body, c: Value, acc: Value, n: u32, minus: bool, l: u32) Value {
+        let ct = b.type_of(c);
+        let vt = b.type_of(acc);
+        let vb = type_bytes(vt, 8);
+        let wrap = type_bits(lane_type(vt), 8) >= type_bits(ct, 8);
+        let by8 = !wrap && vb >= VBYTES && vb <= self.vmax;
+        let st = if wrap {
+            vt
+        } else if by8 {
+            vec_type(T_I64, vb / 8)
+        } else {
+            vec_type(ct, lanes(vt))
+        };
+        self.wide = self.wide || type_bytes(st, 8) > self.vmax;
+        let mut s = VNONE;
+        if by8 {
+            s = self.vsplat_const(b, st, 0, l);
+        }
+        for j in 0..n {
+            let mut x = acc + j;
+            if !wrap {
+                x = self.vi(b, Inst { op: O_NEG, ty: vt, aux: 0, a: x, b: VNONE, c: VNONE }, l);
+            }
+            if by8 {
+                s = self.lanes_wide(b, s, x, l);
+                continue;
+            }
+            if !wrap {
+                x = self.vconv(b, Inst { op: O_ZEXT, ty: st, aux: 0, a: x, b: VNONE, c: VNONE }, l);
+            }
+            s = if s == VNONE {
+                x
+            } else {
+                self.vi(b, Inst { op: O_ADD, ty: st, aux: 0, a: s, b: x, c: 0 }, l)
+            };
+        }
+        let one = [s];
+        let pl = b.pool_list(one[0..1]);
+        let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
+        let mut x = self.vi(b, Inst { op: O_VOP, ty: lane_type(st), aux: code, a: pl, b: 1, c: VNONE }, l);
+        if lane_type(st) != ct {
+            x = self.vi(b, Inst { op: O_TRUNC, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }, l);
+        }
+        return self.vi(b, Inst { op: ast::pick(wrap == minus, O_ADD, O_SUB), ty: ct, aux: 0, a: c, b: x, c: 0 }, l);
+    }
+
+    // The lesser of unsigned integer `v` and constant `k`, at location `l`.
+    fn at_most(self: &mut Self, b: &mut Body, v: Value, k: u64, l: u32) Value {
+        let ty = b.type_of(v);
+        let kv = self.vconst(b, ty, k, l);
+        let less = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: v, b: kv, c: 0 }, l);
+        return self.vi(b, Inst { op: O_SELECT, ty: ty, aux: 0, a: less, b: v, c: kv }, l);
+    }
+
     // Counted loop `h` (preheader `p`, body `u`) whose parameters sum the counts of lane masks' set lanes
     // (`lane_count`), with the counts in lane accumulators: a vector that adds each iteration's mask holds
     // per lane the count negated, exact while it adds no more masks than the lane's greatest value. The
@@ -8698,13 +9057,14 @@ extend LoopOpt {
     // enters an inner counted loop of a copy of the body that runs them, an accumulator per mask from zero
     // in place of each sum; a block then adds the accumulators' lanes to the sums and enters the guard
     // again. Lanes narrower than their sum count at most their greatest value of iterations per entry (255
-    // for bytes), and their lanes negated add as 8-byte lanes (`lanes_wide`); lanes as wide as their sum
-    // wrap as it does and add by one `reduce_add`. Where every lane counts all the iterations the counter's
-    // type holds, that block enters the loop instead. The loop runs what the guard leaves (less than a
-    // step, and all that follows a counter that wraps) and takes no transform again (`BLOCK_NOVEC`); its
-    // header jumps to its exit where nothing is left: a `<` test, the counter's start and the bound
-    // multiples of the step. Not for a body that leaves the loop or reads the header's test, a counter
-    // down, a step that is no power of 2, or more masks than `vaccs` registers. Whether it did.
+    // for bytes), and their lanes negated add as 8-byte lanes; lanes as wide as their sum wrap as it does
+    // and add by one `reduce_add` (`lanes_sum`). Where every lane counts all the iterations the counter's
+    // type holds, or all that an unsigned bound's greatest value allows (`top_of`), that block enters the
+    // loop instead. The loop runs what the guard leaves (less than a step, and all that follows a counter
+    // that wraps) and takes no transform again (`BLOCK_NOVEC`); its header jumps to its exit where nothing
+    // is left: a `<` test, the counter's start and the bound multiples of the step. Not for a body that
+    // leaves the loop or reads the header's test, a counter down, a step that is no power of 2, or more
+    // masks than `vaccs` registers. Whether it did.
     fn count_lanes(self: &mut Self, b: &mut Body, ptr: u32, h: u32, p: u32, u: u32) bool {
         if !self.counted(b, h, u) || self.vexit || self.vrev {
             return false;
@@ -8740,19 +9100,16 @@ extend LoopOpt {
         if !step.is_power_of_two() || self.vaccs != 0 && ms.len() as u32 > self.vaccs || self.reads(b, u, hb.start) != 0 {
             return false;
         }
-        // The most iterations per entry of the inner loop, 0 for no bound: the greatest value of the
-        // narrowest lanes that are narrower than their sum. No bound either where the counter's type holds
-        // no more steps than that.
+        // The most iterations per entry of the inner loop, 0 for no bound: as many as each sum's
+        // accumulators hold masks (`lane_cap`). No bound either where the counter's type holds no more
+        // steps than that, or an unsigned bound's greatest value (`top_of`).
         let mut cap: u64 = 0;
         for r in 0..sums.len() {
             let (q, _, vt, _) = sums[r];
-            let w = type_bits(lane_type(vt), 8);
-            if w < type_bits(b.params[(hb.param_start + q) as usize], 8) && (cap == 0 || mask_of(w) < cap) {
-                cap = mask_of(w);
-            }
+            cap = lane_cap(cap, vt, b.params[(hb.param_start + q) as usize]);
         }
         let top = mask_of(type_bits(qt, ptr));
-        if cap >= top / step {
+        if cap >= top / step || !self.vsigned && top_of(b, self.vn, type_bits(qt, ptr), 4) <= cap * step {
             cap = 0;
         }
         let init = b.edge_arg(term(b, p).a, qx);
@@ -8775,14 +9132,14 @@ extend LoopOpt {
         let z = self.vconst(b, qt, 0, l0);
         let mut trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: lt, b: d, c: z }, l0);
         if cap != 0 {
-            let most = self.vconst(b, qt, cap * step, l0);
-            let less = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_ULT, a: trips, b: most, c: 0 }, l0);
-            trips = self.vi(b, Inst { op: O_SELECT, ty: qt, aux: 0, a: less, b: trips, c: most }, l0);
+            trips = self.at_most(b, trips, cap * step, l0);
         }
         let mk = self.vconst(b, qt, ~(step - 1) & top, l0);
         let cnt = self.vi(b, Inst { op: O_AND, ty: qt, aux: 0, a: trips, b: mk, c: 0 }, l0);
-        let ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: C_NE, a: cnt, b: z, c: 0 }, l0);
         let iend = self.vi(b, Inst { op: O_ADD, ty: qt, aux: 0, a: i0, b: cnt, c: 0 }, l0);
+        // Whether `cnt` is not 0, as the inner header's test of its first iteration, which this branch
+        // then decides: `i0 + cnt` is at most the bound.
+        let ok = self.vi(b, Inst { op: O_ICMP, ty: T_I8, aux: cond, a: i0, b: iend, c: 0 }, l0);
         self.args.truncate(0);
         for q in 0..np {
             self.args.push(VPARAM | gps + q);
@@ -8857,7 +9214,6 @@ extend LoopOpt {
         self.vblock(b, ib, bstart, b.params.len() as u32, 0, ub.flags, ih);
         // The sums' block.
         let fstart = b.insts.len() as u32;
-        let code = (core::OP_SIMD + core::SIMD_REDUCE_ADD as u32) as u16;
         self.args.truncate(0);
         si = 0;
         for q in 0..np {
@@ -8865,40 +9221,14 @@ extend LoopOpt {
                 self.args.push(self.vmap[q as usize]);
                 continue;
             }
-            let (_, at, vt, minus) = sums[si];
+            let (_, at, _, minus) = sums[si];
             let end = if si + 1 < sums.len() {
                 sums[si + 1].1
             } else {
                 ms.len() as u32
             };
             si += 1;
-            let ct = b.params[(hb.param_start + q) as usize];
-            let lt = lane_type(vt);
-            let wide = type_bits(lt, 8) >= type_bits(ct, 8);
-            // The lanes' sum: of the accumulators as they are where the lanes wrap as the sum does (the
-            // count negated), else of their lanes negated, zero-extended to 8 bytes.
-            let st = ast::pick(wide, vt, vec_type(T_I64, type_bytes(vt, 8) / 8));
-            let mut s = VPARAM | ips + nk + at;
-            if !wide {
-                s = self.vsplat_const(b, st, 0, l0);
-            }
-            for j in at + ast::pick(wide, 1u32, 0u32)..end {
-                let acc = VPARAM | ips + nk + j;
-                if wide {
-                    s = self.vi(b, Inst { op: O_ADD, ty: st, aux: 0, a: s, b: acc, c: 0 }, l0);
-                } else {
-                    let ng = self.vi(b, Inst { op: O_NEG, ty: vt, aux: 0, a: acc, b: VNONE, c: VNONE }, l0);
-                    s = self.lanes_wide(b, s, ng, l0);
-                }
-            }
-            let one = [s];
-            let pl = b.pool_list(one[0..1]);
-            let mut x = self.vi(b, Inst { op: O_VOP, ty: lane_type(st), aux: code, a: pl, b: 1, c: VNONE }, l0);
-            if lane_type(st) != ct {
-                x = self.vi(b, Inst { op: O_TRUNC, ty: ct, aux: 0, a: x, b: VNONE, c: VNONE }, l0);
-            }
-            let op = ast::pick(wide == minus, O_ADD, O_SUB);
-            self.args.push(self.vi(b, Inst { op: op, ty: ct, aux: 0, a: VPARAM | gps + q, b: x, c: 0 }, l0));
+            self.args.push(self.lanes_sum(b, VPARAM | gps + q, VPARAM | ips + nk + at, end - at, minus, l0));
         }
         let on = b.edge(ast::pick(cap != 0, g, sp), &self.args);
         let _ = self.vi(b, Inst { op: O_JMP, ty: T_NONE, aux: 0, a: on, b: 0, c: 0 }, l0);
@@ -14814,6 +15144,56 @@ const fn gcd(a: u32, b: u32) u32 {
         y = r;
     }
     return x;
+}
+
+// Constant `v` as a count's unit in `bits` bits: 0, 1, or -1 for all ones; 2 when `v` is no such constant.
+const fn count_unit(b: &Body, v: Value, bits: u32) i32 {
+    let k = int_bits(b, v);
+    if k.is_none() {
+        return 2;
+    }
+    let x = trunc_bits(k.unwrap(), bits);
+    return if x == 0 {
+        0
+    } else if x == 1 {
+        1
+    } else if x == mask_of(bits) {
+        -1
+    } else {
+        2
+    };
+}
+
+// Link `v` of a count's chain (`LoopOpt::count_bytes`), a value that is 0 or the chain's unit (1 or -1):
+// (its flag, the link after it, whether it takes the flag negated, whether the two combine by `or`, else
+// `and`, the unit the link shows, 0 for none). A flag itself (a byte of 0 or 1) and an extension of a flag
+// end the chain (no link after: VNONE) with the unit 1, and so does a select on a flag of a unit and 0, or
+// of 0 and a unit (the flag negated). A select on flag `f` of a value `x` and one of those constants is a
+// link before `x`: `select(f, x, 0)` is `f and x`, `select(f, unit, x)` is `f or x`, `select(f, 0, x)` and
+// `select(f, x, unit)` those of `f` negated. The flag is VNONE for a select that is none of these.
+const fn count_link(b: &Body, v: Value) (Value, Value, bool, bool, i32) {
+    let t = b.insts[v as usize];
+    if t.op != O_SELECT {
+        return (ast::pick(t.op == O_ZEXT || t.op == O_SEXT, t.a, v), VNONE, false, false, 1);
+    }
+    let bits = type_bits(t.ty, 8);
+    let (ub, uc) = (count_unit(b, t.b, bits), count_unit(b, t.c, bits));
+    if ub != 2 && uc != 2 {
+        return (ast::pick(ub == 0 != (uc == 0), t.a, VNONE), VNONE, ub == 0, false, ub + uc);
+    }
+    if ub == 2 && uc == 2 {
+        return (VNONE, VNONE, false, false, 0);
+    }
+    let k = ast::pick(ub != 2, ub, uc);
+    return (t.a, ast::pick(ub != 2, t.c, t.b), ub != 2 == (k == 0), k != 0, k);
+}
+
+// The fewer of `cap` (0: no bound) and the masks that an accumulator of type `vt` holds for a count added
+// to a sum of type `ct`: its lanes' greatest value where they are narrower than the sum (lanes as wide
+// wrap as the sum does).
+const fn lane_cap(cap: u64, vt: u8, ct: u8) u64 {
+    let m = mask_of(type_bits(lane_type(vt), 8));
+    return ast::pick(type_bits(lane_type(vt), 8) < type_bits(ct, 8) && (cap == 0 || m < cap), m, cap);
 }
 
 /// The bit of `Package.vec_sumw` for a widening sum of lanes of `n` bytes into lanes of `a` bytes (each 1, 2,

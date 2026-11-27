@@ -4,8 +4,8 @@
 // `mask_sum`), `compress_store` by whole steps with room for the vector after the start and by the lane
 // loop without it, every element outside the vector's from the start unchanged (`lir::lower`
 // `compress_chunks`), an unchecked gather of a constant mask lane by lane (`gather_lanes`, `lane_load`), a
-// checked gather with one range test (`gather_checked`), and a float sum by halves in registers (`a64gen`
-// `reduce_reg`).
+// checked gather with one range test (`gather_checked`), a float sum by halves in registers (`a64gen`
+// `reduce_reg`), and the lane arithmetic a backend computes by one intrinsic (`lir::opt` `lane_call`).
 import std::simd;
 
 // A deterministic sequence: the next value of a 64-bit linear congruential generator.
@@ -235,20 +235,20 @@ fn compress_store_by_chunks_writes_its_count_inside_its_window() {
     }
 }
 
-// One `compress_store` of lanes 1 to `N` under mask bits `m` at `start` into the first `len` of 24 elements
+// One `compress_store` of lanes 1 to `N` under mask bits `m` at `start` into the first `len` of 40 elements
 // that hold 50 and up: whether it returns the active lane count, the active lanes follow `start` in order,
 // and every element before `start`, from `start + N` on or from `len` on keeps its value (the others after
 // the stored ones may hold any).
 @noinline
 fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool {
     let v = (simd::iota::<i32, N>() + Simd::<i32, N>::splat(1)).cast::<T>();
-    let mut o = [v[0]; 24];
-    for c in 0..3usize {
+    let mut o = [v[0]; 40];
+    for c in 0..5usize {
         simd::store(o, 8 * c, (simd::iota::<i32, 8>() + Simd::<i32, 8>::splat(50 + 8 * c as i32)).cast::<T>());
     }
     let n = simd::compress_store(o[0..len], start, Mask::<N>::from_bits_truncate(m), v);
-    let mut got = [0i32; 24];
-    for c in 0..3usize {
+    let mut got = [0i32; 40];
+    for c in 0..5usize {
         let a = simd::load::<T, 8>(o, 8 * c).cast::<i32>().to_array();
         for j in 0..8usize {
             got[8 * c + j] = a[j];
@@ -266,7 +266,7 @@ fn stored<T: SimdElement, const N: usize>(m: u64, start: usize, len: usize) bool
     if n != k {
         return false;
     }
-    for i in 0..24usize {
+    for i in 0..40usize {
         if (i < start || i >= start + N || i >= len) && got[i] != 50 + i as i32 {
             return false;
         }
@@ -320,6 +320,53 @@ fn compress_store_of_every_mask_changes_nothing_outside_its_window() {
             stored_all::<16>(m | (m * 73 & 255 ^ 0xA5) << 8, start);
         }
     }
+}
+
+// Mask bits `m` of `n` lanes without their highest set bits past `room` of them.
+fn fitted(m: u64, n: usize, room: usize) u64 {
+    let mut r = m & (1u64 << n as u64) - 1;
+    for i in 0..n {
+        if r.count_ones() as usize <= room {
+            break;
+        }
+        r &= ~(1u64 << (n - 1 - i) as u64);
+    }
+    return r;
+}
+
+// `stored` of `N` lanes of `T` into every destination of 0 to `2 * N` elements from every start in it,
+// under masks whose count fits: none, the lowest and the highest lanes that fill the destination exactly
+// (or every lane), and every second lane from lane 0 and from lane 1.
+fn stored_everywhere<T: SimdElement, const N: usize>() bool {
+    let all = (1u64 << N as u64) - 1;
+    for len in 0..2 * N + 1 {
+        for start in 0..len + 1 {
+            let room = (len - start).min(N);
+            let high = all & ~((1u64 << (N - room) as u64) - 1);
+            for m in [0u64, fitted(all, N, room), high, fitted(0x5555, N, room), fitted(0xAAAA, N, room)] {
+                if !stored::<T, N>(m, start, len) {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+// The end of the slice and slices shorter than the vector: whole steps where a step's lanes follow the
+// packed ones, the halves of 32-byte steps, the lane loop where the packed lanes end the slice.
+@test
+fn compress_store_fits_every_destination_and_start() {
+    assert(
+        stored_everywhere::<f32, 16>() && stored_everywhere::<i32, 8>() && stored_everywhere::<f32, 4>(),
+        "lanes of 4 bytes",
+    );
+    assert(
+        stored_everywhere::<i64, 4>() && stored_everywhere::<f64, 8>() && stored_everywhere::<i64, 2>(),
+        "lanes of 8 bytes",
+    );
+    assert(stored_everywhere::<u16, 16>() && stored_everywhere::<u16, 8>(), "lanes of 2 bytes");
+    assert(stored_everywhere::<u8, 16>() && stored_everywhere::<u8, 8>(), "lanes of 1 byte");
 }
 
 @noinline
@@ -483,4 +530,144 @@ fn a_tree_sum_adds_by_halves() {
     assert(tree16(x[0..16]).to_bits() == w[0].to_bits(), "16 f32 lanes by halves");
     let d: [f64; 2] = [0.1, 0.2];
     assert(tree2(d[0..2]).to_bits() == (0.1f64 + 0.2f64).to_bits(), "2 f64 lanes");
+}
+
+// The lane operations each backend computes by one intrinsic, which the optimizer makes the vector
+// operation (`lir::opt` `lane_call`): `out` takes the sum, difference, product, `and`, `or` and `xor` of
+// the first lanes of `a` and `b`, one vector after the other.
+@noinline
+fn int_lanes_u8(a: []u8, b: []u8, out: []mut u8) {
+    let (x, y) = (simd::load::<u8, 16>(a, 0), simd::load::<u8, 16>(b, 0));
+    simd::store(out, 0, x.wrapping_add(y));
+    simd::store(out, 16, x.wrapping_sub(y));
+    simd::store(out, 32, x.wrapping_mul(y));
+    simd::store(out, 48, x & y);
+    simd::store(out, 64, x | y);
+    simd::store(out, 80, x ^ y);
+}
+
+@noinline
+fn int_lanes_u16(a: []u16, b: []u16, out: []mut u16) {
+    let (x, y) = (simd::load::<u16, 4>(a, 0), simd::load::<u16, 4>(b, 0));
+    simd::store(out, 0, x.wrapping_add(y));
+    simd::store(out, 4, x.wrapping_sub(y));
+    simd::store(out, 8, x.wrapping_mul(y));
+    simd::store(out, 12, x & y);
+    simd::store(out, 16, x | y);
+    simd::store(out, 20, x ^ y);
+}
+
+@noinline
+fn int_lanes_u32(a: []u32, b: []u32, out: []mut u32) {
+    let (x, y) = (simd::load::<u32, 4>(a, 0), simd::load::<u32, 4>(b, 0));
+    simd::store(out, 0, x.wrapping_add(y));
+    simd::store(out, 4, x.wrapping_sub(y));
+    simd::store(out, 8, x.wrapping_mul(y));
+    simd::store(out, 12, x & y);
+    simd::store(out, 16, x | y);
+    simd::store(out, 20, x ^ y);
+}
+
+@noinline
+fn int_lanes_u64(a: []u64, b: []u64, out: []mut u64) {
+    let (x, y) = (simd::load::<u64, 2>(a, 0), simd::load::<u64, 2>(b, 0));
+    simd::store(out, 0, x.wrapping_add(y));
+    simd::store(out, 2, x.wrapping_sub(y));
+    simd::store(out, 4, x.wrapping_mul(y));
+    simd::store(out, 6, x & y);
+    simd::store(out, 8, x | y);
+    simd::store(out, 10, x ^ y);
+}
+
+// The sum, difference, product and quotient of the first 4 lanes of `a` and `b` and the square root of
+// those of `b`.
+@noinline
+fn float_lanes(a: []f32, b: []f32, out: []mut f32) {
+    let (x, y) = (simd::load::<f32, 4>(a, 0), simd::load::<f32, 4>(b, 0));
+    simd::store(out, 0, x + y);
+    simd::store(out, 4, x - y);
+    simd::store(out, 8, x * y);
+    simd::store(out, 12, x / y);
+    simd::store(out, 16, y.sqrt());
+}
+
+// Lane arithmetic at the edges of each lane type: an integer sum, difference and product wrap in their
+// own lane (16 lanes of a byte, 4 of 16 bits in a vector of 8 bytes, 4 of 32 bits, 2 of 64), the bitwise
+// operations take every bit, and the float operations round, overflow to an infinity and keep a zero's
+// sign as the scalar ones do.
+@test
+fn lane_arithmetic_wraps_and_rounds_as_scalars_do() {
+    let edges: [u64; 8] = [0, 1, 0x7F, 0x80, 0xFF, 0x7FFF, 0xFFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF];
+    let mut s: u64 = 5;
+    let (mut a8, mut b8, mut o8) = (Vector::<u8>::new(), Vector::<u8>::new(), Vector::<u8>::new());
+    let (mut a16, mut b16, mut o16) = (Vector::<u16>::new(), Vector::<u16>::new(), Vector::<u16>::new());
+    let (mut a32, mut b32, mut o32) = (Vector::<u32>::new(), Vector::<u32>::new(), Vector::<u32>::new());
+    let (mut a64, mut b64, mut o64) = (Vector::<u64>::new(), Vector::<u64>::new(), Vector::<u64>::new());
+    for k in 0..16usize {
+        // An edge value with a random one, in both orders.
+        let (e, r) = (edges[k % 8], next(&mut s) << 31 ^ next(&mut s));
+        let (p, q) = if k < 8 {
+            (e, r)
+        } else {
+            (r, e << k as u64 % 5 * 8)
+        };
+        a8.push(p as u8);
+        b8.push(q as u8);
+        a16.push((p >> k as u64 % 2 * 8) as u16);
+        b16.push(q as u16);
+        a32.push((p >> k as u64 % 4 * 8) as u32);
+        b32.push(q as u32);
+        a64.push(p);
+        b64.push(q);
+    }
+    for _ in 0..96usize {
+        o8.push(0);
+        o16.push(0);
+        o32.push(0);
+        o64.push(0);
+    }
+    int_lanes_u8(a8[0..16], b8[0..16], o8[0..96]);
+    for k in 0..16usize {
+        let (p, q) = (a8[k], b8[k]);
+        let want: [u8; 6] = [p.wrapping_add(q), p.wrapping_sub(q), p.wrapping_mul(q), p & q, p | q, p ^ q];
+        for j in 0..6usize {
+            assert(o8[j * 16 + k] == want[j], "8-bit lanes");
+        }
+    }
+    // Each window of the edge values.
+    for at in 0..13usize {
+        int_lanes_u16(a16[at..at + 4], b16[at..at + 4], o16[0..24]);
+        int_lanes_u32(a32[at..at + 4], b32[at..at + 4], o32[0..24]);
+        int_lanes_u64(a64[at..at + 2], b64[at..at + 2], o64[0..12]);
+        for k in 0..4usize {
+            let (p, q) = (a16[at + k], b16[at + k]);
+            let want: [u16; 6] = [p.wrapping_add(q), p.wrapping_sub(q), p.wrapping_mul(q), p & q, p | q, p ^ q];
+            let (u, v) = (a32[at + k], b32[at + k]);
+            let wide: [u32; 6] = [u.wrapping_add(v), u.wrapping_sub(v), u.wrapping_mul(v), u & v, u | v, u ^ v];
+            for j in 0..6usize {
+                assert(o16[j * 4 + k] == want[j], "16-bit lanes");
+                assert(o32[j * 4 + k] == wide[j], "32-bit lanes");
+            }
+        }
+        for k in 0..2usize {
+            let (p, q) = (a64[at + k], b64[at + k]);
+            let want: [u64; 6] = [p.wrapping_add(q), p.wrapping_sub(q), p.wrapping_mul(q), p & q, p | q, p ^ q];
+            for j in 0..6usize {
+                assert(o64[j * 2 + k] == want[j], "64-bit lanes");
+            }
+        }
+    }
+    let fa: [f32; 8] = [1.5, -0.0, 3.0e38, 1.0e-40, -7.25, 0.1, 16777217.0, -3.0e38];
+    let fb: [f32; 8] = [3.0, 7.0, 3.0e38, 2.0, 0.1, 0.2, 1.0e-30, 3.0e38];
+    let mut of: [f32; 20] = [0.0; 20];
+    for at in 0..5usize {
+        float_lanes(fa[at..at + 4], fb[at..at + 4], of[0..20]);
+        for k in 0..4usize {
+            let (p, q) = (fa[at + k], fb[at + k]);
+            let want: [f32; 5] = [p + q, p - q, p * q, p / q, q.sqrt()];
+            for j in 0..5usize {
+                assert(of[j * 4 + k].to_bits() == want[j].to_bits(), "float lanes");
+            }
+        }
+    }
 }
